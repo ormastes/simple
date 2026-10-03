@@ -1,0 +1,145 @@
+# REQ026 uncompressed, inert signed-patch bundles in external immutable CAS.
+# Quarantine is not execution, signature admission, Git publication or accepted
+# registry state. Compression/archive extraction is deliberately unsupported.
+use app.io.mod.{host_os, file_is_regular_no_follow, file_read_regular_no_follow_bounded_bytes}
+use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_store_put, db_evidence_store_get}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.scv.db_patch.{DbPatch}
+use std.scv.db_patch_codec.{db_patch_encode, db_patch_decode}
+use std.scv.db_admission.{DbAdmissionPolicy, AuthorizedPatch, db_authorize_patch, db_patch_signing_bytes}
+use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes, validated_utf8_bytes_to_text_linear}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+struct DbQuarantineQuota:
+    max_bundle_bytes: i64
+    max_patch_bytes: i64
+    max_patches: i64
+
+struct DbQuarantineHandle:
+    digest: text
+    bundle_digest: text
+    patch_count: u64
+    # Supplied by trusted local clock/accounting, never asserted by the bundle.
+    # This field is not an authorization receipt or signed creation timestamp.
+    created_day: u64
+
+fn _quarantine_quota(quota: DbQuarantineQuota) -> Result<bool, text>:
+    if quota.max_bundle_bytes <= 0 or quota.max_bundle_bytes > 16777216 or quota.max_patch_bytes <= 0 or quota.max_patch_bytes > 1048576 or quota.max_patch_bytes > quota.max_bundle_bytes or quota.max_patches <= 0 or quota.max_patches > 256: return Err("SCVDB_QUARANTINE_QUOTA")
+    Ok(true)
+
+fn _quarantine_signed_shape(patch: DbPatch) -> Result<bool, text>:
+    val signing_bytes = db_patch_signing_bytes(patch)?
+    if patch.signature.len() != 64: return Err("SCVDB_QUARANTINE_SIGNATURE_SHAPE")
+    Ok(true)
+
+fn db_quarantine_bundle_encode(patches: [DbPatch], quota: DbQuarantineQuota) -> Result<text, text>:
+    val checked = _quarantine_quota(quota)?
+    if patches.len() == 0 or patches.len() > quota.max_patches: return Err("SCVDB_QUARANTINE_COUNT")
+    var payload: [u8] = []
+    var ids: [text] = []
+    for patch in patches:
+        val signed = _quarantine_signed_shape(patch)?
+        if ids.contains(patch.batch_id): return Err("SCVDB_QUARANTINE_DUPLICATE")
+        ids.push(patch.batch_id)
+        val wire = db_patch_encode(patch)?
+        if wire.len() > quota.max_patch_bytes: return Err("SCVDB_QUARANTINE_PATCH_QUOTA")
+        val frame = db_canonical_text(wire)?
+        if payload.len() + frame.len() > quota.max_bundle_bytes / 2: return Err("SCVDB_QUARANTINE_BYTES_QUOTA")
+        for byte in frame: payload.push(byte)
+    val bytes = db_domain_bytes("patch-bundle", db_frame(98u8, payload))?
+    val wire = "SCVDB-PATCH-BUNDLE-v1\n" + db_snapshot_hex(bytes) + "\n"
+    if wire.len() > quota.max_bundle_bytes: return Err("SCVDB_QUARANTINE_BYTES_QUOTA")
+    Ok(wire)
+
+fn db_quarantine_bundle_decode(wire: text, quota: DbQuarantineQuota) -> Result<[DbPatch], text>:
+    val checked = _quarantine_quota(quota)?
+    if wire.len() > quota.max_bundle_bytes: return Err("SCVDB_QUARANTINE_BYTES_QUOTA")
+    val prefix = "SCVDB-PATCH-BUNDLE-v1\n"
+    if wire.len() <= prefix.len() or not wire.starts_with(prefix) or not wire.ends_with("\n"): return Err("SCVDB_QUARANTINE_VERSION")
+    val bytes = db_snapshot_unhex(wire[prefix.len():wire.len() - 1])?
+    val domain = db_domain_bytes("patch-bundle", [])?
+    if bytes.len() <= domain.len(): return Err("SCVDB_QUARANTINE_FORMAT")
+    for index in 0..domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_QUARANTINE_FORMAT")
+    val root = db_read_frame(bytes, domain.len())?
+    if root.tag != 98u8 or root.next_offset != bytes.len(): return Err("SCVDB_QUARANTINE_FORMAT")
+    var patches: [DbPatch] = []
+    var cursor = 0
+    var ids: [text] = []
+    while cursor < root.payload.len():
+        if patches.len() >= quota.max_patches: return Err("SCVDB_QUARANTINE_COUNT")
+        val frame = db_read_frame(root.payload, cursor)?
+        if frame.payload.len() > quota.max_patch_bytes: return Err("SCVDB_QUARANTINE_PATCH_QUOTA")
+        val patch = db_patch_decode(db_read_text(frame)?)?
+        val signed = _quarantine_signed_shape(patch)?
+        if ids.contains(patch.batch_id): return Err("SCVDB_QUARANTINE_DUPLICATE")
+        ids.push(patch.batch_id)
+        patches.push(patch)
+        cursor = frame.next_offset
+    if patches.len() == 0: return Err("SCVDB_QUARANTINE_COUNT")
+    if db_quarantine_bundle_encode(patches, quota)? != wire: return Err("SCVDB_QUARANTINE_FORMAT")
+    Ok(patches)
+
+fn _quarantine_input(path: text) -> Result<bool, text>:
+    if path == "" or path.contains("\0") or path.contains("\n") or path.contains("\r"): return Err("SCVDB_QUARANTINE_PATH")
+    var spelling = path
+    val windows = host_os() == "windows"
+    if windows: spelling = spelling.replace("\\", "/")
+    val drive = spelling.len() >= 3 and spelling[1:3] == ":/" and "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(spelling[0:1])
+    if windows and not drive: return Err("SCVDB_QUARANTINE_PATH")
+    if not windows and not spelling.starts_with("/"): return Err("SCVDB_QUARANTINE_PATH")
+    if spelling.starts_with("//") or spelling.ends_with("/"): return Err("SCVDB_QUARANTINE_PATH")
+    for component in spelling.split("/"):
+        if component == "." or component == "..": return Err("SCVDB_QUARANTINE_PATH")
+    if not file_is_regular_no_follow(path): return Err("SCVDB_QUARANTINE_INPUT")
+    val final = path_final_existing(path)?
+    if final.path == "": return Err("SCVDB_QUARANTINE_INPUT")
+    Ok(true)
+
+fn _quarantine_store_quota(quota: DbQuarantineQuota) -> DbEvidenceStoreQuota:
+    # Quarantine content prefix and CAS envelope framing are counted separately.
+    DbEvidenceStoreQuota(max_content_bytes: quota.max_bundle_bytes + 64, max_envelope_bytes: quota.max_bundle_bytes + 128, max_dependencies: 0)
+
+fn db_quarantine_import(checkout: text, external_parent: text, input: text, format: text, created_day: u64, quota: DbQuarantineQuota) -> Result<DbQuarantineHandle, text>:
+    val checked = _quarantine_quota(quota)?
+    if format != "scv-patch-bundle-v1": return Err("SCVDB_QUARANTINE_UNSUPPORTED_FORMAT")
+    val valid_input = _quarantine_input(input)?
+    # Read and decode before taking the CAS owner's short SJ mutation lease.
+    val bytes = file_read_regular_no_follow_bounded_bytes(input, quota.max_bundle_bytes)?
+    val wire = validated_utf8_bytes_to_text_linear(bytes)?
+    val patches = db_quarantine_bundle_decode(wire, quota)?
+    val content = base_encoding_text_to_bytes("SCVDB-QUARANTINE-v1\n" + wire)
+    val digest = db_evidence_digest(content, [])?
+    val node = DbEvidenceNode(digest: digest, content: content, availability: "available", created_day: created_day, dependencies: [])
+    val stored = db_evidence_store_put(checkout, external_parent, node, _quarantine_store_quota(quota))?
+    Ok(DbQuarantineHandle(digest: stored.digest, bundle_digest: sha256_u8_hex(bytes), patch_count: patches.len() as u64, created_day: created_day))
+
+fn db_quarantine_open(checkout: text, external_parent: text, handle: DbQuarantineHandle, quota: DbQuarantineQuota) -> Result<[DbPatch], text>:
+    val checked = _quarantine_quota(quota)?
+    if handle.patch_count == 0 or handle.patch_count > (quota.max_patches as u64): return Err("SCVDB_QUARANTINE_COUNT")
+    val node = db_evidence_store_get(checkout, external_parent, handle.digest, handle.created_day, _quarantine_store_quota(quota))?
+    if node.dependencies.len() != 0: return Err("SCVDB_QUARANTINE_FORMAT")
+    val content = validated_utf8_bytes_to_text_linear(node.content)?
+    val prefix = "SCVDB-QUARANTINE-v1\n"
+    if not content.starts_with(prefix): return Err("SCVDB_QUARANTINE_VERSION")
+    val wire = content[prefix.len():content.len()]
+    if sha256_u8_hex(base_encoding_text_to_bytes(wire)) != handle.bundle_digest: return Err("SCVDB_QUARANTINE_DIGEST")
+    val patches = db_quarantine_bundle_decode(wire, quota)?
+    if (patches.len() as u64) != handle.patch_count: return Err("SCVDB_QUARANTINE_COUNT")
+    Ok(patches)
+
+# Promotion preparation only. accepted_ids must originate in the caller's
+# validated local store; quarantine has no authoritative accepted registry.
+# Final apply must reauthorize against its own current policy/state and publish
+# atomically. A handle or an AuthorizedPatch-shaped value is not admission proof.
+fn db_quarantine_admit_patch(checkout: text, external_parent: text, handle: DbQuarantineHandle, quota: DbQuarantineQuota, batch_id: text, policy: DbAdmissionPolicy, accepted_ids: [text], now: u64) -> Result<AuthorizedPatch, text>:
+    for patch in db_quarantine_open(checkout, external_parent, handle, quota)?:
+        if patch.batch_id == batch_id: return db_authorize_patch(patch, policy, accepted_ids, now)
+    Err("SCVDB_QUARANTINE_PATCH_MISSING")
+
+export DbQuarantineQuota, DbQuarantineHandle
+export db_quarantine_bundle_encode, db_quarantine_bundle_decode
+export db_quarantine_import, db_quarantine_open, db_quarantine_admit_patch

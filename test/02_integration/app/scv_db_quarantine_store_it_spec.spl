@@ -1,0 +1,167 @@
+use std.spec.{describe, it, expect}
+use app.io.mod.{cwd, dir_create, file_write, file_write_bytes, process_run_bounded, host_os}
+use app.scv.db.quarantine_store.*
+use app.scv.db.local_store.{db_store_read}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
+use std.scv.db_patch.*
+use std.scv.db_patch_codec.{db_patch_encode}
+use std.scv.db_admission.*
+use std.scv.db_confidentiality.{DbMetadataPolicy, db_metadata_policy_digest}
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_ref_provisional}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
+
+fn setup_item2_quarantine_paths() -> (text, text, text):
+    val base = secure_temp_dir(path_final_existing(cwd()).unwrap().path, "item2-quarantine-fixture-").unwrap()
+    val checkout = "{base}/source"
+    val external = "{base}/external"
+    expect(dir_create(checkout, false)).to_be(true)
+    expect(dir_create(external, false)).to_be(true)
+    val (_out, _err, code) = process_run_bounded("git", ["init", "--quiet", checkout], 30000, 4096)
+    expect(code).to_equal(0)
+    (checkout, external, "{base}/incoming.bundle")
+
+fn setup_item2_quarantine_quota() -> DbQuarantineQuota:
+    DbQuarantineQuota(max_bundle_bytes: 262144, max_patch_bytes: 65536, max_patches: 8)
+
+fn setup_item2_quarantine_patch(counter: u64) -> DbPatch:
+    val namespace = "00112233445566778899aabbccddeeff"
+    val actor = "ffeeddccbbaa99887766554433221100"
+    val entity = entity_ref_provisional(EntityUid(database_namespace: namespace, entity_kind: "bug", actor: ActorIncarnation(hex: actor), counter: counter))
+    var patch = DbPatch(batch_id: "", repository: "repo", namespace: namespace, epoch: 1, actor: actor, actor_counter: counter, base_revision: "", causal_dependencies: [], schema_revision: "s1", reducer_revision: "r1", operations: [DbOperation.Create(entity, "bug", [DbField(name: "title", value: DbValue.Text("reviewed-{counter}"))])], payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "author", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "quarantine fixture")
+    patch = db_patch_seal(patch).unwrap()
+    val (seed, public_key) = pure_ed25519_keypair_from_seed([47u8;32])
+    patch.signature = pure_ed25519_sign(seed, public_key, db_patch_signing_bytes(patch).unwrap())
+    patch
+
+fn setup_item2_quarantine_policy(patches: [DbPatch]) -> DbAdmissionPolicy:
+    val (_seed, public_key) = pure_ed25519_keypair_from_seed([47u8;32])
+    val key = DbSignerKey(key_id: "author", public_key: public_key, role: "user", valid_from: 0, valid_until: 100, revoked: false, permissions: [DbPermission(operation: "create", kind: "bug", field: "title")])
+    var policy = DbAdmissionPolicy(revision: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, schema_revision: "s1", reducer_revision: "r1", keys: [key], metadata: setup_item2_reviewed_metadata(patches))
+    policy.revision = db_admission_policy_digest(policy).unwrap()
+    policy
+
+fn setup_item2_quarantine_wire(patch_wire: text) -> text:
+    val bytes = db_domain_bytes("patch-bundle", db_frame(98u8, db_canonical_text(patch_wire).unwrap())).unwrap()
+    "SCVDB-PATCH-BUNDLE-v1\n" + db_snapshot_hex(bytes) + "\n"
+
+describe "External signed patch quarantine":
+    it "durably reopens complete signed bundles without applying canonical state":
+        val (checkout, external, input) = setup_item2_quarantine_paths()
+        val quota = setup_item2_quarantine_quota()
+        val patches = [setup_item2_quarantine_patch(1), setup_item2_quarantine_patch(2)]
+        val wire = db_quarantine_bundle_encode(patches, quota).unwrap()
+        expect(file_write(input, wire)).to_be(true)
+        val handle = db_quarantine_import(checkout, external, input, "scv-patch-bundle-v1", 20000, quota).unwrap()
+        expect(handle.patch_count).to_equal(2u64)
+        expect(db_quarantine_open(checkout, external, handle, quota)).to_equal(Ok(patches))
+        expect(db_quarantine_import(checkout, external, input, "scv-patch-bundle-v1", 20000, quota)).to_equal(Ok(handle))
+        expect(file_write(input, "source changed after import")).to_be(true)
+        expect(db_quarantine_open(checkout, external, handle, quota)).to_equal(Ok(patches))
+        expect(db_store_read(checkout).code).to_equal("empty")
+
+    it "requires reviewed metadata and current signature admission on reopened bytes":
+        val (checkout, external, input) = setup_item2_quarantine_paths()
+        val quota = setup_item2_quarantine_quota()
+        val patch = setup_item2_quarantine_patch(1)
+        expect(file_write(input, db_quarantine_bundle_encode([patch], quota).unwrap())).to_be(true)
+        val handle = db_quarantine_import(checkout, external, input, "scv-patch-bundle-v1", 1, quota).unwrap()
+        val policy = setup_item2_quarantine_policy([patch])
+        expect(db_quarantine_admit_patch(checkout, external, handle, quota, patch.batch_id, policy, [], 5).unwrap().patch).to_equal(patch)
+        var denied = policy
+        var metadata = DbMetadataPolicy(revision: "", rules: [])
+        metadata.revision = db_metadata_policy_digest(metadata).unwrap()
+        denied.metadata = metadata
+        denied.revision = db_admission_policy_digest(denied).unwrap()
+        expect(db_quarantine_admit_patch(checkout, external, handle, quota, patch.batch_id, denied, [], 5)).to_equal(Err("SCVDB_METADATA_FIELD_UNREVIEWED"))
+        expect(db_quarantine_admit_patch(checkout, external, handle, quota, patch.batch_id, policy, [], 100)).to_equal(Err("SCVDB_KEY_TIME"))
+        expect(db_store_read(checkout).code).to_equal("empty")
+
+    it "never treats an imported signature-shaped value as verified":
+        val (checkout, external, input) = setup_item2_quarantine_paths()
+        val quota = setup_item2_quarantine_quota()
+        var patch = setup_item2_quarantine_patch(1)
+        patch.signature = [0u8;64]
+        expect(file_write(input, db_quarantine_bundle_encode([patch], quota).unwrap())).to_be(true)
+        val handle = db_quarantine_import(checkout, external, input, "scv-patch-bundle-v1", 1, quota).unwrap()
+        expect(db_quarantine_admit_patch(checkout, external, handle, quota, patch.batch_id, setup_item2_quarantine_policy([patch]), [], 5)).to_equal(Err("SCVDB_SIGNATURE_INVALID"))
+
+    it "rejects truncation, trailing frames, duplicate patches and bad semantic digests":
+        val (checkout, external, input) = setup_item2_quarantine_paths()
+        val quota = setup_item2_quarantine_quota()
+        val patch = setup_item2_quarantine_patch(1)
+        val wire = db_quarantine_bundle_encode([patch], quota).unwrap()
+        expect(file_write(input, wire[0:wire.len() - 3] + "\n")).to_be(true)
+        expect(db_quarantine_import(checkout, external, input, "scv-patch-bundle-v1", 1, quota)).to_equal(Err("SCVDB_FRAME_TRUNCATED"))
+        expect(file_write(input, wire[0:wire.len() - 1] + "010100\n")).to_be(true)
+        expect(db_quarantine_import(checkout, external, input, "scv-patch-bundle-v1", 1, quota)).to_equal(Err("SCVDB_QUARANTINE_FORMAT"))
+        expect(db_quarantine_bundle_encode([patch, patch], quota)).to_equal(Err("SCVDB_QUARANTINE_DUPLICATE"))
+        val patch_wire = db_patch_encode(patch).unwrap()
+        val prefix = "SCVDB-PATCH-v1\n"
+        val bytes = db_snapshot_unhex(patch_wire[prefix.len():patch_wire.len() - 1]).unwrap()
+        val domain = db_domain_bytes("patch-wire", []).unwrap()
+        val root = db_read_frame(bytes, domain.len()).unwrap()
+        val fields = db_read_children(root.payload).unwrap()
+        var payload: [u8] = []
+        for index in 0..fields.len():
+            if index == 11: payload = payload + db_canonical_text("0".repeat(64)).unwrap()
+            else: payload = payload + db_frame(fields[index].tag, fields[index].payload)
+        val forged = prefix + db_snapshot_hex(db_domain_bytes("patch-wire", db_frame(97u8, payload)).unwrap()) + "\n"
+        expect(file_write(input, setup_item2_quarantine_wire(forged))).to_be(true)
+        expect(db_quarantine_import(checkout, external, input, "scv-patch-bundle-v1", 1, quota)).to_equal(Err("SCVDB_BATCH_IDENTITY_COLLISION"))
+
+    it "rejects archive formats, path traversal and over-quota actual input":
+        val (checkout, external, input) = setup_item2_quarantine_paths()
+        var quota = setup_item2_quarantine_quota()
+        expect(db_quarantine_import(checkout, external, input, "zip", 1, quota)).to_equal(Err("SCVDB_QUARANTINE_UNSUPPORTED_FORMAT"))
+        expect(db_quarantine_import(checkout, external, "{external}/../incoming.bundle", "scv-patch-bundle-v1", 1, quota)).to_equal(Err("SCVDB_QUARANTINE_PATH"))
+        expect(file_write(input, "x".repeat(2048))).to_be(true)
+        quota.max_bundle_bytes = 1024
+        quota.max_patch_bytes = 512
+        expect(db_quarantine_import(checkout, external, input, "scv-patch-bundle-v1", 1, quota).is_err()).to_be(true)
+        quota.max_patches = -1
+        expect(db_quarantine_import(checkout, external, input, "scv-patch-bundle-v1", 1, quota)).to_equal(Err("SCVDB_QUARANTINE_QUOTA"))
+
+    it "revalidates forged handles and actual CAS bytes on reopen":
+        val (checkout, external, input) = setup_item2_quarantine_paths()
+        val quota = setup_item2_quarantine_quota()
+        expect(file_write(input, db_quarantine_bundle_encode([setup_item2_quarantine_patch(1)], quota).unwrap())).to_be(true)
+        val handle = db_quarantine_import(checkout, external, input, "scv-patch-bundle-v1", 1, quota).unwrap()
+        var forged = handle
+        forged.bundle_digest = "0".repeat(64)
+        expect(db_quarantine_open(checkout, external, forged, quota)).to_equal(Err("SCVDB_QUARANTINE_DIGEST"))
+        forged.digest = "../outside"
+        expect(db_quarantine_open(checkout, external, forged, quota)).to_equal(Err("SCVDB_EVIDENCE_DIGEST"))
+        expect(file_write_bytes("{external}/scv-evidence-v1/{handle.digest}.scve", [1u8, 2u8])).to_be(true)
+        expect(db_quarantine_open(checkout, external, handle, quota).is_err()).to_be(true)
+
+    it "respects the existing SJ writer lease and rejects checkout-local CAS roots":
+        val (checkout, external, input) = setup_item2_quarantine_paths()
+        val quota = setup_item2_quarantine_quota()
+        expect(file_write(input, db_quarantine_bundle_encode([setup_item2_quarantine_patch(1)], quota).unwrap())).to_be(true)
+        expect(scv_sj_lease_acquire(checkout, "quarantine-other").starts_with("ok:")).to_be(true)
+        expect(db_quarantine_import(checkout, external, input, "scv-patch-bundle-v1", 1, quota)).to_equal(Err("SCVDB_STORE_BUSY"))
+        expect(scv_sj_lease_release(checkout, "quarantine-other").starts_with("ok:")).to_be(true)
+        expect(dir_create("{checkout}/untrusted-store", false)).to_be(true)
+        expect(db_quarantine_import(checkout, "{checkout}/untrusted-store", input, "scv-patch-bundle-v1", 1, quota)).to_equal(Err("SCVDB_STORE_SCOPE"))
+
+    it "rejects an actual input symlink without following its bytes":
+        val (checkout, external, input) = setup_item2_quarantine_paths()
+        val quota = setup_item2_quarantine_quota()
+        expect(file_write(input, db_quarantine_bundle_encode([setup_item2_quarantine_patch(1)], quota).unwrap())).to_be(true)
+        val alias = "{external}/alias.bundle"
+        var code = -1
+        if host_os() == "windows":
+            val script = "{external}/make-link.ps1"
+            expect(file_write(script, "param([string]$LinkPath,[string]$TargetPath)\n$ErrorActionPreference='Stop'\nNew-Item -ItemType SymbolicLink -Path $LinkPath -Target $TargetPath | Out-Null\n")).to_be(true)
+            val (_out, _err, status) = process_run_bounded("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-LinkPath", alias, "-TargetPath", input], 30000, 4096)
+            code = status
+        else:
+            val (_out, _err, status) = process_run_bounded("ln", ["-s", input, alias], 30000, 4096)
+            code = status
+        expect(code).to_equal(0)
+        expect(db_quarantine_import(checkout, external, alias, "scv-patch-bundle-v1", 1, quota)).to_equal(Err("SCVDB_QUARANTINE_INPUT"))
