@@ -42,7 +42,9 @@ use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
 use compiler.common.driver_core_modes.{CompileMode}
 use compiler.common.attributes.{parse_function_attrs}
 use compiler.common.cache_contract.virtual_source_registration_v1.{VirtualSourceRegistrationStatusV1, compiler_virtual_source_read_registered_v1}
-use compiler.driver.cache.package_index_route.{package_index_route_current_v1}
+use compiler.driver.cache.package_index_route.{
+    package_index_route_admitted_current_v1, package_index_route_changed_modules_v1
+}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.pinned_archive_capability.{
     pinned_archive_open_verified_v1
@@ -293,13 +295,13 @@ impl CompilerDriver:
         var package_read_root = machine_cache_root()
         if not package_index_cold_init:
             val package_resolution_started_ns = demand_compile_phase_begin_v1()
-            var changed_modules: [text] = []
             val changed_text = sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_CHANGED_MODULES") ?? ""
-            if changed_text != "":
-                for changed_module in changed_text.split(","):
-                    val normalized = changed_module.trim()
-                    if normalized != "":
-                        changed_modules = changed_modules.push(normalized)
+            val changed_modules = match package_index_route_changed_modules_v1(changed_text):
+                case Ok(modules): modules
+                case Err(reason):
+                    self.ctx.add_error("persistent package index admission failed: {reason}")
+                    driver_entry_scan_cache_release()
+                    return (self.ctx, false)
             val route = if native_group_inputs.len() > 0:
                 val manifest = match native_group_request_v1():
                     case Ok(value): value
@@ -353,7 +355,7 @@ impl CompilerDriver:
                         driver_entry_scan_cache_release()
                         return (self.ctx, false)
             else:
-                package_index_route_current_v1(
+                package_index_route_admitted_current_v1(
                     if entry_closure_walk: requested_entry_input else: "",
                     sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "",
                     sosix_env_get_nullable("SIMPLE_SCV_REVISION_ID") ?? "",
@@ -362,8 +364,7 @@ impl CompilerDriver:
                     sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "",
                     sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "",
                     sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "",
-                    changed_modules,
-                    (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PUBLIC_INTERFACE_CHANGED") ?? "") == "1")
+                    changed_modules)
             if not route.valid:
                 self.ctx.add_error("persistent package index admission failed: {route.reason}; run explicit cold initialization with SIMPLE_PACKAGE_INDEX_COLD_INIT=1")
                 driver_entry_scan_cache_release()

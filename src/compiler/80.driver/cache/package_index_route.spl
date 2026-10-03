@@ -4,9 +4,14 @@ use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.package_module_index.{
     PACKAGE_MODULE_INDEX_SCHEMA_V2, PACKAGE_MODULE_INDEX_SCHEMA_V3,
     PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    PackageModuleChangeV1, PackageModuleInvalidationV1,
     package_module_index_read_current_v1,
+    package_module_index_decode_v1, package_module_index_digest_v1,
     package_module_index_find_v1,
-    package_module_index_invalidate_v1
+    package_module_index_invalidate_v1, package_module_index_invalidate_changes_v1
+}
+use compiler.driver.cache.package_index_semantic_transition.{
+    package_index_transition_read_v1
 }
 use compiler.driver.cache.package_scc_scheduler.{
     package_scc_consume_index_schedule_v1
@@ -20,6 +25,7 @@ use compiler.driver.cache.dirty_module_record.{
     dirty_module_records_sort_validate_v1
 }
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.scv.compile_source_inventory_core.{compile_source_inventory_path_valid_v1}
 
 struct PackageArchiveAdmissionV1:
     package_identity: text
@@ -106,7 +112,80 @@ fn package_index_route_ordered_modules_v1(
             ordered = ordered.push(module_identity)
     ordered
 
-fn package_index_route_current_v1(
+fn package_index_route_changed_modules_v1(value: text) -> Result<[text], text>:
+    if value == "":
+        return Ok([])
+    var modules: [text] = []
+    for part in value.split(","):
+        val identity = part.trim()
+        if identity == "" or identity.contains("\n") or identity.contains("\r"):
+            return Err("changed-module-list-invalid")
+        modules.push(identity)
+    Ok(package_index_route_sorted_unique_v1(modules))
+
+fn package_index_route_admitted_invalidation_v1(
+    cache_root: text, generation: PackageModuleIndexGenerationV1,
+    changed_modules: [text]
+) -> PackageModuleInvalidationV1:
+    # An empty event set is a no-op request, not a replay of the last transition.
+    if changed_modules.len() == 0:
+        return package_module_index_invalidate_v1(generation, [], false)
+    val transition = package_index_transition_read_v1(
+        "{cache_root}/package-module-index-v1", package_module_index_digest_v1(generation))
+    if transition.is_err():
+        return package_module_index_invalidate_v1(generation, changed_modules, true)
+    val previous = package_module_index_decode_v1(transition.unwrap().previous_encoded)
+    if not previous.valid or previous.generation == nil:
+        return package_module_index_invalidate_v1(generation, changed_modules, true)
+    val old = previous.generation!
+    # Topology/owner changes need cold or conservative migration. A same-name
+    # module in another package or variant is not evidence for private reuse.
+    if (old.schema_version != generation.schema_version or
+            old.producer_digest != generation.producer_digest or
+            old.root_generation != generation.root_generation or
+            old.variant_digest != generation.variant_digest or
+            old.scope_entry_source_identity != generation.scope_entry_source_identity or
+            old.entries.len() != generation.entries.len()):
+        return package_module_index_invalidate_v1(generation, changed_modules, true)
+    var changes: [PackageModuleChangeV1] = []
+    var known: Dict<text, bool> = {}
+    var changed: Dict<text, bool> = {}
+    var index = 0
+    for entry in generation.entries:
+        val prior = old.entries[index]
+        index = index + 1
+        if (prior.module_identity != entry.module_identity or
+                prior.package_identity != entry.package_identity or
+                prior.source_identity != entry.source_identity or
+                prior.scc_identity != entry.scc_identity or
+                prior.direct_imports != entry.direct_imports or
+                prior.reverse_dependents != entry.reverse_dependents):
+            return package_module_index_invalidate_v1(generation, changed_modules, true)
+        known[entry.module_identity] = true
+        val content = prior.source_digest != entry.source_digest
+        # SMF metadata includes body-sensitive imported sections. Do not treat
+        # a stable signature alone as proof that generic/inline consumers reuse.
+        val exports = prior.export_digest != entry.export_digest or
+            prior.smf_metadata_digest != entry.smf_metadata_digest or
+            prior.manifest_digest != entry.manifest_digest
+        val abi = prior.abi_digest != entry.abi_digest
+        val initializer = prior.initializer_digest != entry.initializer_digest
+        val provider = prior.provider_digest != entry.provider_digest
+        if content or exports or abi or initializer or provider:
+            changes.push(PackageModuleChangeV1(
+                entry.module_identity, content, exports, abi, initializer, provider))
+            changed[entry.module_identity] = true
+    # Hints may request extra work but cannot assert semantic equivalence or
+    # omit actual graph deltas. An unproven hint remains conservatively public.
+    for module_identity in changed_modules:
+        if not known.has(module_identity):
+            return package_module_index_invalidate_v1(generation, changed_modules, true)
+        if not changed.has(module_identity):
+            changes.push(PackageModuleChangeV1(module_identity, true, true, true, true, true))
+            changed[module_identity] = true
+    package_module_index_invalidate_changes_v1(generation, changes)
+
+fn _package_index_route_current_v1(
     entry_path: text,
     snapshot_root: text,
     expected_revision: text,
@@ -116,7 +195,8 @@ fn package_index_route_current_v1(
     expected_root_generation: text,
     expected_variant_digest: text,
     changed_modules: [text],
-    public_interface_changed: bool
+    public_interface_changed: bool,
+    admitted_semantic_changes: bool
 ) -> PackageIndexRouteV1:
     if (snapshot_root == "" or expected_revision == "" or
             expected_tree == "" or expected_inventory == ""):
@@ -188,8 +268,10 @@ fn package_index_route_current_v1(
     var schedule: [text] = []
     var dirty_packages: [text] = []
     if changed_modules.len() > 0:
-        val invalidation = package_module_index_invalidate_v1(
-            generation, changed_modules, public_interface_changed)
+        val invalidation = if admitted_semantic_changes:
+            package_index_route_admitted_invalidation_v1(cache_root, generation, changed_modules)
+        else:
+            package_module_index_invalidate_v1(generation, changed_modules, public_interface_changed)
         if not invalidation.valid:
             return PackageIndexRouteV1(
                 false, "invalidation-{invalidation.reason}", [], [], [], [])
@@ -266,8 +348,14 @@ fn package_index_route_current_v1(
         if entry == nil or entry!.source_identity == "":
             return PackageIndexRouteV1(false, "indexed-source-missing", [], [], [], [])
         if dirty_packages.contains(entry!.package_identity):
+            # Published HIR seeds carry logical inventory paths. Project only
+            # validated relative identities into the already-admitted snapshot;
+            # the dirty owner then performs canonical/no-follow source checks.
+            var source_entry = entry!
+            if compile_source_inventory_path_valid_v1(source_entry.source_identity):
+                source_entry.source_identity = "{snapshot_root}/{source_entry.source_identity}"
             val dirty = dirty_module_record_admit_v1(
-                generation, entry!, snapshot_root, expected_revision,
+                generation, source_entry, snapshot_root, expected_revision,
                 expected_tree, expected_inventory, expected_producer,
                 expected_root_generation, expected_variant_digest)
             if dirty.is_err():
@@ -325,6 +413,31 @@ fn package_index_route_current_v1(
         true, "ok", source_paths, canonical_dirty.unwrap(), schedule,
         archive_admissions)
 
+fn package_index_route_current_v1(
+    entry_path: text, snapshot_root: text, expected_revision: text,
+    expected_tree: text, expected_inventory: text, expected_producer: text,
+    expected_root_generation: text, expected_variant_digest: text,
+    changed_modules: [text], public_interface_changed: bool
+) -> PackageIndexRouteV1:
+    # Compatibility API for existing callers with their own classification.
+    _package_index_route_current_v1(entry_path, snapshot_root, expected_revision,
+        expected_tree, expected_inventory, expected_producer,
+        expected_root_generation, expected_variant_digest,
+        changed_modules, public_interface_changed, false)
+
+fn package_index_route_admitted_current_v1(
+    entry_path: text, snapshot_root: text, expected_revision: text,
+    expected_tree: text, expected_inventory: text, expected_producer: text,
+    expected_root_generation: text, expected_variant_digest: text,
+    changed_modules: [text]
+) -> PackageIndexRouteV1:
+    _package_index_route_current_v1(entry_path, snapshot_root, expected_revision,
+        expected_tree, expected_inventory, expected_producer,
+        expected_root_generation, expected_variant_digest,
+        changed_modules, true, true)
+
 export PackageArchiveAdmissionV1, PackageIndexRouteV1
 export package_index_route_ordered_modules_v1
 export package_index_route_current_v1
+export package_index_route_admitted_current_v1, package_index_route_admitted_invalidation_v1
+export package_index_route_changed_modules_v1
