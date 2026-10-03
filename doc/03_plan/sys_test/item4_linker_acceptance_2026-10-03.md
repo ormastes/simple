@@ -4,6 +4,16 @@ Date: 2026-10-03. Target: `release/1.0` at
 `e9cd3153c881c55f59eaaa2573b4b8a5e803023a`.
 Status: specification in progress; execution and certification unverified.
 
+Full coding continuation: RV64 static ELF image linking, freestanding Mach-O
+construction, FreeBSD hosted startup/identity, explicit static file publication,
+checked spill transactions, retained ELF record reading and section emission
+have source implementations and executable specs. These supersede earlier
+statements that only relocation helpers or budget arithmetic exist. The source
+review report records exact evidence. No new runtime PASS is claimed.
+Full bounded linking, hosted dyld composition/signing, RISC-V dynamic/TLS,
+dynamic-pack lifecycle binding, and full-product/performance execution remain
+unfinished acceptance work. This is not a reduction of ITEM4-REQ-001..010.
+
 Implementation update, 2026-10-03: after the tests were committed, the user
 instructed `fix what you can`. The hosted ELF engine now rejects selected
 non-ET_REL archive members before resolution/layout and rejects embedded NUL
