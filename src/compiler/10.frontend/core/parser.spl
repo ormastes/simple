@@ -48,6 +48,7 @@ use compiler.core.types.{TYPE_RESULT, TYPE_NAMED_BASE, TYPE_DICT, TYPE_FN, TYPE_
 use compiler.core.types.{TYPE_UNION}
 use compiler.core.types.{int_to_str}
 use compiler.core.types.{named_type_find, named_type_register}
+use compiler.core.types.{named_type_apply}
 use compiler.core.types.{primitive_integer_bit_width_from_name}
 use compiler.core.types.{type_pools_promote_hir_owners}
 use compiler.core.types.{union_type_register}
@@ -888,6 +889,7 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         if has_generic:
             parser_advance()
             val inner_type = parser_parse_type()
+            var type_arguments: [i64] = [inner_type]
             # Handle multi-param generics: Dict<K, V>, Result<T, E>
             var extra_type = inner_type
             var has_extra_type: bool = false
@@ -897,6 +899,7 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                     break
                 parser_advance()
                 extra_type = parser_parse_type()
+                type_arguments.push(extra_type)
                 has_extra_type = true
                 generic_arg_tags.push(extra_type)
             # The same token represents binary `>` and a generic type close.
@@ -960,6 +963,10 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             if par_imported_type_names.contains(type_name):
                 val instance_tag = named_generic_instance_register(type_name, generic_arg_tags)
                 return parser_absorb_optional_suffix(instance_tag)
+            # Adaptive containers need their declared key/value instantiation
+            # at the typed attribute boundary. Keep ordinary runtime layouts.
+            if type_name == "AdaptiveMap" or type_name == "AdaptiveSet":
+                return parser_absorb_optional_suffix(named_type_apply(type_name, type_arguments))
             # Unknown generic type - check if base is a named struct
             val gid = named_type_find(type_name)
             if gid >= 0:

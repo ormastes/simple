@@ -52,7 +52,7 @@ impl HirLowering:
 
     fn attributed_factory_return_type(source: HirExpr) -> HirType?:
         if source.has_type_:
-            return Some(source.type_)
+            return source.type_
         var callable = SymbolId(id: -1)
         match source.kind:
             case HirExprKind.Call(callee, _, _):
@@ -67,7 +67,7 @@ impl HirLowering:
         if val symbol = self.symbols.get_symbol_raw(callable.id):
             if val signature = symbol.type_:
                 match signature.kind:
-                    case HirTypeKind.Function(_, returned, _): return Some(returned)
+                    case HirTypeKind.Function(_, returned, _): return returned
                     case _: ()
         nil
 
@@ -127,6 +127,33 @@ impl HirLowering:
                                 not hir_types_equal(receiver.type_, returned):
                             self.error("attributed collection factory generic arguments do not match {expected}", span)
                     case _: ()
+
+    me retain_attributed_collection_type(initializer: HirExpr, declared: HirType?) -> HirExpr:
+        """Carry a written instance type through the compiler-owned wrapper."""
+        if declared == nil:
+            return initializer
+        val family = self.attributed_collection_family(declared)
+        if family == "": return initializer
+        match initializer.kind:
+            case HirExprKind.MethodCall(receiver, method, args, resolution):
+                if method != "attributed_at_site" and method != "attributed_with_prior_at_site":
+                    return initializer
+                val owner = _hir_expr_symbol_or_invalid(receiver.kind)
+                match declared.kind:
+                    case HirTypeKind.Named(declared_owner, _):
+                        if owner.id != declared_owner.id: return initializer
+                    case _: return initializer
+                val typed_receiver = HirExpr(kind: receiver.kind, has_type_: true,
+                    type_: declared, span: receiver.span)
+                # The ordinary expression path already checks family errors.
+                # Recheck only matching/unknown families for generic arguments.
+                if args.len() >= 3:
+                    val found = self.attributed_factory_return_name(args[0].value)
+                    if found == "" or found == family:
+                        self.validate_attributed_collection_factory(typed_receiver, method, args, initializer.span)
+                return HirExpr(kind: HirExprKind.MethodCall(typed_receiver, method, args, resolution),
+                    has_type_: initializer.has_type_, type_: initializer.type_, span: initializer.span)
+            case _: initializer
 
     fn declared_static_method_resolution(receiver: HirExpr, method: text) -> MethodResolution:
         # Keep the declared owner while HIR still owns the receiver expression.
