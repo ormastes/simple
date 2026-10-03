@@ -1,0 +1,385 @@
+# Flattened device tree (FDT / DTB) reader, pure Simple.
+#
+# MDSOC: feature dimension, kernel boot layer.
+#
+# One reader serves two sources:
+#   * the blob the firmware hands the kernel (a1 at the RISC-V Image entry),
+#     read IN PLACE through volatile byte loads (FdtBlob.at_address), and
+#   * an in-memory byte array (FdtBlob.from_bytes) — host-side specs drive the
+#     very same walkers over real DTB fixtures.
+#
+# Every query is a bounded walk of the structure block. Nothing here builds
+# text from blob bytes: names and paths are compared byte-by-byte through
+# FdtStr, which addresses either a Simple text literal or a byte run inside the
+# blob (a property value such as /chosen stdout-path). Unit addresses are part
+# of a node name and must match exactly; `ranges` translation is not applied
+# (QEMU virt and JH7110 both use identity `ranges;` under /soc).
+#
+# No module-level initializers: freestanding entry closures must not depend on
+# module init order, so every constant is a function.
+
+use os.kernel.boot.mmio_hardware.{hardware_mmio_read8}
+
+fn _fdt_magic() -> u64: 0xD00DFEEDu64
+fn _fdt_header_size() -> u64: 40u64
+fn _fdt_max_size() -> u64: 0x200000u64
+fn _fdt_max_depth() -> u64: 15u64
+fn _tok_begin() -> u64: 1u64
+fn _tok_end() -> u64: 2u64
+fn _tok_prop() -> u64: 3u64
+fn _tok_nop() -> u64: 4u64
+fn _tok_finish() -> u64: 9u64
+
+class FdtBlob:
+    addr: u64
+    bytes: [u8]
+    in_memory: bool
+    size: u64
+
+impl FdtBlob:
+    static fn at_address(addr: u64) -> FdtBlob:
+        """Read the blob in place at physical `addr` (MMU off / identity)."""
+        var blob = FdtBlob(addr: addr, bytes: [], in_memory: true, size: 0u64)
+        if addr == 0u64:
+            return blob
+        blob.size = _fdt_header_size()
+        if blob.be32(0u64) != _fdt_magic():
+            blob.size = 0u64
+            return blob
+        val total = blob.be32(4u64)
+        if total < _fdt_header_size() or total > _fdt_max_size():
+            blob.size = 0u64
+            return blob
+        blob.size = total
+        blob
+
+    static fn from_bytes(data: [u8]) -> FdtBlob:
+        FdtBlob(addr: 0u64, bytes: data, in_memory: false, size: data.len() as u64)
+
+    fn byte(off: u64) -> u64:
+        if off >= self.size:
+            return 0u64
+        if self.in_memory:
+            return hardware_mmio_read8(self.addr + off) as u64
+        self.bytes[off as i64] as u64
+
+    fn be32(off: u64) -> u64:
+        (self.byte(off) << 24u64) | (self.byte(off + 1u64) << 16u64) |
+            (self.byte(off + 2u64) << 8u64) | self.byte(off + 3u64)
+
+    fn valid() -> bool:
+        """Header sanity: magic, version >= 16, blocks inside totalsize."""
+        # Header words are bound to typed locals before ordering compares: the
+        # riscv64 seed lowered `self.be32(..) < x` to the dynamic
+        # rt_native_cmp, which faults on raw integers (measured 2026-10-04).
+        if self.size < _fdt_header_size():
+            return false
+        val magic: u64 = self.be32(0u64)
+        val total: u64 = self.be32(4u64)
+        val off_struct: u64 = self.be32(8u64)
+        val off_strings: u64 = self.be32(12u64)
+        val version: u64 = self.be32(20u64)
+        if magic != _fdt_magic() or total > self.size or version < 16u64:
+            return false
+        off_struct < self.size and off_strings < self.size
+
+    fn struct_off() -> u64:
+        self.be32(8u64)
+
+    fn strings_off() -> u64:
+        self.be32(12u64)
+
+# A byte string: a Simple text literal, or `len` bytes of the blob at `off`.
+struct FdtStr:
+    from_blob: bool
+    off: u64
+    len: u64
+    lit: text
+
+pub fn fdt_lit(value: text) -> FdtStr:
+    FdtStr(from_blob: false, off: 0u64, len: value.len() as u64, lit: value)
+
+pub fn fdt_blob_str(off: u64, len: u64) -> FdtStr:
+    FdtStr(from_blob: true, off: off, len: len, lit: "")
+
+pub fn fdt_str_at(blob: FdtBlob, s: FdtStr, i: u64) -> u64:
+    if i >= s.len:
+        return 0u64
+    if s.from_blob:
+        return blob.byte(s.off + i)
+    s.lit.byte_at(i as i64) as u64
+
+pub fn fdt_str_eq_lit(blob: FdtBlob, s: FdtStr, expected: text) -> bool:
+    val n = expected.len() as u64
+    if s.len != n:
+        return false
+    var i: u64 = 0u64
+    while i < n:
+        if fdt_str_at(blob, s, i) != (expected.byte_at(i as i64) as u64):
+            return false
+        i = i + 1u64
+    true
+
+struct FdtNode:
+    found: bool
+    depth: u64
+    begin_off: u64
+    props_off: u64
+    addr_cells: u64
+    size_cells: u64
+
+struct FdtProp:
+    found: bool
+    off: u64
+    len: u64
+
+struct FdtReg:
+    found: bool
+    addr: u64
+    size: u64
+
+pub fn fdt_node_none() -> FdtNode:
+    FdtNode(found: false, depth: 0u64, begin_off: 0u64, props_off: 0u64,
+            addr_cells: 2u64, size_cells: 1u64)
+
+pub fn fdt_prop_none() -> FdtProp:
+    FdtProp(found: false, off: 0u64, len: 0u64)
+
+fn _align4(v: u64) -> u64:
+    (v + 3u64) & 0xFFFFFFFFFFFFFFFCu64
+
+fn _strz_len(blob: FdtBlob, off: u64) -> u64:
+    var n: u64 = 0u64
+    while off + n < blob.size and blob.byte(off + n) != 0u64:
+        n = n + 1u64
+    n
+
+# NUL-terminated blob string at `off` equals `s` exactly.
+fn _strz_eq(blob: FdtBlob, off: u64, s: FdtStr) -> bool:
+    var i: u64 = 0u64
+    while i < s.len:
+        if blob.byte(off + i) != fdt_str_at(blob, s, i):
+            return false
+        i = i + 1u64
+    blob.byte(off + s.len) == 0u64
+
+# Packed per-depth #address-cells / #size-cells (4 bits per depth).
+fn _cells_get(packed: u64, depth: u64) -> u64:
+    (packed >> (depth * 4u64)) & 0xFu64
+
+fn _cells_set(packed: u64, depth: u64, value: u64) -> u64:
+    val shift = depth * 4u64
+    val cleared = packed - (_cells_get(packed, depth) << shift)
+    cleared | ((value & 0xFu64) << shift)
+
+# Offset just past a BEGIN_NODE token's padded name.
+fn _after_name(blob: FdtBlob, begin_off: u64) -> u64:
+    _align4(begin_off + 4u64 + _strz_len(blob, begin_off + 4u64) + 1u64)
+
+# Offset just past a PROP token (header + padded value).
+fn _after_prop(blob: FdtBlob, prop_off: u64) -> u64:
+    _align4(prop_off + 12u64 + blob.be32(prop_off + 4u64))
+
+pub fn fdt_node_prop(blob: FdtBlob, node: FdtNode, name: FdtStr) -> FdtProp:
+    """Find property `name` among `node`'s own properties."""
+    if not node.found:
+        return fdt_prop_none()
+    val strings = blob.strings_off()
+    var off = node.props_off
+    var guard: u64 = 0u64
+    while off + 4u64 <= blob.size and guard < 4096u64:
+        guard = guard + 1u64
+        val tok = blob.be32(off)
+        if tok == _tok_nop():
+            off = off + 4u64
+        else if tok == _tok_prop():
+            val len = blob.be32(off + 4u64)
+            val nameoff = blob.be32(off + 8u64)
+            if _strz_eq(blob, strings + nameoff, name):
+                return FdtProp(found: true, off: off + 12u64, len: len)
+            off = _after_prop(blob, off)
+        else:
+            return fdt_prop_none()
+    fdt_prop_none()
+
+pub fn fdt_prop_u32(blob: FdtBlob, prop: FdtProp, fallback: u64) -> u64:
+    if not prop.found or prop.len < 4u64:
+        return fallback
+    blob.be32(prop.off)
+
+pub fn fdt_node_u32(blob: FdtBlob, node: FdtNode, name: text, fallback: u64) -> u64:
+    fdt_prop_u32(blob, fdt_node_prop(blob, node, fdt_lit(name)), fallback)
+
+pub fn fdt_prop_has_string(blob: FdtBlob, prop: FdtProp, expected: text) -> bool:
+    """True when the NUL-separated string list `prop` contains `expected`."""
+    if not prop.found:
+        return false
+    val want = fdt_lit(expected)
+    var start: u64 = 0u64
+    while start < prop.len:
+        if _strz_eq(blob, prop.off + start, want) and start + want.len < prop.len:
+            return true
+        start = start + _strz_len(blob, prop.off + start) + 1u64
+    false
+
+pub fn fdt_node_enabled(blob: FdtBlob, node: FdtNode) -> bool:
+    """`status` absent, "okay" or "ok"."""
+    val status = fdt_node_prop(blob, node, fdt_lit("status"))
+    if not status.found:
+        return true
+    _strz_eq(blob, status.off, fdt_lit("okay")) or _strz_eq(blob, status.off, fdt_lit("ok"))
+
+fn _read_cells(blob: FdtBlob, off: u64, cells: u64) -> u64:
+    if cells == 1u64:
+        return blob.be32(off)
+    if cells == 2u64:
+        return (blob.be32(off) << 32u64) | blob.be32(off + 4u64)
+    0u64
+
+pub fn fdt_node_reg(blob: FdtBlob, node: FdtNode, index: u64) -> FdtReg:
+    """Entry `index` of `node`'s reg, decoded with its parent's cell sizes."""
+    val none = FdtReg(found: false, addr: 0u64, size: 0u64)
+    val prop = fdt_node_prop(blob, node, fdt_lit("reg"))
+    if not prop.found:
+        return none
+    val ac = node.addr_cells
+    val sc = node.size_cells
+    if ac < 1u64 or ac > 2u64 or sc > 2u64:
+        return none
+    val stride = (ac + sc) * 4u64
+    if (index + 1u64) * stride > prop.len:
+        return none
+    val at = prop.off + index * stride
+    FdtReg(found: true, addr: _read_cells(blob, at, ac), size: _read_cells(blob, at + ac * 4u64, sc))
+
+# Segment of `path` starting at byte `seg` ends at the next '/' or the end.
+fn _seg_len(blob: FdtBlob, path: FdtStr, seg: u64) -> u64:
+    var n: u64 = 0u64
+    while seg + n < path.len and fdt_str_at(blob, path, seg + n) != 47u64:
+        n = n + 1u64
+    n
+
+fn _name_eq_seg(blob: FdtBlob, name_off: u64, path: FdtStr, seg: u64, seg_len: u64) -> bool:
+    var i: u64 = 0u64
+    while i < seg_len:
+        if blob.byte(name_off + i) != fdt_str_at(blob, path, seg + i):
+            return false
+        i = i + 1u64
+    blob.byte(name_off + seg_len) == 0u64
+
+fn _make_node(blob: FdtBlob, begin_off: u64, depth: u64, ac: u64, sc: u64) -> FdtNode:
+    FdtNode(found: true, depth: depth, begin_off: begin_off,
+            props_off: _after_name(blob, begin_off),
+            addr_cells: _cells_get(ac, depth), size_cells: _cells_get(sc, depth))
+
+pub fn fdt_find_path(blob: FdtBlob, path: FdtStr) -> FdtNode:
+    """Find the node with absolute path `path` ("/", "/chosen", "/soc/x@1")."""
+    if not blob.valid() or path.len == 0u64 or fdt_str_at(blob, path, 0u64) != 47u64:
+        return fdt_node_none()
+    var off = blob.struct_off()
+    var open: u64 = 0u64
+    var matched: u64 = 0u64
+    var seg: u64 = 1u64
+    var ac: u64 = _cells_set(0u64, 0u64, 2u64)
+    var sc: u64 = _cells_set(0u64, 0u64, 1u64)
+    var guard: u64 = 0u64
+    while off + 4u64 <= blob.size and guard < 1000000u64:
+        guard = guard + 1u64
+        val tok = blob.be32(off)
+        if tok == _tok_begin():
+            val depth = open
+            if depth >= _fdt_max_depth():
+                return fdt_node_none()
+            open = open + 1u64
+            ac = _cells_set(ac, open, 2u64)
+            sc = _cells_set(sc, open, 1u64)
+            if depth == 0u64:
+                if path.len == 1u64:
+                    return _make_node(blob, off, 0u64, ac, sc)
+            else if matched == depth - 1u64:
+                val n = _seg_len(blob, path, seg)
+                if n > 0u64 and _name_eq_seg(blob, off + 4u64, path, seg, n):
+                    matched = depth
+                    if seg + n >= path.len:
+                        return _make_node(blob, off, depth, ac, sc)
+                    seg = seg + n + 1u64
+            off = _after_name(blob, off)
+        else if tok == _tok_end():
+            if open == 0u64:
+                return fdt_node_none()
+            open = open - 1u64
+            if matched > 0u64 and open == matched:
+                # Left the deepest matched node without finding the rest:
+                # node names are unique among siblings, so the path is absent.
+                return fdt_node_none()
+            off = off + 4u64
+        else if tok == _tok_prop():
+            val nameoff = blob.be32(off + 8u64)
+            val name_at = blob.strings_off() + nameoff
+            if open > 0u64:
+                if _strz_eq(blob, name_at, fdt_lit("#address-cells")):
+                    ac = _cells_set(ac, open, blob.be32(off + 12u64))
+                else if _strz_eq(blob, name_at, fdt_lit("#size-cells")):
+                    sc = _cells_set(sc, open, blob.be32(off + 12u64))
+            off = _after_prop(blob, off)
+        else if tok == _tok_nop():
+            off = off + 4u64
+        else:
+            return fdt_node_none()
+    fdt_node_none()
+
+fn _node_compatible_any(blob: FdtBlob, node: FdtNode, compat: [text]) -> bool:
+    val prop = fdt_node_prop(blob, node, fdt_lit("compatible"))
+    if not prop.found:
+        return false
+    for c in compat:
+        if fdt_prop_has_string(blob, prop, c):
+            return true
+    false
+
+pub fn fdt_find_compatible(blob: FdtBlob, compat: [text], after_off: u64) -> FdtNode:
+    """First enabled node, in blob order, whose BEGIN token lies strictly after
+    `after_off` and whose `compatible` list contains any of `compat`. Pass 0 to
+    start; pass the previous result's begin_off to continue."""
+    if not blob.valid():
+        return fdt_node_none()
+    var off = blob.struct_off()
+    var open: u64 = 0u64
+    var ac: u64 = _cells_set(0u64, 0u64, 2u64)
+    var sc: u64 = _cells_set(0u64, 0u64, 1u64)
+    var guard: u64 = 0u64
+    while off + 4u64 <= blob.size and guard < 1000000u64:
+        guard = guard + 1u64
+        val tok = blob.be32(off)
+        if tok == _tok_begin():
+            val depth = open
+            if depth >= _fdt_max_depth():
+                return fdt_node_none()
+            open = open + 1u64
+            ac = _cells_set(ac, open, 2u64)
+            sc = _cells_set(sc, open, 1u64)
+            if off > after_off:
+                # Parent cells are final here: a node's properties precede
+                # its children, so the parent's #*-cells were already seen.
+                val node = _make_node(blob, off, depth, ac, sc)
+                if _node_compatible_any(blob, node, compat) and fdt_node_enabled(blob, node):
+                    return node
+            off = _after_name(blob, off)
+        else if tok == _tok_end():
+            if open == 0u64:
+                return fdt_node_none()
+            open = open - 1u64
+            off = off + 4u64
+        else if tok == _tok_prop():
+            val name_at = blob.strings_off() + blob.be32(off + 8u64)
+            if open > 0u64:
+                if _strz_eq(blob, name_at, fdt_lit("#address-cells")):
+                    ac = _cells_set(ac, open, blob.be32(off + 12u64))
+                else if _strz_eq(blob, name_at, fdt_lit("#size-cells")):
+                    sc = _cells_set(sc, open, blob.be32(off + 12u64))
+            off = _after_prop(blob, off)
+        else if tok == _tok_nop():
+            off = off + 4u64
+        else:
+            return fdt_node_none()
+    fdt_node_none()

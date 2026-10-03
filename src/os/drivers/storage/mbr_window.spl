@@ -1,0 +1,76 @@
+# MBR partition table decoding + a partition-window BlockDevice, pure Simple.
+#
+# MDSOC: feature dimension, drivers layer.
+#
+# A board SD card carries an MBR: partition 1 is the FAT boot partition U-Boot
+# reads Image + boot.scr from, partition 2 holds the raw NVFS root image. NVFS
+# addresses its replicas at LBA 0/1 of ITS device, so the kernel hands NVFS a
+# BlockWindow over partition 2 rather than the whole card. A whole-device
+# window (start 0) serves disks that carry NVFS directly (the QEMU lane's
+# second virtio disk). GPT is not decoded here; the SimpleOS SD image is MBR.
+
+use os.services.block_device.{BlockDevice}
+
+struct MbrPartition:
+    found: bool
+    kind: u64
+    start: u64
+    count: u64
+
+fn _le32(sector: [u8], at: i64) -> u64:
+    (sector[at] as u64) | ((sector[at + 1] as u64) << 8u64) |
+        ((sector[at + 2] as u64) << 16u64) | ((sector[at + 3] as u64) << 24u64)
+
+pub fn mbr_has_signature(sector: [u8]) -> bool:
+    sector.len() >= 512 and (sector[510] as u64) == 0x55u64 and (sector[511] as u64) == 0xAAu64
+
+pub fn mbr_partition_at(sector: [u8], index: u64) -> MbrPartition:
+    """Primary entry `index` (0..3). found=false for an empty slot, a GPT
+    protective entry (type 0xEE), a zero-length entry, or no MBR signature."""
+    val none = MbrPartition(found: false, kind: 0u64, start: 0u64, count: 0u64)
+    if index > 3u64 or not mbr_has_signature(sector):
+        return none
+    val at = 446 + (index as i64) * 16
+    val kind = sector[at + 4] as u64
+    val start = _le32(sector, at + 8)
+    val count = _le32(sector, at + 12)
+    if kind == 0u64 or kind == 0xEEu64 or count == 0u64 or start == 0u64:
+        return none
+    MbrPartition(found: true, kind: kind, start: start, count: count)
+
+class BlockWindow:
+    inner: BlockDevice
+    start: u64
+    count: u64
+
+impl BlockWindow:
+    static fn whole(dev: BlockDevice) -> BlockWindow:
+        BlockWindow(inner: dev, start: 0u64, count: dev.sector_count())
+
+    static fn partition(dev: BlockDevice, part: MbrPartition) -> Result<BlockWindow, text>:
+        if not part.found:
+            return Err("partition slot is empty")
+        val total = dev.sector_count()
+        if total != 0u64 and part.start + part.count > total:
+            return Err("partition extends past the end of the device")
+        Ok(BlockWindow(inner: dev, start: part.start, count: part.count))
+
+impl BlockDevice for BlockWindow:
+    me fn read_sector(lba: u64) -> Result<[u8], text>:
+        if lba >= self.count:
+            return Err("block window read beyond partition")
+        self.inner.read_sector(self.start + lba)
+
+    me fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        if lba >= self.count:
+            return Err("block window write beyond partition")
+        self.inner.write_sector(self.start + lba, data)
+
+    me fn sector_size() -> u32:
+        self.inner.sector_size()
+
+    me fn sector_count() -> u64:
+        self.count
+
+    me fn flush() -> Result<bool, text>:
+        self.inner.flush()

@@ -162,3 +162,91 @@ bounce-buffer DMA using retained allocation handles. Live checker promotion is
 still blocked until the exact SSD and UART transcript prove those paths. Do not
 interpret the PCI identity line or a contract PASS as proof of an NVMe model,
 namespace, filesystem, or durable write.
+
+## SD-card NVFS root (riscv64 NVFS-root lane)
+
+**Status: UNVERIFIED ON HARDWARE.** The kernel, drivers and SD image exist and
+are proven under QEMU `virt` plus host-side specs; no VisionFive 2 transcript
+exists yet (open: `doc/08_tracking/bug/simpleos_riscv64_nvfs_root_board_blocked_2026-10-03.md`).
+Unlike the RAM-only lane above, this lane boots from a micro-SD card and its
+kernel writes ONLY to the NVFS partition of that card (it never writes a
+device without an NVFS superblock; eMMC fails SD identification and is skipped).
+
+The image is the same kernel the QEMU gate boots. It selects everything from
+the device tree U-Boot hands it: the console UART from `/chosen stdout-path`
+(VF2: alias `serial0` -> `snps,dw-apb-uart@0x10000000`, 32-bit access,
+reg-shift 2, LSR at `0x10000014`; U-Boot's 115200 8N1 setup is kept) and the
+root device from the DW MSHC nodes (`mmc@16020000` = micro-SD slot), driven
+by the pure-Simple PIO driver `src/os/drivers/storage/dw_mshc_sd.spl`. NVFS is
+found on SD partition 2 through `src/os/drivers/storage/mbr_window.spl`; there
+is no fallback filesystem.
+
+Load address: `boot.scr` loads `Image` to `0x80200000` and `booti`s it in
+place. JH7110 DRAM starts at `0x40000000`, so every DRAM size (2/4/8 GiB) covers
+`0x80200000..0xA0000000` (kernel, 8 MiB stack, 64 MiB heap, virtio DMA window
+`0x90000000` unused on the board); OpenSBI sits at `0x40000000` and U-Boot
+relocates itself and its DTB to the top of DRAM, clear of that range.
+
+### Build and write the card (host)
+
+```sh
+cargo build --release --bin simple            # in src/compiler_rust (seed)
+sh scripts/check/check-simpleos-riscv64-nvfs-qemu.shs   # builds + QEMU-proves the image
+# -> build/verify/simpleos-riscv64-nvfs/sdcard.img (MBR: p1 FAT32 Image+boot.scr, p2 0xda NVFS)
+lsblk -o NAME,SIZE,MODEL,TRAN                   # identify the card reader: /dev/sdX
+sudo dd if=build/verify/simpleos-riscv64-nvfs/sdcard.img of=/dev/sdX bs=4M conv=fsync status=progress
+```
+
+To rebuild only the card from an existing kernel/NVFS image:
+`sh scripts/os/build-simpleos-riscv64-sdcard.shs --image <Image> --nvfs <nvfs-root.img> --out sdcard.img`.
+If the board's U-Boot control DTB does not describe the SD controller as
+`starfive,jh7110-mmc`, `starfive,jh7110-sdio` or `snps,dw-mshc`, add
+`--board-dtb <jh7110-starfive-visionfive-2-v1.3b.dtb>`; `boot.scr` then passes
+`/board.dtb` (loaded to `${fdt_addr_r}`) instead of `${fdtcontroladdr}`.
+
+### Boot (board)
+
+Boot-mode switches on QSPI flash (the board's own SPL -> OpenSBI -> U-Boot),
+card in the micro-SD slot, USB-serial adapter on UART0 (40-pin header: GND,
+GPIO5 TX, GPIO6 RX) at 115200 8N1. Stop autoboot and run, without `saveenv`:
+
+```
+mmc list                                   # micro-SD is the 0x16020000 controller, normally mmc 1
+setenv devtype mmc; setenv devnum 1; setenv distro_bootpart 1
+load mmc 1:1 ${scriptaddr} /boot.scr; source ${scriptaddr}
+```
+
+### Expected serial markers
+
+Boot 1 (fresh card), in this order (other diagnostic lines interleave):
+
+```
+[u-boot] SimpleOS riscv64 boot.scr devtype=mmc devnum=1 part=1
+Starting kernel ...
+[console] fdt-selected snps,dw-apb-uart base=0x10000000 reg-shift=2 reg-io-width=4 lsr=0x10000014 stdout-path=alias
+=== SimpleOS RV64 NVFS root boot ===
+[rv64-nvfs] dw-mshc@0x16020000: SD card ready, 0x<n> sectors
+[rv64-nvfs] NVFS superblock found on dw-mshc@0x16020000 partition 2 (start 0x<p2>)
+[rv64-nvfs] NVFS root device dw-mshc@0x16020000 start 0x<p2> sectors 0x800
+[NVFS] mounted as root filesystem provider=nvfs-dbfs-backed-v1
+[rv64-nvfs] ls / : /etc/motd
+[rv64-nvfs] ls / : /bin/hello.spl
+[rv64-nvfs] cat /etc/motd: SimpleOS NVFS POSIX root ...
+[rv64-nvfs] NVFS persistence check: written:first-boot
+[rv64-nvfs] write+read /rv64-sanity.txt ok
+[rv64-nvfs] exec /bin/hello.spl (loaded from NVFS root)
+NVFS_PROGRAM_HELLO_OK hello from a program stored on the NVFS root
+NVFS_RV64_ROOT_SANITY_PASSED
+```
+
+(`<p2>` is the partition-2 start sector, recorded in decimal as
+`sdcard_nvfs_p2_start` in the gate receipt; the kernel prints it in hex —
+0x3a000 for the image the gate built on 2026-10-04.) With an eMMC module fitted, a
+`dw-mshc@0x16010000: dw-mshc: no SD card answered ACMD41 ...` line precedes
+the SD lines.) Boot 2, after a cold power cycle and the same three U-Boot
+commands, must additionally show `[rv64-nvfs] ls / : /boot-marker.txt` and
+`[rv64-nvfs] NVFS persistence check: persisted:match content=nvfs-persist-ok`.
+`NVFS_ROOT_BOOT_FAILED` means no NVFS root was found or mounted — it is a FAIL,
+never a fallback. A board PASS needs board identity (U-Boot banner / `mmc
+info`), the commands above and both transcripts, per
+`.claude/rules/board-runnable.md`.

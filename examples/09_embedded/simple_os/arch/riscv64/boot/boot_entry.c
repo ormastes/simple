@@ -31,14 +31,11 @@
  * shared definition here serves all of them rather than each lane carrying a
  * copy.
  *
- * The handover registers are accepted and deliberately ignored: `spl_start`
- * takes no arguments in the Simple entry convention. A future entry that needs
- * hartid/dtb should gain a two-argument Simple entry and this shim should
- * forward to it; until such an entry exists, inventing a forwarding path would
- * be unused code. They are stored to a pair of globals rather than dropped so
- * the values survive for a debugger and for any later runtime that wants them,
- * and so the parameters are genuinely used (silencing -Wunused-parameter
- * without a cast-to-void lie).
+ * `spl_start` takes no arguments in the Simple entry convention, so the
+ * handover registers are stored to a pair of globals. The DTB address is read
+ * back by Simple through rv64_boot_dtb_address() (the NVFS-root entry selects
+ * its console UART and storage controllers from it); the hartid stays for a
+ * debugger.
  */
 
 /* Firmware handover values, captured before Simple code runs. Read by
@@ -138,18 +135,63 @@ void boot_entry(unsigned long hartid, unsigned long dtb)
  *     two sessions. A single definition cannot be shadowed.
  * ------------------------------------------------------------------------- */
 
-#define SIMPLEOS_TRAP_UART_BASE 0x10000000UL
-#define SIMPLEOS_TRAP_UART_THR  0x00UL
-#define SIMPLEOS_TRAP_UART_LSR  0x05UL
-#define SIMPLEOS_TRAP_UART_THRE 0x20U
+/* --- console sink -----------------------------------------------------------
+ * The ONE riscv64 console sink: serial_println/log_raw_println (via
+ * arch/common/baremetal_16550_serial.h), rt_riscv_uart_put and the trap printer
+ * below all end here. Which UART it drives is decided by pure Simple
+ * (src/os/kernel/boot/fdt_console.spl resolves /chosen stdout-path in the
+ * firmware FDT) and handed over through rv64_console_configure; this C side
+ * only stores three scalars and performs the access, and
+ * fdt_uart_console_putc is its Simple twin over the same address math.
+ *
+ * The defaults are the QEMU `virt` ns16550a (0x10000000, byte-wide, shift 0),
+ * so every byte printed before selection behaves exactly as before. JH7110
+ * (VisionFive 2) needs 32-bit accesses with reg-shift 2: LSR at 0x10000014. */
+#define SIMPLEOS_UART_THR  0UL
+#define SIMPLEOS_UART_LSR  5UL
+#define SIMPLEOS_UART_THRE 0x20U
+
+static unsigned long g_rv64_console_base = 0x10000000UL;
+static unsigned long g_rv64_console_shift = 0UL;
+static unsigned long g_rv64_console_width = 1UL;
+
+/* Read by the Simple entry to find the FDT (a1 at the Image entry). */
+unsigned long rv64_boot_dtb_address(void)
+{
+    return g_rv64_boot_dtb;
+}
+
+/* Called from Simple after FDT selection. Rejects layouts the sink cannot
+ * drive rather than switching to a half-understood one. */
+void rv64_console_configure(unsigned long base, unsigned long shift,
+                            unsigned long width)
+{
+    if (base == 0UL || shift > 3UL || (width != 1UL && width != 4UL)) return;
+    g_rv64_console_base = base;
+    g_rv64_console_shift = shift;
+    g_rv64_console_width = width;
+}
+
+void rv64_console_putc(char c)
+{
+    unsigned long lsr = g_rv64_console_base + (SIMPLEOS_UART_LSR << g_rv64_console_shift);
+    unsigned long thr = g_rv64_console_base + (SIMPLEOS_UART_THR << g_rv64_console_shift);
+    for (unsigned int spin = 0; spin < 100000U; spin++) {
+        unsigned int status = g_rv64_console_width == 4UL
+            ? *(volatile unsigned int *)lsr
+            : *(volatile unsigned char *)lsr;
+        if ((status & SIMPLEOS_UART_THRE) != 0U) break;
+    }
+    if (g_rv64_console_width == 4UL) {
+        *(volatile unsigned int *)thr = (unsigned int)(unsigned char)c;
+    } else {
+        *(volatile unsigned char *)thr = (unsigned char)c;
+    }
+}
 
 static void rv64_trap_putc(char c)
 {
-    volatile unsigned char *uart = (volatile unsigned char *)SIMPLEOS_TRAP_UART_BASE;
-    for (unsigned int spin = 0; spin < 100000U; spin++) {
-        if ((uart[SIMPLEOS_TRAP_UART_LSR] & SIMPLEOS_TRAP_UART_THRE) != 0U) break;
-    }
-    uart[SIMPLEOS_TRAP_UART_THR] = (unsigned char)c;
+    rv64_console_putc(c);
 }
 
 static void rv64_trap_puts(const char *s)
