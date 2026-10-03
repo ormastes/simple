@@ -1351,3 +1351,37 @@ bounded workload, **not attribution or closure of the historical Stage 3 P0**.
 The 25 GB termination, real full-entry-closure RSS budget, provenance-bound
 candidate, hello, and module-qualified field-layout checks remain unverified.
 No canonical Stage 3 was run, and both authoritative DB rows remain OPEN.
+
+## 2026-10-03 exact PR #2287 two-backend RSS cap recurrence
+
+- Reproducer source: PR #2287 head `1d486b40dd4eae4ab5edf74b9e71f315f4eec2c3` on aarch64 Linux.
+- Boundary: admitted Stage 2 pure-Simple compiler, `native-build --low-memory` of the full CLI and test runner, with the unchanged enforced per-process RSS cap of 6,835,937 KiB.
+- Related independent repairs: writable HIR cache (#2289) and HIR import resolution (#2290/#2291). Their completion does not establish this memory criterion.
+
+### Exact two-backend evidence
+
+| Backend | Entry | Last completed HIR module | Peak RSS KiB | Exit |
+| --- | --- | ---: | ---: | --- |
+| LLVM | full CLI | 59 / 2,561 | 6,837,244 | 88, `rss-cap-exceeded` |
+| LLVM | test runner | 422 / 642 | 6,839,188 | 88, `rss-cap-exceeded` |
+| Cranelift | full CLI | 59 / 2,561 | 6,842,088 | 88, `rss-cap-exceeded` |
+| Cranelift | test runner | 423 / 642 | 6,837,080 | 88, `rss-cap-exceeded` |
+
+The Cranelift terminal receipt is `/dev/shm/simple-release10-cranelift-pr2287-h1d486b-20261003/logs/terminal-summary.env`. The per-tool logs are under that run's `output/stage2-compiler-tests/aarch64-unknown-linux-gnu/verification/logs/`. LLVM per-tool logs are under `/dev/shm/simple-release10-llvm-1d486b-20261003/output/stage2-compiler-tests/aarch64-unknown-linux-gnu/verification/logs/`; the durable run summary is `/home/yoon/dev/simple-release-stage2-current-20261003/build/phase2_llvm_1d486b_admitted_verifier_blocked_20261003/STATUS.md`.
+
+Live read-only `/proc` observations indicated rising RSS during the LLVM runner HIR loop, but that time series was not archived and is not admission evidence. The persisted rollup at `/dev/shm/simple-release10-llvm-1d486b-20261003/logs/runner-hir-smaps-rollup-20261003-1053.txt` reports 3,402,528 KiB RSS, of which 3,371,716 KiB is anonymous. Across the five source roots `src/compiler`, `src/app`, `src/lib`, `src/os` and `src/plugins`, all 15,984 `.spl` files together contain 129,522,621 bytes (one scan of the exact-head checkout). This is a superset of the 2,561-source CLI closure; source text alone cannot explain or remove several GiB of HIR RSS.
+
+### Owner analysis and open question
+
+The streaming driver holds frozen `ModuleSurfacesByName`, source text and one reused `HirLowering` through HIR (`driver_hir_pipeline_lowering.spl`). Each successful source also enters the persistent `phase_hir_modules` map, the `lowered_by_surface` map and the value-layout validation arrays. These are mostly references to the same canonical `HirModule`; their mere presence does not prove a duplicate full graph. `lower_streaming_surface_source` reparses in a transient scope and promotes the HIR root, diagnostics, phase memos and symbol containers before ending the scope. The retained HIR graph and any accidentally promoted scratch therefore require byte-level attribution before eviction or reset changes.
+
+One narrower hypothesis is that `lowering.begin_module(source.path)` runs **before** `lower_streaming_surface_source` opens the transient scope. `begin_module` replaces many module-local dictionaries and arrays (`context_helpers.spl`), including the `SymbolTable.reset_module` containers. In a no-GC process, unretained allocations made before the scope can accumulate. Moving the reset into the scope might reclaim scratch, but the symbol containers and their HIR snapshot aliases require explicit promotion and native liveness verification; source inspection alone cannot establish safety or enough RSS reduction.
+
+A focused 96-reset native ownership probe was attempted with the admitted LLVM Stage 2 compiler, `SIMPLE_NO_STUB_FALLBACK=1`, `SIMPLE_SCV_INVENTORY_COLD_INIT=1`, an isolated cache and the same core-C runtime. It consumed one core for 5m10s, reached 261,904 KiB RSS, produced no cache/object output or probe result, and was terminated under this investigation's bound. Its only log line was the generic check-dbs warning. A provisional reset relocation was **reverted** because this attempt did not prove owner liveness or reduced allocation. No full CLI retry was run from this lane.
+
+### Required repair evidence
+
+1. Attribute anonymous bytes across parse completion and each HIR file boundary: live canonical HIR graph, flat bootstrap projections, module-local lowerer state, parser/phase memo owners, source text and frozen surface graph. Use an isolated native lifecycle probe from the exact Stage 2 runtime; keep the existing durable HIR snapshot counters and add byte counters only where ownership is sound.
+2. For any reset-scope or eviction change, prove that the next module can read phase-wide import and surface indexes and that the completed module's symbols, diagnostics, spans and HIR remain valid after the transient scope ends. Test a cache hit, a cache miss, an alias and a poisoned module.
+3. Compare a bounded multi-module fixture's per-module RSS slope before/after with the same source and producer, then rerun the mandatory full CLI and test-runner tool builds under the unchanged 6,835,937 KiB cap on both backends. A successful fixture alone does not close this blocker.
+4. Keep import resolution diagnostics distinct from memory admission. The four observed tool builds ended by the enforced RSS cap before a complete HIR or downstream check, so neither HIR semantic correctness nor the required six-row verification matrix is established by these receipts.
