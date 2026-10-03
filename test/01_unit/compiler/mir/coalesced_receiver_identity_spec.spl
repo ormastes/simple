@@ -1,0 +1,43 @@
+# U43F-017: exercise lowering, not source-text pattern matching.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_serialization.{serialize_mir_module}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn coalesced_receiver_mir(source: text) -> (i64, text):
+    val filename = "coalesced_receiver.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_owner = HirLowering.with_filename(filename)
+    val hir = hir_owner.lower_module(parsed)
+    var mir_owner = MirLowering.new(hir.symbols)
+    val mir = mir_owner.lower_module(hir)
+    (hir_owner.errors.len() + mir_owner.errors.len(), serialize_mir_module(mir))
+
+describe "Coalesced native receiver identity", tag: ["only-compiled"]:
+    it "keeps text returned from a call eligible for contains":
+        val (errors, mir) = coalesced_receiver_mir("extern fn receiver_text() -> text\nfn probe() -> bool:\n    val value = receiver_text() ?? \"\"\n    value.contains(\"Windows\")\n")
+        expect(errors).to_equal(0)
+        expect(mir).to_contain("rt_string_contains")
+
+    it "uses the known array receiver for is_empty":
+        val (errors, mir) = coalesced_receiver_mir("extern fn receiver_args() -> [text]\nfn probe() -> bool:\n    val values = receiver_args() ?? []\n    values.is_empty()\n")
+        expect(errors).to_equal(0)
+        expect(mir).to_contain("rt_len")
+
+    it "does not reinterpret a custom is_empty method as collection length":
+        val (errors, mir) = coalesced_receiver_mir("struct Box:\n    value: i64\nimpl Box:\n    fn is_empty(self) -> bool:\n        self.value == 7\nfn probe() -> bool:\n    val value = Box(value: 7)\n    value.is_empty()\n")
+        expect(errors).to_equal(0)
+        expect(mir.contains("rt_len")).to_equal(false)
+
+    it "rejects is_empty on an unsupported scalar receiver":
+        val (errors, _) = coalesced_receiver_mir("fn probe(value: i64) -> bool:\n    value.is_empty()\n")
+        expect(errors).to_be_greater_than(0)
+
+    it "keeps a type-valued static is_empty receiver out of value lowering":
+        val (errors, mir) = coalesced_receiver_mir("struct StaticProbe:\n    value: i64\nimpl StaticProbe:\n    static fn is_empty() -> bool:\n        true\nfn probe() -> bool:\n    StaticProbe.is_empty()\n")
+        expect(errors).to_equal(0)
+        expect(mir.contains("rt_len")).to_equal(false)
