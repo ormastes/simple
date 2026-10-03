@@ -1,6 +1,6 @@
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001, REQ-002, REQ-010, REQ-030 boundary, REQ-032 local honesty and REQ-035 use real filesystem/production owners. Remaining
+# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-030 boundary, REQ-032 local honesty and REQ-035 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
@@ -18,6 +18,7 @@ use app.scv.db.offline_actor.{db_actor_open, db_actor_reserve}
 use app.scv.db.local_apply.{db_apply_local, db_read_local_view}
 use app.scv.db.local_store.{db_store_read}
 use test.fixtures.scv.db_apply_fixture.*
+use test.fixtures.scv.db_merge_fixture.*
 use test.fixtures.scv.db_patch_wire_fixture.{setup_item2_wire_patch}
 use std.scv.db_patch.{DbPatch, DbOperation, DbField, DbValue, FieldEdit, RowPrecondition, db_operation_ref, db_patch_seal}
 use std.scv.db_patch_codec.{db_patch_encode, db_patch_decode}
@@ -442,8 +443,29 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
     describe "REQ-013: Merge semantics":
         it "should prove that it merges concurrent edits to different schema-declared fields":
             step("Settle compact identifiers")
-            step("Drive accepted state and inspect its receipt")
-            check_settlement_contract("REQ-013", "drive accepted merge semantics state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            val root = setup_item2_apply_root()
+            val create = setup_item2_apply_patch(1, "")
+            val merge = setup_item2_merge_rules()
+            val first = db_apply_local(root, "", create, merge, setup_item2_merge_admission([create]), 10).unwrap()
+            val title = setup_item2_apply_edit(2, first.revision, "changed title")
+            var note = setup_item2_apply_patch(3, first.revision)
+            note.operations = [DbOperation.UpdateFields(db_operation_ref(create.operations[0]), [FieldEdit(field: "note", before: DbValue.Absent, after: DbValue.Text("independent note"))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: []))]
+            note = setup_item2_apply_resign(note)
+            val admission = setup_item2_merge_admission([create, title, note])
+            step("Apply two signed edits with the same original semantic base")
+            expect(title.base_revision).to_equal(note.base_revision)
+            expect(title.causal_dependencies).to_equal([])
+            expect(note.causal_dependencies).to_equal([])
+            val left = db_apply_local(root, first.head, title, merge, admission, 10).unwrap()
+            val combined = db_apply_local(root, left.head, note, merge, admission, 10).unwrap()
+            expect(combined.code).to_equal("ok")
+            step("Reopen actual accepted state and verify both independent fields")
+            val reopened = db_read_local_view(root, admission).unwrap()
+            expect(reopened.head).to_equal(combined.head)
+            expect(reopened.image.state.accepted.len()).to_equal(3)
+            expect(reopened.image.catalog.records.len()).to_equal(0)
+            expect(db_field_value(reopened.image.state.rows[0].fields, "title")).to_equal(DbValue.Text("changed title"))
+            expect(db_field_value(reopened.image.state.rows[0].fields, "note")).to_equal(DbValue.Text("independent note"))
 
         it "should prove that it retains delete-update and same-scalar races as explicit conflicts":
             step("Settle compact identifiers")
@@ -452,8 +474,26 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 
         it "should prove that it rejects undeclared list or set merge guesses":
             step("Settle compact identifiers")
-            step("Inject the failure and inspect fail-closed state")
-            check_settlement_contract("REQ-013", "inject unsafe merge semantics state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            val root = setup_item2_apply_root()
+            val create = setup_item2_apply_patch(1, "")
+            val merge = setup_item2_merge_rules()
+            val first = db_apply_local(root, "", create, merge, setup_item2_merge_admission([create]), 10).unwrap()
+            var list_edit = setup_item2_apply_patch(2, first.revision)
+            list_edit.operations = [DbOperation.UpdateFields(db_operation_ref(create.operations[0]), [FieldEdit(field: "items", before: DbValue.Absent, after: DbValue.List([DbValue.Text("one")]))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: []))]
+            list_edit = setup_item2_apply_resign(list_edit)
+            var set_edit = setup_item2_apply_patch(3, first.revision)
+            set_edit.operations = [DbOperation.UpdateFields(db_operation_ref(create.operations[0]), [FieldEdit(field: "tags", before: DbValue.Absent, after: DbValue.Set([DbValue.Text("one")]))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: []))]
+            set_edit = setup_item2_apply_resign(set_edit)
+            val admission = setup_item2_merge_admission([create, list_edit, set_edit])
+            val before = db_store_read(root)
+            step("Admit original signatures and reviewed metadata but reject absent merge rules")
+            for patch in [list_edit, set_edit]:
+                expect(db_apply_local(root, first.head, patch, merge, admission, 10)).to_equal(Err("SCVDB_UNKNOWN_FIELD"))
+                expect(db_store_read(root).head).to_equal(before.head)
+                expect(db_store_read(root).state).to_equal(before.state)
+            val reopened = db_read_local_view(root, admission).unwrap()
+            expect(reopened.image.state.accepted.len()).to_equal(1)
+            expect(reopened.image.catalog.records.len()).to_equal(0)
 
     describe "REQ-014: Causality":
         it "should prove that it orders causal dependencies before deterministic batch-ID ties":
