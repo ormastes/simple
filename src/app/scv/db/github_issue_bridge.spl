@@ -81,7 +81,7 @@ fn db_github_bridge_payload(request: DbGithubBridgeRequest, title: text, body: t
     var bytes: [u8] = []
     for field in [request.kind, request.issue_number, title, body, state, request.base_title, request.base_body, request.base_state, request.policy.revision, request.policy.reviewed_by, request.policy.title_authority, request.policy.body_authority, request.policy.state_authority]:
         bytes = bytes + db_frame(1u8, db_canonical_text(field)?)
-    Ok(sha256_u8_hex(db_domain_bytes("github-issue-payload.v1", bytes)?))
+    Ok(sha256_u8_hex(db_domain_bytes("github-issue-payload-v1", bytes)?))
 
 fn _db_issue_marker(request: DbGithubBridgeRequest) -> text:
     "<!-- scv-bridge:v1:{request.delivery.intent.revision} -->"
@@ -300,9 +300,25 @@ fn _db_issue_live_execute(args: [text], timeout: i64, maximum_bytes: i64) -> DbG
     val (stdout, stderr, code) = process_run_bounded("gh", args, timeout, maximum_bytes)
     DbGithubProcessReply(stdout: stdout, stderr: stderr, exit_code: code)
 
+fn _db_issue_readonly_persist(delivery: DbBridgeDelivery) -> Result<DbBridgeDelivery, text>:
+    Err("GithubBridgeReadOnly")
+
+# No delivery state transition and no POST/PATCH are reachable from this entry.
+# Transport is an owner capability; returned records alone authorize no write.
+fn db_github_bridge_readback(request: DbGithubBridgeRequest, transport: DbGithubTransport) -> Result<DbGithubBridgeScan, text>:
+    _db_issue_validate(request)?
+    if request.source.maximum_pages + 1u64 > request.source.maximum_requests:
+        return Err("GithubBridgeRequestBudgetExceeded")
+    val ports = DbGithubBridgePorts(transport: transport, now: \: 0u64, persist_sent: _db_issue_readonly_persist)
+    val repository = _db_issue_http(request.source, ports, "GET", "repos/{request.source.owner}/{request.source.repository}", [])?
+    if _db_issue_id(repository, "id")? != request.source.repository_id:
+        return Err("GithubBridgeScopeMismatch")
+    _db_issue_scan(request, ports)
+
 fn db_github_bridge_live_ports(lease_held: fn() -> bool, now: fn() -> u64, persist_sent: fn(DbBridgeDelivery) -> Result<DbBridgeDelivery, text>) -> DbGithubBridgePorts:
     DbGithubBridgePorts(transport: DbGithubTransport(execute: _db_issue_live_execute, lease_held: lease_held), now: now, persist_sent: persist_sent)
 
 export DbGithubIssuePolicy, DbGithubBridgeRequest, DbGithubBridgePorts, DbGithubBridgeResult
 export db_github_bridge_payload, db_github_bridge_deliver, db_github_bridge_live_ports
 export db_github_bridge_external_id
+export DbGithubBridgeScan, db_github_bridge_readback

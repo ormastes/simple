@@ -130,6 +130,19 @@ fn setup_item2_issue_ports() -> DbGithubBridgePorts:
     DbGithubBridgePorts(transport: DbGithubTransport(execute: setup_item2_issue_execute, lease_held: setup_item2_issue_no_lease), now: setup_item2_issue_now, persist_sent: setup_item2_issue_persist)
 
 describe "GitHub issue bridge effect ordering and uncertain readback":
+    it "encodes a valid canonical payload domain and performs read-only scoped recovery":
+        val request = setup_item2_issue_request("create-issue")
+        val digest = db_github_bridge_payload(request, request.title, request.body, request.state).unwrap()
+        expect(digest.len()).to_equal(64)
+        expect(digest).to_equal(request.delivery.intent.payload_digest)
+        _item2_issue_remote_body = request.body + "\n\n<!-- scv-bridge:v1:{request.delivery.intent.revision} -->"
+        val scan = db_github_bridge_readback(request, setup_item2_issue_ports().transport).unwrap()
+        expect(scan.found).to_equal(true)
+        expect(scan.payload_digest).to_equal(digest)
+        expect(scan.external_id).to_equal("7")
+        expect(_item2_issue_effects).to_equal(0)
+        expect(_item2_issue_persist_calls).to_equal(0)
+
     it "persists sent-unconfirmed before POST and acknowledges exact causal-marker readback":
         val request = setup_item2_issue_request("create-issue")
         match db_github_bridge_deliver(request, setup_item2_issue_ports()):
