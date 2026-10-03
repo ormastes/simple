@@ -1,0 +1,128 @@
+# Actual filesystem source tests. Quarantine storage is inert preparation, not
+# signature admission, a provider-identity decision, or a retention receipt.
+use std.spec.*
+use app.io.mod.{file_write, dir_create}
+use std.nogc_sync_mut.io.path_identity.{path_entry_present}
+use app.scv.db.quarantine_store.*
+use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_store_get}
+use app.scv.db.local_store.{DbStoreView, db_store_read}
+use app.scv.db.observation_owner.{db_observation_now}
+use std.scv.db_retention.{db_evidence_digest}
+use std.scv.db_patch_codec.{db_patch_encode}
+use std.scv.db_canonical.{db_domain_bytes, db_frame, db_canonical_text}
+use std.scv.db_snapshot.{db_snapshot_hex}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release, scv_sj_lease_is_held}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use test.fixtures.scv.db_observation_fixture.*
+use test.fixtures.scv.db_artifact_binding_fixture.*
+
+fn setup_item2_quarantine_prepare_quota() -> DbQuarantineQuota:
+    DbQuarantineQuota(max_bundle_bytes: 16777216, max_patch_bytes: 1048576, max_patches: 256)
+
+fn check_item2_quarantine_prepare_heads(fixture: Item2ObservationFixture) -> [DbStoreView]:
+    [db_store_read(fixture.source, "semantic"), db_store_read(fixture.source, "paged"), db_store_read(fixture.source, "retention")]
+
+fn setup_item2_quarantine_candidate(fixture: Item2ObservationFixture, wire: text) -> text:
+    val digest = db_evidence_digest(base_encoding_text_to_bytes("SCVDB-QUARANTINE-v1\n" + wire), []).unwrap()
+    fixture.sources.evidence_parent + "/scv-evidence-v1/" + digest + ".scve"
+
+describe "REQ017 REQ026 inert direct-wire quarantine preparation":
+    it "stores exact original signed bundle bytes and shares idempotent handles with checked file import":
+        for paged in [false, true]:
+            val fixture = setup_item2_artifact_fixture(paged)
+            check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+            val before = check_item2_quarantine_prepare_heads(fixture)
+            val quota = setup_item2_quarantine_prepare_quota()
+            val wire = db_quarantine_bundle_encode([fixture.patch], quota).unwrap()
+            val original = db_patch_encode(fixture.patch).unwrap()
+            val day = db_observation_now().unwrap() / 86400u64
+            val direct = db_quarantine_store_bundle(fixture.source, fixture.sources.evidence_parent, wire, day, quota).unwrap()
+            val expected = base_encoding_text_to_bytes("SCVDB-QUARANTINE-v1\n" + wire)
+            expect(direct.digest).to_equal(db_evidence_digest(expected, []).unwrap())
+            expect(direct.bundle_digest).to_equal(sha256_u8_hex(base_encoding_text_to_bytes(wire)))
+            expect(direct.patch_count).to_equal(1u64)
+            expect(direct.created_day).to_equal(day)
+            val stored = db_evidence_store_get(fixture.source, fixture.sources.evidence_parent, direct.digest, day, DbEvidenceStoreQuota(max_content_bytes: quota.max_bundle_bytes + 64, max_envelope_bytes: quota.max_bundle_bytes + 128, max_dependencies: 0)).unwrap()
+            expect(stored.content).to_equal(expected)
+            expect(stored.dependencies.len()).to_equal(0)
+            val input = fixture.root + "/original.bundle"
+            expect(file_write(input, wire)).to_equal(true)
+            expect(db_quarantine_import(fixture.source, fixture.sources.evidence_parent, input, "scv-patch-bundle-v1", day, quota).unwrap()).to_equal(direct)
+            expect(db_quarantine_store_bundle(fixture.source, fixture.sources.evidence_parent, wire, day, quota).unwrap()).to_equal(direct)
+            val reopened = db_quarantine_open(fixture.source, fixture.sources.evidence_parent, direct, quota).unwrap()
+            expect(reopened).to_equal([fixture.patch])
+            expect(db_patch_encode(reopened[0]).unwrap()).to_equal(original)
+            expect(reopened[0].signature).to_equal(fixture.patch.signature)
+            expect(check_item2_quarantine_prepare_heads(fixture)).to_equal(before)
+            check_item2_observation_cleanup(fixture)
+
+    it "stores well-shaped forged signatures unchanged while current admission refuses them":
+        val fixture = setup_item2_artifact_fixture()
+        check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+        val before = check_item2_quarantine_prepare_heads(fixture)
+        var forged = fixture.patch
+        forged.signature[0] = forged.signature[0] ^ 1u8
+        val quota = setup_item2_quarantine_prepare_quota()
+        val wire = db_quarantine_bundle_encode([forged], quota).unwrap()
+        val now = db_observation_now().unwrap()
+        val handle = db_quarantine_store_bundle(fixture.source, fixture.sources.evidence_parent, wire, now / 86400u64, quota).unwrap()
+        expect(db_quarantine_open(fixture.source, fixture.sources.evidence_parent, handle, quota).unwrap()).to_equal([forged])
+        expect(db_quarantine_admit_patch(fixture.source, fixture.sources.evidence_parent, handle, quota, forged.batch_id, fixture.policy.config.admission, [], now).unwrap_err()).to_equal("SCVDB_SIGNATURE_INVALID")
+        expect(check_item2_quarantine_prepare_heads(fixture)).to_equal(before)
+        check_item2_observation_cleanup(fixture)
+
+    it "rejects malformed or over-quota bundles before publishing their candidate CAS object":
+        val fixture = setup_item2_artifact_fixture(true)
+        check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+        val before = check_item2_quarantine_prepare_heads(fixture)
+        val quota = setup_item2_quarantine_prepare_quota()
+        val wire = db_quarantine_bundle_encode([fixture.patch], quota).unwrap()
+        val malformed = wire.replace("SCVDB-PATCH-BUNDLE-v1", "SCVDB-PATCH-BUNDLE-v2")
+        var short_signature = fixture.patch
+        short_signature.signature = [1u8;63]
+        val short_wire = "SCVDB-PATCH-BUNDLE-v1\n" + db_snapshot_hex(db_domain_bytes("patch-bundle", db_frame(98u8, db_canonical_text(db_patch_encode(short_signature).unwrap()).unwrap())).unwrap()) + "\n"
+        val trailing = wire[0:wire.len() - 1] + "010100\n"
+        for candidate in [malformed, short_wire, trailing, wire]: expect(path_entry_present(setup_item2_quarantine_candidate(fixture, candidate)).unwrap()).to_equal(false)
+        expect(db_quarantine_store_bundle(fixture.source, fixture.sources.evidence_parent, malformed, 0u64, quota).unwrap_err()).to_equal("SCVDB_QUARANTINE_VERSION")
+        expect(db_quarantine_store_bundle(fixture.source, fixture.sources.evidence_parent, short_wire, 0u64, quota).unwrap_err()).to_equal("SCVDB_QUARANTINE_SIGNATURE_SHAPE")
+        expect(db_quarantine_store_bundle(fixture.source, fixture.sources.evidence_parent, trailing, 0u64, quota).unwrap_err()).to_equal("SCVDB_QUARANTINE_FORMAT")
+        val limited = DbQuarantineQuota(max_bundle_bytes: wire.len() - 1, max_patch_bytes: 1, max_patches: 256)
+        expect(db_quarantine_store_bundle(fixture.source, fixture.sources.evidence_parent, wire, 0u64, limited).unwrap_err()).to_equal("SCVDB_QUARANTINE_BYTES_QUOTA")
+        for candidate in [malformed, short_wire, trailing, wire]: expect(path_entry_present(setup_item2_quarantine_candidate(fixture, candidate)).unwrap()).to_equal(false)
+        expect(check_item2_quarantine_prepare_heads(fixture)).to_equal(before)
+        check_item2_observation_cleanup(fixture)
+
+    it "validates before short SJ acquisition and retries exact bytes after a real busy lease":
+        val fixture = setup_item2_artifact_fixture()
+        check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+        val before = check_item2_quarantine_prepare_heads(fixture)
+        val quota = setup_item2_quarantine_prepare_quota()
+        val wire = db_quarantine_bundle_encode([fixture.patch], quota).unwrap()
+        val holder = "quarantine-prepare-other-writer"
+        expect(scv_sj_lease_acquire(fixture.source, holder).starts_with("ok:")).to_equal(true)
+        val malformed = db_quarantine_store_bundle(fixture.source, fixture.sources.evidence_parent, "not a bundle", 0u64, quota)
+        val busy = db_quarantine_store_bundle(fixture.source, fixture.sources.evidence_parent, wire, 0u64, quota)
+        expect(scv_sj_lease_release(fixture.source, holder).starts_with("ok:")).to_equal(true)
+        expect(malformed.unwrap_err()).to_equal("SCVDB_QUARANTINE_VERSION")
+        expect(busy.unwrap_err()).to_equal("SCVDB_STORE_BUSY")
+        expect(scv_sj_lease_is_held(fixture.source)).to_equal(false)
+        expect(path_entry_present(setup_item2_quarantine_candidate(fixture, wire)).unwrap()).to_equal(false)
+        expect(check_item2_quarantine_prepare_heads(fixture)).to_equal(before)
+        val retry = db_quarantine_store_bundle(fixture.source, fixture.sources.evidence_parent, wire, 0u64, quota).unwrap()
+        expect(db_quarantine_read(fixture.source, fixture.sources.evidence_parent, retry.digest, quota).unwrap()).to_equal([fixture.patch])
+        expect(check_item2_quarantine_prepare_heads(fixture)).to_equal(before)
+        check_item2_observation_cleanup(fixture)
+
+    it "refuses checkout-internal evidence storage without changing existing stores":
+        val fixture = setup_item2_artifact_fixture(true)
+        check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+        val before = check_item2_quarantine_prepare_heads(fixture)
+        val internal = fixture.source + "/forbidden-evidence"
+        expect(dir_create(internal, true)).to_equal(true)
+        val quota = setup_item2_quarantine_prepare_quota()
+        val wire = db_quarantine_bundle_encode([fixture.patch], quota).unwrap()
+        expect(db_quarantine_store_bundle(fixture.source, internal, wire, 0u64, quota).unwrap_err()).to_equal("SCVDB_STORE_SCOPE")
+        expect(path_entry_present(internal + "/scv-evidence-v1").unwrap()).to_equal(false)
+        expect(check_item2_quarantine_prepare_heads(fixture)).to_equal(before)
+        check_item2_observation_cleanup(fixture)
