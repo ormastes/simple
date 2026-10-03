@@ -16333,6 +16333,19 @@ RtCpuidResult rt_cpuid(int32_t leaf, int32_t subleaf) {
     return r;
 }
 
+/* Simple tuples are runtime handles, not C aggregates. Keep the raw CPUID
+ * ABI for native callers and box all four registers at the Simple boundary. */
+int64_t rt_cpuid_tuple(int32_t leaf, int32_t subleaf) {
+    RtCpuidResult regs = rt_cpuid(leaf, subleaf);
+    int64_t tuple = rt_tuple_new(4);
+    if (tuple == rt_core_nil()) return tuple;
+    rt_tuple_set(tuple, 0, rt_value_int((int64_t)regs.a));
+    rt_tuple_set(tuple, 1, rt_value_int((int64_t)regs.b));
+    rt_tuple_set(tuple, 2, rt_value_int((int64_t)regs.c));
+    rt_tuple_set(tuple, 3, rt_value_int((int64_t)regs.d));
+    return tuple;
+}
+
 int64_t rt_xgetbv(int32_t index) {
 #if defined(__x86_64__) || defined(_M_X64)
 #  if defined(_MSC_VER)
