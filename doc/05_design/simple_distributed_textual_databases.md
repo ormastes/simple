@@ -971,3 +971,60 @@ manifest generation; a failed CAS may leave safe orphan pages. This does not yet
 replace the reference whole-state reducer/apply path or prove the selected
 million-row Operating B targets. Bucket skew fails explicitly rather than
 silently raising memory limits.
+
+### 19.3 Reserved provider facts and durable retention
+
+Generic producer apply and generic conflict resolution reject operations on
+`provider_binding` and `provider_common_state`, independent of provenance text.
+The provider owner checks actual durable acknowledgement, scoped GET read-back,
+exact proposed operations and independently signed metadata/ACL admission before
+using the internal local transition primitive. That primitive is trusted app
+infrastructure like the generation store; it is not exposed as a producer
+command or represented as an unforgeable public record. Historical accepted
+replay reauthenticates the original bytes without requiring GitHub or referenced
+local policy/intent rows to remain unchanged forever.
+
+Canonical bridge intent now contains typed `local_entity` and `authority_policy`
+references plus a capability digest. The policy reference must identify a live
+`bridge_policy` row whose revision matches the reviewed request policy. Older
+minimal intent rows return a typed missing-context error. Follow-up writes
+atomically create an immutable common-state row and create/update its binding;
+the binding retains provider instance/project, remote kind/ID/revision, causal
+IDs, policy reference and a digest plus reference to retrievable common bytes.
+
+Retention records a verified rollup and a durable `delete_pending` generation
+before unlink. Resume restores the pending generation's durability and recomputes
+current pin closure under the same SJ writer lease used for deletion. Existing
+content is reopened and hashed. Missing-entry recovery uses a native no-follow
+entry probe which distinguishes dangling links and access errors from absence;
+`unlinked` and `already_absent_synced` are different receipts. Only then may the
+catalog record deletion. Resolution reads actual raw or verified rollup bytes;
+a catalog label is never an exact-availability receipt. This initial catalog is
+bounded to 256 entries and is not the million-row Operating B implementation.
+
+### 19.4 Authoritative paged transaction protocol (implementation in progress)
+
+The indexed projection layer is insufficient to authenticate a partial-state
+reduction. The separate backend uses `scv-paged-txn-v1`, index grammar
+`scv-paged-index-v1` and reducer `scv-merkle-reducer-v1`. Its semantic revision
+hashes the complete manifest envelope excluding its own revision field; current
+revision claims are not stored inside their own committed page tree. Accepted
+records and retained-base membership point to prior revisions, avoiding a hash
+self-reference. Existing reference/projection images require explicit migration.
+
+The planner derives required row, alias, accepted-batch, actor-counter, unique
+key and incoming-reference-count lookups. Every response must carry page content
+or an absent-bucket proof verified against the captured manifest; omitted keys
+are not absent. It removes old unique claims/reference edges before applying all
+final claims, allowing atomic swaps while preventing duplicate live ownership
+and dangling references. The existing reducer contributes only an explicitly
+row-local kernel; its global validator is never run over an incomplete state.
+Immutable pages precede one SJ CAS of the authoritative manifest, including all
+rows/indexes/acceptance/history. No partial-page publication acknowledges a patch.
+
+Structural compatibility is pinned separately from the last writer's full
+admission-policy revision. Independently trusted key revocation/rotation and
+reviewed metadata changes must not require rewriting every row when schema,
+merge rules, constraints, context and index grammar remain identical. Changes
+to those structural inputs still require explicit migration. These are design
+contracts for the in-progress backend, not executed performance evidence.

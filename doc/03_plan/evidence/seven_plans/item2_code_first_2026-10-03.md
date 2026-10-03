@@ -33,6 +33,9 @@ crash durability, cross-platform qualification, or a measured scale result.
 | Recovery journal | `src/app/scv/db/settlement_journal.spl` | Signed candidate and exact tree/blob inventory persisted before publication; actual remote ancestry read-back advances only to awaiting-index |
 | Quarantine | `src/app/scv/db/quarantine_store.spl` | Bounded uncompressed patch bundles imported into external CAS; reopening revalidates bytes; promotion preparation checks independent signature/metadata/ACL policy |
 | Trusted configuration and CLI | `db_policy_codec.spl`, `src/app/scv/db/commands.spl` | Independently pinned complete admission/merge policy; local status/apply and explicitly unverified patch inspection through `scv db` |
+| Typed indexed projections | `db_page_records.spl`, `db_page_projection.spl`, `semantic_page_store.spl` | Generation-bound row/alias/accepted/actor-counter queries and paired incremental projection updates; imported revision claims are not authoritative paged admission |
+| Canonical provider follow-up | `github_binding_owner.spl` | Durable acknowledgement plus fresh scoped GET for new signed binding/common-state writes; generic producer entry rejects reserved entity kinds; historical replay reauthorizes accepted bytes |
+| Retention effects | `retention_store.spl`, `retention_codec.spl`, `evidence_delete.spl` | Durable pending deletion, verified rollup/provenance, same-lease current-pin checks, actual unlink/absence receipts and honest resolution; bounded reference lane, not Operating B qualification |
 
 ## Review findings addressed during coding
 
@@ -55,9 +58,10 @@ crash durability, cross-platform qualification, or a measured scale result.
 ## Remaining integration and execution gates
 
 Finish candidate publication coordination, durable signed receipt/index recovery,
-protected-authority deployment admission, canonical provider-binding follow-up,
-cross-replica delivery admission, paged semantic/query orchestration, complete
-command coverage and retention/resnapshot/catalog effects. Compressed/archive
+protected-authority deployment admission, cross-replica delivery admission,
+authenticated paged transactions, complete command coverage and resnapshot/epoch
+migration orchestration. The source binding follow-up is implemented; live
+provider qualification remains open. Compressed/archive
 bundle formats are explicitly unsupported by the initial quarantine owner.
 Admission/alias resolution, confidentiality, durable CI state, provider outbox
 and local conflict lifecycle now have integrated source and focused tests; their

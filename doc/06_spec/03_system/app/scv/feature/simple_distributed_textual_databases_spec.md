@@ -1,6 +1,6 @@
 # Simple distributed textual databases: SCV + jj + GitHub
 
-**Status:** Source-only, execution unverified. REQ-001 now invokes real offline-actor and authenticated local-publication owners. Other broad requirement checkers remain intentionally fail-fast. No scenario is PASS evidence without execution and its required durable oracle.
+**Status:** Source-only, execution unverified. REQ-001 and REQ-010 now invoke real filesystem, typed codec and authenticated local-publication owners. Other broad requirement checkers remain intentionally fail-fast. No scenario is PASS evidence without execution and its required durable oracle.
 
 **Executable source:** `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl`
 
@@ -11,7 +11,7 @@ Each remaining `@inline` checker owns its named setup contract: `setup_replica_f
 REQ-001 now creates two independent filesystem roots, reserves actual durable
 offline IDs, restores a saved counter and old handle to exercise rollback, and
 checks a separately signed actor-counter collision against persisted accepted
-state. Those three authored oracles retain the existing step names. This manual
+state. REQ-010 adds persisted signed transport, ordered mutation/precondition checks, and missing signature/provenance/version rejection. These six authored oracles retain the existing step names. This manual
 annotation is not a generated test-run receipt; docgen/execution remains pending.
 
 The five visible flows are:
@@ -35,7 +35,7 @@ The five visible flows are:
 | REQ-007 — Atomic candidate | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it writes allocation aliases rewritten references and registry in one tree | Should prove that it builds a candidate with fetched head as its sole parent | Should prove that it rejects partially published identity state |
 | REQ-008 — Publication and uncertainty | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it publishes by expected-old-head update then verifies accepted batch | Should prove that it replans a losing integrator from the newly fetched head | Should prove that it checks canonical history after lost acknowledgement before allocating again |
 | REQ-009 — Rollback detection | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it verifies the signed chained receipt before next allocation | Should prove that it restores from a current receipt with unchanged high-water marks | Should prove that it blocks ancestry epoch or allocator regression |
-| REQ-010 — Typed patches | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it round-trips every required patch identity dependency and operation field | Should prove that it preserves ordered operations and explicit preconditions | Should prove that it rejects a patch missing signature provenance or version identity |
+| REQ-010 — Typed patches | Real signed file round-trip; codec, `db_apply_local`, durable reopen | Should prove that it round-trips every required patch identity dependency and operation field | Should prove that it preserves ordered operations and explicit preconditions | Should prove that it rejects a patch missing signature provenance or version identity |
 | REQ-011 — Canonical encoding | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it produces identical domain-separated bytes for equivalent typed values | Should prove that it keeps delimiter-like Unicode data unambiguous through length framing | Should prove that it quarantines one batch ID reused with different canonical bytes |
 | REQ-012 — Pure reducer | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it reduces an authorized patch without adapter or credential access | Should prove that it returns the same plan under provider-free fixture implementations | Should prove that it rejects merge planning attempted before authorization |
 | REQ-013 — Merge semantics | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it merges concurrent edits to different schema-declared fields | Should prove that it retains delete-update and same-scalar races as explicit conflicts | Should prove that it rejects undeclared list or set merge guesses |
@@ -90,7 +90,7 @@ Run only after production helpers exist. Compiled-mode execution must validate p
 ```simple
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001 uses real actor/local-publication owners. Remaining
+# Acceptance source: REQ-001 and REQ-010 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
@@ -102,6 +102,12 @@ use app.scv.db.offline_actor.{db_actor_open, db_actor_reserve}
 use app.scv.db.local_apply.{db_apply_local, db_read_local_view}
 use app.scv.db.local_store.{db_store_read}
 use test.fixtures.scv.db_apply_fixture.*
+use test.fixtures.scv.db_patch_wire_fixture.{setup_item2_wire_patch}
+use std.scv.db_patch.{DbOperation, DbField, DbValue, FieldEdit, RowPrecondition, db_operation_ref, db_patch_seal}
+use std.scv.db_patch_codec.{db_patch_encode, db_patch_decode}
+use std.scv.db_admission.{db_patch_signing_bytes}
+use std.scv.db_reducer.{db_field_value}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_verify}
 
 # Pure prerequisites only: these assertions do not prove durable REQ-004.
 fn setup_item2_uid(counter: u64) -> EntityUid:
@@ -348,18 +354,91 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
     describe "REQ-010: Typed patches":
         it "should prove that it round-trips every required patch identity dependency and operation field":
             step("Settle compact identifiers")
+            val root = setup_item2_apply_root()
+            val patch = setup_item2_wire_patch()
+            val wire = db_patch_encode(patch).unwrap()
+            expect(file_write("{root}/signed-patch", wire)).to_be(true)
+            val decoded = db_patch_decode(file_read("{root}/signed-patch")).unwrap()
             step("Drive accepted state and inspect its receipt")
-            check_settlement_contract("REQ-010", "drive accepted typed patches state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            # Transport receipt only; this deliberately mixed operation vector
+            # is not claimed to be one semantically admissible transaction.
+            expect(decoded).to_equal(patch)
+            expect(decoded.operations.len()).to_equal(8)
+            expect(decoded.actor_counter).to_equal(18446744073709551615u64)
+            expect(decoded.causal_dependencies).to_equal(["dependency"])
+            expect(db_patch_encode(decoded).unwrap()).to_equal(wire)
+            val (seed, public_key) = pure_ed25519_keypair_from_seed([43u8;32])
+            expect(pure_ed25519_verify(public_key, db_patch_signing_bytes(decoded).unwrap(), decoded.signature)).to_be(true)
 
         it "should prove that it preserves ordered operations and explicit preconditions":
             step("Settle compact identifiers")
+            val root = setup_item2_apply_root()
+            val first_patch = setup_item2_apply_patch(1, "")
+            val first = db_apply_local(root, "", first_patch, setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+            val entity = db_operation_ref(first_patch.operations[0])
+            var ordered = setup_item2_apply_patch(2, first.revision)
+            ordered.causal_dependencies = [first_patch.batch_id]
+            ordered.operations = [
+                DbOperation.UpdateFields(entity, [FieldEdit(field: "title", before: DbValue.Text("bug-1"), after: DbValue.Text("intermediate"))], RowPrecondition(base_row: first_patch.batch_id, expected_revision: first_patch.batch_id, expected_fields: [DbField(name: "title", value: DbValue.Text("bug-1"))])),
+                DbOperation.UpdateFields(entity, [FieldEdit(field: "title", before: DbValue.Text("intermediate"), after: DbValue.Text("final"))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: [DbField(name: "title", value: DbValue.Text("intermediate"))]))
+            ]
+            ordered = setup_item2_apply_resign(ordered)
+            expect(file_write("{root}/ordered-patch", db_patch_encode(ordered).unwrap())).to_be(true)
+            val decoded = db_patch_decode(file_read("{root}/ordered-patch")).unwrap()
             step("Drive the boundary state and inspect preserved invariants")
-            check_settlement_contract("REQ-010", "drive boundary typed patches state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            expect(decoded.operations).to_equal(ordered.operations)
+            val policy = setup_item2_apply_policy([ordered])
+            val applied = db_apply_local(root, first.head, decoded, setup_item2_apply_merge(), policy, 10).unwrap()
+            expect(applied.code).to_equal("ok")
+            val before = db_read_local_view(root, policy).unwrap()
+            expect(db_field_value(before.image.state.rows[0].fields, "title")).to_equal(DbValue.Text("final"))
+            expect(before.image.state.accepted.len()).to_equal(2)
+            var stale = setup_item2_apply_edit(3, applied.revision, "forbidden")
+            stale.operations = [DbOperation.UpdateFields(entity, [FieldEdit(field: "title", before: DbValue.Text("final"), after: DbValue.Text("forbidden"))], RowPrecondition(base_row: first_patch.batch_id, expected_revision: first_patch.batch_id, expected_fields: [DbField(name: "title", value: DbValue.Text("bug-1"))]))]
+            stale = setup_item2_apply_resign(stale)
+            val stale_policy = setup_item2_apply_policy([ordered, stale])
+            val rejected = db_apply_local(root, applied.head, db_patch_decode(db_patch_encode(stale).unwrap()).unwrap(), setup_item2_apply_merge(), stale_policy, 10).unwrap()
+            expect(rejected.code).to_equal("conflict")
+            val after = db_read_local_view(root, stale_policy).unwrap()
+            expect(after.image.state).to_equal(before.image.state)
+            expect(after.head).to_equal(before.head)
 
         it "should prove that it rejects a patch missing signature provenance or version identity":
             step("Settle compact identifiers")
+            val root = setup_item2_apply_root()
+            val initial = setup_item2_apply_patch(1, "")
+            val applied = db_apply_local(root, "", initial, setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+            val before = db_store_read(root)
+            val valid = setup_item2_apply_patch(2, applied.revision)
+            var unsigned = valid
+            unsigned.signature = []
+            var no_provenance = valid
+            no_provenance.provenance = ""
+            no_provenance = db_patch_seal(no_provenance).unwrap()
+            var no_version = valid
+            no_version.schema_revision = ""
+            expect(db_patch_seal(no_version)).to_equal(Err("SCVDB_VERSION"))
+            var no_reducer = valid
+            no_reducer.reducer_revision = ""
+            var no_signer = valid
+            no_signer.signer = ""
+            no_signer = db_patch_seal(no_signer).unwrap()
+            var no_digest_version = valid
+            no_digest_version.digest_version = 0
+            var no_signature_version = valid
+            no_signature_version.signature_version = 0
+            no_signature_version = db_patch_seal(no_signature_version).unwrap()
             step("Inject the failure and inspect fail-closed state")
-            check_settlement_contract("REQ-010", "inject unsafe typed patches state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            val policy = setup_item2_apply_policy([valid])
+            expect(db_apply_local(root, applied.head, unsigned, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_SIGNATURE_INVALID"))
+            expect(db_apply_local(root, applied.head, no_provenance, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_SIGNED_PROVENANCE_REQUIRED"))
+            expect(db_apply_local(root, applied.head, no_version, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_VERSION"))
+            expect(db_apply_local(root, applied.head, no_reducer, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_VERSION"))
+            expect(db_apply_local(root, applied.head, no_signer, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_SIGNED_PROVENANCE_REQUIRED"))
+            expect(db_apply_local(root, applied.head, no_digest_version, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_DIGEST_ALGORITHM"))
+            expect(db_apply_local(root, applied.head, no_signature_version, setup_item2_apply_merge(), policy, 10)).to_equal(Err("SCVDB_SIGNATURE_ALGORITHM"))
+            expect(db_store_read(root).head).to_equal(before.head)
+            expect(db_store_read(root).state).to_equal(before.state)
 
     describe "REQ-011: Canonical encoding":
         it "should prove that it produces identical domain-separated bytes for equivalent typed values":
@@ -1028,6 +1107,6 @@ The executable now also contains three pure production-map prerequisites:
 2. Replay tombstoned A: return `tombstoned` at 1, retain one tombstoned binding and high-water 1.
 3. Reject another namespace with `SCVDB_NAMESPACE_MISMATCH`, sequence 0, and unchanged binding/high-water.
 
-These pure prerequisites supplement 153 full-contract scenarios. Three REQ-001 scenarios now use real filesystem and authenticated mutation owners; the other 150 still fail explicitly. None has executed in this session, so neither group establishes runtime, process-crash, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains RED/unproved.
+These pure prerequisites supplement 153 full-contract scenarios. Six REQ-001/REQ-010 scenarios now use real filesystem, codec and authenticated mutation owners; the other 147 still fail explicitly. None has executed in this session, so neither group establishes runtime, process-crash, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains RED/unproved.
 
 Concrete inputs and oracles for all 51 requirements and five durable campaigns are in `doc/03_plan/evidence/seven_plans/item2_acceptance_matrix_2026-10-03.md`. Preserve the original scenario catalog until each whole checker has production-backed evidence. Runtime results and generated-manual regeneration are still required before verification PASS.
