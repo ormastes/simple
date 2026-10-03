@@ -6,6 +6,7 @@ use std.scv.db_schema.*
 use std.scv.db_remove_wins.*
 use std.scv.db_identity_resolve.{db_resolve_operations}
 use std.scv.db_reference_closure.{DbReferenceTarget, db_reference_errors}
+use std.scv.db_conflict_model.{DbConflictRecord, db_conflict_record_seal}
 use std.scv.distributed_identity_map.{IdentityMap}
 use std.scv.db_patch_normalize.{db_normalize_text, db_normalize_operations}
 use std.common.search.generated.unicode_17_0_0.{unicode_normalize_nfc}
@@ -64,6 +65,7 @@ struct MergePlan:
     conflicts: [DbConflict]
     replay: bool
     authorization_status: text
+    conflict_records: [DbConflictRecord]
 
 fn db_empty_state() -> MaterializedState:
     MaterializedState(rows: [], accepted: [], revision: "")
@@ -219,7 +221,7 @@ fn _db_plan_patch_operations(state: MaterializedState, patch: DbPatch, policy: M
     for accepted in state.accepted:
         if accepted.batch_id == patch.batch_id:
             if accepted.canonical_digest != digest: return Err("SCVDB_BATCH_IDENTITY_COLLISION")
-            return Ok(MergePlan(base_revision: state.revision, proposed: state, conflicts: [], replay: true, authorization_status: "UNVERIFIED_PREVIEW"))
+            return Ok(MergePlan(base_revision: state.revision, proposed: state, conflicts: [], replay: true, authorization_status: "UNVERIFIED_PREVIEW", conflict_records: []))
     var base_known = patch.base_revision != "" and patch.base_revision == state.revision
     if patch.base_revision == "" and state.rows.len() == 0 and state.accepted.len() == 0: base_known = true
     for accepted in state.accepted:
@@ -233,6 +235,7 @@ fn _db_plan_patch_operations(state: MaterializedState, patch: DbPatch, policy: M
         if not accepted_ids.contains(dependency): return Err("SCVDB_MISSING_DEPENDENCY")
     var rows = state.rows
     var conflicts: [DbConflict] = []
+    var conflict_records: [DbConflictRecord] = []
     for operation in operations:
         match operation:
             Create(ref, kind, fields):
@@ -269,6 +272,8 @@ fn _db_plan_patch_operations(state: MaterializedState, patch: DbPatch, policy: M
                             row.fields = db_set_field(row.fields, edit.field, edit.after)
                         else:
                             conflicts.push(DbConflict(entity: entity, field: edit.field, code: "SCVDB_CONCURRENT_FIELD"))
+                            val record = DbConflictRecord(conflict_id: "", repository: patch.repository, epoch: patch.epoch, entity: ref, field: edit.field, code: "SCVDB_CONCURRENT_FIELD", base_revision: patch.base_revision, local_revision: row.revision, incoming_revision: patch.batch_id, base: edit.before, local: current, incoming: edit.after)
+                            conflict_records.push(db_conflict_record_seal(record)?)
                     row.revision = patch.batch_id
                     rows[index] = row
             Tombstone(ref, condition):
@@ -366,12 +371,12 @@ fn _db_plan_patch_operations(state: MaterializedState, patch: DbPatch, policy: M
             for code in errors: conflicts.push(DbConflict(entity: row.entity, field: field.name, code: code))
     conflicts = conflicts + db_constraint_conflicts(rows, policy)?
     if conflicts.len() > 0:
-        return Ok(MergePlan(base_revision: state.revision, proposed: state, conflicts: conflicts, replay: false, authorization_status: "UNVERIFIED_PREVIEW"))
+        return Ok(MergePlan(base_revision: state.revision, proposed: state, conflicts: conflicts, replay: false, authorization_status: "UNVERIFIED_PREVIEW", conflict_records: conflict_records))
     var accepted = state.accepted
     accepted.push(DbAcceptedBatch(batch_id: patch.batch_id, canonical_digest: digest, actor: patch.actor, actor_counter: patch.actor_counter, prior_revision: state.revision))
     var proposed = MaterializedState(rows: rows, accepted: accepted, revision: "")
     proposed.revision = db_state_digest(proposed)?
-    Ok(MergePlan(base_revision: state.revision, proposed: proposed, conflicts: [], replay: false, authorization_status: "UNVERIFIED_PREVIEW"))
+    Ok(MergePlan(base_revision: state.revision, proposed: proposed, conflicts: [], replay: false, authorization_status: "UNVERIFIED_PREVIEW", conflict_records: []))
 
 fn db_preview_materialize(checkpoint: MaterializedState, patches: [DbPatch], policy: MergePolicy) -> Result<MaterializedState, text>:
     """Deterministic full/incremental simulation; never an authorization bypass."""

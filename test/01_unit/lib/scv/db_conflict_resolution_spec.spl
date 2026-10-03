@@ -1,0 +1,85 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_patch.*
+use std.scv.db_reducer.*
+use std.scv.db_conflict_model.*
+use std.scv.db_conflict_resolution.*
+use std.scv.db_conflict_catalog.*
+use std.scv.distributed_identity.*
+
+fn setup_item2_conflict_entity() -> EntityRef:
+    entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: 1))
+
+fn setup_item2_conflict_record() -> DbConflictRecord:
+    val record = DbConflictRecord(conflict_id: "", repository: "repo", epoch: 1, entity: setup_item2_conflict_entity(), field: "title", code: "SCVDB_CONCURRENT_FIELD", base_revision: "base-state", local_revision: "local-revision", incoming_revision: "incoming-batch", base: DbValue.Text("base"), local: DbValue.Text("local"), incoming: DbValue.Text("incoming"))
+    db_conflict_record_seal(record).unwrap()
+
+fn setup_item2_conflict_state() -> MaterializedState:
+    val row = DbRow(entity: entity_ref_canonical(setup_item2_conflict_entity()), kind: "bug", fields: [DbField(name: "title", value: DbValue.Text("local"))], revision: "local-revision", tombstoned: false)
+    var state = MaterializedState(rows: [row], accepted: [], revision: "")
+    state.revision = db_state_digest(state).unwrap()
+    state
+
+fn setup_item2_conflict_decision(record: DbConflictRecord) -> DbConflictDecision:
+    DbConflictDecision(conflict_id: record.conflict_id, reviewer: "reviewer", expected_current: DbValue.Text("local"), chosen: DbValue.Text("reviewed"))
+
+describe "REQ-013 immutable conflict evidence and guarded reviewer decisions":
+    it "binds all conflict values and revisions to its immutable identity":
+        step("Reject changed conflict evidence after the record has been sealed")
+        val original = setup_item2_conflict_record()
+        var changed = original
+        changed.incoming = DbValue.Text("changed")
+        expect(db_conflict_record_validate(changed)).to_equal(Err("SCVDB_CONFLICT_DIGEST"))
+        changed = original
+        changed.local_revision = "changed-revision"
+        expect(db_conflict_record_validate(changed)).to_equal(Err("SCVDB_CONFLICT_DIGEST"))
+
+    it "translates a reviewer choice into an exact value and row revision precondition":
+        step("Bind the planned operation and immutable conflict ID into signed patch content")
+        val record = setup_item2_conflict_record()
+        val decision = setup_item2_conflict_decision(record)
+        val state = setup_item2_conflict_state()
+        val plan = db_plan_conflict_resolution(record, decision, state).unwrap()
+        expect(plan.authorization_status).to_equal("UNVERIFIED_RESOLUTION")
+        var patch = DbPatch(batch_id: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, actor: "ffeeddccbbaa99887766554433221100", actor_counter: 2, base_revision: state.revision, causal_dependencies: [], schema_revision: "s1", reducer_revision: "r1", operations: [plan.operation], payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "reviewer", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: db_conflict_resolution_provenance(record, decision).unwrap())
+        patch = db_patch_seal(patch).unwrap()
+        expect(db_validate_resolution_patch(record, decision, state, patch).unwrap().conflict_id).to_equal(record.conflict_id)
+        patch.provenance = "ordinary update"
+        patch = db_patch_seal(patch).unwrap()
+        expect(db_validate_resolution_patch(record, decision, state, patch)).to_equal(Err("SCVDB_CONFLICT_PROVENANCE"))
+
+    it "rejects stale state mismatched decisions and tombstone resurrection":
+        step("Refuse resolution when either the expected value or row revision changed")
+        val record = setup_item2_conflict_record()
+        val decision = setup_item2_conflict_decision(record)
+        var state = setup_item2_conflict_state()
+        var row = state.rows[0]
+        row.revision = "newer"
+        state.rows = [row]
+        expect(db_plan_conflict_resolution(record, decision, state)).to_equal(Err("SCVDB_CONFLICT_STALE"))
+        row.tombstoned = true
+        state.rows = [row]
+        expect(db_plan_conflict_resolution(record, decision, state)).to_equal(Err("SCVDB_TOMBSTONE_UPDATE"))
+        var wrong = decision
+        wrong.expected_current = DbValue.Text("invented")
+        expect(db_plan_conflict_resolution(record, wrong, setup_item2_conflict_state())).to_equal(Err("SCVDB_CONFLICT_EXPECTED_VALUE"))
+
+    it "preserves immutable records and receipts while rejecting duplicate catalog entries":
+        step("Roundtrip the catalog independently of semantic row changes")
+        val record = setup_item2_conflict_record()
+        val decision = setup_item2_conflict_decision(record)
+        val receipt = DbConflictReceipt(conflict_id: record.conflict_id, reviewer: "reviewer", resolution_batch: "resolution-batch", provenance: db_conflict_resolution_provenance(record, decision).unwrap(), resulting_revision: "result-revision")
+        val catalog = DbConflictCatalog(records: [record], resolutions: [receipt])
+        val decoded = db_conflict_catalog_decode(db_conflict_catalog_encode(catalog).unwrap()).unwrap()
+        expect(decoded.records).to_equal(catalog.records)
+        expect(decoded.resolutions).to_equal(catalog.resolutions)
+        expect(db_conflict_catalog_encode(DbConflictCatalog(records: [record,record], resolutions: []))).to_equal(Err("SCVDB_CONFLICT_DUPLICATE"))
+        expect(db_conflict_catalog_encode(DbConflictCatalog(records: [], resolutions: [receipt]))).to_equal(Err("SCVDB_CONFLICT_RECEIPT_UNKNOWN"))
+        expect(db_conflict_catalog_encode(DbConflictCatalog(records: [record], resolutions: [receipt,receipt]))).to_equal(Err("SCVDB_CONFLICT_ALREADY_RESOLVED"))
+
+    it "validates literal empty catalog framing and rejects trailing wire bytes":
+        step("Check strict decoding against fixed vectors independent of the encoder")
+        val empty = "SCVDB-CONFLICTS-v1\n7363762d64622f636f6e666c6963742d636174616c6f672f7631003f0406000600\n"
+        expect(db_conflict_catalog_decode(empty).unwrap().records.len()).to_equal(0)
+        expect(db_conflict_catalog_encode(DbConflictCatalog(records: [], resolutions: []))).to_equal(Ok(empty))
+        val trailing = "SCVDB-CONFLICTS-v1\n7363762d64622f636f6e666c6963742d636174616c6f672f7631003f040600060000\n"
+        expect(db_conflict_catalog_decode(trailing)).to_equal(Err("SCVDB_CONFLICT_CATALOG_ROOT"))
