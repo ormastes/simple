@@ -1,0 +1,31 @@
+#!/bin/sh
+# Real Windows clang-cl probes. No seed/compiler build and no fabricated exits.
+set -eu
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) echo 'SKIP: Windows native probe required'; exit 77 ;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+[ "$#" -eq 2 ] || { echo 'usage: check-bootstrap-windows-c-admission.shs CLANG_CL EVIDENCE_DIR' >&2; exit 64; }
+compiler=$1
+capture=$2
+mkdir -p "$capture/path with spaces"
+capture=$(CDPATH= cd -- "$capture" && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+source_file="$capture/path with spaces/probe.c"
+object_file="$capture/path with spaces/probe.obj"
+printf 'int admission_probe(void) { return 7; }\n' > "$source_file"
+bootstrap_stage3_windows_native_compile_probe "$root" "$compiler" "$source_file" "$object_file" "$capture/valid.log"
+[ -s "$object_file" ] || { echo 'FAIL: accepted probe produced no object' >&2; exit 1; }
+valid_receipt=$(sed -n 's/^process_receipt=//p' "$capture/valid.log")
+grep -qx 'native_exit_status=0' "$valid_receipt"
+grep -qx 'status=complete' "$valid_receipt"
+printf 'this is not C source;\n' > "$source_file"
+# Leave the valid old object present: it must never override a native failure.
+invalid_status=0
+bootstrap_stage3_windows_native_compile_probe "$root" "$compiler" "$source_file" "$object_file" "$capture/invalid.log" || invalid_status=$?
+[ "$invalid_status" -ne 0 ] || { echo 'FAIL: invalid source accepted with stale object' >&2; exit 1; }
+invalid_receipt=$(sed -n 's/^process_receipt=//p' "$capture/invalid.log")
+grep -qx 'status=complete' "$invalid_receipt"
+if grep -qx 'native_exit_status=0' "$invalid_receipt"; then echo 'FAIL: malformed source native status zero' >&2; exit 1; fi
+if bootstrap_stage3_windows_native_compile_probe "$root" "$capture/missing-clang.exe" "$source_file" "$object_file" "$capture/missing.log"; then
+    echo 'FAIL: missing compiler accepted' >&2; exit 1
+fi
+printf 'PASS: real native compile, spaced paths, malformed source with stale object, missing tool\n'
