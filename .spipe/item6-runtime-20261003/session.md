@@ -99,3 +99,27 @@ reviewed but not directly exercised by a fabricated mock.
 Runtime tests remain unexecuted: source implementation is not RED/GREEN or
 qualification evidence. Lock contention is bounded by the existing one-second
 API and is not a measured successful-read p95. Parent owns integration/push.
+
+## Remote content-integrity continuation
+
+Owner additionally assigned `remote/remote_client.spl` and new
+`remote_client_integrity_spec.spl`. Locally owned manifest framing includes all
+semantic fields except its claimed digest, with explicit counts/optional marker.
+Dependency manifest stays opaque text: no unproven digest-only field contract
+is imposed. Ordered reference lists reject duplicates and malformed digest text.
+Local SHA256 verifies both manifest and artifact bytes; the transport's legacy
+recompute method remains callable for compatibility but is never trusted by
+admission. Verified means content integrity, not full graph/provenance authority.
+
+Defensive limits: 4096 artifact/AOP references per list, 1 MiB framed manifest,
+64 MiB per artifact and 256 MiB cumulative bytes. Existing manifest/artifact
+mismatch results represent malformed/over-budget refusals. Subtraction-based
+size admission prevents cumulative overflow and is tested directly at boundaries
+without constructing 64 MiB payloads. Transport fetch may already allocate its
+response; these are admission limits, not streaming transport allocation limits.
+
+Focused source tests cover valid local-hash admission despite a lying transport,
+forged manifest fields/claims, forged artifact bytes/claims, missing data,
+namespace/schema/action mismatches, duplicate/malformed references, length
+framing, reference boundaries and manifest/byte limits. They remain unexecuted
+without an admitted pure-Simple runner. No full-authority or runtime PASS claim.
