@@ -1,0 +1,40 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+PORTABLE_LOCK_ATOMIC_HELPER_PATH=$root/scripts/check/lib/portable-hardlink-lock.pl
+export PORTABLE_LOCK_ATOMIC_HELPER_PATH
+. "$root/scripts/check/lib/portable-process-lock.shs"
+evidence=$(mktemp -d "${TMPDIR:-/tmp}/portable-lock-evidence.XXXXXX")
+portable_lock_acquire "$evidence" test 2
+handle=$PORTABLE_LOCK_HANDLE
+stable="$evidence/.test.lock"
+portable_lock_handle_is_owned "$handle" 2>"$evidence/owned.err"
+[ ! -s "$evidence/owned.err" ]
+
+# A child must still be unable to borrow its parent's claim.
+if sh -c '. "$1"; portable_lock_handle_is_owned "$2"' sh \
+    "$root/scripts/check/lib/portable-process-lock.shs" "$handle" \
+    2>"$evidence/child.err"; then
+  echo 'FAIL: child borrowed parent lock' >&2; exit 1
+fi
+grep -q 'reason=owner-pid' "$evidence/child.err"
+portable_lock_handle_is_owned "$handle"
+
+if portable_lock_handle_is_owned "$evidence/absent" 2>"$evidence/absent.err"; then
+  echo 'FAIL: absent claim accepted' >&2; exit 1
+fi
+grep -q 'reason=claim-read' "$evidence/absent.err"
+
+# Byte-identical files are not interchangeable with the owned hard link.
+mv "$stable" "$evidence/original.lock"
+cp "$handle" "$stable"
+if portable_lock_handle_is_owned "$handle" 2>"$evidence/replaced.err"; then
+  echo 'FAIL: replacement lock accepted' >&2; exit 1
+fi
+grep -q 'reason=hardlink-identity' "$evidence/replaced.err"
+rm -f "$stable"
+mv "$evidence/original.lock" "$stable"
+portable_lock_handle_is_owned "$handle"
+portable_lock_release "$handle"
+[ ! -e "$stable" ] && [ ! -e "$handle" ]
+printf 'PASS: parent ownership, child rejection, absent claim, replacement identity, release; evidence=%s\n' "$evidence"
