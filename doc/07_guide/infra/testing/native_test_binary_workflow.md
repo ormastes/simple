@@ -65,6 +65,27 @@ executables, executed cases, PASS, FAIL, SKIP and BLOCKED separate for each row.
 Compiler coverage includes core/HIR/MIR. A file-level build failure means its
 cases were not executed; it is not a count of failed test assertions.
 
+The provisional Phase 3/4 diagnostic schedule runs three native suite tasks
+per backend after its independent Phase 4 binary builds have been attempted;
+the full CLI and test runner must be available. This exposes independent build
+failures before starting potentially long suites. The schedule verifies
+their original manager manifests, receipts and hashes before and after each
+task. `compiler-subsystem-test-inventory.shs` supplies all unit, integration and
+system files owned by compiler, interpreter or loader, including sibling
+compiler core/shared roots. Each file uses the existing native AOT wrapper with
+40 compiler workers when the phase was configured for 40 threads. The two
+backend lanes remain parallel; files within a lane run sequentially.
+
+Results live under `phase4/native-tests/<backend>/<subsystem>/`. `results.tsv`
+records each file's status, exit code and verified passing assertion count;
+failed files retain `UNKNOWN` counts and their original logs. All independent
+files continue after a failure. Empty or unavailable inventories are blocked.
+Inventory hashes are checked before and after execution. `limitations.txt`
+keeps aggregate executable and binary-owned listing support unverified: six
+suite tasks are additional diagnostic coverage, not six aggregate binaries or
+proof of 1000 executed cases. Provisional admission remains incomplete and
+actual compiler/linker invocation provenance remains unproven.
+
 ## Repair and evidence
 
 Continue independent files and suites after failures using the existing

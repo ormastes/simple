@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+root=$(mktemp -d "${TMPDIR:-/tmp}/simple-native-artifact-pin.XXXXXX")
+backend=llvm
+statuses="$root/statuses" hashes="$root/hashes"
+source_root="$root/source"
+native_job="$root/phase4/binaries/llvm/full-cli"
+mkdir -p "$native_job/bin" "$native_job/state/receipts" "$source_root"
+printf 'compiler fixture\n' >"$native_job/bin/simple"
+printf 'receipt fixture\n' >"$native_job/state/receipts/full-cli-llvm.sdn"
+printf 'manifest fixture\n' >"$native_job/manifest.sdn"
+printf 'phase4_llvm_full-cli_status=SUCCEEDED\n' >"$statuses"
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+bootstrap_stage3_manifest_value() { awk -F= -v key="$1" '$1==key {print substr($0,index($0,"=")+1); found=1} END {if(!found) exit 1}' "$2"; }
+require_current_manifest() { regular "$1"; }
+printf 'phase4_llvm_full-cli=%s\nphase4_llvm_full-cli_manager_receipt_sha256=%s\n' \
+  "$(hash_file "$native_job/bin/simple")" "$(hash_file "$native_job/state/receipts/full-cli-llvm.sdn")" >"$hashes"
+builder_program="$root/builder"
+printf '#!/bin/sh\nexit 0\n' >"$builder_program"
+chmod +x "$builder_program"
+awk '/^verify_native_test_artifact\(\)/ {copy=1} copy {print} copy && /^}/ {exit}' \
+  "$script_root/bootstrap-provisional-phase3-phase4.shs" >"$root/function.shs"
+. "$root/function.shs"
+verify_native_test_artifact full-cli bin/simple
+printf 'changed receipt\n' >>"$native_job/state/receipts/full-cli-llvm.sdn"
+result=0
+verify_native_test_artifact full-cli bin/simple || result=$?
+[ "$result" -eq 20 ] || { echo 'FAIL: changed manager receipt accepted'; exit 1; }
+printf 'receipt fixture\n' >"$native_job/state/receipts/full-cli-llvm.sdn"
+printf '#!/bin/sh\nexit 1\n' >"$builder_program"
+result=0
+verify_native_test_artifact full-cli bin/simple || result=$?
+[ "$result" -eq 20 ] || { echo 'FAIL: rejected manager verification accepted'; exit 1; }
+printf '#!/bin/sh\nexit 0\n' >"$builder_program"
+printf 'changed compiler\n' >>"$native_job/bin/simple"
+result=0
+verify_native_test_artifact full-cli bin/simple || result=$?
+[ "$result" -eq 20 ] || { echo 'FAIL: changed compiler accepted'; exit 1; }
+echo 'PASS: changed compiler/receipt and rejected original manager verification block native tests'

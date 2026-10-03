@@ -265,6 +265,50 @@ verify_image_set() {
 
 # The manager's worker runs in its own work root, so output and cache paths in
 # the compiler argv are relative. Output publication is hash checked by run.
+verify_native_test_artifact() {
+  native_id=$1 native_output=$2
+  native_job="$root/phase4/binaries/$backend/$native_id"
+  native_key="phase4_${backend}_${native_id}"
+  [ "$(bootstrap_stage3_manifest_value "${native_key}_status" "$statuses")" = SUCCEEDED ] || return 20
+  native_sha=$(bootstrap_stage3_manifest_value "$native_key" "$hashes") || return 20
+  native_receipt_sha=$(bootstrap_stage3_manifest_value "${native_key}_manager_receipt_sha256" "$hashes") || return 20
+  regular "$native_job/$native_output" && regular "$native_job/state/receipts/$native_id-$backend.sdn" || return 20
+  [ "$(hash_file "$native_job/$native_output")" = "$native_sha" ] &&
+    [ "$(hash_file "$native_job/state/receipts/$native_id-$backend.sdn")" = "$native_receipt_sha" ] || return 20
+  require_current_manifest "$native_job/manifest.sdn"
+  "$builder_program" verify --manifest "$native_job/manifest.sdn" \
+    --state "$native_job/state" --source-root "$source_root" \
+    --output-root "$native_job" || return 20
+}
+
+run_native_subsystem() {
+  backend=$1 subsystem=$2
+  verify_shared_source
+  verify_native_test_artifact full-cli "bin/simple$exe_suffix" || return 20
+  compiler_sha=$native_sha
+  verify_native_test_artifact test-runner "bin/simple_test_runner$exe_suffix" || return 20
+  native_dir="$root/phase4/native-tests/$backend/$subsystem"
+  mkdir -p "$(dirname -- "$native_dir")" || return 20
+  mkdir "$native_dir" || return 20
+  native_status=0
+  sh "$repo_root/scripts/bootstrap/run-provisional-native-subsystem.shs" \
+    "$source_root" "$backend" \
+    "$root/phase4/binaries/$backend/full-cli/bin/simple$exe_suffix" "$compiler_sha" \
+    "$root/phase4/binaries/$backend/test-runner/bin/simple_test_runner$exe_suffix" \
+    "$subsystem" "$native_dir" "$threads" "$source_root/src/runtime" \
+    "$runtime_snapshot_digest" || native_status=$?
+  verify_shared_source
+  verify_native_test_artifact full-cli "bin/simple$exe_suffix" || return 20
+  verify_native_test_artifact test-runner "bin/simple_test_runner$exe_suffix" || return 20
+  for native_evidence in inventory.tsv results.tsv limitations.txt; do
+    if regular "$native_dir/$native_evidence"; then
+      printf '%s=%s\n' "phase4_${backend}_native_${subsystem}_${native_evidence}_sha256" \
+        "$(hash_file "$native_dir/$native_evidence")" >>"$hashes"
+    fi
+  done
+  return "$native_status"
+}
+
 build_binary() {
   id=$1 entry=$2 output=$3 task_phase=$4 backend=$5
   provisional_select_binary_producer || return 20
