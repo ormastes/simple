@@ -56,6 +56,9 @@ use compiler.backend.linker.elf.section_gc.{
 }
 use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
 use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
+use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags, elf_riscv_hi_index}
+use compiler.backend.linker.elf.riscv_align.{elf_riscv_align_objects}
+use compiler.backend.linker.riscv_static_reloc.{riscv_static_delta, riscv_uleb_width, riscv_uleb_patch}
 use compiler.backend.linker.elf.merge_strings.{
     ElfMergePlan, elf_merge_section, elf_merge_sections, elf_merge_offset
 }
@@ -167,6 +170,10 @@ fn elf_static_machine(target: RelocArch) -> Result<i64, text>:
             Ok(EM_X86_64)
         case AArch64:
             Ok(EM_AARCH64)
+        case Riscv64:
+            Ok(243)
+        case Riscv32:
+            Err("elf_static_link: RV32 ELF driver is not supported")
         case _:
             Err("elf_static_link: slice 1 supports only x86_64 and aarch64 targets")
 
@@ -734,6 +741,15 @@ fn elf_collect_refs(ctx: ElfLinkCtx, contents: [[i64]]) -> Result<[ElfScanRef], 
                 continue
             val o = inputs.outs[k]
             val rtype = elf_reloc_type(r)
+            if ctx.target == RelocArch.Riscv64 and rtype == 20 and r.r_addend != 0:
+                return Err("object {oi}: RISC-V GOT_HI20 addend must be zero")
+            if ctx.target == RelocArch.Riscv64 and (rtype == 24 or rtype == 25):
+                if r.r_addend != 0: return Err("object {oi}: RISC-V PCREL_LO12 addend must be zero")
+                val symbol = elf_reloc_sym(r)
+                if symbol < 0 or symbol >= obj.symbols.len():
+                    return Err("object {oi}: RISC-V PCREL_LO12 invalid label symbol")
+                if obj.symbols[symbol].st_shndx != tsec:
+                    return Err("object {oi}: RISC-V PCREL_LO12 label must belong to the same input section")
             if o.sh_type == SHT_NOBITS_E:
                 return Err("object {oi}: relocation type {rtype} targets a NOBITS section")
             if elf_merge_section(obj, tsec):
@@ -1193,6 +1209,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     val target = req.target
     val machine = elf_static_machine(target)?
     val mode = req.mode
+    if target == RelocArch.Riscv64 and mode != ELF_LINK_STATIC_EXEC:
+        return Err("RISC-V static ET_EXEC is the only admitted output mode")
     val dynamic = elf_mode_dynamic(mode)
     val pie = elf_mode_pie(mode)
     if not dynamic and req.shared.len() > 0:
@@ -1263,6 +1281,10 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             return Err("archive member {m.name}: e_machine {m.obj.header.e_machine} does not match target {machine}")
         all = all.push(m.obj)
 
+    var riscv_flags: i64 = 0
+    if target == RelocArch.Riscv64:
+        riscv_flags = elf_riscv_flags(all)?
+        all = elf_riscv_align_objects(all)?
     all = elf_relax_tls(all, target)?
 
     val res = sym_resolve_objects(all)
@@ -1300,8 +1322,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     var need_got_base = false
     for r in refs:
         if r.name == "_GLOBAL_OFFSET_TABLE_" or
-                r.rtype == R_X86_64_GOTOFF64 or
-                r.rtype == R_X86_64_PLTOFF64 or
+                (target == RelocArch.X86_64 and
+                (r.rtype == R_X86_64_GOTOFF64 or r.rtype == R_X86_64_PLTOFF64)) or
                 (elf_target_is_a64(target) and
                 (r.rtype == R_AARCH64_GOTREL64 or r.rtype == R_AARCH64_GOTREL32)):
             need_got_base = true
@@ -1441,6 +1463,22 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     val gotplt_v = elf_plan_addr(plan, ".got.plt")
 
     # --- relocate input sections ---
+    var riscv_highs: {text: i64} = {}
+    var riscv_uleb_widths: {i64: i64} = {}
+    if target == RelocArch.Riscv64:
+        var bases: [i64] = []
+        for index in in_to_plan:
+            bases = bases.push(plan.vaddrs[index])
+        riscv_highs = elf_riscv_hi_index(refs, bases)?
+        # Snapshot original encoded extents before applying any relocation.
+        # Admission already checked each extent against its input section.
+        var ri: i64 = 0
+        while ri < refs.len():
+            val reference = refs[ri]
+            if reference.rtype == 60:
+                val bytes = contents[reference.out_sec]
+                riscv_uleb_widths[ri] = riscv_uleb_width(bytes, reference.out_off, bytes.len())?
+            ri = ri + 1
     var j: i64 = 0
     while j < refs.len():
         val r = refs[j]
@@ -1464,6 +1502,18 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         val ref_value = elf_ref_value(ctx, lay, r)?
         var s = ref_value.address
         var a = ref_value.addend
+        if target == RelocArch.Riscv64 and r.rtype == 60:
+            if j + 1 >= refs.len(): return Err("RISC-V ULEB128 requires adjacent SET/SUB relocations")
+            val sub = refs[j + 1]
+            if sub.rtype != 61 or sub.oi != r.oi or sub.out_sec != r.out_sec or sub.out_off != r.out_off:
+                return Err("RISC-V ULEB128 requires adjacent SET/SUB relocations at the same output offset")
+            val sub_value = elf_ref_value(ctx, lay, sub)?
+            val assigned = riscv_static_delta(s, a, 0)?
+            val subtracted = riscv_static_delta(sub_value.address, sub_value.addend, 0)?
+            val difference = riscv_static_delta(assigned, 0, subtracted)?
+            contents[k] = riscv_uleb_patch(contents[k], r.out_off, riscv_uleb_widths[j], difference)?
+            j = j + 2
+            continue
         if a64 and (r.rtype == R_AARCH64_GOTREL64 or r.rtype == R_AARCH64_GOTREL32):
             p = gotplt_v
         if r.rclass == RC_TLS_LD:
@@ -1500,7 +1550,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
                 rtype = 2  # R_X86_64_PC32 applies GOTTPOFF's GOT + A - P formula
         else if (r.rclass == RC_GOT or r.rclass == RC_GOT_RELAX) and not r.relax:
             s = got_v + sc.got_idx[r.key] * 8
-            if not a64 and (r.rtype == R_X86_64_GOT32 or
+            if target == RelocArch.X86_64 and (r.rtype == R_X86_64_GOT32 or
                     r.rtype == R_X86_64_GOT64 or
                     r.rtype == R_X86_64_GOTPLT64): s = s - gotplt_v
             if a64:
@@ -1524,8 +1574,21 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         else if r.rclass == RC_BRANCH and r.kind == SYMREF_WEAK_ZERO and a64:
             # ld.lld: a branch to an undefined weak symbol targets the next instruction
             s = p + 4 - a
-        if not a64 and (r.rtype == R_X86_64_GOTOFF64 or
+        if target == RelocArch.X86_64 and (r.rtype == R_X86_64_GOTOFF64 or
                 r.rtype == R_X86_64_PLTOFF64): p = gotplt_v
+        if target == RelocArch.Riscv64 and (r.rtype == 24 or r.rtype == 25):
+            val key = "{r.oi}#{s}"
+            if not riscv_highs.has(key):
+                return Err("object {r.oi}: RISC-V PCREL_LO12 '{r.name}' has no matching HI20")
+            val high = refs[riscv_highs[key]]
+            val high_place = plan.vaddrs[in_to_plan[high.out_sec]] + high.out_off
+            val high_value = elf_ref_value(ctx, lay, high)?
+            var high_target = high_value.address
+            if high.rtype == 20: high_target = got_v + sc.got_idx[high.key] * 8
+            s = riscv_static_delta(high_target, high_value.addend, high_place)?
+            a = 0
+            p = 0
+            rtype = if r.rtype == 24: 27 else: 28
         val applied = reloc_apply(target, contents[k], r.out_off, rtype, s, a, p)
         if not applied.success:
             return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {applied.error}")
@@ -1660,6 +1723,9 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
 
     val entry_addr = elf_entry_addr(ctx, lay, res.defined[req.entry])?
     var image = elf_write_image(e_type, machine, entry_addr, plan, out)
+    if target == RelocArch.Riscv64:
+        # Header identity participates in the existing final build-id hash.
+        image[48] = riscv_flags
     if not strip_output:
         image = elf_append_symtab(image, elf_build_symtab(ctx, lay)?)
     val digest = sha1_bytes(image)

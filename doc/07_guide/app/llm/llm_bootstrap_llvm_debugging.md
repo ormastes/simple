@@ -4,6 +4,28 @@ Use this workflow when a native bootstrap fails during LLVM generation. Rust is
 only the seed in this workflow: seed diagnostics may explain why generation
 stopped, but success is proved only by the resulting pure-Simple compiler.
 
+## Finish collection and repair in parallel
+
+Follow the [shared collection policy](../../tooling/bootstrap_failure_collection.md).
+Always finish independently runnable modules and tests; one failed backend or
+entry must not cancel healthy sibling work. Group collected failures by their
+first actionable cause and assign separate agents to logic, performance and
+resource-policy defects with isolated writable caches/source scopes.
+
+A user-authorized time, memory or other checker exception is an explicitly
+labeled DIAGNOSTIC attempt with resource/progress monitoring and the original
+failed receipt retained. Record exactly which check is disabled; keep other
+limits visible. Do not infer an oversized input merely from a generic error
+label, or claim the exception repairs the underlying defect. Formal admission
+and release still require restored checks and truthful evidence.
+
+Before advancing provisionally, the exact produced compiler must compile Hello
+World and successfully execute its output. Full qualification need not finish
+first. On the next actual restart use the requested latest release plus reviewed
+applicable unmerged fixes, freeze identities, and reuse only compatible persisted
+frontend/HIR/native caches. Never alter live builds or retry identical failures
+indefinitely; continue the remaining finite work graph instead.
+
 ## Diagnose the earliest broken boundary
 
 Classify the failure before changing a backend:
@@ -57,8 +79,8 @@ sh scripts/check/replay-llvm-artifact.shs module.bc build/check/llvm-replay
 The replay performs text-to-bitcode assembly when needed, LLVM verification,
 and object generation. It reports the exact failing stage and retains generated
 bitcode/object files. Never treat replay success as Stage 4 success: build the
-pure-Simple executable, run its sanity command and essential-tool smoke, then
-deploy that executable.
+pure-Simple executable, pass the Hello compile/run gate, and finish the required
+sanity, essential-tool and formal admission checks before deployment.
 
 ## Close recovery with the Phase 4 system gate
 

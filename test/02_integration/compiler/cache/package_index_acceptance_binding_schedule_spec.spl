@@ -1,0 +1,83 @@
+# @req PSI-REQ-002 PSI-REQ-003 PSI-REQ-004 PSI-REQ-005
+use std.spec.*
+use app.test.package_index_acceptance_binding.{
+    package_index_acceptance_binding_v1, package_index_acceptance_publication_v1
+}
+use app.test.package_index_acceptance_schedule.{package_index_acceptance_schedule_v1}
+use app.io.mod.{dir_remove, getpid}
+
+fn binding_schedule_test_root() -> text:
+    "build/test-artifacts/package-index-binding-schedule-{getpid()}"
+
+describe "persisted route bindings and scheduling":
+    before_each:
+        dir_remove(binding_schedule_test_root(), true)
+    after_each:
+        dir_remove(binding_schedule_test_root(), true)
+
+    it "rejects a stale revision before admitting any source or archive":
+        step("Reject a changed index binding")
+        val result = package_index_acceptance_binding_v1("stale-index-denied", binding_schedule_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("revision=scv-revision-mismatch")
+        expect(result.observations).to_contain("pointer_preserved=true")
+
+    it "checks each provenance field independently and retains persisted bytes":
+        step("Reject a changed index binding")
+        val result = package_index_acceptance_binding_v1("scv-provenance-binding", binding_schedule_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("revision=scv-revision-mismatch")
+        expect(result.observations).to_contain("tree=scv-tree-mismatch")
+        expect(result.observations).to_contain("inventory=scv-inventory-mismatch")
+        expect(result.observations).to_contain("producer=index-producer-mismatch")
+        expect(result.observations).to_contain("root=index-root-generation-mismatch")
+        expect(result.observations).to_contain("generation_preserved=true")
+
+    it "rejects a request lacking frozen snapshot authority":
+        step("Refuse an untrusted package index")
+        val result = package_index_acceptance_binding_v1("scv-no-live-worktree-fallback", binding_schedule_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("snapshot=scv-authority-missing")
+
+    it "refuses a release variant against a persisted debug generation":
+        step("Change one configuration or build-tag variant")
+        val result = package_index_acceptance_binding_v1("config-variant-isolation", binding_schedule_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("variant=index-variant-mismatch")
+        expect(result.observations).to_contain("generation_preserved=true")
+
+    it "refuses a different feature tag against the original generation":
+        step("Change one configuration or build-tag variant")
+        val result = package_index_acceptance_binding_v1("build-tag-variant-isolation", binding_schedule_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("variant=index-variant-mismatch")
+        expect(result.observations).to_contain("pointer_preserved=true")
+
+    it "ignores incomplete staged bytes before publication":
+        step("Preserve the prior admitted generation")
+        val result = package_index_acceptance_publication_v1("crash-before-publish", binding_schedule_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("staging_injection=partial-file")
+        expect(result.observations).to_contain("prior_generation_preserved=true")
+        expect(result.observations).to_contain("staged_bytes_untouched=true")
+
+    it "retains the complete new publication despite unrelated partial staging":
+        step("Preserve the prior admitted generation")
+        val result = package_index_acceptance_publication_v1("crash-after-publish", binding_schedule_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("publication_boundary=crash-after-publish")
+        expect(result.observations).to_contain("prior_generation_preserved=true")
+
+    it "schedules independent packages deterministically from persisted metadata":
+        step("Schedule independent ready packages")
+        val result = package_index_acceptance_schedule_v1("deterministic-independent-schedule", binding_schedule_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("scheduled_packages=alpha,beta,bundle")
+        expect(result.observations).to_contain("repeat_group_order_match=true")
+
+    it "invalidates a cycle and schedules its members together before its consumer":
+        step("Invalidate one member of a package cycle")
+        val result = package_index_acceptance_schedule_v1("scc-group-invalidation", binding_schedule_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("invalidated_packages=cycle_a,cycle_b,root")
+        expect(result.observations).to_contain("scheduled_packages=cycle_a,cycle_b,root")
