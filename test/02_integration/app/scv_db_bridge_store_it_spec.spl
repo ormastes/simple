@@ -1,0 +1,107 @@
+use std.spec.{describe, it, expect, step}
+use app.io.mod (cwd, dir_create)
+use app.scv.db.local_store.{db_store_read, db_store_commit}
+use app.scv.db.bridge_store.*
+use std.scv.db_bridge.*
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+
+fn setup_item2_delivery_root() -> text:
+    val nonce = random_hex(8) ?? ""
+    expect(nonce.len()).to_equal(16)
+    val root = "{cwd()}/build/test-artifacts/item2-delivery-{nonce}"
+    expect(dir_create(root, true)).to_be(true)
+    root
+
+fn setup_item2_delivery() -> DbBridgeDelivery:
+    var intent = DbBridgeIntent(revision: "", provider: DbProviderBindingIdentity(instance: "github.com", project: "123", external_id: "issue-7"), operation: "update", payload_digest: sha256_text("reviewed title"), correlation_id: "edit-1", causation_id: "", idempotency_key: "edit-1")
+    intent.revision = db_bridge_intent_digest(intent).unwrap()
+    db_bridge_pending(intent).unwrap()
+
+# Decode a known-valid fixture only to locate fields; mutations below are
+# independently specified invalid bytes, never encoder-generated expectations.
+fn setup_item2_delivery_fields(delivery: DbBridgeDelivery) -> [[u8]]:
+    val encoded = db_bridge_store_encode([delivery]).unwrap()
+    val header = "SCVDB-BRIDGE-v1\n"
+    val bytes = db_snapshot_unhex(encoded[header.len():encoded.len() - 1]).unwrap()
+    val domain = db_domain_bytes("bridge-store", []).unwrap()
+    val root = db_read_frame(bytes, domain.len()).unwrap()
+    val records = db_read_children(root.payload).unwrap()
+    var fields: [[u8]] = []
+    for field in db_read_children(records[0].payload).unwrap():
+        fields.push(db_frame(field.tag, field.payload))
+    fields
+
+fn setup_item2_delivery_wire(fields: [[u8]], root_tag: u8, record_tag: u8) -> text:
+    var payload: [u8] = []
+    for field in fields: payload = payload + field
+    val bytes = db_domain_bytes("bridge-store", db_frame(root_tag, db_frame(record_tag, payload))).unwrap()
+    "SCVDB-BRIDGE-v1\n" + db_snapshot_hex(bytes) + "\n"
+
+describe "Durable provider delivery state under SJ ownership":
+    it "reopens sent-unconfirmed state and requires readback after lease recovery":
+        step("Seed an already accepted intent delivery fixture then persist pre-send state")
+        # This fixture starts at canonical-intent admission; enqueue admission
+        # itself is tested by the application owner fixture, not this seed.
+        val root = setup_item2_delivery_root()
+        val pending = setup_item2_delivery()
+        val encoded = db_bridge_store_encode([pending]).unwrap()
+        expect(db_store_commit(root, "", sha256_text(encoded), encoded, "bridge").code).to_equal("ok")
+        val leased = db_bridge_store_acquire(root, pending.intent.revision, "worker-a", 10, 10).unwrap()
+        val sent = db_bridge_store_sent(root, pending.intent.revision, "worker-a", leased.delivery.generation, 11).unwrap()
+        expect(sent.delivery.state).to_equal("sent_unconfirmed")
+        expect(db_bridge_store_load(root, pending.intent.revision).unwrap().delivery.must_reconcile).to_be(true)
+        val recovered = db_bridge_store_acquire(root, pending.intent.revision, "worker-b", 21, 10).unwrap()
+        expect(recovered.delivery.must_reconcile).to_be(true)
+        expect(db_bridge_store_sent(root, pending.intent.revision, "worker-b", recovered.delivery.generation, 22)).to_equal(Err("SCVDB_READBACK_REQUIRED"))
+        val observed = DbBridgeObservation(provider: pending.intent.provider, correlation_id: pending.intent.correlation_id, payload_digest: pending.intent.payload_digest, revision: "provider-revision-2", status: "found")
+        val acknowledged = db_bridge_store_reconcile(root, pending.intent.revision, "worker-b", recovered.delivery.generation, 22, observed).unwrap()
+        expect(acknowledged.delivery.state).to_equal("acknowledged")
+        expect(db_bridge_store_load(root, pending.intent.revision).unwrap().delivery.provider_revision).to_equal("provider-revision-2")
+        expect(db_store_read(root).code).to_equal("empty")
+
+    it "rejects a stale issuer without changing durable delivery bytes":
+        val root = setup_item2_delivery_root()
+        val pending = setup_item2_delivery()
+        val encoded = db_bridge_store_encode([pending]).unwrap()
+        expect(db_store_commit(root, "", sha256_text(encoded), encoded, "bridge").code).to_equal("ok")
+        val current = db_bridge_store_acquire(root, pending.intent.revision, "worker", 10, 10).unwrap()
+        expect(db_bridge_store_sent(root, pending.intent.revision, "stale-worker", current.delivery.generation, 11)).to_equal(Err("SCVDB_LEASE_STALE"))
+        expect(db_store_read(root, "bridge").head).to_equal(current.head)
+
+    it "roundtrips every delivery fence field and rejects duplicate intent entries":
+        val pending = setup_item2_delivery()
+        val leased = db_bridge_acquire(pending, "worker", 10, 10).delivery
+        expect(db_bridge_store_decode(db_bridge_store_encode([leased]).unwrap()).unwrap()).to_equal([leased])
+        expect(db_bridge_store_encode([pending, pending])).to_equal(Err("SCVDB_DUPLICATE_MEMBER"))
+
+    it "rejects truncated framing, trailing frames, wrong tags and field counts":
+        val fields = setup_item2_delivery_fields(setup_item2_delivery())
+        val encoded = setup_item2_delivery_wire(fields, 6u8, 91u8)
+        expect(db_bridge_store_decode(encoded[0:encoded.len() - 3] + "\n")).to_equal(Err("SCVDB_FRAME_TRUNCATED"))
+        expect(db_bridge_store_decode(encoded[0:encoded.len() - 1] + "010100\n")).to_equal(Err("SCVDB_BRIDGE_STORE_FORMAT"))
+        expect(db_bridge_store_decode(setup_item2_delivery_wire(fields, 7u8, 91u8))).to_equal(Err("SCVDB_BRIDGE_STORE_FORMAT"))
+        expect(db_bridge_store_decode(setup_item2_delivery_wire(fields, 6u8, 90u8))).to_equal(Err("SCVDB_BRIDGE_STORE_FORMAT"))
+        expect(db_bridge_store_decode(setup_item2_delivery_wire(fields[0:17], 6u8, 91u8))).to_equal(Err("SCVDB_BRIDGE_STORE_FORMAT"))
+        expect(db_bridge_store_decode(setup_item2_delivery_wire(fields + [db_frame(1u8, [0u8])], 6u8, 91u8))).to_equal(Err("SCVDB_BRIDGE_STORE_FORMAT"))
+
+    it "rejects invalid flags and nonminimal or overflowing unsigned counters":
+        var fields = setup_item2_delivery_fields(setup_item2_delivery())
+        fields[17] = db_frame(1u8, [2u8])
+        expect(db_bridge_store_decode(setup_item2_delivery_wire(fields, 6u8, 91u8))).to_equal(Err("SCVDB_FLAG"))
+        fields[17] = db_frame(1u8, [0u8])
+        fields[13] = db_frame(2u8, [128u8, 0u8])
+        expect(db_bridge_store_decode(setup_item2_delivery_wire(fields, 6u8, 91u8))).to_equal(Err("SCVDB_VARINT_NONMINIMAL"))
+        fields[13] = db_frame(2u8, [255u8, 255u8, 255u8, 255u8, 255u8, 255u8, 255u8, 255u8, 255u8, 2u8])
+        expect(db_bridge_store_decode(setup_item2_delivery_wire(fields, 6u8, 91u8))).to_equal(Err("SCVDB_VARINT_OVERFLOW"))
+
+    it "rejects a forged sent record that suppresses required readback":
+        val leased = db_bridge_acquire(setup_item2_delivery(), "worker", 10, 10).delivery
+        var sent = db_bridge_sent(leased, "worker", leased.generation, 11).delivery
+        var fields = setup_item2_delivery_fields(sent)
+        fields[17] = db_frame(1u8, [0u8])
+        expect(db_bridge_store_decode(setup_item2_delivery_wire(fields, 6u8, 91u8))).to_equal(Err("SCVDB_BRIDGE_STORE_INVARIANT"))
+        sent.must_reconcile = false
+        expect(db_bridge_store_encode([sent])).to_equal(Err("SCVDB_BRIDGE_STORE_INVARIANT"))

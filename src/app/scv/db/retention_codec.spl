@@ -1,0 +1,172 @@
+# Bounded local retention catalog and compact, reconstructible rollup records.
+use std.scv.db_canonical.*
+use std.scv.db_retention.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+
+struct DbRetentionEntry:
+    digest: text
+    created_day: u64
+    classification: text
+    state: text
+    rollup_digest: text
+    deletion_status: text
+
+struct DbRetentionRollupRef:
+    day: u64
+    cohort: text
+    digest: text
+
+struct DbRetentionCatalog:
+    entries: [DbRetentionEntry]
+    pins: [DbEvidencePin]
+    rollups: [DbRetentionRollupRef]
+
+struct DbStoredRetention:
+    head: text
+    catalog: DbRetentionCatalog
+
+struct DbRetainedRollup:
+    rollup: DbDailyRollup
+    inputs: [DbRollupInput]
+
+fn retention_fields(bytes: [u8], limit: i64) -> Result<[DbDecodedFrame], text>:
+    var fields: [DbDecodedFrame] = []
+    var offset = 0
+    while offset < bytes.len():
+        if fields.len() >= limit: return Err("SCVDB_RETENTION_QUOTA")
+        val frame = db_read_frame(bytes, offset)?
+        fields.push(frame)
+        offset = frame.next_offset
+    Ok(fields)
+
+fn retention_root(bytes: [u8], domain_name: text, tag: u8) -> Result<DbDecodedFrame, text>:
+    val domain = db_domain_bytes(domain_name, [])?
+    if bytes.len() <= domain.len() or bytes.len() > 8388608: return Err("SCVDB_RETENTION_FORMAT")
+    for index in 0..domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_RETENTION_FORMAT")
+    val root = db_read_frame(bytes, domain.len())?
+    if root.tag != tag or root.next_offset != bytes.len(): return Err("SCVDB_RETENTION_FORMAT")
+    Ok(root)
+
+fn retention_hex(digest: text) -> bool:
+    if digest.len() != 64: return false
+    for index in 0..digest.len():
+        val code = digest.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn db_retention_catalog_encode(catalog: DbRetentionCatalog) -> Result<text, text>:
+    if catalog.entries.len() > 256 or catalog.pins.len() > 256 or catalog.rollups.len() > 256: return Err("SCVDB_RETENTION_QUOTA")
+    var entries: [[u8]] = []
+    var keys: [text] = []
+    for entry in catalog.entries:
+        if not retention_hex(entry.digest) or keys.contains(entry.digest): return Err("SCVDB_RETENTION_IDENTITY")
+        keys.push(entry.digest)
+        if not ["public", "internal", "restricted"].contains(entry.classification) or not ["active", "delete_pending", "deleted"].contains(entry.state): return Err("SCVDB_RETENTION_STATE")
+        if entry.state == "active":
+            if entry.rollup_digest != "" or entry.deletion_status != "": return Err("SCVDB_RETENTION_STATE")
+        else:
+            if not retention_hex(entry.rollup_digest): return Err("SCVDB_RETENTION_STATE")
+            if entry.state == "delete_pending" and entry.deletion_status != "": return Err("SCVDB_RETENTION_STATE")
+            if entry.state == "deleted" and not ["unlinked", "already_absent_synced"].contains(entry.deletion_status): return Err("SCVDB_RETENTION_STATE")
+        entries.push(db_frame(100u8, db_canonical_text(entry.digest)? + db_frame(2u8, db_u64_bytes(entry.created_day)) + db_canonical_text(entry.classification)? + db_canonical_text(entry.state)? + db_canonical_text(entry.rollup_digest)? + db_canonical_text(entry.deletion_status)?))
+    var pins: [[u8]] = []
+    for pin in catalog.pins:
+        if not retention_hex(pin.root) or not ["unresolved_failure", "release", "pending", "reproduction", "policy"].contains(pin.reason): return Err("SCVDB_PIN_REASON")
+        pins.push(db_frame(101u8, db_canonical_text(pin.root)? + db_canonical_text(pin.reason)? + db_frame(2u8, db_u64_bytes(pin.expires_day))))
+    var rollups: [[u8]] = []
+    var contexts: [[u8]] = []
+    for ref in catalog.rollups:
+        val context = db_frame(2u8, db_u64_bytes(ref.day)) + db_canonical_text(ref.cohort)?
+        if ref.cohort == "" or not retention_hex(ref.digest) or contexts.contains(context): return Err("SCVDB_RETENTION_IDENTITY")
+        contexts.push(context)
+        rollups.push(db_frame(102u8, context + db_canonical_text(ref.digest)?))
+    val bytes = db_domain_bytes("retention-catalog", db_frame(103u8, db_canonical_list(entries) + db_canonical_list(pins) + db_canonical_list(rollups)))?
+    if bytes.len() > 8388608: return Err("SCVDB_RETENTION_QUOTA")
+    Ok("SCVDB-RETENTION-v1\n" + db_snapshot_hex(bytes) + "\n")
+
+fn db_retention_catalog_decode(wire: text) -> Result<DbRetentionCatalog, text>:
+    val prefix = "SCVDB-RETENTION-v1\n"
+    if wire.len() > 16777264 or not wire.starts_with(prefix) or not wire.ends_with("\n"): return Err("SCVDB_RETENTION_FORMAT")
+    val root = retention_root(db_snapshot_unhex(wire[prefix.len():wire.len() - 1])?, "retention-catalog", 103u8)?
+    val fields = retention_fields(root.payload, 3)?
+    if fields.len() != 3: return Err("SCVDB_RETENTION_FORMAT")
+    for field in fields:
+        if field.tag != 6u8: return Err("SCVDB_RETENTION_FORMAT")
+    var entries: [DbRetentionEntry] = []
+    for frame in retention_fields(fields[0].payload, 256)?:
+        val values = retention_fields(frame.payload, 6)?
+        if frame.tag != 100u8 or values.len() != 6: return Err("SCVDB_RETENTION_FORMAT")
+        entries.push(DbRetentionEntry(digest: db_read_text(values[0])?, created_day: db_read_unsigned(values[1])?, classification: db_read_text(values[2])?, state: db_read_text(values[3])?, rollup_digest: db_read_text(values[4])?, deletion_status: db_read_text(values[5])?))
+    var pins: [DbEvidencePin] = []
+    for frame in retention_fields(fields[1].payload, 256)?:
+        val values = retention_fields(frame.payload, 3)?
+        if frame.tag != 101u8 or values.len() != 3: return Err("SCVDB_RETENTION_FORMAT")
+        pins.push(DbEvidencePin(root: db_read_text(values[0])?, reason: db_read_text(values[1])?, expires_day: db_read_unsigned(values[2])?))
+    var rollups: [DbRetentionRollupRef] = []
+    for frame in retention_fields(fields[2].payload, 256)?:
+        val values = retention_fields(frame.payload, 3)?
+        if frame.tag != 102u8 or values.len() != 3: return Err("SCVDB_RETENTION_FORMAT")
+        rollups.push(DbRetentionRollupRef(day: db_read_unsigned(values[0])?, cohort: db_read_text(values[1])?, digest: db_read_text(values[2])?))
+    val catalog = DbRetentionCatalog(entries: entries, pins: pins, rollups: rollups)
+    if db_retention_catalog_encode(catalog)? != wire: return Err("SCVDB_RETENTION_FORMAT")
+    Ok(catalog)
+
+# The raw payload contains expendable detail. Compact inputs retain metadata
+# and actual envelope digest, so aggregation never silently discards provenance.
+fn db_retention_observation_encode(identity: text, day: u64, cohort: text, outcome: text, duration_ms: u64, detail: [u8]) -> Result<[u8], text>:
+    if identity == "" or cohort == "" or detail.len() > 1048576: return Err("SCVDB_RETENTION_OBSERVATION")
+    val fields = db_canonical_text(identity)? + db_frame(2u8, db_u64_bytes(day)) + db_canonical_text(cohort)? + db_canonical_text(outcome)? + db_frame(2u8, db_u64_bytes(duration_ms)) + db_frame(4u8, detail)
+    db_domain_bytes("retention-observation", db_frame(104u8, fields))
+
+fn db_retention_observation_decode(node: DbEvidenceNode) -> Result<DbRollupInput, text>:
+    if db_evidence_resolution(node, node.digest) != "exact": return Err("SCVDB_EVIDENCE_DIGEST")
+    val root = retention_root(node.content, "retention-observation", 104u8)?
+    val fields = retention_fields(root.payload, 6)?
+    if fields.len() != 6 or fields[5].tag != 4u8: return Err("SCVDB_RETENTION_OBSERVATION")
+    val input = DbRollupInput(identity: db_read_text(fields[0])?, day: db_read_unsigned(fields[1])?, cohort: db_read_text(fields[2])?, outcome: db_read_text(fields[3])?, duration_ms: db_read_unsigned(fields[4])?, payload_digest: node.digest)
+    if db_retention_observation_encode(input.identity, input.day, input.cohort, input.outcome, input.duration_ms, fields[5].payload)? != node.content: return Err("SCVDB_RETENTION_OBSERVATION")
+    Ok(input)
+
+fn db_retained_rollup_encode(value: DbRetainedRollup) -> Result<[u8], text>:
+    val r = value.rollup
+    if value.inputs.len() > 4096: return Err("SCVDB_RETENTION_QUOTA")
+    val verified = db_rollup_resolution(r, value.inputs, r.day, r.cohort, r.reducer)?
+    if verified != "aggregated": return Err("SCVDB_ROLLUP_PROVENANCE")
+    var inputs: [[u8]] = []
+    for input in value.inputs:
+        inputs.push(db_frame(105u8, db_canonical_text(input.identity)? + db_frame(2u8, db_u64_bytes(input.day)) + db_canonical_text(input.cohort)? + db_canonical_text(input.outcome)? + db_frame(2u8, db_u64_bytes(input.duration_ms)) + db_canonical_text(input.payload_digest)?))
+    var payload = db_frame(2u8, db_u64_bytes(r.day)) + db_canonical_text(r.cohort)? + db_canonical_text(r.reducer)? + db_frame(2u8, db_u64_bytes(r.generation)) + db_canonical_text(r.revision)? + db_canonical_text(r.prior_revision)?
+    for number in [r.count, r.passed, r.failed, r.other, r.duration_sum, r.duration_min, r.duration_max]: payload = payload + db_frame(2u8, db_u64_bytes(number))
+    var bins: [[u8]] = []
+    for number in r.histogram: bins.push(db_frame(2u8, db_u64_bytes(number)))
+    db_domain_bytes("retained-rollup", db_frame(106u8, payload + db_canonical_list(bins) + db_canonical_list(inputs)))
+
+fn db_retained_rollup_decode(bytes: [u8]) -> Result<DbRetainedRollup, text>:
+    val root = retention_root(bytes, "retained-rollup", 106u8)?
+    val fields = retention_fields(root.payload, 15)?
+    if fields.len() != 15 or fields[13].tag != 6u8 or fields[14].tag != 6u8: return Err("SCVDB_RETENTION_FORMAT")
+    var inputs: [DbRollupInput] = []
+    for frame in retention_fields(fields[14].payload, 4096)?:
+        val values = retention_fields(frame.payload, 6)?
+        if frame.tag != 105u8 or values.len() != 6: return Err("SCVDB_RETENTION_FORMAT")
+        inputs.push(DbRollupInput(identity: db_read_text(values[0])?, day: db_read_unsigned(values[1])?, cohort: db_read_text(values[2])?, outcome: db_read_text(values[3])?, duration_ms: db_read_unsigned(values[4])?, payload_digest: db_read_text(values[5])?))
+    var rebuilt = db_rollup(db_rollup_empty(db_read_unsigned(fields[0])?, db_read_text(fields[1])?, db_read_text(fields[2])?), inputs)?
+    rebuilt.generation = db_read_unsigned(fields[3])?
+    rebuilt.prior_revision = db_read_text(fields[5])?
+    if rebuilt.revision != db_read_text(fields[4])?: return Err("SCVDB_ROLLUP_DIGEST")
+    val actual = [rebuilt.count, rebuilt.passed, rebuilt.failed, rebuilt.other, rebuilt.duration_sum, rebuilt.duration_min, rebuilt.duration_max]
+    for index in 0..actual.len():
+        if actual[index] != db_read_unsigned(fields[6 + index])?: return Err("SCVDB_ROLLUP_DIGEST")
+    val bins = retention_fields(fields[13].payload, 8)?
+    if bins.len() != 8: return Err("SCVDB_ROLLUP_DIGEST")
+    for index in 0..8:
+        if rebuilt.histogram[index] != db_read_unsigned(bins[index])?: return Err("SCVDB_ROLLUP_DIGEST")
+    val value = DbRetainedRollup(rollup: rebuilt, inputs: inputs)
+    if db_retained_rollup_encode(value)? != bytes: return Err("SCVDB_RETENTION_FORMAT")
+    Ok(value)
+
+export DbRetentionEntry, DbRetentionRollupRef, DbRetentionCatalog, DbStoredRetention, DbRetainedRollup
+export db_retention_catalog_encode, db_retention_catalog_decode, retention_hex
+export db_retention_observation_encode, db_retention_observation_decode
+export db_retained_rollup_encode, db_retained_rollup_decode

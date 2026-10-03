@@ -1,0 +1,150 @@
+use std.spec.*
+use app.io.mod.{file_write_bytes}
+use app.scv.db.page_store.{db_page_store_load_page}
+use std.scv.db_pages.{db_page_encode, db_pages_bucket, db_pages_entry}
+use std.scv.db_page_records.{db_page_batch_key, db_page_row_key}
+use std.scv.db_patch.*
+use std.scv.db_reducer.{db_field_value}
+use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
+use app.scv.db.paged_store.*
+use app.scv.db.paged_query.*
+use app.scv.db.bridge_store.{db_bridge_store_enqueue_paged}
+use app.scv.db.github_binding_core.{DbGithubBindingTarget}
+use app.scv.db.github_binding_paged_owner.*
+use test.fixtures.scv.db_paged_binding_fixture.*
+use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_repin}
+
+describe "Authenticated indexed GitHub binding owner":
+    it "charges distinct buckets cumulatively and reuses captured proof after backing bytes change":
+        val fixture = setup_item2_paged_binding_fixture(true, true)
+        val view = db_paged_open(fixture.root, fixture.policy).unwrap()
+        val batch_key = db_page_batch_key(fixture.intent_patch.batch_id).unwrap()
+        val row_key = db_page_row_key(setup_item2_paged_binding_ref("bug", 1u64)).unwrap()
+        expect(db_pages_bucket(batch_key).unwrap() == db_pages_bucket(row_key).unwrap()).to_be(false)
+        val page = db_page_store_load_page(fixture.root, view.manifest.pages, batch_key).unwrap().unwrap()
+        val budget = db_page_encode(page, fixture.policy.quota).unwrap().len() as u64
+        var policy = fixture.policy
+        policy.max_read_bytes = budget
+        policy = setup_item2_paged_repin(policy)
+        val empty = db_paged_query_open(fixture.root, policy).unwrap()
+        expect(db_paged_query_record(empty, batch_key)).to_equal(Err("SCVDB_PAGED_PROOF_REQUIRED"))
+        val captured = db_paged_query_require(empty, [batch_key,batch_key]).unwrap()
+        expect(captured.bytes_read).to_equal(budget)
+        expect(captured.keys_read).to_equal(1u64)
+        val expected = db_paged_query_record(captured, batch_key).unwrap()
+        val entry = db_pages_entry(view.manifest.pages, batch_key).unwrap().unwrap()
+        expect(file_write_bytes("{fixture.root}/.scv/db-pages/pages/{entry.digest}.scvp", [0u8])).to_be(true)
+        val cached = db_paged_query_require(captured, [batch_key,batch_key]).unwrap()
+        expect(db_paged_query_record(cached, batch_key).unwrap()).to_equal(expected)
+        expect(cached.bytes_read).to_equal(budget)
+        expect(cached.keys_read).to_equal(1u64)
+        expect(db_page_store_load_page(fixture.root, view.manifest.pages, batch_key).is_err()).to_be(true)
+        expect(db_paged_query_require(cached, [row_key])).to_equal(Err("SCVDB_PAGE_BATCH_QUOTA"))
+
+    it "shares the dependency budget with all later binding context reads before GET":
+        val fixture = setup_item2_paged_binding_fixture(true, true)
+        val plan = db_github_binding_paged_plan(fixture.root, fixture.policy, fixture.request, fixture.target, setup_item2_paged_binding_transport).unwrap()
+        val patch = setup_item2_paged_binding_patch(plan.operations, plan.base_revision, 2u64, plan.provenance, [fixture.intent_patch.batch_id])
+        var policy = setup_item2_paged_binding_review(fixture, [patch])
+        val view = db_paged_open(fixture.root, policy).unwrap()
+        val page = db_page_store_load_page(fixture.root, view.manifest.pages, db_page_batch_key(fixture.intent_patch.batch_id).unwrap()).unwrap().unwrap()
+        policy.max_read_bytes = db_page_encode(page, policy.quota).unwrap().len() as u64
+        policy = setup_item2_paged_repin(policy)
+        val calls = check_item2_paged_binding_calls()
+        expect(db_github_binding_paged_apply(fixture.root, plan.head, policy, fixture.request, fixture.target, patch, setup_item2_paged_binding_transport).is_err()).to_be(true)
+        expect(check_item2_paged_binding_calls()).to_equal(calls)
+        expect(db_paged_open(fixture.root, policy).unwrap().head).to_equal(plan.head)
+
+    it "publishes exact signed binding and common state after durable ACK and fresh GET":
+        val fixture = setup_item2_paged_binding_fixture(true, true)
+        val plan = db_github_binding_paged_plan(fixture.root, fixture.policy, fixture.request, fixture.target, setup_item2_paged_binding_transport).unwrap()
+        val patch = setup_item2_paged_binding_patch(plan.operations, plan.base_revision, 2u64, plan.provenance)
+        val policy = setup_item2_paged_binding_review(fixture, [patch])
+        val applied = db_github_binding_paged_apply(fixture.root, plan.head, policy, fixture.request, fixture.target, patch, setup_item2_paged_binding_transport).unwrap()
+        expect(applied.replay).to_be(false)
+        val query = db_paged_query_rows(db_paged_query_open(fixture.root, policy).unwrap(), [fixture.target.binding, fixture.target.common_state, setup_item2_paged_binding_ref("bridge_policy", 2u64)]).unwrap()
+        val binding = db_paged_row_at(query, fixture.target.binding).unwrap().unwrap()
+        expect(db_field_value(binding.fields, "last_common_state")).to_equal(DbValue.Reference(fixture.target.common_state))
+        expect(db_paged_row_at(query, fixture.target.common_state).unwrap().unwrap().revision).to_equal(patch.batch_id)
+        step("Retained alias indexes identify the same targets on accepted replay")
+        val namespace = policy.config.admission.namespace
+        val alias_target = DbGithubBindingTarget(binding: entity_ref_settled(SettledAlias(database_namespace: namespace, authority_epoch: 1u64, entity_kind: "provider_binding", sequence: 1u64)), common_state: entity_ref_settled(SettledAlias(database_namespace: namespace, authority_epoch: 1u64, entity_kind: "provider_common_state", sequence: 1u64)))
+        val calls = check_item2_paged_binding_calls()
+        expect(db_github_binding_paged_apply(fixture.root, plan.head, policy, fixture.request, alias_target, patch, setup_item2_paged_binding_transport).unwrap().replay).to_be(true)
+        expect(check_item2_paged_binding_calls()).to_equal(calls)
+        val other = DbGithubBindingTarget(binding: setup_item2_paged_binding_ref("provider_binding", 6u64), common_state: setup_item2_paged_binding_ref("provider_common_state", 7u64))
+        expect(db_github_binding_paged_plan(fixture.root, policy, fixture.request, other, setup_item2_paged_binding_transport)).to_equal(Err("SCVDB_BINDING_DUPLICATE_REMOTE"))
+
+    it "rejects caller ACK and modified signed planner output without publishing":
+        val pending = setup_item2_paged_binding_fixture(false, true)
+        var forged_request = pending.request
+        var delivery = forged_request.delivery
+        delivery.state = "acknowledged"
+        delivery.provider_revision = "caller assertion"
+        forged_request.delivery = delivery
+        expect(db_github_binding_paged_plan(pending.root, pending.policy, forged_request, pending.target, setup_item2_paged_binding_transport)).to_equal(Err("SCVDB_BINDING_ACK_REQUIRED"))
+        val fixture = setup_item2_paged_binding_fixture(true, true)
+        val plan = db_github_binding_paged_plan(fixture.root, fixture.policy, fixture.request, fixture.target, setup_item2_paged_binding_transport).unwrap()
+        var operations = plan.operations
+        operations[0] = DbOperation.Create(fixture.target.common_state, "provider_common_state", [DbField(name: "title", value: DbValue.Text("forged plan"))])
+        val patch = setup_item2_paged_binding_patch(operations, plan.base_revision, 2u64, plan.provenance)
+        val policy = setup_item2_paged_binding_review(fixture, [patch])
+        expect(db_github_binding_paged_apply(fixture.root, plan.head, policy, fixture.request, fixture.target, patch, setup_item2_paged_binding_transport)).to_equal(Err("SCVDB_BINDING_PATCH_MISMATCH"))
+        expect(db_paged_open(fixture.root, policy).unwrap().head).to_equal(plan.head)
+        step("A changed provider revision prevents an otherwise exact signed patch")
+        val exact = setup_item2_paged_binding_patch(plan.operations, plan.base_revision, 2u64, plan.provenance)
+        val exact_policy = setup_item2_paged_binding_review(fixture, [exact])
+        setup_item2_paged_binding_changed(true)
+        expect(db_github_binding_paged_apply(fixture.root, plan.head, exact_policy, fixture.request, fixture.target, exact, setup_item2_paged_binding_transport)).to_equal(Err("SCVDB_BINDING_READBACK_CHANGED"))
+        expect(db_paged_open(fixture.root, exact_policy).unwrap().head).to_equal(plan.head)
+
+    it "requires exact unique indexes instead of interpreting absent arbitrary keys":
+        val missing = setup_item2_paged_binding_fixture(false, true, "missing")
+        expect(db_bridge_store_enqueue_paged(missing.root, missing.policy, missing.request.delivery.intent)).to_equal(Err("SCVDB_PAGED_UNIQUE_INDEX_REQUIRED"))
+        val wrong = setup_item2_paged_binding_fixture(true, true, "wrong-order")
+        expect(db_github_binding_paged_plan(wrong.root, wrong.policy, wrong.request, wrong.target, setup_item2_paged_binding_transport)).to_equal(Err("SCVDB_PAGED_UNIQUE_INDEX_REQUIRED"))
+
+    it "preserves a newer semantic HEAD installed during provider readback":
+        val fixture = setup_item2_paged_binding_fixture(true, true)
+        val plan = db_github_binding_paged_plan(fixture.root, fixture.policy, fixture.request, fixture.target, setup_item2_paged_binding_transport).unwrap()
+        val patch = setup_item2_paged_binding_patch(plan.operations, plan.base_revision, 2u64, plan.provenance)
+        val condition = RowPrecondition(base_row: fixture.intent_patch.batch_id, expected_revision: fixture.intent_patch.batch_id, expected_fields: [])
+        val race = setup_item2_paged_binding_patch([DbOperation.UpdateFields(setup_item2_paged_binding_ref("bridge_policy", 2u64), [FieldEdit(field: "revision", before: DbValue.Text(fixture.request.policy.revision), after: DbValue.Text(fixture.request.policy.revision))], condition)], plan.base_revision, 3u64, "concurrent reviewed policy touch")
+        val policy = setup_item2_paged_binding_review(fixture, [patch,race])
+        setup_item2_paged_binding_race(plan.head, race, policy)
+        expect(db_github_binding_paged_apply(fixture.root, plan.head, policy, fixture.request, fixture.target, patch, setup_item2_paged_binding_transport)).to_equal(Err("SCVDB_STORE_HEAD_ADVANCED"))
+        val query = db_paged_query_rows(db_paged_query_open(fixture.root, policy).unwrap(), [fixture.target.binding, fixture.target.common_state, setup_item2_paged_binding_ref("bridge_policy", 2u64)]).unwrap()
+        expect(db_paged_row_at(query, setup_item2_paged_binding_ref("bridge_policy", 2u64)).unwrap().unwrap().revision).to_equal(race.batch_id)
+        expect(db_paged_row_at(query, fixture.target.binding).unwrap()).to_be_nil()
+
+    it "authenticates historical replay after intent deletion and authority revision change":
+        val fixture = setup_item2_paged_binding_fixture(true, true)
+        val plan = db_github_binding_paged_plan(fixture.root, fixture.policy, fixture.request, fixture.target, setup_item2_paged_binding_transport).unwrap()
+        val patch = setup_item2_paged_binding_patch(plan.operations, plan.base_revision, 2u64, plan.provenance)
+        var policy = setup_item2_paged_binding_review(fixture, [patch])
+        val applied = db_github_binding_paged_apply(fixture.root, plan.head, policy, fixture.request, fixture.target, patch, setup_item2_paged_binding_transport).unwrap()
+        val condition = RowPrecondition(base_row: fixture.intent_patch.batch_id, expected_revision: fixture.intent_patch.batch_id, expected_fields: [])
+        val edit = FieldEdit(field: "revision", before: DbValue.Text(fixture.request.policy.revision), after: DbValue.Text("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+        val later = setup_item2_paged_binding_patch([DbOperation.Tombstone(setup_item2_paged_binding_ref("bridge_intent", 3u64), condition), DbOperation.UpdateFields(setup_item2_paged_binding_ref("bridge_policy", 2u64), [edit], condition)], applied.revision, 3u64, "later reviewed semantic change")
+        policy = setup_item2_paged_binding_review(fixture, [patch,later])
+        val changed = db_paged_apply(fixture.root, applied.head, later, policy).unwrap()
+        setup_item2_paged_binding_changed(true)
+        val calls = check_item2_paged_binding_calls()
+        expect(db_github_binding_paged_apply(fixture.root, plan.head, policy, fixture.request, fixture.target, patch, setup_item2_paged_binding_transport).unwrap().replay).to_be(true)
+        expect(check_item2_paged_binding_calls()).to_equal(calls)
+        expect(db_paged_open(fixture.root, policy).unwrap().head).to_equal(changed.head)
+        var forged = patch
+        forged.signature = [0u8;64]
+        expect(db_github_binding_paged_apply(fixture.root, plan.head, policy, fixture.request, fixture.target, forged, setup_item2_paged_binding_transport)).to_equal(Err("SCVDB_SIGNATURE_INVALID"))
+
+    it "keeps every reserved operation behind its specialized owner":
+        val fixture = setup_item2_paged_binding_fixture(true, true)
+        val head = db_paged_open(fixture.root, fixture.policy).unwrap()
+        for entity in [fixture.target.binding, fixture.target.common_state]:
+            val condition = RowPrecondition(base_row: "", expected_revision: "", expected_fields: [])
+            val operations = [DbOperation.Create(entity, "provider_binding", []), DbOperation.UpdateFields(entity, [], condition), DbOperation.Tombstone(entity, condition), DbOperation.AppendObservation(entity, "provider_binding", []), DbOperation.AddSetMember(entity, "field", DbValue.Text("value"), "dot"), DbOperation.RemoveObservedSetMember(entity, "field", ["dot"]), DbOperation.AddSetMemberAfterRemoval(entity, "field", DbValue.Text("value"), "dot", []), DbOperation.RemoveSetMember(entity, "field", DbValue.Text("value"), "dot", [])]
+            for operation in operations:
+                var patch = fixture.intent_patch
+                patch.operations = [operation]
+                expect(db_paged_apply(fixture.root, head.head, patch, fixture.policy)).to_equal(Err("SCVDB_BINDING_OWNER_REQUIRED"))
+        expect(db_paged_open(fixture.root, fixture.policy).unwrap().head).to_equal(head.head)

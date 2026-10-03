@@ -1,0 +1,99 @@
+# Indexed projection IO only. These APIs do not admit patches or certify global
+# uniqueness/reference closure. Semantic revisions are imported claims; the
+# captured manifest root binds actual page bytes for every bounded lookup.
+use app.scv.db.page_store.*
+use std.scv.db_page_records.*
+use std.scv.db_page_projection.*
+use std.scv.db_pages.*
+use std.scv.db_reducer.{MaterializedState, DbRow, DbAcceptedBatch}
+use std.scv.distributed_identity.*
+use std.scv.distributed_identity_map.{IdentityMap}
+
+struct DbSemanticPages:
+    stored: DbStoredPages
+    revision: DbPageRevision
+
+fn _semantic_pages_opened(root: text, stored: DbStoredPages, context: DbPageContext) -> Result<DbSemanticPages, text>:
+    val record = db_page_store_lookup(root, stored, db_page_revision_key())?
+    if record == nil: return Err("SCVDB_TYPED_REVISION_REQUIRED")
+    match db_typed_page_record_decode(record.unwrap())?:
+        Revision(revision):
+            if revision.context != context: return Err("SCVDB_TYPED_CONTEXT")
+            Ok(DbSemanticPages(stored: stored, revision: revision))
+        _: Err("SCVDB_TYPED_REVISION_REQUIRED")
+
+fn db_semantic_pages_open(root: text, expected_context: DbPageContext) -> Result<DbSemanticPages, text>:
+    _semantic_pages_opened(root, db_page_store_open(root)?, expected_context)
+
+fn db_semantic_pages_row(root: text, opened: DbSemanticPages, entity: EntityRef) -> Result<DbRow?, text>:
+    val context = opened.revision.context
+    if not entity_ref_validate(entity).valid: return Err("SCVDB_TYPED_UID")
+    var uid = entity
+    if val alias = entity.settled:
+        if alias.database_namespace != context.namespace or alias.authority_epoch != context.epoch: return Err("SCVDB_TYPED_CONTEXT")
+        val indexed = db_page_store_lookup(root, opened.stored, db_page_alias_key(alias)?)?
+        if indexed == nil: return Ok(nil)
+        match db_typed_page_record_decode(indexed.unwrap())?:
+            Alias(binding): uid = entity_ref_provisional(binding.uid)
+            _: return Err("SCVDB_TYPED_ALIAS")
+    if uid.provisional == nil or uid.provisional.unwrap().database_namespace != context.namespace: return Err("SCVDB_TYPED_CONTEXT")
+    val record = db_page_store_lookup(root, opened.stored, db_page_row_key(uid)?)?
+    if record == nil:
+        if entity.settled != nil: return Err("SCVDB_TYPED_ALIAS_ROW_MISSING")
+        return Ok(nil)
+    match db_typed_page_record_decode(record.unwrap())?:
+        CurrentRow(_, row): Ok(Some(row))
+        _: Err("SCVDB_TYPED_ROW_IDENTITY")
+
+fn db_semantic_pages_batch(root: text, opened: DbSemanticPages, batch_id: text) -> Result<DbAcceptedBatch?, text>:
+    val record = db_page_store_lookup(root, opened.stored, db_page_batch_key(batch_id)?)?
+    if record == nil: return Ok(nil)
+    match db_typed_page_record_decode(record.unwrap())?:
+        Accepted(batch): Ok(Some(batch))
+        _: Err("SCVDB_TYPED_BATCH")
+
+fn db_semantic_pages_actor_counter(root: text, opened: DbSemanticPages, actor: text, counter: u64) -> Result<DbAcceptedBatch?, text>:
+    val record = db_page_store_lookup(root, opened.stored, db_page_actor_counter_key(actor, counter)?)?
+    if record == nil: return Ok(nil)
+    match db_typed_page_record_decode(record.unwrap())?:
+        ActorCounter(batch):
+            val paired = db_semantic_pages_batch(root, opened, batch.batch_id)?
+            if paired == nil or paired.unwrap() != batch: return Err("SCVDB_TYPED_ACCEPTED_PAIR")
+            Ok(Some(batch))
+        _: Err("SCVDB_TYPED_ACTOR")
+
+fn db_semantic_pages_highwater(root: text, opened: DbSemanticPages, kind: text) -> Result<u64?, text>:
+    val context = opened.revision.context
+    val record = db_page_store_lookup(root, opened.stored, db_page_highwater_key(context.namespace, context.epoch, kind)?)?
+    if record == nil: return Ok(nil)
+    match db_typed_page_record_decode(record.unwrap())?:
+        HighWater(_, _, _, sequence): Ok(Some(sequence))
+        _: Err("SCVDB_TYPED_ALIAS_HIGHWATER")
+
+fn db_semantic_pages_import_projection(root: text, expected_head: text, state: MaterializedState, identities: IdentityMap, entities: [EntityRef], context: DbPageContext, quota: DbPageQuota) -> Result<DbSemanticPages, text>:
+    val build = db_page_projection_import(state, identities, entities, context, quota)?
+    _semantic_pages_opened(root, db_page_store_commit(root, expected_head, build)?, context)
+
+fn db_semantic_pages_commit_projection(root: text, opened: DbSemanticPages, records: [DbTypedPageRecord]) -> Result<DbSemanticPages, text>:
+    """Commit a projection delta atomically; never infer complete semantic validity."""
+    val updates = db_page_projection_delta(records, opened.revision.context)?
+    var rows: {text: DbPageRecord} = {}
+    for update in updates: rows[update.key] = update
+    for record in records:
+        match record:
+            Alias(binding):
+                val uid = entity_ref_provisional(binding.uid)
+                val key = db_page_row_key(uid)?
+                if rows.contains_key(key):
+                    match db_typed_page_record_decode(rows[key])?:
+                        CurrentRow(_, _): ()
+                        _: return Err("SCVDB_TYPED_ALIAS_ROW_MISSING")
+                elif db_semantic_pages_row(root, opened, uid)? == nil: return Err("SCVDB_TYPED_ALIAS_ROW_MISSING")
+            _: ()
+    val affected = db_page_store_load_affected(root, opened.stored, updates)?
+    val build = db_pages_update(opened.stored.manifest, affected, updates)?
+    _semantic_pages_opened(root, db_page_store_commit(root, opened.stored.head, build)?, opened.revision.context)
+
+export DbSemanticPages, db_semantic_pages_open, db_semantic_pages_row, db_semantic_pages_batch
+export db_semantic_pages_actor_counter, db_semantic_pages_highwater
+export db_semantic_pages_import_projection, db_semantic_pages_commit_projection

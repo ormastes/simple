@@ -1,0 +1,274 @@
+# Bounded Git mechanics, not deployment authorization. The local publication
+# entrypoint accepts ONLY canonical disposable/local bare remotes. Production
+# publication requires a separate trusted credential/protection owner.
+# Scratch parents must be trusted against concurrent same-name replacement.
+# Process/output/history bounds do not establish a Git pack disk quota.
+use app.io.mod.{process_run_bounded, dir_remove_all}
+use app.io.file_ops.{secure_temp_dir_raw, file_write_bytes}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.nogc_sync_mut.io.path_identity.{HostFinalPath, path_final_existing, path_identity_same, path_identity_contains}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+use std.scv.db_receipt.*
+use std.scv.db_receipt_index.*
+use app.scv.db.local_store.{db_local_path_scope}
+use app.scv.db.git_policy.*
+
+struct DbReceiptIndexGitRequest:
+    source_root: text
+    remote: text
+    scratch_parent: text
+    expected_head: text
+    receipt: DbSettlementReceipt
+    authority: DbReceiptAuthority
+
+struct DbReceiptIndexGitProof:
+    index_ref: text
+    index_head: text
+    receipt_digest: text
+    sequence: u64
+
+fn _receipt_index_hex(value: text, width: i64) -> bool:
+    if value.len() != width: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn db_receipt_index_ref(namespace: text, epoch: u64) -> Result<text, text>:
+    if not _receipt_index_hex(namespace, 32) or epoch == 0: return Err("SCVDB_INDEX_REF")
+    Ok("refs/heads/scv-receipts/v1/{namespace}/{epoch}")
+
+fn _receipt_index_git(root: text, args: [text], limit: i64 = 65536) -> Result<text, text>:
+    if not db_git_environment_safe() or not db_git_network_config_safe(root): return Err("SCVDB_INDEX_GIT_POLICY")
+    val (output, _error, code) = process_run_bounded("git", db_git_effect_prefix(root) + args, 30000, limit)
+    if code != 0 or output.len() >= limit: return Err("SCVDB_INDEX_GIT_EFFECT")
+    Ok(output)
+
+fn _receipt_index_head(request: DbReceiptIndexGitRequest, root: text, reference: text) -> Result<text, text>:
+    if scv_sj_lease_is_held(request.source_root): return Err("SCVDB_INDEX_NETWORK_UNDER_LEASE")
+    val output = _receipt_index_git(root, ["ls-remote", "--refs", "--", request.remote, reference], 512)?
+    if output == "": return Ok("")
+    val fields = output.trim().split("\t")
+    val width = if request.receipt.object_format == "sha1": 40 else: 64
+    if fields.len() != 2 or fields[1] != reference or not _receipt_index_hex(fields[0], width): return Err("SCVDB_INDEX_REMOTE_REF")
+    Ok(fields[0])
+
+fn _receipt_index_blob(root: text, head: text, path: text) -> Result<text?, text>:
+    if head == "": return Ok(nil)
+    val listing = _receipt_index_git(root, ["ls-tree", "--full-tree", head, "--", path], 1024)?
+    if listing == "": return Ok(nil)
+    val parts = listing.trim().split("\t")
+    if parts.len() != 2 or parts[1] != path: return Err("SCVDB_INDEX_TREE_ENTRY")
+    val metadata = parts[0].split(" ")
+    if metadata.len() != 3 or metadata[0] != "100644" or metadata[1] != "blob": return Err("SCVDB_INDEX_TREE_ENTRY")
+    if not _receipt_index_hex(metadata[2], head.len()): return Err("SCVDB_INDEX_TREE_ENTRY")
+    # A stricter effect quota than the general pure codec. No trimmed bytes.
+    Ok(Some(_receipt_index_git(root, ["cat-file", "blob", metadata[2]], 262145)?))
+
+fn _receipt_index_lookup(root: text, head: text, receipt: DbSettlementReceipt, sequence: u64) -> Result<DbReceiptIndexLookup, text>:
+    Ok(DbReceiptIndexLookup(by_digest: _receipt_index_blob(root, head, "entries/" + db_receipt_digest(receipt)?)?, by_commit: _receipt_index_blob(root, head, "by-commit/" + receipt.accepted_head)?, by_sequence: _receipt_index_blob(root, head, db_receipt_index_sequence_path(sequence)?)?))
+
+fn _receipt_index_plan(root: text, head: text, request: DbReceiptIndexGitRequest) -> Result<DbReceiptIndexPlan, text>:
+    var cursor = DbReceiptIndexCursor(count: 0, last_receipt: nil)
+    if head != "":
+        val encoded = _receipt_index_blob(root, head, "cursor")?
+        if encoded == nil: return Err("SCVDB_INDEX_CURSOR_MISSING")
+        cursor = db_receipt_index_cursor_decode(encoded.unwrap())?
+        # A signed cursor is not evidence that its indexed receipt survived.
+        # Validate the current immutable projections before extending history,
+        # even when the incoming receipt itself has no existing index entry.
+        if cursor.count == 0 or cursor.last_receipt == nil: return Err("SCVDB_INDEX_QUARANTINE_CURSOR")
+        val latest = cursor.last_receipt.unwrap()
+        val authenticated = db_receipt_authenticate(latest, request.authority)?
+        val copies = _receipt_index_lookup(root, head, latest, cursor.count)?
+        if copies.by_digest == nil or copies.by_commit == nil or copies.by_sequence == nil: return Err("SCVDB_INDEX_QUARANTINE_PARTIAL")
+        val expected = db_receipt_index_entry_encode(DbReceiptIndexEntry(sequence: cursor.count, receipt: latest))?
+        for copy in [copies.by_digest.unwrap(), copies.by_commit.unwrap(), copies.by_sequence.unwrap()]:
+            val decoded = db_receipt_index_entry_decode(copy)?
+            if copy != expected: return Err("SCVDB_INDEX_QUARANTINE_DISAGREEMENT")
+    val digest_entry = _receipt_index_blob(root, head, "entries/" + db_receipt_digest(request.receipt)?)?
+    var sequence = 1u64
+    if val existing = digest_entry:
+        sequence = db_receipt_index_entry_decode(existing)?.sequence
+    else:
+        if cursor.count == 18446744073709551615u64: return Err("SCVDB_INDEX_EXHAUSTED")
+        sequence = cursor.count + 1u64
+    val lookup = _receipt_index_lookup(root, head, request.receipt, sequence)?
+    var history: [DbSettlementReceipt] = []
+    if digest_entry != nil and sequence < cursor.count:
+        if cursor.count - sequence >= 64u64: return Err("SCVDB_INDEX_HISTORY_QUOTA")
+        var ordinal = sequence
+        while ordinal <= cursor.count:
+            val encoded = _receipt_index_blob(root, head, db_receipt_index_sequence_path(ordinal)?)?
+            if encoded == nil: return Err("SCVDB_INDEX_HISTORY_REQUIRED")
+            val entry = db_receipt_index_entry_decode(encoded.unwrap())?
+            if entry.sequence != ordinal: return Err("SCVDB_INDEX_QUARANTINE_SEQUENCE")
+            val copies = _receipt_index_lookup(root, head, entry.receipt, ordinal)?
+            if copies.by_digest != encoded or copies.by_commit != encoded or copies.by_sequence != encoded: return Err("SCVDB_INDEX_QUARANTINE_DISAGREEMENT")
+            history.push(entry.receipt)
+            if ordinal == cursor.count: break
+            ordinal = ordinal + 1u64
+    db_receipt_index_plan(cursor, request.receipt, request.authority, lookup, history)
+
+fn _receipt_index_fetch(request: DbReceiptIndexGitRequest, scratch: text, reference: text) -> Result<text, text>:
+    val observed = _receipt_index_head(request, scratch, reference)?
+    if observed != "":
+        if scv_sj_lease_is_held(request.source_root): return Err("SCVDB_INDEX_NETWORK_UNDER_LEASE")
+        val fetched = _receipt_index_git(scratch, ["-c", "fetch.fsckObjects=true", "fetch", "--no-auto-maintenance", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--depth=1", request.remote, reference + ":refs/scv-index/readback"])?
+        if _receipt_index_git(scratch, ["rev-parse", "refs/scv-index/readback"], 256)?.trim() != observed: return Err("SCVDB_INDEX_READBACK_MOVED")
+        if _receipt_index_git(scratch, ["cat-file", "-t", observed], 256)?.trim() != "commit": return Err("SCVDB_INDEX_NOT_COMMIT")
+    if _receipt_index_head(request, scratch, reference)? != observed: return Err("SCVDB_INDEX_READBACK_MOVED")
+    Ok(observed)
+
+fn _receipt_index_proof(request: DbReceiptIndexGitRequest, scratch: text, reference: text) -> Result<DbReceiptIndexGitProof, text>:
+    val observed = _receipt_index_fetch(request, scratch, reference)?
+    if observed == "": return Err("SCVDB_INDEX_NOT_INDEXED")
+    val plan = _receipt_index_plan(scratch, observed, request)?
+    if not plan.replay: return Err("SCVDB_INDEX_NOT_INDEXED")
+    if _receipt_index_head(request, scratch, reference)? != observed: return Err("SCVDB_INDEX_READBACK_MOVED")
+    Ok(DbReceiptIndexGitProof(index_ref: reference, index_head: observed, receipt_digest: db_receipt_authenticate(request.receipt, request.authority)?, sequence: plan.entry.sequence))
+
+fn _receipt_index_write(request: DbReceiptIndexGitRequest, scratch: text, reference: text) -> Result<DbReceiptIndexGitProof, text>:
+    val observed = _receipt_index_fetch(request, scratch, reference)?
+    val plan = _receipt_index_plan(scratch, observed, request)?
+    if plan.replay: return _receipt_index_proof(request, scratch, reference)
+    if observed != request.expected_head: return Err("SCVDB_INDEX_STALE_HEAD")
+    if observed == "":
+        val empty = _receipt_index_git(scratch, ["read-tree", "--empty"])?
+    else:
+        val prior = _receipt_index_git(scratch, ["read-tree", observed])?
+    val paths = [plan.digest_path, plan.commit_path, plan.sequence_path, "cursor"]
+    val contents = [plan.encoded, plan.encoded, plan.encoded, db_receipt_index_cursor_encode(plan.next_cursor)?]
+    for index in 0..paths.len():
+        if contents[index].len() > 262144: return Err("SCVDB_INDEX_BLOB_QUOTA")
+        if not file_write_bytes(scratch + "/payload", text_to_utf8_bytes(contents[index])): return Err("SCVDB_INDEX_BLOB_WRITE")
+        val oid = _receipt_index_git(scratch, ["hash-object", "-w", "--no-filters", "--", scratch + "/payload"], 256)?.trim()
+        val width = if request.receipt.object_format == "sha1": 40 else: 64
+        if not _receipt_index_hex(oid, width): return Err("SCVDB_INDEX_OBJECT")
+        val staged = _receipt_index_git(scratch, ["update-index", "--add", "--cacheinfo", "100644,{oid},{paths[index]}"])?
+    val tree = _receipt_index_git(scratch, ["write-tree"], 256)?.trim()
+    var parent: [text] = []
+    if observed != "": parent = ["-p", observed]
+    val candidate = _receipt_index_git(scratch, ["-c", "user.name=SCV Receipt Index", "-c", "user.email=scv-receipts@invalid", "commit-tree", tree] + parent + ["-m", "SCV receipt index v1"], 256)?.trim()
+    val width = if request.receipt.object_format == "sha1": 40 else: 64
+    if not _receipt_index_hex(candidate, width): return Err("SCVDB_INDEX_OBJECT")
+    if _receipt_index_head(request, scratch, reference)? != observed: return Err("SCVDB_INDEX_STALE_HEAD")
+    if scv_sj_lease_is_held(request.source_root): return Err("SCVDB_INDEX_NETWORK_UNDER_LEASE")
+    # Never force, including genesis; a concurrent sibling causes rejection.
+    # Process success/failure is not the publication acknowledgement.
+    val attempted = _receipt_index_git(scratch, ["push", "--porcelain", "--no-force", "--no-verify", request.remote, candidate + ":" + reference])
+    # Delete only the private scratch ref so readback fetch does not depend on
+    # the earlier shallow tip being an ancestor of the new remote state.
+    val removed = _receipt_index_git(scratch, ["update-ref", "-d", "refs/scv-index/readback"])?
+    _receipt_index_proof(request, scratch, reference)
+
+fn _receipt_index_scope(request: DbReceiptIndexGitRequest, local_write: bool) -> Result<HostFinalPath, text>:
+    val authenticated = db_receipt_authenticate(request.receipt, request.authority)?
+    if request.remote != request.authority.remote: return Err("SCVDB_INDEX_REMOTE")
+    if request.expected_head != "" and not _receipt_index_hex(request.expected_head, request.receipt.accepted_head.len()): return Err("SCVDB_INDEX_HEAD")
+    if scv_sj_lease_is_held(request.source_root): return Err("SCVDB_INDEX_NETWORK_UNDER_LEASE")
+    if db_local_path_scope(request.source_root, []) != "" or db_local_path_scope(request.scratch_parent, []) != "": return Err("SCVDB_INDEX_SCOPE")
+    var source = path_final_existing(request.source_root)?
+    val parent = path_final_existing(request.scratch_parent)?
+    val common = path_final_existing(_receipt_index_git(source.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"], 4096)?.trim())?
+    if _receipt_index_git(source.path, ["rev-parse", "--is-bare-repository"], 256)?.trim() == "false":
+        source = path_final_existing(_receipt_index_git(source.path, ["rev-parse", "--show-toplevel"], 4096)?.trim())?
+    if path_identity_contains(source, parent) or path_identity_contains(common, parent): return Err("SCVDB_INDEX_SCOPE")
+    if request.remote.starts_with("https://github.com/") and not local_write:
+        val parts = request.remote[19:].split("/")
+        if parts.len() != 2: return Err("SCVDB_INDEX_REMOTE")
+        for part in parts:
+            if part == "" or part.starts_with(".") or part.contains(".."): return Err("SCVDB_INDEX_REMOTE")
+            for index in 0..part.len():
+                val code = part.char_code_at(index)
+                if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or [45, 46, 95].contains(code)): return Err("SCVDB_INDEX_REMOTE")
+    else:
+        if not dir_is_real_no_follow(request.remote) or db_local_path_scope(request.remote, []) != "": return Err("SCVDB_INDEX_LOCAL_REMOTE_REQUIRED")
+        if path_final_existing(request.remote)?.path != request.remote: return Err("SCVDB_INDEX_LOCAL_REMOTE_REQUIRED")
+        if path_identity_contains(path_final_existing(request.remote)?, parent): return Err("SCVDB_INDEX_SCOPE")
+        if _receipt_index_git(request.remote, ["rev-parse", "--is-bare-repository"], 256)?.trim() != "true": return Err("SCVDB_INDEX_LOCAL_REMOTE_REQUIRED")
+    Ok(parent)
+
+fn _receipt_index_effect(request: DbReceiptIndexGitRequest, local_write: bool) -> Result<DbReceiptIndexGitProof, text>:
+    val parent = _receipt_index_scope(request, local_write)?
+    val reference = db_receipt_index_ref(request.receipt.namespace, request.receipt.epoch)?
+    val scratch = secure_temp_dir_raw(parent.path, "scv-receipt-index-")
+    if scratch == "" or not dir_is_real_no_follow(scratch): return Err("SCVDB_INDEX_SCRATCH")
+    val identity = path_final_existing(scratch)?
+    if identity.path != scratch or not path_identity_contains(parent, identity) or not scratch.starts_with(parent.path + "/scv-receipt-index-"): return Err("SCVDB_INDEX_SCRATCH")
+    var result: Result<DbReceiptIndexGitProof, text> = Err("SCVDB_INDEX_INIT")
+    match _receipt_index_git(scratch, ["init", "--bare", "--template=", "--object-format={request.receipt.object_format}", "."]):
+        Ok(_):
+            if local_write: result = _receipt_index_write(request, scratch, reference)
+            else: result = _receipt_index_proof(request, scratch, reference)
+        Err(reason): result = Err(reason)
+    if not dir_is_real_no_follow(scratch) or not path_identity_same(identity, path_final_existing(scratch)?): return Err("SCVDB_INDEX_CLEANUP_SCOPE")
+    if not dir_remove_all(scratch): return Err("SCVDB_INDEX_CLEANUP")
+    result
+
+fn db_receipt_index_git_read(request: DbReceiptIndexGitRequest) -> Result<DbReceiptIndexGitProof, text>:
+    _receipt_index_effect(request, false)
+
+fn db_receipt_index_git_publish_local(request: DbReceiptIndexGitRequest) -> Result<DbReceiptIndexGitProof, text>:
+    _receipt_index_effect(request, true)
+
+export DbReceiptIndexGitRequest, DbReceiptIndexGitProof, db_receipt_index_ref
+export db_receipt_index_git_read, db_receipt_index_git_publish_local
+
+struct DbReceiptIndexGitTip:
+    index_head: text
+    receipt: DbSettlementReceipt
+
+fn _receipt_index_tip_read(request: DbReceiptIndexGitRequest, scratch: text, expected_index: text, batch_id: text) -> Result<DbReceiptIndexGitTip, text>:
+    val initialized = _receipt_index_git(scratch, ["init", "--bare", "--template=", "--object-format={request.receipt.object_format}", "."])?
+    val reference = db_receipt_index_ref(request.receipt.namespace, request.receipt.epoch)?
+    val head = _receipt_index_fetch(request, scratch, reference)?
+    if head != expected_index: return Err("SCVDB_INDEX_READBACK_MOVED")
+    val encoded = _receipt_index_blob(scratch, head, "cursor")?
+    if encoded == nil: return Err("SCVDB_INDEX_CURSOR_MISSING")
+    val cursor = db_receipt_index_cursor_decode(encoded.unwrap())?
+    if cursor.last_receipt == nil: return Err("SCVDB_INDEX_QUARANTINE_CURSOR")
+    var latest = request
+    latest.receipt = cursor.last_receipt.unwrap()
+    if batch_id != "":
+        var ordinal = cursor.count
+        var found = false
+        for depth in 0..64:
+            val entry_bytes = _receipt_index_blob(scratch, head, db_receipt_index_sequence_path(ordinal)?)?
+            if entry_bytes == nil: return Err("SCVDB_INDEX_HISTORY_REQUIRED")
+            val entry = db_receipt_index_entry_decode(entry_bytes.unwrap())?
+            if entry.sequence != ordinal: return Err("SCVDB_INDEX_QUARANTINE_SEQUENCE")
+            if entry.receipt.batch_digests.contains(batch_id):
+                latest.receipt = entry.receipt
+                found = true
+                break
+            if ordinal == 1u64: break
+            ordinal = ordinal - 1u64
+        if not found: return Err("SCVDB_INDEX_BATCH_HISTORY_REQUIRED")
+    val checked = _receipt_index_plan(scratch, head, latest)?
+    if not checked.replay or _receipt_index_head(request, scratch, reference)? != head: return Err("SCVDB_INDEX_READBACK_MOVED")
+    Ok(DbReceiptIndexGitTip(index_head: head, receipt: latest.receipt))
+
+fn _receipt_index_tip_effect(request: DbReceiptIndexGitRequest, batch_id: text) -> Result<DbReceiptIndexGitTip, text>:
+    # First prove the caller's signed anchor through the current signed chain.
+    # A separate fresh exact-ref read must observe the SAME index head.
+    val anchor = db_receipt_index_git_read(request)?
+    val parent = _receipt_index_scope(request, false)?
+    val scratch = secure_temp_dir_raw(parent.path, "scv-receipt-tip-")
+    if scratch == "" or not dir_is_real_no_follow(scratch): return Err("SCVDB_INDEX_SCRATCH")
+    val identity = path_final_existing(scratch)?
+    if identity.path != scratch or not path_identity_contains(parent, identity) or not scratch.starts_with(parent.path + "/scv-receipt-tip-"): return Err("SCVDB_INDEX_SCRATCH")
+    val result = _receipt_index_tip_read(request, scratch, anchor.index_head, batch_id)
+    if not dir_is_real_no_follow(scratch) or not path_identity_same(identity, path_final_existing(scratch)?): return Err("SCVDB_INDEX_CLEANUP_SCOPE")
+    if not dir_remove_all(scratch): return Err("SCVDB_INDEX_CLEANUP")
+    result
+
+fn db_receipt_index_git_tip(request: DbReceiptIndexGitRequest) -> Result<DbReceiptIndexGitTip, text>:
+    _receipt_index_tip_effect(request, "")
+
+fn db_receipt_index_git_batch(request: DbReceiptIndexGitRequest, batch_id: text) -> Result<DbReceiptIndexGitTip, text>:
+    if not _receipt_index_hex(batch_id, 64): return Err("SCVDB_INDEX_BATCH")
+    _receipt_index_tip_effect(request, batch_id)
+
+export DbReceiptIndexGitTip, db_receipt_index_git_tip, db_receipt_index_git_batch

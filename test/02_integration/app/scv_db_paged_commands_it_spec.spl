@@ -1,0 +1,91 @@
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{file_write, process_run_bounded}
+use app.scv.db.commands.{db_command}
+use app.scv.db.local_store.{db_store_read}
+use app.scv.db.local_apply.{db_apply_local}
+use app.scv.db.paged_store.{db_paged_open, db_paged_current_row}
+use std.scv.db_paged_model.{db_paged_policy_encode}
+use std.scv.db_patch_codec.{db_patch_encode}
+use std.scv.db_patch.{DbValue}
+use std.scv.db_reducer.{db_field_value}
+use test.fixtures.scv.db_paged_fixture.*
+use test.fixtures.scv.db_apply_fixture.*
+use app.scv.db.quarantine_store.{DbQuarantineQuota, db_quarantine_bundle_encode}
+
+describe "Explicit paged database command owner":
+    it "publishes a selected quarantined patch through the paged admission owner":
+        val root = setup_item2_paged_root()
+        val external = setup_item2_paged_root()
+        val (_out, _error, initialized) = process_run_bounded("git", ["init", "--quiet", root], 30000, 4096)
+        expect(initialized).to_equal(0)
+        val policy = setup_item2_paged_policy()
+        expect(file_write("{root}/policy", db_paged_policy_encode(policy).unwrap())).to_be(true)
+        expect(db_command(root, ["paged-init", "policy", policy.revision]).starts_with("OK paged head=")).to_be(true)
+        val before = db_paged_open(root, policy).unwrap()
+        val patch = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], before.manifest.revision, 1)
+        val quota = DbQuarantineQuota(max_bundle_bytes: 16777216, max_patch_bytes: 1048576, max_patches: 256)
+        expect(file_write("{root}/bundle", db_quarantine_bundle_encode([patch], quota).unwrap())).to_be(true)
+        val imported = db_command(root, ["quarantine-import", external, "bundle"])
+        expect(imported.starts_with("OK quarantined-unverified digest=")).to_be(true)
+        val digest = imported.split(" ")[2].replace("digest=", "")
+        expect(db_store_read(root, "paged").head).to_equal(before.head)
+        expect(db_command(root, ["paged-quarantine-apply", "policy", policy.revision, external, digest, "unknown", before.head])).to_equal("ERROR SCVDB_QUARANTINE_PATCH_MISSING")
+        expect(db_store_read(root, "paged").head).to_equal(before.head)
+        expect(db_command(root, ["paged-quarantine-apply", "policy", policy.revision, external, digest, patch.batch_id, before.head]).starts_with("OK paged head=")).to_be(true)
+        val row = db_paged_current_row(root, policy, setup_item2_paged_ref(1)).unwrap().unwrap()
+        expect(db_field_value(row.fields, "code")).to_equal(DbValue.Text("A"))
+        expect(db_store_read(root, "semantic").code).to_equal("empty")
+
+    it "initializes a pinned paged store and publishes a signed transaction through the CLI":
+        val root = setup_item2_paged_root()
+        val policy = setup_item2_paged_policy()
+        expect(file_write("{root}/policy", db_paged_policy_encode(policy).unwrap())).to_be(true)
+        expect(db_command(root, ["paged-status", "policy", policy.revision])).to_equal("ERROR SCVDB_PAGED_GENESIS_REQUIRED")
+        step("Initialize the explicitly selected storage protocol")
+        val initialized = db_command(root, ["paged-init", "policy", policy.revision])
+        expect(initialized.starts_with("OK paged head=")).to_be(true)
+        val initial = db_paged_open(root, policy).unwrap()
+        expect(initialized).to_equal("OK paged head={initial.head} revision={initial.manifest.revision}")
+        val patch = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], initial.manifest.revision, 1)
+        expect(file_write("{root}/patch", db_patch_encode(patch).unwrap())).to_be(true)
+        step("Apply and independently reopen the actual indexed row")
+        val applied = db_command(root, ["paged-apply", "policy", policy.revision, "patch", initial.head])
+        expect(applied.starts_with("OK paged head=")).to_be(true)
+        val current = db_paged_open(root, policy).unwrap()
+        expect(current.head == initial.head).to_be(false)
+        val row = db_paged_current_row(root, policy, setup_item2_paged_ref(1)).unwrap().unwrap()
+        expect(db_field_value(row.fields, "code")).to_equal(DbValue.Text("A"))
+        expect(db_command(root, ["paged-status", "policy", policy.revision])).to_equal("OK paged head={current.head} revision={current.manifest.revision}")
+        expect(db_command(root, ["paged-apply", "policy", policy.revision, "patch", current.head]).contains("replay=true")).to_be(true)
+        expect(db_store_read(root, "paged").head).to_equal(current.head)
+
+    it "rejects wrong independent pins and forged signatures without moving paged HEAD":
+        val root = setup_item2_paged_root()
+        val policy = setup_item2_paged_policy()
+        expect(file_write("{root}/policy", db_paged_policy_encode(policy).unwrap())).to_be(true)
+        expect(db_command(root, ["paged-init", "policy", "wrong-pin"])).to_equal("ERROR SCVDB_PAGED_POLICY_PIN")
+        expect(db_store_read(root, "paged").code).to_equal("empty")
+        expect(db_command(root, ["paged-init", "policy", policy.revision]).starts_with("OK paged head=")).to_be(true)
+        val before = db_paged_open(root, policy).unwrap()
+        var patch = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], before.manifest.revision, 1)
+        patch.signature = [0u8;64]
+        expect(file_write("{root}/patch", db_patch_encode(patch).unwrap())).to_be(true)
+        expect(db_command(root, ["paged-apply", "policy", policy.revision, "patch", before.head])).to_equal("ERROR SCVDB_SIGNATURE_INVALID")
+        expect(db_store_read(root, "paged").head).to_equal(before.head)
+        expect(db_paged_current_row(root, policy, setup_item2_paged_ref(1)).unwrap()).to_equal(nil)
+
+    it "requires explicit migration instead of creating a second authoritative backend":
+        val root = setup_item2_paged_root()
+        val policy = setup_item2_paged_policy()
+        expect(file_write("{root}/policy", db_paged_policy_encode(policy).unwrap())).to_be(true)
+        val old = db_apply_local(root, "", setup_item2_apply_patch(1, ""), setup_item2_apply_merge(), setup_item2_apply_policy(), 10).unwrap()
+        expect(db_command(root, ["paged-init", "policy", policy.revision])).to_equal("ERROR SCVDB_PAGED_MIGRATION_REQUIRED")
+        expect(db_store_read(root, "semantic").head).to_equal(old.head)
+        expect(db_store_read(root, "paged").code).to_equal("empty")
+        val other = setup_item2_paged_root()
+        expect(file_write("{other}/policy", db_paged_policy_encode(policy).unwrap())).to_be(true)
+        expect(db_command(other, ["paged-init", "policy", policy.revision]).starts_with("OK paged head=")).to_be(true)
+        val before = db_store_read(other, "paged")
+        expect(db_apply_local(other, "", setup_item2_apply_patch(1, ""), setup_item2_apply_merge(), setup_item2_apply_policy(), 10)).to_equal(Err("SCVDB_PAGED_MIGRATION_REQUIRED"))
+        expect(db_store_read(other, "semantic").code).to_equal("empty")
+        expect(db_store_read(other, "paged").head).to_equal(before.head)

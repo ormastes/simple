@@ -1,0 +1,129 @@
+# Versioned transport projection, distinct from the signed canonical patch bytes.
+# Decoding checks content identity; signature authorization remains admission's job.
+use std.scv.db_patch.*
+use std.scv.db_patch_normalize.{db_normalize_operations}
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.*
+use std.scv.distributed_identity.{EntityRef}
+
+fn _patch_texts(values: [text]) -> Result<[u8], text>:
+    if values.len() > 10000: return Err("SCVDB_PATCH_WIRE_QUOTA")
+    var encoded: [[u8]] = []
+    for value in values: encoded.push(db_canonical_text(value)?)
+    Ok(db_canonical_list(encoded))
+
+fn _patch_read_texts(frame: DbDecodedFrame) -> Result<[text], text>:
+    if frame.tag != 6u8: return Err("SCVDB_PATCH_WIRE_TAG")
+    val children = db_read_children(frame.payload)?
+    if children.len() > 10000: return Err("SCVDB_PATCH_WIRE_QUOTA")
+    var values: [text] = []
+    for child in children: values.push(db_read_text(child)?)
+    Ok(values)
+
+fn _patch_condition(condition: RowPrecondition) -> Result<[u8], text>:
+    Ok(db_frame(20u8, db_canonical_text(condition.base_row)? + db_canonical_text(condition.expected_revision)? + db_snapshot_fields_encode(condition.expected_fields)?))
+
+fn _patch_read_condition(frame: DbDecodedFrame) -> Result<RowPrecondition, text>:
+    if frame.tag != 20u8: return Err("SCVDB_PATCH_WIRE_TAG")
+    val fields = db_read_children(frame.payload)?
+    if fields.len() != 3: return Err("SCVDB_PATCH_WIRE_ARITY")
+    Ok(RowPrecondition(base_row: db_read_text(fields[0])?, expected_revision: db_read_text(fields[1])?, expected_fields: db_snapshot_fields_decode(fields[2])?))
+
+fn _patch_operation(operation: DbOperation) -> Result<[u8], text>:
+    val ref = db_snapshot_value_encode(DbValue.Reference(db_operation_ref(operation)), 0)?
+    match operation:
+        Create(_, kind, fields): Ok(db_frame(21u8, ref + db_canonical_text(kind)? + db_snapshot_fields_encode(fields)?))
+        AppendObservation(_, kind, fields): Ok(db_frame(29u8, ref + db_canonical_text(kind)? + db_snapshot_fields_encode(fields)?))
+        Tombstone(_, condition): Ok(db_frame(23u8, ref + _patch_condition(condition)?))
+        UpdateFields(_, edits, condition):
+            if edits.len() > 10000: return Err("SCVDB_PATCH_WIRE_QUOTA")
+            var encoded: [[u8]] = []
+            for edit in edits:
+                encoded.push(db_frame(24u8, db_canonical_text(edit.field)? + db_snapshot_value_encode(edit.before, 0)? + db_snapshot_value_encode(edit.after, 0)?))
+            Ok(db_frame(22u8, ref + db_canonical_list(encoded) + _patch_condition(condition)?))
+        AddSetMember(_, field, member, dot): Ok(db_frame(27u8, ref + db_canonical_text(field)? + db_snapshot_value_encode(member, 0)? + db_canonical_text(dot)?))
+        RemoveObservedSetMember(_, field, observed): Ok(db_frame(28u8, ref + db_canonical_text(field)? + _patch_texts(observed)?))
+        AddSetMemberAfterRemoval(_, field, member, dot, observed): Ok(db_frame(37u8, ref + db_canonical_text(field)? + db_snapshot_value_encode(member, 0)? + db_canonical_text(dot)? + _patch_texts(observed)?))
+        RemoveSetMember(_, field, member, dot, observed): Ok(db_frame(38u8, ref + db_canonical_text(field)? + db_snapshot_value_encode(member, 0)? + db_canonical_text(dot)? + _patch_texts(observed)?))
+
+fn _patch_read_ref(frame: DbDecodedFrame) -> Result<EntityRef, text>:
+    match db_snapshot_value_decode(frame, 0)?:
+        Reference(ref): Ok(ref)
+        _: Err("SCVDB_PATCH_WIRE_REFERENCE")
+
+fn _patch_read_operation(frame: DbDecodedFrame) -> Result<DbOperation, text>:
+    val fields = db_read_children(frame.payload)?
+    var arity = 0
+    if frame.tag == 21u8 or frame.tag == 22u8 or frame.tag == 28u8 or frame.tag == 29u8: arity = 3
+    elif frame.tag == 23u8: arity = 2
+    elif frame.tag == 27u8: arity = 4
+    elif frame.tag == 37u8 or frame.tag == 38u8: arity = 5
+    else: return Err("SCVDB_PATCH_WIRE_TAG")
+    if fields.len() != arity: return Err("SCVDB_PATCH_WIRE_ARITY")
+    val ref = _patch_read_ref(fields[0])?
+    if frame.tag == 21u8: return Ok(DbOperation.Create(ref, db_read_text(fields[1])?, db_snapshot_fields_decode(fields[2])?))
+    if frame.tag == 29u8: return Ok(DbOperation.AppendObservation(ref, db_read_text(fields[1])?, db_snapshot_fields_decode(fields[2])?))
+    if frame.tag == 23u8: return Ok(DbOperation.Tombstone(ref, _patch_read_condition(fields[1])?))
+    if frame.tag == 22u8:
+        if fields[1].tag != 6u8: return Err("SCVDB_PATCH_WIRE_TAG")
+        val children = db_read_children(fields[1].payload)?
+        if children.len() > 10000: return Err("SCVDB_PATCH_WIRE_QUOTA")
+        var edits: [FieldEdit] = []
+        for child in children:
+            if child.tag != 24u8: return Err("SCVDB_PATCH_WIRE_TAG")
+            val parts = db_read_children(child.payload)?
+            if parts.len() != 3: return Err("SCVDB_PATCH_WIRE_ARITY")
+            edits.push(FieldEdit(field: db_read_text(parts[0])?, before: db_snapshot_value_decode(parts[1], 0)?, after: db_snapshot_value_decode(parts[2], 0)?))
+        return Ok(DbOperation.UpdateFields(ref, edits, _patch_read_condition(fields[2])?))
+    if frame.tag == 28u8: return Ok(DbOperation.RemoveObservedSetMember(ref, db_read_text(fields[1])?, _patch_read_texts(fields[2])?))
+    val field = db_read_text(fields[1])?
+    val member = db_snapshot_value_decode(fields[2], 0)?
+    val dot = db_read_text(fields[3])?
+    if frame.tag == 27u8: return Ok(DbOperation.AddSetMember(ref, field, member, dot))
+    val observed = _patch_read_texts(fields[4])?
+    if frame.tag == 37u8: return Ok(DbOperation.AddSetMemberAfterRemoval(ref, field, member, dot, observed))
+    Ok(DbOperation.RemoveSetMember(ref, field, member, dot, observed))
+
+fn db_patch_encode(patch: DbPatch) -> Result<text, text>:
+    """Preserve all signed metadata while normalizing equivalent semantic text."""
+    if patch.operations.len() > 10000 or patch.signature.len() > 4096: return Err("SCVDB_PATCH_WIRE_QUOTA")
+    val original_digest = db_patch_validate(patch)?
+    var normalized = patch
+    normalized.operations = db_normalize_operations(patch.operations)?
+    if db_patch_validate(normalized)? != original_digest: return Err("SCVDB_PATCH_WIRE_IDENTITY")
+    var operations: [[u8]] = []
+    for operation in normalized.operations: operations.push(_patch_operation(operation)?)
+    var payload = db_canonical_text(patch.batch_id)? + db_canonical_text(patch.repository)? + db_canonical_text(patch.namespace)?
+    payload = payload + db_frame(2u8, db_u64_bytes(patch.epoch)) + db_canonical_text(patch.actor)? + db_frame(2u8, db_u64_bytes(patch.actor_counter))
+    payload = payload + db_canonical_text(patch.base_revision)? + _patch_texts(patch.causal_dependencies)? + db_canonical_text(patch.schema_revision)? + db_canonical_text(patch.reducer_revision)?
+    payload = payload + db_canonical_list(operations) + db_canonical_text(patch.payload_digest)? + db_canonical_text(patch.digest_algorithm)? + db_frame(2u8, db_u64_bytes(patch.digest_version))
+    payload = payload + db_canonical_text(patch.signer)? + db_canonical_text(patch.signature_algorithm)? + db_frame(2u8, db_u64_bytes(patch.signature_version)) + db_frame(4u8, patch.signature) + db_canonical_text(patch.provenance)?
+    val bytes = db_domain_bytes("patch-wire", db_frame(97u8, payload))?
+    if bytes.len() > 16777216: return Err("SCVDB_PATCH_WIRE_QUOTA")
+    Ok("SCVDB-PATCH-v1\n" + db_snapshot_hex(bytes) + "\n")
+
+fn db_patch_decode(encoded: text) -> Result<DbPatch, text>:
+    """Reject noncanonical projections and changed semantic digests, without granting authority."""
+    val prefix = "SCVDB-PATCH-v1\n"
+    if encoded.len() > 33554464: return Err("SCVDB_PATCH_WIRE_QUOTA")
+    if encoded.len() <= prefix.len() or not encoded.starts_with(prefix) or not encoded.ends_with("\n"): return Err("SCVDB_PATCH_WIRE_VERSION")
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1])?
+    val domain = db_domain_bytes("patch-wire", [])?
+    if bytes.len() <= domain.len(): return Err("SCVDB_PATCH_WIRE_ENCODING")
+    for index in 0..domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_PATCH_WIRE_DOMAIN")
+    val root = db_read_frame(bytes, domain.len())?
+    if root.tag != 97u8 or root.next_offset != bytes.len(): return Err("SCVDB_PATCH_WIRE_ENCODING")
+    val fields = db_read_children(root.payload)?
+    if fields.len() != 19 or fields[10].tag != 6u8 or fields[17].tag != 4u8: return Err("SCVDB_PATCH_WIRE_ARITY")
+    val children = db_read_children(fields[10].payload)?
+    if children.len() > 10000 or fields[17].payload.len() > 4096: return Err("SCVDB_PATCH_WIRE_QUOTA")
+    var operations: [DbOperation] = []
+    for child in children: operations.push(_patch_read_operation(child)?)
+    val patch = DbPatch(batch_id: db_read_text(fields[0])?, repository: db_read_text(fields[1])?, namespace: db_read_text(fields[2])?, epoch: db_read_unsigned(fields[3])?, actor: db_read_text(fields[4])?, actor_counter: db_read_unsigned(fields[5])?, base_revision: db_read_text(fields[6])?, causal_dependencies: _patch_read_texts(fields[7])?, schema_revision: db_read_text(fields[8])?, reducer_revision: db_read_text(fields[9])?, operations: operations, payload_digest: db_read_text(fields[11])?, digest_algorithm: db_read_text(fields[12])?, digest_version: db_read_unsigned(fields[13])?, signer: db_read_text(fields[14])?, signature_algorithm: db_read_text(fields[15])?, signature_version: db_read_unsigned(fields[16])?, signature: fields[17].payload, provenance: db_read_text(fields[18])?)
+    val digest = db_patch_validate(patch)?
+    if db_patch_encode(patch)? != encoded: return Err("SCVDB_PATCH_WIRE_NONCANONICAL")
+    Ok(patch)
+
+export db_patch_encode, db_patch_decode

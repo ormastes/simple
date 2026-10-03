@@ -1,0 +1,24 @@
+use std.spec.{describe, it, expect}
+use std.scv.db_identity_snapshot.*
+use std.scv.distributed_identity.*
+use std.scv.distributed_identity_map.*
+
+describe "Identity allocator complete snapshot":
+    it "preserves tombstones and high-water across roundtrip before the next allocation":
+        val uid = EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: 1)
+        val first = identity_map_allocate(identity_map_empty(uid.database_namespace, 1), uid)
+        val removed = identity_map_tombstone(first.state, uid).state
+        val reopened = db_identity_snapshot_decode(db_identity_snapshot_encode(removed).unwrap()).unwrap()
+        expect(reopened).to_equal(removed)
+        var next_uid = uid
+        next_uid.counter = 2
+        expect(identity_map_allocate(reopened, next_uid).sequence).to_equal(2u64)
+
+    it "rejects trailing data and malformed identity state instead of reconstructing counters":
+        val empty = identity_map_empty("00112233445566778899aabbccddeeff", 1)
+        val encoded = db_identity_snapshot_encode(empty).unwrap()
+        expect(db_identity_snapshot_decode(encoded).unwrap()).to_equal(empty)
+        expect(db_identity_snapshot_decode(encoded + "00\n").is_err()).to_be(true)
+        var invalid = empty
+        invalid.authority_epoch = 0
+        expect(db_identity_snapshot_encode(invalid).is_err()).to_be(true)

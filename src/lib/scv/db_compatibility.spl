@@ -1,0 +1,56 @@
+# Pure negotiation and real replay evidence. No caller-provided proof flags.
+use std.scv.db_canonical.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+struct DbSupportedVersion:
+    schema_revision: text
+    reducer_revision: text
+    generation: u64
+
+struct DbReplayEvidence:
+    schema_revision: text
+    reducer_revision: text
+    checkpoint_digest: text
+    full_digest: text
+    incremental_digest: text
+    history_batches: u64
+    pending_batches: u64
+    evidence_digest: text
+
+fn db_negotiate_version(requested: DbSupportedVersion, supported: [DbSupportedVersion], minimum_generation: u64) -> Result<DbSupportedVersion, text>:
+    if requested.generation < minimum_generation: return Err("SCVDB_VERSION_DOWNGRADE")
+    var found = false
+    var selected = requested
+    for version in supported:
+        if version.schema_revision == requested.schema_revision and version.reducer_revision == requested.reducer_revision:
+            if found: return Err("SCVDB_VERSION_CATALOG_AMBIGUOUS")
+            if version.generation != requested.generation: return Err("SCVDB_VERSION_GENERATION")
+            if version.schema_revision == "" or version.reducer_revision == "" or version.generation == 0: return Err("SCVDB_VERSION_CATALOG")
+            found = true
+            selected = version
+    if not found: return Err("SCVDB_VERSION_UNSUPPORTED")
+    Ok(selected)
+
+fn db_verify_materialization_replay(checkpoint: MaterializedState, history: [DbPatch], pending: [DbPatch], policy: MergePolicy) -> Result<DbReplayEvidence, text>:
+    """Recompute both paths under the selected implementation before accepting equality.
+
+    This gate is necessary migration evidence, not a data converter, admission
+    receipt, native execution claim, or cross-host compatibility certificate.
+    """
+    val reconstructed = db_preview_materialize(db_empty_state(), history, policy)?
+    val checkpoint_digest = db_state_digest(checkpoint)?
+    if db_state_digest(reconstructed)? != checkpoint_digest or reconstructed.revision != checkpoint.revision:
+        return Err("SCVDB_CHECKPOINT_REPLAY_MISMATCH")
+    val full = db_preview_materialize(db_empty_state(), history + pending, policy)?
+    val incremental = db_preview_materialize(checkpoint, pending, policy)?
+    val full_digest = db_state_digest(full)?
+    val incremental_digest = db_state_digest(incremental)?
+    if full_digest != incremental_digest or full.revision != incremental.revision:
+        return Err("SCVDB_MATERIALIZATION_DIVERGENCE")
+    val payload = db_canonical_text(policy.repository)? + db_canonical_text(policy.namespace)? + db_frame(2u8, db_u64_bytes(policy.epoch)) + db_canonical_text(policy.schema_revision)? + db_canonical_text(policy.reducer_revision)? + db_canonical_text(checkpoint_digest)? + db_canonical_text(full_digest)? + db_canonical_text(incremental_digest)? + db_frame(2u8, db_u64_bytes(history.len() as u64)) + db_frame(2u8, db_u64_bytes(pending.len() as u64))
+    val evidence = sha256_u8_hex(db_domain_bytes("materialization-replay", db_frame(64u8, payload))?)
+    Ok(DbReplayEvidence(schema_revision: policy.schema_revision, reducer_revision: policy.reducer_revision, checkpoint_digest: checkpoint_digest, full_digest: full_digest, incremental_digest: incremental_digest, history_batches: history.len() as u64, pending_batches: pending.len() as u64, evidence_digest: evidence))
+
+export DbSupportedVersion, DbReplayEvidence, db_negotiate_version, db_verify_materialization_replay

@@ -1,0 +1,121 @@
+# Captured-response schema and real signature tests; no live API calls. Passing
+# these never qualifies deployment, App credentials, or an exclusive worker.
+use std.spec.*
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.json.types.*
+use std.common.json.serializer.{json_stringify}
+use std.common.json.parser.{json_parse_strict_with_error, json_parse_with_error, json_parse_tokens, json_tokenize}
+use app.scv.db.receipt_protection.*
+use app.scv.db.receipt_index_git.{db_receipt_index_ref}
+
+fn setup_item2_protection_profile() -> DbReceiptProtectionProfile:
+    var profile = DbReceiptProtectionProfile(owner: "example", repository: "database", repository_id: 42, namespace: "00112233445566778899aabbccddeeff", epoch: 1, app_id: 17, update_ruleset_id: 21, safety_ruleset_id: 22, worker_digest: sha256_text("reviewed worker artifact"), deployment_id: "integrator-one", key_id: "deployment-review", issued_at: 100, expires_at: 200, signature: [])
+    val (seed, public_key) = pure_ed25519_keypair_from_seed([55u8;32])
+    profile.signature = pure_ed25519_sign(seed, public_key, db_receipt_protection_signing_bytes(profile).unwrap())
+    profile
+
+fn setup_item2_protection_repository(identity: i64 = 42) -> text:
+    json_stringify(json_object({"id": json_number(identity as f64), "full_name": json_string("example/database"), "html_url": json_string("https://github.com/example/database")}))
+
+fn setup_item2_protection_rules(profile: DbReceiptProtectionProfile, writer: bool, actors: [any], types: [text], reference: text = "") -> text:
+    var selected = reference
+    if selected == "": selected = db_receipt_index_ref(profile.namespace, profile.epoch).unwrap()
+    var rules: [any] = []
+    for kind in types:
+        if kind == "update": rules.push(json_object({"type": json_string(kind), "parameters": json_object({"update_allows_fetch_and_merge": json_boolean(false)})}))
+        else: rules.push(json_object({"type": json_string(kind)}))
+    val identity = if writer: profile.update_ruleset_id else: profile.safety_ruleset_id
+    json_stringify(json_object({"id": json_number(identity as f64), "target": json_string("branch"), "enforcement": json_string("active"), "source_type": json_string("Repository"), "source": json_string("example/database"), "conditions": json_object({"ref_name": json_object({"include": json_array([json_string(selected)]), "exclude": json_array([])})}), "bypass_actors": json_array(actors), "rules": json_array(rules)}))
+
+fn setup_item2_protection_app(identity: i64 = 17) -> any:
+    json_object({"actor_type": json_string("Integration"), "actor_id": json_number(identity as f64), "bypass_mode": json_string("always")})
+
+describe "versioned signed receipt protection evidence does not issue deployment authority":
+    it "examines distinct exact-branch writer and no-bypass safety rulesets":
+        val profile = setup_item2_protection_profile()
+        val (seed, key) = pure_ed25519_keypair_from_seed([55u8;32])
+        val writer = setup_item2_protection_rules(profile, true, [setup_item2_protection_app()], ["creation", "update"])
+        val safety = setup_item2_protection_rules(profile, false, [], ["deletion", "non_fast_forward", "required_linear_history"])
+        val result = db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), writer, safety).unwrap()
+        expect(result.index_ref).to_equal("refs/heads/scv-receipts/v1/00112233445566778899aabbccddeeff/1")
+        expect(result.repository_id).to_equal(42u64)
+        expect(result.update_ruleset_digest).to_equal(sha256_text(writer))
+        expect(result.safety_ruleset_digest).to_equal(sha256_text(safety))
+
+    it "verifies an independently pinned key and closed expiry boundary before trusting policy fields":
+        val profile = setup_item2_protection_profile()
+        val (seed, key) = pure_ed25519_keypair_from_seed([55u8;32])
+        expect(db_receipt_protection_verify_profile(profile, key, 99)).to_equal(Err("SCVDB_PROTECTION_EXPIRED"))
+        expect(db_receipt_protection_verify_profile(profile, key, 200)).to_equal(Err("SCVDB_PROTECTION_EXPIRED"))
+        expect(db_receipt_protection_verify_profile(profile, [0u8;32], 150)).to_equal(Err("SCVDB_PROTECTION_SIGNATURE"))
+        var forged = profile
+        forged.worker_digest = sha256_text("different worker")
+        expect(db_receipt_protection_verify_profile(forged, key, 150)).to_equal(Err("SCVDB_PROTECTION_SIGNATURE"))
+        forged = profile
+        forged.app_id = 18
+        expect(db_receipt_protection_verify_profile(forged, key, 150)).to_equal(Err("SCVDB_PROTECTION_SIGNATURE"))
+
+    it "rejects safety bypass even for the intended App and rejects multiple writer actors":
+        val profile = setup_item2_protection_profile()
+        val (seed, key) = pure_ed25519_keypair_from_seed([55u8;32])
+        val writer = setup_item2_protection_rules(profile, true, [setup_item2_protection_app()], ["creation", "update"])
+        val bypassed = setup_item2_protection_rules(profile, false, [setup_item2_protection_app()], ["deletion", "non_fast_forward", "required_linear_history"])
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), writer, bypassed)).to_equal(Err("SCVDB_PROTECTION_BYPASS"))
+        val safety = setup_item2_protection_rules(profile, false, [], ["deletion", "non_fast_forward", "required_linear_history"])
+        val multiple = setup_item2_protection_rules(profile, true, [setup_item2_protection_app(), setup_item2_protection_app(18)], ["creation", "update"])
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), multiple, safety)).to_equal(Err("SCVDB_PROTECTION_BYPASS"))
+
+    it "rejects arbitrary-ref or wildcard targeting and missing nonforce protections":
+        val profile = setup_item2_protection_profile()
+        val (seed, key) = pure_ed25519_keypair_from_seed([55u8;32])
+        val writer = setup_item2_protection_rules(profile, true, [setup_item2_protection_app()], ["creation", "update"])
+        val wrong = setup_item2_protection_rules(profile, false, [], ["deletion", "non_fast_forward", "required_linear_history"], "refs/scv/receipts/v1/namespace/1")
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), writer, wrong)).to_equal(Err("SCVDB_PROTECTION_TARGET"))
+        val wildcard = setup_item2_protection_rules(profile, false, [], ["deletion", "non_fast_forward", "required_linear_history"], "refs/heads/*")
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), writer, wildcard)).to_equal(Err("SCVDB_PROTECTION_TARGET"))
+        val incomplete = setup_item2_protection_rules(profile, false, [], ["deletion", "required_linear_history"])
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), writer, incomplete)).to_equal(Err("SCVDB_PROTECTION_RULES"))
+        val safety = setup_item2_protection_rules(profile, false, [], ["deletion", "non_fast_forward", "required_linear_history"])
+        val upstream_exception = writer.replace("false", "true")
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), upstream_exception, safety)).to_equal(Err("SCVDB_PROTECTION_RULES"))
+
+    it "rejects wrong immutable repository identity and malformed or duplicated rules":
+        val profile = setup_item2_protection_profile()
+        val (seed, key) = pure_ed25519_keypair_from_seed([55u8;32])
+        val writer = setup_item2_protection_rules(profile, true, [setup_item2_protection_app()], ["creation", "update"])
+        val safety = setup_item2_protection_rules(profile, false, [], ["deletion", "non_fast_forward", "required_linear_history"])
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(43), writer, safety)).to_equal(Err("SCVDB_PROTECTION_REPOSITORY"))
+        val duplicated = setup_item2_protection_rules(profile, false, [], ["deletion", "non_fast_forward", "non_fast_forward"])
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), writer, duplicated)).to_equal(Err("SCVDB_PROTECTION_RULES"))
+        expect(db_receipt_protection_examine(profile, key, 150, "[]", writer, safety)).to_equal(Err("SCVDB_PROTECTION_SCHEMA"))
+
+    it "rejects contradictory and escaped duplicate protection members before examination":
+        val profile = setup_item2_protection_profile()
+        val (seed, key) = pure_ed25519_keypair_from_seed([55u8;32])
+        val writer = setup_item2_protection_rules(profile, true, [setup_item2_protection_app()], ["creation", "update"])
+        val safety = setup_item2_protection_rules(profile, false, [], ["deletion", "non_fast_forward", "required_linear_history"])
+        # Prefixing the raw member makes the serializer's existing safe value
+        # the last occurrence. A permissive parser would silently accept it.
+        val contradictory = "{" + "\"enforcement\":\"disabled\"," + writer[1:]
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), contradictory, safety)).to_equal(Err("SCVDB_PROTECTION_SCHEMA"))
+        val escaped = "{" + "\"enforc\\u0065ment\":\"disabled\"," + writer[1:]
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), escaped, safety)).to_equal(Err("SCVDB_PROTECTION_SCHEMA"))
+        val exception = writer.replace("false", "true,\"update_allows_fetch_and_merge\":false")
+        expect(exception == writer).to_be(false)
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), exception, safety)).to_equal(Err("SCVDB_PROTECTION_SCHEMA"))
+        val escaped_exception = writer.replace("false", "true,\"update_allows_fetch_and_merg\\u0065\":false")
+        expect(db_receipt_protection_examine(profile, key, 150, setup_item2_protection_repository(), escaped_exception, safety)).to_equal(Err("SCVDB_PROTECTION_SCHEMA"))
+
+    it "keeps permissive callers unchanged and checks nested decoded names in strict parsing":
+        val duplicated = "{\"outer\":[{\"name\":1,\"na\\u006de\":2}]}"
+        val (permissive, permissive_error) = json_parse_with_error(duplicated)
+        expect(permissive_error).to_equal("")
+        val legacy_callback: fn([(text, text)]) -> (bool, any, text, i64) = json_parse_tokens
+        expect(legacy_callback(json_tokenize(duplicated)).0).to_be(true)
+        val (strict, strict_error) = json_parse_strict_with_error(duplicated)
+        expect(strict_error).to_equal("Duplicate object key")
+        val (separate, separate_error) = json_parse_strict_with_error("[{\"name\":1},{\"name\":2}]")
+        expect(separate_error).to_equal("")
+        val (trailing, trailing_error) = json_parse_strict_with_error("{\"name\":1} false")
+        expect(trailing_error).to_equal("Unexpected trailing tokens")

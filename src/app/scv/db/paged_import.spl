@@ -1,0 +1,139 @@
+# Full staged-page invariant validation. Two external passes; never flatten a
+# corpus into MaterializedState. Signed checkpoint ancestry/admission and old
+# to new retention/disposition links remain the checkpoint owner's obligations.
+use app.scv.db.page_store.{db_page_store_import_page}
+use app.scv.db.paged_import_spool.*
+use app.scv.db.paged_query.*
+use app.scv.db.paged_store.{DbPagedView}
+use std.scv.db_paged_import_claims.*
+use std.scv.db_paged_model.*
+use std.scv.db_paged_indexes.{db_paged_history_key}
+use std.scv.db_pages.*
+use std.scv.db_page_records.{db_page_alias_key}
+use std.scv.db_paged_conflicts.*
+use std.scv.db_paged_conflict_history.*
+use std.scv.db_paged_resolve.{db_paged_operation_references}
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+
+fn _import_query(root: text, manifest: DbPagedManifest, policy: DbPagedPolicy) -> DbPagedQuery:
+    # Read-only captured staged root; there is intentionally no active HEAD or
+    # producer admission claim. Entry point already validates its structural pin.
+    DbPagedQuery(root: root, view: DbPagedView(head: "", manifest: manifest), policy: policy, buckets: {}, records: {}, requested: {}, bytes_read: 0u64, keys_read: 0u64)
+
+fn _import_require(captured: DbPagedQuery, keys: [text]) -> Result<DbPagedQuery, text>:
+    # This private reader only receives the manifest validated at entry. Reuse
+    # one bounded cache for the ENTIRE import; no per-conflict directory hash.
+    var query = captured
+    for key in keys:
+        val bucket = db_pages_bucket(key)?
+        if not query.requested.contains_key(key):
+            if query.keys_read >= query.policy.max_read_keys: return Err("SCVDB_IMPORT_READ_QUOTA")
+            query.requested[key] = true
+            query.keys_read = query.keys_read + 1u64
+        if query.buckets.contains_key(bucket): continue
+        if val entry = db_pages_entry(query.view.manifest.pages, key)?:
+            val remaining = query.policy.max_read_bytes - query.bytes_read
+            val page = db_page_store_import_page(query.root, query.view.manifest.pages, entry, remaining)?
+            query.bytes_read = query.bytes_read + (db_page_encode(page, query.view.manifest.pages.quota)?.len() as u64)
+            for record in page.records: query.records[record.key] = record
+        query.buckets[bucket] = true
+    Ok(query)
+
+fn _import_conflict(captured: DbPagedQuery, value: DbPageRecord) -> Result<DbPagedQuery, text>:
+    var query = captured
+    val policy = query.policy
+    val evidence_prefix = "scv-db/conflicts/v1/evidence/"
+    val resolution_prefix = "scv-db/conflicts/v1/resolution/"
+    if value.key.starts_with(evidence_prefix):
+        val evidence = db_paged_conflict_decode(value)?
+        db_paged_history_signature(evidence.original, policy.config.admission)?
+        var keys: [text] = []
+        for entity in db_paged_operation_references(evidence.original.operations)?:
+            if val alias = entity.settled: keys.push(db_page_alias_key(alias)?)
+        query = _import_require(query, keys)?
+        db_paged_history_conflict(evidence, policy.config.admission, \entity: db_paged_resolve_at(query, entity))?
+        return Ok(query)
+    if value.key.starts_with(resolution_prefix):
+        val id = value.key[resolution_prefix.len():]
+        val patch = db_paged_resolution_patch(id, value)?
+        db_paged_history_signature(patch, policy.config.admission)?
+        val key = db_paged_conflict_key(id)?
+        query = _import_require(query, [key])?
+        val record = db_paged_query_record(query, key)?
+        if record == nil: return Err("SCVDB_IMPORT_CONFLICT_EVIDENCE")
+        db_paged_history_resolution(db_paged_conflict_decode(record.unwrap())?, patch, policy.config.admission)?
+        return Ok(query)
+    if value.key.starts_with("scv-db/conflicts/"): return Err("SCVDB_IMPORT_EXTENSION_VERSION")
+    Ok(query)
+
+fn _import_collect(root: text, manifest: DbPagedManifest, policy: DbPagedPolicy, initial: DbImportSpool) -> Result<DbImportSpool, text>:
+    var buckets: {text: bool} = {}
+    for entry in manifest.pages.entries: buckets[entry.bucket] = true
+    var spool = initial
+    var query = _import_query(root, manifest, policy)
+    var source_bytes = 0u64
+    if manifest.parent_revision != "":
+        val claim = DbImportClaim(key: db_paged_history_key(manifest.parent_revision)?, mode: "history", value: "", number: 0u64)
+        if not buckets.contains_key(db_pages_bucket(claim.key)?): return Err("SCVDB_IMPORT_HISTORY")
+        spool = db_import_spool_append(spool, [claim])?
+    elif manifest.pages.entries.len() != 0: return Err("SCVDB_IMPORT_GENESIS")
+    for entry in manifest.pages.entries:
+        if scv_sj_lease_is_held(root): return Err("SCVDB_IMPORT_UNDER_LEASE")
+        val page = db_page_store_import_page(root, manifest.pages, entry, 17179869184u64 - source_bytes)?
+        source_bytes = source_bytes + (db_page_encode(page, manifest.pages.quota)?.len() as u64)
+        for record in page.records:
+            query = _import_conflict(query, record)?
+            val claims = db_import_record_claims(record, policy)?
+            for claim in claims:
+                if not buckets.contains_key(db_pages_bucket(claim.key)?): return Err("SCVDB_IMPORT_MISSING_COUNTERPART")
+            spool = db_import_spool_append(spool, claims)?
+    Ok(spool)
+
+fn _import_reduce(root: text, manifest: DbPagedManifest, spool: DbImportSpool) -> Result<bool, text>:
+    var source_bytes = 0u64
+    for entry in manifest.pages.entries:
+        if scv_sj_lease_is_held(root): return Err("SCVDB_IMPORT_UNDER_LEASE")
+        val page = db_page_store_import_page(root, manifest.pages, entry, 17179869184u64 - source_bytes)?
+        source_bytes = source_bytes + (db_page_encode(page, manifest.pages.quota)?.len() as u64)
+        var records: {text: DbPageRecord} = {}
+        var folds: {text: DbImportFold} = {}
+        for record in page.records:
+            records[record.key] = record
+            folds[record.key] = db_import_empty_fold()
+        if spool.chunks.contains_key(entry.bucket):
+            var ordinal = 1u64
+            while ordinal <= spool.chunks[entry.bucket]:
+                val encoded = db_import_spool_read(spool, entry.bucket, ordinal)?
+                if not encoded.ends_with("\n"): return Err("SCVDB_IMPORT_CHUNK")
+                val lines = encoded.split("\n")
+                for index in 0..lines.len() - 1:
+                    val claim = db_import_claim_decode(lines[index])?
+                    if db_pages_bucket(claim.key)? != entry.bucket or not records.contains_key(claim.key): return Err("SCVDB_IMPORT_MISSING_COUNTERPART")
+                    folds[claim.key] = db_import_fold(records[claim.key], folds[claim.key], claim)?
+                ordinal = ordinal + 1u64
+        for record in page.records: db_import_finish(record, folds[record.key])?
+    Ok(true)
+
+fn _import_validate_owned(root: text, manifest: DbPagedManifest, policy: DbPagedPolicy, spool: DbImportSpool) -> Result<bool, text>:
+    val populated = _import_collect(root, manifest, policy, spool)?
+    _import_reduce(root, manifest, populated)
+
+fn db_paged_validate_import(root: text, manifest: DbPagedManifest, policy: DbPagedPolicy) -> Result<bool, text>:
+    """Read every actual staged page and globally check typed index invariants.
+
+    No CAS, signature admission or historical allocation authority is returned.
+    Each page pass reads at most 16GiB. A whole-import conflict cache additionally
+    reads/retains at most policy.max_read_bytes (at most64MiB), plus one page,
+    one-MiB chunk, page-sized fold and at most8MiB emitted claim batch. Spill is
+    capped at64GiB/1,048,576 files. These are encoded-content bounds, not peakRSS
+    or measured throughput. Any other writer acquiring SJ conservatively aborts
+    this scan; no long-lived lease or proof of owning another writer's lease.
+    """
+    if scv_sj_lease_is_held(root): return Err("SCVDB_IMPORT_UNDER_LEASE")
+    db_paged_manifest_validate(manifest, policy)?
+    val spool = db_import_spool_create(root)?
+    val result = _import_validate_owned(root, manifest, policy, spool)
+    db_import_spool_cleanup(spool)?
+    result
+
+export db_paged_validate_import

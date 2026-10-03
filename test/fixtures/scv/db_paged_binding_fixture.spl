@@ -1,0 +1,161 @@
+use std.scv.db_paged_model.*
+use std.scv.db_policy_codec.{DbPolicyConfig}
+use std.scv.db_schema.{DbEntityConstraint}
+use app.scv.db.paged_store.*
+use app.scv.db.bridge_store.{db_bridge_store_enqueue_paged}
+use app.scv.db.github_bridge_owner.{db_github_bridge_owned_paged}
+use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_policy, setup_item2_paged_repin}
+# Real signed local commits and durable bridge records; injected GET transport.
+# Reviewed-value fixture generation is test-only, never a production trust rule.
+use std.spec.*
+use app.io.mod.{cwd, dir_create}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.json.types.{json_object, json_array, json_number, json_string}
+use std.common.json.serializer.{json_stringify}
+use std.scv.distributed_identity.{EntityRef, EntityUid, ActorIncarnation, entity_ref_provisional, entity_ref_canonical}
+use std.scv.db_admission.*
+use std.scv.db_bridge.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.*
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+use app.scv.db.github_provider.{DbGithubSource, DbGithubProcessReply}
+use app.scv.db.github_issue_bridge.{DbGithubBridgeRequest, DbGithubIssuePolicy, db_github_bridge_payload}
+use app.scv.db.github_binding_owner.*
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
+
+struct Item2PagedBindingFixture:
+    root: text
+    policy: DbPagedPolicy
+    intent_patch: DbPatch
+    request: DbGithubBridgeRequest
+    target: DbGithubBindingTarget
+
+var _paged_binding_test_root = ""
+var _paged_binding_test_marker = ""
+var _paged_binding_test_changed = false
+var _paged_binding_test_calls = 0
+var _paged_binding_race_patch: DbPatch? = nil
+var _paged_binding_race_policy: DbPagedPolicy? = nil
+var _paged_binding_race_head = ""
+
+fn setup_item2_paged_binding_now() -> u64: 10u64
+
+fn setup_item2_paged_binding_field(fields: [DbField], name: text, value: DbValue) -> [DbField]:
+    var result: [DbField] = []
+    for field in fields:
+        if field.name == name: result.push(DbField(name: name, value: value))
+        else: result.push(field)
+    result
+
+fn setup_item2_paged_binding_seed() -> [u8]:
+    var bytes: [u8] = []
+    for index in 0..32: bytes.push(index as u8)
+    bytes
+
+fn setup_item2_paged_binding_ref(kind: text, counter: u64) -> EntityRef:
+    entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: kind, actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter))
+
+fn setup_item2_paged_binding_patch(operations: [DbOperation], base: text, counter: u64, provenance: text, dependencies: [text] = []) -> DbPatch:
+    val (seed, public_key) = pure_ed25519_keypair_from_seed(setup_item2_paged_binding_seed())
+    var patch = DbPatch(batch_id: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1u64, actor: "ffeeddccbbaa99887766554433221100", actor_counter: counter, base_revision: base, causal_dependencies: dependencies, schema_revision: "s1", reducer_revision: "scv-merkle-reducer-v1", operations: operations, payload_digest: "", digest_algorithm: "sha256", digest_version: 1u64, signer: "reviewer", signature_algorithm: "ed25519", signature_version: 1u64, signature: [], provenance: provenance)
+    patch = db_patch_seal(patch).unwrap()
+    patch.signature = pure_ed25519_sign(seed, public_key, db_patch_signing_bytes(patch).unwrap())
+    patch
+
+fn setup_item2_paged_binding_transport(args: [text], timeout: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    expect(scv_sj_lease_is_held(_paged_binding_test_root)).to_equal(false)
+    expect(args[4]).to_equal("GET")
+    _paged_binding_test_calls = _paged_binding_test_calls + 1
+    if args[10] == "repos/owner/repo":
+        return DbGithubProcessReply(stdout: "HTTP/2.0 200 OK\n\n" + json_stringify(json_object({"id": json_number(42)})), stderr: "", exit_code: 0)
+    expect(["repos/owner/repo/issues?state=all&sort=created&direction=asc&per_page=100&page=1", "repos/owner/repo/issues/7"].contains(args[10])).to_equal(true)
+    if val race = _paged_binding_race_patch:
+        _paged_binding_race_patch = nil
+        db_paged_apply(_paged_binding_test_root, _paged_binding_race_head, race, _paged_binding_race_policy.unwrap()).unwrap()
+    val updated = if _paged_binding_test_changed: "2026-10-04T00:00:00Z" else: "2026-10-03T00:00:00Z"
+    val issue = json_object({"number": json_number(7), "title": json_string("reviewed title"), "body": json_string("reviewed body\n\n" + _paged_binding_test_marker), "state": json_string("open"), "updated_at": json_string(updated)})
+    if args[10] == "repos/owner/repo/issues/7":
+        return DbGithubProcessReply(stdout: "HTTP/2.0 200 OK\n\n" + json_stringify(issue), stderr: "", exit_code: 0)
+    DbGithubProcessReply(stdout: "HTTP/2.0 200 OK\n\n" + json_stringify(json_array([issue])), stderr: "", exit_code: 0)
+
+fn setup_item2_paged_binding_fixture(acknowledge: bool, full_context: bool, index_mode: text = "normal") -> Item2PagedBindingFixture:
+    val nonce = random_hex(8).unwrap()
+    val path = cwd() + "/build/test-artifacts/item2-binding-" + nonce
+    expect(dir_create(path, true)).to_equal(true)
+    val root = path_final_existing(path).unwrap().path
+    val source = DbGithubSource(host: "github.com", owner: "owner", repository: "repo", repository_id: "42", created_since: "2026-10-01", tracked_run_ids: [], per_page: 100u64, maximum_pages: 2u64, maximum_requests: 10u64, timeout_ms: 1000, maximum_response_bytes: 16384)
+    var intent = DbBridgeIntent(revision: "", provider: DbProviderBindingIdentity(instance: "github.com", project: "42", external_id: "new:binding"), operation: "create", payload_digest: "", correlation_id: "binding-correlation", causation_id: "reviewed-edit", idempotency_key: "binding-intent")
+    val blank = DbBridgeDelivery(intent: intent, state: "pending", owner: "", generation: 0u64, lease_expires: 0u64, attempts: 0u64, next_attempt: 0u64, must_reconcile: false, provider_revision: "", last_error: "")
+    val policy = DbGithubIssuePolicy(revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", reviewed_by: "reviewer", title_authority: "local", body_authority: "local", state_authority: "local")
+    var request = DbGithubBridgeRequest(source: source, delivery: blank, kind: "create-issue", issue_number: "", title: "reviewed title", body: "reviewed body", state: "open", base_title: "", base_body: "", base_state: "", policy: policy)
+    intent.payload_digest = db_github_bridge_payload(request, request.title, request.body, request.state).unwrap()
+    intent.revision = db_bridge_intent_digest(intent).unwrap()
+    request.delivery = db_bridge_pending(intent).unwrap()
+    val local = setup_item2_paged_binding_ref("bug", 1u64)
+    val authority = setup_item2_paged_binding_ref("bridge_policy", 2u64)
+    var intent_fields = [DbField(name: "intent_revision", value: DbValue.Text(intent.revision))]
+    if full_context:
+        intent_fields = intent_fields + [DbField(name: "local_entity", value: DbValue.Reference(local)), DbField(name: "authority_policy", value: DbValue.Reference(authority)), DbField(name: "capability_digest", value: DbValue.Text(policy.revision))]
+    val operations = [DbOperation.Create(local, "bug", [DbField(name: "title", value: DbValue.Text("reviewed title"))]), DbOperation.Create(authority, "bridge_policy", [DbField(name: "revision", value: DbValue.Text(policy.revision))]), DbOperation.Create(setup_item2_paged_binding_ref("bridge_intent", 3u64), "bridge_intent", intent_fields)]
+    var patch = setup_item2_paged_binding_patch(operations, "", 1u64, "reviewed binding fixture intent")
+    val (_seed, public_key) = pure_ed25519_keypair_from_seed(setup_item2_paged_binding_seed())
+    var permissions: [DbPermission] = []
+    for kind in ["bug", "bridge_policy", "bridge_intent", "provider_binding", "provider_common_state"]:
+        permissions.push(DbPermission(operation: "create", kind: kind, field: "*"))
+    permissions.push(DbPermission(operation: "update", kind: "provider_binding", field: "*"))
+    permissions.push(DbPermission(operation: "update", kind: "bridge_policy", field: "*"))
+    permissions.push(DbPermission(operation: "update", kind: "bridge_intent", field: "*"))
+    permissions.push(DbPermission(operation: "tombstone", kind: "bridge_intent", field: ""))
+    val key = DbSignerKey(key_id: "reviewer", public_key: public_key, role: "reviewer", valid_from: 0u64, valid_until: 18446744073709551615u64, revoked: false, permissions: permissions)
+    var admission = DbAdmissionPolicy(revision: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1u64, schema_revision: "s1", reducer_revision: "scv-merkle-reducer-v1", keys: [key], metadata: setup_item2_reviewed_metadata([patch]))
+    admission.revision = db_admission_policy_digest(admission).unwrap()
+    var fields: [DbFieldSchema] = [DbFieldSchema(kind: "bug", field: "title", rule: FieldMergeRule.ScalarConflict), DbFieldSchema(kind: "bridge_policy", field: "revision", rule: FieldMergeRule.ScalarConflict)]
+    for name in ["intent_revision", "local_entity", "authority_policy", "capability_digest"]: fields.push(DbFieldSchema(kind: "bridge_intent", field: name, rule: FieldMergeRule.ScalarConflict))
+    for name in ["title", "body", "state", "payload_digest", "provider_revision", "correlation_id", "causation_id", "intent_revision"]: fields.push(DbFieldSchema(kind: "provider_common_state", field: name, rule: FieldMergeRule.ScalarConflict))
+    for name in ["local_entity", "provider_instance", "project", "remote_kind", "remote_id", "remote_revision", "last_common_state", "common_revision", "capability_digest", "authority_policy", "correlation_id", "causation_id", "intent_revision"]: fields.push(DbFieldSchema(kind: "provider_binding", field: name, rule: FieldMergeRule.ScalarConflict))
+    var merge = MergePolicy(repository: "repo", namespace: admission.namespace, epoch: 1u64, schema_revision: "s1", reducer_revision: "scv-merkle-reducer-v1", fields: fields, constraints: [DbEntityConstraint(kind: "bridge_intent", key_fields: [], unique_fields: ["intent_revision"], references: []), DbEntityConstraint(kind: "provider_binding", key_fields: ["provider_instance", "project", "remote_kind", "remote_id"], unique_fields: [], references: [])])
+    if index_mode == "missing": merge.constraints = []
+    if index_mode == "wrong-order":
+        merge.constraints = [DbEntityConstraint(kind: "bridge_intent", key_fields: [], unique_fields: ["intent_revision"], references: []), DbEntityConstraint(kind: "provider_binding", key_fields: ["project", "provider_instance", "remote_kind", "remote_id"], unique_fields: [], references: [])]
+    var paged = setup_item2_paged_policy()
+    paged.config = DbPolicyConfig(revision: "", admission: admission, merge: merge)
+    paged = setup_item2_paged_repin(paged)
+    val genesis = db_paged_initialize(root, paged).unwrap()
+    patch = setup_item2_paged_binding_patch(operations, genesis.manifest.revision, 1u64, "reviewed binding fixture intent")
+    db_paged_apply(root, genesis.head, patch, paged).unwrap()
+    _paged_binding_test_root = root
+    _paged_binding_test_marker = "<!-- scv-bridge:v1:{intent.revision} -->"
+    _paged_binding_test_changed = false
+    _paged_binding_test_calls = 0
+    _paged_binding_race_patch = nil
+    if index_mode != "missing": db_bridge_store_enqueue_paged(root, paged, intent).unwrap()
+    if acknowledge and index_mode != "missing":
+        expect(db_github_bridge_owned_paged(root, paged, request, "worker", 100u64, setup_item2_paged_binding_now, setup_item2_paged_binding_transport).unwrap().code).to_equal("acknowledged")
+    Item2PagedBindingFixture(root: root, policy: paged, intent_patch: patch, request: request, target: DbGithubBindingTarget(binding: setup_item2_paged_binding_ref("provider_binding", 4u64), common_state: setup_item2_paged_binding_ref("provider_common_state", 5u64)))
+
+fn setup_item2_paged_binding_review(fixture: Item2PagedBindingFixture, patches: [DbPatch]) -> DbPagedPolicy:
+    var policy = fixture.policy
+    var config = policy.config
+    var admission = config.admission
+    admission.metadata = setup_item2_reviewed_metadata([fixture.intent_patch] + patches)
+    config.admission = admission
+    policy.config = config
+    setup_item2_paged_repin(policy)
+
+fn setup_item2_paged_binding_changed(value: bool):
+    _paged_binding_test_changed = value
+
+fn check_item2_paged_binding_calls() -> i64:
+    _paged_binding_test_calls
+
+export Item2PagedBindingFixture, setup_item2_paged_binding_fixture, setup_item2_paged_binding_review
+export setup_item2_paged_binding_patch, setup_item2_paged_binding_ref, setup_item2_paged_binding_transport
+export setup_item2_paged_binding_changed, check_item2_paged_binding_calls
+fn setup_item2_paged_binding_race(head: text, patch: DbPatch, policy: DbPagedPolicy):
+    _paged_binding_race_head = head
+    _paged_binding_race_patch = Some(patch)
+    _paged_binding_race_policy = Some(policy)
+
+export setup_item2_paged_binding_race

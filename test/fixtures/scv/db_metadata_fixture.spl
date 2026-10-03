@@ -1,0 +1,84 @@
+# TEST FIXTURE ONLY. The caller supplies already-known fixture patches; this
+# builder is not authorization and must never be imported by production code.
+# Confidentiality negative tests mutate a patch AFTER creating this policy.
+use std.scv.db_confidentiality.{DbMetadataPolicy, DbMetadataRule, db_metadata_policy_digest, db_metadata_value_digest}
+use std.scv.db_patch.*
+use std.scv.distributed_identity.{EntityRef, entity_ref_canonical}
+
+fn setup_item2_metadata_rule(rules: [DbMetadataRule], kind: text, field: text, value: DbValue) -> [DbMetadataRule]:
+    val digest = db_metadata_value_digest(value).unwrap()
+    var result: [DbMetadataRule] = []
+    var found = false
+    for rule in rules:
+        if rule.kind == kind and rule.field == field:
+            var values = rule.allowed_value_digests
+            if not values.contains(digest): values.push(digest)
+            result.push(DbMetadataRule(kind: kind, field: field, classification: "public", allowed_value_digests: values))
+            found = true
+        else: result.push(rule)
+    if not found: result.push(DbMetadataRule(kind: kind, field: field, classification: "public", allowed_value_digests: [digest]))
+    result
+
+fn setup_item2_metadata_fields(rules: [DbMetadataRule], kind: text, fields: [DbField]) -> [DbMetadataRule]:
+    var result = rules
+    for field in fields: result = setup_item2_metadata_rule(result, kind, field.name, field.value)
+    result
+
+fn setup_item2_metadata_kind(entity: EntityRef) -> text:
+    if val uid = entity.provisional: return uid.entity_kind
+    if val alias = entity.settled: return alias.entity_kind
+    ""
+
+fn setup_item2_metadata_condition(rules: [DbMetadataRule], kind: text, condition: RowPrecondition) -> [DbMetadataRule]:
+    var result = setup_item2_metadata_rule(rules, "$envelope", "base_row", DbValue.Text(condition.base_row))
+    result = setup_item2_metadata_rule(result, "$envelope", "expected_revision", DbValue.Text(condition.expected_revision))
+    setup_item2_metadata_fields(result, kind, condition.expected_fields)
+
+fn setup_item2_metadata_entity(operation: DbOperation) -> EntityRef:
+    match operation:
+        Create(entity, kind, fields): entity
+        AppendObservation(entity, kind, fields): entity
+        UpdateFields(entity, edits, condition): entity
+        Tombstone(entity, condition): entity
+        AddSetMember(entity, field, member, dot): entity
+        RemoveObservedSetMember(entity, field, observed): entity
+        AddSetMemberAfterRemoval(entity, field, member, dot, observed): entity
+        RemoveSetMember(entity, field, member, dot, observed): entity
+
+fn setup_item2_reviewed_metadata(patches: [DbPatch]) -> DbMetadataPolicy:
+    var rules: [DbMetadataRule] = []
+    for patch in patches:
+        val envelope = [DbField(name: "repository", value: DbValue.Text(patch.repository)), DbField(name: "namespace", value: DbValue.Text(patch.namespace)), DbField(name: "actor", value: DbValue.Text(patch.actor)), DbField(name: "base_revision", value: DbValue.Text(patch.base_revision)), DbField(name: "schema_revision", value: DbValue.Text(patch.schema_revision)), DbField(name: "reducer_revision", value: DbValue.Text(patch.reducer_revision)), DbField(name: "signer", value: DbValue.Text(patch.signer)), DbField(name: "provenance", value: DbValue.Text(patch.provenance))]
+        rules = setup_item2_metadata_fields(rules, "$envelope", envelope)
+        for dependency in patch.causal_dependencies: rules = setup_item2_metadata_rule(rules, "$envelope", "causal_dependency", DbValue.Text(dependency))
+        for operation in patch.operations:
+            rules = setup_item2_metadata_rule(rules, "$envelope", "entity_reference", DbValue.Text(entity_ref_canonical(setup_item2_metadata_entity(operation))))
+            match operation:
+                Create(entity, kind, fields): rules = setup_item2_metadata_fields(rules, kind, fields)
+                AppendObservation(entity, kind, fields): rules = setup_item2_metadata_fields(rules, kind, fields)
+                UpdateFields(entity, edits, condition):
+                    val kind = setup_item2_metadata_kind(entity)
+                    for edit in edits:
+                        rules = setup_item2_metadata_rule(rules, kind, edit.field, edit.before)
+                        rules = setup_item2_metadata_rule(rules, kind, edit.field, edit.after)
+                    rules = setup_item2_metadata_condition(rules, kind, condition)
+                Tombstone(entity, condition): rules = setup_item2_metadata_condition(rules, setup_item2_metadata_kind(entity), condition)
+                AddSetMember(entity, field, member, dot):
+                    rules = setup_item2_metadata_rule(rules, setup_item2_metadata_kind(entity), field, member)
+                    rules = setup_item2_metadata_rule(rules, "$envelope", "set_dot", DbValue.Text(dot))
+                RemoveObservedSetMember(entity, field, observed):
+                    rules = setup_item2_metadata_rule(rules, setup_item2_metadata_kind(entity), field, DbValue.Absent)
+                    for dot in observed: rules = setup_item2_metadata_rule(rules, "$envelope", "observed_dot", DbValue.Text(dot))
+                AddSetMemberAfterRemoval(entity, field, member, dot, observed):
+                    rules = setup_item2_metadata_rule(rules, setup_item2_metadata_kind(entity), field, member)
+                    rules = setup_item2_metadata_rule(rules, "$envelope", "set_dot", DbValue.Text(dot))
+                    for prior in observed: rules = setup_item2_metadata_rule(rules, "$envelope", "observed_dot", DbValue.Text(prior))
+                RemoveSetMember(entity, field, member, dot, observed):
+                    rules = setup_item2_metadata_rule(rules, setup_item2_metadata_kind(entity), field, member)
+                    rules = setup_item2_metadata_rule(rules, "$envelope", "set_dot", DbValue.Text(dot))
+                    for prior in observed: rules = setup_item2_metadata_rule(rules, "$envelope", "observed_dot", DbValue.Text(prior))
+    var policy = DbMetadataPolicy(revision: "", rules: rules)
+    policy.revision = db_metadata_policy_digest(policy).unwrap()
+    policy
+
+export setup_item2_reviewed_metadata

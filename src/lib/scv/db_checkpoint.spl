@@ -1,0 +1,121 @@
+# Signed same-epoch checkpoint envelope. An authenticated manifest is not page
+# availability: the effect owner must verify every immutable object before CAS.
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex, db_snapshot_decode}
+use std.scv.db_identity_snapshot.{db_identity_snapshot_decode}
+use std.scv.db_conflict_catalog.{db_conflict_catalog_decode}
+use std.scv.db_pages.*
+use std.scv.db_paged_model.*
+use std.scv.db_policy_codec.*
+use std.scv.db_checkpoint_history.{db_checkpoint_hex}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.crypto.ed25519.{pure_ed25519_verify}
+
+enum DbCheckpointStorage:
+    Reference(snapshot: text, identities: text, conflicts: text)
+    Paged(manifest: DbPagedManifest)
+
+struct DbDatabaseCheckpoint:
+    revision: text
+    repository: text
+    namespace: text
+    epoch: u64
+    schema_revision: text
+    reducer_revision: text
+    policy_revision: text
+    predecessor_checkpoint: text
+    history_horizon: text
+    current_revision: text
+    metadata: DbPageManifest
+    storage: DbCheckpointStorage
+    signer: text
+    signature: [u8]
+
+struct DbCheckpointAuthority:
+    expected_checkpoint: text
+    key_id: text
+    public_key: [u8]
+    policy: DbPolicyConfig
+    paged_policy: DbPagedPolicy?
+
+fn db_checkpoint_signing_bytes(checkpoint: DbDatabaseCheckpoint) -> Result<[u8], text>:
+    if checkpoint.repository == "" or checkpoint.namespace.len() != 32 or checkpoint.epoch == 0 or checkpoint.signer == "": return Err("SCVDB_CHECKPOINT_CONTEXT")
+    for value in [checkpoint.schema_revision, checkpoint.reducer_revision, checkpoint.signer]:
+        if value == "" or value.len() > 4096: return Err("SCVDB_CHECKPOINT_CONTEXT")
+    for value in [checkpoint.policy_revision, checkpoint.history_horizon, checkpoint.current_revision]:
+        if not db_checkpoint_hex(value): return Err("SCVDB_CHECKPOINT_DIGEST")
+    if checkpoint.predecessor_checkpoint != "" and not db_checkpoint_hex(checkpoint.predecessor_checkpoint): return Err("SCVDB_CHECKPOINT_DIGEST")
+    val context = db_canonical_text(checkpoint.repository)? + db_canonical_text(checkpoint.namespace)? + db_frame(2u8, db_u64_bytes(checkpoint.epoch)) + db_canonical_text(checkpoint.schema_revision)? + db_canonical_text(checkpoint.reducer_revision)?
+    var storage: [u8] = []
+    match checkpoint.storage:
+        Reference(snapshot, identities, conflicts):
+            if snapshot.len() + identities.len() + conflicts.len() > 16777216: return Err("SCVDB_CHECKPOINT_REFERENCE_QUOTA")
+            val state = db_snapshot_decode(snapshot)?
+            val identity = db_identity_snapshot_decode(identities)?
+            val catalog = db_conflict_catalog_decode(conflicts)?
+            if state.revision != checkpoint.current_revision or identity.database_namespace != checkpoint.namespace or identity.authority_epoch != checkpoint.epoch: return Err("SCVDB_CHECKPOINT_CONTEXT")
+            storage = db_frame(182u8, db_canonical_text(snapshot)? + db_canonical_text(identities)? + db_canonical_text(conflicts)?)
+        Paged(manifest):
+            if manifest.context.repository != checkpoint.repository or manifest.context.namespace != checkpoint.namespace or manifest.context.epoch != checkpoint.epoch or manifest.context.schema_revision != checkpoint.schema_revision or manifest.context.reducer_revision != checkpoint.reducer_revision or manifest.revision != checkpoint.current_revision: return Err("SCVDB_CHECKPOINT_CONTEXT")
+            storage = db_frame(183u8, db_canonical_text(db_paged_manifest_encode(manifest)?)?)
+    val metadata = db_frame(4u8, db_pages_manifest_encode(checkpoint.metadata)?)
+    val body = context + db_canonical_text(checkpoint.policy_revision)? + db_canonical_text(checkpoint.predecessor_checkpoint)? + db_canonical_text(checkpoint.history_horizon)? + db_canonical_text(checkpoint.current_revision)? + metadata + storage + db_canonical_text(checkpoint.signer)?
+    val bytes = db_domain_bytes("database-checkpoint-v1", db_frame(184u8, body))?
+    if bytes.len() > 16777136: return Err("SCVDB_CHECKPOINT_BYTES_QUOTA")
+    Ok(bytes)
+
+fn db_checkpoint_digest(checkpoint: DbDatabaseCheckpoint) -> Result<text, text>:
+    Ok(sha256_u8_hex(db_checkpoint_signing_bytes(checkpoint)?))
+
+fn db_checkpoint_authenticate(checkpoint: DbDatabaseCheckpoint, authority: DbCheckpointAuthority) -> Result<bool, text>:
+    val policy = authority.policy
+    if db_policy_digest(policy)? != policy.revision or policy.revision != checkpoint.policy_revision: return Err("SCVDB_CHECKPOINT_POLICY")
+    val admission = policy.admission
+    if checkpoint.repository != admission.repository or checkpoint.namespace != admission.namespace or checkpoint.epoch != admission.epoch or checkpoint.schema_revision != admission.schema_revision or checkpoint.reducer_revision != admission.reducer_revision: return Err("SCVDB_CHECKPOINT_CONTEXT")
+    if not db_checkpoint_hex(authority.expected_checkpoint) or checkpoint.revision != authority.expected_checkpoint or db_checkpoint_digest(checkpoint)? != authority.expected_checkpoint: return Err("SCVDB_CHECKPOINT_PIN")
+    if authority.key_id != checkpoint.signer or authority.public_key.len() != 32 or checkpoint.signature.len() != 64 or not pure_ed25519_verify(authority.public_key, db_checkpoint_signing_bytes(checkpoint)?, checkpoint.signature): return Err("SCVDB_CHECKPOINT_SIGNATURE")
+    match checkpoint.storage:
+        Paged(manifest):
+            if authority.paged_policy == nil: return Err("SCVDB_CHECKPOINT_PAGED_POLICY")
+            val paged = authority.paged_policy.unwrap()
+            if paged.config != policy: return Err("SCVDB_CHECKPOINT_PAGED_POLICY")
+            db_paged_manifest_validate(manifest, paged)?
+        Reference(snapshot, identities, conflicts):
+            if authority.paged_policy != nil: return Err("SCVDB_CHECKPOINT_PAGED_POLICY")
+    Ok(true)
+
+fn db_checkpoint_encode(checkpoint: DbDatabaseCheckpoint) -> Result<text, text>:
+    val bytes = db_checkpoint_signing_bytes(checkpoint)?
+    if sha256_u8_hex(bytes) != checkpoint.revision or checkpoint.signature.len() != 64: return Err("SCVDB_CHECKPOINT_PIN")
+    Ok("SCVDB-CHECKPOINT-v1\n" + checkpoint.revision + "\n" + db_snapshot_hex(bytes + db_frame(4u8, checkpoint.signature)) + "\n")
+
+fn db_checkpoint_decode(encoded: text, authority: DbCheckpointAuthority) -> Result<DbDatabaseCheckpoint, text>:
+    if encoded.len() > 33554800: return Err("SCVDB_CHECKPOINT_BYTES_QUOTA")
+    val lines = encoded.split("\n")
+    if lines.len() != 4 or lines[0] != "SCVDB-CHECKPOINT-v1" or lines[3] != "": return Err("SCVDB_CHECKPOINT_FORMAT")
+    val bytes = db_snapshot_unhex(lines[2])?
+    val domain = db_domain_bytes("database-checkpoint-v1", [])?
+    if bytes.len() <= domain.len(): return Err("SCVDB_CHECKPOINT_FORMAT")
+    for index in 0..domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_CHECKPOINT_DOMAIN")
+    val frame = db_read_frame(bytes, domain.len())?
+    val signature = db_read_frame(bytes, frame.next_offset)?
+    if frame.tag != 184u8 or signature.tag != 4u8 or signature.next_offset != bytes.len(): return Err("SCVDB_CHECKPOINT_FORMAT")
+    val fields = db_read_children(frame.payload)?
+    if fields.len() != 12 or fields[9].tag != 4u8: return Err("SCVDB_CHECKPOINT_FORMAT")
+    val parts = db_read_children(fields[10].payload)?
+    var storage = DbCheckpointStorage.Reference("", "", "")
+    if fields[10].tag == 182u8 and parts.len() == 3:
+        storage = DbCheckpointStorage.Reference(db_read_text(parts[0])?, db_read_text(parts[1])?, db_read_text(parts[2])?)
+    elif fields[10].tag == 183u8 and parts.len() == 1:
+        if authority.paged_policy == nil: return Err("SCVDB_CHECKPOINT_PAGED_POLICY")
+        storage = DbCheckpointStorage.Paged(db_paged_manifest_decode(db_read_text(parts[0])?, authority.paged_policy.unwrap())?)
+    else: return Err("SCVDB_CHECKPOINT_FORMAT")
+    val checkpoint = DbDatabaseCheckpoint(revision: lines[1], repository: db_read_text(fields[0])?, namespace: db_read_text(fields[1])?, epoch: db_read_unsigned(fields[2])?, schema_revision: db_read_text(fields[3])?, reducer_revision: db_read_text(fields[4])?, policy_revision: db_read_text(fields[5])?, predecessor_checkpoint: db_read_text(fields[6])?, history_horizon: db_read_text(fields[7])?, current_revision: db_read_text(fields[8])?, metadata: db_pages_manifest_decode(fields[9].payload)?, storage: storage, signer: db_read_text(fields[11])?, signature: signature.payload)
+    db_checkpoint_authenticate(checkpoint, authority)?
+    if db_checkpoint_encode(checkpoint)? != encoded: return Err("SCVDB_CHECKPOINT_NONCANONICAL")
+    Ok(checkpoint)
+
+export DbCheckpointStorage, DbDatabaseCheckpoint, DbCheckpointAuthority
+export db_checkpoint_signing_bytes, db_checkpoint_digest, db_checkpoint_authenticate
+export db_checkpoint_encode, db_checkpoint_decode

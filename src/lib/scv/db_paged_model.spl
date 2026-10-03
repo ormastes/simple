@@ -1,0 +1,144 @@
+# Explicit authoritative protocol. Imported projection revision claims are not
+# accepted here. Current Merkle revision is outside its own indexed records.
+use std.scv.db_pages.*
+use std.scv.db_page_records.{DbPageContext}
+use std.scv.db_policy_codec.{DbPolicyConfig, db_policy_encode, db_policy_decode}
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.distributed_identity.{SettledAlias, settled_alias_validate}
+
+struct DbPagedPolicy:
+    revision: text
+    config: DbPolicyConfig
+    protocol: text
+    index_version: text
+    quota: DbPageQuota
+    max_operations: u64
+    max_read_keys: u64
+    max_read_bytes: u64
+
+struct DbPagedManifest:
+    context: DbPageContext
+    policy_revision: text
+    structure_revision: text
+    protocol: text
+    index_version: text
+    parent_revision: text
+    pages: DbPageManifest
+    revision: text
+
+fn db_paged_policy_digest(policy: DbPagedPolicy) -> Result<text, text>:
+    if policy.protocol != "scv-paged-txn-v1" or policy.index_version != "scv-paged-index-v1" or policy.config.admission.reducer_revision != "scv-merkle-reducer-v1": return Err("SCVDB_PAGED_MIGRATION_REQUIRED")
+    if policy.max_operations == 0 or policy.max_operations > 10000u64 or policy.max_read_keys == 0 or policy.max_read_keys > 200000u64 or policy.max_read_bytes == 0 or policy.max_read_bytes > 67108864u64: return Err("SCVDB_PAGED_QUOTA")
+    val probe = SettledAlias(database_namespace: policy.config.admission.namespace, authority_epoch: policy.config.admission.epoch, entity_kind: "record", sequence: 1u64)
+    if not settled_alias_validate(probe).valid: return Err("SCVDB_PAGED_CONTEXT")
+    val empty = db_pages_build([], policy.quota)?
+    val payload = db_canonical_text(db_policy_encode(policy.config)?)? + db_canonical_text(policy.protocol)? + db_canonical_text(policy.index_version)? + db_frame(4u8, db_pages_manifest_encode(empty.manifest)?) + db_frame(2u8, db_u64_bytes(policy.max_operations)) + db_frame(2u8, db_u64_bytes(policy.max_read_keys)) + db_frame(2u8, db_u64_bytes(policy.max_read_bytes))
+    Ok(sha256_u8_hex(db_domain_bytes("paged-policy-v1", payload)?))
+
+fn db_paged_context(policy: DbPagedPolicy) -> DbPageContext:
+    val admission = policy.config.admission
+    DbPageContext(repository: admission.repository, namespace: admission.namespace, epoch: admission.epoch, schema_revision: admission.schema_revision, reducer_revision: admission.reducer_revision)
+
+fn db_paged_structure_digest(policy: DbPagedPolicy) -> Result<text, text>:
+    # The versioned policy codec has a separate canonical reduction subtree.
+    # Credentials/metadata changes do not alter this structural pin.
+    val encoded = db_policy_encode(policy.config)?
+    val prefix = "SCVDB-POLICY-v1\n"
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1])?
+    val envelope = db_read_children(db_read_frame(bytes, 0)?.payload)?
+    val pair = db_read_children(envelope[1].payload)?
+    val reduction = db_frame(pair[1].tag, pair[1].payload)
+    val empty = db_pages_build([], policy.quota)?
+    Ok(sha256_u8_hex(db_domain_bytes("paged-structure-v1", reduction + db_canonical_text(policy.protocol)? + db_canonical_text(policy.index_version)? + db_frame(4u8, db_pages_manifest_encode(empty.manifest)?))?))
+
+fn _paged_manifest_body(manifest: DbPagedManifest) -> Result<[u8], text>:
+    val context = manifest.context
+    if manifest.protocol != "scv-paged-txn-v1" or manifest.index_version != "scv-paged-index-v1" or context.reducer_revision != "scv-merkle-reducer-v1": return Err("SCVDB_PAGED_MIGRATION_REQUIRED")
+    for digest in [manifest.policy_revision, manifest.structure_revision]:
+        if not _paged_digest(digest): return Err("SCVDB_PAGED_ROOT")
+    if manifest.parent_revision != "" and not _paged_digest(manifest.parent_revision): return Err("SCVDB_PAGED_ROOT")
+    val valid = db_pages_manifest_validate(manifest.pages)?
+    val payload = db_canonical_text(context.repository)? + db_canonical_text(context.namespace)? + db_frame(2u8, db_u64_bytes(context.epoch)) + db_canonical_text(context.schema_revision)? + db_canonical_text(context.reducer_revision)? + db_canonical_text(manifest.policy_revision)? + db_canonical_text(manifest.protocol)? + db_canonical_text(manifest.index_version)? + db_canonical_text(manifest.parent_revision)? + db_frame(4u8, db_pages_manifest_encode(manifest.pages)?) + db_canonical_text(manifest.structure_revision)?
+    db_domain_bytes("semantic-merkle-v1", db_frame(160u8, payload))
+
+fn _paged_digest(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn db_paged_manifest_seal(manifest: DbPagedManifest) -> Result<DbPagedManifest, text>:
+    var sealed = manifest
+    sealed.revision = sha256_u8_hex(_paged_manifest_body(manifest)?)
+    Ok(sealed)
+
+fn db_paged_manifest_validate(manifest: DbPagedManifest, policy: DbPagedPolicy) -> Result<bool, text>:
+    if db_paged_policy_digest(policy)? != policy.revision: return Err("SCVDB_PAGED_POLICY_PIN")
+    if manifest.context != db_paged_context(policy) or manifest.structure_revision != db_paged_structure_digest(policy)? or manifest.pages.quota != policy.quota: return Err("SCVDB_PAGED_MIGRATION_REQUIRED")
+    if db_paged_manifest_seal(manifest)?.revision != manifest.revision: return Err("SCVDB_PAGED_ROOT")
+    Ok(true)
+
+fn db_paged_manifest_encode(manifest: DbPagedManifest) -> Result<text, text>:
+    if db_paged_manifest_seal(manifest)?.revision != manifest.revision: return Err("SCVDB_PAGED_ROOT")
+    Ok("SCVDB-PAGED-v1\n" + manifest.revision + "\n" + db_snapshot_hex(_paged_manifest_body(manifest)?) + "\n")
+
+fn db_paged_manifest_decode(encoded: text, policy: DbPagedPolicy) -> Result<DbPagedManifest, text>:
+    if encoded.len() > 16777216: return Err("SCVDB_PAGED_QUOTA")
+    val lines = encoded.split("\n")
+    if lines.len() != 4 or lines[0] != "SCVDB-PAGED-v1" or lines[3] != "": return Err("SCVDB_PAGED_MIGRATION_REQUIRED")
+    val bytes = db_snapshot_unhex(lines[2])?
+    val domain = db_domain_bytes("semantic-merkle-v1", [])?
+    if bytes.len() <= domain.len(): return Err("SCVDB_PAGED_ENCODING")
+    for index in 0..domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_PAGED_DOMAIN")
+    val root = db_read_frame(bytes, domain.len())?
+    if root.tag != 160u8 or root.next_offset != bytes.len(): return Err("SCVDB_PAGED_ENCODING")
+    val fields = db_read_children(root.payload)?
+    if fields.len() != 11 or fields[9].tag != 4u8: return Err("SCVDB_PAGED_ENCODING")
+    val context = DbPageContext(repository: db_read_text(fields[0])?, namespace: db_read_text(fields[1])?, epoch: db_read_unsigned(fields[2])?, schema_revision: db_read_text(fields[3])?, reducer_revision: db_read_text(fields[4])?)
+    val manifest = DbPagedManifest(context: context, policy_revision: db_read_text(fields[5])?, structure_revision: db_read_text(fields[10])?, protocol: db_read_text(fields[6])?, index_version: db_read_text(fields[7])?, parent_revision: db_read_text(fields[8])?, pages: db_pages_manifest_decode(fields[9].payload)?, revision: lines[1])
+    val valid = db_paged_manifest_validate(manifest, policy)?
+    if db_paged_manifest_encode(manifest)? != encoded: return Err("SCVDB_PAGED_NONCANONICAL")
+    Ok(manifest)
+
+fn db_paged_genesis(policy: DbPagedPolicy) -> Result<DbPagedManifest, text>:
+    if db_paged_policy_digest(policy)? != policy.revision: return Err("SCVDB_PAGED_POLICY_PIN")
+    val build = db_pages_build([], policy.quota)?
+    db_paged_manifest_seal(DbPagedManifest(context: db_paged_context(policy), policy_revision: policy.revision, structure_revision: db_paged_structure_digest(policy)?, protocol: policy.protocol, index_version: policy.index_version, parent_revision: "", pages: build.manifest, revision: ""))
+
+export DbPagedPolicy, DbPagedManifest, db_paged_policy_digest, db_paged_context, db_paged_genesis
+export db_paged_structure_digest
+export db_paged_manifest_seal, db_paged_manifest_validate, db_paged_manifest_encode, db_paged_manifest_decode
+
+fn db_paged_policy_encode(policy: DbPagedPolicy) -> Result<text, text>:
+    if db_paged_policy_digest(policy)? != policy.revision: return Err("SCVDB_PAGED_POLICY_PIN")
+    val payload = db_canonical_text(policy.revision)? + db_canonical_text(policy.config.revision)? + db_canonical_text(db_policy_encode(policy.config)?)? + db_canonical_text(policy.protocol)? + db_canonical_text(policy.index_version)? + db_frame(2u8, db_u64_bytes(policy.quota.max_page_bytes)) + db_frame(2u8, db_u64_bytes(policy.quota.max_page_records)) + db_frame(2u8, db_u64_bytes(policy.quota.max_records)) + db_frame(2u8, db_u64_bytes(policy.max_operations)) + db_frame(2u8, db_u64_bytes(policy.max_read_keys)) + db_frame(2u8, db_u64_bytes(policy.max_read_bytes))
+    val bytes = db_domain_bytes("paged-policy-wire-v1", db_frame(161u8, payload))?
+    if bytes.len() > 16777216: return Err("SCVDB_PAGED_QUOTA")
+    Ok("SCVDB-PAGED-POLICY-v1\n" + db_snapshot_hex(bytes) + "\n")
+
+fn db_paged_policy_decode(encoded: text, expected_revision: text) -> Result<DbPagedPolicy, text>:
+    if expected_revision.len() != 64: return Err("SCVDB_PAGED_POLICY_PIN")
+    val prefix = "SCVDB-PAGED-POLICY-v1\n"
+    if encoded.len() > 33554500: return Err("SCVDB_PAGED_QUOTA")
+    if encoded.len() <= prefix.len() or not encoded.starts_with(prefix) or not encoded.ends_with("\n"): return Err("SCVDB_PAGED_MIGRATION_REQUIRED")
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1])?
+    val domain = db_domain_bytes("paged-policy-wire-v1", [])?
+    if bytes.len() <= domain.len(): return Err("SCVDB_PAGED_ENCODING")
+    for index in 0..domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_PAGED_DOMAIN")
+    val root = db_read_frame(bytes, domain.len())?
+    if root.tag != 161u8 or root.next_offset != bytes.len(): return Err("SCVDB_PAGED_ENCODING")
+    val fields = db_read_children(root.payload)?
+    if fields.len() != 11: return Err("SCVDB_PAGED_ENCODING")
+    val revision = db_read_text(fields[0])?
+    if revision != expected_revision: return Err("SCVDB_PAGED_POLICY_PIN")
+    val config = db_policy_decode(db_read_text(fields[2])?, db_read_text(fields[1])?)?
+    val policy = DbPagedPolicy(revision: revision, config: config, protocol: db_read_text(fields[3])?, index_version: db_read_text(fields[4])?, quota: DbPageQuota(max_page_bytes: db_read_unsigned(fields[5])?, max_page_records: db_read_unsigned(fields[6])?, max_records: db_read_unsigned(fields[7])?), max_operations: db_read_unsigned(fields[8])?, max_read_keys: db_read_unsigned(fields[9])?, max_read_bytes: db_read_unsigned(fields[10])?)
+    if db_paged_policy_encode(policy)? != encoded: return Err("SCVDB_PAGED_NONCANONICAL")
+    Ok(policy)
+
+export db_paged_policy_encode, db_paged_policy_decode

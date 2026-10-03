@@ -1,0 +1,91 @@
+# Storage-protocol oracles only. Signed checkpoint/closure admission belongs to
+# the checkpoint effect owner; these fixtures do not manufacture that proof.
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{file_read, file_delete}
+use app.scv.db.local_store.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
+use test.fixtures.scv.db_apply_fixture.{setup_item2_apply_root}
+use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
+use test.fixtures.scv.db_checkpoint_storage_fixture.{setup_item2_checkpoint_descriptor}
+
+describe "Atomic checkpoint storage anchor and writer barrier":
+    it "keeps v1 bytes stable and binds a new checkpoint to the same semantic transaction":
+        val root = setup_item2_apply_root()
+        val transaction = sha256_text("semantic revision")
+        val initial = db_store_commit(root, "", transaction, "snapshot")
+        expect(initial.code).to_equal("ok")
+        val state_digest = sha256_text("snapshot")
+        val v1 = "scv-db/local-generation/v1\n\n{transaction}\n{state_digest}\nsnapshot"
+        expect(file_read("{root}/.scv/db/objects/{initial.head}.scvg")).to_equal(v1)
+        expect(initial.head).to_equal(sha256_text(v1))
+        expect(initial.checkpoint_anchor).to_equal("")
+        val anchor = sha256_text("signed complete checkpoint")
+        val target = db_store_generation_head(initial.head, transaction, "snapshot", anchor).unwrap()
+        val prepared = setup_item2_checkpoint_descriptor("Prepared", "semantic", initial.head, "", anchor, target)
+        val journal = db_store_commit(root, "", sha256_text(prepared), prepared, "checkpoint-install")
+        expect(journal.code).to_equal("ok")
+        expect(db_store_checkpoint_barrier(root)).to_equal(Ok(true))
+        step("Block ordinary writes while the captured install is prepared")
+        for channel in ["semantic", "paged", "pages", "bridge", "ci", "retention", "settlement", "settlement-work"]:
+            expect(db_store_commit(root, "", sha256_text(channel), "forbidden", channel).code).to_equal("SCVDB_CHECKPOINT_INSTALL_PENDING")
+        expect(db_store_checkpoint_install_held(root, "owner", journal.head, initial.head, "", transaction, "snapshot", anchor, "semantic").code).to_equal("SCVDB_STORE_LEASE_IDENTITY")
+        expect(scv_sj_lease_acquire(root, "owner").starts_with("ok:")).to_be(true)
+        val installed = db_store_checkpoint_install_held(root, "owner", journal.head, initial.head, "", transaction, "snapshot", anchor, "semantic")
+        expect(installed.code).to_equal("ok")
+        expect(installed.head).to_equal(target)
+        expect(installed.transaction_id).to_equal(transaction)
+        expect(installed.checkpoint_anchor).to_equal(anchor)
+        expect(installed.parent).to_equal(initial.head)
+        expect(scv_sj_lease_release(root, "owner").starts_with("ok:")).to_be(true)
+        step("Reopen installed HEAD before its completion marker and recover the exact generation")
+        expect(db_store_read(root).head).to_equal(target)
+        expect(db_store_checkpoint_barrier(root)).to_equal(Ok(true))
+        expect(scv_sj_lease_acquire(root, "recovery").starts_with("ok:")).to_be(true)
+        expect(db_store_checkpoint_install_held(root, "recovery", journal.head, initial.head, "", transaction, "snapshot", anchor, "semantic").head).to_equal(target)
+        expect(db_store_commit_held(root, "recovery", target, sha256_text("blocked"), "forbidden", "semantic").code).to_equal("SCVDB_CHECKPOINT_INSTALL_PENDING")
+        val completed = setup_item2_checkpoint_descriptor("Installed", "semantic", initial.head, "", anchor, target)
+        expect(db_store_commit_held(root, "recovery", journal.head, sha256_text(completed), completed, "checkpoint-install").code).to_equal("ok")
+        expect(scv_sj_lease_release(root, "recovery").starts_with("ok:")).to_be(true)
+        expect(db_store_checkpoint_barrier(root)).to_equal(Ok(false))
+        step("Preserve the checkpoint metadata anchor across ordinary future mutations")
+        val next = db_store_commit(root, target, sha256_text("next semantic revision"), "next snapshot")
+        expect(next.code).to_equal("ok")
+        expect(next.checkpoint_anchor).to_equal(anchor)
+        expect(db_store_read(root).checkpoint_anchor).to_equal(anchor)
+        expect(file_read("{root}/.scv/db/objects/{next.head}.scvg").starts_with("scv-db/local-generation/v2\n")).to_be(true)
+
+    it "checks the captured queue generation and target bytes while holding the real lease":
+        val root = setup_item2_apply_root()
+        val source = db_store_commit(root, "", sha256_text("source"), "source")
+        val pending = db_store_commit(root, "", sha256_text("pending"), "original signed work", "settlement-work")
+        val anchor = sha256_text("checkpoint")
+        val transaction = sha256_text("target")
+        val target = db_store_generation_head(source.head, transaction, "target", anchor).unwrap()
+        # Model a captured queue that advanced before an attempted install.
+        val prepared = setup_item2_checkpoint_descriptor("Prepared", "semantic", source.head, "", anchor, target)
+        val journal = db_store_commit(root, "", sha256_text(prepared), prepared, "checkpoint-install")
+        expect(journal.code).to_equal("ok")
+        expect(scv_sj_lease_acquire(root, "owner").starts_with("ok:")).to_be(true)
+        expect(db_store_checkpoint_install_held(root, "owner", journal.head, source.head, "", transaction, "target", anchor, "semantic").code).to_equal("SCVDB_CHECKPOINT_PENDING_ADVANCED")
+        expect(db_store_checkpoint_install_held(root, "owner", journal.head, source.head, pending.head, transaction, "target", anchor, "semantic").code).to_equal("SCVDB_CHECKPOINT_INSTALL_MISMATCH")
+        expect(db_store_checkpoint_install_held(root, "owner", journal.head, source.head, "", transaction, "altered", anchor, "semantic").code).to_equal("SCVDB_CHECKPOINT_INSTALL_MISMATCH")
+        expect(scv_sj_lease_release(root, "owner").starts_with("ok:")).to_be(true)
+        expect(db_store_read(root).head).to_equal(source.head)
+        expect(db_store_read(root, "settlement-work").head).to_equal(pending.head)
+
+    it "fails closed on malformed or dangling barrier state and preserves the active generation":
+        val root = setup_item2_apply_root()
+        val source = db_store_commit(root, "", sha256_text("source"), "source")
+        val malformed = db_store_commit(root, "", sha256_text("malformed"), "SCVDB-CHECKPOINT-INSTALL-v1\nInstalled\n", "checkpoint-install")
+        expect(malformed.code).to_equal("ok")
+        expect(db_store_checkpoint_barrier(root)).to_equal(Err("SCVDB_CHECKPOINT_BARRIER_CORRUPT"))
+        expect(db_store_commit(root, source.head, sha256_text("next"), "next").code).to_equal("SCVDB_CHECKPOINT_BARRIER_CORRUPT")
+        expect(scv_sj_lease_acquire(root, "owner").starts_with("ok:")).to_be(true)
+        expect(db_store_commit_held(root, "owner", source.head, sha256_text("held"), "next", "semantic").code).to_equal("SCVDB_CHECKPOINT_BARRIER_CORRUPT")
+        expect(scv_sj_lease_release(root, "owner").starts_with("ok:")).to_be(true)
+        val pointer = "{root}/.scv/db-checkpoint-install/HEAD"
+        expect(file_delete(pointer)).to_be(true)
+        expect(setup_item2_filesystem_link(root, "{root}/missing-barrier", pointer, false)).to_equal(0)
+        expect(db_store_commit(root, source.head, sha256_text("next"), "next").code).to_equal("SCVDB_STORE_HEAD_CORRUPT")
+        expect(db_store_read(root).head).to_equal(source.head)

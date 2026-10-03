@@ -852,3 +852,285 @@ The implementation and system specs must prove:
 10. Existing SCV identities and documented reader paths survive migration.
 
 This design covers REQ-001 through REQ-036 and NFR-001 through NFR-015. Architecture and system-test artifacts provide the requirement-to-scenario matrix; implementation may refine internal field representation but must preserve these named shared interfaces and behavioral contracts or update requirements/design and receive review first.
+
+## 18. Concrete TDD acceptance refinement — 2026-10-03
+
+The selected requirements and the earlier receipt-index protocol remain authoritative. These cases turn the first existing implementation seams into reviewable tests; they do not declare all 36 requirements implemented. Shared helper names for new fixtures are `setup_item2_*` and `check_item2_*`. Existing manual step labels remain `Create offline semantic changes`, `Settle compact identifiers`, and `Drive the boundary state and inspect preserved invariants`. Unimplemented `check_*_contract` paths must still fail explicitly.
+
+| Case | Existing requirement | Concrete stimulus | Independent oracle |
+|---|---|---|---|
+| ID-01 | REQ-002,004 | Allocate A, tombstone A, allocate B of the same kind, replay A. | A's alias remains unchanged/tombstoned; B gets the next high-water value; reverse lookup still identifies A; no resurrection. |
+| ID-02 | REQ-004 | Supply duplicate alias, duplicate allocator mark, inconsistent UID provenance, or exhausted u64 mark. | Exact rejection code and unchanged input bindings/marks; no sequence allocated. |
+| ID-03 | REQ-002,003 | Resolve equal integers in different kind/epoch/namespace contexts. | Context remains part of identity; canonical SCV identity is never rewritten by alias assignment. |
+| GIT-01 | REQ-007,008 | Local bare authority advances H -> candidate -> successor. | Old reconcile remains HISTORY_REQUIRED; new history read-back observes successor and finds candidate using actual fetched raw objects. |
+| GIT-02 | REQ-008 | Authority advances H -> competitor without candidate. | New bounded history read-back reaches H and reports not_published; source refs/index/worktree remain unchanged. |
+| GIT-03 | REQ-007,008 | Candidate has wrong parent or replacement refs forge ancestry. | Raw object validation rejects mismatch before any acceptance decision. |
+| GIT-04 | REQ-008,022 | Remote ref moves between initial observation and final recheck. | READBACK_MOVED, no settled projection or new allocation. |
+| GIT-05 | REQ-008,022 | Fetched history contains a merge, unreadable object, or neither target is found within 32 cursor inspections. | HISTORY_REQUIRED; bounded work and no guessed decision. A failed fetch instead yields READBACK_UNAVAILABLE. |
+| GIT-06 | REQ-029,036 | Scratch is inside source/common-dir or aliases either through a link; host cannot prove canonical identity. | SCRATCH_SCOPE before mutation; no unsafe platform fallback. |
+| CANON-01 | REQ-011,015 | Equal maps with differing insertion order; framed text containing delimiters; absent/empty; u64 above 2^53; NFC equivalents. | Exact literal canonical bytes/digests under the selected encoding; do not derive expected bytes with the encoder being tested. |
+| REPLAY-01 | REQ-011,015,017 | Deliver same batch/observation twice, then reuse its identity with changed bytes. | One accepted entry/count; changed content quarantined; allocator and accepted state unchanged by rejected replay. |
+| CRASH-01 | REQ-004,007,009 | Crash after each persistence boundary and between settled-ref acceptance and receipt indexing. | Fresh process recovers one complete generation; frozen unacknowledged head admits no new allocation; exactly one receipt-index entry. |
+
+TDD evidence for each implemented case records the command, runtime path/digest, initial failing assertion, production change, passing result and durable fixture evidence. An unavailable runner is a blocked execution result; source inspection or a test listing is not RED or GREEN. Pure helper tests can prove only their stated local invariants. CRASH-01 requires restart/read-back and cannot be replaced by comparing two in-memory values.
+
+### 18.1 Additive history reconciliation detail
+
+Preserve existing APIs. Add `db_git_settlement_reconcile_history(source, remote, expected_old_oid, candidate_oid, scratch_parent) -> DbGitSettlementReadback`. Validate candidate's raw sole parent before history reasoning. Create a securely isolated bare scratch repository only after alias-safe path containment checks; fetch the observed authority head into it at depth 33 and validate the exact fetched OID. Inspect no more than 32 cursors in the raw single-parent walk, with replace-object rewriting disabled. Re-read authority before classifying a stable result and clean up only the owned scratch repository. Canonical scratch parent `/` is rejected before creation because the current secure-temp owner duplicates its separator. Unsupported host canonicalization returns `SCVDB_SCRATCH_SCOPE` and leaves host conformance incomplete; it must not be reported as REQ-036 PASS. This finite walk still requires total latency, transfer/storage and RSS measurement.
+
+The result `published` means candidate inclusion in inspected Git history, not accepted semantic content. `not_published` requires reaching the expected old head without finding the candidate. `SCVDB_HISTORY_REQUIRED` retains ambiguity; `SCVDB_READBACK_MOVED` requires a fresh observation rather than recursive retry. The coordinator alone may reconcile accepted batches and signed receipts, replan after proven rejection, or advance a projection.
+
+### 18.2 Remaining acceptance order
+
+After the focused identity/transport prerequisites, implement canonical encoding and replay, durable transaction recovery, admission/receipt-index publication, configuration-aware evidence/CI, provider bridge, retention/resnapshot, and Operating B performance/host evidence. Keep all remaining scenarios visibly failing until their production owners and durable oracles exist. Windows/Linux/macOS/FreeBSD support and live GitHub capability proofs are separate evidence cells; one host's local bare-Git fixture does not satisfy them. NFR targets in section 16 are unchanged and unproven by these small fixtures.
+
+Current host blocker: the Windows `path_absolute` implementation cannot prove symlink/final-path identity (`src/app/io/env_access_host.spl:111`). The interim history adapter therefore rejects Windows scratch setup with `SCVDB_SCRATCH_SCOPE`. REQ-036 remains OPEN until the existing host path owner supplies alias-safe final-path resolution and the same containment/history fixtures run on Windows. This is a blocked capability, not an accepted Windows exclusion or a reduction of the one-app-path requirement.
+
+## 19. Code-first implementation refinement (2026-10-03)
+
+The user directed implementation and test coding to proceed before runtime
+execution. The [source-progress record](../03_plan/evidence/seven_plans/item2_code_first_2026-10-03.md)
+describes implemented owners and remaining integration gates; it is not a
+verification receipt or permission to reduce the selected scope.
+
+The materialized snapshot is now `SCVDB-SNAPSHOT-v2`: accepted entries bind the
+original actor/counter, canonical batch digest and prior semantic revision.
+Aliased operations resolve after verification without changing original signed
+patch identity. Explicit causal events implement remove-wins sets; settlement
+order does not create their causal observations.
+
+Local semantic publication uses a `SCVDB-LOCAL-v2` envelope binding authority and
+schema/reducer context, the complete semantic snapshot, and an immutable conflict
+catalog with resolution receipts. A conflicting scalar edit can persist its
+diagnostic record without accepting the batch or changing semantic state. A
+reviewer/integrator resolution binds exact guarded operations and canonical
+decision provenance into a newly signed patch; state and receipt publish
+together. Retries reestablish durability rather than treating readable bytes as
+an acknowledgement.
+
+One SJ repository writer boundary owns separate semantic, bridge, CI, settlement
+and page-manifest channels. Channels do not create independent checkout locks.
+Provider calls run after the short write lease is released. Bridge delivery
+persists sent-unconfirmed before effects, reconstructs reconciliation from
+observed provider data, and retains scoped provider IDs through recovery.
+Shared-field GitHub updates without provider CAS remain unsupported; uncertain
+absent creates are not blindly repeated.
+
+Metadata admission now requires an independently reviewed exact typed-value
+allowlist, including envelope/precondition/provenance content. Policy hashing
+and lookup share NFC equivalence. Restricted evidence uses actual authenticated
+encryption and controlled external key files; a deletion receipt covers removal
+of the owned active key file only, never retained plaintext/key copies, backups,
+or immutable Git history.
+
+The small whole-state codecs are bounded reference owners. They cannot establish
+Operating B: the [tracked capacity issue](../08_tracking/bug/item2_operating_b_sharded_storage_required_2026-10-03.md)
+requires immutable bounded pages, indexed manifests and affected-page updates,
+followed by unchanged million-row resource measurements. No quota increase or
+source-only implementation may be reported as that measurement.
+
+### 19.1 Receipt signature refinement during implementation
+
+The implemented `DbSettlementReceipt` refines the two-signature sketches in
+sections 7.1–7.3. Once the complete candidate commit has been constructed, its
+OID, tree, sole parent, authority context, previous receipt, allocator marks and
+batch digests are all known. One Ed25519 signature covers those fields before
+publication. The receipt remains outside its own candidate tree, avoiding a
+self-reference. A second signature over the same known fields is unnecessary.
+
+This signature proves authorization of a candidate, **not acceptance**. Actual
+settled ancestry/tree read-back and protected receipt-index publication/read-back
+remain independent mandatory proofs before acknowledgement. An unpublished but
+valid signed receipt must remain pending. The recovery journal records the
+signed candidate before network effects; no caller-supplied boolean substitutes
+for those proofs.
+
+`db_receipt_index.spl` implements strict entry/cursor codecs and immutable
+`entries/<receipt-digest>`, `by-commit/<accepted-head>` and 20-digit sequence
+projections. All three must contain identical canonical entry bytes. Existing
+partial/disagreeing records are corruption. Older idempotent replay requires an
+actual signed successor chain to the cursor, bounded to 64 receipts per request;
+missing history is an explicit result, not implicit acceptance. The protected
+Git index effect owner and authority deployment admission remain open gates.
+
+### 19.2 Authoritative path identities and bounded pages
+
+The shared existing-path owner resolves Windows paths through one kernel handle
+and obtains a local-volume identity; POSIX uses realpath without lexical fallback.
+Consumers verify no-follow types and existing parents before creating leaves.
+Cleanup compares the observed path identity again. These are resolved path
+identities, not retained handles or filesystem object IDs: roots must remain
+trusted and stable against hostile concurrent replacement. Missing or unsupported
+identity resolution is an error. Actual host/durability tests remain required.
+
+Immutable storage now has 65,536 fixed hash buckets, per-page byte/record bounds,
+an authenticated directory manifest, binary lookup and affected-page updates.
+Alias/accepted records are immutable, tombstones cannot resurrect and allocator
+marks cannot regress. The durable owner fsyncs immutable pages before CAS of the
+manifest generation; a failed CAS may leave safe orphan pages. This does not yet
+replace the reference whole-state reducer/apply path or prove the selected
+million-row Operating B targets. Bucket skew fails explicitly rather than
+silently raising memory limits.
+
+### 19.3 Reserved provider facts and durable retention
+
+Generic producer apply and generic conflict resolution reject operations on
+`provider_binding` and `provider_common_state`, independent of provenance text.
+The provider owner checks actual durable acknowledgement, scoped GET read-back,
+exact proposed operations and independently signed metadata/ACL admission before
+using the internal local transition primitive. That primitive is trusted app
+infrastructure like the generation store; it is not exposed as a producer
+command or represented as an unforgeable public record. Historical accepted
+replay reauthenticates the original bytes without requiring GitHub or referenced
+local policy/intent rows to remain unchanged forever.
+
+Canonical bridge intent now contains typed `local_entity` and `authority_policy`
+references plus a capability digest. The policy reference must identify a live
+`bridge_policy` row whose revision matches the reviewed request policy. Older
+minimal intent rows return a typed missing-context error. Follow-up writes
+atomically create an immutable common-state row and create/update its binding;
+the binding retains provider instance/project, remote kind/ID/revision, causal
+IDs, policy reference and a digest plus reference to retrievable common bytes.
+
+Retention records a verified rollup and a durable `delete_pending` generation
+before unlink. Resume restores the pending generation's durability and recomputes
+current pin closure under the same SJ writer lease used for deletion. Existing
+content is reopened and hashed. Missing-entry recovery uses a native no-follow
+entry probe which distinguishes dangling links and access errors from absence;
+`unlinked` and `already_absent_synced` are different receipts. Only then may the
+catalog record deletion. Resolution reads actual raw or verified rollup bytes;
+a catalog label is never an exact-availability receipt. This initial catalog is
+bounded to 256 entries and is not the million-row Operating B implementation.
+
+### 19.4 Authoritative paged transaction protocol (source implemented; execution unverified)
+
+The indexed projection layer is insufficient to authenticate a partial-state
+reduction. The separate backend uses `scv-paged-txn-v1`, index grammar
+`scv-paged-index-v1` and reducer `scv-merkle-reducer-v1`. Its semantic revision
+hashes the complete manifest envelope excluding its own revision field; current
+revision claims are not stored inside their own committed page tree. Accepted
+records and retained-base membership point to prior revisions, avoiding a hash
+self-reference. Existing reference/projection images require explicit migration.
+
+The planner derives required row, alias, accepted-batch, actor-counter, unique
+key and incoming-reference-count lookups. Every response must carry page content
+or an absent-bucket proof verified against the captured manifest; omitted keys
+are not absent. It removes old unique claims/reference edges before applying all
+final claims, allowing atomic swaps while preventing duplicate live ownership
+and dangling references. The existing reducer contributes only an explicitly
+row-local kernel; its global validator is never run over an incomplete state.
+Immutable pages precede one SJ CAS of the authoritative manifest, including all
+rows/indexes/acceptance/history. No partial-page publication acknowledges a patch. Signature/context/metadata admission precedes dependency reads. The effect loader enforces the remaining aggregate byte budget before allocating each next page and validates the manifest once per batch. Repeated tombstones preserve the original tombstone revision while recording the newly accepted batch.
+
+Structural compatibility is pinned separately from the last writer's full
+admission-policy revision. Independently trusted key revocation/rotation and
+reviewed metadata changes must not require rewriting every row when schema,
+merge rules, constraints, context and index grammar remain identical. Changes
+to those structural inputs still require explicit migration. These are design
+contracts for the in-progress backend, not executed performance evidence.
+
+### 19.5 Explicit command and retained-root boundaries
+
+The single `scv db` command owner now exposes `quarantine-import`,
+`quarantine-inspect`, and `quarantine-apply`. Import accepts only the bounded
+uncompressed inert patch-bundle format. Inspection by CAS address reopens and
+verifies actual bytes; it derives patch count/content rather than trusting a
+remembered handle. Its internal zero accounting day is never exposed as a
+creation date or retention authorization. Application independently pins policy,
+selects an exact batch, samples current time, and calls the producer-facing
+admission/CAS owner. No inspection result grants semantic acceptance.
+
+`paged-init`, `paged-status`, `paged-apply`, and `paged-quarantine-apply` require the separately versioned
+paged policy and an independent full policy digest. They do not silently migrate
+reference snapshots or imported projections. Final publication excludes the
+other backend channels under the same SJ lease; reference status must report a
+backend mismatch instead of describing an initialized paged store as empty.
+
+Retention planning protects the verified dependency closure of every retained
+root: recent raw observations, explicit pins, restricted/unsupported content,
+and supported observations outside the selected rollup cohort/day. Resume
+protects all active roots while processing pending deletions. An unreadable
+active root blocks collection because its dependency edges cannot be proved.
+These derived keep roots are ephemeral planning inputs, not persisted policy
+changes or caller-provided safety claims.
+
+Receipt-index effects use an exact protected branch-shaped namespace and
+independent Git readback. A signed protection profile and current GitHub ruleset
+examination are evidence only: they do not attest the ambient credential,
+current worker artifact, or exclusive integrator. Journal v2 can represent an
+indexed receipt but exposes no production-completion transition until those
+independent owners exist. Local bare-Git fixture publication is not deployment
+admission. All new source and tests remain execution-unverified.
+### 19.6 Checkpoint install storage boundary
+
+Unanchored local generations retain their exact v1 encoding. An installed
+checkpoint uses a v2 envelope that binds its immutable checkpoint digest;
+subsequent ordinary commits inherit that anchor. The semantic transaction ID
+remains unchanged in meaning (the paged manifest revision for paged state).
+This avoids detached alias/history metadata and preserves captured-generation
+reads without walking the entire parent chain.
+
+The `checkpoint-install` channel contains a bounded nine-line descriptor:
+version, phase, active channel, source head, pending queue head, checkpoint
+digest, expected installed head, immutable journal digest, and final newline.
+The full signed checkpoint and install journal are separate immutable artifacts.
+A Prepared descriptor blocks ordinary generation writes under SJ, including
+held writes; malformed or dangling descriptor state fails closed. Destructive
+evidence/key deletion checks the same barrier before unlinking owned bytes.
+
+The trusted install primitive verifies the real SJ holder, descriptor HEAD,
+source and queue generations, target bytes and target generation digest. It
+publishes one active HEAD with its anchor. Reopening an exact installed generation
+while the descriptor is still Prepared follows the existing durability-retry
+path; the owner writes the Installed marker afterward. No two independent HEAD
+updates are described as atomic. Authentication, full checkpoint closure,
+nonregression and in-flight provider checks belong to the checkpoint effect
+owner, not to public storage-record shape. Cross-backend migration is separate.
+The full install owner is still in progress; storage regression source is
+unexecuted and is not a crash-durability receipt.
+### 19.7 Compact alias cells
+
+The REQ-002 interchange owner uses SCVDB-ALIAS-v1 followed by namespace, minimal positive decimal epoch, kind, and final newline. The bounded header (4096 bytes maximum; kind at most 4000 characters) may be shared by a table; each cell is a minimal positive decimal u64. Decode requires the transported header and an independently supplied expected context. Missing headers, foreign contexts, zero, signs, whitespace, leading zeroes and overflow are rejected. The codec does not allocate or certify settlement; actual resolution uses the authenticated captured database generation. Test source exercises file round-trip and paged lookup; runtime evidence is pending.
+
+### 19.8 Bounded local settlement coordination
+
+The settlement-work queue persists at most 64 original signed patches (1 MiB each, 16 MiB total encoding). Its local bare-remote coordinator records the exact candidate commit and a canonical structural policy pin before publication, prioritizes uncertain publication recovery, and chooses dependency-ready work deterministically. Credentials are rechecked separately from structural replanning. Real signed index and exact tree/blob readbacks can produce local-index-observed; this is not protected deployment admission or Indexed completion. The existing scv db command owner exposes queue-status and queue-enqueue through independently pinned policy and exact queue-head checks. Network, signing and protected production completion are not implied by a queue acknowledgement. All coordinator and command tests remain execution-unverified.
+
+### 19.9 Paged conflicts and checkpoint codec boundaries
+
+Paged conflict capture stores the original signed patch and canonical conflict
+record under an immutable evidence key. It publishes no partial semantic rows,
+accepted batch or actor-counter claim. A conflict against an intermediate row
+created or changed only by an earlier operation in the rejected batch returns
+`SCVDB_INTERMEDIATE_CONFLICT_UNSUPPORTED` before any metadata CAS.
+
+Resolution accepts a typed reviewer decision and original signed resolution
+patch, checks its exact operation, preconditions and provenance against actual
+captured evidence, and runs the indexed constraint reducer. The resolution
+receipt, semantic rows, accepted registry and derived indexes publish in one
+manifest CAS. The receipt binds the prior root and signed patch; the containing
+manifest supplies the resulting root without a self-referential digest.
+Historical replay still authenticates the reviewer under current policy and
+verifies the original producer signature with its retained public key. Retiring
+that producer key does not invalidate an already accepted reviewer operation.
+New resolution also requires current admission of the preserved original.
+
+The checkpoint codec binds a separate immutable metadata page manifest, explicit
+Live/Tombstoned/MergedInto/SplitInto dispositions, and history records carrying
+signed nonzero topological ordinals. The effect owner must verify every parent,
+strict ordinal decrease, actual ancestry/nonregression and all page/index links;
+ordinals and signed manifests alone are not full import validation. Missing
+records are errors, never implicit history or Live defaults. Signed frame bytes
+plus signature fit the existing 16 MiB canonical reader. Reference inline data
+is bounded; paged data and metadata remain separate immutable pages. Codec and
+conflict tests are authored but unexecuted; complete installation remains open.
+
+### 19.10 Streaming external evidence hydration
+
+`evidence_hydrate` verifies actual SCVE1 bytes through a retained no-follow regular-file handle, using the existing incremental evidence digest. Content reads and private output writes use at most 1 MiB per chunk; dependency metadata is limited to 65,536 sorted digests. Exact envelope size, EOF, handle identity and semantic digest precede publication. Restricted ciphertext may be inspected but ordinary hydration refuses it. Failed copies and parent-sync failures remove only the identity-checked owned stage.
+
+The native IO owner currently supports Windows and Linux; other hosts return `SCVDB_FILE_HOST_UNSUPPORTED`. Windows outputs request metadata-query rights alongside write access. Linux checks retained inode, size and modification/change timestamps. These checks require trusted parents against concurrent OS renames; they are not a hostile-filesystem sandbox.
+
+`evidence_closure` uses a private disk queue and visited markers, not a corpus-sized memory set. Explicit limits are one million objects, two million scratch files, 1 TiB cumulative content, depth 4096 and 1024 sorted roots. It clamps each object's content quota to the remaining scan allowance before reading. Receipts describe verified bytes observed during the scan; durable pins, canonical Git publication and deletion authority remain separate owners. Per-object scratch IO and actual RSS/throughput are unmeasured.
+
+Two unit and four filesystem test scenarios are authored, including an actual 100 MiB copy, tamper/truncation/symlink refusal, restricted dependency closure and native binary roundtrip. All are unexecuted. Scalable retention and macOS/FreeBSD IO remain open.

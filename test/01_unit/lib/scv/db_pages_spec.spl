@@ -1,0 +1,131 @@
+# Source acceptance scenarios; no IO or measured scalability claims.
+use std.spec.{describe, it, expect}
+use std.scv.db_pages.*
+
+fn setup_item2_page_quota() -> DbPageQuota:
+    DbPageQuota(max_page_bytes: 4096, max_page_records: 8, max_records: 100)
+
+fn setup_item2_page_record(key: text, value: u8) -> DbPageRecord:
+    DbPageRecord(key: key, kind: DbPageKind.Row, payload: [value])
+
+fn setup_item2_page_for(build: DbPageBuild, key: text) -> DbRecordPage:
+    val bucket = db_pages_bucket(key).unwrap()
+    var found = -1
+    for index in 0..build.pages.len():
+        if build.pages[index].bucket == bucket: found = index
+    expect(found).to_be_greater_than(-1)
+    build.pages[found]
+
+describe "Immutable bounded semantic pages":
+    it "builds stable ordered pages independently of input order":
+        val first = setup_item2_page_record("row-a", 1u8)
+        val second = setup_item2_page_record("row-b", 2u8)
+        val third = setup_item2_page_record("row-c", 3u8)
+        val built = db_pages_build([third, first, second], setup_item2_page_quota()).unwrap()
+        val ordered = db_pages_build([first, second, third], setup_item2_page_quota()).unwrap()
+        expect(built).to_equal(ordered)
+        expect(built.pages.len()).to_be_greater_than(1)
+        expect(db_pages_manifest_validate(built.manifest)).to_equal(Ok(true))
+        expect(db_pages_lookup(built.manifest, setup_item2_page_for(built, "row-b"), "row-b").unwrap().unwrap()).to_equal(second)
+        expect(db_pages_entry(built.manifest, "missing-row").unwrap()).to_be_nil()
+
+    it "handles a known hash-prefix collision and rejects bucket record overflow":
+        # SHA256(tag3 || minimal length || UTF8) prefix, independently fixed.
+        val first = setup_item2_page_record("collision-174", 1u8)
+        val second = setup_item2_page_record("collision-199", 2u8)
+        expect(db_pages_bucket(first.key)).to_equal(Ok("658d"))
+        expect(db_pages_bucket(second.key)).to_equal(Ok("658d"))
+        val built = db_pages_build([second, first], setup_item2_page_quota()).unwrap()
+        expect(built.pages.len()).to_equal(1)
+        expect(built.pages[0].records).to_equal([first, second])
+        expect(db_pages_lookup(built.manifest, built.pages[0], second.key).unwrap().unwrap()).to_equal(second)
+        var quota = setup_item2_page_quota()
+        quota.max_page_records = 1
+        expect(db_pages_build([first, second], quota)).to_equal(Err("SCVDB_PAGE_RECORD_QUOTA"))
+
+    it "counts framing bytes at the exact page byte boundary":
+        val record = setup_item2_page_record("boundary", 7u8)
+        val built = db_pages_build([record], setup_item2_page_quota()).unwrap()
+        val bytes = db_page_encode(built.pages[0], built.manifest.quota).unwrap()
+        var quota = setup_item2_page_quota()
+        quota.max_page_bytes = bytes.len() as u64
+        expect(db_pages_build([record], quota).unwrap().pages[0].digest).to_equal(built.pages[0].digest)
+        quota.max_page_bytes = quota.max_page_bytes - 1
+        expect(db_pages_build([record], quota)).to_equal(Err("SCVDB_PAGE_BYTES_QUOTA"))
+        quota.max_page_bytes = 0
+        expect(db_pages_build([], quota)).to_equal(Err("SCVDB_PAGE_QUOTA"))
+
+    it "updates only supplied affected pages and matches a full rebuild":
+        val old = setup_item2_page_record("row-a", 1u8)
+        val untouched = setup_item2_page_record("row-b", 2u8)
+        val built = db_pages_build([old, untouched], setup_item2_page_quota()).unwrap()
+        val changed = setup_item2_page_record("row-a", 9u8)
+        val affected = setup_item2_page_for(built, old.key)
+        val next = db_pages_update(built.manifest, [affected], [changed]).unwrap()
+        val full = db_pages_build([changed, untouched], setup_item2_page_quota()).unwrap()
+        expect(next.manifest).to_equal(full.manifest)
+        expect(next.pages.len()).to_equal(1)
+        expect(next.pages[0]).to_equal(setup_item2_page_for(full, changed.key))
+        expect(db_pages_entry(next.manifest, untouched.key)).to_equal(db_pages_entry(built.manifest, untouched.key))
+        expect(db_pages_required_buckets([changed, changed])).to_equal(Ok([affected.bucket]))
+        expect(db_pages_update(built.manifest, [], [changed])).to_equal(Err("SCVDB_PAGE_MISSING_OR_DIGEST"))
+        expect(db_pages_update(built.manifest, built.pages, [])).to_equal(Err("SCVDB_PAGE_UNEXPECTED"))
+
+    it "inserts a new bucket without loading existing rows":
+        val old = setup_item2_page_record("row-a", 1u8)
+        val added = setup_item2_page_record("row-b", 2u8)
+        val built = db_pages_build([old], setup_item2_page_quota()).unwrap()
+        val next = db_pages_update(built.manifest, [], [added]).unwrap()
+        expect(next.manifest).to_equal(db_pages_build([old, added], setup_item2_page_quota()).unwrap().manifest)
+        expect(next.pages.len()).to_equal(1)
+        expect(next.pages[0].records).to_equal([added])
+        expect(db_pages_update(next.manifest, [], []).unwrap().manifest).to_equal(next.manifest)
+
+    it "rejects modified page bytes, wrong page identities and corrupt manifests":
+        val record = setup_item2_page_record("row-a", 1u8)
+        val built = db_pages_build([record], setup_item2_page_quota()).unwrap()
+        var corrupt = built.pages[0]
+        corrupt.records = [setup_item2_page_record("row-a", 8u8)]
+        expect(db_pages_lookup(built.manifest, corrupt, record.key)).to_equal(Err("SCVDB_PAGE_DIGEST"))
+        expect(db_pages_update(built.manifest, [corrupt], [record])).to_equal(Err("SCVDB_PAGE_DIGEST"))
+        corrupt.digest = "wrong"
+        expect(db_pages_lookup(built.manifest, corrupt, record.key)).to_equal(Err("SCVDB_PAGE_MISSING_OR_DIGEST"))
+        var manifest = built.manifest
+        manifest.root = "wrong"
+        expect(db_pages_update(manifest, [], [])).to_equal(Err("SCVDB_PAGE_MANIFEST_DIGEST"))
+
+    it "preserves tombstones, accepted records, aliases and monotone highwaters":
+        val kinds = [DbPageKind.Tombstone, DbPageKind.Accepted, DbPageKind.Alias]
+        for kind in kinds:
+            val retained = DbPageRecord(key: "retained", kind: kind, payload: [1u8])
+            val built = db_pages_build([retained], setup_item2_page_quota()).unwrap()
+            val forged = DbPageRecord(key: "retained", kind: kind, payload: [2u8])
+            expect(db_pages_update(built.manifest, built.pages, [forged])).to_equal(Err("SCVDB_PAGE_RETAINED_RECORD"))
+            expect(db_pages_update(built.manifest, built.pages, [retained]).unwrap().manifest).to_equal(built.manifest)
+        val high = DbPageRecord(key: "highwater", kind: DbPageKind.HighWater(9u64), payload: [])
+        val built = db_pages_build([high], setup_item2_page_quota()).unwrap()
+        val lower = DbPageRecord(key: "highwater", kind: DbPageKind.HighWater(8u64), payload: [])
+        expect(db_pages_update(built.manifest, built.pages, [lower])).to_equal(Err("SCVDB_PAGE_HIGHWATER"))
+        val higher = DbPageRecord(key: "highwater", kind: DbPageKind.HighWater(10u64), payload: [])
+        expect(db_pages_update(built.manifest, built.pages, [higher]).unwrap().manifest).to_equal(db_pages_build([higher], built.manifest.quota).unwrap().manifest)
+
+    it "retains deleted rows as typed tombstones and refuses duplicate keys":
+        val row = setup_item2_page_record("deleted", 1u8)
+        val built = db_pages_build([row], setup_item2_page_quota()).unwrap()
+        val tombstone = DbPageRecord(key: row.key, kind: DbPageKind.Tombstone, payload: [1u8])
+        val deleted = db_pages_update(built.manifest, built.pages, [tombstone]).unwrap()
+        expect(deleted.pages[0].records).to_equal([tombstone])
+        expect(db_pages_update(deleted.manifest, deleted.pages, [row])).to_equal(Err("SCVDB_PAGE_RETAINED_RECORD"))
+        expect(db_pages_build([row, row], setup_item2_page_quota())).to_equal(Err("SCVDB_PAGE_KEY_ORDER"))
+        expect(db_pages_update(built.manifest, built.pages, [row, row])).to_equal(Err("SCVDB_PAGE_KEY_ORDER"))
+
+    it "roundtrips bounded codecs and rejects truncated or trailing bytes":
+        val built = db_pages_build([setup_item2_page_record("codec", 1u8)], setup_item2_page_quota()).unwrap()
+        val page = db_page_encode(built.pages[0], built.manifest.quota).unwrap()
+        val manifest = db_pages_manifest_encode(built.manifest).unwrap()
+        expect(db_page_decode(page, built.manifest.quota)).to_equal(Ok(built.pages[0]))
+        expect(db_pages_manifest_decode(manifest)).to_equal(Ok(built.manifest))
+        expect(db_page_decode(page[0:page.len() - 1], built.manifest.quota)).to_equal(Err("SCVDB_FRAME_TRUNCATED"))
+        expect(db_pages_manifest_decode(manifest[0:manifest.len() - 1])).to_equal(Err("SCVDB_FRAME_TRUNCATED"))
+        expect(db_page_decode(page + [0u8], built.manifest.quota)).to_equal(Err("SCVDB_PAGE_FORMAT"))
+        expect(db_pages_manifest_decode(manifest + [0u8])).to_equal(Err("SCVDB_PAGE_FORMAT"))

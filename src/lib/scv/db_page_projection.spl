@@ -1,0 +1,81 @@
+# Full snapshot import and typed delta representation, not patch authorization.
+use std.scv.db_page_records.*
+use std.scv.db_pages.*
+use std.scv.db_reducer.{MaterializedState, DbRow}
+use std.scv.db_snapshot.{db_snapshot_encode}
+use std.scv.db_identity_snapshot.{db_identity_snapshot_encode}
+use std.scv.distributed_identity.*
+use std.scv.distributed_identity_map.*
+use std.common.crypto.sha256.{sha256_text}
+
+fn db_page_projection_import(state: MaterializedState, identities: IdentityMap, entities: [EntityRef], context: DbPageContext, quota: DbPageQuota) -> Result<DbPageBuild, text>:
+    """Import a complete existing snapshot; entities correspond one-for-one to rows."""
+    val snapshot = db_snapshot_encode(state)?
+    val identity_snapshot = db_identity_snapshot_encode(identities)?
+    if identities.database_namespace != context.namespace or identities.authority_epoch != context.epoch: return Err("SCVDB_TYPED_CONTEXT")
+    if entities.len() != state.rows.len(): return Err("SCVDB_TYPED_ROW_COVERAGE")
+    var records: [DbPageRecord] = []
+    var rows: {text: DbRow} = {}
+    var index = 0
+    for row in state.rows:
+        val entity = entities[index]
+        if entity.provisional == nil or entity.provisional.unwrap().database_namespace != context.namespace: return Err("SCVDB_TYPED_CONTEXT")
+        records.push(db_typed_page_record_encode(DbTypedPageRecord.CurrentRow(entity, row))?)
+        rows[row.entity] = row
+        index = index + 1
+    for batch in state.accepted:
+        records.push(db_typed_page_record_encode(DbTypedPageRecord.Accepted(batch))?)
+        records.push(db_typed_page_record_encode(DbTypedPageRecord.ActorCounter(batch))?)
+    for binding in identities.bindings:
+        if not rows.contains_key(binding.identity): return Err("SCVDB_TYPED_ALIAS_ROW_MISSING")
+        if rows[binding.identity].tombstoned != binding.tombstoned: return Err("SCVDB_TYPED_ALIAS_TOMBSTONE")
+        val alias = DbPageAlias(namespace: context.namespace, epoch: context.epoch, uid: binding.uid, sequence: binding.sequence)
+        records.push(db_typed_page_record_encode(DbTypedPageRecord.Alias(alias))?)
+    for mark in identities.high_water:
+        records.push(db_typed_page_record_encode(DbTypedPageRecord.HighWater(context.namespace, context.epoch, mark.entity_kind, mark.sequence))?)
+    val revision = DbPageRevision(context: context, semantic_revision: state.revision, identity_revision: sha256_text(identity_snapshot))
+    records.push(db_typed_page_record_encode(DbTypedPageRecord.Revision(revision))?)
+    db_pages_build(records, quota)
+
+fn db_page_projection_delta(records: [DbTypedPageRecord], context: DbPageContext) -> Result<[DbPageRecord], text>:
+    """Check delta context and accepted pair closure; does not prove reducer completeness."""
+    if records.len() == 0 or records.len() > 10000: return Err("SCVDB_TYPED_DELTA_QUOTA")
+    var encoded: [DbPageRecord] = []
+    var keyed: {text: DbPageRecord} = {}
+    var revision_count = 0
+    for record in records:
+        val item = db_typed_page_record_encode(record)?
+        if keyed.contains_key(item.key): return Err("SCVDB_TYPED_DUPLICATE_KEY")
+        keyed[item.key] = item
+        encoded.push(item)
+        match record:
+            CurrentRow(entity, _):
+                if entity.provisional.unwrap().database_namespace != context.namespace: return Err("SCVDB_TYPED_CONTEXT")
+            Alias(binding):
+                if binding.namespace != context.namespace or binding.epoch != context.epoch: return Err("SCVDB_TYPED_CONTEXT")
+            HighWater(namespace, epoch, _, _):
+                if namespace != context.namespace or epoch != context.epoch: return Err("SCVDB_TYPED_CONTEXT")
+            Revision(revision):
+                if revision.context != context: return Err("SCVDB_TYPED_CONTEXT")
+                revision_count = revision_count + 1
+            _: ()
+    if revision_count != 1: return Err("SCVDB_TYPED_REVISION_REQUIRED")
+    for record in records:
+        match record:
+            Accepted(batch):
+                val counterpart = db_typed_page_record_encode(DbTypedPageRecord.ActorCounter(batch))?
+                if not keyed.contains_key(counterpart.key) or keyed[counterpart.key] != counterpart: return Err("SCVDB_TYPED_ACCEPTED_PAIR")
+            ActorCounter(batch):
+                val counterpart = db_typed_page_record_encode(DbTypedPageRecord.Accepted(batch))?
+                if not keyed.contains_key(counterpart.key) or keyed[counterpart.key] != counterpart: return Err("SCVDB_TYPED_ACCEPTED_PAIR")
+            Alias(binding):
+                val key = db_page_highwater_key(binding.namespace, binding.epoch, binding.uid.entity_kind)?
+                if not keyed.contains_key(key): return Err("SCVDB_TYPED_ALIAS_HIGHWATER")
+                match db_typed_page_record_decode(keyed[key])?:
+                    HighWater(_, _, _, sequence):
+                        if sequence < binding.sequence: return Err("SCVDB_TYPED_ALIAS_HIGHWATER")
+                    _: return Err("SCVDB_TYPED_ALIAS_HIGHWATER")
+            _: ()
+    Ok(encoded)
+
+export db_page_projection_import, db_page_projection_delta

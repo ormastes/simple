@@ -1,0 +1,66 @@
+use std.spec.{expect}
+use test.fixtures.scv.db_paged_fixture.*
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
+use app.scv.db.paged_store.*
+use app.scv.db.paged_conflict_owner.*
+use std.scv.db_paged_model.*
+use std.scv.db_paged_conflicts.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.{MaterializedState}
+use std.scv.db_conflict_resolution.*
+use std.scv.db_admission.{db_patch_signing_bytes}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+
+struct Item2PagedConflictFixture:
+    root: text
+    policy: DbPagedPolicy
+    head: text
+    revision: text
+    patches: [DbPatch]
+    evidence: DbPagedConflictEvidence
+
+fn setup_item2_conflict_review(policy: DbPagedPolicy, patches: [DbPatch]) -> DbPagedPolicy:
+    var changed = policy
+    changed.config.admission.metadata = setup_item2_reviewed_metadata(patches)
+    setup_item2_paged_repin(changed)
+
+fn setup_item2_conflict_edit(before: text, after: text) -> DbOperation:
+    DbOperation.UpdateFields(setup_item2_paged_ref(1), [FieldEdit(field: "code", before: DbValue.Text(before), after: DbValue.Text(after))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: []))
+
+fn setup_item2_paged_conflict() -> Item2PagedConflictFixture:
+    val root = setup_item2_paged_root()
+    var policy = setup_item2_paged_policy()
+    policy.config.admission.keys[0].role = "reviewer"
+    policy = setup_item2_paged_repin(policy)
+    val genesis = db_paged_initialize(root, policy).unwrap()
+    val create = setup_item2_paged_patch([setup_item2_paged_create(1, "A"), setup_item2_paged_create(2, "D")], genesis.manifest.revision, 1)
+    policy = setup_item2_conflict_review(policy, [create])
+    val created = db_paged_apply(root, genesis.head, create, policy).unwrap()
+    val local = setup_item2_paged_patch([setup_item2_conflict_edit("A", "B")], created.revision, 2)
+    # A separate operation would be valid in isolation. The conflicting whole
+    # batch must publish neither its row nor an alias/accepted-counter claim.
+    val incoming = setup_item2_paged_patch([setup_item2_paged_create(3, "C"), setup_item2_conflict_edit("A", "C")], created.revision, 3, true)
+    policy = setup_item2_conflict_review(policy, [create,local,incoming])
+    val changed = db_paged_apply(root, created.head, local, policy).unwrap()
+    val captured = db_paged_capture_conflict(root, changed.head, incoming, policy).unwrap()
+    expect(captured.conflict_ids.len()).to_equal(1)
+    val view = db_paged_open(root, policy).unwrap()
+    val value = db_paged_lookup(root, view, db_paged_conflict_key(captured.conflict_ids[0]).unwrap()).unwrap().unwrap()
+    Item2PagedConflictFixture(root: root, policy: policy, head: captured.head, revision: captured.revision, patches: [create,local,incoming], evidence: db_paged_conflict_decode(value).unwrap())
+
+fn setup_item2_conflict_decision(fixture: Item2PagedConflictFixture, chosen: text = "C") -> DbConflictDecision:
+    DbConflictDecision(conflict_id: fixture.evidence.record.conflict_id, reviewer: "paged-first", expected_current: DbValue.Text("B"), chosen: DbValue.Text(chosen))
+
+fn setup_item2_conflict_signed_resolution(fixture: Item2PagedConflictFixture, decision: DbConflictDecision) -> DbPatch:
+    val row = db_paged_current_row(fixture.root, fixture.policy, setup_item2_paged_ref(1)).unwrap().unwrap()
+    val state = MaterializedState(rows: [row], accepted: [], revision: fixture.revision)
+    val plan = db_plan_conflict_resolution(fixture.evidence.record, decision, state).unwrap()
+    var patch = setup_item2_paged_patch([plan.operation], fixture.revision, 4)
+    patch.provenance = db_conflict_resolution_provenance(fixture.evidence.record, decision).unwrap()
+    patch = db_patch_seal(patch).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([45u8;32])
+    patch.signature = pure_ed25519_sign(seed, key, db_patch_signing_bytes(patch).unwrap())
+    patch
+
+export Item2PagedConflictFixture, setup_item2_conflict_review, setup_item2_conflict_edit
+export setup_item2_paged_conflict, setup_item2_conflict_decision, setup_item2_conflict_signed_resolution
