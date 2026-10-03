@@ -34,6 +34,12 @@ struct CollectionPlanFacts:
     lookup_promotion_count: i64
     profile_hash_probes_p95: i64 = -1
     profile_hash_collisions_p95: i64 = -1
+    # Admitted upper bounds on peak EXTRA live bytes above Original, for the
+    # same collection site, target and candidate. -1 means unknown, not zero.
+    memory_budget_bytes: i64 = -1
+    linear_extra_memory_bytes: i64 = -1
+    hash_extra_memory_bytes: i64 = -1
+    ordered_extra_memory_bytes: i64 = -1
 
 struct CollectionPlanDecision:
     selected: CollectionPlanAlgorithm
@@ -94,6 +100,13 @@ fn _collection_plan_selected(
         hash_rejection: hash_rejection, ordered_rejection: ordered_rejection
     )
 
+fn _collection_plan_memory_rejection(estimate: i64, budget: i64) -> text:
+    if estimate < 0:
+        return "memory-estimate-unproven"
+    if estimate > budget:
+        return "memory-budget-exceeded"
+    ""
+
 fn collection_plan_select(facts: CollectionPlanFacts) -> CollectionPlanDecision:
     """Choose only a candidate whose semantic, target and policy guards hold."""
     if facts.collection_kind != "set" and facts.collection_kind != "map":
@@ -107,6 +120,9 @@ fn collection_plan_select(facts: CollectionPlanFacts) -> CollectionPlanDecision:
     if facts.linear_size_limit < 0 or facts.lookup_promotion_count < 1 or
             facts.static_size < -1 or facts.static_lookups < -1 or facts.hard_size_bound < -1:
         return _collection_plan_original("invalid-static-cost-facts", "not-evaluated", "not-evaluated", "not-evaluated")
+    if (facts.memory_budget_bytes < -1 or facts.linear_extra_memory_bytes < -1 or
+            facts.hash_extra_memory_bytes < -1 or facts.ordered_extra_memory_bytes < -1):
+        return _collection_plan_original("invalid-memory-facts", "not-evaluated", "not-evaluated", "not-evaluated")
     if facts.profile_admitted and (facts.profile_size_p95 < 0 or facts.profile_lookups_p95 < 0):
         return _collection_plan_original("invalid-profile-facts", "not-evaluated", "not-evaluated", "not-evaluated")
     # Size evidence for this collection must agree with its proven upper bound.
@@ -126,7 +142,11 @@ fn collection_plan_select(facts: CollectionPlanFacts) -> CollectionPlanDecision:
     if not facts.equality_pure or not facts.duplicate_semantics_preserved or
             not facts.order_insensitive or not facts.mutation_epoch_stable:
         return _collection_plan_original("semantic-proof-missing", "semantic-proof-missing", "semantic-proof-missing", "semantic-proof-missing")
+    if facts.memory_budget_bytes < 0:
+        return _collection_plan_original("memory-budget-unproven", "memory-budget-unproven", "memory-budget-unproven", "memory-budget-unproven")
 
+    val linear_memory_rejection = _collection_plan_memory_rejection(
+        facts.linear_extra_memory_bytes, facts.memory_budget_bytes)
     val hash_rejection = if not facts.key_hashable:
         "key-not-hashable"
     elif not facts.target_has_hash:
@@ -134,7 +154,7 @@ fn collection_plan_select(facts: CollectionPlanFacts) -> CollectionPlanDecision:
     elif facts.policy == "robust" or facts.policy == "critical":
         "unbounded-hash-worst-case"
     else:
-        ""
+        _collection_plan_memory_rejection(facts.hash_extra_memory_bytes, facts.memory_budget_bytes)
     val ordered_rejection = if not facts.key_orderable:
         "key-not-orderable"
     elif not facts.target_has_ordered:
@@ -142,12 +162,14 @@ fn collection_plan_select(facts: CollectionPlanFacts) -> CollectionPlanDecision:
     elif not facts.ordered_update_bound_proven:
         "ordered-update-bound-unproven"
     else:
-        ""
+        _collection_plan_memory_rejection(facts.ordered_extra_memory_bytes, facts.memory_budget_bytes)
 
     if facts.attribute == "linear":
         if (facts.policy == "robust" or facts.policy == "critical") and
                 (facts.hard_size_bound < 0 or facts.hard_size_bound > facts.linear_size_limit):
             return _collection_plan_original("explicit-linear-bound-unproven", "hard-size-bound-unproven", hash_rejection, ordered_rejection)
+        if linear_memory_rejection != "":
+            return _collection_plan_original("explicit-linear-rejected", linear_memory_rejection, hash_rejection, ordered_rejection)
         return _collection_plan_selected(CollectionPlanAlgorithm.Linear, "attribute", "explicit-linear", "", hash_rejection, ordered_rejection)
     if facts.attribute == "hash":
         if hash_rejection != "":
@@ -165,9 +187,12 @@ fn collection_plan_select(facts: CollectionPlanFacts) -> CollectionPlanDecision:
     val known_quiet = lookup_hint >= 0 and lookup_hint < facts.lookup_promotion_count
     val bounded_small = facts.hard_size_bound >= 0 and facts.hard_size_bound <= facts.linear_size_limit
     val needs_hard_bound = facts.policy == "robust" or facts.policy == "critical"
-    if known_small and known_quiet and (not needs_hard_bound or bounded_small):
+    if (known_small and known_quiet and (not needs_hard_bound or bounded_small) and
+            linear_memory_rejection == ""):
         return _collection_plan_selected(CollectionPlanAlgorithm.Linear, evidence, "small-quiet-collection", "", hash_rejection, ordered_rejection)
-    val linear_rejection = if size_hint > facts.linear_size_limit:
+    val linear_rejection = if linear_memory_rejection != "":
+        linear_memory_rejection
+    elif size_hint > facts.linear_size_limit:
         "size-exceeds-linear-limit"
     elif needs_hard_bound and not bounded_small:
         "hard-size-bound-unproven"
