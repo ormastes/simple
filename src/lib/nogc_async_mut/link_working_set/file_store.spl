@@ -7,12 +7,13 @@ Each returned stage is a single-owner capability; publish/discard consumes it.
 """
 use std.nogc_sync_mut.io.retained_file.{
     RetainedFile, retained_file_open, retained_file_read, retained_file_write,
-    retained_file_unchanged, retained_file_sync, retained_file_close
+    retained_file_unchanged, retained_file_sync, retained_file_close,
+    retained_directory_is_real_no_follow
 }
 use std.nogc_sync_mut.io.file_ops.{
     secure_temp_dir, file_publish_noreplace, file_exists, file_remove
 }
-use std.nogc_sync_mut.io.dir_ops.{dir_remove, dir_is_real_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.nogc_async_mut.link_working_set.model.{LinkSpillFrameV1}
 use std.nogc_async_mut.link_working_set.spill.{link_spill_frame_v1, link_spill_frame_v1_valid}
 
@@ -71,7 +72,7 @@ fn _link_spill_read_exact(file: RetainedFile, count: i64) -> Result<[u8], text>:
 
 fn _link_spill_cleanup(stage: LinkStagedFileV1) -> bool:
     if stage.consumed: return false
-    if not dir_is_real_no_follow(stage.directory): return false
+    if not retained_directory_is_real_no_follow(stage.directory): return false
     var cleaned = true
     for name in ["frames.bin", "payload.tmp"]:
         val path = stage.directory + "/" + name
@@ -120,7 +121,7 @@ pub fn link_stage_file_v1(source: text, parent: text, window_bytes: i64,
         scratch_limit_bytes: u64, cancelled: fn() -> bool) -> Result<LinkStagedFileV1, text>:
     link_spill_required_scratch_v1(0, window_bytes)?
     if cancelled(): return Err("spill staging cancelled")
-    if not dir_is_real_no_follow(parent): return Err("spill parent is not a regular directory")
+    if not retained_directory_is_real_no_follow(parent): return Err("spill parent is not a regular directory")
     val input = retained_file_open(source, LINK_SPILL_FILE_LIMIT_V1)?
     val required_result = link_spill_required_scratch_v1(input.size, window_bytes)
     if required_result.is_err():
@@ -190,7 +191,7 @@ pub fn link_publish_staged_v1(stage: LinkStagedFileV1, destination: text,
     if stage.published: return Err("spill transaction already published")
     if stage.consumed: return Err("spill transaction already consumed")
     if cancelled(): return _link_spill_failure(stage, "spill publication cancelled")
-    if not dir_is_real_no_follow(stage.directory): return Err("spill stage directory changed")
+    if not retained_directory_is_real_no_follow(stage.directory): return Err("spill stage directory changed")
     val opened_input = retained_file_open(stage.directory + "/frames.bin", stage.spill_bytes)
     if opened_input.is_err(): return _link_spill_failure(stage, opened_input.unwrap_err())
     val input = opened_input.unwrap()

@@ -2,10 +2,25 @@
 
 ## Bootstrap failure collection
 
-Bootstrap failure collection means completing independently runnable builds and tests after errors. Usable compiler bytes plus minimum sanity permit the next diagnostic phase before formal admission. Crashes block dependent chains; all failed and blocked rows remain visible and prevent a successful aggregate. Follow the
+Bootstrap failure collection means finishing all independently runnable modules,
+builds and tests after errors, then assigning independent root causes to parallel
+repair agents. The exact compiler must compile Hello World and execute its output
+successfully before the next provisional phase; full verification may continue
+alongside it. User-authorized time/memory/policy exceptions use separate monitored
+DIAGNOSTIC attempts, retain failed receipts, and never manufacture admission or
+test PASS. Restore normal gates before promotion. Follow the
 [shared collection policy](../07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
 cache preservation, and bug evidence. This is agent workflow guidance; it does
 not change runner behavior.
+
+Maintained project routes: [build collection](../07_guide/tooling/bootstrap_failure_collection.md),
+[parallel handoff](../07_guide/app/llm/bootstrap_parallel_handoff.md), and
+[LLVM debugging](../07_guide/app/llm/llm_bootstrap_llvm_debugging.md).
+Agent entrypoints: [debug](../../.agents/skills/debug/SKILL.md),
+[long-build](../../.agents/skills/long-build/SKILL.md), and
+[bootstrap](../../.agents/skills/bootstrap/SKILL.md). Reusable SPipe procedures
+belong to the resolved common package's `skills/` and `wiki/` indexes; machine
+build status and private receipts remain in the project/runtime owner.
 
 ## SPipe home routing
 
@@ -39,8 +54,8 @@ references, then narrowly restore intended blocks and run the smallest valid
 build. A recovery hash never authorizes checkout/reset. Preserve cache producer,
 entry, dependency, ABI, and option identities; defer the one final clean gate
 to the required boundary. For Windows/Linux bootstrap repairs, run dependent
-Phase 3/4 diagnostics once the required compiler binary exists, concurrently
-with admission using isolated outputs/caches. Retain exact producer evidence;
+Phase 3/4 diagnostics once the exact compiler passes the Hello compile/run
+gate, concurrently with qualification using isolated outputs/caches. Retain exact producer evidence;
 admission and lineage still gate qualification and promotion. Do not turn this
 process note into a test, docgen, bootstrap, or release PASS.
 

@@ -9,10 +9,17 @@ alwaysApply: false
 
 ## Bootstrap failure collection
 
-During diagnosis, continue independently runnable build and test rows after
-failures. A usable immutable compiler plus minimum sanity may start the next
-diagnostic phase before formal admission; keep that lineage unadmitted. Crash or
-sanity failure blocks its dependent chain while independent work continues.
+During diagnosis, finish every independently runnable module/build/test row,
+collect failures and delegate independent causes to parallel repair agents.
+The exact immutable compiler must compile Hello World and execute its output
+successfully before the next provisional phase starts; full qualification may
+continue alongside it. A failure blocks only work needing that capability.
+User-authorized time, memory or policy bypasses belong to separate monitored
+DIAGNOSTIC attempts. Retain failed receipts and truthful identities; restore
+normal gates before formal admission or promotion. Never turn missing inputs
+or failed assertions into PASS. Preserve compatible frontend/HIR/native caches
+and freeze latest requested release plus reviewed applicable unmerged fixes at
+the next actual restart, without changing live source/producer bytes.
 Follow the
 [shared collection policy](../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
 cache preservation, and bug evidence. This is agent workflow guidance; it does
@@ -135,11 +142,14 @@ deployment. Warning-only mismatch handling is permitted solely for explicitly
 labeled temporary diagnostic rows.
 
 For the Windows/Linux parallel repair workflow, start dependent Phase 3/4
-diagnostic builds as soon as each required compiler binary exists while
-upstream admission continues. Freeze the producer bytes and source identity,
+diagnostic builds after each exact compiler has compiled Hello World and its
+output has executed successfully, while upstream qualification continues.
+Freeze the producer bytes and source identity,
 isolate writable caches and outputs, and share CPU capacity within memory
 limits. This diagnostic scheduling rule does not change the admitted scheduler
-or its receipt requirements; binary existence is not admission evidence.
+or its receipt requirements; binary existence is neither the Hello gate nor
+admission evidence. Apply the shared policy's explicit diagnostic exceptions,
+finite repair budgets and session-specific worker selection.
 
 Temporary source workarounds must link the owning canonical bug immediately
 before the affected block. Use the

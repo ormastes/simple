@@ -7,14 +7,22 @@ description: Use when a Simple bootstrap/native-build is unstable, slow, or fail
 
 ## Bootstrap failure collection
 
-Collect independent build and test failures before reporting. A usable compiler plus minimum sanity can start the next diagnostic phase while qualification continues; formal admission remains required for promotion. Keep phase/producer/entry caches and stop repair after at most three cycles. Follow the
+Finish all independently runnable build modules and test rows, collect their
+failures, and delegate separate causes to parallel repair agents. The exact
+compiler must compile Hello World and execute its output successfully before
+starting the next provisional phase; full qualification may continue alongside
+it. Formal admission remains required for promotion. Follow the
 [shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
 cache preservation, and bug evidence. Host native-build/bootstrap runs default
 to collecting independent failures; CI=true/1 defaults to fail fast. Use
 `--keep-going` to collect CI diagnostics or `--fail-fast` for a short host run.
 The last flag wins over `SIMPLE_COMPILE_FAIL_FAST=0|1`, which overrides CI/host
 defaults. Preserve nonzero aggregate failure and explicit unrun SKIPPED/BLOCKED
-rows; never bypass snapshot or admission failures to continue.
+rows. User-authorized time, memory or policy exceptions belong to separate
+monitored DIAGNOSTIC attempts; record the disabled check and authority, preserve
+the failed attempt, and continue eligible work without claiming admission.
+Restore normal gates before promotion. This does not permit false hashes,
+missing-input PASS, unsafe memory access or ignored assertions.
 
 Goal: produce the requested Simple executable without throwing away useful cache.
 
@@ -68,8 +76,8 @@ for supported invalidation commands and their scope.
   `simple check-dbs --fullscan bugs` reconciliation. Fix the bug owner, review
   related links, then narrowly restore intended code. Recovery hashes never
   authorize automatic checkout/reset.
-- Start dependent Phase 3/4 diagnostic builds when their required compiler
-  binary exists, concurrently with upstream admission and independent Windows/
+- Start dependent Phase 3/4 diagnostic builds after their exact compiler has
+  compiled and successfully executed Hello World, concurrently with upstream admission and independent Windows/
   Linux lanes. Use immutable producer bytes and isolated caches/outputs, with
   CPU and memory budgets. Keep results provisional until admission and lineage
   pass; binary existence is not an admission result.
@@ -91,6 +99,10 @@ for supported invalidation commands and their scope.
   only on the non-vacuous full-CLI artifact. Require a `Results:` line—exit 0
   without test output is not evidence.
 - If a source fix lands while a build is still before object output, prefer letting it fail or finish. Restart only when no cache/output can be lost.
+- On the next actual restart, fetch the requested release branch and integrate
+  reviewed applicable unmerged fixes in an isolated source owner before freezing
+  inputs. Do not mutate live builds, overwrite another agent's work or force
+  cache identities. Preserve compatible frontend/HIR persistence.
 - Keep every log under `build/mini_builds/` or `build/native_probe/`.
 - Set `SIMPLE_NO_STUB_FALLBACK=1` for every candidate or verification build;
   a binary containing generated unresolved stubs is debug evidence only.
@@ -100,7 +112,7 @@ for supported invalidation commands and their scope.
 1. Start or keep the main build:
    ```bash
    bin/simple native-build --backend cranelift --source src/compiler --source src/app --source src/lib \
-     --entry-closure --threads 8 --cache-dir build/bootstrap/native_cache --mode dynload \
+     --entry-closure --threads <session-worker-budget> --cache-dir build/bootstrap/native_cache --mode dynload \
      --entry src/app/cli/main.spl -o build/native_probe/simple
    ```
 2. Run parallel mini builds with separate caches for early failures:
@@ -112,13 +124,15 @@ for supported invalidation commands and their scope.
 3. Finish independently runnable builds and test shards after an error; a crash
    blocks only its dependent chain. Group failures by the first real error,
    retain every affected row, and attach bug IDs and exact reproductions.
-4. Fix the smallest shared root cause. Add a focused regression and a similar
+4. Assign independent causes to parallel agents and fix their smallest shared
+   owners. Add a focused regression and a similar
    scenario for the same mechanism.
 5. Rerun only failed shards first, reusing their compatible caches and recording
    any explicit invalidation needed for the fix.
-6. Resume the main build with its compatible cache. Respect the session's
-   maximum of three verify/fix cycles; reuse green evidence for unchanged
-   inputs. Report unresolved failures and resume steps when the limit is reached.
+6. Resume with compatible caches. Use the shared policy's finite per-cause
+   repair budget and record explicit user-directed exceptions. Reuse green
+   evidence for unchanged inputs; an exhausted cause does not stop unrelated
+   collection. Never loop an identical failed command indefinitely.
 7. Once fixes and focused checks pass, perform the requested final clean build
    and sanity checks. Binary existence alone is not completion; report the
    actual requested executable behavior and any remaining verification gaps.

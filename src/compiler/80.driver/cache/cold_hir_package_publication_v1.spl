@@ -3,8 +3,6 @@
 # pin and decode one archive at a time before moving the index pointer.
 
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
-use compiler.driver.cache.cache_text_join.{cache_text_join_v1}
-use compiler.driver.cache.cas_store.{cas_get}
 use compiler.driver.cache.cas_batch_transaction.{cas_batch_current_v1}
 use compiler.driver.cache.cold_hir_package_drafts_v1.{
     ColdHirPackageOutputV1, cold_hir_package_index_from_outputs_v1
@@ -22,17 +20,10 @@ use compiler.driver.cache.package_config_variant_receipt.{
 }
 use compiler.driver.cache.package_archive_cache.{
     PackageArchiveAuthorityV1, package_archive_aggregate_entry_v1,
-    package_archive_load_v1
+    package_archive_load_v1, package_archive_payloads_v1
 }
 use compiler.driver.cache.package_archive_types.{PackageArchiveReceiptV1}
-use compiler.hir.archive.interface_action_archive.{
-    interface_action_archive_payloads_decode_v1
-}
-use std.common.crypto.sha256.{sha256_text}
-use std.common.string_core.{text_validate_utf8}
 use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1}
-
-val COLD_HIR_ARCHIVE_MAX_BYTES_V1: u64 = 1073741824
 
 # CAS readback verifies the whole archive digest. Check exact member layout,
 # payload hashes, and the manifest binding before graph publication. The warm
@@ -40,64 +31,9 @@ val COLD_HIR_ARCHIVE_MAX_BYTES_V1: u64 = 1073741824
 fn cold_hir_archive_payloads_v1(
     archive_content: text, receipt: PackageArchiveReceiptV1
 ) -> Result<(text, text, text, text), text>:
-    val size = archive_content.len().to_u64()
-    if size == 0 or size > COLD_HIR_ARCHIVE_MAX_BYTES_V1 or
-            receipt.members.len() != 3:
-        return Err("cold-publish-archive-layout-invalid")
-    val expected_names = ["actions.smf", "interface.smf", "manifest.sdn"]
-    var previous_end: u64 = 0
-    var member_digests: [text] = []
-    var manifest_content = ""
-    var interface_content = ""
-    var action_content = ""
-    var index = 0
-    while index < 3:
-        val member = receipt.members[index]
-        if member.name != expected_names[index] or
-                member.offset != previous_end or member.extent == 0 or
-                member.offset > size or member.extent > size - member.offset:
-            return Err("cold-publish-archive-layout-invalid")
-        val end = member.offset + member.extent
-        val begin_index = member.offset.to_i64()
-        val end_index = end.to_i64()
-        # The archive is already resident for CAS readback. Slice exactly one
-        # member for semantic decoding instead of constructing a second
-        # member-sized [u8] before converting it back to text.
-        val payload_text = archive_content.slice(begin_index, end_index)
-        if payload_text.len().to_u64() != member.extent:
-            return Err("cold-publish-archive-layout-invalid")
-        if not text_validate_utf8(payload_text):
-            return Err("cold-publish-archive-member-utf8-invalid")
-        if sha256_text(payload_text) != member.payload_digest:
-            return Err("cold-publish-archive-member-digest-mismatch")
-        if index == 0:
-            action_content = payload_text
-        elif index == 1:
-            interface_content = payload_text
-        else:
-            manifest_content = payload_text
-        member_digests.push(member.payload_digest)
-        previous_end = end
-        index = index + 1
-    if previous_end != size:
-        return Err("cold-publish-archive-layout-invalid")
-    val dependency_text = cache_text_join_v1(
-        receipt.dependency_interface_digests, ",")
-    if dependency_text == nil:
-        return Err("cold-publish-archive-manifest-invalid")
-    val dependency_text_value = dependency_text.unwrap()
-    val manifest_lines = manifest_content.split("\n")
-    if manifest_lines.len() != 7 or
-            manifest_lines[0] != "simple-interface-action-archive-v1" or
-            manifest_lines[1] != "package={receipt.package_key}" or
-            manifest_lines[2] != "variant={receipt.variant_digest}" or
-            manifest_lines[3] != "producer={receipt.producer_digest}" or
-            manifest_lines[4] != "dependencies={receipt.dependency_interface_digests.len()};{dependency_text_value}" or
-            manifest_lines[5] != "interface={member_digests[1]}" or
-            manifest_lines[6] != "action={member_digests[0]}":
-        return Err("cold-publish-archive-manifest-invalid")
-    Ok((member_digests[1], member_digests[0],
-        interface_content, action_content))
+    match package_archive_payloads_v1(archive_content, receipt):
+        case Ok(payloads): Ok(payloads)
+        case Err(reason): Err("cold-publish-{reason}")
 
 fn cold_hir_package_publish_verified_v1(
     cache_root: text,
@@ -162,22 +98,21 @@ fn cold_hir_package_publish_verified_v1(
             cache_root, aggregate_entry, archive_authority,
             canonical_identity_sort_texts(dependencies))
         if not loaded.valid or loaded.receipt == nil:
+            if loaded.reason == "archive-semantic-invalid":
+                return Err("cold-publish-archive-decode-invalid:{package_identity}")
+            if loaded.reason == "archive-content-unavailable":
+                return Err("cold-publish-archive-blob-invalid:{package_identity}")
+            if loaded.reason == "archive-layout-invalid" or
+                    loaded.reason.starts_with("archive-member-") or
+                    loaded.reason == "archive-manifest-invalid":
+                return Err("cold-publish-{loaded.reason}:{package_identity}")
             return Err("cold-publish-archive-{loaded.reason}:{package_identity}")
         val loaded_receipt = loaded.receipt.unwrap()
-        val archive_content = cas_get(
-            cache_root, loaded_receipt.archive_digest)
-        if archive_content == nil:
-            return Err("cold-publish-archive-blob-invalid:{package_identity}")
-        val archive_bytes = archive_content.unwrap()
-        val payloads = cold_hir_archive_payloads_v1(
-            archive_bytes, loaded_receipt)
-        if payloads.is_err():
-            return Err("{payloads.unwrap_err()}:{package_identity}")
-        val (interface_digest, action_digest,
-            interface_content, action_content) = payloads.unwrap()
-        if interface_action_archive_payloads_decode_v1(
-                interface_content, action_content).is_err():
-            return Err("cold-publish-archive-decode-invalid:{package_identity}")
+        # load already checked the whole bytes, exact three-member layout,
+        # each payload hash and semantic grammar. Reuse its verified digests
+        # instead of rereading and decoding the archive a second time.
+        val interface_digest = loaded_receipt.members[1].payload_digest
+        val action_digest = loaded_receipt.members[0].payload_digest
         for entry in entries:
             if not output_by_module.has(entry.module_identity):
                 return Err("cold-publish-output-missing:{entry.module_identity}")
