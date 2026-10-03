@@ -167,6 +167,28 @@ describe "bootstrap inventory backed job manifest":
                     case Err(reason): fail(reason)
             case Err(reason): fail(reason)
 
+        # Exercise actual emission and decoding: zero is not replaced by 24h,
+        # while the positive reservation remains separate from enforcement.
+        var work_keys: [text] = []
+        for duration in ["0", "1000"]:
+            match bootstrap_manifest_job_from_inventory_v1(["--job-from-inventory",
+                    root + "/template.sdn", producer, root, "work_policy", "native", "result.sdn",
+                    "inventory.txt", "--memory-limit-bytes", "2147483648",
+                    "--links-inventory", "links.txt", "--work-timeout-ms", duration,
+                    "--memory-policy", "monitor", "--manifest", private_root + "/work-" + duration + ".sdn",
+                    "--", "--group", "one"]):
+                case Ok(path):
+                    match builder_read_run_v1(path):
+                        case Ok(run):
+                            expect(run.tasks[0].timeout_ms).to_equal(if duration == "0": 0 else: 1000)
+                            expect(run.tasks[0].memory_limit_bytes).to_equal(2147483648)
+                            expect(run.tasks[0].memory_policy).to_equal("monitor")
+                            expect(run.tasks[0].args).to_equal(["--group", "one"])
+                            work_keys = work_keys.push(run.tasks[0].cache_key)
+                        case Err(reason): fail(reason)
+                case Err(reason): fail(reason)
+        expect(work_keys[0] == work_keys[1]).to_equal(false)
+
         # Exercise the actual emitter: changing a nonfirst member must change
         # source_digest even though the inventory path list is byte-identical.
         var source_digests: [text] = []

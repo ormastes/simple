@@ -1,0 +1,74 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/derived-manager.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir "$tmp/other-checkout"
+printf 'not an admission\n' >"$tmp/producer.env"
+if [ "${1:-}" = --facade-only ]; then
+  if env -u BOOTSTRAP_STAGE3_FACADE_PATH -u BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE \
+      sh "$repo/scripts/bootstrap/prepare-phase2-build-manager.shs" \
+      --producer-receipt="$tmp/producer.env" --source-root="$repo" \
+      --output-root="$tmp/images" --target=x86_64-pc-windows-msvc \
+      --runtime-bundle=core-c-bootstrap --memory-bytes=67108864 --reserve-bytes=1 \
+      --derived-source-snapshot="$tmp/snapshot" >"$tmp/facade.log" 2>&1; then
+    echo 'invalid admission accepted' >&2; exit 1
+  fi
+  grep -q 'producer missing from admission' "$tmp/facade.log" \
+    || { cat "$tmp/facade.log" >&2; exit 1; }
+  printf '%s\n' 'PASS: actual preparer loads canonical facade without ambient setup and rejects invalid admission before compiler launch'
+  exit 0
+fi
+if sh "$repo/scripts/bootstrap/prepare-phase2-build-manager.shs" \
+    --producer-receipt="$tmp/producer.env" --source-root="$tmp/other-checkout" \
+    --output-root="$tmp/images" --target=x86_64-pc-windows-msvc \
+    --runtime-bundle=core-c-bootstrap --memory-bytes=67108864 --reserve-bytes=1 \
+    --derived-source-snapshot="$tmp/snapshot" >"$tmp/routing.log" 2>&1; then
+  echo 'different derived helper/driver checkout accepted' >&2; exit 1
+fi
+grep -q 'derived helper source must be the checkout' "$tmp/routing.log" \
+  || { cat "$tmp/routing.log" >&2; exit 1; }
+if [ "${1:-}" = --routing-only ]; then
+  printf '%s\n' 'PASS: actual preparer refuses mismatched helper/driver root before admission or compiler launch'
+  exit 0
+fi
+. "$repo/scripts/bootstrap/lib/derived-manager-provenance.shs"
+# Exact single-field reader and real byte snapshot for this small source tree.
+bootstrap_stage3_manifest_value() {
+  awk -F= -v key="$1" '$1 == key { n++; sub(/^[^=]*=/, ""); value=$0 } END { if (n != 1) exit 1; print value }' "$2"
+}
+bootstrap_stage3_source_snapshot() { (cd "$2" && sha256sum source.spl) >"$1"; }
+mkdir "$tmp/helper"
+printf 'fn main():\n    print("helper")\n' >"$tmp/helper/source.spl"
+git -C "$tmp/helper" init -q
+git -C "$tmp/helper" add source.spl
+git -C "$tmp/helper" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture
+for name in producer product runtime tools; do printf '%s\n' "$name" >"$tmp/$name"; done
+bootstrap_stage3_source_snapshot "$tmp/helper.snapshot" "$tmp/helper"
+sha() { sha256sum "$1" | cut -d ' ' -f 1; }
+{
+  printf '%s\n' 'format=SIMPLE-DERIVED-MANAGER-IMAGES-1' 'canonical_admission=0' 'manager_support_image_mode=one-binary' \
+    "producer_path=$tmp/producer" "producer_sha256=$(sha "$tmp/producer")" \
+    "product_source_snapshot_sha256=$(sha "$tmp/product")" \
+    "runtime_snapshot_sha256=$(sha "$tmp/runtime")" "tool_authority_sha256=$(sha "$tmp/tools")" \
+    "helper_source_root=$tmp/helper" "helper_source_snapshot_path=$tmp/helper.snapshot" \
+    "helper_source_snapshot_sha256=$(sha "$tmp/helper.snapshot")" \
+    "helper_source_commit=$(git -C "$tmp/helper" rev-parse HEAD)" \
+    "helper_source_tree=$(git -C "$tmp/helper" rev-parse HEAD^{tree})"
+} >"$tmp/good.env"
+check() { bootstrap_derived_manager_provenance_verify "$tmp/current.env" "$tmp/producer" "$tmp/product" "$tmp/runtime" "$tmp/tools" "$tmp/helper" "$tmp/observed" "$tmp/helper.snapshot"; }
+cp "$tmp/good.env" "$tmp/current.env"
+check || { echo 'valid derived binding refused' >&2; exit 1; }
+for field in producer_sha256 product_source_snapshot_sha256 runtime_snapshot_sha256 tool_authority_sha256 helper_source_snapshot_sha256 helper_source_root helper_source_commit helper_source_tree canonical_admission manager_support_image_mode; do
+  sed "s|^$field=.*|$field=wrong|" "$tmp/good.env" >"$tmp/current.env"
+  if check; then echo "wrong $field accepted" >&2; exit 1; fi
+  sed "/^$field=/d" "$tmp/good.env" >"$tmp/current.env"
+  if check; then echo "missing $field accepted" >&2; exit 1; fi
+done
+cp "$tmp/good.env" "$tmp/current.env"
+printf '# mutated\n' >>"$tmp/helper/source.spl"
+if check; then echo 'same Git commit with changed source accepted' >&2; exit 1; fi
+git -C "$tmp/helper" checkout -- source.spl
+printf '# tampered\n' >>"$tmp/helper.snapshot"
+if check; then echo 'tampered snapshot accepted' >&2; exit 1; fi
+printf '%s\n' 'PASS: derived helper binding verifies actual source bytes and rejects wrong/missing provenance; native compatibility UNRUN'

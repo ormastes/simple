@@ -1,0 +1,43 @@
+use std.spec
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessOwnerV1, group_process_collect_reap_v1}
+use std.common.build_manager.group_process_protocol.{GroupProcessRequestV1,
+    GroupProcessLaunchV1, GroupProcessPollV1, group_process_identity_v1,
+    group_process_observation_encode_v1, group_process_memory_receipt_v1}
+use std.common.build_manager.grouped_execution_contract.{GroupedActionLeaseV1}
+use std.nogc_sync_mut.io.env_ops.{cwd}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.time_ops.{current_time_ms}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+
+describe "Group collector binds memory evidence to its installed host provider":
+    it "refuses missing, opposite-provider, stale-identity and stale-peak receipts before retaining reap":
+        for provider in ["windows", "linux"]:
+            val root = cwd().replace("\\", "/") + "/build/group-memory-reap-" +
+                str(getpid()) + "-" + str(current_time_ms()) + "-" + provider
+            expect(dir_create(root, true)).to_equal(true)
+            val digest = "a".repeat(64)
+            val request = GroupProcessRequestV1(root + "/worker", digest,
+                ["--group-root", root], [], root, [], root + "/stdout", root + "/stderr",
+                60000, root + "/broker", digest)
+            val launch = GroupProcessLaunchV1(root, "worker", 1, digest, digest, 100, request, "monitor")
+            val identity = group_process_identity_v1(launch)
+            val owner = GroupProcessOwnerV1(launch, identity, provider)
+            val lease = GroupedActionLeaseV1("group", "action", "worker", 1, "lease", digest, digest, false)
+            val observed = GroupProcessPollV1(true, true, true, 0, 0, false, false, 180, 0, false)
+            expect(file_atomic_write(root + "/broker.tree.sdn",
+                group_process_observation_encode_v1(identity, observed))).to_equal(true)
+            expect(group_process_collect_reap_v1(owner, lease).is_err()).to_equal(true)
+            expect(file_exists(root + "/tree-reaped.sdn")).to_equal(false)
+            val opposite = if provider == "windows": "linux" else: "windows"
+            for invalid in [group_process_memory_receipt_v1(identity, "monitor", 100, 180, opposite).unwrap(),
+                    group_process_memory_receipt_v1("b".repeat(64), "monitor", 100, 180, provider).unwrap(),
+                    group_process_memory_receipt_v1(identity, "monitor", 100, 179, provider).unwrap(),
+                    group_process_memory_receipt_v1(identity, "enforce", 100, 180, provider).unwrap()]:
+                expect(file_atomic_write(root + "/broker-memory.sdn", invalid)).to_equal(true)
+                expect(group_process_collect_reap_v1(owner, lease).is_err()).to_equal(true)
+                expect(file_exists(root + "/tree-reaped.sdn")).to_equal(false)
+            val valid = group_process_memory_receipt_v1(identity, "monitor", 100, 180, provider).unwrap()
+            expect(file_atomic_write(root + "/broker-memory.sdn", valid)).to_equal(true)
+            expect(group_process_collect_reap_v1(owner, lease).is_ok()).to_equal(true)
+            expect(file_exists(root + "/tree-reaped.sdn")).to_equal(true)

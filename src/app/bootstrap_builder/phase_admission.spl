@@ -24,6 +24,7 @@ use app.bootstrap_builder.link_inputs.{builder_regular_input_parents_safe_v1, bu
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use app.bootstrap_builder.failure_policy.{builder_failure_class_v1}
 use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
+use std.common.build_manager.work_deadline.{builder_work_deadline_v1, builder_work_deadline_expired_v1}
 use std.common.crypto.sha256.{sha256_text}
 use app.io.file_ops.{file_read_regular_no_follow_bounded, file_hash_sha256,
     file_is_regular_no_follow}
@@ -405,7 +406,7 @@ fn managed_phase_policy_decode_v1(payload: text
 
 fn managed_phase_cli_locked_v1(owner: ManagedPhaseAdmissionV1,
         poll_ms: i64, lifetime_ms: i64) -> Result<i64, text>:
-    val deadline = current_time_ms() + lifetime_ms
+    val deadline = builder_work_deadline_v1(current_time_ms(), lifetime_ms)
     var failed = false
     for i in 0..2:
         if owner.states[i] == "REAPED":
@@ -416,7 +417,7 @@ fn managed_phase_cli_locked_v1(owner: ManagedPhaseAdmissionV1,
             val classification = builder_failure_class_v1(result.status, result.exit_code, true)
             if classification == "infrastructure-abort": return Err("reaped aborted phase requires an admitted retry; completion is not proven")
             if classification == "compile-failure": failed = true
-    while current_time_ms() < deadline:
+    while not builder_work_deadline_expired_v1(current_time_ms(), deadline):
         if managed_phase_stop_requested_v1(owner.root):
             return Err("managed phase owner stop requested")
         for i in 0..2:
@@ -584,7 +585,7 @@ fn managed_phase_cli_v1(args: [text], process: BuilderProcessPortV1,
     var timing = BuilderWireReaderV1.create(values["--poll-ms"] + "\n" + values["--lifetime-ms"] + "\n")
     val poll_ms = timing.number(60000, false)
     val lifetime_ms = timing.number(604800000, false)
-    if timing.reason != "" or poll_ms < 1 or lifetime_ms < poll_ms: return 2
+    if timing.reason != "" or poll_ms < 1 or (lifetime_ms != 0 and lifetime_ms < poll_ms): return 2
     val authority = sha256_text(values["--phase3-sha256"] + "\n" + values["--phase4-sha256"] + "\n" +
         values["--policy-sha256"] + "\n" + path_absolute(values["--source-root"]))
     if args[0] == "managed-phases-verify":
