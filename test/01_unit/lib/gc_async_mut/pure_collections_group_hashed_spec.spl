@@ -1,0 +1,122 @@
+"""
+Authored acceptance cases for explicit hashed grouping (REQ-004).
+Tests call the production API. Callback counters measure actual callback calls,
+not elapsed time or bucket traversal. Execution has not been performed.
+"""
+use std.spec.*
+use std.gc_async_mut.pure.collections.{group_by_hashed}
+
+var gh_keys: i64 = 0
+var gh_hashes: i64 = 0
+var gh_equalities: i64 = 0
+
+fn gh_key(value: i64) -> i64:
+    gh_keys = gh_keys + 1
+    value
+
+fn gh_hash(value: i64) -> i64:
+    gh_hashes = gh_hashes + 1
+    value
+
+fn gh_collision(value: i64) -> i64:
+    gh_hashes = gh_hashes + 1
+    0
+
+fn gh_equal(left: i64, right: i64) -> bool:
+    gh_equalities = gh_equalities + 1
+    left == right
+
+fn gh_parity(value: i64) -> i64:
+    value % 2
+
+fn gh_min_hash(value: i64) -> i64:
+    -9223372036854775807 - 1
+
+fn gh_reset():
+    gh_keys = 0
+    gh_hashes = 0
+    gh_equalities = 0
+
+describe "explicit hashed grouping":
+    it "does not invoke callbacks for empty input":
+        # @req REQ-004
+        step("Group an empty typed list")
+        gh_reset()
+        val input: [i64] = []
+        expect(group_by_hashed(input, gh_key, gh_hash, gh_equal)).to_equal([])
+        expect(gh_keys).to_equal(0)
+        expect(gh_hashes).to_equal(0)
+        expect(gh_equalities).to_equal(0)
+
+    it "keeps every member when all keys match":
+        # @req REQ-004
+        step("Group one repeated key")
+        gh_reset()
+        expect(group_by_hashed([7, 7, 7, 7], gh_key, gh_hash, gh_equal)).to_equal([(7, [7, 7, 7, 7])])
+        expect(gh_keys).to_equal(4)
+        expect(gh_hashes).to_equal(4)
+        expect(gh_equalities).to_equal(3)
+
+    it "preserves first key order for distinct input":
+        # @req REQ-004
+        step("Group distinct keys")
+        expect(group_by_hashed([3, 1, 2], gh_key, gh_hash, gh_equal)).to_equal([(3, [3]), (1, [1]), (2, [2])])
+
+    it "preserves member order for mixed groups":
+        # @req REQ-004
+        step("Group mixed parity keys")
+        expect(group_by_hashed([5, 2, 3, 4, 1], gh_parity, gh_hash, gh_equal)).to_equal([(1, [5, 3, 1]), (0, [2, 4])])
+
+    it "uses equality to distinguish forced hash collisions":
+        # @req REQ-004
+        step("Force all keys into one hash chain")
+        expect(group_by_hashed([3, 1, 3, 2, 1], gh_key, gh_collision, gh_equal)).to_equal([(3, [3, 3]), (1, [1, 1]), (2, [2])])
+
+    it "accepts negative hashes and the minimum signed hash":
+        # @req REQ-004
+        step("Normalize signed hashes without absolute value overflow")
+        expect(group_by_hashed([-3, -1, -3], gh_key, gh_hash, gh_equal)).to_equal([(-3, [-3, -3]), (-1, [-1])])
+        expect(group_by_hashed([2, 1, 2], gh_key, gh_min_hash, gh_equal)).to_equal([(2, [2, 2]), (1, [1])])
+
+    it "bounds callbacks on a larger well distributed distinct input":
+        # @req REQ-004
+        step("Group 512 distinct integer keys")
+        var input: [i64] = []
+        for i in 0..512:
+            input.push(i)
+        gh_reset()
+        val groups = group_by_hashed(input, gh_key, gh_hash, gh_equal)
+        expect(groups.len()).to_equal(512)
+        expect(groups[0]).to_equal((0, [0]))
+        expect(groups[511]).to_equal((511, [511]))
+        expect(gh_keys).to_equal(512)
+        expect(gh_hashes).to_equal(512)
+        expect(gh_equalities).to_equal(0)
+
+    it "bounds callbacks on a larger repeated input":
+        # @req REQ-004
+        step("Group 512 members across 16 keys")
+        var input: [i64] = []
+        for i in 0..512:
+            input.push(i % 16)
+        gh_reset()
+        val groups = group_by_hashed(input, gh_key, gh_hash, gh_equal)
+        expect(groups.len()).to_equal(16)
+        expect(groups[0].1.len()).to_equal(32)
+        expect(groups[15].1.len()).to_equal(32)
+        expect(gh_keys).to_equal(512)
+        expect(gh_hashes).to_equal(512)
+        expect(gh_equalities).to_equal(496)
+
+    it "reports the real quadratic equality cost for forced collisions":
+        # @req REQ-004
+        step("Group 32 distinct keys with one hash")
+        var input: [i64] = []
+        for i in 0..32:
+            input.push(i)
+        gh_reset()
+        val groups = group_by_hashed(input, gh_key, gh_collision, gh_equal)
+        expect(groups.len()).to_equal(32)
+        expect(gh_keys).to_equal(32)
+        expect(gh_hashes).to_equal(32)
+        expect(gh_equalities).to_equal(496)

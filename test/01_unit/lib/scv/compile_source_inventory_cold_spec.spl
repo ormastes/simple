@@ -13,6 +13,70 @@ fn cold_sequential(generation: i64, events: [CompileSourceEventV1]) -> CompileSo
     inventory
 
 describe "bounded cold source inventory replay":
+    it "admits unique mixed-source create batches with exact sequential flags and bytes":
+        val events = [
+            cold_event("create", "src/z.spl", ""),
+            compile_source_inventory_filesystem_event_v1("create", "test/a.spl", "pub fn a(): 2"),
+            cold_event("create", "src/m.spl", "# comment\nval m = 3")
+        ]
+        val sequential = cold_sequential(41, events)
+        val cold = compile_source_inventory_apply_cold_events_v1(41, events)
+        expect(cold.valid).to_equal(true)
+        expect(cold.reason).to_equal("ok")
+        expect(cold.inventory!.generation).to_equal(44)
+        expect(cold.content_changed).to_equal(true)
+        expect(cold.semantics_changed).to_equal(true)
+        expect(cold.inventory!.entries[0].source_identity).to_equal("src/m.spl")
+        expect(compile_source_inventory_encode_v1(cold.inventory!)).to_equal(
+            compile_source_inventory_encode_v1(sequential))
+
+    it "does not count duplicate creates as independent cold generations":
+        val first = cold_event("create", "src/a.spl", "pub fn a(): 1")
+        val replacement = cold_event("create", "src/a.spl", "pub fn a(): 2")
+        val events = [first, first, replacement]
+        val cold = compile_source_inventory_apply_cold_events_v1(7, events)
+        expect(cold.valid).to_equal(true)
+        expect(cold.inventory!.generation).to_equal(9)
+        expect(cold.inventory!.entries.len()).to_equal(1)
+        expect(cold.content_changed).to_equal(true)
+        expect(cold.semantics_changed).to_equal(true)
+        expect(compile_source_inventory_encode_v1(cold.inventory!)).to_equal(
+            compile_source_inventory_encode_v1(cold_sequential(7, events)))
+
+    it "preserves modify and delete replay after a unique create prefix":
+        val events = [cold_event("create", "src/a.spl", "fn a(): 1"),
+            cold_event("create", "src/b.spl", "fn b(): 2"),
+            cold_event("modify", "src/a.spl", "fn a(): 3"),
+            cold_event("delete", "src/b.spl", "")]
+        val cold = compile_source_inventory_apply_cold_events_v1(10, events)
+        expect(cold.valid).to_equal(true)
+        expect(cold.inventory!.generation).to_equal(14)
+        expect(cold.inventory!.entries.len()).to_equal(1)
+        expect(cold.content_changed).to_equal(true)
+        expect(cold.semantics_changed).to_equal(true)
+        expect(compile_source_inventory_encode_v1(cold.inventory!)).to_equal(
+            compile_source_inventory_encode_v1(cold_sequential(10, events)))
+
+    it "keeps empty batch flags and rejects a negative initial generation":
+        val empty = compile_source_inventory_apply_cold_events_v1(11, [])
+        expect(empty.valid).to_equal(true)
+        expect(empty.reason).to_equal("ok-no-change")
+        expect(empty.inventory!.generation).to_equal(11)
+        expect(empty.content_changed).to_equal(false)
+        expect(empty.semantics_changed).to_equal(false)
+        val invalid = compile_source_inventory_apply_cold_events_v1(-1, [])
+        expect(invalid.valid).to_equal(false)
+        expect(invalid.reason).to_equal("event-invalid")
+        expect(invalid.inventory).to_be_nil()
+
+    it "preserves the largest nonoverflowing generation offset":
+        val events = [cold_event("create", "src/last.spl", "fn last(): 1")]
+        val cold = compile_source_inventory_apply_cold_events_v1(9223372036854775806, events)
+        expect(cold.valid).to_equal(true)
+        expect(cold.inventory!.generation).to_equal(9223372036854775807)
+        expect(compile_source_inventory_encode_v1(cold.inventory!)).to_equal(
+            compile_source_inventory_encode_v1(cold_sequential(9223372036854775806, events)))
+
     it "matches sequential generation and canonical bytes through churn and no-ops":
         val events = [
             cold_event("delete", "missing.spl", ""),

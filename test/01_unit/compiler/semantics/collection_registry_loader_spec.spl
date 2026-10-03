@@ -1,0 +1,162 @@
+use std.spec.*
+use compiler.semantics.perf_facts.types.*
+use compiler.semantics.perf_facts.registry.{
+    CollectionRegistrySnapshotV1, CollectionRegistryBindingV1,
+    collection_registry_parse, collection_registry_bind, collection_registry_bind_modules
+}
+
+fn registry_test_source() -> text:
+    """
+schema_version: "simple.collection-operations/v1"
+metadata_version: "fixture-v1"
+operations:
+  - stable_name: "fixture.array.map"
+    operation: "map"
+    receiver: "array"
+    signature_fingerprint: "fixture-array-map-signature"
+    key_contract: "not-keyed"
+    expected_cost: "linear"
+    worst_cost: "linear"
+    cardinality: "same-as-receiver"
+    cardinality_value: -1
+    enumeration: "once"
+    enumeration_count: -1
+    explicit_argument_count: 1
+    reads: true
+    writes: false
+    allocates: true
+    throws: false
+    suspends: false
+    observable: false
+    allocation: "unbounded"
+    preserves_order: true
+    materializes: true
+    backends: ["interpreter", "native"]
+    provenance: "unit-fixture-only"
+    evidence_receipt: "fixture-receipt-not-production-evidence"
+"""
+
+fn registry_test_binding(snapshot: CollectionRegistrySnapshotV1) -> CollectionRegistryBindingV1:
+    CollectionRegistryBindingV1(module_path: "fixture/module.spl",
+        symbol_id: 42, stable_name: "fixture.array.map",
+        receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "fixture-array-map-signature", backend: "native",
+        evidence_receipt: "fixture-receipt-not-production-evidence",
+        metadata_version: snapshot.metadata_version, source_digest: snapshot.source_digest)
+
+describe "versioned collection registry content and resolved symbol binding":
+    it "parses metadata and binds the explicit resolved symbol with full cost facts":
+        val snapshot = collection_registry_parse(registry_test_source()).unwrap()
+        val registry = collection_registry_bind(snapshot, [registry_test_binding(snapshot)]).unwrap()
+        expect(registry.is_structurally_valid()).to_equal(true)
+        val summary = registry.lookup(42).unwrap()
+        expect(summary.stable_name).to_equal("fixture.array.map")
+        expect(summary.cost).to_equal(HirPerfCostClass.LinearReceiver)
+        expect(summary.worst_cost).to_equal(HirPerfCostClass.LinearReceiver)
+        expect(summary.key_contract).to_equal("not-keyed")
+        expect(summary.supported_backends).to_contain("native")
+
+    it "allows an empty safe default and permits unbound rows":
+        val empty = collection_registry_parse("schema_version: simple.collection-operations/v1\nmetadata_version: pending-admission-v1\noperations: []\n").unwrap()
+        expect(collection_registry_bind(empty, []).unwrap().summaries.len()).to_equal(0)
+        val snapshot = collection_registry_parse(registry_test_source()).unwrap()
+        expect(collection_registry_bind(snapshot, []).unwrap().summaries.len()).to_equal(0)
+
+    it "rejects duplicate keys unknown fields and unsupported schema versions":
+        val source = registry_test_source()
+        expect(collection_registry_parse(source + "metadata_version: forged\n").is_err()).to_equal(true)
+        expect(collection_registry_parse(source + "unrecognized: true\n").is_err()).to_equal(true)
+        expect(collection_registry_parse(source.replace("operations:", "operations:\n    unknown: true")).is_err()).to_equal(true)
+        expect(collection_registry_parse(source.replace("operations/v1", "operations/v2")).is_err()).to_equal(true)
+
+    it "rejects unknown operation receiver cost allocation backend and key contracts":
+        val source = registry_test_source()
+        for pair in [("operation: \"map\"", "operation: \"unknown\""),
+                ("receiver: \"array\"", "receiver: \"unknown\""),
+                ("expected_cost: \"linear\"", "expected_cost: \"unknown\""),
+                ("worst_cost: \"linear\"", "worst_cost: \"expected-constant\""),
+                ("allocation: \"unbounded\"", "allocation: \"unknown\""),
+                ("\"interpreter\", \"native\"", "\"unknown\""),
+                ("key_contract: \"not-keyed\"", "key_contract: \"unknown\"")]:
+            expect(collection_registry_parse(source.replace(pair.0, pair.1)).is_err()).to_equal(true)
+
+    it "rejects duplicate backend and operation rows and absent evidence":
+        val source = registry_test_source()
+        expect(collection_registry_parse(source.replace("\"interpreter\", \"native\"", "\"native\", \"native\"")).is_err()).to_equal(true)
+        expect(collection_registry_parse(source.replace("fixture-receipt-not-production-evidence", "")).is_err()).to_equal(true)
+        val row_start = source.index_of("  - stable_name:")
+        expect(row_start).to_be_greater_than(-1)
+        expect(collection_registry_parse(source + source.substring(row_start)).is_err()).to_equal(true)
+
+    it "rejects ill-typed counts and contradictory allocation metadata":
+        val source = registry_test_source()
+        expect(collection_registry_parse(source.replace("explicit_argument_count: 1", "explicit_argument_count: true")).is_err()).to_equal(true)
+        expect(collection_registry_parse(source.replace("allocates: true", "allocates: false")).is_err()).to_equal(true)
+        expect(collection_registry_parse(source.replace("cardinality_value: -1", "cardinality_value: 7")).is_err()).to_equal(true)
+
+    it "rejects mismatched version digest signature receiver backend and receipt bindings":
+        val snapshot = collection_registry_parse(registry_test_source()).unwrap()
+        var binding = registry_test_binding(snapshot)
+        binding.metadata_version = "old"
+        expect(collection_registry_bind(snapshot, [binding]).is_err()).to_equal(true)
+        binding = registry_test_binding(snapshot)
+        binding.source_digest = "forged"
+        expect(collection_registry_bind(snapshot, [binding]).is_err()).to_equal(true)
+        binding = registry_test_binding(snapshot)
+        binding.signature_fingerprint = "unrelated-signature"
+        expect(collection_registry_bind(snapshot, [binding]).is_err()).to_equal(true)
+        binding = registry_test_binding(snapshot)
+        binding.receiver = HirPerfReceiverKind.Dict
+        expect(collection_registry_bind(snapshot, [binding]).is_err()).to_equal(true)
+        binding = registry_test_binding(snapshot)
+        binding.backend = "llvm"
+        expect(collection_registry_bind(snapshot, [binding]).is_err()).to_equal(true)
+        binding = registry_test_binding(snapshot)
+        binding.evidence_receipt = "forged"
+        expect(collection_registry_bind(snapshot, [binding]).is_err()).to_equal(true)
+
+    it "rejects unknown operations invalid symbols and duplicate bindings":
+        val snapshot = collection_registry_parse(registry_test_source()).unwrap()
+        var binding = registry_test_binding(snapshot)
+        binding.stable_name = "map"
+        expect(collection_registry_bind(snapshot, [binding]).is_err()).to_equal(true)
+        binding = registry_test_binding(snapshot)
+        binding.symbol_id = -1
+        expect(collection_registry_bind(snapshot, [binding]).is_err()).to_equal(true)
+        binding = registry_test_binding(snapshot)
+        expect(collection_registry_bind(snapshot, [binding, binding]).is_err()).to_equal(true)
+
+    it "revalidates publicly constructed snapshots instead of trusting cached rows":
+        var snapshot = collection_registry_parse(registry_test_source()).unwrap()
+        val binding = registry_test_binding(snapshot)
+        snapshot.rows[0].signature_fingerprint = "forged"
+        expect(collection_registry_bind(snapshot, [binding]).is_err()).to_equal(true)
+        snapshot = collection_registry_parse(registry_test_source()).unwrap()
+        snapshot.source_text = snapshot.source_text + "unknown: true\n"
+        expect(collection_registry_bind(snapshot, [binding]).is_err()).to_equal(true)
+
+    it "requires one explicit module owner for module-local symbol IDs":
+        val snapshot = collection_registry_parse(registry_test_source()).unwrap()
+        var first = registry_test_binding(snapshot)
+        first.module_path = ""
+        expect(collection_registry_bind(snapshot, [first]).is_err()).to_equal(true)
+        first = registry_test_binding(snapshot)
+        var other = registry_test_binding(snapshot)
+        other.module_path = "other/module.spl"
+        expect(collection_registry_bind(snapshot, [first, other]).is_err()).to_equal(true)
+
+    it "isolates identical symbol IDs across modules in one batch admission":
+        val snapshot = collection_registry_parse(registry_test_source()).unwrap()
+        val first = registry_test_binding(snapshot)
+        var other = registry_test_binding(snapshot)
+        other.module_path = "other/module.spl"
+        val modules = collection_registry_bind_modules(snapshot, [first, other]).unwrap()
+        expect(modules.len()).to_equal(2)
+        expect(modules["fixture/module.spl"].lookup(42).unwrap().stable_name).to_equal("fixture.array.map")
+        expect(modules["other/module.spl"].lookup(42).unwrap().stable_name).to_equal("fixture.array.map")
+        expect(collection_registry_bind_modules(snapshot, [first, first]).is_err()).to_equal(true)
+
+    it "rejects worst costs below expected costs and keyed operations without key contracts":
+        val source = registry_test_source()
+        expect(collection_registry_parse(source.replace("worst_cost: \"linear\"", "worst_cost: \"constant\"")).is_err()).to_equal(true)
+        expect(collection_registry_parse(source.replace("operation: \"map\"", "operation: \"distinct-by\"")).is_err()).to_equal(true)

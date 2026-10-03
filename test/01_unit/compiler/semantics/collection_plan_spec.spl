@@ -51,6 +51,31 @@ fn plan_test_plan(nodes: [CollectionPlanNode], output_id: i64) -> CollectionPlan
         nodes: nodes, output_id: output_id)
 
 describe "CollectionPlan structural contract":
+    it "rejects a source output type that disagrees with its expression":
+        step("Reject stale source output metadata")
+        var source = plan_test_node(0, CollectionPlanKind.Source, [])
+        source.output_type = Some(HirType(kind: HirTypeKind.Bool, span: Span.default()))
+        expect(validate_collection_plan(plan_test_plan([source], 0)).is_err()).to_equal(true)
+
+    it "rejects an untyped retained source expression":
+        step("Require actual HIR typing rather than only a node output type")
+        var source = plan_test_node(0, CollectionPlanKind.Source, [])
+        var expr = source.source_expr.unwrap()
+        expr.has_type_ = false
+        source.source_expr = Some(expr)
+        expect(validate_collection_plan(plan_test_plan([source], 0)).is_err()).to_equal(true)
+
+    it "accepts structurally equal source types at distinct spans":
+        step("Ignore source locations while comparing type structure")
+        var source = plan_test_node(0, CollectionPlanKind.Source, [])
+        var expr = source.source_expr.unwrap()
+        val first = HirType(kind: HirTypeKind.Int(64, true), span: Span.at(1, 2, 3))
+        expr.type_ = HirType(kind: HirTypeKind.Array(first, nil), span: Span.at(4, 5, 6))
+        source.source_expr = Some(expr)
+        val second = HirType(kind: HirTypeKind.Int(64, true), span: Span.at(7, 8, 9))
+        source.output_type = Some(HirType(kind: HirTypeKind.Array(second, nil), span: Span.at(10, 11, 12)))
+        expect(validate_collection_plan(plan_test_plan([source], 0)).is_ok()).to_equal(true)
+
     it "accepts a source followed by a unary filter":
         step("Validate a backward-only logical plan")
         val plan = plan_test_plan([
@@ -110,7 +135,9 @@ describe "CollectionPlan structural contract":
 
     it "reports missing rewrite proofs without authorizing a transform":
         step("Expose absent equality, alias, and profitability evidence")
-        val node = plan_test_node(0, CollectionPlanKind.Source, [])
+        var node = plan_test_node(0, CollectionPlanKind.Source, [])
+        node.output_type = nil
+        node.source_expr = nil
         val missing = collection_plan_unproven_facts(node)
         expect(missing).to_contain("equality")
         expect(missing).to_contain("allocation")
@@ -122,6 +149,19 @@ describe "CollectionPlan structural contract":
 
     it "requires a typed key for equality planning":
         step("Keep an index candidate blocked until its key type is resolved")
-        val node = plan_test_node(1, CollectionPlanKind.IndexBy, [0])
+        var node = plan_test_node(1, CollectionPlanKind.IndexBy, [0])
+        node.operation_symbol_id = nil
         expect(collection_plan_unproven_facts(node)).to_contain("key type")
         expect(collection_plan_unproven_facts(node)).to_contain("operation symbol")
+
+    it "distinguishes existing typed bindings from absent rewrite proofs":
+        step("Keep provided source and operation bindings out of the missing-proof list")
+        val source = plan_test_node(0, CollectionPlanKind.Source, [])
+        val source_missing = collection_plan_unproven_facts(source)
+        expect(source_missing.contains("output type")).to_be(false)
+        expect(source_missing.contains("source binding")).to_be(false)
+        expect(source_missing).to_contain("alias")
+        val operation = plan_test_node(1, CollectionPlanKind.IndexBy, [0])
+        val operation_missing = collection_plan_unproven_facts(operation)
+        expect(operation_missing.contains("operation symbol")).to_be(false)
+        expect(operation_missing).to_contain("key type")

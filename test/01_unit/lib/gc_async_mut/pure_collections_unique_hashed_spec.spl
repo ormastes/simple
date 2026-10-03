@@ -1,0 +1,91 @@
+"""REQ-004 stable explicit-contract uniqueness; authored, not executed."""
+use std.spec.*
+use std.gc_async_mut.pure.collections.{unique_hashed}
+
+var uh_keys: i64 = 0
+var uh_hashes: i64 = 0
+var uh_equals: i64 = 0
+
+fn uh_key(value: i64) -> i64:
+    uh_keys = uh_keys + 1
+    value
+fn uh_hash(value: i64) -> i64:
+    uh_hashes = uh_hashes + 1
+    value
+fn uh_equal(a: i64, b: i64) -> bool:
+    uh_equals = uh_equals + 1
+    a == b
+fn uh_collision(value: i64) -> i64:
+    -9223372036854775807 - 1
+fn uh_tuple_key(item: (i64, text)) -> i64:
+    item.0
+fn uh_text_key(item: (i64, text)) -> text:
+    item.1
+fn uh_text_hash(key: text) -> i64:
+    key.len()
+fn uh_text_equal(a: text, b: text) -> bool:
+    a == b
+fn uh_pair_key(item: (i64, text)) -> (i64, text):
+    item
+fn uh_pair_hash(key: (i64, text)) -> i64:
+    key.0
+fn uh_pair_equal(a: (i64, text), b: (i64, text)) -> bool:
+    a.0 == b.0 and a.1 == b.1
+fn uh_reset():
+    uh_keys = 0
+    uh_hashes = 0
+    uh_equals = 0
+
+describe "stable explicit hashed uniqueness":
+    it "returns empty input without invoking callbacks":
+        # @req REQ-004
+        step("Deduplicate an empty typed list")
+        uh_reset()
+        val input: [i64] = []
+        expect(unique_hashed(input, uh_key, uh_hash, uh_equal)).to_equal([])
+        expect(uh_keys).to_equal(0)
+        expect(uh_hashes).to_equal(0)
+        expect(uh_equals).to_equal(0)
+
+    it "keeps first original elements rather than reconstructed keys":
+        # @req REQ-004
+        step("Deduplicate records by their integer keys")
+        val input = [(2, "first-two"), (1, "first-one"), (2, "later-two")]
+        expect(unique_hashed(input, uh_tuple_key, uh_hash, uh_equal)).to_equal([(2, "first-two"), (1, "first-one")])
+
+    it "distinguishes colliding keys including minimum signed hash":
+        # @req REQ-004
+        step("Force all keys into one signed-minimum hash bucket")
+        expect(unique_hashed([3, 1, 3, 2, 1], uh_key, uh_collision, uh_equal)).to_equal([3, 1, 2])
+
+    it "supports text and tuple key contracts":
+        # @req REQ-004
+        step("Deduplicate the same records using different key types")
+        val input = [(1, "a"), (2, "b"), (3, "a"), (1, "a")]
+        expect(unique_hashed(input, uh_text_key, uh_text_hash, uh_text_equal)).to_equal([(1, "a"), (2, "b")])
+        expect(unique_hashed(input, uh_pair_key, uh_pair_hash, uh_pair_equal)).to_equal([(1, "a"), (2, "b"), (3, "a")])
+
+    it "calls the key once per item and probes before distinct insertion":
+        # @req REQ-004
+        step("Count real callbacks for repeated and distinct keys")
+        uh_reset()
+        expect(unique_hashed([2, 1, 2, 1, 3], uh_key, uh_hash, uh_equal)).to_equal([2, 1, 3])
+        expect(uh_keys).to_equal(5)
+        # contains once per item; insert once per new key.
+        expect(uh_hashes).to_equal(8)
+        expect(uh_equals).to_equal(2)
+
+    it "preserves order through set growth":
+        # @req REQ-004
+        step("Deduplicate 512 items across 257 keys")
+        var input: [i64] = []
+        var expected: [i64] = []
+        for i in 0..257:
+            expected.push(i)
+        for i in 0..512:
+            input.push(i % 257)
+        uh_reset()
+        expect(unique_hashed(input, uh_key, uh_hash, uh_equal)).to_equal(expected)
+        expect(uh_keys).to_equal(512)
+        expect(uh_hashes).to_equal(769)
+        expect(uh_equals).to_equal(255)

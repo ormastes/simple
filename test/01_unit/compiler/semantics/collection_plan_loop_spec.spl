@@ -1,0 +1,160 @@
+"""Partial REQ-007 canonical loop analysis; authored, not executed."""
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, MethodResolution}
+use compiler.hir.hir_definitions.*
+use compiler.semantics.perf_facts.types.*
+use compiler.semantics.perf.collection_plan.*
+use compiler.semantics.perf.collection_plan_loop.{extract_canonical_collection_loop}
+use compiler.semantics.perf.collection_plan_analysis.{collect_collection_expr_plans_v1}
+
+fn cl_type(array: bool) -> HirType:
+    val scalar = HirType(kind: HirTypeKind.Int(64, true), span: Span.default())
+    if array:
+        return HirType(kind: HirTypeKind.Array(scalar, nil), span: Span.default())
+    scalar
+
+fn cl_var(id: i64, array: bool) -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(SymbolId(id: id)), has_type_: true,
+        type_: cl_type(array), span: Span.default())
+
+fn cl_registry() -> CollectionOperationRegistry:
+    var registry = CollectionOperationRegistry.new("loop-fixture")
+    registry.register(CollectionOperationSummary(symbol_id: 40, stable_name: "fixture.append",
+        operation: HirPerfOperationKind.Append, cost: HirPerfCostClass.AmortizedConstant,
+        output_cardinality: HirPerfCardinality.SameAsReceiver,
+        enumeration: HirPerfEnumerationClass.None, expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "fixture", explicit_argument_count: 1,
+        effects: HirPerfEffectFacts(reads: false, writes: true, allocates: true,
+            throws: false, suspends: false, observable: false, unknown: false),
+        allocation: HirPerfAllocationClass.InitOnly, preserves_order: true, materializes: false,
+        metadata_version: "loop-fixture", provenance: "typed fixture", evidence_receipt: "fixture"))
+    registry
+
+fn cl_block(mapped_id: i64, append_id: i64, label: text?) -> HirBlock:
+    val span = Span.default()
+    val unit_type = HirType(kind: HirTypeKind.Unit, span: span)
+    val unit = HirExpr(kind: HirExprKind.UnitLit, has_type_: true, type_: unit_type, span: span)
+    val mapped = cl_var(mapped_id, false)
+    val append = HirExpr(kind: HirExprKind.MethodCall(cl_var(12, true), "push",
+        [HirCallArg(has_name: false, name: "", value: mapped, span: span)],
+        MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: append_id))),
+        has_type_: true, type_: unit_type, span: span)
+    val body = HirBlock(stmts: [HirStmt(kind: HirStmtKind.Expr(append), span: span)],
+        has: false, value: unit, span: span)
+    val loop_expr = HirExpr(kind: HirExprKind.For(SymbolId(id: 13), cl_var(11, true), body, label),
+        has_type_: true, type_: unit_type, span: span)
+    val init = HirExpr(kind: HirExprKind.ArrayLit([], Some(cl_type(false))),
+        has_type_: true, type_: cl_type(true), span: span)
+    HirBlock(stmts: [HirStmt(kind: HirStmtKind.Let(SymbolId(id: 12), cl_type(true), init), span: span),
+        HirStmt(kind: HirStmtKind.Expr(loop_expr), span: span)],
+        has: true, value: cl_var(12, true), span: span)
+
+describe "canonical typed loop origin":
+    it "rejects stale source node type even when loop provenance is unchanged":
+        var plan = extract_canonical_collection_loop(cl_block(13, 40, nil), 20, cl_registry()).unwrap()
+        var source = plan.nodes[0]
+        source.output_type = Some(HirType(kind: HirTypeKind.Bool, span: Span.default()))
+        plan.nodes[0] = source
+        expect(validate_collection_plan(plan).is_err()).to_equal(true)
+
+    it "retains a typed identity mapping without inventing a callback or map symbol":
+        val plan = extract_canonical_collection_loop(cl_block(13, 40, nil), 20, cl_registry()).unwrap()
+        expect(plan.nodes.len()).to_equal(2)
+        expect(plan.nodes[1].kind).to_equal(CollectionPlanKind.Map)
+        expect(plan.nodes[1].operation_symbol_id.?).to_equal(false)
+        expect(plan.nodes[1].call_arguments.len()).to_equal(0)
+        expect(plan.nodes[1].loop_origin.unwrap().append_symbol.id).to_equal(40)
+        expect(plan.nodes[1].loop_origin.unwrap().mapped_expr).to_equal(cl_var(13, false))
+        expect(plan.nodes[1].facts.effects.unknown).to_equal(true)
+        expect(plan.nodes[1].facts.callback_pure).to_equal(false)
+        expect(validate_collection_plan(plan).is_ok()).to_equal(true)
+
+    it "rejects accumulator reads captured bindings unknown append and labels":
+        expect(extract_canonical_collection_loop(cl_block(12, 40, nil), 20, cl_registry()).is_err()).to_equal(true)
+        expect(extract_canonical_collection_loop(cl_block(99, 40, nil), 20, cl_registry()).is_err()).to_equal(true)
+        expect(extract_canonical_collection_loop(cl_block(13, 99, nil), 20, cl_registry()).is_err()).to_equal(true)
+        expect(extract_canonical_collection_loop(cl_block(13, 40, Some("label")), 20, cl_registry()).is_err()).to_equal(true)
+
+    it "rejects extra statements and a different final accumulator":
+        var block = cl_block(13, 40, nil)
+        block.stmts.push(block.stmts[1])
+        expect(extract_canonical_collection_loop(block, 20, cl_registry()).is_err()).to_equal(true)
+        block = cl_block(13, 40, nil)
+        block.value = cl_var(14, true)
+        expect(extract_canonical_collection_loop(block, 20, cl_registry()).is_err()).to_equal(true)
+
+    it "rejects duplicate origins and source origins":
+        var plan = extract_canonical_collection_loop(cl_block(13, 40, nil), 20, cl_registry()).unwrap()
+        var node = plan.nodes[1]
+        node.operation_symbol_id = Some(40)
+        plan.nodes[1] = node
+        expect(validate_collection_plan(plan).is_err()).to_equal(true)
+        plan = extract_canonical_collection_loop(cl_block(13, 40, nil), 20, cl_registry()).unwrap()
+        node = plan.nodes[0]
+        node.loop_origin = plan.nodes[1].loop_origin
+        plan.nodes[0] = node
+        expect(validate_collection_plan(plan).is_err()).to_equal(true)
+
+    it "rejects stale origin operands and append identity":
+        var plan = extract_canonical_collection_loop(cl_block(13, 40, nil), 20, cl_registry()).unwrap()
+        var node = plan.nodes[1]
+        var origin = node.loop_origin.unwrap()
+        origin.append_symbol = SymbolId(id: 99)
+        node.loop_origin = Some(origin)
+        plan.nodes[1] = node
+        expect(validate_collection_plan(plan).is_err()).to_equal(true)
+        plan = extract_canonical_collection_loop(cl_block(13, 40, nil), 20, cl_registry()).unwrap()
+        node = plan.nodes[1]
+        origin = node.loop_origin.unwrap()
+        var mapped = origin.mapped_expr
+        mapped.has_type_ = false
+        origin.mapped_expr = mapped
+        node.loop_origin = Some(origin)
+        plan.nodes[1] = node
+        expect(validate_collection_plan(plan).is_err()).to_equal(true)
+
+    it "rejects a forged induction type that disagrees with the source element":
+        var block = cl_block(13, 40, nil)
+        var checked = false
+        match block.stmts[1].kind:
+            case HirStmtKind.Expr(loop_expr):
+                match loop_expr.kind:
+                    case HirExprKind.For(binding, source, body, label):
+                        var changed_source = source
+                        val boolean = HirType(kind: HirTypeKind.Bool, span: Span.default())
+                        changed_source.type_ = HirType(kind: HirTypeKind.Array(boolean, nil), span: Span.default())
+                        var changed_loop = loop_expr
+                        changed_loop.kind = HirExprKind.For(binding, changed_source, body, label)
+                        block.stmts[1] = HirStmt(kind: HirStmtKind.Expr(changed_loop), span: Span.default())
+                        expect(extract_canonical_collection_loop(block, 20, cl_registry()).is_err()).to_equal(true)
+                        checked = true
+                    case _: fail("fixture must contain for loop")
+            case _: fail("fixture must contain loop expression")
+        expect(checked).to_equal(true)
+
+    it "rejects origin mappings that differ from the original append body":
+        var plan = extract_canonical_collection_loop(cl_block(13, 40, nil), 20, cl_registry()).unwrap()
+        var node = plan.nodes[1]
+        var origin = node.loop_origin.unwrap()
+        origin.mapped_expr = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true,
+            type_: cl_type(false), span: Span.default())
+        node.loop_origin = Some(origin)
+        plan.nodes[1] = node
+        expect(validate_collection_plan(plan).is_err()).to_equal(true)
+
+    it "accepts equivalent array types declared at different source spans":
+        var block = cl_block(13, 40, nil)
+        var result = block.value
+        val scalar = HirType(kind: HirTypeKind.Int(64, true), span: Span.at(8, 8, 3))
+        result.type_ = HirType(kind: HirTypeKind.Array(scalar, nil), span: Span.at(9, 9, 3))
+        block.value = result
+        expect(extract_canonical_collection_loop(block, 20, cl_registry()).is_ok()).to_equal(true)
+
+    it "discovers one loop region at the block boundary":
+        val block = cl_block(13, 40, nil)
+        val expr = HirExpr(kind: HirExprKind.Block(block), has_type_: true,
+            type_: cl_type(true), span: Span.default())
+        val result = collect_collection_expr_plans_v1(expr, 20, cl_registry())
+        expect(result.plans.len()).to_equal(1)
+        expect(result.blockers.len()).to_equal(0)

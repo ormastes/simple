@@ -30,3 +30,32 @@ without importing external behavior as proof of Simple implementation.
 Design implication: keep logical operations, legality evidence, symbolic costs,
 physical candidates and runtime measurements distinct. Default to original
 execution when any required proof is unavailable.
+
+## 2026-10-03 primary-source update (Codex)
+
+- [Polars lazy optimizations](https://docs.pola.rs/user-guide/lazy/optimizations/)
+  separates predicate/projection pushdown, common-subplan reuse and join
+  ordering. **Inference for Simple:** model each transformation separately.
+  Eliminating repeated work requires an effect and alias proof because
+  arbitrary Simple callbacks can mutate, throw or suspend. A relational
+  optimization name is not such a proof.
+- [DuckDB join operations](https://duckdb.org/docs/lts/guides/performance/join_operations)
+  describes statistics-based cardinality estimation and configurable join
+  ordering. **Inference for Simple:** compare build, probe and emitted-output
+  work; include skew and all-equal keys. An all-matches join with n*m emitted
+  pairs cannot satisfy a linear total-work claim even with a hash index.
+- [Apache Arrow columnar format](https://arrow.apache.org/docs/format/Columnar.html)
+  specifies a validity bitmap independently of value storage.
+  **Inference for Simple:** a missing row and a present floating NaN remain
+  different test cases. Preserve the explicit mask through typed/dynamic
+  round trips; do not use a payload sentinel as the missing-value contract.
+- [Polars explain API](https://docs.pola.rs/docs/python/dev/reference/lazyframe/api/polars.LazyFrame.explain.html)
+  exposes plan inspection and optimizer controls. **Inference for Simple:**
+  use receipts to explain alternatives and blockers, but pair them with
+  compilation/execution evidence. A plan rendering is not evidence of
+  executed lowering or improved scaling.
+
+Sources reviewed through primary-site search on 2026-10-03; no third-party
+summary establishes a Simple behavior. These findings refine verification of
+already selected requirements rather than introducing relational SQL semantics
+or additional optimization requirements.

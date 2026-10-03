@@ -127,6 +127,17 @@ and history inspected; remote authorization and secrets remain outside artifacts
 References: [collection plan IR](../01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md),
 [system test plan](sys_test/collection_planner.md).
 
+2026-10-03 development follow-up: the selected scope remains REQ-001–011 and
+NFR-001–007. See the refreshed [local research](../01_research/local/collection_planner.md),
+[domain research](../01_research/domain/collection_planner.md),
+[architecture](../04_architecture/collection_planner.md),
+[detail design](../05_design/collection_planner.md), and
+[parallel ownership plan](agent_tasks/collection_planner.md).
+The system test plan enumerates concrete CP-001-A through CP-011-C acceptance
+cases. CP-GUARD scenarios exercise the advisory selector and its explanation;
+they do not establish production lowering, backend parity, or performance.
+Host completion remains TODO until those separate execution gates pass.
+
 - Audit and close the research P0 semantic prerequisites before enabling optimized
   execution: array-map resolution, closure ABI, any/all, native Dict insertion,
   and collection behavior across backends.

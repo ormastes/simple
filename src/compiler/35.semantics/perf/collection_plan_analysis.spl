@@ -1,0 +1,130 @@
+# Compilation-owned collection analysis. Facts and logical regions are evidence,
+# not permission to replace HIR/MIR or to claim callback/alias proofs.
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.generated.hir_children.{
+    HirChildFrame, HirChildFrameSink, hir_expand_child_frames_reverse}
+use compiler.semantics.perf_facts.types.{
+    CollectionOperationRegistry, HirPerfFacts, TypedCollectionFinding}
+use compiler.semantics.perf_facts.collector.{
+    collect_hir_perf_facts, typed_coll002_linear_lookup_findings,
+    hir_perf_resolved_method_symbol}
+use compiler.semantics.perf.collection_plan.{CollectionPlan}
+use compiler.semantics.perf.collection_plan_extractor.{extract_unary_collection_plan}
+use compiler.semantics.perf.collection_plan_loop.{extract_canonical_collection_loop}
+
+struct CollectionRegionAnalysisV1:
+    plans: [CollectionPlan]
+    blockers: [text]
+
+struct CollectionModuleAnalysisV1:
+    facts: HirPerfFacts
+    findings: [TypedCollectionFinding]
+    plans: [CollectionPlan]
+    blockers: [text]
+
+class CollectionRegionCollectorV1:
+    work: [HirChildFrame]
+    plans: [CollectionPlan]
+    blockers: [text]
+
+impl HirChildFrameSink for CollectionRegionCollectorV1:
+    me push_hir_child_frame(frame: HirChildFrame):
+        self.work.push(frame)
+
+impl CollectionRegionCollectorV1:
+    static fn new() -> CollectionRegionCollectorV1:
+        CollectionRegionCollectorV1(work: [], plans: [], blockers: [])
+
+    me scan(function_symbol_id: i64, registry: CollectionOperationRegistry):
+        if not registry.is_structurally_valid():
+            self.blockers.push("collection operation registry is invalid")
+            self.work = []
+            return
+        if function_symbol_id < 0:
+            self.blockers.push("collection analysis has no valid function symbol")
+            self.work = []
+            return
+        if registry.summaries.len() == 0:
+            self.work = []
+            return
+        while self.work.len() > 0:
+            val frame = self.work.pop()
+            var expand = true
+            match frame:
+                case HirChildFrame.Block(block):
+                    match extract_canonical_collection_loop(block, function_symbol_id, registry):
+                        case Ok(plan):
+                            self.plans.push(plan)
+                            # Preserve visits to original operands, not the append shell.
+                            val origin = plan.nodes[1].loop_origin.unwrap()
+                            self.work.push(HirChildFrame.Expr(origin.mapped_expr))
+                            self.work.push(HirChildFrame.Expr(plan.nodes[0].source_expr.unwrap()))
+                            expand = false
+                        case Err(_):
+                            pass
+                case HirChildFrame.Expr(expr):
+                    match expr.kind:
+                        case HirExprKind.MethodCall(_, _, _, resolution):
+                            val symbol = hir_perf_resolved_method_symbol(resolution)
+                            if symbol.? and registry.contains(symbol.unwrap()):
+                                match extract_unary_collection_plan(expr, function_symbol_id, registry):
+                                    case Ok(plan):
+                                        self.plans.push(plan)
+                                        # Visit the source and each argument exactly once.
+                                        # Expanding the original receiver chain would also
+                                        # publish every suffix as a duplicate region.
+                                        var pending: [HirChildFrame] = []
+                                        for node in plan.nodes:
+                                            if val source = node.source_expr:
+                                                pending.push(HirChildFrame.Expr(source))
+                                            for arg in node.call_arguments:
+                                                pending.push(HirChildFrame.Expr(arg.value))
+                                        var i = pending.len() - 1
+                                        while i >= 0:
+                                            self.work.push(pending[i])
+                                            i = i - 1
+                                        expand = false
+                                    case Err(reason):
+                                        self.blockers.push(
+                                            "function={function_symbol_id} line={expr.span.line} column={expr.span.col}: {reason}")
+                        case _:
+                            pass
+                case _:
+                    pass
+            if expand:
+                hir_expand_child_frames_reverse(frame, self)
+
+    fn snapshot() -> CollectionRegionAnalysisV1:
+        CollectionRegionAnalysisV1(plans: self.plans, blockers: self.blockers)
+
+fn collect_collection_expr_plans_v1(
+    expr: HirExpr, function_symbol_id: i64, registry: CollectionOperationRegistry
+) -> CollectionRegionAnalysisV1:
+    """Discover maximal admitted chains without changing the input expression."""
+    var collector = CollectionRegionCollectorV1.new()
+    collector.push_hir_child_frame(HirChildFrame.Expr(expr))
+    collector.scan(function_symbol_id, registry)
+    collector.snapshot()
+
+fn analyze_collection_module_v1(
+    module: HirModule, registry: CollectionOperationRegistry
+) -> CollectionModuleAnalysisV1:
+    """Share the admitted registry between typed diagnostics and plan extraction."""
+    # Two bounded traversals reuse the established loop-domain diagnostic
+    # collector. Neither traversal loads metadata or performs filesystem I/O.
+    val facts = collect_hir_perf_facts(module, registry)
+    val findings = typed_coll002_linear_lookup_findings(facts)
+    var collector = CollectionRegionCollectorV1.new()
+    if not registry.is_structurally_valid():
+        collector.blockers.push("collection operation registry is invalid")
+    else:
+        for function in module.functions.values():
+            if not function.is_extern:
+                collector.push_hir_child_frame(HirChildFrame.Block(function.body))
+                collector.scan(function.symbol.id, registry)
+    CollectionModuleAnalysisV1(facts: facts, findings: findings,
+        plans: collector.plans, blockers: collector.blockers)
+
+export CollectionRegionAnalysisV1, CollectionModuleAnalysisV1
+export collect_collection_expr_plans_v1, analyze_collection_module_v1
