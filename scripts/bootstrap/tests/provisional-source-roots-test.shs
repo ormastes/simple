@@ -1,0 +1,32 @@
+#!/bin/sh
+# Check the executable source arguments and their recorded identity together.
+set -eu
+base=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+check_roots() {
+  count=0
+  for expected in src/compiler src/app src/lib src/os; do
+    [ "$#" -ge 2 ] && [ "$1" = --source ] && [ "$2" = "$expected" ] || {
+      echo "FAIL: provisional build source roots omit or reorder $expected" >&2
+      exit 1
+    }
+    count=$((count + 1))
+    shift 2
+  done
+  [ "$count" = 4 ]
+}
+# These lines are shared by argv hashing, image execution, the receipt template,
+# and the compiler-task manifest. Extract arguments rather than whole scripts:
+# executing the real build would require an admitted producer and image receipts.
+rows=$(sed -n 's/.*\(--source src\/compiler.*\)/\1/p' \
+  "$base/prepare-provisional-manager-images.shs" \
+  "$base/bootstrap-provisional-phase3-phase4.shs")
+[ "$(printf '%s\n' "$rows" | wc -l | tr -d ' ')" = 4 ] || {
+  echo 'FAIL: expected image hash, invocation, receipt, and task manifest roots' >&2
+  exit 1
+}
+printf '%s\n' "$rows" | while IFS= read -r row; do
+  # Splitting the fixed literal root arguments is intentional; do not eval code.
+  set -- $row
+  check_roots "$@"
+done
+echo 'PASS: manager image identity and Phase3/4 task arguments include src/os'

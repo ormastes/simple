@@ -36,9 +36,13 @@ provisional_dispatch_tasks() {
     printf '%s=%s\n' "${task_phase}_${backend}_group_status" "$group_outcome" >>"$statuses"
     printf '%s=unproven\n' "${task_phase}_${backend}_group_tool_evidence" >>"$statuses"
   }
-  # LLVM precedes Cranelift within each independent phase. A failed index
-  # blocks only its own group; binary jobs remain independent.
-  for backend in llvm cranelift; do
+  # Each backend owns its writable caches and evidence journals. Only the
+  # parent combines the journals, in deterministic backend order.
+  dispatch_backend() {
+    backend=$1
+    attempt_binary phase3 "$backend" phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix"
+    case "$backend" in llvm) config=$phase3_llvm_index_config ;; cranelift) config=$phase3_cranelift_index_config ;; esac
+    attempt_modules phase3 "$backend" "$config"
     attempt_binary phase4 "$backend" bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix"
     attempt_binary phase4 "$backend" full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix"
     attempt_binary phase4 "$backend" interpreter src/app/interpreter/main.spl "bin/simple_interpreter$exe_suffix"
@@ -47,10 +51,28 @@ provisional_dispatch_tasks() {
     attempt_binary phase4 "$backend" test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix"
     case "$backend" in llvm) config=$llvm_index_config ;; cranelift) config=$cranelift_index_config ;; esac
     attempt_modules phase4 "$backend" "$config"
-  done
+  }
+  parent_statuses=$statuses
+  parent_hashes=$hashes
+  lane_root=$(mktemp -d "${parent_statuses}.lanes.XXXXXX") || return 1
+  (
+    statuses="$lane_root/llvm.statuses" hashes="$lane_root/llvm.hashes"
+    : >"$statuses"; : >"$hashes"
+    dispatch_backend llvm
+  ) &
+  llvm_pid=$!
+  (
+    statuses="$lane_root/cranelift.statuses" hashes="$lane_root/cranelift.hashes"
+    : >"$statuses"; : >"$hashes"
+    dispatch_backend cranelift
+  ) &
+  cranelift_pid=$!
+  dispatch_result=0
+  wait "$llvm_pid" || dispatch_result=1
+  wait "$cranelift_pid" || dispatch_result=1
   for backend in llvm cranelift; do
-    attempt_binary phase3 "$backend" phase3-bootstrap src/app/cli/bootstrap_main.spl "bin/simple$exe_suffix"
-    case "$backend" in llvm) config=$phase3_llvm_index_config ;; cranelift) config=$phase3_cranelift_index_config ;; esac
-    attempt_modules phase3 "$backend" "$config"
+    cat "$lane_root/$backend.statuses" >>"$parent_statuses" || dispatch_result=1
+    cat "$lane_root/$backend.hashes" >>"$parent_hashes" || dispatch_result=1
   done
+  return "$dispatch_result"
 }
