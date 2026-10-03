@@ -16,6 +16,8 @@ struct DbCheckpointInstallJournal:
     expected_installed_head: text
     transaction_id: text
     target_state: text
+    # Prepare-time diagnostics only. Never a fresh write/admission capability;
+    # the subsequent queue/apply owner reauthenticates at its actual host time.
     pending_results: [text]
 
 fn db_checkpoint_journal_encode(journal: DbCheckpointInstallJournal) -> Result<text, text>:
@@ -30,7 +32,7 @@ fn db_checkpoint_journal_encode(journal: DbCheckpointInstallJournal) -> Result<t
     for value in [journal.channel, journal.source_head, journal.pending_head, journal.pending_state_digest, journal.bridge_head, journal.checkpoint_digest, journal.expected_installed_head, journal.transaction_id, journal.target_state]: fields = fields + db_canonical_text(value)?
     var results: [[u8]] = []
     for value in journal.pending_results:
-        if not ["AcceptedReplay", "RebaseReady", "RebaseEligible", "WaitingForPending", "Conflict", "ResnapshotRequired"].contains(value): return Err("SCVDB_CHECKPOINT_PENDING_RESULT")
+        if not ["AcceptedReplay", "RebaseReady", "WaitingForPending", "Conflict", "ResnapshotRequired"].contains(value): return Err("SCVDB_CHECKPOINT_PENDING_RESULT")
         results.push(db_canonical_text(value)?)
     val bytes = db_domain_bytes("checkpoint-install-journal-v1", db_frame(185u8, fields + db_canonical_list(results)))?
     if bytes.len() > 16777216: return Err("SCVDB_CHECKPOINT_JOURNAL_QUOTA")

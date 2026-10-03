@@ -5,6 +5,7 @@ use app.scv.db.checkpoint_store.*
 use app.scv.db.checkpoint_objects.*
 use app.scv.db.checkpoint_journal.*
 use app.scv.db.checkpoint_validation.*
+use app.scv.db.page_store.{db_page_store_publish_objects}
 use app.scv.db.local_store.*
 use app.scv.db.bridge_store.{db_bridge_store_encode, db_bridge_store_acquire, db_bridge_store_sent}
 use std.scv.db_bridge.*
@@ -62,6 +63,37 @@ fn setup_item2_checkpoint_files() -> (text, DbDatabaseCheckpoint, DbCheckpointAu
     (root, checkpoint, authority, DbCheckpointPageSource(external_parent: external, maximum_pages: 65536, maximum_bytes: 67108864))
 
 describe "Same-epoch checkpoint installation and immutable pending work":
+    it "requires an actual current history record even when an empty checkpoint equals its horizon":
+        val (root, original, original_authority, source) = setup_item2_checkpoint_files()
+        var checkpoint = original
+        var authority = original_authority
+        checkpoint.metadata = db_pages_build([], checkpoint.metadata.quota).unwrap().manifest
+        checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+        val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+        checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+        authority.expected_checkpoint = checkpoint.revision
+        expect(checkpoint.current_revision).to_equal(checkpoint.history_horizon)
+        expect(db_checkpoint_prepare_install(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source)).to_equal(Err("SCVDB_CHECKPOINT_METADATA_MISSING"))
+        expect(db_store_read(root, "checkpoint-install").code).to_equal("empty")
+
+    it "rejects accepted history on a sibling branch outside the actual current ancestry":
+        val (root, original, authority, source) = setup_item2_checkpoint_files()
+        val patch = setup_item2_apply_patch(1, "")
+        val state = db_plan_admitted_patch(db_empty_state(), patch, authority.policy.merge, authority.policy.admission, 10).unwrap().proposed
+        val entity = setup_item2_checkpoint_entity(1)
+        val identities = identity_map_allocate(identity_map_empty(original.namespace, original.epoch), entity.provisional.unwrap()).state
+        var checkpoint = original
+        checkpoint.current_revision = state.revision
+        checkpoint.storage = DbCheckpointStorage.Reference(db_snapshot_encode(state).unwrap(), db_identity_snapshot_encode(identities).unwrap(), db_conflict_catalog_encode(DbConflictCatalog(records: [], resolutions: [])).unwrap())
+        val sibling = sha256_text("a separate branch")
+        var empty = db_empty_state()
+        empty.revision = db_state_digest(empty).unwrap()
+        val records = [db_checkpoint_metadata_encode(DbCheckpointMetadata.History(empty.revision, 1u64, [], [], sha256_text(db_snapshot_encode(empty).unwrap()))).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.History(state.revision, 2u64, [empty.revision], [], sha256_text(db_snapshot_encode(state).unwrap()))).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.History(sibling, 2u64, [empty.revision], [patch.batch_id], sha256_text("historical reference"))).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.Acceptance(patch.batch_id, sibling)).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(entity, DbCheckpointDisposition.Live)).unwrap()]
+        val build = db_pages_build(records, checkpoint.metadata.quota).unwrap()
+        checkpoint.metadata = build.manifest
+        expect(db_page_store_publish_objects(root, build, nil)).to_equal(Ok(true))
+        expect(db_checkpoint_validate_metadata(root, checkpoint)).to_equal(Err("SCVDB_CHECKPOINT_HISTORY_ACCEPTANCE_ANCESTRY"))
+
     it "rejects an imported undeclared field even when its snapshot digest is internally consistent":
         val (checkpoint, authority) = setup_item2_checkpoint()
         val patch = setup_item2_apply_patch(1, "")

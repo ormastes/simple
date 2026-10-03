@@ -51,23 +51,27 @@ fn db_checkpoint_row(root: text, checkpoint: DbDatabaseCheckpoint, entity: Entit
                     _: return Err("SCVDB_CHECKPOINT_INDEX")
     Ok(nil)
 
-fn db_checkpoint_reaches(root: text, checkpoint: DbDatabaseCheckpoint, wanted: text) -> Result<bool, text>:
+fn db_checkpoint_reachable(root: text, checkpoint: DbDatabaseCheckpoint) -> Result<{text: bool}, text>:
     var pending = [checkpoint.current_revision]
-    var visited: [text] = []
+    var visited: {text: bool} = {}
+    var visited_count = 0
     while pending.len() > 0:
         val revision = pending[pending.len() - 1]
         pending = pending[0:pending.len() - 1]
-        if revision == wanted: return Ok(true)
-        if visited.contains(revision): continue
-        if visited.len() >= 4096: return Err("SCVDB_CHECKPOINT_HISTORY_QUERY_QUOTA")
-        visited.push(revision)
+        if visited.contains_key(revision): continue
+        if visited_count >= 4096: return Err("SCVDB_CHECKPOINT_HISTORY_QUERY_QUOTA")
+        visited[revision] = true
+        visited_count = visited_count + 1
         match db_checkpoint_metadata(root, checkpoint, db_checkpoint_history_key(revision)?)?:
             History(found, ordinal, parents, batches, object_digest):
                 for parent in parents:
-                    if not visited.contains(parent) and not pending.contains(parent): pending.push(parent)
+                    if not visited.contains_key(parent) and not pending.contains(parent): pending.push(parent)
                 if pending.len() > 4096: return Err("SCVDB_CHECKPOINT_HISTORY_QUERY_QUOTA")
             _: return Err("SCVDB_CHECKPOINT_HISTORY")
-    Ok(false)
+    Ok(visited)
+
+fn db_checkpoint_reaches(root: text, checkpoint: DbDatabaseCheckpoint, wanted: text) -> Result<bool, text>:
+    Ok(db_checkpoint_reachable(root, checkpoint)?.contains_key(wanted))
 
 fn _checkpoint_links(root: text, checkpoint: DbDatabaseCheckpoint, entity: EntityRef) -> Result<bool, text>:
     # Follow all merge/split descendants for a bounded component. A split is
@@ -96,6 +100,22 @@ fn _checkpoint_links(root: text, checkpoint: DbDatabaseCheckpoint, entity: Entit
 
 fn db_checkpoint_validate_metadata(root: text, checkpoint: DbDatabaseCheckpoint) -> Result<bool, text>:
     db_pages_manifest_validate(checkpoint.metadata)?
+    # Equality of current/horizon is not an existence or object-binding proof.
+    match db_checkpoint_metadata(root, checkpoint, db_checkpoint_history_key(checkpoint.current_revision)?)?:
+        History(revision, ordinal, parents, batches, object_digest):
+            val expected = match checkpoint.storage:
+                Reference(snapshot, identities, conflicts): sha256_text(snapshot)
+                Paged(manifest): manifest.revision
+            if object_digest != expected: return Err("SCVDB_CHECKPOINT_HISTORY_OBJECT")
+        _: return Err("SCVDB_CHECKPOINT_HISTORY")
+    match db_checkpoint_metadata(root, checkpoint, db_checkpoint_history_key(checkpoint.history_horizon)?)?:
+        History(revision, ordinal, parents, batches, object_digest):
+            if parents.len() != 0: return Err("SCVDB_CHECKPOINT_HISTORY_HORIZON")
+        _: return Err("SCVDB_CHECKPOINT_HISTORY")
+    # One actual bounded ancestry traversal, reused across the streaming catalog
+    # pass. Histories beyond this cap require a future scalable proof owner.
+    val reachable = db_checkpoint_reachable(root, checkpoint)?
+    if not reachable.contains_key(checkpoint.history_horizon): return Err("SCVDB_CHECKPOINT_HISTORY_HORIZON")
     var dispositions = 0u64
     var acceptances = 0u64
     for entry in checkpoint.metadata.entries:
@@ -132,14 +152,15 @@ fn db_checkpoint_validate_metadata(root: text, checkpoint: DbDatabaseCheckpoint)
                     for batch in batches:
                         if db_checkpoint_batch(root, checkpoint, batch)? == nil: return Err("SCVDB_CHECKPOINT_HISTORY_BATCH")
                         if db_checkpoint_metadata(root, checkpoint, db_checkpoint_acceptance_key(batch)?)? != DbCheckpointMetadata.Acceptance(batch, revision): return Err("SCVDB_CHECKPOINT_HISTORY_BATCH")
+                    if batches.len() > 0 and not reachable.contains_key(revision): return Err("SCVDB_CHECKPOINT_HISTORY_ACCEPTANCE_ANCESTRY")
                 Acceptance(batch, revision):
                     acceptances = acceptances + 1u64
+                    if not reachable.contains_key(revision): return Err("SCVDB_CHECKPOINT_HISTORY_ACCEPTANCE_ANCESTRY")
                     if db_checkpoint_batch(root, checkpoint, batch)? == nil: return Err("SCVDB_CHECKPOINT_HISTORY_BATCH")
                     match db_checkpoint_metadata(root, checkpoint, db_checkpoint_history_key(revision)?)?:
                         History(found, ordinal, parents, batches, object_digest):
                             if not batches.contains(batch): return Err("SCVDB_CHECKPOINT_HISTORY_BATCH")
                         _: return Err("SCVDB_CHECKPOINT_HISTORY_BATCH")
-    if not db_checkpoint_reaches(root, checkpoint, checkpoint.history_horizon)?: return Err("SCVDB_CHECKPOINT_HISTORY_HORIZON")
     # Every materialized row requires an explicit disposition, including Live.
     var rows = 0u64
     var accepted = 0u64
