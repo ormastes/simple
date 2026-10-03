@@ -423,13 +423,33 @@ extern fn rt_string_builder_new() -> i64
 extern fn rt_string_builder_push(handle: i64, value: text) -> i64
 @unsafe(reason: "bounded flat-pool cache serialization through the runtime string builder", capabilities: [ffi])
 extern fn rt_string_builder_finish(handle: i64) -> text
+@unsafe(reason: "inspect rejected append input without dereferencing an unvalidated string", capabilities: [ffi])
+extern fn rt_string_len(value: Any) -> i64
 
-fn flat_pool_builder_push(handle: i64, value: text):
+fn flat_pool_builder_push(handle: i64, value: text, site: i64, item: i64):
     val appended =
         unsafe(capabilities: [ffi]):
             rt_string_builder_push(handle, value)
     if appended != 1:
-        panic("flat pool encoder string builder append failed")
+        # Inspect only on failure: no extra string validation/allocation on
+        # successful appends, and never stringify the possibly invalid value.
+        # A valid original input does NOT prove a bad handle: foreign lowering
+        # may have transformed it before the provider rejected the append.
+        val input_length =
+            unsafe(capabilities: [ffi]):
+                rt_string_len(value)
+        val site_name = match site:
+            0 => "i64.count"
+            1 => "i64.value"
+            2 => "text.count"
+            3 => "text.value"
+            4 => "text.separator"
+            5 => "text_list.count"
+            6 => "bool.count"
+            7 => "bool.value"
+            8 => "i64_list.count"
+            _ => "text_list_list.count"
+        panic("flat pool encoder string builder append failed site={site_name} item={item} input_length={input_length} result={appended}")
 
 fn flat_pool_builder_new() -> i64:
     val handle =
@@ -448,18 +468,22 @@ fn flat_pool_builder_finish(handle: i64) -> text:
     result
 
 fn flat_pool_enc_i64_into(handle: i64, pool: [i64]):
-    flat_pool_builder_push(handle, "{pool.len()}\n")
+    flat_pool_builder_push(handle, "{pool.len()}\n", 0, -1)
+    var item = 0
     for v in pool:
-        flat_pool_builder_push(handle, "{v}\n")
+        flat_pool_builder_push(handle, "{v}\n", 1, item)
+        item = item + 1
 
 fn flat_pool_enc_text_into(handle: i64, pool: [text]):
-    flat_pool_builder_push(handle, "{pool.len()}\n")
+    flat_pool_builder_push(handle, "{pool.len()}\n", 2, -1)
+    var item = 0
     for v in pool:
-        flat_pool_builder_push(handle, flat_pool_escape(v))
-        flat_pool_builder_push(handle, "\n")
+        flat_pool_builder_push(handle, flat_pool_escape(v), 3, item)
+        flat_pool_builder_push(handle, "\n", 4, item)
+        item = item + 1
 
 fn flat_pool_enc_text_list_into(handle: i64, pool: [[text]]):
-    flat_pool_builder_push(handle, "{pool.len()}\n")
+    flat_pool_builder_push(handle, "{pool.len()}\n", 5, -1)
     for inner in pool:
         flat_pool_enc_text_into(handle, inner)
 
@@ -470,9 +494,11 @@ pub fn flat_pool_enc_i64(pool: [i64]) -> text:
 
 pub fn flat_pool_enc_bool(pool: [bool]) -> text:
     val handle = flat_pool_builder_new()
-    flat_pool_builder_push(handle, "{pool.len()}\n")
+    flat_pool_builder_push(handle, "{pool.len()}\n", 6, -1)
+    var item = 0
     for v in pool:
-        flat_pool_builder_push(handle, if v: "1\n" else: "0\n")
+        flat_pool_builder_push(handle, if v: "1\n" else: "0\n", 7, item)
+        item = item + 1
     flat_pool_builder_finish(handle)
 
 pub fn flat_pool_enc_text(pool: [text]) -> text:
@@ -482,7 +508,7 @@ pub fn flat_pool_enc_text(pool: [text]) -> text:
 
 pub fn flat_pool_enc_i64_list(pool: [[i64]]) -> text:
     val handle = flat_pool_builder_new()
-    flat_pool_builder_push(handle, "{pool.len()}\n")
+    flat_pool_builder_push(handle, "{pool.len()}\n", 8, -1)
     for inner in pool:
         flat_pool_enc_i64_into(handle, inner)
     flat_pool_builder_finish(handle)
@@ -494,7 +520,7 @@ pub fn flat_pool_enc_text_list(pool: [[text]]) -> text:
 
 pub fn flat_pool_enc_text_list_list(pool: [[[text]]]) -> text:
     val handle = flat_pool_builder_new()
-    flat_pool_builder_push(handle, "{pool.len()}\n")
+    flat_pool_builder_push(handle, "{pool.len()}\n", 9, -1)
     for inner in pool:
         flat_pool_enc_text_list_into(handle, inner)
     flat_pool_builder_finish(handle)
