@@ -1,0 +1,145 @@
+# Real local CAS integration. These positive cases require working canonical
+# host paths/fsync; unsupported hosts must fail, never become passing skips.
+use std.spec.{describe, it, expect, fail, step}
+use app.io.mod.{cwd, dir_create, dir_list, file_exists, file_delete, file_write_bytes, file_read_regular_no_follow_bounded_bytes, process_run_timeout}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
+use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
+use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_store_put, db_evidence_store_get}
+
+fn setup_item2_store_paths() -> (text, text):
+    var root = ""
+    match secure_temp_dir(path_absolute(cwd()), "item2-cas-fixture-"):
+        Ok(value): root = value
+        Err(error): fail(error)
+    expect(root.len() > 0).to_be(true)
+    val source = "{root}/source"
+    val external = "{root}/external"
+    expect(dir_create(source, false)).to_be(true)
+    expect(dir_create(external, false)).to_be(true)
+    val (_out, _err, code) = process_run_timeout("git", ["init", "--quiet", source], 30000)
+    expect(code).to_equal(0)
+    (source, external)
+
+fn setup_item2_store_quota() -> DbEvidenceStoreQuota:
+    DbEvidenceStoreQuota(max_content_bytes: 4096, max_envelope_bytes: 8192, max_dependencies: 8)
+
+fn setup_item2_store_node(content: [u8], dependencies: [text]) -> DbEvidenceNode:
+    match db_evidence_digest(content, dependencies):
+        Ok(digest): return DbEvidenceNode(digest: digest, content: content, availability: "available", created_day: 10, dependencies: dependencies)
+        Err(error): fail(error)
+    fail("cannot construct canonical evidence fixture")
+
+fn check_item2_store_put(source: text, external: text, node: DbEvidenceNode) -> DbEvidenceNode:
+    match db_evidence_store_put(source, external, node, setup_item2_store_quota()):
+        Ok(value): return value
+        Err(error): fail(error)
+    fail("evidence put failed")
+
+fn check_item2_store_get(source: text, external: text, digest: text) -> DbEvidenceNode:
+    match db_evidence_store_get(source, external, digest, 10, setup_item2_store_quota()):
+        Ok(value): return value
+        Err(error): fail(error)
+    fail("evidence read failed")
+
+fn check_item2_store_put_error(source: text, external: text, node: DbEvidenceNode, quota: DbEvidenceStoreQuota, expected: text):
+    match db_evidence_store_put(source, external, node, quota):
+        Ok(value): fail("unsafe evidence write succeeded")
+        Err(error): expect(error).to_equal(expected)
+
+fn check_item2_store_get_error(source: text, external: text, digest: text, expected: text):
+    match db_evidence_store_get(source, external, digest, 10, setup_item2_store_quota()):
+        Ok(value): fail("missing or corrupt bytes reported available")
+        Err(error): expect(error).to_equal(expected)
+
+fn check_item2_store_read_bytes(path: text) -> [u8]:
+    match file_read_regular_no_follow_bounded_bytes(path, 8192):
+        Ok(bytes): return bytes
+        Err(error): fail(error)
+    fail("fixture read failed")
+
+describe "SCV external evidence CAS real file publication":
+    it "publishes immutable binary bytes and dependency edges then reads them back":
+        step("Persist an evidence envelope outside the canonical checkout")
+        val (source, external) = setup_item2_store_paths()
+        val leaf = setup_item2_store_node([0, 255, 10, 13], [])
+        val published_leaf = check_item2_store_put(source, external, leaf)
+        expect(published_leaf.content).to_equal([0, 255, 10, 13])
+        val root = setup_item2_store_node([1, 2, 3], [leaf.digest])
+        check_item2_store_put(source, external, root)
+        val readback = check_item2_store_get(source, external, root.digest)
+        expect(readback.availability).to_equal("available")
+        expect(readback.content).to_equal(root.content)
+        expect(readback.dependencies).to_equal([leaf.digest])
+        expect(readback.digest).to_equal(root.digest)
+        expect(dir_list("{external}/scv-evidence-v1").len()).to_equal(2)
+        expect(file_exists("{source}/.sj/lease/holder")).to_be(false)
+
+    it "retries identical publication idempotently after real byte verification":
+        val (source, external) = setup_item2_store_paths()
+        val node = setup_item2_store_node([], [])
+        check_item2_store_put(source, external, node)
+        val path = "{external}/scv-evidence-v1/{node.digest}.scve"
+        val before = check_item2_store_read_bytes(path)
+        check_item2_store_put(source, external, node)
+        expect(check_item2_store_read_bytes(path)).to_equal(before)
+        expect(dir_list("{external}/scv-evidence-v1").len()).to_equal(1)
+
+    it "never overwrites an existing digest path containing different bytes":
+        val (source, external) = setup_item2_store_paths()
+        val node = setup_item2_store_node([1], [])
+        check_item2_store_put(source, external, node)
+        val path = "{external}/scv-evidence-v1/{node.digest}.scve"
+        expect(file_write_bytes(path, [7, 8, 9])).to_be(true)
+        check_item2_store_put_error(source, external, node, setup_item2_store_quota(), "SCVDB_EVIDENCE_COLLISION")
+        expect(check_item2_store_read_bytes(path)).to_equal([7, 8, 9])
+        expect(file_exists("{source}/.sj/lease/holder")).to_be(false)
+
+    it "never substitutes manifest existence for deleted evidence bytes":
+        val (source, external) = setup_item2_store_paths()
+        val node = setup_item2_store_node([1, 2], [])
+        check_item2_store_put(source, external, node)
+        expect(file_delete("{external}/scv-evidence-v1/{node.digest}.scve")).to_be(true)
+        check_item2_store_get_error(source, external, node.digest, "SCVDB_EVIDENCE_UNAVAILABLE")
+
+    it "rejects negative byte and dependency quotas before filesystem IO":
+        val node = setup_item2_store_node([1], [])
+        val negative = DbEvidenceStoreQuota(max_content_bytes: -1, max_envelope_bytes: 128, max_dependencies: 1)
+        check_item2_store_put_error("/nonexistent-item2-checkout", "/nonexistent-item2-storage", node, negative, "SCVDB_EVIDENCE_QUOTA")
+        val negative_deps = DbEvidenceStoreQuota(max_content_bytes: 64, max_envelope_bytes: 128, max_dependencies: -1)
+        check_item2_store_put_error("/nonexistent-item2-checkout", "/nonexistent-item2-storage", node, negative_deps, "SCVDB_EVIDENCE_QUOTA")
+        val small = DbEvidenceStoreQuota(max_content_bytes: 0, max_envelope_bytes: 128, max_dependencies: 1)
+        check_item2_store_put_error("/nonexistent-item2-checkout", "/nonexistent-item2-storage", node, small, "SCVDB_EVIDENCE_QUOTA")
+
+    it "quarantines digest mismatches before creating a store":
+        val (source, external) = setup_item2_store_paths()
+        val good = setup_item2_store_node([1], [])
+        val changed = DbEvidenceNode(digest: good.digest, content: [2], availability: "available", created_day: 10, dependencies: [])
+        check_item2_store_put_error(source, external, changed, setup_item2_store_quota(), "SCVDB_EVIDENCE_QUARANTINED")
+        expect(file_exists("{external}/scv-evidence-v1")).to_be(false)
+        expect(file_exists("{source}/.sj/lease/holder")).to_be(false)
+
+    it "rejects checkout and Git metadata overlap and traversal":
+        val (source, external) = setup_item2_store_paths()
+        val node = setup_item2_store_node([1], [])
+        check_item2_store_put_error(source, source, node, setup_item2_store_quota(), "SCVDB_STORE_SCOPE")
+        check_item2_store_put_error(source, "{source}/.git", node, setup_item2_store_quota(), "SCVDB_STORE_SCOPE")
+        check_item2_store_put_error(source, "{external}/../external", node, setup_item2_store_quota(), "SCVDB_STORE_SCOPE")
+        check_item2_store_get_error(source, external, "../escape", "SCVDB_EVIDENCE_DIGEST")
+
+    it "respects an existing SJ writer lease without creating CAS state":
+        val (source, external) = setup_item2_store_paths()
+        expect(scv_sj_lease_acquire(source, "other-owner")).to_equal("ok: other-owner")
+        val node = setup_item2_store_node([1], [])
+        check_item2_store_put_error(source, external, node, setup_item2_store_quota(), "SCVDB_STORE_BUSY")
+        expect(file_exists("{external}/scv-evidence-v1")).to_be(false)
+        expect(scv_sj_lease_release(source, "other-owner")).to_equal("ok: released")
+
+    it "rejects a symlink alias for the configured CAS directory":
+        val (source, external) = setup_item2_store_paths()
+        val node = setup_item2_store_node([1], [])
+        val (_out, _err, code) = process_run_timeout("ln", ["-s", source, "{external}/scv-evidence-v1"], 30000)
+        expect(code).to_equal(0)
+        check_item2_store_put_error(source, external, node, setup_item2_store_quota(), "SCVDB_STORE_SCOPE")
+        expect(file_exists("{source}/{node.digest}.scve")).to_be(false)

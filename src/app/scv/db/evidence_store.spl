@@ -1,0 +1,233 @@
+# External immutable evidence CAS. Input is bytes, never an archive extraction
+# or executable reproduction. Authorization/encryption are separate owners.
+use app.io.mod.{is_dir, dir_create, dir_remove_all, file_write_bytes, file_read_regular_no_follow_bounded_bytes, file_is_regular_no_follow, file_exists, file_fsync, directory_fsync, process_run_timeout, env_get, host_os}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
+use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
+
+struct DbEvidenceStoreQuota:
+    max_content_bytes: i64
+    max_envelope_bytes: i64
+    max_dependencies: i64
+
+fn _evidence_quota_valid(q: DbEvidenceStoreQuota) -> bool:
+    q.max_content_bytes >= 0 and q.max_content_bytes <= 1073741824 and q.max_envelope_bytes >= 21 and q.max_envelope_bytes <= 2147483647 and q.max_dependencies >= 0 and q.max_dependencies <= 65536
+
+fn _evidence_digest_valid(digest: text) -> bool:
+    if digest.len() != 64:
+        return false
+    for index in 0..digest.len():
+        val code = digest.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+    true
+
+fn _evidence_contains(parent: text, child: text) -> bool:
+    parent == "/" or parent == child or child.starts_with("{parent}/")
+
+fn _evidence_path_valid(path: text) -> bool:
+    if not path.starts_with("/") or path.starts_with("//") or path.contains("\\") or path.contains("\n") or path.contains("\r") or path.ends_with("/"):
+        return false
+    for index in 0..path.len():
+        if path.char_code_at(index) == 0:
+            return false
+    for component in path.split("/"):
+        if component == "." or component == "..":
+            return false
+    true
+
+# Only local bounded Git discovery; no network wait occurs under the lease.
+fn _evidence_scope(checkout: text, external_parent: text) -> Result<text, text>:
+    if host_os() == "windows":
+        return Err("SCVDB_STORE_CANONICAL_PATH_UNSUPPORTED")
+    if not _evidence_path_valid(checkout) or not _evidence_path_valid(external_parent) or not is_dir(checkout) or not is_dir(external_parent):
+        return Err("SCVDB_STORE_SCOPE")
+    if path_absolute(checkout) != checkout or path_absolute(external_parent) != external_parent:
+        return Err("SCVDB_STORE_SCOPE")
+    for key in ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_EXEC_PATH"]:
+        if env_get(key).len() > 0:
+            return Err("SCVDB_STORE_GIT_ENV")
+    val (top, _top_error, top_code) = process_run_timeout("git", ["--no-replace-objects", "-C", checkout, "rev-parse", "--show-toplevel"], 30000)
+    val (common, _common_error, common_code) = process_run_timeout("git", ["--no-replace-objects", "-C", checkout, "rev-parse", "--path-format=absolute", "--git-common-dir"], 30000)
+    if top_code != 0 or common_code != 0 or top.len() > 4096 or common.len() > 4096 or path_absolute(top.trim()) != checkout:
+        return Err("SCVDB_STORE_REPOSITORY")
+    val common_path = path_absolute(common.trim())
+    if common_path.len() <= 0:
+        return Err("SCVDB_STORE_REPOSITORY")
+    val root = "{external_parent}/scv-evidence-v1"
+    if _evidence_contains(checkout, root) or _evidence_contains(root, checkout) or _evidence_contains(common_path, root) or _evidence_contains(root, common_path):
+        return Err("SCVDB_STORE_SCOPE")
+    if is_dir(root) or file_exists(root):
+        if not is_dir(root) or path_absolute(root) != root:
+            return Err("SCVDB_STORE_SCOPE")
+    # Reject a preexisting alias for SJ's lock directory, too.
+    val sj = "{checkout}/.sj"
+    if is_dir(sj) or file_exists(sj):
+        if not is_dir(sj) or path_absolute(sj) != sj:
+            return Err("SCVDB_STORE_SCOPE")
+    Ok(root)
+
+fn _evidence_encode(node: DbEvidenceNode, quota: DbEvidenceStoreQuota) -> Result<[u8], text>:
+    if not _evidence_quota_valid(quota) or node.content.len() < 0 or node.dependencies.len() < 0 or node.content.len() > quota.max_content_bytes or node.dependencies.len() > quota.max_dependencies:
+        return Err("SCVDB_EVIDENCE_QUOTA")
+    val size = 21 + node.dependencies.len() * 64 + node.content.len()
+    if size > quota.max_envelope_bytes:
+        return Err("SCVDB_EVIDENCE_QUOTA")
+    if node.availability != "available" or not _evidence_digest_valid(node.digest):
+        return Err("SCVDB_EVIDENCE_QUARANTINED")
+    var dependencies: [text] = []
+    for dependency in node.dependencies:
+        if not _evidence_digest_valid(dependency):
+            return Err("SCVDB_EVIDENCE_DEPENDENCY")
+        var next: [text] = []
+        var inserted = false
+        for existing in dependencies:
+            if dependency == existing:
+                return Err("SCVDB_EVIDENCE_DEPENDENCY")
+            if not inserted and dependency < existing:
+                next.push(dependency)
+                inserted = true
+            next.push(existing)
+        if not inserted:
+            next.push(dependency)
+        dependencies = next
+    if db_evidence_digest(node.content, dependencies)? != node.digest:
+        return Err("SCVDB_EVIDENCE_QUARANTINED")
+    var bytes: [u8] = [83, 67, 86, 69, 1]
+    bytes = bytes + _evidence_fixed_u64(dependencies.len() as u64) + _evidence_fixed_u64(node.content.len() as u64)
+    for dependency in dependencies:
+        for index in 0..64:
+            bytes.push(dependency.char_code_at(index) as u8)
+    Ok(bytes + node.content)
+
+# Storage envelope length fields are fixed big-endian u64. They are not the
+# semantic canonical encoder's minimal LEB128 fields.
+fn _evidence_fixed_u64(value: u64) -> [u8]:
+    var bytes: [u8] = []
+    for index in 0..8:
+        val shift = (7 - index) * 8
+        bytes.push(((value >> shift) & 255u64) as u8)
+    bytes
+
+fn _evidence_u64(bytes: [u8], offset: i64) -> u64:
+    var value: u64 = 0
+    for index in 0..8:
+        value = value * 256 + (bytes[offset + index] as u64)
+    value
+
+fn _evidence_decode(bytes: [u8], digest: text, created_day: u64, quota: DbEvidenceStoreQuota) -> Result<DbEvidenceNode, text>:
+    if bytes.len() < 21 or bytes.len() > quota.max_envelope_bytes:
+        return Err("SCVDB_EVIDENCE_QUOTA")
+    if bytes[0] != 83 or bytes[1] != 67 or bytes[2] != 86 or bytes[3] != 69 or bytes[4] != 1:
+        return Err("SCVDB_EVIDENCE_FORMAT")
+    val dep_count = _evidence_u64(bytes, 5)
+    val content_size = _evidence_u64(bytes, 13)
+    if dep_count > (quota.max_dependencies as u64) or content_size > (quota.max_content_bytes as u64):
+        return Err("SCVDB_EVIDENCE_QUOTA")
+    val expected_size = 21 + (dep_count as i64) * 64 + (content_size as i64)
+    if expected_size != bytes.len():
+        return Err("SCVDB_EVIDENCE_FORMAT")
+    val hex = "0123456789abcdef"
+    var dependencies: [text] = []
+    var cursor = 21
+    for dep in 0..(dep_count as i64):
+        var value = ""
+        for digit in 0..64:
+            val code = bytes[cursor] as i64
+            cursor = cursor + 1
+            var position = -1
+            if code >= 48 and code <= 57:
+                position = code - 48
+            elif code >= 97 and code <= 102:
+                position = code - 97 + 10
+            if position < 0:
+                return Err("SCVDB_EVIDENCE_DEPENDENCY")
+            value = value + hex[position:position + 1]
+        if dependencies.len() > 0 and value <= dependencies[dependencies.len() - 1]:
+            return Err("SCVDB_EVIDENCE_DEPENDENCY")
+        dependencies.push(value)
+    var content: [u8] = []
+    while cursor < bytes.len():
+        content.push(bytes[cursor])
+        cursor = cursor + 1
+    if db_evidence_digest(content, dependencies)? != digest:
+        return Err("SCVDB_EVIDENCE_DIGEST")
+    Ok(DbEvidenceNode(digest: digest, content: content, availability: "available", created_day: created_day, dependencies: dependencies))
+
+fn _evidence_read(root: text, digest: text, created_day: u64, quota: DbEvidenceStoreQuota) -> Result<DbEvidenceNode, text>:
+    if not is_dir(root) or path_absolute(root) != root:
+        return Err("SCVDB_STORE_UNAVAILABLE")
+    val destination = "{root}/{digest}.scve"
+    if not file_is_regular_no_follow(destination) or path_absolute(destination) != destination:
+        return Err("SCVDB_EVIDENCE_UNAVAILABLE")
+    val bytes = file_read_regular_no_follow_bounded_bytes(destination, quota.max_envelope_bytes)?
+    _evidence_decode(bytes, digest, created_day, quota)
+
+fn db_evidence_store_get(checkout: text, external_parent: text, digest: text, created_day: u64, quota: DbEvidenceStoreQuota) -> Result<DbEvidenceNode, text>:
+    if not _evidence_quota_valid(quota):
+        return Err("SCVDB_EVIDENCE_QUOTA")
+    if not _evidence_digest_valid(digest):
+        return Err("SCVDB_EVIDENCE_DIGEST")
+    val root = _evidence_scope(checkout, external_parent)?
+    _evidence_read(root, digest, created_day, quota)
+
+fn _evidence_publish(root: text, stage: text, node: DbEvidenceNode, bytes: [u8], quota: DbEvidenceStoreQuota) -> Result<DbEvidenceNode, text>:
+    if path_absolute(root) != root or path_absolute(stage) != stage or not stage.starts_with("{root}/quarantine-"):
+        return Err("SCVDB_STORE_SCOPE")
+    val staged_file = "{stage}/envelope"
+    if not file_write_bytes(staged_file, bytes):
+        return Err("SCVDB_EVIDENCE_STAGE_WRITE")
+    if not file_fsync(staged_file) or not directory_fsync(stage):
+        return Err("SCVDB_EVIDENCE_DURABILITY_UNCERTAIN")
+    val verified_stage = file_read_regular_no_follow_bounded_bytes(staged_file, quota.max_envelope_bytes)?
+    if verified_stage != bytes:
+        return Err("SCVDB_EVIDENCE_STAGE_CHANGED")
+    # Publication never replaces an existing entry, including a hostile link.
+    val destination = "{root}/{node.digest}.scve"
+    if path_absolute(root) != root or path_absolute(stage) != stage:
+        return Err("SCVDB_STORE_SCOPE")
+    val _inserted = file_publish_noreplace(staged_file, destination)?
+    if not file_is_regular_no_follow(destination) or path_absolute(destination) != destination:
+        return Err("SCVDB_EVIDENCE_COLLISION")
+    val actual = file_read_regular_no_follow_bounded_bytes(destination, quota.max_envelope_bytes)?
+    if actual != bytes:
+        return Err("SCVDB_EVIDENCE_COLLISION")
+    # Also reestablish all durability barriers for an idempotent retry after
+    # previous publication uncertainty. Existing bytes alone are not an ACK.
+    if not file_fsync(destination) or not directory_fsync(root):
+        return Err("SCVDB_EVIDENCE_DURABILITY_UNCERTAIN")
+    _evidence_decode(actual, node.digest, node.created_day, quota)
+
+fn _evidence_put_locked(root: text, node: DbEvidenceNode, bytes: [u8], quota: DbEvidenceStoreQuota) -> Result<DbEvidenceNode, text>:
+    if not is_dir(root) and not dir_create(root, false):
+        return Err("SCVDB_STORE_CREATE")
+    if path_absolute(root) != root:
+        return Err("SCVDB_STORE_SCOPE")
+    val stage = secure_temp_dir(root, "quarantine-")?
+    if path_absolute(stage) != stage or not stage.starts_with("{root}/quarantine-"):
+        return Err("SCVDB_STORE_SCOPE")
+    val result = _evidence_publish(root, stage, node, bytes, quota)
+    if path_absolute(stage) != stage or not dir_remove_all(stage):
+        return Err("SCVDB_EVIDENCE_CLEANUP")
+    result
+
+fn db_evidence_store_put(checkout: text, external_parent: text, node: DbEvidenceNode, quota: DbEvidenceStoreQuota) -> Result<DbEvidenceNode, text>:
+    # Byte/dependency/count checks and canonical digest run before any file or
+    # process IO. No archive paths or caller-provided destination names exist.
+    val bytes = _evidence_encode(node, quota)?
+    val root = _evidence_scope(checkout, external_parent)?
+    val holder = "evidence-{node.digest}"
+    val acquired = scv_sj_lease_acquire(checkout, holder)
+    if not acquired.starts_with("ok:"):
+        return Err("SCVDB_STORE_BUSY")
+    val result = _evidence_put_locked(root, node, bytes, quota)
+    val released = scv_sj_lease_release(checkout, holder)
+    if not released.starts_with("ok:"):
+        return Err("SCVDB_STORE_LEASE_RELEASE")
+    # New store directory entry must itself be durable in the external parent.
+    if not directory_fsync(external_parent):
+        return Err("SCVDB_EVIDENCE_DURABILITY_UNCERTAIN")
+    result
+
+export DbEvidenceStoreQuota, db_evidence_store_put, db_evidence_store_get
