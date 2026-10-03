@@ -203,3 +203,47 @@ limits do not replace the selected Operating B requirements. The system
 inventory remains 20 actual-owner sources and 133 explicit fail-fast cases;
 REQ-019's full acceptance is not closed. No runtime/core/MCP/coverage/performance
 PASS or release admission is claimed.
+
+## Trusted retention repair source continuation
+
+Integrated owner/design `96c5a03f08b` and independently authored test sources
+`36bc49f1d0f`, both based on prior root checkpoint `777eaf15299`. The repair
+owner captures exact retention HEAD under SJ, reads bounded actual registered
+bytes, verifies every incomplete root's complete dependency graph, and runs
+ordinary retention planning before removing only incomplete markers. Review
+added the permanent reproduction companion-pin invariant; orphan markers fail
+without synthesizing authority. No ordinary pin, classification, entry, rollup,
+deletion receipt or semantic generation is changed by repair.
+
+Eight filesystem scenarios and two CLI cases cover restoration/registration,
+actual subsequent unrelated deletion, permanent pin preservation, missing and
+unregistered dependencies, genuine encrypted evidence, corruption, oversize,
+stale HEAD, scope, lease exclusion, orphan markers and no-marker reopen after
+later evidence loss. `retention-status` provides the captured HEAD; explicit
+`retention-repair-reproduction` returns either a fresh complete-closure check or
+the distinct no-marker result. No-marker retry does not reverify availability.
+
+Source reviews cleared one bounded fix cycle. The owner remains limited to
+256 nodes, 8 MiB per object and 32 MiB encoded evidence reads under SJ, with
+separately bounded catalog IO. This closes the missing repair-owner source gap,
+not runtime acceptance, pin release, large-object scaling or full reproduction
+mapping. All ten regression sources remain UNEXECUTED. The full system inventory
+is unchanged at 20 actual-owner sources and 133 explicit fail-fast cases.
+
+### Fresh runtime audit
+
+The original item1 export still contained only `simple.exe.rejected`. A different
+stage2 executable was observed under
+`C:/Users/user/.simple/worktrees/simple-windows-phase2/build/native_probe/llvm-repaired3fa-native40-attempt1/stage2-resume.6zOjsA/stage2/x86_64-pc-windows-msvc/simple.exe`,
+SHA256 `452b8a2d511228114ad7019b74bdba19f33191be7a16872da226a7ad0b39dbc3`.
+PID 17384 was gone at the audit; PID 26696 was then observed using the same
+binary for compiler HIR `native-build`, not `test`/`check`. These are historical
+process observations, not an assertion that a process is still live.
+
+Matching `llvm-repaired3fa-provisional40-attempt1/pins.json` and `status.json`
+in that `native_probe` directory label admission `NONE`.
+`llvm-repaired3fa-native40-attempt1/launch.env` and `native-command-result.env`
+label it `UNADMITTED`; `native.receipt.env` records raw exit zero only. HIR
+reported `SCV-E-ADMISSION: compile-event-journal-missing`. This supplies no
+admitted full runner. No binary was probed, build launched or other process
+interrupted. Runtime/core/MCP/host/coverage/performance gates remain unverified.

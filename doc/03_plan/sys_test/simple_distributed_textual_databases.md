@@ -105,3 +105,26 @@ The five canonical steps remain visible. Happy, boundary, and failure names are 
 | NFR-015 | should prove that it runs one pure semantic core through all capability fixtures | should prove that it keeps subprocess network OS and runtime code in adapters | should prove that it rejects forbidden provider SDK or raw runtime dependency in the core | `check_replica_contract` | Missing: explicit fail-fast |
 
 Every REQ-001..REQ-036 and NFR-001..NFR-015 has three executable, behavior-specific cases. The table is a coverage design, not an admission result.
+
+## Retention repair acceptance sources, 2026-10-03
+
+REQ-019 and NFR-008 gain the following scoped prerequisites. These do not replace
+their full system scenarios or prove full reproduction, scale or performance.
+The eight filesystem cases are in
+`test/02_integration/app/scv_db_retention_repair_it_spec.spl`; two command cases
+are in `test/02_integration/app/scv_db_retention_repair_commands_it_spec.spl`.
+All ten are UNEXECUTED pending an admitted runtime.
+
+| Concrete setup/action | Required observable result |
+|---|---|
+| Persist an incomplete parent, restore its actual child and register it, then repair captured retention HEAD | Remove only incomplete markers; preserve every ordinary pin, entry, rollup and semantic HEAD |
+| Resume an older unrelated prepared deletion after successful repair | Actual eligible bytes disappear with a durable receipt; restored closure and unrelated release-pinned bytes remain readable |
+| Leave child missing, unregistered, registered-but-missing, corrupt, oversized or restricted | Error with byte-for-byte unchanged retention catalog and preserved parent/pending bytes |
+| Supply stale HEAD, checkout-contained evidence or an occupied SJ lease | Refuse repair without changing protection or semantic state |
+| Persist an orphan incomplete marker without its permanent reproduction pin | Refuse with `SCVDB_PIN_REPAIR_REQUIRED`; never invent replacement authority |
+| Reopen repaired state, lose a dependency, then retry repair | `no_incomplete_markers` reports no fresh proof; ordinary retention still refuses the incomplete closure |
+| Use local status and repair commands | Capture actual retention HEAD, enforce command arity, report distinct fresh-check/no-marker status, preserve all ordinary pins |
+
+Fixtures create real signed observations, CAS envelopes, rollups and prepared
+deletion state. Independent test sources preceded the owner commit; without
+execution this establishes test-first authoring, not RED/GREEN evidence.

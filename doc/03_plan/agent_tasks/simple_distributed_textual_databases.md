@@ -354,3 +354,14 @@ reproducibility. Incomplete retention protection does not establish complete
 closure, a repair path, scalable collection or Operating B qualification.
 Root is the merge owner and integration reviewer; named final model review,
 runtime acceptance and release approval remain unfulfilled gates.
+
+### Retention repair follow-up
+
+The next bounded slice used the same isolated worktrees on new branches based
+on `777eaf15299`: core owned only `retention_store.spl` and its repair design;
+evidence owned the independent repair spec/fixture; root owned CLI, CLI tests
+and plan/guide updates. Core and evidence cross-reviewed their scoped changes;
+research independently reviewed the root command routes and performed a
+read-only runner-admission audit. Root reviewed and integrated the two commits.
+One source fix cycle added the permanent companion-pin invariant. No runtime
+test pass or final production/model approval is implied by these source reviews.

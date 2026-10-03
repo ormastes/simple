@@ -1,0 +1,53 @@
+# Actual CLI dispatch into retained evidence repair. Execution needs an admitted runner.
+use std.spec.*
+use app.scv.db.commands.{db_command}
+use app.scv.db.observation_owner.{db_observation_apply_reference}
+use app.scv.db.observation_content.{db_observation_limits}
+use app.scv.db.retention_store.{db_retention_open, db_retention_register, db_retention_store_quota}
+use app.scv.db.evidence_store.{db_evidence_store_put}
+use app.scv.db.local_store.{db_store_read}
+use std.scv.db_retention.{DbEvidenceNode}
+use test.fixtures.scv.db_observation_fixture.*
+
+describe "Explicit local reproduction protection repair command":
+    it "verifies restored registered bytes and clears only incomplete markers without semantic mutation":
+        val fixture = setup_item2_observation_fixture(false, "missing", true)
+        db_observation_apply_reference(fixture.source, fixture.initial_head, fixture.patch, fixture.policy.config, fixture.sources, db_observation_limits()).unwrap()
+        val semantic = db_store_read(fixture.source)
+        val incomplete = db_retention_open(fixture.source).unwrap()
+        expect(db_command(fixture.source, ["retention-status"]).contains("head={incomplete.head}")).to_be(true)
+        var marked = false
+        for pin in incomplete.catalog.pins:
+            if pin.reason == "reproduction_incomplete": marked = true
+        expect(marked).to_be(true)
+        val child = DbEvidenceNode(digest: fixture.absent_digest, content: [9u8, 9u8], availability: "available", created_day: 0, dependencies: [])
+        db_evidence_store_put(fixture.source, fixture.sources.evidence_parent, child, db_retention_store_quota()).unwrap()
+        val restored = db_retention_register(fixture.source, fixture.sources.evidence_parent, incomplete.head, child.digest, 0, "internal").unwrap()
+        val result = db_command(fixture.source, ["retention-repair-reproduction", restored.head, fixture.sources.evidence_parent])
+        expect(result.starts_with("OK local-retention-repair head=")).to_be(true)
+        expect(result.contains("closure=complete_closure_verified")).to_be(true)
+        val repaired = db_retention_open(fixture.source).unwrap()
+        expect(db_command(fixture.source, ["retention-status"])).to_equal("OK local-retention head={repaired.head} incomplete_markers=0")
+        expect(repaired.catalog.entries).to_equal(restored.catalog.entries)
+        expect(repaired.catalog.rollups).to_equal(restored.catalog.rollups)
+        for pin in repaired.catalog.pins:
+            expect(pin.reason == "reproduction_incomplete").to_be(false)
+        for pin in restored.catalog.pins:
+            if pin.reason != "reproduction_incomplete": expect(repaired.catalog.pins.contains(pin)).to_be(true)
+        expect(db_store_read(fixture.source)).to_equal(semantic)
+        check_item2_observation_cleanup(fixture)
+
+    it "refuses missing dependencies stale capture checkout evidence and missing arguments without clearing protection":
+        val fixture = setup_item2_observation_fixture(false, "missing", true)
+        db_observation_apply_reference(fixture.source, fixture.initial_head, fixture.patch, fixture.policy.config, fixture.sources, db_observation_limits()).unwrap()
+        val semantic = db_store_read(fixture.source)
+        val retained = db_store_read(fixture.source, "retention")
+        expect(db_command(fixture.source, ["retention-repair-reproduction", retained.head, fixture.sources.evidence_parent]).starts_with("ERROR ")).to_be(true)
+        expect(db_store_read(fixture.source, "retention")).to_equal(retained)
+        expect(db_command(fixture.source, ["retention-repair-reproduction", "0".repeat(64), fixture.sources.evidence_parent])).to_equal("ERROR SCVDB_STORE_HEAD_ADVANCED")
+        expect(db_command(fixture.source, ["retention-repair-reproduction", retained.head, fixture.source])).to_equal("ERROR SCVDB_STORE_SCOPE")
+        expect(db_command(fixture.source, ["retention-repair-reproduction", retained.head])).to_equal("ERROR SCVDB_COMMAND_USAGE")
+        expect(db_command(fixture.source, ["retention-status", "extra"])).to_equal("ERROR SCVDB_COMMAND_USAGE")
+        expect(db_store_read(fixture.source, "retention")).to_equal(retained)
+        expect(db_store_read(fixture.source)).to_equal(semantic)
+        check_item2_observation_cleanup(fixture)

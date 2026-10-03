@@ -50,8 +50,28 @@ An available object with a verified missing or restricted transitive dependency
 can receive an explicit incomplete-reproduction protection marker in the
 retention catalog. Such a marker stops collection for the whole local catalog,
 including resuming previously prepared deletions. It does not certify a complete
-closure. The trusted marker-repair operation is still missing; restoring bytes
-alone does not resume collection.
+closure. Restoring bytes alone does not resume collection. The source now has
+an explicit trusted local repair operation:
+
+```text
+scv db retention-status
+scv db retention-repair-reproduction <expected-retention-head|empty> <external-evidence-parent>
+```
+
+Capture the retention HEAD with `retention-status` after restoring and registering
+the required objects through their trusted storage owners. Repair reopens the
+actual registered dependency graph under the SJ writer lease. Every marker must
+retain its matching permanent reproduction pin. Missing, unregistered, corrupt
+or restricted dependencies refuse repair and preserve all markers. Successful
+repair removes only incomplete markers; ordinary pins, semantic state, catalog
+classifications and deletion receipts remain unchanged. It performs no deletion.
+
+`complete_closure_verified` reports a successful fresh check at repair time.
+`no_incomplete_markers` reports an unchanged catalog without rechecking current
+evidence. A stale captured HEAD requires a fresh status read. Repair is bounded
+to 256 nodes, 8 MiB per object and 32 MiB aggregate encoded evidence reads;
+catalog metadata reads are bounded separately. This source path still needs
+runtime qualification and does not close the full reproduction or scale gates.
 
 The interim observation/pin path inherits the existing retention owner's
 256-object and 8 MiB per-object limits, with a 1 GiB aggregate content-read
@@ -326,6 +346,7 @@ insufficient for claiming the adapter operational.
 - [Detail design](../../../05_design/simple_distributed_textual_databases.md)
 - [Configuration and reproduction admission checkpoint](../../../05_design/simple_distributed_textual_databases_reproduction_admission.md)
 - [Paged historical regression design](../../../05_design/simple_distributed_textual_databases_paged_history_regressions.md)
+- [Retention repair design](../../../05_design/simple_distributed_textual_databases_retention_repair.md)
 - [System-test plan](../../../03_plan/sys_test/simple_distributed_textual_databases.md)
 - [Parallel agent plan](../../../03_plan/agent_tasks/simple_distributed_textual_databases.md)
 - [System-spec manual](../../../06_spec/03_system/app/scv/feature/simple_distributed_textual_databases_spec.md)

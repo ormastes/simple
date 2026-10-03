@@ -102,3 +102,18 @@ uses local bare Git, signed bootstrap/index, queue reopen and unpublished-candid
 content recheck. Helpers use `setup_item2_observation_*` / `check_item2_observation_*`.
 All Simple source tests are UNEXECUTED; no admitted runtime or coverage result is
 available. This checkpoint is implementation evidence, not verification completion.
+
+## 2026-10-03 repair implementation delta
+
+The previously missing trusted incomplete-marker repair now has a source owner
+and independent filesystem/CLI regression sources; see
+[retention repair design](simple_distributed_textual_databases_retention_repair.md).
+It verifies actual registered closure under SJ and removes only incomplete
+markers whose permanent reproduction pins remain present. Ordinary pins,
+classifications, entries and semantic state are preserved. Restricted or
+unavailable closure still refuses repair. Restoring bytes alone never clears
+the marker, and no-marker retry explicitly makes no fresh availability claim.
+
+This supersedes only the earlier missing-repair statement. Source/test artifact
+mapping, Reference alias support, large-object/scalable retention and all runtime
+qualification remain open. The new owner is not a pin-release or unlink API.

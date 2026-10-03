@@ -15,9 +15,10 @@ use app.scv.db.paged_store.{db_paged_initialize, db_paged_open, db_paged_apply}
 use app.scv.db.settlement_queue.{db_settlement_queue_open, db_settlement_enqueue}
 use app.scv.db.observation_owner.{db_observation_apply_reference, db_observation_apply_paged}
 use app.scv.db.observation_content.{DbObservationSources, db_observation_limits}
+use app.scv.db.retention_store.{db_retention_open, db_retention_repair_reproduction}
 
 fn db_command_help() -> text:
-    "scv db status <policy-file> <policy-digest>\nscv db apply <policy-file> <policy-digest> <patch-file> <expected-head|empty>\nscv db paged-init <paged-policy-file> <policy-digest>\nscv db paged-status <paged-policy-file> <policy-digest>\nscv db paged-apply <paged-policy-file> <policy-digest> <patch-file> <expected-head>\nscv db paged-quarantine-apply <paged-policy-file> <policy-digest> <external-store> <digest> <batch-id> <expected-head>\nscv db queue-status <policy-file> <policy-digest>\nscv db queue-enqueue <policy-file> <policy-digest> <patch-file> <expected-head|empty>\nscv db observation-apply <policy-file> <policy-digest> <patch-file> <expected-head|empty> <external-evidence-parent>\nscv db paged-observation-apply <paged-policy-file> <policy-digest> <patch-file> <expected-head> <external-evidence-parent>\nscv db inspect-patch <patch-file>\nscv db quarantine-import <external-store> <bundle-file>\nscv db quarantine-inspect <external-store> <digest>\nscv db quarantine-apply <policy-file> <policy-digest> <external-store> <digest> <batch-id> <expected-head|empty>\nPolicy digests must come from the independently reviewed configuration. Apply and queue commands are local; queue acknowledgement is not remote settlement. Paged commands require a paged policy; existing reference stores require explicit migration. Observation commands validate exact configuration/reproduction artifacts and declared dependency availability; unavailable dependencies remain explicit and acceptance alone does not prove reproducibility. Quarantine inspection verifies storage and parsing only."
+    "scv db retention-status\nscv db retention-repair-reproduction <expected-retention-head|empty> <external-evidence-parent>\nscv db status <policy-file> <policy-digest>\nscv db apply <policy-file> <policy-digest> <patch-file> <expected-head|empty>\nscv db paged-init <paged-policy-file> <policy-digest>\nscv db paged-status <paged-policy-file> <policy-digest>\nscv db paged-apply <paged-policy-file> <policy-digest> <patch-file> <expected-head>\nscv db paged-quarantine-apply <paged-policy-file> <policy-digest> <external-store> <digest> <batch-id> <expected-head>\nscv db queue-status <policy-file> <policy-digest>\nscv db queue-enqueue <policy-file> <policy-digest> <patch-file> <expected-head|empty>\nscv db observation-apply <policy-file> <policy-digest> <patch-file> <expected-head|empty> <external-evidence-parent>\nscv db paged-observation-apply <paged-policy-file> <policy-digest> <patch-file> <expected-head> <external-evidence-parent>\nscv db inspect-patch <patch-file>\nscv db quarantine-import <external-store> <bundle-file>\nscv db quarantine-inspect <external-store> <digest>\nscv db quarantine-apply <policy-file> <policy-digest> <external-store> <digest> <batch-id> <expected-head|empty>\nPolicy digests must come from the independently reviewed configuration. Apply and queue commands are local; queue acknowledgement is not remote settlement. Paged commands require a paged policy; existing reference stores require explicit migration. Observation commands validate exact configuration/reproduction artifacts and declared dependency availability; unavailable dependencies remain explicit and acceptance alone does not prove reproducibility. Quarantine inspection verifies storage and parsing only."
 
 fn _db_command_now() -> Result<u64, text>:
     val sample = time_sample_unix_micros_or_failure()
@@ -45,6 +46,20 @@ fn _db_command_run(root: text, args: [text]) -> Result<text, text>:
     if args.len() == 0: return Ok(db_command_help())
     if args.len() == 1 and args[0] == "help": return Ok(db_command_help())
     val observed = path_final_existing(root)?
+    if args[0] == "retention-status":
+        if args.len() != 1: return Err("SCVDB_COMMAND_USAGE")
+        val retained = db_retention_open(observed.path)?
+        val head = if retained.head == "": "empty" else: retained.head
+        var incomplete = 0
+        for pin in retained.catalog.pins:
+            if pin.reason == "reproduction_incomplete": incomplete = incomplete + 1
+        return Ok("OK local-retention head={head} incomplete_markers={incomplete}")
+    if args[0] == "retention-repair-reproduction":
+        if args.len() != 3: return Err("SCVDB_COMMAND_USAGE")
+        val expected = if args[1] == "empty": "" else: args[1]
+        val parent = _db_command_path(observed.path, args[2])
+        val repaired = db_retention_repair_reproduction(observed.path, parent, expected, _db_command_now()? / 86400u64)?
+        return Ok("OK local-retention-repair head={repaired.retained.head} closure={repaired.closure_status}")
     if args[0] == "observation-apply" or args[0] == "paged-observation-apply":
         if args.len() != 6: return Err("SCVDB_COMMAND_USAGE")
         val policy_path = _db_command_path(observed.path, args[1])
