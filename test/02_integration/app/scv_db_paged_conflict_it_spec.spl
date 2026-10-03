@@ -77,6 +77,35 @@ describe "paged immutable conflicts and atomic reviewed resolution REQ013 REQ015
         expect(db_paged_lookup(fixture.root, view, db_paged_conflict_key(decision.conflict_id, true).unwrap()).unwrap()).to_be_nil()
         expect(db_paged_lookup(fixture.root, view, db_page_batch_key(patch.batch_id).unwrap()).unwrap()).to_be_nil()
 
+    it "replays an accepted reviewer resolution after the original producer key is retired":
+        val fixture = setup_item2_paged_conflict()
+        val decision = setup_item2_conflict_decision(fixture)
+        val patch = setup_item2_conflict_signed_resolution(fixture, decision)
+        var policy = setup_item2_conflict_review(fixture.policy, fixture.patches + [patch])
+        val accepted = db_paged_resolve_conflict(fixture.root, fixture.head, decision, patch, policy).unwrap()
+        policy.config.admission.keys[1].revoked = true
+        policy = setup_item2_paged_repin(policy)
+        val replay = db_paged_resolve_conflict(fixture.root, fixture.head, decision, patch, policy).unwrap()
+        expect(replay.replay).to_be(true)
+        expect(replay.head).to_equal(accepted.head)
+
+    it "rejects conflict evidence produced only by an earlier uncommitted update":
+        val fixture = setup_item2_paged_conflict()
+        val patch = setup_item2_paged_patch([setup_item2_conflict_edit("B", "A"), setup_item2_conflict_edit("B", "C")], fixture.revision, 6)
+        val policy = setup_item2_conflict_review(fixture.policy, fixture.patches + [patch])
+        expect(db_paged_capture_conflict(fixture.root, fixture.head, patch, policy)).to_equal(Err("SCVDB_INTERMEDIATE_CONFLICT_UNSUPPORTED"))
+        expect(db_paged_open(fixture.root, policy).unwrap().head).to_equal(fixture.head)
+        expect(db_field_value(db_paged_current_row(fixture.root, policy, setup_item2_paged_ref(1)).unwrap().unwrap().fields, "code")).to_equal(DbValue.Text("B"))
+
+    it "rejects conflict evidence referring to a row created only inside the rejected batch":
+        val fixture = setup_item2_paged_conflict()
+        val update = DbOperation.UpdateFields(setup_item2_paged_ref(3), [FieldEdit(field: "code", before: DbValue.Text("A"), after: DbValue.Text("B"))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: []))
+        val patch = setup_item2_paged_patch([setup_item2_paged_create(3, "C"),update], fixture.revision, 6)
+        val policy = setup_item2_conflict_review(fixture.policy, fixture.patches + [patch])
+        expect(db_paged_capture_conflict(fixture.root, fixture.head, patch, policy)).to_equal(Err("SCVDB_INTERMEDIATE_CONFLICT_UNSUPPORTED"))
+        expect(db_paged_open(fixture.root, policy).unwrap().head).to_equal(fixture.head)
+        expect(db_paged_current_row(fixture.root, policy, setup_item2_paged_ref(3)).unwrap()).to_be_nil()
+
     it "rejects a signed different operation and stale physical head":
         val fixture = setup_item2_paged_conflict()
         val decision = setup_item2_conflict_decision(fixture)

@@ -10,6 +10,7 @@ use std.scv.db_pages.*
 use std.scv.db_patch.*
 use std.scv.db_reducer.{DbAcceptedBatch, MaterializedState}
 use std.scv.db_paged_conflicts.*
+use std.scv.db_paged_conflict_history.{db_paged_history_signature}
 use std.scv.db_conflict_resolution.{DbConflictDecision, db_validate_resolution_patch, db_conflict_resolution_provenance}
 use std.scv.db_patch_codec.{db_patch_encode}
 use std.scv.db_admission.{db_authorize_patch, db_require_unreserved_entity_kinds}
@@ -88,8 +89,10 @@ fn _paged_run(request: DbPagedRequest) -> Result<DbPagedPlanning, text>:
             if record == nil: return Err("SCVDB_CONFLICT_NOT_FOUND")
             val captured = db_paged_conflict_decode(record.unwrap())?
             val original = captured.original
-            # Reauthenticate preserved original bytes, not a resealed projection.
-            db_authorize_patch(original, policy.config.admission, original.causal_dependencies, request.now)?
+            # Historical replay verifies original bytes with retained keys;
+            # fresh resolution additionally requires current original admission
+            # below, after ruling out the already accepted reviewer operation.
+            db_paged_history_signature(original, policy.config.admission)?
             var dependencies: [text] = []
             for dependency in original.causal_dependencies: dependencies.push(db_page_batch_key(dependency)?)
             missing = db_paged_missing(reads, dependencies, policy)?
@@ -113,6 +116,8 @@ fn _paged_run(request: DbPagedRequest) -> Result<DbPagedPlanning, text>:
         return Ok(DbPagedPlanning.Ready(DbPagedCommitPlan(manifest: manifest, build: DbPageBuild(manifest: manifest.pages, pages: []), replay: true, conflict_ids: [])))
     if resolution != nil: return Err("SCVDB_CONFLICT_ALREADY_RESOLVED")
     if counter != nil: return Err("SCVDB_ACTOR_COUNTER_COLLISION")
+    if val captured = evidence:
+        db_authorize_patch(captured.original, policy.config.admission, captured.original.causal_dependencies, request.now)?
     if patch.base_revision != manifest.revision:
         if patch.base_revision == "": return Err("SCVDB_BASE_REVISION_MISSING")
         val historical = db_paged_read(reads, db_paged_history_key(patch.base_revision)?)?
