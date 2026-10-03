@@ -95,10 +95,12 @@ fn collection_native_encode_v1(request: text, artifact_digest: text, bindings: [
         if not collection_native_binding_valid_v1(binding): return Err("capsule-binding-invalid")
         val fields = collection_native_unframe_v1(binding).unwrap()
         report_count = report_count + collection_native_unframe_v1(fields[11]).unwrap().len()
-    if report_count == 0: return Err("collection-reports-missing")
+    # A budget is a ceiling, not a requirement that eligible collections exist.
+    # Empty reports do not attest selection or analysis completeness.
+    val report_scope = if report_count == 0: "no-reported-plans" else: "linked-input-mir"
     val payload = collection_native_frame_v1(bindings)
     val body = collection_native_frame_v1([COLLECTION_NATIVE_SCHEMA_V1, request,
-        artifact_digest, "linked-input-mir", "runtime-semantics-unverified", payload])
+        artifact_digest, report_scope, "runtime-semantics-unverified", payload])
     val encoded = collection_native_frame_v1([body, sha256_text(body)])
     if encoded.len() > COLLECTION_NATIVE_MAX_BYTES_V1: return Err("receipt-too-large")
     Ok(encoded)
@@ -113,7 +115,8 @@ fn collection_native_decode_v1(encoded: text, request: text, artifact_digest: te
         case Ok(values): values
         case Err(reason): return Err(reason)
     if body.len() != 6 or body[0] != COLLECTION_NATIVE_SCHEMA_V1 or
-            body[3] != "linked-input-mir" or body[4] != "runtime-semantics-unverified":
+            (body[3] != "linked-input-mir" and body[3] != "no-reported-plans") or
+            body[4] != "runtime-semantics-unverified":
         return Err("receipt-schema-invalid")
     if body[1] != request: return Err("build-request-mismatch")
     if body[2] != artifact_digest: return Err("artifact-digest-mismatch")
