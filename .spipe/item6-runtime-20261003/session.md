@@ -123,3 +123,21 @@ forged manifest fields/claims, forged artifact bytes/claims, missing data,
 namespace/schema/action mismatches, duplicate/malformed references, length
 framing, reference boundaries and manifest/byte limits. They remain unexecuted
 without an admitted pure-Simple runner. No full-authority or runtime PASS claim.
+
+## Daemon base value ownership continuation
+
+Read-only host review found that free `daemon_base_start`/`stop` functions mutate
+a copied struct. Added `DaemonBaseStartV1`, `daemon_base_start_owned` and
+`daemon_base_stop_owned` to return updated values explicitly; callers must write
+those values back. Legacy wrappers retain their historical caller-state behavior.
+Failed acquisition preserves its input state. Stop checks the recorded PID
+before the legacy release operation and keeps its receipt if removal fails,
+allowing a caller retry; normal stop clears running/acquired state.
+
+Focused filesystem tests cover real PID creation/removal, unchanged original
+value, failed repeated/competing acquisition, and foreign-PID replacement.
+The legacy PID receipt cannot distinguish later lifetimes of the same PID, and
+its compare/delete is not atomic. This API does not replace the host's opaque
+exclusive-lock authority. Explicit service facades are not edited in this lane;
+the host must directly import the owner module or extend facade exports.
+Runtime tests remain unexecuted without an admitted pure-Simple runner.
