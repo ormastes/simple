@@ -1,6 +1,6 @@
 # Simple distributed textual databases: SCV + jj + GitHub
 
-**Status:** Source-only, execution unverified. REQ-001, REQ-002 and REQ-010 now invoke real filesystem, typed codec and authenticated local-publication owners. Other broad requirement checkers remain intentionally fail-fast. No scenario is PASS evidence without execution and its required durable oracle.
+**Status:** Source-only, execution unverified. REQ-001, REQ-002, REQ-010 and REQ-035 now invoke real filesystem, typed codec and authenticated local-publication owners. Other broad requirement checkers remain intentionally fail-fast. No scenario is PASS evidence without execution and its required durable oracle.
 
 **Executable source:** `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl`
 
@@ -12,7 +12,7 @@ REQ-001 now creates two independent filesystem roots, reserves actual durable
 offline IDs, restores a saved counter and old handle to exercise rollback, and
 checks a separately signed actor-counter collision against persisted accepted
 state. REQ-002 writes and rereads a versioned compact alias header/cell, resolves its actual paged row, and rejects missing or mismatched context without changing the generation. REQ-010 adds persisted signed transport, ordered mutation/precondition checks, and missing signature/provenance/version rejection. The typed-patch steps explicitly distinguish transport from semantic publication. This manual
-annotation is not a generated test-run receipt; docgen/execution remains pending.
+annotation is not a generated test-run receipt; docgen/execution remains pending. REQ-035 now publishes reviewed metadata to a local Git fixture, rejects unreviewed synthetic secret/PII values and forbidden classifications before queue mutation, and erases an owned key while proving loaded copies and ciphertext remain. Exact reviewed-value admission is not a general secret or PII detector.
 
 The five feature flows use these steps (typed-patch scenarios add transport and publication-specific steps):
 
@@ -60,7 +60,7 @@ The five feature flows use these steps (typed-patch scenarios add transport and 
 | REQ-032 — Honest resolution | `setup_retention_fixture` / `check_retention_contract` | Should prove that it returns exact aggregated restricted or unavailable explicitly | Should prove that it reports a day-end aggregate without claiming an exact revision | Should prove that it rejects a manifest-only claim that missing bytes remain available |
 | REQ-033 — Rollup correctness | `setup_retention_fixture` / `check_retention_contract` | Should prove that it deduplicates counts and merges declared timing sketches | Should prove that it revises provenance when late input changes a daily rollup | Should prove that it rejects averaging daily percentiles as a global percentile |
 | REQ-034 — Resnapshot | `setup_retention_fixture` / `check_retention_contract` | Should prove that it rebases pending semantic work onto a complete resnapshot | Should prove that it retains alias allocator tombstone merge batch and history knowledge | Should prove that it returns ResnapshotRequired rather than resurrecting stale entities |
-| REQ-035 — Confidentiality and deletion | `setup_retention_fixture` / `check_retention_contract` | Should prove that it filters secrets and unnecessary PII before Git ingestion | Should prove that it erases restricted CAS keys while reporting immutable-copy limits | Should prove that it rejects secret-bearing metadata under default-deny policy |
+| REQ-035 — Confidentiality and deletion | Actual Git queue admission and external encrypted evidence/key files | Should prove that it filters secrets and unnecessary PII before Git ingestion | Should prove that it erases restricted CAS keys while reporting immutable-copy limits | Should prove that it rejects secret-bearing metadata under default-deny policy |
 | REQ-036 — One app path | `setup_retention_fixture` / `check_retention_contract` | Should prove that it runs the same orchestration through capability-selected adapters | Should prove that it uses platform differences only behind existing HAL interfaces | Should prove that it rejects per-OS sibling or raw-runtime fallback implementations |
 | NFR-001 — Fixture receipt | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it records a complete reproducible performance receipt | Should prove that it distinguishes cold warm percentile and timeout methods | Should prove that it rejects a threshold claim with missing fixture or raw evidence fields |
 | NFR-002 — Scale | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it builds the one-million-alias and observation Operating-B corpus | Should prove that it imports exactly ten thousand representative observations | Should prove that it rejects a reduced corpus presented as Operating-B evidence |
@@ -90,7 +90,7 @@ Run only after production helpers exist. Compiled-mode execution must validate p
 ```simple
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001, REQ-002 and REQ-010 use real filesystem/production owners. Remaining
+# Acceptance source: REQ-001, REQ-002, REQ-010 and REQ-035 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
@@ -103,11 +103,18 @@ use app.scv.db.local_apply.{db_apply_local, db_read_local_view}
 use app.scv.db.local_store.{db_store_read}
 use test.fixtures.scv.db_apply_fixture.*
 use test.fixtures.scv.db_patch_wire_fixture.{setup_item2_wire_patch}
-use std.scv.db_patch.{DbOperation, DbField, DbValue, FieldEdit, RowPrecondition, db_operation_ref, db_patch_seal}
+use std.scv.db_patch.{DbPatch, DbOperation, DbField, DbValue, FieldEdit, RowPrecondition, db_operation_ref, db_patch_seal}
 use std.scv.db_patch_codec.{db_patch_encode, db_patch_decode}
-use std.scv.db_admission.{db_patch_signing_bytes}
+use std.scv.db_admission.{db_patch_signing_bytes, db_admission_policy_digest}
 use std.scv.db_reducer.{db_field_value}
-use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_verify}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_verify, pure_ed25519_sign}
+use std.scv.db_confidentiality.{db_metadata_policy_digest}
+use std.scv.db_snapshot.{db_snapshot_decode}
+use app.scv.db.settlement_queue.{db_settlement_enqueue, db_settlement_queue_open}
+use app.scv.db.settlement_resume_local.{db_settlement_resume_local}
+use app.scv.db.restricted_evidence.*
+use test.fixtures.scv.db_settlement_queue_fixture.*
+use test.fixtures.scv.db_restricted_fixture.*
 use std.scv.db_alias_cell.*
 use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
 use app.scv.db.paged_store.{db_paged_initialize, db_paged_apply, db_paged_open, db_paged_current_row}
@@ -122,6 +129,14 @@ fn setup_item2_compact_alias() -> (text, text, text, SettledAlias, DbAliasContex
     val context = DbAliasContext(namespace: policy.config.admission.namespace, epoch: policy.config.admission.epoch, kind: "bug")
     val alias = SettledAlias(database_namespace: context.namespace, authority_epoch: context.epoch, entity_kind: context.kind, sequence: 1u64)
     (root, applied.head, db_alias_header_encode(context).unwrap(), alias, context)
+
+fn setup_item2_unreviewed_metadata(original: DbPatch, value: text) -> DbPatch:
+    var patch = original
+    patch.operations = [DbOperation.Create(db_operation_ref(original.operations[0]), "bug", [DbField(name: "code", value: DbValue.Text(value)), DbField(name: "link", value: DbValue.Absent)])]
+    patch = db_patch_seal(patch).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([45u8;32])
+    patch.signature = pure_ed25519_sign(seed, key, db_patch_signing_bytes(patch).unwrap())
+    patch
 
 # Pure prerequisites only: these assertions do not prove durable REQ-004.
 fn setup_item2_uid(counter: u64) -> EntityUid:
@@ -862,19 +877,64 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 
     describe "REQ-035: Confidentiality and deletion":
         it "should prove that it filters secrets and unnecessary PII before Git ingestion":
-            step("Retain exact or aggregated history")
-            step("Drive accepted state and inspect its receipt")
-            check_retention_contract("REQ-035", "drive accepted confidentiality and deletion state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            step("Publish reviewed metadata to an actual local Git authority")
+            val fixture = setup_item2_queue_fixture(1u64)
+            val queued = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.admission).unwrap()
+            val prepared = db_settlement_resume_local(fixture.source, queued.head, fixture.config, setup_item2_queue_sign).unwrap()
+            expect(prepared.code).to_equal("prepared")
+            val published = db_settlement_resume_local(fixture.source, prepared.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+            expect(published.code).to_equal("awaiting-index")
+            val indexed = db_settlement_resume_local(fixture.source, published.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+            expect(indexed.code).to_equal("local-index-observed")
+            val before = check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])
+            val snapshot = db_snapshot_decode(check_item2_queue_git(fixture.config.authority.remote, ["show", "refs/heads/settled:scv/semantic.snapshot"]) + "\n").unwrap()
+            expect(snapshot.rows.len()).to_equal(1)
+            expect(db_field_value(snapshot.rows[0].fields, "code")).to_equal(DbValue.Text("queue-1"))
+            step("Reject unreviewed synthetic secret and PII samples before another Git candidate")
+            for value in ["synthetic-secret-do-not-publish", "person@example.invalid"]:
+                val rejected = setup_item2_unreviewed_metadata(fixture.patches[0], value)
+                expect(db_settlement_enqueue(fixture.source, indexed.view.head, rejected, fixture.config.policy.admission)).to_equal(Err("SCVDB_METADATA_VALUE_UNREVIEWED"))
+                expect(check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])).to_equal(before)
+                expect(db_settlement_queue_open(fixture.source, fixture.config.policy.admission).unwrap().head).to_equal(indexed.view.head)
 
         it "should prove that it erases restricted CAS keys while reporting immutable-copy limits":
-            step("Retain exact or aggregated history")
-            step("Drive the boundary state and inspect preserved invariants")
-            check_retention_contract("REQ-035", "drive boundary confidentiality and deletion state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            step("Encrypt actual external evidence with an owned active key")
+            val (source, external) = setup_item2_restricted_paths()
+            val context = setup_item2_restricted_store_context()
+            val quota = setup_item2_restricted_quota()
+            val owner = db_restricted_key_create(source, external, context).unwrap()
+            val loaded_copy = db_restricted_key_load(source, external, owner).unwrap()
+            val plaintext: [u8] = [1u8, 2u8, 3u8]
+            val evidence = db_restricted_store_put(source, external, context, loaded_copy, plaintext, [], 10, quota).unwrap()
+            expect(db_restricted_store_get(source, external, evidence, loaded_copy, quota)).to_equal(Ok(plaintext))
+            step("Erase only the owned key and report what copies remain")
+            val report = db_restricted_key_delete(source, external, owner).unwrap()
+            expect(report.owned_key_status).to_equal("active_file_deleted_and_directory_synced")
+            expect(report.git_and_clone_erasure).to_equal("not_guaranteed")
+            expect(report.external_ciphertext_status).to_equal("retained")
+            expect(file_exists("{owner.directory}/active.key")).to_be(false)
+            expect(db_restricted_key_load(source, external, owner)).to_equal(Err("SCVDB_RESTRICTED_KEY_UNAVAILABLE"))
+            expect(db_restricted_store_get(source, external, evidence, [], quota)).to_equal(Err("SCVDB_EVIDENCE_RESTRICTED"))
+            expect(db_restricted_store_get(source, external, evidence, loaded_copy, quota)).to_equal(Ok(plaintext))
 
         it "should prove that it rejects secret-bearing metadata under default-deny policy":
-            step("Retain exact or aggregated history")
-            step("Inject the failure and inspect fail-closed state")
-            check_retention_contract("REQ-035", "inject unsafe confidentiality and deletion state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            step("Keep classified and unreviewed metadata out of the durable queue")
+            val fixture = setup_item2_queue_fixture(1u64)
+            val before = check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])
+            for classification in ["secret", "pii", "restricted", "unreviewed"]:
+                var admission = fixture.config.policy.admission
+                for index in 0..admission.metadata.rules.len():
+                    if admission.metadata.rules[index].kind == "bug" and admission.metadata.rules[index].field == "code":
+                        var rule = admission.metadata.rules[index]
+                        if classification != "unreviewed": rule.classification = classification
+                        else: rule.allowed_value_digests = []
+                        admission.metadata.rules[index] = rule
+                admission.metadata.revision = db_metadata_policy_digest(admission.metadata).unwrap()
+                admission.revision = db_admission_policy_digest(admission).unwrap()
+                val error = if classification == "unreviewed": "SCVDB_METADATA_VALUE_UNREVIEWED" else: "SCVDB_METADATA_FORBIDDEN"
+                expect(db_settlement_enqueue(fixture.source, "", fixture.patches[0], admission)).to_equal(Err(error))
+                expect(db_store_read(fixture.source, "settlement-work").code).to_equal("empty")
+                expect(check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])).to_equal(before)
 
     describe "REQ-036: One app path":
         it "should prove that it runs the same orchestration through capability-selected adapters":
@@ -1143,6 +1203,6 @@ The executable now also contains three pure production-map prerequisites:
 2. Replay tombstoned A: return `tombstoned` at 1, retain one tombstoned binding and high-water 1.
 3. Reject another namespace with `SCVDB_NAMESPACE_MISMATCH`, sequence 0, and unchanged binding/high-water.
 
-These pure prerequisites supplement 153 full-contract scenarios. Nine REQ-001/REQ-002/REQ-010 scenarios now use real filesystem, codec and authenticated mutation owners; the other 144 still fail explicitly. None has executed in this session, so neither group establishes runtime, process-crash, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains RED/unproved.
+These pure prerequisites supplement 153 full-contract scenarios. Twelve REQ-001/REQ-002/REQ-010/REQ-035 scenarios now use real filesystem, codec and authenticated mutation owners; the other 141 still fail explicitly. None has executed in this session, so neither group establishes runtime, process-crash, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains RED/unproved.
 
 Concrete inputs and oracles for all 51 requirements and five durable campaigns are in `doc/03_plan/evidence/seven_plans/item2_acceptance_matrix_2026-10-03.md`. Preserve the original scenario catalog until each whole checker has production-backed evidence. Runtime results and generated-manual regeneration are still required before verification PASS.

@@ -1,6 +1,6 @@
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001, REQ-002 and REQ-010 use real filesystem/production owners. Remaining
+# Acceptance source: REQ-001, REQ-002, REQ-010 and REQ-035 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
@@ -13,11 +13,18 @@ use app.scv.db.local_apply.{db_apply_local, db_read_local_view}
 use app.scv.db.local_store.{db_store_read}
 use test.fixtures.scv.db_apply_fixture.*
 use test.fixtures.scv.db_patch_wire_fixture.{setup_item2_wire_patch}
-use std.scv.db_patch.{DbOperation, DbField, DbValue, FieldEdit, RowPrecondition, db_operation_ref, db_patch_seal}
+use std.scv.db_patch.{DbPatch, DbOperation, DbField, DbValue, FieldEdit, RowPrecondition, db_operation_ref, db_patch_seal}
 use std.scv.db_patch_codec.{db_patch_encode, db_patch_decode}
-use std.scv.db_admission.{db_patch_signing_bytes}
+use std.scv.db_admission.{db_patch_signing_bytes, db_admission_policy_digest}
 use std.scv.db_reducer.{db_field_value}
-use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_verify}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_verify, pure_ed25519_sign}
+use std.scv.db_confidentiality.{db_metadata_policy_digest}
+use std.scv.db_snapshot.{db_snapshot_decode}
+use app.scv.db.settlement_queue.{db_settlement_enqueue, db_settlement_queue_open}
+use app.scv.db.settlement_resume_local.{db_settlement_resume_local}
+use app.scv.db.restricted_evidence.*
+use test.fixtures.scv.db_settlement_queue_fixture.*
+use test.fixtures.scv.db_restricted_fixture.*
 use std.scv.db_alias_cell.*
 use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
 use app.scv.db.paged_store.{db_paged_initialize, db_paged_apply, db_paged_open, db_paged_current_row}
@@ -32,6 +39,14 @@ fn setup_item2_compact_alias() -> (text, text, text, SettledAlias, DbAliasContex
     val context = DbAliasContext(namespace: policy.config.admission.namespace, epoch: policy.config.admission.epoch, kind: "bug")
     val alias = SettledAlias(database_namespace: context.namespace, authority_epoch: context.epoch, entity_kind: context.kind, sequence: 1u64)
     (root, applied.head, db_alias_header_encode(context).unwrap(), alias, context)
+
+fn setup_item2_unreviewed_metadata(original: DbPatch, value: text) -> DbPatch:
+    var patch = original
+    patch.operations = [DbOperation.Create(db_operation_ref(original.operations[0]), "bug", [DbField(name: "code", value: DbValue.Text(value)), DbField(name: "link", value: DbValue.Absent)])]
+    patch = db_patch_seal(patch).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([45u8;32])
+    patch.signature = pure_ed25519_sign(seed, key, db_patch_signing_bytes(patch).unwrap())
+    patch
 
 # Pure prerequisites only: these assertions do not prove durable REQ-004.
 fn setup_item2_uid(counter: u64) -> EntityUid:
@@ -772,19 +787,64 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 
     describe "REQ-035: Confidentiality and deletion":
         it "should prove that it filters secrets and unnecessary PII before Git ingestion":
-            step("Retain exact or aggregated history")
-            step("Drive accepted state and inspect its receipt")
-            check_retention_contract("REQ-035", "drive accepted confidentiality and deletion state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            step("Publish reviewed metadata to an actual local Git authority")
+            val fixture = setup_item2_queue_fixture(1u64)
+            val queued = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.admission).unwrap()
+            val prepared = db_settlement_resume_local(fixture.source, queued.head, fixture.config, setup_item2_queue_sign).unwrap()
+            expect(prepared.code).to_equal("prepared")
+            val published = db_settlement_resume_local(fixture.source, prepared.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+            expect(published.code).to_equal("awaiting-index")
+            val indexed = db_settlement_resume_local(fixture.source, published.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+            expect(indexed.code).to_equal("local-index-observed")
+            val before = check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])
+            val snapshot = db_snapshot_decode(check_item2_queue_git(fixture.config.authority.remote, ["show", "refs/heads/settled:scv/semantic.snapshot"]) + "\n").unwrap()
+            expect(snapshot.rows.len()).to_equal(1)
+            expect(db_field_value(snapshot.rows[0].fields, "code")).to_equal(DbValue.Text("queue-1"))
+            step("Reject unreviewed synthetic secret and PII samples before another Git candidate")
+            for value in ["synthetic-secret-do-not-publish", "person@example.invalid"]:
+                val rejected = setup_item2_unreviewed_metadata(fixture.patches[0], value)
+                expect(db_settlement_enqueue(fixture.source, indexed.view.head, rejected, fixture.config.policy.admission)).to_equal(Err("SCVDB_METADATA_VALUE_UNREVIEWED"))
+                expect(check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])).to_equal(before)
+                expect(db_settlement_queue_open(fixture.source, fixture.config.policy.admission).unwrap().head).to_equal(indexed.view.head)
 
         it "should prove that it erases restricted CAS keys while reporting immutable-copy limits":
-            step("Retain exact or aggregated history")
-            step("Drive the boundary state and inspect preserved invariants")
-            check_retention_contract("REQ-035", "drive boundary confidentiality and deletion state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            step("Encrypt actual external evidence with an owned active key")
+            val (source, external) = setup_item2_restricted_paths()
+            val context = setup_item2_restricted_store_context()
+            val quota = setup_item2_restricted_quota()
+            val owner = db_restricted_key_create(source, external, context).unwrap()
+            val loaded_copy = db_restricted_key_load(source, external, owner).unwrap()
+            val plaintext: [u8] = [1u8, 2u8, 3u8]
+            val evidence = db_restricted_store_put(source, external, context, loaded_copy, plaintext, [], 10, quota).unwrap()
+            expect(db_restricted_store_get(source, external, evidence, loaded_copy, quota)).to_equal(Ok(plaintext))
+            step("Erase only the owned key and report what copies remain")
+            val report = db_restricted_key_delete(source, external, owner).unwrap()
+            expect(report.owned_key_status).to_equal("active_file_deleted_and_directory_synced")
+            expect(report.git_and_clone_erasure).to_equal("not_guaranteed")
+            expect(report.external_ciphertext_status).to_equal("retained")
+            expect(file_exists("{owner.directory}/active.key")).to_be(false)
+            expect(db_restricted_key_load(source, external, owner)).to_equal(Err("SCVDB_RESTRICTED_KEY_UNAVAILABLE"))
+            expect(db_restricted_store_get(source, external, evidence, [], quota)).to_equal(Err("SCVDB_EVIDENCE_RESTRICTED"))
+            expect(db_restricted_store_get(source, external, evidence, loaded_copy, quota)).to_equal(Ok(plaintext))
 
         it "should prove that it rejects secret-bearing metadata under default-deny policy":
-            step("Retain exact or aggregated history")
-            step("Inject the failure and inspect fail-closed state")
-            check_retention_contract("REQ-035", "inject unsafe confidentiality and deletion state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            step("Keep classified and unreviewed metadata out of the durable queue")
+            val fixture = setup_item2_queue_fixture(1u64)
+            val before = check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])
+            for classification in ["secret", "pii", "restricted", "unreviewed"]:
+                var admission = fixture.config.policy.admission
+                for index in 0..admission.metadata.rules.len():
+                    if admission.metadata.rules[index].kind == "bug" and admission.metadata.rules[index].field == "code":
+                        var rule = admission.metadata.rules[index]
+                        if classification != "unreviewed": rule.classification = classification
+                        else: rule.allowed_value_digests = []
+                        admission.metadata.rules[index] = rule
+                admission.metadata.revision = db_metadata_policy_digest(admission.metadata).unwrap()
+                admission.revision = db_admission_policy_digest(admission).unwrap()
+                val error = if classification == "unreviewed": "SCVDB_METADATA_VALUE_UNREVIEWED" else: "SCVDB_METADATA_FORBIDDEN"
+                expect(db_settlement_enqueue(fixture.source, "", fixture.patches[0], admission)).to_equal(Err(error))
+                expect(db_store_read(fixture.source, "settlement-work").code).to_equal("empty")
+                expect(check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])).to_equal(before)
 
     describe "REQ-036: One app path":
         it "should prove that it runs the same orchestration through capability-selected adapters":
