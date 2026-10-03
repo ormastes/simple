@@ -302,6 +302,15 @@ pub extern "C" fn rt_text_count_codepoints(text: RuntimeValue) -> i64 {
     count_codepoints_for_tier(simple_simd::active_simd_tier(), bytes)
 }
 
+/// Twin of runtime_simd_utf8.c's validator: nil/non-text is vacuously valid.
+#[no_mangle]
+pub extern "C" fn rt_text_validate_utf8(text: RuntimeValue) -> bool {
+    let Some(bytes) = runtime_value_text_to_bytes(text) else {
+        return true;
+    };
+    std::str::from_utf8(bytes).is_ok()
+}
+
 #[no_mangle]
 pub extern "C" fn rt_swi_build(text: RuntimeValue) -> i64 {
     let Some(bytes) = runtime_value_text_to_bytes(text) else {

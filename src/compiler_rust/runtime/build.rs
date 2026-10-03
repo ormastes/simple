@@ -408,11 +408,14 @@ fn compile_c_runtime_sources() {
     // a host liburing that can disagree with the headers.  The Rust facade
     // below remains the owner of the rt_driver_* ABI; the C layer contributes
     // only the spl_driver vtable and backend implementation.
+    // The Rust seed cannot include runtime_native.c/runtime_thread.c: both
+    // carry other rt_* owners. Stage 2 still needs these two POSIX calls on
+    // every hosted Unix target (Linux and macOS alike).
+    if target_os != "windows" {
+        c_sources.push("runtime_bootstrap_linux_provider.c");
+    }
     let linux_uring = target_os == "linux";
     if linux_uring {
-        // The Rust seed cannot include runtime_native.c/runtime_thread.c:
-        // both carry other rt_* owners. Stage 2 still needs these two calls.
-        c_sources.push("runtime_bootstrap_linux_provider.c");
         c_sources.push("platform/async_driver.c");
         c_sources.push("platform/async_linux_uring.c");
         c_sources.push("vendor/liburing/src/queue.c");
@@ -655,7 +658,7 @@ fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: 
         if *source == "hosted_win32.c" && (target_os == "windows" || native_all_provider) {
             continue;
         }
-        if *source == "runtime_bootstrap_linux_provider.c" && target_os != "linux" {
+        if *source == "runtime_bootstrap_linux_provider.c" && target_os == "windows" {
             continue;
         }
         let path = root.join(source);
