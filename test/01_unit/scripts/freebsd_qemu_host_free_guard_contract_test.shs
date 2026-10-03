@@ -1,0 +1,165 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+script="$root/scripts/check/check-freebsd-bootstrap-qemu.shs"
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/freebsd-host-free.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+
+# Source the production helpers rather than reproducing their decisions.
+for function_name in is_positive_integer is_valid_host_free_floor overlay_df_path \
+    overlay_free_kib host_free_space_receipt process_start_token qemu_owned_alive \
+    watch_host_free_space cleanup on_exit; do
+    sed -n "/^${function_name}() {/,/^}/p" "$script" >>"$fixture/helpers.sh"
+done
+. "$fixture/helpers.sh"
+
+is_valid_host_free_floor 4 || fail '4 GiB default floor rejected'
+for invalid in 0 04 08 01024 -1 1025 4G abc 999999999999999999999; do
+    if is_valid_host_free_floor "$invalid"; then fail "invalid floor accepted: $invalid"; fi
+done
+grep -Fq 'QEMU_HOST_FREE_FLOOR_GIB="${QEMU_HOST_FREE_FLOOR_GIB:-4}"' "$script" ||
+    fail 'default floor is missing'
+grep -Fq 'preflight_try host_free_space preflight_host_free_space' "$script" ||
+    fail 'preflight omits host space'
+grep -Fq 'QEMU_DRIVE_ARG="file=${OVERLAY_IMAGE},format=qcow2,if=virtio,werror=report,rerror=report"' "$script" ||
+    fail 'explicit QEMU write/read error policy is missing'
+grep -Fq -- '-drive "$QEMU_DRIVE_ARG"' "$script" ||
+    fail 'QEMU does not use the guarded drive argument'
+
+VM_DIR="$fixture/overlay"
+mkdir -p "$VM_DIR"
+QEMU_HOST_FREE_FLOOR_GIB=4
+MOCK_DF=at_floor
+df() {
+    case "$MOCK_DF" in
+        at_floor) printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nmock 9000000 0 4194304 0%% %s\n' "$VM_DIR" ;;
+        below_floor) printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nmock 9000000 0 4194303 0%% %s\n' "$VM_DIR" ;;
+        malformed) printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nmock broken\n' ;;
+        *) return 1 ;;
+    esac
+}
+receipt=$(host_free_space_receipt) || fail 'exact floor was rejected'
+printf '%s\n' "$receipt" | grep -Fqx 'overlay_available_bytes=4294967296' ||
+    fail 'available byte receipt is wrong'
+printf '%s\n' "$receipt" | grep -Fqx 'overlay_required_bytes=4294967296' ||
+    fail 'required byte receipt is wrong'
+printf '%s\n' "$receipt" | grep -Fqx "overlay_filesystem_path=$VM_DIR" ||
+    fail 'actual overlay filesystem path is missing'
+MOCK_DF=below_floor
+if host_free_space_receipt >"$fixture/low.receipt"; then fail 'below-floor disk accepted'; fi
+grep -Fqx 'overlay_available_bytes=4294966272' "$fixture/low.receipt" ||
+    fail 'below-floor byte receipt is wrong'
+MOCK_DF=malformed
+if host_free_space_receipt >/dev/null; then fail 'malformed df accepted'; fi
+
+PROC_ROOT="$fixture/proc"
+mkdir -p "$PROC_ROOT/111" "$PROC_ROOT/222" "$PROC_ROOT/333"
+make_stat() {
+    pid=$1; token=$2
+    printf '%s (mock) ' "$pid" >"$PROC_ROOT/$pid/stat"
+    field=3
+    while [ "$field" -le 22 ]; do
+        if [ "$field" -eq 22 ]; then printf '%s' "$token" >>"$PROC_ROOT/$pid/stat"
+        else printf '0' >>"$PROC_ROOT/$pid/stat"; fi
+        [ "$field" -eq 22 ] || printf ' ' >>"$PROC_ROOT/$pid/stat"
+        field=$((field + 1))
+    done
+    printf '\n' >>"$PROC_ROOT/$pid/stat"
+}
+make_stat 111 11111
+make_stat 222 22222
+make_stat 333 33333
+QEMU_PID=222
+QEMU_START_TOKEN=22222
+OVERLAY_IMAGE="$VM_DIR/owned.qcow2"
+QEMU_DRIVE_ARG="file=${OVERLAY_IMAGE},format=qcow2,if=virtio,werror=report,rerror=report"
+printf 'qemu-system-aarch64\000-drive\000%s\000' "$QEMU_DRIVE_ARG" >"$PROC_ROOT/222/cmdline"
+qemu_owned_alive || fail 'owned QEMU identity rejected'
+
+# A low-space monitor may stop only the exact launched QEMU and its parent.
+DISK_MONITOR_STOP="$fixture/stop"
+DISK_FLOOR_MARKER="$fixture/low.env"
+MOCK_DF=below_floor
+sleep() { :; }
+kill() { printf '%s\n' "$*" >>"$fixture/kills"; }
+watch_host_free_space 111 11111
+[ -f "$DISK_FLOOR_MARKER" ] || fail 'monitor failed to retain low-space receipt'
+grep -Fqx -- '-TERM 222' "$fixture/kills" || fail 'monitor did not stop owned QEMU'
+grep -Fqx -- '-TERM 111' "$fixture/kills" || fail 'monitor did not stop its own wrapper'
+if grep -Eq '(^| )333$' "$fixture/kills"; then fail 'monitor touched unrelated PID'; fi
+
+: >"$fixture/kills"
+: >"$DISK_MONITOR_STOP"
+watch_host_free_space 111 11111
+[ ! -s "$fixture/kills" ] || fail 'stopped monitor sent a signal'
+rm -f "$DISK_MONITOR_STOP"
+make_stat 222 99999
+watch_host_free_space 111 11111
+[ ! -s "$fixture/kills" ] || fail 'monitor signaled reused QEMU PID'
+make_stat 222 22222
+make_stat 111 99999
+watch_host_free_space 111 11111
+[ ! -s "$fixture/kills" ] || fail 'monitor signaled reused wrapper PID'
+
+# A stale pidfile alone grants no shutdown authority on wrapper exit.
+PID_FILE="$fixture/qemu.pid"
+printf '333\n' >"$PID_FILE"
+QEMU_PID=333
+QEMU_START_TOKEN=22222
+QEMU_PID_FILE_ID=
+DISK_MONITOR_PID=
+DISK_FLOOR_MARKER="$fixture/no-breach.env"
+SERIAL_LOG="$fixture/serial.log"
+PHASE2_VM_LOCK=
+SCRIPT_OK=0
+SUCCESS_MESSAGE=
+PHASE2_SUMMARY_SUCCESS_PENDING=0
+info() { :; }
+cleanup
+[ ! -s "$fixture/kills" ] || fail 'cleanup signaled unrelated PID'
+[ -f "$PID_FILE" ] || fail 'cleanup removed unrelated pidfile'
+
+# Guest shutdown can take seconds. If QEMU exits and the PID is reused in
+# that window, cleanup must revalidate immediately before TERM.
+QEMU_PID=222
+QEMU_START_TOKEN=22222
+make_stat 222 22222
+VM_SSH=mock_guest_shutdown
+mock_guest_shutdown() { make_stat 222 99999; }
+cleanup
+[ ! -s "$fixture/kills" ] || fail 'cleanup signaled PID reused during guest shutdown'
+VM_SSH=
+
+# Even if the build reached its success assignment, a low-space receipt
+# forces failure and keeps the image available for diagnosis.
+SCRIPT_OK=1
+MOCK_DF=at_floor
+OVERLAY_IMAGE="$fixture/retained.qcow2"
+: >"$OVERLAY_IMAGE"
+DISK_FLOOR_MARKER="$fixture/cleanup-breach.env"
+printf 'host_disk_guard_status=fail\n' >"$DISK_FLOOR_MARKER"
+if cleanup 0; then fail 'low-space cleanup returned success'; fi
+[ "$SCRIPT_OK" -eq 0 ] || fail 'low-space cleanup kept a success verdict'
+[ -f "$OVERLAY_IMAGE" ] || fail 'low-space cleanup deleted the overlay'
+
+# A main body that exits zero must still fail when cleanup sees a late breach.
+# The Phase 2 terminal receipt and PASS banner must reflect that failure.
+PHASE2_HOST_SUMMARY="$fixture/phase2-summary.env"
+printf 'backend=llvm\n' >"$PHASE2_HOST_SUMMARY"
+if (
+    SCRIPT_OK=1
+    PHASE2_SUMMARY_SUCCESS_PENDING=1
+    SUCCESS_MESSAGE='FreeBSD mock QEMU Phase 2 PASS'
+    trap on_exit EXIT
+    exit 0
+) >"$fixture/late-cleanup.log" 2>&1; then
+    fail 'late cleanup breach allowed a zero exit status'
+fi
+grep -Fqx 'overall=FAIL' "$PHASE2_HOST_SUMMARY" || fail 'late breach lacked FAIL receipt'
+if grep -Fq 'overall=PASS' "$PHASE2_HOST_SUMMARY"; then fail 'late breach left PASS receipt'; fi
+if grep -Fq 'QEMU Phase 2 PASS' "$fixture/late-cleanup.log"; then fail 'late breach printed PASS'; fi
+[ -f "$OVERLAY_IMAGE" ] || fail 'late breach deleted diagnostic overlay'
+
+printf 'freebsd_qemu_host_free_guard_contract=true\n'
