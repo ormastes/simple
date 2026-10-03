@@ -9,7 +9,7 @@ The object and its retained handle have one sequential owner.
 """
 use std.nogc_sync_mut.io.retained_file.{
     RetainedFile, retained_file_open, retained_file_read_at,
-    retained_file_identity_unchanged, retained_file_close
+    retained_file_identity_unchanged, retained_file_close, retained_file_write
 }
 
 pub class ElfFileObjectV1:
@@ -142,6 +142,28 @@ pub fn elf_file_section_window_v1(object: ElfFileObjectV1, index: i64,
 pub fn elf_file_close_v1(object: ElfFileObjectV1) -> bool:
     retained_file_close(object.file)
 
+# Emits section contents only; layout, relocation, transaction sync/publication
+# belong to the caller. After any Err the caller must discard its private output.
+# No rollback is attempted on a shared retained destination.
+pub fn elf_file_copy_section_v1(object: ElfFileObjectV1, index: i64,
+        output: RetainedFile, cancelled: fn() -> bool) -> Result<u64, text>:
+    if output.closed or not output.writable: return Err("ELF output state invalid")
+    val section = elf_file_section_v1(object, index)?
+    if section.section_type == 0u64: return Err("ELF NULL section has no payload")
+    if output.position > output.maximum or section.size > output.maximum - output.position:
+        return Err("ELF output capacity insufficient before section emission")
+    var offset: u64 = 0
+    while offset < section.size:
+        if cancelled(): return Err("ELF section emission cancelled; discard output")
+        val remaining = section.size - offset
+        val count = if remaining < object.max_window_bytes as u64: remaining as i64 else: object.max_window_bytes
+        val bytes = elf_file_section_window_v1(object, index, offset, count)?
+        retained_file_write(output, bytes)?
+        offset = offset + count as u64
+    if cancelled(): return Err("ELF section emission cancelled; discard output")
+    retained_file_identity_unchanged(object.file)?
+    Ok(offset)
+
 pub fn elf_file_string_v1(object: ElfFileObjectV1, table_index: i64,
         offset: u64, max_bytes: i64) -> Result<[u8], text>:
     if max_bytes < 0 or max_bytes > object.max_window_bytes: return Err("ELF string budget invalid")
@@ -213,3 +235,4 @@ pub fn elf_file_rela_v1(object: ElfFileObjectV1, table_index: i64,
 export ElfFileObjectV1, ElfFileSectionV1, ElfFileSymbolV1, ElfFileRelaV1
 export elf_file_open_v1, elf_file_section_v1, elf_file_section_window_v1, elf_file_close_v1
 export elf_file_string_v1, elf_file_symbol_v1, elf_file_rela_v1
+export elf_file_copy_section_v1
