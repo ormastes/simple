@@ -47,6 +47,10 @@ bootstrap_helper_runtime_authority_verify() (
   LC_ALL=C sort -o "$expected" "$expected" || exit 1
   LC_ALL=C sort -o "$observed" "$observed" || exit 1
   cmp -s "$expected" "$observed" || exit 1
+  git -C "$helper_root" -c core.quotePath=false ls-files --cached --others --exclude-standard -- \
+    src/compiler_rust src/runtime tools/counterpart/sdk/c src/compiler/70.backend/backend_plugin/abi >"$observed" || exit 1
+  LC_ALL=C sort -o "$observed" "$observed" || exit 1
+  cmp -s "$expected" "$observed" || exit 1
   (cd "$helper_root" && sha256sum --strict --status -c "$source_snapshot") || exit 1
   tools=$(field tool_snapshot_path) || exit 1
   sha256sum --strict --status -c "$tools" || exit 1
@@ -71,5 +75,35 @@ bootstrap_helper_runtime_authority_verify() (
   cap zero_work_deadline PASS
   cap finite_cleanup PASS
   cap memory_policy_monitor PASS
+  cap_pin() {
+    proof=$(bootstrap_stage3_manifest_value "$1" "$capability") || exit 1
+    expected_proof=$(bootstrap_stage3_manifest_value "$2" "$capability") || exit 1
+    regular "$proof" && [ "$(digest "$proof")" = "$expected_proof" ] || exit 1
+  }
+  cap_pin probe_program probe_sha256
+  cap_pin link_receipt_path link_receipt_sha256
+  cap_pin execution_receipt_path execution_receipt_sha256
+  probe_sha=$(bootstrap_stage3_manifest_value probe_sha256 "$capability") || exit 1
+  link=$(bootstrap_stage3_manifest_value link_receipt_path "$capability") || exit 1
+  execution=$(bootstrap_stage3_manifest_value execution_receipt_path "$capability") || exit 1
+  proof_equal() { got=$(bootstrap_stage3_manifest_value "$2" "$1") || exit 1; [ "$got" = "$3" ] || exit 1; }
+  proof_equal "$link" schema simple-helper-runtime-link-v1
+  proof_equal "$link" status PASS
+  proof_equal "$link" runtime_inventory_sha256 "$(field runtime_inventory_sha256)"
+  proof_equal "$link" probe_sha256 "$probe_sha"
+  link_inputs=$(bootstrap_stage3_manifest_value link_inputs_path "$link") || exit 1
+  regular "$link_inputs" || exit 1
+  proof_equal "$link" link_inputs_sha256 "$(digest "$link_inputs")"
+  case "$target" in *windows*) archive="$runtime/simple_native_all.lib" ;; *) archive="$runtime/libsimple_native_all.a" ;; esac
+  regular "$archive" || exit 1
+  archive_sha=$(digest "$archive")
+  awk -v path="$archive" -v hash="$archive_sha" 'substr($0,67)==path && substr($0,1,64)==hash {n++} END {exit n!=1}' "$link_inputs" || exit 1
+  sha256sum --strict --status -c "$link_inputs" || exit 1
+  proof_equal "$execution" schema simple-helper-runtime-execution-v1
+  proof_equal "$execution" status PASS
+  proof_equal "$execution" probe_sha256 "$probe_sha"
+  proof_equal "$execution" compile_exit 0
+  proof_equal "$execution" run_exit 0
+  proof_equal "$execution" quiescent 1
   printf '%s\n' "$runtime" auto
 )

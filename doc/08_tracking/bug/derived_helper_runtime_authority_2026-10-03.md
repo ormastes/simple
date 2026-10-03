@@ -19,6 +19,12 @@ plugin ABI headers. Complete membership is checked against the build commit and
 every byte is replayed against the helper checkout. A later SPL/script-only
 helper commit is allowed only when those native inputs remain identical. Its
 full SPL source snapshot remains independently bound by the image receipt.
+The current tracked and nonignored untracked native input membership must also
+equal the build snapshot, so newly added native inputs cannot evade comparison.
+Capability evidence additionally pins the actual probe executable, a link
+receipt with the exact fresh native-all archive in its input inventory, and
+an execution receipt with compile/run exits and quiescence. A source-only C
+test or a symbol-presence audit is insufficient to publish this qualification.
 
 The existing canonical Cargo construction is retained for the provider:
 `cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml
@@ -34,7 +40,9 @@ V4 symbol presence is not a capability proof. Qualification must execute the
 changed Windows owner fixture linked with this provider, along with applicable
 bounded-runner deadline/cleanup checks. Unsupported V4 stubs never count as PASS.
 
-One executable shell contract fixture passed with deliberately non-executable
-test archive bytes: valid binding, missing fields, extra provider and changed
-archive. It establishes verifier behavior only. No actual archive capability,
+The executable shell contract fixture passed three evolving checks, stopping
+after the final cycle. It uses deliberately non-executable test archive bytes:
+valid binding, missing fields, extra provider, changed archive, changed/new
+native inputs and altered link evidence. It establishes verifier behavior only.
+No actual archive capability,
 manager startup or product deployment is claimed by this source change.
