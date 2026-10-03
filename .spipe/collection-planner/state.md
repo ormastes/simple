@@ -182,3 +182,34 @@ This bounded repair does not implement the full loop/chain lowering pipeline.
 Do not mark this objective complete because the documentation or selector guard
 is ready. At most three fix/verify cycles are allowed per feature; do not repeat
 already passing checks without changed code or new failure evidence.
+
+## 2026-10-03 final bootstrap attempt and source checkpoint
+
+Integrated source checkpoint `ad12ff62177` is pushed to draft PR #2285 targeting
+`release/1.0`. Subsequent increments include explicit-contract generic map/set,
+stable hashed uniqueness, opaque-source chain boundaries, retained canonical
+loop provenance, literal source cardinality with consistency revalidation,
+unsafe concat-rewrite rejection, and strict differential fixture admission.
+Shared fixtures cover checked columns, closures/collections and generic indices.
+All added Simple tests remain authored and unexecuted; manuals are not generated
+execution evidence. Full REQ-001–011 and the release merge remain incomplete.
+
+The third canonical Windows bootstrap attempt ended at 04:29:13 UTC before
+stage-2 compilation. The stage-2 build wrapper returned 255; its log states:
+`rss-guard: cap must be between 1 and 6835937 KiB (7000000000 bytes)`.
+The launch requested 16777216 KiB. This is a resource-contract rejection, not
+evidence of an Item 3 compiler or semantic failure. Producer artifacts and caches
+are retained. No admitted self-hosted CLI/test runner was produced. No fourth
+attempt is allowed in this session. A later scoped attempt must use a supported
+cap and preserve the admitted producer generation; it must also distinguish
+seed-delegated bootstrap tests from actual pure-Simple feature execution.
+
+Evidence is retained outside sparse source worktrees at
+`C:/dev/simple/.git/worktrees/simple-item3-spec-20261003/item3-bootstrap/attempt3`.
+The pinned bootstrap source is `d53aed4ec74200a34ceb198a25de135e39bfe5e1`.
+Do not use the Rust seed or a compile-only stage-2 artifact for normal tests.
+
+The proposed typed indirect-call repair `d6d5b0a5fbf` stays isolated: independent
+review found incompatible lifted-lambda producer signatures. Its tests and the
+unimplemented scalar ORC contract are not integrated as completed implementation.
+See the tracked typed-indirect ABI blocker for the exact producer/consumer gap.
