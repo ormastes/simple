@@ -1,0 +1,381 @@
+# Immutable evidence values and pure admission/evaluation. No storage or trust I/O.
+# Callers supply revision/digest verified objects from the authorized repository.
+use std.scv.db_canonical.{db_frame, db_u64_bytes, db_canonical_text, db_domain_bytes}
+use std.scv.distributed_identity.{EntityRef, entity_ref_validate, entity_ref_canonical}
+
+struct DbEvidenceRevision:
+    entity: EntityRef
+    revision: text
+
+struct DbIdentityDimension:
+    name: text
+    value: text
+
+struct DbProviderIdentity:
+    instance: text
+    project: text
+    run: text
+    job: text
+    attempt: u64
+    dimensions: [DbIdentityDimension]
+
+struct DbEvidenceDependency:
+    digest: text
+    availability: text
+
+struct DbTestDefinitionRevision:
+    reference: DbEvidenceRevision
+    definition_digest: text
+
+struct DbConfigRevision:
+    reference: DbEvidenceRevision
+    effective_values_digest: text
+    dependencies: [DbEvidenceDependency]
+
+struct DbConfigSetRevision:
+    reference: DbEvidenceRevision
+    members: [DbEvidenceRevision]
+
+struct DbReproductionRevision:
+    reference: DbEvidenceRevision
+    source_revision: text
+    test_definition: DbEvidenceRevision
+    config: DbEvidenceRevision
+    invocation_digest: text
+    dependencies: [DbEvidenceDependency]
+
+struct DbObservation:
+    reference: DbEvidenceRevision
+    provider: DbProviderIdentity
+    source_revision: text
+    test_definition: DbEvidenceRevision
+    config: DbEvidenceRevision
+    case_revision: DbEvidenceRevision
+    run: DbEvidenceRevision
+    actual: text
+    failure_signature: text
+    custom_config: bool
+    reproduction: DbEvidenceRevision?
+    payload_digest: text
+
+struct DbExpectationRule:
+    rule_digest: text
+    test_definition: DbEvidenceRevision
+    exact_config: DbEvidenceRevision?
+    config_set: DbEvidenceRevision?
+    expected: text
+    failure_signature: text
+    priority: u64
+
+struct DbExpectationRevision:
+    reference: DbEvidenceRevision
+    reviewed_by: text
+    rules: [DbExpectationRule]
+
+struct DbOutcomeEvaluation:
+    observation: DbEvidenceRevision
+    expectation: DbEvidenceRevision
+    classification: text
+    rule_digest: text
+
+struct DbPlannedCase:
+    case_revision: DbEvidenceRevision
+    test_definition: DbEvidenceRevision
+    config: DbEvidenceRevision
+    job: text
+    attempt: u64
+
+struct DbEvidenceChunk:
+    digest: text
+    observations: [DbEvidenceRevision]
+
+struct DbRunManifest:
+    reference: DbEvidenceRevision
+    provider: DbProviderIdentity
+    source_revision: text
+    config_set: DbEvidenceRevision
+    expectation: DbEvidenceRevision
+    planned: [DbPlannedCase]
+    chunks: [DbEvidenceChunk]
+    completion: text
+    missing_shards: [text]
+    supersedes: DbEvidenceRevision?
+    artifacts: [DbEvidenceDependency]
+
+struct DbBugOccurrence:
+    bug: EntityRef
+    observation: DbEvidenceRevision
+    config: DbEvidenceRevision
+    reproduction: DbEvidenceRevision
+
+fn db_evidence_same_ref(a: DbEvidenceRevision, b: DbEvidenceRevision) -> bool:
+    entity_ref_canonical(a.entity) == entity_ref_canonical(b.entity) and a.revision == b.revision
+
+fn db_evidence_check_ref(reference: DbEvidenceRevision) -> Result<bool, text>:
+    if not entity_ref_validate(reference.entity).valid or not db_evidence_digest_valid(reference.revision):
+        return Err("UnpinnedRevision")
+    Ok(true)
+
+# Algorithm/version explicit. Future algorithms require negotiated validation.
+fn db_evidence_digest_valid(digest: text) -> bool:
+    if not digest.starts_with("sha256:v1:") or digest.len() != 74:
+        return false
+    for i in 10..digest.len():
+        val code = digest.char_code_at(i)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+    true
+
+fn db_evidence_ref_bytes(reference: DbEvidenceRevision) -> Result<[u8], text>:
+    db_evidence_check_ref(reference)?
+    Ok(db_frame(1u8, db_canonical_text(entity_ref_canonical(reference.entity))?) + db_frame(2u8, db_canonical_text(reference.revision)?))
+
+# Additional dimensions must already be sorted, unique, and explicitly declared.
+fn db_provider_identity_bytes(identity: DbProviderIdentity, declared: [text]) -> Result<[u8], text>:
+    if identity.instance == "" or identity.project == "" or identity.run == "" or identity.job == "" or identity.attempt == 0:
+        return Err("IncompleteProviderIdentity")
+    var bytes = db_frame(1u8, db_canonical_text(identity.instance)?)
+    bytes = bytes + db_frame(2u8, db_canonical_text(identity.project)?)
+    bytes = bytes + db_frame(3u8, db_canonical_text(identity.run)?)
+    bytes = bytes + db_frame(4u8, db_canonical_text(identity.job)?)
+    bytes = bytes + db_frame(5u8, db_u64_bytes(identity.attempt))
+    if identity.dimensions.len() != declared.len():
+        return Err("IdentityDimensionsMismatch")
+    var previous = ""
+    for i in 0..declared.len():
+        val dimension = identity.dimensions[i]
+        if dimension.name != declared[i] or dimension.name <= previous or dimension.value == "":
+            return Err("IdentityDimensionsMismatch")
+        previous = dimension.name
+        bytes = bytes + db_frame(6u8, db_frame(1u8, db_canonical_text(dimension.name)?) + db_frame(2u8, db_canonical_text(dimension.value)?))
+    db_domain_bytes("scv.db.provider-observation.v1", bytes)
+
+fn db_observation_bytes(observation: DbObservation, declared: [text]) -> Result<[u8], text>:
+    var bytes = db_frame(1u8, db_provider_identity_bytes(observation.provider, declared)?)
+    bytes = bytes + db_frame(2u8, db_evidence_ref_bytes(observation.reference)?)
+    bytes = bytes + db_frame(3u8, db_canonical_text(observation.source_revision)?)
+    bytes = bytes + db_frame(4u8, db_evidence_ref_bytes(observation.test_definition)?)
+    bytes = bytes + db_frame(5u8, db_evidence_ref_bytes(observation.config)?)
+    bytes = bytes + db_frame(6u8, db_evidence_ref_bytes(observation.case_revision)?)
+    bytes = bytes + db_frame(7u8, db_evidence_ref_bytes(observation.run)?)
+    bytes = bytes + db_frame(8u8, db_canonical_text(observation.actual)?)
+    bytes = bytes + db_frame(9u8, db_canonical_text(observation.failure_signature)?)
+    if observation.custom_config:
+        bytes = bytes + db_frame(10u8, [1u8])
+    else:
+        bytes = bytes + db_frame(10u8, [0u8])
+    if val reproduction = observation.reproduction:
+        bytes = bytes + db_frame(11u8, db_evidence_ref_bytes(reproduction)?)
+    bytes = bytes + db_frame(12u8, db_canonical_text(observation.payload_digest)?)
+    db_domain_bytes("scv.db.observation.v1", bytes)
+
+fn db_evidence_dependencies_available(dependencies: [DbEvidenceDependency]) -> Result<bool, text>:
+    for dependency in dependencies:
+        if not db_evidence_digest_valid(dependency.digest) or dependency.availability != "available":
+            return Err("DependencyUnavailable")
+    Ok(true)
+
+fn db_observation_validate(observation: DbObservation, configs: [DbConfigRevision], reproductions: [DbReproductionRevision]) -> Result<bool, text>:
+    db_evidence_check_ref(observation.reference)?
+    db_evidence_check_ref(observation.test_definition)?
+    db_evidence_check_ref(observation.config)?
+    db_evidence_check_ref(observation.case_revision)?
+    db_evidence_check_ref(observation.run)?
+    if not db_evidence_digest_valid(observation.source_revision) or not db_evidence_digest_valid(observation.payload_digest):
+        return Err("MissingContentRevision")
+    if not ["PASS", "FAIL", "INFRA", "NOT_RUN", "INCOMPLETE", "UNKNOWN"].contains(observation.actual):
+        return Err("UnknownActualOutcome")
+    if observation.custom_config and observation.actual == "FAIL":
+        var config_found = false
+        for config in configs:
+            if db_evidence_same_ref(config.reference, observation.config):
+                if not db_evidence_digest_valid(config.effective_values_digest):
+                    return Err("MissingEffectiveConfig")
+                db_evidence_dependencies_available(config.dependencies)?
+                config_found = true
+        if not config_found:
+            return Err("MissingEffectiveConfig")
+        if val reference = observation.reproduction:
+            db_evidence_check_ref(reference)?
+            for reproduction in reproductions:
+                if db_evidence_same_ref(reference, reproduction.reference):
+                    if reproduction.source_revision != observation.source_revision or not db_evidence_same_ref(reproduction.config, observation.config) or not db_evidence_same_ref(reproduction.test_definition, observation.test_definition) or not db_evidence_digest_valid(reproduction.invocation_digest):
+                        return Err("ReproductionMismatch")
+                    db_evidence_dependencies_available(reproduction.dependencies)?
+                    return Ok(true)
+            return Err("MissingReproduction")
+        return Err("MissingReproduction")
+    Ok(true)
+
+# Same provider identity with changed bytes is corruption, even with reused digest.
+fn db_observation_admit(existing: [DbObservation], incoming: DbObservation, declared: [text], configs: [DbConfigRevision], reproductions: [DbReproductionRevision]) -> Result<text, text>:
+    db_observation_validate(incoming, configs, reproductions)?
+    val identity = db_provider_identity_bytes(incoming.provider, declared)?
+    val content = db_observation_bytes(incoming, declared)?
+    for observation in existing:
+        if db_provider_identity_bytes(observation.provider, declared)? == identity:
+            if db_observation_bytes(observation, declared)? == content:
+                return Ok("Duplicate")
+            return Err("QuarantinedIdentityReuse")
+        if db_evidence_same_ref(observation.reference, incoming.reference):
+            return Err("QuarantinedRevisionReuse")
+    Ok("Append")
+
+fn db_rule_specificity(rule: DbExpectationRule, observation: DbObservation, sets: [DbConfigSetRevision]) -> Result<u64, text>:
+    db_evidence_check_ref(rule.test_definition)?
+    if not db_evidence_same_ref(rule.test_definition, observation.test_definition):
+        return Ok(0u64)
+    if val config = rule.exact_config:
+        db_evidence_check_ref(config)?
+        if db_evidence_same_ref(config, observation.config):
+            return Ok(2u64)
+        return Ok(0u64)
+    if val reference = rule.config_set:
+        db_evidence_check_ref(reference)?
+        for config_set in sets:
+            if db_evidence_same_ref(config_set.reference, reference):
+                for member in config_set.members:
+                    if db_evidence_same_ref(member, observation.config):
+                        return Ok(1u64)
+                return Ok(0u64)
+        return Err("MissingPinnedConfigSet")
+    Err("MissingRuleSelector")
+
+fn db_evaluate(observation: DbObservation, policy: DbExpectationRevision, sets: [DbConfigSetRevision]) -> Result<DbOutcomeEvaluation, text>:
+    db_evidence_check_ref(policy.reference)?
+    if policy.reviewed_by == "":
+        return Err("UnreviewedExpectation")
+    var selected: DbExpectationRule? = nil
+    var specificity = 0u64
+    for rule in policy.rules:
+        if not db_evidence_digest_valid(rule.rule_digest) or not ["PASS", "FAIL"].contains(rule.expected):
+            return Err("InvalidExpectationRule")
+        if rule.exact_config != nil and rule.config_set != nil:
+            return Err("AmbiguousRuleSelector")
+        if rule.expected == "FAIL" and rule.failure_signature == "":
+            return Err("MissingFailureSignature")
+        val rank = db_rule_specificity(rule, observation, sets)?
+        # Reject contradictions even when a more-specific rule would hide them.
+        for other in policy.rules:
+            if rank > 0 and other.priority == rule.priority and db_rule_specificity(other, observation, sets)? == rank:
+                if other.expected != rule.expected or other.failure_signature != rule.failure_signature:
+                    return Err("ContradictoryExpectationRules")
+        if rank > 0:
+            if val previous = selected:
+                if rank == specificity and rule.priority == previous.priority:
+                    if rule.expected != previous.expected or rule.failure_signature != previous.failure_signature:
+                        return Err("ContradictoryExpectationRules")
+                    if rule.rule_digest < previous.rule_digest:
+                        selected = Some(rule)
+                elif rank > specificity or (rank == specificity and rule.priority > previous.priority):
+                    selected = Some(rule)
+                    specificity = rank
+            else:
+                selected = Some(rule)
+                specificity = rank
+    var classification = "UNCLASSIFIED"
+    var rule_digest = ""
+    if observation.actual == "INFRA":
+        classification = "INFRASTRUCTURE_ERROR"
+    elif observation.actual == "NOT_RUN":
+        classification = "NOT_RUN"
+    elif observation.actual == "INCOMPLETE":
+        classification = "INCOMPLETE"
+    elif val rule = selected:
+        rule_digest = rule.rule_digest
+        if observation.actual == "PASS":
+            classification = if rule.expected == "FAIL": "XPASS" else: "PASS"
+        elif observation.actual == "FAIL":
+            if rule.expected == "PASS":
+                classification = "UNEXPECTED_FAILURE"
+            elif observation.failure_signature == rule.failure_signature:
+                classification = "XFAIL"
+            else:
+                classification = "SIGNATURE_MISMATCH"
+    Ok(DbOutcomeEvaluation(observation: observation.reference, expectation: policy.reference, classification: classification, rule_digest: rule_digest))
+
+# A terminal manifest must account for every planned attempt and every chunk member.
+fn db_manifest_coverage(manifest: DbRunManifest, observations: [DbObservation]) -> Result<text, text>:
+    db_evidence_check_ref(manifest.reference)?
+    db_evidence_check_ref(manifest.config_set)?
+    db_evidence_check_ref(manifest.expectation)?
+    if not ["OPEN", "COMPLETE", "CANCELLED", "INCOMPLETE"].contains(manifest.completion):
+        return Err("UnknownRunCompletion")
+    var seen: [DbEvidenceRevision] = []
+    for chunk in manifest.chunks:
+        if not db_evidence_digest_valid(chunk.digest):
+            return Err("MissingChunkDigest")
+        for reference in chunk.observations:
+            for previous in seen:
+                if db_evidence_same_ref(previous, reference):
+                    return Err("DuplicateChunkObservation")
+            seen.push(reference)
+    var actual_seen: [DbEvidenceRevision] = []
+    for observation in observations:
+        for reference in actual_seen:
+            if db_evidence_same_ref(reference, observation.reference):
+                return Err("DuplicateObservation")
+        actual_seen.push(observation.reference)
+        if not db_evidence_same_ref(observation.run, manifest.reference) or observation.source_revision != manifest.source_revision or observation.provider.instance != manifest.provider.instance or observation.provider.project != manifest.provider.project or observation.provider.run != manifest.provider.run:
+            return Err("ObservationRunMismatch")
+        var declared = false
+        for reference in seen:
+            if db_evidence_same_ref(reference, observation.reference):
+                declared = true
+        if not declared:
+            return Err("UndeclaredObservation")
+    if seen.len() != observations.len():
+        return Err("MissingChunkObservation")
+    var missing = false
+    var matched = 0
+    var planned_seen: [DbPlannedCase] = []
+    for planned in manifest.planned:
+        db_evidence_check_ref(planned.case_revision)?
+        db_evidence_check_ref(planned.test_definition)?
+        db_evidence_check_ref(planned.config)?
+        if planned.attempt == 0 or planned.job == "":
+            return Err("InvalidPlannedAttempt")
+        for previous in planned_seen:
+            if db_evidence_same_ref(previous.case_revision, planned.case_revision) and db_evidence_same_ref(previous.test_definition, planned.test_definition) and db_evidence_same_ref(previous.config, planned.config) and previous.job == planned.job and previous.attempt == planned.attempt:
+                return Err("DuplicatePlannedCase")
+        planned_seen.push(planned)
+        var count = 0
+        for observation in observations:
+            if db_evidence_same_ref(planned.case_revision, observation.case_revision) and db_evidence_same_ref(planned.test_definition, observation.test_definition) and db_evidence_same_ref(planned.config, observation.config) and planned.job == observation.provider.job and planned.attempt == observation.provider.attempt:
+                count = count + 1
+        if count > 1:
+            return Err("DuplicatePlannedObservation")
+        if count == 0:
+            missing = true
+        matched = matched + count
+    if matched != observations.len():
+        return Err("UnplannedOrDuplicateCoverage")
+    if manifest.completion == "OPEN" or manifest.completion == "INCOMPLETE" or manifest.missing_shards.len() > 0:
+        return Ok("INCOMPLETE")
+    if missing:
+        return Ok("NOT_RUN")
+    Ok("COMPLETE")
+
+fn db_manifest_supersession(previous: DbRunManifest, next: DbRunManifest) -> Result<bool, text>:
+    db_evidence_check_ref(previous.reference)?
+    db_evidence_check_ref(next.reference)?
+    if val reference = next.supersedes:
+        if not db_evidence_same_ref(reference, previous.reference):
+            return Err("SupersessionRevisionMismatch")
+    else:
+        return Err("MissingSupersession")
+    if next.provider.instance != previous.provider.instance or next.provider.project != previous.provider.project or next.provider.run != previous.provider.run or next.source_revision != previous.source_revision or not db_evidence_same_ref(next.config_set, previous.config_set) or not db_evidence_same_ref(next.expectation, previous.expectation):
+        return Err("SupersessionScopeMismatch")
+    if next.provider.attempt <= previous.provider.attempt or db_evidence_same_ref(next.reference, previous.reference):
+        return Err("AttemptRegression")
+    Ok(true)
+
+export DbEvidenceRevision, DbIdentityDimension, DbProviderIdentity, DbEvidenceDependency
+export DbTestDefinitionRevision, DbConfigRevision, DbConfigSetRevision, DbReproductionRevision
+export DbObservation, DbExpectationRule, DbExpectationRevision, DbOutcomeEvaluation
+export DbPlannedCase, DbEvidenceChunk, DbRunManifest, DbBugOccurrence
+export db_evidence_same_ref, db_evidence_check_ref, db_provider_identity_bytes
+export db_evidence_digest_valid
+export db_observation_bytes, db_observation_validate, db_observation_admit, db_evaluate
+export db_manifest_coverage, db_manifest_supersession
+

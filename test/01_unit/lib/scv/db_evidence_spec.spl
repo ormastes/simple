@@ -1,0 +1,119 @@
+use std.spec.*
+use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
+use std.scv.db_evidence.*
+
+fn setup_item2_digest() -> text:
+    "sha256:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn setup_item2_ref(kind: text, sequence: u64) -> DbEvidenceRevision:
+    DbEvidenceRevision(entity: entity_ref_settled(SettledAlias(database_namespace: "0123456789abcdef0123456789abcdef", authority_epoch: 1u64, entity_kind: kind, sequence: sequence)), revision: setup_item2_digest())
+
+fn setup_item2_provider(attempt: u64) -> DbProviderIdentity:
+    DbProviderIdentity(instance: "ci.example", project: "project", run: "run-1", job: "job-1", attempt: attempt, dimensions: [DbIdentityDimension(name: "case", value: "case-1")])
+
+fn setup_item2_observation(actual: text) -> DbObservation:
+    DbObservation(reference: setup_item2_ref("observation", 1u64), provider: setup_item2_provider(1u64), source_revision: setup_item2_digest(), test_definition: setup_item2_ref("test", 1u64), config: setup_item2_ref("config", 1u64), case_revision: setup_item2_ref("case", 1u64), run: setup_item2_ref("run", 1u64), actual: actual, failure_signature: "assert-42", custom_config: false, reproduction: nil, payload_digest: setup_item2_digest())
+
+fn setup_item2_rule(expected: text) -> DbExpectationRule:
+    DbExpectationRule(rule_digest: setup_item2_digest(), test_definition: setup_item2_ref("test", 1u64), exact_config: Some(setup_item2_ref("config", 1u64)), config_set: nil, expected: expected, failure_signature: "assert-42", priority: 1u64)
+
+fn setup_item2_policy(rules: [DbExpectationRule]) -> DbExpectationRevision:
+    DbExpectationRevision(reference: setup_item2_ref("expectation", 1u64), reviewed_by: "reviewer-key", rules: rules)
+
+fn check_item2_class(observation: DbObservation, policy: DbExpectationRevision, sets: [DbConfigSetRevision]) -> text:
+    match db_evaluate(observation, policy, sets):
+        Ok(evaluation): evaluation.classification
+        Err(reason): reason
+
+fn setup_item2_manifest() -> DbRunManifest:
+    DbRunManifest(reference: setup_item2_ref("run", 1u64), provider: setup_item2_provider(1u64), source_revision: setup_item2_digest(), config_set: setup_item2_ref("config-set", 1u64), expectation: setup_item2_ref("expectation", 1u64), planned: [DbPlannedCase(case_revision: setup_item2_ref("case", 1u64), test_definition: setup_item2_ref("test", 1u64), config: setup_item2_ref("config", 1u64), job: "job-1", attempt: 1u64)], chunks: [DbEvidenceChunk(digest: setup_item2_digest(), observations: [setup_item2_ref("observation", 1u64)])], completion: "COMPLETE", missing_shards: [], supersedes: nil, artifacts: [])
+
+describe "REQ-016..021 immutable evidence policy":
+    it "requires canonical algorithm-version digest and contextual entity identity":
+        expect(db_evidence_digest_valid(setup_item2_digest())).to_equal(true)
+        expect(db_evidence_digest_valid("moving-latest")).to_equal(false)
+        expect(db_evidence_digest_valid("sha512:v1:aaaa")).to_equal(false)
+        var reference = setup_item2_ref("test", 1u64)
+        reference.revision = "latest"
+        expect(db_evidence_check_ref(reference)).to_equal(Err("UnpinnedRevision"))
+
+    it "deduplicates exact content and quarantines content reuse even with the same digest":
+        val observation = setup_item2_observation("PASS")
+        expect(db_observation_admit([], observation, ["case"], [], [])).to_equal(Ok("Append"))
+        expect(db_observation_admit([observation], observation, ["case"], [], [])).to_equal(Ok("Duplicate"))
+        var changed = observation
+        changed.actual = "FAIL"
+        expect(db_observation_admit([observation], changed, ["case"], [], [])).to_equal(Err("QuarantinedIdentityReuse"))
+
+    it "rejects undeclared dimensions and revision reuse across provider tuples":
+        val observation = setup_item2_observation("PASS")
+        expect(db_observation_admit([], observation, [], [], [])).to_equal(Err("IdentityDimensionsMismatch"))
+        var changed = observation
+        changed.provider = setup_item2_provider(2u64)
+        expect(db_observation_admit([observation], changed, ["case"], [], [])).to_equal(Err("QuarantinedRevisionReuse"))
+
+    it "distinguishes all actual-policy classifications":
+        val expected_pass = setup_item2_policy([setup_item2_rule("PASS")])
+        val expected_fail = setup_item2_policy([setup_item2_rule("FAIL")])
+        expect(check_item2_class(setup_item2_observation("PASS"), expected_pass, [])).to_equal("PASS")
+        expect(check_item2_class(setup_item2_observation("FAIL"), expected_fail, [])).to_equal("XFAIL")
+        expect(check_item2_class(setup_item2_observation("PASS"), expected_fail, [])).to_equal("XPASS")
+        expect(check_item2_class(setup_item2_observation("FAIL"), expected_pass, [])).to_equal("UNEXPECTED_FAILURE")
+        var mismatch = setup_item2_observation("FAIL")
+        mismatch.failure_signature = "other-crash"
+        expect(check_item2_class(mismatch, expected_fail, [])).to_equal("SIGNATURE_MISMATCH")
+        expect(check_item2_class(setup_item2_observation("INFRA"), expected_fail, [])).to_equal("INFRASTRUCTURE_ERROR")
+        expect(check_item2_class(setup_item2_observation("NOT_RUN"), expected_pass, [])).to_equal("NOT_RUN")
+        expect(check_item2_class(setup_item2_observation("INCOMPLETE"), expected_pass, [])).to_equal("INCOMPLETE")
+        expect(check_item2_class(setup_item2_observation("UNKNOWN"), expected_pass, [])).to_equal("UNCLASSIFIED")
+        expect(check_item2_class(setup_item2_observation("PASS"), setup_item2_policy([]), [])).to_equal("UNCLASSIFIED")
+
+    it "prioritizes exact config over higher-priority pinned config-set rules":
+        var default_rule = setup_item2_rule("FAIL")
+        default_rule.exact_config = nil
+        default_rule.config_set = Some(setup_item2_ref("config-set", 1u64))
+        default_rule.priority = 999u64
+        val sets = [DbConfigSetRevision(reference: setup_item2_ref("config-set", 1u64), members: [setup_item2_ref("config", 1u64)])]
+        expect(check_item2_class(setup_item2_observation("PASS"), setup_item2_policy([default_rule, setup_item2_rule("PASS")]), sets)).to_equal("PASS")
+        expect(check_item2_class(setup_item2_observation("PASS"), setup_item2_policy([default_rule]), [])).to_equal("MissingPinnedConfigSet")
+
+    it "rejects contradictory equal-priority rules regardless of ordering":
+        val pass_rule = setup_item2_rule("PASS")
+        val fail_rule = setup_item2_rule("FAIL")
+        expect(check_item2_class(setup_item2_observation("PASS"), setup_item2_policy([pass_rule, fail_rule]), [])).to_equal("ContradictoryExpectationRules")
+        expect(check_item2_class(setup_item2_observation("PASS"), setup_item2_policy([fail_rule, pass_rule]), [])).to_equal("ContradictoryExpectationRules")
+
+    it "requires exact reproduction and available hashed custom-config dependencies":
+        var observation = setup_item2_observation("FAIL")
+        observation.custom_config = true
+        val config = DbConfigRevision(reference: observation.config, effective_values_digest: setup_item2_digest(), dependencies: [])
+        expect(db_observation_validate(observation, [], [])).to_equal(Err("MissingEffectiveConfig"))
+        expect(db_observation_validate(observation, [config], [])).to_equal(Err("MissingReproduction"))
+        observation.reproduction = Some(setup_item2_ref("reproduction", 1u64))
+        var reproduction = DbReproductionRevision(reference: setup_item2_ref("reproduction", 1u64), source_revision: observation.source_revision, test_definition: observation.test_definition, config: observation.config, invocation_digest: setup_item2_digest(), dependencies: [DbEvidenceDependency(digest: setup_item2_digest(), availability: "missing")])
+        expect(db_observation_validate(observation, [config], [reproduction])).to_equal(Err("DependencyUnavailable"))
+        reproduction.dependencies = [DbEvidenceDependency(digest: setup_item2_digest(), availability: "available")]
+        expect(db_observation_validate(observation, [config], [reproduction])).to_equal(Ok(true))
+        reproduction.config = setup_item2_ref("config", 2u64)
+        expect(db_observation_validate(observation, [config], [reproduction])).to_equal(Err("ReproductionMismatch"))
+
+    it "never interprets absent planned evidence as PASS":
+        var manifest = setup_item2_manifest()
+        expect(db_manifest_coverage(manifest, [setup_item2_observation("PASS")])).to_equal(Ok("COMPLETE"))
+        expect(db_manifest_coverage(manifest, [])).to_equal(Err("MissingChunkObservation"))
+        manifest.chunks = []
+        expect(db_manifest_coverage(manifest, [])).to_equal(Ok("NOT_RUN"))
+        manifest.completion = "OPEN"
+        expect(db_manifest_coverage(manifest, [])).to_equal(Ok("INCOMPLETE"))
+
+    it "rejects duplicate coverage and requires increasing scoped supersession":
+        val previous = setup_item2_manifest()
+        var duplicate = previous
+        duplicate.chunks = previous.chunks + previous.chunks
+        expect(db_manifest_coverage(duplicate, [setup_item2_observation("PASS")])).to_equal(Err("DuplicateChunkObservation"))
+        var next = previous
+        next.reference = setup_item2_ref("run", 2u64)
+        next.supersedes = Some(previous.reference)
+        expect(db_manifest_supersession(previous, next)).to_equal(Err("AttemptRegression"))
+        next.provider = setup_item2_provider(2u64)
+        expect(db_manifest_supersession(previous, next)).to_equal(Ok(true))

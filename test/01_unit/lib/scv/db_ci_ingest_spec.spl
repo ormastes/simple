@@ -1,0 +1,132 @@
+use std.spec.*
+use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
+use std.scv.db_evidence.{DbEvidenceRevision}
+use std.scv.db_ci_ingest.*
+
+fn setup_item2_ci_digest() -> text:
+    "sha256:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn setup_item2_ci_ref() -> DbEvidenceRevision:
+    DbEvidenceRevision(entity: entity_ref_settled(SettledAlias(database_namespace: "0123456789abcdef0123456789abcdef", authority_epoch: 1u64, entity_kind: "manifest", sequence: 1u64)), revision: setup_item2_ci_digest())
+
+fn setup_item2_ci_cursor() -> DbCiCursor:
+    DbCiCursor(provider_instance: "ci.example", project: "repo", opaque_position: "page1", high_water_seconds: 100u64, overlap_from_seconds: 90u64)
+
+fn setup_item2_ci_page() -> DbDiscoveryPage:
+    DbDiscoveryPage(provider_instance: "ci.example", project: "repo", requested_position: "page1", next_position: "page2", observed_until_seconds: 110u64, items: [DbDiscoveryItem(manifest: setup_item2_ci_ref(), bundle_digest: setup_item2_ci_digest())])
+
+fn setup_item2_ci_receipt() -> DbEvidenceReceipt:
+    DbEvidenceReceipt(provider_instance: "ci.example", project: "repo", manifest: setup_item2_ci_ref(), bundle_digest: setup_item2_ci_digest(), durable_object_digest: setup_item2_ci_digest(), accepted_manifest: setup_item2_ci_ref(), accepted_head: setup_item2_ci_digest(), settlement_receipt_digest: setup_item2_ci_digest())
+
+fn setup_item2_quota() -> DbImportQuota:
+    DbImportQuota(maximum_bytes: 100u64, maximum_compressed_bytes: 100u64, maximum_files: 2u64, maximum_records: 10u64, maximum_depth: 3u64, maximum_path_bytes: 64u64, maximum_ratio: 10u64, maximum_elapsed_ms: 1000u64)
+
+fn setup_item2_usage() -> DbImportUsage:
+    DbImportUsage(bytes: 0u64, compressed_bytes: 0u64, files: 0u64, records: 0u64)
+
+fn setup_item2_entry() -> DbImportEntry:
+    DbImportEntry(path: "run/chunk.json", kind: "regular", bytes: 100u64, compressed_bytes: 10u64, records: 10u64)
+
+fn check_item2_advance(cursor: DbCiCursor, page: DbDiscoveryPage, receipts: [DbEvidenceReceipt]) -> text:
+    match db_ci_advance(cursor, page, receipts, 10u64):
+        Ok(next): "{next.opaque_position}:{next.overlap_from_seconds}"
+        Err(reason): reason
+
+describe "REQ-021,024..026 CI admission pure policy":
+    it "prevents every CI semantic-policy mutation including trusted CI":
+        for operation in ["review-expectation", "close-bug", "promote-config", "qualify-release"]:
+            expect(db_ci_authorize("ci-producer", operation, true)).to_equal(Err("CiPolicyMutationForbidden"))
+        expect(db_ci_authorize("ci-producer", "append-observation", false)).to_equal(Ok(true))
+        expect(db_ci_authorize("release-owner", "qualify-release", false)).to_equal(Err("OperationUnauthorized"))
+        expect(db_ci_authorize("release-owner", "qualify-release", true)).to_equal(Ok(true))
+        expect(db_ci_authorize("unknown", "append-evidence", true)).to_equal(Err("OperationUnauthorized"))
+
+    it "requires matching storage and canonical acceptance receipts before cursor proposal":
+        val cursor = setup_item2_ci_cursor()
+        val page = setup_item2_ci_page()
+        expect(check_item2_advance(cursor, page, [])).to_equal("EvidenceReceiptRequired")
+        var receipt = setup_item2_ci_receipt()
+        receipt.durable_object_digest = "missing"
+        expect(check_item2_advance(cursor, page, [receipt])).to_equal("ReceiptContentMismatch")
+        receipt = setup_item2_ci_receipt()
+        receipt.accepted_head = ""
+        expect(check_item2_advance(cursor, page, [receipt])).to_equal("MissingCanonicalAcceptance")
+        expect(check_item2_advance(cursor, page, [setup_item2_ci_receipt()])).to_equal("page2:100")
+
+    it "enforces pagination scope and monotonic overlapping poll windows":
+        val cursor = setup_item2_ci_cursor()
+        var page = setup_item2_ci_page()
+        page.requested_position = "unrelated-page"
+        expect(check_item2_advance(cursor, page, [])).to_equal("CursorScopeMismatch")
+        page = setup_item2_ci_page()
+        page.observed_until_seconds = 99u64
+        expect(check_item2_advance(cursor, page, [])).to_equal("CursorRegression")
+        page = setup_item2_ci_page()
+        page.items = page.items + page.items
+        expect(check_item2_advance(cursor, page, [setup_item2_ci_receipt()])).to_equal("page2:100")
+
+    it "rejects conflicting manifest digest reuse in one discovery page":
+        var page = setup_item2_ci_page()
+        var item = page.items[0]
+        item.bundle_digest = "sha256:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        page.items.push(item)
+        expect(check_item2_advance(setup_item2_ci_cursor(), page, [setup_item2_ci_receipt()])).to_equal("QuarantinedManifestReuse")
+
+    it "rejects traversal absolute paths Unicode ambiguity and Windows devices":
+        for path in ["../escape", "/absolute", "C:/escape", "a/../b", "a\\b", "a//b", "a/./b", "a/CON.txt", "a/nul", "a/trailing.", "a/trailing ", "한글/data"]:
+            expect(db_import_path_validate(path, setup_item2_quota())).to_equal(Err("UnsafeImportPath"))
+        expect(db_import_path_validate("a/b/c/d", setup_item2_quota())).to_equal(Err("ImportDepthExceeded"))
+        expect(db_import_path_validate("safe/chunk.json", setup_item2_quota())).to_equal(Ok(true))
+
+    it "accepts exact quota boundaries and rejects one byte over":
+        val quota = setup_item2_quota()
+        val usage = setup_item2_usage()
+        var entry = setup_item2_entry()
+        match db_import_charge(usage, entry, quota, 1000u64):
+            Ok(charged):
+                expect(charged.bytes).to_equal(100u64)
+                expect(charged.files).to_equal(1u64)
+                expect(charged.records).to_equal(10u64)
+            Err(reason): fail(reason)
+        entry.bytes = 101u64
+        expect(db_import_charge(usage, entry, quota, 1000u64)).to_equal(Err("ImportBytesExceeded"))
+
+    it "rejects special files time exhaustion compression bombs and integer wrap":
+        val quota = setup_item2_quota()
+        val usage = setup_item2_usage()
+        var entry = setup_item2_entry()
+        entry.kind = "symlink"
+        expect(db_import_charge(usage, entry, quota, 0u64)).to_equal(Err("ImportSpecialFileForbidden"))
+        entry = setup_item2_entry()
+        expect(db_import_charge(usage, entry, quota, 1001u64)).to_equal(Err("ImportTimeExceeded"))
+        entry.compressed_bytes = 9u64
+        expect(db_import_charge(usage, entry, quota, 0u64)).to_equal(Err("ImportDecompressionExceeded"))
+        entry.compressed_bytes = 0u64
+        expect(db_import_charge(usage, entry, quota, 0u64)).to_equal(Err("ImportDecompressionExceeded"))
+        var corrupt_usage = usage
+        corrupt_usage.bytes = 18446744073709551615u64
+        expect(db_import_charge(corrupt_usage, setup_item2_entry(), quota, 0u64)).to_equal(Err("ImportBytesExceeded"))
+
+    it "enforces record file and compressed-byte limits independently":
+        val usage = setup_item2_usage()
+        val quota = setup_item2_quota()
+        var entry = setup_item2_entry()
+        entry.records = 11u64
+        expect(db_import_charge(usage, entry, quota, 0u64)).to_equal(Err("ImportRecordsExceeded"))
+        entry = setup_item2_entry()
+        entry.compressed_bytes = 101u64
+        expect(db_import_charge(usage, entry, quota, 0u64)).to_equal(Err("ImportCompressedBytesExceeded"))
+        var full = usage
+        full.files = 2u64
+        expect(db_import_charge(full, setup_item2_entry(), quota, 0u64)).to_equal(Err("ImportFilesExceeded"))
+
+    it "validates capabilities independently of provider brand":
+        val dims = ["instance", "project", "run", "job", "attempt", "case"]
+        var capabilities = DbCiCapabilities(identity_dimensions: dims, uniqueness_tuple: dims, event_hints: false, polling: true, bundle_import: true, artifact_download: false, attestations: false, pagination: true, maximum_bundle_bytes: 100u64)
+        expect(db_ci_capabilities_validate(capabilities)).to_equal(Ok(true))
+        capabilities.uniqueness_tuple = ["run", "attempt"]
+        expect(db_ci_capabilities_validate(capabilities)).to_equal(Err("IncompleteIdentityCapability"))
+        capabilities.uniqueness_tuple = dims
+        capabilities.polling = false
+        capabilities.bundle_import = false
+        expect(db_ci_capabilities_validate(capabilities)).to_equal(Err("NoDurableDiscovery"))
