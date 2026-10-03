@@ -194,14 +194,21 @@ impl InterpreterBackendImpl:
                 Err(BackendError.type_error("value is not callable", Some(span)))
 
     fn call_hir_function(fn_: HirFunction, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>:
+        # Advice observes owned extern calls just as it observes HIR bodies.
+        self.interp_aop_run_before(fn_, ctx)
         if fn_.is_extern:
             if val symbol = ctx.module.symbols.get_symbol_raw(fn_.symbol.id):
                 val owner = symbol.defining_module ?? ""
                 if val result = self.try_owned_run_abi(fn_.name, owner, true, args):
+                    match result:
+                        case Ok(value): self.interp_aop_run_after(fn_, ctx, value)
+                        # Backend execution errors propagate without after
+                        # advice, matching eval_block(...)? below. after_error
+                        # advice applies to a returned Value.Result error.
+                        case Err(_): ()
                     return result
         # AOP hook (task #31): weave declarative `on pc{...} use ... before`
         # advice for interpreted calls. See interpreter_aop_weave.spl.
-        self.interp_aop_run_before(fn_, ctx)
         ctx.env.push_scope()
 
         # Bind parameters
