@@ -362,3 +362,23 @@ fn db_git_candidate_restore(request: DbGitCandidateRequest, raw_commit: text, ex
             Err(reason)
 
 export db_git_candidate_commit_bytes, db_git_candidate_restore
+
+# Trusted backend infrastructure. The existing registered candidate owns the
+# fetched parent and scope; its current index may be replaced by a typed owner.
+# This grants no semantic authority and is never a producer-facing facade.
+fn db_git_candidate_finish_index(candidate: DbGitPreparedCandidate, message: text, raw_commit: text = "", expected_oid: text = "") -> Result<DbGitPreparedCandidate, text>:
+    _db_candidate_verify(candidate)?
+    if message == "" or message.len() > 4096 or message.contains("\0"): return Err("CandidateInvalidManifest")
+    var next = candidate
+    next.tree_oid = _db_candidate_run(candidate.scratch, ["write-tree"])?
+    if not _db_candidate_oid(next.tree_oid, candidate.object_format): return Err("CandidateInvalidTree")
+    next.candidate_oid = _db_candidate_run(candidate.scratch, ["-c", "user.name=SCV Settlement", "-c", "user.email=scv-settlement@invalid", "commit-tree", next.tree_oid, "-p", candidate.expected_head, "-m", message])?
+    _db_candidate_prepared.push(next)
+    _db_candidate_verify(next)?
+    if raw_commit != "":
+        if raw_commit.len() >= 65536 or raw_commit.contains("\0") or not _db_candidate_oid(expected_oid, candidate.object_format): return Err("CandidateCommitEncoding")
+        return _db_candidate_restore_commit(next, raw_commit, expected_oid)
+    if expected_oid != "": return Err("CandidateCommitEncoding")
+    Ok(next)
+
+export db_git_candidate_finish_index

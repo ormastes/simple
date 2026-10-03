@@ -115,6 +115,14 @@ state, so large retained descriptors can cause explicit backpressure. No quota
 is a measured RSS or throughput result. Blob/candidate work is per affected page;
 cold full validation remains explicit maintenance work.
 
+The 16 GiB source cap is per pass: cold Git blob import, each of the two existing
+global validation passes, recovery high-water scanning, and changed-page export
+are separately bounded. They do not share an operation-wide 16 GiB IO allowance.
+Global validation also retains its existing spill/conflict-cache quotas. Signed
+receipt ancestry uses the existing 32-commit settlement history bound; older
+unproved history fails explicitly rather than allocating or guessing. Local
+object commands disable lazy fetch; explicit transport owners alone fetch.
+
 ### Process cost and invalidation
 
 Cold Git import performs bounded inventory/metadata calls followed by several

@@ -9,6 +9,10 @@ use app.scv.db.settlement_journal_git.{db_settlement_verify_objects, db_settleme
 use app.scv.db.git_candidate.*
 use app.scv.db.git_settlement_transport.{db_git_settlement_ref_head, db_git_settlement_reconcile_history}
 use app.scv.db.receipt_index_git.*
+use app.scv.db.settlement_paged_owner.*
+use app.scv.db.settlement_paged_projection.*
+use app.scv.db.settlement_paged_git.{db_paged_git_acquire, db_paged_git_command}
+use std.scv.db_paged_model.*
 use std.scv.db_receipt.*
 use std.scv.db_allocation.{db_plan_allocation}
 use std.scv.db_policy_codec.{DbPolicyConfig, db_policy_encode}
@@ -30,6 +34,16 @@ struct DbSettlementLocalResult:
     view: DbSettlementQueueView
     batch_id: text
 
+struct DbSettlementPagedLocalConfig:
+    scratch_parent: text
+    authority: DbReceiptAuthority
+    policy: DbPagedPolicy
+    bootstrap_receipt: DbSettlementReceipt
+
+fn _queue_structure(config: DbSettlementLocalConfig, paged: DbPagedPolicy?) -> Result<text, text>:
+    if val policy = paged: return db_paged_structure_digest(policy)
+    db_settlement_queue_structure(config.policy)
+
 fn _queue_index_request(root: text, config: DbSettlementLocalConfig, receipt: DbSettlementReceipt, expected: text) -> DbReceiptIndexGitRequest:
     DbReceiptIndexGitRequest(source_root: root, remote: config.authority.remote, scratch_parent: config.scratch_parent, expected_head: expected, receipt: receipt, authority: config.authority)
 
@@ -42,7 +56,41 @@ fn _queue_result(root: text, before: DbSettlementQueueView, item_index: i64, ite
     val view = db_settlement_queue_commit(root, before.head, queue)?
     Ok(DbSettlementLocalResult(code: code, view: view, batch_id: item.patch.batch_id))
 
-fn _queue_prepare(root: text, before: DbSettlementQueueView, item_index: i64, config: DbSettlementLocalConfig, now: u64, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>) -> Result<DbSettlementLocalResult, text>:
+fn _queue_prepare_paged(root: text, before: DbSettlementQueueView, index: i64, config: DbSettlementLocalConfig, policy: DbPagedPolicy, now: u64, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>) -> Result<DbSettlementLocalResult, text>:
+    var item = before.queue.items[index]
+    val tip = db_receipt_index_git_tip(_queue_index_request(root, config, config.bootstrap_receipt, ""))?
+    val observed = db_git_settlement_ref_head(root, config.authority.remote)
+    if observed.code != "ok": return Err(observed.code)
+    if observed.oid != tip.receipt.accepted_head: return Err("SCVDB_QUEUE_AWAITING_CANONICAL_INDEX")
+    if item.attempts == 18446744073709551615u64: return Err("SCVDB_QUEUE_ATTEMPTS_EXHAUSTED")
+    val prepared = db_settlement_paged_prepare_local(root, config.scratch_parent, tip.receipt, item.patch, config.authority, policy, now, sign_receipt)?
+    if prepared.replay:
+        # Replays require the actual signed historical index entry and tree,
+        # not a caller's accepted-ID claim or a newly allocated replacement.
+        val proof = db_receipt_index_git_batch(_queue_index_request(root, config, config.bootstrap_receipt, ""), item.patch.batch_id)?
+        val projection = db_settlement_paged_readback_local(root, config.scratch_parent, proof.receipt, config.authority, policy)?
+        val owner = db_paged_git_acquire(root, config.scratch_parent, proof.receipt.remote, proof.receipt.accepted_head, proof.receipt.object_format)?
+        val raw = db_paged_git_command(owner, ["cat-file", "commit", proof.receipt.accepted_head])
+        db_git_candidate_cleanup(owner)?
+        item.paged_journal = Some(DbPagedSettlementJournal(receipt: proof.receipt, manifest_wire: db_paged_manifest_encode(projection.manifest)?, projection_digest: projection.projection_digest, phase: DbSettlementPhase.PublishedAwaitingIndex))
+        item.candidate_commit = raw?
+        item.phase = "local-index-observed"
+        item.observed_index_head = proof.index_head
+    else:
+        # Preparation owns a live scratch until these exact signed bytes have
+        # been persisted. Cleanup still occurs if queue CAS loses a race.
+        item.paged_journal = prepared.journal
+        item.candidate_commit = prepared.candidate_commit
+        item.phase = "prepared"
+        item.attempts = item.attempts + 1u64
+    item.preparation_structure = db_paged_structure_digest(policy)?
+    item.last_error = ""
+    val result = _queue_result(root, before, index, item, item.phase)
+    if val candidate = prepared.candidate: db_git_candidate_cleanup(candidate)?
+    result
+
+fn _queue_prepare(root: text, before: DbSettlementQueueView, item_index: i64, config: DbSettlementLocalConfig, now: u64, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>, paged: DbPagedPolicy?) -> Result<DbSettlementLocalResult, text>:
+    if val policy = paged: return _queue_prepare_paged(root, before, item_index, config, policy, now, sign_receipt)
     var item = before.queue.items[item_index]
     val tip = db_receipt_index_git_tip(_queue_index_request(root, config, config.bootstrap_receipt, ""))?
     val observed = db_git_settlement_ref_head(root, config.authority.remote)
@@ -98,59 +146,74 @@ fn _queue_record_candidate(root: text, before: DbSettlementQueueView, item_index
     item.last_error = ""
     _queue_result(root, before, item_index, item, "prepared")
 
-fn _queue_observe_published(root: text, before: DbSettlementQueueView, index: i64, config: DbSettlementLocalConfig) -> Result<DbSettlementLocalResult, text>:
+fn _queue_observe_published(root: text, before: DbSettlementQueueView, index: i64, config: DbSettlementLocalConfig, paged: DbPagedPolicy?) -> Result<DbSettlementLocalResult, text>:
     var item = before.queue.items[index]
-    var journal = item.journal.unwrap()
-    val accepted = db_settlement_journal_readback(root, config.scratch_parent, journal)?
-    journal.phase = DbSettlementPhase.PublishedAwaitingIndex
-    item.journal = Some(journal)
+    if val policy = paged:
+        var journal = item.paged_journal.unwrap()
+        db_settlement_paged_journal_readback(root, config.scratch_parent, journal, config.authority, policy)?
+        journal.phase = DbSettlementPhase.PublishedAwaitingIndex
+        item.paged_journal = Some(journal)
+    else:
+        var journal = item.journal.unwrap()
+        val accepted = db_settlement_journal_readback(root, config.scratch_parent, journal)?
+        journal.phase = DbSettlementPhase.PublishedAwaitingIndex
+        item.journal = Some(journal)
     item.phase = "awaiting-index"
     item.last_error = ""
     _queue_result(root, before, index, item, "awaiting-index")
 
-fn _queue_publish(root: text, before: DbSettlementQueueView, index: i64, config: DbSettlementLocalConfig) -> Result<DbSettlementLocalResult, text>:
+fn _queue_publish(root: text, before: DbSettlementQueueView, index: i64, config: DbSettlementLocalConfig, paged: DbPagedPolicy?) -> Result<DbSettlementLocalResult, text>:
     var item = before.queue.items[index]
-    val journal = item.journal.unwrap()
-    val receipt = journal.receipt
+    val receipt = db_settlement_work_receipt(item)?
     val status = db_git_settlement_reconcile_history(root, receipt.remote, receipt.previous_head, receipt.accepted_head, config.scratch_parent)
-    if status.code == "published": return _queue_observe_published(root, before, index, config)
+    if status.code == "published": return _queue_observe_published(root, before, index, config, paged)
     if status.code != "not_published": return Err(status.code)
-    val changed_structure = item.preparation_structure != db_settlement_queue_structure(config.policy)?
+    val changed_structure = item.preparation_structure != _queue_structure(config, paged)?
     if status.observed_head != receipt.previous_head or changed_structure:
         # Absence was proved by raw single-parent history, not by push status.
         # The old candidate remains in the immutable prior queue generation.
         item.phase = "queued"
         item.journal = nil
+        item.paged_journal = nil
         item.candidate_commit = ""
         item.preparation_structure = ""
         item.last_error = if changed_structure: "SCVDB_QUEUE_STRUCTURE_REPLAN" else: "SCVDB_QUEUE_STALE_REPLAN"
         return _queue_result(root, before, index, item, if changed_structure: "structure-replan" else: "stale-replan")
-    val candidate = db_git_candidate_restore(_queue_candidate_request(root, config, journal), item.candidate_commit, receipt.accepted_head, \: scv_sj_lease_is_held(root))?
-    val verified = db_settlement_verify_objects(candidate.scratch, journal)
+    val candidate = if paged != nil: db_settlement_paged_restore_local(root, config.scratch_parent, item.paged_journal.unwrap(), config.authority, paged.unwrap(), item.candidate_commit)? else: db_git_candidate_restore(_queue_candidate_request(root, config, item.journal.unwrap()), item.candidate_commit, receipt.accepted_head, \: scv_sj_lease_is_held(root))?
     var publication: Result<DbGitCandidatePublication, text> = Err("SCVDB_QUEUE_CANDIDATE")
-    match verified:
-        Ok(_): publication = db_git_candidate_publish(candidate, \: scv_sj_lease_is_held(root))
-        Err(reason): publication = Err(reason)
+    if paged != nil:
+        # The paged restore owner already verified exact bytes/tree/OID.
+        publication = db_git_candidate_publish(candidate, \: scv_sj_lease_is_held(root))
+    else:
+        match db_settlement_verify_objects(candidate.scratch, item.journal.unwrap()):
+            Ok(_): publication = db_git_candidate_publish(candidate, \: scv_sj_lease_is_held(root))
+            Err(reason): publication = Err(reason)
     db_git_candidate_cleanup(candidate)?
     val result = publication?
     if result.code != "published" and result.code != "already_published": return Err(result.code)
-    _queue_observe_published(root, before, index, config)
+    _queue_observe_published(root, before, index, config, paged)
 
-fn _queue_index(root: text, before: DbSettlementQueueView, index: i64, config: DbSettlementLocalConfig) -> Result<DbSettlementLocalResult, text>:
+fn _queue_index(root: text, before: DbSettlementQueueView, index: i64, config: DbSettlementLocalConfig, paged: DbPagedPolicy?) -> Result<DbSettlementLocalResult, text>:
     var item = before.queue.items[index]
-    val journal = item.journal.unwrap()
-    val accepted = db_settlement_journal_readback(root, config.scratch_parent, journal)?
+    val receipt = db_settlement_work_receipt(item)?
+    if val policy = paged:
+        db_settlement_paged_journal_readback(root, config.scratch_parent, item.paged_journal.unwrap(), config.authority, policy)?
+    else:
+        db_settlement_journal_readback(root, config.scratch_parent, item.journal.unwrap())?
     val tip = db_receipt_index_git_tip(_queue_index_request(root, config, config.bootstrap_receipt, ""))?
-    val proof = db_receipt_index_git_publish_local(_queue_index_request(root, config, journal.receipt, tip.index_head))?
+    val proof = db_receipt_index_git_publish_local(_queue_index_request(root, config, receipt, tip.index_head))?
     item.phase = "local-index-observed"
     item.observed_index_head = proof.index_head
     item.last_error = ""
     _queue_result(root, before, index, item, "local-index-observed")
 
-fn db_settlement_resume_local(root: text, expected_queue_head: text, config: DbSettlementLocalConfig, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>) -> Result<DbSettlementLocalResult, text>:
+fn _queue_resume(root: text, expected_queue_head: text, config: DbSettlementLocalConfig, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>, paged: DbPagedPolicy?) -> Result<DbSettlementLocalResult, text>:
     val pinned = db_policy_encode(config.policy)?
     val bootstrap = db_receipt_authenticate(config.bootstrap_receipt, config.authority)?
     val admission = config.policy.admission
+    if (admission.reducer_revision == "scv-merkle-reducer-v1") != (paged != nil): return Err("SCVDB_PAGED_MIGRATION_REQUIRED")
+    if val policy = paged:
+        if policy.config != config.policy or db_paged_policy_digest(policy)? != policy.revision: return Err("SCVDB_PAGED_POLICY_PIN")
     if admission.repository != config.authority.repository or admission.namespace != config.authority.namespace or admission.epoch != config.authority.epoch or admission.schema_revision != config.authority.schema_revision or admission.reducer_revision != config.authority.reducer_revision: return Err("SCVDB_QUEUE_AUTHORITY")
     if not dir_is_real_no_follow(config.authority.remote) or path_final_existing(config.authority.remote)?.path != config.authority.remote: return Err("SCVDB_SETTLEMENT_LOCAL_REMOTE_REQUIRED")
     if scv_sj_lease_is_held(root): return Err("SCVDB_SETTLEMENT_NETWORK_UNDER_LEASE")
@@ -166,10 +229,9 @@ fn db_settlement_resume_local(root: text, expected_queue_head: text, config: DbS
         if item.phase != "prepared" and item.phase != "awaiting-index": continue
         db_require_unreserved_entity_kinds(item.patch)?
         val authenticated = db_authorize_patch(item.patch, admission, item.patch.causal_dependencies, now)?
-        if val journal = item.journal:
-            val receipt = db_receipt_authenticate(journal.receipt, config.authority)?
-        if item.phase == "prepared": return _queue_publish(root, before, index, config)
-        if item.phase == "awaiting-index": return _queue_index(root, before, index, config)
+        val receipt = db_receipt_authenticate(db_settlement_work_receipt(item)?, config.authority)?
+        if item.phase == "prepared": return _queue_publish(root, before, index, config, paged)
+        if item.phase == "awaiting-index": return _queue_index(root, before, index, config, paged)
     var eligible: [i64] = []
     var blocked = false
     for index in 0..before.queue.items.len():
@@ -192,7 +254,7 @@ fn db_settlement_resume_local(root: text, expected_queue_head: text, config: DbS
         val item = before.queue.items[selected]
         db_require_unreserved_entity_kinds(item.patch)?
         val authenticated = db_authorize_patch(item.patch, admission, item.patch.causal_dependencies, now)?
-        match _queue_prepare(root, before, selected, config, now, sign_receipt):
+        match _queue_prepare(root, before, selected, config, now, sign_receipt, paged):
             Ok(result): return Ok(result)
             Err(reason):
                 if reason != "SCVDB_MISSING_DEPENDENCY": return Err(reason)
@@ -202,4 +264,12 @@ fn db_settlement_resume_local(root: text, expected_queue_head: text, config: DbS
     if blocked: return Err("SCVDB_QUEUE_DEPENDENCY_BLOCKED")
     Ok(DbSettlementLocalResult(code: "idle", view: before, batch_id: ""))
 
+fn db_settlement_resume_local(root: text, expected_queue_head: text, config: DbSettlementLocalConfig, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>) -> Result<DbSettlementLocalResult, text>:
+    _queue_resume(root, expected_queue_head, config, sign_receipt, nil)
+
+fn db_settlement_resume_paged_local(root: text, expected_queue_head: text, config: DbSettlementPagedLocalConfig, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>) -> Result<DbSettlementLocalResult, text>:
+    val shared = DbSettlementLocalConfig(scratch_parent: config.scratch_parent, authority: config.authority, policy: config.policy.config, bootstrap_receipt: config.bootstrap_receipt)
+    _queue_resume(root, expected_queue_head, shared, sign_receipt, Some(config.policy))
+
 export DbSettlementLocalConfig, DbSettlementLocalResult, db_settlement_resume_local
+export DbSettlementPagedLocalConfig, db_settlement_resume_paged_local

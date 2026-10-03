@@ -1,0 +1,231 @@
+# Canonical paged readback and preparation. The private cache is populated only
+# by actual full import or by this owner's authenticated incremental planner.
+# It is not persisted and no caller data object can register a validated root.
+use app.scv.db.settlement_paged_projection.*
+use app.scv.db.settlement_paged_git.*
+use app.scv.db.git_candidate.*
+use app.scv.db.git_blob.{db_git_blob_read_owned}
+use app.scv.db.git_settlement_transport.{db_git_settlement_reconcile_history}
+use app.scv.db.page_store.{db_page_store_publish_objects, db_page_store_import_page, db_page_store_load_pages}
+use app.scv.db.paged_import.{db_paged_validate_import}
+use app.scv.db.paged_transition.{db_paged_load_proofs}
+use app.scv.db.settlement_journal_codec.{DbSettlementPhase}
+use std.scv.db_paged_model.*
+use std.scv.db_paged_txn.*
+use std.scv.db_pages.*
+use std.scv.db_page_records.*
+use std.scv.db_patch.{DbPatch}
+use std.scv.db_admission.{db_authorize_patch, db_require_unreserved_entity_kinds}
+use std.scv.db_receipt.*
+use std.scv.distributed_identity_map.{IdentityMapHighWater}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes, validated_utf8_bytes_to_text_linear}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+
+struct _DbPagedGitValidated:
+    root: text
+    projection: DbPagedGitProjection
+    objects: {text:text}
+
+struct DbPagedSettlementPreparation:
+    projection: DbPagedGitProjection
+    candidate: DbGitPreparedCandidate?
+    journal: DbPagedSettlementJournal?
+    candidate_commit: text
+    replay: bool
+
+var _db_paged_git_validated: [_DbPagedGitValidated] = []
+
+fn _paged_git_policy(authority: DbReceiptAuthority, policy: DbPagedPolicy) -> Result<bool, text>:
+    if db_paged_policy_digest(policy)? != policy.revision: return Err("SCVDB_PAGED_POLICY_PIN")
+    val admission = policy.config.admission
+    if admission.repository != authority.repository or admission.namespace != authority.namespace or admission.epoch != authority.epoch or admission.schema_revision != authority.schema_revision or admission.reducer_revision != authority.reducer_revision: return Err("SCVDB_QUEUE_AUTHORITY")
+    if not dir_is_real_no_follow(authority.remote) or path_final_existing(authority.remote)?.path != authority.remote: return Err("SCVDB_SETTLEMENT_LOCAL_REMOTE_REQUIRED")
+    Ok(true)
+
+fn _paged_git_remember(root: text, projection: DbPagedGitProjection, objects: {text:text}):
+    var retained: [_DbPagedGitValidated] = []
+    for prior in _db_paged_git_validated:
+        if prior.root == root and prior.projection.manifest.revision == projection.manifest.revision: continue
+        if retained.len() < 3: retained.push(prior)
+    retained.push(_DbPagedGitValidated(root: root, projection: projection, objects: objects))
+    _db_paged_git_validated = retained
+
+fn _paged_git_mark(marks: [IdentityMapHighWater], kind: text, sequence: u64) -> [IdentityMapHighWater]:
+    var next: [IdentityMapHighWater] = []
+    for prior in marks:
+        if prior.entity_kind != kind: next.push(prior)
+    next.push(IdentityMapHighWater(entity_kind: kind, sequence: sequence))
+    next
+
+fn _paged_git_page_marks(page: DbRecordPage, marks: [IdentityMapHighWater]) -> Result<[IdentityMapHighWater], text>:
+    var result = marks
+    for record in page.records:
+        match record.kind:
+            HighWater(_):
+                match db_typed_page_record_decode(record)?:
+                    HighWater(_namespace, _epoch, kind, sequence): result = _paged_git_mark(result, kind, sequence)
+                    _: return Err("SCVDB_PAGED_GIT_MARK")
+            _: ()
+        if result.len() > 1024: return Err("SCVDB_PAGED_GIT_KINDS_QUOTA")
+    Ok(result)
+
+fn _paged_git_accepted(root: text, projection: DbPagedGitProjection, receipt: DbSettlementReceipt) -> Result<bool, text>:
+    # Deduplicate physical buckets and enforce one aggregate receipt proof cap.
+    var keys: [text] = []
+    var seen: {text:bool} = {}
+    for digest in receipt.batch_digests:
+        val key = db_page_batch_key(digest)?
+        val bucket = db_pages_bucket(key)?
+        if not seen.contains_key(bucket): keys.push(key)
+        seen[bucket] = true
+    val reads = db_page_store_load_pages(root, projection.manifest.pages, keys, 67108864u64)?
+    for digest in receipt.batch_digests:
+        val key = db_page_batch_key(digest)?
+        var found = false
+        for read in reads:
+            if val page = read.page:
+                if page.bucket != db_pages_bucket(key)?: continue
+                if val record = db_pages_lookup(projection.manifest.pages, page, key)?:
+                    match db_typed_page_record_decode(record)?:
+                        Accepted(batch): found = batch.batch_id == digest and batch.canonical_digest == digest
+                        _: return Err("SCVDB_SETTLEMENT_ACCEPTED_MISSING")
+        if not found: return Err("SCVDB_SETTLEMENT_ACCEPTED_MISSING")
+    Ok(true)
+
+fn _paged_git_read_owned(root: text, owner: DbGitPreparedCandidate, receipt: DbSettlementReceipt, policy: DbPagedPolicy) -> Result<DbPagedGitProjection, text>:
+    val objects = db_paged_git_inventory(owner, receipt)?
+    val manifest_blob = db_git_blob_read_owned(owner.scratch, objects["scv/paged/manifest"], 16777216u64)?
+    val wire = validated_utf8_bytes_to_text_linear(manifest_blob.bytes)?
+    val manifest = db_paged_manifest_decode(wire, policy)?
+    if objects.len() != manifest.pages.entries.len() + 2: return Err("SCVDB_PAGED_GIT_INVENTORY")
+    for entry in manifest.pages.entries:
+        if not objects.contains_key(db_paged_git_bucket_path(entry.bucket)?): return Err("SCVDB_PAGED_GIT_INVENTORY")
+    val marks_blob = db_git_blob_read_owned(owner.scratch, objects["scv/paged/high-water"], 1048576u64)?
+    if marks_blob.bytes != base_encoding_text_to_bytes(db_paged_git_marks(receipt.high_water)?): return Err("SCVDB_PAGED_GIT_MARK")
+    val claimed = db_paged_git_projection(manifest, receipt.high_water)?
+    for prior in _db_paged_git_validated:
+        if prior.root == root and prior.projection == claimed and prior.objects == objects:
+            _paged_git_accepted(root, claimed, receipt)?
+            return Ok(claimed)
+    var marks: [IdentityMapHighWater] = []
+    var remaining = 17179869184u64
+    for entry in manifest.pages.entries:
+        val maximum = if remaining < policy.quota.max_page_bytes: remaining else: policy.quota.max_page_bytes
+        val blob = db_git_blob_read_owned(owner.scratch, objects[db_paged_git_bucket_path(entry.bucket)?], maximum)?
+        remaining = remaining - blob.size
+        val page = db_page_decode(blob.bytes, policy.quota)?
+        if page.bucket != entry.bucket or page.digest != entry.digest or (page.records.len() as u64) != entry.count: return Err("SCVDB_PAGE_DESCRIPTOR_MISMATCH")
+        marks = _paged_git_page_marks(page, marks)?
+        # Stage one actual verified immutable page at a time; never flatten the
+        # corpus or publish a local paged HEAD as a side effect of readback.
+        db_page_store_publish_objects(root, db_pages_build(page.records, policy.quota)?, nil)?
+    val projection = db_paged_git_projection(manifest, marks)?
+    if projection != claimed: return Err("SCVDB_PAGED_GIT_MARK")
+    db_paged_validate_import(root, manifest, policy)?
+    _paged_git_accepted(root, projection, receipt)?
+    _paged_git_remember(root, projection, objects)
+    Ok(projection)
+
+fn db_settlement_paged_readback_local(root: text, parent: text, receipt: DbSettlementReceipt, authority: DbReceiptAuthority, policy: DbPagedPolicy) -> Result<DbPagedGitProjection, text>:
+    db_receipt_authenticate(receipt, authority)?
+    _paged_git_policy(authority, policy)?
+    val status = db_git_settlement_reconcile_history(root, receipt.remote, receipt.previous_head, receipt.accepted_head, parent)
+    if status.code != "published": return Err(status.code)
+    val owner = db_paged_git_acquire(root, parent, receipt.remote, receipt.accepted_head, receipt.object_format)?
+    val result = _paged_git_read_owned(root, owner, receipt, policy)
+    db_git_candidate_cleanup(owner)?
+    result
+
+fn _paged_git_plan(root: text, prior: DbPagedGitProjection, patch: DbPatch, policy: DbPagedPolicy, now: u64) -> Result<DbPagedCommitPlan, text>:
+    var planning = db_paged_begin(prior.manifest, patch, policy, now)?
+    for _round in 0..8:
+        match planning:
+            Ready(plan): return Ok(plan)
+            NeedKeys(request, keys): planning = db_paged_advance(planning, db_paged_load_proofs(root, request, keys)?)?
+    Err("SCVDB_PAGED_PROOF_ROUNDS")
+
+fn _paged_git_prepare_owned(root: text, owner: DbGitPreparedCandidate, prior: DbPagedGitProjection, previous: DbSettlementReceipt, patch: DbPatch, policy: DbPagedPolicy, authority: DbReceiptAuthority, now: u64, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>) -> Result<DbPagedSettlementPreparation, text>:
+    val plan = _paged_git_plan(root, prior, patch, policy, now)?
+    if plan.replay: return Ok(DbPagedSettlementPreparation(projection: prior, candidate: nil, journal: nil, candidate_commit: "", replay: true))
+    if plan.conflict_ids.len() != 0: return Err("SCVDB_QUEUE_SEMANTIC_CONFLICT")
+    db_page_store_publish_objects(root, plan.build, Some(prior.manifest.pages))?
+    var marks = prior.high_water
+    for page in plan.build.pages: marks = _paged_git_page_marks(page, marks)?
+    val projection = db_paged_git_projection(plan.manifest, marks)?
+    db_paged_git_write_index(owner, root, projection, Some(prior))?
+    val candidate = db_git_candidate_finish_index(owner, "SCV queued paged settlement")?
+    val unsigned = DbSettlementReceipt(repository: authority.repository, namespace: authority.namespace, epoch: authority.epoch, remote: authority.remote, settled_ref: authority.settled_ref, previous_receipt: db_receipt_digest(previous)?, previous_head: previous.accepted_head, accepted_head: candidate.candidate_oid, accepted_tree: candidate.tree_oid, object_format: candidate.object_format, high_water: projection.high_water, schema_revision: authority.schema_revision, reducer_revision: authority.reducer_revision, batch_digests: [patch.batch_id], signer: authority.key_id, signature: [])
+    val signed = sign_receipt(unsigned)?
+    if db_receipt_signing_bytes(signed)? != db_receipt_signing_bytes(unsigned)?: return Err("SCVDB_QUEUE_SIGNER_CHANGED_MESSAGE")
+    db_receipt_successor(previous, signed, authority)?
+    val objects = db_paged_git_inventory(candidate, signed)?
+    # The prior full root was read back above and the admitted planner produced
+    # every changed page; actual blob put readback checked each changed payload.
+    _paged_git_remember(root, projection, objects)
+    val journal = DbPagedSettlementJournal(receipt: signed, manifest_wire: db_paged_manifest_encode(projection.manifest)?, projection_digest: projection.projection_digest, phase: DbSettlementPhase.Prepared)
+    Ok(DbPagedSettlementPreparation(projection: projection, candidate: Some(candidate), journal: Some(journal), candidate_commit: db_git_candidate_commit_bytes(candidate)?, replay: false))
+
+fn db_settlement_paged_prepare_local(root: text, parent: text, previous: DbSettlementReceipt, patch: DbPatch, authority: DbReceiptAuthority, policy: DbPagedPolicy, now: u64, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>) -> Result<DbPagedSettlementPreparation, text>:
+    # Verify signatures/context/metadata before dependency or Git object IO.
+    _paged_git_policy(authority, policy)?
+    db_require_unreserved_entity_kinds(patch)?
+    db_authorize_patch(patch, policy.config.admission, patch.causal_dependencies, now)?
+    if patch.provenance.starts_with("SCVDB-CONFLICT-RESOLUTION-v1"): return Err("SCVDB_CONFLICT_RESOLUTION_OWNER_REQUIRED")
+    val prior = db_settlement_paged_readback_local(root, parent, previous, authority, policy)?
+    val owner = db_paged_git_acquire(root, parent, previous.remote, previous.accepted_head, previous.object_format)?
+    val prepared = _paged_git_prepare_owned(root, owner, prior, previous, patch, policy, authority, now, sign_receipt)
+    match prepared:
+        Ok(result):
+            if result.replay: db_git_candidate_cleanup(owner)?
+            Ok(result)
+        Err(reason):
+            db_git_candidate_cleanup(owner)?
+            Err(reason)
+
+fn db_settlement_paged_journal_readback(root: text, parent: text, journal: DbPagedSettlementJournal, authority: DbReceiptAuthority, policy: DbPagedPolicy) -> Result<DbPagedGitProjection, text>:
+    db_paged_settlement_journal_encode(journal)?
+    val projection = db_settlement_paged_readback_local(root, parent, journal.receipt, authority, policy)?
+    if db_paged_manifest_encode(projection.manifest)? != journal.manifest_wire or projection.projection_digest != journal.projection_digest: return Err("SCVDB_PAGED_GIT_PROJECTION")
+    Ok(projection)
+
+fn _paged_git_restore_owned(root: text, owner: DbGitPreparedCandidate, journal: DbPagedSettlementJournal, policy: DbPagedPolicy, raw_commit: text) -> Result<DbGitPreparedCandidate, text>:
+    val manifest = db_paged_manifest_decode(journal.manifest_wire, policy)?
+    val projection = db_paged_git_projection(manifest, journal.receipt.high_water)?
+    if projection.projection_digest != journal.projection_digest: return Err("SCVDB_PAGED_GIT_PROJECTION")
+    var cached = false
+    for prior in _db_paged_git_validated:
+        if prior.root == root and prior.projection == projection: cached = true
+    if not cached:
+        db_paged_validate_import(root, manifest, policy)?
+        var marks: [IdentityMapHighWater] = []
+        var remaining = 17179869184u64
+        for entry in manifest.pages.entries:
+            val maximum = if remaining < policy.quota.max_page_bytes: remaining else: policy.quota.max_page_bytes
+            val page = db_page_store_import_page(root, manifest.pages, entry, maximum)?
+            remaining = remaining - (db_page_encode(page, policy.quota)?.len() as u64)
+            marks = _paged_git_page_marks(page, marks)?
+        if db_paged_git_projection(manifest, marks)? != projection: return Err("SCVDB_PAGED_GIT_MARK")
+    _paged_git_accepted(root, projection, journal.receipt)?
+    # Recovery reconstructs the complete exact tree from retained immutable
+    # pages. No cached parent summary supplied by a caller can skip a bucket.
+    db_paged_git_write_index(owner, root, projection, nil)?
+    val candidate = db_git_candidate_finish_index(owner, "SCV queued paged recovery", raw_commit, journal.receipt.accepted_head)?
+    val objects = db_paged_git_inventory(candidate, journal.receipt)?
+    _paged_git_remember(root, projection, objects)
+    Ok(candidate)
+
+fn db_settlement_paged_restore_local(root: text, parent: text, journal: DbPagedSettlementJournal, authority: DbReceiptAuthority, policy: DbPagedPolicy, raw_commit: text) -> Result<DbGitPreparedCandidate, text>:
+    db_receipt_authenticate(journal.receipt, authority)?
+    _paged_git_policy(authority, policy)?
+    db_paged_settlement_journal_encode(journal)?
+    val owner = db_paged_git_acquire(root, parent, journal.receipt.remote, journal.receipt.previous_head, journal.receipt.object_format)?
+    val restored = _paged_git_restore_owned(root, owner, journal, policy, raw_commit)
+    match restored:
+        Ok(candidate): Ok(candidate)
+        Err(reason):
+            db_git_candidate_cleanup(owner)?
+            Err(reason)
+
+export DbPagedSettlementPreparation, db_settlement_paged_readback_local, db_settlement_paged_prepare_local
+export db_settlement_paged_journal_readback, db_settlement_paged_restore_local
