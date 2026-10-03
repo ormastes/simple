@@ -1,17 +1,24 @@
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001, REQ-002, REQ-010 and REQ-035 use real filesystem/production owners. Remaining
+# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-030 boundary, REQ-032 local honesty and REQ-035 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
 use std.spec.*
+use app.scv.db.evidence_hydrate.{db_evidence_inspect_file, db_evidence_hydrate_file}
+use test.fixtures.scv.db_hydration_fixture.*
+use test.fixtures.scv.db_retention_fixture.*
+use app.scv.db.retention_store.*
+use app.scv.db.retention_codec.{db_retained_rollup_decode}
+use app.scv.db.evidence_store.{db_evidence_store_get}
 use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_ref_provisional, entity_ref_canonical}
 use std.scv.distributed_identity_map.{identity_map_empty, identity_map_allocate, identity_map_tombstone, identity_map_reverse}
-use app.io.mod (file_read, file_write, file_exists)
+use app.io.mod (file_read, file_write, file_exists, file_delete, file_write_bytes)
 use app.scv.db.offline_actor.{db_actor_open, db_actor_reserve}
 use app.scv.db.local_apply.{db_apply_local, db_read_local_view}
 use app.scv.db.local_store.{db_store_read}
 use test.fixtures.scv.db_apply_fixture.*
+use test.fixtures.scv.db_merge_fixture.*
 use test.fixtures.scv.db_patch_wire_fixture.{setup_item2_wire_patch}
 use std.scv.db_patch.{DbPatch, DbOperation, DbField, DbValue, FieldEdit, RowPrecondition, db_operation_ref, db_patch_seal}
 use std.scv.db_patch_codec.{db_patch_encode, db_patch_decode}
@@ -436,8 +443,29 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
     describe "REQ-013: Merge semantics":
         it "should prove that it merges concurrent edits to different schema-declared fields":
             step("Settle compact identifiers")
-            step("Drive accepted state and inspect its receipt")
-            check_settlement_contract("REQ-013", "drive accepted merge semantics state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            val root = setup_item2_apply_root()
+            val create = setup_item2_apply_patch(1, "")
+            val merge = setup_item2_merge_rules()
+            val first = db_apply_local(root, "", create, merge, setup_item2_merge_admission([create]), 10).unwrap()
+            val title = setup_item2_apply_edit(2, first.revision, "changed title")
+            var note = setup_item2_apply_patch(3, first.revision)
+            note.operations = [DbOperation.UpdateFields(db_operation_ref(create.operations[0]), [FieldEdit(field: "note", before: DbValue.Absent, after: DbValue.Text("independent note"))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: []))]
+            note = setup_item2_apply_resign(note)
+            val admission = setup_item2_merge_admission([create, title, note])
+            step("Apply two signed edits with the same original semantic base")
+            expect(title.base_revision).to_equal(note.base_revision)
+            expect(title.causal_dependencies).to_equal([])
+            expect(note.causal_dependencies).to_equal([])
+            val left = db_apply_local(root, first.head, title, merge, admission, 10).unwrap()
+            val combined = db_apply_local(root, left.head, note, merge, admission, 10).unwrap()
+            expect(combined.code).to_equal("ok")
+            step("Reopen actual accepted state and verify both independent fields")
+            val reopened = db_read_local_view(root, admission).unwrap()
+            expect(reopened.head).to_equal(combined.head)
+            expect(reopened.image.state.accepted.len()).to_equal(3)
+            expect(reopened.image.catalog.records.len()).to_equal(0)
+            expect(db_field_value(reopened.image.state.rows[0].fields, "title")).to_equal(DbValue.Text("changed title"))
+            expect(db_field_value(reopened.image.state.rows[0].fields, "note")).to_equal(DbValue.Text("independent note"))
 
         it "should prove that it retains delete-update and same-scalar races as explicit conflicts":
             step("Settle compact identifiers")
@@ -446,8 +474,26 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 
         it "should prove that it rejects undeclared list or set merge guesses":
             step("Settle compact identifiers")
-            step("Inject the failure and inspect fail-closed state")
-            check_settlement_contract("REQ-013", "inject unsafe merge semantics state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            val root = setup_item2_apply_root()
+            val create = setup_item2_apply_patch(1, "")
+            val merge = setup_item2_merge_rules()
+            val first = db_apply_local(root, "", create, merge, setup_item2_merge_admission([create]), 10).unwrap()
+            var list_edit = setup_item2_apply_patch(2, first.revision)
+            list_edit.operations = [DbOperation.UpdateFields(db_operation_ref(create.operations[0]), [FieldEdit(field: "items", before: DbValue.Absent, after: DbValue.List([DbValue.Text("one")]))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: []))]
+            list_edit = setup_item2_apply_resign(list_edit)
+            var set_edit = setup_item2_apply_patch(3, first.revision)
+            set_edit.operations = [DbOperation.UpdateFields(db_operation_ref(create.operations[0]), [FieldEdit(field: "tags", before: DbValue.Absent, after: DbValue.Set([DbValue.Text("one")]))], RowPrecondition(base_row: "", expected_revision: "", expected_fields: []))]
+            set_edit = setup_item2_apply_resign(set_edit)
+            val admission = setup_item2_merge_admission([create, list_edit, set_edit])
+            val before = db_store_read(root)
+            step("Admit original signatures and reviewed metadata but reject absent merge rules")
+            for patch in [list_edit, set_edit]:
+                expect(db_apply_local(root, first.head, patch, merge, admission, 10)).to_equal(Err("SCVDB_UNKNOWN_FIELD"))
+                expect(db_store_read(root).head).to_equal(before.head)
+                expect(db_store_read(root).state).to_equal(before.state)
+            val reopened = db_read_local_view(root, admission).unwrap()
+            expect(reopened.image.state.accepted.len()).to_equal(1)
+            expect(reopened.image.catalog.records.len()).to_equal(0)
 
     describe "REQ-014: Causality":
         it "should prove that it orders causal dependencies before deterministic batch-ID ties":
@@ -713,8 +759,26 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
 
         it "should prove that it hydrates raw bytes through a digest-verified manifest":
             step("Retain exact or aggregated history")
-            step("Drive the boundary state and inspect preserved invariants")
-            check_retention_contract("REQ-030", "drive boundary semantic and evidence placement state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            val (root, parent, target) = setup_item2_hydration_paths()
+            val digest = setup_item2_hydration_big(parent)
+            val before = db_store_read(root, "semantic")
+            step("Read the actual external envelope and verify a 100 MiB hydration")
+            val quota = setup_item2_hydration_quota()
+            val manifest = db_evidence_inspect_file(root, parent, digest, quota).unwrap()
+            expect(manifest.digest).to_equal(digest)
+            expect(manifest.content_bytes).to_equal(104857600u64)
+            expect(manifest.dependencies).to_equal([])
+            val hydrated = db_evidence_hydrate_file(root, parent, digest, target, quota).unwrap()
+            expect(hydrated.digest).to_equal(digest)
+            expect(hydrated.content_path.starts_with(target + "/")).to_be(true)
+            check_item2_hydration_big(hydrated.content_path)
+            step("Reject an insufficient byte allowance without semantic mutation")
+            var small = quota
+            small.max_content_bytes = 104857599
+            expect(db_evidence_hydrate_file(root, parent, digest, target, small).unwrap_err()).to_equal("SCVDB_EVIDENCE_QUOTA")
+            expect(db_store_read(root, "semantic").head).to_equal(before.head)
+            expect(db_store_read(root, "semantic").state).to_equal(before.state)
+            # This proves actual hydration, not canonical Git placement or NFR timing.
 
         it "should prove that it rejects high-volume raw evidence from canonical Git ancestry":
             step("Retain exact or aggregated history")
@@ -740,18 +804,94 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
     describe "REQ-032: Honest resolution":
         it "should prove that it returns exact aggregated restricted or unavailable explicitly":
             step("Retain exact or aggregated history")
-            step("Drive accepted state and inspect its receipt")
-            check_retention_contract("REQ-032", "drive accepted honest resolution state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            val (root, parent) = setup_item2_retention_paths()
+            val old = setup_item2_retention_node(root, parent, "old", 10, 0)
+            val registered = db_retention_register(root, parent, "", old.digest, 0, "public").unwrap()
+            val expired = db_retention_run(root, parent, registered.head, 28, 0, "linux").unwrap()
+            val recent = setup_item2_retention_node(root, parent, "recent", 20, 27)
+            val added = db_retention_register(root, parent, expired.head, recent.digest, 27, "public").unwrap()
+            step("Persist restricted ciphertext through the owned key and encryption boundary")
+            val context = setup_item2_restricted_store_context()
+            val key_owner = db_restricted_key_create(root, parent, context).unwrap()
+            val key = db_restricted_key_load(root, parent, key_owner).unwrap()
+            val restricted = db_restricted_store_put(root, parent, context, key, [1u8,2u8,3u8], [], 0, setup_item2_restricted_quota()).unwrap()
+            val protected = db_retention_register(root, parent, added.head, restricted.digest, 0, "restricted").unwrap()
+            val missing = setup_item2_retention_node(root, parent, "missing", 30, 27)
+            val complete = db_retention_register(root, parent, protected.head, missing.digest, 27, "public").unwrap()
+            expect(file_delete(setup_item2_retention_raw(parent, missing.digest))).to_be(true)
+            val before = db_store_read(root, "retention")
+            step("Reopen the catalog and distinguish all four actual resolution outcomes")
+            expect(db_retention_open(root).unwrap().head).to_equal(complete.head)
+            expect(db_evidence_store_get(root, parent, recent.digest, 27, db_retention_store_quota()).unwrap().content).to_equal(recent.content)
+            expect(db_retention_resolve(root, parent, recent.digest)).to_equal(Ok("exact"))
+            expect(file_exists(setup_item2_retention_raw(parent, old.digest))).to_be(false)
+            expect(db_retention_resolve(root, parent, old.digest)).to_equal(Ok("aggregated"))
+            expect(db_retention_resolve(root, parent, restricted.digest)).to_equal(Ok("restricted"))
+            expect(db_restricted_store_get(root, parent, restricted, [], setup_item2_restricted_quota())).to_equal(Err("SCVDB_EVIDENCE_RESTRICTED"))
+            expect(db_retention_resolve(root, parent, missing.digest)).to_equal(Ok("unavailable"))
+            expect(db_store_read(root, "retention").head).to_equal(before.head)
+            expect(db_store_read(root, "retention").state).to_equal(before.state)
+            # Local digest resolution only: no requested historical revision or
+            # canonical-remote retention authority is supplied by this API.
 
         it "should prove that it reports a day-end aggregate without claiming an exact revision":
             step("Retain exact or aggregated history")
-            step("Drive the boundary state and inspect preserved invariants")
-            check_retention_contract("REQ-032", "drive boundary honest resolution state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            val (root, parent) = setup_item2_retention_paths()
+            val first = setup_item2_retention_node(root, parent, "first", 10, 0)
+            val second = setup_item2_retention_node(root, parent, "second", 30, 0)
+            val registered = db_retention_register(root, parent, "", first.digest, 0, "public").unwrap()
+            val both = db_retention_register(root, parent, registered.head, second.digest, 0, "public").unwrap()
+            val expired = db_retention_run(root, parent, both.head, 28, 0, "linux").unwrap()
+            val before = db_store_read(root, "retention")
+            step("Read the actual rollup bytes and its two original payload identities")
+            val rollup_digest = expired.catalog.entries[0].rollup_digest
+            val retained = db_evidence_store_get(root, parent, rollup_digest, 0, db_retention_store_quota()).unwrap()
+            val rollup = db_retained_rollup_decode(retained.content).unwrap()
+            expect(rollup.rollup.day).to_equal(0u64)
+            expect(rollup.rollup.count).to_equal(2u64)
+            expect(rollup.rollup.duration_sum).to_equal(40u64)
+            expect(rollup.inputs.len()).to_equal(2)
+            var inputs: [text] = []
+            for input in rollup.inputs: inputs.push(input.payload_digest)
+            expect(inputs.contains(first.digest)).to_be(true)
+            expect(inputs.contains(second.digest)).to_be(true)
+            step("Keep aggregate identity distinct from missing exact raw bytes")
+            for node in [first, second]:
+                expect(rollup_digest == node.digest).to_be(false)
+                expect(file_exists(setup_item2_retention_raw(parent, node.digest))).to_be(false)
+                expect(db_evidence_store_get(root, parent, node.digest, 0, db_retention_store_quota()).is_err()).to_be(true)
+                expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("aggregated"))
+            expect(db_store_read(root, "retention").head).to_equal(before.head)
+            expect(db_store_read(root, "retention").state).to_equal(before.state)
+            # This distinguishes local aggregate/raw identity; the historical
+            # semantic-revision query parameter and remote proof remain absent.
 
         it "should prove that it rejects a manifest-only claim that missing bytes remain available":
             step("Retain exact or aggregated history")
-            step("Inject the failure and inspect fail-closed state")
-            check_retention_contract("REQ-032", "inject unsafe honest resolution state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            val (root, parent) = setup_item2_retention_paths()
+            val node = setup_item2_retention_node(root, parent, "lost-raw", 10, 0)
+            val registered = db_retention_register(root, parent, "", node.digest, 0, "public").unwrap()
+            val before = db_store_read(root, "retention")
+            expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("exact"))
+            step("Remove actual raw bytes while retaining the active catalog entry")
+            expect(file_delete(setup_item2_retention_raw(parent, node.digest))).to_be(true)
+            expect(db_retention_open(root).unwrap().catalog.entries[0].state).to_equal("active")
+            expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("unavailable"))
+            expect(db_store_read(root, "retention").head).to_equal(before.head)
+            expect(db_store_read(root, "retention").state).to_equal(before.state)
+            step("Corrupt actual rollup bytes while retaining its catalog reference")
+            val (other, external) = setup_item2_retention_paths()
+            val old = setup_item2_retention_node(other, external, "lost-rollup", 20, 0)
+            val active = db_retention_register(other, external, "", old.digest, 0, "public").unwrap()
+            val expired = db_retention_run(other, external, active.head, 28, 0, "linux").unwrap()
+            expect(db_retention_resolve(other, external, old.digest)).to_equal(Ok("aggregated"))
+            val aggregate_before = db_store_read(other, "retention")
+            val rollup_digest = expired.catalog.entries[0].rollup_digest
+            expect(file_write_bytes(setup_item2_retention_raw(external, rollup_digest), [1u8,2u8])).to_be(true)
+            expect(db_retention_open(other).unwrap().catalog.entries[0].rollup_digest).to_equal(rollup_digest)
+            expect(db_retention_resolve(other, external, old.digest)).to_equal(Ok("unavailable"))
+            expect(db_store_read(other, "retention").head).to_equal(aggregate_before.head)
+            expect(db_store_read(other, "retention").state).to_equal(aggregate_before.state)
 
     describe "REQ-033: Rollup correctness":
         it "should prove that it deduplicates counts and merges declared timing sketches":
