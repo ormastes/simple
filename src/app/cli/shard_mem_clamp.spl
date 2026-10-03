@@ -19,12 +19,19 @@
 # would re-open the orphaned-claim class fixed by 6cedd51faec.
 # std-only on purpose: the orchestrator is a slim entry that must not drag the
 # compiler closure in.
-use app.io.env_ops.{env_get}
+use app.io.env_ops.{env_get, platform_name}
 use app.io.process_ops.{process_run_timeout}
 
-# MemAvailable (kB) from /proc/meminfo; 0 when unreadable (non-Linux, or a
-# kernel without the field). Absence of evidence must never *raise* concurrency,
-# so 0 makes the caller skip the clamp rather than assume anything.
+@when(os="windows"):
+use std.nogc_sync_mut.io.windows_process_owner.{windows_available_memory_headroom_v1}
+
+pub fn shard_mem_available_kb() -> i64:
+    match windows_available_memory_headroom_v1():
+        case Ok(bytes): bytes / 1024
+        case Err(_): 0
+@else:
+# MemAvailable (kB) from /proc/meminfo; 0 when unavailable. Unknown memory
+# permits only the existing sequential path, never CPU-count fanout.
 # NOTE: deliberately NOT std.io_runtime.file_read. In the run20-class seed
 # `file_read` infinitely recurses and aborts the process with
 # "fatal runtime error: stack overflow" on ANY file, regular or procfs --
@@ -38,12 +45,29 @@ pub fn shard_mem_available_kb() -> i64:
     if code != 0:
         return 0
     shard_mem_available_kb_from_field(out.trim())
+@end
 
 # Split out so a spec can feed a fixture without a /proc dependency.
 pub fn shard_mem_available_kb_from_field(field: text) -> i64:
-    if field == "":
+    val trimmed = field.trim()
+    if trimmed == "" or trimmed.len() > 19:
         return 0
-    val n = field.trim().to_i64() ?? 0
+    # Some bootstrap providers saturate overflowing to_i64 input. Reject its
+    # decimal magnitude before conversion rather than trusting that sentinel.
+    val maximum = "9223372036854775807"
+    var larger = false
+    var smaller = false
+    var index = 0
+    while index < trimmed.len():
+        val digit = trimmed.byte_at(index)
+        if digit < 48 or digit > 57: return 0
+        if trimmed.len() == 19 and not larger and not smaller:
+            val bound = maximum.byte_at(index)
+            if digit > bound: larger = true
+            elif digit < bound: smaller = true
+        index = index + 1
+    if larger: return 0
+    val n = trimmed.to_i64() ?? 0
     if n < 0:
         return 0
     n
@@ -55,33 +79,53 @@ pub fn shard_mem_available_kb_from_field(field: text) -> i64:
 pub fn shard_worker_budget_kb(var_name: text, default_kb: i64) -> i64:
     val raw = env_get(var_name) ?? ""
     if raw != "":
-        val parsed = raw.to_i64() ?? 0
+        val parsed = shard_mem_available_kb_from_field(raw)
         if parsed > 0:
             return parsed
     default_kb
 
 # The clamp itself, pure: N x budget must fit inside 60% of MemAvailable.
-# avail_kb <= 0 means "unknown" and returns the request untouched.
+# Unknown memory or an invalid estimate permits only the sequential path.
 pub fn shard_threads_cap_for(requested: i64, budget_kb: i64, avail_kb: i64) -> i64:
     if requested <= 1:
         return requested
     if budget_kb <= 0 or avail_kb <= 0:
-        return requested
-    var cap = (avail_kb * 6 / 10) / budget_kb
+        return 1
+    # Divide first; an arbitrary positive i64 input must not overflow at * 6.
+    val usable_kb = (avail_kb / 10) * 6 + ((avail_kb % 10) * 6) / 10
+    var cap = usable_kb / budget_kb
     if cap < 1:
         cap = 1
     if cap >= requested:
         return requested
     cap
 
-# Live entry point used by the orchestrator. SIMPLE_SHARD_MEM_CLAMP=0 disables.
+# The tree budget includes the supervisor, compiler and siblings. Keep 40%
+# for those owners, just as the host clamp reserves 40% of available memory.
+# The bootstrap owner transcribes this hint from its actual enforced RSS cap;
+# the watchdog remains the enforcement authority.
+pub fn shard_threads_tree_cap_for(requested: i64, budget_kb: i64,
+        avail_kb: i64, tree_kb: i64, require_tree: bool, host_clamp: bool) -> i64:
+    if requested <= 1: return requested
+    var capped = requested
+    if host_clamp:
+        capped = shard_threads_cap_for(capped, budget_kb, avail_kb)
+    if tree_kb > 0:
+        capped = shard_threads_cap_for(capped, budget_kb, tree_kb)
+    elif require_tree and host_clamp:
+        return 1
+    capped
+
+# An explicit opt-out disables the host estimate, not a known enclosing cap.
 pub fn shard_threads_mem_cap(requested: i64, budget_kb: i64) -> i64:
     if requested <= 1:
         return requested
-    if (env_get("SIMPLE_SHARD_MEM_CLAMP") ?? "") == "0":
-        return requested
-    val avail_kb = shard_mem_available_kb()
-    val cap = shard_threads_cap_for(requested, budget_kb, avail_kb)
+    val host_clamp = (env_get("SIMPLE_SHARD_MEM_CLAMP") ?? "") != "0"
+    val avail_kb = if host_clamp: shard_mem_available_kb() else: 0
+    val tree_kb = shard_mem_available_kb_from_field(
+        env_get("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB") ?? "")
+    val cap = shard_threads_tree_cap_for(requested, budget_kb, avail_kb,
+        tree_kb, platform_name() == "windows", host_clamp)
     if cap < requested:
-        print "[shard] threads={cap} (requested {requested}, capped by MemAvailable={avail_kb} kB / worker budget {budget_kb} kB)"
+        print "[shard] threads={cap} (requested {requested}, available={avail_kb} kB, tree budget={tree_kb} kB, worker budget={budget_kb} kB)"
     cap

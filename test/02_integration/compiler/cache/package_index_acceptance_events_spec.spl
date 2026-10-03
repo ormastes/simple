@@ -1,0 +1,61 @@
+# @req PSI-REQ-004 PSI-REQ-005 PSI-REQ-006
+use std.spec.*
+use app.test.package_index_acceptance_events.{
+    package_index_acceptance_events_v1, package_index_acceptance_frozen_refusal_v1
+}
+use app.compiler_entrypoint.admission.{compiler_entrypoint_binding_generation_v1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_acquire_v1}
+use compiler.driver.cache.package_module_index.{
+    package_module_index_publish_if_current_v1, package_module_index_read_current_v1
+}
+use app.io.mod.{dir_remove, getpid}
+
+fn event_acceptance_test_root() -> text:
+    "build/test-artifacts/package-index-event-acceptance-{getpid()}"
+
+describe "production Git refresh and frozen source refusal":
+    before_each:
+        dir_remove(event_acceptance_test_root(), true)
+    after_each:
+        dir_remove(event_acceptance_test_root(), true)
+
+    it "refreshes admitted inventory after a real committed source change":
+        step("Detect source drift without mutating the active build")
+        val result = package_index_acceptance_events_v1("scv-git-event-auto-index-update", event_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.reason).to_equal("git-refresh-owner")
+        expect(result.observations).to_contain("inventory_digest_changed=true")
+        expect(result.observations).to_contain("source_content_matches=true")
+        expect(result.observations).to_contain("generation_advanced=true")
+
+    it "rebuilds a missing snapshot binding through the production transition owner":
+        step("Authorize one bounded index rebuild")
+        val result = package_index_acceptance_events_v1("missing-index-bounded-rebuild", event_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("recovery_scope=snapshot-binding-only")
+        expect(result.observations).to_contain("transition_before=publish-binding")
+        expect(result.observations).to_contain("transition_after=bound")
+        expect(result.observations).to_contain("binding_published=true")
+
+    it "rejects missing event authority without publishing an inventory":
+        step("Refuse an untrusted package index")
+        val result = package_index_acceptance_events_v1("no-hidden-full-scan-fallback", event_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.reason).to_start_with("compile-event-journal-missing")
+        expect(result.observations).to_contain("inventory_published=false")
+
+    it "refuses missing frozen bytes even while the live source remains readable":
+        step("Refuse an untrusted package index")
+        val result = package_index_acceptance_frozen_refusal_v1(event_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("missing_frozen_source_rejected=true")
+        expect(result.observations).to_contain("live_source_preserved=true")
+        expect(result.observations).to_contain("initial_read_set_snapshot_bound=true")
+
+    it "does not publish a binding constructed from a refused snapshot":
+        step("Reject a changed index binding")
+        val invalid = scv_compile_snapshot_acquire_v1("", "", [])
+        expect(invalid.valid).to_equal(false)
+        val binding = compiler_entrypoint_binding_generation_v1(invalid)
+        expect(package_module_index_publish_if_current_v1(event_acceptance_test_root(), binding, "")).to_equal(false)
+        expect(package_module_index_read_current_v1(event_acceptance_test_root()).valid).to_equal(false)

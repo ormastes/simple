@@ -1,0 +1,156 @@
+use app.test.package_index_acceptance_binding.{PackageIndexBindingObservationV1}
+use std.scv.compile_snapshot.{
+    ScvCompileSnapshotV1, scv_compile_snapshot_acquire_v1,
+    scv_compile_snapshot_open_v1, scv_compile_snapshot_recover_v1,
+    scv_compile_snapshot_gc_v1, scv_compile_snapshot_cleanup_v1
+}
+use std.scv.compile_source_inventory.{
+    compile_source_inventory_filesystem_event_v1,
+    compile_source_inventory_apply_and_publish_v1
+}
+use app.io.mod.{dir_create, dir_exists, file_read, file_write, file_hash_sha256,
+    getpid, process_spawn_async, process_wait, process_is_running, process_run_timeout}
+use app.io.file_ops.{path_absolute}
+
+fn acceptance_snapshot_failure_v1(reason: text) -> PackageIndexBindingObservationV1:
+    PackageIndexBindingObservationV1(false, reason, [])
+
+fn acceptance_snapshot_publish_source_v1(root: text, content: text, operation: text) -> bool:
+    if not file_write("{root}/src/main.spl", content):
+        return false
+    val published = compile_source_inventory_apply_and_publish_v1(
+        "{root}/build/scv", [compile_source_inventory_filesystem_event_v1(
+            operation, "src/main.spl", content)])
+    published.valid
+
+fn acceptance_snapshot_reopen_v1(root: text, snapshot: ScvCompileSnapshotV1) -> ScvCompileSnapshotV1:
+    scv_compile_snapshot_open_v1(root, snapshot.snapshot_root, snapshot.revision_id,
+        snapshot.commit_id, snapshot.tree_id, snapshot.inventory_digest)
+
+fn package_index_acceptance_snapshot_v1(scenario: text, fixture_root: text) -> PackageIndexBindingObservationV1:
+    val root = path_absolute(fixture_root).replace("\\", "/")
+    val cache = "{root}/build/scv"
+    if not dir_create("{root}/src", true):
+        return acceptance_snapshot_failure_v1("fixture-directory-failed")
+    val original = "export fn main() -> i64:\n    1\n"
+    if not acceptance_snapshot_publish_source_v1(root, original, "create"):
+        return acceptance_snapshot_failure_v1("fixture-inventory-publication-failed")
+    if scenario == "scv-git-state-nonmutation":
+        return acceptance_snapshot_git_v1(root)
+    if scenario == "scv-internal-write-boundary":
+        val refused = scv_compile_snapshot_acquire_v1(root, "{root}/outside-cache", ["src"])
+        val valid = not refused.valid and refused.reason == "snapshot-cache-root-not-owned" and
+            not dir_exists("{root}/outside-cache") and file_read("{root}/src/main.spl") == original
+        val outside_created = dir_exists("{root}/outside-cache")
+        val source_preserved = file_read("{root}/src/main.spl") == original
+        return PackageIndexBindingObservationV1(valid, refused.reason, [
+            "outside_cache_created={outside_created}", "source_preserved={source_preserved}"])
+    val snapshot = scv_compile_snapshot_acquire_v1(root, cache, ["src"])
+    if not snapshot.valid:
+        return acceptance_snapshot_failure_v1("fixture-snapshot:{snapshot.reason}")
+    val frozen_path = "{snapshot.snapshot_root}/src/main.spl"
+    val reopened = acceptance_snapshot_reopen_v1(root, snapshot)
+    if not reopened.valid or file_read(frozen_path) != original:
+        return acceptance_snapshot_failure_v1("fixture-snapshot-readback-failed")
+    if scenario == "scv-snapshot-bound-build":
+        val source_matches = file_read(frozen_path) == original
+        return PackageIndexBindingObservationV1(true, "ok", [
+            "snapshot_revision={snapshot.revision_id}", "snapshot_tree={snapshot.tree_id}",
+            "snapshot_inventory_digest={snapshot.inventory_digest}",
+            "snapshot_inventory_count={snapshot.inventory_count}",
+            "snapshot_reopened={reopened.valid}", "frozen_source_matches={source_matches}"])
+    if scenario == "scv-concurrent-worktree-edit-isolated":
+        if not file_write("{root}/src/main.spl", "export fn main() -> i64:\n    2\n"):
+            return acceptance_snapshot_failure_v1("fixture-live-edit-failed")
+        val frozen_preserved = file_read(frozen_path) == original
+        val live_distinct = file_read("{root}/src/main.spl") != original
+        val still_open = acceptance_snapshot_reopen_v1(root, snapshot)
+        return PackageIndexBindingObservationV1(frozen_preserved and live_distinct and still_open.valid,
+            "owner-interleaving", ["frozen_source_preserved={frozen_preserved}",
+                "live_source_distinct={live_distinct}", "snapshot_reopened={still_open.valid}"])
+    if scenario == "scv-concise-failure-diagnostics":
+        if not file_write(snapshot.provenance_path, "corrupt-provenance"):
+            return acceptance_snapshot_failure_v1("fixture-provenance-tamper-failed")
+        val rejected = acceptance_snapshot_reopen_v1(root, snapshot)
+        val valid = not rejected.valid and rejected.reason == "snapshot-open-provenance-invalid"
+        return PackageIndexBindingObservationV1(valid, rejected.reason,
+            ["diagnostic={rejected.reason}", "snapshot_admitted={rejected.valid}"])
+    if scenario == "scv-snapshot-create-crash":
+        return acceptance_snapshot_recovery_v1(root, snapshot)
+    if scenario == "scv-source-drift-new-build" or scenario == "scv-internal-metadata-atomic-gc" or
+            scenario == "scv-snapshot-cleanup-crash":
+        val changed = "export fn main() -> i64:\n    2\n"
+        if not acceptance_snapshot_publish_source_v1(root, changed, "modify"):
+            return acceptance_snapshot_failure_v1("fixture-changed-inventory-failed")
+        val next = scv_compile_snapshot_acquire_v1(root, cache, ["src"])
+        if not next.valid or next.revision_id == snapshot.revision_id or
+                file_read("{next.snapshot_root}/src/main.spl") != changed:
+            return acceptance_snapshot_failure_v1("fixture-next-snapshot-failed")
+        if scenario == "scv-source-drift-new-build":
+            val old_preserved = file_read(frozen_path) == original
+            return PackageIndexBindingObservationV1(old_preserved, "ok", [
+                "prior_revision={snapshot.revision_id}", "next_revision={next.revision_id}",
+                "distinct_revision={snapshot.revision_id != next.revision_id}",
+                "prior_source_preserved={old_preserved}"])
+        if scenario == "scv-snapshot-cleanup-crash":
+            # Incomplete/corrupt cleanup authority must preserve the snapshot.
+            val receipt = file_read(next.receipt_path)
+            if not file_write(next.receipt_path, "partial-receipt"):
+                return acceptance_snapshot_failure_v1("fixture-partial-receipt-failed")
+            val rejected = not scv_compile_snapshot_cleanup_v1(next)
+            val intact = dir_exists(next.snapshot_root) and file_read(frozen_path) == original
+            if not file_write(next.receipt_path, receipt):
+                return acceptance_snapshot_failure_v1("fixture-receipt-restore-failed")
+            val cleaned = scv_compile_snapshot_cleanup_v1(next)
+            return PackageIndexBindingObservationV1(rejected and intact and cleaned, "owner-cleanup-admission",
+                ["partial_receipt_cleanup_rejected={rejected}", "prior_snapshot_intact={intact}",
+                 "restored_receipt_cleanup_succeeded={cleaned}"])
+        val removed = scv_compile_snapshot_gc_v1(cache, [snapshot.revision_id], 1)
+        val retained = acceptance_snapshot_reopen_v1(root, snapshot).valid
+        val next_removed = not dir_exists(next.snapshot_root)
+        val second = scv_compile_snapshot_gc_v1(cache, [snapshot.revision_id], 1)
+        return PackageIndexBindingObservationV1(removed == 1 and retained and next_removed and second == 0,
+            "owner-retention-gc", ["removed_snapshots={removed}", "retained_snapshot_valid={retained}",
+                "unretained_snapshot_removed={next_removed}", "repeat_removals={second}"])
+    return acceptance_snapshot_failure_v1("unsupported-snapshot-scenario")
+
+fn acceptance_snapshot_recovery_v1(root: text, snapshot: ScvCompileSnapshotV1) -> PackageIndexBindingObservationV1:
+    val cache = "{root}/build/scv"
+    val child = process_spawn_async("git", ["--version"])
+    if child <= 0 or process_wait(child, 10000) != 0 or process_is_running(child):
+        return acceptance_snapshot_failure_v1("fixture-exited-owner-unavailable")
+    val abandoned = "{cache}/snapshots/.tmp.{child}.acceptance"
+    val live = "{cache}/snapshots/.tmp.{getpid()}.acceptance"
+    if not dir_create(abandoned, true) or not dir_create(live, true) or
+            not file_write("{abandoned}/partial", "incomplete"):
+        return acceptance_snapshot_failure_v1("fixture-staging-failed")
+    val removed = scv_compile_snapshot_recover_v1(cache)
+    val abandoned_removed = not dir_exists(abandoned)
+    val live_preserved = dir_exists(live)
+    val retained = acceptance_snapshot_reopen_v1(root, snapshot).valid
+    val second = scv_compile_snapshot_recover_v1(cache)
+    PackageIndexBindingObservationV1(removed == 1 and abandoned_removed and live_preserved and retained and second == 0,
+        "owner-staging-recovery", ["abandoned_staging_removed={abandoned_removed}",
+            "live_staging_preserved={live_preserved}", "prior_snapshot_valid={retained}",
+            "repeat_removals={second}"])
+
+fn acceptance_snapshot_git_v1(root: text) -> PackageIndexBindingObservationV1:
+    val (_, init_error, init_status) = process_run_timeout("git", ["-C", root, "init", "--quiet"], 10000)
+    if init_status != 0:
+        return acceptance_snapshot_failure_v1("fixture-git-init-failed:{init_error}")
+    val (_, add_error, add_status) = process_run_timeout("git", ["-C", root, "add", "src/main.spl"], 10000)
+    if add_status != 0:
+        return acceptance_snapshot_failure_v1("fixture-git-add-failed:{add_error}")
+    val head = file_read("{root}/.git/HEAD")
+    val index_digest = file_hash_sha256("{root}/.git/index")
+    val (before, _, before_status) = process_run_timeout("git", ["-C", root, "diff", "--cached", "--raw"], 10000)
+    val snapshot = scv_compile_snapshot_acquire_v1(root, "{root}/build/scv", ["src"])
+    val (after, _, after_status) = process_run_timeout("git", ["-C", root, "diff", "--cached", "--raw"], 10000)
+    val head_preserved = file_read("{root}/.git/HEAD") == head
+    val index_preserved = index_digest != "" and file_hash_sha256("{root}/.git/index") == index_digest
+    val diff_preserved = before_status == 0 and after_status == 0 and before == after
+    PackageIndexBindingObservationV1(snapshot.valid and head_preserved and index_preserved and diff_preserved,
+        "owner-git-state", ["head_preserved={head_preserved}", "index_bytes_preserved={index_preserved}",
+            "staged_diff_preserved={diff_preserved}", "snapshot_admitted={snapshot.valid}"])
+
+export package_index_acceptance_snapshot_v1
