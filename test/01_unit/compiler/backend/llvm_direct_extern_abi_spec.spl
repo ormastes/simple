@@ -8,6 +8,8 @@ use compiler.hir.hir_definitions.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_lower_flat_hir_module_to_mir, bootstrap_mir_functions_reset}
+use compiler.common.mir_target_context.{mir_target_context_from}
 use compiler.mir.mir_json.{serialize_mir_signature}
 use compiler.backend.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
@@ -52,6 +54,37 @@ fn exact_extern_check(source: text, external_name: text, params: [MirType], resu
     expect(emitted_calls).to_equal(1)
 
 describe "fixed direct LLVM-C ABI prerequisites":
+    it "seeds fixed extern authority before bootstrap runtime initializers":
+        val source = "extern fn raw_seed() -> i64\nval values = [raw_seed()]\nfn probe() -> i64:\n    0\n"
+        val ast = parse_full_frontend(source, "initializer.spl", "initializer", Logger(level: 0))
+        var lowering = HirLowering.with_filename("initializer.spl")
+        val hir = lowering.lower_module(ast)
+        expect(lowering.errors.len()).to_equal(0)
+        bootstrap_hir_modules_reset()
+        bootstrap_mir_functions_reset()
+        bootstrap_hir_modules_add(hir.name, true, hir.symbols.symbols.values(), hir.functions.values(), hir.constants.values(), hir.enums.values(), hir.structs.values(), hir.classes.values())
+        val target = mir_target_context_from("x86_64-pc-windows-msvc", "x86_64", "windows", "llvm-lib", 1)
+        val (mir, _) = bootstrap_lower_flat_hir_module_to_mir(0, target, true)
+        var calls = 0
+        for function in mir.functions.values():
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str("raw_seed"), type_):
+                                    calls = calls + 1
+                                    match type_.kind:
+                                        case MirTypeKind.FuncPtr(signature):
+                                            expect(signature.params_known).to_equal(true)
+                                            expect(signature.params.len()).to_equal(0)
+                                        case _: fail("initializer extern signature lost")
+                                case _: pass
+                        case _: pass
+        bootstrap_hir_modules_reset()
+        bootstrap_mir_functions_reset()
+        expect(calls).to_equal(1)
+
     it "lowers the canonical raw owner's zero-argument declaration":
         val owner = file_read("src/lib/nogc_sync_mut/sffi/llvm_orc_raw.spl")
         val source = owner + "\nfn probe() -> *mut u8:\n    unsafe(capabilities: [ffi, raw_ptr]):\n        LLVMContextCreate()\n"
