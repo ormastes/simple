@@ -1,0 +1,217 @@
+use app.scv.db.evidence_store.{db_evidence_store_put, db_evidence_store_get}
+use app.scv.db.retention_codec.{db_retention_observation_encode}
+use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
+use std.scv.distributed_identity.*
+use std.spec.*
+use app.io.mod.{file_delete, file_write}
+use app.scv.db.observation_owner.*
+use app.scv.db.observation_content.*
+use app.scv.db.local_apply.{db_apply_local}
+use app.scv.db.local_transition.{db_read_local_view}
+use app.scv.db.paged_store.{db_paged_apply, db_paged_open, db_paged_current_row}
+use app.scv.db.local_store.{db_store_read}
+use app.scv.db.retention_store.{db_retention_open, db_retention_prepare, db_retention_register, db_retention_set_pins, db_retention_resume, db_retention_store_quota}
+use std.scv.db_patch.*
+use std.scv.db_reproduction_codec.*
+use std.scv.db_reproduction_projection.*
+use std.scv.db_reducer.{db_empty_state}
+use test.fixtures.scv.db_observation_fixture.*
+
+fn check_item2_observation_apply(fixture: Item2ObservationFixture, expected: text, patch: DbPatch) -> text:
+    if fixture.policy.config.admission.reducer_revision == "scv-merkle-reducer-v1":
+        return db_observation_apply_paged(fixture.source, expected, patch, fixture.policy, fixture.sources, db_observation_limits()).unwrap().head
+    db_observation_apply_reference(fixture.source, expected, patch, fixture.policy.config, fixture.sources, db_observation_limits()).unwrap().head
+
+fn check_item2_observation_rejected(fixture: Item2ObservationFixture, patch: DbPatch) -> bool:
+    if fixture.policy.config.admission.reducer_revision == "scv-merkle-reducer-v1":
+        return db_observation_apply_paged(fixture.source, fixture.initial_head, patch, fixture.policy, fixture.sources, db_observation_limits()).is_err()
+    db_observation_apply_reference(fixture.source, fixture.initial_head, patch, fixture.policy.config, fixture.sources, db_observation_limits()).is_err()
+
+describe "REQ019 actual configuration reproduction admission":
+    it "commits exact signed configuration reproduction and custom failure on both backends":
+        for paged in [false, true]:
+            val fixture = setup_item2_observation_fixture(paged)
+            val head = check_item2_observation_apply(fixture, fixture.initial_head, fixture.patch)
+            expect(head.len()).to_equal(64)
+            if paged:
+                for record in fixture.records:
+                    val row = db_paged_current_row(fixture.source, fixture.policy, db_reproduction_reference(record).entity).unwrap().unwrap()
+                    expect(db_reproduction_row(row).unwrap()).to_equal(record)
+            else:
+                val view = db_read_local_view(fixture.source, fixture.policy.config.admission).unwrap()
+                expect(view.image.state.rows.len()).to_equal(3)
+                expect(view.image.state.accepted.len()).to_equal(1)
+                expect(view.image.state.accepted[0].batch_id).to_equal(fixture.patch.batch_id)
+            val retention = db_retention_open(fixture.source).unwrap()
+            expect(retention.catalog.pins.len()).to_equal(1)
+            expect(retention.catalog.pins[0].root).to_equal(fixture.available_digest)
+            check_item2_observation_cleanup(fixture)
+
+    it "admits truthfully missing dependencies while explicitly refusing a all_declared_available claim":
+        for paged in [false, true]:
+            val fixture = setup_item2_observation_fixture(paged, "missing")
+            check_item2_observation_apply(fixture, fixture.initial_head, fixture.patch)
+            val proof = db_observation_verify_and_pin(fixture.source, fixture.sources, fixture.records, fixture.patch.batch_id, db_observation_limits(), db_observation_now().unwrap() / 86400u64).unwrap()
+            expect(proof.all_declared_available).to_equal(false)
+            var found = false
+            for dependency in proof.availability:
+                if dependency.digest == "sha256:v1:" + fixture.absent_digest:
+                    expect(dependency.observed).to_equal("missing")
+                    found = true
+            expect(found).to_equal(true)
+            check_item2_observation_cleanup(fixture)
+
+    it "never accepts missing or corrupt bytes as an available declaration":
+        for corrupt in [false, true]:
+            for paged in [false, true]:
+                val fixture = setup_item2_observation_fixture(paged)
+                val channel = if paged: "paged" else: "semantic"
+                val before = db_store_read(fixture.source, channel)
+                val path = fixture.sources.evidence_parent + "/scv-evidence-v1/" + fixture.available_digest + ".scve"
+                if corrupt: expect(file_write(path, "corrupt")).to_equal(true)
+                else: expect(file_delete(path)).to_equal(true)
+                expect(check_item2_observation_rejected(fixture, fixture.patch)).to_equal(true)
+                expect(db_store_read(fixture.source, channel)).to_equal(before)
+                check_item2_observation_cleanup(fixture)
+
+    it "reopens exact accepted replay after later content loss without claiming availability":
+        for paged in [false, true]:
+            val fixture = setup_item2_observation_fixture(paged)
+            val head = check_item2_observation_apply(fixture, fixture.initial_head, fixture.patch)
+            expect(file_delete(fixture.sources.evidence_parent + "/scv-evidence-v1/" + fixture.available_digest + ".scve")).to_equal(true)
+            expect(check_item2_observation_apply(fixture, head, fixture.patch)).to_equal(head)
+            check_item2_observation_cleanup(fixture)
+
+    it "blocks generic producer bypass even for correctly signed reviewed records":
+        val reference = setup_item2_observation_fixture()
+        expect(db_apply_local(reference.source, "", reference.patch, reference.policy.config.merge, reference.policy.config.admission, db_observation_now().unwrap()).unwrap_err()).to_equal("SCVDB_OBSERVATION_OWNER_REQUIRED")
+        expect(db_store_read(reference.source).code).to_equal("empty")
+        check_item2_observation_cleanup(reference)
+        val paged = setup_item2_observation_fixture(true)
+        expect(db_paged_apply(paged.source, paged.initial_head, paged.patch, paged.policy).unwrap_err()).to_equal("SCVDB_OBSERVATION_OWNER_REQUIRED")
+        expect(db_paged_open(paged.source, paged.policy).unwrap().head).to_equal(paged.initial_head)
+        check_item2_observation_cleanup(paged)
+
+    it "rejects forged and stale writes without semantic mutation or new pins":
+        for paged in [false, true]:
+            val fixture = setup_item2_observation_fixture(paged)
+            var forged = fixture.patch
+            forged.signature[0] = forged.signature[0] ^ 1u8
+            expect(check_item2_observation_rejected(fixture, forged)).to_equal(true)
+            expect(db_retention_open(fixture.source).unwrap().catalog.pins.len()).to_equal(0)
+            if paged:
+                expect(db_observation_apply_paged(fixture.source, "wrong", fixture.patch, fixture.policy, fixture.sources, db_observation_limits()).unwrap_err()).to_equal("SCVDB_STORE_HEAD_ADVANCED")
+            else:
+                expect(db_observation_apply_reference(fixture.source, "wrong", fixture.patch, fixture.policy.config, fixture.sources, db_observation_limits()).unwrap_err()).to_equal("SCVDB_STORE_HEAD_ADVANCED")
+            check_item2_observation_cleanup(fixture)
+
+    it "rejects a false expired claim without an actual durable deletion receipt":
+        val fixture = setup_item2_observation_fixture(false, "expired")
+        expect(check_item2_observation_rejected(fixture, fixture.patch)).to_equal(true)
+        expect(db_store_read(fixture.source).code).to_equal("empty")
+        check_item2_observation_cleanup(fixture)
+
+    it "admits actual unavailable transitive edges with durable protection and blocks collection":
+        for declared in ["missing", "restricted"]:
+            for paged in [false, true]:
+                val fixture = setup_item2_observation_fixture(paged, declared, true)
+                check_item2_observation_apply(fixture, fixture.initial_head, fixture.patch)
+                val before = db_retention_open(fixture.source).unwrap()
+                val proof = db_observation_verify_and_pin(fixture.source, fixture.sources, fixture.records, fixture.patch.batch_id, db_observation_limits(), db_observation_now().unwrap() / 86400u64).unwrap()
+                expect(proof.protection_status).to_equal("incomplete_closure_protected")
+                expect(proof.all_declared_available).to_equal(false)
+                val retained = db_retention_open(fixture.source).unwrap()
+                expect(retained.catalog.pins).to_equal(before.catalog.pins)
+                expect(db_retention_prepare(fixture.source, fixture.sources.evidence_parent, retained.head, db_observation_now().unwrap() / 86400u64 + 29u64, 0, "fixture").is_err()).to_equal(true)
+                expect(db_retention_open(fixture.source).unwrap()).to_equal(retained)
+                # Reverification reopens the actual parent after the rejected
+                # collection attempt; catalog presence alone cannot pass.
+                expect(db_observation_verify_and_pin(fixture.source, fixture.sources, fixture.records, fixture.patch.batch_id, db_observation_limits(), db_observation_now().unwrap() / 86400u64).unwrap().protection_status).to_equal("incomplete_closure_protected")
+                check_item2_observation_cleanup(fixture)
+    it "keeps a cataloged restricted child incomplete and prevents ordinary pin removal":
+        for paged in [false, true]:
+            val fixture = setup_item2_observation_fixture(paged, "restricted", true)
+            db_retention_register(fixture.source, fixture.sources.evidence_parent, "", fixture.absent_digest, 0, "restricted").unwrap()
+            check_item2_observation_apply(fixture, fixture.initial_head, fixture.patch)
+            val before = db_retention_open(fixture.source).unwrap()
+            var marker = false
+            for pin in before.catalog.pins:
+                if pin.reason == "reproduction_incomplete": marker = true
+            expect(marker).to_equal(true)
+            expect(db_retention_prepare(fixture.source, fixture.sources.evidence_parent, before.head, db_observation_now().unwrap() / 86400u64 + 29u64, 0, "fixture").unwrap_err()).to_equal("SCVDB_PIN_CLOSURE_INCOMPLETE")
+            expect(db_retention_set_pins(fixture.source, fixture.sources.evidence_parent, before.head, [], db_observation_now().unwrap() / 86400u64).unwrap_err()).to_equal("SCVDB_PIN_REPAIR_REQUIRED")
+            expect(db_retention_open(fixture.source).unwrap()).to_equal(before)
+            check_item2_observation_cleanup(fixture)
+    it "resolves captured aliases for comparison without resealing signed dependency records":
+        var fixture = setup_item2_observation_fixture(true)
+        var initial = fixture.patch
+        initial.operations = [db_reproduction_operation(fixture.records[0]).unwrap(), db_reproduction_operation(fixture.records[1]).unwrap()]
+        initial = setup_item2_observation_sign(initial)
+        fixture.policy = setup_item2_observation_review(fixture.policy, [initial])
+        val first = db_observation_apply_paged(fixture.source, fixture.initial_head, initial, fixture.policy, fixture.sources, db_observation_limits()).unwrap()
+        var observation = match fixture.records[2]:
+            Observation(value): value
+            _: fail("expected observation fixture")
+        observation.config.entity = entity_ref_settled(SettledAlias(database_namespace: fixture.patch.namespace, authority_epoch: 1, entity_kind: "config", sequence: 1))
+        var reproduction = observation.reproduction.unwrap()
+        reproduction.entity = entity_ref_settled(SettledAlias(database_namespace: fixture.patch.namespace, authority_epoch: 1, entity_kind: "reproduction", sequence: 1))
+        observation.reproduction = Some(reproduction)
+        val record = db_reproduction_record_seal(DbReproductionRecord.Observation(observation)).unwrap()
+        var next = fixture.patch
+        next.actor_counter = 2
+        next.base_revision = first.revision
+        next.operations = [db_reproduction_operation(record).unwrap()]
+        next = setup_item2_observation_sign(next)
+        fixture.policy = setup_item2_observation_review(fixture.policy, [initial, next])
+        val admitted = db_observation_apply_paged(fixture.source, first.head, next, fixture.policy, fixture.sources, db_observation_limits()).unwrap()
+        val row = db_paged_current_row(fixture.source, fixture.policy, observation.reference.entity).unwrap().unwrap()
+        expect(db_reproduction_row(row).unwrap()).to_equal(record)
+        for wrong_context in [true, false]:
+            var bad = observation
+            var uid = bad.reference.entity.provisional.unwrap()
+            uid.counter = 2
+            bad.reference.entity = entity_ref_provisional(uid)
+            if wrong_context:
+                var alias = bad.config.entity.settled.unwrap()
+                alias.authority_epoch = 2
+                bad.config.entity = entity_ref_settled(alias)
+            else: bad.config.revision = "sha256:v1:" + "e".repeat(64)
+            var rejected = next
+            rejected.actor_counter = 3
+            rejected.base_revision = admitted.revision
+            rejected.operations = [db_reproduction_operation(db_reproduction_record_seal(DbReproductionRecord.Observation(bad)).unwrap()).unwrap()]
+            rejected = setup_item2_observation_sign(rejected)
+            val policy = setup_item2_observation_review(fixture.policy, [rejected])
+            expect(db_observation_apply_paged(fixture.source, admitted.head, rejected, policy, fixture.sources, db_observation_limits()).unwrap_err()).to_equal(if wrong_context: "SCVDB_REPRODUCTION_CONTEXT" else: "SCVDB_REPRODUCTION_REVISION")
+            expect(db_paged_open(fixture.source, policy).unwrap().head).to_equal(admitted.head)
+        check_item2_observation_cleanup(fixture)
+    it "blocks an already prepared deletion after incomplete reproduction protection is durable":
+        val fixture = setup_item2_observation_fixture(false, "missing", true)
+        val bytes = db_retention_observation_encode("older-observation", 0, "fixture", "PASS", 5, [1u8]).unwrap()
+        val digest = db_evidence_digest(bytes, []).unwrap()
+        db_evidence_store_put(fixture.source, fixture.sources.evidence_parent, DbEvidenceNode(digest: digest, content: bytes, availability: "available", created_day: 0, dependencies: []), db_retention_store_quota()).unwrap()
+        val registered = db_retention_register(fixture.source, fixture.sources.evidence_parent, "", digest, 0, "internal").unwrap()
+        val day = db_observation_now().unwrap() / 86400u64
+        val prepared = db_retention_prepare(fixture.source, fixture.sources.evidence_parent, registered.head, day, 0, "fixture").unwrap()
+        expect(prepared.catalog.entries[0].state).to_equal("delete_pending")
+        check_item2_observation_apply(fixture, "", fixture.patch)
+        val protected = db_retention_open(fixture.source).unwrap()
+        expect(db_retention_resume(fixture.source, fixture.sources.evidence_parent, protected.head, day).unwrap_err()).to_equal("SCVDB_PIN_CLOSURE_INCOMPLETE")
+        expect(db_retention_open(fixture.source).unwrap()).to_equal(protected)
+        expect(db_evidence_store_get(fixture.source, fixture.sources.evidence_parent, digest, 0, db_retention_store_quota()).unwrap().content).to_equal(bytes)
+        expect(db_evidence_store_get(fixture.source, fixture.sources.evidence_parent, fixture.available_digest, day, db_retention_store_quota()).unwrap().digest).to_equal(fixture.available_digest)
+        check_item2_observation_cleanup(fixture)
+    it "fails closed for Reference alias dependencies without an authoritative captured identity map":
+        var fixture = setup_item2_observation_fixture(false)
+        var observation = match fixture.records[2]:
+            Observation(value): value
+            _: fail("expected observation fixture")
+        observation.config.entity = entity_ref_settled(SettledAlias(database_namespace: fixture.patch.namespace, authority_epoch: 1, entity_kind: "config", sequence: 1))
+        var patch = fixture.patch
+        patch.operations[2] = db_reproduction_operation(db_reproduction_record_seal(DbReproductionRecord.Observation(observation)).unwrap()).unwrap()
+        patch = setup_item2_observation_sign(patch)
+        fixture.policy = setup_item2_observation_review(fixture.policy, [patch])
+        expect(db_observation_apply_reference(fixture.source, "", patch, fixture.policy.config, fixture.sources, db_observation_limits()).unwrap_err()).to_equal("SCVDB_REPRODUCTION_REFERENCE_MISSING")
+        expect(db_store_read(fixture.source).code).to_equal("empty")
+        expect(db_retention_open(fixture.source).unwrap().catalog.pins.len()).to_equal(0)
+        check_item2_observation_cleanup(fixture)

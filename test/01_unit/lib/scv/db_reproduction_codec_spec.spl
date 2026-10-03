@@ -1,0 +1,37 @@
+use std.spec.*
+use std.scv.db_reproduction_codec.*
+use std.scv.db_reproduction_projection.*
+use std.scv.db_evidence.*
+use std.scv.distributed_identity.*
+
+fn setup_item2_observation_codec_config() -> DbReproductionRecord:
+    val reference = DbEvidenceRevision(entity: entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "config", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: 1)), revision: "sha256:v1:" + "0".repeat(64))
+    db_reproduction_record_seal(DbReproductionRecord.Config(DbConfigRevision(reference: reference, effective_values_digest: "sha256:v1:" + "a".repeat(64), dependencies: []))).unwrap()
+
+describe "REQ019 strict content revision codec":
+    it "binds own UID and effective content while excluding its own claimed revision":
+        val record = setup_item2_observation_codec_config()
+        val wire = db_reproduction_record_encode(record).unwrap()
+        expect(db_reproduction_record_decode(wire).unwrap()).to_equal(record)
+        match record:
+            Config(value):
+                var wrong = value
+                wrong.reference.revision = "sha256:v1:" + "b".repeat(64)
+                expect(db_reproduction_record_encode(DbReproductionRecord.Config(wrong)).unwrap_err()).to_equal("SCVDB_REPRODUCTION_CONTENT_REVISION")
+                wrong = value
+                wrong.effective_values_digest = "sha256:v1:" + "c".repeat(64)
+                expect(db_reproduction_record_encode(DbReproductionRecord.Config(wrong)).unwrap_err()).to_equal("SCVDB_REPRODUCTION_CONTENT_REVISION")
+            _: fail("expected exact config fixture")
+
+    it "rejects trailing truncation and duplicate dependency declarations":
+        val record = setup_item2_observation_codec_config()
+        val wire = db_reproduction_record_encode(record).unwrap()
+        expect(db_reproduction_record_decode(wire + "00\n").is_err()).to_equal(true)
+        expect(db_reproduction_record_decode(wire[0:wire.len() - 3]).is_err()).to_equal(true)
+        match record:
+            Config(value):
+                var duplicate = value
+                val dependency = DbEvidenceDependency(digest: value.effective_values_digest, availability: "missing")
+                duplicate.dependencies = [dependency, dependency]
+                expect(db_reproduction_record_seal(DbReproductionRecord.Config(duplicate)).unwrap_err()).to_equal("SCVDB_REPRODUCTION_DEPENDENCY")
+            _: fail("expected exact config fixture")

@@ -1,0 +1,175 @@
+# Strict immutable REQ019 records. This codec is data, never effect authority.
+use std.scv.db_evidence.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.db_patch.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.*
+use std.scv.db_canonical.*
+use std.scv.distributed_identity.{EntityRef}
+
+enum DbReproductionRecord:
+    Config(value: DbConfigRevision)
+    Reproduction(value: DbReproductionRevision)
+    Observation(value: DbObservation)
+
+fn _repro_list(value: DbValue, count: i64 = -1) -> Result<[DbValue], text>:
+    match value:
+        List(values):
+            if values.len() > 4096 or (count >= 0 and values.len() != count): return Err("SCVDB_REPRODUCTION_ARITY")
+            Ok(values)
+        _: Err("SCVDB_REPRODUCTION_TYPE")
+
+fn _repro_text(value: DbValue) -> Result<text, text>:
+    match value:
+        Text(text_value):
+            if text_value.len() > 1048576: return Err("SCVDB_REPRODUCTION_QUOTA")
+            Ok(text_value)
+        _: Err("SCVDB_REPRODUCTION_TYPE")
+
+fn _repro_u64(value: DbValue) -> Result<u64, text>:
+    match value:
+        Unsigned(number): Ok(number)
+        _: Err("SCVDB_REPRODUCTION_TYPE")
+
+fn _repro_ref(reference: DbEvidenceRevision) -> Result<DbValue, text>:
+    db_evidence_check_ref(reference)?
+    Ok(DbValue.List([DbValue.Reference(reference.entity), DbValue.Text(reference.revision)]))
+
+fn _repro_read_ref(value: DbValue) -> Result<DbEvidenceRevision, text>:
+    val pair = _repro_list(value, 2)?
+    match pair[0]:
+        Reference(entity):
+            val result = DbEvidenceRevision(entity: entity, revision: _repro_text(pair[1])?)
+            db_evidence_check_ref(result)?
+            Ok(result)
+        _: Err("SCVDB_REPRODUCTION_TYPE")
+
+fn _repro_dependencies(values: [DbEvidenceDependency]) -> Result<DbValue, text>:
+    if values.len() > 4096: return Err("SCVDB_REPRODUCTION_QUOTA")
+    var encoded: [DbValue] = []
+    var previous = ""
+    for dependency in values:
+        if dependency.digest <= previous or not db_evidence_digest_valid(dependency.digest) or not ["available", "restricted", "expired", "missing"].contains(dependency.availability): return Err("SCVDB_REPRODUCTION_DEPENDENCY")
+        previous = dependency.digest
+        encoded.push(DbValue.List([DbValue.Text(dependency.digest), DbValue.Text(dependency.availability)]))
+    Ok(DbValue.List(encoded))
+
+fn _repro_read_dependencies(value: DbValue) -> Result<[DbEvidenceDependency], text>:
+    var dependencies: [DbEvidenceDependency] = []
+    for item in _repro_list(value)?:
+        val pair = _repro_list(item, 2)?
+        dependencies.push(DbEvidenceDependency(digest: _repro_text(pair[0])?, availability: _repro_text(pair[1])?))
+    _repro_dependencies(dependencies)?
+    Ok(dependencies)
+
+fn db_reproduction_reference(record: DbReproductionRecord) -> DbEvidenceRevision:
+    match record:
+        Config(value): value.reference
+        Reproduction(value): value.reference
+        Observation(value): value.reference
+
+fn db_reproduction_kind(record: DbReproductionRecord) -> text:
+    match record:
+        Config(_): "config"
+        Reproduction(_): "reproduction"
+        Observation(_): "observation"
+
+fn _repro_value(record: DbReproductionRecord) -> Result<DbValue, text>:
+    val reference = db_reproduction_reference(record)
+    if db_ref_kind(reference.entity) != db_reproduction_kind(record): return Err("SCVDB_REPRODUCTION_KIND")
+    match record:
+        Config(value):
+            if not db_evidence_digest_valid(value.effective_values_digest): return Err("MissingEffectiveConfig")
+            Ok(DbValue.List([DbValue.Text("config"), _repro_ref(value.reference)?, DbValue.Text(value.effective_values_digest), _repro_dependencies(value.dependencies)?]))
+        Reproduction(value):
+            if not db_evidence_digest_valid(value.source_revision) or not db_evidence_digest_valid(value.invocation_digest) or db_ref_kind(value.config.entity) != "config": return Err("ReproductionMismatch")
+            Ok(DbValue.List([DbValue.Text("reproduction"), _repro_ref(value.reference)?, DbValue.Text(value.source_revision), _repro_ref(value.test_definition)?, _repro_ref(value.config)?, DbValue.Text(value.invocation_digest), _repro_dependencies(value.dependencies)?]))
+        Observation(value):
+            var dimensions: [DbValue] = []
+            var declared: [text] = []
+            for dimension in value.provider.dimensions:
+                declared.push(dimension.name)
+                dimensions.push(DbValue.List([DbValue.Text(dimension.name), DbValue.Text(dimension.value)]))
+            db_provider_identity_bytes(value.provider, declared)?
+            db_observation_bytes(value, declared)?
+            if not db_evidence_digest_valid(value.source_revision) or not db_evidence_digest_valid(value.payload_digest) or not ["PASS", "FAIL", "INFRA", "NOT_RUN", "INCOMPLETE", "UNKNOWN"].contains(value.actual): return Err("SCVDB_REPRODUCTION_OBSERVATION")
+            var measurements: [DbValue] = []
+            for measurement in value.measurements: measurements.push(DbValue.List([DbValue.Text(measurement.name), DbValue.Unsigned(measurement.value), DbValue.Text(measurement.unit)]))
+            var reproduction = DbValue.Absent
+            if val revision = value.reproduction: reproduction = _repro_ref(revision)?
+            val provider = DbValue.List([DbValue.Text(value.provider.instance), DbValue.Text(value.provider.project), DbValue.Text(value.provider.run), DbValue.Text(value.provider.job), DbValue.Unsigned(value.provider.attempt), DbValue.List(dimensions)])
+            Ok(DbValue.List([DbValue.Text("observation"), _repro_ref(value.reference)?, provider, DbValue.Text(value.source_revision), _repro_ref(value.test_definition)?, _repro_ref(value.config)?, _repro_ref(value.case_revision)?, _repro_ref(value.run)?, DbValue.Text(value.actual), DbValue.List(measurements), DbValue.Text(value.failure_signature), DbValue.Flag(value.custom_config), reproduction, DbValue.Text(value.payload_digest)]))
+
+fn db_reproduction_record_encode(record: DbReproductionRecord) -> Result<text, text>:
+    if db_reproduction_reference(record).revision != db_reproduction_record_revision(record)?: return Err("SCVDB_REPRODUCTION_CONTENT_REVISION")
+    val bytes = db_snapshot_value_encode(_repro_value(record)?, 0)?
+    if bytes.len() > 524240: return Err("SCVDB_REPRODUCTION_QUOTA")
+    Ok("SCVDB-REPRODUCTION-RECORD-v1\n" + db_snapshot_hex(bytes) + "\n")
+
+fn _repro_decode_value(value: DbValue) -> Result<DbReproductionRecord, text>:
+    val fields = _repro_list(value)?
+    if fields.len() < 2: return Err("SCVDB_REPRODUCTION_ARITY")
+    val kind = _repro_text(fields[0])?
+    val reference = _repro_read_ref(fields[1])?
+    if kind == "config":
+        if fields.len() != 4: return Err("SCVDB_REPRODUCTION_ARITY")
+        return Ok(DbReproductionRecord.Config(DbConfigRevision(reference: reference, effective_values_digest: _repro_text(fields[2])?, dependencies: _repro_read_dependencies(fields[3])?)))
+    if kind == "reproduction":
+        if fields.len() != 7: return Err("SCVDB_REPRODUCTION_ARITY")
+        return Ok(DbReproductionRecord.Reproduction(DbReproductionRevision(reference: reference, source_revision: _repro_text(fields[2])?, test_definition: _repro_read_ref(fields[3])?, config: _repro_read_ref(fields[4])?, invocation_digest: _repro_text(fields[5])?, dependencies: _repro_read_dependencies(fields[6])?)))
+    if kind != "observation" or fields.len() != 14: return Err("SCVDB_REPRODUCTION_ARITY")
+    val provider = _repro_list(fields[2], 6)?
+    var dimensions: [DbIdentityDimension] = []
+    for item in _repro_list(provider[5])?:
+        val pair = _repro_list(item, 2)?
+        dimensions.push(DbIdentityDimension(name: _repro_text(pair[0])?, value: _repro_text(pair[1])?))
+    var measurements: [DbEvidenceMeasurement] = []
+    for item in _repro_list(fields[9])?:
+        val triple = _repro_list(item, 3)?
+        measurements.push(DbEvidenceMeasurement(name: _repro_text(triple[0])?, value: _repro_u64(triple[1])?, unit: _repro_text(triple[2])?))
+    val custom = match fields[11]:
+        Flag(flag): flag
+        _: return Err("SCVDB_REPRODUCTION_TYPE")
+    var reproduction: DbEvidenceRevision? = nil
+    if fields[12] != DbValue.Absent: reproduction = Some(_repro_read_ref(fields[12])?)
+    Ok(DbReproductionRecord.Observation(DbObservation(reference: reference, provider: DbProviderIdentity(instance: _repro_text(provider[0])?, project: _repro_text(provider[1])?, run: _repro_text(provider[2])?, job: _repro_text(provider[3])?, attempt: _repro_u64(provider[4])?, dimensions: dimensions), source_revision: _repro_text(fields[3])?, test_definition: _repro_read_ref(fields[4])?, config: _repro_read_ref(fields[5])?, case_revision: _repro_read_ref(fields[6])?, run: _repro_read_ref(fields[7])?, actual: _repro_text(fields[8])?, measurements: measurements, failure_signature: _repro_text(fields[10])?, custom_config: custom, reproduction: reproduction, payload_digest: _repro_text(fields[13])?)))
+
+fn db_reproduction_record_decode(encoded: text) -> Result<DbReproductionRecord, text>:
+    val prefix = "SCVDB-REPRODUCTION-RECORD-v1\n"
+    if encoded.len() > 1048576 or not encoded.starts_with(prefix) or not encoded.ends_with("\n"): return Err("SCVDB_REPRODUCTION_ENCODING")
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1])?
+    val frame = db_read_frame(bytes, 0)?
+    if frame.next_offset != bytes.len(): return Err("SCVDB_REPRODUCTION_ENCODING")
+    val record = _repro_decode_value(db_snapshot_value_decode(frame, 0)?)?
+    if db_reproduction_record_encode(record)? != encoded: return Err("SCVDB_REPRODUCTION_NONCANONICAL")
+    Ok(record)
+
+export DbReproductionRecord, db_reproduction_reference, db_reproduction_kind
+export db_reproduction_record_encode, db_reproduction_record_decode
+
+fn db_reproduction_record_revision(record: DbReproductionRecord) -> Result<text, text>:
+    # Remove the own-revision field entirely, retaining the exact entity UID.
+    # All dependency revisions remain in the body. No self-referential hash.
+    var fields = _repro_list(_repro_value(record)?)?
+    fields[1] = DbValue.Reference(db_reproduction_reference(record).entity)
+    Ok("sha256:v1:" + sha256_u8_hex(db_domain_bytes("reproduction-record-content-v1", db_snapshot_value_encode(DbValue.List(fields), 0)?)?))
+
+fn db_reproduction_record_seal(record: DbReproductionRecord) -> Result<DbReproductionRecord, text>:
+    # Input reference must be a syntactically valid digest (zero is permitted
+    # for construction). The returned record is still unsigned producer data.
+    val revision = db_reproduction_record_revision(record)?
+    match record:
+        Config(value):
+            var next = value
+            next.reference.revision = revision
+            Ok(DbReproductionRecord.Config(next))
+        Reproduction(value):
+            var next = value
+            next.reference.revision = revision
+            Ok(DbReproductionRecord.Reproduction(next))
+        Observation(value):
+            var next = value
+            next.reference.revision = revision
+            Ok(DbReproductionRecord.Observation(next))
+
+export db_reproduction_record_revision, db_reproduction_record_seal

@@ -1,0 +1,122 @@
+use std.spec.*
+use app.io.mod.{cwd, dir_create, dir_remove_all}
+use app.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.scv.db_evidence.*
+use std.scv.db_reproduction_codec.*
+use std.scv.db_reproduction_projection.*
+use std.scv.db_patch.*
+use std.scv.db_admission.*
+use std.scv.db_reducer.{DbFieldSchema, FieldMergeRule, db_empty_state}
+use std.scv.db_paged_model.*
+use std.scv.db_policy_codec.{db_policy_digest}
+use std.scv.db_retention.{DbEvidenceNode, db_evidence_digest}
+use std.scv.distributed_identity.*
+use app.scv.db.evidence_store.*
+use app.scv.db.observation_content.*
+use app.scv.db.restricted_evidence.*
+use std.scv.db_confidentiality.{DbRestrictedContext}
+use app.scv.db.paged_transition.{db_paged_initialize}
+use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_policy, setup_item2_paged_repin}
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
+use test.fixtures.scv.db_settlement_queue_fixture.{check_item2_queue_git}
+use std.common.crypto.sha256.{sha256_text}
+
+struct Item2ObservationFixture:
+    root: text
+    source: text
+    sources: DbObservationSources
+    policy: DbPagedPolicy
+    patch: DbPatch
+    records: [DbReproductionRecord]
+    initial_head: text
+    available_digest: text
+    absent_digest: text
+
+fn setup_item2_observation_ref(kind: text, counter: u64) -> DbEvidenceRevision:
+    DbEvidenceRevision(entity: entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: kind, actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter)), revision: "sha256:v1:" + "0".repeat(64))
+
+fn setup_item2_observation_sign(patch: DbPatch) -> DbPatch:
+    var signed = db_patch_seal(patch).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([45u8;32])
+    signed.signature = pure_ed25519_sign(seed, key, db_patch_signing_bytes(signed).unwrap())
+    signed
+
+fn setup_item2_observation_review(policy: DbPagedPolicy, patches: [DbPatch]) -> DbPagedPolicy:
+    var next = policy
+    next.config.admission.metadata = setup_item2_reviewed_metadata(patches)
+    setup_item2_observation_repin(next)
+
+fn setup_item2_observation_fixture(paged: bool = false, declared: text = "available", transitive: bool = false) -> Item2ObservationFixture:
+    val path = secure_temp_dir_raw(path_final_existing(cwd()).unwrap().path, "scv-observation-spec-")
+    expect(path.len()).to_be_greater_than(0)
+    val root = path_final_existing(path).unwrap().path
+    val source = root + "/source"
+    val parent = root + "/external"
+    expect(dir_create(source, true)).to_be(true)
+    expect(dir_create(parent, true)).to_be(true)
+    check_item2_queue_git(source, ["init", "--template=", "--object-format=sha1", "."])
+    val content: [u8] = [101u8, 120u8, 97u8, 99u8, 116u8]
+    var digest = db_evidence_digest(content, []).unwrap()
+    val quota = DbEvidenceStoreQuota(max_content_bytes: 8388608, max_envelope_bytes: 8409088, max_dependencies: 256)
+    db_evidence_store_put(source, parent, DbEvidenceNode(digest: digest, content: content, availability: "available", created_day: 0, dependencies: []), quota).unwrap()
+    val absent = db_evidence_digest([9u8, 9u8], []).unwrap()
+    var dependency = if declared == "available": digest else: absent
+    if declared == "restricted":
+        val context = DbRestrictedContext(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, key_id: "observation-fixture", purpose: "dependency")
+        val key_handle = db_restricted_key_create(source, parent, context).unwrap()
+        val key = db_restricted_key_load(source, parent, key_handle).unwrap()
+        val restricted = db_restricted_store_put(source, parent, context, key, [7u8,8u8], [], 0, quota).unwrap()
+        expect(db_restricted_store_get(source, parent, restricted, key, quota).unwrap()).to_equal([7u8,8u8])
+        dependency = restricted.digest
+    if transitive:
+        digest = db_evidence_digest(content, [dependency]).unwrap()
+        db_evidence_store_put(source, parent, DbEvidenceNode(digest: digest, content: content, availability: "available", created_day: 0, dependencies: [dependency]), quota).unwrap()
+    val config = db_reproduction_record_seal(DbReproductionRecord.Config(DbConfigRevision(reference: setup_item2_observation_ref("config", 1), effective_values_digest: "sha256:v1:" + digest, dependencies: [DbEvidenceDependency(digest: "sha256:v1:" + dependency, availability: declared)]))).unwrap()
+    val definition = setup_item2_observation_ref("test", 1)
+    val source_revision = "sha256:v1:" + sha256_text("exact fixture source snapshot")
+    val reproduction = db_reproduction_record_seal(DbReproductionRecord.Reproduction(DbReproductionRevision(reference: setup_item2_observation_ref("reproduction", 1), source_revision: source_revision, test_definition: definition, config: db_reproduction_reference(config), invocation_digest: "sha256:v1:" + digest, dependencies: [DbEvidenceDependency(digest: "sha256:v1:" + dependency, availability: declared)]))).unwrap()
+    val observation = db_reproduction_record_seal(DbReproductionRecord.Observation(DbObservation(reference: setup_item2_observation_ref("observation", 1), provider: DbProviderIdentity(instance: "fixture.invalid", project: "repo", run: "run-1", job: "job-1", attempt: 1, dimensions: []), source_revision: source_revision, test_definition: definition, config: db_reproduction_reference(config), case_revision: setup_item2_observation_ref("case", 1), run: setup_item2_observation_ref("run", 1), actual: "FAIL", measurements: [], failure_signature: "fixture-failure", custom_config: true, reproduction: Some(db_reproduction_reference(reproduction)), payload_digest: "sha256:v1:" + digest))).unwrap()
+    val records = [config, reproduction, observation]
+    var policy = setup_item2_paged_policy()
+    policy.config.merge.fields = []
+    policy.config.merge.constraints = []
+    var permissions: [DbPermission] = []
+    for kind in ["config", "reproduction", "observation"]:
+        for name in ["version", "revision", "canonical_record"]: policy.config.merge.fields.push(DbFieldSchema(kind: kind, field: name, rule: FieldMergeRule.ScalarConflict))
+        permissions.push(DbPermission(operation: "append", kind: kind, field: "*"))
+    policy.config.admission.keys[0].permissions = permissions
+    policy.config.admission.keys = [policy.config.admission.keys[0]]
+    if not paged:
+        policy.config.admission.reducer_revision = "r1"
+        policy.config.merge.reducer_revision = "r1"
+    policy = setup_item2_observation_repin(policy)
+    var initial_head = ""
+    if paged: initial_head = db_paged_initialize(source, policy).unwrap().head
+    val base = if paged: db_paged_genesis(policy).unwrap().revision else: db_empty_state().revision
+    var operations: [DbOperation] = []
+    for record in records: operations.push(db_reproduction_operation(record).unwrap())
+    var patch = DbPatch(batch_id: "", repository: "repo", namespace: policy.config.admission.namespace, epoch: 1, actor: "ffeeddccbbaa99887766554433221100", actor_counter: 1, base_revision: base, causal_dependencies: [], schema_revision: "s1", reducer_revision: policy.config.admission.reducer_revision, operations: operations, payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "paged-first", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "reviewed exact reproduction fixture")
+    patch = setup_item2_observation_sign(patch)
+    policy = setup_item2_observation_review(policy, [patch])
+    Item2ObservationFixture(root: root, source: source, sources: DbObservationSources(evidence_parent: parent), policy: policy, patch: patch, records: records, initial_head: initial_head, available_digest: digest, absent_digest: dependency)
+
+fn check_item2_observation_cleanup(fixture: Item2ObservationFixture):
+    expect(path_final_existing(fixture.root).unwrap().path).to_equal(fixture.root)
+    expect(fixture.root.starts_with(path_final_existing(cwd()).unwrap().path + "/scv-observation-spec-")).to_be(true)
+    expect(dir_remove_all(fixture.root)).to_be(true)
+
+export Item2ObservationFixture, setup_item2_observation_fixture, setup_item2_observation_ref
+export setup_item2_observation_sign, setup_item2_observation_review, check_item2_observation_cleanup
+
+fn setup_item2_observation_repin(policy: DbPagedPolicy) -> DbPagedPolicy:
+    if policy.config.admission.reducer_revision == "scv-merkle-reducer-v1": return setup_item2_paged_repin(policy)
+    var next = policy
+    next.config.admission.revision = db_admission_policy_digest(next.config.admission).unwrap()
+    next.config.revision = db_policy_digest(next.config).unwrap()
+    # Reference tests consume config only, never claim this is a paged policy.
+    next.revision = ""
+    next
+
+export setup_item2_observation_repin

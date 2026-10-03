@@ -1,0 +1,170 @@
+# Actual local artifact observations for REQ019. Public result structs are data;
+# callers cannot use them to skip this owner. No execution or network occurs.
+use std.scv.db_reproduction_codec.*
+use std.scv.db_reproduction_projection.*
+use std.scv.db_evidence.*
+use std.scv.db_retention.{DbEvidencePin}
+use std.common.crypto.sha256.{sha256_text}
+use app.scv.db.evidence_store.*
+use app.scv.db.evidence_hydrate.{db_evidence_inspect_at}
+use app.scv.db.retention_store.*
+use app.scv.db.retention_codec.*
+use std.nogc_sync_mut.io.path_identity.{path_entry_present}
+
+struct DbObservationSources:
+    evidence_parent: text
+
+struct DbObservationLimits:
+    max_nodes: u64
+    max_content_bytes: u64
+    max_total_read_bytes: u64
+
+struct DbObservationAvailability:
+    digest: text
+    declared: text
+    observed: text
+    dependencies: [text]
+
+struct DbObservationClosure:
+    owner: text
+    retention_head: text
+    availability: [DbObservationAvailability]
+    all_declared_available: bool
+    protection_status: text
+
+fn db_observation_limits() -> DbObservationLimits:
+    # Existing retention owner admits at most 256 entries / 8MiB per object.
+    # These are explicit implementation bounds, not Operating B qualification.
+    DbObservationLimits(max_nodes: 256u64, max_content_bytes: 8388608u64, max_total_read_bytes: 1073741824u64)
+
+fn _observation_limits(limits: DbObservationLimits) -> Result<bool, text>:
+    if limits.max_nodes == 0u64 or limits.max_nodes > 256u64 or limits.max_content_bytes == 0u64 or limits.max_content_bytes > 8388608u64 or limits.max_total_read_bytes == 0u64 or limits.max_total_read_bytes > 1073741824u64: return Err("SCVDB_OBSERVATION_QUOTA")
+    Ok(true)
+
+fn _observation_add(values: [DbEvidenceDependency], incoming: DbEvidenceDependency, maximum: u64) -> Result<[DbEvidenceDependency], text>:
+    if not db_evidence_digest_valid(incoming.digest) or not ["available", "restricted", "expired", "missing"].contains(incoming.availability): return Err("SCVDB_OBSERVATION_DECLARATION")
+    for previous in values:
+        if previous.digest == incoming.digest:
+            if previous.availability != incoming.availability: return Err("SCVDB_OBSERVATION_CLAIM_COLLISION")
+            return Ok(values)
+    if values.len() as u64 >= maximum: return Err("SCVDB_OBSERVATION_QUOTA")
+    var next = values
+    next.push(incoming)
+    Ok(next)
+
+fn db_observation_artifacts(records: [DbReproductionRecord], maximum: u64) -> Result<[DbEvidenceDependency], text>:
+    var values: [DbEvidenceDependency] = []
+    for record in records:
+        var required: [text] = []
+        var dependencies: [DbEvidenceDependency] = []
+        match record:
+            Config(value):
+                required.push(value.effective_values_digest)
+                dependencies = value.dependencies
+            Reproduction(value):
+                required.push(value.invocation_digest)
+                dependencies = value.dependencies
+            Observation(value): required.push(value.payload_digest)
+        for digest in required: values = _observation_add(values, DbEvidenceDependency(digest: digest, availability: "available"), maximum)?
+        for dependency in dependencies: values = _observation_add(values, dependency, maximum)?
+    Ok(values)
+
+fn _observation_entry(catalog: DbRetentionCatalog, digest: text) -> DbRetentionEntry?:
+    for entry in catalog.entries:
+        if entry.digest == digest: return Some(entry)
+    nil
+
+fn _observation_inspect(root: text, sources: DbObservationSources, declarations: [DbEvidenceDependency], retained: DbStoredRetention, limits: DbObservationLimits, remaining: u64, now_day: u64) -> Result<(u64, [DbObservationAvailability]), text>:
+    val cas = db_evidence_external_scope(root, sources.evidence_parent, "scv-evidence-v1")?
+    var budget = remaining
+    var receipts: [DbObservationAvailability] = []
+    for declaration in declarations:
+        val digest = declaration.digest[10:]
+        val path = cas + "/" + digest + ".scve"
+        val entry = _observation_entry(retained.catalog, digest)
+        val present = path_entry_present(path)?
+        var observed = "missing"
+        var dependencies: [text] = []
+        if present:
+            val maximum = limits.max_content_bytes + 16405u64
+            if maximum > budget: return Err("SCVDB_OBSERVATION_QUOTA")
+            budget = budget - maximum
+            val quota = DbEvidenceStoreQuota(max_content_bytes: limits.max_content_bytes as i64, max_envelope_bytes: maximum as i64, max_dependencies: 256)
+            val info = db_evidence_inspect_at(cas, digest, quota)?
+            dependencies = info.dependencies
+            observed = if info.restricted: "restricted" else: "available"
+            if entry != nil and entry.unwrap().classification == "restricted": observed = "restricted"
+            # Every observed edge needs an explicit immutable declaration. No
+            # implicit available status is fabricated for transitive children.
+            for child in info.dependencies:
+                var declared = false
+                for candidate in declarations:
+                    if candidate.digest == "sha256:v1:" + child: declared = true
+                if not declared: return Err("SCVDB_OBSERVATION_UNDECLARED_DEPENDENCY")
+        elif entry != nil:
+            val stored = entry.unwrap()
+            if stored.state == "deleted" and ["unlinked", "already_absent_synced"].contains(stored.deletion_status) and stored.rollup_digest != "" and now_day >= stored.created_day and now_day - stored.created_day >= 28u64: observed = "expired"
+        if observed != declaration.availability: return Err("SCVDB_OBSERVATION_AVAILABILITY_MISMATCH")
+        receipts.push(DbObservationAvailability(digest: declaration.digest, declared: declaration.availability, observed: observed, dependencies: dependencies))
+    Ok((budget, receipts))
+
+fn db_observation_verify_and_pin(root: text, sources: DbObservationSources, records: [DbReproductionRecord], owner: text, limits: DbObservationLimits, now_day: u64) -> Result<DbObservationClosure, text>:
+    _observation_limits(limits)?
+    if owner.len() != 64: return Err("SCVDB_OBSERVATION_OWNER")
+    for byte in owner.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): return Err("SCVDB_OBSERVATION_OWNER")
+    val declarations = db_observation_artifacts(records, limits.max_nodes)?
+    var retained = db_retention_open(root)?
+    val first = _observation_inspect(root, sources, declarations, retained, limits, limits.max_total_read_bytes, now_day)?
+    var remaining = first.0
+    # Register only available bytes. Existing deletion identity/classification
+    # remains owned by retention; absent or expired data cannot be resurrected.
+    for declaration in declarations:
+        if declaration.availability != "available": continue
+        val digest = declaration.digest[10:]
+        if _observation_entry(retained.catalog, digest) == nil:
+            val maximum = db_retention_store_quota().max_envelope_bytes as u64
+            if maximum > remaining: return Err("SCVDB_OBSERVATION_QUOTA")
+            remaining = remaining - maximum
+            retained = db_retention_register(root, sources.evidence_parent, retained.head, digest, now_day, "internal")?
+    var pins = retained.catalog.pins
+    for declaration in declarations:
+        if declaration.availability != "available": continue
+        val digest = declaration.digest[10:]
+        var found = false
+        for pin in pins:
+            if pin.root == digest and pin.reason == "reproduction" and pin.expires_day == 0u64: found = true
+        if not found: pins.push(DbEvidencePin(root: digest, reason: "reproduction", expires_day: 0u64))
+    # set_pins traverses actual retained closure under its existing SJ owner.
+    # Reserve its whole bounded catalog IO before entering that owner.
+    val pin_bytes = (retained.catalog.entries.len() as u64) * (db_retention_store_quota().max_envelope_bytes as u64)
+    if pin_bytes > remaining: return Err("SCVDB_OBSERVATION_QUOTA")
+    remaining = remaining - pin_bytes
+    var protection_status = "verified_closure_protected"
+    var incomplete = false
+    for parent in first.1:
+        for edge in parent.dependencies:
+            for child in first.1:
+                if child.digest == "sha256:v1:" + edge and child.observed != "available": incomplete = true
+    for pin in pins:
+        if pin.reason == "reproduction_incomplete": incomplete = true
+    val pin_result = if incomplete: Err("SCVDB_PIN_CLOSURE_INCOMPLETE") else: db_retention_set_pins(root, sources.evidence_parent, retained.head, pins, now_day)
+    match pin_result:
+        Ok(protected): retained = protected
+        Err(error):
+            if error != "SCVDB_PIN_CLOSURE_MISSING" and error != "SCVDB_PIN_CLOSURE_UNVERIFIED" and error != "SCVDB_PIN_CLOSURE_INCOMPLETE": return Err(error)
+            if 33554432u64 > remaining: return Err("SCVDB_OBSERVATION_QUOTA")
+            remaining = remaining - 33554432u64
+            val held = db_retention_pin_incomplete_reproduction(root, sources.evidence_parent, retained.head, pins, now_day)?
+            retained = held.retained
+            protection_status = held.closure_status
+    # Publication callers must use captured semantic HEAD. Pins deliberately
+    # survive a subsequent losing CAS. Never clean them up as a guessed rollback.
+    val checked = _observation_inspect(root, sources, declarations, retained, limits, remaining, now_day)?
+    var all_declared_available = true
+    for receipt in checked.1:
+        if receipt.observed != "available": all_declared_available = false
+    Ok(DbObservationClosure(owner: owner, retention_head: retained.head, availability: checked.1, all_declared_available: all_declared_available, protection_status: protection_status))
+
+export DbObservationSources, DbObservationLimits, DbObservationAvailability, DbObservationClosure
+export db_observation_limits, db_observation_artifacts, db_observation_verify_and_pin

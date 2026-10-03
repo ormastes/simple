@@ -1,0 +1,82 @@
+# Dedicated producer boundary. Original signed patches are never rewritten.
+# Pure planning and bounded content IO precede the existing short semantic CAS.
+use app.scv.db.observation_content.*
+use app.scv.db.local_transition.*
+use app.scv.db.paged_transition.*
+use app.scv.db.paged_query.*
+use std.scv.db_reproduction_codec.*
+use std.scv.db_reproduction_projection.*
+use std.scv.db_admission.{db_authorize_patch, db_plan_admitted_patch, db_require_nonbinding_entity_kinds}
+use std.scv.db_policy_codec.{DbPolicyConfig, db_policy_encode}
+use std.scv.db_patch.{DbPatch}
+use std.scv.db_reducer.{DbRow}
+use std.scv.db_paged_model.*
+use std.scv.db_paged_txn.*
+use std.scv.distributed_identity.{EntityRef}
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure}
+
+fn db_observation_now() -> Result<u64, text>:
+    val sample = time_sample_unix_micros_or_failure()
+    if sample < 0: return Err("SCVDB_COMMAND_CLOCK")
+    Ok((sample / 1000000) as u64)
+
+fn db_observation_expand(patch: DbPatch, lookup: fn(EntityRef) -> Result<DbRow?, text>) -> Result<[DbReproductionRecord], text>:
+    var records = db_reproduction_patch_records(patch)?
+    if records.len() == 0: return Ok(records)
+    db_reproduction_validate_records(records, lookup)?
+    val requested = db_reproduction_lookup_refs(records)
+    for reference in requested:
+        val record = db_reproduction_exact(reference, records, lookup)?
+        var present = false
+        for prior in records:
+            if db_reproduction_record_encode(prior)? == db_reproduction_record_encode(record)?: present = true
+        if not present: records.push(record)
+        if records.len() > 64: return Err("SCVDB_REPRODUCTION_QUOTA")
+    Ok(records)
+
+fn db_observation_apply_reference(root: text, expected_head: text, patch: DbPatch, config: DbPolicyConfig, sources: DbObservationSources, limits: DbObservationLimits) -> Result<DbApplyResult, text>:
+    db_policy_encode(config)?
+    db_require_nonbinding_entity_kinds(patch)?
+    val now = db_observation_now()?
+    db_authorize_patch(patch, config.admission, patch.causal_dependencies, now)?
+    val view = db_read_local_view(root, config.admission)?
+    if view.head != expected_head: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    val plan = db_plan_admitted_patch(view.image.state, patch, config.merge, config.admission, now)?
+    if not plan.replay and plan.conflicts.len() == 0:
+        val records = db_observation_expand(patch, \entity: db_reproduction_state_row(view.image.state.rows, entity))?
+        if records.len() > 0: db_observation_verify_and_pin(root, sources, records, patch.batch_id, limits, now / 86400u64)?
+    db_apply_local_transition(root, expected_head, patch, config.merge, config.admission, now)
+
+fn db_observation_paged_plan(root: text, manifest: DbPagedManifest, patch: DbPatch, policy: DbPagedPolicy, now: u64) -> Result<DbPagedCommitPlan, text>:
+    var planning = db_paged_transition_begin(manifest, patch, policy, now)?
+    for _round in 0..12:
+        match planning:
+            Ready(plan): return Ok(plan)
+            NeedKeys(request, keys): planning = db_paged_transition_advance(planning, db_paged_load_proofs(root, request, keys)?)?
+    Err("SCVDB_PAGED_PLANNING_BOUND")
+
+fn db_observation_paged_records(root: text, view: DbPagedView, patch: DbPatch, policy: DbPagedPolicy) -> Result<[DbReproductionRecord], text>:
+    var query = DbPagedQuery(root: root, view: view, policy: policy, buckets: {}, records: {}, requested: {}, bytes_read: 0u64, keys_read: 0u64)
+    var entities: [EntityRef] = []
+    for reference in db_reproduction_lookup_refs(db_reproduction_patch_records(patch)?): entities.push(reference.entity)
+    query = db_paged_query_rows(query, entities)?
+    var aliases: [EntityRef] = []
+    for reference in db_reproduction_comparison_refs(db_reproduction_patch_records(patch)?, \entity: db_paged_row_at(query, entity))?:
+        if reference.entity.settled != nil: aliases.push(reference.entity)
+    query = db_paged_query_rows(query, aliases)?
+    db_observation_expand(patch, \entity: db_paged_row_at(query, entity))
+
+fn db_observation_apply_paged(root: text, expected_head: text, patch: DbPatch, policy: DbPagedPolicy, sources: DbObservationSources, limits: DbObservationLimits) -> Result<DbPagedApplyResult, text>:
+    db_require_nonbinding_entity_kinds(patch)?
+    val now = db_observation_now()?
+    db_authorize_patch(patch, policy.config.admission, patch.causal_dependencies, now)?
+    val view = db_paged_open(root, policy)?
+    if view.head != expected_head: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    val plan = db_observation_paged_plan(root, view.manifest, patch, policy, now)?
+    if not plan.replay and plan.conflict_ids.len() == 0:
+        val records = db_observation_paged_records(root, view, patch, policy)?
+        if records.len() > 0: db_observation_verify_and_pin(root, sources, records, patch.batch_id, limits, now / 86400u64)?
+    db_paged_apply_transition(root, expected_head, patch, policy)
+
+export db_observation_now, db_observation_expand, db_observation_apply_reference, db_observation_apply_paged
+export db_observation_paged_plan, db_observation_paged_records

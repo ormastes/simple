@@ -1,0 +1,82 @@
+use std.spec.*
+use app.io.mod.{dir_create, file_write, file_delete}
+use app.scv.db.observation_content.*
+use app.scv.db.settlement_queue.*
+use app.scv.db.settlement_queue_codec.*
+use app.scv.db.settlement_resume_local.*
+use app.scv.db.settlement_remote_snapshot.{db_settlement_snapshot_files}
+use app.scv.db.settlement_paged_projection.{db_paged_git_marks}
+use app.scv.db.paged_store.{db_paged_open}
+use app.scv.db.git_settlement_transport.{db_git_settlement_ref_head}
+use app.scv.db.receipt_index_git.*
+use std.scv.db_paged_model.{db_paged_manifest_encode}
+use std.scv.db_reducer.{db_empty_state}
+use std.scv.db_receipt.*
+use std.scv.distributed_identity_map.{identity_map_empty}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed}
+use test.fixtures.scv.db_observation_fixture.*
+use test.fixtures.scv.db_settlement_queue_fixture.{check_item2_queue_git, setup_item2_queue_sign}
+
+fn setup_item2_observation_settlement(fixture: Item2ObservationFixture, paged: bool) -> DbSettlementLocalConfig:
+    val source = fixture.source
+    val remote = fixture.root + "/authority.git"
+    val scratch = fixture.root + "/scratch"
+    expect(dir_create(scratch, true)).to_be(true)
+    check_item2_queue_git(source, ["init", "--bare", "--template=", "--object-format=sha1", remote])
+    if paged:
+        expect(dir_create(source + "/scv/paged", true)).to_be(true)
+        val manifest = db_paged_open(source, fixture.policy).unwrap().manifest
+        expect(file_write(source + "/scv/paged/manifest", db_paged_manifest_encode(manifest).unwrap())).to_be(true)
+        expect(file_write(source + "/scv/paged/high-water", db_paged_git_marks([]).unwrap())).to_be(true)
+    else:
+        expect(dir_create(source + "/scv", true)).to_be(true)
+        for file in db_settlement_snapshot_files(db_empty_state(), identity_map_empty(fixture.policy.config.admission.namespace, 1)).unwrap():
+            expect(file_write(source + "/" + file.path, file.content)).to_be(true)
+    check_item2_queue_git(source, ["add", "--", "scv"])
+    check_item2_queue_git(source, ["commit", "-m", "actual observation genesis"])
+    val head = check_item2_queue_git(source, ["rev-parse", "HEAD"])
+    val tree = check_item2_queue_git(source, ["rev-parse", "HEAD^{tree}"])
+    check_item2_queue_git(source, ["push", "--no-force", remote, "HEAD:refs/heads/settled"])
+    val (_seed, key) = pure_ed25519_keypair_from_seed([44u8;32])
+    val admission = fixture.policy.config.admission
+    val authority = DbReceiptAuthority(repository: admission.repository, namespace: admission.namespace, epoch: admission.epoch, remote: remote, settled_ref: "refs/heads/settled", key_id: "local-receipt-key", public_key: key, schema_revision: admission.schema_revision, reducer_revision: admission.reducer_revision)
+    val bootstrap = setup_item2_queue_sign(DbSettlementReceipt(repository: authority.repository, namespace: authority.namespace, epoch: authority.epoch, remote: remote, settled_ref: authority.settled_ref, previous_receipt: "", previous_head: "", accepted_head: head, accepted_tree: tree, object_format: "sha1", high_water: [], schema_revision: authority.schema_revision, reducer_revision: authority.reducer_revision, batch_digests: [], signer: authority.key_id, signature: [])).unwrap()
+    db_receipt_index_git_publish_local(DbReceiptIndexGitRequest(source_root: source, remote: remote, scratch_parent: scratch, expected_head: "", receipt: bootstrap, authority: authority)).unwrap()
+    DbSettlementLocalConfig(scratch_parent: scratch, authority: authority, policy: fixture.policy.config, bootstrap_receipt: bootstrap)
+
+fn check_item2_observation_resume(fixture: Item2ObservationFixture, config: DbSettlementLocalConfig, head: text, sources: DbObservationSources?) -> Result<DbSettlementLocalResult, text>:
+    if fixture.policy.config.admission.reducer_revision == "scv-merkle-reducer-v1":
+        val paged = DbSettlementPagedLocalConfig(scratch_parent: config.scratch_parent, authority: config.authority, policy: fixture.policy, bootstrap_receipt: config.bootstrap_receipt)
+        return db_settlement_resume_paged_local(fixture.source, head, paged, setup_item2_queue_sign, sources)
+    db_settlement_resume_local(fixture.source, head, config, setup_item2_queue_sign, sources)
+
+describe "REQ019 shared signed queue publication closure":
+    it "requires configured evidence owner and settles unchanged signed records on both backends":
+        for paged in [false, true]:
+            val fixture = setup_item2_observation_fixture(paged)
+            val config = setup_item2_observation_settlement(fixture, paged)
+            val queued = db_settlement_enqueue(fixture.source, "", fixture.patch, config.policy.admission).unwrap()
+            expect(check_item2_observation_resume(fixture, config, queued.head, nil).unwrap_err()).to_equal("SCVDB_OBSERVATION_SOURCES_REQUIRED")
+            expect(db_settlement_queue_open(fixture.source, config.policy.admission).unwrap()).to_equal(queued)
+            val prepared = check_item2_observation_resume(fixture, config, queued.head, Some(fixture.sources)).unwrap()
+            expect(prepared.code).to_equal("prepared")
+            val reopened = db_settlement_queue_open(fixture.source, config.policy.admission).unwrap()
+            expect(reopened.queue.items[0].patch).to_equal(fixture.patch)
+            val published = check_item2_observation_resume(fixture, config, reopened.head, Some(fixture.sources)).unwrap()
+            expect(published.code).to_equal("awaiting-index")
+            val indexed = check_item2_observation_resume(fixture, config, published.view.head, Some(fixture.sources)).unwrap()
+            expect(indexed.code).to_equal("local-index-observed")
+            expect(indexed.view.queue.items[0].patch).to_equal(fixture.patch)
+            check_item2_observation_cleanup(fixture)
+
+    it "rechecks actual bytes after unpublished reconciliation and prevents publication on loss":
+        for paged in [false, true]:
+            val fixture = setup_item2_observation_fixture(paged)
+            val config = setup_item2_observation_settlement(fixture, paged)
+            val queued = db_settlement_enqueue(fixture.source, "", fixture.patch, config.policy.admission).unwrap()
+            val prepared = check_item2_observation_resume(fixture, config, queued.head, Some(fixture.sources)).unwrap()
+            expect(file_delete(fixture.sources.evidence_parent + "/scv-evidence-v1/" + fixture.available_digest + ".scve")).to_be(true)
+            expect(check_item2_observation_resume(fixture, config, prepared.view.head, Some(fixture.sources)).is_err()).to_be(true)
+            expect(db_git_settlement_ref_head(fixture.source, config.authority.remote).oid).to_equal(config.bootstrap_receipt.accepted_head)
+            expect(db_settlement_queue_open(fixture.source, config.policy.admission).unwrap()).to_equal(prepared.view)
+            check_item2_observation_cleanup(fixture)

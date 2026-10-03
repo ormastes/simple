@@ -1,8 +1,9 @@
+use std.nogc_sync_mut.io.path_identity.{path_entry_present}
 # Local trusted-policy retention effects. Pins/classification come from the
 # application owner, not untrusted evidence. No provider wait or caller deletion
 # boolean authorizes unlink. Bounded reference lane: 256 entries, 32MiB read set.
 use app.scv.db.retention_codec.*
-use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_store_get, db_evidence_store_put}
+use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_store_get, db_evidence_store_put, db_evidence_external_scope}
 use app.scv.db.evidence_delete.{db_evidence_delete_held}
 use app.scv.db.local_store.{db_store_read, db_store_commit_held, db_local_path_scope}
 use std.scv.db_retention.*
@@ -91,6 +92,8 @@ fn _retention_covers(value: DbRetainedRollup, digest: text) -> bool:
 # candidates. Unreadable active roots fail closed: their edges are unknown.
 # Synthetic policy pins are ephemeral planning inputs, not saved policy edits.
 fn _retention_plan_owned(nodes: [DbEvidenceNode], catalog: DbRetentionCatalog, pins: [DbEvidencePin], now_day: u64, day: u64?, cohort: text) -> Result<DbRetentionPlan, text>:
+    for pin in pins:
+        if pin.reason == "reproduction_incomplete": return Err("SCVDB_PIN_CLOSURE_INCOMPLETE")
     var effective = pins
     for index in 0..catalog.entries.len():
         val entry = catalog.entries[index]
@@ -132,6 +135,8 @@ fn _retention_pins_owned(root: text, parent: text, holder: text, expected: text,
     var current = db_retention_open(root)?
     if current.head != expected: return Err("SCVDB_STORE_HEAD_ADVANCED")
     if pins.len() > 256: return Err("SCVDB_RETENTION_QUOTA")
+    for previous in current.catalog.pins:
+        if ["reproduction", "reproduction_incomplete"].contains(previous.reason) and previous.expires_day == 0u64 and not pins.contains(previous): return Err("SCVDB_PIN_REPAIR_REQUIRED")
     val nodes = _retention_nodes(root, parent, current.catalog)?
     val closure = _retention_plan_owned(nodes, current.catalog, pins, now_day, nil, "")?
     current.catalog.pins = pins
@@ -276,3 +281,80 @@ fn db_retention_resolve(root: text, parent: text, digest: text) -> Result<text, 
 
 export db_retention_store_quota, db_retention_open, db_retention_register, db_retention_set_pins
 export db_retention_prepare, db_retention_resume, db_retention_run, db_retention_resolve
+
+# Conservative admission of a permanent protection intent, not a verified
+# complete-closure receipt. Normal set_pins/prune/resume remain strict.
+struct DbRetentionProtection:
+    retained: DbStoredRetention
+    closure_status: text
+
+fn _retention_incomplete_owned(root: text, parent: text, holder: text, expected: text, pins: [DbEvidencePin], now_day: u64) -> Result<DbRetentionProtection, text>:
+    var current = db_retention_open(root)?
+    if current.head != expected: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    if pins.len() > 256: return Err("SCVDB_RETENTION_QUOTA")
+    for previous in current.catalog.pins:
+        if ["reproduction", "reproduction_incomplete"].contains(previous.reason) and previous.expires_day == 0u64 and not pins.contains(previous): return Err("SCVDB_PIN_REPAIR_REQUIRED")
+    # This operation only adds protection. It cannot remove another owner pin.
+    for existing in current.catalog.pins:
+        if not pins.contains(existing): return Err("SCVDB_PIN_REMOVAL")
+    val cas = db_evidence_external_scope(root, parent, "scv-evidence-v1")?
+    var pending: [text] = []
+    var roots: [text] = []
+    for pin in pins:
+        if pin.reason != "reproduction" or pin.expires_day != 0u64:
+            if not current.catalog.pins.contains(pin): return Err("SCVDB_PIN_REASON")
+            continue
+        var registered = false
+        for entry in current.catalog.entries:
+            if entry.digest == pin.root and entry.state != "deleted": registered = true
+        if not registered: return Err("SCVDB_PIN_CLOSURE_MISSING")
+        if not pending.contains(pin.root): pending.push(pin.root)
+        roots.push(pin.root)
+    var visited: [text] = []
+    var remaining = 33554432u64
+    var incomplete = false
+    var index = 0
+    while index < pending.len():
+        val digest = pending[index]
+        index = index + 1
+        if visited.contains(digest): continue
+        if visited.len() >= 256: return Err("SCVDB_RETENTION_QUOTA")
+        visited.push(digest)
+        if not path_entry_present(cas + "/" + digest + ".scve")?:
+            if roots.contains(digest): return Err("SCVDB_PIN_CLOSURE_MISSING")
+            incomplete = true
+            continue
+        var quota = db_retention_store_quota()
+        if remaining < quota.max_envelope_bytes as u64: quota.max_envelope_bytes = remaining as i64
+        # Never collapse a corrupt/link/unreadable file into missing evidence.
+        val node = db_evidence_store_get(root, parent, digest, now_day, quota)?
+        val bytes = 21u64 + node.dependencies.len() as u64 * 64u64 + node.content.len() as u64
+        if bytes > remaining: return Err("SCVDB_RETENTION_READ_QUOTA")
+        remaining = remaining - bytes
+        var restricted = node.content.len() >= 5 and node.content[0:5] == [83u8,67u8,82u8,69u8,1u8]
+        for entry in current.catalog.entries:
+            if entry.digest == digest and entry.classification == "restricted": restricted = true
+        if restricted:
+            if roots.contains(digest): return Err("SCVDB_PIN_CLOSURE_UNVERIFIED")
+            incomplete = true
+        for child in node.dependencies:
+            if not pending.contains(child):
+                if pending.len() >= 256: return Err("SCVDB_RETENTION_QUOTA")
+                pending.push(child)
+    if not incomplete: return Err("SCVDB_PIN_REPAIR_REQUIRED")
+    var guarded = pins
+    for digest in roots:
+        val marker = DbEvidencePin(root: digest, reason: "reproduction_incomplete", expires_day: 0u64)
+        if not guarded.contains(marker): guarded.push(marker)
+    if guarded.len() > 256: return Err("SCVDB_RETENTION_QUOTA")
+    current.catalog.pins = guarded
+    val retained = _retention_publish(root, holder, current.head, current.catalog)?
+    Ok(DbRetentionProtection(retained: retained, closure_status: "incomplete_closure_protected"))
+
+fn db_retention_pin_incomplete_reproduction(root: text, parent: text, expected: text, pins: [DbEvidencePin], now_day: u64) -> Result<DbRetentionProtection, text>:
+    val holder = _retention_lock(root)?
+    val result = _retention_incomplete_owned(root, parent, holder, expected, pins, now_day)
+    if not scv_sj_lease_release(root, holder).starts_with("ok:") or scv_sj_lease_is_held(root): return Err("SCVDB_STORE_RELEASE_UNCERTAIN")
+    result
+
+export DbRetentionProtection, db_retention_pin_incomplete_reproduction

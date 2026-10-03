@@ -5,6 +5,8 @@
 # call db_plan_admitted_patch and reverify instead of trusting a caller record.
 use std.scv.db_canonical.*
 use std.scv.db_patch.*
+use std.scv.db_reproduction_projection.*
+use std.scv.db_identity_resolve.{db_resolve_reference}
 use std.scv.db_reducer.{MaterializedState, MergePolicy, MergePlan, db_plan_patch, db_plan_patch_with_identity}
 use std.scv.distributed_identity_map.{IdentityMap}
 use std.scv.db_confidentiality.{DbMetadataPolicy, db_metadata_policy_digest, db_metadata_check_patch}
@@ -94,6 +96,7 @@ fn _db_require_scope(key: DbSignerKey, operation: text, kind: text, fields: [tex
     # Manifest revisions are immutable for every role, not just CI keys. Exact
     # AppendObservation replay is handled by the reducer/accepted registry.
     if kind == "run_manifest" and operation != "append": return Err("SCVDB_MANIFEST_IMMUTABLE")
+    if db_reproduction_owned_kind(kind) and operation != "append": return Err("SCVDB_REPRODUCTION_IMMUTABLE")
     # CI is append-only regardless of an accidentally overbroad configured ACL.
     if key.role == "ci":
         if operation != "create" and operation != "append":
@@ -172,6 +175,7 @@ fn db_plan_admitted_patch(state: MaterializedState, patch: DbPatch, merge: Merge
     if merge.repository != admission.repository or merge.namespace != admission.namespace or merge.epoch != admission.epoch or merge.schema_revision != admission.schema_revision or merge.reducer_revision != admission.reducer_revision:
         return Err("SCVDB_POLICY_CONTEXT")
     var plan = db_plan_patch(state, authorized.patch, merge)?
+    if not plan.replay: db_reproduction_validate_records(db_reproduction_patch_records(patch)?, \entity: db_reproduction_state_row(state.rows, entity))?
     plan.authorization_status = "VERIFIED_SIGNATURE_AND_SCOPE"
     Ok(plan)
 
@@ -184,6 +188,7 @@ fn db_plan_admitted_settled_patch(state: MaterializedState, patch: DbPatch, merg
     if identities.database_namespace != admission.namespace or identities.authority_epoch != admission.epoch:
         return Err("SCVDB_ALLOCATOR_CONTEXT")
     var plan = db_plan_patch_with_identity(state, authorized.patch, merge, identities)?
+    if not plan.replay: db_reproduction_validate_records(db_reproduction_patch_records(patch)?, \entity: db_reproduction_state_row(state.rows, db_resolve_reference(entity, identities)?))?
     plan.authorization_status = "VERIFIED_SIGNATURE_AND_SCOPE"
     Ok(plan)
 
@@ -193,10 +198,16 @@ export db_admission_policy_digest, db_patch_signing_bytes, db_authorize_patch, d
 # Shared producer gate for every storage backend. A signed/metadata-reviewed
 # producer patch still cannot impersonate the provider effect owner. Internal
 # application transitions are a trusted boundary, not a caller-selectable flag.
-fn db_require_unreserved_entity_kinds(patch: DbPatch) -> Result<bool, text>:
+fn db_require_nonbinding_entity_kinds(patch: DbPatch) -> Result<bool, text>:
     for operation in patch.operations:
         if ["provider_binding", "provider_common_state"].contains(db_ref_kind(db_operation_ref(operation))):
             return Err("SCVDB_BINDING_OWNER_REQUIRED")
     Ok(true)
 
-export db_require_unreserved_entity_kinds
+fn db_require_unreserved_entity_kinds(patch: DbPatch) -> Result<bool, text>:
+    db_require_nonbinding_entity_kinds(patch)?
+    for operation in patch.operations:
+        if db_reproduction_owned_kind(db_ref_kind(db_operation_ref(operation))): return Err("SCVDB_OBSERVATION_OWNER_REQUIRED")
+    Ok(true)
+
+export db_require_unreserved_entity_kinds, db_require_nonbinding_entity_kinds

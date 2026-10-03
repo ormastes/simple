@@ -1,0 +1,158 @@
+# Structural half of REQ019. Actual availability is exclusively an IO-owner
+# observation; these pure checks never turn a declared status into a receipt.
+use std.scv.db_reproduction_codec.*
+use std.scv.db_evidence.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.{DbRow, db_field_value}
+use std.scv.distributed_identity.{EntityRef, entity_ref_canonical}
+
+fn db_reproduction_owned_kind(kind: text) -> bool:
+    ["config", "reproduction", "observation"].contains(kind)
+
+fn db_reproduction_fields(record: DbReproductionRecord) -> Result<[DbField], text>:
+    Ok([DbField(name: "version", value: DbValue.Text("scv-reproduction-v1")), DbField(name: "revision", value: DbValue.Text(db_reproduction_reference(record).revision)), DbField(name: "canonical_record", value: DbValue.Text(db_reproduction_record_encode(record)?))])
+
+fn db_reproduction_operation(record: DbReproductionRecord) -> Result<DbOperation, text>:
+    val reference = db_reproduction_reference(record)
+    if reference.entity.provisional == nil or reference.entity.settled != nil: return Err("SCVDB_REPRODUCTION_UID")
+    Ok(DbOperation.AppendObservation(reference.entity, db_reproduction_kind(record), db_reproduction_fields(record)?))
+
+fn db_reproduction_row(row: DbRow) -> Result<DbReproductionRecord, text>:
+    if row.tombstoned or not db_reproduction_owned_kind(row.kind) or row.fields.len() != 3 or db_field_value(row.fields, "version") != DbValue.Text("scv-reproduction-v1"): return Err("SCVDB_REPRODUCTION_PROJECTION")
+    val wire = match db_field_value(row.fields, "canonical_record"):
+        Text(value): value
+        _: return Err("SCVDB_REPRODUCTION_PROJECTION")
+    val record = db_reproduction_record_decode(wire)?
+    if db_reproduction_kind(record) != row.kind or entity_ref_canonical(db_reproduction_reference(record).entity) != row.entity or db_field_value(row.fields, "revision") != DbValue.Text(db_reproduction_reference(record).revision): return Err("SCVDB_REPRODUCTION_PROJECTION")
+    # Names must be exactly these three, not duplicate names hiding a field.
+    var seen: [text] = []
+    for field in row.fields:
+        if seen.contains(field.name) or not ["version", "revision", "canonical_record"].contains(field.name): return Err("SCVDB_REPRODUCTION_PROJECTION")
+        seen.push(field.name)
+    Ok(record)
+
+fn db_reproduction_patch_records(patch: DbPatch) -> Result<[DbReproductionRecord], text>:
+    var records: [DbReproductionRecord] = []
+    var identities: [text] = []
+    for operation in patch.operations:
+        val entity = db_operation_ref(operation)
+        if not db_reproduction_owned_kind(db_ref_kind(entity)): continue
+        match operation:
+            AppendObservation(reference, kind, fields):
+                val record = db_reproduction_row(DbRow(entity: entity_ref_canonical(reference), kind: kind, fields: fields, revision: patch.batch_id, tombstoned: false))?
+                val identity = entity_ref_canonical(reference)
+                if identities.contains(identity): return Err("SCVDB_REPRODUCTION_DUPLICATE")
+                identities.push(identity)
+                records.push(record)
+            _: return Err("SCVDB_REPRODUCTION_IMMUTABLE")
+        if records.len() > 64: return Err("SCVDB_REPRODUCTION_QUOTA")
+    for record in records:
+        for reference in db_reproduction_record_references(record):
+            if not db_ref_context(reference.entity, patch.namespace, patch.epoch): return Err("SCVDB_REPRODUCTION_CONTEXT")
+    Ok(records)
+
+fn db_reproduction_record_references(record: DbReproductionRecord) -> [DbEvidenceRevision]:
+    var refs = [db_reproduction_reference(record)]
+    match record:
+        Config(_): ()
+        Reproduction(value):
+            refs.push(value.config)
+            refs.push(value.test_definition)
+        Observation(value):
+            refs.push(value.config)
+            refs.push(value.test_definition)
+            refs.push(value.case_revision)
+            refs.push(value.run)
+            if val reproduction = value.reproduction: refs.push(reproduction)
+    refs
+
+fn db_reproduction_lookup_refs(records: [DbReproductionRecord]) -> [DbEvidenceRevision]:
+    var refs: [DbEvidenceRevision] = []
+    for record in records:
+        match record:
+            Config(_): ()
+            Reproduction(value): refs.push(value.config)
+            Observation(value):
+                refs.push(value.config)
+                if val reproduction = value.reproduction: refs.push(reproduction)
+    refs
+
+fn db_reproduction_exact(reference: DbEvidenceRevision, records: [DbReproductionRecord], lookup: fn(EntityRef) -> Result<DbRow?, text>) -> Result<DbReproductionRecord, text>:
+    for record in records:
+        if db_evidence_same_ref(db_reproduction_reference(record), reference): return Ok(record)
+    val row = lookup(reference.entity)?
+    if row == nil: return Err("SCVDB_REPRODUCTION_REFERENCE_MISSING")
+    val found = db_reproduction_row(row.unwrap())?
+    # The lookup owns alias resolution and row identity. Revision stays exact.
+    if db_reproduction_reference(found).revision != reference.revision or db_reproduction_kind(found) != db_ref_kind(reference.entity): return Err("SCVDB_REPRODUCTION_REVISION")
+    Ok(found)
+
+fn db_reproduction_validate_records(records: [DbReproductionRecord], lookup: fn(EntityRef) -> Result<DbRow?, text>) -> Result<bool, text>:
+    for record in records:
+        match record:
+            Config(_): ()
+            Reproduction(value):
+                match db_reproduction_exact(value.config, records, lookup)?:
+                    Config(_): ()
+                    _: return Err("ReproductionMismatch")
+            Observation(value):
+                var configs: [DbConfigRevision] = []
+                var reproductions: [DbReproductionRevision] = []
+                match db_reproduction_exact(value.config, records, lookup)?:
+                    Config(config):
+                        var comparison = config
+                        comparison.reference = value.config
+                        configs.push(comparison)
+                    _: return Err("MissingEffectiveConfig")
+                if val reference = value.reproduction:
+                    match db_reproduction_exact(reference, records, lookup)?:
+                        Reproduction(reproduction):
+                            if not db_reproduction_same_resolved(reproduction.config, value.config, lookup)? or not db_reproduction_same_resolved(reproduction.test_definition, value.test_definition, lookup)?: return Err("ReproductionMismatch")
+                            var comparison = reproduction
+                            comparison.reference = reference
+                            comparison.config = value.config
+                            comparison.test_definition = value.test_definition
+                            reproductions.push(comparison)
+                        _: return Err("MissingReproduction")
+                db_observation_validate(value, configs, reproductions)?
+    Ok(true)
+
+export db_reproduction_owned_kind, db_reproduction_fields, db_reproduction_operation
+export db_reproduction_row, db_reproduction_patch_records, db_reproduction_record_references
+export db_reproduction_lookup_refs, db_reproduction_exact, db_reproduction_validate_records
+
+fn db_reproduction_state_row(rows: [DbRow], entity: EntityRef) -> Result<DbRow?, text>:
+    val key = entity_ref_canonical(entity)
+    for row in rows:
+        if row.entity == key: return Ok(Some(row))
+    Ok(nil)
+
+export db_reproduction_state_row
+
+# Comparison-only alias resolution. Never reseals or returns mutated source
+# records; signed canonical bytes and content revisions remain unchanged.
+fn db_reproduction_same_resolved(left: DbEvidenceRevision, right: DbEvidenceRevision, lookup: fn(EntityRef) -> Result<DbRow?, text>) -> Result<bool, text>:
+    if left.revision != right.revision: return Ok(false)
+    var a = entity_ref_canonical(left.entity)
+    var b = entity_ref_canonical(right.entity)
+    if a == b: return Ok(true)
+    if left.entity.settled != nil:
+        val row = lookup(left.entity)?
+        if row == nil: return Err("SCVDB_REPRODUCTION_REFERENCE_MISSING")
+        a = row.unwrap().entity
+    if right.entity.settled != nil:
+        val row = lookup(right.entity)?
+        if row == nil: return Err("SCVDB_REPRODUCTION_REFERENCE_MISSING")
+        b = row.unwrap().entity
+    Ok(a == b)
+
+fn db_reproduction_comparison_refs(records: [DbReproductionRecord], lookup: fn(EntityRef) -> Result<DbRow?, text>) -> Result<[DbEvidenceRevision], text>:
+    var refs: [DbEvidenceRevision] = []
+    for record in records:
+        for reference in db_reproduction_record_references(record): refs.push(reference)
+    for reference in db_reproduction_lookup_refs(records):
+        val record = db_reproduction_exact(reference, records, lookup)?
+        for dependency in db_reproduction_record_references(record): refs.push(dependency)
+    Ok(refs)
+
+export db_reproduction_same_resolved, db_reproduction_comparison_refs

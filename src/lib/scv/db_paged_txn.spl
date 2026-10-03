@@ -1,3 +1,4 @@
+use std.scv.db_reproduction_projection.*
 # Complete transaction planning from authenticated original patches and actual
 # Merkle-bound bucket proofs. No incomplete read set can prove absence.
 use std.scv.db_paged_model.*
@@ -125,6 +126,29 @@ fn _paged_run(request: DbPagedRequest) -> Result<DbPagedPlanning, text>:
         if db_paged_index_value(historical.unwrap(), 172u8)? != DbValue.Text(patch.base_revision): return Err("SCVDB_PAGED_INDEX_CORRUPT")
     missing = db_paged_missing(reads, db_paged_alias_reads(patch, policy)?, policy)?
     if missing.len() > 0: return Ok(DbPagedPlanning.NeedKeys(request, missing))
+    val reproduction_records = db_reproduction_patch_records(patch)?
+    val reproduction_refs = db_reproduction_lookup_refs(reproduction_records)
+    var reproduction_aliases: [text] = []
+    for reference in reproduction_refs:
+        if val alias = reference.entity.settled: reproduction_aliases.push(db_page_alias_key(alias)?)
+    missing = db_paged_missing(reads, reproduction_aliases, policy)?
+    if missing.len() > 0: return Ok(DbPagedPlanning.NeedKeys(request, missing))
+    var reproduction_rows: [text] = []
+    for reference in reproduction_refs: reproduction_rows.push(db_page_row_key(db_paged_resolve_ref(reference.entity, reads, policy)?)?)
+    missing = db_paged_missing(reads, reproduction_rows, policy)?
+    if missing.len() > 0: return Ok(DbPagedPlanning.NeedKeys(request, missing))
+    val comparison_refs = db_reproduction_comparison_refs(reproduction_records, \entity: db_paged_get_row(reads, db_paged_resolve_ref(entity, reads, policy)?))?
+    var comparison_aliases: [text] = []
+    for reference in comparison_refs:
+        if val alias = reference.entity.settled: comparison_aliases.push(db_page_alias_key(alias)?)
+    missing = db_paged_missing(reads, comparison_aliases, policy)?
+    if missing.len() > 0: return Ok(DbPagedPlanning.NeedKeys(request, missing))
+    var comparison_rows: [text] = []
+    for reference in comparison_refs:
+        if reference.entity.settled != nil: comparison_rows.push(db_page_row_key(db_paged_resolve_ref(reference.entity, reads, policy)?)?)
+    missing = db_paged_missing(reads, comparison_rows, policy)?
+    if missing.len() > 0: return Ok(DbPagedPlanning.NeedKeys(request, missing))
+    db_reproduction_validate_records(reproduction_records, \entity: db_paged_get_row(reads, db_paged_resolve_ref(entity, reads, policy)?))?
     val operations = db_paged_execution_operations(patch, reads, policy)?
     var row_keys = db_paged_operation_row_keys(operations)?
     if val captured = evidence: row_keys.push(db_page_row_key(captured.record.entity)?)

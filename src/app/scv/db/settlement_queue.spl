@@ -1,6 +1,7 @@
+use std.scv.db_reproduction_projection.{db_reproduction_patch_records}
 use app.scv.db.local_store.{db_store_read, db_store_commit}
 use app.scv.db.settlement_queue_codec.*
-use std.scv.db_admission.{DbAdmissionPolicy, db_authorize_patch, db_require_unreserved_entity_kinds}
+use std.scv.db_admission.{DbAdmissionPolicy, db_authorize_patch, db_require_nonbinding_entity_kinds}
 use std.scv.db_patch.{DbPatch}
 use std.scv.db_patch_codec.{db_patch_encode}
 use std.common.crypto.sha256.{sha256_text}
@@ -31,13 +32,14 @@ fn db_settlement_queue_commit(root: text, expected_head: text, queue: DbSettleme
 fn db_settlement_enqueue(root: text, expected_head: text, patch: DbPatch, admission: DbAdmissionPolicy) -> Result<DbSettlementQueueView, text>:
     val wire = db_patch_encode(patch)?
     if wire.len() > 1048576: return Err("SCVDB_QUEUE_PATCH_QUOTA")
-    db_require_unreserved_entity_kinds(patch)?
+    db_require_nonbinding_entity_kinds(patch)?
     if patch.provenance.starts_with("SCVDB-CONFLICT-RESOLUTION-v1:"): return Err("SCVDB_RESOLUTION_OWNER_REQUIRED")
     val sample = time_sample_unix_micros_or_failure()
     if sample < 0: return Err("SCVDB_COMMAND_CLOCK")
     # Authentication only at ingress; signed dependency names are NOT evidence
     # of existence. Canonical dependency membership is checked during planning.
     val authenticated = db_authorize_patch(patch, admission, patch.causal_dependencies, (sample / 1000000) as u64)?
+    db_reproduction_patch_records(patch)?
     var view = db_settlement_queue_open(root, admission)?
     if view.head != expected_head: return Err("SCVDB_STORE_HEAD_ADVANCED")
     for item in view.queue.items:

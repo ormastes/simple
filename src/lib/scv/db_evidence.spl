@@ -182,12 +182,19 @@ fn db_observation_bytes(observation: DbObservation, declared: [text]) -> Result<
         bytes = bytes + db_frame(13u8, encoded)
     db_domain_bytes("observation-v1", bytes)
 
-fn db_evidence_dependencies_available(dependencies: [DbEvidenceDependency]) -> Result<bool, text>:
+# Valid declared states are not proof of current availability. Effect owners
+# independently observe bytes/retention receipts without rewriting signed data.
+fn db_evidence_dependencies_declared(dependencies: [DbEvidenceDependency]) -> Result<bool, text>:
     for dependency in dependencies:
-        if not db_evidence_digest_valid(dependency.digest) or dependency.availability != "available":
+        if not db_evidence_digest_valid(dependency.digest) or not ["available", "restricted", "expired", "missing"].contains(dependency.availability):
             return Err("DependencyUnavailable")
     Ok(true)
 
+fn db_evidence_dependencies_available(dependencies: [DbEvidenceDependency]) -> Result<bool, text>:
+    db_evidence_dependencies_declared(dependencies)?
+    for dependency in dependencies:
+        if dependency.availability != "available": return Err("DependencyUnavailable")
+    Ok(true)
 fn db_observation_validate(observation: DbObservation, configs: [DbConfigRevision], reproductions: [DbReproductionRevision]) -> Result<bool, text>:
     db_evidence_check_ref(observation.reference)?
     db_evidence_check_ref(observation.test_definition)?
@@ -204,7 +211,7 @@ fn db_observation_validate(observation: DbObservation, configs: [DbConfigRevisio
             if db_evidence_same_ref(config.reference, observation.config):
                 if not db_evidence_digest_valid(config.effective_values_digest):
                     return Err("MissingEffectiveConfig")
-                db_evidence_dependencies_available(config.dependencies)?
+                db_evidence_dependencies_declared(config.dependencies)?
                 config_found = true
         if not config_found:
             return Err("MissingEffectiveConfig")
@@ -214,7 +221,7 @@ fn db_observation_validate(observation: DbObservation, configs: [DbConfigRevisio
                 if db_evidence_same_ref(reference, reproduction.reference):
                     if reproduction.source_revision != observation.source_revision or not db_evidence_same_ref(reproduction.config, observation.config) or not db_evidence_same_ref(reproduction.test_definition, observation.test_definition) or not db_evidence_digest_valid(reproduction.invocation_digest):
                         return Err("ReproductionMismatch")
-                    db_evidence_dependencies_available(reproduction.dependencies)?
+                    db_evidence_dependencies_declared(reproduction.dependencies)?
                     return Ok(true)
             return Err("MissingReproduction")
         return Err("MissingReproduction")
@@ -401,3 +408,5 @@ export db_evidence_same_ref, db_evidence_check_ref, db_provider_identity_bytes
 export db_evidence_digest_valid
 export db_observation_bytes, db_observation_validate, db_observation_admit, db_evaluate
 export db_manifest_coverage, db_manifest_supersession
+
+export db_evidence_dependencies_declared

@@ -1,3 +1,9 @@
+use std.scv.db_patch.{DbPatch}
+use app.scv.db.observation_content.*
+use app.scv.db.observation_owner.{db_observation_expand, db_observation_paged_records, db_observation_now, db_observation_paged_plan}
+use app.scv.db.paged_transition.{DbPagedView}
+use std.scv.db_reproduction_projection.*
+use std.scv.db_identity_resolve.{db_resolve_reference}
 # Explicit local bare-remote coordinator. No production authority grant, remote
 # deployment admission, or Indexed journal phase is exposed by this module.
 # Each invocation performs one persisted transition; network is never under SJ.
@@ -17,7 +23,7 @@ use std.scv.db_receipt.*
 use std.scv.db_allocation.{db_plan_allocation}
 use std.scv.db_policy_codec.{DbPolicyConfig, db_policy_encode}
 use std.scv.db_identity_snapshot.{db_identity_snapshot_decode}
-use std.scv.db_admission.{db_authorize_patch, db_require_unreserved_entity_kinds}
+use std.scv.db_admission.{db_authorize_patch, db_require_nonbinding_entity_kinds}
 use std.scv.sj_capsule.{scv_sj_lease_is_held}
 use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
@@ -89,7 +95,8 @@ fn _queue_prepare_paged(root: text, before: DbSettlementQueueView, index: i64, c
     if val candidate = prepared.candidate: db_git_candidate_cleanup(candidate)?
     result
 
-fn _queue_prepare(root: text, before: DbSettlementQueueView, item_index: i64, config: DbSettlementLocalConfig, now: u64, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>, paged: DbPagedPolicy?) -> Result<DbSettlementLocalResult, text>:
+fn _queue_prepare(root: text, before: DbSettlementQueueView, item_index: i64, config: DbSettlementLocalConfig, now: u64, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>, paged: DbPagedPolicy?, observation_sources: DbObservationSources?) -> Result<DbSettlementLocalResult, text>:
+    _queue_observation_content(root, config, before.queue.items[item_index].patch, paged, observation_sources)?
     if val policy = paged: return _queue_prepare_paged(root, before, item_index, config, policy, now, sign_receipt)
     var item = before.queue.items[item_index]
     val tip = db_receipt_index_git_tip(_queue_index_request(root, config, config.bootstrap_receipt, ""))?
@@ -162,7 +169,7 @@ fn _queue_observe_published(root: text, before: DbSettlementQueueView, index: i6
     item.last_error = ""
     _queue_result(root, before, index, item, "awaiting-index")
 
-fn _queue_publish(root: text, before: DbSettlementQueueView, index: i64, config: DbSettlementLocalConfig, paged: DbPagedPolicy?) -> Result<DbSettlementLocalResult, text>:
+fn _queue_publish(root: text, before: DbSettlementQueueView, index: i64, config: DbSettlementLocalConfig, paged: DbPagedPolicy?, observation_sources: DbObservationSources?) -> Result<DbSettlementLocalResult, text>:
     var item = before.queue.items[index]
     val receipt = db_settlement_work_receipt(item)?
     val status = db_git_settlement_reconcile_history(root, receipt.remote, receipt.previous_head, receipt.accepted_head, config.scratch_parent)
@@ -179,6 +186,7 @@ fn _queue_publish(root: text, before: DbSettlementQueueView, index: i64, config:
         item.preparation_structure = ""
         item.last_error = if changed_structure: "SCVDB_QUEUE_STRUCTURE_REPLAN" else: "SCVDB_QUEUE_STALE_REPLAN"
         return _queue_result(root, before, index, item, if changed_structure: "structure-replan" else: "stale-replan")
+    _queue_observation_content(root, config, item.patch, paged, observation_sources)?
     val candidate = if paged != nil: db_settlement_paged_restore_local(root, config.scratch_parent, item.paged_journal.unwrap(), config.authority, paged.unwrap(), item.candidate_commit)? else: db_git_candidate_restore(_queue_candidate_request(root, config, item.journal.unwrap()), item.candidate_commit, receipt.accepted_head, \: scv_sj_lease_is_held(root))?
     var publication: Result<DbGitCandidatePublication, text> = Err("SCVDB_QUEUE_CANDIDATE")
     if paged != nil:
@@ -207,7 +215,7 @@ fn _queue_index(root: text, before: DbSettlementQueueView, index: i64, config: D
     item.last_error = ""
     _queue_result(root, before, index, item, "local-index-observed")
 
-fn _queue_resume(root: text, expected_queue_head: text, config: DbSettlementLocalConfig, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>, paged: DbPagedPolicy?) -> Result<DbSettlementLocalResult, text>:
+fn _queue_resume(root: text, expected_queue_head: text, config: DbSettlementLocalConfig, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>, paged: DbPagedPolicy?, observation_sources: DbObservationSources?) -> Result<DbSettlementLocalResult, text>:
     val pinned = db_policy_encode(config.policy)?
     val bootstrap = db_receipt_authenticate(config.bootstrap_receipt, config.authority)?
     val admission = config.policy.admission
@@ -227,10 +235,10 @@ fn _queue_resume(root: text, expected_queue_head: text, config: DbSettlementLoca
     for index in 0..before.queue.items.len():
         val item = before.queue.items[index]
         if item.phase != "prepared" and item.phase != "awaiting-index": continue
-        db_require_unreserved_entity_kinds(item.patch)?
+        db_require_nonbinding_entity_kinds(item.patch)?
         val authenticated = db_authorize_patch(item.patch, admission, item.patch.causal_dependencies, now)?
         val receipt = db_receipt_authenticate(db_settlement_work_receipt(item)?, config.authority)?
-        if item.phase == "prepared": return _queue_publish(root, before, index, config, paged)
+        if item.phase == "prepared": return _queue_publish(root, before, index, config, paged, observation_sources)
         if item.phase == "awaiting-index": return _queue_index(root, before, index, config, paged)
     var eligible: [i64] = []
     var blocked = false
@@ -252,9 +260,9 @@ fn _queue_resume(root: text, expected_queue_head: text, config: DbSettlementLoca
             if index != selected: retained.push(index)
         eligible = retained
         val item = before.queue.items[selected]
-        db_require_unreserved_entity_kinds(item.patch)?
+        db_require_nonbinding_entity_kinds(item.patch)?
         val authenticated = db_authorize_patch(item.patch, admission, item.patch.causal_dependencies, now)?
-        match _queue_prepare(root, before, selected, config, now, sign_receipt, paged):
+        match _queue_prepare(root, before, selected, config, now, sign_receipt, paged, observation_sources):
             Ok(result): return Ok(result)
             Err(reason):
                 if reason != "SCVDB_MISSING_DEPENDENCY": return Err(reason)
@@ -264,12 +272,30 @@ fn _queue_resume(root: text, expected_queue_head: text, config: DbSettlementLoca
     if blocked: return Err("SCVDB_QUEUE_DEPENDENCY_BLOCKED")
     Ok(DbSettlementLocalResult(code: "idle", view: before, batch_id: ""))
 
-fn db_settlement_resume_local(root: text, expected_queue_head: text, config: DbSettlementLocalConfig, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>) -> Result<DbSettlementLocalResult, text>:
-    _queue_resume(root, expected_queue_head, config, sign_receipt, nil)
+fn db_settlement_resume_local(root: text, expected_queue_head: text, config: DbSettlementLocalConfig, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>, observation_sources: DbObservationSources? = nil) -> Result<DbSettlementLocalResult, text>:
+    _queue_resume(root, expected_queue_head, config, sign_receipt, nil, observation_sources)
 
-fn db_settlement_resume_paged_local(root: text, expected_queue_head: text, config: DbSettlementPagedLocalConfig, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>) -> Result<DbSettlementLocalResult, text>:
+fn db_settlement_resume_paged_local(root: text, expected_queue_head: text, config: DbSettlementPagedLocalConfig, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>, observation_sources: DbObservationSources? = nil) -> Result<DbSettlementLocalResult, text>:
     val shared = DbSettlementLocalConfig(scratch_parent: config.scratch_parent, authority: config.authority, policy: config.policy.config, bootstrap_receipt: config.bootstrap_receipt)
-    _queue_resume(root, expected_queue_head, shared, sign_receipt, Some(config.policy))
+    _queue_resume(root, expected_queue_head, shared, sign_receipt, Some(config.policy), observation_sources)
 
 export DbSettlementLocalConfig, DbSettlementLocalResult, db_settlement_resume_local
 export DbSettlementPagedLocalConfig, db_settlement_resume_paged_local
+
+fn _queue_observation_content(root: text, config: DbSettlementLocalConfig, patch: DbPatch, paged: DbPagedPolicy?, sources: DbObservationSources?) -> Result<bool, text>:
+    if db_reproduction_patch_records(patch)?.len() == 0: return Ok(true)
+    if sources == nil: return Err("SCVDB_OBSERVATION_SOURCES_REQUIRED")
+    val tip = db_receipt_index_git_tip(_queue_index_request(root, config, config.bootstrap_receipt, ""))?
+    val now = db_observation_now()?
+    if val policy = paged:
+        val projection = db_settlement_paged_readback_local(root, config.scratch_parent, tip.receipt, config.authority, policy)?
+        if db_observation_paged_plan(root, projection.manifest, patch, policy, now)?.replay: return Ok(true)
+        val records = db_observation_paged_records(root, DbPagedView(head: "", manifest: projection.manifest), patch, policy)?
+        db_observation_verify_and_pin(root, sources.unwrap(), records, patch.batch_id, db_observation_limits(), now / 86400u64)?
+    else:
+        val snapshot = db_settlement_remote_snapshot_local(root, config.scratch_parent, tip.receipt, config.authority)?
+        for accepted in snapshot.state.accepted:
+            if accepted.batch_id == patch.batch_id and accepted.canonical_digest == patch.batch_id and accepted.actor == patch.actor and accepted.actor_counter == patch.actor_counter: return Ok(true)
+        val records = db_observation_expand(patch, \entity: db_reproduction_state_row(snapshot.state.rows, db_resolve_reference(entity, snapshot.identities)?))?
+        db_observation_verify_and_pin(root, sources.unwrap(), records, patch.batch_id, db_observation_limits(), now / 86400u64)?
+    Ok(true)

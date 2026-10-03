@@ -15,7 +15,7 @@ use std.scv.db_paged_txn.*
 use std.scv.db_pages.*
 use std.scv.db_page_records.*
 use std.scv.db_patch.{DbPatch}
-use std.scv.db_admission.{db_authorize_patch, db_require_unreserved_entity_kinds}
+use std.scv.db_admission.{db_authorize_patch, db_require_nonbinding_entity_kinds}
 use std.scv.db_receipt.*
 use std.scv.distributed_identity_map.{IdentityMapHighWater}
 use std.common.base_encoding.utilities.{base_encoding_text_to_bytes, validated_utf8_bytes_to_text_linear}
@@ -138,11 +138,11 @@ fn db_settlement_paged_readback_local(root: text, parent: text, receipt: DbSettl
     result
 
 fn _paged_git_plan(root: text, prior: DbPagedGitProjection, patch: DbPatch, policy: DbPagedPolicy, now: u64) -> Result<DbPagedCommitPlan, text>:
-    var planning = db_paged_begin(prior.manifest, patch, policy, now)?
-    for _round in 0..8:
+    var planning = db_paged_transition_begin(prior.manifest, patch, policy, now)?
+    for _round in 0..12:
         match planning:
             Ready(plan): return Ok(plan)
-            NeedKeys(request, keys): planning = db_paged_advance(planning, db_paged_load_proofs(root, request, keys)?)?
+            NeedKeys(request, keys): planning = db_paged_transition_advance(planning, db_paged_load_proofs(root, request, keys)?)?
     Err("SCVDB_PAGED_PROOF_ROUNDS")
 
 fn _paged_git_prepare_owned(root: text, owner: DbGitPreparedCandidate, prior: DbPagedGitProjection, previous: DbSettlementReceipt, patch: DbPatch, policy: DbPagedPolicy, authority: DbReceiptAuthority, now: u64, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>) -> Result<DbPagedSettlementPreparation, text>:
@@ -166,10 +166,14 @@ fn _paged_git_prepare_owned(root: text, owner: DbGitPreparedCandidate, prior: Db
     val journal = DbPagedSettlementJournal(receipt: signed, manifest_wire: db_paged_manifest_encode(projection.manifest)?, projection_digest: projection.projection_digest, phase: DbSettlementPhase.Prepared)
     Ok(DbPagedSettlementPreparation(projection: projection, candidate: Some(candidate), journal: Some(journal), candidate_commit: db_git_candidate_commit_bytes(candidate)?, replay: false))
 
+# Trusted app primitive, like local_transition: production callers are the
+# settlement coordinator, which verifies original patch and content/pins before
+# preparation and rechecks after uncertainty reconciliation before publication.
+# This primitive is not a producer-facing content admission API.
 fn db_settlement_paged_prepare_local(root: text, parent: text, previous: DbSettlementReceipt, patch: DbPatch, authority: DbReceiptAuthority, policy: DbPagedPolicy, now: u64, sign_receipt: fn(DbSettlementReceipt) -> Result<DbSettlementReceipt, text>) -> Result<DbPagedSettlementPreparation, text>:
     # Verify signatures/context/metadata before dependency or Git object IO.
     _paged_git_policy(authority, policy)?
-    db_require_unreserved_entity_kinds(patch)?
+    db_require_nonbinding_entity_kinds(patch)?
     db_authorize_patch(patch, policy.config.admission, patch.causal_dependencies, now)?
     if patch.provenance.starts_with("SCVDB-CONFLICT-RESOLUTION-v1"): return Err("SCVDB_CONFLICT_RESOLUTION_OWNER_REQUIRED")
     val prior = db_settlement_paged_readback_local(root, parent, previous, authority, policy)?
@@ -215,6 +219,9 @@ fn _paged_git_restore_owned(root: text, owner: DbGitPreparedCandidate, journal: 
     _paged_git_remember(root, projection, objects)
     Ok(candidate)
 
+# Trusted exact-recovery primitive. The coordinator owns current content
+# revalidation after proving the candidate unpublished; this method alone does
+# not authorize an original producer patch or claim artifact availability.
 fn db_settlement_paged_restore_local(root: text, parent: text, journal: DbPagedSettlementJournal, authority: DbReceiptAuthority, policy: DbPagedPolicy, raw_commit: text) -> Result<DbGitPreparedCandidate, text>:
     db_receipt_authenticate(journal.receipt, authority)?
     _paged_git_policy(authority, policy)?
