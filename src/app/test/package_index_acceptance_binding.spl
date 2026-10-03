@@ -1,0 +1,140 @@
+use app.test.package_index_acceptance_invalidation.{acceptance_graph_v1}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1, package_module_index_publish_if_current_v1,
+    package_module_index_read_current_v1, package_module_index_entry_action_digest_v1
+}
+use compiler.driver.cache.package_index_route.{PackageIndexRouteV1, package_index_route_current_v1}
+use compiler.driver.cache.package_tldr_metadata.{ConfigVariantKeyV1, config_variant_digest_v1}
+use app.io.mod.{env_get, env_set, file_read, file_write}
+use std.common.crypto.sha256.{sha256_text}
+
+struct PackageIndexBindingObservationV1:
+    valid: bool
+    reason: text
+    observations: [text]
+
+fn acceptance_variant_v1(mode: text, feature: text) -> ConfigVariantKeyV1:
+    ConfigVariantKeyV1("x86_64-pc-windows-msvc", "cranelift", [feature], mode,
+        "v1", ["opt=0"], ["SIMPLE_LIB=src"])
+
+fn acceptance_rebind_actions_v1(graph: PackageModuleIndexGenerationV1) -> PackageModuleIndexGenerationV1:
+    var result = graph
+    var entries = graph.entries
+    var index = 0
+    while index < entries.len():
+        var entry = entries[index]
+        entry.action_digest = package_module_index_entry_action_digest_v1(graph, entry)
+        entries[index] = entry
+        index = index + 1
+    result.entries = entries
+    result
+
+fn acceptance_changed_binding_v1(
+    graph: PackageModuleIndexGenerationV1, field: text, changed_variant: text
+) -> PackageIndexRouteV1:
+    package_index_route_current_v1("src/app.spl",
+        if field == "snapshot": "" else: "build/test-artifacts/absent-frozen-snapshot",
+        if field == "revision": "other-revision" else: graph.scv_revision_id,
+        if field == "tree": "other-tree" else: graph.scv_tree_id,
+        if field == "inventory": sha256_text("other-inventory") else: graph.inventory_digest,
+        if field == "producer": sha256_text("other-producer") else: graph.producer_digest,
+        if field == "root": "other-root" else: graph.root_generation,
+        if field == "variant": changed_variant else: graph.variant_digest,
+        [], false)
+
+fn package_index_acceptance_binding_v1(scenario: text, root: text) -> PackageIndexBindingObservationV1:
+    var graph = acceptance_graph_v1()
+    graph.variant_digest = config_variant_digest_v1(acceptance_variant_v1("debug", "feature_x"))
+    graph = acceptance_rebind_actions_v1(graph)
+    if not package_module_index_publish_if_current_v1(root, graph, ""):
+        return PackageIndexBindingObservationV1(false, "fixture-publication-failed", [])
+    val admitted = package_module_index_read_current_v1(root)
+    if not admitted.valid:
+        return PackageIndexBindingObservationV1(false, "fixture-admission-failed", [])
+    val pointer_path = "{root}/package-module-index-v1/CURRENT"
+    val pointer_before = file_read(pointer_path)
+    val generation_path = "{root}/package-module-index-v1/{admitted.digest}.index"
+    val generation_before = file_read(generation_path)
+    val prior_cache = env_get("SIMPLE_CACHE")
+    if not env_set("SIMPLE_CACHE", root):
+        return PackageIndexBindingObservationV1(false, "fixture-cache-selection-failed", [])
+    var fields: [text] = []
+    var reasons: [text] = []
+    var changed_variant = config_variant_digest_v1(acceptance_variant_v1("release", "feature_x"))
+    if scenario == "stale-index-denied":
+        fields = ["revision"]
+        reasons = ["scv-revision-mismatch"]
+    elif scenario == "scv-provenance-binding":
+        fields = ["revision", "tree", "inventory", "producer", "root"]
+        reasons = ["scv-revision-mismatch", "scv-tree-mismatch", "scv-inventory-mismatch",
+            "index-producer-mismatch", "index-root-generation-mismatch"]
+    elif scenario == "scv-no-live-worktree-fallback":
+        fields = ["snapshot"]
+        reasons = ["scv-authority-missing"]
+    elif scenario == "config-variant-isolation":
+        fields = ["variant"]
+        reasons = ["index-variant-mismatch"]
+    elif scenario == "build-tag-variant-isolation":
+        fields = ["variant"]
+        reasons = ["index-variant-mismatch"]
+        changed_variant = config_variant_digest_v1(acceptance_variant_v1("debug", "feature_y"))
+    else:
+        env_set("SIMPLE_CACHE", prior_cache)
+        return PackageIndexBindingObservationV1(false, "unsupported-binding-scenario", [])
+    var observed: [text] = []
+    var valid = graph.variant_digest != "" and changed_variant != "" and changed_variant != graph.variant_digest
+    var index = 0
+    while index < fields.len():
+        val route = acceptance_changed_binding_v1(graph, fields[index], changed_variant)
+        observed.push("{fields[index]}={route.reason}")
+        if route.valid or route.reason != reasons[index] or route.source_paths.len() != 0 or
+                route.dirty_modules.len() != 0 or route.archive_admissions.len() != 0:
+            valid = false
+        index = index + 1
+    val restored = env_set("SIMPLE_CACHE", prior_cache)
+    val pointer_preserved = file_read(pointer_path) == pointer_before
+    val generation_preserved = file_read(generation_path) == generation_before
+    observed.push("pointer_preserved={pointer_preserved}")
+    observed.push("generation_preserved={generation_preserved}")
+    observed.push("admitted_variant_digest={graph.variant_digest}")
+    observed.push("changed_variant_digest={changed_variant}")
+    valid = valid and restored and pointer_preserved and generation_preserved
+    PackageIndexBindingObservationV1(valid, if valid: "ok" else: "binding-refusal-contract-failed", observed)
+
+fn package_index_acceptance_publication_v1(scenario: text, root: text) -> PackageIndexBindingObservationV1:
+    val prior = acceptance_graph_v1()
+    if not package_module_index_publish_if_current_v1(root, prior, ""):
+        return PackageIndexBindingObservationV1(false, "fixture-publication-failed", [])
+    val admitted = package_module_index_read_current_v1(root)
+    if not admitted.valid:
+        return PackageIndexBindingObservationV1(false, "fixture-admission-failed", [])
+    val prior_path = "{root}/package-module-index-v1/{admitted.digest}.index"
+    val prior_bytes = file_read(prior_path)
+    var expected_digest = admitted.digest
+    if scenario == "crash-after-publish":
+        var next = prior
+        next.scv_revision_id = "next-revision"
+        next = acceptance_rebind_actions_v1(next)
+        if not package_module_index_publish_if_current_v1(root, next, admitted.digest):
+            return PackageIndexBindingObservationV1(false, "fixture-next-publication-failed", [])
+        val published = package_module_index_read_current_v1(root)
+        if not published.valid or published.digest == admitted.digest:
+            return PackageIndexBindingObservationV1(false, "fixture-next-admission-failed", [])
+        expected_digest = published.digest
+    elif scenario != "crash-before-publish":
+        return PackageIndexBindingObservationV1(false, "unsupported-publication-scenario", [])
+    # Model leftover uncommitted bytes without claiming an OS process crash.
+    val staged_path = "{root}/package-module-index-v1/incomplete.index.tmp"
+    if not file_write(staged_path, "partial-generation"):
+        return PackageIndexBindingObservationV1(false, "fixture-staging-failed", [])
+    val observed = package_module_index_read_current_v1(root)
+    val preserved = file_read(prior_path) == prior_bytes
+    val staging_untouched = file_read(staged_path) == "partial-generation"
+    val valid = observed.valid and observed.digest == expected_digest and preserved and staging_untouched
+    PackageIndexBindingObservationV1(valid, if valid: "ok" else: "publication-boundary-contract-failed", [
+        "publication_boundary={scenario}", "staging_injection=partial-file",
+        "observed_generation={observed.digest}", "expected_generation={expected_digest}",
+        "prior_generation_preserved={preserved}", "staged_bytes_untouched={staging_untouched}"])
+
+export PackageIndexBindingObservationV1, acceptance_variant_v1, acceptance_rebind_actions_v1
+export package_index_acceptance_binding_v1, package_index_acceptance_publication_v1
