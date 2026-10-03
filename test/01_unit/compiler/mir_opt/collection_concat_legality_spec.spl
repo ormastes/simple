@@ -1,0 +1,69 @@
+"""REQ-008 array-concat preservation. Authored production-pass tests, not executed."""
+use std.spec.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirBlock, MirFunction}
+use compiler.mir_opt.mir_opt.collection_opt.{create_collection_opt_pass, collection_opt_run_on_function}
+use compiler.mir_opt.mir_opt.collection_opt_patterns.{colopt_match_concat_pattern}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{DriverManifestAttr, DriverManifestAttrKind, vhdl_hardware_metadata_default}
+
+fn ca_copy(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: id)))
+
+fn ca_call(name: text, destination: i64, arguments: [MirOperand]) -> MirInst:
+    val signature = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+    val callee = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(signature))))
+    MirInst(kind: MirInstKind.Call(LocalId(id: destination), callee, arguments), span: nil)
+
+fn ca_window(destination: i64) -> [MirInst]:
+    val seven = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(7), MirType.i64()))
+    [MirInst(kind: MirInstKind.Aggregate(LocalId(id: 1), AggregateKind.Array(MirType.i64()), [seven]), span: nil),
+        ca_call("+", 2, [ca_copy(0), ca_copy(1)]),
+        MirInst(kind: MirInstKind.Copy(LocalId(id: destination), LocalId(id: 2)), span: nil)]
+
+fn ca_function(instructions: [MirInst], returned: i64) -> MirFunction:
+    val block = MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: instructions,
+        terminator: MirTerminator.Ret(Some(ca_copy(returned))))
+    val manifest = DriverManifestAttr(kind: DriverManifestAttrKind.Driver,
+        driver_class: 0, vendor: 0, device_ids: [], version: "", abi: "")
+    MirFunction(SymbolId(id: 1), "concat_fixture",
+        MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), [], [block],
+        BlockId(id: 0), Span(0, 0, 1, 1), [], false, nil, {}, nil, false, false, "",
+        false, manifest, false, vhdl_hardware_metadata_default(), false)
+
+fn ca_assert_preserved(instructions: [MirInst], returned: i64):
+    var pass = create_collection_opt_pass()
+    val original = ca_function(instructions, returned)
+    val result = collection_opt_run_on_function(pass, original)
+    expect(result.blocks).to_equal(original.blocks)
+    expect(pass.concat_replaced).to_equal(0)
+
+describe "array concat requires ownership alias and liveness evidence":
+    it "preserves a copy into a different destination used by the terminator":
+        step("Keep the destination assignment in the production pass")
+        ca_assert_preserved(ca_window(3), 3)
+
+    it "preserves live aggregate and result temporaries":
+        step("Keep temporary definitions consumed after concatenation")
+        var instructions = ca_window(0)
+        instructions.push(ca_call("observe", 4, [ca_copy(1), ca_copy(2)]))
+        ca_assert_preserved(instructions, 4)
+
+    it "does not infer canonical ownership from an operator spelling":
+        step("Keep an unresolved plus call without builtin ownership authority")
+        ca_assert_preserved(ca_window(0), 0)
+
+    it "preserves observable aliases of the original left operand":
+        step("Keep concatenation distinct from mutation of a shared operand")
+        var instructions = [MirInst(kind: MirInstKind.Copy(LocalId(id: 5), LocalId(id: 0)), span: nil)]
+        for instruction in ca_window(0):
+            instructions.push(instruction)
+        instructions.push(ca_call("observe", 4, [ca_copy(5)]))
+        ca_assert_preserved(instructions, 4)
+
+    it "rejects the direct matcher without an authority-bearing API":
+        step("Keep direct helper callers from bypassing the legality boundary")
+        val instructions = ca_window(0)
+        val pass = create_collection_opt_pass()
+        expect(colopt_match_concat_pattern(pass, instructions[0], instructions[1], instructions[2])).to_be_nil()
