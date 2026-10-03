@@ -38,6 +38,6 @@ set it true. A zero-argument call remains distinct from unknown legacy empty
 arity through the return-type repair copy and LLVM external declaration. A
 separate test checks backend and serialized signature identities; no owned JSON
 MIR deserializer was found, so no serialization roundtrip is claimed.
-No LLVM-C wrapper,
+The raw LLVM-C declarations are not a safe wrapper. No
 ORC safe owner or JIT execution is certified by these tests. Native ABI, provider
 identity, error ownership and copied-session lifetime checks remain required.
