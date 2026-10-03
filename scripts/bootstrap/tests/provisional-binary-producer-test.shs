@@ -44,6 +44,30 @@ handoff_receipt="$root/phase4/hello/llvm/hello.receipt"
 provisional_select_binary_producer
 [ "$task_producer" = "$predecessor/bin/simple" ] && [ "$task_producer_sha" = "$phase3_sha" ] || exit 1
 
+# Exercise a fresh handoff through the hello runner boundary. This mock only
+# validates orchestration; it is never used as bootstrap qualification proof.
+repo_root="$tmp/launcher"
+mkdir -p "$repo_root/scripts/bootstrap"
+hello_receipt="$tmp/original-hello"
+printf 'hello_source_path=%s/test/04_smoke/windows_native_hello.spl\nhello_source_digest=fixture\n' "$source_root" >"$hello_receipt"
+original_source_snapshot="$tmp/snapshot" target=x86_64-pc-windows-msvc
+memory_bytes=6000000000 reserve_bytes=17179869184 lifetime_ms=0 memory_policy=monitor
+HANDOFF_TEMPLATE="$tmp/handoff-template" HANDOFF_EXPECTED_PRODUCER="$task_producer"
+export HANDOFF_TEMPLATE HANDOFF_EXPECTED_PRODUCER
+mv "$handoff_receipt" "$HANDOFF_TEMPLATE"
+cat >"$repo_root/scripts/bootstrap/prepare-provisional-hello.shs" <<'EOF'
+#!/bin/sh
+set -eu
+producer= output= timeout= policy=
+for arg in "$@"; do
+  case "$arg" in --producer=*) producer=${arg#*=} ;; --output-root=*) output=${arg#*=} ;; --timeout-seconds=*) timeout=${arg#*=} ;; --memory-policy=*) policy=${arg#*=} ;; esac
+done
+[ "$producer" = "$HANDOFF_EXPECTED_PRODUCER" ] && [ "$timeout:$policy" = 0:monitor ]
+cp "$HANDOFF_TEMPLATE" "$output/hello.receipt"
+EOF
+provisional_select_binary_producer
+[ -f "$handoff_receipt" ] || exit 1
+
 backend=cranelift
 if provisional_select_binary_producer; then echo 'FAIL cross-backend producer accepted'; exit 1; else [ "$?" -eq 20 ]; fi
 backend=llvm
