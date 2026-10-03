@@ -1,0 +1,132 @@
+# REQ-027/028 pure transition tests. Provider/SJ persistence remains integration work.
+use std.spec.{describe, it, expect, fail, step}
+use std.scv.db_bridge.*
+
+fn setup_item2_binding() -> DbProviderBindingIdentity:
+    DbProviderBindingIdentity(instance: "https://provider.example", project: "org/repo", external_id: "issue-7")
+
+fn setup_item2_intent() -> DbBridgeIntent:
+    val draft = DbBridgeIntent(revision: "", provider: setup_item2_binding(), operation: "update", payload_digest: "payload-1", correlation_id: "delivery-1", causation_id: "inbound-0", idempotency_key: "intent-1")
+    match db_bridge_intent_digest(draft):
+        Ok(digest): return DbBridgeIntent(revision: digest, provider: draft.provider, operation: draft.operation, payload_digest: draft.payload_digest, correlation_id: draft.correlation_id, causation_id: draft.causation_id, idempotency_key: draft.idempotency_key)
+        Err(error): fail(error)
+    fail("intent fixture failed")
+
+fn setup_item2_pending() -> DbBridgeDelivery:
+    match db_bridge_pending(setup_item2_intent()):
+        Ok(value): return value
+        Err(error): fail(error)
+    fail("pending fixture failed")
+
+fn setup_item2_observation(status: text, digest: text) -> DbBridgeObservation:
+    DbBridgeObservation(provider: setup_item2_binding(), correlation_id: "delivery-1", payload_digest: digest, revision: "remote-v2", status: status)
+
+fn setup_item2_sent() -> DbBridgeDelivery:
+    val leased = db_bridge_acquire(setup_item2_pending(), "worker-a", 100, 20)
+    expect(leased.code).to_equal("leased")
+    val sent = db_bridge_sent(leased.delivery, "worker-a", 1, 101)
+    expect(sent.code).to_equal("sent_unconfirmed")
+    sent.delivery
+
+fn check_item2_key(identity: DbProviderBindingIdentity) -> text:
+    match db_provider_binding_identity_key(identity):
+        Ok(value): return value
+        Err(error): fail(error)
+    fail("provider key failed")
+
+describe "SCV bridge local state transitions":
+    it "namespaces external identities and frames delimiter-bearing fields":
+        val original = check_item2_key(setup_item2_binding())
+        val another = DbProviderBindingIdentity(instance: "https://provider.example", project: "another/repo", external_id: "issue-7")
+        expect(original == check_item2_key(another)).to_be(false)
+        val first = DbProviderBindingIdentity(instance: "a|b", project: "c", external_id: "d")
+        val second = DbProviderBindingIdentity(instance: "a", project: "b|c", external_id: "d")
+        expect(check_item2_key(first) == check_item2_key(second)).to_be(false)
+
+    it "rejects an invalid provider identity before creating local delivery":
+        val identity = DbProviderBindingIdentity(instance: "", project: "p", external_id: "1")
+        match db_provider_binding_identity_key(identity):
+            Ok(value): fail("empty provider accepted")
+            Err(error): expect(error).to_equal("SCVDB_PROVIDER_IDENTITY")
+
+    it "fences workers and rotates generation exactly at lease expiry":
+        step("Drive the boundary state and inspect preserved invariants")
+        val leased = db_bridge_acquire(setup_item2_pending(), "worker-a", 100, 20).delivery
+        expect(db_bridge_acquire(leased, "worker-b", 119, 20).code).to_equal("SCVDB_LEASE_BUSY")
+        val replacement = db_bridge_acquire(leased, "worker-b", 120, 20)
+        expect(replacement.delivery.generation).to_equal(2)
+        expect(db_bridge_sent(replacement.delivery, "worker-a", 1, 121).code).to_equal("SCVDB_LEASE_STALE")
+        expect(db_bridge_sent(replacement.delivery, "worker-b", 2, 140).code).to_equal("SCVDB_LEASE_EXPIRED")
+        expect(leased.generation).to_equal(1)
+
+    it "requires readback after an uncertain effect and lease takeover":
+        val sent = setup_item2_sent()
+        expect(sent.must_reconcile).to_be(true)
+        expect(sent.attempts).to_equal(1)
+        val takeover = db_bridge_acquire(sent, "worker-b", 120, 30).delivery
+        expect(db_bridge_sent(takeover, "worker-b", 2, 121).code).to_equal("SCVDB_READBACK_REQUIRED")
+        expect(db_bridge_retry(takeover, "worker-b", 2, 121, 5, 60).code).to_equal("SCVDB_READBACK_REQUIRED")
+        val ack = db_bridge_reconcile(takeover, "worker-b", 2, 122, setup_item2_observation("found", "payload-1"))
+        expect(ack.code).to_equal("acknowledged")
+        expect(ack.delivery.provider_revision).to_equal("remote-v2")
+        expect(ack.delivery.attempts).to_equal(1)
+        expect(db_bridge_acquire(ack.delivery, "worker-c", 150, 30).code).to_equal("SCVDB_BRIDGE_TERMINAL")
+
+    it "distinguishes permission loss deletion and uncertain observations":
+        val sent = setup_item2_sent()
+        expect(db_bridge_reconcile(sent, "worker-a", 1, 102, setup_item2_observation("permission_denied", "")).code).to_equal("SCVDB_PROVIDER_PERMISSION_DENIED")
+        expect(db_bridge_reconcile(sent, "worker-a", 1, 102, setup_item2_observation("deleted", "")).code).to_equal("SCVDB_PROVIDER_OBJECT_DELETED")
+        val unknown = db_bridge_reconcile(sent, "worker-a", 1, 102, setup_item2_observation("unknown", ""))
+        expect(unknown.code).to_equal("SCVDB_PROVIDER_EFFECT_UNCERTAIN")
+        expect(unknown.delivery.must_reconcile).to_be(true)
+        expect(unknown.delivery.state).to_equal("sent_unconfirmed")
+
+    it "allows bounded retry only after scoped absence readback":
+        val sent = setup_item2_sent()
+        val absent = db_bridge_reconcile(sent, "worker-a", 1, 102, setup_item2_observation("absent", ""))
+        expect(absent.code).to_equal("not_applied")
+        val retry = db_bridge_retry(absent.delivery, "worker-a", 1, 103, 5, 8)
+        expect(retry.delivery.next_attempt).to_equal(111)
+        expect(retry.delivery.owner).to_equal("")
+        expect(db_bridge_acquire(retry.delivery, "worker-b", 110, 20).code).to_equal("SCVDB_RETRY_NOT_DUE")
+        expect(db_bridge_acquire(retry.delivery, "worker-b", 111, 20).code).to_equal("leased")
+        expect(sent.must_reconcile).to_be(true)
+
+    it "rejects foreign readback and quarantines no unobserved success":
+        val sent = setup_item2_sent()
+        val foreign = DbBridgeObservation(provider: DbProviderBindingIdentity(instance: "other", project: "org/repo", external_id: "issue-7"), correlation_id: "delivery-1", payload_digest: "payload-1", revision: "r", status: "found")
+        expect(db_bridge_reconcile(sent, "worker-a", 1, 102, foreign).code).to_equal("SCVDB_READBACK_SCOPE")
+        val conflict = db_bridge_reconcile(sent, "worker-a", 1, 102, setup_item2_observation("found", "other-bytes"))
+        expect(conflict.delivery.state).to_equal("conflicted")
+        val quarantine = db_bridge_quarantine(sent, "worker-a", 1, 102, "invalid-receipt")
+        expect(quarantine.delivery.state).to_equal("quarantined")
+        expect(quarantine.delivery.must_reconcile).to_be(true)
+
+    it "scopes echo suppression to causation and provider binding":
+        expect(db_bridge_is_echo(setup_item2_intent(), setup_item2_binding(), "delivery-1")).to_be(true)
+        expect(db_bridge_is_echo(setup_item2_intent(), setup_item2_binding(), "unrelated-bot-event")).to_be(false)
+        val foreign = DbProviderBindingIdentity(instance: "another-provider", project: "org/repo", external_id: "issue-7")
+        expect(db_bridge_is_echo(setup_item2_intent(), foreign, "delivery-1")).to_be(false)
+
+    it "rejects zero or overflowing lease durations without changing delivery":
+        val pending = setup_item2_pending()
+        expect(db_bridge_acquire(pending, "w", 1, 0).code).to_equal("SCVDB_LEASE_ARGUMENT")
+        expect(db_bridge_acquire(pending, "w", 18446744073709551615, 2).code).to_equal("SCVDB_LEASE_ARGUMENT")
+        expect(pending.state).to_equal("pending")
+
+    it "binds immutable intent contents and rejects changed bytes":
+        val original = setup_item2_intent()
+        val tampered = DbBridgeIntent(revision: original.revision, provider: original.provider, operation: original.operation, payload_digest: "changed", correlation_id: original.correlation_id, causation_id: original.causation_id, idempotency_key: original.idempotency_key)
+        match db_bridge_pending(tampered):
+            Ok(value): fail("tampered intent accepted")
+            Err(error): expect(error).to_equal("SCVDB_BRIDGE_INTENT_DIGEST")
+
+    it "uses three-way field authority and never treats access loss as deletion":
+        expect(db_provider_field_plan("a", "a", "b", "shared", "found").action).to_equal("pull_remote")
+        expect(db_provider_field_plan("a", "b", "a", "shared", "found").action).to_equal("push_local")
+        expect(db_provider_field_plan("a", "b", "c", "shared", "found").action).to_equal("conflict")
+        expect(db_provider_field_plan("a", "b", "c", "remote", "found").value).to_equal("c")
+        expect(db_provider_field_plan("a", "b", "c", "local", "found").value).to_equal("b")
+        expect(db_provider_field_plan("a", "b", "", "remote", "permission_denied").action).to_equal("permission_denied")
+        expect(db_provider_field_plan("a", "b", "", "remote", "deleted").action).to_equal("deleted")
+        expect(db_provider_field_plan("a", "b", "c", "guess", "found").action).to_equal("invalid_policy")

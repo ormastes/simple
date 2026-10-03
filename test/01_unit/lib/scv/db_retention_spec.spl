@@ -1,0 +1,160 @@
+# REQ-030..034 pure planning tests. No deletion or durable archive is simulated.
+use std.spec.{describe, it, expect, fail, step}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.db_retention.*
+use std.scv.distributed_identity_map.{IdentityMap, IdentityMapHighWater, identity_map_empty, identity_map_allocate, identity_map_tombstone}
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid}
+
+fn setup_item2_evidence(value: u8, day: u64, dependencies: [text]) -> DbEvidenceNode:
+    val content: [u8] = [value]
+    match db_evidence_digest(content, dependencies):
+        Ok(digest): return DbEvidenceNode(digest: digest, content: content, availability: "available", created_day: day, dependencies: dependencies)
+        Err(error): fail(error)
+    fail("evidence fixture failed")
+
+fn check_item2_plan(nodes: [DbEvidenceNode], pins: [DbEvidencePin], day: u64) -> DbRetentionPlan:
+    match db_retention_plan(nodes, pins, day):
+        Ok(value): return value
+        Err(error): fail(error)
+    fail("retention plan failed")
+
+fn check_item2_plan_error(nodes: [DbEvidenceNode], pins: [DbEvidencePin], day: u64, expected: text):
+    match db_retention_plan(nodes, pins, day):
+        Ok(value): fail("unsafe retention accepted")
+        Err(error): expect(error).to_equal(expected)
+
+fn setup_item2_rollup_input(identity: text, duration: u64, outcome: text) -> DbRollupInput:
+    DbRollupInput(identity: identity, day: 10, cohort: "linux-x64", outcome: outcome, duration_ms: duration, payload_digest: "payload-{identity}")
+
+fn check_item2_rollup(previous: DbDailyRollup, inputs: [DbRollupInput]) -> DbDailyRollup:
+    match db_rollup(previous, inputs):
+        Ok(value): return value
+        Err(error): fail(error)
+    fail("rollup failed")
+
+fn check_item2_rollup_error(previous: DbDailyRollup, inputs: [DbRollupInput], expected: text):
+    match db_rollup(previous, inputs):
+        Ok(value): fail("invalid rollup accepted")
+        Err(error): expect(error).to_equal(expected)
+
+fn setup_item2_snapshot(horizon: u64, high: u64, accepted: [DbAcceptedIdentity]) -> DbResnapshotState:
+    val identities = IdentityMap(database_namespace: "ffeeddccbbaa99887766554433221100", authority_epoch: 1, bindings: [], high_water: [IdentityMapHighWater(entity_kind: "bug", sequence: high)])
+    DbResnapshotState(identities: identities, schema: "schema-1", reducer: "reducer-1", accepted: accepted, history_horizon: horizon)
+
+describe "SCV retention closure and evidence resolution":
+    it "keeps raw observations exact through day27 and plans day28 rollup":
+        val node = setup_item2_evidence(1, 10, [])
+        expect(check_item2_plan([node], [], 37).deletions.len()).to_equal(0)
+        val boundary = check_item2_plan([node], [], 38)
+        expect(boundary.deletions).to_equal([node.digest])
+        expect(boundary.rollup_required).to_equal([node.digest])
+        expect(node.availability).to_equal("available")
+
+    it "protects complete transitive closure of content-addressed manifests":
+        val leaf = setup_item2_evidence(1, 1, [])
+        val root = setup_item2_evidence(2, 1, [leaf.digest])
+        val pin = DbEvidencePin(root: root.digest, reason: "release", expires_day: 2)
+        val plan = check_item2_plan([root, leaf], [pin], 100)
+        expect(plan.protected.len()).to_equal(2)
+        expect(plan.protected).to_contain(leaf.digest)
+        expect(plan.deletions.len()).to_equal(0)
+        val stripped = DbEvidenceNode(digest: root.digest, content: root.content, availability: "available", created_day: 1, dependencies: [])
+        expect(db_evidence_resolution(stripped, root.digest)).to_equal("unavailable")
+
+    it "never expires pending or unresolved pins by age":
+        val node = setup_item2_evidence(1, 1, [])
+        for reason in ["pending", "unresolved_failure", "release"]:
+            val pin = DbEvidencePin(root: node.digest, reason: reason, expires_day: 2)
+            expect(check_item2_plan([node], [pin], 100).deletions.len()).to_equal(0)
+        val policy = DbEvidencePin(root: node.digest, reason: "policy", expires_day: 100)
+        expect(check_item2_plan([node], [policy], 100).deletions.len()).to_equal(1)
+
+    it "rejects missing tampered or restricted pinned closure":
+        val missing = DbEvidencePin(root: "absent", reason: "release", expires_day: 0)
+        check_item2_plan_error([], [missing], 100, "SCVDB_PIN_CLOSURE_MISSING")
+        val node = setup_item2_evidence(1, 1, [])
+        val pin = DbEvidencePin(root: node.digest, reason: "release", expires_day: 0)
+        val tampered = DbEvidenceNode(digest: node.digest, content: [2], availability: "available", created_day: 1, dependencies: [])
+        check_item2_plan_error([tampered], [pin], 100, "SCVDB_PIN_CLOSURE_UNVERIFIED")
+        val restricted = DbEvidenceNode(digest: node.digest, content: [], availability: "restricted", created_day: 1, dependencies: [])
+        check_item2_plan_error([restricted], [pin], 100, "SCVDB_PIN_CLOSURE_UNVERIFIED")
+        expect(db_evidence_resolution(restricted, node.digest)).to_equal("restricted")
+        expect(db_evidence_resolution(tampered, node.digest)).to_equal("unavailable")
+        expect(db_evidence_resolution(node, node.digest)).to_equal("exact")
+        expect(db_evidence_resolution(node, "wrong")).to_equal("unavailable")
+
+    it "rejects duplicate inventory future evidence and unknown policy":
+        val node = setup_item2_evidence(1, 1, [])
+        check_item2_plan_error([node, node], [], 100, "SCVDB_EVIDENCE_IDENTITY")
+        check_item2_plan_error([node], [], 0, "SCVDB_EVIDENCE_FUTURE")
+        val pin = DbEvidencePin(root: node.digest, reason: "guess", expires_day: 0)
+        check_item2_plan_error([node], [pin], 100, "SCVDB_PIN_REASON")
+
+describe "SCV daily rollup semantics":
+    it "deduplicates identities and retains mergeable timing buckets":
+        val empty = db_rollup_empty(10, "linux-x64", "reducer-1")
+        val a = setup_item2_rollup_input("a", 1, "PASS")
+        val b = setup_item2_rollup_input("b", 100, "FAIL")
+        val rollup = check_item2_rollup(empty, [b, a, a])
+        expect(rollup.count).to_equal(2)
+        expect(rollup.passed).to_equal(1)
+        expect(rollup.failed).to_equal(1)
+        expect(rollup.duration_sum).to_equal(101)
+        expect(rollup.duration_min).to_equal(1)
+        expect(rollup.duration_max).to_equal(100)
+        expect(rollup.histogram).to_equal([1, 0, 1, 0, 0, 0, 0, 0])
+        expect(rollup.revision).to_equal(check_item2_rollup(empty, [a, b]).revision)
+        expect(check_item2_rollup(rollup, [a, b]).generation).to_equal(1)
+
+    it "revises late input provenance without changing earlier observations":
+        val a = setup_item2_rollup_input("a", 5, "PASS")
+        val b = setup_item2_rollup_input("b", 1001, "INCOMPLETE")
+        val first = check_item2_rollup(db_rollup_empty(10, "linux-x64", "r1"), [a])
+        val later = check_item2_rollup(first, [b, a])
+        expect(later.generation).to_equal(2)
+        expect(later.prior_revision).to_equal(first.revision)
+        expect(later.revision == first.revision).to_be(false)
+        expect(later.other).to_equal(1)
+        expect(first.count).to_equal(1)
+        check_item2_rollup_error(later, [b], "SCVDB_ROLLUP_INPUT_LOST")
+
+    it "quarantines conflicting identity reuse and arithmetic overflow":
+        val empty = db_rollup_empty(10, "linux-x64", "r1")
+        val a = setup_item2_rollup_input("a", 1, "PASS")
+        val conflict = setup_item2_rollup_input("a", 2, "PASS")
+        check_item2_rollup_error(empty, [a, conflict], "SCVDB_OBSERVATION_IDENTITY_COLLISION")
+        val huge = setup_item2_rollup_input("huge", 18446744073709551615, "FAIL")
+        check_item2_rollup_error(empty, [a, huge], "SCVDB_ROLLUP_OVERFLOW")
+
+    it "labels recomputed rollups aggregated and rejects wrong context":
+        val a = setup_item2_rollup_input("a", 5, "PASS")
+        val rollup = check_item2_rollup(db_rollup_empty(10, "linux-x64", "r1"), [a])
+        match db_rollup_resolution(rollup, [a], 10, "linux-x64", "r1"):
+            Ok(value): expect(value).to_equal("aggregated")
+            Err(error): fail(error)
+        match db_rollup_resolution(rollup, [a], 11, "linux-x64", "r1"):
+            Ok(value): expect(value).to_equal("unavailable")
+            Err(error): fail(error)
+
+describe "SCV resnapshot preservation":
+    it "preserves accepted batches highwater and replay horizon":
+        val batch = DbAcceptedIdentity(batch_id: "b1", digest: "d1")
+        val previous = setup_item2_snapshot(1, 10, [batch])
+        val next = setup_item2_snapshot(2, 11, [batch])
+        expect(db_resnapshot_validate(previous, next, 2)).to_equal("ok")
+        expect(db_resnapshot_validate(previous, next, 1)).to_equal("SCVDB_RESNAPSHOT_REQUIRED")
+        expect(db_resnapshot_validate(previous, setup_item2_snapshot(2, 9, [batch]), 2)).to_equal("SCVDB_ALLOCATOR_REGRESSION")
+        expect(db_resnapshot_validate(previous, setup_item2_snapshot(2, 11, []), 2)).to_equal("SCVDB_ACCEPTED_BATCH_LOST")
+        val changed = DbAcceptedIdentity(batch_id: "b1", digest: "changed")
+        expect(db_resnapshot_validate(previous, setup_item2_snapshot(2, 11, [changed]), 2)).to_equal("SCVDB_BATCH_IDENTITY_COLLISION")
+
+    it "rejects tombstone resurrection and ambiguous allocator snapshots":
+        val uid = EntityUid(database_namespace: "ffeeddccbbaa99887766554433221100", entity_kind: "bug", actor: ActorIncarnation(hex: "00112233445566778899aabbccddeeff"), counter: 1)
+        val allocated = identity_map_allocate(identity_map_empty(uid.database_namespace, 1), uid).state
+        val tombstoned = identity_map_tombstone(allocated, uid).state
+        val previous = DbResnapshotState(identities: tombstoned, schema: "s1", reducer: "r1", accepted: [], history_horizon: 1)
+        val resurrected = DbResnapshotState(identities: allocated, schema: "s1", reducer: "r1", accepted: [], history_horizon: 1)
+        expect(db_resnapshot_validate(previous, resurrected, 1)).to_equal("SCVDB_RESNAPSHOT_IDENTITY_LOSS")
+        val invalid = IdentityMap(database_namespace: uid.database_namespace, authority_epoch: 1, bindings: [], high_water: [IdentityMapHighWater(entity_kind: "bug", sequence: 1), IdentityMapHighWater(entity_kind: "bug", sequence: 2)])
+        val snapshot = DbResnapshotState(identities: invalid, schema: "s1", reducer: "r1", accepted: [], history_horizon: 1)
+        expect(db_resnapshot_validate(previous, snapshot, 1)).to_equal("SCVDB_RESNAPSHOT_IDENTITY_INVALID")

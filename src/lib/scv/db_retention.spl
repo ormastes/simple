@@ -1,0 +1,336 @@
+# Pure retention planning, verified content resolution and deterministic rollups.
+# External deletion, encrypted CAS, receipt signatures and SJ persistence are
+# separate owners. A plan never changes availability or deletes bytes.
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.db_canonical.{db_frame, db_canonical_text, db_domain_bytes, db_u64_bytes}
+use std.scv.distributed_identity_map.{IdentityMap, identity_map_reverse}
+use std.scv.distributed_identity.{SettledAlias, settled_alias_validate}
+
+struct DbEvidenceNode:
+    digest: text
+    content: [u8]
+    availability: text
+    created_day: u64
+    dependencies: [text]
+
+struct DbEvidencePin:
+    root: text
+    reason: text
+    expires_day: u64
+
+struct DbRetentionPlan:
+    protected: [text]
+    deletions: [text]
+    rollup_required: [text]
+
+# CAS identity covers the typed envelope, including every dependency edge.
+# Omitting a dependency therefore changes the expected object digest.
+fn db_evidence_digest(content: [u8], dependencies: [text]) -> Result<text, text>:
+    var ordered: [text] = []
+    for dependency in dependencies:
+        if dependency == "" or _retention_has(ordered, dependency):
+            return Err("SCVDB_EVIDENCE_DEPENDENCY")
+        var next: [text] = []
+        var inserted = false
+        for prior in ordered:
+            if not inserted and dependency < prior:
+                next.push(dependency)
+                inserted = true
+            next.push(prior)
+        if not inserted:
+            next.push(dependency)
+        ordered = next
+    var bytes = db_frame(1, content)
+    for dependency in ordered:
+        bytes = bytes + db_frame(2, db_canonical_text(dependency)?)
+    Ok(sha256_u8_hex(db_domain_bytes("SCVDB-EVIDENCE-ENVELOPE-v1", bytes)?))
+
+fn _retention_has(values: [text], value: text) -> bool:
+    for item in values:
+        if item == value:
+            return true
+    false
+
+fn _retention_node(nodes: [DbEvidenceNode], digest: text) -> i64:
+    for index in 0..nodes.len():
+        if nodes[index].digest == digest:
+            return index
+    -1
+
+fn db_evidence_resolution(node: DbEvidenceNode, expected_digest: text) -> text:
+    if expected_digest == "" or node.digest != expected_digest:
+        return "unavailable"
+    if node.availability == "restricted":
+        return "restricted"
+    if node.availability != "available":
+        return "unavailable"
+    match db_evidence_digest(node.content, node.dependencies):
+        Ok(actual):
+            if actual == expected_digest:
+                return "exact"
+        Err(error): return "unavailable"
+    "unavailable"
+
+# Cycles are legal in the dependency graph; each digest is visited once.
+# Unresolved/release/pending pins remain protected until an authorized caller
+# removes the pin, regardless of a local expiration timestamp.
+fn db_retention_plan(nodes: [DbEvidenceNode], pins: [DbEvidencePin], now_day: u64) -> Result<DbRetentionPlan, text>:
+    var known: [text] = []
+    for node in nodes:
+        if node.digest == "" or _retention_has(known, node.digest):
+            return Err("SCVDB_EVIDENCE_IDENTITY")
+        if node.created_day > now_day:
+            return Err("SCVDB_EVIDENCE_FUTURE")
+        if node.availability != "available" and node.availability != "restricted" and node.availability != "expired" and node.availability != "missing":
+            return Err("SCVDB_EVIDENCE_AVAILABILITY")
+        known.push(node.digest)
+    var pending: [text] = []
+    for pin in pins:
+        if pin.reason != "unresolved_failure" and pin.reason != "release" and pin.reason != "pending" and pin.reason != "reproduction" and pin.reason != "policy":
+            return Err("SCVDB_PIN_REASON")
+        val permanent = pin.reason == "unresolved_failure" or pin.reason == "release" or pin.reason == "pending"
+        if permanent or pin.expires_day == 0 or now_day < pin.expires_day:
+            pending.push(pin.root)
+    var protected: [text] = []
+    var cursor = 0
+    while cursor < pending.len():
+        val digest = pending[cursor]
+        cursor = cursor + 1
+        if _retention_has(protected, digest):
+            continue
+        val index = _retention_node(nodes, digest)
+        if index < 0:
+            return Err("SCVDB_PIN_CLOSURE_MISSING")
+        val node = nodes[index]
+        if db_evidence_resolution(node, digest) != "exact":
+            return Err("SCVDB_PIN_CLOSURE_UNVERIFIED")
+        protected.push(digest)
+        for dependency in node.dependencies:
+            if not _retention_has(protected, dependency):
+                pending.push(dependency)
+    var deletions: [text] = []
+    for node in nodes:
+        if node.availability == "available" and now_day - node.created_day >= 28 and not _retention_has(protected, node.digest):
+            if db_evidence_resolution(node, node.digest) != "exact":
+                return Err("SCVDB_EVIDENCE_DIGEST")
+            deletions.push(node.digest)
+    # An executor must first produce verified rollups and receive policy
+    # authorization; this list is not a deletion capability.
+    Ok(DbRetentionPlan(protected: protected, deletions: deletions, rollup_required: deletions))
+
+struct DbRollupInput:
+    identity: text
+    day: u64
+    cohort: text
+    outcome: text
+    duration_ms: u64
+    payload_digest: text
+
+struct DbDailyRollup:
+    day: u64
+    cohort: text
+    reducer: text
+    generation: u64
+    revision: text
+    prior_revision: text
+    identities: [text]
+    input_digests: [text]
+    count: u64
+    passed: u64
+    failed: u64
+    other: u64
+    duration_sum: u64
+    duration_min: u64
+    duration_max: u64
+    histogram: [u64]
+
+fn _rollup_digest(input: DbRollupInput) -> Result<text, text>:
+    if input.identity == "" or input.cohort == "" or input.payload_digest == "":
+        return Err("SCVDB_OBSERVATION_IDENTITY")
+    if input.outcome != "PASS" and input.outcome != "FAIL" and input.outcome != "XFAIL" and input.outcome != "XPASS" and input.outcome != "INCOMPLETE" and input.outcome != "NOT_RUN" and input.outcome != "UNCLASSIFIED" and input.outcome != "INFRA_ERROR" and input.outcome != "SIGNATURE_MISMATCH":
+        return Err("SCVDB_OBSERVATION_OUTCOME")
+    val identity = db_canonical_text(input.identity)?
+    val cohort = db_canonical_text(input.cohort)?
+    val outcome = db_canonical_text(input.outcome)?
+    val payload = db_canonical_text(input.payload_digest)?
+    val bytes = db_frame(1, identity) + db_frame(2, db_u64_bytes(input.day)) + db_frame(3, cohort) + db_frame(4, outcome) + db_frame(5, db_u64_bytes(input.duration_ms)) + db_frame(6, payload)
+    Ok(sha256_u8_hex(db_domain_bytes("SCVDB-ROLLUP-INPUT-v1", bytes)?))
+
+fn db_rollup_empty(day: u64, cohort: text, reducer: text) -> DbDailyRollup:
+    DbDailyRollup(day: day, cohort: cohort, reducer: reducer, generation: 0, revision: "", prior_revision: "", identities: [], input_digests: [], count: 0, passed: 0, failed: 0, other: 0, duration_sum: 0, duration_min: 0, duration_max: 0, histogram: [0, 0, 0, 0, 0, 0, 0, 0])
+
+# Recompute from the entire retained input set, including late observations.
+# Prior identities/digests must be preserved; callers cannot revise away facts.
+# Bins: <=1, <=10, <=100, <=1000, <=10000, <=60000, <=3600000, larger.
+fn db_rollup(previous: DbDailyRollup, inputs: [DbRollupInput]) -> Result<DbDailyRollup, text>:
+    if previous.cohort == "" or previous.reducer == "" or previous.identities.len() != previous.input_digests.len():
+        return Err("SCVDB_ROLLUP_CONTEXT")
+    if previous.generation == 18446744073709551615:
+        return Err("SCVDB_ROLLUP_EXHAUSTED")
+    var ordered: [DbRollupInput] = []
+    var digests: [text] = []
+    for input in inputs:
+        if input.day != previous.day or input.cohort != previous.cohort:
+            return Err("SCVDB_ROLLUP_COHORT")
+        val digest = _rollup_digest(input)?
+        var duplicate = false
+        for index in 0..ordered.len():
+            if ordered[index].identity == input.identity:
+                if digests[index] != digest:
+                    return Err("SCVDB_OBSERVATION_IDENTITY_COLLISION")
+                duplicate = true
+        if not duplicate:
+            var next: [DbRollupInput] = []
+            var next_digests: [text] = []
+            var inserted = false
+            for index in 0..ordered.len():
+                if not inserted and input.identity < ordered[index].identity:
+                    next.push(input)
+                    next_digests.push(digest)
+                    inserted = true
+                next.push(ordered[index])
+                next_digests.push(digests[index])
+            if not inserted:
+                next.push(input)
+                next_digests.push(digest)
+            ordered = next
+            digests = next_digests
+    for index in 0..previous.identities.len():
+        var found = false
+        for next_index in 0..ordered.len():
+            if previous.identities[index] == ordered[next_index].identity:
+                if previous.input_digests[index] != digests[next_index]:
+                    return Err("SCVDB_OBSERVATION_IDENTITY_COLLISION")
+                found = true
+        if not found:
+            return Err("SCVDB_ROLLUP_INPUT_LOST")
+    var identities: [text] = []
+    var count: u64 = 0
+    var passed: u64 = 0
+    var failed: u64 = 0
+    var other: u64 = 0
+    var total: u64 = 0
+    var minimum: u64 = 0
+    var maximum: u64 = 0
+    var histogram: [u64] = [0, 0, 0, 0, 0, 0, 0, 0]
+    val limits: [u64] = [1, 10, 100, 1000, 10000, 60000, 3600000]
+    var canonical: [u8] = []
+    for index in 0..ordered.len():
+        val input = ordered[index]
+        if total > 18446744073709551615 - input.duration_ms:
+            return Err("SCVDB_ROLLUP_OVERFLOW")
+        total = total + input.duration_ms
+        if count == 0 or input.duration_ms < minimum:
+            minimum = input.duration_ms
+        if input.duration_ms > maximum:
+            maximum = input.duration_ms
+        count = count + 1
+        if input.outcome == "PASS":
+            passed = passed + 1
+        elif input.outcome == "FAIL" or input.outcome == "XPASS" or input.outcome == "SIGNATURE_MISMATCH":
+            failed = failed + 1
+        else:
+            other = other + 1
+        var bucket = 0
+        while bucket < limits.len() and input.duration_ms > limits[bucket]:
+            bucket = bucket + 1
+        histogram[bucket] = histogram[bucket] + 1
+        identities.push(input.identity)
+        canonical = canonical + db_frame(4, db_canonical_text(digests[index])?)
+    val context = db_frame(1, db_u64_bytes(previous.day)) + db_frame(2, db_canonical_text(previous.cohort)?) + db_frame(3, db_canonical_text(previous.reducer)?)
+    val revision = sha256_u8_hex(db_domain_bytes("SCVDB-DAILY-ROLLUP-v1", context + canonical)?)
+    val generation = if previous.revision == revision: previous.generation else: previous.generation + 1
+    val prior_revision = if previous.revision == revision: previous.prior_revision else: previous.revision
+    Ok(DbDailyRollup(day: previous.day, cohort: previous.cohort, reducer: previous.reducer, generation: generation, revision: revision, prior_revision: prior_revision, identities: identities, input_digests: digests, count: count, passed: passed, failed: failed, other: other, duration_sum: total, duration_min: minimum, duration_max: maximum, histogram: histogram))
+
+# Honest aggregated resolution requires the exact queried cohort/reducer and
+# an independently recomputed revision, never just a manifest's presence.
+fn db_rollup_resolution(rollup: DbDailyRollup, inputs: [DbRollupInput], day: u64, cohort: text, reducer: text) -> Result<text, text>:
+    if rollup.day != day or rollup.cohort != cohort or rollup.reducer != reducer:
+        return Ok("unavailable")
+    val rebuilt = db_rollup(db_rollup_empty(day, cohort, reducer), inputs)?
+    if rollup.generation == 0 or (rollup.generation > 1 and rollup.prior_revision == "") or rebuilt.identities != rollup.identities or rebuilt.input_digests != rollup.input_digests:
+        return Err("SCVDB_ROLLUP_PROVENANCE")
+    if rebuilt.revision != rollup.revision or rebuilt.count != rollup.count or rebuilt.duration_sum != rollup.duration_sum or rebuilt.histogram != rollup.histogram or rebuilt.passed != rollup.passed or rebuilt.failed != rollup.failed or rebuilt.other != rollup.other or rebuilt.duration_min != rollup.duration_min or rebuilt.duration_max != rollup.duration_max:
+        return Err("SCVDB_ROLLUP_DIGEST")
+    Ok("aggregated")
+
+struct DbAcceptedIdentity:
+    batch_id: text
+    digest: text
+
+struct DbResnapshotState:
+    identities: IdentityMap
+    schema: text
+    reducer: text
+    accepted: [DbAcceptedIdentity]
+    history_horizon: u64
+
+fn _resnapshot_identity_valid(state: IdentityMap) -> bool:
+    val header = SettledAlias(database_namespace: state.database_namespace, authority_epoch: state.authority_epoch, entity_kind: "identity", sequence: 1)
+    if not settled_alias_validate(header).valid:
+        return false
+    for index in 0..state.high_water.len():
+        val mark = state.high_water[index]
+        val alias = SettledAlias(database_namespace: state.database_namespace, authority_epoch: state.authority_epoch, entity_kind: mark.entity_kind, sequence: 1)
+        if not settled_alias_validate(alias).valid:
+            return false
+        for prior in 0..index:
+            if state.high_water[prior].entity_kind == mark.entity_kind:
+                return false
+    for binding in state.bindings:
+        if identity_map_reverse(state, binding.entity_kind, binding.sequence) != binding.identity or binding.identity == "":
+            return false
+    true
+
+fn db_resnapshot_validate(previous: DbResnapshotState, candidate: DbResnapshotState, pending_base: u64) -> text:
+    if not _resnapshot_identity_valid(previous.identities) or not _resnapshot_identity_valid(candidate.identities):
+        return "SCVDB_RESNAPSHOT_IDENTITY_INVALID"
+    if previous.identities.database_namespace != candidate.identities.database_namespace or previous.identities.authority_epoch != candidate.identities.authority_epoch:
+        return "SCVDB_RESNAPSHOT_DOMAIN"
+    if candidate.schema == "" or candidate.reducer == "" or candidate.schema != previous.schema or candidate.reducer != previous.reducer:
+        return "SCVDB_RESNAPSHOT_MIGRATION_REQUIRED"
+    if candidate.history_horizon < previous.history_horizon:
+        return "SCVDB_HISTORY_REGRESSION"
+    if pending_base < candidate.history_horizon:
+        return "SCVDB_RESNAPSHOT_REQUIRED"
+    for old_mark in previous.identities.high_water:
+        var found = false
+        for mark in candidate.identities.high_water:
+            if mark.entity_kind == old_mark.entity_kind:
+                if mark.sequence < old_mark.sequence:
+                    return "SCVDB_ALLOCATOR_REGRESSION"
+                found = true
+        if not found:
+            return "SCVDB_ALLOCATOR_REGRESSION"
+    for old_binding in previous.identities.bindings:
+        var found = false
+        for binding in candidate.identities.bindings:
+            if binding.identity == old_binding.identity:
+                if binding.entity_kind != old_binding.entity_kind or binding.sequence != old_binding.sequence or (old_binding.tombstoned and not binding.tombstoned):
+                    return "SCVDB_RESNAPSHOT_IDENTITY_LOSS"
+                found = true
+        if not found:
+            return "SCVDB_RESNAPSHOT_IDENTITY_LOSS"
+    for old_batch in previous.accepted:
+        var found = false
+        for batch in candidate.accepted:
+            if batch.batch_id == old_batch.batch_id:
+                if batch.digest != old_batch.digest:
+                    return "SCVDB_BATCH_IDENTITY_COLLISION"
+                found = true
+        if not found:
+            return "SCVDB_ACCEPTED_BATCH_LOST"
+    for index in 0..candidate.accepted.len():
+        val batch = candidate.accepted[index]
+        if batch.batch_id == "" or batch.digest == "":
+            return "SCVDB_BATCH_IDENTITY"
+        for prior in 0..index:
+            if candidate.accepted[prior].batch_id == batch.batch_id:
+                return "SCVDB_BATCH_IDENTITY_COLLISION"
+    "ok"
+
+export DbEvidenceNode, DbEvidencePin, DbRetentionPlan, db_evidence_resolution, db_retention_plan
+export db_evidence_digest
+export DbRollupInput, DbDailyRollup, db_rollup_empty, db_rollup, db_rollup_resolution
+export DbAcceptedIdentity, DbResnapshotState, db_resnapshot_validate

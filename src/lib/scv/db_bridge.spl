@@ -1,0 +1,207 @@
+# Pure provider-delivery transitions. The SJ owner persists returned records;
+# adapters supply read-back observations. No function performs a provider effect.
+use std.scv.db_canonical.{db_frame, db_canonical_text, db_domain_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+struct DbProviderBindingIdentity:
+    instance: text
+    project: text
+    external_id: text
+
+struct DbBridgeIntent:
+    revision: text
+    provider: DbProviderBindingIdentity
+    operation: text
+    payload_digest: text
+    correlation_id: text
+    causation_id: text
+    idempotency_key: text
+
+struct DbBridgeDelivery:
+    intent: DbBridgeIntent
+    state: text
+    owner: text
+    generation: u64
+    lease_expires: u64
+    attempts: u64
+    next_attempt: u64
+    must_reconcile: bool
+    provider_revision: text
+    last_error: text
+
+struct DbBridgeTransition:
+    code: text
+    delivery: DbBridgeDelivery
+
+struct DbBridgeObservation:
+    provider: DbProviderBindingIdentity
+    correlation_id: text
+    payload_digest: text
+    revision: text
+    status: text
+
+fn db_provider_binding_identity_key(identity: DbProviderBindingIdentity) -> Result<text, text>:
+    if identity.instance == "" or identity.project == "" or identity.external_id == "":
+        return Err("SCVDB_PROVIDER_IDENTITY")
+    val instance = db_canonical_text(identity.instance)?
+    val project = db_canonical_text(identity.project)?
+    val external = db_canonical_text(identity.external_id)?
+    val bytes = db_domain_bytes("SCVDB-PROVIDER-BINDING-v1", db_frame(1, instance) + db_frame(2, project) + db_frame(3, external))?
+    Ok(sha256_u8_hex(bytes))
+
+fn _bridge_copy(d: DbBridgeDelivery, state: text, owner: text, generation: u64, expires: u64, attempts: u64, next_attempt: u64, reconcile: bool, revision: text, error: text) -> DbBridgeDelivery:
+    DbBridgeDelivery(intent: d.intent, state: state, owner: owner, generation: generation, lease_expires: expires, attempts: attempts, next_attempt: next_attempt, must_reconcile: reconcile, provider_revision: revision, last_error: error)
+
+fn _bridge_result(d: DbBridgeDelivery, code: text) -> DbBridgeTransition:
+    DbBridgeTransition(code: code, delivery: d)
+
+fn db_bridge_intent_digest(intent: DbBridgeIntent) -> Result<text, text>:
+    val provider = db_provider_binding_identity_key(intent.provider)?
+    var bytes = db_frame(1, db_canonical_text(provider)?)
+    bytes = bytes + db_frame(2, db_canonical_text(intent.operation)?)
+    bytes = bytes + db_frame(3, db_canonical_text(intent.payload_digest)?)
+    bytes = bytes + db_frame(4, db_canonical_text(intent.correlation_id)?)
+    bytes = bytes + db_frame(5, db_canonical_text(intent.causation_id)?)
+    bytes = bytes + db_frame(6, db_canonical_text(intent.idempotency_key)?)
+    Ok(sha256_u8_hex(db_domain_bytes("SCVDB-BRIDGE-INTENT-v1", bytes)?))
+
+fn db_bridge_pending(intent: DbBridgeIntent) -> Result<DbBridgeDelivery, text>:
+    val provider_key = db_provider_binding_identity_key(intent.provider)?
+    if provider_key == "" or intent.revision == "" or intent.payload_digest == "" or intent.correlation_id == "" or intent.idempotency_key == "":
+        return Err("SCVDB_BRIDGE_INTENT")
+    if intent.operation != "create" and intent.operation != "update" and intent.operation != "delete":
+        return Err("SCVDB_BRIDGE_OPERATION")
+    if intent.causation_id == intent.correlation_id:
+        return Err("SCVDB_CAUSATION_LOOP")
+    if db_bridge_intent_digest(intent)? != intent.revision:
+        return Err("SCVDB_BRIDGE_INTENT_DIGEST")
+    Ok(DbBridgeDelivery(intent: intent, state: "pending", owner: "", generation: 0, lease_expires: 0, attempts: 0, next_attempt: 0, must_reconcile: false, provider_revision: "", last_error: ""))
+
+fn _bridge_terminal(state: text) -> bool:
+    state == "acknowledged" or state == "conflicted" or state == "quarantined"
+
+fn _bridge_fence(d: DbBridgeDelivery, owner: text, generation: u64, now: u64) -> text:
+    if d.state != "leased" and d.state != "sent_unconfirmed":
+        return "SCVDB_BRIDGE_STATE"
+    if owner == "" or d.owner != owner or d.generation != generation:
+        return "SCVDB_LEASE_STALE"
+    if now >= d.lease_expires:
+        return "SCVDB_LEASE_EXPIRED"
+    ""
+
+fn db_bridge_acquire(d: DbBridgeDelivery, owner: text, now: u64, ttl: u64) -> DbBridgeTransition:
+    if _bridge_terminal(d.state):
+        return _bridge_result(d, "SCVDB_BRIDGE_TERMINAL")
+    if d.state != "pending" and d.state != "leased" and d.state != "sent_unconfirmed":
+        return _bridge_result(d, "SCVDB_BRIDGE_STATE")
+    if owner == "" or ttl == 0 or ttl > 3600 or now > 18446744073709551615 - ttl:
+        return _bridge_result(d, "SCVDB_LEASE_ARGUMENT")
+    if d.generation == 18446744073709551615:
+        return _bridge_result(d, "SCVDB_LEASE_EXHAUSTED")
+    if (d.state == "leased" or d.state == "sent_unconfirmed") and now < d.lease_expires:
+        return _bridge_result(d, "SCVDB_LEASE_BUSY")
+    if now < d.next_attempt:
+        return _bridge_result(d, "SCVDB_RETRY_NOT_DUE")
+    val candidate = _bridge_copy(d, "leased", owner, d.generation + 1, now + ttl, d.attempts, d.next_attempt, d.must_reconcile or d.state == "sent_unconfirmed", d.provider_revision, "")
+    _bridge_result(candidate, "leased")
+
+# Persist this transition BEFORE starting network I/O. A crash then requires
+# read-back even when it occurred before the adapter sent the request.
+fn db_bridge_sent(d: DbBridgeDelivery, owner: text, generation: u64, now: u64) -> DbBridgeTransition:
+    val error = _bridge_fence(d, owner, generation, now)
+    if error != "":
+        return _bridge_result(d, error)
+    if d.must_reconcile or d.state != "leased":
+        return _bridge_result(d, "SCVDB_READBACK_REQUIRED")
+    if d.attempts == 18446744073709551615:
+        return _bridge_result(d, "SCVDB_ATTEMPTS_EXHAUSTED")
+    _bridge_result(_bridge_copy(d, "sent_unconfirmed", owner, generation, d.lease_expires, d.attempts + 1, 0, true, d.provider_revision, ""), "sent_unconfirmed")
+
+fn db_bridge_reconcile(d: DbBridgeDelivery, owner: text, generation: u64, now: u64, observed: DbBridgeObservation) -> DbBridgeTransition:
+    val error = _bridge_fence(d, owner, generation, now)
+    if error != "":
+        return _bridge_result(d, error)
+    if not d.must_reconcile:
+        return _bridge_result(d, "SCVDB_READBACK_NOT_REQUIRED")
+    val same_provider = observed.provider.instance == d.intent.provider.instance and observed.provider.project == d.intent.provider.project and observed.provider.external_id == d.intent.provider.external_id
+    if not same_provider or observed.correlation_id != d.intent.correlation_id:
+        return _bridge_result(d, "SCVDB_READBACK_SCOPE")
+    if observed.status == "permission_denied":
+        return _bridge_result(d, "SCVDB_PROVIDER_PERMISSION_DENIED")
+    if observed.status == "unknown":
+        return _bridge_result(d, "SCVDB_PROVIDER_EFFECT_UNCERTAIN")
+    if observed.status == "absent":
+        return _bridge_result(_bridge_copy(d, "leased", owner, generation, d.lease_expires, d.attempts, 0, false, "", ""), "not_applied")
+    if observed.status == "deleted":
+        if d.intent.operation != "delete" or observed.revision == "":
+            return _bridge_result(d, "SCVDB_PROVIDER_OBJECT_DELETED")
+    elif observed.status == "found":
+        if observed.revision == "":
+            return _bridge_result(d, "SCVDB_READBACK_REVISION")
+        if observed.payload_digest != d.intent.payload_digest or d.intent.operation == "delete":
+            return _bridge_result(_bridge_copy(d, "conflicted", "", generation, 0, d.attempts, 0, false, observed.revision, "SCVDB_PROVIDER_CONFLICT"), "conflicted")
+    else:
+        return _bridge_result(d, "SCVDB_READBACK_STATUS")
+    _bridge_result(_bridge_copy(d, "acknowledged", "", generation, 0, d.attempts, 0, false, observed.revision, ""), "acknowledged")
+
+fn db_bridge_retry(d: DbBridgeDelivery, owner: text, generation: u64, now: u64, base_delay: u64, cap_delay: u64) -> DbBridgeTransition:
+    val error = _bridge_fence(d, owner, generation, now)
+    if error != "":
+        return _bridge_result(d, error)
+    if d.must_reconcile:
+        return _bridge_result(d, "SCVDB_READBACK_REQUIRED")
+    if base_delay == 0 or base_delay > cap_delay or cap_delay > 86400:
+        return _bridge_result(d, "SCVDB_BACKOFF_ARGUMENT")
+    var delay = base_delay
+    var exponent: u64 = 0
+    while exponent < d.attempts and delay < cap_delay:
+        delay = if delay > cap_delay / 2: cap_delay else: delay * 2
+        exponent = exponent + 1
+    if now > 18446744073709551615 - delay:
+        return _bridge_result(d, "SCVDB_TIME_OVERFLOW")
+    _bridge_result(_bridge_copy(d, "pending", "", generation, 0, d.attempts, now + delay, false, d.provider_revision, "retry"), "pending")
+
+fn db_bridge_quarantine(d: DbBridgeDelivery, owner: text, generation: u64, now: u64, reason: text) -> DbBridgeTransition:
+    val error = _bridge_fence(d, owner, generation, now)
+    if error != "":
+        return _bridge_result(d, error)
+    if reason == "":
+        return _bridge_result(d, "SCVDB_QUARANTINE_REASON")
+    _bridge_result(_bridge_copy(d, "quarantined", "", generation, 0, d.attempts, 0, d.must_reconcile, d.provider_revision, reason), "quarantined")
+
+# Only a causation match scoped to the same provider binding suppresses an echo.
+fn db_bridge_is_echo(intent: DbBridgeIntent, provider: DbProviderBindingIdentity, causation: text) -> bool:
+    causation != "" and causation == intent.correlation_id and provider.instance == intent.provider.instance and provider.project == intent.provider.project and provider.external_id == intent.provider.external_id
+
+struct DbProviderFieldPlan:
+    action: text
+    value: text
+
+# Same three-way decisions as lifecycle_sync_field, kept pure because that
+# module also imports a persistence owner. Authority is selected field policy,
+# not proof of caller authorization; authorize the patch before invoking this.
+fn db_provider_field_plan(base: text, local: text, remote: text, authority: text, remote_status: text) -> DbProviderFieldPlan:
+    if remote_status == "permission_denied":
+        return DbProviderFieldPlan(action: "permission_denied", value: local)
+    if remote_status == "deleted":
+        return DbProviderFieldPlan(action: "deleted", value: local)
+    if remote_status != "found":
+        return DbProviderFieldPlan(action: "unavailable", value: local)
+    if authority != "local" and authority != "remote" and authority != "shared":
+        return DbProviderFieldPlan(action: "invalid_policy", value: local)
+    if local == remote:
+        return DbProviderFieldPlan(action: "unchanged", value: local)
+    if local == base:
+        return DbProviderFieldPlan(action: "pull_remote", value: remote)
+    if remote == base:
+        return DbProviderFieldPlan(action: "push_local", value: local)
+    if authority == "local":
+        return DbProviderFieldPlan(action: "push_local_authoritative", value: local)
+    if authority == "remote":
+        return DbProviderFieldPlan(action: "pull_remote_authoritative", value: remote)
+    DbProviderFieldPlan(action: "conflict", value: local)
+
+export DbProviderBindingIdentity, DbBridgeIntent, DbBridgeDelivery, DbBridgeTransition, DbBridgeObservation
+export db_provider_binding_identity_key, db_bridge_pending, db_bridge_acquire, db_bridge_sent, db_bridge_reconcile, db_bridge_retry, db_bridge_quarantine, db_bridge_is_echo
+export DbProviderFieldPlan, db_provider_field_plan
+export db_bridge_intent_digest
