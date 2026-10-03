@@ -1,0 +1,300 @@
+# Dedicated settled-tree candidate effects, never a source checkout/index write.
+# Caller authenticates the COMPLETE candidate tree and protected authority config.
+# A successful local bare-remote push proves neither protection nor authorization.
+# Network calls require the caller's SJ lease query; the owner must exclude
+# concurrent lease acquisition until the synchronous call has returned.
+use app.io.mod.{is_dir, dir_remove_all, process_run_bounded}
+use app.io.env_ops.{env_get, host_os}
+use app.io.file_ops.{secure_temp_dir_raw, file_write_bytes, file_read, file_is_regular_no_follow}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use app.scv.db.git_settlement_transport.{db_git_settlement_reconcile_history}
+
+struct DbGitCandidateFile:
+    path: text
+    content: text
+
+struct DbGitCandidateRequest:
+    source_root: text
+    remote: text
+    scratch_parent: text
+    expected_head: text
+    object_format: text
+    files: [DbGitCandidateFile]
+    message: text
+
+struct DbGitPreparedCandidate:
+    source_root: text
+    scratch_parent: text
+    scratch: text
+    remote: text
+    expected_head: text
+    candidate_oid: text
+    tree_oid: text
+    object_format: text
+
+struct DbGitCandidatePublication:
+    code: text
+    candidate_oid: text
+    observed_head: text
+
+# Private in-process ownership. Public struct fields never authorize cleanup or
+# publication. Durable recovery imports require a separate authenticated owner.
+var _db_candidate_owned_scratch: [text] = []
+var _db_candidate_prepared: [DbGitPreparedCandidate] = []
+
+fn _db_candidate_oid(oid: text, format: text) -> bool:
+    val width = if format == "sha1": 40 else: if format == "sha256": 64 else: 0
+    if width == 0 or oid.len() != width:
+        return false
+    for i in 0..oid.len():
+        val c = oid.char_code_at(i)
+        if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102)):
+            return false
+    true
+
+fn _db_candidate_environment_safe() -> bool:
+    for key in ["GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_EXEC_PATH", "GIT_SHALLOW_FILE", "GIT_QUARANTINE_PATH", "GIT_REPLACE_REF_BASE", "GIT_SSL_NO_VERIFY"]:
+        if env_get(key) != "":
+            return false
+    true
+
+fn _db_candidate_run(root: text, arguments: [text]) -> Result<text, text>:
+    if not _db_candidate_environment_safe():
+        return Err("CandidateGitEnvironmentOverride")
+    val prefix = ["--no-replace-objects", "-C", root, "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "commit.gpgsign=false", "-c", "push.followTags=false", "-c", "protocol.allow=never", "-c", "protocol.file.allow=always", "-c", "protocol.https.allow=always", "-c", "http.sslVerify=true", "-c", "http.followRedirects=false"]
+    val (stdout, _stderr, code) = process_run_bounded("git", prefix + arguments, 30000, 65536)
+    if code != 0 or stdout.len() >= 65536:
+        return Err("CandidateGitEffectFailed")
+    Ok(stdout.trim())
+
+fn _db_candidate_network_config_safe(root: text) -> Result<bool, text>:
+    # A fixed caller-authorized URL must not be rewritten by inherited config.
+    # No matched configuration is returned: URL values may contain credentials.
+    val (_out, _err, code) = process_run_bounded("git", ["--no-replace-objects", "-C", root, "config", "--get-regexp", "^url\\..*\\.(insteadof|pushinsteadof)$"], 30000, 65536)
+    if code != 1:
+        return Err("CandidateRemoteRewriteForbidden")
+    Ok(true)
+
+fn _db_candidate_remote_allowed(remote: text) -> bool:
+    if remote.starts_with("/") and not remote.starts_with("//"):
+        for i in 0..remote.len():
+            val code = remote.char_code_at(i)
+            if code < 32 or code == 127:
+                return false
+        return is_dir(remote)
+    if not remote.starts_with("https://github.com/"):
+        return false
+    val parts = remote[19:].split("/")
+    if parts.len() != 2:
+        return false
+    for part in parts:
+        if part == "" or part.starts_with(".") or part.contains(".."):
+            return false
+        for i in 0..part.len():
+            val code = part.char_code_at(i)
+            if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or [45, 46, 95].contains(code)):
+                return false
+    true
+
+fn _db_candidate_inside(parent: text, child: text) -> bool:
+    parent == child or child.starts_with(parent + "/")
+
+fn _db_candidate_path(path: text) -> bool:
+    if path == "" or path.len() > 512 or path.starts_with("/"):
+        return false
+    val parts = path.split("/")
+    if parts.len() > 16:
+        return false
+    for part in parts:
+        if part == "" or part == "." or part.contains("..") or part.to_lower() == ".git" or part.ends_with("."):
+            return false
+        for i in 0..part.len():
+            val code = part.char_code_at(i)
+            if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122) or [45, 46, 95].contains(code)):
+                return false
+    true
+
+fn db_git_candidate_validate(request: DbGitCandidateRequest) -> Result<bool, text>:
+    # Existing path facade cannot prove Windows junction identity; fail closed.
+    if host_os() == "windows":
+        return Err("CandidatePathIdentityUnsupported")
+    if not _db_candidate_environment_safe():
+        return Err("CandidateGitEnvironmentOverride")
+    for path in [request.source_root, request.scratch_parent]:
+        for i in 0..path.len():
+            val code = path.char_code_at(i)
+            if code < 32 or code == 127:
+                return Err("CandidateInvalidScope")
+    if not request.source_root.starts_with("/") or not request.scratch_parent.starts_with("/") or not is_dir(request.source_root) or not is_dir(request.scratch_parent) or not _db_candidate_remote_allowed(request.remote):
+        return Err("CandidateInvalidScope")
+    if not _db_candidate_oid(request.expected_head, request.object_format):
+        return Err("CandidateInvalidHead")
+    if request.files.len() == 0 or request.files.len() > 10000 or request.message == "" or request.message.len() > 4096 or request.message.contains("\0"):
+        return Err("CandidateInvalidManifest")
+    var total = 0
+    var paths: [text] = []
+    for file in request.files:
+        if not _db_candidate_path(file.path) or file.content.contains("\0"):
+            return Err("CandidateInvalidPathOrText")
+        val path = file.path.to_lower()
+        for previous in paths:
+            if previous == path or _db_candidate_inside(previous, path) or _db_candidate_inside(path, previous):
+                return Err("CandidatePathCollision")
+        paths.push(path)
+        val bytes = text_to_utf8_bytes(file.content).len()
+        if bytes > 1048576 or bytes > 16777216 - total:
+            return Err("CandidateContentQuotaExceeded")
+        total = total + bytes
+    Ok(true)
+
+fn _db_candidate_scratch_parent(request: DbGitCandidateRequest) -> Result<text, text>:
+    var source = path_absolute(request.source_root)
+    val parent = path_absolute(request.scratch_parent)
+    val common = path_absolute(_db_candidate_run(source, ["rev-parse", "--path-format=absolute", "--git-common-dir"])?)
+    if _db_candidate_run(source, ["rev-parse", "--is-bare-repository"])? == "false":
+        source = path_absolute(_db_candidate_run(source, ["rev-parse", "--show-toplevel"])?)
+    if parent == "" or parent == "/" or source == "" or common == "" or _db_candidate_inside(source, parent) or _db_candidate_inside(common, parent):
+        return Err("CandidateScratchInsideSource")
+    val format = _db_candidate_run(source, ["rev-parse", "--show-object-format"])?
+    if format != request.object_format:
+        return Err("CandidateObjectFormatMismatch")
+    Ok(parent)
+
+fn _db_candidate_cleanup_owned(scratch: text) -> Result<bool, text>:
+    if not _db_candidate_owned_scratch.contains(scratch):
+        return Err("CandidateScratchNotOwned")
+    if path_absolute(scratch) != scratch or not file_is_regular_no_follow(scratch + "/.scv-candidate-owner") or file_read(scratch + "/.scv-candidate-owner") != scratch:
+        return Err("CandidateScratchIdentityChanged")
+    if not dir_remove_all(scratch):
+        return Err("CandidateScratchCleanupFailed")
+    var retained: [text] = []
+    for owned in _db_candidate_owned_scratch:
+        if owned != scratch:
+            retained.push(owned)
+    _db_candidate_owned_scratch = retained
+    var candidates: [DbGitPreparedCandidate] = []
+    for candidate in _db_candidate_prepared:
+        if candidate.scratch != scratch:
+            candidates.push(candidate)
+    _db_candidate_prepared = candidates
+    Ok(true)
+
+fn _db_candidate_build(request: DbGitCandidateRequest, scratch: text, parent: text, lease_held: fn() -> bool) -> Result<DbGitPreparedCandidate, text>:
+    _db_candidate_run(scratch, ["init", "--bare", "--template=", "--object-format={request.object_format}", "."])?
+    if lease_held():
+        return Err("CandidateNetworkForbiddenUnderLease")
+    _db_candidate_network_config_safe(scratch)?
+    _db_candidate_run(scratch, ["fetch", "--no-auto-maintenance", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--depth=1", request.remote, request.expected_head])?
+    if _db_candidate_run(scratch, ["cat-file", "-t", request.expected_head])? != "commit":
+        return Err("CandidateParentNotCommit")
+    _db_candidate_run(scratch, ["read-tree", "--empty"])?
+    for file in request.files:
+        if not file_write_bytes(scratch + "/.scv-payload", text_to_utf8_bytes(file.content)):
+            return Err("CandidateBlobWriteFailed")
+        val oid = _db_candidate_run(scratch, ["hash-object", "-w", "--no-filters", "--", scratch + "/.scv-payload"])?
+        if not _db_candidate_oid(oid, request.object_format):
+            return Err("CandidateInvalidBlob")
+        _db_candidate_run(scratch, ["update-index", "--add", "--cacheinfo", "100644,{oid},{file.path}"])?
+    val tree = _db_candidate_run(scratch, ["write-tree"])?
+    if not _db_candidate_oid(tree, request.object_format):
+        return Err("CandidateInvalidTree")
+    val oid = _db_candidate_run(scratch, ["-c", "user.name=SCV Settlement", "-c", "user.email=scv-settlement@invalid", "commit-tree", tree, "-p", request.expected_head, "-m", request.message])?
+    if not _db_candidate_oid(oid, request.object_format):
+        return Err("CandidateInvalidCommit")
+    Ok(DbGitPreparedCandidate(source_root: path_absolute(request.source_root), scratch_parent: parent, scratch: scratch, remote: request.remote, expected_head: request.expected_head, candidate_oid: oid, tree_oid: tree, object_format: request.object_format))
+
+fn db_git_candidate_prepare(request: DbGitCandidateRequest, lease_held: fn() -> bool) -> Result<DbGitPreparedCandidate, text>:
+    db_git_candidate_validate(request)?
+    if lease_held():
+        return Err("CandidateNetworkForbiddenUnderLease")
+    val parent = _db_candidate_scratch_parent(request)?
+    val scratch = secure_temp_dir_raw(parent, "scv-candidate-")
+    if scratch == "" or path_absolute(scratch) != scratch or not scratch.starts_with(parent + "/scv-candidate-"):
+        return Err("CandidateScratchCreationFailed")
+    if not file_write_bytes(scratch + "/.scv-candidate-owner", text_to_utf8_bytes(scratch)):
+        # Fresh, securely allocated, canonical path; no external effects yet.
+        if path_absolute(scratch) == scratch:
+            val removed = dir_remove_all(scratch)
+        return Err("CandidateOwnershipMarkerFailed")
+    _db_candidate_owned_scratch.push(scratch)
+    match _db_candidate_build(request, scratch, parent, lease_held):
+        Ok(candidate):
+            _db_candidate_prepared.push(candidate)
+            match _db_candidate_verify(candidate):
+                Ok(_): Ok(candidate)
+                Err(reason):
+                    _db_candidate_cleanup_owned(scratch)?
+                    Err(reason)
+        Err(reason):
+            _db_candidate_cleanup_owned(scratch)?
+            Err(reason)
+
+fn _db_candidate_registered(candidate: DbGitPreparedCandidate) -> bool:
+    for prepared in _db_candidate_prepared:
+        if prepared.scratch == candidate.scratch and prepared.source_root == candidate.source_root and prepared.scratch_parent == candidate.scratch_parent and prepared.remote == candidate.remote and prepared.expected_head == candidate.expected_head and prepared.candidate_oid == candidate.candidate_oid and prepared.tree_oid == candidate.tree_oid and prepared.object_format == candidate.object_format:
+            return true
+    false
+
+fn _db_candidate_verify(candidate: DbGitPreparedCandidate) -> Result<bool, text>:
+    if not _db_candidate_registered(candidate) or not _db_candidate_owned_scratch.contains(candidate.scratch):
+        return Err("CandidateNotOwned")
+    if path_absolute(candidate.scratch) != candidate.scratch or not file_is_regular_no_follow(candidate.scratch + "/.scv-candidate-owner") or file_read(candidate.scratch + "/.scv-candidate-owner") != candidate.scratch:
+        return Err("CandidateScratchIdentityChanged")
+    if _db_candidate_run(candidate.scratch, ["rev-parse", "--show-object-format"])? != candidate.object_format:
+        return Err("CandidateObjectFormatMismatch")
+    if _db_candidate_run(candidate.scratch, ["cat-file", "-t", candidate.candidate_oid])? != "commit":
+        return Err("CandidateInvalidCommit")
+    val commit = _db_candidate_run(candidate.scratch, ["cat-file", "-p", candidate.candidate_oid])?
+    var parents = 0
+    var trees = 0
+    for line in commit.split("\n"):
+        if line == "":
+            break
+        if line.starts_with("parent "):
+            parents = parents + 1
+            if line[7:] != candidate.expected_head:
+                return Err("CandidateParentMismatch")
+        if line.starts_with("tree "):
+            trees = trees + 1
+            if line[5:] != candidate.tree_oid:
+                return Err("CandidateTreeMismatch")
+    if parents != 1 or trees != 1:
+        return Err("CandidateParentMismatch")
+    Ok(true)
+
+fn db_git_candidate_publish(candidate: DbGitPreparedCandidate, lease_held: fn() -> bool) -> Result<DbGitCandidatePublication, text>:
+    _db_candidate_verify(candidate)?
+    _db_candidate_network_config_safe(candidate.scratch)?
+    if lease_held():
+        return Err("CandidateNetworkForbiddenUnderLease")
+    val before = db_git_settlement_reconcile_history(candidate.scratch, candidate.remote, candidate.expected_head, candidate.candidate_oid, candidate.scratch_parent)
+    if before.code == "published":
+        return Ok(DbGitCandidatePublication(code: "already_published", candidate_oid: candidate.candidate_oid, observed_head: before.observed_head))
+    if before.code != "not_published":
+        return Ok(DbGitCandidatePublication(code: "uncertain", candidate_oid: candidate.candidate_oid, observed_head: before.observed_head))
+    if before.observed_head != candidate.expected_head:
+        return Ok(DbGitCandidatePublication(code: "stale_head", candidate_oid: candidate.candidate_oid, observed_head: before.observed_head))
+    if lease_held():
+        return Err("CandidateNetworkForbiddenUnderLease")
+    # Sole parent H plus non-force push: a competing sibling is not fast-forward.
+    # No force, force-with-lease, plus-refspec, tags, or mutable local source ref.
+    val push = _db_candidate_run(candidate.scratch, ["push", "--porcelain", "--no-force", "--no-verify", candidate.remote, "{candidate.candidate_oid}:refs/heads/settled"])
+    # Even a failed process may have published before acknowledgement was lost.
+    if lease_held():
+        return Ok(DbGitCandidatePublication(code: "uncertain", candidate_oid: candidate.candidate_oid, observed_head: ""))
+    val after = db_git_settlement_reconcile_history(candidate.scratch, candidate.remote, candidate.expected_head, candidate.candidate_oid, candidate.scratch_parent)
+    var code = "uncertain"
+    if after.code == "published":
+        code = "published"
+    elif after.code == "not_published":
+        code = if after.observed_head == candidate.expected_head: "not_published" else: "stale_head"
+    Ok(DbGitCandidatePublication(code: code, candidate_oid: candidate.candidate_oid, observed_head: after.observed_head))
+
+fn db_git_candidate_cleanup(candidate: DbGitPreparedCandidate) -> Result<bool, text>:
+    if not _db_candidate_registered(candidate):
+        return Err("CandidateNotOwned")
+    _db_candidate_cleanup_owned(candidate.scratch)
+
+export DbGitCandidateFile, DbGitCandidateRequest, DbGitPreparedCandidate, DbGitCandidatePublication
+export db_git_candidate_validate, db_git_candidate_prepare, db_git_candidate_publish, db_git_candidate_cleanup
