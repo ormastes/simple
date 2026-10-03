@@ -10,6 +10,81 @@ use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 
+fn filter_callback_reachable(function: MirFunction, blocked_from: i64, blocked_to: i64) -> bool:
+    var work: [i64] = [function.entry_block.id]
+    var visited: [i64] = []
+    while work.len() > 0:
+        val id = work.pop()
+        if not visited.contains(id):
+            visited.push(id)
+            for block in function.blocks:
+                if block.id.id == id:
+                    for instruction in block.instructions:
+                        match instruction.kind:
+                            case MirInstKind.CallIndirect(_, _, _, _): return true
+                            case _: pass
+                    var next: [i64] = []
+                    match block.terminator:
+                        case MirTerminator.Goto(target): next.push(target.id)
+                        case MirTerminator.If(_, yes, no):
+                            next.push(yes.id)
+                            next.push(no.id)
+                        case _: pass
+                    for target in next:
+                        if id != blocked_from or target != blocked_to:
+                            work.push(target)
+    false
+
+fn filter_assert_null_target_guard(function: MirFunction):
+    var target_id: i64 = -1
+    var zero_id: i64 = -1
+    var guard_id: i64 = -1
+    var guard_block: i64 = -1
+    var success_block: i64 = -1
+    var failure_block: i64 = -1
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(dest, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str("rt_closure_func_ptr"), _): target_id = dest.unwrap().id
+                        case _: pass
+                case MirInstKind.Const(dest, MirConstValue.Int(0), _): zero_id = dest.id
+                case MirInstKind.BinOp(dest, MirBinOp.Ne, left, right):
+                    match (left.kind, right.kind):
+                        case (MirOperandKind.Copy(target), MirOperandKind.Copy(zero)):
+                            if target.id == target_id and zero.id == zero_id and target_id >= 0:
+                                guard_id = dest.id
+                                guard_block = block.id.id
+                        case _: pass
+                case _: pass
+        match block.terminator:
+            case MirTerminator.If(condition, yes, no):
+                match condition.kind:
+                    case MirOperandKind.Copy(local):
+                        if local.id == guard_id and block.id.id == guard_block:
+                            success_block = yes.id
+                            failure_block = no.id
+                    case _: pass
+            case _: pass
+    expect(success_block).to_be_greater_than(-1)
+    expect(failure_block).to_be_greater_than(-1)
+    var panic_found = false
+    for block in function.blocks:
+        if block.id.id == failure_block:
+            expect(block.terminator).to_equal(MirTerminator.Unreachable)
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str("rt_panic"), _): panic_found = true
+                            case _: pass
+                    case _: pass
+    expect(panic_found).to_equal(true)
+    expect(filter_callback_reachable(function, -1, -1)).to_equal(true)
+    # Removing the nonzero edge must disconnect every indirect callback call.
+    expect(filter_callback_reachable(function, guard_block, success_block)).to_equal(false)
+
 fn filter_abi_check(source: text, captured: bool):
     val ast = parse_full_frontend(source, "filter_abi.spl", "filter_abi", Logger(level: 0))
     var hir_lowering = HirLowering.with_filename("filter_abi.spl")
@@ -41,6 +116,8 @@ fn filter_abi_check(source: text, captured: bool):
     var array_pushes = 0
     for function in mir.functions.values():
         if not function.name.starts_with("__lambda_lift_"):
+            if captured:
+                filter_assert_null_target_guard(function)
             for block in function.blocks:
                 for instruction in block.instructions:
                     match instruction.kind:
