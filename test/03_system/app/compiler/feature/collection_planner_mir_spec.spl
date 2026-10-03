@@ -1,0 +1,93 @@
+"""
+Collection query reuse legality at the production MIR block-pass boundary.
+Hand-built MIR exercises real transformations, not compiled program execution.
+Runtime ownership admission is a fixture proof, not evidence of driver wiring.
+"""
+# @req REQ-008
+# @cover src/compiler/60.mir_opt/mir_opt/collection_opt_core.spl
+use std.spec.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.MirBlock
+use compiler.mir_opt.mir_opt.collection_opt.create_collection_opt_pass
+
+fn planner_mir_copy(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: id)))
+
+fn planner_mir_read(name: text, dest: i64) -> MirInst:
+    val callee = MirOperand(kind: MirOperandKind.Const(
+        MirConstValue.Str(name),
+        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+    ))
+    MirInst(kind: MirInstKind.Call(LocalId(id: dest), callee, [planner_mir_copy(1), planner_mir_copy(2)]), span: nil)
+
+fn planner_mir_block(instructions: [MirInst]) -> MirBlock:
+    MirBlock(id: BlockId(id: 0), label: Some("entry"), instructions: instructions, terminator: MirTerminator.Ret(nil))
+
+fn planner_mir_call_count(block: MirBlock) -> i64:
+    var count = 0
+    for inst in block.instructions:
+        match inst.kind:
+            case Call(_, _, _):
+                count = count + 1
+            case _:
+                pass
+    count
+
+describe "collection planner MIR query legality":
+    it "CP-MIR-01 retains runtime-looking calls without ownership proof":
+        step("prepare MIR query fixtures")
+        var optimizer = create_collection_opt_pass()
+        val block = planner_mir_block([planner_mir_read("rt_array_get", 10), planner_mir_read("rt_array_get", 11)])
+        step("apply the production MIR query pass")
+        val result = optimizer.canonicalize_collection_pure_queries_block(block)
+        expect(planner_mir_call_count(result)).to_equal(2)
+        expect(optimizer.pure_queries_reused).to_equal(0)
+
+    it "CP-MIR-02 refuses generic method names even when submitted for admission":
+        step("prepare MIR query fixtures")
+        var optimizer = create_collection_opt_pass()
+        optimizer.admit_collection_runtime_reads(["get"])
+        val block = planner_mir_block([planner_mir_read("get", 10), planner_mir_read("get", 11)])
+        step("apply the production MIR query pass")
+        val result = optimizer.canonicalize_collection_pure_queries_block(block)
+        expect(planner_mir_call_count(result)).to_equal(2)
+        expect(optimizer.pure_queries_reused).to_equal(0)
+
+    it "CP-MIR-03 reuses an admitted read with stable inputs and result":
+        step("prepare MIR query fixtures")
+        var optimizer = create_collection_opt_pass()
+        optimizer.admit_collection_runtime_reads(["rt_array_get"])
+        val block = planner_mir_block([planner_mir_read("rt_array_get", 10), planner_mir_read("rt_array_get", 11)])
+        step("apply the production MIR query pass")
+        val result = optimizer.canonicalize_collection_pure_queries_block(block)
+        expect(planner_mir_call_count(result)).to_equal(1)
+        expect(result.instructions.len()).to_equal(2)
+        expect(optimizer.pure_queries_reused).to_equal(1)
+        match result.instructions[1].kind:
+            case Copy(dest, source):
+                expect(dest.id).to_equal(11)
+                expect(source.id).to_equal(10)
+            case _:
+                fail("duplicate admitted read must copy its valid cached result")
+
+    it "CP-MIR-04 retains the read after its index changes":
+        step("prepare MIR query fixtures")
+        var optimizer = create_collection_opt_pass()
+        optimizer.admit_collection_runtime_reads(["rt_array_get"])
+        val overwrite = MirInst(kind: MirInstKind.Copy(LocalId(id: 2), LocalId(id: 3)), span: nil)
+        val block = planner_mir_block([planner_mir_read("rt_array_get", 10), overwrite, planner_mir_read("rt_array_get", 11)])
+        step("apply the production MIR query pass")
+        val result = optimizer.canonicalize_collection_pure_queries_block(block)
+        expect(planner_mir_call_count(result)).to_equal(2)
+        expect(optimizer.pure_queries_reused).to_equal(0)
+
+    it "CP-MIR-05 retains the read after its cached result is overwritten":
+        step("prepare MIR query fixtures")
+        var optimizer = create_collection_opt_pass()
+        optimizer.admit_collection_runtime_reads(["rt_array_get"])
+        val overwrite = MirInst(kind: MirInstKind.Copy(LocalId(id: 10), LocalId(id: 3)), span: nil)
+        val block = planner_mir_block([planner_mir_read("rt_array_get", 10), overwrite, planner_mir_read("rt_array_get", 11)])
+        step("apply the production MIR query pass")
+        val result = optimizer.canonicalize_collection_pure_queries_block(block)
+        expect(planner_mir_call_count(result)).to_equal(2)
+        expect(optimizer.pure_queries_reused).to_equal(0)
