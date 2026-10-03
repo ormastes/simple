@@ -1,6 +1,9 @@
 #!/bin/sh
 # Run an admitted phase compiler's compiler/tool matrix without sharing mutable
 # HOME, TMP, cache, or output state with the next canonical bootstrap phase.
+# BOOTSTRAP_VERIFY_DIAGNOSTIC=1 permits explicit zero work/spec/native deadlines
+# and up to80 backend build threads. Worker pools and identity checks remain.
+# A successful diagnostic matrix records DIAGNOSTIC_PASS, never admission PASS.
 
 set -u
 
@@ -10,6 +13,7 @@ set -u
 . "$(dirname -- "$0")/bootstrap-module-collection.shs"
 . "$(dirname -- "$0")/bootstrap-scv-prime.shs"
 . "$(dirname -- "$0")/phase-c-backend-commands.shs"
+. "$(dirname -- "$0")/bootstrap-verification-resource-policy.shs"
 bootstrap_windows_preserve_cl_mode
 
 die() {
@@ -179,6 +183,7 @@ native_internal_timeout=${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-600}
 build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-4}
 module_workers=${BOOTSTRAP_VERIFY_MODULE_WORKERS:-2}
 test_workers=${BOOTSTRAP_VERIFY_TEST_WORKERS:-1}
+verification_diagnostic=${BOOTSTRAP_VERIFY_DIAGNOSTIC:-0}
 
 for arg in "$@"; do
   case "$arg" in
@@ -227,20 +232,10 @@ case "$profile" in full|slim) ;; *) die "--profile requires full or slim" ;; esa
 [ "$profile" != slim ] || [ "$phase" = stage2 ] || die "--profile=slim is stage2-only"
 [ "$profile" != slim ] || [ "$strategy" != full ] || die "--profile=slim and --strategy=full are mutually exclusive"
 case "$hash_policy" in canonical|temporary) ;; *) die "invalid hash policy" ;; esac
-case "$timeout_seconds" in ''|*[!0-9]*|0) die "timeout must be a positive integer" ;; esac
-case "$spec_timeout_seconds" in ''|*[!0-9]*|0) die "spec timeout must be a positive integer" ;; esac
-case "$native_internal_timeout" in ''|*[!0-9]*) die "native internal timeout must be an integer" ;; esac
-[ "$native_internal_timeout" -gt 60 ] || die "native internal timeout must exceed 60 seconds"
-case "$build_threads" in ''|*[!0-9]*|0) die "build threads must be a positive integer" ;; esac
-verification_worker_limit=12
-# Stage2 qualification can use an explicitly requested large Windows pool.
-# Keep later-phase limits unchanged until their separate memory admission.
-[ "$phase" != stage2 ] || verification_worker_limit=80
-case "$module_workers" in ''|*[!0-9]*|0) die "module workers must be a positive integer" ;; esac
-[ "$module_workers" -gt 0 ] && [ "$module_workers" -le "$verification_worker_limit" ] || die "module workers must be from 1 to $verification_worker_limit"
-[ "$phase" != stage3 ] || [ "$build_threads" -le 12 ] || die "Stage3 build threads must be from 1 to 12"
-case "$test_workers" in ''|*[!0-9]*|0) die "test workers must be a positive integer" ;; esac
-[ "$test_workers" -gt 0 ] && [ "$test_workers" -le "$verification_worker_limit" ] || die "test workers must be from 1 to $verification_worker_limit"
+bootstrap_verification_resource_policy "$phase" "$verification_diagnostic" \
+  "$timeout_seconds" "$spec_timeout_seconds" "$native_internal_timeout" \
+  "$build_threads" "$module_workers" "$test_workers" ||
+  die "invalid verification resource policy (zero deadlines require BOOTSTRAP_VERIFY_DIAGNOSTIC=1; worker pools remain bounded)"
 test_mode_flag=--sequential
 test_worker_flag=
 if [ "$test_workers" -gt 1 ]; then
@@ -501,6 +496,12 @@ stage2_row_delegation_env() {
   echo "verification_backend=$verification_backend"
   echo "strategy=$strategy"
   echo "hash_policy=$hash_policy"
+  echo "diagnostic_execution=$verification_diagnostic"
+  echo "task_timeout_seconds=$timeout_seconds"
+  echo "spec_timeout_seconds=$spec_timeout_seconds"
+  echo "build_threads=$build_threads"
+  echo "module_workers=$module_workers"
+  echo "test_workers=$test_workers"
   echo "expected_compiler_sha256=$expected_sha"
   echo "actual_compiler_sha256=$snapshot_sha"
   echo "compiler_hash_status=$hash_status"
@@ -2444,7 +2445,7 @@ echo "unsupported_tasks=$matrix_unsupported" >>"$summary" || die "cannot append 
 # by this process. Keep unsupported state separate from execution failures,
 # so independent supported tasks still produce their normal evidence.
 if [ "$failures" -eq 0 ] && [ "$matrix_failed" -eq 0 ] && [ "$matrix_unsupported" -eq 0 ]; then
-  echo "overall=PASS" >>"$summary" || die "cannot append verification summary"
+  echo "overall=$verification_success_result" >>"$summary" || die "cannot append verification summary"
   exit 0
 fi
 echo "overall=FAIL" >>"$summary" || die "cannot append verification summary"
