@@ -1,0 +1,181 @@
+"""Checked psABI file-attribute decoding and deterministic selected-input merge."""
+use compiler.backend.linker.elf_parser.{ElfObject}
+use compiler.backend.linker.riscv_arch_attributes.{riscv_isa_merge}
+use std.string_core.{char_from_code}
+
+struct RiscvAttributeNumber:
+    value: i64
+    next: i64
+
+struct RiscvAttributeString:
+    value: text
+    next: i64
+
+struct RiscvFileAttributes:
+    present: bool
+    arch: text
+    numbers: {i64: i64}
+
+fn riscv_attr_number(bytes: [u8], offset: i64, end: i64) -> Result<RiscvAttributeNumber, text>:
+    var cursor = offset
+    var value: i64 = 0
+    var shift: i64 = 0
+    while cursor < end and shift < 63:
+        val byte = bytes[cursor] as i64
+        value = value | ((byte & 127) << shift)
+        cursor = cursor + 1
+        if byte < 128: return Ok(RiscvAttributeNumber(value: value, next: cursor))
+        shift = shift + 7
+    Err("RISC-V attribute ULEB128 is truncated or exceeds signed 63-bit representation")
+
+fn riscv_attr_string(bytes: [u8], offset: i64, end: i64) -> Result<RiscvAttributeString, text>:
+    var cursor = offset
+    var value = ""
+    while cursor < end:
+        val byte = bytes[cursor] as i64
+        cursor = cursor + 1
+        if byte == 0: return Ok(RiscvAttributeString(value: value, next: cursor))
+        if byte > 127: return Err("RISC-V attribute string is not ASCII")
+        value = value + char_from_code(byte)
+    Err("RISC-V attribute string is unterminated")
+
+fn riscv_attr_length(bytes: [u8], offset: i64, end: i64) -> Result<i64, text>:
+    if offset < 0 or offset > end or end > bytes.len() or 4 > end - offset:
+        return Err("RISC-V attribute length is truncated")
+    var value: i64 = 0
+    var i: i64 = 0
+    while i < 4:
+        value = value | ((bytes[offset + i] as i64) << (i * 8))
+        i = i + 1
+    Ok(value)
+
+fn riscv_attributes_read(object: ElfObject) -> Result<RiscvFileAttributes, text>:
+    var present = false
+    var arch = ""
+    var numbers: {i64: i64} = {}
+    var seen: {i64: bool} = {}
+    for section in object.sections:
+        if section.sh_type != 0x70000003: continue
+        if present: return Err("duplicate RISC-V attribute sections")
+        present = true
+        if section.sh_flags != 0 or section.sh_addr < 0 or section.sh_addr > object.raw.len() or section.sh_size < 1 or section.sh_size > object.raw.len() - section.sh_addr:
+            return Err("RISC-V attribute section bounds or flags are invalid")
+        val bytes = object.raw
+        val end = section.sh_addr + section.sh_size
+        if bytes[section.sh_addr] != 65: return Err("RISC-V attribute format must be A")
+        var cursor = section.sh_addr + 1
+        var vendor_seen = false
+        while cursor < end:
+            val start = cursor
+            val length = riscv_attr_length(bytes, cursor, end)?
+            if length < 10 or length > end - start: return Err("RISC-V attribute vendor length exceeds section")
+            val vendor_end = start + length
+            val vendor = riscv_attr_string(bytes, cursor + 4, vendor_end)?
+            if vendor.value != "riscv": return Err("unsupported RISC-V attribute vendor: {vendor.value}")
+            if vendor_seen: return Err("duplicate RISC-V attribute vendor records")
+            vendor_seen = true
+            cursor = vendor.next
+            while cursor < vendor_end:
+                val record_start = cursor
+                val tag = riscv_attr_number(bytes, cursor, vendor_end)?
+                val size = riscv_attr_length(bytes, tag.next, vendor_end)?
+                if size < tag.next - record_start + 4 or size > vendor_end - record_start:
+                    return Err("RISC-V attribute file-record length is invalid")
+                if tag.value != 1: return Err("unsupported RISC-V attribute scope {tag.value}")
+                val record_end = record_start + size
+                cursor = tag.next + 4
+                while cursor < record_end:
+                    val attribute = riscv_attr_number(bytes, cursor, record_end)?
+                    val key = attribute.value
+                    if seen.has(key): return Err("duplicate RISC-V attribute tag {key}")
+                    seen[key] = true
+                    cursor = attribute.next
+                    if key == 5:
+                        val value = riscv_attr_string(bytes, cursor, record_end)?
+                        arch = value.value
+                        cursor = value.next
+                    elif [4, 6, 8, 10, 12, 14, 16].contains(key):
+                        val value = riscv_attr_number(bytes, cursor, record_end)?
+                        numbers[key] = value.value
+                        cursor = value.next
+                    else:
+                        return Err("unsupported RISC-V attribute tag {key}")
+            cursor = vendor_end
+        if not vendor_seen or arch == "": return Err("RISC-V attributes require a riscv file architecture record")
+    Ok(RiscvFileAttributes(present: present, arch: arch, numbers: numbers))
+
+fn riscv_attr_append_number(bytes: [i64], value: i64) -> [i64]:
+    var result = bytes
+    var rest = value
+    while rest >= 128:
+        result.push((rest & 127) | 128)
+        rest = rest >> 7
+    result.push(rest)
+    result
+
+fn riscv_attr_append_u32(bytes: [i64], value: i64) -> [i64]:
+    var result = bytes
+    var i: i64 = 0
+    while i < 4:
+        result.push((value >> (i * 8)) & 255)
+        i = i + 1
+    result
+
+fn elf_riscv_attributes(objects: [ElfObject]) -> Result<[i64], text>:
+    var architectures: [text] = []
+    var merged: {i64: i64} = {}
+    var present = false
+    var first = true
+    for object in objects:
+        val attributes = riscv_attributes_read(object)?
+        present = present or attributes.present
+        architectures.push(attributes.arch)
+        val values = attributes.numbers
+        val stack = if values.has(4): values[4] else: 16
+        if stack <= 0 or (stack & (stack - 1)) != 0: return Err("invalid RISC-V stack alignment attribute")
+        if not first and merged[4] != stack: return Err("incompatible RISC-V stack alignment attributes")
+        merged[4] = stack
+        val unaligned = if values.has(6): values[6] else: 0
+        if unaligned > 1: return Err("invalid RISC-V unaligned-access attribute")
+        merged[6] = if first: unaligned else: merged[6] | unaligned
+        val atomic = if values.has(14): values[14] else: 0
+        if atomic > 3: return Err("unsupported RISC-V atomic ABI attribute")
+        val previous_atomic = if first: 0 else: merged[14]
+        if (previous_atomic == 1 and atomic == 3) or (previous_atomic == 3 and atomic == 1):
+            return Err("incompatible RISC-V atomic ABI attributes")
+        if atomic == 0: merged[14] = previous_atomic
+        elif previous_atomic == 0 or previous_atomic == 2: merged[14] = atomic
+        elif atomic == 2: merged[14] = previous_atomic
+        else: merged[14] = atomic
+        val gp = if values.has(16): values[16] else: 0
+        if gp > 2047: return Err("unsupported RISC-V x3 register usage attribute")
+        val previous_gp = if first: gp else: merged[16]
+        if previous_gp != gp and not ((previous_gp == 0 and (gp == 1 or gp == 2)) or (gp == 0 and (previous_gp == 1 or previous_gp == 2))):
+            return Err("incompatible RISC-V x3 register usage attributes")
+        merged[16] = if gp == 0: previous_gp else: gp
+        for key in [8, 10, 12]:
+            if values.has(key):
+                if merged.has(key) and merged[key] != values[key]: return Err("incompatible RISC-V privileged specification attributes")
+                merged[key] = values[key]
+        first = false
+    if not present: return Ok([])
+    val arch = riscv_isa_merge(architectures)?
+    var body: [i64] = []
+    for key in [4, 5, 6, 8, 10, 12, 14, 16]:
+        if key == 5:
+            body.push(5)
+            for byte in arch.bytes(): body.push(byte as i64)
+            body.push(0)
+        elif merged.has(key):
+            body = riscv_attr_append_number(body, key)
+            body = riscv_attr_append_number(body, merged[key])
+    var result: [i64] = [65]
+    result = riscv_attr_append_u32(result, 15 + body.len())
+    for byte in "riscv".bytes(): result.push(byte as i64)
+    result.push(0)
+    result.push(1)
+    result = riscv_attr_append_u32(result, 5 + body.len())
+    for byte in body: result.push(byte)
+    Ok(result)
+
+export elf_riscv_attributes

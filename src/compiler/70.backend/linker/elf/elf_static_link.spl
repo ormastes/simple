@@ -58,6 +58,8 @@ use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
 use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
 use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags, elf_riscv_hi_index}
 use compiler.backend.linker.elf.riscv_align.{elf_riscv_align_objects}
+use compiler.backend.linker.elf.riscv_attributes.{elf_riscv_attributes}
+use compiler.backend.linker.elf.elf_nonalloc_section.{elf_append_nonalloc_section}
 use compiler.backend.linker.riscv_static_reloc.{riscv_static_delta, riscv_uleb_width, riscv_uleb_patch}
 use compiler.backend.linker.elf.merge_strings.{
     ElfMergePlan, elf_merge_section, elf_merge_sections, elf_merge_offset
@@ -893,9 +895,21 @@ fn elf_tls_tprel(plan: ElfExecPlan, target: RelocArch, address: i64) -> Result<i
     val end = elf_tls_end(plan)
     if start < 0 or end < 0:
         return Err("TLS relocation has no PT_TLS image")
+    if target == RelocArch.Riscv64:
+        return Ok(address - start)
     # Same p_memsz/p_align the writer publishes in PT_TLS.
     Ok(elf_tls_tpoff(elf_target_is_a64(target), address, start, end - start,
         elf_tls_align(plan)))
+
+fn elf_symtab_address(plan: ElfExecPlan, info: i64, address: i64) -> Result<i64, text>:
+    if (info & 15) != 6:
+        return Ok(address)
+    val start = elf_tls_start(plan)
+    val end = elf_tls_end(plan)
+    if start < 0 or address < start or address > end:
+        return Err("defined STT_TLS symbol is outside the PT_TLS image")
+    # ELF STT_TLS values are offsets in the TLS block on every target.
+    Ok(address - start)
 
 fn elf_tls_dtprel(plan: ElfExecPlan, address: i64) -> Result<i64, text>:
     val start = elf_tls_start(plan)
@@ -1001,7 +1015,8 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
                         val sh = elf_out_shndx(ctx, lay, oi, sym.st_shndx)
                         if sh > 0:
                             rows = elf_sym_row(rows, sym.name, typ, sym.st_other, sh,
-                                elf_in_vaddr(ctx, lay, oi, sym.st_shndx, sym.st_value)?, sym.st_size)
+                                elf_symtab_address(lay.plan, typ,
+                                    elf_in_vaddr(ctx, lay, oi, sym.st_shndx, sym.st_value)?)?, sym.st_size)
             else if sym.name != "":
                 if not seen.has(sym.name):
                     seen[sym.name] = true
@@ -1025,7 +1040,8 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
                         var sz = sym.st_size
                         if sym.st_shndx == SHN_COMMON:
                             sz = ctx.res.defined[sym.name].size
-                        rows = elf_sym_row(rows, sym.name, typ, sym.st_other, shn, v, sz)
+                        rows = elf_sym_row(rows, sym.name, typ, sym.st_other, shn,
+                            elf_symtab_address(lay.plan, typ, v)?, sz)
             si = si + 1
         oi = oi + 1
     for n in order:
@@ -1063,7 +1079,8 @@ fn elf_build_symtab(ctx: ElfLinkCtx, lay: ElfLayout) -> Result<ElfSymtabOut, tex
                 var sz = def_sym.st_size
                 if e.section_idx == SHN_COMMON:
                     sz = e.size
-                rows = elf_sym_row(rows, n, info, def_sym.st_other, sh, elf_entry_addr(ctx, lay, e)?, sz)
+                rows = elf_sym_row(rows, n, info, def_sym.st_other, sh,
+                    elf_symtab_address(lay.plan, info, elf_entry_addr(ctx, lay, e)?)?, sz)
         else:
             var sym_bind = STB_GLOBAL
             if all_weak[n]:
@@ -1282,8 +1299,10 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         all = all.push(m.obj)
 
     var riscv_flags: i64 = 0
+    var riscv_attributes: [i64] = []
     if target == RelocArch.Riscv64:
         riscv_flags = elf_riscv_flags(all)?
+        riscv_attributes = elf_riscv_attributes(all)?
         all = elf_riscv_align_objects(all)?
     all = elf_relax_tls(all, target)?
 
@@ -1527,9 +1546,19 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             s = 1 # Main executable/static link unit is module 1 in the Linux TLS ABI.
             a = 0
         else if r.rclass == RC_TLS_LE:
-            s = elf_tls_tprel(plan, target, s + a)?
+            if target == RelocArch.Riscv64:
+                if r.stype != 6 or r.kind != SYMREF_DEFINED:
+                    return Err("RISC-V local-exec relocation requires a defined TLS symbol: {r.name}")
+                val tls_offset = elf_symtab_address(plan, r.stype, s)?
+                s = riscv_static_delta(tls_offset, a, 0)?
+            else:
+                s = elf_tls_tprel(plan, target, s + a)?
             a = 0
-            if a64:
+            if target == RelocArch.Riscv64:
+                if r.rtype == 29: rtype = 26
+                else if r.rtype == 30: rtype = 27
+                else if r.rtype == 31: rtype = 28
+            else if a64:
                 rtype = r.rtype
             else if r.rtype != 18:
                 rtype = 11  # R_X86_64_32S encodes the signed TPOFF32 result
@@ -1728,6 +1757,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         image[48] = riscv_flags
     if not strip_output:
         image = elf_append_symtab(image, elf_build_symtab(ctx, lay)?)
+    if riscv_attributes.len() > 0:
+        image = elf_append_nonalloc_section(image, ".riscv.attributes", 0x70000003, riscv_attributes)?
     val digest = sha1_bytes(image)
     val note_off = plan.offsets[elf_exec_find(plan, ".note.gnu.build-id")] + 16
     var di: i64 = 0

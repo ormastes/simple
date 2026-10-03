@@ -26,7 +26,7 @@ fn macho_reloc_target(inputs: [MachOInput], definitions: {text: MachOBinding},
     Err("Mach-O local relocation section out of range")
 
 fn macho_relocate(bytes: [u8], inputs: [MachOInput], definitions: {text: MachOBinding},
-        layout: MachOLayout, arm: bool) -> Result<[u8], text>:
+        layout: MachOLayout, arm: bool, hosted_targets: {text: i64} = {}, hosted_binds: {text: bool} = {}) -> Result<[u8], text>:
     var out = bytes
     var owner: i64 = 0
     for input in inputs:
@@ -54,7 +54,15 @@ fn macho_relocate(bytes: [u8], inputs: [MachOInput], definitions: {text: MachOBi
                             return Err("{input.name}: Mach-O relocation patch exceeds section")
                         val offset = layout.offsets[key] + relocation.r_address
                         val place = layout.addresses[key] + relocation.r_address
-                        val target = macho_reloc_target(inputs, definitions, owner, relocation, layout)?
+                        val site = "{owner}:{ordinal}:{relocation.r_address}"
+                        var target = MachORelocTarget(address: 0, original: 0)
+                        if hosted_targets.has(site):
+                            target = MachORelocTarget(address: hosted_targets[site], original: 0)
+                            if not arm and (relocation.r_type == 3 or relocation.r_type == 4 or relocation.r_type == 9): relocation.r_type = 1
+                            if arm and (relocation.r_type == 5 or relocation.r_type == 8): relocation.r_type = 3
+                            if arm and (relocation.r_type == 6 or relocation.r_type == 9): relocation.r_type = 4
+                        else:
+                            target = macho_reloc_target(inputs, definitions, owner, relocation, layout)?
                         val encoded = macho_read(out, offset, width)
                         var value: i64 = 0
                         val subtractor = if arm: 1 else: 5
@@ -75,8 +83,12 @@ fn macho_relocate(bytes: [u8], inputs: [MachOInput], definitions: {text: MachOBi
                         elif relocation.r_type == 0:
                             if relocation.r_pcrel or (width != 4 and width != 8):
                                 return Err("unsupported Mach-O unsigned relocation encoding")
-                            value = target.address + macho_sign(encoded, width * 8)
-                            if not relocation.r_extern: value = value - target.original
+                            if hosted_binds.has(site):
+                                if width != 8: return Err("hosted dyld bind requires a 64-bit pointer")
+                                value = 0
+                            else:
+                                value = target.address + macho_sign(encoded, width * 8)
+                                if not relocation.r_extern: value = value - target.original
                             if value < 0 or (width == 4 and value > 4294967295):
                                 return Err("Mach-O unsigned relocation overflow")
                         elif not arm:

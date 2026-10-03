@@ -9,11 +9,14 @@ The object and its retained handle have one sequential owner.
 """
 use std.nogc_sync_mut.io.retained_file.{
     RetainedFile, retained_file_open, retained_file_read_at,
-    retained_file_identity_unchanged, retained_file_close, retained_file_write
-}
+    retained_file_identity_unchanged}
 
 pub class ElfFileObjectV1:
-    file: RetainedFile
+    var file: RetainedFile
+    object_base: u64
+    object_bytes: u64
+    owns_file: bool
+    var closed: bool
     machine: i64
     flags: u64
     section_table_offset: u64
@@ -68,9 +71,15 @@ fn _elf_file_exact(file: RetainedFile, offset: u64, count: i64) -> Result<[u8], 
         for byte in part: bytes.push(byte)
     Ok(bytes)
 
+fn _elf_file_object_exact(object: ElfFileObjectV1, offset: u64, count: i64) -> Result<[u8], text>:
+    if object.closed: return Err("ELF object view closed")
+    if count < 1 or offset > object.object_bytes or count as u64 > object.object_bytes - offset:
+        return Err("ELF object window bounds")
+    _elf_file_exact(object.file, object.object_base + offset, count)
+
 pub fn elf_file_section_v1(object: ElfFileObjectV1, index: i64) -> Result<ElfFileSectionV1, text>:
     if index < 0 or index >= object.section_count: return Err("ELF section index bounds")
-    val bytes = _elf_file_exact(object.file, object.section_table_offset + index as u64 * 64u64, 64)?
+    val bytes = _elf_file_object_exact(object, object.section_table_offset + index as u64 * 64u64, 64)?
     val section = ElfFileSectionV1(
         name_offset: _elf_file_field(bytes, 0, 4), section_type: _elf_file_field(bytes, 4, 4),
         flags: _elf_file_field(bytes, 8, 8), address: _elf_file_field(bytes, 16, 8),
@@ -78,14 +87,17 @@ pub fn elf_file_section_v1(object: ElfFileObjectV1, index: i64) -> Result<ElfFil
         link: _elf_file_field(bytes, 40, 4) as i64, info: _elf_file_field(bytes, 44, 4) as i64,
         alignment: _elf_file_field(bytes, 48, 8), entry_size: _elf_file_field(bytes, 56, 8))
     if section.section_type != 0u64 and section.section_type != 8u64:
-        if section.file_offset > object.file.size or section.size > object.file.size - section.file_offset:
+        if section.file_offset > object.object_bytes or section.size > object.object_bytes - section.file_offset:
             return Err("ELF file-backed section bounds")
     if section.alignment != 0u64 and (section.alignment & (section.alignment - 1u64)) != 0u64:
         return Err("ELF section alignment invalid")
     Ok(section)
 
-fn _elf_file_decode(file: RetainedFile, metadata_table_byte_limit: u64, max_window_bytes: i64) -> Result<ElfFileObjectV1, text>:
-    val bytes = _elf_file_exact(file, 0u64, 64)?
+fn _elf_file_decode(file: RetainedFile, base: u64, extent: u64, owns_file: bool,
+        metadata_table_byte_limit: u64, max_window_bytes: i64) -> Result<ElfFileObjectV1, text>:
+    if extent < 64u64 or base > file.size or extent > file.size - base:
+        return Err("ELF object extent bounds")
+    val bytes = _elf_file_exact(file, base, 64)?
     if bytes[0] != 127u8 or bytes[1] != 69u8 or bytes[2] != 76u8 or bytes[3] != 70u8:
         return Err("ELF file magic invalid")
     if bytes[4] != 2u8 or bytes[5] != 1u8 or bytes[6] != 1u8:
@@ -102,10 +114,11 @@ fn _elf_file_decode(file: RetainedFile, metadata_table_byte_limit: u64, max_wind
     if count == 0 or names == 65535: return Err("ELF extended section numbering unsupported")
     if names >= count: return Err("ELF section names index bounds")
     val table_bytes = count as u64 * 64u64
-    if offset < 64u64 or offset > file.size or table_bytes > file.size - offset:
+    if offset < 64u64 or offset > extent or table_bytes > extent - offset:
         return Err("ELF section table bounds")
     if table_bytes > metadata_table_byte_limit: return Err("ELF metadata budget exceeded")
-    val object = ElfFileObjectV1(file: file, machine: _elf_file_field(bytes, 18, 2) as i64,
+    val object = ElfFileObjectV1(file: file, object_base: base, object_bytes: extent,
+        owns_file: owns_file, closed: false, machine: _elf_file_field(bytes, 18, 2) as i64,
         flags: _elf_file_field(bytes, 48, 4), section_table_offset: offset,
         section_count: count, section_names_index: names,
         metadata_table_bytes: table_bytes, max_window_bytes: max_window_bytes)
@@ -120,11 +133,18 @@ fn _elf_file_decode(file: RetainedFile, metadata_table_byte_limit: u64, max_wind
 
 pub fn elf_file_open_v1(path: text, metadata_table_byte_limit: u64, max_window_bytes: i64) -> Result<ElfFileObjectV1, text>:
     if max_window_bytes < 1 or max_window_bytes > 1048576: return Err("ELF payload window invalid")
-    val file = retained_file_open(path, 1099511627776u64)?
-    val decoded = _elf_file_decode(file, metadata_table_byte_limit, max_window_bytes)
+    var file = retained_file_open(path, 1099511627776u64)?
+    val decoded = _elf_file_decode(file, 0u64, file.size, true, metadata_table_byte_limit, max_window_bytes)
     if decoded.is_err():
-        if not retained_file_close(file): return Err("ELF input close failed after: {decoded.unwrap_err()}")
+        if not file.close(): return Err("ELF input close failed after: {decoded.unwrap_err()}")
     decoded
+
+# Borrow the caller's retained container; closing a view never closes its file.
+# Caller keeps the container alive until every borrowed view has been consumed.
+pub fn elf_file_view_v1(file: RetainedFile, base: u64, extent: u64,
+        metadata_table_byte_limit: u64, max_window_bytes: i64) -> Result<ElfFileObjectV1, text>:
+    if max_window_bytes < 1 or max_window_bytes > 1048576: return Err("ELF payload window invalid")
+    _elf_file_decode(file, base, extent, false, metadata_table_byte_limit, max_window_bytes)
 
 pub fn elf_file_section_window_v1(object: ElfFileObjectV1, index: i64,
         offset: u64, length: i64) -> Result<[u8], text>:
@@ -137,32 +157,12 @@ pub fn elf_file_section_window_v1(object: ElfFileObjectV1, index: i64,
         var zeros: [u8] = []
         for index in 0..length: zeros.push(0u8)
         return Ok(zeros)
-    _elf_file_exact(object.file, section.file_offset + offset, length)
-
-pub fn elf_file_close_v1(object: ElfFileObjectV1) -> bool:
-    retained_file_close(object.file)
+    _elf_file_object_exact(object, section.file_offset + offset, length)
 
 # Emits section contents only; layout, relocation, transaction sync/publication
 # belong to the caller. After any Err the caller must discard its private output.
 # No rollback is attempted on a shared retained destination.
-pub fn elf_file_copy_section_v1(object: ElfFileObjectV1, index: i64,
-        output: RetainedFile, cancelled: fn() -> bool) -> Result<u64, text>:
-    if output.closed or not output.writable: return Err("ELF output state invalid")
-    val section = elf_file_section_v1(object, index)?
-    if section.section_type == 0u64: return Err("ELF NULL section has no payload")
-    if output.position > output.maximum or section.size > output.maximum - output.position:
-        return Err("ELF output capacity insufficient before section emission")
-    var offset: u64 = 0
-    while offset < section.size:
-        if cancelled(): return Err("ELF section emission cancelled; discard output")
-        val remaining = section.size - offset
-        val count = if remaining < object.max_window_bytes as u64: remaining as i64 else: object.max_window_bytes
-        val bytes = elf_file_section_window_v1(object, index, offset, count)?
-        retained_file_write(output, bytes)?
-        offset = offset + count as u64
-    if cancelled(): return Err("ELF section emission cancelled; discard output")
-    retained_file_identity_unchanged(object.file)?
-    Ok(offset)
+
 
 pub fn elf_file_string_v1(object: ElfFileObjectV1, table_index: i64,
         offset: u64, max_bytes: i64) -> Result<[u8], text>:
@@ -177,7 +177,7 @@ pub fn elf_file_string_v1(object: ElfFileObjectV1, table_index: i64,
         var count = max_bytes - name.len() + 1
         if count > object.max_window_bytes: count = object.max_window_bytes
         if remaining < count as u64: count = remaining as i64
-        val bytes = _elf_file_exact(object.file, table.file_offset + cursor, count)?
+        val bytes = _elf_file_object_exact(object, table.file_offset + cursor, count)?
         for byte in bytes:
             if byte == 0u8: return Ok(name)
             if name.len() == max_bytes: return Err("ELF string budget exceeded")
@@ -200,7 +200,7 @@ pub fn elf_file_symbol_v1(object: ElfFileObjectV1, table_index: i64,
         ordinal: u64, max_name_bytes: i64) -> Result<ElfFileSymbolV1, text>:
     val table = _elf_file_symbol_table(object, table_index)?
     if ordinal >= table.size / 24u64: return Err("ELF symbol ordinal bounds")
-    val bytes = _elf_file_exact(object.file, table.file_offset + ordinal * 24u64, 24)?
+    val bytes = _elf_file_object_exact(object, table.file_offset + ordinal * 24u64, 24)?
     val section_index = _elf_file_field(bytes, 6, 2) as i64
     if section_index == 65535: return Err("ELF extended symbol section unsupported")
     if section_index < 65280 and section_index >= object.section_count:
@@ -220,7 +220,7 @@ pub fn elf_file_rela_v1(object: ElfFileObjectV1, table_index: i64,
     if table.info == 0: return Err("ELF RELA target is NULL")
     val target = elf_file_section_v1(object, table.info)?
     val symbols = _elf_file_symbol_table(object, table.link)?
-    val bytes = _elf_file_exact(object.file, table.file_offset + ordinal * 24u64, 24)?
+    val bytes = _elf_file_object_exact(object, table.file_offset + ordinal * 24u64, 24)?
     val offset = _elf_file_field(bytes, 0, 8)
     val info = _elf_file_field(bytes, 8, 8)
     val symbol_index = info >> 32
@@ -233,6 +233,32 @@ pub fn elf_file_rela_v1(object: ElfFileObjectV1, table_index: i64,
         target_section: table.info, symbol_table: table.link))
 
 export ElfFileObjectV1, ElfFileSectionV1, ElfFileSymbolV1, ElfFileRelaV1
-export elf_file_open_v1, elf_file_section_v1, elf_file_section_window_v1, elf_file_close_v1
+export elf_file_open_v1, elf_file_section_v1, elf_file_section_window_v1
 export elf_file_string_v1, elf_file_symbol_v1, elf_file_rela_v1
-export elf_file_copy_section_v1
+export elf_file_view_v1
+
+impl ElfFileObjectV1:
+    me elf_file_close_v1() -> bool:
+        if self.closed: return false
+        self.closed = true
+        if self.owns_file: self.file.close() else: true
+
+impl RetainedFile:
+    me elf_file_copy_section_v1(object: ElfFileObjectV1, index: i64,
+            cancelled: fn() -> bool) -> Result<u64, text>:
+        if self.closed or not self.writable: return Err("ELF output state invalid")
+        val section = elf_file_section_v1(object, index)?
+        if section.section_type == 0u64: return Err("ELF NULL section has no payload")
+        if self.position > self.maximum or section.size > self.maximum - self.position:
+            return Err("ELF output capacity insufficient before section emission")
+        var offset: u64 = 0
+        while offset < section.size:
+            if cancelled(): return Err("ELF section emission cancelled; discard output")
+            val remaining = section.size - offset
+            val count = if remaining < object.max_window_bytes as u64: remaining as i64 else: object.max_window_bytes
+            val bytes = elf_file_section_window_v1(object, index, offset, count)?
+            self.write(bytes)?
+            offset = offset + count as u64
+        if cancelled(): return Err("ELF section emission cancelled; discard output")
+        retained_file_identity_unchanged(object.file)?
+        Ok(offset)
