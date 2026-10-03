@@ -330,3 +330,13 @@ contracts, plus three pure prerequisites. No test has run on an admitted runtime
 these counts are source inventory, not RED/GREEN, coverage or production PASS.
 Complete source-tree/environment reproduction, Paged legacy replay, scalable
 retention, remote publication and the original remaining requirements stay open.
+
+Integrated independent compatibility follow-ups: d27bf173fe2 (root
+554dcc0a072) adds a Paged source/test-drop scenario whose candidate must first
+pass actual empty-receiver installation; populated receivers then reject exact
+INDEX_REGRESSION without changing active/journal heads. 97bf0cbb9ba (root
+17c71d81c3c) adds three literal v1 vectors and four unit scenarios. Independent
+review rehashed literal preimages using host .NET SHA256 and checked their
+framing/lengths. This host calculation is not Simple runtime test evidence and
+the vectors are independently derived, not captured from historical binaries.
+Paged legacy replay remains absent. No new PR, merge or release claim is made.

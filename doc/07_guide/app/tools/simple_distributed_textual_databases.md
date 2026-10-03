@@ -371,5 +371,7 @@ not supersede implementation, verification, or release gates.
 
 Compatibility regression sources now cover Reference legacy replay and signed
 checkpoint mapping-drop rejection. The system rejection source covers both
-backends. These cases remain unexecuted; Paged legacy/drop coverage and an
-independent literal v1 golden vector remain pending.
+backends. Paged mapping-drop regression sources and three independently derived
+literal v1 vectors now also exist. Expected vectors are framing-derived, not
+captured historical wire. All Simple cases remain unexecuted; Paged legacy replay
+and complete reproduction qualification remain pending.

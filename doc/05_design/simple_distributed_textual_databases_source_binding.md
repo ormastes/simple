@@ -135,3 +135,29 @@ all_declared_available=false. Unavailable roots gain no available-evidence pin.
 Accepted replay preserves the signed wire and semantic/retention heads; it does
 not claim to restore evidence. This boundary is a source oracle, not a runtime
 receipt or proof of complete source-tree/environment capture.
+
+### Paged immutable mapping preservation oracle
+
+A dropped Paged mapping must be removed consistently from the CurrentRow,
+forward alias and UID reverse index. Preserve accepted batches, actor counters,
+history and high-water marks; rebuild pages and manifest and independently sign
+the candidate. An initialized empty receiver must actually install it and read
+back all remaining records before the populated receiver is asked to reject it.
+This distinguishes immutable-history preservation from ordinary malformed-index
+rejection. The populated Paged path reports SCVDB_CHECKPOINT_INDEX_REGRESSION;
+the Reference path reports SCVDB_CHECKPOINT_ROW_REGRESSION. Both must preserve
+active and install-journal heads and original source/test mappings.
+
+The integrated Paged regression is source-reviewed and unexecuted. Paged legacy
+replay, runtime crash recovery and the selected large-scale operating profile
+remain separate acceptance work.
+
+### Fixed v1 compatibility vectors
+
+Config, Reproduction and Observation each have a fixed typed input, literal
+wire, literal domain-framed preimage and independently computed SHA256 digest.
+The unit sources compare exact encoding, decoding and revision identity and
+reject tampered or nonminimal variants. Vectors include multi-byte LEB128,
+u64 maximum and NFC text. Expected bytes were derived from framing rules;
+production encoding did not generate them. This supplies an independent oracle,
+not historical binary provenance or runtime compatibility proof.
