@@ -426,3 +426,32 @@ GNU ld scripts as object bytes while permitting their versioned shared-object
 targets. Missing or malformed libraries are named errors and never trigger an
 external-linker fallback. Output-policy fields whose semantics are not yet
 implemented remain rejected before linking.
+
+## 15. Configured requests and pinned linker operations (2026-10-03)
+
+The request adapter accepts `NativeLinkConfig` as explicit execution context via
+`link_request_to_native_with_config(req, policy, config, inputs, output)`; the
+legacy entrypoint delegates with its prior default projection. The request's
+canonical triple and ABI must match the context, and ambient target selectors
+must not disagree. Unsupported target combinations fail before linker probing.
+ELF and PE internal requests enter the same typed native wrapper, so tool/runtime
+admission cannot be bypassed by the request facade. The Unix wrapper remains
+host-oriented; this adapter rejects mismatched Unix host/target pairs. Explicit
+internal SMF/LSM embedding is rejected as a different output contract.
+
+`LinkerLifecycleV1` is a synchronous, single-owner operation registry above the
+existing KPF generation table. Providers carry an independently checked schema,
+identity/digest and real callback. Open sessions pin their generation; replacing
+the active provider cannot change existing sessions. Close releases the pin and
+advances the session epoch; collection requires a retired unpinned generation.
+The independently retained recovery callback can execute without allocating a
+session or publishing a generation, so exhausted tables do not disable recovery.
+This API consumes already loaded operations; dynamic-pack loading and production
+CLI composition remain separate missing implementation, not implicit behavior.
+
+RISC-V relocation evaluation distinguishes RV32 modular high-part rounding from
+RV64 checked signed arithmetic. CALL/CALL_PLT patch both instruction words only
+after validating pair bounds/opcodes/register relationships and range/alignment.
+HI20/PCREL-HI20 and LO12-I patch only immediate fields. PCREL-LO12 remains an
+explicit error until its matching HI20 place/target context is supplied by an
+owning resolver. No ELF target admission is inferred from formula support.

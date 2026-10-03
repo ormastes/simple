@@ -165,3 +165,42 @@ RED/GREEN, generated manuals, full verification and
 release admission remain open. The existing bug
 `doc/08_tracking/bug/deployed_bin_simple_still_seed_2026-08-05.md` records the
 deployed-runtime problem. No completion receipt may be minted from this plan.
+
+## Coding continuation: configured facade, relocations and lifecycle (2026-10-03)
+
+The `complete coding` instruction retains all ten requirements. This wave adds:
+
+- `link_request_to_native_with_config`: explicit native execution options without
+  changing the frozen request record. Target vocabulary/format/ABI/width/endian,
+  config agreement and ambient target disagreement are checked before execution.
+  Both internal ELF and PE use the canonical typed wrapper, including its tool
+  admission; unsupported Unix cross-target requests cannot produce host images.
+- The fallback scenario now reaches the LinkRequest adapter itself after proving
+  a real direct-link failure with fallback disabled. New facade scenarios cover
+  target rejection, output preservation, bounded refusal and actual PE output.
+- RISC-V CALL/CALL_PLT now validate and patch AUIPC/JALR pairs with XLEN-aware
+  rounding and checked RV64 bounds. HI20/LO12-I patches retain instruction bits;
+  PCREL-HI20 is supported and NONE preserves input. Twelve scenarios specify
+  exact bytes, boundary errors, malformed pairs and unchanged rejected buffers.
+- `LinkerLifecycleV1` owns generation-pinned provider callbacks and bounded
+  session slots using the existing KPF table. Four real ELF callback scenarios
+  cover replacement, stale handles, schema refusal and independent static
+  recovery even when the generation table is full.
+
+All new behavior is source-reviewed, not runtime-qualified. No admitted runtime
+was found on reinspection; the earlier capped diagnostic is not retried.
+
+### Remaining implementation, distinct from verification
+
+| Gate | Concrete source still missing |
+|---|---|
+| G3 bounded execution | Windowed input/spill I/O owner and streaming engine consumers; whole-job constrained child started before allocations; no-swap enforcement; truthful measured accounting wired into receipts. Existing planners and CRC frame metadata are not an executor. |
+| G4 Mach-O | Internal executable/archive/relocation/dyld link driver. Existing writer emits relocatable objects only. |
+| G4 FreeBSD | Internal target-aware CRT/sysroot/libc admission; current internal ELF route is explicitly Linux/glibc. |
+| G4 RISC-V | Paired PCREL-LO12 resolution, remaining branch/JAL/store-low/GOT/TLS/dynamic families, ELF machine/layout admission and RV32 image writer. |
+| G5 complete lifecycle | Actual dynamic-pack loading/production command integration and loader reachability evidence. New callback/session owner does not claim those paths exist. |
+
+PE ARM64 core linking exists, but its checked-in real fixture is a relocation
+census object; a complete real executable corpus and native evidence remain.
+Full compiler/application corpora, platform execution, bounded parity/performance,
+modern SSpec execution, generated manuals and core/MCP checks remain unrun.
