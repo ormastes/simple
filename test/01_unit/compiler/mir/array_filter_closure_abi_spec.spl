@@ -1,0 +1,100 @@
+"""Actual frontend lambda producers and filter consumers; authored, unexecuted.
+These inspect calling convention only, not typed element execution correctness.
+"""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn filter_abi_check(source: text, captured: bool):
+    val ast = parse_full_frontend(source, "filter_abi.spl", "filter_abi", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("filter_abi.spl")
+    val hir = hir_lowering.lower_module(ast)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    expect(lowering.errors.len()).to_equal(0)
+    var producer_count = 0
+    var producer = MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)
+    for function in mir.functions.values():
+        if function.name.starts_with("__lambda_lift_"):
+            producer_count = producer_count + 1
+            producer = function.signature
+    expect(producer_count).to_equal(1)
+    val expected_arity = if captured: 2 else: 1
+    expect(producer.params.len()).to_equal(expected_arity)
+    for param in producer.params:
+        expect(param).to_equal(MirType.i64())
+    expect(producer.return_type).to_equal(MirType.i64())
+
+    var handle_id: i64 = -1
+    var target_id: i64 = -1
+    var closure_creations = 0
+    var target_resolutions = 0
+    var raw_calls = 0
+    var closure_calls = 0
+    var array_reads = 0
+    var array_pushes = 0
+    for function in mir.functions.values():
+        if not function.name.starts_with("__lambda_lift_"):
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(dest, callee, args):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    if name == "rt_closure_new":
+                                        closure_creations = closure_creations + 1
+                                        handle_id = dest.unwrap().id
+                                    elif name == "rt_closure_func_ptr":
+                                        target_resolutions = target_resolutions + 1
+                                        target_id = dest.unwrap().id
+                                        expect(args.len()).to_equal(1)
+                                        match args[0].kind:
+                                            case MirOperandKind.Copy(local): expect(local.id).to_equal(handle_id)
+                                            case _: fail("closure target must be resolved from its handle")
+                                    elif name.starts_with("__lambda_lift_"):
+                                        raw_calls = raw_calls + 1
+                                        expect(args.len()).to_equal(producer.params.len())
+                                    elif name == "rt_array_get": array_reads = array_reads + 1
+                                    elif name == "rt_array_push": array_pushes = array_pushes + 1
+                                case _: fail("filter must never directly call a closure handle")
+                        case MirInstKind.CallIndirect(_, callee, args, signature):
+                            closure_calls = closure_calls + 1
+                            expect(signature).to_equal(producer)
+                            expect(args.len()).to_equal(2)
+                            match callee.kind:
+                                case MirOperandKind.Copy(local): expect(local.id).to_equal(target_id)
+                                case _: fail("indirect target must be the resolved closure function")
+                            match args[0].kind:
+                                case MirOperandKind.Copy(local): expect(local.id).to_equal(handle_id)
+                                case _: fail("captured callback requires its environment first")
+                        case _: pass
+    expect(closure_creations).to_equal(if captured: 1 else: 0)
+    expect(target_resolutions).to_equal(if captured: 1 else: 0)
+    expect(closure_calls).to_equal(if captured: 1 else: 0)
+    expect(raw_calls).to_equal(if captured: 0 else: 1)
+    # One instruction in the existing loop, not a runtime invocation count.
+    expect(array_reads).to_equal(1)
+    expect(array_pushes).to_equal(1)
+
+describe "array filter lambda ABI":
+    it "retains the noncapturing raw producer convention":
+        step("Lower a real inline predicate with an inferred parameter")
+        filter_abi_check("fn select(values: [i64]) -> [i64]:\n    values.filter(\\x: x > 1)\n", false)
+
+    it "passes the captured environment to the actual lifted target":
+        step("Construct a captured predicate before the filter loop")
+        filter_abi_check("fn select(values: [i64], threshold: i64) -> [i64]:\n    values.filter(\\x: x > threshold)\n", true)
+
+    it "keeps existing text eligibility while checking its actual word ABI":
+        step("Lower a text predicate without claiming element representation parity")
+        filter_abi_check("fn select(values: [text], wanted: text) -> [text]:\n    values.filter(fn(x: text): x == wanted)\n", true)
+
+    it "keeps existing narrow integer eligibility and producer agreement":
+        step("Lower an explicitly typed narrow predicate")
+        filter_abi_check("fn select(values: [i32], threshold: i32) -> [i32]:\n    values.filter(fn(x: i32): x > threshold)\n", true)
