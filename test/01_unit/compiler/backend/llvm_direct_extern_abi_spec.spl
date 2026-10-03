@@ -7,6 +7,7 @@ use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_json.{serialize_mir_signature}
 use compiler.backend.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
 
@@ -34,6 +35,7 @@ fn exact_extern_check(source: text, external_name: text, params: [MirType], resu
                                             expect(signature.params).to_equal(params)
                                             expect(signature.return_type).to_equal(result)
                                             expect(signature.is_variadic).to_equal(false)
+                                            expect(signature.params_known).to_equal(true)
                                         case _: fail("direct extern must retain a fixed function signature")
                             case _: pass
                     case _: pass
@@ -48,6 +50,22 @@ fn exact_extern_check(source: text, external_name: text, params: [MirType], resu
     expect(emitted_calls).to_equal(1)
 
 describe "fixed direct LLVM-C ABI prerequisites":
+    it "preserves a declared zero-argument pointer result as a fixed prototype":
+        val pointer = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
+        exact_extern_check("extern fn LLVMContextCreate() -> *mut u8\nfn probe() -> *mut u8:\n    LLVMContextCreate()\n", "LLVMContextCreate", [], pointer, "declare ptr @LLVMContextCreate()", "call ptr @LLVMContextCreate()")
+
+    it "keeps unknown empty signatures distinct in backend declarations and serialization":
+        val unknown = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+        val fixed = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false, params_known: true)
+        var translator = MirToLlvm.create("signature_authority", CodegenTarget.X86_64, nil)
+        translator.remember_external_call_signature("legacy", unknown)
+        translator.remember_external_call_signature("fixed", fixed)
+        expect(translator.external_declare_line("legacy")).to_equal("declare i64 @legacy(...)")
+        expect(translator.external_declare_line("fixed")).to_equal("declare i64 @fixed()")
+        expect(serialize_mir_signature(unknown)).to_contain("\"params_known\":false")
+        expect(serialize_mir_signature(fixed)).to_contain("\"params_known\":true")
+        expect(serialize_mir_signature(unknown) == serialize_mir_signature(fixed)).to_equal(false)
+
     it "does not treat an ordinary function as an extern declaration":
         val source = "fn identity(x: i32) -> i32:\n    x\nfn probe(x: i32) -> i32:\n    identity(x)\n"
         val ast = parse_full_frontend(source, "ordinary.spl", "ordinary", Logger(level: 0))
