@@ -1,0 +1,148 @@
+# Persistence codecs are not authenticated lookup or publication authority.
+use std.spec.*
+use std.scv.db_observation_identity.*
+use std.scv.db_observation_identity_codec.*
+use std.scv.db_reproduction_codec.{DbReproductionRecord, db_reproduction_record_encode}
+use std.scv.db_canonical.{db_read_frame, db_read_children, db_frame, db_canonical_list, db_canonical_text}
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.distributed_identity.*
+use test.fixtures.scv.db_provider_identity_fixture.*
+
+describe "REQ017 strict identity policy and compact claim persistence":
+    it "uses literal versioned headers and roundtrips a separately pinned complete policy":
+        val policy = setup_item2_identity_policy()
+        val wire = db_observation_identity_policy_encode(policy).unwrap()
+        val lines = wire.split("\n")
+        expect(lines.len()).to_equal(3)
+        expect(lines[0]).to_equal("SCVDB-OBSERVATION-IDENTITY-POLICY-v1")
+        expect(lines[1].starts_with("06")).to_equal(true)
+        expect(lines[2]).to_equal("")
+        val decoded = db_observation_identity_policy_decode(wire, policy.revision).unwrap()
+        expect(decoded).to_equal(policy)
+        expect(db_observation_identity_policy_encode(decoded).unwrap()).to_equal(wire)
+
+    it "does not accept self-declared or stale policy pins after valid canonical policy changes":
+        val policy = setup_item2_identity_policy()
+        var changed = policy
+        changed.capabilities.artifact_download = false
+        changed = db_observation_identity_policy_seal(changed).unwrap()
+        val wire = db_observation_identity_policy_encode(changed).unwrap()
+        expect(db_observation_identity_policy_decode(wire, policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_PIN")
+        expect(db_observation_identity_policy_decode(wire, "").unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_PIN")
+        expect(db_observation_identity_policy_decode(wire, changed.revision).unwrap()).to_equal(changed)
+        changed.revision = policy.revision
+        expect(db_observation_identity_policy_encode(changed).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_PIN")
+        var invalid = policy
+        invalid.capabilities.uniqueness_tuple = ["attempt", "attempt", "instance", "job", "project", "run"]
+        expect(db_observation_identity_policy_encode(invalid).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_POLICY")
+
+    it "rejects policy wrong versions trailing frames incomplete wire and noncanonical hex":
+        val policy = setup_item2_identity_policy()
+        val wire = db_observation_identity_policy_encode(policy).unwrap()
+        val lines = wire.split("\n")
+        val upper = lines[1].replace("e", "E")
+        expect(upper == lines[1]).to_equal(false)
+        for malformed in [wire.replace("-v1\n", "-v2\n"), wire + "\n", wire + "00", wire[0:wire.len() - 1], lines[0] + "\n" + lines[1] + lines[1] + "\n", lines[0] + "\n" + upper + "\n"]:
+            expect(db_observation_identity_policy_decode(malformed, policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_CODEC")
+
+    it "encodes only a compact claim and original reference under a literal entry version":
+        val policy = setup_item2_identity_policy()
+        val original = setup_item2_identity_observation()
+        val claim = db_observation_identity_claim(original, policy, policy.revision).unwrap()
+        val wire = db_observation_identity_entry_encode(claim).unwrap()
+        val lines = wire.split("\n")
+        expect(lines.len()).to_equal(3)
+        expect(lines[0]).to_equal("SCVDB-OBSERVATION-IDENTITY-ENTRY-v1")
+        expect(lines[1].starts_with("06")).to_equal(true)
+        expect(lines[2]).to_equal("")
+        expect(db_observation_identity_entry_decode(wire).unwrap()).to_equal(claim)
+        expect(db_observation_identity_entry_encode(db_observation_identity_entry_decode(wire).unwrap()).unwrap()).to_equal(wire)
+        expect(db_observation_identity_entry_verify(wire, policy, policy.revision, claim.identity_digest, Some(original)).unwrap()).to_equal(claim)
+        var larger = original
+        larger.failure_signature = "x".repeat(4096)
+        larger = setup_item2_identity_seal(larger)
+        val larger_claim = db_observation_identity_claim(larger, policy, policy.revision).unwrap()
+        val larger_wire = db_observation_identity_entry_encode(larger_claim).unwrap()
+        expect(db_reproduction_record_encode(DbReproductionRecord.Observation(larger)).unwrap().len()).to_be_greater_than(db_reproduction_record_encode(DbReproductionRecord.Observation(original)).unwrap().len())
+        expect(larger_wire.len()).to_equal(wire.len())
+
+    it "recomputes content identity and refuses forged but codec-valid persisted digest claims":
+        val policy = setup_item2_identity_policy()
+        val original = setup_item2_identity_observation()
+        val claim = db_observation_identity_claim(original, policy, policy.revision).unwrap()
+        for changed_field in 0..3:
+            var forged = claim
+            if changed_field == 0: forged.content_digest = "0".repeat(64)
+            elif changed_field == 1: forged.identity_digest = "0".repeat(64)
+            else: forged.policy_revision = "0".repeat(64)
+            val wire = db_observation_identity_entry_encode(forged).unwrap()
+            expect(db_observation_identity_entry_decode(wire).unwrap()).to_equal(forged)
+            expect(db_observation_identity_entry_verify(wire, policy, policy.revision, claim.identity_digest, Some(original)).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_LOOKUP")
+
+    it "requires the exact original reference even when a different sealed UID has identical content":
+        val policy = setup_item2_identity_policy()
+        val original = setup_item2_identity_observation()
+        val other = setup_item2_identity_observation(2u64)
+        val claim = db_observation_identity_claim(original, policy, policy.revision).unwrap()
+        expect(db_observation_identity_claim(other, policy, policy.revision).unwrap().content_digest).to_equal(claim.content_digest)
+        var forged = claim
+        forged.observation = other.reference
+        val wire = db_observation_identity_entry_encode(forged).unwrap()
+        expect(db_observation_identity_entry_verify(wire, policy, policy.revision, claim.identity_digest, Some(original)).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_LOOKUP")
+        expect(db_observation_identity_entry_verify(db_observation_identity_entry_encode(claim).unwrap(), policy, policy.revision, claim.identity_digest, Some(other)).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_LOOKUP")
+
+    it "refuses absent original observations wrong lookup keys and independently wrong policy pins":
+        val policy = setup_item2_identity_policy()
+        val original = setup_item2_identity_observation()
+        val claim = db_observation_identity_claim(original, policy, policy.revision).unwrap()
+        val wire = db_observation_identity_entry_encode(claim).unwrap()
+        expect(db_observation_identity_entry_verify(wire, policy, policy.revision, claim.identity_digest, nil).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_LOOKUP")
+        expect(db_observation_identity_entry_verify(wire, policy, policy.revision, "0".repeat(64), Some(original)).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_LOOKUP")
+        expect(db_observation_identity_entry_verify(wire, policy, "0".repeat(64), claim.identity_digest, Some(original)).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_PIN")
+
+    it "rejects entry wrong versions trailing frames truncation and noncanonical hex":
+        val policy = setup_item2_identity_policy()
+        val claim = db_observation_identity_claim(setup_item2_identity_observation(), policy, policy.revision).unwrap()
+        val wire = db_observation_identity_entry_encode(claim).unwrap()
+        val lines = wire.split("\n")
+        val upper = lines[1].replace("a", "A")
+        expect(upper == lines[1]).to_equal(false)
+        for malformed in [wire.replace("-v1\n", "-v2\n"), wire + "\n", wire + "00", wire[0:wire.len() - 1], lines[0] + "\n" + lines[1] + lines[1] + "\n", lines[0] + "\n" + upper + "\n"]:
+            expect(db_observation_identity_entry_decode(malformed).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_CODEC")
+
+    it "rejects structural foreign-kind references rather than promoting them to observations":
+        val policy = setup_item2_identity_policy()
+        var claim = db_observation_identity_claim(setup_item2_identity_observation(), policy, policy.revision).unwrap()
+        claim.observation = setup_item2_identity_ref("config", 1u64)
+        expect(db_observation_identity_entry_encode(claim).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_SCOPE")
+
+    it "enforces wire limits before parsing oversized policy and entry bodies":
+        val policy = setup_item2_identity_policy()
+        expect(db_observation_identity_policy_decode("x".repeat(2097152), policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_CODEC")
+        expect(db_observation_identity_policy_decode("x".repeat(2097153), policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+        expect(db_observation_identity_entry_decode("x".repeat(32768)).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_CODEC")
+        expect(db_observation_identity_entry_decode("x".repeat(32769)).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+
+    it "bounds fixed arity and nested capability cardinality before consuming extra fields":
+        val policy = setup_item2_identity_policy()
+        val policy_wire = db_observation_identity_policy_encode(policy).unwrap()
+        val policy_lines = policy_wire.split("\n")
+        val policy_root = db_read_frame(db_snapshot_unhex(policy_lines[1]).unwrap(), 0).unwrap()
+        val extra_policy = policy_lines[0] + "\n" + db_snapshot_hex(db_frame(6u8, policy_root.payload + db_frame(0u8, []))) + "\n"
+        expect(db_observation_identity_policy_decode(extra_policy, policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+        val fields = db_read_children(policy_root.payload).unwrap()
+        val short_policy = policy_lines[0] + "\n" + db_snapshot_hex(db_frame(6u8, policy_root.payload[0:fields[12].next_offset])) + "\n"
+        expect(db_observation_identity_policy_decode(short_policy, policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_CODEC")
+        var oversized_names: [[u8]] = []
+        for _index in 0..65: oversized_names.push(db_canonical_text("dimension").unwrap())
+        var rebuilt: [[u8]] = []
+        for index in 0..fields.len():
+            if index == 5: rebuilt.push(db_canonical_list(oversized_names))
+            else: rebuilt.push(db_frame(fields[index].tag, fields[index].payload))
+        val excess_names = policy_lines[0] + "\n" + db_snapshot_hex(db_canonical_list(rebuilt)) + "\n"
+        expect(db_observation_identity_policy_decode(excess_names, policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+        val claim = db_observation_identity_claim(setup_item2_identity_observation(), policy, policy.revision).unwrap()
+        val entry_lines = db_observation_identity_entry_encode(claim).unwrap().split("\n")
+        val entry_root = db_read_frame(db_snapshot_unhex(entry_lines[1]).unwrap(), 0).unwrap()
+        val extra_entry = entry_lines[0] + "\n" + db_snapshot_hex(db_frame(6u8, entry_root.payload + db_frame(0u8, []))) + "\n"
+        expect(db_observation_identity_entry_decode(extra_entry).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_QUOTA")
