@@ -147,4 +147,24 @@ Six integrated regression sources now exercise actual three-generation rollups, 
 
 REQ-032's three system scenarios now include actual signed-history queries and provenance alongside their existing local catalog/CAS checks. REQ-033's happy/boundary placeholders are replaced by actual duplicate registration, rollup publication/readback, declared histogram bins and preserved late-input generation links. Review caught and corrected a historical fixture cohort mismatch. The system inventory is now 20 actual-owner sources and 133 explicit fail-fast cases; the percentile-averaging refusal remains open. The manual and test-plan inventory track these authored sources, not executed evidence. The unchanged rejected bootstrap output supplies no admitted runner; all tests remain UNEXECUTED. Paged-history and exact configuration/reproduction admission work continue in isolated lanes.
 
-REQ-013 now has two additional real-owner system test sources: concurrent signed edits from the same retained base merge different declared fields, while reviewed and ACL-admitted list/set writes to undeclared fields fail without changing the generation. Independent source review found no concrete blocker. Inventory: 18 actual-owner cases and 135 fail-fast; all unexecuted. The combined delete/update/scalar boundary remains open because row-level delete/update conflicts lack durable catalog evidence; the source gap is tracked separately.
+Earlier REQ-013 work added two real-owner system test sources: concurrent signed edits from the same retained base merge different declared fields, while reviewed and ACL-admitted list/set writes to undeclared fields fail without changing the generation. Independent source review found no concrete blocker. That earlier inventory was 18 actual-owner cases and 135 fail-fast; the current inventory above is 20 and 133. All remain unexecuted. The combined delete/update/scalar boundary remains open because row-level delete/update conflicts lack durable catalog evidence; the source gap is tracked separately.
+
+## Paged historical proof and fixture checkpoint
+
+Integrated nine additional regression sources: three physical page-reader cases
+and six Paged historical-query/checkpoint cases. The reader distinguishes actual
+absence, scope and pre-allocation quota failures, uses retained handles and
+bounded chunks, and verifies exact EOF without converting quota errors to IO.
+Historical missing pages produce a typed semantic-unavailable result. The
+fixtures use two real signed revisions and old/current alias page proofs;
+rewritten checkpoint rows must pass ordinary import validity before the
+immutable-history rejection oracle is reached.
+
+Independent review repaired metadata preconditions in both the new history
+fixture and the prior settlement fixture: approval now names the final signed
+patches, dependency variants are reviewed after signing, and captured structural
+genesis remains unchanged by policy repinning. These test repairs do not weaken
+production admission. Commits `0fb512ed519` and `fc1dcb301f0` are local source
+checkpoints. No runtime tests were executed; system inventory remains 20 actual
+owner sources and 133 explicit fail-fast cases. REQ-019 content admission and
+complete source/test reproduction closure remain unfinished.
