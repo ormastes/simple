@@ -1,0 +1,48 @@
+# Real filesystem oracle for the Windows bootstrap path boundary. The runner
+# creates root/inside, root/outside and root/inside/junction -> root/outside.
+# This is focused bootstrap evidence, not the full compatibility spec matrix.
+use compiler.common.cache.phase_compatibility_path_io.{
+    phase_compatibility_canonical_directory_io_v1,
+    phase_compatibility_existing_artifact_io_v1,
+    phase_compatibility_destination_io_v1,
+    phase_compatibility_read_manifest_io_v1
+}
+
+extern fn rt_path_absolute(path: text) -> text
+extern fn rt_path_separator() -> text
+
+fn check_path_oracle(ok: bool, name: text) -> i64:
+    if ok:
+        print "PASS:{name}"
+        return 0
+    print "FAIL:{name}"
+    1
+
+fn main() -> i64:
+    if rt_path_separator() != "\\":
+        print "FAIL:Windows host required"
+        return 1
+    val root = rt_path_absolute("build/native_probe/windows_phase_path_fixture").replace("\\", "/")
+    val inside = root + "/inside"
+    val artifact = inside + "/module.o"
+    val backslash = artifact.replace("/", "\\")
+    var failed = 0
+    failed = failed + check_path_oracle(phase_compatibility_canonical_directory_io_v1(inside).valid, "directory")
+    failed = failed + check_path_oracle(phase_compatibility_existing_artifact_io_v1(inside, artifact).valid, "artifact")
+    val normalized = phase_compatibility_existing_artifact_io_v1(inside.replace("/", "\\"), backslash)
+    failed = failed + check_path_oracle(normalized.valid and normalized.canonical_path == artifact, "backslash-normalized")
+    val read = phase_compatibility_read_manifest_io_v1(backslash)
+    failed = failed + check_path_oracle(read.valid and read.content == "path-oracle", "manifest-read")
+    failed = failed + check_path_oracle(phase_compatibility_destination_io_v1(inside, inside + "/new.o").valid, "destination")
+    failed = failed + check_path_oracle(not phase_compatibility_destination_io_v1(inside, artifact).valid, "occupied")
+    failed = failed + check_path_oracle(not phase_compatibility_existing_artifact_io_v1(inside, root + "/outside/module.o").valid, "outside")
+    failed = failed + check_path_oracle(not phase_compatibility_existing_artifact_io_v1(inside, inside + "/./module.o").valid, "dot-alias")
+    failed = failed + check_path_oracle(not phase_compatibility_existing_artifact_io_v1(inside, inside + "//module.o").valid, "empty-component")
+    failed = failed + check_path_oracle(not phase_compatibility_canonical_directory_io_v1(inside + "/junction").valid, "junction-root")
+    failed = failed + check_path_oracle(not phase_compatibility_existing_artifact_io_v1(inside, inside + "/junction/module.o").valid, "junction-artifact")
+    failed = failed + check_path_oracle(not phase_compatibility_read_manifest_io_v1(inside + "/junction/module.o").valid, "junction-manifest")
+    failed = failed + check_path_oracle(not phase_compatibility_destination_io_v1(inside, inside + "/junction/new.o").valid, "junction-destination")
+    for leaf in ["stream.o:stream", "trailing.", "trailing ", "NUL", "con.txt", "COM1.o", "LPT9", "wild*.o"]:
+        failed = failed + check_path_oracle(not phase_compatibility_destination_io_v1(inside, inside + "/" + leaf).valid, "reserved-" + leaf)
+    print "Results: 21 checked, {failed} failed"
+    failed

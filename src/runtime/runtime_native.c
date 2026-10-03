@@ -10745,7 +10745,11 @@ int64_t rt_path_ext(const uint8_t* path_ptr, uint64_t path_len) {
     return rt_string_new(NULL, 0);
 }
 int64_t rt_path_separator(void) {
+#if defined(_WIN32)
+    static const uint8_t sep[1] = { '\\' };
+#else
     static const uint8_t sep[1] = { '/' };
+#endif
     return rt_string_new(sep, 1);
 }
 
