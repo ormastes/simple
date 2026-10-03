@@ -13,6 +13,7 @@ use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg}
 use compiler.semantics.perf_facts.types.*
 use compiler.semantics.perf.collection_plan.*
 use compiler.semantics.perf.collection_plan_extractor.{extract_unary_collection_plan}
+use compiler.semantics.perf.collection_plan_analysis.{collect_collection_expr_plans_v1}
 
 fn cp_span(line: i64) -> Span:
     Span.at(line, line, 1)
@@ -140,3 +141,64 @@ describe "typed CollectionPlan extraction":
         expect(plan.nodes[1].key_type.?).to_equal(true)
         val missing = collection_plan_unproven_facts(plan.nodes[1])
         expect(missing.contains("key type")).to_equal(false)
+
+describe "collection analysis discovers maximal regions":
+    it "discovers one maximal plan for a nested admitted chain":
+        step("Analyze a resolved map-filter region")
+        val chain = cp_call(cp_call(cp_source(), "map", 40, 3), "filter", 41, 4)
+        val result = collect_collection_expr_plans_v1(chain, 20, cp_registry())
+        expect(result.plans.len()).to_equal(1)
+        expect(result.plans[0].nodes.len()).to_equal(3)
+        expect(result.blockers.len()).to_equal(0)
+
+    it "finds an admitted inner region beneath an unregistered user method":
+        step("Traverse a user call without attributing builtin meaning to its name")
+        val mapped = cp_call(cp_source(), "map", 40, 3)
+        val user_call = cp_call(mapped, "filter", 900, 4)
+        val result = collect_collection_expr_plans_v1(user_call, 20, cp_registry())
+        expect(result.plans.len()).to_equal(1)
+        expect(result.plans[0].nodes.len()).to_equal(2)
+        expect(result.plans[0].nodes[1].operation_symbol_id.unwrap()).to_equal(40)
+        expect(result.blockers.len()).to_equal(0)
+
+    it "retains a located blocker for malformed admitted metadata use":
+        step("Reject an admitted operation whose result type is unavailable")
+        var bad_call = cp_call(cp_source(), "map", 40, 8)
+        bad_call.has_type_ = false
+        val result = collect_collection_expr_plans_v1(bad_call, 20, cp_registry())
+        expect(result.plans.len()).to_equal(0)
+        expect(result.blockers.len()).to_equal(1)
+        expect(result.blockers[0]).to_contain("function=20")
+        expect(result.blockers[0]).to_contain("line=8")
+        expect(result.blockers[0]).to_contain("no resolved result type")
+
+    it "traverses argument-owned regions when pruning an extracted receiver chain":
+        step("Retain nested callback expression discovery after maximal extraction")
+        val inner = cp_call(cp_source(), "map", 40, 7)
+        val outer = HirExpr(kind: HirExprKind.MethodCall(
+            cp_source(), "filter", [HirCallArg(has_name: false, name: "",
+                value: inner, span: cp_span(7))],
+            MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: 41))),
+            has_type_: true, type_: cp_array_type(), span: cp_span(8))
+        val result = collect_collection_expr_plans_v1(outer, 20, cp_registry())
+        expect(result.plans.len()).to_equal(2)
+        expect(result.plans[0].nodes[1].operation_symbol_id.unwrap()).to_equal(41)
+        expect(result.plans[1].nodes[1].operation_symbol_id.unwrap()).to_equal(40)
+
+    it "rejects an invalid registry before discovering regions":
+        step("Preserve registry failure rather than publishing admitted plans")
+        var registry = cp_registry()
+        registry.errors.push("fixture registry failure")
+        val result = collect_collection_expr_plans_v1(
+            cp_call(cp_source(), "map", 40, 3), 20, registry)
+        expect(result.plans.len()).to_equal(0)
+        expect(result.blockers.len()).to_equal(1)
+        expect(result.blockers[0]).to_contain("registry is invalid")
+
+    it "does not manufacture plans for an empty registry":
+        step("Analyze a call without any admitted operation contracts")
+        val result = collect_collection_expr_plans_v1(
+            cp_call(cp_source(), "map", 40, 3), 20,
+            CollectionOperationRegistry.new("empty-v1"))
+        expect(result.plans.len()).to_equal(0)
+        expect(result.blockers.len()).to_equal(0)
