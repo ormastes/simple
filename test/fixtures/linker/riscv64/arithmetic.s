@@ -30,6 +30,10 @@ arithmetic_values:
   .word 0
   .reloc ., R_RISCV_32_PCREL, arithmetic_values
   .word 0
+  .reloc ., R_RISCV_PLT32, _start
+  .word 0
+  .reloc ., R_RISCV_GOT32_PCREL, arithmetic_values
+  .word 0
 .globl delta_start, delta_end, six_value, two_value, byte_value, half_value, word_value
 .set delta_start, 0x1000
 .set delta_end, 0x1011
