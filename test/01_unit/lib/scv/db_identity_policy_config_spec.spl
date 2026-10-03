@@ -1,0 +1,219 @@
+# v2 configuration is independently pinned data, not identity-owner admission.
+use std.spec.*
+use std.scv.db_identity_policy_config.*
+use std.scv.db_observation_identity.*
+use std.scv.db_observation_identity_codec.{db_observation_identity_policy_encode}
+use std.scv.db_policy_codec.{db_policy_digest, db_policy_encode, db_policy_decode}
+use std.scv.db_admission.{db_admission_policy_digest}
+use std.scv.db_confidentiality.{db_metadata_policy_digest}
+use std.scv.db_canonical.{db_read_frame, db_read_children, db_frame, db_canonical_text}
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use test.fixtures.scv.db_provider_identity_fixture.*
+use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_policy}
+
+fn setup_item2_identity_config() -> DbIdentityPolicyConfig:
+    val first = setup_item2_identity_policy()
+    var second = first
+    second.provider_instance = "zi.fixture.invalid"
+    second = db_observation_identity_policy_seal(second).unwrap()
+    db_identity_policy_config_seal(DbIdentityPolicyConfig(revision: "", base: setup_item2_paged_policy().config, identities: [first, second])).unwrap()
+
+describe "REQ-017 v2 independently pinned identity-policy configuration":
+    it "roundtrips two provider policies and selects exact scoped policies":
+        val config = setup_item2_identity_config()
+        val wire = db_identity_policy_config_encode(config).unwrap()
+        val lines = wire.split("\n")
+        expect(lines.len()).to_equal(3)
+        expect(lines[0]).to_equal("SCVDB-POLICY-v2")
+        expect(lines[1].starts_with("06")).to_equal(true)
+        expect(lines[2]).to_equal("")
+        val decoded = db_identity_policy_config_decode(wire, config.revision).unwrap()
+        expect(decoded).to_equal(config)
+        expect(db_identity_policy_config_encode(decoded).unwrap()).to_equal(wire)
+        for policy in config.identities:
+            expect(db_identity_policy_select(decoded, policy.provider_instance, policy.project).unwrap()).to_equal(policy)
+        expect(db_identity_policy_select(decoded, "unregistered.fixture.invalid", "repo-1").unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_UNKNOWN_SCOPE")
+        expect(db_identity_policy_select(decoded, config.identities[0].provider_instance, "other-project").unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_UNKNOWN_SCOPE")
+
+    it "rejects duplicate and unsorted provider project scope pairs":
+        val config = setup_item2_identity_config()
+        for duplicate in [false, true]:
+            var changed = config
+            changed.identities = if duplicate: [config.identities[0], config.identities[0]] else: [config.identities[1], config.identities[0]]
+            expect(db_identity_policy_config_seal(changed).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_ORDER")
+        var same_instance = config
+        var later_project = config.identities[0]
+        later_project.project = "repo-2"
+        later_project = db_observation_identity_policy_seal(later_project).unwrap()
+        same_instance.identities = [config.identities[0], later_project]
+        same_instance = db_identity_policy_config_seal(same_instance).unwrap()
+        expect(db_identity_policy_select(same_instance, later_project.provider_instance, "repo-2").unwrap()).to_equal(later_project)
+        same_instance.identities = [later_project, config.identities[0]]
+        expect(db_identity_policy_config_seal(same_instance).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_ORDER")
+
+    it "rejects correctly sealed foreign namespace and epoch identity policies":
+        for foreign_namespace in [false, true]:
+            var config = setup_item2_identity_config()
+            var policy = config.identities[0]
+            if foreign_namespace: policy.namespace = "11112233445566778899aabbccddeeff"
+            else: policy.epoch = 2u64
+            config.identities[0] = db_observation_identity_policy_seal(policy).unwrap()
+            expect(db_identity_policy_config_seal(config).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_SCOPE")
+
+    it "keeps delimiter-ambiguous instance project pairs distinct and validates the outer selection pin":
+        var config = setup_item2_identity_config()
+        var first = setup_item2_identity_policy()
+        first.provider_instance = "a"
+        first.project = "b:c"
+        first = db_observation_identity_policy_seal(first).unwrap()
+        var second = setup_item2_identity_policy()
+        second.provider_instance = "a:b"
+        second.project = "c"
+        second = db_observation_identity_policy_seal(second).unwrap()
+        expect(first.provider_instance + ":" + first.project).to_equal(second.provider_instance + ":" + second.project)
+        config.identities = [first, second]
+        config = db_identity_policy_config_seal(config).unwrap()
+        expect(db_identity_policy_select(config, "a", "b:c").unwrap()).to_equal(first)
+        expect(db_identity_policy_select(config, "a:b", "c").unwrap()).to_equal(second)
+        var changed = config
+        first.capabilities.attestations = true
+        changed.identities[0] = db_observation_identity_policy_seal(first).unwrap()
+        expect(db_identity_policy_select(changed, "a", "b:c").unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_PIN")
+
+    it "checks outer base and inner pins independently rather than blessing nested caller values":
+        val config = setup_item2_identity_config()
+        var outer = config
+        outer.revision = "0".repeat(64)
+        expect(db_identity_policy_config_encode(outer).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_PIN")
+        expect(db_identity_policy_select(outer, config.identities[0].provider_instance, "repo-1").unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_PIN")
+        var base = config
+        base.base.revision = "0".repeat(64)
+        expect(db_identity_policy_config_seal(base).unwrap_err()).to_equal("SCVDB_POLICY_CONFIG_REVISION")
+        var inner = config
+        inner.identities[0].revision = "0".repeat(64)
+        expect(db_identity_policy_config_seal(inner).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_PIN")
+        val wire = db_identity_policy_config_encode(config).unwrap()
+        expect(db_identity_policy_config_decode(wire, "").unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_PIN")
+        expect(db_identity_policy_config_decode(wire, "0".repeat(64)).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_PIN")
+
+    it "changes the identity-set pin for even a transport-only capability rotation":
+        val config = setup_item2_identity_config()
+        var changed = config
+        var policy = changed.identities[0]
+        policy.capabilities.attestations = not policy.capabilities.attestations
+        changed.identities[0] = db_observation_identity_policy_seal(policy).unwrap()
+        changed = db_identity_policy_config_seal(changed).unwrap()
+        expect(changed.base).to_equal(config.base)
+        expect(changed.revision == config.revision).to_equal(false)
+        expect(db_identity_policy_set_digest(changed).unwrap() == db_identity_policy_set_digest(config).unwrap()).to_equal(false)
+
+    it "keeps the set pin stable across ordinary signing-key and reviewed-metadata rotation":
+        val config = setup_item2_identity_config()
+        val identity_pin = db_identity_policy_set_digest(config).unwrap()
+        for metadata_rotation in [false, true]:
+            var changed = config
+            if metadata_rotation:
+                changed.base.admission.metadata.rules[0].classification = "internal"
+                changed.base.admission.metadata.revision = db_metadata_policy_digest(changed.base.admission.metadata).unwrap()
+            else: changed.base.admission.keys[0].revoked = true
+            changed.base.admission.revision = db_admission_policy_digest(changed.base.admission).unwrap()
+            changed.base.revision = db_policy_digest(changed.base).unwrap()
+            changed = db_identity_policy_config_seal(changed).unwrap()
+            expect(changed.revision == config.revision).to_equal(false)
+            expect(changed.base.revision == config.base.revision).to_equal(false)
+            expect(db_identity_policy_set_digest(changed).unwrap()).to_equal(identity_pin)
+            expect(db_identity_policy_config_decode(db_identity_policy_config_encode(changed).unwrap(), changed.revision).unwrap()).to_equal(changed)
+
+    it "rejects v1 input without silently converting it into a v2 policy":
+        val config = setup_item2_identity_config()
+        expect(db_identity_policy_config_decode(db_policy_encode(config.base).unwrap(), config.revision).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_CODEC")
+        expect(db_policy_decode(db_identity_policy_config_encode(config).unwrap(), config.base.revision).unwrap_err()).to_equal("SCVDB_POLICY_VERSION")
+
+    it "rejects wrong versions trailing data and noncanonical outer hexadecimal":
+        val config = setup_item2_identity_config()
+        val wire = db_identity_policy_config_encode(config).unwrap()
+        val lines = wire.split("\n")
+        val upper = lines[1].replace("d", "D")
+        expect(upper == lines[1]).to_equal(false)
+        for invalid in [wire.replace("SCVDB-POLICY-v2", "SCVDB-POLICY-v3"), wire + "\n", wire[0:wire.len() - 1], lines[0] + "\n" + lines[1] + lines[1] + "\n", lines[0] + "\n" + upper + "\n"]:
+            expect(db_identity_policy_config_decode(invalid, config.revision).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_CODEC")
+        val root = db_read_frame(db_snapshot_unhex(lines[1]).unwrap(), 0).unwrap()
+        val fields = db_read_children(root.payload).unwrap()
+        val tampered = lines[0] + "\n" + db_snapshot_hex(db_frame(6u8, db_canonical_text("0".repeat(64)).unwrap() + db_frame(fields[1].tag, fields[1].payload) + db_frame(fields[2].tag, fields[2].payload))) + "\n"
+        expect(db_identity_policy_config_decode(tampered, config.revision).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_PIN")
+
+    it "requires a nonempty bounded policy set and admits exactly sixtyfour scoped policies":
+        var config = setup_item2_identity_config()
+        config.identities = []
+        expect(db_identity_policy_config_seal(config).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_COUNT")
+        for index in 1..65:
+            var policy = setup_item2_identity_policy()
+            policy.project = "r".repeat(index)
+            config.identities.push(db_observation_identity_policy_seal(policy).unwrap())
+        config = db_identity_policy_config_seal(config).unwrap()
+        val wire = db_identity_policy_config_encode(config).unwrap()
+        expect(db_identity_policy_config_decode(wire, config.revision).unwrap()).to_equal(config)
+        var extra = setup_item2_identity_policy()
+        extra.project = "r".repeat(65)
+        config.identities.push(db_observation_identity_policy_seal(extra).unwrap())
+        expect(db_identity_policy_config_seal(config).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_COUNT")
+
+    it "rejects oversized wire before parsing an attacker-selected body":
+        val config = setup_item2_identity_config()
+        expect(db_identity_policy_config_decode("x".repeat(16777217), config.revision).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_QUOTA")
+
+    it "rejects missing extra mistagged and nonminimal outer frames":
+        val config = setup_item2_identity_config()
+        val lines = db_identity_policy_config_encode(config).unwrap().split("\n")
+        val bytes = db_snapshot_unhex(lines[1]).unwrap()
+        val root = db_read_frame(bytes, 0).unwrap()
+        val fields = db_read_children(root.payload).unwrap()
+        val missing = db_frame(6u8, root.payload[0:fields[1].next_offset])
+        val extra = db_frame(6u8, root.payload + db_frame(0u8, []))
+        val wrong_tag = db_frame(7u8, root.payload)
+        # Extend the original length's final LEB128 byte with a zero group;
+        # payload and represented length stay unchanged, encoding is nonminimal.
+        var prefix = bytes[0:bytes.len() - root.payload.len()]
+        prefix[prefix.len() - 1] = prefix[prefix.len() - 1] | 128u8
+        val nonminimal = prefix + [0u8] + root.payload
+        for malformed in [missing, extra, wrong_tag, nonminimal]:
+            val wire = lines[0] + "\n" + db_snapshot_hex(malformed) + "\n"
+            expect(db_identity_policy_config_decode(wire, config.revision).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_CODEC")
+
+    it "bounds decoded scope children before duplicate scope or pin comparison":
+        val config = setup_item2_identity_config()
+        val lines = db_identity_policy_config_encode(config).unwrap().split("\n")
+        val root = db_read_frame(db_snapshot_unhex(lines[1]).unwrap(), 0).unwrap()
+        val fields = db_read_children(root.payload).unwrap()
+        val policies = db_read_children(fields[2].payload).unwrap()
+        val policy_frame = db_frame(policies[0].tag, policies[0].payload)
+        var too_many: [u8] = []
+        for _index in 0..65: too_many = too_many + policy_frame
+        val payload = db_frame(fields[0].tag, fields[0].payload) + db_frame(fields[1].tag, fields[1].payload) + db_frame(6u8, too_many)
+        val wire = lines[0] + "\n" + db_snapshot_hex(db_frame(6u8, payload)) + "\n"
+        expect(db_identity_policy_config_decode(wire, config.revision).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_COUNT")
+
+    it "rejects aggregate encoding overflow even when every scoped policy is individually valid":
+        var config = setup_item2_identity_config()
+        config.identities = []
+        var template = setup_item2_identity_policy()
+        for index in 1..58:
+            val name = "z".repeat(index) + "a".repeat(4096 - index)
+            template.capabilities.identity_dimensions.push(name)
+            template.capabilities.uniqueness_tuple.push(name)
+        expect(template.capabilities.identity_dimensions.len()).to_equal(64)
+        expect(template.capabilities.uniqueness_tuple.len()).to_equal(63)
+        var minimum_outer_bytes = 0
+        for index in 1..11:
+            var policy = template
+            policy.project = "r".repeat(index)
+            policy = db_observation_identity_policy_seal(policy).unwrap()
+            val inner = db_observation_identity_policy_encode(policy).unwrap()
+            expect(inner.len()).to_be_less_than(2097153)
+            # Outer hex needs two bytes for every embedded ASCII wire byte,
+            # even before adding frame/header/base overhead. No giant outer
+            # allocation is needed to establish this strict lower bound.
+            minimum_outer_bytes = minimum_outer_bytes + 2 * inner.len()
+            config.identities.push(policy)
+        expect(minimum_outer_bytes).to_be_greater_than(16777216)
+        expect(db_identity_policy_config_seal(config).unwrap_err()).to_equal("SCVDB_IDENTITY_CONFIG_QUOTA")
