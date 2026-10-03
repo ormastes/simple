@@ -3,6 +3,7 @@ use app.io.mod (file_write, file_exists, process_run_bounded)
 use app.scv.db.commands.{db_command}
 use app.scv.db.local_store.{db_store_read}
 use app.scv.db.local_apply.{db_read_local_view}
+use app.scv.db.settlement_queue.{db_settlement_queue_open}
 use std.scv.db_policy_codec.*
 use std.scv.db_patch_codec.{db_patch_encode}
 use std.scv.db_admission.{db_admission_policy_digest}
@@ -21,6 +22,31 @@ fn setup_item2_command_policy() -> DbPolicyConfig:
     config
 
 describe "Distributed database command owner":
+    it "persists original authenticated queue bytes and rejects stale or forged enqueue requests":
+        val root = setup_item2_apply_root()
+        val config = setup_item2_command_policy()
+        val patch = setup_item2_apply_patch(1, "")
+        expect(file_write("{root}/policy", db_policy_encode(config).unwrap())).to_be(true)
+        expect(file_write("{root}/patch", db_patch_encode(patch).unwrap())).to_be(true)
+        step("Inspect an empty queue then enqueue with independent policy and physical-head pins")
+        expect(db_command(root, ["queue-status", "policy", config.revision])).to_equal("OK local-queue head=empty items=0")
+        expect(db_command(root, ["queue-enqueue", "policy", config.revision, "patch", "empty"]).starts_with("OK local-queue head=")).to_be(true)
+        val view = db_settlement_queue_open(root, config.admission).unwrap()
+        expect(view.queue.items.len()).to_equal(1)
+        expect(view.queue.items[0].phase).to_equal("queued")
+        expect(db_patch_encode(view.queue.items[0].patch)).to_equal(db_patch_encode(patch))
+        expect(db_command(root, ["queue-status", "policy", config.revision])).to_equal("OK local-queue head={view.head} items=1")
+        step("Replay preserves the original queue; stale or forged requests preserve its head")
+        expect(db_command(root, ["queue-enqueue", "policy", config.revision, "patch", view.head])).to_equal("OK local-queue head={view.head} items=1")
+        expect(db_command(root, ["queue-enqueue", "policy", config.revision, "patch", "empty"])).to_equal("ERROR SCVDB_STORE_HEAD_ADVANCED")
+        var forged = patch
+        forged.signature = [0u8;64]
+        expect(file_write("{root}/patch", db_patch_encode(forged).unwrap())).to_be(true)
+        expect(db_command(root, ["queue-enqueue", "policy", config.revision, "patch", view.head])).to_equal("ERROR SCVDB_SIGNATURE_INVALID")
+        expect(db_settlement_queue_open(root, config.admission).unwrap().head).to_equal(view.head)
+        expect(db_store_read(root, "semantic").code).to_equal("empty")
+        expect(db_store_read(root, "settlement").code).to_equal("empty")
+
     it "imports inert external quarantine and applies only the requested authenticated patch":
         step("Create a private repository and external evidence parent")
         val root = setup_item2_apply_root()

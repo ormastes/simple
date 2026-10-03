@@ -36,7 +36,6 @@ crash durability, cross-platform qualification, or a measured scale result.
 | Typed indexed projections | `db_page_records.spl`, `db_page_projection.spl`, `semantic_page_store.spl` | Generation-bound row/alias/accepted/actor-counter queries and paired incremental projection updates; imported revision claims are not authoritative paged admission |
 | Canonical provider follow-up | `github_binding_owner.spl` | Durable acknowledgement plus fresh scoped GET for new signed binding/common-state writes; generic producer entry rejects reserved entity kinds; historical replay reauthorizes accepted bytes |
 | Retention effects | `retention_store.spl`, `retention_codec.spl`, `evidence_delete.spl` | Durable pending deletion, verified rollup/provenance, same-lease current-pin and retained-root dependency closure checks, actual unlink/absence receipts and honest resolution; bounded reference lane, not Operating B qualification |
-
 | Authoritative paged transactions | `db_paged_*.spl`, `paged_store.spl` | Signature admission before bounded proof IO, captured-manifest indexes, unique swaps/reference counts, one authoritative SJ CAS, structural/key rotation pins and symmetric backend exclusion; execution unverified |
 
 ## Review findings addressed during coding
@@ -59,7 +58,7 @@ crash durability, cross-platform qualification, or a measured scale result.
 
 ## Remaining integration and execution gates
 
-Finish candidate publication coordination, durable signed receipt/index recovery,
+The bounded local settlement coordinator now persists original queued patches, exact candidate commits and structural policy pins; it schedules ready dependencies and reconciles uncertain publication before allocation. Local signed index observation is not protected production completion. Finish protected receipt/index recovery,
 protected-authority deployment admission, cross-replica delivery admission,
 paged adapter/conflict-resolution integration, complete command coverage and resnapshot/epoch
 migration orchestration. The source binding follow-up is implemented; live
@@ -83,3 +82,9 @@ and succeed, not accept an unsupported result as PASS.
 SJ's existing stale lease recovery and actual process crash boundaries need
 separate integration evidence. The private work PR remains a draft until those
 release gates are satisfied; no protected branch or release tag is updated.
+
+## Compact alias interchange source
+
+REQ-002 now has a strict versioned header/cell codec and three owner-integrated system test sources. A bare decimal requires its transported namespace/epoch/kind header and independently supplied expected context. Full positive u64 values are supported; overflow, zero, ambiguous decimals and mismatched contexts fail closed. This representation allocates nothing and grants no settlement authority. Execution remains unverified.
+
+The existing command owner now exposes queue-status and queue-enqueue with independent policy pins and exact queue HEADs. Enqueue persists the original signed patch through the queue owner and reports local queue state only; it neither invokes a signer nor publishes a remote ref. Command regression source covers original bytes, replay, stale HEAD, forged signature and untouched semantic/settlement channels.

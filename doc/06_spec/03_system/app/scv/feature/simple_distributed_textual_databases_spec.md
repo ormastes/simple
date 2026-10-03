@@ -1,6 +1,6 @@
 # Simple distributed textual databases: SCV + jj + GitHub
 
-**Status:** Source-only, execution unverified. REQ-001 and REQ-010 now invoke real filesystem, typed codec and authenticated local-publication owners. Other broad requirement checkers remain intentionally fail-fast. No scenario is PASS evidence without execution and its required durable oracle.
+**Status:** Source-only, execution unverified. REQ-001, REQ-002 and REQ-010 now invoke real filesystem, typed codec and authenticated local-publication owners. Other broad requirement checkers remain intentionally fail-fast. No scenario is PASS evidence without execution and its required durable oracle.
 
 **Executable source:** `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl`
 
@@ -11,7 +11,7 @@ Each remaining `@inline` checker owns its named setup contract: `setup_replica_f
 REQ-001 now creates two independent filesystem roots, reserves actual durable
 offline IDs, restores a saved counter and old handle to exercise rollback, and
 checks a separately signed actor-counter collision against persisted accepted
-state. REQ-010 adds persisted signed transport, ordered mutation/precondition checks, and missing signature/provenance/version rejection. The typed-patch steps explicitly distinguish transport from semantic publication. This manual
+state. REQ-002 writes and rereads a versioned compact alias header/cell, resolves its actual paged row, and rejects missing or mismatched context without changing the generation. REQ-010 adds persisted signed transport, ordered mutation/precondition checks, and missing signature/provenance/version rejection. The typed-patch steps explicitly distinguish transport from semantic publication. This manual
 annotation is not a generated test-run receipt; docgen/execution remains pending.
 
 The five feature flows use these steps (typed-patch scenarios add transport and publication-specific steps):
@@ -27,7 +27,7 @@ The five feature flows use these steps (typed-patch scenarios add transport and 
 | Contract | Fixture/checker | Happy-path scenario | Boundary scenario | Failure scenario |
 |---|---|---|---|---|
 | REQ-001 — Offline identity | Real filesystem roots; `db_actor_open/reserve`, `db_apply_local`, durable reopen | Should prove that it creates distinct durable IDs on disconnected replicas | Should prove that it rotates incarnation after cloned counter rollback | Should prove that it rejects reused actor-counter identity with different bytes |
-| REQ-002 — Compact alias | `setup_replica_fixture` / `check_replica_contract` | Should prove that it resolves a settled u64 under namespace epoch and kind | Should prove that it round-trips a context-elided integer through its versioned header | Should prove that it rejects a bare integer copied without identity context |
+| REQ-002 — Compact alias | Actual paged generation, versioned header/cell files and independent expected context | Should prove that it resolves a settled u64 under namespace epoch and kind | Should prove that it round-trips a context-elided integer through its versioned header | Should prove that it rejects a bare integer copied without identity context |
 | REQ-003 — Canonical identity preservation | `setup_replica_fixture` / `check_replica_contract` | Should prove that it adds aliases without changing ChangeIdentity or RevisionIdentity | Should prove that it keeps canonical identities stable across compaction and replay | Should prove that it rejects alias-driven renumbering of canonical SCV identities |
 | REQ-004 — Identity map | `setup_replica_fixture` / `check_replica_contract` | Should prove that it commits bidirectional aliases allocator receipt and tombstone atomically | Should prove that it leaves gaps while preserving high-water marks after deletion | Should prove that it rejects reuse or allocation derived from live row count |
 | REQ-005 — Fixed authority | `setup_settlement_fixture` / `check_settlement_contract` | Should prove that it allocates only through the configured protected settled ref | Should prove that it allows a mirror to verify but not allocate identifiers | Should prove that it requires a new namespace when old-authority fencing is unproven |
@@ -90,7 +90,7 @@ Run only after production helpers exist. Compiled-mode execution must validate p
 ```simple
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001 and REQ-010 use real filesystem/production owners. Remaining
+# Acceptance source: REQ-001, REQ-002 and REQ-010 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
@@ -108,6 +108,20 @@ use std.scv.db_patch_codec.{db_patch_encode, db_patch_decode}
 use std.scv.db_admission.{db_patch_signing_bytes}
 use std.scv.db_reducer.{db_field_value}
 use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_verify}
+use std.scv.db_alias_cell.*
+use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
+use app.scv.db.paged_store.{db_paged_initialize, db_paged_apply, db_paged_open, db_paged_current_row}
+use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_root, setup_item2_paged_policy, setup_item2_paged_patch, setup_item2_paged_create, setup_item2_paged_ref}
+
+fn setup_item2_compact_alias() -> (text, text, text, SettledAlias, DbAliasContext):
+    val root = setup_item2_paged_root()
+    val policy = setup_item2_paged_policy()
+    val genesis = db_paged_initialize(root, policy).unwrap()
+    val patch = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], genesis.manifest.revision, 1)
+    val applied = db_paged_apply(root, genesis.head, patch, policy).unwrap()
+    val context = DbAliasContext(namespace: policy.config.admission.namespace, epoch: policy.config.admission.epoch, kind: "bug")
+    val alias = SettledAlias(database_namespace: context.namespace, authority_epoch: context.epoch, entity_kind: context.kind, sequence: 1u64)
+    (root, applied.head, db_alias_header_encode(context).unwrap(), alias, context)
 
 # Pure prerequisites only: these assertions do not prove durable REQ-004.
 fn setup_item2_uid(counter: u64) -> EntityUid:
@@ -226,18 +240,40 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
     describe "REQ-002: Compact alias":
         it "should prove that it resolves a settled u64 under namespace epoch and kind":
             step("Create offline semantic changes")
+            val (root, head, header, alias, context) = setup_item2_compact_alias()
             step("Drive accepted state and inspect its receipt")
-            check_replica_contract("REQ-002", "drive accepted compact alias state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            val policy = setup_item2_paged_policy()
+            val row = db_paged_current_row(root, policy, entity_ref_settled(alias)).unwrap().unwrap()
+            expect(row.entity).to_equal(entity_ref_canonical(setup_item2_paged_ref(1)))
+            expect(db_paged_current_row(root, policy, setup_item2_paged_ref(1)).unwrap().unwrap()).to_equal(row)
+            for foreign in [SettledAlias(database_namespace: "ffffffffffffffffffffffffffffffff", authority_epoch: alias.authority_epoch, entity_kind: "bug", sequence: 1u64), SettledAlias(database_namespace: alias.database_namespace, authority_epoch: 2u64, entity_kind: "bug", sequence: 1u64)]:
+                expect(db_paged_current_row(root, policy, entity_ref_settled(foreign)).is_err()).to_be(true)
+            val wrong_kind = SettledAlias(database_namespace: alias.database_namespace, authority_epoch: alias.authority_epoch, entity_kind: "test", sequence: 1u64)
+            expect(db_paged_current_row(root, policy, entity_ref_settled(wrong_kind)).unwrap()).to_be_nil()
+            expect(db_paged_open(root, policy).unwrap().head).to_equal(head)
 
         it "should prove that it round-trips a context-elided integer through its versioned header":
             step("Create offline semantic changes")
+            val (root, head, header, alias, context) = setup_item2_compact_alias()
+            expect(file_write("{root}/alias-header.txt", header)).to_be(true)
+            expect(file_write("{root}/alias-cell.txt", db_alias_cell_encode(header, alias).unwrap())).to_be(true)
             step("Drive the boundary state and inspect preserved invariants")
-            check_replica_contract("REQ-002", "drive boundary compact alias state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            val decoded = db_alias_cell_decode(file_read("{root}/alias-header.txt"), file_read("{root}/alias-cell.txt"), context).unwrap()
+            expect(file_read("{root}/alias-cell.txt")).to_equal("1")
+            expect(decoded).to_equal(alias)
+            expect(db_paged_current_row(root, setup_item2_paged_policy(), entity_ref_settled(decoded)).unwrap().unwrap().entity).to_equal(entity_ref_canonical(setup_item2_paged_ref(1)))
+            expect(db_paged_open(root, setup_item2_paged_policy()).unwrap().head).to_equal(head)
 
         it "should prove that it rejects a bare integer copied without identity context":
             step("Create offline semantic changes")
+            val (root, head, header, alias, context) = setup_item2_compact_alias()
+            expect(file_write("{root}/copied-cell.txt", "1")).to_be(true)
             step("Inject the failure and inspect fail-closed state")
-            check_replica_contract("REQ-002", "inject unsafe compact alias state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            val cell = file_read("{root}/copied-cell.txt")
+            expect(db_alias_cell_decode("", cell, context)).to_equal(Err("SCVDB_ALIAS_HEADER"))
+            val foreign = DbAliasContext(namespace: context.namespace, epoch: context.epoch + 1u64, kind: context.kind)
+            expect(db_alias_cell_decode(header, cell, foreign)).to_equal(Err("SCVDB_ALIAS_CONTEXT"))
+            expect(db_paged_open(root, setup_item2_paged_policy()).unwrap().head).to_equal(head)
 
     describe "REQ-003: Canonical identity preservation":
         it "should prove that it adds aliases without changing ChangeIdentity or RevisionIdentity":
@@ -1107,6 +1143,6 @@ The executable now also contains three pure production-map prerequisites:
 2. Replay tombstoned A: return `tombstoned` at 1, retain one tombstoned binding and high-water 1.
 3. Reject another namespace with `SCVDB_NAMESPACE_MISMATCH`, sequence 0, and unchanged binding/high-water.
 
-These pure prerequisites supplement 153 full-contract scenarios. Six REQ-001/REQ-010 scenarios now use real filesystem, codec and authenticated mutation owners; the other 147 still fail explicitly. None has executed in this session, so neither group establishes runtime, process-crash, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains RED/unproved.
+These pure prerequisites supplement 153 full-contract scenarios. Nine REQ-001/REQ-002/REQ-010 scenarios now use real filesystem, codec and authenticated mutation owners; the other 144 still fail explicitly. None has executed in this session, so neither group establishes runtime, process-crash, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains RED/unproved.
 
 Concrete inputs and oracles for all 51 requirements and five durable campaigns are in `doc/03_plan/evidence/seven_plans/item2_acceptance_matrix_2026-10-03.md`. Preserve the original scenario catalog until each whole checker has production-backed evidence. Runtime results and generated-manual regeneration are still required before verification PASS.

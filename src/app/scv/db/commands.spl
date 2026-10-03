@@ -12,9 +12,10 @@ use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
 use app.scv.db.quarantine_store.{DbQuarantineQuota, db_quarantine_import, db_quarantine_read}
 use std.scv.db_paged_model.{db_paged_policy_decode}
 use app.scv.db.paged_store.{db_paged_initialize, db_paged_open, db_paged_apply}
+use app.scv.db.settlement_queue.{db_settlement_queue_open, db_settlement_enqueue}
 
 fn db_command_help() -> text:
-    "scv db status <policy-file> <policy-digest>\nscv db apply <policy-file> <policy-digest> <patch-file> <expected-head|empty>\nscv db paged-init <paged-policy-file> <policy-digest>\nscv db paged-status <paged-policy-file> <policy-digest>\nscv db paged-apply <paged-policy-file> <policy-digest> <patch-file> <expected-head>\nscv db paged-quarantine-apply <paged-policy-file> <policy-digest> <external-store> <digest> <batch-id> <expected-head>\nscv db inspect-patch <patch-file>\nscv db quarantine-import <external-store> <bundle-file>\nscv db quarantine-inspect <external-store> <digest>\nscv db quarantine-apply <policy-file> <policy-digest> <external-store> <digest> <batch-id> <expected-head|empty>\nPolicy digests must come from the independently reviewed configuration. Apply is local; it does not settle a remote authority. Paged commands require a paged policy; existing reference stores require explicit migration. Quarantine inspection verifies storage and parsing only."
+    "scv db status <policy-file> <policy-digest>\nscv db apply <policy-file> <policy-digest> <patch-file> <expected-head|empty>\nscv db paged-init <paged-policy-file> <policy-digest>\nscv db paged-status <paged-policy-file> <policy-digest>\nscv db paged-apply <paged-policy-file> <policy-digest> <patch-file> <expected-head>\nscv db paged-quarantine-apply <paged-policy-file> <policy-digest> <external-store> <digest> <batch-id> <expected-head>\nscv db queue-status <policy-file> <policy-digest>\nscv db queue-enqueue <policy-file> <policy-digest> <patch-file> <expected-head|empty>\nscv db inspect-patch <patch-file>\nscv db quarantine-import <external-store> <bundle-file>\nscv db quarantine-inspect <external-store> <digest>\nscv db quarantine-apply <policy-file> <policy-digest> <external-store> <digest> <batch-id> <expected-head|empty>\nPolicy digests must come from the independently reviewed configuration. Apply and queue commands are local; queue acknowledgement is not remote settlement. Paged commands require a paged policy; existing reference stores require explicit migration. Quarantine inspection verifies storage and parsing only."
 
 fn _db_command_now() -> Result<u64, text>:
     val sample = time_sample_unix_micros_or_failure()
@@ -42,6 +43,18 @@ fn _db_command_run(root: text, args: [text]) -> Result<text, text>:
     if args.len() == 0: return Ok(db_command_help())
     if args.len() == 1 and args[0] == "help": return Ok(db_command_help())
     val observed = path_final_existing(root)?
+    if args[0] == "queue-status" or args[0] == "queue-enqueue":
+        val required = if args[0] == "queue-status": 3 else: 5
+        if args.len() != required: return Err("SCVDB_COMMAND_USAGE")
+        val config = _db_command_policy(_db_command_path(observed.path, args[1]), args[2])?
+        if args[0] == "queue-status":
+            val view = db_settlement_queue_open(observed.path, config.admission)?
+            val head = if view.head == "": "empty" else: view.head
+            return Ok("OK local-queue head={head} items={view.queue.items.len()}")
+        val patch = db_patch_decode(_db_command_input(_db_command_path(observed.path, args[3]), 1048576)?)?
+        val expected = if args[4] == "empty": "" else: args[4]
+        val view = db_settlement_enqueue(observed.path, expected, patch, config.admission)?
+        return Ok("OK local-queue head={view.head} items={view.queue.items.len()}")
     if ["paged-init", "paged-status", "paged-apply", "paged-quarantine-apply"].contains(args[0]):
         var required = 3
         if args[0] == "paged-apply": required = 5

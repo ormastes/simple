@@ -1088,3 +1088,10 @@ nonregression and in-flight provider checks belong to the checkpoint effect
 owner, not to public storage-record shape. Cross-backend migration is separate.
 The full install owner is still in progress; storage regression source is
 unexecuted and is not a crash-durability receipt.
+### 19.7 Compact alias cells
+
+The REQ-002 interchange owner uses SCVDB-ALIAS-v1 followed by namespace, minimal positive decimal epoch, kind, and final newline. The bounded header (4096 bytes maximum; kind at most 4000 characters) may be shared by a table; each cell is a minimal positive decimal u64. Decode requires the transported header and an independently supplied expected context. Missing headers, foreign contexts, zero, signs, whitespace, leading zeroes and overflow are rejected. The codec does not allocate or certify settlement; actual resolution uses the authenticated captured database generation. Test source exercises file round-trip and paged lookup; runtime evidence is pending.
+
+### 19.8 Bounded local settlement coordination
+
+The settlement-work queue persists at most 64 original signed patches (1 MiB each, 16 MiB total encoding). Its local bare-remote coordinator records the exact candidate commit and a canonical structural policy pin before publication, prioritizes uncertain publication recovery, and chooses dependency-ready work deterministically. Credentials are rechecked separately from structural replanning. Real signed index and exact tree/blob readbacks can produce local-index-observed; this is not protected deployment admission or Indexed completion. The existing scv db command owner exposes queue-status and queue-enqueue through independently pinned policy and exact queue-head checks. Network, signing and protected production completion are not implied by a queue acknowledgement. All coordinator and command tests remain execution-unverified.

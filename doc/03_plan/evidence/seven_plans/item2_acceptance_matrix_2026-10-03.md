@@ -3,7 +3,7 @@
 Date: 2026-10-03. Baseline: release/1.0 at `e9cd3153c881c55f59eaaa2573b4b8a5e803023a`.
 Selected scope remains Authority A / Adapters A / Operating B / Retention A.
 
-This is a test contract, not a passing receipt. Every full requirement below is **UNPROVED; execution blocked**. Of the 153 full-contract happy/boundary/failure cases, six REQ-001/REQ-010 cases now invoke actual offline actor, typed transport and authenticated local-publication owners; 147 retain explicit fail-fast checks. Pure candidate-map prerequisites and the new durable test sources remain unexecuted. They do not establish disk atomicity, protected publication, recovery or a passing requirement. No source inventory counts as runtime evidence. See the [execution report](item2_dev_execution_2026-10-03.md) for the runtime blocker and remaining gates.
+This is a test contract, not a passing receipt. Every full requirement below is **UNPROVED; execution blocked**. Of the 153 full-contract happy/boundary/failure cases, nine REQ-001/REQ-002/REQ-010 cases now invoke actual offline actor, versioned alias interchange, typed transport and authenticated local-publication owners; 144 retain explicit fail-fast checks. Pure candidate-map prerequisites and the new durable test sources remain unexecuted. They do not establish disk atomicity, protected publication, recovery or a passing requirement. No source inventory counts as runtime evidence. See the [execution report](item2_dev_execution_2026-10-03.md) for the runtime blocker and remaining gates.
 
 ## Shared deterministic fixtures and ownership
 
