@@ -1,0 +1,151 @@
+"""REQ-005 explicit-contract generic indices. Authored, not executed.
+Imports production structures; no native Dict or stringified key oracle.
+"""
+use std.spec.*
+use std.gc_async_mut.pure.indexed_collections.{HashMap, HashSet}
+
+enum IndexColor:
+    Red
+    Blue
+
+fn ix_hash(key: i64) -> i64:
+    key
+fn ix_equal(a: i64, b: i64) -> bool:
+    a == b
+fn ix_collision(key: i64) -> i64:
+    -9223372036854775807 - 1
+fn ix_text_hash(key: text) -> i64:
+    key.len()
+fn ix_text_equal(a: text, b: text) -> bool:
+    a == b
+fn ix_color_hash(key: IndexColor) -> i64:
+    match key:
+        Red: 0
+        Blue: 1
+fn ix_color_equal(a: IndexColor, b: IndexColor) -> bool:
+    ix_color_hash(a) == ix_color_hash(b)
+fn ix_tuple_hash(key: (i64, i64)) -> i64:
+    key.0
+fn ix_tuple_equal(a: (i64, i64), b: (i64, i64)) -> bool:
+    a.0 == b.0 and a.1 == b.1
+fn ix_parity_hash(key: i64) -> i64:
+    key % 2
+fn ix_parity_equal(a: i64, b: i64) -> bool:
+    a % 2 == b % 2
+
+describe "explicit-contract generic hash map":
+    it "reports empty and absent keys":
+        # @req REQ-005
+        step("Construct an empty integer map")
+        val map: HashMap<i64, text> = HashMap.with_contract(ix_hash, ix_equal)
+        expect(map.len()).to_equal(0)
+        expect(map.contains(7)).to_equal(false)
+        expect(map.get(7)).to_be_nil()
+
+    it "overwrites equal keys according to the supplied contract":
+        # @req REQ-005
+        step("Insert equivalent parity keys")
+        var map: HashMap<i64, text> = HashMap.with_contract(ix_parity_hash, ix_parity_equal)
+        map.insert(1, "first")
+        map.insert(3, "second")
+        expect(map.len()).to_equal(1)
+        expect(map.get(5)).to_equal(Some("second"))
+        expect(map.contains(2)).to_equal(false)
+
+    it "distinguishes text keys with identical hashes":
+        # @req REQ-005
+        step("Insert colliding text keys")
+        var map: HashMap<text, i64> = HashMap.with_contract(ix_text_hash, ix_text_equal)
+        map.insert("ab", 1)
+        map.insert("cd", 2)
+        expect(map.get("ab")).to_equal(Some(1))
+        expect(map.get("cd")).to_equal(Some(2))
+        expect(map.get("ef")).to_be_nil()
+
+    it "supports enum and tuple keys without stringification":
+        # @req REQ-005
+        step("Use explicit enum and tuple contracts")
+        var colors: HashMap<IndexColor, i64> = HashMap.with_contract(ix_color_hash, ix_color_equal)
+        colors.insert(IndexColor.Red, 4)
+        colors.insert(IndexColor.Blue, 9)
+        expect(colors.get(IndexColor.Red)).to_equal(Some(4))
+        expect(colors.get(IndexColor.Blue)).to_equal(Some(9))
+        var pairs: HashMap<(i64, i64), text> = HashMap.with_contract(ix_tuple_hash, ix_tuple_equal)
+        pairs.insert((1, 2), "left")
+        pairs.insert((1, 3), "right")
+        expect(pairs.get((1, 2))).to_equal(Some("left"))
+        expect(pairs.get((1, 3))).to_equal(Some("right"))
+
+    it "removes head middle and tail collisions without losing neighbors":
+        # @req REQ-005
+        step("Remove and reinsert within a forced-collision bucket")
+        var map: HashMap<i64, i64> = HashMap.with_contract(ix_collision, ix_equal)
+        for i in 0..5:
+            map.insert(i, i * 10)
+        expect(map.remove(2)).to_equal(true)
+        expect(map.remove(0)).to_equal(true)
+        expect(map.remove(4)).to_equal(true)
+        expect(map.remove(2)).to_equal(false)
+        expect(map.len()).to_equal(2)
+        expect(map.get(1)).to_equal(Some(10))
+        expect(map.get(3)).to_equal(Some(30))
+        expect(map.get(2)).to_be_nil()
+        map.insert(2, 99)
+        expect(map.get(2)).to_equal(Some(99))
+        expect(map.len()).to_equal(3)
+
+    it "retains all values across repeated growth and removal":
+        # @req REQ-005
+        step("Grow through 257 integer entries")
+        var map: HashMap<i64, i64> = HashMap.with_contract(ix_hash, ix_equal)
+        for i in 0..257:
+            map.insert(i, i * 3)
+        expect(map.len()).to_equal(257)
+        for i in 0..257:
+            expect(map.get(i)).to_equal(Some(i * 3))
+        for i in 0..128:
+            expect(map.remove(i)).to_equal(true)
+        expect(map.len()).to_equal(129)
+        for i in 128..257:
+            expect(map.get(i)).to_equal(Some(i * 3))
+
+    it "retains forced collisions through resize":
+        # @req REQ-005
+        step("Grow a single collision bucket")
+        var map: HashMap<i64, i64> = HashMap.with_contract(ix_collision, ix_equal)
+        for i in 0..40:
+            map.insert(i, i)
+        for i in 0..40:
+            expect(map.get(i)).to_equal(Some(i))
+        expect(map.len()).to_equal(40)
+
+    it "accepts both signed hash extremes":
+        # @req REQ-005
+        step("Insert minimum and maximum signed integer hashes")
+        var map: HashMap<i64, text> = HashMap.with_contract(ix_hash, ix_equal)
+        val minimum: i64 = -9223372036854775807 - 1
+        val maximum: i64 = 9223372036854775807
+        map.insert(minimum, "min")
+        map.insert(maximum, "max")
+        map.insert(-1, "negative")
+        expect(map.get(minimum)).to_equal(Some("min"))
+        expect(map.get(maximum)).to_equal(Some("max"))
+        expect(map.remove(minimum)).to_equal(true)
+        expect(map.get(-1)).to_equal(Some("negative"))
+
+describe "explicit-contract generic hash set":
+    it "deduplicates removes and grows with collision equality":
+        # @req REQ-005
+        step("Exercise the set through the same collision-safe substrate")
+        var items: HashSet<i64> = HashSet.with_contract(ix_collision, ix_equal)
+        expect(items.len()).to_equal(0)
+        expect(items.remove(0)).to_equal(false)
+        for i in 0..40:
+            items.insert(i)
+            items.insert(i)
+        expect(items.len()).to_equal(40)
+        for i in 0..40:
+            expect(items.contains(i)).to_equal(true)
+        expect(items.remove(20)).to_equal(true)
+        expect(items.contains(20)).to_equal(false)
+        expect(items.len()).to_equal(39)
