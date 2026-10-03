@@ -1,0 +1,51 @@
+# Pure admission rules shared by the existing differential runner and its tests.
+# Strict requests are not evidence: no admitted self-hosted JIT receipt exists
+# here yet, so certification of that lane deliberately fails closed.
+
+fn differential_terminal_newline(text_value: text) -> text:
+    if text_value.ends_with("\r\n"):
+        return text_value.substring(0, text_value.len() - 2)
+    if text_value.ends_with("\n"):
+        return text_value.substring(0, text_value.len() - 1)
+    text_value
+
+fn differential_observation_error(engine: text, exit_code: i64, stdout: text, expected: text, certify: bool) -> text:
+    if exit_code != 0:
+        return "exit={exit_code}"
+    if stdout.trim().len() == 0:
+        return "no-stdout"
+    if not certify:
+        return ""
+    val oracle = differential_terminal_newline(expected)
+    if oracle.len() == 0:
+        return "oracle-missing"
+    if oracle.contains("\n") or oracle.contains("\r"):
+        return "oracle-must-be-single-marker"
+    if differential_terminal_newline(stdout) != oracle:
+        return "oracle-mismatch"
+    if engine == "jit":
+        return "engine-witness-unavailable:jit"
+    ""
+
+fn differential_engine_error(engines: [text]) -> text:
+    var seen: [text] = []
+    for engine in engines:
+        var canonical = engine
+        if canonical == "interpreter":
+            canonical = "interpret"
+        if canonical != "interpret" and canonical != "jit" and canonical != "native":
+            return "unknown-engine:{canonical}"
+        for existing in seen:
+            if existing == canonical:
+                return "duplicate-engine:{canonical}"
+        seen.push(canonical)
+    if seen.len() < 2:
+        return "at-least-two-engines-required"
+    ""
+
+fn differential_certification_exit(fixtures: i64, lane_errors: i64, divergences: i64) -> i64:
+    if fixtures == 0:
+        return 2
+    if lane_errors > 0 or divergences > 0:
+        return 1
+    0

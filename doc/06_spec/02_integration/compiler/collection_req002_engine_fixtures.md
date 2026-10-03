@@ -30,20 +30,31 @@ Keep the exact same four sources and markers for both generations. Bootstrap
 does not authorize Rust-seed tests: only admitted pure-Simple artifacts may run
 verification; the Rust seed remains bootstrap-only. No command was run here.
 
-## Existing harness limitations that block certification
+## Certification rules and remaining admission limits
 
-Strict no-fallback execution is required before accepting parity. The canonical
-runner currently pins engine names but `run_interpreted` does not enforce
-`SIMPLE_JIT_STRICT`, collect a positive JIT witness, or check child exit status.
-`run_native` explicitly supplies `SIMPLE_SCV_FREEZE_FALLBACK=1` and also ignores
-the final program exit status. It compares nonempty normalized stdout rather
-than enforcing an expected-marker file. Thus its AGREE verdict alone cannot
-certify these fixtures, identical runtime diagnostics, or actual engine identity.
-Future admitted evidence must require exact markers, zero exit, engine provenance,
-and no fallback; this test-only change does not authorize admission bypasses or
-modify runner behavior. All-whitespace differences are outside its comparison.
-The SCV knob relaxes source-inventory snapshot admission; it is distinct from
-execution-engine fallback and does not by itself mean native code was interpreted.
+`DIFF_CERTIFY=1` enables strict admission in the existing runner. Every selected
+program needs a sibling `.spl.expected` containing its sole exact stdout marker.
+Only one terminal LF or CRLF is ignored; spaces, extra lines and missing markers
+fail. All requested distinct engines must answer; duplicate interpreter aliases,
+fewer than two engines, any lane error, and any divergence prohibit certification.
+Child exit status is checked in diagnostic mode too, including native build/run.
+
+Certification requests `SIMPLE_NO_STUB_FALLBACK=1` and `SIMPLE_JIT_STRICT=1`, but
+these are requests, not proof. No production-owned self-hosted JIT witness is
+available at this seam: that lane deliberately returns
+`engine-witness-unavailable:jit` even if stdout is correct. A seed-only trace is
+not accepted as replacement. A runtime-owned witness remains required work.
+
+The diagnostic native lane retains its SCV inventory preparation and explicit
+freeze fallback. Certification skips that preparation and explicitly disables
+freeze fallback, requiring already admitted inventory. The SCV knob relaxes
+source-inventory snapshot admission, distinct from execution-engine fallback.
+No bootstrap, inventory preparation, or certification command was run here.
+
+Pure admission helper tests in `engine_differential_contract_spec.spl` cover
+nonzero exits with plausible stdout, missing/wrong/extra markers, newline rules,
+absent JIT witness, duplicate/unknown engines and incomplete final verdicts.
+These are authored regression tests, not observed RED/GREEN evidence.
 
 No expected-missing-runtime-symbol facility was found in this harness: such a
 fixture would be reported as a lane error, not a verified negative. That negative

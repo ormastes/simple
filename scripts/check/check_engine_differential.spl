@@ -68,6 +68,9 @@
 #   SIMPLE_BIN=<path> ...        target a specific compiler binary
 #   DIFF_LANES=interpret,jit     restrict the lane set (native is the slow one)
 #   DIFF_FILTER=utf8             run only fixtures whose name contains this
+#   DIFF_CERTIFY=1               exact .spl.expected oracle + all-lane admission
+# Certification requires preadmitted native inventory and fails JIT closed until
+# a production-owned engine witness is available. Strict flags alone are not one.
 #
 # NOTE: `native-build` resolves its source root from the tree it is invoked
 # in, so this script must be run from the REPO ROOT and the fixtures must live
@@ -75,6 +78,28 @@
 # alone, which would read as a false LANE_ERROR.
 
 use std.io.{process_run, env_get}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+use app.test.engine_differential_contract.{differential_observation_error, differential_engine_error, differential_certification_exit, differential_terminal_newline}
+
+fn certification_requested() -> bool:
+    (env_get("DIFF_CERTIFY") ?? "") == "1"
+
+fn expected_marker(path: text) -> text:
+    val oracle_path = path + ".expected"
+    if not file_exists(oracle_path):
+        return ""
+    file_read(oracle_path)
+
+fn observed_lane(engine: text, path: text, stdout: text, code: i64) -> LaneResult:
+    val certify = certification_requested()
+    var expected = ""
+    if certify:
+        expected = expected_marker(path)
+    val reason = differential_observation_error(engine, code, stdout, expected, certify)
+    var normalized = normalize(stdout)
+    if certify:
+        normalized = differential_terminal_newline(stdout)
+    LaneResult(lane: engine, output: stdout, normalized: normalized, ok: reason.len() == 0, note: "fixture={path} engine={engine} {reason}")
 
 val FIXTURE_DIR: text = "test/fixtures/engine_differential"
 val ARTIFACT_DIR: text = "build/engine_differential"
@@ -161,12 +186,12 @@ fn normalize(raw: text) -> text:
 # the program's answer; only stdout is compared. A lane that printed nothing
 # to stdout is an ERROR lane, not an empty-but-valid answer.
 fn run_interpreted(binary: text, path: text, engine: text) -> LaneResult:
-    val command = "SIMPLE_EXECUTION_MODE=" + engine + " SIMPLE_RUNTIME_MODE=" + engine + " " + binary + " run " + path + " 2>/dev/null"
-    val (stdout, _stderr, _code) = process_run("/bin/sh", ["-c", command])
-    val norm = normalize(stdout)
-    if norm.len() == 0:
-        return LaneResult(lane: engine, output: stdout, normalized: norm, ok: false, note: "no stdout (build or codegen failure)")
-    LaneResult(lane: engine, output: stdout, normalized: norm, ok: true, note: "")
+    var strict = ""
+    if certification_requested():
+        strict = "SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_JIT_STRICT=1 "
+    val command = strict + "SIMPLE_EXECUTION_MODE=" + engine + " SIMPLE_RUNTIME_MODE=" + engine + " " + binary + " run " + path + " 2>/dev/null"
+    val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+    observed_lane(engine, path, stdout, code)
 
 # One-time SCV admission preparation for the native lane.
 #
@@ -205,8 +230,7 @@ fn run_native(binary: text, path: text, name: text) -> LaneResult:
     val artifact = ARTIFACT_DIR + "/" + name + ".bin"
     process_run("/bin/sh", ["-c", "mkdir -p " + ARTIFACT_DIR + " && rm -f " + artifact])
     # native-build can print warnings and still exit 0 while producing NO
-    # artifact, so the artifact's existence -- not the exit code -- is the
-    # test for whether the build succeeded.
+    # artifact, so both a zero build exit and artifact existence are required.
     # Capture the build diagnostics instead of discarding them. This used to be
     # `>/dev/null 2>&1`, which made every native failure read as the same
     # contentless note ("native-build produced no artifact") with no way to tell
@@ -222,8 +246,13 @@ fn run_native(binary: text, path: text, name: text) -> LaneResult:
     # The knob is explicit and prints its own warning line; it scans the working
     # tree directly instead of a frozen snapshot, which is the right trade for a
     # harness building 19 one-file fixtures.
-    val build_cmd = "SIMPLE_SCV_FREEZE_FALLBACK=1 " + binary + " native-build " + path + " -o " + artifact + " > " + log + " 2>&1"
-    process_run("/bin/sh", ["-c", build_cmd])
+    var build_environment = "SIMPLE_SCV_FREEZE_FALLBACK=1 "
+    if certification_requested():
+        build_environment = "SIMPLE_SCV_FREEZE_FALLBACK=0 SIMPLE_NO_STUB_FALLBACK=1 "
+    val build_cmd = build_environment + binary + " native-build " + path + " -o " + artifact + " > " + log + " 2>&1"
+    val (_build_out, _build_err, build_code) = process_run("/bin/sh", ["-c", build_cmd])
+    if build_code != 0:
+        return LaneResult(lane: "native", output: "", normalized: "", ok: false, note: "fixture={path} engine=native build-exit={build_code} log={log}")
     val (exists, _e, _c) = process_run("/bin/sh", ["-c", "test -s " + artifact + " && echo YES || echo NO"])
     if not exists.trim().contains("YES"):
         val (reason, _re, _rc) = process_run("/bin/sh", ["-c", "grep -m1 -E '^error:' " + log + " 2>/dev/null || tail -n 1 " + log + " 2>/dev/null"])
@@ -231,11 +260,8 @@ fn run_native(binary: text, path: text, name: text) -> LaneResult:
         if cleaned.len() > 0:
             return LaneResult(lane: "native", output: "", normalized: "", ok: false, note: "native-build produced no artifact: " + cleaned + " (full log: " + log + ")")
         return LaneResult(lane: "native", output: "", normalized: "", ok: false, note: "native-build produced no artifact (full log: " + log + ")")
-    val (stdout, _s2, _c2) = process_run("/bin/sh", ["-c", "./" + artifact + " 2>/dev/null"])
-    val norm = normalize(stdout)
-    if norm.len() == 0:
-        return LaneResult(lane: "native", output: stdout, normalized: norm, ok: false, note: "artifact ran but printed nothing")
-    LaneResult(lane: "native", output: stdout, normalized: norm, ok: true, note: "")
+    val (stdout, _s2, code) = process_run("/bin/sh", ["-c", "./" + artifact + " 2>/dev/null"])
+    observed_lane("native", path, stdout, code)
 
 # `SIMPLE_EXECUTION_MODE` silently selects the JIT for ANY unrecognised value,
 # so a typo in DIFF_LANES (`jitt`, `interp`, `nativ`) would run the JIT a second
@@ -291,6 +317,12 @@ fn main() -> i64:
     val binary = simple_binary()
     val lanes = selected_lanes()
     val fixtures = list_fixtures()
+    val certify = certification_requested()
+    if certify:
+        val engine_error = differential_engine_error(lanes)
+        if engine_error.len() > 0:
+            print("ERROR — certification {engine_error}")
+            return 2
 
     print("=== multi-engine differential harness ===")
     print_binary_identity(binary)
@@ -304,7 +336,7 @@ fn main() -> i64:
     for lane in lanes:
         if lane == "native":
             native_selected = true
-    if native_selected:
+    if native_selected and not certify:
         val prepared = prepare_native_lane(binary)
         if prepared:
             print("native lane: SCV admission prepared (one-time cold init)")
@@ -425,6 +457,11 @@ fn main() -> i64:
     # lane) must not read as a silent pass -- vacuous agreement is not
     # evidence of engine parity.
     val compared = agreements + divergences
+    if certify:
+        val certification_code = differential_certification_exit(fixtures.len(), lane_errors, divergences)
+        if certification_code != 0:
+            print("FAIL — certification fixture-count={fixtures.len()} lane-errors={lane_errors} divergences={divergences}; all requested engines and exact oracles are required")
+            return certification_code
     if fixtures.len() == 0:
         print("ERROR — nothing was checked: no fixtures under {FIXTURE_DIR}")
         return 2
