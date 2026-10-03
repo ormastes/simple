@@ -1,0 +1,157 @@
+use std.spec.*
+use std.scv.db_evidence.*
+use std.scv.db_observation_identity.*
+use std.scv.distributed_identity.*
+use std.common.crypto.sha256.{sha256_text}
+use test.fixtures.scv.db_provider_identity_fixture.*
+
+describe "REQ017 pure pinned provider identity contract":
+    it "deduplicates identical content across different sealed observation UIDs to the original reference":
+        val policy = setup_item2_identity_policy()
+        val original = setup_item2_identity_observation()
+        val duplicate = setup_item2_identity_observation(2u64)
+        expect(original.reference == duplicate.reference).to_equal(false)
+        val first = db_observation_identity_claim(original, policy, policy.revision).unwrap()
+        val next = db_observation_identity_claim(duplicate, policy, policy.revision).unwrap()
+        expect(first.identity_digest).to_equal(next.identity_digest)
+        expect(first.content_digest).to_equal(next.content_digest)
+        expect(first.policy_revision).to_equal(policy.revision)
+        expect(first.observation).to_equal(original.reference)
+        expect(first.identity_digest.len()).to_equal(64)
+        expect(first.content_digest.len()).to_equal(64)
+        expect(db_observation_identity_decide(policy, policy.revision, nil, original).unwrap()).to_equal(DbObservationIdentityDecision.Append)
+        expect(db_observation_identity_decide(policy, policy.revision, Some(original), duplicate).unwrap()).to_equal(DbObservationIdentityDecision.Duplicate(original.reference))
+
+    it "quarantines actual nonidentity semantic changes even when payload digest remains identical":
+        val policy = setup_item2_identity_policy()
+        val original = setup_item2_identity_observation()
+        for change in 0..6:
+            var changed = setup_item2_identity_observation(2u64)
+            if change == 0: changed.failure_signature = "different diagnostic"
+            elif change == 1: changed.measurements[0].value = 8u64
+            elif change == 2: changed.source_revision = "sha256:v1:" + sha256_text("other source")
+            elif change == 3: changed.config = setup_item2_identity_ref("config", 2u64)
+            elif change == 4: changed.test_definition = setup_item2_identity_ref("test_definition", 2u64)
+            else: changed.provider.dimensions[1].value = "runner-B"
+            changed = setup_item2_identity_seal(changed)
+            expect(changed.payload_digest).to_equal(original.payload_digest)
+            val first = db_observation_identity_claim(original, policy, policy.revision).unwrap()
+            val next = db_observation_identity_claim(changed, policy, policy.revision).unwrap()
+            expect(next.identity_digest).to_equal(first.identity_digest)
+            expect(next.content_digest == first.content_digest).to_equal(false)
+            expect(db_observation_identity_decide(policy, policy.revision, Some(original), changed).unwrap()).to_equal(DbObservationIdentityDecision.Quarantine("QuarantinedIdentityReuse"))
+
+    it "keeps genuine attempts and independently declared cases distinct and rejects wrong lookup results":
+        val policy = setup_item2_identity_policy()
+        val original = setup_item2_identity_observation()
+        for new_attempt in [false, true]:
+            var incoming = setup_item2_identity_observation(2u64, if new_attempt: 2u64 else: 1u64)
+            if not new_attempt: incoming.provider.dimensions[0].value = "case-B"
+            incoming = setup_item2_identity_seal(incoming)
+            expect(db_observation_identity_claim(incoming, policy, policy.revision).unwrap().identity_digest == db_observation_identity_claim(original, policy, policy.revision).unwrap().identity_digest).to_equal(false)
+            expect(db_observation_identity_decide(policy, policy.revision, nil, incoming).unwrap()).to_equal(DbObservationIdentityDecision.Append)
+            expect(db_observation_identity_decide(policy, policy.revision, Some(original), incoming).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_LOOKUP")
+
+    it "does not treat a changed policy pin as an absent identity and silent append":
+        val policy = setup_item2_identity_policy()
+        val observation = setup_item2_identity_observation()
+        var rotated = policy
+        rotated.capabilities.attestations = true
+        rotated = db_observation_identity_policy_seal(rotated).unwrap()
+        expect(rotated.revision == policy.revision).to_equal(false)
+        expect(db_observation_identity_decide(rotated, policy.revision, nil, observation).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_PIN")
+        expect(db_observation_identity_claim(observation, policy, "0".repeat(64)).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_PIN")
+        var tampered = policy
+        tampered.capabilities.maximum_bundle_bytes = 2048u64
+        expect(db_observation_identity_claim(observation, tampered, policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_PIN")
+
+    it "rejects incoming dimension omission addition core shadows and reordering against independent capabilities":
+        val policy = setup_item2_identity_policy()
+        for change in 0..4:
+            var incoming = setup_item2_identity_observation()
+            if change == 0: incoming.provider.dimensions = [incoming.provider.dimensions[0]]
+            elif change == 1: incoming.provider.dimensions.push(DbIdentityDimension(name: "worker", value: "worker-A"))
+            elif change == 2: incoming.provider.dimensions[0].name = "attempt"
+            else: incoming.provider.dimensions = [incoming.provider.dimensions[1], incoming.provider.dimensions[0]]
+            # Existing v1 sealing already rejects unsorted dimension names;
+            # preserve the old seal for this new-kernel preflight rejection.
+            if change != 3: incoming = setup_item2_identity_seal(incoming)
+            expect(db_observation_identity_claim(incoming, policy, policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")
+
+    it "rejects scope substitution even though own reference is excluded from content identity":
+        val policy = setup_item2_identity_policy()
+        for change in 0..5:
+            var incoming = setup_item2_identity_observation()
+            if change == 0:
+                var uid = incoming.reference.entity.provisional.unwrap()
+                uid.database_namespace = "11112233445566778899aabbccddeeff"
+                incoming.reference.entity = entity_ref_provisional(uid)
+            elif change == 1: incoming.provider.instance = "other.fixture.invalid"
+            elif change == 2: incoming.provider.project = "other-project"
+            elif change == 3: incoming.config.entity = entity_ref_settled(SettledAlias(database_namespace: policy.namespace, authority_epoch: 2u64, entity_kind: "config", sequence: 1u64))
+            else:
+                var uid = incoming.test_definition.entity.provisional.unwrap()
+                uid.database_namespace = "11112233445566778899aabbccddeeff"
+                incoming.test_definition.entity = entity_ref_provisional(uid)
+            incoming = setup_item2_identity_seal(incoming)
+            expect(db_observation_identity_claim(incoming, policy, policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_SCOPE")
+
+    it "rejects unsealed own revisions instead of using caller supplied digest shaped claims":
+        val policy = setup_item2_identity_policy()
+        var incoming = setup_item2_identity_observation()
+        incoming.reference.revision = "sha256:v1:" + "0".repeat(64)
+        expect(db_observation_identity_claim(incoming, policy, policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_SCOPE")
+
+    it "requires sorted unique NFC capabilities containing every core dimension":
+        for change in 0..6:
+            var policy = setup_item2_identity_policy()
+            if change == 0: policy.capabilities.identity_dimensions = ["attempt", "case", "instance", "job", "label", "project"]
+            elif change == 1: policy.capabilities.identity_dimensions = ["attempt", "case", "case", "instance", "job", "label", "project", "run"]
+            elif change == 2: policy.capabilities.uniqueness_tuple = ["case", "attempt", "instance", "job", "project", "run"]
+            elif change == 3: policy.capabilities.uniqueness_tuple.push("unknown")
+            elif change == 4: policy.provider_instance = "ci.é.fixture.invalid"
+            else:
+                policy.capabilities.identity_dimensions = ["attempt", "café", "café", "instance", "job", "project", "run"]
+                policy.capabilities.uniqueness_tuple = ["attempt", "instance", "job", "project", "run"]
+            expect(db_observation_identity_policy_seal(policy).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_POLICY")
+
+    it "bounds observation UTF8 text and measurement counts before identity canonicalization":
+        val policy = setup_item2_identity_policy()
+        var text_over = setup_item2_identity_observation()
+        text_over.failure_signature = "a".repeat(4097)
+        expect(db_observation_identity_claim(text_over, policy, policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+        text_over.failure_signature = "é".repeat(2049)
+        expect(db_observation_identity_claim(text_over, policy, policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+        var measurements_over = setup_item2_identity_observation()
+        measurements_over.measurements = []
+        for index in 0..65: measurements_over.measurements.push(DbEvidenceMeasurement(name: "metric", value: index as u64, unit: "ns"))
+        expect(db_observation_identity_claim(measurements_over, policy, policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+
+    it "admits the exact UTF8 text and measurement ceilings while rejecting nonNFC incoming text":
+        val policy = setup_item2_identity_policy()
+        var boundary = setup_item2_identity_observation()
+        boundary.failure_signature = "é".repeat(2048)
+        boundary.measurements = []
+        for index in 1..65: boundary.measurements.push(DbEvidenceMeasurement(name: "m".repeat(index), value: index as u64, unit: "ns"))
+        boundary = setup_item2_identity_seal(boundary)
+        expect(db_observation_identity_claim(boundary, policy, policy.revision).is_ok()).to_equal(true)
+        var noncanonical = setup_item2_identity_observation()
+        noncanonical.provider.dimensions[1].value = "é"
+        noncanonical = setup_item2_identity_seal(noncanonical)
+        expect(db_observation_identity_claim(noncanonical, policy, policy.revision).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_DIMENSIONS")
+
+    it "admits exactly sixtyfour capability dimensions and rejects one more":
+        var policy = setup_item2_identity_policy()
+        policy.capabilities.identity_dimensions = ["attempt", "instance", "job", "project", "run"]
+        policy.capabilities.uniqueness_tuple = policy.capabilities.identity_dimensions
+        var observation = setup_item2_identity_observation()
+        observation.provider.dimensions = []
+        for index in 1..60:
+            val name = "z".repeat(index)
+            policy.capabilities.identity_dimensions.push(name)
+            observation.provider.dimensions.push(DbIdentityDimension(name: name, value: "declared"))
+        policy = db_observation_identity_policy_seal(policy).unwrap()
+        observation = setup_item2_identity_seal(observation)
+        expect(db_observation_identity_claim(observation, policy, policy.revision).is_ok()).to_equal(true)
+        policy.capabilities.identity_dimensions.push("z".repeat(60))
+        expect(db_observation_identity_policy_seal(policy).unwrap_err()).to_equal("SCVDB_OBSERVATION_IDENTITY_QUOTA")
