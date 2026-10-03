@@ -1485,6 +1485,26 @@ impl MirLowering:
             return Err("reverse-reference publication failed for {module.name}")
         Ok(lowered)
 
+    me record_exact_extern_declaration_v1(declaration: HirFunction):
+        # HIR exposes fixed parameters only. Generic/default/method and
+        # adapted text signatures must retain their existing lowering.
+        if not declaration.is_extern or declaration.is_method or declaration.is_async or declaration.type_params.len() != 0 or declaration.is_generic_template:
+            return
+        if not mir_exact_extern_type_v1(declaration.return_type, true):
+            return
+        var parameters: [MirType] = []
+        for parameter in declaration.params:
+            if parameter.has_default or not mir_exact_extern_type_v1(parameter.type_, false):
+                return
+            parameters.push(self.lower_type(parameter.type_))
+        if declaration.symbol.id < 0:
+            return
+        var signatures = self.exact_extern_signatures
+        signatures[declaration.symbol.id] = MirSignature(params: parameters,
+            return_type: self.lower_type(declaration.return_type), is_variadic: false,
+            params_known: true)
+        self.exact_extern_signatures = signatures
+
     me lower_module(module: HirModule, providers: [HirModule] = [], is_entry_module: bool = true) -> MirModule:
         """Lower HIR module to MIR."""
         self.unsafe_depth = 0
@@ -1492,23 +1512,9 @@ impl MirLowering:
         self.external_layout_traces = []
         self.symbols = module.symbols
         self.exact_extern_signatures = {}
-        var exact_externs: Dict<i64, MirSignature> = {}
         for raw_declaration in module.functions.values():
             val declaration: HirFunction = raw_declaration
-            # HIR exposes fixed parameters only. Generic/default/method and
-            # adapted text signatures must retain their existing lowering.
-            if declaration.is_extern and not declaration.is_method and not declaration.is_async and declaration.type_params.len() == 0 and not declaration.is_generic_template and declaration.params.len() > 0:
-                var supported = mir_exact_extern_type_v1(declaration.return_type, true)
-                var parameters: [MirType] = []
-                for parameter in declaration.params:
-                    if parameter.has_default or not mir_exact_extern_type_v1(parameter.type_, false):
-                        supported = false
-                    else:
-                        parameters.push(self.lower_type(parameter.type_))
-                if supported and declaration.symbol.id >= 0:
-                    exact_externs[declaration.symbol.id] = MirSignature(params: parameters,
-                        return_type: self.lower_type(declaration.return_type), is_variadic: false)
-        self.exact_extern_signatures = exact_externs
+            self.record_exact_extern_declaration_v1(declaration)
         self.lowering_entry_module = is_entry_module
         var function_names: [text] = []
         for raw_func in module.functions.values():
