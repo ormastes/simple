@@ -1,0 +1,138 @@
+# Pure plans over independently loaded protected-index content. This module
+# does not prove Git protection, ancestry, durable publication or read-back.
+# The signed receipt exists before publication, outside its candidate tree.
+use std.scv.db_receipt.*
+use std.scv.db_receipt_codec.{db_receipt_encode, db_receipt_decode}
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.{db_snapshot_text}
+
+struct DbReceiptIndexCursor:
+    count: u64
+    last_receipt: DbSettlementReceipt?
+
+struct DbReceiptIndexLookup:
+    by_digest: text?
+    by_commit: text?
+    by_sequence: text?
+
+struct DbReceiptIndexEntry:
+    sequence: u64
+    receipt: DbSettlementReceipt
+
+struct DbReceiptIndexPlan:
+    entry: DbReceiptIndexEntry
+    encoded: text
+    digest_path: text
+    commit_path: text
+    sequence_path: text
+    next_cursor: DbReceiptIndexCursor
+    replay: bool
+
+fn _index_encode(domain: text, tag: u8, payload: [u8]) -> Result<text, text>:
+    val bytes = db_domain_bytes(domain, db_frame(tag, payload))?
+    if bytes.len() > 2097216: return Err("SCVDB_INDEX_QUOTA")
+    Ok("SCVDB-RECEIPT-INDEX-v1\n" + db_snapshot_hex(bytes) + "\n")
+
+fn _index_decode(encoded: text, domain_name: text, tag: u8) -> Result<[DbDecodedFrame], text>:
+    val prefix = "SCVDB-RECEIPT-INDEX-v1\n"
+    if encoded.len() > 4194500: return Err("SCVDB_INDEX_QUOTA")
+    if encoded.len() <= prefix.len() or not encoded.starts_with(prefix) or not encoded.ends_with("\n"): return Err("SCVDB_INDEX_ENCODING")
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1])?
+    val domain = db_domain_bytes(domain_name, [])?
+    if bytes.len() <= domain.len(): return Err("SCVDB_INDEX_ENCODING")
+    for index in 0..domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_INDEX_DOMAIN")
+    val root = db_read_frame(bytes, domain.len())?
+    if root.tag != tag or root.next_offset != bytes.len(): return Err("SCVDB_INDEX_ENCODING")
+    db_read_children(root.payload)
+
+fn db_receipt_index_entry_encode(entry: DbReceiptIndexEntry) -> Result<text, text>:
+    if entry.sequence == 0: return Err("SCVDB_INDEX_SEQUENCE")
+    _index_encode("receipt-index-entry", 95u8, db_frame(2u8, db_u64_bytes(entry.sequence)) + db_snapshot_text(db_receipt_encode(entry.receipt)?)?)
+
+fn db_receipt_index_entry_decode(encoded: text) -> Result<DbReceiptIndexEntry, text>:
+    val fields = _index_decode(encoded, "receipt-index-entry", 95u8)?
+    if fields.len() != 2: return Err("SCVDB_INDEX_ENCODING")
+    val entry = DbReceiptIndexEntry(sequence: db_read_unsigned(fields[0])?, receipt: db_receipt_decode(db_read_text(fields[1])?)?)
+    if db_receipt_index_entry_encode(entry)? != encoded: return Err("SCVDB_INDEX_NONCANONICAL")
+    Ok(entry)
+
+fn db_receipt_index_cursor_encode(cursor: DbReceiptIndexCursor) -> Result<text, text>:
+    var receipt = db_frame(0u8, [])
+    if val latest = cursor.last_receipt:
+        if cursor.count == 0: return Err("SCVDB_INDEX_CURSOR")
+        receipt = db_snapshot_text(db_receipt_encode(latest)?)?
+    elif cursor.count != 0: return Err("SCVDB_INDEX_CURSOR")
+    _index_encode("receipt-index-cursor", 96u8, db_frame(2u8, db_u64_bytes(cursor.count)) + receipt)
+
+fn db_receipt_index_cursor_decode(encoded: text) -> Result<DbReceiptIndexCursor, text>:
+    val fields = _index_decode(encoded, "receipt-index-cursor", 96u8)?
+    if fields.len() != 2: return Err("SCVDB_INDEX_ENCODING")
+    var receipt: DbSettlementReceipt? = nil
+    if fields[1].tag == 3u8: receipt = Some(db_receipt_decode(db_read_text(fields[1])?)?)
+    elif fields[1].tag != 0u8 or fields[1].payload.len() != 0: return Err("SCVDB_INDEX_ENCODING")
+    val cursor = DbReceiptIndexCursor(count: db_read_unsigned(fields[0])?, last_receipt: receipt)
+    if db_receipt_index_cursor_encode(cursor)? != encoded: return Err("SCVDB_INDEX_NONCANONICAL")
+    Ok(cursor)
+
+fn db_receipt_index_sequence_path(sequence: u64) -> Result<text, text>:
+    if sequence == 0: return Err("SCVDB_INDEX_SEQUENCE")
+    var ordinal = sequence.to_text()
+    while ordinal.len() < 20: ordinal = "0" + ordinal
+    Ok("sequence/" + ordinal)
+
+fn _index_plan(entry: DbReceiptIndexEntry, cursor: DbReceiptIndexCursor, replay: bool) -> Result<DbReceiptIndexPlan, text>:
+    Ok(DbReceiptIndexPlan(entry: entry, encoded: db_receipt_index_entry_encode(entry)?, digest_path: "entries/" + db_receipt_digest(entry.receipt)?, commit_path: "by-commit/" + entry.receipt.accepted_head, sequence_path: db_receipt_index_sequence_path(entry.sequence)?, next_cursor: cursor, replay: replay))
+
+fn db_receipt_index_plan(cursor: DbReceiptIndexCursor, incoming: DbSettlementReceipt, authority: DbReceiptAuthority, lookup: DbReceiptIndexLookup, history: [DbSettlementReceipt] = []) -> Result<DbReceiptIndexPlan, text>:
+    """Plan three identical immutable writes plus the next protected cursor.
+
+    The owner loads by-digest and by-commit paths, then the existing entry's
+    ordinal (or count+1 when absent). Historical replay also needs a bounded
+    signed successor chain from the existing entry through the current cursor.
+    """
+    val incoming_digest = db_receipt_authenticate(incoming, authority)?
+    val cursor_shape = db_receipt_index_cursor_encode(cursor)?
+    var latest_digest = ""
+    if val latest = cursor.last_receipt: latest_digest = db_receipt_authenticate(latest, authority)?
+    if val encoded = lookup.by_commit:
+        val entry = db_receipt_index_entry_decode(encoded)?
+        if entry.receipt.accepted_head != incoming.accepted_head: return Err("SCVDB_INDEX_QUARANTINE_LOOKUP")
+        if db_receipt_digest(entry.receipt)? != incoming_digest: return Err("SCVDB_INDEX_QUARANTINE_COMMIT_COLLISION")
+    var present = 0
+    if lookup.by_digest != nil: present = present + 1
+    if lookup.by_commit != nil: present = present + 1
+    if lookup.by_sequence != nil: present = present + 1
+    if present != 0 and present != 3: return Err("SCVDB_INDEX_QUARANTINE_PARTIAL")
+    if present == 3:
+        val digest_bytes = lookup.by_digest.unwrap()
+        if digest_bytes != lookup.by_commit.unwrap() or digest_bytes != lookup.by_sequence.unwrap(): return Err("SCVDB_INDEX_QUARANTINE_DISAGREEMENT")
+        val entry = db_receipt_index_entry_decode(digest_bytes)?
+        val authenticated = db_receipt_authenticate(entry.receipt, authority)?
+        if authenticated != incoming_digest or db_receipt_encode(entry.receipt)? != db_receipt_encode(incoming)?: return Err("SCVDB_INDEX_QUARANTINE_IDENTITY")
+        if entry.sequence > cursor.count or cursor.count == 0: return Err("SCVDB_INDEX_QUARANTINE_SEQUENCE")
+        if entry.sequence == cursor.count and incoming_digest != latest_digest: return Err("SCVDB_INDEX_QUARANTINE_CURSOR")
+        if entry.sequence < cursor.count and incoming_digest == latest_digest: return Err("SCVDB_INDEX_QUARANTINE_SEQUENCE")
+        if entry.sequence < cursor.count:
+            val required = cursor.count - entry.sequence + 1u64
+            if history.len() > 64: return Err("SCVDB_INDEX_HISTORY_QUOTA")
+            if (history.len() as u64) != required or history.len() == 0: return Err("SCVDB_INDEX_HISTORY_REQUIRED")
+            if db_receipt_encode(history[0])? != db_receipt_encode(entry.receipt)?: return Err("SCVDB_INDEX_HISTORY_ANCHOR")
+            var index = 1
+            while index < history.len():
+                val successor = db_receipt_successor(history[index - 1], history[index], authority)?
+                index = index + 1
+            if db_receipt_digest(history[history.len() - 1])? != latest_digest: return Err("SCVDB_INDEX_HISTORY_ANCHOR")
+        return _index_plan(entry, cursor, true)
+    if cursor.count == 18446744073709551615u64: return Err("SCVDB_INDEX_EXHAUSTED")
+    if val previous = cursor.last_receipt:
+        val successor = db_receipt_successor(previous, incoming, authority)?
+    else:
+        val genesis = db_receipt_genesis(incoming, authority)?
+    val entry = DbReceiptIndexEntry(sequence: cursor.count + 1u64, receipt: incoming)
+    _index_plan(entry, DbReceiptIndexCursor(count: entry.sequence, last_receipt: Some(incoming)), false)
+
+export DbReceiptIndexCursor, DbReceiptIndexLookup, DbReceiptIndexEntry, DbReceiptIndexPlan
+export db_receipt_index_entry_encode, db_receipt_index_entry_decode, db_receipt_index_cursor_encode, db_receipt_index_cursor_decode
+export db_receipt_index_sequence_path, db_receipt_index_plan

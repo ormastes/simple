@@ -1,0 +1,95 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_receipt.*
+use std.scv.db_receipt_index.*
+use std.scv.distributed_identity_map.{IdentityMapHighWater}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.crypto.sha256.{sha256_text}
+
+fn setup_item2_index_authority() -> DbReceiptAuthority:
+    val (seed, public_key) = pure_ed25519_keypair_from_seed([42u8;32])
+    DbReceiptAuthority(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, remote: "https://github.com/example/data", settled_ref: "refs/heads/settled", key_id: "settlement-key", public_key: public_key, schema_revision: "s1", reducer_revision: "r1")
+
+fn setup_item2_index_receipt(head: text, previous: DbSettlementReceipt?, high_water: u64) -> DbSettlementReceipt:
+    val authority = setup_item2_index_authority()
+    var previous_digest = ""
+    var previous_head = ""
+    if val before = previous:
+        previous_digest = db_receipt_digest(before).unwrap()
+        previous_head = before.accepted_head
+    var receipt = DbSettlementReceipt(repository: authority.repository, namespace: authority.namespace, epoch: authority.epoch, remote: authority.remote, settled_ref: authority.settled_ref, previous_receipt: previous_digest, previous_head: previous_head, accepted_head: head, accepted_tree: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", object_format: "sha1", high_water: [IdentityMapHighWater(entity_kind: "bug", sequence: high_water)], schema_revision: "s1", reducer_revision: "r1", batch_digests: [sha256_text(head)], signer: authority.key_id, signature: [])
+    val (seed, public_key) = pure_ed25519_keypair_from_seed([42u8;32])
+    receipt.signature = pure_ed25519_sign(seed, public_key, db_receipt_signing_bytes(receipt).unwrap())
+    receipt
+
+fn setup_item2_index_absent() -> DbReceiptIndexLookup:
+    DbReceiptIndexLookup(by_digest: nil, by_commit: nil, by_sequence: nil)
+
+fn setup_item2_index_existing(encoded: text) -> DbReceiptIndexLookup:
+    DbReceiptIndexLookup(by_digest: Some(encoded), by_commit: Some(encoded), by_sequence: Some(encoded))
+
+describe "REQ-009 immutable protected receipt-index plans":
+    it "plans three identical immutable lookup entries and one chained cursor advance":
+        step("Authenticate the genesis receipt and allocate the first exact ordinal")
+        val receipt = setup_item2_index_receipt("1111111111111111111111111111111111111111", nil, 1)
+        val cursor = DbReceiptIndexCursor(count: 0, last_receipt: nil)
+        val first = db_receipt_index_plan(cursor, receipt, setup_item2_index_authority(), setup_item2_index_absent()).unwrap()
+        expect(first.entry.sequence).to_equal(1u64)
+        expect(first.sequence_path).to_equal("sequence/00000000000000000001")
+        expect(first.digest_path).to_equal("entries/" + db_receipt_digest(receipt).unwrap())
+        expect(first.commit_path).to_equal("by-commit/1111111111111111111111111111111111111111")
+        expect(db_receipt_index_entry_decode(first.encoded).unwrap().receipt.signature).to_equal(receipt.signature)
+        expect(first.replay).to_be(false)
+        step("An exact current-head replay returns the same entry and count")
+        val replay = db_receipt_index_plan(first.next_cursor, receipt, setup_item2_index_authority(), setup_item2_index_existing(first.encoded)).unwrap()
+        expect(replay.replay).to_be(true)
+        expect(replay.encoded).to_equal(first.encoded)
+        expect(replay.next_cursor.count).to_equal(1u64)
+
+    it "requires signed chain evidence for older receipt replay":
+        step("Append a signed successor then retry the older immutable entry")
+        val first_receipt = setup_item2_index_receipt("1111111111111111111111111111111111111111", nil, 1)
+        val first = db_receipt_index_plan(DbReceiptIndexCursor(count: 0, last_receipt: nil), first_receipt, setup_item2_index_authority(), setup_item2_index_absent()).unwrap()
+        val second_receipt = setup_item2_index_receipt("2222222222222222222222222222222222222222", Some(first_receipt), 2)
+        val second = db_receipt_index_plan(first.next_cursor, second_receipt, setup_item2_index_authority(), setup_item2_index_absent()).unwrap()
+        val existing = setup_item2_index_existing(first.encoded)
+        expect(db_receipt_index_plan(second.next_cursor, first_receipt, setup_item2_index_authority(), existing)).to_equal(Err("SCVDB_INDEX_HISTORY_REQUIRED"))
+        val replay = db_receipt_index_plan(second.next_cursor, first_receipt, setup_item2_index_authority(), existing, [first_receipt,second_receipt]).unwrap()
+        expect(replay.next_cursor.count).to_equal(2u64)
+        expect(replay.entry.sequence).to_equal(1u64)
+        expect(replay.replay).to_be(true)
+
+    it "quarantines partial disagreeing and commit-reusing lookup contents":
+        step("Require all three lookup keys to contain exactly the same immutable bytes")
+        val receipt = setup_item2_index_receipt("1111111111111111111111111111111111111111", nil, 1)
+        val plan = db_receipt_index_plan(DbReceiptIndexCursor(count: 0, last_receipt: nil), receipt, setup_item2_index_authority(), setup_item2_index_absent()).unwrap()
+        val partial = DbReceiptIndexLookup(by_digest: Some(plan.encoded), by_commit: nil, by_sequence: nil)
+        expect(db_receipt_index_plan(plan.next_cursor, receipt, setup_item2_index_authority(), partial)).to_equal(Err("SCVDB_INDEX_QUARANTINE_PARTIAL"))
+        val disagreeing = DbReceiptIndexLookup(by_digest: Some(plan.encoded), by_commit: Some(plan.encoded), by_sequence: Some("different bytes"))
+        expect(db_receipt_index_plan(plan.next_cursor, receipt, setup_item2_index_authority(), disagreeing)).to_equal(Err("SCVDB_INDEX_QUARANTINE_DISAGREEMENT"))
+        val reused = setup_item2_index_receipt(receipt.accepted_head, nil, 2)
+        expect(db_receipt_index_plan(plan.next_cursor, reused, setup_item2_index_authority(), setup_item2_index_existing(plan.encoded))).to_equal(Err("SCVDB_INDEX_QUARANTINE_COMMIT_COLLISION"))
+
+    it "rejects forged signatures high-water rollback and ordinal overflow":
+        step("Validate receipt authority and monotonic chain facts before proposing writes")
+        val first = setup_item2_index_receipt("1111111111111111111111111111111111111111", nil, 5)
+        val cursor = DbReceiptIndexCursor(count: 1, last_receipt: Some(first))
+        var forged = setup_item2_index_receipt("2222222222222222222222222222222222222222", Some(first), 6)
+        forged.signature = [0u8;64]
+        expect(db_receipt_index_plan(cursor, forged, setup_item2_index_authority(), setup_item2_index_absent())).to_equal(Err("SCVDB_RECEIPT_SIGNATURE"))
+        val regressed = setup_item2_index_receipt("2222222222222222222222222222222222222222", Some(first), 4)
+        expect(db_receipt_index_plan(cursor, regressed, setup_item2_index_authority(), setup_item2_index_absent())).to_equal(Err("SCVDB_RECEIPT_HIGH_WATER_REGRESSION"))
+        val valid = setup_item2_index_receipt("2222222222222222222222222222222222222222", Some(first), 6)
+        val exhausted = DbReceiptIndexCursor(count: 18446744073709551615u64, last_receipt: Some(first))
+        expect(db_receipt_index_plan(exhausted, valid, setup_item2_index_authority(), setup_item2_index_absent())).to_equal(Err("SCVDB_INDEX_EXHAUSTED"))
+        expect(db_receipt_index_sequence_path(18446744073709551615u64)).to_equal(Ok("sequence/18446744073709551615"))
+
+    it "roundtrips the cursor and rejects malformed versioned entry projections":
+        step("Decode a literal empty cursor rather than relying solely on roundtrip generation")
+        val empty = "SCVDB-RECEIPT-INDEX-v1\n7363762d64622f726563656970742d696e6465782d637572736f722f76310060050201000000\n"
+        expect(db_receipt_index_cursor_decode(empty).unwrap().count).to_equal(0u64)
+        expect(db_receipt_index_cursor_encode(DbReceiptIndexCursor(count: 0, last_receipt: nil))).to_equal(Ok(empty))
+        expect(db_receipt_index_entry_decode(empty)).to_equal(Err("SCVDB_INDEX_DOMAIN"))
+        expect(db_receipt_index_cursor_decode("SCVDB-RECEIPT-INDEX-v2\n00\n")).to_equal(Err("SCVDB_INDEX_ENCODING"))
+        val receipt = setup_item2_index_receipt("1111111111111111111111111111111111111111", nil, 1)
+        val cursor = DbReceiptIndexCursor(count: 1, last_receipt: Some(receipt))
+        expect(db_receipt_index_cursor_encode(db_receipt_index_cursor_decode(db_receipt_index_cursor_encode(cursor).unwrap()).unwrap())).to_equal(db_receipt_index_cursor_encode(cursor))
