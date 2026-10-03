@@ -221,3 +221,15 @@ describe "GitHub issue bridge effect ordering and uncertain readback":
         ports.transport = DbGithubTransport(execute: setup_item2_issue_execute, lease_held: setup_item2_issue_held_lease)
         expect(db_github_bridge_deliver(request, ports)).to_equal(Err("GithubNetworkForbiddenUnderLease"))
         expect(_item2_issue_effects).to_equal(0)
+
+    it "retains resolved external identity in an opaque version pinned to provider scope":
+        val request = setup_item2_issue_request("create-issue")
+        match db_github_bridge_deliver(request, setup_item2_issue_ports()):
+            Ok(result):
+                val revision = result.transition.delivery.provider_revision
+                expect(db_github_bridge_external_id(revision, request.delivery.intent.provider)).to_equal(Ok("7"))
+                var foreign = request.delivery.intent.provider
+                foreign.project = "other-project"
+                expect(db_github_bridge_external_id(revision, foreign)).to_equal(Err("GithubBridgeProviderRevisionScopeMismatch"))
+                expect(db_github_bridge_external_id("github:v1:../escape", foreign)).to_equal(Err("GithubBridgeProviderRevisionMalformed"))
+            Err(reason): fail(reason)

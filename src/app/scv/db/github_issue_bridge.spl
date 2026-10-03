@@ -8,7 +8,7 @@ use std.common.json.parser.{json_parse_with_error}
 use std.common.json.types.{json_get_type}
 use std.common.crypto.sha256.{sha256_u8_hex, sha256_text}
 use std.scv.db_canonical.{db_frame, db_canonical_text, db_domain_bytes}
-use std.scv.db_bridge.{DbBridgeDelivery, DbBridgeTransition, DbBridgeObservation, db_bridge_pending, db_bridge_sent, db_bridge_reconcile, db_provider_field_plan}
+use std.scv.db_bridge.{DbProviderBindingIdentity, DbBridgeDelivery, DbBridgeTransition, DbBridgeObservation, db_bridge_pending, db_bridge_sent, db_bridge_reconcile, db_provider_field_plan, db_provider_binding_identity_key}
 use app.scv.db.github_provider.{DbGithubSource, DbGithubTransport, DbGithubProcessReply, db_github_source_validate, db_github_response}
 
 struct DbGithubIssuePolicy:
@@ -66,6 +66,16 @@ fn _db_issue_number(value: text) -> bool:
         if c < 48 or c > 57:
             return false
     true
+
+# Opaque provider revision retains resolved IDs through durable acknowledgement.
+# The embedded binding digest prevents cross-instance/project/intent reuse.
+fn db_github_bridge_external_id(revision: text, provider: DbProviderBindingIdentity) -> Result<text, text>:
+    val parts = revision.split(":")
+    if parts.len() != 5 or parts[0] != "github" or parts[1] != "v1" or not _db_issue_number(parts[2]) or not _db_issue_hex(parts[3]) or not _db_issue_hex(parts[4]):
+        return Err("GithubBridgeProviderRevisionMalformed")
+    if parts[3] != db_provider_binding_identity_key(provider)?:
+        return Err("GithubBridgeProviderRevisionScopeMismatch")
+    Ok(parts[2])
 
 fn db_github_bridge_payload(request: DbGithubBridgeRequest, title: text, body: text, state: text) -> Result<text, text>:
     var bytes: [u8] = []
@@ -177,7 +187,9 @@ fn _db_issue_scan_value(request: DbGithubBridgeRequest, value: any) -> Result<Db
     if updated == "":
         return Err("GithubBridgeMissingRevision")
     val payload = db_github_bridge_payload(request, title, content, state)?
-    Ok(DbGithubBridgeScan(found: true, payload_digest: payload, revision: sha256_text(external_id + "\n" + updated + "\n" + payload), external_id: external_id))
+    val scope = db_provider_binding_identity_key(request.delivery.intent.provider)?
+    val readback = sha256_text(external_id + "\n" + updated + "\n" + payload)
+    Ok(DbGithubBridgeScan(found: true, payload_digest: payload, revision: "github:v1:{external_id}:{scope}:{readback}", external_id: external_id))
 
 # Full bounded scans use stable creation ordering and exact markers. An exhausted
 # page budget is unknown, never proof that no previous create exists.
@@ -293,3 +305,4 @@ fn db_github_bridge_live_ports(lease_held: fn() -> bool, now: fn() -> u64, persi
 
 export DbGithubIssuePolicy, DbGithubBridgeRequest, DbGithubBridgePorts, DbGithubBridgeResult
 export db_github_bridge_payload, db_github_bridge_deliver, db_github_bridge_live_ports
+export db_github_bridge_external_id

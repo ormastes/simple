@@ -7,7 +7,7 @@ use std.scv.db_admission.{DbAdmissionPolicy}
 use std.scv.db_bridge.{DbBridgeDelivery, db_bridge_sent, db_bridge_reconcile}
 use app.scv.db.bridge_store.{DbStoredDelivery, db_bridge_store_encode, db_bridge_store_load, db_bridge_store_enqueue, db_bridge_store_acquire, db_bridge_store_sent, db_bridge_store_reconcile}
 use app.scv.db.github_provider.{DbGithubTransport, DbGithubProcessReply}
-use app.scv.db.github_issue_bridge.{DbGithubBridgeRequest, DbGithubBridgePorts, db_github_bridge_deliver}
+use app.scv.db.github_issue_bridge.{DbGithubBridgeRequest, DbGithubBridgePorts, db_github_bridge_deliver, db_github_bridge_external_id}
 
 struct DbGithubOwnedBridgeResult:
     code: text
@@ -36,7 +36,10 @@ fn db_github_bridge_owned(root: text, admission: DbAdmissionPolicy, request: DbG
     # non-tombstoned canonical semantic row; caller delivery state is ignored.
     val enqueued = db_bridge_store_enqueue(root, admission, request.delivery.intent)?
     if ["acknowledged", "conflicted", "quarantined"].contains(enqueued.delivery.state):
-        return Ok(DbGithubOwnedBridgeResult(code: enqueued.delivery.state, stored: enqueued, external_id: ""))
+        var external_id = ""
+        if enqueued.delivery.state == "acknowledged" or enqueued.delivery.state == "conflicted":
+            external_id = db_github_bridge_external_id(enqueued.delivery.provider_revision, enqueued.delivery.intent.provider)?
+        return Ok(DbGithubOwnedBridgeResult(code: enqueued.delivery.state, stored: enqueued, external_id: external_id))
     var leased = enqueued
     if enqueued.delivery.owner != owner or enqueued.delivery.lease_expires <= now() or enqueued.delivery.state == "pending":
         leased = db_bridge_store_acquire(root, request.delivery.intent.revision, owner, now(), ttl)?
