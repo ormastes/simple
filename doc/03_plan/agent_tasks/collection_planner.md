@@ -1,6 +1,22 @@
 <!-- codex-design -->
 # Collection planner work lanes
 
+## Current implementation checkpoint
+
+The primary owns integration in `C:/dev/simple-item3-dev-20261003` and draft
+PR 2285 targeting `release/1.0`. The planner worktree implemented explicit
+hash grouping, generic indices and stable hashed uniqueness, then moved to
+shared semantic fixtures. The research worktree reviewed registry/driver,
+typed-column and index changes and owns the bounded explicit-loop extraction
+increment. The spec worktree is frozen at `d53aed4ec74` for canonical Windows
+bootstrap after repairing its inherited sparse-checkout layout. Its current
+source must not be updated while the bootstrap is active.
+
+All lanes retain their worktree-local ownership receipts. The primary reviews
+each source integration; no authored tests, source review or bootstrap launch
+is counted as an executed acceptance PASS. Full scope and merge criteria below
+remain unchanged.
+
 Scope: REQ-001–011. Merge owner and final reviewer: primary Codex agent at
 normal/highest available capability. Research sidecars reviewed compiler,
 library and domain evidence on 2026-09-27; none edited files.

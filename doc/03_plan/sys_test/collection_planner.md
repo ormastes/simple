@@ -1,12 +1,12 @@
 <!-- codex-system-test -->
 # Collection planner system test plan
 
-Status: design draft. The user selected the full functional scope in
+Status: implementation in progress; runtime acceptance pending. The user selected the full functional scope in
 `doc/02_requirements/feature/collection_planner.md` and balanced targets in
-`doc/02_requirements/nfr/collection_planner.md`. No collection-planner system
-spec, generated manual, or passing full CLI runner exists yet. Existing unit
-and DataFrame specs below are narrower evidence and do not close a system
-requirement.
+`doc/02_requirements/nfr/collection_planner.md`. Collection-planner system
+specs and authored companion manuals now exist. No generated execution manual
+or passing full CLI runner has been obtained. Authored unit and system cases
+below do not close a requirement until executed with the required evidence.
 
 Executable home: `test/03_system/app/compiler/feature/collection_planner_spec.spl`.
 Generated manual: `doc/06_spec/03_system/app/compiler/feature/collection_planner_spec.md`.
@@ -21,21 +21,21 @@ not acceptance evidence.
 
 | REQ | Existing narrower evidence | Required system scenarios | Status |
 |---|---|---|---|
-| 001 | `test/03_system/feature/scilib/df_merge_spec.spl`, `df_groupby_spec.spl`, `df_value_counts_spec.spl`, `df_scalar_broadcast_spec.spl`; `doc/06_spec/03_system/feature/scilib/` mirrors exist but need freshness checks | Typed column round trip; signed zero/NaN/duplicate/missing edge; dtype mismatch rejected | Partial; generic typed column missing |
+| 001 | Numeric DataFrame specs plus both variants' `df_typed_series_checked_spec.spl` and system `collection_planner_columns_spec.spl` | Typed column round trip; signed zero/NaN/duplicate/missing edge; dtype mismatch rejected | Checked adapters implemented; execution pending |
 | 002 | None across all five engines | Map/filter/flat-map/any/all parity; captured closure and Dict collision parity; missing runtime symbol fails build | Missing |
-| 003 | `test/01_unit/compiler/semantics/hir_perf_facts_spec.spl` exercises an in-memory registry | Production registry binding; duplicate/stale row rejected; backend symbol mismatch rejected | Partial; no production registry load |
-| 004 | Numeric DataFrame specs above | Generic unique/group_by first-seen order; collision and fallback behavior; operation-count scaling | Partial; generic indexed algorithms missing |
-| 005 | Text-only hash collection specs, if admitted, are narrower than generic-key parity | Integer/text/enum/tuple/symbol keys; collision/resize/removal; unsupported hash/equality rejected | Missing |
+| 003 | Registry loader, driver session and binding-owner unit specs | Production registry binding; duplicate/stale row rejected; backend symbol mismatch rejected | Explicit driver configuration implemented; certified default metadata and execution pending |
+| 004 | `pure_collections_group_hashed_spec.spl`, `pure_collections_unique_hashed_spec.spl`, dynamic equality regression specs | Generic unique/group_by first-seen order; collision and fallback behavior; operation-count scaling | Explicit-contract indexed APIs implemented; execution and NFR gates pending |
+| 005 | `indexed_collections_spec.spl` uses production generic structures and real interned symbols | Integer/text/enum/tuple/symbol keys; collision/resize/removal; unsupported hash/equality rejected | Generic explicit-contract implementation; all engine evidence pending |
 | 006 | `test/01_unit/compiler/semantics/hir_perf_facts_spec.spl` and existing `COLL` lint specs | Equivalent chain/loop warnings; bounded intentional work suppressed; strict-mode assumptions explained | Partial; no production typed equivalence |
-| 007 | `test/01_unit/compiler/semantics/collection_plan_spec.spl` and `collection_plan_extractor_spec.spl` | Chain and loop extract equivalent DAGs; unknown facts block rewrite; malformed or cyclic plan rejected | Partial; no production invocation |
+| 007 | Logical plan/extractor and driver session unit specs | Chain and loop extract equivalent DAGs; unknown facts block rewrite; malformed or cyclic plan rejected | Driver invokes chain analysis; loop normalization and execution pending |
 | 008 | None for emitted fused MIR | Pure map/filter parity and allocation count; callback/throw/mutation/short-circuit edge; unproven case uses original path | Missing |
 | 009 | `test/01_unit/compiler/mir_opt/collection_plan_selection_spec.spl` is only an advisory chooser | Semi/anti/first/all/index candidate parity; duplicate/order/output-work edge; illegal candidate rejected with reason | Missing production lowering |
 | 010 | In-memory `.sprof` work is provisional until wired to the compiler | Valid profile changes guarded choice; stale/mismatched profile ignored; missing profile preserves original behavior | Missing production adaptation |
 | 011 | No system explain or differential evidence | Selected and rejected plan explanation; differential multi-engine oracle; selected NFR scaling/RSS gate | Missing |
 
-Recently appearing untracked explain/profile files in the shared worktree are
-treated as concurrent work until their owner completes and verifies them.
-They are not counted as accepted evidence here.
+Explain/profile changes explicitly integrated into the owned branch remain
+advisory until production lowering and execution evidence exist. Unrelated
+shared-worktree changes are preserved and are not counted as acceptance.
 
 ## Environment and execution order
 
