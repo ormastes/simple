@@ -42,6 +42,7 @@ work_root=
 timeout_seconds=${SIMPLE_LINUX_PHASE2_TEST_TIMEOUT:-900}
 memory_max=${SIMPLE_LINUX_PHASE2_TEST_MEMORY_MAX:-32G}
 strategy=normal
+backend=
 
 for arg in "$@"; do
     case "$arg" in
@@ -51,12 +52,14 @@ for arg in "$@"; do
         --work-root=*) work_root=${arg#*=} ;;
         --source-root=*) source_root=${arg#*=} ;;
         --strategy=*) strategy=${arg#*=} ;;
+        --backend=*) backend=${arg#*=} ;;
         --timeout-seconds=*) timeout_seconds=${arg#*=} ;;
         *) die "unknown option: $arg" ;;
     esac
 done
 
 [ -n "$compiler" ] || die "--compiler is required"
+case "$backend" in llvm|cranelift) ;; *) die "--backend=llvm|cranelift is required" ;; esac
 [ -x "$compiler" ] || die "compiler is not executable: $compiler"
 [ -n "$compiler_sha256" ] || die "--compiler-sha256 is required"
 case "$compiler_sha256" in
@@ -108,6 +111,7 @@ rm -rf "$verification_root/outputs/compiler-tools" ||
 # Keep an interrupted or rejected run from looking like a successful receipt.
 trap 'status=$?; if [ "$status" -ne 0 ]; then echo "overall=FAIL" >>"$summary"; fi' 0
 echo "schema=linux-phase2-post-bootstrap-tests-v1" >>"$summary"
+echo "verification_backend=$backend" >>"$summary"
 echo "required_memory_max=$memory_max" >>"$summary"
 
 base_status=0
@@ -116,6 +120,7 @@ base_status=0
     CAP_MEM_MAX="$memory_max" CAP_REQUIRE=1 sh scripts/resource/run_capped.shs \
         sh scripts/bootstrap/bootstrap-phase-verification.shs \
         --phase=stage2 \
+        --backend="$backend" \
         --compiler="$compiler" \
         --compiler-sha256="$compiler_sha256" \
         --strategy="$strategy" \
@@ -179,6 +184,8 @@ test_runner=$(find_one_tool simple_test_runner)
 [ -x "$compiler_cli" ] || die "full CLI artifact is not executable"
 [ -x "$test_runner" ] || die "test runner artifact is not executable"
 base_summary="$verification_root/summary.env"
+[ "$(manifest_value verification_backend "$base_summary")" = "$backend" ] ||
+    die "base verifier backend mismatch"
 command_owner_receipt=$(manifest_value command_owner_receipt "$base_summary")
 command_owner_receipt_sha=$(manifest_value command_owner_receipt_sha256 "$base_summary")
 [ -n "$command_owner_receipt" ] && [ -f "$command_owner_receipt" ] && \
@@ -195,6 +202,8 @@ esac
     die "command-owner receipt is not frozen"
 [ "$(manifest_value phase "$command_owner_receipt")" = stage2 ] ||
     die "command-owner receipt is not Stage 2"
+[ "$(manifest_value verification_backend "$command_owner_receipt")" = "$backend" ] ||
+    die "command-owner backend mismatch"
 [ "$(manifest_value compiler_cli_path "$command_owner_receipt")" = "$compiler_cli" ] ||
     die "command-owner CLI path mismatch"
 [ "$(manifest_value test_runner_path "$command_owner_receipt")" = "$test_runner" ] ||
