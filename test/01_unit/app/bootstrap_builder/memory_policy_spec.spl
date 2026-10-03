@@ -1,0 +1,95 @@
+# Pure policy/codec/receipt tests. Native process qualification is separate.
+use std.spec.{describe, it, expect, fail}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1, BuildHostV1, BuildRunV1, builder_validate_task_v1, builder_task_identity_v1}
+use std.common.build_manager.codec.{builder_encode_task_v1, builder_decode_task_v1, builder_encode_run_v1, builder_decode_run_v1}
+use std.common.build_manager.memory_policy.{BuilderMemoryReceiptV1, builder_memory_enforcement_bytes_v1, builder_memory_receipt_encode_v1, builder_memory_receipt_validate_v1}
+
+fn memory_task_v1() -> BuildTaskV1:
+    val digest = "a".repeat(64)
+    BuildTaskV1(id: "compiler", attempt: 1, phase: "compile", producer_digest: digest,
+        source_digest: digest, toolchain_digest: digest, dependencies: [],
+        program: "bin/compiler", args: [], inputs: [BuildInputV1("source.spl", digest)],
+        outputs: ["result.o"], cache_key: digest, timeout_ms: 1000,
+        memory_limit_bytes: 1048576, links: [])
+
+describe "Manager memory reservation and enforcement policy":
+    it "keeps legacy enforce bytes and identity while monitor is independently bound":
+        var task = memory_task_v1()
+        val legacy = builder_encode_task_v1(task)
+        val legacy_identity = builder_task_identity_v1(task)
+        expect(legacy).to_start_with("SIMPLE-BUILD-TASK-3\n")
+        match builder_decode_task_v1(legacy):
+            Ok(decoded): expect(decoded.memory_policy).to_equal("enforce")
+            Err(reason): fail(reason)
+        task.memory_policy = "monitor"
+        expect(builder_task_identity_v1(task) == legacy_identity).to_equal(false)
+        val modern = builder_encode_task_v1(task)
+        expect(modern).to_start_with("SIMPLE-BUILD-TASK-4\n")
+        match builder_decode_task_v1(modern):
+            Ok(decoded):
+                expect(decoded.memory_policy).to_equal("monitor")
+                expect(decoded.memory_limit_bytes).to_equal(1048576)
+                expect(builder_task_identity_v1(decoded)).to_equal(builder_task_identity_v1(task))
+            Err(reason): fail(reason)
+
+    it "round trips mixed policy runs without dropping either reservation":
+        val legacy = memory_task_v1()
+        var monitored = memory_task_v1()
+        monitored.id = "other"
+        monitored.memory_policy = "monitor"
+        monitored.outputs = ["other.o"]
+        val host = BuildHostV1("local", "local", "", "work", "bin/worker", "a".repeat(64), 2)
+        val run = BuildRunV1([legacy, monitored], [host], false, 1)
+        val wire = builder_encode_run_v1(run)
+        expect(wire).to_start_with("SIMPLE-BUILD-RUN-5\n")
+        match builder_decode_run_v1(wire):
+            Ok(decoded):
+                expect(decoded.tasks[0].memory_policy).to_equal("enforce")
+                expect(decoded.tasks[1].memory_policy).to_equal("monitor")
+                expect(decoded.tasks[1].memory_limit_bytes).to_equal(1048576)
+            Err(reason): fail(reason)
+
+    it "requires real positive reservation in both modes and refuses unknown policy":
+        for policy in ["enforce", "monitor"]:
+            for reservation in [0, -1, 1125899906842625]:
+                match builder_memory_enforcement_bytes_v1(policy, reservation):
+                    Ok(_): fail("invalid reservation accepted")
+                    Err(reason): expect(reason).to_contain("reservation")
+        match builder_memory_enforcement_bytes_v1("monitor", 1048576):
+            Ok(bytes): expect(bytes).to_equal(0)
+            Err(reason): fail(reason)
+        match builder_memory_enforcement_bytes_v1("enforce", 1048576):
+            Ok(bytes): expect(bytes).to_equal(1048576)
+            Err(reason): fail(reason)
+        var task = memory_task_v1()
+        task.memory_policy = "unlimited-capacity"
+        expect(builder_validate_task_v1(task)).to_contain("policy")
+        task.memory_policy = "monitor"
+        task.memory_limit_bytes = 0
+        expect(builder_validate_task_v1(task)).to_contain("memory")
+
+    it "records no enforcement and observed peaks above reservation for every monitor provider":
+        for metric in ["job-commit-peak", "cgroup-memory-peak", "process-tree-peak", "child-rss-peak"]:
+            val receipt = BuilderMemoryReceiptV1("a".repeat(64), "monitor", 1048576,
+                "none", 0, 2097152, metric)
+            match builder_memory_receipt_encode_v1(receipt):
+                Ok(wire):
+                    expect(wire).to_contain("requested_policy=monitor\nreserved_bytes=1048576\n")
+                    expect(wire).to_contain("enforcement=none\nenforced_bytes=0\n")
+                    expect(wire).to_contain("observed_peak_bytes=2097152\npeak_metric=" + metric)
+                Err(reason): fail(reason)
+
+    it "rejects monitor claims of a cap and enforce claims without native enforcement":
+        var receipt = BuilderMemoryReceiptV1("a".repeat(64), "monitor", 1048576,
+            "job-memory", 1048576, 100, "job-commit-peak")
+        expect(builder_memory_receipt_validate_v1(receipt)).to_contain("claims")
+        receipt.requested_policy = "enforce"
+        expect(builder_memory_receipt_validate_v1(receipt)).to_equal("")
+        receipt.enforcement = "none"
+        receipt.enforced_bytes = 0
+        expect(builder_memory_receipt_validate_v1(receipt)).to_contain("unproven")
+        receipt.enforcement = "cgroup-memory-max"
+        receipt.enforced_bytes = 1048576
+        expect(builder_memory_receipt_validate_v1(receipt)).to_contain("mismatch")
+        receipt.peak_metric = "cgroup-memory-peak"
+        expect(builder_memory_receipt_validate_v1(receipt)).to_equal("")

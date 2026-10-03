@@ -1,6 +1,8 @@
 # Compiled Windows worker entry. Keep kernel32 ownership out of Linux manager
 # link closures and bind this distinct image digest in BuildHostV1.
 use app.io.args_ops.{get_args}
+use std.common.build_manager.memory_policy.{builder_memory_enforcement_bytes_v1, builder_memory_receipt_for_task_v1}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_peak_memory_v1}
 use app.io.env_ops.{env_vars, env_get}
 use app.io.file_ops.{file_exists, file_read_regular_no_follow_bounded, file_atomic_write}
 use app.io.time_ops.{sleep_ms}
@@ -86,8 +88,7 @@ fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(
         Ok(value): value
         Err(failure):
             return Err(builder_windows_setup_failure_v1(task, root, host, failure))
-    # The immutable task identity owns the hard JobObject cap. An ambient
-    # environment value cannot weaken or silently change it on a retry.
+    # The immutable task owns a positive capacity reservation and separate policy.
     val memory_limit = task.memory_limit_bytes
     if memory_limit < 1 or memory_limit > 1125899906842624:
         return Err(builder_windows_reject_before_start_v1(task, root, host, "task memory bound invalid"))
@@ -126,7 +127,8 @@ fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(
     val final_links = builder_link_inputs_match_v1(task, root + "/work")
     if final_links != "":
         return Err(builder_windows_reject_before_start_v1(task, root, host, final_links))
-    val lease = match windows_process_admit_with_reserve_v1(request, memory_limit, required_memory):
+    val enforcement_bytes = builder_memory_enforcement_bytes_v1(task.memory_policy, task.memory_limit_bytes)?
+    val lease = match windows_process_admit_with_reserve_v1(request, enforcement_bytes, required_memory):
         WindowsProcessAdmissionV1.Started(value): value
         WindowsProcessAdmissionV1.RejectedBeforeStart(reason):
             return Err(builder_windows_reject_before_start_v1(task, root, host, reason))
@@ -149,6 +151,8 @@ fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(
                 val _cancelled = windows_process_cancel_v1(lease)
                 return Err(message)
         if observation.terminal:
+            # Query before closing the Job; still collect if accounting fails.
+            val measured_peak = windows_process_peak_memory_v1(lease)
             val receipt = windows_process_collect_v1(lease)?
             if not receipt.leader_reaped or not receipt.tree_empty: return Err("Windows tree cleanup unproven")
             # Receipt is published only after exact handle/job cleanup completes.
@@ -156,6 +160,10 @@ fn builder_windows_run_v1(task: BuildTaskV1, root: text, host: text) -> Result<(
                 return Err("cannot persist Windows tree cleanup receipt")
             if not builder_windows_capacity_settle_v1(task, root, host):
                 return Err("cannot persist Windows capacity settlement")
+            val memory_receipt = builder_memory_receipt_for_task_v1(task,
+                "job-memory", measured_peak?, "job-commit-peak")?
+            if not file_atomic_write(root + "/compiler.memory", memory_receipt):
+                return Err("cannot persist Windows memory policy receipt")
             if receipt.timed_out: return Ok(("TIMEOUT", 124))
             if receipt.cancelled: return Ok(("ERROR", 125))
             if receipt.exit_code == 0: return Ok(("OK", 0))

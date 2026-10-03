@@ -101,7 +101,8 @@ static int lifecycle_probe(const char *path) {
 
 int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[2], "lifecycle") == 0) return lifecycle_probe(argv[1]);
-    assert(argc == 2 && argv[1][0] == '/');
+    int monitor = argc == 3 && strcmp(argv[2], "monitor") == 0;
+    assert((argc == 2 || monitor) && argv[1][0] == '/');
     const char *identity = "cafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00dcafef00d";
     const char *other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const char *path = argv[1];
@@ -134,13 +135,15 @@ int main(int argc, char **argv) {
     assert(field(wrong, 0) == 0 && field(wrong, 1) == ESTALE);
     SplArray *started = rt_linux_group_start_v1(executable, strlen(executable), digest, 64,
         &empty, &empty, path, strlen(path), path, strlen(path), identity, 64,
-        33554432, 5000, out, strlen(out), err, strlen(err));
+        monitor ? 0 : 33554432, monitor ? 0 : 5000, out, strlen(out), err, strlen(err));
     printf("start status=%lld token=%lld\n", (long long)field(started, 1), (long long)field(started, 0)); fflush(stdout);
     assert(field(started, 0) == 1 && field(started, 1) == 0);
     assert(rt_linux_group_parent_release_v1(1) == EBUSY);
     char limit[128];
     assert(rt_lg_read_at(rt_linux_group.group_fd, "memory.max", limit, sizeof(limit)));
-    assert(strcmp(limit, "33554432\n") == 0);
+    assert(strcmp(limit, monitor ? "max\n" : "33554432\n") == 0);
+    assert(rt_lg_read_at(rt_linux_group.group_fd, "memory.swap.max", limit, sizeof(limit)));
+    assert(strcmp(limit, monitor ? "max\n" : "0\n") == 0);
     SplArray *observed = NULL;
     for (int i = 0; i < 1000; i++) {
         observed = rt_linux_group_poll_v1(1);
@@ -150,6 +153,7 @@ int main(int argc, char **argv) {
     }
     assert(field(observed, 1) && field(observed, 2) && field(observed, 3));
     assert(field(observed, 5) == 0 && field(observed, 8) > 0);
+    assert(!field(observed, 6)); /* timeout=0 must not become immediate timeout */
     assert(field(rt_linux_group_collect_v1(1), 0) == 0);
     assert(rt_linux_group_parent_release_v1(1) == 0);
     assert(rt_linux_group_parent_release_v1(1) == EINVAL);
@@ -160,6 +164,7 @@ int main(int argc, char **argv) {
     if (!current_after_ok) { assert(errno == ENODATA); current_after[0] = 0; }
     assert(strcmp(root_before, root_after) == 0 && strcmp(current_before, current_after) == 0);
     close(root); close(current);
-    puts("PASS: parent identity/capacity cap/atomic clone/child cap/reap/cleanup/no global mutation");
+    puts(monitor ? "PASS: positive parent capacity/no child memory or swap cap/no work deadline/peak/reap/cleanup" :
+        "PASS: parent identity/capacity cap/atomic clone/child cap/reap/cleanup/no global mutation");
     return 0;
 }
