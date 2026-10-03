@@ -1,0 +1,54 @@
+# Request-owned collection metadata and pre-monomorphization HIR evidence.
+# The caller supplies source bytes and independently resolved bindings once;
+# no filesystem, environment, source-name inference or rewrite is performed.
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.semantics.perf_facts.types.{CollectionOperationRegistry}
+use compiler.semantics.perf_facts.registry.{
+    CollectionRegistryBindingV1, collection_registry_parse, collection_registry_bind
+}
+use compiler.semantics.perf.collection_plan_analysis.{analyze_collection_module_v1}
+
+impl CompilerDriver:
+    me configure_collection_registry(
+        source: text, bindings: [CollectionRegistryBindingV1]
+    ) -> Result<bool, text>:
+        """Replace this request's registry; failure discards all old evidence."""
+        self.collection_registry = CollectionOperationRegistry.new("unconfigured")
+        self.collection_registry_configured = true
+        self.collection_registry_error = ""
+        self.collection_analyses = {}
+        val snapshot = match collection_registry_parse(source):
+            case Ok(value): value
+            case Err(reason):
+                self.collection_registry_error = reason
+                return Err(reason)
+        match collection_registry_bind(snapshot, bindings):
+            case Ok(registry):
+                self.collection_registry = registry
+                Ok(true)
+            case Err(reason):
+                self.collection_registry_error = reason
+                Err(reason)
+
+    me analyze_collections_before_monomorphize(hir_phase_admitted: bool) -> bool:
+        """Publish fresh analysis snapshots, never lowered/executed receipts."""
+        self.collection_analyses = {}
+        if not hir_phase_admitted:
+            return false
+        if not self.collection_registry_configured:
+            return true
+        if self.collection_registry_error != "":
+            self.ctx.add_error("collection-registry-configuration: " + self.collection_registry_error)
+            return false
+        if not self.collection_registry.is_structurally_valid():
+            self.ctx.add_error("collection-registry-invalid-at-hir-boundary")
+            return false
+        # Flat/bootstrap routes can retain fewer object modules than the
+        # admitted HIR population. Do not publish a partial result as complete.
+        if self.ctx.hir_module_count_value > self.ctx.hir_modules.len():
+            self.ctx.add_error("collection-analysis-incomplete-hir")
+            return false
+        for name in self.ctx.hir_modules.keys():
+            self.collection_analyses[name] = analyze_collection_module_v1(
+                self.ctx.hir_modules[name], self.collection_registry)
+        true
