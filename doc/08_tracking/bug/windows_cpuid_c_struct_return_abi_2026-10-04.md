@@ -1,6 +1,6 @@
 # Windows CPUID C aggregate is not a Simple tuple
 
-Status: C runtime, Rust runtime unit, and narrow-owner Cranelift native execution passed. Canonical-import pure compiler validation and full bootstrap qualification remain pending.
+Status: C runtime, Rust runtime unit, narrow-owner Cranelift native execution, and canonical-import pure LLVM compiler validation passed. Full bootstrap qualification remains pending.
 
 The LLVM-produced compiler crashes in capability detection when optimizing a Cranelift target. The captured native frame is rt_cpuid in the pinned bootstrap runtime archive. Its caller passes ECX=1 and EDX=0, treating the result as a tuple handle. The Windows callee expects RCX to be a writable 16-byte return buffer and leaf/subleaf in EDX/R8D. Its first result store therefore dereferences address 1.
 
@@ -12,6 +12,8 @@ No CPU feature or OS-state check is removed. Tuple allocation failure remains ni
 
 MSVC-mode C syntax validation passes. The standalone core-C runtime and `rt_cpuid_tuple_selfcheck.c` compiled successfully (39 objects, 40 build jobs); the linked executable passed, comparing all four signed registers for the vendor and extended maximum leaves through real tuple allocation/access. Evidence: C:/Users/user/.simple/worktrees/simple/runtime/windows-restart-20261004/cpuid-core-runtime/result.json.
 
-The Rust `test_cpuid_tuple_preserves_registers` regression passed (1 test, 0 failures). The exact CPU owner compiled with Cranelift through a local-import fixture (2 modules, 40 jobs), linked with the real core-C runtime, and ran with exit 0 and `PASS narrow CPUID tuple`. Evidence: `cranelift-tagging-investigation/narrow-cpuid-evidence.json` in the same packet. This local-import result does not prove the canonical `std` routing. A separate pure-compiler canonical-import probe and both repaired compiler builds are still running; full bootstrap and promotion are unproven.
+The Rust `test_cpuid_tuple_preserves_registers` regression passed (1 test, 0 failures). The exact CPU owner compiled with Cranelift through a local-import fixture (2 modules, 40 jobs), linked with the real core-C runtime, and ran with exit 0 and `PASS narrow CPUID tuple`. Evidence: `cranelift-tagging-investigation/narrow-cpuid-evidence.json` in the same packet.
+
+The separate pure-compiler LLVM probe of `windows_native_cpuid_tuple.spl` passed using the canonical `std.nogc_sync_mut.sffi.cpu` import, 40 jobs, and the real core-C runtime. Compilation and execution exited 0 with `PASS Windows CPUID tuple ABI`. Evidence: `cpuid-canonical-validation/result.json` and `build.log`; executable SHA-256 `99a775acbd8dc3a947ae32e03a7d205fadd1dcd36455cb1a54b048b8e4aad9f0`. Full compiler bootstrap and promotion remain unproven; the repaired Cranelift compiler reached 1,180 compiled modules but encountered an independent atomic runtime discarded-section link failure.
 
 Debug evidence is in C:/Users/user/.simple/worktrees/simple/runtime/windows-restart-20261004/pr2385-validation/cranelift-optimizer-crash. Inline assembly was considered but not adopted because the existing asm-template binding bug would not establish correct register outputs.
