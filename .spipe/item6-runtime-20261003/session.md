@@ -50,3 +50,32 @@ paused between those reads. Future acceptance must pause a reader after
 observing A, publish B, collect while that reader still owns A, then resume it
 and verify A's exact payload remains readable until its pin is released.
 No full atomic lifecycle or reader/GC safety claim is supported by this change.
+
+## Reader contract continuation
+
+The eight production consumer files read fully owned decoded values/digests;
+none retains an index path or lazily rereads index bytes. Thus the requirement
+above can be met for index records without a persistent reader-pin registry:
+
+1. Preserve absent CURRENT/storage as `missing-or-invalid-generation`, without
+   creating its directory.
+2. Acquire the same CURRENT.lock; one second is the smallest bounded timeout
+   supported by existing file_lock. Refusal is `generation-lock-unavailable`.
+3. While locked, validate CURRENT and read exact bounded generation bytes into
+   owned memory. A private helper returns pointer/content/error to one unlock
+   owner, including all early error paths.
+4. Unlock before SHA256, decode, or any caller logic. Authenticate captured bytes
+   against captured pointer, then return the fully owned decoded generation.
+
+No publisher/GC locked helper calls public read_current, so this does not add
+recursive locking. The archive loader returns CAS paths independently; the
+index collector removes only `.index` files, not those archive paths. Separate
+archive lifetime work remains outside this index-record repair. One-second
+contention is diagnostic behavior, not demonstrated hot-path latency compliance.
+
+The new `package_module_index_reader_transaction_spec.spl` contains three real
+contracts: held-lock rejection and post-release success, decoded value survival
+after its backing index file is collected, and absent-root compatibility.
+Production reader remains unchanged pending an actual executed RED per parent
+instruction. No RED/GREEN or test pass is claimed. The adjacent bootstrap
+recheck still reported stage2 ABORTED; root `bin/release` remained absent.
