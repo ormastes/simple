@@ -34,12 +34,16 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) ||
     die "cannot locate repository root"
 source_root=$root
 work_root=
+reuse_base=0
+backend=llvm
 timeout_seconds=${SIMPLE_FREEBSD_PHASE2_TEST_TIMEOUT:-900}
 
 for arg in "$@"; do
     case "$arg" in
         --work-root=*) work_root=${arg#*=} ;;
         --source-root=*) source_root=${arg#*=} ;;
+        --reuse-base) reuse_base=1 ;;
+        --backend=*) backend=${arg#*=} ;;
         --phase=stage2) ;;
         --phase=*) die "Phase 2 runner requires --phase=stage2" ;;
         --hash-policy=temporary) die "canonical hash policy required" ;;
@@ -47,6 +51,7 @@ for arg in "$@"; do
 done
 
 [ -n "$work_root" ] || die "--work-root is required"
+case "$backend" in llvm|cranelift) ;; *) die "invalid native backend: $backend" ;; esac
 case "$timeout_seconds" in
     ''|*[!0-9]*|0) die "SIMPLE_FREEBSD_PHASE2_TEST_TIMEOUT must be a positive integer" ;;
 esac
@@ -65,8 +70,10 @@ mkdir -p "$logs" "$fixture" "$home" "$tmp" "$cache" || die "cannot isolate test 
 # Tool artifacts are identity-scoped by the delegated verifier.  Remove only
 # prior outputs so a reused work root cannot make discovery ambiguous; retain
 # its compiler caches for bounded rebuilds.
-rm -rf "$work_root/outputs/compiler-tools" ||
-    die "cannot clear stale compiler-tool outputs"
+if [ "$reuse_base" -eq 0 ]; then
+    rm -rf "$work_root/outputs/compiler-tools" ||
+        die "cannot clear stale compiler-tool outputs"
+fi
 
 : >"$summary"
 # Do not leave an incomplete run looking like a successful task-only receipt.
@@ -74,15 +81,20 @@ trap 'status=$?; if [ "$status" -ne 0 ]; then echo "overall=FAIL" >>"$summary"; 
 echo "schema=freebsd-phase2-post-bootstrap-tests-v1" >>"$summary"
 
 base_status=0
-(cd "$source_root" && sh scripts/bootstrap/bootstrap-phase-verification.shs "$@") || base_status=$?
+if [ "$reuse_base" -eq 0 ]; then
+    (cd "$source_root" && sh scripts/bootstrap/bootstrap-phase-verification.shs "$@") || base_status=$?
+fi
 require_base_summary() {
     expected_sha=
     for arg in "$@"; do
         case "$arg" in --compiler-sha256=*) expected_sha=${arg#*=} ;; esac
     done
     [ -n "$expected_sha" ] || return 1
-    awk -F'[=|]' -v sha="$expected_sha" '
+    awk -F'[=|]' -v sha="$expected_sha" -v backend="$backend" \
+        -v source="$source_root/src/runtime" '
         $1 == "phase" { phases++; if ($2 != "stage2") bad = 1 }
+        $1 == "verification_backend" { backends++; if ($2 != backend) bad = 1 }
+        $1 == "target_runtime_source_path" { sources++; if ($2 != source) bad = 1 }
         $1 == "hash_policy" { policies++; if ($2 != "canonical") bad = 1 }
         $1 == "expected_compiler_sha256" { expected++; if ($2 != sha) bad = 1 }
         $1 == "actual_compiler_sha256" { actual++; if ($2 != sha) bad = 1 }
@@ -92,10 +104,15 @@ require_base_summary() {
             if ($3 != "result" || $4 != "PASS") bad = 1
             if ($2 == "compiler_cli_build") cli++
             if ($2 == "test_runner_build") runner++
+            if ($2 == "compiler_bootstrap_tests") compiler_tests++
+            if ($2 == "interpreter_interpreter_tests") interpreter_tests++
+            if ($2 == "loader_interpreter_tests") loader_tests++
         }
         END {
-            exit (bad || phases != 1 || policies != 1 || expected != 1 ||
-                actual != 1 || failures != 1 || outcomes != 1 || cli != 1 || runner != 1)
+            exit (bad || phases != 1 || backends != 1 || sources != 1 || policies != 1 ||
+                expected != 1 || actual != 1 || failures != 1 || outcomes != 1 ||
+                cli != 1 || runner != 1 || compiler_tests != 1 ||
+                interpreter_tests != 1 || loader_tests != 1)
         }
     ' "$work_root/summary.env"
 }
@@ -184,7 +201,7 @@ run_task interpreter_module_load "$compiler_cli" run "$fixture/main.spl" \
 probe="$fixture/phase2-module-probe"
 rm -f "$probe" || die "cannot remove stale native probe"
 run_task native_module_build "$compiler_cli" native-build "$fixture/main.spl" \
-    --threads 1 --cache-dir "$cache/native-module-build" --output "$probe" ||
+    --backend "$backend" --threads 1 --cache-dir "$cache/native-module-build" --output "$probe" ||
     die "native module build failed"
 [ -x "$probe" ] || die "native module build produced no executable"
 run_task native_module_execute "$probe" || die "native module probe failed"
