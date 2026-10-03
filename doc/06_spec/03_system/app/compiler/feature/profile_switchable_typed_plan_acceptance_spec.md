@@ -1,6 +1,24 @@
 # Typed collection physical-plan acceptance
 
-This is an authored manual for `test/03_system/app/compiler/feature/profile_switchable_typed_plan_acceptance_spec.spl`. SPipe execution and generation have not run on an admitted Stage 4 runtime. The scenario intentionally ends with `MissingEvidence` until a production physical-decision receipt exists; it cannot be reported as PASS.
+This is an authored manual for `test/03_system/app/compiler/feature/profile_switchable_typed_plan_acceptance_spec.spl`. SPipe execution and generation have not run on an admitted Stage 4 runtime. The profile-replay scenario intentionally ends with `MissingEvidence` until an artifact-bound production physical-decision receipt exists; the suite cannot be reported as PASS.
+
+## Literal membership guard and execution scenario
+
+The separate literal scenario uses the three-entry duplicate-key fixture at
+`test/fixtures/profile_switchable/typed_literal_membership_probe.spl`. It requires
+Original at O0 or zero budget, and a consumed Linear MIR decision at O2 with a
+512-byte scratch budget on the explicitly requested x86_64 Linux target. The
+consumed decision must retain the insertion-failure fallback. It then runs the
+same fixture through the interpreter and an LLVM native build for the actual
+host, checks the PASS marker and matching output, and rechecks source/compiler
+hashes. Every child is bounded and output is retained incrementally under
+`build/test-artifacts/compiler/literal-membership-<pid>.txt`.
+
+This proves separate MIR-guard and logical-execution criteria when run; it does
+not bind the Linux explanation to the host native artifact or discharge the
+profile-replay requirement below. Status: authored, NOT RUN.
+
+## Profile replay and artifact-bound selection scenario
 
 The suite entry invokes canonical `stage4_verify_candidate_provenance` once for the exact executable, its `.provenance.env`, and this source tree. It retains accepted candidate, provenance and source hashes under `build/test-artifacts/stage4-source-admission-<pid>.txt`; the scenario rechecks candidate and receipt hashes before workload capture.
 
