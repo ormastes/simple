@@ -56,6 +56,16 @@ nonzero exits with plausible stdout, missing/wrong/extra markers, newline rules,
 absent JIT witness, duplicate/unknown engines and incomplete final verdicts.
 These are authored regression tests, not observed RED/GREEN evidence.
 
+Interpreter certification additionally consumes the real CLI execution-owner
+stderr record from `src/app/io/_CliCommands/run_commands.spl`. The runner requests
+the receipt and places `--interpret` before `run`, using the global flag parser.
+Exactly one `simple_execution_mode_v1 requested=interpreter actual=interpreter fallback=false`
+line is required. Missing, duplicate, fallback, wrong-mode and malformed records
+fail. Stdout remains separate and must still match the exact oracle: current CLI
+`CompileResult.Success` can flatten a program's main return code to zero, so a
+receipt or successful process exit alone is insufficient semantic evidence.
+No positive JIT witness is inferred from this interpreter-only owner record.
+
 No expected-missing-runtime-symbol facility was found in this harness: such a
 fixture would be reported as a lane error, not a verified negative. That negative
 gate remains explicitly missing. Native admission, optional struct payload ABI,

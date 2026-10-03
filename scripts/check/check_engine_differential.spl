@@ -79,7 +79,7 @@
 
 use std.io.{process_run, env_get}
 use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
-use app.test.engine_differential_contract.{differential_observation_error, differential_engine_error, differential_certification_exit, differential_terminal_newline}
+use app.test.engine_differential_contract.{differential_observation_error, differential_engine_error, differential_certification_exit, differential_terminal_newline, differential_interpreter_receipt_error}
 
 fn certification_requested() -> bool:
     (env_get("DIFF_CERTIFY") ?? "") == "1"
@@ -187,11 +187,21 @@ fn normalize(raw: text) -> text:
 # to stdout is an ERROR lane, not an empty-but-valid answer.
 fn run_interpreted(binary: text, path: text, engine: text) -> LaneResult:
     var strict = ""
+    var global_flags = ""
     if certification_requested():
-        strict = "SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_JIT_STRICT=1 "
-    val command = strict + "SIMPLE_EXECUTION_MODE=" + engine + " SIMPLE_RUNTIME_MODE=" + engine + " " + binary + " run " + path + " 2>/dev/null"
-    val (stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-    observed_lane(engine, path, stdout, code)
+        strict = "SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_JIT_STRICT=1 SIMPLE_EXECUTION_MODE_RECEIPT=1 "
+        if engine == "interpret" or engine == "interpreter":
+            # Parsed globally before command dispatch, then filtered by CLI.
+            global_flags = " --interpret"
+    val command = strict + "SIMPLE_EXECUTION_MODE=" + engine + " SIMPLE_RUNTIME_MODE=" + engine + " " + binary + global_flags + " run " + path
+    val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+    val observed = observed_lane(engine, path, stdout, code)
+    if observed.ok and certification_requested() and (engine == "interpret" or engine == "interpreter"):
+        val receipt_error = differential_interpreter_receipt_error(stderr)
+        if receipt_error.len() > 0:
+            return LaneResult(lane: engine, output: stdout, normalized: observed.normalized, ok: false,
+                note: "fixture={path} engine={engine} {receipt_error}")
+    observed
 
 # One-time SCV admission preparation for the native lane.
 #
