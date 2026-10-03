@@ -1,6 +1,72 @@
 <!-- codex-design -->
 # Persistent Package/Module Index Compile Detail Design
 
+## 2026-10-03 concrete repair and acceptance design
+
+Execution plan:
+`doc/03_plan/compiler/perf/item6_compile_optimization_2026-10-03.md`.
+Acceptance inventory:
+`doc/03_plan/sys_test/item6_compile_optimization_acceptance_2026-10-03.md`.
+These preserve the full retained scope; the following repair is one component.
+
+### GC/publication transaction
+
+1. Resolve the index owner's `CURRENT.lock` through the existing lock/path
+   facilities. Attempt a bounded acquisition before observing retention state.
+2. On contention or failed acquisition, return without enumeration or deletion.
+   Preserve the existing count-returning API; zero is not proof a GC cycle ran.
+3. Under the acquired lock, read and validate `CURRENT`, establish the retained
+   generation set from the caller's retained digests, then enumerate eligible
+   generations. This list is not an implemented atomic reader-pin registry.
+4. Delete only validated unretained/unpinned candidates according to existing
+   ownership rules. Never delete `CURRENT` or its selected generation.
+5. Release the lock on every path after acquisition, including invalid-current
+   refusal and empty candidate sets.
+
+The deterministic regression stages two valid generations, keeps the old one
+current, and holds the production publication lock. A collection attempt must
+report no deletions and preserve both generation payloads and the pointer. After
+unlocking, a normal collection must remove only the eligible non-current candidate.
+The fixture uses actual index publication, lock, read and GC owners. No sleep
+race, mocked retention algorithm or hardcoded success receipt is acceptable.
+Record RED before the implementation and GREEN after it on the same admitted
+runtime. If no suitable runtime exists, keep execution explicitly blocked.
+
+Reader acquisition requires a separate repair: pause a reader after it selects
+the old `CURRENT`, publish a new generation and collect, then resume the payload
+read. The selected generation must remain readable until that reader releases
+its pin. The current unlocked pointer/payload sequence does not establish this
+guarantee. Keep this row OPEN after the writer-lock regression passes; do not
+infer lifetime safety from a caller-supplied retained list.
+
+### Mixed-change routing acceptance
+
+Use two independent branches, `app_a -> api_a` and `app_b -> impl_b`.
+Change the public signature of `api_a` and only the body of `impl_b` in one
+snapshot transition. Assert the actual compile set includes `api_a`, `app_a`,
+and `impl_b`, while `app_b` remains reusable unless a recorded body-sensitive
+edge requires it. Also cover byte-identical regenerated exports, unknown change
+classification, SCC members, initializer/provider changes and generated input
+identity. Validate new classifications against admitted prior/new records;
+never trust a user/test flag as semantic proof.
+
+The current route cannot express that mixed batch. Its conservative behavior
+is not a correctness failure by itself, but it cannot satisfy precise-reuse
+acceptance. A future implementation must wire classification through the real
+driver call and prove the resulting artifacts and diagnostics equal a clean
+compile. The acceptance list records this gap rather than inventing a new API.
+
+### Specification and evidence shape
+
+Use modern `describe`/`context`/`it`, meaningful `step` actions, actual production
+imports and built-in matchers. Steps explain actions; assertions prove results.
+Keep narrow lock/persistence regressions separate from compiler system tests.
+The 44 existing system scenarios require a production harness: restoring the
+filename alone or printing their expected strings is not implementation.
+Generated manuals must name the executable source and actual execution status.
+Logs bind command, source revision, binary digest/provenance, host, target,
+fixture and result; diagnostic/unadmitted runs cannot qualify the release.
+
 ## Scope
 
 This design specifies the package-index, metadata, invalidation, cache,

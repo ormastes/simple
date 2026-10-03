@@ -65,12 +65,19 @@ Each row requires the named production scenario, status 0, empty unexpected stde
 
 ## Focused TDD increments and gaps
 
-1. **PSI-REQ-004 / GC publication exclusion.** Publish A and B using the real persistence API. Pin A, hold the same CURRENT.lock used by publication, and attempt collection with B unretained. Collection must fail closed while the lock is held and preserve B's persisted bytes. Release the lock and demonstrate ordinary collection still removes only eligible generations. Runtime lane owns the executable regression and production fix. Capture baseline failure and fixed success using the same admitted self-hosted binary, fixtures, and invocation; source inspection alone cannot provide either result.
+1. **PSI-REQ-004 / GC publication exclusion.** Publish A and B using the real persistence API. Select A as CURRENT, hold the same CURRENT.lock used by publication, and attempt collection with B unretained. Collection must fail closed while the lock is held and preserve B's persisted bytes. Release the lock and demonstrate ordinary collection still removes only eligible generations. Runtime lane owns the executable regression and production fix. Capture baseline failure and fixed success using the same admitted self-hosted binary, fixtures, and invocation; source inspection alone cannot provide either result.
 2. **PSI-REQ-002 / mixed private and public edits.** Use disjoint dependency pairs `a -> b` and `c -> d` (arrows mean reverse-dependent propagation here). Change only a's body and c's export. Production precise invalidation must return a,c,d and preserve b. Existing module-index unit coverage asserts that lower-level result. The live route still calls `package_module_index_invalidate_v1(generation, changed_modules, public_interface_changed)`, and its driver constructs one global public-interface flag from the environment. Both branches therefore share one classification. A route-level test must provision real admitted archives for retained b and assert returned dirty records plus byte-identical retained artifact. Do not add a new precise API until the driver supplies authoritative per-module changes and migration behavior is designed.
 3. **PSI-REQ-004 / persisted corruption.** Publish through the real owner, save CURRENT and generation bytes, corrupt only a generation payload, and read through `package_module_index_read_current_v1`. Require invalid result with the precise digest/admission error and no fallback scan or write. Restore original bytes and require valid read. Separately corrupt CURRENT, use a missing generation, and truncate metadata; retain the previous admitted generation unless an explicit bounded rebuild is authorized. Decode-only tests cannot cover this storage boundary.
 4. **PSI-REQ-005 / changed binding.** Publish a valid graph and independently alter expected revision, tree, inventory, producer, root generation, and variant. For each route call, require the exact mismatch reason, no source paths/archive admissions, and unchanged CURRENT bytes. A single combined mismatch is insufficient because it observes only the first check.
 
 ## Shared interfaces and manual rules
+
+Reader acquisition remains a separate OPEN case: pause a reader after selecting
+A from CURRENT, publish B and run GC, then resume reading A. A must remain
+readable until its reader pin is released. The current reader performs unlocked
+pointer and payload reads, and GC's caller-supplied retained list is not an
+atomic pin registry. The held-publication-lock unit test does not certify this
+interleaving or multi-process lifecycle safety.
 
 Use existing `PackageIndexRouteV1`, `PackageModuleIndexReadV1`, `PackageModuleChangeV1`, `package_index_route_current_v1`, and production publish/read/invalidate owners. Preserve the canonical conceptual record names and PSI IDs in the parent plan. A future `run_package_index_scenario(name)` helper is allowed only when it invokes the real compiler and returns admitted evidence; no synthetic receipt adapter is planned.
 

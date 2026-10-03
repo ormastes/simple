@@ -1,6 +1,67 @@
 <!-- codex-design -->
 # Persistent Package/Module Index Compile Architecture
 
+## 2026-10-03 release-line reconciliation
+
+The current item 6 execution umbrella is
+`doc/03_plan/compiler/perf/item6_compile_optimization_2026-10-03.md`.
+Research inspected release commit `7d16ab11d2227cbe5f29dc998b76a1eff326abbb`.
+Cold HIR and full-index publication owners exist at that revision; remaining
+claims require executed qualification, not an assumption of missing code.
+The broad system spec's shell checker is absent, so none of its expected output
+strings can establish acceptance. The additive local/domain research and
+concrete acceptance matrix linked by the umbrella preserve these distinctions.
+
+### One authority for publication and collection
+
+`CURRENT`, generation files, and reader pins form one retention transaction.
+The index persistence owner must serialize GC retention decisions with the same
+`CURRENT.lock` used by publication. GC acquires the lock before reading the
+current generation, discovering candidates, applying retained digests, or deleting any
+generation. Contention ends the bounded collection attempt without deletion;
+it does not authorize an unlocked best-effort scan. The lock is released on
+every acquired-lock exit. Readers continue to consume immutable generations.
+
+This closes the interleaving where GC reads generation A, publication promotes
+B, and GC deletes B using its stale view of A. Tests must hold the real lock,
+inspect persisted bytes and the current pointer, and then prove ordinary
+unretained collection after releasing it. The test does not certify every
+pin/crash ordering; those remain separate acceptance rows.
+
+Reader lifetime remains OPEN: the current implementation accepts a caller's
+`retained_digests` snapshot, not an atomic reader-pin registry, and
+`package_module_index_read_current_v1` reads pointer then payload without a
+shared lock. A publication/GC interleaving can therefore retire a reader's
+chosen generation before its payload read. The writer-lock repair cannot
+certify pin safety. Add a deterministic paused-reader/publish/GC test before
+claiming the broader retention transaction above is implemented.
+
+### Semantic classification must reach the driver
+
+The existing precise invalidation owner consumes `PackageModuleChangeV1`, but
+`package_index_route_current_v1` currently receives a batch-wide boolean from
+the driver. Correct mixed-batch routing requires a per-module classification
+produced from admitted old/new semantic metadata, including public exports,
+initializers, providers and body-sensitive consumers. The driver must pass that
+classification to the actual route. Adding an unused precise overload or
+allowing the test to declare an edit private cannot prove adoption.
+
+Content identity remains separate from exported semantic identity. Unknown or
+unadmitted metadata cannot suppress reverse invalidation. The legacy coarse
+route stays conservative until the classification path is implemented and
+qualified. A public change in one independent branch must not convert a
+proven private-only edit in another branch into a public change.
+
+### Startup and performance evidence
+
+Index/GC repair must not introduce new compiler subprocesses or recursive
+source discovery. MCP/LSP continue to use the shared catalog owner; no duplicate
+workspace index is introduced. Qualify startup, local lookup p95, representative
+warm request latency and peak RSS using the existing NFR-CSM and compiler
+performance budgets, with source/runtime/target and fixture digests. Missing
+admitted Windows tooling is an evidence blocker, never a reason to run a seed
+and call its measurements production results.
+
 ## Context
 
 Simple currently has entry-closure resolution, SIF/SMF metadata, action keys,
