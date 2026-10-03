@@ -18,6 +18,11 @@ to use unknown source facts. Effects, cost, allocation, order, uniqueness, alias
 purity, escape, equality, profitability, and evidence receipt are unchanged.
 The helper neither evaluates elements nor authorizes a physical rewrite.
 
+Structural plan validation rechecks an ArrayLit source's Exact count against its
+retained elements, rejecting stale literal edits or forged counts. Unknown is
+allowed, and nonliteral evidence is not newly rejected or authenticated. This
+local consistency check produces no additional facts or rewrite authority.
+
 Tests cover literal counts through actual chain extraction plus exclusions and
 an effectful element. Tests were authored before implementation; execution and
 cross-engine evidence remain pending. No runtime or performance result is claimed.
