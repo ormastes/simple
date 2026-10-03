@@ -28,7 +28,8 @@ use std.nogc_sync_mut.fs.host_path.{host_path_native}
 
 @unsafe(reason: "writes checked Unicode scalars into privately owned UTF16 input allocation", capabilities: [ffi, raw_ptr])
 fn _path_identity_wide(heap: i64, path: text) -> i64:
-    val buffer = HeapAlloc(heap, 8u32, ((path.len() + 1) * 2) as u64)
+    # Input and output both have a fixed 32768-unit bound, including NUL.
+    val buffer = HeapAlloc(heap, 8u32, 65536u64)
     if buffer == 0: return 0
     var ordinal = 0
     var consumed = 0
@@ -36,6 +37,10 @@ fn _path_identity_wide(heap: i64, path: text) -> i64:
     while consumed < path.len():
         val scalar = path.char_code_at(ordinal)
         if scalar <= 0 or scalar > 1114111 or (scalar >= 55296 and scalar <= 57343):
+            val released = HeapFree(heap, 0u32, buffer)
+            return 0
+        val needed = if scalar < 65536: 1 else: 2
+        if offset + needed >= 32768:
             val released = HeapFree(heap, 0u32, buffer)
             return 0
         if scalar < 65536:

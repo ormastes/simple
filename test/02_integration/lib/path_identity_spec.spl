@@ -5,6 +5,8 @@ use std.spec.{describe, it, expect}
 use app.io.mod.{cwd, dir_create, file_write, process_run_bounded}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
 use std.nogc_sync_mut.io.path_identity.*
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes, file_is_regular_no_follow, file_read_regular_no_follow_bounded_bytes, file_fsync, directory_fsync}
 
 fn setup_item2_path_identity_root() -> text:
     val nonce = random_hex(8) ?? ""
@@ -31,6 +33,23 @@ describe "Existing path identity host owner":
         val first = path_final_existing(root).unwrap()
         expect(path_identity_same(first, path_final_existing(root).unwrap())).to_be(true)
 
+    it "requires the correct object type and preserves bounded binary bytes":
+        val root = setup_item2_path_identity_root()
+        val path = "{root}/binary"
+        expect(file_write_bytes(path, [0u8, 128u8, 255u8])).to_be(true)
+        expect(file_is_regular_no_follow(path)).to_be(true)
+        expect(file_is_regular_no_follow(root)).to_be(false)
+        expect(dir_is_real_no_follow(root)).to_be(true)
+        expect(dir_is_real_no_follow(path)).to_be(false)
+        expect(file_read_regular_no_follow_bounded_bytes(path, 3)).to_equal(Ok([0u8, 128u8, 255u8]))
+        expect(file_read_regular_no_follow_bounded_bytes(path, 2).is_err()).to_be(true)
+        expect(file_read_regular_no_follow_bounded_bytes(root, 3).is_err()).to_be(true)
+        expect(directory_fsync(path)).to_be(false)
+        expect(directory_fsync("{root}/missing")).to_be(false)
+        # Positive barriers must really succeed on the qualified filesystem.
+        expect(file_fsync(path)).to_be(true)
+        expect(directory_fsync(root)).to_be(true)
+
 @when(os="windows"):
 fn setup_item2_windows_path_alias(root: text, name: text, kind: text, target: text) -> text:
     val script = "{root}/make-link.ps1"
@@ -42,6 +61,9 @@ fn setup_item2_windows_path_alias(root: text, name: text, kind: text, target: te
     alias
 
 describe "Windows handle-derived final identity":
+    it "rejects overlong UTF16 input without overflowing its fixed buffer":
+        expect(path_final_existing("C:/" + "a".repeat(32768))).to_equal(Err("PATH_IDENTITY_INPUT"))
+
     it "normalizes existing case variants through the kernel rather than lowercasing":
         val root = setup_item2_path_identity_root()
         expect(dir_create("{root}/CaseProof", false)).to_be(true)
@@ -58,8 +80,21 @@ describe "Windows handle-derived final identity":
         val symlink = setup_item2_windows_path_alias(root, "symlink", "SymbolicLink", target.path)
         expect(path_identity_same(target, path_final_existing(junction).unwrap())).to_be(true)
         expect(path_identity_same(target, path_final_existing(symlink).unwrap())).to_be(true)
+        expect(dir_is_real_no_follow(junction)).to_be(false)
+        expect(dir_is_real_no_follow(symlink)).to_be(false)
+        expect(directory_fsync(junction)).to_be(false)
+        expect(directory_fsync(symlink)).to_be(false)
         expect(dir_create("{root}/target/child", false)).to_be(true)
         expect(path_identity_contains(target, path_final_existing("{junction}/child").unwrap())).to_be(true)
+
+    it "refuses a file symlink at the bounded read boundary":
+        val root = setup_item2_path_identity_root()
+        expect(file_write_bytes("{root}/target.bin", [0u8, 255u8])).to_be(true)
+        val target = path_final_existing("{root}/target.bin").unwrap()
+        val alias = setup_item2_windows_path_alias(root, "alias.bin", "SymbolicLink", target.path)
+        expect(path_identity_same(target, path_final_existing(alias).unwrap())).to_be(true)
+        expect(file_is_regular_no_follow(alias)).to_be(false)
+        expect(file_read_regular_no_follow_bounded_bytes(alias, 2).is_err()).to_be(true)
 @else:
 describe "POSIX existing-path realpath owner":
     it "resolves actual symlink targets and preserves literal backslashes":
@@ -70,4 +105,6 @@ describe "POSIX existing-path realpath owner":
         expect(code).to_equal(0)
         expect(path_identity_same(target, path_final_existing("{root}/alias").unwrap())).to_be(true)
         expect(target.path.ends_with("/target\\literal")).to_be(true)
+        expect(dir_is_real_no_follow("{root}/alias")).to_be(false)
+        expect(directory_fsync("{root}/alias")).to_be(false)
 @end
