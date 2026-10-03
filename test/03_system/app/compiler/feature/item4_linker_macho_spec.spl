@@ -1,0 +1,125 @@
+"""ITEM4-REQ-003/004/006/007: actual freestanding Mach-O executable images.
+
+Test intent precedes implementation. NOT RUN: admitted SSpec runtime missing.
+Byte assertions are not Darwin loader, dyld, TLS, signature or unwind evidence.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use compiler.backend.linker.macho.macho_static_link.{macho_static_link}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn item4_macho_fixture(name: text) -> [u8]:
+    val bytes = file_read_bytes("test/fixtures/linker/macho/" + name)
+    expect(bytes.len()).to_be_greater_than(32)
+    bytes
+
+fn item4_macho_read(bytes: [u8], at: i64, size: i64) -> i64:
+    val valid = at >= 0 and at <= bytes.len() and size > 0 and size <= 8
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    expect(size <= bytes.len() - at).to_equal(true)
+    if size > bytes.len() - at: return 0
+    var value: i64 = 0
+    var index: i64 = 0
+    while index < size:
+        value = value | ((bytes[at + index] as i64) << (8 * index))
+        index = index + 1
+    value
+
+fn item4_macho_check_image(bytes: [u8], arm: bool):
+    expect(item4_macho_read(bytes, 0, 4)).to_equal(0xfeedfacf)
+    expect(item4_macho_read(bytes, 4, 4)).to_equal(if arm: 0x0100000c else: 0x01000007)
+    expect(item4_macho_read(bytes, 12, 4)).to_equal(2)
+    expect(item4_macho_read(bytes, 16, 4)).to_equal(4)
+    # PAGEZERO, TEXT, DATA are independent LC_SEGMENT_64 commands (72 bytes).
+    expect(item4_macho_read(bytes, 32, 4)).to_equal(0x19)
+    expect(item4_macho_read(bytes, 32 + 32, 8)).to_equal(0x100000000)
+    expect(item4_macho_read(bytes, 32 + 60, 4)).to_equal(0)
+    expect(item4_macho_read(bytes, 104, 4)).to_equal(0x19)
+    expect(item4_macho_read(bytes, 104 + 24, 8)).to_equal(0x100000000)
+    expect(item4_macho_read(bytes, 104 + 40, 8)).to_equal(0)
+    expect(item4_macho_read(bytes, 104 + 60, 4)).to_equal(5)
+    expect(item4_macho_read(bytes, 176, 4)).to_equal(0x19)
+    expect(item4_macho_read(bytes, 176 + 60, 4)).to_equal(3)
+    val data_offset = item4_macho_read(bytes, 176 + 40, 8)
+    val data_size = item4_macho_read(bytes, 176 + 48, 8)
+    expect(data_offset + data_size <= bytes.len()).to_equal(true)
+    expect(item4_macho_read(bytes, 248, 4)).to_equal(5)
+    expect(item4_macho_read(bytes, 256, 4)).to_equal(if arm: 6 else: 4)
+    expect(item4_macho_read(bytes, 260, 4)).to_equal(if arm: 68 else: 42)
+    val pc = if arm: 248 + 16 + 256 else: 248 + 16 + 128
+    expect(item4_macho_read(bytes, pc, 8)).to_equal(0x100004000)
+
+describe "Mach-O freestanding executable construction":
+    # @req ITEM4-REQ-003 ITEM4-REQ-004 ITEM4-REQ-006 ITEM4-REQ-007
+    it "links x86_64 objects into deterministic executable segments and thread state":
+        step("Load actual clang MH_OBJECT entry and provider")
+        val objects = [item4_macho_fixture("start_x64.o"), item4_macho_fixture("provider_x64.o")]
+        step("Execute the production static linker twice")
+        val first = macho_static_link(objects, [], "_start", RelocArch.X86_64).unwrap()
+        val second = macho_static_link(objects, [], "_start", RelocArch.X86_64).unwrap()
+        step("Check MH_EXECUTE, segment protections, thread entry and exact relocation bytes")
+        expect(first).to_equal(second)
+        item4_macho_check_image(first, false)
+        expect(item4_macho_read(first, 0x4001, 4)).to_equal(3)
+        val data_offset = item4_macho_read(first, 216, 8)
+        expect(item4_macho_read(first, data_offset, 8)).to_equal(0x100000000 + data_offset + 8)
+        expect(item4_macho_read(first, data_offset + 8, 8)).to_equal(42)
+
+    # @req ITEM4-REQ-003 ITEM4-REQ-004 ITEM4-REQ-006
+    it "encodes ARM64 branch, page and scaled page-offset relocations":
+        step("Load actual clang ARM64 objects")
+        val objects = [item4_macho_fixture("start_a64.o"), item4_macho_fixture("provider_a64.o")]
+        step("Link to an ARM64 static executable")
+        val image = macho_static_link(objects, [], "_start", RelocArch.AArch64).unwrap()
+        step("Check architecture thread state and independent instruction encodings")
+        item4_macho_check_image(image, true)
+        expect(item4_macho_read(image, 0x4000, 4)).to_equal(0x94000004)
+        expect(item4_macho_read(image, 0x4004, 4)).to_equal(0x90000021)
+        expect(item4_macho_read(image, 0x4008, 4)).to_equal(0xf9400020)
+
+    # @req ITEM4-REQ-003 ITEM4-REQ-007
+    it "extracts a Darwin BSD archive provider and preserves direct-link bytes":
+        step("Use the same provider as a direct object and a real llvm-ar BSD archive")
+        val entry = item4_macho_fixture("start_x64.o")
+        val direct = macho_static_link([entry, item4_macho_fixture("provider_x64.o")], [], "_start", RelocArch.X86_64).unwrap()
+        step("Extract only the needed member through production archive resolution")
+        val archived = macho_static_link([entry], [item4_macho_fixture("provider_x64.a")], "_start", RelocArch.X86_64).unwrap()
+        expect(archived).to_equal(direct)
+
+    # @req ITEM4-REQ-003
+    it "extracts a GNU archive provider for ARM64":
+        step("Link a real GNU-format archive with the ARM64 entry")
+        val linked = macho_static_link([item4_macho_fixture("start_a64.o")],
+            [item4_macho_fixture("provider_a64.a")], "_start", RelocArch.AArch64)
+        expect(linked.is_ok()).to_equal(true)
+
+    # @req ITEM4-REQ-003 ITEM4-REQ-007
+    it "names missing and duplicate strong definitions":
+        step("Omit the needed provider")
+        val entry = item4_macho_fixture("start_x64.o")
+        expect(macho_static_link([entry], [], "_start", RelocArch.X86_64).unwrap_err()).to_contain("undefined symbol _helper")
+        step("Supply the provider twice")
+        val provider = item4_macho_fixture("provider_x64.o")
+        expect(macho_static_link([entry, provider, provider], [], "_start", RelocArch.X86_64).unwrap_err()).to_contain("duplicate symbol _helper")
+
+    # @req ITEM4-REQ-006 ITEM4-REQ-007
+    it "rejects a wrong architecture and a nonobject file type":
+        step("Request ARM64 with a real x86_64 object")
+        val object = item4_macho_fixture("start_x64.o")
+        expect(macho_static_link([object], [], "_start", RelocArch.AArch64).unwrap_err()).to_contain("CPU")
+        step("Mutate only MH_OBJECT to MH_DYLIB")
+        var dylib = object
+        dylib[12] = 6u8
+        expect(macho_static_link([dylib], [], "_start", RelocArch.X86_64).unwrap_err()).to_contain("MH_OBJECT")
+
+    # @req ITEM4-REQ-006 ITEM4-REQ-007
+    it "rejects truncated load commands and archives without an image":
+        step("Truncate an actual object before its complete load-command table")
+        val object = item4_macho_fixture("start_x64.o")
+        val short = object[0:40]
+        expect(macho_static_link([short], [], "_start", RelocArch.X86_64).is_err()).to_equal(true)
+        step("Truncate a BSD archive inside its first member header")
+        val archive = item4_macho_fixture("provider_x64.a")
+        expect(macho_static_link([object], [archive[0:35]], "_start", RelocArch.X86_64).unwrap_err()).to_contain("archive")
