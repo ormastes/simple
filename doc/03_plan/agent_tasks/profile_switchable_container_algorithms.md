@@ -48,6 +48,23 @@ rejection. This repair does not close typed lowering or full P6 instrumentation.
 
 ## Remaining capture implementation sequence
 
+### Parallel continuation and stable landing, 2026-10-03
+
+The independently tested watchdog cancellation repair and Windows admission
+correction landed in [PR #2345](https://github.com/ormastes/simple/pull/2345),
+merge commit `812304cc2d30beffd5acf1a0ee273de54463a82c` on `release/1.0`.
+Actual evidence covers controller loss, ordinary completion, completion races,
+deadline/TERM-grace behavior, and emulated unsupported-Windows admission. This
+does not establish a completed bootstrap or an item 7 verification PASS.
+
+Parallel coding added the caller-owned filter completion API and standalone
+native artifact receipt publication. Their unit tests remain unrun. Source
+review repaired receipt cleanup before ownership, unwanted same-path no-op
+rebuilds, and rejection of budgeted builds with no reported plans. These changes
+remain local; only the tested watchdog repair was pushed and merged. A bounded
+search found no newly qualified runtime in the known Windows/WSL lanes. The
+full item 7 implementation, execution evidence, and release landing remain open.
+
 Progress update, 2026-10-03: the sequence below is now an execution checklist,
 not a claim that all code remains unwritten. The integrated branch contains
 run capture/replay orchestration, interpreter argument transport and canonical

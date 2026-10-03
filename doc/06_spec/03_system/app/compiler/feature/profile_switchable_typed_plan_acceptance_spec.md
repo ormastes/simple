@@ -21,6 +21,16 @@ profile-replay requirement below. Status: authored, NOT RUN.
 
 ## Profile replay and artifact-bound selection scenario
 
+Local implementation update: standalone native builds with an explicit collection
+memory budget now have a `.collection-plan-receipt` publication path. It binds
+current admitted module capsules, report digests, object digests, build request,
+and final artifact bytes. This is linked-input MIR evidence, not proof of runtime
+equivalence, linker retention, or profile-driven selection. Zero-report builds
+are labeled `no-reported-plans`; grouped publication remains unsupported. The
+integrity/ownership unit cases are authored but NOT RUN. The profile scenario
+below still lacks its required profile/site/epoch-to-executed-representation
+evidence and must not be marked passing on the strength of this partial receipt.
+
 The suite entry invokes canonical `stage4_verify_candidate_provenance` once for the exact executable, its `.provenance.env`, and this source tree. It retains accepted candidate, provenance and source hashes under `build/test-artifacts/stage4-source-admission-<pid>.txt`; the scenario rechecks candidate and receipt hashes before workload capture.
 
 The runner needs `sh` on `PATH` (the Git POSIX shell on Windows). If it is absent, admission fails MissingEvidence before compilation.
