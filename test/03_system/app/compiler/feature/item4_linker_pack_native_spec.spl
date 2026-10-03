@@ -1,0 +1,76 @@
+"""ITEM4-REQ-010 real native pack generation test. UNRUN.
+
+Prerequisite: compile linker_pack_entry.spl to build/providers/item4-linker.so
+with the admitted native-build --emit-shared path. An absent artifact FAILS;
+this spec never substitutes a callback or a mock address for native loading.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_exists}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty}
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.common.kernel_plugin.schema_header.{KpfSchemaHeaderV1, KpfSchemaRequirementV1}
+use std.common.linker.link_request_v1.{LinkRequestV1}
+use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1, LinkExecutionModeV1}
+use std.common.linker.link_receipt_v1.{LinkReceiptV1, LinkOutcomeV1, LinkAccountingClassV1}
+use compiler.backend.linker.link_engine_external.{native_host_link_target, link_request_to_native}
+use compiler.backend.linker.linker_pack.{LinkerPackConfigV1}
+use compiler.backend.linker.linker_pack_wire.{linker_pack_policy_digest}
+use compiler.backend.linker.linker_lifecycle.{LinkerLifecycleV1, LinkerProviderV1}
+use os.smf.provider_loader.{ProviderAdmissionRequestV1}
+
+fn item4_pack_native_header() -> KpfSchemaHeaderV1:
+    KpfSchemaHeaderV1(abi_version: 1, struct_size: 72, schema_id: KpfId128(hi: 1, lo: 3),
+        schema_major: 1, schema_minor: 0, schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0), reserved0: 0)
+
+fn item4_pack_native_requirement() -> KpfSchemaRequirementV1:
+    KpfSchemaRequirementV1(schema_id: KpfId128(hi: 1, lo: 3), schema_major: 1, minimum_minor: 0,
+        minimum_struct_size: 72, schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0))
+
+describe "Real loaded linker pack generations":
+    it "keeps old native calls alive across replacement and unloads only after release":
+        step("Require the built native provider artifact and bind its actual digest")
+        val path = "build/providers/item4-linker.so"
+        expect(file_exists(path)).to_be(true)
+        if not file_exists(path): return
+        val digest = file_hash_sha256_or_empty(path)
+        expect(digest.len()).to_equal(64)
+        if digest.len() != 64: return
+        val header = item4_pack_native_header()
+        val requirement = item4_pack_native_requirement()
+        val policy = LinkExecutionPolicyV1(header: header, mode: LinkExecutionModeV1.Fast,
+            job_memory_limit_bytes: 0, scratch_limit_bytes: 0, max_workers: 1, allowed_placements: 1, enforcement_requirement: 0)
+        var target = native_host_link_target()
+        target.arch = 999
+        val request = LinkRequestV1(header: header, target: target, inputs_manifest_digest: header.schema_digest,
+            output_contract: 1, semantic_profile_digest: header.schema_digest, runtime_sysroot_digest: header.schema_digest,
+            required_features: 0, layout_handle: 0, debug_handle: 0, reproducibility: 1)
+        val recovery = LinkerProviderV1(header: header, provider_id: KpfId128(hi: 4, lo: 1),
+            composition_digest: header.schema_digest, engine_id: "none", invoke: link_request_to_native)
+        var registry = LinkerLifecycleV1.create(3, 3, requirement, recovery).unwrap()
+        val config = LinkerPackConfigV1(header: header, provider_id: KpfId128(hi: 4, lo: 2),
+            composition_digest: header.schema_digest, engine_id: "none",
+            loader: ProviderAdmissionRequestV1(artifact_path: path, artifact_kind: "native", expected_artifact_digest: digest,
+                granted_capability_bits: 0, required_capability_bits: 0, host_abi: 1, minimum_host_abi: 1, maximum_host_abi: 1,
+                requested_interface_major: 1, requested_interface_minor: 0, provided_interface_major: 1, provided_interface_minor: 0),
+            interface_abi_digest: "f0d207492d516366fbc3a6e609a971f7812d1c17ac833a104d8f8d05ef0e3684",
+            request_requirement: requirement, policy_requirement: requirement, receipt_requirement: requirement,
+            host: native_host_link_target(), policy_digest: linker_pack_policy_digest(policy).unwrap())
+        val first_generation = registry.publish_pack(config).unwrap()
+        val old = registry.open().unwrap()
+        step("Replace the loaded generation and prove its pinned predecessor is still callable")
+        val second_generation = registry.publish_pack(config).unwrap()
+        val current = registry.open().unwrap()
+        val result = registry.run(old, request, policy, ["not-read.o"], "not-written").unwrap()
+        expect(result.outcome).to_equal(LinkOutcomeV1.UnsupportedFeature)
+        expect(result.accounting_class).to_equal(LinkAccountingClassV1.NotCertified)
+        expect(registry.collect(first_generation).unwrap_err()).to_contain("still pinned")
+        expect(registry.close(old).unwrap()).to_be(true)
+        expect(registry.collect(first_generation).unwrap()).to_be(true)
+        expect(registry.run(old, request, policy, ["not-read.o"], "not-written").is_err()).to_be(true)
+        step("Static recovery and the replacement remain independent of the unloaded mapping")
+        expect(registry.run(current, request, policy, ["not-read.o"], "not-written").unwrap().outcome).to_equal(LinkOutcomeV1.UnsupportedFeature)
+        expect(registry.run_recovery(request, policy, ["not-read.o"], "not-written").unwrap().outcome).to_equal(LinkOutcomeV1.UnsupportedFeature)
+        expect(registry.close(current).unwrap()).to_be(true)
+        expect(registry.recover().is_ok()).to_be(true)
+        expect(registry.collect(second_generation).unwrap()).to_be(true)

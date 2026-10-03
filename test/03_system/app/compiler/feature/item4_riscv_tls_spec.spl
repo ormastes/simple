@@ -1,0 +1,132 @@
+"""ITEM4-REQ-004/005/006: local-exec TLS image construction and symbol ABI.
+
+Runtime UNRUN. Clang/LLD fixtures establish byte expectations; no thread,
+loader, dynamic TLS, or application execution is claimed by image inspection.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf_parser.{elf_parse_object, elf_section_name}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn item4_riscv_tls_fixture(path: text) -> [i64]:
+    val raw = file_read_bytes("test/fixtures/linker/" + path)
+    expect(raw.len()).to_be_greater_than(64)
+    var bytes: [i64] = []
+    for byte in raw: bytes.push(byte as i64)
+    bytes
+
+fn item4_riscv_tls_read(bytes: [i64], offset: i64, width: i64) -> i64:
+    val valid = offset >= 0 and offset <= bytes.len() and width > 0 and width <= 8 and width <= bytes.len() - offset
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    var value: i64 = 0
+    var i: i64 = 0
+    while i < width:
+        value = value | (bytes[offset + i] << (i * 8))
+        i = i + 1
+    value
+
+fn item4_riscv_tls_section(image: [i64], name: text) -> [i64]:
+    val parsed = elf_parse_object(image)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return [-1, 0]
+    var index: i64 = 0
+    for section in parsed.unwrap().sections:
+        if elf_section_name(parsed.unwrap(), index) == name:
+            return [section.sh_addr, section.sh_size]
+        index = index + 1
+    expect(false).to_equal(true)
+    [-1, 0]
+
+fn item4_riscv_tls_symbol(image: [i64], name: text) -> [i64]:
+    val parsed = elf_parse_object(image)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return [-1, -1, -1]
+    var found: i64 = 0
+    var result: [i64] = [-1, -1, -1]
+    for symbol in parsed.unwrap().symbols:
+        if symbol.name == name:
+            found = found + 1
+            result = [symbol.st_value, symbol.st_info, symbol.st_other]
+    expect(found).to_equal(1)
+    result
+
+describe "RV64 static local-exec TLS":
+    it "emits TP-relative instructions and a precise TLS initialization image":
+        # @req ITEM4-REQ-004 ITEM4-REQ-005 ITEM4-REQ-006
+        step("Load a real RV64 local-exec object spanning initialized and zero TLS storage")
+        val object = item4_riscv_tls_fixture("riscv64/tls_local_exec.o")
+        step("Link through the ordinary static ELF driver")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        val text_section = item4_riscv_tls_section(image, ".text")
+        if text_section[0] < 0: return
+        step("Compare the LUI ADD load/store encodings with the independent LLD oracle")
+        expect(item4_riscv_tls_read(image, text_section[0], 4)).to_equal(0x000017b7)
+        expect(item4_riscv_tls_read(image, text_section[0] + 4, 4)).to_equal(0x004787b3)
+        expect(item4_riscv_tls_read(image, text_section[0] + 8, 4)).to_equal(0x0007a503)
+        expect(item4_riscv_tls_read(image, text_section[0] + 12, 4)).to_equal(0x00a7a823)
+        expect(item4_riscv_tls_symbol(image, "tls_value")[0]).to_equal(4096)
+        expect(item4_riscv_tls_symbol(image, "tls_zero")[0]).to_equal(4112)
+        val parsed = elf_parse_object(image).unwrap()
+        expect(parsed.header.e_phnum).to_be_less_than(64)
+        if parsed.header.e_phnum >= 64: return
+        var count: i64 = 0
+        var index: i64 = 0
+        step("Inspect PT_TLS file extent, memory extent, alignment and initializer")
+        while index < parsed.header.e_phnum:
+            val header = parsed.header.e_phoff + index * 56
+            if item4_riscv_tls_read(image, header, 4) == 7:
+                count = count + 1
+                expect(item4_riscv_tls_read(image, header + 32, 8)).to_equal(4100)
+                expect(item4_riscv_tls_read(image, header + 40, 8)).to_equal(4116)
+                expect(item4_riscv_tls_read(image, header + 48, 8)).to_equal(16)
+                val file_offset = item4_riscv_tls_read(image, header + 8, 8)
+                expect(item4_riscv_tls_read(image, file_offset + 4096, 4)).to_equal(42)
+            index = index + 1
+        expect(count).to_equal(1)
+
+    it "rejects an invalid instruction carrying the TPREL_ADD annotation":
+        # @req ITEM4-REQ-004
+        step("Change only the ADD instruction opcode in the real TLS fixture")
+        var object = item4_riscv_tls_fixture("riscv64/tls_local_exec.o")
+        val section = item4_riscv_tls_section(object, ".text")
+        val valid = section[0] >= 0 and section[0] <= object.len() and 8 <= object.len() - section[0]
+        expect(valid).to_equal(true)
+        if not valid: return
+        expect(item4_riscv_tls_read(object, section[0] + 4, 4)).to_equal(0x004787b3)
+        if item4_riscv_tls_read(object, section[0] + 4, 4) != 0x004787b3: return
+        object[section[0] + 4] = 0x13
+        step("Link the malformed annotation through the real relocation pipeline")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        step("Require a named TPREL_ADD instruction rejection")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("TPREL_ADD requires ADD with tp")
+
+describe "ELF TLS symbol values across targets":
+    it "emits local hidden and global TLS offsets for x86_64 and AArch64":
+        # @req ITEM4-REQ-005 ITEM4-REQ-006
+        step("Load clang local-exec C objects with three distinct TLS symbol bindings")
+        for target in [RelocArch.X86_64, RelocArch.AArch64]:
+            val path = if target == RelocArch.X86_64: "elf/tls_symbol_offsets_x64.o" else: "elf/tls_symbol_offsets_a64.o"
+            val object = item4_riscv_tls_fixture(path)
+            step("Link each target through its production ELF relocation path")
+            val linked = elf_static_link([object], [], "_start", target)
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_err(): return
+            step("Require TLS-block offsets instead of image virtual addresses")
+            val global = item4_riscv_tls_symbol(linked.unwrap(), "global_tls")
+            val local = item4_riscv_tls_symbol(linked.unwrap(), "local_tls")
+            val hidden = item4_riscv_tls_symbol(linked.unwrap(), "hidden_tls")
+            expect(global[0]).to_equal(0)
+            expect(hidden[0]).to_equal(8)
+            expect(local[0]).to_equal(16)
+            expect(global[1]).to_equal(0x16)
+            expect(local[1]).to_equal(6)
+            expect(hidden[1]).to_equal(6)
+            expect(hidden[2] & 3).to_equal(2)

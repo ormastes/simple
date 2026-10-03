@@ -1,0 +1,28 @@
+"""Provider-side linker command: checked arena -> real native adapter -> receipt."""
+use std.nogc_sync_mut.composition.provider_contract.{SIMPLE_CLI_RUN}
+use std.nogc_sync_mut.composition.cli_command_wire.{encode_cli_command_result_v1}
+use std.nogc_sync_mut.composition.cli_provider_wire.{CliCommandResultArenaV1, decode_cli_command_request_v1}
+use compiler.backend.linker.linker_pack_wire.{linker_pack_decode_job, linker_pack_encode_receipt, linker_pack_policy_digest}
+use compiler.backend.linker.link_engine_external.{link_request_to_native}
+
+pub fn linker_pack_command(arena: [u8]) -> CliCommandResultArenaV1:
+    if arena.len() > 1048576: return encode_cli_command_result_v1(1, "", "linker command arena too large")
+    val request = decode_cli_command_request_v1(arena)
+    if not request.ok: return encode_cli_command_result_v1(1, "", request.diagnostic)
+    if request.command != "linker-v1" or request.operation != SIMPLE_CLI_RUN:
+        return encode_cli_command_result_v1(1, "", "unknown linker command or operation")
+    # Reserve the complete response before invoking an operation with effects.
+    if request.output_capacity < 8192:
+        return encode_cli_command_result_v1(1, "", "linker response capacity too small")
+    val decoded = linker_pack_decode_job(request.args)
+    if decoded.is_err(): return encode_cli_command_result_v1(1, "", decoded.unwrap_err())
+    val job = decoded.unwrap()
+    val policy_digest = linker_pack_policy_digest(job.policy)
+    if policy_digest.is_err(): return encode_cli_command_result_v1(1, "", policy_digest.unwrap_err())
+    var receipt = link_request_to_native(job.request, job.policy, job.inputs, job.output)
+    receipt.policy_digest = policy_digest.unwrap()
+    val encoded = linker_pack_encode_receipt(receipt)
+    if encoded.is_err(): return encode_cli_command_result_v1(1, "", encoded.unwrap_err())
+    encode_cli_command_result_v1(0, encoded.unwrap(), "")
+
+export linker_pack_command

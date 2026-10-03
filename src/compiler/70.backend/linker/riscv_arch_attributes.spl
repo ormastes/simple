@@ -1,0 +1,145 @@
+"""Canonical versioned RISC-V ISA attribute union for the admitted ISA set.
+
+Unknown extensions reject explicitly: silently unioning unknown requirements
+cannot establish conflict or dependency compatibility. ISA-catalog expansion
+is a separate admission change, not a dropped attribute.
+"""
+struct RiscvIsaAttributes:
+    names: [text]
+    versions: {text: i64}
+
+fn riscv_isa_rank(name: text) -> i64:
+    val order = "iemafdqlcbkjtpvnh"
+    var letter = name.substring(0, 1)
+    var group: i64 = 0
+    if name.starts_with("z"):
+        group = 100
+        letter = name.substring(1, 2)
+    elif name.starts_with("s"): return 200
+    elif name.starts_with("x"): return 300
+    var i: i64 = 0
+    while i < order.len():
+        if order.substring(i, i + 1) == letter: return group + i
+        i = i + 1
+    group + 50
+
+fn riscv_isa_admitted(name: text) -> bool:
+    ["i", "m", "a", "f", "d", "c", "zicsr", "zifencei", "zmmul",
+        "zaamo", "zalrsc", "zca", "zcd", "zcf", "zcb", "zcmp", "zcmt",
+        "zfinx", "zdinx", "zhinx", "zhinxmin", "zfh", "zfhmin", "ztso"].contains(name)
+
+fn riscv_isa_ratified(name: text, version: i64) -> bool:
+    if name == "i": return version == 131072 or version == 131073
+    if name == "a": return version == 131072 or version == 131073
+    if name == "f" or name == "d": return version == 131072 or version == 131074
+    if name == "m" or name == "c" or name == "zicsr" or name == "zifencei": return version == 131072
+    return version == 65536
+
+fn riscv_isa_parse(arch: text) -> Result<RiscvIsaAttributes, text>:
+    if not arch.starts_with("rv64i"):
+        return Err("RISC-V attributes require a normalized rv64i architecture")
+    var names: [text] = []
+    var versions: {text: i64} = {}
+    for token in arch.substring(4, arch.len()).split("_"):
+        var p: i64 = -1
+        var i: i64 = 0
+        while i < token.len():
+            if token.substring(i, i + 1) == "p": p = i
+            i = i + 1
+        if p <= 1 or p + 1 >= token.len(): return Err("RISC-V ISA extension requires explicit major/minor version: {token}")
+        var start = p
+        while start > 0:
+            val ch = token.substring(start - 1, start)
+            if ch < "0" or ch > "9": break
+            start = start - 1
+        if start == p or start == 0: return Err("RISC-V ISA extension version is malformed: {token}")
+        val name = token.substring(0, start)
+        if not riscv_isa_admitted(name): return Err("unsupported RISC-V ISA extension metadata: {name}")
+        var major: i64 = 0
+        i = start
+        while i < p:
+            major = major * 10 + (token.bytes()[i] as i64) - 48
+            if major > 65535: return Err("RISC-V ISA major version exceeds supported representation")
+            i = i + 1
+        var minor: i64 = 0
+        i = p + 1
+        while i < token.len():
+            val digit = (token.bytes()[i] as i64) - 48
+            if digit < 0 or digit > 9: return Err("RISC-V ISA minor version is malformed")
+            minor = minor * 10 + digit
+            if minor > 65535: return Err("RISC-V ISA minor version exceeds supported representation")
+            i = i + 1
+        if versions.has(name): return Err("duplicate RISC-V ISA extension {name}")
+        names.push(name)
+        versions[name] = major * 65536 + minor
+    if names.len() == 0 or names[0] != "i": return Err("RISC-V ISA base extension is missing")
+    Ok(RiscvIsaAttributes(names: names, versions: versions))
+
+fn riscv_isa_merge(architectures: [text]) -> Result<text, text>:
+    var names: [text] = []
+    var versions: {text: i64} = {}
+    for arch in architectures:
+        if arch == "": continue
+        val parsed = riscv_isa_parse(arch)?
+        for name in parsed.names:
+            val version = parsed.versions[name]
+            if not versions.has(name):
+                names.push(name)
+                versions[name] = version
+            elif versions[name] != version:
+                if not riscv_isa_ratified(name, version) or not riscv_isa_ratified(name, versions[name]):
+                    return Err("incompatible or unratified RISC-V ISA versions for {name}")
+                if version > versions[name]: versions[name] = version
+    if names.len() == 0: return Ok("")
+    # Dependencies whose canonical expansion is required by this catalog.
+    for pair in [["m", "zmmul"], ["a", "zaamo"], ["a", "zalrsc"],
+            ["c", "zca"], ["zcb", "zca"], ["zcd", "zca"], ["zcmp", "zca"], ["zcmt", "zca"],
+            ["zdinx", "zfinx"], ["zhinx", "zhinxmin"], ["zfh", "zfhmin"]]:
+        if versions.has(pair[0]) and not versions.has(pair[1]):
+            names.push(pair[1])
+            versions[pair[1]] = 65536
+    if versions.has("zcd") and not versions.has("d"):
+        names.push("d")
+        versions["d"] = 131074
+    if versions.has("d") and not versions.has("f"):
+        names.push("f")
+        versions["f"] = 131074
+    if (versions.has("zfh") or versions.has("zfhmin")) and not versions.has("f"):
+        names.push("f")
+        versions["f"] = 131074
+    if versions.has("zhinxmin") and not versions.has("zfinx"):
+        names.push("zfinx")
+        versions["zfinx"] = 65536
+    if (versions.has("f") or versions.has("zfinx") or versions.has("zcmt")) and not versions.has("zicsr"):
+        names.push("zicsr")
+        versions["zicsr"] = 131072
+    if versions.has("c") and versions.has("d") and not versions.has("zcd"):
+        names.push("zcd")
+        versions["zcd"] = 65536
+    if versions.has("f") and versions.has("zfinx"):
+        return Err("conflicting RISC-V ISA extensions f and zfinx")
+    if versions.has("zcf"): return Err("RISC-V zcf is incompatible with RV64")
+    if versions.has("zcd") and (versions.has("zcmp") or versions.has("zcmt")):
+        return Err("conflicting RISC-V compressed ISA extensions")
+    # Small finite admitted catalog; insertion sort gives stable canonical order.
+    var i: i64 = 1
+    while i < names.len():
+        var j = i
+        while j > 0:
+            val left = names[j - 1]
+            val right = names[j]
+            val swap = riscv_isa_rank(left) > riscv_isa_rank(right) or
+                (riscv_isa_rank(left) == riscv_isa_rank(right) and left > right)
+            if not swap: break
+            names[j - 1] = right
+            names[j] = left
+            j = j - 1
+        i = i + 1
+    var result = "rv64"
+    for name in names:
+        if name != "i": result = result + "_"
+        val version = versions[name]
+        result = result + "{name}{version / 65536}p{version % 65536}"
+    Ok(result)
+
+export riscv_isa_merge

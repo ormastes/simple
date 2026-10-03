@@ -1,0 +1,52 @@
+"""Native pack ABI entry; all raw access goes through the existing memory owner.
+
+Build as a shared provider exporting both C entrypoints. The registered command
+executes the real native request adapter; no canned successful result is emitted.
+"""
+use std.nogc_sync_mut.io.volatile_ops.{volatile_read_u8, volatile_write_u8}
+use os.smf.provider_query_wire.{decode_provider_query_request_v1, encode_provider_query_result_v1}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT, simple_provider_query_error_v1
+}
+use compiler.backend.linker.linker_pack_command.{linker_pack_command}
+use compiler.backend.linker.linker_pack_query.{LINKER_PACK_INTERFACE, LINKER_PACK_CONTEXT, linker_pack_query_result}
+
+@unsafe(reason: "copies a caller-owned checked ABI buffer", capabilities: [ffi, raw_ptr])
+fn _pack_read(address: i64, length: i64) -> [u8]:
+    var bytes: [u8] = []
+    for offset in 0..length: bytes.push(volatile_read_u8(address + offset) as u8)
+    bytes
+
+@unsafe(reason: "writes into the caller-reserved ABI output buffer", capabilities: [ffi, raw_ptr])
+fn _pack_write(address: i64, bytes: [u8]):
+    for offset in 0..bytes.len(): volatile_write_u8(address + offset, bytes[offset] as i64)
+
+@export("C")
+@unsafe(reason: "provider query accepts host-owned native buffers", capabilities: [ffi, raw_ptr])
+pub fn simple_provider_query_v1(request_address: i64, result_address: i64) -> i32:
+    if request_address <= 0 or result_address <= 0 or
+            request_address > 9223372036854775807 - 44 or result_address > 9223372036854775807 - 84:
+        return SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT
+    val decoded = decode_provider_query_request_v1(_pack_read(request_address, 44))
+    var result = simple_provider_query_error_v1(SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT)
+    if decoded.ok: result = linker_pack_query_result(decoded.value)
+    val encoded = encode_provider_query_result_v1(result)
+    if not encoded.ok: return SIMPLE_PROVIDER_DESCRIPTOR_TOO_SHORT
+    _pack_write(result_address, encoded.bytes)
+    result.status
+
+@export("C")
+@unsafe(reason: "provider invocation accepts bounded host-owned native arenas", capabilities: [ffi, raw_ptr])
+pub fn simple_cli_command_invoke_v1(interface_handle: i64, provider_context: i64,
+        request_address: i64, request_length: i64, result_address: i64, result_capacity: i64) -> i32:
+    if interface_handle != LINKER_PACK_INTERFACE as i64 or provider_context != LINKER_PACK_CONTEXT as i64 or
+            request_address <= 0 or result_address <= 0 or request_length < 28 or request_length > 1048576 or
+            result_capacity < 8192 or result_capacity > 1048576 or
+            request_address > 9223372036854775807 - request_length or result_address > 9223372036854775807 - result_capacity:
+        return 1
+    val result = linker_pack_command(_pack_read(request_address, request_length))
+    if not result.ok or result.bytes.len() > result_capacity: return 1
+    _pack_write(result_address, result.bytes)
+    0
+
+export simple_provider_query_v1, simple_cli_command_invoke_v1
