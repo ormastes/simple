@@ -1,0 +1,154 @@
+# Real immutable page files and manifest CAS. No performance or crash-injection
+# receipt is implied by source presence; execute on an admitted runtime.
+use std.spec.*
+use app.io.mod.{cwd, dir_create, file_write, file_read, file_write_bytes, file_exists, process_run_bounded}
+use app.io.env_ops.{host_os}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release, scv_sj_lease_is_held}
+use std.scv.db_pages.*
+use app.scv.db.local_store.{db_store_read}
+use app.scv.db.page_store.*
+
+fn setup_item2_page_root() -> text:
+    val nonce = random_hex(8) ?? ""
+    expect(nonce.len()).to_equal(16)
+    val path = "{cwd()}/build/test-artifacts/item2-pages-{nonce}"
+    expect(dir_create(path, true)).to_equal(true)
+    path_absolute(path)
+
+fn setup_item2_page_quota() -> DbPageQuota:
+    DbPageQuota(max_page_bytes: 16384u64, max_page_records: 1000u64, max_records: 10000u64)
+
+fn setup_item2_page_other_key(first: text) -> text:
+    val bucket = db_pages_bucket(first).unwrap()
+    for index in 0..100:
+        val key = "other-{index}"
+        if db_pages_bucket(key).unwrap() != bucket: return key
+    fail("Fixture could not obtain distinct page buckets")
+    ""
+
+fn setup_item2_page_build() -> DbPageBuild:
+    val first = DbPageRecord(key: "row-a", kind: DbPageKind.Row, payload: [1u8, 2u8])
+    val second = DbPageRecord(key: setup_item2_page_other_key(first.key), kind: DbPageKind.Row, payload: [3u8, 4u8])
+    db_pages_build([first, second], setup_item2_page_quota()).unwrap()
+
+fn check_item2_page_payload(value: Result<Option<DbPageRecord>, text>) -> [u8]:
+    match value:
+        Ok(record):
+            if val actual = record: return actual.payload
+            fail("Expected a retained page record")
+            []
+        Err(reason):
+            fail(reason)
+            []
+
+if host_os() != "windows":
+    describe "immutable page CAS with atomic small manifests":
+        it "publishes all page objects before one reopened complete manifest":
+            val root = setup_item2_page_root()
+            val build = setup_item2_page_build()
+            expect(db_page_store_open(root)).to_equal(Err("SCVDB_PAGE_MANIFEST_MISSING"))
+            val stored = db_page_store_commit(root, "", build).unwrap()
+            expect(stored.manifest.root).to_equal(build.manifest.root)
+            expect(db_store_read(root, "pages").transaction_id).to_equal(build.manifest.root)
+            expect(db_store_read(root).code).to_equal("empty")
+            for entry in stored.manifest.entries:
+                expect(file_exists("{root}/.scv/db-pages/pages/{entry.digest}.scvp")).to_equal(true)
+            expect(check_item2_page_payload(db_page_store_lookup(root, stored, "row-a"))).to_equal([1u8, 2u8])
+            expect(db_page_store_open(root).unwrap().head).to_equal(stored.head)
+            expect(db_page_store_commit(root, "", build).unwrap().head).to_equal(stored.head)
+            expect(db_page_store_commit(root, stored.head, DbPageBuild(manifest: stored.manifest, pages: [])).unwrap().head).to_equal(stored.head)
+
+        it "loads only selected page bytes and detects corruption when that page is queried":
+            val root = setup_item2_page_root()
+            val build = setup_item2_page_build()
+            val stored = db_page_store_commit(root, "", build).unwrap()
+            val other_key = setup_item2_page_other_key("row-a")
+            val entry = db_pages_entry(stored.manifest, other_key).unwrap()
+            if val other = entry:
+                expect(file_write_bytes("{root}/.scv/db-pages/pages/{other.digest}.scvp", [9u8])).to_equal(true)
+            else:
+                fail("Missing second page in fixture")
+            expect(check_item2_page_payload(db_page_store_lookup(root, stored, "row-a"))).to_equal([1u8, 2u8])
+            expect(db_page_store_lookup(root, stored, other_key)).to_equal(Err("SCVDB_PAGE_CORRUPT"))
+
+        it "updates only affected pages while retaining the previous snapshot":
+            val root = setup_item2_page_root()
+            val first = db_page_store_commit(root, "", setup_item2_page_build()).unwrap()
+            val updates = [DbPageRecord(key: "row-a", kind: DbPageKind.Row, payload: [7u8, 8u8])]
+            val loaded = db_page_store_load_affected(root, first, updates).unwrap()
+            expect(loaded.len()).to_equal(1)
+            val next = db_pages_update(first.manifest, loaded, updates).unwrap()
+            expect(next.pages.len()).to_equal(1)
+            val second = db_page_store_commit(root, first.head, next).unwrap()
+            expect(check_item2_page_payload(db_page_store_lookup(root, second, "row-a"))).to_equal([7u8, 8u8])
+            expect(check_item2_page_payload(db_page_store_lookup(root, first, "row-a"))).to_equal([1u8, 2u8])
+            val other_key = setup_item2_page_other_key("row-a")
+            expect(db_pages_entry(second.manifest, other_key)).to_equal(db_pages_entry(first.manifest, other_key))
+
+        it "rejects stale manifest CAS without exposing a partial replacement":
+            val root = setup_item2_page_root()
+            val first = db_page_store_commit(root, "", setup_item2_page_build()).unwrap()
+            val update_a = [DbPageRecord(key: "row-a", kind: DbPageKind.Row, payload: [5u8])]
+            val update_b = [DbPageRecord(key: "row-a", kind: DbPageKind.Row, payload: [6u8])]
+            val pages = db_page_store_load_affected(root, first, update_a).unwrap()
+            val winner = db_pages_update(first.manifest, pages, update_a).unwrap()
+            val stale = db_pages_update(first.manifest, pages, update_b).unwrap()
+            val accepted = db_page_store_commit(root, first.head, winner).unwrap()
+            expect(db_page_store_commit(root, first.head, stale)).to_equal(Err("SCVDB_STORE_HEAD_ADVANCED"))
+            expect(db_page_store_open(root).unwrap().head).to_equal(accepted.head)
+            expect(check_item2_page_payload(db_page_store_lookup(root, accepted, "row-a"))).to_equal([5u8])
+
+        it "rejects descriptor closure gaps forged digests and extra replacement pages":
+            val root = setup_item2_page_root()
+            val original = setup_item2_page_build()
+            var missing = original
+            missing.pages = []
+            expect(db_page_store_commit(root, "", missing)).to_equal(Err("SCVDB_PAGE_REFERENCE_CLOSURE"))
+            var forged = original
+            var page = forged.pages[0]
+            page.digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            forged.pages[0] = page
+            expect(db_page_store_commit(root, "", forged)).to_equal(Err("SCVDB_PAGE_CORRUPT"))
+            val empty = db_pages_build([], setup_item2_page_quota()).unwrap()
+            var extra = empty
+            extra.pages = original.pages
+            expect(db_page_store_commit(root, "", extra)).to_equal(Err("SCVDB_PAGE_UNREFERENCED_REPLACEMENT"))
+            expect(db_store_read(root, "pages").code).to_equal("empty")
+
+        it "respects the same repository SJ lease and preserves the other holder":
+            val root = setup_item2_page_root()
+            expect(scv_sj_lease_acquire(root, "other-writer").starts_with("ok:")).to_equal(true)
+            expect(db_page_store_commit(root, "", setup_item2_page_build())).to_equal(Err("SCVDB_STORE_BUSY"))
+            expect(scv_sj_lease_is_held(root)).to_equal(true)
+            expect(scv_sj_lease_release(root, "other-writer").starts_with("ok:")).to_equal(true)
+            expect(db_store_read(root, "pages").code).to_equal("empty")
+
+        it "rejects a caller-built candidate that drops an admitted retained bucket":
+            val root = setup_item2_page_root()
+            val first = db_page_store_commit(root, "", setup_item2_page_build()).unwrap()
+            val dropped = db_pages_build([DbPageRecord(key: "row-a", kind: DbPageKind.Row, payload: [1u8, 2u8])], setup_item2_page_quota()).unwrap()
+            expect(db_page_store_commit(root, first.head, dropped)).to_equal(Err("SCVDB_PAGE_RETAINED_STATE_CHANGED"))
+            expect(db_page_store_open(root).unwrap().head).to_equal(first.head)
+
+        it "rejects page-directory aliases before writing outside the repository":
+            val root = setup_item2_page_root()
+            val outside = setup_item2_page_root()
+            expect(file_write(outside + "/sentinel", "preserve")).to_equal(true)
+            expect(dir_create(root + "/.scv/db-pages", true)).to_equal(true)
+            val (_out, _err, code) = process_run_bounded("ln", ["-s", outside, root + "/.scv/db-pages/pages"], 1000, 1024)
+            expect(code).to_equal(0)
+            expect(db_page_store_commit(root, "", setup_item2_page_build())).to_equal(Err("SCVDB_STORE_SCOPE"))
+            expect(file_read(outside + "/sentinel")).to_equal("preserve")
+            expect(file_exists(root + "/.scv/db-pages/HEAD")).to_equal(false)
+
+        it "never overwrites an existing corrupt page with a matching filename":
+            val root = setup_item2_page_root()
+            val build = setup_item2_page_build()
+            expect(dir_create(root + "/.scv/db-pages/pages", true)).to_equal(true)
+            val path = "{root}/.scv/db-pages/pages/{build.pages[0].digest}.scvp"
+            expect(file_write_bytes(path, [99u8])).to_equal(true)
+            expect(db_page_store_commit(root, "", build)).to_equal(Err("SCVDB_PAGE_CORRUPT"))
+            expect(file_exists(root + "/.scv/db-pages/HEAD")).to_equal(false)
+            expect(scv_sj_lease_is_held(root)).to_equal(false)

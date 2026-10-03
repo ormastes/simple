@@ -1,0 +1,256 @@
+# Immutable page CAS and small-manifest publication under the root SJ boundary.
+# Unchanged page bytes are not reread during an affected-page commit. Each page
+# is hash-verified on lookup; manifest admission verifies new descriptor closure.
+use app.io.mod.{dir_create, dir_remove_all, file_write_bytes, file_read_regular_no_follow_bounded_bytes, file_is_regular_no_follow, file_fsync, directory_fsync}
+use app.io.file_ops.{secure_temp_dir, file_publish_noreplace}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_holder, scv_sj_lease_release, scv_sj_lease_is_held}
+use app.scv.db.local_store.{db_store_read, db_store_commit, db_local_path_scope}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_pages.{DbPageRecord, DbRecordPage, DbPageEntry, DbPageManifest, DbPageBuild, db_page_encode, db_page_decode, db_pages_manifest_encode, db_pages_manifest_decode, db_pages_manifest_validate, db_pages_entry, db_pages_lookup, db_pages_required_buckets, db_pages_update}
+
+struct DbStoredPages:
+    head: text
+    manifest: DbPageManifest
+
+struct _DbEncodedPage:
+    digest: text
+    bytes: [u8]
+
+struct _DbLoadedPage:
+    page: DbRecordPage
+    byte_count: i64
+
+fn _db_page_digest_valid(digest: text) -> bool:
+    if digest.len() != 64: return false
+    for index in 0..digest.len():
+        val code = digest.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+    true
+
+fn _db_page_scope(root: text) -> Result<bool, text>:
+    val scope = db_local_path_scope(root, [".sj", ".scv", ".scv/db-pages", ".scv/db-pages/pages"])
+    if scope != "": return Err(scope)
+    Ok(true)
+
+fn _db_page_path(root: text, digest: text) -> Result<text, text>:
+    if not _db_page_digest_valid(digest): return Err("SCVDB_PAGE_DIGEST")
+    Ok("{root}/.scv/db-pages/pages/{digest}.scvp")
+
+fn _db_page_read_bytes(path: text, limit: i64 = 16777216) -> Result<[u8], text>:
+    if limit <= 0 or limit > 16777216: return Err("SCVDB_PAGE_BYTES_QUOTA")
+    if not file_is_regular_no_follow(path) or path_absolute(path) != path:
+        return Err("SCVDB_PAGE_FILE_SCOPE")
+    file_read_regular_no_follow_bounded_bytes(path, limit)
+
+fn _db_page_stage_publish(stage: text, destination: text, bytes: [u8]) -> Result<bool, text>:
+    if bytes.len() > 16777216: return Err("SCVDB_PAGE_BYTES_QUOTA")
+    val path = stage + "/payload"
+    if not file_write_bytes(path, bytes): return Err("SCVDB_PAGE_WRITE")
+    if not file_fsync(path) or not directory_fsync(stage): return Err("SCVDB_PAGE_SYNC")
+    if _db_page_read_bytes(path)? != bytes: return Err("SCVDB_PAGE_CORRUPT")
+    file_publish_noreplace(path, destination)?
+    # A preexisting name is accepted only if its complete bytes agree; never
+    # overwrite a corrupt immutable object to turn corruption into success.
+    if _db_page_read_bytes(destination)? != bytes: return Err("SCVDB_PAGE_CORRUPT")
+    if not file_fsync(destination): return Err("SCVDB_PAGE_SYNC")
+    Ok(true)
+
+fn _db_page_publish_bytes(root: text, digest: text, bytes: [u8]) -> Result<bool, text>:
+    val destination = _db_page_path(root, digest)?
+    val pages = root + "/.scv/db-pages/pages"
+    val stage = secure_temp_dir(pages, "page-")?
+    if path_absolute(stage) != stage or not dir_is_real_no_follow(stage) or not stage.starts_with(pages + "/page-"):
+        return Err("SCVDB_PAGE_STAGE_SCOPE")
+    val result = _db_page_stage_publish(stage, destination, bytes)
+    if path_absolute(stage) != stage or not dir_remove_all(stage):
+        return Err("SCVDB_PAGE_CLEANUP")
+    result
+
+fn _db_page_manifest_text(manifest: DbPageManifest) -> Result<text, text>:
+    db_pages_manifest_validate(manifest)?
+    val bytes = db_pages_manifest_encode(manifest)?
+    # Hex is a portable text envelope for the existing atomic generation owner.
+    # Bound encoded storage, not only the smaller binary manifest representation.
+    if bytes.len() > 8388599: return Err("SCVDB_PAGE_MANIFEST_QUOTA")
+    val encoded = "SCVDB-PAGES-v1\n" + db_snapshot_hex(bytes) + "\n"
+    if encoded.len() > 16777216: return Err("SCVDB_PAGE_MANIFEST_QUOTA")
+    Ok(encoded)
+
+fn _db_page_manifest_read(encoded: text) -> Result<DbPageManifest, text>:
+    val header = "SCVDB-PAGES-v1\n"
+    if encoded.len() > 16777216 or encoded.len() <= header.len() or not encoded.starts_with(header) or not encoded.ends_with("\n"):
+        return Err("SCVDB_PAGE_MANIFEST_FORMAT")
+    val bytes = db_snapshot_unhex(encoded[header.len():encoded.len() - 1])?
+    val manifest = db_pages_manifest_decode(bytes)?
+    if _db_page_manifest_text(manifest)? != encoded:
+        return Err("SCVDB_PAGE_MANIFEST_NONCANONICAL")
+    for entry in manifest.entries:
+        if not _db_page_digest_valid(entry.digest): return Err("SCVDB_PAGE_DIGEST")
+    Ok(manifest)
+
+fn db_page_store_open(root: text) -> Result<DbStoredPages, text>:
+    _db_page_scope(root)?
+    val current = db_store_read(root, "pages")
+    if current.code == "empty": return Err("SCVDB_PAGE_MANIFEST_MISSING")
+    if current.code != "ok": return Err(current.code)
+    val manifest = _db_page_manifest_read(current.state)?
+    if manifest.root != current.transaction_id: return Err("SCVDB_PAGE_MANIFEST_DIGEST")
+    Ok(DbStoredPages(head: current.head, manifest: manifest))
+
+fn _db_page_load(root: text, manifest: DbPageManifest, entry: DbPageEntry) -> Result<_DbLoadedPage, text>:
+    val bytes = _db_page_read_bytes(_db_page_path(root, entry.digest)?, manifest.quota.max_page_bytes as i64)?
+    if sha256_u8_hex(bytes) != entry.digest: return Err("SCVDB_PAGE_CORRUPT")
+    val page = db_page_decode(bytes, manifest.quota)?
+    if page.bucket != entry.bucket or page.digest != entry.digest or page.records.len() as u64 != entry.count:
+        return Err("SCVDB_PAGE_DESCRIPTOR_MISMATCH")
+    Ok(_DbLoadedPage(page: page, byte_count: bytes.len()))
+
+# Reuse a manifest admitted by open rather than rehashing its whole directory on
+# every query. This read API grants no mutation/authorization capability. The
+# commit path always reopens actual HEAD independently of caller-shaped records.
+fn db_page_store_lookup(root: text, opened: DbStoredPages, key: text) -> Result<Option<DbPageRecord>, text>:
+    _db_page_scope(root)?
+    if val entry = db_pages_entry(opened.manifest, key)?:
+        val page = _db_page_load(root, opened.manifest, entry)?
+        return db_pages_lookup(opened.manifest, page.page, key)
+    Ok(nil)
+
+fn _db_page_bucket_entry(manifest: DbPageManifest, bucket: text) -> Option<DbPageEntry>:
+    var low = 0
+    var high = manifest.entries.len()
+    while low < high:
+        val middle = low + (high - low) / 2
+        if manifest.entries[middle].bucket < bucket: low = middle + 1
+        else: high = middle
+    if low < manifest.entries.len() and manifest.entries[low].bucket == bucket:
+        return Some(manifest.entries[low])
+    nil
+
+fn db_page_store_load_affected(root: text, opened: DbStoredPages, updates: [DbPageRecord]) -> Result<[DbRecordPage], text>:
+    _db_page_scope(root)?
+    var pages: [DbRecordPage] = []
+    var total = 0
+    for bucket in db_pages_required_buckets(updates)?:
+        if val entry = _db_page_bucket_entry(opened.manifest, bucket):
+            val loaded = _db_page_load(root, opened.manifest, entry)?
+            if loaded.byte_count > 67108864 - total: return Err("SCVDB_PAGE_BATCH_QUOTA")
+            total = total + loaded.byte_count
+            pages.push(loaded.page)
+    Ok(pages)
+
+fn _db_page_prepare_changed(build: DbPageBuild, previous: DbPageManifest?) -> Result<[_DbEncodedPage], text>:
+    if build.pages.len() > 65536: return Err("SCVDB_PAGE_BATCH_QUOTA")
+    var encoded: [_DbEncodedPage] = []
+    var total = 0
+    var previous_bucket = ""
+    for page in build.pages:
+        if page.bucket <= previous_bucket: return Err("SCVDB_PAGE_REPLACEMENT_ORDER")
+        previous_bucket = page.bucket
+        val bytes = db_page_encode(page, build.manifest.quota)?
+        if bytes.len() > 16777216 or bytes.len() > 67108864 - total:
+            return Err("SCVDB_PAGE_BATCH_QUOTA")
+        total = total + bytes.len()
+        if not _db_page_digest_valid(page.digest) or sha256_u8_hex(bytes) != page.digest:
+            return Err("SCVDB_PAGE_CORRUPT")
+        if val entry = _db_page_bucket_entry(build.manifest, page.bucket):
+            if entry.digest != page.digest or entry.count != page.records.len() as u64:
+                return Err("SCVDB_PAGE_DESCRIPTOR_MISMATCH")
+        else:
+            return Err("SCVDB_PAGE_UNREFERENCED_REPLACEMENT")
+        encoded.push(_DbEncodedPage(digest: page.digest, bytes: bytes))
+    # Linear merge of supplied replacement buckets against sorted manifest.
+    var changed_index = 0
+    for entry in build.manifest.entries:
+        if not _db_page_digest_valid(entry.digest): return Err("SCVDB_PAGE_DIGEST")
+        if changed_index < build.pages.len() and build.pages[changed_index].bucket == entry.bucket:
+            changed_index = changed_index + 1
+        else:
+            var retained = false
+            if val old = previous:
+                if old.quota.max_page_bytes == build.manifest.quota.max_page_bytes and old.quota.max_page_records == build.manifest.quota.max_page_records:
+                    if val old_entry = _db_page_bucket_entry(old, entry.bucket):
+                        retained = old_entry.digest == entry.digest and old_entry.count == entry.count
+            if not retained:
+                return Err("SCVDB_PAGE_REFERENCE_CLOSURE")
+    Ok(encoded)
+
+fn _db_page_write_owned(root: text, pages: [_DbEncodedPage]) -> Result<bool, text>:
+    _db_page_scope(root)?
+    for directory in [root + "/.scv", root + "/.scv/db-pages", root + "/.scv/db-pages/pages"]:
+        if not dir_is_real_no_follow(directory) and not dir_create(directory, false):
+            return Err("SCVDB_PAGE_DIRECTORY_CREATE")
+        if not dir_is_real_no_follow(directory) or path_absolute(directory) != directory:
+            return Err("SCVDB_PAGE_DIRECTORY_SCOPE")
+    for page in pages:
+        _db_page_publish_bytes(root, page.digest, page.bytes)?
+    for directory in [root + "/.scv/db-pages/pages", root + "/.scv/db-pages", root + "/.scv", root]:
+        if not directory_fsync(directory): return Err("SCVDB_PAGE_DURABILITY_UNCERTAIN")
+    Ok(true)
+
+# A caller-shaped candidate cannot silently remove a retained bucket/record or
+# lower allocator state. Re-derive from ONLY the affected old pages; unchanged
+# descriptor bytes remain pinned by the prior manifest, without whole-tree IO.
+fn _db_page_verify_retained(root: text, build: DbPageBuild, previous: DbPageManifest?) -> Result<bool, text>:
+    if val old = previous:
+        if old.quota.max_page_bytes != build.manifest.quota.max_page_bytes or old.quota.max_page_records != build.manifest.quota.max_page_records or old.quota.max_records != build.manifest.quota.max_records:
+            return Err("SCVDB_PAGE_QUOTA_MIGRATION_REQUIRED")
+        var affected: [DbRecordPage] = []
+        var updates: [DbPageRecord] = []
+        var total = 0
+        for page in build.pages:
+            if val entry = _db_page_bucket_entry(old, page.bucket):
+                val loaded = _db_page_load(root, old, entry)?
+                if loaded.byte_count > 67108864 - total: return Err("SCVDB_PAGE_BATCH_QUOTA")
+                total = total + loaded.byte_count
+                affected.push(loaded.page)
+            for record in page.records: updates.push(record)
+        val derived = db_pages_update(old, affected, updates)?
+        if derived.manifest.root != build.manifest.root:
+            return Err("SCVDB_PAGE_RETAINED_STATE_CHANGED")
+    Ok(true)
+
+# Higher-level semantic admission supplies build. This owner checks physical
+# integrity/closure, typed retention and CAS; signatures/field ACLs remain above.
+fn db_page_store_commit(root: text, expected_head: text, build: DbPageBuild) -> Result<DbStoredPages, text>:
+    _db_page_scope(root)?
+    val encoded_manifest = _db_page_manifest_text(build.manifest)?
+    val current = db_store_read(root, "pages")
+    if current.code != "ok" and current.code != "empty": return Err(current.code)
+    var previous: DbPageManifest? = nil
+    if current.code == "ok":
+        val prior = _db_page_manifest_read(current.state)?
+        if prior.root != current.transaction_id: return Err("SCVDB_PAGE_MANIFEST_DIGEST")
+        previous = Some(prior)
+    # An immediate exact retry may need to reestablish page/directory durability
+    # before the generation owner acknowledges a previously uncertain HEAD sync.
+    val replay = current.code == "ok" and current.parent == expected_head and current.transaction_id == build.manifest.root and current.state == encoded_manifest
+    if current.head != expected_head and not replay: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    val pages = _db_page_prepare_changed(build, previous)?
+    _db_page_verify_retained(root, build, previous)?
+    val nonce = random_hex(16) ?? ""
+    if nonce.len() != 32: return Err("SCVDB_STORE_ENTROPY")
+    val holder = "scv-pages-{nonce}"
+    if not scv_sj_lease_acquire(root, holder).starts_with("ok:"):
+        return Err("SCVDB_STORE_BUSY")
+    if scv_sj_lease_holder(root) != holder: return Err("SCVDB_STORE_LEASE_IDENTITY")
+    val written = _db_page_write_owned(root, pages)
+    val released = scv_sj_lease_release(root, holder)
+    if not released.starts_with("ok:") or scv_sj_lease_is_held(root):
+        return Err("SCVDB_STORE_RELEASE_UNCERTAIN")
+    written?
+    # A race between the two short leases can leave harmless immutable orphan
+    # pages. CAS rejects stale manifests; readers retain the complete prior HEAD.
+    val publication_parent = if current.code == "ok" and current.head == expected_head and current.state == encoded_manifest: current.parent else: expected_head
+    val committed = db_store_commit(root, publication_parent, build.manifest.root, encoded_manifest, "pages")
+    if committed.code != "ok": return Err(committed.code)
+    val reopened = db_page_store_open(root)?
+    if reopened.head != committed.head: return Err("SCVDB_PAGE_HEAD_MOVED")
+    Ok(reopened)
+
+export DbStoredPages, db_page_store_open, db_page_store_lookup
+export db_page_store_load_affected, db_page_store_commit
