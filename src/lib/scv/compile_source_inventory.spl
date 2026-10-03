@@ -356,6 +356,14 @@ fn compile_source_inventory_read_text_v1(path: text) -> text?:
     rt_file_read_regular_no_follow_bounded(path, size)
 
 fn compile_source_inventory_decode_v1(content: text) -> CompileSourceInventoryReadV1:
+    compile_source_inventory_decode_content_v1(content, "")
+
+# Only the immutable-generation reader supplies a digest, after hashing the
+# same bounded content and comparing it with the captured pointer. Keep this
+# helper private: callers of the public decoder still get an independent hash.
+fn compile_source_inventory_decode_content_v1(
+    content: text, verified_digest: text
+) -> CompileSourceInventoryReadV1:
     val lines = content.split("\n")
     if lines.len() < 3 or lines[0] != "simple-compile-source-inventory-v1" or
             not lines[1].starts_with("generation=") or
@@ -378,7 +386,8 @@ fn compile_source_inventory_decode_v1(content: text) -> CompileSourceInventoryRe
     val inventory = CompileSourceInventoryV1(1, generation, entries)
     if compile_source_inventory_encode_v1(inventory) != content:
         return CompileSourceInventoryReadV1(false, "inventory-noncanonical", "", nil)
-    CompileSourceInventoryReadV1(true, "ok", sha256_text(content), Some(inventory))
+    val digest = if verified_digest == "": sha256_text(content) else: verified_digest
+    CompileSourceInventoryReadV1(true, "ok", digest, Some(inventory))
 
 fn compile_source_inventory_publish_v1(
     cache_root: text, inventory: CompileSourceInventoryV1
@@ -563,7 +572,7 @@ fn compile_source_inventory_read_at_pointer_v1(
         "{root}/generations/{pointer}.inventory") ?? ""
     if content == "" or sha256_text(content) != pointer:
         return CompileSourceInventoryReadV1(false, "inventory-generation-invalid", "", nil)
-    compile_source_inventory_decode_v1(content)
+    compile_source_inventory_decode_content_v1(content, pointer)
 
 fn compile_source_inventory_recover_v1(cache_root: text) -> i64:
     if not compile_source_inventory_cache_root_valid_v1(cache_root):

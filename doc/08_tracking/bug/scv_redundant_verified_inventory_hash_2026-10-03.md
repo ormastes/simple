@@ -1,0 +1,7 @@
+# Redundant hash on validated immutable inventory reads
+
+The immutable generation reader hashes the bounded blob and compares it with the captured pointer. Its decoder then validates canonical re-encoding and hashes the exact same blob again to return the digest. For the retained Windows qualification inventory this blob was16,941,026 bytes/44,286 rows. This establishes redundant work, not its share of the measured630-second cold publication window or the later1200-second p2_add timeout.
+
+The performance-only fix passes the verified pointer to a private decoder. Public decoding still computes its digest, and all syntax, canonical re-encoding, regular-file, size, pointer, and immutable blob hash checks remain. No persistence format, errors, source membership, or publication policy changes. PR2271 warm no-event refresh and PR2284 flat-pool serialization repairs are already in this branch's base and are not duplicated.
+
+Focused regressions cover public/read equivalence, changed canonical bytes, and digest-matching noncanonical bytes. Execution UNRUN: this host has no admitted self-hosted Windows runtime; any cache-preserving bootstrap mini executable is provisional diagnostic evidence only. Baseline/candidate p50/p95 and peakRSS remain UNRUN; no speedup or joint resource PASS is claimed. The optimization CLI is likewise BLOCKED by the missing admitted runtime. Old candidates, failed receipts, and caches are unchanged.

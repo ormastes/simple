@@ -1,0 +1,54 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.*
+use std.nogc_sync_mut.io.file_ops.{file_write}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+
+extern fn rt_getpid() -> i64
+
+describe "verified immutable inventory decoding":
+    it "retains the canonical bytes, fields and digest of public decoding":
+        val cache_root = "build/test-artifacts/scv-verified-digest-{rt_getpid()}/build/scv"
+        val event = compile_source_inventory_git_event_v1(
+            "create", "src/retained.spl", "fn retained(): 17")
+        val applied = compile_source_inventory_apply_event_v1(
+            CompileSourceInventoryV1(1, 0, []), event)
+        expect(applied.valid).to_equal(true)
+        val encoded = compile_source_inventory_encode_v1(applied.inventory!)
+        val decoded = compile_source_inventory_decode_v1(encoded)
+        val published = compile_source_inventory_publish_v1(cache_root, applied.inventory!)
+        val read = compile_source_inventory_read_at_pointer_v1(cache_root, published)
+        expect(decoded.valid).to_equal(true)
+        expect(read.valid).to_equal(true)
+        expect(read.digest).to_equal(sha256_text(encoded))
+        expect(read.digest).to_equal(decoded.digest)
+        expect(compile_source_inventory_encode_v1(read.inventory!)).to_equal(encoded)
+        expect(read.inventory!.entries[0].source_identity).to_equal("src/retained.spl")
+        expect(read.inventory!.entries[0].content_digest).to_equal(sha256_text("fn retained(): 17"))
+        dir_remove(cache_root, true)
+
+    it "rejects changed bytes even when their replacement is canonical":
+        val cache_root = "build/test-artifacts/scv-verified-tamper-{rt_getpid()}/build/scv"
+        val original = CompileSourceInventoryV1(1, 1, [])
+        val published = compile_source_inventory_publish_v1(cache_root, original)
+        expect(published.len()).to_equal(64)
+        val replacement = compile_source_inventory_encode_v1(CompileSourceInventoryV1(1, 2, []))
+        expect(file_write("{cache_root}/source-inventory/generations/{published}.inventory", replacement)).to_equal(true)
+        val rejected = compile_source_inventory_read_at_pointer_v1(cache_root, published)
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_equal("inventory-generation-invalid")
+        dir_remove(cache_root, true)
+
+    it "rejects digest-matching noncanonical bytes after the hash gate":
+        val cache_root = "build/test-artifacts/scv-verified-noncanonical-{rt_getpid()}/build/scv"
+        val published = compile_source_inventory_publish_v1(cache_root, CompileSourceInventoryV1(1, 1, []))
+        expect(published.len()).to_equal(64)
+        val content = "simple-compile-source-inventory-v1\ngeneration=01\ncount=0"
+        val digest = sha256_text(content)
+        expect(file_write("{cache_root}/source-inventory/generations/{digest}.inventory", content)).to_equal(true)
+        val rejected = compile_source_inventory_read_at_pointer_v1(cache_root, digest)
+        expect(rejected.valid).to_equal(false)
+        expect(rejected.reason).to_equal("inventory-noncanonical")
+        val direct = compile_source_inventory_decode_v1(content)
+        expect(direct.reason).to_equal(rejected.reason)
+        dir_remove(cache_root, true)
