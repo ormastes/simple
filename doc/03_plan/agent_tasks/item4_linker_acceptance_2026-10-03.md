@@ -74,3 +74,15 @@ entrypoint directly, and the fallback spec omits that unavailable import/check.
 All other production guards and acceptance scenarios are carried forward.
 Runtime SSpec, generated-manual, coverage and core/MCP evidence remain unrun;
 this forward-port does not change any requirement's verification status.
+
+## Completion coding wave ownership (2026-10-03)
+
+Root's new branch is `work/item4-linker-completion-20261003` in the existing
+integration worktree. Root owns configured request admission, PE routing and
+facade/receipt specs. Acceptance owns RISC-V pair evaluation/patching and its new
+spec on `work/item4-riscv-relocations-20261003`. Research owns linker lifecycle
+and its new spec on `work/item4-linker-lifecycle-20261003`. Runtime reviews root's
+routing and revalidates runtime availability read-only. All use the inherited
+model. Root integrates exact commits and reviews source; no runtime PASS or full
+item 4 completion is authorized by source review. Remaining source owners are
+listed in the acceptance plan rather than relabeled as missing evidence only.
