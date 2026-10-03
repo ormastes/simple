@@ -1,0 +1,147 @@
+use std.spec.{describe, it, expect, step}
+use test.fixtures.scv.db_paged_fixture.*
+use test.fixtures.scv.db_paged_conflict_fixture.*
+use app.scv.db.paged_store.*
+use app.scv.db.paged_conflict_owner.*
+use std.scv.db_paged_conflicts.*
+use std.scv.db_paged_conflict_history.*
+use std.scv.db_pages.*
+use std.scv.db_page_records.*
+use std.scv.db_patch.*
+use std.scv.db_patch_codec.{db_patch_encode}
+use std.scv.db_reducer.{db_field_value}
+use std.scv.db_admission.{db_patch_signing_bytes}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+
+describe "paged immutable conflicts and atomic reviewed resolution REQ013 REQ015":
+    it "reopens original conflict evidence without accepting any partial transaction":
+        val fixture = setup_item2_paged_conflict()
+        val view = db_paged_open(fixture.root, fixture.policy).unwrap()
+        expect(db_patch_encode(fixture.evidence.original)).to_equal(db_patch_encode(fixture.patches[2]))
+        expect(db_paged_current_row(fixture.root, fixture.policy, setup_item2_paged_ref(3)).unwrap()).to_be_nil()
+        expect(db_paged_lookup(fixture.root, view, db_page_batch_key(fixture.patches[2].batch_id).unwrap()).unwrap()).to_be_nil()
+        expect(db_paged_lookup(fixture.root, view, db_page_actor_counter_key(fixture.patches[2].actor, 3).unwrap()).unwrap()).to_be_nil()
+        expect(db_field_value(db_paged_current_row(fixture.root, fixture.policy, setup_item2_paged_ref(1)).unwrap().unwrap().fields, "code")).to_equal(DbValue.Text("B"))
+        val replay = db_paged_capture_conflict(fixture.root, "stale", fixture.patches[2], fixture.policy).unwrap()
+        expect(replay.replay).to_be(true)
+        expect(replay.head).to_equal(fixture.head)
+
+    it "publishes exact signed resolution receipt with accepted counter and semantic update":
+        val fixture = setup_item2_paged_conflict()
+        val decision = setup_item2_conflict_decision(fixture)
+        val patch = setup_item2_conflict_signed_resolution(fixture, decision)
+        val policy = setup_item2_conflict_review(fixture.policy, fixture.patches + [patch])
+        expect(db_paged_apply(fixture.root, fixture.head, patch, policy)).to_equal(Err("SCVDB_RESOLUTION_OWNER_REQUIRED"))
+        val result = db_paged_resolve_conflict(fixture.root, fixture.head, decision, patch, policy).unwrap()
+        val view = db_paged_open(fixture.root, policy).unwrap()
+        expect(view.head).to_equal(result.head)
+        val receipt = db_paged_lookup(fixture.root, view, db_paged_conflict_key(decision.conflict_id, true).unwrap()).unwrap().unwrap()
+        expect(db_patch_encode(db_paged_resolution_patch(decision.conflict_id, receipt).unwrap())).to_equal(db_patch_encode(patch))
+        expect(db_paged_lookup(fixture.root, view, db_page_batch_key(patch.batch_id).unwrap()).unwrap() == nil).to_be(false)
+        expect(db_paged_lookup(fixture.root, view, db_page_actor_counter_key(patch.actor, patch.actor_counter).unwrap()).unwrap() == nil).to_be(false)
+        expect(db_field_value(db_paged_current_row(fixture.root, policy, setup_item2_paged_ref(1)).unwrap().unwrap().fields, "code")).to_equal(DbValue.Text("C"))
+        expect(db_paged_resolve_conflict(fixture.root, fixture.head, decision, patch, policy).unwrap().replay).to_be(true)
+
+    it "preserves resolution replay after later semantic changes without overwriting the later row":
+        val fixture = setup_item2_paged_conflict()
+        val decision = setup_item2_conflict_decision(fixture)
+        val patch = setup_item2_conflict_signed_resolution(fixture, decision)
+        var policy = setup_item2_conflict_review(fixture.policy, fixture.patches + [patch])
+        val resolved = db_paged_resolve_conflict(fixture.root, fixture.head, decision, patch, policy).unwrap()
+        val later = setup_item2_paged_patch([setup_item2_conflict_edit("C", "A")], resolved.revision, 5)
+        policy = setup_item2_conflict_review(policy, fixture.patches + [patch,later])
+        val moved = db_paged_apply(fixture.root, resolved.head, later, policy).unwrap()
+        val replay = db_paged_resolve_conflict(fixture.root, fixture.head, decision, patch, policy).unwrap()
+        expect(replay.replay).to_be(true)
+        expect(replay.head).to_equal(moved.head)
+        expect(db_field_value(db_paged_current_row(fixture.root, policy, setup_item2_paged_ref(1)).unwrap().unwrap().fields, "code")).to_equal(DbValue.Text("A"))
+
+    it "rejects a decision whose captured local row changed before resolution":
+        val fixture = setup_item2_paged_conflict()
+        val decision = setup_item2_conflict_decision(fixture)
+        val patch = setup_item2_conflict_signed_resolution(fixture, decision)
+        val later = setup_item2_paged_patch([setup_item2_conflict_edit("B", "A")], fixture.revision, 5)
+        val policy = setup_item2_conflict_review(fixture.policy, fixture.patches + [patch,later])
+        val moved = db_paged_apply(fixture.root, fixture.head, later, policy).unwrap()
+        expect(db_paged_resolve_conflict(fixture.root, moved.head, decision, patch, policy)).to_equal(Err("SCVDB_CONFLICT_STALE"))
+        expect(db_paged_open(fixture.root, policy).unwrap().head).to_equal(moved.head)
+
+    it "rejects a unique collision in an untouched row without publishing a receipt":
+        val fixture = setup_item2_paged_conflict()
+        val decision = setup_item2_conflict_decision(fixture, "D")
+        val patch = setup_item2_conflict_signed_resolution(fixture, decision)
+        val policy = setup_item2_conflict_review(fixture.policy, fixture.patches + [patch])
+        expect(db_paged_resolve_conflict(fixture.root, fixture.head, decision, patch, policy)).to_equal(Err("SCVDB_UNIQUE_COLLISION"))
+        val view = db_paged_open(fixture.root, policy).unwrap()
+        expect(view.head).to_equal(fixture.head)
+        expect(db_paged_lookup(fixture.root, view, db_paged_conflict_key(decision.conflict_id, true).unwrap()).unwrap()).to_be_nil()
+        expect(db_paged_lookup(fixture.root, view, db_page_batch_key(patch.batch_id).unwrap()).unwrap()).to_be_nil()
+
+    it "rejects a signed different operation and stale physical head":
+        val fixture = setup_item2_paged_conflict()
+        val decision = setup_item2_conflict_decision(fixture)
+        val valid = setup_item2_conflict_signed_resolution(fixture, decision)
+        var forged = valid
+        forged.operations = [setup_item2_conflict_edit("B", "A")]
+        forged = db_patch_seal(forged).unwrap()
+        val (seed, key) = pure_ed25519_keypair_from_seed([45u8;32])
+        forged.signature = pure_ed25519_sign(seed, key, db_patch_signing_bytes(forged).unwrap())
+        val policy = setup_item2_conflict_review(fixture.policy, fixture.patches + [valid,forged])
+        expect(db_paged_resolve_conflict(fixture.root, fixture.head, decision, forged, policy)).to_equal(Err("SCVDB_CONFLICT_OPERATION"))
+        expect(db_paged_resolve_conflict(fixture.root, "stale", decision, valid, policy)).to_equal(Err("SCVDB_STORE_HEAD_ADVANCED"))
+        expect(db_paged_open(fixture.root, policy).unwrap().head).to_equal(fixture.head)
+
+    it "requires reviewer authority and reauthenticates historical original evidence":
+        val fixture = setup_item2_paged_conflict()
+        val decision = setup_item2_conflict_decision(fixture)
+        val patch = setup_item2_conflict_signed_resolution(fixture, decision)
+        var policy = setup_item2_conflict_review(fixture.policy, fixture.patches + [patch])
+        policy.config.admission.keys[0].role = "user"
+        policy = setup_item2_paged_repin(policy)
+        expect(db_paged_resolve_conflict(fixture.root, fixture.head, decision, patch, policy)).to_equal(Err("SCVDB_CONFLICT_REVIEWER_ROLE"))
+        policy.config.admission.keys[0].role = "reviewer"
+        policy.config.admission.keys[1].revoked = true
+        policy = setup_item2_paged_repin(policy)
+        expect(db_paged_resolve_conflict(fixture.root, fixture.head, decision, patch, policy)).to_equal(Err("SCVDB_KEY_REVOKED"))
+        expect(db_paged_open(fixture.root, policy).unwrap().head).to_equal(fixture.head)
+
+    it "shares the cumulative page budget and rejects forged signature before evidence IO":
+        val fixture = setup_item2_paged_conflict()
+        val decision = setup_item2_conflict_decision(fixture)
+        val patch = setup_item2_conflict_signed_resolution(fixture, decision)
+        var policy = setup_item2_conflict_review(fixture.policy, fixture.patches + [patch])
+        policy.max_read_bytes = 1u64
+        policy = setup_item2_paged_repin(policy)
+        var forged = patch
+        forged.signature = [0u8;64]
+        expect(db_paged_resolve_conflict(fixture.root, fixture.head, decision, forged, policy)).to_equal(Err("SCVDB_SIGNATURE_INVALID"))
+        expect(db_paged_resolve_conflict(fixture.root, fixture.head, decision, patch, policy)).to_equal(Err("SCVDB_PAGED_READ_QUOTA"))
+        expect(db_paged_open(fixture.root, policy).unwrap().head).to_equal(fixture.head)
+
+    it "rejects truncated trailing and miskeyed conflict evidence":
+        val fixture = setup_item2_paged_conflict()
+        val encoded = db_paged_conflict_evidence(fixture.evidence).unwrap()
+        expect(db_paged_conflict_decode(encoded).unwrap()).to_equal(fixture.evidence)
+        var broken = encoded
+        broken.payload = encoded.payload[0:encoded.payload.len() - 1]
+        expect(db_paged_conflict_decode(broken).is_err()).to_be(true)
+        broken.payload = encoded.payload + [0u8]
+        expect(db_paged_conflict_decode(broken)).to_equal(Err("SCVDB_CONFLICT_ENCODING"))
+        broken = encoded
+        broken.key = db_paged_conflict_key(fixture.patches[0].batch_id).unwrap()
+        expect(db_paged_conflict_decode(broken)).to_equal(Err("SCVDB_CONFLICT_ENCODING"))
+
+    it "verifies checkpoint history with retained retired keys without granting present write authority":
+        val fixture = setup_item2_paged_conflict()
+        val decision = setup_item2_conflict_decision(fixture)
+        val patch = setup_item2_conflict_signed_resolution(fixture, decision)
+        var policy = setup_item2_conflict_review(fixture.policy, fixture.patches + [patch])
+        policy.config.admission.keys[0].revoked = true
+        policy.config.admission.keys[1].revoked = true
+        policy = setup_item2_paged_repin(policy)
+        expect(db_paged_history_conflict(fixture.evidence, policy.config.admission, \entity: Ok(entity))).to_equal(Ok(true))
+        expect(db_paged_history_resolution(fixture.evidence, patch, policy.config.admission)).to_equal(Ok(true))
+        expect(db_paged_resolve_conflict(fixture.root, fixture.head, decision, patch, policy)).to_equal(Err("SCVDB_KEY_REVOKED"))
+        policy.config.admission.keys = [policy.config.admission.keys[0]]
+        policy = setup_item2_paged_repin(policy)
+        expect(db_paged_history_signature(fixture.evidence.original, policy.config.admission)).to_equal(Err("SCVDB_HISTORICAL_KEY_UNAVAILABLE"))

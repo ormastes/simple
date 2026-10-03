@@ -7,13 +7,19 @@ use std.scv.db_paged_indexes.*
 use std.scv.db_page_records.*
 use std.scv.db_patch.*
 use std.scv.db_patch_normalize.{db_normalize_operations}
-use std.scv.db_reducer.{DbRow, db_reduce_operations_local}
+use std.scv.db_reducer.{DbRow, DbConflict, db_reduce_operations_local}
+use std.scv.db_conflict_model.{DbConflictRecord}
 use std.scv.distributed_identity.*
 
 struct DbPagedRows:
     entities: [EntityRef]
     before: {text: DbRow}
     after: {text: DbRow}
+
+struct DbPagedRowOutcome:
+    rows: DbPagedRows
+    conflicts: [DbConflict]
+    evidence: [DbConflictRecord]
 
 fn db_paged_resolve_ref(entity: EntityRef, reads: DbPagedReads, policy: DbPagedPolicy) -> Result<EntityRef, text>:
     val context = db_paged_context(policy)
@@ -47,7 +53,7 @@ fn db_paged_get_row(reads: DbPagedReads, entity: EntityRef) -> Result<DbRow?, te
         CurrentRow(_, row): Ok(Some(row))
         _: Err("SCVDB_PAGED_INDEX_CORRUPT")
 
-fn db_paged_reduce_rows(patch: DbPatch, operations: [DbOperation], reads: DbPagedReads, policy: DbPagedPolicy) -> Result<DbPagedRows, text>:
+fn db_paged_reduce_outcome(patch: DbPatch, operations: [DbOperation], reads: DbPagedReads, policy: DbPagedPolicy) -> Result<DbPagedRowOutcome, text>:
     var entities: [EntityRef] = []
     var before: {text: DbRow} = {}
     var after: {text: DbRow} = {}
@@ -64,10 +70,21 @@ fn db_paged_reduce_rows(patch: DbPatch, operations: [DbOperation], reads: DbPage
         var initial: [DbRow] = []
         if after.contains_key(identity): initial.push(after[identity])
         val reduced = db_reduce_operations_local(initial, patch, policy.config.merge, [operation])?
-        if reduced.conflicts.len() != 0: return Err(reduced.conflicts[0].code)
+        # Stop at the first conflicting operation. No intermediate row is ever
+        # published. Evidence may describe a precondition after earlier ordered
+        # operations; the resolution owner checks the actual current row again.
+        if reduced.conflicts.len() != 0:
+            return Ok(DbPagedRowOutcome(rows: DbPagedRows(entities: entities, before: before, after: before), conflicts: reduced.conflicts, evidence: reduced.conflict_records))
         if reduced.rows.len() != 1 or reduced.rows[0].entity != identity: return Err("SCVDB_PAGED_ROW_RESULT")
         after[identity] = reduced.rows[0]
-    Ok(DbPagedRows(entities: entities, before: before, after: after))
+    Ok(DbPagedRowOutcome(rows: DbPagedRows(entities: entities, before: before, after: after), conflicts: [], evidence: []))
+
+fn db_paged_reduce_rows(patch: DbPatch, operations: [DbOperation], reads: DbPagedReads, policy: DbPagedPolicy) -> Result<DbPagedRows, text>:
+    val outcome = db_paged_reduce_outcome(patch, operations, reads, policy)?
+    if outcome.conflicts.len() > 0: return Err(outcome.conflicts[0].code)
+    Ok(outcome.rows)
+
+export DbPagedRowOutcome, db_paged_reduce_outcome
 
 fn db_paged_constraint_reads(rows: DbPagedRows, policy: DbPagedPolicy) -> Result<[text], text>:
     var keys: [text] = []

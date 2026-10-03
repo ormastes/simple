@@ -8,7 +8,10 @@ use std.scv.db_paged_indexes.*
 use std.scv.db_page_records.*
 use std.scv.db_pages.*
 use std.scv.db_patch.*
-use std.scv.db_reducer.{DbAcceptedBatch}
+use std.scv.db_reducer.{DbAcceptedBatch, MaterializedState}
+use std.scv.db_paged_conflicts.*
+use std.scv.db_conflict_resolution.{DbConflictDecision, db_validate_resolution_patch, db_conflict_resolution_provenance}
+use std.scv.db_patch_codec.{db_patch_encode}
 use std.scv.db_admission.{db_authorize_patch, db_require_unreserved_entity_kinds}
 use std.scv.distributed_identity.{SettledAlias}
 
@@ -18,11 +21,13 @@ struct DbPagedRequest:
     policy: DbPagedPolicy
     now: u64
     proofs: [DbPagedLookupProof]
+    intent: DbPagedIntent
 
 struct DbPagedCommitPlan:
     manifest: DbPagedManifest
     build: DbPageBuild
     replay: bool
+    conflict_ids: [text]
 
 enum DbPagedPlanning:
     NeedKeys(request: DbPagedRequest, keys: [text])
@@ -45,7 +50,10 @@ fn _paged_run(request: DbPagedRequest) -> Result<DbPagedPlanning, text>:
     val patch = request.patch
     val policy = request.policy
     val valid = db_paged_manifest_validate(manifest, policy)?
-    if patch.provenance.starts_with("SCVDB-CONFLICT-RESOLUTION-v1:"): return Err("SCVDB_RESOLUTION_OWNER_REQUIRED")
+    match request.intent:
+        ResolveConflict(_): ()
+        _:
+            if patch.provenance.starts_with("SCVDB-CONFLICT-RESOLUTION-v1:"): return Err("SCVDB_RESOLUTION_OWNER_REQUIRED")
     if (patch.operations.len() as u64) > policy.max_operations or (patch.causal_dependencies.len() as u64) > policy.max_read_keys: return Err("SCVDB_PAGED_QUOTA")
     val digest = db_patch_validate(patch)?
     # Signature/context/key-time/scope/metadata authentication precedes any
@@ -57,6 +65,11 @@ fn _paged_run(request: DbPagedRequest) -> Result<DbPagedPlanning, text>:
     val batch_key = db_page_batch_key(patch.batch_id)?
     val actor_key = db_page_actor_counter_key(patch.actor, patch.actor_counter)?
     var first = [batch_key, actor_key]
+    match request.intent:
+        ResolveConflict(decision):
+            first.push(db_paged_conflict_key(decision.conflict_id)?)
+            first.push(db_paged_conflict_key(decision.conflict_id, true)?)
+        _: ()
     for dependency in patch.causal_dependencies: first.push(db_page_batch_key(dependency)?)
     if patch.base_revision != "" and patch.base_revision != manifest.revision: first.push(db_paged_history_key(patch.base_revision)?)
     var missing = db_paged_missing(reads, first, policy)?
@@ -66,11 +79,39 @@ fn _paged_run(request: DbPagedRequest) -> Result<DbPagedPlanning, text>:
         if _paged_accepted(reads, db_page_batch_key(dependency)?, false)? == nil: return Err("SCVDB_MISSING_DEPENDENCY")
         accepted_ids.push(dependency)
     val authorized = db_authorize_patch(patch, policy.config.admission, accepted_ids, request.now)?
+    var evidence: DbPagedConflictEvidence? = nil
+    var resolution: DbPageRecord? = nil
+    match request.intent:
+        ResolveConflict(decision):
+            if authorized.signer_role != "reviewer" and authorized.signer_role != "integrator": return Err("SCVDB_CONFLICT_REVIEWER_ROLE")
+            val record = db_paged_read(reads, db_paged_conflict_key(decision.conflict_id)?)?
+            if record == nil: return Err("SCVDB_CONFLICT_NOT_FOUND")
+            val captured = db_paged_conflict_decode(record.unwrap())?
+            val original = captured.original
+            # Reauthenticate preserved original bytes, not a resealed projection.
+            db_authorize_patch(original, policy.config.admission, original.causal_dependencies, request.now)?
+            var dependencies: [text] = []
+            for dependency in original.causal_dependencies: dependencies.push(db_page_batch_key(dependency)?)
+            missing = db_paged_missing(reads, dependencies, policy)?
+            if missing.len() > 0: return Ok(DbPagedPlanning.NeedKeys(request, missing))
+            for key in dependencies:
+                if _paged_accepted(reads, key, false)? == nil: return Err("SCVDB_MISSING_DEPENDENCY")
+            if patch.signer != decision.reviewer or patch.provenance != db_conflict_resolution_provenance(captured.record, decision)?: return Err("SCVDB_CONFLICT_PROVENANCE")
+            evidence = Some(captured)
+            resolution = db_paged_read(reads, db_paged_conflict_key(decision.conflict_id, true)?)?
+        _: ()
     val accepted = _paged_accepted(reads, batch_key, false)?
     val counter = _paged_accepted(reads, actor_key, true)?
     if val previous = accepted:
         if previous.canonical_digest != digest or counter == nil or counter.unwrap() != previous: return Err("SCVDB_BATCH_IDENTITY_COLLISION")
-        return Ok(DbPagedPlanning.Ready(DbPagedCommitPlan(manifest: manifest, build: DbPageBuild(manifest: manifest.pages, pages: []), replay: true)))
+        match request.intent:
+            ResolveConflict(decision):
+                if resolution == nil: return Err("SCVDB_CONFLICT_RECEIPT_MISSING")
+                if db_patch_encode(db_paged_resolution_patch(decision.conflict_id, resolution.unwrap())?)? != db_patch_encode(patch)?: return Err("SCVDB_CONFLICT_ALREADY_RESOLVED")
+            CaptureConflict: return Err("SCVDB_CONFLICT_BATCH_ALREADY_ACCEPTED")
+            _: ()
+        return Ok(DbPagedPlanning.Ready(DbPagedCommitPlan(manifest: manifest, build: DbPageBuild(manifest: manifest.pages, pages: []), replay: true, conflict_ids: [])))
+    if resolution != nil: return Err("SCVDB_CONFLICT_ALREADY_RESOLVED")
     if counter != nil: return Err("SCVDB_ACTOR_COUNTER_COLLISION")
     if patch.base_revision != manifest.revision:
         if patch.base_revision == "": return Err("SCVDB_BASE_REVISION_MISSING")
@@ -80,9 +121,46 @@ fn _paged_run(request: DbPagedRequest) -> Result<DbPagedPlanning, text>:
     missing = db_paged_missing(reads, db_paged_alias_reads(patch, policy)?, policy)?
     if missing.len() > 0: return Ok(DbPagedPlanning.NeedKeys(request, missing))
     val operations = db_paged_execution_operations(patch, reads, policy)?
-    missing = db_paged_missing(reads, db_paged_operation_row_keys(operations)?, policy)?
+    var row_keys = db_paged_operation_row_keys(operations)?
+    if val captured = evidence: row_keys.push(db_page_row_key(captured.record.entity)?)
+    missing = db_paged_missing(reads, row_keys, policy)?
     if missing.len() > 0: return Ok(DbPagedPlanning.NeedKeys(request, missing))
-    val rows = db_paged_reduce_rows(patch, operations, reads, policy)?
+    match request.intent:
+        ResolveConflict(decision):
+            val record = evidence.unwrap().record
+            val row = db_paged_get_row(reads, record.entity)?
+            if row == nil: return Err("SCVDB_ENTITY_MISSING")
+            # This shell is used only by the exact row/precondition decision
+            # validator. Global constraints still use the indexed reducer below.
+            val local = MaterializedState(rows: [row.unwrap()], accepted: [], revision: manifest.revision)
+            db_validate_resolution_patch(record, decision, local, patch)?
+        _: ()
+    val outcome = db_paged_reduce_outcome(patch, operations, reads, policy)?
+    match request.intent:
+        CaptureConflict:
+            if outcome.conflicts.len() == 0: return Err("SCVDB_CONFLICT_NOT_PRESENT")
+            if outcome.evidence.len() == 0: return Err(outcome.conflicts[0].code)
+            var updates: [DbPageRecord] = []
+            var ids: [text] = []
+            var keys: [text] = []
+            for record in outcome.evidence:
+                val value = db_paged_conflict_evidence(DbPagedConflictEvidence(record: record, original: patch))?
+                updates.push(value)
+                ids.push(record.conflict_id)
+                keys.push(value.key)
+            missing = db_paged_missing(reads, keys, policy)?
+            if missing.len() > 0: return Ok(DbPagedPlanning.NeedKeys(request, missing))
+            var unchanged = true
+            for update in updates:
+                val stored = db_paged_read(reads, update.key)?
+                if stored == nil: unchanged = false
+                elif stored.unwrap() != update: return Err("SCVDB_CONFLICT_DIGEST_COLLISION")
+            if unchanged: return Ok(DbPagedPlanning.Ready(DbPagedCommitPlan(manifest: manifest, build: DbPageBuild(manifest: manifest.pages, pages: []), replay: true, conflict_ids: ids)))
+            updates.push(db_paged_index_record(db_paged_history_key(manifest.revision)?, 172u8, DbValue.Text(manifest.revision))?)
+            return _paged_finish(request, reads, updates, ids)
+        _: ()
+    if outcome.conflicts.len() > 0: return Err(outcome.conflicts[0].code)
+    val rows = outcome.rows
     missing = db_paged_missing(reads, db_paged_constraint_reads(rows, policy)?, policy)?
     if missing.len() > 0: return Ok(DbPagedPlanning.NeedKeys(request, missing))
     val allocations = db_paged_allocations(rows, reads, policy)?
@@ -97,12 +175,20 @@ fn _paged_run(request: DbPagedRequest) -> Result<DbPagedPlanning, text>:
     updates.push(db_typed_page_record_encode(DbTypedPageRecord.Accepted(next_batch))?)
     updates.push(db_typed_page_record_encode(DbTypedPageRecord.ActorCounter(next_batch))?)
     updates.push(db_paged_index_record(db_paged_history_key(manifest.revision)?, 172u8, DbValue.Text(manifest.revision))?)
+    match request.intent:
+        ResolveConflict(decision): updates.push(db_paged_resolution_record(decision.conflict_id, patch, manifest.revision)?)
+        _: ()
+    _paged_finish(request, reads, updates, [])
+
+fn _paged_finish(request: DbPagedRequest, reads: DbPagedReads, updates: [DbPageRecord], conflict_ids: [text]) -> Result<DbPagedPlanning, text>:
+    val manifest = request.manifest
+    val policy = request.policy
     if (updates.len() as u64) > policy.max_read_keys: return Err("SCVDB_PAGED_QUOTA")
     # All update buckets need actual old-page proofs, even records whose keys
     # were derived only after alias allocation/global checks.
     var update_keys: [text] = []
     for update in updates: update_keys.push(update.key)
-    missing = db_paged_missing(reads, update_keys, policy)?
+    val missing = db_paged_missing(reads, update_keys, policy)?
     if missing.len() > 0: return Ok(DbPagedPlanning.NeedKeys(request, missing))
     var affected: [DbRecordPage] = []
     var by_bucket: {text: DbRecordPage} = {}
@@ -111,11 +197,11 @@ fn _paged_run(request: DbPagedRequest) -> Result<DbPagedPlanning, text>:
         if by_bucket.contains_key(bucket): affected.push(by_bucket[bucket])
     val build = db_pages_update(manifest.pages, affected, updates)?
     val next = db_paged_manifest_seal(DbPagedManifest(context: manifest.context, policy_revision: policy.revision, structure_revision: manifest.structure_revision, protocol: manifest.protocol, index_version: manifest.index_version, parent_revision: manifest.revision, pages: build.manifest, revision: ""))?
-    Ok(DbPagedPlanning.Ready(DbPagedCommitPlan(manifest: next, build: build, replay: false)))
+    Ok(DbPagedPlanning.Ready(DbPagedCommitPlan(manifest: next, build: build, replay: false, conflict_ids: conflict_ids)))
 
 fn db_paged_begin(manifest: DbPagedManifest, patch: DbPatch, policy: DbPagedPolicy, now: u64) -> Result<DbPagedPlanning, text>:
     db_require_unreserved_entity_kinds(patch)?
-    _paged_run(DbPagedRequest(manifest: manifest, patch: patch, policy: policy, now: now, proofs: []))
+    _paged_run(DbPagedRequest(manifest: manifest, patch: patch, policy: policy, now: now, proofs: [], intent: DbPagedIntent.Apply))
 
 fn db_paged_advance(planning: DbPagedPlanning, proofs: [DbPagedLookupProof]) -> Result<DbPagedPlanning, text>:
     match planning:
@@ -131,7 +217,7 @@ export DbPagedRequest, DbPagedCommitPlan, DbPagedPlanning, db_paged_begin, db_pa
 # Pure infrastructure entry; never a publication capability. The specialized
 # effect owner validates its reserved transition before calling this reducer.
 fn db_paged_transition_begin(manifest: DbPagedManifest, patch: DbPatch, policy: DbPagedPolicy, now: u64) -> Result<DbPagedPlanning, text>:
-    _paged_run(DbPagedRequest(manifest: manifest, patch: patch, policy: policy, now: now, proofs: []))
+    _paged_run(DbPagedRequest(manifest: manifest, patch: patch, policy: policy, now: now, proofs: [], intent: DbPagedIntent.Apply))
 
 fn db_paged_transition_advance(planning: DbPagedPlanning, proofs: [DbPagedLookupProof]) -> Result<DbPagedPlanning, text>:
     match planning:
@@ -142,3 +228,14 @@ fn db_paged_transition_advance(planning: DbPagedPlanning, proofs: [DbPagedLookup
         Ready(_): Err("SCVDB_PAGED_ALREADY_READY")
 
 export db_paged_transition_begin, db_paged_transition_advance
+
+# Typed inputs are not capabilities: every run authenticates and proves the
+# complete evidence/decision relationship, including after NeedKeys resumes.
+fn db_paged_conflict_begin(manifest: DbPagedManifest, patch: DbPatch, policy: DbPagedPolicy, now: u64, intent: DbPagedIntent) -> Result<DbPagedPlanning, text>:
+    db_require_unreserved_entity_kinds(patch)?
+    match intent:
+        Apply: return Err("SCVDB_CONFLICT_INTENT")
+        _: ()
+    _paged_run(DbPagedRequest(manifest: manifest, patch: patch, policy: policy, now: now, proofs: [], intent: intent))
+
+export db_paged_conflict_begin
