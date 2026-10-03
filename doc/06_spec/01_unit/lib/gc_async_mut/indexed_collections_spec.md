@@ -1,7 +1,7 @@
 # Explicit-contract generic indices
 
 Authored REQ-005 unit inventory, not executed runtime evidence.
-Ten production-API cases cover nested optional values, empty/absent lookup, custom equality overwrite,
+Eleven production-API cases cover real interned Symbols, nested optional values, empty/absent lookup, custom equality overwrite,
 colliding text, enum/tuple identity, removal and reinsertion, repeated growth,
 collision-heavy growth, signed hash extremes, and set deduplication/removal.
 
@@ -18,3 +18,8 @@ No iteration ordering or cross-engine parity is promised by this slice.
 
 Run using an admitted self-hosted test runtime when available. No seed fallback,
 runtime PASS, measured latency, or complete REQ-005 acceptance is claimed.
+
+The Symbol case calls the existing `Symbol.from` runtime interner rather than
+constructing numeric IDs. Its runtime dependency remains unvalidated here.
+The optional-value case matches the outer Some explicitly, rejecting flattening
+of Some(nil) into absence even if expected-value construction would also flatten.

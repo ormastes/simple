@@ -3,6 +3,10 @@ Imports production structures; no native Dict or stringified key oracle.
 """
 use std.spec.*
 use std.gc_async_mut.pure.indexed_collections.{HashMap, HashSet}
+use std.nogc_sync_mut.df.mod.{Symbol, symbol_eq}
+
+fn ix_symbol_hash(key: Symbol) -> i64:
+    key.intern_id()
 
 enum IndexColor:
     Red
@@ -34,6 +38,22 @@ fn ix_parity_equal(a: i64, b: i64) -> bool:
     a % 2 == b % 2
 
 describe "explicit-contract generic hash map":
+    it "uses real interned Symbol identity":
+        # @req REQ-005
+        step("Intern equal labels independently and use their symbol identities")
+        val first = Symbol.from("indexed-alpha")
+        val again = Symbol.from("indexed-alpha")
+        val other = Symbol.from("indexed-beta")
+        expect(symbol_eq(first, again)).to_equal(true)
+        expect(symbol_eq(first, other)).to_equal(false)
+        var map: HashMap<Symbol, i64> = HashMap.with_contract(ix_symbol_hash, symbol_eq)
+        map.insert(first, 10)
+        map.insert(again, 20)
+        map.insert(other, 30)
+        expect(map.len()).to_equal(2)
+        expect(map.get(first)).to_equal(Some(20))
+        expect(map.get(other)).to_equal(Some(30))
+
     it "distinguishes a stored absent optional from a missing key":
         # @req REQ-005
         step("Store optional values behind the outer lookup option")
@@ -42,7 +62,11 @@ describe "explicit-contract generic hash map":
         map.insert(1, empty)
         map.insert(2, Some(7))
         expect(map.contains(1)).to_equal(true)
-        expect(map.get(1)).to_equal(Some(empty))
+        match map.get(1):
+            Some(inner):
+                expect(inner).to_be_nil()
+            nil:
+                assert(false, "lookup flattened stored optional absence into missing key")
         expect(map.get(2)).to_equal(Some(Some(7)))
         expect(map.get(3)).to_be_nil()
 
