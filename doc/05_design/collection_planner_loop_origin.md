@@ -16,7 +16,7 @@ reads/escapes and mismatched element types are rejected.
 
 `CollectionPlanNode.loop_origin` defaults to nil, preserving existing call
 constructors. Non-source nodes require exactly one of a resolved operation
-symbol or loop origin. Loop origin stores original loop HIR, induction symbol,
+symbol or loop origin. Loop origin stores the whole original block and loop HIR, induction symbol,
 mapped expression, accumulator symbol and resolved append symbol. Source nodes
 cannot carry it. Validator checks the retained typed operands and identities;
 loop facts remain unknown and all rewrite proofs false.

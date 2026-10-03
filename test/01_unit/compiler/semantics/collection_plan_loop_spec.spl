@@ -107,6 +107,43 @@ describe "canonical typed loop origin":
         plan.nodes[1] = node
         expect(validate_collection_plan(plan).is_err()).to_equal(true)
 
+    it "rejects a forged induction type that disagrees with the source element":
+        var block = cl_block(13, 40, nil)
+        var checked = false
+        match block.stmts[1].kind:
+            case HirStmtKind.Expr(loop_expr):
+                match loop_expr.kind:
+                    case HirExprKind.For(binding, source, body, label):
+                        var changed_source = source
+                        val boolean = HirType(kind: HirTypeKind.Bool, span: Span.default())
+                        changed_source.type_ = HirType(kind: HirTypeKind.Array(boolean, nil), span: Span.default())
+                        var changed_loop = loop_expr
+                        changed_loop.kind = HirExprKind.For(binding, changed_source, body, label)
+                        block.stmts[1] = HirStmt(kind: HirStmtKind.Expr(changed_loop), span: Span.default())
+                        expect(extract_canonical_collection_loop(block, 20, cl_registry()).is_err()).to_equal(true)
+                        checked = true
+                    case _: fail("fixture must contain for loop")
+            case _: fail("fixture must contain loop expression")
+        expect(checked).to_equal(true)
+
+    it "rejects origin mappings that differ from the original append body":
+        var plan = extract_canonical_collection_loop(cl_block(13, 40, nil), 20, cl_registry()).unwrap()
+        var node = plan.nodes[1]
+        var origin = node.loop_origin.unwrap()
+        origin.mapped_expr = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true,
+            type_: cl_type(false), span: Span.default())
+        node.loop_origin = Some(origin)
+        plan.nodes[1] = node
+        expect(validate_collection_plan(plan).is_err()).to_equal(true)
+
+    it "accepts equivalent array types declared at different source spans":
+        var block = cl_block(13, 40, nil)
+        var result = block.value
+        val scalar = HirType(kind: HirTypeKind.Int(64, true), span: Span.at(8, 8, 3))
+        result.type_ = HirType(kind: HirTypeKind.Array(scalar, nil), span: Span.at(9, 9, 3))
+        block.value = result
+        expect(extract_canonical_collection_loop(block, 20, cl_registry()).is_ok()).to_equal(true)
+
     it "discovers one loop region at the block boundary":
         val block = cl_block(13, 40, nil)
         val expr = HirExpr(kind: HirExprKind.Block(block), has_type_: true,
