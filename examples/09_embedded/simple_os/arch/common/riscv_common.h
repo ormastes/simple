@@ -495,14 +495,90 @@ RuntimeValue rt_qemu_exit_success(void)
     return NIL_VALUE;
 }
 
+/* Text equality must compare CONTENT. A heap string (e.g. a file read back
+ * from NVFS, unwrapped from Option<text>) vs a raw untagged char* literal
+ * used to compare by address and was always "not equal". Port of the arm64
+ * fix (arch/arm64/boot/baremetal_stubs.c rt_native_eq, bug 2026-08-11) with
+ * the same safety rules: a raw word is only read as char* when the OTHER side
+ * is a proven HEAP_STRING, small words are rejected, and the scan is bounded
+ * by the heap string's own length plus its terminating NUL. */
+static int riscv_plausible_raw_text(RuntimeValue raw);
+static int riscv_text_eq_heap_vs_raw(const RuntimeString *s, RuntimeValue raw)
+{
+    if (!riscv_plausible_raw_text(raw)) return 0;
+    const char *p = (const char *)(uintptr_t)raw;
+    for (uint64_t i = 0; i < (uint64_t)s->len; i++) {
+        if (p[i] == '\0' || p[i] != s->data[i]) return 0;
+    }
+    return p[s->len] == '\0';
+}
+
+/* A TAG_HEAP word is only dereferenced when it points inside the loaded kernel
+ * image + bss/stack/heap (linker_riscv_common.ld: _start .. _kernel_end),
+ * where every runtime object lives. Raw untagged integers that merely carry
+ * the heap tag bit (e.g. 0x61) must not be read as headers. */
+extern void _start(void);
+extern char _kernel_end[];
+static int riscv_plausible_heap_ref(RuntimeValue v)
+{
+    if (!IS_HEAP(v)) return 0;
+    uintptr_t p = (uintptr_t)DECODE_PTR(v);
+    return p >= (uintptr_t)_start && p + 16U <= (uintptr_t)_kernel_end;
+}
+
+/* Raw (untagged) char* literals live in the image's .rodata; anything outside
+ * the image (small ints, MMIO addresses) is never read as text. */
+static int riscv_plausible_raw_text(RuntimeValue raw)
+{
+    if (((uint64_t)raw & TAG_MASK) == TAG_HEAP) return 0;
+    uintptr_t p = (uintptr_t)raw;
+    return p >= (uintptr_t)_start && p < (uintptr_t)_kernel_end;
+}
+
+static const RuntimeString *riscv_heap_string(RuntimeValue v)
+{
+    if (!riscv_plausible_heap_ref(v)) return 0;
+    const RuntimeString *s = (const RuntimeString *)DECODE_PTR(v);
+    return (s && s->hdr.type == HEAP_STRING) ? s : 0;
+}
+
 RuntimeValue rt_native_eq(RuntimeValue a, RuntimeValue b)
 {
-    return a == b ? 1 : 0;
+    if (a == b) return 1;
+    const RuntimeString *sa = riscv_heap_string(a);
+    const RuntimeString *sb = riscv_heap_string(b);
+    if (sa && sb) {
+        if (sa->len != sb->len) return 0;
+        for (uint64_t i = 0; i < (uint64_t)sa->len; i++) {
+            if (sa->data[i] != sb->data[i]) return 0;
+        }
+        return 1;
+    }
+    if (sa && !IS_HEAP(b)) return riscv_text_eq_heap_vs_raw(sa, b) ? 1 : 0;
+    if (sb && !IS_HEAP(a)) return riscv_text_eq_heap_vs_raw(sb, a) ? 1 : 0;
+    if (!riscv_plausible_heap_ref(a) || !riscv_plausible_heap_ref(b)) return 0;
+#if defined(HEAP_ENUM)
+    /* Enums are heap objects here (rt_enum_new allocates per construction),
+     * so `provider != ParserProviderV1.LegacyReference` compared two fresh
+     * allocations by address and was always true. Compare structurally like
+     * the hosted rt_core_enum_eq: same discriminant, compatible id (0 is the
+     * untyped Result/Option lane), equal payload. */
+    if (IS_HEAP(a) && IS_HEAP(b)) {
+        const RuntimeEnum *ea = (const RuntimeEnum *)DECODE_PTR(a);
+        const RuntimeEnum *eb = (const RuntimeEnum *)DECODE_PTR(b);
+        if (ea && eb && ea->hdr.type == HEAP_ENUM && eb->hdr.type == HEAP_ENUM) {
+            if (ea->discriminant != eb->discriminant) return 0;
+            if (ea->enum_id != 0U && eb->enum_id != 0U && ea->enum_id != eb->enum_id) return 0;
+            return rt_native_eq(ea->payload, eb->payload);
+        }
+    }
+#endif
+    return 0;
 }
 
 RuntimeValue rt_native_neq(RuntimeValue a, RuntimeValue b)
 {
-    return a == b ? 0 : 1;
+    return rt_native_eq(a, b) ? 0 : 1;
 }
 
 /* --------------------------------------------------------------------------

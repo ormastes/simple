@@ -1,0 +1,216 @@
+# RV64 virtio-mmio block device (read + write + flush), pure Simple.
+#
+# MDSOC: feature dimension, drivers layer.
+#
+# QEMU `virt` exposes up to eight virtio-mmio transports at
+# 0x10001000 + slot * 0x1000. This driver owns ONE block transport, a single
+# 8-entry split virtqueue, and a single in-flight request that it completes by
+# polling the used ring (no interrupts). It speaks both the legacy (version 1)
+# and the modern (version 2) MMIO register layouts.
+#
+# DMA memory: the riscv64 SimpleOS kernel runs with satp=Bare, so physical and
+# virtual addresses are identical. The queue, request header, status byte and
+# sector bounce buffer live in a fixed 16 KiB window at RV64_VBLK_DMA_BASE,
+# above the kernel image + 8 MiB stack + 64 MiB heap (linker_riscv_common.ld)
+# and below the region U-Boot relocates itself and the FDT into. Only one
+# Rv64VirtioMmioBlk may be live at a time.
+#
+# No module-level initializers: freestanding entry closures must not depend on
+# module init order, so every constant is a function.
+
+use os.kernel.boot.mmio_hardware.{
+    hardware_mmio_read32, hardware_mmio_write32,
+    hardware_mmio_read16, hardware_mmio_write16,
+    hardware_mmio_read8, hardware_mmio_write8,
+    mmio_memory_barrier
+}
+use os.services.block_device.{BlockDevice}
+
+fn _vblk_mmio_base() -> u64: 0x10001000u64
+fn _vblk_mmio_stride() -> u64: 0x1000u64
+fn _vblk_mmio_slots() -> u64: 8u64
+fn _vblk_dma_base() -> u64: 0x90000000u64
+fn _vblk_queue_size() -> u32: 8u32
+fn _vblk_poll_limit() -> i64: 200000000
+
+# DMA window layout (offsets from _vblk_dma_base()).
+fn _vblk_desc() -> u64: _vblk_dma_base()
+fn _vblk_avail() -> u64: _vblk_dma_base() + 128u64
+fn _vblk_used() -> u64: _vblk_dma_base() + 4096u64
+fn _vblk_req() -> u64: _vblk_dma_base() + 8192u64
+fn _vblk_status() -> u64: _vblk_dma_base() + 8192u64 + 16u64
+fn _vblk_data() -> u64: _vblk_dma_base() + 12288u64
+
+fn _vblk_reg(base: u64, off: u64) -> u32:
+    hardware_mmio_read32(base + off)
+
+fn _vblk_set(base: u64, off: u64, value: u32):
+    hardware_mmio_write32(base + off, value)
+
+fn _vblk_put64(addr: u64, value: u64):
+    hardware_mmio_write32(addr, (value & 0xFFFFFFFFu64).to_u32())
+    hardware_mmio_write32(addr + 4u64, (value >> 32u64).to_u32())
+
+fn _vblk_desc_set(index: u64, addr: u64, len: u32, flags: u32, next: u32):
+    val d = _vblk_desc() + index * 16u64
+    _vblk_put64(d, addr)
+    hardware_mmio_write32(d + 8u64, len)
+    hardware_mmio_write32(d + 12u64, flags | (next << 16u32))
+
+fn _vblk_zero(addr: u64, len: u64):
+    var i: u64 = 0u64
+    while i < len:
+        hardware_mmio_write32(addr + i, 0u32)
+        i = i + 4u64
+
+pub fn rv64_virtio_mmio_blk_slot_count() -> u64:
+    _vblk_mmio_slots()
+
+pub fn rv64_virtio_mmio_blk_slot_is_block(slot: u64) -> bool:
+    """True when transport `slot` carries a virtio block device."""
+    if slot >= _vblk_mmio_slots():
+        return false
+    val base = _vblk_mmio_base() + slot * _vblk_mmio_stride()
+    _vblk_reg(base, 0u64) == 0x74726976u32 and _vblk_reg(base, 8u64) == 2u32
+
+class Rv64VirtioMmioBlk:
+    base: u64
+    version: u32
+    capacity_sectors: u64
+    flush_supported: bool
+    avail_idx: u32
+
+impl Rv64VirtioMmioBlk:
+    static fn open_slot(slot: u64) -> Result<Rv64VirtioMmioBlk, text>:
+        """Reset and bring up the block transport at `slot`; fail closed."""
+        if not rv64_virtio_mmio_blk_slot_is_block(slot):
+            return Err("rv64 virtio-mmio slot is not a block device")
+        val base = _vblk_mmio_base() + slot * _vblk_mmio_stride()
+        val version = _vblk_reg(base, 4u64)
+        if version != 1u32 and version != 2u32:
+            return Err("rv64 virtio-mmio unsupported transport version")
+        # reset -> ACKNOWLEDGE -> DRIVER
+        _vblk_set(base, 0x70u64, 0u32)
+        _vblk_set(base, 0x70u64, 1u32)
+        _vblk_set(base, 0x70u64, 3u32)
+        # Negotiate only VIRTIO_BLK_F_FLUSH (bit 9); modern also needs VERSION_1.
+        _vblk_set(base, 0x14u64, 0u32)
+        val offered = _vblk_reg(base, 0x10u64)
+        val wanted = offered & (1u32 << 9u32)
+        _vblk_set(base, 0x24u64, 0u32)
+        _vblk_set(base, 0x20u64, wanted)
+        if version == 2u32:
+            _vblk_set(base, 0x14u64, 1u32)
+            val offered_hi = _vblk_reg(base, 0x10u64)
+            if (offered_hi & 1u32) == 0u32:
+                return Err("rv64 virtio-mmio modern device lacks VERSION_1")
+            _vblk_set(base, 0x24u64, 1u32)
+            _vblk_set(base, 0x20u64, 1u32)
+            _vblk_set(base, 0x70u64, 11u32)
+            if (_vblk_reg(base, 0x70u64) & 8u32) == 0u32:
+                _vblk_set(base, 0x70u64, 128u32)
+                return Err("rv64 virtio-mmio FEATURES_OK rejected")
+        else:
+            _vblk_set(base, 0x28u64, 4096u32)
+        # Queue 0
+        _vblk_set(base, 0x30u64, 0u32)
+        val max_queue = _vblk_reg(base, 0x34u64)
+        if max_queue < _vblk_queue_size():
+            _vblk_set(base, 0x70u64, 128u32)
+            return Err("rv64 virtio-mmio queue too small")
+        _vblk_zero(_vblk_dma_base(), 16384u64)
+        _vblk_set(base, 0x38u64, _vblk_queue_size())
+        if version == 2u32:
+            _vblk_set(base, 0x80u64, (_vblk_desc() & 0xFFFFFFFFu64).to_u32())
+            _vblk_set(base, 0x84u64, (_vblk_desc() >> 32u64).to_u32())
+            _vblk_set(base, 0x90u64, (_vblk_avail() & 0xFFFFFFFFu64).to_u32())
+            _vblk_set(base, 0x94u64, (_vblk_avail() >> 32u64).to_u32())
+            _vblk_set(base, 0xA0u64, (_vblk_used() & 0xFFFFFFFFu64).to_u32())
+            _vblk_set(base, 0xA4u64, (_vblk_used() >> 32u64).to_u32())
+            _vblk_set(base, 0x44u64, 1u32)
+            _vblk_set(base, 0x70u64, 15u32)
+        else:
+            _vblk_set(base, 0x3Cu64, 4096u32)
+            _vblk_set(base, 0x40u64, (_vblk_dma_base() >> 12u64).to_u32())
+            _vblk_set(base, 0x70u64, 7u32)
+        val cap_lo = _vblk_reg(base, 0x100u64).to_u64()
+        val cap_hi = _vblk_reg(base, 0x104u64).to_u64()
+        val capacity = cap_lo | (cap_hi << 32u64)
+        if capacity == 0u64:
+            return Err("rv64 virtio-mmio block device reports zero capacity")
+        Ok(Rv64VirtioMmioBlk(
+            base: base,
+            version: version,
+            capacity_sectors: capacity,
+            flush_supported: wanted != 0u32,
+            avail_idx: 0u32
+        ))
+
+    me submit(kind: u32, lba: u64, with_data: bool, device_writes_data: bool) -> Result<bool, text>:
+        """Post one request chain (header [, data], status) and poll it done."""
+        hardware_mmio_write32(_vblk_req(), kind)
+        hardware_mmio_write32(_vblk_req() + 4u64, 0u32)
+        _vblk_put64(_vblk_req() + 8u64, lba)
+        hardware_mmio_write8(_vblk_status(), 0xFFu8)
+        if with_data:
+            _vblk_desc_set(0u64, _vblk_req(), 16u32, 1u32, 1u32)
+            val data_flags = if device_writes_data: 3u32 else: 1u32
+            _vblk_desc_set(1u64, _vblk_data(), 512u32, data_flags, 2u32)
+            _vblk_desc_set(2u64, _vblk_status(), 1u32, 2u32, 0u32)
+        else:
+            _vblk_desc_set(0u64, _vblk_req(), 16u32, 1u32, 1u32)
+            _vblk_desc_set(1u64, _vblk_status(), 1u32, 2u32, 0u32)
+        val slot = (self.avail_idx % _vblk_queue_size()).to_u64()
+        hardware_mmio_write16(_vblk_avail() + 4u64 + slot * 2u64, 0u16)
+        mmio_memory_barrier()
+        val next_idx = (self.avail_idx + 1u32) & 0xFFFFu32
+        hardware_mmio_write16(_vblk_avail() + 2u64, next_idx.to_u16())
+        mmio_memory_barrier()
+        _vblk_set(self.base, 0x50u64, 0u32)
+        var polls: i64 = 0
+        while hardware_mmio_read16(_vblk_used() + 2u64).to_u32() != next_idx:
+            polls = polls + 1
+            if polls > _vblk_poll_limit():
+                return Err("rv64 virtio-mmio request timed out")
+        mmio_memory_barrier()
+        self.avail_idx = next_idx
+        _vblk_set(self.base, 0x64u64, _vblk_reg(self.base, 0x60u64))
+        if hardware_mmio_read8(_vblk_status()) != 0u8:
+            return Err("rv64 virtio-mmio device reported request failure")
+        Ok(true)
+
+impl BlockDevice for Rv64VirtioMmioBlk:
+    me fn read_sector(lba: u64) -> Result<[u8], text>:
+        if lba >= self.capacity_sectors:
+            return Err("rv64 virtio-mmio read beyond capacity")
+        val done = self.submit(0u32, lba, true, true)
+        if done.is_err():
+            return Err(done.unwrap_err())
+        var out: [u8] = []
+        var i: u64 = 0u64
+        while i < 512u64:
+            out = out.push(hardware_mmio_read8(_vblk_data() + i))
+            i = i + 1u64
+        Ok(out)
+
+    me fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+        if lba >= self.capacity_sectors:
+            return Err("rv64 virtio-mmio write beyond capacity")
+        if data.len() != 512:
+            return Err("rv64 virtio-mmio write requires exactly one 512-byte sector")
+        var i: i64 = 0
+        while i < 512:
+            hardware_mmio_write8(_vblk_data() + i.to_u64(), data[i])
+            i = i + 1
+        self.submit(1u32, lba, true, false)
+
+    me fn sector_size() -> u32:
+        512u32
+
+    me fn sector_count() -> u64:
+        self.capacity_sectors
+
+    me fn flush() -> Result<bool, text>:
+        if not self.flush_supported:
+            return Err("rv64 virtio-mmio device did not offer VIRTIO_BLK_F_FLUSH")
+        self.submit(4u32, 0u64, false, false)

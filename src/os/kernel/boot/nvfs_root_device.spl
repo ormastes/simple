@@ -1,0 +1,79 @@
+# Lean NVFS-root mount on a caller-owned BlockDevice.
+#
+# MDSOC: feature dimension, kernel boot layer.
+#
+# boot_fs.spl mounts the same NVFS layout (replicas at LBA 0/1, DBFS backing
+# superblock at LBA 2, arena at LBA 4+) through the full os.services.vfs hub,
+# whose closure (syscall shims, scheduler, loaders) does not link on the
+# freestanding riscv64 runtime. This module performs the identical selection
+# and open with only std.fs_driver + std.db pieces, so a board/arch entry that
+# owns its own storage transport can mount NVFS as its root with NO fallback.
+
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.nvfs_superblock.{
+    NvfsSuperblock, NVFS_VERSION, nvfs_superblock_read_from_bytes
+}
+use std.db.dbfs_engine.superblock.{
+    dbfs_superblock_set_device, dbfs_superblock_probe_disk,
+    dbfs_superblock_read_from_disk, dbfs_superblock_validate
+}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.fs_driver.types.{MountOptions}
+use std.fs_driver.error.{FsError}
+
+pub fn nvfs_root_fs_error_text(err: FsError) -> text:
+    match err:
+        case FsError.Unsupported: "Unsupported"
+        case FsError.Transient(_): "Transient"
+        case FsError.Corrupt: "Corrupt"
+        case FsError.NoSpace: "NoSpace"
+        case FsError.Permission: "Permission"
+        case FsError.NotFound: "NotFound"
+        case FsError.AlreadyExists: "AlreadyExists"
+        case FsError.Busy: "Busy"
+        case FsError.IoError(_): "IoError"
+        case FsError.Interrupted: "Interrupted"
+        case FsError.TooLarge: "TooLarge"
+        case FsError.ReadOnly: "ReadOnly"
+        case FsError.InvalidArg: "InvalidArg"
+        case FsError.StaleHandle: "StaleHandle"
+        case FsError.PathTraversal: "PathTraversal"
+
+fn _nvfs_root_replica(dev: BlockDevice, lba: u64, expected_replica: u8) -> NvfsSuperblock?:
+    val bytes = dev.read_sector(lba)
+    if bytes.is_err():
+        return nil
+    val parsed = nvfs_superblock_read_from_bytes(bytes.unwrap())
+    if parsed.is_err():
+        return nil
+    val sb = parsed.unwrap()
+    if sb.version != NVFS_VERSION or sb.replica_id != expected_replica:
+        return nil
+    Some(sb)
+
+pub fn nvfs_root_device_has_superblock(dev: BlockDevice) -> bool:
+    """True when either checksum-valid NVFS replica (LBA 0 or 1) is present."""
+    if _nvfs_root_replica(dev, 0u64, 0u8).?:
+        return true
+    _nvfs_root_replica(dev, 1u64, 1u8).?
+
+pub fn nvfs_root_device_open(dev: BlockDevice) -> Result<NvfsDriver, text>:
+    """Open and mount the nvfs-dbfs-backed-v1 root on `dev`; fail closed."""
+    if not nvfs_root_device_has_superblock(dev):
+        return Err("no checksum-valid NVFS superblock replica")
+    dbfs_superblock_set_device(dev)
+    if not dbfs_superblock_probe_disk():
+        return Err("NVFS DBFS backing superblock missing at LBA 2")
+    val backing = dbfs_superblock_read_from_disk()
+    if not dbfs_superblock_validate(backing):
+        return Err("NVFS DBFS backing superblock invalid")
+    if backing.block_count < 3u64:
+        return Err("NVFS DBFS backing block count invalid")
+    val opened = NvfsDriver.new_on_device(
+        "nvfs-dbfs-backed-v1", dev, 4, backing.block_count.to_i64())
+    if opened.is_err():
+        return Err("NVFS DBFS-backed provider open failed: " + nvfs_root_fs_error_text(opened.unwrap_err()))
+    var driver = opened.unwrap()
+    if driver.mount(MountOptions.default()).is_err():
+        return Err("NVFS mount failed")
+    Ok(driver)

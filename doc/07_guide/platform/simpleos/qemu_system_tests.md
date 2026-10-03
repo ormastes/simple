@@ -183,6 +183,50 @@ inside the scene; body, content, hit, and layout bounds retain window geometry.
 This source path is not compile-verified while TODO 548 blocks the pure-Simple
 checker; no QEMU receipt is claimed by this section.
 
+## RV64 NVFS-Root Real-Firmware Lane (QEMU-only)
+
+One command builds the riscv64 kernel and an NVFS root image, boots them through
+real firmware twice, and runs a blank-root negative control:
+
+```bash
+cargo build --release --bin simple   # in src/compiler_rust (the seed builds this lane)
+sh scripts/check/check-simpleos-riscv64-nvfs-qemu.shs          # ~10 min (mkfs.nvfs is ~8 min)
+NVFS_IMAGE=<prebuilt.img> sh scripts/check/check-simpleos-riscv64-nvfs-qemu.shs   # reuse an image
+sh scripts/check/check-simpleos-riscv64-nvfs-qemu.shs --selftest
+```
+
+Host packages: `qemu-system-misc`, `opensbi` (`fw_jump.bin`), `u-boot-qemu`
+(`qemu-riscv64_smode/u-boot.bin`), `u-boot-tools`, `dosfstools`, `mtools`,
+`fdisk`, binutils for riscv64. Missing pieces are `ERROR` (exit 2), never PASS.
+
+- **Chain:** `-bios fw_jump.bin` (OpenSBI) -> U-Boot S-mode (placed at
+  `0x80200000` by `-device loader`, standing in for the board SPL) ->
+  `boot.scr` on a FAT boot partition -> `load ... 0x80200000 /Image` ->
+  `booti`. No `-kernel`, no `isa-debug-exit`/`sifive_test` oracle; the argv is
+  self-checked.
+- **Root:** `nvfs-dbfs-backed-v1` image from `src/os/port/mkfs_nvfs.spl` on a
+  second virtio-mmio disk; driver `src/os/drivers/virtio/rv64_virtio_mmio_blk.spl`,
+  mount `src/os/kernel/boot/nvfs_root_device.spl`, entry
+  `examples/09_embedded/simple_os/arch/riscv64/nvfs_root_entry.spl`. No
+  FAT/ramfs/DBFS fallback: no NVFS root => `NVFS_ROOT_BOOT_FAILED`.
+- **Markers (boot 1):** `[NVFS] mounted as root filesystem provider=nvfs-dbfs-backed-v1`,
+  `ls / : /bin/hello.spl`, `cat /etc/motd: ...`, `write+read /rv64-sanity.txt ok`,
+  `NVFS_PROGRAM_HELLO_OK` (printed by `/bin/hello.spl`, loaded from NVFS and run
+  on the in-guest interpreter), `persistence check: written:first-boot`,
+  `NVFS_RV64_ROOT_SANITY_PASSED`. **Boot 2** (same disk) additionally needs
+  `ls / : /boot-marker.txt` and `persisted:match content=nvfs-persist-ok`.
+  **Negative control:** a blank root disk must print `NVFS_ROOT_BOOT_FAILED`.
+- **Receipt:** `build/verify/simpleos-riscv64-nvfs/receipt.env` (seed, kernel,
+  Image, NVFS image, boot media, OpenSBI, U-Boot and QEMU sha256s).
+
+**Physical board (StarFive VisionFive 2, JH7110): BLOCKED** — see
+`doc/08_tracking/bug/simpleos_riscv64_nvfs_root_board_blocked_2026-10-03.md`.
+The boot side is board-shaped (the VF2's own OpenSBI + U-Boot run the same
+`boot.scr`/`booti` from an SD-card FAT partition; DRAM covers `0x80200000`),
+but this kernel has no JH7110 UART provider (DW 8250, reg-shift 2, 32-bit
+access) and no SD/eMMC/PCIe-NVMe block driver to host the NVFS root. Expected
+board markers, once unblocked, are the same serial markers listed above.
+
 ## Direct Boot Fallback
 
 While P1 system-test automation is open, use direct `qemu-system-*` commands for manual verification. This is the known-good riscv64 boot command:
