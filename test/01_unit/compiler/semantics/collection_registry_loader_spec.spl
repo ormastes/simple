@@ -37,7 +37,8 @@ operations:
 """
 
 fn registry_test_binding(snapshot: CollectionRegistrySnapshotV1) -> CollectionRegistryBindingV1:
-    CollectionRegistryBindingV1(symbol_id: 42, stable_name: "fixture.array.map",
+    CollectionRegistryBindingV1(module_path: "fixture/module.spl",
+        symbol_id: 42, stable_name: "fixture.array.map",
         receiver: HirPerfReceiverKind.Array,
         signature_fingerprint: "fixture-array-map-signature", backend: "native",
         evidence_receipt: "fixture-receipt-not-production-evidence",
@@ -83,7 +84,8 @@ describe "versioned collection registry content and resolved symbol binding":
         val source = registry_test_source()
         expect(collection_registry_parse(source.replace("\"interpreter\", \"native\"", "\"native\", \"native\"")).is_err()).to_equal(true)
         expect(collection_registry_parse(source.replace("fixture-receipt-not-production-evidence", "")).is_err()).to_equal(true)
-        val row_start = source.index_of("  - stable_name:").unwrap()
+        val row_start = source.index_of("  - stable_name:")
+        expect(row_start).to_be_greater_than(-1)
         expect(collection_registry_parse(source + source.substring(row_start)).is_err()).to_equal(true)
 
     it "rejects ill-typed counts and contradictory allocation metadata":
@@ -129,6 +131,21 @@ describe "versioned collection registry content and resolved symbol binding":
         val binding = registry_test_binding(snapshot)
         snapshot.rows[0].signature_fingerprint = "forged"
         expect(collection_registry_bind(snapshot, [binding]).is_err()).to_equal(true)
+
+    it "requires one explicit module owner for module-local symbol IDs":
+        val snapshot = collection_registry_parse(registry_test_source()).unwrap()
+        var first = registry_test_binding(snapshot)
+        first.module_path = ""
+        expect(collection_registry_bind(snapshot, [first]).is_err()).to_equal(true)
+        first = registry_test_binding(snapshot)
+        var other = registry_test_binding(snapshot)
+        other.module_path = "other/module.spl"
+        expect(collection_registry_bind(snapshot, [first, other]).is_err()).to_equal(true)
+
+    it "rejects worst costs below expected costs and keyed operations without key contracts":
+        val source = registry_test_source()
+        expect(collection_registry_parse(source.replace("worst_cost: \"linear\"", "worst_cost: \"constant\"")).is_err()).to_equal(true)
+        expect(collection_registry_parse(source.replace("operation: \"map\"", "operation: \"distinct-by\"")).is_err()).to_equal(true)
         snapshot = collection_registry_parse(registry_test_source()).unwrap()
         snapshot.source_text = snapshot.source_text + "unknown: true\n"
         expect(collection_registry_bind(snapshot, [binding]).is_err()).to_equal(true)
