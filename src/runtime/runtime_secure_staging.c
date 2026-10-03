@@ -42,6 +42,20 @@ static int secure_copy_path(const uint8_t* ptr, uint64_t len, char* out, size_t 
 /* Forward declaration -- defined below, ahead of its other two call sites.
  * rt_file_create_excl needs it too: see the call site for why. */
 static int spl_secure_widen_long_path(const char* path, wchar_t* out);
+
+/* The full C runtime exports this in runtime_native.c. Linux Stage2 has the
+ * narrow bootstrap_linux provider; Windows Stage2 needs the same real owner
+ * here because its Rust archive cannot include the full C runtime. */
+int rt_dir_is_real_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+    char path[RT_SECURE_PATH_MAX];
+    wchar_t wide_path[32768];
+    if (!secure_copy_path(path_ptr, path_len, path, sizeof(path)) ||
+        !spl_secure_widen_long_path(path, wide_path)) return 0;
+    DWORD attrs = GetFileAttributesW(wide_path);
+    return attrs != INVALID_FILE_ATTRIBUTES &&
+        (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+}
 #endif
 
 int rt_file_create_excl(const char* path_ptr, int64_t path_len,
