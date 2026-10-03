@@ -1,0 +1,248 @@
+# Local trusted-policy retention effects. Pins/classification come from the
+# application owner, not untrusted evidence. No provider wait or caller deletion
+# boolean authorizes unlink. Bounded reference lane: 256 entries, 32MiB read set.
+use app.scv.db.retention_codec.*
+use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_store_get, db_evidence_store_put}
+use app.scv.db.evidence_delete.{db_evidence_delete_held}
+use app.scv.db.local_store.{db_store_read, db_store_commit_held}
+use std.scv.db_retention.*
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release, scv_sj_lease_holder, scv_sj_lease_is_held}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.common.crypto.sha256.{sha256_text}
+
+fn db_retention_store_quota() -> DbEvidenceStoreQuota:
+    DbEvidenceStoreQuota(max_content_bytes: 8388608, max_envelope_bytes: 8409088, max_dependencies: 256)
+
+fn db_retention_open(root: text) -> Result<DbStoredRetention, text>:
+    val current = db_store_read(root, "retention")
+    if current.code == "empty": return Ok(DbStoredRetention(head: "", catalog: DbRetentionCatalog(entries: [], pins: [], rollups: [])))
+    if current.code != "ok": return Err(current.code)
+    Ok(DbStoredRetention(head: current.head, catalog: db_retention_catalog_decode(current.state)?))
+
+fn _retention_lock(root: text) -> Result<text, text>:
+    val nonce = random_hex(16) ?? ""
+    if nonce.len() != 32: return Err("SCVDB_STORE_ENTROPY")
+    val holder = "retention-{nonce}"
+    if not scv_sj_lease_acquire(root, holder).starts_with("ok:"): return Err("SCVDB_STORE_BUSY")
+    if scv_sj_lease_holder(root) != holder: return Err("SCVDB_STORE_LEASE_IDENTITY")
+    Ok(holder)
+
+fn _retention_release(root: text, holder: text, result: Result<DbStoredRetention, text>) -> Result<DbStoredRetention, text>:
+    if not scv_sj_lease_release(root, holder).starts_with("ok:") or scv_sj_lease_is_held(root): return Err("SCVDB_STORE_RELEASE_UNCERTAIN")
+    result
+
+fn _retention_publish(root: text, holder: text, expected: text, catalog: DbRetentionCatalog) -> Result<DbStoredRetention, text>:
+    val encoded = db_retention_catalog_encode(catalog)?
+    val current = db_store_read(root, "retention")
+    if current.code != "ok" and current.code != "empty": return Err(current.code)
+    if current.head != expected: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    val parent = if current.code == "ok" and current.state == encoded: current.parent else: expected
+    val written = db_store_commit_held(root, holder, parent, sha256_text(encoded), encoded, "retention")
+    if written.code != "ok": return Err(written.code)
+    Ok(DbStoredRetention(head: written.head, catalog: catalog))
+
+fn _retention_nodes(root: text, parent: text, catalog: DbRetentionCatalog) -> Result<[DbEvidenceNode], text>:
+    var nodes: [DbEvidenceNode] = []
+    var total = 0
+    for entry in catalog.entries:
+        match db_evidence_store_get(root, parent, entry.digest, entry.created_day, db_retention_store_quota()):
+            Ok(node):
+                if node.content.len() > 33554432 - total: return Err("SCVDB_RETENTION_READ_QUOTA")
+                total = total + node.content.len()
+                nodes.push(node)
+            Err(error):
+                # Unavailable is not proof of absence and never permits unlink;
+                # the deletion owner performs authoritative absence observation.
+                nodes.push(DbEvidenceNode(digest: entry.digest, content: [], availability: "missing", created_day: entry.created_day, dependencies: []))
+    Ok(nodes)
+
+fn _retention_rollup(root: text, parent: text, digest: text) -> Result<DbRetainedRollup, text>:
+    var node = db_evidence_store_get(root, parent, digest, 0, db_retention_store_quota())?
+    val value = db_retained_rollup_decode(node.content)?
+    var current = value
+    var visited: [text] = [node.digest]
+    var total = node.content.len()
+    while current.rollup.generation > 1:
+        if visited.len() >= 64: return Err("SCVDB_RETENTION_HISTORY_QUOTA")
+        if node.dependencies.len() != 1 or visited.contains(node.dependencies[0]): return Err("SCVDB_ROLLUP_PROVENANCE")
+        node = db_evidence_store_get(root, parent, node.dependencies[0], 0, db_retention_store_quota())?
+        if node.content.len() > 33554432 - total: return Err("SCVDB_RETENTION_READ_QUOTA")
+        total = total + node.content.len()
+        visited.push(node.digest)
+        val previous = db_retained_rollup_decode(node.content)?
+        if db_rollup(previous.rollup, current.inputs)? != current.rollup: return Err("SCVDB_ROLLUP_PROVENANCE")
+        current = previous
+    if current.rollup.generation != 1 or current.rollup.prior_revision != "" or node.dependencies.len() != 0: return Err("SCVDB_ROLLUP_PROVENANCE")
+    Ok(value)
+
+fn _retention_covers(value: DbRetainedRollup, digest: text) -> bool:
+    for input in value.inputs:
+        if input.payload_digest == digest: return true
+    false
+
+fn _retention_register_owned(root: text, parent: text, holder: text, expected: text, digest: text, created_day: u64, classification: text) -> Result<DbStoredRetention, text>:
+    var current = db_retention_open(root)?
+    if current.head != expected: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    if not ["public", "internal", "restricted"].contains(classification): return Err("SCVDB_RETENTION_STATE")
+    val node = db_evidence_store_get(root, parent, digest, created_day, db_retention_store_quota())?
+    for entry in current.catalog.entries:
+        if entry.digest == digest:
+            if entry.created_day != created_day or entry.classification != classification: return Err("SCVDB_RETENTION_IDENTITY")
+            return _retention_publish(root, holder, current.head, current.catalog)
+    if current.catalog.entries.len() >= 256: return Err("SCVDB_RETENTION_QUOTA")
+    current.catalog.entries.push(DbRetentionEntry(digest: node.digest, created_day: created_day, classification: classification, state: "active", rollup_digest: "", deletion_status: ""))
+    _retention_publish(root, holder, current.head, current.catalog)
+
+fn db_retention_register(root: text, parent: text, expected: text, digest: text, created_day: u64, classification: text) -> Result<DbStoredRetention, text>:
+    val holder = _retention_lock(root)?
+    val result = _retention_register_owned(root, parent, holder, expected, digest, created_day, classification)
+    _retention_release(root, holder, result)
+
+fn _retention_pins_owned(root: text, parent: text, holder: text, expected: text, pins: [DbEvidencePin], now_day: u64) -> Result<DbStoredRetention, text>:
+    var current = db_retention_open(root)?
+    if current.head != expected: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    if pins.len() > 256: return Err("SCVDB_RETENTION_QUOTA")
+    val nodes = _retention_nodes(root, parent, current.catalog)?
+    val closure = db_retention_plan(nodes, pins, now_day)?
+    current.catalog.pins = pins
+    _retention_publish(root, holder, current.head, current.catalog)
+
+# Trusted local policy mutation; exact unresolved/release/pending closure must
+# exist now. A new pin cannot resurrect already removed raw bytes.
+fn db_retention_set_pins(root: text, parent: text, expected: text, pins: [DbEvidencePin], now_day: u64) -> Result<DbStoredRetention, text>:
+    val holder = _retention_lock(root)?
+    val result = _retention_pins_owned(root, parent, holder, expected, pins, now_day)
+    _retention_release(root, holder, result)
+
+fn _retention_resume_owned(root: text, parent: text, holder: text, expected: text, now_day: u64) -> Result<DbStoredRetention, text>:
+    var current = db_retention_open(root)?
+    if current.head != expected: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    val nodes = _retention_nodes(root, parent, current.catalog)?
+    # Current pins are reread under exactly the same writer lease as unlink.
+    val plan = db_retention_plan(nodes, current.catalog.pins, now_day)?
+    # A readable pending HEAD may come from an earlier failed sync. Restore its
+    # durability before any unlink, including after a process restart.
+    current = _retention_publish(root, holder, current.head, current.catalog)?
+    for index in 0..current.catalog.entries.len():
+        var entry = current.catalog.entries[index]
+        if entry.state != "delete_pending": continue
+        if plan.protected.contains(entry.digest) or entry.classification == "restricted":
+            entry.state = "active"
+            entry.rollup_digest = ""
+            current.catalog.entries[index] = entry
+            current = _retention_publish(root, holder, current.head, current.catalog)?
+            continue
+        if entry.created_day > now_day or now_day - entry.created_day < 28: return Err("SCVDB_RETENTION_TOO_YOUNG")
+        val rollup = _retention_rollup(root, parent, entry.rollup_digest)?
+        if not _retention_covers(rollup, entry.digest): return Err("SCVDB_ROLLUP_PROVENANCE")
+        # The pending catalog and rollup were durably published before here.
+        # Existing corrupt/link/unreadable content errors; only verified unlink
+        # or explicit already-absent+directory-sync returns an actual receipt.
+        val receipt = db_evidence_delete_held(root, parent, entry.digest, entry.created_day, db_retention_store_quota(), holder)?
+        if receipt.digest != entry.digest: return Err("SCVDB_RETENTION_IDENTITY")
+        entry.state = "deleted"
+        entry.deletion_status = receipt.status
+        current.catalog.entries[index] = entry
+        current = _retention_publish(root, holder, current.head, current.catalog)?
+    _retention_publish(root, holder, current.head, current.catalog)
+
+fn db_retention_resume(root: text, parent: text, expected: text, now_day: u64) -> Result<DbStoredRetention, text>:
+    val holder = _retention_lock(root)?
+    val result = _retention_resume_owned(root, parent, holder, expected, now_day)
+    _retention_release(root, holder, result)
+
+fn _retention_prepare_owned(root: text, parent: text, holder: text, expected: text, now_day: u64, day: u64, cohort: text, rollup_digest: text) -> Result<DbStoredRetention, text>:
+    var current = db_retention_open(root)?
+    if current.head != expected: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    val nodes = _retention_nodes(root, parent, current.catalog)?
+    val plan = db_retention_plan(nodes, current.catalog.pins, now_day)?
+    val rollup = _retention_rollup(root, parent, rollup_digest)?
+    if rollup.rollup.day != day or rollup.rollup.cohort != cohort: return Err("SCVDB_ROLLUP_CONTEXT")
+    for index in 0..current.catalog.entries.len():
+        var entry = current.catalog.entries[index]
+        if entry.state != "active" or entry.classification == "restricted" or not plan.deletions.contains(entry.digest): continue
+        if not _retention_covers(rollup, entry.digest): continue
+        # Actual raw metadata is checked again, not just membership in a caller
+        # list. Digest verification binds its detail and dependency envelope.
+        val input = db_retention_observation_decode(nodes[index])?
+        if input.day != day or input.cohort != cohort: return Err("SCVDB_ROLLUP_CONTEXT")
+        entry.state = "delete_pending"
+        entry.rollup_digest = rollup_digest
+        current.catalog.entries[index] = entry
+    var refs: [DbRetentionRollupRef] = []
+    for previous in current.catalog.rollups:
+        if previous.day != day or previous.cohort != cohort: refs.push(previous)
+    refs.push(DbRetentionRollupRef(day: day, cohort: cohort, digest: rollup_digest))
+    current.catalog.rollups = refs
+    _retention_publish(root, holder, current.head, current.catalog)
+
+# Phase one is intentionally public: a durable pending generation supports
+# crash/restart tests and explicit operational recovery, never a fake receipt.
+fn db_retention_prepare(root: text, parent: text, expected: text, now_day: u64, day: u64, cohort: text) -> Result<DbStoredRetention, text>:
+    val current = db_retention_open(root)?
+    if current.head != expected: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    val nodes = _retention_nodes(root, parent, current.catalog)?
+    val plan = db_retention_plan(nodes, current.catalog.pins, now_day)?
+    var previous = db_rollup_empty(day, cohort, "item2-daily-v1")
+    var inputs: [DbRollupInput] = []
+    var dependencies: [text] = []
+    var previous_digest = ""
+    for ref in current.catalog.rollups:
+        if ref.day == day and ref.cohort == cohort:
+            val retained = _retention_rollup(root, parent, ref.digest)?
+            previous = retained.rollup
+            inputs = retained.inputs
+            dependencies = [ref.digest]
+            previous_digest = ref.digest
+    for index in 0..nodes.len():
+        if current.catalog.entries[index].classification == "restricted": continue
+        match db_retention_observation_decode(nodes[index]):
+            Ok(input):
+                if input.day == day and input.cohort == cohort:
+                    if inputs.len() >= 4096: return Err("SCVDB_RETENTION_QUOTA")
+                    var known = false
+                    for retained in inputs:
+                        if retained.identity == input.identity:
+                            if retained != input: return Err("SCVDB_OBSERVATION_IDENTITY_COLLISION")
+                            known = true
+                    if not known: inputs.push(input)
+            Err(error):
+                # Unknown/unavailable evidence is retained, never guessed into
+                # an observation or automatically assigned deletion eligibility.
+                continue
+    if inputs.len() == 0: return Err("SCVDB_RETENTION_NO_OBSERVATIONS")
+    val rebuilt = db_rollup(previous, inputs)?
+    var rollup_digest = previous_digest
+    if rebuilt.revision != previous.revision:
+        val content = db_retained_rollup_encode(DbRetainedRollup(rollup: rebuilt, inputs: inputs))?
+        rollup_digest = db_evidence_digest(content, dependencies)?
+        val stored = db_evidence_store_put(root, parent, DbEvidenceNode(digest: rollup_digest, content: content, availability: "available", created_day: now_day, dependencies: dependencies), db_retention_store_quota())?
+    val holder = _retention_lock(root)?
+    val result = _retention_prepare_owned(root, parent, holder, expected, now_day, day, cohort, rollup_digest)
+    _retention_release(root, holder, result)
+
+fn db_retention_run(root: text, parent: text, expected: text, now_day: u64, day: u64, cohort: text) -> Result<DbStoredRetention, text>:
+    val prepared = db_retention_prepare(root, parent, expected, now_day, day, cohort)?
+    db_retention_resume(root, parent, prepared.head, now_day)
+
+fn db_retention_resolve(root: text, parent: text, digest: text) -> Result<text, text>:
+    val current = db_retention_open(root)?
+    for entry in current.catalog.entries:
+        if entry.digest != digest: continue
+        var resolution = "unavailable"
+        match db_evidence_store_get(root, parent, digest, entry.created_day, db_retention_store_quota()):
+            Ok(node):
+                if entry.classification == "restricted": return Ok("restricted")
+                if db_evidence_resolution(node, digest) == "exact": return Ok("exact")
+            Err(error): resolution = "unavailable"
+        if entry.classification == "restricted": return Ok("unavailable")
+        if entry.rollup_digest != "":
+            match _retention_rollup(root, parent, entry.rollup_digest):
+                Ok(rollup):
+                    if _retention_covers(rollup, digest): return Ok("aggregated")
+                Err(error): return Ok("unavailable")
+        return Ok(resolution)
+    Ok("unavailable")
+
+export db_retention_store_quota, db_retention_open, db_retention_register, db_retention_set_pins
+export db_retention_prepare, db_retention_resume, db_retention_run, db_retention_resolve

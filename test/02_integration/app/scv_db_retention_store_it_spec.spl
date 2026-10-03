@@ -1,0 +1,158 @@
+# Real filesystem scenarios, not process-crash or hardware durability evidence.
+use std.spec.{describe, it, expect}
+use app.io.mod.{cwd, dir_create, file_write_bytes, file_delete, process_run_bounded}
+use app.scv.db.retention_codec.*
+use app.scv.db.retention_store.*
+use app.scv.db.evidence_store.{db_evidence_store_put, db_evidence_store_get}
+use app.scv.db.evidence_delete.{db_evidence_delete_held}
+use std.scv.db_retention.*
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_entry_present}
+
+fn setup_item2_retention_paths() -> (text, text):
+    val base = secure_temp_dir(path_final_existing(cwd()).unwrap().path, "item2-retention-fixture-").unwrap()
+    val root = "{base}/source"
+    val parent = "{base}/external"
+    expect(dir_create(root, false)).to_be(true)
+    expect(dir_create(parent, false)).to_be(true)
+    val (_out, _err, code) = process_run_bounded("git", ["init", "--quiet", root], 30000, 4096)
+    expect(code).to_equal(0)
+    (root, parent)
+
+fn setup_item2_retention_node(root: text, parent: text, identity: text, duration: u64, created_day: u64, dependencies: [text] = []) -> DbEvidenceNode:
+    val content = db_retention_observation_encode(identity, 0, "linux", "PASS", duration, [7u8;128]).unwrap()
+    val node = DbEvidenceNode(digest: db_evidence_digest(content, dependencies).unwrap(), content: content, availability: "available", created_day: created_day, dependencies: dependencies)
+    db_evidence_store_put(root, parent, node, db_retention_store_quota()).unwrap()
+
+fn setup_item2_retention_raw(parent: text, digest: text) -> text:
+    "{parent}/scv-evidence-v1/{digest}.scve"
+
+describe "Durable evidence retention orchestration":
+    it "rejects catalog truncation and labels without actual deletion receipt fields":
+        val empty = DbRetentionCatalog(entries: [], pins: [], rollups: [])
+        val encoded = db_retention_catalog_encode(empty).unwrap()
+        expect(db_retention_catalog_decode(encoded)).to_equal(Ok(empty))
+        expect(db_retention_catalog_decode(encoded[0:encoded.len() - 3] + "\n")).to_equal(Err("SCVDB_FRAME_TRUNCATED"))
+        expect(db_retention_catalog_decode(encoded[0:encoded.len() - 1] + "010100\n")).to_equal(Err("SCVDB_RETENTION_FORMAT"))
+        val forged = DbRetentionEntry(digest: "a".repeat(64), created_day: 0, classification: "public", state: "deleted", rollup_digest: "b".repeat(64), deletion_status: "")
+        expect(db_retention_catalog_encode(DbRetentionCatalog(entries: [forged], pins: [], rollups: []))).to_equal(Err("SCVDB_RETENTION_STATE"))
+
+    it "retains day27 raw data and deletes only after verified day28 rollup publication":
+        val (root, parent) = setup_item2_retention_paths()
+        val node = setup_item2_retention_node(root, parent, "first", 10, 0)
+        val registered = db_retention_register(root, parent, "", node.digest, 0, "public").unwrap()
+        val young = db_retention_run(root, parent, registered.head, 27, 0, "linux").unwrap()
+        expect(young.catalog.entries[0].state).to_equal("active")
+        expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("exact"))
+        val expired = db_retention_run(root, parent, young.head, 28, 0, "linux").unwrap()
+        expect(expired.catalog.entries[0].state).to_equal("deleted")
+        expect(expired.catalog.entries[0].deletion_status).to_equal("unlinked")
+        expect(path_entry_present(setup_item2_retention_raw(parent, node.digest))).to_equal(Ok(false))
+        expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("aggregated"))
+        val rollup = db_evidence_store_get(root, parent, expired.catalog.entries[0].rollup_digest, 0, db_retention_store_quota()).unwrap()
+        val decoded = db_retained_rollup_decode(rollup.content).unwrap()
+        expect(decoded.rollup.count).to_equal(1u64)
+        expect(decoded.rollup.duration_sum).to_equal(10u64)
+        expect(decoded.inputs[0].payload_digest).to_equal(node.digest)
+
+    it "protects exact transitive release dependencies despite expired pin timestamps":
+        val (root, parent) = setup_item2_retention_paths()
+        val dependency = setup_item2_retention_node(root, parent, "dependency", 10, 0)
+        val owner = setup_item2_retention_node(root, parent, "owner", 20, 0, [dependency.digest])
+        val first = db_retention_register(root, parent, "", dependency.digest, 0, "public").unwrap()
+        val second = db_retention_register(root, parent, first.head, owner.digest, 0, "public").unwrap()
+        val pinned = db_retention_set_pins(root, parent, second.head, [DbEvidencePin(root: owner.digest, reason: "release", expires_day: 1)], 28).unwrap()
+        val protected = db_retention_run(root, parent, pinned.head, 28, 0, "linux").unwrap()
+        expect(protected.catalog.entries[0].state).to_equal("active")
+        expect(protected.catalog.entries[1].state).to_equal("active")
+        expect(db_retention_resolve(root, parent, dependency.digest)).to_equal(Ok("exact"))
+        val unpinned = db_retention_set_pins(root, parent, protected.head, [], 28).unwrap()
+        val expired = db_retention_run(root, parent, unpinned.head, 28, 0, "linux").unwrap()
+        expect(expired.catalog.entries[0].state).to_equal("deleted")
+        expect(expired.catalog.entries[1].state).to_equal("deleted")
+
+    it "rechecks newly added pins and cancels a pending deletion before unlink":
+        val (root, parent) = setup_item2_retention_paths()
+        val node = setup_item2_retention_node(root, parent, "pinned-later", 30, 0)
+        val registered = db_retention_register(root, parent, "", node.digest, 0, "public").unwrap()
+        val prepared = db_retention_prepare(root, parent, registered.head, 28, 0, "linux").unwrap()
+        expect(prepared.catalog.entries[0].state).to_equal("delete_pending")
+        expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("exact"))
+        val pinned = db_retention_set_pins(root, parent, prepared.head, [DbEvidencePin(root: node.digest, reason: "pending", expires_day: 0)], 28).unwrap()
+        val resumed = db_retention_resume(root, parent, pinned.head, 28).unwrap()
+        expect(resumed.catalog.entries[0].state).to_equal("active")
+        expect(resumed.catalog.entries[0].deletion_status).to_equal("")
+        expect(path_entry_present(setup_item2_retention_raw(parent, node.digest))).to_equal(Ok(true))
+
+    it "recovers the actual unlink-before-receipt window without inventing an unlink":
+        val (root, parent) = setup_item2_retention_paths()
+        val node = setup_item2_retention_node(root, parent, "interrupted", 40, 0)
+        val registered = db_retention_register(root, parent, "", node.digest, 0, "public").unwrap()
+        val prepared = db_retention_prepare(root, parent, registered.head, 28, 0, "linux").unwrap()
+        expect(scv_sj_lease_acquire(root, "fixture-delete-window").starts_with("ok:")).to_be(true)
+        val removed = db_evidence_delete_held(root, parent, node.digest, 0, db_retention_store_quota(), "fixture-delete-window").unwrap()
+        expect(removed.status).to_equal("unlinked")
+        expect(scv_sj_lease_release(root, "fixture-delete-window").starts_with("ok:")).to_be(true)
+        expect(db_retention_open(root).unwrap().catalog.entries[0].state).to_equal("delete_pending")
+        expect(db_retention_set_pins(root, parent, prepared.head, [DbEvidencePin(root: node.digest, reason: "release", expires_day: 0)], 28)).to_equal(Err("SCVDB_PIN_CLOSURE_UNVERIFIED"))
+        val resumed = db_retention_resume(root, parent, prepared.head, 28).unwrap()
+        expect(resumed.catalog.entries[0].deletion_status).to_equal("already_absent_synced")
+        expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("aggregated"))
+
+    it "fails before unlink if the durable rollup bytes are corrupted":
+        val (root, parent) = setup_item2_retention_paths()
+        val node = setup_item2_retention_node(root, parent, "corrupt-rollup", 20, 0)
+        val registered = db_retention_register(root, parent, "", node.digest, 0, "public").unwrap()
+        val prepared = db_retention_prepare(root, parent, registered.head, 28, 0, "linux").unwrap()
+        expect(file_write_bytes(setup_item2_retention_raw(parent, prepared.catalog.entries[0].rollup_digest), [1u8, 2u8])).to_be(true)
+        expect(db_retention_resume(root, parent, prepared.head, 28).is_err()).to_be(true)
+        expect(path_entry_present(setup_item2_retention_raw(parent, node.digest))).to_equal(Ok(true))
+        expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("exact"))
+
+    it "revises rollups for late observations while retaining verifiable prior provenance":
+        val (root, parent) = setup_item2_retention_paths()
+        val first = setup_item2_retention_node(root, parent, "first", 10, 0)
+        val registered = db_retention_register(root, parent, "", first.digest, 0, "public").unwrap()
+        val expired = db_retention_run(root, parent, registered.head, 28, 0, "linux").unwrap()
+        val prior_digest = expired.catalog.rollups[0].digest
+        val prior = db_retained_rollup_decode(db_evidence_store_get(root, parent, prior_digest, 0, db_retention_store_quota()).unwrap().content).unwrap()
+        val late = setup_item2_retention_node(root, parent, "late", 30, 29)
+        val added = db_retention_register(root, parent, expired.head, late.digest, 29, "public").unwrap()
+        val revised = db_retention_run(root, parent, added.head, 57, 0, "linux").unwrap()
+        val node = db_evidence_store_get(root, parent, revised.catalog.rollups[0].digest, 0, db_retention_store_quota()).unwrap()
+        var rollup = db_retained_rollup_decode(node.content).unwrap()
+        expect(rollup.rollup.count).to_equal(2u64)
+        expect(rollup.rollup.duration_sum).to_equal(40u64)
+        expect(rollup.rollup.generation).to_equal(2u64)
+        expect(rollup.rollup.prior_revision).to_equal(prior.rollup.revision)
+        expect(node.dependencies).to_equal([prior_digest])
+        rollup.rollup.duration_sum = 999
+        expect(db_retained_rollup_encode(rollup)).to_equal(Err("SCVDB_ROLLUP_DIGEST"))
+        expect(file_delete(setup_item2_retention_raw(parent, prior_digest))).to_be(true)
+        expect(db_retention_resolve(root, parent, late.digest)).to_equal(Ok("unavailable"))
+
+    it "reports restricted only for actual bytes and retains unknown payload formats":
+        val (root, parent) = setup_item2_retention_paths()
+        val node = setup_item2_retention_node(root, parent, "restricted", 10, 0)
+        val registered = db_retention_register(root, parent, "", node.digest, 0, "restricted").unwrap()
+        expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("restricted"))
+        expect(db_retention_run(root, parent, registered.head, 28, 0, "linux")).to_equal(Err("SCVDB_RETENTION_NO_OBSERVATIONS"))
+        expect(file_delete(setup_item2_retention_raw(parent, node.digest))).to_be(true)
+        expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("unavailable"))
+        val content: [u8] = [7u8, 8u8]
+        val unknown = DbEvidenceNode(digest: db_evidence_digest(content, []).unwrap(), content: content, availability: "available", created_day: 0, dependencies: [])
+        val stored = db_evidence_store_put(root, parent, unknown, db_retention_store_quota()).unwrap()
+        val added = db_retention_register(root, parent, registered.head, stored.digest, 0, "public").unwrap()
+        expect(db_retention_run(root, parent, added.head, 28, 0, "linux")).to_equal(Err("SCVDB_RETENTION_NO_OBSERVATIONS"))
+        expect(path_entry_present(setup_item2_retention_raw(parent, stored.digest))).to_equal(Ok(true))
+
+    it "rejects stale catalog heads and another held writer without deleting data":
+        val (root, parent) = setup_item2_retention_paths()
+        val node = setup_item2_retention_node(root, parent, "lease", 10, 0)
+        val registered = db_retention_register(root, parent, "", node.digest, 0, "public").unwrap()
+        expect(db_retention_prepare(root, parent, "", 28, 0, "linux")).to_equal(Err("SCVDB_STORE_HEAD_ADVANCED"))
+        expect(scv_sj_lease_acquire(root, "other-retention").starts_with("ok:")).to_be(true)
+        expect(db_retention_resume(root, parent, registered.head, 28)).to_equal(Err("SCVDB_STORE_BUSY"))
+        expect(scv_sj_lease_release(root, "other-retention").starts_with("ok:")).to_be(true)
+        expect(path_entry_present(setup_item2_retention_raw(parent, node.digest))).to_equal(Ok(true))
