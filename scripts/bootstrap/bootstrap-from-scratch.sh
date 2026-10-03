@@ -4551,6 +4551,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       export BOOTSTRAP_VERIFY_TEST_WORKERS BOOTSTRAP_VERIFY_BUILD_THREADS
       sh "${repo_root}/scripts/bootstrap/bootstrap-phase-verification.shs" \
         --phase=stage2 \
+        --backend="${backend}" \
         --compiler="${stage2_admitted_absolute}" \
         --compiler-sha256="${stage2_tests_sha}" \
         --strategy="${stage2_tests_strategy}" \
