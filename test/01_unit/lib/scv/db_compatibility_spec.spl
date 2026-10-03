@@ -1,0 +1,42 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_patch.*
+use std.scv.db_reducer.*
+use std.scv.db_compatibility.*
+use std.scv.distributed_identity.*
+
+fn setup_item2_replay_patch(operations: [DbOperation], counter: u64, dependencies: [text]) -> DbPatch:
+    val patch = DbPatch(batch_id: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, actor: "ffeeddccbbaa99887766554433221100", actor_counter: counter, base_revision: "", causal_dependencies: dependencies, schema_revision: "s1", reducer_revision: "r1", operations: operations, payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "author", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "fixture")
+    db_patch_seal(patch).unwrap()
+
+describe "REQ-015 version negotiation and computed replay evidence":
+    it "rejects unsupported pairs generation lies and downgrades":
+        step("Negotiate an exact declared schema and reducer pair above the retained floor")
+        val version = DbSupportedVersion(schema_revision: "s1", reducer_revision: "r1", generation: 2)
+        expect(db_negotiate_version(version, [version], 2)).to_equal(Ok(version))
+        expect(db_negotiate_version(version, [version], 3)).to_equal(Err("SCVDB_VERSION_DOWNGRADE"))
+        expect(db_negotiate_version(version, [], 1)).to_equal(Err("SCVDB_VERSION_UNSUPPORTED"))
+        val lied = DbSupportedVersion(schema_revision: "s1", reducer_revision: "r1", generation: 3)
+        expect(db_negotiate_version(lied, [version], 1)).to_equal(Err("SCVDB_VERSION_GENERATION"))
+        expect(db_negotiate_version(version, [version,version], 1)).to_equal(Err("SCVDB_VERSION_CATALOG_AMBIGUOUS"))
+
+    it "replays actual patches through full and incremental reducers and rejects fabricated checkpoints":
+        step("Materialize a historical creation and a causally dependent field update")
+        val ref = entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: 1))
+        val policy = MergePolicy(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, schema_revision: "s1", reducer_revision: "r1", fields: [DbFieldSchema(kind: "bug", field: "title", rule: FieldMergeRule.ScalarConflict)], constraints: [])
+        val create = setup_item2_replay_patch([DbOperation.Create(ref, "bug", [DbField(name: "title", value: DbValue.Text("first"))])], 1, [])
+        val checkpoint = db_preview_materialize(db_empty_state(), [create], policy).unwrap()
+        val condition = RowPrecondition(base_row: "", expected_revision: "", expected_fields: [])
+        val update = setup_item2_replay_patch([DbOperation.UpdateFields(ref, [FieldEdit(field: "title", before: DbValue.Text("first"), after: DbValue.Text("second"))], condition)], 2, [create.batch_id])
+        val evidence = db_verify_materialization_replay(checkpoint, [create], [update], policy).unwrap()
+        expect(evidence.history_batches).to_equal(1u64)
+        expect(evidence.pending_batches).to_equal(1u64)
+        expect(evidence.full_digest).to_equal(evidence.incremental_digest)
+        expect(evidence.full_digest == evidence.checkpoint_digest).to_be(false)
+        expect(evidence.evidence_digest.len()).to_equal(64)
+        step("Reject a self-consistent but historically invented checkpoint")
+        var fabricated = checkpoint
+        var row = fabricated.rows[0]
+        row.fields = [DbField(name: "title", value: DbValue.Text("invented"))]
+        fabricated.rows = [row]
+        fabricated.revision = db_state_digest(fabricated).unwrap()
+        expect(db_verify_materialization_replay(fabricated, [create], [update], policy)).to_equal(Err("SCVDB_CHECKPOINT_REPLAY_MISMATCH"))
