@@ -6,6 +6,7 @@ Compile these assembly inputs with LLVM clang (no Apple SDK or runtime needed):
 clang --target=x86_64-apple-macos11 -c start_x64.s -o start_x64.o
 clang --target=x86_64-apple-macos11 -c provider_x64.s -o provider_x64.o
 clang --target=arm64-apple-macos11 -c start_a64.s -o start_a64.o
+clang --target=arm64-apple-macos11 -c start_a64_add.s -o start_a64_add.o
 clang --target=arm64-apple-macos11 -c provider_a64.s -o provider_a64.o
 llvm-ar --format=darwin rcs provider_x64.a provider_x64.o
 llvm-ar --format=gnu rcs provider_a64.a provider_a64.o
@@ -28,3 +29,20 @@ Wire authorities: [Apple loader.h](https://github.com/apple-oss-distributions/xn
 defines executable/segment/thread commands; [LLVM MachO.h](https://llvm.org/doxygen/BinaryFormat_2MachO_8h_source.html)
 defines relocation and thread-state records. Hosted ARM64 signing is a separate
 gate, illustrated by [LLD's ad-hoc signing tests](https://github.com/llvm/llvm-project/blob/main/lld/test/MachO/adhoc-codesign.s).
+
+## Actual dylib dependency fixtures
+
+Generated using the installed LLVM `ld64.lld` (Windows LLVM distribution), without
+an Apple SDK. These are dependency-reader fixtures, not Darwin execution evidence.
+
+```text
+ld64.lld -dylib -arch x86_64 -platform_version macos 11.0 11.0 -install_name @rpath/libitem4.dylib -current_version 2.3.4 -compatibility_version 1.2 -o provider_x64.dylib provider_x64.o
+ld64.lld -dylib -arch arm64 -platform_version macos 11.0 11.0 -install_name @rpath/libitem4.dylib -current_version 2.3.4 -compatibility_version 1.2 -o provider_a64.dylib provider_a64.o
+ld64.lld -dylib -arch x86_64 -platform_version macos 11.0 11.0 -install_name @rpath/libitem4_reexport.dylib -reexport_library provider_x64.dylib -o reexport_x64.dylib
+llvm-objdump --macho --exports-trie --dylibs-used provider_x64.dylib provider_a64.dylib reexport_x64.dylib
+```
+
+LLVM inspection reports x64 `_helper=0x2d8`, `_value=0x1000`; arm64
+`_helper=0x2e8`, `_value=0x4000`. The reexport fixture has one LC_REEXPORT_DYLIB
+dependency and zero direct trie exports. Version values are independently checked
+as packed 2.3.4 (`0x20304`) and 1.2.0 (`0x10200`).

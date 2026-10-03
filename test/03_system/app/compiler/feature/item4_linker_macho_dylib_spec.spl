@@ -39,6 +39,17 @@ fn item4_dylib_command(bytes: [u8], kind: i64) -> i64:
 
 describe "Mach-O hosted dependency reader":
     # @req ITEM4-REQ-004 ITEM4-REQ-006
+    it "preserves an actual reexport dependency command and version contract":
+        step("Read ld64.lld reexport provider without inventing local exports")
+        val library = macho_read_dylib(item4_dylib_bytes("reexport_x64.dylib"), RelocArch.X86_64).unwrap()
+        expect(library.install_name).to_equal("@rpath/libitem4_reexport.dylib")
+        expect(library.dependencies.len()).to_equal(1)
+        expect(library.dependencies[0].install_name).to_equal("@rpath/libitem4.dylib")
+        expect(library.dependencies[0].command).to_equal(0x8000001f)
+        expect(library.dependencies[0].current_version).to_equal(0x20304)
+        expect(library.dependencies[0].compatibility_version).to_equal(0x10200)
+        expect(library.exports.len()).to_equal(0)
+
     it "reads actual x64 dylib install versions and trie exports":
         step("Read ld64.lld dylib through the production dependency reader")
         val library = macho_read_dylib(item4_dylib_bytes("provider_x64.dylib"), RelocArch.X86_64).unwrap()
@@ -93,6 +104,8 @@ describe "Mach-O hosted dependency reader":
         step("Decode bounded malformed wire tries directly")
         expect(macho_exports_trie([0, 1, 97, 0, 0], 0, 5, 0).is_err()).to_equal(true)
         expect(macho_exports_trie([128], 0, 1, 0).is_err()).to_equal(true)
+        expect(macho_exports_trie([128, 128, 128, 128, 128, 128, 128, 128, 128, 0], 0, 10, 0).is_err()).to_equal(true)
+        expect(macho_exports_trie([0, 1, 97, 0, 127], 0, 5, 0).is_err()).to_equal(true)
         expect(macho_exports_trie([0, 1, 97, 0, 5, 3, 8, 1, 0, 0], 0, 10, 0).is_err()).to_equal(true)
 
     it "preserves reexport and resolver semantics instead of fabricating definitions":
@@ -106,3 +119,20 @@ describe "Mach-O hosted dependency reader":
         val resolvers = macho_exports_trie([0, 1, 97, 0, 5, 3, 16, 32, 48, 0], 0, 10, 0).unwrap()
         expect(resolvers[0].address).to_equal(32)
         expect(resolvers[0].resolver).to_equal(48)
+
+    it "rejects invalid segment and symbol storage before decoding exports":
+        step("Mutate real file and virtual extents independently")
+        val bytes = item4_dylib_bytes("provider_x64.dylib")
+        val segment = item4_dylib_command(bytes, 0x19)
+        val symbols = item4_dylib_command(bytes, 2)
+        expect(macho_read_dylib(item4_dylib_set(bytes, segment + 48, 0xfffffff0), RelocArch.X86_64).is_err()).to_equal(true)
+        expect(macho_read_dylib(item4_dylib_set(bytes, segment + 28, 0x80000000), RelocArch.X86_64).is_err()).to_equal(true)
+        expect(macho_read_dylib(item4_dylib_set(bytes, symbols + 12, 0xffffffff), RelocArch.X86_64).is_err()).to_equal(true)
+
+    it "rejects incompatible identity versions and truncated platform tool arrays":
+        step("Preserve command envelopes while making metadata internally inconsistent")
+        val bytes = item4_dylib_bytes("provider_x64.dylib")
+        val identity = item4_dylib_command(bytes, 13)
+        val build = item4_dylib_command(bytes, 0x32)
+        expect(macho_read_dylib(item4_dylib_set(bytes, identity + 20, 0x30000), RelocArch.X86_64).is_err()).to_equal(true)
+        expect(macho_read_dylib(item4_dylib_set(bytes, build + 20, 2), RelocArch.X86_64).is_err()).to_equal(true)

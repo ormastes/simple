@@ -16,6 +16,8 @@ The reader validates command envelopes, strings within their owning commands,
 segment and symbol table bounds, and bounded trie ULEB/payload/child records.
 Trie traversal rejects cycles and repeated nodes, limits names to 4096 bytes and
 export count to 1000000. The format is a tree; shared-node encodings fail closed.
+Names are bounded ASCII; non-ASCII bytes fail closed pending a byte-string/UTF-8
+contract. Unknown load-command payloads remain opaque and confer no capability.
 LC_DYLD_EXPORTS_TRIE and LC_DYLD_INFO_ONLY export regions are supported; conflicting
 declarations fail. A checked external-definition symbol table is the fallback
 when no trie exists. Indirect symbol aliases fail closed pending alias contracts.

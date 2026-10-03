@@ -88,6 +88,20 @@ fn item4_macho_command(bytes: [u8], kind: i64) -> i64:
     -1
 
 describe "Mach-O freestanding executable construction":
+    it "accepts actual ADD page offsets and rejects SUB flags and reserved memory opcodes":
+        step("Link an actual clang ADD-immediate PAGEOFF12 object")
+        val original = item4_macho_fixture("start_a64_add.o")
+        val provider = item4_macho_fixture("provider_a64.o")
+        val linked = macho_static_link([original, provider], [], "_start", RelocArch.AArch64).unwrap()
+        expect(item4_macho_read(linked, 0x4008, 4)).to_equal(0x91000020)
+        val segment = item4_macho_command(original, 0x19)
+        if segment < 0: return
+        val text_offset = item4_macho_read(original, segment + 72 + 48, 4)
+        step("Mutate only the relocated instruction while retaining its real relocation")
+        for opcode in [0xd1000020, 0xb1000020, 0xf1000020, 0x91800020, 0x7d800020, 0xb9c00020, 0xf9800020]:
+            val changed = item4_macho_write(original, text_offset + 8, 4, opcode)
+            expect(macho_static_link([changed, provider], [], "_start", RelocArch.AArch64).is_err()).to_equal(true)
+
     # @req ITEM4-REQ-003 ITEM4-REQ-004 ITEM4-REQ-006 ITEM4-REQ-007
     it "links x86_64 objects into deterministic executable segments and thread state":
         step("Load actual clang MH_OBJECT entry and provider")

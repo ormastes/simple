@@ -116,11 +116,21 @@ fn macho_relocate(bytes: [u8], inputs: [MachOInput], definitions: {text: MachOBi
                                 if relocation.r_pcrel or not relocation.r_extern:
                                     return Err("unsupported ARM64_RELOC_PAGEOFF12 local/pcrel encoding")
                                 var scale: i64 = 0
-                                if (encoded & 0x1f000000) == 0x11000000:
+                                if (encoded & 0x7f800000) == 0x11000000:
                                     if (encoded & 0x00400000) != 0: return Err("ARM64 PAGEOFF12 ADD cannot shift by 12")
                                 elif (encoded & 0x3b000000) == 0x39000000:
                                     scale = (encoded >> 30) & 3
-                                    if (encoded & 0x04800000) == 0x04800000: scale = 4
+                                    val vector = (encoded & 0x04000000) != 0
+                                    val opcode = (encoded >> 22) & 3
+                                    if vector:
+                                        if opcode >= 2:
+                                            if scale != 0: return Err("reserved ARM64 vector load/store encoding")
+                                            scale = 4
+                                    elif opcode >= 2:
+                                        # Signed loads: opc=2 accepts byte/half/word;
+                                        # opc=3 accepts byte/half. Exclude PRFM.
+                                        if scale == 3 or (opcode == 3 and scale >= 2):
+                                            return Err("unsupported ARM64 load/store opcode")
                                 else:
                                     return Err("ARM64 PAGEOFF12 requires ADD or unsigned-offset load/store")
                                 val addend = (((encoded >> 10) & 0xfff) << scale) + explicit_addend
