@@ -5,6 +5,9 @@ use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 use std.scv.db_confidentiality.{DbRestrictedContext}
 use app.scv.db.evidence_store.{DbEvidenceStoreQuota, db_evidence_store_get}
 use app.scv.db.restricted_evidence.*
+use app.scv.db.local_store.{db_store_commit}
+use std.common.crypto.sha256.{sha256_text}
+use test.fixtures.scv.db_checkpoint_storage_fixture.{setup_item2_checkpoint_descriptor}
 
 fn setup_item2_restricted_paths() -> (text, text):
     val root = secure_temp_dir(path_final_existing(cwd()).unwrap().path, "item2-restricted-").unwrap()
@@ -23,6 +26,17 @@ fn setup_item2_restricted_quota() -> DbEvidenceStoreQuota:
     DbEvidenceStoreQuota(max_content_bytes: 4096, max_envelope_bytes: 8192, max_dependencies: 8)
 
 describe "Restricted external evidence and owned active-key lifecycle":
+    it "keeps actual key bytes intact while checkpoint installation is prepared":
+        val (source, external) = setup_item2_restricted_paths()
+        val owner = db_restricted_key_create(source, external, setup_item2_restricted_store_context()).unwrap()
+        val before = db_restricted_key_load(source, external, owner).unwrap()
+        val anchor = sha256_text("checkpoint")
+        val descriptor = setup_item2_checkpoint_descriptor("Prepared", "semantic", "", "", anchor, sha256_text("target"))
+        expect(db_store_commit(source, "", sha256_text(descriptor), descriptor, "checkpoint-install").code).to_equal("ok")
+        expect(db_restricted_key_delete(source, external, owner)).to_equal(Err("SCVDB_CHECKPOINT_INSTALL_PENDING"))
+        expect(db_restricted_key_load(source, external, owner)).to_equal(Ok(before))
+        expect(file_exists("{owner.directory}/active.key")).to_be(true)
+
     it "stores actual encrypted bytes with fresh nonces and authenticated context":
         val (source, external) = setup_item2_restricted_paths()
         val context = setup_item2_restricted_store_context()

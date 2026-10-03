@@ -6,7 +6,7 @@
 use app.io.mod (is_dir, dir_create, dir_remove_all, file_exists, file_write, file_read_regular_no_follow_bounded, file_is_regular_no_follow, file_atomic_write, file_fsync, directory_fsync)
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace}
-use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same, path_identity_contains}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same, path_identity_contains, path_entry_present}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_holder, scv_sj_lease_release, scv_sj_lease_is_held}
@@ -17,9 +17,10 @@ struct DbStoreView:
     parent: text
     transaction_id: text
     state: text
+    checkpoint_anchor: text
 
 fn _db_store_error(code: text) -> DbStoreView:
-    DbStoreView(code: code, head: "", parent: "", transaction_id: "", state: "")
+    DbStoreView(code: code, head: "", parent: "", transaction_id: "", state: "", checkpoint_anchor: "")
 
 # Root is caller-owned and stable while SJ holds its lease. These path-based
 # facades reject existing aliases; they do not promise dirfd/openat protection
@@ -37,16 +38,21 @@ fn db_local_path_scope(root: text, relative_directories: [text]) -> text:
     for relative in relative_directories:
         if relative == "" or relative.starts_with("/") or relative.contains("\\"):
             return "SCVDB_STORE_SCOPE"
+        var directory = root
         for component in relative.split("/"):
             if component == "" or component == "." or component == "..": return "SCVDB_STORE_SCOPE"
-        val directory = "{root}/{relative}"
-        if is_dir(directory) or file_exists(directory):
+        for component in relative.split("/"):
+            directory = "{directory}/{component}"
+            val present = match path_entry_present(directory):
+                Ok(value): value
+                Err(error): return "SCVDB_STORE_SCOPE"
+            if not present: break
             if not dir_is_real_no_follow(directory) or not db_local_existing_canonical(directory):
                 return "SCVDB_STORE_SCOPE"
     ""
 
 fn _db_store_scope(root: text, channel: text) -> text:
-    if not ["semantic", "bridge", "ci", "settlement", "pages", "retention", "paged"].contains(channel): return "SCVDB_STORE_CHANNEL"
+    if not ["semantic", "bridge", "ci", "settlement", "pages", "retention", "paged", "settlement-work", "checkpoint-install"].contains(channel): return "SCVDB_STORE_CHANNEL"
     db_local_path_scope(root, [".sj", ".scv", _db_store_relative(channel), "{_db_store_relative(channel)}/objects"])
 
 fn _db_store_relative(channel: text) -> text:
@@ -112,10 +118,17 @@ fn _db_store_directory(root: text, channel: text) -> text:
 fn _db_store_object(root: text, head: text, channel: text) -> text:
     "{_db_store_directory(root, channel)}/objects/{head}.scvg"
 
-fn _db_store_encode(parent: text, transaction_id: text, state: text) -> text:
+fn _db_store_encode(parent: text, transaction_id: text, state: text, checkpoint_anchor: text) -> text:
     # This is a storage envelope, not SCVDB-CANON signature encoding. The
     # semantic owner supplies its canonical projection as an opaque payload.
-    "scv-db/local-generation/v1\n{parent}\n{transaction_id}\n{sha256_text(state)}\n{state}"
+    if checkpoint_anchor == "": return "scv-db/local-generation/v1\n{parent}\n{transaction_id}\n{sha256_text(state)}\n{state}"
+    "scv-db/local-generation/v2\n{parent}\n{transaction_id}\n{sha256_text(state)}\n{checkpoint_anchor}\n{state}"
+
+fn db_store_generation_head(parent: text, transaction_id: text, state: text, checkpoint_anchor: text = "") -> Result<text, text>:
+    if (parent != "" and not _db_store_digest(parent)) or not _db_store_digest(transaction_id) or (checkpoint_anchor != "" and not _db_store_digest(checkpoint_anchor)): return Err("SCVDB_STORE_IDENTITY")
+    val limit = if checkpoint_anchor == "": 67108608 else: 67108352
+    if state.len() > limit: return Err("SCVDB_STORE_QUOTA")
+    Ok(sha256_text(_db_store_encode(parent, transaction_id, state, checkpoint_anchor)))
 
 # Read immutable state without holding the writer lease. Reopening after a
 # process crash yields the complete old or new generation, never mixed rows.
@@ -125,8 +138,13 @@ fn db_store_read(root: text, channel: text = "semantic") -> DbStoreView:
     val scope = _db_store_scope(root, channel)
     if scope != "": return _db_store_error(scope)
     val pointer = "{_db_store_directory(root, channel)}/HEAD"
-    if not file_exists(pointer):
-        return DbStoreView(code: "empty", head: "", parent: "", transaction_id: "", state: "")
+    if not is_dir(_db_store_directory(root, channel)):
+        return DbStoreView(code: "empty", head: "", parent: "", transaction_id: "", state: "", checkpoint_anchor: "")
+    val pointer_present = match path_entry_present(pointer):
+        Ok(value): value
+        Err(error): return _db_store_error("SCVDB_STORE_HEAD_CORRUPT")
+    if not pointer_present:
+        return DbStoreView(code: "empty", head: "", parent: "", transaction_id: "", state: "", checkpoint_anchor: "")
     var raw_head = ""
     match _db_store_read_bounded(pointer, 65):
         Ok(value): raw_head = value
@@ -138,22 +156,40 @@ fn db_store_read(root: text, channel: text = "semantic") -> DbStoreView:
     if not file_exists(path):
         return _db_store_error("SCVDB_STORE_OBJECT_MISSING")
     var encoded = ""
-    match _db_store_read_bounded(path, 67108864):
+    val read_limit = if channel == "checkpoint-install": 2048 else: 67108864
+    match _db_store_read_bounded(path, read_limit):
         Ok(value): encoded = value
         Err(error): return _db_store_error("SCVDB_STORE_OBJECT_CORRUPT")
     if sha256_text(encoded) != head:
         return _db_store_error("SCVDB_STORE_OBJECT_CORRUPT")
     val fields = encoded.split("\n")
-    if fields.len() < 5 or fields[0] != "scv-db/local-generation/v1":
+    if fields.len() < 5 or not ["scv-db/local-generation/v1", "scv-db/local-generation/v2"].contains(fields[0]):
         return _db_store_error("SCVDB_STORE_ENCODING")
     if (fields[1] != "" and not _db_store_digest(fields[1])) or not _db_store_digest(fields[2]):
         return _db_store_error("SCVDB_STORE_ENCODING")
-    val state = fields[4:].join("\n")
+    var anchor = ""
+    var offset = 4
+    if fields[0] == "scv-db/local-generation/v2":
+        if fields.len() < 6 or not _db_store_digest(fields[4]): return _db_store_error("SCVDB_STORE_ENCODING")
+        anchor = fields[4]
+        offset = 5
+    val state = fields[offset:].join("\n")
     if not _db_store_digest(fields[3]) or sha256_text(state) != fields[3]:
         return _db_store_error("SCVDB_STORE_PAYLOAD_CORRUPT")
-    DbStoreView(code: "ok", head: head, parent: fields[1], transaction_id: fields[2], state: state)
+    DbStoreView(code: "ok", head: head, parent: fields[1], transaction_id: fields[2], state: state, checkpoint_anchor: anchor)
 
 fn _db_store_commit_owned(root: text, expected_head: text, transaction_id: text, state: text, channel: text) -> DbStoreView:
+    if channel != "checkpoint-install":
+        match db_store_checkpoint_barrier(root):
+            Ok(active):
+                if active: return _db_store_error("SCVDB_CHECKPOINT_INSTALL_PENDING")
+            Err(error): return _db_store_error(error)
+    _db_store_publish_owned(root, expected_head, transaction_id, state, channel, nil)
+
+# Trusted internal publication; the ordinary entry above always checks the
+# install barrier. The install-specific entry verifies the actual descriptor
+# and held lease before supplying an explicit checkpoint anchor here.
+fn _db_store_publish_owned(root: text, expected_head: text, transaction_id: text, state: text, channel: text, anchor_override: text?) -> DbStoreView:
     # Backend exclusion is checked under the actual SJ lease, including held
     # commits. A separately checked empty channel is not a race-safe guard.
     var incompatible: [text] = []
@@ -164,9 +200,11 @@ fn _db_store_commit_owned(root: text, expected_head: text, transaction_id: text,
     val current = db_store_read(root, channel)
     if current.code != "ok" and current.code != "empty":
         return current
+    var anchor = current.checkpoint_anchor
+    if val selected = anchor_override: anchor = selected
     # Retry is idempotent only for the exact immediate transaction and payload.
     # Historical replay belongs to the semantic accepted-batch registry.
-    if current.transaction_id == transaction_id:
+    if current.transaction_id == transaction_id and current.checkpoint_anchor == anchor:
         if current.state != state or current.parent != expected_head:
             return _db_store_error("SCVDB_STORE_TRANSACTION_COLLISION")
         # A prior call may have published HEAD but failed its final sync. A
@@ -174,10 +212,10 @@ fn _db_store_commit_owned(root: text, expected_head: text, transaction_id: text,
         # an acknowledgement; readable bytes alone are insufficient.
         val directory = _db_store_directory(root, channel)
         if not file_fsync(_db_store_object(root, current.head, channel)) or not directory_fsync("{directory}/objects") or not file_fsync("{directory}/HEAD") or not directory_fsync(directory) or not directory_fsync("{root}/.scv") or not directory_fsync(root):
-            return DbStoreView(code: "SCVDB_STORE_DURABILITY_UNCERTAIN", head: current.head, parent: current.parent, transaction_id: current.transaction_id, state: current.state)
+            return DbStoreView(code: "SCVDB_STORE_DURABILITY_UNCERTAIN", head: current.head, parent: current.parent, transaction_id: current.transaction_id, state: current.state, checkpoint_anchor: current.checkpoint_anchor)
         return current
     if current.head != expected_head:
-        return DbStoreView(code: "SCVDB_STORE_HEAD_ADVANCED", head: current.head, parent: current.parent, transaction_id: current.transaction_id, state: current.state)
+        return DbStoreView(code: "SCVDB_STORE_HEAD_ADVANCED", head: current.head, parent: current.parent, transaction_id: current.transaction_id, state: current.state, checkpoint_anchor: current.checkpoint_anchor)
     val directory = _db_store_directory(root, channel)
     val objects = "{directory}/objects"
     # Create one directory at a time and reject aliases before descending.
@@ -186,8 +224,10 @@ fn _db_store_commit_owned(root: text, expected_head: text, transaction_id: text,
             return _db_store_error("SCVDB_STORE_CREATE")
         if not dir_is_real_no_follow(path) or not db_local_existing_canonical(path):
             return _db_store_error("SCVDB_STORE_SCOPE")
-    val encoded = _db_store_encode(expected_head, transaction_id, state)
-    val head = sha256_text(encoded)
+    val head = match db_store_generation_head(expected_head, transaction_id, state, anchor):
+        Ok(value): value
+        Err(error): return _db_store_error(error)
+    val encoded = _db_store_encode(expected_head, transaction_id, state, anchor)
     val object_path = _db_store_object(root, head, channel)
     val publication = _db_store_publish_object(objects, object_path, encoded)
     if publication != "": return _db_store_error(publication)
@@ -209,7 +249,7 @@ fn _db_store_commit_owned(root: text, expected_head: text, transaction_id: text,
         if not file_atomic_write(pointer, "{head}\n"):
             return _db_store_error("SCVDB_STORE_PUBLICATION_UNCERTAIN")
     if not file_fsync(pointer) or not directory_fsync(directory):
-        return DbStoreView(code: "SCVDB_STORE_DURABILITY_UNCERTAIN", head: head, parent: expected_head, transaction_id: transaction_id, state: state)
+        return DbStoreView(code: "SCVDB_STORE_DURABILITY_UNCERTAIN", head: head, parent: expected_head, transaction_id: transaction_id, state: state, checkpoint_anchor: anchor)
     val observed = db_store_read(root, channel)
     if observed.code != "ok" or observed.head != head:
         return _db_store_error("SCVDB_STORE_READBACK")
@@ -221,6 +261,7 @@ fn _db_store_request_scope(root: text, expected_head: text, transaction_id: text
     # Leave room for the fixed storage header within the bounded image read.
     if state.len() < 0 or state.len() > 67108608:
         return "SCVDB_STORE_QUOTA"
+    if channel == "checkpoint-install" and state.len() > 1024: return "SCVDB_STORE_QUOTA"
     if not is_dir(root):
         return "SCVDB_STORE_ROOT"
     val scope = _db_store_scope(root, channel)
@@ -247,7 +288,7 @@ fn db_store_commit_with_absent_channels(root: text, expected_head: text, transac
     if scope != "": return _db_store_error(scope)
     var seen: [text] = []
     for other in absent_channels:
-        if not ["semantic", "bridge", "ci", "settlement", "pages", "retention", "paged"].contains(other) or other == channel or seen.contains(other):
+        if not ["semantic", "bridge", "ci", "settlement", "pages", "retention", "paged", "settlement-work", "checkpoint-install"].contains(other) or other == channel or seen.contains(other):
             return _db_store_error("SCVDB_STORE_ABSENCE_SCOPE")
         seen.push(other)
     val nonce = random_hex(16) ?? ""
@@ -267,9 +308,57 @@ fn db_store_commit_with_absent_channels(root: text, expected_head: text, transac
     elif channel == "paged": result = _db_store_error("SCVDB_PAGED_MIGRATION_REQUIRED")
     val released = scv_sj_lease_release(root, holder)
     if not released.starts_with("ok:") or scv_sj_lease_is_held(root):
-        return DbStoreView(code: "SCVDB_STORE_RELEASE_UNCERTAIN", head: result.head, parent: result.parent, transaction_id: result.transaction_id, state: result.state)
+        return DbStoreView(code: "SCVDB_STORE_RELEASE_UNCERTAIN", head: result.head, parent: result.parent, transaction_id: result.transaction_id, state: result.state, checkpoint_anchor: result.checkpoint_anchor)
     result
+
+fn _db_store_checkpoint_descriptor(current: DbStoreView) -> Result<[text], text>:
+    if current.code != "ok" or current.checkpoint_anchor != "" or current.state.len() > 1024: return Err("SCVDB_CHECKPOINT_BARRIER_CORRUPT")
+    val fields = current.state.split("\n")
+    if fields.len() != 9 or fields[0] != "SCVDB-CHECKPOINT-INSTALL-v1" or not ["Prepared", "Installed"].contains(fields[1]) or not ["semantic", "paged"].contains(fields[2]) or fields[8] != "": return Err("SCVDB_CHECKPOINT_BARRIER_CORRUPT")
+    for index in [3, 4]:
+        if fields[index] != "" and not _db_store_digest(fields[index]): return Err("SCVDB_CHECKPOINT_BARRIER_CORRUPT")
+    for index in [5, 6, 7]:
+        if not _db_store_digest(fields[index]): return Err("SCVDB_CHECKPOINT_BARRIER_CORRUPT")
+    Ok(fields)
+
+# This bounded descriptor is a writer barrier, not checkpoint authentication.
+# The checkpoint owner verifies the separately immutable signed artifact and
+# journal. All ordinary generation writes inspect this while holding SJ.
+fn db_store_checkpoint_barrier(root: text) -> Result<bool, text>:
+    val current = db_store_read(root, "checkpoint-install")
+    if current.code == "empty": return Ok(false)
+    if current.code != "ok": return Err(current.code)
+    val fields = _db_store_checkpoint_descriptor(current)?
+    Ok(fields[1] == "Prepared")
+
+# Trusted compound install primitive, like db_store_commit_held. The caller
+# must be the checkpoint effect owner. Public record shape is never a signed
+# admission capability; actual lease, stored intent and both live generations
+# are independently checked here before ONE authoritative HEAD publication.
+fn db_store_checkpoint_install_held(root: text, holder: text, expected_journal_head: text, expected_source_head: text, expected_pending_head: text, transaction_id: text, state: text, checkpoint_anchor: text, channel: text) -> DbStoreView:
+    val scope = _db_store_request_scope(root, expected_source_head, transaction_id, state, channel)
+    if scope != "": return _db_store_error(scope)
+    if not ["semantic", "paged"].contains(channel) or not _db_store_digest(checkpoint_anchor): return _db_store_error("SCVDB_CHECKPOINT_INSTALL_SCOPE")
+    if holder == "" or not scv_sj_lease_is_held(root) or scv_sj_lease_holder(root) != holder: return _db_store_error("SCVDB_STORE_LEASE_IDENTITY")
+    val journal = db_store_read(root, "checkpoint-install")
+    if journal.code != "ok": return _db_store_error("SCVDB_CHECKPOINT_INSTALL_REQUIRED")
+    if journal.head != expected_journal_head: return _db_store_error("SCVDB_STORE_HEAD_ADVANCED")
+    val fields = match _db_store_checkpoint_descriptor(journal):
+        Ok(value): value
+        Err(error): return _db_store_error(error)
+    val installed_head = match db_store_generation_head(expected_source_head, transaction_id, state, checkpoint_anchor):
+        Ok(value): value
+        Err(error): return _db_store_error(error)
+    if fields[1] != "Prepared" or fields[2] != channel or fields[3] != expected_source_head or fields[4] != expected_pending_head or fields[5] != checkpoint_anchor or fields[6] != installed_head: return _db_store_error("SCVDB_CHECKPOINT_INSTALL_MISMATCH")
+    val pending = db_store_read(root, "settlement-work")
+    if pending.code != "ok" and pending.code != "empty": return pending
+    if pending.head != expected_pending_head: return _db_store_error("SCVDB_CHECKPOINT_PENDING_ADVANCED")
+    val current = db_store_read(root, channel)
+    if current.code != "ok" and current.code != "empty": return current
+    if current.head != expected_source_head and current.head != installed_head: return _db_store_error("SCVDB_STORE_HEAD_ADVANCED")
+    _db_store_publish_owned(root, expected_source_head, transaction_id, state, channel, Some(checkpoint_anchor))
 
 export DbStoreView, db_store_read, db_store_commit, db_store_commit_held
 export db_store_commit_with_absent_channels
 export db_local_path_scope, db_local_existing_canonical
+export db_store_generation_head, db_store_checkpoint_barrier, db_store_checkpoint_install_held

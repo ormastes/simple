@@ -12,6 +12,9 @@ use app.scv.db.evidence_delete.{db_evidence_delete_held}
 use std.nogc_sync_mut.io.path_identity.{path_entry_present}
 use std.scv.sj_capsule.{scv_sj_lease_is_held}
 use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
+use test.fixtures.scv.db_checkpoint_storage_fixture.{setup_item2_checkpoint_descriptor}
+use app.scv.db.local_store.{db_store_commit}
+use std.common.crypto.sha256.{sha256_text}
 
 fn setup_item2_store_paths() -> (text, text):
     var root = ""
@@ -65,6 +68,18 @@ fn check_item2_store_read_bytes(path: text) -> [u8]:
     fail("fixture read failed")
 
 describe "SCV external evidence CAS real file publication":
+    it "preserves actual raw evidence during a prepared checkpoint install":
+        val (source, external) = setup_item2_store_paths()
+        val node = setup_item2_store_node([1u8,2u8,3u8], [])
+        val quota = setup_item2_store_quota()
+        expect(db_evidence_store_put(source, external, node, quota).unwrap().digest).to_equal(node.digest)
+        val descriptor = setup_item2_checkpoint_descriptor("Prepared", "semantic", "", "", sha256_text("checkpoint"), sha256_text("target"))
+        expect(db_store_commit(source, "", sha256_text(descriptor), descriptor, "checkpoint-install").code).to_equal("ok")
+        expect(scv_sj_lease_acquire(source, "deletion").starts_with("ok:")).to_be(true)
+        expect(db_evidence_delete_held(source, external, node.digest, node.created_day, quota, "deletion")).to_equal(Err("SCVDB_CHECKPOINT_INSTALL_PENDING"))
+        expect(scv_sj_lease_release(source, "deletion").starts_with("ok:")).to_be(true)
+        expect(db_evidence_store_get(source, external, node.digest, node.created_day, quota)).to_equal(Ok(node))
+
     it "deletes verified owned bytes only under the held writer and distinguishes an absent retry":
         val (source, external) = setup_item2_store_paths()
         val node = setup_item2_store_node([1, 2, 3], [])

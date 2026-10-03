@@ -1061,3 +1061,30 @@ current worker artifact, or exclusive integrator. Journal v2 can represent an
 indexed receipt but exposes no production-completion transition until those
 independent owners exist. Local bare-Git fixture publication is not deployment
 admission. All new source and tests remain execution-unverified.
+### 19.6 Checkpoint install storage boundary
+
+Unanchored local generations retain their exact v1 encoding. An installed
+checkpoint uses a v2 envelope that binds its immutable checkpoint digest;
+subsequent ordinary commits inherit that anchor. The semantic transaction ID
+remains unchanged in meaning (the paged manifest revision for paged state).
+This avoids detached alias/history metadata and preserves captured-generation
+reads without walking the entire parent chain.
+
+The `checkpoint-install` channel contains a bounded nine-line descriptor:
+version, phase, active channel, source head, pending queue head, checkpoint
+digest, expected installed head, immutable journal digest, and final newline.
+The full signed checkpoint and install journal are separate immutable artifacts.
+A Prepared descriptor blocks ordinary generation writes under SJ, including
+held writes; malformed or dangling descriptor state fails closed. Destructive
+evidence/key deletion checks the same barrier before unlinking owned bytes.
+
+The trusted install primitive verifies the real SJ holder, descriptor HEAD,
+source and queue generations, target bytes and target generation digest. It
+publishes one active HEAD with its anchor. Reopening an exact installed generation
+while the descriptor is still Prepared follows the existing durability-retry
+path; the owner writes the Installed marker afterward. No two independent HEAD
+updates are described as atomic. Authentication, full checkpoint closure,
+nonregression and in-flight provider checks belong to the checkpoint effect
+owner, not to public storage-record shape. Cross-backend migration is separate.
+The full install owner is still in progress; storage regression source is
+unexecuted and is not a crash-durability receipt.
