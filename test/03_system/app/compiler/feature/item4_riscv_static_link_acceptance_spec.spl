@@ -36,7 +36,10 @@ fn item4_rv_load(name: text) -> [i64]:
     bytes
 
 fn item4_rv_symbol(image: [i64], name: text) -> i64:
-    val parsed = elf_parse_object(image).unwrap()
+    val result = elf_parse_object(image)
+    expect(result.is_ok()).to_equal(true)
+    if result.is_err(): return 0
+    val parsed = result.unwrap()
     var matches: i64 = 0
     var address: i64 = 0
     for symbol in parsed.symbols:
@@ -47,12 +50,16 @@ fn item4_rv_symbol(image: [i64], name: text) -> i64:
     address
 
 fn item4_rv_at(image: [i64], address: i64, width: i64) -> i64:
-    val parsed = elf_parse_object(image).unwrap()
+    val result = elf_parse_object(image)
+    expect(result.is_ok()).to_equal(true)
+    if result.is_err(): return 0
+    val parsed = result.unwrap()
     var index: i64 = 0
     for section in parsed.sections:
         val header = parsed.header.e_shoff + index * 64
         val vaddr = item4_rv_read(image, header + 16, 8)
-        if section.sh_type != 8 and address >= vaddr and address - vaddr + width <= section.sh_size:
+        # Parsed sh_addr stores file offset, not the original virtual address.
+        if section.sh_type != 8 and address >= vaddr and address - vaddr <= section.sh_size and width <= section.sh_size - (address - vaddr):
             return item4_rv_read(image, section.sh_addr + address - vaddr, width)
         index = index + 1
     expect(false).to_equal(true)
@@ -69,10 +76,21 @@ fn item4_rv_pair_target(image: [i64], high_place: i64, low_place: i64, store: bo
 
 fn item4_rv_mutate(kind: i64, field: i64, value: i64) -> [i64]:
     var bytes = item4_rv_load("start.o")
-    val object = elf_parse_object(bytes).unwrap()
+    val parsed = elf_parse_object(bytes)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return bytes
+    val object = parsed.unwrap()
+    val valid_field = field == 8 or field == 16
+    expect(valid_field).to_equal(true)
+    if not valid_field: return bytes
     var changed = false
     for section in object.sections:
         if section.sh_type == 4:
+            val valid = section.sh_addr >= 0 and section.sh_addr <= bytes.len() and section.sh_size >= 0 and section.sh_size % 24 == 0
+            expect(valid).to_equal(true)
+            if not valid: return bytes
+            expect(section.sh_size <= bytes.len() - section.sh_addr).to_equal(true)
+            if section.sh_size > bytes.len() - section.sh_addr: return bytes
             var offset = section.sh_addr
             while offset < section.sh_addr + section.sh_size:
                 if not changed and (item4_rv_read(bytes, offset + 8, 8) & 0xffffffff) == kind:
@@ -114,6 +132,41 @@ describe "RV64 real static ELF link":
         val absolute_upper = item4_rv_at(image, entry + 26, 4) & 0xfffff000
         val absolute_low = item4_rv_at(image, entry + 30, 4) >> 20
         expect(item4_rv_signed(absolute_upper, 32) + item4_rv_signed(absolute_low, 12)).to_equal(data)
+        val branch = item4_rv_at(image, entry + 46, 4)
+        val branch_delta = ((branch >> 31) << 12) | (((branch >> 7) & 1) << 11) | (((branch >> 25) & 63) << 5) | ((branch >> 8) & 15) * 2
+        expect(entry + 46 + item4_rv_signed(branch_delta, 13)).to_equal(item4_rv_symbol(image, "fail_label"))
+        val cb = item4_rv_at(image, entry + 50, 2)
+        val cb_delta = (((cb >> 12) & 1) << 8) | (((cb >> 10) & 3) << 3) | (((cb >> 5) & 3) << 6) | (((cb >> 3) & 3) << 1) | (((cb >> 2) & 1) << 5)
+        expect(entry + 50 + item4_rv_signed(cb_delta, 9)).to_equal(item4_rv_symbol(image, "fail_label"))
+        val cj = item4_rv_at(image, entry + 52, 2)
+        val cj_delta = (((cj >> 12) & 1) << 11) | (((cj >> 11) & 1) << 4) | (((cj >> 9) & 3) << 8) | (((cj >> 8) & 1) << 10) | (((cj >> 7) & 1) << 6) | (((cj >> 6) & 1) << 7) | (((cj >> 3) & 7) << 1) | (((cj >> 2) & 1) << 5)
+        expect(entry + 52 + item4_rv_signed(cj_delta, 12)).to_equal(item4_rv_symbol(image, "done_label"))
+        val jal = item4_rv_at(image, entry + 54, 4)
+        val jal_delta = ((jal >> 31) << 20) | (jal & 0xff000) | (((jal >> 20) & 1) << 11) | (((jal >> 21) & 1023) << 1)
+        expect(entry + 54 + item4_rv_signed(jal_delta, 21)).to_equal(item4_rv_symbol(image, "fail_label"))
+
+    it "applies ordered ADD SUB SET and PCREL32 data relocations through the full driver":
+        # @req ITEM4-REQ-004
+        step("Read the clang fixture containing ordered same-field arithmetic relocations")
+        val object = item4_rv_load("arithmetic.o")
+        expect(elf_parse_object(object).unwrap().relocations.len()).to_equal(15)
+        step("Link the retained data section from the entry's absolute pointer")
+        val result = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        val image = result.unwrap()
+        val data = item4_rv_symbol(image, "arithmetic_values")
+        step("Check the known seventeen-byte difference and preserved six-bit field prefix")
+        expect(item4_rv_at(image, data, 1)).to_equal(18)
+        expect(item4_rv_at(image, data + 1, 2)).to_equal(19)
+        expect(item4_rv_at(image, data + 3, 4)).to_equal(20)
+        expect(item4_rv_at(image, data + 7, 8)).to_equal(21)
+        expect(item4_rv_at(image, data + 15, 1)).to_equal(0xc5)
+        expect(item4_rv_at(image, data + 16, 1)).to_equal(0xc7)
+        expect(item4_rv_at(image, data + 17, 1)).to_equal(0xa5)
+        expect(item4_rv_at(image, data + 18, 2)).to_equal(0xa55a)
+        expect(item4_rv_at(image, data + 20, 4)).to_equal(0x76543210)
+        expect(item4_rv_at(image, data + 24, 4)).to_equal(0xffffffe8)
 
     it "extracts the provider archive and emits the same deterministic image":
         # @req ITEM4-REQ-003 ITEM4-REQ-007
