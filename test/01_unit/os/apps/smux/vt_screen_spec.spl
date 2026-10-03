@@ -1,0 +1,94 @@
+"""
+## Purpose and audience
+For maintainers of smux and of the caret dashboard's agent screen. A full-screen
+program — an agent TUI, or ConPTY itself — does not print lines: it moves the
+cursor and overwrites cells. `vt_screen` applies that output to a rows x cols
+grid so a capture shows what the program currently displays, instead of every
+frame it ever drew.
+## Operator workflow
+bin/simple test test/01_unit/os/apps/smux/vt_screen_spec.spl
+## Compatibility and limitations
+Covers the layout subset ConPTY and common TUIs emit: CUP/HVP, cursor moves,
+CHA/VPA, erase-in-line/display, erase-chars, wrap and scroll. Colours, modes
+and OSC titles are consumed. Unsupported sequences are ignored, never printed.
+## Verification guidance and troubleshooting
+A capture that shows stale dialog text after a redraw means an erase sequence
+is not applied; text run together without spaces means cursor-forward is lost.
+"""
+# Lifecycle: doc/01_research/app/llm_caret/caret_suite_ide_workbench_smux_migration_2026-09-05.md ;
+# doc/02_requirements/feature/windows_conpty_smux.md
+# @manual_section: smux-vt-screen
+
+use std.spec
+use os.apps.smux.vt_screen.{vt_new, vt_feed, vt_text}
+
+fn esc() -> text:
+    "\x1b"
+
+describe "smux pane screen":
+
+    it "overwrites a cell in place when the program moves the cursor back":
+        # @req REQ-SMUX-VT-001
+        step("Print a dialog line, then redraw its first word at the same spot")
+        var s = vt_new(4, 20)
+        s = vt_feed(s, "Trust folder? yes")
+        s = vt_feed(s, esc() + "[1;1H" + "Done ")
+        # @capture(tui_grid): 4x20 grid after an in-place redraw
+        step("The screen shows the redraw, not both frames")
+        expect(vt_text(s)).to_equal("Done  folder? yes")
+
+    it "turns a cursor-forward into the blank cells it skipped":
+        # @req REQ-SMUX-VT-001
+        step("Write two words separated by a cursor-forward of three columns")
+        val s = vt_feed(vt_new(2, 20), "ab" + esc() + "[3C" + "cd")
+        # @capture(tui_grid): words separated by skipped cells
+        step("The skipped cells read as spaces")
+        expect(vt_text(s)).to_equal("ab   cd")
+
+    it "erases the rest of a line and the whole display on request":
+        # @req REQ-SMUX-VT-001
+        step("Fill two rows, erase from column 3 of row 1 to the end")
+        var s = vt_feed(vt_new(3, 10), "abcdefgh\r\nsecond")
+        s = vt_feed(s, esc() + "[1;3H" + esc() + "[K")
+        # @capture(tui_grid): grid after erase-in-line
+        step("Row one keeps only what preceded the cursor")
+        expect(vt_text(s)).to_equal("ab\nsecond")
+        step("Erase the whole display")
+        s = vt_feed(s, esc() + "[2J")
+        expect(vt_text(s)).to_equal("")
+
+    it "wraps at the right edge and scrolls at the bottom":
+        # @req REQ-SMUX-VT-001
+        step("Write more lines than the screen has rows")
+        val s = vt_feed(vt_new(2, 5), "one\r\ntwo\r\nthree45678")
+        # @capture(tui_grid): 2x5 grid after wrap and scroll
+        step("Only the newest rows remain, and the long word wrapped")
+        expect(vt_text(s)).to_equal("three\n45678")
+
+    it "keeps box drawing and other multi-byte characters whole":
+        # @req REQ-SMUX-VT-001
+        step("Draw a box border, then overwrite its middle cell")
+        var s = vt_feed(vt_new(2, 10), "╭──────╮")
+        s = vt_feed(s, esc() + "[1;4H" + "●")
+        # @capture(tui_grid): one cell replaced inside a multi-byte border
+        step("Exactly one character changed and no replacement characters appear")
+        expect(vt_text(s)).to_equal("╭──●───╮")
+
+    it "returns to a saved cursor position after drawing elsewhere":
+        # @req REQ-SMUX-VT-001
+        step("Save the cursor, draw a status line at the bottom, restore, keep typing")
+        var s = vt_feed(vt_new(3, 12), "> ab")
+        s = vt_feed(s, esc() + "7" + esc() + "[3;1H" + "status" + esc() + "8" + "cd")
+        # @capture(tui_grid): input line continued after a status redraw
+        step("The input continues where it was, and the status stays at the bottom")
+        expect(vt_text(s)).to_equal("> abcd\n\nstatus")
+
+    it "drops colours, titles and modes instead of printing them":
+        # @req REQ-SMUX-VT-001
+        step("Feed colours, a title, a private mode and a split escape sequence")
+        var s = vt_new(2, 20)
+        s = vt_feed(s, esc() + "]0;title" + "\x07" + esc() + "[?25l" + esc() + "[31mred" + esc() + "[")
+        s = vt_feed(s, "0m!")
+        # @capture(tui_grid): only printable text survives
+        step("Only the printable text reaches the screen, even across reads")
+        expect(vt_text(s)).to_equal("red!")

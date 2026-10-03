@@ -187,7 +187,7 @@ describe "cs dashboard - selecting and maximizing panes":
             pid: 222, pane_id: "%2", cpu_pct: 2.0, rss_mb: 20, detail: "two")
         val d = CsDashboard(session: base.session,
             manager_status: base.manager_status, agents: [a1, a2],
-            selected: 1, input: "", log: [])
+            selected: 1, input: "", log: [], screen: [])
 
         step("/max targets the SELECTED agent's pane, not the first one")
         val (_after, answer) = cs_handle_command(d, "/max")
@@ -268,7 +268,7 @@ describe "cs dashboard - the rendered screen":
             detail: "pane %2 title a2")
         val d = CsDashboard(session: "caret",
             manager_status: "connected: tmux session caret, 2 agent(s), 2 running",
-            agents: [a1, a2], selected: 1, input: "hello there", log: [])
+            agents: [a1, a2], selected: 1, input: "hello there", log: [], screen: [])
 
         step("render at 80x14")
         val out = cs_render(d, 80, 14)
@@ -308,12 +308,69 @@ describe "cs dashboard - the rendered screen":
                 detail: "d")]
             i = i + 1
         val d = CsDashboard(session: "caret", manager_status: "connected: tmux",
-            agents: agents, selected: 0, input: "tail", log: [])
+            agents: agents, selected: 0, input: "tail", log: [], screen: [])
 
         step("render into fewer rows than the roster needs")
         val lines = _lines(cs_render(d, 60, 8))
         expect(lines.len()).to_equal(8)  # oracle: the frame must never exceed the requested grid height
         expect(lines[7]).to_contain("tail")
+
+    it "shows the dashboard on the left and the selected agent's screen on the right":
+        # @req REQ-CSDASH-014
+        # @capture(tui_grid): 100x12 split frame, dashboard | agent screen
+        step("Select an agent whose pane has printed three lines")
+        val a1 = CsAgent(agent_id: "a1", spec: "claude", status: "running",
+            pid: 111, pane_id: "id3", cpu_pct: 1.0, rss_mb: 10, detail: "one")
+        val a2 = CsAgent(agent_id: "a2", spec: "codex", status: "running",
+            pid: 222, pane_id: "id4", cpu_pct: 2.0, rss_mb: 20, detail: "two")
+        val d = CsDashboard(session: "caret", manager_status: "connected: smux",
+            agents: [a1, a2], selected: 1, input: "draft",
+            log: [], screen: ["old line", "codex> thinking", "codex> hello from a2"])
+
+        step("Render a 100x12 frame")
+        val lines = _lines(cs_render(d, 100, 12))
+        expect(lines.len()).to_equal(12)  # oracle: the frame fills the requested grid height exactly
+
+        step("The status header and the input line span the full width")
+        expect(lines[0]).to_contain("connected: smux")
+        expect(lines[11]).to_contain("draft")
+
+        step("Every middle row is split at the same column: dashboard | screen")
+        val bar = lines[1].index_of("|")
+        expect(bar).to_be_greater_than(30)
+        var row = 1
+        while row < 11:
+            expect(lines[row].index_of("|")).to_equal(bar)
+            row = row + 1
+
+        step("The left half lists agents, the right half names the selected agent")
+        expect(lines[1].substring(0, bar)).to_contain("AGENTS")
+        expect(lines[1].substring(bar, lines[1].len())).to_contain("AGENT  a2")
+
+        step("The agent's newest output is on the right, below its title")
+        var found = false
+        for line in lines:
+            val bi = line.index_of("|")
+            if bi > 0 and line.substring(bi, line.len()).contains("hello from a2"):
+                found = true
+        assert_true(found)
+
+    it "falls back to one column when the terminal is too narrow to split":
+        # @req REQ-CSDASH-014
+        # @capture(tui_grid): 50x8 single-column frame
+        step("Render the same dashboard into a 50-column terminal")
+        val a1 = CsAgent(agent_id: "a1", spec: "claude", status: "running",
+            pid: 111, pane_id: "id3", cpu_pct: 1.0, rss_mb: 10, detail: "one")
+        val d = CsDashboard(session: "caret", manager_status: "connected: smux",
+            agents: [a1], selected: 0, input: "x", log: [], screen: ["agent says hi"])
+        val out = cs_render(d, 50, 8)
+        step("No split column below the header, and the agent screen is not squeezed in")
+        val lines = _lines(out)
+        var row = 1
+        while row < lines.len():
+            expect(lines[row].contains("|")).to_equal(false)
+            row = row + 1
+        expect(out.contains("agent says hi")).to_equal(false)
 
     it "says it has not polled yet rather than showing an empty screen as truth":
         # @req REQ-CSDASH-012

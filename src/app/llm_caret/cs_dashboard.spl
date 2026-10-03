@@ -16,11 +16,13 @@
 # a plausible zero.
 
 use std.tui.widget.{pad_or_truncate}
-use std.nogc_async_mut.sosix.{sosix_proc_usage, sosix_is_running, sosix_which}
+use std.nogc_async_mut.sosix.{sosix_proc_usage, sosix_is_running, sosix_which,
+    sosix_platform}
 use std.io_runtime.{env_get, file_exists}
 use app.llm_caret.harness_spec.{parse_harness_spec, harness_spec_display}
 use app.llm_caret.pane_backend.{Pane, pane_backend_name, pane_available,
-    pane_list, pane_select, pane_zoom, pane_spawn, pane_kill, pane_send}
+    pane_list, pane_select, pane_zoom, pane_spawn, pane_kill, pane_send,
+    pane_capture, pane_send_key, pane_key_bytes}
 
 # cpu_pct/rss_mb use -1 as the UNMEASURED sentinel; 0 would be a real idle
 # reading and must stay distinguishable from "we never got a number".
@@ -41,15 +43,18 @@ struct CsDashboard:
     selected: i64
     input: text
     log: [text]
+    # What the SELECTED agent's pane child printed, oldest first; empty when
+    # nothing is selected or the backend could not capture it.
+    screen: [text]
 
 fn cs_dashboard_new(session: text) -> CsDashboard:
     CsDashboard(session: session, manager_status: "unknown: not polled yet",
-        agents: [], selected: -1, input: "", log: [])
+        agents: [], selected: -1, input: "", log: [], screen: [])
 
 fn _dash(d: CsDashboard, status: text, agents: [CsAgent], selected: i64,
         log: [text]) -> CsDashboard:
     CsDashboard(session: d.session, manager_status: status, agents: agents,
-        selected: selected, input: d.input, log: log)
+        selected: selected, input: d.input, log: log, screen: d.screen)
 
 fn _logged(d: CsDashboard, entry: text) -> [text]:
     d.log + [entry]
@@ -68,6 +73,7 @@ fn cs_help_text() -> text:
         "/launch <spec>   launch an agent (harness[:provider][/model])",
         "/switch <n|id>   select an agent and focus its pane",
         "/max             maximize the selected agent's pane",
+        "/key <name>      press enter|esc|tab|space|up|down|ctrl-c in its pane",
         "/kill <n|id>     kill an agent's pane",
         "/agents          list agents",
         "/help            this text",
@@ -196,6 +202,16 @@ fn cs_handle_command(d: CsDashboard, line: text) -> (CsDashboard, text):
             return (d, "agent " + target.agent_id + " has no pane to maximize")
         return (d, "pane:zoom " + target.pane_id)
 
+    if cmd == "/key":
+        if d.selected < 0:
+            return (d, "no agent selected: /switch <n|id> before /key")
+        if pane_key_bytes(arg) == "":
+            return (d, "unknown key " + arg + ": enter|esc|tab|space|up|down|ctrl-c")
+        val target = d.agents[d.selected]
+        if target.pane_id == "":
+            return (d, "agent " + target.agent_id + " has no pane to press keys in")
+        return (d, "key:" + target.agent_id + " " + target.pane_id + " " + arg)
+
     if cmd == "/kill":
         val idx = _resolve(d, arg)
         if idx < 0:
@@ -225,10 +241,65 @@ fn _detail_lines(d: CsDashboard) -> [text]:
         "  " + _usage_text(a),
         "  " + a.detail]
 
-# The input line is written LAST, so the body budget is rows - 1. A body longer
-# than the budget is truncated; a shorter one is padded with blank lines, which
-# is what pins the input to the bottom row.
+# Below this width the agent screen would be an unreadable sliver, so the
+# frame stays single-column.
+const CS_SPLIT_MIN_COLS: i64 = 60
+const CS_LEFT_MIN_COLS: i64 = 32
+
+# Right-hand region: the selected agent's own terminal output, newest at the
+# bottom, so what the agent is doing right now is always visible.
+fn _screen_lines(d: CsDashboard, height: i64) -> [text]:
+    if d.selected < 0 or d.selected >= d.agents.len():
+        return ["AGENT  (no agent selected)"]
+    val a = d.agents[d.selected]
+    var out: [text] = ["AGENT  " + a.agent_id + "  " + a.spec]
+    if d.screen.len() == 0:
+        return out + ["  (no output captured yet)"]
+    val room = height - 1
+    var start = d.screen.len() - room
+    if start < 0:
+        start = 0
+    var i = start
+    while i < d.screen.len():
+        out = out + [d.screen[i]]
+        i = i + 1
+    out
+
+# The status header is the FIRST row and the input line the LAST, both full
+# width. Between them the dashboard sits on the left and the selected agent's
+# screen on the right. A body longer than its region is truncated; a shorter
+# one is padded with blank lines, which is what pins the input to the bottom.
 fn cs_render(d: CsDashboard, cols: i64, rows: i64) -> text:
+    if cols < CS_SPLIT_MIN_COLS or rows < 3:
+        return _render_single(d, cols, rows)
+    var left_w = cols * 2 / 5
+    if left_w < CS_LEFT_MIN_COLS:
+        left_w = CS_LEFT_MIN_COLS
+    val right_w = cols - left_w - 1
+    val body = _dashboard_lines(d)
+    val mid = rows - 2
+    val screen = _screen_lines(d, mid)
+    var out = pad_or_truncate(body[0], cols) + "\n"
+    var i = 0
+    while i < mid:
+        val left = if i + 1 < body.len(): body[i + 1] else: ""
+        val right = if i < screen.len(): screen[i] else: ""
+        out = out + pad_or_truncate(left, left_w) + "|" + pad_or_truncate(right, right_w) + "\n"
+        i = i + 1
+    out + pad_or_truncate("> " + d.input, cols)
+
+fn _render_single(d: CsDashboard, cols: i64, rows: i64) -> text:
+    val body = _dashboard_lines(d)
+    val budget = if rows > 1: rows - 1 else: 0
+    var out = ""
+    var i = 0
+    while i < budget:
+        val line = if i < body.len(): body[i] else: ""
+        out = out + pad_or_truncate(line, cols) + "\n"
+        i = i + 1
+    out + pad_or_truncate("> " + d.input, cols)
+
+fn _dashboard_lines(d: CsDashboard) -> [text]:
     var body: [text] = ["cs " + d.session + "  |  " + d.manager_status,
         "AGENTS (" + d.agents.len().to_text() + ")"]
     for line in _agent_list_text(d).split("\n"):
@@ -241,15 +312,7 @@ fn cs_render(d: CsDashboard, cols: i64, rows: i64) -> text:
         body = body + ["", "LOG"]
         for entry in d.log:
             body = body + ["  " + entry]
-
-    val budget = if rows > 1: rows - 1 else: 0
-    var out = ""
-    var i = 0
-    while i < budget:
-        val line = if i < body.len(): body[i] else: ""
-        out = out + pad_or_truncate(line, cols) + "\n"
-        i = i + 1
-    out + pad_or_truncate("> " + d.input, cols)
+    body
 
 # ---------------------------------------------------------------------------
 # I/O - re-poll, and execute one action line
@@ -266,8 +329,10 @@ fn _find_pane(panes: [Pane], pane_id: text, title: text) -> [Pane]:
 fn _measured(a: CsAgent, pane: Pane) -> CsAgent:
     var status = "running"
     var detail = "pane " + pane.pane_id + " title " + pane.title
+    # smux lists only panes whose child it has confirmed alive, so a listed
+    # smux pane IS running; only a tmux pid needs the OS probe.
     # TODO: [llm-caret][P1] Reports every live agent as exited on the shipped binary: the seed's rt_process_is_running returns false for any pid it did not spawn and a tmux pane is tmux's child; fixed in source, needs the deploy (doc/08_tracking/bug/interpreter_process_is_running_false_for_unspawned_pid_2026-09-06.md) [blocked:seed-deploy]
-    if not sosix_is_running(pane.pid):
+    if pane_backend_name() == "tmux" and not sosix_is_running(pane.pid):
         status = "exited: pane pid " + pane.pid.to_text() + " is not running"
     val usage = sosix_proc_usage(pane.pid)
     var cpu = -1.0
@@ -307,9 +372,23 @@ fn cs_refresh(d: CsDashboard) -> CsDashboard:
         if next.status == "running":
             running = running + 1
         agents = agents + [next]
-    _dash(d, "connected: " + backend + " session " + d.session + ", " +
+    _with_screen(_dash(d, "connected: " + backend + " session " + d.session + ", " +
         agents.len().to_text() + " agent(s), " + running.to_text() + " running",
-        agents, d.selected, d.log)
+        agents, d.selected, d.log))
+
+# Lines kept for the right-hand agent screen; the render shows the newest ones
+# that fit.
+const CS_SCREEN_LINES: i64 = 200
+
+fn _with_screen(d: CsDashboard) -> CsDashboard:
+    var screen: [text] = []
+    if d.selected >= 0 and d.selected < d.agents.len():
+        val pane_id = d.agents[d.selected].pane_id
+        if pane_id != "":
+            screen = pane_capture(d.session, pane_id, CS_SCREEN_LINES)
+    CsDashboard(session: d.session, manager_status: d.manager_status,
+        agents: d.agents, selected: d.selected, input: d.input, log: d.log,
+        screen: screen)
 
 # Command line for a launch spec. Pure, so the spawned shape is testable
 # without tmux. Element 0 is the command; the rest are its arguments.
@@ -337,15 +416,32 @@ fn cs_resolve_exe(name: text) -> text:
         val override = env_get("SIMPLE_BINARY") ?? ""
         if override != "" and file_exists(override):
             return override
-        val found = sosix_which("simple")
+        val found = _which(name)
         if found != "":
             return found
-        if file_exists("bin/simple"):
-            return "bin/simple"
+        for local in ["bin/simple", "bin/simple.cmd"]:
+            if file_exists(local):
+                return local
         return ""
-    val found = sosix_which(name)
-    if found != "":
-        return found
+    _which(name)
+
+# The names Windows would actually run for a bare command, in PATHEXT priority.
+# A name that already carries an extension is taken as-is.
+fn windows_executable_names(name: text) -> [text]:
+    if name.contains("."):
+        return [name]
+    [name + ".exe", name + ".cmd", name + ".bat"]
+
+# PATH lookup that honours Windows executable extensions: on Windows `claude`
+# is claude.exe and `codex` is the npm shim codex.cmd, and a lookup of the bare
+# name finds neither.
+fn _which(name: text) -> text:
+    if sosix_platform() != "windows":
+        return sosix_which(name)
+    for candidate in windows_executable_names(name):
+        val found = sosix_which(candidate)
+        if found != "":
+            return found
     ""
 
 fn _attach(d: CsDashboard, agent_id: text, pane: Pane) -> CsDashboard:
@@ -373,6 +469,13 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
         if pane_zoom(d.session, words[1]):
             return (d, "maximized pane " + words[1])
         return (d, "pane backend refused to maximize " + words[1])
+    if head.starts_with("key:"):
+        # "key:<agent_id> <pane_id> <key>"
+        if words.len() < 3:
+            return (d, "malformed key action")
+        if pane_send_key(d.session, words[1], words[2]):
+            return (d, "pressed " + words[2] + " in pane " + words[1])
+        return (d, "pane backend refused key " + words[2] + " for pane " + words[1])
     if head == "pane:kill":
         if pane_kill(d.session, words[2]):
             return (cs_refresh(d), "killed pane " + words[2])
@@ -425,4 +528,4 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
 
 export CsAgent, CsDashboard
 export cs_dashboard_new, cs_refresh, cs_render, cs_handle_command, cs_help_text
-export cs_launch_argv, cs_apply_action, cs_resolve_exe
+export cs_launch_argv, cs_apply_action, cs_resolve_exe, windows_executable_names
