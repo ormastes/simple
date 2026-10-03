@@ -12,6 +12,12 @@ use compiler.driver.cache.compile_options_hash.{compile_options_hash_compute}
 use compiler.backend.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.llvm_backend.{generate_runtime_declarations_for_target}
+use compiler.mir_opt.mir_opt.simd_lowering.{run_simd_lowering}
+use compiler.mir_opt.mir_opt._AutoVectorize.recipe.{run_auto_vectorization}
+use compiler.mir_opt.mir_opt.inline.{ModuleInliner, InlinePolicy}
+use compiler.mir_opt.mir_opt.storage_projection_lowering.{lower_mir_storage_project_fields_v1}
+use compiler.mir_opt.mir_opt.typed_storage_view_producer.{produce_mir_typed_storage_views_v1}
+use compiler.mir.mir_debug_trace_injection.{inject_debug_trace}
 
 fn collection_literal_graph(source: text, budget: i64, level: i64 = 2) -> MirModule:
     val file = "collection_literal_membership.spl"
@@ -197,3 +203,29 @@ describe "literal dictionary membership physical consumer", tag: ["only-compiled
         expect(llvm).to_contain("call i8 @rt_dict_contains(")
         expect(llvm.contains("call i64 @rt_dict_set(")).to_equal(false)
         expect(llvm.contains("call i64 @rt_dict_contains(")).to_equal(false)
+
+    it "retains the actual consumed receipt through module reconstructions":
+        step("Transform parsed membership MIR and compare the complete original receipt")
+        val source = "fn probe() -> i64:\n    1\nfn pick() -> bool:\n    {1: 10, 2: 20}.contains_key(probe())\n"
+        val graph = collection_literal_graph(source, 384)
+        expect(graph.functions.len()).to_be_greater_than(1)
+        expect(graph.collection_plan_explanations.len()).to_equal(1)
+        val expected = graph.collection_plan_explanations
+        expect(expected[0]).to_contain("typed_mir=consumed")
+
+        val simd = run_simd_lowering(graph)
+        expect(simd.collection_plan_explanations).to_equal(expected)
+        val vectorized = run_auto_vectorization(simd)
+        expect(vectorized.collection_plan_explanations).to_equal(expected)
+        var inliner = ModuleInliner.new(500, InlinePolicy.Aggressive)
+        val inlined = inliner.inline_module(vectorized)
+        expect(inlined.collection_plan_explanations).to_equal(expected)
+        val projected = lower_mir_storage_project_fields_v1(inlined, [])
+        expect(projected.ok).to_equal(true)
+        expect(projected.module.collection_plan_explanations).to_equal(expected)
+        val produced = produce_mir_typed_storage_views_v1(projected.module, [])
+        expect(produced.ok).to_equal(true)
+        expect(produced.module.collection_plan_explanations).to_equal(expected)
+        val traced = inject_debug_trace(produced.module, "functions")
+        expect(traced.collection_plan_explanations).to_equal(expected)
+        expect(serialize_mir_module(traced)).to_contain("typed_mir=consumed")
