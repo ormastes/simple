@@ -4625,6 +4625,22 @@ impl MirLowering:
                 val target = target_builder.emit_call(target_fn, [lam_op], MirType.i64())
                 filter_target = mir_operand_copy(target.unwrap())
                 filter_environment = Some(lam_op)
+                # Allocation/lookup failure must not turn into call address 0.
+                val zero_target = target_builder.emit_const_int(0)
+                val valid_target = target_builder.emit_binop(MirBinOp.Ne,
+                    filter_target, mir_operand_copy(zero_target), MirType.bool())
+                val ready_block = target_builder.new_block(Some("filter_target_ready"))
+                val failed_block = target_builder.new_block(Some("filter_target_missing"))
+                target_builder.terminate_if(mir_operand_copy(valid_target), ready_block, failed_block)
+                target_builder.switch_to_block(failed_block)
+                val message = target_builder.emit_const_str("array filter closure target is unavailable")
+                val panic_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_panic"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))
+                ))
+                target_builder.emit_call(panic_fn, [mir_operand_copy(message)], MirType.unit())
+                target_builder.terminate_unreachable()
+                target_builder.switch_to_block(ready_block)
                 self.builder = target_builder
             case _: ()
 
