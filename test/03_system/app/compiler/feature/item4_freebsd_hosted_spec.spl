@@ -1,0 +1,119 @@
+"""ITEM4-REQ-005/006: FreeBSD ELF identity, retained notes and hosted inputs.
+
+Image and filesystem scenarios are portable. Native execution still requires
+the FreeBSD host acceptance runner; these assertions do not claim it ran.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes, file_write_bytes, dir_create_all, remove_file_if_exists}
+use std.common.crypto.sha1.{sha1_bytes}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf_parser.{elf_parse_object, elf_section_name}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf.freebsd_hosted.{freebsd_hosted_inputs, freebsd_brand_image}
+use compiler.backend.linker.elf.image_identity.{elf_reseal_build_id}
+
+fn item4_freebsd_object(path: text) -> [i64]:
+    val raw = file_read_bytes(path)
+    expect(raw.len()).to_be_greater_than(64)
+    var bytes: [i64] = []
+    for byte in raw: bytes.push(byte as i64)
+    bytes
+
+fn item4_freebsd_load_image() -> Result<[i64], text>:
+    elf_static_link([item4_freebsd_object("test/fixtures/linker/elf/start_x64.o"),
+        item4_freebsd_object("test/fixtures/linker/elf/lib_x64.o")], [], "_start", RelocArch.X86_64)
+
+describe "ITEM4 FreeBSD hosted ELF identity":
+    it "brands a real linked image and recomputes its build identity":
+        # @req ITEM4-REQ-006
+        step("Construct an ELF image through the production linker")
+        val linked = item4_freebsd_load_image()
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val original = linked.unwrap()
+        val branded = freebsd_brand_image(original)
+        expect(branded.is_ok()).to_equal(true)
+        if branded.is_err(): return
+        val image = branded.unwrap()
+        expect(image[7]).to_equal(9)
+        expect(image.len()).to_equal(original.len())
+        step("Locate the emitted note and independently hash the zeroed digest image")
+        var raw: [u8] = []
+        for byte in image: raw.push(byte as u8)
+        val parsed = elf_parse_object(raw)
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_err(): return
+        val object = parsed.unwrap()
+        var digest_offset: i64 = -1
+        var index: i64 = 0
+        while index < object.sections.len():
+            if elf_section_name(object, index) == ".note.gnu.build-id":
+                digest_offset = object.sections[index].sh_addr + 16
+            index = index + 1
+        expect(digest_offset).to_be_greater_than(0)
+        if digest_offset <= 0 or digest_offset + 20 > image.len(): return
+        var preimage = image
+        index = 0
+        while index < 20:
+            preimage[digest_offset + index] = 0
+            index = index + 1
+        val expected = sha1_bytes(preimage)
+        index = 0
+        while index < 20:
+            expect(image[digest_offset + index]).to_equal(expected.get(index))
+            index = index + 1
+        expect(freebsd_brand_image(image).unwrap()).to_equal(image)
+
+    it "rejects malformed identity input instead of returning a branded header":
+        # @req ITEM4-REQ-006
+        step("Require a fully parsed ELF and canonical SHA1 note")
+        expect(freebsd_brand_image([127, 69, 76, 70]).is_err()).to_equal(true)
+        val linked = item4_freebsd_load_image()
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        var image = linked.unwrap()
+        image[4] = 1
+        expect(freebsd_brand_image(image).is_err()).to_equal(true)
+        image = linked.unwrap()
+        image[0] = 0
+        expect(elf_reseal_build_id(image).is_err()).to_equal(true)
+
+describe "ITEM4 FreeBSD startup input ordering":
+    it "selects FreeBSD startup objects and libc without Linux discovery":
+        # @req ITEM4-REQ-006
+        step("Create a task-owned sysroot using real ELF fixture contents")
+        val root = "build/item4_freebsd/sysroot"
+        val made_usr = dir_create_all(root + "/usr/lib")
+        val made_lib = dir_create_all(root + "/lib")
+        val made_loader = dir_create_all(root + "/libexec")
+        expect(made_usr and made_lib and made_loader).to_equal(true)
+        if not made_usr or not made_lib or not made_loader: return
+        val object = file_read_bytes("test/fixtures/linker/elf/start_x64.o")
+        val shared = file_read_bytes("test/fixtures/linker/elf/libadd_x64.so.1")
+        expect(object.len()).to_be_greater_than(64)
+        expect(shared.len()).to_be_greater_than(64)
+        if object.len() <= 64 or shared.len() <= 64: return
+        for name in ["crt1.o", "Scrt1.o", "crti.o", "crtn.o", "crtbegin.o", "crtbeginS.o", "crtend.o", "crtendS.o"]:
+            val written = file_write_bytes(root + "/usr/lib/" + name, object)
+            expect(written).to_equal(true)
+            if not written: return
+        expect(file_write_bytes(root + "/lib/libc.so.7", shared)).to_equal(true)
+        expect(file_write_bytes(root + "/libexec/ld-elf.so.1", shared)).to_equal(true)
+        step("Resolve executable and PIE startup ordering from the explicit sysroot")
+        val normal = freebsd_hosted_inputs(root, false)
+        val pie = freebsd_hosted_inputs(root, true)
+        expect(normal.is_ok()).to_equal(true)
+        expect(pie.is_ok()).to_equal(true)
+        if normal.is_err() or pie.is_err(): return
+        expect(normal.unwrap().before).to_equal([root + "/usr/lib/crt1.o", root + "/usr/lib/crti.o", root + "/usr/lib/crtbegin.o"])
+        expect(normal.unwrap().after).to_equal([root + "/usr/lib/crtend.o", root + "/usr/lib/crtn.o"])
+        expect(pie.unwrap().before[0]).to_equal(root + "/usr/lib/Scrt1.o")
+        expect(pie.unwrap().after[0]).to_equal(root + "/usr/lib/crtendS.o")
+        expect(normal.unwrap().interpreter).to_equal("/libexec/ld-elf.so.1")
+        expect(normal.unwrap().shared[0]).to_equal(root + "/lib/libc.so.7")
+        step("Delete one required startup object and require its named rejection")
+        expect(remove_file_if_exists(root + "/usr/lib/crti.o")).to_equal(true)
+        val missing = freebsd_hosted_inputs(root, false)
+        expect(missing.is_err()).to_equal(true)
+        if missing.is_err(): expect(missing.unwrap_err()).to_contain("crti.o")
