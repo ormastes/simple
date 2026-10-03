@@ -1,0 +1,168 @@
+# SimpleOS riscv64 NVFS-root entry (real-firmware lane).
+#
+# Boot chain: OpenSBI (fw_jump) -> U-Boot (S-mode) -> boot.scr `booti` of this
+# kernel's flat Image -> crt0.S -> boot_entry -> spl_start. The root
+# filesystem is Simple NVFS (nvfs-dbfs-backed-v1) on a virtio-mmio block
+# device. There is NO FAT32/ramfs/DBFS fallback: if no NVFS root mounts, the
+# boot prints `NVFS_ROOT_BOOT_FAILED` and parks.
+#
+# Driven by scripts/check/check-simpleos-riscv64-nvfs-qemu.shs, which boots
+# the same NVFS image twice to prove persistence.
+#
+# No module-level initializers; constants stay function-local.
+
+extern fn serial_println(msg: text)
+
+use os.drivers.virtio.rv64_virtio_mmio_blk.{
+    Rv64VirtioMmioBlk, rv64_virtio_mmio_blk_slot_count,
+    rv64_virtio_mmio_blk_slot_is_block
+}
+use os.kernel.boot.nvfs_root_device.{
+    nvfs_root_device_has_superblock, nvfs_root_device_open
+}
+use std.fs_driver.nvfs_driver.{NvfsDriver}
+use std.fs_driver.types.{Path, OpenFlags}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.desugar.desugar_async.{desugar_module}
+use compiler.frontend.desugar.collection_desugar.{desugar_collections_static}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+
+fn fail_boot(reason: text):
+    serial_println("[rv64-nvfs] " + reason)
+    serial_println("NVFS_ROOT_BOOT_FAILED")
+
+fn find_nvfs_slot() -> i64:
+    """Return the first virtio-mmio block slot carrying a valid NVFS replica."""
+    var slot: i64 = 0
+    while slot < rv64_virtio_mmio_blk_slot_count().to_i64():
+        if rv64_virtio_mmio_blk_slot_is_block(slot.to_u64()):
+            val opened = Rv64VirtioMmioBlk.open_slot(slot.to_u64())
+            if opened.is_ok():
+                if nvfs_root_device_has_superblock(opened.unwrap()):
+                    return slot
+        slot = slot + 1
+    -1
+
+fn root_exists(root: NvfsDriver, path: text) -> bool:
+    root.stat_path(Path(raw: path)).is_ok()
+
+fn root_read(root: NvfsDriver, path: text) -> text?:
+    val opened = root.open_path(Path(raw: path), OpenFlags.read_only())
+    if opened.is_err():
+        return nil
+    val handle = opened.unwrap()
+    val body = root.read_handle(handle, 4096)
+    root.close_handle(handle)
+    if body.is_err():
+        return nil
+    Some(body.unwrap())
+
+fn root_write(root: NvfsDriver, path: text, body: text) -> bool:
+    val opened = root.open_path(Path(raw: path), OpenFlags.create_write().with_trunc())
+    if opened.is_err():
+        return false
+    val handle = opened.unwrap()
+    val wrote = root.write_handle(handle, body)
+    val synced = root.fsync(handle)
+    root.close_handle(handle)
+    wrote.is_ok() and synced.is_ok()
+
+fn run_program(root: NvfsDriver, path: text) -> bool:
+    """Load a Simple program FROM the NVFS root and run it on the in-guest
+    interpreter. Its output reaches the console only by being printed by the
+    interpreted program itself."""
+    val source = root_read(root, path)
+    if not source.?:
+        serial_println("[rv64-nvfs] program " + path + " unreadable on NVFS root")
+        return false
+    serial_println("[rv64-nvfs] exec " + path + " (loaded from NVFS root)")
+    var parsed = parse_and_build_module(_pp_preprocess_conditionals(source.unwrap()), path)
+    parsed = desugar_module(parsed)
+    desugar_collections_static(0, 0)
+    var lowering: HirLowering = HirLowering.with_filename(path)
+    val hir: HirModule = lowering.lower_module(parsed)
+    if lowering.errors.len() > 0:
+        serial_println("[rv64-nvfs] program lowering error: " + lowering.errors[0].message)
+        return false
+    if hir.functions.len() == 0:
+        serial_println("[rv64-nvfs] program has no functions")
+        return false
+    match InterpreterBackendImpl.new().interpret_hir_module(hir):
+        case Ok(_):
+            serial_println("[rv64-nvfs] exec " + path + " exited ok")
+            true
+        case Err(error):
+            serial_println("[rv64-nvfs] program error: " + error.message)
+            false
+
+fn spl_start():
+    serial_println("")
+    serial_println("=== SimpleOS RV64 NVFS root boot ===")
+    val slot = find_nvfs_slot()
+    if slot < 0:
+        fail_boot("no virtio-blk device carries a valid NVFS superblock")
+        return
+    serial_println("[rv64-nvfs] NVFS superblock found on virtio-mmio block device")
+    val dev = Rv64VirtioMmioBlk.open_slot(slot.to_u64())
+    if dev.is_err():
+        fail_boot("reopen of NVFS device failed: " + dev.unwrap_err())
+        return
+    val mounted = nvfs_root_device_open(dev.unwrap())
+    if mounted.is_err():
+        fail_boot("NVFS root mount failed (no fallback): " + mounted.unwrap_err())
+        return
+    var root = mounted.unwrap()
+    serial_println("[NVFS] mounted as root filesystem provider=nvfs-dbfs-backed-v1")
+
+    val dir = root.opendir_path(Path(raw: "/"))
+    if dir.is_err():
+        fail_boot("opendir / failed")
+        return
+    val listing = root.readdir_handle(dir.unwrap())
+    if listing.is_err():
+        fail_boot("readdir / failed")
+        return
+    for e in listing.unwrap():
+        serial_println("[rv64-nvfs] ls / : " + e.name)
+    serial_println("[rv64-nvfs] ls / done")
+
+    val motd = root_read(root, "/etc/motd")
+    if not motd.?:
+        fail_boot("/etc/motd unreadable on NVFS root")
+        return
+    serial_println("[rv64-nvfs] cat /etc/motd: " + motd.unwrap())
+
+    val marker_path = "/boot-marker.txt"
+    val marker_body = "nvfs-persist-ok"
+    if root_exists(root, marker_path):
+        val seen = root_read(root, marker_path)
+        if not seen.? or seen.unwrap() != marker_body:
+            fail_boot("NVFS persistence check: FAILED content-mismatch")
+            return
+        serial_println("[rv64-nvfs] NVFS persistence check: persisted:match content=nvfs-persist-ok")
+    else:
+        if not root_write(root, marker_path, marker_body):
+            fail_boot("NVFS persistence check: FAILED first-boot-write")
+            return
+        serial_println("[rv64-nvfs] NVFS persistence check: written:first-boot")
+
+    val probe_path = "/rv64-sanity.txt"
+    val probe_body = "rv64 nvfs write+read ok"
+    if not root_write(root, probe_path, probe_body):
+        fail_boot("write " + probe_path + " failed")
+        return
+    val back = root_read(root, probe_path)
+    if not back.? or back.unwrap() != probe_body:
+        if back.?:
+            serial_println("[rv64-nvfs] readback was [" + back.unwrap() + "]")
+        fail_boot("readback " + probe_path + " mismatch")
+        return
+    serial_println("[rv64-nvfs] write+read " + probe_path + " ok")
+
+    if not run_program(root, "/bin/hello.spl"):
+        fail_boot("running /bin/hello.spl from NVFS failed")
+        return
+    serial_println("NVFS_RV64_ROOT_SANITY_PASSED")

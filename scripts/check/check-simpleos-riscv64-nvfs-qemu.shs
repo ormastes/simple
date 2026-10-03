@@ -1,0 +1,277 @@
+#!/bin/sh
+# check-simpleos-riscv64-nvfs-qemu.shs
+#
+# SimpleOS riscv64 with a Simple NVFS ROOT FILESYSTEM, booted through REAL
+# FIRMWARE under QEMU `virt`, then sanity-checked over two cold boots of the
+# same disk image.
+#
+# BOOT CHAIN (identical to a JH7110 / VisionFive 2 SD-card boot):
+#   OpenSBI fw_jump (M-mode, `-bios`)  ->  U-Boot S-mode  ->  boot.scr on a
+#   FAT boot partition  ->  `load` the SimpleOS flat Image to 0x80200000  ->
+#   `booti` (RISC-V Image header, a0=hartid, a1=FDT)  ->  crt0.S -> spl_start.
+# QEMU's `-device loader` only stands in for the board's SPI-flash SPL that
+# places U-Boot in DRAM; the SimpleOS kernel is read off the boot disk by
+# U-Boot. NEVER `-kernel`, NEVER isa-debug-exit/sifive_test as the oracle: the
+# verdict comes from serial markers only, and the assembled argv is
+# self-checked for both forbidden flags before QEMU starts.
+#
+# ROOT FILESYSTEM: an nvfs-dbfs-backed-v1 image built by src/os/port/mkfs_nvfs.spl
+# on a second virtio-mmio disk. The kernel entry
+# (examples/09_embedded/simple_os/arch/riscv64/nvfs_root_entry.spl) has NO
+# FAT/ramfs/DBFS fallback; a missing NVFS root prints NVFS_ROOT_BOOT_FAILED.
+# A negative-control boot with a blank root disk must show exactly that.
+#
+# SANITY (all from serial): NVFS mounted as root, `ls /`, `cat /etc/motd`,
+# write+read /rv64-sanity.txt, run /bin/hello.spl (stored on NVFS) on the
+# in-guest interpreter, and the /boot-marker.txt written on boot 1 is read
+# back on boot 2 (persistence across a full firmware reboot).
+#
+# COMPILER: the Rust bootstrap SEED (no full-CLI pure-Simple binary exists);
+# its path + sha256 are recorded in the receipt and the verdict.
+#
+# Verdict is the LAST stdout line:
+#   PASS  — <n> marker(s) checked ...   exit 0
+#   FAIL  — ...                         exit 1
+#   ERROR — nothing was checked: ...    exit 2
+#
+# Env: SIMPLE_BIN (seed, default src/compiler_rust/target/release/simple),
+#      OPENSBI_FW_JUMP, UBOOT_SMODE_BIN, BOOT_WAIT (s, default 180),
+#      NVFS_SECTORS (default 2048), NVFS_IMAGE (reuse a prebuilt image),
+#      OUT_DIR (default build/verify/simpleos-riscv64-nvfs).
+# `--selftest` runs the evaluator/argv-guard fixtures only (they also run,
+# fatally, before every real run).
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT"
+
+OUT=${OUT_DIR:-$ROOT/build/verify/simpleos-riscv64-nvfs}
+SIMPLE_BIN=${SIMPLE_BIN:-$ROOT/src/compiler_rust/target/release/simple}
+ENTRY=examples/09_embedded/simple_os/arch/riscv64/nvfs_root_entry.spl
+LDS=examples/09_embedded/simple_os/arch/riscv64/linker.ld
+BOOT_WAIT=${BOOT_WAIT:-180}
+NVFS_SECTORS=${NVFS_SECTORS:-2048}
+
+verdict_error() { printf 'ERROR — nothing was checked: %s\n' "$1"; exit 2; }
+verdict_fail()  { printf 'FAIL — %s\n' "$1"; exit 1; }
+
+MARKERS_COMMON='OpenSBI v
+U-Boot
+[u-boot] SimpleOS riscv64 boot.scr
+Starting kernel
+=== SimpleOS RV64 NVFS root boot ===
+[NVFS] mounted as root filesystem provider=nvfs-dbfs-backed-v1
+[rv64-nvfs] ls / : /etc/motd
+[rv64-nvfs] ls / : /bin/hello.spl
+[rv64-nvfs] cat /etc/motd: SimpleOS NVFS POSIX root
+[rv64-nvfs] write+read /rv64-sanity.txt ok
+[rv64-nvfs] exec /bin/hello.spl (loaded from NVFS root)
+NVFS_PROGRAM_HELLO_OK
+NVFS_RV64_ROOT_SANITY_PASSED'
+MARKERS_BOOT1="$MARKERS_COMMON
+[rv64-nvfs] NVFS persistence check: written:first-boot"
+MARKERS_BOOT2="$MARKERS_COMMON
+[rv64-nvfs] ls / : /boot-marker.txt
+[rv64-nvfs] NVFS persistence check: persisted:match content=nvfs-persist-ok"
+MARKERS_NEGATIVE='=== SimpleOS RV64 NVFS root boot ===
+NVFS_ROOT_BOOT_FAILED'
+
+# eval_log <log> <markers-text>: "CHECKED=<n>" when all present, "MISSING:<m>"
+# for the first absent one, "CHECKED=0" on an empty log or empty marker list.
+eval_log() {
+    log=$1; list=$2; n=0
+    [ -n "$list" ] && [ -s "$log" ] || { echo "CHECKED=0"; return 0; }
+    while IFS= read -r m; do
+        [ -n "$m" ] || continue
+        grep -Faq -- "$m" "$log" || { printf 'MISSING:%s\n' "$m"; return 0; }
+        n=$((n + 1))
+    done <<EOF
+$list
+EOF
+    echo "CHECKED=$n"
+}
+
+# argv_guard <args...>: non-zero when the argv carries a forbidden pass oracle.
+argv_guard() {
+    for a in "$@"; do
+        case "$a" in
+            -kernel|*isa-debug-exit*|*sifive_test*) return 1 ;;
+        esac
+    done
+    return 0
+}
+
+selftest() {
+    st=$OUT/selftest; rm -rf "$st"; mkdir -p "$st"
+    printf 'noise\n%s\nnoise\n' "$MARKERS_BOOT1" > "$st/good.log"
+    want=$(printf '%s\n' "$MARKERS_BOOT1" | grep -c .)
+    [ "$(eval_log "$st/good.log" "$MARKERS_BOOT1")" = "CHECKED=$want" ] || return 1
+    grep -Fv 'NVFS_PROGRAM_HELLO_OK' "$st/good.log" > "$st/noprog.log"
+    [ "$(eval_log "$st/noprog.log" "$MARKERS_BOOT1")" = "MISSING:NVFS_PROGRAM_HELLO_OK" ] || return 1
+    : > "$st/empty.log"
+    [ "$(eval_log "$st/empty.log" "$MARKERS_BOOT1")" = "CHECKED=0" ] || return 1
+    [ "$(eval_log "$st/good.log" "")" = "CHECKED=0" ] || return 1
+    # A boot-1 transcript must not satisfy boot 2 (persistence is not implied).
+    case "$(eval_log "$st/good.log" "$MARKERS_BOOT2")" in MISSING:*) ;; *) return 1 ;; esac
+    argv_guard -machine virt -bios fw.bin || return 1
+    if argv_guard -bios fw.bin -kernel Image; then return 1; fi
+    if argv_guard -device isa-debug-exit,iobase=0xf4; then return 1; fi
+    echo "[rv64-nvfs-gate] selftest OK (7 fixtures)"
+}
+
+mkdir -p "$OUT"
+selftest || verdict_error "selftest failed — the serial evaluator cannot be trusted"
+[ "${1:-}" = "--selftest" ] && { printf 'PASS — 7 selftest fixture(s) checked, evaluator and argv guard discriminate\n'; exit 0; }
+
+# --- toolchain / firmware ----------------------------------------------------
+sha() { sha256sum "$1" | awk '{print $1}'; }
+admission=$(sh scripts/qemu/simple-qemu-host-admission.shs --arch riscv64 --accelerator tcg 2>/dev/null) \
+    || verdict_error "QEMU host admission failed"
+QEMU=$(printf '%s\n' "$admission" | sed -n 's/^qemu_binary_resolved=//p')
+[ -n "$QEMU" ] && [ -x "$QEMU" ] || verdict_error "qemu-system-riscv64 not found"
+FW=${OPENSBI_FW_JUMP:-}
+if [ -z "$FW" ]; then
+    for c in /usr/lib/riscv64-linux-gnu/opensbi/generic/fw_jump.bin \
+             /usr/share/opensbi/lp64/generic/firmware/fw_jump.bin; do
+        [ -f "$c" ] && { FW=$c; break; }
+    done
+fi
+[ -n "$FW" ] && [ -f "$FW" ] || verdict_error "no OpenSBI fw_jump.bin (set OPENSBI_FW_JUMP; Debian/Ubuntu: opensbi)"
+UBOOT=${UBOOT_SMODE_BIN:-/usr/lib/u-boot/qemu-riscv64_smode/u-boot.bin}
+[ -f "$UBOOT" ] || verdict_error "no U-Boot qemu-riscv64_smode u-boot.bin (set UBOOT_SMODE_BIN; Debian/Ubuntu: u-boot-qemu)"
+for t in mkimage sfdisk mkfs.vfat mcopy timeout; do
+    command -v "$t" >/dev/null 2>&1 || verdict_error "missing host tool $t (u-boot-tools, fdisk, dosfstools, mtools, coreutils)"
+done
+OBJCOPY=
+for c in riscv64-linux-gnu-objcopy riscv64-unknown-elf-objcopy llvm-objcopy; do
+    command -v "$c" >/dev/null 2>&1 && { OBJCOPY=$c; break; }
+done
+[ -n "$OBJCOPY" ] || verdict_error "no riscv64-capable objcopy"
+[ -x "$SIMPLE_BIN" ] || verdict_error "no compiler at $SIMPLE_BIN (cargo build --release --bin simple in src/compiler_rust)"
+
+# --- kernel ------------------------------------------------------------------
+KERNEL=$OUT/kernel.elf; IMAGE=$OUT/Image
+rm -f "$KERNEL" "$IMAGE"
+set +e
+"$SIMPLE_BIN" native-build --backend cranelift --entry-closure --timeout 1200 \
+    --entry "$ENTRY" --target riscv64gc-unknown-none-elf --linker-script "$LDS" \
+    -o "$KERNEL" >"$OUT/kernel-build.log" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 0 ] && [ -s "$KERNEL" ] || { tail -30 "$OUT/kernel-build.log" >&2; verdict_error "kernel native-build failed (rc=$rc), log $OUT/kernel-build.log"; }
+readelf -h "$KERNEL" 2>/dev/null | grep -q 'RISC-V' || verdict_error "$KERNEL is not a RISC-V ELF"
+for sym in spl_start Rv64VirtioMmioBlk_dot_open_slot nvfs_root_device_open interpret_hir_module; do
+    readelf -sW "$KERNEL" | grep -q "$sym" || verdict_error "kernel lacks $sym (closure was not linked)"
+done
+"$OBJCOPY" -O binary "$KERNEL" "$IMAGE" && [ -s "$IMAGE" ] || verdict_error "flat Image extraction failed"
+
+# --- NVFS root image -----------------------------------------------------------
+NVFS=$OUT/nvfs-root.img
+if [ -n "${NVFS_IMAGE:-}" ]; then
+    cp "$NVFS_IMAGE" "$NVFS"
+else
+    rm -f "$NVFS"
+    set +e
+    "$SIMPLE_BIN" run src/os/port/mkfs_nvfs.spl -- "$NVFS" "$NVFS_SECTORS" >"$OUT/mkfs.log" 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] && [ -s "$NVFS" ] || { tail -20 "$OUT/mkfs.log" >&2; verdict_error "mkfs.nvfs failed (rc=$rc)"; }
+fi
+[ "$(head -c 4 "$NVFS")" = "SFVN" ] || verdict_error "$NVFS has no NVFS superblock magic at LBA 0"
+
+# --- boot media: FAT boot partition with Image + boot.scr (as on an SD card) ----
+cat >"$OUT/boot.cmd" <<'EOF'
+echo [u-boot] SimpleOS riscv64 boot.scr devtype=${devtype} devnum=${devnum} part=${distro_bootpart}
+load ${devtype} ${devnum}:${distro_bootpart} 0x80200000 /Image
+booti 0x80200000 - ${fdtcontroladdr}
+EOF
+mkimage -A riscv -T script -C none -n simpleos-nvfs -d "$OUT/boot.cmd" "$OUT/boot.scr" >/dev/null \
+    || verdict_error "mkimage boot.scr failed"
+BOOTIMG=$OUT/boot.img
+rm -f "$BOOTIMG"
+img_mib=$(( $(wc -c <"$IMAGE") / 1048576 + 32 ))
+truncate -s "${img_mib}M" "$BOOTIMG"
+printf 'label: dos\nstart=2048, type=c, bootable\n' | sfdisk -q "$BOOTIMG" || verdict_error "sfdisk failed"
+mkfs.vfat -F 32 --offset 2048 "$BOOTIMG" >/dev/null || verdict_error "mkfs.vfat failed"
+mcopy -i "$BOOTIMG@@1M" "$IMAGE" ::/Image && mcopy -i "$BOOTIMG@@1M" "$OUT/boot.scr" ::/boot.scr \
+    || verdict_error "populating boot partition failed"
+
+# boot_once <root-disk> <serial-log>: run until a terminal marker or BOOT_WAIT.
+boot_once() {
+    disk=$1; log=$2
+    rm -f "$log"
+    set -- -no-user-config -machine virt -cpu rv64 -smp 1 -m 512M \
+        -bios "$FW" \
+        -device "loader,file=$UBOOT,addr=0x80200000" \
+        -drive "file=$BOOTIMG,format=raw,if=none,id=bootdisk" \
+        -device virtio-blk-device,drive=bootdisk \
+        -drive "file=$disk,format=raw,if=none,id=nvfsroot" \
+        -device virtio-blk-device,drive=nvfsroot \
+        -serial "file:$log" -display none -monitor none -net none -no-reboot
+    argv_guard "$@" || verdict_fail "assembled QEMU argv carries a forbidden flag (-kernel / isa-debug-exit / sifive_test)"
+    printf '%s' "$QEMU" >"$log.argv"; printf ' %s' "$@" >>"$log.argv"
+    "$QEMU" "$@" >"$log.qemu" 2>&1 &
+    qpid=$!
+    waited=0
+    while [ "$waited" -lt "$BOOT_WAIT" ]; do
+        sleep 2; waited=$((waited + 2))
+        kill -0 "$qpid" 2>/dev/null || break
+        if grep -Faq 'NVFS_RV64_ROOT_SANITY_PASSED' "$log" 2>/dev/null ||
+           grep -Faq 'NVFS_ROOT_BOOT_FAILED' "$log" 2>/dev/null; then
+            sleep 2; break
+        fi
+    done
+    kill "$qpid" 2>/dev/null || true
+    wait "$qpid" 2>/dev/null || true
+    [ -s "$log" ] || verdict_fail "boot produced an empty serial log ($log)"
+}
+
+# check_boot <label> <log> <markers>: sets CHECKED_N or exits with the verdict.
+check_boot() {
+    label=$1; log=$2; list=$3
+    if grep -Faq 'NVFS_ROOT_BOOT_FAILED' "$log"; then
+        verdict_fail "$label: kernel reported NVFS_ROOT_BOOT_FAILED (see $log)"
+    fi
+    res=$(eval_log "$log" "$list")
+    case "$res" in
+        CHECKED=0) verdict_error "$label: no markers were evaluated" ;;
+        MISSING:*) verdict_fail "$label: serial log is missing '${res#MISSING:}' (see $log)" ;;
+    esac
+    CHECKED_N=${res#CHECKED=}
+}
+
+RUN_DISK=$OUT/nvfs-root.run.img
+cp "$NVFS" "$RUN_DISK"
+boot_once "$RUN_DISK" "$OUT/boot1.log"
+check_boot "boot 1" "$OUT/boot1.log" "$MARKERS_BOOT1"; n1=$CHECKED_N
+boot_once "$RUN_DISK" "$OUT/boot2.log"
+check_boot "boot 2" "$OUT/boot2.log" "$MARKERS_BOOT2"; n2=$CHECKED_N
+
+# Negative control: a blank root disk must FAIL loudly — no silent fallback.
+BLANK=$OUT/blank-root.img
+rm -f "$BLANK"; truncate -s 1M "$BLANK"
+boot_once "$BLANK" "$OUT/negative.log"
+res=$(eval_log "$OUT/negative.log" "$MARKERS_NEGATIVE")
+case "$res" in
+    CHECKED=0) verdict_error "negative control: no markers were evaluated" ;;
+    MISSING:*) verdict_fail "negative control: blank root did not fail loudly (missing '${res#MISSING:}', see $OUT/negative.log)" ;;
+esac
+if grep -Faq 'NVFS_RV64_ROOT_SANITY_PASSED' "$OUT/negative.log"; then
+    verdict_fail "negative control: blank root disk still reported sanity PASS (fallback present)"
+fi
+n3=${res#CHECKED=}
+
+{
+    printf 'schema_version=1\n'
+    printf 'source_revision=%s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+    printf 'compiler_path=%s\ncompiler_sha256=%s\n' "$SIMPLE_BIN" "$(sha "$SIMPLE_BIN")"
+    printf 'kernel_elf_sha256=%s\nkernel_image_sha256=%s\n' "$(sha "$KERNEL")" "$(sha "$IMAGE")"
+    printf 'nvfs_image_sha256=%s\nboot_media_sha256=%s\n' "$(sha "$NVFS")" "$(sha "$BOOTIMG")"
+    printf 'opensbi_path=%s\nopensbi_sha256=%s\n' "$FW" "$(sha "$FW")"
+    printf 'uboot_path=%s\nuboot_sha256=%s\n' "$UBOOT" "$(sha "$UBOOT")"
+    printf '%s\n' "$admission" | grep -E '^(qemu_binary_resolved|qemu_sha256|qemu_version)='
+} >"$OUT/receipt.env"
+
+total=$((n1 + n2 + n3))
+printf 'PASS — %s marker(s) checked across 2 NVFS-root boots + 1 blank-root negative control; riscv64 SimpleOS booted OpenSBI fw_jump -> U-Boot -> booti (no -kernel, no isa-debug-exit), NVFS root mounted, ls/cat/write+read/exec-from-NVFS ok, persisted across reboot; QEMU-only (board blocked, see doc/07_guide/platform/simpleos/qemu_system_tests.md); kernel built by RUST SEED %s; receipt %s\n' \
+    "$total" "$SIMPLE_BIN" "$OUT/receipt.env"
