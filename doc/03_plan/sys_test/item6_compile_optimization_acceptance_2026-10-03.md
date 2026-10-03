@@ -133,3 +133,48 @@ Generate manuals from the executable spec with the admitted SPipe docgen after e
 - NFR performance records warm startup, representative request latency, maximum RSS, and realistic fixture size; correctness strings alone do not establish performance.
 - Existing requirement/design/manual links stay current; generated manuals follow executable steps. A focused GC PASS does not complete Item 6.
 - Stop after three repair cycles; never rerun already-green criteria without a relevant change.
+
+## Open production reachability gap: snapshot-derived root generation
+
+Status: **unresolved design/implementation gap**, found by source review on
+2026-10-03. This is not a runtime RED/GREEN result. It blocks claiming that the
+real cold publisher preserves consumer reuse for a private source edit
+(`PSI-REQ-002`, `PSI-NFR-004`). Conservative invalidation remains correct.
+
+The sole production construction of `PackageModuleIndexBuildAuthorityV1` is in
+`src/compiler/80.driver/cache/cold_full_index_producer_v1.spl`, in
+`cold_full_index_publish_from_driver_v1`. It supplies `snapshot.tree_id` as both
+the root-generation seed and the separate SCV tree binding. In
+`src/compiler/80.driver/cache/package_module_index_builder.spl`,
+`package_module_index_root_for_variant_v1` hashes that seed with the variant.
+Therefore a source edit that changes the admitted snapshot tree also changes
+the package-index root generation.
+
+The integrated `package_index_route_admitted_invalidation_v1` deliberately
+requires equal old/new root generations before accepting precise per-module
+semantic changes. A publisher-produced source edit fails this guard and uses
+conservative public-change propagation. Tests which retain an invented constant
+root generation exercise the classifier but do not prove this production path.
+
+No established stable authenticated project/root-generation authority was found
+in the audited cold-publisher, compiler-entrypoint, or SCV snapshot owners.
+The daemon's caller-supplied workspace label is a session isolation key;
+`cache_project_namespace()` defaults to the common name `simple`; an absolute
+checkout path breaks the required checkout-root reproducibility. None is an
+approved replacement for the current root-generation authority. Do not remove
+the compatibility guard or substitute one of these values to make tests green.
+
+Resolution requires an explicit authority design that distinguishes stable
+package graph ownership from mutable snapshot/tree provenance, preserves
+cross-workspace isolation and relocation behavior, and specifies migration of
+existing index/archive keys. Apply the selected authority consistently in the
+publisher, route admission, archive authority, and transition comparison.
+
+The required regression must start with two actual publisher-produced graphs
+from frozen snapshots: change one private producer body and one independent
+public export, admit the second publication, and route through the actual driver
+entrypoint. Assert that only the public branch's reverse dependents are dirty,
+the private branch's consumer archive is retained, and all source/index/archive
+bindings name the new snapshot. Also reject a different project/root authority
+despite matching module names, and compare identities across relocated copies.
+This regression must not manually force equal root generations on the graphs.
