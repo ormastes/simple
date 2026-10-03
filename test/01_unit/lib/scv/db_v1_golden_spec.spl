@@ -1,0 +1,70 @@
+# Literal vectors independently derived from v1 framing, not encoder output.
+# This is codec compatibility coverage, not admission or reproducibility proof.
+use std.spec.*
+use std.scv.db_reproduction_codec.*
+use std.scv.db_snapshot.{db_snapshot_unhex}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use test.fixtures.scv.db_v1_golden_fixture.*
+
+describe "Independent literal reproduction-v1 compatibility vectors":
+    it "matches exact wire and semantic digests for all three original variants":
+        val vectors = setup_item2_v1_golden_vectors()
+        expect(vectors.len()).to_equal(3)
+        for vector in vectors:
+            expect(db_reproduction_record_version(vector.record)).to_equal("v1")
+            expect(db_reproduction_record_encode(vector.record).unwrap()).to_equal(vector.wire)
+            expect(db_reproduction_record_revision(vector.record).unwrap()).to_equal(vector.digest)
+            expect(db_reproduction_record_decode(vector.wire).unwrap()).to_equal(vector.record)
+            # Independent .NET hashes are literals in the fixture. Hashing the
+            # literal preimage here also detects a mistyped checked-in vector.
+            expect("sha256:v1:" + sha256_u8_hex(db_snapshot_unhex(vector.preimage_hex).unwrap())).to_equal(vector.digest)
+
+    it "excludes only the own revision while refusing a false claimed revision":
+        for vector in setup_item2_v1_golden_vectors():
+            val altered = match vector.record:
+                Config(value):
+                    var next = value
+                    next.reference.revision = "sha256:v1:" + "0".repeat(64)
+                    DbReproductionRecord.Config(next)
+                Reproduction(value):
+                    var next = value
+                    next.reference.revision = "sha256:v1:" + "0".repeat(64)
+                    DbReproductionRecord.Reproduction(next)
+                Observation(value):
+                    var next = value
+                    next.reference.revision = "sha256:v1:" + "0".repeat(64)
+                    DbReproductionRecord.Observation(next)
+                _: fail("golden set contains only original v1 variants")
+            expect(db_reproduction_record_revision(altered).unwrap()).to_equal(vector.digest)
+            expect(db_reproduction_record_encode(altered)).to_equal(Err("SCVDB_REPRODUCTION_CONTENT_REVISION"))
+
+    it "binds effective content dependency revisions and full unsigned measurements":
+        for vector in setup_item2_v1_golden_vectors():
+            val altered = match vector.record:
+                Config(value):
+                    var next = value
+                    next.effective_values_digest = "sha256:v1:" + "b".repeat(64)
+                    DbReproductionRecord.Config(next)
+                Reproduction(value):
+                    var next = value
+                    next.config.revision = "sha256:v1:" + "b".repeat(64)
+                    DbReproductionRecord.Reproduction(next)
+                Observation(value):
+                    var next = value
+                    next.measurements[0].value = 18446744073709551614u64
+                    DbReproductionRecord.Observation(next)
+                _: fail("golden set contains only original v1 variants")
+            expect(db_reproduction_record_revision(altered).unwrap() == vector.digest).to_equal(false)
+            expect(db_reproduction_record_encode(altered)).to_equal(Err("SCVDB_REPRODUCTION_CONTENT_REVISION"))
+
+    it "refuses a substituted v2 header and nonminimal outer length on literal v1 data":
+        val header = "SCVDB-REPRODUCTION-RECORD-v1\n"
+        for vector in setup_item2_v1_golden_vectors():
+            val swapped = "SCVDB-REPRODUCTION-RECORD-v2\n" + vector.wire[header.len():]
+            expect(db_reproduction_record_decode(swapped)).to_equal(Err("SCVDB_REPRODUCTION_NONCANONICAL"))
+        val config = setup_item2_v1_golden_vectors()[0].wire
+        # Literal Config frame begins 06 f9 01: 249 payload bytes. f9 81 00
+        # encodes the same length nonminimally and must fail before decoding.
+        expect(config[header.len():header.len() + 6]).to_equal("06f901")
+        val nonminimal = header + "06f98100" + config[header.len() + 6:]
+        expect(db_reproduction_record_decode(nonminimal)).to_equal(Err("SCVDB_VARINT_NONMINIMAL"))
