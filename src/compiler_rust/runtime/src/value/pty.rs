@@ -179,6 +179,9 @@ mod pty_process {
         output_read: isize,
         pseudo_console: isize,
         process: Option<isize>,
+        // Bytes of a UTF-8 sequence the last read cut in half; prefixed to the
+        // next read so a split character is not decoded as U+FFFD.
+        pending: Vec<u8>,
     }
 
     impl Session {
@@ -250,6 +253,7 @@ mod pty_process {
                 output_read: output_read.0 as isize,
                 pseudo_console: pseudo_console.0,
                 process: None,
+                pending: Vec::new(),
             };
             match SESSIONS.lock() {
                 Ok(mut sessions) => {
@@ -353,15 +357,40 @@ mod pty_process {
         }
     }
 
+    /// Length of an incomplete UTF-8 sequence at the end of `bytes` (0..=3):
+    /// a lead byte whose continuation bytes have not arrived yet.
+    fn utf8_incomplete_tail(bytes: &[u8]) -> usize {
+        let n = bytes.len();
+        let mut back = 1;
+        while back <= 3 && back <= n {
+            let b = bytes[n - back];
+            if b & 0xC0 != 0x80 {
+                // Lead byte: how long is its sequence?
+                let need = if b & 0xE0 == 0xC0 {
+                    2
+                } else if b & 0xF0 == 0xE0 {
+                    3
+                } else if b & 0xF8 == 0xF0 {
+                    4
+                } else {
+                    1
+                };
+                return if need > back { back } else { 0 };
+            }
+            back += 1;
+        }
+        0
+    }
+
     pub(super) fn read(handle: i64, timeout_ms: i64) -> String {
         let start = Instant::now();
         let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
         loop {
-            let sessions = match SESSIONS.lock() {
+            let mut sessions = match SESSIONS.lock() {
                 Ok(value) => value,
                 Err(_) => return String::new(),
             };
-            let Some(session) = sessions.get(&(handle as i32)) else {
+            let Some(session) = sessions.get_mut(&(handle as i32)) else {
                 return String::new();
             };
             let pipe = HANDLE(session.output_read as *mut c_void);
@@ -375,7 +404,11 @@ mod pty_process {
                 let mut read = 0u32;
                 if unsafe { ReadFile(pipe, Some(&mut buffer), Some(&mut read), None) }.is_ok() {
                     buffer.truncate(read as usize);
-                    return String::from_utf8_lossy(&buffer).into_owned();
+                    let mut bytes = std::mem::take(&mut session.pending);
+                    bytes.extend_from_slice(&buffer);
+                    let cut = utf8_incomplete_tail(&bytes);
+                    session.pending = bytes.split_off(bytes.len() - cut);
+                    return String::from_utf8_lossy(&bytes).into_owned();
                 }
                 return String::new();
             }
