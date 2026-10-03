@@ -56,3 +56,22 @@ Even after this repair, the ORC session needs its own synchronized identity and
 destructor protocol: copied sessions must not retain freed code, and provider
 unloading must follow ORC disposal. See
 `doc/05_design/collection_scalar_orc_session.md` on the tests-first branch.
+
+## Independent producer/consumer review — 2026-10-03
+
+The consumer-only candidate `d6d5b0a5fbf` is deliberately **not integrated**.
+Review found that `lower_lambda_value` in the same lowering file constructs
+lifted parameters and results as i64, including noncapturing lambdas represented
+as raw function pointers. Changing only indirect callers to pointer/i32/Unit
+therefore creates incompatible producer/consumer signatures. Tests which accept
+a callback parameter without constructing a lambda cannot catch this mismatch.
+The eventual repair must test actual capturing and noncapturing producers,
+their call sites, and runtime collection helpers which use the flat-word ABI.
+REQ-002 execution prerequisites still apply; source inspection is not parity.
+
+The closure probe itself has a narrower, existing safeguard: in
+`src/runtime/runtime_native.c`, `rt_core_as_closure` checks tag and pointer-only
+registry membership before dereferencing, explicitly handling raw code-pointer
+tag collisions. Thus an absent safe discrimination check is not established by
+this audit. That check still does not authenticate a raw target's signature or
+lifetime. No foreign function was invoked during this review.
