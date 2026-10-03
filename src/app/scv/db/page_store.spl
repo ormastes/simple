@@ -10,7 +10,7 @@ use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_holder, scv_sj_lease_
 use app.scv.db.local_store.{db_store_read, db_store_commit, db_local_path_scope}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
-use std.scv.db_pages.{DbPageRecord, DbRecordPage, DbPageEntry, DbPageManifest, DbPageBuild, db_page_encode, db_page_decode, db_pages_manifest_encode, db_pages_manifest_decode, db_pages_manifest_validate, db_pages_entry, db_pages_lookup, db_pages_required_buckets, db_pages_update}
+use std.scv.db_pages.{DbPageRecord, DbRecordPage, DbPageEntry, DbPageManifest, DbPageBuild, db_page_encode, db_page_decode, db_pages_manifest_encode, db_pages_manifest_decode, db_pages_manifest_validate, db_pages_entry, db_pages_lookup, db_pages_required_buckets, db_pages_update, db_pages_bucket}
 
 struct DbStoredPages:
     head: text
@@ -107,8 +107,10 @@ fn db_page_store_open(root: text) -> Result<DbStoredPages, text>:
     if manifest.root != current.transaction_id: return Err("SCVDB_PAGE_MANIFEST_DIGEST")
     Ok(DbStoredPages(head: current.head, manifest: manifest))
 
-fn _db_page_load(root: text, manifest: DbPageManifest, entry: DbPageEntry) -> Result<_DbLoadedPage, text>:
-    val bytes = _db_page_read_bytes(_db_page_path(root, entry.digest)?, manifest.quota.max_page_bytes as i64)?
+fn _db_page_load(root: text, manifest: DbPageManifest, entry: DbPageEntry, maximum_bytes: u64 = 16777216u64) -> Result<_DbLoadedPage, text>:
+    val limit = if maximum_bytes < manifest.quota.max_page_bytes: maximum_bytes else: manifest.quota.max_page_bytes
+    if limit == 0: return Err("SCVDB_PAGE_BATCH_QUOTA")
+    val bytes = _db_page_read_bytes(_db_page_path(root, entry.digest)?, limit as i64)?
     if sha256_u8_hex(bytes) != entry.digest: return Err("SCVDB_PAGE_CORRUPT")
     val page = db_page_decode(bytes, manifest.quota)?
     if page.bucket != entry.bucket or page.digest != entry.digest or page.records.len() as u64 != entry.count:
@@ -262,3 +264,63 @@ fn db_page_store_commit(root: text, expected_head: text, build: DbPageBuild) -> 
 
 export DbStoredPages, db_page_store_open, db_page_store_lookup
 export db_page_store_load_affected, db_page_store_commit
+
+# Captured manifests are validated by the authoritative caller before this
+# content-addressed read; this function proves actual page bytes, not authority.
+fn db_page_store_load_page(root: text, manifest: DbPageManifest, key: text) -> Result<DbRecordPage?, text>:
+    _db_page_scope(root)?
+    db_pages_manifest_validate(manifest)?
+    if val entry = db_pages_entry(manifest, key)?:
+        val loaded = _db_page_load(root, manifest, entry)?
+        return Ok(Some(loaded.page))
+    Ok(nil)
+
+# Stage and fsync immutable objects only. Never publishes either pages HEAD or
+# a caller-supplied semantic claim; the authenticated owner performs final CAS.
+fn db_page_store_publish_objects(root: text, build: DbPageBuild, previous: DbPageManifest?) -> Result<bool, text>:
+    _db_page_scope(root)?
+    db_pages_manifest_validate(build.manifest)?
+    if val old = previous: db_pages_manifest_validate(old)?
+    val pages = _db_page_prepare_changed(build, previous)?
+    _db_page_verify_retained(root, build, previous)?
+    val nonce = random_hex(16) ?? ""
+    if nonce.len() != 32: return Err("SCVDB_STORE_ENTROPY")
+    val holder = "scv-paged-stage-{nonce}"
+    if not scv_sj_lease_acquire(root, holder).starts_with("ok:"): return Err("SCVDB_STORE_BUSY")
+    if scv_sj_lease_holder(root) != holder: return Err("SCVDB_STORE_LEASE_IDENTITY")
+    val written = _db_page_write_owned(root, pages)
+    val released = scv_sj_lease_release(root, holder)
+    if not released.starts_with("ok:") or scv_sj_lease_is_held(root): return Err("SCVDB_STORE_RELEASE_UNCERTAIN")
+    written
+
+export db_page_store_load_page, db_page_store_publish_objects
+
+struct DbPageRead:
+    key: text
+    page: DbRecordPage?
+    byte_count: u64
+
+# One manifest validation per batch. Every actual read is bounded by the
+# remaining aggregate budget before bytes are allocated/retained.
+fn db_page_store_load_pages(root: text, manifest: DbPageManifest, keys: [text], maximum_bytes: u64) -> Result<[DbPageRead], text>:
+    _db_page_scope(root)?
+    db_pages_manifest_validate(manifest)?
+    if keys.len() > 65536 or maximum_bytes > 67108864u64: return Err("SCVDB_PAGE_BATCH_QUOTA")
+    var seen: {text: bool} = {}
+    var loaded: [DbPageRead] = []
+    var remaining = maximum_bytes
+    for key in keys:
+        val bucket = db_pages_bucket(key)?
+        if seen.contains_key(bucket): return Err("SCVDB_PAGE_DUPLICATE_BUCKET")
+        seen[bucket] = true
+        if val entry = db_pages_entry(manifest, key)?:
+            val value = _db_page_load(root, manifest, entry, remaining)?
+            val size = value.byte_count as u64
+            if size > remaining: return Err("SCVDB_PAGE_BATCH_QUOTA")
+            remaining = remaining - size
+            loaded.push(DbPageRead(key: key, page: Some(value.page), byte_count: size))
+        else:
+            loaded.push(DbPageRead(key: key, page: nil, byte_count: 0u64))
+    Ok(loaded)
+
+export DbPageRead, db_page_store_load_pages

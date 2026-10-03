@@ -1,0 +1,92 @@
+use std.scv.db_canonical.*
+use std.scv.db_pages.{DbPageRecord, DbPageKind}
+use std.scv.db_patch.*
+use std.scv.db_reducer.{DbRow, MergePolicy, db_field_value}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.scv.db_snapshot_values.{db_snapshot_value_encode, db_snapshot_value_decode}
+use std.scv.db_remove_wins.{db_remove_wins_visible}
+use std.scv.distributed_identity.*
+
+struct DbPagedReference:
+    entity: EntityRef
+    historical: bool
+
+fn db_paged_index_key(kind: text, payload: [u8]) -> Result<text, text>:
+    Ok(kind + ":" + sha256_u8_hex(db_domain_bytes("paged-index-key-v1", db_canonical_text(kind)? + payload)?))
+
+fn db_paged_history_key(revision: text) -> Result<text, text>:
+    db_paged_index_key("history", db_canonical_text(revision)?)
+
+fn db_paged_refcount_key(entity: EntityRef) -> Result<text, text>:
+    db_paged_index_key("incoming", db_canonical_text(entity_ref_canonical(entity))?)
+
+fn db_paged_reverse_key(entity: EntityRef) -> Result<text, text>:
+    db_paged_index_key("uid-alias", db_canonical_text(entity_ref_canonical(entity))?)
+
+fn db_paged_index_record(key: text, tag: u8, value: DbValue) -> Result<DbPageRecord, text>:
+    var kind = DbPageKind.Row
+    if tag == 172u8: kind = DbPageKind.Accepted
+    elif tag == 173u8: kind = DbPageKind.Alias
+    elif tag != 170u8 and tag != 171u8: return Err("SCVDB_PAGED_INDEX_TAG")
+    Ok(DbPageRecord(key: key, kind: kind, payload: db_domain_bytes("paged-index-v1", db_frame(tag, db_snapshot_value_encode(value, 0)?))?))
+
+fn db_paged_index_value(record: DbPageRecord, tag: u8) -> Result<DbValue, text>:
+    val domain = db_domain_bytes("paged-index-v1", [])?
+    if record.payload.len() <= domain.len(): return Err("SCVDB_PAGED_INDEX_ENCODING")
+    for index in 0..domain.len():
+        if record.payload[index] != domain[index]: return Err("SCVDB_PAGED_INDEX_ENCODING")
+    val root = db_read_frame(record.payload, domain.len())?
+    if root.tag != tag or root.next_offset != record.payload.len(): return Err("SCVDB_PAGED_INDEX_ENCODING")
+    val value_frame = db_read_frame(root.payload, 0)?
+    if value_frame.next_offset != root.payload.len(): return Err("SCVDB_PAGED_INDEX_ENCODING")
+    val value = db_snapshot_value_decode(value_frame, 0)?
+    if db_paged_index_record(record.key, tag, value)? != record: return Err("SCVDB_PAGED_INDEX_ENCODING")
+    Ok(value)
+
+fn db_paged_unique_keys(row: DbRow, policy: MergePolicy) -> Result<[text], text>:
+    var keys: [text] = []
+    if row.tombstoned: return Ok(keys)
+    for constraint in policy.constraints:
+        if constraint.kind != row.kind: continue
+        var parts: [[u8]] = []
+        var names: [[u8]] = []
+        for name in constraint.key_fields:
+            val value = db_field_value(row.fields, name)
+            if value == DbValue.Absent: return Err("SCVDB_KEY_MISSING")
+            names.push(db_canonical_text(name)?)
+            parts.push(db_value_bytes(value)?)
+        if parts.len() > 0:
+            keys.push(db_paged_index_key("natural", db_canonical_text(row.kind)? + db_canonical_list(names) + db_canonical_list(parts))?)
+        for name in constraint.unique_fields:
+            val value = db_field_value(row.fields, name)
+            if value != DbValue.Absent:
+                keys.push(db_paged_index_key("unique", db_canonical_text(row.kind)? + db_canonical_text(name)? + db_value_bytes(value)?)
+    Ok(keys)
+
+fn db_paged_value_references(value: DbValue, historical: bool, depth: i64) -> Result<[DbPagedReference], text>:
+    if depth > 64: return Err("SCVDB_DEPTH_QUOTA")
+    var refs: [DbPagedReference] = []
+    match value:
+        Reference(entity): refs.push(DbPagedReference(entity: entity, historical: historical))
+        List(values):
+            for item in values: refs = refs + db_paged_value_references(item, historical, depth + 1)?
+        Set(values):
+            for item in values: refs = refs + db_paged_value_references(item, historical, depth + 1)?
+        ObservedSet(members):
+            for member in members: refs = refs + db_paged_value_references(member.value, historical or member.removed, depth + 1)?
+        CausalSet(events):
+            val visible = db_remove_wins_visible(value)?
+            var live: [[u8]] = []
+            for item in visible: live.push(db_value_bytes(item)?)
+            for event in events:
+                refs = refs + db_paged_value_references(event.value, historical or event.removed or not live.contains(db_value_bytes(event.value)?), depth + 1)?
+        _: ()
+    Ok(refs)
+
+fn db_paged_row_references(row: DbRow) -> Result<[DbPagedReference], text>:
+    var refs: [DbPagedReference] = []
+    for field in row.fields: refs = refs + db_paged_value_references(field.value, row.tombstoned, 0)?
+    Ok(refs)
+
+export DbPagedReference, db_paged_index_key, db_paged_history_key, db_paged_refcount_key, db_paged_reverse_key
+export db_paged_index_record, db_paged_index_value, db_paged_unique_keys, db_paged_value_references, db_paged_row_references

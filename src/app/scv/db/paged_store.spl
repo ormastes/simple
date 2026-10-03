@@ -1,0 +1,136 @@
+# Authoritative paged owner: independently pinned policy, actual bucket reads,
+# immutable object durability, then one root-SJ generation CAS. No plan-shaped
+# caller object is accepted as authorization to publish.
+use app.scv.db.local_store.{DbStoreView, db_store_read, db_store_commit, db_store_commit_with_absent_channels}
+use app.scv.db.page_store.{db_page_store_load_page, db_page_store_load_pages, db_page_store_publish_objects}
+use std.scv.db_paged_model.*
+use std.scv.db_paged_proof.*
+use std.scv.db_paged_txn.*
+use std.scv.db_page_records.*
+use std.scv.db_pages.*
+use std.scv.db_patch.{DbPatch}
+use std.scv.db_reducer.{DbRow}
+use std.scv.db_admission.{db_require_unreserved_entity_kinds}
+use std.scv.distributed_identity.*
+use std.nogc_sync_mut.io.time_ops.{time_sample_unix_micros_or_failure}
+
+struct DbPagedView:
+    head: text
+    manifest: DbPagedManifest
+
+struct DbPagedApplyResult:
+    head: text
+    revision: text
+    replay: bool
+
+fn _paged_open_store(root: text, policy: DbPagedPolicy) -> Result<(DbStoreView, DbPagedManifest), text>:
+    val current = db_store_read(root, "paged")
+    if current.code == "empty": return Err("SCVDB_PAGED_GENESIS_REQUIRED")
+    if current.code != "ok": return Err(current.code)
+    val manifest = db_paged_manifest_decode(current.state, policy)?
+    if current.transaction_id != manifest.revision: return Err("SCVDB_PAGED_ROOT")
+    Ok((current, manifest))
+
+fn db_paged_open(root: text, policy: DbPagedPolicy) -> Result<DbPagedView, text>:
+    val (current, manifest) = _paged_open_store(root, policy)?
+    Ok(DbPagedView(head: current.head, manifest: manifest))
+
+fn db_paged_initialize(root: text, policy: DbPagedPolicy) -> Result<DbPagedView, text>:
+    val genesis = db_paged_genesis(policy)?
+    val current = db_store_read(root, "paged")
+    if current.code == "ok":
+        val manifest = db_paged_manifest_decode(current.state, policy)?
+        if current.transaction_id != manifest.revision: return Err("SCVDB_PAGED_ROOT")
+        if manifest.parent_revision != "": return Err("SCVDB_PAGED_ALREADY_INITIALIZED")
+        val durable = db_store_commit(root, current.parent, current.transaction_id, current.state, "paged")
+        if durable.code != "ok": return Err(durable.code)
+        return Ok(DbPagedView(head: durable.head, manifest: manifest))
+    if current.code != "empty": return Err(current.code)
+    # No implicit conversion from whole-state or untrusted projection claims.
+    for channel in ["semantic", "pages"]:
+        val previous = db_store_read(root, channel)
+        if previous.code != "empty": return Err("SCVDB_PAGED_MIGRATION_REQUIRED")
+    val build = DbPageBuild(manifest: genesis.pages, pages: [])
+    db_page_store_publish_objects(root, build, nil)?
+    val published = db_store_commit_with_absent_channels(root, "", genesis.revision, db_paged_manifest_encode(genesis)?, "paged", ["semantic", "pages"])
+    if published.code != "ok": return Err(published.code)
+    Ok(DbPagedView(head: published.head, manifest: genesis))
+
+fn _paged_load_proofs(root: text, request: DbPagedRequest, keys: [text]) -> Result<[DbPagedLookupProof], text>:
+    var groups: {text: [text]} = {}
+    var buckets: [text] = []
+    for key in keys:
+        val bucket = db_pages_bucket(key)?
+        if not groups.contains_key(bucket):
+            groups[bucket] = []
+            buckets.push(bucket)
+        var group = groups[bucket]
+        group.push(key)
+        groups[bucket] = group
+    var proofs: [DbPagedLookupProof] = []
+    var remaining = request.policy.max_read_bytes
+    for proof in request.proofs:
+        if val page = proof.page:
+            val size = db_page_encode(page, request.manifest.pages.quota)?.len() as u64
+            if size > remaining: return Err("SCVDB_PAGED_READ_QUOTA")
+            remaining = remaining - size
+    var representatives: [text] = []
+    for bucket in buckets: representatives.push(groups[bucket][0])
+    val loaded = db_page_store_load_pages(root, request.manifest.pages, representatives, remaining)?
+    var index = 0
+    for bucket in buckets:
+        val group = groups[bucket]
+        proofs.push(DbPagedLookupProof(keys: group, page: loaded[index].page))
+        index = index + 1
+    Ok(proofs)
+
+fn db_paged_apply(root: text, expected_head: text, patch: DbPatch, policy: DbPagedPolicy) -> Result<DbPagedApplyResult, text>:
+    db_require_unreserved_entity_kinds(patch)?
+    if patch.provenance.starts_with("SCVDB-CONFLICT-RESOLUTION-v1:"): return Err("SCVDB_RESOLUTION_OWNER_REQUIRED")
+    val sample = time_sample_unix_micros_or_failure()
+    if sample < 0: return Err("SCVDB_COMMAND_CLOCK")
+    val (current, manifest) = _paged_open_store(root, policy)?
+    var progress = db_paged_begin(manifest, patch, policy, (sample / 1000000) as u64)?
+    # Dependency, aliases, rows, constraints, allocation and final buckets:
+    # every pass advances complete bucket knowledge, never a retry sleep.
+    for round in 0..8:
+        match progress:
+            NeedKeys(request, keys):
+                progress = db_paged_advance(progress, _paged_load_proofs(root, request, keys)?)?
+            Ready(plan):
+                if plan.replay:
+                    val durable = db_store_commit(root, current.parent, current.transaction_id, current.state, "paged")
+                    if durable.code != "ok": return Err(durable.code)
+                    return Ok(DbPagedApplyResult(head: durable.head, revision: manifest.revision, replay: true))
+                if current.head != expected_head: return Err("SCVDB_STORE_HEAD_ADVANCED")
+                db_page_store_publish_objects(root, plan.build, Some(manifest.pages))?
+                val committed = db_store_commit(root, current.head, plan.manifest.revision, db_paged_manifest_encode(plan.manifest)?, "paged")
+                if committed.code != "ok": return Err(committed.code)
+                return Ok(DbPagedApplyResult(head: committed.head, revision: plan.manifest.revision, replay: false))
+    Err("SCVDB_PAGED_PLANNING_BOUND")
+
+fn db_paged_lookup(root: text, view: DbPagedView, key: text) -> Result<DbPageRecord?, text>:
+    val page = db_page_store_load_page(root, view.manifest.pages, key)?
+    if page == nil: return Ok(nil)
+    db_pages_lookup(view.manifest.pages, page.unwrap(), key)
+
+fn db_paged_current_row(root: text, policy: DbPagedPolicy, entity: EntityRef) -> Result<DbRow?, text>:
+    val view = db_paged_open(root, policy)?
+    if not entity_ref_validate(entity).valid: return Err("SCVDB_ENTITY_REF")
+    var uid = entity
+    if val alias = entity.settled:
+        if alias.database_namespace != view.manifest.context.namespace or alias.authority_epoch != view.manifest.context.epoch: return Err("SCVDB_ALIAS_CONTEXT")
+        val record = db_paged_lookup(root, view, db_page_alias_key(alias)?)?
+        if record == nil: return Ok(nil)
+        match db_typed_page_record_decode(record.unwrap())?:
+            Alias(binding): uid = entity_ref_provisional(binding.uid)
+            _: return Err("SCVDB_PAGED_INDEX_CORRUPT")
+    if uid.provisional == nil or uid.provisional.unwrap().database_namespace != view.manifest.context.namespace: return Err("SCVDB_ALIAS_CONTEXT")
+    val record = db_paged_lookup(root, view, db_page_row_key(uid)?)?
+    if record == nil: return Ok(nil)
+    match db_typed_page_record_decode(record.unwrap())?:
+        CurrentRow(_, row): Ok(Some(row))
+        _: Err("SCVDB_PAGED_INDEX_CORRUPT")
+
+export DbPagedView, DbPagedApplyResult, db_paged_initialize, db_paged_open, db_paged_apply
+export db_paged_lookup, db_paged_current_row

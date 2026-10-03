@@ -1,0 +1,82 @@
+# Map execution references only; the original signed patch is unchanged.
+use std.scv.db_patch.*
+use std.scv.distributed_identity.*
+use std.scv.db_paged_indexes.{db_paged_value_references}
+
+fn db_paged_operation_references(operations: [DbOperation]) -> Result<[EntityRef], text>:
+    var refs: [EntityRef] = []
+    for operation in operations:
+        refs.push(db_operation_ref(operation))
+        var values: [DbValue] = []
+        match operation:
+            Create(_, _, fields):
+                for field in fields: values.push(field.value)
+            AppendObservation(_, _, fields):
+                for field in fields: values.push(field.value)
+            UpdateFields(_, edits, condition):
+                for edit in edits:
+                    values.push(edit.before)
+                    values.push(edit.after)
+                for field in condition.expected_fields: values.push(field.value)
+            Tombstone(_, condition):
+                for field in condition.expected_fields: values.push(field.value)
+            AddSetMember(_, _, value, _): values.push(value)
+            AddSetMemberAfterRemoval(_, _, value, _, _): values.push(value)
+            RemoveSetMember(_, _, value, _, _): values.push(value)
+            RemoveObservedSetMember(_, _, _): ()
+        for value in values:
+            for reference in db_paged_value_references(value, false, 0)?: refs.push(reference.entity)
+    Ok(refs)
+
+export db_paged_operation_references
+
+fn db_paged_map_value(value: DbValue, resolver: fn(EntityRef) -> Result<EntityRef, text>, depth: i64) -> Result<DbValue, text>:
+    if depth > 64: return Err("SCVDB_DEPTH_QUOTA")
+    match value:
+        Reference(ref): Ok(DbValue.Reference(resolver(ref)?))
+        List(values):
+            var resolved: [DbValue] = []
+            for item in values: resolved.push(db_paged_map_value(item, resolver, depth + 1)?)
+            Ok(DbValue.List(resolved))
+        Set(values):
+            var resolved: [DbValue] = []
+            for item in values: resolved.push(db_paged_map_value(item, resolver, depth + 1)?)
+            Ok(DbValue.Set(resolved))
+        ObservedSet(members):
+            var resolved: [DbSetMember] = []
+            for member in members:
+                resolved.push(DbSetMember(dot: member.dot, value: db_paged_map_value(member.value, resolver, depth + 1)?, removed: member.removed))
+            Ok(DbValue.ObservedSet(resolved))
+        CausalSet(events):
+            var resolved: [DbSetEvent] = []
+            for event in events:
+                resolved.push(DbSetEvent(dot: event.dot, value: db_paged_map_value(event.value, resolver, depth + 1)?, removed: event.removed, observed: event.observed))
+            Ok(DbValue.CausalSet(resolved))
+        _: Ok(value)
+
+fn db_paged_map_fields(fields: [DbField], resolver: fn(EntityRef) -> Result<EntityRef, text>) -> Result<[DbField], text>:
+    var resolved: [DbField] = []
+    for field in fields: resolved.push(DbField(name: field.name, value: db_paged_map_value(field.value, resolver, 0)?))
+    Ok(resolved)
+
+fn db_paged_map_condition(condition: RowPrecondition, resolver: fn(EntityRef) -> Result<EntityRef, text>) -> Result<RowPrecondition, text>:
+    Ok(RowPrecondition(base_row: condition.base_row, expected_revision: condition.expected_revision, expected_fields: db_paged_map_fields(condition.expected_fields, resolver)?))
+
+fn db_paged_map_operations(operations: [DbOperation], resolver: fn(EntityRef) -> Result<EntityRef, text>) -> Result<[DbOperation], text>:
+    var resolved: [DbOperation] = []
+    for operation in operations:
+        match operation:
+            Create(entity, kind, fields): resolved.push(DbOperation.Create(resolver(entity)?, kind, db_paged_map_fields(fields, resolver)?))
+            AppendObservation(entity, kind, fields): resolved.push(DbOperation.AppendObservation(resolver(entity)?, kind, db_paged_map_fields(fields, resolver)?))
+            Tombstone(entity, condition): resolved.push(DbOperation.Tombstone(resolver(entity)?, db_paged_map_condition(condition, resolver)?))
+            UpdateFields(entity, edits, condition):
+                var normalized: [FieldEdit] = []
+                for edit in edits: normalized.push(FieldEdit(field: edit.field, before: db_paged_map_value(edit.before, resolver, 0)?, after: db_paged_map_value(edit.after, resolver, 0)?))
+                resolved.push(DbOperation.UpdateFields(resolver(entity)?, normalized, db_paged_map_condition(condition, resolver)?))
+            AddSetMember(entity, field, member, dot): resolved.push(DbOperation.AddSetMember(resolver(entity)?, field, db_paged_map_value(member, resolver, 0)?, dot))
+            RemoveObservedSetMember(entity, field, observed): resolved.push(DbOperation.RemoveObservedSetMember(resolver(entity)?, field, observed))
+            AddSetMemberAfterRemoval(entity, field, member, dot, observed): resolved.push(DbOperation.AddSetMemberAfterRemoval(resolver(entity)?, field, db_paged_map_value(member, resolver, 0)?, dot, observed))
+            RemoveSetMember(entity, field, member, dot, observed): resolved.push(DbOperation.RemoveSetMember(resolver(entity)?, field, db_paged_map_value(member, resolver, 0)?, dot, observed))
+    Ok(resolved)
+
+export db_paged_map_operations

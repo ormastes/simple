@@ -1,0 +1,92 @@
+# Proof-bound alias resolution and row-local reduction. No global validation is
+# delegated to a fabricated partial MaterializedState.
+use std.scv.db_paged_model.*
+use std.scv.db_paged_proof.*
+use std.scv.db_paged_resolve.*
+use std.scv.db_paged_indexes.*
+use std.scv.db_page_records.*
+use std.scv.db_patch.*
+use std.scv.db_patch_normalize.{db_normalize_operations}
+use std.scv.db_reducer.{DbRow, db_reduce_operations_local}
+use std.scv.distributed_identity.*
+
+struct DbPagedRows:
+    entities: [EntityRef]
+    before: {text: DbRow}
+    after: {text: DbRow}
+
+fn db_paged_resolve_ref(entity: EntityRef, reads: DbPagedReads, policy: DbPagedPolicy) -> Result<EntityRef, text>:
+    val context = db_paged_context(policy)
+    if not db_ref_context(entity, context.namespace, context.epoch): return Err("SCVDB_ALIAS_CONTEXT")
+    if entity.provisional != nil: return Ok(entity)
+    val record = db_paged_read(reads, db_page_alias_key(entity.settled.unwrap())?)?
+    if record == nil: return Err("SCVDB_IDENTITY_UNKNOWN")
+    match db_typed_page_record_decode(record.unwrap())?:
+        Alias(binding): Ok(entity_ref_provisional(binding.uid))
+        _: Err("SCVDB_PAGED_INDEX_CORRUPT")
+
+fn db_paged_alias_reads(patch: DbPatch, policy: DbPagedPolicy) -> Result<[text], text>:
+    var keys: [text] = []
+    for entity in db_paged_operation_references(patch.operations)?:
+        if not db_ref_context(entity, policy.config.admission.namespace, policy.config.admission.epoch): return Err("SCVDB_ALIAS_CONTEXT")
+        if val alias = entity.settled: keys.push(db_page_alias_key(alias)?)
+    Ok(keys)
+
+fn db_paged_execution_operations(patch: DbPatch, reads: DbPagedReads, policy: DbPagedPolicy) -> Result<[DbOperation], text>:
+    db_normalize_operations(db_paged_map_operations(patch.operations, \entity: db_paged_resolve_ref(entity, reads, policy))?)
+
+fn db_paged_operation_row_keys(operations: [DbOperation]) -> Result<[text], text>:
+    var keys: [text] = []
+    for operation in operations: keys.push(db_page_row_key(db_operation_ref(operation))?)
+    Ok(keys)
+
+fn db_paged_get_row(reads: DbPagedReads, entity: EntityRef) -> Result<DbRow?, text>:
+    val record = db_paged_read(reads, db_page_row_key(entity)?)?
+    if record == nil: return Ok(nil)
+    match db_typed_page_record_decode(record.unwrap())?:
+        CurrentRow(_, row): Ok(Some(row))
+        _: Err("SCVDB_PAGED_INDEX_CORRUPT")
+
+fn db_paged_reduce_rows(patch: DbPatch, operations: [DbOperation], reads: DbPagedReads, policy: DbPagedPolicy) -> Result<DbPagedRows, text>:
+    var entities: [EntityRef] = []
+    var before: {text: DbRow} = {}
+    var after: {text: DbRow} = {}
+    var seen: {text: bool} = {}
+    for operation in operations:
+        val entity = db_operation_ref(operation)
+        val identity = entity_ref_canonical(entity)
+        if not seen.contains_key(identity):
+            seen[identity] = true
+            entities.push(entity)
+            if val row = db_paged_get_row(reads, entity)?:
+                before[identity] = row
+                after[identity] = row
+        var initial: [DbRow] = []
+        if after.contains_key(identity): initial.push(after[identity])
+        val reduced = db_reduce_operations_local(initial, patch, policy.config.merge, [operation])?
+        if reduced.conflicts.len() != 0: return Err(reduced.conflicts[0].code)
+        if reduced.rows.len() != 1 or reduced.rows[0].entity != identity: return Err("SCVDB_PAGED_ROW_RESULT")
+        after[identity] = reduced.rows[0]
+    Ok(DbPagedRows(entities: entities, before: before, after: after))
+
+fn db_paged_constraint_reads(rows: DbPagedRows, policy: DbPagedPolicy) -> Result<[text], text>:
+    var keys: [text] = []
+    val context = db_paged_context(policy)
+    for entity in rows.entities:
+        val identity = entity_ref_canonical(entity)
+        keys.push(db_paged_refcount_key(entity)?)
+        if not rows.before.contains_key(identity):
+            keys.push(db_paged_reverse_key(entity)?)
+            keys.push(db_page_highwater_key(context.namespace, context.epoch, db_ref_kind(entity))?)
+        var versions = [rows.after[identity]]
+        if rows.before.contains_key(identity): versions.push(rows.before[identity])
+        for row in versions:
+            keys = keys + db_paged_unique_keys(row, policy.config.merge)?
+            for reference in db_paged_row_references(row)?:
+                if reference.entity.provisional == nil or not db_ref_context(reference.entity, context.namespace, context.epoch): return Err("SCVDB_PAGED_INDEX_CORRUPT")
+                keys.push(db_page_row_key(reference.entity)?)
+                keys.push(db_paged_refcount_key(reference.entity)?)
+    Ok(keys)
+
+export DbPagedRows, db_paged_resolve_ref, db_paged_alias_reads, db_paged_execution_operations
+export db_paged_operation_row_keys, db_paged_get_row, db_paged_reduce_rows, db_paged_constraint_reads

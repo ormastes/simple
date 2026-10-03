@@ -154,6 +154,13 @@ fn db_store_read(root: text, channel: text = "semantic") -> DbStoreView:
     DbStoreView(code: "ok", head: head, parent: fields[1], transaction_id: fields[2], state: state)
 
 fn _db_store_commit_owned(root: text, expected_head: text, transaction_id: text, state: text, channel: text) -> DbStoreView:
+    # Backend exclusion is checked under the actual SJ lease, including held
+    # commits. A separately checked empty channel is not a race-safe guard.
+    var incompatible: [text] = []
+    if channel == "semantic" or channel == "pages": incompatible = ["paged"]
+    elif channel == "paged": incompatible = ["semantic", "pages"]
+    for other in incompatible:
+        if db_store_read(root, other).code != "empty": return _db_store_error("SCVDB_PAGED_MIGRATION_REQUIRED")
     val current = db_store_read(root, channel)
     if current.code != "ok" and current.code != "empty":
         return current
@@ -233,8 +240,16 @@ fn db_store_commit_held(root: text, holder: text, expected_head: text, transacti
     _db_store_commit_owned(root, expected_head, transaction_id, state, channel)
 
 fn db_store_commit(root: text, expected_head: text, transaction_id: text, state: text, channel: text = "semantic") -> DbStoreView:
+    db_store_commit_with_absent_channels(root, expected_head, transaction_id, state, channel, [])
+
+fn db_store_commit_with_absent_channels(root: text, expected_head: text, transaction_id: text, state: text, channel: text, absent_channels: [text]) -> DbStoreView:
     val scope = _db_store_request_scope(root, expected_head, transaction_id, state, channel)
     if scope != "": return _db_store_error(scope)
+    var seen: [text] = []
+    for other in absent_channels:
+        if not ["semantic", "bridge", "ci", "settlement", "pages", "retention", "paged"].contains(other) or other == channel or seen.contains(other):
+            return _db_store_error("SCVDB_STORE_ABSENCE_SCOPE")
+        seen.push(other)
     val nonce = random_hex(16) ?? ""
     if nonce.len() != 32:
         return _db_store_error("SCVDB_STORE_ENTROPY")
@@ -244,11 +259,17 @@ fn db_store_commit(root: text, expected_head: text, transaction_id: text, state:
         return _db_store_error("SCVDB_STORE_BUSY")
     if scv_sj_lease_holder(root) != holder:
         return _db_store_error("SCVDB_STORE_LEASE_IDENTITY")
-    val result = _db_store_commit_owned(root, expected_head, transaction_id, state, channel)
+    var result = _db_store_error("SCVDB_STORE_ABSENCE_REQUIRED")
+    var absent = true
+    for other in absent_channels:
+        if db_store_read(root, other).code != "empty": absent = false
+    if absent: result = _db_store_commit_owned(root, expected_head, transaction_id, state, channel)
+    elif channel == "paged": result = _db_store_error("SCVDB_PAGED_MIGRATION_REQUIRED")
     val released = scv_sj_lease_release(root, holder)
     if not released.starts_with("ok:") or scv_sj_lease_is_held(root):
         return DbStoreView(code: "SCVDB_STORE_RELEASE_UNCERTAIN", head: result.head, parent: result.parent, transaction_id: result.transaction_id, state: result.state)
     result
 
 export DbStoreView, db_store_read, db_store_commit, db_store_commit_held
+export db_store_commit_with_absent_channels
 export db_local_path_scope, db_local_existing_canonical
