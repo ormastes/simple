@@ -1115,6 +1115,32 @@ bootstrap_stage3_windows_msvc_candidate_path() {
     esac
 }
 
+# Keep the native child's exit status authoritative. MSYS env.exe can return
+# 125 after clang-cl has produced an object; object existence is not success.
+bootstrap_stage3_windows_native_compile_probe() (
+    [ "$#" -eq 5 ] || return 126
+    case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) return 126 ;; esac
+    bswc_root=$1 bswc_compiler=$2 bswc_source=$3 bswc_object=$4 bswc_log=$5
+    [ -x "$bswc_compiler" ] && [ -f "$bswc_source" ] || return 126
+    . "$bswc_root/scripts/bootstrap/bootstrap-logged-process.shs" || return 126
+    bswc_compiler=$(cygpath -w "$bswc_compiler") || return 126
+    bswc_source=$(cygpath -w "$bswc_source") || return 126
+    bswc_object=$(cygpath -w "$bswc_object") || return 126
+    bswc_path=$(cygpath -wp "$PATH") || return 126
+    # Hyphen aliases prevent MSYS from rewriting /c and /Fo before Python's
+    # native Windows boundary sees them. clang-cl accepts both spellings.
+    BOOTSTRAP_LOGGED_PROCESS_TIMEOUT_SECONDS=30 \
+    BOOTSTRAP_LOGGED_PROCESS_MAX_BYTES=1048576 \
+        bootstrap_logged_windows_cargo "$bswc_root" "$bswc_log" \
+        env -i PATH="$bswc_path" LC_ALL=C LANG=C MSYS2_ARG_CONV_EXCL='*' \
+        INCLUDE="${INCLUDE:-}" LIB="${LIB:-}" LIBPATH="${LIBPATH:-}" \
+        SystemRoot="${SystemRoot:-${SYSTEMROOT:-${WINDIR:-${windir:-}}}}" \
+        SystemDrive="${SystemDrive:-${SYSTEMDRIVE:-}}" \
+        ProgramData="${ProgramData:-${PROGRAMDATA:-}}" \
+        TEMP="${TEMP:-${TMPDIR:-/tmp}}" \
+        "$bswc_compiler" -nologo -c "-Fo$bswc_object" "$bswc_source"
+)
+
 bootstrap_stage3_windows_runnable_compiler() {
     bootstrap_stage3_windows_name=$1
     bootstrap_stage3_windows_probe_arg=$2
@@ -1176,6 +1202,28 @@ $bootstrap_stage3_windows_probe_object
         bootstrap_stage3_windows_probe_status=0
         if [ ! -x "$bootstrap_stage3_windows_candidate" ]; then
             bootstrap_stage3_windows_probe_status=126
+        elif command -v cygpath >/dev/null 2>&1; then
+            bootstrap_stage3_windows_probe_root=${SIMPLE_PROJECT_ROOT:-}
+            if [ -z "$bootstrap_stage3_windows_probe_root" ]; then
+                bootstrap_stage3_windows_probe_root=$(CDPATH= cd -- \
+                    "${BOOTSTRAP_STAGE3_FACADE_PATH%/*}/../../.." && pwd -P) || return 1
+            fi
+            bootstrap_stage3_windows_probe_evidence=\
+"${SIMPLE_WORKTREE_STORAGE_ROOT:-$bootstrap_stage3_windows_probe_root/build}/native_probe/c-admission"
+            mkdir -p "$bootstrap_stage3_windows_probe_evidence" || return 1
+            bootstrap_stage3_windows_probe_capture=$(mktemp -d \
+                "$bootstrap_stage3_windows_probe_evidence/probe.XXXXXX") || return 1
+            bootstrap_stage3_windows_native_compile_probe \
+                "$bootstrap_stage3_windows_probe_root" \
+                "$bootstrap_stage3_windows_candidate" \
+                "$bootstrap_stage3_windows_probe_source" \
+                "$bootstrap_stage3_windows_probe_object" \
+                "$bootstrap_stage3_windows_probe_capture/adapter.log" \
+                2>"$bootstrap_stage3_windows_probe_stderr" || \
+                bootstrap_stage3_windows_probe_status=$?
+            printf 'bootstrap-windows-c-admission native-evidence=%s status=%s\n' \
+                "$bootstrap_stage3_windows_probe_capture/adapter.log" \
+                "$bootstrap_stage3_windows_probe_status" >&2
         else
            env -i PATH="$PATH" LC_ALL=C LANG=C \
                 MSYS2_ARG_CONV_EXCL='*' \

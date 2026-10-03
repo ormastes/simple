@@ -20,9 +20,10 @@ checks remain authored but unexecuted.
 
 Canonical bootstrap attempt 1 stopped on an excluded symlink target; attempt 2
 passed materialization but stopped on an excluded counterpart ABI header.
-Attempt 3 follows an explicit prerequisite-existence preflight and is the final
-bounded attempt this session. The spec worktree remains frozen at `d53aed4ec74`;
-evidence is under its Git worktree metadata `item3-bootstrap/attempt3`. Original
+Attempt 3 followed an explicit prerequisite-existence preflight and terminated
+at the RSS admission guard. Its source pin was `d53aed4ec74`; the later explicit
+user resume and bounded recovery are recorded below. Original evidence remains
+under Git worktree metadata `item3-bootstrap/attempt3`. Original
 attempt-1 logs were removed by sparse-checkout behavior; its reconstructed
 summary is explicitly not an original log. No prior native diagnostic is rerun.
 
@@ -30,7 +31,9 @@ summary is explicitly not an original log. No prior native diagnostic is rerun.
 
 - Session: `01a0fedc-f802-7af2-ab5b-a5c6abe85984`, merge/review owner `/root`.
 - Integration worktree: `C:/dev/simple-item3-dev-20261003`.
-- Work branch: `work/item3-dev-20261003`; target: `release/1.0`.
+- Original branch: `work/item3-dev-20261003`; target: `release/1.0`.
+- Follow-up branch after the earlier checkpoint merged:
+  `work/item3-runtime-followup-20261003`, draft PR #2304.
 - Refreshed base and expected target: `cb2f783acf0ea22e8da54ff0d8d18b4fb14c816c`.
 - Research, specifications, and planner agents have separate sibling worktrees
   and `work/item3-{research,spec,planner}-20261003` branches. Their commits are
@@ -213,3 +216,50 @@ The proposed typed indirect-call repair `d6d5b0a5fbf` stays isolated: independen
 review found incompatible lifted-lambda producer signatures. Its tests and the
 unimplemented scalar ORC contract are not integrated as completed implementation.
 See the tracked typed-indirect ABI blocker for the exact producer/consumer gap.
+
+## Explicit user resume: bounded recovery and ABI prerequisites
+
+The user explicitly resumed implementation after the preceding blocked run.
+The new recovery keeps one worker, a supported 5859375 KiB process-tree cap,
+the admitted Rust producer generation, and seed test delegation disabled.
+It permits three attempts; the earlier failed attempts remain terminal.
+
+Recovery cycle 1 reused producer artifacts but failed Windows C admission:
+MSYS reported status 125 despite creating an object. A tests-first repair uses
+the existing native process adapter and clang-cl hyphen flags. Its real shell
+regression failed before the repair and passed afterward, including malformed
+input and missing-tool rejection. This is bootstrap evidence only.
+
+Recovery cycle 2, pinned to `1d9824fe2d1`, passed C admission and preflight,
+then rejected the old Stage 2 cache identity. The source identity changed for
+the reviewed adapter repair; four tool version statuses changed from 125 to 0.
+Runtime identity was unchanged. The cache contained one binding file and zero
+usable entry objects. After preserving and hash-checking that file, cycle 3
+uses canonical `--invalidate-cache=stage2` on the same output directory.
+Rust, runtime and Cargo caches remain retained. Cycle 3 is the final attempt;
+its fixed deadline is 2026-10-03 06:49:13 UTC, without extension.
+Evidence: Git worktree metadata
+`item3-bootstrap/recovery-20261003/cycle3` in the specification worktree.
+No test-capable CLI or Simple semantic result is claimed at this checkpoint.
+
+Reviewed implementation increments now include signed-zero binary decoding,
+numeric join value oracles, captured-filter closure ABI and callback fixtures,
+explicit LLVM link-option forwarding, target-owned standard libraries, and the
+native output existence postcondition. Direct fixed extern signatures now
+retain declared arity through MIR and LLVM, including zero-argument calls,
+lifted lambdas and bootstrap initializers. An isolated raw owner declares 24
+LLVM-C functions against inspected LLVM 23.1.1 headers and exports. It provides
+no safe session, loaded-provider identity, or JIT invocation. Actual imported
+owner calls still require verification; appended-source ABI tests alone do not
+prove that boundary. All added Simple scenarios remain authored, unexecuted.
+
+Live GitHub inspection at 05:56 UTC found PR #2285 had already merged at
+04:37:30 UTC by `ormastes`, with head `71259ba2326` and merge commit
+`6c905c710c6`. An ancestry check confirms that checkpoint is on `release/1.0`.
+This merge occurred outside this continuation and does not establish feature
+acceptance. The reviewed newer fixes are preserved in draft PR #2304 rather
+than attributed to the earlier merge. The refreshed release tip was
+`5742353e641` when creating the follow-up branch.
+
+Full REQ-001–011, native/backend parity, measured NFRs, generated manuals,
+production verification and landing of the newer fixes remain incomplete.
