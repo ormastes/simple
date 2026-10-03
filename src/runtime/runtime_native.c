@@ -861,6 +861,53 @@ int64_t rt_current_task_id(void) {
 #define SPL_CORE_C_WEAK
 #endif
 
+/* Raw-pointer CPU parallel atomics. The caller supplies valid, aligned i64
+ * storage, exactly as for Rust parallel.rs / AtomicI64::from_ptr. All return
+ * the previous value, including compare-exchange failure. These are strong
+ * definitions: on COFF, Rust may alias rt_par_* to rt_gpu_* COMDATs which
+ * the core-C GPU trap provider replaces. Each CPU entry needs a live owner.
+ * BEGIN CORE PAR ATOMICS */
+int64_t rt_par_atomic_add_i64(int64_t* ptr, int64_t value) {
+    return atomic_fetch_add_explicit((_Atomic int64_t*)ptr, value, memory_order_seq_cst);
+}
+
+int64_t rt_par_atomic_sub_i64(int64_t* ptr, int64_t value) {
+    return atomic_fetch_sub_explicit((_Atomic int64_t*)ptr, value, memory_order_seq_cst);
+}
+
+int64_t rt_par_atomic_xchg_i64(int64_t* ptr, int64_t value) {
+    return atomic_exchange_explicit((_Atomic int64_t*)ptr, value, memory_order_seq_cst);
+}
+
+int64_t rt_par_atomic_cmpxchg_i64(int64_t* ptr, int64_t expected, int64_t value) {
+    atomic_compare_exchange_strong_explicit((_Atomic int64_t*)ptr, &expected, value,
+                                           memory_order_seq_cst, memory_order_seq_cst);
+    return expected;
+}
+
+int64_t rt_par_atomic_min_i64(int64_t* ptr, int64_t value) {
+    _Atomic int64_t* atomic = (_Atomic int64_t*)ptr;
+    int64_t previous = atomic_load_explicit(atomic, memory_order_seq_cst);
+    for (;;) {
+        int64_t next = previous < value ? previous : value;
+        if (atomic_compare_exchange_weak_explicit(atomic, &previous, next,
+                                                  memory_order_seq_cst, memory_order_seq_cst))
+            return previous;
+    }
+}
+
+int64_t rt_par_atomic_max_i64(int64_t* ptr, int64_t value) {
+    _Atomic int64_t* atomic = (_Atomic int64_t*)ptr;
+    int64_t previous = atomic_load_explicit(atomic, memory_order_seq_cst);
+    for (;;) {
+        int64_t next = previous > value ? previous : value;
+        if (atomic_compare_exchange_weak_explicit(atomic, &previous, next,
+                                                  memory_order_seq_cst, memory_order_seq_cst))
+            return previous;
+    }
+}
+/* END CORE PAR ATOMICS */
+
 typedef struct RtCoreAtomicInt {
     atomic_int_fast64_t value;
 } RtCoreAtomicInt;
