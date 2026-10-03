@@ -1,0 +1,113 @@
+# Narrow syntactic loop normalization. No rewrite or callback purity authority.
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId}
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirBlock, HirStmtKind}
+use compiler.semantics.perf_facts.types.{CollectionOperationRegistry, HirPerfOperationKind, HirPerfReceiverKind}
+use compiler.semantics.perf_facts.collector.{hir_perf_resolved_method_symbol}
+use compiler.semantics.perf.collection_plan.*
+use compiler.semantics.perf.collection_plan_extractor.{collection_plan_unknown_source_facts}
+
+fn collection_loop_variable_id(expr: HirExpr) -> i64:
+    match expr.kind:
+        case HirExprKind.Var(symbol): symbol.id
+        case HirExprKind.NamedVar(symbol, _): symbol.id
+        case _: -1
+
+fn collection_loop_mapping_supported(expr: HirExpr, induction: SymbolId) -> bool:
+    if not expr.has_type_:
+        return false
+    match expr.kind:
+        case HirExprKind.Var(symbol): symbol.id == induction.id
+        case HirExprKind.NamedVar(symbol, _): symbol.id == induction.id
+        case HirExprKind.IntLit(_, _): true
+        case HirExprKind.FloatLit(_, _): true
+        case HirExprKind.BoolLit(_): true
+        case HirExprKind.CharLit(_): true
+        case _: false
+
+fn collection_loop_build(block: HirBlock, accumulator: SymbolId, output_type: HirType,
+    loop_expr: HirExpr, induction: SymbolId, source: HirExpr, body: HirBlock,
+    function_symbol_id: i64, registry: CollectionOperationRegistry) -> Result<CollectionPlan, text>:
+    val source_id = collection_loop_variable_id(source)
+    if source_id < 0 or source_id == accumulator.id or source_id == induction.id:
+        return Err("loop source requires an independent typed array binding")
+    if not source.has_type_ or not loop_expr.has_type_ or induction.id < 0 or induction.id == accumulator.id:
+        return Err("loop iteration binding is untyped or aliases accumulator")
+    match source.type_.kind:
+        case HirTypeKind.Array(_, _): pass
+        case _: return Err("loop source is not a typed array")
+    if body.has or body.stmts.len() != 1:
+        return Err("loop body must contain exactly one append statement")
+    match body.stmts[0].kind:
+        case HirStmtKind.Expr(call):
+            if not call.has_type_:
+                return Err("loop append is untyped")
+            match call.kind:
+                case HirExprKind.MethodCall(receiver, _, arguments, resolution):
+                    if not receiver.has_type_ or collection_loop_variable_id(receiver) != accumulator.id:
+                        return Err("loop append receiver is not the fresh accumulator")
+                    if not hir_types_equal(receiver.type_, output_type) or arguments.len() != 1 or arguments[0].has_name:
+                        return Err("loop append has incompatible receiver or arguments")
+                    val symbol = hir_perf_resolved_method_symbol(resolution)
+                    if not symbol.? or not registry.contains(symbol.unwrap()):
+                        return Err("loop append lacks resolved registry evidence")
+                    val summary = registry.lookup(symbol.unwrap()).unwrap()
+                    if summary.operation != HirPerfOperationKind.Append or summary.expected_receiver != HirPerfReceiverKind.Array:
+                        return Err("loop operation is not an admitted array append")
+                    if summary.explicit_argument_count != 1 or not summary.preserves_order:
+                        return Err("loop append contract is incompatible")
+                    val mapped = arguments[0].value
+                    if not collection_loop_mapping_supported(mapped, induction):
+                        return Err("loop mapping has unsupported binding or effects")
+                    match output_type.kind:
+                        case HirTypeKind.Array(element, _):
+                            if not hir_types_equal(element, mapped.type_):
+                                return Err("loop mapping type differs from accumulator element")
+                        case _: return Err("loop accumulator is not an array")
+                    val origin = CollectionLoopOrigin(original_block: block, original_loop: loop_expr, induction_symbol: induction,
+                        mapped_expr: mapped, accumulator_symbol: accumulator, append_symbol: SymbolId(id: symbol.unwrap()))
+                    val plan = CollectionPlan(function_symbol_id: function_symbol_id, registry_version: registry.metadata_version,
+                        nodes: [CollectionPlanNode(id: 0, kind: CollectionPlanKind.Source, inputs: [],
+                            source_span: source.span, source_expr: Some(source), call_arguments: [],
+                            operation_symbol_id: nil, output_type: Some(source.type_), key_type: nil,
+                            facts: collection_plan_unknown_source_facts()),
+                            CollectionPlanNode(id: 1, kind: CollectionPlanKind.Map, inputs: [0],
+                            source_span: block.span, source_expr: nil, call_arguments: [],
+                            operation_symbol_id: nil, output_type: Some(output_type), key_type: nil,
+                            facts: collection_plan_unknown_source_facts(), loop_origin: Some(origin))], output_id: 1)
+                    match validate_collection_plan(plan):
+                        case Ok(_): return Ok(plan)
+                        case Err(reason): return Err(reason)
+                case _: return Err("loop body is not a resolved append")
+        case _: return Err("loop body has unsupported statements")
+
+fn extract_canonical_collection_loop(block: HirBlock, function_symbol_id: i64,
+    registry: CollectionOperationRegistry) -> Result<CollectionPlan, text>:
+    if not registry.is_structurally_valid() or function_symbol_id < 0:
+        return Err("loop analysis requires valid registry and function")
+    if block.stmts.len() != 2 or not block.has or not block.value.has_type_:
+        return Err("block is not a canonical array loop")
+    match block.stmts[0].kind:
+        case HirStmtKind.Let(accumulator, output_type, init):
+            if accumulator.id < 0 or collection_loop_variable_id(block.value) != accumulator.id:
+                return Err("loop result is not the fresh accumulator")
+            if not init.has_type_ or not hir_types_equal(init.type_, output_type) or not hir_types_equal(block.value.type_, output_type):
+                return Err("loop accumulator types disagree")
+            match init.kind:
+                case HirExprKind.ArrayLit(elements, _):
+                    if elements.len() != 0:
+                        return Err("loop accumulator must be initially empty")
+                case _: return Err("loop accumulator is not a fresh array literal")
+            match block.stmts[1].kind:
+                case HirStmtKind.Expr(loop_expr):
+                    match loop_expr.kind:
+                        case HirExprKind.For(induction, source, body, label):
+                            if label.?:
+                                return Err("labelled loops are unsupported")
+                            return collection_loop_build(block, accumulator, output_type, loop_expr,
+                                induction, source, body, function_symbol_id, registry)
+                        case _: return Err("canonical loop requires for iteration")
+                case _: return Err("canonical loop requires an expression statement")
+        case _: return Err("canonical loop requires a fresh local accumulator")
+
+export extract_canonical_collection_loop

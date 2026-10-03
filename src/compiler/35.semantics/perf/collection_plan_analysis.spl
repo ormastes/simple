@@ -11,6 +11,7 @@ use compiler.semantics.perf_facts.collector.{
     hir_perf_resolved_method_symbol}
 use compiler.semantics.perf.collection_plan.{CollectionPlan}
 use compiler.semantics.perf.collection_plan_extractor.{extract_unary_collection_plan}
+use compiler.semantics.perf.collection_plan_loop.{extract_canonical_collection_loop}
 
 struct CollectionRegionAnalysisV1:
     plans: [CollectionPlan]
@@ -51,6 +52,17 @@ impl CollectionRegionCollectorV1:
             val frame = self.work.pop()
             var expand = true
             match frame:
+                case HirChildFrame.Block(block):
+                    match extract_canonical_collection_loop(block, function_symbol_id, registry):
+                        case Ok(plan):
+                            self.plans.push(plan)
+                            # Preserve visits to original operands, not the append shell.
+                            val origin = plan.nodes[1].loop_origin.unwrap()
+                            self.work.push(HirChildFrame.Expr(origin.mapped_expr))
+                            self.work.push(HirChildFrame.Expr(plan.nodes[0].source_expr.unwrap()))
+                            expand = false
+                        case Err(_):
+                            pass
                 case HirChildFrame.Expr(expr):
                     match expr.kind:
                         case HirExprKind.MethodCall(_, _, _, resolution):

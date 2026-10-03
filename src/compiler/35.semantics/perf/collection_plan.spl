@@ -2,8 +2,9 @@
 # earlier nodes, so the plan has an explicit acyclic evaluation order.
 
 use compiler.common.diagnostics.span.{Span}
-use compiler.hir.hir_definitions.{HirExpr, HirCallArg}
-use compiler.hir.hir_types.{HirType}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirCallArg, HirBlock, HirStmtKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, MethodResolution}
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.semantics.perf_facts.types.{HirPerfEffectFacts, HirPerfCostClass, HirPerfCardinality, HirPerfAllocationClass}
 
 enum CollectionPlanKind:
@@ -60,6 +61,77 @@ struct CollectionPlanFacts:
     profitability_proven: bool
     evidence_receipt: text
 
+struct CollectionLoopOrigin:
+    original_block: HirBlock
+    original_loop: HirExpr
+    induction_symbol: SymbolId
+    mapped_expr: HirExpr
+    accumulator_symbol: SymbolId
+    append_symbol: SymbolId
+
+fn collection_origin_variable(expr: HirExpr) -> i64:
+    match expr.kind:
+        case HirExprKind.Var(symbol): symbol.id
+        case HirExprKind.NamedVar(symbol, _): symbol.id
+        case _: -1
+
+fn collection_loop_origin_matches(origin: CollectionLoopOrigin, source: HirExpr, output_type: HirType) -> bool:
+    val block = origin.original_block
+    if block.stmts.len() != 2 or not block.has or not block.value.has_type_:
+        return false
+    if collection_origin_variable(block.value) != origin.accumulator_symbol.id or not hir_types_equal(block.value.type_, output_type):
+        return false
+    match block.stmts[0].kind:
+        case HirStmtKind.Let(symbol, declared, init):
+            if symbol.id != origin.accumulator_symbol.id or not hir_types_equal(declared, output_type) or not init.has_type_ or not hir_types_equal(init.type_, output_type):
+                return false
+            match init.kind:
+                case HirExprKind.ArrayLit(items, _):
+                    if items.len() != 0: return false
+                case _: return false
+        case _: return false
+    match block.stmts[1].kind:
+        case HirStmtKind.Expr(loop_expr):
+            if loop_expr != origin.original_loop: return false
+        case _: return false
+    match origin.original_loop.kind:
+        case HirExprKind.For(_, iter, body, _):
+            if iter != source or body.has or body.stmts.len() != 1: return false
+            val source_id = collection_origin_variable(source)
+            if source_id < 0 or source_id == origin.accumulator_symbol.id or source_id == origin.induction_symbol.id:
+                return false
+            match source.type_.kind:
+                case HirTypeKind.Array(element, _):
+                    match origin.mapped_expr.kind:
+                        case HirExprKind.Var(symbol):
+                            if symbol.id != origin.induction_symbol.id or not hir_types_equal(origin.mapped_expr.type_, element): return false
+                        case HirExprKind.NamedVar(symbol, _):
+                            if symbol.id != origin.induction_symbol.id or not hir_types_equal(origin.mapped_expr.type_, element): return false
+                        case HirExprKind.IntLit(_, _): pass
+                        case HirExprKind.FloatLit(_, _): pass
+                        case HirExprKind.BoolLit(_): pass
+                        case HirExprKind.CharLit(_): pass
+                        case _: return false
+                case _: return false
+            match body.stmts[0].kind:
+                case HirStmtKind.Expr(call):
+                    if not call.has_type_: return false
+                    match call.kind:
+                        case HirExprKind.MethodCall(receiver, _, args, resolution):
+                            if not receiver.has_type_ or collection_origin_variable(receiver) != origin.accumulator_symbol.id or not hir_types_equal(receiver.type_, output_type):
+                                return false
+                            if args.len() != 1 or args[0].has_name or args[0].value != origin.mapped_expr: return false
+                            match resolution:
+                                case MethodResolution.InstanceMethod(_, symbol):
+                                    if symbol.id != origin.append_symbol.id: return false
+                                case _: return false
+                        case _: return false
+                case _: return false
+        case _: return false
+    match output_type.kind:
+        case HirTypeKind.Array(element, _): hir_types_equal(element, origin.mapped_expr.type_)
+        case _: false
+
 struct CollectionPlanNode:
     id: i64
     kind: CollectionPlanKind
@@ -71,6 +143,7 @@ struct CollectionPlanNode:
     output_type: HirType?
     key_type: HirType?
     facts: CollectionPlanFacts
+    loop_origin: CollectionLoopOrigin? = nil
 
 struct CollectionPlan:
     function_symbol_id: i64
@@ -133,14 +206,34 @@ fn validate_collection_plan(plan: CollectionPlan) -> Result<bool, text>:
         match node.kind:
             case CollectionPlanKind.Source:
                 source_count = source_count + 1
-                if (not node.source_expr.? or node.operation_symbol_id.? or
+                if (not node.source_expr.? or node.operation_symbol_id.? or node.loop_origin.? or
                     node.call_arguments.len() != 0):
                     return Err("collection plan source has invalid binding: " + i.to_text())
             case _:
-                if node.source_expr.? or not node.operation_symbol_id.?:
+                if node.source_expr.? or (node.operation_symbol_id.? == node.loop_origin.?):
                     return Err("collection plan operation has invalid binding: " + i.to_text())
-                if node.operation_symbol_id.unwrap() < 0:
+                if node.operation_symbol_id.? and node.operation_symbol_id.unwrap() < 0:
                     return Err("collection plan operation has invalid symbol: " + i.to_text())
+                if val origin = node.loop_origin:
+                    if node.kind != CollectionPlanKind.Map or node.call_arguments.len() != 0:
+                        return Err("collection loop origin requires an explicit mapping node")
+                    if not origin.original_loop.has_type_ or not origin.mapped_expr.has_type_:
+                        return Err("collection loop origin has untyped operands")
+                    if origin.induction_symbol.id < 0 or origin.accumulator_symbol.id < 0 or origin.append_symbol.id < 0:
+                        return Err("collection loop origin has invalid symbols")
+                    if origin.induction_symbol.id == origin.accumulator_symbol.id:
+                        return Err("collection loop origin aliases its accumulator")
+                    match origin.original_loop.kind:
+                        case HirExprKind.For(binding, iter, _, label):
+                            if binding.id != origin.induction_symbol.id or not iter.has_type_ or label.?:
+                                return Err("collection loop origin has invalid iteration binding")
+                        case _:
+                            return Err("collection loop origin is not a canonical for")
+                    val input = node.inputs[0]
+                    if input < 0 or input >= i or not plan.nodes[input].source_expr.?:
+                        return Err("collection loop origin requires its original source")
+                    if not collection_loop_origin_matches(origin, plan.nodes[input].source_expr.unwrap(), node.output_type.unwrap()):
+                        return Err("collection loop origin disagrees with original region")
         for input in node.inputs:
             if input < 0 or input >= i:
                 return Err("collection plan has a forward, cyclic, or invalid input: " + i.to_text())
@@ -185,7 +278,7 @@ fn collection_plan_unproven_facts(node: CollectionPlanNode) -> [text]:
             if not node.source_expr.?:
                 missing.push("source binding")
         case _:
-            if not node.operation_symbol_id.?:
+            if not node.operation_symbol_id.? and not node.loop_origin.?:
                 missing.push("operation symbol")
     if collection_plan_requires_key(node.kind) and not node.key_type.?:
         missing.push("key type")
@@ -203,4 +296,5 @@ fn collection_plan_unproven_facts(node: CollectionPlanNode) -> [text]:
 
 export CollectionPlanKind, CollectionPlanOrder, CollectionPlanUniqueness
 export CollectionPlanFacts, CollectionPlanNode, CollectionPlan
+export CollectionLoopOrigin
 export validate_collection_plan, collection_plan_unproven_facts
