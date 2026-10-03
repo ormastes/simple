@@ -1,0 +1,124 @@
+# Real bounded page lookup and generation CAS; no admission or perf receipt.
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{cwd, dir_create}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.db_patch.{DbField, DbValue}
+use std.scv.db_reducer.{DbRow, DbAcceptedBatch, MaterializedState, db_state_digest}
+use std.scv.db_pages.*
+use std.scv.db_page_records.*
+use std.scv.db_page_projection.*
+use std.scv.distributed_identity.*
+use std.scv.distributed_identity_map.*
+use app.scv.db.semantic_page_store.*
+
+struct Item2TypedPageFixture:
+    root: text
+    context: DbPageContext
+    entity: EntityRef
+    alias: EntityRef
+    row: DbRow
+    batch: DbAcceptedBatch
+    opened: DbSemanticPages
+
+fn setup_item2_typed_pages() -> Item2TypedPageFixture:
+    val nonce = random_hex(8) ?? ""
+    expect(nonce.len()).to_equal(16)
+    val path = "{cwd()}/build/test-artifacts/item2-typed-pages-{nonce}"
+    expect(dir_create(path, true)).to_be(true)
+    val root = path_final_existing(path).unwrap().path
+    val namespace = "00112233445566778899aabbccddeeff"
+    val actor = "ffeeddccbbaa99887766554433221100"
+    val context = DbPageContext(repository: "repo", namespace: namespace, epoch: 1, schema_revision: "s1", reducer_revision: "r1")
+    val uid = EntityUid(database_namespace: namespace, entity_kind: "bug", actor: ActorIncarnation(hex: actor), counter: 18446744073709551615u64)
+    val entity = entity_ref_provisional(uid)
+    val alias = entity_ref_settled(SettledAlias(database_namespace: namespace, authority_epoch: 1, entity_kind: "bug", sequence: 1))
+    val row = DbRow(entity: entity_ref_canonical(entity), kind: "bug", fields: [DbField(name: "title", value: DbValue.Text("before"))], revision: sha256_text("row-before"), tombstoned: false)
+    val batch = DbAcceptedBatch(batch_id: sha256_text("batch1"), canonical_digest: sha256_text("batch1"), actor: actor, actor_counter: 18446744073709551615u64, prior_revision: "")
+    var state = MaterializedState(rows: [row], accepted: [batch], revision: "")
+    state.revision = db_state_digest(state).unwrap()
+    val identities = identity_map_allocate(identity_map_empty(namespace, 1), uid).state
+    val quota = DbPageQuota(max_page_bytes: 16384u64, max_page_records: 1000u64, max_records: 10000u64)
+    val opened = db_semantic_pages_import_projection(root, "", state, identities, [entity], context, quota).unwrap()
+    Item2TypedPageFixture(root: root, context: context, entity: entity, alias: alias, row: row, batch: batch, opened: opened)
+
+fn setup_item2_typed_revision(fixture: Item2TypedPageFixture, label: text) -> DbTypedPageRecord:
+    var revision = fixture.opened.revision
+    revision.semantic_revision = sha256_text(label)
+    DbTypedPageRecord.Revision(revision)
+
+describe "Operating B typed generation-bound semantic page projections":
+    it "resolves a settled alias and exact actor counter through actual page records":
+        step("Open the captured manifest against independently expected repository context")
+        val fixture = setup_item2_typed_pages()
+        val opened = db_semantic_pages_open(fixture.root, fixture.context).unwrap()
+        expect(opened.stored.head).to_equal(fixture.opened.stored.head)
+        expect(db_semantic_pages_row(fixture.root, opened, fixture.entity).unwrap()).to_equal(Some(fixture.row))
+        expect(db_semantic_pages_row(fixture.root, opened, fixture.alias).unwrap()).to_equal(Some(fixture.row))
+        expect(db_semantic_pages_batch(fixture.root, opened, fixture.batch.batch_id).unwrap()).to_equal(Some(fixture.batch))
+        expect(db_semantic_pages_actor_counter(fixture.root, opened, fixture.batch.actor, 18446744073709551615u64).unwrap()).to_equal(Some(fixture.batch))
+        expect(db_semantic_pages_highwater(fixture.root, opened, "bug").unwrap()).to_equal(Some(1u64))
+        expect(db_semantic_pages_batch(fixture.root, opened, sha256_text("absent")).unwrap()).to_be_nil()
+        var foreign = fixture.context
+        foreign.repository = "different-repository"
+        expect(db_semantic_pages_open(fixture.root, foreign)).to_equal(Err("SCVDB_TYPED_CONTEXT"))
+
+    it "publishes a row delta while prior generation lookups retain their exact contents":
+        step("Change one row and its revision claim through affected-page publication")
+        val fixture = setup_item2_typed_pages()
+        var row = fixture.row
+        row.fields = [DbField(name: "title", value: DbValue.Text("after"))]
+        row.revision = sha256_text("row-after")
+        val records = [DbTypedPageRecord.CurrentRow(fixture.entity, row), setup_item2_typed_revision(fixture, "next semantic claim")]
+        val advanced = db_semantic_pages_commit_projection(fixture.root, fixture.opened, records).unwrap()
+        expect(advanced.stored.manifest.root == fixture.opened.stored.manifest.root).to_be(false)
+        expect(db_semantic_pages_row(fixture.root, advanced, fixture.alias).unwrap()).to_equal(Some(row))
+        expect(db_semantic_pages_row(fixture.root, fixture.opened, fixture.alias).unwrap()).to_equal(Some(fixture.row))
+        expect(db_semantic_pages_actor_counter(fixture.root, advanced, fixture.batch.actor, fixture.batch.actor_counter).unwrap()).to_equal(Some(fixture.batch))
+        step("An incompatible stale generation cannot overwrite the published row")
+        val stale = [DbTypedPageRecord.CurrentRow(fixture.entity, fixture.row), setup_item2_typed_revision(fixture, "stale claim")]
+        expect(db_semantic_pages_commit_projection(fixture.root, fixture.opened, stale)).to_equal(Err("SCVDB_STORE_HEAD_ADVANCED"))
+
+    it "requires paired collision indexes and retains existing actor counter identity":
+        step("Reject an unpaired acceptance record before any page publication")
+        val fixture = setup_item2_typed_pages()
+        var changed = fixture.batch
+        changed.batch_id = sha256_text("collision")
+        changed.canonical_digest = changed.batch_id
+        val unpaired = [DbTypedPageRecord.Accepted(changed), setup_item2_typed_revision(fixture, "unpaired")]
+        expect(db_semantic_pages_commit_projection(fixture.root, fixture.opened, unpaired)).to_equal(Err("SCVDB_TYPED_ACCEPTED_PAIR"))
+        val paired = [DbTypedPageRecord.Accepted(changed), DbTypedPageRecord.ActorCounter(changed), setup_item2_typed_revision(fixture, "collision")]
+        expect(db_semantic_pages_commit_projection(fixture.root, fixture.opened, paired)).to_equal(Err("SCVDB_PAGE_RETAINED_RECORD"))
+        expect(db_semantic_pages_open(fixture.root, fixture.context).unwrap().stored.head).to_equal(fixture.opened.stored.head)
+
+    it "retains tombstones and requires alias high-water updates in the same delta":
+        step("Persist a tombstone while the stable settled alias still resolves its deleted row")
+        val fixture = setup_item2_typed_pages()
+        var deleted = fixture.row
+        deleted.tombstoned = true
+        deleted.revision = sha256_text("deleted")
+        val next = db_semantic_pages_commit_projection(fixture.root, fixture.opened, [DbTypedPageRecord.CurrentRow(fixture.entity, deleted), setup_item2_typed_revision(fixture, "deleted")]).unwrap()
+        expect(db_semantic_pages_row(fixture.root, next, fixture.alias).unwrap().unwrap().tombstoned).to_be(true)
+        expect(db_semantic_pages_commit_projection(fixture.root, next, [DbTypedPageRecord.CurrentRow(fixture.entity, fixture.row), setup_item2_typed_revision(fixture, "resurrect")])).to_equal(Err("SCVDB_PAGE_RETAINED_RECORD"))
+        val binding = DbPageAlias(namespace: fixture.context.namespace, epoch: 1, uid: fixture.entity.provisional.unwrap(), sequence: 1)
+        expect(db_semantic_pages_commit_projection(fixture.root, next, [DbTypedPageRecord.Alias(binding), setup_item2_typed_revision(fixture, "alias")])).to_equal(Err("SCVDB_TYPED_ALIAS_HIGHWATER"))
+        val regressed = [DbTypedPageRecord.HighWater(fixture.context.namespace, 1, "bug", 0), setup_item2_typed_revision(fixture, "regressed")]
+        expect(db_semantic_pages_commit_projection(fixture.root, next, regressed)).to_equal(Err("SCVDB_PAGE_HIGHWATER"))
+
+    it "rejects mismatched record keys kinds and structured entity identities":
+        step("Typed decoding binds every payload to its lookup key and page retention kind")
+        val fixture = setup_item2_typed_pages()
+        val typed = DbTypedPageRecord.CurrentRow(fixture.entity, fixture.row)
+        val record = db_typed_page_record_encode(typed).unwrap()
+        expect(db_typed_page_record_decode(record)).to_equal(Ok(typed))
+        var wrong_key = record
+        wrong_key.key = "bare-id"
+        expect(db_typed_page_record_decode(wrong_key)).to_equal(Err("SCVDB_TYPED_NONCANONICAL"))
+        var wrong_kind = record
+        wrong_kind.kind = DbPageKind.Tombstone
+        expect(db_typed_page_record_decode(wrong_kind)).to_equal(Err("SCVDB_TYPED_NONCANONICAL"))
+        var wrong_row = fixture.row
+        wrong_row.entity = "bare-id"
+        expect(db_typed_page_record_encode(DbTypedPageRecord.CurrentRow(fixture.entity, wrong_row))).to_equal(Err("SCVDB_TYPED_ROW_IDENTITY"))
+        expect(db_page_revision_key()).to_equal("scv-db/typed-pages/revision/v1")

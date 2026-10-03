@@ -1,0 +1,145 @@
+# Typed projection records. Semantic/identity revisions are imported claims;
+# DbPageManifest.root is the independently verified identity of stored pages.
+use std.scv.db_pages.*
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex}
+use std.scv.db_snapshot_values.*
+use std.scv.db_patch.{DbValue, db_ref_kind}
+use std.scv.db_reducer.{DbRow, DbAcceptedBatch}
+use std.scv.distributed_identity.*
+
+struct DbPageContext:
+    repository: text
+    namespace: text
+    epoch: u64
+    schema_revision: text
+    reducer_revision: text
+
+struct DbPageRevision:
+    context: DbPageContext
+    semantic_revision: text
+    identity_revision: text
+
+struct DbPageAlias:
+    namespace: text
+    epoch: u64
+    uid: EntityUid
+    sequence: u64
+
+enum DbTypedPageRecord:
+    CurrentRow(entity: EntityRef, row: DbRow)
+    Accepted(batch: DbAcceptedBatch)
+    ActorCounter(batch: DbAcceptedBatch)
+    Alias(binding: DbPageAlias)
+    HighWater(namespace: text, epoch: u64, kind: text, sequence: u64)
+    Revision(value: DbPageRevision)
+
+fn _typed_key(tag: u8, fields: [u8]) -> Result<text, text>:
+    Ok(db_snapshot_hex(db_domain_bytes("typed-page-key", db_frame(tag, fields))?))
+
+fn db_page_row_key(entity: EntityRef) -> Result<text, text>:
+    if not entity_ref_validate(entity).valid or entity.provisional == nil: return Err("SCVDB_TYPED_UID")
+    _typed_key(1u8, db_canonical_text(entity_ref_canonical(entity))?)
+
+fn db_page_batch_key(batch_id: text) -> Result<text, text>:
+    if batch_id == "": return Err("SCVDB_TYPED_BATCH")
+    _typed_key(2u8, db_canonical_text(batch_id)?)
+
+fn db_page_actor_counter_key(actor: text, counter: u64) -> Result<text, text>:
+    if not actor_incarnation_validate(ActorIncarnation(hex: actor)).valid or counter == 0: return Err("SCVDB_TYPED_ACTOR")
+    _typed_key(3u8, db_canonical_text(actor)? + db_frame(2u8, db_u64_bytes(counter)))
+
+fn db_page_alias_key(alias: SettledAlias) -> Result<text, text>:
+    if not settled_alias_validate(alias).valid: return Err("SCVDB_TYPED_ALIAS")
+    _typed_key(4u8, db_canonical_text(entity_ref_canonical(entity_ref_settled(alias)))?)
+
+fn db_page_highwater_key(namespace: text, epoch: u64, kind: text) -> Result<text, text>:
+    val probe = SettledAlias(database_namespace: namespace, authority_epoch: epoch, entity_kind: kind, sequence: 1)
+    if not settled_alias_validate(probe).valid: return Err("SCVDB_TYPED_ALIAS")
+    _typed_key(5u8, db_canonical_text(namespace)? + db_frame(2u8, db_u64_bytes(epoch)) + db_canonical_text(kind)?)
+
+fn db_page_revision_key() -> text:
+    "scv-db/typed-pages/revision/v1"
+
+fn _typed_digest(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn _typed_batch(batch: DbAcceptedBatch) -> Result<[u8], text>:
+    val key = db_page_actor_counter_key(batch.actor, batch.actor_counter)?
+    if not _typed_digest(batch.batch_id) or batch.canonical_digest != batch.batch_id: return Err("SCVDB_TYPED_BATCH")
+    if batch.prior_revision != "" and not _typed_digest(batch.prior_revision): return Err("SCVDB_TYPED_BATCH")
+    Ok(db_snapshot_text(batch.batch_id)? + db_snapshot_text(batch.canonical_digest)? + db_snapshot_text(batch.actor)? + db_frame(2u8, db_u64_bytes(batch.actor_counter)) + db_snapshot_text(batch.prior_revision)?)
+
+fn _typed_record(key: text, kind: DbPageKind, tag: u8, payload: [u8]) -> Result<DbPageRecord, text>:
+    val bytes = db_domain_bytes("typed-page-record", db_frame(tag, payload))?
+    if bytes.len() > 1048576: return Err("SCVDB_TYPED_RECORD_QUOTA")
+    Ok(DbPageRecord(key: key, kind: kind, payload: bytes))
+
+fn db_typed_page_record_encode(value: DbTypedPageRecord) -> Result<DbPageRecord, text>:
+    match value:
+        CurrentRow(entity, row):
+            val key = db_page_row_key(entity)?
+            if row.entity != entity_ref_canonical(entity) or row.kind != db_ref_kind(entity): return Err("SCVDB_TYPED_ROW_IDENTITY")
+            val kind = if row.tombstoned: DbPageKind.Tombstone else: DbPageKind.Row
+            val flag = if row.tombstoned: 1u8 else: 0u8
+            _typed_record(key, kind, 101u8, db_snapshot_value_encode(DbValue.Reference(entity), 0)? + db_snapshot_text(row.kind)? + db_snapshot_fields_encode(row.fields)? + db_snapshot_text(row.revision)? + db_frame(1u8, [flag]))
+        Accepted(batch): _typed_record(db_page_batch_key(batch.batch_id)?, DbPageKind.Accepted, 102u8, _typed_batch(batch)?)
+        ActorCounter(batch): _typed_record(db_page_actor_counter_key(batch.actor, batch.actor_counter)?, DbPageKind.Accepted, 103u8, _typed_batch(batch)?)
+        Alias(binding):
+            if binding.uid.database_namespace != binding.namespace: return Err("SCVDB_TYPED_ALIAS")
+            val alias = SettledAlias(database_namespace: binding.namespace, authority_epoch: binding.epoch, entity_kind: binding.uid.entity_kind, sequence: binding.sequence)
+            _typed_record(db_page_alias_key(alias)?, DbPageKind.Alias, 104u8, db_snapshot_value_encode(DbValue.Reference(entity_ref_provisional(binding.uid)), 0)? + db_frame(2u8, db_u64_bytes(binding.epoch)) + db_frame(2u8, db_u64_bytes(binding.sequence)))
+        HighWater(namespace, epoch, kind, sequence):
+            _typed_record(db_page_highwater_key(namespace, epoch, kind)?, DbPageKind.HighWater(sequence), 105u8, db_snapshot_text(namespace)? + db_frame(2u8, db_u64_bytes(epoch)) + db_snapshot_text(kind)? + db_frame(2u8, db_u64_bytes(sequence)))
+        Revision(revision):
+            val context = revision.context
+            if context.repository == "" or context.schema_revision == "" or context.reducer_revision == "": return Err("SCVDB_TYPED_CONTEXT")
+            val key = db_page_highwater_key(context.namespace, context.epoch, "bug")?
+            _typed_record(db_page_revision_key(), DbPageKind.Row, 106u8, db_snapshot_text(context.repository)? + db_snapshot_text(context.namespace)? + db_frame(2u8, db_u64_bytes(context.epoch)) + db_snapshot_text(context.schema_revision)? + db_snapshot_text(context.reducer_revision)? + db_snapshot_text(revision.semantic_revision)? + db_snapshot_text(revision.identity_revision)?)
+
+fn _typed_ref(frame: DbDecodedFrame) -> Result<EntityRef, text>:
+    match db_snapshot_value_decode(frame, 0)?:
+        Reference(entity): Ok(entity)
+        _: Err("SCVDB_TYPED_UID")
+
+fn _typed_read_batch(fields: [DbDecodedFrame]) -> Result<DbAcceptedBatch, text>:
+    Ok(DbAcceptedBatch(batch_id: db_read_text(fields[0])?, canonical_digest: db_read_text(fields[1])?, actor: db_read_text(fields[2])?, actor_counter: db_read_unsigned(fields[3])?, prior_revision: db_read_text(fields[4])?))
+
+fn db_typed_page_record_decode(record: DbPageRecord) -> Result<DbTypedPageRecord, text>:
+    if record.payload.len() > 1048576: return Err("SCVDB_TYPED_RECORD_QUOTA")
+    val domain = db_domain_bytes("typed-page-record", [])?
+    if record.payload.len() <= domain.len(): return Err("SCVDB_TYPED_ENCODING")
+    for index in 0..domain.len():
+        if record.payload[index] != domain[index]: return Err("SCVDB_TYPED_DOMAIN")
+    val root = db_read_frame(record.payload, domain.len())?
+    if root.next_offset != record.payload.len(): return Err("SCVDB_TYPED_ENCODING")
+    val fields = db_read_children(root.payload)?
+    var decoded: DbTypedPageRecord? = nil
+    if root.tag == 101u8 and fields.len() == 5:
+        val entity = _typed_ref(fields[0])?
+        decoded = Some(DbTypedPageRecord.CurrentRow(entity, DbRow(entity: entity_ref_canonical(entity), kind: db_read_text(fields[1])?, fields: db_snapshot_fields_decode(fields[2])?, revision: db_read_text(fields[3])?, tombstoned: db_read_flag(fields[4])?)))
+    elif (root.tag == 102u8 or root.tag == 103u8) and fields.len() == 5:
+        val batch = _typed_read_batch(fields)?
+        decoded = Some(if root.tag == 102u8: DbTypedPageRecord.Accepted(batch) else: DbTypedPageRecord.ActorCounter(batch))
+    elif root.tag == 104u8 and fields.len() == 3:
+        val entity = _typed_ref(fields[0])?
+        if entity.provisional == nil: return Err("SCVDB_TYPED_UID")
+        val uid = entity.provisional.unwrap()
+        decoded = Some(DbTypedPageRecord.Alias(DbPageAlias(namespace: uid.database_namespace, epoch: db_read_unsigned(fields[1])?, uid: uid, sequence: db_read_unsigned(fields[2])?)))
+    elif root.tag == 105u8 and fields.len() == 4:
+        decoded = Some(DbTypedPageRecord.HighWater(db_read_text(fields[0])?, db_read_unsigned(fields[1])?, db_read_text(fields[2])?, db_read_unsigned(fields[3])?))
+    elif root.tag == 106u8 and fields.len() == 7:
+        val context = DbPageContext(repository: db_read_text(fields[0])?, namespace: db_read_text(fields[1])?, epoch: db_read_unsigned(fields[2])?, schema_revision: db_read_text(fields[3])?, reducer_revision: db_read_text(fields[4])?)
+        decoded = Some(DbTypedPageRecord.Revision(DbPageRevision(context: context, semantic_revision: db_read_text(fields[5])?, identity_revision: db_read_text(fields[6])?)))
+    else: return Err("SCVDB_TYPED_TAG_ARITY")
+    val value = decoded.unwrap()
+    if db_typed_page_record_encode(value)? != record: return Err("SCVDB_TYPED_NONCANONICAL")
+    Ok(value)
+
+export DbPageContext, DbPageRevision, DbPageAlias, DbTypedPageRecord
+export db_page_row_key, db_page_batch_key, db_page_actor_counter_key, db_page_alias_key, db_page_highwater_key, db_page_revision_key
+export db_typed_page_record_encode, db_typed_page_record_decode

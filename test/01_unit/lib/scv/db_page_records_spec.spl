@@ -1,0 +1,41 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_page_records.*
+use std.scv.db_page_projection.*
+use std.scv.db_pages.*
+use std.scv.db_canonical.*
+use std.scv.db_reducer.{DbAcceptedBatch}
+use std.common.crypto.sha256.{sha256_text}
+
+fn setup_item2_page_record_batch() -> DbAcceptedBatch:
+    DbAcceptedBatch(batch_id: sha256_text("batch"), canonical_digest: sha256_text("batch"), actor: "ffeeddccbbaa99887766554433221100", actor_counter: 18446744073709551615u64, prior_revision: "")
+
+describe "REQ-010 strict typed semantic page record contracts":
+    it "preserves maximum actor counters and keeps batch and counter lookup keys distinct":
+        step("Roundtrip both immutable index records using the same accepted semantic identity")
+        val batch = setup_item2_page_record_batch()
+        val accepted = db_typed_page_record_encode(DbTypedPageRecord.Accepted(batch)).unwrap()
+        val counter = db_typed_page_record_encode(DbTypedPageRecord.ActorCounter(batch)).unwrap()
+        expect(accepted.key == counter.key).to_be(false)
+        expect(db_typed_page_record_decode(accepted)).to_equal(Ok(DbTypedPageRecord.Accepted(batch)))
+        expect(db_typed_page_record_decode(counter)).to_equal(Ok(DbTypedPageRecord.ActorCounter(batch)))
+        expect(counter.kind).to_equal(DbPageKind.Accepted)
+
+    it "rejects literal nonminimal framing unknown tags and trailing bytes":
+        step("Reject malformed projections independently of any roundtrip generator")
+        val domain = db_domain_bytes("typed-page-record", []).unwrap()
+        val nonminimal = DbPageRecord(key: "unused", kind: DbPageKind.Row, payload: domain + [106u8,128u8,0u8])
+        expect(db_typed_page_record_decode(nonminimal)).to_equal(Err("SCVDB_VARINT_NONMINIMAL"))
+        val unknown = DbPageRecord(key: "unused", kind: DbPageKind.Row, payload: domain + [255u8,0u8])
+        expect(db_typed_page_record_decode(unknown)).to_equal(Err("SCVDB_TYPED_TAG_ARITY"))
+        val trailing = DbPageRecord(key: "unused", kind: DbPageKind.Row, payload: domain + [106u8,0u8,0u8])
+        expect(db_typed_page_record_decode(trailing)).to_equal(Err("SCVDB_TYPED_ENCODING"))
+
+    it "requires an explicit context-bound revision in every projection delta":
+        step("A pair of index records alone cannot silently publish an unversioned projection")
+        val context = DbPageContext(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, schema_revision: "s1", reducer_revision: "r1")
+        val batch = setup_item2_page_record_batch()
+        expect(db_page_projection_delta([DbTypedPageRecord.Accepted(batch), DbTypedPageRecord.ActorCounter(batch)], context)).to_equal(Err("SCVDB_TYPED_REVISION_REQUIRED"))
+        var wrong = context
+        wrong.epoch = 2
+        val revision = DbTypedPageRecord.Revision(DbPageRevision(context: wrong, semantic_revision: sha256_text("imported claim"), identity_revision: sha256_text("identity claim")))
+        expect(db_page_projection_delta([revision], context)).to_equal(Err("SCVDB_TYPED_CONTEXT"))
