@@ -1,0 +1,88 @@
+use std.spec.*
+use app.io.mod.{dir_create, file_write_bytes}
+use app.scv.db.paged_store.{db_paged_open}
+use app.scv.db.page_store.{db_page_store_import_page}
+use app.scv.db.checkpoint_objects.{DbCheckpointPageSource}
+use std.scv.db_checkpoint.*
+use std.scv.db_checkpoint_history.*
+use std.scv.db_pages.*
+use std.scv.db_page_records.*
+use std.scv.db_paged_indexes.*
+use std.scv.db_paged_model.*
+use std.scv.db_patch.{DbValue}
+use std.scv.db_reproduction_codec.{db_reproduction_reference}
+use std.scv.distributed_identity.*
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use test.fixtures.scv.db_observation_fixture.*
+use test.fixtures.scv.db_artifact_binding_fixture.*
+
+struct Item2PagedArtifactDrop:
+    fixture: Item2ObservationFixture
+    head: text
+    original: DbPagedManifest
+    candidate: DbPagedManifest
+    checkpoint: DbDatabaseCheckpoint
+    authority: DbCheckpointAuthority
+    source: DbCheckpointPageSource
+    removed: [text]
+    retained: [DbPageRecord]
+
+fn setup_item2_paged_artifact_drop(dropped: i64) -> Item2PagedArtifactDrop:
+    expect([3, 4].contains(dropped)).to_equal(true)
+    val fixture = setup_item2_artifact_fixture(true)
+    val genesis = db_paged_open(fixture.source, fixture.policy).unwrap().manifest
+    val head = check_item2_artifact_apply(fixture, fixture.initial_head).unwrap()
+    val original = db_paged_open(fixture.source, fixture.policy).unwrap().manifest
+    val entity = db_reproduction_reference(fixture.records[dropped]).entity
+    val row_key = db_page_row_key(entity).unwrap()
+    val reverse_key = db_paged_reverse_key(entity).unwrap()
+    var alias_key = ""
+    var records: [DbPageRecord] = []
+    for entry in original.pages.entries:
+        val page = db_page_store_import_page(fixture.source, original.pages, entry).unwrap()
+        for record in page.records:
+            records.push(record)
+            if record.key == reverse_key:
+                val alias = match db_paged_index_value(record, 173u8).unwrap():
+                    Reference(reference): reference.settled.unwrap()
+                    _: fail("actual reverse alias required")
+                expect(alias.entity_kind).to_equal(entity.provisional.unwrap().entity_kind)
+                alias_key = db_page_alias_key(alias).unwrap()
+    expect(alias_key.len()).to_be_greater_than(0)
+    val removed = [row_key, reverse_key, alias_key]
+    var retained: [DbPageRecord] = []
+    var removed_count = 0
+    for record in records:
+        if removed.contains(record.key): removed_count = removed_count + 1
+        else: retained.push(record)
+    expect(removed_count).to_equal(3)
+    # Fixture schema has only canonical text fields and no uniqueness/reference
+    # constraints. Removing its row and the exact alias pair leaves every other
+    # derived index unchanged, including retained high-water allocation gaps.
+    expect(fixture.policy.config.merge.constraints.len()).to_equal(0)
+    val build = db_pages_build(retained, fixture.policy.quota).unwrap()
+    var candidate = original
+    candidate.parent_revision = original.revision
+    candidate.pages = build.manifest
+    candidate = db_paged_manifest_seal(candidate).unwrap()
+    var metadata = [db_checkpoint_metadata_encode(DbCheckpointMetadata.History(genesis.revision, 1u64, [], [], genesis.revision)).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.History(original.revision, 2u64, [genesis.revision], [fixture.patch.batch_id], original.revision)).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.History(candidate.revision, 3u64, [original.revision], [], candidate.revision)).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.Acceptance(fixture.patch.batch_id, original.revision)).unwrap()]
+    for index in 0..fixture.records.len():
+        if index == dropped: continue
+        metadata.push(db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(db_reproduction_reference(fixture.records[index]).entity, DbCheckpointDisposition.Live)).unwrap())
+    val catalog = db_pages_build(metadata, fixture.policy.quota).unwrap()
+    val parent = fixture.root + "/paged-drop-source"
+    val directory = parent + "/scv-checkpoint-pages-v1"
+    expect(dir_create(directory, true)).to_equal(true)
+    for page in build.pages:
+        expect(file_write_bytes(directory + "/" + page.digest + ".page", db_page_encode(page, build.manifest.quota).unwrap())).to_equal(true)
+    for page in catalog.pages:
+        expect(file_write_bytes(directory + "/" + page.digest + ".page", db_page_encode(page, catalog.manifest.quota).unwrap())).to_equal(true)
+    val admission = fixture.policy.config.admission
+    var checkpoint = DbDatabaseCheckpoint(revision: "", repository: admission.repository, namespace: admission.namespace, epoch: admission.epoch, schema_revision: admission.schema_revision, reducer_revision: admission.reducer_revision, policy_revision: fixture.policy.config.revision, predecessor_checkpoint: "", history_horizon: genesis.revision, current_revision: candidate.revision, metadata: catalog.manifest, storage: DbCheckpointStorage.Paged(candidate), signer: "checkpoint-authority", signature: [])
+    checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+    checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+    val authority = DbCheckpointAuthority(expected_checkpoint: checkpoint.revision, key_id: checkpoint.signer, public_key: key, policy: fixture.policy.config, paged_policy: Some(fixture.policy))
+    Item2PagedArtifactDrop(fixture: fixture, head: head, original: original, candidate: candidate, checkpoint: checkpoint, authority: authority, source: DbCheckpointPageSource(external_parent: parent, maximum_pages: 65536u64, maximum_bytes: 67108864u64), removed: removed, retained: retained)
+
+export Item2PagedArtifactDrop, setup_item2_paged_artifact_drop

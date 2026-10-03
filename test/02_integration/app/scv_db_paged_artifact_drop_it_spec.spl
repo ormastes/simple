@@ -1,0 +1,51 @@
+use std.spec.*
+use app.scv.db.checkpoint_store.*
+use app.scv.db.local_store.{db_store_read}
+use app.scv.db.paged_store.{db_paged_open, db_paged_current_row}
+use app.scv.db.page_store.{db_page_store_import_page}
+use std.scv.db_checkpoint.{db_checkpoint_encode, db_checkpoint_decode}
+use std.scv.db_pages.*
+use std.scv.db_page_records.{db_page_batch_key}
+use std.scv.db_reproduction_codec.{db_reproduction_reference}
+use test.fixtures.scv.db_observation_fixture.*
+use test.fixtures.scv.db_artifact_binding_fixture.*
+use test.fixtures.scv.db_paged_artifact_drop_fixture.*
+
+describe "REQ019 paged signed checkpoint mapping nonregression":
+    it "imports valid source and test drops into an empty receiver but refuses them over retained mappings":
+        for dropped in [3, 4]:
+            val context = setup_item2_paged_artifact_drop(dropped)
+            val fixture = context.fixture
+            val wire = db_checkpoint_encode(context.checkpoint).unwrap()
+            expect(db_checkpoint_decode(wire, context.authority).unwrap()).to_equal(context.checkpoint)
+            val receiver = setup_item2_artifact_fixture(true)
+            expect(receiver.policy).to_equal(fixture.policy)
+            val empty = db_paged_open(receiver.source, receiver.policy).unwrap()
+            expect(db_pages_entry(empty.manifest.pages, db_page_batch_key(fixture.patch.batch_id).unwrap()).unwrap()).to_equal(nil)
+            for record in fixture.records:
+                expect(db_paged_current_row(receiver.source, receiver.policy, db_reproduction_reference(record).entity).unwrap()).to_equal(nil)
+            # This real install executes the complete paged import validator,
+            # including alias/reverse, accepted/counter and high-water closure.
+            val prepared = db_checkpoint_prepare_install(receiver.source, empty.head, wire, context.authority, context.source).unwrap()
+            val installed = db_checkpoint_resume_install(receiver.source, prepared.journal_head, context.authority).unwrap()
+            expect(installed.phase).to_equal("Installed")
+            val imported = db_paged_open(receiver.source, receiver.policy).unwrap().manifest
+            expect(imported).to_equal(context.candidate)
+            for key in context.removed:
+                if val entry = db_pages_entry(imported.pages, key).unwrap():
+                    val page = db_page_store_import_page(receiver.source, imported.pages, entry).unwrap()
+                    expect(db_pages_lookup(imported.pages, page, key).unwrap()).to_equal(nil)
+            for record in context.retained:
+                val entry = db_pages_entry(imported.pages, record.key).unwrap().unwrap()
+                val page = db_page_store_import_page(receiver.source, imported.pages, entry).unwrap()
+                expect(db_pages_lookup(imported.pages, page, record.key).unwrap()).to_equal(Some(record))
+            expect(db_paged_current_row(receiver.source, receiver.policy, db_reproduction_reference(fixture.records[dropped]).entity).unwrap()).to_equal(nil)
+            val before = db_store_read(fixture.source, "paged")
+            val journal = db_store_read(fixture.source, "checkpoint-install")
+            expect(db_checkpoint_prepare_install(fixture.source, context.head, wire, context.authority, context.source).unwrap_err()).to_equal("SCVDB_CHECKPOINT_INDEX_REGRESSION")
+            expect(db_store_read(fixture.source, "paged")).to_equal(before)
+            expect(db_store_read(fixture.source, "checkpoint-install")).to_equal(journal)
+            check_item2_artifact_mapping(fixture, fixture.records[3])
+            check_item2_artifact_mapping(fixture, fixture.records[4])
+            check_item2_observation_cleanup(receiver)
+            check_item2_observation_cleanup(fixture)
