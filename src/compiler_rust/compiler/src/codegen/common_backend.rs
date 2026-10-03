@@ -2543,9 +2543,18 @@ impl<M: Module> CodegenBackend<M> {
         // Declare the init function: fn() -> void
         let call_conv = super::shared::platform_call_conv();
         let sig = cranelift_codegen::ir::Signature::new(call_conv);
+        // COFF WeakExternal definitions can resolve to the generated
+        // /ALTERNATENAME empty fallback instead of this initializer, leaving
+        // heap-backed globals as null. A module has exactly one init owner,
+        // so export its definition strongly on Windows (as for global data).
+        let linkage = if self.target.os == TargetOS::Windows {
+            cranelift_module::Linkage::Export
+        } else {
+            cranelift_module::Linkage::Preemptible
+        };
         let func_id = self
             .module
-            .declare_function(&init_name, cranelift_module::Linkage::Preemptible, &sig)
+            .declare_function(&init_name, linkage, &sig)
             .map_err(|e| BackendError::ModuleError(format!("declare __module_init: {e}")))?;
         self.func_ids.insert(init_name.clone(), func_id);
 
@@ -3025,7 +3034,7 @@ impl<M: Module> CodegenBackend<M> {
         // Skip .init_array registration — define_zeroinit + write_function_addr
         // corrupts Mach-O output (object crate bug). Module init functions are
         // called explicitly from the native binary's startup code instead.
-        // The function is still defined and exported (Preemptible linkage above),
+        // The function is still defined and externally visible (linkage above),
         // so the linker/startup code can find and call it.
 
         Ok(())
@@ -3677,5 +3686,24 @@ mod tests {
         assert!(!module_init_trace_enabled_for(None));
         assert!(!module_init_trace_enabled_for(Some("0")));
         assert!(module_init_trace_enabled_for(Some("1")));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn coff_module_initializer_is_a_strong_definition() {
+        use object::{Object, ObjectSymbol};
+        let mut backend = test_backend();
+        backend.set_module_prefix("init_owner".to_string());
+        backend.generate_module_init(
+            &Default::default(), &Default::default(), &Default::default(),
+            &Default::default(), &[],
+        ).expect("emit module initializer");
+        let bytes = backend.module.finish().emit().expect("emit COFF");
+        let object = object::File::parse(bytes.as_slice()).expect("read COFF");
+        let initializer = object.symbols()
+            .find(|symbol| symbol.name() == Ok("__module_init_init_owner"))
+            .expect("initializer definition");
+        assert!(initializer.is_definition());
+        assert!(!initializer.is_weak(), "weak COFF init can resolve to the empty /ALTERNATENAME stub");
     }
 }
