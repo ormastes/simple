@@ -24,6 +24,7 @@ use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
 use std.nogc_sync_mut.io.env_ops.{env_set, env_get}
 use nogc_sync_mut.io.crypto_sffi.{random_hex as test_runner_random_hex}
 use std.common.crypto.sha256.{sha256_text}
+use std.common.json.{json_escape_string}
 use std.io_runtime.{file_hash_sha256_or_empty, dir_create, dir_remove_all}
 use std.nogc_sync_mut.io.file_ops.{file_size_raw, file_modified_time}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
@@ -1074,10 +1075,43 @@ fn native_test_request_error(backend: text, coverage: bool, safe_mode: bool = fa
         return "Native Cranelift coverage is not qualified; refusing LLVM fallback"
     ""
 
-fn native_test_compile_args(source_path: text, artifact_path: text, backend: text) -> [text]:
+fn native_test_compile_threads(raw: text) -> (i64, text):
+    if raw == "":
+        return (1, "")
+    for ch in raw:
+        if ch < "0" or ch > "9":
+            return (0, "SIMPLE_NATIVE_BUILD_THREADS must be a positive decimal integer")
+    var first_nonzero = 0
+    while first_nonzero < raw.len() and raw[first_nonzero:first_nonzero + 1] == "0":
+        first_nonzero = first_nonzero + 1
+    val significant = raw[first_nonzero:raw.len()]
+    if significant == "" or significant.len() > 19 or (significant.len() == 19 and significant > "9223372036854775807"):
+        return (0, "SIMPLE_NATIVE_BUILD_THREADS must be a positive decimal integer")
+    val threads = significant.to_i64() ?? 0
+    if threads <= 0:
+        return (0, "SIMPLE_NATIVE_BUILD_THREADS must be a positive decimal integer")
+    (threads, "")
+
+fn native_test_compile_args_with_threads(source_path: text, artifact_path: text, backend: text, threads: i64) -> [text]:
     ["native-build", "--backend", backend, "--source", "src/lib", "--entry-closure",
-        "--entry", source_path, "--runtime-bundle", "core-c-bootstrap", "--threads", "1",
+        "--entry", source_path, "--runtime-bundle", "core-c-bootstrap", "--threads", "{threads}",
         "--cache-dir", artifact_path + ".cache", "--output", artifact_path]
+
+fn native_test_compile_args(source_path: text, artifact_path: text, backend: text) -> [text]:
+    native_test_compile_args_with_threads(source_path, artifact_path, backend, 1)
+
+fn native_test_invocation_receipt(backend: text, producer_digest: text, spec_path: text,
+                                  artifact_path: text, binary: text, args: [text]) -> text:
+    var encoded_args: [text] = []
+    for arg in args:
+        encoded_args.push("\"" + json_escape_string(arg) + "\"")
+    "native-aot-invocation|" +
+        "{\"backend\":\"" + json_escape_string(backend) +
+        "\",\"producer_sha256\":\"" + json_escape_string(producer_digest) +
+        "\",\"spec\":\"" + json_escape_string(spec_path) +
+        "\",\"output\":\"" + json_escape_string(artifact_path) +
+        "\",\"compiler\":\"" + json_escape_string(binary) +
+        "\",\"argv\":[" + encoded_args.join(",") + "]}"
 
 fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
@@ -1092,6 +1126,12 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     if explicit_aot and (env_get("SIMPLE_BINARY") ?? "") == "":
         return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
             duration_ms: 0, setup_ms: 0, error: "Native backend tests require an explicitly pinned SIMPLE_BINARY producer",
+            timed_out: false, cached: false)
+    val (native_threads, native_threads_error) = native_test_compile_threads(
+        if explicit_aot: env_get("SIMPLE_NATIVE_BUILD_THREADS") ?? "" else: "")
+    if native_threads_error != "":
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: 0, setup_ms: 0, error: native_threads_error,
             timed_out: false, cached: false)
     if explicit_aot:
         env_set("SIMPLE_NO_STUB_FALLBACK", "1")
@@ -1135,7 +1175,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         val selected_backend = if explicit_aot: options.native_backend else: "llvm"
         compile_args = ["native-build", "--backend", selected_backend, "--source", "src/lib", "--entry-closure", "--entry", source_path, "--runtime-bundle", "core-c-bootstrap", "--output", smf_path]
         if explicit_aot:
-            compile_args = native_test_compile_args(source_path, smf_path, options.native_backend)
+            compile_args = native_test_compile_args_with_threads(source_path, smf_path, options.native_backend, native_threads)
             val selected_runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
             if selected_runtime_path != "":
                 compile_args.push("--runtime-path")
@@ -1154,6 +1194,9 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             duration_ms: (time_now_unix_micros() - start) / 1000, setup_ms: 0,
             error: "Native backend private cache creation failed", timed_out: false, cached: false)
     val compile_started = time_now_unix_micros()
+    if explicit_aot and options.verbose:
+        print native_test_invocation_receipt(options.native_backend, producer_digest, file_path,
+            smf_path, binary, compile_args)
     val compile_scoped = _run_scoped_child(test_resource_class(file_path), binary, compile_args, timeout_ms, 0, 0, 0, if options.no_limits: 0 else: options.max_procs, not options.no_limits)
     val compile_ms = (time_now_unix_micros() - compile_started) / 1000
     val compile_result = compile_scoped.result
@@ -1474,5 +1517,6 @@ export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simpl
 export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe, preprocess_spipe_file
 export mcdc_manifest_transport_args
 export smf_compile_degrade_token
-export native_test_request_error, native_test_compile_args
+export native_test_request_error, native_test_compile_threads, native_test_compile_args
+export native_test_compile_args_with_threads, native_test_invocation_receipt
 export cleanup_native_generated_files

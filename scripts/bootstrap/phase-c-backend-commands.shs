@@ -1,0 +1,41 @@
+#!/bin/sh
+# Phase C native-build commands. The verifier supplies run_matrix_task/run_task;
+# keeping argv construction here lets the backend contract be exercised without
+# building the full compiler in a shell fixture.
+
+bootstrap_phase_c_backend_valid() {
+  case "$1" in llvm|cranelift) return 0 ;; *) return 1 ;; esac
+}
+
+bootstrap_phase_c_tool_input_identity() {
+  pcb_backend=$1 pcb_runtime=$2 pcb_target=$3 pcb_source=$4
+  bootstrap_phase_c_backend_valid "$pcb_backend" || return 2
+  printf '%s\n' "$pcb_runtime" "$pcb_target" "$pcb_source" "$pcb_backend" | hash_stream
+}
+
+bootstrap_phase_c_validate_backend_receipt() {
+  pcb_backend=$1 pcb_receipt=$2
+  bootstrap_phase_c_backend_valid "$pcb_backend" || return 2
+  [ "$(manifest_key_count verification_backend "$pcb_receipt")" = 1 ] &&
+    [ "$(manifest_value verification_backend "$pcb_receipt")" = "$pcb_backend" ]
+}
+
+bootstrap_phase_c_run_tool_build() {
+  pcb_backend=$1 pcb_task=$2 pcb_compiler=$3 pcb_entry=$4 pcb_output=$5 pcb_threads=$6
+  bootstrap_phase_c_backend_valid "$pcb_backend" || return 2
+  if [ "$pcb_backend" = llvm ]; then
+    run_matrix_task "$pcb_task" --verification-expect-executable="$pcb_output" \
+      "$pcb_compiler" native-build "$pcb_entry" --backend=llvm --low-memory --threads "$pcb_threads" -o "$pcb_output"
+  else
+    run_matrix_task "$pcb_task" --verification-expect-executable="$pcb_output" \
+      "$pcb_compiler" native-build "$pcb_entry" --backend=cranelift --threads "$pcb_threads" -o "$pcb_output"
+  fi
+}
+
+bootstrap_phase_c_run_module_build() {
+  pcb_backend=$1 pcb_compiler=$2 pcb_entry=$3 pcb_output=$4 pcb_log_dir=$5 pcb_threads=$6
+  bootstrap_phase_c_backend_valid "$pcb_backend" || return 2
+  set -- "$pcb_compiler" native-build "$pcb_entry" "--backend=$pcb_backend" --threads "$pcb_threads" -o "$pcb_output"
+  printf '%s\n' 'SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1' "$@" >"$pcb_log_dir/command.argv" || return 1
+  run_task module_compile_object "$@"
+}

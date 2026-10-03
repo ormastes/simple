@@ -1,0 +1,81 @@
+"""Native lifecycle and RSS probe for scoped HIR module reset."""
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_new}
+use compiler.hir.hir_lowering.context_helpers.*
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_heap_registry_count() -> i64
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_transient_heap_promote(value: Any) -> bool
+
+fn retained_module(lowering: HirLowering, name: text) -> HirModule:
+    HirModule(name: name, path: name + ".spl", imports: [], exports: [],
+        domain_blocks: [], symbols: lowering.symbols.module_snapshot(),
+        functions: {}, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {},
+        enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+fn main() -> i64:
+    val args = rt_cli_get_args()
+    if args.len() != 2: return 10
+    val inside = args[1] == "inside"
+    if not inside and args[1] != "outside": return 11
+    var lowering = hirlowering_new()
+    var modules: [HirModule] = []
+    var diagnostics: [[text]] = []
+    val objects_before = rt_heap_registry_count()
+    var index = 0
+    while index < 96:
+        if index == 48:
+            # A parse failure ends without HIR-root or lowerer promotion.
+            # Reuse the lowerer and verify preceding snapshots afterward.
+            if not inside:
+                lowering.begin_module("failed")
+            if not rt_transient_array_scope_begin(): return 21
+            if inside:
+                lowering.begin_module("failed")
+            lowering.error("failed parse", Span.empty())
+            if not rt_transient_array_scope_pause(): return 22
+            if not rt_transient_array_scope_end(): return 23
+        val name = "probe_{index}"
+        if not inside:
+            lowering.begin_module(name)
+        if not rt_transient_array_scope_begin(): return 12
+        if inside:
+            lowering.begin_module(name)
+        lowering.symbols.root_scope_symbols[name] = index
+        lowering.error("diagnostic_{index}", Span.empty())
+        var scratch = 0
+        while scratch < 512:
+            lowering.local_struct_types[index * 512 + scratch] = "Scratch"
+            scratch = scratch + 1
+        val module = retained_module(lowering, name)
+        if not rt_transient_array_scope_pause(): return 13
+        if not rt_transient_heap_promote(module): return 14
+        if not lowering.promote_diagnostics_transient_owner(): return 15
+        if not lowering.promote_phase_memo_transient_owners(): return 16
+        if not lowering.promote_symbol_table_transient_owners(): return 17
+        if not rt_transient_array_scope_end(): return 18
+        modules.push(module)
+        diagnostics.push(lowering.diagnostic_messages)
+        index = index + 1
+    index = 0
+    while index < 96:
+        val module = modules[index]
+        if module.name != "probe_{index}" or
+                module.path != "probe_{index}.spl" or
+                not module.symbols.scopes.contains_key(0) or
+                module.symbols.current_scope.id != 0 or
+                module.symbols.root_scope_symbols["probe_{index}"] != index: return 19
+        if diagnostics[index].len() != 1 or
+                not diagnostics[index][0].contains("diagnostic_{index}"): return 20
+        index = index + 1
+    val objects_after = rt_heap_registry_count()
+    print "mode={args[1]} retained_modules={modules.len()} retained_registry_objects={objects_after - objects_before}"
+    0

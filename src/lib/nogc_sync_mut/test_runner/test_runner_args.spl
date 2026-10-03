@@ -99,6 +99,7 @@ fn _test_arg_has_empty_equals_value(arg: text) -> bool:
         arg == "--batch-result=" or arg == "--session-kind=" or
         arg == "--max-sessions=" or arg == "--session-reset=" or
         arg == "--sdoctest-env=" or arg == "--mode=" or
+        arg == "--native-backend=" or
         arg == "--timeout=" or arg == "--seed=" or arg == "--format="
     )
 
@@ -116,7 +117,8 @@ fn test_args_validation_error(args: [text]) -> text:
             arg == "--batch-size" or arg == "--session-kind" or
             arg == "--max-sessions" or arg == "--session-reset" or
             arg == "--sdoctest-env" or arg == "--tag" or arg == "--format" or
-            arg == "--mode" or arg == "--timeout" or arg == "--seed" or
+            arg == "--mode" or arg == "--native-backend" or
+            arg == "--timeout" or arg == "--seed" or
             arg == "--profile"
         )
         if needs_value:
@@ -132,6 +134,8 @@ fn test_args_validation_error(args: [text]) -> text:
                 return "invalid value for --max-procs: {value} (expected a nonnegative integer)"
             if arg == "--profile" and normalize_profile_name(value) == "":
                 return "invalid value for --profile: {value} (valid: {valid_profile_names_help()})"
+            if arg == "--native-backend" and value != "llvm" and value != "cranelift":
+                return "invalid value for --native-backend: {value} (expected llvm or cranelift)"
             i = i + 2
             continue
 
@@ -146,6 +150,13 @@ fn test_args_validation_error(args: [text]) -> text:
             val value = arg.substring(10)
             if value == "" or normalize_profile_name(value) == "":
                 return "invalid value for --profile: {value} (valid: {valid_profile_names_help()})"
+            i = i + 1
+            continue
+
+        if arg.starts_with("--native-backend=") and arg != "--native-backend=":
+            val value = arg.substring(17)
+            if value != "llvm" and value != "cranelift":
+                return "invalid value for --native-backend: {value} (expected llvm or cranelift)"
             i = i + 1
             continue
 
@@ -184,6 +195,7 @@ fn test_args_validation_error(args: [text]) -> text:
             arg == "--no-session-daemon" or arg == "--session-debug" or
             arg == "--sdoctest" or arg == "--sdoctest-force" or arg == "--doc" or
             arg == "--compile" or arg.starts_with("--max-mem=") or
+            arg.starts_with("--native-backend=") or
             arg.starts_with("--execution-mode=") or arg.starts_with("--cpu-threshold=") or
             arg.starts_with("--mem-threshold=") or arg.starts_with("--resource-limit=") or
             arg.starts_with("--max-workers=") or arg.starts_with("--parallel-timeout=") or
@@ -214,6 +226,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var tag = ""
     var fail_fast = false
     var mode = TestExecutionMode.Interpreter
+    var native_backend = ""
     var timeout = 120
     var list = false
     var list_ignored = false
@@ -568,6 +581,12 @@ fn parse_test_args(args: [text]) -> TestOptions:
         elif arg.starts_with("--mode="):
             val m = arg.replace("--mode=", "")
             mode = parse_mode_str(m)
+        elif arg == "--native-backend":
+            i = i + 1
+            if i < args.len():
+                native_backend = args[i]
+        elif arg.starts_with("--native-backend="):
+            native_backend = arg.substring(17)
         elif arg == "--timeout":
             i = i + 1
             if i < args.len():
@@ -608,6 +627,14 @@ fn parse_test_args(args: [text]) -> TestOptions:
                 path_explicit = true
         i = i + 1
 
+    if native_backend != "":
+        mode = TestExecutionMode.Native
+        # Legacy cache and daemon entries do not bind the selected producer.
+        no_cache = true
+        assert_ran = true
+        session_daemon = false
+        session_share = false
+
     if path == "":
         path = "test/"
     if paths.len() == 0:
@@ -625,6 +652,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
         tag: tag,
         fail_fast: fail_fast,
         mode: mode,
+        native_backend: native_backend,
         timeout: timeout,
         list: list,
         list_ignored: list_ignored,

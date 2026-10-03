@@ -1,0 +1,72 @@
+#!/bin/sh
+# A success needs an actual backend-bound executable, invocation, and assertions.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+validator="$root/scripts/bootstrap/validate-native-aot-evidence.pl"
+scratch=$(mktemp -d) || exit 1
+trap 'find "$scratch" -depth -mindepth 1 -delete; rmdir "$scratch"' EXIT HUP INT TERM
+source_root="$scratch/source"
+spec=test/01_unit/compiler/bootstrap/sample_spec.spl
+mkdir -p "$source_root/test/01_unit/compiler/bootstrap"
+printf 'fn main():\n    print "ok"\n' >"$source_root/$spec"
+compiler="$scratch/compiler"
+runtime_path="$scratch/runtime"
+mkdir -p "$runtime_path"
+runtime_identity=$(printf 'a%.0s' $(seq 1 64))
+printf '#!/bin/sh\nexit 0\n' >"$compiler"
+chmod 500 "$compiler"
+if command -v sha256sum >/dev/null 2>&1; then
+  producer_sha=$(sha256sum "$compiler" | awk '{ print $1 }')
+else
+  producer_sha=$(shasum -a 256 "$compiler" | awk '{ print $1 }')
+fi
+prefix=$(printf '%.16s' "$producer_sha")
+
+make_case() {
+  case_name=$1 backend=$2 threads=$3 passed=$4
+  case_dir="$scratch/$case_name"
+  mkdir -p "$case_dir/tmp"
+  artifact="$case_dir/tmp/native-sample-$backend-$prefix-1.exe"
+  printf '\177ELFfixture\n' >"$artifact"
+  chmod 500 "$artifact"
+  perl -MJSON::PP -e '
+    my ($path,$backend,$sha,$spec,$artifact,$threads,$runtime)=@ARGV;
+    my $item={backend=>$backend,producer_sha256=>$sha,spec=>$spec,output=>$artifact,
+      compiler=>$path,argv=>["native-build","--backend",$backend,"--source","src/lib",
+      "--entry-closure","--entry","/tmp/wrapped.spl","--runtime-bundle","core-c-bootstrap",
+      "--runtime-path",$runtime,"--threads",$threads,"--cache-dir","$artifact.cache","--output",$artifact]};
+    print "native-aot-invocation|",JSON::PP::encode_json($item),"\n";
+  ' "$compiler" "$backend" "$producer_sha" "$spec" "$artifact" "$threads" "$runtime_path" >"$case_dir/runner.log"
+  printf '[native] Running %s\nResults: %s total, %s passed, 0 failed\n' \
+    "$artifact" "$passed" "$passed" >>"$case_dir/runner.log"
+  printf '{"success":true,"spec":{"success":true,"total_passed":%s,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":1,"groups":[],"files":[{"path":"%s","passed":%s,"failed":0,"skipped":0,"pending":0,"duration_ms":1,"error":null}]},"spl_doctest":null,"sdoctest":null}\n' \
+    "$passed" "$spec" "$passed" >>"$case_dir/runner.log"
+}
+
+make_case pass llvm 20 1
+perl "$validator" "$scratch/pass/runner.log" "$scratch/pass/tmp" "$source_root" \
+  "$spec" llvm "$compiler" "$producer_sha" 20 "$runtime_path" "$runtime_identity" "$scratch/pass/evidence.tsv" >/dev/null
+[ -f "$scratch/pass/sample-artifact" ] && [ -f "$scratch/pass/evidence.tsv" ] || exit 1
+[ ! -e "$scratch/pass/tmp" ] || { echo 'transient artifacts were not cleaned' >&2; exit 1; }
+
+make_case wrong_backend cranelift 20 1
+if perl "$validator" "$scratch/wrong_backend/runner.log" "$scratch/wrong_backend/tmp" "$source_root" \
+    "$spec" llvm "$compiler" "$producer_sha" 20 "$runtime_path" "$runtime_identity" "$scratch/wrong_backend/evidence.tsv" >/dev/null 2>&1; then
+  echo 'wrong backend admitted' >&2; exit 1
+fi
+make_case wrong_threads llvm 1 1
+if perl "$validator" "$scratch/wrong_threads/runner.log" "$scratch/wrong_threads/tmp" "$source_root" \
+    "$spec" llvm "$compiler" "$producer_sha" 20 "$runtime_path" "$runtime_identity" "$scratch/wrong_threads/evidence.tsv" >/dev/null 2>&1; then
+  echo 'wrong build thread count admitted' >&2; exit 1
+fi
+make_case zero_assertions llvm 20 0
+if perl "$validator" "$scratch/zero_assertions/runner.log" "$scratch/zero_assertions/tmp" "$source_root" \
+    "$spec" llvm "$compiler" "$producer_sha" 20 "$runtime_path" "$runtime_identity" "$scratch/zero_assertions/evidence.tsv" >/dev/null 2>&1; then
+  echo 'zero assertions admitted' >&2; exit 1
+fi
+make_case wrong_runtime llvm 20 1
+if perl "$validator" "$scratch/wrong_runtime/runner.log" "$scratch/wrong_runtime/tmp" "$source_root" \
+    "$spec" llvm "$compiler" "$producer_sha" 20 "$scratch/other-runtime" "$runtime_identity" "$scratch/wrong_runtime/evidence.tsv" >/dev/null 2>&1; then
+  echo 'wrong runtime path admitted' >&2; exit 1
+fi
+echo 'PASS: native AOT artifact, backend, producer, and assertion evidence'
