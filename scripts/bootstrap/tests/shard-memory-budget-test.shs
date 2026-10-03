@@ -1,0 +1,70 @@
+#!/bin/sh
+# Real hermetic child + mandatory watchdog integration; no mocked executor.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+evidence=${1:?provide a fresh absolute evidence directory}
+phase=${2:-all}
+case "$phase" in all|remaining) ;; *) exit 64 ;; esac
+checks=0
+mkdir "$evidence"
+mkdir "$evidence/home" "$evidence/tmp"
+BOOTSTRAP_STAGE3_FACADE_PATH="$root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+unset SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC
+
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=2000000
+SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_RSS_CAP_MODE
+if [ "$phase" = all ]; then
+bootstrap_stage3_run_transcribed "$evidence/enforced.transcript" "$root" \
+    "$evidence/enforced.log" "$evidence/home" "$evidence/tmp" "$PATH" -- \
+    /bin/sh -c 'printf "tree-budget=%s\n" "$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB"'
+test "$(cat "$evidence/enforced.log")" = 'tree-budget=2000000'
+grep -Eq '^explicit-env:[0-9]+:SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=2000000$' "$evidence/enforced.transcript"
+grep -q '^rss_limit_kib=2000000$' "$evidence/enforced.log.rss.env"
+grep -q '^quiescent=1$' "$evidence/enforced.log.rss.env"
+checks=$((checks + 1))
+fi
+
+SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+export SIMPLE_BOOTSTRAP_RSS_CAP_MODE
+bootstrap_stage3_run_transcribed "$evidence/observed.transcript" "$root" \
+    "$evidence/observed.log" "$evidence/home" "$evidence/tmp" "$PATH" -- \
+    /bin/sh -c 'printf "tree-budget=%s\n" "$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB"'
+test "$(cat "$evidence/observed.log")" = 'tree-budget=0'
+grep -Eq '^explicit-env:[0-9]+:SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=0$' "$evidence/observed.transcript"
+grep -q '^rss_limit_kib=unlimited$' "$evidence/observed.log.rss.env"
+checks=$((checks + 1))
+
+for invalid in 0 -1 nope 6835938 9223372036854775808; do
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=$invalid
+    export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+    if bootstrap_stage3_run_transcribed "$evidence/invalid.transcript" "$root" \
+        "$evidence/invalid.log" "$evidence/home" "$evidence/tmp" "$PATH" -- \
+        /bin/sh -c 'exit 0'; then
+        echo "invalid cap accepted: $invalid" >&2
+        exit 1
+    fi
+    test ! -e "$evidence/invalid.transcript"
+    checks=$((checks + 1))
+done
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=2000000
+export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB
+if bootstrap_stage3_run_transcribed "$evidence/override.transcript" "$root" \
+    "$evidence/override.log" "$evidence/home" "$evidence/tmp" "$PATH" \
+    SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=4000000 -- /bin/sh -c 'exit 0'; then
+    echo 'caller budget override accepted' >&2
+    exit 1
+fi
+test ! -e "$evidence/override.transcript"
+checks=$((checks + 1))
+if bootstrap_stage3_run_transcribed "$evidence/mixed-case.transcript" "$root" \
+    "$evidence/mixed-case.log" "$evidence/home" "$evidence/tmp" "$PATH" \
+    Simple_Shard_Tree_Memory_Budget_KiB=4000000 -- /bin/sh -c 'exit 0'; then
+    echo 'mixed-case caller budget override accepted' >&2
+    exit 1
+fi
+test ! -e "$evidence/mixed-case.transcript"
+checks=$((checks + 1))
+echo "shard-budget-transport:checks=$checks:failures=0"

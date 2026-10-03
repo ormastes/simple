@@ -141,3 +141,71 @@ its compare/delete is not atomic. This API does not replace the host's opaque
 exclusive-lock authority. Explicit service facades are not edited in this lane;
 the host must directly import the owner module or extend facade exports.
 Runtime tests remain unexecuted without an admitted pure-Simple runner.
+
+## Remote acceptance owner adapter
+
+Added `app.test.package_index_acceptance_remote` for canonical scenarios
+`remote-cache-local-admission` and `remote-cache-poison-denied`, with actual
+local hash observations from `remote_lookup_verified` and an in-memory transport
+whose recompute method repeats the untrusted claim. The returned record reports
+content verification and exact manifest/artifact digests; it does not report
+local semantic/archive admission, graph authority or fabricated filesystem
+counters. Three integration cases assert verified bytes, rejected poisoned
+bytes and unknown-scenario refusal. Parent/harness owner integrates the record
+into main; this lane does not edit main or the cached-binary wrapper.
+
+Read-only review of root `a1a36f44002` confirmed the prior owned-state and stale
+request-token P1 findings are closed in source. Wrapper inspection confirmed
+missing cached executable produces BLOCKED/exit 2 and no source fallback.
+These are static review findings, not runtime qualification.
+
+## Metadata and real source projection adapter
+
+Added `package_index_acceptance_metadata` for clean TLDR admission, demanded
+SMF section selection/digest verification, and comment/blank-line source edits.
+The source cases call the real parser, frozen module-surface registry, and HIR
+closure digest owner; a changed callable signature is a negative control.
+No manually toggled header hash is used to claim source-derived equivalence.
+Source-only header mutation appears only in the separate narrow cutoff unit
+assertion, which does not claim compiler classification.
+
+Fixed two metadata defects: early cutoff omitted compiler-producer and
+body-sensitive SMF digest equality; section offset+extent could overflow signed
+range validation. Regression cases exercise both and payload out-of-bounds.
+The adapter reports metadata decisions and in-memory bytes only, not physical
+lazy filesystem read counters or downstream compilation completion.
+
+Generated-source search found opaque `generated_source_digest` fields threaded
+through cold HIR drafts and TLDR keys, but no declared-output admission owner in
+the inspected compiler/SCV pipeline. Those two adapter scenarios explicitly
+return unavailable, not a fake successful declaration check. Implementing the
+generator producer/input/output receipt owner remains outstanding. Main harness
+is parent-owned. All new Simple tests remain unexecuted.
+
+## Generated receipt production admission continuation
+
+The previously missing receipt owner is now implemented in
+`generated_source_receipt.spl` and adopted by the real
+`cold_hir_package_outputs_from_driver_v1` boundary. A nonempty emitted generated
+facet must have an independently supplied declaration plus typed receipt;
+the receipt's producer and snapshot are checked against compiler authority and
+the recomputed frozen inventory, exact declared/observed sets are enforced, and
+input/output content digests must match actual inventory rows. The emitted file
+must contain the canonical receipt bytes under its already checked file digest.
+Empty facets with no receipt retain their no-generated-source meaning.
+
+Reusable generated identity binds producer/declaration/input/output content,
+excluding whole-inventory identity. Provenance still binds the snapshot, but an
+unrelated inventory epoch does not invalidate unchanged generated identity.
+That admitted identity feeds the existing generated_source_digest TLDR field.
+Tests cover bridge missing receipt, undeclared/missing output, incorrect input or
+output bytes, independent snapshot/producer mismatch, duplicate/traversal paths,
+stable identity across snapshot epochs, and actual metadata cutoff refusal.
+
+Generated adapter scenarios now report receipt-owner evidence instead of
+unavailable. This does not run a generator: the existing HIR domain-block path
+still requires a real domain producer receipt, and end-to-end generation,
+dependent invalidation/compilation and archive reuse remain separate evidence.
+Comment/whitespace adapter validity now requires changed content and equal real
+closure identity; demanded-section validity additionally requires selected-byte
+digest equality. Runtime tests are still unexecuted.

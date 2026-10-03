@@ -1,0 +1,20 @@
+# The phase receipt keeps only the digest (or diagnostic), never the encoder
+# graph. Native allocations otherwise remain registered for the whole build.
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.abi_interface.{hir_abi_interface_digest_v1}
+use std.nogc_sync_mut.sffi.transient.{
+    transient_scope_begin, transient_scope_pause, transient_scope_end,
+    transient_promote}
+
+fn driver_hir_abi_interface_digest_v1(module: HirModule) -> Result<text, text>:
+    if not transient_scope_begin():
+        return Err("ABI interface scratch scope unavailable")
+    val result = hir_abi_interface_digest_v1(module)
+    val paused = transient_scope_pause()
+    val promoted = paused and transient_promote(result)
+    # Close on digest errors and promotion failures too. Logging runs after
+    # this boundary so a log sink cannot retain an unpromoted scratch value.
+    val ended = transient_scope_end()
+    if not paused or not promoted or not ended:
+        return Err("ABI interface scratch ownership failed")
+    result
