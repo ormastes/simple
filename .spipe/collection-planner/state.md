@@ -10,6 +10,22 @@ the release branch. The selected contract remains REQ-001–011 in
 
 Status: **IN PROGRESS; verification is incomplete; no release admission.**
 
+Latest continuation adds generic explicit-contract map/set, stable hashed
+uniqueness, real interned-symbol/nested-option fixtures, bounded canonical-loop
+provenance and four shared engine-oracle programs. Differential certification
+now rejects nonzero exits, missing/wrong expected markers and any failed lane;
+JIT still lacks an execution witness. Array-concat rewriting preserves original
+MIR until canonical ownership, liveness and alias proofs exist. All new Simple
+checks remain authored but unexecuted.
+
+Canonical bootstrap attempt 1 stopped on an excluded symlink target; attempt 2
+passed materialization but stopped on an excluded counterpart ABI header.
+Attempt 3 follows an explicit prerequisite-existence preflight and is the final
+bounded attempt this session. The spec worktree remains frozen at `d53aed4ec74`;
+evidence is under its Git worktree metadata `item3-bootstrap/attempt3`. Original
+attempt-1 logs were removed by sparse-checkout behavior; its reconstructed
+summary is explicitly not an original log. No prior native diagnostic is rerun.
+
 ## Session ownership (2026-10-03)
 
 - Session: `01a0fedc-f802-7af2-ab5b-a5c6abe85984`, merge/review owner `/root`.

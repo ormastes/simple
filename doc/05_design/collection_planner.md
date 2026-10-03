@@ -23,16 +23,38 @@ traversals perform no I/O. Maximal chains suppress duplicate suffix regions but
 retain traversal of source and callback arguments. Driver integration retains
 these results as analysis, never as lowered/executed receipts.
 
+The bounded explicit-loop increment is defined in
+`collection_planner_loop_origin.md`. It retains the whole original block and
+admits only a fresh array accumulator with one resolved append per iteration,
+an independent typed array source, and an induction/scalar-literal mapping.
+Call and loop provenance are mutually exclusive; structural HIR type equality
+ignores source positions. The common collector visits accepted operands once.
+This is partial normalization, without general filter/loop equivalence or MIR
+substitution.
+
+`unique_hashed` and `group_by_hashed` preserve first-seen representatives using
+explicit stable key contracts. Generic `HashMap<K,V>`/`HashSet<K>` are isolated
+in `gc_async_mut/pure/indexed_collections`; they do not replace legacy exports.
+Real symbol interning, collision, growth, optional payload and callback-count
+fixtures are authored. Cross-engine certification is still required.
+
+The existing differential harness now offers `DIFF_CERTIFY=1`: exact sibling
+oracle markers, successful build/run exits, at least two distinct requested
+engines and no partial-lane acceptance. Native builds explicitly select LLVM.
+JIT certification fails without a production-owned execution witness; strict
+environment requests alone are not evidence. Diagnostic SCV inventory fallback
+is separate from engine selection and remains disabled in certification.
+
 Typed columns now expose additive checked APIs with mask, index, dtype and
 storage errors. Existing APIs preserve `DfError.ShapeMismatch`. Both sync and
 async variants validate shape/stride rank, dimensions, overflow, offsets and
 reachable backing extent before flat reads. Valid strided/reversed/multidimensional
 views remain supported; rank-zero storage is rejected as an invalid column.
 These changes and their tests are unexecuted; they do not close full engine
-parity, loop extraction, MIR lowering or measured NFR requirements.
+parity, full loop extraction, MIR lowering or measured NFR requirements.
 
-Status: draft with balanced NFR targets selected; executable system scenarios
-remain pending.
+Status: implementation in progress with balanced NFR targets selected;
+authored system scenarios await runtime execution.
 Architecture: `doc/04_architecture/collection_planner.md`.
 NFR: `doc/02_requirements/nfr/collection_planner.md`.
 

@@ -39,8 +39,11 @@ cross-engine gate.
    local fusion/cleanup; it consumes MIR-level metadata and does not rederive
    HIR ownership from strings. Backends receive normal MIR and do not invent
    planner semantics.
-5. `src/lib/nogc_sync_mut/` owns generic map/set and typed DataFrame facades;
-   the async family mirrors APIs without sharing mutable state. Runtime/FFI
+5. `src/lib/nogc_sync_mut/` owns typed DataFrame facades;
+   the async family mirrors those APIs without sharing mutable state. Explicit
+   generic map/set currently lives in `src/lib/gc_async_mut/pure/indexed_collections.spl`
+   with caller-supplied hash/equality functions, without root namespace exports.
+   Cross-family/backend admission remains pending. Runtime/FFI
    owns hash and equality ABI behavior. Numeric DataFrame index policy remains
    explicit and separate from generic hash assumptions.
 6. `.sprof` collection records feed a later optional physical choice. Invalid,
@@ -54,6 +57,21 @@ component invalidates the affected plan and its receipt. No hot path performs a
 full-tree scan, repeated source read, subprocess call or retry sleep.
 
 ## Plan and proof contracts
+
+The implemented loop increment preserves `CollectionLoopOrigin` alongside the
+call-origin alternative. Exactly one origin is permitted on an operation node.
+The loop origin retains the entire original block, loop, induction binding,
+mapped operand, fresh accumulator and resolved append. Its validator checks
+these against the original body and types using structural HIR equality.
+Only an identity or scalar-literal map over an independent typed array variable
+is recognized; labels, captures and extra body statements remain unsupported.
+No alias, callback-purity or rewrite authority follows from syntactic admission.
+See `doc/05_design/collection_planner_loop_origin.md` for the bounded contract.
+
+The existing array-concat MIR window matcher is disabled until it receives
+canonical operator, liveness and alias evidence. Its old spelling match could
+remove a required destination assignment and live temporaries. Keeping original
+MIR deliberately retains allocation costs; it does not implement fusion.
 
 `CollectionPlanNode` retains typed source binding, resolved symbol ID, input
 node IDs, key/output types, effects, expected/worst cost, cardinality, order,
