@@ -1,0 +1,40 @@
+# The app runner imports this canonical parser and child argument builder.
+use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
+use std.test_runner.test_runner_types.{execution_mode_to_string}
+use std.test_runner.test_executor_parsing.{build_child_args}
+
+describe "canonical test runner native backend arguments":
+    it "accepts a two-token Cranelift backend and forwards it to the child":
+        val args = ["--mode=interpreter", "--native-backend", "cranelift", "test/probe_spec.spl"]
+        expect(test_args_validation_error(args)).to_equal("")
+        val options = parse_test_args(args)
+        expect(options.native_backend).to_equal("cranelift")
+        expect(execution_mode_to_string(options.mode)).to_equal("native")
+        expect(options.no_cache).to_equal(true)
+        expect(options.assert_ran).to_equal(true)
+        expect(options.session_daemon).to_equal(false)
+        expect(options.session_share).to_equal(false)
+        val child = build_child_args("test/probe_spec.spl", options)
+        expect(child[0]).to_equal("test")
+        expect(child[1]).to_equal("test/probe_spec.spl")
+        expect(child[2]).to_equal("--native-backend=cranelift")
+        expect(child[4]).to_equal("--no-cache")
+        expect(child[6]).to_equal("--no-session-daemon")
+        expect(child[7]).to_equal("--assert-ran")
+
+    it "keeps explicit LLVM native mode after later conflicting flags":
+        val args = ["--native-backend=llvm", "--mode=compile", "--session-daemon", "--session-share"]
+        expect(test_args_validation_error(args)).to_equal("")
+        val options = parse_test_args(args)
+        expect(options.native_backend).to_equal("llvm")
+        expect(execution_mode_to_string(options.mode)).to_equal("native")
+        expect(options.no_cache).to_equal(true)
+        expect(options.assert_ran).to_equal(true)
+        expect(options.session_daemon).to_equal(false)
+        expect(options.session_share).to_equal(false)
+
+    it "rejects absent and unsupported backends before execution":
+        expect(test_args_validation_error(["--native-backend"])).to_equal("missing value for --native-backend")
+        expect(test_args_validation_error(["--native-backend="])).to_equal("missing value for --native-backend")
+        expect(test_args_validation_error(["--native-backend", "unknown"])).to_equal("invalid value for --native-backend: unknown (expected llvm or cranelift)")
+        expect(test_args_validation_error(["--native-backend=unknown"])).to_equal("invalid value for --native-backend: unknown (expected llvm or cranelift)")
