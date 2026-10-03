@@ -6,7 +6,8 @@ use std.scv.compile_source_inventory_core.{
 }
 use compiler.driver.driver_build.native_full_inventory_sources.{
     NativeFullInventorySourcesV1, native_full_inventory_select_v1,
-    native_full_inventory_requires_cold_index_v1
+    native_full_inventory_requires_cold_index_v1,
+    native_cold_entry_snapshot_path_v1
 }
 
 fn full_source_entry(path: text) -> CompileSourceInventoryEntryV1:
@@ -36,6 +37,21 @@ fn full_select(rows: text, count: i64) -> Result<NativeFullInventorySourcesV1, t
         sha256_text("scv-receipt"), count)
 
 describe "frozen full-inventory source selection":
+    it "routes a cold entry to the frozen snapshot without losing its identity":
+        val checkout = "/tmp/checkout"
+        val root = "{checkout}/build/scv/snapshots/revision"
+        val entry = "src/compiler/bootstrap_admission/p2_add.spl"
+        for spelling in [entry, "./{entry}", "{checkout}/{entry}", "{root}/{entry}"]:
+            val selected = native_cold_entry_snapshot_path_v1(root, checkout, spelling)
+            expect(selected.unwrap()).to_equal("{root}/{entry}")
+        val example = "examples/hello.spl"
+        expect(native_cold_entry_snapshot_path_v1(
+            root, checkout, example).unwrap()).to_equal("{root}/{example}")
+        for invalid in ["src/../src/app/main.spl", "{checkout}/../other/main.spl",
+                "/tmp/outside/main.spl", "src/app/main.spl/../escape.spl"]:
+            expect(native_cold_entry_snapshot_path_v1(
+                root, checkout, invalid).is_err()).to_equal(true)
+
     it "forces cold index construction even with warm compatibility markers":
         expect(native_full_inventory_requires_cold_index_v1(
             true, 0, false, true)).to_equal(true)
