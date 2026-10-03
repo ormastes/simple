@@ -24,6 +24,23 @@ fn mir_provider_callable_identity(owner: text, source_name: text) -> text:
         return name
     "{module_name}.{name}"
 
+fn mir_provider_declares_enum_owner(provider: SymbolTable, module_name: text, type_name: text, owner_key: text) -> bool:
+    # Provider method registration runs before consumer enum registration on
+    # the flat path. Inspect the declaration in its own SymbolTable instead
+    # of requiring a consumer class layout or reusing a foreign SymbolId.
+    val owner = _hir_symbol_owner_module(module_name)
+    var owner_id = provider.lookup_qualified_type_raw(owner, type_name)
+    if owner_id < 0:
+        if val exact_owner = provider.lookup_exact_type(type_name):
+            owner_id = exact_owner.id
+    if owner_id < 0:
+        return false
+    if val declaration = provider.get_symbol_raw(owner_id):
+        match declaration.kind:
+            case Enum: return mir_class_identity(declaration) == owner_key
+            case _: ()
+    false
+
 fn mir_provider_function_name(owner: text, symbols: SymbolTable, func: HirFunction, is_entry_module: bool = false) -> text:
     # Linkage attributes are an ABI boundary, including runtime push helpers.
     if func.is_extern or func.has_export_attr or func.func_attr.is_global or func.func_attr.is_entry or (is_entry_module and func.name == "main"):
@@ -106,7 +123,7 @@ impl MirLowering:
         val source = provider.get_symbol_raw(func.symbol.id)
         if source == nil:
             return
-        # Method dispatch owns the declaring class even when its link spelling
+        # Method dispatch owns the declaring type even when its link spelling
         # is exempt from qualification by an export/global ABI attribute.
         val identity = mir_provider_callable_identity(source.defining_module ?? "", source.name)
         val parts = identity.split(".")
@@ -115,7 +132,8 @@ impl MirLowering:
         val method_name = parts[parts.len() - 1]
         val class_key = identity.substring(0, identity.len() - method_name.len() - 1)
         if not self.class_type_names.has(class_key):
-            return
+            if not mir_provider_declares_enum_owner(provider, source.defining_module ?? "", parts[parts.len() - 2], class_key):
+                return
         val method = self.relocate_provider_callable(func.symbol, provider, links)
         if method.id < 0:
             return
@@ -128,7 +146,7 @@ impl MirLowering:
             case Named(id, _):
                 val symbol = self.symbols.get_symbol_raw(id.id)
                 if symbol != nil:
-                    self.struct_method_return_names[key] = if symbol.kind == SymbolKind.Class: mir_class_identity(symbol) else: symbol.name
+                    self.struct_method_return_names[key] = if symbol.kind == SymbolKind.Class or symbol.kind == SymbolKind.Enum: mir_class_identity(symbol) else: symbol.name
             case Array(_, _) | Slice(_): self.struct_method_return_is_array[key] = true
             case Optional(_): self.struct_method_return_is_optional[key] = true
             case _: ()
