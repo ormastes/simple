@@ -1,0 +1,94 @@
+# Independent bounded operation model: no adaptive collection is the oracle.
+use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetAlgorithm, AdaptiveSetAttribute}
+
+fn psc_acceptance_transition_model(initial: AdaptiveSetAttribute):
+    var set: AdaptiveSet<i64> = AdaptiveSet.new()
+    var map: AdaptiveMap<i64, i64> = AdaptiveMap.new()
+    set.set_attribute(initial)
+    map.set_attribute(initial)
+    var present: [bool] = []
+    var values: [i64] = []
+    for index in 0..32:
+        if not set.insert(index - 16) or not map.put(index - 16, index + 1000):
+            panic("initial model population failed")
+        present.push(true)
+        values.push(index + 1000)
+    var expected_size = 32
+    for operation in 0..128:
+        # Every phase switches an already-populated instance, not a fresh one.
+        if operation % 16 == 0:
+            val phase = (operation / 16) % 4
+            val attribute = if phase == 0: AdaptiveSetAttribute.Linear
+                elif phase == 1: AdaptiveSetAttribute.Hash
+                elif phase == 2: AdaptiveSetAttribute.Ordered
+                else: AdaptiveSetAttribute.Auto
+            set.set_attribute(attribute)
+            map.set_attribute(attribute)
+            if phase == 0 and (set.selected_algorithm() != AdaptiveSetAlgorithm.Linear or
+                    map.selected_algorithm() != AdaptiveSetAlgorithm.Linear):
+                panic("transition to linear did not apply")
+            if phase == 1 and (set.selected_algorithm() != AdaptiveSetAlgorithm.Hash or
+                    map.selected_algorithm() != AdaptiveSetAlgorithm.Hash):
+                panic("transition to hash did not apply")
+            if phase == 2 and (set.selected_algorithm() != AdaptiveSetAlgorithm.Ordered or
+                    map.selected_algorithm() != AdaptiveSetAlgorithm.Ordered):
+                panic("transition to ordered did not apply")
+        val index = (operation * 13 + 7) % 32
+        val key = index - 16
+        if operation == 63 or operation == 127:
+            set.clear()
+            map.clear()
+            for slot in 0..32:
+                present[slot] = false
+                values[slot] = 0
+            expected_size = 0
+        elif operation % 5 == 0:
+            val expected_present = present[index]
+            if set.remove(key) != expected_present:
+                panic("set remove disagrees with independent model")
+            val removed = map.remove(key)
+            if expected_present:
+                if removed == nil or removed.unwrap() != values[index]:
+                    panic("map remove lost modeled value")
+                expected_size = expected_size - 1
+            elif removed != nil:
+                panic("map removal invented a key")
+            present[index] = false
+        else:
+            val expected_new = not present[index]
+            if set.insert(key) != expected_new or map.put(key, operation + 100) != expected_new:
+                panic("insert or replacement disagrees with independent model")
+            if expected_new:
+                expected_size = expected_size + 1
+            present[index] = true
+            values[index] = operation + 100
+        if set.len() != expected_size or map.len() != expected_size:
+            panic("transition changed modeled cardinality")
+        val keys = set.snapshot_values()
+        val entries = map.entries()
+        if keys.len() != expected_size or entries.len() != expected_size:
+            panic("snapshot cardinality disagrees with model")
+        var snapshot_index = 0
+        for slot in 0..32:
+            val query = slot - 16
+            if set.contains(query) != present[slot] or map.contains_key(query) != present[slot]:
+                panic("lookup disagrees with independent model")
+            val found = map.get(query)
+            if present[slot]:
+                if found == nil or found.unwrap() != values[slot]:
+                    panic("lookup returned a stale value after transition")
+                if keys[snapshot_index] != query or entries[snapshot_index].key != query or
+                        entries[snapshot_index].value != values[slot]:
+                    panic("snapshot order or value changed after transition")
+                snapshot_index = snapshot_index + 1
+            elif found != nil:
+                panic("lookup invented a removed key")
+
+fn main():
+    psc_acceptance_transition_model(AdaptiveSetAttribute.Linear)
+    psc_acceptance_transition_model(AdaptiveSetAttribute.Hash)
+    psc_acceptance_transition_model(AdaptiveSetAttribute.Ordered)
+    psc_acceptance_transition_model(AdaptiveSetAttribute.Auto)
+    print "COLLECTION_TRANSITION_MODEL: PASS"

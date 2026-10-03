@@ -1,5 +1,40 @@
 # System test plan: profile-switchable containers
 
+## Item 7 acceptance contract (2026-10-03)
+
+This list is the completion gate, not a claim that the existing narrow probes
+prove every requirement. Each acceptance ID maps to the equally numbered
+REQ-PSC requirement. A scenario is green only with a source-matched pure-Simple
+runtime, real assertions, and saved execution receipts. An unavailable backend
+or compiler is BLOCKED, never an implied PASS. Run the failing scenario before
+its implementation change, then run that scenario once after the fix; cap
+verify/fix cycles at three. Static review is not a red or green execution.
+
+| Acceptance | Concrete stimulus and required assertion | Executable evidence / remaining work |
+|---|---|---|
+| PSC-AC-001 | Declare neighboring set/map containers with all four attributes, including typed factory locals and fields. Assert selected storage independently before insertion; change only one attribute and assert unchanged other-instance contents and identities. | Existing attributed semantics and typed-factory scenarios cover storage. Attribute-only source identity cases require their parser/profile specs and actual execution. |
+| PSC-AC-002 | Populate 32 signed keys, replay 128 deterministic insert/update/remove/clear operations, switch populated instances through linear/hash/ordered/auto every 16 operations, and compare every lookup, return value, length, sorted key, and map payload with an independent array model after each operation. | `transition_model_probe.spl` plus the system scenario run the same model on interpreter and LLVM native. Existing nil-payload and unsupported-key probes remain required. |
+| PSC-AC-003 | Capture hot and cold text/generic set/map sites. Assert stable distinct site IDs, exact lookup hits/misses/cardinality, and observed distinct/materialization/probe/collision metrics; zero observations must not fabricate measurement. | Capture/collision system scenarios plus metric unit/integration specs. Applicable join/P6 measurements remain an explicit missing implementation/evidence gate. |
+| PSC-AC-004 | Reload captured bytes; append an independently identified run and verify p95. Mutate schema/module/workload/target and duplicate/corrupt sample identities separately; each rejection must preserve the previous profile/output. | Existing sprof and CLI integration cases plus system target rejection. The system now reruns the preserved binary and compares full stdout and stderr; mere file existence is insufficient. Byte-exact output retention and hot-path no-I/O instrumentation remain required. |
+| PSC-AC-005 | Use identical data with conflicting explicit attribute/profile hints; explicit choice wins. For each failed effect/order/duplicate/ownership/worst-case gate, reject an unsafe nested/hash/merge candidate and preserve baseline outputs. | Existing collision and forced-linear controls cover runtime precedence. Typed planner-to-MIR rejection/selection needs executable implementation and adversarial differential fixtures; advisory strings alone cannot satisfy this row. |
+| PSC-AC-006 | Explain the exact captured site. Assert selected algorithm and admitted evidence plus explicit linear/hash/ordered rejection fields, initializer/key-order guards, extra-memory field, and fallback field. Assert emitted choice agrees with the executed instance. | Captured-site system scenario strengthened with these output fields; typed MIR evidence must replace the current `unconnected` boundary before full completion. |
+| PSC-AC-007 | Exercise supported primitive and aggregate `Hash + Eq + Ord` keys, optional/nested values, sets/maps, and typed collection operations. For nested/hash/merge plans prove duplicate multiplicity, stable order, empty inputs, collisions, and ownership under P0 gates. | Integer/text probes are partial coverage only. Aggregate dispatch and typed join/MIR fixtures remain missing; unsupported-key rejection does not count as aggregate support. |
+| PSC-AC-008 | Run the same accepted semantic/feedback fixtures on interpreter, JIT, LLVM AOT, self-hosted native, and supported SimpleOS targets. Double workload sizes and gate production comparison/probe counts; capture allocations, copied bytes, peak RSS, and warm latency against NFR targets. | Interpreter/LLVM system drivers exist. JIT/SimpleOS and full performance/memory receipts remain absent. No single backend or compiler banner proves this row. |
+
+### Current runtime admission evidence
+
+Acceptance lane: `work/item7-acceptance-20261003`, isolated worktree
+`C:/dev/simple-item7-acceptance-20261003`, owner acceptance-tests agent.
+On 2026-10-03, `SIMPLE_QUALIFIED_RUNTIME` was unset and `C:/dev/simple/bin/release`
+did not exist. Both `C:/dev/simple/bin/simple.exe --version` and
+`C:/dev/simple-windows-phase2-integrated-20261003/bin/simple.exe --version`
+explicitly identified themselves as Rust bootstrap seeds. Neither was used to
+run these tests. The separate item1 bootstrap log ended with stage2 link failure
+(`rt_fd_stat_snapshot_v1` undefined) and explicitly refused seed fallback.
+Consequently new scenarios are written but **NOT RUN**, with red/green execution
+blocked by the qualified runtime prerequisite. This must not be presented as
+successful TDD execution or production readiness.
+
 | Requirement | Executable evidence required |
 |---|---|
 | REQ-PSC-001–002 | Source examples with two differently attributed containers, including typed factory local/field initializers; insert/remove/lookup/iteration equivalence through linear, hash, ordered, and auto transitions. |
