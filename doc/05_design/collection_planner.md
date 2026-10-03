@@ -1,6 +1,36 @@
 <!-- codex-design -->
 # Collection planner detail design
 
+## 2026-10-03 registry and typed-column implementation increment
+
+The content-only registry loader now parses a closed SDN schema, retains the
+source digest and validates cached projections again at binding. Batch binding
+indexes operation rows once and produces separate registries for explicit
+module paths. Numeric SymbolIds are module-local, so a single unscoped registry
+must never be shared across HIR modules. Bindings match schema/metadata version,
+source digest, receiver, typed signature, backend and supplied receipt. Matching
+a receipt string is not authentication of its producer.
+
+`hir_abi_function_digest_v1` reuses the canonical typed ABI encoder. It binds
+declaration types, effects and calling attributes; it excludes body and source
+positions and therefore is not proof of operation semantics. The default
+`config/compiler/collection_operations.sdn` is explicitly empty until reviewed
+operation rows and independently resolved bindings are available.
+
+`analyze_collection_module_v1` shares a registry between the existing typed
+diagnostic collector and maximal unary-chain discovery. Its two bounded HIR
+traversals perform no I/O. Maximal chains suppress duplicate suffix regions but
+retain traversal of source and callback arguments. Driver integration retains
+these results as analysis, never as lowered/executed receipts.
+
+Typed columns now expose additive checked APIs with mask, index, dtype and
+storage errors. Existing APIs preserve `DfError.ShapeMismatch`. Both sync and
+async variants validate shape/stride rank, dimensions, overflow, offsets and
+reachable backing extent before flat reads. Valid strided/reversed/multidimensional
+views remain supported; rank-zero storage is rejected as an invalid column.
+These changes and their tests are unexecuted; they do not close full engine
+parity, loop extraction, MIR lowering or measured NFR requirements.
+
 Status: draft with balanced NFR targets selected; executable system scenarios
 remain pending.
 Architecture: `doc/04_architecture/collection_planner.md`.

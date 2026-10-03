@@ -95,6 +95,38 @@ and release verification remain incomplete.
 
 ## Remaining work and stop conditions
 
+### Continued implementation after the user's “go; do not stop”
+
+Registry loading now has a closed SDN schema, source-bound snapshot validation,
+module-scoped binding and a safe empty default configuration. The driver API
+loads supplied source once per configuration and performs bounded validation;
+at the shared pre-monomorphization boundary it checks actual declaration owner,
+canonical typed ABI signature, receiver, arity and backend before publishing
+analysis snapshots. Reconfiguration/failure clears old snapshots. Numeric
+SymbolIds are not assumed globally unique. Default configuration does not
+manufacture admitted standard-library metadata.
+
+Module analysis connects the typed diagnostic collector with maximal unary
+chain discovery, retaining source-located blockers and visiting nested argument
+regions without duplicate chain suffix plans. It is analysis only: explicit-loop
+normalization, proof production and emitted MIR replacement remain outstanding.
+
+Both typed-column variants now offer checked mask/index/dtype/storage diagnostics
+through their package facades. Dynamic adapters validate backing extents and
+overflow before reads; legacy error behavior remains compatible. Dynamic
+`array_uniq` now uses actual equality instead of display identity, with its
+quadratic fallback explicitly tracked. `group_by_hashed` offers stable grouping
+with explicit hash/equality callbacks and collision checks; equality-only
+`group_by` remains available.
+
+The SCV cold-create path now reuses its existing validated batch initializer.
+Equivalence tests cover generations, flags and mixed/invalid fallback. This is
+a source-level optimization, not a proven timeout root cause or measured speedup.
+No exhausted diagnostic attempt was repeated and no admission was bypassed.
+
+All new Simple tests are authored but unexecuted. Independent source reviews
+have resolved identified issues; they do not replace runtime verification.
+
 The user next requested continued coding. Query-CSE work uses isolated planner
 and spec lanes `work/item3-query-cse-20261003` and
 `work/item3-query-tests-20261003`, both based on `c92920d6806`.
