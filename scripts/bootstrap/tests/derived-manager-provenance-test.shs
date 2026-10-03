@@ -3,6 +3,35 @@ set -eu
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/derived-manager.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir "$tmp/other-checkout"
+printf 'not an admission\n' >"$tmp/producer.env"
+if [ "${1:-}" = --facade-only ]; then
+  if env -u BOOTSTRAP_STAGE3_FACADE_PATH -u BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE \
+      sh "$repo/scripts/bootstrap/prepare-phase2-build-manager.shs" \
+      --producer-receipt="$tmp/producer.env" --source-root="$repo" \
+      --output-root="$tmp/images" --target=x86_64-pc-windows-msvc \
+      --runtime-bundle=core-c-bootstrap --memory-bytes=67108864 --reserve-bytes=1 \
+      --derived-source-snapshot="$tmp/snapshot" >"$tmp/facade.log" 2>&1; then
+    echo 'invalid admission accepted' >&2; exit 1
+  fi
+  grep -q 'producer missing from admission' "$tmp/facade.log" \
+    || { cat "$tmp/facade.log" >&2; exit 1; }
+  printf '%s\n' 'PASS: actual preparer loads canonical facade without ambient setup and rejects invalid admission before compiler launch'
+  exit 0
+fi
+if sh "$repo/scripts/bootstrap/prepare-phase2-build-manager.shs" \
+    --producer-receipt="$tmp/producer.env" --source-root="$tmp/other-checkout" \
+    --output-root="$tmp/images" --target=x86_64-pc-windows-msvc \
+    --runtime-bundle=core-c-bootstrap --memory-bytes=67108864 --reserve-bytes=1 \
+    --derived-source-snapshot="$tmp/snapshot" >"$tmp/routing.log" 2>&1; then
+  echo 'different derived helper/driver checkout accepted' >&2; exit 1
+fi
+grep -q 'derived helper source must be the checkout' "$tmp/routing.log" \
+  || { cat "$tmp/routing.log" >&2; exit 1; }
+if [ "${1:-}" = --routing-only ]; then
+  printf '%s\n' 'PASS: actual preparer refuses mismatched helper/driver root before admission or compiler launch'
+  exit 0
+fi
 . "$repo/scripts/bootstrap/lib/derived-manager-provenance.shs"
 # Exact single-field reader and real byte snapshot for this small source tree.
 bootstrap_stage3_manifest_value() {
