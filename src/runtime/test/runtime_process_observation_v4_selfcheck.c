@@ -114,7 +114,70 @@ static SplArray* ticket_from(const SplArray* words) {
     return t;
 }
 
+static void check_work_deadlines(const char* cwd, int64_t cwd_pin,
+                                 const uint8_t cwd_digest[32]) {
+    for (int unlimited=0; unlimited<=1; unlimited++) {
+        SplArray* request=request_bytes(cwd,cwd_pin,cwd_digest,"--pov4-wait-child",64);
+        set_u64_at(request,24,unlimited ? 0 : 250000000ULL);
+        SplArray* started=rt_process_observation_v4_start_pinned_value(77,cwd_pin,request);
+        SplArray* words=tuple_item(started,3);
+        assert(rt_array_get(words,POV4_STATUS)==POV4_STATUS_RUNNING);
+        SplArray* ticket=ticket_from(words);
+        if (unlimited) {
+            int64_t until=owned_now_ns()+400000000LL;
+            do {
+                SplArray* poll=rt_process_observation_v4_poll_value(ticket,25000000);
+                words=tuple_item(poll,3);
+                assert(rt_array_get(words,POV4_STATUS)==POV4_STATUS_RUNNING);
+                assert(rt_array_get(words,POV4_EXECUTION_DEADLINE_NS)==0);
+                assert(rt_array_get(words,POV4_KILL_DEADLINE_NS)==0);
+                assert(rt_array_get(words,POV4_CLEANUP_DEADLINE_NS)==0);
+                assert(rt_array_get(words,POV4_TERM_ATTEMPTED)==0);
+                assert(rt_array_get(words,POV4_FAILURE_REASON)==0);
+            } while (owned_now_ns()<until);
+            words=tuple_item(rt_process_observation_v4_cancel_value(ticket,0),3);
+            int64_t kill_at=rt_array_get(words,POV4_KILL_DEADLINE_NS);
+            assert(kill_at>0 && rt_array_get(words,POV4_CLEANUP_DEADLINE_NS)==kill_at+500000000LL);
+            words=tuple_item(rt_process_observation_v4_cancel_value(ticket,0),3);
+            assert(rt_array_get(words,POV4_KILL_DEADLINE_NS)==kill_at);
+        }
+        SplArray* frozen=NULL;
+        for(int turn=0;turn<100;turn++) {
+            frozen=rt_process_observation_v4_collect_value(ticket,25000000);
+            words=tuple_item(frozen,3);
+            if(rt_array_get(words,POV4_PACKET_KIND)==POV4_KIND_FROZEN) break;
+        }
+        assert(rt_array_get(words,POV4_PACKET_KIND)==POV4_KIND_FROZEN);
+        assert(rt_array_get(words,POV4_LEADER_REAPED)==1);
+        assert(rt_array_get(words,POV4_TERM_ATTEMPTED)==1);
+        assert(rt_array_get(words,POV4_KILL_ATTEMPTED)==1);
+        assert(rt_array_get(words,POV4_FAILURE_REASON)==(unlimited ? 0 : POV4_REASON_EXEC_DEADLINE));
+        SplArray* ack=rt_process_observation_v4_ack_collect_value(ticket,tuple_item(frozen,2));
+        assert(rt_array_get(tuple_item(ack,3),POV4_PACKET_KIND)==POV4_KIND_ACK);
+    }
+    /* Natural completion also starts a finite drain lease without signalling. */
+    SplArray* request=request_bytes(cwd,cwd_pin,cwd_digest,"--pov4-child",1024);
+    set_u64_at(request,24,0);
+    SplArray* started=rt_process_observation_v4_start_pinned_value(77,cwd_pin,request);
+    SplArray* ticket=ticket_from(tuple_item(started,3)), *frozen=NULL, *words=NULL;
+    for(int turn=0;turn<100;turn++) {
+        frozen=rt_process_observation_v4_collect_value(ticket,25000000);
+        words=tuple_item(frozen,3);
+        if(rt_array_get(words,POV4_PACKET_KIND)==POV4_KIND_FROZEN) break;
+    }
+    assert(rt_array_get(words,POV4_PACKET_KIND)==POV4_KIND_FROZEN);
+    assert(rt_array_get(words,POV4_EXIT_CODE)==0 && rt_array_get(words,POV4_TERM_ATTEMPTED)==0);
+    assert(rt_array_get(words,POV4_CLEANUP_DEADLINE_NS)>=rt_array_get(words,POV4_LEADER_WAITED_NS));
+    assert(rt_array_get(tuple_item(rt_process_observation_v4_ack_collect_value(ticket,tuple_item(frozen,2)),3),
+        POV4_PACKET_KIND)==POV4_KIND_ACK);
+}
+
 int main(int argc, char** argv) {
+    if (argc==2 && strcmp(argv[1],"--pov4-wait-child")==0) {
+        signal(SIGTERM,SIG_IGN);
+        sleep(3);  /* Test-only leak backstop if an assertion aborts the owner. */
+        return 94;
+    }
     if (argc==2 && strcmp(argv[1],"--pov4-input-child")==0) {
         const char* exact=getenv("POV4_TEST");
         if (!exact || strcmp(exact,"exact")!=0) return 80;
@@ -158,6 +221,7 @@ int main(int argc, char** argv) {
     SplArray* cwd_digest_value=rt_process_observation_v4_cwd_digest_value(cwd_pin);
     uint8_t cwd_digest[32]; assert(rt_array_bytes_copy_checked(
         (int64_t)(uintptr_t)cwd_digest_value,cwd_digest,32)==32);
+    check_work_deadlines(cwd,cwd_pin,cwd_digest);
     SplArray* request=request_bytes(cwd,cwd_pin,cwd_digest,"--pov4-child",1024);
     SplArray* unavailable=rt_process_observation_v4_start_value(request);
     assert(rt_array_get(tuple_item(unavailable,3),3)==POV4_STATUS_REJECTED);

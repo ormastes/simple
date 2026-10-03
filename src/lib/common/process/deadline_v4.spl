@@ -27,6 +27,8 @@ pub enum ProcessObservationDeadlineActionV4:
 
 pub struct ProcessObservationDeadlinesV4:
     request_started_ns: i64
+    # Zero execution means unlimited useful work. Zero kill/cleanup means
+    # teardown is not armed yet; the host arms finite deadlines on stop/reap.
     execution_deadline_ns: i64
     kill_deadline_ns: i64
     cleanup_deadline_ns: i64
@@ -53,8 +55,11 @@ pub fn process_observation_deadlines_v4(
     term_grace_ns: i64,
     cleanup_budget_ns: i64
 ) -> Result<ProcessObservationDeadlinesV4, text>:
-    if request_started_ns < 0 or wall_budget_ns <= 0 or term_grace_ns < 0 or cleanup_budget_ns < 0:
-        return Err("process observation V4 requires nonnegative absolute deadline inputs and positive wall budget")
+    if request_started_ns < 0 or wall_budget_ns < 0 or term_grace_ns < 0 or cleanup_budget_ns < 0:
+        return Err("process observation V4 requires nonnegative absolute deadline inputs")
+    if wall_budget_ns == 0:
+        return Ok(ProcessObservationDeadlinesV4(request_started_ns: request_started_ns,
+            execution_deadline_ns: 0, kill_deadline_ns: 0, cleanup_deadline_ns: 0))
     val execution = process_observation_checked_add_v4(request_started_ns, wall_budget_ns)?
     val kill = process_observation_checked_add_v4(execution, term_grace_ns)?
     val cleanup = process_observation_checked_add_v4(kill, cleanup_budget_ns)?
@@ -67,10 +72,15 @@ pub fn process_observation_deadlines_v4(
 pub fn process_observation_deadline_order_valid_v4(
     deadlines: ProcessObservationDeadlinesV4
 ) -> bool:
-    deadlines.request_started_ns >= 0 and
-        deadlines.execution_deadline_ns >= deadlines.request_started_ns and
-        deadlines.kill_deadline_ns >= deadlines.execution_deadline_ns and
-        deadlines.cleanup_deadline_ns >= deadlines.kill_deadline_ns
+    process_observation_deadline_values_valid_v4(deadlines.request_started_ns,
+        deadlines.execution_deadline_ns, deadlines.kill_deadline_ns, deadlines.cleanup_deadline_ns)
+
+pub fn process_observation_deadline_values_valid_v4(start: i64, execution: i64, kill: i64, cleanup: i64) -> bool:
+    if start < 0: return false
+    if execution == 0:
+        return (kill == 0 and cleanup == 0) or
+            (kill > 0 and kill >= start and cleanup >= kill)
+    execution >= start and execution > 0 and kill >= execution and cleanup >= kill
 
 pub fn process_observation_reduce_deadline_v4(
     deadlines: ProcessObservationDeadlinesV4,
@@ -90,7 +100,7 @@ pub fn process_observation_reduce_deadline_v4(
         return ProcessObservationDeadlineDecisionV4(
             phase: ProcessObservationPhaseV4.Terminal,
             action: ProcessObservationDeadlineActionV4.None)
-    if observed_ns >= deadlines.kill_deadline_ns:
+    if deadlines.kill_deadline_ns > 0 and observed_ns >= deadlines.kill_deadline_ns:
         # A zero grace period makes TERM and KILL simultaneously due.  They
         # are one ordered host action and must win over cleanup, even when the
         # cleanup budget is also zero.
@@ -113,7 +123,8 @@ pub fn process_observation_reduce_deadline_v4(
         return ProcessObservationDeadlineDecisionV4(
             phase: ProcessObservationPhaseV4.KillRequested,
             action: ProcessObservationDeadlineActionV4.None)
-    if observed_ns >= deadlines.execution_deadline_ns:
+    if (deadlines.execution_deadline_ns > 0 and observed_ns >= deadlines.execution_deadline_ns) or
+            (deadlines.execution_deadline_ns == 0 and deadlines.kill_deadline_ns > 0):
         return ProcessObservationDeadlineDecisionV4(
             phase: ProcessObservationPhaseV4.TermRequested,
             action: if state.term_attempted:
@@ -128,4 +139,5 @@ export ProcessObservationPhaseV4, ProcessObservationDeadlineActionV4
 export ProcessObservationDeadlinesV4, ProcessObservationDeadlineStateV4
 export ProcessObservationDeadlineDecisionV4
 export process_observation_deadlines_v4, process_observation_deadline_order_valid_v4
+export process_observation_deadline_values_valid_v4
 export process_observation_reduce_deadline_v4

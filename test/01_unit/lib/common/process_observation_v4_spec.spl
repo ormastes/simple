@@ -5,7 +5,7 @@
 use std.spec.*
 use std.common.process.deadline_v4.{
     ProcessObservationPhaseV4, ProcessObservationDeadlineActionV4,
-    ProcessObservationDeadlineStateV4, process_observation_deadlines_v4,
+    ProcessObservationDeadlineStateV4, ProcessObservationDeadlinesV4, process_observation_deadlines_v4,
     process_observation_reduce_deadline_v4
 }
 use std.common.process.observation_v4.{
@@ -53,6 +53,23 @@ fn _request() -> ProcessObservationRequestV4:
         max_clock_resolution_ns: 1)
 
 describe "process observation V4 common schema":
+    it "roundtrips zero workload budget while rejecting negative budgets":
+        var unlimited = _request()
+        unlimited.wall_budget_ns = 0
+        expect(process_observation_request_valid_v4(unlimited)).to_equal(true)
+        val wire = canonical_encode_process_observation_request_v4(unlimited).unwrap()
+        expect(canonical_decode_process_observation_request_v4(wire).unwrap().wall_budget_ns).to_equal(0)
+        unlimited.wall_budget_ns = -1
+        expect(process_observation_request_valid_v4(unlimited)).to_equal(false)
+
+    it "accepts unlimited execution with finite cleanup in a real receipt shape":
+        var words = _golden_words()
+        words[25] = 0
+        val receipt = decode_process_observation_v4(ProcessObservationWireV4(
+            words: words, stdout: [111u8, 107u8], stderr: [33u8], binding: _binding())).unwrap()
+        expect(receipt.packet.execution_deadline_ns).to_equal(0)
+        expect(receipt.packet.kill_deadline_ns).to_equal(20)
+        expect(receipt.packet.cleanup_deadline_ns).to_equal(30)
     it "decodes the fixed 64-word golden vector without host authority":
         val receipt = decode_process_observation_v4(_golden_wire()).unwrap()
         expect(receipt.packet.packet_kind).to_equal(ProcessObservationPacketKindV4.Frozen)
@@ -194,6 +211,20 @@ describe "process observation V4 common schema":
             stdout: [], stderr: [], binding: [])).is_ok()).to_equal(true)
 
 describe "process observation V4 absolute deadline reducer":
+    it "never expires zero work budget but retains an armed cleanup boundary":
+        val unarmed = process_observation_deadlines_v4(10, 0, 5, 10).unwrap()
+        val state = ProcessObservationDeadlineStateV4(phase: ProcessObservationPhaseV4.Running,
+            term_attempted: false, kill_attempted: false, leader_reaped: false, tree_empty: false)
+        val running = process_observation_reduce_deadline_v4(unarmed, 9223372036854775806, state)
+        expect(running.phase).to_equal(ProcessObservationPhaseV4.Running)
+        expect(running.action).to_equal(ProcessObservationDeadlineActionV4.None)
+        val armed = ProcessObservationDeadlinesV4(request_started_ns: 10,
+            execution_deadline_ns: 0, kill_deadline_ns: 105, cleanup_deadline_ns: 115)
+        expect(process_observation_reduce_deadline_v4(armed, 100, state).action).to_equal(
+            ProcessObservationDeadlineActionV4.AttemptTerm)
+        expect(process_observation_reduce_deadline_v4(armed, 105, state).action).to_equal(
+            ProcessObservationDeadlineActionV4.AttemptTermAndKill)
+
     it "sends TERM and KILL on the same tick when grace is zero":
         val deadlines = process_observation_deadlines_v4(10, 10, 0, 10).unwrap()
         val decision = process_observation_reduce_deadline_v4(deadlines, 20,

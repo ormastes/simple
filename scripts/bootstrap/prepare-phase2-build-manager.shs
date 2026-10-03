@@ -7,6 +7,7 @@ regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
 hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
 producer_receipt= source_root= output_root= target= runtime_bundle= memory_bytes= reserve_bytes=
+derived_source_snapshot= derived_source_sha256= derived_source_commit=
 for arg in "$@"; do
   case "$arg" in
     --producer-receipt=*) producer_receipt=${arg#*=} ;;
@@ -16,6 +17,9 @@ for arg in "$@"; do
     --runtime-bundle=*) runtime_bundle=${arg#*=} ;;
     --memory-bytes=*) memory_bytes=${arg#*=} ;;
     --reserve-bytes=*) reserve_bytes=${arg#*=} ;;
+    --derived-source-snapshot=*) derived_source_snapshot=${arg#*=} ;;
+    --derived-source-sha256=*) derived_source_sha256=${arg#*=} ;;
+    --derived-source-commit=*) derived_source_commit=${arg#*=} ;;
     *) die "unknown option: $arg" ;;
   esac
 done
@@ -35,7 +39,15 @@ done
   || die "memory cap exceeds manager task limit"
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "repository root unavailable"
-. "$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+if [ -n "$derived_source_snapshot$derived_source_sha256$derived_source_commit" ]; then
+  derived_root=$(CDPATH= cd -- "$source_root" && pwd -P) || die "derived source root unavailable"
+  [ "$derived_root" = "$repo_root" ] \
+    || die "derived helper source must be the checkout containing this preparer and grouped driver"
+fi
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE=0
+export BOOTSTRAP_STAGE3_FACADE_PATH BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
 field() { bootstrap_stage3_manifest_value "$1" "$producer_receipt"; }
 producer=$(field candidate_path) || die "producer missing from admission"
 producer_sha=$(field candidate_sha256) || die "producer hash missing"
@@ -59,6 +71,19 @@ bootstrap_stage3_verify_stage2_admission_receipt \
   || die "Phase 2 admission replay failed"
 regular "$producer" && [ "$(hash_file "$producer")" = "$producer_sha" ] || die "admitted producer changed"
 regular "$source_authority" || die "source authority missing"
+image_format=SIMPLE-PHASE2-MANAGER-IMAGES-1
+image_source_authority=$source_authority
+if [ -n "$derived_source_snapshot$derived_source_sha256$derived_source_commit" ]; then
+  absolute "$derived_source_snapshot" && regular "$derived_source_snapshot" \
+    || die "derived source snapshot missing"
+  [ "$(hash_file "$derived_source_snapshot")" = "$derived_source_sha256" ] \
+    || die "derived source snapshot differs"
+  [ "$(git -C "$source_root" rev-parse HEAD)" = "$derived_source_commit" ] \
+    || die "derived source commit differs"
+  derived_source_tree=$(git -C "$source_root" rev-parse HEAD^{tree}) || die "derived source tree unavailable"
+  image_format=SIMPLE-DERIVED-MANAGER-IMAGES-1
+  image_source_authority=$derived_source_snapshot
+fi
 
 # Reuse the canonical snapshotter, which also validates the admitted source
 # symlink records and checks every file for mutation while it is read.
@@ -72,7 +97,11 @@ verify_sources() {
   observed="$output_root/logs/source-verify.$$.txt"
   bootstrap_stage3_source_snapshot "$observed" "$source_root" \
     || die "canonical source snapshot failed"
-  cmp -s "$observed" "$source_authority" \
+  if [ "$image_format" = SIMPLE-DERIVED-MANAGER-IMAGES-1 ]; then
+    [ "$(hash_file "$derived_source_snapshot")" = "$derived_source_sha256" ] \
+      || die "derived source authority changed"
+  fi
+  cmp -s "$observed" "$image_source_authority" \
     || die "frozen source differs from admitted Stage 2 source; snapshot retained: $observed"
   rm -f "$observed"
 }
@@ -170,7 +199,7 @@ verify_sources
 tmp="$receipt.tmp.$$"
 umask 077
 {
-  printf '%s\n' 'format=SIMPLE-PHASE2-MANAGER-IMAGES-1' "target=$target" \
+  printf '%s\n' "format=$image_format" "target=$target" \
     "producer_path=$producer" "producer_sha256=$producer_sha" \
     "memory_limit_bytes=$memory_bytes" "memory_reserve_bytes=$reserve_bytes" \
     "source_authority_sha256=$(hash_file "$source_authority")" \
@@ -184,6 +213,14 @@ umask 077
     "index_program=$index_image" "index_sha256=$(hash_file "$index_image")" \
     "authority_program=$authority_image" "authority_sha256=$(hash_file "$authority_image")" \
     "template=$template" "template_sha256=$(hash_file "$template")"
+  if [ "$image_format" = SIMPLE-DERIVED-MANAGER-IMAGES-1 ]; then
+    printf '%s\n' 'canonical_admission=0' 'manager_support_image_mode=one-binary' \
+      "product_source_snapshot_sha256=$source_authority_sha" \
+      "helper_source_root=$source_root" "helper_source_commit=$derived_source_commit" \
+      "helper_source_tree=$derived_source_tree" \
+      "helper_source_snapshot_path=$derived_source_snapshot" \
+      "helper_source_snapshot_sha256=$derived_source_sha256"
+  fi
 } >"$tmp" || die "image receipt write failed"
 if [ -e "$receipt" ]; then
   cmp -s "$tmp" "$receipt" || die "manager image receipt differs on resume"

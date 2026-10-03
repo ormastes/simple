@@ -1,7 +1,35 @@
 use std.spec
 use std.common.build_manager.grouped_native_process_policy.{
     NativeGroupActiveChargeV1, native_group_process_budget_v1,
-    native_group_disk_required_v1, native_group_disk_budget_v1}
+    native_group_disk_required_v1, native_group_disk_budget_v1, native_group_observed_charge_v1}
+
+describe "Monitor reservations and measured overshoot":
+    it "charges Linux current or conservative Windows peak above the reservation":
+        val linux = native_group_observed_charge_v1("monitor", 150, 180, true)
+        val windows = native_group_observed_charge_v1("monitor", 0, 180, false)
+        expect(linux).to_equal(150)
+        expect(windows).to_equal(180)
+        for observed in [linux, windows]:
+            val active = [NativeGroupActiveChargeV1(100, observed, 1, "monitor")]
+            val required = observed + 100 + 80
+            val rejected = native_group_process_budget_v1(4, 1, 100, 80,
+                required - 1, required, true, active).unwrap()
+            expect(rejected.admitted).to_equal(false)
+            expect(rejected.required_host_bytes).to_equal(required)
+            expect(native_group_process_budget_v1(4, 1, 100, 80,
+                required, required - 1, true, active).unwrap().admitted).to_equal(false)
+            expect(native_group_process_budget_v1(4, 1, 100, 80,
+                required, required, true, active).unwrap().admitted).to_equal(true)
+        expect(native_group_process_budget_v1(4, 1, 100, 80, 400, 400, true,
+            [NativeGroupActiveChargeV1(100, 150, 1)]).is_err()).to_equal(true)
+        expect(native_group_process_budget_v1(4, 1, 100, 80, 400, 400, true,
+            [NativeGroupActiveChargeV1(0, 150, 1, "monitor")]).is_err()).to_equal(true)
+
+    it "retains the positive reservation when current usage is smaller":
+        val result = native_group_process_budget_v1(4, 1, 100, 80, 280, 280, true,
+            [NativeGroupActiveChargeV1(100, 1, 1, "monitor")]).unwrap()
+        expect(result.admitted).to_equal(true)
+        expect(result.required_host_bytes).to_equal(280)
 
 fn disk_required(reserve: i64, active: i64, source: i64, estimate: i64) -> i64:
     match native_group_disk_required_v1(reserve, active, source, estimate):

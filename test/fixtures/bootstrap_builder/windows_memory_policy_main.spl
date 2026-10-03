@@ -1,0 +1,51 @@
+# Native Win64 probe: PROGRAM is an explicit cmd.exe path; ROOT is private.
+# Runs two trivial owned children, not a compiler. No child escapes its Job.
+use app.io.args_ops.{get_args}
+use app.io.time_ops.{sleep_ms}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, windows_process_file_digest_v1, windows_process_admit_with_reserve_v1, WindowsProcessAdmissionV1, windows_process_poll_v1, windows_process_peak_memory_v1, windows_process_collect_v1, windows_process_cancel_v1, windows_process_collected_proof_v1}
+use std.common.build_manager.memory_policy.{BuilderMemoryReceiptV1, builder_memory_enforcement_bytes_v1, builder_memory_receipt_encode_v1}
+
+fn memory_probe_v1(program: text, root: text, policy: text) -> Result<bool, text>:
+    val reserved: i64 = 67108864
+    val enforced = builder_memory_enforcement_bytes_v1(policy, reserved)?
+    val digest = windows_process_file_digest_v1(program)
+    val request = WindowsProcessRequestV1(program, digest, ["/d", "/c", "exit", "0"],
+        ["SystemRoot=C:\\Windows"], root, [], root + "/" + policy + ".out",
+        root + "/" + policy + ".err", 0)
+    val lease = match windows_process_admit_with_reserve_v1(request, enforced, reserved):
+        WindowsProcessAdmissionV1.Started(value): value
+        WindowsProcessAdmissionV1.RejectedBeforeStart(reason): return Err(reason)
+        WindowsProcessAdmissionV1.FailedAfterCleanup(reason): return Err(reason)
+        WindowsProcessAdmissionV1.Unknown(reason): return Err(reason)
+    var cancelled = false
+    for poll in 0..1000:
+        # A finite probe cleanup watchdog is independent of the child's work deadline.
+        if poll == 500:
+            val accepted = windows_process_cancel_v1(lease)?
+            cancelled = true
+        val observed = windows_process_poll_v1(lease)?
+        if observed.terminal:
+            val peak = windows_process_peak_memory_v1(lease)
+            val terminal = windows_process_collect_v1(lease)?
+            if not windows_process_collected_proof_v1(lease) or not terminal.tree_empty or not terminal.leader_reaped:
+                return Err("native cleanup unproven")
+            if terminal.timed_out or cancelled or terminal.exit_code != 0:
+                return Err("trivial zero-deadline child failed")
+            val enforcement = if policy == "monitor": "none" else: "job-memory"
+            val encoded = builder_memory_receipt_encode_v1(BuilderMemoryReceiptV1(digest,
+                policy, reserved, enforcement, enforced, peak?, "job-commit-peak"))?
+            print encoded
+            return Ok(true)
+        sleep_ms(10)
+    Err("native cleanup watchdog expired")
+
+fn main() -> i64:
+    val args = get_args()
+    if args.len() != 3: return 2
+    for policy in ["enforce", "monitor"]:
+        match memory_probe_v1(args[1], args[2], policy):
+            Ok(_): print "PASS: {policy} Job policy, positive reservation, peak, cleanup"
+            Err(reason):
+                print reason
+                return 1
+    0

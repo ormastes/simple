@@ -1,6 +1,7 @@
 # Linux compiler worker. Its sealed image is selected by BuildHostV1; the
-# compiler and every descendant run inside one cgroup-v2 memory boundary.
+# compiler and every descendant run inside one cgroup-v2 containment boundary.
 use app.io.args_ops.{get_args}
+use std.common.build_manager.memory_policy.{builder_memory_enforcement_bytes_v1, builder_memory_receipt_for_task_v1}
 use app.io.env_ops.{env_vars, env_get}
 use app.io.file_ops.{file_exists, file_hash_sha256, file_is_regular_no_follow, file_read_regular_no_follow_bounded, file_atomic_write}
 use app.io.time_ops.{sleep_ms}
@@ -187,7 +188,7 @@ fn builder_linux_run_in_parent_v1(task: BuildTaskV1, root: text, host: text) -> 
     val identity = builder_task_identity_v1(task)
     if file_exists(root + "/cancel.request") or builder_linux_control_v1(root, identity, host):
         return Err(builder_linux_reject_before_start_v1(task, root, host, "cancelled before compiler launch"))
-    if task.timeout_ms < 1 or task.timeout_ms > 604800000:
+    if task.timeout_ms < 0 or task.timeout_ms > 604800000:
         return Err(builder_linux_reject_before_start_v1(task, root, host, "Linux compiler timeout outside owner bound"))
     for kind in ["native", "runtime", "hir", "frontend", "temp"]:
         if not dir_create_all(root + "/work/.builder-cache/" + kind):
@@ -218,7 +219,8 @@ fn builder_linux_run_in_parent_v1(task: BuildTaskV1, root: text, host: text) -> 
     if ready_links != "":
         return Err(builder_linux_reject_before_start_v1(task, root, host, ready_links))
     # Start errors can occur after clone3. They never certify no-child-started.
-    val lease = linux_process_start_with_memory_v1(request, task.memory_limit_bytes,
+    val enforcement_bytes = builder_memory_enforcement_bytes_v1(task.memory_policy, task.memory_limit_bytes)?
+    val lease = linux_process_start_with_memory_v1(request, enforcement_bytes,
         root, identity)?
     var cancelled = false
     while true:
@@ -242,6 +244,10 @@ fn builder_linux_run_in_parent_v1(task: BuildTaskV1, root: text, host: text) -> 
             val outcome = builder_linux_terminal_outcome_v1(receipt, cancelled)?
             if not file_atomic_write(root + "/compiler.reaped", identity + "\n" + host):
                 return Err("cannot persist Linux compiler reap receipt")
+            val memory_receipt = builder_memory_receipt_for_task_v1(task,
+                "cgroup-memory-max", receipt.memory_peak_bytes, "cgroup-memory-peak")?
+            if not file_atomic_write(root + "/compiler.memory", memory_receipt):
+                return Err("cannot persist Linux memory policy receipt")
             return Ok(outcome)
         sleep_ms(10)
     Err("unreachable Linux owner loop")

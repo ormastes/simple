@@ -2,6 +2,7 @@
 # the whole broker tree; they are not resident bytes or per-thread allocation.
 use std.common.build_manager.codec.{BuilderWireReaderV1, builder_wire_line_v1}
 use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.build_manager.memory_policy.{builder_memory_policy_valid_v1}
 
 struct NativeGroupChargeSampleV1:
     before_ms: i64
@@ -17,8 +18,8 @@ struct NativeGroupChargeTraceV1:
     samples: [NativeGroupChargeSampleV1]
 
 fn native_group_charge_trace_error_v1(trace: NativeGroupChargeTraceV1,
-        memory_limit_bytes: i64) -> text:
-    if not builder_digest_valid_v1(trace.manifest_digest) or
+        memory_limit_bytes: i64, memory_policy: text = "enforce") -> text:
+    if not builder_memory_policy_valid_v1(memory_policy) or not builder_digest_valid_v1(trace.manifest_digest) or
             memory_limit_bytes < 1 or memory_limit_bytes > 1125899906842624 or
             trace.samples.len() > 32768:
         return "invalid group charge trace identity or bound"
@@ -30,7 +31,8 @@ fn native_group_charge_trace_error_v1(trace: NativeGroupChargeTraceV1,
         val row = trace.samples[i]
         if row.before_ms < 0 or row.after_ms < row.before_ms or
                 row.current_bytes < 0 or row.peak_bytes < row.current_bytes or
-                row.peak_bytes > memory_limit_bytes or row.active_processes < 0 or
+                row.peak_bytes > 1125899906842624 or
+                (memory_policy == "enforce" and row.peak_bytes > memory_limit_bytes) or row.active_processes < 0 or
                 row.active_processes > 4096 or row.before_ms < prior_after or
                 row.peak_bytes < prior_peak:
             return "inconsistent group charge sample"
@@ -44,8 +46,8 @@ fn native_group_charge_trace_error_v1(trace: NativeGroupChargeTraceV1,
     ""
 
 fn native_group_charge_trace_encode_v1(trace: NativeGroupChargeTraceV1,
-        memory_limit_bytes: i64) -> text:
-    if native_group_charge_trace_error_v1(trace, memory_limit_bytes) != "": return ""
+        memory_limit_bytes: i64, memory_policy: text = "enforce") -> text:
+    if native_group_charge_trace_error_v1(trace, memory_limit_bytes, memory_policy) != "": return ""
     var rows = "SIMPLE-NATIVE-GROUP-CHARGE-1\n" +
         builder_wire_line_v1(trace.manifest_digest) +
         builder_wire_line_v1(if trace.complete: "1" else: "0") +
@@ -58,7 +60,7 @@ fn native_group_charge_trace_encode_v1(trace: NativeGroupChargeTraceV1,
     rows
 
 fn native_group_charge_trace_decode_v1(payload: text, expected_digest: text,
-        memory_limit_bytes: i64) -> Result<NativeGroupChargeTraceV1, text>:
+        memory_limit_bytes: i64, memory_policy: text = "enforce") -> Result<NativeGroupChargeTraceV1, text>:
     val reader = BuilderWireReaderV1.create(payload)
     if reader.scalar() != "SIMPLE-NATIVE-GROUP-CHARGE-1":
         return Err("wrong group charge trace schema")
@@ -79,7 +81,7 @@ fn native_group_charge_trace_decode_v1(payload: text, expected_digest: text,
     if wire_error != "": return Err(wire_error)
     if digest != expected_digest: return Err("group charge trace manifest differs")
     val trace = NativeGroupChargeTraceV1(digest, complete_number == 1, samples)
-    val invalid = native_group_charge_trace_error_v1(trace, memory_limit_bytes)
+    val invalid = native_group_charge_trace_error_v1(trace, memory_limit_bytes, memory_policy)
     if invalid != "": return Err(invalid)
     Ok(trace)
 
