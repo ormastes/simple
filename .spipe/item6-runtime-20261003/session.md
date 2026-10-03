@@ -181,3 +181,31 @@ the inspected compiler/SCV pipeline. Those two adapter scenarios explicitly
 return unavailable, not a fake successful declaration check. Implementing the
 generator producer/input/output receipt owner remains outstanding. Main harness
 is parent-owned. All new Simple tests remain unexecuted.
+
+## Generated receipt production admission continuation
+
+The previously missing receipt owner is now implemented in
+`generated_source_receipt.spl` and adopted by the real
+`cold_hir_package_outputs_from_driver_v1` boundary. A nonempty emitted generated
+facet must have an independently supplied declaration plus typed receipt;
+the receipt's producer and snapshot are checked against compiler authority and
+the recomputed frozen inventory, exact declared/observed sets are enforced, and
+input/output content digests must match actual inventory rows. The emitted file
+must contain the canonical receipt bytes under its already checked file digest.
+Empty facets with no receipt retain their no-generated-source meaning.
+
+Reusable generated identity binds producer/declaration/input/output content,
+excluding whole-inventory identity. Provenance still binds the snapshot, but an
+unrelated inventory epoch does not invalidate unchanged generated identity.
+That admitted identity feeds the existing generated_source_digest TLDR field.
+Tests cover bridge missing receipt, undeclared/missing output, incorrect input or
+output bytes, independent snapshot/producer mismatch, duplicate/traversal paths,
+stable identity across snapshot epochs, and actual metadata cutoff refusal.
+
+Generated adapter scenarios now report receipt-owner evidence instead of
+unavailable. This does not run a generator: the existing HIR domain-block path
+still requires a real domain producer receipt, and end-to-end generation,
+dependent invalidation/compilation and archive reuse remain separate evidence.
+Comment/whitespace adapter validity now requires changed content and equal real
+closure identity; demanded-section validity additionally requires selected-byte
+digest equality. Runtime tests are still unexecuted.

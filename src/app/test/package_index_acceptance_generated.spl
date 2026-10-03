@@ -1,0 +1,75 @@
+# Receipt admission observations over explicit frozen source bytes; generator
+# execution and dependent compiler completion are separate evidence gates.
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryEntryV1, CompileSourceInventoryV1, compile_source_inventory_digest_v1
+}
+use compiler.driver.cache.generated_source_receipt.{
+    GeneratedSourceDeclarationV1, GeneratedSourceFileV1, GeneratedSourceReceiptV1,
+    generated_source_declaration_digest_v1, generated_source_receipt_admit_v1
+}
+
+struct PackageIndexAcceptanceGeneratedObservationV1:
+    valid: bool
+    reason: text
+    observations: [text]
+
+fn package_index_generated_inventory_v1(input: text, output: text) -> CompileSourceInventoryV1:
+    val input_digest = sha256_text(input)
+    val output_digest = sha256_text(output)
+    CompileSourceInventoryV1(1, 1, [
+        CompileSourceInventoryEntryV1("simple.sdn", input_digest, input_digest,
+            input_digest, input_digest, input_digest, input.len()),
+        CompileSourceInventoryEntryV1("src/generated_api.spl", output_digest, output_digest,
+            output_digest, output_digest, output_digest, output.len())])
+
+fn package_index_generated_declaration_v1() -> GeneratedSourceDeclarationV1:
+    GeneratedSourceDeclarationV1(sha256_text("compiler-generator"),
+        ["simple.sdn"], ["src/generated_api.spl"])
+
+fn package_index_generated_receipt_v1(
+    declaration: GeneratedSourceDeclarationV1, inventory: CompileSourceInventoryV1,
+    input: text, output: text
+) -> GeneratedSourceReceiptV1:
+    GeneratedSourceReceiptV1(generated_source_declaration_digest_v1(declaration),
+        compile_source_inventory_digest_v1(inventory),
+        [GeneratedSourceFileV1("simple.sdn", sha256_text(input))],
+        [GeneratedSourceFileV1("src/generated_api.spl", sha256_text(output))])
+
+fn package_index_acceptance_generated_v1(scenario: text) -> PackageIndexAcceptanceGeneratedObservationV1:
+    val declaration = package_index_generated_declaration_v1()
+    val input = "generator_version: 1\n"
+    val output = "pub fn generated_api() -> i64:\n    1\n"
+    val inventory = package_index_generated_inventory_v1(input, output)
+    var receipt = package_index_generated_receipt_v1(declaration, inventory, input, output)
+    if scenario == "generated-output-undeclared-denied":
+        receipt.outputs.push(GeneratedSourceFileV1("src/undeclared.spl", sha256_text("unexpected output")))
+        val denied = generated_source_receipt_admit_v1(declaration, receipt, inventory,
+            declaration.producer_digest, compile_source_inventory_digest_v1(inventory), "src/generated_api.spl")
+        if denied.is_ok():
+            return PackageIndexAcceptanceGeneratedObservationV1(false, "undeclared-output-admitted", [])
+        val reason = denied.unwrap_err()
+        return PackageIndexAcceptanceGeneratedObservationV1(reason == "generated-output-undeclared", reason,
+            ["generated_receipt_admitted=false", "observed_generated_error={reason}"])
+    if scenario != "generated-source-invalidation":
+        return PackageIndexAcceptanceGeneratedObservationV1(false, "unsupported-generated-scenario", [])
+    val before = generated_source_receipt_admit_v1(declaration, receipt, inventory,
+        declaration.producer_digest, compile_source_inventory_digest_v1(inventory), "src/generated_api.spl")
+    val edited_input = "generator_version: 2\n"
+    val edited_output = "pub fn generated_api() -> i64:\n    2\n"
+    val edited_inventory = package_index_generated_inventory_v1(edited_input, edited_output)
+    val edited_receipt = package_index_generated_receipt_v1(
+        declaration, edited_inventory, edited_input, edited_output)
+    val after = generated_source_receipt_admit_v1(declaration, edited_receipt, edited_inventory,
+        declaration.producer_digest, compile_source_inventory_digest_v1(edited_inventory), "src/generated_api.spl")
+    if before.is_err() or after.is_err():
+        return PackageIndexAcceptanceGeneratedObservationV1(false, "generated-fixture-admission-failed", [])
+    val before_digest = before.unwrap()
+    val after_digest = after.unwrap()
+    PackageIndexAcceptanceGeneratedObservationV1(before_digest != after_digest, "generated-receipt-observed", [
+        "generated_receipt_admitted=true", "generated_before_digest={before_digest}",
+        "generated_after_digest={after_digest}", "generated_receipt_digest_changed={before_digest != after_digest}"])
+
+export PackageIndexAcceptanceGeneratedObservationV1, package_index_acceptance_generated_v1
+export package_index_generated_inventory_v1, package_index_generated_declaration_v1
+export package_index_generated_receipt_v1
