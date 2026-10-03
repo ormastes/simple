@@ -1,0 +1,45 @@
+#!/bin/sh
+# Supplemental diagnostics, not an aggregate-binary or release admission.
+# The caller verifies both original build receipts before and after this run.
+set -eu
+[ "$#" -eq 10 ] || exit 2
+source_root=$1 backend=$2 compiler=$3 compiler_sha=$4 runner=$5 subsystem=$6
+run_dir=$7 threads=$8 runtime_path=$9 runtime_identity=${10}
+case "$subsystem" in compiler|interpreter|loader) ;; *) exit 2 ;; esac
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+[ -d "$run_dir" ] && [ ! -L "$run_dir" ] || exit 2
+[ ! -e "$run_dir/results.tsv" ] || exit 2
+sh "$script_root/compiler-subsystem-test-inventory.shs" "$source_root" >"$run_dir/inventory.tsv" || exit 20
+printf 'path\tstatus\texit_code\tassertions_passed\tevidence\n' >"$run_dir/results.tsv"
+printf '%s\n' 'diagnostic_only=1' 'aggregate_binary=UNVERIFIED' \
+  'binary_owned_listing=UNVERIFIED' >"$run_dir/limitations.txt"
+result=0
+count=0
+tab=$(printf '\t')
+while IFS="$tab" read -r owner level path source_sha; do
+  [ "$owner" = "$subsystem" ] || continue
+  count=$((count + 1))
+  file_dir="$run_dir/file-$count"
+  mkdir "$file_dir" || exit 2
+  status=0
+  sh "$script_root/run-native-aot-suite.shs" "$source_root" "$backend" \
+    "$compiler" "$compiler_sha" "$runner" "$path" "$file_dir" "$threads" \
+    "$runtime_path" "$runtime_identity" >"$file_dir/wrapper.log" 2>&1 || status=$?
+  assertions=UNKNOWN
+  evidence=-
+  outcome=FAILED
+  if [ "$status" -eq 0 ] && [ -f "$file_dir/evidence.tsv" ] && [ ! -L "$file_dir/evidence.tsv" ]; then
+    assertions=$(sed -n 's/^assertions_passed=//p' "$file_dir/evidence.tsv")
+    case "$assertions" in ''|*[!0-9]*|0) status=1 ;; *) outcome=PASSED; evidence="$file_dir/evidence.tsv" ;; esac
+  else
+    [ "$status" -ne 0 ] || status=1
+  fi
+  [ "$status" -eq 0 ] || result=1
+  printf '%s\t%s\t%s\t%s\t%s\n' "$path" "$outcome" "$status" "$assertions" "$evidence" >>"$run_dir/results.tsv"
+done <"$run_dir/inventory.tsv"
+[ "$count" -gt 0 ] || exit 20
+# Discovery is a source-file inventory, never an executed/binary case count.
+printf 'discovered_files=%s\n' "$count" >>"$run_dir/limitations.txt"
+sh "$script_root/compiler-subsystem-test-inventory.shs" "$source_root" >"$run_dir/inventory.after.tsv" || exit 1
+cmp -s "$run_dir/inventory.tsv" "$run_dir/inventory.after.tsv" || exit 1
+exit "$result"
