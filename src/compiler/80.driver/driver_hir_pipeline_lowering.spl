@@ -378,6 +378,10 @@ impl CompilerDriver:
         val parser_generation = parser_initialization_generation_v1()
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
+        # Reset module-local scratch inside the scope that owns this source's
+        # parser and HIR work. Retained HIR, diagnostics, symbol containers
+        # and phase-wide memos are promoted before that scope ends below.
+        lowering.begin_module(source.path)
         val reverse_token = reverse_reference_module_begin_v1()
         if reverse_token < 0:
             val _ended = driver_end_transient_parse_scope()
@@ -621,7 +625,6 @@ impl CompilerDriver:
                 hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return false
-            lowering.begin_module(source.path)
             log_phase("phase3:hir:file:start {source.path} module={source.module_name}")
             # In-flight receipt, same reasoning as the parse loop: HIR lowering
             # is the phase that actually breaks (stack-exhaustion SIGSEGV,
@@ -633,6 +636,9 @@ impl CompilerDriver:
             var hir_module: HirModule = nil
             var hir_cache_stored: bool = hir_stream_cached != nil
             if hir_stream_cached != nil:
+                # A cached HIR root is already persistent; preserve the reset
+                # without opening an otherwise unused parse scope.
+                lowering.begin_module(source.path)
                 hir_module = hir_stream_cached.unwrap()
                 val hir_registry_name = if is_requested_bootstrap_entry:
                     hir_module_logical_name_from_path(source.path)
