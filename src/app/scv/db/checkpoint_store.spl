@@ -108,7 +108,14 @@ fn _checkpoint_pending(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckp
     val micros = time_sample_unix_micros_or_failure()
     if micros < 0: return Err("SCVDB_COMMAND_CLOCK")
     for item in queue.items:
+        # Queue v2 paged candidates pin their complete immutable page closure.
+        # Both journal alternatives remain in flight until actual local index
+        # observation; checkpoint installation cannot discard/reclassify them.
         if ["prepared", "awaiting-index"].contains(item.phase): return Err("SCVDB_CHECKPOINT_SETTLEMENT_IN_FLIGHT")
+        if item.paged_journal != nil:
+            match checkpoint.storage:
+                Paged(_): ()
+                _: return Err("SCVDB_CHECKPOINT_STORAGE_MIGRATION_REQUIRED")
         val patch = item.patch
         var missing = false
         var waiting = false
