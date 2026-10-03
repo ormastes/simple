@@ -220,7 +220,10 @@ my @backend_identity_lines = split /\n/, regular_bytes($backend_identity_path), 
 my %backend_identity = build_fields(join("\n", @backend_identity_lines));
 keys(%backend_identity) == 2 &&
   $backend_identity{backend} && $backend_identity{backend} eq $arg{backend} &&
-  defined($backend_identity{provider}) &&
+  $backend_identity{provider} && $backend_identity{provider} =~ /\A[0-9a-f]{64}\z/ &&
+  $build{provider_kind} && $build{provider_kind} eq 'builtin' &&
+  $build{provider_receipt_hash} &&
+    $build{provider_receipt_hash} eq $backend_identity{provider} &&
   $build{actual_backend} eq $backend_identity{backend}
   or die "effective backend differs from compiler identity\n";
 $generated_manifest =~ m{\A\Q$binary_dir\E/} &&
@@ -465,6 +468,7 @@ for my $task (@tasks) {
       $flag{'--cache-dir'} && $flag{'--cache-dir'} eq "$binary_dir/cache-$task" &&
       scalar(grep { $_ eq '--entry-closure' } @argv) == 1 &&
       scalar(grep { $_ eq "--backend=$arg{backend}" } @argv) == 1 &&
+      !(grep { $_ eq '--backend-plugin' || /^--backend-plugin=/ } @argv) &&
       ($source{'src/compiler'} // 0) == 1 && ($source{'src/lib'} // 0) == 1 &&
       ($source{'src/app'} // 0) == 1 && ($source{'src/plugins'} // 0) == 1 &&
       ($source{'src/compositions'} // 0) == 1
@@ -480,17 +484,9 @@ for my $task (@tasks) {
     defined($watch{exit_status}) && $watch{exit_status} eq '0'
     or die "$task watchdog did not enforce legal cap\n";
 }
-if (defined($build{provider_path}) && $build{provider_path} ne 'none') {
-  $build{provider_path} =~ m{\A/} && $build{provider_sha256} &&
-    sha_file($build{provider_path}) eq $build{provider_sha256} &&
-    $backend_identity{provider} eq $build{provider_sha256}
-    or die "loaded provider differs\n";
-} else {
-  $build{provider_path} && $build{provider_path} eq 'none' &&
-    $build{provider_sha256} && $build{provider_sha256} eq 'none' &&
-    $backend_identity{provider} eq ''
-    or die "static backend provider fields differ\n";
-}
+$build{provider_path} && $build{provider_path} eq 'none' &&
+  $build{provider_sha256} && $build{provider_sha256} eq 'none'
+  or die "builtin backend provider path differs\n";
 exit 0 if $arg{phase} eq 'build';
 for my $kind ($arg{phase} eq 'complete' ? qw(enumeration execution) : ('enumeration')) {
   my %watch = build_fields(regular_bytes($arg{"${kind}_watchdog"}));
