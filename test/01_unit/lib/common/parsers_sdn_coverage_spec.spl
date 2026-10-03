@@ -779,6 +779,73 @@ describe "SDN Parser":
                 case Err(e):
                     expect("parse failed").to_equal("should not fail")
 
+    context "churn-regression (perf-fix equivalence)":
+        """_sdn_split_lines and _sdn_unescape were rewritten from per-character
+        text concatenation (O(n^2) per line / per escaped string) to slicing
+        and parts.join. These cases pin the BYTE-IDENTICAL parse results of
+        the old paths on non-trivial inputs."""
+
+        it "parses a long single-line value byte-identically (slice-based line split)":
+            # @req REQ-LIB-PARSERS-COV-001
+            # @capture(statistics): recorded outcome of "parses a long single-line value byte-identically (slice-based line split)"
+            step("Exercise: parses a long single-line value byte-identically (slice-based line split)")
+            var parts: [text] = []
+            var i = 0
+            while i < 5000:
+                parts.push("ab")
+                i = i + 1
+            val long_val = parts.join("")
+            val src = "payload: " + long_val
+            match parse(src):
+                case Ok(SdnValue.Dict(d)):
+                    match d["payload"]:
+                        case SdnValue.String(s):
+                            expect(s).to_equal(long_val)
+                            expect(s.len()).to_equal(10000)
+                        case _:
+                            expect("payload variant").to_equal("SdnValue.String")
+                case _:
+                    expect("parse result").to_equal("Ok(Dict)")
+
+        it "parses escaped quoted strings byte-identically (parts-join unescape)":
+            # @req REQ-LIB-PARSERS-COV-001
+            # @capture(statistics): recorded outcome of "parses escaped quoted strings byte-identically (parts-join unescape)"
+            step("Exercise: parses escaped quoted strings byte-identically (parts-join unescape)")
+            # SDN source: note: "a\nb\t\\c\"d\q"  (literal backslash sequences;
+            # \q is an unknown escape and must be preserved verbatim as "\q").
+            val src = "note: \"a\\nb\\t\\\\c\\\"d\\q\""
+            match parse(src):
+                case Ok(SdnValue.Dict(d)):
+                    match d["note"]:
+                        case SdnValue.String(s):
+                            expect(s).to_equal("a\nb\t\\c\"d\\q")
+                        case _:
+                            expect("note variant").to_equal("SdnValue.String")
+                case _:
+                    expect("parse result").to_equal("Ok(Dict)")
+
+        it "splits many mixed lines identically (slice-based line split)":
+            # @req REQ-LIB-PARSERS-COV-001
+            # @capture(statistics): recorded outcome of "splits many mixed lines identically (slice-based line split)"
+            step("Exercise: splits many mixed lines identically (slice-based line split)")
+            var src_parts: [text] = []
+            var j = 0
+            while j < 200:
+                src_parts.push("k" + j.to_text() + ": v" + j.to_text())
+                j = j + 1
+            val src = src_parts.join("\n")
+            match parse(src):
+                case Ok(SdnValue.Dict(d)):
+                    # Dict.len() lies under native codegen — count keys.
+                    expect(d.keys().len()).to_equal(200)
+                    match d["k199"]:
+                        case SdnValue.String(s):
+                            expect(s).to_equal("v199")
+                        case _:
+                            expect("k199 variant").to_equal("SdnValue.String")
+                case _:
+                    expect("parse result").to_equal("Ok(Dict)")
+
 
 # ============================================================================
 # SDN Error
