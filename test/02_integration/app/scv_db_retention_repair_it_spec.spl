@@ -1,0 +1,148 @@
+# Test-first source for trusted repair; no admitted runtime RED/GREEN claim.
+use std.spec.*
+use app.io.mod.{file_write, file_write_bytes, file_delete, file_is_regular_no_follow}
+use app.io.retained_file_ops.{retained_file_open, retained_file_close}
+use app.scv.db.retention_store.*
+use app.scv.db.retention_codec.*
+use app.scv.db.local_store.{db_store_read, db_store_commit}
+use app.scv.db.evidence_store.{db_evidence_store_get}
+use std.scv.db_retention.{DbEvidencePin}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release, scv_sj_lease_is_held}
+use test.fixtures.scv.db_observation_fixture.{check_item2_observation_cleanup}
+use test.fixtures.scv.db_retention_repair_fixture.*
+
+fn check_item2_repair_preserved(fixture: Item2RetentionRepairFixture, retained: DbStoredRetention):
+    val context = fixture.observation
+    expect(db_retention_open(context.source).unwrap()).to_equal(retained)
+    expect(db_evidence_store_get(context.source, context.sources.evidence_parent, fixture.old_digest, 0u64, db_retention_store_quota()).unwrap().digest).to_equal(fixture.old_digest)
+    val parent = db_evidence_store_get(context.source, context.sources.evidence_parent, context.available_digest, fixture.day, db_retention_store_quota()).unwrap()
+    expect(parent.digest).to_equal(context.available_digest)
+    expect(parent.dependencies).to_equal([context.absent_digest])
+
+describe "Trusted same-catalog reproduction retention repair":
+    it "requires both actual restored bytes and trusted catalog registration before clearing protection":
+        val fixture = setup_item2_retention_repair()
+        val context = fixture.observation
+        val semantic = db_store_read(context.source)
+        expect(db_retention_repair_reproduction(context.source, context.sources.evidence_parent, fixture.retained.head, fixture.day).unwrap_err()).to_equal("SCVDB_PIN_CLOSURE_MISSING")
+        check_item2_repair_preserved(fixture, fixture.retained)
+        val unregistered = setup_item2_repair_restore(fixture, false)
+        expect(db_evidence_store_get(context.source, context.sources.evidence_parent, context.absent_digest, fixture.day, db_retention_store_quota()).unwrap().content).to_equal([9u8,9u8])
+        expect(db_retention_repair_reproduction(context.source, context.sources.evidence_parent, unregistered.head, fixture.day).unwrap_err()).to_equal("SCVDB_PIN_CLOSURE_MISSING")
+        check_item2_repair_preserved(fixture, unregistered)
+        val registered = setup_item2_repair_restore(fixture)
+        expect(file_delete(context.sources.evidence_parent + "/scv-evidence-v1/" + context.absent_digest + ".scve")).to_be(true)
+        expect(db_retention_repair_reproduction(context.source, context.sources.evidence_parent, registered.head, fixture.day).unwrap_err()).to_equal("SCVDB_PIN_CLOSURE_MISSING")
+        check_item2_repair_preserved(fixture, registered)
+        expect(db_store_read(context.source)).to_equal(semantic)
+        check_item2_observation_cleanup(context)
+
+    it "clears only incomplete markers and resumes an unrelated prepared deletion while preserving pinned closure":
+        val fixture = setup_item2_retention_repair()
+        val context = fixture.observation
+        val semantic = db_store_read(context.source)
+        val registered = setup_item2_repair_restore(fixture)
+        var ordinary: [DbEvidencePin] = []
+        for pin in registered.catalog.pins:
+            if pin.reason != "reproduction_incomplete": ordinary.push(pin)
+        expect(ordinary.contains(fixture.unrelated_pin)).to_be(true)
+        val repaired = db_retention_repair_reproduction(context.source, context.sources.evidence_parent, registered.head, fixture.day).unwrap()
+        expect(repaired.closure_status).to_equal("complete_closure_verified")
+        expect(repaired.retained.catalog.entries).to_equal(registered.catalog.entries)
+        expect(repaired.retained.catalog.rollups).to_equal(registered.catalog.rollups)
+        expect(repaired.retained.catalog.pins).to_equal(ordinary)
+        expect(db_retention_open(context.source).unwrap()).to_equal(repaired.retained)
+        val resumed = db_retention_resume(context.source, context.sources.evidence_parent, repaired.retained.head, fixture.day).unwrap()
+        var deleted = false
+        for entry in resumed.catalog.entries:
+            if entry.digest == fixture.old_digest: deleted = entry.state == "deleted"
+        expect(deleted).to_be(true)
+        expect(file_is_regular_no_follow(context.sources.evidence_parent + "/scv-evidence-v1/" + fixture.old_digest + ".scve")).to_be(false)
+        for digest in [context.available_digest, context.absent_digest, fixture.unrelated_pin.root]:
+            expect(db_evidence_store_get(context.source, context.sources.evidence_parent, digest, fixture.day, db_retention_store_quota()).unwrap().digest).to_equal(digest)
+        expect(resumed.catalog.pins).to_equal(ordinary)
+        expect(db_store_read(context.source)).to_equal(semantic)
+        check_item2_observation_cleanup(context)
+
+    it "rejects a cataloged encrypted child without removing any marker or prepared bytes":
+        val fixture = setup_item2_retention_repair("restricted")
+        val context = fixture.observation
+        val registered = db_retention_register(context.source, context.sources.evidence_parent, fixture.retained.head, context.absent_digest, fixture.day, "restricted").unwrap()
+        expect(db_retention_repair_reproduction(context.source, context.sources.evidence_parent, registered.head, fixture.day).unwrap_err()).to_equal("SCVDB_PIN_CLOSURE_UNVERIFIED")
+        check_item2_repair_preserved(fixture, registered)
+        expect(db_evidence_store_get(context.source, context.sources.evidence_parent, context.absent_digest, fixture.day, db_retention_store_quota()).unwrap().content[0:5]).to_equal([83u8,67u8,82u8,69u8,1u8])
+        check_item2_observation_cleanup(context)
+
+    it "refuses corrupt or oversized restored child files and preserves exact failure-state catalog":
+        for oversized in [false, true]:
+            val fixture = setup_item2_retention_repair()
+            val context = fixture.observation
+            val registered = setup_item2_repair_restore(fixture)
+            val path = context.sources.evidence_parent + "/scv-evidence-v1/" + context.absent_digest + ".scve"
+            if oversized: expect(file_write_bytes(path, [0u8;8409089])).to_be(true)
+            else: expect(file_write(path, "corrupt")).to_be(true)
+            val result = db_retention_repair_reproduction(context.source, context.sources.evidence_parent, registered.head, fixture.day)
+            if oversized: expect(result.is_err()).to_be(true)
+            else: expect(result.unwrap_err()).to_equal("SCVDB_EVIDENCE_FORMAT")
+            check_item2_repair_preserved(fixture, registered)
+            val actual = retained_file_open(path, 8409089u64).unwrap()
+            expect(actual.size).to_equal(if oversized: 8409089u64 else: 7u64)
+            expect(retained_file_close(actual)).to_be(true)
+            check_item2_observation_cleanup(context)
+
+    it "refuses stale HEAD and an external-store scope mismatch without mutation":
+        val fixture = setup_item2_retention_repair()
+        val context = fixture.observation
+        val registered = setup_item2_repair_restore(fixture)
+        expect(db_retention_repair_reproduction(context.source, context.sources.evidence_parent, fixture.retained.head, fixture.day).unwrap_err()).to_equal("SCVDB_STORE_HEAD_ADVANCED")
+        expect(db_retention_repair_reproduction(context.source, context.source, registered.head, fixture.day).unwrap_err()).to_equal("SCVDB_STORE_SCOPE")
+        check_item2_repair_preserved(fixture, registered)
+        check_item2_observation_cleanup(context)
+
+    it "does not repair while another actual SJ holder owns the root":
+        val fixture = setup_item2_retention_repair()
+        val context = fixture.observation
+        val registered = setup_item2_repair_restore(fixture)
+        val holder = "retention-repair-spec-owner"
+        expect(scv_sj_lease_acquire(context.source, holder).starts_with("ok:")).to_be(true)
+        val attempted = db_retention_repair_reproduction(context.source, context.sources.evidence_parent, registered.head, fixture.day)
+        expect(scv_sj_lease_release(context.source, holder).starts_with("ok:")).to_be(true)
+        expect(attempted.unwrap_err()).to_equal("SCVDB_STORE_BUSY")
+        expect(scv_sj_lease_is_held(context.source)).to_be(false)
+        check_item2_repair_preserved(fixture, registered)
+        check_item2_observation_cleanup(context)
+
+    it "refuses an actually persisted orphan marker instead of inventing its missing ordinary pin":
+        val fixture = setup_item2_retention_repair()
+        val context = fixture.observation
+        var malformed = fixture.retained.catalog
+        var pins: [DbEvidencePin] = []
+        for pin in malformed.pins:
+            if pin.reason != "reproduction": pins.push(pin)
+        malformed.pins = pins
+        # Deliberately malformed trusted-store fixture: preserve codec validity
+        # while violating the marker/ordinary-pin relationship. Not a producer.
+        val wire = db_retention_catalog_encode(malformed).unwrap()
+        val saved = db_store_commit(context.source, fixture.retained.head, sha256_text(wire), wire, "retention")
+        expect(saved.code).to_equal("ok")
+        val captured = db_retention_open(context.source).unwrap()
+        expect(db_retention_repair_reproduction(context.source, context.sources.evidence_parent, captured.head, fixture.day).unwrap_err()).to_equal("SCVDB_PIN_REPAIR_REQUIRED")
+        check_item2_repair_preserved(fixture, captured)
+        check_item2_observation_cleanup(context)
+
+    it "reopens durable repair and reports a no-op without inventing a fresh closure proof":
+        val fixture = setup_item2_retention_repair()
+        val context = fixture.observation
+        val registered = setup_item2_repair_restore(fixture)
+        db_retention_repair_reproduction(context.source, context.sources.evidence_parent, registered.head, fixture.day).unwrap()
+        # Reopen actual persisted state; no in-process repair receipt is reused.
+        val reopened = db_retention_open(context.source).unwrap()
+        expect(file_delete(context.sources.evidence_parent + "/scv-evidence-v1/" + context.absent_digest + ".scve")).to_be(true)
+        val replay = db_retention_repair_reproduction(context.source, context.sources.evidence_parent, reopened.head, fixture.day).unwrap()
+        expect(replay.closure_status).to_equal("no_incomplete_markers")
+        expect(replay.retained).to_equal(reopened)
+        expect(db_retention_open(context.source).unwrap()).to_equal(reopened)
+        expect(db_retention_resume(context.source, context.sources.evidence_parent, reopened.head, fixture.day).is_err()).to_be(true)
+        check_item2_repair_preserved(fixture, reopened)
+        check_item2_observation_cleanup(context)

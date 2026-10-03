@@ -1,0 +1,55 @@
+# Real prepared deletion and independently admitted incomplete reproduction.
+use std.spec.{expect}
+use app.scv.db.observation_owner.{db_observation_apply_reference, db_observation_now}
+use app.scv.db.observation_content.{db_observation_limits}
+use app.scv.db.retention_store.*
+use app.scv.db.retention_codec.*
+use app.scv.db.evidence_store.*
+use std.scv.db_retention.{DbEvidenceNode, DbEvidencePin, db_evidence_digest}
+use test.fixtures.scv.db_observation_fixture.*
+
+struct Item2RetentionRepairFixture:
+    observation: Item2ObservationFixture
+    day: u64
+    old_digest: text
+    unrelated_pin: DbEvidencePin
+    retained: DbStoredRetention
+
+fn setup_item2_repair_node(fixture: Item2ObservationFixture, content: [u8], day: u64) -> text:
+    val digest = db_evidence_digest(content, []).unwrap()
+    db_evidence_store_put(fixture.source, fixture.sources.evidence_parent, DbEvidenceNode(digest: digest, content: content, availability: "available", created_day: day, dependencies: []), db_retention_store_quota()).unwrap()
+    digest
+
+fn setup_item2_retention_repair(declared: text = "missing") -> Item2RetentionRepairFixture:
+    val fixture = setup_item2_observation_fixture(false, declared, true)
+    val day = db_observation_now().unwrap() / 86400u64
+    val old = setup_item2_repair_node(fixture, db_retention_observation_encode("eligible-before-repair", 0u64, "repair-fixture", "PASS", 5u64, [1u8]).unwrap(), 0u64)
+    var retained = db_retention_register(fixture.source, fixture.sources.evidence_parent, "", old, 0u64, "internal").unwrap()
+    val ordinary = setup_item2_repair_node(fixture, [3u8,4u8], day)
+    retained = db_retention_register(fixture.source, fixture.sources.evidence_parent, retained.head, ordinary, day, "internal").unwrap()
+    val pin = DbEvidencePin(root: ordinary, reason: "release", expires_day: 0u64)
+    retained = db_retention_set_pins(fixture.source, fixture.sources.evidence_parent, retained.head, [pin], day).unwrap()
+    retained = db_retention_prepare(fixture.source, fixture.sources.evidence_parent, retained.head, day, 0u64, "repair-fixture").unwrap()
+    var pending = false
+    for entry in retained.catalog.entries:
+        if entry.digest == old: pending = entry.state == "delete_pending"
+    expect(pending).to_be(true)
+    val admitted = db_observation_apply_reference(fixture.source, "", fixture.patch, fixture.policy.config, fixture.sources, db_observation_limits()).unwrap()
+    expect(admitted.code).to_equal("ok")
+    retained = db_retention_open(fixture.source).unwrap()
+    var guarded = false
+    for retained_pin in retained.catalog.pins:
+        if retained_pin.reason == "reproduction_incomplete": guarded = true
+    expect(guarded).to_be(true)
+    expect(retained.catalog.pins.contains(pin)).to_be(true)
+    Item2RetentionRepairFixture(observation: fixture, day: day, old_digest: old, unrelated_pin: pin, retained: retained)
+
+fn setup_item2_repair_restore(fixture: Item2RetentionRepairFixture, register: bool = true) -> DbStoredRetention:
+    val context = fixture.observation
+    val digest = setup_item2_repair_node(context, [9u8,9u8], fixture.day)
+    expect(digest).to_equal(context.absent_digest)
+    val before = db_retention_open(context.source).unwrap()
+    if not register: return before
+    db_retention_register(context.source, context.sources.evidence_parent, before.head, digest, fixture.day, "internal").unwrap()
+
+export Item2RetentionRepairFixture, setup_item2_repair_node, setup_item2_retention_repair, setup_item2_repair_restore
