@@ -38,6 +38,7 @@ use compiler.driver.native_relocatable_link.{native_relocatable_link_plan,
 use compiler.driver.driver_log_helpers.{log_phase, log_error}
 use compiler.driver.native_aot_artifacts.{
     native_aot_object_path_v1, native_aot_finish_diagnostics_v1}
+use compiler.driver.driver_collection_native_receipt.{collection_native_bind_capsule_v1, collection_native_publish_v1}
 use compiler.backend.backend_plugin.session_authority_v2.{BackendSessionOwnedLeaseV2, BackendSessionAuthorityErrorV2}
 use compiler.driver.driver_backend_plugin_selection.{
     driver_aot_uses_versioned_backend, driver_aot_backend_plugin_request_v1,
@@ -1492,9 +1493,15 @@ fn driver_native_launch_metadata_trailer(ctx: CompileContext) -> [u8]:
     out = out.concat(driver_native_launch_trailer_magic())
     out
 
-fn driver_native_success_with_launch_metadata(ctx: CompileContext, output: text) -> CompileResult:
+fn driver_native_success_with_launch_metadata(ctx: CompileContext, output: text,
+    collection_bindings: [text] = [], collection_objects: [text] = []) -> CompileResult:
     # Native launch metadata is optional. Keep native-build self-hostable even
     # when the byte-range file API is unavailable in the pure Simple runtime.
+    if ctx.options.collection_memory_budget_bytes >= 0:
+        val request = ctx.config["collection-native-request-identity"] ?? ""
+        val verdict = collection_native_publish_v1(output, request, collection_bindings, collection_objects)
+        if verdict != "":
+            return CompileResult.CodegenError("native collection receipt publication failed: {verdict}")
     CompileResult.Success(output)
 
 # ============================================================================
@@ -1898,6 +1905,8 @@ impl CompilerDriver:
 
         # Compile all modules and collect object files
         var object_files: [text] = []
+        var collection_bindings: [text] = []
+        val collection_receipt_requested = ctx.options.collection_memory_budget_bytes >= 0
 
         # Lane non-vacuity receipt (driver_pass_receipt.spl). These are counts
         # of work this function already does; `SIMPLE_LANE_RECEIPT=off` skips
@@ -1919,6 +1928,8 @@ impl CompilerDriver:
         var native_group: NativeGroupManifestV1? = nil
         var group_name_by_source: {text: text} = {}
         if native_group_request_path_v1() != "":
+            if collection_receipt_requested:
+                return CompileResult.CodegenError("artifact-bound collection receipts are not yet supported for grouped native publication")
             val admitted_group = match native_group_request_v1():
                 case Ok(value): value
                 case Err(reason):
@@ -2076,6 +2087,7 @@ impl CompilerDriver:
                     # candidate to the CURRENT MIR/storage capsule receipt.
                     var capsule_matches = false
                     var cached_capsule_identity = ""
+                    var cached_collection_binding = ""
                     if all_in_scope and scoped_outputs.len() == 1 and outputs_exist:
                         val cached_capsules = ctx.freeze_native_module_capsules_v1(
                             [name], object_base, backend_name, native_target,
@@ -2087,6 +2099,10 @@ impl CompilerDriver:
                                 and driver_native_capsule_result_valid_v1(cached_capsule)
                             if capsule_matches:
                                 cached_capsule_identity = cached_capsule.capsule_identity
+                                if collection_receipt_requested:
+                                    cached_collection_binding = match collection_native_bind_capsule_v1(cached_capsule):
+                                        case Ok(value): value
+                                        case Err(reason): return CompileResult.CodegenError("native collection cache binding failed: {reason}")
                     if capsule_matches:
                         val handoff_reason = driver_cold_hir_record_verified_object_v1(
                             ctx, name, scoped_outputs[0], cached_capsule_identity)
@@ -2101,6 +2117,8 @@ impl CompilerDriver:
                             BuildUnitOutcome.ok(module_unit_id, name, 0, 0))
                         for obj in scoped_outputs:
                             object_files = object_files.push(obj)
+                        if collection_receipt_requested:
+                            collection_bindings = collection_bindings.push(cached_collection_binding)
                         if native_group.? and scoped_outputs.len() == 1:
                             group_object_paths[name] = scoped_outputs[0]
                         if low_memory:
@@ -2375,6 +2393,11 @@ impl CompilerDriver:
                         return CompileResult.CodegenError(handoff_reason)
                     reconstructed_outputs = reconstructed_outputs.push(obj_path)
                     object_files = object_files.push(obj_path)
+                    if collection_receipt_requested:
+                        val binding = match collection_native_bind_capsule_v1(capsule):
+                            case Ok(value): value
+                            case Err(reason): return CompileResult.CodegenError("native collection object binding failed: {reason}")
+                        collection_bindings = collection_bindings.push(binding)
                     if native_group.?: group_object_paths[name] = obj_path
                     if ctx.demand_scc_publication != nil:
                         var publication = ctx.demand_scc_publication!
@@ -2675,7 +2698,7 @@ impl CompilerDriver:
                 if result.exit_code != 0:
                     return CompileResult.CodegenError("emit-object relocatable link failed ({linker}): {result.stderr}{result.stdout}")
             driver_log_info(log, "Native object written to {output}")
-            return driver_native_success_with_launch_metadata(ctx, output)
+            return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files)
 
         if emit_archive_requested:
             val archiver = find_archive_portable()
@@ -2698,7 +2721,7 @@ impl CompilerDriver:
             if code != 0:
                 return CompileResult.CodegenError("emit-archive failed: {stderr}")
             driver_log_info(log, "Native archive written to {output}")
-            return driver_native_success_with_launch_metadata(ctx, output)
+            return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files)
 
         if emit_shared_requested:
             var shared_config = NativeLinkConfig.default()
@@ -2707,7 +2730,7 @@ impl CompilerDriver:
             match link_to_shared(object_files, output, shared_config):
                 case Ok(_):
                     driver_log_info(log, "Native shared library written to {output}")
-                    return driver_native_success_with_launch_metadata(ctx, output)
+                    return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files)
                 case Err(e):
                     return CompileResult.CodegenError("shared-library link failed: {e}")
 
@@ -2743,7 +2766,7 @@ impl CompilerDriver:
                         object_files.len(), output, 6, 6, 0,
                         cache_hit_count, "succeeded")
                     driver_log_info(log, "Native executable written to {output} (backend: LLVM)")
-                    return driver_native_success_with_launch_metadata(ctx, output)
+                    return driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files)
                 case Err(e):
                     driver_native_link_failure_result(ctx, "LLVM native linking failed", e)
         else:
@@ -2770,7 +2793,7 @@ impl CompilerDriver:
                         object_files.len(), output, 6, 6, 0,
                         cache_hit_count, "succeeded")
                     driver_log_info(log, "Native executable written to {output} (backend: {effective_backend})")
-                    driver_native_success_with_launch_metadata(ctx, output)
+                    driver_native_success_with_launch_metadata(ctx, output, collection_bindings, object_files)
                 case Err(e):
                     driver_native_link_failure_result(ctx, "Hosted native linking failed", e)
 

@@ -14,6 +14,7 @@ use compiler.driver.driver_pipeline.*
 use compiler.driver.driver_pipeline_lowering.*
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 use compiler.driver.driver_aot_pipeline.*
+use compiler.driver.driver_collection_native_receipt.{collection_native_clear_v1, collection_native_validate_v1, collection_native_copy_v1}
 use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
 use compiler.driver.driver_log_helpers.{
     log_debug,
@@ -152,7 +153,16 @@ impl CompilerDriver:
         if not reverse_reference_owner_begin_v1():
             return CompileResult.RuntimeError(
                 "reverse-reference owner already active in this process")
+        var requested_mode = self.ctx.options.mode.to_text()
+        if self.ctx.options.cli_mode_text != "":
+            requested_mode = self.ctx.options.cli_mode_text
         val result = self.compile_with_reverse_reference_owner_v1()
+        if requested_mode == "aot" and not result.is_success():
+            val output = self.ctx.options.output_file ?? driver_noop_default_output_v1(self.ctx.options.input_files)
+            val cleared = collection_native_clear_v1(output)
+            if cleared != "":
+                reverse_reference_owner_end_v1()
+                return CompileResult.CodegenError("native compilation failed and collection receipt cleanup failed: {cleared}")
         reverse_reference_owner_end_v1()
         result
 
@@ -184,12 +194,17 @@ impl CompilerDriver:
         # The request hashes compiler and environment authority. Check,
         # interpret, JIT, and other non-native modes never consume it.
         var native_noop_request = NativeNoopRequestV1("", "", "")
-        if native_noop_eligible:
+        val collection_receipt_requested = compile_mode_text == "aot" and self.ctx.options.collection_memory_budget_bytes >= 0
+        if native_noop_eligible or collection_receipt_requested:
             native_noop_request = driver_native_noop_request_v1(self.ctx)
+        if collection_receipt_requested:
+            self.ctx.config["collection-native-request-identity"] = native_noop_request.identity
         compiler_work_counters_reset_v1()
         if native_noop_eligible:
             val admission = native_noop_admit_v1(native_noop_request)
-            if native_noop_admission_hit_v1(admission):
+            val collection_admitted = not collection_receipt_requested or
+                collection_native_validate_v1(native_noop_request_output_v1(native_noop_request), native_noop_request.identity) == ""
+            if native_noop_admission_hit_v1(admission) and collection_admitted:
                 val work = compiler_work_counters_snapshot_v1()
                 if not compiler_work_counters_zero_v1(work):
                     return CompileResult.RuntimeError(
@@ -200,9 +215,25 @@ impl CompilerDriver:
                         not file_copy(native_noop_request_output_v1(native_noop_request), delivery_output):
                     return CompileResult.RuntimeError(
                         "native no-op admission could not stage the admitted output")
+                if collection_receipt_requested:
+                    val copied = collection_native_copy_v1(native_noop_request_output_v1(native_noop_request), delivery_output, native_noop_request.identity)
+                    if copied != "":
+                        return CompileResult.CodegenError("native collection receipt delivery failed: {copied}")
+                else:
+                    val cleared = collection_native_clear_v1(delivery_output)
+                    if cleared != "":
+                        return CompileResult.CodegenError("native collection receipt cleanup failed: {cleared}")
                 print "[MBH-NFR-002] admission=hit generation={native_noop_admission_generation_v1(admission)} inputs={native_noop_admission_input_count_v1(admission)} {compiler_work_counters_receipt_v1(work)}"
                 return CompileResult.Success(delivery_output)
 
+        # Preserve admitted same-path no-op receipts. Once a full compile is
+        # necessary, remove the previous proof before any compilation work.
+        # The outer owner also clears it on early configuration failures.
+        if compile_mode_text == "aot":
+            val output = self.ctx.options.output_file ?? driver_noop_default_output_v1(self.ctx.options.input_files)
+            val cleared = collection_native_clear_v1(output)
+            if cleared != "":
+                return CompileResult.CodegenError("native collection receipt cleanup failed: {cleared}")
         log_phase("compile:start")
         log_build_progress("load_sources", "files", -1, -1,
             "starting", 0, 6, 0, 0, "running")
@@ -445,6 +476,10 @@ impl CompilerDriver:
                 if publication != "ok":
                     return CompileResult.CodegenError(
                         "native no-op receipt publication failed: {publication}")
+                if collection_receipt_requested:
+                    val copied = collection_native_copy_v1(built_output, native_noop_request_output_v1(native_noop_request), native_noop_request.identity)
+                    if copied != "":
+                        return CompileResult.CodegenError("native collection receipt cache publication failed: {copied}")
             return aot_result
         if compile_mode_text == "smf_exec":
             log_debug("smf_exec mode")
