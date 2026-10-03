@@ -1,6 +1,6 @@
 # Pinned package archive admission and atomic SCC publication.
 
-use compiler.driver.cache.cas_store.{cas_blob_path, cas_get, cas_put}
+use compiler.driver.cache.cas_store.{cas_blob_path, cas_put}
 use compiler.driver.cache.cache_text_join.{cache_text_join_v1}
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use compiler.driver.cache.cas_batch_transaction.{
@@ -16,11 +16,15 @@ use compiler.driver.cache.package_archive_types.{
 use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.string_core.{text_validate_utf8}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io_runtime.{file_size}
 use compiler.hir.archive.interface_action_archive.{
     interface_action_archive_payloads_decode_v1
 }
 
 val PACKAGE_ARCHIVE_MANIFEST_V1: text = "simple-interface-action-archive-v1"
+val PACKAGE_ARCHIVE_MAX_BYTES_V1: i64 = 1073741824
+val PACKAGE_ARCHIVE_RECEIPT_MAX_BYTES_V1: i64 = 4 * 1024 * 1024
 
 struct PackageArchiveAuthorityV1:
     producer_digest: text
@@ -98,6 +102,32 @@ fn package_archive_digest_valid_v1(value: text) -> bool:
 fn package_archive_token_valid_v1(value: text) -> bool:
     value != "" and not value.contains("\n") and not value.contains("\r") and
         not value.contains(":") and not value.contains("|")
+
+# Both receipt and payload reads use this budgeted no-follow CAS boundary.
+# A size preflight bounds allocation only, never admission: the no-follow reader
+# checks the opened handle again and refuses growth beyond that exact budget.
+# SHA verification happens before callers decode or admit any returned bytes.
+fn package_archive_read_verified_v1(
+    root: text, digest: text, max_bytes: i64
+) -> Result<text, text>:
+    if root == "" or not package_archive_digest_valid_v1(digest) or
+            max_bytes <= 0 or max_bytes > PACKAGE_ARCHIVE_MAX_BYTES_V1:
+        return Err("archive-read-authority-invalid")
+    val path = cas_blob_path(root, digest)
+    val extent = file_size(path)
+    if extent <= 0 or extent > max_bytes:
+        return Err("archive-object-extent-invalid")
+    # The current facade allocates its requested bound. Pass the observed file
+    # extent rather than allocating the full 1 GiB policy cap for small hits.
+    val read = file_read_regular_no_follow_bounded(path, extent)
+    if read.is_err():
+        return Err("archive-object-unavailable")
+    val content = read.unwrap()
+    if content.len() != extent:
+        return Err("archive-object-oversized")
+    if sha256_text(content) != digest:
+        return Err("archive-object-digest-mismatch")
+    Ok(content)
 
 fn package_archive_sorted_dependencies_v1(values: [text]) -> [text]?:
     val sorted = canonical_identity_sort_texts(values)
@@ -309,8 +339,9 @@ fn package_archive_load_v1(
     val receipt_digest_value = receipt_digest.unwrap()
     if not package_archive_digest_valid_v1(receipt_digest_value):
         return PackageArchiveLoadV1(false, "archive-receipt-invalid", false, "", nil)
-    val receipt_content = cas_get(root, receipt_digest_value)
-    if receipt_content == nil:
+    val receipt_content = package_archive_read_verified_v1(
+        root, receipt_digest_value, PACKAGE_ARCHIVE_RECEIPT_MAX_BYTES_V1)
+    if receipt_content.is_err():
         return PackageArchiveLoadV1(
             false, "archive-receipt-missing", false, "", nil)
     val receipt_content_value = receipt_content.unwrap()
@@ -340,8 +371,9 @@ fn package_archive_load_v1(
     # Mapping/receipt admission is insufficient: the archive itself may have
     # disappeared or been corrupted after publication. CAS verifies its hash;
     # shared layout admission proves every member and manifest binding.
-    val archive = cas_get(root, receipt_value.archive_digest)
-    if archive == nil:
+    val archive = package_archive_read_verified_v1(
+        root, receipt_value.archive_digest, PACKAGE_ARCHIVE_MAX_BYTES_V1)
+    if archive.is_err():
         return PackageArchiveLoadV1(false, "archive-content-unavailable", false, "", nil)
     val payloads = package_archive_payloads_v1(archive.unwrap(), receipt_value)
     if payloads.is_err():
@@ -428,3 +460,4 @@ export package_archive_manifest_v1
 export package_archive_receipt_decode_v1
 export package_archive_load_v1, package_archive_publish_scc_v1
 export package_archive_payloads_v1
+export package_archive_read_verified_v1

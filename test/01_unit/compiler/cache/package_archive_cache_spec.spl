@@ -6,7 +6,8 @@ use compiler.driver.cache.cas_batch_transaction.{
 }
 use compiler.driver.cache.package_archive_cache.{
     PackageArchiveAuthorityV1, PackageArchivePublishInputV1, package_archive_load_v1,
-    package_archive_publish_scc_v1, package_archive_aggregate_entry_v1
+    package_archive_publish_scc_v1, package_archive_aggregate_entry_v1,
+    package_archive_read_verified_v1
 }
 use compiler.driver.cache.package_archive_types.{
     PackageActionKeyV1, PackageArchiveReceiptV1, PackageArchiveMemberReceiptV1,
@@ -64,6 +65,18 @@ fn archive_forge_receipt(root: text, original: PackageArchiveReceiptV1) -> bool:
     cas_batch_publish_v1(transaction).is_ok()
 
 describe "sealed clean-package archive cache":
+    it "enforces read budgets before decoding actual CAS files":
+        step("Read one stored object at and below its byte extent budget")
+        val root = archive_root("bounded")
+        val content = "bounded payload"
+        val digest = cas_put(root, content)
+        expect(package_archive_read_verified_v1(root, digest, content.len()).unwrap()).to_equal(content)
+        expect(package_archive_read_verified_v1(root, digest, content.len() - 1).is_err()).to_equal(true)
+        expect(package_archive_read_verified_v1(root, "../outside", 64).unwrap_err()).to_equal(
+            "archive-read-authority-invalid")
+        expect(package_archive_read_verified_v1(root, digest, 0).is_err()).to_equal(true)
+        dir_remove(root, true)
+
     it "admits exact archive bytes and member digests on repeated warm loads":
         step("Publish a real SCC archive and read the aggregated package twice")
         val root = archive_root("clean")

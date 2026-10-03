@@ -45,3 +45,18 @@ All executable tests remain UNEXECUTED without an admitted pure-Simple runner.
 Source/import/whitespace checks are not RED/GREEN or native qualification.
 Warm-hit hashing/decoding is necessary correctness work; production time/RSS
 measurement is still pending. No performance improvement is claimed.
+
+## Review repair: bound CAS admission before allocation
+
+Independent review found that generic `cas_get` read the whole file before the
+archive layout cap. Warm admission now uses `package_archive_read_verified_v1`:
+an extent preflight caps allocation and the regular/no-follow single-handle
+facade rechecks that exact bound, then local SHA verifies content before decode. Receipts use
+4 MiB and archives the existing 1 GiB cap. Corrupt files are refused without
+quarantine mutation. A small real CAS fixture proves exact-budget admission
+and below-extent refusal without allocating a huge test file. This correction
+is source-reviewed only, not executed runtime evidence.
+The runtime reader allocates the requested bound before opening, so passing the
+policy maximum directly would allocate 1 GiB for tiny warm hits. The owner
+passes only the observed extent; that preflight is not trusted admission and a
+growth race must fail the handle's bound check. No native runtime edit is needed.
