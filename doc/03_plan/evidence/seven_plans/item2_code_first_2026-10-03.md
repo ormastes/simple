@@ -295,3 +295,22 @@ Git-commit or environment/instruction capture. Full reproduction, Reference alia
 support, scalable retention, protected publication, migration and the selected
 Operating B targets remain open. No additional runner probe or bootstrap was
 performed in this continuation; no runtime/core/MCP/coverage/release PASS exists.
+
+### Authenticated rejection and historical compatibility source checkpoint
+
+Integrated evidence commit a978450911c and core commit 81584c59c18 after
+independent source review. Signed Reference checkpoint candidates first import
+into an empty receiver before populated receivers reject dropped source/test
+mappings without changing semantic or install-journal heads. Three legacy-v1
+scenarios derive accepted history through actual prior-contract authorization
+and the reducer, import its signed checkpoint, and distinguish accepted replay
+from fresh mapping refusal, current authorization and stale-HEAD rejection.
+This constructed historical fixture is not an old-binary execution receipt.
+
+REQ-019 failure now authenticates malformed bindings and invokes Reference and
+Paged owners for moving names, private paths and mutable jj IDs. Exact errors
+and unchanged semantic/retention stores are asserted. Inventory: 22 actual-owner
+sources, 131 explicit fail-fast contracts and three pure prerequisites. All
+runtime evidence remains UNEXECUTED. Paged legacy/drop cases, independent v1
+golden wire, full reproduction boundaries and all broader acceptance gates
+remain open. No PR or release qualification is claimed.

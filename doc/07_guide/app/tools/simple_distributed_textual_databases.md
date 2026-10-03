@@ -368,3 +368,8 @@ insufficient for claiming the adapter operational.
 
 These artifacts define the selected design and its planned evidence. They do
 not supersede implementation, verification, or release gates.
+
+Compatibility regression sources now cover Reference legacy replay and signed
+checkpoint mapping-drop rejection. The system rejection source covers both
+backends. These cases remain unexecuted; Paged legacy/drop coverage and an
+independent literal v1 golden vector remain pending.

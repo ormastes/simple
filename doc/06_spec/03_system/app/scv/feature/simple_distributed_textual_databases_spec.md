@@ -6,7 +6,7 @@
 
 REQ-013 different-field merge and undeclared list/set schema rejection now invoke actual signed local publication and reopened state. The combined delete/update/scalar durable-conflict boundary remains open; see `doc/08_tracking/bug/item2_delete_update_conflict_retention_2026-10-03.md`. These source oracles are unexecuted.
 
-REQ-019 happy now drives signed Reference and Paged admission, reopens all immutable records, checks exact source/test/config/reproduction bindings against actual CAS objects, and verifies accepted replay with unchanged retention. Its full boundary/failure scenarios remain fail-fast. Legacy-v1 accepted replay and explicit checkpoint mapping-drop source cases remain missing; runtime and full reproduction acceptance are unproved.
+REQ-019 happy now drives signed Reference and Paged admission, reopens all immutable records, checks exact source/test/config/reproduction bindings against actual CAS objects, and verifies accepted replay with unchanged retention. Its failure scenario authenticates malformed incoming bindings before rejecting moving names, private paths and mutable jj IDs, with unchanged semantic and retention stores. Its boundary scenario remains fail-fast. Reference legacy-v1 accepted replay and signed checkpoint mapping-drop integration sources now exist; Paged equivalents and an independent literal v1 golden vector remain open. Runtime and full reproduction acceptance are unproved.
 
 ## Operator model
 
@@ -20,7 +20,7 @@ checks a separately signed actor-counter collision against persisted accepted
 state. REQ-002 writes and rereads a versioned compact alias header/cell, resolves its actual paged row, and rejects missing or mismatched context without changing the generation. REQ-010 adds persisted signed transport, ordered mutation/precondition checks, and missing signature/provenance/version rejection. The typed-patch steps explicitly distinguish transport from semantic publication. This manual
 annotation is not a generated test-run receipt; docgen/execution remains pending. REQ-035 now publishes reviewed metadata to a local Git fixture, rejects unreviewed synthetic secret/PII values and forbidden classifications before queue mutation, and erases an owned key while proving loaded copies and ciphertext remain. Exact reviewed-value admission is not a general secret or PII detector. The REQ-030 boundary hydrates and rereads an actual 100 MiB external envelope and rejects an insufficient content allowance without semantic mutation. Its Git-placement cases and NFR measurements remain open.
 
-REQ-032 supplies three filesystem and signed-history oracles. They retain the existing four local resolution outcomes and add requested historical revisions: two independently admitted manifests resolve to distinct actual bundles; encrypted evidence stays restricted without loading its key; a retained aggregate keeps the requested revision, raw digest and rollup provenance; missing bytes stay unavailable despite the accepted historical manifest. The query checks the signed checkpoint, reachable history and actual semantic/CAS bytes. Assertions preserve captured semantic and retention state. Canonical remote retention authority and cross-replica deletion safety remain open. Twenty-one of the 153 full-contract scenarios have concrete owner oracles; 132 remain explicit fail-fast. All are unexecuted, so there is no full REQ-032 PASS.
+REQ-032 supplies three filesystem and signed-history oracles. They retain the existing four local resolution outcomes and add requested historical revisions: two independently admitted manifests resolve to distinct actual bundles; encrypted evidence stays restricted without loading its key; a retained aggregate keeps the requested revision, raw digest and rollup provenance; missing bytes stay unavailable despite the accepted historical manifest. The query checks the signed checkpoint, reachable history and actual semantic/CAS bytes. Assertions preserve captured semantic and retention state. Canonical remote retention authority and cross-replica deletion safety remain open. Twenty-two of the 153 full-contract scenarios have concrete owner oracles; 131 remain explicit fail-fast. All are unexecuted, so there is no full REQ-032 PASS.
 
 The five feature flows use these steps (typed-patch scenarios add transport and publication-specific steps):
 
@@ -52,7 +52,7 @@ The five feature flows use these steps (typed-patch scenarios add transport and 
 | REQ-016 — Immutable evidence entities | `setup_test_evidence_fixture` / `check_test_evidence_contract` | Should prove that it persists all ten immutable evidence entity kinds with revision links | Should prove that it shares one run manifest across compact observation references | Should prove that it rejects mutation of an admitted evidence revision |
 | REQ-017 — Observation identity | `setup_test_evidence_fixture` / `check_test_evidence_contract` | Should prove that it deduplicates identical provider identity and payload digest | Should prove that it retains a genuine rerun under a distinct attempt identity | Should prove that it quarantines identical observation identity with changed bytes |
 | REQ-018 — Outcome separation | `setup_test_evidence_fixture` / `check_test_evidence_contract` | Should prove that it classifies immutable actual outcome against a pinned expectation | Should prove that it records XPASS signature mismatch infrastructure and incomplete distinctly | Should prove that it prevents observation ingestion from rewriting expectation policy |
-| REQ-019 — Configuration and reproduction | Happy: `setup_item2_artifact_fixture` / `check_item2_artifact_apply`; remaining: `check_test_evidence_contract` | Should prove that it binds a custom failure to exact config and reproduction revisions | Should prove that it records restricted expired and missing dependency availability honestly | Should prove that it rejects moving names private paths or mutable jj IDs as reproducibility |
+| REQ-019 — Configuration and reproduction | Happy/failure: `setup_item2_artifact_fixture` / `check_item2_artifact_apply`, failure mutation: `setup_item2_noncontent_binding`; boundary: `check_test_evidence_contract` | Should prove that it binds a custom failure to exact config and reproduction revisions | Should prove that it records restricted expired and missing dependency availability honestly | Should prove that it rejects moving names private paths or mutable jj IDs as reproducibility |
 | REQ-020 — Coverage finality | `setup_test_evidence_fixture` / `check_test_evidence_contract` | Should prove that it closes a run only after all declared chunks and digests reconcile | Should prove that it records skipped missing retried and superseded shards explicitly | Should prove that it keeps absent observations NOT_RUN or INCOMPLETE rather than PASS |
 | REQ-021 — CI authority | `setup_test_evidence_fixture` / `check_test_evidence_contract` | Should prove that it accepts CI observations and evidence under append-only authority | Should prove that it records untrusted fork evidence without release qualification | Should prove that it rejects CI attempts to approve expectations close bugs or promote configs |
 | REQ-022 — Git capability contract | `setup_bridge_fixture` / `check_bridge_contract` | Should prove that it settles through exact-head CAS protection and read-back capabilities | Should prove that it classifies a stale-head race separately from transport failure | Should prove that it disables allocator mode without admitted protection or read-back |
@@ -98,7 +98,7 @@ Run only after production helpers exist. Compiled-mode execution must validate p
 ```simple
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-019 happy, REQ-030 boundary, REQ-032 historical honesty, two REQ-033 cases and REQ-035 use real filesystem/production owners. Remaining
+# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-019 happy and failure, REQ-030 boundary, REQ-032 historical honesty, two REQ-033 cases and REQ-035 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
@@ -123,11 +123,13 @@ use test.fixtures.scv.db_merge_fixture.*
 use test.fixtures.scv.db_patch_wire_fixture.{setup_item2_wire_patch}
 use std.scv.db_patch.{DbPatch, DbOperation, DbField, DbValue, FieldEdit, RowPrecondition, db_operation_ref, db_patch_seal}
 use std.scv.db_patch_codec.{db_patch_encode, db_patch_decode}
-use std.scv.db_admission.{db_patch_signing_bytes, db_admission_policy_digest}
+use std.scv.db_admission.{db_patch_signing_bytes, db_admission_policy_digest, db_authorize_patch}
 use std.scv.db_reducer.{db_field_value}
 use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_verify, pure_ed25519_sign}
 use std.scv.db_confidentiality.{db_metadata_policy_digest}
-use std.scv.db_snapshot.{db_snapshot_decode}
+use std.scv.db_snapshot.{db_snapshot_decode, db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.{db_snapshot_value_encode, db_snapshot_value_decode}
+use std.scv.db_canonical.{db_read_frame}
 use app.scv.db.settlement_queue.{db_settlement_enqueue, db_settlement_queue_open}
 use app.scv.db.settlement_resume_local.{db_settlement_resume_local}
 use app.scv.db.restricted_evidence.*
@@ -138,9 +140,34 @@ use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
 use app.scv.db.paged_store.{db_paged_initialize, db_paged_apply, db_paged_open, db_paged_current_row}
 use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_root, setup_item2_paged_policy, setup_item2_paged_patch, setup_item2_paged_create, setup_item2_paged_ref}
 use test.fixtures.scv.db_artifact_binding_fixture.*
-use test.fixtures.scv.db_observation_fixture.{check_item2_observation_cleanup}
+use test.fixtures.scv.db_observation_fixture.{Item2ObservationFixture, check_item2_observation_cleanup, setup_item2_observation_sign, setup_item2_observation_review}
+use app.scv.db.observation_owner.{db_observation_now}
 use std.scv.db_reproduction_codec.*
 use std.scv.db_reproduction_projection.{db_reproduction_row}
+
+# Construct malformed incoming wire below the typed producer codec so this
+# oracle reaches real admission with valid signature, ACL and metadata review.
+fn setup_item2_noncontent_binding(fixture: Item2ObservationFixture, record_index: i64, locator: text) -> Item2ObservationFixture:
+    var next = fixture
+    val record = fixture.records[record_index]
+    val prefix = "SCVDB-REPRODUCTION-RECORD-" + db_reproduction_record_version(record) + "\n"
+    val encoded = db_reproduction_record_encode(record).unwrap()
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1]).unwrap()
+    var values = match db_snapshot_value_decode(db_read_frame(bytes, 0).unwrap(), 0).unwrap():
+        List(items): items
+        _: fail("expected canonical record tuple")
+    values[2] = DbValue.Text(locator)
+    val malformed = prefix + db_snapshot_hex(db_snapshot_value_encode(DbValue.List(values), 0).unwrap()) + "\n"
+    next.patch.operations[record_index] = match next.patch.operations[record_index]:
+        AppendObservation(entity, kind, fields):
+            var updated: [DbField] = []
+            for field in fields:
+                updated.push(if field.name == "canonical_record": DbField(name: field.name, value: DbValue.Text(malformed)) else: field)
+            DbOperation.AppendObservation(entity, kind, updated)
+        _: fail("expected immutable append operation")
+    next.patch = setup_item2_observation_sign(next.patch)
+    next.policy = setup_item2_observation_review(next.policy, [next.patch])
+    next
 
 fn setup_item2_compact_alias() -> (text, text, text, SettledAlias, DbAliasContext):
     val root = setup_item2_paged_root()
@@ -741,7 +768,19 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
         it "should prove that it rejects moving names private paths or mutable jj IDs as reproducibility":
             step("Classify configuration-bound evidence")
             step("Inject the failure and inspect fail-closed state")
-            check_test_evidence_contract("REQ-019", "inject unsafe configuration and reproduction state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            for paged in [false, true]:
+                for locator in ["profile:nightly", "C:/private/fixture-config.json", "jj:mutable-change-id"]:
+                    for index in [0, 1, 3, 4]:
+                        val fixture = setup_item2_noncontent_binding(setup_item2_artifact_fixture(paged), index, locator)
+                        expect(db_authorize_patch(fixture.patch, fixture.policy.config.admission, [], db_observation_now().unwrap()).is_ok()).to_be(true)
+                        val channel = if paged: "paged" else: "semantic"
+                        val semantic = db_store_read(fixture.source, channel)
+                        val retained = db_store_read(fixture.source, "retention")
+                        val expected = if index == 0: "MissingEffectiveConfig" elif index == 1: "SCVDB_REPRODUCTION_SOURCE_BINDING" else: "SCVDB_REPRODUCTION_ARTIFACT_DIGEST"
+                        expect(check_item2_artifact_apply(fixture, fixture.initial_head).unwrap_err()).to_equal(expected)
+                        expect(db_store_read(fixture.source, channel)).to_equal(semantic)
+                        expect(db_store_read(fixture.source, "retention")).to_equal(retained)
+                        check_item2_observation_cleanup(fixture)
 
     describe "REQ-020: Coverage finality":
         it "should prove that it closes a run only after all declared chunks and digests reconcile":
@@ -1516,6 +1555,6 @@ The executable now also contains three pure production-map prerequisites:
 2. Replay tombstoned A: return `tombstoned` at 1, retain one tombstoned binding and high-water 1.
 3. Reject another namespace with `SCVDB_NAMESPACE_MISMATCH`, sequence 0, and unchanged binding/high-water.
 
-These pure prerequisites supplement 153 full-contract scenarios. Twenty-one REQ-001/REQ-002/REQ-010/REQ-013/REQ-019-happy/REQ-030/REQ-032/REQ-033/REQ-035 scenarios now use real filesystem, codec and authenticated mutation/query owners; the other 132 still fail explicitly. None has executed in this session, so neither group establishes runtime, process-crash, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains unproved.
+These pure prerequisites supplement 153 full-contract scenarios. Twenty-two REQ-001/REQ-002/REQ-010/REQ-013/REQ-019-happy-and-failure/REQ-030/REQ-032/REQ-033/REQ-035 scenarios now use real filesystem, codec and authenticated mutation/query owners; the other 131 still fail explicitly. None has executed in this session, so neither group establishes runtime, process-crash, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains unproved.
 
 Concrete inputs and oracles for all 51 requirements and five durable campaigns are in `doc/03_plan/evidence/seven_plans/item2_acceptance_matrix_2026-10-03.md`. Preserve the original scenario catalog until each whole checker has production-backed evidence. Runtime results and generated-manual regeneration are still required before verification PASS.

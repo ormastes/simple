@@ -1,6 +1,6 @@
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-019 happy, REQ-030 boundary, REQ-032 historical honesty, two REQ-033 cases and REQ-035 use real filesystem/production owners. Remaining
+# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-019 happy and failure, REQ-030 boundary, REQ-032 historical honesty, two REQ-033 cases and REQ-035 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
@@ -25,11 +25,13 @@ use test.fixtures.scv.db_merge_fixture.*
 use test.fixtures.scv.db_patch_wire_fixture.{setup_item2_wire_patch}
 use std.scv.db_patch.{DbPatch, DbOperation, DbField, DbValue, FieldEdit, RowPrecondition, db_operation_ref, db_patch_seal}
 use std.scv.db_patch_codec.{db_patch_encode, db_patch_decode}
-use std.scv.db_admission.{db_patch_signing_bytes, db_admission_policy_digest}
+use std.scv.db_admission.{db_patch_signing_bytes, db_admission_policy_digest, db_authorize_patch}
 use std.scv.db_reducer.{db_field_value}
 use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_verify, pure_ed25519_sign}
 use std.scv.db_confidentiality.{db_metadata_policy_digest}
-use std.scv.db_snapshot.{db_snapshot_decode}
+use std.scv.db_snapshot.{db_snapshot_decode, db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.{db_snapshot_value_encode, db_snapshot_value_decode}
+use std.scv.db_canonical.{db_read_frame}
 use app.scv.db.settlement_queue.{db_settlement_enqueue, db_settlement_queue_open}
 use app.scv.db.settlement_resume_local.{db_settlement_resume_local}
 use app.scv.db.restricted_evidence.*
@@ -40,9 +42,34 @@ use std.scv.distributed_identity.{SettledAlias, entity_ref_settled}
 use app.scv.db.paged_store.{db_paged_initialize, db_paged_apply, db_paged_open, db_paged_current_row}
 use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_root, setup_item2_paged_policy, setup_item2_paged_patch, setup_item2_paged_create, setup_item2_paged_ref}
 use test.fixtures.scv.db_artifact_binding_fixture.*
-use test.fixtures.scv.db_observation_fixture.{check_item2_observation_cleanup}
+use test.fixtures.scv.db_observation_fixture.{Item2ObservationFixture, check_item2_observation_cleanup, setup_item2_observation_sign, setup_item2_observation_review}
+use app.scv.db.observation_owner.{db_observation_now}
 use std.scv.db_reproduction_codec.*
 use std.scv.db_reproduction_projection.{db_reproduction_row}
+
+# Construct malformed incoming wire below the typed producer codec so this
+# oracle reaches real admission with valid signature, ACL and metadata review.
+fn setup_item2_noncontent_binding(fixture: Item2ObservationFixture, record_index: i64, locator: text) -> Item2ObservationFixture:
+    var next = fixture
+    val record = fixture.records[record_index]
+    val prefix = "SCVDB-REPRODUCTION-RECORD-" + db_reproduction_record_version(record) + "\n"
+    val encoded = db_reproduction_record_encode(record).unwrap()
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1]).unwrap()
+    var values = match db_snapshot_value_decode(db_read_frame(bytes, 0).unwrap(), 0).unwrap():
+        List(items): items
+        _: fail("expected canonical record tuple")
+    values[2] = DbValue.Text(locator)
+    val malformed = prefix + db_snapshot_hex(db_snapshot_value_encode(DbValue.List(values), 0).unwrap()) + "\n"
+    next.patch.operations[record_index] = match next.patch.operations[record_index]:
+        AppendObservation(entity, kind, fields):
+            var updated: [DbField] = []
+            for field in fields:
+                updated.push(if field.name == "canonical_record": DbField(name: field.name, value: DbValue.Text(malformed)) else: field)
+            DbOperation.AppendObservation(entity, kind, updated)
+        _: fail("expected immutable append operation")
+    next.patch = setup_item2_observation_sign(next.patch)
+    next.policy = setup_item2_observation_review(next.policy, [next.patch])
+    next
 
 fn setup_item2_compact_alias() -> (text, text, text, SettledAlias, DbAliasContext):
     val root = setup_item2_paged_root()
@@ -643,7 +670,19 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
         it "should prove that it rejects moving names private paths or mutable jj IDs as reproducibility":
             step("Classify configuration-bound evidence")
             step("Inject the failure and inspect fail-closed state")
-            check_test_evidence_contract("REQ-019", "inject unsafe configuration and reproduction state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            for paged in [false, true]:
+                for locator in ["profile:nightly", "C:/private/fixture-config.json", "jj:mutable-change-id"]:
+                    for index in [0, 1, 3, 4]:
+                        val fixture = setup_item2_noncontent_binding(setup_item2_artifact_fixture(paged), index, locator)
+                        expect(db_authorize_patch(fixture.patch, fixture.policy.config.admission, [], db_observation_now().unwrap()).is_ok()).to_be(true)
+                        val channel = if paged: "paged" else: "semantic"
+                        val semantic = db_store_read(fixture.source, channel)
+                        val retained = db_store_read(fixture.source, "retention")
+                        val expected = if index == 0: "MissingEffectiveConfig" elif index == 1: "SCVDB_REPRODUCTION_SOURCE_BINDING" else: "SCVDB_REPRODUCTION_ARTIFACT_DIGEST"
+                        expect(check_item2_artifact_apply(fixture, fixture.initial_head).unwrap_err()).to_equal(expected)
+                        expect(db_store_read(fixture.source, channel)).to_equal(semantic)
+                        expect(db_store_read(fixture.source, "retention")).to_equal(retained)
+                        check_item2_observation_cleanup(fixture)
 
     describe "REQ-020: Coverage finality":
         it "should prove that it closes a run only after all declared chunks and digests reconcile":

@@ -1,7 +1,7 @@
 # System test plan: Simple distributed textual databases
 
 **Selection:** Authority A / Adapters A / Operating B / Retention A  
-**Status:** Full acceptance remains unproved: 21 of 153 scenarios invoke actual production owners; 132 retain explicit fail-fast checkers. Three additional pure identity-map prerequisite cases are not durable acceptance. All sources remain unexecuted; this is not a recorded TDD RED/GREEN result.
+**Status:** Full acceptance remains unproved: 22 of 153 scenarios invoke actual production owners; 131 retain explicit fail-fast checkers. Three additional pure identity-map prerequisite cases are not durable acceptance. All sources remain unexecuted; this is not a recorded TDD RED/GREEN result.
 **Executable:** `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl`  
 **Manual:** `doc/06_spec/03_system/app/scv/feature/simple_distributed_textual_databases_spec.md`
 
@@ -156,8 +156,11 @@ exact opaque byte object: this does not prove complete source-tree capture,
 Git commit correspondence, a defined execution environment or successful
 reproduction. Those claims require separate formats and acceptance evidence.
 
-The integrated checkpoint contains nine new binding integration scenarios and
-an actual-owner REQ-019 happy system scenario. Genuine legacy-v1 accepted replay
-and explicit checkpoint mapping-drop cases still need dedicated source oracles;
-current checkpoint coverage verifies preservation and rewrite refusal. The
-full boundary/failure system scenarios remain explicit fail-fast.
+The integrated checkpoint contains the nine original binding integration
+scenarios, a signed Reference checkpoint-drop scenario covering both mapping
+kinds, three Reference legacy-v1 replay scenarios, and actual-owner REQ-019
+happy and failure system scenarios. Historical v1 fixture state comes from
+prior-contract authorization and the actual reducer, then a signed checkpoint;
+it is not evidence of execution by an old released binary. Paged legacy replay,
+Paged mapping-drop and an independent literal v1 golden vector remain open.
+The full boundary system scenario remains explicit fail-fast. All are unexecuted.

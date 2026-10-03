@@ -378,3 +378,11 @@ cross-review production changes; core reviews independent fixtures and research
 reviews the root system scenario. Root integrates scoped commits. Two effect
 fix cycles and one root system-oracle correction are source-review evidence,
 not runtime RED/GREEN or final production approval.
+
+### Legacy replay and binding rejection checkpoint
+
+Core owns the isolated legacy fixture/spec; evidence owns Reference checkpoint
+drop cases; research independently reviews both and the root rejection oracle.
+Root owns integration, the system failure scenario and source-aligned manuals.
+Reviewed source commits: 81584c59c18 and a978450911c. Final runtime review and
+merge remain pending; source review does not establish acceptance.
