@@ -193,11 +193,51 @@ fn retained_file_write(file: RetainedFile, bytes: [u8]) -> Result<bool, text>:
     file.position = file.position + (bytes.len() as u64)
     Ok(true)
 
-fn retained_file_unchanged(file: RetainedFile) -> Result<bool, text>:
+fn retained_file_identity_unchanged(file: RetainedFile) -> Result<bool, text>:
     if file.closed or file.writable: return Err("SCVDB_FILE_STATE")
     val (size, identity) = _retained_metadata(file.handle)?
-    if size != file.size or identity != file.identity or file.position != size: return Err("SCVDB_FILE_CHANGED")
+    if size != file.size or identity != file.identity: return Err("SCVDB_FILE_CHANGED")
     Ok(true)
+
+fn retained_file_unchanged(file: RetainedFile) -> Result<bool, text>:
+    retained_file_identity_unchanged(file)?
+    if file.position != file.size: return Err("SCVDB_FILE_CHANGED")
+    Ok(true)
+
+# Single-owner, non-concurrent operation. Linux pread preserves the descriptor
+# cursor. Windows synchronous seek/read/restore preserves the existing API's
+# cursor; a failed restore invalidates the handle. No path reopen occurs.
+# https://man7.org/linux/man-pages/man2/pread.2.html
+# https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfilepointerex
+@unsafe(reason: "reads bounded retained file range while preserving sequential cursor", capabilities: [ffi, raw_ptr])
+fn retained_file_read_at(file: RetainedFile, offset: u64, maximum: i64) -> Result<[u8], text>:
+    if file.closed or file.writable or maximum < 1 or maximum > 1048576:
+        return Err("SCVDB_FILE_READ_QUOTA")
+    if offset > file.size or maximum as u64 > file.size - offset:
+        return Err("SCVDB_FILE_READ_RANGE")
+    retained_file_identity_unchanged(file)?
+    val ptr = _retained_alloc((maximum + 8) as u64)
+    if ptr == 0: return Err("SCVDB_FILE_MEMORY")
+    var count = -1i64
+    var restored = true
+    @when(os="windows"):
+    if SetFilePointerEx(file.handle, offset as i64, 0, 0u32) != 0:
+        if ReadFile(file.handle, ptr, maximum as u32, ptr + maximum, 0) != 0:
+            count = volatile_read_u32(ptr + maximum)
+    restored = SetFilePointerEx(file.handle, file.position as i64, 0, 0u32) != 0
+    @else:
+    count = pread(file.handle as i32, ptr, maximum as u64, offset as i64)
+    @end
+    var bytes: [u8] = []
+    if count >= 0 and count <= maximum and restored:
+        for index in 0..count: bytes.push(volatile_read_u8(ptr + index) as u8)
+    _retained_free(ptr)
+    if not restored:
+        val closed = retained_file_close(file)
+        return Err("SCVDB_FILE_CURSOR_RESTORE")
+    if count < 0 or count > maximum: return Err("SCVDB_FILE_READ")
+    retained_file_identity_unchanged(file)?
+    Ok(bytes)
 
 @unsafe(reason: "flushes exact owned output descriptor before close", capabilities: [ffi])
 fn retained_file_sync(file: RetainedFile) -> bool:
@@ -220,3 +260,4 @@ fn retained_file_close(file: RetainedFile) -> bool:
 
 export RetainedFile, retained_file_open, retained_file_read, retained_file_write
 export retained_file_unchanged, retained_file_sync, retained_file_close
+export retained_file_read_at, retained_file_identity_unchanged

@@ -65,6 +65,8 @@ use compiler.backend.backend.runtime_compiler.{find_c_compiler, hosted_c_compile
 # own LinkRequestV1-shaped entry point -- internal_link_native() below is the
 # one shared implementation both callers now use.
 use compiler.backend.linker.elf.elf_static_link.{elf_link_configured, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
+use compiler.backend.linker.native_image_publish.{native_image_publish}
+use compiler.backend.linker.elf.freebsd_hosted.{freebsd_hosted_inputs, freebsd_brand_image}
 use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_policy}
 use compiler.backend.linker.boot_layout.boot_layout_plan.{boot_layout_from_text, boot_layout_add_defsym}
 use compiler.backend.linker.reloc_engine.{RelocArch}
@@ -396,7 +398,7 @@ fn link_native_unix_with_engine(object_files: [text], output: text, config: Nati
             return Err("native-link-reproduce-requires-linux-lld")
         val cross_plan = hosted_c_compiler_plan(target, os, arch)
         if cross_plan.requires_cross:
-            return Err("internal engine: unsupported cross target '{target}' (internal:elf links against the host glibc only)")
+            return Err("internal engine: unsupported cross target '{target}' (internal:elf requires the matching hosted ELF sysroot)")
         val unsupported_field = internal_elf_unsupported_config_field(config)
         if unsupported_field != "":
             return Err("internal engine: unsupported config field '{unsupported_field}' (internal:elf does not honour it; unset SIMPLE_LINKER to use the external linker)")
@@ -1367,33 +1369,7 @@ fn internal_link_native_read_i64(path: text) -> [i64]:
     out
 
 fn internal_link_publish_bytes(output: text, bytes: [u8]) -> bool:
-    """Publish one linked image after staging, restoring old output on failure."""
-    val nonce = "{getpid()}-{time_now_unix_micros()}"
-    val staged = output + ".simple-link-stage-" + nonce
-    if not file_write_bytes(staged, bytes):
-        val _ = file_delete(staged)
-        return false
-    # C-core/POSIX replace an existing destination atomically. Some admitted
-    # interpreter runtimes expose a no-replace rename instead; use a bounded
-    # backup dance only after that first publication attempt fails.
-    if file_rename(staged, output): return true
-    if not file_exists(output):
-        val _ = file_delete(staged)
-        return false
-    val backup = output + ".simple-link-backup-" + nonce
-    if not file_rename(output, backup):
-        val _ = file_delete(staged)
-        return false
-    if file_rename(staged, output):
-        val _ = file_delete(backup)
-        return true
-    val restored = file_rename(backup, output)
-    val _ = file_delete(staged)
-    if not restored:
-        # Keep the recoverable backup path intact when restoration itself
-        # fails; deleting it here would turn publication failure into data loss.
-        return false
-    false
+    native_image_publish(output, bytes)
 
 fn internal_link_simpleos(object_files: [text], output: text, target: text,
         config: NativeLinkConfig) -> Result:
@@ -1467,32 +1443,60 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
         norm_arch = "x86_64"
     elif arch == "arm64":
         norm_arch = "aarch64"
-    if os != "linux":
-        return Err("internal engine: unsupported OS '{os}' (internal:elf links Linux targets only)")
+    if os != "linux" and os != "freebsd":
+        return Err("internal engine: unsupported hosted ELF OS '{os}'")
     if norm_arch != "x86_64" and norm_arch != "aarch64":
         return Err("internal engine: unsupported architecture '{arch}' (internal:elf supports x86_64 and aarch64 only)")
-    if norm_arch != host_arch():
-        return Err("internal engine: unsupported cross-arch link (target {arch} != host {host_arch()}; internal:elf links against the host glibc only)")
+    if norm_arch != host_arch() or os != host_os():
+        return Err("internal engine: unsupported cross-host link (target {os}/{arch}; hosted ELF requires the matching sysroot)")
     for path in object_files:
         if not file_exists(path):
             return Err("internal engine: input {path} cannot be read")
-    val crt = find_crt_files(config.pie, false)
-    if crt.crt1 == "" or crt.crti == "" or crt.crtn == "":
-        return Err("internal engine: unsupported host (no host crt1/crti/crtn objects found)")
-    if crt.dynamic_linker == "":
-        return Err("internal engine: unsupported host (no host dynamic linker found)")
-    val libdir = path_dirname(crt.crt1)
-    val libc = "{libdir}/libc.so.6"
-    if not file_exists(libc):
-        return Err("internal engine: unsupported host (no {libc} found)")
-    var objects: [[i64]] = [internal_link_native_read_i64(crt.crt1), internal_link_native_read_i64(crt.crti)]
+    var before: [text] = []
+    var after: [text] = []
+    var system_shared: [text] = []
+    var system_archives: [text] = []
+    var system_paths: [text] = []
+    var interpreter = ""
+    if os == "freebsd":
+        val selected = freebsd_hosted_inputs("", config.pie)?
+        before = selected.before
+        after = selected.after
+        system_shared = selected.shared
+        system_archives = selected.archives
+        system_paths = selected.library_paths
+        interpreter = selected.interpreter
+    else:
+        val crt = find_crt_files(config.pie, false)
+        if crt.crt1 == "" or crt.crti == "" or crt.crtn == "":
+            return Err("internal engine: unsupported host (no host crt1/crti/crtn objects found)")
+        if crt.dynamic_linker == "":
+            return Err("internal engine: unsupported host (no host dynamic linker found)")
+        val libdir = path_dirname(crt.crt1)
+        val libc = "{libdir}/libc.so.6"
+        if not file_exists(libc):
+            return Err("internal engine: unsupported host (no {libc} found)")
+        before = [crt.crt1, crt.crti]
+        after = [crt.crtn]
+        system_shared = [libc]
+        interpreter = crt.dynamic_linker
+        system_paths = crt.lib_dirs
+        if not system_paths.contains(libdir): system_paths.push(libdir)
+        val nonshared = "{libdir}/libc_nonshared.a"
+        if file_exists(nonshared): system_archives.push(nonshared)
+        if norm_arch == "x86_64":
+            for directory in ["/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib64", "/usr/lib64"]:
+                if not system_paths.contains(directory): system_paths.push(directory)
+        else:
+            for directory in ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"]:
+                if not system_paths.contains(directory): system_paths.push(directory)
+    var objects: [[i64]] = []
+    for path in before: objects.push(internal_link_native_read_i64(path))
     for path in object_files:
         objects = objects.push(internal_link_native_read_i64(path))
-    objects = objects.push(internal_link_native_read_i64(crt.crtn))
+    for path in after: objects.push(internal_link_native_read_i64(path))
     var archives: [[i64]] = []
-    val nonshared = "{libdir}/libc_nonshared.a"
-    if file_exists(nonshared):
-        archives = archives.push(internal_link_native_read_i64(nonshared))
+    for path in system_archives: archives.push(internal_link_native_read_i64(path))
     var runtime_dir = config.runtime_path
     if runtime_dir == "": runtime_dir = find_runtime_lib_dir()
     for path in native_runtime_archive_inputs(runtime_dir, config.runtime_bundle):
@@ -1501,17 +1505,13 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
         archives = archives.push(internal_link_native_read_i64(path))
     var library_paths: [text] = []
     for directory in config.library_paths: library_paths.push(directory)
-    for directory in crt.lib_dirs:
+    for directory in system_paths:
         if not library_paths.contains(directory): library_paths.push(directory)
-    if not library_paths.contains(libdir): library_paths.push(libdir)
-    if norm_arch == "x86_64":
-        for directory in ["/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib64", "/usr/lib64"]:
-            if not library_paths.contains(directory): library_paths.push(directory)
-    else:
-        for directory in ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"]:
-            if not library_paths.contains(directory): library_paths.push(directory)
-    var shared: [[u8]] = [file_read_bytes(libc)]
-    var shared_names: [text] = [internal_elf_library_needed_name(libc, libc)]
+    var shared: [[u8]] = []
+    var shared_names: [text] = []
+    for path in system_shared:
+        shared.push(file_read_bytes(path))
+        shared_names.push(internal_elf_library_needed_name(path, path))
     for library in config.libraries:
         val path = internal_elf_library_file(library, library_paths)
         if path == "": return Err("internal engine: ELF library '{library}' was not found")
@@ -1535,7 +1535,7 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
     val as_needed = internal_elf_as_needed(config.extra_flags)?
     val gc_sections = internal_elf_gc_sections(config.extra_flags)?
     val request = ElfLinkRequest(objects: objects, archives: archives, shared: shared,
-        entry: "_start", target: target_arch, mode: mode, interp: crt.dynamic_linker,
+        entry: "_start", target: target_arch, mode: mode, interp: interpreter,
         shared_names: shared_names,
         runpath: runpath, bind_now: internal_elf_bind_now(config.extra_flags),
         hash_style: hash_style, as_needed: as_needed, gc_sections: gc_sections)
@@ -1544,14 +1544,13 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
         config.retained_symbols)
     if linked.is_err():
         return Err("internal engine: {linked.unwrap_err()}")
+    var image = linked.unwrap()
+    if os == "freebsd": image = freebsd_brand_image(image)?
     var bytes: [u8] = []
-    for b in linked.unwrap():
+    for b in image:
         bytes = bytes.push(b as u8)
-    if not internal_link_publish_bytes(output, bytes):
-        return Err("internal engine: could not publish {output}")
-    val (_co, _ce, chmod_code) = process_run("chmod", ["755", output])
-    if chmod_code != 0:
-        return Err("internal engine: could not mark {output} executable")
+    if not native_image_publish(output, bytes, true):
+        return Err("internal engine: could not publish executable {output}")
     Ok(output)
 
 # Build self-contained binary when given SMF inputs

@@ -1,0 +1,154 @@
+"""ITEM4-REQ-004/006: checked hosted Mach-O dependency metadata.
+
+Test intent committed before reader implementation. NOT RUN: no admitted SSpec
+runtime. Reading dependencies does not constitute hosted linker completion.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use compiler.backend.linker.macho.dylib.{macho_read_dylib}
+use compiler.backend.linker.macho.export_trie.{macho_exports_trie}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn item4_dylib_bytes(name: text) -> [u8]:
+    val bytes = file_read_bytes("test/fixtures/linker/macho/" + name)
+    expect(bytes.len()).to_be_greater_than(32)
+    bytes
+
+fn item4_dylib_word(bytes: [u8], at: i64) -> i64:
+    expect(at >= 0 and at <= bytes.len() - 4).to_equal(true)
+    if at < 0 or at > bytes.len() - 4: return 0
+    (bytes[at] as i64) | ((bytes[at + 1] as i64) << 8) | ((bytes[at + 2] as i64) << 16) | ((bytes[at + 3] as i64) << 24)
+
+fn item4_dylib_set(bytes: [u8], at: i64, value: i64) -> [u8]:
+    expect(at >= 0 and at <= bytes.len() - 4).to_equal(true)
+    if at < 0 or at > bytes.len() - 4: return []
+    var out = bytes
+    for index in 0..4: out[at + index] = ((value >> (8 * index)) & 255) as u8
+    out
+
+fn item4_dylib_command(bytes: [u8], kind: i64) -> i64:
+    var at: i64 = 32
+    for index in 0..item4_dylib_word(bytes, 16):
+        if item4_dylib_word(bytes, at) == kind: return at
+        val size = item4_dylib_word(bytes, at + 4)
+        if size < 8 or size > bytes.len() - at: break
+        at = at + size
+    fail("fixture command absent")
+    -1
+
+describe "Mach-O hosted dependency reader":
+    # @req ITEM4-REQ-004 ITEM4-REQ-006
+    it "preserves an actual reexport dependency command and version contract":
+        step("Read ld64.lld reexport provider without inventing local exports")
+        val library = macho_read_dylib(item4_dylib_bytes("reexport_x64.dylib"), RelocArch.X86_64).unwrap()
+        expect(library.install_name).to_equal("@rpath/libitem4_reexport.dylib")
+        expect(library.dependencies.len()).to_equal(1)
+        expect(library.dependencies[0].install_name).to_equal("@rpath/libitem4.dylib")
+        expect(library.dependencies[0].command).to_equal(0x8000001f)
+        expect(library.dependencies[0].current_version).to_equal(0x20304)
+        expect(library.dependencies[0].compatibility_version).to_equal(0x10200)
+        expect(library.exports.len()).to_equal(0)
+
+    it "preserves lazy-load dependency identity and ordinal position":
+        step("Change the real reexport command to LC_LAZY_LOAD_DYLIB")
+        val bytes = item4_dylib_bytes("reexport_x64.dylib")
+        val dependency = item4_dylib_command(bytes, 0x8000001f)
+        if dependency < 0: return
+        val library = macho_read_dylib(item4_dylib_set(bytes, dependency, 0x20), RelocArch.X86_64).unwrap()
+        step("Keep the dependency in ordinal slot one with its full version contract")
+        expect(library.dependencies.len()).to_equal(1)
+        expect(library.dependencies[0].command).to_equal(0x20)
+        expect(library.dependencies[0].install_name).to_equal("@rpath/libitem4.dylib")
+        expect(library.dependencies[0].current_version).to_equal(0x20304)
+        expect(library.dependencies[0].compatibility_version).to_equal(0x10200)
+        val reexports = macho_exports_trie([0, 1, 97, 0, 5, 3, 8, 1, 0, 0], 0, 10, library.dependencies.len()).unwrap()
+        expect(reexports[0].library_ordinal).to_equal(1)
+        expect(library.dependencies[reexports[0].library_ordinal - 1].install_name).to_equal("@rpath/libitem4.dylib")
+
+    it "reads actual x64 dylib install versions and trie exports":
+        step("Read ld64.lld dylib through the production dependency reader")
+        val library = macho_read_dylib(item4_dylib_bytes("provider_x64.dylib"), RelocArch.X86_64).unwrap()
+        step("Check independent LLVM fixture metadata")
+        expect(library.install_name).to_equal("@rpath/libitem4.dylib")
+        expect(library.current_version).to_equal(0x20304)
+        expect(library.compatibility_version).to_equal(0x10200)
+        expect(library.platform).to_equal(1)
+        expect(library.minimum_os).to_equal(0xb0000)
+        expect(library.sdk).to_equal(0xb0000)
+        expect(library.dependencies.len()).to_equal(0)
+        expect(library.exports.len()).to_equal(2)
+        for symbol in library.exports:
+            expect(symbol.name == "_helper" or symbol.name == "_value").to_equal(true)
+            expect(symbol.address).to_equal(if symbol.name == "_helper": 0x2d8 else: 0x1000)
+            expect(symbol.flags).to_equal(0)
+
+    it "reads actual arm64 exports without claiming signature admission":
+        step("Inspect the arm64 dependency")
+        val library = macho_read_dylib(item4_dylib_bytes("provider_a64.dylib"), RelocArch.AArch64).unwrap()
+        expect(library.exports.len()).to_equal(2)
+        for symbol in library.exports:
+            expect(symbol.name == "_helper" or symbol.name == "_value").to_equal(true)
+            expect(symbol.address).to_equal(if symbol.name == "_helper": 0x2e8 else: 0x4000)
+
+    it "uses the real symbol table when no exports trie is declared":
+        step("Remove only the fixture export-trie declaration")
+        val bytes = item4_dylib_bytes("provider_x64.dylib")
+        val info = item4_dylib_command(bytes, 0x80000022)
+        val changed = item4_dylib_set(item4_dylib_set(bytes, info + 40, 0), info + 44, 0)
+        val library = macho_read_dylib(changed, RelocArch.X86_64).unwrap()
+        expect(library.exports.len()).to_equal(2)
+        for symbol in library.exports:
+            expect(symbol.address).to_equal(if symbol.name == "_helper": 0x2d8 else: 0x1000)
+
+    it "rejects foreign CPU and non-dylib images":
+        step("Reject incompatible dependency headers")
+        val bytes = item4_dylib_bytes("provider_x64.dylib")
+        expect(macho_read_dylib(bytes, RelocArch.AArch64).is_err()).to_equal(true)
+        expect(macho_read_dylib(item4_dylib_set(bytes, 12, 1), RelocArch.X86_64).is_err()).to_equal(true)
+
+    it "bounds install names and export storage within their owners":
+        step("Mutate command-relative string and file-relative trie offsets")
+        val bytes = item4_dylib_bytes("provider_x64.dylib")
+        val identity = item4_dylib_command(bytes, 13)
+        val info = item4_dylib_command(bytes, 0x80000022)
+        expect(macho_read_dylib(item4_dylib_set(bytes, identity + 8, 0xfffffff0), RelocArch.X86_64).is_err()).to_equal(true)
+        expect(macho_read_dylib(item4_dylib_set(bytes, info + 40, 0xfffffff0), RelocArch.X86_64).is_err()).to_equal(true)
+        expect(macho_read_dylib(item4_dylib_set(bytes, identity + 4, 16), RelocArch.X86_64).is_err()).to_equal(true)
+
+    it "rejects trie cycles truncated ULEB and invalid reexport ordinals":
+        step("Decode bounded malformed wire tries directly")
+        expect(macho_exports_trie([0, 1, 97, 0, 0], 0, 5, 0).is_err()).to_equal(true)
+        expect(macho_exports_trie([128], 0, 1, 0).is_err()).to_equal(true)
+        expect(macho_exports_trie([128, 128, 128, 128, 128, 128, 128, 128, 128, 0], 0, 10, 0).is_err()).to_equal(true)
+        expect(macho_exports_trie([0, 1, 97, 0, 127], 0, 5, 0).is_err()).to_equal(true)
+        expect(macho_exports_trie([0, 1, 97, 0, 5, 3, 8, 1, 0, 0], 0, 10, 0).is_err()).to_equal(true)
+
+    it "preserves reexport and resolver semantics instead of fabricating definitions":
+        step("Decode explicit reexport and resolver export payloads")
+        val reexports = macho_exports_trie([0, 1, 97, 0, 5, 3, 8, 1, 0, 0], 0, 10, 1).unwrap()
+        expect(reexports.len()).to_equal(1)
+        expect(reexports[0].name).to_equal("a")
+        expect(reexports[0].library_ordinal).to_equal(1)
+        expect(reexports[0].import_name).to_equal("a")
+        expect(reexports[0].flags).to_equal(8)
+        val resolvers = macho_exports_trie([0, 1, 97, 0, 5, 3, 16, 32, 48, 0], 0, 10, 0).unwrap()
+        expect(resolvers[0].address).to_equal(32)
+        expect(resolvers[0].resolver).to_equal(48)
+
+    it "rejects invalid segment and symbol storage before decoding exports":
+        step("Mutate real file and virtual extents independently")
+        val bytes = item4_dylib_bytes("provider_x64.dylib")
+        val segment = item4_dylib_command(bytes, 0x19)
+        val symbols = item4_dylib_command(bytes, 2)
+        expect(macho_read_dylib(item4_dylib_set(bytes, segment + 48, 0xfffffff0), RelocArch.X86_64).is_err()).to_equal(true)
+        expect(macho_read_dylib(item4_dylib_set(bytes, segment + 28, 0x80000000), RelocArch.X86_64).is_err()).to_equal(true)
+        expect(macho_read_dylib(item4_dylib_set(bytes, symbols + 12, 0xffffffff), RelocArch.X86_64).is_err()).to_equal(true)
+
+    it "rejects incompatible identity versions and truncated platform tool arrays":
+        step("Preserve command envelopes while making metadata internally inconsistent")
+        val bytes = item4_dylib_bytes("provider_x64.dylib")
+        val identity = item4_dylib_command(bytes, 13)
+        val build = item4_dylib_command(bytes, 0x32)
+        expect(macho_read_dylib(item4_dylib_set(bytes, identity + 20, 0x30000), RelocArch.X86_64).is_err()).to_equal(true)
+        expect(macho_read_dylib(item4_dylib_set(bytes, build + 20, 2), RelocArch.X86_64).is_err()).to_equal(true)
