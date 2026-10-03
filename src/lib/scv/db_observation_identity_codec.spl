@@ -1,0 +1,148 @@
+# Persistence projections only. A decoded claim is caller data, never proof of
+# lookup, protected storage, or admission. Verification requires actual original
+# bytes represented by a sealed observation and an independently supplied pin.
+# These headers do not change the observation or identity canonical domains.
+use std.scv.db_observation_identity.*
+use std.scv.db_ci_ingest.{DbCiCapabilities}
+use std.scv.db_evidence.{DbObservation, DbEvidenceRevision, db_evidence_check_ref, db_evidence_same_ref}
+use std.scv.db_patch.{db_ref_kind}
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_snapshot_values.{db_snapshot_text, db_snapshot_ref_encode, db_snapshot_ref_decode}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+
+fn _identity_codec_error(error: text) -> text:
+    if ["SCVDB_OBSERVATION_IDENTITY_POLICY", "SCVDB_OBSERVATION_IDENTITY_PIN", "SCVDB_OBSERVATION_IDENTITY_SCOPE", "SCVDB_OBSERVATION_IDENTITY_LOOKUP", "SCVDB_OBSERVATION_IDENTITY_QUOTA"].contains(error): return error
+    "SCVDB_OBSERVATION_IDENTITY_CODEC"
+
+fn _identity_codec_hex(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn _identity_codec_text(value: text) -> Result<[u8], text>:
+    if value.len() > 4096: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+    if base_encoding_text_to_bytes(value).len() > 4096: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+    db_snapshot_text(value)
+
+fn _identity_codec_read_text(frame: DbDecodedFrame) -> Result<text, text>:
+    if frame.payload.len() > 4096: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+    db_read_text(frame)
+
+# Bound cardinality before reading/copying the next child's payload. Only fixed
+# shape lists are accepted: there is no attacker-selected recursive value tree.
+fn _identity_codec_children(frame: DbDecodedFrame, maximum: i64, exact: i64) -> Result<[DbDecodedFrame], text>:
+    if frame.tag != 6u8: return Err("SCVDB_OBSERVATION_IDENTITY_CODEC")
+    var children: [DbDecodedFrame] = []
+    var offset = 0
+    while offset < frame.payload.len():
+        if children.len() >= maximum: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+        val child = db_read_frame(frame.payload, offset)?
+        children.push(child)
+        offset = child.next_offset
+    if exact >= 0 and children.len() != exact: return Err("SCVDB_OBSERVATION_IDENTITY_CODEC")
+    Ok(children)
+
+fn _identity_codec_root(wire: text, header: text, limit: i64) -> Result<DbDecodedFrame, text>:
+    if wire.len() > limit: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+    if not wire.starts_with(header) or not wire.ends_with("\n") or wire.len() <= header.len(): return Err("SCVDB_OBSERVATION_IDENTITY_CODEC")
+    val bytes = db_snapshot_unhex(wire[header.len():wire.len() - 1])?
+    val root = db_read_frame(bytes, 0)?
+    if root.next_offset != bytes.len(): return Err("SCVDB_OBSERVATION_IDENTITY_CODEC")
+    Ok(root)
+
+fn _identity_codec_names(names: [text]) -> Result<[u8], text>:
+    if names.len() > 64: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+    var fields: [[u8]] = []
+    for name in names: fields.push(_identity_codec_text(name)?)
+    Ok(db_canonical_list(fields))
+
+fn _identity_codec_read_names(frame: DbDecodedFrame) -> Result<[text], text>:
+    var names: [text] = []
+    for child in _identity_codec_children(frame, 64, -1)?: names.push(_identity_codec_read_text(child)?)
+    Ok(names)
+
+fn _identity_policy_encode(policy: DbObservationIdentityPolicy) -> Result<text, text>:
+    if policy.revision != db_observation_identity_policy_digest(policy)?: return Err("SCVDB_OBSERVATION_IDENTITY_PIN")
+    val caps = policy.capabilities
+    var fields = [_identity_codec_text(policy.revision)?, _identity_codec_text(policy.namespace)?, db_frame(2u8, db_u64_bytes(policy.epoch)), _identity_codec_text(policy.provider_instance)?, _identity_codec_text(policy.project)?, _identity_codec_names(caps.identity_dimensions)?, _identity_codec_names(caps.uniqueness_tuple)?]
+    for flag in [caps.event_hints, caps.polling, caps.bundle_import, caps.artifact_download, caps.attestations, caps.pagination]:
+        fields.push(db_frame(1u8, if flag: [1u8] else: [0u8]))
+    fields.push(db_frame(2u8, db_u64_bytes(caps.maximum_bundle_bytes)))
+    val wire = "SCVDB-OBSERVATION-IDENTITY-POLICY-v1\n" + db_snapshot_hex(db_canonical_list(fields)) + "\n"
+    if wire.len() > 2097152: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+    Ok(wire)
+
+fn db_observation_identity_policy_encode(policy: DbObservationIdentityPolicy) -> Result<text, text>:
+    match _identity_policy_encode(policy):
+        Ok(wire): Ok(wire)
+        Err(error): Err(_identity_codec_error(error))
+
+fn _identity_policy_decode(wire: text, expected_revision: text) -> Result<DbObservationIdentityPolicy, text>:
+    if not _identity_codec_hex(expected_revision): return Err("SCVDB_OBSERVATION_IDENTITY_PIN")
+    val fields = _identity_codec_children(_identity_codec_root(wire, "SCVDB-OBSERVATION-IDENTITY-POLICY-v1\n", 2097152)?, 14, 14)?
+    val caps = DbCiCapabilities(identity_dimensions: _identity_codec_read_names(fields[5])?, uniqueness_tuple: _identity_codec_read_names(fields[6])?, event_hints: db_read_flag(fields[7])?, polling: db_read_flag(fields[8])?, bundle_import: db_read_flag(fields[9])?, artifact_download: db_read_flag(fields[10])?, attestations: db_read_flag(fields[11])?, pagination: db_read_flag(fields[12])?, maximum_bundle_bytes: db_read_unsigned(fields[13])?)
+    val policy = DbObservationIdentityPolicy(revision: _identity_codec_read_text(fields[0])?, namespace: _identity_codec_read_text(fields[1])?, epoch: db_read_unsigned(fields[2])?, provider_instance: _identity_codec_read_text(fields[3])?, project: _identity_codec_read_text(fields[4])?, capabilities: caps)
+    if policy.revision != expected_revision or db_observation_identity_policy_digest(policy)? != expected_revision: return Err("SCVDB_OBSERVATION_IDENTITY_PIN")
+    if _identity_policy_encode(policy)? != wire: return Err("SCVDB_OBSERVATION_IDENTITY_CODEC")
+    Ok(policy)
+
+fn db_observation_identity_policy_decode(wire: text, expected_revision: text) -> Result<DbObservationIdentityPolicy, text>:
+    match _identity_policy_decode(wire, expected_revision):
+        Ok(policy): Ok(policy)
+        Err(error): Err(_identity_codec_error(error))
+
+fn _identity_entry_encode(claim: DbObservationIdentityClaim) -> Result<text, text>:
+    if not _identity_codec_hex(claim.policy_revision) or not _identity_codec_hex(claim.identity_digest) or not _identity_codec_hex(claim.content_digest): return Err("SCVDB_OBSERVATION_IDENTITY_CODEC")
+    val reference = claim.observation
+    _identity_codec_text(reference.revision)?
+    if val uid = reference.entity.provisional:
+        for value in [uid.database_namespace, uid.entity_kind, uid.actor.hex]: _identity_codec_text(value)?
+    if val alias = reference.entity.settled:
+        for value in [alias.database_namespace, alias.entity_kind]: _identity_codec_text(value)?
+    match db_evidence_check_ref(reference):
+        Ok(_): pass
+        Err(_): return Err("SCVDB_OBSERVATION_IDENTITY_SCOPE")
+    if db_ref_kind(reference.entity) != "observation": return Err("SCVDB_OBSERVATION_IDENTITY_SCOPE")
+    val ref_bytes = db_canonical_list([db_snapshot_ref_encode(reference.entity)?, _identity_codec_text(reference.revision)?])
+    val bytes = db_canonical_list([_identity_codec_text(claim.policy_revision)?, _identity_codec_text(claim.identity_digest)?, _identity_codec_text(claim.content_digest)?, ref_bytes])
+    val wire = "SCVDB-OBSERVATION-IDENTITY-ENTRY-v1\n" + db_snapshot_hex(bytes) + "\n"
+    if wire.len() > 32768: return Err("SCVDB_OBSERVATION_IDENTITY_QUOTA")
+    Ok(wire)
+
+fn db_observation_identity_entry_encode(claim: DbObservationIdentityClaim) -> Result<text, text>:
+    match _identity_entry_encode(claim):
+        Ok(wire): Ok(wire)
+        Err(error): Err(_identity_codec_error(error))
+
+fn _identity_entry_decode(wire: text) -> Result<DbObservationIdentityClaim, text>:
+    val fields = _identity_codec_children(_identity_codec_root(wire, "SCVDB-OBSERVATION-IDENTITY-ENTRY-v1\n", 32768)?, 4, 4)?
+    val reference = _identity_codec_children(fields[3], 2, 2)?
+    # Preflight the fixed structured reference before the shared decoder reads
+    # children; do not let its generic child limit replace this four-field cap.
+    if reference[0].tag != 40u8 and reference[0].tag != 41u8: return Err("SCVDB_OBSERVATION_IDENTITY_CODEC")
+    val ref_fields = _identity_codec_children(DbDecodedFrame(tag: 6u8, payload: reference[0].payload, next_offset: reference[0].next_offset), 4, 4)?
+    for field in ref_fields:
+        if field.tag == 3u8: _identity_codec_read_text(field)?
+    val claim = DbObservationIdentityClaim(policy_revision: _identity_codec_read_text(fields[0])?, identity_digest: _identity_codec_read_text(fields[1])?, content_digest: _identity_codec_read_text(fields[2])?, observation: DbEvidenceRevision(entity: db_snapshot_ref_decode(reference[0])?, revision: _identity_codec_read_text(reference[1])?))
+    if _identity_entry_encode(claim)? != wire: return Err("SCVDB_OBSERVATION_IDENTITY_CODEC")
+    Ok(claim)
+
+fn db_observation_identity_entry_decode(wire: text) -> Result<DbObservationIdentityClaim, text>:
+    match _identity_entry_decode(wire):
+        Ok(claim): Ok(claim)
+        Err(error): Err(_identity_codec_error(error))
+
+fn db_observation_identity_entry_verify(wire: text, policy: DbObservationIdentityPolicy, expected_revision: text, expected_identity_digest: text, original: DbObservation?) -> Result<DbObservationIdentityClaim, text>:
+    val claim = db_observation_identity_entry_decode(wire)?
+    if not _identity_codec_hex(expected_identity_digest): return Err("SCVDB_OBSERVATION_IDENTITY_LOOKUP")
+    if val observation = original:
+        val actual = db_observation_identity_claim(observation, policy, expected_revision)?
+        if claim.policy_revision != actual.policy_revision or claim.identity_digest != actual.identity_digest or claim.identity_digest != expected_identity_digest or claim.content_digest != actual.content_digest or not db_evidence_same_ref(claim.observation, actual.observation): return Err("SCVDB_OBSERVATION_IDENTITY_LOOKUP")
+        return Ok(actual)
+    Err("SCVDB_OBSERVATION_IDENTITY_LOOKUP")
+
+export db_observation_identity_policy_encode, db_observation_identity_policy_decode
+export db_observation_identity_entry_encode, db_observation_identity_entry_decode, db_observation_identity_entry_verify
