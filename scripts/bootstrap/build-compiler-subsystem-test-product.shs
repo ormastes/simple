@@ -1,0 +1,297 @@
+#!/bin/sh
+# Build one source-bound compiler/interpreter/loader aggregate test executable.
+# The admitted Stage 2 compiler is the only compiler allowed on this path.
+set -eu
+
+source_root= compiler= compiler_sha256= compiler_producer_receipt=
+backend= subsystem= inventory= threads= rss_cap_kib=
+build_timeout_seconds= output= receipt=
+for arg do
+  case "$arg" in
+    --source-root=*) source_root=${arg#*=} ;;
+    --compiler=*) compiler=${arg#*=} ;;
+    --compiler-sha256=*) compiler_sha256=${arg#*=} ;;
+    --compiler-producer-receipt=*) compiler_producer_receipt=${arg#*=} ;;
+    --backend=*) backend=${arg#*=} ;;
+    --subsystem=*) subsystem=${arg#*=} ;;
+    --inventory=*) inventory=${arg#*=} ;;
+    --threads=*) threads=${arg#*=} ;;
+    --rss-cap-kib=*) rss_cap_kib=${arg#*=} ;;
+    --build-timeout-seconds=*) build_timeout_seconds=${arg#*=} ;;
+    --output=*) output=${arg#*=} ;;
+    --receipt=*) receipt=${arg#*=} ;;
+    *) echo "unknown product-builder argument: $arg" >&2; exit 2 ;;
+  esac
+done
+case "$backend:$subsystem" in
+  llvm:compiler|llvm:interpreter|llvm:loader|cranelift:compiler|cranelift:interpreter|cranelift:loader) ;;
+  *) echo 'invalid product backend/subsystem' >&2; exit 2 ;;
+esac
+case "$threads:$rss_cap_kib:$build_timeout_seconds" in
+  *[!0-9:]*|:*|*:) echo 'invalid product resource bounds' >&2; exit 2 ;;
+esac
+[ "$threads" -ge 10 ] && [ "$threads" -le 20 ] || { echo 'product threads must be 10..20' >&2; exit 2; }
+[ "$rss_cap_kib" -gt 0 ] && [ "$rss_cap_kib" -le 6835937 ] || { echo 'invalid legal RSS cap' >&2; exit 2; }
+[ "$build_timeout_seconds" -gt 0 ] || { echo 'invalid build timeout' >&2; exit 2; }
+for value in "$source_root" "$compiler" "$compiler_sha256" "$compiler_producer_receipt" "$inventory" "$output" "$receipt"; do
+  [ -n "$value" ] || { echo 'missing required product-builder argument' >&2; exit 2; }
+done
+case "$source_root:$compiler:$compiler_producer_receipt:$inventory:$output:$receipt" in
+  /*:/*:/*:/*:/*:/*) ;;
+  *) echo 'product paths must be absolute' >&2; exit 2 ;;
+esac
+case "$compiler_sha256" in
+  *[!0-9a-f]*|'') echo 'invalid compiler SHA' >&2; exit 2 ;;
+esac
+[ "${#compiler_sha256}" -eq 64 ] || exit 2
+
+hash_file() {
+  perl -MDigest::SHA -e 'my $s=Digest::SHA->new(256); open my $f,"<:raw",$ARGV[0] or die $!; $s->addfile($f); print $s->hexdigest' "$1"
+}
+field() {
+  perl -e 'my($k,$p)=@ARGV; open my $f,"<",$p or exit 2; my @v=map { /^\Q$k\E=(.*)$/ ? $1 : () } <$f>; @v==1 or exit 2; print $v[0]' "$1" "$2"
+}
+physical_file() {
+  [ -f "$1" ] && [ ! -L "$1" ]
+}
+fail() {
+  error=$1
+  printf '%s\n' "product-builder: $error" >&2
+  if [ -n "$receipt" ]; then
+    mkdir -p "$(dirname "$receipt")"
+    { printf '%s\n' 'schema=simple-subsystem-product-v1' 'status=failed'
+      printf '%s\n' "requested_backend=$backend" "subsystem=$subsystem" "error=$error"
+    } >"$receipt"
+  fi
+  exit 1
+}
+
+physical_file "$compiler" || fail 'admitted compiler missing or linked'
+physical_file "$compiler_producer_receipt" || fail 'admission receipt missing or linked'
+physical_file "$inventory" || fail 'inventory missing or linked'
+[ "$(hash_file "$compiler")" = "$compiler_sha256" ] || fail 'compiler SHA differs'
+[ "$(field schema "$compiler_producer_receipt")" = simple-bootstrap-stage2-admission-v2 ] || fail 'admission schema differs'
+[ "$(field status "$compiler_producer_receipt")" = admitted ] || fail 'compiler is not admitted'
+[ "$(field candidate_path "$compiler_producer_receipt")" = "$compiler" ] || fail 'admitted compiler path differs'
+[ "$(field candidate_sha256 "$compiler_producer_receipt")" = "$compiler_sha256" ] || fail 'admitted compiler SHA differs'
+[ "$compiler_producer_receipt" = "$(dirname "$compiler")/admission.env" ] || fail 'admission is not compiler adjacent'
+source_root=$(CDPATH= cd -P -- "$source_root" && pwd -P) || fail 'source root missing'
+[ -d "$source_root/src/compiler" ] && [ -d "$source_root/src/lib" ] && [ -d "$source_root/test" ] || fail 'incomplete source root'
+source_head=$(git -C "$source_root" rev-parse HEAD) || fail 'source commit unavailable'
+[ -z "$(git -C "$source_root" status --porcelain=v1)" ] || fail 'source checkout is not clean'
+source_snapshot=$(field source_snapshot_path "$compiler_producer_receipt") || fail 'admitted source snapshot absent'
+physical_file "$source_snapshot" || fail 'admitted source snapshot missing'
+[ "$(hash_file "$source_snapshot")" = "$(field source_snapshot_sha256 "$compiler_producer_receipt")" ] || fail 'admitted source snapshot SHA differs'
+. "$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+
+runtime_authority=$(field runtime_authority_path "$compiler_producer_receipt") || fail 'runtime authority absent'
+capsule_binding="$(dirname "$compiler")/runtime-capsule.env"
+physical_file "$capsule_binding" || fail 'runtime capsule binding missing'
+[ "$(field schema "$capsule_binding")" = simple-phase2-runtime-binding-v1 ] || fail 'runtime binding schema differs'
+[ "$(field compiler_sha256 "$capsule_binding")" = "$compiler_sha256" ] || fail 'runtime binding compiler differs'
+capsule=$(field capsule_path "$capsule_binding") || fail 'capsule path absent'
+capsule_receipt="$capsule/phase2-runtime-capsule.env"
+physical_file "$capsule_receipt" || fail 'frozen runtime capsule missing'
+[ "$(hash_file "$capsule_receipt")" = "$(field capsule_receipt_sha256 "$capsule_binding")" ] || fail 'capsule receipt SHA differs'
+[ "$(field status "$capsule_receipt")" = frozen ] || fail 'runtime capsule not frozen'
+[ "$(field compiler_sha256 "$capsule_receipt")" = "$compiler_sha256" ] || fail 'runtime capsule compiler differs'
+[ "$(field source_authority_path "$capsule_receipt")" = "$runtime_authority" ] || fail 'runtime authority differs'
+sh "$source_root/scripts/bootstrap/phase2-runtime-capsule.shs" verify "$capsule" >/dev/null || fail 'runtime capsule verification failed'
+runtime_receipt="$runtime_authority/hosted-runtime.env"
+physical_file "$runtime_receipt" || fail 'hosted runtime receipt missing'
+
+job_root=$(dirname "$output")
+case "$receipt" in "$job_root"/*) ;; *) fail 'receipt must be under product job root' ;; esac
+[ ! -e "$output" ] && [ ! -e "$receipt" ] && [ ! -e "$job_root/source-overlay" ] && \
+  [ ! -e "$job_root/logs" ] && [ ! -e "$job_root/tools" ] && [ ! -e "$job_root/tmp" ] && \
+  [ ! -e "$job_root/source-spans.tsv" ] && [ ! -e "$job_root/main-verdicts.tsv" ] || \
+  fail 'product job root contains an earlier attempt'
+for volume in / /dev/shm; do
+  available_kib=$(df -Pk "$volume" | awk 'NR==2 {print $4}')
+  [ "$available_kib" -ge 4194304 ] || fail "less than 4 GiB free on $volume"
+done
+mkdir -p "$job_root/logs" "$job_root/tools" "$job_root/tmp"
+source_observed="$job_root/logs/source-observed.txt"
+bootstrap_stage3_source_snapshot "$source_observed" "$source_root" || fail 'canonical source snapshot failed'
+cmp -s "$source_observed" "$source_snapshot" || fail 'source differs from admitted Stage 2 snapshot'
+inventory_current="$job_root/inventory-current.tsv"
+sh "$source_root/scripts/bootstrap/compiler-subsystem-test-inventory.shs" "$source_root" >"$inventory_current" || fail 'inventory regeneration failed'
+cmp -s "$inventory" "$inventory_current" || fail 'inventory differs from current source'
+inventory_sha256=$(hash_file "$inventory")
+watchdog="$source_root/scripts/bootstrap/run-process-group-timeout.shs"
+physical_file "$watchdog" || fail 'process watchdog missing'
+
+# The admitted Stage 2 SCV accepts native-build entries only below src/test.
+# Retain generated files under an isolated exact-HEAD sparse worktree, whose
+# root and manifest are both inside this product job. Never mutate the pinned
+# caller's source checkout or transiently populate a full worktree.
+overlay="$job_root/source-overlay"
+git -C "$source_root" worktree add --no-checkout --detach "$overlay" "$source_head" \
+  >"$job_root/logs/source-overlay.log" 2>&1 || fail 'isolated source overlay creation failed'
+git -C "$overlay" sparse-checkout init --cone \
+  >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'sparse overlay init failed'
+git -C "$overlay" sparse-checkout set src/compiler src/lib src/app src/plugins src/compositions \
+  >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'sparse overlay checkout failed'
+git -C "$overlay" checkout -f HEAD \
+  >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'sparse overlay materialization failed'
+[ "$(git -C "$overlay" rev-parse HEAD)" = "$source_head" ] || fail 'overlay source HEAD differs'
+[ -f "$overlay/src/app/compiler_subsystem_product_generator/main.spl" ] && \
+  [ -f "$overlay/src/app/compiler_subsystem_main_verdict/main.spl" ] && \
+  [ -f "$overlay/src/lib/nogc_sync_mut/spec.spl" ] || fail 'sparse overlay lacks product sources'
+[ -z "$(git -C "$overlay" status --porcelain=v1)" ] || fail 'sparse overlay is not clean before generation'
+overlay_allocated_kib=$(du -sk "$overlay" | awk '{print $1}')
+overlay_allocated_bytes=$((overlay_allocated_kib * 1024))
+overlay_input_manifest="$job_root/logs/source-overlay-inputs.tsv"
+perl -MFile::Find -MDigest::SHA -e '
+  my ($root, $out) = @ARGV; my @rows;
+  for my $dir (qw(src/compiler src/lib src/app src/plugins src/compositions)) {
+    find({no_chdir => 1, wanted => sub {
+      my $path = $File::Find::name;
+      die "linked overlay file: $path\n" if -l $path;
+      return unless -f $path;
+      my $relative = substr($path, length($root) + 1);
+      die "unsafe overlay path\n" if $relative =~ /[\t\r\n\\]/;
+      open my $fh, "<:raw", $path or die $!;
+      my $sha = Digest::SHA->new(256); $sha->addfile($fh);
+      push @rows, "$relative\t" . $sha->hexdigest . "\n";
+    }}, "$root/$dir");
+  }
+  open my $fh, ">:raw", $out or die $!;
+  print {$fh} "path\tsha256\n", sort @rows or die $!;
+  close $fh or die $!;
+' "$overlay" "$overlay_input_manifest" || fail 'overlay input manifest failed'
+overlay_input_sha256=$(hash_file "$overlay_input_manifest")
+for volume in / /dev/shm; do
+  available_kib=$(df -Pk "$volume" | awk 'NR==2 {print $4}')
+  [ "$available_kib" -ge 6291456 ] || fail "less than 4 GiB floor plus 2 GiB build reserve on $volume"
+done
+
+run_native_build() {
+  task=$1 entry=$2 produced=$3 build_backend=$4
+  shift 4
+  set -- "$compiler" native-build --backend="$build_backend" --threads "$threads" \
+      --source src/compiler --source src/app --source src/lib \
+      --source src/plugins --source src/compositions "$@" \
+    --entry-closure --entry "$entry" --cache-dir "$job_root/cache-$task" \
+    --output "$produced"
+  {
+    printf '%s\n' 'schema=simple-native-product-command-v1'
+    printf '%s\n' "source_root=$source_root" "source_overlay=$overlay" "compiler_sha256=$compiler_sha256"
+    printf '%s\n' "runtime_authority=$runtime_authority" "rss_cap_kib=$rss_cap_kib"
+    printf '%s\n' "timeout_seconds=$build_timeout_seconds" "task=$task"
+    perl -e 'for my $arg (@ARGV) { print "argv-hex=", unpack("H*", $arg), "\n" }' "$@"
+  } >"$job_root/logs/$task.command.tsv"
+  mkdir -p "$job_root/tmp/$task"
+  (
+    cd "$overlay"
+    export TMPDIR="$job_root/tmp/$task"
+    export SIMPLE_PROJECT_ROOT="$overlay" SIMPLE_LIB="$overlay/src"
+    export SIMPLE_RUNTIME_PATH="$runtime_authority" SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap
+    export SIMPLE_NATIVE_BUILD_THREADS="$threads" SIMPLE_NO_STUB_FALLBACK=1
+    export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$rss_cap_kib"
+    export SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=5000
+    export SIMPLE_SCV_INVENTORY_COLD_INIT=1
+    export SIMPLE_PROCESS_TREE_RSS_RECEIPT="$job_root/logs/$task.watchdog.env"
+    sh "$watchdog" "$build_timeout_seconds" 5 "$@"
+  ) >"$job_root/logs/$task.log" 2>&1 || return $?
+  physical_file "$produced" || return 1
+  physical_file "$job_root/logs/$task.watchdog.env" || return 1
+  [ "$(field status "$job_root/logs/$task.watchdog.env")" = complete ] || return 1
+  [ "$(field exit_status "$job_root/logs/$task.watchdog.env")" = 0 ] || return 1
+  [ "$(field rss_cap_enforced "$job_root/logs/$task.watchdog.env")" = 1 ] || return 1
+  [ "$(field rss_limit_kib "$job_root/logs/$task.watchdog.env")" = "$rss_cap_kib" ]
+}
+
+run_native_tool() {
+  task=$1
+  shift
+  {
+    printf '%s\n' 'schema=simple-native-product-command-v1'
+    printf '%s\n' "source_root=$source_root" "compiler_sha256=$compiler_sha256"
+    printf '%s\n' "rss_cap_kib=$rss_cap_kib" "timeout_seconds=$build_timeout_seconds" "task=$task"
+    perl -e 'for my $arg (@ARGV) { print "argv-hex=", unpack("H*", $arg), "\n" }' "$@"
+  } >"$job_root/logs/$task.command.tsv"
+  mkdir -p "$job_root/tmp/$task"
+  (
+    cd "$source_root"
+    export TMPDIR="$job_root/tmp/$task"
+    export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$rss_cap_kib"
+    export SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=5000
+    export SIMPLE_PROCESS_TREE_RSS_RECEIPT="$job_root/logs/$task.watchdog.env"
+    sh "$watchdog" "$build_timeout_seconds" 5 "$@"
+  ) >"$job_root/logs/$task.log" 2>&1 || return $?
+  physical_file "$job_root/logs/$task.watchdog.env" || return 1
+  [ "$(field status "$job_root/logs/$task.watchdog.env")" = complete ] || return 1
+  [ "$(field exit_status "$job_root/logs/$task.watchdog.env")" = 0 ] || return 1
+  [ "$(field rss_cap_enforced "$job_root/logs/$task.watchdog.env")" = 1 ] || return 1
+  [ "$(field rss_limit_kib "$job_root/logs/$task.watchdog.env")" = "$rss_cap_kib" ]
+}
+
+generator="$job_root/tools/product-generator"
+run_native_build generator src/app/compiler_subsystem_product_generator/main.spl "$generator" "$backend" ||
+  fail 'native parser generator build failed'
+spans="$job_root/source-spans.tsv"
+run_native_tool generator_run "$generator" --source-root="$source_root" --inventory="$inventory" \
+  --subsystem="$subsystem" --output="$spans" || fail 'native parser span inventory failed'
+physical_file "$spans" || fail 'native parser span ledger absent'
+
+adapter="$job_root/tools/main-verdict-adapter"
+run_native_build main_adapter src/app/compiler_subsystem_main_verdict/main.spl "$adapter" "$backend" ||
+  fail 'authored main adapter build failed'
+main_policy="$source_root/config/check/compiler_subsystem_main_verdict_policy.tsv"
+physical_file "$main_policy" || fail 'authored main policy absent'
+main_policy_sha256=$(hash_file "$main_policy")
+main_verdicts="$job_root/main-verdicts.tsv"
+run_native_tool main_adapter_run "$adapter" --source-root="$source_root" --inventory="$inventory" \
+  --spans="$spans" --policy="$main_policy" \
+  --output="$main_verdicts" || fail 'authored main verdict unsupported'
+physical_file "$main_verdicts" || fail 'authored main verdict manifest absent'
+spans_sha256=$(hash_file "$spans")
+main_verdicts_sha256=$(hash_file "$main_verdicts")
+
+generated="$overlay/src/app"
+perl "$source_root/scripts/bootstrap/render-compiler-subsystem-product.pl" \
+  "$source_root" "$inventory" "$spans" "$main_verdicts" "$generated" "$subsystem" "$backend" \
+  >"$job_root/logs/render.log" 2>&1 || fail 'aggregate source rendering failed'
+manifest="$generated/generated-manifest.tsv"
+physical_file "$manifest" || fail 'generated source manifest absent'
+generated_tree_sha256=$(hash_file "$manifest")
+subset_sha256=$(field subset_sha256 "$job_root/logs/render.log") || fail 'subset SHA absent'
+generated_owner_count=$(field generated_owner_count "$job_root/logs/render.log") || fail 'owner count absent'
+
+run_native_build product src/app/product/main.spl "$output" "$backend" ||
+  fail 'native aggregate product build failed'
+
+{
+  printf '%s\n' 'schema=simple-subsystem-product-v1' 'status=produced'
+  printf '%s\n' "source_root=$source_root" "source_head=$source_head"
+  printf '%s\n' "source_snapshot_path=$source_snapshot" "source_snapshot_sha256=$(hash_file "$source_snapshot")"
+  printf '%s\n' "source_overlay_path=$overlay" "source_overlay_head=$(git -C "$overlay" rev-parse HEAD)"
+  printf '%s\n' "source_overlay_allocated_bytes=$overlay_allocated_bytes"
+  printf '%s\n' "source_overlay_input_manifest_path=$overlay_input_manifest"
+  printf '%s\n' "source_overlay_input_sha256=$overlay_input_sha256"
+  printf '%s\n' "compiler_path=$compiler" "compiler_sha256=$compiler_sha256"
+  printf '%s\n' "compiler_producer_receipt_path=$compiler_producer_receipt"
+  printf '%s\n' "compiler_producer_receipt_sha256=$(hash_file "$compiler_producer_receipt")"
+  printf '%s\n' "requested_backend=$backend" "actual_backend=$backend" "provider_path=none" "provider_sha256=none"
+  printf '%s\n' "subsystem=$subsystem" "inventory_path=$inventory" "inventory_sha256=$inventory_sha256"
+  printf '%s\n' "subset_sha256=$subset_sha256" "generated_manifest_path=$manifest"
+  printf '%s\n' "generated_tree_sha256=$generated_tree_sha256"
+  printf '%s\n' "source_spans_path=$spans" "source_spans_sha256=$spans_sha256"
+  printf '%s\n' "main_policy_path=$main_policy" "main_policy_sha256=$main_policy_sha256"
+  printf '%s\n' "main_verdicts_path=$main_verdicts" "main_verdicts_sha256=$main_verdicts_sha256"
+  printf '%s\n' "generator_path=$generator" "generator_sha256=$(hash_file "$generator")"
+  printf '%s\n' "adapter_path=$adapter" "adapter_sha256=$(hash_file "$adapter")"
+  printf '%s\n' "runtime_receipt_path=$runtime_receipt" "runtime_receipt_sha256=$(hash_file "$runtime_receipt")"
+  printf '%s\n' "binary_path=$output" "binary_sha256=$(hash_file "$output")"
+  printf '%s\n' "generated_owner_count=$generated_owner_count" "threads=$threads"
+  printf '%s\n' "rss_cap_kib=$rss_cap_kib" "build_timeout_seconds=$build_timeout_seconds"
+  for task in generator generator_run main_adapter main_adapter_run product; do
+    printf '%s\n' "${task}_command_path=$job_root/logs/$task.command.tsv"
+    printf '%s\n' "${task}_command_sha256=$(hash_file "$job_root/logs/$task.command.tsv")"
+    printf '%s\n' "${task}_watchdog_receipt_path=$job_root/logs/$task.watchdog.env"
+    printf '%s\n' "${task}_watchdog_receipt_sha256=$(hash_file "$job_root/logs/$task.watchdog.env")"
+  done
+} >"$receipt"
