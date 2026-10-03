@@ -48,6 +48,22 @@ rejection. This repair does not close typed lowering or full P6 instrumentation.
 
 ## Remaining capture implementation sequence
 
+Progress update, 2026-10-03: the sequence below is now an execution checklist,
+not a claim that all code remains unwritten. The integrated branch contains
+run capture/replay orchestration, interpreter argument transport and canonical
+extern dispatch, failure cleanup, output admission, and executable regression
+scenarios. These changes have source review only; their runtime evidence remains
+pending. Five extended metrics still need actual observation wiring rather than
+serializer-only support. Full typed profile selection and generic physical
+lowering remain incomplete.
+
+Native-build policy and memory-budget controls now share strict parsing and
+cache identity. Typed explanation uses a compiler-produced MIR receipt API;
+its compiler implementation and target restrictions must be verified together.
+The first literal membership slice does not establish complete collection
+planner coverage. No RED/GREEN execution, verification PASS, or release landing
+is claimed by this session's local commits.
+
 1. Define one bounded execution-owned `collection_capture_begin`, `note_size`, `note_lookup`, `finish`, and `abort` contract. The interpreter and native runtime must share its event semantics; the app must receive a snapshot after evaluation. An app-only Simple global cannot observe the interpreter's fresh module context.
 2. Instrument attributed text and generic map/set operations once per logical event. Generic set delegates to generic map; do not count both layers. Keep lookup hit detection independent of an optional map value, preserve lifetime peak across `clear`, and filter events by admitted target/site.
 3. Add `simple run --collection-profile-out=PATH` with required workload and target identifiers. Serialize the bounded snapshot through the existing `.sprof` v2 writer after execution; never open files in collection operations. Make snapshot/write failures visible and clear run state on every exit path.
