@@ -1139,3 +1139,12 @@ is `tools/claude-plugin/repo-and-pull-req/skills/gh_pull_req_review/SKILL.md`.
   `0ea0:2211` exposes storage/HID only and must be rejected.
 - If OpenOCD reports the FTDI device absent, stop. Do not substitute CN22 CPLD
   service JTAG, guess CPU TAP wiring, or loop software resets.
+
+## Existing Simple native test binaries
+
+For compiled test executables like GoogleTest, use Simple's existing native
+runner, not a newly introduced foreign framework. Start with the
+[native test binary workflow](../07_guide/infra/testing/native_test_binary_workflow.md):
+explicit LLVM/Cranelift AOT commands, retained executables, source-list versus
+binary-owned counts, and the six-product compiler/interpreter/loader matrix.
+Research and repair existing aggregate/list entrypoints before replacing them.

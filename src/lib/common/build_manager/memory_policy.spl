@@ -1,0 +1,60 @@
+# Reservation is an admission charge, not an assertion about maximum RSS.
+use std.common.build_manager.contracts.{BuildTaskV1, builder_task_identity_v1, builder_digest_valid_v1, BUILDER_MEMORY_LIMIT_MAX_V2}
+
+fn builder_memory_policy_valid_v1(policy: text) -> bool:
+    policy == "enforce" or policy == "monitor"
+
+fn builder_memory_enforcement_bytes_v1(policy: text, reserved: i64) -> Result<i64, text>:
+    if reserved < 1 or reserved > BUILDER_MEMORY_LIMIT_MAX_V2:
+        return Err("positive task memory reservation required")
+    if policy == "monitor": return Ok(0)
+    if policy == "enforce": return Ok(reserved)
+    Err("invalid task memory policy")
+
+struct BuilderMemoryReceiptV1:
+    task_identity: text
+    requested_policy: text
+    reserved_bytes: i64
+    enforcement: text
+    enforced_bytes: i64
+    observed_peak_bytes: i64
+    peak_metric: text
+
+fn builder_memory_receipt_validate_v1(receipt: BuilderMemoryReceiptV1) -> text:
+    if not builder_digest_valid_v1(receipt.task_identity): return "invalid memory receipt identity"
+    if receipt.reserved_bytes < 1 or receipt.reserved_bytes > BUILDER_MEMORY_LIMIT_MAX_V2:
+        return "invalid memory reservation"
+    if receipt.observed_peak_bytes < 0: return "invalid observed memory peak"
+    if not ["job-commit-peak", "cgroup-memory-peak", "process-tree-peak", "child-rss-peak"].contains(receipt.peak_metric):
+        return "unqualified memory metric"
+    if receipt.requested_policy == "monitor":
+        if receipt.enforcement != "none" or receipt.enforced_bytes != 0:
+            return "monitor receipt claims a memory cap"
+    elif receipt.requested_policy == "enforce":
+        if receipt.enforced_bytes != receipt.reserved_bytes or not ["job-memory", "cgroup-memory-max"].contains(receipt.enforcement):
+            return "requested memory enforcement unproven"
+    else:
+        return "invalid requested memory policy"
+    if receipt.enforcement == "job-memory" and receipt.peak_metric != "job-commit-peak":
+        return "Job memory metric mismatch"
+    if receipt.enforcement == "cgroup-memory-max" and receipt.peak_metric != "cgroup-memory-peak":
+        return "cgroup memory metric mismatch"
+    ""
+
+fn builder_memory_receipt_encode_v1(receipt: BuilderMemoryReceiptV1) -> Result<text, text>:
+    val reason = builder_memory_receipt_validate_v1(receipt)
+    if reason != "": return Err(reason)
+    Ok("format=simple-build-memory-v1\ntask_identity=" + receipt.task_identity +
+        "\nrequested_policy=" + receipt.requested_policy + "\nreserved_bytes=" + str(receipt.reserved_bytes) +
+        "\nenforcement=" + receipt.enforcement + "\nenforced_bytes=" + str(receipt.enforced_bytes) +
+        "\nobserved_peak_bytes=" + str(receipt.observed_peak_bytes) + "\npeak_metric=" + receipt.peak_metric + "\n")
+
+fn builder_memory_receipt_for_task_v1(task: BuildTaskV1, provider: text, peak: i64,
+        metric: text) -> Result<text, text>:
+    val enforced = builder_memory_enforcement_bytes_v1(task.memory_policy, task.memory_limit_bytes)?
+    val enforcement = if enforced == 0: "none" else: provider
+    builder_memory_receipt_encode_v1(BuilderMemoryReceiptV1(builder_task_identity_v1(task),
+        task.memory_policy, task.memory_limit_bytes, enforcement, enforced, peak, metric))
+
+export BuilderMemoryReceiptV1, builder_memory_enforcement_bytes_v1, builder_memory_policy_valid_v1
+export builder_memory_receipt_validate_v1, builder_memory_receipt_encode_v1, builder_memory_receipt_for_task_v1

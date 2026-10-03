@@ -18,6 +18,8 @@ set -eu
 printf 'emit %s %s\n' "$5" "$6" >>"$PHASE_TEST_LOG"
 manifest=
 while [ "$#" -gt 0 ]; do
+  if [ "$1" = --work-timeout-ms ]; then printf 'work-timeout %s\n' "$2" >>"$PHASE_TEST_LOG"; fi
+  if [ "$1" = --memory-policy ]; then printf 'memory-policy %s\n' "$2" >>"$PHASE_TEST_LOG"; fi
   if [ "$1" = --manifest ]; then manifest=$2; shift; fi
   shift
 done
@@ -41,7 +43,7 @@ launch() {
     --stage-root="$tmp/stage" --inventory="$tmp/stage/inputs.list" --links="$tmp/stage/links.list" \
     --root="$tmp/$1" --phase3-command=.managed/phase3.shs --phase4-command=.managed/phase4.shs \
     --phase3-memory-bytes=6000000000 --phase4-memory-bytes=7000000000 \
-    --policy="$tmp/policy" --policy-sha256="$2" --poll-ms=1000 --lifetime-ms=60000
+    --policy="$tmp/policy" --policy-sha256="$2" --poll-ms=1000 --lifetime-ms="${3:-60000}" --memory-policy="${4:-enforce}"
 }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 launch valid "$(sha "$tmp/policy")"
@@ -49,6 +51,17 @@ launch valid "$(sha "$tmp/policy")"
 grep -q '^emit managed-phase3 phase3$' "$PHASE_TEST_LOG" || fail 'phase3 binding lost'
 grep -q '^emit managed-phase4 phase4$' "$PHASE_TEST_LOG" || fail 'phase4 binding lost'
 grep -q '^dispatch 21$' "$PHASE_TEST_LOG" || fail 'wrong compiled owner invocation'
+
+: >"$PHASE_TEST_LOG"
+launch unlimited "$(sha "$tmp/policy")" 0 monitor
+[ "$(grep -c '^work-timeout 0$' "$PHASE_TEST_LOG")" -eq 2 ] || fail 'unlimited work deadline not forwarded to both phase manifests'
+[ "$(grep -c '^memory-policy monitor$' "$PHASE_TEST_LOG")" -eq 2 ] || fail 'monitor policy not forwarded to both phase manifests'
+grep -q '^dispatch 21$' "$PHASE_TEST_LOG" || fail 'unlimited work never reached compiled owner'
+
+: >"$PHASE_TEST_LOG"
+code=0
+launch negative "$(sha "$tmp/policy")" -1 monitor >"$tmp/out" 2>"$tmp/err" || code=$?
+[ "$code" -eq 2 ] && [ ! -s "$PHASE_TEST_LOG" ] || fail 'negative work deadline reached emitter/owner'
 
 : >"$PHASE_TEST_LOG"
 code=0

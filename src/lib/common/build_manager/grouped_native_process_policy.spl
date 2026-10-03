@@ -1,11 +1,15 @@
-# One process is bounded by its enforced JobObject/cgroup limit. The public
+# Admission reservations remain positive even when native enforcement is disabled. The public
 # Win64 extended-limit row has a lifetime job peak but no current job charge.
-# Reserve every active process's full hard cap for both physical and system
-# commit headroom until a true current aggregate charge probe is available.
+# Reserve each active process's full reservation for physical and commit
+# headroom. Monitor overshoot increases that charge; an unavailable current
+# measurement uses the lifetime peak conservatively, never a fabricated zero.
+use std.common.build_manager.memory_policy.{builder_memory_policy_valid_v1}
+
 struct NativeGroupActiveChargeV1:
     memory_limit_bytes: i64
     memory_current_bytes: i64
     effective_threads: i64
+    memory_policy: text = "enforce"
 
 struct NativeGroupProcessBudgetV1:
     admitted: bool
@@ -15,6 +19,14 @@ struct NativeGroupProcessBudgetV1:
     required_host_bytes: i64
     required_commit_bytes: i64
     active_threads: i64
+
+fn native_group_observed_charge_v1(policy: text, current: i64, peak: i64,
+        current_measured: bool) -> i64:
+    if current_measured: return current
+    if policy == "monitor": return peak
+    0
+
+export native_group_observed_charge_v1
 
 fn native_group_process_budget_v1(cpu_count: i64, candidate_threads: i64,
         candidate_limit_bytes: i64, host_reserve_bytes: i64,
@@ -33,14 +45,16 @@ fn native_group_process_budget_v1(cpu_count: i64, candidate_threads: i64,
     var active_threads: i64 = 0
     var active_host_cap: i64 = 0
     for charge in active:
-        if charge.memory_limit_bytes < 1 or
+        if not builder_memory_policy_valid_v1(charge.memory_policy) or charge.memory_limit_bytes < 1 or
                 charge.memory_limit_bytes > 1125899906842624 or
                 charge.memory_current_bytes < 0 or
-                charge.memory_current_bytes > charge.memory_limit_bytes or
+                charge.memory_current_bytes > 1125899906842624 or
+                (charge.memory_policy == "enforce" and charge.memory_current_bytes > charge.memory_limit_bytes) or
                 charge.effective_threads < 1 or charge.effective_threads > cpu_count:
             return Err("invalid active native group charge")
         active_threads = active_threads + charge.effective_threads
-        active_host_cap = active_host_cap + charge.memory_limit_bytes
+        val admission_charge = if charge.memory_current_bytes > charge.memory_limit_bytes: charge.memory_current_bytes else: charge.memory_limit_bytes
+        active_host_cap = active_host_cap + admission_charge
     val required_host = active_host_cap + candidate_limit_bytes + host_reserve_bytes
     val required_commit = active_host_cap + candidate_limit_bytes + host_reserve_bytes
     if active_threads + candidate_threads > cpu_count:

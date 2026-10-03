@@ -1,0 +1,118 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+guard=$root/scripts/resource/process-tree-rss-watchdog.pl
+tmp=$(mktemp -d)
+controller=
+watchdog=
+leader=
+cleanup() {
+    # These PIDs come only from this test's private controller/ready files.
+    [ -z "$watchdog" ] || kill -TERM "$watchdog" 2>/dev/null || :
+    [ -z "$controller" ] || kill -TERM "$controller" 2>/dev/null || :
+    sleep .2
+    for group in "$leader" "$controller"; do
+        [ -z "$group" ] || perl -e 'kill "KILL", -$ARGV[0]' "$group" 2>/dev/null || :
+    done
+    [ -z "$watchdog" ] || kill -KILL "$watchdog" 2>/dev/null || :
+    [ -z "$controller" ] || wait "$controller" 2>/dev/null || :
+    rm -rf "$tmp"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# This controller owns a separate session but the production watchdog creates
+# another session for its workload. Killing only the controller therefore
+# cannot accidentally satisfy the regression by signalling the workload too.
+cat >"$tmp/controller.pl" <<'PERL'
+use strict;
+use warnings;
+use POSIX qw(setsid);
+my ($guard, $base, $duration) = @ARGV;
+defined(setsid()) or die "controller setsid failed";
+my $child = fork();
+defined($child) or die "controller fork failed";
+if (!$child) {
+    exec $^X, $guard, '--max-rss-kib=65536', "--receipt=$base.env", '--',
+        '/bin/sh', '-c', 'echo $$ >"$1"; sleep "$2" & echo $! >>"$1"; wait',
+        'sh', "$base.pids", $duration;
+    die "watchdog exec failed";
+}
+open(my $pid, '>', "$base.guard") or die $!;
+print $pid "$child\n";
+close($pid) or die $!;
+waitpid($child, 0) == $child or die "controller wait failed";
+exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
+PERL
+
+start_case() {
+    name=$1
+    perl "$tmp/controller.pl" "$guard" "$tmp/$name" "$2" >"$tmp/$name.log" 2>&1 &
+    controller=$!
+    attempts=0
+    while [ ! -s "$tmp/$name.pids" ] || [ "$(wc -l <"$tmp/$name.pids")" -ne 2 ]; do
+        attempts=$((attempts + 1))
+        [ "$attempts" -lt 500 ] || { cat "$tmp/$name.log"; fail "$name: no workload readiness"; }
+        sleep .02
+    done
+    watchdog=$(cat "$tmp/$name.guard")
+    leader=$(sed -n '1p' "$tmp/$name.pids")
+    [ "$controller" != "$leader" ] || fail 'controller and workload share identity'
+}
+
+start_case abandoned 60
+kill -KILL "$controller"
+status=0
+wait "$controller" 2>/dev/null || status=$?
+[ "$status" -ne 0 ] || fail 'controller was not interrupted'
+attempts=0
+while [ ! -s "$tmp/abandoned.env" ]; do
+    attempts=$((attempts + 1))
+    [ "$attempts" -lt 250 ] || fail 'controller exited but watchdog left workload running without a receipt'
+    sleep .02
+done
+grep -Fxq 'status=controller-exited' "$tmp/abandoned.env" || fail 'controller cancellation status missing'
+grep -Fxq 'exit_status=143' "$tmp/abandoned.env" || fail 'controller cancellation exit status missing'
+grep -Fxq 'quiescent=1' "$tmp/abandoned.env" || fail 'controller cancellation did not establish quiescence'
+for pid in "$watchdog" $(cat "$tmp/abandoned.pids"); do
+    state=$(ps -o stat= -p "$pid" 2>/dev/null || :)
+    case "$state" in ''|Z*) ;; *) fail "controller cancellation left survivor $pid ($state)" ;; esac
+done
+controller= watchdog= leader=
+
+# A live controller must not cancel a naturally completing workload.
+start_case completed .4
+status=0
+wait "$controller" || status=$?
+[ "$status" -eq 0 ] || { cat "$tmp/completed.log"; fail "normal workload exited $status"; }
+grep -Fxq 'status=complete' "$tmp/completed.env" || fail 'normal completion was cancelled'
+grep -Fxq 'quiescent=1' "$tmp/completed.env" || fail 'normal completion was not quiescent'
+controller= watchdog= leader=
+
+# Freeze observation, allow the real workload to finish, then lose the
+# controller. Its completed exit status must win over parent-loss cancellation.
+start_case completed_before_loss 1
+kill -STOP "$watchdog"
+attempts=0
+while :; do
+    state=$(ps -o stat= -p "$leader" 2>/dev/null || :)
+    case "$state" in Z*) break ;; esac
+    attempts=$((attempts + 1))
+    [ "$attempts" -lt 250 ] || fail 'workload did not complete while observation was stopped'
+    sleep .02
+done
+kill -KILL "$controller"
+wait "$controller" 2>/dev/null || :
+kill -CONT "$watchdog"
+attempts=0
+while [ ! -s "$tmp/completed_before_loss.env" ]; do
+    attempts=$((attempts + 1))
+    [ "$attempts" -lt 250 ] || fail 'completed workload has no receipt after controller loss'
+    sleep .02
+done
+grep -Fxq 'status=complete' "$tmp/completed_before_loss.env" || fail 'controller loss overwrote completed result'
+grep -Fxq 'exit_status=0' "$tmp/completed_before_loss.env" || fail 'completed result changed after controller loss'
+grep -Fxq 'quiescent=1' "$tmp/completed_before_loss.env" || fail 'completed orphan was not quiescent'
+controller= watchdog= leader=
+echo 'PASS: controller death cancels live workload and preserves normal/already-completed results (3 cases)'

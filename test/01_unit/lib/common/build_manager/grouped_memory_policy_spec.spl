@@ -1,0 +1,55 @@
+use std.spec
+use std.common.build_manager.group_process_protocol.{GroupProcessRequestV1,
+    GroupProcessLaunchV1, group_process_launch_encode_v1, group_process_launch_decode_v1,
+    group_process_identity_v1, group_process_memory_receipt_v1}
+use std.common.build_manager.memory_policy.{builder_memory_enforcement_bytes_v1}
+
+fn policy_launch(root: text) -> GroupProcessLaunchV1:
+    val digest = "a".repeat(64)
+    val request = GroupProcessRequestV1(root + "/worker", digest,
+        ["--group-root", root], [], root, [], root + "/stdout", root + "/stderr",
+        60000, root + "/broker", digest)
+    GroupProcessLaunchV1(root, "worker", 1, digest, digest, 100, request)
+
+describe "Grouped memory policy is reservation plus explicit native enforcement":
+    it "defaults old broker requests to enforce and binds monitor for both host path forms":
+        for root in ["/owned/group", "D:/owned/group"]:
+            var launch = policy_launch(root)
+            val prior = group_process_launch_encode_v1(launch)
+            expect(prior).to_start_with("SIMPLE-GROUP-BROKER-1\n")
+            val restored = group_process_launch_decode_v1(prior).unwrap()
+            expect(restored.memory_policy).to_equal("enforce")
+            expect(group_process_launch_encode_v1(restored)).to_equal(prior)
+            val old_identity = group_process_identity_v1(launch)
+            launch.memory_policy = "monitor"
+            val encoded = group_process_launch_encode_v1(launch)
+            expect(encoded).to_start_with("SIMPLE-GROUP-BROKER-2\n")
+            expect(group_process_identity_v1(launch) != old_identity).to_equal(true)
+            val decoded = group_process_launch_decode_v1(encoded).unwrap()
+            expect(decoded.memory_policy).to_equal("monitor")
+            expect(decoded.memory_limit_bytes).to_equal(100)
+            expect(group_process_launch_encode_v1(decoded)).to_equal(encoded)
+            launch.memory_limit_bytes = 0
+            expect(group_process_launch_encode_v1(launch)).to_equal("")
+            launch.memory_limit_bytes = 100
+            launch.memory_policy = "unknown"
+            expect(group_process_launch_encode_v1(launch)).to_equal("")
+
+    it "reports native enforcement separately from positive reservation and actual peak":
+        val identity = "a".repeat(64)
+        expect(builder_memory_enforcement_bytes_v1("enforce", 100).unwrap()).to_equal(100)
+        expect(builder_memory_enforcement_bytes_v1("monitor", 100).unwrap()).to_equal(0)
+        expect(builder_memory_enforcement_bytes_v1("monitor", 0).is_err()).to_equal(true)
+        for platform in ["windows", "linux"]:
+            val monitor = group_process_memory_receipt_v1(identity, "monitor", 100, 180, platform).unwrap()
+            expect(monitor).to_contain("requested_policy=monitor\nreserved_bytes=100\n")
+            expect(monitor).to_contain("enforcement=none\nenforced_bytes=0\nobserved_peak_bytes=180\n")
+            val enforced = group_process_memory_receipt_v1(identity, "enforce", 100, 90, platform).unwrap()
+            expect(enforced).to_contain("enforced_bytes=100\nobserved_peak_bytes=90\n")
+            if platform == "windows":
+                expect(enforced).to_contain("enforcement=job-memory\n")
+                expect(monitor).to_contain("peak_metric=job-commit-peak\n")
+            else:
+                expect(enforced).to_contain("enforcement=cgroup-memory-max\n")
+                expect(monitor).to_contain("peak_metric=cgroup-memory-peak\n")
+        expect(group_process_memory_receipt_v1(identity, "monitor", 100, 180, "unknown").is_err()).to_equal(true)

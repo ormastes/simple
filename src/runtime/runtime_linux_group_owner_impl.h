@@ -1,5 +1,5 @@
 /* Included by runtime_process_owned.c on Linux only. One broker owns one
- * grouped compiler attempt. The worker enters a fresh memory-capped cgroup
+ * grouped compiler attempt. The worker enters a fresh monitored cgroup
  * atomically in clone3, before its first instruction or execveat. */
 #include <linux/magic.h>
 #include <linux/memfd.h>
@@ -400,7 +400,7 @@ static int rt_lg_poll(RtLinuxGroup *owner) {
     if (!owner->active || owner->collected) return EINVAL;
     int64_t now = rt_lg_now_ms();
     if (now < 0) return EIO;
-    if (!owner->timed_out && !owner->leader_reaped &&
+    if (owner->timeout_ms > 0 && !owner->timed_out && !owner->leader_reaped &&
         now - owner->started_ms >= owner->timeout_ms) {
         owner->timed_out = 1;
         if (!rt_lg_kill(owner)) return errno ? errno : EIO;
@@ -512,8 +512,8 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
     int parent_fd = -1, group_fd = -1, exec_fd = -1, cwd_fd = -1, out_fd = -1, err_fd = -1;
     int created = 0, child_started = 0, pidfd = -1;
     pid_t pid = -1;
-    if (rt_linux_group.active || memory_limit < 1 || memory_limit > 1125899906842624LL ||
-        timeout_ms < 1 || timeout_ms > 604800000 ||
+    if (rt_linux_group.active || memory_limit < 0 || memory_limit > 1125899906842624LL ||
+        timeout_ms < 0 || timeout_ms > 604800000 ||
         !rt_lg_copy_text(program_data, program_len, program, sizeof(program)) ||
         !rt_lg_copy_text(directory_data, directory_len, directory, sizeof(directory)) ||
         !rt_lg_copy_text(root_data, root_len, root, sizeof(root)) ||
@@ -544,13 +544,15 @@ SplArray *rt_linux_group_start_v1(const char *program_data, uint64_t program_len
     created = 1;
     group_fd = openat(parent_fd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (group_fd < 0) { answer[1] = errno; goto done; }
-    snprintf(memory_text, sizeof(memory_text), "%lld", (long long)memory_limit);
+    if (memory_limit == 0) snprintf(memory_text, sizeof(memory_text), "max");
+    else snprintf(memory_text, sizeof(memory_text), "%lld", (long long)memory_limit);
     if (!rt_lg_write_at(group_fd, "memory.max", memory_text) ||
         !rt_lg_read_at(group_fd, "memory.max", verify, sizeof(verify)) ||
-        !rt_lg_number(verify, &readback) || readback != memory_limit ||
-        !rt_lg_write_at(group_fd, "memory.swap.max", "0") ||
+        (memory_limit == 0 ? (strcmp(verify, "max") != 0 && strcmp(verify, "max\n") != 0) :
+            (!rt_lg_number(verify, &readback) || readback != memory_limit)) ||
+        !rt_lg_write_at(group_fd, "memory.swap.max", memory_limit == 0 ? "max" : "0") ||
         !rt_lg_read_at(group_fd, "memory.swap.max", verify, sizeof(verify)) ||
-        verify[0] != '0' ||
+        (memory_limit == 0 ? (strcmp(verify, "max") != 0 && strcmp(verify, "max\n") != 0) : verify[0] != '0') ||
         !rt_lg_write_at(group_fd, "memory.oom.group", "1") ||
         !rt_lg_read_at(group_fd, "memory.oom.group", verify, sizeof(verify)) ||
         verify[0] != '1' || !rt_lg_read_at(group_fd, "memory.peak", verify, sizeof(verify))) {
