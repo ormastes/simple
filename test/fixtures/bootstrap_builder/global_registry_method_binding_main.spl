@@ -1,0 +1,59 @@
+# Reduced shape of compiler_sffi's module-global Dict<i64, class> registry.
+# Local and field dictionaries are controls; named methods must retain owner.
+var GLOBAL_COUNTERS: Dict<i64, RegistryCounter> = {}
+
+class RegistryCounter:
+    count: i64
+
+    fn read() -> i64:
+        self.count
+
+    me add(amount: i64):
+        self.count = self.count + amount
+
+class RegistryOwner:
+    entries: Dict<i64, RegistryCounter>
+
+    fn contains(key: i64) -> bool:
+        self.entries.contains(key)
+
+
+
+fn registry_check(condition: bool, label: text) -> i64:
+    if condition: return 0
+    print "FAIL {label}"
+    1
+
+fn registry_read_inferred(key: i64) -> i64:
+    val counter = GLOBAL_COUNTERS[key]
+    counter.read()
+
+fn registry_read_declared(key: i64) -> i64:
+    val counter: RegistryCounter = GLOBAL_COUNTERS[key]
+    counter.read()
+
+fn main() -> i64:
+    var failures: i64 = 0
+    var local: Dict<i64, RegistryCounter> = {}
+    local[7] = RegistryCounter(count: 19)
+    val owner = RegistryOwner(entries: local)
+    failures = failures + registry_check(local.contains(7), "local dictionary contains")
+    failures = failures + registry_check(owner.contains(7), "field dictionary contains")
+    failures = failures + registry_check(not GLOBAL_COUNTERS.contains(7), "global initially absent")
+    GLOBAL_COUNTERS[7] = RegistryCounter(count: 41)
+    failures = failures + registry_check(GLOBAL_COUNTERS.contains(7), "global insertion visible")
+    failures = failures + registry_check(not GLOBAL_COUNTERS.contains(8), "global missing key")
+    failures = failures + registry_check(registry_read_inferred(7) == 41, "inferred dictionary value owner")
+    failures = failures + registry_check(registry_read_declared(7) == 41, "declared dictionary value owner")
+    var counter = GLOBAL_COUNTERS[7]
+    counter.add(1)
+    GLOBAL_COUNTERS[7] = counter
+    failures = failures + registry_check(registry_read_inferred(7) == 42, "mutable value writeback")
+    GLOBAL_COUNTERS.remove(7)
+    failures = failures + registry_check(not GLOBAL_COUNTERS.contains(7), "global removal visible")
+    failures = failures + registry_check(local[7].read() == 19, "local dictionary remains independent")
+    if failures != 0:
+        print "GLOBAL_REGISTRY_METHOD_BINDING_NATIVE_FAIL count={failures}"
+        return 1
+    print "GLOBAL_REGISTRY_METHOD_BINDING_NATIVE_PASS"
+    0
