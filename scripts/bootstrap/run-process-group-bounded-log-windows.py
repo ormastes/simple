@@ -54,7 +54,7 @@ def main():
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else []
-    if not command or args.max_bytes <= 0 or args.timeout_seconds <= 0 or args.term_grace_seconds < 0:
+    if not command or args.max_bytes <= 0 or args.timeout_seconds < 0 or args.term_grace_seconds < 0:
         raise RuntimeError("invalid command or limits")
     environment_text = None
     if args.command_environment == "clean-prefix":
@@ -219,7 +219,7 @@ def main():
             root_exit_members = "not-observed"
             log_hash = hashlib.sha256()
             started = time.monotonic()
-            deadline = started + args.timeout_seconds
+            deadline = started + args.timeout_seconds if args.timeout_seconds else float("inf")
             read_handle = msvcrt.get_osfhandle(read_fd)
 
             def active_processes():
