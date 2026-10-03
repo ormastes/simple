@@ -3,7 +3,7 @@
 use std.spec.*
 use std.spec.step
 use std.io_runtime.{file_read_bytes, dir_create_all}
-use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_atomic_write, file_remove}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_read, retained_file_read_at, retained_file_identity_unchanged, retained_file_close}
 use compiler.backend.linker.elf.elf_file_reader.{elf_file_open_v1, elf_file_section_v1, elf_file_section_window_v1, elf_file_close_v1}
@@ -92,6 +92,60 @@ describe "ITEM4-REQ-009 retained ELF file windows":
         if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("metadata budget")
         expect(elf_file_open_v1(ITEM4_FILE_FIXTURE, 512u64, 0).is_err()).to_equal(true)
         expect(elf_file_open_v1(ITEM4_FILE_FIXTURE, 512u64, 1048577).is_err()).to_equal(true)
+
+    it "rejects changed retained input after truncation or prevents the mutation while the handle is open":
+        step("Retain a private real ELF fixture before trying to truncate its underlying file")
+        val bytes = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(bytes.len()).to_equal(840)
+        if bytes.len() != 840: return
+        val directory = item4_file_mutant(bytes)
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = retained_file_open(directory.unwrap() + "/object.o", 840u64)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err():
+            item4_file_clean(directory.unwrap())
+            return
+        val truncated = file_write_bytes(directory.unwrap() + "/object.o", [127u8])
+        @when(os="windows"):
+        expect(truncated).to_equal(false)
+        expect(retained_file_identity_unchanged(opened.unwrap()).is_ok()).to_equal(true)
+        @else:
+        expect(truncated).to_equal(true)
+        val rejected = retained_file_read_at(opened.unwrap(), 0u64, 1)
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("FILE_CHANGED")
+        @end
+        expect(retained_file_close(opened.unwrap())).to_equal(true)
+        item4_file_clean(directory.unwrap())
+
+    it "never switches a retained input to replacement path contents":
+        step("Try atomic path replacement while an original object is retained")
+        val bytes = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(bytes.len()).to_equal(840)
+        if bytes.len() != 840: return
+        val directory = item4_file_mutant(bytes)
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = retained_file_open(directory.unwrap() + "/object.o", 840u64)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err():
+            item4_file_clean(directory.unwrap())
+            return
+        val replaced = file_atomic_write(directory.unwrap() + "/object.o", "replacement")
+        @when(os="windows"):
+        expect(replaced).to_equal(false)
+        @else:
+        expect(replaced).to_equal(true)
+        @end
+        step("A path replacement may invalidate original metadata but can never supply replacement bytes")
+        val retained = retained_file_read_at(opened.unwrap(), 0u64, 4)
+        if retained.is_ok():
+            expect(retained.unwrap()).to_equal([127u8, 69u8, 76u8, 70u8])
+        else:
+            expect(retained.unwrap_err()).to_contain("FILE_CHANGED")
+        expect(retained_file_close(opened.unwrap())).to_equal(true)
+        item4_file_clean(directory.unwrap())
 
     it "rejects overflowing table offsets and file-backed section ranges from real malformed objects":
         val original = file_read_bytes(ITEM4_FILE_FIXTURE)
