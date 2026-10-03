@@ -2778,7 +2778,7 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   rust_authority_target=$(bootstrap_authority_rust_cargo_target \
     "${repo_root}" "${os}" "${seed_inputs_fingerprint}" \
     "${rust_authority_root}" "${rust_authority_config_key}") || exit 1
-  rust_authority_profile_dir="${rust_authority_target}/${PLATFORM}/bootstrap"
+  rust_authority_profile_dir="${rust_authority_target}/${PLATFORM_RUST_TRIPLE}/bootstrap"
 fi
 bootstrap_step_mark rust-authority-target-key
 
@@ -2910,7 +2910,7 @@ run_rust_authority_cargo() {
       "$(absolute_path "${log_dir}/${rust_authority_log}.log")"
   fi
   if [ "${os}" = "windows" ]; then
-    set -- "$@" --target "${PLATFORM}"
+    set -- "$@" --target "${PLATFORM_RUST_TRIPLE}"
   fi
   prepare_rust_authority_workspace
   if [ "${rust_llvm_status:-disabled}" = enabled ]; then
@@ -3031,7 +3031,7 @@ elif [ "${full_bootstrap}" -eq 1 ] && bootstrap_stage3_rust_tuple_requires_compl
   run_rust_authority_cargo rust-seed-build default \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
-    --target "${PLATFORM}" -p simple-driver ${llvm_features}
+    --target "${PLATFORM_RUST_TRIPLE}" -p simple-driver ${llvm_features}
   # spl_hosted_runtime is selected alongside simple-native-all because the
   # authority tuple freezes deps/libspl_hosted_runtime-*.rlib: cargo < 1.100
   # left it in deps/ as a byproduct of these invocations, but the cargo >=
@@ -3042,7 +3042,7 @@ elif [ "${full_bootstrap}" -eq 1 ] && bootstrap_stage3_rust_tuple_requires_compl
   run_rust_authority_cargo rust-native-all-build default \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
-    --target "${PLATFORM}" -p simple-native-all -p spl_hosted_runtime ${llvm_features}
+    --target "${PLATFORM_RUST_TRIPLE}" -p simple-native-all -p spl_hosted_runtime ${llvm_features}
   # Rebuild simple-runtime LAST with LTO off so deps/libsimple_runtime.a holds
   # machine-code symbol definitions. Under the bootstrap profile's thin-LTO the
   # rlib members export symbols only inside embedded `__bitcode` sections, which
@@ -3052,7 +3052,7 @@ elif [ "${full_bootstrap}" -eq 1 ] && bootstrap_stage3_rust_tuple_requires_compl
   run_rust_authority_cargo rust-runtime-nolto-build off \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
-    --target "${PLATFORM}" -p simple-runtime --features runtime-symbol-table
+    --target "${PLATFORM_RUST_TRIPLE}" -p simple-runtime --features runtime-symbol-table
   rust_rebuilt=1
 fi
 
@@ -3061,7 +3061,7 @@ if [ "${full_bootstrap}" -eq 1 ] \
   run_rust_authority_cargo rust-compiler-backfill-build default \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
-    --target "${PLATFORM}" -p simple-compiler-backfill
+    --target "${PLATFORM_RUST_TRIPLE}" -p simple-compiler-backfill
   compiler_backfill_rebuilt=1
 fi
 if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
