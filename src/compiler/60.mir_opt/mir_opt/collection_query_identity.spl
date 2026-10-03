@@ -1,6 +1,14 @@
 # Private identity/effect helpers for block-local collection query CSE.
 # Unknown values and opcodes fail closed; no display string is an identity.
 use compiler.mir.mir_data.*
+use compiler.mir.mir_types.{LocalId}
+
+fn _collection_query_local_id(local: LocalId) -> i64:
+    # Preserve the existing malformed-MIR compatibility boundary: an absent
+    # LocalId must decline reuse rather than dereference its missing payload.
+    match local:
+        case LocalId(id): id
+        case _: -1
 
 fn _collection_query_frame(value: text) -> text:
     "{value.len()}:{value}"
@@ -43,12 +51,19 @@ fn _collection_query_const_key(value: MirConstValue) -> text:
 fn _collection_query_operand_key(op: MirOperand, versions: Dict<i64, i64>) -> text:
     match op.kind:
         case Copy(local):
-            if local.id < 0:
+            val local_id = _collection_query_local_id(local)
+            if local_id < 0:
                 return ""
-            val version = versions[local.id] ?? 0
-            "copy:{local.id}:{version}"
+            val version = versions[local_id] ?? 0
+            "copy:{local_id}:{version}"
         case Move(_): ""
         case Const(value, type_):
+            # Literal text has exact contents, but repeated materialization
+            # need not produce the same allocation. Runtime-name admission
+            # does not prove this particular operation ignores that identity.
+            match value:
+                case Str(_): return ""
+                case _: pass_do_nothing
             val type_key = _collection_query_type_key(type_)
             val value_key = _collection_query_const_key(value)
             if type_key == "" or value_key == "":
@@ -57,7 +72,7 @@ fn _collection_query_operand_key(op: MirOperand, versions: Dict<i64, i64>) -> te
 
 fn _collection_query_operand_borrowed(op: MirOperand) -> bool:
     match op.kind:
-        case Copy(local): local.id >= 0
+        case Copy(local): _collection_query_local_id(local) >= 0
         case Const(_, _): true
         case _: false
 
@@ -70,7 +85,7 @@ fn _collection_query_args_borrowed(args: [MirOperand]) -> bool:
 fn _collection_query_local_only(inst: MirInst) -> bool:
     match inst.kind:
         case Const(_, _, _): true
-        case Copy(_, src): src.id >= 0
+        case Copy(_, src): _collection_query_local_id(src) >= 0
         case BinOp(_, _, left, right):
             _collection_query_operand_borrowed(left) and _collection_query_operand_borrowed(right)
         case CheckedBinOp(_, _, left, right):
@@ -89,19 +104,19 @@ fn _collection_query_local_only(inst: MirInst) -> bool:
 
 fn _collection_query_written_local(inst: MirInst) -> i64:
     match inst.kind:
-        case Const(dest, _, _): dest.id
-        case Copy(dest, _): dest.id
-        case BinOp(dest, _, _, _): dest.id
-        case CheckedBinOp(dest, _, _, _): dest.id
-        case UnaryOp(dest, _, _): dest.id
-        case Cast(dest, _, _): dest.id
-        case Bitcast(dest, _, _): dest.id
-        case GetElementPtr(dest, _, _): dest.id
-        case GetField(dest, _, _): dest.id
+        case Const(dest, _, _): _collection_query_local_id(dest)
+        case Copy(dest, _): _collection_query_local_id(dest)
+        case BinOp(dest, _, _, _): _collection_query_local_id(dest)
+        case CheckedBinOp(dest, _, _, _): _collection_query_local_id(dest)
+        case UnaryOp(dest, _, _): _collection_query_local_id(dest)
+        case Cast(dest, _, _): _collection_query_local_id(dest)
+        case Bitcast(dest, _, _): _collection_query_local_id(dest)
+        case GetElementPtr(dest, _, _): _collection_query_local_id(dest)
+        case GetField(dest, _, _): _collection_query_local_id(dest)
         case Call(dest, _, _):
-            if val local = dest: local.id else: -1
+            if val local = dest: _collection_query_local_id(local) else: -1
         case Intrinsic(dest, _, _):
-            if val local = dest: local.id else: -1
+            if val local = dest: _collection_query_local_id(local) else: -1
         case _: -1
 
 export _collection_query_frame, _collection_query_const_key
