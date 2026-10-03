@@ -1,7 +1,7 @@
 # Runner middle facade routes
 
 - Executable spec: `test/01_unit/lib/runner_middle_facade_routes_spec.spl`
-- Source SHA-256: `362b26295de59fbbb8b6e63c811a655c9a98547c2775df1166a9f297c4f8d1a4`
+- Source SHA-256: `c724b8f2e44c11ea3fd60192c0718edbefc1fa38fe7114d616fd8ac3c6bea3de`
 - Manual status: hand-maintained source mirror; no test-run receipt is asserted.
 - Scenarios: 4 active, 0 skipped, 0 pending.
 
@@ -75,7 +75,7 @@ Confirms the GC async Vulkan lane can reach the sync owner’s nonblocking submi
 
 ### 4. exports database tracking helpers and runtime identity names
 
-Confirms database tracking helpers and runtime-identity names are exported through the database and stubs facades, without the nonexistent `rt_*` aliases.
+Confirms database tracking helpers and runtime-identity names are exported through the database and stubs facades, that tracking imports `is_flaky` from its statistics owner, and that the nonexistent `rt_*` aliases are absent.
 
 ```simple
     it "exports database tracking helpers and runtime identity names":
@@ -83,12 +83,14 @@ Confirms database tracking helpers and runtime-identity names are exported throu
         val database = facade_source("src/lib/nogc_async_mut/database/test_extended/database.spl")
         val stubs = facade_source("src/lib/nogc_async_mut/database/test_extended/stubs.spl")
         val package = facade_source("src/lib/nogc_async_mut/database/test_extended/__init__.spl")
+        val tracking = facade_source("src/lib/nogc_sync_mut/database/test_extended/tracking.spl")
         expect(database).to_start_with("export use nogc_sync_mut.database.test_extended.database.")
         expect(database).to_contain("trim_to_last_f64")
         expect(database).to_contain("ensure_timing_baseline_schema")
         expect(database).to_contain("TIMING_RUNS_PER_TEST_CAP")
         expect(stubs).to_contain(r"export use nogc_sync_mut.database.test_extended.stubs.{timestamp_now, process_id, host_name}")
         expect(package).to_contain(r"export use nogc_async_mut.database.test_extended.stubs.{timestamp_now, process_id, host_name}")
+        expect(tracking).to_contain(r"use std.database.stats.{stats_from_values, is_flaky}")
         expect(stubs.contains("rt_timestamp_now")).to_equal(false)
         expect(stubs.contains("rt_getpid")).to_equal(false)
 ```
