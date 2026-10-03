@@ -1,0 +1,139 @@
+# Internal trusted application-owner transition primitive, like local_store. Producer entry points must use local_apply facade.
+# Authenticated local publication. Trusted admission/merge policies come from
+# the repository authority owner, never from the submitted patch envelope.
+use app.scv.db.local_store.{db_store_read, db_store_commit}
+use std.scv.db_patch.{DbPatch}
+use std.scv.db_admission.{DbAdmissionPolicy, db_authorize_patch, db_plan_admitted_patch}
+use std.scv.db_conflict_catalog.*
+use std.scv.db_conflict_model.{DbConflictRecord}
+use std.scv.db_conflict_resolution.{DbConflictDecision, db_validate_resolution_patch, db_conflict_resolution_provenance}
+use std.scv.db_reducer.{MaterializedState, MergePolicy, DbConflict, db_empty_state}
+use std.scv.db_snapshot.{db_snapshot_encode, db_snapshot_decode}
+use std.scv.db_canonical.{db_domain_bytes, db_canonical_text, db_frame, db_u64_bytes}
+use std.common.crypto.sha256.{sha256_u8_hex, sha256_text}
+
+struct DbLocalImage:
+    state: MaterializedState
+    catalog: DbConflictCatalog
+
+struct DbLocalView:
+    head: text
+    image: DbLocalImage
+
+struct DbApplyResult:
+    code: text
+    head: text
+    revision: text
+    replay: bool
+    conflicts: [DbConflict]
+
+fn _db_local_context(admission: DbAdmissionPolicy) -> Result<text, text>:
+    val bytes = db_canonical_text(admission.repository)? + db_canonical_text(admission.namespace)? + db_frame(2u8, db_u64_bytes(admission.epoch)) + db_canonical_text(admission.schema_revision)? + db_canonical_text(admission.reducer_revision)?
+    Ok(sha256_u8_hex(db_domain_bytes("local-authority", bytes)?))
+
+fn _db_local_encode(image: DbLocalImage, admission: DbAdmissionPolicy) -> Result<text, text>:
+    Ok("SCVDB-LOCAL-v2\n{_db_local_context(admission)?}\n" + db_snapshot_encode(image.state)? + db_conflict_catalog_encode(image.catalog)?)
+
+fn _db_local_decode(encoded: text, admission: DbAdmissionPolicy) -> Result<DbLocalImage, text>:
+    val prefix = "SCVDB-LOCAL-v2\n{_db_local_context(admission)?}\n"
+    if not encoded.starts_with(prefix): return Err("SCVDB_STORE_CONTEXT")
+    val parts = encoded.split("\n")
+    if parts.len() != 7 or parts[6] != "": return Err("SCVDB_STORE_IMAGE_FORMAT")
+    Ok(DbLocalImage(state: db_snapshot_decode("{parts[2]}\n{parts[3]}\n")?, catalog: db_conflict_catalog_decode("{parts[4]}\n{parts[5]}\n")?))
+
+fn _db_empty_local_image() -> DbLocalImage:
+    DbLocalImage(state: db_empty_state(), catalog: DbConflictCatalog(records: [], resolutions: []))
+
+fn db_read_local_view(root: text, admission: DbAdmissionPolicy) -> Result<DbLocalView, text>:
+    val current = db_store_read(root)
+    if current.code == "empty": return Ok(DbLocalView(head: "", image: _db_empty_local_image()))
+    if current.code != "ok": return Err(current.code)
+    Ok(DbLocalView(head: current.head, image: _db_local_decode(current.state, admission)?))
+
+fn db_read_local_image(root: text, admission: DbAdmissionPolicy) -> Result<DbLocalImage, text>:
+    Ok(db_read_local_view(root, admission)?.image)
+
+fn db_read_local(root: text, admission: DbAdmissionPolicy) -> Result<MaterializedState, text>:
+    Ok(db_read_local_image(root, admission)?.state)
+
+fn db_apply_local_transition(root: text, expected_head: text, patch: DbPatch, merge: MergePolicy, admission: DbAdmissionPolicy, now: u64) -> Result<DbApplyResult, text>:
+    if patch.provenance.starts_with("SCVDB-CONFLICT-RESOLUTION-v1:"): return Err("SCVDB_RESOLUTION_OWNER_REQUIRED")
+    val current = db_store_read(root)
+    if current.code != "empty" and current.code != "ok":
+        return Err(current.code)
+    var image = _db_empty_local_image()
+    if current.code == "ok":
+        image = _db_local_decode(current.state, admission)?
+    val state = image.state
+    # All cryptography and reducer work precedes the short filesystem lease.
+    # Publication compares the physical generation again inside that lease.
+    val plan = db_plan_admitted_patch(state, patch, merge, admission, now)?
+    if plan.conflicts.len() > 0:
+        if plan.conflict_records.len() == 0:
+            return Ok(DbApplyResult(code: "conflict", head: current.head, revision: state.revision, replay: false, conflicts: plan.conflicts))
+        if expected_head != current.head: return Err("SCVDB_STORE_HEAD_ADVANCED")
+        var records = image.catalog.records
+        for incoming in plan.conflict_records:
+            var exists = false
+            for existing in records:
+                if existing.conflict_id == incoming.conflict_id: exists = true
+            if not exists: records.push(incoming)
+        image.catalog = DbConflictCatalog(records: records, resolutions: image.catalog.resolutions)
+        val encoded = _db_local_encode(image, admission)?
+        if encoded == current.state:
+            val durable = db_store_commit(root, current.parent, current.transaction_id, current.state)
+            if durable.code != "ok": return Err(durable.code)
+            return Ok(DbApplyResult(code: "conflict", head: durable.head, revision: state.revision, replay: false, conflicts: plan.conflicts))
+        val published = db_store_commit(root, current.head, sha256_text("conflict:" + encoded), encoded)
+        if published.code != "ok": return Err(published.code)
+        return Ok(DbApplyResult(code: "conflict", head: published.head, revision: state.revision, replay: false, conflicts: plan.conflicts))
+    if plan.replay:
+        # Re-establish durability before acknowledging a previously accepted
+        # batch. A concurrent head change fails closed and requires rereading.
+        val durable = db_store_commit(root, current.parent, current.transaction_id, current.state)
+        if durable.code != "ok": return Err(durable.code)
+        return Ok(DbApplyResult(code: "ok", head: durable.head, revision: state.revision, replay: true, conflicts: []))
+    if expected_head != current.head:
+        return Err("SCVDB_STORE_HEAD_ADVANCED")
+    image.state = plan.proposed
+    val encoded = _db_local_encode(image, admission)?
+    val published = db_store_commit(root, current.head, patch.payload_digest, encoded)
+    if published.code != "ok": return Err(published.code)
+    return Ok(DbApplyResult(code: "ok", head: published.head, revision: plan.proposed.revision, replay: false, conflicts: []))
+
+fn db_resolve_local_transition(root: text, expected_head: text, decision: DbConflictDecision, patch: DbPatch, merge: MergePolicy, admission: DbAdmissionPolicy, now: u64) -> Result<DbApplyResult, text>:
+    val current = db_store_read(root)
+    if current.code != "ok": return Err("SCVDB_CONFLICT_NOT_FOUND")
+    var image = _db_local_decode(current.state, admission)?
+    var accepted: [text] = []
+    for batch in image.state.accepted: accepted.push(batch.batch_id)
+    val authorized = db_authorize_patch(patch, admission, accepted, now)?
+    if authorized.signer_role != "reviewer" and authorized.signer_role != "integrator": return Err("SCVDB_CONFLICT_REVIEWER_ROLE")
+    for receipt in image.catalog.resolutions:
+        if receipt.conflict_id == decision.conflict_id:
+            if receipt.resolution_batch != patch.batch_id: return Err("SCVDB_CONFLICT_ALREADY_RESOLVED")
+            var matched_decision = false
+            for record in image.catalog.records:
+                if record.conflict_id == decision.conflict_id and db_conflict_resolution_provenance(record, decision)? == patch.provenance:
+                    matched_decision = true
+            if not matched_decision: return Err("SCVDB_CONFLICT_PROVENANCE")
+            val durable = db_store_commit(root, current.parent, current.transaction_id, current.state)
+            if durable.code != "ok": return Err(durable.code)
+            return Ok(DbApplyResult(code: "ok", head: durable.head, revision: image.state.revision, replay: true, conflicts: []))
+    if expected_head != current.head: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    for record in image.catalog.records:
+        if record.conflict_id != decision.conflict_id: continue
+        val resolution = db_validate_resolution_patch(record, decision, image.state, patch)?
+        val plan = db_plan_admitted_patch(image.state, patch, merge, admission, now)?
+        if plan.conflicts.len() > 0: return Err("SCVDB_CONFLICT_STALE")
+        if plan.replay: return Err("SCVDB_CONFLICT_RECEIPT_MISSING")
+        val receipt = DbConflictReceipt(conflict_id: record.conflict_id, reviewer: patch.signer, resolution_batch: patch.batch_id, provenance: patch.provenance, resulting_revision: plan.proposed.revision)
+        image = DbLocalImage(state: plan.proposed, catalog: DbConflictCatalog(records: image.catalog.records, resolutions: image.catalog.resolutions + [receipt]))
+        val encoded = _db_local_encode(image, admission)?
+        val published = db_store_commit(root, current.head, patch.payload_digest, encoded)
+        if published.code != "ok": return Err(published.code)
+        return Ok(DbApplyResult(code: "ok", head: published.head, revision: plan.proposed.revision, replay: false, conflicts: []))
+    Err("SCVDB_CONFLICT_NOT_FOUND")
+
+export DbLocalImage, DbApplyResult, db_apply_local_transition, db_read_local, db_read_local_image, db_resolve_local_transition
+export DbLocalView, db_read_local_view

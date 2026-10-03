@@ -3,10 +3,10 @@
 # Policies, signed patch and transport capability come from independent owners.
 use app.io.mod.{process_run_bounded}
 use app.scv.db.bridge_store.{db_bridge_store_load}
-use app.scv.db.local_apply.{DbApplyResult, DbLocalView, db_read_local_view, db_apply_local}
+use app.scv.db.local_transition.{DbApplyResult, DbLocalView, db_read_local_view, db_apply_local_transition}
 use app.scv.db.github_issue_bridge.{DbGithubBridgeRequest, db_github_bridge_payload, db_github_bridge_external_id, db_github_bridge_readback}
 use app.scv.db.github_provider.{DbGithubTransport, DbGithubProcessReply}
-use std.scv.db_admission.{DbAdmissionPolicy, db_admission_policy_digest}
+use std.scv.db_admission.{DbAdmissionPolicy, db_admission_policy_digest, db_authorize_patch}
 use std.scv.db_bridge.{DbBridgeDelivery, db_bridge_intent_digest}
 use std.scv.db_patch.*
 use std.scv.db_reducer.{MergePolicy, DbRow, db_field_value}
@@ -56,14 +56,30 @@ fn _binding_reference_live(field: DbField, view: DbLocalView, admission: DbAdmis
     match field.value:
         Reference(ref):
             if not db_ref_context(ref, admission.namespace, admission.epoch): return Err("SCVDB_BINDING_INTENT_CONTEXT_MISSING")
+            if revision != "" and db_ref_kind(ref) != "bridge_policy": return Err("SCVDB_BINDING_AUTHORITY_KIND")
             for row in view.image.state.rows:
                 if row.entity == entity_ref_canonical(ref) and not row.tombstoned:
+                    if revision != "" and row.kind != "bridge_policy": return Err("SCVDB_BINDING_AUTHORITY_KIND")
                     if revision != "" and db_field_value(row.fields, "revision") != DbValue.Text(revision): return Err("SCVDB_BINDING_AUTHORITY_REVISION")
                     return Ok(true)
         _: ()
     Err("SCVDB_BINDING_INTENT_CONTEXT_MISSING")
 
-fn _binding_context(root: text, admission: DbAdmissionPolicy, request: DbGithubBridgeRequest, target: DbGithubBindingTarget) -> Result<_DbGithubBindingContext, text>:
+fn _binding_original_fields(patch: DbPatch) -> Result<[DbField], text>:
+    if patch.operations.len() != 2: return Err("SCVDB_BINDING_REPLAY_MISMATCH")
+    match patch.operations[1]:
+        Create(_, kind, fields):
+            if kind != "provider_binding": return Err("SCVDB_BINDING_REPLAY_MISMATCH")
+            Ok(fields)
+        UpdateFields(_, edits, _):
+            var fields: [DbField] = []
+            for edit in edits: fields.push(DbField(name: edit.field, value: edit.after))
+            Ok(fields)
+        _: Err("SCVDB_BINDING_REPLAY_MISMATCH")
+
+# original is used only by the accepted-registry branch AFTER authentication.
+# It supplies historical signed context, never a public plan or ACK capability.
+fn _binding_context(root: text, admission: DbAdmissionPolicy, request: DbGithubBridgeRequest, target: DbGithubBindingTarget, original: DbPatch? = nil) -> Result<_DbGithubBindingContext, text>:
     if db_admission_policy_digest(admission)? != admission.revision: return Err("SCVDB_POLICY_REVISION")
     if not db_ref_context(target.binding, admission.namespace, admission.epoch) or not db_ref_context(target.common_state, admission.namespace, admission.epoch) or db_ref_kind(target.binding) != "provider_binding" or db_ref_kind(target.common_state) != "provider_common_state":
         return Err("SCVDB_BINDING_TARGET")
@@ -80,20 +96,28 @@ fn _binding_context(root: text, admission: DbAdmissionPolicy, request: DbGithubB
     if db_github_bridge_payload(scoped, scoped.title, scoped.body, scoped.state)? != delivery.intent.payload_digest: return Err("SCVDB_BINDING_PAYLOAD")
     val external_id = db_github_bridge_external_id(delivery.provider_revision, delivery.intent.provider)?
     val view = db_read_local_view(root, admission)?
-    var intent_rows = 0
     var intent_fields: [DbField] = []
-    for row in view.image.state.rows:
-        if row.kind == "bridge_intent" and not row.tombstoned and db_field_value(row.fields, "intent_revision") == DbValue.Text(delivery.intent.revision):
-            intent_rows = intent_rows + 1
-            intent_fields = row.fields
-    if intent_rows != 1: return Err("SCVDB_BINDING_INTENT_NOT_COMMITTED")
+    if val accepted = original:
+        intent_fields = _binding_original_fields(accepted)?
+    else:
+        var intent_rows = 0
+        for row in view.image.state.rows:
+            if row.kind == "bridge_intent" and not row.tombstoned and db_field_value(row.fields, "intent_revision") == DbValue.Text(delivery.intent.revision):
+                intent_rows = intent_rows + 1
+                intent_fields = row.fields
+        if intent_rows != 1: return Err("SCVDB_BINDING_INTENT_NOT_COMMITTED")
     # Refined intent schema: legacy revision-only rows fail explicitly. Never
     # invent a local entity, authority policy or capability from provider input.
     val local = _binding_required(intent_fields, "local_entity", true)?
     val authority = _binding_required(intent_fields, "authority_policy", true)?
     val capability = _binding_required(intent_fields, "capability_digest", false)?
-    _binding_reference_live(local, view, admission, "")?
-    _binding_reference_live(authority, view, admission, scoped.policy.revision)?
+    match authority.value:
+        Reference(ref):
+            if db_ref_kind(ref) != "bridge_policy" or not db_ref_context(ref, admission.namespace, admission.epoch): return Err("SCVDB_BINDING_AUTHORITY_KIND")
+        _: return Err("SCVDB_BINDING_AUTHORITY_KIND")
+    if original == nil:
+        _binding_reference_live(local, view, admission, "")?
+        _binding_reference_live(authority, view, admission, scoped.policy.revision)?
     match capability.value:
         Text(digest):
             if digest.len() != 64: return Err("SCVDB_BINDING_CAPABILITY_DIGEST")
@@ -176,21 +200,30 @@ fn _binding_replay_matches(context: _DbGithubBindingContext, target: DbGithubBin
         _: Ok(false)
 
 fn db_github_binding_apply(root: text, expected_head: text, admission: DbAdmissionPolicy, merge: MergePolicy, request: DbGithubBridgeRequest, target: DbGithubBindingTarget, patch: DbPatch, now: u64, execute: fn([text], i64, i64) -> DbGithubProcessReply) -> Result<DbApplyResult, text>:
+    val current = db_read_local_view(root, admission)?
+    val digest = db_patch_validate(patch)?
+    for batch in current.image.state.accepted:
+        if batch.batch_id == patch.batch_id:
+            var accepted_ids: [text] = []
+            for prior in current.image.state.accepted: accepted_ids.push(prior.batch_id)
+            db_authorize_patch(patch, admission, accepted_ids, now)?
+            val context = _binding_context(root, admission, request, target, Some(patch))?
+            if patch.provenance != _binding_provenance(context.delivery.intent.revision): return Err("SCVDB_BINDING_PROVENANCE")
+            if batch.canonical_digest != digest or not _binding_replay_matches(context, target, patch)?: return Err("SCVDB_BINDING_REPLAY_MISMATCH")
+            return db_apply_local_transition(root, expected_head, patch, merge, admission, now)
     val context = _binding_context(root, admission, request, target)?
     if patch.provenance != _binding_provenance(context.delivery.intent.revision): return Err("SCVDB_BINDING_PROVENANCE")
-    val digest = db_patch_validate(patch)?
-    for batch in context.view.image.state.accepted:
-        if batch.batch_id == patch.batch_id:
-            if batch.canonical_digest != digest or not _binding_replay_matches(context, target, patch)?: return Err("SCVDB_BINDING_REPLAY_MISMATCH")
-            return db_apply_local(root, expected_head, patch, merge, admission, now)
     if context.view.head != expected_head or patch.base_revision != context.view.image.state.revision: return Err("SCVDB_STORE_HEAD_ADVANCED")
     val operations = _binding_operations(context, target)?
     if patch.operations.len() != operations.len(): return Err("SCVDB_BINDING_PATCH_MISMATCH")
     for index in 0..operations.len():
         if db_operation_bytes(patch.operations[index])? != db_operation_bytes(operations[index])?: return Err("SCVDB_BINDING_PATCH_MISMATCH")
+    var accepted_ids: [text] = []
+    for prior in context.view.image.state.accepted: accepted_ids.push(prior.batch_id)
+    db_authorize_patch(patch, admission, accepted_ids, now)?
     _binding_readback(root, context, execute)?
     # Fresh network work has ended. The semantic writer owns the only CAS/lease.
-    db_apply_local(root, expected_head, patch, merge, admission, now)
+    db_apply_local_transition(root, expected_head, patch, merge, admission, now)
 
 fn _binding_live_execute(args: [text], timeout: i64, maximum_bytes: i64) -> DbGithubProcessReply:
     val (stdout, stderr, code) = process_run_bounded("gh", args, timeout, maximum_bytes)

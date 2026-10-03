@@ -5,8 +5,6 @@ use app.io.mod.{cwd, dir_create}
 use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
 use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
-use std.common.crypto.sha256.{sha256_u8_hex}
-use std.scv.db_canonical.{db_domain_bytes}
 use std.common.json.types.{json_object, json_array, json_number, json_string}
 use std.common.json.serializer.{json_stringify}
 use std.scv.distributed_identity.{EntityRef, EntityUid, ActorIncarnation, entity_ref_provisional, entity_ref_canonical}
@@ -14,8 +12,9 @@ use std.scv.db_admission.*
 use std.scv.db_bridge.*
 use std.scv.db_patch.*
 use std.scv.db_reducer.*
+use std.scv.db_conflict_resolution.{DbConflictDecision}
 use std.scv.sj_capsule.{scv_sj_lease_is_held}
-use app.scv.db.local_apply.{db_apply_local, db_read_local_view}
+use app.scv.db.local_apply.{db_apply_local, db_resolve_local, db_read_local_view}
 use app.scv.db.bridge_store.{db_bridge_store_enqueue, db_bridge_store_load}
 use app.scv.db.github_provider.{DbGithubSource, DbGithubProcessReply}
 use app.scv.db.github_issue_bridge.{DbGithubBridgeRequest, DbGithubIssuePolicy, db_github_bridge_payload}
@@ -66,9 +65,11 @@ fn setup_item2_binding_transport(args: [text], timeout: i64, maximum_bytes: i64)
     _binding_test_calls = _binding_test_calls + 1
     if args[10] == "repos/owner/repo":
         return DbGithubProcessReply(stdout: "HTTP/2.0 200 OK\n\n" + json_stringify(json_object({"id": json_number(42)})), stderr: "", exit_code: 0)
-    expect(args[10]).to_equal("repos/owner/repo/issues?state=all&sort=created&direction=asc&per_page=100&page=1")
+    expect(["repos/owner/repo/issues?state=all&sort=created&direction=asc&per_page=100&page=1", "repos/owner/repo/issues/7"].contains(args[10])).to_equal(true)
     val updated = if _binding_test_changed: "2026-10-04T00:00:00Z" else: "2026-10-03T00:00:00Z"
     val issue = json_object({"number": json_number(7), "title": json_string("reviewed title"), "body": json_string("reviewed body\n\n" + _binding_test_marker), "state": json_string("open"), "updated_at": json_string(updated)})
+    if args[10] == "repos/owner/repo/issues/7":
+        return DbGithubProcessReply(stdout: "HTTP/2.0 200 OK\n\n" + json_stringify(issue), stderr: "", exit_code: 0)
     DbGithubProcessReply(stdout: "HTTP/2.0 200 OK\n\n" + json_stringify(json_array([issue])), stderr: "", exit_code: 0)
 
 fn setup_item2_binding_fixture(acknowledge: bool, full_context: bool) -> Item2BindingFixture:
@@ -96,6 +97,9 @@ fn setup_item2_binding_fixture(acknowledge: bool, full_context: bool) -> Item2Bi
     for kind in ["bug", "bridge_policy", "bridge_intent", "provider_binding", "provider_common_state"]:
         permissions.push(DbPermission(operation: "create", kind: kind, field: "*"))
     permissions.push(DbPermission(operation: "update", kind: "provider_binding", field: "*"))
+    permissions.push(DbPermission(operation: "update", kind: "bridge_policy", field: "*"))
+    permissions.push(DbPermission(operation: "update", kind: "bridge_intent", field: "*"))
+    permissions.push(DbPermission(operation: "tombstone", kind: "bridge_intent", field: ""))
     val key = DbSignerKey(key_id: "reviewer", public_key: public_key, role: "reviewer", valid_from: 0u64, valid_until: 10000u64, revoked: false, permissions: permissions)
     var admission = DbAdmissionPolicy(revision: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1u64, schema_revision: "s1", reducer_revision: "r1", keys: [key], metadata: setup_item2_reviewed_metadata([patch]))
     admission.revision = db_admission_policy_digest(admission).unwrap()
@@ -121,6 +125,59 @@ fn setup_item2_binding_review(fixture: Item2BindingFixture, patch: DbPatch) -> D
     admission
 
 describe "Canonical provider binding after durable GitHub acknowledgement":
+    it "rejects signed generic producer and resolution bypasses for every protected operation":
+        val fixture = setup_item2_binding_fixture(true, true)
+        val plan = db_github_binding_plan(fixture.root, fixture.admission, fixture.request, fixture.target, setup_item2_binding_transport).unwrap()
+        val decision = DbConflictDecision(conflict_id: "untrusted", reviewer: "reviewer", expected_current: DbValue.Absent, chosen: DbValue.Absent)
+        for provenance in [plan.provenance, "unrelated reviewed producer edit", "SCVDB-CONFLICT-RESOLUTION-v1:forged"]:
+            val patch = setup_item2_binding_patch(plan.operations, plan.base_revision, 2u64, provenance)
+            val admission = setup_item2_binding_review(fixture, patch)
+            expect(db_apply_local(fixture.root, plan.head, patch, fixture.merge, admission, 10u64)).to_equal(Err("SCVDB_BINDING_OWNER_REQUIRED"))
+            expect(db_resolve_local(fixture.root, plan.head, decision, patch, fixture.merge, admission, 10u64)).to_equal(Err("SCVDB_BINDING_OWNER_REQUIRED"))
+        for entity in [fixture.target.binding, fixture.target.common_state]:
+            val condition = RowPrecondition(base_row: "", expected_revision: "", expected_fields: [])
+            val operations = [DbOperation.UpdateFields(entity, [], condition), DbOperation.Tombstone(entity, condition), DbOperation.AppendObservation(entity, "provider_binding", []), DbOperation.AddSetMember(entity, "field", DbValue.Text("value"), "dot"), DbOperation.RemoveObservedSetMember(entity, "field", ["dot"]), DbOperation.AddSetMemberAfterRemoval(entity, "field", DbValue.Text("value"), "dot", []), DbOperation.RemoveSetMember(entity, "field", DbValue.Text("value"), "dot", [])]
+            for operation in operations:
+                var patch = setup_item2_binding_patch(plan.operations, plan.base_revision, 2u64, "signed producer bypass")
+                patch.operations = [operation]
+                # Guard must run before semantic/signature acceptance for ALL
+                # operation variants, including malformed producer submissions.
+                expect(db_apply_local(fixture.root, plan.head, patch, fixture.merge, fixture.admission, 10u64)).to_equal(Err("SCVDB_BINDING_OWNER_REQUIRED"))
+        expect(db_read_local_view(fixture.root, fixture.admission).unwrap().head).to_equal(plan.head)
+
+    it "rejects an authority reference whose entity kind is not bridge_policy":
+        val fixture = setup_item2_binding_fixture(true, true)
+        val current = db_read_local_view(fixture.root, fixture.admission).unwrap()
+        val edit = FieldEdit(field: "authority_policy", before: DbValue.Reference(setup_item2_binding_ref("bridge_policy", 2u64)), after: DbValue.Reference(setup_item2_binding_ref("bug", 1u64)))
+        val condition = RowPrecondition(base_row: fixture.intent_patch.batch_id, expected_revision: fixture.intent_patch.batch_id, expected_fields: [])
+        val patch = setup_item2_binding_patch([DbOperation.UpdateFields(setup_item2_binding_ref("bridge_intent", 3u64), [edit], condition)], current.image.state.revision, 2u64, "reviewed wrong policy reference fixture")
+        val admission = setup_item2_binding_review(fixture, patch)
+        expect(db_apply_local(fixture.root, current.head, patch, fixture.merge, admission, 10u64).unwrap().code).to_equal("ok")
+        expect(db_github_binding_plan(fixture.root, admission, fixture.request, fixture.target, setup_item2_binding_transport)).to_equal(Err("SCVDB_BINDING_AUTHORITY_KIND"))
+
+    it "reauthenticates historical replay without requiring current live intent or policy revision":
+        val fixture = setup_item2_binding_fixture(true, true)
+        val plan = db_github_binding_plan(fixture.root, fixture.admission, fixture.request, fixture.target, setup_item2_binding_transport).unwrap()
+        val patch = setup_item2_binding_patch(plan.operations, plan.base_revision, 2u64, plan.provenance)
+        var admission = setup_item2_binding_review(fixture, patch)
+        val accepted = db_github_binding_apply(fixture.root, plan.head, admission, fixture.merge, fixture.request, fixture.target, patch, 10u64, setup_item2_binding_transport).unwrap()
+        val condition = RowPrecondition(base_row: fixture.intent_patch.batch_id, expected_revision: fixture.intent_patch.batch_id, expected_fields: [])
+        val edit = FieldEdit(field: "revision", before: DbValue.Text(fixture.request.policy.revision), after: DbValue.Text("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+        val changed = setup_item2_binding_patch([DbOperation.UpdateFields(setup_item2_binding_ref("bridge_policy", 2u64), [edit], condition), DbOperation.Tombstone(setup_item2_binding_ref("bridge_intent", 3u64), condition)], accepted.revision, 3u64, "reviewed subsequent policy change and intent retirement")
+        admission.metadata = setup_item2_reviewed_metadata([fixture.intent_patch, patch, changed])
+        admission.revision = db_admission_policy_digest(admission).unwrap()
+        val advanced = db_apply_local(fixture.root, accepted.head, changed, fixture.merge, admission, 10u64).unwrap()
+        expect(advanced.code).to_equal("ok")
+        _binding_test_changed = true
+        val calls = _binding_test_calls
+        val replay = db_github_binding_apply(fixture.root, plan.head, admission, fixture.merge, fixture.request, fixture.target, patch, 10u64, setup_item2_binding_transport).unwrap()
+        expect(replay.replay).to_equal(true)
+        expect(replay.head).to_equal(advanced.head)
+        expect(_binding_test_calls).to_equal(calls)
+        var forged = patch
+        forged.signature = []
+        expect(db_github_binding_apply(fixture.root, plan.head, admission, fixture.merge, fixture.request, fixture.target, forged, 10u64, setup_item2_binding_transport)).to_equal(Err("SCVDB_SIGNATURE_INVALID"))
+
     it "recovers an acknowledged delivery into one atomic binding and retrievable common state":
         val fixture = setup_item2_binding_fixture(true, true)
         val plan = db_github_binding_plan(fixture.root, fixture.admission, fixture.request, fixture.target, setup_item2_binding_transport).unwrap()
@@ -192,42 +249,61 @@ describe "Canonical provider binding after durable GitHub acknowledgement":
         expect(db_github_binding_apply(fixture.root, plan.head, admission, fixture.merge, fixture.request, fixture.target, patch, 10u64, setup_item2_binding_transport)).to_equal(Err("SCVDB_BINDING_READBACK_CHANGED"))
         expect(db_read_local_view(fixture.root, admission).unwrap().head).to_equal(plan.head)
 
-    it "updates an existing scoped binding only with the exact prior row precondition":
-        val fixture = setup_item2_binding_fixture(true, true)
+    it "updates a genuinely owner-created binding only with its exact prior row precondition":
+        var fixture = setup_item2_binding_fixture(true, true)
         val initial = db_github_binding_plan(fixture.root, fixture.admission, fixture.request, fixture.target, setup_item2_binding_transport).unwrap()
-        val old_common = setup_item2_binding_ref("provider_common_state", 6u64)
-        var prior_operations: [DbOperation] = []
-        var old_common_fields: [DbField] = []
-        match initial.operations[0]:
-            Create(_, kind, fields):
-                old_common_fields = setup_item2_binding_field(fields, "intent_revision", DbValue.Text("previous-reviewed-intent"))
-                prior_operations.push(DbOperation.Create(old_common, kind, old_common_fields))
-            _: fail("Expected common state creation")
-        match initial.operations[1]:
-            Create(entity, kind, fields):
-                var prior = setup_item2_binding_field(fields, "last_common_state", DbValue.Reference(old_common))
-                prior = setup_item2_binding_field(prior, "intent_revision", DbValue.Text("previous-reviewed-intent"))
-                prior = setup_item2_binding_field(prior, "common_revision", DbValue.Text(sha256_u8_hex(db_domain_bytes("provider-common-state", db_fields_bytes(old_common_fields).unwrap()).unwrap())))
-                prior_operations.push(DbOperation.Create(entity, kind, prior))
-            _: fail("Expected initial binding creation")
-        val prior_patch = setup_item2_binding_patch(prior_operations, initial.base_revision, 2u64, "reviewed previous binding fixture")
+        val prior_patch = setup_item2_binding_patch(initial.operations, initial.base_revision, 2u64, initial.provenance)
         val prior_policy = setup_item2_binding_review(fixture, prior_patch)
-        expect(db_apply_local(fixture.root, initial.head, prior_patch, fixture.merge, prior_policy, 10u64).unwrap().code).to_equal("ok")
-        val plan = db_github_binding_plan(fixture.root, prior_policy, fixture.request, fixture.target, setup_item2_binding_transport).unwrap()
+        val first = db_github_binding_apply(fixture.root, initial.head, prior_policy, fixture.merge, fixture.request, fixture.target, prior_patch, 10u64, setup_item2_binding_transport).unwrap()
+        expect(first.code).to_equal("ok")
+        val old_common = fixture.target.common_state
+        # A second canonical intent and actual durable provider readback precede
+        # the next owner transaction; no generic binding seeding bypass exists.
+        var request = fixture.request
+        request.kind = "update-issue"
+        request.issue_number = "7"
+        request.base_title = request.title
+        request.base_body = request.body
+        request.base_state = request.state
+        var intent = request.delivery.intent
+        intent.provider.external_id = "7"
+        intent.operation = "update"
+        intent.correlation_id = "second-binding-correlation"
+        intent.causation_id = "binding-correlation"
+        intent.idempotency_key = "second-binding-intent"
+        intent.payload_digest = db_github_bridge_payload(request, request.title, request.body, request.state).unwrap()
+        intent.revision = db_bridge_intent_digest(intent).unwrap()
+        request.delivery = db_bridge_pending(intent).unwrap()
+        var intent_fields: [DbField] = []
+        match fixture.intent_patch.operations[2]:
+            Create(_, _, fields): intent_fields = setup_item2_binding_field(fields, "intent_revision", DbValue.Text(intent.revision))
+            _: fail("Expected canonical intent fixture")
+        val new_intent_patch = setup_item2_binding_patch([DbOperation.Create(setup_item2_binding_ref("bridge_intent", 7u64), "bridge_intent", intent_fields)], first.revision, 3u64, "reviewed second bridge intent")
+        var new_policy = fixture.admission
+        new_policy.metadata = setup_item2_reviewed_metadata([fixture.intent_patch, prior_patch, new_intent_patch])
+        new_policy.revision = db_admission_policy_digest(new_policy).unwrap()
+        expect(db_apply_local(fixture.root, first.head, new_intent_patch, fixture.merge, new_policy, 10u64).unwrap().code).to_equal("ok")
+        _binding_test_marker = "<!-- scv-bridge:v1:{intent.revision} -->"
+        expect(db_github_bridge_owned(fixture.root, new_policy, request, "worker", 100u64, setup_item2_binding_now, setup_item2_binding_transport).unwrap().code).to_equal("acknowledged")
+        fixture.request = request
+        fixture.intent_patch = new_intent_patch
+        fixture.admission = new_policy
+        fixture.target.common_state = setup_item2_binding_ref("provider_common_state", 6u64)
+        val plan = db_github_binding_plan(fixture.root, new_policy, request, fixture.target, setup_item2_binding_transport).unwrap()
         match plan.operations[1]:
             UpdateFields(_, _, condition): expect(condition.expected_revision).to_equal(prior_patch.batch_id)
             _: fail("Existing binding requires conditional update")
-        val patch = setup_item2_binding_patch(plan.operations, plan.base_revision, 3u64, plan.provenance)
+        val patch = setup_item2_binding_patch(plan.operations, plan.base_revision, 4u64, plan.provenance)
         val admission = setup_item2_binding_review(fixture, patch)
         var weakened = plan.operations
         match weakened[1]:
             UpdateFields(entity, edits, condition):
                 weakened[1] = DbOperation.UpdateFields(entity, edits, RowPrecondition(base_row: condition.base_row, expected_revision: "", expected_fields: condition.expected_fields))
             _: fail("Expected update fixture")
-        val invalid = setup_item2_binding_patch(weakened, plan.base_revision, 3u64, plan.provenance)
-        expect(db_github_binding_apply(fixture.root, plan.head, admission, fixture.merge, fixture.request, fixture.target, invalid, 10u64, setup_item2_binding_transport)).to_equal(Err("SCVDB_BINDING_PATCH_MISMATCH"))
-        expect(db_github_binding_apply(fixture.root, plan.head, admission, fixture.merge, fixture.request, fixture.target, patch, 10u64, setup_item2_binding_transport).unwrap().code).to_equal("ok")
+        val invalid = setup_item2_binding_patch(weakened, plan.base_revision, 4u64, plan.provenance)
+        expect(db_github_binding_apply(fixture.root, plan.head, admission, fixture.merge, request, fixture.target, invalid, 10u64, setup_item2_binding_transport)).to_equal(Err("SCVDB_BINDING_PATCH_MISMATCH"))
+        expect(db_github_binding_apply(fixture.root, plan.head, admission, fixture.merge, request, fixture.target, patch, 10u64, setup_item2_binding_transport).unwrap().code).to_equal("ok")
         val after = db_read_local_view(fixture.root, admission).unwrap()
-        expect(after.image.state.rows.len()).to_equal(6)
+        expect(after.image.state.rows.len()).to_equal(7)
         for row in after.image.state.rows:
             if row.entity == entity_ref_canonical(old_common): expect(row.tombstoned).to_equal(false)
