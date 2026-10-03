@@ -1,0 +1,20 @@
+use std.spec.{describe, it, expect}
+use std.scv.db_evidence_stream.*
+use std.scv.db_retention.{db_evidence_digest}
+use std.common.crypto.sha256.{sha256_stream_v1_update}
+
+describe "Evidence digest streaming compatibility":
+    it "matches the original canonical envelope across binary chunk boundaries":
+        val content = [0u8,255u8,10u8,128u8,42u8]
+        val dependencies = ["1111111111111111111111111111111111111111111111111111111111111111", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+        val stream = db_evidence_stream_start(5u64).unwrap()
+        expect(sha256_stream_v1_update(stream, content[0:2])).to_be(true)
+        expect(sha256_stream_v1_update(stream, content[2:5])).to_be(true)
+        expect(db_evidence_stream_finish(stream, dependencies).unwrap()).to_equal(db_evidence_digest(content, dependencies).unwrap())
+        expect(db_evidence_stream_finish(db_evidence_stream_start(0u64).unwrap(), []).unwrap()).to_equal(db_evidence_digest([], []).unwrap())
+        expect(db_evidence_stream_finish(db_evidence_stream_start(0u64).unwrap(), []).unwrap()).to_equal("d47edfd786539c6e9d91617afb65a582217fb65edf184cdef89cc1427e538d0b")
+
+    it "rejects duplicate and noncanonical dependency identities":
+        val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        expect(db_evidence_stream_finish(db_evidence_stream_start(0u64).unwrap(), [digest,digest]).is_err()).to_be(true)
+        expect(db_evidence_stream_finish(db_evidence_stream_start(0u64).unwrap(), ["not-a-digest"]).is_err()).to_be(true)

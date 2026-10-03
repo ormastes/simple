@@ -1,0 +1,33 @@
+use std.spec.*
+use std.scv.db_checkpoint.*
+use std.scv.db_checkpoint_history.*
+use std.scv.db_pages.*
+use std.scv.db_policy_codec.*
+use std.scv.db_reducer.{db_empty_state, db_state_digest}
+use std.scv.db_snapshot.{db_snapshot_encode}
+use std.scv.db_identity_snapshot.{db_identity_snapshot_encode}
+use std.scv.distributed_identity_map.{identity_map_empty}
+use std.scv.distributed_identity.*
+use std.scv.db_conflict_catalog.{DbConflictCatalog, db_conflict_catalog_encode}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.crypto.sha256.{sha256_text}
+use test.fixtures.scv.db_apply_fixture.*
+
+fn setup_item2_checkpoint() -> (DbDatabaseCheckpoint, DbCheckpointAuthority):
+    var policy = DbPolicyConfig(revision: "", admission: setup_item2_apply_policy(), merge: setup_item2_apply_merge())
+    policy.revision = db_policy_digest(policy).unwrap()
+    var state = db_empty_state()
+    state.revision = db_state_digest(state).unwrap()
+    val record = db_checkpoint_metadata_encode(DbCheckpointMetadata.History(state.revision, 1u64, [], [], sha256_text(db_snapshot_encode(state).unwrap()))).unwrap()
+    val pages = db_pages_build([record], DbPageQuota(max_page_bytes: 16777216, max_page_records: 10000, max_records: 1000000)).unwrap()
+    var checkpoint = DbDatabaseCheckpoint(revision: "", repository: "repo", namespace: policy.admission.namespace, epoch: 1, schema_revision: "s1", reducer_revision: "r1", policy_revision: policy.revision, predecessor_checkpoint: "", history_horizon: state.revision, current_revision: state.revision, metadata: pages.manifest, storage: DbCheckpointStorage.Reference(db_snapshot_encode(state).unwrap(), db_identity_snapshot_encode(identity_map_empty(policy.admission.namespace, 1)).unwrap(), db_conflict_catalog_encode(DbConflictCatalog(records: [], resolutions: [])).unwrap()), signer: "checkpoint-authority", signature: [])
+    checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+    checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+    (checkpoint, DbCheckpointAuthority(expected_checkpoint: checkpoint.revision, key_id: checkpoint.signer, public_key: key, policy: policy, paged_policy: nil))
+
+fn setup_item2_checkpoint_entity(counter: u64) -> EntityRef:
+    entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter))
+
+
+export setup_item2_checkpoint, setup_item2_checkpoint_entity

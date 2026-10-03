@@ -1,0 +1,98 @@
+# Temporary external partition, not a persisted proof or admission receipt.
+# One-MiB chunks prevent a heavily referenced bucket from growing one file or
+# one in-memory accumulator without bound. No network or SJ lease is used.
+# This correctness-first maintenance path performs an append/path check per
+# claim; large-corpus IO throughput remains unqualified until measured/batched.
+use app.io.mod.{dir_create, dir_remove_all, file_append, file_create_exclusive, file_is_regular_no_follow, file_read_regular_no_follow_bounded}
+use app.io.file_ops.{secure_temp_dir}
+use app.scv.db.local_store.{db_local_path_scope}
+use std.nogc_sync_mut.io.path_identity.{HostFinalPath, path_final_existing, path_identity_same, path_identity_contains, path_entry_present}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.scv.db_pages.{db_pages_bucket}
+use std.scv.db_paged_import_claims.{DbImportClaim, db_import_claim_encode}
+
+struct DbImportSpool:
+    parent: HostFinalPath
+    identity: HostFinalPath
+    chunks: {text: u64}
+    sizes: {text: u64}
+    total_bytes: u64
+    total_files: u64
+
+var _import_owned: [HostFinalPath] = []
+
+fn _import_bucket(bucket: text) -> bool:
+    if bucket.len() != 4: return false
+    for index in 0..bucket.len():
+        val code = bucket.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn _import_owned_scope(spool: DbImportSpool) -> Result<bool, text>:
+    var owned = false
+    for identity in _import_owned:
+        if path_identity_same(identity, spool.identity): owned = true
+    if not owned or not dir_is_real_no_follow(spool.identity.path) or not path_identity_same(spool.identity, path_final_existing(spool.identity.path)?) or not path_identity_same(spool.parent, path_final_existing(spool.parent.path)?) or not path_identity_contains(spool.parent, spool.identity) or not spool.identity.path.starts_with(spool.parent.path + "/scv-import-"): return Err("SCVDB_IMPORT_SCRATCH_SCOPE")
+    Ok(true)
+
+fn db_import_spool_create(root: text) -> Result<DbImportSpool, text>:
+    if db_local_path_scope(root, [".scv"]) != "": return Err("SCVDB_IMPORT_SCRATCH_SCOPE")
+    if not dir_create(root + "/.scv", true): return Err("SCVDB_IMPORT_SCRATCH_CREATE")
+    if db_local_path_scope(root, [".scv"]) != "": return Err("SCVDB_IMPORT_SCRATCH_SCOPE")
+    val parent = path_final_existing(root + "/.scv")?
+    val path = secure_temp_dir(parent.path, "scv-import-")?
+    val identity = path_final_existing(path)?
+    if not dir_is_real_no_follow(path) or identity.path != path or not path_identity_contains(parent, identity) or not path.starts_with(parent.path + "/scv-import-"): return Err("SCVDB_IMPORT_SCRATCH_SCOPE")
+    _import_owned.push(identity)
+    Ok(DbImportSpool(parent: parent, identity: identity, chunks: {}, sizes: {}, total_bytes: 0u64, total_files: 0u64))
+
+fn _import_chunk_path(spool: DbImportSpool, bucket: text, ordinal: u64) -> Result<text, text>:
+    if not _import_bucket(bucket) or ordinal == 0 or ordinal > 1048576u64: return Err("SCVDB_IMPORT_CHUNK")
+    Ok(spool.identity.path + "/" + bucket + "-" + ordinal.to_text() + ".claims")
+
+fn db_import_spool_append(spool: DbImportSpool, claims: [DbImportClaim]) -> Result<DbImportSpool, text>:
+    _import_owned_scope(spool)?
+    if claims.len() > 20000: return Err("SCVDB_IMPORT_CLAIM_QUOTA")
+    var next = spool
+    var emitted = 0u64
+    for claim in claims:
+        val line = db_import_claim_encode(claim)? + "\n"
+        val size = line.len() as u64
+        if size > 1048576u64 or emitted > 8388608u64 - size or next.total_bytes > 68719476736u64 - size: return Err("SCVDB_IMPORT_SPILL_QUOTA")
+        val bucket = db_pages_bucket(claim.key)?
+        var ordinal = if next.chunks.contains_key(bucket): next.chunks[bucket] else: 0u64
+        var used = if next.sizes.contains_key(bucket): next.sizes[bucket] else: 0u64
+        if ordinal == 0 or used > 1048576u64 - size:
+            if next.total_files >= 1048576u64: return Err("SCVDB_IMPORT_SPILL_QUOTA")
+            ordinal = ordinal + 1u64
+            used = 0u64
+            val path = _import_chunk_path(next, bucket, ordinal)?
+            if path_entry_present(path)?: return Err("SCVDB_IMPORT_SCRATCH_SCOPE")
+            if not file_create_exclusive(path, ""): return Err("SCVDB_IMPORT_SPILL_WRITE")
+            next.total_files = next.total_files + 1u64
+        val path = _import_chunk_path(next, bucket, ordinal)?
+        if not file_is_regular_no_follow(path) or path_final_existing(path)?.path != path: return Err("SCVDB_IMPORT_SCRATCH_SCOPE")
+        if not file_append(path, line): return Err("SCVDB_IMPORT_SPILL_WRITE")
+        next.chunks[bucket] = ordinal
+        next.sizes[bucket] = used + size
+        next.total_bytes = next.total_bytes + size
+        emitted = emitted + size
+    Ok(next)
+
+fn db_import_spool_read(spool: DbImportSpool, bucket: text, ordinal: u64) -> Result<text, text>:
+    _import_owned_scope(spool)?
+    if not spool.chunks.contains_key(bucket) or ordinal > spool.chunks[bucket]: return Err("SCVDB_IMPORT_CHUNK")
+    val path = _import_chunk_path(spool, bucket, ordinal)?
+    if not file_is_regular_no_follow(path) or path_final_existing(path)?.path != path: return Err("SCVDB_IMPORT_SCRATCH_SCOPE")
+    file_read_regular_no_follow_bounded(path, 1048576)
+
+fn db_import_spool_cleanup(spool: DbImportSpool) -> Result<bool, text>:
+    _import_owned_scope(spool)?
+    if not dir_remove_all(spool.identity.path): return Err("SCVDB_IMPORT_SCRATCH_CLEANUP")
+    var retained: [HostFinalPath] = []
+    for identity in _import_owned:
+        if not path_identity_same(identity, spool.identity): retained.push(identity)
+    _import_owned = retained
+    Ok(true)
+
+export DbImportSpool, db_import_spool_create, db_import_spool_append, db_import_spool_read, db_import_spool_cleanup

@@ -1,0 +1,61 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_receipt.*
+use std.scv.distributed_identity_map.{IdentityMapHighWater}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+
+fn setup_item2_receipt_seed() -> [u8]:
+    [0u8,1u8,2u8,3u8,4u8,5u8,6u8,7u8,8u8,9u8,10u8,11u8,12u8,13u8,14u8,15u8,16u8,17u8,18u8,19u8,20u8,21u8,22u8,23u8,24u8,25u8,26u8,27u8,28u8,29u8,30u8,31u8]
+
+fn setup_item2_receipt_authority() -> DbReceiptAuthority:
+    val (seed, public_key) = pure_ed25519_keypair_from_seed(setup_item2_receipt_seed())
+    DbReceiptAuthority(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, remote: "https://example.invalid/authority.git", settled_ref: "refs/heads/settled", key_id: "integrator", public_key: public_key, schema_revision: "s1", reducer_revision: "r1")
+
+fn setup_item2_receipt_sign(receipt: DbSettlementReceipt) -> DbSettlementReceipt:
+    val (seed, public_key) = pure_ed25519_keypair_from_seed(setup_item2_receipt_seed())
+    var signed = receipt
+    signed.signature = pure_ed25519_sign(seed, public_key, db_receipt_signing_bytes(receipt).unwrap())
+    signed
+
+fn setup_item2_receipt() -> DbSettlementReceipt:
+    setup_item2_receipt_sign(DbSettlementReceipt(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, remote: "https://example.invalid/authority.git", settled_ref: "refs/heads/settled", previous_receipt: "", previous_head: "", accepted_head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", accepted_tree: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", object_format: "sha1", high_water: [IdentityMapHighWater(entity_kind: "bug", sequence: 2)], schema_revision: "s1", reducer_revision: "r1", batch_digests: ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"], signer: "integrator", signature: []))
+
+fn setup_item2_receipt_next(previous: DbSettlementReceipt) -> DbSettlementReceipt:
+    var next = previous
+    next.previous_receipt = db_receipt_digest(previous).unwrap()
+    next.previous_head = previous.accepted_head
+    next.accepted_head = "dddddddddddddddddddddddddddddddddddddddd"
+    next.high_water = [IdentityMapHighWater(entity_kind: "bug", sequence: 3)]
+    setup_item2_receipt_sign(next)
+
+describe "Signed hash-chained settlement receipts":
+    it "verifies actual genesis and successor signatures with monotonic allocation":
+        step("Authenticate a real Ed25519 chain without claiming Git ancestry")
+        val previous = setup_item2_receipt()
+        val next = setup_item2_receipt_next(previous)
+        expect(db_receipt_genesis(previous, setup_item2_receipt_authority()).unwrap()).to_equal(db_receipt_digest(previous).unwrap())
+        expect(db_receipt_successor(previous, next, setup_item2_receipt_authority()).unwrap()).to_equal(db_receipt_digest(next).unwrap())
+
+    it "rejects signed allocator rollback and omission of a previously allocated kind":
+        val previous = setup_item2_receipt()
+        var next = setup_item2_receipt_next(previous)
+        next.high_water = [IdentityMapHighWater(entity_kind: "bug", sequence: 1)]
+        expect(db_receipt_successor(previous, setup_item2_receipt_sign(next), setup_item2_receipt_authority())).to_equal(Err("SCVDB_RECEIPT_HIGH_WATER_REGRESSION"))
+        next.high_water = []
+        expect(db_receipt_successor(previous, setup_item2_receipt_sign(next), setup_item2_receipt_authority())).to_equal(Err("SCVDB_RECEIPT_HIGH_WATER_REGRESSION"))
+
+    it "rejects wrong chain links and unsigned changes to accepted trees":
+        val previous = setup_item2_receipt()
+        var next = setup_item2_receipt_next(previous)
+        next.previous_head = next.accepted_head
+        expect(db_receipt_successor(previous, setup_item2_receipt_sign(next), setup_item2_receipt_authority())).to_equal(Err("SCVDB_RECEIPT_CHAIN"))
+        next = setup_item2_receipt_next(previous)
+        next.accepted_tree = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        expect(db_receipt_authenticate(next, setup_item2_receipt_authority())).to_equal(Err("SCVDB_RECEIPT_SIGNATURE"))
+
+    it "rejects a correctly signed mirror or epoch change under the pinned authority":
+        var receipt = setup_item2_receipt()
+        receipt.remote = "https://example.invalid/mirror.git"
+        expect(db_receipt_authenticate(setup_item2_receipt_sign(receipt), setup_item2_receipt_authority())).to_equal(Err("SCVDB_RECEIPT_AUTHORITY"))
+        receipt = setup_item2_receipt()
+        receipt.epoch = 2
+        expect(db_receipt_authenticate(setup_item2_receipt_sign(receipt), setup_item2_receipt_authority())).to_equal(Err("SCVDB_RECEIPT_AUTHORITY"))

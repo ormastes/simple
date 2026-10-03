@@ -1,0 +1,25 @@
+use std.spec.*
+use std.scv.db_alias_cell.*
+use std.scv.distributed_identity.{SettledAlias}
+
+describe "REQ-002 versioned compact alias cells":
+    it "round-trips the entire positive u64 range without a signed conversion":
+        val context = DbAliasContext(namespace: "00112233445566778899aabbccddeeff", epoch: 18446744073709551615u64, kind: "bug")
+        val header = db_alias_header_encode(context).unwrap()
+        expect(db_alias_header_decode(header)).to_equal(Ok(context))
+        for sequence in [1u64, 9223372036854775808u64, 18446744073709551615u64]:
+            val alias = SettledAlias(database_namespace: context.namespace, authority_epoch: context.epoch, entity_kind: context.kind, sequence: sequence)
+            expect(db_alias_cell_decode(header, db_alias_cell_encode(header, alias).unwrap(), context)).to_equal(Ok(alias))
+
+    it "rejects absent context, ambiguous decimals, overflow and noncanonical headers":
+        val context = DbAliasContext(namespace: "00112233445566778899aabbccddeeff", epoch: 1u64, kind: "bug")
+        val header = db_alias_header_encode(context).unwrap()
+        expect(db_alias_cell_decode("", "1", context)).to_equal(Err("SCVDB_ALIAS_HEADER"))
+        for cell in ["", "0", "01", "+1", "-1", " 1", "1\n", "1.0", "18446744073709551616", "999999999999999999999"]:
+            expect(db_alias_cell_decode(header, cell, context)).to_equal(Err("SCVDB_ALIAS_INTEGER"))
+        for malformed in [header + "1\n", "SCVDB-ALIAS-v2\n00112233445566778899aabbccddeeff\n1\nbug\n", "SCVDB-ALIAS-v1\n00112233445566778899aabbccddeeff\n01\nbug\n", "SCVDB-ALIAS-v1\n00112233445566778899aabbccddeeff\n1\nbug"]:
+            expect(db_alias_header_decode(malformed).is_err()).to_be(true)
+        for wrong in [DbAliasContext(namespace: "ffffffffffffffffffffffffffffffff", epoch: 1u64, kind: "bug"), DbAliasContext(namespace: context.namespace, epoch: 2u64, kind: "bug"), DbAliasContext(namespace: context.namespace, epoch: 1u64, kind: "test")]:
+            expect(db_alias_cell_decode(header, "1", wrong)).to_equal(Err("SCVDB_ALIAS_CONTEXT"))
+            val alias = SettledAlias(database_namespace: wrong.namespace, authority_epoch: wrong.epoch, entity_kind: wrong.kind, sequence: 1u64)
+            expect(db_alias_cell_encode(header, alias)).to_equal(Err("SCVDB_ALIAS_CONTEXT"))

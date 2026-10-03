@@ -1,0 +1,49 @@
+# REQ-002: a compact cell is meaningful only with its versioned table header.
+# This is an interchange representation, not an allocation or authority proof.
+use std.scv.distributed_identity.{SettledAlias, settled_alias_validate}
+
+struct DbAliasContext:
+    namespace: text
+    epoch: u64
+    kind: text
+
+fn _db_alias_decimal(cell: text) -> Result<u64, text>:
+    if cell.len() == 0 or cell.len() > 20 or cell[0:1] == "0": return Err("SCVDB_ALIAS_INTEGER")
+    var value = 0u64
+    var offset = 0
+    while offset < cell.len():
+        val code = cell.char_code_at(offset)
+        if code < 48 or code > 57: return Err("SCVDB_ALIAS_INTEGER")
+        val digit = (code - 48) as u64
+        if value > (18446744073709551615u64 - digit) / 10u64: return Err("SCVDB_ALIAS_INTEGER")
+        value = value * 10u64 + digit
+        offset = offset + 1
+    Ok(value)
+
+fn db_alias_header_encode(context: DbAliasContext) -> Result<text, text>:
+    """Encode one bounded header; cells contain only minimal decimal sequences."""
+    val probe = SettledAlias(database_namespace: context.namespace, authority_epoch: context.epoch, entity_kind: context.kind, sequence: 1u64)
+    if context.kind.len() > 4000 or not settled_alias_validate(probe).valid: return Err("SCVDB_ALIAS_CONTEXT")
+    Ok("SCVDB-ALIAS-v1\n{context.namespace}\n{context.epoch}\n{context.kind}\n")
+
+fn db_alias_header_decode(encoded: text) -> Result<DbAliasContext, text>:
+    if encoded.len() > 4096: return Err("SCVDB_ALIAS_HEADER_QUOTA")
+    val lines = encoded.split("\n")
+    if lines.len() != 5 or lines[0] != "SCVDB-ALIAS-v1" or lines[4] != "": return Err("SCVDB_ALIAS_HEADER")
+    val context = DbAliasContext(namespace: lines[1], epoch: _db_alias_decimal(lines[2])?, kind: lines[3])
+    if db_alias_header_encode(context)? != encoded: return Err("SCVDB_ALIAS_HEADER")
+    Ok(context)
+
+fn db_alias_cell_encode(header: text, alias: SettledAlias) -> Result<text, text>:
+    val context = db_alias_header_decode(header)?
+    if not settled_alias_validate(alias).valid: return Err("SCVDB_ALIAS_CONTEXT")
+    if alias.database_namespace != context.namespace or alias.authority_epoch != context.epoch or alias.entity_kind != context.kind: return Err("SCVDB_ALIAS_CONTEXT")
+    Ok(alias.sequence.to_text())
+
+fn db_alias_cell_decode(header: text, cell: text, expected: DbAliasContext) -> Result<SettledAlias, text>:
+    """Require both the transported header and independently supplied context."""
+    val context = db_alias_header_decode(header)?
+    if context != expected: return Err("SCVDB_ALIAS_CONTEXT")
+    Ok(SettledAlias(database_namespace: context.namespace, authority_epoch: context.epoch, entity_kind: context.kind, sequence: _db_alias_decimal(cell)?))
+
+export DbAliasContext, db_alias_header_encode, db_alias_header_decode, db_alias_cell_encode, db_alias_cell_decode

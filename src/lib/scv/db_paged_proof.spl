@@ -1,0 +1,58 @@
+use std.scv.db_pages.*
+use std.scv.db_paged_model.*
+
+struct DbPagedLookupProof:
+    keys: [text]
+    page: DbRecordPage?
+
+struct DbPagedReads:
+    buckets: {text: bool}
+    records: {text: DbPageRecord}
+    pages: [DbRecordPage]
+
+fn db_paged_reads(manifest: DbPagedManifest, policy: DbPagedPolicy, proofs: [DbPagedLookupProof]) -> Result<DbPagedReads, text>:
+    var buckets: {text: bool} = {}
+    var records: {text: DbPageRecord} = {}
+    var pages: [DbRecordPage] = []
+    var bytes = 0u64
+    var count = 0u64
+    for proof in proofs:
+        if proof.keys.len() == 0: return Err("SCVDB_PAGED_EMPTY_PROOF")
+        count = count + (proof.keys.len() as u64)
+        if count > policy.max_read_keys: return Err("SCVDB_PAGED_READ_QUOTA")
+        val key = proof.keys[0]
+        val bucket = db_pages_bucket(key)?
+        if buckets.contains_key(bucket): return Err("SCVDB_PAGED_DUPLICATE_PROOF")
+        for requested in proof.keys:
+            if db_pages_bucket(requested)? != bucket: return Err("SCVDB_PAGED_PROOF_BUCKET")
+        val entry = db_pages_entry(manifest.pages, key)?
+        if entry == nil:
+            if proof.page != nil: return Err("SCVDB_PAGED_UNEXPECTED_PAGE")
+        else:
+            if proof.page == nil: return Err("SCVDB_PAGED_PAGE_REQUIRED")
+            val page = proof.page.unwrap()
+            val verified = db_pages_lookup(manifest.pages, page, key)?
+            val size = db_page_encode(page, manifest.pages.quota)?.len() as u64
+            if size > policy.max_read_bytes - bytes: return Err("SCVDB_PAGED_READ_QUOTA")
+            bytes = bytes + size
+            pages.push(page)
+            for record in page.records: records[record.key] = record
+        buckets[bucket] = true
+    Ok(DbPagedReads(buckets: buckets, records: records, pages: pages))
+
+fn db_paged_missing(reads: DbPagedReads, keys: [text], policy: DbPagedPolicy) -> Result<[text], text>:
+    if (keys.len() as u64) > policy.max_read_keys: return Err("SCVDB_PAGED_READ_QUOTA")
+    var missing: [text] = []
+    var seen: {text: bool} = {}
+    for key in keys:
+        if not reads.buckets.contains_key(db_pages_bucket(key)?) and not seen.contains_key(key):
+            missing.push(key)
+            seen[key] = true
+    Ok(missing)
+
+fn db_paged_read(reads: DbPagedReads, key: text) -> Result<DbPageRecord?, text>:
+    if not reads.buckets.contains_key(db_pages_bucket(key)?): return Err("SCVDB_PAGED_PROOF_REQUIRED")
+    if reads.records.contains_key(key): return Ok(Some(reads.records[key]))
+    Ok(nil)
+
+export DbPagedLookupProof, DbPagedReads, db_paged_reads, db_paged_missing, db_paged_read

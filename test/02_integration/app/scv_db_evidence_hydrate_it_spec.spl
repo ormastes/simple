@@ -1,0 +1,82 @@
+# Source regression fixtures; no runtime/performance qualification is claimed.
+use std.spec.{describe, it, expect}
+use app.io.mod.{cwd, dir_create, file_write_bytes, file_delete, process_run_bounded, file_read_regular_no_follow_bounded_bytes}
+use app.io.retained_file_ops.*
+use app.scv.db.evidence_store.*
+use app.scv.db.evidence_hydrate.*
+use app.scv.db.evidence_closure.*
+use std.scv.db_retention.*
+use std.scv.db_evidence_stream.*
+use std.common.crypto.sha256.{sha256_stream_v1_update}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
+
+use test.fixtures.scv.db_hydration_fixture.*
+
+describe "Verified bounded evidence hydration":
+    it "creates a retained output with metadata-query rights and exact binary readback":
+        val (root,parent,target) = setup_item2_hydration_paths()
+        # Windows creation must request FILE_READ_ATTRIBUTES alongside write:
+        # open performs its mandatory attribute/basic/identity queries here.
+        val file = retained_file_open("{target}/native-output",3u64,true).unwrap()
+        expect(file.size).to_equal(0u64)
+        retained_file_write(file,[0u8,255u8,42u8]).unwrap()
+        expect(retained_file_write(file,[9u8]).is_err()).to_be(true)
+        expect(retained_file_sync(file)).to_be(true)
+        expect(retained_file_close(file)).to_be(true)
+        val readback = retained_file_open("{target}/native-output",3u64).unwrap()
+        expect(retained_file_read(readback,3).unwrap()).to_equal([0u8,255u8,42u8])
+        expect(retained_file_read(readback,1).unwrap()).to_equal([])
+        expect(retained_file_unchanged(readback).unwrap()).to_be(true)
+        expect(retained_file_close(readback)).to_be(true)
+
+    it "hydrates a real 100MiB envelope with one MiB reads and rejects oversized chunk requests":
+        val (root,parent,target) = setup_item2_hydration_paths()
+        val digest = setup_item2_hydration_big(parent)
+        val info = db_evidence_inspect_file(root,parent,digest,setup_item2_hydration_quota()).unwrap()
+        expect(info.content_bytes).to_equal(104857600u64)
+        val hydrated = db_evidence_hydrate_file(root,parent,digest,target,setup_item2_hydration_quota()).unwrap()
+        check_item2_hydration_big(hydrated.content_path)
+        val file = retained_file_open(hydrated.content_path,104857600u64).unwrap()
+        expect(retained_file_read(file,1048577).is_err()).to_be(true)
+        expect(retained_file_close(file)).to_be(true)
+
+    it "rejects changed content, truncated envelopes and link objects instead of publishing output":
+        val (root,parent,target) = setup_item2_hydration_paths()
+        val node = setup_item2_hydration_node(root,parent,[1u8,2u8,3u8])
+        val path = "{parent}/scv-evidence-v1/{node.digest}.scve"
+        var bytes = file_read_regular_no_follow_bounded_bytes(path,1024).unwrap()
+        bytes[bytes.len() - 1] = 99u8
+        expect(file_write_bytes(path,bytes)).to_be(true)
+        expect(db_evidence_hydrate_file(root,parent,node.digest,target,setup_item2_hydration_quota()).is_err()).to_be(true)
+        expect(file_write_bytes(path,bytes[0:22])).to_be(true)
+        expect(db_evidence_inspect_file(root,parent,node.digest,setup_item2_hydration_quota()).is_err()).to_be(true)
+        expect(file_delete(path)).to_be(true)
+        val other = "{parent}/other"
+        expect(file_write_bytes(other,bytes)).to_be(true)
+        expect(setup_item2_filesystem_link(root,other,path,false)).to_equal(0)
+        expect(db_evidence_inspect_file(root,parent,node.digest,setup_item2_hydration_quota()).is_err()).to_be(true)
+
+    it "verifies opaque restricted closure without hydrating plaintext or loading a key":
+        val (root,parent,target) = setup_item2_hydration_paths()
+        val leaf = setup_item2_hydration_node(root,parent,[83u8,67u8,82u8,69u8,1u8,0u8,255u8])
+        val first = setup_item2_hydration_node(root,parent,[11u8],[leaf.digest])
+        val second = setup_item2_hydration_node(root,parent,[12u8],[leaf.digest])
+        var children = [first.digest,second.digest]
+        if first.digest > second.digest: children = [second.digest,first.digest]
+        val root_node = setup_item2_hydration_node(root,parent,[13u8],children)
+        val quota = DbEvidenceClosureQuota(object_quota: setup_item2_hydration_quota(),max_objects: 4,max_content_bytes: 10,max_depth: 3)
+        val receipt = db_evidence_verify_closure(root,parent,[root_node.digest],quota).unwrap()
+        expect(receipt.object_count).to_equal(4u64)
+        expect(receipt.content_bytes).to_equal(10u64)
+        expect(db_evidence_inspect_file(root,parent,leaf.digest,setup_item2_hydration_quota()).unwrap().restricted).to_be(true)
+        expect(db_evidence_hydrate_file(root,parent,leaf.digest,target,setup_item2_hydration_quota()).unwrap_err()).to_equal("SCVDB_EVIDENCE_RESTRICTED")
+        var small = quota
+        small.max_objects = 3
+        expect(db_evidence_verify_closure(root,parent,[root_node.digest],small).is_err()).to_be(true)
+        small = quota
+        small.max_content_bytes = 9
+        expect(db_evidence_verify_closure(root,parent,[root_node.digest],small).is_err()).to_be(true)
+        expect(file_delete("{parent}/scv-evidence-v1/{leaf.digest}.scve")).to_be(true)
+        expect(db_evidence_verify_closure(root,parent,[root_node.digest],quota).is_err()).to_be(true)

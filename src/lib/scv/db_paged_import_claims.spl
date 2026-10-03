@@ -1,0 +1,234 @@
+# Global import claims are reduced externally by page bucket. No claim is an
+# authorization proof; the effect owner obtains every source from actual pages.
+use std.scv.db_pages.*
+use std.scv.db_page_records.*
+use std.scv.db_paged_model.*
+use std.scv.db_paged_indexes.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.{DbRow, DbAcceptedBatch, db_field_value, db_schema_rule, db_rule_accepts_value}
+use std.scv.db_paged_conflicts.{db_paged_conflict_decode, db_paged_resolution_patch}
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.distributed_identity.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+struct DbImportClaim:
+    key: text
+    mode: text
+    value: text
+    number: u64
+
+struct DbImportFold:
+    exact: u64
+    row_alias: u64
+    reverse: u64
+    incoming: u64
+    maximum: u64
+
+struct _DbImportClaims:
+    values: [DbImportClaim]
+    bytes: u64
+
+fn _import_push(batch: _DbImportClaims, claim: DbImportClaim) -> Result<_DbImportClaims, text>:
+    val size = (db_import_claim_encode(claim)?.len() + 1) as u64
+    if batch.values.len() >= 20000 or size > 8388608u64 or batch.bytes > 8388608u64 - size: return Err("SCVDB_IMPORT_CLAIM_QUOTA")
+    var next = batch
+    next.values.push(claim)
+    next.bytes = next.bytes + size
+    Ok(next)
+
+fn db_import_digest(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn db_import_fingerprint(record: DbPageRecord) -> Result<text, text>:
+    val kind = match record.kind:
+        Row: "row"
+        Tombstone: "tombstone"
+        Accepted: "accepted"
+        Alias: "alias"
+        HighWater(value): "highwater:" + value.to_text()
+    Ok(sha256_u8_hex(db_domain_bytes("paged-import-record-v1", db_canonical_text(record.key)? + db_canonical_text(kind)? + db_frame(4u8, record.payload))?))
+
+fn _import_claim(key: text, mode: text, value: text = "", number: u64 = 0u64) -> DbImportClaim:
+    DbImportClaim(key: key, mode: mode, value: value, number: number)
+
+fn _import_exact(record: DbPageRecord) -> Result<DbImportClaim, text>:
+    Ok(_import_claim(record.key, "exact", db_import_fingerprint(record)?))
+
+fn db_import_claim_encode(claim: DbImportClaim) -> Result<text, text>:
+    db_pages_bucket(claim.key)?
+    if not ["exact", "same", "row-alias", "row", "reverse", "alias-reverse", "count", "maximum", "batch", "history"].contains(claim.mode): return Err("SCVDB_IMPORT_CLAIM")
+    if claim.value.len() > 4096: return Err("SCVDB_IMPORT_CLAIM_QUOTA")
+    val bytes = db_frame(200u8, db_canonical_text(claim.key)? + db_canonical_text(claim.mode)? + db_canonical_text(claim.value)? + db_frame(2u8, db_u64_bytes(claim.number)))
+    if bytes.len() > 16384: return Err("SCVDB_IMPORT_CLAIM_QUOTA")
+    Ok(db_snapshot_hex(bytes))
+
+fn db_import_claim_decode(encoded: text) -> Result<DbImportClaim, text>:
+    if encoded.len() > 32768: return Err("SCVDB_IMPORT_CLAIM_QUOTA")
+    val bytes = db_snapshot_unhex(encoded)?
+    val frame = db_read_frame(bytes, 0)?
+    if frame.tag != 200u8 or frame.next_offset != bytes.len(): return Err("SCVDB_IMPORT_CLAIM")
+    val parts = db_read_children(frame.payload)?
+    if parts.len() != 4: return Err("SCVDB_IMPORT_CLAIM")
+    val claim = DbImportClaim(key: db_read_text(parts[0])?, mode: db_read_text(parts[1])?, value: db_read_text(parts[2])?, number: db_read_unsigned(parts[3])?)
+    if db_import_claim_encode(claim)? != encoded: return Err("SCVDB_IMPORT_CLAIM")
+    Ok(claim)
+
+fn db_import_index_tag(record: DbPageRecord) -> Result<u8, text>:
+    for prefix in ["natural:", "unique:", "incoming:", "history:", "uid-alias:"]:
+        if record.key.starts_with(prefix):
+            if not db_import_digest(record.key[prefix.len():]): return Err("SCVDB_IMPORT_INDEX_KEY")
+            if prefix == "natural:" or prefix == "unique:": return Ok(170u8)
+            if prefix == "incoming:": return Ok(171u8)
+            if prefix == "history:": return Ok(172u8)
+            return Ok(173u8)
+    Ok(0u8)
+
+fn _import_row_claims(entity: EntityRef, row: DbRow, policy: DbPagedPolicy) -> Result<[DbImportClaim], text>:
+    if not db_ref_context(entity, policy.config.admission.namespace, policy.config.admission.epoch): return Err("SCVDB_IMPORT_CONTEXT")
+    if not db_import_digest(row.revision): return Err("SCVDB_IMPORT_ROW_REVISION")
+    for field in row.fields: db_rule_accepts_value(db_schema_rule(policy.config.merge, row.kind, field.name)?, field.value)?
+    var claims = _DbImportClaims(values: [], bytes: 0u64)
+    claims = _import_push(claims, _import_claim(db_page_batch_key(row.revision)?, "batch"))?
+    claims = _import_push(claims, _import_claim(db_paged_reverse_key(entity)?, "reverse"))?
+    for key in db_paged_unique_keys(row, policy.config.merge)?:
+        claims = _import_push(claims, _import_exact(db_paged_index_record(key, 170u8, DbValue.Reference(entity))?)?)?
+    var live: {text: bool} = {}
+    for reference in db_paged_row_references(row)?:
+        if reference.entity.provisional == nil or not db_ref_context(reference.entity, policy.config.admission.namespace, policy.config.admission.epoch): return Err("SCVDB_IMPORT_REFERENCE_CONTEXT")
+        val key = db_page_row_key(reference.entity)?
+        claims = _import_push(claims, _import_claim(key, "row", "", if reference.historical: 0u64 else: 1u64))?
+        if not reference.historical and not live.contains_key(key):
+            live[key] = true
+            claims = _import_push(claims, _import_claim(db_paged_refcount_key(reference.entity)?, "count", "", 1u64))?
+    for constraint in policy.config.merge.constraints:
+        if row.tombstoned or constraint.kind != row.kind: continue
+        for reference in constraint.references:
+            match db_field_value(row.fields, reference.field):
+                Absent: ()
+                Reference(target): claims = _import_push(claims, _import_claim(db_page_row_key(target)?, "row", reference.target_kind, 1u64))?
+                _: return Err("SCVDB_REFERENCE_TYPE")
+    Ok(claims.values)
+
+fn db_import_record_claims(record: DbPageRecord, policy: DbPagedPolicy) -> Result<[DbImportClaim], text>:
+    if record.key.starts_with("scv-db/conflicts/v1/evidence/"):
+        val evidence = db_paged_conflict_decode(record)?
+        return Ok([_import_claim(db_page_row_key(evidence.record.entity)?, "row"), _import_claim(db_page_batch_key(evidence.record.local_revision)?, "batch"), _import_claim(db_paged_history_key(evidence.record.base_revision)?, "history")])
+    if record.key.starts_with("scv-db/conflicts/v1/resolution/"):
+        val prefix = "scv-db/conflicts/v1/resolution/"
+        val patch = db_paged_resolution_patch(record.key[prefix.len():], record)?
+        val batch = DbAcceptedBatch(batch_id: patch.batch_id, canonical_digest: patch.batch_id, actor: patch.actor, actor_counter: patch.actor_counter, prior_revision: patch.base_revision)
+        val expected = db_typed_page_record_encode(DbTypedPageRecord.Accepted(batch))?
+        return Ok([_import_claim(expected.key, "same", db_import_fingerprint(expected)?)])
+    val tag = db_import_index_tag(record)?
+    if tag != 0u8:
+        val value = db_paged_index_value(record, tag)?
+        if tag == 170u8:
+            match value:
+                Absent: return Ok([])
+                Reference(entity):
+                    if entity.provisional == nil: return Err("SCVDB_IMPORT_INDEX_VALUE")
+                    return Ok([])
+                _: return Err("SCVDB_IMPORT_INDEX_VALUE")
+        if tag == 171u8:
+            match value:
+                Unsigned(_): return Ok([])
+                _: return Err("SCVDB_IMPORT_INDEX_VALUE")
+        if tag == 172u8:
+            match value:
+                Text(revision):
+                    if not db_import_digest(revision) or db_paged_history_key(revision)? != record.key: return Err("SCVDB_IMPORT_HISTORY")
+                    return Ok([])
+                _: return Err("SCVDB_IMPORT_HISTORY")
+        match value:
+            Reference(entity):
+                if entity.settled == nil or not db_ref_context(entity, policy.config.admission.namespace, policy.config.admission.epoch): return Err("SCVDB_IMPORT_CONTEXT")
+                return Ok([_import_claim(db_page_alias_key(entity.settled.unwrap())?, "alias-reverse", record.key)])
+            _: return Err("SCVDB_IMPORT_INDEX_VALUE")
+    # Unknown extension records fail closed; the checkpoint owner must select a
+    # validator version that understands any conflict/disposition extensions.
+    match db_typed_page_record_decode(record)?:
+        CurrentRow(entity, row): _import_row_claims(entity, row, policy)
+        Accepted(batch):
+            if batch.prior_revision == "": return Err("SCVDB_IMPORT_HISTORY")
+            Ok([_import_exact(db_typed_page_record_encode(DbTypedPageRecord.ActorCounter(batch))?)?, _import_claim(db_paged_history_key(batch.prior_revision)?, "history")])
+        ActorCounter(batch): Ok([_import_exact(db_typed_page_record_encode(DbTypedPageRecord.Accepted(batch))?)?])
+        Alias(binding):
+            if binding.namespace != policy.config.admission.namespace or binding.epoch != policy.config.admission.epoch: return Err("SCVDB_IMPORT_CONTEXT")
+            val uid = entity_ref_provisional(binding.uid)
+            val alias = SettledAlias(database_namespace: binding.namespace, authority_epoch: binding.epoch, entity_kind: binding.uid.entity_kind, sequence: binding.sequence)
+            Ok([_import_claim(db_page_row_key(uid)?, "row-alias"), _import_exact(db_paged_index_record(db_paged_reverse_key(uid)?, 173u8, DbValue.Reference(entity_ref_settled(alias)))?)?, _import_claim(db_page_highwater_key(binding.namespace, binding.epoch, binding.uid.entity_kind)?, "maximum", "", binding.sequence)])
+        HighWater(namespace, epoch, _, _):
+            if namespace != policy.config.admission.namespace or epoch != policy.config.admission.epoch: return Err("SCVDB_IMPORT_CONTEXT")
+            Ok([])
+        Revision(_): Err("SCVDB_PAGED_MIGRATION_REQUIRED")
+
+fn db_import_empty_fold() -> DbImportFold:
+    DbImportFold(exact: 0u64, row_alias: 0u64, reverse: 0u64, incoming: 0u64, maximum: 0u64)
+
+fn db_import_fold(record: DbPageRecord, prior: DbImportFold, claim: DbImportClaim) -> Result<DbImportFold, text>:
+    if record.key != claim.key: return Err("SCVDB_IMPORT_CLAIM")
+    var result = prior
+    if claim.mode == "same":
+        if db_import_fingerprint(record)? != claim.value: return Err("SCVDB_IMPORT_COUNTERPART")
+    elif claim.mode == "exact":
+        if db_import_fingerprint(record)? != claim.value or result.exact != 0: return Err("SCVDB_IMPORT_COUNTERPART")
+        result.exact = 1u64
+    elif claim.mode == "count":
+        if db_import_index_tag(record)? != 171u8 or result.incoming == 18446744073709551615u64: return Err("SCVDB_IMPORT_REFCOUNT")
+        result.incoming = result.incoming + 1u64
+    elif claim.mode == "reverse":
+        if db_import_index_tag(record)? != 173u8 or result.reverse != 0: return Err("SCVDB_IMPORT_REVERSE")
+        result.reverse = 1u64
+    elif claim.mode == "history":
+        if db_import_index_tag(record)? != 172u8: return Err("SCVDB_IMPORT_HISTORY")
+    else:
+        match db_typed_page_record_decode(record)?:
+            CurrentRow(_, row):
+                if claim.mode != "row" and claim.mode != "row-alias": return Err("SCVDB_IMPORT_CLAIM")
+                if claim.mode == "row-alias":
+                    if result.row_alias != 0: return Err("SCVDB_IMPORT_ALIAS")
+                    result.row_alias = 1u64
+                elif (claim.number != 0u64 and row.tombstoned) or (claim.value != "" and claim.value != row.kind): return Err("SCVDB_REFERENCE_INVALID")
+            Accepted(_):
+                if claim.mode != "batch": return Err("SCVDB_IMPORT_CLAIM")
+            Alias(binding):
+                if claim.mode != "alias-reverse" or db_paged_reverse_key(entity_ref_provisional(binding.uid))? != claim.value or result.reverse != 0: return Err("SCVDB_IMPORT_ALIAS")
+                result.reverse = 1u64
+            HighWater(_, _, _, sequence):
+                if claim.mode != "maximum" or claim.number > sequence: return Err("SCVDB_IMPORT_HIGHWATER")
+                if claim.number > result.maximum: result.maximum = claim.number
+            _: return Err("SCVDB_IMPORT_CLAIM")
+    Ok(result)
+
+fn db_import_finish(record: DbPageRecord, fold: DbImportFold) -> Result<bool, text>:
+    if record.key.starts_with("scv-db/conflicts/v1/"): return Ok(true) # Actual owner separately authenticates and joins evidence/resolution.
+    val tag = db_import_index_tag(record)?
+    if tag == 170u8:
+        val occupied = db_paged_index_value(record, tag)? != DbValue.Absent
+        if fold.exact != (if occupied: 1u64 else: 0u64): return Err("SCVDB_IMPORT_UNIQUENESS")
+    elif tag == 171u8:
+        if db_paged_index_value(record, tag)? != DbValue.Unsigned(fold.incoming): return Err("SCVDB_IMPORT_REFCOUNT")
+    elif tag == 173u8:
+        if fold.exact != 1u64 or fold.reverse != 1u64: return Err("SCVDB_IMPORT_REVERSE")
+    elif tag == 0u8:
+        match db_typed_page_record_decode(record)?:
+            CurrentRow(_, _):
+                if fold.row_alias != 1u64: return Err("SCVDB_IMPORT_ALIAS")
+            Accepted(_):
+                if fold.exact != 1u64: return Err("SCVDB_IMPORT_COUNTERPART")
+            ActorCounter(_):
+                if fold.exact != 1u64: return Err("SCVDB_IMPORT_COUNTERPART")
+            Alias(_):
+                if fold.reverse != 1u64: return Err("SCVDB_IMPORT_ALIAS")
+            HighWater(_, _, _, _): () # Upper gap/disposition history belongs to signed checkpoint validation.
+            _: return Err("SCVDB_IMPORT_RECORD")
+    Ok(true)
+
+export DbImportClaim, DbImportFold, db_import_digest, db_import_fingerprint
+export db_import_claim_encode, db_import_claim_decode, db_import_record_claims
+export db_import_empty_fold, db_import_fold, db_import_finish

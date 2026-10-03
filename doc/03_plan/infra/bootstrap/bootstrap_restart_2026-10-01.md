@@ -3,6 +3,98 @@
 This supplements the [historical Windows restart](windows_bootstrap_restart_2026-09-22.md).
 It records incomplete work, not build admission or permission to publish.
 
+## Active application plan: Windows and Ubuntu, 2026-10-03
+
+This section supersedes older live-process and Debian instructions below. It is
+an execution plan, not a claim that either host or item 7 is qualified.
+The inspected release baseline is `43f626850b6a5531e89110f75cd1eaedc24adcd1`.
+PR #2293 (explicit SHA-256 report binding and populated-buffer wipe regression),
+#2298 (combined Stage 2 source/admission fixes), and #2301 (private verifier
+memory snapshots) are merged. Landing does not establish native PASS.
+
+### Host authority and scheduling
+
+- Windows worktrees, build outputs, receipts, and caches stay on D:. Never modify
+  the unrelated C: checkout or reuse its running MCP/LSP processes as compilers.
+- The user unregistered Debian. Its former Linux filesystem and bootstrap
+  artifacts are unavailable; historical D: receipts do not restore those binaries.
+  Use Ubuntu-22.04 for future WSL work. Its registered storage is currently on C:;
+  record actual source/output/storage paths and any later migration before launch.
+- At this preparation checkpoint, Windows reported 21.69 GiB available RAM and
+  64.89 GiB free on D:. These are observations, not durable reservations. The
+  legacy paired Windows route requires two 7 GB aggregate Jobs plus 8 GiB host
+  reserve (21.04 GiB total). The current managed two-lane owner additionally
+  reserves 268,435,456 bytes overhead (21.29 GiB total with the host reserve). Starting Ubuntu or another compiler requires additional
+  admission; never give two owners the same available-memory budget.
+- Root owns the global resource ledger. Windows and Ubuntu owners may inspect
+  evidence and prepare scripts concurrently. Run compilation in parallel only
+  when fresh physical-memory, commit, disk, and process-tree reservations admit it.
+  Otherwise queue the blocked lane; record it as queued, not running or complete.
+
+### Phase 2 to Phase 3 and Phase 4 execution
+
+1. Inventory current producers before rebuilding. Pin source/tree, target/backend,
+   runtime provider and compiler binary hashes, materialization authority, and
+   terminal admission receipts. The old Windows 7734 producer was rejected by
+   canonical sanity; diagnostic hello alone does not turn it into an admitted tool.
+   The old partial 00b192 checkout is not the release baseline above.
+2. If no usable Phase 2 exists for a host/backend, build it from a frozen release
+   checkout through the canonical bootstrap route. Rust seeds are bootstrap-only.
+   Preserve old attempts and their counters. A changed source or fixed cause must
+   justify any new attempt; do not reset counters by renaming output directories.
+3. Require actual compile-and-execute hello evidence before downstream diagnostic
+   work, and the canonical admission receipt before claiming an admitted compiler.
+   Then schedule Phase 3 and Phase 4 independently with that same pinned Phase 2
+   producer. Phase 4 must not silently substitute a Phase 3 producer.
+4. Use the build manager when its real worker/isolation primitive is admitted.
+   If unavailable, the user-authorized existing scripts may advance the same task
+   inventory. Preserve independent module failures, continue unrelated tasks, and
+   classify dependent tasks as blocked. Do not invent stub symbols or empty passes.
+5. For each Windows and Ubuntu host, cover LLVM and Cranelift, all planned modules,
+   compiler/loader/interpreter binaries and their test executables. Run one backend
+   then the next within the resource ledger. Retain Phase 3 MIR completion evidence.
+   A compiler-only bootstrap CLI is not a full CLI or test runner; tests require
+   actual `Results:` output, exit status, and nonzero intended test execution.
+6. Keep writable object/tool caches private by host, target, backend, producer
+   phase/hash and entry closure. Retain `SIMPLE_NO_STUB_FALLBACK=1`. Share only
+   admitted portable frontend records with verified identity/schema/digest; prove
+   Windows-to-Ubuntu and Ubuntu-to-Windows reuse and rejection of mismatches before
+   claiming shared-cache deployment.
+7. Record per-task source/producer, command, cache path, start/terminal status,
+   elapsed time, peak aggregate RSS, exit code, artifact hash, and guard quiescence.
+   Keep interrupted tasks pending for exact requeue; do not count them as completed.
+
+### Item 7 application gates
+
+Item 7 retains the scope in [the seven-item host plan](../../seven_plans_host_completion_2026-09-29.md#7-profile-based-switchable-container-algorithms)
+and [its agent sequence](../../agent_tasks/profile_switchable_container_algorithms.md).
+Do not replace that scope with parser support or an advisory selector test.
+
+| Gate | Required observation before advancing |
+|---|---|
+| Source integration | Reconcile release implementations of `AdaptiveSetAttribute`, `AdaptiveSetWorkloadProfile`, `SprofCollectionLoad`, and `CollectionPlan`; retain item 3 typed-planner dependencies and all selected requirements. |
+| Capture | Execution-owned begin/note/finish/abort records bounded logical events exactly once; map-backed sets do not double-count; every exit clears capture state. |
+| Profile handoff | Persist and admit workload A, run again with feedback, then repeat with workload B; observe actual differing justified selection with identical logical results. |
+| Safety | Reject stale source/schema/site/workload/target, preserve explicit-attribute precedence and auto fallback, and test atomic publication and append failure. |
+| Runtime behavior | Prove generic map/set lowering and actual execution, per-instance independence, transitions, collision-heavy inputs, ownership/iteration and concurrency boundaries. |
+| Host/backend acceptance | Run real SPipe/native evidence on Windows and Ubuntu with both backend routes; preserve interpreter/native differential, timing, RSS, and instrumentation-cost evidence against retained NFRs. |
+| Deployment | Apply each independently verified feature through release/1.0, create a new frozen bootstrap candidate, and invalidate only incompatible caches. Source landing is not host deployment or item completion. |
+
+Use separate implementation worktrees for remaining item 7 gaps. Update matching
+executable specs and manuals before verification. Parent reviews evidence before
+landing feature changes; this plan may land without asserting those gates passed.
+Never change a currently running compiler's source or provider underneath it.
+
+### Ownership and current limits
+
+Windows owner: `atomic_enum_failure_fix`; Ubuntu recovery owner:
+`linux_runtime_repair_astra`; resource/merge and item 7 plan owner: root.
+Existing Windows historical totals remain Phase 3: 45 completed (14 pass),
+Phase 4: 27 completed (1 pass). These belong to the old diagnostic source, not
+this release. PR #2298 reports a newer 1,146-module Stage 2 candidate elsewhere,
+but its full CLI/test-runner verification is incomplete and its receipts/artifacts
+must be acquired and checked before use. No new phase launch is implied here.
+
 ## Latest checkpoint: 2026-10-02 cached builds resumed
 
 Provider state checked again: PRs #2156 (SDK links), #2157 (Item5 metadata

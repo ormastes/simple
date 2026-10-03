@@ -1,0 +1,102 @@
+# Authenticated candidate planning. The stable internal row identity remains
+# the original UID; the settled projection rewrites every typed reference.
+# Both views and the allocator must be published in one candidate tree.
+use std.scv.db_patch.*
+use std.scv.db_reducer.{MaterializedState, MergePolicy, MergePlan, DbRow}
+use std.scv.db_admission.{DbAdmissionPolicy, db_plan_admitted_settled_patch}
+use std.scv.distributed_identity.*
+use std.scv.distributed_identity_map.*
+
+struct DbAllocationPlan:
+    code: text
+    identities: IdentityMap
+    semantic: MergePlan
+    settled_rows: [DbRow]
+
+fn db_settled_reference(ref: EntityRef, identities: IdentityMap) -> Result<EntityRef, text>:
+    if not entity_ref_validate(ref).valid: return Err("SCVDB_ENTITY_REF")
+    if val alias = ref.settled:
+        if alias.database_namespace != identities.database_namespace or alias.authority_epoch != identities.authority_epoch:
+            return Err("SCVDB_ALIAS_CONTEXT")
+        if identity_map_reverse(identities, alias.entity_kind, alias.sequence) == "": return Err("SCVDB_IDENTITY_UNKNOWN")
+        return Ok(ref)
+    if val uid = ref.provisional:
+        val id = entity_ref_canonical(ref)
+        for binding in identities.bindings:
+            if binding.identity == id:
+                val alias = SettledAlias(database_namespace: identities.database_namespace, authority_epoch: identities.authority_epoch, entity_kind: binding.entity_kind, sequence: binding.sequence)
+                return Ok(entity_ref_settled(alias))
+    Err("SCVDB_IDENTITY_UNKNOWN")
+
+fn db_project_settled_value(value: DbValue, identities: IdentityMap, depth: i64) -> Result<DbValue, text>:
+    if depth > 64: return Err("SCVDB_DEPTH_QUOTA")
+    match value:
+        Reference(ref): Ok(DbValue.Reference(db_settled_reference(ref, identities)?))
+        List(values):
+            var projected: [DbValue] = []
+            for child in values: projected.push(db_project_settled_value(child, identities, depth + 1)?)
+            Ok(DbValue.List(projected))
+        Set(values):
+            var projected: [DbValue] = []
+            for child in values: projected.push(db_project_settled_value(child, identities, depth + 1)?)
+            Ok(DbValue.Set(projected))
+        ObservedSet(members):
+            var projected: [DbSetMember] = []
+            for member in members:
+                projected.push(DbSetMember(dot: member.dot, value: db_project_settled_value(member.value, identities, depth + 1)?, removed: member.removed))
+            Ok(DbValue.ObservedSet(projected))
+        CausalSet(events):
+            var projected: [DbSetEvent] = []
+            for event in events:
+                projected.push(DbSetEvent(dot: event.dot, value: db_project_settled_value(event.value, identities, depth + 1)?, removed: event.removed, observed: event.observed))
+            Ok(DbValue.CausalSet(projected))
+        _: Ok(value)
+
+fn db_project_settled_rows(state: MaterializedState, identities: IdentityMap) -> Result<[DbRow], text>:
+    var rows: [DbRow] = []
+    for row in state.rows:
+        var alias = ""
+        for binding in identities.bindings:
+            if binding.identity == row.entity:
+                alias = entity_ref_canonical(db_settled_reference(entity_ref_provisional(binding.uid), identities)?)
+        if alias == "": return Err("SCVDB_IDENTITY_UNKNOWN")
+        var fields: [DbField] = []
+        for field in row.fields:
+            fields.push(DbField(name: field.name, value: db_project_settled_value(field.value, identities, 0)?))
+        rows.push(DbRow(entity: alias, kind: row.kind, fields: fields, revision: row.revision, tombstoned: row.tombstoned))
+    Ok(rows)
+
+fn _db_allocate_entity(identities: IdentityMap, entity: EntityRef) -> Result<IdentityMap, text>:
+    if val uid = entity.provisional:
+        val allocated = identity_map_allocate(identities, uid)
+        if allocated.code != "allocated" and allocated.code != "existing": return Err(allocated.code)
+        return Ok(allocated.state)
+    # Creation uses an offline UID. A caller cannot invent a settled alias.
+    Err("SCVDB_CREATION_REQUIRES_UID")
+
+fn db_plan_allocation(state: MaterializedState, identities: IdentityMap, patch: DbPatch, merge: MergePolicy, admission: DbAdmissionPolicy, now: u64) -> Result<DbAllocationPlan, text>:
+    # Authentication, ACL, metadata, versions, bases and schema/reference
+    # constraints all run before any candidate high-water mark advances.
+    val plan = db_plan_admitted_settled_patch(state, patch, merge, admission, identities, now)?
+    if identities.database_namespace != admission.namespace or identities.authority_epoch != admission.epoch:
+        return Err("SCVDB_ALLOCATOR_CONTEXT")
+    if plan.conflicts.len() > 0:
+        return Ok(DbAllocationPlan(code: "conflict", identities: identities, semantic: plan, settled_rows: []))
+    var candidate = identities
+    if not plan.replay:
+        for operation in patch.operations:
+            match operation:
+                Create(entity, kind, fields): candidate = _db_allocate_entity(candidate, entity)?
+                AppendObservation(entity, kind, fields): candidate = _db_allocate_entity(candidate, entity)?
+                _: ()
+        for row in plan.proposed.rows:
+            if row.tombstoned:
+                for binding in candidate.bindings:
+                    if binding.identity == row.entity and not binding.tombstoned:
+                        val removed = identity_map_tombstone(candidate, binding.uid)
+                        if removed.code != "tombstoned": return Err(removed.code)
+                        candidate = removed.state
+    val settled = db_project_settled_rows(plan.proposed, candidate)?
+    Ok(DbAllocationPlan(code: "candidate", identities: candidate, semantic: plan, settled_rows: settled))
+
+export DbAllocationPlan, db_settled_reference, db_project_settled_value, db_project_settled_rows, db_plan_allocation

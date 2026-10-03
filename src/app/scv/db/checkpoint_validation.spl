@@ -1,0 +1,294 @@
+# Shared operation-wide reader state is returned explicitly by every helper.
+# No validation helper creates or resets an install reader.
+use app.scv.db.checkpoint_reader.*
+use std.scv.db_checkpoint.*
+use std.scv.db_checkpoint_history.*
+use std.scv.db_pages.*
+use std.scv.db_page_records.*
+use std.scv.db_reducer.{DbRow, DbAcceptedBatch, db_constraint_conflicts, db_schema_rule, db_rule_accepts_value}
+use std.scv.db_reference_closure.{DbReferenceTarget, db_reference_errors}
+use std.scv.db_patch.{db_ref_kind}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.distributed_identity.*
+
+fn db_checkpoint_metadata(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckpoint, key: text) -> Result<(DbCheckpointReader, DbCheckpointMetadata), text>:
+    val loaded = db_checkpoint_reader_record(initial, checkpoint.metadata, key)?
+    if loaded.1 == nil: return Err("SCVDB_CHECKPOINT_METADATA_MISSING")
+    Ok((loaded.0, db_checkpoint_metadata_decode(loaded.1.unwrap())?))
+
+fn db_checkpoint_batch(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckpoint, batch: text) -> Result<(DbCheckpointReader, DbAcceptedBatch?), text>:
+    match checkpoint.storage:
+        Reference(snapshot, identities, conflicts):
+            val loaded = db_checkpoint_reader_reference(initial, checkpoint)?
+            val reader = db_checkpoint_reader_reserve(loaded.0, 0u64, 256u64)?
+            Ok((reader, loaded.1.accepted.get(batch)))
+        Paged(manifest):
+            val loaded = db_checkpoint_reader_record(initial, manifest.pages, db_page_batch_key(batch)?)?
+            if val record = loaded.1:
+                match db_typed_page_record_decode(record)?:
+                    Accepted(accepted): return Ok((loaded.0, Some(accepted)))
+                    _: return Err("SCVDB_CHECKPOINT_INDEX")
+            Ok((loaded.0, nil))
+
+fn db_checkpoint_row(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckpoint, entity: EntityRef) -> Result<(DbCheckpointReader, DbRow?), text>:
+    match checkpoint.storage:
+        Reference(snapshot, identities, conflicts):
+            val loaded = db_checkpoint_reader_reference(initial, checkpoint)?
+            val reader = db_checkpoint_reader_reserve(loaded.0, 0u64, 4096u64)?
+            Ok((reader, loaded.1.rows.get(entity_ref_canonical(entity))))
+        Paged(manifest):
+            val loaded = db_checkpoint_reader_record(initial, manifest.pages, db_page_row_key(entity)?)?
+            if val record = loaded.1:
+                match db_typed_page_record_decode(record)?:
+                    CurrentRow(found, row):
+                        if found != entity: return Err("SCVDB_CHECKPOINT_INDEX")
+                        return Ok((loaded.0, Some(row)))
+                    _: return Err("SCVDB_CHECKPOINT_INDEX")
+            Ok((loaded.0, nil))
+
+fn db_checkpoint_reachable(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckpoint) -> Result<(DbCheckpointReader, {text: bool}), text>:
+    var reader = initial
+    var pending = [checkpoint.current_revision]
+    var visited: {text: bool} = {}
+    var visited_count = 0
+    while pending.len() > 0:
+        val revision = pending[pending.len() - 1]
+        pending = pending[0:pending.len() - 1]
+        if visited.contains_key(revision): continue
+        if visited_count >= 4096: return Err("SCVDB_CHECKPOINT_HISTORY_QUERY_QUOTA")
+        visited[revision] = true
+        visited_count = visited_count + 1
+        val loaded = db_checkpoint_metadata(reader, checkpoint, db_checkpoint_history_key(revision)?)?
+        reader = loaded.0
+        match loaded.1:
+            History(found, ordinal, parents, batches, object_digest):
+                for parent in parents:
+                    if not visited.contains_key(parent) and not pending.contains(parent): pending.push(parent)
+                if pending.len() > 4096: return Err("SCVDB_CHECKPOINT_HISTORY_QUERY_QUOTA")
+            _: return Err("SCVDB_CHECKPOINT_HISTORY")
+    Ok((reader, visited))
+
+fn db_checkpoint_reaches(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckpoint, wanted: text) -> Result<(DbCheckpointReader, bool), text>:
+    val loaded = db_checkpoint_reachable(initial, checkpoint)?
+    Ok((loaded.0, loaded.1.contains_key(wanted)))
+
+fn _checkpoint_links(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckpoint, entity: EntityRef) -> Result<DbCheckpointReader, text>:
+    var reader = initial
+    var frontier = [(entity, [entity_ref_canonical(entity)])]
+    var examined = 0
+    while frontier.len() > 0:
+        val item = frontier[frontier.len() - 1]
+        frontier = frontier[0:frontier.len() - 1]
+        examined = examined + 1
+        if examined > 256: return Err("SCVDB_CHECKPOINT_GRAPH_QUOTA")
+        var targets: [EntityRef] = []
+        val loaded = db_checkpoint_metadata(reader, checkpoint, db_checkpoint_disposition_key(item.0)?)?
+        reader = loaded.0
+        match loaded.1:
+            Disposition(found, disposition):
+                match disposition:
+                    MergedInto(target, batch): targets = [target]
+                    SplitInto(children, batch): targets = children
+                    _: ()
+            _: return Err("SCVDB_CHECKPOINT_METADATA_FORMAT")
+        for target in targets:
+            val key = entity_ref_canonical(target)
+            if item.1.contains(key): return Err("SCVDB_CHECKPOINT_GRAPH_CYCLE")
+            if frontier.len() >= 256: return Err("SCVDB_CHECKPOINT_GRAPH_QUOTA")
+            frontier.push((target, item.1 + [key]))
+    Ok(reader)
+
+fn db_checkpoint_validate_metadata(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckpoint) -> Result<DbCheckpointReader, text>:
+    var reader = db_checkpoint_reader_reserve(initial, 0u64, checkpoint.metadata.entries.len() as u64 * 256u64)?
+    db_pages_manifest_validate(checkpoint.metadata)?
+    val current = db_checkpoint_metadata(reader, checkpoint, db_checkpoint_history_key(checkpoint.current_revision)?)?
+    reader = current.0
+    match current.1:
+        History(revision, ordinal, parents, batches, object_digest):
+            val expected = match checkpoint.storage:
+                Reference(snapshot, identities, conflicts): sha256_text(snapshot)
+                Paged(manifest): manifest.revision
+            if object_digest != expected: return Err("SCVDB_CHECKPOINT_HISTORY_OBJECT")
+        _: return Err("SCVDB_CHECKPOINT_HISTORY")
+    val horizon = db_checkpoint_metadata(reader, checkpoint, db_checkpoint_history_key(checkpoint.history_horizon)?)?
+    reader = horizon.0
+    match horizon.1:
+        History(revision, ordinal, parents, batches, object_digest):
+            if parents.len() != 0: return Err("SCVDB_CHECKPOINT_HISTORY_HORIZON")
+        _: return Err("SCVDB_CHECKPOINT_HISTORY")
+    val ancestry = db_checkpoint_reachable(reader, checkpoint)?
+    reader = ancestry.0
+    val reachable = ancestry.1
+    if not reachable.contains_key(checkpoint.history_horizon): return Err("SCVDB_CHECKPOINT_HISTORY_HORIZON")
+    var dispositions = 0u64
+    var acceptances = 0u64
+    for entry in checkpoint.metadata.entries:
+        val loaded = db_checkpoint_reader_page(reader, checkpoint.metadata, entry)?
+        reader = loaded.0
+        for record in loaded.1.records:
+            reader = db_checkpoint_reader_work(reader, record)?
+            match db_checkpoint_metadata_decode(record)?:
+                Disposition(entity, disposition):
+                    dispositions = dispositions + 1u64
+                    if entity.provisional.unwrap().database_namespace != checkpoint.namespace: return Err("SCVDB_CHECKPOINT_CONTEXT")
+                    val found = db_checkpoint_row(reader, checkpoint, entity)?
+                    reader = found.0
+                    val row = found.1
+                    if row == nil or row.unwrap().kind != db_ref_kind(entity): return Err("SCVDB_CHECKPOINT_DISPOSITION_ROW")
+                    var batch = ""
+                    match disposition:
+                        Live:
+                            if row.unwrap().tombstoned: return Err("SCVDB_CHECKPOINT_DISPOSITION_ROW")
+                        Tombstoned(cause): batch = cause
+                        MergedInto(target, cause): batch = cause
+                        SplitInto(targets, cause): batch = cause
+                    if batch != "":
+                        val accepted = db_checkpoint_batch(reader, checkpoint, batch)?
+                        reader = accepted.0
+                        if not row.unwrap().tombstoned or row.unwrap().revision != batch or accepted.1 == nil: return Err("SCVDB_CHECKPOINT_DISPOSITION_CAUSE")
+                    reader = _checkpoint_links(reader, checkpoint, entity)?
+                History(revision, ordinal, parents, batches, object_digest):
+                    if parents.len() == 0 and revision != checkpoint.history_horizon: return Err("SCVDB_CHECKPOINT_HISTORY_ROOT")
+                    for parent in parents:
+                        val loaded_parent = db_checkpoint_metadata(reader, checkpoint, db_checkpoint_history_key(parent)?)?
+                        reader = loaded_parent.0
+                        match loaded_parent.1:
+                            History(found, previous, ancestors, accepted, digest):
+                                if previous >= ordinal: return Err("SCVDB_CHECKPOINT_HISTORY_CYCLE")
+                            _: return Err("SCVDB_CHECKPOINT_HISTORY")
+                    for batch in batches:
+                        val accepted = db_checkpoint_batch(reader, checkpoint, batch)?
+                        reader = accepted.0
+                        if accepted.1 == nil: return Err("SCVDB_CHECKPOINT_HISTORY_BATCH")
+                        val membership = db_checkpoint_metadata(reader, checkpoint, db_checkpoint_acceptance_key(batch)?)?
+                        reader = membership.0
+                        if membership.1 != DbCheckpointMetadata.Acceptance(batch, revision): return Err("SCVDB_CHECKPOINT_HISTORY_BATCH")
+                    if batches.len() > 0 and not reachable.contains_key(revision): return Err("SCVDB_CHECKPOINT_HISTORY_ACCEPTANCE_ANCESTRY")
+                Acceptance(batch, revision):
+                    acceptances = acceptances + 1u64
+                    if not reachable.contains_key(revision): return Err("SCVDB_CHECKPOINT_HISTORY_ACCEPTANCE_ANCESTRY")
+                    val accepted = db_checkpoint_batch(reader, checkpoint, batch)?
+                    reader = accepted.0
+                    if accepted.1 == nil: return Err("SCVDB_CHECKPOINT_HISTORY_BATCH")
+                    val membership = db_checkpoint_metadata(reader, checkpoint, db_checkpoint_history_key(revision)?)?
+                    reader = membership.0
+                    match membership.1:
+                        History(found, ordinal, parents, batches, object_digest):
+                            if not batches.contains(batch): return Err("SCVDB_CHECKPOINT_HISTORY_BATCH")
+                        _: return Err("SCVDB_CHECKPOINT_HISTORY_BATCH")
+    var rows = 0u64
+    var accepted = 0u64
+    match checkpoint.storage:
+        Reference(snapshot, identities, conflicts):
+            val image = db_checkpoint_reader_reference(reader, checkpoint)?
+            reader = image.0
+            rows = image.1.state.rows.len() as u64
+            accepted = image.1.state.accepted.len() as u64
+        Paged(manifest):
+            for entry in manifest.pages.entries:
+                val loaded = db_checkpoint_reader_page(reader, manifest.pages, entry)?
+                reader = loaded.0
+                for record in loaded.1.records:
+                    reader = db_checkpoint_reader_work(reader, record)?
+                    match db_typed_page_record_decode(record):
+                        Ok(value):
+                            match value:
+                                CurrentRow(entity, row): rows = rows + 1u64
+                                Accepted(batch): accepted = accepted + 1u64
+                                _: ()
+                        Err(error): () # Derived indexes are checked by the paged import owner.
+    if rows != dispositions: return Err("SCVDB_CHECKPOINT_DISPOSITION_COVERAGE")
+    if accepted != acceptances: return Err("SCVDB_CHECKPOINT_HISTORY_BATCH_COVERAGE")
+    Ok(reader)
+
+fn db_checkpoint_preserve_metadata(initial: DbCheckpointReader, previous: DbDatabaseCheckpoint, next: DbDatabaseCheckpoint) -> Result<DbCheckpointReader, text>:
+    if next.predecessor_checkpoint != previous.revision: return Err("SCVDB_CHECKPOINT_HISTORY_REGRESSION")
+    val reached = db_checkpoint_reaches(initial, next, previous.current_revision)?
+    var reader = reached.0
+    if not reached.1: return Err("SCVDB_CHECKPOINT_HISTORY_REGRESSION")
+    for entry in previous.metadata.entries:
+        val loaded = db_checkpoint_reader_page(reader, previous.metadata, entry)?
+        reader = loaded.0
+        for record in loaded.1.records:
+            val found = db_checkpoint_reader_record(reader, next.metadata, record.key)?
+            reader = db_checkpoint_reader_work(found.0, record)?
+            val retained = found.1
+            if retained == nil: return Err("SCVDB_CHECKPOINT_METADATA_REGRESSION")
+            match db_checkpoint_metadata_decode(record)?:
+                Disposition(entity, disposition):
+                    match disposition:
+                        Live: ()
+                        _: if retained.unwrap() != record: return Err("SCVDB_CHECKPOINT_METADATA_REGRESSION")
+                _: if retained.unwrap() != record: return Err("SCVDB_CHECKPOINT_METADATA_REGRESSION")
+    Ok(reader)
+
+fn db_checkpoint_validate_reference(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckpoint, authority: DbCheckpointAuthority) -> Result<DbCheckpointReader, text>:
+    val loaded = db_checkpoint_reader_reference(initial, checkpoint)?
+    var reader = loaded.0
+    val image = loaded.1
+    val state = image.state
+    val identity = image.identities
+    # Existing global reference/constraint helpers may scan all rows. Reserve
+    # their conservative Cartesian byte-work before calling them, not afterwards.
+    val factor = state.rows.len() as u64 + authority.policy.merge.fields.len() as u64 + authority.policy.merge.constraints.len() as u64 + 1u64
+    if factor > 30001u64: return Err("SCVDB_CHECKPOINT_WORK_QUOTA")
+    reader = db_checkpoint_reader_reserve(reader, 0u64, image.encoded_bytes * factor)?
+    if db_constraint_conflicts(state.rows, authority.policy.merge)?.len() != 0: return Err("SCVDB_CHECKPOINT_CONSTRAINT")
+    var targets: [DbReferenceTarget] = []
+    for row in state.rows: targets.push(DbReferenceTarget(identity: row.entity, tombstoned: row.tombstoned))
+    for row in state.rows:
+        if not image.accepted.contains_key(row.revision): return Err("SCVDB_CHECKPOINT_ROW_REVISION")
+        for field in row.fields:
+            db_rule_accepts_value(db_schema_rule(authority.policy.merge, row.kind, field.name)?, field.value)?
+            if db_reference_errors(field.value, targets, row.tombstoned, 0)?.len() != 0: return Err("SCVDB_CHECKPOINT_REFERENCE_CLOSURE")
+    for binding in identity.bindings:
+        val row = image.rows.get(binding.identity)
+        if row == nil: return Err("SCVDB_CHECKPOINT_ALIAS_ROW")
+        if row.unwrap().tombstoned != binding.tombstoned: return Err("SCVDB_CHECKPOINT_ALIAS_TOMBSTONE")
+    if identity.bindings.len() != state.rows.len(): return Err("SCVDB_CHECKPOINT_ALIAS_COVERAGE")
+    for record in image.catalog.records:
+        if record.repository != checkpoint.repository or record.epoch != checkpoint.epoch: return Err("SCVDB_CHECKPOINT_CONFLICT_CONTEXT")
+        if record.entity.provisional == nil or record.entity.provisional.unwrap().database_namespace != checkpoint.namespace: return Err("SCVDB_CHECKPOINT_CONFLICT_CONTEXT")
+    for receipt in image.catalog.resolutions:
+        var reviewer = false
+        for key in authority.policy.admission.keys:
+            if key.key_id == receipt.reviewer: reviewer = true
+        val prefix = "SCVDB-CONFLICT-RESOLUTION-v1:"
+        if not image.accepted.contains_key(receipt.resolution_batch) or not reviewer or not receipt.provenance.starts_with(prefix) or not db_checkpoint_hex(receipt.provenance[prefix.len():]) or not db_checkpoint_hex(receipt.resulting_revision): return Err("SCVDB_CHECKPOINT_CONFLICT_RECEIPT")
+    # Reference v1 catalogs retain checkpoint-attested receipts, not original
+    # signed resolution envelopes; no historical-signature claim is made.
+    Ok(reader)
+
+fn db_checkpoint_preserve_reference(initial: DbCheckpointReader, previous: DbDatabaseCheckpoint, next: DbDatabaseCheckpoint) -> Result<DbCheckpointReader, text>:
+    val before = db_checkpoint_reader_reference(initial, previous)?
+    val after = db_checkpoint_reader_reference(before.0, next)?
+    var reader = after.0
+    val old = before.1
+    val current = after.1
+    reader = db_checkpoint_reader_reserve(reader, 0u64, old.encoded_bytes + current.encoded_bytes)?
+    for batch in old.state.accepted:
+        if current.accepted.get(batch.batch_id) != Some(batch): return Err("SCVDB_CHECKPOINT_ACCEPTED_REGRESSION")
+    for row in old.state.rows:
+        val found = current.rows.get(row.entity)
+        if found == nil: return Err("SCVDB_CHECKPOINT_ROW_REGRESSION")
+        if found.unwrap().kind != row.kind or (row.tombstoned and found.unwrap() != row): return Err("SCVDB_CHECKPOINT_ROW_REGRESSION")
+    for binding in old.identities.bindings:
+        val found = current.bindings.get(binding.identity)
+        if found == nil: return Err("SCVDB_CHECKPOINT_ALIAS_REGRESSION")
+        val bound = found.unwrap()
+        if bound.uid != binding.uid or bound.entity_kind != binding.entity_kind or bound.sequence != binding.sequence or (binding.tombstoned and not bound.tombstoned): return Err("SCVDB_CHECKPOINT_ALIAS_REGRESSION")
+    for mark in old.identities.high_water:
+        val found = current.high_water.get(mark.entity_kind)
+        if found == nil or found.unwrap() < mark.sequence: return Err("SCVDB_CHECKPOINT_ALLOCATOR_REGRESSION")
+    # Catalog membership still uses its reviewed equality semantics. Reserve
+    # the bounded cross-product rather than conceal that residual scan cost.
+    reader = db_checkpoint_reader_reserve(reader, 0u64, old.encoded_bytes * (current.catalog.records.len() as u64 + current.catalog.resolutions.len() as u64 + 1u64))?
+    for record in old.catalog.records:
+        if not current.catalog.records.contains(record): return Err("SCVDB_CHECKPOINT_CONFLICT_REGRESSION")
+    for receipt in old.catalog.resolutions:
+        if not current.catalog.resolutions.contains(receipt): return Err("SCVDB_CHECKPOINT_CONFLICT_REGRESSION")
+    Ok(reader)
+
+export db_checkpoint_metadata, db_checkpoint_batch, db_checkpoint_row, db_checkpoint_reaches
+export db_checkpoint_validate_metadata, db_checkpoint_preserve_metadata
+export db_checkpoint_validate_reference, db_checkpoint_preserve_reference

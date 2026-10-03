@@ -2,6 +2,17 @@
 
 **Status:** IN PROGRESS — CORE GROUNDWORK ONLY
 
+**2026-10-03 reconciliation:** use
+`doc/03_plan/compiler/perf/item6_compile_optimization_2026-10-03.md` for the full
+item 6 execution scope and current research/acceptance links. The release base
+now contains cold HIR/full-index publication owners; historical notes below
+remain dated evidence and must not imply those owners are absent today.
+The broad 44-scenario SSpec still references a missing checker at inspected
+release commit `7d16ab11d2227cbe5f29dc998b76a1eff326abbb`. Its current acceptance
+status is unverified. The first concrete TDD repair addresses GC/publication
+serialization; mixed semantic classification, full harness adoption, and
+performance qualification remain distinct open work.
+
 Adjacent compile-performance finding (2026-09-29): an exact Stage4 standalone
 hello build now succeeds. A repeated invocation still does compiler work
 because that diagnostic compiler has no ABI admission receipt; its producer

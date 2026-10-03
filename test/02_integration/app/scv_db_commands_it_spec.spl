@@ -1,0 +1,187 @@
+use std.spec.{describe, it, expect, step}
+use app.io.mod (file_write, file_exists, process_run_bounded)
+use app.scv.db.commands.{db_command}
+use app.scv.db.local_store.{db_store_read}
+use app.scv.db.local_apply.{db_read_local_view}
+use app.scv.db.settlement_queue.{db_settlement_queue_open}
+use std.scv.db_policy_codec.*
+use std.scv.db_patch_codec.{db_patch_encode}
+use std.scv.db_admission.{db_admission_policy_digest}
+use test.fixtures.scv.db_apply_fixture.*
+use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
+use app.scv.db.quarantine_store.{DbQuarantineQuota, db_quarantine_bundle_encode, db_quarantine_read}
+
+fn setup_item2_command_policy() -> DbPolicyConfig:
+    var admission = setup_item2_apply_policy()
+    var key = admission.keys[0]
+    key.valid_until = 18446744073709551615u64
+    admission.keys = [key]
+    admission.revision = db_admission_policy_digest(admission).unwrap()
+    var config = DbPolicyConfig(revision: "", admission: admission, merge: setup_item2_apply_merge())
+    config.revision = db_policy_digest(config).unwrap()
+    config
+
+describe "Distributed database command owner":
+    it "persists original authenticated queue bytes and rejects stale or forged enqueue requests":
+        val root = setup_item2_apply_root()
+        val config = setup_item2_command_policy()
+        val patch = setup_item2_apply_patch(1, "")
+        expect(file_write("{root}/policy", db_policy_encode(config).unwrap())).to_be(true)
+        expect(file_write("{root}/patch", db_patch_encode(patch).unwrap())).to_be(true)
+        step("Inspect an empty queue then enqueue with independent policy and physical-head pins")
+        expect(db_command(root, ["queue-status", "policy", config.revision])).to_equal("OK local-queue head=empty items=0")
+        expect(db_command(root, ["queue-enqueue", "policy", config.revision, "patch", "empty"]).starts_with("OK local-queue head=")).to_be(true)
+        val view = db_settlement_queue_open(root, config.admission).unwrap()
+        expect(view.queue.items.len()).to_equal(1)
+        expect(view.queue.items[0].phase).to_equal("queued")
+        expect(db_patch_encode(view.queue.items[0].patch)).to_equal(db_patch_encode(patch))
+        expect(db_command(root, ["queue-status", "policy", config.revision])).to_equal("OK local-queue head={view.head} items=1")
+        step("Replay preserves the original queue; stale or forged requests preserve its head")
+        expect(db_command(root, ["queue-enqueue", "policy", config.revision, "patch", view.head])).to_equal("OK local-queue head={view.head} items=1")
+        expect(db_command(root, ["queue-enqueue", "policy", config.revision, "patch", "empty"])).to_equal("ERROR SCVDB_STORE_HEAD_ADVANCED")
+        var forged = patch
+        forged.signature = [0u8;64]
+        expect(file_write("{root}/patch", db_patch_encode(forged).unwrap())).to_be(true)
+        expect(db_command(root, ["queue-enqueue", "policy", config.revision, "patch", view.head])).to_equal("ERROR SCVDB_SIGNATURE_INVALID")
+        expect(db_settlement_queue_open(root, config.admission).unwrap().head).to_equal(view.head)
+        expect(db_store_read(root, "semantic").code).to_equal("empty")
+        expect(db_store_read(root, "settlement").code).to_equal("empty")
+
+    it "imports inert external quarantine and applies only the requested authenticated patch":
+        step("Create a private repository and external evidence parent")
+        val root = setup_item2_apply_root()
+        val external = setup_item2_apply_root()
+        val (_stdout, _stderr, initialized) = process_run_bounded("git", ["init", "--quiet", root], 30000, 4096)
+        expect(initialized).to_equal(0)
+        val config = setup_item2_command_policy()
+        val patch = setup_item2_apply_patch(1, "")
+        val quota = DbQuarantineQuota(max_bundle_bytes: 16777216, max_patch_bytes: 1048576, max_patches: 256)
+        expect(file_write("{root}/policy", db_policy_encode(config).unwrap())).to_be(true)
+        expect(file_write("{root}/bundle", db_quarantine_bundle_encode([patch], quota).unwrap())).to_be(true)
+        val imported = db_command(root, ["quarantine-import", external, "bundle"])
+        expect(imported.starts_with("OK quarantined-unverified digest=")).to_be(true)
+        val digest = imported.split(" ")[2].replace("digest=", "")
+        expect(digest.len()).to_equal(64)
+        expect(db_store_read(root).code).to_equal("empty")
+        expect(file_write("{root}/bundle", "changed source after import")).to_be(true)
+        expect(db_quarantine_read(root, external, digest, quota)).to_equal(Ok([patch]))
+        expect(db_command(root, ["quarantine-inspect", external, digest])).to_equal("OK quarantined-unverified digest={digest} patches=1")
+        expect(db_command(root, ["quarantine-inspect", external, "../escape"])).to_equal("ERROR SCVDB_EVIDENCE_DIGEST")
+        expect(db_command(root, ["quarantine-inspect", external, "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"])).to_equal("ERROR SCVDB_EVIDENCE_DIGEST")
+        step("Require an independent policy pin and exact requested batch before publication")
+        expect(db_command(root, ["quarantine-apply", "policy", "0000000000000000000000000000000000000000000000000000000000000000", external, digest, patch.batch_id, "empty"])).to_equal("ERROR SCVDB_POLICY_PIN_MISMATCH")
+        expect(db_command(root, ["quarantine-apply", "policy", config.revision, external, digest, "unknown", "empty"])).to_equal("ERROR SCVDB_QUARANTINE_PATCH_MISSING")
+        expect(db_store_read(root).code).to_equal("empty")
+        val applied = db_command(root, ["quarantine-apply", "policy", config.revision, external, digest, patch.batch_id, "empty"])
+        expect(applied.starts_with("OK local head=")).to_be(true)
+        val view = db_read_local_view(root, config.admission).unwrap()
+        expect(view.image.state.accepted[0].batch_id).to_equal(patch.batch_id)
+        expect(view.image.state.rows.len()).to_equal(1)
+        expect(db_command(root, ["quarantine-apply", "policy", config.revision, external, digest, patch.batch_id, "empty"]).contains("replay=true")).to_be(true)
+        expect(db_read_local_view(root, config.admission).unwrap().head).to_equal(view.head)
+        step("Reject altered stored bytes instead of trusting a remembered address")
+        expect(file_write("{external}/scv-evidence-v1/{digest}.scve", "tampered-content-at-rest-without-a-valid-envelope")).to_be(true)
+        expect(db_command(root, ["quarantine-inspect", external, digest])).to_equal("ERROR SCVDB_EVIDENCE_FORMAT")
+        expect(db_command(root, ["quarantine-apply", "policy", config.revision, external, digest, patch.batch_id, view.head])).to_equal("ERROR SCVDB_EVIDENCE_FORMAT")
+        expect(db_read_local_view(root, config.admission).unwrap().head).to_equal(view.head)
+
+    it "keeps a forged signature unverified in quarantine and rejects it at authenticated apply":
+        val root = setup_item2_apply_root()
+        val external = setup_item2_apply_root()
+        val (_stdout, _stderr, initialized) = process_run_bounded("git", ["init", "--quiet", root], 30000, 4096)
+        expect(initialized).to_equal(0)
+        val config = setup_item2_command_policy()
+        var patch = setup_item2_apply_patch(1, "")
+        patch.signature = [0u8;64]
+        val quota = DbQuarantineQuota(max_bundle_bytes: 16777216, max_patch_bytes: 1048576, max_patches: 256)
+        expect(file_write("{root}/policy", db_policy_encode(config).unwrap())).to_be(true)
+        expect(file_write("{root}/bundle", db_quarantine_bundle_encode([patch], quota).unwrap())).to_be(true)
+        val imported = db_command(root, ["quarantine-import", external, "bundle"])
+        expect(imported.starts_with("OK quarantined-unverified digest=")).to_be(true)
+        val digest = imported.split(" ")[2].replace("digest=", "")
+        expect(db_command(root, ["quarantine-inspect", external, digest])).to_equal("OK quarantined-unverified digest={digest} patches=1")
+        expect(db_command(root, ["quarantine-apply", "policy", config.revision, external, digest, patch.batch_id, "empty"])).to_equal("ERROR SCVDB_SIGNATURE_INVALID")
+        expect(db_store_read(root).code).to_equal("empty")
+
+    it "rejects checkout-contained quarantine storage and wrong command arity":
+        val root = setup_item2_apply_root()
+        val (_stdout, _stderr, initialized) = process_run_bounded("git", ["init", "--quiet", root], 30000, 4096)
+        expect(initialized).to_equal(0)
+        val quota = DbQuarantineQuota(max_bundle_bytes: 16777216, max_patch_bytes: 1048576, max_patches: 256)
+        expect(file_write("{root}/bundle", db_quarantine_bundle_encode([setup_item2_apply_patch(1, "")], quota).unwrap())).to_be(true)
+        expect(db_command(root, ["quarantine-import", root, "bundle"])).to_equal("ERROR SCVDB_STORE_SCOPE")
+        expect(db_command(root, ["quarantine-inspect", root])).to_equal("ERROR SCVDB_COMMAND_USAGE")
+        expect(db_command(root, ["quarantine-apply"])).to_equal("ERROR SCVDB_COMMAND_USAGE")
+        expect(db_store_read(root).code).to_equal("empty")
+
+    it "applies a real signed file under an independently pinned policy and reopens exact head/state":
+        step("Write separately reviewed policy and signed patch files")
+        val root = setup_item2_apply_root()
+        val config = setup_item2_command_policy()
+        val patch = setup_item2_apply_patch(1, "")
+        expect(file_write("{root}/policy", db_policy_encode(config).unwrap())).to_be(true)
+        expect(file_write("{root}/patch", db_patch_encode(patch).unwrap())).to_be(true)
+        expect(db_command(root, ["status", "{root}/policy", config.revision]).contains("head=empty")).to_be(true)
+        expect(db_command(root, ["inspect-patch", "patch"]).starts_with("OK parsed-unverified")).to_be(true)
+        val applied = db_command(root, ["apply", "{root}/policy", config.revision, "{root}/patch", "empty"])
+        expect(applied.starts_with("OK local head=")).to_be(true)
+        val view = db_read_local_view(root, config.admission).unwrap()
+        expect(view.image.state.accepted[0].batch_id).to_equal(patch.batch_id)
+        expect(view.image.state.rows.len()).to_equal(1)
+        expect(view.head).to_equal(db_store_read(root).head)
+        expect(applied.contains("head={view.head}")).to_be(true)
+        expect(db_command(root, ["status", "{root}/policy", config.revision]).contains("accepted=1")).to_be(true)
+        expect(db_command(root, ["apply", "{root}/policy", config.revision, "{root}/patch", "empty"]).contains("replay=true")).to_be(true)
+
+    it "rejects a changed self-consistent policy when its independent pin is unchanged":
+        val root = setup_item2_apply_root()
+        var config = setup_item2_command_policy()
+        val trusted_pin = config.revision
+        var key = config.admission.keys[0]
+        key.revoked = true
+        var admission = config.admission
+        admission.keys = [key]
+        admission.revision = db_admission_policy_digest(admission).unwrap()
+        config.admission = admission
+        config.revision = db_policy_digest(config).unwrap()
+        expect(config.revision == trusted_pin).to_be(false)
+        expect(file_write("{root}/policy", db_policy_encode(config).unwrap())).to_be(true)
+        expect(db_command(root, ["status", "{root}/policy", trusted_pin]).starts_with("ERROR ")).to_be(true)
+        expect(file_exists("{root}/.scv/db/HEAD")).to_be(false)
+
+    it "never upgrades structurally valid patch inspection into signature authorization":
+        val root = setup_item2_apply_root()
+        val config = setup_item2_command_policy()
+        var patch = setup_item2_apply_patch(1, "")
+        patch.signature[0] = patch.signature[0] ^ 1u8
+        expect(file_write("{root}/policy", db_policy_encode(config).unwrap())).to_be(true)
+        expect(file_write("{root}/patch", db_patch_encode(patch).unwrap())).to_be(true)
+        expect(db_command(root, ["inspect-patch", "{root}/patch"]).starts_with("OK parsed-unverified")).to_be(true)
+        expect(db_command(root, ["apply", "{root}/policy", config.revision, "{root}/patch", "empty"])).to_equal("ERROR SCVDB_SIGNATURE_INVALID")
+        expect(db_store_read(root).code).to_equal("empty")
+
+    it "checks actual host time against the signing key window":
+        val root = setup_item2_apply_root()
+        var config = setup_item2_command_policy()
+        var key = config.admission.keys[0]
+        key.valid_until = 1
+        var admission = config.admission
+        admission.keys = [key]
+        admission.revision = db_admission_policy_digest(admission).unwrap()
+        config.admission = admission
+        config.revision = db_policy_digest(config).unwrap()
+        expect(file_write("{root}/policy", db_policy_encode(config).unwrap())).to_be(true)
+        expect(file_write("{root}/patch", db_patch_encode(setup_item2_apply_patch(1, "")).unwrap())).to_be(true)
+        expect(db_command(root, ["apply", "{root}/policy", config.revision, "{root}/patch", "empty"])).to_equal("ERROR SCVDB_KEY_TIME")
+        expect(db_store_read(root).code).to_equal("empty")
+
+    it "rejects real input links and malformed command shapes before mutation":
+        val root = setup_item2_apply_root()
+        val patch = setup_item2_apply_patch(1, "")
+        expect(file_write("{root}/patch", db_patch_encode(patch).unwrap())).to_be(true)
+        expect(setup_item2_filesystem_link(root, "{root}/patch", "{root}/alias", false)).to_equal(0)
+        expect(db_command(root, ["inspect-patch", "{root}/alias"])).to_equal("ERROR SCVDB_COMMAND_INPUT_SCOPE")
+        expect(db_command(root, ["apply"])).to_equal("ERROR SCVDB_COMMAND_USAGE")
+        expect(db_command(root, ["unknown"])).to_equal("ERROR SCVDB_COMMAND_USAGE")
+        expect(db_command(root, ["help"]).contains("independently reviewed")).to_be(true)
+        expect(db_store_read(root).code).to_equal("empty")

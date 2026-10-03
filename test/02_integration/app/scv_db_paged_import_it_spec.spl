@@ -1,0 +1,136 @@
+use std.spec.*
+use app.io.mod.{file_create_exclusive, file_read, is_dir}
+use app.scv.db.paged_import_spool.*
+use std.scv.db_paged_import_claims.*
+use app.scv.db.paged_store.*
+use app.scv.db.paged_import.{db_paged_validate_import}
+use app.scv.db.page_store.{db_page_store_import_page, db_page_store_publish_objects}
+use app.scv.db.paged_conflict_owner.{db_paged_resolve_conflict}
+use std.scv.db_paged_model.*
+use std.scv.db_paged_indexes.*
+use std.scv.db_page_records.*
+use std.scv.db_pages.*
+use std.scv.db_patch.*
+use std.scv.distributed_identity.*
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
+use test.fixtures.scv.db_paged_fixture.*
+use test.fixtures.scv.db_paged_conflict_fixture.*
+
+# Small fixture collection only. Production validator never flattens the corpus.
+fn setup_item2_import_records(root: text, manifest: DbPagedManifest) -> [DbPageRecord]:
+    var records: [DbPageRecord] = []
+    for entry in manifest.pages.entries:
+        records = records + db_page_store_import_page(root, manifest.pages, entry).unwrap().records
+    records
+
+fn setup_item2_import_variant(root: text, original: DbPagedManifest, records: [DbPageRecord]) -> DbPagedManifest:
+    val build = db_pages_build(records, original.pages.quota).unwrap()
+    db_page_store_publish_objects(root, build, nil).unwrap()
+    var next = original
+    next.pages = build.manifest
+    db_paged_manifest_seal(next).unwrap()
+
+describe "Full staged paged import invariants":
+    it "bounds a skewed bucket by chunks and never truncates an unexpected scratch entry":
+        val root = setup_item2_paged_root()
+        val initial = db_import_spool_create(root).unwrap()
+        val key = db_page_row_key(setup_item2_paged_ref(1)).unwrap()
+        val bucket = db_pages_bucket(key).unwrap()
+        val claim = DbImportClaim(key: key, mode: "row", value: "a".repeat(4000), number: 0u64)
+        var claims: [DbImportClaim] = []
+        for index in 0..200: claims.push(claim)
+        val spool = db_import_spool_append(initial, claims).unwrap()
+        expect(spool.chunks[bucket]).to_be_greater_than(1u64)
+        var ordinal = 1u64
+        var count = 0
+        while ordinal <= spool.chunks[bucket]:
+            val chunk = db_import_spool_read(spool, bucket, ordinal).unwrap()
+            expect(chunk.len() <= 1048576).to_be(true)
+            val lines = chunk.split("\n")
+            for index in 0..lines.len() - 1:
+                expect(db_import_claim_decode(lines[index]).unwrap()).to_equal(claim)
+                count = count + 1
+            ordinal = ordinal + 1u64
+        expect(count).to_equal(200)
+        db_import_spool_cleanup(spool).unwrap()
+        expect(is_dir(spool.identity.path)).to_be(false)
+        val guarded = db_import_spool_create(root).unwrap()
+        val path = guarded.identity.path + "/" + bucket + "-1.claims"
+        expect(file_create_exclusive(path, "keep this entry")).to_be(true)
+        expect(db_import_spool_append(guarded, [claim])).to_equal(Err("SCVDB_IMPORT_SCRATCH_SCOPE"))
+        expect(file_read(path)).to_equal("keep this entry")
+        db_import_spool_cleanup(guarded).unwrap()
+
+    it "checks actual indexed rows and rejects independently rehashed corrupt indexes":
+        val root = setup_item2_paged_root()
+        val policy = setup_item2_paged_policy()
+        val genesis = db_paged_initialize(root, policy).unwrap()
+        expect(db_paged_validate_import(root, genesis.manifest, policy)).to_equal(Ok(true))
+        val patch = setup_item2_paged_patch([setup_item2_paged_create(1, "A"), setup_item2_paged_create(2, "B", DbValue.Reference(setup_item2_paged_ref(1)))], genesis.manifest.revision, 1u64)
+        db_paged_apply(root, genesis.head, patch, policy).unwrap()
+        val view = db_paged_open(root, policy).unwrap()
+        expect(db_paged_validate_import(root, view.manifest, policy)).to_equal(Ok(true))
+        val records = setup_item2_import_records(root, view.manifest)
+        for defect in ["counter", "reverse", "highwater", "unique", "incoming", "row-schema"]:
+            var changed: [DbPageRecord] = []
+            for record in records:
+                var next = record
+                if defect == "counter" and record.key == db_page_actor_counter_key(patch.actor, 1u64).unwrap(): continue
+                if defect == "reverse" and record.key == db_paged_reverse_key(setup_item2_paged_ref(1)).unwrap():
+                    val alias = SettledAlias(database_namespace: policy.config.admission.namespace, authority_epoch: 1u64, entity_kind: "bug", sequence: 2u64)
+                    next = db_paged_index_record(record.key, 173u8, DbValue.Reference(entity_ref_settled(alias))).unwrap()
+                if defect == "highwater" and record.key == db_page_highwater_key(policy.config.admission.namespace, 1u64, "bug").unwrap():
+                    next = db_typed_page_record_encode(DbTypedPageRecord.HighWater(policy.config.admission.namespace, 1u64, "bug", 1u64)).unwrap()
+                if defect == "unique" and record.key.starts_with("unique:"): next = db_paged_index_record(record.key, 170u8, DbValue.Absent).unwrap()
+                if defect == "incoming" and record.key == db_paged_refcount_key(setup_item2_paged_ref(1)).unwrap(): next = db_paged_index_record(record.key, 171u8, DbValue.Unsigned(2u64)).unwrap()
+                if defect == "row-schema" and record.key == db_page_row_key(setup_item2_paged_ref(1)).unwrap():
+                    match db_typed_page_record_decode(record).unwrap():
+                        CurrentRow(entity, old):
+                            var row = old
+                            row.fields.push(DbField(name: "undeclared", value: DbValue.Text("bad")))
+                            next = db_typed_page_record_encode(DbTypedPageRecord.CurrentRow(entity, row)).unwrap()
+                        _: fail("Expected row fixture")
+                changed.push(next)
+            val imported = setup_item2_import_variant(root, view.manifest, changed)
+            expect(db_paged_validate_import(root, imported, policy).is_err()).to_be(true)
+            expect(db_paged_open(root, policy).unwrap().head).to_equal(view.head)
+
+    it "requires retained root membership and alias coverage without inventing historical allocations":
+        val root = setup_item2_paged_root()
+        val policy = setup_item2_paged_policy()
+        val genesis = db_paged_initialize(root, policy).unwrap()
+        val patch = setup_item2_paged_patch([setup_item2_paged_create(1, "A")], genesis.manifest.revision, 1u64)
+        db_paged_apply(root, genesis.head, patch, policy).unwrap()
+        val view = db_paged_open(root, policy).unwrap()
+        val records = setup_item2_import_records(root, view.manifest)
+        for absent in [db_paged_history_key(genesis.manifest.revision).unwrap(), db_paged_reverse_key(setup_item2_paged_ref(1)).unwrap()]:
+            var retained: [DbPageRecord] = []
+            for record in records:
+                if record.key != absent: retained.push(record)
+            expect(db_paged_validate_import(root, setup_item2_import_variant(root, view.manifest, retained), policy).is_err()).to_be(true)
+        step("Allocation gaps are preserved for the signed disposition owner, not inferred from live rows")
+        var advanced: [DbPageRecord] = []
+        for record in records:
+            if record.key == db_page_highwater_key(policy.config.admission.namespace, 1u64, "bug").unwrap():
+                advanced.push(db_typed_page_record_encode(DbTypedPageRecord.HighWater(policy.config.admission.namespace, 1u64, "bug", 9u64)).unwrap())
+            else: advanced.push(record)
+        expect(db_paged_validate_import(root, setup_item2_import_variant(root, view.manifest, advanced), policy)).to_equal(Ok(true))
+        expect(scv_sj_lease_acquire(root, "import-test").starts_with("ok:")).to_be(true)
+        expect(db_paged_validate_import(root, view.manifest, policy)).to_equal(Err("SCVDB_IMPORT_UNDER_LEASE"))
+        expect(scv_sj_lease_release(root, "import-test").starts_with("ok:")).to_be(true)
+
+    it "validates immutable conflict and resolution signatures plus actual accepted counterparts":
+        val fixture = setup_item2_paged_conflict()
+        val captured = db_paged_open(fixture.root, fixture.policy).unwrap()
+        expect(db_paged_validate_import(fixture.root, captured.manifest, fixture.policy)).to_equal(Ok(true))
+        val decision = setup_item2_conflict_decision(fixture)
+        val patch = setup_item2_conflict_signed_resolution(fixture, decision)
+        val policy = setup_item2_conflict_review(fixture.policy, fixture.patches + [patch])
+        db_paged_resolve_conflict(fixture.root, fixture.head, decision, patch, policy).unwrap()
+        val resolved = db_paged_open(fixture.root, policy).unwrap()
+        expect(db_paged_validate_import(fixture.root, resolved.manifest, policy)).to_equal(Ok(true))
+        var retained: [DbPageRecord] = []
+        for record in setup_item2_import_records(fixture.root, resolved.manifest):
+            if record.key != db_page_batch_key(patch.batch_id).unwrap(): retained.push(record)
+        expect(db_paged_validate_import(fixture.root, setup_item2_import_variant(fixture.root, resolved.manifest, retained), policy).is_err()).to_be(true)
+        expect(db_paged_open(fixture.root, policy).unwrap().head).to_equal(resolved.head)

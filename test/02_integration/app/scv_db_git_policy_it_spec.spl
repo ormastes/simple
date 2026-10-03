@@ -1,0 +1,57 @@
+# codex-impl
+# REQ036: real Git configuration resolution, with no network effects.
+# These assertions require Git and an environment admitted by the effect owner.
+use std.spec.{describe, it, expect}
+use app.io.mod.{cwd, dir_create, process_run_bounded}
+use app.scv.db.git_policy.{db_git_environment_safe, db_git_effect_prefix, db_git_network_config_safe}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+
+fn setup_item2_git_policy() -> text:
+    expect(db_git_environment_safe()).to_be(true)
+    val nonce = random_hex(8) ?? ""
+    expect(nonce.len()).to_equal(16)
+    val root = "{cwd()}/build/test-artifacts/item2-git-policy-{nonce}"
+    expect(dir_create(root, true)).to_be(true)
+    val (_out, _err, code) = process_run_bounded("git", ["init", "--quiet", root], 30000, 4096)
+    expect(code).to_equal(0)
+    expect(db_git_network_config_safe(root)).to_be(true)
+    root
+
+fn check_item2_git_config_set(root: text, key: text, value: text):
+    val (_out, _err, code) = process_run_bounded("git", ["-C", root, "config", "--local", key, value], 30000, 4096)
+    expect(code).to_equal(0)
+
+fn check_item2_git_effective(root: text, key: text, expected: text):
+    val args = db_git_effect_prefix(root) + ["config", "--get-urlmatch", key, "https://github.com/example/repository"]
+    val (out, _err, code) = process_run_bounded("git", args, 30000, 4096)
+    expect(code).to_equal(0)
+    expect(out.trim()).to_equal(expected)
+
+describe "Git effect configuration admission":
+    it "overrides unsafe generic HTTP defaults with the effect prefix":
+        val root = setup_item2_git_policy()
+        check_item2_git_config_set(root, "http.sslVerify", "false")
+        check_item2_git_config_set(root, "http.followRedirects", "true")
+        check_item2_git_effective(root, "http.sslVerify", "true")
+        check_item2_git_effective(root, "http.followRedirects", "false")
+        expect(db_git_network_config_safe(root)).to_be(true)
+
+    it "rejects scoped TLS disabling that wins over a generic secure override":
+        val root = setup_item2_git_policy()
+        check_item2_git_config_set(root, "http.https://github.com/.sslVerify", "false")
+        check_item2_git_effective(root, "http.sslVerify", "false")
+        expect(db_git_network_config_safe(root)).to_be(false)
+
+    it "rejects scoped redirects that win over a generic secure override":
+        val root = setup_item2_git_policy()
+        check_item2_git_config_set(root, "http.https://github.com/.followRedirects", "true")
+        check_item2_git_effective(root, "http.followRedirects", "true")
+        expect(db_git_network_config_safe(root)).to_be(false)
+
+    it "rejects fetch and push URL rewriting without contacting either target":
+        val fetch_root = setup_item2_git_policy()
+        check_item2_git_config_set(fetch_root, "url.https://invalid.example/.insteadOf", "https://github.com/")
+        expect(db_git_network_config_safe(fetch_root)).to_be(false)
+        val push_root = setup_item2_git_policy()
+        check_item2_git_config_set(push_root, "url.https://invalid.example/.pushInsteadOf", "https://github.com/")
+        expect(db_git_network_config_safe(push_root)).to_be(false)

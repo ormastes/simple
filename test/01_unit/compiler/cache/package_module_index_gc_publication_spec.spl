@@ -1,0 +1,63 @@
+# @req PSI-REQ-004
+# @evidence-display: links
+# GC must not remove a generation owned by an active publisher.
+use std.spec.*
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1, package_module_index_publish_v1,
+    package_module_index_read_current_v1, package_module_index_gc_v1,
+    package_module_index_digest_v1, package_module_index_encode_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
+use std.nogc_sync_mut.io_runtime.{dir_remove, file_read, file_exists}
+
+extern fn rt_getpid() -> i64
+
+fn gc_publication_generation(revision: text) -> PackageModuleIndexGenerationV1:
+    PackageModuleIndexGenerationV1(
+        schema_version: 1,
+        producer_digest: sha256_text("gc-publisher"),
+        root_generation: "gc-root",
+        scv_revision_id: revision,
+        scv_commit_id: "gc-commit",
+        scv_tree_id: "gc-tree",
+        inventory_digest: sha256_text(revision),
+        entries: [])
+
+describe "package index GC publication exclusion":
+    it "preserves current and candidate bytes while a publisher owns CURRENT.lock":
+        step("Publish two complete generations and select the current generation")
+        val root = "build/test-artifacts/package-index-gc-publisher-{rt_getpid()}"
+        dir_remove(root, true)
+        val current = gc_publication_generation("current")
+        val candidate = gc_publication_generation("candidate")
+        # Leave a valid candidate on disk while CURRENT points at current.
+        expect(package_module_index_publish_v1(root, candidate)).to_equal(true)
+        expect(package_module_index_publish_v1(root, current)).to_equal(true)
+        val current_digest = package_module_index_digest_v1(current)
+        val candidate_digest = package_module_index_digest_v1(candidate)
+        val dir = "{root}/package-module-index-v1"
+        val publisher = file_lock("{dir}/CURRENT.lock", 1)
+        expect(publisher >= 0).to_equal(true)
+        # Distinct open handles contend on both flock and LockFileEx. Release
+        # before assertions so a failed expectation cannot strand the handle.
+        val removed = package_module_index_gc_v1(root, [], 10)
+        val current_bytes = file_read("{dir}/{current_digest}.index")
+        val candidate_bytes = file_read("{dir}/{candidate_digest}.index")
+        val pointer = file_read("{dir}/CURRENT")
+        val released = file_unlock(publisher)
+        step("Preserve the prior admitted generation while publication owns the lock")
+        expect(released).to_equal(true)
+        expect(removed).to_equal(0)
+        expect(current_bytes).to_equal(package_module_index_encode_v1(current))
+        expect(candidate_bytes).to_equal(package_module_index_encode_v1(candidate))
+        expect(pointer).to_equal(current_digest)
+        step("Retain explicitly protected generation bytes after publication unlocks")
+        expect(package_module_index_gc_v1(root, [candidate_digest], 1)).to_equal(0)
+        expect(file_read("{dir}/{candidate_digest}.index")).to_equal(candidate_bytes)
+        # After release the same collector must still reclaim stale data.
+        step("Collect only the unretained non-current generation")
+        expect(package_module_index_gc_v1(root, [], 1)).to_equal(1)
+        expect(file_exists("{dir}/{candidate_digest}.index")).to_equal(false)
+        expect(package_module_index_read_current_v1(root).digest).to_equal(current_digest)
+        dir_remove(root, true)

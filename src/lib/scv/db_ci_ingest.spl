@@ -1,0 +1,274 @@
+# Pure provider-neutral ingestion policy. No network, files, acknowledgement,
+# signature verification or durable writes occur here. Receipt inputs MUST be
+# loaded and authenticated by the SJ storage/settlement owner, never a CI caller.
+use std.scv.db_evidence.{DbEvidenceRevision, DbProviderIdentity, DbRunManifest, DbEvidenceChunk, db_evidence_same_ref, db_evidence_check_ref, db_evidence_digest_valid}
+
+# Provider transport DTOs. Stable IDs come from provider responses. The GitLab
+# retry index must come from authoritative retry history, never poll order.
+# These adapters do not assert that a response was authenticated.
+struct DbGithubActionsJob:
+    instance: text
+    repository_id: text
+    run_id: text
+    job_id: text
+    run_attempt: u64
+
+struct DbGitlabCiJob:
+    instance: text
+    project_id: text
+    pipeline_id: text
+    job_id: text
+    retry_index: u64
+
+struct DbJenkinsBuild:
+    instance: text
+    project_id: text
+    build_number: text
+    stage_id: text
+    attempt: u64
+
+struct DbNormalizedRunEnvelope:
+    provider_identity: DbProviderIdentity
+    manifest: DbRunManifest
+    chunks: [DbEvidenceChunk]
+    attestation_digests: [text]
+
+struct DbCiCapabilities:
+    identity_dimensions: [text]
+    uniqueness_tuple: [text]
+    event_hints: bool
+    polling: bool
+    bundle_import: bool
+    artifact_download: bool
+    attestations: bool
+    pagination: bool
+    maximum_bundle_bytes: u64
+
+struct DbCiCursor:
+    provider_instance: text
+    project: text
+    opaque_position: text
+    high_water_seconds: u64
+    overlap_from_seconds: u64
+
+struct DbDiscoveryItem:
+    manifest: DbEvidenceRevision
+    bundle_digest: text
+
+struct DbDiscoveryPage:
+    provider_instance: text
+    project: text
+    requested_position: text
+    next_position: text
+    observed_until_seconds: u64
+    items: [DbDiscoveryItem]
+
+# Structural receipts, not authority tokens. The trusted owner verifies receipt
+# chain, signature, accepted tree membership and CAS readback before calling.
+struct DbEvidenceReceipt:
+    provider_instance: text
+    project: text
+    manifest: DbEvidenceRevision
+    bundle_digest: text
+    durable_object_digest: text
+    accepted_manifest: DbEvidenceRevision
+    accepted_head: text
+    accepted_object_format: text
+    settlement_receipt_digest: text
+
+struct DbImportQuota:
+    maximum_bytes: u64
+    maximum_compressed_bytes: u64
+    maximum_files: u64
+    maximum_records: u64
+    maximum_depth: u64
+    maximum_path_bytes: u64
+    maximum_ratio: u64
+    maximum_elapsed_ms: u64
+
+struct DbImportUsage:
+    bytes: u64
+    compressed_bytes: u64
+    files: u64
+    records: u64
+
+struct DbImportEntry:
+    path: text
+    kind: text
+    bytes: u64
+    compressed_bytes: u64
+    records: u64
+
+fn db_ci_capabilities_validate(capabilities: DbCiCapabilities) -> Result<bool, text>:
+    if not capabilities.polling and not capabilities.bundle_import:
+        return Err("NoDurableDiscovery")
+    if capabilities.maximum_bundle_bytes == 0:
+        return Err("MissingBundleBound")
+    for required in ["instance", "project", "run", "job", "attempt"]:
+        if not capabilities.identity_dimensions.contains(required) or not capabilities.uniqueness_tuple.contains(required):
+            return Err("IncompleteIdentityCapability")
+    var seen: [text] = []
+    for dimension in capabilities.identity_dimensions:
+        if dimension == "" or seen.contains(dimension):
+            return Err("DuplicateIdentityDimension")
+        seen.push(dimension)
+    seen = []
+    for dimension in capabilities.uniqueness_tuple:
+        if not capabilities.identity_dimensions.contains(dimension) or seen.contains(dimension):
+            return Err("InvalidUniquenessTuple")
+        seen.push(dimension)
+    Ok(true)
+
+fn db_ci_job_identity(instance: text, project: text, run: text, job: text, attempt: u64) -> Result<DbProviderIdentity, text>:
+    if instance == "" or project == "" or run == "" or job == "" or attempt == 0:
+        return Err("IncompleteProviderIdentity")
+    Ok(DbProviderIdentity(instance: instance, project: project, run: run, job: job, attempt: attempt, dimensions: []))
+
+fn db_ci_github_identity(job: DbGithubActionsJob) -> Result<DbProviderIdentity, text>:
+    db_ci_job_identity(job.instance, job.repository_id, job.run_id, job.job_id, job.run_attempt)
+
+# GitLab retry indexes are zero-based; the canonical attempt is one-based.
+fn db_ci_gitlab_identity(job: DbGitlabCiJob) -> Result<DbProviderIdentity, text>:
+    if job.retry_index == 18446744073709551615u64:
+        return Err("AttemptOverflow")
+    db_ci_job_identity(job.instance, job.project_id, job.pipeline_id, job.job_id, job.retry_index + 1u64)
+
+fn db_ci_jenkins_identity(build: DbJenkinsBuild) -> Result<DbProviderIdentity, text>:
+    db_ci_job_identity(build.instance, build.project_id, build.build_number, build.stage_id, build.attempt)
+
+# Verify transport identity matches immutable manifest before emitting an envelope.
+# Observations add capability-declared case/shard dimensions in a later stage.
+fn db_ci_normalize_run(identity: DbProviderIdentity, manifest: DbRunManifest, attestations: [text]) -> Result<DbNormalizedRunEnvelope, text>:
+    db_evidence_check_ref(manifest.reference)?
+    if identity.instance != manifest.provider.instance or identity.project != manifest.provider.project or identity.run != manifest.provider.run or identity.job != manifest.provider.job or identity.attempt != manifest.provider.attempt:
+        return Err("ProviderManifestMismatch")
+    if identity.dimensions.len() != 0 or manifest.provider.dimensions.len() != 0:
+        return Err("RunIdentityUnexpectedDimensions")
+    for digest in attestations:
+        if not db_evidence_digest_valid(digest):
+            return Err("InvalidAttestationDigest")
+    for chunk in manifest.chunks:
+        if not db_evidence_digest_valid(chunk.digest):
+            return Err("MissingChunkDigest")
+    Ok(DbNormalizedRunEnvelope(provider_identity: identity, manifest: manifest, chunks: manifest.chunks, attestation_digests: attestations))
+
+# CI producers cannot turn an authenticated upload into semantic policy authority.
+fn db_ci_authorize(role: text, operation: text, trusted_source: bool) -> Result<bool, text>:
+    if role == "ci-producer":
+        if ["append-observation", "append-evidence", "append-manifest"].contains(operation):
+            return Ok(true)
+        return Err("CiPolicyMutationForbidden")
+    if role == "reviewer" and ["review-expectation", "close-bug", "promote-config"].contains(operation):
+        return Ok(true)
+    if role == "release-owner" and operation == "qualify-release" and trusted_source:
+        return Ok(true)
+    Err("OperationUnauthorized")
+
+fn db_ci_head_valid(head: text, object_format: text) -> bool:
+    val expected_length = if object_format == "sha1": 40 else: 64
+    if not ["sha1", "sha256"].contains(object_format) or head.len() != expected_length:
+        return false
+    for i in 0..head.len():
+        val code = head.char_code_at(i)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+    true
+
+# Returns a proposed cursor only; the owner atomically persists it with receipts.
+# No receipt fields are accepted as proof of authenticity by this function.
+fn db_ci_advance(cursor: DbCiCursor, page: DbDiscoveryPage, verified_receipts: [DbEvidenceReceipt], overlap_seconds: u64) -> Result<DbCiCursor, text>:
+    if page.provider_instance != cursor.provider_instance or page.project != cursor.project or page.requested_position != cursor.opaque_position:
+        return Err("CursorScopeMismatch")
+    if page.observed_until_seconds < cursor.high_water_seconds:
+        return Err("CursorRegression")
+    var seen: [DbDiscoveryItem] = []
+    for item in page.items:
+        db_evidence_check_ref(item.manifest)?
+        if not db_evidence_digest_valid(item.bundle_digest):
+            return Err("InvalidBundleDigest")
+        for previous in seen:
+            if db_evidence_same_ref(previous.manifest, item.manifest) and previous.bundle_digest != item.bundle_digest:
+                return Err("QuarantinedManifestReuse")
+        seen.push(item)
+        var accepted = false
+        for receipt in verified_receipts:
+            if receipt.provider_instance == page.provider_instance and receipt.project == page.project and db_evidence_same_ref(receipt.manifest, item.manifest):
+                if receipt.bundle_digest != item.bundle_digest or receipt.durable_object_digest != item.bundle_digest:
+                    return Err("ReceiptContentMismatch")
+                if not db_evidence_same_ref(receipt.accepted_manifest, item.manifest) or not db_ci_head_valid(receipt.accepted_head, receipt.accepted_object_format) or not db_evidence_digest_valid(receipt.settlement_receipt_digest):
+                    return Err("MissingCanonicalAcceptance")
+                accepted = true
+        if not accepted:
+            return Err("EvidenceReceiptRequired")
+    var overlap = 0u64
+    if page.observed_until_seconds > overlap_seconds:
+        overlap = page.observed_until_seconds - overlap_seconds
+    Ok(DbCiCursor(provider_instance: cursor.provider_instance, project: cursor.project, opaque_position: page.next_position, high_water_seconds: page.observed_until_seconds, overlap_from_seconds: overlap))
+
+# Conservative portable path profile: ASCII only until NFC/collision proofs exist.
+# Rejects absolute paths, devices/ADS, dot segments, backslashes and ambiguous tails.
+fn db_import_path_validate(path: text, quota: DbImportQuota) -> Result<bool, text>:
+    if path == "" or path.len() as u64 > quota.maximum_path_bytes or path.starts_with("/"):
+        return Err("UnsafeImportPath")
+    for i in 0..path.len():
+        val code = path.char_code_at(i)
+        if code < 32 or code > 126 or [92, 58, 42, 63, 34, 60, 62, 124].contains(code):
+            return Err("UnsafeImportPath")
+    val parts = path.split("/")
+    if parts.len() as u64 > quota.maximum_depth:
+        return Err("ImportDepthExceeded")
+    for part in parts:
+        if part == "" or part == "." or part == ".." or part.ends_with(".") or part.ends_with(" "):
+            return Err("UnsafeImportPath")
+        val base = part.split(".")[0].to_lower()
+        if ["con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"].contains(base):
+            return Err("UnsafeImportPath")
+    Ok(true)
+
+# Reserve BEFORE reading/decompressing each entry. Subtraction guards
+# avoid u64 wrap; ceil division enforces the ratio without multiplication overflow.
+fn db_import_charge(usage: DbImportUsage, entry: DbImportEntry, quota: DbImportQuota, elapsed_ms: u64) -> Result<DbImportUsage, text>:
+    db_import_path_validate(entry.path, quota)?
+    if entry.kind != "regular":
+        return Err("ImportSpecialFileForbidden")
+    if elapsed_ms > quota.maximum_elapsed_ms:
+        return Err("ImportTimeExceeded")
+    if usage.bytes > quota.maximum_bytes or entry.bytes > quota.maximum_bytes - usage.bytes:
+        return Err("ImportBytesExceeded")
+    if usage.compressed_bytes > quota.maximum_compressed_bytes or entry.compressed_bytes > quota.maximum_compressed_bytes - usage.compressed_bytes:
+        return Err("ImportCompressedBytesExceeded")
+    if usage.files >= quota.maximum_files:
+        return Err("ImportFilesExceeded")
+    if usage.records > quota.maximum_records or entry.records > quota.maximum_records - usage.records:
+        return Err("ImportRecordsExceeded")
+    if entry.bytes > 0:
+        if entry.compressed_bytes == 0 or quota.maximum_ratio == 0:
+            return Err("ImportDecompressionExceeded")
+        val quotient = entry.bytes / entry.compressed_bytes
+        val remainder = entry.bytes % entry.compressed_bytes
+        if quotient > quota.maximum_ratio or (quotient == quota.maximum_ratio and remainder > 0):
+            return Err("ImportDecompressionExceeded")
+    Ok(DbImportUsage(bytes: usage.bytes + entry.bytes, compressed_bytes: usage.compressed_bytes + entry.compressed_bytes, files: usage.files + 1, records: usage.records + entry.records))
+
+# Reject cross-platform path aliases before reserving the complete bundle budget.
+# Caller still verifies actual streamed byte totals/digests under the same bounds.
+fn db_import_plan(entries: [DbImportEntry], quota: DbImportQuota, elapsed_ms: u64) -> Result<DbImportUsage, text>:
+    var usage = DbImportUsage(bytes: 0u64, compressed_bytes: 0u64, files: 0u64, records: 0u64)
+    var paths: [text] = []
+    for entry in entries:
+        val normalized = entry.path.to_lower()
+        if paths.contains(normalized):
+            return Err("ImportPathCollision")
+        for previous in paths:
+            if normalized.starts_with(previous + "/") or previous.starts_with(normalized + "/"):
+                return Err("ImportFileDirectoryCollision")
+        usage = db_import_charge(usage, entry, quota, elapsed_ms)?
+        paths.push(normalized)
+    Ok(usage)
+
+export DbCiCapabilities, DbCiCursor, DbDiscoveryItem, DbDiscoveryPage, DbEvidenceReceipt
+export DbGithubActionsJob, DbGitlabCiJob, DbJenkinsBuild, DbNormalizedRunEnvelope
+export db_ci_github_identity, db_ci_gitlab_identity, db_ci_jenkins_identity, db_ci_normalize_run
+export DbImportQuota, DbImportUsage, DbImportEntry
+export db_ci_capabilities_validate, db_ci_authorize, db_ci_advance
+export db_import_path_validate, db_import_charge, db_import_plan

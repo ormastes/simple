@@ -1,0 +1,87 @@
+# Explicit bounded reference-backend wire. Paged snapshots require their own
+# admitted adapter; this owner never silently expands a paged corpus.
+use app.io.mod.{process_run_bounded, dir_remove_all}
+use app.io.file_ops.{secure_temp_dir_raw}
+use app.scv.db.git_policy.*
+use app.scv.db.local_store.{db_local_path_scope}
+use app.scv.db.git_candidate.{DbGitCandidateFile}
+use app.scv.db.settlement_journal_codec.*
+use app.scv.db.settlement_journal_git.{db_settlement_verify_objects, db_settlement_journal_readback}
+use std.scv.db_receipt.*
+use std.scv.db_snapshot.{db_snapshot_encode, db_snapshot_decode}
+use std.scv.db_identity_snapshot.{db_identity_snapshot_encode, db_identity_snapshot_decode}
+use std.scv.db_reducer.{MaterializedState, db_state_digest}
+use std.scv.db_allocation.{db_project_settled_rows}
+use std.scv.distributed_identity_map.{IdentityMap}
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_contains, path_identity_same}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+
+struct DbSettlementRemoteSnapshot:
+    state: MaterializedState
+    identities: IdentityMap
+    files: [DbGitCandidateFile]
+    candidate_commit: text
+
+fn db_settlement_snapshot_files(state: MaterializedState, identities: IdentityMap) -> Result<[DbGitCandidateFile], text>:
+    var projected = MaterializedState(rows: db_project_settled_rows(state, identities)?, accepted: state.accepted, revision: "")
+    projected.revision = db_state_digest(projected)?
+    val files = [DbGitCandidateFile(path: "scv/semantic.snapshot", content: db_snapshot_encode(state)?), DbGitCandidateFile(path: "scv/identity.snapshot", content: db_identity_snapshot_encode(identities)?), DbGitCandidateFile(path: "scv/settled.snapshot", content: db_snapshot_encode(projected)?)]
+    for file in files:
+        if file.content.len() > 1048576: return Err("SCVDB_SETTLEMENT_REFERENCE_QUOTA")
+    Ok(files)
+
+fn _settlement_read_git(root: text, args: [text], limit: i64) -> Result<text, text>:
+    if not db_git_environment_safe() or not db_git_network_config_safe(root): return Err("SCVDB_SETTLEMENT_GIT_POLICY")
+    val (output, _error, code) = process_run_bounded("git", db_git_effect_prefix(root) + args, 30000, limit)
+    if code != 0 or output.len() >= limit: return Err("SCVDB_SETTLEMENT_GIT_READ")
+    Ok(output)
+
+fn _settlement_snapshot_read(source: text, scratch: text, receipt: DbSettlementReceipt) -> Result<DbSettlementRemoteSnapshot, text>:
+    if scv_sj_lease_is_held(source): return Err("SCVDB_SETTLEMENT_NETWORK_UNDER_LEASE")
+    val initialized = _settlement_read_git(scratch, ["init", "--bare", "--template=", "--object-format={receipt.object_format}", "."], 4096)?
+    val fetched = _settlement_read_git(scratch, ["-c", "fetch.fsckObjects=true", "fetch", "--no-auto-maintenance", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--depth=1", receipt.remote, receipt.accepted_head], 65536)?
+    var files: [DbGitCandidateFile] = []
+    for path in ["scv/semantic.snapshot", "scv/identity.snapshot", "scv/settled.snapshot"]:
+        files.push(DbGitCandidateFile(path: path, content: _settlement_read_git(scratch, ["show", receipt.accepted_head + ":" + path], 1048577)?))
+    val journal = DbSettlementJournal(receipt: receipt, files: files, projection_digest: db_settlement_projection_digest(files)?, phase: DbSettlementPhase.Prepared, index_ref: "", index_head: "", index_receipt_digest: "")
+    val verified = db_settlement_verify_objects(scratch, journal)?
+    val state = db_snapshot_decode(files[0].content)?
+    val identities = db_identity_snapshot_decode(files[1].content)?
+    if identities.database_namespace != receipt.namespace or identities.authority_epoch != receipt.epoch: return Err("SCVDB_SETTLEMENT_SNAPSHOT_CONTEXT")
+    var marked = receipt
+    marked.high_water = identities.high_water
+    if db_receipt_signing_bytes(marked)? != db_receipt_signing_bytes(receipt)?: return Err("SCVDB_SETTLEMENT_SNAPSHOT_CONTEXT")
+    if db_settlement_snapshot_files(state, identities)? != files: return Err("SCVDB_SETTLEMENT_PROJECTION")
+    for digest in receipt.batch_digests:
+        var found = false
+        for batch in state.accepted:
+            if batch.batch_id == digest and batch.canonical_digest == digest: found = true
+        if not found: return Err("SCVDB_SETTLEMENT_ACCEPTED_MISSING")
+    val raw_commit = _settlement_read_git(scratch, ["cat-file", "commit", receipt.accepted_head], 65536)?
+    Ok(DbSettlementRemoteSnapshot(state: state, identities: identities, files: files, candidate_commit: raw_commit))
+
+fn db_settlement_remote_snapshot_local(source: text, parent: text, receipt: DbSettlementReceipt, authority: DbReceiptAuthority) -> Result<DbSettlementRemoteSnapshot, text>:
+    val authenticated = db_receipt_authenticate(receipt, authority)?
+    if db_local_path_scope(source, []) != "" or db_local_path_scope(parent, []) != "" or db_local_path_scope(receipt.remote, []) != "": return Err("SCVDB_SETTLEMENT_SCOPE")
+    if not dir_is_real_no_follow(receipt.remote) or path_final_existing(receipt.remote)?.path != receipt.remote: return Err("SCVDB_SETTLEMENT_LOCAL_REMOTE_REQUIRED")
+    if _settlement_read_git(receipt.remote, ["rev-parse", "--is-bare-repository"], 256)?.trim() != "true": return Err("SCVDB_SETTLEMENT_LOCAL_REMOTE_REQUIRED")
+    var source_identity = path_final_existing(source)?
+    if _settlement_read_git(source, ["rev-parse", "--is-bare-repository"], 256)?.trim() == "false":
+        source_identity = path_final_existing(_settlement_read_git(source, ["rev-parse", "--show-toplevel"], 4096)?.trim())?
+    val parent_identity = path_final_existing(parent)?
+    val common = path_final_existing(_settlement_read_git(source, ["rev-parse", "--path-format=absolute", "--git-common-dir"], 4096)?.trim())?
+    if path_identity_contains(source_identity, parent_identity) or path_identity_contains(common, parent_identity) or path_identity_contains(path_final_existing(receipt.remote)?, parent_identity): return Err("SCVDB_SETTLEMENT_SCOPE")
+    val scratch = secure_temp_dir_raw(parent_identity.path, "scv-settlement-snapshot-")
+    if scratch == "" or not dir_is_real_no_follow(scratch): return Err("SCVDB_SETTLEMENT_SCOPE")
+    val identity = path_final_existing(scratch)?
+    if identity.path != scratch or not path_identity_contains(parent_identity, identity) or not scratch.starts_with(parent_identity.path + "/scv-settlement-snapshot-"): return Err("SCVDB_SETTLEMENT_SCOPE")
+    val result = _settlement_snapshot_read(source, scratch, receipt)
+    if not dir_is_real_no_follow(scratch) or not path_identity_same(identity, path_final_existing(scratch)?): return Err("SCVDB_SETTLEMENT_CLEANUP_SCOPE")
+    if not dir_remove_all(scratch): return Err("SCVDB_SETTLEMENT_CLEANUP")
+    val snapshot = result?
+    val journal = DbSettlementJournal(receipt: receipt, files: snapshot.files, projection_digest: db_settlement_projection_digest(snapshot.files)?, phase: DbSettlementPhase.Prepared, index_ref: "", index_head: "", index_receipt_digest: "")
+    val ancestry = db_settlement_journal_readback(source, parent, journal)?
+    Ok(snapshot)
+
+export DbSettlementRemoteSnapshot, db_settlement_snapshot_files, db_settlement_remote_snapshot_local

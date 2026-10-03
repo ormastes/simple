@@ -1,0 +1,74 @@
+use app.io.mod.{cwd, dir_create}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.spec.{expect}
+use std.scv.db_paged_model.*
+use std.scv.db_pages.{DbPageQuota}
+use std.scv.db_policy_codec.{DbPolicyConfig, db_policy_digest}
+use std.scv.db_admission.*
+use std.scv.db_confidentiality.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.{MergePolicy, DbFieldSchema, FieldMergeRule}
+use std.scv.db_schema.{DbEntityConstraint, DbReferenceConstraint}
+use std.scv.distributed_identity.*
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+
+fn setup_item2_paged_root() -> text:
+    val nonce = random_hex(8) ?? ""
+    expect(nonce.len()).to_equal(16)
+    val path = "{cwd()}/build/test-artifacts/item2-paged-txn-{nonce}"
+    expect(dir_create(path, true)).to_be(true)
+    path_final_existing(path).unwrap().path
+
+fn setup_item2_paged_ref(counter: u64) -> EntityRef:
+    entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter))
+
+fn setup_item2_paged_repin(policy: DbPagedPolicy) -> DbPagedPolicy:
+    var result = policy
+    var config = result.config
+    var admission = config.admission
+    admission.revision = db_admission_policy_digest(admission).unwrap()
+    config.admission = admission
+    config.revision = db_policy_digest(config).unwrap()
+    result.config = config
+    result.revision = db_paged_policy_digest(result).unwrap()
+    result
+
+fn setup_item2_paged_policy() -> DbPagedPolicy:
+    val (seed, public_key) = pure_ed25519_keypair_from_seed([45u8;32])
+    val (second_seed, second_public_key) = pure_ed25519_keypair_from_seed([46u8;32])
+    var permissions: [DbPermission] = []
+    for operation in ["create", "update", "tombstone", "append", "set_add", "set_remove"]:
+        permissions.push(DbPermission(operation: operation, kind: "bug", field: "*"))
+    var code_values: [text] = []
+    for value in ["A", "B", "C", "D"]: code_values.push(db_metadata_value_digest(DbValue.Text(value)).unwrap())
+    var link_values = [db_metadata_value_digest(DbValue.Absent).unwrap()]
+    for counter in [1u64,2u64,3u64,99u64]: link_values.push(db_metadata_value_digest(DbValue.Reference(setup_item2_paged_ref(counter))).unwrap())
+    var metadata = DbMetadataPolicy(revision: "", rules: [DbMetadataRule(kind: "bug", field: "code", classification: "public", allowed_value_digests: code_values), DbMetadataRule(kind: "bug", field: "link", classification: "public", allowed_value_digests: link_values)])
+    metadata.revision = db_metadata_policy_digest(metadata).unwrap()
+    val first = DbSignerKey(key_id: "paged-first", public_key: public_key, role: "user", valid_from: 1u64, valid_until: 18446744073709551615u64, revoked: false, permissions: permissions)
+    val second = DbSignerKey(key_id: "paged-second", public_key: second_public_key, role: "user", valid_from: 1u64, valid_until: 18446744073709551615u64, revoked: false, permissions: permissions)
+    val admission = DbAdmissionPolicy(revision: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1u64, schema_revision: "s1", reducer_revision: "scv-merkle-reducer-v1", keys: [first,second], metadata: metadata)
+    val merge = MergePolicy(repository: admission.repository, namespace: admission.namespace, epoch: admission.epoch, schema_revision: admission.schema_revision, reducer_revision: admission.reducer_revision, fields: [DbFieldSchema(kind: "bug", field: "code", rule: FieldMergeRule.ScalarConflict), DbFieldSchema(kind: "bug", field: "link", rule: FieldMergeRule.ScalarConflict)], constraints: [DbEntityConstraint(kind: "bug", key_fields: ["code"], unique_fields: ["code"], references: [DbReferenceConstraint(field: "link", target_kind: "bug")])])
+    val config = DbPolicyConfig(revision: "", admission: admission, merge: merge)
+    val policy = DbPagedPolicy(revision: "", config: config, protocol: "scv-paged-txn-v1", index_version: "scv-paged-index-v1", quota: DbPageQuota(max_page_bytes: 1048576u64, max_page_records: 4096u64, max_records: 10000000u64), max_operations: 10000u64, max_read_keys: 200000u64, max_read_bytes: 67108864u64)
+    setup_item2_paged_repin(policy)
+
+fn setup_item2_paged_patch(operations: [DbOperation], base: text, counter: u64, second_key: bool = false) -> DbPatch:
+    val policy = setup_item2_paged_policy()
+    val key_name = if second_key: "paged-second" else: "paged-first"
+    val seed_bytes = if second_key: [46u8;32] else: [45u8;32]
+    val (seed, public_key) = pure_ed25519_keypair_from_seed(seed_bytes)
+    var patch = DbPatch(batch_id: "", repository: policy.config.admission.repository, namespace: policy.config.admission.namespace, epoch: 1u64, actor: "ffeeddccbbaa99887766554433221100", actor_counter: counter, base_revision: base, causal_dependencies: [], schema_revision: "s1", reducer_revision: "scv-merkle-reducer-v1", operations: operations, payload_digest: "", digest_algorithm: "sha256", digest_version: 1u64, signer: key_name, signature_algorithm: "ed25519", signature_version: 1u64, signature: [], provenance: "paged integration fixture")
+    patch = db_patch_seal(patch).unwrap()
+    patch.signature = pure_ed25519_sign(seed, public_key, db_patch_signing_bytes(patch).unwrap())
+    patch
+
+fn setup_item2_paged_create(counter: u64, code: text, link: DbValue = DbValue.Absent) -> DbOperation:
+    DbOperation.Create(setup_item2_paged_ref(counter), "bug", [DbField(name: "code", value: DbValue.Text(code)), DbField(name: "link", value: link)])
+
+fn setup_item2_paged_condition(revision: text) -> RowPrecondition:
+    RowPrecondition(base_row: revision, expected_revision: revision, expected_fields: [])
+
+export setup_item2_paged_root, setup_item2_paged_ref, setup_item2_paged_policy, setup_item2_paged_repin
+export setup_item2_paged_patch, setup_item2_paged_create, setup_item2_paged_condition

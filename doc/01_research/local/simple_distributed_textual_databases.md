@@ -76,3 +76,25 @@ allocator, semantic patch protocol, or CI/server bridge.
 - Webhooks and expiring artifacts cannot be the durable discovery queue.
 - Permanent Git ancestry conflicts with guaranteed erasure of secrets/PII; admissible metadata and external encrypted evidence need explicit policy.
 - Sequential allocation is order-dependent, so deterministic equality applies to the same accepted ordered log, not arbitrary equivalent operation sets.
+
+## Release-lane source refresh — 2026-10-03
+
+Inspected base: `origin/release/1.0` at `e9cd3153c881c55f59eaaa2573b4b8a5e803023a`. This dated addendum supersedes absence claims above only for the specific surfaces below; it is source evidence, not a runtime PASS. The selected REQ-001–REQ-036 and NFR-001–NFR-015 remain unchanged.
+
+| Inspected source | Present behavior | Remaining proof or implementation |
+|---|---|---|
+| `src/lib/scv/distributed_identity_map.spl` | Pure `IdentityMap` transitions allocate per-kind high-water values, preserve tombstones, reverse-resolve contextual aliases, reject inconsistent candidates and u64 exhaustion. | No durable accepted-batch registry, merge/split dispositions, transaction recovery, or authority admission in this module. Full REQ-004 remains open. |
+| Same module, `_map_state_error` | Pairwise duplicate validation precedes operations; lookup and allocation scan arrays. | Worst-case validation is quadratic in bindings. This is a concrete NFR-002–004 scaling gap, not a million-row implementation; benchmark and indexed generation work must precede performance acceptance. |
+| `src/app/scv/db/git_settlement_transport.spl` | Scoped local/GitHub remote read-back; SHA-1/SHA-256 OID validation; raw single-parent commit validation with replace objects disabled; exact candidate/old-head/other-head classification. | No publish, exact object fetch, protection probe, signature, accepted-batch or receipt-index verification. `published` means observed candidate tip only, never settled identity admission. |
+| `test/02_integration/app/scv_git_settlement_transport_it_spec.spl` | Real local Git fixtures exercise lost acknowledgement, successor uncertainty, replacement refs, wrong parents and rejected remote forms. | These do not exercise a protected live GitHub authority or receipt recovery; no fresh runtime result is claimed here. |
+| `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl` | Requirement-organized scenarios call explicit failing `check_*_contract` placeholders. | They describe outstanding acceptance and must not be counted as passing implementation coverage. Replace scenario helpers only with production calls and independent state/receipt assertions. |
+
+### Concrete next work under the existing selection
+
+1. Freeze existing identity and read-back interfaces; implement focused rejection/invariant tests against real production calls before changing behavior.
+2. Establish canonical byte vectors and accepted-batch collision semantics, then compose atomic identity/state/registry persistence through SJ. Crash/reopen evidence is required separately from pure transition equality.
+3. Compose read-back with exact fetched objects, semantic admission and protected receipt-index recovery. A moved ref must remain uncertain until history and batch evidence resolve it.
+4. Deliver CI normalization/discovery, provider delivery and retention through the already selected interfaces; do not let a small identity/read-back suite retire those requirements.
+5. Measure indexed operations with the selected Operating B corpus and host receipts. The array implementation's complexity is an explicit pending engineering task.
+
+Parallel lanes use separate worktrees and `work/*` branches based on the release target. Research owns these append-only notes; production and SSpec owners share interface names and evidence with the integrating reviewer. A release branch is the integration target, not permission to publish a release tag.

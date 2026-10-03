@@ -1,0 +1,58 @@
+# A reviewer decision becomes a normal, preconditioned operation. The caller
+# must sign/admit it and atomically persist the conflict resolution receipt.
+use std.scv.db_patch.*
+use std.scv.db_conflict_model.*
+use std.scv.db_reducer.{MaterializedState, db_field_value}
+use std.scv.distributed_identity.{entity_ref_canonical}
+use std.scv.db_canonical.*
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+struct DbConflictDecision:
+    conflict_id: text
+    reviewer: text
+    expected_current: DbValue
+    chosen: DbValue
+
+struct DbConflictResolutionPlan:
+    operation: DbOperation
+    conflict_id: text
+    required_reviewer: text
+    authorization_status: text
+
+fn db_plan_conflict_resolution(record: DbConflictRecord, decision: DbConflictDecision, state: MaterializedState) -> Result<DbConflictResolutionPlan, text>:
+    val digest = db_conflict_record_validate(record)?
+    if digest != decision.conflict_id: return Err("SCVDB_CONFLICT_DECISION_ID")
+    if decision.reviewer == "": return Err("SCVDB_CONFLICT_REVIEWER")
+    if record.code != "SCVDB_CONCURRENT_FIELD": return Err("SCVDB_CONFLICT_RESOLUTION_UNSUPPORTED")
+    if db_value_bytes(decision.expected_current)? != db_value_bytes(record.local)?: return Err("SCVDB_CONFLICT_EXPECTED_VALUE")
+    val entity = entity_ref_canonical(record.entity)
+    for row in state.rows:
+        if row.entity == entity:
+            if row.tombstoned: return Err("SCVDB_TOMBSTONE_UPDATE")
+            if row.revision != record.local_revision: return Err("SCVDB_CONFLICT_STALE")
+            val current = db_field_value(row.fields, record.field)
+            if db_value_bytes(current)? != db_value_bytes(decision.expected_current)?: return Err("SCVDB_CONFLICT_STALE")
+            val condition = RowPrecondition(base_row: "", expected_revision: row.revision, expected_fields: [DbField(name: record.field, value: current)])
+            val edit = FieldEdit(field: record.field, before: current, after: decision.chosen)
+            return Ok(DbConflictResolutionPlan(operation: DbOperation.UpdateFields(record.entity, [edit], condition), conflict_id: digest, required_reviewer: decision.reviewer, authorization_status: "UNVERIFIED_RESOLUTION"))
+    Err("SCVDB_ENTITY_MISSING")
+
+fn db_conflict_resolution_provenance(record: DbConflictRecord, decision: DbConflictDecision) -> Result<text, text>:
+    val digest = db_conflict_record_validate(record)?
+    if digest != decision.conflict_id or decision.reviewer == "": return Err("SCVDB_CONFLICT_DECISION_ID")
+    val payload = db_canonical_text(digest)? + db_canonical_text(decision.reviewer)? + db_value_bytes(decision.expected_current)? + db_value_bytes(decision.chosen)?
+    Ok("SCVDB-CONFLICT-RESOLUTION-v1:" + sha256_u8_hex(db_domain_bytes("conflict-resolution", db_frame(61u8, payload))?))
+
+fn db_validate_resolution_patch(record: DbConflictRecord, decision: DbConflictDecision, state: MaterializedState, patch: DbPatch) -> Result<DbConflictResolutionPlan, text>:
+    """Bind the exact guarded operation and decision to bytes the caller signs."""
+    val digest = db_patch_validate(patch)?
+    val plan = db_plan_conflict_resolution(record, decision, state)?
+    if patch.repository != record.repository or patch.epoch != record.epoch or patch.base_revision != state.revision: return Err("SCVDB_CONFLICT_PATCH_CONTEXT")
+    if patch.signer != plan.required_reviewer: return Err("SCVDB_CONFLICT_REVIEWER")
+    if patch.provenance != db_conflict_resolution_provenance(record, decision)?: return Err("SCVDB_CONFLICT_PROVENANCE")
+    if patch.operations.len() != 1: return Err("SCVDB_CONFLICT_OPERATION")
+    if db_operation_bytes(patch.operations[0])? != db_operation_bytes(plan.operation)?: return Err("SCVDB_CONFLICT_OPERATION")
+    Ok(plan)
+
+export DbConflictDecision, DbConflictResolutionPlan, db_plan_conflict_resolution
+export db_conflict_resolution_provenance, db_validate_resolution_patch
