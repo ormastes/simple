@@ -6,7 +6,7 @@ use std.io_runtime.{file_read_bytes, dir_create_all}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_atomic_write, file_remove}
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_read, retained_file_read_at, retained_file_identity_unchanged, retained_file_close}
-use compiler.backend.linker.elf.elf_file_reader.{elf_file_open_v1, elf_file_section_v1, elf_file_section_window_v1, elf_file_close_v1}
+use compiler.backend.linker.elf.elf_file_reader.{elf_file_open_v1, elf_file_section_v1, elf_file_section_window_v1, elf_file_close_v1, elf_file_string_v1, elf_file_symbol_v1, elf_file_rela_v1}
 
 val ITEM4_FILE_FIXTURE = "test/fixtures/linker/elf/common_x64.o"
 
@@ -30,6 +30,70 @@ fn item4_file_clean(directory: text):
     expect(dir_remove(directory, false)).to_equal(true)
 
 describe "ITEM4-REQ-009 retained ELF file windows":
+    it "decodes real names symbols and RELA records individually without a resident symbol table":
+        step("Read the real _start symbol and its cross-section relocation from independently known fixture fields")
+        val opened = elf_file_open_v1(ITEM4_FILE_FIXTURE, 512u64, 32)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err(): return
+        val object = opened.unwrap()
+        val symbol = elf_file_symbol_v1(object, 7, 2u64, 16)
+        expect(symbol.is_ok()).to_equal(true)
+        if symbol.is_ok():
+            expect(symbol.unwrap().name_bytes).to_equal([95u8, 115u8, 116u8, 97u8, 114u8, 116u8])
+            expect(symbol.unwrap().binding).to_equal(1)
+            expect(symbol.unwrap().symbol_type).to_equal(2)
+            expect(symbol.unwrap().section_index).to_equal(2)
+            expect(symbol.unwrap().size).to_equal(17u64)
+        val relocation = elf_file_rela_v1(object, 3, 0u64)
+        expect(relocation.is_ok()).to_equal(true)
+        if relocation.is_ok():
+            expect(relocation.unwrap().offset).to_equal(7u64)
+            expect(relocation.unwrap().symbol_index).to_equal(3u64)
+            expect(relocation.unwrap().relocation_type).to_equal(11u64)
+            expect(relocation.unwrap().addend).to_equal(12i64)
+            expect(relocation.unwrap().target_section).to_equal(2)
+        expect(elf_file_symbol_v1(object, 7, 4u64, 16).is_err()).to_equal(true)
+        expect(elf_file_rela_v1(object, 3, 1u64).is_err()).to_equal(true)
+        expect(elf_file_string_v1(object, 1, 12u64, 5).is_err()).to_equal(true)
+        expect(elf_file_close_v1(object)).to_equal(true)
+
+    it "rejects a missing string terminator within the declared string section":
+        step("Prove and mutate exactly the real table's final terminator")
+        var original = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(original.len()).to_equal(840)
+        if original.len() != 840: return
+        expect(original[324]).to_equal(0u8)
+        if original[324] != 0u8: return
+        original[324] = 88u8
+        val directory = item4_file_mutant(original)
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = elf_file_open_v1(directory.unwrap() + "/object.o", 512u64, 32)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_ok():
+            val string = elf_file_string_v1(opened.unwrap(), 1, 92u64, 16)
+            expect(string.is_err()).to_equal(true)
+            if string.is_err(): expect(string.unwrap_err()).to_contain("unterminated")
+            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+        item4_file_clean(directory.unwrap())
+
+    it "rejects a relocation that references a symbol beyond its linked symbol table":
+        step("Keep the real relocation type and change only its symbol index to an impossible value")
+        val original = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(original.len()).to_equal(840)
+        if original.len() != 840: return
+        val directory = item4_file_mutant(item4_file_put_u64(original, 208, 0xffffffff0000000bu64))
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = elf_file_open_v1(directory.unwrap() + "/object.o", 512u64, 32)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_ok():
+            val relocation = elf_file_rela_v1(opened.unwrap(), 3, 0u64)
+            expect(relocation.is_err()).to_equal(true)
+            if relocation.is_err(): expect(relocation.unwrap_err()).to_contain("symbol index")
+            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+        item4_file_clean(directory.unwrap())
+
     it "reads real ELF metadata and separate text windows without retaining whole object bytes":
         step("Open the checked-in 840-byte relocatable with its exact 512-byte serialized section-table budget")
         val opened = elf_file_open_v1(ITEM4_FILE_FIXTURE, 512u64, 8)
