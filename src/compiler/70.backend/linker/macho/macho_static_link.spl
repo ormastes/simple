@@ -1,0 +1,93 @@
+# Freestanding, symbol-stripped static MH_EXECUTE construction. No dyld, TLS,
+# code-signature or host-loader claim. Caller owns publication and host admission.
+use compiler.backend.linker.macho.input.{MachOInput, macho_checked_object, macho_archive_inputs}
+use compiler.backend.linker.macho.layout.{macho_layout, macho_executable_header}
+use compiler.backend.linker.macho.symbols.{macho_definitions, macho_unresolved, macho_member_needed, macho_symbol_address}
+use compiler.backend.linker.macho.relocations.{macho_relocate}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn macho_static_link(objects: [[u8]], archives: [[u8]], entry: text, target: RelocArch,
+        max_image_bytes: i64 = 268435456) -> Result<[u8], text>:
+    """Construct a fixed-address Mach-O executable from real MH_OBJECT inputs.
+
+    Output is static/freestanding LC_UNIXTHREAD, not a dyld-linked application.
+    The explicit allocation limit is checked before constructing the image.
+    Native Darwin execution requires its own host/signature qualification.
+    """
+    var cpu: i64 = 0
+    match target:
+        case RelocArch.X86_64: cpu = 0x01000007
+        case RelocArch.AArch64: cpu = 0x0100000c
+        case _: return Err("unsupported Mach-O target CPU")
+    if max_image_bytes < 0x8000 or max_image_bytes > 0x7fffffff:
+        return Err("unsupported Mach-O image byte limit (32768..2147483647)")
+    if entry == "" or entry.contains("\0"): return Err("invalid Mach-O entry name")
+    var inputs: [MachOInput] = []
+    var index: i64 = 0
+    for bytes in objects:
+        val parsed = macho_checked_object(bytes)
+        if parsed.is_err(): return Err("object {index}: {parsed.unwrap_err()}")
+        inputs = inputs.push(MachOInput(name: "object {index}", object: parsed.unwrap()))
+        index = index + 1
+    var members: [MachOInput] = []
+    for archive in archives:
+        val parsed = macho_archive_inputs(archive)?
+        for member in parsed: members = members.push(member)
+    var selected: [bool] = []
+    for member in members: selected = selected.push(false)
+    var changed = true
+    while changed:
+        changed = false
+        val unresolved = macho_unresolved(inputs, entry)?
+        index = 0
+        while index < members.len():
+            if not selected[index] and macho_member_needed(members[index], unresolved):
+                # Select one member then recompute needs; duplicate archive
+                # definitions must not all enter because a stale need survived.
+                inputs = inputs.push(members[index])
+                selected[index] = true
+                changed = true
+                break
+            index = index + 1
+    for input in inputs:
+        if input.object.header.filetype != 1: return Err("{input.name}: expected MH_OBJECT")
+        if input.object.header.cputype != cpu: return Err("{input.name}: Mach-O CPU does not match target")
+        val subtype = input.object.header.cpusubtype & 0xffffff
+        if (cpu == 0x01000007 and subtype != 3) or (cpu == 0x0100000c and subtype != 0):
+            return Err("{input.name}: unsupported Mach-O CPU subtype {subtype}")
+    val definitions = macho_definitions(inputs)?
+    if not definitions.has(entry): return Err("undefined entry symbol {entry}")
+    # Preserve input order for deterministic diagnostics rather than hash order.
+    for input in inputs:
+        for symbol in input.object.symbols:
+            if (symbol.n_type & 0xe0) == 0 and (symbol.n_type & 15) == 1 and
+                    (symbol.n_desc & 0x40) == 0 and symbol.name != "" and not definitions.has(symbol.name):
+                return Err("undefined symbol {symbol.name}")
+    val layout = macho_layout(inputs, max_image_bytes)?
+    val chosen = definitions[entry]
+    val address = macho_symbol_address(inputs[chosen.owner], chosen.owner, chosen.symbol, layout)?
+    var executable = false
+    var ordinal: i64 = 1
+    for segment in inputs[chosen.owner].object.segments:
+        for section in segment.sections:
+            if ordinal == chosen.symbol.n_sect and section.segname == "__TEXT" and
+                    (section.flags & 0x80000400) != 0 and chosen.symbol.n_value < section.addr + section.size:
+                executable = true
+            ordinal = ordinal + 1
+    if not executable: return Err("entry symbol {entry} is not in executable section bytes")
+    if cpu == 0x0100000c and address % 4 != 0: return Err("ARM64 entry is not instruction aligned")
+    var bytes: [u8] = []
+    index = 0
+    while index < layout.size:
+        bytes = bytes.push(0u8)
+        index = index + 1
+    for placement in layout.placements:
+        if not placement.zerofill:
+            var byte: i64 = 0
+            while byte < placement.size:
+                bytes[placement.offset + byte] = inputs[placement.owner].object.raw[placement.source_offset + byte]
+                byte = byte + 1
+    bytes = macho_relocate(bytes, inputs, definitions, layout, cpu == 0x0100000c)?
+    Ok(macho_executable_header(bytes, layout, cpu, address))
+
+export macho_static_link

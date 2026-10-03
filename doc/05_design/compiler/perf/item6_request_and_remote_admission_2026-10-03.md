@@ -70,3 +70,40 @@ The acceptance CLI invokes real owners and exposes explicit `--scope owner`.
 This scope cannot satisfy whole-compiler scenario claims. Default full scope
 must report missing filesystem, compiler completion or lifecycle evidence until
 those observations exist; it must never print inferred zero scan/compile counts.
+
+## Follow-up source implementation
+
+The driver derives per-module changes from a digest-bound previous/current
+generation receipt. It rejects incompatible authority, variants and graph
+topology and uses conservative invalidation if the receipt cannot be admitted.
+The receipt embeds the prior graph, so collection of that generation file does
+not invalidate an already owned transition. Interrupted publication can leave
+unreferenced transition files; orphan maintenance remains outstanding.
+
+Archive loading now admits actual member bytes and semantic interface/action
+payloads before reporting a cache hit. The same member validator serves warm
+and cold paths. Routing reuses its first admitted archive record within the
+request. A returned path remains subject to the downstream pin/revalidation
+boundary; successful validation does not grant a filesystem lifetime lease.
+
+Generated output consistency uses a caller-supplied declaration and typed producer
+receipt. The cold compiled-output boundary checks expected producer and frozen
+inventory independently, requires exactly the supplied declaration's input/output
+paths and digests, and rejects inconsistent or missing outputs. Canonical emitted receipt
+bytes bind provenance; reusable generated identity excludes unrelated inventory
+entries while including declared producer, inputs and outputs. This admits
+producer results; it does not implement execution of arbitrary generators.
+
+OPEN: both declaration and receipt currently arrive inside the compiled artifact.
+There is no independently selected build-plan declaration digest at this boundary.
+Replacing both can redefine the allowed output set; current checks prove internal
+consistency, not authorization against the user's declared build plan. Bind an
+independent plan declaration before treating this as full undeclared-output
+admission. The full cold producer still omits generated receipts and its facet
+producer refuses domain blocks, so generated producer integration is also open.
+
+New specs exercise real Git inventory refresh, snapshot materialization and
+retention, frozen-source refusal, dependency closure, archive corruption and
+generated-output admission. Runtime execution, whole-compiler filesystem
+observations, process crash qualification, performance and cross-mode parity
+remain unverified. No full PSI acceptance or release PASS is asserted.

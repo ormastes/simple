@@ -1,0 +1,330 @@
+# ITEM4-REQ-009 bounded ELF metadata and section windows.
+# NOT RUN: admitted runtime unavailable. Does not certify a bounded link engine.
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes, dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_atomic_write, file_remove, file_exists, file_size}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_read, retained_file_read_at, retained_file_identity_unchanged, retained_file_close, retained_file_sync}
+use compiler.backend.linker.elf.elf_file_reader.{elf_file_open_v1, elf_file_section_v1, elf_file_section_window_v1, elf_file_close_v1, elf_file_string_v1, elf_file_symbol_v1, elf_file_rela_v1, elf_file_copy_section_v1}
+
+val ITEM4_FILE_FIXTURE = "test/fixtures/linker/elf/common_x64.o"
+
+fn item4_file_put_u64(bytes: [u8], offset: i64, value: u64) -> [u8]:
+    expect(offset >= 0 and offset <= bytes.len() - 8).to_equal(true)
+    if offset < 0 or offset > bytes.len() - 8: return bytes
+    var result = bytes
+    for index in 0..8: result[offset + index] = (value >> (index * 8)) as u8
+    result
+
+fn item4_file_mutant(bytes: [u8]) -> Result<text, text>:
+    if not dir_create_all("build"): return Err("test directory unavailable")
+    val directory = secure_temp_dir("build", "item4-file-reader-")?
+    if not file_write_bytes(directory + "/object.o", bytes):
+        val cleaned = dir_remove(directory, false)
+        return Err("fixture write failed")
+    Ok(directory)
+
+fn item4_file_clean(directory: text):
+    expect(file_remove(directory + "/object.o")).to_equal(true)
+    if file_exists(directory + "/slice.bin"):
+        expect(file_remove(directory + "/slice.bin")).to_equal(true)
+    expect(dir_remove(directory, false)).to_equal(true)
+
+fn item4_file_not_cancelled() -> bool: false
+
+describe "ITEM4-REQ-009 retained ELF file windows":
+    it "streams a real section into an exact-capacity retained output using several windows":
+        step("Create a private transaction source and exact 17-byte output handle")
+        val bytes = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(bytes.len()).to_equal(840)
+        if bytes.len() != 840: return
+        val directory = item4_file_mutant(bytes)
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = elf_file_open_v1(directory.unwrap() + "/object.o", 512u64, 8)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err():
+            item4_file_clean(directory.unwrap())
+            return
+        val output = retained_file_open(directory.unwrap() + "/slice.bin", 17u64, true)
+        expect(output.is_ok()).to_equal(true)
+        if output.is_err():
+            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+            item4_file_clean(directory.unwrap())
+            return
+        step("Emit three bounded windows through the production retained reader and writer")
+        val copied = elf_file_copy_section_v1(opened.unwrap(), 2, output.unwrap(), item4_file_not_cancelled)
+        expect(copied.is_ok()).to_equal(true)
+        if copied.is_ok(): expect(copied.unwrap()).to_equal(17u64)
+        expect(output.unwrap().position).to_equal(17u64)
+        expect(retained_file_sync(output.unwrap())).to_equal(true)
+        expect(retained_file_close(output.unwrap())).to_equal(true)
+        expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+        var expected: [u8] = []
+        for index in 64..81: expected.push(bytes[index])
+        expect(file_read_bytes(directory.unwrap() + "/slice.bin")).to_equal(expected)
+        item4_file_clean(directory.unwrap())
+
+    it "rejects output quota before any write and reports mid-stream cancellation as incomplete":
+        val bytes = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(bytes.len()).to_equal(840)
+        if bytes.len() != 840: return
+        val directory = item4_file_mutant(bytes)
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = elf_file_open_v1(directory.unwrap() + "/object.o", 512u64, 8)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err():
+            item4_file_clean(directory.unwrap())
+            return
+        val path = directory.unwrap() + "/slice.bin"
+        val small = retained_file_open(path, 16u64, true)
+        expect(small.is_ok()).to_equal(true)
+        if small.is_err():
+            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+            item4_file_clean(directory.unwrap())
+            return
+        step("A one-byte-short output budget fails before emitting any part of the section")
+        val refused = elf_file_copy_section_v1(opened.unwrap(), 2, small.unwrap(), item4_file_not_cancelled)
+        expect(refused.is_err()).to_equal(true)
+        if refused.is_err(): expect(refused.unwrap_err()).to_contain("output capacity")
+        expect(small.unwrap().position).to_equal(0u64)
+        expect(retained_file_close(small.unwrap())).to_equal(true)
+        expect(file_size(path)).to_equal(0)
+        expect(file_remove(path)).to_equal(true)
+        val output = retained_file_open(path, 17u64, true)
+        expect(output.is_ok()).to_equal(true)
+        if output.is_ok():
+            step("Cancel using the actual first emitted window as the signal and discard the partial transaction")
+            val cancelled = elf_file_copy_section_v1(opened.unwrap(), 2, output.unwrap(), \: file_size(path) >= 8)
+            expect(cancelled.is_err()).to_equal(true)
+            if cancelled.is_err(): expect(cancelled.unwrap_err()).to_contain("cancelled; discard output")
+            expect(output.unwrap().position).to_equal(8u64)
+            expect(retained_file_close(output.unwrap())).to_equal(true)
+        expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+        item4_file_clean(directory.unwrap())
+
+    it "decodes real names symbols and RELA records individually without a resident symbol table":
+        step("Read the real _start symbol and its cross-section relocation from independently known fixture fields")
+        val opened = elf_file_open_v1(ITEM4_FILE_FIXTURE, 512u64, 32)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err(): return
+        val object = opened.unwrap()
+        val symbol = elf_file_symbol_v1(object, 7, 2u64, 16)
+        expect(symbol.is_ok()).to_equal(true)
+        if symbol.is_ok():
+            expect(symbol.unwrap().name_bytes).to_equal([95u8, 115u8, 116u8, 97u8, 114u8, 116u8])
+            expect(symbol.unwrap().binding).to_equal(1)
+            expect(symbol.unwrap().symbol_type).to_equal(2)
+            expect(symbol.unwrap().section_index).to_equal(2)
+            expect(symbol.unwrap().size).to_equal(17u64)
+        val relocation = elf_file_rela_v1(object, 3, 0u64)
+        expect(relocation.is_ok()).to_equal(true)
+        if relocation.is_ok():
+            expect(relocation.unwrap().offset).to_equal(7u64)
+            expect(relocation.unwrap().symbol_index).to_equal(3u64)
+            expect(relocation.unwrap().relocation_type).to_equal(11u64)
+            expect(relocation.unwrap().addend).to_equal(12i64)
+            expect(relocation.unwrap().target_section).to_equal(2)
+        expect(elf_file_symbol_v1(object, 7, 4u64, 16).is_err()).to_equal(true)
+        expect(elf_file_rela_v1(object, 3, 1u64).is_err()).to_equal(true)
+        expect(elf_file_string_v1(object, 1, 12u64, 5).is_err()).to_equal(true)
+        expect(elf_file_close_v1(object)).to_equal(true)
+
+    it "rejects a missing string terminator within the declared string section":
+        step("Prove and mutate exactly the real table's final terminator")
+        var original = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(original.len()).to_equal(840)
+        if original.len() != 840: return
+        expect(original[324]).to_equal(0u8)
+        if original[324] != 0u8: return
+        original[324] = 88u8
+        val directory = item4_file_mutant(original)
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = elf_file_open_v1(directory.unwrap() + "/object.o", 512u64, 32)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_ok():
+            val string = elf_file_string_v1(opened.unwrap(), 1, 92u64, 16)
+            expect(string.is_err()).to_equal(true)
+            if string.is_err(): expect(string.unwrap_err()).to_contain("unterminated")
+            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+        item4_file_clean(directory.unwrap())
+
+    it "rejects a relocation that references a symbol beyond its linked symbol table":
+        step("Keep the real relocation type and change only its symbol index to an impossible value")
+        val original = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(original.len()).to_equal(840)
+        if original.len() != 840: return
+        val directory = item4_file_mutant(item4_file_put_u64(original, 208, 0xffffffff0000000bu64))
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = elf_file_open_v1(directory.unwrap() + "/object.o", 512u64, 32)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_ok():
+            val relocation = elf_file_rela_v1(opened.unwrap(), 3, 0u64)
+            expect(relocation.is_err()).to_equal(true)
+            if relocation.is_err(): expect(relocation.unwrap_err()).to_contain("symbol index")
+            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+        item4_file_clean(directory.unwrap())
+
+    it "reads real ELF metadata and separate text windows without retaining whole object bytes":
+        step("Open the checked-in 840-byte relocatable with its exact 512-byte serialized section-table budget")
+        val opened = elf_file_open_v1(ITEM4_FILE_FIXTURE, 512u64, 8)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err(): return
+        val object = opened.unwrap()
+        expect(object.machine).to_equal(62)
+        expect(object.section_count).to_equal(8)
+        expect(object.metadata_table_bytes).to_equal(512u64)
+        step("Read section two as independent bounded slices matching fixture bytes at file offset 64")
+        val section = elf_file_section_v1(object, 2)
+        expect(section.is_ok()).to_equal(true)
+        if section.is_err():
+            expect(elf_file_close_v1(object)).to_equal(true)
+            return
+        expect(section.unwrap().file_offset).to_equal(64u64)
+        expect(section.unwrap().size).to_equal(17u64)
+        val original = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(original.len()).to_equal(840)
+        if original.len() != 840:
+            expect(elf_file_close_v1(object)).to_equal(true)
+            return
+        val first = elf_file_section_window_v1(object, 2, 0u64, 8)
+        val last = elf_file_section_window_v1(object, 2, 16u64, 1)
+        expect(first.is_ok()).to_equal(true)
+        expect(last.is_ok()).to_equal(true)
+        if first.is_ok(): expect(first.unwrap()).to_equal([original[64], original[65], original[66], original[67], original[68], original[69], original[70], original[71]])
+        if last.is_ok(): expect(last.unwrap()).to_equal([original[80]])
+        expect(elf_file_section_window_v1(object, 2, 0u64, 9).is_err()).to_equal(true)
+        expect(elf_file_section_window_v1(object, 2, 17u64, 1).is_err()).to_equal(true)
+        expect(elf_file_section_v1(object, 8).is_err()).to_equal(true)
+        expect(elf_file_close_v1(object)).to_equal(true)
+        expect(elf_file_section_v1(object, 2).is_err()).to_equal(true)
+
+    it "preserves the sequential cursor across retained positional reads":
+        step("Interleave native positional reads with the existing retained sequential API")
+        val opened = retained_file_open(ITEM4_FILE_FIXTURE, 840u64)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err(): return
+        val file = opened.unwrap()
+        val first = retained_file_read(file, 1)
+        val positional = retained_file_read_at(file, 2u64, 2)
+        val second = retained_file_read(file, 1)
+        expect(first.is_ok()).to_equal(true)
+        expect(positional.is_ok()).to_equal(true)
+        expect(second.is_ok()).to_equal(true)
+        if first.is_ok(): expect(first.unwrap()).to_equal([127u8])
+        if positional.is_ok(): expect(positional.unwrap()).to_equal([76u8, 70u8])
+        if second.is_ok(): expect(second.unwrap()).to_equal([69u8])
+        expect(file.position).to_equal(2u64)
+        expect(retained_file_read_at(file, 840u64, 1).is_err()).to_equal(true)
+        expect(retained_file_read_at(file, 0xffffffffffffffffu64, 1).is_err()).to_equal(true)
+        expect(retained_file_identity_unchanged(file).is_ok()).to_equal(true)
+        expect(retained_file_close(file)).to_equal(true)
+
+    it "rejects the section metadata budget before building an index":
+        step("Admit no implicit resident table and enforce the caller's serialized metadata admission cap")
+        val rejected = elf_file_open_v1(ITEM4_FILE_FIXTURE, 511u64, 8)
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("metadata budget")
+        expect(elf_file_open_v1(ITEM4_FILE_FIXTURE, 512u64, 0).is_err()).to_equal(true)
+        expect(elf_file_open_v1(ITEM4_FILE_FIXTURE, 512u64, 1048577).is_err()).to_equal(true)
+
+    it "rejects changed retained input after truncation or prevents the mutation while the handle is open":
+        step("Retain a private real ELF fixture before trying to truncate its underlying file")
+        val bytes = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(bytes.len()).to_equal(840)
+        if bytes.len() != 840: return
+        val directory = item4_file_mutant(bytes)
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = retained_file_open(directory.unwrap() + "/object.o", 840u64)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err():
+            item4_file_clean(directory.unwrap())
+            return
+        val truncated = file_write_bytes(directory.unwrap() + "/object.o", [127u8])
+        @when(os="windows"):
+        expect(truncated).to_equal(false)
+        expect(retained_file_identity_unchanged(opened.unwrap()).is_ok()).to_equal(true)
+        @else:
+        expect(truncated).to_equal(true)
+        val rejected = retained_file_read_at(opened.unwrap(), 0u64, 1)
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("FILE_CHANGED")
+        @end
+        expect(retained_file_close(opened.unwrap())).to_equal(true)
+        item4_file_clean(directory.unwrap())
+
+    it "never switches a retained input to replacement path contents":
+        step("Try atomic path replacement while an original object is retained")
+        val bytes = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(bytes.len()).to_equal(840)
+        if bytes.len() != 840: return
+        val directory = item4_file_mutant(bytes)
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = retained_file_open(directory.unwrap() + "/object.o", 840u64)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err():
+            item4_file_clean(directory.unwrap())
+            return
+        val replaced = file_atomic_write(directory.unwrap() + "/object.o", "replacement")
+        @when(os="windows"):
+        expect(replaced).to_equal(false)
+        @else:
+        expect(replaced).to_equal(true)
+        @end
+        step("A path replacement may invalidate original metadata but can never supply replacement bytes")
+        val retained = retained_file_read_at(opened.unwrap(), 0u64, 4)
+        if retained.is_ok():
+            expect(retained.unwrap()).to_equal([127u8, 69u8, 76u8, 70u8])
+        else:
+            expect(retained.unwrap_err()).to_contain("FILE_CHANGED")
+        expect(retained_file_close(opened.unwrap())).to_equal(true)
+        item4_file_clean(directory.unwrap())
+
+    it "rejects overflowing table offsets and file-backed section ranges from real malformed objects":
+        val original = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(original.len()).to_equal(840)
+        if original.len() != 840: return
+        step("Change only e_shoff to a near-u64 maximum and require subtractive table bounds rejection")
+        val table_dir = item4_file_mutant(item4_file_put_u64(original, 40, 0xfffffffffffffff0u64))
+        expect(table_dir.is_ok()).to_equal(true)
+        if table_dir.is_err(): return
+        val table = elf_file_open_v1(table_dir.unwrap() + "/object.o", 512u64, 8)
+        expect(table.is_err()).to_equal(true)
+        if table.is_err(): expect(table.unwrap_err()).to_contain("section table bounds")
+        item4_file_clean(table_dir.unwrap())
+        step("Change only section two's size to overflow its file range")
+        val section_dir = item4_file_mutant(item4_file_put_u64(original, 488, 0xffffffffffffffffu64))
+        expect(section_dir.is_ok()).to_equal(true)
+        if section_dir.is_err(): return
+        val section = elf_file_open_v1(section_dir.unwrap() + "/object.o", 512u64, 8)
+        expect(section.is_err()).to_equal(true)
+        if section.is_err(): expect(section.unwrap_err()).to_contain("file-backed section bounds")
+        item4_file_clean(section_dir.unwrap())
+
+    it "materializes only requested NOBITS zero windows despite a logical section larger than the file":
+        step("Convert the real text header to NOBITS with a large logical extent and irrelevant file offset")
+        var original = file_read_bytes(ITEM4_FILE_FIXTURE)
+        expect(original.len()).to_equal(840)
+        if original.len() != 840: return
+        expect(original[460]).to_equal(1u8)
+        if original[460] != 1u8: return
+        original[460] = 8u8
+        original = item4_file_put_u64(original, 480, 0xffffffffffffffffu64)
+        original = item4_file_put_u64(original, 488, 1048576u64)
+        val directory = item4_file_mutant(original)
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = elf_file_open_v1(directory.unwrap() + "/object.o", 512u64, 8)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_ok():
+            val zeros = elf_file_section_window_v1(opened.unwrap(), 2, 1048568u64, 8)
+            expect(zeros.is_ok()).to_equal(true)
+            if zeros.is_ok(): expect(zeros.unwrap()).to_equal([0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8])
+            expect(elf_file_close_v1(opened.unwrap())).to_equal(true)
+        item4_file_clean(directory.unwrap())

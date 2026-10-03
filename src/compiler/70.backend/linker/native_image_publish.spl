@@ -1,0 +1,39 @@
+"""Stage complete images and set permissions before replacing their destination.
+
+The caller owns the destination directory. This fast-path publisher is not a
+retained-handle, hostile-directory, or bounded-working-set authority.
+"""
+use std.io_runtime.{file_write_bytes, file_delete, file_rename, file_exists,
+    getpid, time_now_unix_micros, host_os, process_run}
+
+fn native_image_publish(output: text, bytes: [u8], executable: bool = false) -> bool:
+    if output == "" or output.contains("\0"): return false
+    val nonce = "{getpid()}-{time_now_unix_micros()}"
+    val staged = output + ".simple-link-stage-" + nonce
+    if not file_write_bytes(staged, bytes):
+        val _ = file_delete(staged)
+        return false
+    if executable and host_os() != "windows":
+        val (_out, _err, code) = process_run("chmod", ["--", "755", staged])
+        if code != 0:
+            val _ = file_delete(staged)
+            return false
+    if file_rename(staged, output): return true
+    if not file_exists(output):
+        val _ = file_delete(staged)
+        return false
+    # Compatibility for admitted runtimes whose rename cannot replace a file.
+    val backup = output + ".simple-link-backup-" + nonce
+    if not file_rename(output, backup):
+        val _ = file_delete(staged)
+        return false
+    if file_rename(staged, output):
+        val _ = file_delete(backup)
+        return true
+    val restored = file_rename(backup, output)
+    val _ = file_delete(staged)
+    # Preserve a recoverable backup if restoration itself fails.
+    if not restored: return false
+    false
+
+export native_image_publish

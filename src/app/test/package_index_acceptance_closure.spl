@@ -1,0 +1,61 @@
+use app.test.package_index_acceptance_binding.{PackageIndexBindingObservationV1, acceptance_rebind_actions_v1}
+use app.test.package_index_acceptance_invalidation.{acceptance_graph_v1}
+use compiler.driver.cache.package_module_index.{
+    package_module_index_publish_if_current_v1, package_module_index_read_current_v1
+}
+use compiler.driver.cache.package_index_route.{package_index_route_closure_v1}
+
+fn package_index_acceptance_closure_v1(mode: text, root: text) -> PackageIndexBindingObservationV1:
+    var graph = acceptance_graph_v1()
+    var unrelated = graph.entries[0]
+    unrelated.package_identity = "unrelated"
+    unrelated.module_identity = "unrelated"
+    unrelated.source_identity = "unreadable/unrelated.spl"
+    unrelated.scc_identity = "scc:unrelated"
+    unrelated.direct_imports = []
+    unrelated.reverse_dependents = []
+    # Canonical storage order: api, app, model, unrelated, util.
+    graph.entries = [graph.entries[0], graph.entries[1], graph.entries[2], unrelated, graph.entries[3]]
+    if mode == "cycle":
+        var app = graph.entries[1]
+        var util = graph.entries[4]
+        app.reverse_dependents = ["util"]
+        util.direct_imports = ["app", "model"]
+        app.scc_identity = "scc:app-util"
+        util.scc_identity = "scc:app-util"
+        graph.entries[1] = app
+        graph.entries[4] = util
+    graph = acceptance_rebind_actions_v1(graph)
+    if not package_module_index_publish_if_current_v1(root, graph, ""):
+        return PackageIndexBindingObservationV1(false, "fixture-publication-failed", [])
+    val admitted = package_module_index_read_current_v1(root)
+    if not admitted.valid or admitted.generation == nil:
+        return PackageIndexBindingObservationV1(false, "fixture-admission-failed", [])
+    val closure = package_index_route_closure_v1(admitted.generation!, "app")
+    if mode == "dangling":
+        var invalid_graph = admitted.generation!
+        var app = invalid_graph.entries[1]
+        app.direct_imports = ["api", "missing", "util"]
+        invalid_graph.entries[1] = app
+        invalid_graph = acceptance_rebind_actions_v1(invalid_graph)
+        val incomplete = package_index_route_closure_v1(invalid_graph, "app")
+        val published = package_module_index_publish_if_current_v1(root, invalid_graph, admitted.digest)
+        val after = package_module_index_read_current_v1(root)
+        val refused = incomplete.len() == 0 and not published and after.valid and after.digest == admitted.digest
+        return PackageIndexBindingObservationV1(refused, "dangling-import-refusal", [
+            "incomplete_closure_size={incomplete.len()}", "invalid_graph_published={published}",
+            "prior_generation_preserved={after.digest == admitted.digest}"])
+    if mode == "missing-root":
+        val absent = package_index_route_closure_v1(admitted.generation!, "absent")
+        return PackageIndexBindingObservationV1(absent.len() == 0, "missing-root-refusal",
+            ["missing_root_closure_size={absent.len()}"])
+    if mode != "cycle" and mode != "explicit-closure-only":
+        return PackageIndexBindingObservationV1(false, "unsupported-closure-mode", [])
+    val ordered = closure.join(",")
+    val unrelated_excluded = not closure.contains("unrelated")
+    val valid = ordered == "api,app,model,util" and unrelated_excluded
+    PackageIndexBindingObservationV1(valid, "indexed-closure-owner", [
+        "selected_modules={ordered}", "selected_module_count={closure.len()}",
+        "unrelated_module_excluded={unrelated_excluded}", "index_digest={admitted.digest}"])
+
+export package_index_acceptance_closure_v1

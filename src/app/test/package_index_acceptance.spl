@@ -12,6 +12,19 @@ use app.test.package_index_acceptance_invalidation.{
     package_index_acceptance_invalidation_v1
 }
 use app.test.package_index_acceptance_daemon.{package_index_acceptance_daemon_v1}
+use app.test.package_index_acceptance_binding.{
+    PackageIndexBindingObservationV1, package_index_acceptance_binding_v1,
+    package_index_acceptance_publication_v1
+}
+use app.test.package_index_acceptance_schedule.{package_index_acceptance_schedule_v1}
+use app.test.package_index_acceptance_remote.{package_index_acceptance_remote_v1}
+use app.test.package_index_acceptance_snapshot.{package_index_acceptance_snapshot_v1}
+use app.test.package_index_acceptance_metadata.{package_index_acceptance_metadata_v1}
+use app.test.package_index_acceptance_archive.{package_index_acceptance_archive_v1}
+use app.test.package_index_acceptance_events.{
+    package_index_acceptance_events_v1, package_index_acceptance_frozen_refusal_v1
+}
+use app.test.package_index_acceptance_closure.{package_index_acceptance_closure_v1}
 
 struct PackageIndexAcceptanceObservationV1:
     operation_valid: bool
@@ -83,8 +96,108 @@ fn main() -> i64:
     if args.len() == 5 and not owner_scope:
         return 2
     val scenario = args[2]
+    if scenario == "header-metadata-reuse" or scenario == "metadata-section-lazy-read" or
+            scenario == "comment-only-semantic-reuse" or scenario == "whitespace-only-semantic-reuse" or
+            scenario == "generated-source-invalidation" or scenario == "generated-output-undeclared-denied":
+        val metadata = package_index_acceptance_metadata_v1(scenario)
+        print "scenario={scenario}"
+        print "owner_valid={metadata.valid}"
+        print "owner_reason={metadata.reason}"
+        for observation in metadata.observations:
+            print observation
+        if owner_scope:
+            print "acceptance_scope=owner"
+            return if metadata.supported and metadata.valid: 0 else: 1
+        print "acceptance_status=incomplete"
+        print "missing_evidence=compiler-build-receipt,production-filesystem-observations"
+        return 3
+    if scenario == "remote-cache-local-admission" or scenario == "remote-cache-poison-denied":
+        val remote = package_index_acceptance_remote_v1(scenario)
+        print "scenario={scenario}"
+        print "owner=remote_lookup_verified"
+        print "content_verified={remote.content_verified}"
+        print "owner_reason={remote.reason}"
+        print "expected_manifest_digest={remote.expected_manifest_digest}"
+        print "observed_manifest_digest={remote.observed_manifest_digest}"
+        print "artifact_count={remote.artifact_count}"
+        print "observed_artifact_digest={remote.observed_artifact_digest}"
+        if owner_scope:
+            print "acceptance_scope=owner"
+            val admitted = scenario == "remote-cache-local-admission" and
+                remote.content_verified and remote.artifact_count == 1 and
+                remote.observed_manifest_digest == remote.expected_manifest_digest
+            val rejected = scenario == "remote-cache-poison-denied" and
+                not remote.content_verified and remote.artifact_count == 0 and
+                remote.reason.starts_with("artifact-digest-mismatch:")
+            return if remote.supported and (admitted or rejected): 0 else: 1
+        print "acceptance_status=incomplete"
+        print "missing_evidence=local-action-and-archive-semantic-admission,production-filesystem-observations"
+        return 3
     val root = "build/test-artifacts/package-index-acceptance-{getpid()}"
     dir_remove(root, true)
+    if scenario == "package-archive-cache-hit" or scenario == "clean-warm-reproducibility":
+        val archive = package_index_acceptance_archive_v1(scenario, root)
+        dir_remove(root, true)
+        print "scenario={scenario}"
+        print "owner=package_archive_load_v1"
+        print "owner_reason={archive.reason}"
+        print "archive_admitted={archive.archive_admitted}"
+        print "archive_digest={archive.archive_digest}"
+        print "receipt_digest={archive.receipt_digest}"
+        print "interface_payload_digest={archive.interface_payload_digest}"
+        print "action_payload_digest={archive.action_payload_digest}"
+        print "member_count={archive.member_count}"
+        print "persisted_bytes_identical={archive.persisted_bytes_identical}"
+        if owner_scope:
+            print "acceptance_scope=owner"
+            return if archive.supported and archive.archive_admitted and
+                archive.member_count == 3 and archive.persisted_bytes_identical and
+                archive.archive_digest == archive.repeated_archive_digest: 0 else: 1
+        print "acceptance_status=incomplete"
+        print "missing_evidence=compiler-completion,clean-build-output-parity,production-filesystem-observations"
+        return 3
+    if scenario == "explicit-closure-only":
+        val closure = package_index_acceptance_closure_v1(scenario, root)
+        dir_remove(root, true)
+        return package_index_acceptance_report_v1(scenario, closure, owner_scope,
+            "compiler-completion,production-filesystem-observations")
+    if scenario == "scv-git-event-auto-index-update" or scenario == "missing-index-bounded-rebuild" or
+            scenario == "no-hidden-full-scan-fallback":
+        val events = package_index_acceptance_events_v1(scenario, root)
+        dir_remove(root, true)
+        return package_index_acceptance_report_v1(scenario, events, owner_scope,
+            "full-module-graph-build,event-triggered-compiler-invocation,production-filesystem-observations")
+    if scenario == "scv-no-live-worktree-fallback":
+        val frozen = package_index_acceptance_frozen_refusal_v1(root)
+        dir_remove(root, true)
+        return package_index_acceptance_report_v1(scenario, frozen, owner_scope,
+            "compiler-request-refusal-receipt,production-filesystem-observations")
+    if scenario == "scv-snapshot-bound-build" or scenario == "scv-concurrent-worktree-edit-isolated" or
+            scenario == "scv-source-drift-new-build" or scenario == "scv-internal-write-boundary" or
+            scenario == "scv-git-state-nonmutation" or scenario == "scv-concise-failure-diagnostics" or
+            scenario == "scv-internal-metadata-atomic-gc" or scenario == "scv-snapshot-create-crash" or
+            scenario == "scv-snapshot-cleanup-crash":
+        val snapshot = package_index_acceptance_snapshot_v1(scenario, root)
+        dir_remove(root, true)
+        return package_index_acceptance_report_v1(scenario, snapshot, owner_scope,
+            "compiler-build-receipt,production-filesystem-observations,process-crash-injection")
+    if scenario == "stale-index-denied" or scenario == "scv-provenance-binding" or
+            scenario == "config-variant-isolation" or
+            scenario == "build-tag-variant-isolation":
+        val binding = package_index_acceptance_binding_v1(scenario, root)
+        dir_remove(root, true)
+        return package_index_acceptance_report_v1(scenario, binding, owner_scope,
+            "compiler-refusal-receipt,production-filesystem-observations")
+    if scenario == "crash-before-publish" or scenario == "crash-after-publish":
+        val publication = package_index_acceptance_publication_v1(scenario, root)
+        dir_remove(root, true)
+        return package_index_acceptance_report_v1(scenario, publication, owner_scope,
+            "process-crash-injection,orphan-staging-recovery")
+    if scenario == "deterministic-independent-schedule" or scenario == "scc-group-invalidation":
+        val schedule = package_index_acceptance_schedule_v1(scenario, root)
+        dir_remove(root, true)
+        return package_index_acceptance_report_v1(scenario, schedule, owner_scope,
+            "actual-worker-dispatch,compiler-completion,production-filesystem-observations")
     if scenario == "daemon-generation-workspace-isolation":
         val daemon = package_index_acceptance_daemon_v1(root)
         print "scenario={scenario}"
@@ -153,6 +266,22 @@ fn main() -> i64:
     # admissions/reads. This owner-only probe must not manufacture those facts.
     print "acceptance_status=incomplete"
     print "missing_evidence=compiler-operation,production-filesystem-observations"
+    3
+
+fn package_index_acceptance_report_v1(
+    scenario: text, observed: PackageIndexBindingObservationV1,
+    owner_scope: bool, missing_evidence: text
+) -> i64:
+    print "scenario={scenario}"
+    print "owner_valid={observed.valid}"
+    print "owner_reason={observed.reason}"
+    for observation in observed.observations:
+        print observation
+    if owner_scope:
+        print "acceptance_scope=owner"
+        return if observed.valid: 0 else: 1
+    print "acceptance_status=incomplete"
+    print "missing_evidence={missing_evidence}"
     3
 
 export PackageIndexAcceptanceObservationV1
