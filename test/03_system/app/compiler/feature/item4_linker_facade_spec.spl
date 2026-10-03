@@ -1,0 +1,239 @@
+"""ITEM4-REQ-002/006/007: request admission and configured native execution.
+
+Runtime execution is pending an admitted self-hosted CLI. PE image assertions
+inspect production output; they are not Windows loader execution evidence.
+"""
+use std.spec.*
+use std.spec.step
+use std.common.kernel_plugin.ids.*
+use std.common.kernel_plugin.schema_header.*
+use std.common.linker.link_request_v1.*
+use std.common.linker.link_policy_v1.*
+use compiler.backend.linker.link_engine_external.*
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
+use compiler.backend.linker.pe_inspect.{pe_inspect}
+use std.io_runtime.{env_get, env_set, host_os, file_exists, file_read_bytes, file_write_bytes, dir_create_all, remove_file_if_exists}
+
+fn item4_facade_header(id: u64) -> KpfSchemaHeaderV1:
+    KpfSchemaHeaderV1(abi_version: KPF_ABI_VERSION_V1,
+        struct_size: KPF_SCHEMA_HEADER_V1_SIZE, schema_id: KpfId128(hi: 1, lo: id),
+        schema_major: 1, schema_minor: 0,
+        schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0), reserved0: 0)
+
+fn item4_facade_target() -> LinkTargetV1:
+    LinkTargetV1(arch: LINK_ARCH_X86_64, os: LINK_OS_WINDOWS,
+        abi: LINK_ABI_MSVC, object_format: LINK_OBJECT_FORMAT_PE,
+        endian: LINK_ENDIAN_LITTLE, address_width: 64)
+
+fn item4_facade_request(target: LinkTargetV1) -> LinkRequestV1:
+    LinkRequestV1(header: item4_facade_header(1), target: target,
+        inputs_manifest_digest: KpfDigest256(w0: 2, w1: 0, w2: 0, w3: 0),
+        output_contract: 1,
+        semantic_profile_digest: KpfDigest256(w0: 3, w1: 0, w2: 0, w3: 0),
+        runtime_sysroot_digest: KpfDigest256(w0: 4, w1: 0, w2: 0, w3: 0),
+        required_features: 0, layout_handle: 0, debug_handle: 0, reproducibility: 0)
+
+fn item4_facade_policy() -> LinkExecutionPolicyV1:
+    LinkExecutionPolicyV1(header: item4_facade_header(2), mode: LinkExecutionModeV1.Fast,
+        job_memory_limit_bytes: 0, scratch_limit_bytes: 0, max_workers: 1,
+        allowed_placements: 0, enforcement_requirement: 0)
+
+fn item4_facade_reject(target: LinkTargetV1):
+    val receipt = link_request_to_native(item4_facade_request(target),
+        item4_facade_policy(), ["build/item4_facade/never_read.obj"],
+        "build/item4_facade/never_written.exe")
+    expect(receipt.outcome.name()).to_equal("UnsupportedFeature")
+    expect(receipt.engine_id).to_equal("none")
+    expect(receipt.accounting_class.name()).to_equal("NotCertified")
+
+fn item4_facade_no_target_override() -> bool:
+    val build_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    val target = env_get("SIMPLE_TARGET") ?? ""
+    expect(build_target).to_equal("")
+    expect(target).to_equal("")
+    build_target == "" and target == ""
+
+describe "ITEM4-REQ-006 facade target admission":
+    it "rejects an unknown architecture before probing a linker":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
+        step("Submit an unassigned architecture code with otherwise valid PE fields")
+        var target = item4_facade_target()
+        target.arch = 99
+        item4_facade_reject(target)
+
+    it "rejects unknown OS and ABI codes instead of guessing GNU":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
+        step("Submit unknown OS and ABI values independently")
+        var target = item4_facade_target()
+        target.os = 99
+        item4_facade_reject(target)
+        target = item4_facade_target()
+        target.abi = 99
+        item4_facade_reject(target)
+
+    it "rejects incompatible object format and OS pairs":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
+        step("Try ELF on Windows, PE on Linux, and ELF on macOS")
+        var target = item4_facade_target()
+        target.object_format = LINK_OBJECT_FORMAT_ELF
+        item4_facade_reject(target)
+        target = item4_facade_target()
+        target.os = LINK_OS_LINUX
+        target.abi = LINK_ABI_GNU
+        item4_facade_reject(target)
+        target.os = LINK_OS_MACOS
+        target.object_format = LINK_OBJECT_FORMAT_ELF
+        item4_facade_reject(target)
+
+    it "rejects MSVC ABI on an ELF target":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
+        step("Keep valid Linux ELF fields but request the Windows ABI")
+        var target = item4_facade_target()
+        target.os = LINK_OS_LINUX
+        target.object_format = LINK_OBJECT_FORMAT_ELF
+        item4_facade_reject(target)
+
+    it "rejects unsupported endian and width without publishing output":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
+        step("Submit a big-endian PE request and a 32-bit x86_64 request")
+        var target = item4_facade_target()
+        target.endian = 2
+        item4_facade_reject(target)
+        target = item4_facade_target()
+        target.address_width = 32
+        item4_facade_reject(target)
+
+describe "ITEM4-REQ-002 configured request execution":
+    it "rejects SMF embedding as a different internal output contract":
+        # @req ITEM4-REQ-002, ITEM4-REQ-007
+        step("Request an internal PE image using a missing SMF input")
+        if not item4_facade_no_target_override(): return
+        val previous = env_get("SIMPLE_LINKER") ?? ""
+        val changed = env_set("SIMPLE_LINKER", "internal")
+        expect(changed).to_equal(true)
+        if not changed: return
+        val receipt = link_request_to_native(item4_facade_request(item4_facade_target()),
+            item4_facade_policy(), ["build/item4_facade/never_read.smf"],
+            "build/item4_facade/never_written.exe")
+        val restored = env_set("SIMPLE_LINKER", previous)
+        expect(restored).to_equal(true)
+        step("Require output-contract rejection before any embedding or input read")
+        expect(receipt.outcome.name()).to_equal("UnsupportedFeature")
+        expect(receipt.engine_id).to_equal("internal:coff")
+
+    it "rejects a conflicting ambient target before input access":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
+        step("Select SimpleOS in the environment while requesting Windows PE")
+        val previous = env_get("SIMPLE_TARGET") ?? ""
+        val changed = env_set("SIMPLE_TARGET", "simpleos")
+        expect(changed).to_equal(true)
+        if not changed: return
+        val request = item4_facade_request(item4_facade_target())
+        val receipt = link_request_to_native(request, item4_facade_policy(), [],
+            "build/item4_facade/never_written.exe")
+        val restored = env_set("SIMPLE_TARGET", previous)
+        expect(restored).to_equal(true)
+        expect(receipt.outcome.name()).to_equal("InputError")
+        expect(receipt.engine_id).to_equal("none")
+
+    it "rejects Unix targets that the external wrapper would execute for another host":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
+        step("Choose a valid Unix target OS different from the host")
+        if not item4_facade_no_target_override(): return
+        var target = item4_facade_target()
+        target.os = if host_os() == "linux": LINK_OS_FREEBSD else: LINK_OS_LINUX
+        target.abi = LINK_ABI_GNU
+        target.object_format = LINK_OBJECT_FORMAT_ELF
+        val previous = env_get("SIMPLE_LINKER") ?? ""
+        val changed = env_set("SIMPLE_LINKER", "")
+        expect(changed).to_equal(true)
+        if not changed: return
+        val receipt = link_request_to_native(item4_facade_request(target),
+            item4_facade_policy(), [], "build/item4_facade/never_written_unix")
+        val restored = env_set("SIMPLE_LINKER", previous)
+        expect(restored).to_equal(true)
+        expect(receipt.outcome.name()).to_equal("UnsupportedFeature")
+        expect(receipt.engine_id).to_equal("none")
+
+    it "rejects configuration target disagreement and preserves an existing output":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
+        step("Create a sentinel output before requesting a mismatched target")
+        val created = dir_create_all("build/item4_facade")
+        expect(created).to_equal(true)
+        if not created: return
+        val output = "build/item4_facade/preserve.exe"
+        val sentinel: [u8] = [83, 65, 70, 69]
+        val written = file_write_bytes(output, sentinel)
+        expect(written).to_equal(true)
+        if not written: return
+        val request = item4_facade_request(item4_facade_target())
+        val policy = item4_facade_policy()
+        var config = link_request_to_native_config(request, policy)
+        config.target_triple = "aarch64-pc-windows-msvc"
+        val receipt = link_request_to_native_with_config(request, policy, config,
+            ["build/item4_facade/never_read.obj"], output)
+        step("Require rejection before any output or input side effect")
+        expect(receipt.outcome.name()).to_equal("InputError")
+        expect(receipt.engine_id).to_equal("none")
+        expect(file_read_bytes(output)).to_equal(sentinel)
+        config = link_request_to_native_config(request, policy)
+        config.linker_abi = "elf"
+        val abi_receipt = link_request_to_native_with_config(request, policy, config, [], output)
+        expect(abi_receipt.outcome.name()).to_equal("InputError")
+        expect(file_read_bytes(output)).to_equal(sentinel)
+        expect(remove_file_if_exists(output)).to_equal(true)
+
+    it "keeps the bounded policy rejection ahead of native execution":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
+        step("Request a finite bounded execution with missing input")
+        if not item4_facade_no_target_override(): return
+        val request = item4_facade_request(item4_facade_target())
+        var policy = item4_facade_policy()
+        policy.mode = LinkExecutionModeV1.Bounded
+        policy.job_memory_limit_bytes = 6000000000
+        val config = link_request_to_native_config(request, policy)
+        val receipt = link_request_to_native_with_config(request, policy, config,
+            ["build/item4_facade/never_read.obj"], "build/item4_facade/bounded.exe")
+        expect(receipt.outcome.name()).to_equal("UnsupportedBudget")
+        expect(receipt.engine_id).to_equal("none")
+
+    it "links real COFF fixtures through the request facade and records internal coff":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006, ITEM4-REQ-007
+        step("Require real input objects and an owned output directory")
+        if not item4_facade_no_target_override(): return
+        val objects = ["test/fixtures/linker/coff/windows_corpus_main.obj",
+            "test/fixtures/linker/coff/windows_corpus_provider.obj"]
+        for path in objects:
+            expect(file_exists(path)).to_equal(true)
+            if not file_exists(path): return
+        val created = dir_create_all("build/item4_facade")
+        expect(created).to_equal(true)
+        if not created: return
+        val output = "build/item4_facade/internal.exe"
+        val removed = remove_file_if_exists(output)
+        expect(removed).to_equal(true)
+        if not removed: return
+        val request = item4_facade_request(item4_facade_target())
+        val policy = item4_facade_policy()
+        var config = link_request_to_native_config(request, policy)
+        config.runtime_path = "none"
+        config.extra_flags = ["/entry:_start", "/nodefaultlib", "/subsystem:console"]
+        val previous = env_get("SIMPLE_LINKER") ?? ""
+        val changed = env_set("SIMPLE_LINKER", "  INTERNAL  ")
+        expect(changed).to_equal(true)
+        if not changed: return
+        step("Execute the production facade with explicit runtime and PE policy")
+        val receipt = link_request_to_native_with_config(request, policy, config, objects, output)
+        val restored = env_set("SIMPLE_LINKER", previous)
+        expect(restored).to_equal(true)
+        step("Require the executed engine receipt and independently inspect the image")
+        expect(receipt.outcome.name()).to_equal("Success")
+        expect(receipt.engine_id).to_equal("internal:coff")
+        expect(receipt.accounting_class.name()).to_equal("NotCertified")
+        expect(file_exists(output)).to_equal(true)
+        if not file_exists(output): return
+        val image = pe_inspect(file_read_bytes(output))
+        expect(image.is_ok()).to_equal(true)
+        if image.is_err(): return
+        expect(image.unwrap().header.machine).to_equal(0x8664)
+        expect(remove_file_if_exists(output)).to_equal(true)

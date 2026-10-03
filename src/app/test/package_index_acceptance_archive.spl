@@ -1,0 +1,68 @@
+# Owner-level archive evidence only. No compiler/codegen/source-open counter is
+# inferred from successful archive publication and repeated validated loading.
+use compiler.driver.cache.package_archive_cache.{
+    PackageArchiveAuthorityV1, PackageArchivePublishInputV1,
+    package_archive_aggregate_entry_v1, package_archive_publish_scc_v1,
+    package_archive_load_v1
+}
+use compiler.driver.cache.package_module_index.{PackageModuleIndexEntryV1}
+use compiler.driver.cache.cas_store.{cas_get}
+use std.common.crypto.sha256.{sha256_text}
+
+struct PackageIndexAcceptanceArchiveObservationV1:
+    supported: bool
+    archive_admitted: bool
+    reason: text
+    archive_digest: text
+    receipt_digest: text
+    interface_payload_digest: text
+    action_payload_digest: text
+    member_count: i64
+    repeated_archive_digest: text
+    persisted_bytes_identical: bool
+
+fn _archive_observation_failure_v1(supported: bool, reason: text) -> PackageIndexAcceptanceArchiveObservationV1:
+    PackageIndexAcceptanceArchiveObservationV1(supported, false, reason, "", "", "", "", 0, "", false)
+
+fn package_index_acceptance_archive_v1(
+    scenario: text, root: text
+) -> PackageIndexAcceptanceArchiveObservationV1:
+    if scenario != "package-archive-cache-hit" and scenario != "clean-warm-reproducibility":
+        return _archive_observation_failure_v1(false, "unsupported-archive-scenario")
+    if root == "":
+        return _archive_observation_failure_v1(true, "archive-root-missing")
+    val semantic = sha256_text("archive-acceptance-symbol")
+    val action = sha256_text("archive-acceptance-action")
+    val interface_content = "symbol|fixture|function|i64|{semantic}"
+    val action_content = "action|fixture-entry|compile|fixture|{action}"
+    val entry = PackageModuleIndexEntryV1(
+        "archive.acceptance", "archive.acceptance.main", "src/fixture.spl",
+        sha256_text("source"), sha256_text("metadata"), sha256_text("export"),
+        sha256_text("abi"), sha256_text("initializer"), sha256_text("provider"),
+        sha256_text("action-key"), sha256_text("manifest"), "scc.archive", [], [])
+    val authority = PackageArchiveAuthorityV1(sha256_text("producer"), "archive-root",
+        sha256_text("variant"), "revision", "tree", sha256_text("inventory"))
+    if not package_archive_publish_scc_v1(root, entry.scc_identity, authority,
+            [PackageArchivePublishInputV1(entry, [], interface_content, action_content, true)]):
+        return _archive_observation_failure_v1(true, "archive-publication-failed")
+    val aggregate = package_archive_aggregate_entry_v1([entry])
+    if aggregate == nil:
+        return _archive_observation_failure_v1(true, "archive-aggregate-invalid")
+    val first = package_archive_load_v1(root, aggregate!, authority, [])
+    if not first.valid or first.receipt == nil:
+        return _archive_observation_failure_v1(true, first.reason)
+    val receipt = first.receipt!
+    val first_bytes = cas_get(root, receipt.archive_digest)
+    val second = package_archive_load_v1(root, aggregate!, authority, [])
+    if not second.valid or second.receipt == nil:
+        return _archive_observation_failure_v1(true, second.reason)
+    val second_receipt = second.receipt!
+    val second_bytes = cas_get(root, second_receipt.archive_digest)
+    val identical = first_bytes != nil and second_bytes != nil and
+        first_bytes! == second_bytes! and receipt.archive_digest == second_receipt.archive_digest
+    PackageIndexAcceptanceArchiveObservationV1(true, true, "archive-owner-only",
+        receipt.archive_digest, receipt.receipt_digest,
+        receipt.members[1].payload_digest, receipt.members[0].payload_digest,
+        receipt.members.len(), second_receipt.archive_digest, identical)
+
+export PackageIndexAcceptanceArchiveObservationV1, package_index_acceptance_archive_v1

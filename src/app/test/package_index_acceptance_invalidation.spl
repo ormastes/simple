@@ -1,0 +1,59 @@
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    PackageModuleInvalidationV1, PackageModuleChangeV1,
+    package_module_index_entry_action_digest_v1,
+    package_module_index_publish_if_current_v1,
+    package_module_index_read_current_v1,
+    package_module_index_invalidate_changes_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+fn acceptance_graph_entry_v1(
+    name: text, imports: [text], reverse: [text]
+) -> PackageModuleIndexEntryV1:
+    val digest = sha256_text(name)
+    PackageModuleIndexEntryV1(name, name, "src/{name}.spl",
+        digest, digest, digest, digest, digest, digest, digest, digest,
+        "scc:{name}", imports, reverse)
+
+fn acceptance_graph_v1() -> PackageModuleIndexGenerationV1:
+    # Declared fixture edges only. All closure/invalidation/scheduling work
+    # belongs to the production index owner below.
+    var generation = PackageModuleIndexGenerationV1(
+        2, sha256_text("acceptance-producer"), "acceptance-root",
+        "revision", "commit", "tree", sha256_text("inventory"), [
+            acceptance_graph_entry_v1("api", ["model"], ["app"]),
+            acceptance_graph_entry_v1("app", ["api", "util"], []),
+            acceptance_graph_entry_v1("model", [], ["api", "util"]),
+            acceptance_graph_entry_v1("util", ["model"], ["app"])
+        ], sha256_text("variant"))
+    var admitted_entries: [PackageModuleIndexEntryV1] = []
+    for candidate in generation.entries:
+        var entry = candidate
+        entry.action_digest = package_module_index_entry_action_digest_v1(
+            generation, entry)
+        admitted_entries.push(entry)
+    generation.entries = admitted_entries
+    generation
+
+fn package_index_acceptance_invalidation_v1(
+    scenario: text, root: text
+) -> PackageModuleInvalidationV1:
+    var changes: [PackageModuleChangeV1] = []
+    if scenario == "direct-reverse-invalidation":
+        changes.push(PackageModuleChangeV1("util", true, true, false, false, false))
+    elif scenario == "indirect-reverse-invalidation":
+        changes.push(PackageModuleChangeV1("model", true, true, false, false, false))
+    elif scenario == "private-body-export-early-cutoff":
+        changes.push(PackageModuleChangeV1("util", true, false, false, false, false))
+    else:
+        return PackageModuleInvalidationV1(false, "unsupported-invalidation-scenario", [], [], [])
+    if not package_module_index_publish_if_current_v1(root, acceptance_graph_v1(), ""):
+        return PackageModuleInvalidationV1(false, "fixture-publication-failed", [], [], [])
+    val admitted = package_module_index_read_current_v1(root)
+    if not admitted.valid or admitted.generation == nil:
+        return PackageModuleInvalidationV1(false, "fixture-admission-failed", [], [], [])
+    package_module_index_invalidate_changes_v1(admitted.generation!, changes)
+
+export package_index_acceptance_invalidation_v1
+export acceptance_graph_v1

@@ -1,0 +1,143 @@
+# Compiler-owned generated output admission against an independently admitted
+# frozen inventory. This verifies producer receipts; it does not run generators.
+# The caller must authorize the declaration against its selected build plan.
+# Supplying a declaration and receipt together proves consistency only; this
+# owner cannot establish declaration authority from their matching digests.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
+use std.scv.compile_source_inventory_core.{
+    CompileSourceInventoryV1, compile_source_inventory_digest_v1,
+    compile_source_inventory_path_valid_v1
+}
+
+struct GeneratedSourceDeclarationV1:
+    producer_digest: text
+    input_paths: [text]
+    output_paths: [text]
+
+struct GeneratedSourceFileV1:
+    path: text
+    digest: text
+
+struct GeneratedSourceReceiptV1:
+    declaration_digest: text
+    inventory_digest: text
+    inputs: [GeneratedSourceFileV1]
+    outputs: [GeneratedSourceFileV1]
+
+fn _generated_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    var index = 0
+    while index < 64:
+        val code = value.byte_at(index) as i64
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+        index = index + 1
+    true
+
+fn _generated_path_valid_v1(path: text) -> bool:
+    path.len() <= 4096 and compile_source_inventory_path_valid_v1(path) and not path.contains(":") and
+        not path.split("/").contains(".")
+
+fn _generated_frame_v1(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn _generated_paths_encode_v1(paths: [text]) -> text:
+    if paths.len() > 4096: return ""
+    var seen: Dict<text, bool> = {}
+    var encoded = _generated_frame_v1("{paths.len()}")
+    for path in canonical_identity_sort_texts(paths):
+        if not _generated_path_valid_v1(path) or seen.has(path): return ""
+        seen[path] = true
+        encoded = encoded + _generated_frame_v1(path)
+        if encoded.len() > 1024 * 1024: return ""
+    encoded
+
+fn generated_source_declaration_digest_v1(declaration: GeneratedSourceDeclarationV1) -> text:
+    if not _generated_digest_valid_v1(declaration.producer_digest) or declaration.output_paths.len() == 0:
+        return ""
+    val inputs = _generated_paths_encode_v1(declaration.input_paths)
+    val outputs = _generated_paths_encode_v1(declaration.output_paths)
+    if inputs == "" or outputs == "": return ""
+    for path in declaration.input_paths:
+        if declaration.output_paths.contains(path): return ""
+    sha256_text("simple-generated-source-declaration-v1\n" +
+        _generated_frame_v1(declaration.producer_digest) +
+        _generated_frame_v1(inputs) + _generated_frame_v1(outputs))
+
+fn _generated_files_encode_v1(files: [GeneratedSourceFileV1]) -> text:
+    if files.len() > 4096: return ""
+    var by_path: Dict<text, text> = {}
+    var paths: [text] = []
+    for file in files:
+        if not _generated_path_valid_v1(file.path) or
+                not _generated_digest_valid_v1(file.digest) or by_path.has(file.path): return ""
+        by_path[file.path] = file.digest
+        paths.push(file.path)
+    var encoded = _generated_frame_v1("{files.len()}")
+    for path in canonical_identity_sort_texts(paths):
+        encoded = encoded + _generated_frame_v1(path) + _generated_frame_v1(by_path[path])
+        if encoded.len() > 2 * 1024 * 1024: return ""
+    encoded
+
+fn generated_source_receipt_encode_v1(receipt: GeneratedSourceReceiptV1) -> text:
+    if not _generated_digest_valid_v1(receipt.declaration_digest) or
+            not _generated_digest_valid_v1(receipt.inventory_digest): return ""
+    val inputs = _generated_files_encode_v1(receipt.inputs)
+    val outputs = _generated_files_encode_v1(receipt.outputs)
+    if inputs == "" or outputs == "": return ""
+    "simple-generated-source-receipt-v1\n" +
+        _generated_frame_v1(receipt.declaration_digest) + _generated_frame_v1(receipt.inventory_digest) +
+        _generated_frame_v1(inputs) + _generated_frame_v1(outputs)
+
+# Provenance binds the full snapshot, while reusable generated identity binds
+# only declared producer/input/output content. Unrelated source edits do not
+# silently turn into generated-source changes.
+fn generated_source_identity_digest_v1(receipt: GeneratedSourceReceiptV1) -> text:
+    if generated_source_receipt_encode_v1(receipt) == "": return ""
+    sha256_text("simple-generated-source-identity-v1\n" +
+        _generated_frame_v1(receipt.declaration_digest) +
+        _generated_frame_v1(_generated_files_encode_v1(receipt.inputs)) +
+        _generated_frame_v1(_generated_files_encode_v1(receipt.outputs)))
+
+fn generated_source_receipt_admit_v1(
+    declaration: GeneratedSourceDeclarationV1, receipt: GeneratedSourceReceiptV1,
+    inventory: CompileSourceInventoryV1, expected_producer: text,
+    expected_inventory: text, required_output: text
+) -> Result<text, text>:
+    if not _generated_digest_valid_v1(expected_producer) or declaration.producer_digest != expected_producer:
+        return Err("generated-producer-mismatch")
+    val inventory_digest = compile_source_inventory_digest_v1(inventory)
+    if inventory_digest == "" or inventory_digest != expected_inventory or receipt.inventory_digest != expected_inventory:
+        return Err("generated-inventory-mismatch")
+    val declared = generated_source_declaration_digest_v1(declaration)
+    if declared == "" or receipt.declaration_digest != declared:
+        return Err("generated-declaration-mismatch")
+    val encoded = generated_source_receipt_encode_v1(receipt)
+    if encoded == "": return Err("generated-receipt-invalid")
+    if not declaration.output_paths.contains(required_output):
+        return Err("generated-required-output-undeclared")
+    var content: Dict<text, text> = {}
+    for entry in inventory.entries:
+        content[entry.source_identity] = entry.content_digest
+    var observed_inputs: [text] = []
+    for input in receipt.inputs:
+        if not declaration.input_paths.contains(input.path): return Err("generated-input-undeclared")
+        if not content.has(input.path) or content[input.path] != input.digest:
+            return Err("generated-input-digest-mismatch")
+        observed_inputs.push(input.path)
+    var observed_outputs: [text] = []
+    for output in receipt.outputs:
+        if not declaration.output_paths.contains(output.path): return Err("generated-output-undeclared")
+        if not content.has(output.path) or content[output.path] != output.digest:
+            return Err("generated-output-digest-mismatch")
+        observed_outputs.push(output.path)
+    if canonical_identity_sort_texts(observed_inputs) != canonical_identity_sort_texts(declaration.input_paths):
+        return Err("generated-input-missing")
+    if canonical_identity_sort_texts(observed_outputs) != canonical_identity_sort_texts(declaration.output_paths):
+        return Err("generated-output-missing")
+    Ok(generated_source_identity_digest_v1(receipt))
+
+export GeneratedSourceDeclarationV1, GeneratedSourceFileV1, GeneratedSourceReceiptV1
+export generated_source_declaration_digest_v1, generated_source_receipt_encode_v1
+export generated_source_receipt_admit_v1
+export generated_source_identity_digest_v1

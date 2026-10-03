@@ -1,0 +1,57 @@
+"""ITEM4-REQ-002/006: native FreeBSD hosted link and execution.
+
+Run on FreeBSD AMD64/ARM64 with SIMPLE_LINKER=internal and an admitted
+self-hosted runtime. Missing host/startup prerequisites fail explicitly.
+This platform acceptance spec is not portable image-inspection evidence.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{host_os, host_arch, dir_create_all, file_read_bytes,
+    remove_file_if_exists, process_run_timeout}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_native_unix_with_engine}
+use compiler.backend.linker.mold.{requested_linker_override}
+use compiler.backend.linker.elf.freebsd_hosted.{freebsd_hosted_inputs}
+
+describe "ITEM4 FreeBSD native hosted acceptance":
+    it "links and executes real main objects as ET_EXEC and PIE":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006
+        step("Require FreeBSD, explicit internal selection and installed startup objects")
+        val arch = host_arch()
+        val compatible = host_os() == "freebsd" and (arch == "x86_64" or arch == "aarch64")
+        expect(compatible).to_equal(true)
+        if not compatible: return
+        expect(requested_linker_override()).to_equal("internal")
+        if requested_linker_override() != "internal": return
+        val directory = "build/item4_freebsd/native"
+        expect(dir_create_all(directory)).to_equal(true)
+        val fixture = if arch == "x86_64": "main_x64.o" else: "main_a64.o"
+        for pie in [false, true]:
+            val startup = freebsd_hosted_inputs("", pie)
+            expect(startup.is_ok()).to_equal(true)
+            if startup.is_err(): return
+            val output = directory + (if pie: "/pie" else: "/exec")
+            expect(remove_file_if_exists(output)).to_equal(true)
+            var config = NativeLinkConfig.default()
+            config.target_triple = arch + "-unknown-freebsd"
+            config.linker_abi = "elf"
+            config.pie = pie
+            config.runtime_path = "none"
+            config.allow_cc_fallback = false
+            step("Link through the typed production facade without external fallback")
+            val linked = link_native_unix_with_engine(
+                ["test/fixtures/linker/freebsd/" + fixture], output, config)
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_err(): return
+            expect(linked.unwrap().engine_id).to_equal("internal:elf")
+            expect(linked.unwrap().output).to_equal(output)
+            val image = file_read_bytes(output)
+            expect(image.len()).to_be_greater_than(64)
+            if image.len() <= 64: return
+            expect(image[7]).to_equal(9)
+            expect(image[16]).to_equal(if pie: 3 else: 2)
+            step("Execute through the FreeBSD loader and require the main return value")
+            val (stdout, stderr, code) = process_run_timeout(output, [], 5000)
+            expect(code).to_equal(42)
+            expect(stdout).to_equal("")
+            expect(stderr).to_equal("")
+            expect(remove_file_if_exists(output)).to_equal(true)

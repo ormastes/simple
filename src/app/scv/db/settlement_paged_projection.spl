@@ -1,0 +1,77 @@
+# Paged Git projection data and strict durable journal. No decoder authorizes
+# a candidate or asserts page availability. Actual page readers live separately.
+use std.scv.db_paged_model.*
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_receipt.*
+use std.scv.db_receipt_codec.{db_receipt_encode, db_receipt_decode}
+use std.scv.distributed_identity_map.{IdentityMapHighWater}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use app.scv.db.settlement_journal_codec.{DbSettlementPhase}
+
+struct DbPagedGitProjection:
+    manifest: DbPagedManifest
+    high_water: [IdentityMapHighWater]
+    projection_digest: text
+
+struct DbPagedSettlementJournal:
+    receipt: DbSettlementReceipt
+    manifest_wire: text
+    projection_digest: text
+    phase: DbSettlementPhase
+
+fn db_paged_git_marks(marks: [IdentityMapHighWater]) -> Result<text, text>:
+    if marks.len() > 1024: return Err("SCVDB_PAGED_GIT_KINDS_QUOTA")
+    var entries: [DbCanonicalEntry] = []
+    for mark in marks:
+        if mark.entity_kind == "" or mark.sequence == 0u64: return Err("SCVDB_PAGED_GIT_MARK")
+        entries.push(DbCanonicalEntry(key: db_canonical_text(mark.entity_kind)?, value: db_frame(2u8, db_u64_bytes(mark.sequence))))
+    Ok("SCVDB-PAGED-HIGH-WATER-v1\n" + db_snapshot_hex(db_canonical_map(entries)?) + "\n")
+
+fn db_paged_git_projection_digest(manifest_wire: text, marks: [IdentityMapHighWater]) -> Result<text, text>:
+    if manifest_wire.len() > 16777216 or not manifest_wire.starts_with("SCVDB-PAGED-v1\n"): return Err("SCVDB_PAGED_GIT_MANIFEST")
+    Ok(sha256_u8_hex(db_domain_bytes("paged-git-projection-v1", db_canonical_text(manifest_wire)? + db_canonical_text(db_paged_git_marks(marks)?)?)?))
+
+fn db_paged_git_projection(manifest: DbPagedManifest, marks: [IdentityMapHighWater]) -> Result<DbPagedGitProjection, text>:
+    val wire = db_paged_manifest_encode(manifest)?
+    # Canonical marks order is observable in receipts and strict journal replay.
+    var ordered: [IdentityMapHighWater] = []
+    for mark in marks:
+        var next: [IdentityMapHighWater] = []
+        var inserted = false
+        for prior in ordered:
+            if prior.entity_kind == mark.entity_kind: return Err("SCVDB_PAGED_GIT_MARK")
+            if not inserted and mark.entity_kind < prior.entity_kind:
+                next.push(mark)
+                inserted = true
+            next.push(prior)
+        if not inserted: next.push(mark)
+        ordered = next
+    Ok(DbPagedGitProjection(manifest: manifest, high_water: ordered, projection_digest: db_paged_git_projection_digest(wire, ordered)?))
+
+fn db_paged_settlement_journal_encode(journal: DbPagedSettlementJournal) -> Result<text, text>:
+    if journal.receipt.reducer_revision != "scv-merkle-reducer-v1": return Err("SCVDB_PAGED_MIGRATION_REQUIRED")
+    if journal.phase == DbSettlementPhase.Indexed: return Err("SCVDB_QUEUE_PROTECTED_CLAIM")
+    if db_paged_git_projection_digest(journal.manifest_wire, journal.receipt.high_water)? != journal.projection_digest: return Err("SCVDB_PAGED_GIT_PROJECTION")
+    val phase = if journal.phase == DbSettlementPhase.Prepared: 0u64 else: 1u64
+    val bytes = db_frame(190u8, db_canonical_text(db_receipt_encode(journal.receipt)?)? + db_canonical_text(journal.manifest_wire)? + db_canonical_text(journal.projection_digest)? + db_frame(2u8, db_u64_bytes(phase)))
+    if bytes.len() > 8388608: return Err("SCVDB_QUEUE_BACKPRESSURE")
+    Ok("SCVDB-PAGED-JOURNAL-v1\n" + db_snapshot_hex(bytes) + "\n")
+
+fn db_paged_settlement_journal_decode(encoded: text) -> Result<DbPagedSettlementJournal, text>:
+    val prefix = "SCVDB-PAGED-JOURNAL-v1\n"
+    if encoded.len() > 16777300 or not encoded.starts_with(prefix) or not encoded.ends_with("\n"): return Err("SCVDB_PAGED_GIT_JOURNAL")
+    val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1])?
+    val root = db_read_frame(bytes, 0)?
+    if root.tag != 190u8 or root.next_offset != bytes.len(): return Err("SCVDB_PAGED_GIT_JOURNAL")
+    val fields = db_read_children(root.payload)?
+    if fields.len() != 4: return Err("SCVDB_PAGED_GIT_JOURNAL")
+    val phase = db_read_unsigned(fields[3])?
+    if phase > 1u64: return Err("SCVDB_PAGED_GIT_JOURNAL")
+    val journal = DbPagedSettlementJournal(receipt: db_receipt_decode(db_read_text(fields[0])?)?, manifest_wire: db_read_text(fields[1])?, projection_digest: db_read_text(fields[2])?, phase: if phase == 0u64: DbSettlementPhase.Prepared else: DbSettlementPhase.PublishedAwaitingIndex)
+    if db_paged_settlement_journal_encode(journal)? != encoded: return Err("SCVDB_PAGED_GIT_JOURNAL")
+    Ok(journal)
+
+export DbPagedGitProjection, DbPagedSettlementJournal, db_paged_git_marks
+export db_paged_git_projection, db_paged_git_projection_digest
+export db_paged_settlement_journal_encode, db_paged_settlement_journal_decode

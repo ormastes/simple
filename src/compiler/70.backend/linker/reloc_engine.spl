@@ -5,14 +5,13 @@
 # smf_reloc_compute (gpu_smf/smf_reloc_formulas.spl), the single value
 # oracle — out-of-width results REJECT, never mask. aarch64 covers ABS64/
 # ABS32/CALL26 plus the ADRP+ADD/LDR page-relative pair
-# (ADR_PREL_PG_HI21/ADD_ABS_LO12_NC/LDST64_ABS_LO12_NC); RISC-V hi/lo
-# pairing (%pcrel_hi/%pcrel_lo cross-referencing another relocation's
-# address) is NOT implemented — it needs a second relocation entry as
-# input, unlike every other formula here, so it stays scaffolded with
-# HI20/LO12_I (immediate-only, no pairing) until a caller needs it.
+# (ADR_PREL_PG_HI21/ADD_ABS_LO12_NC/LDST64_ABS_LO12_NC). RISC-V paired
+# PCREL low relocations require the ELF driver's high-place index; this
+# context-free evaluator rejects them rather than guessing an adjacent high.
 
 use compiler.backend.linker.elf_parser.{ElfRelocation, elf_reloc_sym, elf_reloc_type}
 use compiler.backend.linker.smf_writer.{RelocationType}
+use compiler.backend.linker.riscv_static_reloc.{riscv_static_width, riscv_static_delta, riscv_static_branch, riscv_static_arithmetic}
 use compiler.backend.linker.gpu_smf.smf_reloc_formulas.{
     smf_reloc_compute, smf_reloc_compute_rel64, smf_reloc_compute_abs32s,
     smf_reloc_compute_rel_signed, smf_reloc_compute_abs_unsigned
@@ -194,6 +193,7 @@ val R_RISCV_NONE: i64        = 0
 val R_RISCV_32: i64          = 1   # S + A (u32)
 val R_RISCV_64: i64          = 2   # S + A
 val R_RISCV_CALL: i64        = 18  # S + A - P (auipc+jalr pair)
+val R_RISCV_CALL_PLT: i64    = 19  # resolved S/PLT + A - P (auipc+jalr pair)
 val R_RISCV_PCREL_HI20: i64  = 23  # S + A - P (bits 31:12)
 val R_RISCV_PCREL_LO12_I: i64 = 24 # S - referenced HI20 base
 val R_RISCV_HI20: i64        = 26  # S + A (bits 31:12)
@@ -900,25 +900,126 @@ fn reloc_apply_aarch64(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p:
 
 # reason: positional linker reloc_engine API
 fn reloc_apply_riscv(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i64) -> RelocResult:
-    if rtype == R_RISCV_NONE:
+    # Historical direct API uses 64-bit arithmetic. Unified dispatch supplies
+    # the actual XLEN so RV32 rounds modulo32 before extracting signed HI20.
+    reloc_apply_riscv_xlen(bytes, offset, rtype, s, a, p, 64)
+
+# reason: positional linker reloc_engine API plus target XLEN
+fn reloc_apply_riscv_xlen(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i64, xlen: i64) -> RelocResult:
+    if rtype == R_RISCV_NONE or rtype == 51:
         return RelocResult(success: true, offset: offset, value: 0, error: "")
 
     if rtype == R_RISCV_32:
-        val v = s + a
-        return RelocResult(success: true, offset: offset, value: v & 0xffffffff, error: "")
-
-    if rtype == R_RISCV_64:
-        val v = s + a
+        val v = riscv_static_arithmetic(0, s, a, 4, false)
         return RelocResult(success: true, offset: offset, value: v, error: "")
 
-    if rtype == R_RISCV_HI20:
-        val v = s + a
-        return RelocResult(success: true, offset: offset, value: (v + 0x800) >> 12, error: "")
+    if rtype == R_RISCV_64:
+        val v = riscv_static_arithmetic(0, s, a, 8, false)
+        return RelocResult(success: true, offset: offset, value: v, error: "")
 
-    if rtype == R_RISCV_LO12_I:
-        val v = s + a
-        return RelocResult(success: true, offset: offset, value: v & 0xfff, error: "")
+    if rtype == R_RISCV_PCREL_LO12_I or rtype == 25:
+        return RelocResult(success: false, offset: offset, value: 0,
+            error: "R_RISCV_PCREL_LO12_I requires paired HI20 place and target context")
 
+    val call = rtype == R_RISCV_CALL or rtype == R_RISCV_CALL_PLT
+    if call or rtype == R_RISCV_HI20 or rtype == R_RISCV_PCREL_HI20 or rtype == 20:
+        if call:
+            if not reloc_patch_range_valid(bytes.len(), offset, 8):
+                return RelocResult(success: false, offset: offset, value: 0,
+                    error: "RISC-V CALL requires an eight-byte instruction pair")
+            val upper = read_u32_le(bytes, offset)
+            val lower = read_u32_le(bytes, offset + 4)
+            val base_register = (upper >> 7) & 31
+            if (upper & 0x7f) != 0x17 or (lower & 0x707f) != 0x67 or
+                    base_register == 0 or ((lower >> 15) & 31) != base_register:
+                return RelocResult(success: false, offset: offset, value: 0,
+                    error: "RISC-V CALL requires AUIPC/JALR with a matching base register")
+        val relative = call or rtype == R_RISCV_PCREL_HI20 or rtype == 20
+        var v: i64 = 0
+        if xlen == 32:
+            v = (s & 0xffffffff) + (a & 0xffffffff)
+            if relative: v = v - (p & 0xffffffff)
+            v = v & 0xffffffff
+            if v >= 0x80000000: v = v - 4294967296
+        else:
+            val maximum: i64 = 9223372036854775807
+            val minimum: i64 = -9223372036854775807 - 1
+            if (a > 0 and s > maximum - a) or (a < 0 and s < minimum - a):
+                return RelocResult(success: false, offset: offset, value: 0,
+                    error: "RISC-V relocation S + A overflows signed 64-bit arithmetic")
+            v = s + a
+            if relative:
+                if (p > 0 and v < minimum + p) or (p < 0 and v > maximum + p):
+                    return RelocResult(success: false, offset: offset, value: 0,
+                        error: "RISC-V relocation S + A - P overflows signed 64-bit arithmetic")
+                v = v - p
+            # Check before rounding so v+0x800 cannot itself overflow.
+            if v < -2147485696 or v > 2147481599:
+                return RelocResult(success: false, offset: offset, value: 0,
+                    error: "RISC-V relocation rounded high part exceeds signed 20-bit range")
+        var rounded = v + 0x800
+        if xlen == 32:
+            rounded = rounded & 0xffffffff
+            if rounded >= 0x80000000: rounded = rounded - 4294967296
+        val high = rounded >> 12
+        if call:
+            if (v & 1) != 0 or (p & 1) != 0:
+                return RelocResult(success: false, offset: offset, value: 0,
+                    error: "RISC-V CALL target and place must be two-byte aligned")
+            return RelocResult(success: true, offset: offset, value: v, error: "")
+        return RelocResult(success: true, offset: offset, value: high, error: "")
+
+    if rtype == R_RISCV_LO12_I or rtype == 28:
+        val low = ((s & 0xfff) + (a & 0xfff)) & 0xfff
+        return RelocResult(success: true, offset: offset, value: low, error: "")
+
+    if rtype == 16 or rtype == 17 or rtype == 44 or rtype == 45:
+        val width = riscv_static_width(rtype)
+        if not reloc_patch_range_valid(bytes.len(), offset, width):
+            return RelocResult(success: false, offset: offset, value: 0, error: "RISC-V branch patch exceeds section")
+        val delta = if xlen == 32:
+            riscv_static_delta(s & 0xffffffff, a & 0xffffffff, p & 0xffffffff)
+        else:
+            riscv_static_delta(s, a, p)
+        if delta.is_err(): return RelocResult(success: false, offset: offset, value: 0, error: delta.unwrap_err())
+        var instruction: i64 = 0
+        var i: i64 = 0
+        while i < width:
+            instruction = instruction | ((bytes[offset + i] & 255) << (i * 8))
+            i = i + 1
+        var branch_delta = delta.unwrap()
+        if xlen == 32:
+            branch_delta = branch_delta & 0xffffffff
+            if branch_delta >= 0x80000000: branch_delta = branch_delta - 4294967296
+        val encoded = riscv_static_branch(rtype, instruction, branch_delta)
+        if encoded.is_err(): return RelocResult(success: false, offset: offset, value: 0, error: encoded.unwrap_err())
+        return RelocResult(success: true, offset: offset, value: encoded.unwrap(), error: "")
+    if rtype == 41 or rtype == 57 or rtype == 59:
+        val delta = riscv_static_delta(s, a, p)
+        if delta.is_err(): return RelocResult(success: false, offset: offset, value: 0, error: delta.unwrap_err())
+        val value = delta.unwrap()
+        if value < -2147483648 or value > 2147483647:
+            return RelocResult(success: false, offset: offset, value: 0, error: "RISC-V PCREL32 relocation {rtype} overflow")
+        return RelocResult(success: true, offset: offset, value: value, error: "")
+    if (rtype >= 33 and rtype <= 40) or (rtype >= 52 and rtype <= 56):
+        if rtype == 56:
+            val checked = riscv_static_delta(s, a, 0)
+            if checked.is_err(): return RelocResult(success: false, offset: offset, value: 0, error: checked.unwrap_err())
+            if checked.unwrap() < -2147483648 or checked.unwrap() > 2147483647:
+                return RelocResult(success: false, offset: offset, value: 0, error: "R_RISCV_SET32 overflow")
+        val width = riscv_static_width(rtype)
+        if not reloc_patch_range_valid(bytes.len(), offset, width):
+            return RelocResult(success: false, offset: offset, value: 0, error: "RISC-V arithmetic patch exceeds section")
+        var current: i64 = 0
+        var i: i64 = 0
+        while i < width:
+            current = current | ((bytes[offset + i] & 255) << (i * 8))
+            i = i + 1
+        val subtract = (rtype >= 37 and rtype <= 40) or rtype == 52
+        val initial = if rtype >= 53: 0 else: current
+        var value = riscv_static_arithmetic(initial, s, a, width, subtract)
+        if rtype == 52 or rtype == 53: value = (current & 0xc0) | (value & 63)
+        return RelocResult(success: true, offset: offset, value: value, error: "")
     RelocResult(success: false, offset: offset, value: 0, error: "unsupported riscv reloc type {rtype}")
 
 # ============================================================================
@@ -956,11 +1057,9 @@ fn reloc_patch_width(arch: RelocArch, rtype: i64) -> i64:
             if rtype == R_AARCH64_ABS16 or rtype == R_AARCH64_PREL16: return 2
             4
         case Riscv32:
-            if rtype == R_RISCV_NONE: 0 else: 4
+            riscv_static_width(rtype)
         case Riscv64:
-            if rtype == R_RISCV_NONE: 0
-            else if rtype == R_RISCV_64: 8
-            else: 4
+            riscv_static_width(rtype)
 
 fn reloc_patch_range_valid(byte_len: i64, offset: i64, width: i64) -> bool:
     offset >= 0 and width >= 0 and offset <= byte_len and width <= byte_len - offset
@@ -975,7 +1074,7 @@ fn reloc_apply(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: i64, a
         case AArch64:
             reloc_apply_aarch64(bytes, offset, rtype, s, a, p)
         case Riscv32:
-            reloc_apply_riscv(bytes, offset, rtype, s, a, p)
+            reloc_apply_riscv_xlen(bytes, offset, rtype, s, a, p, 32)
         case Riscv64:
             reloc_apply_riscv(bytes, offset, rtype, s, a, p)
 
@@ -1169,12 +1268,43 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
             else:
                 patch_u32_le(bytes, offset, result.value)
         case Riscv32:
-            patch_u32_le(bytes, offset, result.value)
+            reloc_patch_riscv_bytes(bytes, offset, rtype, result.value)
         case Riscv64:
-            if rtype == R_RISCV_64:
-                patch_u64_le(bytes, offset, result.value)
-            else:
-                patch_u32_le(bytes, offset, result.value)
+            reloc_patch_riscv_bytes(bytes, offset, rtype, result.value)
+
+fn reloc_patch_riscv_bytes(bytes: [i64], offset: i64, rtype: i64, value: i64) -> [i64]:
+    if rtype == R_RISCV_NONE or rtype == 51: return bytes
+    val width = reloc_patch_width(RelocArch.Riscv64, rtype)
+    if not reloc_patch_range_valid(bytes.len(), offset, width): return bytes
+    if rtype == R_RISCV_64 or rtype == 36 or rtype == 40: return patch_u64_le(bytes, offset, value)
+    if rtype == R_RISCV_CALL or rtype == R_RISCV_CALL_PLT:
+        # Both XLENs encode the same low32 instruction bit pattern after the
+        # evaluator has checked the appropriate rounded signed high part.
+        val high = (value + 0x800) & 0xfffff000
+        val upper = (read_u32_le(bytes, offset) & 0xfff) | high
+        val lower = (read_u32_le(bytes, offset + 4) & 0xfffff) | ((value & 0xfff) << 20)
+        val patched = patch_u32_le(bytes, offset, upper)
+        return patch_u32_le(patched, offset + 4, lower)
+    if rtype == R_RISCV_HI20 or rtype == R_RISCV_PCREL_HI20 or rtype == 20:
+        val instruction = read_u32_le(bytes, offset)
+        return patch_u32_le(bytes, offset, (instruction & 0xfff) | ((value & 0xfffff) << 12))
+    if rtype == R_RISCV_LO12_I:
+        val instruction = read_u32_le(bytes, offset)
+        return patch_u32_le(bytes, offset, (instruction & 0xfffff) | ((value & 0xfff) << 20))
+    if rtype == 28:
+        val instruction = read_u32_le(bytes, offset)
+        return patch_u32_le(bytes, offset, (instruction & 0x01fff07f) |
+            ((value & 0xfe0) << 20) | ((value & 31) << 7))
+    if width == 1:
+        var result = bytes
+        result[offset] = value & 255
+        return result
+    if width == 2:
+        var result = bytes
+        result[offset] = value & 255
+        result[offset + 1] = (value >> 8) & 255
+        return result
+    patch_u32_le(bytes, offset, value)
 
 fn reloc_arch_from_machine(machine: i64) -> RelocArch:
     if machine == 62:
@@ -1256,5 +1386,5 @@ export R_AARCH64_TLSLE_LDST64_TPREL_LO12, R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC
 export R_AARCH64_TLSLE_LDST128_TPREL_LO12, R_AARCH64_TLSLE_LDST128_TPREL_LO12_NC
 export R_AARCH64_ADD_ABS_LO12_NC, R_AARCH64_LDST64_ABS_LO12_NC
 export R_AARCH64_LDST8_ABS_LO12_NC, R_AARCH64_LDST16_ABS_LO12_NC, R_AARCH64_LDST32_ABS_LO12_NC, R_AARCH64_LDST128_ABS_LO12_NC
-export R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_CALL
+export R_RISCV_NONE, R_RISCV_32, R_RISCV_64, R_RISCV_CALL, R_RISCV_CALL_PLT
 export R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I, R_RISCV_HI20, R_RISCV_LO12_I

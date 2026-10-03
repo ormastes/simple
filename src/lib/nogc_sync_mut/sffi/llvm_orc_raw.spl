@@ -1,0 +1,104 @@
+# Raw LLVM-C ORC declarations for the pinned x86_64 LLVM 23 SDK.
+# No safe session API, provider admission, dynamic calls or automatic imports.
+# Link explicitly through the canonical native build dependency configuration.
+# Preconditions: the process-linked provider matches these headers; size_t is
+# 64 bits; all pointer/storage/lifetime and LLVM ownership contracts are met.
+# Opaque handles are raw pointers, never integer handles. LLVMBool is C i32.
+# These declarations alone do not certify that the provider was linked/executed.
+
+@unsafe(reason: "LLVM C version output pointers", capabilities: [ffi, raw_ptr])
+extern fn LLVMGetVersion(major: *mut u32, minor: *mut u32, patch: *mut u32)
+
+@unsafe(reason: "LLVM context allocation requiring explicit disposal", capabilities: [ffi, raw_ptr])
+extern fn LLVMContextCreate() -> *mut u8
+@unsafe(reason: "LLVM context disposal requires unique untransferred ownership", capabilities: [ffi, raw_ptr])
+extern fn LLVMContextDispose(context: *mut u8)
+
+# Copies input bytes. Both input and name must remain readable during the call;
+# the name is NUL terminated. Caller owns the returned buffer.
+@unsafe(reason: "LLVM byte-buffer allocation with x64 size_t and C string name", capabilities: [ffi, raw_ptr])
+extern fn LLVMCreateMemoryBufferWithMemoryRangeCopy(input: *const u8, length: u64, name: *const u8) -> *mut u8
+@unsafe(reason: "LLVM memory-buffer disposal requires live unique ownership", capabilities: [ffi, raw_ptr])
+extern fn LLVMDisposeMemoryBuffer(buffer: *mut u8)
+
+# Unlike deprecated ParseIRInContext, the version-2 API DOES NOT consume buffer.
+# It returns i32 zero on success, writes the module through output, and may
+# return an owned message requiring LLVMDisposeMessage on failure.
+@unsafe(reason: "LLVM parser with borrowed buffer and module/message output storage", capabilities: [ffi, raw_ptr])
+extern fn LLVMParseIRInContext2(context: *mut u8, buffer: *mut u8, output: *mut *mut u8, message: *mut *mut u8) -> i32
+@unsafe(reason: "LLVM module disposal before ownership transfer only", capabilities: [ffi, raw_ptr])
+extern fn LLVMDisposeModule(module_: *mut u8)
+@unsafe(reason: "LLVM parser/core message allocator pairing", capabilities: [ffi, raw_ptr])
+extern fn LLVMDisposeMessage(message: *mut u8)
+
+# Builder may be null. A non-null builder is consumed even on error. Success
+# transfers unique LLJIT ownership through output; error is an LLVMErrorRef.
+@unsafe(reason: "LLVM ORC creation consumes builder and writes uniquely owned LLJIT", capabilities: [ffi, raw_ptr])
+extern fn LLVMOrcCreateLLJIT(output: *mut *mut u8, builder: *mut u8) -> *mut u8
+# Disposing LLJIT invalidates all module/code addresses obtained from it.
+@unsafe(reason: "LLVM ORC release invalidates code and requires no active invocations", capabilities: [ffi, raw_ptr])
+extern fn LLVMOrcDisposeLLJIT(jit: *mut u8) -> *mut u8
+@unsafe(reason: "LLVM ORC borrowed dylib handle bounded by LLJIT lifetime", capabilities: [ffi, raw_ptr])
+extern fn LLVMOrcLLJITGetMainJITDylib(jit: *mut u8) -> *mut u8
+# This consumes the thread-safe module on return, including error returns.
+@unsafe(reason: "LLVM ORC module ownership transfer on success and failure", capabilities: [ffi, raw_ptr])
+extern fn LLVMOrcLLJITAddLLVMIRModule(jit: *mut u8, dylib: *mut u8, module_: *mut u8) -> *mut u8
+# ExecutorAddress is uint64_t. It is not a safe callable or lifetime token.
+@unsafe(reason: "LLVM ORC lookup writes an unowned code address with no callable ABI proof", capabilities: [ffi, raw_ptr])
+extern fn LLVMOrcLLJITLookup(jit: *mut u8, address: *mut u64, name: *const u8) -> *mut u8
+
+# Context must not already belong to another ThreadSafeContext; this takes it.
+@unsafe(reason: "LLVM shared context takes ownership of the raw context", capabilities: [ffi, raw_ptr])
+extern fn LLVMOrcCreateNewThreadSafeContextFromLLVMContext(context: *mut u8) -> *mut u8
+@unsafe(reason: "LLVM shared-context reference release", capabilities: [ffi, raw_ptr])
+extern fn LLVMOrcDisposeThreadSafeContext(context: *mut u8)
+# Takes the module; wrapper shares context data. Dispose wrapper only before
+# transfer to LLJIT. LLVMOrcLLJITAddLLVMIRModule always consumes the wrapper.
+@unsafe(reason: "LLVM thread-safe module takes module ownership", capabilities: [ffi, raw_ptr])
+extern fn LLVMOrcCreateNewThreadSafeModule(module_: *mut u8, context: *mut u8) -> *mut u8
+@unsafe(reason: "LLVM untransferred thread-safe module disposal", capabilities: [ffi, raw_ptr])
+extern fn LLVMOrcDisposeThreadSafeModule(module_: *mut u8)
+
+# Choose exactly one consuming operation for a non-null LLVMErrorRef.
+@unsafe(reason: "LLVM error consumption without rendering", capabilities: [ffi, raw_ptr])
+extern fn LLVMConsumeError(error: *mut u8)
+@unsafe(reason: "LLVM error consumption returning a separately owned message", capabilities: [ffi, raw_ptr])
+extern fn LLVMGetErrorMessage(error: *mut u8) -> *mut u8
+@unsafe(reason: "LLVM error-message allocator pairing distinct from core messages", capabilities: [ffi, raw_ptr])
+extern fn LLVMDisposeErrorMessage(message: *mut u8)
+
+# Explicit x86 target initialization, not the header-only NativeTarget helpers.
+# The future process owner must serialize one-time initialization before use.
+@unsafe(reason: "LLVM process target-registry initialization", capabilities: [ffi])
+extern fn LLVMInitializeX86TargetInfo()
+@unsafe(reason: "LLVM process target-registry initialization", capabilities: [ffi])
+extern fn LLVMInitializeX86Target()
+@unsafe(reason: "LLVM process target-machine initialization", capabilities: [ffi])
+extern fn LLVMInitializeX86TargetMC()
+@unsafe(reason: "LLVM process assembly-printer initialization", capabilities: [ffi])
+extern fn LLVMInitializeX86AsmPrinter()
+
+export LLVMGetVersion
+export LLVMContextCreate
+export LLVMContextDispose
+export LLVMCreateMemoryBufferWithMemoryRangeCopy
+export LLVMDisposeMemoryBuffer
+export LLVMParseIRInContext2
+export LLVMDisposeModule
+export LLVMDisposeMessage
+export LLVMOrcCreateLLJIT
+export LLVMOrcDisposeLLJIT
+export LLVMOrcLLJITGetMainJITDylib
+export LLVMOrcLLJITAddLLVMIRModule
+export LLVMOrcLLJITLookup
+export LLVMOrcCreateNewThreadSafeContextFromLLVMContext
+export LLVMOrcDisposeThreadSafeContext
+export LLVMOrcCreateNewThreadSafeModule
+export LLVMOrcDisposeThreadSafeModule
+export LLVMConsumeError
+export LLVMGetErrorMessage
+export LLVMDisposeErrorMessage
+export LLVMInitializeX86TargetInfo
+export LLVMInitializeX86Target
+export LLVMInitializeX86TargetMC
+export LLVMInitializeX86AsmPrinter

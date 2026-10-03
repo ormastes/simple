@@ -1,0 +1,90 @@
+# A daemon request owns a decoded immutable index, never a lazy index-file path.
+# Workspace identity here isolates state; host admission authenticates requests.
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexGenerationV1, package_module_index_read_current_v1
+}
+
+struct PackageDaemonRequestV1:
+    valid: bool
+    reason: text
+    sequence: i64
+    index_digest: text
+    generation: PackageModuleIndexGenerationV1?
+
+fn package_daemon_request_denied_v1(reason: text) -> PackageDaemonRequestV1:
+    PackageDaemonRequestV1(false, reason, 0, "", nil)
+
+class PackageDaemonSessionV1:
+    workspace_identity: text
+    cache_root: text
+    request_sequence: i64
+    reload_count: i64
+    active: bool
+    closed: bool
+    index_digest: text
+    generation: PackageModuleIndexGenerationV1?
+    last_reason: text
+
+    static fn create(workspace_identity: text, cache_root: text) -> PackageDaemonSessionV1:
+        PackageDaemonSessionV1(
+            workspace_identity, cache_root, 0, 0, false, false, "", nil, "not-loaded")
+
+    me refresh() -> bool:
+        if self.closed:
+            self.last_reason = "session-closed"
+            return false
+        if self.active:
+            self.last_reason = "request-active"
+            return false
+        if self.workspace_identity == "" or self.cache_root == "":
+            self.last_reason = "session-identity-missing"
+            return false
+        val admitted = package_module_index_read_current_v1(self.cache_root)
+        if not admitted.valid or admitted.generation == nil:
+            self.last_reason = "index-{admitted.reason}"
+            # Do not keep old graph state eligible for a later failed refresh.
+            self.index_digest = ""
+            self.generation = nil
+            return false
+        if admitted.digest != self.index_digest:
+            self.generation = admitted.generation
+            self.index_digest = admitted.digest
+            self.reload_count = self.reload_count + 1
+        self.last_reason = "ok"
+        true
+
+    me begin_request(workspace_identity: text) -> PackageDaemonRequestV1:
+        if workspace_identity != self.workspace_identity:
+            return package_daemon_request_denied_v1("workspace-mismatch")
+        if self.closed:
+            return package_daemon_request_denied_v1("session-closed")
+        if self.active:
+            return package_daemon_request_denied_v1("request-active")
+        if self.request_sequence >= 9223372036854775806:
+            return package_daemon_request_denied_v1("request-sequence-exhausted")
+        if not self.refresh():
+            return package_daemon_request_denied_v1(self.last_reason)
+        self.request_sequence = self.request_sequence + 1
+        self.active = true
+        PackageDaemonRequestV1(
+            true, "ok", self.request_sequence, self.index_digest, self.generation)
+
+    me end_request(sequence: i64) -> bool:
+        if self.closed or not self.active or sequence != self.request_sequence:
+            return false
+        self.active = false
+        true
+
+    me close() -> bool:
+        if self.active:
+            return false
+        self.closed = true
+        self.generation = nil
+        self.index_digest = ""
+        self.cache_root = ""
+        self.workspace_identity = ""
+        self.last_reason = "session-closed"
+        true
+
+export PackageDaemonRequestV1, PackageDaemonSessionV1
+export package_daemon_request_denied_v1

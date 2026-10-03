@@ -1,0 +1,75 @@
+use std.spec.*
+use app.io.mod.{cwd, dir_create, file_write, dir_remove_all}
+use app.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.scv.db_patch.*
+use std.scv.db_admission.{db_patch_signing_bytes}
+use std.scv.db_paged_model.*
+use std.scv.db_receipt.*
+use std.scv.distributed_identity.*
+use app.scv.db.settlement_resume_local.*
+use app.scv.db.settlement_paged_projection.*
+use app.scv.db.receipt_index_git.*
+use app.scv.db.settlement_queue.*
+use app.scv.db.settlement_queue_codec.*
+use test.fixtures.scv.db_paged_fixture.*
+use test.fixtures.scv.db_settlement_queue_fixture.{setup_item2_queue_sign, check_item2_queue_git}
+
+struct Item2PagedSettlementFixture:
+    root: text
+    source: text
+    config: DbSettlementPagedLocalConfig
+    patches: [DbPatch]
+
+fn setup_item2_paged_settlement_fixture() -> Item2PagedSettlementFixture:
+    val allocated = secure_temp_dir_raw(path_final_existing(cwd()).unwrap().path, "scv-paged-settlement-spec-")
+    expect(allocated.len()).to_be_greater_than(0)
+    val root = path_final_existing(allocated).unwrap().path
+    val source = root + "/source"
+    val remote = root + "/remote.git"
+    val scratch = root + "/scratch"
+    expect(dir_create(source + "/scv/paged", true)).to_equal(true)
+    expect(dir_create(scratch, true)).to_equal(true)
+    check_item2_queue_git(source, ["init", "--template=", "--object-format=sha1", "."])
+    check_item2_queue_git(source, ["init", "--bare", "--template=", "--object-format=sha1", remote])
+    val policy = setup_item2_paged_policy()
+    val genesis = db_paged_genesis(policy).unwrap()
+    expect(file_write(source + "/scv/paged/manifest", db_paged_manifest_encode(genesis).unwrap())).to_equal(true)
+    expect(file_write(source + "/scv/paged/high-water", db_paged_git_marks([]).unwrap())).to_equal(true)
+    check_item2_queue_git(source, ["add", "--", "scv"])
+    check_item2_queue_git(source, ["commit", "-m", "explicit signed paged genesis"])
+    val head = check_item2_queue_git(source, ["rev-parse", "HEAD"])
+    val tree = check_item2_queue_git(source, ["rev-parse", "HEAD^{tree}"])
+    check_item2_queue_git(source, ["push", "--no-force", remote, "HEAD:refs/heads/settled"])
+    val (_seed, receipt_key) = pure_ed25519_keypair_from_seed([44u8;32])
+    val admission = policy.config.admission
+    val authority = DbReceiptAuthority(repository: admission.repository, namespace: admission.namespace, epoch: admission.epoch, remote: remote, settled_ref: "refs/heads/settled", key_id: "local-receipt-key", public_key: receipt_key, schema_revision: admission.schema_revision, reducer_revision: admission.reducer_revision)
+    val bootstrap = setup_item2_queue_sign(DbSettlementReceipt(repository: authority.repository, namespace: authority.namespace, epoch: authority.epoch, remote: remote, settled_ref: authority.settled_ref, previous_receipt: "", previous_head: "", accepted_head: head, accepted_tree: tree, object_format: "sha1", high_water: [], schema_revision: authority.schema_revision, reducer_revision: authority.reducer_revision, batch_digests: [], signer: authority.key_id, signature: [])).unwrap()
+    db_receipt_index_git_publish_local(DbReceiptIndexGitRequest(source_root: source, remote: remote, scratch_parent: scratch, expected_head: "", receipt: bootstrap, authority: authority)).unwrap()
+    val first = setup_item2_paged_patch([setup_item2_paged_create(1u64, "A")], genesis.revision, 1u64)
+    val second_actor = "11223344556677889900aabbccddeeff"
+    val entity = entity_ref_provisional(EntityUid(database_namespace: authority.namespace, entity_kind: "bug", actor: ActorIncarnation(hex: second_actor), counter: 1u64))
+    var second = setup_item2_paged_patch([DbOperation.Create(entity, "bug", [DbField(name: "code", value: DbValue.Text("B")), DbField(name: "link", value: DbValue.Absent)])], genesis.revision, 1u64, true)
+    second.actor = second_actor
+    second = db_patch_seal(second).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([46u8;32])
+    second.signature = pure_ed25519_sign(seed, key, db_patch_signing_bytes(second).unwrap())
+    Item2PagedSettlementFixture(root: root, source: source, config: DbSettlementPagedLocalConfig(scratch_parent: scratch, authority: authority, policy: policy, bootstrap_receipt: bootstrap), patches: [first,second])
+
+fn check_item2_paged_settlement_complete(fixture: Item2PagedSettlementFixture, queued: DbSettlementQueueView) -> DbSettlementQueueView:
+    val prepared = db_settlement_resume_paged_local(fixture.source, queued.head, fixture.config, setup_item2_queue_sign).unwrap()
+    expect(prepared.code).to_equal("prepared")
+    val published = db_settlement_resume_paged_local(fixture.source, prepared.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+    expect(published.code).to_equal("awaiting-index")
+    val indexed = db_settlement_resume_paged_local(fixture.source, published.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+    expect(indexed.code).to_equal("local-index-observed")
+    indexed.view
+
+fn check_item2_paged_settlement_cleanup(fixture: Item2PagedSettlementFixture):
+    expect(path_final_existing(fixture.root).unwrap().path).to_equal(fixture.root)
+    expect(fixture.root.starts_with(path_final_existing(cwd()).unwrap().path + "/scv-paged-settlement-spec-")).to_equal(true)
+    expect(dir_remove_all(fixture.root)).to_equal(true)
+
+export Item2PagedSettlementFixture, setup_item2_paged_settlement_fixture
+export check_item2_paged_settlement_complete, check_item2_paged_settlement_cleanup

@@ -1,0 +1,151 @@
+# Actual local bare-Git/FS/signature oracles. No protected remote or performance
+# admission is implied. These source scenarios remain UNEXECUTED.
+use std.spec.*
+use app.io.mod.{dir_create, file_write}
+use app.scv.db.settlement_queue.*
+use app.scv.db.settlement_queue_codec.*
+use app.scv.db.settlement_resume_local.*
+use app.scv.db.settlement_paged_projection.*
+use app.scv.db.settlement_paged_owner.*
+use app.scv.db.git_candidate.*
+use app.scv.db.page_store.{db_page_store_load_pages}
+use std.scv.db_pages.{db_pages_lookup}
+use std.scv.db_page_records.*
+use std.scv.db_patch.*
+use std.scv.db_patch_codec.{db_patch_encode}
+use std.scv.db_admission.{db_patch_signing_bytes}
+use std.scv.db_receipt.*
+use std.scv.db_paged_model.*
+use std.scv.distributed_identity.*
+use std.scv.sj_capsule.{scv_sj_lease_is_held, scv_sj_lease_acquire, scv_sj_lease_release}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use test.fixtures.scv.db_paged_fixture.*
+use test.fixtures.scv.db_paged_settlement_fixture.*
+use test.fixtures.scv.db_settlement_queue_fixture.{setup_item2_queue_sign, check_item2_queue_git}
+
+fn setup_item2_paged_settlement_replica(fixture: Item2PagedSettlementFixture, name: text) -> Item2PagedSettlementFixture:
+    var next = fixture
+    next.source = fixture.root + "/" + name
+    expect(dir_create(next.source, true)).to_equal(true)
+    check_item2_queue_git(next.source, ["init", "--template=", "."])
+    next
+
+fn check_item2_paged_settlement_alias(fixture: Item2PagedSettlementFixture, projection: DbPagedGitProjection, number: u64, actor: text):
+    val key = db_page_alias_key(SettledAlias(database_namespace: fixture.config.authority.namespace, authority_epoch: 1u64, entity_kind: "bug", sequence: number)).unwrap()
+    val read = db_page_store_load_pages(fixture.source, projection.manifest.pages, [key], 67108864u64).unwrap()
+    val record = db_pages_lookup(projection.manifest.pages, read[0].page.unwrap(), key).unwrap().unwrap()
+    match db_typed_page_record_decode(record).unwrap():
+        Alias(binding): expect(binding.uid.actor.hex).to_equal(actor)
+        _: fail("settled alias must resolve to the original actor UID")
+
+describe "canonical paged local settlement and exact recovery":
+    it "publishes two actors through the shared queue and reads their actual canonical aliases":
+        val fixture = setup_item2_paged_settlement_fixture()
+        val queued = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.config.admission).unwrap()
+        val first = check_item2_paged_settlement_complete(fixture, queued)
+        val second_pending = db_settlement_enqueue(fixture.source, first.head, fixture.patches[1], fixture.config.policy.config.admission).unwrap()
+        val second = check_item2_paged_settlement_complete(fixture, second_pending)
+        val journal = second.queue.items[1].paged_journal.unwrap()
+        val projection = db_settlement_paged_journal_readback(fixture.source, fixture.config.scratch_parent, journal, fixture.config.authority, fixture.config.policy).unwrap()
+        expect(projection.high_water.len()).to_equal(1)
+        expect(projection.high_water[0].sequence).to_equal(2u64)
+        check_item2_paged_settlement_alias(fixture, projection, 1u64, fixture.patches[0].actor)
+        check_item2_paged_settlement_alias(fixture, projection, 2u64, fixture.patches[1].actor)
+        expect(check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])).to_equal(journal.receipt.accepted_head)
+        # A separate local object root forces complete cold import, not a
+        # forged public cache token or flattening the prior reference snapshot.
+        val replica = setup_item2_paged_settlement_replica(fixture, "cold-replay")
+        val replay_pending = db_settlement_enqueue(replica.source, "", fixture.patches[0], fixture.config.policy.config.admission).unwrap()
+        val replay = db_settlement_resume_paged_local(replica.source, replay_pending.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(replay.code).to_equal("local-index-observed")
+        expect(replay.view.queue.items[0].attempts).to_equal(0u64)
+        expect(replay.view.queue.items[0].paged_journal.unwrap().receipt.accepted_head).to_equal(first.queue.items[0].paged_journal.unwrap().receipt.accepted_head)
+        expect(db_patch_encode(replay.view.queue.items[0].patch).unwrap()).to_equal(db_patch_encode(fixture.patches[0]).unwrap())
+        check_item2_paged_settlement_cleanup(fixture)
+
+    it "reopens queue v2 and restores exact OID after publication acknowledgement loss":
+        val fixture = setup_item2_paged_settlement_fixture()
+        val queued = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.config.admission).unwrap()
+        val prepared = db_settlement_resume_paged_local(fixture.source, queued.head, fixture.config, setup_item2_queue_sign).unwrap()
+        val reopened = db_settlement_queue_open(fixture.source, fixture.config.policy.config.admission).unwrap()
+        expect(reopened).to_equal(prepared.view)
+        val wire = db_settlement_queue_encode(reopened.queue).unwrap()
+        expect(wire.starts_with("SCVDB-SETTLEMENT-WORK-v2\n")).to_equal(true)
+        expect(db_settlement_queue_decode(wire).unwrap()).to_equal(reopened.queue)
+        expect(db_settlement_queue_decode(wire + "00").is_err()).to_equal(true)
+        val item = reopened.queue.items[0]
+        val candidate = db_settlement_paged_restore_local(fixture.source, fixture.config.scratch_parent, item.paged_journal.unwrap(), fixture.config.authority, fixture.config.policy, item.candidate_commit).unwrap()
+        expect(candidate.candidate_oid).to_equal(item.paged_journal.unwrap().receipt.accepted_head)
+        expect(db_git_candidate_commit_bytes(candidate).unwrap()).to_equal(item.candidate_commit)
+        expect(db_git_candidate_publish(candidate, \: scv_sj_lease_is_held(fixture.source)).unwrap().code).to_equal("published")
+        db_git_candidate_cleanup(candidate).unwrap()
+        val observed = db_settlement_resume_paged_local(fixture.source, reopened.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(observed.code).to_equal("awaiting-index")
+        val indexed = db_settlement_resume_paged_local(fixture.source, observed.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(indexed.code).to_equal("local-index-observed")
+        expect(indexed.view.queue.items[0].attempts).to_equal(1u64)
+        expect(indexed.view.queue.items[0].candidate_commit).to_equal(item.candidate_commit)
+        check_item2_paged_settlement_cleanup(fixture)
+
+    it "proves an old candidate unpublished before replanning against the competing canonical HEAD":
+        val fixture = setup_item2_paged_settlement_fixture()
+        val pending = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.config.admission).unwrap()
+        val prepared = db_settlement_resume_paged_local(fixture.source, pending.head, fixture.config, setup_item2_queue_sign).unwrap()
+        val competitor = setup_item2_paged_settlement_replica(fixture, "competitor")
+        val other_pending = db_settlement_enqueue(competitor.source, "", fixture.patches[1], fixture.config.policy.config.admission).unwrap()
+        val other = check_item2_paged_settlement_complete(competitor, other_pending)
+        val stale = db_settlement_resume_paged_local(fixture.source, prepared.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(stale.code).to_equal("stale-replan")
+        expect(stale.view.queue.items[0].paged_journal).to_equal(nil)
+        val complete = check_item2_paged_settlement_complete(fixture, stale.view)
+        expect(complete.queue.items[0].attempts).to_equal(2u64)
+        val journal = complete.queue.items[0].paged_journal.unwrap()
+        expect(journal.receipt.previous_head).to_equal(other.queue.items[0].paged_journal.unwrap().receipt.accepted_head)
+        val projection = db_settlement_paged_journal_readback(fixture.source, fixture.config.scratch_parent, journal, fixture.config.authority, fixture.config.policy).unwrap()
+        check_item2_paged_settlement_alias(fixture, projection, 1u64, fixture.patches[1].actor)
+        check_item2_paged_settlement_alias(fixture, projection, 2u64, fixture.patches[0].actor)
+        expect(db_patch_encode(complete.queue.items[0].patch).unwrap()).to_equal(db_patch_encode(fixture.patches[0]).unwrap())
+        check_item2_paged_settlement_cleanup(fixture)
+
+    it "denies a revoked prepared signer without replacing the journal or publishing its candidate":
+        val fixture = setup_item2_paged_settlement_fixture()
+        val pending = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.config.admission).unwrap()
+        val prepared = db_settlement_resume_paged_local(fixture.source, pending.head, fixture.config, setup_item2_queue_sign).unwrap()
+        var revoked = fixture.config
+        revoked.policy.config.admission.keys[0].revoked = true
+        revoked.policy = setup_item2_paged_repin(revoked.policy)
+        expect(db_settlement_resume_paged_local(fixture.source, prepared.view.head, revoked, setup_item2_queue_sign).is_err()).to_equal(true)
+        expect(db_settlement_queue_open(fixture.source, fixture.config.policy.config.admission).unwrap()).to_equal(prepared.view)
+        expect(check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])).to_equal(fixture.config.bootstrap_receipt.accepted_head)
+        check_item2_paged_settlement_cleanup(fixture)
+
+    it "rejects signed extra-tree content instead of treating a receipt as page closure":
+        val fixture = setup_item2_paged_settlement_fixture()
+        expect(file_write(fixture.source + "/scv/paged/unlisted", "not a canonical page")).to_equal(true)
+        check_item2_queue_git(fixture.source, ["add", "--", "scv"])
+        check_item2_queue_git(fixture.source, ["commit", "-m", "malformed canonical inventory fixture"])
+        check_item2_queue_git(fixture.source, ["push", "--no-force", fixture.config.authority.remote, "HEAD:refs/heads/settled"])
+        var malformed = fixture.config.bootstrap_receipt
+        malformed.previous_head = malformed.accepted_head
+        malformed.previous_receipt = db_receipt_digest(fixture.config.bootstrap_receipt).unwrap()
+        malformed.accepted_head = check_item2_queue_git(fixture.source, ["rev-parse", "HEAD"])
+        malformed.accepted_tree = check_item2_queue_git(fixture.source, ["rev-parse", "HEAD^{tree}"])
+        malformed = setup_item2_queue_sign(malformed).unwrap()
+        expect(db_settlement_paged_readback_local(fixture.source, fixture.config.scratch_parent, malformed, fixture.config.authority, fixture.config.policy)).to_equal(Err("SCVDB_PAGED_GIT_INVENTORY"))
+        check_item2_paged_settlement_cleanup(fixture)
+
+    it "rejects forged patch signatures and reserved binding writes before any candidate is persisted":
+        val fixture = setup_item2_paged_settlement_fixture()
+        var forged = fixture.patches[0]
+        forged.signature = [0u8;64]
+        expect(db_settlement_enqueue(fixture.source, "", forged, fixture.config.policy.config.admission).is_err()).to_equal(true)
+        val entity = entity_ref_provisional(EntityUid(database_namespace: forged.namespace, entity_kind: "provider_binding", actor: ActorIncarnation(hex: forged.actor), counter: 9u64))
+        var reserved = fixture.patches[0]
+        reserved.operations = [DbOperation.Create(entity, "provider_binding", [])]
+        reserved = db_patch_seal(reserved).unwrap()
+        val (seed, key) = pure_ed25519_keypair_from_seed([45u8;32])
+        reserved.signature = pure_ed25519_sign(seed, key, db_patch_signing_bytes(reserved).unwrap())
+        expect(db_settlement_enqueue(fixture.source, "", reserved, fixture.config.policy.config.admission)).to_equal(Err("SCVDB_BINDING_OWNER_REQUIRED"))
+        expect(db_settlement_queue_open(fixture.source, fixture.config.policy.config.admission).unwrap().head).to_equal("")
+        expect(check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])).to_equal(fixture.config.bootstrap_receipt.accepted_head)
+        check_item2_paged_settlement_cleanup(fixture)
