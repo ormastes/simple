@@ -72,6 +72,41 @@ fn cp_registry() -> CollectionOperationRegistry:
     registry
 
 describe "typed CollectionPlan extraction":
+    it "rejects stale literal counts and forged exact cardinality":
+        step("Revalidate exact cardinality against the retained source literal")
+        val item = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true, type_: cp_int_type(), span: cp_span(1))
+        val literal = HirExpr(kind: HirExprKind.ArrayLit([item], Some(cp_int_type())), has_type_: true, type_: cp_array_type(), span: cp_span(1))
+        var plan = extract_unary_collection_plan(cp_call(literal, "map", 40, 3), 20, cp_registry()).unwrap()
+        expect(validate_collection_plan(plan).is_ok()).to_equal(true)
+        var source = plan.nodes[0]
+        var changed = literal
+        changed.kind = HirExprKind.ArrayLit([item, item], Some(cp_int_type()))
+        source.source_expr = Some(changed)
+        plan.nodes[0] = source
+        expect(validate_collection_plan(plan).is_err()).to_equal(true)
+        source.source_expr = Some(literal)
+        var facts = source.facts
+        facts.cardinality = HirPerfCardinality.Exact(99)
+        source.facts = facts
+        plan.nodes[0] = source
+        expect(validate_collection_plan(plan).is_err()).to_equal(true)
+
+    it "allows unknown literal cardinality and preserves nonliteral evidence policy":
+        step("Check consistency without demanding or manufacturing exact evidence")
+        val literal = HirExpr(kind: HirExprKind.ArrayLit([], Some(cp_int_type())), has_type_: true, type_: cp_array_type(), span: cp_span(1))
+        var plan = extract_unary_collection_plan(cp_call(literal, "map", 40, 3), 20, cp_registry()).unwrap()
+        var source = plan.nodes[0]
+        var facts = source.facts
+        facts.cardinality = HirPerfCardinality.Unknown("not supplied")
+        source.facts = facts
+        plan.nodes[0] = source
+        expect(validate_collection_plan(plan).is_ok()).to_equal(true)
+        source.source_expr = Some(cp_source())
+        facts.cardinality = HirPerfCardinality.Exact(4)
+        source.facts = facts
+        plan.nodes[0] = source
+        expect(validate_collection_plan(plan).is_ok()).to_equal(true)
+
     it "derives exact cardinality only from typed array literal slots":
         step("Extract empty and nonempty literal sources")
         val item = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: true, type_: cp_int_type(), span: cp_span(1))

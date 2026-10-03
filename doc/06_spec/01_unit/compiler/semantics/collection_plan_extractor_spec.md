@@ -12,6 +12,12 @@ Unknown. An effectful element still gives one slot conditional on successful
 construction; every independent effect/cost/allocation/rewrite proof stays
 unknown or false. These tests were committed before implementation, unexecuted.
 
+Literal Exact facts are also checked for consistency after plan mutation:
+changing the retained literal length or forging Exact(99) must fail validation;
+the correct original count and Unknown remain accepted. Nonliteral cardinality
+evidence policy is unchanged. These are authored, unexecuted regressions, not a
+claim that structural validation authenticates arbitrary externally supplied facts.
+
 The original extraction cases cover node ordering, unresolved/absent metadata,
 receiver and arity mismatch, chain bounds, and callback-derived distinct key
 types. The module-analysis increment adds six scenarios:
