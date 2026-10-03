@@ -143,6 +143,39 @@ describe "typed CollectionPlan extraction":
         expect(missing.contains("key type")).to_equal(false)
 
 describe "collection analysis discovers maximal regions":
+    it "retains a user method as the opaque source of an admitted chain":
+        step("Extract map-filter above a typed user-produced collection")
+        val produced = cp_call(cp_source(), "load_rows", 900, 2)
+        val chain = cp_call(cp_call(produced, "map", 40, 3), "filter", 41, 4)
+        val result = collect_collection_expr_plans_v1(chain, 20, cp_registry())
+        expect(result.plans.len()).to_equal(1)
+        expect(result.blockers.len()).to_equal(0)
+        val plan = result.plans[0]
+        expect(plan.nodes.len()).to_equal(3)
+        expect(plan.nodes[0].source_expr.unwrap()).to_equal(produced)
+        expect(plan.nodes[0].facts.effects.unknown).to_equal(true)
+        expect(plan.nodes[1].operation_symbol_id.unwrap()).to_equal(40)
+
+    it "keeps an unresolved source call opaque without granting operation authority":
+        step("Preserve a typed source while admitting only the resolved outer map")
+        val produced = HirExpr(kind: HirExprKind.MethodCall(
+            cp_source(), "load_rows", [], MethodResolution.Unresolved),
+            has_type_: true, type_: cp_array_type(), span: cp_span(2))
+        val plan = extract_unary_collection_plan(
+            cp_call(produced, "map", 40, 3), 20, cp_registry()).unwrap()
+        expect(plan.nodes.len()).to_equal(2)
+        expect(plan.nodes[0].source_expr.unwrap()).to_equal(produced)
+        expect(collection_plan_unproven_facts(plan.nodes[0])).to_contain("effects")
+        expect(plan.nodes[0].operation_symbol_id.?).to_equal(false)
+
+    it "still rejects an untyped opaque source":
+        step("Require a source type even when source operation metadata is absent")
+        var produced = cp_call(cp_source(), "load_rows", 900, 2)
+        produced.has_type_ = false
+        val result = extract_unary_collection_plan(
+            cp_call(produced, "map", 40, 3), 20, cp_registry())
+        expect(result.is_err()).to_equal(true)
+
     it "discovers one maximal plan for a nested admitted chain":
         step("Analyze a resolved map-filter region")
         val chain = cp_call(cp_call(cp_source(), "map", 40, 3), "filter", 41, 4)
