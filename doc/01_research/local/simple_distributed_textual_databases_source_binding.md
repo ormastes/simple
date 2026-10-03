@@ -65,3 +65,20 @@ candidate; its test-runner receipt is terminal exit 1. The exported bootstrap
 path contains simple.exe.rejected and the main bin/release path is absent.
 A RUNNING label elsewhere in the aggregate status is not evidence of a live
 handle or usable runner. No binary was executed or restarted by this lane.
+
+### Capability-pinned identity kernel implementation contract
+
+Independent review confirms DbCiCapabilities lists the five built-in provider
+fields while DbProviderIdentity.dimensions holds only extras. Passing one list
+as the other would reject valid records or let incoming names choose their own
+scope. Existing pure identity comparison includes the observation reference in
+content, so it cannot deduplicate independently allocated import UIDs. The new
+comparison must exclude only that own reference while validating it and retaining
+all nested/contextual references and result fields.
+
+The new design records canonical-name collision checks, explicit case identity,
+full-policy-key migration and authenticated index readback. Canonical v1 encoding
+is a compatibility boundary, not a place to silently change historical bytes.
+Any new content comparison has its own domain. This research justifies a pure
+kernel first; the known owner/index/quarantine defect remains open until the
+same contract is integrated across Reference, Paged, settlement and checkpoints.

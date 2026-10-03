@@ -378,3 +378,11 @@ literal v1 vectors now also exist. Expected vectors are framing-derived, not
 captured historical wire. Paged legacy replay also has source scenarios derived from a bounded prior-contract
 model and actual signed checkpoint import. All Simple cases remain unexecuted;
 complete reproduction qualification remains pending.
+
+The source library now includes db_observation_identity, a pure pinned-policy
+comparison kernel with eleven unit scenarios. It distinguishes cross-UID exact
+duplicates from changed-content identity reuse while preserving existing v1 wire.
+Its decisions confer no write authority. Filesystem admission still lacks the
+atomic provider-identity index and durable quarantine integration described in
+the focused observation-identity design; the tracked effect regression remains
+expected-failing and unexecuted.

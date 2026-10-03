@@ -179,3 +179,28 @@ the current owner; no runtime RED is recorded. Add durable signed-input quaranti
 independently pinned capability dimensions, cross-batch exact duplicate and
 distinct-attempt scenarios before claiming full requirement coverage. Batch replay
 and row-UID collision are insufficient substitutes.
+
+### Capability-pinned identity kernel test matrix
+
+The pure kernel is a dependency of the still-open REQ-017 effect owner. Unit
+sources must cover the following independently observable decisions before the
+filesystem regression can be repaired:
+
+| Input variation | Required oracle |
+|---|---|
+| Same provider/content, independently allocated observation UID | Duplicate returns the original reference |
+| Same uniqueness tuple, changed failure signature or measurements | Quarantine despite unchanged payload digest |
+| Distinct genuine attempt | Distinct identity and Append when its verified lookup is absent |
+| Declared non-unique dimension changes | Same identity, different content, Quarantine |
+| Missing/extra/core-shadow/non-NFC dimension | Typed refusal; incoming names cannot redefine scope |
+| Wrong pin/provider scope/own or nested reference context | Typed refusal before Append |
+| Existing row returned for another identity | Lookup mismatch, not false duplicate or quarantine |
+| Count/text/aggregate over bound | Quota error before expensive canonical allocation |
+| Config/source/test/case/run/reproduction or result mutation | Content change; own reference is the only excluded field |
+
+Run the existing independent v1 golden vectors after a content-encoding helper
+refactor. A pure decision does not prove signature authorization, index lookup,
+durable rejected-wire storage, mixed-batch handling, migration or recovery.
+Those remain actual-owner acceptance gates on both backends. Do not replace
+system placeholders or record RED/GREEN until their required runtime evidence
+exists. The effect regression remains expected-failing at this source stage.

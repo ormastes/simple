@@ -367,3 +367,35 @@ readback asserts paired accepted/counter entries and canonical rows. This closes
 the Paged legacy source-oracle gap, not runtime verification. No production gate
 was relaxed. REQ-017 remains a known defect with an intended-failing regression;
 all system counts and remaining full acceptance obligations are unchanged.
+
+### Capability-pinned identity pure kernel continuation
+
+The frozen contract reuses DbCiCapabilities with explicit core/extra dimension
+separation and independently pinned policy bytes. Content comparison excludes
+only ingestion-owned observation reference, preserving every other immutable
+field. An existing lookup is recomputed from the original observation, not a
+caller-provided digest. Full-policy revision participates in identity keys;
+any policy change requires explicit migration before absence can mean Append.
+
+Core owns production pure helpers; evidence independently authors unit sources;
+research reviews both. Root's focused design retains all effect, quarantine,
+mixed-batch, checkpoint and migration obligations. These helpers cannot fix the
+filesystem identity regression until those owners invoke them atomically.
+System inventory stays 23 concrete owner scenarios and 130 placeholders.
+
+Read-only runner evidence remains insufficient: inherited-core40 admission is
+NONE; the newer cranelift-size-relaxed40-subsystems1 collector ended with exit 1
+and its interpreter result is BUILD_FAILED/admission none. No binary was run or
+restarted by this lane. Runtime unit/integration, existing v1 golden vectors,
+compiler/lib/MCP/LSP checks, core/MCP native smoke, coverage and performance remain
+UNEXECUTED. Static/source review is not a substitute for those required gates.
+
+Integrated test-first cc80fb50fd1 as f694bb9c6c6 and production f1bc4d6a83a
+as 910eb15de9f. Eleven unit sources and the pure kernel passed independent source
+review, including corrected negative-fixture preconditions and error precedence.
+The old observation-v1 frame/domain sequence is preserved by the shared result
+field extraction; new content comparison excludes only own reference. The kernel
+recomputes existing claims, validates scope/pins and fails closed on wrong lookups.
+Object quotas are per policy/per observation, with at most two observation claims
+per decision; they are not whole-operation RSS evidence. Actual owner integration,
+index migration, mixed-batch disposition and durable quarantine remain open.

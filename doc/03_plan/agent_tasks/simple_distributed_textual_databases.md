@@ -405,3 +405,14 @@ record and shared documentation; evidence independently reviewed that regression
 Shared APIs: setup_item2_paged_legacy_transition, setup_item2_paged_legacy_replay
 and check_item2_paged_legacy_import. No production bypass is authorized. Root
 integrates reviewed commits; final runtime review and merge remain pending.
+
+### Capability-pinned identity kernel lanes
+
+All lanes start from34574b711b9 on isolated release-derived branches. Core owns
+new db_observation_identity.spl and the minimal compatible db_evidence helper
+factor. Evidence owns new provider-identity unit fixture/spec. Research reviews
+the frozen contract, both source lanes and compatibility limits. Root owns the
+focused design, acceptance matrix, documentation and final integration. Shared
+APIs: DbObservationIdentityPolicy/Claim/Decision, policy_digest, policy_seal,
+claim and decide under the db_observation_identity prefix. Decisions are pure;
+full effect integration and runtime verification remain required before merge.

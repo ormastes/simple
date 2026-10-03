@@ -32,3 +32,9 @@ in checkpoint validation/preservation and settlement; a local preflight scan or
 an independent side file would leave race and bypass paths. Genuine reruns with
 distinct attempts must remain distinct. All three REQ-017 system placeholders
 remain fail-fast until their complete durable oracles exist.
+
+Pure-kernel progress: 910eb15de9f adds pinned policy/claim/decision helpers and
+f694bb9c6c6 adds eleven unit sources. This does not resolve the defect: neither
+Reference nor Paged admission invokes an atomic provider index/quarantine owner.
+The actual-owner regression remains expected-failing; all runtime tests are
+UNEXECUTED. Keep this issue open through full effect and migration verification.
