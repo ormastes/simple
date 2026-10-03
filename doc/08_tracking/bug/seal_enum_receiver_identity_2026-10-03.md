@@ -20,6 +20,9 @@ Its attempts are diagnostic, with `canonical_admission=false`.
   Enum parameters are excluded from the struct-layout registration path.
 - Single-field enum extraction computes `effective_payload_type` but did
   not retain it on the extracted MIR local for subsequent method lookup.
+- Both flat and full-module provider loops skipped enum-only providers.
+  Even in a mixed provider, `register_provider_method` required a class
+  layout owner, so enum methods were excluded from relocated metadata.
 
 These are concrete source gaps, not proof that they explain every diagnostic.
 The constructor/variant errors and SDN container operations need separate
@@ -32,13 +35,22 @@ no struct owner, recover a declared enum owner only if its symbol is an Enum
 and its qualified identity is registered. Reuse existing instance-call
 lowering, including receiver arguments and default argument handling.
 
+Visit enum-only providers in both lowering paths. Admit an enum method using
+its declaring provider symbol table and require the declaration's qualified
+identity to match the method owner. This check cannot depend on consumer enum
+registration: the flat provider pass runs before consumer type registration.
+Relocate the callable through the existing provider mechanism. Preserve
+qualified enum return owners, while retaining the existing class path.
+
 ## Regression evidence required
 
 `test/fixtures/native_enum_receiver_identity/main.spl` imports its owner
 module and checks an enum parameter method, two nested enum payload variants,
-and the enclosing enum's no-payload alternative. Compile with the fixture
+the enclosing enum's no-payload alternative, an enum static constructor with
+a name distinct from its variants, and an ordinary class provider exposing
+the same `code` method name. Compile with the fixture
 directory as a source root and this file as the entry. Successful execution
-must print `enum receiver identity: PASS` and exit zero; failures exit 11–14.
+must print `enum receiver identity: PASS` and exit zero; failures exit 11–16.
 
 Run the baseline probe with the pinned producer before interpreting the
 candidate result. A fixture already passing on the baseline is coverage,
