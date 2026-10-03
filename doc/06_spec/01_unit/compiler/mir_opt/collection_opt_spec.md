@@ -3,7 +3,7 @@
 Status: **authored replacement for stale generated output; unexecuted**
 (2026-10-03). Source:
 `test/01_unit/compiler/mir_opt/collection_opt_spec.spl`.
-This is not a generated manual or runtime PASS. Its 50 scenarios call actual
+This is not a generated manual or runtime PASS. Its 51 scenarios call actual
 MIR pass/canonicalizer APIs and inspect rewritten instructions and counters;
 they do not execute the rewritten program or prove driver pipeline admission.
 
@@ -27,8 +27,9 @@ are retained with changed expectations: both calls remain and reuse is zero.
 Bare/unknown calls also invalidate previously cached runtime reads.
 
 Query keys must distinguish type, payload, argument boundaries and arity.
-Exact supported scalar/string repeats may reuse; aggregate object identity is
-unproved and may fail closed. Floating-point text is not a bitwise identity
+Exact supported scalar repeats and stable locals may reuse. Equal string
+literal bytes do not prove equal allocation/pointer identity, so strings and
+aggregates fail closed without a per-operation identity proof. Floating-point text is not a bitwise identity
 proof. Move operands are consuming and cannot become cached copies. A local
 redefinition or consumed/overwritten result invalidates the relevant cached
 answer, including definitions produced by another admitted query.
@@ -39,7 +40,7 @@ answer, including definitions produced by another admitted query.
 |---|---|
 | 032 | Distinct array, tuple and struct constants retain two real query calls; zero reuse |
 | 033 | `["a:const:str:b","c"]` versus `["a","b:const:str:c"]` retains two calls despite delimiter ambiguity |
-| 034 | Identical supported text and integer arguments yield one call and one copy from the first result |
+| 034 | Equal string literals retain two calls: runtime authority does not prove literal allocation identity |
 | 035 | Identical integer payloads with i64/u64 types retain two calls |
 | 036 | Redefining receiver, index or cached-result local retains the second read |
 | 037 | An admitted runtime length query overwriting receiver/index/result also invalidates reuse |
@@ -56,6 +57,7 @@ answer, including definitions produced by another admitted query.
 | 048 | Unknown intrinsic and Drop effects fence reuse |
 | 049 | Positive/negative floating zero arguments are not collapsed by formatted text |
 | 050 | One string argument containing a delimiter does not collide with a two-argument vector |
+| 051 | Equal integer constants with the same receiver local yield one call and one copy from the first result |
 
 Cases 032, 035, 049 and 050 exercise conservative canonicalizer input handling,
 not validation or execution of those call signatures. Malformed input cannot
@@ -68,13 +70,16 @@ classification; bare-name non-reuse; admitted runtime array/dict/typed-byte
 reads; mutating append barriers; repeated array lengths and consumers; loop
 metadata/scalar/bitcast behavior; loop-defined values; typed array index
 dispatch; and dead append/write-only arrays versus observed results and known
-data-pointer writes. Existing hoisting scenarios include historical names
-that say fail-closed while their counters expect hoisting; this increment does
-not certify those unrelated claims or change that implementation.
+data-pointer writes. Concrete preexisting inconsistency: scenarios 019, 021 and
+022 say queries/scalars/bitcasts stay in-loop, but assert header hoisting and
+nonzero hoist counters; `colopt_hoist_pure_calls` currently returns its blocks
+unchanged. These source-observed expected-result defects are outside this
+query-canonicalization increment and block a broad suite-PASS claim. No runtime
+result is inferred from that inspection. Scenario 020 is the mutation control.
 
 The pass-level instruction census is stronger than source-shape checks but
 weaker than whole-program differential execution. Actual source resolution,
 MIR verification, engine parity, callback/error/order behavior, executed
-lowering and performance gates remain open. The 50 scenarios are authored
-coverage, not 50 passing checks. Regenerate this manual with admitted SPipe
+lowering and performance gates remain open. The 51 scenarios are authored
+coverage, not 51 passing checks. Regenerate this manual with admitted SPipe
 docgen after execution and review all scenario outputs before admission.
