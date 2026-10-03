@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/simple-subsystem-links.XXXXXX")
+mkdir -p "$fixture/test/01_unit" "$fixture/test/02_integration/compiler" \
+  "$fixture/test/03_system" "$fixture/hidden"
+printf '# hidden owner\n' >"$fixture/hidden/hidden_spec.spl"
+printf '# visible owner\n' >"$fixture/test/02_integration/compiler/visible_spec.spl"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    SIMPLE_INVENTORY_TEST_ROOT=$(cygpath -w "$fixture") powershell.exe -NoProfile -NonInteractive -Command \
+      '$ErrorActionPreference="Stop"; $p=$env:SIMPLE_INVENTORY_TEST_ROOT; New-Item -ItemType Junction -Path ($p+"\test\01_unit\compiler") -Target ($p+"\hidden") | Out-Null'
+    ;;
+  *) ln -s "$fixture/hidden" "$fixture/test/01_unit/compiler" ;;
+esac
+if sh "$script_root/compiler-subsystem-test-inventory.shs" "$fixture" >"$fixture/result.tsv" 2>"$fixture/error.log"; then
+  echo 'FAIL: linked test directory silently omitted' >&2
+  exit 1
+fi
+[ ! -s "$fixture/result.tsv" ]
+grep -q 'linked test inventory entry' "$fixture/error.log"
+printf 'PASS: linked owner rejects before partial publication; fixture=%s\n' "$fixture"

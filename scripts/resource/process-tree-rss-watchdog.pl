@@ -73,6 +73,10 @@ my ($observer_starts, $observer_errors, $observer_last_pid) = (0, 0, 0);
 # the summed working set of the job's members, and kill-on-limit terminates the
 # whole job. Native MSWin32 perl has no MSYS path/fork layer and fails closed.
 my $windows = $^O =~ /\A(?:msys|cygwin|MSWin32)\z/ ? 1 : 0;
+# The POSIX workload gets its own session, so controller death need not signal
+# it. Reparenting proves controller loss; PID reuse cannot restore that relation.
+# Windows uses Job Objects, and native MSWin32 Perl does not provide getppid.
+my $controller_pid = $windows ? 0 : getppid();
 my $observer_backend = $windows ? 'win32-job-object' :
     $^O eq 'darwin' ? 'darwin-sysctl-libproc' : 'ps';
 my $containment_scope = $windows ? 'win32-job-object-no-breakaway' :
@@ -762,6 +766,11 @@ if ($windows) {
     receipt($status, $code, $quiet);
     exit $code;
 }
+if (getppid() != $controller_pid) {
+    stop_observer();
+    receipt('controller-exited', 143, 1);
+    exit 143;
+}
 $started = time;
 pipe(my $gate_read, my $gate_write) or die "rss-guard: pipe failed\n";
 $leader = fork();
@@ -812,6 +821,11 @@ while (1) {
     if ($opt{'rss-cap-mode'} eq 'enforce' && $rss >= $opt{'max-rss-kib'}) {
         ($status, $code) = ('rss-cap-exceeded', 88); last;
     }
+    my $controller_lost = getppid() != $controller_pid;
+    if (!$released && $controller_lost) {
+        $interrupted = 143;
+        ($status, $code) = ('controller-exited', 143); last;
+    }
     if (!$released) {
         # Both successful sampling and confirmed session isolation are required
         # before releasing exec. A child failure cannot launch unguarded work.
@@ -835,6 +849,13 @@ while (1) {
     # Keep the direct child unreaped as the root PGID identity anchor. A
     # zombie is completion evidence; obtain its exact wait status after cleanup.
     last if exists($all->{$leader}) && $all->{$leader}{zombie};
+    # Preserve an already completed workload's result above. Only an active
+    # workload loses its authority when its controller exits; use the same
+    # TERM/grace/quiescence path as explicit cancellation.
+    if ($controller_lost) {
+        $interrupted = 143;
+        ($status, $code) = ('controller-exited', 143); last;
+    }
     my $remaining = $opt{'interval-ms'} / 1000 - (time - $sample_started);
     sleep($remaining) if $remaining > 0;
 }

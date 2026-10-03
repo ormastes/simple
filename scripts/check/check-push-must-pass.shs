@@ -1077,6 +1077,57 @@ rebased_push_published_base() {
     printf '%s\n' "$_rebased_base"
 }
 
+# New feature refs normally use published main as their range base. A branch
+# explicitly tracking a versioned release branch instead needs that published
+# release as its base; otherwise a five-file PR scans every change between
+# main and release. Trust only the configured upstream on the SAME push remote,
+# and only after querying that exact versioned release ref at Git's actual
+# pre-push destination ($2), which may differ from the named remote's fetch URL.
+# A release branch may have advanced since the feature branched, so use the
+# unique common ancestor. Every excluded commit is then reachable from the
+# verified published release tip; ambiguous or unavailable authority refuses.
+new_ref_published_base() {
+    _nr_ref=$1
+    _nr_tip=$2
+    case "$_nr_ref" in refs/heads/*) _nr_branch=${_nr_ref#refs/heads/} ;; *) return 1 ;; esac
+    _nr_merge=$(git -C "$ROOT" config --get-all "branch.$_nr_branch.merge" 2>/dev/null) || _nr_merge=""
+    # `--get-all` may return several configured upstreams. Never let a mixed
+    # release/main value drop into the ordinary-main fallback by accident.
+    [ "$(printf '%s\n' "$_nr_merge" | wc -l | tr -d ' ')" -eq 1 ] || return 1
+    case "$_nr_merge" in
+        refs/heads/release/*)
+            _nr_version=${_nr_merge#refs/heads/release/}
+            case "$_nr_version" in
+                *.*) ;;
+                *) return 1 ;;
+            esac
+            case "$_nr_version" in
+                ''|.*|*.|*..*|*[!0-9.]*) return 1 ;;
+            esac
+            _nr_config_remote=$(git -C "$ROOT" config --get-all "branch.$_nr_branch.remote" 2>/dev/null) || return 1
+            _nr_push_remote=${MUST_CHECK_PUSH_REMOTE:-}
+            [ -n "$_nr_push_remote" ] && [ "$_nr_config_remote" = "$_nr_push_remote" ] || return 1
+            case "$_nr_push_remote" in *[!A-Za-z0-9._/-]*) return 1 ;; esac
+            _nr_destination=${MUST_CHECK_PUSH_DESTINATION:-}
+            case "$_nr_destination" in ''|-*) return 1 ;; esac
+            _nr_line=$("$TIMEOUT_BIN" -k 1s "${REMOTE_QUERY_TIMEOUT_S}s" \
+                git -C "$ROOT" ls-remote --exit-code "$_nr_destination" "$_nr_merge" 2>/dev/null) || return 1
+            _nr_sha=${_nr_line%%[[:space:]]*}
+            _nr_seen_ref=${_nr_line#*[[:space:]]}
+            [ "$_nr_seen_ref" = "$_nr_merge" ] || return 1
+            git -C "$ROOT" rev-parse --verify --quiet "$_nr_sha^{commit}" >/dev/null || return 1
+            _nr_base=$(git -C "$ROOT" merge-base --all "$_nr_sha" "$_nr_tip") || return 1
+            [ -n "$_nr_base" ] || return 1
+            [ "$(printf '%s\n' "$_nr_base" | wc -l | tr -d ' ')" -eq 1 ] || return 1
+            printf '%s\n' "$_nr_base"
+            ;;
+        *)
+            # Keep the historical main-based behavior for ordinary new refs.
+            git -C "$ROOT" merge-base "$_nr_tip" origin/main
+            ;;
+    esac
+}
+
 # The blocking budget needs GNU timeout(1). Absence is an ERROR naming the
 # tool, never an unbudgeted run. Resolved here, BEFORE --self-test, so the
 # budget/dispatcher self-test fixtures below exercise the exact same
@@ -1118,6 +1169,90 @@ elif command -v timeout >/dev/null 2>&1 && _is_gnu_timeout timeout; then
 else
     echo "push-must-check: ERROR — nothing was checked (GNU timeout(1) not found or not identifiable via --version: install GNU coreutils so 'timeout' or 'gtimeout' resolves to it. On Windows this means Git Bash's own coreutils 'timeout' must precede C:\\Windows\\System32 on PATH — that System32 'timeout.exe' is an unrelated countdown command and is never accepted here. On stock macOS: 'brew install coreutils' provides 'gtimeout')"
     exit 2
+fi
+
+# Focused tiny-repository proof for the new-ref base choice. It never pushes
+# to an external remote and retains its fixture directory on failure so the
+# exact remote/config state can be inspected. This is separate from the broad
+# manifest self-test and does not run any production push gate.
+if [ "${1:-}" = --self-test-release-base ]; then
+    _st_dir=$(mktemp -d) || exit 2
+    _st_repo=$_st_dir/repo
+    git init -q --bare "$_st_dir/remote.git" || exit 2
+    git init -q -b main "$_st_repo" || exit 2
+    git -C "$_st_repo" config user.email test@example.com
+    git -C "$_st_repo" config user.name test
+    git -C "$_st_repo" config core.hooksPath /dev/null
+    git -C "$_st_repo" remote add origin "$_st_dir/remote.git"
+    printf 'main\n' > "$_st_repo/main.txt"
+    git -C "$_st_repo" add main.txt && git -C "$_st_repo" commit -qm main &&
+        git -C "$_st_repo" push -q -u origin main || exit 2
+    _st_main=$(git -C "$_st_repo" rev-parse HEAD)
+    git -C "$_st_repo" switch -qc release/1.0
+    printf 'release one\n' > "$_st_repo/release.txt"
+    git -C "$_st_repo" add release.txt && git -C "$_st_repo" commit -qm release-one &&
+        git -C "$_st_repo" push -q -u origin release/1.0 || exit 2
+    _st_release_one=$(git -C "$_st_repo" rev-parse HEAD)
+    git -C "$_st_repo" switch -qc fix/release
+    git -C "$_st_repo" branch -q --set-upstream-to=origin/release/1.0
+    printf 'feature\n' > "$_st_repo/feature.txt"
+    git -C "$_st_repo" add feature.txt && git -C "$_st_repo" commit -qm feature || exit 2
+    _st_tip=$(git -C "$_st_repo" rev-parse HEAD)
+    ROOT=$_st_repo MUST_CHECK_PUSH_REMOTE=origin MUST_CHECK_PUSH_DESTINATION=$_st_dir/remote.git
+    [ "$(new_ref_published_base refs/heads/fix/release "$_st_tip")" = "$_st_release_one" ] || exit 2
+    [ "$(git -C "$ROOT" rev-list --count "$_st_release_one..$_st_tip")" -eq 1 ] || exit 2
+    echo 'push-must-check: release-based new ref scans its one own commit: PASS'
+
+    git -C "$ROOT" switch -q release/1.0
+    printf 'release two\n' >> "$ROOT/release.txt"
+    git -C "$ROOT" add release.txt && git -C "$ROOT" commit -qm release-two &&
+        git -C "$ROOT" push -q origin release/1.0 || exit 2
+    git -C "$ROOT" switch -q fix/release
+    [ "$(new_ref_published_base refs/heads/fix/release "$_st_tip")" = "$_st_release_one" ] || exit 2
+    echo 'push-must-check: advanced published release keeps the common base: PASS'
+
+    git -C "$ROOT" switch -q main && git -C "$ROOT" switch -qc fix/main
+    git -C "$ROOT" branch -q --set-upstream-to=origin/main
+    printf 'main feature\n' > "$ROOT/main-feature.txt"
+    git -C "$ROOT" add main-feature.txt && git -C "$ROOT" commit -qm main-feature || exit 2
+    _st_main_tip=$(git -C "$ROOT" rev-parse HEAD)
+    [ "$(new_ref_published_base refs/heads/fix/main "$_st_main_tip")" = "$_st_main" ] || exit 2
+    echo 'push-must-check: ordinary main-based new ref is unchanged: PASS'
+
+    git -C "$ROOT" config branch.fix/main.merge refs/heads/release/1.0
+    [ "$(new_ref_published_base refs/heads/fix/main "$_st_main_tip")" = "$_st_main" ] || exit 2
+    echo 'push-must-check: release-diverged ref retains its full common-base range: PASS'
+    git -C "$ROOT" config branch.fix/main.merge refs/heads/main
+    git -C "$ROOT" config --add branch.fix/main.merge refs/heads/release/1.0
+    new_ref_published_base refs/heads/fix/main "$_st_main_tip" >/dev/null 2>&1 && exit 2
+    echo 'push-must-check: mixed upstream configuration refuses: PASS'
+    git -C "$ROOT" config --unset-all branch.fix/main.merge
+    git -C "$ROOT" config branch.fix/main.merge refs/heads/release/1.0
+    git -C "$ROOT" config --add branch.fix/main.merge refs/heads/release/1.0
+    new_ref_published_base refs/heads/fix/main "$_st_main_tip" >/dev/null 2>&1 && exit 2
+    echo 'push-must-check: ambiguous upstream configuration refuses: PASS'
+
+    git init -q --bare "$_st_dir/push.git" || exit 2
+    git -C "$ROOT" config remote.origin.pushurl "$_st_dir/push.git" || exit 2
+    MUST_CHECK_PUSH_DESTINATION=$(git -C "$ROOT" remote get-url --push origin) || exit 2
+    new_ref_published_base refs/heads/fix/release "$_st_tip" >/dev/null 2>&1 && exit 2
+    echo 'push-must-check: release only on fetch endpoint cannot authorize push endpoint: PASS'
+    git -C "$ROOT" push -q origin release/1.0 || exit 2
+    [ "$(new_ref_published_base refs/heads/fix/release "$_st_tip")" = "$_st_release_one" ] || exit 2
+    echo 'push-must-check: actual separate push endpoint authorizes its published release: PASS'
+    MUST_CHECK_PUSH_DESTINATION=""
+    new_ref_published_base refs/heads/fix/release "$_st_tip" >/dev/null 2>&1 && exit 2
+    echo 'push-must-check: absent actual push destination refuses: PASS'
+    git -C "$ROOT" config --unset remote.origin.pushurl || exit 2
+    MUST_CHECK_PUSH_DESTINATION=$_st_dir/remote.git
+
+    git -C "$ROOT" push -q origin :refs/heads/release/1.0 || exit 2
+    # A stale or forged tracking ref cannot replace the live remote query.
+    git -C "$ROOT" update-ref refs/remotes/origin/release/1.0 "$_st_release_one" || exit 2
+    new_ref_published_base refs/heads/fix/release "$_st_tip" >/dev/null 2>&1 && exit 2
+    echo 'push-must-check: absent remote release refuses despite stale local ref: PASS'
+    echo "push-must-check: retained fixture $_st_dir"
+    exit 0
 fi
 
 if [ "${1:-}" = --self-test ]; then
@@ -1484,7 +1619,7 @@ while read -r _local_ref _local_sha _remote_ref _remote_sha; do
     EVIDENCE_REV=$_local_sha
     _predecessor=$_remote_sha
     if [ "$_predecessor" = "$ZERO" ]; then
-        _predecessor=$(git -C "$ROOT" merge-base "$_local_sha" origin/main 2>/dev/null) || die "cannot derive new-ref base"
+        _predecessor=$(new_ref_published_base "$_local_ref" "$_local_sha") || die "cannot verify published new-ref base"
     elif ! git -C "$ROOT" merge-base --is-ancestor "$_predecessor" "$_local_sha"; then
         _predecessor=$(rebased_push_published_base "$_local_sha") ||
             die "cannot verify published main as the base of rebased ref $_local_ref"
