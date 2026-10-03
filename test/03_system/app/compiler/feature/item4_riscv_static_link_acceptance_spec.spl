@@ -1,0 +1,180 @@
+"""
+# RV64 static ELF driver acceptance — ITEM4-REQ-003/004/006/007
+
+NOT RUN with Simple: these tests precede implementation. Real clang 21.1.8
+fixtures cover nonadjacent PCREL pairs, store pairs, GOT, absolute address
+materialization, calls and compressed/uncompressed control flow. They exercise
+elf_static_link, not isolated relocation helpers. Native execution, RV32,
+dynamic/TLS linking and instruction-size relaxation remain separate gates.
+Fixture production: test/fixtures/linker/riscv64/RECIPE.md.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link, elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC}
+use compiler.backend.linker.elf_parser.{elf_parse_object, elf_section_name}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn item4_rv_read(bytes: [i64], offset: i64, width: i64) -> i64:
+    val valid = offset >= 0 and offset <= bytes.len() and width > 0 and width <= 8
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    expect(width <= bytes.len() - offset).to_equal(true)
+    if width > bytes.len() - offset: return 0
+    var result: i64 = 0
+    var index: i64 = 0
+    while index < width:
+        result = result | (bytes[offset + index] << (8 * index))
+        index = index + 1
+    result
+
+fn item4_rv_load(name: text) -> [i64]:
+    val raw = file_read_bytes("test/fixtures/linker/riscv64/" + name)
+    expect(raw.len()).to_be_greater_than(0)
+    var bytes: [i64] = []
+    for byte in raw: bytes = bytes.push(byte as i64)
+    bytes
+
+fn item4_rv_symbol(image: [i64], name: text) -> i64:
+    val parsed = elf_parse_object(image).unwrap()
+    var matches: i64 = 0
+    var address: i64 = 0
+    for symbol in parsed.symbols:
+        if symbol.name == name:
+            matches = matches + 1
+            address = symbol.st_value
+    expect(matches).to_equal(1)
+    address
+
+fn item4_rv_at(image: [i64], address: i64, width: i64) -> i64:
+    val parsed = elf_parse_object(image).unwrap()
+    var index: i64 = 0
+    for section in parsed.sections:
+        val header = parsed.header.e_shoff + index * 64
+        val vaddr = item4_rv_read(image, header + 16, 8)
+        if section.sh_type != 8 and address >= vaddr and address - vaddr + width <= section.sh_size:
+            return item4_rv_read(image, section.sh_addr + address - vaddr, width)
+        index = index + 1
+    expect(false).to_equal(true)
+    0
+
+fn item4_rv_signed(value: i64, bits: i64) -> i64:
+    if value & (1 << (bits - 1)) != 0: value - (1 << bits) else: value
+
+fn item4_rv_pair_target(image: [i64], high_place: i64, low_place: i64, store: bool) -> i64:
+    val upper = item4_rv_at(image, high_place, 4)
+    val lower = item4_rv_at(image, low_place, 4)
+    val low = if store: ((lower >> 25) << 5) | ((lower >> 7) & 31) else: lower >> 20
+    high_place + item4_rv_signed(upper & 0xfffff000, 32) + item4_rv_signed(low, 12)
+
+fn item4_rv_mutate(kind: i64, field: i64, value: i64) -> [i64]:
+    var bytes = item4_rv_load("start.o")
+    val object = elf_parse_object(bytes).unwrap()
+    var changed = false
+    for section in object.sections:
+        if section.sh_type == 4:
+            var offset = section.sh_addr
+            while offset < section.sh_addr + section.sh_size:
+                if not changed and (item4_rv_read(bytes, offset + 8, 8) & 0xffffffff) == kind:
+                    var index: i64 = 0
+                    while index < 8:
+                        bytes[offset + field + index] = (value >> (8 * index)) & 255
+                        index = index + 1
+                    changed = true
+                offset = offset + 24
+    expect(changed).to_equal(true)
+    bytes
+
+describe "RV64 real static ELF link":
+    it "links nonadjacent PCREL loads, stores, GOT and calls through the full driver":
+        # @req ITEM4-REQ-003 ITEM4-REQ-004 ITEM4-REQ-006
+        step("Read the clang entry and provider with fourteen real ELF relocations")
+        val start = item4_rv_load("start.o")
+        expect(elf_parse_object(start).unwrap().relocations.len()).to_equal(14)
+        step("Link both objects as RV64 static ET_EXEC")
+        val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        val image = result.unwrap()
+        step("Independently decode emitted pairs and compare resolved symbol addresses")
+        val parsed = elf_parse_object(image).unwrap()
+        expect(parsed.header.e_machine).to_equal(243)
+        expect(parsed.header.e_type).to_equal(2)
+        expect(item4_rv_read(image, 48, 4)).to_equal(1)
+        val entry = item4_rv_symbol(image, "_start")
+        val data = item4_rv_symbol(image, "data_value")
+        expect(parsed.header.e_entry).to_equal(entry)
+        expect(item4_rv_pair_target(image, entry, entry + 6, false)).to_equal(data)
+        expect(item4_rv_pair_target(image, entry + 10, entry + 14, true)).to_equal(data)
+        val got = item4_rv_pair_target(image, entry + 18, entry + 22, false)
+        expect(item4_rv_at(image, got, 8)).to_equal(data)
+        expect(item4_rv_pair_target(image, entry + 38, entry + 42, false)).to_equal(item4_rv_symbol(image, "worker"))
+        expect(item4_rv_at(image, data, 4)).to_equal(41)
+        # The emitted absolute upper+lower sequences preserve instruction/register fields.
+        val absolute_upper = item4_rv_at(image, entry + 26, 4) & 0xfffff000
+        val absolute_low = item4_rv_at(image, entry + 30, 4) >> 20
+        expect(item4_rv_signed(absolute_upper, 32) + item4_rv_signed(absolute_low, 12)).to_equal(data)
+
+    it "extracts the provider archive and emits the same deterministic image":
+        # @req ITEM4-REQ-003 ITEM4-REQ-007
+        step("Read the same provider as a direct object and llvm-ar archive")
+        val start = item4_rv_load("start.o")
+        step("Link direct, archived and repeated archived requests")
+        val direct = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64).unwrap()
+        val archived = elf_static_link([start], [item4_rv_load("libprovider.a")], "_start", RelocArch.Riscv64).unwrap()
+        val repeated = elf_static_link([start], [item4_rv_load("libprovider.a")], "_start", RelocArch.Riscv64).unwrap()
+        step("Require exact bytes rather than merely equal image sizes")
+        expect(archived).to_equal(direct)
+        expect(repeated).to_equal(archived)
+
+    it "accepts RELAX markers while preserving the unrelaxed call pair":
+        # @req ITEM4-REQ-004
+        step("Read a clang call carrying a paired R_RISCV_RELAX marker")
+        val start = item4_rv_load("relax.o")
+        expect(elf_parse_object(start).unwrap().relocations.len()).to_equal(2)
+        step("Link with relaxation disabled but ordinary call relocation enabled")
+        val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        val image = result.unwrap()
+        val entry = item4_rv_symbol(image, "_start")
+        step("Require AUIPC and JALR opcodes targeting the provider")
+        expect(item4_rv_at(image, entry, 4) & 127).to_equal(0x17)
+        expect(item4_rv_at(image, entry + 4, 4) & 127).to_equal(0x67)
+        expect(item4_rv_pair_target(image, entry, entry + 4, false)).to_equal(item4_rv_symbol(image, "worker"))
+
+    it "rejects a nonzero paired-low addend instead of silently shifting the target":
+        # @req ITEM4-REQ-004
+        step("Change only the first PCREL_LO12_I addend to one")
+        val start = item4_rv_mutate(24, 16, 1)
+        step("Link the malformed pair through the complete driver")
+        val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+        step("Require an explicit paired-low addend failure")
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("PCREL_LO12 addend must be zero")
+
+    it "rejects a low relocation whose label has no matching HI20 relocation":
+        # @req ITEM4-REQ-004
+        step("Replace the first high relocation by NONE but retain its low reference")
+        val start = item4_rv_mutate(23, 8, 0)
+        step("Link the orphaned low relocation")
+        val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+        step("Require a named missing-HI20 error")
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("no matching HI20")
+
+    it "rejects RV64 dynamic mode and RV32 before attempting image construction":
+        # @req ITEM4-REQ-006
+        step("Prepare a real RV64 object with unsupported driver modes")
+        val start = item4_rv_load("start.o")
+        step("Request dynamic RV64 and static RV32 links")
+        val dynamic = elf_link(ElfLinkRequest(objects: [start], archives: [], shared: [], entry: "_start", target: RelocArch.Riscv64, mode: ELF_LINK_DYNAMIC_EXEC, interp: "/lib/ld-linux-riscv64-lp64.so.1"))
+        val rv32 = elf_static_link([start], [], "_start", RelocArch.Riscv32)
+        step("Require explicit unsupported target-mode errors")
+        expect(dynamic.is_err()).to_equal(true)
+        expect(rv32.is_err()).to_equal(true)
+        if dynamic.is_ok() or rv32.is_ok(): return
+        expect(dynamic.unwrap_err()).to_contain("RISC-V static ET_EXEC")
+        expect(rv32.unwrap_err()).to_contain("RV32")
