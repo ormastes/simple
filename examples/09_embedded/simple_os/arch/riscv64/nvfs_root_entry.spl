@@ -1,21 +1,40 @@
-# SimpleOS riscv64 NVFS-root entry (real-firmware lane).
+# SimpleOS riscv64 NVFS-root entry (real-firmware lane, QEMU virt + JH7110).
 #
 # Boot chain: OpenSBI (fw_jump) -> U-Boot (S-mode) -> boot.scr `booti` of this
-# kernel's flat Image -> crt0.S -> boot_entry -> spl_start. The root
-# filesystem is Simple NVFS (nvfs-dbfs-backed-v1) on a virtio-mmio block
-# device. There is NO FAT32/ramfs/DBFS fallback: if no NVFS root mounts, the
-# boot prints `NVFS_ROOT_BOOT_FAILED` and parks.
+# kernel's flat Image -> crt0.S -> boot_entry -> spl_start. Everything
+# board-specific comes from the device tree U-Boot passes in a1:
+#   * console: /chosen stdout-path -> ns16550a (QEMU virt, byte-wide) or
+#     snps,dw-apb-uart (JH7110, 32-bit, reg-shift 2) — fdt_console.spl;
+#   * storage: DW MSHC SDIO controllers (JH7110 micro-SD) and virtio,mmio
+#     transports (QEMU), probed in that order; on each device NVFS is looked
+#     for on the whole device, then on its MBR primary partitions.
+# The root filesystem is Simple NVFS (nvfs-dbfs-backed-v1). There is NO
+# FAT32/ramfs/DBFS fallback: if no NVFS root mounts, the boot prints
+# `NVFS_ROOT_BOOT_FAILED` and parks.
 #
-# Driven by scripts/check/check-simpleos-riscv64-nvfs-qemu.shs, which boots
-# the same NVFS image twice to prove persistence.
+# Driven by scripts/check/check-simpleos-riscv64-nvfs-qemu.shs (QEMU virt,
+# two boots for persistence + blank-disk negative control, plus the same SD
+# card layout the VisionFive 2 boots). Board path:
+# doc/07_guide/platform/simpleos/qemu_system_tests.md (VisionFive 2 section).
 #
 # No module-level initializers; constants stay function-local.
 
 extern fn serial_println(msg: text)
+extern fn rv64_boot_dtb_address() -> u64
+extern fn rv64_console_configure(base: u64, shift: u64, width: u64)
 
 use os.drivers.virtio.rv64_virtio_mmio_blk.{
-    Rv64VirtioMmioBlk, rv64_virtio_mmio_blk_slot_count,
-    rv64_virtio_mmio_blk_slot_is_block
+    Rv64VirtioMmioBlk, rv64_virtio_mmio_blk_is_block_at
+}
+use os.drivers.storage.dw_mshc_sd.{DwMshcSd, DwMshcMmio, DwMshcConfig}
+use os.drivers.storage.mbr_window.{BlockWindow, MbrPartition, mbr_partition_at}
+use os.services.block_device.{BlockDevice}
+use os.kernel.boot.fdt_blob.{
+    FdtBlob, FdtNode, fdt_find_compatible, fdt_node_reg, fdt_node_u32
+}
+use os.kernel.boot.fdt_console.{
+    fdt_uart_console_select, fdt_uart_console_describe,
+    fdt_uart_console_println, fdt_hex, fdt_small
 }
 use os.kernel.boot.nvfs_root_device.{
     nvfs_root_device_has_superblock, nvfs_root_device_open
@@ -34,17 +53,133 @@ fn fail_boot(reason: text):
     serial_println("[rv64-nvfs] " + reason)
     serial_println("NVFS_ROOT_BOOT_FAILED")
 
-fn find_nvfs_slot() -> i64:
-    """Return the first virtio-mmio block slot carrying a valid NVFS replica."""
-    var slot: i64 = 0
-    while slot < rv64_virtio_mmio_blk_slot_count().to_i64():
-        if rv64_virtio_mmio_blk_slot_is_block(slot.to_u64()):
-            val opened = Rv64VirtioMmioBlk.open_slot(slot.to_u64())
+fn select_console(blob: FdtBlob):
+    """Point the C console sink at the FDT stdout UART, announcing it through
+    the Simple twin first so the line itself proves the new layout works."""
+    val con = fdt_uart_console_select(blob)
+    if not con.found:
+        serial_println("[console] FDT stdout UART " + fdt_uart_console_describe(con) +
+                       "; keeping ns16550a base=0x10000000")
+        return
+    rv64_console_configure(con.base, con.reg_shift, con.reg_io_width)
+    fdt_uart_console_println(con, "[console] fdt-selected " + fdt_uart_console_describe(con))
+
+# Where the NVFS root lives. Probing and mounting are separate: the device a
+# probe opened is dropped and the chosen one is re-opened fresh for the mount
+# (the virtio driver keeps ring indices in the object, so a probe-time copy
+# must never be the one NVFS keeps using).
+struct NvfsLocation:
+    found: bool
+    kind: u64
+    base: u64
+    start: u64
+    count: u64
+    mshc: DwMshcConfig
+    label: text
+
+fn _kind_dw_mshc() -> u64: 1u64
+fn _kind_virtio() -> u64: 2u64
+
+fn _no_location() -> NvfsLocation:
+    NvfsLocation(found: false, kind: 0u64, base: 0u64, start: 0u64, count: 0u64,
+                 mshc: _dw_mshc_config_none(), label: "")
+
+fn _dw_mshc_config_none() -> DwMshcConfig:
+    DwMshcConfig(base: 0u64, fifo_depth: 0u64, data_offset: 0u64, bus_width: 1u64,
+                 ciu_hz: 0u64, max_hz: 0u64)
+
+fn _dw_mshc_compat() -> [text]:
+    ["starfive,jh7110-mmc", "starfive,jh7110-sdio", "snps,dw-mshc"]
+
+fn _dw_mshc_config(blob: FdtBlob, node: FdtNode, base: u64) -> DwMshcConfig:
+    DwMshcConfig(
+        base: base,
+        fifo_depth: fdt_node_u32(blob, node, "fifo-depth", 0u64),
+        data_offset: fdt_node_u32(blob, node, "data-addr", 0u64),
+        bus_width: fdt_node_u32(blob, node, "bus-width", 1u64),
+        ciu_hz: fdt_node_u32(blob, node, "clock-frequency", 0u64),
+        max_hz: fdt_node_u32(blob, node, "max-frequency", 0u64)
+    )
+
+fn nvfs_extent_on(dev: BlockDevice, label: text) -> MbrPartition:
+    """The NVFS-carrying extent of `dev`: the whole device, else the first MBR
+    primary partition with a valid NVFS superblock; found=false otherwise."""
+    if nvfs_root_device_has_superblock(dev):
+        serial_println("[rv64-nvfs] NVFS superblock found on " + label + " (whole device)")
+        return MbrPartition(found: true, kind: 0u64, start: 0u64, count: dev.sector_count())
+    val first = dev.read_sector(0u64)
+    if first.is_err():
+        serial_println("[rv64-nvfs] " + label + ": sector 0 unreadable: " + first.unwrap_err())
+        return MbrPartition(found: false, kind: 0u64, start: 0u64, count: 0u64)
+    val sector0 = first.unwrap()
+    var index: i64 = 0
+    while index < 4:
+        val part = mbr_partition_at(sector0, index.to_u64())
+        if part.found:
+            val window = BlockWindow.partition(dev, part)
+            if window.is_ok() and nvfs_root_device_has_superblock(window.unwrap()):
+                serial_println("[rv64-nvfs] NVFS superblock found on " + label + " partition " +
+                               fdt_small((index + 1).to_u64()) + " (start " + fdt_hex(part.start) + ")")
+                return part
+        index = index + 1
+    MbrPartition(found: false, kind: 0u64, start: 0u64, count: 0u64)
+
+fn find_nvfs_on_dw_mshc(blob: FdtBlob) -> NvfsLocation:
+    """Every enabled DW MSHC controller in the FDT, in blob order."""
+    var after: u64 = 0u64
+    var node = fdt_find_compatible(blob, _dw_mshc_compat(), after)
+    while node.found:
+        val reg = fdt_node_reg(blob, node, 0u64)
+        if reg.found:
+            val label = "dw-mshc@" + fdt_hex(reg.addr)
+            val cfg = _dw_mshc_config(blob, node, reg.addr)
+            val opened = DwMshcSd.open(DwMshcMmio(base: reg.addr), cfg)
+            if opened.is_err():
+                serial_println("[rv64-nvfs] " + label + ": " + opened.unwrap_err())
+            else:
+                val card = opened.unwrap()
+                serial_println("[rv64-nvfs] " + label + ": SD card ready, " +
+                               fdt_hex(card.capacity_sectors) + " sectors")
+                val extent = nvfs_extent_on(card, label)
+                if extent.found:
+                    return NvfsLocation(found: true, kind: _kind_dw_mshc(), base: reg.addr,
+                                        start: extent.start, count: extent.count, mshc: cfg,
+                                        label: label)
+        after = node.begin_off
+        node = fdt_find_compatible(blob, _dw_mshc_compat(), after)
+    _no_location()
+
+fn find_nvfs_on_virtio(blob: FdtBlob) -> NvfsLocation:
+    """Every virtio,mmio transport in the FDT that carries a block device."""
+    var after: u64 = 0u64
+    var node = fdt_find_compatible(blob, ["virtio,mmio"], after)
+    while node.found:
+        val reg = fdt_node_reg(blob, node, 0u64)
+        if reg.found and rv64_virtio_mmio_blk_is_block_at(reg.addr):
+            val opened = Rv64VirtioMmioBlk.open_at(reg.addr)
             if opened.is_ok():
-                if nvfs_root_device_has_superblock(opened.unwrap()):
-                    return slot
-        slot = slot + 1
-    -1
+                val label = "virtio-mmio@" + fdt_hex(reg.addr)
+                val extent = nvfs_extent_on(opened.unwrap(), label)
+                if extent.found:
+                    return NvfsLocation(found: true, kind: _kind_virtio(), base: reg.addr,
+                                        start: extent.start, count: extent.count,
+                                        mshc: _dw_mshc_config_none(), label: label)
+        after = node.begin_off
+        node = fdt_find_compatible(blob, ["virtio,mmio"], after)
+    _no_location()
+
+fn mount_nvfs_at(loc: NvfsLocation) -> Result<NvfsDriver, text>:
+    """Re-open the located device fresh and mount NVFS on its extent."""
+    if loc.kind == _kind_dw_mshc():
+        val card = DwMshcSd.open(DwMshcMmio(base: loc.base), loc.mshc)
+        if card.is_err():
+            return Err("reopen of " + loc.label + " failed: " + card.unwrap_err())
+        return nvfs_root_device_open(BlockWindow(inner: card.unwrap(), start: loc.start, count: loc.count))
+    val dev = Rv64VirtioMmioBlk.open_at(loc.base)
+    if dev.is_err():
+        return Err("reopen of " + loc.label + " failed: " + dev.unwrap_err())
+    nvfs_root_device_open(BlockWindow(inner: dev.unwrap(), start: loc.start, count: loc.count))
+
 
 fn root_exists(root: NvfsDriver, path: text) -> bool:
     root.stat_path(Path(raw: path)).is_ok()
@@ -99,18 +234,24 @@ fn run_program(root: NvfsDriver, path: text) -> bool:
             false
 
 fn spl_start():
+    # Console first: nothing may be printed through the default byte-wide
+    # ns16550 layout before the FDT says which UART this board has.
+    val blob = FdtBlob.at_address(rv64_boot_dtb_address())
+    select_console(blob)
     serial_println("")
     serial_println("=== SimpleOS RV64 NVFS root boot ===")
-    val slot = find_nvfs_slot()
-    if slot < 0:
-        fail_boot("no virtio-blk device carries a valid NVFS superblock")
+    if not blob.valid():
+        fail_boot("firmware passed no valid device tree; storage cannot be discovered")
         return
-    serial_println("[rv64-nvfs] NVFS superblock found on virtio-mmio block device")
-    val dev = Rv64VirtioMmioBlk.open_slot(slot.to_u64())
-    if dev.is_err():
-        fail_boot("reopen of NVFS device failed: " + dev.unwrap_err())
+    var loc = find_nvfs_on_dw_mshc(blob)
+    if not loc.found:
+        loc = find_nvfs_on_virtio(blob)
+    if not loc.found:
+        fail_boot("no SD (dw-mshc) or virtio-blk device carries a valid NVFS superblock")
         return
-    val mounted = nvfs_root_device_open(dev.unwrap())
+    serial_println("[rv64-nvfs] NVFS root device " + loc.label + " start " + fdt_hex(loc.start) +
+                   " sectors " + fdt_hex(loc.count))
+    val mounted = mount_nvfs_at(loc)
     if mounted.is_err():
         fail_boot("NVFS root mount failed (no fallback): " + mounted.unwrap_err())
         return

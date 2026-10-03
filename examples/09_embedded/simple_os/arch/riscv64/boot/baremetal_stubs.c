@@ -4,6 +4,7 @@
 typedef intptr_t RuntimeValue;
 
 #define UART_BASE 0x10000000UL
+#define SIMPLEOS_RV64_FDT_CONSOLE 1
 #include "../../common/baremetal_16550_serial.h"
 #define SIFIVE_TEST_BASE 0x100000UL
 #define VIRTIO_MMIO_BASE 0x10001000UL

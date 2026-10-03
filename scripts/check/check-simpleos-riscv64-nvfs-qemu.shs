@@ -26,6 +26,19 @@
 # in-guest interpreter, and the /boot-marker.txt written on boot 1 is read
 # back on boot 2 (persistence across a full firmware reboot).
 #
+# DEVICE TREE: the kernel picks its console UART from /chosen stdout-path and
+# its storage from `virtio,mmio` / DW MSHC nodes of the FDT U-Boot passes
+# (src/os/kernel/boot/fdt_console.spl). Every boot must show the FDT-selected
+# ns16550a line (printed through the Simple twin of the C console sink).
+#
+# SD-CARD IMAGE: a third positive boot runs the VisionFive 2 SD-card image
+# (scripts/os/build-simpleos-riscv64-sdcard.shs: MBR, p1 FAT Image+boot.scr,
+# p2 NVFS) as ONE virtio disk, proving the boot.scr-from-p1 and
+# NVFS-on-MBR-partition-2 path the board uses. QEMU has no JH7110 model, so
+# the board's DW MSHC driver and DesignWare UART path are covered only by
+# host-side specs (test/01_unit/os/drivers/storage/dw_mshc_sd_model_spec.spl,
+# test/01_unit/os/kernel/boot/fdt_console_spec.spl) — unverified on hardware.
+#
 # COMPILER: the Rust bootstrap SEED (no full-CLI pure-Simple binary exists);
 # its path + sha256 are recorded in the receipt and the verdict.
 #
@@ -68,13 +81,24 @@ Starting kernel
 [rv64-nvfs] exec /bin/hello.spl (loaded from NVFS root)
 NVFS_PROGRAM_HELLO_OK
 NVFS_RV64_ROOT_SANITY_PASSED'
+MARKERS_FDT_CONSOLE='[console] fdt-selected ns16550a base=0x10000000 reg-shift=0 reg-io-width=1 lsr=0x10000005 stdout-path=path'
 MARKERS_BOOT1="$MARKERS_COMMON
+$MARKERS_FDT_CONSOLE
+(whole device)
 [rv64-nvfs] NVFS persistence check: written:first-boot"
 MARKERS_BOOT2="$MARKERS_COMMON
+$MARKERS_FDT_CONSOLE
+(whole device)
 [rv64-nvfs] ls / : /boot-marker.txt
 [rv64-nvfs] NVFS persistence check: persisted:match content=nvfs-persist-ok"
-MARKERS_NEGATIVE='=== SimpleOS RV64 NVFS root boot ===
-NVFS_ROOT_BOOT_FAILED'
+MARKERS_SDCARD="$MARKERS_COMMON
+$MARKERS_FDT_CONSOLE
+[rv64-nvfs] NVFS superblock found on virtio-mmio@
+ partition 2 (start 0x
+[rv64-nvfs] NVFS persistence check: written:first-boot"
+MARKERS_NEGATIVE="=== SimpleOS RV64 NVFS root boot ===
+$MARKERS_FDT_CONSOLE
+NVFS_ROOT_BOOT_FAILED"
 
 # eval_log <log> <markers-text>: "CHECKED=<n>" when all present, "MISSING:<m>"
 # for the first absent one, "CHECKED=0" on an empty log or empty marker list.
@@ -160,7 +184,8 @@ rc=$?
 set -e
 [ "$rc" -eq 0 ] && [ -s "$KERNEL" ] || { tail -30 "$OUT/kernel-build.log" >&2; verdict_error "kernel native-build failed (rc=$rc), log $OUT/kernel-build.log"; }
 readelf -h "$KERNEL" 2>/dev/null | grep -q 'RISC-V' || verdict_error "$KERNEL is not a RISC-V ELF"
-for sym in spl_start Rv64VirtioMmioBlk_dot_open_slot nvfs_root_device_open interpret_hir_module; do
+for sym in spl_start Rv64VirtioMmioBlk_dot_open_at DwMshcSd_dot_open fdt_uart_console_select \
+           rv64_console_putc nvfs_root_device_open interpret_hir_module; do
     readelf -sW "$KERNEL" | grep -q "$sym" || verdict_error "kernel lacks $sym (closure was not linked)"
 done
 "$OBJCOPY" -O binary "$KERNEL" "$IMAGE" && [ -s "$IMAGE" ] || verdict_error "flat Image extraction failed"
@@ -180,11 +205,8 @@ fi
 [ "$(head -c 4 "$NVFS")" = "SFVN" ] || verdict_error "$NVFS has no NVFS superblock magic at LBA 0"
 
 # --- boot media: FAT boot partition with Image + boot.scr (as on an SD card) ----
-cat >"$OUT/boot.cmd" <<'EOF'
-echo [u-boot] SimpleOS riscv64 boot.scr devtype=${devtype} devnum=${devnum} part=${distro_bootpart}
-load ${devtype} ${devnum}:${distro_bootpart} 0x80200000 /Image
-booti 0x80200000 - ${fdtcontroladdr}
-EOF
+sh scripts/os/build-simpleos-riscv64-sdcard.shs --boot-cmd "$OUT/boot.cmd" \
+    || verdict_error "writing boot.cmd failed"
 mkimage -A riscv -T script -C none -n simpleos-nvfs -d "$OUT/boot.cmd" "$OUT/boot.scr" >/dev/null \
     || verdict_error "mkimage boot.scr failed"
 BOOTIMG=$OUT/boot.img
@@ -196,17 +218,25 @@ mkfs.vfat -F 32 --offset 2048 "$BOOTIMG" >/dev/null || verdict_error "mkfs.vfat 
 mcopy -i "$BOOTIMG@@1M" "$IMAGE" ::/Image && mcopy -i "$BOOTIMG@@1M" "$OUT/boot.scr" ::/boot.scr \
     || verdict_error "populating boot partition failed"
 
-# boot_once <root-disk> <serial-log>: run until a terminal marker or BOOT_WAIT.
+# boot_once <root-disk> <serial-log> [sdcard]: run until a terminal marker or
+# BOOT_WAIT. Default: FAT boot disk + separate NVFS disk. `sdcard`: the one
+# disk is the full board SD image (boot partition + NVFS partition).
 boot_once() {
-    disk=$1; log=$2
+    disk=$1; log=$2; layout=${3:-twodisk}
     rm -f "$log"
+    if [ "$layout" = sdcard ]; then
+        set -- -drive "file=$disk,format=raw,if=none,id=sdcard" \
+            -device virtio-blk-device,drive=sdcard
+    else
+        set -- -drive "file=$BOOTIMG,format=raw,if=none,id=bootdisk" \
+            -device virtio-blk-device,drive=bootdisk \
+            -drive "file=$disk,format=raw,if=none,id=nvfsroot" \
+            -device virtio-blk-device,drive=nvfsroot
+    fi
     set -- -no-user-config -machine virt -cpu rv64 -smp 1 -m 512M \
         -bios "$FW" \
         -device "loader,file=$UBOOT,addr=0x80200000" \
-        -drive "file=$BOOTIMG,format=raw,if=none,id=bootdisk" \
-        -device virtio-blk-device,drive=bootdisk \
-        -drive "file=$disk,format=raw,if=none,id=nvfsroot" \
-        -device virtio-blk-device,drive=nvfsroot \
+        "$@" \
         -serial "file:$log" -display none -monitor none -net none -no-reboot
     argv_guard "$@" || verdict_fail "assembled QEMU argv carries a forbidden flag (-kernel / isa-debug-exit / sifive_test)"
     printf '%s' "$QEMU" >"$log.argv"; printf ' %s' "$@" >>"$log.argv"
@@ -261,17 +291,26 @@ if grep -Faq 'NVFS_RV64_ROOT_SANITY_PASSED' "$OUT/negative.log"; then
 fi
 n3=${res#CHECKED=}
 
+# The VisionFive 2 SD-card image itself, as one disk: boot.scr from p1, NVFS
+# found through the kernel's MBR window on p2.
+SDCARD=$OUT/sdcard.img
+p2_start=$(sh scripts/os/build-simpleos-riscv64-sdcard.shs --image "$IMAGE" --nvfs "$NVFS" --out "$SDCARD") \
+    || verdict_error "building the SD-card image failed"
+boot_once "$SDCARD" "$OUT/sdcard.log" sdcard
+check_boot "sd-card image" "$OUT/sdcard.log" "$MARKERS_SDCARD"; n4=$CHECKED_N
+
 {
     printf 'schema_version=1\n'
     printf 'source_revision=%s\n' "$(git rev-parse HEAD 2>/dev/null || echo unknown)"
     printf 'compiler_path=%s\ncompiler_sha256=%s\n' "$SIMPLE_BIN" "$(sha "$SIMPLE_BIN")"
     printf 'kernel_elf_sha256=%s\nkernel_image_sha256=%s\n' "$(sha "$KERNEL")" "$(sha "$IMAGE")"
     printf 'nvfs_image_sha256=%s\nboot_media_sha256=%s\n' "$(sha "$NVFS")" "$(sha "$BOOTIMG")"
+    printf 'sdcard_image_sha256=%s\nsdcard_nvfs_p2_start=%s\n' "$(sha "$SDCARD")" "$p2_start"
     printf 'opensbi_path=%s\nopensbi_sha256=%s\n' "$FW" "$(sha "$FW")"
     printf 'uboot_path=%s\nuboot_sha256=%s\n' "$UBOOT" "$(sha "$UBOOT")"
     printf '%s\n' "$admission" | grep -E '^(qemu_binary_resolved|qemu_sha256|qemu_version)='
 } >"$OUT/receipt.env"
 
-total=$((n1 + n2 + n3))
-printf 'PASS — %s marker(s) checked across 2 NVFS-root boots + 1 blank-root negative control; riscv64 SimpleOS booted OpenSBI fw_jump -> U-Boot -> booti (no -kernel, no isa-debug-exit), NVFS root mounted, ls/cat/write+read/exec-from-NVFS ok, persisted across reboot; QEMU-only (board blocked, see doc/07_guide/platform/simpleos/qemu_system_tests.md); kernel built by RUST SEED %s; receipt %s\n' \
+total=$((n1 + n2 + n3 + n4))
+printf 'PASS — %s marker(s) checked across 2 NVFS-root boots + 1 blank-root negative control + 1 SD-card-image boot (NVFS on MBR p2); riscv64 SimpleOS booted OpenSBI fw_jump -> U-Boot -> booti (no -kernel, no isa-debug-exit), FDT-selected console, NVFS root mounted, ls/cat/write+read/exec-from-NVFS ok, persisted across reboot; QEMU-only — VisionFive 2 DW MSHC/DW-UART path is spec-verified, UNVERIFIED ON HARDWARE (see doc/07_guide/platform/simpleos/qemu_system_tests.md); kernel built by RUST SEED %s; receipt %s\n' \
     "$total" "$SIMPLE_BIN" "$OUT/receipt.env"

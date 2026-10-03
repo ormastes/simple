@@ -1,0 +1,83 @@
+#!/bin/sh
+# build-simpleos-riscv64-sdcard.shs
+#
+# Assemble the SimpleOS riscv64 NVFS-root SD-card image — the exact bytes that
+# go onto a StarFive VisionFive 2 (JH7110) micro-SD card, and that
+# scripts/check/check-simpleos-riscv64-nvfs-qemu.shs also boots under QEMU
+# `virt` as one virtio disk.
+#
+# Layout (MBR):
+#   p1  type 0x0c FAT32-LBA, bootable, 1 MiB..  : /Image, /boot.scr
+#   p2  type 0xda (non-FS data)                 : raw nvfs-dbfs-backed-v1 image
+# The kernel (examples/09_embedded/simple_os/arch/riscv64/nvfs_root_entry.spl)
+# finds NVFS on p2 through its MBR window; U-Boot runs boot.scr from p1.
+#
+# boot.scr loads Image to 0x80200000 (inside DRAM on QEMU virt and on every
+# JH7110 DRAM size: 0x40000000..) and booti's it with ${fdtcontroladdr} — or
+# with /board.dtb from p1 loaded to ${fdt_addr_r} when that file exists.
+#
+# Usage:
+#   sh scripts/os/build-simpleos-riscv64-sdcard.shs --image Image \
+#      --nvfs nvfs-root.img --out sdcard.img [--board-dtb file.dtb]
+#   sh scripts/os/build-simpleos-riscv64-sdcard.shs --boot-cmd FILE
+#      (only write the boot.cmd source, for the separate-disk QEMU lane)
+# Writes <out> and <out>.boot.scr; prints the p2 start sector on success.
+# Host tools: mkimage (u-boot-tools), sfdisk, mkfs.vfat, mcopy, dd.
+set -eu
+
+die() { printf 'build-simpleos-riscv64-sdcard: %s\n' "$1" >&2; exit 1; }
+
+write_boot_cmd() {
+    cat >"$1" <<'EOF'
+echo [u-boot] SimpleOS riscv64 boot.scr devtype=${devtype} devnum=${devnum} part=${distro_bootpart}
+load ${devtype} ${devnum}:${distro_bootpart} 0x80200000 /Image
+if test -e ${devtype} ${devnum}:${distro_bootpart} /board.dtb; then load ${devtype} ${devnum}:${distro_bootpart} ${fdt_addr_r} /board.dtb; setenv simpleos_fdt ${fdt_addr_r}; else setenv simpleos_fdt ${fdtcontroladdr}; fi
+booti 0x80200000 - ${simpleos_fdt}
+EOF
+}
+
+IMAGE= NVFS= OUT= BOARD_DTB=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --image) IMAGE=$2; shift 2 ;;
+        --nvfs) NVFS=$2; shift 2 ;;
+        --out) OUT=$2; shift 2 ;;
+        --board-dtb) BOARD_DTB=$2; shift 2 ;;
+        --boot-cmd) write_boot_cmd "$2"; exit 0 ;;
+        *) die "unknown argument $1" ;;
+    esac
+done
+[ -s "$IMAGE" ] || die "--image must name a non-empty flat Image"
+[ -s "$NVFS" ] || die "--nvfs must name a non-empty NVFS image"
+[ -n "$OUT" ] || die "--out is required"
+[ "$(head -c 4 "$NVFS")" = "SFVN" ] || die "$NVFS has no NVFS superblock magic at LBA 0"
+for t in mkimage sfdisk mkfs.vfat mcopy dd; do
+    command -v "$t" >/dev/null 2>&1 || die "missing host tool $t"
+done
+
+write_boot_cmd "$OUT.boot.cmd"
+mkimage -A riscv -T script -C none -n simpleos-nvfs -d "$OUT.boot.cmd" "$OUT.boot.scr" >/dev/null \
+    || die "mkimage boot.scr failed"
+
+# p1: 1 MiB aligned, Image + 32 MiB headroom (FAT32 needs >= ~33 MiB).
+fat_mib=$(( $(wc -c <"$IMAGE") / 1048576 + 40 ))
+fat_sectors=$(( fat_mib * 2048 ))
+nvfs_sectors=$(( ($(wc -c <"$NVFS") + 511) / 512 ))
+p2_start=$(( 2048 + fat_sectors ))
+total=$(( p2_start + nvfs_sectors + 2048 ))
+
+rm -f "$OUT"
+truncate -s $(( total * 512 )) "$OUT"
+printf 'label: dos\nstart=2048, size=%s, type=c, bootable\nstart=%s, size=%s, type=da\n' \
+    "$fat_sectors" "$p2_start" "$nvfs_sectors" | sfdisk -q "$OUT" || die "sfdisk failed"
+mkfs.vfat -F 32 --offset 2048 "$OUT" "$(( fat_sectors / 2 ))" >/dev/null || die "mkfs.vfat failed"
+mcopy -i "$OUT@@1M" "$IMAGE" ::/Image || die "copying Image failed"
+mcopy -i "$OUT@@1M" "$OUT.boot.scr" ::/boot.scr || die "copying boot.scr failed"
+if [ -n "$BOARD_DTB" ]; then
+    mcopy -i "$OUT@@1M" "$BOARD_DTB" ::/board.dtb || die "copying board.dtb failed"
+fi
+dd if="$NVFS" of="$OUT" bs=512 seek="$p2_start" conv=notrunc status=none || die "writing NVFS to p2 failed"
+
+[ "$(dd if="$OUT" bs=512 skip="$p2_start" count=1 status=none | head -c 4)" = "SFVN" ] \
+    || die "read-back: no NVFS magic at p2 (sector $p2_start)"
+printf '%s\n' "$p2_start"
