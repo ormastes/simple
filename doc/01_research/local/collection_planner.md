@@ -90,3 +90,21 @@ supports diagnostic compilation but has no test/run CLI. A full self-hosted
 runner has not been admitted for this work. Consequently, this dated audit and
 its focused guard implementation cannot report runtime PASS; five-engine
 parity, generated manuals and retained NFR measurement remain open gates.
+
+## 2026-10-03 append: audited self-hosted JIT execution gap
+
+The CLI source-run path reaches `driver_api_interpret.interpret_file`, which
+sets Interpret mode. The apparent hybrid backend's execution manager imports
+`app.io.jit_sffi`, whose current soft path stores source and interprets it;
+explicit LLVM/Cranelift creation is rejected. Core interpreter JIT tracking and
+the compatibility loader's fake-byte/address path likewise do not establish
+machine-code invocation. These are inspected path findings, not an exhaustive
+claim about all backend providers.
+
+The missing positive harness witness is therefore distinct from the underlying
+missing actual execution owner in these paths. Implementing native codegen,
+loading, ABI-safe invocation, lifetime ownership and an execution-owned receipt
+is necessary before JIT parity can be certified. AOT subprocess execution stays
+the native lane. Exact locations, audit limits and remaining acceptance are in
+`doc/08_tracking/bug/selfhost_jit_execution_owner_missing_2026-10-03.md`.
+No additional runtime attempts or positive execution claims accompany this audit.

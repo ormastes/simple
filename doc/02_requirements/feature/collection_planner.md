@@ -61,3 +61,16 @@ REQ-005 precedes hash-backed REQ-009. REQ-003/007/008 require production
 pipeline invocation, not stand-alone type definitions. The feature is complete
 only when REQ-001–011 have implementation and executable evidence, required
 architecture/design/spec artifacts are current, and `/verify` reports PASS.
+
+### REQ-002 remaining execution acceptance — 2026-10-03
+
+Shared fixture sources and strict differential admission do not complete
+cross-engine parity. The audited self-hosted CLI/compatibility JIT paths either
+interpret source or maintain tracking state; they do not establish actual JIT
+code invocation. JIT must remain uncertified until a real codegen/load/invoke
+owner with closure/code lifetime handling emits execution-owned evidence and
+the same fixtures execute successfully through it. Interpreter and native AOT
+receipts cannot be relabelled JIT. See the scoped source audit and exact missing
+contract in `doc/08_tracking/bug/selfhost_jit_execution_owner_missing_2026-10-03.md`.
+All originally selected engine routes remain required; no scope reduction or
+runtime PASS is implied.
