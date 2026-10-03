@@ -3,7 +3,7 @@
 fn riscv_static_width(kind: i64) -> i64:
     if kind == 0 or kind == 51: return 0
     if kind == 2 or kind == 18 or kind == 19 or kind == 36 or kind == 40: return 8
-    if kind == 33 or kind == 37 or kind == 52 or kind == 53 or kind == 54: return 1
+    if kind == 33 or kind == 37 or kind == 52 or kind == 53 or kind == 54 or kind == 60 or kind == 61: return 1
     if kind == 34 or kind == 38 or kind == 44 or kind == 45 or kind == 55: return 2
     4
 
@@ -68,3 +68,33 @@ fn riscv_static_arithmetic(current: i64, s: i64, a: i64, width: i64, subtract: b
     result
 
 export riscv_static_width, riscv_static_delta, riscv_static_branch, riscv_static_arithmetic
+
+fn riscv_uleb_width(bytes: [i64], offset: i64, limit: i64) -> Result<i64, text>:
+    if offset < 0 or limit > bytes.len() or offset >= limit:
+        return Err("RISC-V ULEB128 field is outside its input section")
+    var width: i64 = 0
+    while width < 10 and width < limit - offset:
+        val byte = bytes[offset + width]
+        width = width + 1
+        if (byte & 128) == 0:
+            if width == 10 and byte > 1:
+                return Err("RISC-V ULEB128 input exceeds 64 bits")
+            return Ok(width)
+    Err("RISC-V ULEB128 field is unterminated or exceeds 64 bits")
+
+fn riscv_uleb_patch(bytes: [i64], offset: i64, width: i64, value: i64) -> Result<[i64], text>:
+    if value < 0: return Err("RISC-V ULEB128 result is negative")
+    if offset < 0 or offset > bytes.len() or width < 1 or width > 10 or width > bytes.len() - offset:
+        return Err("RISC-V ULEB128 patch exceeds its allocated field")
+    var result = bytes
+    var remaining = value
+    var i: i64 = 0
+    while i < width:
+        val continuation = if i + 1 < width: 128 else: 0
+        result[offset + i] = (remaining & 127) | continuation
+        remaining = remaining >> 7
+        i = i + 1
+    if remaining != 0: return Err("RISC-V ULEB128 result exceeds allocated field")
+    Ok(result)
+
+export riscv_uleb_width, riscv_uleb_patch

@@ -57,7 +57,7 @@ use compiler.backend.linker.elf.section_gc.{
 use compiler.backend.linker.elf.eh_frame_gc.{elf_gc_eh_frames}
 use compiler.backend.linker.elf.tls_relax.{elf_relax_tls, elf_tls_tpoff}
 use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags, elf_riscv_hi_index}
-use compiler.backend.linker.riscv_static_reloc.{riscv_static_delta}
+use compiler.backend.linker.riscv_static_reloc.{riscv_static_delta, riscv_uleb_width, riscv_uleb_patch}
 use compiler.backend.linker.elf.merge_strings.{
     ElfMergePlan, elf_merge_section, elf_merge_sections, elf_merge_offset
 }
@@ -1319,8 +1319,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     var need_got_base = false
     for r in refs:
         if r.name == "_GLOBAL_OFFSET_TABLE_" or
-                r.rtype == R_X86_64_GOTOFF64 or
-                r.rtype == R_X86_64_PLTOFF64 or
+                (target == RelocArch.X86_64 and
+                (r.rtype == R_X86_64_GOTOFF64 or r.rtype == R_X86_64_PLTOFF64)) or
                 (elf_target_is_a64(target) and
                 (r.rtype == R_AARCH64_GOTREL64 or r.rtype == R_AARCH64_GOTREL32)):
             need_got_base = true
@@ -1461,11 +1461,21 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
 
     # --- relocate input sections ---
     var riscv_highs: {text: i64} = {}
+    var riscv_uleb_widths: {i64: i64} = {}
     if target == RelocArch.Riscv64:
         var bases: [i64] = []
         for index in in_to_plan:
             bases = bases.push(plan.vaddrs[index])
         riscv_highs = elf_riscv_hi_index(refs, bases)?
+        # Snapshot original encoded extents before applying any relocation.
+        # Admission already checked each extent against its input section.
+        var ri: i64 = 0
+        while ri < refs.len():
+            val reference = refs[ri]
+            if reference.rtype == 60:
+                val bytes = contents[reference.out_sec]
+                riscv_uleb_widths[ri] = riscv_uleb_width(bytes, reference.out_off, bytes.len())?
+            ri = ri + 1
     var j: i64 = 0
     while j < refs.len():
         val r = refs[j]
@@ -1489,6 +1499,18 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         val ref_value = elf_ref_value(ctx, lay, r)?
         var s = ref_value.address
         var a = ref_value.addend
+        if target == RelocArch.Riscv64 and r.rtype == 60:
+            if j + 1 >= refs.len(): return Err("RISC-V ULEB128 requires adjacent SET/SUB relocations")
+            val sub = refs[j + 1]
+            if sub.rtype != 61 or sub.oi != r.oi or sub.out_sec != r.out_sec or sub.out_off != r.out_off:
+                return Err("RISC-V ULEB128 requires adjacent SET/SUB relocations at the same output offset")
+            val sub_value = elf_ref_value(ctx, lay, sub)?
+            val assigned = riscv_static_delta(s, a, 0)?
+            val subtracted = riscv_static_delta(sub_value.address, sub_value.addend, 0)?
+            val difference = riscv_static_delta(assigned, 0, subtracted)?
+            contents[k] = riscv_uleb_patch(contents[k], r.out_off, riscv_uleb_widths[j], difference)?
+            j = j + 2
+            continue
         if a64 and (r.rtype == R_AARCH64_GOTREL64 or r.rtype == R_AARCH64_GOTREL32):
             p = gotplt_v
         if r.rclass == RC_TLS_LD:

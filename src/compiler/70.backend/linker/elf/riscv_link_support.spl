@@ -1,11 +1,44 @@
-use compiler.backend.linker.elf_parser.{ElfObject}
+use compiler.backend.linker.elf_parser.{ElfObject, elf_reloc_type}
 use compiler.backend.linker.elf.reloc_scan.{ElfScanRef}
+use compiler.backend.linker.riscv_static_reloc.{riscv_uleb_width}
+
+fn elf_riscv_validate_uleb(object: ElfObject) -> Result<bool, text>:
+    var i: i64 = 0
+    while i < object.relocations.len():
+        val r = object.relocations[i]
+        val kind = elf_reloc_type(r)
+        if kind == 60:
+            if i + 1 >= object.relocations.len():
+                return Err("RISC-V ULEB128 requires adjacent SET/SUB relocations")
+            val sub = object.relocations[i + 1]
+            if elf_reloc_type(sub) != 61 or sub.r_offset != r.r_offset or
+                    sub.section_idx != r.section_idx or sub.target_section_idx != r.target_section_idx:
+                return Err("RISC-V ULEB128 requires adjacent SET/SUB relocations at the same offset")
+            if r.target_section_idx < 0 or r.target_section_idx >= object.sections.len():
+                return Err("RISC-V ULEB128 target section is invalid")
+            val section = object.sections[r.target_section_idx]
+            if r.r_offset < 0 or r.r_offset >= section.sh_size or section.sh_type == 8:
+                return Err("RISC-V ULEB128 field is outside its input section")
+            if section.sh_addr < 0 or section.sh_addr > object.raw.len() or section.sh_size > object.raw.len() - section.sh_addr:
+                return Err("RISC-V ULEB128 input section is truncated")
+            var bytes: [i64] = []
+            var count: i64 = 0
+            while count < 10 and count < section.sh_size - r.r_offset:
+                bytes.push(object.raw[section.sh_addr + r.r_offset + count] as i64)
+                count = count + 1
+            val width = riscv_uleb_width(bytes, 0, bytes.len())?
+            i = i + 2
+            continue
+        if kind == 61: return Err("RISC-V ULEB128 requires adjacent SET/SUB relocations")
+        i = i + 1
+    Ok(true)
 
 fn elf_riscv_flags(objects: [ElfObject]) -> Result<i64, text>:
     var flags: i64 = 0
     var float_abi: i64 = -1
     var oi: i64 = 0
     for obj in objects:
+        val valid_pairs = elf_riscv_validate_uleb(obj)?
         if obj.raw.len() < 64 or obj.raw[4] != 2 or obj.raw[5] != 1:
             return Err("RISC-V object {oi}: requires little-endian ELF64")
         var current: i64 = 0
