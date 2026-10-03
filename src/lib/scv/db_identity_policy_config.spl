@@ -1,0 +1,182 @@
+# POLICY-v2 is a separate, explicitly pinned configuration projection. It does
+# not activate an indexed backend or migrate legacy state. The embedded POLICY-v1
+# wire and all existing observation signing/content domains remain unchanged.
+use std.scv.db_policy_codec.{DbPolicyConfig, db_policy_encode, db_policy_decode}
+use std.scv.db_observation_identity.{DbObservationIdentityPolicy}
+use std.scv.db_observation_identity_codec.{db_observation_identity_policy_encode, db_observation_identity_policy_decode}
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+struct DbIdentityPolicyConfig:
+    revision: text
+    base: DbPolicyConfig
+    identities: [DbObservationIdentityPolicy]
+
+struct _IdentityConfigBody:
+    base_wire: text
+    identity_wires: [text]
+
+fn _identity_config_error(error: text) -> text:
+    if error.starts_with("SCVDB_IDENTITY_CONFIG_") or error.starts_with("SCVDB_POLICY_") or error.starts_with("SCVDB_OBSERVATION_IDENTITY_") or error.starts_with("SCVDB_METADATA_"): return error
+    "SCVDB_IDENTITY_CONFIG_CODEC"
+
+fn _identity_config_hex(value: text) -> bool:
+    if value.len() != 64: return false
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn _identity_config_frame_size(payload: i64) -> i64:
+    1 + db_u64_bytes(payload as u64).len() + payload
+
+# Exact final wire size, before allocating its text frames/hex. Nested codecs
+# independently cap one current nested wire; prior wires are retained only while
+# their cumulative enclosing projection remains <=16MiB, never 64*2MiB first.
+fn _identity_config_size(base_bytes: i64, identity_payload: i64) -> Result<bool, text>:
+    val root_payload = _identity_config_frame_size(64) + _identity_config_frame_size(base_bytes) + _identity_config_frame_size(identity_payload)
+    val wire_size = "SCVDB-POLICY-v2\n".len() + 2 * _identity_config_frame_size(root_payload) + 1
+    if wire_size > 16777216: return Err("SCVDB_IDENTITY_CONFIG_QUOTA")
+    Ok(true)
+
+fn _identity_config_body(config: DbIdentityPolicyConfig) -> Result<_IdentityConfigBody, text>:
+    if config.identities.len() == 0 or config.identities.len() > 64: return Err("SCVDB_IDENTITY_CONFIG_COUNT")
+    # The legacy encoder validates every admission/metadata/base pin and context.
+    # Its result is ASCII, so text length is the exact embedded UTF-8 byte count.
+    val base_wire = db_policy_encode(config.base)?
+    _identity_config_size(base_wire.len(), 0)?
+    var wires: [text] = []
+    var payload = 0
+    var previous_instance = ""
+    var previous_project = ""
+    var have_previous = false
+    for policy in config.identities:
+        if policy.namespace != config.base.admission.namespace or policy.epoch != config.base.admission.epoch: return Err("SCVDB_IDENTITY_CONFIG_SCOPE")
+        if have_previous and (policy.provider_instance < previous_instance or (policy.provider_instance == previous_instance and policy.project <= previous_project)): return Err("SCVDB_IDENTITY_CONFIG_ORDER")
+        val wire = db_observation_identity_policy_encode(policy)?
+        payload = payload + _identity_config_frame_size(wire.len())
+        _identity_config_size(base_wire.len(), payload)?
+        wires.push(wire)
+        previous_instance = policy.provider_instance
+        previous_project = policy.project
+        have_previous = true
+    Ok(_IdentityConfigBody(base_wire: base_wire, identity_wires: wires))
+
+fn _identity_config_list(body: _IdentityConfigBody) -> Result<[u8], text>:
+    var fields: [[u8]] = []
+    for wire in body.identity_wires: fields.push(db_canonical_text(wire)?)
+    Ok(db_canonical_list(fields))
+
+fn _identity_config_digest(body: _IdentityConfigBody) -> Result<text, text>:
+    val bytes = db_canonical_list([db_canonical_text(body.base_wire)?, _identity_config_list(body)?])
+    Ok(sha256_u8_hex(db_domain_bytes("policy-config-v2", bytes)?))
+
+fn db_identity_policy_config_digest(config: DbIdentityPolicyConfig) -> Result<text, text>:
+    """Recompute the outer pin, ignoring its old value; this does not approve configuration."""
+    match _identity_config_body(config):
+        Ok(body): _identity_config_digest(body)
+        Err(error): Err(_identity_config_error(error))
+
+fn db_identity_policy_config_seal(config: DbIdentityPolicyConfig) -> Result<DbIdentityPolicyConfig, text>:
+    """Set the recomputed content pin without granting configuration approval."""
+    var sealed = config
+    sealed.revision = db_identity_policy_config_digest(config)?
+    Ok(sealed)
+
+fn _identity_config_encode(config: DbIdentityPolicyConfig) -> Result<text, text>:
+    val body = _identity_config_body(config)?
+    if not _identity_config_hex(config.revision) or config.revision != _identity_config_digest(body)?: return Err("SCVDB_IDENTITY_CONFIG_PIN")
+    val bytes = db_canonical_list([db_canonical_text(config.revision)?, db_canonical_text(body.base_wire)?, _identity_config_list(body)?])
+    val wire = "SCVDB-POLICY-v2\n" + db_snapshot_hex(bytes) + "\n"
+    if wire.len() > 16777216: return Err("SCVDB_IDENTITY_CONFIG_QUOTA")
+    Ok(wire)
+
+fn db_identity_policy_config_encode(config: DbIdentityPolicyConfig) -> Result<text, text>:
+    """Encode a self-consistent sealed v2 configuration; no backend is activated."""
+    match _identity_config_encode(config):
+        Ok(wire): Ok(wire)
+        Err(error): Err(_identity_config_error(error))
+
+fn _identity_config_root(wire: text, header: text, tag: u8, limit: i64) -> Result<DbDecodedFrame, text>:
+    if wire.len() > limit: return Err("SCVDB_IDENTITY_CONFIG_QUOTA")
+    if not wire.starts_with(header) or not wire.ends_with("\n") or wire.len() <= header.len(): return Err("SCVDB_IDENTITY_CONFIG_CODEC")
+    val bytes = db_snapshot_unhex(wire[header.len():wire.len() - 1])?
+    val root = db_read_frame(bytes, 0)?
+    if root.tag != tag or root.next_offset != bytes.len(): return Err("SCVDB_IDENTITY_CONFIG_CODEC")
+    Ok(root)
+
+fn _identity_config_children(frame: DbDecodedFrame, maximum: i64, exact: i64) -> Result<[DbDecodedFrame], text>:
+    if frame.tag != 6u8: return Err("SCVDB_IDENTITY_CONFIG_CODEC")
+    var children: [DbDecodedFrame] = []
+    var offset = 0
+    while offset < frame.payload.len():
+        if children.len() >= maximum:
+            if exact < 0: return Err("SCVDB_IDENTITY_CONFIG_COUNT")
+            return Err("SCVDB_IDENTITY_CONFIG_CODEC")
+        val child = db_read_frame(frame.payload, offset)?
+        children.push(child)
+        offset = child.next_offset
+    if exact >= 0 and children.len() != exact: return Err("SCVDB_IDENTITY_CONFIG_CODEC")
+    Ok(children)
+
+# Extracting an embedded self-pin establishes no trust: its own strict decoder
+# recomputes it, then the independently supplied outer pin binds all nested bytes.
+fn _identity_config_nested_pin(wire: text, header: text, tag: u8, limit: i64) -> Result<text, text>:
+    val root = _identity_config_root(wire, header, tag, limit)?
+    val first = db_read_frame(root.payload, 0)?
+    if first.payload.len() != 64: return Err("SCVDB_IDENTITY_CONFIG_PIN")
+    val pin = db_read_text(first)?
+    if not _identity_config_hex(pin): return Err("SCVDB_IDENTITY_CONFIG_PIN")
+    Ok(pin)
+
+fn _identity_config_decode(wire: text, expected_revision: text) -> Result<DbIdentityPolicyConfig, text>:
+    if not _identity_config_hex(expected_revision): return Err("SCVDB_IDENTITY_CONFIG_PIN")
+    val fields = _identity_config_children(_identity_config_root(wire, "SCVDB-POLICY-v2\n", 6u8, 16777216)?, 3, 3)?
+    if fields[0].payload.len() != 64: return Err("SCVDB_IDENTITY_CONFIG_PIN")
+    val revision = db_read_text(fields[0])?
+    if revision != expected_revision: return Err("SCVDB_IDENTITY_CONFIG_PIN")
+    val policy_fields = _identity_config_children(fields[2], 64, -1)?
+    if policy_fields.len() == 0: return Err("SCVDB_IDENTITY_CONFIG_COUNT")
+    val base_wire = db_read_text(fields[1])?
+    val base_pin = _identity_config_nested_pin(base_wire, "SCVDB-POLICY-v1\n", 120u8, 16777216)?
+    val base = db_policy_decode(base_wire, base_pin)?
+    var identities: [DbObservationIdentityPolicy] = []
+    for field in policy_fields:
+        if field.payload.len() > 2097152: return Err("SCVDB_IDENTITY_CONFIG_QUOTA")
+        val identity_wire = db_read_text(field)?
+        val pin = _identity_config_nested_pin(identity_wire, "SCVDB-OBSERVATION-IDENTITY-POLICY-v1\n", 6u8, 2097152)?
+        identities.push(db_observation_identity_policy_decode(identity_wire, pin)?)
+    val config = DbIdentityPolicyConfig(revision: revision, base: base, identities: identities)
+    if db_identity_policy_config_digest(config)? != expected_revision: return Err("SCVDB_IDENTITY_CONFIG_PIN")
+    if _identity_config_encode(config)? != wire: return Err("SCVDB_IDENTITY_CONFIG_CODEC")
+    Ok(config)
+
+fn db_identity_policy_config_decode(wire: text, expected_revision: text) -> Result<DbIdentityPolicyConfig, text>:
+    """Decode strict v2 bytes against an independently trusted outer configuration pin."""
+    match _identity_config_decode(wire, expected_revision):
+        Ok(config): Ok(config)
+        Err(error): Err(_identity_config_error(error))
+
+fn db_identity_policy_set_digest(config: DbIdentityPolicyConfig) -> Result<text, text>:
+    """Hash scoped identity policies, intentionally ignoring the outer pin; not authority."""
+    # Validate nested pins and configuration scope, but exclude outer/base pins
+    # from this structural digest. Credential/metadata rotation remains possible;
+    # ANY identity policy change (including transport flags) requires migration.
+    val body = match _identity_config_body(config):
+        Ok(value): value
+        Err(error): return Err(_identity_config_error(error))
+    val bytes = db_canonical_list([db_canonical_text(config.base.admission.namespace)?, db_frame(2u8, db_u64_bytes(config.base.admission.epoch)), _identity_config_list(body)?])
+    Ok(sha256_u8_hex(db_domain_bytes("identity-policy-set-v1", bytes)?))
+
+fn db_identity_policy_select(config: DbIdentityPolicyConfig, provider_instance: text, project: text) -> Result<DbObservationIdentityPolicy, text>:
+    """Select after validating the full seal; the caller must pin an approved configuration."""
+    if not _identity_config_hex(config.revision) or db_identity_policy_config_digest(config)? != config.revision: return Err("SCVDB_IDENTITY_CONFIG_PIN")
+    for policy in config.identities:
+        if policy.provider_instance == provider_instance and policy.project == project: return Ok(policy)
+    Err("SCVDB_IDENTITY_CONFIG_UNKNOWN_SCOPE")
+
+export DbIdentityPolicyConfig
+export db_identity_policy_config_digest, db_identity_policy_config_seal
+export db_identity_policy_config_encode, db_identity_policy_config_decode
+export db_identity_policy_set_digest, db_identity_policy_select
