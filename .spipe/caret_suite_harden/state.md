@@ -22,6 +22,10 @@ feature). All evidence below is from that binary on Windows 11.
 | AC-4 slang small model hello | DONE (1.5B) | `caret_slang_local_hello_system_spec` 3/3 with Qwen2.5-1.5B-Instruct Q4_K_M; 0.5B fails the hello oracle (sabotage-verified) — bug filed |
 | AC-5 sspec mirrors | DONE | `spipe-docgen` mirrors for every new/changed spec, 0 stubs, 0 warnings |
 
+Perf: `cs_refresh` + `cs_render` (140x40) while Claude streams: 18 ms avg, 46 ms
+worst over 20 refreshes (interpreter, phase 1). Windows slang memory probe adds
+~2.4 s per model load (PowerShell CIM, two probes).
+
 Sabotage: hello oracle red with 0.5B; live oracle red with a wrong expected
 product; interpreter regression spec red on the pre-fix seed (0 vs 3/1).
 

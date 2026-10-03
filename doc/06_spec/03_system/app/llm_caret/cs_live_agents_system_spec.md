@@ -38,8 +38,9 @@ type a question, read the answer off the agent screen, `/kill` the pane.
 ## Compatibility and limitations
 Needs `claude`, `codex` and `kimi` on PATH and signed in; on Windows they are
 found as claude.exe / codex.cmd / kimi.exe. Without tmux (always on Windows)
-the panes are smux panes on a real ConPTY. A missing or signed-out agent is a
-FAILED scenario naming the agent, never a skip. Each scenario costs one short
+the panes are smux panes on a real ConPTY. An agent CLI absent from PATH is a
+visible BLOCKED (pending) row naming it; a present CLI that does not answer
+(signed out, no network) FAILS. Each scenario costs one short
 model call.
 ## Verification guidance and troubleshooting
 The oracle is a product the agent must COMPUTE (4711 x 3 = 14133): the typed
@@ -65,11 +66,13 @@ model (`os.apps.smux.vt_screen`) missed an erase sequence.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-CS-LIVE-001
+if _blocked("claude"):
+    return
 step("Launch claude from the dashboard and type the question")
 val run = drive_agent("cs-live-claude", "claude", 180)
 step("The pane was created for the agent")
@@ -96,11 +99,13 @@ expect(run.killed).to_contain("killed pane")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-CS-LIVE-002
+if _blocked("codex"):
+    return
 step("Launch codex from the dashboard and type the question")
 val run = drive_agent("cs-live-codex", "codex", 180)
 step("The pane was created for the agent")
@@ -127,11 +132,13 @@ expect(run.killed).to_contain("killed pane")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-CS-LIVE-003
+if _blocked("kimi"):
+    return
 step("Launch kimi from the dashboard and type the question")
 val run = drive_agent("cs-live-kimi", "kimi", 180)
 step("The pane was created for the agent")

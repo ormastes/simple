@@ -14,8 +14,9 @@ type a question, read the answer off the agent screen, `/kill` the pane.
 ## Compatibility and limitations
 Needs `claude`, `codex` and `kimi` on PATH and signed in; on Windows they are
 found as claude.exe / codex.cmd / kimi.exe. Without tmux (always on Windows)
-the panes are smux panes on a real ConPTY. A missing or signed-out agent is a
-FAILED scenario naming the agent, never a skip. Each scenario costs one short
+the panes are smux panes on a real ConPTY. An agent CLI absent from PATH is a
+visible BLOCKED (pending) row naming it; a present CLI that does not answer
+(signed out, no network) FAILS. Each scenario costs one short
 model call.
 ## Verification guidance and troubleshooting
 The oracle is a product the agent must COMPUTE (4711 x 3 = 14133): the typed
@@ -30,9 +31,10 @@ model (`os.apps.smux.vt_screen`) missed an erase sequence.
 # @manual_section: cs-live-agents
 
 use std.spec
+use std.spec.{pending}
 use std.nogc_sync_mut.io.{thread_sleep_ms}
 use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
-    cs_render, cs_handle_command, cs_apply_action}
+    cs_render, cs_handle_command, cs_apply_action, cs_resolve_exe}
 
 val QUESTION = "What is 4711 times 3? Reply with only the number."
 val ANSWER = "14133"
@@ -99,6 +101,14 @@ fn drive_agent(session: text, harness: text, budget_s: i64) -> LiveRun:
     LiveRun(launched: launched, answered: answered, screen: screen,
         frame: frame, killed: killed)
 
+# An agent CLI absent from this host is a visible BLOCKED row, not a pass and
+# not a silent skip. A CLI that IS present but never answers still fails.
+fn _blocked(harness: text) -> bool:
+    if cs_resolve_exe(harness) != "":
+        return false
+    pending("BLOCKED: " + harness + " is not on PATH on this host")
+    true
+
 # The text right of the dashboard/screen divider on every frame row.
 fn right_half(frame: text) -> text:
     var out: [text] = []
@@ -114,6 +124,8 @@ describe "cs dashboard drives live agents in panes":
 
     it "Claude Code answers a dashboard question in the right-hand pane":
         # @req REQ-CS-LIVE-001
+        if _blocked("claude"):
+            return
         step("Launch claude from the dashboard and type the question")
         val run = drive_agent("cs-live-claude", "claude", 180)
         # @capture(tui): split frame with Claude's answer on the right
@@ -127,6 +139,8 @@ describe "cs dashboard drives live agents in panes":
 
     it "Codex answers a dashboard question in the right-hand pane":
         # @req REQ-CS-LIVE-002
+        if _blocked("codex"):
+            return
         step("Launch codex from the dashboard and type the question")
         val run = drive_agent("cs-live-codex", "codex", 180)
         # @capture(tui): split frame with Codex's answer on the right
@@ -140,6 +154,8 @@ describe "cs dashboard drives live agents in panes":
 
     it "Kimi answers a dashboard question in the right-hand pane":
         # @req REQ-CS-LIVE-003
+        if _blocked("kimi"):
+            return
         step("Launch kimi from the dashboard and type the question")
         val run = drive_agent("cs-live-kimi", "kimi", 180)
         # @capture(tui): split frame with Kimi's answer on the right

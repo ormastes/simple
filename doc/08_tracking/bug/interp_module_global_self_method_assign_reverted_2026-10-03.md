@@ -46,3 +46,10 @@ blocked forever when the piped child had nothing pending: POSIX sets
 `PeekNamedPipe` for the pending byte count and reading only that.
 `rt_pty_is_running` was implemented but never registered in the interpreter
 extern table; registered.
+
+## Open sibling (not fixed: no POSIX host in this session)
+The POSIX interpreter PTY read (`interpreter_extern/pty.rs` `unix_impl::pty_read`)
+still decodes each 4096-byte chunk with `from_utf8_lossy`, so a multi-byte
+character split across two reads becomes U+FFFD on Linux/macOS. The Windows
+ConPTY path (`runtime/src/value/pty.rs`) now carries the incomplete tail to the
+next read; apply the same carry per fd on POSIX and verify on a POSIX host.

@@ -20,7 +20,7 @@ use std.nogc_async_mut.sosix.{sosix_proc_usage, sosix_is_running, sosix_which,
     sosix_platform}
 use std.io_runtime.{env_get, file_exists}
 use app.llm_caret.harness_spec.{parse_harness_spec, harness_spec_display}
-use app.llm_caret.pane_backend.{Pane, pane_backend_name, pane_available,
+use app.llm_caret.pane_backend.{Pane, pane_backend_name,
     pane_list, pane_select, pane_zoom, pane_spawn, pane_kill, pane_send,
     pane_capture, pane_send_key, pane_key_bytes}
 
@@ -326,13 +326,13 @@ fn _find_pane(panes: [Pane], pane_id: text, title: text) -> [Pane]:
             return [pane]
     []
 
-fn _measured(a: CsAgent, pane: Pane) -> CsAgent:
+fn _measured(a: CsAgent, pane: Pane, probe_pid: bool) -> CsAgent:
     var status = "running"
     var detail = "pane " + pane.pane_id + " title " + pane.title
     # smux lists only panes whose child it has confirmed alive, so a listed
-    # smux pane IS running; only a tmux pid needs the OS probe.
+    # smux pane IS running; only a tmux pid needs the OS probe (`probe_pid`).
     # TODO: [llm-caret][P1] Reports every live agent as exited on the shipped binary: the seed's rt_process_is_running returns false for any pid it did not spawn and a tmux pane is tmux's child; fixed in source, needs the deploy (doc/08_tracking/bug/interpreter_process_is_running_false_for_unspawned_pid_2026-09-06.md) [blocked:seed-deploy]
-    if pane_backend_name() == "tmux" and not sosix_is_running(pane.pid):
+    if probe_pid and not sosix_is_running(pane.pid):
         status = "exited: pane pid " + pane.pid.to_text() + " is not running"
     val usage = sosix_proc_usage(pane.pid)
     var cpu = -1.0
@@ -351,14 +351,7 @@ fn _unmeasured(a: CsAgent, status: text, detail: text) -> CsAgent:
 
 fn cs_refresh(d: CsDashboard) -> CsDashboard:
     val backend = pane_backend_name()
-    if not pane_available():
-        var stale: [CsAgent] = []
-        for a in d.agents:
-            stale = stale + [_unmeasured(a, "unknown: pane backend unavailable",
-                "not polled: no pane backend")]
-        return _dash(d, "disconnected: pane backend " + backend +
-            " is unavailable; agent state is unknown", stale, d.selected, d.log)
-
+    val probe_pid = backend == "tmux"
     val panes = pane_list(d.session)
     var agents: [CsAgent] = []
     var running = 0
@@ -368,7 +361,7 @@ fn cs_refresh(d: CsDashboard) -> CsDashboard:
         if a.pane_id == "" and a.status.starts_with("pending"):
             next = _unmeasured(a, a.status, a.detail)
         for pane in _find_pane(panes, a.pane_id, a.agent_id):
-            next = _measured(a, pane)
+            next = _measured(a, pane, probe_pid)
         if next.status == "running":
             running = running + 1
         agents = agents + [next]
@@ -448,7 +441,7 @@ fn _attach(d: CsDashboard, agent_id: text, pane: Pane) -> CsDashboard:
     var agents: [CsAgent] = []
     for a in d.agents:
         if a.agent_id == agent_id:
-            agents = agents + [_measured(a, pane)]
+            agents = agents + [_measured(a, pane, pane_backend_name() == "tmux")]
         else:
             agents = agents + [a]
     _dash(d, d.manager_status, agents, d.selected, d.log)
