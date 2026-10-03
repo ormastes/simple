@@ -67,6 +67,7 @@ fn _queue_prepare(root: text, before: DbSettlementQueueView, item_index: i64, co
         item.journal = Some(DbSettlementJournal(receipt: proof.receipt, files: accepted.files, projection_digest: db_settlement_projection_digest(accepted.files)?, phase: DbSettlementPhase.PublishedAwaitingIndex, index_ref: "", index_head: "", index_receipt_digest: ""))
         item.candidate_commit = accepted.candidate_commit
         item.observed_index_head = proof.index_head
+        item.preparation_structure = db_settlement_queue_structure(config.policy)?
         item.last_error = ""
         return _queue_result(root, before, item_index, item, "local-index-observed")
     if item.attempts == 18446744073709551615u64: return Err("SCVDB_QUEUE_ATTEMPTS_EXHAUSTED")
@@ -93,6 +94,7 @@ fn _queue_record_candidate(root: text, before: DbSettlementQueueView, item_index
     item.attempts = item.attempts + 1u64
     item.journal = Some(journal)
     item.candidate_commit = db_git_candidate_commit_bytes(candidate)?
+    item.preparation_structure = db_settlement_queue_structure(config.policy)?
     item.last_error = ""
     _queue_result(root, before, item_index, item, "prepared")
 
@@ -113,14 +115,16 @@ fn _queue_publish(root: text, before: DbSettlementQueueView, index: i64, config:
     val status = db_git_settlement_reconcile_history(root, receipt.remote, receipt.previous_head, receipt.accepted_head, config.scratch_parent)
     if status.code == "published": return _queue_observe_published(root, before, index, config)
     if status.code != "not_published": return Err(status.code)
-    if status.observed_head != receipt.previous_head:
+    val changed_structure = item.preparation_structure != db_settlement_queue_structure(config.policy)?
+    if status.observed_head != receipt.previous_head or changed_structure:
         # Absence was proved by raw single-parent history, not by push status.
         # The old candidate remains in the immutable prior queue generation.
         item.phase = "queued"
         item.journal = nil
         item.candidate_commit = ""
-        item.last_error = "SCVDB_QUEUE_STALE_REPLAN"
-        return _queue_result(root, before, index, item, "stale-replan")
+        item.preparation_structure = ""
+        item.last_error = if changed_structure: "SCVDB_QUEUE_STRUCTURE_REPLAN" else: "SCVDB_QUEUE_STALE_REPLAN"
+        return _queue_result(root, before, index, item, if changed_structure: "structure-replan" else: "stale-replan")
     val candidate = db_git_candidate_restore(_queue_candidate_request(root, config, journal), item.candidate_commit, receipt.accepted_head, \: scv_sj_lease_is_held(root))?
     val verified = db_settlement_verify_objects(candidate.scratch, journal)
     var publication: Result<DbGitCandidatePublication, text> = Err("SCVDB_QUEUE_CANDIDATE")
@@ -155,17 +159,47 @@ fn db_settlement_resume_local(root: text, expected_queue_head: text, config: DbS
     val now = (sample / 1000000) as u64
     val before = db_settlement_queue_open(root, admission)?
     if before.head != expected_queue_head: return Err("SCVDB_STORE_HEAD_ADVANCED")
+    # Reconcile all uncertain effects before selecting any fresh work. Queue
+    # arrival order is not causality; a predecessor may arrive after its child.
     for index in 0..before.queue.items.len():
         val item = before.queue.items[index]
-        if item.phase == "conflicted" or item.phase == "local-index-observed": continue
+        if item.phase != "prepared" and item.phase != "awaiting-index": continue
         db_require_unreserved_entity_kinds(item.patch)?
         val authenticated = db_authorize_patch(item.patch, admission, item.patch.causal_dependencies, now)?
         if val journal = item.journal:
             val receipt = db_receipt_authenticate(journal.receipt, config.authority)?
-        if item.phase == "queued": return _queue_prepare(root, before, index, config, now, sign_receipt)
         if item.phase == "prepared": return _queue_publish(root, before, index, config)
         if item.phase == "awaiting-index": return _queue_index(root, before, index, config)
-        return Err("SCVDB_QUEUE_PHASE")
+    var eligible: [i64] = []
+    var blocked = false
+    for index in 0..before.queue.items.len():
+        val item = before.queue.items[index]
+        if item.phase != "queued": continue
+        var waiting = false
+        for dependency in item.patch.causal_dependencies:
+            for predecessor in before.queue.items:
+                if predecessor.patch.batch_id == dependency and predecessor.phase != "local-index-observed": waiting = true
+        if waiting: blocked = true
+        else: eligible.push(index)
+    while eligible.len() > 0:
+        var selected = eligible[0]
+        for index in eligible:
+            if before.queue.items[index].patch.batch_id < before.queue.items[selected].patch.batch_id: selected = index
+        var retained: [i64] = []
+        for index in eligible:
+            if index != selected: retained.push(index)
+        eligible = retained
+        val item = before.queue.items[selected]
+        db_require_unreserved_entity_kinds(item.patch)?
+        val authenticated = db_authorize_patch(item.patch, admission, item.patch.causal_dependencies, now)?
+        match _queue_prepare(root, before, selected, config, now, sign_receipt):
+            Ok(result): return Ok(result)
+            Err(reason):
+                if reason != "SCVDB_MISSING_DEPENDENCY": return Err(reason)
+                # External dependencies remain queued without poisoning ready
+                # independent work or silently converting absence to conflict.
+                blocked = true
+    if blocked: return Err("SCVDB_QUEUE_DEPENDENCY_BLOCKED")
     Ok(DbSettlementLocalResult(code: "idle", view: before, batch_id: ""))
 
 export DbSettlementLocalConfig, DbSettlementLocalResult, db_settlement_resume_local

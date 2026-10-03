@@ -4,6 +4,8 @@ use app.io.mod.{dir_create, dir_remove_all, cwd}
 use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 use std.scv.db_patch_codec.{db_patch_encode}
 use std.scv.db_identity_snapshot.{db_identity_snapshot_decode}
+use std.scv.db_reducer.{FieldMergeRule}
+use std.common.crypto.sha256.{sha256_text}
 use std.scv.sj_capsule.{scv_sj_lease_is_held}
 use app.scv.db.settlement_queue_codec.*
 use app.scv.db.settlement_queue.*
@@ -146,4 +148,60 @@ describe "durable local settlement queue and exact candidate restart":
         var invalid = view.queue
         invalid.items[0].phase = "production-complete"
         expect(db_settlement_queue_encode(invalid)).to_equal(Err("SCVDB_QUEUE_PHASE"))
+        check_item2_queue_cleanup(fixture)
+
+    it "processes a later-arriving predecessor before its signed dependent without rewriting either":
+        val initial = setup_item2_queue_fixture()
+        val fixture = setup_item2_queue_dependencies(initial, 1, [initial.patches[0].batch_id])
+        val child = db_settlement_enqueue(fixture.source, "", fixture.patches[1], fixture.config.policy.admission).unwrap()
+        val both = db_settlement_enqueue(fixture.source, child.head, fixture.patches[0], fixture.config.policy.admission).unwrap()
+        val first = db_settlement_resume_local(fixture.source, both.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(first.batch_id).to_equal(fixture.patches[0].batch_id)
+        expect(first.view.queue.items[0].phase).to_equal("queued")
+        expect(first.view.queue.items[1].phase).to_equal("prepared")
+        val sent = db_settlement_resume_local(fixture.source, first.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        val indexed = db_settlement_resume_local(fixture.source, sent.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        val second = db_settlement_resume_local(fixture.source, indexed.view.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(second.batch_id).to_equal(fixture.patches[1].batch_id)
+        expect(second.code).to_equal("prepared")
+        expect(db_patch_encode(second.view.queue.items[0].patch).unwrap()).to_equal(db_patch_encode(fixture.patches[1]).unwrap())
+        check_item2_queue_cleanup(fixture)
+
+    it "retains externally blocked work while admitting an independent ready batch":
+        val fixture = setup_item2_queue_dependencies(setup_item2_queue_fixture(), 1, [sha256_text("external predecessor not yet received")])
+        val orphan = db_settlement_enqueue(fixture.source, "", fixture.patches[1], fixture.config.policy.admission).unwrap()
+        expect(db_settlement_resume_local(fixture.source, orphan.head, fixture.config, setup_item2_queue_sign)).to_equal(Err("SCVDB_QUEUE_DEPENDENCY_BLOCKED"))
+        val both = db_settlement_enqueue(fixture.source, orphan.head, fixture.patches[0], fixture.config.policy.admission).unwrap()
+        val ready = db_settlement_resume_local(fixture.source, both.head, fixture.config, setup_item2_queue_sign).unwrap()
+        expect(ready.batch_id).to_equal(fixture.patches[0].batch_id)
+        expect(ready.view.queue.items[0].phase).to_equal("queued")
+        expect(ready.view.queue.items[0].patch).to_equal(fixture.patches[1])
+        check_item2_queue_cleanup(fixture)
+
+    it "replans an unpublished prepared candidate after structural policy change":
+        val fixture = setup_item2_queue_fixture()
+        val queued = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.admission).unwrap()
+        val prepared = db_settlement_resume_local(fixture.source, queued.head, fixture.config, setup_item2_queue_sign).unwrap()
+        var changed = fixture.config
+        changed.policy.merge.fields[0].rule = FieldMergeRule.OrderedListConflict
+        changed = setup_item2_queue_repin(changed)
+        expect(db_settlement_queue_structure(changed.policy).unwrap() == prepared.view.queue.items[0].preparation_structure).to_equal(false)
+        val result = db_settlement_resume_local(fixture.source, prepared.view.head, changed, setup_item2_queue_sign).unwrap()
+        expect(result.code).to_equal("structure-replan")
+        expect(result.view.queue.items[0].phase).to_equal("queued")
+        expect(result.view.queue.items[0].patch).to_equal(fixture.patches[0])
+        expect(check_item2_queue_git(fixture.config.authority.remote, ["rev-parse", "refs/heads/settled"])).to_equal(fixture.config.bootstrap_receipt.accepted_head)
+        check_item2_queue_cleanup(fixture)
+
+    it "reauthorizes credential rotation without changing the structural pin":
+        val fixture = setup_item2_queue_fixture()
+        val queued = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.admission).unwrap()
+        val prepared = db_settlement_resume_local(fixture.source, queued.head, fixture.config, setup_item2_queue_sign).unwrap()
+        var rotated = fixture.config
+        rotated.policy.admission.keys[0].valid_until = 18446744073709551614u64
+        rotated = setup_item2_queue_repin(rotated)
+        expect(db_settlement_queue_structure(rotated.policy).unwrap()).to_equal(prepared.view.queue.items[0].preparation_structure)
+        val result = db_settlement_resume_local(fixture.source, prepared.view.head, rotated, setup_item2_queue_sign).unwrap()
+        expect(result.code).to_equal("awaiting-index")
+        expect(result.view.queue.items[0].attempts).to_equal(1u64)
         check_item2_queue_cleanup(fixture)
