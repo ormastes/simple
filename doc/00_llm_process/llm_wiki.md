@@ -599,6 +599,14 @@ wrong repository subsystem. Link detailed guides instead of duplicating them.
 - **Scope:** native FreeBSD x86_64 bootstrap inside QEMU (`check-freebsd-bootstrap-qemu.shs --full`)
   through Stage 3 PASS, then Stage 4 full CLI and FreeBSD spec runs.
 - **Timeouts:** ssh cap >= bootstrap budget (#1121); Stage 2 per-file cap 1800s under TCG (#1122).
+
+## Linux riscv64 QEMU bootstrap lane
+
+- **Expert note:** `doc/00_llm_process/feature_expert/linux_riscv64_qemu_bootstrap/skill.md`.
+- **Scope:** native riscv64 Linux guest (Ubuntu cloud image, OpenSBI -> U-Boot, 20 vCPU TCG)
+  via `check-linux-riscv64-bootstrap-qemu.shs`; trust-root Stage 2 with `--backend=cranelift`.
+- **Triple:** cargo needs `riscv64gc-unknown-linux-gnu` (`PLATFORM_RUST_TRIPLE`), Simple keeps `riscv64-unknown-linux-gnu`.
+
 ## Robust lifecycle persistence
 
 - **Canonical owner:** `std.lifecycle_persistence`, implemented under
