@@ -12,7 +12,8 @@ use compiler.hir.hir_definitions.{HirStmtKind, HirExprKind}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.statements.*
 use compiler.core.types.{named_type_register, named_type_apply, named_type_update,
-    named_type_fields, named_type_field_type_tags, TYPE_NAMED_BASE, TYPE_I64, TYPE_TEXT}
+    named_type_fields, named_type_field_type_tags, option_generic_type_register,
+    TYPE_NAMED_BASE, TYPE_OPTION_GENERIC_BASE, TYPE_I64, TYPE_TEXT}
 use compiler.frontend.core.flat_pool_codec.{FLAT_POOL_CODEC_VERSION}
 
 fn expect_map_annotation(source: text):
@@ -42,6 +43,18 @@ fn expect_map_annotation(source: text):
         case _: expect("declaration lost").to_equal("val or var")
 
 describe "attributed collection parsed type transport":
+    it "rejects a corrupt v3 cache with an indirect Option cycle before conversion":
+        step("Construct AdaptiveSet<Option<Self>> using a forged forward named argument")
+        parser_init("")
+        val owner = named_type_register("AdaptiveSet", [], [])
+        val future_application = TYPE_NAMED_BASE + owner + 1
+        val cyclic_option = option_generic_type_register(future_application)
+        val application = named_type_apply("AdaptiveSet", [cyclic_option])
+        expect(application).to_equal(future_application)
+        val corrupted = flat_pools_dump_all()
+        parser_init("val unrelated = 1")
+        expect(flat_pools_restore_all(corrupted)).to_equal(false)
+
     it "shares canonical layout updates without modifying unrelated types":
         step("Instantiate two key types and update their canonical owner once")
         parser_init("")
@@ -54,6 +67,20 @@ describe "attributed collection parsed type transport":
         expect(named_type_fields(strings)).to_equal(["current"])
         expect(named_type_field_type_tags(integers)).to_equal([TYPE_TEXT])
         expect(named_type_fields(unrelated)).to_equal(["untouched"])
+
+    it "rejects a corrupt wrapper-only cycle reached from an adaptive argument":
+        step("Prevent Option registry cycles from consuming unbounded bridge recursion")
+        parser_init("")
+        # The first Option slot points to the next slot, which
+        # points back to the first. No named tag exposes this cycle directly.
+        val first = option_generic_type_register(TYPE_OPTION_GENERIC_BASE + 1)
+        val second = option_generic_type_register(first)
+        expect(first).to_equal(TYPE_OPTION_GENERIC_BASE)
+        expect(second).to_equal(TYPE_OPTION_GENERIC_BASE + 1)
+        val application = named_type_apply("AdaptiveSet", [first])
+        val corrupted = flat_pools_dump_all()
+        parser_init("val unrelated = 1")
+        expect(flat_pools_restore_all(corrupted)).to_equal(false)
 
     it "retains nested adaptive type applications and rejects stale codec snapshots":
         step("Roundtrip a nested type while rejecting the previous schema before restoration")

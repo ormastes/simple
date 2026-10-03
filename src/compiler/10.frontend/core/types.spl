@@ -1799,6 +1799,85 @@ pub fn flat_type_pools_dump() -> text:
     parts = parts.push(flat_pool_enc_scalar_i64(current_scope_depth))
     parts.join("")
 
+fn named_type_argument_graph_valid(root: i64, owner_tag: i64) -> bool:
+    # Applications may reference earlier named entries through any wrapper
+    # registry. Checking only the immediate tag misses Option<Self> cycles.
+    # This iterative validation bounds both work and scratch storage at 4096
+    # edges per argument and type depth 128, including wrapper-only cycles.
+    var pending: [i64] = [root]
+    var depths: [i64] = [1]
+    var position = 0
+    while position < pending.len():
+        val tag = pending[position]
+        val depth = depths[position]
+        position = position + 1
+        if tag < 0 or depth > 128: return false
+        var children: [i64] = []
+        if tag >= TYPE_NAMED_BASE:
+            if tag >= owner_tag: return false
+            children = named_type_arguments[tag - TYPE_NAMED_BASE]
+        elif is_option_generic_tag(tag):
+            val index = option_generic_tag_to_id(tag)
+            if index >= option_generic_inner_tags.len(): return false
+            children = [option_generic_inner_tags[index]]
+        elif is_array_generic_tag(tag):
+            val index = array_generic_tag_to_id(tag)
+            if index >= array_generic_elem_tags.len(): return false
+            children = [array_generic_elem_tags[index]]
+        elif is_dict_tag(tag):
+            val index = dict_tag_to_id(tag)
+            if index >= dict_type_keys.len() or index >= dict_type_values.len(): return false
+            children = [dict_type_keys[index], dict_type_values[index]]
+        elif is_result_tag(tag):
+            val index = result_tag_to_id(tag)
+            if index >= result_type_ok.len() or index >= result_type_err.len(): return false
+            children = [result_type_ok[index], result_type_err[index]]
+        elif is_tuple_type_tag(tag):
+            val index = tuple_type_tag_to_id(tag)
+            if index >= tuple_type_elem_tags.len(): return false
+            children = tuple_type_elem_tags[index]
+        elif is_union_tag(tag):
+            val index = union_tag_to_id(tag)
+            if index >= union_type_members.len(): return false
+            children = union_type_members[index]
+        elif is_intersection_tag(tag):
+            val index = intersection_tag_to_id(tag)
+            if index >= intersection_type_members.len(): return false
+            children = intersection_type_members[index]
+        elif is_refinement_tag(tag):
+            val index = refinement_tag_to_id(tag)
+            if index >= refinement_base_types.len(): return false
+            children = [refinement_base_types[index]]
+        elif is_isolated_tag(tag):
+            val index = isolated_tag_to_id(tag)
+            if index >= isolated_inner_tags.len(): return false
+            children = [isolated_inner_tags[index]]
+        elif is_exclusive_tag(tag):
+            val index = exclusive_tag_to_id(tag)
+            if index >= exclusive_inner_tags.len(): return false
+            children = [exclusive_inner_tags[index]]
+        elif is_reference_tag(tag):
+            val index = reference_tag_to_id(tag)
+            if index >= reference_inner_tags.len(): return false
+            children = [reference_inner_tags[index]]
+        elif is_pointer_tag(tag):
+            val index = pointer_tag_to_id(tag)
+            if index >= pointer_inner_tags.len(): return false
+            children = [pointer_inner_tags[index]]
+        elif is_atomic_tag(tag):
+            val index = atomic_tag_to_id(tag)
+            if index >= atomic_inner_tags.len(): return false
+            children = [atomic_inner_tags[index]]
+        elif is_weak_tag(tag):
+            val index = weak_tag_to_id(tag)
+            if index >= weak_inner_tags.len(): return false
+            children = [weak_inner_tags[index]]
+        if pending.len() + children.len() > 4096: return false
+        for child in children:
+            pending.push(child)
+            depths.push(depth + 1)
+    true
+
 # Returns false when the blob ran short or was malformed; the caller must
 # treat that as a cache MISS and reparse, never as an empty parse.
 pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
@@ -1876,7 +1955,7 @@ pub fn flat_type_pools_restore(r: FlatPoolReader) -> bool:
                 named_type_names[owner] != named_type_names[i]:
             return false
         for argument in named_type_arguments[i]:
-            if argument >= TYPE_NAMED_BASE + i:
+            if not named_type_argument_graph_valid(argument, TYPE_NAMED_BASE + i):
                 return false
     true
 
