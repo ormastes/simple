@@ -1,0 +1,64 @@
+"""ITEM4-REQ-002/006/007: explicit static file adapter, not hosted admission."""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{dir_create_all, file_read_bytes, file_write_bytes, remove_file_if_exists}
+use compiler.backend.linker.native_freestanding.{
+    NativeFreestandingFormat, NativeFreestandingLinkConfig, link_freestanding_to_native_v1}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+describe "ITEM4 explicit freestanding file adapter":
+    it "publishes actual ELF bytes and the internal engine identity":
+        # @req ITEM4-REQ-002, ITEM4-REQ-006
+        step("Link real ELF files using explicit static configuration")
+        val directory = "build/item4_freestanding"
+        expect(dir_create_all(directory)).to_equal(true)
+        val output = directory + "/elf"
+        expect(remove_file_if_exists(output)).to_equal(true)
+        val config = NativeFreestandingLinkConfig(format: NativeFreestandingFormat.Elf,
+            target: RelocArch.X86_64, entry: "_start", output_byte_limit: 1048576,
+            executable: false)
+        val linked = link_freestanding_to_native_v1([
+            "test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [], output, config)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        expect(linked.unwrap().engine_id).to_equal("internal:elf")
+        expect(linked.unwrap().output).to_equal(output)
+        val bytes = file_read_bytes(output)
+        expect(bytes.len()).to_be_greater_than(64)
+        if bytes.len() <= 64: return
+        expect(bytes[0:4]).to_equal([127, 69, 76, 70])
+        expect(bytes[16]).to_equal(2)
+        expect(remove_file_if_exists(output)).to_equal(true)
+
+    it "preserves an existing destination when resolution or image size fails":
+        # @req ITEM4-REQ-007
+        step("Place sentinel contents at the requested output")
+        expect(dir_create_all("build/item4_freestanding")).to_equal(true)
+        val output = "build/item4_freestanding/preserved"
+        val sentinel: [u8] = [23, 0, 255, 10]
+        expect(file_write_bytes(output, sentinel)).to_equal(true)
+        var config = NativeFreestandingLinkConfig(format: NativeFreestandingFormat.Elf,
+            target: RelocArch.X86_64, entry: "_start", output_byte_limit: 1048576,
+            executable: false)
+        val missing = link_freestanding_to_native_v1(
+            ["test/fixtures/linker/elf/start_x64.o"], [], output, config)
+        expect(missing.is_err()).to_equal(true)
+        expect(file_read_bytes(output)).to_equal(sentinel)
+        step("Reject an oversized successfully constructed image before publication")
+        config.output_byte_limit = 64
+        val oversized = link_freestanding_to_native_v1([
+            "test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [], output, config)
+        expect(oversized.is_err()).to_equal(true)
+        if oversized.is_err(): expect(oversized.unwrap_err()).to_contain("output byte limit")
+        expect(file_read_bytes(output)).to_equal(sentinel)
+        expect(remove_file_if_exists(output)).to_equal(true)
+
+    it "rejects invalid configuration before reading missing input paths":
+        # @req ITEM4-REQ-002, ITEM4-REQ-007
+        step("Require the explicit entry contract before input IO")
+        val config = NativeFreestandingLinkConfig(format: NativeFreestandingFormat.Elf,
+            target: RelocArch.X86_64, entry: "", output_byte_limit: 1024,
+            executable: false)
+        val linked = link_freestanding_to_native_v1(["absent-item4-input"], [], "unused-item4-output", config)
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_err(): expect(linked.unwrap_err()).to_contain("entry")
