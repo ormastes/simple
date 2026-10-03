@@ -1,0 +1,75 @@
+#!/bin/sh
+# A helper provider is distinct from the producer/product runtime admission.
+# Emit only the verified runtime directory and bundle on success.
+bootstrap_helper_runtime_authority_verify() (
+  set -eu
+  [ "$#" -eq 5 ] || exit 1
+  receipt=$1 helper_snapshot=$2 helper_root=$3 target=$4 scratch=$5
+  regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+  digest() { sha256sum "$1" | cut -d ' ' -f 1; }
+  field() { bootstrap_stage3_manifest_value "$1" "$receipt"; }
+  require() { value=$(field "$1") || exit 1; [ "$value" = "$2" ] || exit 1; }
+  pin() {
+    path=$(field "$1") || exit 1
+    expected=$(field "$2") || exit 1
+    case "$path" in /*) ;; *) exit 1 ;; esac
+    regular "$path" && [ "$(digest "$path")" = "$expected" ] || exit 1
+  }
+  regular "$receipt" && regular "$helper_snapshot" || exit 1
+  require schema simple-derived-helper-runtime-v1
+  require status qualified
+  require target "$target"
+  pin source_snapshot_path source_snapshot_sha256
+  source_snapshot=$(field source_snapshot_path) || exit 1
+  runtime_commit=$(field source_commit) || exit 1
+  runtime_tree=$(git -C "$helper_root" rev-parse "$runtime_commit^{tree}") || exit 1
+  require source_tree "$runtime_tree"
+  require runtime_input_kind archive
+  require runtime_bundle auto
+  pin runtime_inventory_path runtime_inventory_sha256
+  pin tool_snapshot_path tool_snapshot_sha256
+  pin capability_receipt_path capability_receipt_sha256
+  runtime=$(field runtime_path) || exit 1
+  case "$runtime" in /*) ;; *) exit 1 ;; esac
+  [ -d "$runtime" ] && [ ! -L "$runtime" ] || exit 1
+  inventory=$(field runtime_inventory_path) || exit 1
+  # Closed provider directory: no omitted archive, symlink, or ambiguous path.
+  expected=$(mktemp "$scratch/helper-runtime-expected.XXXXXX") || exit 1
+  observed=$(mktemp "$scratch/helper-runtime-observed.XXXXXX") || exit 1
+  trap 'rm -f "$expected" "$observed"' EXIT HUP INT TERM
+  # Runtime build provenance covers native/Cargo inputs, not unrelated SPL
+  # or driver edits. Replay the complete native input set against the helper
+  # checkout, permitting a later helper commit only when those bytes agree.
+  git -C "$helper_root" -c core.quotePath=false ls-tree -r --name-only "$runtime_commit" -- \
+    src/compiler_rust src/runtime tools/counterpart/sdk/c src/compiler/70.backend/backend_plugin/abi >"$expected" || exit 1
+  awk '{ if (length($0)<67 || substr($0,65,2)!="  " || substr($0,1,64)!~/^[0-9a-f]+$/ || substr($0,67)!~/^(src\/compiler_rust\/|src\/runtime\/|tools\/counterpart\/sdk\/c\/|src\/compiler\/70.backend\/backend_plugin\/abi\/)/) exit 1; print substr($0,67) }' "$source_snapshot" >"$observed" || exit 1
+  [ -s "$expected" ] && [ -s "$observed" ] || exit 1
+  LC_ALL=C sort -o "$expected" "$expected" || exit 1
+  LC_ALL=C sort -o "$observed" "$observed" || exit 1
+  cmp -s "$expected" "$observed" || exit 1
+  (cd "$helper_root" && sha256sum --strict --status -c "$source_snapshot") || exit 1
+  tools=$(field tool_snapshot_path) || exit 1
+  sha256sum --strict --status -c "$tools" || exit 1
+  awk '{ if (length($0)<67 || substr($0,65,1)!=" " || (substr($0,66,1)!=" " && substr($0,66,1)!="*") || substr($0,1,64)!~/^[0-9a-f]+$/ || substr($0,67)!~/^[A-Za-z0-9_.\/-]+$/ || substr($0,67)~/^\// || substr($0,67)~/(^|\/)\.\.?(\/|$)/) exit 1; print substr($0,67) }' "$inventory" >"$expected" || exit 1
+  [ -s "$expected" ] || exit 1
+  finder=find
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) finder=/usr/bin/find ;; esac
+  [ -z "$("$finder" "$runtime" -type l -print)" ] || exit 1
+  (cd "$runtime" && "$finder" . -type f -print | sed 's|^./||') >"$observed" || exit 1
+  LC_ALL=C sort -o "$expected" "$expected" || exit 1
+  LC_ALL=C sort -o "$observed" "$observed" || exit 1
+  cmp -s "$expected" "$observed" || exit 1
+  (cd "$runtime" && sha256sum --strict --status -c "$inventory") || exit 1
+  capability=$(field capability_receipt_path) || exit 1
+  cap() { got=$(bootstrap_stage3_manifest_value "$1" "$capability") || exit 1; [ "$got" = "$2" ] || exit 1; }
+  cap schema simple-helper-runtime-capability-v1
+  cap status PASS
+  cap target "$target"
+  cap source_snapshot_sha256 "$(digest "$source_snapshot")"
+  cap runtime_inventory_sha256 "$(field runtime_inventory_sha256)"
+  cap tool_snapshot_sha256 "$(field tool_snapshot_sha256)"
+  cap zero_work_deadline PASS
+  cap finite_cleanup PASS
+  cap memory_policy_monitor PASS
+  printf '%s\n' "$runtime" auto
+)

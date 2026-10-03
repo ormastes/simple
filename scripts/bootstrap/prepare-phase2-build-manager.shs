@@ -8,6 +8,7 @@ absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
 hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
 producer_receipt= source_root= output_root= target= runtime_bundle= memory_bytes= reserve_bytes=
 derived_source_snapshot= derived_source_sha256= derived_source_commit=
+helper_runtime_receipt=
 for arg in "$@"; do
   case "$arg" in
     --producer-receipt=*) producer_receipt=${arg#*=} ;;
@@ -20,6 +21,7 @@ for arg in "$@"; do
     --derived-source-snapshot=*) derived_source_snapshot=${arg#*=} ;;
     --derived-source-sha256=*) derived_source_sha256=${arg#*=} ;;
     --derived-source-commit=*) derived_source_commit=${arg#*=} ;;
+    --helper-runtime-receipt=*) helper_runtime_receipt=${arg#*=} ;;
     *) die "unknown option: $arg" ;;
   esac
 done
@@ -31,7 +33,11 @@ regular "$producer_receipt" || die "admitted Phase 2 receipt missing"
 case "$output_root/" in "$source_root/"*) die "image output overlaps frozen source" ;; esac
 case "$source_root/" in "$output_root/"*) die "frozen source overlaps image output" ;; esac
 case "$target" in *windows*) host=windows; suffix=.exe ;; *linux*) host=linux; suffix= ;; *) die "unsupported image target" ;; esac
-case "$runtime_bundle" in core-c-bootstrap|hosted-c) ;; *) die "runtime bundle is not qualified for manager image build" ;; esac
+case "$runtime_bundle" in
+  core-c-bootstrap|hosted-c) ;;
+  auto) [ -n "$helper_runtime_receipt" ] || die "auto requires explicit helper runtime authority" ;;
+  *) die "runtime bundle is not qualified for manager image build" ;;
+esac
 for number in "$memory_bytes" "$reserve_bytes"; do
   case "$number" in ''|0|0*|*[!0-9]*) die "canonical positive resource policy required" ;; esac
 done
@@ -71,6 +77,7 @@ bootstrap_stage3_verify_stage2_admission_receipt \
   || die "Phase 2 admission replay failed"
 regular "$producer" && [ "$(hash_file "$producer")" = "$producer_sha" ] || die "admitted producer changed"
 regular "$source_authority" || die "source authority missing"
+image_runtime_path=$runtime_path
 image_format=SIMPLE-PHASE2-MANAGER-IMAGES-1
 image_source_authority=$source_authority
 if [ -n "$derived_source_snapshot$derived_source_sha256$derived_source_commit" ]; then
@@ -84,6 +91,18 @@ if [ -n "$derived_source_snapshot$derived_source_sha256$derived_source_commit" ]
   image_format=SIMPLE-DERIVED-MANAGER-IMAGES-1
   image_source_authority=$derived_source_snapshot
 fi
+[ -z "$helper_runtime_receipt" ] || [ "$image_format" = SIMPLE-DERIVED-MANAGER-IMAGES-1 ] \
+  || die "helper runtime requires explicit derived helper source"
+. "$repo_root/scripts/bootstrap/lib/helper-runtime-authority.shs"
+verify_helper_runtime() {
+  [ -n "$helper_runtime_receipt" ] || return 0
+  verified_runtime=$(bootstrap_helper_runtime_authority_verify "$helper_runtime_receipt" \
+    "$derived_source_snapshot" "$source_root" "$target" "$output_root/logs") \
+    || die "helper runtime source/provider/tools/capability binding failed"
+  image_runtime_path=$(printf '%s\n' "$verified_runtime" | sed -n '1p')
+  image_runtime_bundle=$(printf '%s\n' "$verified_runtime" | sed -n '2p')
+  [ "$runtime_bundle" = "$image_runtime_bundle" ] || die "helper runtime bundle differs"
+}
 
 # Reuse the canonical snapshotter, which also validates the admitted source
 # symlink records and checks every file for mutation while it is read.
@@ -104,6 +123,7 @@ verify_sources() {
   cmp -s "$observed" "$image_source_authority" \
     || die "frozen source differs from admitted Stage 2 source; snapshot retained: $observed"
   rm -f "$observed"
+  verify_helper_runtime
 }
 mkdir -p "$output_root/images" "$output_root/cache" "$output_root/logs" "$output_root/template-workspace" \
   || die "manager image directories unavailable"
@@ -156,7 +176,7 @@ build_image() {
     || die "host memory below manager-image cap plus reserve"
   (CDPATH= cd -- "$source_root" && SIMPLE_NO_STUB_FALLBACK=1 \
     "$producer" native-build "$entry" --backend llvm --target "$target" \
-      --runtime-bundle "$runtime_bundle" --runtime-path "$runtime_path" \
+      --runtime-bundle "$runtime_bundle" --runtime-path "$image_runtime_path" \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure --cache-dir "$output_root/cache/$name" \
       --mode one-binary --output "$image") \
@@ -220,6 +240,10 @@ umask 077
       "helper_source_tree=$derived_source_tree" \
       "helper_source_snapshot_path=$derived_source_snapshot" \
       "helper_source_snapshot_sha256=$derived_source_sha256"
+    if [ -n "$helper_runtime_receipt" ]; then
+      printf '%s\n' "helper_runtime_receipt_path=$helper_runtime_receipt" \
+        "helper_runtime_receipt_sha256=$(hash_file "$helper_runtime_receipt")"
+    fi
   fi
 } >"$tmp" || die "image receipt write failed"
 if [ -e "$receipt" ]; then

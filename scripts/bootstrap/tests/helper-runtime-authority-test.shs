@@ -1,0 +1,58 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/helper-runtime.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+. "$repo/scripts/bootstrap/lib/helper-runtime-authority.shs"
+bootstrap_stage3_manifest_value() {
+  awk -F= -v key="$1" '$1==key { n++; sub(/^[^=]*=/, ""); value=$0 } END { if(n!=1) exit 1; print value }' "$2"
+}
+sha() { sha256sum "$1" | cut -d ' ' -f 1; }
+mkdir -p "$tmp/helper/src/runtime" "$tmp/provider"
+printf 'runtime source\n' >"$tmp/helper/src/runtime/runtime.c"
+git -C "$tmp/helper" init -q
+git -C "$tmp/helper" add src/runtime/runtime.c
+git -C "$tmp/helper" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture
+printf 'fixture source snapshot\n' >"$tmp/source.snapshot"
+(cd "$tmp/helper" && sha256sum --text src/runtime/runtime.c) >"$tmp/runtime-source.snapshot"
+printf 'fixture compiler tool, never executed\n' >"$tmp/tool"
+sha256sum "$tmp/tool" >"$tmp/tools.snapshot"
+printf 'fixture archive bytes, never executed\n' >"$tmp/provider/simple_native_all.lib"
+(cd "$tmp/provider" && sha256sum simple_native_all.lib) >"$tmp/runtime.inventory"
+{
+  printf '%s\n' 'schema=simple-helper-runtime-capability-v1' 'status=PASS' 'target=x86_64-pc-windows-msvc' \
+    "source_snapshot_sha256=$(sha "$tmp/runtime-source.snapshot")" "runtime_inventory_sha256=$(sha "$tmp/runtime.inventory")" \
+    "tool_snapshot_sha256=$(sha "$tmp/tools.snapshot")" 'zero_work_deadline=PASS' 'finite_cleanup=PASS' 'memory_policy_monitor=PASS'
+} >"$tmp/fixture-capability.env"
+{
+  printf '%s\n' 'schema=simple-derived-helper-runtime-v1' 'status=qualified' 'target=x86_64-pc-windows-msvc' \
+    "source_commit=$(git -C "$tmp/helper" rev-parse HEAD)" "source_tree=$(git -C "$tmp/helper" rev-parse HEAD^{tree})" \
+    "source_snapshot_path=$tmp/runtime-source.snapshot" "source_snapshot_sha256=$(sha "$tmp/runtime-source.snapshot")" \
+    'runtime_bundle=auto' 'runtime_input_kind=archive' "runtime_path=$tmp/provider" \
+    "runtime_inventory_path=$tmp/runtime.inventory" "runtime_inventory_sha256=$(sha "$tmp/runtime.inventory")" \
+    "tool_snapshot_path=$tmp/tools.snapshot" "tool_snapshot_sha256=$(sha "$tmp/tools.snapshot")" \
+    "capability_receipt_path=$tmp/fixture-capability.env" "capability_receipt_sha256=$(sha "$tmp/fixture-capability.env")"
+} >"$tmp/good.env"
+# A later SPL-only helper commit does not rewrite native build provenance.
+printf 'later helper SPL\n' >"$tmp/helper/helper.spl"
+git -C "$tmp/helper" add helper.spl
+git -C "$tmp/helper" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm helper
+check() { bootstrap_helper_runtime_authority_verify "$tmp/current.env" "$tmp/source.snapshot" "$tmp/helper" x86_64-pc-windows-msvc "$tmp" >"$tmp/verified"; }
+cp "$tmp/good.env" "$tmp/current.env"
+check || exit 1
+[ "$(sed -n '1p' "$tmp/verified")" = "$tmp/provider" ] && [ "$(sed -n '2p' "$tmp/verified")" = auto ] || exit 1
+for field in source_commit source_snapshot_sha256 runtime_inventory_sha256 capability_receipt_sha256 target; do
+  sed "/^$field=/d" "$tmp/good.env" >"$tmp/current.env"
+  if check; then echo "missing $field accepted" >&2; exit 1; fi
+done
+cp "$tmp/good.env" "$tmp/current.env"
+printf 'unlisted\n' >"$tmp/provider/extra.lib"
+if check; then echo 'unlisted provider accepted' >&2; exit 1; fi
+rm "$tmp/provider/extra.lib"
+cp "$tmp/helper/src/runtime/runtime.c" "$tmp/runtime.saved"
+printf 'native mutation\n' >>"$tmp/helper/src/runtime/runtime.c"
+if check; then echo 'changed native input accepted' >&2; exit 1; fi
+cp "$tmp/runtime.saved" "$tmp/helper/src/runtime/runtime.c"
+printf 'changed\n' >>"$tmp/provider/simple_native_all.lib"
+if check; then echo 'changed provider accepted' >&2; exit 1; fi
+printf '%s\n' 'PASS: helper runtime contract binds exact provider membership, bytes and source/tool/capability evidence; native runtime qualification UNRUN'
