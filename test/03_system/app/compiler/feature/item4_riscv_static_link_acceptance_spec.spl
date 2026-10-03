@@ -1,0 +1,486 @@
+"""
+# RV64 static ELF driver acceptance — ITEM4-REQ-003/004/006/007
+
+NOT RUN with Simple: these tests precede implementation. Real clang 21.1.8
+fixtures cover nonadjacent PCREL pairs, store pairs, GOT, absolute address
+materialization, calls and compressed/uncompressed control flow. They exercise
+elf_static_link, not isolated relocation helpers. Native execution, RV32,
+dynamic/TLS linking and instruction-size relaxation remain separate gates.
+Fixture production: test/fixtures/linker/riscv64/RECIPE.md.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link, elf_link, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC}
+use compiler.backend.linker.elf_parser.{elf_parse_object, elf_section_name}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn item4_rv_read(bytes: [i64], offset: i64, width: i64) -> i64:
+    val valid = offset >= 0 and offset <= bytes.len() and width > 0 and width <= 8
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    expect(width <= bytes.len() - offset).to_equal(true)
+    if width > bytes.len() - offset: return 0
+    var result: i64 = 0
+    var index: i64 = 0
+    while index < width:
+        result = result | (bytes[offset + index] << (8 * index))
+        index = index + 1
+    result
+
+fn item4_rv_load(name: text) -> [i64]:
+    val raw = file_read_bytes("test/fixtures/linker/riscv64/" + name)
+    expect(raw.len()).to_be_greater_than(0)
+    var bytes: [i64] = []
+    for byte in raw: bytes = bytes.push(byte as i64)
+    bytes
+
+fn item4_rv_symbol(image: [i64], name: text) -> i64:
+    val result = elf_parse_object(image)
+    expect(result.is_ok()).to_equal(true)
+    if result.is_err(): return 0
+    val parsed = result.unwrap()
+    var matches: i64 = 0
+    var address: i64 = 0
+    for symbol in parsed.symbols:
+        if symbol.name == name:
+            matches = matches + 1
+            address = symbol.st_value
+    expect(matches).to_equal(1)
+    address
+
+fn item4_rv_at(image: [i64], address: i64, width: i64) -> i64:
+    val result = elf_parse_object(image)
+    expect(result.is_ok()).to_equal(true)
+    if result.is_err(): return 0
+    val parsed = result.unwrap()
+    var index: i64 = 0
+    for section in parsed.sections:
+        val header = parsed.header.e_shoff + index * 64
+        val vaddr = item4_rv_read(image, header + 16, 8)
+        # Parsed sh_addr stores file offset, not the original virtual address.
+        if section.sh_type != 8 and address >= vaddr and address - vaddr <= section.sh_size and width <= section.sh_size - (address - vaddr):
+            return item4_rv_read(image, section.sh_addr + address - vaddr, width)
+        index = index + 1
+    expect(false).to_equal(true)
+    0
+
+fn item4_rv_signed(value: i64, bits: i64) -> i64:
+    if value & (1 << (bits - 1)) != 0: value - (1 << bits) else: value
+
+fn item4_rv_pair_target(image: [i64], high_place: i64, low_place: i64, store: bool) -> i64:
+    val upper = item4_rv_at(image, high_place, 4)
+    val lower = item4_rv_at(image, low_place, 4)
+    val low = if store: ((lower >> 25) << 5) | ((lower >> 7) & 31) else: lower >> 20
+    high_place + item4_rv_signed(upper & 0xfffff000, 32) + item4_rv_signed(low, 12)
+
+fn item4_rv_mutate(kind: i64, field: i64, value: i64, name: text = "start.o") -> [i64]:
+    var bytes = item4_rv_load(name)
+    val parsed = elf_parse_object(bytes)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return bytes
+    val object = parsed.unwrap()
+    val valid_field = field == 0 or field == 8 or field == 16
+    expect(valid_field).to_equal(true)
+    if not valid_field: return bytes
+    var changed = false
+    for section in object.sections:
+        if section.sh_type == 4:
+            val valid = section.sh_addr >= 0 and section.sh_addr <= bytes.len() and section.sh_size >= 0 and section.sh_size % 24 == 0
+            expect(valid).to_equal(true)
+            if not valid: return bytes
+            expect(section.sh_size <= bytes.len() - section.sh_addr).to_equal(true)
+            if section.sh_size > bytes.len() - section.sh_addr: return bytes
+            var offset = section.sh_addr
+            while offset < section.sh_addr + section.sh_size:
+                if not changed and (item4_rv_read(bytes, offset + 8, 8) & 0xffffffff) == kind:
+                    var index: i64 = 0
+                    while index < 8:
+                        bytes[offset + field + index] = (value >> (8 * index)) & 255
+                        index = index + 1
+                    changed = true
+                offset = offset + 24
+    expect(changed).to_equal(true)
+    bytes
+
+describe "RV64 real static ELF link":
+    it "links nonadjacent PCREL loads, stores, GOT and calls through the full driver":
+        # @req ITEM4-REQ-003 ITEM4-REQ-004 ITEM4-REQ-006
+        step("Read the clang entry and provider with fourteen real ELF relocations")
+        val start = item4_rv_load("start.o")
+        expect(elf_parse_object(start).unwrap().relocations.len()).to_equal(14)
+        step("Link both objects as RV64 static ET_EXEC")
+        val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        val image = result.unwrap()
+        step("Independently decode emitted pairs and compare resolved symbol addresses")
+        val parsed = elf_parse_object(image).unwrap()
+        expect(parsed.header.e_machine).to_equal(243)
+        expect(parsed.header.e_type).to_equal(2)
+        expect(item4_rv_read(image, 48, 4)).to_equal(1)
+        val entry = item4_rv_symbol(image, "_start")
+        val data = item4_rv_symbol(image, "data_value")
+        expect(parsed.header.e_entry).to_equal(entry)
+        expect(item4_rv_pair_target(image, entry, entry + 6, false)).to_equal(data)
+        expect(item4_rv_pair_target(image, entry + 10, entry + 14, true)).to_equal(data)
+        val got = item4_rv_pair_target(image, entry + 18, entry + 22, false)
+        expect(item4_rv_at(image, got, 8)).to_equal(data)
+        expect(item4_rv_pair_target(image, entry + 38, entry + 42, false)).to_equal(item4_rv_symbol(image, "worker"))
+        expect(item4_rv_at(image, data, 4)).to_equal(41)
+        # The emitted absolute upper+lower sequences preserve instruction/register fields.
+        val absolute_upper = item4_rv_at(image, entry + 26, 4) & 0xfffff000
+        val absolute_low = item4_rv_at(image, entry + 30, 4) >> 20
+        expect(item4_rv_signed(absolute_upper, 32) + item4_rv_signed(absolute_low, 12)).to_equal(data)
+        val branch = item4_rv_at(image, entry + 46, 4)
+        val branch_delta = ((branch >> 31) << 12) | (((branch >> 7) & 1) << 11) | (((branch >> 25) & 63) << 5) | ((branch >> 8) & 15) * 2
+        expect(entry + 46 + item4_rv_signed(branch_delta, 13)).to_equal(item4_rv_symbol(image, "fail_label"))
+        val cb = item4_rv_at(image, entry + 50, 2)
+        val cb_delta = (((cb >> 12) & 1) << 8) | (((cb >> 10) & 3) << 3) | (((cb >> 5) & 3) << 6) | (((cb >> 3) & 3) << 1) | (((cb >> 2) & 1) << 5)
+        expect(entry + 50 + item4_rv_signed(cb_delta, 9)).to_equal(item4_rv_symbol(image, "fail_label"))
+        val cj = item4_rv_at(image, entry + 52, 2)
+        val cj_delta = (((cj >> 12) & 1) << 11) | (((cj >> 11) & 1) << 4) | (((cj >> 9) & 3) << 8) | (((cj >> 8) & 1) << 10) | (((cj >> 7) & 1) << 6) | (((cj >> 6) & 1) << 7) | (((cj >> 3) & 7) << 1) | (((cj >> 2) & 1) << 5)
+        expect(entry + 52 + item4_rv_signed(cj_delta, 12)).to_equal(item4_rv_symbol(image, "done_label"))
+        val jal = item4_rv_at(image, entry + 54, 4)
+        val jal_delta = ((jal >> 31) << 20) | (jal & 0xff000) | (((jal >> 20) & 1) << 11) | (((jal >> 21) & 1023) << 1)
+        expect(entry + 54 + item4_rv_signed(jal_delta, 21)).to_equal(item4_rv_symbol(image, "fail_label"))
+
+    it "applies ordered ADD SUB SET and PCREL32 data relocations through the full driver":
+        # @req ITEM4-REQ-004
+        step("Read the clang fixture containing ordered same-field arithmetic relocations")
+        val object = item4_rv_load("arithmetic.o")
+        expect(elf_parse_object(object).unwrap().relocations.len()).to_equal(17)
+        step("Link the retained data section from the entry's absolute pointer")
+        val result = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        val image = result.unwrap()
+        val data = item4_rv_symbol(image, "arithmetic_values")
+        step("Check the known seventeen-byte difference and preserved six-bit field prefix")
+        expect(item4_rv_at(image, data, 1)).to_equal(18)
+        expect(item4_rv_at(image, data + 1, 2)).to_equal(19)
+        expect(item4_rv_at(image, data + 3, 4)).to_equal(20)
+        expect(item4_rv_at(image, data + 7, 8)).to_equal(21)
+        expect(item4_rv_at(image, data + 15, 1)).to_equal(0xc5)
+        expect(item4_rv_at(image, data + 16, 1)).to_equal(0xc7)
+        expect(item4_rv_at(image, data + 17, 1)).to_equal(0xa5)
+        expect(item4_rv_at(image, data + 18, 2)).to_equal(0xa55a)
+        expect(item4_rv_at(image, data + 20, 4)).to_equal(0x76543210)
+        expect(item4_rv_at(image, data + 24, 4)).to_equal(0xffffffe8)
+        val entry = item4_rv_symbol(image, "_start")
+        expect(data + 28 + item4_rv_signed(item4_rv_at(image, data + 28, 4), 32)).to_equal(entry)
+        val got = data + 32 + item4_rv_signed(item4_rv_at(image, data + 32, 4), 32)
+        expect(item4_rv_at(image, got, 8)).to_equal(data)
+
+    it "extracts the provider archive and emits the same deterministic image":
+        # @req ITEM4-REQ-003 ITEM4-REQ-007
+        step("Read the same provider as a direct object and llvm-ar archive")
+        val start = item4_rv_load("start.o")
+        step("Link direct, archived and repeated archived requests")
+        val direct = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64).unwrap()
+        val archived = elf_static_link([start], [item4_rv_load("libprovider.a")], "_start", RelocArch.Riscv64).unwrap()
+        val repeated = elf_static_link([start], [item4_rv_load("libprovider.a")], "_start", RelocArch.Riscv64).unwrap()
+        step("Require exact bytes rather than merely equal image sizes")
+        expect(archived).to_equal(direct)
+        expect(repeated).to_equal(archived)
+
+    it "accepts RELAX markers while preserving the unrelaxed call pair":
+        # @req ITEM4-REQ-004
+        step("Read a clang call carrying a paired R_RISCV_RELAX marker")
+        val start = item4_rv_load("relax.o")
+        expect(elf_parse_object(start).unwrap().relocations.len()).to_equal(2)
+        step("Link with relaxation disabled but ordinary call relocation enabled")
+        val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        val image = result.unwrap()
+        val entry = item4_rv_symbol(image, "_start")
+        step("Require AUIPC and JALR opcodes targeting the provider")
+        expect(item4_rv_at(image, entry, 4) & 127).to_equal(0x17)
+        expect(item4_rv_at(image, entry + 4, 4) & 127).to_equal(0x67)
+        expect(item4_rv_pair_target(image, entry, entry + 4, false)).to_equal(item4_rv_symbol(image, "worker"))
+
+    it "rejects a nonzero paired-low addend instead of silently shifting the target":
+        # @req ITEM4-REQ-004
+        step("Change only the first PCREL_LO12_I addend to one")
+        val start = item4_rv_mutate(24, 16, 1)
+        step("Link the malformed pair through the complete driver")
+        val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+        step("Require an explicit paired-low addend failure")
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("PCREL_LO12 addend must be zero")
+
+    it "rejects a low relocation whose label has no matching HI20 relocation":
+        # @req ITEM4-REQ-004
+        step("Replace the first high relocation by NONE but retain its low reference")
+        val start = item4_rv_mutate(23, 8, 0)
+        step("Link the orphaned low relocation")
+        val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+        step("Require a named missing-HI20 error")
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("no matching HI20")
+
+    it "rejects RV64 dynamic mode and RV32 before attempting image construction":
+        # @req ITEM4-REQ-006
+        step("Prepare a real RV64 object with unsupported driver modes")
+        val start = item4_rv_load("start.o")
+        step("Request dynamic RV64 and static RV32 links")
+        val dynamic = elf_link(ElfLinkRequest(objects: [start], archives: [], shared: [], entry: "_start", target: RelocArch.Riscv64, mode: ELF_LINK_DYNAMIC_EXEC, interp: "/lib/ld-linux-riscv64-lp64.so.1"))
+        val rv32 = elf_static_link([start], [], "_start", RelocArch.Riscv32)
+        step("Require explicit unsupported target-mode errors")
+        expect(dynamic.is_err()).to_equal(true)
+        expect(rv32.is_err()).to_equal(true)
+        if dynamic.is_ok() or rv32.is_ok(): return
+        expect(dynamic.unwrap_err()).to_contain("RISC-V static ET_EXEC")
+        expect(rv32.unwrap_err()).to_contain("RV32")
+
+    it "rejects overflow and odd targets for every retained branch encoding":
+        # @req ITEM4-REQ-004
+        step("Mutate one real branch addend at a time while preserving the instruction")
+        for kind in [16, 17, 44, 45]:
+            for addend in [1, 4194304]:
+                val start = item4_rv_mutate(kind, 16, addend)
+                step("Link the malformed branch through section placement and relocation")
+                val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+                step("Require a named branch range or alignment error")
+                expect(result.is_err()).to_equal(true)
+                if result.is_ok(): return
+                expect(result.unwrap_err()).to_contain("branch relocation {kind}")
+
+    it "rejects a PCREL low label from a different input section":
+        # @req ITEM4-REQ-004
+        step("Reference the undefined zero symbol from a retained low relocation")
+        val start = item4_rv_mutate(24, 8, 24)
+        step("Link with the label section mismatch")
+        val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+        step("Require the same-input-section pairing diagnostic")
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("same input section")
+
+    it "rejects nonzero GOT high addends":
+        # @req ITEM4-REQ-004
+        step("Change only the real GOT_HI20 addend")
+        val start = item4_rv_mutate(20, 16, 1)
+        step("Link the invalid GOT reference")
+        val result = elf_static_link([start, item4_rv_load("provider.o")], [], "_start", RelocArch.Riscv64)
+        step("Require the psABI zero-addend diagnostic")
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("GOT_HI20 addend must be zero")
+
+    it "rejects incompatible floating-point ABI objects before output construction":
+        # @req ITEM4-REQ-006
+        step("Change only the provider ELF flags from soft-float to double-float")
+        val start = item4_rv_load("start.o")
+        var provider = item4_rv_load("provider.o")
+        expect(provider.len()).to_be_greater_than(63)
+        if provider.len() < 64: return
+        expect(provider[48]).to_equal(1)
+        if provider[48] != 1: return
+        provider[48] = 5
+        step("Link the incompatible ABI pair")
+        val result = elf_static_link([start, provider], [], "_start", RelocArch.Riscv64)
+        step("Require a named floating-point ABI rejection")
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("incompatible floating-point ABI")
+
+    it "resolves paired ULEB128 labels without shrinking padded fields":
+        # @req ITEM4-REQ-004
+        step("Load the real clang object with three-byte and one-byte ULEB pairs")
+        val object = item4_rv_load("uleb.o")
+        expect(elf_parse_object(object).unwrap().relocations.len()).to_equal(5)
+        step("Resolve the two label differences after final section placement")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        val data = item4_rv_symbol(image, "uleb_values")
+        step("Require the original three-byte extent and the following field unchanged")
+        expect(item4_rv_symbol(image, "end_marker") - item4_rv_symbol(image, "_start")).to_equal(136)
+        expect(item4_rv_at(image, data, 1)).to_equal(0x88)
+        expect(item4_rv_at(image, data + 1, 1)).to_equal(0x81)
+        expect(item4_rv_at(image, data + 2, 1)).to_equal(0)
+        expect(item4_rv_at(image, data + 3, 1)).to_equal(13)
+
+    it "rejects orphaned ULEB128 assignments before applying any pair":
+        # @req ITEM4-REQ-004
+        step("Replace the first SUB_ULEB128 entry by NONE")
+        val object = item4_rv_mutate(61, 8, 0, "uleb.o")
+        step("Link the malformed relocation sequence")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        step("Require a named adjacent-pair error")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("ULEB128 requires adjacent SET/SUB")
+
+    it "rejects a ULEB128 result that cannot fit its allocated field":
+        # @req ITEM4-REQ-004
+        step("Increase the first label difference beyond twenty-one bits")
+        val object = item4_rv_mutate(61, 16, -2097152, "uleb.o")
+        step("Link without allowing ULEB128 field growth")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        step("Require a named encoding-size overflow")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("ULEB128 result exceeds allocated field")
+
+    it "rejects negative ULEB128 label differences":
+        # @req ITEM4-REQ-004
+        step("Make the first assigned label smaller than the subtracted label")
+        val object = item4_rv_mutate(60, 16, -1000, "uleb.o")
+        step("Link the negative unsigned result")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        step("Require an unsigned-result diagnostic")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("ULEB128 result is negative")
+
+    it "rejects ULEB128 subtraction at a different offset or without assignment":
+        # @req ITEM4-REQ-004
+        step("Prepare a mismatched offset and an orphaned subtraction")
+        val wrong_offset = item4_rv_mutate(61, 0, 1, "uleb.o")
+        val orphan_sub = item4_rv_mutate(60, 8, 0, "uleb.o")
+        for object in [wrong_offset, orphan_sub]:
+            step("Link the malformed ULEB128 pair")
+            val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+            step("Require explicit adjacency rejection")
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_ok(): return
+            expect(linked.unwrap_err()).to_contain("ULEB128 requires adjacent SET/SUB")
+
+    it "rejects a ULEB128 continuation beyond its original input section":
+        # @req ITEM4-REQ-004
+        step("Remove the final one-byte field terminator in the real object")
+        var bytes = item4_rv_load("uleb.o")
+        val parsed = elf_parse_object(bytes)
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_err(): return
+        val object = parsed.unwrap()
+        var index: i64 = 0
+        var changed = false
+        while index < object.sections.len():
+            if elf_section_name(object, index) == ".data":
+                val section = object.sections[index]
+                val valid = section.sh_size == 4 and section.sh_addr >= 0 and section.sh_addr <= bytes.len() and 4 <= bytes.len() - section.sh_addr
+                expect(valid).to_equal(true)
+                if not valid: return
+                bytes[section.sh_addr + 3] = 0x80
+                changed = true
+            index = index + 1
+        expect(changed).to_equal(true)
+        if not changed: return
+        step("Link without permitting the decoder to consume another section")
+        val linked = elf_static_link([bytes], [], "_start", RelocArch.Riscv64)
+        step("Require a named unterminated-field failure")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("ULEB128 field is unterminated")
+
+    it "normalizes multiple ALIGN paddings and adjusts symbol sizes and references":
+        # @req ITEM4-REQ-004
+        step("Read two real ALIGN relocations with fourteen and thirty padding bytes")
+        val object = item4_rv_load("align.o")
+        step("Link while retaining calls but deleting surplus alignment padding")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        val entry = item4_rv_symbol(image, "_start")
+        val first = item4_rv_symbol(image, "aligned_target")
+        val second = item4_rv_symbol(image, "second_target")
+        val refs = item4_rv_symbol(image, "align_references")
+        step("Check final alignment, relocated call, data pointers and fixed named-symbol addend")
+        expect(entry % 32).to_equal(0)
+        expect(first - entry).to_equal(16)
+        expect(second - entry).to_equal(32)
+        expect(item4_rv_pair_target(image, entry, entry + 4, false)).to_equal(first)
+        expect(item4_rv_at(image, refs, 8)).to_equal(first)
+        expect(item4_rv_at(image, refs + 8, 8)).to_equal(second)
+        expect(item4_rv_at(image, refs + 16, 8)).to_equal(entry + 24)
+        expect(item4_rv_at(image, refs + 24, 8)).to_equal(entry + 24)
+        val parsed = elf_parse_object(image).unwrap()
+        for symbol in parsed.symbols:
+            if symbol.name == "_start": expect(symbol.st_size).to_equal(34)
+
+    it "normalizes ALIGN using full-size NOPs when compressed instructions are disabled":
+        # @req ITEM4-REQ-004
+        step("Read the RV64I alignment fixture with twelve bytes of assembler padding")
+        val object = item4_rv_load("align_norvc.o")
+        step("Link and keep only the four bytes required for sixteen-byte alignment")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        val entry = item4_rv_symbol(image, "_start")
+        val target = item4_rv_symbol(image, "aligned_target")
+        step("Check the retained NOP is a complete four-byte instruction")
+        expect(target - entry).to_equal(16)
+        expect(item4_rv_at(image, entry + 12, 4)).to_equal(0x13)
+        expect(item4_rv_pair_target(image, entry, entry + 4, false)).to_equal(target)
+
+    it "rejects malformed ALIGN sizes instead of deleting arbitrary input bytes":
+        # @req ITEM4-REQ-004
+        step("Change the first padding addend to zero, odd and out-of-section sizes")
+        for addend in [0, 13, 32766]:
+            val object = item4_rv_mutate(43, 16, addend, "align.o")
+            step("Attempt normalization before symbol resolution")
+            val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+            step("Require an explicit ALIGN rejection")
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_ok(): return
+            expect(linked.unwrap_err()).to_contain("RISC-V ALIGN")
+
+    it "rejects non-NOP ALIGN contents and insufficient section alignment":
+        # @req ITEM4-REQ-004
+        step("Locate the real fixture's text padding and raw section header")
+        val original = item4_rv_load("align.o")
+        val parsed = elf_parse_object(original)
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_err(): return
+        val object = parsed.unwrap()
+        var text_index: i64 = -1
+        var index: i64 = 0
+        while index < object.sections.len():
+            if elf_section_name(object, index) == ".text": text_index = index
+            index = index + 1
+        expect(text_index).to_be_greater_than(0)
+        if text_index <= 0: return
+        val section = object.sections[text_index]
+        val padding = section.sh_addr + 10
+        val alignment = object.header.e_shoff + text_index * 64 + 48
+        val valid = padding >= 0 and padding < original.len() and alignment >= 0 and alignment <= original.len() and 8 <= original.len() - alignment
+        expect(valid).to_equal(true)
+        if not valid: return
+        expect(item4_rv_read(original, alignment, 8)).to_equal(32)
+        if item4_rv_read(original, alignment, 8) != 32: return
+        for malformed_opcode in [true, false]:
+            var bytes = original
+            if malformed_opcode:
+                bytes[padding] = 0xff
+            else:
+                index = 0
+                while index < 8:
+                    bytes[alignment + index] = if index == 0: 8 else: 0
+                    index = index + 1
+            step("Link the invalid alignment region without publishing an image")
+            val linked = elf_static_link([bytes], [], "_start", RelocArch.Riscv64)
+            step("Require the concrete padding or section-alignment diagnostic")
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_ok(): return
+            val message = if malformed_opcode: "non-NOP" else: "exceeds input section alignment"
+            expect(linked.unwrap_err()).to_contain(message)
+
+    it "rejects duplicate ALIGN offsets rather than applying a deletion twice":
+        # @req ITEM4-REQ-004
+        step("Move the first ALIGN marker onto the second marker's offset")
+        val object = item4_rv_mutate(43, 0, 28, "align.o")
+        step("Link the ambiguous padding map")
+        val linked = elf_static_link([object], [], "_start", RelocArch.Riscv64)
+        step("Require a named duplicate-offset rejection")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("duplicate padding offset")

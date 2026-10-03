@@ -3,7 +3,7 @@
 Authored fixtures only; all execution and engine admission are pending.
 No generated PASS output or completed REQ-002 claim is made.
 
-The existing `scripts/check/check_engine_differential.spl` discovers these four
+The existing `scripts/check/check_engine_differential.spl` discovers these five
 programs under `test/fixtures/engine_differential/` without a new runner:
 
 | Fixture suffix after `collection_req002_` | Independent literal oracle |
@@ -12,6 +12,7 @@ programs under `test/fixtures/engine_differential/` without a new runner:
 | `flatmap_empty_order.spl` | Runtime flat_map and actual library flatten each produce `[2,12,1,11,2,12]`, including empty expansion |
 | `any_all_shortcircuit.spl` | Builtin and library any/all stop after two callbacks; empty yields false/true with zero callbacks |
 | `dict_struct_overwrite.spl` | Two keys after overwrite; independent present/absent probes; exact struct fields preserved |
+| `filter_captured.spl` | Captured threshold retains `[4,4,5]` with exact visits `[4,1,4,2,5]`; empty calls no predicate; captured heap text selects only `ba` from equal-length words with exact visit order; original inputs unchanged |
 
 These supplement existing `closure_runtime_facing.spl`, `closure_capture_list.spl`
 and the Dict differential guard. Algorithms are not copied into test helpers.
@@ -26,7 +27,7 @@ Use the existing `DIFF_FILTER=collection_req002_` discovery selector. Interprete
 and JIT use existing `DIFF_LANES=interpret,jit`; LLVM is the actual `native` build
 lane with explicit `--backend=llvm`, never an invented execution-mode environment value. Self-hosted and
 bootstrap-produced compilers are binary provenance, not additional mode strings.
-Keep the exact same four sources and markers for both generations. Bootstrap
+Keep the exact same five sources and markers for both generations. Bootstrap
 does not authorize Rust-seed tests: only admitted pure-Simple artifacts may run
 verification; the Rust seed remains bootstrap-only. No command was run here.
 

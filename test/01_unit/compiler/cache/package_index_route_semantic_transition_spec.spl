@@ -1,0 +1,276 @@
+# @req PSI-REQ-002 PSI-REQ-004 PSI-REQ-005
+# Source-level TDD specification; execution requires an admitted self-hosted runner.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{env_get, env_set}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{dir_remove, dir_create_all, file_read, file_write, file_delete, file_exists}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    package_module_index_entry_action_digest_v1, package_module_index_publish_v1,
+    package_module_index_digest_v1, package_module_index_encode_v1
+}
+use compiler.driver.cache.package_index_semantic_transition.{
+    package_index_transition_read_v1, package_index_transition_stage_v1
+}
+use compiler.driver.cache.package_index_route.{
+    package_index_route_admitted_invalidation_v1, package_index_route_admitted_current_v1,
+    package_index_route_changed_modules_v1
+}
+use compiler.driver.cache.package_archive_cache.{
+    PackageArchiveAuthorityV1, PackageArchivePublishInputV1,
+    package_archive_publish_scc_v1, package_archive_aggregate_entry_v1,
+    package_archive_load_v1
+}
+
+extern fn rt_getpid() -> i64
+
+fn semantic_source(name: text, changed: bool) -> text:
+    val value = if changed: 2 else: 1
+    "fn {name}() -> i64:\n    {value}\n"
+
+fn semantic_graph(revision: text, changed_a: bool, changed_c: bool) -> PackageModuleIndexGenerationV1:
+    var graph = PackageModuleIndexGenerationV1(
+        2, sha256_text("producer"), "root", revision, "commit", "tree-{revision}",
+        sha256_text("inventory-{revision}"), [], sha256_text("variant"))
+    var entries: [PackageModuleIndexEntryV1] = []
+    for name in ["a", "b", "c", "d"]:
+        val changed = (name == "a" and changed_a) or (name == "c" and changed_c)
+        val public_change = name == "a" and changed_a
+        val semantic = sha256_text("metadata-{name}-{public_change}")
+        val imports = if name == "b": ["a"] else: if name == "d": ["c"] else: []
+        val reverse = if name == "a": ["b"] else: if name == "c": ["d"] else: []
+        var entry = PackageModuleIndexEntryV1(
+            "pkg-{name}", name, "src/{name}.spl", sha256_text(semantic_source(name, changed)),
+            semantic, semantic, sha256_text("abi-{name}"), sha256_text("init-{name}"),
+            sha256_text("provider-{name}"), "", sha256_text("manifest-{name}"),
+            "scc-{name}", imports, reverse)
+        entry.action_digest = package_module_index_entry_action_digest_v1(graph, entry)
+        entries.push(entry)
+    graph.entries = entries
+    graph
+
+fn semantic_root(case_name: text) -> text:
+    val root = "build/test-artifacts/index-semantic-{case_name}-{rt_getpid()}"
+    dir_remove(root, true)
+    root
+
+fn semantic_publish_pair(root: text) -> PackageModuleIndexGenerationV1:
+    val previous = semantic_graph("before", false, false)
+    val current = semantic_graph("after", true, true)
+    expect(package_module_index_publish_v1(root, previous)).to_equal(true)
+    expect(package_module_index_publish_v1(root, current)).to_equal(true)
+    current
+
+describe "admitted per-module semantic route":
+    it "distinguishes no change hint from malformed nonempty change lists":
+        step("Reject malformed event lists before driver routing")
+        expect(package_index_route_changed_modules_v1("").unwrap()).to_equal([])
+        expect(package_index_route_changed_modules_v1(" c, a,c ").unwrap()).to_equal(["a", "c"])
+        for malformed in [" ", ",", "a,", ",a", "a,,c", "a\nb"]:
+            val parsed = package_index_route_changed_modules_v1(malformed)
+            expect(parsed.is_err()).to_equal(true)
+            expect(parsed.unwrap_err()).to_equal("changed-module-list-invalid")
+
+    it "derives mixed private and public changes from persisted generation bytes":
+        step("Publish two admitted graph generations with independent edit branches")
+        val root = semantic_root("mixed")
+        val graph = semantic_publish_pair(root)
+        val invalidation = package_index_route_admitted_invalidation_v1(root, graph, ["a", "c"])
+        expect(invalidation.valid).to_equal(true)
+        expect(invalidation.dirty_modules).to_equal(["a", "b", "c"])
+        expect(invalidation.dirty_packages).to_equal(["pkg-a", "pkg-b", "pkg-c"])
+        step("Do not let an incomplete event hint omit a semantic graph delta")
+        val omitted = package_index_route_admitted_invalidation_v1(root, graph, ["c"])
+        expect(omitted.dirty_modules).to_equal(["a", "b", "c"])
+        val noop = package_index_route_admitted_invalidation_v1(root, graph, [])
+        expect(noop.valid).to_equal(true)
+        expect(noop.dirty_modules).to_equal([])
+        dir_remove(root, true)
+
+    it "conservatively propagates when no prior generation is available":
+        step("Publish a first generation without previous semantic evidence")
+        val root = semantic_root("missing")
+        val graph = semantic_graph("first", true, true)
+        expect(package_module_index_publish_v1(root, graph)).to_equal(true)
+        val invalidation = package_index_route_admitted_invalidation_v1(root, graph, ["c"])
+        expect(invalidation.valid).to_equal(true)
+        expect(invalidation.dirty_modules).to_equal(["c", "d"])
+        dir_remove(root, true)
+
+    it "retains precise evidence after the previous index file is collected":
+        step("Delete the previous index while retaining its embedded transition evidence")
+        val root = semantic_root("collected")
+        val graph = semantic_publish_pair(root)
+        val old_digest = package_module_index_digest_v1(semantic_graph("before", false, false))
+        expect(file_delete("{root}/package-module-index-v1/{old_digest}.index")).to_equal(true)
+        val invalidation = package_index_route_admitted_invalidation_v1(root, graph, ["a", "c"])
+        expect(invalidation.valid).to_equal(true)
+        expect(invalidation.dirty_modules).to_equal(["a", "b", "c"])
+        dir_remove(root, true)
+
+    it "cuts off unchanged semantic exports and preserves evidence on idempotent publication":
+        step("Publish a private edit twice and compare its retained predecessor")
+        val root = semantic_root("cutoff")
+        val previous = semantic_graph("before", false, false)
+        val current = semantic_graph("after", false, true)
+        expect(package_module_index_publish_v1(root, previous)).to_equal(true)
+        expect(package_module_index_publish_v1(root, current)).to_equal(true)
+        val pointer = file_read("{root}/package-module-index-v1/TRANSITION")
+        expect(package_module_index_publish_v1(root, current)).to_equal(true)
+        expect(file_read("{root}/package-module-index-v1/TRANSITION")).to_equal(pointer)
+        val invalidation = package_index_route_admitted_invalidation_v1(root, current, ["c"])
+        expect(invalidation.dirty_modules).to_equal(["c"])
+        dir_remove(root, true)
+
+    it "conservatively propagates a hint not proven by the prior generation":
+        step("Add an unproven event hint without suppressing actual graph changes")
+        val root = semantic_root("unproven")
+        val graph = semantic_publish_pair(root)
+        val invalidation = package_index_route_admitted_invalidation_v1(root, graph, ["d"])
+        expect(invalidation.valid).to_equal(true)
+        expect(invalidation.dirty_modules).to_equal(["a", "b", "c", "d"])
+        val unknown = package_index_route_admitted_invalidation_v1(root, graph, ["unknown"])
+        expect(unknown.valid).to_equal(false)
+        expect(unknown.reason).to_equal("changed-module-unknown:unknown")
+        dir_remove(root, true)
+
+    it "rejects corrupt transition content without accepting private-change hints":
+        step("Truncate persisted semantic evidence before routing a private edit")
+        val root = semantic_root("corrupt")
+        val graph = semantic_publish_pair(root)
+        val dir = "{root}/package-module-index-v1"
+        val pointer = file_read("{dir}/TRANSITION")
+        file_write("{dir}/{pointer}.transition", "truncated")
+        val read = package_index_transition_read_v1(dir, package_module_index_digest_v1(graph))
+        expect(read.is_err()).to_equal(true)
+        val invalidation = package_index_route_admitted_invalidation_v1(root, graph, ["c"])
+        expect(invalidation.dirty_modules).to_equal(["c", "d"])
+        dir_remove(root, true)
+
+    it "refuses a transition staged for a different current generation":
+        val root = semantic_root("interrupted")
+        val graph = semantic_publish_pair(root)
+        val next = semantic_graph("future", false, true)
+        val dir = "{root}/package-module-index-v1"
+        step("Stage a candidate transition without replacing CURRENT")
+        expect(package_index_transition_stage_v1(dir, package_module_index_digest_v1(next),
+            package_module_index_digest_v1(graph), package_module_index_encode_v1(graph))).to_equal(true)
+        val read = package_index_transition_read_v1(dir, package_module_index_digest_v1(graph))
+        expect(read.is_err()).to_equal(true)
+        expect(read.unwrap_err()).to_equal("transition-current-mismatch")
+        val invalidation = package_index_route_admitted_invalidation_v1(root, graph, ["c"])
+        expect(invalidation.dirty_modules).to_equal(["c", "d"])
+        dir_remove(root, true)
+
+    it "binds the actual predecessor when revisiting an earlier generation":
+        step("Publish A then B then C then B and inspect B's actual predecessor")
+        val root = semantic_root("revisit")
+        val first = semantic_graph("first", false, false)
+        val second = semantic_graph("second", true, true)
+        val third = semantic_graph("third", false, true)
+        for graph in [first, second]:
+            expect(package_module_index_publish_v1(root, graph)).to_equal(true)
+        val retired = file_read("{root}/package-module-index-v1/TRANSITION")
+        expect(package_module_index_publish_v1(root, third)).to_equal(true)
+        expect(file_exists("{root}/package-module-index-v1/{retired}.transition")).to_equal(false)
+        expect(package_module_index_publish_v1(root, second)).to_equal(true)
+        val read = package_index_transition_read_v1("{root}/package-module-index-v1",
+            package_module_index_digest_v1(second))
+        expect(read.is_ok()).to_equal(true)
+        expect(read.unwrap().previous_digest).to_equal(package_module_index_digest_v1(third))
+        val invalidation = package_index_route_admitted_invalidation_v1(root, second, ["a"])
+        expect(invalidation.dirty_modules).to_equal(["a", "b"])
+        dir_remove(root, true)
+
+    it "does not infer private reuse across compiler configuration or graph changes":
+        step("Change each compatibility binding independently")
+        for dimension in ["producer", "variant", "root", "topology"]:
+            val root = semantic_root(dimension)
+            val previous = semantic_graph("before", false, false)
+            var graph = semantic_graph("after", true, true)
+            if dimension == "producer": graph.producer_digest = sha256_text("other-producer")
+            if dimension == "variant": graph.variant_digest = sha256_text("other-variant")
+            if dimension == "root": graph.root_generation = "other-root"
+            if dimension == "topology":
+                var changed_entry = graph.entries[0]
+                changed_entry.source_identity = "src/renamed-a.spl"
+                graph.entries[0] = changed_entry
+            var rebound: [PackageModuleIndexEntryV1] = []
+            for entry in graph.entries:
+                var bound = entry
+                bound.action_digest = package_module_index_entry_action_digest_v1(graph, bound)
+                rebound.push(bound)
+            graph.entries = rebound
+            expect(package_module_index_publish_v1(root, previous)).to_equal(true)
+            expect(package_module_index_publish_v1(root, graph)).to_equal(true)
+            val invalidation = package_index_route_admitted_invalidation_v1(root, graph, ["c"])
+            expect(invalidation.dirty_modules).to_equal(["c", "d"])
+            dir_remove(root, true)
+
+    it "propagates each body-sensitive semantic dimension independently":
+        step("Change one admitted semantic facet at a time")
+        for dimension in ["export", "smf", "abi", "initializer", "provider", "manifest"]:
+            val root = semantic_root(dimension)
+            val previous = semantic_graph("before", false, false)
+            var graph = semantic_graph("after", false, true)
+            var entry = graph.entries[2]
+            val digest = sha256_text("changed-{dimension}")
+            if dimension == "export": entry.export_digest = digest
+            if dimension == "smf": entry.smf_metadata_digest = digest
+            if dimension == "abi": entry.abi_digest = digest
+            if dimension == "initializer": entry.initializer_digest = digest
+            if dimension == "provider": entry.provider_digest = digest
+            if dimension == "manifest": entry.manifest_digest = digest
+            entry.action_digest = package_module_index_entry_action_digest_v1(graph, entry)
+            graph.entries[2] = entry
+            expect(package_module_index_publish_v1(root, previous)).to_equal(true)
+            expect(package_module_index_publish_v1(root, graph)).to_equal(true)
+            val invalidation = package_index_route_admitted_invalidation_v1(root, graph, ["c"])
+            expect(invalidation.dirty_modules).to_equal(["c", "d"])
+            dir_remove(root, true)
+
+    it "routes mixed edits through real dirty source and retained archive admission on POSIX":
+        step("Admit logical source identities through the snapshot and reuse one real archive")
+        val root = semantic_root("route")
+        expect(dir_create_all("{root}/snapshot/src")).to_equal(true)
+        val snapshot = path_absolute("{root}/snapshot")
+        val previous = semantic_graph("before", false, false)
+        val graph = semantic_graph("after", true, true)
+        expect(package_module_index_publish_v1(root, previous)).to_equal(true)
+        expect(package_module_index_publish_v1(root, graph)).to_equal(true)
+        for name in ["a", "b", "c", "d"]:
+            file_write("{snapshot}/src/{name}.spl", semantic_source(name, name == "a" or name == "c"))
+        val authority = PackageArchiveAuthorityV1(graph.producer_digest, graph.root_generation,
+            graph.variant_digest, graph.scv_revision_id, graph.scv_tree_id, graph.inventory_digest)
+        val interface_digest = sha256_text("d-interface")
+        val action_digest = sha256_text("d-action")
+        expect(package_archive_publish_scc_v1(root, "scc-d", authority,
+            [PackageArchivePublishInputV1(graph.entries[3], [graph.entries[2].smf_metadata_digest],
+                "symbol|d|function|i64|{interface_digest}",
+                "action|d-entry|compile|d|{action_digest}", true)])).to_equal(true)
+        val retained_entry = package_archive_aggregate_entry_v1([graph.entries[3]])!
+        val retained = package_archive_load_v1(root, retained_entry, authority,
+            [graph.entries[2].smf_metadata_digest])
+        expect(retained.valid).to_equal(true)
+        val previous_cache = env_get("SIMPLE_CACHE") ?? ""
+        env_set("SIMPLE_CACHE", root)
+        val route = package_index_route_admitted_current_v1("", snapshot,
+            graph.scv_revision_id, graph.scv_tree_id, graph.inventory_digest,
+            graph.producer_digest, graph.root_generation, graph.variant_digest, ["a", "c"])
+        env_set("SIMPLE_CACHE", previous_cache)
+        expect(route.valid).to_equal(true)
+        expect(route.dirty_modules.len()).to_equal(3)
+        var dirty_names: [text] = []
+        for dirty in route.dirty_modules:
+            dirty_names.push(dirty.module_id)
+        expect(dirty_names).to_contain("a")
+        expect(dirty_names).to_contain("b")
+        expect(dirty_names).to_contain("c")
+        expect(route.archive_admissions.len()).to_equal(1)
+        expect(route.archive_admissions[0].module_identities).to_equal(["d"])
+        expect(route.archive_admissions[0].load.valid).to_equal(true)
+        expect(route.archive_admissions[0].load.receipt!.receipt_digest).to_equal(
+            retained.receipt!.receipt_digest)
+        expect(route.archive_admissions[0].archive_path).to_equal(retained.archive_path)
+        dir_remove(root, true)

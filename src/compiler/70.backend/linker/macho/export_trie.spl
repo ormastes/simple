@@ -1,0 +1,114 @@
+# Checked export-trie decoder. Addresses remain image-relative until the dylib
+# reader applies the preferred load address; reexports remain provider references.
+use compiler.backend.linker.macho.input.{macho_range}
+use std.string_core.{char_from_code}
+
+struct MachODylibExport:
+    name: text
+    flags: i64
+    address: i64
+    resolver: i64
+    library_ordinal: i64
+    import_name: text
+
+struct MachOUleb:
+    value: i64
+    next: i64
+
+struct MachOTrieNode:
+    offset: i64
+    prefix: text
+
+fn macho_uleb(bytes: [u8], start: i64, end: i64) -> Result<MachOUleb, text>:
+    var value: i64 = 0
+    var at = start
+    var shift: i64 = 0
+    while at < end and shift < 63:
+        val byte = bytes[at] as i64
+        value = value | ((byte & 127) << shift)
+        at = at + 1
+        if (byte & 128) == 0: return Ok(MachOUleb(value: value, next: at))
+        shift = shift + 7
+    Err("truncated or overflowing Mach-O export ULEB")
+
+fn macho_bounded_string(bytes: [u8], start: i64, end: i64) -> Result<text, text>:
+    if start < 0 or end > bytes.len() or start >= end:
+        return Err("Mach-O string outside owning record")
+    var name = ""
+    var at = start
+    while at < end:
+        if bytes[at] == 0: return Ok(name)
+        if at - start >= 4096: return Err("Mach-O name exceeds 4096-byte limit")
+        # Mach-O linker names here use byte-preserving ASCII. Non-ASCII names
+        # require an explicit UTF-8 contract instead of lossy char conversion.
+        if bytes[at] > 127: return Err("unsupported non-ASCII Mach-O name")
+        name = name + char_from_code(bytes[at] as i64)
+        at = at + 1
+    Err("unterminated Mach-O string")
+
+fn macho_exports_trie(bytes: [u8], start: i64, size: i64, dependency_count: i64) -> Result<[MachODylibExport], text>:
+    """Decode bounded exports; preserve reexports and stub/resolver pairs."""
+    if not macho_range(bytes, start, size) or size == 0 or dependency_count < 0:
+        return Err("invalid Mach-O exports trie extent")
+    val end = start + size
+    var pending = [MachOTrieNode(offset: 0, prefix: "")]
+    var visited: {i64: bool} = {}
+    var names: {text: bool} = {}
+    var exports: [MachODylibExport] = []
+    var cursor: i64 = 0
+    while cursor < pending.len():
+        val node = pending[cursor]
+        cursor = cursor + 1
+        if visited.has(node.offset): return Err("cyclic or shared Mach-O export trie node")
+        visited[node.offset] = true
+        if node.offset < 0 or node.offset >= size: return Err("Mach-O export child outside trie")
+        val terminal = macho_uleb(bytes, start + node.offset, end)?
+        if terminal.value > end - terminal.next: return Err("Mach-O export terminal outside trie")
+        val terminal_end = terminal.next + terminal.value
+        if terminal.value > 0:
+            if node.prefix == "" or names.has(node.prefix): return Err("empty or duplicate Mach-O export")
+            if exports.len() >= 1000000: return Err("Mach-O export count limit exceeded")
+            val flags = macho_uleb(bytes, terminal.next, terminal_end)?
+            if flags.value > 31 or (flags.value & 3) == 3:
+                return Err("unsupported Mach-O export flags")
+            var at = flags.next
+            var address: i64 = 0
+            var resolver: i64 = 0
+            var ordinal: i64 = 0
+            var import_name = ""
+            if (flags.value & 8) != 0:
+                if (flags.value & 19) != 0: return Err("incompatible Mach-O reexport flags")
+                val library = macho_uleb(bytes, at, terminal_end)?
+                ordinal = library.value
+                if ordinal < 1 or ordinal > dependency_count: return Err("invalid Mach-O reexport ordinal")
+                import_name = macho_bounded_string(bytes, library.next, terminal_end)?
+                at = library.next + import_name.len() + 1
+                if import_name == "": import_name = node.prefix
+            else:
+                val location = macho_uleb(bytes, at, terminal_end)?
+                address = location.value
+                at = location.next
+                if (flags.value & 16) != 0:
+                    if (flags.value & 3) != 0: return Err("invalid Mach-O resolver kind")
+                    val target = macho_uleb(bytes, at, terminal_end)?
+                    resolver = target.value
+                    at = target.next
+            if at != terminal_end: return Err("unexpected Mach-O export terminal bytes")
+            names[node.prefix] = true
+            exports = exports.push(MachODylibExport(name: node.prefix, flags: flags.value,
+                address: address, resolver: resolver, library_ordinal: ordinal, import_name: import_name))
+        if terminal_end >= end: return Err("missing Mach-O export child count")
+        val children = bytes[terminal_end] as i64
+        var at = terminal_end + 1
+        for index in 0..children:
+            val edge = macho_bounded_string(bytes, at, end)?
+            if edge == "" or node.prefix.len() > 4096 - edge.len(): return Err("invalid Mach-O export edge")
+            at = at + edge.len() + 1
+            val child = macho_uleb(bytes, at, end)?
+            at = child.next
+            if child.value >= size: return Err("Mach-O export child outside trie")
+            if pending.len() >= 1000000: return Err("Mach-O export node limit exceeded")
+            pending = pending.push(MachOTrieNode(offset: child.value, prefix: node.prefix + edge))
+    Ok(exports)
+
+export MachODylibExport, macho_exports_trie, macho_bounded_string

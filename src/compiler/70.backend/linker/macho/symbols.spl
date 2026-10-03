@@ -1,0 +1,89 @@
+use compiler.backend.linker.macho.input.{MachOInput}
+use compiler.backend.linker.macho.layout.{MachOLayout}
+use compiler.backend.linker.macho_parser.{MachOSymbolEntry}
+
+struct MachOBinding:
+    owner: i64
+    symbol: MachOSymbolEntry
+
+fn macho_definitions(inputs: [MachOInput]) -> Result<{text: MachOBinding}, text>:
+    var definitions: {text: MachOBinding} = {}
+    var owner: i64 = 0
+    for input in inputs:
+        for symbol in input.object.symbols:
+            if (symbol.n_type & 0xe0) == 0 and (symbol.n_type & 1) != 0 and symbol.name != "":
+                val kind = symbol.n_type & 14
+                if kind != 0 and kind != 2 and kind != 14:
+                    return Err("{input.name}: unsupported Mach-O symbol kind {kind}")
+                if kind != 0 or symbol.n_value != 0:
+                    if definitions.has(symbol.name):
+                        val previous = definitions[symbol.name]
+                        val previous_weak = (previous.symbol.n_desc & 0x80) != 0
+                        val weak = (symbol.n_desc & 0x80) != 0
+                        val previous_common = (previous.symbol.n_type & 14) == 0
+                        val common = kind == 0
+                        if not previous_common and not common and not previous_weak and not weak:
+                            return Err("duplicate symbol {symbol.name}")
+                        if (previous_common and not common) or (not common and previous_weak and not weak):
+                            definitions[symbol.name] = MachOBinding(owner: owner, symbol: symbol)
+                    else:
+                        definitions[symbol.name] = MachOBinding(owner: owner, symbol: symbol)
+        owner = owner + 1
+    Ok(definitions)
+
+fn macho_unresolved(inputs: [MachOInput], entry: text) -> Result<{text: bool}, text>:
+    val definitions = macho_definitions(inputs)?
+    var unresolved: {text: bool} = {}
+    if not definitions.has(entry): unresolved[entry] = true
+    for input in inputs:
+        for symbol in input.object.symbols:
+            if (symbol.n_type & 0xe0) == 0 and (symbol.n_type & 15) == 1 and
+                    symbol.n_value == 0 and (symbol.n_desc & 0x40) == 0 and
+                    symbol.name != "" and not definitions.has(symbol.name):
+                unresolved[symbol.name] = true
+    Ok(unresolved)
+
+fn macho_member_needed(input: MachOInput, unresolved: {text: bool}) -> bool:
+    for symbol in input.object.symbols:
+        if (symbol.n_type & 0xe0) == 0 and (symbol.n_type & 1) != 0 and
+                ((symbol.n_type & 14) != 0 or symbol.n_value != 0) and unresolved.has(symbol.name): return true
+    false
+
+fn macho_symbol_address(input: MachOInput, owner: i64, symbol: MachOSymbolEntry,
+        layout: MachOLayout) -> Result<i64, text>:
+    val kind = symbol.n_type & 14
+    if kind == 0 and symbol.n_value != 0:
+        if not layout.common_addresses.has(symbol.name): return Err("missing Mach-O common storage for {symbol.name}")
+        return Ok(layout.common_addresses[symbol.name])
+    if kind == 2: return Ok(symbol.n_value)
+    if kind != 14: return Err("undefined symbol {symbol.name}")
+    val key = "{owner}:{symbol.n_sect}"
+    if not layout.addresses.has(key): return Err("symbol {symbol.name} references a discarded or invalid section")
+    var ordinal: i64 = 1
+    for segment in input.object.segments:
+        for section in segment.sections:
+            if ordinal == symbol.n_sect:
+                val delta = symbol.n_value - section.addr
+                if symbol.n_value < section.addr or delta < 0 or delta > section.size:
+                    return Err("symbol {symbol.name} lies outside its section")
+                return Ok(layout.addresses[key] + delta)
+            ordinal = ordinal + 1
+    Err("invalid symbol section for {symbol.name}")
+
+fn macho_resolve_symbol(inputs: [MachOInput], definitions: {text: MachOBinding},
+        owner: i64, symbol_index: i64, layout: MachOLayout) -> Result<i64, text>:
+    val input = inputs[owner]
+    if symbol_index < 0 or symbol_index >= input.object.symbols.len():
+        return Err("Mach-O relocation symbol index out of range")
+    val symbol = input.object.symbols[symbol_index]
+    if (symbol.n_type & 0xe0) != 0: return Err("Mach-O relocation references a debug symbol")
+    if (symbol.n_type & 1) != 0:
+        if definitions.has(symbol.name):
+            val chosen = definitions[symbol.name]
+            return macho_symbol_address(inputs[chosen.owner], chosen.owner, chosen.symbol, layout)
+        if (symbol.n_desc & 0x40) != 0: return Ok(0)
+        return Err("undefined symbol {symbol.name}")
+    macho_symbol_address(input, owner, symbol, layout)
+
+export MachOBinding, macho_definitions, macho_unresolved, macho_member_needed
+export macho_symbol_address, macho_resolve_symbol

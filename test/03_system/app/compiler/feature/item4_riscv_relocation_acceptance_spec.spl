@@ -1,0 +1,197 @@
+"""
+# ITEM4-REQ-004: RISC-V instruction relocation slice
+
+NOT RUN: tests precede implementation; no admitted self-hosted test runtime.
+Calls exercise production relocation evaluation and byte patching, not a full
+RISC-V ELF link. ELF target admission, archive/corpus linking, relaxation,
+paired PCREL_LO12 resolution, dynamic/TLS and native/firmware runs stay open.
+
+Oracle: RISC-V ELF psABI U+I CALL/CALL_PLT and HI20/LO12 definitions;
+https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/master/riscv-elf.adoc
+LLVM LLD checks SignExtend(val+0x800, XLEN)>>12 as signed20:
+https://llvm.googlesource.com/llvm-project/lld/+/6ef5ac64475f61262e794c705a06f0c0ffe769dd/ELF/Arch/RISCV.cpp
+Expected instruction words below are independent literal ISA encodings.
+"""
+use std.spec.*
+use std.spec.step
+use compiler.backend.linker.reloc_engine.{
+    RelocArch, reloc_apply, reloc_patch_bytes, reloc_patch_width,
+    R_RISCV_NONE, R_RISCV_CALL, R_RISCV_CALL_PLT, R_RISCV_HI20, R_RISCV_LO12_I,
+    R_RISCV_PCREL_HI20, R_RISCV_PCREL_LO12_I}
+
+fn item4_riscv_call_pair() -> [i64]:
+    # auipc ra,0 ; jalr ra,ra,0
+    [0x97, 0, 0, 0, 0xe7, 0x80, 0, 0]
+
+fn item4_riscv_word(bytes: [i64], offset: i64) -> i64:
+    val valid = offset >= 0 and offset <= bytes.len()
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    expect(4 <= bytes.len() - offset).to_equal(true)
+    if 4 > bytes.len() - offset: return 0
+    bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)
+
+describe "ITEM4-REQ-004 RISC-V relocation instruction encoding":
+    it "leaves NONE relocation bytes unchanged for both XLENs":
+        # @req ITEM4-REQ-004
+        step("Use a nonzero instruction pair so accidental zeroing is visible")
+        val original = item4_riscv_call_pair()
+        step("Apply the no-operation relocation through both target dispatches")
+        val rv32 = reloc_patch_bytes(RelocArch.Riscv32, original, 0, R_RISCV_NONE, 0, 0, 0)
+        val rv64 = reloc_patch_bytes(RelocArch.Riscv64, original, 0, R_RISCV_NONE, 0, 0, 0)
+        step("Require exact original bytes and a zero patch width")
+        expect(rv32).to_equal(original)
+        expect(rv64).to_equal(original)
+        expect(reloc_patch_width(RelocArch.Riscv32, R_RISCV_NONE)).to_equal(0)
+        expect(reloc_patch_width(RelocArch.Riscv64, R_RISCV_NONE)).to_equal(0)
+
+    it "patches CALL as an eight-byte AUIPC and JALR pair":
+        # @req ITEM4-REQ-004
+        step("Use literal auipc ra,0 and jalr ra,ra,0 instructions")
+        val original = item4_riscv_call_pair()
+        expect(item4_riscv_word(original, 0)).to_equal(0x00000097)
+        expect(item4_riscv_word(original, 4)).to_equal(0x000080e7)
+        step("Relocate a function 0x1234 bytes after the AUIPC")
+        val result = reloc_apply(RelocArch.Riscv64, original, 0, R_RISCV_CALL, 0x5234, 0, 0x4000)
+        expect(result.success).to_equal(true)
+        if not result.success: return
+        val patched = reloc_patch_bytes(RelocArch.Riscv64, original, 0, R_RISCV_CALL, 0x5234, 0, 0x4000)
+        step("Require both exact instructions and an eight-byte patch width")
+        expect(reloc_patch_width(RelocArch.Riscv64, R_RISCV_CALL)).to_equal(8)
+        expect(item4_riscv_word(patched, 0)).to_equal(0x00001097)
+        expect(item4_riscv_word(patched, 4)).to_equal(0x234080e7)
+
+    it "rounds CALL_PLT high bits when the low immediate is negative":
+        # @req ITEM4-REQ-004
+        step("Use a resolved PLT destination 2048 bytes after the call site")
+        val original = item4_riscv_call_pair()
+        step("Apply the same paired relocation using CALL_PLT")
+        val result = reloc_apply(RelocArch.Riscv64, original, 0, R_RISCV_CALL_PLT, 0x4800, 0, 0x4000)
+        expect(result.success).to_equal(true)
+        if not result.success: return
+        val patched = reloc_patch_bytes(RelocArch.Riscv64, original, 0, R_RISCV_CALL_PLT, 0x4800, 0, 0x4000)
+        step("Require AUIPC plus 4096 and JALR minus 2048")
+        expect(item4_riscv_word(patched, 0)).to_equal(0x00001097)
+        expect(item4_riscv_word(patched, 4)).to_equal(0x800080e7)
+
+    it "accepts both rounded signed-high boundaries on RV64":
+        # @req ITEM4-REQ-004
+        step("Use the smallest and largest even offsets representable by signed20 plus signed12")
+        val offsets: [i64] = [-2147485696, 2147481598]
+        val high_words: [i64] = [0x80000097, 0x7ffff097]
+        val low_words: [i64] = [0x800080e7, 0x7fe080e7]
+        step("Evaluate and patch each literal boundary through the production dispatcher")
+        var index: i64 = 0
+        for offset in offsets:
+            val result = reloc_apply(RelocArch.Riscv64, item4_riscv_call_pair(), 0, R_RISCV_CALL, offset, 0, 0)
+            expect(result.success).to_equal(true)
+            if not result.success: return
+            val patched = reloc_patch_bytes(RelocArch.Riscv64, item4_riscv_call_pair(), 0, R_RISCV_CALL, offset, 0, 0)
+            step("Compare exact upper and lower immediate encodings")
+            expect(item4_riscv_word(patched, 0)).to_equal(high_words[index])
+            expect(item4_riscv_word(patched, 4)).to_equal(low_words[index])
+            index = index + 1
+
+    it "rejects RV64 calls outside the rounded high-part range without mutating bytes":
+        # @req ITEM4-REQ-004
+        step("Choose even offsets immediately outside both representable boundaries")
+        val original = item4_riscv_call_pair()
+        step("Attempt evaluation and patching for each overflowing displacement")
+        for offset in [-2147485698, 2147481600]:
+            val result = reloc_apply(RelocArch.Riscv64, original, 0, R_RISCV_CALL, offset, 0, 0)
+            step("Require a signed-high range failure and unchanged instructions")
+            expect(result.success).to_equal(false)
+            expect(result.error).to_contain("signed 20-bit")
+            expect(reloc_patch_bytes(RelocArch.Riscv64, original, 0, R_RISCV_CALL, offset, 0, 0)).to_equal(original)
+
+    it "uses RV32 wraparound rather than RV64 high-part rejection":
+        # @req ITEM4-REQ-004
+        step("Choose 0x7ffff800 where rounding crosses the RV32 sign boundary")
+        val original = item4_riscv_call_pair()
+        step("Relocate through the RV32 dispatcher")
+        val result = reloc_apply(RelocArch.Riscv32, original, 0, R_RISCV_CALL, 0x7ffff800, 0, 0)
+        expect(result.success).to_equal(true)
+        if not result.success: return
+        val patched = reloc_patch_bytes(RelocArch.Riscv32, original, 0, R_RISCV_CALL, 0x7ffff800, 0, 0)
+        step("Require the wrapped upper immediate and negative lower immediate")
+        expect(reloc_patch_width(RelocArch.Riscv32, R_RISCV_CALL)).to_equal(8)
+        expect(item4_riscv_word(patched, 0)).to_equal(0x80000097)
+        expect(item4_riscv_word(patched, 4)).to_equal(0x800080e7)
+
+    it "rejects a truncated or structurally invalid call instruction pair":
+        # @req ITEM4-REQ-004
+        step("Prepare truncated, non-AUIPC, non-JALR and mismatched-register inputs")
+        val invalid: [[i64]] = [
+            [0x97, 0, 0, 0],
+            [0x13, 0, 0, 0, 0xe7, 0x80, 0, 0],
+            [0x97, 0, 0, 0, 0x13, 0, 0, 0],
+            [0x97, 0, 0, 0, 0xe7, 0, 1, 0]]
+        step("Send malformed instruction pairs to the checked relocation evaluator")
+        for original in invalid:
+            val result = reloc_apply(RelocArch.Riscv64, original, 0, R_RISCV_CALL, 16, 0, 0)
+            step("Require rejection and leave all original bytes unchanged")
+            expect(result.success).to_equal(false)
+            expect(reloc_patch_bytes(RelocArch.Riscv64, original, 0, R_RISCV_CALL, 16, 0, 0)).to_equal(original)
+
+    it "preserves LUI and ADDI register fields for absolute HI20 and LO12_I":
+        # @req ITEM4-REQ-004
+        step("Use lui t0,0 followed by addi t0,t0,0")
+        val original: [i64] = [0xb7, 2, 0, 0, 0x93, 0x82, 2, 0]
+        step("Apply absolute upper and lower relocations for address 0x1234")
+        val high = reloc_patch_bytes(RelocArch.Riscv64, original, 0, R_RISCV_HI20, 0x1234, 0, 0)
+        val both = reloc_patch_bytes(RelocArch.Riscv64, high, 4, R_RISCV_LO12_I, 0x1234, 0, 0)
+        step("Require exact LUI and ADDI encodings with t0 preserved")
+        expect(item4_riscv_word(both, 0)).to_equal(0x000012b7)
+        expect(item4_riscv_word(both, 4)).to_equal(0x23428293)
+
+    it "preserves the temporary register and zero destination of a tail call":
+        # @req ITEM4-REQ-004
+        step("Use auipc t1,0 followed by jalr zero,t1,0")
+        val original: [i64] = [0x17, 3, 0, 0, 0x67, 0, 3, 0]
+        step("Apply CALL_PLT for the resolved target 0x1234 bytes away")
+        val result = reloc_apply(RelocArch.Riscv64, original, 0, R_RISCV_CALL_PLT, 0x1234, 0, 0)
+        expect(result.success).to_equal(true)
+        if not result.success: return
+        val patched = reloc_patch_bytes(RelocArch.Riscv64, original, 0, R_RISCV_CALL_PLT, 0x1234, 0, 0)
+        step("Require the independent t1 and zero-register encodings")
+        expect(item4_riscv_word(patched, 0)).to_equal(0x00001317)
+        expect(item4_riscv_word(patched, 4)).to_equal(0x23430067)
+
+    it "rejects odd call targets instead of relying on JALR to discard the low bit":
+        # @req ITEM4-REQ-004
+        step("Prepare a target one byte after an aligned call site")
+        val original = item4_riscv_call_pair()
+        step("Evaluate the unaligned function address")
+        val result = reloc_apply(RelocArch.Riscv64, original, 0, R_RISCV_CALL, 0x4001, 0, 0x4000)
+        step("Require an alignment diagnostic and unchanged instructions")
+        expect(result.success).to_equal(false)
+        expect(result.error).to_contain("two-byte aligned")
+        expect(reloc_patch_bytes(RelocArch.Riscv64, original, 0, R_RISCV_CALL, 0x4001, 0, 0x4000)).to_equal(original)
+
+    it "rejects arithmetic overflow before call-range arithmetic can wrap":
+        # @req ITEM4-REQ-004
+        step("Prepare overflow in S plus A and then in S minus P")
+        val original = item4_riscv_call_pair()
+        step("Evaluate overflowing signed 64-bit address calculations")
+        val addition = reloc_apply(RelocArch.Riscv64, original, 0, R_RISCV_CALL, 9223372036854775807, 1, 0)
+        val subtraction = reloc_apply(RelocArch.Riscv64, original, 0, R_RISCV_CALL, -9223372036854775807 - 1, 0, 1)
+        step("Require named arithmetic failures rather than wrapped call targets")
+        expect(addition.success).to_equal(false)
+        expect(addition.error).to_contain("overflows signed 64-bit")
+        expect(subtraction.success).to_equal(false)
+        expect(subtraction.error).to_contain("overflows signed 64-bit")
+
+    it "supports standalone PCREL_HI20 while rejecting unpaired PCREL_LO12_I":
+        # @req ITEM4-REQ-004
+        step("Use AUIPC with a target 0x1800 bytes after its place")
+        val original = item4_riscv_call_pair()
+        step("Apply only the high relocation whose complete context is supplied")
+        val high = reloc_apply(RelocArch.Riscv64, original, 0, R_RISCV_PCREL_HI20, 0x5800, 0, 0x4000)
+        expect(high.success).to_equal(true)
+        if not high.success: return
+        val patched = reloc_patch_bytes(RelocArch.Riscv64, original, 0, R_RISCV_PCREL_HI20, 0x5800, 0, 0x4000)
+        expect(item4_riscv_word(patched, 0)).to_equal(0x00002097)
+        step("Reject the low relocation without the paired HI20 place and target")
+        val low = reloc_apply(RelocArch.Riscv64, patched, 4, R_RISCV_PCREL_LO12_I, 0x4000, 0, 0x4004)
+        expect(low.success).to_equal(false)
+        expect(low.error).to_contain("paired HI20")

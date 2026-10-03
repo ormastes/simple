@@ -1,0 +1,224 @@
+"""
+# ITEM4-REQ-010 linker lifecycle callback acceptance
+
+NOT RUN: no admitted SSpec runtime is available. Tests execute real ELF linking
+inside each provider callback; they do not certify dynamic-pack loading,
+native image execution, resource enforcement, or whole-linker completion.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.common.kernel_plugin.schema_header.{
+    KpfSchemaHeaderV1, KpfSchemaRequirementV1, KPF_ABI_VERSION_V1, KPF_SCHEMA_HEADER_V1_SIZE
+}
+use std.common.linker.link_request_v1.{LinkRequestV1, LinkTargetV1}
+use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1, LinkExecutionModeV1}
+use std.common.linker.link_receipt_v1.{LinkReceiptV1, LinkAccountingClassV1, LinkOutcomeV1}
+use compiler.backend.linker.linker_lifecycle.{LinkerProviderV1, LinkerLifecycleV1}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn item4_lifecycle_digest(value: u64) -> KpfDigest256:
+    KpfDigest256(w0: value, w1: 0, w2: 0, w3: 0)
+
+fn item4_lifecycle_header(major: u32) -> KpfSchemaHeaderV1:
+    KpfSchemaHeaderV1(abi_version: KPF_ABI_VERSION_V1,
+        struct_size: KPF_SCHEMA_HEADER_V1_SIZE, schema_id: KpfId128(hi: 4, lo: 10),
+        schema_major: major, schema_minor: 0,
+        schema_digest: item4_lifecycle_digest(10), reserved0: 0)
+
+fn item4_lifecycle_requirement() -> KpfSchemaRequirementV1:
+    # Independent expected identity; it is never derived from a candidate provider.
+    KpfSchemaRequirementV1(schema_id: KpfId128(hi: 4, lo: 10),
+        schema_major: 1, minimum_minor: 0, minimum_struct_size: KPF_SCHEMA_HEADER_V1_SIZE,
+        schema_digest: item4_lifecycle_digest(10))
+
+fn item4_lifecycle_target() -> LinkTargetV1:
+    LinkTargetV1(arch: 1, os: 1, abi: 1, object_format: 1, endian: 1, address_width: 64)
+
+fn item4_lifecycle_request() -> LinkRequestV1:
+    LinkRequestV1(header: item4_lifecycle_header(1), target: item4_lifecycle_target(),
+        inputs_manifest_digest: item4_lifecycle_digest(11), output_contract: 1,
+        semantic_profile_digest: item4_lifecycle_digest(12),
+        runtime_sysroot_digest: item4_lifecycle_digest(13), required_features: 0,
+        layout_handle: 0, debug_handle: 0, reproducibility: 1)
+
+fn item4_lifecycle_policy() -> LinkExecutionPolicyV1:
+    LinkExecutionPolicyV1(header: item4_lifecycle_header(1), mode: LinkExecutionModeV1.Fast,
+        job_memory_limit_bytes: 0, scratch_limit_bytes: 0, max_workers: 1,
+        allowed_placements: 1, enforcement_requirement: 0)
+
+fn item4_lifecycle_inputs() -> [text]:
+    ["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"]
+
+fn item4_lifecycle_link(inputs: [text], entry: text, request: LinkRequestV1,
+        policy: LinkExecutionPolicyV1) -> LinkReceiptV1:
+    var objects: [[i64]] = []
+    for path in inputs:
+        val raw = file_read_bytes(path)
+        expect(raw.len()).to_be_greater_than(64)
+        var bytes: [i64] = []
+        for byte in raw: bytes.push(byte as i64)
+        objects.push(bytes)
+    # The outcome comes from actual production linking; no canned callback PASS.
+    val linked = elf_static_link(objects, [], entry, RelocArch.X86_64)
+    if linked.is_ok():
+        val image = linked.unwrap()
+        expect(image.len()).to_be_greater_than(64)
+        if image.len() > 64:
+            expect(image[0]).to_equal(127)
+            expect(image[16]).to_equal(2)
+            expect(image[18]).to_equal(62)
+    LinkReceiptV1(header: item4_lifecycle_header(1), engine_id: "internal:elf",
+        host: item4_lifecycle_target(), target: request.target,
+        policy_digest: policy.header.schema_digest,
+        accounting_class: LinkAccountingClassV1.NotCertified, measured_peak_bytes: 0,
+        outcome: if linked.is_ok(): LinkOutcomeV1.Success else: LinkOutcomeV1.InputError)
+
+fn item4_lifecycle_recovery(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
+        inputs: [text], output: text) -> LinkReceiptV1:
+    item4_lifecycle_link(inputs, "_start", request, policy)
+
+fn item4_lifecycle_replacement(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
+        inputs: [text], output: text) -> LinkReceiptV1:
+    item4_lifecycle_link(inputs, "__item4_missing_entry", request, policy)
+
+fn item4_lifecycle_provider(replacement: bool, major: u32) -> LinkerProviderV1:
+    LinkerProviderV1(header: item4_lifecycle_header(major),
+        provider_id: KpfId128(hi: 4, lo: if replacement: 2 else: 1),
+        composition_digest: item4_lifecycle_digest(if replacement: 102 else: 101),
+        engine_id: "internal:elf",
+        invoke: if replacement: item4_lifecycle_replacement else: item4_lifecycle_recovery)
+
+describe "ITEM4-REQ-010 linker generation lifecycle":
+    it "dispatches static recovery even when generation capacity prevents publication":
+        # @req ITEM4-REQ-010
+        step("Fill both generation slots while an old session keeps recovery generation pinned")
+        val created = LinkerLifecycleV1.create(2, 2, item4_lifecycle_requirement(), item4_lifecycle_provider(false, 1))
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        var lifecycle = created.unwrap()
+        val held = lifecycle.open()
+        expect(held.is_ok()).to_equal(true)
+        if held.is_err(): return
+        val replaced = lifecycle.publish(item4_lifecycle_provider(true, 1))
+        expect(replaced.is_ok()).to_equal(true)
+        if replaced.is_err(): return
+        expect(lifecycle.recover().is_err()).to_equal(true)
+        step("Execute the independently retained static callback despite the exhausted publication table")
+        val result = lifecycle.run_recovery(item4_lifecycle_request(), item4_lifecycle_policy(), item4_lifecycle_inputs(), "")
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        expect(result.unwrap().outcome).to_equal(LinkOutcomeV1.Success)
+        expect(result.unwrap().engine_id).to_equal("internal:elf")
+        expect(result.unwrap().accounting_class).to_equal(LinkAccountingClassV1.NotCertified)
+        expect(result.unwrap().measured_peak_bytes).to_equal(0)
+        expect(lifecycle.active_generation().index).to_equal(replaced.unwrap().index)
+        expect(lifecycle.active_generation().epoch).to_equal(replaced.unwrap().epoch)
+        step("Preserve a real recovery-link error when its input omits the provider object")
+        val failed = lifecycle.run_recovery(item4_lifecycle_request(), item4_lifecycle_policy(),
+            ["test/fixtures/linker/elf/start_x64.o"], "")
+        expect(failed.is_ok()).to_equal(true)
+        if failed.is_err(): return
+        expect(failed.unwrap().outcome).to_equal(LinkOutcomeV1.InputError)
+        expect(lifecycle.close(held.unwrap()).is_ok()).to_equal(true)
+
+    it "pins existing real linker callbacks across replacement and recovers independently":
+        # @req ITEM4-REQ-010
+        step("Create the static recovery provider and open a session on its generation")
+        val created = LinkerLifecycleV1.create(3, 3, item4_lifecycle_requirement(), item4_lifecycle_provider(false, 1))
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        var lifecycle = created.unwrap()
+        val old_generation = lifecycle.active_generation()
+        val old = lifecycle.open()
+        expect(old.is_ok()).to_equal(true)
+        if old.is_err(): return
+        step("Publish a provider whose actual ELF entry-point request fails and open a new session")
+        val replaced = lifecycle.publish(item4_lifecycle_provider(true, 1))
+        expect(replaced.is_ok()).to_equal(true)
+        if replaced.is_err(): return
+        val current = lifecycle.open()
+        expect(current.is_ok()).to_equal(true)
+        if current.is_err(): return
+        step("Run both callbacks against real fixtures: the old session succeeds and replacement reports input failure")
+        val prior = lifecycle.run(old.unwrap(), item4_lifecycle_request(), item4_lifecycle_policy(), item4_lifecycle_inputs(), "")
+        val newer = lifecycle.run(current.unwrap(), item4_lifecycle_request(), item4_lifecycle_policy(), item4_lifecycle_inputs(), "")
+        expect(prior.is_ok()).to_equal(true)
+        expect(newer.is_ok()).to_equal(true)
+        if prior.is_err() or newer.is_err(): return
+        expect(prior.unwrap().outcome).to_equal(LinkOutcomeV1.Success)
+        expect(newer.unwrap().outcome).to_equal(LinkOutcomeV1.InputError)
+        expect(prior.unwrap().engine_id).to_equal("internal:elf")
+        step("Refuse collection of the pinned retired provider, then release its session and collect it")
+        val pinned = lifecycle.collect(old_generation)
+        expect(pinned.is_err()).to_equal(true)
+        if pinned.is_err(): expect(pinned.unwrap_err()).to_contain("still pinned")
+        expect(lifecycle.close(old.unwrap()).is_ok()).to_equal(true)
+        expect(lifecycle.collect(old_generation).is_ok()).to_equal(true)
+        step("Recover using the retained static callback and prove a new session links successfully")
+        val recovered = lifecycle.recover()
+        expect(recovered.is_ok()).to_equal(true)
+        if recovered.is_err(): return
+        val restored = lifecycle.open()
+        expect(restored.is_ok()).to_equal(true)
+        if restored.is_err(): return
+        val result = lifecycle.run(restored.unwrap(), item4_lifecycle_request(), item4_lifecycle_policy(), item4_lifecycle_inputs(), "")
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        expect(result.unwrap().outcome).to_equal(LinkOutcomeV1.Success)
+        expect(result.unwrap().accounting_class).to_equal(LinkAccountingClassV1.NotCertified)
+        expect(lifecycle.close(current.unwrap()).is_ok()).to_equal(true)
+        expect(lifecycle.close(restored.unwrap()).is_ok()).to_equal(true)
+
+    it "rejects an incompatible provider before changing the active generation":
+        # @req ITEM4-REQ-010
+        step("Create an admitted callback and record its active generation")
+        val created = LinkerLifecycleV1.create(2, 1, item4_lifecycle_requirement(), item4_lifecycle_provider(false, 1))
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        var lifecycle = created.unwrap()
+        val before = lifecycle.active_generation()
+        step("Offer the same schema identity with incompatible major version")
+        val rejected = lifecycle.publish(item4_lifecycle_provider(true, 2))
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("schema rejected")
+        expect(lifecycle.active_generation().index).to_equal(before.index)
+        expect(lifecycle.active_generation().epoch).to_equal(before.epoch)
+        step("A newly opened session still reaches the admitted real linker callback")
+        val session = lifecycle.open()
+        expect(session.is_ok()).to_equal(true)
+        if session.is_err(): return
+        val result = lifecycle.run(session.unwrap(), item4_lifecycle_request(), item4_lifecycle_policy(), item4_lifecycle_inputs(), "")
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        expect(result.unwrap().outcome).to_equal(LinkOutcomeV1.Success)
+        expect(lifecycle.close(session.unwrap()).is_ok()).to_equal(true)
+
+    it "rejects closed handles after a bounded session slot is reused":
+        # @req ITEM4-REQ-010
+        step("Fill the sole session slot and prove a second open is rejected")
+        val created = LinkerLifecycleV1.create(2, 1, item4_lifecycle_requirement(), item4_lifecycle_provider(false, 1))
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        var lifecycle = created.unwrap()
+        val original = lifecycle.open()
+        expect(original.is_ok()).to_equal(true)
+        if original.is_err(): return
+        expect(lifecycle.open().is_err()).to_equal(true)
+        step("Close and reuse the slot with a different epoch")
+        expect(lifecycle.close(original.unwrap()).is_ok()).to_equal(true)
+        val reused = lifecycle.open()
+        expect(reused.is_ok()).to_equal(true)
+        if reused.is_err(): return
+        expect(reused.unwrap().index).to_equal(original.unwrap().index)
+        expect(reused.unwrap().epoch != original.unwrap().epoch).to_equal(true)
+        step("The old handle cannot dispatch or close the replacement session")
+        expect(lifecycle.run(original.unwrap(), item4_lifecycle_request(), item4_lifecycle_policy(), item4_lifecycle_inputs(), "").is_err()).to_equal(true)
+        expect(lifecycle.close(original.unwrap()).is_err()).to_equal(true)
+        val result = lifecycle.run(reused.unwrap(), item4_lifecycle_request(), item4_lifecycle_policy(), item4_lifecycle_inputs(), "")
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        expect(result.unwrap().outcome).to_equal(LinkOutcomeV1.Success)
+        expect(lifecycle.close(reused.unwrap()).is_ok()).to_equal(true)

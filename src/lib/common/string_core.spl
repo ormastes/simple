@@ -46,7 +46,23 @@ fn str_char_at(s: text, idx: i64) -> text:
     # Keep the legacy negative-index behavior of this free helper.
     if idx < 0:
         return ""
-    s.char_at(idx)
+    # Do not redispatch text.char_at here: native extension resolution maps
+    # that method back to this helper, creating unbounded self-recursion.
+    # Walk UTF-8 byte boundaries, then slice exactly one complete scalar.
+    val length = rt_string_len(s)
+    var offset = 0
+    var ordinal = 0
+    while offset < length:
+        val lead = s.byte_at(offset)
+        val width = if lead < 0x80: 1 elif lead < 0xE0: 2 elif lead < 0xF0: 3 else: 4
+        val next = offset + width
+        if next > length:
+            return ""
+        if ordinal == idx:
+            return s[offset:next]
+        offset = next
+        ordinal = ordinal + 1
+    ""
 
 # Search
 #

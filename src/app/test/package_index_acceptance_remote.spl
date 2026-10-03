@@ -1,0 +1,77 @@
+# Owner-level remote content evidence. No local action/archive publication or
+# package graph authority is inferred from RemoteLookupResult.Verified.
+use compiler.driver.cache.remote.remote_client.{
+    RemoteTransport, RemoteLookupRequest, RemoteActionMapping,
+    RemoteResultManifest, RemoteArtifact, RemoteLookupResult,
+    remote_lookup_verified, remote_result_manifest_digest_v1
+}
+use compiler.driver.cache.remote.remote_policy.{ProducerClass}
+use std.common.crypto.sha256.{sha256_text}
+
+struct PackageIndexAcceptanceRemoteObservationV1:
+    supported: bool
+    content_verified: bool
+    reason: text
+    expected_manifest_digest: text
+    observed_manifest_digest: text
+    artifact_count: i64
+    observed_artifact_digest: text
+
+struct PackageIndexAcceptanceRemoteTransportV1:
+    mapping: RemoteActionMapping
+    manifest: RemoteResultManifest
+    artifact: RemoteArtifact
+
+impl RemoteTransport for PackageIndexAcceptanceRemoteTransportV1:
+    fn fetch_action_mapping(request: RemoteLookupRequest) -> RemoteActionMapping?:
+        Some(self.mapping)
+    fn fetch_result_manifest(digest: text) -> RemoteResultManifest?:
+        Some(self.manifest)
+    fn fetch_artifact(digest: text) -> RemoteArtifact?:
+        Some(self.artifact)
+    fn recompute_digest(content: text) -> text:
+        # A malicious transport repeats its claimed digest for poisoned bytes.
+        # The production owner must use local SHA256 instead of this method.
+        self.artifact.digest
+
+fn package_index_acceptance_remote_v1(scenario: text) -> PackageIndexAcceptanceRemoteObservationV1:
+    if scenario != "remote-cache-local-admission" and scenario != "remote-cache-poison-denied":
+        return PackageIndexAcceptanceRemoteObservationV1(
+            false, false, "unsupported-remote-scenario", "", "", 0, "")
+    val action = sha256_text("package-index-acceptance-remote-action")
+    val expected_payload = "package-index-acceptance-remote-artifact"
+    val payload_digest = sha256_text(expected_payload)
+    var manifest = RemoteResultManifest(
+        "", action, [payload_digest], "acceptance-dependency-manifest", [], nil)
+    manifest.digest = remote_result_manifest_digest_v1(manifest)
+    val bytes = if scenario == "remote-cache-poison-denied":
+        "poisoned-remote-artifact"
+    else:
+        expected_payload
+    val transport = PackageIndexAcceptanceRemoteTransportV1(
+        RemoteActionMapping("remote/acceptance/main", action, 1, manifest.digest, nil),
+        manifest, RemoteArtifact(payload_digest, bytes))
+    val result = remote_lookup_verified(transport,
+        RemoteLookupRequest("remote/acceptance/main", action, 1),
+        ProducerClass.CleanDeveloperBranch)
+    match result:
+        case RemoteLookupResult.Verified(admitted, artifacts):
+            var observed_digest = ""
+            if artifacts.len() > 0:
+                observed_digest = sha256_text(artifacts[0].bytes)
+            PackageIndexAcceptanceRemoteObservationV1(
+                true, true, "content-verified", manifest.digest, admitted.digest,
+                artifacts.len(), observed_digest)
+        case RemoteLookupResult.RejectedArtifactDigestMismatch(digest):
+            PackageIndexAcceptanceRemoteObservationV1(
+                true, false, "artifact-digest-mismatch:" + digest,
+                manifest.digest, "", 0, sha256_text(bytes))
+        case RemoteLookupResult.RejectedManifestDigestMismatch:
+            PackageIndexAcceptanceRemoteObservationV1(
+                true, false, "manifest-digest-mismatch", manifest.digest, "", 0, "")
+        case _:
+            PackageIndexAcceptanceRemoteObservationV1(
+                true, false, "unexpected-remote-owner-result", manifest.digest, "", 0, "")
+
+export PackageIndexAcceptanceRemoteObservationV1
+export package_index_acceptance_remote_v1

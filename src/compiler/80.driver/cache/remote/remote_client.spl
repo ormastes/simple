@@ -25,6 +25,12 @@
 # milestone, per contract.
 
 use compiler.driver.cache.remote.remote_policy.{ProducerClass, remote_read_main_allowed}
+use std.common.crypto.sha256.{sha256_text}
+
+val REMOTE_MANIFEST_MAX_BYTES_V1: i64 = 1024 * 1024
+val REMOTE_MANIFEST_MAX_REFERENCES_V1: i64 = 4096
+val REMOTE_ARTIFACT_MAX_BYTES_V1: i64 = 64 * 1024 * 1024
+val REMOTE_CLOSURE_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
 
 # Exact-key remote lookup input. `expected_schema_version` and
 # `expected_action_digest` are what step 2 validates against what comes
@@ -62,11 +68,12 @@ trait RemoteTransport:
     fn fetch_action_mapping(request: RemoteLookupRequest) -> RemoteActionMapping?
     fn fetch_result_manifest(digest: text) -> RemoteResultManifest?
     fn fetch_artifact(digest: text) -> RemoteArtifact?
-    fn recompute_digest(content: text) -> text   # sha256 or fake, per test/prod wiring
+    # Compatibility only; admission never trusts a transport-provided hash.
+    fn recompute_digest(content: text) -> text
 
-# Outcome of a full verified lookup. `Verified` carries everything a local
-# publisher (C1's tier_router, out of this agent's scope) needs to publish a
-# LOCAL machine-cache mapping. Every rejection variant names which step of
+# `Verified` means content integrity only, not target/dependency/provenance
+# authority. A local publisher must still admit those semantic authorities
+# before publishing a LOCAL machine-cache mapping. Rejection variants name
 # the §14.2 sequence failed, for diagnosability.
 enum RemoteLookupResult:
     Miss
@@ -77,6 +84,61 @@ enum RemoteLookupResult:
     RejectedManifestDigestMismatch
     RejectedManifestActionMismatch
     RejectedArtifactDigestMismatch(text)
+
+fn remote_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    var index = 0
+    while index < value.len():
+        val code = value.byte_at(index) as i64
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+        index = index + 1
+    true
+
+fn remote_frame_v1(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn remote_digest_list_encode_v1(values: [text]) -> text:
+    if values.len() > REMOTE_MANIFEST_MAX_REFERENCES_V1: return ""
+    var seen: Dict<text, bool> = {}
+    var encoded = remote_frame_v1("{values.len()}")
+    for value in values:
+        if not remote_digest_valid_v1(value) or seen.has(value): return ""
+        seen[value] = true
+        encoded = encoded + remote_frame_v1(value)
+    encoded
+
+# Canonical ordered fields, explicit optional presence, and byte-length frames
+# bind every field except the manifest's own claimed digest. Dependency data
+# remains bounded opaque text; its semantic authority belongs to the caller.
+fn remote_result_manifest_encode_v1(manifest: RemoteResultManifest) -> text:
+    if not remote_digest_valid_v1(manifest.action_digest) or
+            manifest.dependency_manifest.len() > REMOTE_MANIFEST_MAX_BYTES_V1:
+        return ""
+    val artifacts = remote_digest_list_encode_v1(manifest.artifact_digests)
+    val aop = remote_digest_list_encode_v1(manifest.aop_group_roots)
+    if artifacts == "" or aop == "": return ""
+    var block = "0"
+    if val root = manifest.block_manifest_root:
+        if not remote_digest_valid_v1(root): return ""
+        block = "1" + remote_frame_v1(root)
+    val encoded = "simple-remote-result-manifest-v1\n" +
+        remote_frame_v1(manifest.action_digest) + remote_frame_v1(artifacts) +
+        remote_frame_v1(manifest.dependency_manifest) + remote_frame_v1(aop) +
+        remote_frame_v1(block)
+    if encoded.len() > REMOTE_MANIFEST_MAX_BYTES_V1: return ""
+    encoded
+
+fn remote_result_manifest_digest_v1(manifest: RemoteResultManifest) -> text:
+    val encoded = remote_result_manifest_encode_v1(manifest)
+    if encoded == "": "" else: sha256_text(encoded)
+
+# Exposed size policy allows boundary verification without allocating hostile
+# payloads. Subtraction before addition prevents overflow of cumulative bytes.
+fn remote_artifact_size_admissible_v1(size: i64, accumulated: i64) -> bool:
+    size >= 0 and size <= REMOTE_ARTIFACT_MAX_BYTES_V1 and
+        accumulated >= 0 and accumulated <= REMOTE_CLOSURE_MAX_BYTES_V1 and
+        size <= REMOTE_CLOSURE_MAX_BYTES_V1 - accumulated
 
 # Step-ordered verified lookup. `producer` gates step 3 (promotion/provenance
 # policy) via remote_policy.spl — a producer class without read-main rights
@@ -110,24 +172,30 @@ fn remote_lookup_verified(transport: RemoteTransport, request: RemoteLookupReque
     # Step 5: verify its digest — the manifest's OWN claimed digest must
     # equal the digest the action index pointed us at, AND the manifest's
     # internal action_digest must match the one we asked for.
-    if manifest.digest != mapping.result_manifest_digest:
+    val manifest_digest = remote_result_manifest_digest_v1(manifest)
+    if manifest_digest == "" or manifest.digest != mapping.result_manifest_digest or
+            manifest_digest != mapping.result_manifest_digest:
         return RemoteLookupResult.RejectedManifestDigestMismatch
     if manifest.action_digest != request.action_digest:
         return RemoteLookupResult.RejectedManifestActionMismatch
 
     # Step 6: verify every referenced artifact digest while materializing.
     var artifacts: [RemoteArtifact] = []
+    var materialized_bytes: i64 = 0
     for artifact_digest in manifest.artifact_digests:
         val artifact_opt = transport.fetch_artifact(artifact_digest)
         val artifact = match artifact_opt:
             case Some(a): a
             case nil: return RemoteLookupResult.RejectedArtifactDigestMismatch(artifact_digest)
-        val recomputed = transport.recompute_digest(artifact.bytes)
+        if not remote_artifact_size_admissible_v1(artifact.bytes.len(), materialized_bytes):
+            return RemoteLookupResult.RejectedArtifactDigestMismatch(artifact_digest)
+        val recomputed = sha256_text(artifact.bytes)
         if recomputed != artifact_digest:
             return RemoteLookupResult.RejectedArtifactDigestMismatch(artifact_digest)
         if artifact.digest != artifact_digest:
             return RemoteLookupResult.RejectedArtifactDigestMismatch(artifact_digest)
         artifacts.push(artifact)
+        materialized_bytes = materialized_bytes + artifact.bytes.len()
 
     # Step 7 (target/schema/dependency/AOP/block-manifest root validation) is
     # deferred to the local publisher, which has the full local context
@@ -142,3 +210,7 @@ fn remote_lookup_verified(transport: RemoteTransport, request: RemoteLookupReque
 export RemoteLookupRequest, RemoteActionMapping, RemoteResultManifest, RemoteArtifact
 export RemoteTransport, RemoteLookupResult
 export remote_lookup_verified
+export remote_result_manifest_encode_v1, remote_result_manifest_digest_v1
+export remote_artifact_size_admissible_v1
+export REMOTE_MANIFEST_MAX_BYTES_V1, REMOTE_MANIFEST_MAX_REFERENCES_V1
+export REMOTE_ARTIFACT_MAX_BYTES_V1, REMOTE_CLOSURE_MAX_BYTES_V1

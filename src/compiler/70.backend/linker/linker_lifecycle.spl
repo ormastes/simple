@@ -1,0 +1,162 @@
+"""Single-owner linker provider dispatch with generation-pinned sessions.
+
+The caller supplies an independently registered provider schema requirement and
+already loaded operation callbacks. This module owns no native loader and makes
+no dynamic-pack, resource-budget, or whole-linker certification claim.
+"""
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_id128_is_zero}
+use std.common.kernel_plugin.schema_header.{
+    KpfSchemaHeaderV1, KpfSchemaRequirementV1, kpf_validate_schema_header_v1
+}
+use std.nogc_sync_mut.kernel_plugin.generation.{
+    KpfGenerationTable, KpfGenerationHandle, KpfPinHandle
+}
+use std.nogc_sync_mut.kernel_plugin.status.{KpfSyncStatus}
+use std.common.linker.link_request_v1.{LinkRequestV1}
+use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1}
+use std.common.linker.link_receipt_v1.{LinkReceiptV1}
+
+pub struct LinkerProviderV1:
+    header: KpfSchemaHeaderV1
+    provider_id: KpfId128
+    composition_digest: KpfDigest256
+    engine_id: text
+    invoke: fn(LinkRequestV1, LinkExecutionPolicyV1, [text], text) -> LinkReceiptV1
+
+pub struct LinkerSessionHandleV1:
+    index: u32
+    epoch: u64
+
+class _LinkerSessionSlotV1:
+    var occupied: bool
+    var epoch: u64
+    var running: bool
+    var generation: KpfGenerationHandle
+    var pin: KpfPinHandle
+
+pub class LinkerLifecycleV1:
+    var generations: KpfGenerationTable
+    var providers: [Option<LinkerProviderV1>]
+    var sessions: [_LinkerSessionSlotV1]
+    requirement: KpfSchemaRequirementV1
+    recovery: LinkerProviderV1
+    var active: KpfGenerationHandle
+    var registry_revision: u64
+    var recovery_running: bool
+
+    pub static fn create(capacity: u32, session_capacity: u32,
+            requirement: KpfSchemaRequirementV1, recovery: LinkerProviderV1) -> Result<LinkerLifecycleV1, text>:
+        if capacity == 0 or session_capacity == 0:
+            return Err("linker lifecycle capacities must be nonzero")
+        var providers: [Option<LinkerProviderV1>] = []
+        var sessions: [_LinkerSessionSlotV1] = []
+        var index: u32 = 0
+        while index < capacity:
+            providers.push(nil)
+            index = index + 1
+        index = 0
+        while index < session_capacity:
+            sessions.push(_LinkerSessionSlotV1(occupied: false, epoch: 1,
+                running: false, generation: KpfGenerationHandle(index: 0, epoch: 0),
+                pin: KpfPinHandle(index: 0, epoch: 0)))
+            index = index + 1
+        var owner = LinkerLifecycleV1(
+            generations: KpfGenerationTable.create(capacity, session_capacity),
+            providers: providers, sessions: sessions,
+            requirement: requirement, recovery: recovery,
+            active: KpfGenerationHandle(index: 0, epoch: 0), registry_revision: 0,
+            recovery_running: false)
+        val initialized = owner.publish(recovery)
+        if initialized.is_err(): return Err(initialized.unwrap_err())
+        Ok(owner)
+
+    pub me publish(provider: LinkerProviderV1) -> Result<KpfGenerationHandle, text>:
+        val schema = kpf_validate_schema_header_v1(provider.header, self.requirement)
+        if not schema.accepted():
+            return Err("linker provider schema rejected: code={schema.code()}")
+        if kpf_id128_is_zero(provider.provider_id) or provider.engine_id == "":
+            return Err("linker provider identity is missing")
+        if self.registry_revision == 0xffffffffffffffffu64:
+            return Err("linker registry revision exhausted")
+        val published = self.generations.publish(
+            provider.provider_id, provider.composition_digest, self.registry_revision + 1)
+        if not published.status.accepted():
+            return Err("linker generation publish rejected: code={published.status.code()}")
+        self.providers[published.current.index] = Some(provider)
+        self.active = published.current
+        self.registry_revision = self.registry_revision + 1
+        Ok(published.current)
+
+    pub me open() -> Result<LinkerSessionHandleV1, text>:
+        var index: u32 = 0
+        while index < self.sessions.len():
+            if not self.sessions[index].occupied:
+                val pinned = self.generations.pin_active()
+                if not pinned.status.accepted():
+                    return Err("linker generation pin rejected: code={pinned.status.code()}")
+                # pin_active pins this owner's current active handle synchronously.
+                self.sessions[index].generation = self.active
+                self.sessions[index].pin = pinned.handle
+                self.sessions[index].running = false
+                self.sessions[index].occupied = true
+                return Ok(LinkerSessionHandleV1(index: index, epoch: self.sessions[index].epoch))
+            index = index + 1
+        Err("linker session capacity exceeded")
+
+    fn valid_session(session: LinkerSessionHandleV1) -> bool:
+        if session.index >= self.sessions.len(): return false
+        self.sessions[session.index].occupied and self.sessions[session.index].epoch == session.epoch
+
+    pub me run(session: LinkerSessionHandleV1, request: LinkRequestV1,
+            policy: LinkExecutionPolicyV1, inputs: [text], output: text) -> Result<LinkReceiptV1, text>:
+        if not self.valid_session(session): return Err("stale linker session")
+        if self.sessions[session.index].running: return Err("linker session is already running")
+        val generation = self.sessions[session.index].generation
+        val view = self.generations.view(generation)
+        if not view.status.accepted(): return Err("stale linker generation")
+        val selected = self.providers[generation.index]
+        if selected == nil: return Err("linker generation has no operation")
+        val provider = selected.unwrap()
+        self.sessions[session.index].running = true
+        val receipt = provider.invoke(request, policy, inputs, output)
+        self.sessions[session.index].running = false
+        # Preserve the callback's actual engine/outcome/accounting; no invented success.
+        Ok(receipt)
+
+    pub me close(session: LinkerSessionHandleV1) -> Result<bool, text>:
+        if not self.valid_session(session): return Err("stale linker session")
+        if self.sessions[session.index].running: return Err("linker session is still running")
+        val released = self.generations.release_pin(self.sessions[session.index].pin)
+        if not released.accepted():
+            return Err("linker generation release rejected: code={released.code()}")
+        self.sessions[session.index].occupied = false
+        self.sessions[session.index].epoch = self.sessions[session.index].epoch + 1
+        if self.sessions[session.index].epoch == 0: self.sessions[session.index].epoch = 1
+        Ok(true)
+
+    pub me collect(generation: KpfGenerationHandle) -> Result<bool, text>:
+        val collected = self.generations.collect(generation)
+        if collected == KpfSyncStatus.GenerationStillPinned:
+            return Err("linker generation is still pinned")
+        if not collected.accepted():
+            return Err("linker generation collect rejected: code={collected.code()}")
+        self.providers[generation.index] = nil
+        Ok(true)
+
+    pub me recover() -> Result<KpfGenerationHandle, text>:
+        """Publish the independently retained static recovery callback."""
+        self.publish(self.recovery)
+
+    pub me run_recovery(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
+            inputs: [text], output: text) -> Result<LinkReceiptV1, text>:
+        """Execute static recovery without depending on publication/session capacity."""
+        if self.recovery_running: return Err("recursive linker recovery dispatch")
+        self.recovery_running = true
+        val receipt = self.recovery.invoke(request, policy, inputs, output)
+        self.recovery_running = false
+        Ok(receipt)
+
+    pub fn active_generation() -> KpfGenerationHandle:
+        self.active
+
+export LinkerProviderV1, LinkerSessionHandleV1, LinkerLifecycleV1

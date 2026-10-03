@@ -1,0 +1,223 @@
+"""Actual direct-extern lowering ABI; authored and unexecuted."""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_lower_flat_hir_module_to_mir, bootstrap_mir_functions_reset}
+use compiler.common.mir_target_context.{mir_target_context_from}
+use compiler.mir.mir_json.{serialize_mir_signature}
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+fn exact_extern_check(source: text, external_name: text, params: [MirType], result: MirType, declaration: text, call_prefix: text):
+    val ast = parse_full_frontend(source, "exact_extern.spl", "exact_extern", Logger(level: 0))
+    var lowering = HirLowering.with_filename("exact_extern.spl")
+    val hir = lowering.lower_module(ast)
+    expect(lowering.errors.len()).to_equal(0)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    expect(mir_lowering.errors.len()).to_equal(0)
+    var calls = 0
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, args):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), type_):
+                                if name == external_name:
+                                    calls = calls + 1
+                                    expect(args.len()).to_equal(params.len())
+                                    match type_.kind:
+                                        case MirTypeKind.FuncPtr(signature):
+                                            expect(signature.params).to_equal(params)
+                                            expect(signature.return_type).to_equal(result)
+                                            expect(signature.is_variadic).to_equal(false)
+                                            expect(signature.params_known).to_equal(true)
+                                        case _: fail("direct extern must retain a fixed function signature")
+                            case _: pass
+                    case _: pass
+    expect(calls).to_equal(1)
+    val output = MirToLlvm.create("exact_extern", CodegenTarget.X86_64, nil).translate_module(mir)
+    var declarations = 0
+    var emitted_calls = 0
+    for line in output.split("\n"):
+        if line.trim() == declaration: declarations = declarations + 1
+        if line.contains(call_prefix): emitted_calls = emitted_calls + 1
+    expect(declarations).to_equal(1)
+    expect(emitted_calls).to_equal(1)
+
+describe "fixed direct LLVM-C ABI prerequisites":
+    it "seeds fixed extern authority before bootstrap runtime initializers":
+        val source = "extern fn raw_seed() -> i64\nval values = [raw_seed()]\nfn probe() -> i64:\n    0\n"
+        val ast = parse_full_frontend(source, "initializer.spl", "initializer", Logger(level: 0))
+        var lowering = HirLowering.with_filename("initializer.spl")
+        val hir = lowering.lower_module(ast)
+        expect(lowering.errors.len()).to_equal(0)
+        bootstrap_hir_modules_reset()
+        bootstrap_mir_functions_reset()
+        bootstrap_hir_modules_add(hir.name, true, hir.symbols.symbols.values(), hir.functions.values(), hir.constants.values(), hir.enums.values(), hir.structs.values(), hir.classes.values())
+        val target = mir_target_context_from("x86_64-pc-windows-msvc", "x86_64", "windows", "llvm-lib", 1)
+        val (mir, _) = bootstrap_lower_flat_hir_module_to_mir(0, target, true)
+        var calls = 0
+        for function in mir.functions.values():
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str("raw_seed"), type_):
+                                    calls = calls + 1
+                                    match type_.kind:
+                                        case MirTypeKind.FuncPtr(signature):
+                                            expect(signature.params_known).to_equal(true)
+                                            expect(signature.params.len()).to_equal(0)
+                                        case _: fail("initializer extern signature lost")
+                                case _: pass
+                        case _: pass
+        bootstrap_hir_modules_reset()
+        bootstrap_mir_functions_reset()
+        expect(calls).to_equal(1)
+
+    it "lowers the canonical raw owner's zero-argument declaration":
+        val owner = file_read("src/lib/nogc_sync_mut/sffi/llvm_orc_raw.spl")
+        val source = owner + "\nfn probe() -> *mut u8:\n    unsafe(capabilities: [ffi, raw_ptr]):\n        LLVMContextCreate()\n"
+        val pointer = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
+        exact_extern_check(source, "LLVMContextCreate", [], pointer, "declare ptr @LLVMContextCreate()", "call ptr @LLVMContextCreate()")
+
+    it "lowers the canonical raw owner's signed status and pointer outputs":
+        val owner = file_read("src/lib/nogc_sync_mut/sffi/llvm_orc_raw.spl")
+        val source = owner + "\nfn probe(ctx: *mut u8, buffer: *mut u8, output: *mut *mut u8, message: *mut *mut u8) -> i32:\n    unsafe(capabilities: [ffi, raw_ptr]):\n        LLVMParseIRInContext2(ctx, buffer, output, message)\n"
+        val p = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
+        exact_extern_check(source, "LLVMParseIRInContext2", [p, p, MirType.ptr(p, true), MirType.ptr(p, true)], MirType(kind: MirTypeKind.I32), "declare i32 @LLVMParseIRInContext2(ptr, ptr, ptr, ptr)", "call i32 @LLVMParseIRInContext2(ptr ")
+
+    it "lowers the canonical raw owner's pointer error and owned handle output":
+        val owner = file_read("src/lib/nogc_sync_mut/sffi/llvm_orc_raw.spl")
+        val source = owner + "\nfn probe(output: *mut *mut u8, builder: *mut u8) -> *mut u8:\n    unsafe(capabilities: [ffi, raw_ptr]):\n        LLVMOrcCreateLLJIT(output, builder)\n"
+        val p = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
+        exact_extern_check(source, "LLVMOrcCreateLLJIT", [MirType.ptr(p, true), p], p, "declare ptr @LLVMOrcCreateLLJIT(ptr, ptr)", "call ptr @LLVMOrcCreateLLJIT(ptr ")
+
+    it "rejects malformed HIR arity without emitting the extern call":
+        val source = "extern fn raw_probe(value: i32) -> i32\nfn probe(value: i32) -> i32:\n    raw_probe(value)\n"
+        val ast = parse_full_frontend(source, "bad_arity.spl", "bad_arity", Logger(level: 0))
+        var lowering = HirLowering.with_filename("bad_arity.spl")
+        var hir = lowering.lower_module(ast)
+        expect(lowering.errors.len()).to_equal(0)
+        var functions = hir.functions
+        var changed = 0
+        for key in functions.keys():
+            var function = functions[key]
+            if function.name == "probe":
+                var body = function.body
+                var value = body.value
+                match value.kind:
+                    case HirExprKind.Call(callee, _, type_args):
+                        value.kind = HirExprKind.Call(callee, [], type_args)
+                        body.value = value
+                        function.body = body
+                        functions[key] = function
+                        changed = changed + 1
+                    case _: fail("expected actual frontend direct call")
+        expect(changed).to_equal(1)
+        hir.functions = functions
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        var fatal = 0
+        for error in mir_lowering.errors:
+            if error.fatal and error.message.contains("fixed extern call argument count"):
+                fatal = fatal + 1
+        expect(fatal).to_equal(1)
+        var calls = 0
+        for function in mir.functions.values():
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str("raw_probe"), _): calls = calls + 1
+                                case _: pass
+                        case _: pass
+        expect(calls).to_equal(0)
+
+    it "retains declaration authority inside an actual captured lambda":
+        val source = "extern fn raw_probe(value: i64) -> i64\nfn consume(callback: fn(i64) -> i64, value: i64) -> i64:\n    callback(value)\nfn probe(base: i64) -> i64:\n    consume(\\value: raw_probe(value + base), 7)\n"
+        exact_extern_check(source, "raw_probe", [MirType.i64()], MirType.i64(), "declare i64 @raw_probe(i64)", "call i64 @raw_probe(i64 ")
+
+    it "preserves a declared zero-argument pointer result as a fixed prototype":
+        val pointer = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
+        exact_extern_check("extern fn LLVMContextCreate() -> *mut u8\nfn probe() -> *mut u8:\n    LLVMContextCreate()\n", "LLVMContextCreate", [], pointer, "declare ptr @LLVMContextCreate()", "call ptr @LLVMContextCreate()")
+
+    it "keeps unknown empty signatures distinct in backend declarations and serialization":
+        val unknown = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+        val fixed = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false, params_known: true)
+        var translator = MirToLlvm.create("signature_authority", CodegenTarget.X86_64, nil)
+        translator.remember_external_call_signature("legacy", unknown)
+        translator.remember_external_call_signature("fixed", fixed)
+        expect(translator.external_declare_line("legacy")).to_equal("declare i64 @legacy(...)")
+        expect(translator.external_declare_line("fixed")).to_equal("declare i64 @fixed()")
+        expect(serialize_mir_signature(unknown)).to_contain("\"params_known\":false")
+        expect(serialize_mir_signature(fixed)).to_contain("\"params_known\":true")
+        expect(serialize_mir_signature(unknown) == serialize_mir_signature(fixed)).to_equal(false)
+
+    it "does not treat an ordinary function as an extern declaration":
+        val source = "fn identity(x: i32) -> i32:\n    x\nfn probe(x: i32) -> i32:\n    identity(x)\n"
+        val ast = parse_full_frontend(source, "ordinary.spl", "ordinary", Logger(level: 0))
+        var lowering = HirLowering.with_filename("ordinary.spl")
+        val hir = lowering.lower_module(ast)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        var found = 0
+        for function in mir.functions.values():
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str("identity"), type_):
+                                    found = found + 1
+                                    match type_.kind:
+                                        case MirTypeKind.FuncPtr(signature): expect(signature.params).to_equal([])
+                                        case _: fail("ordinary direct call representation changed")
+                                case _: pass
+                        case _: pass
+        expect(found).to_equal(1)
+
+    it "retains the existing word ABI for an actual captured lambda producer":
+        val source = "fn consume(callback: fn(i64) -> i64, value: i64) -> i64:\n    callback(value)\nfn probe(base: i64) -> i64:\n    consume(\\value: value + base, 7)\n"
+        val ast = parse_full_frontend(source, "captured.spl", "captured", Logger(level: 0))
+        var lowering = HirLowering.with_filename("captured.spl")
+        val hir = lowering.lower_module(ast)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        var found = 0
+        for function in mir.functions.values():
+            if function.name.starts_with("__lambda_lift_"):
+                found = found + 1
+                expect(function.signature.params).to_equal([MirType.i64(), MirType.i64()])
+                expect(function.signature.return_type).to_equal(MirType.i64())
+        expect(found).to_equal(1)
+
+    it "preserves pointer handles and pointer-to-pointer outputs with C i32 status":
+        val p = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
+        val pp = MirType.ptr(p, true)
+        exact_extern_check("extern fn LLVMParseIRInContext2(ctx: *mut u8, buffer: *mut u8, output: *mut *mut u8, message: *mut *mut u8) -> i32\nfn probe(ctx: *mut u8, buffer: *mut u8, output: *mut *mut u8, message: *mut *mut u8) -> i32:\n    LLVMParseIRInContext2(ctx, buffer, output, message)\n", "LLVMParseIRInContext2", [p, p, pp, pp], MirType(kind: MirTypeKind.I32), "declare i32 @LLVMParseIRInContext2(ptr, ptr, ptr, ptr)", "call i32 @LLVMParseIRInContext2(ptr ")
+
+    it "preserves pointer return and unsigned executor-address output":
+        val p = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
+        val name = MirType.ptr(MirType(kind: MirTypeKind.U8), false)
+        val address = MirType.ptr(MirType(kind: MirTypeKind.U64), true)
+        exact_extern_check("extern fn LLVMOrcLLJITLookup(jit: *mut u8, output: *mut u64, name: *const u8) -> *mut u8\nfn probe(jit: *mut u8, output: *mut u64, name: *const u8) -> *mut u8:\n    LLVMOrcLLJITLookup(jit, output, name)\n", "LLVMOrcLLJITLookup", [p, address, name], p, "declare ptr @LLVMOrcLLJITLookup(ptr, ptr, ptr)", "call ptr @LLVMOrcLLJITLookup(ptr ")
+
+    it "preserves void result and unsigned C version output pointers":
+        val output = MirType.ptr(MirType(kind: MirTypeKind.U32), true)
+        exact_extern_check("extern fn LLVMGetVersion(major: *mut u32, minor: *mut u32, patch: *mut u32)\nfn probe(major: *mut u32, minor: *mut u32, patch: *mut u32):\n    LLVMGetVersion(major, minor, patch)\n", "LLVMGetVersion", [output, output, output], MirType.unit(), "declare void @LLVMGetVersion(ptr, ptr, ptr)", "call void @LLVMGetVersion(ptr ")

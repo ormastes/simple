@@ -445,6 +445,13 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
         constants = constants.push(bootstrap_hir_module_constant_at(module_index, constant_index))
         constant_index = constant_index + 1
     var lowering = MirLowering.new_for_target(symbols, target_context)
+    # Runtime module initializers are lowered before the body prescan below.
+    # Seed declaration authority before any expression can issue a call.
+    val function_count = bootstrap_hir_module_function_count(module_index)
+    var extern_index = 0
+    while extern_index < function_count:
+        lowering.record_exact_extern_declaration_v1(bootstrap_hir_module_function_at(module_index, extern_index))
+        extern_index = extern_index + 1
     # `lower_module` sets `current_module_id` before lowering anything
     # (module_lowering.spl). This BOOTSTRAP-FLAT path never calls it, so the
     # field kept its `""` initialiser for the whole lowering -- the same class
@@ -530,7 +537,6 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
     # field 0 and yields `inner.a`'s value -- a silent wrong answer with no
     # diagnostic and exit 0. Seeding the map here makes the result independent
     # of function order, exactly as the non-flat path already is.
-    val function_count = bootstrap_hir_module_function_count(module_index)
     # Level-gated (default OFF), retained per the log-retention policy.
     val flat_prescan_trace = mir_trace_enabled()
     if flat_prescan_trace:
@@ -919,6 +925,8 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
             print "error[E-MIR-BOOTSTRAP-ENTRY-NIL]: the bootstrap entry HIR module is nil at MIR lowering -- the HIR phase produced no entry module (upstream: the phase-2 module set was lost before phase 3). Refusing to lower an empty program."
             exit(1)
         var lowering = MirLowering.new_for_target(hir_module.symbols, target_context)
+        for declaration in hir_module.functions.values():
+            lowering.record_exact_extern_declaration_v1(declaration)
         lowering.callable_link_names = _bootstrap_callable_link_names
         lowering.current_module_id = mir_layout_canonical_module_name(hir_module.name)
         lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
@@ -1035,6 +1043,8 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
     val trace_enabled = mir_lower_trace_enabled()
     var added_instr_total = 0
     var lowering = MirLowering.new_for_target(hir_module.symbols, target_context)
+    for declaration in hir_module.functions.values():
+        lowering.record_exact_extern_declaration_v1(declaration)
     lowering.callable_link_names = _bootstrap_callable_link_names
     lowering.current_module_id = mir_layout_canonical_module_name(hir_module.name)
     lowering = bootstrap_register_hir_type_defs(lowering, hir_module)
