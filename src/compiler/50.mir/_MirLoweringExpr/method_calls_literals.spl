@@ -2102,6 +2102,24 @@ impl MirLowering:
                     len_symbol = self.len_runtime_symbol_for_hir_type(found_receiver_type)
             var receiver_local: LocalId = 0
             var receiver_lowered = false
+            # Flat HIR can omit the annotation on `values ?? []`, while MIR
+            # still proves that the resulting local is a built-in collection.
+            # Recover only proven receivers: unknown/custom is_empty methods
+            # must retain normal dispatch, never the generic rt_len fallback.
+            if len_symbol == "" and method == "is_empty" and resolution_is_unresolved and static_receiver_name == "":
+                if has_prelowered_method_receiver:
+                    receiver_local = prelowered_method_receiver
+                else:
+                    receiver_local = self.lower_expr(receiver)
+                    prelowered_method_receiver = receiver_local
+                    has_prelowered_method_receiver = true
+                receiver_lowered = true
+                if self.local_is_runtime_array(receiver_local):
+                    len_symbol = "rt_len"
+                elif self.local_is_runtime_dict(receiver_local):
+                    len_symbol = "rt_dict_len"
+                elif self.local_is_str(receiver_local):
+                    len_symbol = "rt_string_len"
             # `rt_len` is an intentional recovery path only for unresolved
             # len/length calls.  An unresolved user-defined `is_empty` must
             # continue to its normal method-dispatch recovery below; unlike
