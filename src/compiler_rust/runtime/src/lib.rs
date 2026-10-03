@@ -143,6 +143,7 @@ pub mod security_runtime;
 pub mod text_slice_audit;
 pub mod value;
 mod file_view;
+mod fd_stat_v1;
 
 // Keep a small set of dynamic-loader exports alive only when static runtime
 // symbol registration is enabled. Tiny standalone binaries do not need these
