@@ -1,12 +1,14 @@
 # Simple distributed textual databases: SCV + jj + GitHub
 
-**Status:** Source-only, execution unverified. REQ-001, REQ-002, REQ-010 and REQ-035, plus the REQ-030 hydration boundary and three REQ-032 local honesty scenarios, now invoke real filesystem, typed codec and authenticated local-publication owners. Other broad requirement checkers remain intentionally fail-fast. No scenario is PASS evidence without execution and its required durable oracle.
+**Status:** Source-only, execution unverified. REQ-001, REQ-002, REQ-010 and REQ-035, plus the REQ-030 hydration boundary and three REQ-032 signed-history honesty scenarios, now invoke real filesystem, typed codec and authenticated local-publication owners. Other broad requirement checkers remain intentionally fail-fast. No scenario is PASS evidence without execution and its required durable oracle.
 
 **Executable source:** `test/03_system/app/scv/feature/simple_distributed_textual_databases_spec.spl`
 
 REQ-013 different-field merge and undeclared list/set schema rejection now invoke actual signed local publication and reopened state. The combined delete/update/scalar durable-conflict boundary remains open; see `doc/08_tracking/bug/item2_delete_update_conflict_retention_2026-10-03.md`. These source oracles are unexecuted.
 
 ## Operator model
+
+REQ-033's happy and boundary scenarios now publish actual retained rollups. They replay an identical payload registration, check deduplicated counts and all declared histogram bins, then admit a late observation and verify its new generation links the unchanged prior CAS object. The percentile-averaging refusal scenario remains fail-fast until its complete production oracle is implemented. These are source assertions, not executed results.
 
 Each remaining `@inline` checker owns its named setup contract: `setup_replica_fixture`, `setup_settlement_fixture`, `setup_test_evidence_fixture`, `setup_bridge_fixture`, or `setup_retention_fixture`. Its production implementation must create an isolated fixture, drive the real owner, inject the stated boundary/fault, and inspect canonical state plus a durable receipt. These remaining checkers name that sequence and call `fail(...)`; setup is not a silent test double.
 
@@ -16,7 +18,7 @@ checks a separately signed actor-counter collision against persisted accepted
 state. REQ-002 writes and rereads a versioned compact alias header/cell, resolves its actual paged row, and rejects missing or mismatched context without changing the generation. REQ-010 adds persisted signed transport, ordered mutation/precondition checks, and missing signature/provenance/version rejection. The typed-patch steps explicitly distinguish transport from semantic publication. This manual
 annotation is not a generated test-run receipt; docgen/execution remains pending. REQ-035 now publishes reviewed metadata to a local Git fixture, rejects unreviewed synthetic secret/PII values and forbidden classifications before queue mutation, and erases an owned key while proving loaded copies and ciphertext remain. Exact reviewed-value admission is not a general secret or PII detector. The REQ-030 boundary hydrates and rereads an actual 100 MiB external envelope and rejects an insufficient content allowance without semantic mutation. Its Git-placement cases and NFR measurements remain open.
 
-REQ-032 now supplies three local filesystem oracles: all four resolution states, aggregate/raw identity separation with actual rollup input coverage, and unavailable results after raw deletion or rollup corruption despite unchanged catalog references. Restricted state uses real encrypted CAS bytes and an owned key; absence of a caller key rejects decryption. Query assertions preserve the local catalog HEAD and bytes. The API still accepts only a raw digest and returns text: independently requested historical semantic revisions, structured result provenance and canonical remote retention authority remain open. These cases do not establish cross-replica deletion safety or a full REQ-032 PASS. Sixteen of the 153 full-contract scenarios now have concrete owner oracles; 137 remain explicit fail-fast. All sixteen remain unexecuted.
+REQ-032 supplies three filesystem and signed-history oracles. They retain the existing four local resolution outcomes and add requested historical revisions: two independently admitted manifests resolve to distinct actual bundles; encrypted evidence stays restricted without loading its key; a retained aggregate keeps the requested revision, raw digest and rollup provenance; missing bytes stay unavailable despite the accepted historical manifest. The query checks the signed checkpoint, reachable history and actual semantic/CAS bytes. Assertions preserve captured semantic and retention state. Canonical remote retention authority and cross-replica deletion safety remain open. Twenty of the 153 full-contract scenarios have concrete owner oracles; 133 remain explicit fail-fast. All are unexecuted, so there is no full REQ-032 PASS.
 
 The five feature flows use these steps (typed-patch scenarios add transport and publication-specific steps):
 
@@ -61,8 +63,8 @@ The five feature flows use these steps (typed-patch scenarios add transport and 
 | REQ-029 — Writer ownership | `setup_bridge_fixture` / `check_bridge_contract` | Should prove that it commits every mutation through the SJ lease capsule | Should prove that it persists intent and releases the lease during provider waits | Should prove that it rejects independent Git jj or adapter mutation of one checkout |
 | REQ-030 — Semantic and evidence placement | Hydration boundary: `setup_item2_hydration_big` / actual streaming owner; other cases remain fail-fast | Should prove that it stores durable semantics in Git and raw evidence in controlled CAS | Should prove that it hydrates raw bytes through a digest-verified manifest | Should prove that it rejects high-volume raw evidence from canonical Git ancestry |
 | REQ-031 — Retention classes | `setup_retention_fixture` / `check_retention_contract` | Should prove that it keeps 28-day exact telemetry and versioned daily rollups afterward | Should prove that it pins complete unresolved release pending and reproduction closure | Should prove that it refuses age-based pruning of unsynchronized work |
-| REQ-032 — Honest resolution | Shared actual retention/restricted fixtures; `db_retention_resolve`, real CAS/rollup readback | Should prove that it returns exact aggregated restricted or unavailable explicitly | Should prove that it reports a day-end aggregate without claiming an exact revision | Should prove that it rejects a manifest-only claim that missing bytes remain available |
-| REQ-033 — Rollup correctness | `setup_retention_fixture` / `check_retention_contract` | Should prove that it deduplicates counts and merges declared timing sketches | Should prove that it revises provenance when late input changes a daily rollup | Should prove that it rejects averaging daily percentiles as a global percentile |
+| REQ-032 — Honest resolution | Actual retention/restricted and signed-history fixtures; `db_retention_resolve`, `db_history_query`, CAS/rollup readback | Should prove that it returns exact aggregated restricted or unavailable explicitly | Should prove that it reports a day-end aggregate without claiming an exact revision | Should prove that it rejects a manifest-only claim that missing bytes remain available |
+| REQ-033 — Rollup correctness | Actual retention publication/rollup readback (happy/boundary); failure remains explicit checker | Should prove that it deduplicates counts and merges declared timing sketches | Should prove that it revises provenance when late input changes a daily rollup | Should prove that it rejects averaging daily percentiles as a global percentile |
 | REQ-034 — Resnapshot | `setup_retention_fixture` / `check_retention_contract` | Should prove that it rebases pending semantic work onto a complete resnapshot | Should prove that it retains alias allocator tombstone merge batch and history knowledge | Should prove that it returns ResnapshotRequired rather than resurrecting stale entities |
 | REQ-035 — Confidentiality and deletion | Actual Git queue admission and external encrypted evidence/key files | Should prove that it filters secrets and unnecessary PII before Git ingestion | Should prove that it erases restricted CAS keys while reporting immutable-copy limits | Should prove that it rejects secret-bearing metadata under default-deny policy |
 | REQ-036 — One app path | `setup_retention_fixture` / `check_retention_contract` | Should prove that it runs the same orchestration through capability-selected adapters | Should prove that it uses platform differences only behind existing HAL interfaces | Should prove that it rejects per-OS sibling or raw-runtime fallback implementations |
@@ -94,7 +96,7 @@ Run only after production helpers exist. Compiled-mode execution must validate p
 ```simple
 # codex-system-test
 # @evidence-display: links
-# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-030 boundary, REQ-032 local honesty and REQ-035 use real filesystem/production owners. Remaining
+# Acceptance source: REQ-001, REQ-002, REQ-010, two REQ-013 cases, REQ-030 boundary, REQ-032 historical honesty, two REQ-033 cases and REQ-035 use real filesystem/production owners. Remaining
 # broad checkers fail explicitly until their complete durable oracles exist.
 # Source presence is not execution evidence or a passing requirement receipt.
 
@@ -102,6 +104,9 @@ use std.spec.*
 use app.scv.db.evidence_hydrate.{db_evidence_inspect_file, db_evidence_hydrate_file}
 use test.fixtures.scv.db_hydration_fixture.*
 use test.fixtures.scv.db_retention_fixture.*
+use test.fixtures.scv.db_history_fixture.*
+use app.scv.db.historical_model.*
+use app.scv.db.historical_query.{db_history_query}
 use app.scv.db.retention_store.*
 use app.scv.db.retention_codec.{db_retained_rollup_decode}
 use app.scv.db.evidence_store.{db_evidence_store_get}
@@ -925,8 +930,34 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
             expect(db_retention_resolve(root, parent, missing.digest)).to_equal(Ok("unavailable"))
             expect(db_store_read(root, "retention").head).to_equal(before.head)
             expect(db_store_read(root, "retention").state).to_equal(before.state)
-            # Local digest resolution only: no requested historical revision or
-            # canonical-remote retention authority is supplied by this API.
+            step("Resolve two signed semantic revisions to their distinct actual evidence bundles")
+            val history = setup_item2_history()
+            val semantic_before = db_store_read(history.root)
+            val old_request = DbHistoricalRequest(revision: history.first.revision, manifest: history.entities[0])
+            val current_request = DbHistoricalRequest(revision: history.current.revision, manifest: history.entities[1])
+            val historical = db_history_query(history.root, old_request, history.authority, history.sources, db_history_limits()).unwrap()
+            val current = db_history_query(history.root, current_request, history.authority, history.sources, db_history_limits()).unwrap()
+            match historical.resolution:
+                Exact(info):
+                    expect(info.digest).to_equal(history.digests[0])
+                    expect(info.content_bytes).to_equal(3u64)
+                _: fail("historical revision must resolve its verified exact bytes")
+            match current.resolution:
+                Exact(info): expect(info.digest).to_equal(history.digests[1])
+                _: fail("current revision must resolve its distinct verified bytes")
+            expect(historical.provenance.requested_revision).to_equal(history.first.revision)
+            expect(historical.provenance.accepted_batch_digest).to_equal(Some(history.patches[0].batch_id))
+            expect(historical.provenance.semantic_cas_digest).to_equal(Some(history.archive.cas_digest))
+            expect(db_store_read(history.root)).to_equal(semantic_before)
+            step("Inspect encrypted evidence through the historical manifest without loading its key")
+            val encrypted = setup_item2_history(restricted: true)
+            val encrypted_request = DbHistoricalRequest(revision: encrypted.first.revision, manifest: encrypted.entities[0])
+            val restricted_history = db_history_query(encrypted.root, encrypted_request, encrypted.authority, encrypted.sources, db_history_limits()).unwrap()
+            match restricted_history.resolution:
+                Restricted(info):
+                    expect(info.restricted).to_be(true)
+                    expect(info.digest).to_equal(encrypted.digests[0])
+                _: fail("historical ciphertext must remain explicitly restricted")
 
         it "should prove that it reports a day-end aggregate without claiming an exact revision":
             step("Retain exact or aggregated history")
@@ -957,8 +988,28 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
                 expect(db_retention_resolve(root, parent, node.digest)).to_equal(Ok("aggregated"))
             expect(db_store_read(root, "retention").head).to_equal(before.head)
             expect(db_store_read(root, "retention").state).to_equal(before.state)
-            # This distinguishes local aggregate/raw identity; the historical
-            # semantic-revision query parameter and remote proof remain absent.
+            step("Keep the requested signed revision while reporting its verified retained aggregate")
+            val history = setup_item2_history(observation: true)
+            val captured = db_store_read(history.root)
+            val active = db_retention_register(history.root, history.sources.evidence_parent, "", history.digests[0], 0u64, "internal").unwrap()
+            val retained_history = db_retention_run(history.root, history.sources.evidence_parent, active.head, 28u64, 0u64, "history-cohort").unwrap()
+            var authority = history.authority
+            authority.expected_retention_head = retained_history.head
+            val request = DbHistoricalRequest(revision: history.first.revision, manifest: history.entities[0])
+            val result = db_history_query(history.root, request, authority, history.sources, db_history_limits()).unwrap()
+            match result.resolution:
+                Aggregated(aggregate, unavailable):
+                    expect(unavailable).to_equal(DbHistoricalUnavailableReason.EvidenceMissing)
+                    expect(aggregate.inputs.len()).to_equal(1)
+                    expect(aggregate.inputs[0].payload_digest).to_equal(history.digests[0])
+                _: fail("retained history must report aggregate with raw unavailability")
+            expect(result.provenance.requested_revision).to_equal(history.first.revision)
+            expect(result.provenance.history_object_digest).to_equal(Some(history.archive.object_digest))
+            expect(result.provenance.evidence_digest).to_equal(Some(history.digests[0]))
+            expect(result.provenance.rollup_digest).to_equal(Some(retained_history.catalog.entries[0].rollup_digest))
+            expect(result.provenance.retention_head).to_equal(Some(retained_history.head))
+            expect(db_store_read(history.root)).to_equal(captured)
+            expect(db_retention_open(history.root).unwrap().head).to_equal(retained_history.head)
 
         it "should prove that it rejects a manifest-only claim that missing bytes remain available":
             step("Retain exact or aggregated history")
@@ -986,17 +1037,82 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
             expect(db_retention_resolve(other, external, old.digest)).to_equal(Ok("unavailable"))
             expect(db_store_read(other, "retention").head).to_equal(aggregate_before.head)
             expect(db_store_read(other, "retention").state).to_equal(aggregate_before.state)
+            step("Preserve a signed historical manifest while removing its actual evidence bytes")
+            val history = setup_item2_history()
+            val captured = db_store_read(history.root)
+            val request = DbHistoricalRequest(revision: history.first.revision, manifest: history.entities[0])
+            val available = db_history_query(history.root, request, history.authority, history.sources, db_history_limits()).unwrap()
+            match available.resolution:
+                Exact(info): expect(info.digest).to_equal(history.digests[0])
+                _: fail("historical fixture must initially contain exact bytes")
+            expect(file_delete(setup_item2_retention_raw(history.sources.evidence_parent, history.digests[0]))).to_be(true)
+            val unavailable = db_history_query(history.root, request, history.authority, history.sources, db_history_limits()).unwrap()
+            expect(unavailable.resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.EvidenceMissing))
+            expect(unavailable.provenance.accepted_batch_digest).to_equal(Some(history.patches[0].batch_id))
+            expect(unavailable.provenance.history_object_digest).to_equal(Some(history.archive.object_digest))
+            expect(unavailable.provenance.evidence_digest).to_equal(Some(history.digests[0]))
+            expect(db_store_read(history.root)).to_equal(captured)
 
     describe "REQ-033: Rollup correctness":
         it "should prove that it deduplicates counts and merges declared timing sketches":
             step("Retain exact or aggregated history")
-            step("Drive accepted state and inspect its receipt")
-            check_retention_contract("REQ-033", "drive accepted rollup correctness state; inspect canonical state and durable receipt", "fixture -> production owner -> committed/read-back receipt -> oracle")
+            val (root, parent) = setup_item2_retention_paths()
+            val first = setup_item2_retention_node(root, parent, "deduplicated-first", 10u64, 0u64)
+            val second = setup_item2_retention_node(root, parent, "distinct-second", 100u64, 0u64)
+            val registered = db_retention_register(root, parent, "", first.digest, 0u64, "public").unwrap()
+            step("Replay the same actual payload registration before admitting another observation")
+            val replayed = db_retention_register(root, parent, registered.head, first.digest, 0u64, "public").unwrap()
+            expect(replayed.catalog.entries.len()).to_equal(1)
+            val both = db_retention_register(root, parent, replayed.head, second.digest, 0u64, "public").unwrap()
+            val retired = db_retention_run(root, parent, both.head, 28u64, 0u64, "linux").unwrap()
+            val captured = db_store_read(root, "retention")
+            step("Reopen the canonical rollup and check exact counts and declared histogram bins")
+            val digest = retired.catalog.rollups[0].digest
+            val actual = db_evidence_store_get(root, parent, digest, 0u64, db_retention_store_quota()).unwrap()
+            val summary = db_retained_rollup_decode(actual.content).unwrap()
+            expect(summary.inputs.len()).to_equal(2)
+            expect(summary.rollup.count).to_equal(2u64)
+            expect(summary.rollup.passed).to_equal(2u64)
+            expect(summary.rollup.failed).to_equal(0u64)
+            expect(summary.rollup.duration_sum).to_equal(110u64)
+            expect(summary.rollup.duration_min).to_equal(10u64)
+            expect(summary.rollup.duration_max).to_equal(100u64)
+            expect(summary.rollup.histogram).to_equal([0u64, 1u64, 1u64, 0u64, 0u64, 0u64, 0u64, 0u64])
+            expect(summary.rollup.identities).to_equal(["deduplicated-first", "distinct-second"])
+            expect(actual.dependencies.len()).to_equal(0)
+            expect(db_retention_resolve(root, parent, first.digest)).to_equal(Ok("aggregated"))
+            expect(db_retention_resolve(root, parent, second.digest)).to_equal(Ok("aggregated"))
+            expect(db_store_read(root, "retention")).to_equal(captured)
 
         it "should prove that it revises provenance when late input changes a daily rollup":
             step("Retain exact or aggregated history")
-            step("Drive the boundary state and inspect preserved invariants")
-            check_retention_contract("REQ-033", "drive boundary rollup correctness state; inspect identity, provenance, and unchanged invariants", "fixture -> boundary transition -> durable receipt -> boundary oracle")
+            val (root, parent) = setup_item2_retention_paths()
+            val first = setup_item2_retention_node(root, parent, "initial", 10u64, 0u64)
+            val registered = db_retention_register(root, parent, "", first.digest, 0u64, "public").unwrap()
+            val retired = db_retention_run(root, parent, registered.head, 28u64, 0u64, "linux").unwrap()
+            val prior_digest = retired.catalog.rollups[0].digest
+            val prior_bytes = db_evidence_store_get(root, parent, prior_digest, 0u64, db_retention_store_quota()).unwrap()
+            val prior = db_retained_rollup_decode(prior_bytes.content).unwrap()
+            step("Admit a late observation for the same original day and publish its revised rollup")
+            val late = setup_item2_retention_node(root, parent, "late", 30u64, 29u64)
+            val added = db_retention_register(root, parent, retired.head, late.digest, 29u64, "public").unwrap()
+            val revised = db_retention_run(root, parent, added.head, 57u64, 0u64, "linux").unwrap()
+            val captured = db_store_read(root, "retention")
+            val next_digest = revised.catalog.rollups[0].digest
+            val next_bytes = db_evidence_store_get(root, parent, next_digest, 0u64, db_retention_store_quota()).unwrap()
+            val next = db_retained_rollup_decode(next_bytes.content).unwrap()
+            step("Verify the new aggregate links the preserved original aggregate and both raw identities")
+            expect(next_digest == prior_digest).to_be(false)
+            expect(prior.rollup.generation).to_equal(1u64)
+            expect(next.rollup.generation).to_equal(2u64)
+            expect(next.rollup.prior_revision).to_equal(prior.rollup.revision)
+            expect(next.rollup.count).to_equal(2u64)
+            expect(next.rollup.duration_sum).to_equal(40u64)
+            expect(next.rollup.histogram).to_equal([0u64, 1u64, 1u64, 0u64, 0u64, 0u64, 0u64, 0u64])
+            expect(next_bytes.dependencies).to_equal([prior_digest])
+            expect(db_evidence_store_get(root, parent, prior_digest, 0u64, db_retention_store_quota()).unwrap().content).to_equal(prior_bytes.content)
+            expect(db_retention_resolve(root, parent, late.digest)).to_equal(Ok("aggregated"))
+            expect(db_store_read(root, "retention")).to_equal(captured)
 
         it "should prove that it rejects averaging daily percentiles as a global percentile":
             step("Retain exact or aggregated history")
@@ -1347,6 +1463,6 @@ The executable now also contains three pure production-map prerequisites:
 2. Replay tombstoned A: return `tombstoned` at 1, retain one tombstoned binding and high-water 1.
 3. Reject another namespace with `SCVDB_NAMESPACE_MISMATCH`, sequence 0, and unchanged binding/high-water.
 
-These pure prerequisites supplement 153 full-contract scenarios. Twelve REQ-001/REQ-002/REQ-010/REQ-035 scenarios now use real filesystem, codec and authenticated mutation owners; the other 141 still fail explicitly. None has executed in this session, so neither group establishes runtime, process-crash, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains RED/unproved.
+These pure prerequisites supplement 153 full-contract scenarios. Twenty REQ-001/REQ-002/REQ-010/REQ-013/REQ-030/REQ-032/REQ-033/REQ-035 scenarios now use real filesystem, codec and authenticated mutation/query owners; the other 133 still fail explicitly. None has executed in this session, so neither group establishes runtime, process-crash, network or settlement acceptance. This section is a manually maintained source-aligned companion update, not output from a successful docgen or test run; no admitted self-hosted runner was available to this lane. Full requirement acceptance remains unproved.
 
 Concrete inputs and oracles for all 51 requirements and five durable campaigns are in `doc/03_plan/evidence/seven_plans/item2_acceptance_matrix_2026-10-03.md`. Preserve the original scenario catalog until each whole checker has production-backed evidence. Runtime results and generated-manual regeneration are still required before verification PASS.
