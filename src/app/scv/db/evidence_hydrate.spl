@@ -140,11 +140,16 @@ fn db_evidence_hydrate_file(checkout: text, parent: text, digest: text, target_p
     val stage = secure_temp_dir(target_parent, "scv-hydrate-")?
     val identity = path_final_existing(stage)?
     if not dir_is_real_no_follow(stage) or identity.path != stage or not path_identity_contains(target, identity): return Err("SCVDB_STORE_SCOPE")
-    val result = _hydrate_copy("{root}/{digest}.scve", digest, stage, quota)
-    match result:
+    val copied = _hydrate_copy("{root}/{digest}.scve", digest, stage, quota)
+    # A parent sync failure is also an owner failure: the caller has not yet
+    # received this private path. Route it through identical checked cleanup.
+    val result = match copied:
         Ok(info):
-            if not directory_fsync(target_parent): return Err("SCVDB_EVIDENCE_DURABILITY_UNCERTAIN")
-            Ok(info)
+            if directory_fsync(target_parent): Ok(info)
+            else: Err("SCVDB_EVIDENCE_DURABILITY_UNCERTAIN")
+        Err(error): Err(error)
+    match result:
+        Ok(info): Ok(info)
         Err(error):
             if not dir_is_real_no_follow(stage) or not path_identity_same(identity, path_final_existing(stage)?) or not path_identity_same(target, path_final_existing(target_parent)?) or not dir_remove_all(stage): return Err("SCVDB_EVIDENCE_CLEANUP")
             Err(error)
