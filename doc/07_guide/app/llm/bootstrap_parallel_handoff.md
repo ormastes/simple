@@ -4,6 +4,27 @@ This is the operator contract for handing a bootstrap candidate from the x86_64
 Linux lane to platform owners. Parallel work is allowed, but evidence is
 lineage-bound and platform claims remain fail-closed.
 
+## Diagnostic continuation before full qualification
+
+Use the [shared build collection policy](../../tooling/bootstrap_failure_collection.md)
+for the active operator workflow. Finish all independently runnable modules and
+tests, retain every failure, and assign independent causes to parallel repair
+agents. Keep their writable sources, caches and outputs isolated.
+
+An immutable producer may launch the next provisional phase after it compiles
+Hello World and the resulting executable passes its output/exit check. Record
+both commands and hashes. Full verification may continue in parallel; this
+provisional handoff does not satisfy the formal readiness checker below.
+Binary existence or `--version` alone is insufficient.
+
+For a user-authorized time, memory or policy exception, record the disabled
+check and retain resource/progress monitoring in a separate DIAGNOSTIC lineage.
+Do not silently retain an enclosing kill threshold the user disabled. Missing
+inputs and actual failed operations remain failed or blocked. Restore normal
+gates before admission or promotion. The next actual restart integrates latest
+requested release and reviewed applicable unmerged fixes; preserve live frozen
+inputs, old receipts and compatible frontend/HIR caches.
+
 ## Canonical readiness checker
 
 Run the canonical checker for the exact target triple:
@@ -22,11 +43,12 @@ complete. An unavailable host is `OPEN` or `BLOCKED`, never `PASS`.
 
 The Stage 3 owner may be another agent. That owner supplies the admitted Stage 3
 path, SHA-256, authority/compiler identity, rejection-probe result, frontend
-admission, and source revision. Stage 4 and platform agents may prepare
+admission, and source revision for a formal handoff. Stage 4 and platform agents may prepare
 diagnostics, preserve caches, review receipts, and arrange external native hosts
 without waiting for the Stage 3 process to finish. This is independent
-preparation, not admission: no agent may claim a later gate until it has consumed
-the Stage 3 receipt for the same source lineage.
+preparation, not admission. They may also execute provisional work after the
+Hello gate above; no agent may claim a later formal gate until it has consumed
+the required receipt for the same source lineage.
 
 The merge owner freezes the candidate and is the only agent that publishes the
 combined readiness result. A final reviewer checks the frozen receipts before a
@@ -89,7 +111,10 @@ receipt, and MCP/LSP server hashes. Stage 4 MCP integration and both server help
 probes validate this receipt before and after execution. Phase-qualified cache
 and output paths keep Phase 3 artifacts outside the Stage 4 evidence namespace.
 
-## Current x86 transaction status (2026-08-14)
+## Historical x86 transaction status (2026-08-14)
+
+The session-specific retry restrictions below describe that historical run;
+they do not cancel a later user's explicit diagnostic-continuation instruction.
 
 Historical cycle 3 repaired two source frontiers and published Stage 2,
 binary SHA-256
@@ -111,7 +136,7 @@ process/RSS/signal supervision, and provenance migration. After M0 acceptance,
 build a fresh current-HEAD Stage 2 and run one instrumented Stage 3 in a fresh session. No fourth run is permitted in
 this session. TODO667 remains gated.
 
-## Exact Gate 1-7 sequence
+## Formal Gate 1-7 sequence
 
 Run and record these in order. Do not skip a gate or restart with a different
 candidate between gates.

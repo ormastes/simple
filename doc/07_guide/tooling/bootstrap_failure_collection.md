@@ -13,7 +13,8 @@ default. This policy does not change inventory scope (`normal` versus `full`).
 The phase matrix retains its first failure and exits nonzero even if later rows
 succeed. In fail-fast mode, unlaunched tasks and spec rows are `SKIPPED`; already
 launched bounded workers finish. Missing prerequisites remain `BLOCKED` or
-`UNSUPPORTED`, and invalid snapshots/admission remain fatal. Successful objects
+`UNSUPPORTED`. Invalid snapshots/admission remain fatal to the canonical
+admitted result, not to separately identified diagnostic work. Successful objects
 and admitted cache entries survive either policy. A failed compile never gains
 a successful output merely because diagnostic collection reached the end.
 
@@ -21,6 +22,57 @@ The regression `sh scripts/check/check-bootstrap-keep-going-policy.shs` exercise
 production orchestration with failing/passing fake commands and inventory rows;
 it also checks policy inheritance, ordered overrides, cache preservation, and
 fatal snapshot admission. Other runners may still need their own policy wiring.
+
+## Agent continuation and explicit diagnostic exceptions
+
+Always finish the finite inventory of independently runnable modules, binary
+builds and tests. A failed row is a result to collect, not a reason to stop the
+whole pipeline. Let healthy sibling jobs finish; after collecting failures,
+group them by cause and delegate independent repairs to parallel agents with
+separate writable source/cache ownership. A repair already understood may run
+while collection continues. Distinguish logic defects, performance defects,
+resource-policy exits and unavailable prerequisites.
+
+When the user authorizes continuation past a time, memory or other policy
+failure, record that authorization and the exact disabled check in a separate
+**DIAGNOSTIC** attempt. Continue eligible work with elapsed-time, memory/RSS,
+process-tree, progress and exit-status monitoring. Monitoring must not silently
+re-enable the disabled kill threshold. Keep any other selected limits explicit;
+do not claim a watchdog was disabled when an enclosing job still enforces it.
+Use supported per-attempt settings, or a reviewed isolated diagnostic source
+change when no setting exists. Preserve the original failed receipt and cache.
+Do not repeatedly request permission already granted for that scoped exception.
+
+An exception changes diagnostic execution policy, not facts: retain actual
+source/producer/runtime/tool hashes, label altered inputs and descendants, and
+never forge PASS, admission, test counts or cache compatibility. Do not turn
+invalid inputs, missing binaries, empty payloads or failed assertions into
+successful results. A disabled policy check does not authorize unsafe memory
+access or a false provenance claim. Restore normal checks and obtain the
+required verification before formal admission, deployment or release promotion.
+
+Before a dependent provisional phase starts, the exact produced compiler must
+compile a real Hello World fixture **and its output executable must run with
+the expected output and exit status**. Record both commands and artifacts.
+This gate permits diagnostic continuation before full qualification; it does
+not grant admission. If Hello fails, record its failing boundary and continue
+independent builds/tests or an explicitly authorized diagnostic repair of that
+boundary. Do not label the dependent phase runnable from binary existence alone.
+
+At the next actual restart, fetch the requested release branch and integrate
+reviewed, applicable unmerged fixes in an isolated source owner. Coordinate with
+their owners; preserve unrelated work and do not take over active drafts. Freeze
+the resulting revision/patch identities before launching. Never mutate a live
+producer or source snapshot. Reuse compatible persisted frontend/HIR/native
+caches; changed inputs invalidate only the scope the cache contract requires.
+
+The Windows LLVM/Cranelift repair request recorded on 2026-10-03 selects 40
+backend jobs per lane, parallel failure collection, monitored diagnostic policy
+exceptions, and Hello-gated provisional continuation. This is the active repair
+profile, not a universal worker count: later explicit user choices supersede
+it. Frontend process fanout must account for shared host and enclosing process
+budgets; backend thread count is not permission to spawn that many large HIR
+processes. Keep performance and correctness fixes separate when requested.
 
 ## Canonical managed Phase 3 and Phase 4
 
@@ -31,7 +83,7 @@ phases and LLVM/Cranelift. A verified compiler
 own module group. The task-outcomes TSV is scheduling evidence, not an admission
 receipt. Any failed or blocked task prevents the canonical PASS receipt.
 
-Continuation requires the updated compiled manager: exit 1 is reserved for an
+Canonical admitted continuation requires the updated compiled manager: exit 1 is reserved for an
 identity-checked compiler failure with actual tree reap and a retained matching
 result. Launch rejection, timeout, cancellation, unknown crash, capacity,
 integrity, and cleanup errors abort with exit 2. Retained failures are admitted
@@ -44,7 +96,10 @@ The canonical resource policy defaults to one attempt. Deterministic compiler
 `ERROR/1` is terminal even with a larger explicit attempt budget; unrelated
 groups continue. The shell regression is
 `scripts/bootstrap/tests/managed-task-schedule-test.shs`. Native policy and
-manager tests remain required before qualification.
+manager tests remain required before qualification. These are current canonical
+runner semantics. A user-authorized diagnostic exception uses a separate,
+explicitly labeled attempt or independent entrypoint; it does not rewrite an
+exit-2 receipt or stop unrelated runnable work.
 
 The aggregate phase owner queues two isolated phase tasks, reserving their
 full memory caps, disk growth and CPU demand before staging/spawn. Each phase
@@ -146,8 +201,9 @@ unbounded retries. Respect explicit user stop points and scope.
 
 A produced compiler may start the next **diagnostic** phase once its immutable
 bytes and producer identity are recorded and minimum sanity proves the required
-operation works: launch it, compile a small representative fixture, and execute
-that fixture with checked output. A version string or binary existence alone
+operation works: launch it, compile Hello World, and execute its output with
+checked output and exit status. Add another representative fixture when the
+next phase requires a capability that Hello does not exercise. Binary existence
 is insufficient. Do not wait for full suite completion or formal phase admission
 to start this diagnostic continuation. Label the compiler and descendants
 unadmitted and retain their exact lineage. Failed qualification still blocks
@@ -159,7 +215,8 @@ collecting from independent entries, platforms, phases with usable artifacts,
 and test shards. Do not rerun a known crashing producer without a changed input
 or a concrete bounded diagnostic hypothesis. If a wrapper exits early, use
 supported independent entrypoints with equivalent identity and sanity checks;
-record any remaining runner limitation instead of bypassing admission guards.
+record any remaining runner limitation. Apply a user-authorized diagnostic
+policy exception in its own attempt; never bypass guards to publish admission.
 
 ## Preserve truthful terminal results
 
@@ -187,7 +244,8 @@ failure explicitly. No finite sweep proves the absence of all bugs.
 
 Group failures by the first actionable root cause, retain each affected row,
 and claim or create a bug ID with an exact reproduction and artifact identity.
-After fixing the owner, add a same-mechanism regression and a similar scenario;
+Assign independent root causes to parallel repair agents with explicit file and
+cache ownership. After fixing the owner, add a same-mechanism regression and a similar scenario;
 link fixes and remaining blockers from the owning knowledge entry.
 
 Preserve caches by phase, producer identity, and entry. Invalidate only proven
@@ -199,6 +257,10 @@ writable caches between lanes or alter stamps to admit stale data. See the
 Run only the checks needed to resolve changed or failed evidence. Reuse recorded
 green results for unchanged identities; changed producer/source inputs make
 affected evidence stale and require explicit explanation before rechecking.
-Stop repairs after at most three verify/fix cycles per feature, report remaining
-failures and exact resume steps, and finish independent collection within the
-declared budget. Collection is bounded work, not an endless repair loop.
+Use at most three verify/fix cycles per scoped cause by default. On exhaustion,
+report that cause and its resume steps while finishing other independent rows.
+Record an explicit user-directed exception before additional finite repair
+cycles; do not infer unlimited retries. Never repeat an identical failing
+command without a changed input or concrete diagnostic hypothesis, or replay
+green checks for unchanged identities. Stop at convergence. Completing a finite
+work graph is different from repeatedly restarting the same failed operation.
