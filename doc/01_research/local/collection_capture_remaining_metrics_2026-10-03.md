@@ -62,3 +62,44 @@ cases only after the corresponding owner contracts exist.
 
 No bootstrap or runtime execution was attempted in this audit. P6 remains open;
 performance being best effort does not waive observation correctness.
+
+## Implemented prerequisite: caller-owned filter completion
+
+Follow-up implementation `eb561b562ce` (integrated as `a641df66bbd`) adds
+`adaptive_set_filter_observed` in
+`src/lib/nogc_sync_mut/src/collections/adaptive_set_filter.spl`. This supersedes
+the earlier inventory's statement that no event implementation was added; it
+does not supersede the shared-channel blockers above.
+
+The API accepts an `AdaptiveTextSet` and a predicate returning
+`Result<bool, text>`. It returns `Result<AdaptiveSetFilterResult, text>`, containing
+the filtered set and an optional `AdaptiveSetFilterObservation`:
+
+- Both source site and target must be nonempty before evaluation. The event
+  copies those identities unchanged; this is identity preservation, not proof
+  of compiler/profile admission. The derived set has no invented AST site.
+- Each unique key is evaluated once in the source's stable snapshot order.
+  Successful completion records raw evaluated and accepted counts; duplicate
+  insertion into the source does not create additional predicate evaluations.
+  Counts remain unrounded so future aggregation can weight invocations correctly.
+- Empty input returns an empty result and no observation; it invents no
+  selectivity value. Nonempty all-reject input returns a completed zero-accepted
+  observation, which is distinct from absent evidence.
+- Predicate error is propagated; count overflow or unsuccessful accepted-key
+  insertion returns an error. No partial result or completed filter event is
+  returned on these paths. Predicate side effects are not rolled back. The
+  existing snapshot materialization observation may still occur independently.
+
+Four unit scenarios in
+`test/01_unit/lib/collections/adaptive_set_filter_spec.spl` cover representation
+parity, duplicate handling, predicate invocation counts, empty/all/none outcomes,
+failure short-circuiting and identity preservation/admission presence checks.
+Runtime status: **NOT RUN**. These authored cases are not execution evidence.
+
+The API is directly usable by callers but is not wired into automatic compiler
+filter attribution or shared `.sprof` publication. It adds no process singleton,
+new C export or locking change. Remaining work is an admitted site-aware caller
+plus one synchronized shared owner consuming the count pair with capture
+begin/finish/abort lifetime, followed by interpreter/native parity evidence.
+Filter selectivity and full P6 remain incomplete; the watchdog-only PR #2345
+landing does not establish completion of item 7.
