@@ -1,0 +1,135 @@
+use compiler.backend.linker.macho.input.{MachOInput, macho_put}
+
+struct MachOPlacement:
+    owner: i64
+    ordinal: i64
+    source_offset: i64
+    offset: i64
+    size: i64
+    zerofill: bool
+
+struct MachOLayout:
+    placements: [MachOPlacement]
+    offsets: {text: i64}
+    addresses: {text: i64}
+    common_addresses: {text: i64}
+    data_offset: i64
+    size: i64
+
+fn macho_align(value: i64, alignment: i64) -> i64:
+    ((value + alignment - 1) / alignment) * alignment
+
+fn macho_layout(inputs: [MachOInput], limit: i64, hosted_text_reserve: i64 = 0) -> Result<MachOLayout, text>:
+    if hosted_text_reserve < 0 or hosted_text_reserve > limit or hosted_text_reserve % 0x4000 != 0:
+        return Err("invalid hosted Mach-O text reservation")
+    var placements: [MachOPlacement] = []
+    var offsets: {text: i64} = {}
+    var addresses: {text: i64} = {}
+    var cursor: i64 = 0x4000
+    var data_offset: i64 = 0
+    var group: i64 = 0
+    while group < 2:
+        if group == 1:
+            cursor = macho_align(cursor, 0x4000)
+            if hosted_text_reserve > limit - cursor: return Err("Mach-O stub storage exceeds byte limit")
+            cursor = cursor + hosted_text_reserve
+            data_offset = cursor
+        var owner: i64 = 0
+        for input in inputs:
+            var ordinal: i64 = 1
+            for segment in input.object.segments:
+                for section in segment.sections:
+                    val kind = section.flags & 255
+                    val writable = section.segname != "__TEXT"
+                    if section.segname != "__DWARF" and ((group == 1) == writable):
+                        if section.sectname == "__eh_frame" or section.sectname == "__compact_unwind":
+                            return Err("{input.name}: unsupported static Mach-O unwind metadata")
+                        if kind != 0 and kind != 1 and kind != 2 and kind != 3 and kind != 4 and kind != 12 and kind != 14:
+                            return Err("{input.name}: unsupported Mach-O section type {kind} (dyld/TLS/init requires loader support)")
+                        if section.align_val < 0 or section.align_val > 24:
+                            return Err("{input.name}: unsupported Mach-O section alignment")
+                        val alignment = 1 << section.align_val
+                        cursor = macho_align(cursor, alignment)
+                        if section.size < 0 or cursor > limit or section.size > limit - cursor:
+                            return Err("Mach-O image exceeds requested byte limit {limit}")
+                        val key = "{owner}:{ordinal}"
+                        offsets[key] = cursor
+                        addresses[key] = 0x100000000 + cursor
+                        placements = placements.push(MachOPlacement(owner: owner, ordinal: ordinal,
+                            source_offset: section.offset, offset: cursor, size: section.size,
+                            zerofill: kind == 1 or kind == 12))
+                        cursor = cursor + section.size
+                    ordinal = ordinal + 1
+            owner = owner + 1
+        group = group + 1
+    # Tentative definitions coalesce by maximum size/alignment unless a real
+    # definition exists. Allocate once, in first-input order, in zeroed DATA.
+    var defined: {text: bool} = {}
+    for input in inputs:
+        for symbol in input.object.symbols:
+            if (symbol.n_type & 0xe1) == 1 and (symbol.n_type & 14) != 0:
+                defined[symbol.name] = true
+    var common_sizes: {text: i64} = {}
+    var common_alignments: {text: i64} = {}
+    var common_names: [text] = []
+    for input in inputs:
+        for symbol in input.object.symbols:
+            if (symbol.n_type & 0xef) == 1 and symbol.n_value != 0 and not defined.has(symbol.name):
+                if symbol.n_value < 0: return Err("invalid Mach-O common symbol size")
+                val alignment = 1 << ((symbol.n_desc >> 8) & 15)
+                if not common_sizes.has(symbol.name):
+                    common_sizes[symbol.name] = symbol.n_value
+                    common_alignments[symbol.name] = alignment
+                    common_names = common_names.push(symbol.name)
+                else:
+                    if common_sizes[symbol.name] < symbol.n_value: common_sizes[symbol.name] = symbol.n_value
+                    if common_alignments[symbol.name] < alignment: common_alignments[symbol.name] = alignment
+    var common_addresses: {text: i64} = {}
+    for name in common_names:
+        cursor = macho_align(cursor, common_alignments[name])
+        if cursor > limit or common_sizes[name] > limit - cursor:
+            return Err("Mach-O common storage exceeds requested byte limit {limit}")
+        common_addresses[name] = 0x100000000 + cursor
+        cursor = cursor + common_sizes[name]
+    if cursor > limit: return Err("Mach-O image exceeds requested byte limit {limit}")
+    Ok(MachOLayout(placements: placements, offsets: offsets, addresses: addresses,
+        common_addresses: common_addresses, data_offset: data_offset, size: cursor))
+
+fn macho_segment(bytes: [u8], at: i64, name: text, address: i64,
+        memory: i64, offset: i64, size: i64, protection: i64) -> [u8]:
+    var out = macho_put(bytes, at, 4, 0x19)
+    out = macho_put(out, at + 4, 4, 72)
+    var index: i64 = 0
+    while index < name.len():
+        out[at + 8 + index] = name.byte_at(index) as u8
+        index = index + 1
+    out = macho_put(out, at + 24, 8, address)
+    out = macho_put(out, at + 32, 8, memory)
+    out = macho_put(out, at + 40, 8, offset)
+    out = macho_put(out, at + 48, 8, size)
+    out = macho_put(out, at + 56, 4, protection)
+    macho_put(out, at + 60, 4, protection)
+
+fn macho_executable_header(bytes: [u8], layout: MachOLayout, cpu: i64, entry: i64) -> [u8]:
+    val arm = cpu == 0x0100000c
+    val thread_size = if arm: 288 else: 184
+    var out = macho_put(bytes, 0, 4, 0xfeedfacf)
+    out = macho_put(out, 4, 4, cpu)
+    out = macho_put(out, 8, 4, if arm: 0 else: 3)
+    out = macho_put(out, 12, 4, 2)
+    out = macho_put(out, 16, 4, 4)
+    out = macho_put(out, 20, 4, 216 + thread_size)
+    out = macho_put(out, 24, 4, 1)
+    out = macho_segment(out, 32, "__PAGEZERO", 0, 0x100000000, 0, 0, 0)
+    out = macho_segment(out, 104, "__TEXT", 0x100000000, layout.data_offset,
+        0, layout.data_offset, 5)
+    out = macho_segment(out, 176, "__DATA", 0x100000000 + layout.data_offset,
+        macho_align(layout.size - layout.data_offset, 0x4000), layout.data_offset,
+        layout.size - layout.data_offset, 3)
+    out = macho_put(out, 248, 4, 5)
+    out = macho_put(out, 252, 4, thread_size)
+    out = macho_put(out, 256, 4, if arm: 6 else: 4)
+    out = macho_put(out, 260, 4, if arm: 68 else: 42)
+    macho_put(out, if arm: 520 else: 392, 8, entry)
+
+export MachOPlacement, MachOLayout, macho_align, macho_layout, macho_executable_header, macho_segment

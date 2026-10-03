@@ -1,0 +1,165 @@
+# Checked admission around the existing permissive inspection parser. No I/O.
+use compiler.backend.linker.macho_parser.{MachOObject, macho_parse_object}
+use compiler.backend.linker.archive_parser.{ar_parse}
+use std.string_core.{char_from_code}
+
+struct MachOInput:
+    name: text
+    object: MachOObject
+
+fn macho_range(bytes: [u8], offset: i64, size: i64) -> bool:
+    offset >= 0 and size >= 0 and offset <= bytes.len() and size <= bytes.len() - offset
+
+fn macho_read(bytes: [u8], offset: i64, width: i64) -> i64:
+    var value: i64 = 0
+    var index: i64 = 0
+    while index < width:
+        value = value | ((bytes[offset + index] as i64) << (8 * index))
+        index = index + 1
+    value
+
+fn macho_put(bytes: [u8], offset: i64, width: i64, value: i64) -> [u8]:
+    var out = bytes
+    var index: i64 = 0
+    while index < width:
+        out[offset + index] = ((value >> (8 * index)) & 255) as u8
+        index = index + 1
+    out
+
+fn macho_sign(value: i64, bits: i64) -> i64:
+    if bits == 64: return value
+    val sign = 1 << (bits - 1)
+    (value ^ sign) - sign
+
+fn macho_cstring(bytes: [u8], start: i64, length: i64) -> text:
+    var name = ""
+    var index: i64 = 0
+    while index < length:
+        val byte = bytes[start + index]
+        if byte == 0: return name
+        name = name + char_from_code(byte as i64)
+        index = index + 1
+    name
+
+fn macho_checked_object(bytes: [u8]) -> Result<MachOObject, text>:
+    if bytes.len() < 32: return Err("truncated Mach-O header")
+    if macho_read(bytes, 0, 4) != 0xfeedfacf:
+        return Err("unsupported Mach-O magic: require thin little-endian 64-bit")
+    val count = macho_read(bytes, 16, 4)
+    val size = macho_read(bytes, 20, 4)
+    if not macho_range(bytes, 32, size) or count > size / 8:
+        return Err("Mach-O load commands exceed input")
+    var offset: i64 = 32
+    var index: i64 = 0
+    var symtabs: i64 = 0
+    while index < count:
+        if offset > 32 + size - 8: return Err("truncated Mach-O load command")
+        val kind = macho_read(bytes, offset, 4)
+        val command_size = macho_read(bytes, offset + 4, 4)
+        if command_size < 8 or command_size % 8 != 0 or command_size > 32 + size - offset:
+            return Err("invalid Mach-O load command size")
+        if kind == 0x19:
+            if command_size < 72: return Err("truncated Mach-O segment")
+            val sections = macho_read(bytes, offset + 64, 4)
+            if sections > (command_size - 72) / 80:
+                return Err("Mach-O section headers exceed segment command")
+            var section: i64 = 0
+            while section < sections:
+                val at = offset + 72 + section * 80
+                val length = macho_read(bytes, at + 40, 8)
+                val address = macho_read(bytes, at + 32, 8)
+                val payload = macho_read(bytes, at + 48, 4)
+                val flags = macho_read(bytes, at + 64, 4)
+                if length < 0: return Err("invalid Mach-O section size")
+                if address < 0 or length > 0x7fffffffffffffff - address:
+                    return Err("Mach-O section address range overflows")
+                if (flags & 255) != 1 and (flags & 255) != 12 and not macho_range(bytes, payload, length):
+                    return Err("Mach-O section payload exceeds input")
+                val relocations = macho_read(bytes, at + 60, 4)
+                val reloc_offset = macho_read(bytes, at + 56, 4)
+                if not macho_range(bytes, reloc_offset, relocations * 8):
+                    return Err("Mach-O relocation table exceeds input")
+                section = section + 1
+        elif kind == 2:
+            symtabs = symtabs + 1
+            if symtabs != 1 or command_size != 24: return Err("invalid Mach-O symbol table command")
+            val symbols = macho_read(bytes, offset + 8, 4)
+            val symbol_count = macho_read(bytes, offset + 12, 4)
+            val strings = macho_read(bytes, offset + 16, 4)
+            val string_size = macho_read(bytes, offset + 20, 4)
+            if not macho_range(bytes, symbols, symbol_count * 16) or not macho_range(bytes, strings, string_size):
+                return Err("Mach-O symbol or string table exceeds input")
+            var symbol: i64 = 0
+            while symbol < symbol_count:
+                val name = macho_read(bytes, symbols + symbol * 16, 4)
+                if name >= string_size: return Err("Mach-O symbol name exceeds string table")
+                var cursor = name
+                while cursor < string_size and bytes[strings + cursor] != 0:
+                    cursor = cursor + 1
+                if cursor == string_size: return Err("unterminated Mach-O symbol name")
+                symbol = symbol + 1
+        elif kind == 0xb:
+            if command_size != 80: return Err("invalid Mach-O LC_DYSYMTAB size")
+        elif kind == 0x1b:
+            if command_size != 24: return Err("invalid Mach-O LC_UUID size")
+        elif kind == 0x24 or kind == 0x25:
+            if command_size != 16: return Err("invalid Mach-O version-min command size")
+        elif kind == 0x32:
+            if command_size < 24: return Err("invalid Mach-O build-version command size")
+            val tools = macho_read(bytes, offset + 20, 4)
+            if tools > (command_size - 24) / 8:
+                return Err("Mach-O build-version tools exceed command")
+        else:
+            return Err("unsupported Mach-O object load command {kind}")
+        offset = offset + command_size
+        index = index + 1
+    if offset != 32 + size: return Err("Mach-O load-command size mismatch")
+    macho_parse_object(bytes)
+
+fn macho_archive_inputs(bytes: [u8]) -> Result<[MachOInput], text>:
+    # Preflight the shared ar parser: sizes must not wrap or leave trailing junk.
+    if bytes.len() < 8: return Err("truncated Mach-O archive magic")
+    var offset: i64 = 8
+    while offset < bytes.len():
+        if not macho_range(bytes, offset, 60): return Err("truncated Mach-O archive header")
+        var size: i64 = 0
+        var digits: i64 = 0
+        var padding = false
+        var index: i64 = 0
+        while index < 10:
+            val byte = bytes[offset + 48 + index] as i64
+            if byte == 32:
+                padding = true
+            else:
+                if padding or byte < 48 or byte > 57: return Err("invalid Mach-O archive member size")
+                size = size * 10 + byte - 48
+                digits = digits + 1
+            index = index + 1
+        if digits == 0 or not macho_range(bytes, offset + 60, size):
+            return Err("Mach-O archive member exceeds input")
+        offset = offset + 60 + size
+        if size % 2 != 0:
+            if offset >= bytes.len(): return Err("missing Mach-O archive padding")
+            offset = offset + 1
+    var raw: [i64] = []
+    for byte in bytes: raw = raw.push(byte as i64)
+    val archive = ar_parse(raw)?
+    var result: [MachOInput] = []
+    for member in archive.members:
+        var name = member.name
+        var start = member.data_offset
+        var size = member.data_size
+        if name.starts_with("#1/"):
+            val name_size = name.substring(3).to_i64() ?? -1
+            if name_size <= 0 or name_size > size: return Err("invalid BSD archive extended name")
+            name = macho_cstring(bytes, start, name_size)
+            start = start + name_size
+            size = size - name_size
+        if name != "/" and name != "//" and not name.starts_with("__.SYMDEF"):
+            val object = macho_checked_object(bytes[start:start + size])
+            if object.is_err(): return Err("archive member {name}: {object.unwrap_err()}")
+            result = result.push(MachOInput(name: "archive member " + name, object: object.unwrap()))
+    Ok(result)
+
+export MachOInput, macho_range, macho_read, macho_put, macho_sign, macho_cstring
+export macho_checked_object, macho_archive_inputs

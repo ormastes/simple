@@ -1,0 +1,87 @@
+# RV64 static linker fixtures
+
+Produced with Ubuntu clang and LLD 21.1.8, `llvm-ar`, through WSL Ubuntu.
+The assembly uses LP64 soft-float RV64IMAC. Explicit `.reloc` directives keep
+cross-object branch/compressed-branch encodings from being assembler-expanded.
+
+```sh
+clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c start.s -o start.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c provider.s -o provider.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c relax.s -o relax.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c arithmetic.s -o arithmetic.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c uleb.s -o uleb.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64imac -mabi=lp64 -c align.s -o align.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64ima -mabi=lp64 -c align_norvc.s -o align_norvc.o
+llvm-ar rcs libprovider.a provider.o
+llvm-readelf -r -h start.o provider.o relax.o
+ld.lld --no-relax -static -e _start start.o provider.o -o oracle.elf
+qemu-riscv64 ./oracle.elf # expected exit 42
+```
+
+Fixture compilation and relocation census ran during authoring. LLD also
+successfully linked start/provider with `--no-relax`; readelf confirmed ELF64,
+EM_RISCV, ET_EXEC and e_flags=RVC. QEMU execution is pending: qemu-riscv64 was
+not on WSL Ubuntu PATH. LLD output is fixture validation, not Simple evidence.
+Simple acceptance execution is pending an admitted self-hosted runtime.
+
+`start.o` has fourteen relocations: PCREL_HI20 (2), PCREL_LO12_I (2),
+PCREL_LO12_S, GOT_HI20, HI20, LO12_I, LO12_S, CALL_PLT, BRANCH, RVC_BRANCH,
+RVC_JUMP and JAL. `relax.o` isolates CALL_PLT plus RELAX without ALIGN padding.
+
+`arithmetic.o` contains seventeen relocations: an absolute pointer retains the
+data section; ADD/SUB pairs cover 8/16/32/64-bit fields; SET6/SUB6 preserve the
+upper two bits; SET8/16/32, PCREL32, PLT32 and GOT32_PCREL cover data fields.
+
+`uleb.o` contains an absolute retention pointer and two adjacent SET/SUB pairs.
+The three-byte padded label difference is 136, encoded as `88 81 00`, followed
+by a one-byte value13. LLD independently emitted `88 81 00 0d` during fixture
+authoring. Tests also corrupt adjacency, range and unsigned ordering.
+
+`align.o` has two padding cuts; LLD `--no-relax` moves its targets to entry+16
+and entry+32 and changes the function size from60 to34. Named `_start+24` and
+section-symbol `.text+24` references both remain entry+24 in the oracle.
+`align_norvc.o` retains a four-byte NOP and moves its target to entry+16.
+These LLD fixture checks ran; internal Simple tests remain unexecuted.
+
+ALIGN normalization admits canonical ELF64 RELA, executable PROGBITS, and
+validated 2/4-byte NOP padding whose requested alignment is covered by the
+input section alignment. It rejects overlapping/duplicate padding, malformed
+sizes, references into rewritten padding, and non-NOP contents.
+
+Current static-driver boundary: no instruction-size call relaxation or
+.riscv.attributes merge. RV32 ELF,
+dynamic/PIE and TLS output remain unsupported. Native execution and the Simple
+acceptance run are pending. Arithmetic/branch encodings follow the
+[RISC-V psABI](https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/master/riscv-elf.adoc)
+and [LLVM LLD implementation](https://llvm.googlesource.com/llvm-project/lld/+/6ef5ac64475f61262e794c705a06f0c0ffe769dd/ELF/Arch/RISCV.cpp).
+
+Attribute fixtures added in the phase-4 continuation:
+
+```sh
+clang --target=riscv64-unknown-linux-gnu -march=rv64i -mabi=lp64 -c attr_start.s -o attr_start.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64imac_zicsr -mabi=lp64 -c attr_provider.s -o attr_provider.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64i -mabi=lp64 -c attr_stack32.s -o attr_stack32.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64i -mabi=lp64 -c attr_atomic7.s -o attr_atomic7.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64i -mabi=lp64 -c attr_gp_shadow.s -o attr_gp_shadow.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64if -mabi=lp64 -c attr_start.s -o attr_float_start.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64izfinx -mabi=lp64 -c attr_provider.s -o attr_finx_provider.o
+llvm-ar rcs libattr_provider.a attr_provider.o attr_stack32.o
+```
+
+These commands ran with clang21.1.8. LLD linked the compatible pair and rejected
+the f/zfinx pair. Its tag16 warnings mean LLVM21 is not an x3-policy oracle;
+the dedicated attribute spec follows the newer psABI table. The ordinary
+driver now merges admitted attributes; broader ISA catalogs remain open.
+
+## Static local-exec TLS
+
+`tls_local_exec.s` uses explicit nonrelaxed TPREL HI20/ADD/LO12 sequences.
+Constructed with clang21.1.8 targeting riscv64-unknown-linux-gnu, march=rv64ima,
+mabi=lp64. LLD21.1.8 `--no-relax -static -e _start` supplied the independent
+instruction and TLS-symbol oracle. No output executable was run.
+
+`../elf/tls_symbol_offsets.c` was separately compiled for x86_64-unknown-linux-gnu
+and aarch64-unknown-linux-gnu using `-O0 -ftls-model=local-exec -ffreestanding
+-fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables`.
+Both objects were linked by LLD21.1.8 as static images and inspected for
+global/local/hidden TLS offsets. The Simple acceptance spec remains UNRUN.

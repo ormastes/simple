@@ -86,3 +86,33 @@ routing and revalidates runtime availability read-only. All use the inherited
 model. Root integrates exact commits and reviews source; no runtime PASS or full
 item 4 completion is authorized by source review. Remaining source owners are
 listed in the acceptance plan rather than relabeled as missing evidence only.
+
+## Full coding continuation ownership (2026-10-03)
+
+Root integrates on `work/item4-full-linker-20261003`, owning hosted FreeBSD,
+explicit freestanding file dispatch, publication and documentation. Acceptance
+owns RV64 static-driver, ULEB and alignment work in its existing isolated
+worktree. Research owns retained spill/file reading and section emission on
+`work/item4-linker-bounded-20261003`; it also performs independent integrated
+source review. Runtime owns Mach-O static construction and dylib-reading work
+in `C:/dev/simple-item4-macho-20261003`, `work/item4-macho-20261003`.
+
+All agents use the inherited model; lower-model sidecars are N/A. Tests are
+committed before the corresponding implementation. Root reviews agent source;
+acceptance reviews root's hosted/adapter changes and research reviews integrated
+Mach-O/adapter changes. Root is the merge owner. Runtime tests, generated-manual
+validation and coverage are UNRUN, so source review cannot award verify PASS.
+The prior three-attempt runtime diagnostic cap is unchanged.
+
+## Verification readiness continuation (2026-10-03)
+
+The user requests remaining items be divided into implementation and test work
+before Phase 4. The authoritative current breakdown is
+`doc/03_plan/compiler/linker/item4_verification_readiness.md`.
+Root integrates on `work/item4-verification-readiness-20261003`, owns provider
+lifecycle binding and common documents. Research owns retained archive/bounded
+execution in its original isolated research worktree. Runtime owns hosted Mach-O
+in the Mach-O worktree. Acceptance owns remaining RISC-V work in the acceptance
+worktree. All start from release `94a16103a5baeefad8bc7688e70b43b75dcf2914`.
+No agent edits another lane. Tests precede implementation, root reviews source,
+and an independent inherited-model agent reviews root. Lower-model sidecars N/A.

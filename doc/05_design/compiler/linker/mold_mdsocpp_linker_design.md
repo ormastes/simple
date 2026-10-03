@@ -455,3 +455,79 @@ after validating pair bounds/opcodes/register relationships and range/alignment.
 HI20/PCREL-HI20 and LO12-I patch only immediate fields. PCREL-LO12 remains an
 explicit error until its matching HI20 place/target context is supplied by an
 owning resolver. No ELF target admission is inferred from formula support.
+
+## 16. Static image engines and retained file execution (2026-10-03)
+
+This continuation supersedes the preceding PCREL-low implementation status,
+without claiming runtime qualification. The RV64 static ELF driver now resolves
+HI20/LO12 labels by object and final high-instruction address, including GOT
+slots; it validates paired labels in their original input section. The target
+is little-endian ELF64 ET_EXEC. ABI flags are merged before the final build-id
+seal; incompatible floating ABIs, RV32 output, and dynamic/TLS requests reject.
+Instruction/data relocation tests use independent LLVM-assembled objects.
+Fixed-span ULEB SET/SUB pairs are validated within the original section before
+layout and patched together. ALIGN normalization accepts only validated NOP
+padding in allocated executable PROGBITS with sufficient section alignment;
+it rewrites coherent raw symbol/relocation/section tables and reparses them.
+Explicit addends remain unchanged, matching the recorded LLVM fixture oracle.
+Instruction-size call relaxation and attribute merging remain open.
+
+`macho/macho_static_link.spl` constructs fixed-address, symbol-stripped
+MH_EXECUTE images with PAGEZERO/TEXT/DATA and LC_UNIXTHREAD. Its checked input,
+layout, symbol and relocation modules own the corresponding stages. Strong,
+weak and common definitions and iterative archive extraction precede layout.
+This freestanding contract does not imply a dyld application, code signing,
+TLS/unwind support, or successful execution on modern Darwin.
+
+`native_freestanding.spl` exposes these static engines and ELF x86-64/AArch64
+through `link_freestanding_to_native_v1`. Configuration explicitly supplies
+format, architecture, entry, output byte limit and executable permissions.
+Input files and the ELF image remain resident arrays: the output limit is an
+artifact-size check, not a memory budget. The result carries the actual
+`internal:elf` or `internal:macho` identity. No external fallback is attempted.
+This API is re-exported by the existing linker wrapper. The hosted Unix wrapper
+retains a separate contract; `-nostdlib` is not reinterpreted as static Mach-O.
+
+`native_image_publish.spl` owns staged image publication. Requested executable
+permissions are applied to the staged file before replacing the destination.
+Resolution, relocation and size failures therefore cannot publish a new image.
+The existing backup/restore compatibility path remains for runtimes lacking
+replace-style rename. It is recoverable best-effort replacement, not a
+gap-free atomic replacement guarantee. The caller owns the output directory;
+normalized lexical input aliases reject, but this is not hostile-directory
+filesystem identity admission.
+
+FreeBSD hosted ELF uses `elf/freebsd_hosted.spl` rather than Linux discovery:
+crt1/Scrt1, crti and crtbegin/S precede user objects; crtend/S and crtn follow.
+The target interpreter is `/libexec/ld-elf.so.1`; optional split providers precede
+libc. Allocated ABI notes are GC roots and receive PT_NOTE entries. FreeBSD
+branding reseals the canonical SHA1 build-id through `elf/image_identity.spl`.
+The native acceptance spec requires actual FreeBSD startup files and executes
+both ET_EXEC and PIE with a main-return oracle of 42. It has not been run.
+
+`link_working_set/file_store.spl` provides checked framed spill staging/replay
+and explicit commit-versus-cleanup outcomes. The retained file owner supplies
+positional reads preserving its sequential cursor and checks input identity.
+`elf/elf_file_reader.spl` reads individual ELF headers, symbol/name/RELA records
+and section windows, and emits bounded windows to an owned output handle.
+The metadata quota measures serialized table bytes; scratch quota measures
+logical spill plus private output bytes. Neither is an RSS certificate.
+
+Remaining bounded implementation includes the shared file-backed resolution
+index, final layout, relocation-window output, and a constrained worker started
+before allocations with no-swap and whole-job accounting. The production
+bounded facade must continue returning UnsupportedBudget until these exist and
+their tests run. Existing lifecycle callbacks still lack actual dynamic-pack
+loading and production binding. Full compiler/application, platform execution,
+SPipe generation, coverage and performance evidence remain open gates.
+
+## 17. Itemized verification readiness continuation (2026-10-03)
+
+The current implementation/test breakdown lives in
+`doc/03_plan/compiler/linker/item4_verification_readiness.md`. Its source-written
+states are separate from Phase 4 evidence and do not reduce G0..G6 requirements.
+`linker_pack_transport.md` in this directory specifies actual pack loading,
+generation retention and the native provider command. It supersedes the earlier
+statement that only callbacks exist; complete composition/CLI admission and
+mapped-provider execution remain open. `macho_hosted_image.md` specifies the
+new eager dyld import/rebase and ad-hoc signing subset and its explicit gaps.
