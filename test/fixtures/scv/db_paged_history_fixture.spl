@@ -1,0 +1,130 @@
+# Actual paged admission, immutable pages, semantic CAS and signed checkpoint.
+use std.spec.{expect}
+use app.io.mod.{dir_create, file_write_bytes}
+use app.scv.db.paged_store.*
+use app.scv.db.page_store.{db_page_store_import_page}
+use app.scv.db.historical_model.*
+use app.scv.db.historical_archive.*
+use app.scv.db.checkpoint_store.*
+use app.scv.db.checkpoint_objects.{DbCheckpointPageSource}
+use app.scv.db.ci_projection.*
+use std.scv.db_paged_model.*
+use std.scv.db_page_records.*
+use std.scv.db_pages.*
+use std.scv.db_checkpoint.*
+use std.scv.db_checkpoint_history.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.{DbFieldSchema, FieldMergeRule}
+use std.scv.db_admission.{DbPermission, db_patch_signing_bytes, db_authorize_patch}
+use std.scv.db_confidentiality.{db_metadata_check_patch}
+use std.scv.db_evidence.{DbEvidenceRevision}
+use std.scv.distributed_identity.*
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.crypto.sha256.{sha256_text}
+use test.fixtures.scv.db_paged_fixture.*
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
+use test.fixtures.scv.db_hydration_fixture.*
+
+struct Item2PagedHistoryState:
+    root: text
+    sources: DbHistoricalSources
+    pages_parent: text
+    policy: DbPagedPolicy
+    genesis: DbPagedManifest
+    first: DbPagedManifest
+    current: DbPagedManifest
+    patches: [DbPatch]
+    entities: [EntityRef]
+    digests: [text]
+    archive: DbArchivedSemantic
+
+struct Item2PagedHistoryFixture:
+    state: Item2PagedHistoryState
+    checkpoint: DbDatabaseCheckpoint
+    authority: DbHistoricalAuthority
+
+fn setup_item2_paged_history_entity(counter: u64) -> EntityRef:
+    entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "run_manifest", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter))
+
+fn setup_item2_paged_history_alias(number: u64) -> EntityRef:
+    entity_ref_settled(SettledAlias(database_namespace: "00112233445566778899aabbccddeeff", authority_epoch: 1u64, entity_kind: "run_manifest", sequence: number))
+
+fn setup_item2_paged_history_patch(counter: u64, uid_counter: u64, base: text, digest: text) -> DbPatch:
+    val draft = DbCiManifestDraft(provider_instance: "github.com", project: "123", run_id: "paged-run-{counter}", manifest: DbEvidenceRevision(entity: setup_item2_paged_history_entity(uid_counter), revision: "sha256:v1:" + sha256_text("paged-discovery-{counter}")), bundle_digest: "sha256:v1:" + digest)
+    setup_item2_paged_patch(db_ci_manifest_operations(draft).unwrap(), base, counter)
+
+fn setup_item2_paged_history_policy(patches: [DbPatch]) -> DbPagedPolicy:
+    var policy = setup_item2_paged_policy()
+    var key = policy.config.admission.keys[0]
+    key.permissions = [DbPermission(operation: "append", kind: "run_manifest", field: "*")]
+    policy.config.admission.keys = [key]
+    policy.config.admission.metadata = setup_item2_reviewed_metadata(patches)
+    policy.config.merge.fields = []
+    policy.config.merge.constraints = []
+    for name in ["version", "provider_instance", "project", "run_id", "manifest_revision", "bundle_digest"]:
+        policy.config.merge.fields.push(DbFieldSchema(kind: "run_manifest", field: name, rule: FieldMergeRule.ScalarConflict))
+    setup_item2_paged_repin(policy)
+
+fn setup_item2_paged_history_checkpoint(state: Item2PagedHistoryState, manifest: DbPagedManifest, predecessor: text = "") -> (DbDatabaseCheckpoint, DbCheckpointAuthority, DbCheckpointPageSource):
+    var records = [db_checkpoint_metadata_encode(DbCheckpointMetadata.History(state.genesis.revision, 1u64, [], [], state.genesis.revision)).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.History(state.first.revision, 2u64, [state.genesis.revision], [state.patches[0].batch_id], state.first.revision)).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.History(state.current.revision, 3u64, [state.first.revision], [state.patches[1].batch_id], state.current.revision)).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.Acceptance(state.patches[0].batch_id, state.first.revision)).unwrap(), db_checkpoint_metadata_encode(DbCheckpointMetadata.Acceptance(state.patches[1].batch_id, state.current.revision)).unwrap()]
+    if manifest.revision != state.current.revision:
+        records.push(db_checkpoint_metadata_encode(DbCheckpointMetadata.History(manifest.revision, 4u64, [state.current.revision], [], manifest.revision)).unwrap())
+    for entity in state.entities:
+        records.push(db_checkpoint_metadata_encode(DbCheckpointMetadata.Disposition(entity, DbCheckpointDisposition.Live)).unwrap())
+    val build = db_pages_build(records, state.policy.quota).unwrap()
+    val path = state.pages_parent + "/scv-checkpoint-pages-v1"
+    expect(dir_create(path, true)).to_be(true)
+    for page in build.pages:
+        expect(file_write_bytes(path + "/" + page.digest + ".page", db_page_encode(page, build.manifest.quota).unwrap())).to_be(true)
+    for entry in manifest.pages.entries:
+        val page = db_page_store_import_page(state.root, manifest.pages, entry).unwrap()
+        expect(file_write_bytes(path + "/" + page.digest + ".page", db_page_encode(page, manifest.pages.quota).unwrap())).to_be(true)
+    val admission = state.policy.config.admission
+    var checkpoint = DbDatabaseCheckpoint(revision: "", repository: admission.repository, namespace: admission.namespace, epoch: admission.epoch, schema_revision: admission.schema_revision, reducer_revision: admission.reducer_revision, policy_revision: state.policy.config.revision, predecessor_checkpoint: predecessor, history_horizon: state.genesis.revision, current_revision: manifest.revision, metadata: build.manifest, storage: DbCheckpointStorage.Paged(manifest), signer: "checkpoint-authority", signature: [])
+    checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+    checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+    val authority = DbCheckpointAuthority(expected_checkpoint: checkpoint.revision, key_id: checkpoint.signer, public_key: key, policy: state.policy.config, paged_policy: Some(state.policy))
+    (checkpoint, authority, DbCheckpointPageSource(external_parent: state.pages_parent, maximum_pages: 65536u64, maximum_bytes: 67108864u64))
+
+fn setup_item2_paged_history() -> Item2PagedHistoryFixture:
+    val (root, external, pages_parent) = setup_item2_hydration_paths()
+    val first_digest = setup_item2_hydration_node(root, external, [7u8,8u8,9u8]).digest
+    val second_digest = setup_item2_hydration_node(root, external, [70u8,80u8]).digest
+    # A one-time bounded host exploration found counter87716. Production hash
+    # assertions below prove this fixture; there is no runtime collision search.
+    val entities = [setup_item2_paged_history_entity(1u64), setup_item2_paged_history_entity(87716u64)]
+    val alias_key = db_page_alias_key(setup_item2_paged_history_alias(1u64).settled.unwrap()).unwrap()
+    expect(db_pages_bucket(alias_key).unwrap()).to_equal("985c")
+    expect(db_pages_bucket(db_page_row_key(entities[1]).unwrap()).unwrap()).to_equal("985c")
+    var policy = setup_item2_paged_history_policy([])
+    val genesis = db_paged_initialize(root, policy).unwrap()
+    val first_patch = setup_item2_paged_history_patch(1u64, 1u64, genesis.manifest.revision, first_digest)
+    # Review the actual envelope only after the structural genesis is known.
+    # Full admission revisions may change; the structural pin remains fixed.
+    policy = setup_item2_paged_history_policy([first_patch])
+    expect(db_metadata_check_patch(first_patch, policy.config.admission.metadata)).to_equal(Ok("allowed"))
+    expect(db_authorize_patch(first_patch, policy.config.admission, [], 10u64).is_ok()).to_be(true)
+    val first_apply = db_paged_apply(root, genesis.head, first_patch, policy).unwrap()
+    val first = db_paged_open(root, policy).unwrap()
+    val sources = DbHistoricalSources(evidence_parent: external)
+    val archive = db_history_archive_current(root, "paged", first_apply.head, policy.config, Some(policy), sources, db_history_limits()).unwrap()
+    val second_patch = setup_item2_paged_history_patch(2u64, 87716u64, first.manifest.revision, second_digest)
+    policy = setup_item2_paged_history_policy([first_patch, second_patch])
+    expect(db_metadata_check_patch(second_patch, policy.config.admission.metadata)).to_equal(Ok("allowed"))
+    expect(db_authorize_patch(second_patch, policy.config.admission, [first_patch.batch_id], 11u64).is_ok()).to_be(true)
+    val second_apply = db_paged_apply(root, first.head, second_patch, policy).unwrap()
+    val current = db_paged_open(root, policy).unwrap()
+    val old_entry = db_pages_entry(first.manifest.pages, alias_key).unwrap().unwrap()
+    val new_entry = db_pages_entry(current.manifest.pages, alias_key).unwrap().unwrap()
+    expect(old_entry.digest == new_entry.digest).to_be(false)
+    val state = Item2PagedHistoryState(root: root, sources: sources, pages_parent: pages_parent, policy: policy, genesis: genesis.manifest, first: first.manifest, current: current.manifest, patches: [first_patch,second_patch], entities: entities, digests: [first_digest,second_digest], archive: archive)
+    val (checkpoint, authority, source) = setup_item2_paged_history_checkpoint(state, current.manifest)
+    val prepared = db_checkpoint_prepare_install(root, second_apply.head, db_checkpoint_encode(checkpoint).unwrap(), authority, source).unwrap()
+    val installed = db_checkpoint_resume_install(root, prepared.journal_head, authority).unwrap()
+    expect(installed.phase).to_equal("Installed")
+    Item2PagedHistoryFixture(state: state, checkpoint: checkpoint, authority: DbHistoricalAuthority(checkpoint: authority, expected_active_head: installed.active_head, expected_retention_head: ""))
+
+export Item2PagedHistoryState, Item2PagedHistoryFixture
+export setup_item2_paged_history_entity, setup_item2_paged_history_alias, setup_item2_paged_history_patch
+export setup_item2_paged_history_policy, setup_item2_paged_history_checkpoint, setup_item2_paged_history

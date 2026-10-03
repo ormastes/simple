@@ -1,0 +1,160 @@
+# Real signed Paged checkpoints, requested-root proof reads and actual CAS bytes.
+# Source coverage only: no admitted Simple runner or performance result.
+use std.spec.*
+use app.io.mod.{file_delete, file_write_bytes}
+use app.scv.db.historical_model.*
+use app.scv.db.historical_query.*
+use app.scv.db.local_store.{db_store_read}
+use app.scv.db.page_store.*
+use app.scv.db.paged_import.{db_paged_validate_import}
+use app.scv.db.checkpoint_store.*
+use std.scv.db_checkpoint.*
+use std.scv.db_paged_model.*
+use std.scv.db_paged_indexes.*
+use std.scv.db_pages.*
+use std.scv.db_page_records.*
+use std.scv.db_patch.*
+use std.scv.distributed_identity.*
+use test.fixtures.scv.db_paged_history_fixture.*
+use test.fixtures.scv.db_paged_fixture.{setup_item2_paged_repin}
+use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
+
+fn check_item2_paged_history_exact(result: DbHistoricalResult, entity: EntityRef, digest: text, batch: text):
+    match result.resolution:
+        Exact(info):
+            expect(info.digest).to_equal(digest)
+            expect(info.restricted).to_be(false)
+        _: fail("historical evidence must be verified from actual CAS bytes")
+    expect(result.provenance.resolved_manifest).to_equal(Some(entity))
+    expect(result.provenance.accepted_batch_digest).to_equal(Some(batch))
+    expect(result.provenance.evidence_digest).to_equal(Some(digest))
+
+fn setup_item2_paged_history_query(fixture: Item2PagedHistoryFixture, revision: text, alias: u64) -> Result<DbHistoricalResult, text>:
+    db_history_query(fixture.state.root, DbHistoricalRequest(revision: revision, manifest: setup_item2_paged_history_alias(alias)), fixture.authority, fixture.state.sources, db_history_limits())
+
+fn setup_item2_paged_history_old_alias_page(fixture: Item2PagedHistoryFixture) -> DbPageEntry:
+    val key = db_page_alias_key(setup_item2_paged_history_alias(1u64).settled.unwrap()).unwrap()
+    db_pages_entry(fixture.state.first.pages, key).unwrap().unwrap()
+
+fn setup_item2_paged_history_rewrite(fixture: Item2PagedHistoryFixture) -> DbPagedManifest:
+    val state = fixture.state
+    val key = db_page_row_key(state.entities[0]).unwrap()
+    val entry = db_pages_entry(state.current.pages, key).unwrap().unwrap()
+    val page = db_page_store_import_page(state.root, state.current.pages, entry).unwrap()
+    val original = db_pages_lookup(state.current.pages, page, key).unwrap().unwrap()
+    var changed = original
+    match db_typed_page_record_decode(original).unwrap():
+        CurrentRow(entity, row):
+            var forged = row
+            var fields: [DbField] = []
+            for field in row.fields:
+                fields.push(if field.name == "bundle_digest": DbField(name: field.name, value: DbValue.Text("sha256:v1:" + state.digests[1])) else: field)
+            forged.fields = fields
+            expect(forged == row).to_be(false)
+            changed = db_typed_page_record_encode(DbTypedPageRecord.CurrentRow(entity, forged)).unwrap()
+        _: fail("fixture row must be a typed current manifest")
+    # Keep structural history/index closure valid so actual checkpoint install
+    # reaches the immutable-row comparison, not an unrelated missing index.
+    val history = db_paged_index_record(db_paged_history_key(state.current.revision).unwrap(), 172u8, DbValue.Text(state.current.revision)).unwrap()
+    val updates = [changed, history]
+    var affected: [DbRecordPage] = []
+    for bucket in db_pages_required_buckets(updates).unwrap():
+        for existing in state.current.pages.entries:
+            if existing.bucket == bucket: affected.push(db_page_store_import_page(state.root, state.current.pages, existing).unwrap())
+    val build = db_pages_update(state.current.pages, affected, updates).unwrap()
+    db_page_store_publish_objects(state.root, build, Some(state.current.pages)).unwrap()
+    var manifest = state.current
+    manifest.parent_revision = state.current.revision
+    manifest.pages = build.manifest
+    manifest = db_paged_manifest_seal(manifest).unwrap()
+    expect(db_paged_validate_import(state.root, manifest, state.policy)).to_equal(Ok(true))
+    manifest
+
+describe "Paged history uses requested-root identities and actual retained pages":
+    it "resolves both signed revisions and refuses aliases that did not yet exist":
+        val fixture = setup_item2_paged_history()
+        val state = fixture.state
+        val before = db_store_read(state.root, "paged")
+        val old = setup_item2_paged_history_query(fixture, state.first.revision, 1u64).unwrap()
+        check_item2_paged_history_exact(old, state.entities[0], state.digests[0], state.patches[0].batch_id)
+        expect(old.provenance.semantic_cas_digest).to_equal(Some(state.archive.cas_digest))
+        expect(old.provenance.history_object_digest).to_equal(Some(state.first.revision))
+        val current = setup_item2_paged_history_query(fixture, state.current.revision, 2u64).unwrap()
+        check_item2_paged_history_exact(current, state.entities[1], state.digests[1], state.patches[1].batch_id)
+        expect(setup_item2_paged_history_query(fixture, state.first.revision, 2u64).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.HistoricalIdentityUnavailable))
+        val future = DbHistoricalRequest(revision: state.first.revision, manifest: state.entities[1])
+        expect(db_history_query(state.root, future, fixture.authority, state.sources, db_history_limits()).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.ManifestMissing))
+        expect(db_store_read(state.root, "paged")).to_equal(before)
+
+    it "reports missing or corrupt old alias pages while the current alias remains verifiable":
+        for missing in [true,false]:
+            val fixture = setup_item2_paged_history()
+            val state = fixture.state
+            val before = db_store_read(state.root, "paged")
+            val journal = db_store_read(state.root, "checkpoint-install")
+            val entry = setup_item2_paged_history_old_alias_page(fixture)
+            val path = state.root + "/.scv/db-pages/pages/" + entry.digest + ".scvp"
+            if missing: expect(file_delete(path)).to_be(true)
+            else: expect(file_write_bytes(path, [0u8])).to_be(true)
+            val reason = if missing: DbHistoricalUnavailableReason.SemanticMissing else: DbHistoricalUnavailableReason.SemanticCorrupt
+            expect(setup_item2_paged_history_query(fixture, state.first.revision, 1u64).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(reason))
+            check_item2_paged_history_exact(setup_item2_paged_history_query(fixture, state.current.revision, 1u64).unwrap(), state.entities[0], state.digests[0], state.patches[0].batch_id)
+            expect(db_store_read(state.root, "paged")).to_equal(before)
+            expect(db_store_read(state.root, "checkpoint-install")).to_equal(journal)
+
+    it "keeps a dangling old page link a scope error rather than missing history":
+        val fixture = setup_item2_paged_history()
+        val state = fixture.state
+        val entry = setup_item2_paged_history_old_alias_page(fixture)
+        val path = state.root + "/.scv/db-pages/pages/" + entry.digest + ".scvp"
+        expect(file_delete(path)).to_be(true)
+        expect(setup_item2_filesystem_link(state.root, state.root + "/missing-page-target", path, false)).to_equal(0)
+        expect(setup_item2_paged_history_query(fixture, state.first.revision, 1u64).unwrap_err()).to_equal("SCVDB_PAGE_FILE_SCOPE")
+        check_item2_paged_history_exact(setup_item2_paged_history_query(fixture, state.current.revision, 1u64).unwrap(), state.entities[0], state.digests[0], state.patches[0].batch_id)
+
+    it "charges alias and row proof reads cumulatively and rejects foreign identity context":
+        val fixture = setup_item2_paged_history()
+        val state = fixture.state
+        val alias_entry = setup_item2_paged_history_old_alias_page(fixture)
+        val row_entry = db_pages_entry(state.first.pages, db_page_row_key(state.entities[0]).unwrap()).unwrap().unwrap()
+        expect(alias_entry.bucket == row_entry.bucket).to_be(false)
+        val alias_page = db_page_store_import_page(state.root, state.first.pages, alias_entry).unwrap()
+        val row_page = db_page_store_import_page(state.root, state.first.pages, row_entry).unwrap()
+        var policy = state.policy
+        policy.max_read_bytes = (db_page_encode(alias_page, policy.quota).unwrap().len() + db_page_encode(row_page, policy.quota).unwrap().len() - 1) as u64
+        policy = setup_item2_paged_repin(policy)
+        var limited = fixture.authority
+        limited.checkpoint.paged_policy = Some(policy)
+        val request = DbHistoricalRequest(revision: state.first.revision, manifest: setup_item2_paged_history_alias(1u64))
+        expect(db_history_query(state.root, request, limited, state.sources, db_history_limits()).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.Quota))
+        var alias = request.manifest.settled.unwrap()
+        alias.authority_epoch = 2u64
+        expect(db_history_query(state.root, DbHistoricalRequest(revision: state.first.revision, manifest: entity_ref_settled(alias)), fixture.authority, state.sources, db_history_limits()).unwrap_err()).to_equal("SCVDB_HISTORY_CONTEXT")
+        alias.authority_epoch = 1u64
+        alias.database_namespace = "11112233445566778899aabbccddeeff"
+        expect(db_history_query(state.root, DbHistoricalRequest(revision: state.first.revision, manifest: entity_ref_settled(alias)), fixture.authority, state.sources, db_history_limits()).unwrap_err()).to_equal("SCVDB_HISTORY_CONTEXT")
+
+    it "requires the actual accepted actor-counter page rather than a row's claimed batch":
+        val fixture = setup_item2_paged_history()
+        val state = fixture.state
+        val key = db_page_actor_counter_key(state.patches[0].actor, state.patches[0].actor_counter).unwrap()
+        val entry = db_pages_entry(state.first.pages, key).unwrap().unwrap()
+        for earlier in [db_page_alias_key(setup_item2_paged_history_alias(1u64).settled.unwrap()).unwrap(), db_page_row_key(state.entities[0]).unwrap(), db_page_batch_key(state.patches[0].batch_id).unwrap()]:
+            expect(db_pages_bucket(earlier).unwrap() == entry.bucket).to_be(false)
+        expect(file_delete(state.root + "/.scv/db-pages/pages/" + entry.digest + ".scvp")).to_be(true)
+        val before = db_store_read(state.root, "paged")
+        expect(setup_item2_paged_history_query(fixture, state.first.revision, 1u64).unwrap().resolution).to_equal(DbHistoricalResolution.Unavailable(DbHistoricalUnavailableReason.SemanticMissing))
+        expect(db_store_read(state.root, "paged")).to_equal(before)
+
+    it "rejects an independently signed rehashed checkpoint rewriting an immutable manifest":
+        val fixture = setup_item2_paged_history()
+        val state = fixture.state
+        val before = db_store_read(state.root, "paged")
+        val journal = db_store_read(state.root, "checkpoint-install")
+        val forged = setup_item2_paged_history_rewrite(fixture)
+        val (checkpoint, authority, source) = setup_item2_paged_history_checkpoint(state, forged, fixture.checkpoint.revision)
+        expect(db_checkpoint_decode(db_checkpoint_encode(checkpoint).unwrap(), authority).unwrap()).to_equal(checkpoint)
+        expect(db_checkpoint_prepare_install(state.root, before.head, db_checkpoint_encode(checkpoint).unwrap(), authority, source).unwrap_err()).to_equal("SCVDB_CHECKPOINT_ROW_REGRESSION")
+        expect(db_store_read(state.root, "paged")).to_equal(before)
+        expect(db_store_read(state.root, "checkpoint-install")).to_equal(journal)
+        check_item2_paged_history_exact(setup_item2_paged_history_query(fixture, state.current.revision, 1u64).unwrap(), state.entities[0], state.digests[0], state.patches[0].batch_id)

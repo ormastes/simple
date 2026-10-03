@@ -1,11 +1,12 @@
 # Immutable page CAS and small-manifest publication under the root SJ boundary.
 # Unchanged page bytes are not reread during an affected-page commit. Each page
 # is hash-verified on lookup; manifest admission verifies new descriptor closure.
-use app.io.mod.{dir_create, dir_remove_all, file_write_bytes, file_read_regular_no_follow_bounded_bytes, file_is_regular_no_follow, file_fsync, directory_fsync}
+use app.io.mod.{dir_create, dir_remove_all, file_write_bytes, file_is_regular_no_follow, file_fsync, directory_fsync}
+use app.io.retained_file_ops.{RetainedFile, retained_file_open, retained_file_read, retained_file_unchanged, retained_file_close}
 use app.io.file_ops.{secure_temp_dir, file_publish_noreplace}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
-use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same, path_identity_contains}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same, path_identity_contains, path_entry_present}
 use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_holder, scv_sj_lease_release, scv_sj_lease_is_held}
 use app.scv.db.local_store.{db_store_read, db_store_commit, db_local_path_scope}
 use std.common.crypto.sha256.{sha256_u8_hex}
@@ -41,11 +42,31 @@ fn _db_page_path(root: text, digest: text) -> Result<text, text>:
     if not _db_page_digest_valid(digest): return Err("SCVDB_PAGE_DIGEST")
     Ok("{root}/.scv/db-pages/pages/{digest}.scvp")
 
+fn _db_page_read_handle(file: RetainedFile) -> Result<[u8], text>:
+    var bytes: [u8] = []
+    while (bytes.len() as u64) < file.size:
+        val remaining = file.size - (bytes.len() as u64)
+        val count = if remaining > 1048576u64: 1048576 else: remaining as i64
+        val chunk = retained_file_read(file, count)?
+        if chunk.len() == 0: return Err("SCVDB_PAGE_TRUNCATED")
+        bytes = bytes + chunk
+    if retained_file_read(file, 1)?.len() != 0: return Err("SCVDB_PAGE_TRAILING")
+    retained_file_unchanged(file)?
+    Ok(bytes)
+
 fn _db_page_read_bytes(path: text, limit: i64 = 16777216) -> Result<[u8], text>:
     if limit <= 0 or limit > 16777216: return Err("SCVDB_PAGE_BYTES_QUOTA")
+    # Native entry presence distinguishes true absence from a dangling link.
+    # Missing retained history is unavailable; links/types still fail scope.
+    if not path_entry_present(path)?: return Err("SCVDB_PAGE_MISSING")
     if not file_is_regular_no_follow(path) or path_final_existing(path)?.path != path:
         return Err("SCVDB_PAGE_FILE_SCOPE")
-    file_read_regular_no_follow_bounded_bytes(path, limit)
+    # Actual handle metadata enforces the remaining aggregate proof budget and
+    # reports typed quota, rather than depending on a low-level diagnostic text.
+    val file = retained_file_open(path, limit as u64)?
+    val result = _db_page_read_handle(file)
+    if not retained_file_close(file): return Err("SCVDB_PAGE_CLOSE")
+    result
 
 fn _db_page_stage_publish(stage: text, destination: text, bytes: [u8]) -> Result<bool, text>:
     if bytes.len() > 16777216: return Err("SCVDB_PAGE_BYTES_QUOTA")

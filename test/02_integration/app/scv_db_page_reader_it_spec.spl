@@ -1,0 +1,43 @@
+# Physical page-reader boundaries; these generic pages carry no semantic claim.
+use std.spec.*
+use app.io.mod.{file_delete, file_write_bytes}
+use app.scv.db.page_store.*
+use std.scv.db_pages.*
+use test.fixtures.scv.db_hydration_fixture.{setup_item2_hydration_paths}
+use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
+
+fn setup_item2_page_reader() -> (text, DbPageBuild):
+    val (root, _external, _target) = setup_item2_hydration_paths()
+    val quota = DbPageQuota(max_page_bytes: 1048576u64, max_page_records: 4096u64, max_records: 10000u64)
+    val build = db_pages_build([DbPageRecord(key: "page-reader-record", kind: DbPageKind.Row, payload: [17u8,23u8,91u8])], quota).unwrap()
+    db_page_store_publish_objects(root, build, nil).unwrap()
+    (root, build)
+
+describe "Actual retained page handle and typed failure boundaries":
+    it "separates an empty corrupt object from a genuinely absent file":
+        val (root, build) = setup_item2_page_reader()
+        val entry = build.manifest.entries[0]
+        val path = root + "/.scv/db-pages/pages/" + entry.digest + ".scvp"
+        expect(file_write_bytes(path, [])).to_be(true)
+        expect(db_page_store_import_page(root, build.manifest, entry).unwrap_err()).to_equal("SCVDB_PAGE_CORRUPT")
+        expect(file_delete(path)).to_be(true)
+        expect(db_page_store_import_page(root, build.manifest, entry).unwrap_err()).to_equal("SCVDB_PAGE_MISSING")
+
+    it "refuses oversized actual files before allocation and permits a subsequent bounded read":
+        val (root, build) = setup_item2_page_reader()
+        val page = build.pages[0]
+        val bytes = db_page_encode(page, build.manifest.quota).unwrap()
+        expect(bytes.len()).to_be_greater_than(1)
+        expect(db_page_store_load_pages(root, build.manifest, ["page-reader-record"], (bytes.len() - 1) as u64).unwrap_err()).to_equal("SCVDB_FILE_QUOTA")
+        val loaded = db_page_store_load_pages(root, build.manifest, ["page-reader-record"], bytes.len() as u64).unwrap()
+        expect(loaded[0].page).to_equal(Some(page))
+        expect(loaded[0].byte_count).to_equal(bytes.len() as u64)
+        expect(file_delete(root + "/.scv/db-pages/pages/" + page.digest + ".scvp")).to_be(true)
+
+    it "rejects an actual dangling file link instead of misreporting it as absence":
+        val (root, build) = setup_item2_page_reader()
+        val entry = build.manifest.entries[0]
+        val path = root + "/.scv/db-pages/pages/" + entry.digest + ".scvp"
+        expect(file_delete(path)).to_be(true)
+        expect(setup_item2_filesystem_link(root, root + "/nonexistent-target", path, false)).to_equal(0)
+        expect(db_page_store_import_page(root, build.manifest, entry).unwrap_err()).to_equal("SCVDB_PAGE_FILE_SCOPE")
