@@ -32,12 +32,22 @@ race, mocked retention algorithm or hardcoded success receipt is acceptable.
 Record RED before the implementation and GREEN after it on the same admitted
 runtime. If no suitable runtime exists, keep execution explicitly blocked.
 
-Reader acquisition requires a separate repair: pause a reader after it selects
-the old `CURRENT`, publish a new generation and collect, then resume the payload
-read. The selected generation must remain readable until that reader releases
-its pin. The current unlocked pointer/payload sequence does not establish this
-guarantee. Keep this row OPEN after the writer-lock regression passes; do not
-infer lifetime safety from a caller-supplied retained list.
+Reader acquisition requires a separate repair. Current consumers own the whole
+decoded generation rather than retaining a lazy `.index` reader. Protect pointer
+selection and bounded payload capture with `CURRENT.lock`, then unlock before
+hashing/decoding. Missing storage retains `missing-or-invalid-generation` without
+creating directories. Lock failure yields `generation-lock-unavailable`; unlock
+failure refuses admission. The existing lock facade has only a seconds timeout;
+a one-second contention refusal is not warm-success latency evidence.
+
+The reader test first holds the real lock, requires explicit refusal, then
+releases it and requires admission. A second case acquires decoded A, publishes
+B, collects A's file, and proves the owned A value remains byte-identical while
+the current reader admits B. A process-barrier stress case must still cover
+reader/publisher/collector interleavings. Capture-before-unlock is the selected
+algorithm; no test-only barrier belongs in the production API. Implementation
+waits for executable RED evidence. Long-lived archive or future lazy-index
+consumers require separate leases; a retained-digest list cannot prove those.
 
 ### Mixed-change routing acceptance
 

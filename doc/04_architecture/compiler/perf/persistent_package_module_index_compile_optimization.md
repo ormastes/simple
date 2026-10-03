@@ -28,13 +28,18 @@ inspect persisted bytes and the current pointer, and then prove ordinary
 unretained collection after releasing it. The test does not certify every
 pin/crash ordering; those remain separate acceptance rows.
 
-Reader lifetime remains OPEN: the current implementation accepts a caller's
-`retained_digests` snapshot, not an atomic reader-pin registry, and
-`package_module_index_read_current_v1` reads pointer then payload without a
-shared lock. A publication/GC interleaving can therefore retire a reader's
-chosen generation before its payload read. The writer-lock repair cannot
-certify pin safety. Add a deterministic paused-reader/publish/GC test before
-claiming the broader retention transaction above is implemented.
+Reader acquisition remains OPEN: `package_module_index_read_current_v1` reads
+pointer then payload without a shared lock. Publication/GC can retire the
+chosen generation between those reads. The writer-lock repair cannot certify
+this boundary. A follow-up call-site audit found that current consumers receive
+owned decoded generation values; none retains an index-file path or lazy reader.
+For those consumers, capture pointer and complete immutable payload under the
+same lock, release it, and only then hash/decode the owned bytes. The returned
+value pins the logical generation for the request without requiring the `.index`
+file to survive. Test contention and preservation of an already acquired value
+after publication/collection. A future lazy file consumer must supply a real
+lease before use; caller-supplied `retained_digests` is not such a registry.
+Archive/CAS leases remain a separate lifetime obligation.
 
 ### Semantic classification must reach the driver
 

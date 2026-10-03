@@ -72,12 +72,28 @@ Each row requires the named production scenario, status 0, empty unexpected stde
 
 ## Shared interfaces and manual rules
 
-Reader acquisition remains a separate OPEN case: pause a reader after selecting
-A from CURRENT, publish B and run GC, then resume reading A. A must remain
-readable until its reader pin is released. The current reader performs unlocked
-pointer and payload reads, and GC's caller-supplied retained list is not an
-atomic pin registry. The held-publication-lock unit test does not certify this
-interleaving or multi-process lifecycle safety.
+### Concrete executable additions
+
+| Executable source | Cases | Execution status |
+|---|---|---|
+| `test/01_unit/compiler/cache/package_module_index_gc_publication_spec.spl` | Publication-lock exclusion, retained generation, post-unlock collection | UNEXECUTED; GC repair exists |
+| `test/01_unit/compiler/cache/package_module_index_reader_transaction_spec.spl` | Reader contention, owned snapshot after collection, absent-root compatibility | UNEXECUTED; reader repair awaits RED |
+| `test/02_integration/compiler/cache/package_index_persistence_admission_spec.spl` | Tampered payload, invalid pointer, empty pointer, absent generation and restoration | UNEXECUTED; uses actual persistence owners |
+
+These eight scenarios do not replace the 44 compiler system scenarios. Owner
+corruption/refusal behavior is a prerequisite; production scan counters, compile
+sets, archive behavior, crash timing, daemon/remote lifecycle and output parity
+still require their own witnesses. Runtime provenance investigation is recorded
+in `doc/08_tracking/bug/item6_acceptance_runtime_unavailable_2026-10-03.md`.
+
+Reader acquisition remains a separate OPEN case. Actual current consumers own
+decoded generation values, so the selected repair is atomic pointer/payload
+capture, followed by hash/decode outside the lock. Test lock contention refusal,
+successful admission after release, and unchanged owned A after publishing B
+and collecting A's file. A process-barrier reader/publisher/GC case still needs
+execution. The current unlocked pointer/payload sequence is unsafe, and a
+caller-supplied retained list is not a lease for lazy-index/archive consumers.
+The held-publication-lock test does not certify those separate lifetimes.
 
 Use existing `PackageIndexRouteV1`, `PackageModuleIndexReadV1`, `PackageModuleChangeV1`, `package_index_route_current_v1`, and production publish/read/invalidate owners. Preserve the canonical conceptual record names and PSI IDs in the parent plan. A future `run_package_index_scenario(name)` helper is allowed only when it invokes the real compiler and returns admitted evidence; no synthetic receipt adapter is planned.
 
