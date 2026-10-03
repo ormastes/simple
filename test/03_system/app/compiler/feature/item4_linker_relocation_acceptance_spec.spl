@@ -1,0 +1,287 @@
+"""
+# Item 4 relocation boundary acceptance (ITEM4-REQ-004)
+
+Production path: clang-produced ELF64 objects -> parser -> symbol resolution
+-> layout -> checked relocation -> executable image, through elf_static_link.
+Fixtures and producer commands: test/fixtures/linker/elf/RECIPE.md.
+Plan: doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md.
+
+NOT RUN: test-first code awaiting an admitted self-hosted runtime. No observed
+RED/GREEN or native execution claim. These x86_64 narrow-relocation cases do
+not certify AArch64, other relocation families, PE/Mach-O or host execution.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf_parser.{elf_parse_object, elf_section_name}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn item4_reloc_load(name: text) -> [i64]:
+    val raw = file_read_bytes("test/fixtures/linker/elf/" + name)
+    expect(raw.len()).to_be_greater_than(64)
+    if raw.len() <= 64: return []
+    var bytes: [i64] = []
+    for byte in raw: bytes = bytes.push(byte as i64)
+    val parsed = elf_parse_object(bytes)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return []
+    val object = parsed.unwrap()
+    expect(object.header.e_type).to_equal(1)
+    expect(object.header.e_machine).to_equal(62)
+    bytes
+
+fn item4_reloc_read_le(bytes: [i64], offset: i64, width: i64) -> i64:
+    val valid = width >= 1 and width <= 8 and offset >= 0 and offset <= bytes.len()
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    expect(width <= bytes.len() - offset).to_equal(true)
+    if width > bytes.len() - offset: return 0
+    var value: i64 = 0
+    var index: i64 = 0
+    while index < width:
+        value = value | (bytes[offset + index] << (index * 8))
+        index = index + 1
+    value
+
+fn item4_reloc_write_le(bytes: [i64], offset: i64, value: i64) -> [i64]:
+    expect(offset >= 0 and offset <= bytes.len()).to_equal(true)
+    if offset < 0 or offset > bytes.len(): return []
+    expect(8 <= bytes.len() - offset).to_equal(true)
+    if 8 > bytes.len() - offset: return []
+    var mutated = bytes
+    var index: i64 = 0
+    while index < 8:
+        mutated[offset + index] = (value >> (index * 8)) & 255
+        index = index + 1
+    mutated
+
+fn item4_reloc_mutate(name: text, kind: i64, field: i64, value: i64) -> [i64]:
+    var bytes = item4_reloc_load(name)
+    val parsed = elf_parse_object(bytes)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return []
+    val object = parsed.unwrap()
+    var matches: i64 = 0
+    var record: i64 = -1
+    for section in object.sections:
+        if section.sh_type == 4:
+            expect(section.sh_size % 24).to_equal(0)
+            val valid_section = section.sh_addr >= 0 and section.sh_size >= 0 and section.sh_addr + section.sh_size <= bytes.len() and section.sh_size % 24 == 0 and section.sh_info >= 0 and section.sh_info < object.sections.len()
+            expect(valid_section).to_equal(true)
+            if not valid_section: return []
+            # elf_parse_object repurposes sh_addr as the section's file offset.
+            var offset = section.sh_addr
+            while offset < section.sh_addr + section.sh_size:
+                val info = item4_reloc_read_le(bytes, offset + 8, 8)
+                if (info & 0xffffffff) == kind:
+                    matches = matches + 1
+                    record = offset
+                    val expected_addend: i64 = if kind == 4: -4 else: 0
+                    expect(item4_reloc_read_le(bytes, offset + 16, 8)).to_equal(expected_addend)
+                    if item4_reloc_read_le(bytes, offset + 16, 8) != expected_addend: return []
+                    if kind == 14 or kind == 15:
+                        expect(item4_reloc_read_le(bytes, offset, 8)).to_equal(2)
+                        expect(object.sections[section.sh_info].sh_size).to_equal(3)
+                        if item4_reloc_read_le(bytes, offset, 8) != 2 or object.sections[section.sh_info].sh_size != 3: return []
+                        val symbol_index = info >> 32
+                        expect(symbol_index >= 0 and symbol_index < object.symbols.len()).to_equal(true)
+                        if symbol_index < 0 or symbol_index >= object.symbols.len(): return []
+                        val symbol = object.symbols[symbol_index]
+                        if kind == 14:
+                            expect(symbol.name).to_equal("abs8_target")
+                            if symbol.name != "abs8_target": return []
+                        else:
+                            expect(symbol.name).to_equal("pc_narrow_target")
+                            if symbol.name != "pc_narrow_target": return []
+                offset = offset + 24
+    expect(matches).to_equal(1)
+    if matches != 1: return []
+    expect(field == 0 or field == 8 or field == 16).to_equal(true)
+    if field != 0 and field != 8 and field != 16: return []
+    var replacement = value
+    if field == 8:
+        val original = item4_reloc_read_le(bytes, record + 8, 8)
+        # Negative sentinel requests an invalid symbol index while preserving type.
+        replacement = if value == -1: ((object.symbols.len() + 1) << 32) | kind else: (original & -4294967296) | value
+    bytes = item4_reloc_write_le(bytes, record + field, replacement)
+    expect(item4_reloc_read_le(bytes, record + field, 8)).to_equal(replacement)
+    if field == 16:
+        val checked_parse = elf_parse_object(bytes)
+        expect(checked_parse.is_ok()).to_equal(true)
+        if checked_parse.is_err(): return []
+        val reparsed = checked_parse.unwrap()
+        var checked = false
+        for relocation in reparsed.relocations:
+            if (relocation.r_info & 0xffffffff) == kind:
+                expect(relocation.r_addend).to_equal(value)
+                checked = true
+        expect(checked).to_equal(true)
+    bytes
+
+fn item4_reloc_link(object: [i64], provider: text) -> Result<[i64], text>:
+    val provider_bytes = item4_reloc_load(provider)
+    val parsed = elf_parse_object(provider_bytes)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return Err("fixture provider could not be parsed")
+    if provider == "abs_narrow_def_x64.o":
+        var found = false
+        for symbol in parsed.unwrap().symbols:
+            if symbol.name == "abs8_target":
+                expect(symbol.st_shndx).to_equal(0xfff1)
+                expect(symbol.st_value).to_equal(127)
+                found = symbol.st_shndx == 0xfff1 and symbol.st_value == 127
+        expect(found).to_equal(true)
+        if not found: return Err("fixture absolute symbol is not SHN_ABS 127")
+    if provider == "pc_narrow_def_x64.o":
+        var found = false
+        val provider_object = parsed.unwrap()
+        for symbol in provider_object.symbols:
+            if symbol.name == "pc_narrow_target":
+                val valid_section = symbol.st_shndx > 0 and symbol.st_shndx < provider_object.sections.len()
+                expect(valid_section).to_equal(true)
+                if not valid_section: return Err("fixture target section is invalid")
+                expect(symbol.st_value).to_equal(0)
+                expect(provider_object.sections[symbol.st_shndx].sh_size).to_equal(1)
+                found = symbol.st_value == 0 and provider_object.sections[symbol.st_shndx].sh_size == 1
+        expect(found).to_equal(true)
+        if not found: return Err("fixture PC target is not at the start of a one-byte section")
+    elf_static_link([object, provider_bytes], [], "_start", RelocArch.X86_64)
+
+fn item4_reloc_data(bytes: [i64]) -> [i64]:
+    val parsed = elf_parse_object(bytes)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return []
+    val image = parsed.unwrap()
+    expect(image.header.e_type).to_equal(2)
+    var found: i64 = 0
+    var data: [i64] = []
+    var index: i64 = 0
+    for section in image.sections:
+        if elf_section_name(image, index) == ".data":
+            found = found + 1
+            expect(section.sh_addr + section.sh_size <= bytes.len()).to_equal(true)
+            if section.sh_addr < 0 or section.sh_size < 0 or section.sh_addr + section.sh_size > bytes.len(): return []
+            var position = section.sh_addr
+            while position < section.sh_addr + section.sh_size:
+                data = data.push(bytes[position])
+                position = position + 1
+        index = index + 1
+    expect(found).to_equal(1)
+    data
+
+describe "ITEM4-REQ-004 relocation pipeline boundaries":
+    it "encodes unsigned ABS8 zero without changing the adjacent ABS16 field":
+        # @req ITEM4-REQ-004
+        step("Verify the unmodified absolute-symbol fixture encodes 0x1234 and 127")
+        expect(item4_reloc_data(item4_reloc_link(item4_reloc_load("abs_narrow_x64.o"), "abs_narrow_def_x64.o").unwrap())).to_equal([0x34, 0x12, 0x7f])
+        step("Link ABS8 with addend minus 127, giving 127 minus 127 equals zero")
+        val linked = item4_reloc_link(item4_reloc_mutate("abs_narrow_x64.o", 14, 16, -127), "abs_narrow_def_x64.o").unwrap()
+        step("Require exact data bytes, including the unchanged neighbor")
+        expect(item4_reloc_data(linked)).to_equal([0x34, 0x12, 0])
+
+    it "encodes the maximum unsigned ABS8 value 255":
+        # @req ITEM4-REQ-004
+        step("Prepare the absolute-symbol fixture with addend 128")
+        val object = item4_reloc_mutate("abs_narrow_x64.o", 14, 16, 128)
+        step("Resolve absolute symbol 127 plus 128 through the linker")
+        val linked = item4_reloc_link(object, "abs_narrow_def_x64.o").unwrap()
+        step("Require 255 at the patch and unchanged adjacent bytes")
+        expect(item4_reloc_data(linked)).to_equal([0x34, 0x12, 255])
+
+    it "rejects unsigned ABS8 underflow instead of wrapping minus one to 255":
+        # @req ITEM4-REQ-004
+        step("Prepare absolute symbol 127 with addend minus 128")
+        val object = item4_reloc_mutate("abs_narrow_x64.o", 14, 16, -128)
+        step("Link the request whose mathematical result is minus one")
+        val linked = item4_reloc_link(object, "abs_narrow_def_x64.o")
+        step("Require the named unsigned 8-bit range failure")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("R_X86_64_8 out of unsigned 8-bit range")
+
+    it "rejects unsigned ABS8 overflow instead of truncating 256 to zero":
+        # @req ITEM4-REQ-004
+        step("Prepare absolute symbol 127 with addend 129")
+        val object = item4_reloc_mutate("abs_narrow_x64.o", 14, 16, 129)
+        step("Link the request whose mathematical result is 256")
+        val linked = item4_reloc_link(object, "abs_narrow_def_x64.o")
+        step("Require a range failure rather than emitted image bytes")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("R_X86_64_8 out of unsigned 8-bit range")
+
+    it "encodes the minimum signed PC8 displacement minus 128":
+        # @req ITEM4-REQ-004
+        step("Verify fixture layout: two-byte slot, one-byte slot, then target byte")
+        expect(item4_reloc_data(item4_reloc_link(item4_reloc_load("pc_narrow_x64.o"), "pc_narrow_def_x64.o").unwrap())).to_equal([3, 0, 1, 0x6b])
+        step("Link addend minus 129 with the independently pinned one-byte distance")
+        val linked = item4_reloc_link(item4_reloc_mutate("pc_narrow_x64.o", 15, 16, -129), "pc_narrow_def_x64.o").unwrap()
+        step("Require two's-complement 0x80 without modifying neighboring bytes")
+        expect(item4_reloc_data(linked)).to_equal([3, 0, 0x80, 0x6b])
+
+    it "encodes the maximum signed PC8 displacement 127":
+        # @req ITEM4-REQ-004
+        step("Prepare PC8 addend 126 for the one-byte fixture distance")
+        val object = item4_reloc_mutate("pc_narrow_x64.o", 15, 16, 126)
+        step("Resolve and apply the relocation through the ELF pipeline")
+        val linked = item4_reloc_link(object, "pc_narrow_def_x64.o").unwrap()
+        step("Require 0x7f and preserved neighbor bytes")
+        expect(item4_reloc_data(linked)).to_equal([3, 0, 0x7f, 0x6b])
+
+    it "rejects PC8 displacement minus 129":
+        # @req ITEM4-REQ-004
+        step("Prepare PC8 addend minus 130 for the one-byte fixture distance")
+        val object = item4_reloc_mutate("pc_narrow_x64.o", 15, 16, -130)
+        step("Link one below the signed lower bound")
+        val linked = item4_reloc_link(object, "pc_narrow_def_x64.o")
+        step("Require a signed 8-bit range diagnostic")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("R_X86_64_PC8 out of signed 8-bit range")
+
+    it "rejects PC8 displacement 128":
+        # @req ITEM4-REQ-004
+        step("Prepare PC8 addend 127 for the one-byte fixture distance")
+        val object = item4_reloc_mutate("pc_narrow_x64.o", 15, 16, 127)
+        step("Link one above the signed upper bound")
+        val linked = item4_reloc_link(object, "pc_narrow_def_x64.o")
+        step("Require a signed 8-bit range diagnostic")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("R_X86_64_PC8 out of signed 8-bit range")
+
+    it "rejects a one-byte patch starting exactly after the target section":
+        # @req ITEM4-REQ-004
+        step("Move ABS8 from offset two to offset three in the three-byte section")
+        val object = item4_reloc_mutate("abs_narrow_x64.o", 14, 0, 3)
+        step("Submit the malformed relocation to the production linker")
+        val linked = item4_reloc_link(object, "abs_narrow_def_x64.o")
+        step("Require the offending patch interval and section size")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("patch [3, 4) exceeds target section size 3")
+
+    it "rejects an out-of-range relocation symbol index":
+        # @req ITEM4-REQ-004
+        step("Preserve ABS8 type and replace only its symbol index")
+        val object = item4_reloc_mutate("abs_narrow_x64.o", 14, 8, -1)
+        step("Submit the invalid symbol reference to the production linker")
+        val linked = item4_reloc_link(object, "abs_narrow_def_x64.o")
+        step("Require symbol-index rejection rather than a fabricated definition")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("relocation symbol index")
+        expect(linked.unwrap_err()).to_contain("out of range")
+
+    it "rejects an unsupported relocation without confusing it with patch overflow":
+        # @req ITEM4-REQ-004
+        step("Replace the x86_64 call PLT32 type with unsupported type 65535")
+        val object = item4_reloc_mutate("start_x64.o", 4, 8, 65535)
+        step("Link the otherwise valid entry and provider objects")
+        val linked = item4_reloc_link(object, "lib_x64.o")
+        step("Require the unsupported relocation number in the diagnostic")
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("unsupported x86_64 reloc type 65535")
