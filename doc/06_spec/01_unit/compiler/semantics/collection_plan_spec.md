@@ -6,6 +6,12 @@ Execution and admitted `spipe-docgen` verification remain pending.
 
 ## Scenarios
 
+Source typing regressions additionally reject mismatched node/expression types
+and an untyped retained expression. A nested array type with different source
+spans remains valid under structural equality. The loop-origin spec also checks
+that changing only its source node output to Bool invalidates the retained plan.
+These regressions were authored before the source fix and remain unexecuted.
+
 | Scenario | Production behavior and oracle |
 |---|---|
 | Source followed by filter | A typed, bound source followed by a backward-only unary filter validates successfully. |
