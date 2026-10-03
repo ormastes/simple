@@ -1,0 +1,225 @@
+# @req ITEM4-REQ-005 ITEM4-REQ-007
+# TDD status: NOT RUN. Interpreter-NUL rejection is a predicted defect, not observed RED.
+# Production image/metadata acceptance only; native loader execution is a separate gate.
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use std.string_core.{char_from_code}
+use compiler.backend.linker.elf.elf_static_link.{
+    elf_link, elf_link_stripped, ElfLinkRequest,
+    ELF_LINK_DYNAMIC_EXEC, ELF_LINK_STATIC_EXEC
+}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+val ITEM4_DYNAMIC_FIX: text = "test/fixtures/linker/elf"
+val ITEM4_DYNAMIC_INTERP: text = "/lib64/ld-linux-x86-64.so.2"
+
+fn item4_dynamic_load(name: text) -> [i64]:
+    val raw = file_read_bytes("{ITEM4_DYNAMIC_FIX}/{name}")
+    expect(raw.len()).to_be_greater_than(64)
+    if raw.len() <= 64: return []
+    var bytes: [i64] = []
+    for byte in raw:
+        bytes = bytes.push(byte as i64)
+    expect(bytes[0]).to_equal(127)
+    expect(bytes[1]).to_equal(69)
+    expect(bytes[2]).to_equal(76)
+    expect(bytes[3]).to_equal(70)
+    bytes
+
+# Independent little-endian field reader, not the production parser.
+fn item4_dynamic_read(bytes: [i64], offset: i64, width: i64) -> i64:
+    expect(width >= 1 and width <= 8).to_equal(true)
+    expect(offset >= 0 and offset + width <= bytes.len()).to_equal(true)
+    if offset < 0 or width < 1 or width > 8 or offset > bytes.len() - width: return 0
+    var value: i64 = 0
+    var index: i64 = 0
+    while index < width:
+        value = value | ((bytes[offset + index] & 255) << (index * 8))
+        index = index + 1
+    value
+
+fn item4_dynamic_string(bytes: [i64], offset: i64) -> text:
+    expect(offset >= 0 and offset < bytes.len()).to_equal(true)
+    if offset < 0 or offset >= bytes.len(): return ""
+    var value: text = ""
+    var index = offset
+    while index < bytes.len():
+        if bytes[index] == 0: return value
+        value = value + char_from_code(bytes[index])
+        index = index + 1
+    fail("unterminated ELF string in acceptance image")
+    ""
+
+fn item4_dynamic_section(bytes: [i64], name: text) -> i64:
+    expect(bytes.len()).to_be_greater_than(63)
+    if bytes.len() < 64: return -1
+    val headers = item4_dynamic_read(bytes, 40, 8)
+    val count = item4_dynamic_read(bytes, 60, 2)
+    val names_index = item4_dynamic_read(bytes, 62, 2)
+    expect(item4_dynamic_read(bytes, 58, 2)).to_equal(64)
+    expect(names_index).to_be_less_than(count)
+    expect(headers >= 64 and count > 0 and headers <= bytes.len() - count * 64).to_equal(true)
+    if count <= 0 or names_index >= count or headers < 64 or headers > bytes.len() - count * 64: return -1
+    val names = item4_dynamic_read(bytes, headers + names_index * 64 + 24, 8)
+    var index: i64 = 0
+    while index < count:
+        val header = headers + index * 64
+        val name_offset = item4_dynamic_read(bytes, header, 4)
+        if item4_dynamic_string(bytes, names + name_offset) == name: return header
+        index = index + 1
+    -1
+
+fn item4_dynamic_offset(bytes: [i64], name: text) -> i64:
+    val header = item4_dynamic_section(bytes, name)
+    expect(header).to_be_greater_than(0)
+    if header <= 0: return -1
+    item4_dynamic_read(bytes, header + 24, 8)
+
+fn item4_dynamic_tag(bytes: [i64], tag: i64) -> i64:
+    val header = item4_dynamic_section(bytes, ".dynamic")
+    expect(header).to_be_greater_than(0)
+    if header <= 0: return -1
+    var offset = item4_dynamic_read(bytes, header + 24, 8)
+    val end = offset + item4_dynamic_read(bytes, header + 32, 8)
+    expect(offset >= 0 and end >= offset and end <= bytes.len() and (end - offset) % 16 == 0).to_equal(true)
+    if offset < 0 or end < offset or end > bytes.len() or (end - offset) % 16 != 0: return -1
+    while offset < end:
+        val entry_tag = item4_dynamic_read(bytes, offset, 8)
+        if entry_tag == tag:
+            return item4_dynamic_read(bytes, offset + 8, 8)
+        if entry_tag == 0: return -1
+        offset = offset + 16
+    -1
+
+fn item4_dynamic_symbol(bytes: [i64], name: text) -> i64:
+    val header = item4_dynamic_section(bytes, ".dynsym")
+    expect(header).to_be_greater_than(0)
+    if header <= 0: return -1
+    var offset = item4_dynamic_read(bytes, header + 24, 8)
+    val end = offset + item4_dynamic_read(bytes, header + 32, 8)
+    val names = item4_dynamic_offset(bytes, ".dynstr")
+    expect(item4_dynamic_read(bytes, header + 56, 8)).to_equal(24)
+    expect(offset >= 0 and end >= offset and end <= bytes.len() and (end - offset) % 24 == 0).to_equal(true)
+    if names < 0 or offset < 0 or end < offset or end > bytes.len() or (end - offset) % 24 != 0: return -1
+    while offset < end:
+        if item4_dynamic_string(bytes, names + item4_dynamic_read(bytes, offset, 4)) == name:
+            return offset
+        offset = offset + 24
+    -1
+
+fn item4_dynamic_request(interpreter: text, eager: bool, runpath: text,
+        hash_style: text) -> ElfLinkRequest:
+    val object_bytes = item4_dynamic_load("pic_start_x64.o")
+    val shared_bytes = file_read_bytes("{ITEM4_DYNAMIC_FIX}/libadd_x64.so.1")
+    expect(shared_bytes.len()).to_be_greater_than(64)
+    ElfLinkRequest(objects: [object_bytes], archives: [], shared: [shared_bytes],
+        entry: "_start", target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC,
+        interp: interpreter, bind_now: eager, runpath: runpath, hash_style: hash_style)
+
+fn item4_dynamic_check_imports(bytes: [i64]):
+    expect(item4_dynamic_read(bytes, 16, 2)).to_equal(2)
+    expect(item4_dynamic_read(bytes, 18, 2)).to_equal(62)
+    val needed = item4_dynamic_tag(bytes, 1)
+    expect(needed).to_be_greater_than(0)
+    expect(item4_dynamic_string(bytes, item4_dynamic_offset(bytes, ".dynstr") + needed)).to_equal("libadd_x64.so.1")
+    val function_symbol = item4_dynamic_symbol(bytes, "add_val")
+    val data_symbol = item4_dynamic_symbol(bytes, "msg")
+    expect(function_symbol).to_be_greater_than(0)
+    expect(data_symbol).to_be_greater_than(0)
+    if function_symbol <= 0 or data_symbol <= 0: return
+    # Imported function remains undefined; dynamic loader resolves its PLT relocation.
+    expect(item4_dynamic_read(bytes, function_symbol + 6, 2)).to_equal(0)
+    expect(bytes[function_symbol + 4] & 15).to_equal(2)
+    expect(bytes[data_symbol + 4] & 15).to_equal(1)
+
+describe "Item 4 dynamic linker production acceptance":
+    it "ITEM4-REQ-005 records the real shared dependency and function/data imports":
+        step("Load checked-in x86_64 relocatable and DSO fixtures with setup assertions")
+        val request = item4_dynamic_request(ITEM4_DYNAMIC_INTERP, false, "", "both")
+        step("Link through the production ELF image entrypoint")
+        val result = elf_link(request)
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        step("Decode emitted ELF fields independently and verify exact dependency and imports")
+        item4_dynamic_check_imports(result.unwrap())
+
+    it "ITEM4-REQ-005 strips static symbols while retaining loader dependencies and dynamic symbols":
+        step("Link the same fixture through unstripped and stripped production entrypoints")
+        val request = item4_dynamic_request(ITEM4_DYNAMIC_INTERP, false, "", "both")
+        val full = elf_link(request)
+        val stripped = elf_link_stripped(request)
+        expect(full.is_ok()).to_equal(true)
+        expect(stripped.is_ok()).to_equal(true)
+        if full.is_err() or stripped.is_err(): return
+        step("Prove static symbol tables disappear and the dynamic dependency remains usable metadata")
+        expect(item4_dynamic_section(full.unwrap(), ".symtab")).to_be_greater_than(0)
+        expect(item4_dynamic_section(full.unwrap(), ".strtab")).to_be_greater_than(0)
+        expect(item4_dynamic_section(stripped.unwrap(), ".symtab")).to_equal(-1)
+        expect(item4_dynamic_section(stripped.unwrap(), ".strtab")).to_equal(-1)
+        item4_dynamic_check_imports(stripped.unwrap())
+
+    it "ITEM4-REQ-005 refuses to resolve an imported function from a hidden DSO definition":
+        step("Locate add_val in the actual fixture symbol table and assert its exported visibility")
+        val library = item4_dynamic_load("libadd_x64.so.1")
+        val symbol = item4_dynamic_symbol(library, "add_val")
+        expect(symbol).to_be_greater_than(0)
+        if symbol <= 0 or symbol + 24 > library.len(): return
+        expect(library[symbol + 4] & 15).to_equal(2)
+        expect(library[symbol + 4] >> 4).to_equal(1)
+        expect(library[symbol + 5] & 3).to_equal(0)
+        if (library[symbol + 4] & 15) != 2 or (library[symbol + 4] >> 4) != 1 or (library[symbol + 5] & 3) != 0: return
+        var hidden = file_read_bytes("{ITEM4_DYNAMIC_FIX}/libadd_x64.so.1")
+        expect(hidden.len()).to_equal(library.len())
+        if hidden.len() != library.len(): return
+        hidden[symbol + 5] = 2u8
+        step("Link the unchanged importing object against the hidden-definition DSO")
+        val result = elf_link(ElfLinkRequest(
+            objects: [item4_dynamic_load("pic_start_x64.o")], archives: [], shared: [hidden],
+            entry: "_start", target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC,
+            interp: ITEM4_DYNAMIC_INTERP))
+        step("Reject the missing public definition by symbol name")
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("add_val")
+
+    it "ITEM4-REQ-005 emits exact eager-binding RUNPATH and GNU-only hash metadata":
+        step("Request eager binding, a literal ORIGIN search path, and GNU-only hash policy")
+        val result = elf_link(item4_dynamic_request(ITEM4_DYNAMIC_INTERP, true, "$ORIGIN:/opt/simple/lib", "gnu"))
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        val bytes = result.unwrap()
+        step("Read dynamic tags independently and compare against ELF policy constants")
+        expect(item4_dynamic_tag(bytes, 24)).to_equal(0)
+        expect(item4_dynamic_tag(bytes, 30)).to_equal(8)
+        expect(item4_dynamic_tag(bytes, 0x6ffffffb)).to_equal(1)
+        val runpath = item4_dynamic_tag(bytes, 29)
+        expect(runpath).to_be_greater_than(0)
+        expect(item4_dynamic_string(bytes, item4_dynamic_offset(bytes, ".dynstr") + runpath)).to_equal("$ORIGIN:/opt/simple/lib")
+        val gnu_hash = item4_dynamic_section(bytes, ".gnu.hash")
+        expect(gnu_hash).to_be_greater_than(0)
+        if gnu_hash <= 0: return
+        expect(item4_dynamic_tag(bytes, 0x6ffffef5)).to_equal(item4_dynamic_read(bytes, gnu_hash + 16, 8))
+        expect(item4_dynamic_section(bytes, ".hash")).to_equal(-1)
+        expect(item4_dynamic_tag(bytes, 4)).to_equal(-1)
+        item4_dynamic_check_imports(bytes)
+
+    it "ITEM4-REQ-005 rejects a dynamic binding policy requested for static output":
+        step("Pass a typed static image request carrying the incompatible eager-binding policy")
+        val result = elf_link(ElfLinkRequest(
+            objects: [item4_dynamic_load("pic_start_x64.o")], archives: [], shared: [],
+            entry: "_start", target: RelocArch.X86_64, mode: ELF_LINK_STATIC_EXEC,
+            interp: "", bind_now: true))
+        step("Require a named policy rejection rather than silently dropping the requested behavior")
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("bind-now policy given to a static link")
+
+    it "ITEM4-REQ-005 ITEM4-REQ-007 rejects embedded NUL in the requested runtime interpreter":
+        step("Keep valid link inputs while supplying an interpreter path with an embedded terminator")
+        val request = item4_dynamic_request("/lib64/ld-linux-x86-64.so.2\0/ignored", false, "", "both")
+        step("Call the production linker and require rejection before it emits a truncated loader path")
+        val result = elf_link(request)
+        expect(result.is_err()).to_equal(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("interpreter")
