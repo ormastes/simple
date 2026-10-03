@@ -3,7 +3,7 @@
 # A successful local bare-remote push proves neither protection nor authorization.
 # Network calls require the caller's SJ lease query; the owner must exclude
 # concurrent lease acquisition until the synchronous call has returned.
-use app.io.mod.{is_dir, dir_remove_all, process_run_bounded}
+use app.io.mod.{is_dir, dir_remove_all, process_run_bounded, file_read_regular_no_follow_bounded_bytes}
 use app.io.env_ops.{env_get}
 use app.io.file_ops.{secure_temp_dir_raw, file_write_bytes, file_read, file_is_regular_no_follow}
 use std.nogc_sync_mut.io.path_identity.{HostFinalPath, path_final_existing, path_identity_same, path_identity_contains}
@@ -172,6 +172,20 @@ fn _db_candidate_owned(scratch: text) -> bool:
                 if owned.path == scratch and path_identity_same(owned, current): return true
         Err(_): return false
     false
+
+# Trusted IO infrastructure check. A caller's path or public candidate struct
+# cannot register ownership; acquisition below is the only registry writer.
+fn db_git_candidate_require_owned_scratch(scratch: text) -> Result<bool, text>:
+    if not _db_candidate_owned(scratch): return Err("CandidateScratchNotOwned")
+    # The marker contains only the path. Never allocate an attacker-sized marker.
+    if text_to_utf8_bytes(scratch).len() > 4096: return Err("CandidateScratchIdentityChanged")
+    match file_read_regular_no_follow_bounded_bytes(scratch + "/.scv-candidate-owner", 4096):
+        Ok(bytes):
+            if bytes != text_to_utf8_bytes(scratch): return Err("CandidateScratchIdentityChanged")
+        Err(_): return Err("CandidateScratchIdentityChanged")
+    Ok(true)
+
+export db_git_candidate_require_owned_scratch
 
 # Registry tokens detect aliases, not hostile same-name object replacement.
 # The securely allocated child's parent must remain trusted through cleanup.
@@ -348,3 +362,23 @@ fn db_git_candidate_restore(request: DbGitCandidateRequest, raw_commit: text, ex
             Err(reason)
 
 export db_git_candidate_commit_bytes, db_git_candidate_restore
+
+# Trusted backend infrastructure. The existing registered candidate owns the
+# fetched parent and scope; its current index may be replaced by a typed owner.
+# This grants no semantic authority and is never a producer-facing facade.
+fn db_git_candidate_finish_index(candidate: DbGitPreparedCandidate, message: text, raw_commit: text = "", expected_oid: text = "") -> Result<DbGitPreparedCandidate, text>:
+    _db_candidate_verify(candidate)?
+    if message == "" or message.len() > 4096 or message.contains("\0"): return Err("CandidateInvalidManifest")
+    var next = candidate
+    next.tree_oid = _db_candidate_run(candidate.scratch, ["write-tree"])?
+    if not _db_candidate_oid(next.tree_oid, candidate.object_format): return Err("CandidateInvalidTree")
+    next.candidate_oid = _db_candidate_run(candidate.scratch, ["-c", "user.name=SCV Settlement", "-c", "user.email=scv-settlement@invalid", "commit-tree", next.tree_oid, "-p", candidate.expected_head, "-m", message])?
+    _db_candidate_prepared.push(next)
+    _db_candidate_verify(next)?
+    if raw_commit != "":
+        if raw_commit.len() >= 65536 or raw_commit.contains("\0") or not _db_candidate_oid(expected_oid, candidate.object_format): return Err("CandidateCommitEncoding")
+        return _db_candidate_restore_commit(next, raw_commit, expected_oid)
+    if expected_oid != "": return Err("CandidateCommitEncoding")
+    Ok(next)
+
+export db_git_candidate_finish_index

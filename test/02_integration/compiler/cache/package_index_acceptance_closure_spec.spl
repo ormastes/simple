@@ -1,0 +1,41 @@
+# @req PSI-REQ-001 PSI-REQ-004
+use std.spec.*
+use app.test.package_index_acceptance_closure.{package_index_acceptance_closure_v1}
+use app.io.mod.{dir_remove, getpid}
+
+fn closure_acceptance_test_root() -> text:
+    "build/test-artifacts/package-index-closure-acceptance-{getpid()}"
+
+describe "explicit persisted dependency closure":
+    before_each:
+        dir_remove(closure_acceptance_test_root(), true)
+    after_each:
+        dir_remove(closure_acceptance_test_root(), true)
+
+    it "selects only declared dependencies and excludes the unrelated subtree":
+        step("Admit the current package index")
+        val result = package_index_acceptance_closure_v1("explicit-closure-only", closure_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("selected_modules=api,app,model,util")
+        expect(result.observations).to_contain("unrelated_module_excluded=true")
+
+    it "visits a dependency cycle once and still excludes unrelated modules":
+        step("Admit the current package index")
+        val result = package_index_acceptance_closure_v1("cycle", closure_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("selected_module_count=4")
+        expect(result.observations).to_contain("unrelated_module_excluded=true")
+
+    it "rejects a dangling dependency without publishing the broken graph":
+        step("Preserve the prior admitted generation")
+        val result = package_index_acceptance_closure_v1("dangling", closure_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("incomplete_closure_size=0")
+        expect(result.observations).to_contain("invalid_graph_published=false")
+        expect(result.observations).to_contain("prior_generation_preserved=true")
+
+    it "does not return a partial graph for an unknown root":
+        step("Refuse an untrusted package index")
+        val result = package_index_acceptance_closure_v1("missing-root", closure_acceptance_test_root())
+        expect(result.valid).to_equal(true)
+        expect(result.observations).to_contain("missing_root_closure_size=0")

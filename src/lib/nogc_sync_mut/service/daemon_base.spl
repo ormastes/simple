@@ -55,23 +55,48 @@ fn _parent_dir(path: text) -> text:
 
 # --- Start / Stop ---
 
-fn daemon_base_start(base: DaemonBase) -> bool:
+struct DaemonBaseStartV1:
+    base: DaemonBase
+    started: bool
+
+# Struct state is returned explicitly; callers must assign result.base.
+fn daemon_base_start_owned(base: DaemonBase) -> DaemonBaseStartV1:
     val sj_dir = _parent_dir(base.config.pid_path)
     mkdir_p(sj_dir)
 
     val pid_state = acquire_pid_file(base.config.pid_path)
     if not pid_state.acquired:
-        return false
-    base.pid_state = pid_state
-    base.running = true
-    audit_daemon_start(base.audit, pid_state.pid)
-    true
+        return DaemonBaseStartV1(base, false)
+    var owned = base
+    owned.pid_state = pid_state
+    owned.running = true
+    audit_daemon_start(owned.audit, pid_state.pid)
+    DaemonBaseStartV1(owned, true)
+
+fn daemon_base_stop_owned(base: DaemonBase) -> DaemonBase:
+    var owned = base
+    if owned.pid_state.acquired:
+        # The legacy release primitive does not compare PID ownership. Never
+        # delete a replacement owner's file based solely on our old receipt.
+        if read_pid_file(owned.pid_state.path) == owned.pid_state.pid:
+            release_pid_file(owned.pid_state)
+            # Keep the receipt on failed removal so the caller can retry.
+            if file_exists(owned.pid_state.path) and
+                    read_pid_file(owned.pid_state.path) == owned.pid_state.pid:
+                return owned
+    if owned.running:
+        audit_daemon_stop(owned.audit, owned.pid_state.pid)
+    owned.running = false
+    owned.pid_state = PidFileState(owned.config.pid_path, -1i64, false)
+    owned
+
+# Compatibility signatures retain their historical by-value semantics.
+# New stateful owners must use the owned variants and write back the result.
+fn daemon_base_start(base: DaemonBase) -> bool:
+    daemon_base_start_owned(base).started
 
 fn daemon_base_stop(base: DaemonBase):
-    if base.running:
-        audit_daemon_stop(base.audit, base.pid_state.pid)
-        release_pid_file(base.pid_state)
-        base.running = false
+    val stopped = daemon_base_stop_owned(base)
 
 fn daemon_base_is_running(base: DaemonBase) -> bool:
     base.running

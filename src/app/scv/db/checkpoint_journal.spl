@@ -1,0 +1,65 @@
+# Immutable installation intent. Mutable channel contains only the bounded
+# descriptor; the active generation's checkpoint_anchor is metadata authority.
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use std.scv.db_checkpoint_history.{db_checkpoint_hex}
+use std.common.crypto.sha256.{sha256_text}
+use app.scv.db.local_store.{db_store_generation_head}
+
+struct DbCheckpointInstallJournal:
+    channel: text
+    source_head: text
+    pending_head: text
+    pending_state_digest: text
+    bridge_head: text
+    checkpoint_digest: text
+    expected_installed_head: text
+    transaction_id: text
+    target_state: text
+    # Prepare-time diagnostics only. Never a fresh write/admission capability;
+    # the subsequent queue/apply owner reauthenticates at its actual host time.
+    pending_results: [text]
+
+fn db_checkpoint_journal_encode(journal: DbCheckpointInstallJournal) -> Result<text, text>:
+    if not ["semantic", "paged"].contains(journal.channel): return Err("SCVDB_CHECKPOINT_JOURNAL_CHANNEL")
+    for head in [journal.source_head, journal.pending_head, journal.bridge_head]:
+        if head != "" and not db_checkpoint_hex(head): return Err("SCVDB_CHECKPOINT_JOURNAL_HEAD")
+    for digest in [journal.pending_state_digest, journal.checkpoint_digest, journal.expected_installed_head, journal.transaction_id]:
+        if not db_checkpoint_hex(digest): return Err("SCVDB_CHECKPOINT_JOURNAL_DIGEST")
+    if db_store_generation_head(journal.source_head, journal.transaction_id, journal.target_state, journal.checkpoint_digest)? != journal.expected_installed_head: return Err("SCVDB_CHECKPOINT_JOURNAL_TARGET")
+    if journal.pending_results.len() > 64 or journal.target_state.len() > 8388608: return Err("SCVDB_CHECKPOINT_JOURNAL_QUOTA")
+    var fields: [u8] = []
+    for value in [journal.channel, journal.source_head, journal.pending_head, journal.pending_state_digest, journal.bridge_head, journal.checkpoint_digest, journal.expected_installed_head, journal.transaction_id, journal.target_state]: fields = fields + db_canonical_text(value)?
+    var results: [[u8]] = []
+    for value in journal.pending_results:
+        if not ["AcceptedReplay", "RebaseReady", "WaitingForPending", "Conflict", "ResnapshotRequired"].contains(value): return Err("SCVDB_CHECKPOINT_PENDING_RESULT")
+        results.push(db_canonical_text(value)?)
+    val bytes = db_domain_bytes("checkpoint-install-journal-v1", db_frame(185u8, fields + db_canonical_list(results)))?
+    if bytes.len() > 16777216: return Err("SCVDB_CHECKPOINT_JOURNAL_QUOTA")
+    Ok("SCVDB-CHECKPOINT-JOURNAL-v1\n" + db_snapshot_hex(bytes) + "\n")
+
+fn db_checkpoint_journal_decode(encoded: text) -> Result<DbCheckpointInstallJournal, text>:
+    if encoded.len() > 33554500: return Err("SCVDB_CHECKPOINT_JOURNAL_QUOTA")
+    val lines = encoded.split("\n")
+    if lines.len() != 3 or lines[0] != "SCVDB-CHECKPOINT-JOURNAL-v1" or lines[2] != "": return Err("SCVDB_CHECKPOINT_JOURNAL_FORMAT")
+    val bytes = db_snapshot_unhex(lines[1])?
+    val domain = db_domain_bytes("checkpoint-install-journal-v1", [])?
+    if bytes.len() <= domain.len(): return Err("SCVDB_CHECKPOINT_JOURNAL_FORMAT")
+    for index in 0..domain.len():
+        if bytes[index] != domain[index]: return Err("SCVDB_CHECKPOINT_JOURNAL_FORMAT")
+    val frame = db_read_frame(bytes, domain.len())?
+    if frame.tag != 185u8 or frame.next_offset != bytes.len(): return Err("SCVDB_CHECKPOINT_JOURNAL_FORMAT")
+    val fields = db_read_children(frame.payload)?
+    if fields.len() != 10 or fields[9].tag != 6u8: return Err("SCVDB_CHECKPOINT_JOURNAL_FORMAT")
+    var results: [text] = []
+    for child in db_read_children(fields[9].payload)?: results.push(db_read_text(child)?)
+    val journal = DbCheckpointInstallJournal(channel: db_read_text(fields[0])?, source_head: db_read_text(fields[1])?, pending_head: db_read_text(fields[2])?, pending_state_digest: db_read_text(fields[3])?, bridge_head: db_read_text(fields[4])?, checkpoint_digest: db_read_text(fields[5])?, expected_installed_head: db_read_text(fields[6])?, transaction_id: db_read_text(fields[7])?, target_state: db_read_text(fields[8])?, pending_results: results)
+    if db_checkpoint_journal_encode(journal)? != encoded: return Err("SCVDB_CHECKPOINT_JOURNAL_NONCANONICAL")
+    Ok(journal)
+
+fn db_checkpoint_descriptor(journal: DbCheckpointInstallJournal, phase: text) -> Result<text, text>:
+    if not ["Prepared", "Installed"].contains(phase): return Err("SCVDB_CHECKPOINT_JOURNAL_PHASE")
+    val digest = sha256_text(db_checkpoint_journal_encode(journal)?)
+    Ok("SCVDB-CHECKPOINT-INSTALL-v1\n{phase}\n{journal.channel}\n{journal.source_head}\n{journal.pending_head}\n{journal.checkpoint_digest}\n{journal.expected_installed_head}\n{digest}\n")
+
+export DbCheckpointInstallJournal, db_checkpoint_journal_encode, db_checkpoint_journal_decode, db_checkpoint_descriptor

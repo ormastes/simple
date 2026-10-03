@@ -1,0 +1,136 @@
+# Raw binary Git objects through existing text-process and binary-file facades.
+# Only the candidate owner's private scratch registry admits effects. No caller
+# boolean, path-shaped token, or returned blob grants publication authority.
+# Parents remain trusted against concurrent hostile filesystem replacement.
+use app.io.mod.{process_run_bounded, file_create_exclusive, file_write_bytes, file_read_regular_no_follow_bounded_bytes, file_is_regular_no_follow, file_delete, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.path_identity.{HostFinalPath, path_final_existing, path_identity_same, path_identity_contains, path_entry_present}
+use app.scv.db.git_candidate.{db_git_candidate_require_owned_scratch}
+use app.scv.db.git_policy.{db_git_effect_prefix, db_git_network_config_safe}
+
+struct DbGitBlobRead:
+    oid: text
+    size: u64
+    bytes: [u8]
+
+fn _blob_limit(max_bytes: u64) -> Result<bool, text>:
+    if max_bytes > 16777216u64: return Err("SCVDB_GIT_BLOB_QUOTA")
+    Ok(true)
+
+fn _blob_oid(oid: text) -> Result<bool, text>:
+    if oid.len() != 40 and oid.len() != 64: return Err("SCVDB_GIT_BLOB_OID")
+    for index in 0..oid.len():
+        val code = oid.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return Err("SCVDB_GIT_BLOB_OID")
+    Ok(true)
+
+fn _blob_guard(scratch: text) -> Result<HostFinalPath, text>:
+    db_git_candidate_require_owned_scratch(scratch)?
+    if not db_git_network_config_safe(scratch): return Err("SCVDB_GIT_BLOB_CONFIG")
+    val scope = path_final_existing(scratch)?
+    if scope.path != scratch: return Err("SCVDB_GIT_BLOB_SCOPE")
+    Ok(scope)
+
+fn _blob_run(scratch: text, arguments: [text]) -> Result<text, text>:
+    val scope = _blob_guard(scratch)?
+    # Missing promisor objects must fail locally, never start a lazy fetch.
+    # Git without --no-lazy-fetch support fails closed at this boundary.
+    val prefix = ["--no-lazy-fetch"] + db_git_effect_prefix(scratch)
+    val (output, _error, code) = process_run_bounded("git", prefix + arguments, 30000, 4096)
+    if code != 0 or output.len() >= 4096: return Err("SCVDB_GIT_BLOB_EFFECT")
+    if not path_identity_same(scope, _blob_guard(scratch)?): return Err("SCVDB_GIT_BLOB_SCOPE")
+    Ok(output)
+
+fn _blob_line(output: text) -> Result<text, text>:
+    var value = output
+    if value.ends_with("\r\n"): value = value[0:value.len() - 2]
+    elif value.ends_with("\n"): value = value[0:value.len() - 1]
+    else: return Err("SCVDB_GIT_BLOB_OUTPUT")
+    if value == "" or value.contains("\n") or value.contains("\r") or value.contains("\0"): return Err("SCVDB_GIT_BLOB_OUTPUT")
+    Ok(value)
+
+fn db_git_blob_unpack_leaf(output: text) -> Result<text, text>:
+    val leaf = _blob_line(output)?
+    val prefix = ".merge_file_"
+    if not leaf.starts_with(prefix) or leaf.len() != prefix.len() + 6: return Err("SCVDB_GIT_BLOB_TEMP_PATH")
+    for index in prefix.len()..leaf.len():
+        val code = leaf.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 65 and code <= 90) or (code >= 97 and code <= 122)): return Err("SCVDB_GIT_BLOB_TEMP_PATH")
+    Ok(leaf)
+
+fn _blob_size(output: text, maximum: u64) -> Result<u64, text>:
+    val value = _blob_line(output)?
+    if value.len() > 20 or (value.len() > 1 and value.starts_with("0")): return Err("SCVDB_GIT_BLOB_SIZE")
+    var size = 0u64
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if code < 48 or code > 57: return Err("SCVDB_GIT_BLOB_SIZE")
+        val digit = (code - 48) as u64
+        if size > maximum / 10u64 or (size == maximum / 10u64 and digit > maximum % 10u64): return Err("SCVDB_GIT_BLOB_QUOTA")
+        size = size * 10u64 + digit
+    Ok(size)
+
+fn _blob_read_file(scratch: text, scope: HostFinalPath, path: text, size: u64) -> Result<[u8], text>:
+    if not path_identity_same(scope, _blob_guard(scratch)?) or not file_is_regular_no_follow(path): return Err("SCVDB_GIT_BLOB_SCOPE")
+    val identity = path_final_existing(path)?
+    if identity.path != path or not path_identity_contains(scope, identity): return Err("SCVDB_GIT_BLOB_SCOPE")
+    val bytes = file_read_regular_no_follow_bounded_bytes(path, size as i64)?
+    if bytes.len() as u64 != size: return Err("SCVDB_GIT_BLOB_SIZE")
+    if not path_identity_same(identity, path_final_existing(path)?): return Err("SCVDB_GIT_BLOB_SCOPE")
+    Ok(bytes)
+
+fn _blob_remove(scratch: text, scope: HostFinalPath, path: text, identity: HostFinalPath) -> Result<bool, text>:
+    db_git_candidate_require_owned_scratch(scratch)?
+    if not path_identity_same(scope, path_final_existing(scratch)?) or not file_is_regular_no_follow(path) or not path_identity_same(identity, path_final_existing(path)?): return Err("SCVDB_GIT_BLOB_CLEANUP_SCOPE")
+    if not file_delete(path) or path_entry_present(path)?: return Err("SCVDB_GIT_BLOB_CLEANUP")
+    Ok(true)
+
+fn db_git_blob_read_owned(scratch: text, oid: text, max_bytes: u64) -> Result<DbGitBlobRead, text>:
+    _blob_limit(max_bytes)?
+    _blob_oid(oid)?
+    val scope = _blob_guard(scratch)?
+    val format = _blob_line(_blob_run(scratch, ["rev-parse", "--show-object-format"])?)?
+    if (format != "sha1" and format != "sha256") or (format == "sha1" and oid.len() != 40) or (format == "sha256" and oid.len() != 64): return Err("SCVDB_GIT_BLOB_OID")
+    if _blob_line(_blob_run(scratch, ["cat-file", "-t", oid])?)? != "blob": return Err("SCVDB_GIT_BLOB_TYPE")
+    val size = _blob_size(_blob_run(scratch, ["cat-file", "-s", oid])?, max_bytes)?
+    # Size/type are established before Git materializes any file. unpack-file
+    # uses Git's exclusive temporary creation, returns a name, and applies no
+    # checkout filters. No binary payload crosses the process text boundary.
+    val leaf = db_git_blob_unpack_leaf(_blob_run(scratch, ["unpack-file", oid])?)?
+    val path = scratch + "/" + leaf
+    if not file_is_regular_no_follow(path): return Err("SCVDB_GIT_BLOB_SCOPE")
+    val identity = path_final_existing(path)?
+    if identity.path != path or not path_identity_contains(scope, identity): return Err("SCVDB_GIT_BLOB_SCOPE")
+    val read = _blob_read_file(scratch, scope, path, size)
+    _blob_remove(scratch, scope, path, identity)?
+    match read:
+        Ok(bytes): Ok(DbGitBlobRead(oid: oid, size: size, bytes: bytes))
+        Err(reason): Err(reason)
+
+fn _blob_put_file(scratch: text, scope: HostFinalPath, stage: text, bytes: [u8], max_bytes: u64) -> Result<DbGitBlobRead, text>:
+    val path = stage + "/source"
+    if not file_create_exclusive(path, ""): return Err("SCVDB_GIT_BLOB_SOURCE_CREATE")
+    val identity = path_final_existing(path)?
+    if not file_is_regular_no_follow(path) or identity.path != path or not path_identity_contains(scope, identity): return Err("SCVDB_GIT_BLOB_SCOPE")
+    if not file_write_bytes(path, bytes): return Err("SCVDB_GIT_BLOB_SOURCE_WRITE")
+    if _blob_read_file(scratch, scope, path, bytes.len() as u64)? != bytes: return Err("SCVDB_GIT_BLOB_SOURCE_CHANGED")
+    val oid = _blob_line(_blob_run(scratch, ["hash-object", "-w", "--no-filters", "--", path])?)?
+    val actual = db_git_blob_read_owned(scratch, oid, max_bytes)?
+    if actual.bytes != bytes: return Err("SCVDB_GIT_BLOB_CONTENT")
+    Ok(actual)
+
+fn db_git_blob_put_owned(scratch: text, bytes: [u8], max_bytes: u64) -> Result<DbGitBlobRead, text>:
+    _blob_limit(max_bytes)?
+    if bytes.len() as u64 > max_bytes: return Err("SCVDB_GIT_BLOB_QUOTA")
+    val scope = _blob_guard(scratch)?
+    val stage = secure_temp_dir(scratch, "scv-blob-source-")?
+    val identity = path_final_existing(stage)?
+    if not dir_is_real_no_follow(stage) or identity.path != stage or not path_identity_contains(scope, identity): return Err("SCVDB_GIT_BLOB_SCOPE")
+    val result = _blob_put_file(scratch, scope, stage, bytes, max_bytes)
+    db_git_candidate_require_owned_scratch(scratch)?
+    if not path_identity_same(scope, path_final_existing(scratch)?) or not dir_is_real_no_follow(stage) or not path_identity_same(identity, path_final_existing(stage)?): return Err("SCVDB_GIT_BLOB_CLEANUP_SCOPE")
+    if not dir_remove_all(stage) or path_entry_present(stage)?: return Err("SCVDB_GIT_BLOB_CLEANUP")
+    result
+
+export DbGitBlobRead, db_git_blob_read_owned, db_git_blob_put_owned, db_git_blob_unpack_leaf

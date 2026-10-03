@@ -1,0 +1,178 @@
+use std.spec.*
+use app.io.mod.{dir_create, file_write_bytes, file_write}
+use app.scv.db.settlement_queue.*
+use app.scv.db.settlement_queue_codec.*
+use app.scv.db.settlement_resume_local.*
+use app.scv.db.settlement_paged_owner.*
+use app.scv.db.settlement_paged_projection.*
+use app.scv.db.checkpoint_store.*
+use app.scv.db.checkpoint_objects.*
+use app.scv.db.local_store.{db_store_read}
+use std.scv.db_checkpoint.*
+use std.scv.db_checkpoint_history.*
+use std.scv.db_pages.*
+use std.scv.db_paged_model.*
+use std.scv.db_patch.*
+use std.scv.db_admission.{db_patch_signing_bytes}
+use std.scv.db_reducer.{FieldMergeRule}
+use std.scv.db_receipt.*
+use std.scv.sj_capsule.{scv_sj_lease_acquire, scv_sj_lease_release}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+use std.scv.db_snapshot.{db_snapshot_unhex}
+use test.fixtures.scv.db_paged_settlement_fixture.*
+use test.fixtures.scv.db_paged_fixture.*
+use test.fixtures.scv.db_settlement_queue_fixture.{setup_item2_queue_sign, check_item2_queue_git}
+
+fn setup_item2_paged_corrupt_blob(fixture: Item2PagedSettlementFixture, previous: DbSettlementReceipt, path: text, content: text) -> DbSettlementReceipt:
+    # Deliberately malformed signed authority fixture, using actual Git bytes.
+    # This helper is not a production mutation or publication capability.
+    val remote = fixture.config.authority.remote
+    val payload = fixture.root + "/malformed-blob"
+    expect(file_write(payload, content)).to_equal(true)
+    val blob = check_item2_queue_git(remote, ["hash-object", "-w", "--no-filters", "--", payload])
+    check_item2_queue_git(remote, ["read-tree", previous.accepted_head])
+    check_item2_queue_git(remote, ["update-index", "--add", "--cacheinfo", "100644,{blob},{path}"])
+    val tree = check_item2_queue_git(remote, ["write-tree"])
+    val head = check_item2_queue_git(remote, ["commit-tree", tree, "-p", previous.accepted_head, "-m", "deliberately invalid signed tree"])
+    check_item2_queue_git(remote, ["update-ref", "refs/heads/settled", head, previous.accepted_head])
+    var receipt = previous
+    receipt.previous_receipt = db_receipt_digest(previous).unwrap()
+    receipt.previous_head = previous.accepted_head
+    receipt.accepted_head = head
+    receipt.accepted_tree = tree
+    setup_item2_queue_sign(receipt).unwrap()
+
+fn setup_item2_paged_settlement_checkpoint(fixture: Item2PagedSettlementFixture) -> (DbDatabaseCheckpoint, DbCheckpointAuthority, DbCheckpointPageSource):
+    val policy = fixture.config.policy
+    val manifest = db_paged_genesis(policy).unwrap()
+    val history = db_checkpoint_metadata_encode(DbCheckpointMetadata.History(manifest.revision, 1u64, [], [], manifest.revision)).unwrap()
+    val build = db_pages_build([history], policy.quota).unwrap()
+    val external = fixture.root + "/checkpoint-source"
+    expect(dir_create(external + "/scv-checkpoint-pages-v1", true)).to_equal(true)
+    for page in build.pages:
+        expect(file_write_bytes(external + "/scv-checkpoint-pages-v1/" + page.digest + ".page", db_page_encode(page, policy.quota).unwrap())).to_equal(true)
+    val admission = policy.config.admission
+    var checkpoint = DbDatabaseCheckpoint(revision: "", repository: admission.repository, namespace: admission.namespace, epoch: admission.epoch, schema_revision: admission.schema_revision, reducer_revision: admission.reducer_revision, policy_revision: policy.config.revision, predecessor_checkpoint: "", history_horizon: manifest.revision, current_revision: manifest.revision, metadata: build.manifest, storage: DbCheckpointStorage.Paged(manifest), signer: "checkpoint-authority", signature: [])
+    checkpoint.revision = db_checkpoint_digest(checkpoint).unwrap()
+    val (seed, key) = pure_ed25519_keypair_from_seed([61u8;32])
+    checkpoint.signature = pure_ed25519_sign(seed, key, db_checkpoint_signing_bytes(checkpoint).unwrap())
+    val authority = DbCheckpointAuthority(expected_checkpoint: checkpoint.revision, key_id: checkpoint.signer, public_key: key, policy: policy.config, paged_policy: Some(policy))
+    (checkpoint, authority, DbCheckpointPageSource(external_parent: external, maximum_pages: 65536u64, maximum_bytes: 67108864u64))
+
+describe "paged settlement checkpoint and authority boundaries":
+    it "requires an actual bare repository even when a working repository has a signed settled ref":
+        val fixture = setup_item2_paged_settlement_fixture()
+        var authority = fixture.config.authority
+        authority.remote = fixture.source
+        var receipt = fixture.config.bootstrap_receipt
+        receipt.remote = fixture.source
+        receipt = setup_item2_queue_sign(receipt).unwrap()
+        check_item2_queue_git(fixture.source, ["update-ref", "refs/heads/settled", receipt.accepted_head])
+        expect(db_settlement_paged_readback_local(fixture.source, fixture.config.scratch_parent, receipt, authority, fixture.config.policy)).to_equal(Err("SCVDB_SETTLEMENT_LOCAL_REMOTE_REQUIRED"))
+        check_item2_paged_settlement_cleanup(fixture)
+
+    it "rejects a signed extra empty Git subtree that a leaf-only listing would hide":
+        val fixture = setup_item2_paged_settlement_fixture()
+        val previous = fixture.config.bootstrap_receipt
+        val remote = fixture.config.authority.remote
+        check_item2_queue_git(remote, ["read-tree", "--empty"])
+        val empty = check_item2_queue_git(remote, ["write-tree"])
+        val scv = check_item2_queue_git(remote, ["rev-parse", previous.accepted_head + ":scv"])
+        val raw = base_encoding_text_to_bytes("40000 extra\0") + db_snapshot_unhex(empty).unwrap() + base_encoding_text_to_bytes("40000 scv\0") + db_snapshot_unhex(scv).unwrap()
+        val path = fixture.root + "/extra-tree"
+        expect(file_write_bytes(path, raw)).to_equal(true)
+        val tree = check_item2_queue_git(remote, ["hash-object", "-t", "tree", "-w", "--no-filters", "--", path])
+        val head = check_item2_queue_git(remote, ["commit-tree", tree, "-p", previous.accepted_head, "-m", "extra empty subtree"])
+        check_item2_queue_git(remote, ["update-ref", "refs/heads/settled", head, previous.accepted_head])
+        var receipt = previous
+        receipt.previous_head = previous.accepted_head
+        receipt.previous_receipt = db_receipt_digest(previous).unwrap()
+        receipt.accepted_head = head
+        receipt.accepted_tree = tree
+        receipt = setup_item2_queue_sign(receipt).unwrap()
+        expect(db_settlement_paged_readback_local(fixture.source, fixture.config.scratch_parent, receipt, fixture.config.authority, fixture.config.policy)).to_equal(Err("SCVDB_PAGED_GIT_INVENTORY"))
+        check_item2_paged_settlement_cleanup(fixture)
+
+    it "does not let a warm validated-root cache hide changed Git page or high-water bytes":
+        for corrupt_page in [false,true]:
+            val fixture = setup_item2_paged_settlement_fixture()
+            val pending = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.config.admission).unwrap()
+            val complete = check_item2_paged_settlement_complete(fixture, pending)
+            val journal = complete.queue.items[0].paged_journal.unwrap()
+            val projection = db_settlement_paged_journal_readback(fixture.source, fixture.config.scratch_parent, journal, fixture.config.authority, fixture.config.policy).unwrap()
+            val bucket = projection.manifest.pages.entries[0].bucket
+            val path = if corrupt_page: "scv/paged/buckets/{bucket}.scvp" else: "scv/paged/high-water"
+            val malformed = setup_item2_paged_corrupt_blob(fixture, journal.receipt, path, "corrupt actual bytes\n")
+            expect(db_settlement_paged_readback_local(fixture.source, fixture.config.scratch_parent, malformed, fixture.config.authority, fixture.config.policy).is_err()).to_equal(true)
+            expect(db_settlement_queue_open(fixture.source, fixture.config.policy.config.admission).unwrap()).to_equal(complete)
+            check_item2_paged_settlement_cleanup(fixture)
+
+    it "blocks signed checkpoint installation while a real paged candidate is prepared":
+        val fixture = setup_item2_paged_settlement_fixture()
+        val pending = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.config.admission).unwrap()
+        val prepared = db_settlement_resume_paged_local(fixture.source, pending.head, fixture.config, setup_item2_queue_sign).unwrap()
+        val (checkpoint, authority, source) = setup_item2_paged_settlement_checkpoint(fixture)
+        expect(db_checkpoint_prepare_install(fixture.source, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source)).to_equal(Err("SCVDB_CHECKPOINT_SETTLEMENT_IN_FLIGHT"))
+        expect(db_settlement_queue_open(fixture.source, fixture.config.policy.config.admission).unwrap()).to_equal(prepared.view)
+        expect(db_store_read(fixture.source, "checkpoint-install").code).to_equal("empty")
+        expect(db_store_read(fixture.source, "paged").code).to_equal("empty")
+        check_item2_paged_settlement_cleanup(fixture)
+
+    it "preserves original queued v2 bytes across an actual signed checkpoint install":
+        val fixture = setup_item2_paged_settlement_fixture()
+        val pending = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.config.admission).unwrap()
+        val original = db_store_read(fixture.source, "settlement-work")
+        val (checkpoint, authority, source) = setup_item2_paged_settlement_checkpoint(fixture)
+        val prepared = db_checkpoint_prepare_install(fixture.source, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source).unwrap()
+        expect(prepared.pending_results).to_equal(["RebaseReady"])
+        val installed = db_checkpoint_resume_install(fixture.source, prepared.journal_head, authority).unwrap()
+        expect(installed.phase).to_equal("Installed")
+        expect(db_store_read(fixture.source, "settlement-work")).to_equal(original)
+        expect(db_settlement_queue_open(fixture.source, fixture.config.policy.config.admission).unwrap()).to_equal(pending)
+        check_item2_paged_settlement_cleanup(fixture)
+
+    it "requires explicit backend pins and structural migration while allowing credential rotation":
+        val fixture = setup_item2_paged_settlement_fixture()
+        val pending = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.config.admission).unwrap()
+        val first = check_item2_paged_settlement_complete(fixture, pending)
+        var rotated = fixture
+        rotated.config.policy.config.admission.keys[0].revoked = true
+        rotated.config.policy = setup_item2_paged_repin(rotated.config.policy)
+        val next = db_settlement_enqueue(fixture.source, first.head, fixture.patches[1], rotated.config.policy.config.admission).unwrap()
+        val second = check_item2_paged_settlement_complete(rotated, next)
+        expect(second.queue.items[1].phase).to_equal("local-index-observed")
+        var changed = rotated.config.policy
+        changed.config.merge.fields[0].rule = FieldMergeRule.OrderedListConflict
+        changed = setup_item2_paged_repin(changed)
+        val journal = second.queue.items[1].paged_journal.unwrap()
+        expect(db_settlement_paged_journal_readback(fixture.source, fixture.config.scratch_parent, journal, fixture.config.authority, changed)).to_equal(Err("SCVDB_PAGED_MIGRATION_REQUIRED"))
+        val legacy = DbSettlementLocalConfig(scratch_parent: fixture.config.scratch_parent, authority: fixture.config.authority, policy: fixture.config.policy.config, bootstrap_receipt: fixture.config.bootstrap_receipt)
+        expect(db_settlement_resume_local(fixture.source, second.head, legacy, setup_item2_queue_sign)).to_equal(Err("SCVDB_PAGED_MIGRATION_REQUIRED"))
+        check_item2_paged_settlement_cleanup(fixture)
+
+    it "selects a reverse-arrival predecessor without rewriting either signed patch":
+        val fixture = setup_item2_paged_settlement_fixture()
+        var dependent = fixture.patches[1]
+        dependent.causal_dependencies = [fixture.patches[0].batch_id]
+        dependent = db_patch_seal(dependent).unwrap()
+        val (seed, key) = pure_ed25519_keypair_from_seed([46u8;32])
+        dependent.signature = pure_ed25519_sign(seed, key, db_patch_signing_bytes(dependent).unwrap())
+        val child = db_settlement_enqueue(fixture.source, "", dependent, fixture.config.policy.config.admission).unwrap()
+        val both = db_settlement_enqueue(fixture.source, child.head, fixture.patches[0], fixture.config.policy.config.admission).unwrap()
+        val first = check_item2_paged_settlement_complete(fixture, both)
+        expect(first.queue.items[1].phase).to_equal("local-index-observed")
+        expect(first.queue.items[0].phase).to_equal("queued")
+        val second = check_item2_paged_settlement_complete(fixture, first)
+        expect(second.queue.items[0].patch).to_equal(dependent)
+        expect(second.queue.items[1].patch).to_equal(fixture.patches[0])
+        check_item2_paged_settlement_cleanup(fixture)
+
+    it "refuses process work while an actual SJ lease is held":
+        val fixture = setup_item2_paged_settlement_fixture()
+        val pending = db_settlement_enqueue(fixture.source, "", fixture.patches[0], fixture.config.policy.config.admission).unwrap()
+        expect(scv_sj_lease_acquire(fixture.source, "paged-settlement-boundary").starts_with("ok:")).to_equal(true)
+        expect(db_settlement_resume_paged_local(fixture.source, pending.head, fixture.config, setup_item2_queue_sign)).to_equal(Err("SCVDB_SETTLEMENT_NETWORK_UNDER_LEASE"))
+        expect(scv_sj_lease_release(fixture.source, "paged-settlement-boundary").starts_with("ok:")).to_equal(true)
+        expect(db_settlement_queue_open(fixture.source, fixture.config.policy.config.admission).unwrap()).to_equal(pending)
+        check_item2_paged_settlement_cleanup(fixture)

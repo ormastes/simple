@@ -1,0 +1,58 @@
+# Actual local Git fixtures; no configured remote or protected-authority claim.
+use std.spec.*
+use app.io.mod.{cwd, dir_create, dir_remove_all, process_run_bounded, file_write}
+use app.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_entry_present}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk_native}
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+use app.scv.db.git_candidate.*
+
+struct Item2GitBlobFixture:
+    root: text
+    candidate: DbGitPreparedCandidate
+
+fn check_item2_blob_git(root: text, args: [text]) -> text:
+    val prefix = ["--no-replace-objects", "-C", root, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.name=SCV Test", "-c", "user.email=scv-test@invalid"]
+    val (output, _error, code) = process_run_bounded("git", prefix + args, 30000, 65536)
+    expect(code).to_equal(0)
+    output.trim()
+
+fn setup_item2_blob_fixture(format: text) -> Item2GitBlobFixture:
+    val allocated = secure_temp_dir_raw(path_final_existing(cwd()).unwrap().path, "scv-blob-spec-")
+    expect(allocated.len()).to_be_greater_than(0)
+    val root = path_final_existing(allocated).unwrap().path
+    val source = root + "/source"
+    val remote = root + "/authority.git"
+    val parent = root + "/scratch"
+    for path in [source, remote, parent]: expect(dir_create(path, true)).to_equal(true)
+    check_item2_blob_git(root, ["init", "--bare", "--template=", "--object-format={format}", remote])
+    check_item2_blob_git(root, ["init", "--template=", "--object-format={format}", source])
+    expect(file_write(source + "/genesis", "binary object fixture\n")).to_equal(true)
+    check_item2_blob_git(source, ["add", "--", "genesis"])
+    check_item2_blob_git(source, ["commit", "-m", "genesis"])
+    val head = check_item2_blob_git(source, ["rev-parse", "HEAD"])
+    check_item2_blob_git(source, ["push", "--no-force", remote, "HEAD:refs/heads/settled"])
+    val files = [DbGitCandidateFile(path: "state/value", content: "candidate\n")]
+    val request = DbGitCandidateRequest(source_root: source, remote: remote, scratch_parent: parent, expected_head: head, object_format: format, files: files, message: "binary fixture")
+    val candidate = db_git_candidate_prepare(request, \: scv_sj_lease_is_held(source)).unwrap()
+    Item2GitBlobFixture(root: root, candidate: candidate)
+
+fn check_item2_blob_no_temporary_files(fixture: Item2GitBlobFixture):
+    # Native enumeration includes hidden files. A required owner marker keeps a
+    # collapsed enumeration failure from being accepted as an empty directory.
+    val paths = dir_walk_native(fixture.candidate.scratch)
+    var saw_owner = false
+    for path in paths:
+        if path.ends_with(".scv-candidate-owner"): saw_owner = true
+        expect(path.contains(".merge_file_")).to_equal(false)
+        expect(path.contains("scv-blob-source-")).to_equal(false)
+    expect(saw_owner).to_equal(true)
+
+fn check_item2_blob_cleanup(fixture: Item2GitBlobFixture):
+    expect(db_git_candidate_cleanup(fixture.candidate)).to_equal(Ok(true))
+    expect(path_entry_present(fixture.candidate.scratch)).to_equal(Ok(false))
+    expect(path_final_existing(fixture.root).unwrap().path).to_equal(fixture.root)
+    expect(fixture.root.starts_with(path_final_existing(cwd()).unwrap().path + "/scv-blob-spec-")).to_equal(true)
+    expect(dir_remove_all(fixture.root)).to_equal(true)
+
+export Item2GitBlobFixture, setup_item2_blob_fixture, check_item2_blob_git, check_item2_blob_no_temporary_files, check_item2_blob_cleanup

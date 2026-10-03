@@ -12,52 +12,7 @@ use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace}
 use std.nogc_sync_mut.io.path_identity.{path_final_existing}
 use test.fixtures.scv.db_filesystem_fixture.{setup_item2_filesystem_link}
 
-fn setup_item2_hydration_paths() -> (text,text,text):
-    val base = secure_temp_dir(path_final_existing(cwd()).unwrap().path, "item2-hydration-").unwrap()
-    val source = "{base}/source"
-    val parent = "{base}/external"
-    val target = "{base}/target"
-    for path in [source,parent,target]: expect(dir_create(path,false)).to_be(true)
-    val (_out,_err,code) = process_run_bounded("git", ["init","--quiet",source],30000,4096)
-    expect(code).to_equal(0)
-    (source,parent,target)
-
-fn setup_item2_hydration_quota() -> DbEvidenceStoreQuota:
-    DbEvidenceStoreQuota(max_content_bytes: 134217728,max_envelope_bytes: 134238208,max_dependencies: 256)
-
-fn setup_item2_hydration_node(root: text,parent: text,content: [u8],dependencies: [text] = []) -> DbEvidenceNode:
-    val node = DbEvidenceNode(digest: db_evidence_digest(content,dependencies).unwrap(),content: content,availability: "available",created_day: 0,dependencies: dependencies)
-    db_evidence_store_put(root,parent,node,setup_item2_hydration_quota()).unwrap()
-
-fn setup_item2_hydration_big(parent: text) -> text:
-    val store = "{parent}/scv-evidence-v1"
-    expect(dir_create(store,false)).to_be(true)
-    val file = retained_file_open("{store}/fixture",134217728u64,true).unwrap()
-    # SCVE1, zero dependencies, 104857600 (100MiB) content bytes.
-    retained_file_write(file,[83u8,67u8,86u8,69u8,1u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,0u8,6u8,64u8,0u8,0u8]).unwrap()
-    val stream = db_evidence_stream_start(104857600u64).unwrap()
-    val chunk = [37u8;1048576]
-    for ordinal in 0..100:
-        retained_file_write(file,chunk).unwrap()
-        expect(sha256_stream_v1_update(stream,chunk)).to_be(true)
-    expect(retained_file_sync(file)).to_be(true)
-    expect(retained_file_close(file)).to_be(true)
-    val digest = db_evidence_stream_finish(stream,[]).unwrap()
-    expect(file_publish_noreplace("{store}/fixture","{store}/{digest}.scve").unwrap()).to_be(true)
-    digest
-
-fn check_item2_hydration_big(path: text):
-    val file = retained_file_open(path,104857600u64).unwrap()
-    expect(file.size).to_equal(104857600u64)
-    var count = 0
-    while true:
-        val chunk = retained_file_read(file,1048576).unwrap()
-        if chunk.len() == 0: break
-        expect(chunk).to_equal([37u8;1048576])
-        count = count + 1
-    expect(count).to_equal(100)
-    expect(retained_file_unchanged(file).unwrap()).to_be(true)
-    expect(retained_file_close(file)).to_be(true)
+use test.fixtures.scv.db_hydration_fixture.*
 
 describe "Verified bounded evidence hydration":
     it "creates a retained output with metadata-query rights and exact binary readback":

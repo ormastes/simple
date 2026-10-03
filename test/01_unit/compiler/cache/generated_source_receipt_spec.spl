@@ -1,0 +1,98 @@
+# @req PSI-REQ-002 PSI-REQ-004 PSI-REQ-005
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory_core.{compile_source_inventory_digest_v1}
+use compiler.driver.cache.generated_source_receipt.{
+    GeneratedSourceFileV1, generated_source_declaration_digest_v1,
+    generated_source_receipt_admit_v1, generated_source_receipt_encode_v1,
+    generated_source_identity_digest_v1
+}
+use app.test.package_index_acceptance_generated.{
+    package_index_generated_inventory_v1, package_index_generated_declaration_v1,
+    package_index_generated_receipt_v1
+}
+use app.test.package_index_acceptance_metadata.{
+    package_index_acceptance_smf_v1, package_index_acceptance_metadata_header_v1
+}
+use compiler.driver.cache.package_tldr_metadata.{package_tldr_early_cutoff_v1}
+
+describe "generated source frozen receipt admission":
+    it "binds a real receipt digest into metadata invalidation":
+        step("Change a generated source input")
+        val declaration = package_index_generated_declaration_v1()
+        val inventory = package_index_generated_inventory_v1("input", "output")
+        val receipt = package_index_generated_receipt_v1(declaration, inventory, "input", "output")
+        val before = generated_source_receipt_admit_v1(declaration, receipt, inventory,
+            declaration.producer_digest, compile_source_inventory_digest_v1(inventory), "src/generated_api.spl")
+        expect(before.is_ok()).to_equal(true)
+        expect(before.unwrap()).to_equal(generated_source_identity_digest_v1(receipt))
+        val next_inventory = package_index_generated_inventory_v1("new input", "new output")
+        val next_receipt = package_index_generated_receipt_v1(declaration, next_inventory, "new input", "new output")
+        val after = generated_source_receipt_admit_v1(declaration, next_receipt, next_inventory,
+            declaration.producer_digest, compile_source_inventory_digest_v1(next_inventory), "src/generated_api.spl")
+        expect(after.is_ok()).to_equal(true)
+        expect(before.unwrap() == after.unwrap()).to_equal(false)
+        val smf = package_index_acceptance_smf_v1().unwrap()
+        var old_header = package_index_acceptance_metadata_header_v1(smf)
+        old_header.generated_source_digest = before.unwrap()
+        var next_header = old_header
+        next_header.generated_source_digest = after.unwrap()
+        expect(package_tldr_early_cutoff_v1(old_header, next_header)).to_equal(false)
+
+    it "retains generated identity across unrelated inventory epochs":
+        val declaration = package_index_generated_declaration_v1()
+        var inventory = package_index_generated_inventory_v1("input", "output")
+        val first_receipt = package_index_generated_receipt_v1(declaration, inventory, "input", "output")
+        val first = generated_source_receipt_admit_v1(declaration, first_receipt, inventory,
+            declaration.producer_digest, compile_source_inventory_digest_v1(inventory), "src/generated_api.spl")
+        inventory.generation = inventory.generation + 1
+        val later_receipt = package_index_generated_receipt_v1(declaration, inventory, "input", "output")
+        val later = generated_source_receipt_admit_v1(declaration, later_receipt, inventory,
+            declaration.producer_digest, compile_source_inventory_digest_v1(inventory), "src/generated_api.spl")
+        expect(first.is_ok()).to_equal(true)
+        expect(later.is_ok()).to_equal(true)
+        expect(first_receipt.inventory_digest == later_receipt.inventory_digest).to_equal(false)
+        expect(first.unwrap()).to_equal(later.unwrap())
+
+    it "rejects undeclared and missing generated outputs":
+        val declaration = package_index_generated_declaration_v1()
+        val inventory = package_index_generated_inventory_v1("input", "output")
+        val digest = compile_source_inventory_digest_v1(inventory)
+        var receipt = package_index_generated_receipt_v1(declaration, inventory, "input", "output")
+        receipt.outputs.push(GeneratedSourceFileV1("src/undeclared.spl", sha256_text("extra")))
+        expect(generated_source_receipt_admit_v1(declaration, receipt, inventory,
+            declaration.producer_digest, digest, "src/generated_api.spl").unwrap_err()).to_equal("generated-output-undeclared")
+        receipt.outputs = []
+        expect(generated_source_receipt_admit_v1(declaration, receipt, inventory,
+            declaration.producer_digest, digest, "src/generated_api.spl").unwrap_err()).to_equal("generated-output-missing")
+
+    it "checks input and output digests against independent frozen inventory":
+        val declaration = package_index_generated_declaration_v1()
+        val inventory = package_index_generated_inventory_v1("input", "output")
+        val digest = compile_source_inventory_digest_v1(inventory)
+        var receipt = package_index_generated_receipt_v1(declaration, inventory, "forged input", "output")
+        expect(generated_source_receipt_admit_v1(declaration, receipt, inventory,
+            declaration.producer_digest, digest, "src/generated_api.spl").unwrap_err()).to_equal("generated-input-digest-mismatch")
+        receipt = package_index_generated_receipt_v1(declaration, inventory, "input", "forged output")
+        expect(generated_source_receipt_admit_v1(declaration, receipt, inventory,
+            declaration.producer_digest, digest, "src/generated_api.spl").unwrap_err()).to_equal("generated-output-digest-mismatch")
+        receipt = package_index_generated_receipt_v1(declaration, inventory, "input", "output")
+        receipt.inventory_digest = sha256_text("forged inventory")
+        expect(generated_source_receipt_admit_v1(declaration, receipt, inventory,
+            declaration.producer_digest, digest, "src/generated_api.spl").unwrap_err()).to_equal("generated-inventory-mismatch")
+
+    it "rejects another producer, path traversal and duplicate rows":
+        var declaration = package_index_generated_declaration_v1()
+        val inventory = package_index_generated_inventory_v1("input", "output")
+        val digest = compile_source_inventory_digest_v1(inventory)
+        var receipt = package_index_generated_receipt_v1(declaration, inventory, "input", "output")
+        expect(generated_source_receipt_admit_v1(declaration, receipt, inventory,
+            sha256_text("other producer"), digest, "src/generated_api.spl").unwrap_err()).to_equal("generated-producer-mismatch")
+        receipt.outputs.push(receipt.outputs[0])
+        expect(generated_source_receipt_encode_v1(receipt)).to_equal("")
+        declaration.output_paths = ["../escape.spl"]
+        expect(generated_source_declaration_digest_v1(declaration)).to_equal("")
+        declaration.output_paths = ["C:/escape.spl"]
+        expect(generated_source_declaration_digest_v1(declaration)).to_equal("")
+        declaration.output_paths = ["src/./escape.spl"]
+        expect(generated_source_declaration_digest_v1(declaration)).to_equal("")

@@ -3649,11 +3649,10 @@ impl MirLowering:
                 # (the resolver requires a symbol-bearing HIR type) so they always
                 # reach this Unresolved arm, typed or not.
                 #
-                # Only a non-capturing INLINE lambda literal argument is handled:
-                # lower_lambda_value returns Some(fnptr operand) for a liftable
-                # `Lambda` node and nil for anything else (a capturing lambda, a
-                # lambda stored in a variable and passed by name, or a non-lambda
-                # arg) -- nil falls straight through to the existing loud
+                # Inline lambda literals may lower to a raw function pointer or
+                # a closure handle with captures. Filter preserves the producer's
+                # environment-first convention; named/non-lambda unsupported
+                # arguments still fall through to the existing loud
                 # "unresolved method call" failure below, never silently
                 # mis-lowering. Guarded on `local_is_runtime_array` so a
                 # same-named method on some other Unresolved-typed receiver
@@ -4608,6 +4607,39 @@ impl MirLowering:
         """
         val loop_ty = MirType.i64()
 
+        # lower_lambda_value has already constructed the capture environment at
+        # the original callback-evaluation point. Never inline that environment
+        # as live outer variables or invoke its handle as a raw function address.
+        # Its two output forms are Const(FuncPtr) for noncapturing lambdas and
+        # Copy(handle) for capturing lambdas; both producers use the word ABI.
+        var filter_target = lam_op
+        var filter_environment: MirOperand? = nil
+        match lam_op.kind:
+            case MirOperandKind.Copy(_):
+                var target_builder = self.builder
+                val target_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_closure_func_ptr"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                val target = target_builder.emit_call(target_fn, [lam_op], MirType.i64())
+                filter_target = mir_operand_copy(target.unwrap())
+                filter_environment = Some(lam_op)
+                # Allocation/lookup failure must not turn into call address 0.
+                val zero_target = target_builder.emit_const_int(0)
+                val valid_target = target_builder.emit_binop(MirBinOp.Ne,
+                    filter_target, mir_operand_copy(zero_target), MirType.bool())
+                val ready_block = target_builder.new_block(Some("filter_target_ready"))
+                val failed_block = target_builder.new_block(Some("filter_target_missing"))
+                target_builder.terminate_if(mir_operand_copy(valid_target), ready_block, failed_block)
+                target_builder.switch_to_block(failed_block)
+                # Abort owns backend-specific panic ABI (LLVM pointer+length,
+                # C panic, Cranelift trap); do not guess a runtime signature.
+                target_builder.terminate_abort("array filter closure target is unavailable")
+                target_builder.switch_to_block(ready_block)
+                self.builder = target_builder
+            case _: ()
+
         var b_len = self.builder
         val len_call = b_len.emit_call(self.rt_array_len_operand(), [mir_operand_copy(arr)], MirType.i64())
         val len_local = len_call ?? b_len.new_temp(MirType.i64())
@@ -4660,7 +4692,11 @@ impl MirLowering:
         val elem_raw = self.decode_runtime_value(elem_tagged, MirType.i64())
 
         var b_call = self.builder
-        val call_result = b_call.emit_call(lam_op, [mir_operand_copy(elem_raw)], MirType.i64())
+        val call_result = if val environment = filter_environment:
+            b_call.emit_call_indirect(filter_target, [environment, mir_operand_copy(elem_raw)],
+                MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false), MirType.i64())
+        else:
+            b_call.emit_call(filter_target, [mir_operand_copy(elem_raw)], MirType.i64())
         val pred_raw = call_result ?? b_call.new_temp(MirType.i64())
         val zero_pred = b_call.emit_const_int(0)
         val keep = b_call.emit_binop(MirBinOp.Ne, mir_operand_copy(pred_raw), mir_operand_copy(zero_pred), MirType.bool())

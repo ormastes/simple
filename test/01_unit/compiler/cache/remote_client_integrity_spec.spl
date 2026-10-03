@@ -1,0 +1,197 @@
+# @req PSI-REQ-004
+# @evidence-display: links
+use std.spec.{describe, it, expect, step}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.cache.remote.remote_policy.{ProducerClass}
+use compiler.driver.cache.remote.remote_client.{
+    RemoteLookupRequest, RemoteActionMapping, RemoteResultManifest, RemoteArtifact,
+    RemoteTransport, RemoteLookupResult, remote_lookup_verified,
+    remote_result_manifest_encode_v1, remote_result_manifest_digest_v1,
+    remote_artifact_size_admissible_v1, REMOTE_ARTIFACT_MAX_BYTES_V1,
+    REMOTE_CLOSURE_MAX_BYTES_V1, REMOTE_MANIFEST_MAX_REFERENCES_V1,
+    REMOTE_MANIFEST_MAX_BYTES_V1
+}
+
+# Deliberately untrusted scripted transport: requested identities do not control
+# its responses, and recompute_digest lies. Admission must authenticate locally.
+struct RemoteIntegrityTransport:
+    mapping: RemoteActionMapping?
+    manifest: RemoteResultManifest?
+    artifact: RemoteArtifact?
+    forged_hash: text
+
+impl RemoteTransport for RemoteIntegrityTransport:
+    fn fetch_action_mapping(request: RemoteLookupRequest) -> RemoteActionMapping?:
+        self.mapping
+    fn fetch_result_manifest(digest: text) -> RemoteResultManifest?:
+        self.manifest
+    fn fetch_artifact(digest: text) -> RemoteArtifact?:
+        self.artifact
+    fn recompute_digest(content: text) -> text:
+        self.forged_hash
+
+fn remote_integrity_request() -> RemoteLookupRequest:
+    RemoteLookupRequest("remote/example/main", sha256_text("action"), 1)
+
+fn remote_integrity_manifest() -> RemoteResultManifest:
+    var manifest = RemoteResultManifest(
+        "", sha256_text("action"), [sha256_text("artifact")],
+        "opaque dependency bytes: 3:a:b", [sha256_text("aop")], Some(sha256_text("block")))
+    manifest.digest = remote_result_manifest_digest_v1(manifest)
+    manifest
+
+fn remote_integrity_transport(manifest: RemoteResultManifest) -> RemoteIntegrityTransport:
+    RemoteIntegrityTransport(
+        Some(RemoteActionMapping("remote/example/main", sha256_text("action"), 1,
+            manifest.digest, nil)), Some(manifest),
+        Some(RemoteArtifact(sha256_text("artifact"), "artifact")), "not-a-real-hash")
+
+fn remote_integrity_result(transport: RemoteIntegrityTransport) -> RemoteLookupResult:
+    remote_lookup_verified(transport, remote_integrity_request(), ProducerClass.CleanDeveloperBranch)
+
+fn remote_integrity_status(result: RemoteLookupResult) -> text:
+    match result:
+        case RemoteLookupResult.Verified(manifest, artifacts): "verified"
+        case RemoteLookupResult.Miss: "miss"
+        case RemoteLookupResult.RejectedPolicyDenied: "policy"
+        case RemoteLookupResult.RejectedActionDigestMismatch: "action"
+        case RemoteLookupResult.RejectedSchemaVersionMismatch: "schema"
+        case RemoteLookupResult.RejectedManifestDigestMismatch: "manifest-digest"
+        case RemoteLookupResult.RejectedManifestActionMismatch: "manifest-action"
+        case RemoteLookupResult.RejectedArtifactDigestMismatch(digest): "artifact:" + digest
+
+describe "remote cache locally owned content authentication":
+    it "admits authentic bytes without consulting a transport hash":
+        step("Authenticate remote manifest and payload with local SHA256")
+        val result = remote_integrity_result(remote_integrity_transport(remote_integrity_manifest()))
+        match result:
+            case RemoteLookupResult.Verified(manifest, artifacts):
+                expect(manifest.dependency_manifest).to_equal("opaque dependency bytes: 3:a:b")
+                expect(artifacts.len()).to_equal(1)
+                expect(artifacts[0].bytes).to_equal("artifact")
+            case _:
+                expect(remote_integrity_status(result)).to_equal("verified")
+
+    it "binds every manifest field and excludes only its own digest":
+        val original = remote_integrity_manifest()
+        val digest = remote_result_manifest_digest_v1(original)
+        var own_claim = original
+        own_claim.digest = "changed claim"
+        expect(remote_result_manifest_digest_v1(own_claim)).to_equal(digest)
+        var altered = original
+        altered.dependency_manifest = "forged dependencies"
+        expect(remote_integrity_status(remote_integrity_result(
+            remote_integrity_transport(altered)))).to_equal("manifest-digest")
+        altered = original
+        altered.aop_group_roots = [sha256_text("forged aop")]
+        expect(remote_integrity_status(remote_integrity_result(
+            remote_integrity_transport(altered)))).to_equal("manifest-digest")
+        altered = original
+        altered.block_manifest_root = nil
+        expect(remote_integrity_status(remote_integrity_result(
+            remote_integrity_transport(altered)))).to_equal("manifest-digest")
+        altered = original
+        altered.artifact_digests = [sha256_text("forged artifact")]
+        expect(remote_integrity_status(remote_integrity_result(
+            remote_integrity_transport(altered)))).to_equal("manifest-digest")
+        altered = original
+        altered.digest = sha256_text("forged manifest digest")
+        expect(remote_integrity_status(remote_integrity_result(
+            remote_integrity_transport(altered)))).to_equal("manifest-digest")
+
+    it "rejects forged bytes even when transport hashing agrees with the claim":
+        step("Reject transport-controlled digest evidence")
+        var transport = remote_integrity_transport(remote_integrity_manifest())
+        transport.artifact = Some(RemoteArtifact(sha256_text("artifact"), "attacker bytes"))
+        transport.forged_hash = sha256_text("artifact")
+        val rejected = "artifact:" + sha256_text("artifact")
+        expect(remote_integrity_status(remote_integrity_result(transport))).to_equal(rejected)
+        transport.artifact = Some(RemoteArtifact(sha256_text("different claim"), "artifact"))
+        expect(remote_integrity_status(remote_integrity_result(transport))).to_equal(rejected)
+        transport.artifact = nil
+        expect(remote_integrity_status(remote_integrity_result(transport))).to_equal(rejected)
+
+    it "rejects cross namespace, schema, action and manifest action identities":
+        val manifest = remote_integrity_manifest()
+        var transport = remote_integrity_transport(manifest)
+        var mapping = transport.mapping!
+        mapping.namespace = "remote/attacker/main"
+        transport.mapping = Some(mapping)
+        expect(remote_integrity_status(remote_integrity_result(transport))).to_equal("policy")
+        mapping.namespace = "remote/example/main"
+        mapping.schema_version = 2
+        transport.mapping = Some(mapping)
+        expect(remote_integrity_status(remote_integrity_result(transport))).to_equal("schema")
+        mapping.schema_version = 1
+        mapping.action_digest = sha256_text("other action")
+        transport.mapping = Some(mapping)
+        expect(remote_integrity_status(remote_integrity_result(transport))).to_equal("action")
+        var other = manifest
+        other.action_digest = sha256_text("other action")
+        other.digest = remote_result_manifest_digest_v1(other)
+        expect(remote_integrity_status(remote_integrity_result(
+            remote_integrity_transport(other)))).to_equal("manifest-action")
+
+    it "keeps absent mappings and manifests as misses":
+        var transport = remote_integrity_transport(remote_integrity_manifest())
+        transport.manifest = nil
+        expect(remote_integrity_status(remote_integrity_result(transport))).to_equal("miss")
+        transport.mapping = nil
+        expect(remote_integrity_status(remote_integrity_result(transport))).to_equal("miss")
+
+    it "rejects duplicate and malformed references before transport payload admission":
+        var manifest = remote_integrity_manifest()
+        manifest.artifact_digests = [sha256_text("artifact"), sha256_text("artifact")]
+        expect(remote_result_manifest_encode_v1(manifest)).to_equal("")
+        expect(remote_integrity_status(remote_integrity_result(
+            remote_integrity_transport(manifest)))).to_equal("manifest-digest")
+        manifest = remote_integrity_manifest()
+        manifest.aop_group_roots = [sha256_text("aop"), sha256_text("aop")]
+        expect(remote_result_manifest_encode_v1(manifest)).to_equal("")
+        manifest = remote_integrity_manifest()
+        manifest.artifact_digests = ["not a SHA256 digest"]
+        expect(remote_result_manifest_encode_v1(manifest)).to_equal("")
+        manifest = remote_integrity_manifest()
+        manifest.block_manifest_root = Some("")
+        expect(remote_result_manifest_encode_v1(manifest)).to_equal("")
+
+    it "frames opaque dependency content without ambiguous concatenation":
+        var first = remote_integrity_manifest()
+        var second = first
+        first.dependency_manifest = "1:a2:bc"
+        second.dependency_manifest = "2:ab1:c"
+        expect(remote_result_manifest_digest_v1(first) ==
+            remote_result_manifest_digest_v1(second)).to_equal(false)
+        expect(remote_result_manifest_encode_v1(first).starts_with(
+            "simple-remote-result-manifest-v1\n")).to_equal(true)
+
+    it "bounds reference count and byte accounting without overflow":
+        var manifest = remote_integrity_manifest()
+        var references: [text] = []
+        var index = 0
+        while index < REMOTE_MANIFEST_MAX_REFERENCES_V1:
+            references.push(sha256_text("reference:{index}"))
+            index = index + 1
+        manifest.artifact_digests = references
+        expect(remote_result_manifest_encode_v1(manifest) != "").to_equal(true)
+        references.push(sha256_text("reference:overflow"))
+        manifest.artifact_digests = references
+        expect(remote_result_manifest_encode_v1(manifest)).to_equal("")
+        expect(remote_artifact_size_admissible_v1(REMOTE_ARTIFACT_MAX_BYTES_V1, 0)).to_equal(true)
+        expect(remote_artifact_size_admissible_v1(REMOTE_ARTIFACT_MAX_BYTES_V1 + 1, 0)).to_equal(false)
+        expect(remote_artifact_size_admissible_v1(1, REMOTE_CLOSURE_MAX_BYTES_V1)).to_equal(false)
+        expect(remote_artifact_size_admissible_v1(0, REMOTE_CLOSURE_MAX_BYTES_V1)).to_equal(true)
+        expect(remote_artifact_size_admissible_v1(1, 9223372036854775807)).to_equal(false)
+        expect(remote_artifact_size_admissible_v1(-1, 0)).to_equal(false)
+        expect(remote_artifact_size_admissible_v1(0, -1)).to_equal(false)
+
+    it "rejects oversized opaque dependency content and total manifest encoding":
+        var bytes = "x"
+        while bytes.len() < REMOTE_MANIFEST_MAX_BYTES_V1:
+            bytes = bytes + bytes
+        var manifest = remote_integrity_manifest()
+        manifest.dependency_manifest = bytes
+        # Dependency data itself is at the cap, but framed total exceeds it.
+        expect(remote_result_manifest_encode_v1(manifest)).to_equal("")
+        manifest.dependency_manifest = bytes + "x"
+        expect(remote_result_manifest_encode_v1(manifest)).to_equal("")
