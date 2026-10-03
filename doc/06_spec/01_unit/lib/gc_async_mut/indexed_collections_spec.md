@@ -1,7 +1,7 @@
 # Explicit-contract generic indices
 
 Authored REQ-005 unit inventory, not executed runtime evidence.
-Nine production-API cases cover empty/absent lookup, custom equality overwrite,
+Ten production-API cases cover nested optional values, empty/absent lookup, custom equality overwrite,
 colliding text, enum/tuple identity, removal and reinsertion, repeated growth,
 collision-heavy growth, signed hash extremes, and set deduplication/removal.
 
