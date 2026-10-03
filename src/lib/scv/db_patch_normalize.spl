@@ -27,7 +27,24 @@ fn db_normalize_value(value: DbValue, depth: i64) -> Result<DbValue, text>:
             val result = DbValue.ObservedSet(normalized)
             val unique = db_value_bytes(result)?
             Ok(result)
+        CausalSet(events):
+            var normalized: [DbSetEvent] = []
+            for event in events:
+                normalized.push(DbSetEvent(dot: db_normalize_text(event.dot)?, value: db_normalize_value(event.value, depth + 1)?, removed: event.removed, observed: db_normalize_dots(event.observed)?))
+            val result = DbValue.CausalSet(normalized)
+            val unique = db_value_bytes(result)?
+            Ok(result)
         _: Ok(value)
+
+fn db_normalize_dots(dots: [text]) -> Result<[text], text>:
+    var normalized: [text] = []
+    var encoded: [[u8]] = []
+    for dot in dots:
+        val name = db_normalize_text(dot)?
+        normalized.push(name)
+        encoded.push(db_canonical_text(name)?)
+    val unique = db_canonical_set(encoded)?
+    Ok(normalized)
 
 fn db_normalize_fields(fields: [DbField]) -> Result<[DbField], text>:
     var normalized: [DbField] = []
@@ -56,6 +73,8 @@ fn db_normalize_operations(operations: [DbOperation]) -> Result<[DbOperation], t
                 val unique = db_canonical_set(names)?
                 normalized.push(DbOperation.UpdateFields(entity, normalized_edits, db_normalize_condition(condition)?))
             AddSetMember(entity, field, member, dot): normalized.push(DbOperation.AddSetMember(entity, db_normalize_text(field)?, db_normalize_value(member, 0)?, db_normalize_text(dot)?))
+            AddSetMemberAfterRemoval(entity, field, member, dot, observed): normalized.push(DbOperation.AddSetMemberAfterRemoval(entity, db_normalize_text(field)?, db_normalize_value(member, 0)?, db_normalize_text(dot)?, db_normalize_dots(observed)?))
+            RemoveSetMember(entity, field, member, dot, observed): normalized.push(DbOperation.RemoveSetMember(entity, db_normalize_text(field)?, db_normalize_value(member, 0)?, db_normalize_text(dot)?, db_normalize_dots(observed)?))
             RemoveObservedSetMember(entity, field, observed):
                 var dots: [text] = []
                 var encoded: [[u8]] = []

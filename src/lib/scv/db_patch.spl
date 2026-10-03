@@ -9,6 +9,7 @@ enum DbValue:
     List(values: [DbValue])
     Set(values: [DbValue])
     ObservedSet(members: [DbSetMember])
+    CausalSet(events: [DbSetEvent])
     Reference(entity: EntityRef)
     Absent
 
@@ -16,6 +17,12 @@ struct DbSetMember:
     dot: text
     value: DbValue
     removed: bool
+
+struct DbSetEvent:
+    dot: text
+    value: DbValue
+    removed: bool
+    observed: [text]
 
 struct DbField:
     name: text
@@ -38,6 +45,8 @@ enum DbOperation:
     AddSetMember(entity: EntityRef, field: text, member: DbValue, dot: text)
     RemoveObservedSetMember(entity: EntityRef, field: text, observed: [text])
     AppendObservation(entity: EntityRef, kind: text, fields: [DbField])
+    AddSetMemberAfterRemoval(entity: EntityRef, field: text, member: DbValue, dot: text, observed_removals: [text])
+    RemoveSetMember(entity: EntityRef, field: text, member: DbValue, dot: text, observed_additions: [text])
 
 struct DbPatch:
     batch_id: text
@@ -90,6 +99,16 @@ fn db_value_bytes_bounded(value: DbValue, depth: i64) -> Result<[u8], text>:
                 if member.removed: removed = 1u8
                 entries.push(DbCanonicalEntry(key: db_canonical_text(member.dot)?, value: db_frame(25u8, db_value_bytes_bounded(member.value, depth + 1)? + db_frame(1u8, [removed]))))
             Ok(db_frame(26u8, db_canonical_map(entries)?))
+        CausalSet(events):
+            var entries: [DbCanonicalEntry] = []
+            for event in events:
+                var removed = 0u8
+                if event.removed: removed = 1u8
+                var observed: [[u8]] = []
+                for dot in event.observed: observed.push(db_canonical_text(dot)?)
+                val payload = db_value_bytes_bounded(event.value, depth + 1)? + db_frame(1u8, [removed]) + db_canonical_set(observed)?
+                entries.push(DbCanonicalEntry(key: db_canonical_text(event.dot)?, value: db_frame(35u8, payload)))
+            Ok(db_frame(36u8, db_canonical_map(entries)?))
 
 fn db_fields_bytes(fields: [DbField]) -> Result<[u8], text>:
     var entries: [DbCanonicalEntry] = []
@@ -130,6 +149,18 @@ fn db_operation_bytes(operation: DbOperation) -> Result<[u8], text>:
         AppendObservation(entity, kind, fields):
             if not entity_ref_validate(entity).valid or kind == "": return Err("SCVDB_ENTITY")
             Ok(db_frame(29u8, db_canonical_text(entity_ref_canonical(entity))? + db_canonical_text(kind)? + db_fields_bytes(fields)?))
+        AddSetMemberAfterRemoval(entity, field, member, dot, observed):
+            db_causal_operation_bytes(37u8, entity, field, member, dot, observed)
+        RemoveSetMember(entity, field, member, dot, observed):
+            db_causal_operation_bytes(38u8, entity, field, member, dot, observed)
+
+fn db_causal_operation_bytes(tag: u8, entity: EntityRef, field: text, member: DbValue, dot: text, observed: [text]) -> Result<[u8], text>:
+    if not entity_ref_validate(entity).valid or field == "" or dot == "": return Err("SCVDB_SET_IDENTITY")
+    var encoded: [[u8]] = []
+    for observation in observed:
+        if observation == "": return Err("SCVDB_SET_IDENTITY")
+        encoded.push(db_canonical_text(observation)?)
+    Ok(db_frame(tag, db_canonical_text(entity_ref_canonical(entity))? + db_canonical_text(field)? + db_value_bytes(member)? + db_canonical_text(dot)? + db_canonical_set(encoded)?))
 
 fn db_operation_ref(operation: DbOperation) -> EntityRef:
     match operation:
@@ -139,6 +170,8 @@ fn db_operation_ref(operation: DbOperation) -> EntityRef:
         AddSetMember(entity, _, _, _): entity
         RemoveObservedSetMember(entity, _, _): entity
         AppendObservation(entity, _, _): entity
+        AddSetMemberAfterRemoval(entity, _, _, _, _): entity
+        RemoveSetMember(entity, _, _, _, _): entity
 
 fn db_ref_context(ref: EntityRef, namespace: text, epoch: u64) -> bool:
     if not entity_ref_validate(ref).valid: return false
@@ -228,6 +261,6 @@ fn db_patch_order(patches: [DbPatch], accepted_ids: [text]) -> Result<[DbPatch],
         done.push(patches[best].batch_id)
     Ok(ordered)
 
-export DbValue, DbSetMember, DbField, FieldEdit, RowPrecondition, DbOperation, DbPatch
+export DbValue, DbSetMember, DbSetEvent, DbField, FieldEdit, RowPrecondition, DbOperation, DbPatch
 export db_value_bytes, db_fields_bytes, db_operation_bytes, db_patch_bytes, db_patch_digest, db_patch_seal, db_patch_validate, db_patch_order
 export db_operation_ref, db_ref_context, db_ref_kind

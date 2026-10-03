@@ -6,6 +6,8 @@ fn setup_item2_ref(counter: u64) -> EntityRef:
     entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bug", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: counter))
 use std.scv.db_reducer.*
 use std.scv.db_schema.*
+use std.scv.db_remove_wins.*
+use std.scv.db_snapshot.*
 
 fn setup_item2_reducer_patch(operations: [DbOperation], counter: u64) -> DbPatch:
     val patch = DbPatch(batch_id: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, actor: "ffeeddccbbaa99887766554433221100", actor_counter: counter, base_revision: "", causal_dependencies: [], schema_revision: "s1", reducer_revision: "r1", operations: operations, payload_digest: "", digest_algorithm: "sha256", digest_version: 1, signer: "producer", signature_algorithm: "ed25519", signature_version: 1, signature: [], provenance: "fixture")
@@ -165,3 +167,20 @@ describe "REQ-012 REQ-013 REQ-015 pure reducer previews":
         val initial = db_plan_patch(db_empty_state(), create, set_policy).unwrap().proposed
         val edit = setup_item2_update("title", "first", "second", 2)
         expect(db_plan_patch(initial, edit, set_policy)).to_equal(Err("SCVDB_SET_REQUIRES_DOTS"))
+
+    it "materializes explicit remove-wins operations and retains them through restart":
+        step("Apply additions removals and observed restoration through typed patches")
+        var policy = setup_item2_policy()
+        policy.fields = [DbFieldSchema(kind: "bug", field: "labels", rule: FieldMergeRule.RemoveWinsSet)]
+        val create = setup_item2_reducer_patch([DbOperation.Create(setup_item2_ref(1), "bug", [])], 1)
+        val initial = db_plan_patch(db_empty_state(), create, policy).unwrap().proposed
+        val addition = setup_item2_reducer_patch([DbOperation.AddSetMember(setup_item2_ref(1), "labels", DbValue.Text("label"), "a")], 2)
+        val added = db_plan_patch(initial, addition, policy).unwrap().proposed
+        val removal = setup_item2_reducer_patch([DbOperation.RemoveSetMember(setup_item2_ref(1), "labels", DbValue.Text("label"), "r", ["a"])], 3)
+        val removed = db_plan_patch(added, removal, policy).unwrap().proposed
+        expect(db_remove_wins_visible(db_field_value(removed.rows[0].fields, "labels"))).to_equal(Ok([]))
+        val restored = db_snapshot_decode(db_snapshot_encode(removed).unwrap()).unwrap()
+        val readd = setup_item2_reducer_patch([DbOperation.AddSetMemberAfterRemoval(setup_item2_ref(1), "labels", DbValue.Text("label"), "a2", ["r"])], 4)
+        val visible = db_plan_patch(restored, readd, policy).unwrap().proposed
+        expect(db_remove_wins_visible(db_field_value(visible.rows[0].fields, "labels"))).to_equal(Ok([DbValue.Text("label")]))
+        expect(visible.accepted.len()).to_equal(4)

@@ -3,6 +3,7 @@ use std.scv.db_canonical.*
 use std.scv.db_patch.*
 use std.scv.distributed_identity.{entity_ref_canonical}
 use std.scv.db_schema.*
+use std.scv.db_remove_wins.*
 use std.scv.db_patch_normalize.{db_normalize_text, db_normalize_operations}
 use std.common.search.generated.unicode_17_0_0.{unicode_normalize_nfc}
 use std.common.crypto.sha256.{sha256_u8_hex}
@@ -14,6 +15,7 @@ enum FieldMergeRule:
     ObservedRemoveSet
     AddWinsSet
     AuthorityWins(signer: text)
+    RemoveWinsSet
 
 struct DbFieldSchema:
     kind: text
@@ -106,6 +108,11 @@ fn db_rule_accepts_value(rule: FieldMergeRule, value: DbValue) -> Result<text, t
                 ObservedSet(_): Ok("set")
                 Absent: Ok("empty-set")
                 _: Err("SCVDB_SET_TYPE")
+        RemoveWinsSet:
+            match value:
+                CausalSet(events): db_remove_wins_validate(events)
+                Absent: Ok("empty-set")
+                _: Err("SCVDB_REMOVE_WINS_TYPE")
         _: Ok("value")
 
 fn db_field_authority(rule: FieldMergeRule, signer: text) -> bool:
@@ -242,6 +249,7 @@ fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) 
                             Derived: return Err("SCVDB_DERIVED_WRITE")
                             ObservedRemoveSet: return Err("SCVDB_SET_REQUIRES_DOTS")
                             AddWinsSet: return Err("SCVDB_SET_REQUIRES_DOTS")
+                            RemoveWinsSet: return Err("SCVDB_SET_REQUIRES_DOTS")
                             _: ()
                         val typed = db_rule_accepts_value(rule, edit.after)?
                         val current = db_field_value(row.fields, edit.field)
@@ -270,11 +278,46 @@ fn db_plan_patch(state: MaterializedState, patch: DbPatch, policy: MergePolicy) 
                 if row.tombstoned:
                     conflicts.push(DbConflict(entity: entity, field: field, code: "SCVDB_TOMBSTONE_UPDATE"))
                 else:
-                    match db_schema_rule(policy, row.kind, field)?:
-                        ObservedRemoveSet: ()
-                        AddWinsSet: ()
+                    val rule = db_schema_rule(policy, row.kind, field)?
+                    var updated = DbValue.Absent
+                    match rule:
+                        RemoveWinsSet:
+                            updated = db_remove_wins_add(db_field_value(row.fields, field), member, dot, [])?
+                        ObservedRemoveSet:
+                            updated = db_set_add(db_field_value(row.fields, field), member, dot)?
+                        AddWinsSet:
+                            updated = db_set_add(db_field_value(row.fields, field), member, dot)?
                         _: return Err("SCVDB_SET_POLICY")
-                    val updated = db_set_add(db_field_value(row.fields, field), member, dot)?
+                    row.fields = db_set_field(row.fields, field, updated)
+                    row.revision = patch.batch_id
+                    rows[index] = row
+            AddSetMemberAfterRemoval(ref, field, member, dot, observed):
+                val entity = entity_ref_canonical(ref)
+                val index = db_row_index(rows, entity)
+                if index < 0: return Err("SCVDB_ENTITY_MISSING")
+                var row = rows[index]
+                if row.tombstoned:
+                    conflicts.push(DbConflict(entity: entity, field: field, code: "SCVDB_TOMBSTONE_UPDATE"))
+                else:
+                    match db_schema_rule(policy, row.kind, field)?:
+                        RemoveWinsSet: ()
+                        _: return Err("SCVDB_SET_POLICY")
+                    val updated = db_remove_wins_add(db_field_value(row.fields, field), member, dot, observed)?
+                    row.fields = db_set_field(row.fields, field, updated)
+                    row.revision = patch.batch_id
+                    rows[index] = row
+            RemoveSetMember(ref, field, member, dot, observed):
+                val entity = entity_ref_canonical(ref)
+                val index = db_row_index(rows, entity)
+                if index < 0: return Err("SCVDB_ENTITY_MISSING")
+                var row = rows[index]
+                if row.tombstoned:
+                    conflicts.push(DbConflict(entity: entity, field: field, code: "SCVDB_TOMBSTONE_UPDATE"))
+                else:
+                    match db_schema_rule(policy, row.kind, field)?:
+                        RemoveWinsSet: ()
+                        _: return Err("SCVDB_SET_POLICY")
+                    val updated = db_remove_wins_remove(db_field_value(row.fields, field), member, dot, observed)?
                     row.fields = db_set_field(row.fields, field, updated)
                     row.revision = patch.batch_id
                     rows[index] = row

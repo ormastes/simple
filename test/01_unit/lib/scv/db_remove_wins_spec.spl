@@ -1,0 +1,53 @@
+use std.spec.{describe, it, expect, step}
+use std.scv.db_patch.*
+use std.scv.db_remove_wins.*
+use std.scv.db_canonical.*
+use std.scv.db_snapshot_values.*
+
+describe "REQ-013 explicit causal remove-wins sets":
+    it "suppresses concurrent additions regardless of delivery order":
+        step("Deliver an unobserving addition before and after an independent removal")
+        val member = DbValue.Text("label")
+        val added = db_remove_wins_add(DbValue.Absent, member, "add:1", []).unwrap()
+        val add_then_remove = db_remove_wins_remove(added, member, "remove:1", []).unwrap()
+        val removed = db_remove_wins_remove(DbValue.Absent, member, "remove:1", []).unwrap()
+        val remove_then_add = db_remove_wins_add(removed, member, "add:1", []).unwrap()
+        expect(db_remove_wins_visible(add_then_remove)).to_equal(Ok([]))
+        expect(db_remove_wins_visible(remove_then_add)).to_equal(Ok([]))
+        expect(db_value_bytes(add_then_remove)).to_equal(db_value_bytes(remove_then_add))
+
+    it "restores a member only after observing every matching removal":
+        step("Explicitly observe removal events instead of relying on arrival time")
+        val member = DbValue.Text("label")
+        val removed = db_remove_wins_remove(DbValue.Absent, member, "remove:1", []).unwrap()
+        val concurrent = db_remove_wins_remove(removed, member, "remove:2", []).unwrap()
+        val partial = db_remove_wins_add(concurrent, member, "add:1", ["remove:1"]).unwrap()
+        expect(db_remove_wins_visible(partial)).to_equal(Ok([]))
+        val complete = db_remove_wins_add(partial, member, "add:2", ["remove:1","remove:2"]).unwrap()
+        expect(db_remove_wins_visible(complete)).to_equal(Ok([member]))
+        val replay = db_remove_wins_add(complete, member, "add:1", ["remove:1"]).unwrap()
+        expect(db_remove_wins_visible(replay)).to_equal(Ok([member]))
+        val latest = db_remove_wins_remove(complete, member, "remove:3", ["add:2"]).unwrap()
+        expect(db_remove_wins_visible(latest)).to_equal(Ok([]))
+
+    it "rejects invented observations wrong values and dot reuse":
+        step("Validate each observation against an existing opposite-kind event")
+        val member = DbValue.Text("label")
+        val removed = db_remove_wins_remove(DbValue.Absent, member, "remove:1", []).unwrap()
+        expect(db_remove_wins_add(removed, member, "add:1", ["missing"])).to_equal(Err("SCVDB_UNOBSERVED_DOT"))
+        expect(db_remove_wins_add(removed, DbValue.Text("other"), "add:1", ["remove:1"])).to_equal(Err("SCVDB_CAUSAL_OBSERVATION_TYPE"))
+        expect(db_remove_wins_add(removed, member, "remove:1", [])).to_equal(Err("SCVDB_DOT_COLLISION"))
+        expect(db_remove_wins_remove(removed, member, "remove:2", ["remove:1"])).to_equal(Err("SCVDB_CAUSAL_OBSERVATION_TYPE"))
+
+    it "preserves causal events through snapshots and rejects cyclic contexts":
+        step("Keep removal knowledge when serializing and restoring a value")
+        val member = DbValue.Text("label")
+        val removed = db_remove_wins_remove(DbValue.Absent, member, "remove:1", []).unwrap()
+        val added = db_remove_wins_add(removed, member, "add:1", ["remove:1"]).unwrap()
+        val encoded = db_snapshot_value_encode(added, 0).unwrap()
+        val decoded = db_snapshot_value_decode(db_read_frame(encoded, 0).unwrap(), 0).unwrap()
+        expect(decoded).to_equal(added)
+        expect(db_remove_wins_visible(decoded)).to_equal(Ok([member]))
+        val cycle = [DbSetEvent(dot: "a", value: member, removed: false, observed: ["r"]), DbSetEvent(dot: "r", value: member, removed: true, observed: ["a"])]
+        expect(db_remove_wins_validate(cycle)).to_equal(Err("SCVDB_CAUSAL_CYCLE"))
+        expect(db_snapshot_value_encode(DbValue.CausalSet(cycle), 0)).to_equal(Err("SCVDB_CAUSAL_CYCLE"))

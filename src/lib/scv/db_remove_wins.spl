@@ -1,0 +1,83 @@
+# Remove-wins events retain explicit observations, never arrival timestamps.
+use std.scv.db_canonical.*
+use std.scv.db_patch.*
+
+fn db_remove_wins_events(current: DbValue) -> Result<[DbSetEvent], text>:
+    match current:
+        Absent: Ok([])
+        CausalSet(events): Ok(events)
+        _: Err("SCVDB_REMOVE_WINS_TYPE")
+
+fn db_remove_wins_event_bytes(event: DbSetEvent) -> Result<[u8], text>:
+    db_value_bytes(DbValue.CausalSet([event]))
+
+fn db_remove_wins_validate(events: [DbSetEvent]) -> Result<text, text>:
+    var dots: [[u8]] = []
+    for event in events:
+        if event.dot == "": return Err("SCVDB_SET_IDENTITY")
+        dots.push(db_canonical_text(event.dot)?)
+        val encoded = db_remove_wins_event_bytes(event)?
+        for observation in event.observed:
+            var found = false
+            for target in events:
+                if target.dot == observation:
+                    if target.removed == event.removed or db_value_bytes(target.value)? != db_value_bytes(event.value)?: return Err("SCVDB_CAUSAL_OBSERVATION_TYPE")
+                    found = true
+            if not found: return Err("SCVDB_UNOBSERVED_DOT")
+    val unique = db_canonical_set(dots)?
+    var ordered: [text] = []
+    while ordered.len() < events.len():
+        val before = ordered.len()
+        for event in events:
+            if not ordered.contains(event.dot):
+                var ready = true
+                for observation in event.observed:
+                    if not ordered.contains(observation): ready = false
+                if ready: ordered.push(event.dot)
+        if ordered.len() == before: return Err("SCVDB_CAUSAL_CYCLE")
+    Ok("valid")
+
+fn db_remove_wins_record(current: DbValue, event: DbSetEvent) -> Result<DbValue, text>:
+    if event.dot == "": return Err("SCVDB_SET_IDENTITY")
+    var events = db_remove_wins_events(current)?
+    val valid = db_remove_wins_validate(events)?
+    val encoded = db_remove_wins_event_bytes(event)?
+    for existing in events:
+        if existing.dot == event.dot:
+            if db_remove_wins_event_bytes(existing)? != encoded: return Err("SCVDB_DOT_COLLISION")
+            return Ok(current)
+    for observation in event.observed:
+        var found = false
+        for existing in events:
+            if existing.dot == observation:
+                if existing.removed == event.removed or db_value_bytes(existing.value)? != db_value_bytes(event.value)?:
+                    return Err("SCVDB_CAUSAL_OBSERVATION_TYPE")
+                found = true
+        if not found: return Err("SCVDB_UNOBSERVED_DOT")
+    events.push(event)
+    Ok(DbValue.CausalSet(events))
+
+fn db_remove_wins_add(current: DbValue, value: DbValue, dot: text, removals: [text]) -> Result<DbValue, text>:
+    db_remove_wins_record(current, DbSetEvent(dot: dot, value: value, removed: false, observed: removals))
+
+fn db_remove_wins_remove(current: DbValue, value: DbValue, dot: text, additions: [text]) -> Result<DbValue, text>:
+    db_remove_wins_record(current, DbSetEvent(dot: dot, value: value, removed: true, observed: additions))
+
+fn db_remove_wins_visible(current: DbValue) -> Result<[DbValue], text>:
+    val events = db_remove_wins_events(current)?
+    val valid = db_remove_wins_validate(events)?
+    var visible: [DbValue] = []
+    var seen: [[u8]] = []
+    for addition in events:
+        if not addition.removed:
+            val bytes = db_value_bytes(addition.value)?
+            var removed = false
+            for removal in events:
+                if removal.removed and db_value_bytes(removal.value)? == bytes and not addition.observed.contains(removal.dot):
+                    removed = true
+            if not removed and not seen.contains(bytes):
+                visible.push(addition.value)
+                seen.push(bytes)
+    Ok(visible)
+
+export db_remove_wins_add, db_remove_wins_remove, db_remove_wins_visible, db_remove_wins_validate

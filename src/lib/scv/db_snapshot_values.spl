@@ -3,6 +3,7 @@
 # uniqueness is validated independently. This module performs no I/O.
 use std.scv.db_canonical.*
 use std.scv.db_patch.*
+use std.scv.db_remove_wins.{db_remove_wins_validate}
 use std.scv.distributed_identity.{EntityRef, EntityUid, SettledAlias, ActorIncarnation, entity_ref_validate, entity_ref_provisional, entity_ref_settled}
 
 fn db_snapshot_text(value: text) -> Result<[u8], text>:
@@ -66,6 +67,16 @@ fn db_snapshot_value_encode(value: DbValue, depth: i64) -> Result<[u8], text>:
                 payload = payload + db_frame(25u8, dot + db_snapshot_value_encode(member.value, depth + 1)? + db_frame(1u8, [removed]))
             val unique = db_canonical_set(dots)?
             Ok(db_frame(26u8, payload))
+        CausalSet(events):
+            var payload: [u8] = []
+            for event in events:
+                var observed: [[u8]] = []
+                for dot in event.observed: observed.push(db_snapshot_text(dot)?)
+                var removed = 0u8
+                if event.removed: removed = 1u8
+                payload = payload + db_frame(35u8, db_snapshot_text(event.dot)? + db_snapshot_value_encode(event.value, depth + 1)? + db_frame(1u8, [removed]) + db_canonical_list(observed))
+            val valid = db_remove_wins_validate(events)?
+            Ok(db_frame(36u8, payload))
 
 fn db_snapshot_value_decode(frame: DbDecodedFrame, depth: i64) -> Result<DbValue, text>:
     if depth > 64: return Err("SCVDB_DEPTH_QUOTA")
@@ -104,6 +115,19 @@ fn db_snapshot_value_decode(frame: DbDecodedFrame, depth: i64) -> Result<DbValue
             members.push(DbSetMember(dot: dot, value: db_snapshot_value_decode(fields[1], depth + 1)?, removed: db_read_flag(fields[2])?))
         val unique = db_canonical_set(dots)?
         return Ok(DbValue.ObservedSet(members))
+    if frame.tag == 36u8:
+        val children = db_read_children(frame.payload)?
+        var events: [DbSetEvent] = []
+        for child in children:
+            if child.tag != 35u8: return Err("SCVDB_CAUSAL_EVENT_TAG")
+            val fields = db_read_children(child.payload)?
+            if fields.len() != 4 or fields[3].tag != 6u8: return Err("SCVDB_CAUSAL_EVENT_FIELDS")
+            var observations: [text] = []
+            val observed = db_read_children(fields[3].payload)?
+            for dot in observed: observations.push(db_read_text(dot)?)
+            events.push(DbSetEvent(dot: db_read_text(fields[0])?, value: db_snapshot_value_decode(fields[1], depth + 1)?, removed: db_read_flag(fields[2])?, observed: observations))
+        val valid = db_remove_wins_validate(events)?
+        return Ok(DbValue.CausalSet(events))
     Err("SCVDB_VALUE_TAG")
 
 fn db_snapshot_fields_encode(fields: [DbField]) -> Result<[u8], text>:
