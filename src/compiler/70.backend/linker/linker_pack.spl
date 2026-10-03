@@ -1,0 +1,160 @@
+"""Loaded linker pack ownership over the canonical provider loader.
+
+The lifecycle registry retains this owner until its generation has no pins.
+Failed admission and close retain the value-owner session for cleanup retry.
+The generic loader owns host mapping; this module adds no runtime ABI hooks.
+"""
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_digest256_equal, kpf_id128_is_zero}
+use std.common.kernel_plugin.schema_header.{KpfSchemaHeaderV1, KpfSchemaRequirementV1}
+use std.common.linker.link_request_v1.{LinkRequestV1, LinkTargetV1, link_request_v1_validate}
+use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1, LinkExecutionModeV1, link_policy_v1_validate}
+use std.common.linker.link_receipt_v1.{LinkReceiptV1, LinkAccountingClassV1, link_receipt_v1_validate}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SimpleProviderQueryV1, SIMPLE_PROVIDER_QUERY_V1_SIZE,
+    SIMPLE_CLI_COMMAND_V1_INTERFACE, SIMPLE_CLI_COMMAND_V1_MAJOR, SIMPLE_CLI_COMMAND_V1_MINOR,
+    SIMPLE_CLI_RUN, SIMPLE_PROVIDER_OK, simple_provider_digest_is_canonical_v1
+}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty}
+use os.smf.provider_loader.{
+    ProviderAdmissionRequestV1, ProviderLoaderSessionV1, ProviderSessionQueryV1,
+    PROVIDER_ADMISSION_OK, PROVIDER_SESSION_OK,
+    provider_artifact_path_allowed_v1, provider_admit_dynamic_v1,
+    provider_session_query_owned_v1, provider_session_release_owned_v1,
+    provider_session_close_owned_v1, provider_session_invoke_cli_v1
+}
+use compiler.backend.linker.linker_pack_wire.{LinkerPackJobV1, linker_pack_encode_job, linker_pack_decode_receipt, linker_pack_policy_digest}
+
+pub struct LinkerPackConfigV1:
+    header: KpfSchemaHeaderV1
+    provider_id: KpfId128
+    composition_digest: KpfDigest256
+    engine_id: text
+    loader: ProviderAdmissionRequestV1
+    interface_abi_digest: text
+    request_requirement: KpfSchemaRequirementV1
+    policy_requirement: KpfSchemaRequirementV1
+    receipt_requirement: KpfSchemaRequirementV1
+    host: LinkTargetV1
+    policy_digest: KpfDigest256
+
+pub fn linker_pack_config_validate(config: LinkerPackConfigV1) -> text:
+    if kpf_id128_is_zero(config.provider_id) or config.engine_id == "": return "pack identity missing"
+    if config.engine_id.contains("\n") or config.engine_id.contains("\r") or config.engine_id.contains("\0"):
+        return "invalid pack engine identity"
+    val loader = config.loader
+    if not provider_artifact_path_allowed_v1(loader.artifact_path, loader.artifact_kind): return "pack path denied"
+    if not simple_provider_digest_is_canonical_v1(loader.expected_artifact_digest): return "invalid pack artifact digest"
+    if not simple_provider_digest_is_canonical_v1(config.interface_abi_digest): return "invalid pack ABI digest"
+    if loader.host_abi < loader.minimum_host_abi or loader.host_abi > loader.maximum_host_abi:
+        return "pack host ABI denied"
+    if (loader.granted_capability_bits & loader.required_capability_bits) != loader.required_capability_bits:
+        return "pack capabilities denied"
+    if loader.requested_interface_major != SIMPLE_CLI_COMMAND_V1_MAJOR or
+            loader.provided_interface_major != SIMPLE_CLI_COMMAND_V1_MAJOR or
+            loader.requested_interface_minor != SIMPLE_CLI_COMMAND_V1_MINOR or
+            loader.provided_interface_minor < loader.requested_interface_minor:
+        return "pack command interface denied"
+    ""
+
+fn _pack_same_target(left: LinkTargetV1, right: LinkTargetV1) -> bool:
+    left.arch == right.arch and left.os == right.os and left.abi == right.abi and
+        left.object_format == right.object_format and left.endian == right.endian and
+        left.address_width == right.address_width
+
+pub class LinkerPackV1:
+    config: LinkerPackConfigV1
+    var loader: Option<ProviderLoaderSessionV1>
+    var query: Option<ProviderSessionQueryV1>
+    var ready: bool
+    var diagnostic: text
+
+    pub static fn load(config: LinkerPackConfigV1) -> LinkerPackV1:
+        var owner = LinkerPackV1(config: config, loader: nil, query: nil, ready: false,
+            diagnostic: linker_pack_config_validate(config))
+        if owner.diagnostic != "": return owner
+        # Refuse a known digest mismatch before the loader can run constructors.
+        # The loader also checks its own before/after identity. Dependency closure
+        # and hostile-path snapshot admission remain separate qualification gates.
+        if file_hash_sha256_or_empty(config.loader.artifact_path) != config.loader.expected_artifact_digest:
+            owner.diagnostic = "pack artifact digest mismatch or unavailable"
+            return owner
+        val admitted = provider_admit_dynamic_v1(config.loader)
+        owner.loader = Some(admitted.session)
+        if admitted.admission.status != PROVIDER_ADMISSION_OK:
+            owner.diagnostic = admitted.admission.reason
+            return owner
+        val request = SimpleProviderQueryV1(descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+            interface_id: SIMPLE_CLI_COMMAND_V1_INTERFACE,
+            minimum_major: SIMPLE_CLI_COMMAND_V1_MAJOR, minimum_minor: SIMPLE_CLI_COMMAND_V1_MINOR,
+            host_abi: config.loader.host_abi, target_offset: 0, target_length: 0,
+            requested_capability_bits: config.loader.required_capability_bits)
+        val queried = provider_session_query_owned_v1(admitted.session, request, config.interface_abi_digest)
+        owner.loader = Some(queried.session)
+        if queried.query.status != PROVIDER_SESSION_OK:
+            owner.diagnostic = queried.query.reason
+            return owner
+        owner.query = Some(queried.query)
+        val result = queried.query.call.result
+        # descriptor_size describes SimpleCliCommandV1 (seven u32 fields), not
+        # the 84-byte provider query result envelope that contains this field.
+        if result.status != SIMPLE_PROVIDER_OK or result.descriptor_size < 28 or
+                result.provided_major != SIMPLE_CLI_COMMAND_V1_MAJOR or
+                result.provided_minor < SIMPLE_CLI_COMMAND_V1_MINOR or result.interface_handle == 0:
+            owner.diagnostic = "pack query descriptor rejected"
+            return owner
+        if not queried.session.cli_invoke_process_callable or queried.session.cli_invoke_symbol_address <= 0:
+            owner.diagnostic = "pack operation is not process callable"
+            return owner
+        owner.ready = true
+        owner
+
+    pub fn invoke(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
+            inputs: [text], output: text) -> Result<LinkReceiptV1, text>:
+        if not self.ready or self.loader == nil or self.query == nil: return Err("linker pack is not ready")
+        val request_error = link_request_v1_validate(request, self.config.request_requirement)
+        if request_error != "": return Err(request_error)
+        val policy_error = link_policy_v1_validate(policy, self.config.policy_requirement)
+        if policy_error != "": return Err(policy_error)
+        if policy.mode == LinkExecutionModeV1.Bounded or policy.enforcement_requirement != 0 or
+                policy.job_memory_limit_bytes != 0 or policy.scratch_limit_bytes != 0:
+            return Err("linker pack requires parent-owned resource enforcement")
+        if not kpf_digest256_equal(linker_pack_policy_digest(policy)?, self.config.policy_digest):
+            return Err("linker pack policy differs from admitted contract")
+        val args = linker_pack_encode_job(LinkerPackJobV1(request: request, policy: policy, inputs: inputs, output: output))?
+        val result = provider_session_invoke_cli_v1(self.loader.unwrap(), self.query.unwrap(),
+            "linker-v1", args, SIMPLE_CLI_RUN, 8192)
+        if result.status != PROVIDER_SESSION_OK or not result.call.ok: return Err(result.reason)
+        if not result.call.result.ok or result.call.result.status != 0:
+            return Err("linker pack command rejected: " + result.call.result.diagnostic_text)
+        val receipt = linker_pack_decode_receipt(result.call.result.output)?
+        val reason = link_receipt_v1_validate(receipt, self.config.receipt_requirement)
+        if reason != "": return Err(reason)
+        if receipt.engine_id != self.config.engine_id or not _pack_same_target(receipt.target, request.target) or
+                not _pack_same_target(receipt.host, self.config.host) or
+                not kpf_digest256_equal(receipt.policy_digest, self.config.policy_digest):
+            return Err("linker pack receipt binding mismatch")
+        # A provider response alone cannot attest a whole-process memory limit.
+        if receipt.accounting_class == LinkAccountingClassV1.QualifiedJobScope:
+            return Err("linker pack lacks parent-owned resource evidence")
+        Ok(receipt)
+
+    pub me close() -> Result<bool, text>:
+        self.ready = false
+        if self.loader == nil: return Ok(true)
+        var session = self.loader.unwrap()
+        if self.query != nil:
+            val released = provider_session_release_owned_v1(session, self.query.unwrap().pin_id)
+            self.loader = Some(released.session)
+            if released.status != PROVIDER_SESSION_OK: return Err("linker pack pin release failed")
+            session = released.session
+            self.query = nil
+        if not session.open:
+            self.loader = nil
+            return Ok(true)
+        val closed = provider_session_close_owned_v1(session)
+        self.loader = Some(closed.session)
+        if closed.status != PROVIDER_SESSION_OK: return Err("linker pack unload failed")
+        self.loader = nil
+        Ok(true)
+
+export LinkerPackConfigV1, LinkerPackV1, linker_pack_config_validate

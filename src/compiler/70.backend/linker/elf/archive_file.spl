@@ -1,0 +1,152 @@
+"""Retained ordinary ar traversal; member contents remain file-backed.
+
+GNU/BSD long names are decoded under a caller limit. Thin archives fail closed.
+Physical member count and name limits are logical admission caps, not RSS claims.
+The owner must outlive any borrowed ELF member views and close on every outcome.
+"""
+use std.nogc_sync_mut.io.retained_file.{RetainedFile, retained_file_open, retained_file_read_at, retained_file_identity_unchanged}
+use std.string_core.{char_from_code}
+
+pub class ArchiveFileV1:
+    var file: RetainedFile
+    var cursor: u64
+    var members: u64
+    maximum_members: u64
+    maximum_name_bytes: i64
+    var names_offset: u64
+    var names_bytes: u64
+    var failed: bool
+
+pub struct ArchiveFileMemberV1:
+    name: text
+    data_offset: u64
+    data_bytes: u64
+
+fn archive_file_exact(file: RetainedFile, offset: u64, count: i64) -> Result<[u8], text>:
+    if count < 1 or count > 1048576 or offset > file.size or count as u64 > file.size - offset:
+        return Err("archive read bounds")
+    var bytes: [u8] = []
+    while bytes.len() < count:
+        val part = retained_file_read_at(file, offset + bytes.len() as u64, count - bytes.len())?
+        if part.len() == 0: return Err("archive short read")
+        for byte in part: bytes.push(byte)
+    Ok(bytes)
+
+fn archive_file_decimal(value: text) -> Result<u64, text>:
+    if value.len() == 0: return Err("empty archive decimal field")
+    var result: u64 = 0
+    for index in 0..value.len():
+        val digit = value.byte_at(index)
+        if digit < 48 or digit > 57: return Err("invalid archive decimal field")
+        if result > (0xffffffffffffffffu64 - (digit - 48) as u64) / 10u64:
+            return Err("archive decimal overflow")
+        result = result * 10u64 + (digit - 48) as u64
+    Ok(result)
+
+fn archive_file_ascii(bytes: [u8], offset: i64, count: i64) -> Result<text, text>:
+    var result = ""
+    for index in offset..(offset + count):
+        if bytes[index] > 127u8: return Err("unsupported non-ASCII archive name")
+        result = result + char_from_code(bytes[index] as i64)
+    Ok(result)
+
+pub fn archive_file_open_v1(path: text, maximum_members: u64, maximum_name_bytes: i64) -> Result<ArchiveFileV1, text>:
+    if maximum_members < 1u64 or maximum_members > 1000000u64 or maximum_name_bytes < 1 or maximum_name_bytes > 4096:
+        return Err("archive admission limits invalid")
+    var file = retained_file_open(path, 1099511627776u64)?
+    val magic = archive_file_exact(file, 0u64, 8)
+    if magic.is_err():
+        val closed = file.close()
+        return Err(magic.unwrap_err())
+    if magic.unwrap() != [33u8, 60u8, 97u8, 114u8, 99u8, 104u8, 62u8, 10u8]:
+        val closed = file.close()
+        return Err("archive requires ordinary ar; thin archives unsupported")
+    Ok(ArchiveFileV1(file: file, cursor: 8u64, members: 0u64, maximum_members: maximum_members,
+        maximum_name_bytes: maximum_name_bytes, names_offset: 0u64, names_bytes: 0u64, failed: false))
+
+export ArchiveFileV1, ArchiveFileMemberV1
+export archive_file_open_v1
+impl ArchiveFileV1:
+    me archive_file_next_record() -> Result<Option<ArchiveFileMemberV1>, text>:
+        while self.cursor < self.file.size:
+            if self.members >= self.maximum_members: return Err("archive member budget exceeded")
+            val header = archive_file_exact(self.file, self.cursor, 60)?
+            if header[58] != 96u8 or header[59] != 10u8: return Err("invalid archive member trailer")
+            var name = archive_file_ascii(header, 0, 16)?.trim()
+            val size = archive_file_decimal(archive_file_ascii(header, 48, 10)?.trim())?
+            var payload = self.cursor + 60u64
+            if payload > self.file.size or size > self.file.size - payload:
+                return Err("archive member bounds")
+            var next = payload + size
+            if size % 2u64 != 0u64:
+                val pad = archive_file_exact(self.file, next, 1)?
+                if pad[0] != 10u8: return Err("invalid archive padding")
+                next = next + 1u64
+            self.cursor = next
+            self.members = self.members + 1u64
+            var extent = size
+            if name == "//":
+                if self.names_bytes != 0u64: return Err("duplicate archive long-name table")
+                self.names_offset = payload
+                self.names_bytes = size
+                continue
+            if name == "/" or name == "/SYM64/": continue
+            if name.starts_with("#1/"):
+                val length = archive_file_decimal(name.substring(3))?
+                if length == 0u64 or length > extent or length > self.maximum_name_bytes as u64:
+                    return Err("archive BSD name bounds")
+                val bytes = archive_file_exact(self.file, payload, length as i64)?
+                name = ""
+                var terminated = false
+                for byte in bytes:
+                    if byte == 0u8:
+                        terminated = true
+                    else:
+                        if terminated or byte > 127u8: return Err("invalid BSD archive name padding")
+                        name = name + char_from_code(byte as i64)
+                payload = payload + length
+                extent = extent - length
+            elif name.starts_with("/"):
+                val index = archive_file_decimal(name.substring(1))?
+                if index >= self.names_bytes: return Err("archive GNU name index bounds")
+                val available = self.names_bytes - index
+                val count = if available < (self.maximum_name_bytes + 2) as u64: available as i64 else: self.maximum_name_bytes + 2
+                val bytes = archive_file_exact(self.file, self.names_offset + index, count)?
+                name = ""
+                var found = false
+                var at = 0
+                while at + 1 < bytes.len():
+                    if bytes[at] == 47u8 and bytes[at + 1] == 10u8:
+                        found = true
+                        break
+                    if at >= self.maximum_name_bytes or bytes[at] == 0u8 or bytes[at] > 127u8:
+                        return Err("invalid archive GNU name")
+                    name = name + char_from_code(bytes[at] as i64)
+                    at = at + 1
+                if not found: return Err("unterminated or over-budget archive GNU name")
+            elif name.ends_with("/"):
+                name = name.substring(0, name.len() - 1)
+            if name == "" or name.len() > self.maximum_name_bytes: return Err("archive member name budget exceeded")
+            if name.starts_with("__.SYMDEF"): continue
+            retained_file_identity_unchanged(self.file)?
+            return Ok(Some(ArchiveFileMemberV1(name: name, data_offset: payload, data_bytes: extent)))
+        retained_file_identity_unchanged(self.file)?
+        Ok(None)
+
+    me archive_file_next_v1() -> Result<Option<ArchiveFileMemberV1>, text>:
+        if self.failed or self.file.closed: return Err("archive cursor unavailable")
+        val result = self.archive_file_next_record()
+        if result.is_err(): self.failed = true
+        result
+
+    me archive_file_close_v1() -> bool:
+        self.file.close()
+
+    me archive_file_rewind_v1() -> Result<bool, text>:
+        if self.failed or self.file.closed: return Err("archive cursor unavailable")
+        retained_file_identity_unchanged(self.file)?
+        self.cursor = 8u64
+        self.members = 0u64
+        self.names_offset = 0u64
+        self.names_bytes = 0u64
+        Ok(true)

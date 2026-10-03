@@ -1,0 +1,196 @@
+"""Capped selected-input owners and scan-based static ELF resolution.
+
+Only selected input descriptors are retained. Symbols and archive members are
+decoded on demand, with an explicit finite scan-work budget and cancellation.
+No claim of whole-job RSS enforcement or full hosted ELF semantics is made.
+"""
+use compiler.backend.linker.elf.stream_types.{ElfStreamLimitsV1, ElfStreamInputsV1, ElfStreamBindingV1}
+use compiler.backend.linker.elf.elf_file_reader.{ElfFileObjectV1, ElfFileSymbolV1, elf_file_open_v1, elf_file_view_v1, elf_file_section_v1, elf_file_symbol_v1}
+use compiler.backend.linker.elf.archive_file.{archive_file_open_v1}
+use std.string_core.{char_from_code}
+
+pub fn elf_stream_name_v1(name: [u8]) -> text:
+    var result = ""
+    for byte in name: result = result + char_from_code(byte as i64)
+    result
+
+pub fn elf_stream_symbol_count_v1(object: ElfFileObjectV1, index: i64) -> Result<u64, text>:
+    val table = elf_file_section_v1(object, index)?
+    if table.section_type != 2u64: return Ok(0u64)
+    if table.entry_size != 24u64 or table.size % 24u64 != 0u64: return Err("stream symbol entry width unsupported")
+    Ok(table.size / 24u64)
+
+pub fn elf_stream_open_inputs_v1(objects: [text], archives: [text], entry: [u8], limits: ElfStreamLimitsV1,
+        cancelled: fn() -> bool) -> Result<ElfStreamInputsV1, text>:
+    if limits.input_limit < 1 or limits.input_limit > 4096 or objects.len() > limits.input_limit or archives.len() > limits.input_limit - objects.len():
+        return Err("stream input budget invalid or exceeded")
+    if limits.read_window_bytes < 1 or limits.read_window_bytes > 1048576 or limits.emit_window_bytes < 1 or limits.emit_window_bytes > limits.read_window_bytes or limits.name_bytes < 1 or limits.name_bytes > limits.read_window_bytes or limits.name_bytes > 4096:
+        return Err("stream window/name limits invalid")
+    if limits.metadata_bytes < 64u64 or limits.output_bytes < 4096u64 or limits.output_bytes > 1099511627776u64 or limits.scan_record_limit == 0u64:
+        return Err("stream metadata/output/work limits invalid")
+    if entry.len() == 0 or entry.len() > limits.name_bytes: return Err("stream entry name invalid")
+    if cancelled(): return Err("stream link cancelled")
+    var inputs = ElfStreamInputsV1(objects: [], archives: [], limits: limits, metadata_used: 0u64,
+        records_left: limits.scan_record_limit, closed: false)
+    val populated = inputs.elf_stream_populate(objects, archives, entry, cancelled)
+    if populated.is_err():
+        if not inputs.elf_stream_close_inputs_v1(): return Err("stream input cleanup failed after: {populated.unwrap_err()}")
+        return Err(populated.unwrap_err())
+    Ok(inputs)
+
+export elf_stream_open_inputs_v1
+export elf_stream_symbol_count_v1, elf_stream_name_v1
+
+impl ElfStreamInputsV1:
+    me elf_stream_charge_v1(cancelled: fn() -> bool) -> Result<bool, text>:
+        if self.closed: return Err("stream input set closed")
+        if cancelled(): return Err("stream link cancelled")
+        if self.records_left == 0u64: return Err("stream scan-work budget exceeded")
+        self.records_left = self.records_left - 1u64
+        Ok(true)
+
+    me elf_stream_read_symbol_v1(object: ElfFileObjectV1,
+            table: i64, ordinal: u64, cancelled: fn() -> bool) -> Result<ElfFileSymbolV1, text>:
+        self.elf_stream_charge_v1(cancelled)?
+        elf_file_symbol_v1(object, table, ordinal, self.limits.name_bytes)
+
+    me elf_stream_lookup_v1(name: [u8], cancelled: fn() -> bool) -> Result<Option<ElfStreamBindingV1>, text>:
+        if self.closed: return Err("stream input set closed")
+        var found: Option<ElfStreamBindingV1> = None
+        var owner = 0
+        for object in self.objects:
+            for table in 0..object.section_count:
+                val count = elf_stream_symbol_count_v1(object, table)?
+                var ordinal: u64 = 0
+                while ordinal < count:
+                    val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
+                    if (symbol.binding == 1 or symbol.binding == 2) and symbol.section_index != 0 and symbol.name_bytes == name:
+                        val binding = ElfStreamBindingV1(owner: owner, table: table, ordinal: ordinal, symbol: symbol)
+                        if found.is_none():
+                            found = Some(binding)
+                        elif symbol.binding == 1:
+                            if found.unwrap().symbol.binding == 1:
+                                return Err("duplicate symbol {elf_stream_name_v1(name)}")
+                            found = Some(binding)
+                    ordinal = ordinal + 1u64
+            owner = owner + 1
+        Ok(found)
+
+    me elf_stream_admit_object(object: ElfFileObjectV1) -> Result<bool, text>:
+        if object.machine != 62 or object.flags != 0u64: return Err("stream static slice requires x86_64 ELF flags zero")
+        if self.objects.len() >= self.limits.input_limit: return Err("stream selected input budget exceeded")
+        if object.metadata_table_bytes > self.limits.metadata_bytes - self.metadata_used:
+            return Err("stream cumulative metadata budget exceeded")
+        for index in 0..object.section_count:
+            val section = elf_file_section_v1(object, index)?
+            if section.section_type == 9u64 or section.section_type == 17u64 or (section.flags & 0xe00u64) != 0u64:
+                return Err("stream REL/COMDAT/TLS/compressed sections unsupported")
+            if section.section_type == 4u64:
+                if section.info < 1 or section.info >= object.section_count: return Err("stream RELA target section bounds")
+                val symbols = elf_file_section_v1(object, section.link)?
+                if symbols.section_type != 2u64: return Err("stream RELA requires static symbol table")
+        self.metadata_used = self.metadata_used + object.metadata_table_bytes
+        self.objects = self.objects.push(object)
+        Ok(true)
+
+    me elf_stream_unresolved_name(name: [u8], entry: [u8], cancelled: fn() -> bool) -> Result<bool, text>:
+        if self.elf_stream_lookup_v1(name, cancelled)?.is_some(): return Ok(false)
+        if name == entry: return Ok(true)
+        for object in self.objects:
+            for table in 0..object.section_count:
+                val count = elf_stream_symbol_count_v1(object, table)?
+                var ordinal: u64 = 0
+                while ordinal < count:
+                    val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
+                    if symbol.binding == 1 and symbol.section_index == 0 and symbol.name_bytes == name: return Ok(true)
+                    ordinal = ordinal + 1u64
+        Ok(false)
+
+    me elf_stream_member_needed(object: ElfFileObjectV1, entry: [u8], cancelled: fn() -> bool) -> Result<bool, text>:
+        for table in 0..object.section_count:
+            val count = elf_stream_symbol_count_v1(object, table)?
+            var ordinal: u64 = 0
+            while ordinal < count:
+                val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
+                if (symbol.binding == 1 or symbol.binding == 2) and symbol.section_index != 0 and symbol.name_bytes.len() > 0:
+                    if self.elf_stream_unresolved_name(symbol.name_bytes, entry, cancelled)?: return Ok(true)
+                ordinal = ordinal + 1u64
+        Ok(false)
+
+    me elf_stream_validate_symbols(entry: [u8], cancelled: fn() -> bool) -> Result<bool, text>:
+        if self.elf_stream_lookup_v1(entry, cancelled)?.is_none(): return Err("undefined entry symbol {elf_stream_name_v1(entry)}")
+        for object in self.objects:
+            for table in 0..object.section_count:
+                val count = elf_stream_symbol_count_v1(object, table)?
+                var ordinal: u64 = 0
+                while ordinal < count:
+                    val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
+                    if symbol.binding > 2 or symbol.symbol_type == 6 or symbol.symbol_type == 10 or symbol.section_index == 65522:
+                        return Err("stream GNU-unique/TLS/IFUNC/common symbols unsupported")
+                    if symbol.binding > 0 and symbol.name_bytes.len() > 0:
+                        val binding = self.elf_stream_lookup_v1(symbol.name_bytes, cancelled)?
+                        if binding.is_none() and symbol.binding == 1:
+                            return Err("undefined symbol {elf_stream_name_v1(symbol.name_bytes)}")
+                    ordinal = ordinal + 1u64
+        Ok(true)
+
+    me elf_stream_close_inputs_v1() -> bool:
+        if self.closed: return false
+        self.closed = true
+        var closed = true
+        for index in 0..self.objects.len():
+            var object = self.objects[index]
+            if not object.elf_file_close_v1(): closed = false
+            self.objects[index] = object
+        for index in 0..self.archives.len():
+            var archive = self.archives[index]
+            if not archive.archive_file_close_v1(): closed = false
+            self.archives[index] = archive
+        closed
+
+    me elf_stream_populate(objects: [text], archives: [text], entry: [u8], cancelled: fn() -> bool) -> Result<bool, text>:
+        for path in objects:
+            self.elf_stream_charge_v1(cancelled)?
+            var object = elf_file_open_v1(path, self.limits.metadata_bytes, self.limits.read_window_bytes)?
+            val admitted = self.elf_stream_admit_object(object)
+            if admitted.is_err():
+                val closed = object.elf_file_close_v1()
+                return Err(admitted.unwrap_err())
+        for path in archives:
+            self.elf_stream_charge_v1(cancelled)?
+            val archive = archive_file_open_v1(path, self.limits.archive_member_limit, self.limits.name_bytes)?
+            self.archives = self.archives.push(archive)
+        var changed = true
+        while changed:
+            changed = false
+            for archive_index in 0..self.archives.len():
+                var archive = self.archives[archive_index]
+                val rewound = archive.archive_file_rewind_v1()
+                self.archives[archive_index] = archive
+                rewound?
+                while true:
+                    self.elf_stream_charge_v1(cancelled)?
+                    val advanced = archive.archive_file_next_v1()
+                    self.archives[archive_index] = archive
+                    val next = advanced?
+                    if next.is_none(): break
+                    val member = next.unwrap()
+                    var selected = false
+                    for object in self.objects:
+                        if object.file.handle == archive.file.handle and object.object_base == member.data_offset: selected = true
+                    if selected: continue
+                    var object = elf_file_view_v1(archive.file, member.data_offset, member.data_bytes,
+                        self.limits.metadata_bytes, self.limits.read_window_bytes)?
+                    val needed = self.elf_stream_member_needed(object, entry, cancelled)
+                    if needed.is_err():
+                        val closed = object.elf_file_close_v1()
+                        return Err(needed.unwrap_err())
+                    if needed.unwrap():
+                        val admitted = self.elf_stream_admit_object(object)
+                        if admitted.is_err():
+                            val closed = object.elf_file_close_v1()
+                            return Err(admitted.unwrap_err())
+                        changed = true
+                    else:
+                        if not object.elf_file_close_v1(): return Err("stream member view close failed")
+        self.elf_stream_validate_symbols(entry, cancelled)

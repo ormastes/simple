@@ -6,9 +6,7 @@ Parents are trusted against concurrent rename, as required by RetainedFile.
 Each returned stage is a single-owner capability; publish/discard consumes it.
 """
 use std.nogc_sync_mut.io.retained_file.{
-    RetainedFile, retained_file_open, retained_file_read, retained_file_write,
-    retained_file_unchanged, retained_file_sync, retained_file_close,
-    retained_directory_is_real_no_follow
+    RetainedFile, retained_file_open, retained_file_unchanged, retained_file_sync, retained_directory_is_real_no_follow
 }
 use std.nogc_sync_mut.io.file_ops.{
     secure_temp_dir, file_publish_noreplace, file_exists, file_remove
@@ -61,160 +59,154 @@ fn _link_spill_u64(bytes: [u8], offset: i64) -> u64:
         index = index + 1
     value
 
-fn _link_spill_read_exact(file: RetainedFile, count: i64) -> Result<[u8], text>:
-    if count < 1 or count > 1048576: return Err("spill read window is invalid")
-    var bytes: [u8] = []
-    while bytes.len() < count:
-        val part = retained_file_read(file, count - bytes.len())?
-        if part.len() == 0: return Err("short spill read")
-        for byte in part: bytes.push(byte)
-    Ok(bytes)
-
-fn _link_spill_cleanup(stage: LinkStagedFileV1) -> bool:
-    if stage.consumed: return false
-    if not retained_directory_is_real_no_follow(stage.directory): return false
-    var cleaned = true
-    for name in ["frames.bin", "payload.tmp"]:
-        val path = stage.directory + "/" + name
-        if file_exists(path):
-            if not file_remove(path): cleaned = false
-    if not cleaned: return false
-    if not dir_remove(stage.directory, false): return false
-    stage.consumed = true
-    true
-
-pub fn link_discard_staged_v1(stage: LinkStagedFileV1) -> Result<bool, text>:
-    if stage.consumed: return Err("spill transaction already consumed")
-    if not _link_spill_cleanup(stage): return Err("spill cleanup failed")
-    Ok(true)
-
-fn _link_spill_failure(stage: LinkStagedFileV1, reason: text) -> Result<LinkSpillPublicationV1, text>:
-    if not _link_spill_cleanup(stage): return Err("spill cleanup failed after: {reason}")
-    Err(reason)
-
-fn _link_spill_stage_windows(input: RetainedFile, output: RetainedFile,
-        stage: LinkStagedFileV1, cancelled: fn() -> bool) -> Result<bool, text>:
-    var header: [u8] = []
-    header = _link_spill_append_u64(header, LINK_SPILL_MAGIC_V1)
-    header = _link_spill_append_u64(header, stage.content_bytes)
-    retained_file_write(output, header)?
-    var offset: u64 = 0
-    while offset < stage.content_bytes:
-        if cancelled(): return Err("spill staging cancelled")
-        val remaining = stage.content_bytes - offset
-        val count = if remaining < stage.window_bytes as u64: remaining as i64 else: stage.window_bytes
-        val payload = _link_spill_read_exact(input, count)?
-        val frame = link_spill_frame_v1(offset, payload)
-        var metadata: [u8] = []
-        metadata = _link_spill_append_u64(metadata, frame.logical_offset)
-        metadata = _link_spill_append_u64(metadata, frame.payload_bytes)
-        metadata = _link_spill_append_u64(metadata, frame.checksum_crc32 as u64)
-        retained_file_write(output, metadata)?
-        retained_file_write(output, payload)?
-        offset = offset + frame.payload_bytes
-    if cancelled(): return Err("spill staging cancelled")
-    if retained_file_read(input, 1)?.len() != 0: return Err("spill input changed")
-    retained_file_unchanged(input)?
-    Ok(true)
-
 pub fn link_stage_file_v1(source: text, parent: text, window_bytes: i64,
         scratch_limit_bytes: u64, cancelled: fn() -> bool) -> Result<LinkStagedFileV1, text>:
     link_spill_required_scratch_v1(0, window_bytes)?
     if cancelled(): return Err("spill staging cancelled")
     if not retained_directory_is_real_no_follow(parent): return Err("spill parent is not a regular directory")
-    val input = retained_file_open(source, LINK_SPILL_FILE_LIMIT_V1)?
+    var input = retained_file_open(source, LINK_SPILL_FILE_LIMIT_V1)?
     val required_result = link_spill_required_scratch_v1(input.size, window_bytes)
     if required_result.is_err():
-        val closed = retained_file_close(input)
+        val closed = input.close()
         return Err(required_result.unwrap_err())
     val required = required_result.unwrap()
     if required > scratch_limit_bytes:
-        val closed = retained_file_close(input)
+        val closed = input.close()
         return Err("spill scratch budget exceeded")
     val spill_bytes = required - input.size
     if spill_bytes > LINK_SPILL_FILE_LIMIT_V1:
-        val closed = retained_file_close(input)
+        val closed = input.close()
         return Err("spill file exceeds retained-file capacity")
     val directory_result = secure_temp_dir(parent, "simple-link-spill-")
     if directory_result.is_err():
-        val closed = retained_file_close(input)
+        val closed = input.close()
         return Err(directory_result.unwrap_err())
-    val stage = LinkStagedFileV1(directory: directory_result.unwrap(),
+    var stage = LinkStagedFileV1(directory: directory_result.unwrap(),
         content_bytes: input.size, window_bytes: window_bytes, spill_bytes: spill_bytes,
         scratch_reserved_bytes: required, consumed: false, published: false)
     val opened = retained_file_open(stage.directory + "/frames.bin", spill_bytes, true)
     if opened.is_err():
-        val closed = retained_file_close(input)
-        if not _link_spill_cleanup(stage): return Err("spill cleanup failed after open failure")
+        val closed = input.close()
+        if not stage._link_spill_cleanup(): return Err("spill cleanup failed after open failure")
         return Err(opened.unwrap_err())
-    val output = opened.unwrap()
-    val streamed = _link_spill_stage_windows(input, output, stage, cancelled)
-    val input_closed = retained_file_close(input)
+    var io = LinkSpillIoV1(input: input, output: opened.unwrap())
+    val streamed = io._link_spill_stage_windows(stage, cancelled)
+    val input_closed = io.input.close()
     var synced = false
-    if streamed.is_ok(): synced = retained_file_sync(output)
-    val output_closed = retained_file_close(output)
+    if streamed.is_ok(): synced = retained_file_sync(io.output)
+    val output_closed = io.output.close()
     if streamed.is_err() or not input_closed or not output_closed or not synced:
-        if not _link_spill_cleanup(stage): return Err("spill cleanup failed after staging failure")
+        if not stage._link_spill_cleanup(): return Err("spill cleanup failed after staging failure")
         if streamed.is_err(): return Err(streamed.unwrap_err())
         return Err("spill staging sync or close failed")
     Ok(stage)
 
-fn _link_spill_replay(input: RetainedFile, output: RetainedFile,
-        stage: LinkStagedFileV1, cancelled: fn() -> bool) -> Result<u64, text>:
-    if input.size != stage.spill_bytes: return Err("spill size mismatch")
-    val header = _link_spill_read_exact(input, 16)?
-    if _link_spill_u64(header, 0) != LINK_SPILL_MAGIC_V1 or _link_spill_u64(header, 8) != stage.content_bytes:
-        return Err("spill header mismatch")
-    var offset: u64 = 0
-    while offset < stage.content_bytes:
-        if cancelled(): return Err("spill replay cancelled")
-        val metadata = _link_spill_read_exact(input, 24)?
-        val frame_offset = _link_spill_u64(metadata, 0)
-        val count = _link_spill_u64(metadata, 8)
-        val checksum = _link_spill_u64(metadata, 16)
-        if frame_offset != offset or count == 0 or count > stage.window_bytes as u64 or count > stage.content_bytes - offset:
-            return Err("spill frame range mismatch")
-        if checksum > 0xffffffffu64: return Err("spill checksum field invalid")
-        val payload = _link_spill_read_exact(input, count as i64)?
-        val frame = LinkSpillFrameV1(logical_offset: frame_offset,
-            payload_bytes: count, checksum_crc32: checksum as u32)
-        if not link_spill_frame_v1_valid(frame, payload): return Err("spill checksum mismatch")
-        retained_file_write(output, payload)?
-        offset = offset + count
-    if cancelled(): return Err("spill replay cancelled")
-    if retained_file_read(input, 1)?.len() != 0: return Err("spill trailing data")
-    retained_file_unchanged(input)?
-    Ok(offset)
-
-pub fn link_publish_staged_v1(stage: LinkStagedFileV1, destination: text,
-        cancelled: fn() -> bool) -> Result<LinkSpillPublicationV1, text>:
-    if stage.published: return Err("spill transaction already published")
-    if stage.consumed: return Err("spill transaction already consumed")
-    if cancelled(): return _link_spill_failure(stage, "spill publication cancelled")
-    if not retained_directory_is_real_no_follow(stage.directory): return Err("spill stage directory changed")
-    val opened_input = retained_file_open(stage.directory + "/frames.bin", stage.spill_bytes)
-    if opened_input.is_err(): return _link_spill_failure(stage, opened_input.unwrap_err())
-    val input = opened_input.unwrap()
-    val opened_output = retained_file_open(stage.directory + "/payload.tmp", stage.content_bytes, true)
-    if opened_output.is_err():
-        val closed = retained_file_close(input)
-        return _link_spill_failure(stage, opened_output.unwrap_err())
-    val output = opened_output.unwrap()
-    val replayed = _link_spill_replay(input, output, stage, cancelled)
-    val input_closed = retained_file_close(input)
-    var synced = false
-    if replayed.is_ok(): synced = retained_file_sync(output)
-    val output_closed = retained_file_close(output)
-    if replayed.is_err(): return _link_spill_failure(stage, replayed.unwrap_err())
-    if not input_closed or not output_closed or not synced:
-        return _link_spill_failure(stage, "spill output sync or close failed")
-    if cancelled(): return _link_spill_failure(stage, "spill publication cancelled")
-    val published = file_publish_noreplace(stage.directory + "/payload.tmp", destination)
-    if published.is_err(): return _link_spill_failure(stage, published.unwrap_err())
-    if not published.unwrap(): return _link_spill_failure(stage, "spill destination exists")
-    stage.published = true
-    val cleaned = _link_spill_cleanup(stage)
-    Ok(LinkSpillPublicationV1(published_bytes: replayed.unwrap(), cleanup_pending: not cleaned))
-
 export LinkStagedFileV1, LinkSpillPublicationV1, link_spill_required_scratch_v1
-export link_stage_file_v1, link_publish_staged_v1, link_discard_staged_v1
+export link_stage_file_v1
+impl LinkStagedFileV1:
+    me _link_spill_cleanup() -> bool:
+        if self.consumed: return false
+        if not retained_directory_is_real_no_follow(self.directory): return false
+        var cleaned = true
+        for name in ["frames.bin", "payload.tmp"]:
+            val path = self.directory + "/" + name
+            if file_exists(path):
+                if not file_remove(path): cleaned = false
+        if not cleaned: return false
+        if not dir_remove(self.directory, false): return false
+        self.consumed = true
+        true
+
+    me link_discard_staged_v1() -> Result<bool, text>:
+        if self.consumed: return Err("spill transaction already consumed")
+        if not self._link_spill_cleanup(): return Err("spill cleanup failed")
+        Ok(true)
+
+    me _link_spill_failure(reason: text) -> Result<LinkSpillPublicationV1, text>:
+        if not self._link_spill_cleanup(): return Err("spill cleanup failed after: {reason}")
+        Err(reason)
+
+    me link_publish_staged_v1(destination: text,
+            cancelled: fn() -> bool) -> Result<LinkSpillPublicationV1, text>:
+        if self.published: return Err("spill transaction already published")
+        if self.consumed: return Err("spill transaction already consumed")
+        if cancelled(): return self._link_spill_failure("spill publication cancelled")
+        if not retained_directory_is_real_no_follow(self.directory): return Err("spill stage directory changed")
+        val opened_input = retained_file_open(self.directory + "/frames.bin", self.spill_bytes)
+        if opened_input.is_err(): return self._link_spill_failure(opened_input.unwrap_err())
+        var input = opened_input.unwrap()
+        val opened_output = retained_file_open(self.directory + "/payload.tmp", self.content_bytes, true)
+        if opened_output.is_err():
+            val closed = input.close()
+            return self._link_spill_failure(opened_output.unwrap_err())
+        var io = LinkSpillIoV1(input: input, output: opened_output.unwrap())
+        val replayed = io._link_spill_replay(self, cancelled)
+        val input_closed = io.input.close()
+        var synced = false
+        if replayed.is_ok(): synced = retained_file_sync(io.output)
+        val output_closed = io.output.close()
+        if replayed.is_err(): return self._link_spill_failure(replayed.unwrap_err())
+        if not input_closed or not output_closed or not synced:
+            return self._link_spill_failure("spill output sync or close failed")
+        if cancelled(): return self._link_spill_failure("spill publication cancelled")
+        val published = file_publish_noreplace(self.directory + "/payload.tmp", destination)
+        if published.is_err(): return self._link_spill_failure(published.unwrap_err())
+        if not published.unwrap(): return self._link_spill_failure("spill destination exists")
+        self.published = true
+        val cleaned = self._link_spill_cleanup()
+        Ok(LinkSpillPublicationV1(published_bytes: replayed.unwrap(), cleanup_pending: not cleaned))
+
+class LinkSpillIoV1:
+    var input: RetainedFile
+    var output: RetainedFile
+
+impl LinkSpillIoV1:
+    me _link_spill_stage_windows(stage: LinkStagedFileV1, cancelled: fn() -> bool) -> Result<bool, text>:
+        var header: [u8] = []
+        header = _link_spill_append_u64(header, LINK_SPILL_MAGIC_V1)
+        header = _link_spill_append_u64(header, stage.content_bytes)
+        self.output.write(header)?
+        var offset: u64 = 0
+        while offset < stage.content_bytes:
+            if cancelled(): return Err("spill staging cancelled")
+            val remaining = stage.content_bytes - offset
+            val count = if remaining < stage.window_bytes as u64: remaining as i64 else: stage.window_bytes
+            val payload = self.input.read_exact(count)?
+            val frame = link_spill_frame_v1(offset, payload)
+            var metadata: [u8] = []
+            metadata = _link_spill_append_u64(metadata, frame.logical_offset)
+            metadata = _link_spill_append_u64(metadata, frame.payload_bytes)
+            metadata = _link_spill_append_u64(metadata, frame.checksum_crc32 as u64)
+            self.output.write(metadata)?
+            self.output.write(payload)?
+            offset = offset + frame.payload_bytes
+        if cancelled(): return Err("spill staging cancelled")
+        if self.input.read(1)?.len() != 0: return Err("spill input changed")
+        retained_file_unchanged(self.input)?
+        Ok(true)
+
+    me _link_spill_replay(stage: LinkStagedFileV1, cancelled: fn() -> bool) -> Result<u64, text>:
+        if self.input.size != stage.spill_bytes: return Err("spill size mismatch")
+        val header = self.input.read_exact(16)?
+        if _link_spill_u64(header, 0) != LINK_SPILL_MAGIC_V1 or _link_spill_u64(header, 8) != stage.content_bytes:
+            return Err("spill header mismatch")
+        var offset: u64 = 0
+        while offset < stage.content_bytes:
+            if cancelled(): return Err("spill replay cancelled")
+            val metadata = self.input.read_exact(24)?
+            val frame_offset = _link_spill_u64(metadata, 0)
+            val count = _link_spill_u64(metadata, 8)
+            val checksum = _link_spill_u64(metadata, 16)
+            if frame_offset != offset or count == 0 or count > stage.window_bytes as u64 or count > stage.content_bytes - offset:
+                return Err("spill frame range mismatch")
+            if checksum > 0xffffffffu64: return Err("spill checksum field invalid")
+            val payload = self.input.read_exact(count as i64)?
+            val frame = LinkSpillFrameV1(logical_offset: frame_offset,
+                payload_bytes: count, checksum_crc32: checksum as u32)
+            if not link_spill_frame_v1_valid(frame, payload): return Err("spill checksum mismatch")
+            self.output.write(payload)?
+            offset = offset + count
+        if cancelled(): return Err("spill replay cancelled")
+        if self.input.read(1)?.len() != 0: return Err("spill trailing data")
+        retained_file_unchanged(self.input)?
+        Ok(offset)

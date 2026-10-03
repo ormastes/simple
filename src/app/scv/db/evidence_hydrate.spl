@@ -33,59 +33,66 @@ fn _hydrate_quota(quota: DbEvidenceStoreQuota) -> Result<bool, text>:
         return Err("SCVDB_EVIDENCE_QUOTA")
     Ok(true)
 
-fn _hydrate_exact(file: RetainedFile, count: i64) -> Result<[u8], text>:
-    var bytes: [u8] = []
-    while bytes.len() < count:
-        val next = retained_file_read(file, count - bytes.len())?
-        if next.len() == 0: return Err("SCVDB_EVIDENCE_TRUNCATED")
-        bytes = bytes + next
-    Ok(bytes)
-
 fn _hydrate_u64(bytes: [u8], offset: i64) -> u64:
     var value = 0u64
     for index in 0..8: value = (value << 8) | (bytes[offset + index] as u64)
     value
 
-fn _hydrate_read(file: RetainedFile, digest: text, quota: DbEvidenceStoreQuota, output: RetainedFile?) -> Result<DbEvidenceFileInfo, text>:
-    val header = _hydrate_exact(file, 21)?
-    if header[0:5] != [83u8,67u8,86u8,69u8,1u8]: return Err("SCVDB_EVIDENCE_FORMAT")
-    val count = _hydrate_u64(header, 5)
-    val size = _hydrate_u64(header, 13)
-    if count > (quota.max_dependencies as u64) or size > (quota.max_content_bytes as u64): return Err("SCVDB_EVIDENCE_QUOTA")
-    val envelope_size = 21u64 + count * 64u64 + size
-    if envelope_size != file.size or envelope_size > (quota.max_envelope_bytes as u64): return Err("SCVDB_EVIDENCE_FORMAT")
-    var dependencies: [text] = []
-    val hex = "0123456789abcdef"
-    for index in 0..(count as i64):
-        val bytes = _hydrate_exact(file, 64)?
-        var dependency = ""
-        for byte in bytes:
-            var digit = -1
-            if byte >= 48u8 and byte <= 57u8: digit = (byte - 48u8) as i64
-            elif byte >= 97u8 and byte <= 102u8: digit = (byte - 97u8 + 10u8) as i64
-            if digit < 0: return Err("SCVDB_EVIDENCE_DEPENDENCY")
-            dependency = dependency + hex[digit:digit + 1]
-        if dependencies.len() > 0 and dependency <= dependencies[dependencies.len() - 1]: return Err("SCVDB_EVIDENCE_DEPENDENCY")
-        dependencies.push(dependency)
-    val stream = db_evidence_stream_start(size)?
-    var remaining = size
-    var restricted = false
-    var first = true
-    while remaining > 0:
-        val count = if remaining > 1048576u64: 1048576 else: remaining as i64
-        val bytes = _hydrate_exact(file, count)?
-        if first:
-            restricted = bytes.len() >= 5 and bytes[0:5] == [83u8,67u8,82u8,69u8,1u8]
-            first = false
-        if not sha256_stream_v1_update(stream, bytes): return Err("SCVDB_EVIDENCE_HASH")
-        if val target = output:
-            if not restricted: retained_file_write(target, bytes)?
-        remaining = remaining - (count as u64)
-    if retained_file_read(file, 1)?.len() != 0: return Err("SCVDB_EVIDENCE_TRAILING")
-    retained_file_unchanged(file)?
-    if db_evidence_stream_finish(stream, dependencies)? != digest: return Err("SCVDB_EVIDENCE_DIGEST")
-    if output != nil and restricted: return Err("SCVDB_EVIDENCE_RESTRICTED")
-    Ok(DbEvidenceFileInfo(digest: digest, content_bytes: size, dependencies: dependencies, restricted: restricted))
+class _DbEvidenceHydrationReader:
+    var input: RetainedFile
+    var output: RetainedFile?
+
+    me exact(count: i64) -> Result<[u8], text>:
+        val result = self.input.read_exact(count)
+        if result.is_err() and result.unwrap_err() == "SCVDB_FILE_TRUNCATED":
+            return Err("SCVDB_EVIDENCE_TRUNCATED")
+        result
+
+    me read(digest: text, quota: DbEvidenceStoreQuota) -> Result<DbEvidenceFileInfo, text>:
+        val header = self.exact(21)?
+        if header[0:5] != [83u8,67u8,86u8,69u8,1u8]: return Err("SCVDB_EVIDENCE_FORMAT")
+        val count = _hydrate_u64(header, 5)
+        val size = _hydrate_u64(header, 13)
+        if count > (quota.max_dependencies as u64) or size > (quota.max_content_bytes as u64): return Err("SCVDB_EVIDENCE_QUOTA")
+        val envelope_size = 21u64 + count * 64u64 + size
+        if envelope_size != self.input.size or envelope_size > (quota.max_envelope_bytes as u64): return Err("SCVDB_EVIDENCE_FORMAT")
+        var dependencies: [text] = []
+        val hex = "0123456789abcdef"
+        for index in 0..(count as i64):
+            val bytes = self.exact(64)?
+            var dependency = ""
+            for byte in bytes:
+                var digit = -1
+                if byte >= 48u8 and byte <= 57u8: digit = (byte - 48u8) as i64
+                elif byte >= 97u8 and byte <= 102u8: digit = (byte - 97u8 + 10u8) as i64
+                if digit < 0: return Err("SCVDB_EVIDENCE_DEPENDENCY")
+                dependency = dependency + hex[digit:digit + 1]
+            if dependencies.len() > 0 and dependency <= dependencies[dependencies.len() - 1]: return Err("SCVDB_EVIDENCE_DEPENDENCY")
+            dependencies.push(dependency)
+        val stream = db_evidence_stream_start(size)?
+        var remaining = size
+        var restricted = false
+        var first = true
+        while remaining > 0:
+            val count = if remaining > 1048576u64: 1048576 else: remaining as i64
+            val bytes = self.exact(count)?
+            if first:
+                restricted = bytes.len() >= 5 and bytes[0:5] == [83u8,67u8,82u8,69u8,1u8]
+                first = false
+            if not sha256_stream_v1_update(stream, bytes): return Err("SCVDB_EVIDENCE_HASH")
+            if self.output != nil:
+                if not restricted:
+                    var target = self.output.unwrap()
+                    val written = target.write(bytes)
+                    self.output = Some(target)
+                    written?
+            remaining = remaining - (count as u64)
+        if self.input.read(1)?.len() != 0: return Err("SCVDB_EVIDENCE_TRAILING")
+        retained_file_unchanged(self.input)?
+        if db_evidence_stream_finish(stream, dependencies)? != digest: return Err("SCVDB_EVIDENCE_DIGEST")
+        if self.output != nil and restricted: return Err("SCVDB_EVIDENCE_RESTRICTED")
+        Ok(DbEvidenceFileInfo(digest: digest, content_bytes: size, dependencies: dependencies, restricted: restricted))
+
 
 # Entry point verifies actual final handle bytes. No manifest-only Exact result.
 fn db_evidence_inspect_file(checkout: text, parent: text, digest: text, quota: DbEvidenceStoreQuota) -> Result<DbEvidenceFileInfo, text>:
@@ -101,26 +108,32 @@ fn db_evidence_inspect_at(root: text, digest: text, quota: DbEvidenceStoreQuota)
     if not _hydrate_digest(digest): return Err("SCVDB_EVIDENCE_DIGEST")
     if not dir_is_real_no_follow(root) or path_final_existing(root)?.path != root: return Err("SCVDB_STORE_SCOPE")
     val input = retained_file_open("{root}/{digest}.scve", quota.max_envelope_bytes as u64)?
-    val result = _hydrate_read(input, digest, quota, nil)
-    if not retained_file_close(input): return Err("SCVDB_EVIDENCE_CLOSE")
+    var reader = _DbEvidenceHydrationReader(input: input, output: nil)
+    val result = reader.read(digest, quota)
+    if not reader.input.close(): return Err("SCVDB_EVIDENCE_CLOSE")
     result
 
 fn _hydrate_copy(source: text, digest: text, stage: text, quota: DbEvidenceStoreQuota) -> Result<DbHydratedEvidence, text>:
-    val input = retained_file_open(source, quota.max_envelope_bytes as u64)?
+    var input = retained_file_open(source, quota.max_envelope_bytes as u64)?
     val output_result = retained_file_open("{stage}/unverified", quota.max_content_bytes as u64, true)
-    val output = match output_result:
+    val opened_output = match output_result:
         Ok(file): file
         Err(error):
-            val closed = retained_file_close(input)
+            val closed = input.close()
             return Err(error)
-    val result = _hydrate_read(input, digest, quota, Some(output))
-    val input_closed = retained_file_close(input)
+    var reader = _DbEvidenceHydrationReader(input: input, output: Some(opened_output))
+    val result = reader.read(digest, quota)
+    val input_closed = reader.input.close()
+    # Transfer the output owner out before closing it; never close an unwrap copy
+    # while retaining an apparently live owner in the hydration reader.
+    var output = reader.output.unwrap()
+    reader.output = nil
     # Close both on every outcome; only a verified digest permits sync/publish.
     var synced = false
     match result:
         Ok(info): synced = retained_file_sync(output)
         Err(_): synced = false
-    val output_closed = retained_file_close(output)
+    val output_closed = output.close()
     if not input_closed or not output_closed: return Err("SCVDB_EVIDENCE_CLOSE")
     val info = result?
     if not synced or not directory_fsync(stage): return Err("SCVDB_EVIDENCE_DURABILITY_UNCERTAIN")

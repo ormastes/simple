@@ -1,0 +1,344 @@
+# ITEM4-REQ-009 bounded execution slices. NOT RUN; no admitted runtime.
+# These file-backed operations do not establish whole-job RSS enforcement.
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes, dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove, file_exists, file_size}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_identity_unchanged}
+use compiler.backend.linker.elf.archive_file.{archive_file_open_v1}
+use compiler.backend.linker.elf.elf_file_reader.{elf_file_view_v1, elf_file_section_v1, elf_file_symbol_v1}
+use compiler.backend.linker.elf.stream_types.{ElfStreamLimitsV1}
+use compiler.backend.linker.elf.stream_inputs.{elf_stream_open_inputs_v1}
+use compiler.backend.linker.elf.stream_link.{elf_stream_link_file_v1}
+use compiler.backend.linker.elf.stream_layout.*
+use compiler.backend.linker.elf.stream_emit.{ElfStreamWriterV1}
+
+fn item4_bounded_limits() -> ElfStreamLimitsV1:
+    ElfStreamLimitsV1(input_limit: 8, archive_member_limit: 64u64, metadata_bytes: 65536u64,
+        read_window_bytes: 64, emit_window_bytes: 8, name_bytes: 64, output_bytes: 1048576u64,
+        scratch_bytes: 4194304u64, scan_record_limit: 100000u64)
+
+fn item4_bounded_u64(bytes: [u8], offset: i64, width: i64) -> u64:
+    expect(width >= 1 and width <= 8 and offset >= 0 and offset <= bytes.len() - width).to_equal(true)
+    if width < 1 or width > 8 or offset < 0 or offset > bytes.len() - width: return 0u64
+    var value: u64 = 0
+    for index in 0..width: value = value | ((bytes[offset + index] as u64) << (index * 8))
+    value
+
+fn item4_bounded_name(value: text) -> [u8]:
+    var result: [u8] = []
+    for index in 0..value.len(): result.push(value.byte_at(index) as u8)
+    result
+
+fn item4_bounded_cancelled() -> bool: true
+fn item4_bounded_not_cancelled() -> bool: false
+
+fn item4_bounded_pad(value: text, width: i64) -> text:
+    expect(value.len() <= width).to_equal(true)
+    if value.len() > width: return ""
+    var padded = value
+    while padded.len() < width: padded = padded + " "
+    padded
+
+fn item4_bounded_archive(member: [u8]) -> [u8]:
+    val header = item4_bounded_pad("provider.o/", 16) + item4_bounded_pad("0", 12) + item4_bounded_pad("0", 6) + item4_bounded_pad("0", 6) + item4_bounded_pad("100644", 8) + item4_bounded_pad("{member.len()}", 10) + "`\n"
+    expect(header.len()).to_equal(60)
+    if header.len() != 60: return []
+    var bytes: [u8] = [33u8, 60u8, 97u8, 114u8, 99u8, 104u8, 62u8, 10u8]
+    for index in 0..header.len(): bytes.push(header.byte_at(index) as u8)
+    for byte in member: bytes.push(byte)
+    if member.len() % 2 != 0: bytes.push(10u8)
+    bytes
+
+fn item4_bounded_directory(bytes: [u8]) -> Result<text, text>:
+    if not dir_create_all("build"): return Err("test build directory unavailable")
+    val directory = secure_temp_dir("build", "item4-bounded-execution-")?
+    if not file_write_bytes(directory + "/input.a", bytes):
+        val cleaned = dir_remove(directory, false)
+        return Err("archive fixture write failed")
+    Ok(directory)
+
+fn item4_bounded_cleanup(directory: text):
+    expect(file_remove(directory + "/input.a")).to_equal(true)
+    for name in ["direct.bin", "archive.bin", "protected.bin"]:
+        if file_exists(directory + "/" + name): expect(file_remove(directory + "/" + name)).to_equal(true)
+    expect(dir_remove(directory, false)).to_equal(true)
+
+describe "ITEM4-REQ-009 retained archive and ELF views":
+    it "retains actual writer state when cancellation follows the first emitted header":
+        val directory = item4_bounded_directory([])
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        val selected = elf_stream_open_inputs_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+            item4_bounded_name("_start"), item4_bounded_limits(), item4_bounded_not_cancelled)
+        expect(selected.is_ok()).to_equal(true)
+        if selected.is_err():
+            item4_bounded_cleanup(parent)
+            return
+        var inputs = selected.unwrap()
+        val planned = inputs.elf_stream_layout_v1(item4_bounded_name("_start"), item4_bounded_not_cancelled)
+        expect(planned.is_ok()).to_equal(true)
+        if planned.is_err():
+            expect(inputs.elf_stream_close_inputs_v1()).to_equal(true)
+            item4_bounded_cleanup(parent)
+            return
+        val path = parent + "/direct.bin"
+        val opened = retained_file_open(path, planned.unwrap().file_bytes, true)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err():
+            expect(inputs.elf_stream_close_inputs_v1()).to_equal(true)
+            item4_bounded_cleanup(parent)
+            return
+        var writer = ElfStreamWriterV1(inputs: inputs, output: opened.unwrap())
+        step("Cancel from the real private file length after the fixed header write")
+        val emitted = writer.elf_stream_emit_v1(planned.unwrap(), \: file_size(path) >= 288)
+        expect(emitted.is_err()).to_equal(true)
+        if emitted.is_err(): expect(emitted.unwrap_err()).to_contain("cancelled")
+        expect(writer.output.position).to_equal(288u64)
+        expect(file_size(path)).to_equal(288)
+        step("Close the same retained owners and discard the incomplete private image")
+        expect(writer.output.close()).to_equal(true)
+        expect(writer.output.closed).to_equal(true)
+        expect(writer.inputs.elf_stream_close_inputs_v1()).to_equal(true)
+        expect(writer.inputs.closed).to_equal(true)
+        item4_bounded_cleanup(parent)
+
+    it "enforces record metadata output and exact concurrent scratch limits":
+        step("Reject real input scanning when its finite logical record allowance is exhausted")
+        var limits = item4_bounded_limits()
+        limits.scan_record_limit = 1u64
+        val work = elf_stream_open_inputs_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+            item4_bounded_name("_start"), limits, item4_bounded_not_cancelled)
+        expect(work.is_err()).to_equal(true)
+        if work.is_err(): expect(work.unwrap_err()).to_contain("scan-work budget")
+        limits = item4_bounded_limits()
+        limits.metadata_bytes = 64u64
+        val metadata = elf_stream_open_inputs_v1(["test/fixtures/linker/elf/start_x64.o"], [],
+            item4_bounded_name("_start"), limits, item4_bounded_not_cancelled)
+        expect(metadata.is_err()).to_equal(true)
+        if metadata.is_err(): expect(metadata.unwrap_err()).to_contain("metadata")
+        val directory = item4_bounded_directory([])
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        step("Reject output layout beyond its byte limit before publishing a destination")
+        limits = item4_bounded_limits()
+        limits.output_bytes = 4096u64
+        val output = elf_stream_link_file_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+            item4_bounded_name("_start"), parent + "/direct.bin", parent, limits, item4_bounded_not_cancelled)
+        expect(output.is_err()).to_equal(true)
+        expect(file_exists(parent + "/direct.bin")).to_equal(false)
+        step("Admit precisely image plus spill and replay bytes including 193 frame headers")
+        limits = item4_bounded_limits()
+        limits.scratch_bytes = 41559u64
+        val below = elf_stream_link_file_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+            item4_bounded_name("_start"), parent + "/direct.bin", parent, limits, item4_bounded_not_cancelled)
+        expect(below.is_err()).to_equal(true)
+        if below.is_err(): expect(below.unwrap_err()).to_contain("scratch budget")
+        expect(file_exists(parent + "/direct.bin")).to_equal(false)
+        limits.scratch_bytes = 41560u64
+        val exact = elf_stream_link_file_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+            item4_bounded_name("_start"), parent + "/direct.bin", parent, limits, item4_bounded_not_cancelled)
+        expect(exact.is_ok()).to_equal(true)
+        if exact.is_ok():
+            expect(exact.unwrap().published_bytes).to_equal(12304u64)
+            expect(exact.unwrap().cleanup_pending).to_equal(false)
+        item4_bounded_cleanup(parent)
+
+    it "streams real direct and archive links into identical ELF images across eight-byte patch windows":
+        step("Use real x64 entry and provider objects with code data and BSS references")
+        val provider = file_read_bytes("test/fixtures/linker/elf/lib_x64.o")
+        expect(provider.len()).to_be_greater_than(64)
+        if provider.len() <= 64: return
+        val directory = item4_bounded_directory(item4_bounded_archive(provider))
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        step("Resolve layout patch and publish through retained readers and output windows")
+        val direct = elf_stream_link_file_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+            item4_bounded_name("_start"), parent + "/direct.bin", parent, item4_bounded_limits(), item4_bounded_not_cancelled)
+        var archive = elf_stream_link_file_v1(["test/fixtures/linker/elf/start_x64.o"], [parent + "/input.a"],
+            item4_bounded_name("_start"), parent + "/archive.bin", parent, item4_bounded_limits(), item4_bounded_not_cancelled)
+        expect(direct.is_ok()).to_equal(true)
+        expect(archive.is_ok()).to_equal(true)
+        if direct.is_ok() and archive.is_ok():
+            expect(direct.unwrap().cleanup_pending).to_equal(false)
+            expect(archive.unwrap().cleanup_pending).to_equal(false)
+            val image = file_read_bytes(parent + "/direct.bin")
+            expect(image).to_equal(file_read_bytes(parent + "/archive.bin"))
+            expect(image.len()).to_be_greater_than(8192)
+            expect(image.len() as u64).to_equal(direct.unwrap().published_bytes)
+            if image.len() > 8192:
+                step("Decode independent ELF header and load protections from the published bytes")
+                expect(item4_bounded_u64(image, 0, 4)).to_equal(0x464c457fu64)
+                expect(item4_bounded_u64(image, 16, 2)).to_equal(2u64)
+                expect(item4_bounded_u64(image, 18, 2)).to_equal(62u64)
+                expect(item4_bounded_u64(image, 24, 8)).to_equal(4198400u64)
+                expect(item4_bounded_u64(image, 56, 2)).to_equal(4u64)
+                expect(item4_bounded_u64(image, 68, 4)).to_equal(4u64)
+                expect(item4_bounded_u64(image, 124, 4)).to_equal(5u64)
+                expect(item4_bounded_u64(image, 180, 4)).to_equal(4u64)
+                expect(item4_bounded_u64(image, 236, 4)).to_equal(6u64)
+                expect(image.len()).to_equal(12304)
+                if image.len() == 12304:
+                    step("Check independently derived absolute PC-relative cross-window patches and BSS bytes")
+                    expect(item4_bounded_u64(image, 4108, 4)).to_equal(4202496u64)
+                    expect(item4_bounded_u64(image, 4125, 4)).to_equal(31u64)
+                    expect(item4_bounded_u64(image, 4166, 4)).to_equal(8126u64)
+                    expect(item4_bounded_u64(image, 4173, 4)).to_equal(8111u64)
+                    expect(item4_bounded_u64(image, 8192, 4)).to_equal(0x000a6968u64)
+                    expect(item4_bounded_u64(image, 12288, 8)).to_equal(2u64)
+                    expect(item4_bounded_u64(image, 12296, 8)).to_equal(0u64)
+        item4_bounded_cleanup(parent)
+
+    it "preserves a destination when stream scratch admission fails or publication collides":
+        val provider = file_read_bytes("test/fixtures/linker/elf/lib_x64.o")
+        expect(provider.len()).to_be_greater_than(64)
+        if provider.len() <= 64: return
+        val directory = item4_bounded_directory(item4_bounded_archive(provider))
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val parent = directory.unwrap()
+        val output = parent + "/protected.bin"
+        expect(file_write_bytes(output, [11u8, 0u8, 255u8])).to_equal(true)
+        var limits = item4_bounded_limits()
+        limits.scratch_bytes = 1u64
+        step("Reject insufficient simultaneous private-image spill and publication scratch")
+        val rejected = elf_stream_link_file_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+            item4_bounded_name("_start"), output, parent, limits, item4_bounded_not_cancelled)
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("scratch budget")
+        expect(file_read_bytes(output)).to_equal([11u8, 0u8, 255u8])
+        step("Even a complete valid image must not replace an existing destination")
+        val collision = elf_stream_link_file_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+            item4_bounded_name("_start"), output, parent, item4_bounded_limits(), item4_bounded_not_cancelled)
+        expect(collision.is_err()).to_equal(true)
+        if collision.is_err(): expect(collision.unwrap_err()).to_contain("destination exists")
+        expect(file_read_bytes(output)).to_equal([11u8, 0u8, 255u8])
+        item4_bounded_cleanup(parent)
+
+    it "extracts a required real archive provider and resolves its actual definitions":
+        step("Keep the entry object separate and place the real provider in an ordinary archive")
+        val provider = file_read_bytes("test/fixtures/linker/elf/lib_x64.o")
+        expect(provider.len()).to_be_greater_than(64)
+        if provider.len() <= 64: return
+        val directory = item4_bounded_directory(item4_bounded_archive(provider))
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val selected = elf_stream_open_inputs_v1(["test/fixtures/linker/elf/start_x64.o"],
+            [directory.unwrap() + "/input.a"], item4_bounded_name("_start"), item4_bounded_limits(), item4_bounded_not_cancelled)
+        expect(selected.is_ok()).to_equal(true)
+        if selected.is_ok():
+            var selected_owner = selected.unwrap()
+            expect(selected_owner.objects.len()).to_equal(2)
+            expect(selected_owner.archives.len()).to_equal(1)
+            val records_before = selected_owner.records_left
+            val binding = selected_owner.elf_stream_lookup_v1(item4_bounded_name("add_val"), item4_bounded_not_cancelled)
+            expect(selected_owner.records_left < records_before).to_equal(true)
+            expect(binding.is_ok()).to_equal(true)
+            if binding.is_ok():
+                expect(binding.unwrap().is_some()).to_equal(true)
+                if binding.unwrap().is_some():
+                    expect(binding.unwrap().unwrap().owner).to_equal(1)
+                    expect(binding.unwrap().unwrap().symbol.binding).to_equal(1)
+                    expect(binding.unwrap().unwrap().symbol.name_bytes).to_equal(item4_bounded_name("add_val"))
+            expect(selected_owner.elf_stream_close_inputs_v1()).to_equal(true)
+            expect(selected_owner.closed).to_equal(true)
+            expect(selected_owner.elf_stream_close_inputs_v1()).to_equal(false)
+            expect(selected_owner.elf_stream_lookup_v1(item4_bounded_name("add_val"), item4_bounded_not_cancelled).is_err()).to_equal(true)
+        item4_bounded_cleanup(directory.unwrap())
+
+    it "fails named resolution duplicate definitions admission limits and cancellation before image publication":
+        step("Require complete strong-symbol resolution for real retained inputs")
+        val missing = elf_stream_open_inputs_v1(["test/fixtures/linker/elf/start_x64.o"], [],
+            item4_bounded_name("_start"), item4_bounded_limits(), item4_bounded_not_cancelled)
+        expect(missing.is_err()).to_equal(true)
+        if missing.is_err(): expect(missing.unwrap_err()).to_contain("undefined symbol")
+        step("Reject two real strong providers instead of silently choosing one")
+        val duplicate = elf_stream_open_inputs_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+            item4_bounded_name("_start"), item4_bounded_limits(), item4_bounded_not_cancelled)
+        expect(duplicate.is_err()).to_equal(true)
+        if duplicate.is_err(): expect(duplicate.unwrap_err()).to_contain("duplicate symbol")
+        step("Check input admission and cancellation before opening intentionally absent inputs")
+        var limits = item4_bounded_limits()
+        limits.input_limit = 1
+        val capped = elf_stream_open_inputs_v1(["absent-first", "absent-second"], [], item4_bounded_name("_start"), limits, item4_bounded_not_cancelled)
+        expect(capped.is_err()).to_equal(true)
+        if capped.is_err(): expect(capped.unwrap_err()).to_contain("input budget")
+        val cancelled = elf_stream_open_inputs_v1(["absent-first"], [], item4_bounded_name("_start"), item4_bounded_limits(), item4_bounded_cancelled)
+        expect(cancelled.is_err()).to_equal(true)
+        if cancelled.is_err(): expect(cancelled.unwrap_err()).to_contain("cancelled")
+
+    it "decodes a real ELF archive member without copying its object payload":
+        step("Encode an ordinary ar envelope around the checked-in common symbol object")
+        var object = file_read_bytes("test/fixtures/linker/elf/common_x64.o")
+        expect(object.len()).to_equal(840)
+        if object.len() != 840: return
+        val directory = item4_bounded_directory(item4_bounded_archive(object))
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = archive_file_open_v1(directory.unwrap() + "/input.a", 4u64, 128)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_err():
+            item4_bounded_cleanup(directory.unwrap())
+            return
+        var opened_owner = opened.unwrap()
+        var archive = opened_owner
+        val first = archive.archive_file_next_v1()
+        expect(first.is_ok()).to_equal(true)
+        if first.is_err():
+            expect(archive.archive_file_close_v1()).to_equal(true)
+            item4_bounded_cleanup(directory.unwrap())
+            return
+        expect(first.unwrap().is_some()).to_equal(true)
+        if first.unwrap().is_none():
+            expect(archive.archive_file_close_v1()).to_equal(true)
+            item4_bounded_cleanup(directory.unwrap())
+            return
+        val member = first.unwrap().unwrap()
+        expect(member.name).to_equal("provider.o")
+        expect(member.data_offset).to_equal(68u64)
+        expect(member.data_bytes).to_equal(840u64)
+        step("Read the actual _start symbol through a borrowed, member-relative ELF view")
+        val viewed = elf_file_view_v1(archive.file, member.data_offset, member.data_bytes, 512u64, 32)
+        expect(viewed.is_ok()).to_equal(true)
+        if viewed.is_ok():
+            var viewed_owner = viewed.unwrap()
+            val symbol = elf_file_symbol_v1(viewed_owner, 7, 2u64, 16)
+            expect(symbol.is_ok()).to_equal(true)
+            if symbol.is_ok(): expect(symbol.unwrap().name_bytes).to_equal([95u8, 115u8, 116u8, 97u8, 114u8, 116u8])
+            expect(viewed_owner.elf_file_close_v1()).to_equal(true)
+            expect(elf_file_section_v1(viewed_owner, 2).is_err()).to_equal(true)
+            expect(retained_file_identity_unchanged(archive.file).is_ok()).to_equal(true)
+        step("Reject an ELF header that would read beyond the admitted member but inside its container")
+        val truncated_view = elf_file_view_v1(archive.file, member.data_offset, 80u64, 512u64, 32)
+        expect(truncated_view.is_err()).to_equal(true)
+        if truncated_view.is_err(): expect(truncated_view.unwrap_err()).to_contain("section table bounds")
+        val end = archive.archive_file_next_v1()
+        expect(end.is_ok()).to_equal(true)
+        if end.is_ok(): expect(end.unwrap().is_none()).to_equal(true)
+        expect(archive.archive_file_close_v1()).to_equal(true)
+        item4_bounded_cleanup(directory.unwrap())
+
+    it "rejects an archive member whose declared payload extends past the retained file":
+        step("Preserve the member header while truncating one byte of its real ELF payload")
+        var object = file_read_bytes("test/fixtures/linker/elf/common_x64.o")
+        expect(object.len()).to_equal(840)
+        if object.len() != 840: return
+        val complete = item4_bounded_archive(object)
+        var short: [u8] = []
+        for index in 0..(complete.len() - 1): short.push(complete[index])
+        val directory = item4_bounded_directory(short)
+        expect(directory.is_ok()).to_equal(true)
+        if directory.is_err(): return
+        val opened = archive_file_open_v1(directory.unwrap() + "/input.a", 4u64, 128)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_ok():
+            var opened_owner = opened.unwrap()
+            val rejected = opened_owner.archive_file_next_v1()
+            expect(rejected.is_err()).to_equal(true)
+            if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("member bounds")
+            expect(opened_owner.archive_file_close_v1()).to_equal(true)
+        item4_bounded_cleanup(directory.unwrap())

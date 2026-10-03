@@ -16,3 +16,11 @@ SPipe regeneration are **UNRUN**. This is not generated PASS evidence.
 
 The caller owns publication and cleanup. This reader/emitter does not perform
 full symbol resolution, final layout, streamed relocation or memory certification.
+# Owner API correction (2026-10-03)
+
+The executable spec now holds named `var` owners. Sequential IO uses retained
+`read`/`write`/`close` mutating methods; section copying is
+`output.elf_file_copy_section_v1(object, index, cancelled)` and view closure is
+`object.elf_file_close_v1()`. Cursor checks after successful and cancelled copies
+inspect the same output owner. This corrects value-semantics writeback, with
+runtime evidence still UNRUN.

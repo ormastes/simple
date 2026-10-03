@@ -92,3 +92,16 @@ acceptance reviews root's hosted/adapter changes and research reviews integrated
 Mach-O/adapter changes. Root is the merge owner. Runtime tests, generated-manual
 validation and coverage are UNRUN, so source review cannot award verify PASS.
 The prior three-attempt runtime diagnostic cap is unchanged.
+
+## Verification readiness continuation (2026-10-03)
+
+The user requests remaining items be divided into implementation and test work
+before Phase 4. The authoritative current breakdown is
+`doc/03_plan/compiler/linker/item4_verification_readiness.md`.
+Root integrates on `work/item4-verification-readiness-20261003`, owns provider
+lifecycle binding and common documents. Research owns retained archive/bounded
+execution in its original isolated research worktree. Runtime owns hosted Mach-O
+in the Mach-O worktree. Acceptance owns remaining RISC-V work in the acceptance
+worktree. All start from release `94a16103a5baeefad8bc7688e70b43b75dcf2914`.
+No agent edits another lane. Tests precede implementation, root reviews source,
+and an independent inherited-model agent reviews root. Lower-model sidecars N/A.
