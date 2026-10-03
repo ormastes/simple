@@ -297,6 +297,8 @@ fn _package_index_route_current_v1(
     # fail closed and are never replaced by a global source scan.
     var ordered_packages: [text] = []
     var ordered_package_seen: Dict<text, bool> = {}
+    var validated_loads: [PackageArchiveLoadV1] = []
+    var validated_load_indices: Dict<text, i64> = {}
     for module_identity in ordered_modules:
         val module_entry = package_module_index_find_v1(generation, module_identity)
         if module_entry == nil:
@@ -338,6 +340,9 @@ fn _package_index_route_current_v1(
                         not dirty_packages.contains(candidate.package_identity):
                     dirty_packages = dirty_packages.push(candidate.package_identity)
             dirty_packages = package_index_route_sorted_unique_v1(dirty_packages)
+        else:
+            validated_load_indices[package_identity] = validated_loads.len()
+            validated_loads.push(archive)
 
     var source_paths: [text] = []
     var dirty_modules: [DirtyModuleRecordV1] = []
@@ -374,30 +379,19 @@ fn _package_index_route_current_v1(
             continue
         var package_entries: [PackageModuleIndexEntryV1] = []
         var module_identities: [text] = []
-        var dependency_digests: [text] = []
         var candidate_index = package_heads[entry!.package_identity] ?? -1
         while candidate_index >= 0:
             val candidate = generation.entries[candidate_index]
             package_entries.push(candidate)
             module_identities.push(candidate.module_identity)
-            for imported in candidate.direct_imports:
-                val dependency = package_module_index_find_v1(
-                    generation, imported)
-                if dependency == nil:
-                    return PackageIndexRouteV1(
-                        false, "archive-dependency-missing", [], [], [], [])
-                if not dependency_digests.contains(
-                        dependency!.smf_metadata_digest):
-                    dependency_digests.push(dependency!.smf_metadata_digest)
             candidate_index = package_next[candidate_index]
-        val aggregate = package_archive_aggregate_entry_v1(package_entries)
-        if aggregate == nil:
-            return PackageIndexRouteV1(
-                false, "package-aggregate-invalid", [], [], [], [])
-        val archive = package_archive_load_v1(
-            cache_root, aggregate!, authority, dependency_digests)
-        if not archive.valid:
-            return PackageIndexRouteV1(false, archive.reason, [], [], [], [])
+        # Generation and selected package links are immutable for this request.
+        # Later SCC dirtiness can discard a hit, but cannot change its aggregate.
+        # Reuse the first validated receipt instead of hashing the archive twice.
+        val load_index = validated_load_indices[entry!.package_identity] ?? -1
+        if load_index < 0 or load_index >= validated_loads.len():
+            return PackageIndexRouteV1(false, "archive-admission-missing", [], [], [], [])
+        val archive = validated_loads[load_index]
         archive_admissions = archive_admissions.push(PackageArchiveAdmissionV1(
             entry!.package_identity,
             canonical_identity_sort_texts(module_identities), package_entries,

@@ -19,7 +19,8 @@ use compiler.driver.cache.package_index_route.{
 }
 use compiler.driver.cache.package_archive_cache.{
     PackageArchiveAuthorityV1, PackageArchivePublishInputV1,
-    package_archive_publish_scc_v1
+    package_archive_publish_scc_v1, package_archive_aggregate_entry_v1,
+    package_archive_load_v1
 }
 
 extern fn rt_getpid() -> i64
@@ -242,9 +243,16 @@ describe "admitted per-module semantic route":
             file_write("{snapshot}/src/{name}.spl", semantic_source(name, name == "a" or name == "c"))
         val authority = PackageArchiveAuthorityV1(graph.producer_digest, graph.root_generation,
             graph.variant_digest, graph.scv_revision_id, graph.scv_tree_id, graph.inventory_digest)
+        val interface_digest = sha256_text("d-interface")
+        val action_digest = sha256_text("d-action")
         expect(package_archive_publish_scc_v1(root, "scc-d", authority,
             [PackageArchivePublishInputV1(graph.entries[3], [graph.entries[2].smf_metadata_digest],
-                "interface-d", "action-d", true)])).to_equal(true)
+                "symbol|d|function|i64|{interface_digest}",
+                "action|d-entry|compile|d|{action_digest}", true)])).to_equal(true)
+        val retained_entry = package_archive_aggregate_entry_v1([graph.entries[3]])!
+        val retained = package_archive_load_v1(root, retained_entry, authority,
+            [graph.entries[2].smf_metadata_digest])
+        expect(retained.valid).to_equal(true)
         val previous_cache = env_get("SIMPLE_CACHE") ?? ""
         env_set("SIMPLE_CACHE", root)
         val route = package_index_route_admitted_current_v1("", snapshot,
@@ -262,4 +270,7 @@ describe "admitted per-module semantic route":
         expect(route.archive_admissions.len()).to_equal(1)
         expect(route.archive_admissions[0].module_identities).to_equal(["d"])
         expect(route.archive_admissions[0].load.valid).to_equal(true)
+        expect(route.archive_admissions[0].load.receipt!.receipt_digest).to_equal(
+            retained.receipt!.receipt_digest)
+        expect(route.archive_admissions[0].archive_path).to_equal(retained.archive_path)
         dir_remove(root, true)

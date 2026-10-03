@@ -1,0 +1,42 @@
+# @req PSI-REQ-001 PSI-REQ-005
+use std.spec.*
+use app.test.package_index_acceptance_archive.{package_index_acceptance_archive_v1}
+use compiler.driver.cache.cas_store.{cas_get}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+
+extern fn rt_getpid() -> i64
+
+describe "archive owner acceptance observations":
+    it "reports actual persisted archive and payload identities without compiler counters":
+        for scenario in ["package-archive-cache-hit", "clean-warm-reproducibility"]:
+            step("Run publication and repeated warm admission through the production owner")
+            val root = "build/test-artifacts/archive-observation-{scenario}-{rt_getpid()}"
+            dir_remove(root, true)
+            val observed = package_index_acceptance_archive_v1(scenario, root)
+            expect(observed.supported).to_equal(true)
+            expect(observed.archive_admitted).to_equal(true)
+            expect(observed.reason).to_equal("archive-owner-only")
+            expect(observed.member_count).to_equal(3)
+            expect(observed.persisted_bytes_identical).to_equal(true)
+            expect(observed.repeated_archive_digest).to_equal(observed.archive_digest)
+            val bytes = cas_get(root, observed.archive_digest)
+            expect(bytes != nil).to_equal(true)
+            expect(sha256_text(bytes!)).to_equal(observed.archive_digest)
+            val semantic = sha256_text("archive-acceptance-symbol")
+            val action = sha256_text("archive-acceptance-action")
+            expect(observed.interface_payload_digest).to_equal(
+                sha256_text("symbol|fixture|function|i64|{semantic}"))
+            expect(observed.action_payload_digest).to_equal(
+                sha256_text("action|fixture-entry|compile|fixture|{action}"))
+            dir_remove(root, true)
+
+    it "does not claim unrelated scenarios or write without an owned fixture root":
+        step("Reject missing fixture authority and unsupported scenario names")
+        val unsupported = package_index_acceptance_archive_v1("header-metadata-reuse", "")
+        expect(unsupported.supported).to_equal(false)
+        expect(unsupported.archive_admitted).to_equal(false)
+        val missing = package_index_acceptance_archive_v1("package-archive-cache-hit", "")
+        expect(missing.supported).to_equal(true)
+        expect(missing.archive_admitted).to_equal(false)
+        expect(missing.reason).to_equal("archive-root-missing")
