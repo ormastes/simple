@@ -1,0 +1,43 @@
+use std.spec.*
+use std.scv.db_paged_import_claims.*
+use std.scv.db_paged_indexes.{db_paged_refcount_key}
+use std.scv.db_page_records.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.{DbRow, DbFieldSchema, FieldMergeRule}
+use std.scv.distributed_identity.{entity_ref_canonical}
+use test.fixtures.scv.db_paged_fixture.*
+
+describe "Bounded imported index claim semantics":
+    it "counts one live edge per source row and preserves removed reference closure":
+        var policy = setup_item2_paged_policy()
+        policy.config.merge.fields.push(DbFieldSchema(kind: "bug", field: "observed", rule: FieldMergeRule.ObservedRemoveSet))
+        val target = setup_item2_paged_ref(1)
+        val source = setup_item2_paged_ref(2)
+        val row = DbRow(entity: entity_ref_canonical(source), kind: "bug", fields: [DbField(name: "code", value: DbValue.Text("B")), DbField(name: "link", value: DbValue.Reference(target)), DbField(name: "observed", value: DbValue.ObservedSet([DbSetMember(dot: "one", value: DbValue.Reference(target), removed: false), DbSetMember(dot: "two", value: DbValue.Reference(target), removed: true)]))], revision: "aa".repeat(32), tombstoned: false)
+        val claims = db_import_record_claims(db_typed_page_record_encode(DbTypedPageRecord.CurrentRow(source, row)).unwrap(), policy).unwrap()
+        var counted = 0
+        var historical = 0
+        for claim in claims:
+            if claim.mode == "count":
+                expect(claim.key).to_equal(db_paged_refcount_key(target).unwrap())
+                counted = counted + 1
+            if claim.mode == "row" and claim.number == 0u64: historical = historical + 1
+        expect(counted).to_equal(1)
+        expect(historical).to_equal(1)
+        var tombstone = row
+        tombstone.tombstoned = true
+        val deleted = db_import_record_claims(db_typed_page_record_encode(DbTypedPageRecord.CurrentRow(source, tombstone)).unwrap(), policy).unwrap()
+        var live_after_delete = 0
+        for claim in deleted:
+            if claim.mode == "count": live_after_delete = live_after_delete + 1
+        expect(live_after_delete).to_equal(0)
+
+    it "rejects trailing, nonminimal and unknown spill-claim forms":
+        val claim = DbImportClaim(key: db_page_row_key(setup_item2_paged_ref(1)).unwrap(), mode: "row", value: "bug", number: 1u64)
+        val encoded = db_import_claim_encode(claim).unwrap()
+        expect(db_import_claim_decode(encoded)).to_equal(Ok(claim))
+        expect(db_import_claim_decode(encoded + "00").is_err()).to_be(true)
+        expect(db_import_claim_decode("c88000").is_err()).to_be(true)
+        var wrong = claim
+        wrong.mode = "verified-by-caller"
+        expect(db_import_claim_encode(wrong)).to_equal(Err("SCVDB_IMPORT_CLAIM"))
