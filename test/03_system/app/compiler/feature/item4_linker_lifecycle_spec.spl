@@ -92,6 +92,37 @@ fn item4_lifecycle_provider(replacement: bool, major: u32) -> LinkerProviderV1:
         invoke: if replacement: item4_lifecycle_replacement else: item4_lifecycle_recovery)
 
 describe "ITEM4-REQ-010 linker generation lifecycle":
+    it "dispatches static recovery even when generation capacity prevents publication":
+        step("Fill both generation slots while an old session keeps recovery generation pinned")
+        val created = LinkerLifecycleV1.create(2, 2, item4_lifecycle_requirement(), item4_lifecycle_provider(false, 1))
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        var lifecycle = created.unwrap()
+        val held = lifecycle.open()
+        expect(held.is_ok()).to_equal(true)
+        if held.is_err(): return
+        val replaced = lifecycle.publish(item4_lifecycle_provider(true, 1))
+        expect(replaced.is_ok()).to_equal(true)
+        if replaced.is_err(): return
+        expect(lifecycle.recover().is_err()).to_equal(true)
+        step("Execute the independently retained static callback despite the exhausted publication table")
+        val result = lifecycle.run_recovery(item4_lifecycle_request(), item4_lifecycle_policy(), item4_lifecycle_inputs(), "")
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        expect(result.unwrap().outcome).to_equal(LinkOutcomeV1.Success)
+        expect(result.unwrap().engine_id).to_equal("internal:elf")
+        expect(result.unwrap().accounting_class).to_equal(LinkAccountingClassV1.NotCertified)
+        expect(result.unwrap().measured_peak_bytes).to_equal(0)
+        expect(lifecycle.active_generation().index).to_equal(replaced.unwrap().index)
+        expect(lifecycle.active_generation().epoch).to_equal(replaced.unwrap().epoch)
+        step("Preserve a real recovery-link error when its input omits the provider object")
+        val failed = lifecycle.run_recovery(item4_lifecycle_request(), item4_lifecycle_policy(),
+            ["test/fixtures/linker/elf/start_x64.o"], "")
+        expect(failed.is_ok()).to_equal(true)
+        if failed.is_err(): return
+        expect(failed.unwrap().outcome).to_equal(LinkOutcomeV1.InputError)
+        expect(lifecycle.close(held.unwrap()).is_ok()).to_equal(true)
+
     it "pins existing real linker callbacks across replacement and recovers independently":
         step("Create the static recovery provider and open a session on its generation")
         val created = LinkerLifecycleV1.create(3, 3, item4_lifecycle_requirement(), item4_lifecycle_provider(false, 1))
