@@ -1,6 +1,6 @@
 # Fixed direct extern ABI prerequisite
 
-Authored 2026-10-03; nine unexecuted scenarios. Source:
+Authored 2026-10-03; thirteen unexecuted scenarios. Source:
 `test/01_unit/compiler/backend/llvm_direct_extern_abi_spec.spl`.
 
 Four fixtures pass real source through frontend, HIR, MIR and LLVM translation.
@@ -27,6 +27,11 @@ rejected temporary without emitting an extern call; a malformed-HIR fixture
 checks that behavior. An actual captured lambda calling an extern verifies that
 the fresh same-module lowerer retains declaration authority. Bootstrap fresh
 lowerers seed their maps from their own module declarations.
+Declaration seeding precedes runtime constant/array initializers; an actual
+frontend module passed through the flat bootstrap lowering checks a zero-argument
+extern inside an array initializer. Three further fixtures read the canonical
+raw declaration owner and lower its zero-argument, i32/out-pointer and LLJIT
+creation signatures, rather than duplicating those declarations in the fixture.
 
 The additive params_known flag defaults false. Only admitted resolved externs
 set it true. A zero-argument call remains distinct from unknown legacy empty
