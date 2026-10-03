@@ -41,6 +41,7 @@ struct DbGithubBridgePorts:
 struct DbGithubBridgeResult:
     transition: DbBridgeTransition
     external_id: text
+    observation: DbBridgeObservation?
 
 struct DbGithubBridgeScan:
     found: bool
@@ -241,7 +242,7 @@ fn _db_issue_reconcile(delivery: DbBridgeDelivery, scan: DbGithubBridgeScan, por
     # An absent marker after an uncertain effect cannot prove a POST was not
     # applied (eventual visibility/deletion). Never enable a blind retry.
     val observation = DbBridgeObservation(provider: delivery.intent.provider, correlation_id: delivery.intent.correlation_id, payload_digest: scan.payload_digest, revision: scan.revision, status: if scan.found: "found" else: "unknown")
-    DbGithubBridgeResult(transition: db_bridge_reconcile(delivery, delivery.owner, delivery.generation, ports.now(), observation), external_id: scan.external_id)
+    DbGithubBridgeResult(transition: db_bridge_reconcile(delivery, delivery.owner, delivery.generation, ports.now(), observation), external_id: scan.external_id, observation: Some(observation))
 
 fn db_github_bridge_deliver(request: DbGithubBridgeRequest, ports: DbGithubBridgePorts) -> Result<DbGithubBridgeResult, text>:
     _db_issue_validate(request)?
@@ -281,7 +282,7 @@ fn db_github_bridge_deliver(request: DbGithubBridgeRequest, ports: DbGithubBridg
     match _db_issue_scan(request, ports):
         Ok(scan): Ok(_db_issue_reconcile(persisted, scan, ports))
         Err(reason):
-            Ok(DbGithubBridgeResult(transition: DbBridgeTransition(code: reason, delivery: persisted), external_id: ""))
+            Ok(DbGithubBridgeResult(transition: DbBridgeTransition(code: reason, delivery: persisted), external_id: "", observation: nil))
 
 fn _db_issue_live_execute(args: [text], timeout: i64, maximum_bytes: i64) -> DbGithubProcessReply:
     val (stdout, stderr, code) = process_run_bounded("gh", args, timeout, maximum_bytes)

@@ -1,0 +1,75 @@
+# Durable owner for GitHub bridge effects. Canonical intent must already exist
+# in the semantic database; local leases/status use the separate bridge channel.
+# Only the actual store-reopened sent transition permits a provider mutation.
+use app.io.mod.{process_run_bounded}
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+use std.scv.db_admission.{DbAdmissionPolicy}
+use std.scv.db_bridge.{DbBridgeDelivery, db_bridge_sent, db_bridge_reconcile}
+use app.scv.db.bridge_store.{DbStoredDelivery, db_bridge_store_encode, db_bridge_store_load, db_bridge_store_enqueue, db_bridge_store_acquire, db_bridge_store_sent, db_bridge_store_reconcile}
+use app.scv.db.github_provider.{DbGithubTransport, DbGithubProcessReply}
+use app.scv.db.github_issue_bridge.{DbGithubBridgeRequest, DbGithubBridgePorts, db_github_bridge_deliver}
+
+struct DbGithubOwnedBridgeResult:
+    code: text
+    stored: DbStoredDelivery
+    external_id: text
+
+fn _db_github_owner_sent(root: text, revision: text, owner: text, generation: u64, proposed: DbBridgeDelivery, now: u64) -> Result<DbBridgeDelivery, text>:
+    val current = db_bridge_store_load(root, revision)?
+    val expected = db_bridge_sent(current.delivery, owner, generation, now)
+    if expected.code != "sent_unconfirmed":
+        return Err(expected.code)
+    if db_bridge_store_encode([expected.delivery])? != db_bridge_store_encode([proposed])?:
+        return Err("GithubBridgeProposedFenceMismatch")
+    # Store recomputes against the latest durable state, fences and CAS-commits.
+    # A competing same-owner invocation that already marked sent is rejected.
+    val durable = db_bridge_store_sent(root, revision, owner, generation, now)?
+    val reopened = db_bridge_store_load(root, revision)?
+    if reopened.head != durable.head or db_bridge_store_encode([reopened.delivery])? != db_bridge_store_encode([expected.delivery])?:
+        return Err("GithubBridgeDurableFenceMismatch")
+    Ok(reopened.delivery)
+
+fn db_github_bridge_owned(root: text, admission: DbAdmissionPolicy, request: DbGithubBridgeRequest, owner: text, ttl: u64, now: fn() -> u64, execute: fn([text], i64, i64) -> DbGithubProcessReply) -> Result<DbGithubOwnedBridgeResult, text>:
+    if owner == "":
+        return Err("SCVDB_LEASE_ARGUMENT")
+    # The enqueue owner proves the exact intent revision is in an actual,
+    # non-tombstoned canonical semantic row; caller delivery state is ignored.
+    val enqueued = db_bridge_store_enqueue(root, admission, request.delivery.intent)?
+    if ["acknowledged", "conflicted", "quarantined"].contains(enqueued.delivery.state):
+        return Ok(DbGithubOwnedBridgeResult(code: enqueued.delivery.state, stored: enqueued, external_id: ""))
+    var leased = enqueued
+    if enqueued.delivery.owner != owner or enqueued.delivery.lease_expires <= now() or enqueued.delivery.state == "pending":
+        leased = db_bridge_store_acquire(root, request.delivery.intent.revision, owner, now(), ttl)?
+    val revision = leased.delivery.intent.revision
+    val generation = leased.delivery.generation
+    var scoped_request = request
+    scoped_request.delivery = leased.delivery
+    val ports = DbGithubBridgePorts(
+        transport: DbGithubTransport(execute: execute, lease_held: \: scv_sj_lease_is_held(root)),
+        now: now,
+        persist_sent: \proposed: _db_github_owner_sent(root, revision, owner, generation, proposed, now())
+    )
+    val result = db_github_bridge_deliver(scoped_request, ports)?
+    # Never persist a caller-shaped transition from the adapter result. Derive
+    # the transition again from store-loaded state and the actual readback value.
+    val current = db_bridge_store_load(root, revision)?
+    if current.delivery.owner != owner or current.delivery.generation != generation:
+        return Err("SCVDB_LEASE_STALE")
+    if val observed = result.observation:
+        val checked = db_bridge_reconcile(current.delivery, owner, generation, now(), observed)
+        if ["acknowledged", "conflicted", "not_applied"].contains(checked.code):
+            val committed = db_bridge_store_reconcile(root, revision, owner, generation, now(), observed)?
+            return Ok(DbGithubOwnedBridgeResult(code: checked.code, stored: committed, external_id: result.external_id))
+        # Unknown/permission/expiry observations leave the durable uncertainty
+        # intact. They cannot move a delivery back into a retryable pending state.
+        return Ok(DbGithubOwnedBridgeResult(code: checked.code, stored: current, external_id: result.external_id))
+    Ok(DbGithubOwnedBridgeResult(code: result.transition.code, stored: current, external_id: result.external_id))
+
+fn _db_github_owner_execute(args: [text], timeout_ms: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    val (stdout, stderr, code) = process_run_bounded("gh", args, timeout_ms, maximum_bytes)
+    DbGithubProcessReply(stdout: stdout, stderr: stderr, exit_code: code)
+
+fn db_github_bridge_owned_live(root: text, admission: DbAdmissionPolicy, request: DbGithubBridgeRequest, owner: text, ttl: u64, now: fn() -> u64) -> Result<DbGithubOwnedBridgeResult, text>:
+    db_github_bridge_owned(root, admission, request, owner, ttl, now, _db_github_owner_execute)
+
+export DbGithubOwnedBridgeResult, db_github_bridge_owned, db_github_bridge_owned_live

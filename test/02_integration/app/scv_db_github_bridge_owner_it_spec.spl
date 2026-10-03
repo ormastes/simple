@@ -1,0 +1,190 @@
+# Real signed semantic commit and filesystem outbox; only GitHub transport is
+# injected. No network write occurs in this spec. Requires admitted runtime.
+use std.spec.*
+use app.io.mod.{cwd, dir_create, file_exists}
+use app.io.env_ops.{host_os}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io.crypto_sffi.{random_hex}
+use std.common.json.types.{json_object, json_array, json_number, json_string}
+use std.common.json.serializer.{json_stringify}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.scv.distributed_identity.{ActorIncarnation, EntityUid, entity_ref_provisional}
+use std.scv.db_admission.*
+use std.scv.db_patch.*
+use std.scv.db_reducer.*
+use std.scv.db_bridge.*
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+use app.scv.db.local_apply.{db_apply_local}
+use app.scv.db.local_store.{db_store_read}
+use app.scv.db.bridge_store.{db_bridge_store_load, db_bridge_store_enqueue, db_bridge_store_acquire}
+use app.scv.db.github_provider.{DbGithubSource, DbGithubProcessReply}
+use app.scv.db.github_issue_bridge.{DbGithubBridgeRequest, DbGithubIssuePolicy, db_github_bridge_payload}
+use app.scv.db.github_bridge_owner.{db_github_bridge_owned}
+use test.fixtures.scv.db_metadata_fixture.{setup_item2_reviewed_metadata}
+
+struct Item2GithubOwnedFixture:
+    root: text
+    admission: DbAdmissionPolicy
+    request: DbGithubBridgeRequest
+
+var _item2_owned_root = ""
+var _item2_owned_revision = ""
+var _item2_owned_clock = 10u64
+var _item2_owned_mode = "normal"
+var _item2_owned_remote_body = ""
+var _item2_owned_effects = 0
+var _item2_owned_requests = 0
+
+fn setup_item2_owned_now() -> u64: _item2_owned_clock
+
+fn setup_item2_owned_request() -> DbGithubBridgeRequest:
+    val source = DbGithubSource(host: "github.com", owner: "owner", repository: "repo", repository_id: "42", created_since: "2026-10-01", tracked_run_ids: [], per_page: 100u64, maximum_pages: 2u64, maximum_requests: 10u64, timeout_ms: 1000, maximum_response_bytes: 16384)
+    var intent = DbBridgeIntent(revision: "", provider: DbProviderBindingIdentity(instance: "github.com", project: "42", external_id: "new:durable-intent"), operation: "create", payload_digest: "", correlation_id: "durable-correlation", causation_id: "canonical-edit", idempotency_key: "durable-intent")
+    var delivery = DbBridgeDelivery(intent: intent, state: "pending", owner: "", generation: 0u64, lease_expires: 0u64, attempts: 0u64, next_attempt: 0u64, must_reconcile: false, provider_revision: "", last_error: "")
+    val policy = DbGithubIssuePolicy(revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", reviewed_by: "reviewed-test-policy", title_authority: "local", body_authority: "local", state_authority: "local")
+    var request = DbGithubBridgeRequest(source: source, delivery: delivery, kind: "create-issue", issue_number: "", title: "durable issue", body: "durable body", state: "open", base_title: "", base_body: "", base_state: "", policy: policy)
+    intent.payload_digest = db_github_bridge_payload(request, request.title, request.body, request.state).unwrap()
+    intent.revision = db_bridge_intent_digest(intent).unwrap()
+    delivery.intent = intent
+    request.delivery = delivery
+    request
+
+fn setup_item2_owned_fixture(commit_intent: bool) -> Item2GithubOwnedFixture:
+    val nonce = random_hex(8) ?? ""
+    expect(nonce.len()).to_equal(16)
+    val path = "{cwd()}/build/test-artifacts/item2-github-owner-{nonce}"
+    expect(dir_create(path, true)).to_equal(true)
+    val root = path_absolute(path)
+    val request = setup_item2_owned_request()
+    val seed_bytes = [0u8,1u8,2u8,3u8,4u8,5u8,6u8,7u8,8u8,9u8,10u8,11u8,12u8,13u8,14u8,15u8,16u8,17u8,18u8,19u8,20u8,21u8,22u8,23u8,24u8,25u8,26u8,27u8,28u8,29u8,30u8,31u8]
+    val (seed, public_key) = pure_ed25519_keypair_from_seed(seed_bytes)
+    val entity = entity_ref_provisional(EntityUid(database_namespace: "00112233445566778899aabbccddeeff", entity_kind: "bridge_intent", actor: ActorIncarnation(hex: "ffeeddccbbaa99887766554433221100"), counter: 1u64))
+    val fields = [DbField(name: "intent_revision", value: DbValue.Text(request.delivery.intent.revision))]
+    var patch = DbPatch(batch_id: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1u64, actor: "ffeeddccbbaa99887766554433221100", actor_counter: 1u64, base_revision: "", causal_dependencies: [], schema_revision: "s1", reducer_revision: "r1", operations: [DbOperation.Create(entity, "bridge_intent", fields)], payload_digest: "", digest_algorithm: "sha256", digest_version: 1u64, signer: "bridge-reviewer", signature_algorithm: "ed25519", signature_version: 1u64, signature: [], provenance: "signed bridge owner fixture")
+    patch = db_patch_seal(patch).unwrap()
+    patch.signature = pure_ed25519_sign(seed, public_key, db_patch_signing_bytes(patch).unwrap())
+    val key = DbSignerKey(key_id: "bridge-reviewer", public_key: public_key, role: "reviewer", valid_from: 0u64, valid_until: 10000u64, revoked: false, permissions: [DbPermission(operation: "create", kind: "bridge_intent", field: "intent_revision")])
+    var admission = DbAdmissionPolicy(revision: "", repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1u64, schema_revision: "s1", reducer_revision: "r1", keys: [key], metadata: setup_item2_reviewed_metadata([patch]))
+    admission.revision = db_admission_policy_digest(admission).unwrap()
+    val merge = MergePolicy(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1u64, schema_revision: "s1", reducer_revision: "r1", fields: [DbFieldSchema(kind: "bridge_intent", field: "intent_revision", rule: FieldMergeRule.ScalarConflict)], constraints: [])
+    if commit_intent:
+        expect(db_apply_local(root, "", patch, merge, admission, 10u64).unwrap().code).to_equal("ok")
+    _item2_owned_root = root
+    _item2_owned_revision = request.delivery.intent.revision
+    _item2_owned_clock = 10u64
+    _item2_owned_mode = "normal"
+    _item2_owned_remote_body = ""
+    _item2_owned_effects = 0
+    _item2_owned_requests = 0
+    Item2GithubOwnedFixture(root: root, admission: admission, request: request)
+
+fn setup_item2_owned_reply(value: any) -> DbGithubProcessReply:
+    DbGithubProcessReply(stdout: "HTTP/2.0 200 OK\n\n" + json_stringify(value), stderr: "", exit_code: 0)
+
+fn setup_item2_owned_issue() -> any:
+    json_object({"number": json_number(7), "title": json_string("durable issue"), "body": json_string(_item2_owned_remote_body), "state": json_string("open"), "updated_at": json_string("2026-10-03T00:00:00Z")})
+
+fn setup_item2_owned_transport(args: [text], timeout: i64, maximum_bytes: i64) -> DbGithubProcessReply:
+    # Every simulated provider request checks the REAL repository writer state.
+    expect(scv_sj_lease_is_held(_item2_owned_root)).to_equal(false)
+    _item2_owned_requests = _item2_owned_requests + 1
+    val method = args[4]
+    val endpoint = args[10]
+    if method == "GET":
+        if endpoint == "repos/owner/repo":
+            return setup_item2_owned_reply(json_object({"id": json_number(42)}))
+        expect(endpoint).to_equal("repos/owner/repo/issues?state=all&sort=created&direction=asc&per_page=100&page=1")
+        if _item2_owned_remote_body == "":
+            return setup_item2_owned_reply(json_array([]))
+        return setup_item2_owned_reply(json_array([setup_item2_owned_issue()]))
+    expect(method).to_equal("POST")
+    expect(endpoint).to_equal("repos/owner/repo/issues")
+    # Reopen persisted bytes during the effect: this cannot pass by returning
+    # an in-memory transition from a fake persistence callback.
+    val reopened = db_bridge_store_load(_item2_owned_root, _item2_owned_revision).unwrap()
+    expect(reopened.delivery.state).to_equal("sent_unconfirmed")
+    expect(reopened.delivery.must_reconcile).to_equal(true)
+    expect(reopened.delivery.attempts).to_equal(1u64)
+    expect(file_exists("{_item2_owned_root}/.scv/db-bridge/HEAD")).to_equal(true)
+    _item2_owned_effects = _item2_owned_effects + 1
+    if _item2_owned_mode != "timeout-absent":
+        for arg in args:
+            if arg.starts_with("body="): _item2_owned_remote_body = arg[5:]
+    if _item2_owned_mode == "takeover":
+        _item2_owned_clock = 100u64
+        val acquired = db_bridge_store_acquire(_item2_owned_root, _item2_owned_revision, "other-worker", 100u64, 20u64).unwrap()
+        expect(acquired.delivery.generation).to_equal(2u64)
+    if _item2_owned_mode == "timeout-absent":
+        return DbGithubProcessReply(stdout: "", stderr: "\nTIMEOUT\n", exit_code: -1)
+    setup_item2_owned_reply(setup_item2_owned_issue())
+
+if host_os() != "windows":
+    describe "GitHub owner durable enqueue-to-readback integration":
+        it "requires a committed signed canonical intent before any provider request":
+            val fixture = setup_item2_owned_fixture(false)
+            expect(db_github_bridge_owned(fixture.root, fixture.admission, fixture.request, "worker", 20u64, setup_item2_owned_now, setup_item2_owned_transport)).to_equal(Err("SCVDB_BRIDGE_INTENT_NOT_COMMITTED"))
+            expect(_item2_owned_requests).to_equal(0)
+            expect(db_store_read(fixture.root, "bridge").code).to_equal("empty")
+
+        it "reopens sent state before network and atomically persists observed acknowledgement":
+            val fixture = setup_item2_owned_fixture(true)
+            val semantic_head = db_store_read(fixture.root).head
+            val result = db_github_bridge_owned(fixture.root, fixture.admission, fixture.request, "worker", 20u64, setup_item2_owned_now, setup_item2_owned_transport).unwrap()
+            expect(result.code).to_equal("acknowledged")
+            expect(result.external_id).to_equal("7")
+            val reopened = db_bridge_store_load(fixture.root, fixture.request.delivery.intent.revision).unwrap()
+            expect(reopened.delivery.state).to_equal("acknowledged")
+            expect(reopened.delivery.owner).to_equal("")
+            expect(db_store_read(fixture.root).head).to_equal(semantic_head)
+            expect(_item2_owned_effects).to_equal(1)
+            val before_requests = _item2_owned_requests
+            expect(db_github_bridge_owned(fixture.root, fixture.admission, fixture.request, "next-worker", 20u64, setup_item2_owned_now, setup_item2_owned_transport).unwrap().code).to_equal("acknowledged")
+            expect(_item2_owned_requests).to_equal(before_requests)
+
+        it "recovers durable uncertainty under a new generation without another POST":
+            val fixture = setup_item2_owned_fixture(true)
+            _item2_owned_mode = "timeout-absent"
+            val uncertain = db_github_bridge_owned(fixture.root, fixture.admission, fixture.request, "worker", 20u64, setup_item2_owned_now, setup_item2_owned_transport).unwrap()
+            expect(uncertain.code).to_equal("SCVDB_PROVIDER_EFFECT_UNCERTAIN")
+            expect(db_bridge_store_load(fixture.root, _item2_owned_revision).unwrap().delivery.state).to_equal("sent_unconfirmed")
+            _item2_owned_clock = 100u64
+            val recovered = db_github_bridge_owned(fixture.root, fixture.admission, fixture.request, "recovery-worker", 20u64, setup_item2_owned_now, setup_item2_owned_transport).unwrap()
+            expect(recovered.code).to_equal("SCVDB_PROVIDER_EFFECT_UNCERTAIN")
+            expect(recovered.stored.delivery.generation).to_equal(2u64)
+            expect(recovered.stored.delivery.must_reconcile).to_equal(true)
+            expect(_item2_owned_effects).to_equal(1)
+            # Provider visibility can arrive later; readback completes the same
+            # immutable intent without executing its create again.
+            _item2_owned_remote_body = fixture.request.body + "\n\n<!-- scv-bridge:v1:{_item2_owned_revision} -->"
+            val acknowledged = db_github_bridge_owned(fixture.root, fixture.admission, fixture.request, "recovery-worker", 20u64, setup_item2_owned_now, setup_item2_owned_transport).unwrap()
+            expect(acknowledged.code).to_equal("acknowledged")
+            expect(_item2_owned_effects).to_equal(1)
+
+        it "does not steal another owner's live durable delivery lease":
+            val fixture = setup_item2_owned_fixture(true)
+            db_bridge_store_enqueue(fixture.root, fixture.admission, fixture.request.delivery.intent).unwrap()
+            db_bridge_store_acquire(fixture.root, _item2_owned_revision, "first-owner", 10u64, 20u64).unwrap()
+            expect(db_github_bridge_owned(fixture.root, fixture.admission, fixture.request, "second-owner", 20u64, setup_item2_owned_now, setup_item2_owned_transport)).to_equal(Err("SCVDB_LEASE_BUSY"))
+            expect(_item2_owned_requests).to_equal(0)
+
+        it "rejects acknowledgement after another durable owner replaces an expired fence":
+            val fixture = setup_item2_owned_fixture(true)
+            _item2_owned_mode = "takeover"
+            expect(db_github_bridge_owned(fixture.root, fixture.admission, fixture.request, "worker", 20u64, setup_item2_owned_now, setup_item2_owned_transport)).to_equal(Err("SCVDB_LEASE_STALE"))
+            val current = db_bridge_store_load(fixture.root, _item2_owned_revision).unwrap()
+            expect(current.delivery.owner).to_equal("other-worker")
+            expect(current.delivery.generation).to_equal(2u64)
+            expect(current.delivery.must_reconcile).to_equal(true)
+            expect(_item2_owned_effects).to_equal(1)
+
+        it "ignores a caller-fabricated delivery status and uses actual stored state":
+            val fixture = setup_item2_owned_fixture(true)
+            var request = fixture.request
+            var forged = request.delivery
+            forged.state = "acknowledged"
+            forged.provider_revision = "fabricated"
+            request.delivery = forged
+            val result = db_github_bridge_owned(fixture.root, fixture.admission, request, "worker", 20u64, setup_item2_owned_now, setup_item2_owned_transport).unwrap()
+            expect(result.code).to_equal("acknowledged")
+            expect(_item2_owned_effects).to_equal(1)
+            expect(result.stored.delivery.provider_revision == "fabricated").to_equal(false)
