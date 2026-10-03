@@ -80,3 +80,18 @@ is a different path. No SCV hashing or hydration PASS is claimed.
 Read-only runtime reinspection found no deployed `bin/release` executable and
 the known candidate still reports `admission=UNADMITTED`, despite child exit 0.
 No further diagnostic build or unauthorized Rust seed test was attempted.
+
+## Historical main-only scope before reconciliation
+
+This earlier forward-port note is retained for provenance. The reconciled tree
+includes the release-only SCV callers and their retained-owner migrations.
+
+## Main forward-port scope
+
+Main base: `f2423274600ffe7beef03e2bf07fcf8bba310db7`. The release-only SCV
+retained-file facade, hydration source, hydration spec and hydration fixture do
+not exist on this branch and are not introduced by this forward-port. Their
+existing release consumers were migrated on release/1.0. Shared retained-file
+regressions use direct stdlib imports and private temporary files on both
+branches. References to that SCV caller chain in the SHA bug/report describe the
+release-side dependency; they do not assert those paths exist on main.
