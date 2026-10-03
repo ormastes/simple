@@ -10,6 +10,7 @@ use compiler.backend.linker.elf.elf_static_link.{
     ELF_LINK_DYNAMIC_EXEC, ELF_LINK_STATIC_EXEC
 }
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf.shared_object.{elf_parse_shared}
 
 val ITEM4_DYNAMIC_FIX: text = "test/fixtures/linker/elf"
 val ITEM4_DYNAMIC_INTERP: text = "/lib64/ld-linux-x86-64.so.2"
@@ -134,6 +135,48 @@ fn item4_dynamic_check_imports(bytes: [i64]):
     expect(bytes[data_symbol + 4] & 15).to_equal(1)
 
 describe "Item 4 dynamic linker production acceptance":
+    it "ITEM4-REQ-005 ITEM4-REQ-007 rejects an unterminated shared-object dynamic table":
+        step("Validate the real DSO baseline and locate its bounded dynamic table")
+        val library = item4_dynamic_load("libadd_x64.so.1")
+        var malformed = file_read_bytes("{ITEM4_DYNAMIC_FIX}/libadd_x64.so.1")
+        expect(malformed.len()).to_equal(library.len())
+        if malformed.len() != library.len(): return
+        val baseline = elf_parse_shared(malformed)
+        expect(baseline.is_ok()).to_equal(true)
+        if baseline.is_err(): return
+        expect(baseline.unwrap().soname).to_equal("libadd_x64.so.1")
+        val header = item4_dynamic_section(library, ".dynamic")
+        expect(header).to_be_greater_than(0)
+        if header <= 0: return
+        val start = item4_dynamic_read(library, header + 24, 8)
+        val size = item4_dynamic_read(library, header + 32, 8)
+        expect(start >= 0 and size > 0 and size % 16 == 0 and start <= library.len() - size).to_equal(true)
+        if start < 0 or size <= 0 or size % 16 != 0 or start > library.len() - size: return
+        step("Replace every DT_NULL tag with DT_DEBUG while preserving values and all other input bytes")
+        var offset = start
+        var replaced: i64 = 0
+        while offset < start + size:
+            if item4_dynamic_read(library, offset, 8) == 0:
+                var byte: i64 = 0
+                while byte < 8:
+                    malformed[offset + byte] = 0u8
+                    byte = byte + 1
+                malformed[offset] = 21u8
+                replaced = replaced + 1
+            offset = offset + 16
+        expect(replaced).to_be_greater_than(0)
+        if replaced <= 0: return
+        step("Require the shared-object reader and production link to reject the missing terminator")
+        val parsed = elf_parse_shared(malformed)
+        expect(parsed.is_err()).to_equal(true)
+        if parsed.is_err(): expect(parsed.unwrap_err()).to_contain("DT_NULL")
+        val linked = elf_link(ElfLinkRequest(
+            objects: [item4_dynamic_load("pic_start_x64.o")], archives: [], shared: [malformed],
+            entry: "_start", target: RelocArch.X86_64, mode: ELF_LINK_DYNAMIC_EXEC,
+            interp: ITEM4_DYNAMIC_INTERP))
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_err(): expect(linked.unwrap_err()).to_contain("DT_NULL")
+
     it "ITEM4-REQ-005 records the real shared dependency and function/data imports":
         step("Load checked-in x86_64 relocatable and DSO fixtures with setup assertions")
         val request = item4_dynamic_request(ITEM4_DYNAMIC_INTERP, false, "", "both")
