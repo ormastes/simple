@@ -10,8 +10,19 @@ hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
 require_current_manifest() {
   regular "$1" || die "generic task manifest is not a regular file: $1"
   IFS= read -r manifest_header <"$1" || die "generic task manifest header unreadable"
-  [ "$manifest_header" = SIMPLE-BUILD-RUN-4 ] \
-    || die "generic task manifest uses obsolete wire; preserve it and use a new output root"
+  case "$manifest_header" in SIMPLE-BUILD-RUN-4|SIMPLE-BUILD-RUN-5) ;; \
+    *) die "generic task manifest uses obsolete wire; preserve it and use a new output root" ;; esac
+}
+publish_task_manifest() {
+  pending=$1 destination=$2
+  regular "$pending" || die "task manifest candidate unavailable"
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    regular "$destination" && cmp -s "$pending" "$destination" \
+      || die "retained task manifest differs; preserve it and use a new output root"
+    rm -f "$pending"
+  else
+    mv "$pending" "$destination" || die "task manifest publication failed"
+  fi
 }
 disk_preflight() {
   available_disk_bytes=$(df -Pk "$1" | awk 'NR==2 { printf "%.0f\n", $4*1024 }') \
@@ -33,7 +44,7 @@ shared_parse_cas_root=
 root= template= manifest_program= builder_program= group_program= group_worker= group_broker= index_program=
 authority_program= authority_receipt= authority_digest= authority_image_receipt= image_receipt=
 llvm_index_config= cranelift_index_config= phase3_llvm_index_config= phase3_cranelift_index_config=
-threads= memory_bytes= reserve_bytes= target= group_size= max_attempts= poll_ms= lifetime_ms=
+threads= memory_bytes= reserve_bytes= target= group_size= max_attempts= poll_ms= lifetime_ms= memory_policy=enforce
 estimated_group_disk_bytes= minimum_free_disk_bytes=
 for arg in "$@"; do
   case "$arg" in
@@ -76,6 +87,7 @@ for arg in "$@"; do
     --phase3-cranelift-index-config=*) phase3_cranelift_index_config=${arg#*=} ;;
     --threads=*) threads=${arg#*=} ;;
     --memory-bytes=*) memory_bytes=${arg#*=} ;;
+    --memory-policy=*) memory_policy=${arg#*=} ;;
     --reserve-bytes=*) reserve_bytes=${arg#*=} ;;
     --target=*) target=${arg#*=} ;;
     --group-size=*) group_size=${arg#*=} ;;
@@ -87,6 +99,8 @@ for arg in "$@"; do
     *) die "unknown option: $arg" ;;
   esac
 done
+case "$memory_policy" in enforce|monitor) ;; *) die "invalid memory policy" ;; esac
+case "$lifetime_ms" in 0) ;; *) positive "$lifetime_ms" || die "nonnegative work lifetime required" ;; esac
 for path in "$hello_receipt" "$source_authority" "$original_source_snapshot" "$tool_intent" "$runtime_snapshot" \
     "$scv_receipt" "$source_root" "$source_inventory" "$source_links" \
     "$module_inventory" "$excluded_inventory" "$module_role_policy" "$shared_parse_cas_root" \
@@ -114,7 +128,7 @@ case "$source_links" in "$source_root"/*) source_links_relative=${source_links#"
 case "$root/" in "$source_root/"*) die "output root overlaps immutable source root" ;; esac
 case "$source_root/" in "$root/"*) die "immutable source root overlaps output root" ;; esac
 for n in "$threads" "$memory_bytes" "$reserve_bytes" "$group_size" "$max_attempts" \
-    "$poll_ms" "$lifetime_ms" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes"; do
+    "$poll_ms" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes"; do
   positive "$n" || die "positive resource policy required"
 done
 [ "$memory_bytes" -le 1125899906842624 ] \
@@ -177,7 +191,7 @@ prepare_backend() {
     --shared-parse-cas-root="$shared_parse_cas_root" \
     --output-root="$backend_root" --manager-program="$group_program" \
     --worker-program="$group_worker" --broker-program="$group_broker" \
-    --threads="$threads" --memory-bytes="$memory_bytes" \
+    --threads="$threads" --memory-bytes="$memory_bytes" --memory-policy="$memory_policy" \
     --manifest="$backend_root/state/manifest.sdn" --target="$target" \
     --reserve-bytes="$reserve_bytes" --group-size="$group_size" \
     --max-attempts="$max_attempts" --poll-ms="$poll_ms" \
@@ -258,18 +272,20 @@ build_binary() {
   mkdir -p "$job_root/bin" "$job_root/cache" "$job_root/state" || die "job directories unavailable"
   verify_shared_source
   disk_preflight "$job_root" || exit 20
-  if [ ! -f "$job_root/manifest.sdn" ]; then
+  pending_manifest="$job_root/manifest.sdn.pending.$$"
+  [ ! -e "$pending_manifest" ] && [ ! -L "$pending_manifest" ] || die "task manifest scratch already exists"
     verify_image_set
     "$manifest_program" --job-from-inventory "$template" "$producer" "$source_root" \
       "$task_id" "$task_phase" "$output" "$source_inventory_relative" \
       --memory-limit-bytes "$memory_bytes" --links-inventory "$source_links_relative" \
-      --manifest "$job_root/manifest.sdn" -- \
+      --work-timeout-ms "$lifetime_ms" --memory-policy "$memory_policy" \
+      --manifest "$pending_manifest" -- \
       native-build --target "$target" --backend "$backend" \
       --source src/compiler --source src/app --source src/lib \
       --entry-closure --entry "$entry" --threads "$threads" \
-      --cache-dir "cache/$task_id" --output "$output" \
+      --cache-dir "cache/$task_id" --mode dynload --output "$output" \
       || die "$id manifest blocked"
-  fi
+  publish_task_manifest "$pending_manifest" "$job_root/manifest.sdn"
   require_current_manifest "$job_root/manifest.sdn"
   verify_image_set
   sh "$shared_parse_root_check" "$shared_parse_cas_root" "$shared_parse_cas_root" \
@@ -332,17 +348,19 @@ build_index() {
   else
     : >"$input_root/links.inventory" || die "$backend empty link inventory unavailable"
   fi
-  if [ ! -e "$job_root/manifest.sdn" ]; then
+  pending_manifest="$job_root/manifest.sdn.pending.$$"
+  [ ! -e "$pending_manifest" ] && [ ! -L "$pending_manifest" ] || die "task manifest scratch already exists"
     verify_image_set
     "$manifest_program" --job-from-inventory "$template" "$index_program" \
       "$input_root" "index-$backend" "$task_phase" index-output/receipt.sdn \
       source.inventory --memory-limit-bytes "$memory_bytes" \
       --links-inventory links.inventory \
-      --manifest "$job_root/manifest.sdn" -- \
+      --work-timeout-ms "$lifetime_ms" --memory-policy "$memory_policy" \
+      --manifest "$pending_manifest" -- \
       native-groups-index-build --manager-work --config index.config \
       --receipt @WORK@/index-output/receipt.sdn \
       || die "$backend index manifest blocked"
-  fi
+  publish_task_manifest "$pending_manifest" "$job_root/manifest.sdn"
   require_current_manifest "$job_root/manifest.sdn"
   verify_image_set
   sh "$shared_parse_root_check" "$shared_parse_cas_root" "$shared_parse_cas_root" \

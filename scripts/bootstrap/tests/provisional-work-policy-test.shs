@@ -1,0 +1,143 @@
+#!/bin/sh
+# Execute production routing/serialization with owner spies; native admission is UNRUN.
+set -eu
+base=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+test_parent=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+test_root=$(mktemp -d "$test_parent/simple-provisional-policy.XXXXXX")
+cleanup() {
+  case "$test_root" in "$test_parent"/simple-provisional-policy.*) rm -rf -- "$test_root" ;; *) exit 2 ;; esac
+}
+trap cleanup EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+die() { fail "$*"; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+extract_function() {
+  awk -v name="$2" '$0 == name "() {" {copy=1} copy {print} copy && $0 == "}" {exit}' "$1" >"$3"
+  [ -s "$3" ] || fail "production function absent: $2"
+}
+script="$base/bootstrap-provisional-phase3-phase4.shs"
+for name in require_current_manifest publish_task_manifest prepare_backend build_binary build_index; do
+  extract_function "$script" "$name" "$test_root/$name.shs"
+  . "$test_root/$name.shs"
+done
+export EVENTS="$test_root/events"
+: >"$EVENTS"
+cat >"$test_root/emitter" <<'SH'
+#!/bin/sh
+set -eu
+task=$5 output=$7 manifest= timeout= policy= reservation=
+printf 'emit\n' >>"$EVENTS"
+printf '%s\n' "$@" >>"$EVENTS"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --work-timeout-ms) timeout=$2; shift ;;
+    --memory-policy) policy=$2; shift ;;
+    --memory-limit-bytes) reservation=$2; shift ;;
+    --manifest) manifest=$2; shift ;;
+  esac
+  shift
+done
+[ "$timeout:$policy:$reservation" = 0:monitor:6000000000 ]
+printf '%s\n' SIMPLE-BUILD-RUN-5 "task=$task" "output=$output" >"$manifest"
+SH
+cat >"$test_root/builder" <<'SH'
+#!/bin/sh
+set -eu
+action=$1; shift
+printf 'owner=%s\n' "$action" >>"$EVENTS"
+state= output_root= manifest= config=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --state) state=$2; shift ;;
+    --output-root) output_root=$2; shift ;;
+    --manifest) manifest=$2; shift ;;
+    --config) config=$2; shift ;;
+  esac
+  shift
+done
+if [ "$action" = native-groups-prepare ]; then
+  for row in lifetime_ms=0 memory_policy=monitor memory_limit_bytes=6000000000 max_threads=40 poll_ms=1000 max_attempts=3 memory_reserve_bytes=1000000000; do
+    grep -qx "$row" "$config"
+  done
+  printf 'native group fixture\n' >"$manifest"
+elif [ "$action" = run ]; then
+  task=$(sed -n 's/^task=//p' "$manifest")
+  output=$(sed -n 's/^output=//p' "$manifest")
+  mkdir -p "$output_root/$(dirname -- "$output")" "$state/receipts"
+  printf 'fixture output\n' >"$output_root/$output"
+  printf 'fixture receipt\n' >"$state/receipts/$task.sdn"
+fi
+SH
+cat >"$test_root/index" <<'SH'
+#!/bin/sh
+set -eu
+action=$1; shift
+while [ "$#" -gt 0 ]; do
+  case "$1" in --handoff) handoff=$2; shift ;; --field) field=$2; shift ;; esac
+  shift
+done
+case "$action" in
+  native-groups-index-verify) printf 'fixture handoff\n' >"$handoff" ;;
+  native-groups-index-handoff-field)
+    case "$field" in phase) echo phase4 ;; backend) echo llvm ;; source_count) echo 1 ;; *) exit 2 ;; esac ;;
+  *) exit 2 ;;
+esac
+SH
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" >>"$EVENTS"\n' >"$test_root/prepare"
+printf '#!/bin/sh\nexit 0\n' >"$test_root/check"
+chmod +x "$test_root/emitter" "$test_root/builder" "$test_root/index" "$test_root/prepare" "$test_root/check"
+root="$test_root/run" source_root="$test_root/source"
+mkdir -p "$root" "$source_root"
+fixture="$test_root/pin"; printf 'fixture pin\n' >"$fixture"
+for variable in authority_program authority_receipt authority_digest hello_receipt source_authority source_authority_digest original_source_snapshot original_source_snapshot_digest tool_intent tool_intent_digest runtime_snapshot runtime_snapshot_digest image_receipt scv_receipt module_inventory shared_parse_cas_root group_program group_worker group_broker template producer; do
+  eval "$variable=\$fixture"
+done
+manifest_program="$test_root/emitter" builder_program="$test_root/builder" index_program="$test_root/index"
+prepare="$test_root/prepare" shared_parse_root_check="$test_root/check" shared_parse_source_check="$test_root/check"
+threads=40 memory_bytes=6000000000 reserve_bytes=1000000000 lifetime_ms=0 memory_policy=monitor
+group_size=32 max_attempts=3 poll_ms=1000 estimated_group_disk_bytes=1 minimum_free_disk_bytes=26843545600
+target=x86_64-pc-windows-msvc source_inventory_relative=source.inventory source_links_relative=links.inventory module_inventory_count=1
+hashes="$test_root/hashes"; : >"$hashes"
+verify_shared_source() { :; }
+verify_image_set() { :; }
+disk_preflight() { :; }
+build_binary bootstrap src/app/cli/bootstrap_main.spl bin/bootstrap.exe phase4 llvm
+build_index phase4 llvm "$fixture"
+prepare_backend phase4 llvm
+[ "$(grep -c '^emit$' "$EVENTS")" -eq 2 ] || fail 'binary/index emitter count differs'
+[ "$(grep -c '^owner=run$' "$EVENTS")" -eq 2 ] || fail 'binary/index did not reach owner'
+grep -qx -- '--memory-policy=monitor' "$EVENTS" || fail 'group policy not forwarded'
+grep -qx -- '--lifetime-ms=0' "$EVENTS" || fail 'group deadline not forwarded'
+grep -qx -- '--poll-ms=1000' "$EVENTS" || fail 'finite poll changed'
+grep -qx 'dynload' "$EVENTS" || fail 'product dynload request missing'
+printf 'changed policy fixture\n' >>"$root/phase4/binaries/llvm/bootstrap/manifest.sdn"
+if (build_binary bootstrap src/app/cli/bootstrap_main.spl bin/bootstrap.exe phase4 llvm) >"$test_root/reject" 2>&1; then
+  fail 'retained different manifest admitted'
+fi
+grep -q 'retained task manifest differs' "$test_root/reject" || fail 'changed manifest rejected for wrong reason'
+[ "$(grep -c '^owner=run$' "$EVENTS")" -eq 2 ] || fail 'changed policy reached owner'
+grep -qx 'changed policy fixture' "$root/phase4/binaries/llvm/bootstrap/manifest.sdn" || fail 'retained manifest overwritten'
+
+# Exercise the production config publication and exact manager argv after authority validation.
+output_root="$test_root/group" state_root="$output_root/state"; mkdir -p "$state_root"
+config="$output_root/prepare.env" tmp="$config.tmp" manifest="$state_root/manifest.sdn"
+manager_program="$test_root/builder" worker_program="$fixture" broker_program="$fixture" inventory="$fixture"
+for variable in run_id candidate candidate_digest source_snapshot source_digest scv_receipt_digest variant_receipt variant_receipt_digest runtime_std_authority runtime_std_authority_digest index_handoff index_handoff_digest tool_snapshot tool_digest runtime_digest inventory_digest index_read_root; do
+  eval "$variable=\$fixture"
+done
+inventory_count=1 phase=phase4 backend=llvm available_memory_bytes=16000000000 available_disk_bytes=64000000000
+awk '/^\{$/ {copy=1} copy {print}' "$base/prepare-provisional-native-groups.shs" >"$test_root/config.shs"
+. "$test_root/config.shs" >"$test_root/config-result"
+grep -qx 'owner=native-groups-prepare' "$EVENTS" || fail 'config did not reach group owner'
+
+for wrapper in run-provisional-phase3-phase4 bootstrap-provisional-phase3-phase4 prepare-provisional-native-groups; do
+  if sh "$base/$wrapper.shs" --lifetime-ms=-1 --memory-policy=monitor >"$test_root/reject" 2>&1; then fail 'negative deadline accepted'; fi
+  grep -q 'nonnegative work lifetime required' "$test_root/reject" || fail 'negative deadline rejected for wrong reason'
+  if sh "$base/$wrapper.shs" --lifetime-ms=0 --memory-policy=unknown >"$test_root/reject" 2>&1; then fail 'unknown memory policy accepted'; fi
+  grep -q 'invalid memory policy' "$test_root/reject" || fail 'unknown policy rejected for wrong reason'
+done
+printf 'SIMPLE-BUILD-RUN-4\n' >"$test_root/legacy"; require_current_manifest "$test_root/legacy"
+printf 'SIMPLE-BUILD-RUN-3\n' >"$test_root/obsolete"
+if (require_current_manifest "$test_root/obsolete") >"$test_root/reject" 2>&1; then fail 'obsolete manifest accepted'; fi
+echo 'PASS: unlimited/monitor binary, index and group routes retain positive reservation and finite polling'
