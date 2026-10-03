@@ -174,3 +174,27 @@ describe "actual local receipt-index Git mechanics without protected-completion 
         val broken = setup_item2_index_corrupt_blob(fixture.request, first, "entries/" + first.receipt_digest, oversized)
         expect(db_receipt_index_git_read(fixture.request)).to_equal(Err("SCVDB_INDEX_GIT_EFFECT"))
         check_item2_index_cleanup(fixture)
+
+    it "refuses a successor when the signed latest cursor has lost an immutable projection":
+        val fixture = setup_item2_index_fixture()
+        val first = db_receipt_index_git_publish_local(fixture.request).unwrap()
+        val remote = fixture.request.remote
+        check_item2_index_git(remote, ["read-tree", first.index_head])
+        check_item2_index_git(remote, ["update-index", "--force-remove", "--", "by-commit/" + fixture.request.receipt.accepted_head])
+        val tree = check_item2_index_git(remote, ["write-tree"])
+        val broken = check_item2_index_git(remote, ["commit-tree", tree, "-p", first.index_head, "-m", "latest copy missing"])
+        check_item2_index_git(remote, ["update-ref", first.index_ref, broken, first.index_head])
+        val successor = setup_item2_index_successor(fixture.request, broken)
+        expect(db_receipt_index_git_publish_local(successor)).to_equal(Err("SCVDB_INDEX_QUARANTINE_PARTIAL"))
+        expect(check_item2_index_git(remote, ["rev-parse", first.index_ref])).to_equal(broken)
+        check_item2_index_cleanup(fixture)
+
+    it "refuses an existing branch with a fabricated empty cursor rather than restarting sequence one":
+        val fixture = setup_item2_index_fixture()
+        val first = db_receipt_index_git_publish_local(fixture.request).unwrap()
+        val empty = db_receipt_index_cursor_encode(DbReceiptIndexCursor(count: 0, last_receipt: nil)).unwrap()
+        val broken = setup_item2_index_corrupt_blob(fixture.request, first, "cursor", empty)
+        val successor = setup_item2_index_successor(fixture.request, broken)
+        expect(db_receipt_index_git_publish_local(successor)).to_equal(Err("SCVDB_INDEX_QUARANTINE_CURSOR"))
+        expect(check_item2_index_git(fixture.request.remote, ["rev-parse", first.index_ref])).to_equal(broken)
+        check_item2_index_cleanup(fixture)

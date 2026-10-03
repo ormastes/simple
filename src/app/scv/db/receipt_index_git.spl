@@ -75,6 +75,18 @@ fn _receipt_index_plan(root: text, head: text, request: DbReceiptIndexGitRequest
         val encoded = _receipt_index_blob(root, head, "cursor")?
         if encoded == nil: return Err("SCVDB_INDEX_CURSOR_MISSING")
         cursor = db_receipt_index_cursor_decode(encoded.unwrap())?
+        # A signed cursor is not evidence that its indexed receipt survived.
+        # Validate the current immutable projections before extending history,
+        # even when the incoming receipt itself has no existing index entry.
+        if cursor.count == 0 or cursor.last_receipt == nil: return Err("SCVDB_INDEX_QUARANTINE_CURSOR")
+        val latest = cursor.last_receipt.unwrap()
+        val authenticated = db_receipt_authenticate(latest, request.authority)?
+        val copies = _receipt_index_lookup(root, head, latest, cursor.count)?
+        if copies.by_digest == nil or copies.by_commit == nil or copies.by_sequence == nil: return Err("SCVDB_INDEX_QUARANTINE_PARTIAL")
+        val expected = db_receipt_index_entry_encode(DbReceiptIndexEntry(sequence: cursor.count, receipt: latest))?
+        for copy in [copies.by_digest.unwrap(), copies.by_commit.unwrap(), copies.by_sequence.unwrap()]:
+            val decoded = db_receipt_index_entry_decode(copy)?
+            if copy != expected: return Err("SCVDB_INDEX_QUARANTINE_DISAGREEMENT")
     val digest_entry = _receipt_index_blob(root, head, "entries/" + db_receipt_digest(request.receipt)?)?
     var sequence = 1u64
     if val existing = digest_entry:
