@@ -3,6 +3,14 @@ use std.spec.{describe, it, expect, fail}
 use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1, BuildHostV1, BuildRunV1, builder_validate_task_v1, builder_task_identity_v1}
 use std.common.build_manager.codec.{builder_encode_task_v1, builder_decode_task_v1, builder_encode_run_v1, builder_decode_run_v1}
 use std.common.build_manager.memory_policy.{BuilderMemoryReceiptV1, builder_memory_enforcement_bytes_v1, builder_memory_receipt_encode_v1, builder_memory_receipt_validate_v1}
+use std.common.build_manager.contracts.{BuildResultV1}
+use app.bootstrap_builder.worker.{builder_worker_memory_admit_v1}
+use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_terminal_v1, builder_transport_reaped_v1}
+use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use app.bootstrap_builder.codec.{builder_write_result_v1}
+use app.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 
 fn memory_task_v1() -> BuildTaskV1:
     val digest = "a".repeat(64)
@@ -13,6 +21,28 @@ fn memory_task_v1() -> BuildTaskV1:
         memory_limit_bytes: 1048576, links: [])
 
 describe "Manager memory reservation and enforcement policy":
+    it "settles an unsupported enforcement refusal only with its matching ERROR result":
+        val root = "build/memory-policy-refusal-" + str(getpid())
+        expect(dir_create_all(root)).to_equal(true)
+        val task = memory_task_v1()
+        val identity = builder_task_identity_v1(task)
+        val host = BuildHostV1("local", "local", "", root, "worker", "a".repeat(64), 1)
+        val attempt = BuilderAttemptV1(task_id: task.id, attempt: 1, host: host, pid: 0,
+            local_root: root, remote_root: root, error: "", identity_digest: identity,
+            process: builder_process_portable_v1())
+        match builder_worker_memory_admit_v1(task, root, "local"):
+            Ok(_): fail("unsupported enforcement accepted")
+            Err(reason): expect(reason).to_contain("requires the cgroup or Job")
+        expect(file_exists(root + "/compiler.reaped")).to_equal(false)
+        expect(builder_transport_terminal_v1(attempt)).to_equal(false)
+        var result = BuildResultV1(task.id, 1, identity, "local", "ERROR", 2, [], -1, -1, -1)
+        expect(builder_write_result_v1(root + "/result.sdn", result)).to_equal(true)
+        expect(builder_transport_terminal_v1(attempt)).to_equal(true)
+        expect(builder_transport_reaped_v1(attempt)).to_equal(false)
+        result.host_id = "substituted"
+        expect(builder_write_result_v1(root + "/result.sdn", result)).to_equal(true)
+        expect(builder_transport_terminal_v1(attempt)).to_equal(false)
+
     it "keeps legacy enforce bytes and identity while monitor is independently bound":
         var task = memory_task_v1()
         val legacy = builder_encode_task_v1(task)

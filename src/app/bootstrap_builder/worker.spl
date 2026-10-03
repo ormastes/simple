@@ -10,6 +10,8 @@ use app.io.env_ops.{env_vars}
 use app.io.time_ops.{sleep_ms}
 use std.common.build_manager.memory_policy.{builder_memory_enforcement_bytes_v1, builder_memory_receipt_for_task_v1}
 use std.common.process.observation_v4.{ProcessObservationTreeMetricKindV4, POV4_VALID_DIRECT_RSS}
+use std.common.build_manager.no_child_started.{BuilderNoChildStartedV1, builder_no_child_started_encode_v1}
+use std.common.build_manager.capacity_request.{BuilderCapacitySettlementV1, builder_capacity_settlement_encode_v1}
 use std.nogc_sync_mut.io.process_observation_v4.{OwnedExecutablePin, OwnedCwdPinV4, ProcessObservationLeaseV4, process_observation_capabilities_v4, process_observation_start_pinned_v4}
 use std.common.process.observation_v4.{ProcessObservationRequestV4, ProcessObservationEnvironmentV4, ProcessObservationPacketKindV4, ProcessObservationEnforcementKindV4, ProcessObservationDescendantPolicyV4, ProcessObservationFailureReasonV4, freeze_process_observation_receipt_v4, freeze_process_observation_cleanup_receipt_v4}
 
@@ -99,6 +101,24 @@ fn builder_worker_control_v1(root: text, identity: text, host_id: text) -> bool:
     if not file_atomic_write(root + "/control.response", request): return false
     fields[3] == "cancel"
 
+fn builder_worker_capacity_settle_v1(root: text, identity: text, host_id: text) -> bool:
+    # This worker never acquires a delegated cgroup parent or a Job.
+    val payload = builder_capacity_settlement_encode_v1(BuilderCapacitySettlementV1(
+        identity, host_id, "no-parent-owned"))
+    payload != "" and file_atomic_write(root + "/capacity.settled", payload)
+
+pub fn builder_worker_memory_admit_v1(task: BuildTaskV1, root: text, host_id: text) -> Result<bool, text>:
+    val enforced = builder_memory_enforcement_bytes_v1(task.memory_policy, task.memory_limit_bytes)?
+    if enforced == 0: return Ok(true)
+    val reason = "memory enforcement requires the cgroup or Job worker"
+    val identity = builder_task_identity_v1(task)
+    val payload = builder_no_child_started_encode_v1(BuilderNoChildStartedV1(identity, host_id, reason))
+    if payload == "" or not file_atomic_write(root + "/compiler.not-started.sdn", payload):
+        return Err(reason + "; no-child receipt persistence failed")
+    if not builder_worker_capacity_settle_v1(root, identity, host_id):
+        return Err(reason + "; capacity settlement persistence failed")
+    Err(reason)
+
 fn builder_worker_abort_v1(owner: ProcessObservationLeaseV4, root: text, identity: text, host_id: text) -> bool:
     var lease = owner
     val _cancel = lease.cancel(100000000)
@@ -110,7 +130,9 @@ fn builder_worker_abort_v1(owner: ProcessObservationLeaseV4, root: text, identit
                     match freeze_process_observation_receipt_v4(receipt):
                         Ok(frozen):
                             match lease.acknowledge(frozen):
-                                Ok(_ack): return file_atomic_write(root + "/compiler.reaped", identity + "\n" + host_id)
+                                Ok(_ack):
+                                    if not file_atomic_write(root + "/compiler.reaped", identity + "\n" + host_id): return false
+                                    return builder_worker_capacity_settle_v1(root, identity, host_id)
                                 Err(_message): return false
                         Err(_message): return false
                 if receipt.packet.packet_kind == ProcessObservationPacketKindV4.CleanupFrozen:
@@ -125,8 +147,7 @@ fn builder_worker_abort_v1(owner: ProcessObservationLeaseV4, root: text, identit
 
 fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result<(text, i64), text>:
     # This provider has process-group containment but no per-tree memory cap.
-    if builder_memory_enforcement_bytes_v1(task.memory_policy, task.memory_limit_bytes)? != 0:
-        return Err("memory enforcement requires the cgroup or Job worker")
+    val admitted = builder_worker_memory_admit_v1(task, root, host_id)?
     val capabilities = process_observation_capabilities_v4()?
     if not capabilities.available: return Err("exact process observation V4 unavailable")
     val environment = builder_worker_environment_v1(root)?
@@ -197,6 +218,8 @@ fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result
             val _ack = lease.acknowledge(frozen)?
             if not file_atomic_write(root + "/compiler.reaped", identity + "\n" + host_id):
                 return Err("cannot persist compiler reap evidence")
+            if not builder_worker_capacity_settle_v1(root, identity, host_id):
+                return Err("cannot persist process capacity settlement")
             if receipt.packet.enforcement_kind != ProcessObservationEnforcementKindV4.None or receipt.packet.memory_limit_bytes != 0:
                 return Err("process owner memory policy differs from monitor request")
             var metric = ""

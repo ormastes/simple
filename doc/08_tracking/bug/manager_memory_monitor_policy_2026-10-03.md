@@ -27,6 +27,10 @@ memory peak, process-tree peak and direct-child RSS are not interchangeable.
 The generic process-group worker has no memory enforcement provider and now refuses
 an `enforce` task instead of silently executing it without a cap. Monitor works
 with its native direct-child RSS evidence even when whole-tree accounting is absent.
+The pre-spawn refusal writes a typed no-child certificate and `no-parent-owned`
+settlement; the manager also requires the matching ERROR result before releasing
+the reservation. Successful or cancelled process-group cleanup writes settlement
+only after authoritative reap. It never fabricates a reap for a rejected child.
 
 Grouped native contracts/brokers and managed manifest flag forwarding are owned by
 parallel changes; this patch alone is not a complete managed deployment. This is a
