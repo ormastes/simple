@@ -12,6 +12,7 @@ use compiler.backend.backend_types.*
 use compiler.backend.backend.env.{EvalContext, Environment}
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl, itrace}
 use compiler.backend.backend.interpreter_aop_weave.*
+use compiler.backend.backend.interpreter_run_abi.{interpreter_run_abi}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_print_value(value: i64)
@@ -193,6 +194,11 @@ impl InterpreterBackendImpl:
                 Err(BackendError.type_error("value is not callable", Some(span)))
 
     fn call_hir_function(fn_: HirFunction, args: [Value], ctx: EvalContext) -> Result<Value, BackendError>:
+        if fn_.is_extern:
+            if val symbol = ctx.module.symbols.get_symbol_raw(fn_.symbol.id):
+                val owner = symbol.defining_module ?? ""
+                if val result = self.try_owned_run_abi(fn_.name, owner, true, args):
+                    return result
         # AOP hook (task #31): weave declarative `on pc{...} use ... before`
         # advice for interpreted calls. See interpreter_aop_weave.spl.
         self.interp_aop_run_before(fn_, ctx)
@@ -482,6 +488,9 @@ impl InterpreterBackendImpl:
 
             case BuiltinTag.Unknown:
                 nil
+
+    fn try_owned_run_abi(name: text, owner: text, external: bool, args: [Value]) -> Result<Value, BackendError>?:
+        interpreter_run_abi(name, owner, external, args, self.program_args)
 
     # ========================================================================
     # SFFI RuntimeValue Conversion Helpers

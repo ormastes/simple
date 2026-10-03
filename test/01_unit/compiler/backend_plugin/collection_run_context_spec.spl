@@ -1,0 +1,47 @@
+use std.spec.*
+use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.backend.interpreter_calls.*
+use compiler.backend.backend_types.{Value}
+use std.nogc_sync_mut.sffi.collection_capture.{collection_capture_begin, collection_capture_finish}
+
+describe "interpreter collection run context":
+    it "isolates empty and Unicode application arguments between interpreters":
+        val outer = InterpreterBackendImpl.with_program_args(["outer.spl", "unchanged"])
+        val inner = InterpreterBackendImpl.with_program_args(["inner.spl", "", "한글", "--", "--collection-target=application"])
+        val result = inner.try_owned_run_abi("rt_get_args", "lib.nogc_sync_mut.sffi.system", true, []).unwrap()
+        match result:
+            case Ok(Value.Array(args)):
+                expect(args.len()).to_equal(5)
+                expect(args[1]).to_equal(Value.String(""))
+                expect(args[2]).to_equal(Value.String("한글"))
+                expect(args[4]).to_equal(Value.String("--collection-target=application"))
+            case _: fail("application arguments were not returned")
+        match outer.try_owned_run_abi("rt_get_args", "lib.nogc_sync_mut.sffi.system", true, []).unwrap():
+            case Ok(Value.Array(args)): expect(args.len()).to_equal(2)
+            case _: fail("outer arguments changed")
+
+    it "dispatches interpreted measurement calls into the shared capture channel":
+        val interpreter = InterpreterBackendImpl.new()
+        expect(collection_capture_begin("test-target")).to_be(true)
+        val site = Value.String("ast://interpreter/site#1")
+        val target = Value.String("test-target")
+        match interpreter.try_owned_run_abi("spl_collection_capture_note_size", "lib.nogc_sync_mut.sffi.collection_capture", true, [site, target, Value.Int(3)]).unwrap():
+            case Ok(Value.Int(result)): expect(result).to_equal(1)
+            case _: fail("measurement ABI was not called")
+        val snapshot = collection_capture_finish() ?? ""
+        expect(snapshot).to_contain("size_p95=3")
+        expect(snapshot).to_contain("target=test-target")
+
+    it "does not replace same-name user functions or non-owner externs":
+        val interpreter = InterpreterBackendImpl.with_program_args(["app.spl"])
+        expect(interpreter.try_owned_run_abi("rt_get_args", "app.user", true, [])).to_be_nil()
+        expect(interpreter.try_owned_run_abi("rt_get_args", "lib.nogc_sync_mut.sffi.system", false, [])).to_be_nil()
+
+    it "rejects malformed ABI arguments without changing outer arguments":
+        val interpreter = InterpreterBackendImpl.with_program_args(["app.spl", "outer"])
+        match interpreter.try_owned_run_abi("spl_collection_capture_note_lookup", "lib.nogc_sync_mut.sffi.collection_capture", true, [Value.String("ast://a/b#1"), Value.Int(1), Value.Int(1)]).unwrap():
+            case Err(_): ()
+            case _: fail("numeric target was accepted")
+        match interpreter.try_owned_run_abi("rt_get_args", "lib.nogc_sync_mut.sffi.system", true, []).unwrap():
+            case Ok(Value.Array(args)): expect(args[1]).to_equal(Value.String("outer"))
+            case _: fail("context changed after failure")
