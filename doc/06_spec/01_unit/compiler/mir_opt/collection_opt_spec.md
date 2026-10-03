@@ -70,12 +70,13 @@ classification; bare-name non-reuse; admitted runtime array/dict/typed-byte
 reads; mutating append barriers; repeated array lengths and consumers; loop
 metadata/scalar/bitcast behavior; loop-defined values; typed array index
 dispatch; and dead append/write-only arrays versus observed results and known
-data-pointer writes. Concrete preexisting inconsistency: scenarios 019, 021 and
-022 say queries/scalars/bitcasts stay in-loop, but assert header hoisting and
-nonzero hoist counters; `colopt_hoist_pure_calls` currently returns its blocks
-unchanged. These source-observed expected-result defects are outside this
-query-canonicalization increment and block a broad suite-PASS claim. No runtime
-result is inferred from that inspection. Scenario 020 is the mutation control.
+data-pointer writes. Preexisting fixture correction: scenarios 019, 021 and 022
+said queries/scalars/bitcasts stay in-loop but asserted header hoisting and
+nonzero counters. They now compare original header/body instruction arrays and
+terminators, retain body operations, require an empty header and zero hoist
+counters, matching the existing fail-closed implementation. No source change
+or executed result is inferred from this correction. Scenario 020 remains the
+mutation control.
 
 The pass-level instruction census is stronger than source-shape checks but
 weaker than whole-program differential execution. Actual source resolution,
