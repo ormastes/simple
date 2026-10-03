@@ -6,6 +6,8 @@
 
 REQ-013 different-field merge and undeclared list/set schema rejection now invoke actual signed local publication and reopened state. The combined delete/update/scalar durable-conflict boundary remains open; see `doc/08_tracking/bug/item2_delete_update_conflict_retention_2026-10-03.md`. These source oracles are unexecuted.
 
+REQ-017 remains fail-fast: its quarantine oracle must preserve exact rejected signed bytes and unchanged accepted projections, while allowing a canonical decision to advance HEAD. Codec and pure comparison tests do not satisfy this gate.
+
 REQ-019 happy now drives signed Reference and Paged admission, reopens all immutable records, checks exact source/test/config/reproduction bindings against actual CAS objects, and verifies accepted replay with unchanged retention. Its failure scenario authenticates malformed incoming bindings before rejecting moving names, private paths and mutable jj IDs, with unchanged semantic and retention stores. Its boundary scenario drives actual restricted ciphertext, absent evidence and retention-deleted evidence on both backends, then checks canonical records, observed availability and unchanged replay. Reference legacy-v1 accepted replay and both-backend signed checkpoint mapping-drop sources now exist. Three independently derived literal v1 vectors cover Config, Reproduction and Observation; these are documented framing-derived expectations, not captured historical wire. Paged legacy replay now has three source scenarios using a bounded prior-contract construction and full signed checkpoint import, with physical accepted-index and row readback. Runtime and full reproduction acceptance are unproved.
 
 ## Operator model
@@ -691,7 +693,7 @@ describe "Simple distributed textual databases: SCV + jj + GitHub":
         it "should prove that it quarantines identical observation identity with changed bytes":
             step("Classify configuration-bound evidence")
             step("Inject the failure and inspect fail-closed state")
-            check_test_evidence_contract("REQ-017", "inject unsafe observation identity state; prove typed rejection and no forbidden mutation", "fixture -> fault injection -> typed error -> unchanged canonical state")
+            check_test_evidence_contract("REQ-017", "inject identity reuse; preserve exact rejected signed bytes and accepted observations", "fixture -> conflicting signed observation -> durable quarantine receipt -> unchanged accepted projections")
 
     describe "REQ-018: Outcome separation":
         it "should prove that it classifies immutable actual outcome against a pinned expectation":

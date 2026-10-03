@@ -1,6 +1,6 @@
 # Capability-pinned observation identity
 
-Status: pure kernel and eleven unit scenarios implemented in source; effect integration remains open. No runtime or requirement PASS.
+Status: pure kernel, persistence codecs and twenty-two unit scenarios implemented in source; effect integration remains open. No runtime or requirement PASS.
 Scope: selected REQ-017 and its REQ-024 capability boundary, with the original
 Operating B targets unchanged. The existing effect-owner defect remains open.
 
@@ -110,3 +110,68 @@ observations; warm dedup lookup p95 must be at most 250 ms, and validated import
 of 10,000 observations at most 5 seconds and 256 MiB RSS. Measure p50/p95/p99,
 startup and maximum RSS with the required fixture/machine receipts. No such
 measurements or admitted-runtime test results exist for this module yet.
+
+## Persistence contract
+
+The persistence module encodes the entire policy and a compact index claim. Policy
+wire uses `SCVDB-OBSERVATION-IDENTITY-POLICY-v1`, a single canonical positional
+frame, lowercase hexadecimal and a final newline. It contains revision, namespace,
+epoch, provider instance/project, both capability-name lists, all six capability
+flags and the bundle bound. Decode must validate the independently supplied pin,
+minimal framing, NFC, exact shape and complete re-encoding equality.
+
+Index wire uses `SCVDB-OBSERVATION-IDENTITY-ENTRY-v1` and stores only policy,
+identity and content digests plus the original structured observation reference.
+It does not copy the potentially large observation body. Structural decode is
+not verified lookup. Entry verification requires the expected identity digest,
+pinned policy and an actual original sealed observation, recomputes the complete
+claim and compares every field. Missing originals and mismatches are errors,
+never an absent-index Append decision. The caller still owes authenticated
+generation/page/row lookup; a self-consistent caller DTO is not that proof.
+
+Wire limits are 2 MiB for policy and 32 KiB for an entry, enforced before hex
+decoding. Child enumeration is bounded before allocation (14 policy fields,
+64 capability names, four entry fields and two reference components). These
+formats do not register a Paged record tag or upgrade backend import rules.
+That requires a versioned index protocol and migration, still open.
+
+## Mixed-batch equivalence and quarantine publication
+
+Source inspection confirms the current identity map is bijective: two UIDs cannot
+be assigned the same alias sequence. The existing file-identity correction log is
+not database observation equivalence and must not be reused as its authority.
+A full duplicate protocol therefore needs an immutable, versioned dedup link
+from the newly proposed observation reference (including revision) to the original
+reference, binding policy, identity/content digests and the original batch digest.
+
+Derive any execution view from the authenticated original patch and verified
+links; never reseal or rewrite the original wire. Lookup must reconcile incoming
+and original reference revisions using the equivalence proof, not pretend they
+are the same encoded reference. Typed references, nested references and preconditions
+must resolve consistently through query, refcount, settlement and checkpoint
+validation. Reject cycles, context/kind/content mismatches and collisions with an
+already materialized incoming UID. Link, accepted/counter state, identity index
+and the other operations must publish in one semantic CAS. A global constraint
+failure aborts the entire batch. Until this exists, explicitly defer/reject the
+whole duplicate mixed batch; silently skipping its duplicate operation is unsafe.
+Such interim rejection is not completion of the idempotence requirement.
+
+For quarantine, prepare and reopen the exact original signed bundle in controlled
+external CAS before attempting decision publication. Existing quarantine import
+requires bounded private input staging; do not nest its writer lease inside an
+already held root lease. Under the final root SJ/CAS, recheck semantic HEAD,
+policy pin, identity index and original record. Publish a versioned decision
+record binding batch/payload, rejected-object address and conflicting operations,
+without accepting the batch/counter or applying any other operation. The decision
+must share the versioned semantic image/page root; two channel commits are not an
+atomic transaction merely because both hold SJ.
+
+Crash before decision publication leaves an orphan CAS object, not success.
+Recovery after publication must reopen the decision and exact bundle and
+reestablish durability before returning a completed quarantine. A changed HEAD
+requires recomputation; the prepared object grants no authority. Storage failure
+cannot become a quarantine receipt. A durable decision may advance canonical HEAD
+while accepted observations, counters, aliases and retention remain unchanged.
+The current collision regression checks these accepted projections rather than
+requiring a frozen HEAD; durable rejected-wire and recovery oracles are still
+required before replacing its system placeholder.

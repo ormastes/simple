@@ -15,7 +15,7 @@ replay or an actor-counter collision.
 Reproduction source: `test/02_integration/app/scv_db_provider_identity_gap_it_spec.spl`.
 It admits actual signed bindings, signs an authorized second patch against the
 current base with a new row UID, proves provider identity equality, and expects
-the existing pure-contract `QuarantinedIdentityReuse` error before semantic or
+the existing pure-contract `QuarantinedIdentityReuse` error before accepted-observation/batch/index or
 retention mutation. This is an intended failing regression, not a recorded RED.
 It does not substitute rejection for the required durable quarantine record.
 
@@ -38,3 +38,9 @@ f694bb9c6c6 adds eleven unit sources. This does not resolve the defect: neither
 Reference nor Paged admission invokes an atomic provider index/quarantine owner.
 The actual-owner regression remains expected-failing; all runtime tests are
 UNEXECUTED. Keep this issue open through full effect and migration verification.
+
+Protocol correction: a durable canonical quarantine decision may advance HEAD.
+The regression now compares actual Reference rows/accepted/conflict data and
+verified Paged old/new batch/counter, row, high-water and reverse-index records,
+plus retention. It does not require a frozen canonical HEAD. Full rejected-wire
+readback and same-generation quarantine receipt/recovery remain missing.

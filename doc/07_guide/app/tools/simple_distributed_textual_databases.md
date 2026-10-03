@@ -386,3 +386,10 @@ Its decisions confer no write authority. Filesystem admission still lacks the
 atomic provider-identity index and durable quarantine integration described in
 the focused observation-identity design; the tracked effect regression remains
 expected-failing and unexecuted.
+
+Identity policy and compact-entry wire codecs now have eleven unit sources.
+Structural decoding does not establish authenticated lookup: verification needs
+an independently pinned policy, expected key and actual original observation.
+Missing originals fail closed. Backend index registration/migration and atomic
+duplicate/quarantine publication remain unimplemented; canonical quarantine
+decisions may legitimately advance HEAD without accepting the rejected input.

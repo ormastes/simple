@@ -173,7 +173,7 @@ The boundary uses real retention rollup/deletion before observing expired eviden
 Before replacing its three system placeholders, execute
 `test/02_integration/app/scv_db_provider_identity_gap_it_spec.spl` and repair the
 fresh-UID collision path. It authenticates a second patch with the same provider
-tuple and different observation bytes, then requires rejection before semantic
+tuple and different observation bytes, then requires rejection before accepted observation/batch/index
 or retention mutation on each backend. This source is expected to fail against
 the current owner; no runtime RED is recorded. Add durable signed-input quarantine,
 independently pinned capability dimensions, cross-batch exact duplicate and
@@ -204,3 +204,19 @@ durable rejected-wire storage, mixed-batch handling, migration or recovery.
 Those remain actual-owner acceptance gates on both backends. Do not replace
 system placeholders or record RED/GREEN until their required runtime evidence
 exists. The effect regression remains expected-failing at this source stage.
+
+### Persisted identity and quarantine transaction gates
+
+Policy codecs must round-trip all capability fields under an independent pin;
+compact entry decoding must not imply verified lookup. Verify every stored claim
+field against an actual sealed original and the expected identity key; nil
+original, swapped reference and forged content/policy/key must refuse. Exercise
+exact headers, trailing data, malformed/nonminimal frames, lowercase canonical
+hex, fixed field counts and bounded child enumeration before allocation.
+
+The collision regression now permits decision-only HEAD advancement while
+checking actual accepted projections and retention. Durable quarantine acceptance
+still needs exact original signed-wire readback, before/after-CAS crash cases,
+changed-HEAD recomputation and whole-mixed-batch nonacceptance. A duplicate mixed
+batch needs verified equivalence links and atomic resolution of all dependent
+operations; a skipped append and dangling proposed UID are not a passing oracle.

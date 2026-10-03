@@ -3,9 +3,13 @@
 # Rejection alone is not proof of the required durable quarantine receipt.
 use std.spec.*
 use app.scv.db.local_store.{db_store_read}
+use app.scv.db.local_transition.{db_read_local_view}
+use app.scv.db.paged_query.*
 use app.scv.db.observation_owner.{db_observation_now}
 use std.scv.db_admission.{db_authorize_patch}
 use std.scv.db_evidence.{db_provider_identity_bytes}
+use std.scv.db_page_records.{db_page_batch_key, db_page_actor_counter_key, db_page_highwater_key, db_page_row_key}
+use std.scv.db_paged_indexes.{db_paged_reverse_key}
 use std.scv.db_reproduction_codec.*
 use test.fixtures.scv.db_observation_fixture.*
 use test.fixtures.scv.db_artifact_binding_fixture.*
@@ -27,10 +31,26 @@ describe "REQ017 provider identity safety before durable quarantine completion":
             expect(db_reproduction_record_encode(record).unwrap() == db_reproduction_record_encode(fixture.records[2]).unwrap()).to_be(false)
             val incoming = setup_item2_artifact_followup(fixture, [record])
             expect(db_authorize_patch(incoming.patch, incoming.policy.config.admission, [], db_observation_now().unwrap()).is_ok()).to_be(true)
-            val channel = if paged: "paged" else: "semantic"
-            val before = db_store_read(fixture.source, channel)
             val retained = db_store_read(fixture.source, "retention")
-            expect(check_item2_artifact_apply(incoming, head).unwrap_err()).to_equal("QuarantinedIdentityReuse")
-            expect(db_store_read(fixture.source, channel)).to_equal(before)
+            # A future durable quarantine decision can advance the canonical
+            # generation. Compare accepted semantic projections, not HEAD.
+            if paged:
+                var keys = [db_page_batch_key(fixture.patch.batch_id).unwrap(), db_page_actor_counter_key(fixture.patch.actor, fixture.patch.actor_counter).unwrap(), db_page_batch_key(incoming.patch.batch_id).unwrap(), db_page_actor_counter_key(incoming.patch.actor, incoming.patch.actor_counter).unwrap(), db_page_highwater_key(fixture.patch.namespace, fixture.patch.epoch, "observation").unwrap(), db_page_row_key(changed.reference.entity).unwrap(), db_paged_reverse_key(changed.reference.entity).unwrap()]
+                for existing in fixture.records:
+                    keys.push(db_page_row_key(db_reproduction_reference(existing).entity).unwrap())
+                val before = db_paged_query_require(db_paged_query_open(fixture.source, fixture.policy).unwrap(), keys).unwrap()
+                expect(db_paged_query_record(before, db_page_batch_key(incoming.patch.batch_id).unwrap()).unwrap()).to_be_nil()
+                expect(db_paged_query_record(before, db_page_row_key(changed.reference.entity).unwrap()).unwrap()).to_be_nil()
+                expect(check_item2_artifact_apply(incoming, head).unwrap_err()).to_equal("QuarantinedIdentityReuse")
+                val after = db_paged_query_require(db_paged_query_open(fixture.source, incoming.policy).unwrap(), keys).unwrap()
+                for key in keys:
+                    expect(db_paged_query_record(after, key).unwrap()).to_equal(db_paged_query_record(before, key).unwrap())
+            else:
+                val before = db_read_local_view(fixture.source, fixture.policy.config.admission).unwrap().image
+                expect(check_item2_artifact_apply(incoming, head).unwrap_err()).to_equal("QuarantinedIdentityReuse")
+                val after = db_read_local_view(fixture.source, incoming.policy.config.admission).unwrap().image
+                expect(after.state.rows).to_equal(before.state.rows)
+                expect(after.state.accepted).to_equal(before.state.accepted)
+                expect(after.catalog).to_equal(before.catalog)
             expect(db_store_read(fixture.source, "retention")).to_equal(retained)
             check_item2_observation_cleanup(fixture)

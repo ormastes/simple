@@ -82,3 +82,25 @@ is a compatibility boundary, not a place to silently change historical bytes.
 Any new content comparison has its own domain. This research justifies a pure
 kernel first; the known owner/index/quarantine defect remains open until the
 same contract is integrated across Reference, Paged, settlement and checkpoints.
+
+### Persistence and mixed-batch owner research
+
+IdentityMap rejects duplicate alias sequences, so it cannot silently redirect a
+second proposed observation UID to an existing one. File identity correction
+logs are a separate subsystem, not an atomic DB equivalence proof. A full
+mixed-batch duplicate implementation needs versioned immutable links, consistent
+nested-reference/precondition resolution and atomic publication with accepted
+state and other operations. A plain skipped append would leave dangling UIDs.
+
+Quarantine import already stores and reopens exact signed bundles in controlled
+CAS. It does not publish canonical observation-conflict decisions. The final
+quarantine receipt must bind that object to a rechecked generation/policy/index;
+separate store channels remain separate commits even under one SJ lease. This
+means decision publication may change HEAD without changing accepted observations
+or counters. The initial regression's whole-store equality was too strict and
+has been replaced with actual accepted-projection checks after independent review.
+
+Compact identity entries should retain only claim/reference data, then verify
+against actual original records. Repeating full observations in every index
+entry would add unnecessary persistent bytes against Operating B growth targets.
+Canonical codec success alone is not authenticated membership or absence.

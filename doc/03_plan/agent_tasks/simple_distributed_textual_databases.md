@@ -416,3 +416,13 @@ focused design, acceptance matrix, documentation and final integration. Shared
 APIs: DbObservationIdentityPolicy/Claim/Decision, policy_digest, policy_seal,
 claim and decide under the db_observation_identity prefix. Decisions are pure;
 full effect integration and runtime verification remain required before merge.
+
+### Identity persistence and transaction protocol lanes
+
+All isolated branches start at704a0a65bd2. Core owns only the new identity codec
+module; evidence owns the independent codec unit spec, reusing prior fixtures.
+Research reviews both and traces mixed-batch/quarantine owner requirements.
+Root owns the accepted-projection regression correction and shared design/plan
+updates. APIs: policy_encode/decode, entry_encode/decode and entry_verify under
+the db_observation_identity prefix. Missing originals are typed lookup errors.
+No page tag or backend schema is registered by this pure persistence work.

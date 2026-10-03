@@ -399,3 +399,32 @@ recomputes existing claims, validates scope/pins and fails closed on wrong looku
 Object quotas are per policy/per observation, with at most two observation claims
 per decision; they are not whole-operation RSS evidence. Actual owner integration,
 index migration, mixed-batch disposition and durable quarantine remain open.
+
+### Identity persistence and accepted-projection correction
+
+Independent review approved strict pinned policy/compact-entry codecs and eleven
+unit scenarios. Entries do not duplicate observation bodies and require actual
+sealed-original readback plus an expected identity key before they can support
+comparison. A self-consistent decoded entry is not generation membership proof.
+
+Owner-path research found that duplicate mixed batches need an immutable
+reference-equivalence protocol, and quarantine decisions must publish against a
+rechecked canonical generation after exact signed-bundle CAS preparation. Two
+store channels are not one atomic commit merely because they use SJ. Root
+corrected the intended-failing regression to compare actual accepted projections
+rather than forbid decision-only HEAD advancement; independent review confirmed
+verified Paged record reads and full Reference accepted-row comparisons.
+
+System inventory stays 23 concrete owner sources and 130 placeholders. The
+actual identity owner defect remains open; codecs do not supply indexes,
+migration, mixed-batch resolution, quarantine decisions or recovery. Runtime
+checks remain UNEXECUTED: the main release directory is absent and the inspected
+Cranelift interpreter diagnostic still reports BUILD_FAILED/admission none.
+
+Integrated test-first a0d4e970e35 as 6d5370fe7e6, followed by production
+8b2f50852a2. Eleven unit scenarios cover bounded canonical wire, all policy
+fields, pin enforcement and forged claims checked against actual originals.
+The REQ-017 system contract still fails explicitly; its wording now requires
+exact rejected signed bytes and unchanged accepted projections rather than
+unchanged HEAD. The manually maintained source fold matches exactly. No runtime
+RED/GREEN, core/MCP qualification, migration or durable owner completion is claimed.
