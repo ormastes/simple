@@ -11,6 +11,7 @@ use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir.mir_json.{serialize_mir_signature}
 use compiler.backend.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
+use std.nogc_sync_mut.io.file_ops.{file_read}
 
 fn exact_extern_check(source: text, external_name: text, params: [MirType], result: MirType, declaration: text, call_prefix: text):
     val ast = parse_full_frontend(source, "exact_extern.spl", "exact_extern", Logger(level: 0))
@@ -51,6 +52,24 @@ fn exact_extern_check(source: text, external_name: text, params: [MirType], resu
     expect(emitted_calls).to_equal(1)
 
 describe "fixed direct LLVM-C ABI prerequisites":
+    it "lowers the canonical raw owner's zero-argument declaration":
+        val owner = file_read("src/lib/nogc_sync_mut/sffi/llvm_orc_raw.spl")
+        val source = owner + "\nfn probe() -> *mut u8:\n    unsafe(capabilities: [ffi, raw_ptr]):\n        LLVMContextCreate()\n"
+        val pointer = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
+        exact_extern_check(source, "LLVMContextCreate", [], pointer, "declare ptr @LLVMContextCreate()", "call ptr @LLVMContextCreate()")
+
+    it "lowers the canonical raw owner's signed status and pointer outputs":
+        val owner = file_read("src/lib/nogc_sync_mut/sffi/llvm_orc_raw.spl")
+        val source = owner + "\nfn probe(ctx: *mut u8, buffer: *mut u8, output: *mut *mut u8, message: *mut *mut u8) -> i32:\n    unsafe(capabilities: [ffi, raw_ptr]):\n        LLVMParseIRInContext2(ctx, buffer, output, message)\n"
+        val p = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
+        exact_extern_check(source, "LLVMParseIRInContext2", [p, p, MirType.ptr(p, true), MirType.ptr(p, true)], MirType(kind: MirTypeKind.I32), "declare i32 @LLVMParseIRInContext2(ptr, ptr, ptr, ptr)", "call i32 @LLVMParseIRInContext2(ptr ")
+
+    it "lowers the canonical raw owner's pointer error and owned handle output":
+        val owner = file_read("src/lib/nogc_sync_mut/sffi/llvm_orc_raw.spl")
+        val source = owner + "\nfn probe(output: *mut *mut u8, builder: *mut u8) -> *mut u8:\n    unsafe(capabilities: [ffi, raw_ptr]):\n        LLVMOrcCreateLLJIT(output, builder)\n"
+        val p = MirType.ptr(MirType(kind: MirTypeKind.U8), true)
+        exact_extern_check(source, "LLVMOrcCreateLLJIT", [MirType.ptr(p, true), p], p, "declare ptr @LLVMOrcCreateLLJIT(ptr, ptr)", "call ptr @LLVMOrcCreateLLJIT(ptr ")
+
     it "rejects malformed HIR arity without emitting the extern call":
         val source = "extern fn raw_probe(value: i32) -> i32\nfn probe(value: i32) -> i32:\n    raw_probe(value)\n"
         val ast = parse_full_frontend(source, "bad_arity.spl", "bad_arity", Logger(level: 0))
