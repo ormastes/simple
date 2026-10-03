@@ -8,7 +8,7 @@ programs under `test/fixtures/engine_differential/` without a new runner:
 
 | Fixture suffix after `collection_req002_` | Independent literal oracle |
 |---|---|
-| `map_filter_capture.spl` | Captured offset maps to `[10,8,10,9]`; filtering retains both tens; text lengths `[1,3,2]`; empty stays empty; input unchanged |
+| `map_filter_capture.spl` | Captured offset maps to `[10,8,10,9]`; filtering retains both tens; text lengths `[1,3,2]`; escaped closure retains factory-local prefix (`owned:a`, `owned:bbb`, `owned:cc`); empty stays empty; input unchanged |
 | `flatmap_empty_order.spl` | Runtime flat_map and actual library flatten each produce `[2,12,1,11,2,12]`, including empty expansion |
 | `any_all_shortcircuit.spl` | Builtin and library any/all stop after two callbacks; empty yields false/true with zero callbacks |
 | `dict_struct_overwrite.spl` | Two keys after overwrite; independent present/absent probes; exact struct fields preserved |
@@ -42,6 +42,8 @@ certify these fixtures, identical runtime diagnostics, or actual engine identity
 Future admitted evidence must require exact markers, zero exit, engine provenance,
 and no fallback; this test-only change does not authorize admission bypasses or
 modify runner behavior. All-whitespace differences are outside its comparison.
+The SCV knob relaxes source-inventory snapshot admission; it is distinct from
+execution-engine fallback and does not by itself mean native code was interpreted.
 
 No expected-missing-runtime-symbol facility was found in this harness: such a
 fixture would be reported as a lane error, not a verified negative. That negative
