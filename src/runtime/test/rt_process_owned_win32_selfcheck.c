@@ -68,7 +68,81 @@ static DWORD WINAPI conc_worker(LPVOID arg) {
     return 0;
 }
 
-int main(void) {
+static int zero_child_mode(int argc, char** argv) {
+    if (argc==2 && strcmp(argv[1],"--zero-sleep-child")==0) {
+        Sleep(600);
+        return 0;
+    }
+    if (argc==3 && strcmp(argv[1],"--zero-pipe-child")==0) {
+        if (strcmp(argv[2],"idle")==0) Sleep(5000);
+        else {
+            char bytes[4096]; memset(bytes,'w',sizeof(bytes));
+            ULONGLONG until=GetTickCount64()+5000;
+            while (GetTickCount64()<until) {
+                DWORD wrote=0;
+                if (!WriteFile(GetStdHandle(STD_OUTPUT_HANDLE),bytes,sizeof(bytes),&wrote,NULL)) break;
+            }
+        }
+        return 0;
+    }
+    if (argc==3 && strcmp(argv[1],"--zero-pipe-parent")==0) {
+        char self[MAX_PATH], command[2*MAX_PATH];
+        if (!GetModuleFileNameA(NULL,self,sizeof(self))) return 81;
+        snprintf(command,sizeof(command),"\"%s\" --zero-pipe-child %s",self,argv[2]);
+        STARTUPINFOA startup; PROCESS_INFORMATION child;
+        memset(&startup,0,sizeof(startup)); memset(&child,0,sizeof(child));
+        startup.cb=sizeof(startup); startup.dwFlags=STARTF_USESTDHANDLES;
+        startup.hStdInput=GetStdHandle(STD_INPUT_HANDLE);
+        startup.hStdOutput=GetStdHandle(STD_OUTPUT_HANDLE);
+        startup.hStdError=GetStdHandle(STD_ERROR_HANDLE);
+        if (!CreateProcessA(self,command,NULL,NULL,TRUE,CREATE_NO_WINDOW,NULL,NULL,&startup,&child)) return 82;
+        CloseHandle(child.hThread); CloseHandle(child.hProcess);
+        return 0;
+    }
+    return -1;
+}
+
+static void zero_deadline_checks(void) {
+    char self[MAX_PATH], out[4096], err[4096];
+    RtOwnedProcessReceipt receipt;
+    check("locate test executable",GetModuleFileNameA(NULL,self,sizeof(self))>0,"module path unavailable");
+    const char* sleeper[]={self,"--zero-sleep-child",NULL};
+    DWORD started=GetTickCount();
+    bool ok=rt_process_run_owned_bounded(self,sleeper,0,sizeof(out)-1,
+        out,sizeof(out),err,sizeof(err),&receipt);
+    DWORD elapsed=GetTickCount()-started;
+    check("zero work budget completes naturally",ok && receipt.reaped && receipt.exit_code==0 &&
+        !receipt.timed_out && !receipt.kill_sent,"zero expired or failed");
+    check("zero survives positive deadline boundary",elapsed>=500 && elapsed<3000,"unexpected lifetime");
+    (void)rt_process_run_owned_bounded(self,sleeper,100,sizeof(out)-1,
+        out,sizeof(out),err,sizeof(err),&receipt);
+    check("positive deadline still expires",receipt.timed_out && receipt.kill_sent && receipt.reaped,
+        "positive work limit missing");
+    const char* modes[]={"idle","active"};
+    for(int index=0;index<2;index++) {
+        const char* parent[]={self,"--zero-pipe-parent",modes[index],NULL};
+        started=GetTickCount();
+        ok=rt_process_run_owned_bounded(self,parent,0,sizeof(out)-1,
+            out,sizeof(out),err,sizeof(err),&receipt);
+        elapsed=GetTickCount()-started;
+        printf("  info zero inherited %s elapsed_ms=%lu\n",modes[index],(unsigned long)elapsed);
+        check(modes[index],ok && receipt.exit_code==0 && receipt.reaped && !receipt.timed_out &&
+            receipt.kill_sent && receipt.stdout_truncated && elapsed<3000,
+            "inherited pipe cleanup lost its bound");
+    }
+    (void)rt_process_run_owned_bounded(self,sleeper,-1,sizeof(out)-1,
+        out,sizeof(out),err,sizeof(err),&receipt);
+    check("negative deadline rejected",receipt.runtime_error==EINVAL,"negative accepted");
+}
+
+int main(int argc, char** argv) {
+    int child_result=zero_child_mode(argc,argv);
+    if(child_result>=0) return child_result;
+    if(argc==2 && strcmp(argv[1],"--zero-deadline-only")==0) {
+        zero_deadline_checks();
+        printf("%s: %d failure(s), %d zero-deadline checks\n",failures ? "FAIL" : "PASS",failures,checks);
+        return failures ? 1 : 0;
+    }
     char out[65536];
     char err[65536];
     RtOwnedProcessReceipt r;
@@ -144,13 +218,17 @@ int main(void) {
         check("pid accounting", obs.pids_peak >= 1, "no pids counted");
     }
 
-    /* 7. timeout_ms <= 0 is EINVAL here exactly as in the POSIX branch. */
+    /* 7. Zero is unlimited useful work; only negative timeout is invalid. */
     {
         const char* argv[] = {"cmd.exe", "/c", "echo x", NULL};
         bool ok = rt_process_run_owned_bounded("cmd.exe", argv, 0, sizeof(out) - 1,
                                                out, sizeof(out), err, sizeof(err), &r);
-        check("EINVAL on non-positive timeout", !ok && r.runtime_error == EINVAL,
-              "validation diverges from POSIX");
+        check("zero timeout accepted", ok && r.exit_code==0 && !r.timed_out,
+              "zero workload limit was rejected");
+        ok = rt_process_run_owned_bounded("cmd.exe", argv, -1, sizeof(out) - 1,
+                                           out, sizeof(out), err, sizeof(err), &r);
+        check("EINVAL on negative timeout", !ok && r.runtime_error == EINVAL,
+              "negative workload limit accepted");
     }
 
     /* 8. a missing program fails loudly rather than reporting a silent success. */
