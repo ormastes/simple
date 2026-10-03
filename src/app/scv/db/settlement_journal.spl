@@ -1,0 +1,64 @@
+# One immutable pending candidate lane. No API treats publication as index proof.
+use app.scv.db.local_store.{DbStoreView, db_store_read, db_store_commit}
+use app.scv.db.git_candidate.{DbGitCandidateFile}
+use app.scv.db.settlement_journal_codec.*
+use app.scv.db.settlement_journal_git.{db_settlement_verify_objects, db_settlement_journal_readback}
+use std.scv.db_receipt.{DbReceiptAuthority, DbSettlementReceipt, db_receipt_authenticate}
+use std.scv.db_receipt_codec.{db_receipt_encode}
+use std.common.crypto.sha256.{sha256_text}
+
+struct DbSettlementJournalView:
+    head: text
+    journal: DbSettlementJournal
+
+fn _journal_loaded(root: text, authority: DbReceiptAuthority) -> Result<(DbStoreView, DbSettlementJournal), text>:
+    val current = db_store_read(root, "settlement")
+    if current.code == "empty": return Err("SCVDB_JOURNAL_EMPTY")
+    if current.code != "ok": return Err(current.code)
+    if current.head == "": return Err("SCVDB_JOURNAL_EMPTY")
+    val journal = db_settlement_journal_decode(current.state)?
+    val authenticated = db_receipt_authenticate(journal.receipt, authority)?
+    Ok((current, journal))
+
+fn db_settlement_reopen(root: text, authority: DbReceiptAuthority) -> Result<DbSettlementJournalView, text>:
+    val (current, journal) = _journal_loaded(root, authority)?
+    Ok(DbSettlementJournalView(head: current.head, journal: journal))
+
+fn _journal_commit(root: text, current: DbStoreView, journal: DbSettlementJournal) -> Result<DbSettlementJournalView, text>:
+    val encoded = db_settlement_journal_encode(journal)?
+    var committed = current
+    if encoded == current.state:
+        committed = db_store_commit(root, current.parent, current.transaction_id, current.state, "settlement")
+    else:
+        committed = db_store_commit(root, current.head, sha256_text(encoded), encoded, "settlement")
+    if committed.code != "ok": return Err(committed.code)
+    Ok(DbSettlementJournalView(head: committed.head, journal: db_settlement_journal_decode(encoded)?))
+
+fn db_settlement_prepare(root: text, expected_head: text, receipt: DbSettlementReceipt, authority: DbReceiptAuthority, files: [DbGitCandidateFile], candidate_object_root: text) -> Result<DbSettlementJournalView, text>:
+    """Persist authenticated recovery input before any caller attempts publication."""
+    val authenticated = db_receipt_authenticate(receipt, authority)?
+    var journal = DbSettlementJournal(receipt: receipt, files: files, projection_digest: db_settlement_projection_digest(files)?, phase: DbSettlementPhase.Prepared)
+    val verified = db_settlement_verify_objects(candidate_object_root, journal)?
+    val current = db_store_read(root, "settlement")
+    if current.code != "ok" and current.code != "empty": return Err(current.code)
+    if current.head != "":
+        val existing = db_settlement_journal_decode(current.state)?
+        val existing_auth = db_receipt_authenticate(existing.receipt, authority)?
+        if db_receipt_encode(existing.receipt)? != db_receipt_encode(receipt)? or existing.projection_digest != journal.projection_digest:
+            return Err("SCVDB_JOURNAL_BUSY")
+        # Identical retry preserves a later observed phase and resynchronizes it.
+        journal = existing
+    elif current.head != expected_head: return Err("SCVDB_JOURNAL_STALE_HEAD")
+    _journal_commit(root, current, journal)
+
+fn db_settlement_reconcile(root: text, scratch_parent: text, expected_head: text, authority: DbReceiptAuthority) -> Result<DbSettlementJournalView, text>:
+    """Actual remote reads can only establish PublishedAwaitingIndex, never completion."""
+    val (current, saved) = _journal_loaded(root, authority)?
+    if current.head != expected_head: return Err("SCVDB_JOURNAL_STALE_HEAD")
+    val accepted = db_settlement_journal_readback(root, scratch_parent, saved)?
+    var journal = saved
+    journal.phase = DbSettlementPhase.PublishedAwaitingIndex
+    # CAS observes any competing local journal write made during the network read.
+    _journal_commit(root, current, journal)
+
+export DbSettlementJournalView, db_settlement_prepare, db_settlement_reopen, db_settlement_reconcile

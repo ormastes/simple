@@ -1,0 +1,130 @@
+# Real filesystem, Git objects, bare remote and Ed25519; unsupported hosts fail.
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{cwd, dir_create, file_write, process_run_bounded}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed, pure_ed25519_sign}
+use std.scv.db_receipt.*
+use std.scv.db_canonical.*
+use std.scv.db_snapshot.{db_snapshot_hex, db_snapshot_unhex}
+use app.scv.db.git_candidate.{DbGitCandidateFile}
+use app.scv.db.settlement_journal_codec.*
+use app.scv.db.settlement_journal.*
+
+struct Item2JournalFixture:
+    source: text
+    remote: text
+    scratch: text
+    receipt: DbSettlementReceipt
+    authority: DbReceiptAuthority
+    files: [DbGitCandidateFile]
+
+fn check_item2_journal_git(root: text, args: [text]) -> text:
+    val prefix = ["--no-replace-objects", "-C", root, "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "user.name=SCV Test", "-c", "user.email=scv-test@invalid"]
+    val (output, _error, code) = process_run_bounded("git", prefix + args, 30000, 65536)
+    expect(code).to_equal(0)
+    output.trim()
+
+fn setup_item2_journal_sign(receipt: DbSettlementReceipt) -> DbSettlementReceipt:
+    var signed = receipt
+    val (seed, public_key) = pure_ed25519_keypair_from_seed([44u8;32])
+    signed.signature = pure_ed25519_sign(seed, public_key, db_receipt_signing_bytes(signed).unwrap())
+    signed
+
+fn setup_item2_journal_fixture() -> Item2JournalFixture:
+    val parent = secure_temp_dir(path_absolute(cwd()), "item2-journal-").unwrap()
+    val source = parent + "/source"
+    val remote = parent + "/remote.git"
+    val scratch = parent + "/scratch"
+    expect(dir_create(source, true)).to_be(true)
+    expect(dir_create(scratch, true)).to_be(true)
+    check_item2_journal_git(source, ["init", "--template=", "--object-format=sha1", "."])
+    check_item2_journal_git(source, ["init", "--bare", "--template=", "--object-format=sha1", remote])
+    val files = [DbGitCandidateFile(path: "candidate.scv", content: "exact decomposed é\n")]
+    expect(file_write(source + "/candidate.scv", files[0].content)).to_be(true)
+    check_item2_journal_git(source, ["-c", "core.autocrlf=false", "add", "--", "candidate.scv"])
+    check_item2_journal_git(source, ["commit", "-m", "candidate before publication"])
+    val head = check_item2_journal_git(source, ["rev-parse", "HEAD"])
+    val tree = check_item2_journal_git(source, ["log", "-1", "--format=%T"])
+    val (seed, public_key) = pure_ed25519_keypair_from_seed([44u8;32])
+    val authority = DbReceiptAuthority(repository: "repo", namespace: "00112233445566778899aabbccddeeff", epoch: 1, remote: remote, settled_ref: "refs/heads/settled", key_id: "authority", public_key: public_key, schema_revision: "s1", reducer_revision: "r1")
+    val receipt = setup_item2_journal_sign(DbSettlementReceipt(repository: "repo", namespace: authority.namespace, epoch: 1, remote: remote, settled_ref: authority.settled_ref, previous_receipt: "", previous_head: "", accepted_head: head, accepted_tree: tree, object_format: "sha1", high_water: [], schema_revision: "s1", reducer_revision: "r1", batch_digests: [sha256_text("batch")], signer: authority.key_id, signature: []))
+    Item2JournalFixture(source: source, remote: remote, scratch: scratch, receipt: receipt, authority: authority, files: files)
+
+describe "REQ-009 durable settlement recovery before canonical acknowledgement":
+    it "reopens a signed prepared candidate and records actual publication without claiming completion":
+        step("Persist the complete candidate before any remote publication")
+        val fixture = setup_item2_journal_fixture()
+        val prepared = db_settlement_prepare(fixture.source, "", fixture.receipt, fixture.authority, fixture.files, fixture.source).unwrap()
+        expect(prepared.journal.phase).to_equal(DbSettlementPhase.Prepared)
+        expect(db_settlement_reconcile(fixture.source, fixture.scratch, prepared.head, fixture.authority)).to_equal(Err("SCVDB_READBACK_UNAVAILABLE"))
+        val reopened = db_settlement_reopen(fixture.source, fixture.authority).unwrap()
+        expect(reopened.journal.files).to_equal(fixture.files)
+        expect(reopened.journal.receipt.signature).to_equal(fixture.receipt.signature)
+        expect(db_settlement_prepare(fixture.source, "", fixture.receipt, fixture.authority, fixture.files, fixture.source).unwrap().head).to_equal(prepared.head)
+        step("Recover after remote acceptance by fetching and reading the actual candidate tree")
+        check_item2_journal_git(fixture.source, ["push", "--no-force", fixture.remote, "HEAD:refs/heads/settled"])
+        val observed = db_settlement_reconcile(fixture.source, fixture.scratch, prepared.head, fixture.authority).unwrap()
+        expect(observed.journal.phase).to_equal(DbSettlementPhase.PublishedAwaitingIndex)
+        expect(observed.head == prepared.head).to_be(false)
+        val retry = db_settlement_reconcile(fixture.source, fixture.scratch, observed.head, fixture.authority).unwrap()
+        expect(retry.head).to_equal(observed.head)
+        expect(db_settlement_reopen(fixture.source, fixture.authority).unwrap().journal.phase).to_equal(DbSettlementPhase.PublishedAwaitingIndex)
+
+    it "rejects forged receipts wrong trees parents and incomplete candidate inventories":
+        step("Authenticate receipt bytes before persisting a recovery claim")
+        val fixture = setup_item2_journal_fixture()
+        var forged = fixture.receipt
+        forged.signature = [0u8;64]
+        expect(db_settlement_prepare(fixture.source, "", forged, fixture.authority, fixture.files, fixture.source)).to_equal(Err("SCVDB_RECEIPT_SIGNATURE"))
+        var wrong_tree = fixture.receipt
+        wrong_tree.accepted_tree = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        wrong_tree = setup_item2_journal_sign(wrong_tree)
+        expect(db_settlement_prepare(fixture.source, "", wrong_tree, fixture.authority, fixture.files, fixture.source)).to_equal(Err("SCVDB_JOURNAL_TREE"))
+        var wrong_parent = fixture.receipt
+        wrong_parent.previous_head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        wrong_parent.previous_receipt = sha256_text("previous receipt")
+        wrong_parent = setup_item2_journal_sign(wrong_parent)
+        expect(db_settlement_prepare(fixture.source, "", wrong_parent, fixture.authority, fixture.files, fixture.source)).to_equal(Err("SCVDB_JOURNAL_PARENT"))
+        val altered = [DbGitCandidateFile(path: "candidate.scv", content: "changed")]
+        expect(db_settlement_prepare(fixture.source, "", fixture.receipt, fixture.authority, altered, fixture.source)).to_equal(Err("SCVDB_JOURNAL_BLOB"))
+        val extra = fixture.files + [DbGitCandidateFile(path: "absent.scv", content: "absent")]
+        expect(db_settlement_prepare(fixture.source, "", fixture.receipt, fixture.authority, extra, fixture.source)).to_equal(Err("SCVDB_JOURNAL_INVENTORY"))
+
+    it "keeps a pending candidate immutable and rejects stale reconciliation":
+        step("Refuse a different signed candidate while the journal lane remains occupied")
+        val fixture = setup_item2_journal_fixture()
+        val prepared = db_settlement_prepare(fixture.source, "", fixture.receipt, fixture.authority, fixture.files, fixture.source).unwrap()
+        var other = fixture.receipt
+        other.batch_digests = [sha256_text("different batch")]
+        other = setup_item2_journal_sign(other)
+        expect(db_settlement_prepare(fixture.source, prepared.head, other, fixture.authority, fixture.files, fixture.source)).to_equal(Err("SCVDB_JOURNAL_BUSY"))
+        expect(db_settlement_reconcile(fixture.source, fixture.scratch, "", fixture.authority)).to_equal(Err("SCVDB_JOURNAL_STALE_HEAD"))
+        expect(db_settlement_reopen(fixture.source, fixture.authority).unwrap().head).to_equal(prepared.head)
+        var untrusted = fixture.authority
+        untrusted.public_key = [0u8;32]
+        expect(db_settlement_reopen(fixture.source, untrusted)).to_equal(Err("SCVDB_RECEIPT_SIGNATURE"))
+
+    it "strictly decodes journal phases and preserves exact nonnormalized blob content":
+        step("Roundtrip a complete recovery record without rewriting signed Git blob bytes")
+        val fixture = setup_item2_journal_fixture()
+        val journal = DbSettlementJournal(receipt: fixture.receipt, files: fixture.files, projection_digest: db_settlement_projection_digest(fixture.files).unwrap(), phase: DbSettlementPhase.Prepared)
+        val encoded = db_settlement_journal_encode(journal).unwrap()
+        expect(db_settlement_journal_decode(encoded).unwrap()).to_equal(journal)
+        expect(db_settlement_journal_decode("SCVDB-SETTLEMENT-JOURNAL-v2\n00\n")).to_equal(Err("SCVDB_JOURNAL_VERSION"))
+        var changed = journal
+        changed.projection_digest = sha256_text("wrong")
+        expect(db_settlement_journal_encode(changed)).to_equal(Err("SCVDB_JOURNAL_PROJECTION_DIGEST"))
+        expect(db_settlement_projection_digest([DbGitCandidateFile(path: "a", content: "1"), DbGitCandidateFile(path: "A", content: "2")])).to_equal(Err("SCVDB_JOURNAL_PATH_COLLISION"))
+        step("Reject a literal completion phase that no actual protected-index owner has established")
+        val prefix = "SCVDB-SETTLEMENT-JOURNAL-v1\n"
+        val bytes = db_snapshot_unhex(encoded[prefix.len():encoded.len() - 1]).unwrap()
+        val domain = db_domain_bytes("settlement-journal", []).unwrap()
+        val root = db_read_frame(bytes, domain.len()).unwrap()
+        val fields = db_read_children(root.payload).unwrap()
+        var payload: [u8] = []
+        for index in 0..3: payload = payload + db_frame(fields[index].tag, fields[index].payload)
+        payload = payload + db_frame(2u8, [2u8])
+        val invalid_phase = prefix + db_snapshot_hex(domain + db_frame(98u8, payload)) + "\n"
+        expect(db_settlement_journal_decode(invalid_phase)).to_equal(Err("SCVDB_JOURNAL_PHASE"))

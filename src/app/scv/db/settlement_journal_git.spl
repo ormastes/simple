@@ -1,0 +1,90 @@
+# Actual Git object reads. Network is outside the local journal's SJ lease.
+use app.io.mod.{process_run_bounded, dir_remove_all}
+use app.scv.db.git_policy.{db_git_environment_safe, db_git_network_config_safe, db_git_effect_prefix}
+use app.scv.db.git_settlement_transport.{db_git_settlement_ref_head}
+use app.scv.db.local_store.{db_local_path_scope, db_local_existing_canonical}
+use app.scv.db.settlement_journal_codec.*
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.scv.sj_capsule.{scv_sj_lease_is_held}
+
+fn _journal_git(root: text, args: [text], limit: i64) -> Result<text, text>:
+    if not db_git_environment_safe() or not db_git_network_config_safe(root): return Err("SCVDB_JOURNAL_GIT_POLICY")
+    val (output, _error, code) = process_run_bounded("git", db_git_effect_prefix(root) + args, 30000, limit)
+    if code != 0 or output.len() >= limit: return Err("SCVDB_JOURNAL_GIT_READ")
+    Ok(output)
+
+fn db_settlement_verify_objects(object_root: text, journal: DbSettlementJournal) -> Result<text, text>:
+    if db_local_path_scope(object_root, []) != "": return Err("SCVDB_JOURNAL_OBJECT_SCOPE")
+    val receipt = journal.receipt
+    if _journal_git(object_root, ["rev-parse", "--show-object-format"], 256)?.trim() != receipt.object_format: return Err("SCVDB_JOURNAL_OBJECT_FORMAT")
+    if _journal_git(object_root, ["cat-file", "-t", receipt.accepted_head], 256)?.trim() != "commit": return Err("SCVDB_JOURNAL_COMMIT")
+    val commit = _journal_git(object_root, ["cat-file", "-p", receipt.accepted_head], 65536)?
+    var parents: [text] = []
+    var trees: [text] = []
+    for line in commit.split("\n"):
+        if line == "": break
+        if line.starts_with("parent "): parents.push(line[7:])
+        if line.starts_with("tree "): trees.push(line[5:])
+    var expected_parents: [text] = []
+    if receipt.previous_head != "": expected_parents.push(receipt.previous_head)
+    if parents != expected_parents: return Err("SCVDB_JOURNAL_PARENT")
+    if trees != [receipt.accepted_tree]: return Err("SCVDB_JOURNAL_TREE")
+    val listing = _journal_git(object_root, ["ls-tree", "-r", "--full-tree", receipt.accepted_tree], 1048576)?
+    var seen: [text] = []
+    for line in listing.split("\n"):
+        if line == "": continue
+        val parts = line.split("\t")
+        if parts.len() != 2: return Err("SCVDB_JOURNAL_INVENTORY")
+        val metadata = parts[0].split(" ")
+        if metadata.len() != 3 or metadata[0] != "100644" or metadata[1] != "blob": return Err("SCVDB_JOURNAL_INVENTORY")
+        if seen.contains(parts[1]): return Err("SCVDB_JOURNAL_INVENTORY")
+        seen.push(parts[1])
+        var found = false
+        for file in journal.files:
+            if file.path == parts[1]:
+                found = true
+                if _journal_git(object_root, ["cat-file", "blob", metadata[2]], 4194305)? != file.content: return Err("SCVDB_JOURNAL_BLOB")
+        if not found: return Err("SCVDB_JOURNAL_INVENTORY")
+    if seen.len() != journal.files.len(): return Err("SCVDB_JOURNAL_INVENTORY")
+    Ok(receipt.accepted_head)
+
+fn _journal_fetch(scratch: text, source: text, journal: DbSettlementJournal, observed: text) -> Result<text, text>:
+    val initialized = _journal_git(scratch, ["init", "--bare", "--template=", "--object-format={journal.receipt.object_format}", "."], 4096)?
+    val fetched = _journal_git(scratch, ["-c", "fetch.fsckObjects=true", "-c", "transfer.fsckObjects=true", "fetch", "--no-auto-maintenance", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--depth=65", journal.receipt.remote, observed], 65536)?
+    var cursor = observed
+    var found = false
+    for depth in 0..64:
+        if cursor == journal.receipt.accepted_head:
+            found = true
+            break
+        val commit = _journal_git(scratch, ["cat-file", "-p", cursor], 65536)?
+        var parents: [text] = []
+        for line in commit.split("\n"):
+            if line == "": break
+            if line.starts_with("parent "): parents.push(line[7:])
+        if parents.len() != 1: return Err("SCVDB_JOURNAL_HISTORY_REQUIRED")
+        cursor = parents[0]
+    if not found: return Err("SCVDB_JOURNAL_HISTORY_REQUIRED")
+    val verified = db_settlement_verify_objects(scratch, journal)?
+    val latest = db_git_settlement_ref_head(source, journal.receipt.remote)
+    if latest.code != "ok" or latest.oid != observed: return Err("SCVDB_JOURNAL_READBACK_MOVED")
+    Ok(verified)
+
+fn db_settlement_journal_readback(source: text, scratch_parent: text, journal: DbSettlementJournal) -> Result<text, text>:
+    if scv_sj_lease_is_held(source): return Err("SCVDB_JOURNAL_NETWORK_UNDER_LEASE")
+    if db_local_path_scope(source, []) != "" or db_local_path_scope(scratch_parent, []) != "": return Err("SCVDB_JOURNAL_SCRATCH_SCOPE")
+    if scratch_parent == source or scratch_parent.starts_with(source + "/"): return Err("SCVDB_JOURNAL_SCRATCH_SCOPE")
+    val common = _journal_git(source, ["rev-parse", "--path-format=absolute", "--git-common-dir"], 4096)?
+    if scratch_parent == common.trim() or scratch_parent.starts_with(common.trim() + "/"): return Err("SCVDB_JOURNAL_SCRATCH_SCOPE")
+    val observed = db_git_settlement_ref_head(source, journal.receipt.remote)
+    if observed.code != "ok": return Err(observed.code)
+    if observed.oid == journal.receipt.previous_head: return Err("SCVDB_JOURNAL_NOT_PUBLISHED")
+    val scratch = secure_temp_dir_raw(scratch_parent, "scv-journal-readback-")
+    if scratch == "" or not scratch.starts_with(scratch_parent + "/scv-journal-readback-") or not dir_is_real_no_follow(scratch) or not db_local_existing_canonical(scratch): return Err("SCVDB_JOURNAL_SCRATCH_SCOPE")
+    val result = _journal_fetch(scratch, source, journal, observed.oid)
+    if not dir_is_real_no_follow(scratch) or not db_local_existing_canonical(scratch): return Err("SCVDB_JOURNAL_SCRATCH_SCOPE")
+    if not dir_remove_all(scratch): return Err("SCVDB_JOURNAL_SCRATCH_CLEANUP")
+    result
+
+export db_settlement_verify_objects, db_settlement_journal_readback
