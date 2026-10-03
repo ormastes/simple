@@ -1942,6 +1942,10 @@ bootstrap_stage_sanity() (
   sanity_win_temp=${TEMP:-${TMP:-}}
   sanity_cc=${CC:-}
   sanity_cxx=${CXX:-}
+  # Darwin native-action admission fails closed without these two
+  # (darwin-deployment-or-sdk-missing); the scrub below would drop them.
+  sanity_sdkroot=${SDKROOT:-}
+  sanity_deployment_target=${MACOSX_DEPLOYMENT_TARGET:-}
   # The stage2 sanity probes are bounded by COMPILER_BUILD_TIMEOUT_SECONDS
   # (admission script default 180s, sized for native hardware). Capture the
   # caller's value before the scrub so an emulated lane (QEMU TCG FreeBSD,
@@ -1992,6 +1996,14 @@ bootstrap_stage_sanity() (
   if [ -n "${sanity_build_timeout}" ]; then
     COMPILER_BUILD_TIMEOUT_SECONDS=${sanity_build_timeout}
     export COMPILER_BUILD_TIMEOUT_SECONDS
+  fi
+  if [ -n "${sanity_sdkroot}" ]; then
+    SDKROOT=${sanity_sdkroot}
+    export SDKROOT
+  fi
+  if [ -n "${sanity_deployment_target}" ]; then
+    MACOSX_DEPLOYMENT_TARGET=${sanity_deployment_target}
+    export MACOSX_DEPLOYMENT_TARGET
   fi
   if [ -n "${sanity_windows_abi}" ]; then
     SIMPLE_WINDOWS_ABI=${sanity_windows_abi}
