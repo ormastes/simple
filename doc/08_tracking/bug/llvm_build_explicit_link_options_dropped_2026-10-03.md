@@ -27,3 +27,19 @@ Unix target restriction, so for_simple_cli also delegates its former c/m/pthread
 defaults to the target linker. Regression coverage distinguishes these
 cases, including Windows driver options. This is source evidence, not executed
 cross-platform link validation.
+
+The invocation change is intentional: the former driver_api facade delegates
+to an external selected Simple CLI and cannot transport these full typed link
+options. The LLVM build now invokes compiler_driver_create/run_compile in the
+currently executing compiler artifact, following the existing in-process
+driver_api_native_single contract. It does not select or certify a replacement
+external compiler artifact. Runtime/artifact admission remains the caller's
+responsibility; no backend execution evidence is added by this source change.
+
+The production build_native_llvm_finish adapter preserves the external facade's
+output-file existence postcondition: driver Success without the requested file
+is an error before any build-complete message. Driver errors remain errors even
+when an old file exists. This check does not prove output freshness or validity.
+Its fault-injection specs use a tracked source file solely as an existence
+fixture, never as evidence of executable output or compiler success. Tests are
+authored and unexecuted.
