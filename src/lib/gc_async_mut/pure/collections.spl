@@ -2,9 +2,11 @@
 # Advanced collection operations
 
 export range, take, drop, chunk, flatten
-export unique, group_by, group_by_hashed, partition
+export unique, unique_hashed, group_by, group_by_hashed, partition
 export zip, unzip, cartesian_product
 export find, find_index, all_match, any_match
+
+use std.gc_async_mut.pure.indexed_collections.{HashSet as ContractHashSet}
 
 # Generate range of numbers
 fn range(start: i64, end: i64) -> [i64]:
@@ -165,6 +167,23 @@ fn group_by_hashed<T, K>(list: [T], key_fn: fn(T) -> K, hash_fn: fn(K) -> i64, e
         groups.push((keys[g], members[g]))
         g = g + 1
     groups
+
+# Stable uniqueness by an explicit key contract. Retains the first original
+# element for each key, preserving input order. key_fn runs once per item;
+# hash_fn runs once per lookup plus once for each distinct-key insertion.
+# Callbacks must be deterministic and keys stable; equality is an equivalence
+# relation and equal keys MUST have equal hashes. No built-in Hash/Eq is assumed.
+# Expected O(n) with well-distributed hashes and constant-time callbacks;
+# worst O(n^2) under collisions; O(distinct keys) auxiliary space plus output.
+fn unique_hashed<T, K>(list: [T], key_fn: fn(T) -> K, hash_fn: fn(K) -> i64, equal_fn: fn(K, K) -> bool) -> [T]:
+    var seen: ContractHashSet<K> = ContractHashSet.with_contract(hash_fn, equal_fn)
+    var result: [T] = []
+    for item in list:
+        val key = key_fn(item)
+        if not seen.contains(key):
+            seen.insert(key)
+            result.push(item)
+    result
 
 # Partition list by predicate
 fn partition<T>(list: [T], predicate: fn(T) -> bool) -> ([T], [T]):
