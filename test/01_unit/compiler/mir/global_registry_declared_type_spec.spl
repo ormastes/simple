@@ -1,0 +1,81 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirTypeKind}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn registry_type_source() -> text:
+    "var REGISTRY: Dict<i64, ValueAlias> = {}\nval SNAPSHOT: Dict<i64, RegistryValue> = {}\nval UNANNOTATED = 19\ntype ValueAlias = RegistryValue\n\nclass RegistryValue:\n    count: i64\n    fn read() -> i64:\n        self.count\n\nfn present(key: i64) -> bool:\n    REGISTRY.contains(key)\n\nfn remove(key: i64):\n    REGISTRY.remove(key)\n\nfn inferred(key: i64) -> i64:\n    val item = REGISTRY[key]\n    item.read()\n\nfn declared(key: i64) -> i64:\n    val item: RegistryValue = REGISTRY[key]\n    item.read()\n"
+
+describe "Module-global declared receiver types", tag: ["only-compiled"]:
+    it "retains dictionary key and nominal value types on mutable and immutable symbols":
+        val ast = parse_full_frontend(registry_type_source(), "registry_type.spl", "registry_type.spl", Logger(level: 0))
+        var lowering = HirLowering.with_filename("registry_type.spl")
+        val hir = lowering.lower_module(ast)
+        expect(lowering.errors.len()).to_equal(0)
+        var checked = 0
+        var unannotated = 0
+        for constant in hir.constants.values():
+            if constant.name == "REGISTRY" or constant.name == "SNAPSHOT":
+                if val symbol = hir.symbols.get_symbol_raw(constant.symbol.id):
+                    if val declared = symbol.type_:
+                        match declared.kind:
+                            case HirTypeKind.Dict(key, value):
+                                match key.kind:
+                                    case HirTypeKind.Int(bits, signed):
+                                        expect(bits).to_equal(64)
+                                        expect(signed).to_equal(true)
+                                    case _: fail("dictionary key type was lost")
+                                match value.kind:
+                                    case HirTypeKind.Named(owner, _):
+                                        expect(owner.id).to_equal(hir.symbols.lookup_or_invalid("RegistryValue").id)
+                                    case _: fail("dictionary value owner was lost")
+                            case _: fail("global symbol does not retain its dictionary type")
+                    else:
+                        fail("annotated global symbol has no declared type")
+                else:
+                    fail("global declaration symbol is absent")
+                checked = checked + 1
+            elif constant.name == "UNANNOTATED":
+                if val symbol = hir.symbols.get_symbol_raw(constant.symbol.id):
+                    expect(symbol.type_ == nil).to_equal(true)
+                    unannotated = unannotated + 1
+                else:
+                    fail("unannotated declaration symbol is absent")
+        expect(checked).to_equal(2)
+        expect(unannotated).to_equal(1)
+
+    it "lowers global dictionary methods and inferred and declared class-value calls":
+        val ast = parse_full_frontend(registry_type_source(), "registry_methods.spl", "registry_methods.spl", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("registry_methods.spl")
+        val hir = hir_lowering.lower_module(ast)
+        var lowering = MirLowering.new(hir.symbols)
+        val mir = lowering.lower_module(hir)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
+        var calls = ""
+        var value_callers = 0
+        for function in mir.functions.values():
+            val body = serialize_mir_function(function)
+            calls = calls + body
+            if function.name == "inferred" or function.name.ends_with(".inferred") or function.name == "declared" or function.name.ends_with(".declared"):
+                var resolved_read_calls = 0
+                for block in function.blocks:
+                    for instruction in block.instructions:
+                        match instruction.kind:
+                            case MirInstKind.Call(_, callee, args):
+                                match callee.kind:
+                                    case MirOperandKind.Const(MirConstValue.Str(target), _):
+                                        if target == "RegistryValue.read" or target.ends_with(".RegistryValue.read"):
+                                            expect(args.len()).to_equal(1)
+                                            resolved_read_calls = resolved_read_calls + 1
+                                    case _: ()
+                            case _: ()
+                expect(resolved_read_calls).to_equal(1)
+                value_callers = value_callers + 1
+        expect(calls).to_contain("rt_dict_contains")
+        expect(calls).to_contain("rt_dict_remove")
+        expect(value_callers).to_equal(2)
