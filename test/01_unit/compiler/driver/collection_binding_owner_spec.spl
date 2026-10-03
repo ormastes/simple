@@ -1,0 +1,79 @@
+# @req REQ-003 REQ-007
+use std.spec.*
+use compiler.driver.driver_collection_planner.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.abi_interface.{hir_abi_function_digest_v1}
+use compiler.common.attributes.{FunctionAttr, vhdl_hardware_metadata_default}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.diagnostics.span.{Span}
+use compiler.semantics.perf_facts.types.*
+use compiler.semantics.perf_facts.registry.{CollectionRegistryBindingV1}
+
+fn binding_owner_module(path: text, name: text) -> HirModule:
+    var span = Span.default()
+    span.file = path
+    val unit = HirType(kind: HirTypeKind.Unit, span: span)
+    val array = HirType(kind: HirTypeKind.Array(unit, nil), span: span)
+    val value = HirExpr(kind: HirExprKind.UnitLit, has_type_: true, type_: unit, span: span)
+    val params = [HirParam(symbol: SymbolId(id: 1), name: "self", type_: array,
+        has_default: false, default: value, span: span, is_mutable: false)]
+    val function = HirFunction(symbol: SymbolId(id: 42), name: "read", type_params: [],
+        params: params, return_type: unit,
+        body: HirBlock(stmts: [], has: false, value: value, span: span), effects: [],
+        visibility: Visibility.Private, is_async: false, is_static: false,
+        is_public: false, is_method: true, is_mutable: false, is_const: false,
+        is_extern: false, func_attr: FunctionAttr.default(), has_export_attr: false,
+        export_attr: nil, has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_suspension: false, has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_doc_comment: false, doc_comment: "", span: span, is_gpu_kernel: false,
+        gpu_target: "", gpu_backend_order: "", verification_contract: nil, is_generic_template: false)
+    var symbols = SymbolTable.new()
+    symbols.symbols[42] = HirSymbol(id: SymbolId(id: 42), name: "read", kind: SymbolKind.Method,
+        type_: nil, scope: ScopeId(id: 0), span: span, visibility: Visibility.Private,
+        is_public: false, is_mutable: false, defining_module: Some(name), builtin_method_tag: 0)
+    HirModule(name: name, path: path, imports: [], exports: [], domain_blocks: [],
+        symbols: symbols, functions: {SymbolId(id: 42): function}, gpu_function_targets: {},
+        gpu_function_backend_orders: {}, classes: {}, structs: {}, enums: {}, bitfields: {},
+        traits: {}, impls: [], constants: {}, static_asserts: [], aop_advices: [],
+        di_bindings: [], arch_rules: [], mock_decls: [], types: [])
+
+fn binding_owner_binding(module: HirModule) -> CollectionRegistryBindingV1:
+    CollectionRegistryBindingV1(module_path: module.path, symbol_id: 42, stable_name: "fixture.read",
+        receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: hir_abi_function_digest_v1(module, module.functions[SymbolId(id: 42)]).unwrap(),
+        backend: "native", evidence_receipt: "fixture", metadata_version: "fixture", source_digest: "fixture")
+
+describe "collection registry actual HIR owner admission":
+    it "admits a matching declaration and rejects the same local ID in another module":
+        val first = binding_owner_module("first.spl", "first")
+        val second = binding_owner_module("second.spl", "second")
+        val binding = binding_owner_binding(first)
+        expect(collection_driver_validate_binding_v1(first, binding, "native").is_ok()).to_equal(true)
+        expect(collection_driver_validate_binding_v1(second, binding, "native").is_err()).to_equal(true)
+
+    it "rejects stale signature receiver backend and absent definitions":
+        val module = binding_owner_module("first.spl", "first")
+        var binding = binding_owner_binding(module)
+        binding.signature_fingerprint = "old-signature"
+        expect(collection_driver_validate_binding_v1(module, binding, "native").is_err()).to_equal(true)
+        binding = binding_owner_binding(module)
+        binding.receiver = HirPerfReceiverKind.Text
+        expect(collection_driver_validate_binding_v1(module, binding, "native").is_err()).to_equal(true)
+        binding = binding_owner_binding(module)
+        expect(collection_driver_validate_binding_v1(module, binding, "auto").is_err()).to_equal(true)
+        binding.symbol_id = 43
+        expect(collection_driver_validate_binding_v1(module, binding, "native").is_err()).to_equal(true)
+
+    it "rejects imported or stale source ownership despite matching local IDs":
+        var module = binding_owner_module("first.spl", "first")
+        val binding = binding_owner_binding(module)
+        var symbol = module.symbols.symbols[42]
+        symbol.defining_module = Some("foreign")
+        module.symbols.symbols[42] = symbol
+        expect(collection_driver_validate_binding_v1(module, binding, "native").is_err()).to_equal(true)
+        module = binding_owner_module("first.spl", "first")
+        var function = module.functions[SymbolId(id: 42)]
+        function.span.file = "stale.spl"
+        module.functions[SymbolId(id: 42)] = function
+        expect(collection_driver_validate_binding_v1(module, binding, "native").is_err()).to_equal(true)
