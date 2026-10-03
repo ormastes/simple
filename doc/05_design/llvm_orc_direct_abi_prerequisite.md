@@ -20,6 +20,14 @@ only as the result. Text, aggregates, function values, inferred/unresolved
 types, and ABI-adapted runtime hooks remain outside this change. Extern identity
 must come from resolved declaration provenance, not a spelling whitelist.
 
+The first source repair records only nonempty fixed extern signatures, keyed by
+the current module's resolved SymbolId and reset before every lower_module.
+The initial value subset is i32/u32/i64/u64 and concrete raw pointers; other
+integer sizes are permitted as pointees only. Zero-argument extern declarations
+still need explicit empty-signature authority in the LLVM backend, which today
+conflates an empty legacy signature with unknown parameter types. Consequently
+the complete ORC raw binding owner is not enabled by this repair alone.
+
 Once supported, process linkage uses the existing explicit BuildConfig library
 contract. A safe ORC session must separately validate the loaded provider's
 actual identity and keep it resident, validate translated MIR's exact scalar
