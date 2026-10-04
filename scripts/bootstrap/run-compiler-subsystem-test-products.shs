@@ -10,13 +10,14 @@ hash_file() {
   printf '%s\n' "${sum%% *}"
 }
 absolute() { case "$1" in /*) return 0 ;; *) return 1 ;; esac; }
-resume=0 resume_reused=
+resume=0 resume_reused= selected_product=
 source_root= output_root= compiler_llvm= compiler_cranelift=
 producer_receipt_llvm= producer_receipt_cranelift=
 threads=20 rss_cap_kib=6835937 build_timeout=1800 test_timeout=7200
 for arg in "$@"; do
   case "$arg" in
     --resume) resume=1 ;;
+    --product=*) selected_product=${arg#*=} ;;
     --source-root=*) source_root=${arg#*=} ;;
     --output-root=*) output_root=${arg#*=} ;;
     --compiler-llvm=*) compiler_llvm=${arg#*=} ;;
@@ -30,6 +31,11 @@ for arg in "$@"; do
     *) die "unknown option: $arg" ;;
   esac
 done
+case "$selected_product" in
+  ''|llvm:compiler|llvm:interpreter|llvm:loader|cranelift:compiler|cranelift:interpreter|cranelift:loader) ;;
+  *) die 'invalid product selector' ;;
+esac
+[ -z "$selected_product" ] || [ "$resume" = 0 ] || die 'single-product resume requires a distinct verified product owner'
 for path in "$source_root" "$output_root"; do
   [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
 done
@@ -209,6 +215,24 @@ else
 fi
 
 . "$schedule"
+if [ -n "$selected_product" ]; then
+  # One outer managed task owns all three real callbacks. It produces no
+  # six-product matrix PASS; callers aggregate the independently verified
+  # product receipts and their binary-owned enumeration/execution counts.
+  selected_backend=${selected_product%%:*}
+  selected_suite=${selected_product#*:}
+  managed_failed=0
+  selected_code=0
+  managed_attempt_product "$selected_backend" "$selected_suite" || selected_code=$?
+  [ "$selected_code" -eq 0 ] || exit "$selected_code"
+  [ "$managed_failed" -eq 0 ] || exit 1
+  selected_receipt="$(job_for "$selected_backend" "$selected_suite")/result.env"
+  regular "$selected_receipt" || die 'product owner produced no verified result'
+  selected_status=$(awk -F= '$1=="status" {n++; s=$2} END {if(n!=1)exit 2; print s}' "$selected_receipt") || die 'product result has no unique status'
+  printf '%s\n' "$selected_receipt"
+  [ "$selected_status" = PASS ] || exit 1
+  exit 0
+fi
 schedule_code=0
 managed_dispatch_products || schedule_code=$?
 case "$schedule_code" in 0|1) ;; *) die "product owner aborted; journal: $statuses" ;; esac
