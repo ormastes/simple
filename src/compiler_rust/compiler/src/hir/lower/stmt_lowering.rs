@@ -1669,7 +1669,15 @@ impl Lowerer {
                 // the JIT lane, silently). The local's declared type must
                 // agree, or the raw value would be stored into a tagged slot.
                 // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
-                let binding_ty = self.optional_boxint_scalar_inner(subject_ty).unwrap_or(subject_ty);
+                let binding_ty = self.optional_boxint_scalar_inner(subject_ty).unwrap_or_else(|| {
+                    match self.module.types.get(subject_ty) {
+                        // Presence guards the optional subject; a bound bool is
+                        // its value, not another optional-presence condition.
+                        Some(HirType::Pointer { kind: PointerKind::Shared, inner, .. })
+                            if *inner == TypeId::BOOL => TypeId::BOOL,
+                        _ => subject_ty,
+                    }
+                });
                 if binding_ty != subject_ty {
                     if let Some(local) = ctx.locals.get_mut(local_index) {
                         local.ty = binding_ty;
