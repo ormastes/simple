@@ -25,6 +25,15 @@ executable `_spec.spl` files. No full SSpec, branch coverage,
 core/MCP, native Darwin execution, signing admission or five-host PASS follows
 from these source checks. The default external linker selection is unchanged.
 
+The integrated implementation/spec candidate `43924ee02b9` passed whitespace,
+numbered-artifact classification (15 paths, zero numbered artifacts), and the
+test-tree divergence delta. The latter introduced zero offenders and retained
+3152 inherited offenders. The retained list is
+`.git/item4-macho-addend-preexisting-offenders.txt`, SHA256
+`2fb68a47bab7953e058a449562ecba2df9f135b8d2e2d99c3e14f373b1c1d719`.
+Subsequent changes add visible scenario step labels and this verification
+record; they do not alter production logic or fixture assertions.
+
 ## Runtime prerequisite
 
 The previous isolated minimal compile/run succeeded using source `9737d1217bc`
