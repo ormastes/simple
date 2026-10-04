@@ -1,0 +1,61 @@
+"""
+## Purpose and audience
+Pins the single linker-selection policy for the SimpleOS self-host campaign.
+Audience: compiler/linker maintainers changing how a link engine is chosen.
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend/linker/link_engine_policy_spec.spl
+## Compatibility and limitations
+Pure policy only: it does not probe PATH or run a linker. Whether the
+internal engine can link a given SimpleOS program is proven by the
+SimpleOS real-firmware gates, not here.
+## Verification guidance and troubleshooting
+A failing scenario names the rule that changed; update the plan doc
+doc/03_plan/os/simpleos/simpleos_selfhost_seed_linker_plan_2026-10-04.md
+in the same change.
+"""
+# Lifecycle: doc/03_plan/os/simpleos/simpleos_selfhost_seed_linker_plan_2026-10-04.md ;
+# doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md
+# @manual_section: linker-policy
+
+use std.spec.*
+use compiler.backend.linker.mold.{link_engine_policy}
+
+describe "link_engine_policy — which linker a build uses":
+
+    it "uses the pure-Simple engine for SimpleOS when nothing is requested":
+        # @req REQ-SOS-SELFHOST-LINK-001
+        step("Choose a linker for a SimpleOS build with mold and lld both installed")
+        val engine = link_engine_policy("", true, true, true)
+        # @capture(text): chosen engine name
+        step("Verify the SimpleOS build ignores host linkers")
+        expect(engine).to_equal("internal")
+
+    it "prefers mold on a host where mold is installed":
+        # @req REQ-SOS-SELFHOST-LINK-002
+        step("Choose a linker for a host build with mold and lld installed")
+        val engine = link_engine_policy("", false, true, true)
+        # @capture(text): chosen engine name
+        step("Verify mold is chosen")
+        expect(engine).to_equal("mold")
+
+    it "falls back to ld.lld when mold is missing, then to system ld":
+        # @req REQ-SOS-SELFHOST-LINK-003
+        step("Choose a linker for a host build with only lld installed")
+        val with_lld = link_engine_policy("", false, false, true)
+        step("Choose a linker for a host build with neither mold nor lld")
+        val bare = link_engine_policy("", false, false, false)
+        # @capture(text): chosen engine names
+        step("Verify the fallback order")
+        expect(with_lld).to_equal("lld")
+        expect(bare).to_equal("ld")
+
+    it "rejects silently overriding an explicit SIMPLE_LINKER request":
+        # @req REQ-SOS-SELFHOST-LINK-004
+        step("Request lld explicitly for a SimpleOS build")
+        val sos = link_engine_policy(" LLD ", true, true, true)
+        step("Request the internal engine explicitly on a host with mold")
+        val host = link_engine_policy("internal", false, true, true)
+        # @capture(text): chosen engine names
+        step("Verify the explicit request wins in both cases")
+        expect(sos).to_equal("lld")
+        expect(host).to_equal("internal")
