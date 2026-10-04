@@ -52,10 +52,20 @@ inlined body reads the parameter back from its slot, which the entry `Store`
 has already written at the parameter's width. Integer and other parameters
 keep the forwarding shortcut, so codegen is unchanged for them.
 
+## Not fixed (latent)
+
+The fix removes this trigger only. The underlying defect is still there:
+`compile_cast`'s float→int arm treats an I64 source with a float `from_ty` as
+an integer. Any other float vreg that crosses a block boundary as an i64
+Variable and reaches a float→int cast is still exposed, for example through
+an if-expression merge or a loop-carried float. To close it, give that arm
+the provenance of the cross-block value (float bits versus a genuinely
+mis-typed int call result) instead of guessing from the Cranelift type.
+
 ## Evidence
 
 - Specs in `src/compiler_rust/compiler/tests/inline_float_param_jit.rs`. Both FAIL with the fix disabled (`-161061273601` against `-103`) and PASS with it.
   - `inlined_f32_to_int_helper_floors_negative_fraction` is the repro.
   - `inlined_float_params_keep_value_across_blocks` is the generalization: f64 params, several float params, and a mixed int param.
-- `text_aa_blit_buffer` under the JIT: 3537 lit pixels, the same as the interpreter. The coverage sum differs by 65/485992 because the JIT does true f32 arithmetic.
+- `text_aa_blit_buffer` under the JIT: 3537 lit pixels, the same as the interpreter. The coverage sum differs by 65/485992. The cause is not yet verified; one hypothesis is f32 (JIT) versus f64 (interpreter) intermediate precision.
 - rendering_2d_extended at 960x640: the JIT capture is byte-identical to the interpreter capture (`cmp`). At 3840x2160 the headers read correctly.
