@@ -880,8 +880,11 @@ impl CompilerDriver:
         log_phase("phase3:hir:validate:done errors={validation_error_count}")
         if (self.ctx.error_count_value > 0):
             return false
+        log_phase("phase3:hir:cold_receipts:start")
         if not self.capture_cold_hir_typed_receipts_v1():
+            log_phase("phase3:hir:cold_receipts:failed")
             return false
+        log_phase("phase3:hir:cold_receipts:done")
         ast_reset()
         log_phase("phase3:hir:ast_reset:done")
         self.ctx.modules = {}
@@ -1554,16 +1557,23 @@ impl CompilerDriver:
             legacy_validation_error_count = legacy_validation_error_count + 1
             self.ctx.add_error(validation_error)
         log_phase("phase3:hir:validate:done errors={legacy_validation_error_count}")
+        log_phase("phase3:hir:post_validate_guard:start")
         if self.ctx.error_count_value > 0:
+            log_phase("phase3:hir:post_validate_guard:failed")
             return (self.ctx, false)
+        log_phase("phase3:hir:post_validate_guard:done")
 
         # Profile-gated HM type inference and visibility diagnostics. Advisory
         # remains log-only; robust warns; critical/verified fail the build.
+        log_phase("phase3:hir:typecheck_severity:start")
         val typecheck_enforcing = match typecheck_pass_severity():
             case TypecheckPassSeverity.Advisory: false
             case _: true
+        log_phase("phase3:hir:typecheck_severity:done")
         if ((env_get("SIMPLE_TYPECHECK_WARN")) == "1") or typecheck_enforcing:
+            log_phase("phase3:hir:typecheck:start")
             val tc_warnings = run_typecheck_warn_pass(self.ctx, phase_hir_modules)
+            log_phase("phase3:hir:typecheck:done")
             log_warn("typecheck warn-only pass: {tc_warnings.len()} diagnostic(s)")
             var tcw_idx = 0
             while tcw_idx < tc_warnings.len():
@@ -1573,11 +1583,15 @@ impl CompilerDriver:
         # Profile-gated unsafe-context pass. Advisory remains log-only; robust
         # warns; critical fails the build — unless SIMPLE_ASSURANCE_WARNING_PHASE
         # is on, which drops critical to warn (allocatable-MC migration step 1).
+        log_phase("phase3:hir:safety_severity:start")
         val safety_enforcing = match safety_pass_severity_phased():
             case SafetyPassSeverity.Advisory: false
             case _: true
+        log_phase("phase3:hir:safety_severity:done")
         if ((env_get("SIMPLE_SAFETY_WARN")) == "1") or safety_enforcing:
+            log_phase("phase3:hir:safety:start")
             val safety_warnings = run_safety_warn_pass(self.ctx, phase_hir_modules)
+            log_phase("phase3:hir:safety:done")
             log_warn("safety warn-only pass: {safety_warnings.len()} diagnostic(s)")
             var sw_idx = 0
             while sw_idx < safety_warnings.len():
@@ -1590,23 +1604,34 @@ impl CompilerDriver:
         # Severity is still profile-gated inside each pass -- `critical` raises
         # errors, every other profile raises warnings -- and each records a
         # receipt whether or not it found anything.
+        log_phase("phase3:hir:any_escape:start")
         val any_escape_warnings = run_any_escape_pass(self.ctx, phase_hir_modules)
+        log_phase("phase3:hir:any_escape:done")
         log_warn("any-escape pass: {any_escape_warnings.len()} diagnostic(s)")
         var ae_idx = 0
         while ae_idx < any_escape_warnings.len():
             log_warn(any_escape_warnings[ae_idx])
             ae_idx = ae_idx + 1
 
+        log_phase("phase3:hir:enum_contract:start")
         val enum_contract_warnings = run_enum_contract_pass(self.ctx, phase_hir_modules)
+        log_phase("phase3:hir:enum_contract:done")
         log_warn("enum-contract pass: {enum_contract_warnings.len()} diagnostic(s)")
         var ec_idx = 0
         while ec_idx < enum_contract_warnings.len():
             log_warn(enum_contract_warnings[ec_idx])
             ec_idx = ec_idx + 1
 
-        if self.ctx.error_count_value == 0 and
-                not self.capture_cold_hir_typed_receipts_v1():
-            return (self.ctx, false)
+        log_phase("phase3:hir:cold_receipts_gate:start")
+        if self.ctx.error_count_value == 0:
+            log_phase("phase3:hir:cold_receipts:start")
+            if not self.capture_cold_hir_typed_receipts_v1():
+                log_phase("phase3:hir:cold_receipts:failed")
+                return (self.ctx, false)
+            log_phase("phase3:hir:cold_receipts:done")
+        else:
+            log_phase("phase3:hir:cold_receipts:skipped_prior_errors")
+        log_phase("phase3:hir:cold_receipts_gate:done")
         (self.ctx, self.ctx.error_count_value == 0)
 
     # --------------------------------------------------------------------------
