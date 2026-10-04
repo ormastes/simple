@@ -167,10 +167,19 @@ case "$threads" in ''|*[!0-9]*|0) resume_fail "invalid transcript thread count" 
 [ "$(transcript_executable "$transcript")" = "$runtime/simple" ] ||
     resume_fail "transcript executable is not the frozen runtime compiler"
 
-expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "$platform") ||
+stage2_recorded_cold_init=$(bootstrap_stage3_stage2_transcript_cold_init "$transcript") ||
+    resume_fail "transcript SCV cold-init control is invalid"
+expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "$platform" "$stage2_recorded_cold_init") ||
     resume_fail "canonical environment set is unavailable"
 [ "$(transcript_explicit_env_names "$transcript")" = "$expected_env_names" ] ||
     resume_fail "transcript environment set is not canonical"
+# Replay exactly the recorded policy; an ambient export cannot change it.
+if [ "$stage2_recorded_cold_init" = 1 ]; then
+    SIMPLE_SCV_INVENTORY_COLD_INIT=1
+    export SIMPLE_SCV_INVENTORY_COLD_INIT
+else
+    unset SIMPLE_SCV_INVENTORY_COLD_INIT
+fi
 
 SIMPLE_ABI_POLICY=$(bootstrap_stage3_transcript_explicit_env_value "$transcript" SIMPLE_ABI_POLICY) ||
     resume_fail "ABI policy missing from transcript"
