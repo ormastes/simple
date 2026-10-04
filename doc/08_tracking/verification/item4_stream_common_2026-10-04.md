@@ -29,3 +29,23 @@ external semantic oracle: undefined references extract common-only members;
 existing common definitions extract strong regular members but not weak or
 common-only members. This is not execution of the Simple implementation. See the
 source-backed design `doc/05_design/compiler/linker/stream_common_2026-10-04.md`.
+
+Eight authored scenarios cover allocation/independent maxima, common-only
+archive extraction, strong and weak precedence, archive nonselection and strong
+replacement, a common declaration selected through another symbol, malformed
+declarations, and quota/cancellation behavior. Their real relocated pointers are
+translated through PT_LOAD metadata; the stream RW extent proves one canonical
+allocation, and different emission windows must produce the same stream image.
+Real input owners are opened before exercising the common-layout scan and
+cancellation paths. The matching manual remains explicitly authored/UNRUN.
+
+Working/staged environment-facade guards passed; the manual tree contains zero
+executable `_spec.spl` files. Source review and fixture assembly do not replace
+any pending Simple execution or Phase 4 gate.
+
+Final acceptance also reverses the common declaration order, requires the exact
+common-storage error at a 12399-byte cap (one byte short of the 12400-byte plan),
+and mutates a real common record to maximum unsigned size before checking
+failure and destination preservation. Whitespace and numbered-artifact checks
+passed before these focused test additions; their final diff is checked again
+because the tested content changed. No unchanged runtime check was repeated.
