@@ -9,6 +9,18 @@ integration does not close verification or authorize publication.
 
 ## 2026-10-04 continuation
 
+ELF section-group and COMDAT source is now authored for the bounded engine.
+It implements first-signature selection across selected objects, atomic member and
+relocation discard, kept-definition resolution, and consistent layout/GOT/output
+filtering. It validates group words, signatures, membership and relocation ownership
+without resident group maps. Acceptance covers reversed winners, external references, archive
+selection, generic groups, malformed metadata, cancellation and preserved output.
+GNU research distinguishes final undefined-reference errors from archive demand:
+discarded-only undefined references do not fail the final image, but their
+undefined symbol records can still select an archive provider. Preserve that
+behavior instead of inventing a no-extraction optimization. Source completion
+and executed acceptance remain separate gates.
+
 The ordinary static x64 GOT family is now authored in the stream emitter.
 It uses real canonical GOT slots, a
 synthetic base, local/global identity separation, checked relocation operands

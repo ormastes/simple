@@ -214,3 +214,28 @@ PE ARM64 core linking exists, but its checked-in real fixture is a relocation
 census object; a complete real executable corpus and native evidence remain.
 Full compiler/application corpora, platform execution, bounded parity/performance,
 modern SSpec execution, generated manuals and core/MCP checks remain unrun.
+
+## Streamed ELF COMDAT acceptance (2026-10-04)
+
+Existing requirements: ITEM4-REQ-003/004/009. Executable authority:
+`test/03_system/app/compiler/feature/item4_stream_comdat_spec.spl`.
+All scenarios remain UNRUN until an admitted self-hosted runtime is available.
+
+| Acceptance unit | Real fixture action and required observation |
+|---|---|
+| Whole-group selection | Reverse two objects with the same local signature; selected code/data/RELA all come from the first group, with no losing marker |
+| Live symbol resolution | Retained global references bind selected definitions; ordinary strong duplicates still reject and preserve output |
+| Undefined and archive policy | Losing-only undefined references link; their undefined records can still extract an archive provider; discarded definitions alone create no new demand |
+| Group lifetime | An archive member selected for another definition loses its duplicate group; retained references to discarded locals reject |
+| GOT integration | Losing group relocations create no GOT entry; retained group relocations resolve real slots and targets |
+| Generic groups | Flag-zero groups remain live even when signatures match; COMDAT flag-one deduplicates |
+| Malformed metadata | Mutate actual group words/headers, signature and member relationships; reject out-of-bounds, invalid flags, duplicate ownership and inconsistent relocation membership |
+| Bounded failure | Charge group scans, observe cancellation and preserve the destination on quota/output/scratch failures |
+
+The fast ELF path explicitly lacks COMDAT deduplication, so it is not the oracle.
+Independent program-header/byte observations and recorded GNU fixture experiments
+support the contract. Stream output omits nonallocated debug sections; GNU's
+retained-debug undefined-reference errors are not claimed as stream behavior.
+The first executable intent was committed before implementation. Source-review
+corrections are not observed runtime RED/GREEN. Peak RSS and rescanning latency
+remain separate unverified NFR gates.
