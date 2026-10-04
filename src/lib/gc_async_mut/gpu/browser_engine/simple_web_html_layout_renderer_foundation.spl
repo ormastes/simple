@@ -806,13 +806,22 @@ fn skip_wrap_spaces(txt: text, off: i32) -> i32:
     out
 
 fn find_from(s: text, needle: text, pos: i32) -> i32:
-    # O(n*m) portable positional search. Do not emulate this through
-    # substring(start).index_of(): native substring can be represented as an
-    # untagged slice, while index_of expects tagged text and silently returns a
-    # bogus near-zero offset for non-zero starts. Keeping this in Simple also
-    # lets older deployed interpreters run current web-renderer source without
-    # requiring a newly added runtime extern.
-    # BYTE-indexed throughout: `pos` in, byte index out, matching `index_of`.
+    # Positional search, BYTE-indexed throughout: `pos` in, byte index out.
+    # Do not emulate this through substring(start).index_of(): native
+    # substring can be an untagged slice and index_of then returns a bogus
+    # near-zero offset for non-zero starts.
+    #
+    # The scan itself is the two-argument `index_of(needle, start)`, which the
+    # interpreter (interpreter_method/string.rs) and the compiled lane
+    # (`rt_text_find`) both implement as a native byte search from `start`.
+    # It used to be an interpreted byte loop over `s.bytes()`: every call
+    # copied the WHOLE haystack into a byte array before looking at a single
+    # byte, so the stylesheet scanners (thousands of calls over a ~300 KB
+    # sheet) were quadratic. Wikipedia's sheet took 13-16 s in CSS custom-
+    # property collection alone, exhausting the render budget before the
+    # first element was styled (0 pixels). The early returns below are kept
+    # so the edge cases answer exactly as before (an empty needle returns
+    # `start` even past the end, which native index_of would clamp).
     val start = if pos < 0: 0 else: pos
     val nlen = needle.len() as i32
     if nlen == 0:
@@ -820,30 +829,7 @@ fn find_from(s: text, needle: text, pos: i32) -> i32:
     val slen = s.len() as i32
     if start >= slen or slen < nlen:
         return -1
-    val limit = slen - nlen
-    # Decode both operands to bytes ONCE, then compare integers. Calling
-    # text_matches_at per probe would re-decode the whole haystack at every
-    # offset; the previous `char_code_at` form was worse still, since each
-    # `char_code_at(i)` re-walks the UTF-8 from byte 0, making the scan
-    # quadratic in the match position.
-    val hb = s.bytes()
-    val nb = needle.bytes()
-    val first = nb[0]
-    var i = start
-    while i <= limit:
-        if hb[i] == first:
-            var j = 1
-            var matched = true
-            while j < nlen:
-                if hb[i + j] != nb[j]:
-                    matched = false
-                    j = nlen
-                else:
-                    j = j + 1
-            if matched:
-                return i
-        i = i + 1
-    -1
+    s.index_of(needle, start) as i32
 
 fn html_attr_name_byte_equal(actual: i64, expected: i64) -> bool:
     var actual_folded = actual
