@@ -39,3 +39,13 @@ its controlled generated-source/snapshot design remains implementation work.
 Simple compilation, native tests, doctests/docgen, coverage, compiler/lib/MCP/LSP
 checks, native smoke and performance checks remain UNRUN. No formal readiness
 PASS, executable deployment, release tag or publication is claimed.
+
+Scoped source checks against base `9af9a8c0c70c4a04f6fc3a5bac7db475362854f5`
+passed whitespace, direct-env runtime guards (working/staged), and numbered
+artifact classification (six classified paths, zero numbered artifacts).
+`doc/06_spec` contains zero executable `_spec.spl` files. Test-tree delta
+verification reports 3152 pre-existing offenders and zero introduced; it does
+not establish a clean repository-wide test tree. The recorded offender list is
+`C:/dev/simple/.git/item4-runtime-recovery-preexisting-offenders.txt`, SHA256
+`2fb68a47bab7953e058a449562ecba2df9f135b8d2e2d99c3e14f373b1c1d719`.
+These structural checks do not replace the unrun runtime gates above.
