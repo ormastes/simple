@@ -261,3 +261,24 @@ Acceptance commits test intent before runtime implementation starts. Root and
 research review final source/test behavior. Lower-model sidecars: N/A; inherited
 models retained. No admitted runtime exists in this lane; authored tests remain
 UNRUN and cannot establish TDD RED/GREEN, coverage or Phase 4 PASS.
+
+## Ordinary static x64 GOT ownership (2026-10-04)
+
+Base/expected release target: `11a5ade180d895de65342ed983ce34ad06506a33`.
+Root owns integration, common plans and merge on `work/item4-stream-got-20261004`
+in `C:/dev/simple-item4-sha-owner-20261004`. Separate child worktrees under
+`C:/dev/` are `simple-item4-stream-got-core-20261004`,
+`simple-item4-stream-got-tests-20261004`, and
+`simple-item4-stream-got-docs-20261004`, each on its matching `work/*` branch.
+Runtime owns stream_got and stream_inputs/layout/emit; acceptance owns the
+new item4_stream_got spec/manual and actual fixtures; research owns design,
+primary ABI research, external fixture experiments and independent review.
+
+Public stream link/layout contracts remain unchanged. Production helpers use
+`elf_stream_got_*`, test setup/checkers use `item4_stream_got_*` with real
+assertions and explicit setup failures. Slot identity is tagged global name or
+local owner/table/ordinal; payload is the resolved address, never address plus
+relocation addend. GOT base follows COMMON, independent of slot contents. The
+ordinary types are 3,9,25,26,27,28,29,30,31,41,42,43. TLS/dynamic work stays open.
+Test intent precedes implementation. Root and research review exact changes;
+lower-model sidecars N/A. No admitted runtime or RED/GREEN execution is claimed.

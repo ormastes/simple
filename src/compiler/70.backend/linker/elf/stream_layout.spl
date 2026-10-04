@@ -1,6 +1,7 @@
 # Deterministic scan-based layout. Only three segment summaries are resident.
 use compiler.backend.linker.elf.stream_types.{ElfStreamInputsV1, ElfStreamLayoutV1}
-use compiler.backend.linker.elf.stream_inputs.{elf_stream_name_v1, elf_stream_symbol_count_v1}
+use compiler.backend.linker.elf.stream_inputs.{elf_stream_name_v1, elf_stream_symbol_count_v1, elf_stream_got_anchor_v1}
+use compiler.backend.linker.elf.stream_got.*
 use compiler.backend.linker.elf.elf_file_reader.{ElfFileSymbolV1, ElfFileSectionV1, elf_file_section_v1}
 
 val ELF_STREAM_BASE_V1: u64 = 4194304u64
@@ -33,6 +34,13 @@ export ELF_STREAM_BASE_V1, elf_stream_group_v1, elf_stream_align_v1
 export elf_stream_section_align_v1
 
 impl ElfStreamInputsV1:
+    me elf_stream_got_base_v1(cancelled: fn() -> bool) -> Result<u64, text>:
+        # Independent of GOT slot counting and payload resolution: anchor slots
+        # and references to the anchor cannot recurse into layout.
+        val ordinary = self.elf_stream_regular_end_v1(cancelled)?
+        val common = self.elf_stream_common_layout_v1(ordinary, [], cancelled)?
+        elf_stream_align_v1(common.0, 8u64, self.limits.output_bytes)
+
     me elf_stream_regular_end_v1(cancelled: fn() -> bool) -> Result<u64, text>:
         var cursor = 4096u64
         for group in 0..3:
@@ -97,6 +105,10 @@ impl ElfStreamInputsV1:
 
     me elf_stream_symbol_address_v1(owner: i64, symbol: ElfFileSymbolV1,
             cancelled: fn() -> bool) -> Result<u64, text>:
+        if elf_stream_got_anchor_v1(symbol):
+            if symbol.section_index != 0: return Err("stream reserved GOT anchor definition")
+            val base = self.elf_stream_got_base_v1(cancelled)?
+            return Ok(ELF_STREAM_BASE_V1 + base)
         var definition = symbol
         var defining_owner = owner
         if symbol.binding == 1 or symbol.binding == 2:
@@ -140,7 +152,8 @@ impl ElfStreamInputsV1:
                         cursor = cursor + section.size
             if group == 2:
                 val common = self.elf_stream_common_layout_v1(cursor, [], cancelled)?
-                cursor = common.0
+                val got = self.elf_stream_got_layout_v1(common.0, None, cancelled)?
+                cursor = got.end
             sizes.push(cursor - start)
         val binding = self.elf_stream_lookup_v1(entry, cancelled)?
         if binding.is_none(): return Err("stream entry disappeared")
