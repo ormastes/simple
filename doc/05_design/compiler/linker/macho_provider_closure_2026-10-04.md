@@ -153,6 +153,14 @@ entrypoints, canonical `std.spec.step`, and independent image oracles.
 
 Graph caching and visited-state bounds control repeated lookup work. They are
 not hard RSS, no-swap, descendant containment or performance qualification.
+Each active node validates metadata and builds an export-name index once, with
+explicit owner writeback and charged construction. Queries use that index;
+binary expansion builds an alias-ordinal set once instead of scanning every
+export for every dependency. A single mutable lookup owner retains cumulative
+work across all unresolved symbols in one hosted job. Parser-declared symbol
+counts include unselected metadata; expanded ObjC exports have their own cap
+under the same configured symbol maximum. Duplicate direct roots and conflicting
+source install identities reject rather than silently changing load ordering.
 Representative SDK closure timing and peak-memory measurements remain required
 after runtime admission; do not infer them from small authored fixtures.
 
