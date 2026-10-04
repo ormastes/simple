@@ -1,0 +1,46 @@
+use std.spec
+use std.spec.step
+use std.sffi.dynamic.{DynLib}
+
+"""
+## Purpose and audience
+
+`DynLib.load_checked` must load a real shared library on every execution lane
+and must say why a load failed. Under the Cranelift JIT, `&mut handle` reached
+`spl_dlopen_checked` as the slot VALUE, not its address. The provider answered
+status 1 and the loader reported a bare failure for a library that was
+present: `main_gui` printed "cannot load build/sffi/libspl_winit" for a
+present, valid dylib. Audience: SFFI and GUI maintainers.
+
+Bug: doc/08_tracking/bug/jit_refmut_extern_out_param_passes_value_not_address_2026-10-05.md
+"""
+
+fn _load_ok(path: text) -> bool:
+    val r = unsafe(capabilities: [ffi]):
+        DynLib.load_checked(path)
+    match r:
+        case Ok(_): true
+        case Err(_): false
+
+fn _load_error(path: text) -> text:
+    val r = unsafe(capabilities: [ffi]):
+        DynLib.load_checked(path)
+    match r:
+        case Ok(_): ""
+        case Err(e): e
+
+describe "DynLib.load_checked":
+    # @req REQ-SSPEC-LOCAL-001
+    it "loads the platform C library by soname":
+        step("Load libSystem (macOS) or libc (Linux) through the checked loader")
+        assert_true(_load_ok("libSystem.B.dylib") or _load_ok("libc.so.6"))
+
+    it "explains a failed load of a present non-library file":
+        step("Load a present file that is not a shared library")
+        val error = _load_error("README.md")
+        expect(error).to_contain("README.md")
+        expect(error).to_contain("returned null")
+
+    it "explains a missing artifact":
+        step("Load a path that does not exist")
+        expect(_load_error("build/no_such_dir/libnothing.dylib")).to_contain("artifact not present")

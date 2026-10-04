@@ -44,12 +44,18 @@ extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
 use std.io_runtime.{env_get}
 
+# Names that failed to resolve in the current create() attempt, so a stale
+# provider is reported by symbol instead of a bare "incomplete ABI".
+var _gui_missing_symbols: [text] = []
+
 fn _gui_renderer_resolve(lib: DynLib, name: text) -> i64:
     val result = unsafe(capabilities: [ffi, raw_ptr]):
         lib.sym_checked(name)
     match result:
         case Ok(symbol): symbol
-        case Err(_): 0
+        case Err(_):
+            _gui_missing_symbols.push(name)
+            0
 
 @always_inline
 fn _gui_frame_extent_valid(w: i64, h: i64, pixel_count: i64) -> bool:
@@ -215,17 +221,26 @@ impl GuiRenderer:
         dbg_stage("gui", "winit_dylib_open_start")
         val candidates = gui_renderer_lib_candidates()
         var loaded: DynLib? = nil
+        var errors: [text] = []
         var i = 0
         while i < candidates.len() and loaded == nil:
-            loaded = unsafe(capabilities: [ffi]):
-                DynLib.load(candidates[i])
+            val attempt = unsafe(capabilities: [ffi]):
+                DynLib.load_checked(candidates[i])
+            match attempt:
+                case Ok(lib):
+                    loaded = Some(lib)
+                case Err(error):
+                    errors.push(error)
             i = i + 1
         if loaded == nil:
-            print "GuiRenderer: cannot load build/sffi/libspl_winit.<dylib|so|dll> — build it with: sh scripts/build/build_spl_winit.shs (or set SIMPLE_SPL_WINIT_PATH)"
+            print "GuiRenderer: cannot load the winit provider — build it with: sh scripts/build/build_spl_winit.shs (or set SIMPLE_SPL_WINIT_PATH)"
+            for error in errors:
+                print "GuiRenderer:   {error}"
             dbg_stage("gui", "winit_dylib_open_failed")
             return nil
         var l = loaded.unwrap()
         dbg_stage("gui", "winit_dylib_open_done")
+        _gui_missing_symbols = []
 
         val fp_loop_new = _gui_renderer_resolve(l, "rt_winit_event_loop_new")
         val fp_window_new = _gui_renderer_resolve(l, "rt_winit_window_new")
@@ -263,7 +278,7 @@ impl GuiRenderer:
             fp_present == 0 or fp_event_free == 0 or fp_window_free == 0 or
             fp_loop_window_count == 0 or
             fp_loop_free == 0:
-            print "GuiRenderer: '{l.path}' has an incomplete mandatory rt_winit_* ABI"
+            print "GuiRenderer: '{l.path}' has an incomplete mandatory rt_winit_* ABI (missing: {_gui_missing_symbols.join(", ")}) — rebuild with scripts/build/build_spl_winit.shs"
             dbg_stage("gui", "winit_symbols_incomplete")
             unsafe(capabilities: [ffi]):
                 l.close()
