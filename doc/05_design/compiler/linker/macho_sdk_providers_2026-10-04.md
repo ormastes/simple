@@ -68,6 +68,13 @@ seam, nonempty clients or a parent umbrella fail explicitly because actual clien
 binding is not implemented yet. This prevents policy erasure while retaining
 the full stage-3 requirement to implement those permissions positively.
 
+Immediate cost: projection traverses export/dependency metadata linearly and
+adds one bounded load-command scan to retain formerly opaque client/umbrella
+commands. It reads the already resident binary buffer, not another file or
+external process. Metadata arrays add resident storage; this is not a bounded
+RSS claim. Legacy/typed byte equality partly follows delegation, so independent
+literal dependency/binding and TLV instruction oracles remain essential.
+
 ### 2. Both format readers
 
 V4 requires tagged YAML `!tapi-tbd`, version 4, target lists, install name,
