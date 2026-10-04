@@ -1,7 +1,14 @@
 # Semantic canonical stream loses owner transitions across free functions
 
-Status: confirmed source-shape defect against documented class value semantics;
-runtime reproduction UNRUN. Inspection base: release `f5fec9ccf8c`.
+Status: source repair authored and independently reviewed; native regression
+execution UNRUN. Original inspection base: release `f5fec9ccf8c`.
+
+Repair at `661000c1ed1`: 47 mutating/transitive operations become mutable
+receiver methods; tag builders retain state and extracted parent frames are
+written back. Constructors, observers and the frozen byte format remain.
+Four new original-owner regressions and the migrated existing canonical suite
+cover counters, budgets, sticky errors, nested closure, roots and finalization.
+This is not a runtime PASS or activation of the closed declaration issuer.
 Separate from the SHA-256 compression/stream owner repair.
 
 Owner: `src/compiler/00.common/cache_contract/semantic_canonical_stream_v1.spl`.
