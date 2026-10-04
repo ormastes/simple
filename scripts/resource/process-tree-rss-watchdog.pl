@@ -57,10 +57,12 @@ my %unexpected_sid;
 my $sample_started_at;
 # The cadence is a scheduling target, not a deadline for a host-wide process
 # observation. Keep slow but valid samples bounded separately from that target.
+# Up to 30s for emulated hosts: a riscv64 TCG guest with 20 compile threads
+# stalled one /proc sample past 5s after 3729 good ones (peak 894 MiB).
 my $observation_budget_ms = $ENV{SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS} // 1000;
 $observation_budget_ms =~ /^\d+$/ && $observation_budget_ms >= 1000 &&
-    $observation_budget_ms <= 5000
-    or die "rss-guard: observation budget must be between 1000 and 5000 ms\n";
+    $observation_budget_ms <= 30000
+    or die "rss-guard: observation budget must be between 1000 and 30000 ms\n";
 my ($sample_duration_max_ms, $sample_overruns) = (0, 0);
 my ($observer_path, $observer_fd, $observer_sha, $observer_source_sha);
 my ($observer_read, $observer_write, $observer_pid);
