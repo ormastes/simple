@@ -1,3 +1,4 @@
+use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context_encode_v1, build_runner_context_decode_v1}
 # Build-specific binding over the shared PureDatabase task journal.
 # Context is an immutable manifest input, never reconstructed from filenames.
 use std.common.build_manager.contracts.{BuildTaskV1, BuildRunV1, BuildResultV1, BuildInputV1,
@@ -15,29 +16,6 @@ use std.common.crypto.sha256.{sha256_text}
 use std.common.build_manager.codec.{builder_encode_result_v1}
 use std.common.task_runner.scheduler.{task_runner_output_error}
 use app.buildrunner.process_evidence.{build_runner_process_evidence_decode_v1}
-
-struct BuildRunnerTaskContextV1:
-    backend: text
-    runtime_digest: text
-    policy_digest: text
-    environment_digest: text
-
-fn build_runner_context_encode_v1(value: BuildRunnerTaskContextV1) -> Result<text, text>:
-    if value.backend != "llvm" and value.backend != "cranelift":
-        return Err("unsupported build backend context")
-    for digest in [value.runtime_digest, value.policy_digest, value.environment_digest]:
-        if not builder_digest_valid_v1(digest): return Err("invalid build context digest")
-    Ok("SIMPLE-BUILD-TASK-CONTEXT-1\n" + value.backend + "\n" +
-        value.runtime_digest + "\n" + value.policy_digest + "\n" +
-        value.environment_digest + "\n")
-
-fn build_runner_context_decode_v1(payload: text) -> Result<BuildRunnerTaskContextV1, text>:
-    val fields = payload.split("\n")
-    if fields.len() != 6 or fields[0] != "SIMPLE-BUILD-TASK-CONTEXT-1" or fields[5] != "":
-        return Err("invalid build context framing")
-    val value = BuildRunnerTaskContextV1(fields[1], fields[2], fields[3], fields[4])
-    if build_runner_context_encode_v1(value)? != payload: return Err("noncanonical build context")
-    Ok(value)
 
 fn build_runner_task_identity_v1(task: BuildTaskV1, payload: text) -> Result<TaskRunnerIdentityV1, text>:
     val context = build_runner_context_decode_v1(payload)?
@@ -87,7 +65,8 @@ fn build_runner_database_append_v1(owner: TaskRunnerJournalV1, task: BuildTaskV1
         return Err("accepted build attempt identity differs")
     task_runner_journal_append_v1(owner, accepted)
 
-fn build_runner_database_finish_v1(owner: TaskRunnerJournalV1) -> Result<text, text>:
+fn build_runner_database_finish_v1(owner: TaskRunnerJournalV1,
+        expected_not_run: [text] = []) -> Result<text, text>:
     # Release even on an incomplete ledger or snapshot failure. A process still
     # owning live workers must not call finish; its supervisor owns closure.
     val missing = task_runner_journal_missing_v1(owner)
@@ -95,7 +74,13 @@ fn build_runner_database_finish_v1(owner: TaskRunnerJournalV1) -> Result<text, t
     val released = task_runner_journal_release_v1(owner)
     if released.is_err(): return Err(released.unwrap_err())
     if missing.is_err(): return Err(missing.unwrap_err())
-    if missing.unwrap().len() > 0: return Err("build task ledger has missing outcomes")
+    var allowed_missing: Dict<text, bool> = {}
+    for identity in expected_not_run:
+        if not builder_digest_valid_v1(identity) or allowed_missing.contains_key(identity):
+            return Err("invalid unstarted task inventory")
+        allowed_missing[identity] = true
+    for identity in missing.unwrap():
+        if not allowed_missing.contains_key(identity): return Err("build task ledger has missing executed outcomes")
     snapshot
 
 export BuildRunnerTaskContextV1, build_runner_context_encode_v1, build_runner_context_decode_v1
@@ -150,7 +135,7 @@ fn build_runner_database_collect_v1(owner: TaskRunnerJournalV1, task: BuildTaskV
     val identity = task_runner_identity_v1(build_runner_task_identity_v1(task, context)?)?
     val evidence = sha256_text(builder_encode_result_v1(result) + "\n" + process_payload)
     val accepted = TaskRunnerAttemptV1(identity, group_id, task.attempt, mode,
-        process.pid, process.process_started_ns, status, reason, process.exit_code, task_code,
+        process.pid, process.process_generation, status, reason, process.exit_code, task_code,
         process.signal_number, true, validated, stdout_digest, stderr_digest,
         evidence, process.transport_execution_digest)
     build_runner_database_append_v1(owner, task, context, accepted)

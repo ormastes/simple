@@ -1,3 +1,4 @@
+use app.buildrunner.task_context.{build_runner_context_decode_v1, build_runner_environment_digest_v1}
 use app.buildrunner.process_evidence.{build_runner_process_evidence_freeze_v1}
 use std.common.task_runner.contracts.{task_runner_process_outcome_v1}
 # Worker owns its compiler lease and attempt-local writable files. Only the
@@ -153,6 +154,11 @@ fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result
     val capabilities = process_observation_capabilities_v4()?
     if not capabilities.available: return Err("exact process observation V4 unavailable")
     val environment = builder_worker_environment_v1(root)?
+    for input in task.inputs:
+        if input.path == "task-context/" + task.id + ".sdn":
+            val context = build_runner_context_decode_v1(file_read_regular_no_follow_bounded(root + "/work/" + input.path, 2048)?)?
+            if context.environment_digest != build_runner_environment_digest_v1(environment, root)?:
+                return Err("compiler environment differs from admitted task context")
     var executable = OwnedExecutablePin.pin(root + "/producer.exe")?
     var directory = match OwnedCwdPinV4.pin(root + "/work"):
         Ok(value): value
@@ -297,3 +303,11 @@ pub fn builder_worker_execute_v1(task_path: text, attempt_root: text, host_id: t
     exit_code
 
 export builder_worker_execute_v1, builder_worker_verify_inputs_v1, builder_worker_outputs_v1
+
+# Manifest preparation asks the same worker owner for its normalized environment
+# identity. Only a digest crosses this interface; no secret values are printed.
+fn builder_worker_environment_digest_v1() -> Result<text, text>:
+    val root = "@TASK-CONTEXT@"
+    build_runner_environment_digest_v1(builder_worker_environment_v1(root)?, root)
+
+export builder_worker_environment_digest_v1

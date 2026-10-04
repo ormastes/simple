@@ -1,0 +1,104 @@
+# One parent-owned session wraps the existing CLI lifetime. Children only emit
+# frozen evidence; none may open or mutate this database.
+use app.buildrunner.task_database.{build_runner_database_open_v1, build_runner_database_collect_v1,
+    build_runner_database_finish_v1, build_runner_task_identity_v1}
+use std.common.task_runner.journal.{TaskRunnerJournalV1}
+use std.common.build_manager.contracts.{BuildRunV1, BuildTaskV1, BuildResultV1, BuildInputV1,
+    builder_task_identity_v1}
+use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_reaped_v1}
+use app.bootstrap_builder.process_port.{BuilderProcessPortV1}
+use app.io.file_ops.{file_read_regular_no_follow_bounded, file_hash_sha256,
+    file_is_regular_no_follow, secure_temp_dir, file_atomic_write}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.task_runner.contracts.{task_runner_identity_v1}
+use std.common.task_runner.scheduler.{TaskRunnerV1}
+
+class BuildRunnerDatabaseSessionV1:
+    journal: TaskRunnerJournalV1
+    contexts: Dict<text, text>
+    group_id: text
+    state_root: text
+    recorded: Dict<text, bool>
+    window_root: text
+    terminal_rows: text
+    not_run: [text]
+
+impl BuildRunnerDatabaseSessionV1:
+    me record(task: BuildTaskV1, result: BuildResultV1, observed: [BuildInputV1],
+            attempt: BuilderAttemptV1) -> Result<bool, text>:
+        val key = task.id + ":" + str(task.attempt)
+        if self.recorded.contains_key(key): return Ok(true)
+        if attempt.task_id != task.id or attempt.attempt != task.attempt or
+                attempt.identity_digest != builder_task_identity_v1(task) or
+                not builder_transport_reaped_v1(attempt): return Err("database attempt has no exact reap binding")
+        if attempt.host.transport != "local": return Err("remote process evidence transfer is not admitted")
+        val payload = file_read_regular_no_follow_bounded(attempt.local_root + "/compiler.process", 2048)?
+        for name in ["stdout.log", "stderr.log"]:
+            if not file_is_regular_no_follow(attempt.local_root + "/" + name): return Err("compiler log is not regular")
+        self.journal = build_runner_database_collect_v1(self.journal, task,
+            self.contexts[task.id], self.group_id, "grouped", result, observed, payload,
+            file_hash_sha256(attempt.local_root + "/stdout.log"),
+            file_hash_sha256(attempt.local_root + "/stderr.log"), true)?
+        self.recorded[key] = true
+        Ok(true)
+
+    me record_cached(run: BuildRunV1, task: BuildTaskV1, result: BuildResultV1,
+            observed: [BuildInputV1], process: BuilderProcessPortV1) -> Result<bool, text>:
+        for host in run.hosts:
+            if host.id == result.host_id:
+                val root = self.state_root + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + host.id
+                val attempt = BuilderAttemptV1(task.id, task.attempt, host, 0, root, "", "",
+                    builder_task_identity_v1(task), process)
+                return self.record(task, result, observed, attempt)
+        Err("cached task host is outside admitted run")
+
+    me settle(state: TaskRunnerV1) -> Result<bool, text>:
+        var rows = ""
+        var not_run: [text] = []
+        if state.error != "": return Err("cannot settle an invalid task owner")
+        for index in 0..state.tasks.len():
+            val task = state.tasks[index]
+            val status = state.statuses[index]
+            val identity = task_runner_identity_v1(build_runner_task_identity_v1(task, self.contexts[task.id])?)?
+            if status == "BLOCKED": not_run = not_run.push(identity)
+            elif status == "SUCCEEDED" or status == "FAILED":
+                if not self.recorded.contains_key(task.id + ":" + str(task.attempt)):
+                    return Err("current window terminal receipt is missing")
+            else: return Err("current window contains nonterminal ownership")
+            rows = rows + identity + "\t" + status + "\t" + str(task.attempt) + "\n"
+        self.not_run = not_run
+        self.terminal_rows = rows
+        Ok(true)
+
+    me finish() -> Result<text, text>:
+        if self.terminal_rows == "": return Err("current window outcome inventory is absent")
+        val revision = build_runner_database_finish_v1(self.journal, self.not_run)?
+        val ledger = "SIMPLE-BUILD-TASK-WINDOW-1\n" + self.group_id + "\n" +
+            self.journal.database_identity + "\n" + revision + "\n" + self.terminal_rows
+        if not file_atomic_write(self.window_root + "/outcomes.sdn", ledger):
+            return Err("cannot publish current window outcome ledger")
+        Ok(revision)
+
+fn build_runner_database_session_open_v1(run: BuildRunV1, state_root: text,
+        source_root: text) -> Result<BuildRunnerDatabaseSessionV1?, text>:
+    var contexts: Dict<text, text> = {}
+    for task in run.tasks:
+        val relative = "task-context/" + task.id + ".sdn"
+        for input in task.inputs:
+            if input.path == relative:
+                val payload = file_read_regular_no_follow_bounded(source_root + "/" + relative, 2048)?
+                if sha256_text(payload) != input.digest: return Err("admitted task context changed")
+                val _identity = build_runner_task_identity_v1(task, payload)?
+                contexts[task.id] = payload
+    # Legacy manifests remain readable. New bootstrap inventories must supply
+    # all contexts; a partly upgraded inventory is always an authority error.
+    if contexts.len() == 0: return Ok(nil)
+    if contexts.len() != run.tasks.len(): return Err("incomplete task context inventory")
+    for host in run.hosts:
+        if host.transport != "local": return Err("task database requires local frozen process evidence")
+    val window = secure_temp_dir(state_root, "task-window")?
+    val nonce = sha256_text(window)
+    val journal = build_runner_database_open_v1(state_root + "/task-database", nonce, run, contexts)?
+    Ok(Some(BuildRunnerDatabaseSessionV1(journal, contexts, nonce, state_root, {}, window, "", [])))
+
+export BuildRunnerDatabaseSessionV1, build_runner_database_session_open_v1

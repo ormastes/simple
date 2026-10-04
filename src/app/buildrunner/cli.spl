@@ -1,3 +1,4 @@
+use app.buildrunner.database_session.{BuildRunnerDatabaseSessionV1, build_runner_database_session_open_v1}
 # The manager owns every canonical transition and published output. Worker
 # processes own isolated attempt directories and return encoded receipts.
 use app.io.args_ops.{get_args}
@@ -15,7 +16,7 @@ use app.bootstrap_builder.contracts.{BuildInputV1, BuildTaskV1, BuildResultV1, B
 use app.bootstrap_builder.codec.{builder_read_run_v1, builder_read_result_v1, builder_write_result_v1,
     builder_encode_result_v1}
 use app.buildrunner.runner.{BuildRunnerV1, build_runner_start, build_runner_ready, build_runner_dependencies_ready, build_runner_host_slots, build_runner_dispatch, build_runner_reap, build_runner_unresolved, build_runner_accept, build_runner_resume, build_runner_done, build_runner_succeeded, build_runner_output_error, build_runner_encode_v1, build_runner_decode_v1}
-use app.bootstrap_builder.worker.{builder_worker_execute_v1}
+use app.bootstrap_builder.worker.{builder_worker_execute_v1, builder_worker_environment_digest_v1}
 use app.bootstrap_builder.failure_policy.{builder_failure_class_v1}
 use app.bootstrap_builder.phase_admission.{managed_phase_cli_v1}
 use app.bootstrap_builder.grouped_native_run.{NativeGroupedCapacityV1}
@@ -189,7 +190,8 @@ fn builder_cli_failure_v1(task: BuildTaskV1, host: text, status: text, code: i64
     BuildResultV1(task_id: task.id, attempt: task.attempt, identity_digest: builder_task_identity_v1(task), host_id: host, status: status, exit_code: code, outputs: [], cache_hits: -1, cache_misses: -1, cache_stores: -1)
 
 fn builder_cli_readmit_failures_v1(state: BuildRunnerV1, config: BuilderCliV1,
-        source_root: text, process: BuilderProcessPortV1) -> i64:
+        source_root: text, process: BuilderProcessPortV1,
+        database: BuildRunnerDatabaseSessionV1?) -> i64:
     var admitted_failures = 0
     for index in 0..state.tasks.len():
         if state.statuses[index] == "UNRESOLVED": return -1
@@ -215,12 +217,17 @@ fn builder_cli_readmit_failures_v1(state: BuildRunnerV1, config: BuilderCliV1,
                 Ok(value): value
                 Err(_): return -1
             if builder_encode_result_v1(collected) != builder_encode_result_v1(retained): return -1
+            if val session = database:
+                match session.record(task, retained, [], attempt):
+                    Ok(_): pass
+                    Err(_): return -1
             admitted_failure = true
         if not admitted_failure: return -1
         admitted_failures = admitted_failures + 1
     admitted_failures
 
-fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: BuilderProcessPortV1) -> i64:
+fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: BuilderProcessPortV1,
+        database: BuildRunnerDatabaseSessionV1?) -> i64:
     var state = build_runner_start(run)
     if state.error != "":
         print "builder: {state.error}"
@@ -265,8 +272,13 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                                         print "builder: {task.id} restored=verified-artifact"
                                 if build_runner_output_error(task, cached, observed) == "":
                                     state = build_runner_resume(state, cached, observed)
-                                    val prune_error = builder_cli_prune_success_v1(task, cached,
-                                        run, config.state, source_root, output_root, process)
+                                    if val session = database:
+                                        match session.record_cached(run, task, cached, observed, process):
+                                            Ok(_): pass
+                                            Err(reason): state.error = reason
+                                    val prune_error = if state.error == "":
+                                        builder_cli_prune_success_v1(task, cached, run, config.state, source_root, output_root, process)
+                                    else: ""
                                     if prune_error != "":
                                         prune_failed = true
                                         print "builder: {task.id} terminal input cleanup failed: {prune_error}"
@@ -293,7 +305,7 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
         return 2
     # Recover owned live attempts first so an invalid retained failure can
     # cancel them. No new task may launch until this replay gate succeeds.
-    if builder_cli_readmit_failures_v1(state, config, source_root, process) < 0:
+    if builder_cli_readmit_failures_v1(state, config, source_root, process, database) < 0:
         val cleaned = builder_cli_cancel_v1(active)
         print "builder: retained failure authority invalid; cleanup={cleaned}"
         return 2
@@ -354,6 +366,11 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                         if state.error == "" and builder_failure_class_v1(receipt.status,
                                 receipt.exit_code, builder_transport_reaped_v1(attempt)) == "infrastructure-abort":
                             state.error = "worker admission, resource or containment failure for " + task.id
+                        if state.error == "":
+                            if val session = database:
+                                match session.record(task, receipt, observed, attempt):
+                                    Ok(_): pass
+                                    Err(reason): state.error = reason
                         if state.error == "" and receipt.status == "OK":
                             val prune_error = builder_cli_prune_success_v1(task, receipt,
                                 run, config.state, source_root, output_root, process)
@@ -391,8 +408,13 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                         val observed = builder_cli_hash_outputs_v1(task, output_root, process)
                         if cached.status == "OK" and builder_validate_result_v1(task, cached) == "" and build_runner_output_error(task, cached, observed) == "":
                             state = build_runner_resume(state, cached, observed)
-                            val prune_error = builder_cli_prune_success_v1(task, cached,
-                                run, config.state, source_root, output_root, process)
+                            if val session = database:
+                                match session.record_cached(run, task, cached, observed, process):
+                                    Ok(_): pass
+                                    Err(reason): state.error = reason
+                            val prune_error = if state.error == "":
+                                builder_cli_prune_success_v1(task, cached, run, config.state, source_root, output_root, process)
+                            else: ""
                             if prune_error != "":
                                 prune_failed = true
                                 print "builder: {task.id} terminal input cleanup failed: {prune_error}"
@@ -402,6 +424,7 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
                             print "builder: {task.id} cache=verified-hit"
                     case Err(message):
                         print "builder: {task.id} cache=miss reason={message}"
+            if state.error != "": break
             if not cache_hit:
                 for host in run.hosts:
                     if build_runner_host_slots(state, host.id) > 0:
@@ -450,10 +473,16 @@ fn builder_cli_run_locked_v1(run: BuildRunV1, config: BuilderCliV1, process: Bui
     val succeeded = build_runner_succeeded(state)
     print "builder: completed success={succeeded} verified_cache_hits={reused}"
     if prune_failed: return 2
-    if succeeded: return 0
+    if succeeded:
+        if val session = database:
+            if session.settle(state).is_err(): return 2
+        return 0
     # Recheck the actual terminal evidence before exit 1 permits continuation.
-    val admitted_failures = builder_cli_readmit_failures_v1(state, config, source_root, process)
-    if admitted_failures > 0: 1 else: 2
+    val admitted_failures = builder_cli_readmit_failures_v1(state, config, source_root, process, database)
+    if admitted_failures <= 0: return 2
+    if val session = database:
+        if session.settle(state).is_err(): return 2
+    1
 
 fn builder_cli_private_path_v1(path: text) -> bool:
     if path == "" or path.contains("\\") or path.contains("\0") or
@@ -532,7 +561,23 @@ fn builder_cli_run_v1(run: BuildRunV1, config: BuilderCliV1, process: BuilderPro
     if lock < 0:
         print "builder: another manager owns this state directory"
         return 2
-    val code = builder_cli_run_locked_v1(run, resolved, process)
+    val source_root = if resolved.source_root == "": cwd() else: resolved.source_root
+    val database = match build_runner_database_session_open_v1(run, resolved.state, source_root):
+        Ok(value): value
+        Err(reason):
+            print "buildrunner: task database open failed: {reason}"
+            file_unlock(lock)
+            return 2
+    var code = builder_cli_run_locked_v1(run, resolved, process, database)
+    if val session = database:
+        # Only ordinary terminal returns prove that no unknown live trees remain.
+        # Infrastructure/cancellation retain the lease for supervised recovery.
+        if code == 0 or code == 1:
+            match session.finish():
+                Ok(revision): print "buildrunner: task database revision={revision}"
+                Err(reason):
+                    print "buildrunner: task database finalization failed: {reason}"
+                    code = 2
     file_unlock(lock)
     code
 
@@ -680,6 +725,14 @@ fn build_runner_cli_main_v1(process: BuilderProcessPortV1,
             print "builder: composed phase capacity authority is unavailable"
             return 2
         return managed_phase_cli_v1(args, process, phase_capacity!)
+    if args.len() == 1 and args[0] == "task-environment-digest":
+        match builder_worker_environment_digest_v1():
+            Ok(digest):
+                print digest
+                return 0
+            Err(reason):
+                print "buildrunner: {reason}"
+                return 2
     val config = builder_cli_parse_v1(args)
     if config.error != "":
         print "builder: {config.error}"

@@ -2,7 +2,10 @@
 # JobObject owns this process and its compiler child until tree collection.
 use app.io.args_ops.{get_args}
 use app.io.env_ops.{env_get}
-use app.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope_with_budget,
+    run_in_owned_execution_resource_scope}
+use std.common.perf.execution_metrics.{ResourceBudget}
+use app.buildrunner.process_evidence.{build_runner_process_evidence_completion_v1}
 use compiler.loader.loader.module_loader.{lazymoduleloader_with_defaults}
 use compiler.loader.loader.smf_group_batch_load.{moduleloader_load_native_batch_v1}
 use compiler.driver.driver_build.native_group_warm_route.{NativeGroupDependencySmfV1,
@@ -488,11 +491,30 @@ fn native_group_worker_execute_v1(root: text) -> Result<i64, text>:
         "--low-memory", "--entry-closure", "--keep-going", "--mode", "dynload",
         "--backend=" + request.backend, "--threads", str(request.threads),
         "--target", request.target]
-    val (stdout, stderr, code) = process_run_bounded(request.producer, args,
-        request.timeout_ms, 67108864)
+    # The broker retains the aggregate reservation. This shared process owner
+    # contributes exact compiler completion evidence without test-class defaults.
+    val budget = ResourceBudget(request.timeout_ms, 0,
+        if manifest.memory_policy == "enforce": manifest.memory_limit_bytes else: 0,
+        0, 0, 0, 0)
+    val scope = execution_resource_scope_with_budget(ExecutionResourceClass.Bootstrap, budget, 67108864)
+    val execution = run_in_owned_execution_resource_scope(scope, request.producer, args)
+    val stdout = execution.process.stdout
+    val stderr = execution.process.stderr
+    var code = execution.process.usage.exit_code
     if not file_atomic_write(root + "/compiler.stdout.log", stdout) or
             not file_atomic_write(root + "/compiler.stderr.log", stderr):
         return Err("cannot persist compiler output")
+    if val completed = execution.process.completion:
+        val evidence = build_runner_process_evidence_completion_v1(request.manifest_digest, completed)?
+        if not file_atomic_write(root + "/compiler.process", evidence):
+            return Err("cannot persist exact compiler process evidence")
+        if completed.timed_out: code = 124
+        elif completed.cancelled: code = 125
+        elif completed.signal_number > 0: code = 128 + completed.signal_number
+    # Missing POSIX completion never becomes guessed signal evidence. Ordinary
+    # typed compiler results retain the existing broker/tree admission path.
+    if execution.process.runtime_error != 0:
+        return Err("compiler observed process ownership failed")
     if not file_is_regular_no_follow(request.group_manifest) or
             file_hash_sha256(request.group_manifest) != request.manifest_digest:
         return Err("group manifest changed during compilation")
