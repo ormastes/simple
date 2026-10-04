@@ -66,7 +66,7 @@ pub fn evaluate_module_exports_with_preloaded(
     let impl_methods: ImplMethods = HashMap::new();
 
     // Collect bare export statements (export X, Y) to process after all definitions are available
-    let mut bare_exports: Vec<Vec<String>> = Vec::new();
+    let mut bare_exports: Vec<Vec<(String, String)>> = Vec::new();
 
     // Add builtin types to module environment
     add_builtin_types(&mut env);

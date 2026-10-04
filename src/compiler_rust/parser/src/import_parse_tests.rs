@@ -191,6 +191,71 @@ mod tests {
         assert!(r.is_ok(), "multiline export: {:?}", r);
     }
 
+    fn single_export(source: &str) -> crate::ast::ExportUseStmt {
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parses");
+        let exports: Vec<_> = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                crate::ast::Node::ExportUseStmt(e) => Some(e.clone()),
+                _ => None,
+            })
+            .collect();
+        // The `as alias` tail must not leak into a separate statement.
+        assert_eq!(module.items.len(), 1, "exactly one item for {source:?}: {:?}", module.items);
+        assert_eq!(exports.len(), 1);
+        exports.into_iter().next().unwrap()
+    }
+
+    /// Reproduces src/lib/nogc_sync_mut/src/hash.spl:324
+    /// (`export hash_text_fnv1a as rt_hash_text`): the alias tail used to be
+    /// parsed as a call to a function named `as`, so the module failed to load.
+    #[test]
+    fn bare_export_with_alias_is_one_aliased_export() {
+        use crate::ast::ImportTarget;
+        let export = single_export("export hash_text_fnv1a as rt_hash_text\n");
+        assert!(export.path.segments.is_empty());
+        assert_eq!(
+            export.target,
+            ImportTarget::Group(vec![ImportTarget::Aliased {
+                name: "hash_text_fnv1a".to_string(),
+                alias: "rt_hash_text".to_string(),
+            }])
+        );
+    }
+
+    /// Generalization: aliases mixed into a bare export list, across a line
+    /// continuation, and with an explicit `from` source module.
+    #[test]
+    fn bare_export_lists_accept_per_item_aliases() {
+        use crate::ast::ImportTarget;
+        let aliased = |n: &str, a: &str| ImportTarget::Aliased { name: n.to_string(), alias: a.to_string() };
+        let export = single_export("export init as mimalloc_init, alloc, free as mimalloc_free\n");
+        assert_eq!(
+            export.target,
+            ImportTarget::Group(vec![
+                aliased("init", "mimalloc_init"),
+                ImportTarget::Single("alloc".to_string()),
+                aliased("free", "mimalloc_free"),
+            ])
+        );
+        let export = single_export("export a as b,\n       c as d\n");
+        assert_eq!(export.target, ImportTarget::Group(vec![aliased("a", "b"), aliased("c", "d")]));
+        let export = single_export("export a as b, c from helpers\n");
+        assert_eq!(export.path.segments, vec!["helpers".to_string()]);
+        assert_eq!(
+            export.target,
+            ImportTarget::Group(vec![aliased("a", "b"), ImportTarget::Single("c".to_string())])
+        );
+        // Plain lists are unchanged.
+        let export = single_export("export a, b\n");
+        assert_eq!(
+            export.target,
+            ImportTarget::Group(vec![ImportTarget::Single("a".to_string()), ImportTarget::Single("b".to_string())])
+        );
+    }
+
     #[test]
     fn test_method_chain_then_dot_question_a() {
         // Test A: simple .? works

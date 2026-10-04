@@ -328,7 +328,7 @@ fn unresolved_bare_export_names(items: &[Node]) -> Vec<String> {
     for item in items {
         if let Node::ExportUseStmt(export_stmt) = item {
             if export_stmt.path.segments.is_empty() {
-                for name in export_target_names(&export_stmt.target) {
+                for name in bare_export_source_names(&export_stmt.target) {
                     if !local_names.iter().any(|local| local == &name) && !names.iter().any(|seen| seen == &name) {
                         names.push(name);
                     }
@@ -337,6 +337,16 @@ fn unresolved_bare_export_names(items: &[Node]) -> Vec<String> {
         }
     }
     names
+}
+
+/// Local names a bare export (`export X` / `export impl as public`) needs
+/// defined somewhere: the alias is the exported name, not a symbol to find.
+fn bare_export_source_names(target: &ImportTarget) -> Vec<String> {
+    match target {
+        ImportTarget::Single(name) | ImportTarget::Aliased { name, .. } => vec![name.clone()],
+        ImportTarget::Group(items) => items.iter().flat_map(bare_export_source_names).collect(),
+        ImportTarget::Glob => Vec::new(),
+    }
 }
 
 fn export_target_names(target: &ImportTarget) -> Vec<String> {
@@ -1337,7 +1347,8 @@ pub fn load_and_merge_module(
 #[cfg(test)]
 mod tests {
     use super::{
-        enforce_gc_boundary_policy, gc_boundary_warning_message, load_and_merge_module, loader_trace_enabled,
+        bare_export_source_names, enforce_gc_boundary_policy, export_target_names, gc_boundary_warning_message,
+        load_and_merge_module, loader_trace_enabled,
         mark_module_loading, prefer_package_init_for_member_import, resolve_member_import_target,
         should_keep_selective_export, unmark_module_loading,
     };
@@ -1619,6 +1630,57 @@ mod tests {
 
         assert!(matches!(exports.get("env_get"), Some(Value::Function { .. })));
         assert!(matches!(exports.get("dir_walk"), Some(Value::Function { .. })));
+    }
+
+    /// `export hash_text_fnv1a as rt_hash_text` (src/lib/nogc_sync_mut/src/hash.spl)
+    /// must load and publish the implementation under the alias. Before the
+    /// parser accepted bare aliases, this module failed to load with
+    /// `semantic: function `as` not found`, which broke `simple test <dir>`.
+    #[test]
+    fn bare_aliased_export_publishes_local_definition_under_alias() {
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("..");
+        let current_file = repo_root.join("src/lib/nogc_sync_mut/test_runner/test_runner_main.spl");
+
+        let value = load_and_merge_module(
+            &use_stmt_with_path(
+                &["std", "nogc_sync_mut", "src", "hash"],
+                ImportTarget::Group(vec![ImportTarget::Single("rt_hash_text".to_string())]),
+            ),
+            Some(&current_file),
+            &mut functions,
+            &mut classes,
+            &mut enums,
+        )
+        .expect("hash module loads");
+
+        let exports = match value {
+            Value::Dict(exports) => exports,
+            other => panic!("expected module exports dict, got {:?}", other),
+        };
+        match exports.get("rt_hash_text") {
+            Some(Value::Function { def, .. }) => assert_eq!(def.name, "hash_text_fnv1a"),
+            other => panic!("rt_hash_text must alias hash_text_fnv1a, got {:?}", other),
+        }
+    }
+
+    /// Generalization: aliases in a bare export list resolve each local name
+    /// independently, keep unaliased names, and never invent the alias as a
+    /// symbol to search for (the alias names nothing locally).
+    #[test]
+    fn bare_export_source_names_ignore_aliases() {
+        let target = ImportTarget::Group(vec![
+            ImportTarget::Aliased { name: "init".to_string(), alias: "mimalloc_init".to_string() },
+            ImportTarget::Single("alloc".to_string()),
+        ]);
+        assert_eq!(bare_export_source_names(&target), vec!["init".to_string(), "alloc".to_string()]);
+        // Re-export lists still name BOTH sides (provided-names oracle).
+        assert_eq!(
+            export_target_names(&target),
+            vec!["init".to_string(), "mimalloc_init".to_string(), "alloc".to_string()]
+        );
     }
 
     #[test]
