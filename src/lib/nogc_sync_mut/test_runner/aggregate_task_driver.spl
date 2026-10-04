@@ -28,6 +28,18 @@ struct AggregateTaskRunV1:
     transport_failed: bool
     infrastructure_error: text
 
+struct AggregateTaskPendingV1:
+    identities: [text]
+    mode: text
+    attempt: i64
+    prior: [TaskRunnerAttemptV1]
+
+fn _aggregate_attempts_for(identities: [text], rows: [TaskRunnerAttemptV1]) -> [TaskRunnerAttemptV1]:
+    var selected: [TaskRunnerAttemptV1] = []
+    for row in rows:
+        if identities.contains(row.identity_digest): selected.push(row)
+    selected
+
 fn aggregate_task_identities_v1(template: TaskRunnerIdentityV1,
         command: AggregateTestCommandV1, inventory: AggregateTaskInventoryV1) -> Result<[TaskRunnerIdentityV1], text>:
     if template.kind != "test" or template.case_id != "": return Err("invalid aggregate identity template")
@@ -54,7 +66,8 @@ fn aggregate_task_totals_v1(expected: [TaskRunnerIdentityV1],
     var latest: Dict<text, TaskRunnerAttemptV1> = {}
     var crash_attempts: i64 = 0
     for row in attempts:
-        latest[row.identity_digest] = row
+        if not latest.contains_key(row.identity_digest) or latest[row.identity_digest].attempt < row.attempt:
+            latest[row.identity_digest] = row
         if row.status == "crashed": crash_attempts = crash_attempts + 1
     var totals = AggregateTaskTotalsV1(expected.len(), 0, 0, 0, 0, 0, 0, 0, 0, crash_attempts)
     for identity in expected:
@@ -86,43 +99,33 @@ fn aggregate_task_run_v1(owner: TaskRunnerJournalV1, inventory: AggregateTaskInv
     var all_attempts: [TaskRunnerAttemptV1] = []
     var transport_failed = false
     var infrastructure_error = ""
-    var group_index: i64 = 0
     for group in groups:
         var grouped_command = command
-        grouped_command.group_id = command.group_id + ":" + str(group_index)
-        group_index = group_index + 1
-        val first = match aggregate_test_run_batch_v1(next, inventory, grouped_command, scope,
-                group.identities, group.identities, 1, group.mode, [], max_attempts):
-            case Ok(value): value
-            case Err(message):
-                return Ok(AggregateTaskRunV1(next, all_attempts,
-                    aggregate_task_totals_v1(identities, all_attempts, max_attempts)?, true, message))
-        next = first.journal
-        transport_failed = transport_failed or first.transport_failed
-        if first.infrastructure_error != "": infrastructure_error = first.infrastructure_error
-        for row in first.attempts: all_attempts.push(row)
-        # Each unknown member gets its own recovery window projection. Feeding
-        # a successful isolated sibling back as a non-crashed whole group would
-        # incorrectly abort the other unknown siblings, so never do that.
-        for digest in first.recovery.isolated:
-            var history: [TaskRunnerAttemptV1] = []
-            for row in first.attempts:
-                if row.identity_digest == digest: history.push(row)
-            var attempt: i64 = 2
-            while attempt <= max_attempts:
-                val retry = match aggregate_test_run_batch_v1(next, inventory, grouped_command, scope,
-                        [digest], [digest], attempt, "isolated", history, max_attempts):
-                    case Ok(value): value
-                    case Err(message):
-                        return Ok(AggregateTaskRunV1(next, all_attempts,
-                            aggregate_task_totals_v1(identities, all_attempts, max_attempts)?, true, message))
-                next = retry.journal
-                transport_failed = transport_failed or retry.transport_failed
-                if retry.infrastructure_error != "": infrastructure_error = retry.infrastructure_error
-                for index in history.len()..retry.attempts.len(): all_attempts.push(retry.attempts[index])
-                history = retry.attempts
-                if retry.recovery.isolated.len() == 0: break
-                attempt = attempt + 1
+        var queue = [AggregateTaskPendingV1(group.identities, group.mode, 1, [])]
+        var cursor: i64 = 0
+        while cursor < queue.len():
+            val pending = queue[cursor]
+            cursor = cursor + 1
+            val batch = match aggregate_test_run_batch_v1(next, inventory, grouped_command, scope,
+                    pending.identities, pending.identities, pending.attempt,
+                    pending.mode, pending.prior, max_attempts):
+                case Ok(value): value
+                case Err(message):
+                    return Ok(AggregateTaskRunV1(next, all_attempts,
+                        aggregate_task_totals_v1(identities, all_attempts, max_attempts)?, true, message))
+            next = batch.journal
+            transport_failed = transport_failed or batch.transport_failed
+            if batch.infrastructure_error != "": infrastructure_error = batch.infrastructure_error
+            for index in pending.prior.len()..batch.attempts.len(): all_attempts.push(batch.attempts[index])
+            # Ordinary script interruption preserves grouping. A confirmed
+            # crash isolates unknown members. Each projection excludes green
+            # and failed siblings, so no completed case runs again.
+            if batch.recovery.grouped.len() > 0:
+                queue.push(AggregateTaskPendingV1(batch.recovery.grouped, "grouped", pending.attempt + 1,
+                    _aggregate_attempts_for(batch.recovery.grouped, batch.attempts)))
+            for digest in batch.recovery.isolated:
+                queue.push(AggregateTaskPendingV1([digest], "isolated", pending.attempt + 1,
+                    _aggregate_attempts_for([digest], batch.attempts)))
     Ok(AggregateTaskRunV1(next, all_attempts,
         aggregate_task_totals_v1(identities, all_attempts, max_attempts)?, transport_failed, infrastructure_error))
 

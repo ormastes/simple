@@ -3,9 +3,10 @@
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
 use std.io_runtime.{file_hash_sha256_or_empty}
 use std.common.build_manager.contracts.{builder_digest_valid_v1}
-use std.common.task_runner.snapshot.{task_runner_snapshot_open_v1}
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1, task_runner_identity_v1}
+use std.common.task_runner.snapshot.{task_runner_snapshot_view_v1, task_runner_snapshot_inventory_v1, task_runner_snapshot_window_history_v1}
 use std.test_runner.aggregate_task_ledger.{aggregate_task_inventory_v1}
-use std.test_runner.aggregate_task_driver.{AggregateTaskTotalsV1}
+use std.test_runner.aggregate_task_driver.{AggregateTaskTotalsV1, aggregate_task_totals_v1}
 
 struct AggregateTaskSummaryExpectedV1:
     stage: text
@@ -20,6 +21,8 @@ struct AggregateTaskSummaryExpectedV1:
     execution_digest: text
     report_root: text
     db_root: text
+    expected_identities: [TaskRunnerIdentityV1]
+    group_id: text
 
 struct AggregateTaskSummaryV1:
     totals: AggregateTaskTotalsV1
@@ -90,8 +93,31 @@ fn aggregate_task_summary_verify_v1(payload: text,
     if exit_code != (if failed: 1 else: 0): return Err("test aggregate exit disagrees with outcomes")
     val revision = _summary_field(fields, "task_db_revision")?
     val database_identity = _summary_field(fields, "task_db_identity")?
-    val snapshot = task_runner_snapshot_open_v1(expected.db_root, revision, database_identity)?
-    if snapshot.digest != revision: return Err("test database revision differs")
+    val snapshot = task_runner_snapshot_view_v1(expected.db_root, revision, expected.source_digest,
+        expected.expected_identities, expected.group_id)?
+    if snapshot.database_identity != database_identity: return Err("test database identity differs")
+    val stored = task_runner_snapshot_inventory_v1(snapshot)?
+    if stored.len() != count: return Err("test database inventory count differs")
+    var rows: [TaskRunnerAttemptV1] = []
+    var seen_cases: Dict<text, bool> = {}
+    for identity in stored:
+        if identity.kind != "test" or not inventory.metadata.contains_key(identity.case_id) or
+                seen_cases.contains_key(identity.case_id): return Err("test database case inventory differs")
+        seen_cases[identity.case_id] = true
+        val digest = task_runner_identity_v1(identity)?
+        val history = task_runner_snapshot_window_history_v1(snapshot, digest)?
+        for row in history:
+            if row.attempt > 3: return Err("test attempt budget exceeded")
+            if (row.exit_code != 0 or row.signal_number != 0) and not transport_failed:
+                return Err("test transport failure erased from summary")
+            rows.push(row)
+    val observed = aggregate_task_totals_v1(stored, rows, 3)?
+    val declared_counts = [totals.passed, totals.failed, totals.crashed, totals.exhausted,
+        totals.skipped, totals.pending, totals.aborted, totals.not_run, totals.crash_attempts]
+    val actual_counts = [observed.passed, observed.failed, observed.crashed, observed.exhausted,
+        observed.skipped, observed.pending, observed.aborted, observed.not_run, observed.crash_attempts]
+    for index in 0..declared_counts.len():
+        if declared_counts[index] != actual_counts[index]: return Err("test summary differs from durable case outcomes")
     val artifact = _summary_field(fields, "artifact_digest")?
     val program = _summary_field(fields, "program_digest")?
     if not builder_digest_valid_v1(artifact) or not builder_digest_valid_v1(program): return Err("invalid test artifact digest")

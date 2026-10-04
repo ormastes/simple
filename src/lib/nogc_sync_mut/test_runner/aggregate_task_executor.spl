@@ -5,7 +5,7 @@ use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1,
 use std.common.task_runner.recovery.{TaskRunnerRecoveryPlanV1, task_runner_execution_mode_v1, task_runner_recovery_plan_v1}
 use std.common.task_runner.journal.{TaskRunnerJournalV1, task_runner_journal_identity_v1, task_runner_journal_history_v1, task_runner_journal_append_v1}
 use std.test_runner.aggregate_task_ledger.{AggregateTaskInventoryV1, AggregateTaskProgressV1, aggregate_task_inventory_v1, aggregate_task_progress_v1}
-use std.test_runner.task_runner_adapter.{test_case_attempt_v1}
+use std.test_runner.task_runner_adapter.{test_case_attempt_with_interruption_v1}
 use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceScope, run_in_owned_test_resource_scope}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded}
 use std.io_runtime.{file_hash_sha256_or_empty}
@@ -162,26 +162,31 @@ fn aggregate_test_run_batch_v1(owner: TaskRunnerJournalV1,
         (completion.signal_number > 0 or task_runner_native_exception_v1(completion.exit_code))
     var progress = AggregateTaskProgressV1({}, "", false, false, -1, -1)
     var infrastructure_error = ""
+    var trusted_prefix = false
     if file_exists(ledger):
         match file_read_regular_no_follow_bounded(ledger, 67108864):
             case Ok(payload):
                 match aggregate_task_progress_v1(inventory, payload, selected):
-                    case Ok(value): progress = value
+                    case Ok(value):
+                        progress = value
+                        trusted_prefix = true
                     case Err(message): infrastructure_error = message
             case Err(message): infrastructure_error = message
     elif not crashed:
         infrastructure_error = "aggregate process did not publish a registry"
     if not progress.complete and not crashed and not completion.timed_out and not completion.cancelled:
         infrastructure_error = "aggregate process stopped without a complete registry or crash evidence"
+    val interrupted = trusted_prefix and not progress.complete and not crashed and
+        not completion.timed_out and not completion.cancelled and completion.exit_code != 0
     var next = owner
     var attempts = prior
     for identity in identities:
-        val row = test_case_attempt_v1(identity, command.group_id, attempt, mode,
-            completion, inventory, progress)?
+        val row = test_case_attempt_with_interruption_v1(identity, command.group_id, attempt, mode,
+            completion, inventory, progress, interrupted)?
         next = task_runner_journal_append_v1(next, row)?
         attempts.push(row)
     val recovery = task_runner_recovery_plan_v1(command.group_id, expected,
-        attempts, crashed, completion.tree_reaped, attempt, max_attempts)?
+        attempts, crashed, completion.tree_reaped, attempt, max_attempts, interrupted)?
     Ok(AggregateTestBatchV1(next, attempts, recovery, completion,
         completion.exit_code != 0 or completion.signal_number != 0 or
         completion.timed_out or completion.cancelled or observed.process.runtime_error != 0 or
