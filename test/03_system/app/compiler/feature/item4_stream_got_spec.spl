@@ -10,6 +10,9 @@ use compiler.backend.linker.elf.stream_types.{ElfStreamLimitsV1}
 use compiler.backend.linker.elf.stream_link.{elf_stream_link_file_v1}
 use compiler.backend.linker.elf.elf_static_link.{ElfLinkRequest, elf_link, ELF_LINK_STATIC_EXEC}
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf.stream_inputs.{elf_stream_open_inputs_v1}
+use compiler.backend.linker.elf.stream_got.*
+use compiler.backend.linker.elf_parser.{elf_parse_object}
 
 fn item4_stream_got_pc_slot(bytes: [u8], field: i64, width: i64, addend: i64) -> u64:
     val location = item4_stream_got_translate(bytes, field as u64, true)
@@ -31,9 +34,11 @@ fn item4_stream_got_family_check(bytes: [u8], streamed: bool):
     if table < 0: return
     val base = item4_stream_got_read(bytes, table + 72, 8)
     expect(base % 8u64).to_equal(0u64)
-    val value_slot = base + item4_stream_got_read(bytes, table + 8, 4)
-    expect(base + item4_stream_got_read(bytes, table + 16, 8)).to_equal(value_slot)
-    val function_slot = base + item4_stream_got_read(bytes, table + 24, 8)
+    var offset32 = item4_stream_got_read(bytes, table + 8, 4) as i64
+    if offset32 >= 2147483648: offset32 = offset32 - 4294967296
+    val value_slot = (base as i64 + offset32) as u64
+    expect((base as i64 + item4_stream_got_read(bytes, table + 16, 8) as i64) as u64).to_equal(value_slot)
+    val function_slot = (base as i64 + item4_stream_got_read(bytes, table + 24, 8) as i64) as u64
     expect(function_slot == value_slot).to_equal(false)
     expect(item4_stream_got_pc_slot(bytes, table + 32, 4, 5)).to_equal(base)
     expect(item4_stream_got_pc_slot(bytes, table + 40, 8, 9)).to_equal(base)
@@ -69,6 +74,16 @@ fn item4_stream_got_family_check(bytes: [u8], streamed: bool):
         expect(item4_stream_got_read(bytes, location[0] as i64, 8)).to_equal(if index == 0: 111u64 else: 222u64)
     expect(local_slots[0] == local_slots[1]).to_equal(false)
     if streamed:
+        expect(value_slot).to_equal(base)
+        expect(function_slot).to_equal(base + 8u64)
+        expect(weak_slot).to_equal(base + 16u64)
+        expect(common_slot).to_equal(base + 24u64)
+        expect(alias_slot).to_equal(base + 32u64)
+        expect(local_slots[0]).to_equal(base + 40u64)
+        expect(local_slots[1]).to_equal(base + 48u64)
+        val extent = item4_stream_got_translate(bytes, base, false)
+        if extent.len() != 3: return
+        expect(extent[2]).to_equal(56u64)
         item4_stream_got_check(bytes)
         val marker = item4_stream_got_marker(bytes, "GOTCASE!")
         if marker < 0: return
@@ -103,12 +118,55 @@ fn item4_stream_got_fast(objects: [text], archives: [text]) -> Result<[u8], text
     for byte in linked: output.push(byte as u8)
     Ok(output)
 
+fn item4_stream_got_mutate(kind: i64) -> [u8]:
+    var bytes = file_read_bytes("test/fixtures/linker/elf/stream_got_refs.o")
+    var widened: [i64] = []
+    for byte in bytes: widened.push(byte as i64)
+    val parsed = elf_parse_object(widened)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return []
+    for section in parsed.unwrap().sections:
+        if section.sh_type == 4:
+            val offset = section.sh_addr
+            val valid = offset >= 0 and offset <= bytes.len() and 24 <= bytes.len() - offset
+            expect(valid).to_equal(true)
+            if not valid: return []
+            expect(item4_stream_got_read(bytes, offset, 8)).to_equal(11u64)
+            expect(item4_stream_got_read(bytes, offset + 8, 4)).to_equal(9u64)
+            expect(item4_stream_got_read(bytes, offset + 16, 8) as i64).to_equal(-4)
+            if item4_stream_got_read(bytes, offset, 8) != 11u64 or item4_stream_got_read(bytes, offset + 8, 4) != 9u64: return []
+            if item4_stream_got_read(bytes, offset + 16, 8) as i64 != -4: return []
+            var field = offset
+            var width = 8
+            var value = 28u64
+            if kind == 0:
+                field = offset + 12
+                width = 4
+                value = 2147483647u64
+            elif kind == 1:
+                val index = section.sh_info
+                expect(index >= 0 and index < parsed.unwrap().sections.len()).to_equal(true)
+                if index < 0 or index >= parsed.unwrap().sections.len(): return []
+                value = (parsed.unwrap().sections[index].sh_size - 1) as u64
+            elif kind == 2:
+                field = offset + 16
+                value = 2147483647u64
+            else:
+                field = offset + 8
+                width = 4
+                value = 22u64
+            for byte in 0..width: bytes[field + byte] = ((value >> (byte * 8)) & 255u64) as u8
+            return bytes
+    expect(false).to_equal(true)
+    []
+
 fn item4_stream_got_limits() -> ElfStreamLimitsV1:
     ElfStreamLimitsV1(input_limit: 12, archive_member_limit: 64u64, metadata_bytes: 262144u64,
         read_window_bytes: 64, emit_window_bytes: 8, name_bytes: 64,
         output_bytes: 1048576u64, scratch_bytes: 4194304u64, scan_record_limit: 2000000u64)
 
 fn item4_stream_got_cancelled() -> bool: false
+fn item4_stream_got_stop() -> bool: true
 
 fn item4_stream_got_read(bytes: [u8], offset: i64, width: i64) -> u64:
     val valid = offset >= 0 and offset <= bytes.len() and width >= 1 and width <= 8 and width <= bytes.len() - offset
@@ -136,6 +194,8 @@ fn item4_stream_got_marker(bytes: [u8], marker: text) -> i64:
     found
 
 fn item4_stream_got_translate(bytes: [u8], value: u64, from_file: bool) -> [u64]:
+    expect(item4_stream_got_read(bytes, 54, 2)).to_equal(56u64)
+    if item4_stream_got_read(bytes, 54, 2) != 56u64: return []
     val phoff = item4_stream_got_read(bytes, 32, 8)
     val count = item4_stream_got_read(bytes, 56, 2)
     val valid = phoff <= bytes.len() as u64 and count > 0u64 and count < 64u64 and count * 56u64 <= bytes.len() as u64 - phoff
@@ -189,6 +249,105 @@ fn item4_stream_got_check(bytes: [u8]):
     expect(slots[0] == slots[1]).to_equal(false)
 
 describe "Streamed static x64 GOT relocation families":
+    it "rejects malformed symbol patch range displacement and TLS demands without publishing":
+        step("Mutate checked real GOT relocation records and retain a destination sentinel")
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-got-invalid-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        val input = directory + "/invalid.o"
+        val output = directory + "/protected"
+        val sentinel: [u8] = [17, 0, 255, 31]
+        expect(file_write_bytes(output, sentinel)).to_equal(true)
+        for kind in 0..4:
+            val bytes = item4_stream_got_mutate(kind)
+            expect(bytes.len()).to_be_greater_than(64)
+            if bytes.len() > 64:
+                expect(file_write_bytes(input, bytes)).to_equal(true)
+                val linked = elf_stream_link_file_v1([input, "test/fixtures/linker/elf/stream_got_provider.o"], [],
+                    [95, 115, 116, 97, 114, 116], output, directory, item4_stream_got_limits(), item4_stream_got_cancelled)
+                expect(linked.is_err()).to_equal(true)
+                if linked.is_err():
+                    val errors = ["symbol", "patch exceeds input section", "signed 32-bit range", "unsupported TLS"]
+                    expect(linked.unwrap_err()).to_contain(errors[kind])
+                expect(file_read_bytes(output)).to_equal(sentinel)
+        for path in [input, output]:
+            if file_exists(path): expect(file_remove(path)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)
+
+    it "rejects global and weak definitions of the synthetic anchor but preserves a local spelling":
+        step("Distinguish reserved nonlocal anchor definitions from an actual local data reference")
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-got-reserved-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        for name in ["global", "weak", "local"]:
+            val output = directory + "/" + name
+            val sentinel: [u8] = [17, 0, 255, 31]
+            if name != "local": expect(file_write_bytes(output, sentinel)).to_equal(true)
+            val linked = elf_stream_link_file_v1(["test/fixtures/linker/elf/stream_got_anchor_" + name + ".o"], [],
+                [95, 115, 116, 97, 114, 116], output, directory, item4_stream_got_limits(), item4_stream_got_cancelled)
+            if name == "local":
+                expect(linked.is_ok()).to_equal(true)
+                if linked.is_ok():
+                    expect(linked.unwrap().cleanup_pending).to_equal(false)
+                    val image = file_read_bytes(output)
+                    val marker = item4_stream_got_marker(image, "LOCALGOT")
+                    if marker >= 0:
+                        val address = item4_stream_got_read(image, marker + 8, 8)
+                        val location = item4_stream_got_translate(image, address, false)
+                        if location.len() == 3: expect(item4_stream_got_read(image, location[0] as i64, 8)).to_equal(77u64)
+            else:
+                expect(linked.is_err()).to_equal(true)
+                if linked.is_err(): expect(linked.unwrap_err()).to_contain("_GLOBAL_OFFSET_TABLE_")
+                expect(file_read_bytes(output)).to_equal(sentinel)
+            if file_exists(output): expect(file_remove(output)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)
+
+    it "enforces GOT-only output extent scan quota and cancellation without replacing a sentinel":
+        step("Enter the actual GOT scan with real opened inputs and an exhausted quota")
+        val objects = ["test/fixtures/linker/elf/stream_got_refs.o", "test/fixtures/linker/elf/stream_got_provider.o"]
+        val opened = elf_stream_open_inputs_v1(objects, [], [95, 115, 116, 97, 114, 116],
+            item4_stream_got_limits(), item4_stream_got_cancelled)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_ok():
+            var inputs = opened.unwrap()
+            inputs.records_left = 0u64
+            val exhausted = inputs.elf_stream_got_layout_v1(8200u64, None, item4_stream_got_cancelled)
+            expect(exhausted.is_err()).to_equal(true)
+            if exhausted.is_err(): expect(exhausted.unwrap_err()).to_contain("scan-work")
+            inputs.records_left = 2000000u64
+            val cancelled = inputs.elf_stream_got_layout_v1(8200u64, None, item4_stream_got_stop)
+            expect(cancelled.is_err()).to_equal(true)
+            if cancelled.is_err(): expect(cancelled.unwrap_err()).to_contain("cancelled")
+            expect(inputs.elf_stream_close_inputs_v1()).to_equal(true)
+            expect(inputs.closed).to_equal(true)
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-got-budget-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        val output = directory + "/protected"
+        val sentinel: [u8] = [17, 0, 255, 31]
+        expect(file_write_bytes(output, sentinel)).to_equal(true)
+        for kind in 0..4:
+            var limits = item4_stream_got_limits()
+            # No RO input sections here: RW begins at 8192, then data[8]+GOT[16].
+            if kind == 0: limits.output_bytes = 8215u64
+            if kind == 1: limits.scratch_bytes = 1u64
+            if kind == 2: limits.scan_record_limit = 1u64
+            val linked = elf_stream_link_file_v1(objects, [], [95, 115, 116, 97, 114, 116],
+                output, directory, limits, if kind == 3: item4_stream_got_stop else: item4_stream_got_cancelled)
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_err():
+                val names = ["GOT", "scratch", "scan-work", "cancelled"]
+                expect(linked.unwrap_err()).to_contain(names[kind])
+            expect(file_read_bytes(output)).to_equal(sentinel)
+        expect(file_remove(output)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)
+
     it "links all twelve ordinary families with global local common weak and archive identities":
         step("Decode full formula families and distinguish equal-address globals from same-spelling locals")
         expect(dir_create_all("build")).to_equal(true)
@@ -221,7 +380,7 @@ describe "Streamed static x64 GOT relocation families":
         if created.is_err(): return
         val directory = created.unwrap()
         var baseline: [u8] = []
-        for name in ["inactive", "unused_anchor", "anchor", "base_only"]:
+        for name in ["inactive", "unused_anchor", "nonallocated", "anchor", "base_only"]:
             var limits = item4_stream_got_limits()
             limits.output_bytes = if name == "anchor" or name == "base_only": 12296u64 else: 12289u64
             val output = directory + "/" + name
@@ -233,7 +392,7 @@ describe "Streamed static x64 GOT relocation families":
                 val image = file_read_bytes(output)
                 expect(image.len() as u64).to_equal(limits.output_bytes)
                 if name == "inactive": baseline = image
-                elif name == "unused_anchor": expect(image).to_equal(baseline)
+                elif name == "unused_anchor" or name == "nonallocated": expect(image).to_equal(baseline)
                 else:
                     val marker = item4_stream_got_marker(image, "GOTEMPTY")
                     if marker >= 0:
