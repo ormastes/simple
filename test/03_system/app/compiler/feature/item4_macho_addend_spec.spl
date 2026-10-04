@@ -1,0 +1,102 @@
+"""ITEM4-REQ-004/006 hosted ARM64 ADDEND acceptance. Authored, execution UNRUN."""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.macho.hosted_link.{MachOHostedRequest, macho_hosted_link}
+
+fn item4_macho_addend_read(bytes: [u8], at: i64, width: i64 = 4) -> i64:
+    val valid = at >= 0 and width > 0 and width <= 8 and at <= bytes.len() and width <= bytes.len() - at
+    expect(valid).to_be(true)
+    if not valid: return 0
+    var result: i64 = 0
+    for index in 0..width: result = result | ((bytes[at + index] as i64) << (8 * index))
+    result
+
+fn item4_macho_addend_put(bytes: [u8], at: i64, value: i64) -> [u8]:
+    val valid = at >= 0 and at <= bytes.len() and 4 <= bytes.len() - at
+    expect(valid).to_be(true)
+    if not valid: return []
+    var out = bytes
+    for index in 0..4: out[at + index] = ((value >> (index * 8)) & 255) as u8
+    out
+
+fn item4_macho_addend_fixture(name: text) -> [u8]:
+    val bytes = file_read_bytes("test/fixtures/linker/macho/" + name)
+    expect(bytes.len()).to_be_greater_than(184)
+    bytes
+
+fn item4_macho_addend_request() -> MachOHostedRequest:
+    MachOHostedRequest(target: RelocArch.AArch64, entry: "_main", minimum_os: 0xb0000,
+        sdk: 0xb0000, max_image_bytes: 1048576, identifier: "item4.addend", rpaths: ["@loader_path"])
+
+fn item4_macho_addend_sign(value: i64, bits: i64) -> i64:
+    if (value & (1 << (bits - 1))) != 0: value - (1 << bits) else: value
+
+fn item4_macho_addend_baseline(bytes: [u8]) -> bool:
+    if bytes.len() < 184: return false
+    val relocation_offset = item4_macho_addend_read(bytes, 160)
+    val valid = item4_macho_addend_read(bytes, 0) == 0xfeedfacf and
+        item4_macho_addend_read(bytes, 32) == 0x19 and item4_macho_addend_read(bytes, 96) == 1 and
+        item4_macho_addend_read(bytes, 164) == 12 and relocation_offset >= 184 and
+        relocation_offset <= bytes.len() and 96 <= bytes.len() - relocation_offset
+    expect(valid).to_be(true)
+    if not valid: return false
+    var matched = true
+    for pair in 0..6:
+        val at = relocation_offset + pair * 16
+        val address = 20 - pair * 4
+        val addend = if pair < 2: 16 elif pair < 4: 4096 else: 4
+        val follower = if pair == 0 or pair == 2: 0x4c000003 elif pair == 1 or pair == 3: 0x3d000003 else: 0x2d000002
+        val exact = item4_macho_addend_read(bytes, at) == address and
+            item4_macho_addend_read(bytes, at + 8) == address and
+            item4_macho_addend_read(bytes, at + 4) == 0xa4000000 + addend and
+            item4_macho_addend_read(bytes, at + 12) == follower
+        expect(exact).to_be(true)
+        matched = matched and exact
+    matched
+
+describe "Hosted ARM64 signed ADDEND pairs":
+    it "ITEM4-REQ-004 links branch, page and scaled pageoff pairs with both addend signs":
+        step("Inspect assembler-produced ARM64 ADDEND pairs")
+        val baseline = item4_macho_addend_fixture("addend_local_a64.o")
+        val provider = item4_macho_addend_fixture("addend_provider_a64.o")
+        if not item4_macho_addend_baseline(baseline) or provider.len() < 184: return
+        val relocations = item4_macho_addend_read(baseline, 160)
+        for negative in [false, true]:
+            var object = baseline
+            if negative:
+                # Documented signed24 wire mutation; keep exact validated prefix flags.
+                object = item4_macho_addend_put(object, relocations + 4, 0xa4fffff0)
+                object = item4_macho_addend_put(object, relocations + 20, 0xa4fffff0)
+                object = item4_macho_addend_put(object, relocations + 68, 0xa4fffffc)
+            step("Link defined symbols with signed addends")
+            val linked = macho_hosted_link([object, provider], [], [], item4_macho_addend_request())
+            expect(linked.is_ok()).to_be(true)
+            if linked.is_err(): return
+            val image = linked.unwrap()
+            expect(image.len()).to_be_greater_than(0xc010)
+            if image.len() <= 0xc010: return
+            step("Check independent instruction targets")
+            # The first object has28text bytes; provider target is4bytes into its text.
+            val base: i64 = 0x100000000
+            val symbol: i64 = base + 0x4020
+            expect(item4_macho_addend_read(image, 0x4020)).to_equal(0xd503201f)
+            expect(item4_macho_addend_read(image, 0xc000, 8)).to_equal(77)
+            expect(item4_macho_addend_read(image, 0xc008, 8)).to_equal(88)
+            for index in 0..2:
+                val place = 0x4000 + index * 4
+                val word = item4_macho_addend_read(image, place)
+                expect(word & 0xfc000000).to_equal(0x94000000)
+                val target = base + place + item4_macho_addend_sign(word & 0x3ffffff, 26) * 4
+                expect(target).to_equal(symbol + (if negative and index == 1: -4 else: 4))
+            for index in 0..2:
+                val place = 0x4008 + index * 8
+                val page = item4_macho_addend_read(image, place)
+                val low = item4_macho_addend_read(image, place + 4)
+                expect(page & 0x9f00001f).to_equal(0x90000000 + index)
+                val page_delta = item4_macho_addend_sign(((page >> 29) & 3) | (((page >> 5) & 0x7ffff) << 2), 21) * 4096
+                val low_value = ((low >> 10) & 0xfff) * (if index == 0: 1 else: 8)
+                expect(low & 0xffc003ff).to_equal(if index == 0: 0x91000000 else: 0xf9400021)
+                val target = base + 0x4000 + page_delta + low_value
+                expect(target).to_equal(base + 0xc008 + (if index == 0: 4096 elif negative: -16 else: 16))
