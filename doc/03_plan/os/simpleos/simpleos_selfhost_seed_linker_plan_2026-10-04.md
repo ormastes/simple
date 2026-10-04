@@ -44,6 +44,7 @@ SimpleOS link through the internal engine passes its gate.
 | S2 | in-guest Stage 2 driver in `.spl`/`.shs` (no python/js/perl) | guest transcript + audit |
 | C1 | SOSIX shared-core inventory + first shared module moved behind the interface | host + guest spec on the same module |
 | C2 (2026-10-05) | CRC32/CRC32C + XXH64: one implementation each in `std.common.crypto.{crc32,xxhash}` (moved from `src/os/crypto`); hosted bitwise CRC32 (`compress.utilities`, noalloc `hash`) and i64 XXH64 (`zstd/xxh64.spl`) deleted | KAT specs (0xCBF43926, 0xE3069283, official XXH64 vectors) + caller specs unchanged + aarch64/riscv64 freestanding compile probe |
+| C3 (2026-10-05) | Lexical path normalization: one `std.common.path_pure.path_normalize`; hosted `path.normalize`/`normalize_path`, noalloc `bm_path_normalize` delegate, SimpleOS shell `_normalize_path` deleted; `app_namespace._normalize_absolute` kept (stricter: rejects escape above root) | characterization spec on original code then shared code (9/9) + caller specs unchanged + freestanding compile probe |
 | A1/A2 | aarch64, riscv64 repeat of L2/S1/S2 | per-arch real-firmware transcript |
 
 Board evidence follows `.claude/rules/board-runnable.md`; QEMU-only results
