@@ -333,3 +333,16 @@ Only the unchanged shared helper APIs are involved. Existing external MSVC,
 internal PE support lookup and shared-link consumers must continue using that
 owner. Pure metadata assertions are useful policy regressions but cannot stand
 in for native link/load behavior, ABI correctness or runtime admission.
+
+## Hosted ARM64 ADDEND continuation (2026-10-04)
+
+Existing ITEM4-REQ-004/006; source pending, all execution **UNRUN**.
+[Detail contract](../../05_design/compiler/linker/macho_hosted_addend_2026-10-04.md)
+requires one shared checked pair decoder for static and hosted consumers.
+Use actual object fixtures and independent branch/page/scaled-offset decoding,
+including signed addends, page crossings and real imported zero-addend stubs.
+Malformed prefix/follower/address/overlap and dual-nonzero addends must reject;
+file-route failures preserve destination bytes. Imported nonzero branch addends
+remain refused. Signed-24 payload boundaries are distinct from ISA range checks.
+No GOT/TLV follower expansion, native host execution or full SDK completion is
+claimed by this pair-handling slice.
