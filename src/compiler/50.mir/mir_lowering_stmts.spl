@@ -2783,13 +2783,13 @@ impl MirLowering:
         val cond_local = self.lower_mcdc_decision(cond)
 
         # `if val v = option.?:` is parser-desugared to a raw binding followed
-        # by `v != nil`. Float payload bits must stay in that raw i64 binding
-        # until the sentinel comparison has run, then become a real f32/f64
+        # by `v != nil`. Float/bool payloads must stay in that raw i64 binding
+        # until the sentinel comparison has run, then become a typed scalar
         # only while lowering the present branch.
         var if_val_symbol_id = -1
         var if_val_raw_local = LocalId(id: 0)
         var if_val_payload_type = MirType.i64()
-        var has_if_val_float_binding = false
+        var has_if_val_scalar_binding = false
         match cond.kind:
             case HirExprKind.Binary(HirBinOp.NotEq, left, right):
                 var right_is_nil = false
@@ -2809,11 +2809,11 @@ impl MirLowering:
                                         case MirTypeKind.I64:
                                             if val semantic_type = self.find_local_hir_type(candidate.id):
                                                 match semantic_type.kind:
-                                                    case HirTypeKind.Float(_):
+                                                    case HirTypeKind.Float(_) | HirTypeKind.Bool:
                                                         if_val_symbol_id = symbol.id
                                                         if_val_raw_local = candidate
                                                         if_val_payload_type = self.lower_type(semantic_type)
-                                                        has_if_val_float_binding = true
+                                                        has_if_val_scalar_binding = true
                                                     case _:
                                                         ()
                                         case _:
@@ -2841,11 +2841,11 @@ impl MirLowering:
         var b2 = self.builder
         b2.switch_to_block(then_block)
         self.builder = b2
-        if has_if_val_float_binding:
+        if has_if_val_scalar_binding:
             val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)
             self.bind_local(if_val_symbol_id, decoded_if_val)
         val then_result = self.lower_block_expected(then_, expected_type)
-        if has_if_val_float_binding:
+        if has_if_val_scalar_binding:
             self.bind_local(if_val_symbol_id, if_val_raw_local)
         var b3 = self.builder
         var result_defined = false
@@ -2958,13 +2958,13 @@ impl MirLowering:
             # short-circuit behavior for condition side effects.
             val cond_local = self.lower_mcdc_decision(arm.cond)
 
-            # Preserve `if val`'s raw optional-float binding contract for each
+            # Preserve `if val`'s raw optional-scalar binding contract for each
             # arm.  The condition compares the encoded value with nil; only
-            # the selected arm may temporarily see its decoded float payload.
+            # the selected arm may temporarily see its decoded scalar payload.
             var if_val_symbol_id = -1
             var if_val_raw_local = LocalId(id: 0)
             var if_val_payload_type = MirType.i64()
-            var has_if_val_float_binding = false
+            var has_if_val_scalar_binding = false
             match arm.cond.kind:
                 case HirExprKind.Binary(HirBinOp.NotEq, left, right):
                     var right_is_nil = false
@@ -2983,11 +2983,11 @@ impl MirLowering:
                                             case MirTypeKind.I64:
                                                 if val semantic_type = self.find_local_hir_type(candidate.id):
                                                     match semantic_type.kind:
-                                                        case HirTypeKind.Float(_):
+                                                        case HirTypeKind.Float(_) | HirTypeKind.Bool:
                                                             if_val_symbol_id = symbol.id
                                                             if_val_raw_local = candidate
                                                             if_val_payload_type = self.lower_type(semantic_type)
-                                                            has_if_val_float_binding = true
+                                                            has_if_val_scalar_binding = true
                                                         case _:
                                                             ()
                                             case _:
@@ -3003,11 +3003,11 @@ impl MirLowering:
             b_cond.switch_to_block(then_block)
             self.builder = b_cond
 
-            if has_if_val_float_binding:
+            if has_if_val_scalar_binding:
                 val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)
                 self.bind_local(if_val_symbol_id, decoded_if_val)
             val arm_result = self.lower_block_expected(arm.then_, expected_type)
-            if has_if_val_float_binding:
+            if has_if_val_scalar_binding:
                 self.bind_local(if_val_symbol_id, if_val_raw_local)
             var b_then = self.builder
             if not b_then.current_block_has_explicit_terminator():

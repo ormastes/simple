@@ -523,6 +523,7 @@ pub(crate) struct ModuleImports {
     /// calls (see `ImportMapResult::fn_arities`).
     pub fn_arities: std::sync::Arc<std::collections::HashMap<String, usize>>,
     pub fn_return_types: std::sync::Arc<std::collections::HashMap<String, simple_parser::Type>>,
+    pub method_param_defaults: std::sync::Arc<std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>>>,
     /// When true, pass `struct_defs` to the HIR lowerer so cross-module field
     /// accesses (e.g. `fb_info.addr.addr`) can resolve to real FieldGet instructions
     /// instead of falling through to dynamic MethodCall (which becomes
@@ -1130,6 +1131,7 @@ impl NativeProjectBuilder {
                 data_exports: std::sync::Arc::new(result.data_exports),
                 fn_arities: std::sync::Arc::new(result.fn_arities),
                 fn_return_types: std::sync::Arc::new(result.fn_return_types),
+                method_param_defaults: std::sync::Arc::new(result.method_param_defaults),
                 populate_global_struct_defs: true,
                 populate_global_enum_defs: true,
             }
@@ -1151,6 +1153,7 @@ impl NativeProjectBuilder {
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
                 fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+                method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
                 populate_global_struct_defs: false,
                 populate_global_enum_defs: false,
             }
@@ -1940,6 +1943,10 @@ pub(crate) fn cross_module_layout_fingerprint(result: &imports::ImportMapResult)
     }
     for (k, v) in result.fn_arities.iter() {
         fp = fold_unordered(fp, hash_one(&(k, v)));
+    }
+    // A default expression changes caller code even when arity/layout is unchanged.
+    for (k, v) in result.method_param_defaults.iter() {
+        fp = fold_unordered(fp, hash_one(&("method-default", k, format!("{v:?}"))));
     }
     for (k, v) in result.fn_return_types.iter() {
         fp = fold_unordered(fp, hash_one(&(k, format!("{v:?}"))));
