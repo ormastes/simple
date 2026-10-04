@@ -62,3 +62,14 @@ Integration rebased onto 8287f9bc3a6b10fda5b8da505508ca459f6c11ce with all
 overlap. Final scope whitespace, direct-env working/staged and numbered-artifact
 checks passed. The tracked manual tree has zero executable specs; this lane
 adds only its Markdown manual there. These checks do not change runtime UNRUN.
+
+Committed test-tree delta passed with 3152 inherited offenders and zero
+introduced. Retained evidence:
+`C:/dev/simple/.git/item4-macho-sdk-closure-preexisting-offenders.txt`, SHA256
+`2fb68a47bab7953e058a449562ecba2df9f135b8d2e2d99c3e14f373b1c1d719`.
+The subsequent b034535823f deployment variant adds a `.tbd` fixture and assertions
+inside the same executable spec, changing no executable paths or mirror
+membership. Its own whitespace/new-artifact guard and independent source review
+passed. It specifically checks a reachable macOS 12 leaf under a macOS 11 request,
+the minimum-OS diagnostic and unchanged destination for both root formats.
+Twelve scenarios remain authored; full verification remains FAIL/UNRUN.
