@@ -1,0 +1,118 @@
+"""ITEM4-REQ-003/004/009 streamed ELF COMMON acceptance. UNRUN.
+
+Real ELF objects, program-header address translation and actual output bytes.
+Logical budgets are not measured RSS or full bounded-engine admission.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes, dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.backend.linker.elf.stream_types.{ElfStreamLimitsV1}
+use compiler.backend.linker.elf.stream_link.{elf_stream_link_file_v1}
+
+fn item4_stream_common_limits() -> ElfStreamLimitsV1:
+    ElfStreamLimitsV1(input_limit: 12, archive_member_limit: 64u64,
+        metadata_bytes: 262144u64, read_window_bytes: 64, emit_window_bytes: 8,
+        name_bytes: 64, output_bytes: 1048576u64, scratch_bytes: 4194304u64,
+        scan_record_limit: 1000000u64)
+
+fn item4_stream_common_cancelled() -> bool: false
+
+fn item4_stream_common_inputs() -> [text]:
+    ["test/fixtures/linker/elf/stream_common_refs.o",
+        "test/fixtures/linker/elf/stream_common_a.o",
+        "test/fixtures/linker/elf/stream_common_b.o"]
+
+fn item4_stream_common_u64(bytes: [u8], offset: i64, width: i64) -> u64:
+    val valid = width >= 1 and width <= 8 and offset >= 0 and offset <= bytes.len() and width <= bytes.len() - offset
+    expect(valid).to_equal(true)
+    if not valid: return 0u64
+    var value = 0u64
+    for index in 0..width: value = value | ((bytes[offset + index] as u64) << (index * 8))
+    value
+
+fn item4_stream_common_marker(bytes: [u8]) -> i64:
+    val marker: [u8] = [67, 79, 77, 84, 69, 83, 84, 33, 5]
+    var found = -1
+    var matches = 0
+    if bytes.len() < 33:
+        expect(false).to_equal(true)
+        return -1
+    for offset in 0..(bytes.len() - 32):
+        var equal = true
+        for index in 0..marker.len():
+            if bytes[offset + index] != marker[index]: equal = false
+        if equal:
+            found = offset + 9
+            matches = matches + 1
+    expect(matches).to_equal(1)
+    if matches != 1: return -1
+    found
+
+fn item4_stream_common_zero(bytes: [u8], address: u64, size: u64):
+    val phoff = item4_stream_common_u64(bytes, 32, 8)
+    val count = item4_stream_common_u64(bytes, 56, 2)
+    val valid = phoff <= bytes.len() as u64 and count > 0u64 and count < 64u64 and count * 56u64 <= bytes.len() as u64 - phoff
+    expect(valid).to_equal(true)
+    if not valid: return
+    expect(item4_stream_common_u64(bytes, 54, 2)).to_equal(56u64)
+    var matches = 0
+    for index in 0..(count as i64):
+        val at = phoff as i64 + index * 56
+        if item4_stream_common_u64(bytes, at, 4) == 1u64:
+            val base = item4_stream_common_u64(bytes, at + 16, 8)
+            val memory = item4_stream_common_u64(bytes, at + 40, 8)
+            if address >= base and address - base <= memory and size <= memory - (address - base):
+                matches = matches + 1
+                expect(item4_stream_common_u64(bytes, at + 4, 4)).to_equal(6u64)
+                val file_size = item4_stream_common_u64(bytes, at + 32, 8)
+                val file_offset = item4_stream_common_u64(bytes, at + 8, 8)
+                for byte in 0..(size as i64):
+                    val relative = address - base + byte as u64
+                    # Bytes beyond p_filesz are ELF-defined zero-fill.
+                    if relative < file_size:
+                        expect(item4_stream_common_u64(bytes, (file_offset + relative) as i64, 1)).to_equal(0u64)
+    expect(matches).to_equal(1)
+
+fn item4_stream_common_check(bytes: [u8]):
+    expect(item4_stream_common_u64(bytes, 0, 4)).to_equal(0x464c457fu64)
+    expect(item4_stream_common_u64(bytes, 18, 2)).to_equal(62u64)
+    val table = item4_stream_common_marker(bytes)
+    if table < 0: return
+    val shared = item4_stream_common_u64(bytes, table, 8)
+    val repeated = item4_stream_common_u64(bytes, table + 8, 8)
+    val other = item4_stream_common_u64(bytes, table + 16, 8)
+    expect(shared).to_equal(repeated)
+    expect(shared % 64u64).to_equal(0u64)
+    expect(other % 32u64).to_equal(0u64)
+    expect(shared + 80u64 <= other or other + 16u64 <= shared).to_equal(true)
+    item4_stream_common_zero(bytes, shared, 80u64)
+    item4_stream_common_zero(bytes, other, 16u64)
+
+describe "Streamed ELF common-symbol allocation":
+    it "merges independent maximum common size and alignment across output windows":
+        step("Link real common declarations with size eighty and alignment sixty-four from different objects")
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-common-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        val output = directory + "/first.elf"
+        val first = elf_stream_link_file_v1(item4_stream_common_inputs(), [], [95, 115, 116, 97, 114, 116],
+            output, directory, item4_stream_common_limits(), item4_stream_common_cancelled)
+        expect(first.is_ok()).to_equal(true)
+        if first.is_ok():
+            expect(first.unwrap().cleanup_pending).to_equal(false)
+            item4_stream_common_check(file_read_bytes(output))
+        step("Emit with a different window size and compare the complete deterministic image")
+        var limits = item4_stream_common_limits()
+        limits.emit_window_bytes = 64
+        val second = elf_stream_link_file_v1(item4_stream_common_inputs(), [], [95, 115, 116, 97, 114, 116],
+            directory + "/second.elf", directory, limits, item4_stream_common_cancelled)
+        expect(second.is_ok()).to_equal(true)
+        if second.is_ok(): expect(second.unwrap().cleanup_pending).to_equal(false)
+        if first.is_ok() and second.is_ok(): expect(file_read_bytes(output)).to_equal(file_read_bytes(directory + "/second.elf"))
+        for name in ["first.elf", "second.elf"]:
+            if file_exists(directory + "/" + name): expect(file_remove(directory + "/" + name)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)
