@@ -454,6 +454,19 @@ impl MirLowering:
     me enum_payload_value(raw: LocalId, result_type: MirType) -> LocalId:
         """Recover an untagged enum payload word using its semantic type."""
         match result_type.kind:
+            case MirTypeKind.Bool:
+                # Native Option constructors carry an untagged 0/1 payload;
+                # RuntimeValue-backed producers carry false=19/true=11.
+                # Presence is a different predicate: both false words are
+                # present. Decode only the two valid true representations.
+                var b = self.builder
+                val raw_true = b.emit_const_int(1)
+                val tagged_true = b.emit_const_int(11)
+                val is_raw_true = b.emit_binop(MirBinOp.Eq, mir_operand_copy(raw), mir_operand_copy(raw_true), MirType.bool())
+                val is_tagged_true = b.emit_binop(MirBinOp.Eq, mir_operand_copy(raw), mir_operand_copy(tagged_true), MirType.bool())
+                val value = b.emit_binop(MirBinOp.BitOr, mir_operand_copy(is_raw_true), mir_operand_copy(is_tagged_true), MirType.bool())
+                self.builder = b
+                value
             case MirTypeKind.U64:
                 var b = self.builder
                 val unbox = MirOperand(kind: MirOperandKind.Const(
