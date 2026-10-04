@@ -33,13 +33,22 @@ fn collection_native_unframe_v1(value: text) -> Result<[text], text>:
     var fields: [text] = []
     var cursor = 0
     while cursor < value.len():
-        val tail = value.substring(cursor)
-        val colon = tail.index_of(":")
-        if colon <= 0 or colon > 16: return Err("frame-length-invalid")
-        val digits = tail.substring(0, colon)
-        val extent = digits.to_i64() ?? -1
-        if extent < 0 or extent.to_text() != digits: return Err("frame-length-invalid")
-        val start = cursor + colon + 1
+        # Scan only the bounded length prefix, not a copied remaining suffix
+        # for every field. A large receipt with many short fields stays linear.
+        var colon = cursor
+        var extent: i64 = 0
+        while colon < value.len() and value.char_code_at(colon) != 58:
+            val digit = value.char_code_at(colon) - 48
+            if digit < 0 or digit > 9 or colon - cursor >= 16:
+                return Err("frame-length-invalid")
+            if extent > (COLLECTION_NATIVE_MAX_BYTES_V1 - digit) / 10:
+                return Err("frame-length-invalid")
+            extent = extent * 10 + digit
+            colon = colon + 1
+        if colon == cursor or colon >= value.len(): return Err("frame-length-invalid")
+        if colon - cursor > 1 and value.char_code_at(cursor) == 48:
+            return Err("frame-length-invalid")
+        val start = colon + 1
         if extent > value.len() - start: return Err("frame-truncated")
         fields = fields.push(value.substring(start, start + extent))
         cursor = start + extent
