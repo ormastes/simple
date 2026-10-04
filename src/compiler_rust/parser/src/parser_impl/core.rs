@@ -87,6 +87,11 @@ pub struct Parser<'a> {
     /// When true, postfix parsing won't consume `{ ... }` after field access.
     /// Used to prevent ambiguity in `if cond { body }` syntax.
     pub(crate) no_brace_postfix: bool,
+    /// When true, postfix `as T` does not take an `else:` fallback suffix.
+    /// Set while parsing the THEN arm of an inline `if c: X as T else: Y`
+    /// (and a ternary condition), where that `else` belongs to the `if`.
+    /// See doc/08_tracking/bug/inline_if_then_arm_as_cast_drops_else_2026-10-05.md.
+    pub(crate) no_cast_else: bool,
     /// Buffer for statements produced by multi-node desugaring (e.g., structured_export)
     pub(crate) pending_statements: Vec<Node>,
     /// Count of INDENT tokens consumed during binary expression line continuation
@@ -139,6 +144,7 @@ impl<'a> Parser<'a> {
             pattern_indent_count: 0,
             match_arm_depth: 0,
             no_brace_postfix: false,
+            no_cast_else: false,
             pending_statements: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,
@@ -219,6 +225,7 @@ impl<'a> Parser<'a> {
             pattern_indent_count: 0,
             match_arm_depth: 0,
             no_brace_postfix: false,
+            no_cast_else: false,
             pending_statements: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,

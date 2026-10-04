@@ -708,7 +708,9 @@ impl<'a> Parser<'a> {
                                 default: Box::new(default),
                             };
                         }
-                        TokenKind::Else => {
+                        // Inside an inline-if THEN arm the `else` closes the
+                        // `if`, not the cast (`if c: x as i64 else: 7`).
+                        TokenKind::Else if !self.no_cast_else => {
                             // Check for else: (Else followed by Colon)
                             self.advance();
                             self.expect(&TokenKind::Colon)?;
