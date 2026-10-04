@@ -462,6 +462,8 @@ done <"$stage2_transcript"
 stage2_env_value() {
   bootstrap_stage3_transcript_explicit_env_value "$stage2_transcript" "$1"
 }
+stage2_recorded_cold_init=$(bootstrap_stage3_stage2_transcript_cold_init "$stage2_transcript") || \
+  bootstrap_stage3_error 'recorded Stage 2 SCV cold-init control is invalid'
 # Preserve the original Stage 2 vector. Legacy admitted transcripts had no HIR
 # controls; newer transcripts must carry the complete pair in the same order.
 bootstrap_stage2_hir_env=
@@ -540,6 +542,7 @@ stage2_args=$(bootstrap_stage3_args_sha256 \
   "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=$(stage2_env_value SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE)" \
   "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=$(stage2_env_value SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT)" \
   "SIMPLE_BINARY=$(stage2_env_value SIMPLE_BINARY)" \
+  ${stage2_recorded_cold_init:+"SIMPLE_SCV_INVENTORY_COLD_INIT=$stage2_recorded_cold_init"} \
   "$@") || exit 1
 bootstrap_stage3_verify_sanity_evidence_receipt \
   "$stage2_sanity" "$stage2_sanity" "$(dirname -- "$stage2_sanity")" \
