@@ -5026,6 +5026,37 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
                     ((start - end - step - 1) / (-step)) as u64
                 };
 
+                // PACKED arrays store raw bytes/words, not tagged slots (see
+                // rt_array_concat). `as_slice()` read a byte-packed `[u8]` as
+                // `len` 8-byte slots — garbage elements AND an 8x out-of-bounds
+                // read; under the JIT h1_client's header/body split of a fetched
+                // response came back scrambled. Keep the source layout.
+                if (*arr).is_byte_packed() || (*arr).is_u64_packed() {
+                    let bytes = (*arr).is_byte_packed();
+                    let result = if bytes {
+                        rt_byte_array_new(result_len.max(1))
+                    } else {
+                        rt_array_new_uninit_u64(result_len.max(1))
+                    };
+                    if result.is_nil() {
+                        return result;
+                    }
+                    let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+                    let mut idx = start;
+                    let mut out = 0usize;
+                    while idx < end {
+                        if bytes {
+                            *((*dst).data as *mut u8).add(out) = *((*arr).data as *const u8).add(idx as usize);
+                        } else {
+                            *((*dst).data as *mut u64).add(out) = *((*arr).data as *const u64).add(idx as usize);
+                        }
+                        out += 1;
+                        idx += step;
+                    }
+                    (*dst).len = out as u64;
+                    return result;
+                }
+
                 let result = rt_array_new(result_len);
                 if result.is_nil() {
                     return result;

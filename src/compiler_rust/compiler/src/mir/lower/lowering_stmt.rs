@@ -1309,7 +1309,7 @@ impl<'a> MirLowerer<'a> {
             } => {
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_expr(condition)?;
+                let cond_reg = self.lower_condition_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for coverage (before branch)
@@ -1537,7 +1537,7 @@ impl<'a> MirLowerer<'a> {
                 self.set_current_block(cond_id)?;
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_expr(condition)?;
+                let cond_reg = self.lower_condition_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for while condition coverage
@@ -1696,7 +1696,7 @@ impl<'a> MirLowerer<'a> {
                 // Lower the assertion condition
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_expr(condition)?;
+                let cond_reg = self.lower_condition_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for assert condition coverage (#674)
@@ -2171,7 +2171,7 @@ impl<'a> MirLowerer<'a> {
                 // At runtime, we treat it as an assertion
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_expr(condition)?;
+                let cond_reg = self.lower_condition_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for assume condition coverage (#674)

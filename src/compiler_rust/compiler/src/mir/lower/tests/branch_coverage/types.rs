@@ -297,6 +297,29 @@ fn any_to_bool_return_and_local_unboxing() {
     assert!(has_inst(&merged, is_truthy_call));
 }
 
+/// Branch / `and` / `or` / `not` / `while` on an `ANY` value must decode it:
+/// a tagged FALSE or NIL is a non-zero word, so `if pair.second:` on a
+/// generic `Pair<_, bool>` was always taken under the JIT (h1_client's
+/// `read.second or closed.is_err()` failed every https fetch).
+#[test]
+fn any_condition_decodes_truthiness() {
+    let is_truthy_call =
+        |i: &MirInst| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_truthy"));
+    for src in [
+        "fn test(v: any) -> i64:\n    if v:\n        return 1\n    0\n",
+        "fn test(v: any) -> i64:\n    var n = 0\n    while v and n < 3:\n        n = n + 1\n    n\n",
+        "fn test(v: any) -> i64:\n    if false or v:\n        return 1\n    0\n",
+        "fn test(v: any) -> i64:\n    if not v:\n        return 1\n    0\n",
+        "fn test(v: any) -> i64:\n    if v: 1 else: 0\n",
+    ] {
+        let mir = compile_to_mir(src).unwrap();
+        assert!(has_inst(&mir, is_truthy_call), "missing rt_value_truthy for:\n{src}");
+    }
+    // A typed bool condition stays a raw word test.
+    let typed = compile_to_mir("fn test(v: bool) -> i64:\n    if v and not v:\n        return 1\n    0\n").unwrap();
+    assert!(!has_inst(&typed, is_truthy_call));
+}
+
 #[test]
 fn index_float_unboxing() {
     let mir = compile_to_mir("fn test() -> f64:\n    val arr = [1.5, 2.5]\n    return arr[0]\n").unwrap();
