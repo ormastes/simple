@@ -8,6 +8,53 @@ use std::os::unix::io::{AsRawFd, RawFd};
 #[cfg(unix)]
 use nix::pty::openpty;
 
+// A read can end in the middle of a multi-byte UTF-8 character. Decoding each
+// chunk on its own turned such a split into U+FFFD pairs (broken box drawing
+// in agent TUIs), so the incomplete tail of a chunk is carried per fd and
+// prefixed to the next read.
+static PTY_UTF8_CARRY: std::sync::Mutex<Vec<(i64, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
+
+/// Bytes at the end of `b` that start a UTF-8 sequence not yet complete.
+fn incomplete_utf8_tail(b: &[u8]) -> usize {
+    let n = b.len();
+    for back in 1..=n.min(3) {
+        let c = b[n - back];
+        if c & 0xC0 == 0x80 {
+            continue;
+        }
+        let need = match c {
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            _ => return 0,
+        };
+        return if need > back { back } else { 0 };
+    }
+    0
+}
+
+/// Decodes one PTY read for `fd`, keeping a split trailing character for the next read.
+pub fn decode_pty_utf8(fd: i64, chunk: &[u8]) -> String {
+    let mut carry = PTY_UTF8_CARRY.lock().unwrap_or_else(|e| e.into_inner());
+    let mut buf = match carry.iter().position(|(f, _)| *f == fd) {
+        Some(i) => carry.swap_remove(i).1,
+        None => Vec::new(),
+    };
+    buf.extend_from_slice(chunk);
+    let keep = incomplete_utf8_tail(&buf);
+    let tail = buf.split_off(buf.len() - keep);
+    if !tail.is_empty() {
+        carry.push((fd, tail));
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// Drops any carried partial character for a closed `fd`.
+pub fn forget_pty_utf8(fd: i64) {
+    let mut carry = PTY_UTF8_CARRY.lock().unwrap_or_else(|e| e.into_inner());
+    carry.retain(|(f, _)| *f != fd);
+}
+
 #[cfg(unix)]
 mod pty_process {
     use std::collections::HashMap;
@@ -628,7 +675,7 @@ pub extern "C" fn native_pty_read(fd: i64, timeout_ms: i64) -> RuntimeValue {
                 if result > 0 {
                     // Data read successfully
                     let _ = libc::fcntl(fd, libc::F_SETFL, flags); // Restore blocking mode
-                    let text = String::from_utf8_lossy(&buffer[..result as usize]);
+                    let text = decode_pty_utf8(fd as i64, &buffer[..result as usize]);
                     return string_to_runtime_value(&text);
                 } else if result == 0 {
                     // EOF
@@ -682,6 +729,7 @@ pub extern "C" fn native_pty_close(fd: i64) -> RuntimeValue {
     {
         let fd = fd as RawFd;
         pty_process::forget(fd as i64);
+        forget_pty_utf8(fd as i64);
         unsafe {
             if libc::close(fd) == 0 {
                 RuntimeValue::from_bool(true)
@@ -717,6 +765,16 @@ pub extern "C" fn rt_pty_is_running(handle: i64) -> RuntimeValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_pty_utf8_joins_a_character_split_across_reads() {
+        // "─" is E2 94 80; split after its first byte, on a private fd.
+        let fd = -4242;
+        assert_eq!(decode_pty_utf8(fd, b"ab\xE2"), "ab");
+        assert_eq!(decode_pty_utf8(fd, b"\x94\x80c"), "\u{2500}c");
+        assert_eq!(decode_pty_utf8(fd, b"\xFF"), "\u{FFFD}");
+        forget_pty_utf8(fd);
+    }
 
     #[test]
     fn rt_pty_spawn_rejects_invalid_inputs() {
