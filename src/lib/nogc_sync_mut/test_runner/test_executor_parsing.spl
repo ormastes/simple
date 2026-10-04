@@ -12,7 +12,7 @@ use std.mcdc.dynamic_probe.{mcdc_dynamic_probe_controller_load_builtin_current_o
 use std.test_runner.test_runner_mcdc_report.{test_runner_result_with_mcdc_evidence}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete}
-use std.nogc_sync_mut.io.process_ops.{process_bounded_timed_out}
+use std.nogc_sync_mut.io.process_ops.{process_bounded_timed_out, process_run_bounded}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.io_runtime.{getpid}
 use std.sffi.cli.{cli_get_args}
@@ -131,6 +131,23 @@ fn find_runtime_lib_dir() -> text:
 # Cache for find_simple_binary — avoids 15 file_exists probes per test spawn
 var _cached_binary_path = ""
 
+fn _self_exe_via_pid_query() -> text:
+    """Canonical path of the executable this pid runs, via `ps`; "" if unknown.
+
+    Bounded (2s) single exec, no shell. Windows has no `ps`, so the exec fails
+    and this returns "" (SIMPLE_BINARY above covers that host). A `.spl` or an
+    unresolvable answer is rejected rather than returned as an executable."""
+    val (stdout, _stderr, code) = process_run_bounded("ps", ["-o", "comm=", "-p", "{getpid()}"], 2000, 65536)
+    if code != 0:
+        return ""
+    val reported = (stdout.split("\n")[0]).trim()
+    if reported == "" or reported.ends_with(".spl"):
+        return ""
+    val resolved = path_absolute(reported) ?? ""
+    if resolved == "" or resolved.ends_with(".spl") or not file_exists(resolved):
+        return ""
+    resolved
+
 fn find_simple_binary() -> text:
     if _cached_binary_path != "":
         return _cached_binary_path
@@ -189,13 +206,23 @@ fn find_simple_binary() -> text:
     # `std.spec.engine_probe.simple_binary()` already uses for the same reason.
     # Checked before the candidate list so a stale deployed binary can never
     # shadow the running one; an explicit SIMPLE_RUNTIME above still wins.
-    # Hosts without /proc (macOS, Windows) fall through unchanged.
     for self_link in ["/proc/self/exe", "/proc/curproc/file"]:
         if file_exists(self_link):
             val resolved = path_absolute(self_link) ?? ""
             if resolved.len() > 0 and resolved != self_link and file_exists(resolved):
                 _cached_binary_path = resolved
                 return resolved
+
+    # Hosts without /proc (macOS, BSD) used to fall straight through to the
+    # literal `bin/simple` below, i.e. the DEPLOYED binary -- or, in a fresh
+    # worktree with no bin/simple, a path that does not exist, so every child
+    # spec exited 126. Ask the kernel which executable our own pid runs, the
+    # same pid query app.io.cli_ops._cli_self_exe_via_pid_query uses for
+    # cli_current_exe_path() (which the client and light daemon rely on).
+    val pid_exe = _self_exe_via_pid_query()
+    if pid_exe != "":
+        _cached_binary_path = pid_exe
+        return pid_exe
 
     # Fallback: try multiple known locations.
     val candidates = [
