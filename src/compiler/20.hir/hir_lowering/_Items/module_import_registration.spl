@@ -398,6 +398,29 @@ impl HirLowering:
         val callable_position = self.surface_name_position(surface_key, "F", imported_name)
         val constant_position = self.surface_name_position(surface_key, "K", imported_name)
         hir_phase_profile_add(HIR_PROF_RIS_SCAN, scan_started)
+        if self.registering_lexical_import and (composite_position >= 0 or
+                enum_position >= 0 or trait_position >= 0 or alias_position >= 0):
+            # Materialization belongs to the declaration owner, not the local
+            # spelling. Enum payload/definition tables persist across lexical
+            # scopes and must never use a shadowing alias as their global key.
+            val canonical_local = imported_mod.module_name + "::" + imported_name
+            self.registering_lexical_import = false
+            self.register_imported_symbol(imported_index, imported_mod_name,
+                imported_name, canonical_local, import_span, materialize_enum)
+            self.registering_lexical_import = true
+            val canonical_id = self.symbols.lookup_qualified_type_raw(
+                imported_mod.module_name, imported_name)
+            if canonical_id < 0:
+                self.error("lexical imported type `{local_name}` has no declaration owner", import_span)
+                return
+            self.symbols.bind_local_type_if_free(local_name, SymbolId(id: canonical_id))
+            if enum_position >= 0 and materialize_enum:
+                val lexical_enum = hir_surface_enum_to_enum(
+                    imported_mod.enum_values[enum_position], local_name)
+                self.register_enum_unit_patterns(lexical_enum, local_name)
+                for variant in lexical_enum.variants:
+                    self.enum_variant_names[variant.name] = true
+            return
         if composite_position >= 0:
             val composite = imported_mod.composite_values[composite_position]
             val existing_id = self.import_binding_or_invalid(local_name)
