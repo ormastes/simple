@@ -427,6 +427,9 @@ pub(crate) fn try_field_array_mutation_in_place(
 enum PlaceMutation {
     /// `[T]` leaf reached by an `ARRAY_MUTATING_METHODS` method.
     Array,
+    /// `[T]` leaf reached by `write_span(src, dst_off, src_off, count)`, the
+    /// four-operand bulk span copy whose expression result is the COUNT.
+    WriteSpan,
     /// `{K: V}` leaf reached by a `DICT_MUTATING_METHODS` method.
     Dict,
     /// Object leaf whose class (carried here) defines the method, together
@@ -514,9 +517,8 @@ pub(crate) fn try_place_mutation_in_place(
     // a copy-on-write isolation on the way in.
     let kind = match place::place_slot_ref(env, &target) {
         // `write_span` takes four operands and has its own path.
-        Some(Value::Array(_)) if method != "write_span" && ARRAY_MUTATING_METHODS.contains(&method) => {
-            PlaceMutation::Array
-        }
+        Some(Value::Array(_)) if method == "write_span" => PlaceMutation::WriteSpan,
+        Some(Value::Array(_)) if ARRAY_MUTATING_METHODS.contains(&method) => PlaceMutation::Array,
         Some(Value::Dict(_)) if DICT_MUTATING_METHODS.contains(&method) => PlaceMutation::Dict,
         // The class name IS needed past the borrow here — the slot is re-read
         // after argument evaluation and must still hold an object of the same
@@ -550,6 +552,42 @@ pub(crate) fn try_place_mutation_in_place(
             // ELEMENT.
             let new_array_val = Value::Array(Arc::clone(arc));
             popped.unwrap_or(new_array_val)
+        }
+        PlaceMutation::WriteSpan => {
+            // Operands are evaluated once, in order, before the leaf is re-read
+            // -- the same discipline as the local-identifier `write_span` path
+            // (`handle_method_call_with_self_update`). The functional fallback
+            // this replaces deep-copied the WHOLE destination twice per call
+            // (`arr.to_vec()` in the collections arm, then `arr.clone()` in the
+            // self-update tail): 2 x 506 MB per scanline for a 3840x2160
+            // framebuffer. `Arc::make_mut` mutates in place when the leaf is
+            // uniquely owned and clones otherwise -- including a same-array
+            // `xs.write_span(xs, ...)`, whose src operand holds a second strong
+            // ref -- so the memmove-style overlap semantics are unchanged.
+            // `array_write_span` validates every operand before it writes, so a
+            // rejected call leaves the destination's contents untouched.
+            let src = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let mut ints = [-1i64, -1, 0];
+            for (slot, (arg_i, dflt)) in ints.iter_mut().zip([(1usize, -1i64), (2, -1), (3, 0)]) {
+                *slot = match args.get(arg_i) {
+                    Some(a) => evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)?
+                        .as_int()
+                        .unwrap_or(dflt),
+                    None => dflt,
+                };
+            }
+            let Some(Value::Array(arc)) = place::place_slot_mut(env, &target) else {
+                return Ok(None);
+            };
+            note_place_mutation(arc.len(), Arc::strong_count(arc));
+            let written = super::super::interpreter_method::collections::array_write_span(
+                Arc::make_mut(arc),
+                &src,
+                ints[0],
+                ints[1],
+                ints[2],
+            )?;
+            Value::Int(written)
         }
         PlaceMutation::Dict => {
             // Every operand is evaluated AND validated before the leaf is re-read,
@@ -2255,6 +2293,98 @@ mod cow_alias_mechanism_tests {
             arr_ptr(env.get("b").expect("b")),
             "the aliased array must have been isolated by copy-on-write"
         );
+    }
+
+    fn box_with_xs(xs: Vec<Value>) -> Value {
+        let mut fields: HashMap<String, Value> = HashMap::new();
+        fields.insert("xs".to_string(), Value::array(xs));
+        Value::Object {
+            class: "Box".to_string(),
+            fields: Arc::new(fields),
+        }
+    }
+
+    fn write_span_call(receiver: Expr, src: &str, dst_off: i64, src_off: i64, count: i64) -> Expr {
+        Expr::MethodCall {
+            receiver: Box::new(receiver),
+            method: "write_span".to_string(),
+            args: vec![
+                arg(ident(src)),
+                arg(Expr::Integer(dst_off)),
+                arg(Expr::Integer(src_off)),
+                arg(Expr::Integer(count)),
+            ],
+            generic_args: vec![],
+        }
+    }
+
+    fn ints(v: &Value) -> Vec<i64> {
+        match v {
+            Value::Array(a) => a.iter().map(|x| x.as_int().expect("int element")).collect(),
+            other => panic!("expected array, got {:?}", other),
+        }
+    }
+
+    fn o_xs() -> Expr {
+        Expr::FieldAccess {
+            receiver: Box::new(ident("o")),
+            field: "xs".to_string(),
+        }
+    }
+
+    #[test]
+    fn field_array_write_span_mutates_the_single_owner_in_place() {
+        // `self.buf.write_span(row, off, 0, n)` is the software framebuffer's
+        // span fill. Pre-fix it deep-copied the whole destination TWICE per
+        // call (506 MB each at 3840x2160).
+        let mut env = Env::new();
+        env.insert("o".to_string(), box_with_xs((0..8).map(|_| Value::Int(0)).collect()));
+        env.insert("row".to_string(), Value::array(vec![Value::Int(7); 3]));
+        let before = arr_ptr(field_of(&env, "o", "xs"));
+        let (result, update) = run(&write_span_call(o_xs(), "row", 2, 0, 3), &mut env);
+        if let Some((name, val)) = update {
+            env.insert(name, val);
+        }
+        assert_eq!(result.as_int().expect("count"), 3, "write_span yields the count written");
+        assert_eq!(ints(field_of(&env, "o", "xs")), vec![0, 0, 7, 7, 7, 0, 0, 0]);
+        assert_eq!(
+            arr_ptr(field_of(&env, "o", "xs")),
+            before,
+            "a uniquely-owned field array must be written in place, not copied"
+        );
+    }
+
+    #[test]
+    fn aliased_field_array_write_span_still_copies_on_write() {
+        let mut env = Env::new();
+        env.insert("o".to_string(), box_with_xs((0..5).map(Value::Int).collect()));
+        let alias = field_of(&env, "o", "xs").clone();
+        env.insert("alias".to_string(), alias);
+        env.insert("row".to_string(), Value::array(vec![Value::Int(9); 2]));
+        let (_, update) = run(&write_span_call(o_xs(), "row", 0, 0, 2), &mut env);
+        if let Some((name, val)) = update {
+            env.insert(name, val);
+        }
+        assert_eq!(ints(field_of(&env, "o", "xs")), vec![9, 9, 2, 3, 4]);
+        assert_eq!(ints(env.get("alias").expect("alias")), vec![0, 1, 2, 3, 4], "the alias must be unchanged");
+    }
+
+    #[test]
+    fn field_array_write_span_out_of_range_is_an_error_and_leaves_contents() {
+        let mut env = Env::new();
+        env.insert("o".to_string(), box_with_xs((0..3).map(Value::Int).collect()));
+        env.insert("row".to_string(), Value::array(vec![Value::Int(9); 5]));
+        let err = handle_method_call_with_self_update(
+            &write_span_call(o_xs(), "row", 2, 0, 5),
+            &mut env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect_err("out-of-range write_span must fail");
+        assert!(err.to_string().contains("write_span out of range"), "got: {err}");
+        assert_eq!(ints(field_of(&env, "o", "xs")), vec![0, 1, 2]);
     }
 
     fn dict_len(v: &Value) -> usize {

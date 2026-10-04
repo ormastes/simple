@@ -18,6 +18,21 @@ pub fn evaluate_module_with_di(items: &[Node], di_config: Option<&DiConfig>) -> 
     evaluate_module_with_di_and_aop(items, di_config, None)
 }
 
+/// Evaluate an OWNED module: identical to [`evaluate_module`], except the items
+/// are freed once registration is complete, before `main` runs. Use it when
+/// the caller has no further use for the items (e.g. `simple run`).
+#[instrument(skip(items))]
+pub fn evaluate_module_owned(items: Vec<Node>) -> Result<i32, CompileError> {
+    simple_common::engine_receipt::stamp(simple_common::engine_receipt::Engine::Interpreter);
+    crate::memory_guard::MemoryGuard::init();
+    set_di_config(None);
+    set_aop_config(None);
+    let result = interpreter_eval::evaluate_module_impl_owned(items);
+    set_di_config(None);
+    set_aop_config(None);
+    result
+}
+
 pub fn evaluate_module_with_di_and_aop(
     items: &[Node],
     di_config: Option<&DiConfig>,

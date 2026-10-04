@@ -114,7 +114,7 @@ pub(crate) use block_exec::{
 
 // Public API
 mod public_api;
-pub use public_api::{evaluate_module, evaluate_module_with_di, evaluate_module_with_di_and_aop};
+pub use public_api::{evaluate_module, evaluate_module_owned, evaluate_module_with_di, evaluate_module_with_di_and_aop};
 pub(crate) use public_api::exec_method_function;
 
 // Pattern matching functions for match expressions
