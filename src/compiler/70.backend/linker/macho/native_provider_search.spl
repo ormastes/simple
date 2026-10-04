@@ -1,5 +1,5 @@
 # File lookup for explicit SDK dependencies, not artifact or loader admission.
-use compiler.backend.linker.macho.provider_closure_types.{MachOProviderSourceV1, MachOProviderSearchV1, macho_provider_closure_default_limits_v1}
+use compiler.backend.linker.macho.provider_closure_types.{MachOProviderSourceV1, MachOProviderSearchV1, MachOProviderResolveRequestV2, macho_provider_closure_default_limits_v1}
 use std.io_runtime.{file_exists, file_read_bytes_result, file_size}
 
 fn macho_provider_path_v1(path: text) -> Result<text, text>:
@@ -82,6 +82,9 @@ fn native_macho_load_provider_v1(install_name: text, requester_path: text,
             for candidate in macho_provider_candidates_v1(macho_provider_child_v1(directory, leaf)?)?: candidates = candidates.push(candidate)
         if install_name.starts_with("/") and search.sdk_root != "":
             for candidate in macho_provider_candidates_v1(macho_provider_child_v1(search.sdk_root, install_name[1:install_name.len()])?)?: candidates = candidates.push(candidate)
+    macho_provider_read_candidates_v1(candidates, install_name)
+
+fn macho_provider_read_candidates_v1(candidates: [text], install_name: text) -> Result<MachOProviderSourceV1, text>:
     for candidate in candidates:
         if file_exists(candidate):
             # This preflight and post-read bound are logical guards, not a
@@ -97,4 +100,47 @@ fn native_macho_load_provider_v1(install_name: text, requester_path: text,
             return Ok(MachOProviderSourceV1(path: candidate, bytes: bytes))
     Err("Mach-O provider cannot be read from explicit SDK/search paths: {install_name}")
 
-export native_macho_load_provider_v1, macho_provider_path_v1
+fn native_macho_load_provider_v2(request: MachOProviderResolveRequestV2,
+        search: MachOProviderSearchV1) -> Result<MachOProviderSourceV1, text>:
+    """Resolve dependency runpaths using the requesting provider's provenance."""
+    val name = request.install_name
+    if not name.starts_with("@rpath/"):
+        return native_macho_load_provider_v1(name, request.requester_path, search)
+    val suffix = name[7:name.len()]
+    if suffix == "" or suffix.contains("\0") or suffix.contains("\\") or suffix.starts_with("/"):
+        return Err("invalid Mach-O provider runpath install name")
+    for part in suffix.split("/"):
+        if part == "..": return Err("invalid Mach-O provider runpath traversal")
+    if search.sdk_root.contains("\0"): return Err("invalid Mach-O SDK root")
+    val owner = macho_provider_path_v1(request.requester_path)?
+    var candidates: [text] = []
+    for runpath in request.runpaths:
+        if macho_provider_path_v1(runpath.owner_path)? != owner:
+            return Err("invalid Mach-O provider runpath owner provenance")
+        val path = runpath.path
+        if path == "" or path.contains("\0") or path.contains("\\"):
+            return Err("invalid Mach-O provider runpath")
+        var directory = ""
+        if path == "@loader_path":
+            directory = macho_provider_parent_v1(owner)?
+        elif path.starts_with("@loader_path/"):
+            directory = macho_provider_child_v1(macho_provider_parent_v1(owner)?, path[13:path.len()])?
+        elif path == "@executable_path":
+            directory = macho_provider_parent_v1(search.output_path)?
+        elif path.starts_with("@executable_path/"):
+            directory = macho_provider_child_v1(macho_provider_parent_v1(search.output_path)?, path[17:path.len()])?
+        elif path.starts_with("/"):
+            val normalized = macho_provider_path_v1(path)?
+            directory = if search.sdk_root != "" and not normalized.starts_with("//"):
+                macho_provider_child_v1(search.sdk_root, normalized[1:normalized.len()])?
+            else:
+                normalized
+        elif path.len() >= 3 and path.byte_at(1) == 58 and path.byte_at(2) == 47:
+            directory = macho_provider_path_v1(path)?
+        else:
+            return Err("unsupported Mach-O provider runpath: relative or unknown token")
+        for candidate in macho_provider_candidates_v1(macho_provider_child_v1(directory, suffix)?)?:
+            candidates = candidates.push(candidate)
+    macho_provider_read_candidates_v1(candidates, name)
+
+export native_macho_load_provider_v1, native_macho_load_provider_v2, macho_provider_path_v1
