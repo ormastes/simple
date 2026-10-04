@@ -27,6 +27,7 @@ fn workaround_status_paths(output: text) -> Result<[text], text>:
         return Err("truncated workaround Git status output")
     val records = output.split("\0")
     var paths: [text] = []
+    var seen: Dict<text, bool> = {}
     var i = 0
     while i < records.len():
         val record = records[i]
@@ -38,12 +39,16 @@ fn workaround_status_paths(output: text) -> Result<[text], text>:
         val status = record.substring(0, 2)
         val path = record.substring(3)
         if not workaround_path_valid(path): return Err("unsafe workaround Git path: {path}")
-        if workaround_source_candidate(path) and not paths.contains(path): paths.push(path)
+        if workaround_source_candidate(path) and not seen.contains_key(path):
+            paths.push(path)
+            seen[path] = true
         if status.contains("R") or status.contains("C"):
             i = i + 1
             if i >= records.len() or not workaround_path_valid(records[i]):
                 return Err("missing workaround Git rename source")
-            if workaround_source_candidate(records[i]) and not paths.contains(records[i]): paths.push(records[i])
+            if workaround_source_candidate(records[i]) and not seen.contains_key(records[i]):
+                paths.push(records[i])
+                seen[records[i]] = true
         i = i + 1
     Ok(paths)
 
@@ -168,7 +173,7 @@ fn workaround_refresh_locked(root: text, revision: text, fullscan: bool, discove
     if not workaround_host_publish(index_path, encoded): return Err("atomic workaround publication failed")
     Ok(checked)
 
-fn refresh_workarounds_at(root: text, fullscan: bool, known_paths: [text]) -> Result<WorkaroundIndex, text>:
+fn workaround_refresh_discover_locked(root: text, fullscan: bool, known_paths: [text]) -> Result<WorkaroundIndex, text>:
     val head = workaround_git(root, ["rev-parse", "--verify", "HEAD"])?
     val revision = head.trim()
     if not workaround_recovery_valid(revision): return Err("invalid workaround Git HEAD")
@@ -177,11 +182,16 @@ fn refresh_workarounds_at(root: text, fullscan: bool, known_paths: [text]) -> Re
         discovered = workaround_tracked_paths(workaround_git(root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"] )?)?
     elif known_paths.len() == 0:
         discovered = workaround_status_paths(workaround_git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"] )?)?
+    workaround_refresh_locked(root, revision, fullscan, discovered)
+
+fn refresh_workarounds_at(root: text, fullscan: bool, known_paths: [text]) -> Result<WorkaroundIndex, text>:
     if not workaround_host_mkdir(root + "/.simple"): return Err("cannot create workaround index directory")
     val lock = workaround_host_lock(root + "/.simple/workarounds.sdn.lock", 5)
     if lock < 0: return Err("workaround writer lock unavailable")
+    # Discovery belongs to the writer transaction too. A losing coordinator
+    # must not run a full Git status scan before discovering lock contention.
     # Capture every Result before releasing; no ? may escape the lock owner.
-    val result = workaround_refresh_locked(root, revision, fullscan, discovered)
+    val result = workaround_refresh_discover_locked(root, fullscan, known_paths)
     val unlocked = workaround_host_unlock(lock)
     if not unlocked: return Err("workaround writer lock release failed")
     result
