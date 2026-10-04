@@ -8,6 +8,7 @@ use std.common.kernel_plugin.contracts.{KpfMemoryContractV1, KpfConcurrencyContr
 use std.mdsocpp.model.{CapsuleDescriptorV1, MdsocppFacetOfferV1, MdsocppFacetRequirementV1,
     MdsocppClosure, MdsocppSealPolicyV1, MdsocppGenerationReceiptV1, MdsocppProfile}
 use std.mdsocpp.seal.{mdsocpp_seal_v1}
+use std.io_runtime.{file_read_bytes_result}
 use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
 use compiler.backend.linker.elf.elf_exec_writer.{ElfOutSec, ElfExecPlan, elf_exec_plan,
     elf_write_image, SHT_NOBITS_E, PT_LOAD}
@@ -15,12 +16,14 @@ use compiler.backend.linker.elf.elf_exec_writer.{ElfOutSec, ElfExecPlan, elf_exe
 pub const ELF_OPERATION_RELOCATE: u32 = 1
 pub const ELF_OPERATION_LAYOUT: u32 = 2
 pub const ELF_OPERATION_WRITE_IMAGE: u32 = 3
+pub const ELF_OPERATION_READ_BYTES: u32 = 4
 
 pub struct ElfOperationProviderV1:
     descriptor: CapsuleDescriptorV1
     relocate: Option<fn(RelocArch, [i64], i64, i64, i64, i64, i64) -> Result<[i64], text>> = nil
     layout: Option<fn([ElfOutSec], i64, i64) -> Result<ElfExecPlan, text>> = nil
     write_image: Option<fn(i64, i64, i64, ElfExecPlan, [[i64]]) -> Result<[i64], text>> = nil
+    read_bytes: Option<fn(text) -> Result<[u8], text>> = nil
 
 pub struct ElfComposedImageV1:
     image: [i64]
@@ -189,6 +192,17 @@ pub class ElfSealedOperationsV1:
     layout_operation: fn([ElfOutSec], i64, i64) -> Result<ElfExecPlan, text>
     writer_operation: fn(i64, i64, i64, ElfExecPlan, [[i64]]) -> Result<[i64], text>
     receipt: MdsocppGenerationReceiptV1
+    read_operation: Option<fn(text) -> Result<[u8], text>> = nil
+
+    pub fn has_byte_source() -> bool: self.read_operation != nil
+
+    pub fn read_bytes(path: text) -> Result<[u8], text>:
+        if self.read_operation == nil: return Err("ELF byte-source operation is not bound")
+        if path == "" or path.contains("\0"): return Err("ELF byte-source path is empty or contains NUL")
+        val read = self.read_operation.unwrap()
+        val bytes = read(path)?
+        if bytes.len() == 0: return Err("ELF byte-source input is empty: {path}")
+        Ok(bytes)
 
     pub fn relocate(arch: RelocArch, bytes: [i64], offset: i64, kind: i64,
             symbol: i64, addend: i64, place: i64) -> Result<[i64], text>:
@@ -215,49 +229,82 @@ pub class ElfSealedOperationsV1:
 
 pub fn elf_seal_operations_v1(providers: [ElfOperationProviderV1],
         policy: MdsocppSealPolicyV1) -> Result<ElfSealedOperationsV1, text>:
+    _elf_seal_operations_v1(providers, policy, false)
+
+pub fn elf_seal_file_operations_v1(providers: [ElfOperationProviderV1],
+        policy: MdsocppSealPolicyV1) -> Result<ElfSealedOperationsV1, text>:
+    _elf_seal_operations_v1(providers, policy, true)
+
+fn _elf_seal_operations_v1(providers: [ElfOperationProviderV1],
+        policy: MdsocppSealPolicyV1, requires_source: bool) -> Result<ElfSealedOperationsV1, text>:
     if providers.len() == 0 or providers.len() > 64: return Err("ELF operation provider count is invalid")
     var descriptors: [CapsuleDescriptorV1] = []
     for provider in providers:
         if provider.descriptor.closure != MdsocppClosure.Static: return Err("ELF operations require static closure")
-        var seen: [bool] = [false, false, false]
+        var seen: [bool] = [false, false, false, false]
+        val facet_count = if requires_source: 4 else: 3
         for offer in provider.descriptor.provided_facets:
             var found = false
-            for index in 0..3:
+            for index in 0..facet_count:
                 if kpf_id128_equal(offer.facet_id, elf_operation_facet_id_v1((index + 1) as u32)):
                     if seen[index]: return Err("ELF duplicate operation offer")
                     seen[index] = true
                     found = true
             if not found: return Err("ELF unknown operation offer")
-        if seen[0] != (provider.relocate != nil) or seen[1] != (provider.layout != nil) or seen[2] != (provider.write_image != nil):
+        if seen[0] != (provider.relocate != nil) or seen[1] != (provider.layout != nil) or
+                seen[2] != (provider.write_image != nil) or seen[3] != (provider.read_bytes != nil):
             return Err("ELF operation offer and typed callback disagree")
-        if not seen[0] and not seen[1] and not seen[2]: return Err("ELF operation provider has no operation")
+        if not seen[0] and not seen[1] and not seen[2] and not seen[3]: return Err("ELF operation provider has no operation")
         descriptors.push(provider.descriptor)
     var engine = elf_operation_descriptor_v1(elf_operation_capsule_id_v1(1), [])
     engine.required_facets = [
         MdsocppFacetRequirementV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_RELOCATE), optional: false),
         MdsocppFacetRequirementV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_LAYOUT), optional: false),
         MdsocppFacetRequirementV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_WRITE_IMAGE), optional: false)]
+    if requires_source:
+        var required = engine.required_facets
+        required.push(MdsocppFacetRequirementV1(
+            facet_id: elf_operation_facet_id_v1(ELF_OPERATION_READ_BYTES), optional: false))
+        engine.required_facets = required
     descriptors.push(engine)
     val sealed = mdsocpp_seal_v1(descriptors, policy)
     if not sealed.status.accepted(): return Err("ELF operation composition rejected at slot {sealed.subject_slot}")
     var relocation_slot: i64 = -1
     var layout_slot: i64 = -1
     var writer_slot: i64 = -1
+    var source_slot: i64 = -1
     for binding in sealed.receipt.bindings:
         if binding.consumer_slot == providers.len():
             if binding.provider_slot >= providers.len(): return Err("ELF operation binding provider is invalid")
             if kpf_id128_equal(binding.facet_id, elf_operation_facet_id_v1(ELF_OPERATION_RELOCATE)): relocation_slot = binding.provider_slot as i64
             if kpf_id128_equal(binding.facet_id, elf_operation_facet_id_v1(ELF_OPERATION_LAYOUT)): layout_slot = binding.provider_slot as i64
             if kpf_id128_equal(binding.facet_id, elf_operation_facet_id_v1(ELF_OPERATION_WRITE_IMAGE)): writer_slot = binding.provider_slot as i64
+            if kpf_id128_equal(binding.facet_id, elf_operation_facet_id_v1(ELF_OPERATION_READ_BYTES)): source_slot = binding.provider_slot as i64
     if relocation_slot < 0 or layout_slot < 0 or writer_slot < 0: return Err("ELF operation binding is missing")
+    if requires_source and source_slot < 0: return Err("ELF byte-source binding is missing")
+    val read_operation = if source_slot >= 0: providers[source_slot].read_bytes else: nil
     Ok(ElfSealedOperationsV1(relocate_operation: providers[relocation_slot].relocate.unwrap(),
         layout_operation: providers[layout_slot].layout.unwrap(),
-        writer_operation: providers[writer_slot].write_image.unwrap(), receipt: sealed.receipt))
+        writer_operation: providers[writer_slot].write_image.unwrap(), receipt: sealed.receipt,
+        read_operation: read_operation))
 
 pub fn elf_builtin_operations_v1() -> Result<ElfSealedOperationsV1, text>:
     elf_seal_operations_v1(elf_builtin_operation_providers_v1(), elf_operation_policy_v1())
+
+pub fn elf_builtin_file_operation_providers_v1() -> [ElfOperationProviderV1]:
+    var providers = elf_builtin_operation_providers_v1()
+    providers.push(ElfOperationProviderV1(
+        descriptor: elf_operation_descriptor_v1(elf_operation_capsule_id_v1(5),
+            [MdsocppFacetOfferV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_READ_BYTES))]),
+        read_bytes: Some(file_read_bytes_result)))
+    providers
+
+pub fn elf_builtin_file_operations_v1() -> Result<ElfSealedOperationsV1, text>:
+    elf_seal_file_operations_v1(elf_builtin_file_operation_providers_v1(), elf_operation_policy_v1())
 
 export ElfOperationProviderV1, ElfSealedOperationsV1, ElfComposedImageV1
 export elf_operation_facet_id_v1, elf_operation_capsule_id_v1, elf_operation_descriptor_v1, elf_operation_policy_v1
 export elf_seal_operations_v1, elf_builtin_operations_v1, elf_builtin_operation_providers_v1
 export ELF_OPERATION_RELOCATE, ELF_OPERATION_LAYOUT, ELF_OPERATION_WRITE_IMAGE
+export ELF_OPERATION_READ_BYTES, elf_seal_file_operations_v1
+export elf_builtin_file_operation_providers_v1, elf_builtin_file_operations_v1
