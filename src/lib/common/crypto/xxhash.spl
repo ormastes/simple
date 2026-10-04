@@ -6,10 +6,11 @@
 # Two modes:
 #   xxhash64       — one-shot hash for a complete byte slice
 #   xxhash64_init / xxhash64_update / xxhash64_finalize — streaming API
+#   xxhash32       — one-shot XXH32 (LZ4 frame checksums)
 #
 # All u64 arithmetic wraps naturally (no masking needed in Simple).
 #
-# The one XXH64 implementation shared by SimpleOS (src/os) and hosted std
+# The one XXH64/XXH32 implementation shared by SimpleOS (src/os) and hosted std
 # (zstd content checksum = lower 32 bits of xxhash64(content, 0)).
 # ============================================================================
 
@@ -331,3 +332,60 @@ fn xxhash64_finalize(state: [u64]) -> u64:
     # Extract buffered tail bytes and finalize
     val tail: [u8] = _xxh64_buf_to_u8(state, buf_len)
     _xxh64_finalize_tail(h, tail, 0, buf_len)
+
+# ============================================================================
+# XXH32 — one-shot (LZ4 frame descriptor/block/content checksums)
+# ============================================================================
+
+fn _xxh32_rotl(v: u32, r: i64) -> u32:
+    (v << r.to_u32()) | (v >> (32 - r).to_u32())
+
+fn _xxh32_round(acc: u32, v: u32) -> u32:
+    val a = acc + (v * 2246822519u32)
+    _xxh32_rotl(a, 13) * 2654435761u32
+
+fn _xxh32_read_le32(data: [u8], off: i64) -> u32:
+    data[off].to_u32() |
+        (data[off + 1].to_u32() << 8u32) |
+        (data[off + 2].to_u32() << 16u32) |
+        (data[off + 3].to_u32() << 24u32)
+
+fn xxhash32(data: [u8], seed: u32) -> u32:
+    val p1: u32 = 2654435761u32
+    val p2: u32 = 2246822519u32
+    val p3: u32 = 3266489917u32
+    val p4: u32 = 668265263u32
+    val p5: u32 = 374761393u32
+    val n = data.len()
+    var h: u32 = 0u32
+    var pos = 0
+    if n >= 16:
+        var v1 = seed + p1 + p2
+        var v2 = seed + p2
+        var v3 = seed + 0u32
+        var v4 = seed - p1
+        val limit = n - 16
+        while pos <= limit:
+            v1 = _xxh32_round(v1, _xxh32_read_le32(data, pos))
+            pos = pos + 4
+            v2 = _xxh32_round(v2, _xxh32_read_le32(data, pos))
+            pos = pos + 4
+            v3 = _xxh32_round(v3, _xxh32_read_le32(data, pos))
+            pos = pos + 4
+            v4 = _xxh32_round(v4, _xxh32_read_le32(data, pos))
+            pos = pos + 4
+        h = _xxh32_rotl(v1, 1) + _xxh32_rotl(v2, 7) + _xxh32_rotl(v3, 12) + _xxh32_rotl(v4, 18)
+    else:
+        h = seed + p5
+    h = h + n.to_u32()
+    while pos + 4 <= n:
+        h = h + (_xxh32_read_le32(data, pos) * p3)
+        h = _xxh32_rotl(h, 17) * p4
+        pos = pos + 4
+    while pos < n:
+        h = h + (data[pos].to_u32() * p5)
+        h = _xxh32_rotl(h, 11) * p1
+        pos = pos + 1
+    h = (h ^ (h >> 15u32)) * p2
+    h = (h ^ (h >> 13u32)) * p3
+    h ^ (h >> 16u32)
