@@ -13,6 +13,9 @@ use std.tui.terminal.{
     terminal_read_byte, terminal_install_recovery, terminal_resize_pending
 }
 use std.nogc_sync_mut.io.pipe.{Stdin}
+use std.sys.pty.{read as pty_read}
+use std.sffi.platform.{platform_name_raw}
+use std.io_runtime.{time_now_monotonic_ms}
 use app.llm_caret.tui_input.{caret_is_tty}
 
 struct CaretIo:
@@ -24,6 +27,9 @@ struct CaretIo:
     draw_at: fn(i64, i64, text)
     flush: fn()
     read_byte: fn() -> i64
+    # True when a byte is already waiting, so the line reader can consume a
+    # burst (a pasted or injected message) before paying for a redraw.
+    input_pending: fn() -> bool
     # Explicit `(has_line, line)` avoids Optional(text) crossing the hybrid
     # InterpCall ABI, where boxed optional payloads were previously corrupted.
     read_line: fn() -> (bool, text)
@@ -106,8 +112,54 @@ fn _production_draw_at(row: i64, col: i64, content: text):
 fn _production_flush():
     terminal_flush()
 
+# Stdin is read at the fd, in chunks, into this queue. rt_stdin_read_byte goes
+# through the runtime's buffered stdin, which pulls every waiting byte into a
+# buffer no poll can see, so "is more input pending?" could never be answered
+# and every byte of a burst paid for a full frame redraw.
+var PRODUCTION_INPUT: [i64] = []
+var PRODUCTION_INPUT_AT = 0
+# A hung-up tty makes every read return "" at once; this many back-to-back
+# instant empty reads is EOF (same bound as cs_main's input loop).
+const _PRODUCTION_MAX_INSTANT_EMPTY_READS: i64 = 200
+
+fn _production_fd_input() -> bool:
+    platform_name_raw() != "windows"
+
+fn _production_fill_input(timeout_ms: i64) -> bool:
+    if PRODUCTION_INPUT_AT >= PRODUCTION_INPUT.len():
+        PRODUCTION_INPUT = []
+        PRODUCTION_INPUT_AT = 0
+    val chunk = pty_read(0, timeout_ms)
+    if chunk == "":
+        return false
+    for b in chunk.bytes():
+        PRODUCTION_INPUT = PRODUCTION_INPUT + [b as i64]
+    true
+
 fn _production_read_byte() -> i64:
-    terminal_read_byte()
+    if not _production_fd_input():
+        return terminal_read_byte()
+    var instant_empty = 0
+    while PRODUCTION_INPUT_AT >= PRODUCTION_INPUT.len():
+        val before = time_now_monotonic_ms()
+        if _production_fill_input(200):
+            instant_empty = 0
+        elif time_now_monotonic_ms() - before < 5:
+            instant_empty = instant_empty + 1
+            if instant_empty >= _PRODUCTION_MAX_INSTANT_EMPTY_READS:
+                return -1
+        else:
+            instant_empty = 0
+    val b = PRODUCTION_INPUT[PRODUCTION_INPUT_AT]
+    PRODUCTION_INPUT_AT = PRODUCTION_INPUT_AT + 1
+    b
+
+fn _production_input_pending() -> bool:
+    if not _production_fd_input():
+        return false
+    if PRODUCTION_INPUT_AT < PRODUCTION_INPUT.len():
+        return true
+    _production_fill_input(0)
 
 fn _production_read_line() -> (bool, text):
     val input = Stdin.new()
@@ -128,6 +180,7 @@ fn production_caret_io() -> CaretIo:
         draw_at: _production_draw_at,
         flush: _production_flush,
         read_byte: _production_read_byte,
+        input_pending: _production_input_pending,
         read_line: _production_read_line,
         emit: _production_emit
     )

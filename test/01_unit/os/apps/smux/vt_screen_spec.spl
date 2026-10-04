@@ -9,8 +9,10 @@ frame it ever drew.
 bin/simple test test/01_unit/os/apps/smux/vt_screen_spec.spl
 ## Compatibility and limitations
 Covers the layout subset ConPTY and common TUIs emit: CUP/HVP, cursor moves,
-CHA/VPA, erase-in-line/display, erase-chars, wrap and scroll. Colours, modes
-and OSC titles are consumed. Unsupported sequences are ignored, never printed.
+CHA/VPA, erase-in-line/display, erase-chars, wrap and scroll, the alternate
+screen, per-cell SGR styling, wide characters, and replies to the startup
+queries TUIs send (DSR, DA1/DA2, XTVERSION, DECRQM, OSC 10/11). OSC titles
+are consumed. Unsupported sequences are ignored, never printed.
 ## Verification guidance and troubleshooting
 A capture that shows stale dialog text after a redraw means an erase sequence
 is not applied; text run together without spaces means cursor-forward is lost.
@@ -20,7 +22,8 @@ is not applied; text run together without spaces means cursor-forward is lost.
 # @manual_section: smux-vt-screen
 
 use std.spec
-use os.apps.smux.vt_screen.{vt_new, vt_feed, vt_resize, vt_text}
+use os.apps.smux.vt_screen.{vt_new, vt_feed, vt_resize, vt_text, vt_styled_text,
+    vt_replies, vt_clear_replies, vt_bracketed_paste, vt_cursor_visible, vt_alt_screen}
 
 fn esc() -> text:
     "\x1b"
@@ -109,3 +112,112 @@ describe "smux pane screen":
         s = vt_feed(s, esc() + "[4;10H" + "end")
         # @capture(tui): 4x12 grid after shrink then grow
         expect(vt_text(s)).to_equal("abc\n\n\n         end")
+
+    it "shows the last complete frame while a synchronized update is drawn":
+        # @req REQ-SMUX-VT-001
+        step("Draw a first frame, then start a synchronized update and clear")
+        var s = vt_new(2, 20)
+        s = vt_feed(s, "frame one")
+        s = vt_feed(s, esc() + "[?2026h" + esc() + "[2J" + esc() + "[Hfra")
+        # @capture(tui): capture mid-update still shows the complete frame
+        step("Mid-update the capture is the previous frame, never the half-drawn one")
+        expect(vt_text(s)).to_equal("frame one")
+        step("Ending the update publishes the new frame")
+        s = vt_feed(s, "me two" + esc() + "[?2026l")
+        expect(vt_text(s)).to_equal("frame two")
+
+    it "answers the terminal queries agent TUIs send at startup":
+        # @req REQ-SMUX-VT-002
+        step("Move the cursor to row 3 col 5, then ask DSR, DA1, DA2, XTVERSION and size")
+        var s = vt_new(10, 40)
+        s = vt_feed(s, esc() + "[3;5H" + esc() + "[6n" + esc() + "[c" + esc() + "[>c")
+        s = vt_feed(s, esc() + "[>0q" + esc() + "[18t")
+        step("Each query left its reply, in order, for the child")
+        expect(vt_replies(s)).to_equal(esc() + "[3;5R" + esc() + "[?62;22c" + esc() + "[>0;0;0c" +
+            esc() + "P>|smux" + esc() + "\\" + esc() + "[8;10;40t")
+        step("Taking the replies clears them; no query reply reaches the screen")
+        expect(vt_replies(vt_clear_replies(s))).to_equal("")
+        expect(vt_text(s)).to_equal("")
+
+    it "answers mode, colour and scheme queries but stays silent on the kitty query":
+        # @req REQ-SMUX-VT-002
+        step("Ask DECRQM for 2026 outside and inside an update, OSC 10/11, ?996n and ?u")
+        var s = vt_new(4, 20)
+        s = vt_feed(s, esc() + "[?2026$p" + esc() + "[?2026h" + esc() + "[?2026$p" + esc() + "[?2026l")
+        s = vt_feed(s, esc() + "[?9999$p" + esc() + "]10;?" + esc() + "\\" + esc() + "]11;?" + "\x07")
+        s = vt_feed(s, esc() + "[?996n" + esc() + "[?u")
+        step("2026 reads reset then set, unknown modes 0, colours mirror the terminator")
+        expect(vt_replies(s)).to_equal(esc() + "[?2026;2$y" + esc() + "[?2026;1$y" +
+            esc() + "[?9999;0$y" + esc() + "]10;rgb:d0d0/d0d0/d0d0" + esc() + "\\" +
+            esc() + "]11;rgb:0000/0000/0000" + "\x07" + esc() + "[?997;1n")
+
+    it "restores the main screen and cursor when the alternate screen ends":
+        # @req REQ-SMUX-VT-003
+        step("Draw on the main screen, enter ?1049 and draw a full-screen frame")
+        var s = vt_new(3, 20)
+        s = vt_feed(s, "$ shell prompt")
+        s = vt_feed(s, esc() + "[?1049h")
+        expect(vt_alt_screen(s)).to_equal(true)
+        expect(vt_text(s)).to_equal("")
+        s = vt_feed(s, esc() + "[2;1Hfull screen app")
+        expect(vt_text(s)).to_equal("\nfull screen app")
+        step("Leaving ?1049 brings back the main grid and the cursor after the prompt")
+        s = vt_feed(s, esc() + "[?1049l" + "!")
+        expect(vt_alt_screen(s)).to_equal(false)
+        expect(vt_text(s)).to_equal("$ shell prompt!")
+
+    it "tracks cursor visibility and bracketed paste modes":
+        # @req REQ-SMUX-VT-003
+        var s = vt_new(2, 10)
+        expect(vt_cursor_visible(s)).to_equal(true)
+        expect(vt_bracketed_paste(s)).to_equal(false)
+        s = vt_feed(s, esc() + "[?25l")
+        expect(vt_cursor_visible(s)).to_equal(false)
+        s = vt_feed(s, esc() + "[?25;2004h")
+        expect(vt_cursor_visible(s)).to_equal(true)
+        expect(vt_bracketed_paste(s)).to_equal(true)
+        s = vt_feed(s, esc() + "[?2004l")
+        expect(vt_cursor_visible(s)).to_equal(true)
+        expect(vt_bracketed_paste(s)).to_equal(false)
+
+    it "keeps per-cell colours and attributes for the styled capture":
+        # @req REQ-SMUX-VT-004
+        step("Print plain, bold red, 256-colour, truecolour-on-blue and reverse runs")
+        var s = vt_new(2, 30)
+        s = vt_feed(s, "a" + esc() + "[1;31mB" + esc() + "[22;38;5;196mC" + esc() + "[0m ")
+        s = vt_feed(s, esc() + "[3;4;38;2;1;2;3;44mD" + esc() + "[m" + esc() + "[7mE" + esc() + "[27mf")
+        s = vt_feed(s, esc() + "[>4;2m")
+        step("Plain capture is unchanged; styled capture carries the SGR runs")
+        expect(vt_text(s)).to_equal("aBC DEf")
+        expect(vt_styled_text(s)).to_equal("a" + esc() + "[0;1;31mB" + esc() + "[0;38;5;196mC" +
+            esc() + "[0m " + esc() + "[0;3;4;38;2;1;2;3;44mD" + esc() + "[0;7mE" + esc() + "[0mf")
+        step("A styled cell erased back to default loses its style")
+        s = vt_feed(s, esc() + "[1;2H" + esc() + "[K")
+        expect(vt_styled_text(s)).to_equal("a")
+
+    it "freezes styles together with text during a synchronized update":
+        # @req REQ-SMUX-VT-004
+        var s = vt_feed(vt_new(1, 10), esc() + "[32mok")
+        s = vt_feed(s, esc() + "[?2026h" + esc() + "[2K" + esc() + "[0m" + esc() + "[1Gno")
+        expect(vt_styled_text(s)).to_equal(esc() + "[0;32mok" + esc() + "[0m")
+        s = vt_feed(s, esc() + "[?2026l")
+        expect(vt_styled_text(s)).to_equal("no")
+
+    it "gives wide characters two cells and wraps them whole":
+        # @req REQ-SMUX-VT-005
+        step("Print CJK and an emoji, then a cursor-addressed overwrite after them")
+        var s = vt_new(3, 5)
+        s = vt_feed(s, "가😀" + esc() + "[1;5Hx")
+        expect(vt_text(s)).to_equal("가😀x")
+        step("A wide char that would straddle the right edge moves to the next row")
+        s = vt_feed(s, esc() + "[2;5H" + "中")
+        expect(vt_text(s)).to_equal("가😀x\n\n中")
+        step("Overwriting half of a wide char blanks the other half")
+        s = vt_feed(s, esc() + "[1;2Hz")
+        expect(vt_text(s)).to_equal(" z😀x\n\n中")
+
+    it "swallows charset designators and DCS strings":
+        # @req REQ-SMUX-VT-001
+        var s = vt_new(1, 20)
+        s = vt_feed(s, esc() + "(B" + "ok" + esc() + "P+q544e" + esc() + "\\" + "!" + esc() + "[>5u" + esc() + "[<u")
+        expect(vt_text(s)).to_equal("ok!")

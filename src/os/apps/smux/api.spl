@@ -160,7 +160,13 @@ fn _clean_output(raw: text) -> text:
 # Reads are chunked (a PTY read returns at most one buffer), so keep reading
 # until the child has nothing pending. Bounded so a child that prints forever
 # cannot stall the caller.
-fn _drain(pr: PaneRecord) -> PaneRecord:
+#
+# A PTY chunk is applied to the screen as soon as it is read, and any reply the
+# screen owes (a TUI's startup queries: cursor position, device attributes,
+# colours) is written back to the child right away — a child waiting on that
+# answer prints nothing until it arrives.
+fn _drain(pr0: PaneRecord) -> PaneRecord:
+    var pr = pr0
     var raw = ""
     var reads = 0
     var more = _has_child(pr)
@@ -168,15 +174,19 @@ fn _drain(pr: PaneRecord) -> PaneRecord:
         var chunk = ""
         if _is_pty(pr):
             chunk = pty_read(pr.pty_fd as i32, 0)
+            if chunk != "":
+                pr = pr.feed_screen(chunk)
+                val owed = pr.replies()
+                if owed != "":
+                    val _w = pty_write(pr.pty_fd as i32, owed)
+                    pr = pr.without_replies()
         else:
             chunk = process_read_stdout(pr.child_pid)
-        raw = raw + chunk
+            raw = raw + chunk
         more = chunk != ""
         reads = reads + 1
     if raw == "":
         return pr
-    if _is_pty(pr):
-        return pr.feed_screen(raw)
     return pr.feed(_clean_output(raw))
 
 fn _closed_record() -> PaneRecord:
@@ -466,6 +476,51 @@ pub fn smux_capture(session_id: text, window_id: text, pane_id: text, history_li
         capture_count: m.capture_count + 1
     ))
     return Ok(drained.capture(history_lines))
+
+# Like smux_capture, but each row keeps its styling as ANSI SGR runs
+# (`ESC[0;<params>m` where attributes change, `ESC[0m` at a styled row's end).
+pub fn smux_capture_styled(session_id: text, window_id: text, pane_id: text, history_lines: int) -> Result<text, text>:
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
+    if idx < 0:
+        return Err("unknown pane: " + pane_id)
+    val drained = _drain(_svc.get_pane(idx))
+    val m = _svc.metrics
+    _svc = _svc.replace_pane(idx, drained).with_metrics(SmuxMetrics(
+        startup_count: m.startup_count,
+        last_startup_ns: m.last_startup_ns,
+        resize_count: m.resize_count,
+        capture_count: m.capture_count + 1
+    ))
+    return Ok(drained.styled_capture(history_lines))
+
+# True when the pane's child has bracketed paste (?2004) enabled. Drains first:
+# the mode is set by what the child printed.
+pub fn smux_pane_bracketed_paste(session_id: text, window_id: text, pane_id: text) -> Result<bool, text>:
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
+    if idx < 0:
+        return Err("unknown pane: " + pane_id)
+    val drained = _drain(_svc.get_pane(idx))
+    _svc = _svc.replace_pane(idx, drained)
+    return Ok(drained.bracketed_paste())
+
+# Pastes `body` into the pane: wrapped in ESC[200~ ... ESC[201~ when the child
+# enabled bracketed paste, so it is taken as one paste (newlines included)
+# rather than typed keys; sent as-is otherwise. Does not submit.
+pub fn smux_paste_text(session_id: text, window_id: text, pane_id: text, body: text) -> Result<text, text>:
+    val idx = _pane_idx(_svc, session_id, window_id, pane_id)
+    if idx < 0:
+        return Err("unknown pane: " + pane_id)
+    val drained = _drain(_svc.get_pane(idx))
+    _svc = _svc.replace_pane(idx, drained)
+    if not _has_child(drained):
+        return Err("pane has no child: " + pane_id)
+    var payload = body
+    if drained.bracketed_paste():
+        payload = "\x1b[200~" + body + "\x1b[201~"
+    val ok = if _is_pty(drained): pty_write(drained.pty_fd as i32, payload) else: process_write_stdin(drained.child_pid, payload)
+    if not ok:
+        return Err("write failed: " + pane_id)
+    return Ok("sent")
 
 # =========================================================================
 # Backend contract
