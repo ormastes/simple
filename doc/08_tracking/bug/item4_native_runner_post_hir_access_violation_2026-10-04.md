@@ -85,8 +85,10 @@ private source/SCV/cache/output/temp ownership, producer identity checks and a
 debugger replay may proceed with cold initialization unset. Timeout retains
 evidence; it does not authorize blind retries or reuse forged bindings.
 
-No build or debugger reproduction was launched by this investigation, and no
-process or cache was modified. Required acceptance remains: identify and repair
+No build or debugger reproduction was launched during the initial read-only
+triage. No independently owned process or cache was changed. Subsequent private
+checkout/cache preparation is separate from an executed reproduction.
+Required acceptance remains: identify and repair
 the actual fault, execute a focused regression with a qualified route, build the
 full CLI and runner with complete lineage, then run the pending item4 native
 SSpec/core/MCP/coverage/host gates. This report does not close any of those gates.
