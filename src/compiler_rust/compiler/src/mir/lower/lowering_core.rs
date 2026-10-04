@@ -1604,9 +1604,21 @@ impl<'a> MirLowerer<'a> {
         if !self.slot_holds_tagged_value(value_ty) {
             return Ok(value);
         }
-        // Bool is deliberately excluded: it is tagged through `rt_value_bool`,
-        // not `BoxInt`, so `UnboxInt` is not its inverse.
         match declared_ty {
+            // Bool is tagged through `rt_value_bool`, not `BoxInt`, so
+            // `UnboxInt` is not its inverse. Without this arm a tagged FALSE
+            // (a non-zero word) flowed raw into a `-> bool` return / bool local
+            // and read as true under the JIT: `fn f(v: any) -> bool: v` with
+            // `v = false` returned true (llm_caret claude_cli `_json_bool`).
+            TypeId::BOOL => self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: CallTarget::from_name("rt_value_truthy"),
+                    args: vec![value],
+                });
+                dest
+            }),
             TypeId::U64 => self.unbox_u64_runtime_value(value),
             TypeId::F32 | TypeId::F64 => self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
