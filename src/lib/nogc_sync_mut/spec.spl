@@ -21,6 +21,10 @@ use std.spec.skip_governance.{
     skip_ref, validate_skip_it, validate_bare_pending,
     validate_free_text_skip, validate_skip_ref_record
 }
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.fs.{file_create_excl}
+use std.io_runtime.{file_append_text, file_exists, file_read}
+use std.nogc_sync_mut.fs.host_path.{host_path_is_absolute}
 
 # ================================================================
 # Global Test State
@@ -46,6 +50,245 @@ var after_all_hooks = []
 # overwrite an earlier failure through nested-call global writeback.
 var current_test_errors = []
 
+# Aggregate mode is opt-in. In-place array mutations are intentional: nested
+# Simple calls can restore an older snapshot of a scalar module global.
+var _aggregate_ledger_paths: [text] = []
+var _aggregate_enumerating: [i64] = []
+var _aggregate_running: [i64] = []
+var _aggregate_owner_paths: [text] = []
+var _aggregate_owner_hashes: [text] = []
+var _aggregate_suite_parts: [text] = []
+var _aggregate_context_parts: [text] = []
+var _aggregate_owner_cases: [text] = []
+var _aggregate_all_ids: [text] = []
+var _aggregate_test_callback_marks: [i64] = []
+var _aggregate_hook_callback_marks: [i64] = []
+var _aggregate_errors: [text] = []
+var _aggregate_owner_count: [i64] = []
+var _aggregate_seen_owner_paths: [text] = []
+var _aggregate_in_test: [i64] = []
+var _aggregate_in_hook: [i64] = []
+var _aggregate_failed_cases: [i64] = []
+var _aggregate_selected_case: [text] = []
+var _aggregate_selected_results: [text] = []
+
+fn _aggregate_active() -> bool:
+    _aggregate_ledger_paths.len() == 1
+
+fn _aggregate_enum() -> bool:
+    _aggregate_enumerating.len() == 1
+
+fn _aggregate_valid_sha(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var i = 0
+    while i < value.len():
+        val ch = value[i:i + 1]
+        if not "0123456789abcdef".contains(ch):
+            return false
+        i = i + 1
+    true
+
+fn _aggregate_valid_field(value: text) -> bool:
+    value != "" and not value.contains("\t") and not value.contains("\n") and not value.contains("\r")
+
+fn _aggregate_frame(value: text) -> text:
+    # Simple text.len() is UTF-8 byte length (std.encoding.utf8.text_byte_len).
+    "{value.len()}:{value}"
+
+fn _aggregate_payload(name: text, kind: text, ordinal: i64) -> text:
+    var payload = "simple-subsystem-case-v1:"
+    payload = payload + _aggregate_frame(_aggregate_owner_paths[0])
+    payload = payload + _aggregate_frame(_aggregate_owner_hashes[0])
+    payload = payload + _aggregate_frame("{_aggregate_suite_parts.len()}")
+    for part in _aggregate_suite_parts:
+        payload = payload + _aggregate_frame(part)
+    payload = payload + _aggregate_frame("{_aggregate_context_parts.len()}")
+    for part in _aggregate_context_parts:
+        payload = payload + _aggregate_frame(part)
+    payload + _aggregate_frame(name) + _aggregate_frame(kind) + _aggregate_frame("{ordinal}")
+
+fn _aggregate_append(row: text) -> bool:
+    if _aggregate_errors.len() > 0:
+        return false
+    if not file_append_text(_aggregate_ledger_paths[0], row + "\n"):
+        _aggregate_errors.push("ledger append failed")
+        return false
+    true
+
+fn _aggregate_owner_end_append(row: text) -> bool:
+    # An unsupported owner is still recorded when the ledger remains writable.
+    if not file_append_text(_aggregate_ledger_paths[0], row + "\n"):
+        _aggregate_errors.push("ledger append failed")
+        return false
+    true
+
+fn _aggregate_declare(name: text, kind: text) -> text:
+    if not _aggregate_active():
+        return ""
+    if _aggregate_in_test.len() > 0 or _aggregate_in_hook.len() > 0:
+        _aggregate_errors.push("case declared from test or hook callback")
+        return ""
+    if _aggregate_owner_paths.len() != 1 or _aggregate_errors.len() > 0:
+        _aggregate_errors.push("case outside active owner")
+        return ""
+    val ordinal = _aggregate_owner_cases.len()
+    val payload = _aggregate_payload(name, kind, ordinal)
+    val id = sha256_text("id:" + payload)
+    val metadata_sha = sha256_text("meta:" + payload)
+    if not _aggregate_valid_sha(id) or not _aggregate_valid_sha(metadata_sha):
+        _aggregate_errors.push("case digest failed")
+        return ""
+    for prior in _aggregate_all_ids:
+        if prior == id:
+            _aggregate_errors.push("duplicate case id")
+            return ""
+    _aggregate_all_ids.push(id)
+    _aggregate_owner_cases.push(id)
+    if not _aggregate_append("declare\t{id}\t{metadata_sha}"):
+        return ""
+    id
+
+fn _aggregate_result(id: text, outcome: text):
+    if id != "":
+        val _ = _aggregate_append("result\t{id}\t{outcome}")
+        if _aggregate_selected_case.contains(id):
+            _aggregate_selected_results.push(id)
+        if outcome == "fail":
+            _aggregate_failed_cases.push(1)
+
+pub fn aggregate_registry_begin(mode: text, backend: text, subsystem: text, whole_inventory_sha: text, subset_sha: text, ledger_path: text) -> bool:
+    if _aggregate_active() or _aggregate_owner_paths.len() != 0:
+        return false
+    if (mode != "enumerate" and mode != "run") or not _aggregate_valid_field(backend) or not _aggregate_valid_field(subsystem):
+        return false
+    if not _aggregate_valid_sha(whole_inventory_sha) or not _aggregate_valid_sha(subset_sha):
+        return false
+    if not host_path_is_absolute(ledger_path) or not _aggregate_valid_field(ledger_path):
+        return false
+    val header = "simple-subsystem-registry-v1\t{backend}\t{subsystem}\t{whole_inventory_sha}\t{subset_sha}\n"
+    # The check is diagnostic only; the exclusive create below owns the race.
+    if file_exists(ledger_path):
+        return false
+    if not file_create_excl(ledger_path, header):
+        return false
+    # Fail closed if the selected native provider reported success without
+    # actually creating this regular ledger (historical stub behavior).
+    if file_read(ledger_path) != header:
+        return false
+    _aggregate_ledger_paths.push(ledger_path)
+    if mode == "enumerate":
+        _aggregate_enumerating.push(1)
+    else:
+        _aggregate_running.push(1)
+    true
+
+pub fn aggregate_owner_begin(path: text, source_sha: text) -> bool:
+    if not _aggregate_active():
+        return false
+    if _aggregate_owner_paths.len() != 0:
+        _aggregate_errors.push("nested owner begin")
+        return false
+    if _aggregate_errors.len() > 0:
+        return false
+    if not _aggregate_valid_field(path) or path.starts_with("/") or not _aggregate_valid_sha(source_sha):
+        _aggregate_errors.push("invalid owner identity")
+        return false
+    for part in path.split("/"):
+        if part == "" or part == "." or part == "..":
+            _aggregate_errors.push("invalid owner path segment")
+            return false
+    for prior in _aggregate_seen_owner_paths:
+        if prior == path:
+            _aggregate_errors.push("duplicate owner path")
+            return false
+    _aggregate_seen_owner_paths.push(path)
+    _aggregate_owner_paths.push(path)
+    _aggregate_owner_hashes.push(source_sha)
+    _aggregate_owner_cases.clear()
+    _aggregate_suite_parts.clear()
+    _aggregate_context_parts.clear()
+    before_hooks.clear()
+    after_hooks.clear()
+    after_all_hooks.clear()
+    suite_stack.clear()
+    current_suite = ""
+    current_context = ""
+    current_test_errors.clear()
+    _aggregate_append("owner_begin\t{path}\t{source_sha}")
+
+pub fn aggregate_registry_select_case(id: text) -> bool:
+    # Selection follows complete enumeration in the parent. It does not alter
+    # registration or stable IDs and cannot manufacture skipped outcomes.
+    if not _aggregate_active() or _aggregate_enum() or not _aggregate_valid_sha(id): return false
+    if _aggregate_selected_case.contains(id) or _aggregate_all_ids.len() != 0: return false
+    _aggregate_selected_case.push(id)
+    true
+
+fn _aggregate_case_selected(id: text) -> bool:
+    _aggregate_selected_case.len() == 0 or _aggregate_selected_case.contains(id)
+
+pub fn aggregate_owner_end() -> bool:
+    if not _aggregate_active():
+        return false
+    if _aggregate_owner_paths.len() != 1:
+        _aggregate_errors.push("owner end without owner")
+        return false
+        return false
+    val path = _aggregate_owner_paths[0]
+    val count = _aggregate_owner_cases.len()
+    val supported = _aggregate_errors.len() == 0 and _aggregate_suite_parts.len() == 0 and _aggregate_context_parts.len() == 0
+    val status = if supported: "ok" else: "unsupported"
+    val wrote = _aggregate_owner_end_append("owner_end\t{path}\t{count}\t{status}")
+    _aggregate_owner_paths.clear()
+    _aggregate_owner_hashes.clear()
+    _aggregate_owner_cases.clear()
+    _aggregate_suite_parts.clear()
+    _aggregate_context_parts.clear()
+    before_hooks.clear()
+    after_hooks.clear()
+    after_all_hooks.clear()
+    suite_stack.clear()
+    current_suite = ""
+    current_context = ""
+    if supported and wrote:
+        _aggregate_owner_count.push(1)
+        return true
+    false
+
+pub fn aggregate_registry_finish() -> i64:
+    if not _aggregate_active():
+        return 2
+    val selection_valid = _aggregate_selected_case.len() == 0 or _aggregate_selected_results.len() == _aggregate_selected_case.len()
+    val valid = selection_valid and _aggregate_owner_paths.len() == 0 and _aggregate_owner_count.len() > 0 and _aggregate_all_ids.len() > 0 and _aggregate_errors.len() == 0
+    var result = 2
+    if valid:
+        if _aggregate_append("complete\tregistration_ok=1\ttest_callbacks_executed={_aggregate_test_callback_marks.len()}\thook_callbacks_executed={_aggregate_hook_callback_marks.len()}"):
+            if _aggregate_running.len() == 1 and _aggregate_failed_cases.len() > 0:
+                result = 1
+            else:
+                result = 0
+    _aggregate_ledger_paths.clear()
+    _aggregate_enumerating.clear()
+    _aggregate_running.clear()
+    _aggregate_owner_paths.clear()
+    _aggregate_owner_hashes.clear()
+    _aggregate_suite_parts.clear()
+    _aggregate_context_parts.clear()
+    _aggregate_owner_cases.clear()
+    _aggregate_all_ids.clear()
+    _aggregate_test_callback_marks.clear()
+    _aggregate_hook_callback_marks.clear()
+    _aggregate_errors.clear()
+    _aggregate_owner_count.clear()
+    _aggregate_seen_owner_paths.clear()
+    _aggregate_in_test.clear()
+    _aggregate_in_hook.clear()
+    _aggregate_failed_cases.clear()
+    _aggregate_selected_case.clear()
+    _aggregate_selected_results.clear()
+    result
+
 # NOTE: passed_test_names for pending_on dependency tracking is defined
 # inline in test files. Module vars can't be accessed from imported functions.
 
@@ -56,6 +299,8 @@ fn _test_filter() -> text:
     filter
 
 fn _run_test(kind: text) -> bool:
+    if _aggregate_active():
+        return true
     val filter = _test_filter()
     if filter == "slow":
         return kind == "slow"
@@ -79,6 +324,8 @@ fn _write_test_result_evidence(passed: i64, failed: i64):
 # ================================================================
 
 pub fn describe(name: text, block: fn()):
+    if _aggregate_active():
+        _aggregate_suite_parts.push(name)
     suite_stack.push(current_suite)
     current_suite = name
     val indent = "  ".repeat(indent_level)
@@ -90,8 +337,12 @@ pub fn describe(name: text, block: fn()):
     indent_level = indent_level - 1
     val prev = suite_stack.pop()
     current_suite = prev ?? ""
+    if _aggregate_active():
+        val _ = _aggregate_suite_parts.pop()
 
 pub fn context(name: text, block: fn()):
+    if _aggregate_active():
+        _aggregate_context_parts.push(name)
     val saved_context = current_context
     current_context = name
     val indent = "  ".repeat(indent_level)
@@ -100,8 +351,10 @@ pub fn context(name: text, block: fn()):
     block()
     indent_level = indent_level - 1
     current_context = saved_context
+    if _aggregate_active():
+        val _ = _aggregate_context_parts.pop()
 
-fn _execute_it(name: text, block: fn()):
+fn _execute_it(name: text, block: fn()) -> text:
     val indent = "  ".repeat(indent_level)
     var full_name = "{current_suite} > {name}"
     if current_context != "":
@@ -112,17 +365,27 @@ fn _execute_it(name: text, block: fn()):
     current_test_errors.clear()
     _expect_provisional_len = -1
     val pending_before = test_pending
+    if _aggregate_active():
+        _aggregate_in_test.push(1)
 
     # Run before_each hooks
     for hook in before_hooks:
+        if _aggregate_active():
+            _aggregate_hook_callback_marks.push(1)
         hook()
 
     # Run test block - assertions append to current_test_errors on failure
+    if _aggregate_active():
+        _aggregate_test_callback_marks.push(1)
     block()
 
     # Run after_each hooks
     for hook in after_hooks:
+        if _aggregate_active():
+            _aggregate_hook_callback_marks.push(1)
         hook()
+    if _aggregate_active():
+        val _ = _aggregate_in_test.pop()
 
     # Check result via Option pattern
     var passed = test_passed
@@ -133,6 +396,7 @@ fn _execute_it(name: text, block: fn()):
     ):
         # pending(reason); return marks this example without inflating passes.
         _write_test_result_evidence(passed, failed)
+        return "pending"
     elif current_test_errors.len() == 0:
         passed = passed + 1
         test_passed = passed
@@ -140,6 +404,7 @@ fn _execute_it(name: text, block: fn()):
         # snapshot and stale the local tally under interpreter writeback.
         _write_test_result_evidence(passed, failed)
         print "{indent}  it {name} ... ok"
+        return "pass"
     else:
         # A failing example has one outcome: failure wins over an earlier
         # pending() call in the same block.
@@ -155,19 +420,56 @@ fn _execute_it(name: text, block: fn()):
         val current_test_error = current_test_errors.join("; ")
         print "{indent}    Error: {current_test_error}"
         test_errors.push("{full_name}: {current_test_error}")
+        return "fail"
+
+fn _aggregate_run_case(name: text, kind: text, block: fn()):
+    val id = _aggregate_declare(name, kind)
+    if _aggregate_enum() or id == "" or not _aggregate_case_selected(id):
+        return
+    if not _aggregate_append("begin\t{id}"): return
+    val outcome = _execute_it(name, block)
+    _aggregate_result(id, outcome)
+
+fn _aggregate_skipped_case(name: text, kind: text):
+    val id = _aggregate_declare(name, kind)
+    if not _aggregate_enum() and _aggregate_case_selected(id):
+        _aggregate_result(id, "skip")
+
+fn _aggregate_conditional_case(name: text, kind: text, block: fn(), eligible: bool):
+    val id = _aggregate_declare(name, kind)
+    if _aggregate_enum() or id == "" or not _aggregate_case_selected(id):
+        return
+    if eligible:
+        if not _aggregate_append("begin\t{id}"): return
+        _aggregate_result(id, _execute_it(name, block))
+    else:
+        test_skipped = test_skipped + 1
+        _aggregate_result(id, "skip")
 
 pub fn it(name: text, block: fn()):
+    if _aggregate_active():
+        _aggregate_run_case(name, "normal", block)
+        return
     if not _run_test("normal"):
         return
     _execute_it(name, block)
 
 pub fn test(name: text, block: fn()):
+    if _aggregate_active():
+        _aggregate_run_case(name, "test", block)
+        return
     it(name, block)
 
 pub fn example(name: text, block: fn()):
+    if _aggregate_active():
+        _aggregate_run_case(name, "example", block)
+        return
     it(name, block)
 
 pub fn specify(name: text, block: fn()):
+    if _aggregate_active():
+        _aggregate_run_case(name, "specify", block)
+        return
     it(name, block)
 
 pub fn step(description: text):
@@ -176,6 +478,9 @@ pub fn step(description: text):
         return
 
 pub fn slow_it(name: text, block: fn()):
+    if _aggregate_active():
+        _aggregate_run_case(name, "slow", block)
+        return
     if not _run_test("slow"):
         return
     _execute_it(name, block)
@@ -232,6 +537,20 @@ fn _reject_skip(name: text, message: text):
     _write_test_result_evidence(test_passed, test_failed)
 
 pub fn skip_it(name: text, block: fn()):
+    if _aggregate_active():
+        val id = _aggregate_declare(name, "skip_it")
+        if _aggregate_enum() or id == "":
+            return
+        val validation = validate_skip_it(_active_assurance_profile())
+        if not validation.ok:
+            _reject_skip(name, validation.message)
+            _aggregate_result(id, "fail")
+        elif _is_interpreter_mode():
+            test_skipped = test_skipped + 1
+            _aggregate_result(id, "skip")
+        else:
+            _aggregate_result(id, _execute_it(name, block))
+        return
     if not _run_test("skipped"):
         return
     val validation = validate_skip_it(_active_assurance_profile())
@@ -246,6 +565,18 @@ pub fn skip_it(name: text, block: fn()):
         _execute_it(name, block)
 
 pub fn pending(name: text):
+    if _aggregate_active() and _aggregate_in_test.len() == 0:
+        val id = _aggregate_declare(name, "pending")
+        if _aggregate_enum() or id == "":
+            return
+        val validation = validate_bare_pending(_active_assurance_profile())
+        if not validation.ok:
+            _reject_skip(name, validation.message)
+            _aggregate_result(id, "fail")
+        else:
+            test_pending = test_pending + 1
+            _aggregate_result(id, "pending")
+        return
     val validation = validate_bare_pending(_active_assurance_profile())
     if not validation.ok:
         # pending() runs INSIDE an enclosing it() block (`it "x": pending(...)`),
@@ -272,11 +603,28 @@ pub fn pending(name: text):
 # replacement that gate demands of bare pending. The "... pending (planned:"
 # suffix keeps extract_pending_test_name (test_runner_helpers.spl) counting it.
 pub fn planned(name: text, reason: text):
+    if _aggregate_active():
+        val id = _aggregate_declare(name, "planned")
+        if not _aggregate_enum():
+            _aggregate_result(id, "pending")
+        return
     test_pending = test_pending + 1
     print "    it {name} ... pending (planned: {reason})"
 
 # @tag(name=file_name, reason=reason)
 pub fn skip(name: text, reason: text):
+    if _aggregate_active():
+        val id = _aggregate_declare(name, "skip")
+        if _aggregate_enum() or id == "":
+            return
+        val validation = validate_free_text_skip(reason, _active_assurance_profile())
+        if not validation.ok:
+            _reject_skip(name, validation.message)
+            _aggregate_result(id, "fail")
+        else:
+            test_skipped = test_skipped + 1
+            _aggregate_result(id, "skip")
+        return
     if not _run_test("skipped"):
         return
     val validation = validate_free_text_skip(reason, _active_assurance_profile())
@@ -293,6 +641,19 @@ pub fn skip(name: text, reason: text):
 # missing category/issue is REJECTED — see skip_governance.spl.
 # @tag(name=file_name, id=skip_id)
 pub fn skip_via_ref(name: text, id: text, block: fn()):
+    if _aggregate_active():
+        val case_id = _aggregate_declare(name, "skip_via_ref")
+        if _aggregate_enum() or case_id == "" or not _aggregate_case_selected(case_id):
+            return
+        val record = skip_ref(id)
+        val validation = validate_skip_ref_record(record, _active_assurance_profile())
+        if not validation.ok:
+            _reject_skip(name, validation.message)
+            _aggregate_result(case_id, "fail")
+        else:
+            test_skipped = test_skipped + 1
+            _aggregate_result(case_id, "skip")
+        return
     if not _run_test("skipped"):
         return
     val record = skip_ref(id)
@@ -327,12 +688,24 @@ pub fn skip_via_ref(name: text, id: text, block: fn()):
 # See: test/01_unit/lib/std/spec/pending_on_spec.spl for working examples.
 
 pub fn before_context(block: fn()):
+    if _aggregate_enum():
+        return
+    if _aggregate_active():
+        _aggregate_hook_callback_marks.push(1)
+        _aggregate_in_hook.push(1)
+    val errors_before = current_test_errors.len()
     # Run setup block once for the current context
     block()
+    if _aggregate_active():
+        val _ = _aggregate_in_hook.pop()
+    if _aggregate_active() and current_test_errors.len() > errors_before:
+        _aggregate_errors.push("before_context failed outside a case")
 
 pub fn skip_context(reason: text):
     val validation = validate_free_text_skip(reason, _active_assurance_profile())
     if not validation.ok:
+        if _aggregate_active():
+            _aggregate_errors.push("skip_context rejected outside a case")
         test_failed = test_failed + 1
         print "  context skipped: FAILED (skip rejected under critical: {validation.message})"
         test_errors.push("{current_suite}: {validation.message}")
@@ -408,6 +781,9 @@ pub fn is_linux() -> bool:
 
 pub fn skip_on_windows(name: text, block: fn()):
     """Skip test if running on Windows."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "skip_on_windows", block, not is_windows())
+        return
     if is_windows():
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (Windows-only skip)"
@@ -416,6 +792,9 @@ pub fn skip_on_windows(name: text, block: fn()):
 
 pub fn skip_on_linux(name: text, block: fn()):
     """Skip test if running on Linux."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "skip_on_linux", block, not is_linux())
+        return
     if is_linux():
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (Linux-only skip)"
@@ -424,6 +803,9 @@ pub fn skip_on_linux(name: text, block: fn()):
 
 pub fn skip_on_macos(name: text, block: fn()):
     """Skip test if running on macOS."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "skip_on_macos", block, not is_macos())
+        return
     if is_macos():
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (macOS-only skip)"
@@ -432,6 +814,9 @@ pub fn skip_on_macos(name: text, block: fn()):
 
 pub fn skip_on_unix(name: text, block: fn()):
     """Skip test if running on Unix-like systems."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "skip_on_unix", block, not is_unix())
+        return
     if is_unix():
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (Unix-only skip)"
@@ -440,6 +825,9 @@ pub fn skip_on_unix(name: text, block: fn()):
 
 pub fn only_on_windows(name: text, block: fn()):
     """Run test ONLY on Windows, skip on other platforms."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "only_on_windows", block, is_windows())
+        return
     if is_windows():
         it(name, block)
     else:
@@ -448,6 +836,9 @@ pub fn only_on_windows(name: text, block: fn()):
 
 pub fn only_on_linux(name: text, block: fn()):
     """Run test ONLY on Linux, skip on other platforms."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "only_on_linux", block, is_linux())
+        return
     if is_linux():
         it(name, block)
     else:
@@ -456,6 +847,9 @@ pub fn only_on_linux(name: text, block: fn()):
 
 pub fn only_on_macos(name: text, block: fn()):
     """Run test ONLY on macOS, skip on other platforms."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "only_on_macos", block, is_macos())
+        return
     if is_macos():
         it(name, block)
     else:
@@ -464,6 +858,9 @@ pub fn only_on_macos(name: text, block: fn()):
 
 pub fn only_on_unix(name: text, block: fn()):
     """Run test ONLY on Unix-like systems, skip on Windows."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "only_on_unix", block, is_unix())
+        return
     if is_unix():
         it(name, block)
     else:
@@ -476,6 +873,9 @@ pub fn only_on_unix(name: text, block: fn()):
 
 pub fn skip_on_baremetal(name: text, block: fn()):
     """Skip test when running on bare-metal target."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "skip_on_baremetal", block, not _is_baremetal_mode())
+        return
     if _is_baremetal_mode():
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (not on baremetal)"
@@ -484,6 +884,9 @@ pub fn skip_on_baremetal(name: text, block: fn()):
 
 pub fn only_on_baremetal(name: text, block: fn()):
     """Run test ONLY on bare-metal targets."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "only_on_baremetal", block, _is_baremetal_mode())
+        return
     if _is_baremetal_mode():
         it(name, block)
     else:
@@ -492,6 +895,9 @@ pub fn only_on_baremetal(name: text, block: fn()):
 
 pub fn skip_on_remote(name: text, block: fn()):
     """Skip test when running on remote target."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "skip_on_remote", block, not _is_remote_mode())
+        return
     if _is_remote_mode():
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (not on remote)"
@@ -500,6 +906,9 @@ pub fn skip_on_remote(name: text, block: fn()):
 
 pub fn only_on_remote(name: text, block: fn()):
     """Run test ONLY on remote targets."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "only_on_remote", block, _is_remote_mode())
+        return
     if _is_remote_mode():
         it(name, block)
     else:
@@ -508,6 +917,9 @@ pub fn only_on_remote(name: text, block: fn()):
 
 # @tag(arch=arch, name=file_name)
 pub fn only_on_arch(arch: text, name: text, block: fn()):
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "only_on_arch", block, _target_arch() == arch)
+        return
     """Run test ONLY on specific architecture."""
     if _target_arch() == arch:
         it(name, block)
@@ -517,6 +929,9 @@ pub fn only_on_arch(arch: text, name: text, block: fn()):
 
 # @tag(arch=arch, name=file_name)
 pub fn skip_on_arch(arch: text, name: text, block: fn()):
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "skip_on_arch", block, _target_arch() != arch)
+        return
     """Skip test on specific architecture."""
     if _target_arch() == arch:
         test_skipped = test_skipped + 1
@@ -533,6 +948,9 @@ pub fn skip_on_arch(arch: text, name: text, block: fn()):
 
 pub fn skip_on_interpreter(name: text, block: fn()):
     """Skip test if running in interpreter mode (compiled-only test)."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "skip_on_interpreter", block, not _is_interpreter_mode())
+        return
     if _is_interpreter_mode():
         test_skipped = test_skipped + 1
         print "    it {name} ... skipped (compiled-only)"
@@ -541,6 +959,9 @@ pub fn skip_on_interpreter(name: text, block: fn()):
 
 pub fn only_on_interpreter(name: text, block: fn()):
     """Run test ONLY in interpreter mode."""
+    if _aggregate_active():
+        _aggregate_conditional_case(name, "only_on_interpreter", block, _is_interpreter_mode())
+        return
     if _is_interpreter_mode():
         it(name, block)
     else:
@@ -564,6 +985,21 @@ pub fn skip_if_missing_module(name: text, module_name: text, block: fn()):
     Environment variable format:
         export SIMPLE_MODULES="std.json,std.sdn,compiler.parser"
     """
+    if _aggregate_enum():
+        val _ = _aggregate_declare(name, "skip_if_missing_module")
+        return
+    if _aggregate_active():
+        val modules_env_aggregate = env_get("SIMPLE_MODULES") ?? ""
+        if modules_env_aggregate != "":
+            var available = false
+            for module_entry in modules_env_aggregate.split(","):
+                if module_entry.trim() == module_name:
+                    available = true
+            _aggregate_conditional_case(name, "skip_if_missing_module", block, available)
+            return
+        use std.io_runtime.{file_exists}
+        _aggregate_conditional_case(name, "skip_if_missing_module", block, file_exists(module_name_to_path(module_name)))
+        return
     # Strategy 1: Check environment variable
     val modules_env = env_get("SIMPLE_MODULES")
     if modules_env.len() > 0:
@@ -640,9 +1076,21 @@ pub fn after_each(hook: fn()):
 # A top-level after_all with no enclosing `describe` never fires; that is
 # stated rather than faked, because there is no end-of-file callback here.
 pub fn before_all(hook: fn()):
+    if _aggregate_enum():
+        return
+    if _aggregate_active():
+        _aggregate_hook_callback_marks.push(1)
+        _aggregate_in_hook.push(1)
+    val errors_before = current_test_errors.len()
     hook()
+    if _aggregate_active():
+        val _ = _aggregate_in_hook.pop()
+    if _aggregate_active() and current_test_errors.len() > errors_before:
+        _aggregate_errors.push("before_all failed outside a case")
 
 pub fn after_all(hook: fn()):
+    if _aggregate_enum():
+        return
     after_all_hooks.push(hook)
 
 fn _drain_after_all(baseline: i64):
@@ -650,7 +1098,15 @@ fn _drain_after_all(baseline: i64):
     var i = baseline
     while i < after_all_hooks.len():
         val hook = after_all_hooks[i]
+        if _aggregate_active():
+            _aggregate_hook_callback_marks.push(1)
+            _aggregate_in_hook.push(1)
+        val errors_before = current_test_errors.len()
         hook()
+        if _aggregate_active():
+            val _ = _aggregate_in_hook.pop()
+        if _aggregate_active() and current_test_errors.len() > errors_before:
+            _aggregate_errors.push("after_all failed outside a case")
         i = i + 1
     while after_all_hooks.len() > baseline:
         val _ = after_all_hooks.pop()
@@ -1073,6 +1529,8 @@ pub class ExpectHelper:
 
 # Assertion Helpers
 pub fn fail_assertion(message: text):
+    if _aggregate_active() and _aggregate_in_test.len() == 0:
+        _aggregate_errors.push("assertion outside a case")
     current_test_errors.push(message)
 
 pub fn fail_test(message: text):

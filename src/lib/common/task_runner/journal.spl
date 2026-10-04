@@ -1,0 +1,206 @@
+# PureDatabase task owner backed by the canonical database segmented WAL.
+# Runtime index is rebuildable; only published DB revisions are durable.
+use std.database.pure_sql.{PureDatabase}
+use std.database.wal.{WalEntry, WalEntryType}
+use std.nogc_sync_mut.database.wal_segmented.{DatabaseWalRevisionV1,
+    database_wal_current_v1, database_wal_commit_v1, database_wal_revision_open_v1,
+    database_wal_segment_read_strict_v1}
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1, task_runner_identity_v1}
+use std.common.task_runner.index.{task_runner_index_apply_v1, task_runner_index_history_v1,
+    task_runner_attempt_encode_v1, task_runner_attempt_decode_v1,
+    task_runner_storage_escape_v1, task_runner_storage_unescape_v1, task_runner_inventory_encode_v1,
+    task_runner_inventory_decode_v1, task_runner_inventory_digest_v1, task_runner_inventory_registered_v1}
+use std.database.sql.types.{DbValue}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_read_regular_no_follow_bounded,
+    file_atomic_write, file_lock, file_unlock}
+use std.nogc_sync_mut.io_runtime.{dir_create, file_delete, file_exists}
+
+struct TaskRunnerJournalV1:
+    root: text
+    lease_digest: text
+    source_authority_digest: text
+    database_identity: text
+    sequence: i64
+    revision: text
+    db: PureDatabase
+    parent_lock: i64
+
+fn task_runner_journal_lease_check_v1(owner: TaskRunnerJournalV1) -> Result<bool, text>:
+    if owner.parent_lock < 0: return Err("task database parent lock unavailable")
+    val lease = file_read_regular_no_follow_bounded(owner.root + "/parent.lease", 512)?
+    if sha256_text(lease) != owner.lease_digest: return Err("stale task database lease")
+    Ok(true)
+
+fn task_runner_journal_open_v1(root: text, nonce: text,
+        source: text, expected: [TaskRunnerIdentityV1]) -> Result<TaskRunnerJournalV1, text>:
+    if root.len() <= 0 or not builder_digest_valid_v1(nonce) or not builder_digest_valid_v1(source):
+        return Err("invalid task database owner request")
+    val inventory = task_runner_inventory_digest_v1(expected, source)?
+    val identity = sha256_text("SIMPLE-TASK-DB-1\n" + source + "\n" + inventory)
+    dir_create(root, true)
+    # Never remove the stable OS lock file. Its handle must be non-inheritable.
+    val held = file_lock(root + "/parent.lock", 1)
+    if held < 0: return Err("task database parent lock already owned")
+    val opened = task_runner_journal_open_locked_v2(root, nonce, source, expected, inventory, identity, held)
+    if opened.is_err():
+        val _released = file_unlock(held)
+    opened
+
+fn task_runner_journal_open_locked_v2(root: text, nonce: text, source: text,
+        expected: [TaskRunnerIdentityV1], inventory: text, identity: text, held: i64) -> Result<TaskRunnerJournalV1, text>:
+    # Acquiring the lock proves no v2 writer remains. A legacy v1 owner did not
+    # acquire this lock, so its lease can never be adopted by this protocol.
+    if file_exists(root + "/parent.lease"):
+        val prior = file_read_regular_no_follow_bounded(root + "/parent.lease", 512)?
+        val rows = prior.split("\n")
+        if rows.len() != 4 or rows[0] != "SIMPLE-TASK-DB-LEASE-2" or
+           not builder_digest_valid_v1(rows[1]) or rows[2] != identity or rows[3] != "":
+            return Err("task database prior lease is legacy, malformed, or has different authority")
+    val lease = "SIMPLE-TASK-DB-LEASE-2\n{nonce}\n{identity}\n"
+    if not file_atomic_write(root + "/parent.lease", lease):
+        return Err("task database v2 lease publication failed")
+    val created = PureDatabase.memory_deferred()
+    if created.is_err(): return Err("task PureDatabase initialization failed")
+    var db = created.unwrap()
+    for sql in ["CREATE TABLE task_history (identity TEXT PRIMARY KEY, projection TEXT)",
+            "CREATE TABLE task_inventory (identity TEXT PRIMARY KEY, metadata TEXT)"]:
+        if db.exec_sql(sql).is_err(): return Err("task PureDatabase schema failed")
+    for row in expected:
+        val key = task_runner_identity_v1(row)?
+        val metadata = task_runner_inventory_encode_v1(row)?
+        if db.put("task_inventory", [DbValue.Text(key), DbValue.Text(metadata)]).is_err():
+            return Err("task inventory insertion failed")
+    var latest = database_wal_current_v1(root + "/database-wal", identity)?
+    if latest == "":
+        # First durable registration is bounded segments followed by a complete
+        # inventory marker. Partial registration never enables task appends.
+        var batch: [WalEntry] = []
+        var batch_bytes: i64 = 0
+        for row in expected:
+            val data = task_runner_storage_escape_v1(task_runner_inventory_encode_v1(row)?)
+            batch = batch.push(WalEntry(0, WalEntryType.Insert, "task_inventory",
+                task_runner_identity_v1(row)?, data, 0))
+            batch_bytes = batch_bytes + data.len() + 256
+            if batch.len() == 64 or batch_bytes >= 524288:
+                latest = database_wal_commit_v1(root + "/database-wal", identity, latest, batch)?.digest
+                batch = []
+                batch_bytes = 0
+        if batch.len() > 0:
+            latest = database_wal_commit_v1(root + "/database-wal", identity, latest, batch)?.digest
+        latest = database_wal_commit_v1(root + "/database-wal", identity, latest,
+            [WalEntry(0, WalEntryType.Insert, "task_inventory_complete", inventory, str(expected.len()), 0)])?.digest
+    var revision = latest
+    var sequence: i64 = 0
+    var segments_seen: i64 = 0
+    var expected_last: i64 = -1
+    var registered: Dict<text, bool> = {}
+    var complete_sequence: i64 = -1
+    var first_task_sequence: i64 = 10000001
+    while revision != "":
+        # Stream newest-to-oldest. Indexed projections commute by sequence;
+        # no history array or repeated full receipt scan is retained.
+        if segments_seen >= 10000000: return Err("task database replay segment bound exceeded")
+        val current = database_wal_revision_open_v1(root + "/database-wal", revision)?
+        if current.database_identity != identity: return Err("task WAL database identity differs")
+        if expected_last >= 0 and current.last_sequence != expected_last:
+            return Err("task WAL history sequence gap")
+        if segments_seen == 0: sequence = current.last_sequence
+        expected_last = current.first_sequence - 1
+        val entries = database_wal_segment_read_strict_v1(root + "/database-wal", current)?
+        for entry in entries:
+            if entry.entry_type != WalEntryType.Insert: return Err("task database WAL operation unsupported")
+            if entry.table_name == "task_inventory":
+                if registered.contains_key(entry.row_key): return Err("duplicate durable inventory row")
+                val physical = task_runner_storage_unescape_v1(entry.data)
+                if task_runner_storage_escape_v1(physical) != entry.data: return Err("invalid durable inventory encoding")
+                val found = db.get("task_inventory", "identity", DbValue.Text(entry.row_key))
+                if found.is_err() or found.unwrap() == nil: return Err("unexpected durable task identity")
+                if (found.unwrap().unwrap().get_text("metadata") ?? "") != physical:
+                    return Err("durable task metadata differs from expected inventory")
+                registered[entry.row_key] = true
+            elif entry.table_name == "task_inventory_complete":
+                if complete_sequence >= 0 or entry.row_key != inventory or entry.data != str(expected.len()):
+                    return Err("invalid complete task inventory marker")
+                complete_sequence = entry.sequence
+            elif entry.table_name == "task_attempts":
+                val _registered = task_runner_inventory_registered_v1(db, entry.row_key)?
+                val payload = task_runner_storage_unescape_v1(entry.data)
+                if task_runner_storage_escape_v1(payload) != entry.data: return Err("noncanonical task WAL payload")
+                val row = task_runner_attempt_decode_v1(payload)?
+                if row.identity_digest != entry.row_key: return Err("task WAL key differs")
+                if entry.sequence < first_task_sequence: first_task_sequence = entry.sequence
+                db = task_runner_index_apply_v1(db, entry.sequence, row)?
+            else: return Err("task database WAL table unsupported")
+        segments_seen = segments_seen + 1
+        revision = current.parent
+    if expected_last != 0 or registered.len() != expected.len() or
+            complete_sequence != expected.len() + 1 or first_task_sequence <= complete_sequence:
+        return Err("task WAL inventory incomplete or tasks preceded registration")
+    Ok(TaskRunnerJournalV1(root, sha256_text(lease), source, identity, sequence, latest, db, held))
+
+fn task_runner_journal_history_v1(owner: TaskRunnerJournalV1,
+        identity: text) -> Result<[TaskRunnerAttemptV1], text>:
+    val _lease = task_runner_journal_lease_check_v1(owner)?
+    val current = database_wal_current_v1(owner.root + "/database-wal", owner.database_identity)?
+    if current != owner.revision: return Err("stale task database read revision")
+    val _registered = task_runner_inventory_registered_v1(owner.db, identity)?
+    task_runner_index_history_v1(owner.db, identity)
+
+fn task_runner_journal_append_v1(owner: TaskRunnerJournalV1,
+        row: TaskRunnerAttemptV1) -> Result<TaskRunnerJournalV1, text>:
+    val _lease = task_runner_journal_lease_check_v1(owner)?
+    val current = database_wal_current_v1(owner.root + "/database-wal", owner.database_identity)?
+    if current != owner.revision: return Err("stale task database writer revision")
+    val _registered = task_runner_inventory_registered_v1(owner.db, row.identity_digest)?
+    val encoded = task_runner_attempt_encode_v1(row)?
+    val history = task_runner_index_history_v1(owner.db, row.identity_digest)?
+    for prior in history:
+        if prior.group_id == row.group_id and prior.attempt >= row.attempt:
+            return Err("duplicate task attempt within run group")
+    val event = WalEntry(0, WalEntryType.Insert, "task_attempts", row.identity_digest,
+        task_runner_storage_escape_v1(encoded), 0)
+    val committed = database_wal_commit_v1(owner.root + "/database-wal",
+        owner.database_identity, owner.revision, [event])?
+    # Durable publication precedes mutable cache changes. Failure rebuilding
+    # this index requires reopen, never retrying an already committed event.
+    val applied = task_runner_index_apply_v1(owner.db, committed.last_sequence, row)
+    if applied.is_err(): return Err("task revision committed; reopen to rebuild index")
+    val updated = applied.unwrap()
+    val _still_owned = task_runner_journal_lease_check_v1(owner)?
+    Ok(TaskRunnerJournalV1(owner.root, owner.lease_digest, owner.source_authority_digest,
+        owner.database_identity, committed.last_sequence, committed.digest, updated, owner.parent_lock))
+
+fn task_runner_journal_release_v1(owner: TaskRunnerJournalV1) -> Result<bool, text>:
+    val _lease = task_runner_journal_lease_check_v1(owner)?
+    if not file_delete(owner.root + "/parent.lease"): return Err("task database lease release failed")
+    if not file_unlock(owner.parent_lock): return Err("task database parent lock release failed")
+    Ok(true)
+
+fn task_runner_journal_identity_v1(owner: TaskRunnerJournalV1,
+        identity: text) -> Result<TaskRunnerIdentityV1, text>:
+    val _lease = task_runner_journal_lease_check_v1(owner)?
+    val _registered = task_runner_inventory_registered_v1(owner.db, identity)?
+    val found = owner.db.get("task_inventory", "identity", DbValue.Text(identity))
+    if found.is_err() or found.unwrap() == nil: return Err("registered task metadata absent")
+    task_runner_inventory_decode_v1(found.unwrap().unwrap().get_text("metadata") ?? "")
+
+fn task_runner_journal_missing_v1(owner: TaskRunnerJournalV1) -> Result<[text], text>:
+    val _lease = task_runner_journal_lease_check_v1(owner)?
+    val current = database_wal_current_v1(owner.root + "/database-wal", owner.database_identity)?
+    if current != owner.revision: return Err("stale task database inventory revision")
+    val scanned = owner.db.scan_all("task_inventory")
+    if scanned.is_err(): return Err("expected task inventory scan failed")
+    val expected = scanned.unwrap()
+    if expected.len() < 1 or expected.len() > 100000: return Err("expected task count differs")
+    var missing: [text] = []
+    for row in expected:
+        val identity = row.get_text("identity") ?? ""
+        val history = task_runner_index_history_v1(owner.db, identity)?
+        if history.len() == 0: missing = missing.push(identity)
+    Ok(missing)
+
+export TaskRunnerJournalV1, task_runner_journal_open_v1, task_runner_journal_append_v1
+export task_runner_journal_history_v1, task_runner_journal_lease_check_v1, task_runner_journal_release_v1
+export task_runner_journal_identity_v1, task_runner_journal_missing_v1

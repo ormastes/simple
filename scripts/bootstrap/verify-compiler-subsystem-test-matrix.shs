@@ -1,0 +1,129 @@
+#!/bin/sh
+# Read-only final gate for the separate six-product post-Stage2 matrix.
+set -eu
+die() { echo "subsystem-matrix: $*" >&2; exit 1; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+hash_file() {
+  regular "$1" || die "evidence missing: $1"
+  sum=$(sha256sum "$1") || die "evidence unreadable: $1"
+  printf '%s\n' "${sum%% *}"
+}
+field() {
+  awk -F= -v key="$2" '$1==key {n++; value=substr($0,length(key)+2)} END {if(n!=1)exit 1; print value}' "$1"
+}
+source_root= output_root= matrix_candidate=
+for arg in "$@"; do
+  case "$arg" in
+    --source-root=*) source_root=${arg#*=} ;;
+    --output-root=*) output_root=${arg#*=} ;;
+    --matrix-candidate=*) matrix_candidate=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+[ -d "$source_root" ] && [ ! -L "$source_root" ] &&
+  [ -d "$output_root" ] && [ ! -L "$output_root" ] || die "source or output root missing"
+source_root=$(CDPATH= cd -- "$source_root" && pwd -P) || die "source root unavailable"
+output_root=$(CDPATH= cd -- "$output_root" && pwd -P) || die "output root unavailable"
+if [ -n "$matrix_candidate" ]; then
+  case "$matrix_candidate" in "$output_root"/matrix.env.tmp.*) ;; *) die "matrix candidate outside fresh output" ;; esac
+  matrix=$matrix_candidate
+else
+  matrix="$output_root/matrix.env"
+fi
+inventory="$output_root/source-specs.tsv"
+statuses="$output_root/product-status.tsv"
+regular "$matrix" && regular "$inventory" && regular "$statuses" || die "matrix evidence missing"
+[ "$(field "$matrix" format)" = SIMPLE-SUBSYSTEM-TEST-MATRIX-1 ] &&
+  [ "$(field "$matrix" status)" = PASS ] &&
+  [ "$(field "$matrix" source_root)" = "$source_root" ] &&
+  [ "$(field "$matrix" execution_cwd)" = "$source_root" ] &&
+  [ "$(field "$matrix" inventory_sha256)" = "$(hash_file "$inventory")" ] &&
+  [ "$(field "$matrix" schedule_sha256)" = "$(hash_file "$statuses")" ] &&
+  [ "$(field "$matrix" runtime_mode)" = native ] || die "matrix authority or status differs"
+threads=$(field "$matrix" threads) || die "threads absent"
+rss_cap_kib=$(field "$matrix" rss_cap_kib) || die "RSS cap absent"
+build_timeout=$(field "$matrix" build_timeout_seconds) || die "build timeout absent"
+[ "$threads" -ge 10 ] && [ "$threads" -le 20 ] &&
+  [ "$rss_cap_kib" -gt 0 ] && [ "$rss_cap_kib" -le 6835937 ] &&
+  [ "$build_timeout" -gt 0 ] || die "resource policy differs"
+[ "$(wc -l <"$statuses" | tr -d ' ')" -eq 18 ] || die "six product chains incomplete"
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || die "verifier path unavailable"
+[ "$script_root" = "$source_root/scripts/bootstrap" ] || die "verifier outside pinned source"
+verifier="$script_root/verify-compiler-subsystem-test-product.pl"
+regular "$verifier" || die "product verifier missing"
+inventory_check="$output_root/source-specs.verify.tmp.$$"
+trap 'rm -f "$inventory_check"' EXIT HUP INT TERM
+sh "$script_root/compiler-subsystem-test-inventory.shs" "$source_root" >"$inventory_check" \
+  || die "canonical source inventory failed"
+cmp -s "$inventory_check" "$inventory" || die "source inventory omitted or changed owners"
+rm -f "$inventory_check"
+trap - EXIT HUP INT TERM
+for backend in llvm cranelift; do
+  producer_receipt=$(field "$matrix" "producer_receipt_${backend}_path") || die "$backend admission path absent"
+  regular "$producer_receipt" &&
+    [ "$(hash_file "$producer_receipt")" = "$(field "$matrix" "producer_receipt_${backend}_sha256")" ] \
+    || die "$backend admitted producer receipt differs"
+  for suite in compiler interpreter loader; do
+    key="phase4_${backend}_product_${suite}"
+    for stage in build enumerate run; do
+      [ "$(awk -F '\t' -v key="${key}_${stage}" '$1==key {n++; if($2!="SUCCEEDED" || $3!=0) bad=1} END {if(n!=1 || bad) print "bad"; else print "ok"}' "$statuses")" = ok ] \
+        || die "$backend/$suite $stage did not succeed"
+    done
+    job="$output_root/$backend/$suite"
+    receipt="$job/result.env"
+    regular "$receipt" &&
+      [ "$(field "$matrix" "${backend}_${suite}_receipt_sha256")" = "$(hash_file "$receipt")" ] \
+      || die "$backend/$suite product receipt changed"
+    [ "$(field "$receipt" format)" = SIMPLE-SUBSYSTEM-TEST-PRODUCT-1 ] &&
+      [ "$(field "$receipt" status)" = PASS ] &&
+      [ "$(field "$receipt" backend)" = "$backend" ] &&
+      [ "$(field "$receipt" subsystem)" = "$suite" ] &&
+      [ "$(field "$receipt" actual_backend)" = "$backend" ] &&
+      [ "$(field "$receipt" compiler_producer_receipt_sha256)" = "$(hash_file "$producer_receipt")" ] &&
+      [ "$(field "$receipt" inventory_sha256)" = "$(hash_file "$inventory")" ] &&
+      [ "$(field "$receipt" all_registered_executed)" = 1 ] &&
+      [ "$(field "$receipt" failed)" = 0 ] &&
+      [ "$(field "$receipt" skipped)" = 0 ] &&
+      [ "$(field "$receipt" pending)" = 0 ] || die "$backend/$suite product lacks full pass"
+    registered=$(field "$receipt" registered) || die "registered count absent"
+    passed=$(field "$receipt" passed) || die "passed count absent"
+    [ "$registered" -gt 0 ] && [ "$registered" -eq "$passed" ] || die "registered cases did not all pass"
+    for evidence in build.exit build.stdout.log build.stderr.log build.env \
+        enumeration.exit enumeration.tsv enumeration.stdout.log enumeration.stderr.log enumeration-watchdog.env \
+        execution.exit execution.tsv execution.stdout.log execution.stderr.log execution-watchdog.env; do
+      evidence_key=$(printf '%s' "$evidence" | tr '.-' '__')
+      path="$job/$evidence"
+      regular "$path" &&
+        [ "$(field "$matrix" "${backend}_${suite}_${evidence_key}_sha256")" = "$(hash_file "$path")" ] \
+        || die "$backend/$suite $evidence changed"
+    done
+    for stage in build enumeration execution; do
+      [ "$(field "$matrix" "${backend}_${suite}_${stage}_exit")" = 0 ] &&
+        [ "$(tr -d '\r\n' <"$job/$stage.exit")" = 0 ] \
+        || die "$backend/$suite $stage exit differs"
+    done
+    compiler=$(field "$job/build.env" compiler_path) || die "$backend compiler path absent"
+    regular "$compiler" || die "$backend compiler missing"
+    [ "$(hash_file "$compiler")" = "$(field "$matrix" "compiler_${backend}_sha256")" ] \
+      || die "$backend compiler differs from matrix"
+    tmp="$job/verified-result.tmp.$$"
+    trap 'rm -f "$tmp"' EXIT HUP INT TERM
+    perl "$verifier" --phase=complete --source-root="$source_root" \
+      --inventory="$inventory" --backend="$backend" --subsystem="$suite" \
+      --compiler="$compiler" --binary="$job/product" --build-receipt="$job/build.env" \
+      --compiler-producer-receipt="$producer_receipt" \
+      --threads="$threads" --rss-cap-kib="$rss_cap_kib" \
+      --build-timeout-seconds="$build_timeout" \
+      --enumeration="$job/enumeration.tsv" --enumeration-stdout="$job/enumeration.stdout.log" \
+      --enumeration-stderr="$job/enumeration.stderr.log" \
+      --enumeration-watchdog="$job/enumeration-watchdog.env" --enumeration-exit=0 \
+      --execution="$job/execution.tsv" --execution-stdout="$job/execution.stdout.log" \
+      --execution-stderr="$job/execution.stderr.log" \
+      --execution-watchdog="$job/execution-watchdog.env" --execution-exit=0 \
+      --output="$tmp" || die "$backend/$suite read-only product replay rejected"
+    cmp -s "$tmp" "$receipt" || die "$backend/$suite product receipt differs from raw evidence"
+    rm -f "$tmp"
+    trap - EXIT HUP INT TERM
+  done
+done
+printf '%s\n' "$matrix"

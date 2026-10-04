@@ -34,6 +34,17 @@ See `doc/07_guide/app/llm/spipe_local_knowledge_setup.md` for setup and ownershi
 Short, canonical term resolution for coding agents. Read this index when a user
 names a repository capability whose implementation owner is ambiguous.
 
+## Configured variants and aggregate repairs
+
+Read [configured variants and aggregate validation](../07_guide/compiler/configured_variants_and_aggregate_validation.md)
+before changing library-owner selection or array/tuple behavior. Stable
+interfaces retain configured implementation selection and importer-family
+semantics; fallback order is not authority to overwrite them. Rust/Pure-Simple
+parity remains active work. A newer source repair does not upgrade an older
+producer's evidence. Require actual engine/provider/cache bindings and test
+values/counts. The authored robust-array/tuple plan remains unidentified;
+existing research options are not its approved scope.
+
 ## Bug-linked workarounds
 
 The accepted workflow is

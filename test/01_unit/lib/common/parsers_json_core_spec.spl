@@ -396,6 +396,49 @@ describe "JSON Parser":
             expect(json_is_object(branch)).to_equal(true)
             expect(json_to_string(json_object_get(branch, "name"))).to_equal("x")
 
+    context "string-token churn-regression (perf-fix equivalence)":
+        """The tokenizer's string branch was rewritten to join the accumulated
+        parts ONCE (the old code called str_parts.join("") twice per token —
+        validate + push — re-copying every string token's bytes). These cases
+        pin the byte-identical parsed values of the old path on non-trivial
+        string tokens: escapes, non-ASCII content, and long tokens."""
+
+        it "parses a long escaped string token byte-identically":
+            # @req: REQ-COMMON-ParsersJsonCore-001
+            step("Verify: parses a long escaped string token byte-identically")
+            var parts: [text] = []
+            var i = 0
+            while i < 800:
+                parts.push("xy\\t")  # escape sequence inside the token
+                i = i + 1
+            val text = "{" + "\"k\": \"" + parts.join("") + "\"}"
+            val result = json_parse(text)
+            expect(json_is_object(result)).to_equal(true)
+            val s = json_to_string(json_object_get(result, "k"))
+            # 800 * 3 bytes of content ("xy" + TAB), escape consumed.
+            expect(s.len()).to_equal(2400)
+            expect(s.starts_with("xy\txy")).to_equal(true)
+
+        it "parses a non-ascii string token byte-identically":
+            # @req: REQ-COMMON-ParsersJsonCore-001
+            step("Verify: parses a non-ascii string token byte-identically")
+            val text = "{" + "\"msg\": \"héllo 中\"" + "}"
+            val result = json_parse(text)
+            expect(json_is_object(result)).to_equal(true)
+            expect(json_to_string(json_object_get(result, "msg"))).to_equal("héllo 中")
+
+        it "rejects an invalid escape in a long string token":
+            # @req: REQ-COMMON-ParsersJsonCore-001
+            step("Verify: rejects an invalid escape in a long string token")
+            var parts: [text] = []
+            var j = 0
+            while j < 400:
+                parts.push("ab")
+                j = j + 1
+            # "\q" is not a valid JSON escape; the whole document must fail.
+            val text = "{" + "\"k\": \"" + parts.join("") + "\\q\"" + "}"
+            expect(json_parse(text)).to_be_nil()
+
     context "parsing invalid JSON":
         """json_parse returns nil for invalid input."""
 

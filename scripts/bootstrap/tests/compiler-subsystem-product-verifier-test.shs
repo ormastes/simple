@@ -1,0 +1,227 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-subsystem-verifier.XXXXXX") || exit 2
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+source_root="$tmp/source"
+mkdir -p "$source_root/test/01_unit/compiler" "$source_root/src/app" \
+  "$source_root/config/check" "$tmp/logs" "$tmp/tools" || exit 2
+printf 'spec one\n' >"$source_root/test/01_unit/compiler/one_spec.spl"
+printf 'spec helper\n' >"$source_root/test/01_unit/compiler/helper_spec.spl"
+printf 'app source\n' >"$source_root/src/app/source.spl"
+printf 'policy\n' >"$source_root/config/check/compiler_subsystem_main_verdict_policy.tsv"
+git -C "$source_root" init -q
+git -C "$source_root" add test src config
+git -C "$source_root" -c user.name=Fixture -c user.email=fixture@example.invalid \
+  commit -q -m 'fixture source'
+source_head=$(git -C "$source_root" rev-parse HEAD)
+printf 'compiled compiler\n' >"$tmp/compiler"
+case "$(uname -m)" in x86_64|amd64) elf_machine=62 ;; aarch64|arm64) elf_machine=183 ;; *) exit 2 ;; esac
+perl -e 'my $m=shift; print "\x7fELF\x02\x01", ("\0" x 10), pack("v",2), pack("v",$m), ("\0" x 44)' \
+  "$elf_machine" >"$tmp/product"
+chmod 500 "$tmp/product"
+printf 'generator\n' >"$tmp/generator"
+printf 'adapter\n' >"$tmp/adapter"
+printf 'runtime receipt\n' >"$tmp/runtime.env"
+mkdir -p "$tmp/cache-product"
+provider_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+printf 'simple-native-provider-identity-v1\nbackend=llvm\nprovider=%s\n' "$provider_hash" \
+  >"$tmp/cache-product/native_provider_identity.receipt"
+sha() { sha256sum "$1" | cut -d ' ' -f 1; }
+printf 'snapshot\n' >"$tmp/source.snapshot"
+printf 'product snapshot\n' >"$tmp/logs/product-source-snapshot.txt"
+printf 'schema=simple-bootstrap-stage2-admission-v2\nstatus=admitted\ncandidate_path=%s\ncandidate_sha256=%s\nsource_snapshot_path=%s\nsource_snapshot_sha256=%s\nruntime_authority_path=%s\n' \
+  "$tmp/compiler" "$(sha "$tmp/compiler")" "$tmp/source.snapshot" "$(sha "$tmp/source.snapshot")" "$tmp/runtime" >"$tmp/compiler.env"
+git -C "$source_root" worktree add --quiet --detach "$tmp/source-overlay" "$source_head"
+mkdir -p "$tmp/source-overlay/src/app/product"
+printf 'generated wrapper\n' >"$tmp/source-overlay/src/app/product/main.spl"
+printf 'path\tsha256\nproduct/main.spl\t%s\n' "$(sha "$tmp/source-overlay/src/app/product/main.spl")" \
+  >"$tmp/source-overlay/src/app/generated-manifest.tsv"
+printf 'path\tsha256\nsrc/app/source.spl\t%s\n' "$(sha "$source_root/src/app/source.spl")" \
+  >"$tmp/logs/source-overlay-inputs.tsv"
+one_sha=$(sha "$source_root/test/01_unit/compiler/one_spec.spl")
+helper_sha=$(sha "$source_root/test/01_unit/compiler/helper_spec.spl")
+{
+  printf 'subsystem\tlevel\tpath\tsha256\n'
+  printf 'compiler\t01_unit\ttest/01_unit/compiler/helper_spec.spl\t%s\n' "$helper_sha"
+  printf 'compiler\t01_unit\ttest/01_unit/compiler/one_spec.spl\t%s\n' "$one_sha"
+} >"$tmp/inventory.tsv"
+printf 'simple-subsystem-source-spans-v1\tcompiler\t%s\nowner\ttest/01_unit/compiler/helper_spec.spl\t%s\t0\nowner\ttest/01_unit/compiler/one_spec.spl\t%s\t1\ndecl\ttest/01_unit/compiler/one_spec.spl\t0\t1\tcase\t0\t4\ncomplete\t2\n' \
+  "$(sha "$tmp/inventory.tsv")" "$helper_sha" "$one_sha" >"$tmp/source-spans.tsv"
+printf 'owner-main-verdict-v1\t%s\t%s\nowner\ttest/01_unit/compiler/one_spec.spl\t%s\t0\texit-zero\tevidence\treason\ncomplete\t1\n' \
+  "$(sha "$tmp/inventory.tsv")" "$(sha "$tmp/source-spans.tsv")" "$one_sha" >"$tmp/main-verdicts.tsv"
+for item in generator generator_run main_adapter main_adapter_run product; do
+  case "$item" in
+    generator|main_adapter|product)
+      case "$item" in
+        generator) entry=src/app/compiler_subsystem_product_generator/main.spl; produced="$tmp/tools/product-generator" ;;
+        main_adapter) entry=src/app/compiler_subsystem_main_verdict/main.spl; produced="$tmp/tools/main-verdict-adapter" ;;
+        product) entry=src/app/product/main.spl; produced="$tmp/product" ;;
+      esac
+      { printf 'schema=simple-native-product-command-v1\nsource_root=%s\nsource_overlay=%s\ncompiler_sha256=%s\nruntime_authority=%s\nsimple_bootstrap_empty_native_obj=unset\nsimple_bootstrap=unset\nrss_cap_kib=6835937\ntimeout_seconds=1800\ntask=%s\n' \
+          "$source_root" "$tmp/source-overlay" "$(sha "$tmp/compiler")" "$tmp/runtime" "$item"
+        perl -e 'for (@ARGV) { print "argv-hex=", unpack("H*", $_), "\n" }' "$tmp/compiler" native-build --backend=llvm --threads 20 \
+          --source src/compiler --source src/app --source src/lib --source src/plugins --source src/compositions \
+          --entry-closure --entry "$entry" --cache-dir "$tmp/cache-$item" --output "$produced"
+      } >"$tmp/logs/$item.command.tsv" ;;
+    *)
+      { printf 'schema=simple-native-product-command-v1\nsource_root=%s\ncompiler_sha256=%s\nrss_cap_kib=6835937\ntimeout_seconds=1800\ntask=%s\n' \
+          "$source_root" "$(sha "$tmp/compiler")" "$item"
+        case "$item" in generator_run) exe="$tmp/tools/product-generator" ;; *) exe="$tmp/tools/main-verdict-adapter" ;; esac
+        perl -e 'for (@ARGV) { print "argv-hex=", unpack("H*", $_), "\n" }' "$exe"
+      } >"$tmp/logs/$item.command.tsv" ;;
+  esac
+  printf 'status=complete\nrss_cap_enforced=1\nrss_limit_kib=6835937\nexit_status=0\n' >"$tmp/logs/$item.watchdog.env"
+done
+printf 'generator\n' >"$tmp/tools/product-generator"
+printf 'adapter\n' >"$tmp/tools/main-verdict-adapter"
+for item in enumeration execution; do
+  printf 'rss_cap_enforced=1\nrss_limit_kib=6835937\nexit_status=0\n' >"$tmp/$item.watchdog.env"
+done
+cat >"$tmp/build.env" <<EOF
+schema=simple-subsystem-product-v1
+status=produced
+source_root=$source_root
+source_head=$source_head
+compiler_path=$tmp/compiler
+compiler_sha256=$(sha "$tmp/compiler")
+requested_backend=llvm
+actual_backend=llvm
+provider_path=none
+provider_sha256=none
+provider_kind=builtin
+provider_receipt_hash=$provider_hash
+subsystem=compiler
+inventory_path=$tmp/inventory.tsv
+inventory_sha256=$(sha "$tmp/inventory.tsv")
+subset_sha256=$(sha "$tmp/inventory.tsv")
+producer_source_snapshot_path=$tmp/source.snapshot
+producer_source_snapshot_sha256=$(sha "$tmp/source.snapshot")
+product_source_snapshot_path=$tmp/logs/product-source-snapshot.txt
+product_source_snapshot_sha256=$(sha "$tmp/logs/product-source-snapshot.txt")
+source_overlay_path=$tmp/source-overlay
+source_overlay_head=$source_head
+source_overlay_allocated_bytes=1024
+source_overlay_input_manifest_path=$tmp/logs/source-overlay-inputs.tsv
+source_overlay_input_sha256=$(sha "$tmp/logs/source-overlay-inputs.tsv")
+generated_manifest_path=$tmp/source-overlay/src/app/generated-manifest.tsv
+generated_tree_sha256=$(sha "$tmp/source-overlay/src/app/generated-manifest.tsv")
+source_spans_path=$tmp/source-spans.tsv
+source_spans_sha256=$(sha "$tmp/source-spans.tsv")
+main_policy_path=$source_root/config/check/compiler_subsystem_main_verdict_policy.tsv
+main_policy_sha256=$(sha "$source_root/config/check/compiler_subsystem_main_verdict_policy.tsv")
+main_verdicts_path=$tmp/main-verdicts.tsv
+main_verdicts_sha256=$(sha "$tmp/main-verdicts.tsv")
+binary_path=$tmp/product
+binary_sha256=$(sha "$tmp/product")
+backend_identity_path=$tmp/cache-product/native_provider_identity.receipt
+backend_identity_sha256=$(sha "$tmp/cache-product/native_provider_identity.receipt")
+generated_owner_count=2
+generator_path=$tmp/tools/product-generator
+generator_sha256=$(sha "$tmp/tools/product-generator")
+adapter_path=$tmp/tools/main-verdict-adapter
+adapter_sha256=$(sha "$tmp/tools/main-verdict-adapter")
+runtime_receipt_path=$tmp/runtime.env
+runtime_receipt_sha256=$(sha "$tmp/runtime.env")
+compiler_producer_receipt_path=$tmp/compiler.env
+compiler_producer_receipt_sha256=$(sha "$tmp/compiler.env")
+threads=20
+rss_cap_kib=6835937
+build_timeout_seconds=1800
+EOF
+for item in generator generator_run main_adapter main_adapter_run product; do
+  printf '%s_command_path=%s\n%s_command_sha256=%s\n%s_watchdog_receipt_path=%s\n%s_watchdog_receipt_sha256=%s\n' \
+    "$item" "$tmp/logs/$item.command.tsv" "$item" "$(sha "$tmp/logs/$item.command.tsv")" \
+    "$item" "$tmp/logs/$item.watchdog.env" "$item" "$(sha "$tmp/logs/$item.watchdog.env")" >>"$tmp/build.env"
+done
+case_id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+metadata_id=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+write_ledger() {
+  path=$1 mode=$2 outcome=$3
+  {
+    printf 'simple-subsystem-registry-v1\tllvm\tcompiler\t%s\t%s\n' \
+      "$(sha "$tmp/inventory.tsv")" "$(sha "$tmp/inventory.tsv")"
+    printf 'owner_begin\ttest/01_unit/compiler/helper_spec.spl\t%s\n' "$helper_sha"
+    printf 'owner_end\ttest/01_unit/compiler/helper_spec.spl\t0\tok\n'
+    printf 'owner_begin\ttest/01_unit/compiler/one_spec.spl\t%s\n' "$one_sha"
+    printf 'declare\t%s\t%s\n' "$case_id" "$metadata_id"
+    [ "$mode" = enumerate ] || printf 'result\t%s\t%s\n' "$case_id" "$outcome"
+    printf 'owner_end\ttest/01_unit/compiler/one_spec.spl\t1\tok\n'
+    if [ "$mode" = enumerate ]; then
+      printf 'complete\tregistration_ok=1\ttest_callbacks_executed=0\thook_callbacks_executed=0\n'
+    elif [ "$outcome" = skip ]; then
+      printf 'complete\tregistration_ok=1\ttest_callbacks_executed=0\thook_callbacks_executed=0\n'
+    else
+      printf 'complete\tregistration_ok=1\ttest_callbacks_executed=1\thook_callbacks_executed=0\n'
+    fi
+  } >"$path"
+}
+write_ledger "$tmp/enumeration.tsv" enumerate registered
+write_ledger "$tmp/execution.tsv" run pass
+: >"$tmp/enumeration.stdout.log"; : >"$tmp/enumeration.stderr.log"
+: >"$tmp/execution.stdout.log"; : >"$tmp/execution.stderr.log"
+verify() {
+  perl "$script_root/verify-compiler-subsystem-test-product.pl" \
+    --source-root="$source_root" --inventory="$tmp/inventory.tsv" \
+    --backend=llvm --subsystem=compiler --compiler="$tmp/compiler" \
+    --compiler-producer-receipt="$tmp/compiler.env" \
+    --binary="$tmp/product" --build-receipt="$tmp/build.env" \
+    --threads=20 --rss-cap-kib=6835937 --build-timeout-seconds=1800 \
+    --enumeration="$tmp/enumeration.tsv" \
+    --enumeration-stdout="$tmp/enumeration.stdout.log" \
+    --enumeration-stderr="$tmp/enumeration.stderr.log" \
+    --enumeration-watchdog="$tmp/enumeration.watchdog.env" --enumeration-exit=0 \
+    --execution="$tmp/execution.tsv" \
+    --execution-stdout="$tmp/execution.stdout.log" \
+    --execution-stderr="$tmp/execution.stderr.log" \
+    --execution-watchdog="$tmp/execution.watchdog.env" --execution-exit=0 \
+    --output="$tmp/result.env" "$@"
+}
+verify
+grep -qx 'status=PASS' "$tmp/result.env"
+grep -qx 'source_owner_count=2' "$tmp/result.env"
+grep -qx 'registered=1' "$tmp/result.env"
+grep -qx 'executed=1' "$tmp/result.env"
+grep -qx 'zero_case_owners=1' "$tmp/result.env"
+# The successful fixture above includes compiler_sha256 command fields.
+# Rehash command evidence so malformed/duplicate/unknown keys reach its parser.
+cp "$tmp/logs/generator.command.tsv" "$tmp/generator.command.original"
+cp "$tmp/build.env" "$tmp/build.original"
+for malformed in 'compiler_sha256=duplicate' 'unknown_field=value' '9invalid=value'; do
+  cat "$tmp/generator.command.original" >"$tmp/logs/generator.command.tsv"
+  printf '%s\n' "$malformed" >>"$tmp/logs/generator.command.tsv"
+  command_sha=$(sha "$tmp/logs/generator.command.tsv")
+  sed "s/^generator_command_sha256=.*/generator_command_sha256=$command_sha/" \
+    "$tmp/build.original" >"$tmp/build.env"
+  if verify >"$tmp/out" 2>"$tmp/error"; then exit 1; fi
+  grep -q 'generator command malformed' "$tmp/error"
+done
+cp "$tmp/generator.command.original" "$tmp/logs/generator.command.tsv"
+cp "$tmp/build.original" "$tmp/build.env"
+# Every declared case needs an explicit terminal result.
+sed '/^result\t/d' "$tmp/execution.tsv" >"$tmp/execution.tsv.new"
+mv "$tmp/execution.tsv.new" "$tmp/execution.tsv"
+if verify >"$tmp/out" 2>"$tmp/error"; then exit 1; fi
+grep -qx 'status=FAIL' "$tmp/result.env"
+write_ledger "$tmp/execution.tsv" run pass
+sed '$d' "$tmp/enumeration.tsv" >"$tmp/enumeration.tsv.new"
+mv "$tmp/enumeration.tsv.new" "$tmp/enumeration.tsv"
+if verify >"$tmp/out" 2>"$tmp/error"; then exit 1; fi
+grep -qx 'status=FAIL' "$tmp/result.env"
+write_ledger "$tmp/enumeration.tsv" enumerate registered
+write_ledger "$tmp/execution.tsv" run skip
+verify
+grep -qx 'status=PASS_WITH_SKIPS' "$tmp/result.env"
+grep -qx 'executed=0' "$tmp/result.env"
+grep -qx 'skipped=1' "$tmp/result.env"
+grep -qx 'all_registered_executed=0' "$tmp/result.env"
+write_ledger "$tmp/execution.tsv" run pass
+sed 's/test_callbacks_executed=1/test_callbacks_executed=0/' "$tmp/execution.tsv" >"$tmp/execution.tsv.new"
+mv "$tmp/execution.tsv.new" "$tmp/execution.tsv"
+if verify >"$tmp/out" 2>"$tmp/error"; then exit 1; fi
+grep -qx 'status=FAIL' "$tmp/result.env"
+write_ledger "$tmp/execution.tsv" run pass
+sed 's/^actual_backend=llvm$/actual_backend=cranelift/' "$tmp/build.env" >"$tmp/build.new"
+mv "$tmp/build.new" "$tmp/build.env"
+if verify >"$tmp/out" 2>"$tmp/error"; then exit 1; fi
+echo 'PASS: binary-owned owner/case ledger, explicit skips, missing result, incomplete enumeration and backend mismatch fail closed'

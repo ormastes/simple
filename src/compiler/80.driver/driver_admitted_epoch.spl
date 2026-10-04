@@ -1,0 +1,174 @@
+# Serial worker-owned source authority. The caller must obtain `admitted` from
+# canonical full-inventory admission; this module does not authenticate a struct
+# supplied over an external task channel. Tasks supply identities, never hashes.
+use compiler.driver.driver_build.native_full_inventory_sources.{NativeFullInventorySourcesV1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.core.{scv_worktree_path_safe}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+
+var _g_admitted_epoch_sequence: i64 = 0
+var _g_admitted_epoch_owner: i64 = 0
+var _g_admitted_epoch_root: text = ""
+var _g_admitted_epoch_binding: text = ""
+var _g_admitted_epoch_digests: Dict<text, text> = {}
+var _g_admitted_epoch_lengths: Dict<text, i64> = {}
+var _g_admitted_epoch_task: bool = false
+var _g_admitted_epoch_entry: text = ""
+var _g_admitted_epoch_failure: text = ""
+var _g_admitted_epoch_rows: i64 = 0
+var _g_admitted_epoch_reads: i64 = 0
+
+pub fn driver_admitted_epoch_normalize_v1(path: text, windows: bool) -> text:
+    var value = path.replace("\\", "/")
+    if windows and value.starts_with("//?/"): value = value.substring(4)
+    elif windows and value.starts_with("/?/"): value = value.substring(3)
+    while value.ends_with("/") and value.len() > 1:
+        value = value[0:value.len() - 1]
+    if windows: value.lower() else: value
+
+fn admitted_epoch_binding_v1() -> text:
+    var fields: [text] = []
+    for name in ["SIMPLE_SCV_SNAPSHOT_ROOT", "SIMPLE_SCV_INVENTORY_DIGEST",
+            "SIMPLE_SCV_REVISION_ID", "SIMPLE_SCV_COMMIT_ID", "SIMPLE_SCV_TREE_ID",
+            "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", "SIMPLE_SCV_INVENTORY_GENERATION",
+            "SIMPLE_SCV_RECEIPT_DIGEST"]:
+        val value = sosix_env_get_nullable(name) ?? ""
+        if value == "" or value.contains("\n"): return ""
+        fields = fields.push(value)
+    fields.join("\n")
+
+pub fn driver_admitted_epoch_active_v1() -> bool:
+    _g_admitted_epoch_owner != 0
+
+pub fn driver_admitted_epoch_task_active_v1() -> bool:
+    _g_admitted_epoch_task
+
+pub fn driver_admitted_epoch_error_v1() -> text:
+    _g_admitted_epoch_failure
+
+pub fn driver_admitted_epoch_root_v1() -> text:
+    _g_admitted_epoch_root
+
+pub fn driver_admitted_epoch_entry_v1() -> text:
+    _g_admitted_epoch_entry
+
+pub fn driver_admitted_epoch_declares_path_v1(path: text) -> bool:
+    if not driver_admitted_epoch_active_v1(): return false
+    val normalized = driver_admitted_epoch_normalize_v1(path, host_is_windows_host())
+    if not normalized.starts_with(_g_admitted_epoch_root + "/"): return false
+    val key = normalized.substring(_g_admitted_epoch_root.len() + 1)
+    scv_worktree_path_safe(key) and _g_admitted_epoch_digests.contains_key(key)
+
+pub fn driver_admitted_epoch_counters_v1() -> (i64, i64):
+    (_g_admitted_epoch_rows, _g_admitted_epoch_reads)
+
+fn admitted_epoch_reject_v1(reason: text) -> text:
+    if _g_admitted_epoch_failure == "": _g_admitted_epoch_failure = reason
+    _g_admitted_epoch_failure
+
+pub fn driver_admitted_epoch_check_v1(owner: i64) -> text:
+    if owner == 0 or owner != _g_admitted_epoch_owner: return "admitted-epoch-owner-invalid"
+    if _g_admitted_epoch_failure != "": return _g_admitted_epoch_failure
+    if admitted_epoch_binding_v1() != _g_admitted_epoch_binding:
+        return admitted_epoch_reject_v1("admitted-epoch-binding-changed")
+    ""
+
+pub fn driver_admitted_epoch_begin_v1(admitted: NativeFullInventorySourcesV1) -> Result<i64, text>:
+    if driver_admitted_epoch_active_v1(): return Err("admitted-epoch-already-active")
+    val binding = admitted_epoch_binding_v1()
+    val count = admitted.source_count
+    if binding == "" or count < 1 or count > 20000 or
+            admitted.source_paths.len() != count or admitted.source_identities.len() != count or
+            admitted.source_digests.len() != count or admitted.source_byte_counts.len() != count or
+            not builder_digest_valid_v1(admitted.snapshot_inventory_digest) or
+            not builder_digest_valid_v1(admitted.source_inventory_digest) or
+            not builder_digest_valid_v1(admitted.scv_receipt_digest):
+        return Err("admitted-epoch-inventory-invalid")
+    if (sosix_env_get_nullable("SIMPLE_SCV_INVENTORY_DIGEST") ?? "") != admitted.snapshot_inventory_digest or
+            (sosix_env_get_nullable("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "") != admitted.source_inventory_digest or
+            (sosix_env_get_nullable("SIMPLE_SCV_RECEIPT_DIGEST") ?? "") != admitted.scv_receipt_digest:
+        return Err("admitted-epoch-inventory-binding-mismatch")
+    val windows = host_is_windows_host()
+    val root = driver_admitted_epoch_normalize_v1(
+        sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "", windows)
+    var digests: Dict<text, text> = {}
+    var lengths: Dict<text, i64> = {}
+    for index in 0..count:
+        val identity = admitted.source_identities[index]
+        val key = driver_admitted_epoch_normalize_v1(identity, windows)
+        val bytes = admitted.source_byte_counts[index]
+        if not scv_worktree_path_safe(identity) or not identity.ends_with(".spl") or
+                digests.contains_key(key) or not builder_digest_valid_v1(admitted.source_digests[index]) or
+                bytes < 0 or bytes > 64 * 1024 * 1024 or
+                driver_admitted_epoch_normalize_v1(admitted.source_paths[index], windows) != root + "/" + key:
+            return Err("admitted-epoch-source-row-invalid")
+        digests[key] = admitted.source_digests[index]
+        lengths[key] = bytes
+    _g_admitted_epoch_sequence = _g_admitted_epoch_sequence + 1
+    _g_admitted_epoch_owner = _g_admitted_epoch_sequence
+    _g_admitted_epoch_root = root
+    _g_admitted_epoch_binding = binding
+    _g_admitted_epoch_digests = digests
+    _g_admitted_epoch_lengths = lengths
+    _g_admitted_epoch_failure = ""
+    _g_admitted_epoch_rows = count
+    _g_admitted_epoch_reads = 0
+    Ok(_g_admitted_epoch_owner)
+
+pub fn driver_admitted_epoch_task_begin_v1(owner: i64, identity: text) -> Result<text, text>:
+    val reason = driver_admitted_epoch_check_v1(owner)
+    if reason != "": return Err(reason)
+    if _g_admitted_epoch_task: return Err("admitted-epoch-task-overlap")
+    val key = driver_admitted_epoch_normalize_v1(identity, host_is_windows_host())
+    if not scv_worktree_path_safe(identity) or not _g_admitted_epoch_digests.contains_key(key):
+        return Err(admitted_epoch_reject_v1("admitted-epoch-entry-not-admitted"))
+    _g_admitted_epoch_entry = _g_admitted_epoch_root + "/" + identity
+    _g_admitted_epoch_task = true
+    Ok(_g_admitted_epoch_entry)
+
+pub fn driver_admitted_epoch_task_finish_v1(owner: i64) -> Result<(), text>:
+    if owner != _g_admitted_epoch_owner or not _g_admitted_epoch_task:
+        return Err("admitted-epoch-task-owner-invalid")
+    val reason = driver_admitted_epoch_check_v1(owner)
+    _g_admitted_epoch_task = false
+    _g_admitted_epoch_entry = ""
+    if reason != "": return Err(reason)
+    Ok(())
+
+pub fn driver_admitted_epoch_end_v1(owner: i64) -> Result<(), text>:
+    if owner == 0 or owner != _g_admitted_epoch_owner: return Err("admitted-epoch-owner-invalid")
+    if _g_admitted_epoch_task: return Err("admitted-epoch-task-active")
+    # Settle the correct idle owner even after authority failure, but do not
+    # report a successful epoch seal after its published binding changed.
+    val reason = driver_admitted_epoch_check_v1(owner)
+    _g_admitted_epoch_digests = {}
+    _g_admitted_epoch_lengths = {}
+    _g_admitted_epoch_owner = 0
+    _g_admitted_epoch_root = ""
+    _g_admitted_epoch_binding = ""
+    _g_admitted_epoch_failure = ""
+    if reason != "": return Err(reason)
+    Ok(())
+
+pub fn driver_admitted_epoch_read_v1(path: text, canonical_path: text) -> Result<text, text>:
+    val reason = driver_admitted_epoch_check_v1(_g_admitted_epoch_owner)
+    if reason != "": return Err(reason)
+    if not _g_admitted_epoch_task:
+        return Err(admitted_epoch_reject_v1("admitted-epoch-read-outside-task"))
+    val canonical = driver_admitted_epoch_normalize_v1(canonical_path, host_is_windows_host())
+    if not canonical.starts_with(_g_admitted_epoch_root + "/"):
+        return Err(admitted_epoch_reject_v1("admitted-epoch-source-escape"))
+    val key = canonical.substring(_g_admitted_epoch_root.len() + 1)
+    if not scv_worktree_path_safe(key) or not _g_admitted_epoch_digests.contains_key(key):
+        return Err(admitted_epoch_reject_v1("admitted-epoch-source-not-admitted"))
+    val loaded = file_read_regular_no_follow_bounded(path, 64 * 1024 * 1024)
+    _g_admitted_epoch_reads = _g_admitted_epoch_reads + 1
+    if val Err(_) = loaded:
+        return Err(admitted_epoch_reject_v1("admitted-epoch-source-unreadable"))
+    val content = loaded.unwrap()
+    if content.len() != _g_admitted_epoch_lengths[key] or sha256_text(content) != _g_admitted_epoch_digests[key]:
+        return Err(admitted_epoch_reject_v1("admitted-epoch-source-content-mismatch"))
+    Ok(content)

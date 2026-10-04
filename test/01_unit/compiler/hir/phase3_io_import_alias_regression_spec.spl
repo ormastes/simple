@@ -1,0 +1,37 @@
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+
+describe "Phase3 IO import owner and alias preservation":
+    it "retains the recovery driver's real optional directory-list dependency":
+        val path = "src/compiler/80.driver/driver_hir_recovery.spl"
+        val source = file_read(path)
+        expect(source.len()).to_be_greater_than(0)
+        val module = parse_and_build_module(source, path)
+        var matches = 0
+        for imported in module.imports:
+            for item in imported.items:
+                if item.name == "dir_list_optional":
+                    matches = matches + 1
+                    expect(imported.module).to_equal("std.io_runtime")
+                    expect(item.has_alias).to_equal(false)
+        expect(matches).to_equal(1)
+
+    it "preserves declared client export names separately from local aliases":
+        val module = parse_and_build_module("use std.nogc_sync_mut.io.http_client_core.{http_get as fetch, http_post as submit}\n", "client_aliases.spl")
+        expect(module.imports.len()).to_equal(1)
+        val imported = module.imports[0]
+        expect(imported.module).to_equal("std.nogc_sync_mut.io.http_client_core")
+        expect(imported.items.len()).to_equal(2)
+        expect(imported.items[0].name).to_equal("http_get")
+        expect(imported.items[0].has_alias).to_equal(true)
+        expect(imported.items[0].alias).to_equal("fetch")
+        expect(imported.items[1].name).to_equal("http_post")
+        expect(imported.items[1].alias).to_equal("submit")
+
+    it "preserves a relative grouped facade import without rewriting its owner":
+        val module = parse_and_build_module("export use .http_client_core.{http_get as fetch}\n", "relative_client_facade.spl")
+        expect(module.imports.len()).to_equal(1)
+        expect(module.imports[0].module).to_equal(".http_client_core")
+        expect(module.imports[0].items[0].name).to_equal("http_get")
+        expect(module.imports[0].items[0].alias).to_equal("fetch")

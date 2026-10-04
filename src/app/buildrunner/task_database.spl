@@ -1,0 +1,143 @@
+use app.buildrunner.task_context.{BuildRunnerTaskContextV1, build_runner_context_encode_v1, build_runner_context_decode_v1}
+# Build-specific binding over the shared PureDatabase task journal.
+# Context is an immutable manifest input, never reconstructed from filenames.
+use std.common.build_manager.contracts.{BuildTaskV1, BuildRunV1, BuildResultV1, BuildInputV1,
+    builder_validate_result_v1,
+    builder_digest_valid_v1, builder_task_identity_v1}
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1,
+    task_runner_identity_v1}
+use std.common.task_runner.journal.{TaskRunnerJournalV1, task_runner_journal_open_v1,
+    task_runner_journal_identity_v1, task_runner_journal_history_v1,
+    task_runner_journal_append_v1, task_runner_journal_missing_v1,
+    task_runner_journal_release_v1}
+use std.common.task_runner.snapshot.{task_runner_snapshot_commit_v1}
+use std.common.task_runner.recovery.{task_runner_execution_mode_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.codec.{builder_encode_result_v1}
+use std.common.task_runner.scheduler.{task_runner_output_error}
+use app.buildrunner.process_evidence.{build_runner_process_evidence_decode_v1}
+
+fn build_runner_task_identity_v1(task: BuildTaskV1, payload: text) -> Result<TaskRunnerIdentityV1, text>:
+    val context = build_runner_context_decode_v1(payload)?
+    val path = "task-context/" + task.id + ".sdn"
+    var bound = false
+    for input in task.inputs:
+        if input.path == path:
+            if bound or input.digest != sha256_text(payload): return Err("build context input differs")
+            bound = true
+    if not bound: return Err("build context is not an admitted task input")
+    # Retry number is transport state, not semantic identity. Keep every other
+    # ordered argument/input/dependency/output and policy field in the hash.
+    var canonical = task
+    canonical.attempt = 1
+    val execution = builder_task_identity_v1(canonical)
+    if not builder_digest_valid_v1(execution): return Err("invalid build task contract")
+    val identity = TaskRunnerIdentityV1("build", task.id, "", context.backend,
+        task.phase, task.producer_digest, task.source_digest, context.runtime_digest,
+        task.toolchain_digest, context.policy_digest, execution)
+    val _valid = task_runner_identity_v1(identity)?
+    Ok(identity)
+
+fn build_runner_database_open_v1(root: text, nonce: text, run: BuildRunV1,
+        contexts: Dict<text, text>) -> Result<TaskRunnerJournalV1, text>:
+    if run.max_attempts < 1 or run.max_attempts > 8: return Err("task database retry bound differs")
+    if run.tasks.len() == 0 or contexts.len() != run.tasks.len():
+        return Err("build task context inventory differs")
+    var expected: [TaskRunnerIdentityV1] = []
+    var seen: Dict<text, bool> = {}
+    for task in run.tasks:
+        if seen.contains_key(task.id) or not contexts.contains_key(task.id):
+            return Err("duplicate or absent build task context")
+        seen[task.id] = true
+        expected = expected.push(build_runner_task_identity_v1(task, contexts[task.id])?)
+    task_runner_journal_open_v1(root, nonce, run.tasks[0].source_digest, expected)
+
+fn build_runner_database_mode_v1(owner: TaskRunnerJournalV1, task: BuildTaskV1,
+        context: text) -> Result<text, text>:
+    val identity = task_runner_identity_v1(build_runner_task_identity_v1(task, context)?)?
+    val _registered = task_runner_journal_identity_v1(owner, identity)?
+    task_runner_execution_mode_v1(identity, task_runner_journal_history_v1(owner, identity)?)
+
+fn build_runner_database_append_v1(owner: TaskRunnerJournalV1, task: BuildTaskV1,
+        context: text, accepted: TaskRunnerAttemptV1) -> Result<TaskRunnerJournalV1, text>:
+    val identity = task_runner_identity_v1(build_runner_task_identity_v1(task, context)?)?
+    if accepted.identity_digest != identity or accepted.attempt != task.attempt:
+        return Err("accepted build attempt identity differs")
+    task_runner_journal_append_v1(owner, accepted)
+
+fn build_runner_database_finish_v1(owner: TaskRunnerJournalV1,
+        expected_not_run: [text] = []) -> Result<text, text>:
+    # Release even on an incomplete ledger or snapshot failure. A process still
+    # owning live workers must not call finish; its supervisor owns closure.
+    val missing = task_runner_journal_missing_v1(owner)
+    val snapshot = task_runner_snapshot_commit_v1(owner, owner.revision)
+    val released = task_runner_journal_release_v1(owner)
+    if released.is_err(): return Err(released.unwrap_err())
+    if missing.is_err(): return Err(missing.unwrap_err())
+    var allowed_missing: Dict<text, bool> = {}
+    for identity in expected_not_run:
+        if not builder_digest_valid_v1(identity) or allowed_missing.contains_key(identity):
+            return Err("invalid unstarted task inventory")
+        allowed_missing[identity] = true
+    for identity in missing.unwrap():
+        if not allowed_missing.contains_key(identity): return Err("build task ledger has missing executed outcomes")
+    snapshot
+
+export BuildRunnerTaskContextV1, build_runner_context_encode_v1, build_runner_context_decode_v1
+export build_runner_task_identity_v1, build_runner_database_open_v1
+export build_runner_database_mode_v1, build_runner_database_append_v1, build_runner_database_finish_v1
+
+# Called only after the parent collected the original BuildResult and exact
+# tree-reap proof, and hashed immutable attempt outputs/logs itself.
+fn build_runner_database_collect_v1(owner: TaskRunnerJournalV1, task: BuildTaskV1,
+        context: text, group_id: text, mode: text, result: BuildResultV1,
+        observed: [BuildInputV1], process_payload: text, stdout_digest: text,
+        stderr_digest: text, tree_reaped: bool) -> Result<TaskRunnerJournalV1, text>:
+    if not tree_reaped: return Err("cannot record an unreaped compiler")
+    val invalid = builder_validate_result_v1(task, result)
+    if invalid != "": return Err(invalid)
+    val process = build_runner_process_evidence_decode_v1(process_payload)?
+    if process.task_identity != builder_task_identity_v1(task) or
+            process.stdout_digest != stdout_digest or process.stderr_digest != stderr_digest:
+        return Err("compiler observation/log binding differs")
+    var expected_status = "ERROR"
+    var expected_code = process.exit_code
+    if process.outcome == "cancelled": expected_code = 125
+    elif process.outcome == "timed-out":
+        expected_status = "TIMEOUT"
+        expected_code = 124
+    elif process.outcome == "crashed":
+        expected_status = "CRASHED"
+        if process.signal_number > 0: expected_code = 128 + process.signal_number
+    elif process.exit_code == 0: expected_status = "OK"
+    if result.status != expected_status or result.exit_code != expected_code:
+        return Err("compiler result differs from frozen observation")
+    var status = "aborted"
+    var reason = "infrastructure"
+    var validated = false
+    var task_code: i64 = -1
+    if result.status == "OK":
+        val outputs = task_runner_output_error(task, result, observed)
+        if outputs != "": return Err(outputs)
+        status = "passed"
+        reason = "result"
+        validated = true
+        task_code = 0
+    elif result.status == "ERROR" and result.exit_code == 1 and process.outcome == "exited":
+        status = "failed"
+        reason = "compile"
+        validated = true
+        task_code = 1
+    elif process.outcome == "crashed":
+        status = "crashed"
+        reason = if process.signal_number > 0: "process-signal" else: "native-exception"
+    elif process.outcome == "timed-out" or process.outcome == "cancelled": reason = process.outcome
+    val identity = task_runner_identity_v1(build_runner_task_identity_v1(task, context)?)?
+    val evidence = sha256_text(builder_encode_result_v1(result) + "\n" + process_payload)
+    val accepted = TaskRunnerAttemptV1(identity, group_id, task.attempt, mode,
+        process.pid, process.process_generation, status, reason, process.exit_code, task_code,
+        process.signal_number, true, validated, stdout_digest, stderr_digest,
+        evidence, process.transport_execution_digest)
+    build_runner_database_append_v1(owner, task, context, accepted)
+
+export build_runner_database_collect_v1

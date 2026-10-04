@@ -1,0 +1,126 @@
+"""ITEM4-REQ-010 / PACK-POS-006 generic retirement prerequisite. UNRUN.
+
+These are real generation table transitions, not mapped-provider shutdown or
+CLI/seal evidence. Retirement must not need replacement publication capacity.
+"""
+use std.spec.*
+use std.spec.step
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.nogc_sync_mut.kernel_plugin.generation.{KpfGenerationTable, KpfGenerationHandle}
+use std.nogc_sync_mut.kernel_plugin.status.{KpfSyncStatus}
+
+fn item4_retire_digest() -> KpfDigest256:
+    KpfDigest256(w0: 11, w1: 22, w2: 33, w3: 44)
+
+describe "ITEM4-REQ-010 strict active generation retirement":
+    it "retires at full generation and pin capacity while preserving the existing pin":
+        var table = KpfGenerationTable.create(1, 1)
+        val published = table.publish(KpfId128(hi: 7, lo: 8), item4_retire_digest(), 19)
+        expect(published.status).to_equal(KpfSyncStatus.Ok)
+        if not published.status.accepted(): return
+        val handle = published.current
+        val pinned = table.pin_active()
+        expect(pinned.status).to_equal(KpfSyncStatus.Ok)
+        if not pinned.status.accepted(): return
+        step("Demonstrate exhausted capacity before retiring without a replacement")
+        expect(table.publish(KpfId128(hi: 9, lo: 10), item4_retire_digest(), 20).status).to_equal(KpfSyncStatus.CapacityExceeded)
+        expect(table.pin_active().status).to_equal(KpfSyncStatus.CapacityExceeded)
+        expect(table.retire_active(handle)).to_equal(KpfSyncStatus.Ok)
+        val retired = table.view(handle)
+        expect(retired.status).to_equal(KpfSyncStatus.Ok)
+        expect(retired.active).to_equal(false)
+        expect(retired.retired).to_equal(true)
+        expect(retired.pin_count).to_equal(1u32)
+        expect(retired.provider_id.hi).to_equal(7u64)
+        expect(retired.provider_id.lo).to_equal(8u64)
+        expect(retired.registry_revision).to_equal(19u64)
+        expect(retired.composition_digest.w0).to_equal(11u64)
+        expect(retired.composition_digest.w1).to_equal(22u64)
+        expect(retired.composition_digest.w2).to_equal(33u64)
+        expect(retired.composition_digest.w3).to_equal(44u64)
+        expect(table.generation_storage_capacity()).to_equal(1u32)
+        expect(table.pin_storage_capacity()).to_equal(1u32)
+        step("No new pin can enter but the old pin blocks collection until release")
+        expect(table.pin_active().status).to_equal(KpfSyncStatus.GenerationNotActive)
+        expect(table.pin(handle).status).to_equal(KpfSyncStatus.GenerationNotActive)
+        expect(table.collect(handle)).to_equal(KpfSyncStatus.GenerationStillPinned)
+        expect(table.view(handle).pin_count).to_equal(1u32)
+        expect(table.release_pin(pinned.handle)).to_equal(KpfSyncStatus.Ok)
+        expect(table.view(handle).pin_count).to_equal(0u32)
+        expect(table.collect(handle)).to_equal(KpfSyncStatus.Ok)
+        expect(table.view(handle).status).to_equal(KpfSyncStatus.StaleHandle)
+        expect(table.release_pin(pinned.handle)).to_equal(KpfSyncStatus.StaleHandle)
+
+    it "rejects wrong current and stale handles without changing active identity or pins":
+        var table = KpfGenerationTable.create(2, 2)
+        val first = table.publish(KpfId128(hi: 1, lo: 1), item4_retire_digest(), 1)
+        expect(first.status).to_equal(KpfSyncStatus.Ok)
+        if not first.status.accepted(): return
+        val first_pin = table.pin_active()
+        expect(first_pin.status).to_equal(KpfSyncStatus.Ok)
+        if not first_pin.status.accepted(): return
+        val second = table.publish(KpfId128(hi: 2, lo: 2), item4_retire_digest(), 2)
+        expect(second.status).to_equal(KpfSyncStatus.Ok)
+        if not second.status.accepted(): return
+        step("Reject a valid retired generation and forged current epochs or indexes")
+        expect(table.retire_active(first.current)).to_equal(KpfSyncStatus.GenerationNotActive)
+        expect(table.retire_active(KpfGenerationHandle(index: second.current.index, epoch: second.current.epoch + 1))).to_equal(KpfSyncStatus.StaleHandle)
+        expect(table.retire_active(KpfGenerationHandle(index: 99, epoch: second.current.epoch))).to_equal(KpfSyncStatus.StaleHandle)
+        expect(table.view(first.current).retired).to_equal(true)
+        expect(table.view(first.current).pin_count).to_equal(1u32)
+        val current = table.view(second.current)
+        expect(current.active).to_equal(true)
+        expect(current.retired).to_equal(false)
+        expect(current.provider_id.hi).to_equal(2u64)
+        expect(current.registry_revision).to_equal(2u64)
+        val second_pin = table.pin_active()
+        expect(second_pin.status).to_equal(KpfSyncStatus.Ok)
+        if not second_pin.status.accepted(): return
+        expect(table.view(second.current).pin_count).to_equal(1u32)
+        step("Failed retirement preserves rollback eligibility as well as visible state")
+        expect(table.rollback(first.current).status).to_equal(KpfSyncStatus.Ok)
+        expect(table.view(first.current).active).to_equal(true)
+        expect(table.release_pin(first_pin.handle)).to_equal(KpfSyncStatus.Ok)
+        expect(table.release_pin(second_pin.handle)).to_equal(KpfSyncStatus.Ok)
+        expect(table.retire_active(first.current)).to_equal(KpfSyncStatus.Ok)
+        expect(table.collect(first.current)).to_equal(KpfSyncStatus.Ok)
+        expect(table.collect(second.current)).to_equal(KpfSyncStatus.Ok)
+
+    it "clears rollback activation and rejects repeated retirement before safe generic reuse":
+        var table = KpfGenerationTable.create(2, 1)
+        val first = table.publish(KpfId128(hi: 1, lo: 1), item4_retire_digest(), 1)
+        val second = table.publish(KpfId128(hi: 2, lo: 2), item4_retire_digest(), 2)
+        expect(first.status).to_equal(KpfSyncStatus.Ok)
+        expect(second.status).to_equal(KpfSyncStatus.Ok)
+        if not first.status.accepted() or not second.status.accepted(): return
+        expect(table.retire_active(second.current)).to_equal(KpfSyncStatus.Ok)
+        step("Retirement ends active selection rather than selecting the predecessor")
+        expect(table.retire_active(second.current)).to_equal(KpfSyncStatus.GenerationNotActive)
+        expect(table.rollback(first.current).status).to_equal(KpfSyncStatus.GenerationNotActive)
+        expect(table.rollback(second.current).status).to_equal(KpfSyncStatus.GenerationNotActive)
+        expect(table.pin_active().status).to_equal(KpfSyncStatus.GenerationNotActive)
+        expect(table.view(first.current).retired).to_equal(true)
+        expect(table.view(second.current).retired).to_equal(true)
+        expect(table.collect(first.current)).to_equal(KpfSyncStatus.Ok)
+        expect(table.collect(second.current)).to_equal(KpfSyncStatus.Ok)
+        expect(table.retire_active(second.current)).to_equal(KpfSyncStatus.StaleHandle)
+        step("Generic storage remains reusable but old epochs never name the new generation")
+        val replacement = table.publish(KpfId128(hi: 3, lo: 3), item4_retire_digest(), 3)
+        expect(replacement.status).to_equal(KpfSyncStatus.Ok)
+        if not replacement.status.accepted(): return
+        expect(replacement.previous.epoch).to_equal(0u64)
+        expect(replacement.current.index).to_equal(second.current.index)
+        expect(replacement.current.epoch != second.current.epoch).to_equal(true)
+        expect(table.view(second.current).status).to_equal(KpfSyncStatus.StaleHandle)
+        expect(table.view(replacement.current).active).to_equal(true)
+        expect(table.retire_active(second.current)).to_equal(KpfSyncStatus.StaleHandle)
+        expect(table.view(replacement.current).active).to_equal(true)
+        expect(table.retire_active(replacement.current)).to_equal(KpfSyncStatus.Ok)
+        expect(table.collect(replacement.current)).to_equal(KpfSyncStatus.Ok)
+
+    it "rejects an empty zero-capacity table without division or allocation":
+        var table = KpfGenerationTable.create(0, 0)
+        expect(table.retire_active(KpfGenerationHandle(index: 0, epoch: 0))).to_equal(KpfSyncStatus.StaleHandle)
+        expect(table.pin_active().status).to_equal(KpfSyncStatus.GenerationNotActive)
+        expect(table.generation_storage_capacity()).to_equal(0u32)
+        expect(table.pin_storage_capacity()).to_equal(0u32)

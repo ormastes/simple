@@ -1,5 +1,125 @@
 # Item 4 parallel ownership
 
+## 2026-10-04 ELF byte-source continuation
+
+Base: `d945e61704c7baeca8fe354eb812e390b156a561`, target `release/1.0`.
+Root integrates on `work/item4-elf-byte-source-20261004` and owns the freestanding
+adapter, common plans/report, final review and merge. Runtime owns the operation
+binding extension and hosted `_LinkerWrapper/native_linking.spl` integration.
+Acceptance owns executable specs, fixtures and authored manuals. Research owns
+design and independent review. Agents create separate worktrees at this base;
+root reuses its clean integration worktree. Lower-model sidecars: N/A.
+
+Keep the three-facet array-input APIs unchanged. New file APIs are
+`elf_builtin_file_operation_providers_v1`, `elf_builtin_file_operations_v1`,
+`elf_seal_file_operations_v1`, `has_byte_source`, `read_bytes`,
+`link_freestanding_with_operations_v1`, and
+`internal_link_native_with_operations`. Test helpers use `item4_elf_source_`
+and `std.spec.step`. Concrete test intent precedes implementation.
+
+## 2026-10-04 static ELF operational composition continuation
+
+Base: `80b5ab3f6f568bd614f28a4c91244713a2bb9381`, target `release/1.0`.
+Root integrates in `C:/dev/simple-item4-sha-owner-20261004` on
+`work/item4-elf-operations-20261004` and owns common plans, verification report,
+final review and merge. Runtime owns the new leaf operation-binding module and
+the existing static-link driver. Acceptance owns executable specs and authored
+manuals. Research owns design/research documents and independent source review.
+Each agent uses a newly isolated worktree and session record at the same base.
+
+Shared types: `ElfOperationProviderV1`, `ElfSealedOperationsV1`,
+`ElfComposedImageV1`. Entry points: `elf_seal_operations_v1`,
+`elf_builtin_operations_v1`, and `elf_link_with_operations`. Tests use
+`item4_elf_ops_` helper names and `std.spec.step`; runtime waits for test intent
+before implementation. Lower-model sidecars: N/A. Structural receipts never
+stand in for runtime execution, trusted manifest admission or resource evidence.
+
+## 2026-10-04 RV64 initial-exec TLS continuation
+
+Base: `75076715f57c7c9f20e98019a4a9ec5b1bdc0d0d`, target `release/1.0`.
+Root integrates on `work/item4-riscv-ie-20261004`, owns common plans and the
+verification report, and is final merge reviewer. Acceptance owns test-first
+full-link SSpec, assembly/object fixtures and authored manual in a new isolated
+worktree. Runtime owns relocation classification, high/low pairing and the
+existing static linker path in another new isolated worktree. Research owns
+psABI research, detail design and independent source review in a third worktree.
+All lanes start from the same base and record their session bindings.
+
+No new public schema or callback interface is required. Private test helpers use
+`item4_riscv_ie_`; scenario steps use `std.spec.step`. Tests must assert real
+linked bytes against independent ABI expectations. Missing runtime evidence is
+UNRUN, never a placeholder pass. Lower-model sidecars: N/A.
+
+## 2026-10-04 terminal shutdown continuation
+
+Base: `8e141ae45a89250f30f694e49cd0312ac3eafa10`, target `release/1.0`.
+Root integrates on `work/item4-provider-shutdown-20261004` in the existing
+clean `C:/dev/simple-item4-sha-owner-20261004` worktree and owns the readiness
+ledger, verification report, review and merge. Separate worktree lanes:
+
+- Research: `C:/dev/simple-item4-generation-spec-20261004`; four test-first
+  retirement scenarios, design/manual, independent core and acceptance review.
+- Acceptance: `C:/dev/simple-item4-shutdown-tests-20261004`; two real mapped
+  shutdown scenarios and terminal cleanup of the six existing positives.
+- Runtime: `C:/dev/simple-item4-shutdown-core-20261004`; generation retirement
+  and lifecycle shutdown, after both test intents were committed.
+
+Shared APIs are `retire_active(expected)`, `shutdown()`, `is_closing()` and
+`is_closed()`. Lower-model sidecars: N/A. Root is final integration reviewer.
+Runtime tests and canonical docgen remain UNRUN; source review is not admission.
+
+## 2026-10-04 configured provider continuation
+
+Base: release `b0f0cf98787`. Root owns lifecycle configured dispatch and final
+integration on `work/item4-provider-positive-20261004` in its isolated worktree.
+Runtime owns versioned native-config transport, command dispatch and mapped-pack
+invocation in a separate worktree. Research owns transport specs before source,
+design and independent source review. Acceptance owns six real mapped-provider
+positive scenarios and fixture bytes in another worktree. Sidecars: N/A.
+
+Shared API: `LinkerPackJobV2` with request, policy, inputs, output and
+native_config; `linker_pack_encode_job_v2`/`decode_job_v2`; pack
+`invoke_with_config`; lifecycle `run_with_config` and `run_recovery_with_config`
+take config last. Configured static callbacks take config last and forward to
+the native adapter's existing config-third signature. Test helpers use
+`item4_pack_positive_*`, actual provider artifacts and independent ELF/exit
+oracles. Missing prerequisites fail by name; no mock mapping or canned success.
+
+Production CLI routing and trusted manifest authority remain separate open
+requirements. The config-preserving transport and positive native cases are
+prerequisites, not substitutes for those requirements or full Phase 4 evidence.
+
+## 2026-10-04 canonical stream continuation
+
+Base: release `d8680fe6ec21`. Root integrates in its existing clean isolated
+worktree on new `work/item4-semantic-owner-20261004`; separate registered
+worktrees hold runtime/core, acceptance/spec and research/caller audit work.
+Runtime owns the canonical stream module; acceptance writes regression intent
+before implementation and reviews core; research audits actual callers and
+independently reviews ownership transitions. Root owns final design/manuals,
+integration and merge. Lower-model sidecars: N/A.
+
+Agreed interface: mutating public operations retain their full names as `me`
+methods without a stream parameter; constructors and observers remain free.
+No issuer activation: actual-call audit found no production caller outside the
+primitive. Its future capability boundary remains deliberately unavailable.
+
+## 2026-10-04 SHA dependency continuation
+
+Base: `f5fec9ccf8cb` on release/1.0. Root integrates in isolated
+`C:/dev/simple-item4-sha-owner-20261004`, branch `work/item4-sha-owner-20261004`.
+Runtime owns core SHA methods and regression intent in its separate sha-core
+worktree; acceptance owns independent source/vector review; research owns the
+provider-positive design supplement and outer semantic-stream defect report in
+its separate provider-docs worktree. Root owns caller migration, documentation,
+merge and final status. Lower-model sidecars: N/A.
+
+Shared API agreed before coding: constructor `sha256_stream_v1_new`, mutable
+`reset`, `update`, `update_byte`, `finish_hex`, `zeroize`; private mutable
+compression and byte-push. Tests use actual owners and fixed digest oracles.
+No admitted runtime exists in current evidence. Native tests/docgen/coverage
+and full Phase 4 remain UNRUN/FAIL; no passing placeholder replaces them.
+
 Date: 2026-10-03. Initial inspection base and target at allocation:
 `e9cd3153c881c55f59eaaa2573b4b8a5e803023a` (`origin/release/1.0`).
 
@@ -121,3 +241,89 @@ entrypoint directly, and the fallback spec omits that unavailable import/check.
 All other production guards and acceptance scenarios are carried forward.
 Runtime SSpec, generated-manual, coverage and core/MCP evidence remain unrun;
 this forward-port does not change any requirement's verification status.
+
+## Bounded COMMON implementation ownership (2026-10-04)
+
+Base and expected release target: `63d5f8b20208c92275cfb4c9a105a26b2b51b774`.
+Root integrates on `work/item4-stream-common-20261004` in
+`C:/dev/simple-item4-sha-owner-20261004`, owning shared plans, evidence and merge.
+Runtime owns stream_inputs/layout/emit in the separate
+`simple-item4-stream-common-core-20261004` worktree; acceptance owns the new
+`item4_stream_common_spec.spl`, its manual and real fixtures in
+`simple-item4-stream-common-tests-20261004`; research owns the design and
+provider-authority findings in `simple-item4-stream-common-docs-20261004`.
+All child worktrees are under `C:/dev/`, on matching `work/*` branches.
+
+Shared public link API and layout fields remain unchanged. New helpers use
+`elf_stream_common_*` for production and `item4_stream_common_*` in specs.
+Use real setup/checker assertions and fail immediately on missing prerequisites.
+Acceptance commits test intent before runtime implementation starts. Root and
+research review final source/test behavior. Lower-model sidecars: N/A; inherited
+models retained. No admitted runtime exists in this lane; authored tests remain
+UNRUN and cannot establish TDD RED/GREEN, coverage or Phase 4 PASS.
+
+## Ordinary static x64 GOT ownership (2026-10-04)
+
+Base/expected release target: `11a5ade180d895de65342ed983ce34ad06506a33`.
+Root owns integration, common plans and merge on `work/item4-stream-got-20261004`
+in `C:/dev/simple-item4-sha-owner-20261004`. Separate child worktrees under
+`C:/dev/` are `simple-item4-stream-got-core-20261004`,
+`simple-item4-stream-got-tests-20261004`, and
+`simple-item4-stream-got-docs-20261004`, each on its matching `work/*` branch.
+Runtime owns stream_got and stream_inputs/layout/emit; acceptance owns the
+new item4_stream_got spec/manual and actual fixtures; research owns design,
+primary ABI research, external fixture experiments and independent review.
+
+Public stream link/layout contracts remain unchanged. Production helpers use
+`elf_stream_got_*`, test setup/checkers use `item4_stream_got_*` with real
+assertions and explicit setup failures. Slot identity is tagged global name or
+local owner/table/ordinal; payload is the resolved address, never address plus
+relocation addend. GOT base follows COMMON, independent of slot contents. The
+ordinary types are 3,9,25,26,27,28,29,30,31,41,42,43. TLS/dynamic work stays open.
+Test intent precedes implementation. Root and research review exact changes;
+lower-model sidecars N/A. No admitted runtime or RED/GREEN execution is claimed.
+
+## ELF COMDAT implementation ownership (2026-10-04)
+
+Base/expected release target: `07c4fb746ccbdd06be1934662cc5dcad9b7b4046`.
+Root integrates on `work/item4-stream-comdat-20261004` in the existing isolated
+`C:/dev/simple-item4-sha-owner-20261004` worktree. Child agents reuse their own
+clean GOT core/tests/docs worktrees on new matching `work/item4-stream-comdat-*`
+branches. Sparse unrelated root deletions remain outside their source commits.
+Runtime owns ELF group reading and stream input/layout/GOT/emission integration;
+acceptance owns `item4_stream_comdat_spec.spl`, fixtures and manual; research owns
+ABI/GNU experiments, design and independent source review. Root owns plans,
+reports, final review and the release-branch PR. Lower-model sidecars: N/A.
+
+Shared public methods on `ElfStreamInputsV1` are
+`elf_stream_comdat_validate_v1(object, cancelled)` and
+`elf_stream_comdat_section_kept_v1(owner, index, cancelled)`, returning
+`Result<bool, text>`. Existing public link/layout APIs remain unchanged.
+Test helpers use `item4_stream_comdat_*` and `std.spec.step`, real setup assertions
+and explicit failures. Initial executable intent precedes production edits.
+Undefined symbol archive demand follows the GNU experiment, while final errors
+follow surviving allocated references. No runtime RED/GREEN or coverage is
+claimed without an admitted self-hosted executable.
+
+## Resource evidence and worker ownership (2026-10-04)
+
+Root integrates `work/item4-resource-evidence-20261004` in the existing isolated
+root worktree from release base d11536cc67be20934752b566f63e2bb10ccfe7ee.
+Child agents reuse their own prior clean core/test/doc worktrees on matching
+`work/item4-resource-evidence-*` branches with new session records. Root owns
+link_accounting.spl, common plans, opt-in linker guide, review and merge; runtime
+owns the production resource_scope.spl observation path; acceptance owns
+classifier and real-file observation specs/manuals; research owns primary-source
+worker design and independent review. Sidecars N/A. Test intent precedes fixes.
+
+Shared production test seam: resource_scope_systemd_metrics_v1(show_output,
+exit_code, runtime_error, stdout_truncated, stderr_truncated), returning
+Option<(peak_bytes, cpu_ns)> from the actual systemd observation caller. Tests
+use item4_resource_evidence_* helper prefixes, std.spec.step and real assertions.
+Measurement-only APIs must not manufacture QualifiedJobScope. Missing or invalid
+peak files/properties must remain unavailable. The full worker's before-exec
+limits, no-swap, descendant ownership and parent-authoritative publication remain
+separate implementation obligations. All Simple tests remain UNRUN.
+
+User selection: the mold-style Simple linker stays accessible through explicit
+SIMPLE_LINKER=internal and is not made the default hosted linker.

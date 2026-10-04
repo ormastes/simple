@@ -69,10 +69,12 @@ adm_fail() {
 
 usage() {
     echo "usage: $0 --target=<//bootstrap:stageN> --reason=<typed-reason> --parent-compiler=<path> [--bootstrap-output=<path>] [--runtime-dir=<path>] [--out=<path>]" >&2
+    echo "       --validate-parent-only checks the complete existing Stage-2 authority and exits before planner compilation" >&2
     echo "       $0 --selftest" >&2
 }
 
 selftest=0
+validate_parent_only=0
 adm_target=''
 adm_reason=''
 adm_parent=''
@@ -90,6 +92,7 @@ adm_bootstrap_output=''
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --selftest) selftest=1 ;;
+        --validate-parent-only) validate_parent_only=1 ;;
         --target=*) adm_target=${1#*=} ;;
         --reason=*) adm_reason=${1#*=} ;;
         --parent-compiler=*) adm_parent=${1#*=} ;;
@@ -207,6 +210,18 @@ bootstrap_stage3_verify_stage2_admission_receipt \
     "$root" || adm_fail parent-stage2-admission-invalid
 [ "$(bootstrap_planner_v2_hash_file "$admission_candidate")" = "$parent_sha" ] || adm_fail parent-stage2-admission-candidate-mismatch
 
+# Reuse the entire canonical parent verifier when refreshing a generation from
+# an admitted Phase 2. Do not synthesize a weaker runtime-provenance receipt or
+# compile a planner just to establish the already measured parent authority.
+if [ "$validate_parent_only" -eq 1 ]; then
+    printf 'parent_path=%s\nparent_sha256=%s\nparent_admission_receipt=%s\n' \
+        "$parent_file" "$parent_sha" "$admission_file"
+    printf 'parent_runtime_path=%s\nparent_runtime_snapshot=%s\nparent_runtime_snapshot_sha256=%s\n' \
+        "$admission_root/stage2-runtime-authority" "$admission_runtime" \
+        "$(bootstrap_planner_v2_hash_file "$admission_runtime")"
+    exit 0
+fi
+
 planner_source="$adm_root/src/app/cli/bootstrap_reason_planner.spl"
 bootstrap_planner_v2_canonical_file "$planner_source" >/dev/null || adm_fail planner-source-missing
 bootstrap_planner_v2_canonical_dir "$adm_runtime" >/dev/null || adm_fail runtime-dir-missing
@@ -268,14 +283,15 @@ git_sha=$(bootstrap_planner_v2_hash_file "$adm_dir/git-state.txt")
 # one-file planner never calls. The closure is exactly what the closure snapshot
 # already records, so narrowing the compile set does not narrow the receipt.
 #
-# The build runs with cwd = "$stage" (a fresh mktemp dir) so the parent resolves
-# its relative `build/simple-core/libsimple_runtime.a` inside the staging dir and
-# builds that archive from the runtime tree that was just snapshotted. The
-# repo-root archive is a shared artifact that a concurrent lane can leave stale
-# at any moment; admission must not depend on, or mutate, it.
+# Source inventory admission owns paths relative to the real checkout. A fresh
+# temporary cwd makes every absolute source selector appear outside that owner.
+# Keep cwd at the measured checkout, with an explicit admitted runtime provider
+# and a private planner cache so ambient repo-root archives are never selected.
 build_planner_out=$(bootstrap_planner_v2_planner_path "$adm_dir" "$parent_file") || adm_fail planner-path-invalid
-if ! ( cd "$stage" && SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime" "$parent_file" \
+if ! ( cd "$adm_root" && SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$admission_root/stage2-runtime-authority" "$parent_file" \
         native-build --source "$adm_root/src/app/cli" --source "$adm_root/src/lib" \
+        --runtime-path "$admission_root/stage2-runtime-authority" --runtime-bundle core-c-bootstrap \
+        --cache-dir "$adm_dir/planner-cache" \
         --entry-closure --entry "$planner_source" -o "$build_planner_out" ) >"$adm_dir/planner-build.log" 2>&1; then
     adm_fail planner-build-failed
 fi

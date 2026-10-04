@@ -1,0 +1,96 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use app.bootstrap_builder.native_diagnostic_partition.*
+
+fn diagnostic_test_summary() -> NativeDiagnosticSummaryV1:
+    val digest = sha256_text("admitted test identity")
+    NativeDiagnosticSummaryV1(digest, digest, digest, digest, "phase3", "llvm",
+        0, 2, 5, 3, 2, 1, digest, digest)
+
+describe "independent SMF diagnostic partition contract":
+    it "assigns every full-inventory member exactly once across six owners":
+        var total: i64 = 0
+        for index in 0..17312:
+            var owners: i64 = 0
+            for partition in 0..6:
+                if native_diagnostic_partition_member_v1(index, 17312, partition, 6):
+                    owners = owners + 1
+            expect(owners).to_equal(1)
+            total = total + owners
+        expect(total).to_equal(17312)
+        expect(native_diagnostic_partition_member_v1(17312, 17312, 0, 6)).to_equal(false)
+        expect(native_diagnostic_partition_member_v1(0, 17312, 0, 0)).to_equal(false)
+
+    it "separates backend runtime source and partition cache identities":
+        val a = sha256_text("a")
+        val b = sha256_text("b")
+        val original = native_diagnostic_epoch_digest_v1(a, a, a, "llvm", 0, 6)
+        expect(original.len()).to_equal(64)
+        expect(original == native_diagnostic_epoch_digest_v1(a, a, a, "cranelift", 0, 6)).to_equal(false)
+        expect(original == native_diagnostic_epoch_digest_v1(b, a, a, "llvm", 0, 6)).to_equal(false)
+        expect(original == native_diagnostic_epoch_digest_v1(a, b, a, "llvm", 0, 6)).to_equal(false)
+        expect(original == native_diagnostic_epoch_digest_v1(a, a, b, "llvm", 0, 6)).to_equal(false)
+        expect(original == native_diagnostic_epoch_digest_v1(a, a, a, "llvm", 1, 6)).to_equal(false)
+
+    it "keeps a failed module terminal separate from artifact success":
+        val digest = sha256_text("source")
+        var row = NativeDiagnosticEntryResultV1(digest, "src/b.spl", digest,
+            "compiler-failed", "", sha256_text("semantic error"))
+        val payload = native_diagnostic_entry_encode_v1(row)
+        match native_diagnostic_entry_decode_v1(payload):
+            Ok(decoded):
+                expect(decoded.status).to_equal("compiler-failed")
+                expect(native_diagnostic_entry_matches_v1(decoded, digest, "src/b.spl", digest)).to_equal(true)
+                expect(native_diagnostic_entry_matches_v1(decoded, digest, "src/c.spl", digest)).to_equal(false)
+                expect(native_diagnostic_entry_matches_v1(decoded, sha256_text("other epoch"), "src/b.spl", digest)).to_equal(false)
+            Err(reason): expect(reason).to_equal("")
+        row.artifact_digest = digest
+        expect(native_diagnostic_entry_encode_v1(row)).to_equal("")
+        row.status = "unattempted"
+        expect(native_diagnostic_entry_encode_v1(row)).to_equal("")
+
+    it "publishes complete mixed traversal without hiding compiler failures":
+        val summary = diagnostic_test_summary()
+        val payload = native_diagnostic_summary_encode_v1(summary)
+        match native_diagnostic_summary_decode_v1(payload):
+            Ok(decoded):
+                expect(decoded.attempted).to_equal(3)
+                expect(decoded.compiled).to_equal(2)
+                expect(decoded.failed).to_equal(1)
+            Err(reason): expect(reason).to_equal("")
+
+    it "refuses incomplete interrupted and noncanonical summaries":
+        var summary = diagnostic_test_summary()
+        summary.attempted = 2
+        summary.compiled = 1
+        expect(native_diagnostic_summary_encode_v1(summary)).to_equal("")
+        summary = diagnostic_test_summary()
+        summary.failed = 0
+        expect(native_diagnostic_summary_encode_v1(summary)).to_equal("")
+        match native_diagnostic_summary_decode_v1(""):
+            Ok(_): expect("accepted missing completion").to_equal("")
+            Err(reason): expect(reason != "").to_equal(true)
+        match native_diagnostic_summary_decode_v1(native_diagnostic_summary_encode_v1(diagnostic_test_summary()) + "extra\n"):
+            Ok(_): expect("accepted trailing data").to_equal("")
+            Err(reason): expect(reason != "").to_equal(true)
+
+    it "admits the eightieth worker and round-trips its receipt while rejecting overflow":
+        val digest = sha256_text("eighty-owner boundary")
+        expect(native_diagnostic_partition_member_v1(79, 160, 79, 80)).to_equal(true)
+        expect(native_diagnostic_partition_member_v1(159, 160, 79, 80)).to_equal(true)
+        expect(native_diagnostic_partition_member_v1(79, 160, 78, 80)).to_equal(false)
+        expect(native_diagnostic_partition_member_v1(80, 160, 80, 81)).to_equal(false)
+        expect(native_diagnostic_epoch_digest_v1(digest, digest, digest, "llvm", 79, 80).len()).to_equal(64)
+        expect(native_diagnostic_epoch_digest_v1(digest, digest, digest, "llvm", 80, 81)).to_equal("")
+        var summary = NativeDiagnosticSummaryV1(digest, digest, digest, digest,
+            "phase4", "llvm", 79, 80, 160, 2, 1, 1, digest, digest)
+        val payload = native_diagnostic_summary_encode_v1(summary)
+        expect(payload != "").to_equal(true)
+        match native_diagnostic_summary_decode_v1(payload):
+            Ok(decoded):
+                expect(decoded.partition).to_equal(79)
+                expect(decoded.partitions).to_equal(80)
+                expect(decoded.failed).to_equal(1)
+            Err(reason): expect(reason).to_equal("")
+        summary.partitions = 81
+        expect(native_diagnostic_summary_encode_v1(summary)).to_equal("")

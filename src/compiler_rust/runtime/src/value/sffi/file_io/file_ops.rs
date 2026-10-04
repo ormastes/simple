@@ -1088,7 +1088,7 @@ pub unsafe extern "C" fn rt_file_lock(path_ptr: *const u8, path_len: u64, timeou
 
     #[cfg(unix)]
     {
-        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o644) };
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_CLOEXEC, 0o644) };
         if fd < 0 {
             return -1;
         }

@@ -1,0 +1,120 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.task_runner.contracts.{TaskRunnerAttemptV1, task_runner_attempt_error_v1, task_runner_process_outcome_v1}
+use std.common.task_runner.recovery.*
+
+fn runner_row(name: text, status: text, reason: text, process_code: i64,
+        task_code: i64, signal: i64, validated: bool) -> TaskRunnerAttemptV1:
+    TaskRunnerAttemptV1(identity_digest: sha256_text(name), group_id: "group-a",
+        attempt: 1, mode: "grouped", pid: 101, process_generation: 1,
+        status: status, reason: reason, exit_code: process_code,
+        task_exit_code: task_code, signal_number: signal, tree_reaped: true,
+        result_validated: validated, stdout_digest: sha256_text("stdout"),
+        stderr_digest: sha256_text("stderr"),
+        result_digest: if validated: sha256_text("validated " + name) else: "",
+        transport_execution_digest: sha256_text("actual argv/env/fixture"))
+
+describe "shared TaskRunner recovery":
+    it "preserves a validated member pass despite a later group crash":
+        val a = sha256_text("a")
+        val b = sha256_text("b")
+        val passed = runner_row("a", "passed", "result", 139, 0, 11, true)
+        expect(task_runner_attempt_error_v1(passed)).to_equal("")
+        val plan = task_runner_recovery_plan_v1("group-a", [a, b], [passed], true, true, 1, 2).unwrap()
+        expect(plan.passed).to_equal([a])
+        expect(plan.isolated).to_equal([b])
+        expect(plan.failed.len() + plan.aborted.len() + plan.exhausted.len()).to_equal(0)
+
+    it "keeps an ordinary assertion failure terminal without isolation":
+        val a = sha256_text("a")
+        val failed = runner_row("a", "failed", "assertion", 1, 1, 0, true)
+        val plan = task_runner_recovery_plan_v1("group-a", [a], [failed], false, true, 1, 2).unwrap()
+        expect(plan.failed).to_equal([a])
+        expect(plan.isolated.len()).to_equal(0)
+        expect(task_runner_execution_mode_v1(a, [failed]).unwrap()).to_equal("grouped")
+
+    it "isolates a known exact-identity crash before the next attempt":
+        val a = sha256_text("a")
+        val crashed = runner_row("a", "crashed", "process-signal", 139, -1, 11, false)
+        expect(task_runner_execution_mode_v1(a, [crashed]).unwrap()).to_equal("isolated")
+        expect(task_runner_execution_mode_v1(sha256_text("changed producer"), [crashed]).unwrap()).to_equal("grouped")
+        val unknown = runner_row("a", "not-run", "group-crashed", 139, -1, 11, false)
+        expect(task_runner_execution_mode_v1(a, [unknown]).unwrap()).to_equal("grouped")
+
+    it "never overlaps a still-live tree or exceeds the retry bound":
+        val a = sha256_text("a")
+        expect(task_runner_recovery_plan_v1("group-a", [a], [], true, false, 1, 2).is_err()).to_equal(true)
+        val plan = task_runner_recovery_plan_v1("group-a", [a], [], true, true, 2, 2).unwrap()
+        expect(plan.exhausted).to_equal([a])
+        expect(plan.isolated.len()).to_equal(0)
+
+    it "records missing normal-exit work as aborted instead of crash or pass":
+        val a = sha256_text("a")
+        val plan = task_runner_recovery_plan_v1("group-a", [a], [], false, true, 1, 2).unwrap()
+        expect(plan.aborted).to_equal([a])
+        expect(plan.passed.len() + plan.isolated.len()).to_equal(0)
+
+    it "rejects exit-zero without validated task evidence and duplicate attempts":
+        val a = sha256_text("a")
+        val empty_pass = runner_row("a", "passed", "result", 0, 0, 0, false)
+        expect(task_runner_recovery_plan_v1("group-a", [a], [empty_pass], false, true, 1, 2).is_err()).to_equal(true)
+        val passed = runner_row("a", "passed", "result", 0, 0, 0, true)
+        expect(task_runner_recovery_plan_v1("group-a", [a], [passed, passed], false, true, 1, 2).is_err()).to_equal(true)
+
+    it "distinguishes cancellation from retryable crashes and continues the ledger":
+        val a = sha256_text("a")
+        val b = sha256_text("b")
+        val cancelled = runner_row("a", "aborted", "cancelled", 143, -1, 15, false)
+        val passed = runner_row("b", "passed", "result", 0, 0, 0, true)
+        val plan = task_runner_recovery_plan_v1("group-a", [a, b], [cancelled, passed], false, true, 1, 2).unwrap()
+        expect(plan.aborted).to_equal([a])
+        expect(plan.passed).to_equal([b])
+        expect(plan.isolated.len()).to_equal(0)
+
+    it "does not classify arbitrary nonzero exits as native crashes":
+        val invalid = runner_row("a", "crashed", "native-exception", 2, -1, 0, false)
+        expect(task_runner_attempt_error_v1(invalid) != "").to_equal(true)
+        val access_violation = runner_row("a", "crashed", "native-exception", -1073741819, -1, 0, false)
+        expect(task_runner_attempt_error_v1(access_violation)).to_equal("")
+
+    it "classifies real process observations before any task admission":
+        expect(task_runner_process_outcome_v1(17, 0, false, false, true).unwrap()).to_equal("exited")
+        expect(task_runner_process_outcome_v1(0, 0, false, false, true).unwrap()).to_equal("exited")
+        expect(task_runner_process_outcome_v1(0, 11, false, false, true).unwrap()).to_equal("crashed")
+        expect(task_runner_process_outcome_v1(-1073741819, 0, false, false, true).unwrap()).to_equal("crashed")
+        expect(task_runner_process_outcome_v1(0, 15, false, true, true).unwrap()).to_equal("cancelled")
+        expect(task_runner_process_outcome_v1(124, 0, true, false, true).unwrap()).to_equal("timed-out")
+        expect(task_runner_process_outcome_v1(0, 11, false, false, false).is_err()).to_equal(true)
+
+    it "rejects historical windows but retains their crash isolation hint":
+        val a = sha256_text("a")
+        val old = runner_row("a", "crashed", "process-signal", 139, -1, 11, false)
+        expect(task_runner_execution_mode_v1(a, [old]).unwrap()).to_equal("isolated")
+        expect(task_runner_recovery_plan_v1("new-window", [a], [old], true, true, 1, 2).is_err()).to_equal(true)
+        val fresh = task_runner_recovery_plan_v1("new-window", [a], [], true, true, 1, 2).unwrap()
+        expect(fresh.isolated).to_equal([a])
+
+    it "retains validated skip and pending without success or crash retry":
+        val a = sha256_text("a")
+        val b = sha256_text("b")
+        val skipped = runner_row("a", "skipped", "skipped", 0, -1, 0, true)
+        val pending = runner_row("b", "pending", "pending", 0, -1, 0, true)
+        val plan = task_runner_recovery_plan_v1("group-a", [a, b], [skipped, pending], false, true, 1, 2).unwrap()
+        expect(plan.skipped).to_equal([a])
+        expect(plan.pending).to_equal([b])
+        expect(plan.passed.len() + plan.failed.len() + plan.isolated.len() + plan.aborted.len()).to_equal(0)
+        val unproved = runner_row("a", "skipped", "skipped", 0, -1, 0, false)
+        expect(task_runner_attempt_error_v1(unproved) != "").to_equal(true)
+
+    it "resumes only unknown ordinary interruption work in normal groups":
+        val a = sha256_text("a")
+        val b = sha256_text("b")
+        val failed = runner_row("a", "failed", "assertion", 1, 1, 0, true)
+        val unknown = runner_row("b", "not-run", "group-interrupted", 1, -1, 0, false)
+        val plan = task_runner_recovery_plan_v1("group-a", [a, b], [failed, unknown], false, true, 1, 2, true).unwrap()
+        expect(plan.failed).to_equal([a])
+        expect(plan.grouped).to_equal([b])
+        expect(plan.isolated.len()).to_equal(0)
+        expect(task_runner_execution_mode_v1(b, [unknown]).unwrap()).to_equal("grouped")
+        val exhausted = task_runner_recovery_plan_v1("group-a", [b], [], false, true, 2, 2, true).unwrap()
+        expect(exhausted.exhausted).to_equal([b])
