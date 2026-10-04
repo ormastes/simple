@@ -12,7 +12,7 @@ remain unchanged; Simple linking is selected explicitly.
 | Windows | Native wrapper has internal COFF/PE routing and AMD64/ARM64 handling | Complete runtime/library imports, relocation and unwind corpus; run the actual linker and its produced application on each admitted Windows architecture; preserve explicit selection and no-clobber behavior |
 | Linux | Explicit internal ELF hosted wrapper; retained x64 stream handles COMMON/GOT/COMDAT | Complete remaining ELF/TLS/unwind and full-product semantics, trusted opt-in CLI admission, actual link/load/run corpus and constrained worker evidence |
 | FreeBSD | Hosted ELF wrapper selects FreeBSD CRT/runtime and brands the image | Run actual linker/compiler/application in FreeBSD, validate CRT/interpreter/ABI and failures; use the repository QEMU bootstrap/check entrypoint when exercising from Linux |
-| macOS | Explicit internal native route consumes objects/archives and binary/text providers; v4/v5 parsing, reexport graphs, direct-client checks and explicit SDK lookup are source-implemented and runtime-unverified | Complete owner-specific dependency @rpath, remaining SDK policy/binding and dyld-cache provider support, configuration/TLS/TLV/unwind/weak semantics and managed admission; execute the actual wrapper and Darwin loader/signing checks on both architectures |
+| macOS | Explicit internal native route consumes objects/archives and binary/text providers; v4/v5 parsing, reexport graphs, direct-client checks and explicit SDK lookup are source-implemented; owner-specific dependency @rpath candidate now carries binary/V5 paths into actual native lookup. All remain runtime-unverified | Finish exact runpath candidate review and actual SDK corpus verification; complete remaining SDK policy/binding and dyld-cache provider support, configuration/TLS/TLV/unwind/weak semantics and managed admission; execute the actual wrapper and Darwin loader/signing checks on both architectures |
 | SimpleOS | Explicit cross-target BootLayoutPlan path emits x64/arm64 images | Separately establish a linker executable running inside SimpleOS, its file/process/runtime owners, and on-guest link/load/run acceptance; host-side image generation and booting a generated image alone are insufficient |
 
 Current production admission also requires review: managed native mode rejects
@@ -35,3 +35,7 @@ host execution gates. The Mach-O adapter requires explicit versions/signing
 identity and rejects unsupported policy; its binary/text leaf-provider path does not imply a
 normal SDK or full application links successfully. Simple compilation, host/guest
 runs, coverage and full Phase 4 qualification remain UNRUN.
+
+Runpath source review now covers core `78194e42070`, native routing `ccb9ae0c20b`
+and seven authored acceptance scenarios at `f64c60b4f56`, without concrete P0/P1
+findings. This review does not supply an admitted runtime or complete any host row.

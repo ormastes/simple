@@ -19,13 +19,21 @@ fn macho_read_binary_provider_v1(bytes: [u8], target: RelocArch) -> Result<MachO
             library_ordinal: symbol.library_ordinal, import_name: symbol.import_name))
     var clients: [text] = []
     var umbrella: Option<text> = nil
+    var rpaths: [text] = []
     # Original reader has checked the complete command envelope and each length.
     # Policy commands were opaque there; validate their own string payload here.
     var at: i64 = 32
     for index in 0..macho_read(bytes, 16, 4):
         val kind = macho_read(bytes, at, 4)
         val length = macho_read(bytes, at + 4, 4)
-        if kind == 0x12 or kind == 0x14:
+        if kind == 0x8000001c:
+            if length < 16: return Err("truncated Mach-O provider rpath command")
+            val offset = macho_read(bytes, at + 8, 4)
+            if offset < 12 or offset >= length: return Err("Mach-O provider rpath outside command")
+            val path = macho_bounded_string(bytes, at + offset, at + length)?
+            if path == "": return Err("empty Mach-O provider rpath")
+            rpaths = rpaths.push(path)
+        elif kind == 0x12 or kind == 0x14:
             if length < 16: return Err("truncated Mach-O provider client/umbrella command")
             val offset = macho_read(bytes, at + 8, 4)
             if offset < 12 or offset >= length: return Err("Mach-O provider client/umbrella name outside command")
@@ -40,7 +48,7 @@ fn macho_read_binary_provider_v1(bytes: [u8], target: RelocArch) -> Result<MachO
     val provider = MachOProviderV1(target: target, platform: library.platform, install_name: library.install_name,
         current_version: library.current_version, compatibility_version: library.compatibility_version,
         minimum_os: Some(library.minimum_os), sdk: Some(library.sdk), dependencies: dependencies,
-        exports: exports, allowable_clients: clients, parent_umbrella: umbrella)
+        exports: exports, allowable_clients: clients, parent_umbrella: umbrella, rpaths: rpaths)
     macho_validate_provider_v1(provider, target)?
     Ok(provider)
 
