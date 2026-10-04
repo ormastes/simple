@@ -360,7 +360,8 @@ use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlo
 use std.skia.entity.font.{sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
 use std.skia.feature.glyph.ot_parser.{parse_offset_table}
 use std.skia.feature.shaper.font_fallback.{fallback_chain_new}
-use std.skia.feature.shaper.shaper.{shaped_run_to_font_glyph_run, shaper_new, shaper_shape_with_language, shaper_with_ot_face, shaper_with_ot_font}
+use std.skia.feature.shaper.shaper.{shaped_run_to_font_glyph_run, shaper_new, shaper_shape_with_language, shaper_with_ot_face_blob_hex, shaper_with_ot_font}
+use std.common.crypto.sha256.{sha256_u8_hex}
 use std.skia.feature.shaper.script_detect.{Script, script_of}
 export use std.nogc_sync_mut.text_layout.font_types.{
     CachedGlyph, FontCacheStats, FontGlyphRun, FontTextPayload, FontRenderQuad, FontRenderBatch,
@@ -3208,6 +3209,24 @@ fn _resolved_font_empty_shaped() -> _ResolvedShapedGlyphRun:
 
 # Producer-only shaping. The transient face is released before this semantic
 # result leaves the resolver; Draw IR never owns a face handle or atlas data.
+# SHA-256 hex of a selected face's blob, memoised per (path, byte length,
+# loaded-face identity). The shaper re-verifies the blob against the face
+# identity on every shaped run; computing that digest in pure Simple over an
+# 845 KB Arabic face cost ~45 s per run in the interpreter, so a page with a
+# few complex-script runs (wikipedia.org's language links) blew the render
+# budget. The identity is the face's own native content digest, so a hit means
+# the file at this path holds the same bytes the cached digest was taken from;
+# a changed file changes the identity and misses.
+var _shaped_face_blob_hex_cache: Dict<text, text> = {}
+
+fn _shaped_face_blob_sha256_hex(font_path: text, font_blob: [u8], face_identity: text) -> text:
+    val key = font_path + "\n" + font_blob.len().to_string() + "\n" + face_identity
+    if _shaped_face_blob_hex_cache.has(key):
+        return _shaped_face_blob_hex_cache[key]
+    val hex = sha256_u8_hex(font_blob)
+    _shaped_face_blob_hex_cache[key] = hex
+    hex
+
 fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: text, font_size: i32, language: text) -> _ResolvedShapedGlyphRun:
     if not selected_font_simple_tuple_accepted(candidate.family, language):
         return _resolved_font_empty_shaped()
@@ -3244,7 +3263,8 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
             return _resolved_font_empty_shaped()
         val face = loaded.?
         val font = sk_font_new(sk_typeface_from_attached_font(candidate.family, sk_font_style_normal(), font_path, face.handle), font_size.to_f64())
-        val shaper = shaper_with_ot_face(shaper_new(fallback_chain_new(font)), face.handle, parsed.?)
+        val blob_hex = _shaped_face_blob_sha256_hex(font_path, font_blob, font_face_identity(face.handle, face.generation))
+        val shaper = shaper_with_ot_face_blob_hex(shaper_new(fallback_chain_new(font)), face.handle, parsed.?, blob_hex)
         val result = (shaper_shape_with_language(shaper, codepoints, font, 0.0, 0.0, language), face.handle, face.generation)
         free_font(face)
         result
