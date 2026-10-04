@@ -1,0 +1,193 @@
+# Native and interpreted aggregate tasks use the same parent-owned dispatcher.
+# This module consumes the already-verified binary enumeration and database
+# inventory; it does not confer bootstrap/source admission on either artifact.
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1, task_runner_identity_v1, task_runner_native_exception_v1}
+use std.common.task_runner.recovery.{TaskRunnerRecoveryPlanV1, task_runner_execution_mode_v1, task_runner_recovery_plan_v1}
+use std.common.task_runner.journal.{TaskRunnerJournalV1, task_runner_journal_identity_v1, task_runner_journal_history_v1, task_runner_journal_append_v1}
+use std.test_runner.aggregate_task_ledger.{AggregateTaskInventoryV1, AggregateTaskProgressV1, aggregate_task_inventory_v1, aggregate_task_progress_v1}
+use std.test_runner.task_runner_adapter.{test_case_attempt_v1}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceScope, run_in_owned_test_resource_scope}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded}
+use std.io_runtime.{file_hash_sha256_or_empty}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.process_completion.{ProcessCompletionV1}
+use std.nogc_sync_mut.io.env_ops.{env_vars}
+use std.io_runtime.{cwd}
+
+fn aggregate_test_environment_digest_v1() -> Result<text, text>:
+    val snapshot = env_vars()
+    if snapshot == nil: return Err("test environment snapshot unavailable")
+    var fields: [text] = []
+    for (key, value) in snapshot ?? []:
+        fields.push(str(key.len()) + ":" + key + str(value.len()) + ":" + value)
+    fields.sort()
+    var payload = "SIMPLE-TEST-PARENT-ENVIRONMENT-1\n" + cwd() + "\n"
+    for field in fields: payload = payload + str(field.len()) + ":" + field
+    Ok(sha256_text(payload))
+
+struct AggregateTestCommandV1:
+    program: text
+    program_digest: text
+    environment_digest: text
+    prefix_args: [text]
+    artifact_path: text
+    artifact_digest: text
+    runtime_mode: text
+    work_root: text
+    group_id: text
+    expected_header: text
+
+struct AggregateTestEnumerationV1:
+    inventory: AggregateTaskInventoryV1
+    completion: ProcessCompletionV1
+    ledger_path: text
+
+fn aggregate_test_enumerate_v1(command: AggregateTestCommandV1,
+        scope: ExecutionResourceScope) -> Result<AggregateTestEnumerationV1, text>:
+    if command.runtime_mode != "native" and command.runtime_mode != "interpreter":
+        return Err("invalid aggregate execution engine")
+    if aggregate_test_environment_digest_v1()? != command.environment_digest:
+        return Err("aggregate parent environment changed")
+    if file_hash_sha256_or_empty(command.program) != command.program_digest:
+        return Err("aggregate execution program changed before enumeration")
+    if file_hash_sha256_or_empty(command.artifact_path) != command.artifact_digest:
+        return Err("aggregate artifact changed before enumeration")
+    val ledger = command.work_root + "/enumeration.tsv"
+    if file_exists(ledger): return Err("enumeration ledger already exists")
+    var args = command.prefix_args
+    args.push("--enumerate")
+    args.push("--runtime-mode=" + command.runtime_mode)
+    args.push("--registry-output=" + ledger)
+    val observed = run_in_owned_test_resource_scope(scope, command.program, args)
+    val completion = match observed.process.completion:
+        case Some(value): value
+        case nil: return Err("enumeration process completion is unproven")
+    if not completion.tree_reaped or completion.exit_code != 0 or completion.signal_number != 0 or
+            completion.timed_out or completion.cancelled or observed.process.runtime_error != 0:
+        return Err("binary enumeration did not complete successfully")
+    if file_hash_sha256_or_empty(command.artifact_path) != command.artifact_digest:
+        return Err("aggregate artifact changed during enumeration")
+    if file_hash_sha256_or_empty(command.program) != command.program_digest:
+        return Err("aggregate execution program changed during enumeration")
+    val payload = file_read_regular_no_follow_bounded(ledger, 67108864)?
+    val inventory = aggregate_task_inventory_v1(payload)?
+    if inventory.header != command.expected_header: return Err("binary enumeration differs from pinned product")
+    Ok(AggregateTestEnumerationV1(inventory, completion, ledger))
+
+struct AggregateTestBatchV1:
+    journal: TaskRunnerJournalV1
+    attempts: [TaskRunnerAttemptV1]
+    recovery: TaskRunnerRecoveryPlanV1
+    completion: ProcessCompletionV1
+    transport_failed: bool
+    infrastructure_error: text
+
+struct AggregateTestGroupV1:
+    identities: [text]
+    mode: text
+
+fn aggregate_test_initial_groups_v1(owner: TaskRunnerJournalV1,
+        identities: [TaskRunnerIdentityV1]) -> Result<[AggregateTestGroupV1], text>:
+    var groups: [AggregateTestGroupV1] = []
+    var normal: [text] = []
+    var isolated: [text] = []
+    for identity in identities:
+        val digest = task_runner_identity_v1(identity)?
+        val registered = task_runner_journal_identity_v1(owner, digest)?
+        if registered.case_id == "": return Err("aggregate task lacks registered case identity")
+        val history = task_runner_journal_history_v1(owner, digest)?
+        val mode = task_runner_execution_mode_v1(digest, history)?
+        if mode == "isolated":
+            isolated.push(digest)
+        else:
+            normal.push(digest)
+            # Bound argv bytes on Windows; isolated selection reuses the same
+            # binary and never recompiles or re-runs completed green cases.
+            if normal.len() == 128:
+                groups.push(AggregateTestGroupV1(normal, "grouped"))
+                normal = []
+    if normal.len() > 0: groups.push(AggregateTestGroupV1(normal, "grouped"))
+    for digest in isolated: groups.push(AggregateTestGroupV1([digest], "isolated"))
+    Ok(groups)
+
+fn aggregate_test_run_batch_v1(owner: TaskRunnerJournalV1,
+        inventory: AggregateTaskInventoryV1, command: AggregateTestCommandV1,
+        scope: ExecutionResourceScope, expected: [text], scheduled: [text], attempt: i64,
+        mode: text, prior: [TaskRunnerAttemptV1], max_attempts: i64) -> Result<AggregateTestBatchV1, text>:
+    if expected.len() == 0 or expected.len() > 128 or scheduled.len() == 0 or scheduled.len() > expected.len() or
+            (mode != "grouped" and mode != "isolated") or
+            (mode == "isolated" and scheduled.len() != 1):
+        return Err("invalid aggregate execution batch")
+    if command.runtime_mode != "native" and command.runtime_mode != "interpreter":
+        return Err("invalid aggregate execution engine")
+    if aggregate_test_environment_digest_v1()? != command.environment_digest:
+        return Err("aggregate parent environment changed")
+    if inventory.header != command.expected_header: return Err("execution inventory differs from pinned product")
+    if command.group_id == "" or command.work_root == "" or attempt < 1 or attempt > max_attempts or max_attempts > 3:
+        return Err("invalid aggregate recovery window")
+    if file_hash_sha256_or_empty(command.artifact_path) != command.artifact_digest:
+        return Err("aggregate artifact changed before execution")
+    if file_hash_sha256_or_empty(command.program) != command.program_digest:
+        return Err("aggregate execution program changed before execution")
+    var identities: [TaskRunnerIdentityV1] = []
+    var selected: [text] = []
+    for digest in scheduled:
+        if not expected.contains(digest): return Err("scheduled case is outside recovery group")
+        val identity = task_runner_journal_identity_v1(owner, digest)?
+        if not inventory.metadata.contains_key(identity.case_id) or selected.contains(identity.case_id):
+            return Err("batch identity differs from binary inventory")
+        if attempt == 1:
+            val history = task_runner_journal_history_v1(owner, digest)?
+            if task_runner_execution_mode_v1(digest, history)? == "isolated" and mode != "isolated":
+                return Err("known crash must be isolated before its first attempt")
+        identities.push(identity)
+        selected.push(identity.case_id)
+    val ledger = command.work_root + "/attempt-" + str(attempt) + "-" + sha256_text(selected.join("\n")) + ".tsv"
+    if file_exists(ledger): return Err("aggregate attempt ledger already exists")
+    var args = command.prefix_args
+    args.push("--run")
+    args.push("--runtime-mode=" + command.runtime_mode)
+    args.push("--registry-output=" + ledger)
+    for id in selected: args.push("--case-id=" + id)
+    val observed = run_in_owned_test_resource_scope(scope, command.program, args)
+    val completion = match observed.process.completion:
+        case Some(value): value
+        case nil: return Err("aggregate process completion is unproven; expected cases remain missing")
+    if not completion.tree_reaped: return Err("aggregate tree has not been collected")
+    if file_hash_sha256_or_empty(command.artifact_path) != command.artifact_digest:
+        return Err("aggregate artifact changed during execution")
+    if file_hash_sha256_or_empty(command.program) != command.program_digest:
+        return Err("aggregate execution program changed during execution")
+    val crashed = not completion.timed_out and not completion.cancelled and
+        (completion.signal_number > 0 or task_runner_native_exception_v1(completion.exit_code))
+    var progress = AggregateTaskProgressV1({}, "", false, false, -1, -1)
+    var infrastructure_error = ""
+    if file_exists(ledger):
+        match file_read_regular_no_follow_bounded(ledger, 67108864):
+            case Ok(payload):
+                match aggregate_task_progress_v1(inventory, payload, selected):
+                    case Ok(value): progress = value
+                    case Err(message): infrastructure_error = message
+            case Err(message): infrastructure_error = message
+    elif not crashed:
+        infrastructure_error = "aggregate process did not publish a registry"
+    if not progress.complete and not crashed and not completion.timed_out and not completion.cancelled:
+        infrastructure_error = "aggregate process stopped without a complete registry or crash evidence"
+    var next = owner
+    var attempts = prior
+    for identity in identities:
+        val row = test_case_attempt_v1(identity, command.group_id, attempt, mode,
+            completion, inventory, progress)?
+        next = task_runner_journal_append_v1(next, row)?
+        attempts.push(row)
+    val recovery = task_runner_recovery_plan_v1(command.group_id, expected,
+        attempts, crashed, completion.tree_reaped, attempt, max_attempts)?
+    Ok(AggregateTestBatchV1(next, attempts, recovery, completion,
+        completion.exit_code != 0 or completion.signal_number != 0 or
+        completion.timed_out or completion.cancelled or observed.process.runtime_error != 0 or
+        infrastructure_error != "", infrastructure_error))
+
+export AggregateTestCommandV1, AggregateTestBatchV1, AggregateTestGroupV1
+export AggregateTestEnumerationV1, aggregate_test_enumerate_v1
+export aggregate_test_initial_groups_v1, aggregate_test_run_batch_v1
+export aggregate_test_environment_digest_v1

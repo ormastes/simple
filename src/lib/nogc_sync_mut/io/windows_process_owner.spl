@@ -29,6 +29,8 @@ struct WindowsProcessPollV1:
     exit_code: i64
     timed_out: bool
     cancelled: bool
+    pid: i64 = 0
+    process_generation: i64 = 0
 
 class WindowsProcessLeaseV1:
     slot: i64
@@ -44,6 +46,7 @@ enum WindowsProcessAdmissionV1:
 struct WindowsProcessStateV1:
     job: i64
     process: i64
+    pid: i64
     heap: i64
     accounting: i64
     exit_slot: i64
@@ -413,6 +416,7 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
     var attributes_initialized = false
     var job: i64 = 0
     var process: i64 = 0
+    var process_id: i64 = 0
     var thread: i64 = 0
     var creation_attempted = false
     if error == "" and required_available_bytes > 0:
@@ -479,6 +483,7 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
         else:
             process = volatile_read_u64(process_info)
             thread = volatile_read_u64(process_info + 8)
+            process_id = volatile_read_u32(process_info + 16)
             if AssignProcessToJobObject(job, process) == 0:
                 error = "suspended process job assignment failed"
             elif ResumeThread(thread) == 4294967295u32:
@@ -516,7 +521,7 @@ fn windows_process_admit_with_reserve_v1(request: WindowsProcessRequestV1, memor
     val _thread_closed = CloseHandle(thread)
     val slot = _windows_process_slots_v1.len()
     _windows_process_slots_v1 = _windows_process_slots_v1.push(WindowsProcessStateV1(
-        job: job, process: process, heap: heap, accounting: accounting,
+        job: job, process: process, pid: process_id, heap: heap, accounting: accounting,
         exit_slot: exit_slot, pins: pins, deadline: if request.timeout_ms == 0: 0u64 else: GetTickCount64() + (request.timeout_ms as u64),
         closed: false, timed_out: false, cancelled: false))
     WindowsProcessAdmissionV1.Started(WindowsProcessLeaseV1(slot: slot))
@@ -554,7 +559,8 @@ fn windows_process_poll_v1(lease: WindowsProcessLeaseV1) -> Result<WindowsProces
     Ok(WindowsProcessPollV1(terminal: waited == 0u32 and active == 0,
         leader_reaped: waited == 0u32, tree_empty: active == 0,
         active_processes: active, exit_code: exit_code,
-        timed_out: state.timed_out, cancelled: state.cancelled))
+        timed_out: state.timed_out, cancelled: state.cancelled,
+        pid: state.pid, process_generation: lease.slot + 1))
 
 @unsafe(reason: "invalidates owner slot before releasing terminal process/job/file identities", capabilities: [ffi, raw_ptr])
 fn windows_process_collect_v1(lease: WindowsProcessLeaseV1) -> Result<WindowsProcessPollV1, text>:

@@ -1,0 +1,155 @@
+# Compiled parent entry for one independent aggregate product. The bootstrap
+# DAG runs every product even when this entry returns nonzero. Input digest
+# bindings are not a replacement for canonical bootstrap admission.
+use std.sffi.cli.{cli_get_args}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_exists}
+use std.nogc_sync_mut.sffi.fs.{file_create_excl}
+use std.nogc_sync_mut.fs.host_path.{host_path_is_absolute}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope}
+use std.io_runtime.{file_hash_sha256_or_empty}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1}
+use std.common.task_runner.journal.{task_runner_journal_open_v1, task_runner_journal_release_v1}
+use std.common.task_runner.snapshot.{task_runner_snapshot_commit_v1}
+use std.test_runner.aggregate_task_executor.{AggregateTestCommandV1, aggregate_test_enumerate_v1, aggregate_test_environment_digest_v1}
+use std.test_runner.aggregate_task_driver.{aggregate_task_identities_v1, aggregate_task_run_v1}
+
+fn _task_manifest(path: text) -> Result<Dict<text, text>, text>:
+    val payload = file_read_regular_no_follow_bounded(path, 1048576)?
+    if not payload.ends_with("\n"): return Err("incomplete task manifest")
+    var fields: Dict<text, text> = {}
+    for line in payload.split("\n"):
+        if line == "": continue
+        val split = line.index_of("=")
+        if split <= 0: return Err("malformed task manifest")
+        val key = line[0:split]
+        if fields.contains_key(key): return Err("duplicate task manifest field")
+        fields[key] = line[split + 1:]
+    Ok(fields)
+
+fn _task_field(fields: Dict<text, text>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key) or fields[key] == "": return Err("missing task field: " + key)
+    Ok(fields[key])
+
+fn _task_bound_file(fields: Dict<text, text>, name: text) -> Result<text, text>:
+    val path = _task_field(fields, name + "_path")?
+    val digest = _task_field(fields, name + "_digest")?
+    if not host_path_is_absolute(path) or not builder_digest_valid_v1(digest):
+        return Err("invalid bound task file: " + name)
+    if file_hash_sha256_or_empty(path) != digest: return Err("changed bound task file: " + name)
+    Ok(digest)
+
+fn _task_run(options: Dict<text, text>) -> Result<text, text>:
+    val identity_path = _task_field(options, "identity-manifest")?
+    val inventory_path = _task_field(options, "inventory-manifest")?
+    val identity_digest = _task_field(options, "identity-manifest-sha256")?
+    val inventory_digest = _task_field(options, "inventory-manifest-sha256")?
+    if file_hash_sha256_or_empty(identity_path) != identity_digest or
+            file_hash_sha256_or_empty(inventory_path) != inventory_digest:
+        return Err("input manifest differs from frozen command")
+    val identity = _task_manifest(identity_path)?
+    val product = _task_manifest(inventory_path)?
+    if _task_field(identity, "format")? != "SIMPLE-AGGREGATE-TASK-IDENTITY-1" or
+            _task_field(product, "format")? != "SIMPLE-AGGREGATE-TASK-PRODUCT-1":
+        return Err("unsupported aggregate task manifest")
+    val stage = _task_field(options, "stage")?
+    val backend = _task_field(options, "backend")?
+    if not ["P2", "earlyP4-fromP2", "properP4-fromP3"].contains(stage) or
+            not ["llvm", "cranelift"].contains(backend) or
+            _task_field(identity, "stage")? != stage or _task_field(identity, "backend")? != backend:
+        return Err("stage or backend differs from frozen task identity")
+    if _task_field(options, "threads")? != "80": return Err("expected admitted 80-worker policy")
+    val producer = _task_bound_file(identity, "producer")?
+    val source = _task_bound_file(identity, "source")?
+    val runtime = _task_bound_file(identity, "runtime")?
+    val toolchain = _task_bound_file(identity, "toolchain")?
+    val policy = _task_bound_file(identity, "policy")?
+    val execution = _task_bound_file(identity, "execution")?
+    val program_digest = _task_bound_file(product, "program")?
+    val artifact_digest = _task_bound_file(product, "artifact")?
+    val whole = _task_field(product, "whole_inventory_digest")?
+    val subset = _task_field(product, "subset_digest")?
+    if not builder_digest_valid_v1(whole) or not builder_digest_valid_v1(subset):
+        return Err("invalid product inventory digest")
+    val subsystem = _task_field(product, "subsystem")?
+    if not ["compiler", "interpreter", "loader"].contains(subsystem): return Err("invalid test subsystem")
+    val runtime_mode = _task_field(product, "runtime_mode")?
+    val count_text = _task_field(product, "prefix_count")?
+    if count_text.len() > 2: return Err("command prefix exceeds bound")
+    val prefix_count = count_text.to_int() ?? -1
+    if prefix_count < 0 or prefix_count > 16 or str(prefix_count) != count_text:
+        return Err("invalid command prefix count")
+    var prefix: [text] = []
+    for index in 0..prefix_count: prefix.push(_task_field(product, "prefix_" + str(index))?)
+    val root = _task_field(options, "report-root")?
+    val nonce = _task_field(identity, "run_nonce")?
+    val command = AggregateTestCommandV1(program: _task_field(product, "program_path")?,
+        program_digest: program_digest, environment_digest: aggregate_test_environment_digest_v1()?,
+        prefix_args: prefix, artifact_path: _task_field(product, "artifact_path")?,
+        artifact_digest: artifact_digest, runtime_mode: runtime_mode, work_root: root,
+        group_id: nonce, expected_header: "simple-subsystem-registry-v1\t" + backend +
+            "\t" + subsystem + "\t" + whole + "\t" + subset)
+    # Work deadlines are explicitly disabled for this diagnostic entry. The
+    # process owner still retains its finite collection and stream limits.
+    val scope = execution_resource_scope(ExecutionResourceClass.Unbounded, 0, 134217728)
+    val enumeration = aggregate_test_enumerate_v1(command, scope)?
+    val template = TaskRunnerIdentityV1("test", subsystem, "", backend, stage,
+        producer, source, runtime, toolchain, policy, execution)
+    val identities = aggregate_task_identities_v1(template, command, enumeration.inventory)?
+    val owner = task_runner_journal_open_v1(_task_field(options, "db-root")?, nonce, source, identities)?
+    val executed = aggregate_task_run_v1(owner, enumeration.inventory, command, scope, identities, 3)
+    if executed.is_err():
+        val _released = task_runner_journal_release_v1(owner)
+        return Err(executed.unwrap_err())
+    val run = executed.unwrap()
+    val totals = run.totals
+    val snapshot = task_runner_snapshot_commit_v1(run.journal, run.journal.revision)
+    val released = task_runner_journal_release_v1(run.journal)
+    var complete = run.infrastructure_error == "" and snapshot.is_ok() and released.is_ok()
+    # A fully collected assertion failure is complete but unsuccessful. A
+    # crash that later passes remains unsuccessful through transport_failed.
+    val failed = not complete or run.transport_failed or totals.failed > 0 or
+        totals.crashed > 0 or totals.exhausted > 0 or totals.aborted > 0 or
+        totals.not_run > 0 or totals.pending > 0 or totals.passed == 0
+    var summary = "format=SIMPLE-AGGREGATE-TASK-SUMMARY-1\n"
+    summary = summary + "provenance_status=caller-bound-unadmitted\nstage=" + stage + "\nbackend=" + backend + "\nsubsystem=" + subsystem + "\nruntime_mode=" + runtime_mode + "\n"
+    summary = summary + "identity_manifest_digest=" + identity_digest + "\ninventory_manifest_digest=" + inventory_digest + "\n"
+    summary = summary + "producer_digest=" + producer + "\nsource_digest=" + source + "\nruntime_digest=" + runtime + "\ntoolchain_digest=" + toolchain + "\npolicy_digest=" + policy + "\nexecution_digest=" + execution + "\n"
+    summary = summary + "artifact_digest=" + artifact_digest + "\nprogram_digest=" + program_digest + "\nenvironment_digest=" + command.environment_digest + "\n"
+    summary = summary + "expected_inventory_digest=" + file_hash_sha256_or_empty(enumeration.ledger_path) + "\nexpected_count=" + str(totals.expected) + "\n"
+    summary = summary + "pass=" + str(totals.passed) + "\nfail=" + str(totals.failed) + "\ncrash=" + str(totals.crashed) + "\nexhausted=" + str(totals.exhausted) + "\nskip=" + str(totals.skipped) + "\npending=" + str(totals.pending) + "\nabort=" + str(totals.aborted) + "\nnotrun=" + str(totals.not_run) + "\ncrash_attempts=" + str(totals.crash_attempts) + "\n"
+    summary = summary + "task_db_revision=" + (if snapshot.is_ok(): snapshot.unwrap() else: "unavailable") + "\ntask_db_identity=" + run.journal.database_identity + "\n"
+    summary = summary + "transport_failed=" + (if run.transport_failed: "1" else: "0") + "\n"
+    summary = summary + "completion=" + (if complete: "1" else: "0") + "\naggregate_exit=" + (if failed: "1" else: "0") + "\n"
+    if run.infrastructure_error != "": summary = summary + "error_digest=" + sha256_text(run.infrastructure_error) + "\n"
+    Ok(summary)
+
+fn main() -> i64:
+    var options: Dict<text, text> = {}
+    val allowed = ["stage", "backend", "identity-manifest", "identity-manifest-sha256",
+        "inventory-manifest", "inventory-manifest-sha256", "report-root", "db-root", "threads"]
+    for arg in cli_get_args():
+        if not arg.starts_with("--"): continue
+        val split = arg.index_of("=")
+        if split < 3: return 2
+        val name = arg[2:split]
+        if not allowed.contains(name) or options.contains_key(name): return 2
+        options[name] = arg[split + 1:]
+    for name in allowed:
+        if not options.contains_key(name) or options[name] == "": return 2
+    for name in ["identity-manifest", "inventory-manifest", "report-root", "db-root"]:
+        if not host_path_is_absolute(options[name]): return 2
+    val summary_path = options["report-root"] + "/summary.env"
+    if file_exists(summary_path): return 2
+    var code: i64 = 2
+    var summary = ""
+    match _task_run(options):
+        case Ok(value):
+            summary = value
+            code = if value.contains("\naggregate_exit=0\n"): 0 else: 1
+        case Err(message):
+            summary = "format=SIMPLE-AGGREGATE-TASK-SUMMARY-1\nprovenance_status=caller-bound-unadmitted\nstage=" + options["stage"] + "\nbackend=" + options["backend"] + "\ncompletion=0\nexpected_count=-1\naggregate_exit=2\nerror_digest=" + sha256_text(message) + "\n"
+            print "aggregate task error: " + message
+    if not file_create_excl(summary_path, summary): return 2
+    code

@@ -1,0 +1,52 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use std.test_runner.aggregate_task_ledger.{aggregate_task_inventory_v1, aggregate_task_progress_v1}
+
+fn header() -> text:
+    "simple-subsystem-registry-v1\tllvm\tcompiler\t" + sha256_text("whole") + "\t" + sha256_text("subset") + "\n"
+
+fn owner() -> text:
+    "owner_begin\ttest/one_spec.spl\t" + sha256_text("source") + "\n"
+
+fn declaration(name: text) -> text:
+    "declare\t" + sha256_text(name) + "\t" + sha256_text("meta:" + name) + "\n"
+
+fn enumeration() -> text:
+    header() + owner() + declaration("one") + declaration("two") +
+        "owner_end\ttest/one_spec.spl\t2\tok\n" +
+        "complete\tregistration_ok=1\ttest_callbacks_executed=0\thook_callbacks_executed=0\n"
+
+describe "aggregate binary TaskRunner ledger":
+    it "retains a passed case before the next case crashes":
+        val inventory = aggregate_task_inventory_v1(enumeration()).unwrap()
+        val run = header() + owner() + declaration("one") + "begin\t" + sha256_text("one") + "\nresult\t" + sha256_text("one") + "\tpass\n" + declaration("two") + "begin\t" + sha256_text("two") + "\n"
+        val progress = aggregate_task_progress_v1(inventory, run).unwrap()
+        expect(progress.outcomes[sha256_text("one")]).to_equal("pass")
+        expect(progress.active_case).to_equal(sha256_text("two"))
+        expect(progress.complete).to_equal(false)
+
+    it "accepts one selected outcome without inventing skipped outcomes":
+        val inventory = aggregate_task_inventory_v1(enumeration()).unwrap()
+        val run = header() + owner() + declaration("one") + declaration("two") + "begin\t" + sha256_text("two") + "\nresult\t" + sha256_text("two") + "\tpass\nowner_end\ttest/one_spec.spl\t2\tok\ncomplete\tregistration_ok=1\ttest_callbacks_executed=1\thook_callbacks_executed=0\n"
+        val progress = aggregate_task_progress_v1(inventory, run, [sha256_text("two")]).unwrap()
+        expect(progress.complete).to_equal(true)
+        expect(progress.outcomes.len()).to_equal(1)
+        expect(progress.outcomes.contains_key(sha256_text("one"))).to_equal(false)
+        expect(aggregate_task_progress_v1(inventory, run).is_err()).to_equal(true)
+
+    it "rejects changed metadata and undeclared case selection":
+        val inventory = aggregate_task_inventory_v1(enumeration()).unwrap()
+        expect(aggregate_task_progress_v1(inventory, header() + owner() + "declare\t" + sha256_text("one") + "\t" + sha256_text("changed") + "\n").is_err()).to_equal(true)
+        expect(aggregate_task_progress_v1(inventory, header(), [sha256_text("absent")]).is_err()).to_equal(true)
+
+    it "rejects overlapping case starts instead of blaming every member":
+        val inventory = aggregate_task_inventory_v1(enumeration()).unwrap()
+        val run = header() + owner() + declaration("one") + "begin\t" + sha256_text("one") + "\n" + declaration("two") + "begin\t" + sha256_text("two") + "\n"
+        expect(aggregate_task_progress_v1(inventory, run).is_err()).to_equal(true)
+
+    it "preserves a partial final record as incomplete evidence":
+        val inventory = aggregate_task_inventory_v1(enumeration()).unwrap()
+        val progress = aggregate_task_progress_v1(inventory, header() + owner() + declaration("one") + "begin\t" + sha256_text("one") + "\nres").unwrap()
+        expect(progress.trailing_partial).to_equal(true)
+        expect(progress.complete).to_equal(false)
+        expect(progress.outcomes.len()).to_equal(0)

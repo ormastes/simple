@@ -1,0 +1,43 @@
+# Deliberately failing child fixture for BOTH native and interpreted registry
+# routes. Never include this file in a normal in-process spec inventory.
+use std.sffi.cli.{cli_get_args}
+use std.spec.{aggregate_registry_begin, aggregate_registry_select_case,
+    aggregate_owner_begin, aggregate_owner_end, aggregate_registry_finish, describe, it, expect}
+
+@unsafe(reason: "isolated test child deliberately raises an unhandled Windows exception", capabilities: [ffi])
+extern fn RaiseException(code: u32, flags: u32, count: u32, arguments: i64)
+
+fn register_fault_cases():
+    describe "real TaskRunner process continuation":
+        it "passes before an ordinary failure":
+            expect(6 * 7).to_equal(42)
+        it "reports the deliberately injected assertion failure":
+            expect(2 + 2).to_equal(5)
+        it "raises the deliberately injected native exception":
+            unsafe(capabilities: [ffi]):
+                RaiseException(3221225477u32, 1u32, 0u32, 0)
+            # Returning from a noncontinuable exception is itself a failure.
+            expect("exception returned").to_equal("unreachable")
+        it "passes in a fresh isolated process after the crash":
+            expect([10, 20, 30].len()).to_equal(3)
+
+fn main() -> i64:
+    var mode = ""
+    var ledger = ""
+    var source_digest = ""
+    var backend = ""
+    var selected: [text] = []
+    for arg in cli_get_args():
+        if arg == "--enumerate": mode = "enumerate"
+        elif arg == "--run": mode = "run"
+        elif arg.starts_with("--registry-output="): ledger = arg[18:]
+        elif arg.starts_with("--case-id="): selected.push(arg[10:])
+        elif arg.starts_with("--source-digest="): source_digest = arg[16:]
+        elif arg.starts_with("--backend="): backend = arg[10:]
+    if not aggregate_registry_begin(mode, backend, "compiler", source_digest, source_digest, ledger): return 2
+    for id in selected:
+        if not aggregate_registry_select_case(id): return 2
+    if not aggregate_owner_begin("test/02_integration/lib/task_runner_aggregate_child.spl", source_digest): return 2
+    register_fault_cases()
+    if not aggregate_owner_end(): return 2
+    aggregate_registry_finish()

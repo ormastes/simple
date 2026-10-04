@@ -1,0 +1,130 @@
+# Finite parent driver for the maintained native/interpreted aggregate registry.
+# A group failure never suppresses a later independent group. An unproven tree
+# or failed durable database write stops this product; the caller continues the
+# other products and records this product's remaining inventory as unrun.
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1, task_runner_identity_v1}
+use std.common.task_runner.journal.{TaskRunnerJournalV1}
+use std.test_runner.aggregate_task_ledger.{AggregateTaskInventoryV1}
+use std.test_runner.aggregate_task_executor.{AggregateTestCommandV1, aggregate_test_initial_groups_v1, aggregate_test_run_batch_v1}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceScope}
+use std.common.crypto.sha256.{sha256_text}
+
+struct AggregateTaskTotalsV1:
+    expected: i64
+    passed: i64
+    failed: i64
+    crashed: i64
+    exhausted: i64
+    skipped: i64
+    pending: i64
+    aborted: i64
+    not_run: i64
+    crash_attempts: i64
+
+struct AggregateTaskRunV1:
+    journal: TaskRunnerJournalV1
+    attempts: [TaskRunnerAttemptV1]
+    totals: AggregateTaskTotalsV1
+    transport_failed: bool
+    infrastructure_error: text
+
+fn aggregate_task_identities_v1(template: TaskRunnerIdentityV1,
+        command: AggregateTestCommandV1, inventory: AggregateTaskInventoryV1) -> Result<[TaskRunnerIdentityV1], text>:
+    if template.kind != "test" or template.case_id != "": return Err("invalid aggregate identity template")
+    val _template_digest = task_runner_identity_v1(template)?
+    var identities: [TaskRunnerIdentityV1] = []
+    for case_id in inventory.case_ids:
+        # The stable logical identity intentionally excludes retry selection,
+        # temporary output paths and grouped/isolated transport. Every actual
+        # spawn separately binds those in transport_execution_digest.
+        var identity = template
+        identity.case_id = case_id
+        var logical = "SIMPLE-AGGREGATE-LOGICAL-EXECUTION-1\n"
+        for field in [template.execution_digest, command.program_digest,
+                command.environment_digest, command.program, command.artifact_path,
+                command.artifact_digest, command.runtime_mode, case_id, inventory.metadata[case_id]]:
+            logical = logical + str(field.len()) + ":" + field
+        for field in command.prefix_args: logical = logical + str(field.len()) + ":" + field
+        identity.execution_digest = sha256_text(logical)
+        identities.push(identity)
+    Ok(identities)
+
+fn aggregate_task_totals_v1(expected: [TaskRunnerIdentityV1],
+        attempts: [TaskRunnerAttemptV1], max_attempts: i64) -> Result<AggregateTaskTotalsV1, text>:
+    var latest: Dict<text, TaskRunnerAttemptV1> = {}
+    var crash_attempts: i64 = 0
+    for row in attempts:
+        latest[row.identity_digest] = row
+        if row.status == "crashed": crash_attempts = crash_attempts + 1
+    var totals = AggregateTaskTotalsV1(expected.len(), 0, 0, 0, 0, 0, 0, 0, 0, crash_attempts)
+    for identity in expected:
+        val digest = task_runner_identity_v1(identity)?
+        if not latest.contains_key(digest):
+            totals.not_run = totals.not_run + 1
+            continue
+        val row = latest[digest]
+        if row.status == "passed": totals.passed = totals.passed + 1
+        elif row.status == "failed": totals.failed = totals.failed + 1
+        elif row.status == "skipped": totals.skipped = totals.skipped + 1
+        elif row.status == "pending": totals.pending = totals.pending + 1
+        elif row.status == "aborted": totals.aborted = totals.aborted + 1
+        elif row.status == "crashed": totals.crashed = totals.crashed + 1
+        else: totals.not_run = totals.not_run + 1
+        # Exhausted is an additional retry-budget measure, not an extra case.
+        if (row.status == "crashed" or row.status == "not-run") and row.attempt >= max_attempts:
+            totals.exhausted = totals.exhausted + 1
+    Ok(totals)
+
+fn aggregate_task_run_v1(owner: TaskRunnerJournalV1, inventory: AggregateTaskInventoryV1,
+        command: AggregateTestCommandV1, scope: ExecutionResourceScope,
+        identities: [TaskRunnerIdentityV1], max_attempts: i64) -> Result<AggregateTaskRunV1, text>:
+    if identities.len() != inventory.case_ids.len() or identities.len() == 0 or
+            max_attempts < 1 or max_attempts > 3:
+        return Err("invalid complete aggregate inventory or retry bound")
+    val groups = aggregate_test_initial_groups_v1(owner, identities)?
+    var next = owner
+    var all_attempts: [TaskRunnerAttemptV1] = []
+    var transport_failed = false
+    var infrastructure_error = ""
+    var group_index: i64 = 0
+    for group in groups:
+        var grouped_command = command
+        grouped_command.group_id = command.group_id + ":" + str(group_index)
+        group_index = group_index + 1
+        val first = match aggregate_test_run_batch_v1(next, inventory, grouped_command, scope,
+                group.identities, group.identities, 1, group.mode, [], max_attempts):
+            case Ok(value): value
+            case Err(message):
+                return Ok(AggregateTaskRunV1(next, all_attempts,
+                    aggregate_task_totals_v1(identities, all_attempts, max_attempts)?, true, message))
+        next = first.journal
+        transport_failed = transport_failed or first.transport_failed
+        if first.infrastructure_error != "": infrastructure_error = first.infrastructure_error
+        for row in first.attempts: all_attempts.push(row)
+        # Each unknown member gets its own recovery window projection. Feeding
+        # a successful isolated sibling back as a non-crashed whole group would
+        # incorrectly abort the other unknown siblings, so never do that.
+        for digest in first.recovery.isolated:
+            var history: [TaskRunnerAttemptV1] = []
+            for row in first.attempts:
+                if row.identity_digest == digest: history.push(row)
+            var attempt: i64 = 2
+            while attempt <= max_attempts:
+                val retry = match aggregate_test_run_batch_v1(next, inventory, grouped_command, scope,
+                        [digest], [digest], attempt, "isolated", history, max_attempts):
+                    case Ok(value): value
+                    case Err(message):
+                        return Ok(AggregateTaskRunV1(next, all_attempts,
+                            aggregate_task_totals_v1(identities, all_attempts, max_attempts)?, true, message))
+                next = retry.journal
+                transport_failed = transport_failed or retry.transport_failed
+                if retry.infrastructure_error != "": infrastructure_error = retry.infrastructure_error
+                for index in history.len()..retry.attempts.len(): all_attempts.push(retry.attempts[index])
+                history = retry.attempts
+                if retry.recovery.isolated.len() == 0: break
+                attempt = attempt + 1
+    Ok(AggregateTaskRunV1(next, all_attempts,
+        aggregate_task_totals_v1(identities, all_attempts, max_attempts)?, transport_failed, infrastructure_error))
+
+export AggregateTaskTotalsV1, AggregateTaskRunV1
+export aggregate_task_identities_v1, aggregate_task_totals_v1, aggregate_task_run_v1

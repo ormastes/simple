@@ -1,0 +1,103 @@
+# Typed DAG acceptance boundary. A complete failed test run is valid evidence,
+# never a passing task. Bootstrap source/provider admission remains separate.
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.io_runtime.{file_hash_sha256_or_empty}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.task_runner.snapshot.{task_runner_snapshot_open_v1}
+use std.test_runner.aggregate_task_ledger.{aggregate_task_inventory_v1}
+use std.test_runner.aggregate_task_driver.{AggregateTaskTotalsV1}
+
+struct AggregateTaskSummaryExpectedV1:
+    stage: text
+    backend: text
+    identity_manifest_digest: text
+    inventory_manifest_digest: text
+    producer_digest: text
+    source_digest: text
+    runtime_digest: text
+    toolchain_digest: text
+    policy_digest: text
+    execution_digest: text
+    report_root: text
+    db_root: text
+
+struct AggregateTaskSummaryV1:
+    totals: AggregateTaskTotalsV1
+    aggregate_exit: i64
+    transport_failed: bool
+    expected_inventory_digest: text
+    task_db_revision: text
+    task_db_identity: text
+    artifact_digest: text
+    program_digest: text
+    provenance_status: text
+
+fn _summary_field(fields: Dict<text, text>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key) or fields[key] == "": return Err("missing test summary field: " + key)
+    Ok(fields[key])
+
+fn _summary_count(fields: Dict<text, text>, key: text, maximum: i64) -> Result<i64, text>:
+    val text_value = _summary_field(fields, key)?
+    if text_value.len() > 9: return Err("oversized test summary count")
+    for byte in 0..text_value.len():
+        if not "0123456789".contains(text_value[byte:byte + 1]): return Err("invalid test summary count")
+    val value = text_value.to_int() ?? -1
+    if value < 0 or value > maximum or str(value) != text_value: return Err("noncanonical test summary count")
+    Ok(value)
+
+fn aggregate_task_summary_verify_v1(payload: text,
+        expected: AggregateTaskSummaryExpectedV1) -> Result<AggregateTaskSummaryV1, text>:
+    if payload.len() > 65536 or not payload.ends_with("\n"): return Err("incomplete test summary")
+    var fields: Dict<text, text> = {}
+    for line in payload.split("\n"):
+        if line == "": continue
+        val split = line.index_of("=")
+        if split < 1: return Err("malformed test summary")
+        val key = line[0:split]
+        if fields.contains_key(key): return Err("duplicate test summary field")
+        fields[key] = line[split + 1:]
+    if _summary_field(fields, "format")? != "SIMPLE-AGGREGATE-TASK-SUMMARY-1" or
+            _summary_field(fields, "completion")? != "1": return Err("test collection incomplete")
+    if _summary_field(fields, "stage")? != expected.stage or _summary_field(fields, "backend")? != expected.backend:
+        return Err("test summary stage or backend differs")
+    val keys = ["identity_manifest_digest", "inventory_manifest_digest", "producer_digest",
+        "source_digest", "runtime_digest", "toolchain_digest", "policy_digest", "execution_digest"]
+    val values = [expected.identity_manifest_digest, expected.inventory_manifest_digest,
+        expected.producer_digest, expected.source_digest, expected.runtime_digest,
+        expected.toolchain_digest, expected.policy_digest, expected.execution_digest]
+    for index in 0..keys.len():
+        if not builder_digest_valid_v1(values[index]) or _summary_field(fields, keys[index])? != values[index]:
+            return Err("test summary identity differs: " + keys[index])
+    val inventory_path = expected.report_root + "/enumeration.tsv"
+    val inventory_digest = _summary_field(fields, "expected_inventory_digest")?
+    if not builder_digest_valid_v1(inventory_digest) or file_hash_sha256_or_empty(inventory_path) != inventory_digest:
+        return Err("test enumeration digest differs")
+    val inventory = aggregate_task_inventory_v1(file_read_regular_no_follow_bounded(inventory_path, 67108864)?)?
+    val count = _summary_count(fields, "expected_count", 20000)?
+    if count < 1 or count != inventory.case_ids.len(): return Err("test inventory count differs")
+    val totals = AggregateTaskTotalsV1(count, _summary_count(fields, "pass", count)?,
+        _summary_count(fields, "fail", count)?, _summary_count(fields, "crash", count)?,
+        _summary_count(fields, "exhausted", count)?, _summary_count(fields, "skip", count)?,
+        _summary_count(fields, "pending", count)?, _summary_count(fields, "abort", count)?,
+        _summary_count(fields, "notrun", count)?, _summary_count(fields, "crash_attempts", count * 3)?)
+    if totals.passed + totals.failed + totals.crashed + totals.skipped + totals.pending + totals.aborted + totals.not_run != count:
+        return Err("test terminal counts do not partition inventory")
+    if totals.exhausted > totals.crashed + totals.not_run: return Err("invalid exhausted test count")
+    val exit_code = _summary_count(fields, "aggregate_exit", 1)?
+    val transport_failed = _summary_count(fields, "transport_failed", 1)? == 1
+    val failed = transport_failed or totals.failed > 0 or totals.crashed > 0 or
+        totals.pending > 0 or totals.aborted > 0 or totals.not_run > 0 or totals.passed == 0
+    if exit_code != (if failed: 1 else: 0): return Err("test aggregate exit disagrees with outcomes")
+    val revision = _summary_field(fields, "task_db_revision")?
+    val database_identity = _summary_field(fields, "task_db_identity")?
+    val snapshot = task_runner_snapshot_open_v1(expected.db_root, revision, database_identity)?
+    if snapshot.digest != revision: return Err("test database revision differs")
+    val artifact = _summary_field(fields, "artifact_digest")?
+    val program = _summary_field(fields, "program_digest")?
+    if not builder_digest_valid_v1(artifact) or not builder_digest_valid_v1(program): return Err("invalid test artifact digest")
+    val provenance = _summary_field(fields, "provenance_status")?
+    if provenance != "caller-bound-unadmitted": return Err("unsupported test provenance claim")
+    Ok(AggregateTaskSummaryV1(totals, exit_code, transport_failed, inventory_digest,
+        revision, database_identity, artifact, program, provenance))
+
+export AggregateTaskSummaryExpectedV1, AggregateTaskSummaryV1, aggregate_task_summary_verify_v1

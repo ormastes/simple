@@ -222,18 +222,23 @@ for my $owner (@owners) {
 
 my $entry = "use std.sffi.cli_args.{cli_get_args}\n" .
             "use std.io_runtime.{env_set}\n" .
-            "use std.spec.{aggregate_registry_begin, aggregate_owner_begin, aggregate_owner_end, aggregate_registry_finish}\n" .
+            "use std.spec.{aggregate_registry_begin, aggregate_owner_begin, aggregate_owner_end, aggregate_registry_finish, aggregate_registry_select_case}\n" .
             join("\n", @imports) . "\n\n" .
             "fn main() -> i64:\n" .
-            "    var mode = \"\"\n    var ledger = \"\"\n" .
+            "    var mode = \"\"\n    var ledger = \"\"\n    var runtime_mode = \"native\"\n    var selected_cases: [text] = []\n" .
             "    for arg in cli_get_args():\n" .
             "        if arg == \"--enumerate\": mode = \"enumerate\"\n" .
             "        elif arg == \"--run\": mode = \"run\"\n" .
             "        elif arg.starts_with(\"--registry-output=\"): ledger = arg[18:]\n" .
+            "        elif arg.starts_with(\"--case-id=\"): selected_cases.push(arg[10:])\n" .
+            "        elif arg.starts_with(\"--runtime-mode=\"): runtime_mode = arg[15:]\n" .
             "    if mode == \"\" or ledger == \"\": return 2\n" .
-            "    env_set(\"SIMPLE_RUNTIME_MODE\", \"native\")\n" .
+            "    if runtime_mode != \"native\" and runtime_mode != \"interpreter\": return 2\n" .
+            "    if not env_set(\"SIMPLE_RUNTIME_MODE\", runtime_mode): return 2\n" .
             "    if not aggregate_registry_begin(mode, " . literal($backend) .
-            ", " . literal($subsystem) . ", " . literal($whole_sha) . ", " . literal($subset_sha) . ", ledger): return 2\n";
+            ", " . literal($subsystem) . ", " . literal($whole_sha) . ", " . literal($subset_sha) . ", ledger): return 2\n" .
+            "    for selected_case in selected_cases:\n" .
+            "        if not aggregate_registry_select_case(selected_case): return 2\n";
 for my $call (@calls) {
     my ($owner, $sha, $register) = @$call;
     $entry .= "    if not aggregate_owner_begin(" . literal($owner) . ", " . literal($sha) . "): return 2\n";
