@@ -56,7 +56,7 @@ fail before input consumption/publication rather than silently dropping policy.
 
 | Field | Required treatment |
 |---|---|
-| libraries | Resolve explicit requested object/archive/provider inputs, rejecting unsupported provider formats. |
+| libraries | Resolve requested archives/thin dylibs, rejecting object files and unsupported provider formats in this list. Positional inputs separately classify objects, archives and thin dylibs. |
 | library_paths | Deterministic requested library search; consume the bytes of the actual selected file. |
 | runtime_path | Existing provider selection and validation; no guessed runtime directory or synthesized archive authority. |
 | runtime_bundle | Preserve the named runtime authority and existing strict archive selection; no default invented bundle. |
@@ -71,6 +71,10 @@ fail before input consumption/publication rather than silently dropping policy.
 | allow_cc_fallback | Explicit internal requests never silently fall back, consistent with the existing internal selection contract. |
 | retained_symbols | Reject nonempty until actual root retention is implemented. |
 | extra_flags | Parse only the explicitly frozen Mach-O grammar; reject unknown, missing or conflicting options. |
+
+Library search follows configured directory order, trying `.dylib`, `.tbd`,
+then `.a` within each directory. A selected `.tbd` fails explicitly; it must not
+silently redirect to a later archive. Explicit provider paths bypass name search.
 
 Minimum OS and SDK must come from explicit configuration, never the host version
 or guessed SDK path. Signing identity is structural input, not artifact trust.
