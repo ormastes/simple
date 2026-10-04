@@ -68,7 +68,7 @@ fn item4_macho_legacy_check(image: [u8], arm: bool):
     expect(bindings).to_equal(1)
 
 fn item4_macho_legacy_cleanup(parent: text):
-    for name in ["app", "liblegacy.1.dylib", "liblegacy_x.dylib", "Leaf", "OldRoot", "Wrong"]:
+    for name in ["app", "liblegacy.1.dylib", "liblegacy.2.dylib", "liblegacy_x.dylib", "Leaf", "OldRoot", "Wrong"]:
         if file_exists(parent + "/" + name): expect(file_remove(parent + "/" + name)).to_equal(true)
     expect(dir_remove(parent)).to_equal(true)
 
@@ -111,6 +111,52 @@ fn item4_macho_legacy_name(bytes: [u8], command: i64, name: text) -> [u8]:
     changed
 
 describe "Legacy Mach-O whole-library reexport selectors":
+    it "ITEM4-REQ-006 exposes every matching dependency when only a later provider defines the imports":
+        val root_path = "test/fixtures/linker/macho/legacy_all_matches_x64.dylib"
+        val root = macho_read_binary_provider_v1(file_read_bytes(root_path), RelocArch.X86_64)
+        expect(root.is_ok()).to_equal(true)
+        if root.is_err(): return
+        expect(root.unwrap().dependencies.len()).to_equal(2)
+        if root.unwrap().dependencies.len() != 2: return
+        expect(root.unwrap().dependencies[0].install_name).to_equal("/usr/lib/liblegacy.1.dylib")
+        expect(root.unwrap().dependencies[1].install_name).to_equal("/usr/lib/liblegacy.2.dylib")
+        expect(root.unwrap().dependencies[0].command).to_equal(12)
+        expect(root.unwrap().dependencies[1].command).to_equal(12)
+        expect(root.unwrap().sub_libraries).to_equal(["liblegacy"])
+        val first = file_read_bytes("test/fixtures/linker/macho/legacy_empty_first_x64.dylib")
+        val second = file_read_bytes("test/fixtures/linker/macho/legacy_second_x64.dylib")
+        val first_checked = macho_read_binary_provider_v1(first, RelocArch.X86_64)
+        val second_checked = macho_read_binary_provider_v1(second, RelocArch.X86_64)
+        expect(first_checked.is_ok() and second_checked.is_ok()).to_equal(true)
+        if first_checked.is_err() or second_checked.is_err(): return
+        expect(first_checked.unwrap().exports.len()).to_equal(0)
+        if first_checked.unwrap().exports.len() != 0: return
+        var helper = false
+        var value = false
+        for symbol in second_checked.unwrap().exports:
+            if symbol.name == "_helper": helper = true
+            if symbol.name == "_value": value = true
+        expect(helper and value).to_equal(true)
+        if not helper or not value: return
+        val made = dir_create_all("build")
+        expect(made).to_equal(true)
+        if not made: return
+        val created = secure_temp_dir("build", "item4-legacy-all-matches-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val first_written = file_write_bytes(parent + "/liblegacy.1.dylib", first)
+        val second_written = file_write_bytes(parent + "/liblegacy.2.dylib", second)
+        expect(first_written and second_written).to_equal(true)
+        if not first_written or not second_written:
+            item4_macho_legacy_cleanup(parent)
+            return
+        step("Link real imports found only in the later matching dependency")
+        val linked = item4_macho_legacy_link(parent, root_path, false)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_ok(): item4_macho_legacy_check(file_read_bytes(parent + "/app"), false)
+        item4_macho_legacy_cleanup(parent)
+
     it "ITEM4-REQ-006 leaves an unmatched classic child with a higher deployment target inactive":
         val root = file_read_bytes("test/fixtures/linker/macho/legacy_classic_own_x64.dylib")
         val root_checked = macho_read_binary_provider_v1(root, RelocArch.X86_64)

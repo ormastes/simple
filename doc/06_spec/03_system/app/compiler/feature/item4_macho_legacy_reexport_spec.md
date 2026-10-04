@@ -1,6 +1,6 @@
 # Legacy Mach-O reexport acceptance
 
-Eight authored ITEM4-REQ-006 scenarios live in
+Nine authored ITEM4-REQ-006 scenarios live in
 `test/03_system/app/compiler/feature/item4_macho_legacy_reexport_spec.spl`.
 **Simple execution UNRUN**. This companion is authored documentation, not a
 generated test receipt. Independent LLVM fixture observations are recorded in
@@ -8,6 +8,7 @@ generated test receipt. Independent LLVM fixture observations are recorded in
 
 | Scenario | Concrete assertion |
 |---|---|
+| All matching dependencies | A real root has two ordinary dependencies matching one selector. The first has no exports and only the later provider defines both object imports; actual native output binds them through root ordinal1. |
 | Inactive child deployment | A genuine symbol-table-fallback classic root supplies its own exports while an unmatched child's independently encoded macOS99 deployment remains inactive. The native image still has root ordinal1 and the expected local pointer. |
 | Command validation | Real library/umbrella commands reject an out-of-command offset, header offset, empty name and missing terminator, including missing terminator with MH_NO_REEXPORTED_DYLIBS set. |
 | Exact stem matching | A real dependency with an underscore suffix matches `liblegacy`; shorter `liblega` and longer `liblegacyX` do not. Version-dot matching is exercised by the main positive fixture. |
@@ -24,10 +25,10 @@ is made. Explicit selectors may operate on compressed providers. Classic
 inference additionally requires absence of modern export commands and the
 header suppression flag. Raw dependency command identities remain unchanged.
 
-The broader design also requires all matching dependencies, weak/lazy/upward
-class boundaries, unmatched selectors with physically missing dependencies,
-and additional alias interactions. Those boundaries are **not covered by this
-eight-scenario wave** and remain explicit acceptance obligations. This does not
+Weak/lazy/upward class boundaries and physically missing matched/unmatched
+providers are assigned to the separate `item4_macho_legacy_modes_spec.spl`
+acceptance lane; they are not counted among these nine scenarios. Additional
+alias interactions remain separate acceptance obligations. This does not
 claim complete SDK or native Darwin qualification, signing validity, runtime
 loading, immutable file identity or process memory enforcement.
 

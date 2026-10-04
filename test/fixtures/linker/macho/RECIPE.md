@@ -323,3 +323,38 @@ validating binary reader before relying on the fallback exports.
 Signatures are not regenerated after mutations. These fixtures establish
 reader/graph byte contracts only: no code-signing validity, Darwin loadability,
 Simple execution, or full SDK completion is claimed.
+
+Final all-match and modes fixtures derive from the already validated binaries:
+`legacy_all_matches_x64.dylib` copies the LC_LOAD_DYLIB command in
+`legacy_library_x64.dylib` into verified all-zero header padding before byte4096,
+changes the copied install name to `/usr/lib/liblegacy.2.dylib`, and increments
+ncmds/sizeofcmds by1/the copied command size. Existing offsets do not move.
+`legacy_empty_first_x64.dylib` copies the ordinary no-export root and changes
+only LC_ID_DYLIB to `/usr/lib/liblegacy.1.dylib`; its original header suppression
+and modern format keep its own ordinary dependency hidden.
+`legacy_second_x64.dylib` changes only the real leaf's LC_ID_DYLIB to
+`/usr/lib/liblegacy.2.dylib`. Command-relative string capacity and zero padding
+were checked before each mutation.
+
+```
+llvm-objdump --macho --dylibs-used legacy_all_matches_x64.dylib
+llvm-nm --defined-only --extern-only legacy_empty_first_x64.dylib legacy_second_x64.dylib
+```
+
+The first independently reports root then .1 then .2 install identities.
+The first provider has no symbols; the second exports `_helper`0x2e0 and
+`_value`0x1000. Thus the native image test cannot succeed with only the first
+matching edge.
+
+The separate modes lane uses a modern root with its own exports:
+
+```
+ld64.lld -dylib -arch x86_64 -platform_version macos 11 11 -install_name /usr/lib/liblegacy_root.dylib -needed_library legacy_leaf_x64.dylib -o legacy_unmatched_own_x64.dylib provider_x64.o
+```
+
+Clear0x100000 and replace UUID24 with LC_SUB_LIBRARY offset12/name`unmatched`,
+retaining DYLD_INFO. Unlike the classic fixture, this cannot infer an ordinary
+child, allowing an absent unmatched dependency to remain genuinely unvisited.
+Independent `llvm-objdump --macho --private-headers legacy_unmatched_own_x64.dylib`
+reported `sub_library unmatched (offset 12)` and cmdsize24. No completed
+external validation command was repeated; all Simple execution stays UNRUN.
