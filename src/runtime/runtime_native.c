@@ -5899,8 +5899,20 @@ static int rt_sorted_u64_cmp(const void* lhs, const void* rhs) {
 
 /* Match the hosted rt_array_sorted comparator, not rt_sort's interpreter
  * comparator: unsigned boxes compare as u64 (including against tagged ints),
- * tagged ints precede floats, and all other mixed types compare Equal. */
+ * tagged ints precede floats, and all other mixed types compare Equal.
+ * Two TEXT values compare byte-lexicographically (shorter prefix first), as
+ * rt_sort_cmp above and the interpreter's Str arm do; without this arm a
+ * `[text].sorted()` returned its input order unchanged. */
 static int rt_sorted_value_cmp(int64_t a, int64_t b) {
+    RtCoreString* text_a = rt_core_as_string(a);
+    RtCoreString* text_b = rt_core_as_string(b);
+    if (text_a && text_b) {
+        uint64_t n = text_a->len < text_b->len ? text_a->len : text_b->len;
+        int c = n ? memcmp(text_a->data, text_b->data, (size_t)n) : 0;
+        if (c != 0) return c < 0 ? -1 : 1;
+        if (text_a->len == text_b->len) return 0;
+        return text_a->len < text_b->len ? -1 : 1;
+    }
     RtCoreUInt* unsigned_a = rt_core_as_heap_uint(a);
     RtCoreUInt* unsigned_b = rt_core_as_heap_uint(b);
     if (unsigned_a && unsigned_b) {
