@@ -1,0 +1,62 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1, task_runner_identity_v1}
+use std.common.task_runner.journal.{task_runner_journal_open_v1, task_runner_journal_append_v1,
+    task_runner_journal_history_v1, task_runner_journal_release_v1, task_runner_journal_missing_v1,
+    task_runner_journal_identity_v1}
+use std.common.task_runner.snapshot.{task_runner_snapshot_commit_v1, task_runner_snapshot_open_v1}
+use std.nogc_sync_mut.database.wal_segmented.{database_wal_revision_open_v1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write}
+use std.nogc_sync_mut.io_runtime.{dir_remove}
+
+fn task_storage_identity_v1(source: text) -> TaskRunnerIdentityV1:
+    val digest = sha256_text("producer-runtime-tool-policy-fixture")
+    TaskRunnerIdentityV1("test", "storage-fixture", "registered-case", "cranelift", "phase4",
+        digest, source, digest, digest, digest, digest)
+
+fn task_storage_pass_v1(identity: text, group: text, generation: i64) -> TaskRunnerAttemptV1:
+    TaskRunnerAttemptV1(identity, group, 1, "isolated", 124, generation, "passed", "",
+        0, 0, 0, true, true, identity, identity, identity, identity)
+
+describe "PureDatabase task history with durable database revisions":
+    it "retains crash isolation across more than eight fresh runs and reopen":
+        val root = secure_temp_dir("build", "task-pure-db-spec").unwrap()
+        val source = sha256_text("source")
+        val expected = [task_storage_identity_v1(source)]
+        val identity = task_runner_identity_v1(expected[0]).unwrap()
+        var owner = task_runner_journal_open_v1(root, sha256_text("parent"), source, expected).unwrap()
+        expect(task_runner_journal_open_v1(root, sha256_text("other"), source, expected).is_err()).to_equal(true)
+        expect(task_runner_snapshot_commit_v1(owner, owner.revision).unwrap()).to_equal(owner.revision)
+        expect(task_runner_journal_missing_v1(owner).unwrap()).to_equal([identity])
+        expect(task_runner_journal_identity_v1(owner, identity).unwrap().case_id).to_equal("registered-case")
+        expect(task_runner_journal_append_v1(owner,
+            task_storage_pass_v1(sha256_text("unregistered"), "unregistered-run", 1)).is_err()).to_equal(true)
+        val crash = TaskRunnerAttemptV1(identity, "crashed-run", 1, "grouped", 123, 1,
+            "crashed", "process-signal", 139, -1, 11, true, false, identity, identity, "", identity)
+        val old = owner
+        owner = task_runner_journal_append_v1(owner, crash).unwrap()
+        expect(task_runner_journal_append_v1(old, crash).is_err()).to_equal(true)
+        for run in 2..12:
+            owner = task_runner_journal_append_v1(owner,
+                task_storage_pass_v1(identity, "fresh-run-{run}", run)).unwrap()
+        val history = task_runner_journal_history_v1(owner, identity).unwrap()
+        expect(task_runner_journal_missing_v1(owner).unwrap().len()).to_equal(0)
+        expect(history.len()).to_equal(8)
+        expect(history[0].status).to_equal("crashed")
+        expect(history[7].group_id).to_equal("fresh-run-11")
+        val commit = task_runner_snapshot_commit_v1(owner, owner.revision).unwrap()
+        expect(task_runner_snapshot_commit_v1(owner, owner.revision).unwrap()).to_equal(commit)
+        expect(task_runner_snapshot_open_v1(root, commit, sha256_text("wrong-source")).is_err()).to_equal(true)
+        expect(task_runner_journal_release_v1(owner).unwrap()).to_equal(true)
+        var reopened = task_runner_journal_open_v1(root, sha256_text("reopened-parent"), source, expected).unwrap()
+        expect(task_runner_journal_history_v1(reopened, identity).unwrap()[0].status).to_equal("crashed")
+        reopened = task_runner_journal_append_v1(reopened,
+            task_storage_pass_v1(identity, "new-build-after-reopen", 12)).unwrap()
+        expect(task_runner_journal_history_v1(reopened, identity).unwrap().len()).to_equal(8)
+        expect(task_runner_journal_release_v1(reopened).unwrap()).to_equal(true)
+        # Corrupt a committed segment, not an uncommitted staging tail.
+        val revision = database_wal_revision_open_v1(root + "/database-wal", reopened.revision).unwrap()
+        expect(file_atomic_write(root + "/database-wal/objects/" + revision.segment_digest, "truncated")).to_equal(true)
+        expect(task_runner_snapshot_open_v1(root, reopened.revision, reopened.database_identity).is_err()).to_equal(true)
+        expect(task_runner_journal_open_v1(root, sha256_text("corruption-parent"), source, expected).is_err()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)

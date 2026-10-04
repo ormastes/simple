@@ -1,0 +1,41 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.task_runner.contracts.{TaskRunnerAttemptV1}
+use std.common.task_runner.index.{task_runner_attempt_encode_v1, task_runner_attempt_decode_v1,
+    task_runner_storage_escape_v1, task_runner_storage_unescape_v1}
+
+fn storage_attempt_v1() -> TaskRunnerAttemptV1:
+    val digest = sha256_text("case")
+    TaskRunnerAttemptV1(digest, "run-1", 1, "grouped", 123, 1, "passed", "",
+        0, 0, 0, true, true, digest, digest, digest, digest)
+
+describe "TaskRunner existing database payload adapter":
+    it "roundtrips process and per-member exit independently":
+        var attempt = storage_attempt_v1()
+        attempt.exit_code = 139
+        attempt.signal_number = 11
+        val decoded = task_runner_attempt_decode_v1(task_runner_attempt_encode_v1(attempt).unwrap()).unwrap()
+        expect(decoded.task_exit_code).to_equal(0)
+        expect(decoded.exit_code).to_equal(139)
+        expect(decoded.signal_number).to_equal(11)
+        expect(decoded.transport_execution_digest).to_equal(attempt.transport_execution_digest)
+    it "rejects truncated and altered accepted evidence":
+        val payload = task_runner_attempt_encode_v1(storage_attempt_v1()).unwrap()
+        expect(task_runner_attempt_decode_v1(payload[0:payload.len() - 1]).is_err()).to_equal(true)
+        var row = storage_attempt_v1()
+        row.tree_reaped = false
+        expect(task_runner_attempt_encode_v1(row).is_err()).to_equal(true)
+    it "escapes canonical WAL single-line data reversibly":
+        val original = "percent%25|column\nrow\tfield\r"
+        val encoded = task_runner_storage_escape_v1(original)
+        expect(encoded.contains("\n")).to_equal(false)
+        expect(encoded.contains("|")).to_equal(false)
+        expect(task_runner_storage_unescape_v1(encoded)).to_equal(original)
+    it "preserves validated skip and pending without converting them to pass":
+        for status in ["skipped", "pending"]:
+            var row = storage_attempt_v1()
+            row.status = status
+            row.reason = status
+            val reopened = task_runner_attempt_decode_v1(task_runner_attempt_encode_v1(row).unwrap()).unwrap()
+            expect(reopened.status).to_equal(status)
+            expect(reopened.reason).to_equal(status)

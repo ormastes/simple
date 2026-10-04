@@ -1,0 +1,36 @@
+# A task snapshot is the actual durable database WAL revision, never a copy
+# of an in-memory task table or an invented admission receipt.
+use std.common.task_runner.journal.{TaskRunnerJournalV1, task_runner_journal_lease_check_v1}
+use std.nogc_sync_mut.database.wal_segmented.{DatabaseWalRevisionV1,
+    database_wal_current_v1, database_wal_revision_open_v1, database_wal_segment_read_strict_v1}
+
+fn task_runner_snapshot_commit_v1(owner: TaskRunnerJournalV1,
+        expected_revision: text) -> Result<text, text>:
+    val _lease = task_runner_journal_lease_check_v1(owner)?
+    if expected_revision != owner.revision: return Err("snapshot task revision differs")
+    val current = database_wal_current_v1(owner.root + "/database-wal", owner.database_identity)?
+    if current != owner.revision or current == "": return Err("no matching durable task revision")
+    Ok(current)
+
+fn task_runner_snapshot_open_v1(root: text, revision: text,
+        database_identity: text) -> Result<DatabaseWalRevisionV1, text>:
+    val value = database_wal_revision_open_v1(root + "/database-wal", revision)?
+    if value.database_identity != database_identity: return Err("snapshot database identity differs")
+    # Cold snapshot opening verifies reachable committed history once. Hot
+    # snapshot capture above is only the already-owned current revision.
+    var cursor = value
+    var seen: i64 = 0
+    while true:
+        if seen >= 10000000: return Err("snapshot history bound exceeded")
+        if cursor.database_identity != database_identity: return Err("snapshot history database differs")
+        val _entries = database_wal_segment_read_strict_v1(root + "/database-wal", cursor)?
+        seen = seen + 1
+        if cursor.parent == "":
+            if cursor.first_sequence != 1: return Err("snapshot history genesis missing")
+            break
+        val parent = database_wal_revision_open_v1(root + "/database-wal", cursor.parent)?
+        if parent.last_sequence != cursor.first_sequence - 1: return Err("snapshot history sequence gap")
+        cursor = parent
+    Ok(value)
+
+export task_runner_snapshot_commit_v1, task_runner_snapshot_open_v1
