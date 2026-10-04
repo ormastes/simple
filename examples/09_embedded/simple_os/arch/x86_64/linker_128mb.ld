@@ -56,6 +56,9 @@ SECTIONS
      * ENTRY(_entry32) always resolves to the actual boot code. */
     _entry32 = ADDR(.text) + 28;
     _start = _entry32;
+    /* End of kernel CODE: syscall_entry.s classifies a `syscall` caller as
+     * ring 0 only when its RIP is in [_kernel_start, _kernel_text_end). */
+    _kernel_text_end = ADDR(.text) + SIZEOF(.text);
 
     /* Read-only data */
     .rodata ALIGN(4K) :

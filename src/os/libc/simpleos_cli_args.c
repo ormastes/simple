@@ -32,13 +32,10 @@ static int64_t simpleos_cli_argc;
 static int64_t simpleos_cli_argv;
 extern int64_t rt_array_new(int64_t cap);
 extern int8_t rt_array_push(int64_t array, int64_t value);
-extern int64_t rt_array_len(int64_t array);
 extern int64_t rt_string_new(int64_t bytes, int64_t len);
 
-int64_t rt_array_len_safe(int64_t value) {
-    if (value == 0 || value == 3) return 0;
-    return rt_array_len(value);
-}
+/* rt_array_len_safe is owned by the Simple runtime (runtime_native.c); a
+ * strong copy here duplicated it across libsimpleos_c.a/libsimple_runtime.a. */
 
 __attribute__((weak)) void rt_set_args(int64_t argc, int64_t argv) {
     simpleos_cli_argc = argc;

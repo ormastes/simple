@@ -385,7 +385,7 @@ FILE *stdout = &_stdout_f;
 FILE *stderr = &_stderr_f;
 
 /* The Simple-runtime argv bridge (rt_set_args / rt_cli_* / rt_get_args /
- * sys_get_args / rt_array_len_safe) lives in simpleos_cli_args.c so that a
+ * sys_get_args) lives in simpleos_cli_args.c so that a
  * plain C/C++ link never pulls the Simple runtime dependency in through this
  * object. Do not move it back here. */
 
