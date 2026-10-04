@@ -57,3 +57,5 @@ mod seed_regression_tests;
 mod struct_spread_tests;
 mod coverage_metadata_tests;
 mod conditional_empty_array_tests;
+mod trait_builtin_named_method_tests;
+mod same_named_trait_default_tests;

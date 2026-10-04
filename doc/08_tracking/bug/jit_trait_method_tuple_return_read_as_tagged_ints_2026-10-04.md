@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-10-04
 - **Area:** Rust seed HIR/MIR typing of method calls on trait-bound (generic / trait-object) receivers
-- **Status:** OPEN
+- **Status:** FIXED 2026-10-05 (see "Fix" at the end)
 - **Severity:** high — silent ×8 values; every `showcase_run(host: ScreenHost, ...)` frame is laid out at 8x the real size under JIT
 
 ## Repro
@@ -62,3 +62,28 @@ macOS until large modules stopped panicking into the interpreter (see
 `"x".to_int() ?? 7` (an unparsable string): the JIT returns `0` and the
 interpreter returns `120` (the char code of `x`). The expected value is `7`.
 Not investigated further here.
+
+## Fix (2026-10-05)
+
+The method was not the problem; the method's **name** was. `size` is also a
+builtin collection method. A trait-typed receiver is ANY in HIR, and the
+ANY-receiver builtin table in `lower_builtin_method_call`
+(`compiler/src/hir/lower/expr/mod.rs`) typed `size`/`len`/... as I64 before
+the trait signature was consulted. MIR still emitted a vtable call whose result
+is the trait method's declared tuple, so the I64-typed slot destructured tagged
+words (renaming the method to `dims` made the probe pass).
+
+The fix: for an ANY receiver that is not a typed Dict, the builtin result type
+yields to the trait-declared return type whenever every same-named trait
+declaration agrees. This is the existing `lookup_method_return_type` rule,
+factored out as `agreed_trait_method_return_type`, which MIR's virtual dispatch
+already matches.
+
+Specs:
+- `compiler/src/hir/lower/tests/trait_builtin_named_method_tests.rs` (4)
+- `compiler/tests/trait_receiver_jit.rs`:
+  - `trait_param_size_tuple_destructures_real_values`
+  - `generic_bound_size_tuple_and_scalar_method_agree_with_direct`
+
+Measured: `src/app/ui_showcase/hosts/main_2d.spl` at 1280x720 under the JIT is
+byte-identical (`cmp`) to the interpreted capture (4.3 s vs 90.6 s).

@@ -210,6 +210,23 @@ impl Lowerer {
                 },
                 ty: payload_ty,
             }
+        } else if let Some(inner) = self.optional_struct_inner_type(lowered_receiver.ty) {
+            // `T?` with a struct/class payload, read after a nil check
+            // (`val p = opt` ... `p.field`). The value is either the raw
+            // payload or a boxed `Some` enum (literal `Some(x)`); a field read
+            // straight off the boxed form read the enum object's slots, which
+            // under the JIT segfaulted on `parent.session` in
+            // Engine2D.create_shared_vulkan_offscreen. `rt_unwrap_or_self`
+            // yields the payload of an Option enum and passes anything else
+            // through, so the raw form is unchanged. The interpreter already
+            // auto-unwraps here.
+            HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_unwrap_or_self".to_string(),
+                    args: vec![lowered_receiver],
+                },
+                ty: inner,
+            }
         } else {
             lowered_receiver
         });

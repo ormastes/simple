@@ -352,11 +352,7 @@ pub(super) fn build_vreg_types(
                             types_map.insert(*d, ty);
                             continue;
                         }
-                        let base = target
-                            .name()
-                            .rsplit_once("__")
-                            .map(|(_, tail)| tail)
-                            .unwrap_or(target.name());
+                        let base = super::calls::strip_call_module_prefix(target.name());
                         let ty = match base {
                             "spl_load_i64" => Some(TypeId::I64),
                             "spl_load_u8" => Some(TypeId::U8),
