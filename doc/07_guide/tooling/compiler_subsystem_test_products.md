@@ -61,3 +61,34 @@ registered cases; merely linking a library cannot establish coverage.
 This page defines the acceptance boundary and source inventory. The separate
 manager scripts supply scheduling and verification only; they do not claim an
 aggregate harness, dynamic provider loading, or six passing native products.
+
+## Resume an absent backend without rerunning passed products
+
+Pin the resume-capable manager into the full product source before the first
+run. The first run may omit one backend's compiler/admission arguments. Its
+three products remain BLOCKED; the available backend can produce three PASS
+receipts. The overall matrix remains FAIL until all six products pass.
+
+Once the missing producer is admitted, call the same manager with `--resume`,
+the identical source/output roots and resource limits, and both backend
+compiler/admission inputs. Resume accepts exactly one fully passing backend
+and one wholly absent backend whose nine tasks are BLOCKED. Failed tests,
+partial build artifacts, changed evidence or source, changed limits, and
+non-admitted producer inputs are rejected. This is not a general retry mode.
+
+An exclusive `.product-owner.lock` covers validation through publication.
+A surviving lock after a killed owner requires inspection; never remove it
+while its owner is alive. Before changing the journal, resume checks retained
+hashes and replays the strict product evidence verifier without executing
+native test callbacks. It preserves the old matrix and journal in
+`resume-history/`, leaves passing product files untouched, and runs only the
+previously absent backend. The existing strict six-product final gate remains
+mandatory. Rejected preflight leaves the previous matrix/journal unchanged.
+An interrupted resume retains history and is rejected on a second resume;
+inspect the partial attempt instead of overwriting it.
+
+Products and their source must remain at their original absolute paths.
+Copying evidence to another output root or updating the product source commit
+breaks the recorded source, inventory, binary, command and watchdog bindings.
+Resume does not establish dynamic backend provider loading: the current product
+builder still records builtin provider identity.
