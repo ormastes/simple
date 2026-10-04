@@ -1601,11 +1601,9 @@ fn convert_flat_pattern(pat_eid: i64) -> Pattern:
 # before every `return` in that function (including early returns nested in
 # if/while/for) and at fall-off-the-end -- including when ordinary statements
 # follow the `defer` (e.g. `fn work(): defer f(); g(); h()`, no explicit
-# `return`), as long as the function has no declared `-> T` return type (see
-# the `has_ret` fall-off-the-end block in `convert_decl_fn` below for why that
-# guard exists: a declared return type gives the body's last statement an
-# implicit-tail-value role that an appended defer-replay would silently
-# steal, so that shape stays refused). Any OTHER placement — nested inside
+# `return`). Explicit return expressions and typed implicit tails are saved
+# before cleanup, so replay cannot steal or change the selected return value.
+# Any OTHER placement — nested inside
 # if/while/for/match, or `errdefer` anywhere — is refused with a LOUD build
 # failure instead of a silent drop: it lowers to a reference to a
 # deliberately-nonexistent identifier, which HIR name resolution rejects with
@@ -1644,6 +1642,28 @@ fn defer_unsupported_marker(span: Span) -> Stmt:
 # top-to-bottom order, since only one defer body is unwinding at a time.
 var g_pending_defers: [[Stmt]] = []
 
+# '$' cannot occur in a source identifier, so these bridge-owned locals
+# cannot capture a user binding. The raw statement ID is unique per body.
+fn defer_return_replay(value: Expr?, statement_id: i64, span: Span) -> [Stmt]:
+    var result: [Stmt] = []
+    val name = "__simple$defer_return_{statement_id}"
+    if val expression = value:
+        result.push(Stmt(kind: StmtKind.Val(name, nil, expression), span: span))
+    var group_index = g_pending_defers.len() - 1
+    while group_index >= 0:
+        val group = g_pending_defers[group_index]
+        var statement_index = 0
+        while statement_index < group.len():
+            result.push(group[statement_index])
+            statement_index = statement_index + 1
+        group_index = group_index - 1
+    if value != nil:
+        val saved = Expr(kind: ExprKind.Ident(name), span: span)
+        result.push(Stmt(kind: StmtKind.Return(saved), span: span))
+    else:
+        result.push(Stmt(kind: StmtKind.Return(nil), span: span))
+    result
+
 # Convert one raw statement for inclusion in a statement LIST (function body,
 # if/while/for/match body, ...). Unlike `convert_flat_stmt` (one raw stmt ->
 # exactly one `Stmt`), this can expand to zero statements (a top-level defer
@@ -1681,17 +1701,12 @@ fn convert_flat_stmt_in_list(idx: i64, is_top_level: bool) -> [Stmt]:
         # native path at all yet — refuse loudly everywhere, top-level or not.
         return [defer_unsupported_marker(make_span())]
     elif tag == STMT_RETURN:
-        var out: [Stmt] = []
-        var di = g_pending_defers.len() - 1
-        while di >= 0:
-            val d_replay_group = g_pending_defers[di]
-            var dgi = 0
-            while dgi < d_replay_group.len():
-                out.push(d_replay_group[dgi])
-                dgi = dgi + 1
-            di = di - 1
-        out.push(convert_flat_stmt(idx))
-        return out
+        if g_pending_defers.len() == 0:
+            return [convert_flat_stmt(idx)]
+        val expression_id = stmt_get_expr(idx)
+        if expression_id >= 0:
+            return defer_return_replay(convert_flat_expr(expression_id), idx, make_span())
+        return defer_return_replay(nil, idx, make_span())
     else:
         return [convert_flat_stmt(idx)]
 
@@ -2086,12 +2101,8 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
         # not duplicated (see the `last_raw_tag != STMT_RETURN` guard below).
         #
         # The remaining shape -- the body falls off the end with ordinary
-        # statements AFTER the last `defer` (bug #172 follow-up, the MOST
-        # COMMON defer pattern: `fn work(): defer f(); g(); h()`, no explicit
-        # `return`) -- is handled here too, but ONLY when the function has NO
-        # declared `-> T` return type (`has_ret == false`). That guard exists
-        # because of how HIR lowering picks a lowering path for the body
-        # (`_Items/declaration_lowering.spl`, gated on `fn_.has_return_type`):
+        # statements AFTER the last `defer` -- depends on whether HIR would
+        # extract an implicit tail value:
         #   - has_ret == false -> `lower_hir_block_unit`: every statement,
         #     INCLUDING a trailing expression-statement, stays a plain
         #     statement; no tail value is ever extracted. Appending the
@@ -2103,9 +2114,9 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
         #     block's implicit tail-value / return value. Appending a
         #     defer-replay statement after it would silently steal that slot
         #     (the defer's own expression, not the function's real value,
-        #     would become the return value) -- so that shape is intentionally
-        #     left OUT OF SCOPE and still refused loudly rather than risking a
-        #     silently wrong return value.
+        #     would become the return value). Save that expression in a local
+        #     and return it after replay. Non-expression typed tails remain
+        #     refused until their control-flow cases are supported.
         val last_raw_tag = if body_len > 0: stmt_get_tag(body[body_len - 1]) else: -1
         if last_raw_tag == STMT_DEFER:
             var dj = g_pending_defers.len() - 1
@@ -2118,7 +2129,24 @@ fn convert_decl_fn(idx: i64) -> ParserFunction:
                 dj = dj - 1
         elif last_raw_tag != STMT_RETURN:
             if has_ret:
-                stmts.push(defer_unsupported_marker(make_span()))
+                # Preserve the implicit tail before cleanup, exactly as for
+                # an explicit return. A non-expression tail still needs a
+                # separate control-flow implementation and remains refused.
+                if stmts.len() > 0:
+                    val tail_index = stmts.len() - 1
+                    val tail = stmts[tail_index]
+                    match tail.kind:
+                        case StmtKind.Expr(expression):
+                            val replay = defer_return_replay(expression, body[body_len - 1], tail.span)
+                            stmts[tail_index] = replay[0]
+                            var replay_index = 1
+                            while replay_index < replay.len():
+                                stmts.push(replay[replay_index])
+                                replay_index = replay_index + 1
+                        case _:
+                            stmts.push(defer_unsupported_marker(make_span()))
+                else:
+                    stmts.push(defer_unsupported_marker(make_span()))
             else:
                 var ej = g_pending_defers.len() - 1
                 while ej >= 0:

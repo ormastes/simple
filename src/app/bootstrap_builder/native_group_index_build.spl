@@ -92,12 +92,19 @@ fn native_group_index_resolve_private_v1(work_root: text,
 
 fn native_group_index_manager_task_valid_v1(task: BuildTaskV1,
         config_relative: text, receipt_template: text,
-        config_digest: text) -> text:
+        config_digest: text, diagnostic_partition: i64 = -1,
+        diagnostic_partitions: i64 = 0) -> text:
     if not builder_relative_path_valid_v1(config_relative) or
             not native_group_index_private_template_v1(receipt_template):
         return "index manager task path invalid"
-    val expected = ["native-groups-index-build", "--manager-work",
+    var expected = ["native-groups-index-build", "--manager-work",
         "--config", config_relative, "--receipt", receipt_template]
+    if diagnostic_partition >= 0:
+        if diagnostic_partitions < 1 or diagnostic_partitions > 64 or diagnostic_partition >= diagnostic_partitions:
+            return "diagnostic partition invalid"
+        expected = ["native-groups-diagnostic-build", "--manager-work", "--config", config_relative,
+            "--partition", str(diagnostic_partition), "--partitions", str(diagnostic_partitions),
+            "--receipt", receipt_template]
     if task.args.len() != expected.len() or
             task.outputs.len() != 1 or
             task.outputs[0] != receipt_template.substring(7) or
@@ -117,7 +124,8 @@ fn native_group_index_manager_task_valid_v1(task: BuildTaskV1,
 
 fn native_group_index_manager_context_v1(work_root: text,
         config_relative: text, receipt_template: text,
-        config_path: text) -> Result<RuntimeStdNativeActionBudgetV2, text>:
+        config_path: text, diagnostic_partition: i64 = -1,
+        diagnostic_partitions: i64 = 0) -> Result<RuntimeStdNativeActionBudgetV2, text>:
     val attempt_root = work_root.substring(0, work_root.len() - 5)
     val request_path = attempt_root + "/request.sdn"
     if not file_is_regular_no_follow(request_path):
@@ -134,7 +142,7 @@ fn native_group_index_manager_context_v1(work_root: text,
         return Err("index generic manager memory cap invalid")
     val config_digest = file_hash_sha256(config_path)
     val invalid = native_group_index_manager_task_valid_v1(task,
-        config_relative, receipt_template, config_digest)
+        config_relative, receipt_template, config_digest, diagnostic_partition, diagnostic_partitions)
     if invalid != "": return Err(invalid)
     val staged_image = attempt_root + "/producer.exe"
     if not file_is_regular_no_follow(staged_image) or
@@ -143,7 +151,7 @@ fn native_group_index_manager_context_v1(work_root: text,
     Ok(RuntimeStdNativeActionBudgetV2(
         sha256_text(request_bytes), task.memory_limit_bytes))
 
-fn native_group_index_admit_v1(config: NativeGroupIndexConfigV1,
+fn native_group_source_admit_v1(config: NativeGroupIndexConfigV1,
         artifact_root: text, budget: RuntimeStdNativeActionBudgetV2
         ) -> Result<NativeGroupIndexAdmissionV1, text>:
     if not native_group_index_absolute_v1(config.index_cache_root) or
@@ -188,13 +196,23 @@ fn native_group_index_admit_v1(config: NativeGroupIndexConfigV1,
     if sources.source_count != config.expected_spl_count or
             sources.source_identities.len() != config.expected_spl_count:
         return Err("index full SCV source selection differs")
+    Ok(NativeGroupIndexAdmissionV1(config, sources, snapshot,
+        source_inventory.inventory!, "", artifact_root, budget))
+
+fn native_group_index_admit_v1(config: NativeGroupIndexConfigV1,
+        artifact_root: text, budget: RuntimeStdNativeActionBudgetV2
+        ) -> Result<NativeGroupIndexAdmissionV1, text>:
+    val admitted = native_group_source_admit_v1(config, artifact_root, budget)?
+    val sources = admitted.sources
+    val snapshot = admitted.snapshot
+    val inventory = admitted.inventory
     val pointer = config.index_cache_root + "/package-module-index-v1/CURRENT"
     val current = package_module_index_read_current_v1(config.index_cache_root)
     if config.expected_current_digest == "NONE":
         if file_exists(pointer) or current.valid:
             return Err("index cache has an unpinned CURRENT generation")
         return Ok(NativeGroupIndexAdmissionV1(config, sources, snapshot,
-            source_inventory.inventory!, "", artifact_root, budget))
+            inventory, "", artifact_root, budget))
     if not builder_digest_valid_v1(config.expected_current_digest) or
             not current.valid or current.generation == nil or
             current.digest != config.expected_current_digest:
@@ -202,7 +220,7 @@ fn native_group_index_admit_v1(config: NativeGroupIndexConfigV1,
     if current.generation!.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V2:
         return Err("index expected CURRENT is absent, different, or not V2")
     Ok(NativeGroupIndexAdmissionV1(config, sources, snapshot,
-        source_inventory.inventory!, current.digest, artifact_root, budget))
+        inventory, current.digest, artifact_root, budget))
 
 fn native_group_index_compiler_publish_v1(admitted: NativeGroupIndexAdmissionV1
         ) -> Result<NativeGroupIndexReceiptV1, text>:
@@ -302,3 +320,6 @@ export NativeGroupIndexAdmissionV1, native_group_index_admit_v1
 export native_group_index_compiler_publish_v1, native_group_index_build_managed_v1
 export native_group_index_managed_path_v1
 export native_group_index_manager_task_valid_v1
+
+export native_group_source_admit_v1, native_group_index_work_root_v1
+export native_group_index_resolve_private_v1, native_group_index_manager_context_v1

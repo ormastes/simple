@@ -1,0 +1,45 @@
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_name, decl_get_span}
+use compiler.core.types.{span_start, span_end, span_is_valid}
+use compiler.frontend.core.frontend.{core_frontend_parse_reset}
+
+fn source_for(decl: i64, source: text) -> text:
+    val span = decl_get_span(decl)
+    if not span_is_valid(span):
+        return ""
+    source[span_start(span):span_end(span)]
+
+describe "module expression source spans":
+    it "ends a BDD declaration before the next declaration, through UTF-8 text":
+        ast_reset()
+        val source = "# comment before\n\ndescribe \"한글\":\n    it \"case\":\n        expect(1).to_equal(1)\n\nfn next() -> i64:\n    7\n"
+        expect(core_frontend_parse_reset(source, "span_next_spec.spl")).to_equal(true)
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(2)
+        expect(decl_get_name(decls[0]).starts_with("_expr_")).to_equal(true)
+        val authored = source_for(decls[0], source)
+        expect(authored.starts_with("describe \"한글\":")).to_equal(true)
+        expect(authored).to_contain("expect(1).to_equal(1)")
+        expect(authored.contains("fn next")).to_equal(false)
+        expect(source_for(decls[1], source).starts_with("fn next")).to_equal(true)
+
+    it "retains the final BDD declaration through end of file":
+        ast_reset()
+        val source = "describe \"끝\":\n    it \"last\":\n        expect(2).to_equal(2)"
+        expect(core_frontend_parse_reset(source, "span_eof_spec.spl")).to_equal(true)
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(1)
+        val span = decl_get_span(decls[0])
+        expect(span_is_valid(span)).to_equal(true)
+        expect(span_start(span)).to_equal(0)
+        expect(span_end(span)).to_equal(source.len())
+        expect(source_for(decls[0], source)).to_equal(source)
+
+    it "retains authored top-level control-flow intervals":
+        ast_reset()
+        val source = "if true:\n    print 1\nfor item in [1]:\n    print item\nwhile false:\n    print 2\n"
+        expect(core_frontend_parse_reset(source, "span_control_spec.spl")).to_equal(true)
+        val decls = module_get_decls()
+        expect(decls.len()).to_equal(3)
+        expect(source_for(decls[0], source).starts_with("if true:")).to_equal(true)
+        expect(source_for(decls[1], source).starts_with("for item in [1]:")).to_equal(true)
+        expect(source_for(decls[2], source).starts_with("while false:")).to_equal(true)
