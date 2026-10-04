@@ -384,7 +384,7 @@ for my $task (@tasks) {
   my %command_keys = map { $_ => 1 } qw(source_root source_overlay compiler_sha256
     runtime_authority rss_cap_kib rss_mode timeout_seconds task simple_bootstrap_empty_native_obj simple_bootstrap
     simple_shard_mem_clamp simple_parse_shard_max simple_parse_shard_worker_kb
-    simple_hir_shard_worker_kb simple_shard_tree_memory_budget_kib);
+    simple_hir_shard_worker_kb simple_shard_tree_memory_budget_kib simple_native_file_timeout);
   my @argv;
   for my $line (@command) {
     if ($line =~ /\Aargv-hex=([0-9a-f]*)\z/) {
@@ -402,6 +402,11 @@ for my $task (@tasks) {
     $command{task} && $command{task} eq $task
     or die "$task command authority differs\n";
   if ($task eq 'generator' || $task eq 'main_adapter' || $task eq 'product') {
+    if ($arg{qualification_mode} eq 'diagnostic' || exists $command{simple_native_file_timeout}) {
+      defined($command{simple_native_file_timeout}) &&
+        $command{simple_native_file_timeout} eq $arg{build_timeout_seconds}
+        or die "$task native file timeout differs\n";
+    }
     if ($arg{qualification_mode} eq 'diagnostic' || exists $command{simple_shard_mem_clamp}) {
       ($command{simple_shard_mem_clamp} // '') eq '1' &&
         ($command{simple_parse_shard_max} // '') eq '1' &&
