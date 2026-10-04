@@ -1,0 +1,57 @@
+# @req REQ-TEST-DB-REPORT-001
+use std.database.test_extended.{create_test_database_extended, TestInfo}
+
+fn populated_db():
+    var db = create_test_database_extended("/tmp/test_extended_all_test_info_lookup_spec.sdn")
+    val run_id = db.start_run()
+    db.update_test_result(file_path: "test/a_spec.spl", suite_name: "spec", test_name: "test/a_spec.spl", status: "passed", duration_ms: 12.0, run_id: run_id)
+    db.update_test_result(file_path: "test/a_spec.spl", suite_name: "spec", test_name: "test/a_spec.spl", status: "failed", duration_ms: 30.0, run_id: run_id)
+    db.update_test_result(file_path: "test/b_spec.spl", suite_name: "spec", test_name: "test/b_spec.spl", status: "passed", duration_ms: 5.0, run_id: run_id)
+    db.update_test_result(file_path: "test/b_spec.spl", suite_name: "other", test_name: "test/b_other", status: "skipped", duration_ms: 1.5, run_id: run_id)
+    db.update_test_result(file_path: "test/c_spec.spl", suite_name: "spec", test_name: "test/c_spec.spl", status: "passed", duration_ms: 2000.0, run_id: run_id)
+    db
+
+describe "TestDatabaseExtended.all_test_info lookup tables":
+    """
+    `all_test_info` feeds `test_result.md`. It used to scan the suites, timing
+    and counters tables once per test, which kept `simple test <dir>` busy for
+    over 14 minutes after printing results. It now builds one lookup per table.
+    These examples check that every field still matches the per-test helpers.
+    """
+
+    it "reports the same suite, timing and counts as the per-test helpers":
+        step("Record five results across three files and two suites")
+        val db = populated_db()
+        val infos = db.all_test_info()
+        expect(infos.len()).to_equal(4)
+        # Non-vacuous: the counters and timing tables really are populated.
+        expect(infos.filter(_.total_runs > 0).len() > 0).to_equal(true)
+        expect(infos.filter(_.mean_duration > 0.0).len() > 0).to_equal(true)
+        for info in infos:
+            step("Compare {info.test_name} with the linear helpers")
+            val test_id = db.get_test_id(info.file_path, info.suite_name, info.test_name) ?? -1
+            expect(test_id == -1).to_equal(false)
+            val (mean, p50) = db.get_test_timing(test_id) ?? (0.0, 0.0)
+            val (total_runs, passed, failed) = db.get_test_counts(test_id) ?? (0, 0, 0)
+            expect(info.mean_duration).to_equal(mean)
+            expect(info.p50_duration).to_equal(p50)
+            expect(info.total_runs).to_equal(total_runs)
+            expect(info.passed).to_equal(passed)
+            expect(info.failed).to_equal(failed)
+
+    it "keeps file paths and suite names per suite":
+        val db = populated_db()
+        var seen: [text] = []
+        for info in db.all_test_info():
+            seen.push("{info.file_path}|{info.suite_name}|{info.test_name}|{info.status}")
+        expect(seen).to_contain("test/a_spec.spl|spec|test/a_spec.spl|failed")
+        expect(seen).to_contain("test/b_spec.spl|other|test/b_other|skipped")
+        expect(seen).to_contain("test/c_spec.spl|spec|test/c_spec.spl|passed")
+
+    it "derives status counts from the same rows":
+        val db = populated_db()
+        val (total, passed, failed, skipped) = db.test_count_by_status()
+        expect(total).to_equal(4)
+        expect(passed).to_equal(2)
+        expect(failed).to_equal(1)
+        expect(skipped).to_equal(1)

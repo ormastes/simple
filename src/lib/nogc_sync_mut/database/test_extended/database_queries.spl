@@ -67,6 +67,82 @@ fn db_get_test_counts(db: SdnDatabase, test_id: i64) -> (i64, i64, i64)?:
             return Some((total_runs, passed, failed))
     nil
 
+# One-pass lookup tables for `all_test_info`.
+#
+# all_test_info used to call db_get_suite_info / db_get_test_timing /
+# db_get_test_counts once per test, and each of those scans a whole table, so
+# the report cost O(tests x rows). Interpreted (as `simple test <dir>` runs
+# it) one all_test_info took ~100 s on the repo DB, and generate_test_result_md
+# calls it nine times: the directory runner sat >14 min after printing its
+# results. These tables hold exactly what the linear helpers return: the FIRST
+# matching row wins, and a suite row with an invalid file_id/name_str is
+# skipped just as db_get_suite_info's `continue` skips it.
+struct TestInfoLookup:
+    suite_file: Dict<i64, text>
+    suite_name: Dict<i64, text>
+    timing_mean: Dict<i64, f64>
+    timing_p50: Dict<i64, f64>
+    count_total: Dict<i64, i64>
+    count_passed: Dict<i64, i64>
+    count_failed: Dict<i64, i64>
+
+fn db_test_info_lookup(db: SdnDatabase, interner: StringInterner) -> TestInfoLookup:
+    var file_path: Dict<i64, text> = {}
+    match db.get_table("files"):
+        case Some(table):
+            for row in table.valid_rows():
+                val file_id = row.get_i64("file_id") ?? -1
+                if file_path.has(file_id):
+                    continue
+                val path_str = row.get_i32("path_str") ?? -1
+                if path_str != -1:
+                    file_path[file_id] = interner.get(path_str) ?? ""
+        case nil: pass
+    var suite_file: Dict<i64, text> = {}
+    var suite_name: Dict<i64, text> = {}
+    match db.get_table("suites"):
+        case Some(table):
+            for row in table.valid_rows():
+                val suite_id = row.get_i64("suite_id") ?? -1
+                if suite_file.has(suite_id):
+                    continue
+                val file_id = row.get_i64("file_id") ?? -1
+                val name_str = row.get_i32("name_str") ?? -1
+                if file_id == -1 or name_str == -1:
+                    continue
+                suite_file[suite_id] = if file_path.has(file_id): file_path[file_id] else: ""
+                suite_name[suite_id] = interner.get(name_str) ?? ""
+        case nil: pass
+    var timing_mean: Dict<i64, f64> = {}
+    var timing_p50: Dict<i64, f64> = {}
+    match db.get_table("timing"):
+        case Some(table):
+            for row in table.valid_rows():
+                val test_id = row.get_i64("test_id") ?? -1
+                if timing_mean.has(test_id):
+                    continue
+                timing_mean[test_id] = row.get_f64("mean") ?? 0.0
+                timing_p50[test_id] = row.get_f64("p50") ?? 0.0
+        case nil: pass
+    var count_total: Dict<i64, i64> = {}
+    var count_passed: Dict<i64, i64> = {}
+    var count_failed: Dict<i64, i64> = {}
+    match db.get_table("counters"):
+        case Some(table):
+            for row in table.valid_rows():
+                val test_id = row.get_i64("test_id") ?? -1
+                if count_total.has(test_id):
+                    continue
+                count_total[test_id] = row.get_i64("total_runs") ?? 0
+                count_passed[test_id] = row.get_i64("passed") ?? 0
+                count_failed[test_id] = row.get_i64("failed") ?? 0
+        case nil: pass
+    TestInfoLookup(
+        suite_file: suite_file, suite_name: suite_name,
+        timing_mean: timing_mean, timing_p50: timing_p50,
+        count_total: count_total, count_passed: count_passed, count_failed: count_failed
+    )
+
 # Build a RunRecord from a database row. Returns nil if required fields missing.
 fn run_record_from_row(row: SdnRow) -> RunRecord?:
     val run_id = row.get("run_id") ?? ""
