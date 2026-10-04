@@ -120,3 +120,35 @@ future-integration comments and remains unavailable pending five live
 capabilities. It is not a current production caller or an available manifest
 authority source. Repairing SHA/canonical-stream ownership does not activate
 that boundary or supply the independent manifest trust required above.
+
+## Authority reuse audit (2026-10-04, release c74098886a9)
+
+`src/lib/nogc_sync_mut/io/native_tool_authority_v1.spl` is a real production
+owner for managed external executable tools. Its projection decoder admits
+exactly eight roles, and its linker role accepts ld/lld-link executable names,
+not a linker pack shared library. The bootstrap authority snapshot producer is
+`scripts/check/lib/bootstrap-stage3/authority.shs`;
+`managed_suite_environment_request_v1` transports the selected authority path
+and digest. This chain does not currently issue a pack artifact/schema/ABI/
+composition/dependency grant.
+
+`native_pinned_artifact_open_v1` and `native_pinned_artifact_revalidate_v1`
+can reusefully check already-authorized bytes and metadata continuity. They do
+not decide who authorized those bytes. Supplying the current hash of an
+arbitrarily selected path would not create that missing authority.
+
+`artifact_map_load_eligible_v1` in the environment-variant artifact admission
+module consumes externally authoritative verification receipts and does not
+verify signatures. The inspected source contains no production constructor of
+`ArtifactTrustVerificationReceiptV1`; publication admission consumes it.
+The sealed activation coordinator is a potential downstream retention mechanism,
+not a receipt issuer. Before reusing its ownership guarantees, separately audit
+`environment_variant_sealed_activation_owner_activate_v1`: its free function
+mutates owner records/counters and needs the same value-semantics scrutiny as
+earlier repaired owners. This audit does not activate or certify that path.
+
+The remaining prerequisite is an independently authorized pack catalog/manifest
+issuer or installed verifier and policy provenance that binds the artifact,
+schema/ABI, composition and dependency closure. Once present, existing pin
+checks and `LinkerPackV1.load`/lifecycle can consume it. Managed external linker
+selection is reusable today; production CLI pack authorization is still open.

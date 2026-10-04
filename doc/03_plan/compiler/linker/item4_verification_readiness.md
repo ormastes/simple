@@ -9,6 +9,20 @@ integration does not close verification or authorize publication.
 
 ## 2026-10-04 continuation
 
+Common-symbol support is now authored through the existing file-backed
+entrypoint. Its test-first contract covers independent
+maximum size/alignment coalescing, regular/common/weak precedence, canonical
+aligned writable zero storage, real relocations and archive selection. All
+additional scans must consume the work budget and observe cancellation; output
+and scratch failures must preserve the destination. This removes an explicit
+semantic refusal, not the missing whole-job enforcement gate. Shared plans and
+parallel owners are recorded in the agent-task ledger; source and execution
+status is tracked in `item4_stream_common_2026-10-04.md` under verification.
+The fast archive path also now distinguishes unresolved demand from tentative
+demand: a common-only provider satisfies the former without extracting further
+common/weak members, while a later strong definition can replace it. An executed
+GNU ld fixture experiment supports this contract; Simple execution remains UNRUN.
+
 ELF byte-source implementation and nine acceptance scenarios are now authored.
 File adapters require a four-operation seal and consume the selected reader before the
 same owner's relocation/layout/writer operations. Array-input APIs keep their

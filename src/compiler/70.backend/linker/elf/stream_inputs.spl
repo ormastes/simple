@@ -41,6 +41,19 @@ pub fn elf_stream_open_inputs_v1(objects: [text], archives: [text], entry: [u8],
 export elf_stream_open_inputs_v1
 export elf_stream_symbol_count_v1, elf_stream_name_v1
 
+fn elf_stream_common_valid_v1(symbol: ElfFileSymbolV1) -> Result<bool, text>:
+    if symbol.section_index != 65522: return Ok(true)
+    if symbol.binding == 0: return Err("stream local common symbol unsupported")
+    if symbol.name_bytes.len() == 0: return Err("stream common symbol name is empty")
+    if symbol.value == 0u64 or (symbol.value & (symbol.value - 1u64)) != 0u64:
+        return Err("stream common alignment must be a positive power of two")
+    Ok(true)
+
+fn elf_stream_definition_rank_v1(symbol: ElfFileSymbolV1) -> i64:
+    if symbol.section_index == 65522: return 2
+    if symbol.binding == 1: return 3
+    1
+
 impl ElfStreamInputsV1:
     me elf_stream_charge_v1(cancelled: fn() -> bool) -> Result<bool, text>:
         if self.closed: return Err("stream input set closed")
@@ -60,18 +73,32 @@ impl ElfStreamInputsV1:
         var owner = 0
         for object in self.objects:
             for table in 0..object.section_count:
+                self.elf_stream_charge_v1(cancelled)?
                 val count = elf_stream_symbol_count_v1(object, table)?
                 var ordinal: u64 = 0
                 while ordinal < count:
                     val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
                     if (symbol.binding == 1 or symbol.binding == 2) and symbol.section_index != 0 and symbol.name_bytes == name:
+                        elf_stream_common_valid_v1(symbol)?
                         val binding = ElfStreamBindingV1(owner: owner, table: table, ordinal: ordinal, symbol: symbol)
                         if found.is_none():
                             found = Some(binding)
-                        elif symbol.binding == 1:
-                            if found.unwrap().symbol.binding == 1:
+                        else:
+                            var selected = found.unwrap()
+                            val rank = elf_stream_definition_rank_v1(symbol)
+                            val old_rank = elf_stream_definition_rank_v1(selected.symbol)
+                            if rank == 3 and old_rank == 3:
                                 return Err("duplicate symbol {elf_stream_name_v1(name)}")
-                            found = Some(binding)
+                            if rank > old_rank:
+                                found = Some(binding)
+                            elif rank == 2 and old_rank == 2:
+                                # Keep the first COMMON record as representative,
+                                # but coalesce size and alignment independently.
+                                var combined = selected.symbol
+                                if symbol.size > combined.size: combined.size = symbol.size
+                                if symbol.value > combined.value: combined.value = symbol.value
+                                selected.symbol = combined
+                                found = Some(selected)
                     ordinal = ordinal + 1u64
             owner = owner + 1
         Ok(found)
@@ -93,8 +120,13 @@ impl ElfStreamInputsV1:
         self.objects = self.objects.push(object)
         Ok(true)
 
-    me elf_stream_unresolved_name(name: [u8], entry: [u8], cancelled: fn() -> bool) -> Result<bool, text>:
-        if self.elf_stream_lookup_v1(name, cancelled)?.is_some(): return Ok(false)
+    me elf_stream_unresolved_name(name: [u8], entry: [u8], cancelled: fn() -> bool,
+            strong_regular: bool = false) -> Result<bool, text>:
+        val selected = self.elf_stream_lookup_v1(name, cancelled)?
+        if selected.is_some():
+            # GNU ELF tentative demand extracts a real strong definition only.
+            # Neither a weak nor another COMMON member upgrades a COMMON alone.
+            return Ok(strong_regular and selected.unwrap().symbol.section_index == 65522)
         if name == entry: return Ok(true)
         for object in self.objects:
             for table in 0..object.section_count:
@@ -113,7 +145,8 @@ impl ElfStreamInputsV1:
             while ordinal < count:
                 val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
                 if (symbol.binding == 1 or symbol.binding == 2) and symbol.section_index != 0 and symbol.name_bytes.len() > 0:
-                    if self.elf_stream_unresolved_name(symbol.name_bytes, entry, cancelled)?: return Ok(true)
+                    val strong_regular = symbol.binding == 1 and symbol.section_index != 65522
+                    if self.elf_stream_unresolved_name(symbol.name_bytes, entry, cancelled, strong_regular)?: return Ok(true)
                 ordinal = ordinal + 1u64
         Ok(false)
 
@@ -125,8 +158,9 @@ impl ElfStreamInputsV1:
                 var ordinal: u64 = 0
                 while ordinal < count:
                     val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
-                    if symbol.binding > 2 or symbol.symbol_type == 6 or symbol.symbol_type == 10 or symbol.section_index == 65522:
-                        return Err("stream GNU-unique/TLS/IFUNC/common symbols unsupported")
+                    elf_stream_common_valid_v1(symbol)?
+                    if symbol.binding > 2 or symbol.symbol_type == 6 or symbol.symbol_type == 10:
+                        return Err("stream GNU-unique/TLS/IFUNC symbols unsupported")
                     if symbol.binding > 0 and symbol.name_bytes.len() > 0:
                         val binding = self.elf_stream_lookup_v1(symbol.name_bytes, cancelled)?
                         if binding.is_none() and symbol.binding == 1:

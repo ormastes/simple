@@ -1,6 +1,6 @@
 # Deterministic scan-based layout. Only three segment summaries are resident.
 use compiler.backend.linker.elf.stream_types.{ElfStreamInputsV1, ElfStreamLayoutV1}
-use compiler.backend.linker.elf.stream_inputs.{elf_stream_name_v1}
+use compiler.backend.linker.elf.stream_inputs.{elf_stream_name_v1, elf_stream_symbol_count_v1}
 use compiler.backend.linker.elf.elf_file_reader.{ElfFileSymbolV1, ElfFileSectionV1, elf_file_section_v1}
 
 val ELF_STREAM_BASE_V1: u64 = 4194304u64
@@ -33,6 +33,50 @@ export ELF_STREAM_BASE_V1, elf_stream_group_v1, elf_stream_align_v1
 export elf_stream_section_align_v1
 
 impl ElfStreamInputsV1:
+    me elf_stream_regular_end_v1(cancelled: fn() -> bool) -> Result<u64, text>:
+        var cursor = 4096u64
+        for group in 0..3:
+            cursor = elf_stream_align_v1(cursor, 4096u64, self.limits.output_bytes)?
+            for object in self.objects:
+                for index in 1..object.section_count:
+                    self.elf_stream_charge_v1(cancelled)?
+                    val section = elf_file_section_v1(object, index)?
+                    if elf_stream_group_v1(section)? != group: continue
+                    cursor = elf_stream_section_align_v1(cursor, section.alignment, self.limits.output_bytes)?
+                    if section.size > self.limits.output_bytes - cursor: return Err("stream section exceeds output budget")
+                    cursor = cursor + section.size
+        Ok(cursor)
+
+    me elf_stream_common_layout_v1(start: u64, wanted: [u8],
+            cancelled: fn() -> bool) -> Result<(u64, Option<u64>), text>:
+        # Rescan rather than retain a symbol-sized allocation map. All record
+        # reads spend the shared scan quota; the tradeoff is additional scans.
+        if start > self.limits.output_bytes: return Err("stream common storage exceeds output budget")
+        var cursor = start
+        var address: Option<u64> = None
+        var owner = 0
+        for object in self.objects:
+            for table in 0..object.section_count:
+                self.elf_stream_charge_v1(cancelled)?
+                val count = elf_stream_symbol_count_v1(object, table)?
+                var ordinal = 0u64
+                while ordinal < count:
+                    val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
+                    if symbol.section_index == 65522:
+                        val found = self.elf_stream_lookup_v1(symbol.name_bytes, cancelled)?
+                        if found.is_none(): return Err("stream common definition disappeared")
+                        val selected = found.unwrap()
+                        if selected.symbol.section_index == 65522 and selected.owner == owner and
+                                selected.table == table and selected.ordinal == ordinal:
+                            cursor = elf_stream_section_align_v1(cursor, selected.symbol.value, self.limits.output_bytes)?
+                            if selected.symbol.size > self.limits.output_bytes - cursor:
+                                return Err("stream common storage exceeds output budget")
+                            if selected.symbol.name_bytes == wanted: address = Some(cursor)
+                            cursor = cursor + selected.symbol.size
+                    ordinal = ordinal + 1u64
+            owner = owner + 1
+        Ok((cursor, address))
+
     me elf_stream_section_offset_v1(owner: i64, index: i64,
             cancelled: fn() -> bool) -> Result<u64, text>:
         var cursor: u64 = 4096u64
@@ -67,6 +111,11 @@ impl ElfStreamInputsV1:
             return Ok(definition.value)
         if definition.section_index == 0 and definition.binding == 0 and definition.name_bytes.len() == 0:
             return Ok(0u64)
+        if definition.section_index == 65522:
+            val start = self.elf_stream_regular_end_v1(cancelled)?
+            val common = self.elf_stream_common_layout_v1(start, definition.name_bytes, cancelled)?
+            if common.1.is_none(): return Err("stream common allocation disappeared")
+            return Ok(ELF_STREAM_BASE_V1 + common.1.unwrap())
         if defining_owner < 0 or defining_owner >= self.objects.len(): return Err("stream symbol owner bounds")
         val section = elf_file_section_v1(self.objects[defining_owner], definition.section_index)?
         if definition.value > section.size: return Err("stream symbol value exceeds section")
@@ -89,6 +138,9 @@ impl ElfStreamInputsV1:
                         cursor = elf_stream_section_align_v1(cursor, section.alignment, self.limits.output_bytes)?
                         if section.size > self.limits.output_bytes - cursor: return Err("stream section exceeds output budget")
                         cursor = cursor + section.size
+            if group == 2:
+                val common = self.elf_stream_common_layout_v1(cursor, [], cancelled)?
+                cursor = common.0
             sizes.push(cursor - start)
         val binding = self.elf_stream_lookup_v1(entry, cancelled)?
         if binding.is_none(): return Err("stream entry disappeared")
