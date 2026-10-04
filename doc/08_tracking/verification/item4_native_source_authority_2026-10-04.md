@@ -30,3 +30,10 @@ attempt's terminal failure is recorded in the preceding recovery report. No
 other owner's process/cache was changed, no bootstrap was restarted, and no
 Rust-seed fallback was used. Source repair and structural checks cannot qualify
 this feature for release or establish that all runtime blockers are resolved.
+
+At the subsequent process revalidation, test-runner owner 37596 and collector
+22612 were no longer live. The attempt-specific
+`C:/Users/user/.simple/worktrees/simple/runtime/windows-restart-20261004/phase34-post-link4/cranelift/phase4-test-runner/artifact/result.json`
+records `exit_code: 139`, `compile_exit: 139`, `artifact_sha256: null`, and
+`admitted: false`. This is a terminal failed attempt, not a verified wait or a
+usable test runtime. The exit code alone does not identify its root cause.
