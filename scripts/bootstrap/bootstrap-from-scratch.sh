@@ -627,6 +627,7 @@ fi
 bootstrap_stage2_trust_root=0
 bootstrap_stage2_parent_override=
 bootstrap_stage2_parent_authority=
+bootstrap_stage2_parent_runtime=
 if [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] &&
    { [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; }; then
   # The first independently admitted pure-Simple parent cannot itself require
@@ -652,6 +653,7 @@ elif [ "${stop_after_stage2}" -eq 1 ] &&
   bootstrap_stage2_trust_root=1
   bootstrap_stage2_parent_override=${BOOTSTRAP_STAGE2_PARENT_PATH}
   bootstrap_stage2_parent_authority=${BOOTSTRAP_STAGE2_PARENT_AUTHORITY}
+  bootstrap_stage2_parent_runtime=${BOOTSTRAP_STAGE2_PARENT_RUNTIME_PATH:-}
   bootstrap_reason=stage2-trust-root-refresh
 elif [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; then
   # The named command must be one that PLANS a receipt, never one that starts a
@@ -2441,7 +2443,8 @@ seed_inputs_hash() {
 seed_stale=0
 rust_rebuilt=0
 compiler_backfill_rebuilt=0
-if [ -e "${rust_authority_current_marker}.transaction" ]; then
+if [ -z "${bootstrap_stage2_parent_runtime}" ] &&
+   [ -e "${rust_authority_current_marker}.transaction" ]; then
   bootstrap_acquire_rust_authority || exit 1
   bootstrap_authority_recover_or_refuse "${full_bootstrap}" \
     "${rust_authority_generation_root}" "${rust_authority_current_marker}" \
@@ -2544,7 +2547,7 @@ if [ "${os}" = windows ] && [ "${PLATFORM_ABI}" = gnu ]; then
   export CC
 fi
 seed_inputs_fingerprint=not-used-by-admitted-stage4-resume
-if [ -z "${resume_stage4_output}" ]; then
+if [ -z "${resume_stage4_output}" ] && [ -z "${bootstrap_stage2_parent_runtime}" ]; then
   bootstrap_progress_mark fingerprint ""
   bootstrap_step_mark fingerprint-start
   seed_inputs_fingerprint=$(seed_inputs_hash pre) || {
@@ -2553,7 +2556,8 @@ if [ -z "${resume_stage4_output}" ]; then
   }
   bootstrap_step_mark seed-inputs-hash-pre
 fi
-if [ -z "${resume_stage4_output}" ] && [ -x "${seed_bin}" ] && [ -f "${native_all_lib}" ]; then
+if [ -z "${resume_stage4_output}" ] && [ -z "${bootstrap_stage2_parent_runtime}" ] &&
+   [ -x "${seed_bin}" ] && [ -f "${native_all_lib}" ]; then
   if ! bootstrap_stage3_verify_seed_stamp "${seed_stamp}" \
     "${seed_inputs_fingerprint}" "${seed_bin}" "${native_all_lib}" \
     "${compiler_backfill_lib}"; then
@@ -3279,6 +3283,21 @@ echo "  mode:     admitted Phase 2 → managed Phase 3 and Phase 4"
   # Cache cleanup occurs only after binding and acquiring the selected writer.
   mkdir -p "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}"
+  if [ -n "${bootstrap_stage2_parent_runtime}" ]; then
+    # The complete canonical parent admission was checked before this lane
+    # started. Carry its immutable runtime forward, without selecting another
+    # seed/runtime tuple or mutating the original producer stamp.
+    runtime_origin_absolute=$(bootstrap_stage3_physical_directory \
+      "${bootstrap_stage2_parent_runtime}") || exit 1
+    bootstrap_stage2_parent_runtime_verify \
+      "$(absolute_path "${runtime_origin_before}")" || {
+      echo "error: admitted parent runtime no longer matches its recorded snapshot" >&2
+      exit 1
+    }
+    seed_inputs_fingerprint=$(bootstrap_stage3_manifest_value inputs_fingerprint \
+      "${runtime_origin_absolute}/simple${exe_suffix}.inputs.sha256") || exit 1
+    [ -n "${seed_inputs_fingerprint}" ] || exit 1
+  else
   bootstrap_acquire_rust_authority || exit 1
   bootstrap_authority_require_owned_lock "${rust_target_lock_handle}" || {
     echo "error: Rust authority lock ownership was lost before legacy normalization" >&2
@@ -3371,6 +3390,7 @@ echo "  mode:     admitted Phase 2 → managed Phase 3 and Phase 4"
     echo "error: could not snapshot Rust runtime authority" >&2
     exit 1
   }
+  fi
   bootstrap_step_mark runtime-origin-before
   bootstrap_stage3_copy_authority "${runtime_origin_absolute}" \
     "$(absolute_path "${stage2_runtime_authority}")" || {
@@ -3426,10 +3446,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
   # bootstrap_authority_prune_generations in bootstrap-authority-wiring.shs).
   # Best-effort: a reclaim failure is disk hygiene, not correctness, and must
   # not turn an otherwise-successful bootstrap into a failure.
-  bootstrap_authority_prune_generations \
-    "${rust_authority_generation_root}" "${rust_authority_current_marker}" \
-    "${rust_target_lock_handle}" ||
-    echo "warning: could not prune stale Rust authority generations" >&2
+  if [ -z "${bootstrap_stage2_parent_runtime}" ]; then
+    bootstrap_authority_prune_generations \
+      "${rust_authority_generation_root}" "${rust_authority_current_marker}" \
+      "${rust_target_lock_handle}" ||
+      echo "warning: could not prune stale Rust authority generations" >&2
+  fi
   bootstrap_release_rust_authority || {
     echo "error: could not release Rust authority after private admission" >&2
     exit 1
