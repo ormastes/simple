@@ -10,8 +10,104 @@ use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remov
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use compiler.backend.linker.elf.stream_types.{ElfStreamLimitsV1}
 use compiler.backend.linker.elf.stream_link.{elf_stream_link_file_v1}
+use compiler.backend.linker.elf.stream_inputs.{elf_stream_open_inputs_v1}
+use compiler.backend.linker.elf.stream_layout.*
 use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_STATIC_EXEC}
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf_parser.{elf_parse_object}
+
+fn item4_stream_common_contains(bytes: [u8], text_value: text) -> bool:
+    if bytes.len() < text_value.len(): return false
+    for offset in 0..(bytes.len() - text_value.len() + 1):
+        var matched = true
+        for index in 0..text_value.len():
+            if bytes[offset + index] != text_value.byte_at(index) as u8: matched = false
+        if matched: return true
+    false
+
+fn item4_stream_common_value(bytes: [u8], address: u64) -> u64:
+    val phoff = item4_stream_common_u64(bytes, 32, 8)
+    val count = item4_stream_common_u64(bytes, 56, 2)
+    val valid = phoff <= bytes.len() as u64 and count > 0u64 and count < 64u64 and count * 56u64 <= bytes.len() as u64 - phoff
+    expect(valid).to_equal(true)
+    if not valid: return 0u64
+    for index in 0..(count as i64):
+        val at = phoff as i64 + index * 56
+        if item4_stream_common_u64(bytes, at, 4) == 1u64:
+            val base = item4_stream_common_u64(bytes, at + 16, 8)
+            val size = item4_stream_common_u64(bytes, at + 32, 8)
+            if address >= base and address - base <= size and 8u64 <= size - (address - base):
+                return item4_stream_common_u64(bytes,
+                    (item4_stream_common_u64(bytes, at + 8, 8) + address - base) as i64, 8)
+    expect(false).to_equal(true)
+    0u64
+
+fn item4_stream_common_case(objects: [text], archives: [text], strong: bool,
+        absent_marker: text = "", common_size: u64 = 80u64, common_align: u64 = 64u64):
+    expect(dir_create_all("build")).to_equal(true)
+    val created = secure_temp_dir("build", "item4-stream-common-case-")
+    expect(created.is_ok()).to_equal(true)
+    if created.is_err(): return
+    val directory = created.unwrap()
+    val output = directory + "/image.elf"
+    val streamed = elf_stream_link_file_v1(objects, archives, [95, 115, 116, 97, 114, 116],
+        output, directory, item4_stream_common_limits(), item4_stream_common_cancelled)
+    val fast = item4_stream_common_fast(objects, archives)
+    expect(streamed.is_ok()).to_equal(true)
+    expect(fast.is_ok()).to_equal(true)
+    if streamed.is_ok(): expect(streamed.unwrap().cleanup_pending).to_equal(false)
+    if streamed.is_ok() and fast.is_ok():
+        for image in [file_read_bytes(output), fast.unwrap()]:
+            if strong:
+                val table = item4_stream_common_marker(image)
+                if table >= 0:
+                    val shared = item4_stream_common_u64(image, table, 8)
+                    expect(shared).to_equal(item4_stream_common_u64(image, table + 8, 8))
+                    expect(item4_stream_common_value(image, shared)).to_equal(0x11223344u64)
+                    val other = item4_stream_common_u64(image, table + 16, 8)
+                    expect(other % 32u64).to_equal(0u64)
+                    item4_stream_common_zero(image, other, 16u64)
+                    expect(item4_stream_common_contains(image, "STRONGARCH!")).to_equal(true)
+                    expect(item4_stream_common_contains(image, "WEAKARCHIVE!")).to_equal(false)
+            else:
+                item4_stream_common_check(image, common_size, common_align)
+                if common_size == 4096u64: expect(item4_stream_common_contains(image, "BIGCOMMON!")).to_equal(true)
+            if absent_marker != "": expect(item4_stream_common_contains(image, absent_marker)).to_equal(false)
+    if file_exists(output): expect(file_remove(output)).to_equal(true)
+    expect(dir_remove(directory, false)).to_equal(true)
+
+fn item4_stream_common_mutated(kind: i64) -> [u8]:
+    var bytes = file_read_bytes("test/fixtures/linker/elf/stream_common_a.o")
+    var widened: [i64] = []
+    for byte in bytes: widened.push(byte as i64)
+    val parsed = elf_parse_object(widened)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return []
+    val object = parsed.unwrap()
+    var table: i64 = -1
+    for section in object.sections:
+        if section.sh_type == 2: table = section.sh_addr
+    expect(table >= 0).to_equal(true)
+    if table < 0: return []
+    for index in 0..object.symbols.len():
+        val symbol = object.symbols[index]
+        if symbol.name == "shared_common":
+            expect(symbol.st_shndx).to_equal(65522)
+            expect(symbol.st_info).to_equal(17)
+            expect(symbol.st_value).to_equal(64)
+            if symbol.st_shndx != 65522 or symbol.st_info != 17 or symbol.st_value != 64: return []
+            val offset = table + index * 24
+            val valid = offset >= 0 and offset <= bytes.len() and 24 <= bytes.len() - offset
+            expect(valid).to_equal(true)
+            if not valid: return []
+            if kind == 2:
+                bytes[offset + 4] = 1u8
+            else:
+                val alignment: u64 = if kind == 0: 0u64 else: 3u64
+                for byte in 0..8: bytes[offset + 8 + byte] = ((alignment >> (byte * 8)) & 255u64) as u8
+            return bytes
+    expect(false).to_equal(true)
+    []
 
 fn item4_stream_common_fast(objects: [text], archives: [text]) -> Result<[u8], text>:
     var object_bytes: [[i64]] = []
@@ -38,6 +134,7 @@ fn item4_stream_common_limits() -> ElfStreamLimitsV1:
         scan_record_limit: 1000000u64)
 
 fn item4_stream_common_cancelled() -> bool: false
+fn item4_stream_common_stop() -> bool: true
 
 fn item4_stream_common_inputs() -> [text]:
     ["test/fixtures/linker/elf/stream_common_refs.o",
@@ -95,7 +192,9 @@ fn item4_stream_common_zero(bytes: [u8], address: u64, size: u64):
                         expect(item4_stream_common_u64(bytes, (file_offset + relative) as i64, 1)).to_equal(0u64)
     expect(matches).to_equal(1)
 
-fn item4_stream_common_check(bytes: [u8]):
+fn item4_stream_common_check(bytes: [u8], common_size: u64 = 80u64, common_align: u64 = 64u64):
+    expect(common_align > 0u64).to_equal(true)
+    if common_align == 0u64: return
     expect(item4_stream_common_u64(bytes, 0, 4)).to_equal(0x464c457fu64)
     expect(item4_stream_common_u64(bytes, 18, 2)).to_equal(62u64)
     val table = item4_stream_common_marker(bytes)
@@ -104,13 +203,110 @@ fn item4_stream_common_check(bytes: [u8]):
     val repeated = item4_stream_common_u64(bytes, table + 8, 8)
     val other = item4_stream_common_u64(bytes, table + 16, 8)
     expect(shared).to_equal(repeated)
-    expect(shared % 64u64).to_equal(0u64)
+    expect(shared % common_align).to_equal(0u64)
     expect(other % 32u64).to_equal(0u64)
-    expect(shared + 80u64 <= other or other + 16u64 <= shared).to_equal(true)
-    item4_stream_common_zero(bytes, shared, 80u64)
+    expect(shared + common_size <= other or other + 16u64 <= shared).to_equal(true)
+    item4_stream_common_zero(bytes, shared, common_size)
     item4_stream_common_zero(bytes, other, 16u64)
 
 describe "Streamed ELF common-symbol allocation":
+    it "selects strong regular definitions over common in both input orders":
+        step("Inspect actual relocated strong initializer and remaining common zero storage in both engines")
+        val inputs = item4_stream_common_inputs()
+        val strong = "test/fixtures/linker/elf/stream_common_strong.o"
+        item4_stream_common_case(inputs + [strong], [], true)
+        item4_stream_common_case([strong] + inputs, [], true)
+
+    it "selects common over weak regular definitions in both input orders":
+        step("Ignore the weak initializer ninety-nine when selecting the common address")
+        val inputs = item4_stream_common_inputs()
+        val weak = "test/fixtures/linker/elf/stream_common_weak.o"
+        item4_stream_common_case(inputs + [weak], [], false)
+        item4_stream_common_case([weak] + inputs, [], false)
+
+    it "extracts a strong archive override but leaves weak and larger common members unselected":
+        step("Prove extraction with actual marker bytes as well as relocated symbol values")
+        val inputs = item4_stream_common_inputs()
+        item4_stream_common_case(inputs, ["test/fixtures/linker/elf/stream_common_strong.a"], true)
+        item4_stream_common_case(inputs, ["test/fixtures/linker/elf/stream_common_weak.a"], false, "WEAKARCHIVE!")
+        item4_stream_common_case(inputs, ["test/fixtures/linker/elf/stream_common_unused.a"], false, "BIGCOMMON!")
+        step("Resolve undefined references then skip larger common and weak members before selecting a later strong member in one archive")
+        item4_stream_common_case(["test/fixtures/linker/elf/stream_common_refs.o"],
+            ["test/fixtures/linker/elf/stream_common_mixed.a"], true, "BIGCOMMON!")
+
+    it "rejects zero nonpower-of-two and local common declarations before publication":
+        step("Mutate checked real symbol records and retain the protected destination")
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-common-invalid-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        val output = directory + "/protected"
+        val input = directory + "/invalid.o"
+        val sentinel: [u8] = [17, 0, 255, 31]
+        expect(file_write_bytes(output, sentinel)).to_equal(true)
+        for kind in 0..3:
+            val bytes = item4_stream_common_mutated(kind)
+            expect(bytes.len()).to_be_greater_than(64)
+            if bytes.len() > 64:
+                expect(file_write_bytes(input, bytes)).to_equal(true)
+                val linked = elf_stream_link_file_v1([
+                    "test/fixtures/linker/elf/stream_common_refs.o", input,
+                    "test/fixtures/linker/elf/stream_common_strong.o"], [], [95, 115, 116, 97, 114, 116],
+                    output, directory, item4_stream_common_limits(), item4_stream_common_cancelled)
+                expect(linked.is_err()).to_equal(true)
+                if linked.is_err(): expect(linked.unwrap_err().lower()).to_contain("common")
+                expect(file_read_bytes(output)).to_equal(sentinel)
+        for path in [input, output]:
+            if file_exists(path): expect(file_remove(path)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)
+
+    it "coalesces common declarations from an archive member selected for another unresolved symbol":
+        step("Demand trigger then inspect the selected member's larger aligned common storage")
+        item4_stream_common_case(["test/fixtures/linker/elf/stream_common_trigger_refs.o",
+            "test/fixtures/linker/elf/stream_common_a.o", "test/fixtures/linker/elf/stream_common_b.o"],
+            ["test/fixtures/linker/elf/stream_common_unused.a"], false, "", 4096u64, 256u64)
+
+    it "enforces output scratch scan and cancellation limits without replacing a sentinel":
+        step("Apply each finite budget and cancellation to the real common allocation pipeline")
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-common-budget-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        val output = directory + "/protected"
+        val sentinel: [u8] = [17, 0, 255, 31]
+        expect(file_write_bytes(output, sentinel)).to_equal(true)
+        step("Exhaust scan allowance and cancel inside common layout after real inputs have opened")
+        val opened = elf_stream_open_inputs_v1(item4_stream_common_inputs(), [], [95, 115, 116, 97, 114, 116],
+            item4_stream_common_limits(), item4_stream_common_cancelled)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_ok():
+            var inputs = opened.unwrap()
+            inputs.records_left = 0u64
+            val exhausted = inputs.elf_stream_common_layout_v1(12288u64, [], item4_stream_common_cancelled)
+            expect(exhausted.is_err()).to_equal(true)
+            if exhausted.is_err(): expect(exhausted.unwrap_err()).to_contain("scan-work")
+            inputs.records_left = 1000000u64
+            val cancelled = inputs.elf_stream_common_layout_v1(12288u64, [], item4_stream_common_stop)
+            expect(cancelled.is_err()).to_equal(true)
+            if cancelled.is_err(): expect(cancelled.unwrap_err()).to_contain("cancelled")
+            expect(inputs.elf_stream_close_inputs_v1()).to_equal(true)
+            expect(inputs.closed).to_equal(true)
+        val errors = ["output", "scratch", "scan-work", "cancelled"]
+        for kind in 0..4:
+            var limits = item4_stream_common_limits()
+            if kind == 0: limits.output_bytes = 4096u64
+            if kind == 1: limits.scratch_bytes = 1u64
+            if kind == 2: limits.scan_record_limit = 1u64
+            val linked = elf_stream_link_file_v1(item4_stream_common_inputs(), [], [95, 115, 116, 97, 114, 116],
+                output, directory, limits, if kind == 3: item4_stream_common_stop else: item4_stream_common_cancelled)
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_err(): expect(linked.unwrap_err()).to_contain(errors[kind])
+            expect(file_read_bytes(output)).to_equal(sentinel)
+        expect(file_remove(output)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)
+
     it "extracts a common-only archive provider for genuinely undefined references in both engines":
         step("Resolve real undefined symbols using an actual archive with COMMON definitions")
         val objects = ["test/fixtures/linker/elf/stream_common_refs.o"]
@@ -146,7 +342,21 @@ describe "Streamed ELF common-symbol allocation":
         expect(first.is_ok()).to_equal(true)
         if first.is_ok():
             expect(first.unwrap().cleanup_pending).to_equal(false)
-            item4_stream_common_check(file_read_bytes(output))
+            val image = file_read_bytes(output)
+            item4_stream_common_check(image)
+            val phoff = item4_stream_common_u64(image, 32, 8)
+            val count = item4_stream_common_u64(image, 56, 2)
+            val valid = phoff <= image.len() as u64 and count > 0u64 and count < 64u64 and count * 56u64 <= image.len() as u64 - phoff
+            expect(valid).to_equal(true)
+            if valid:
+                var writable = 0
+                for index in 0..(count as i64):
+                    val at = phoff as i64 + index * 56
+                    if item4_stream_common_u64(image, at, 4) == 1u64 and item4_stream_common_u64(image, at + 4, 4) == 6u64:
+                        writable = writable + 1
+                        # Canonical declaration order: shared[80], padding[16], other[16].
+                        expect(item4_stream_common_u64(image, at + 40, 8)).to_equal(112u64)
+                expect(writable).to_equal(1)
         step("Emit with a different window size and compare the complete deterministic image")
         var limits = item4_stream_common_limits()
         limits.emit_window_bytes = 64
