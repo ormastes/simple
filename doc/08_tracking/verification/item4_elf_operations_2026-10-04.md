@@ -43,3 +43,17 @@ A real serialized-image mutation regression changes one PT_LOAD address and
 requires rejection. Root and independent reviews found no remaining P0/P1 in
 the core and primary acceptance changes. LLVM fixture construction/inspection
 succeeded; this is not Simple runtime evidence. Authored manuals remain UNRUN.
+
+Final regression source review also found no P0/P1. Whitespace, working/staged
+environment guards, numbered-artifact classification and zero executable specs
+under `doc/06_spec` passed. Rebase onto
+`eeb0f1c135833910dfe88dc8e928623f8848c63c` preserved all seven reviewed patches
+unchanged according to `git range-diff`; intervening changes are separate lanes.
+
+Test-tree delta through `4cc9117c0718df1dcd192d4a19515e14f2ccae5d`: PASS,
+3151 inherited offenders and zero introduced. Exact list:
+`C:/dev/simple/.git/item4-elf-operations-preexisting-offenders.txt`, SHA256
+`52ac058b29cffa22e435ff81da0cfb5de6db910b102fa51759866e24fd1d4678`.
+Base verdict: 3813 diverged versus 965 baselined; 2979 new to that baseline,
+131 fixed-but-still-baselined; 42 mirror-only, 41 unallowlisted. This records
+unchanged repository debt, not new behavioral test failures in this range.
