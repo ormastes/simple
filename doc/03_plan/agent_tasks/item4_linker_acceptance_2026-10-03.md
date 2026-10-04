@@ -1,5 +1,20 @@
 # Item 4 parallel ownership
 
+## 2026-10-04 canonical stream continuation
+
+Base: release `d8680fe6ec21`. Root integrates in its existing clean isolated
+worktree on new `work/item4-semantic-owner-20261004`; separate registered
+worktrees hold runtime/core, acceptance/spec and research/caller audit work.
+Runtime owns the canonical stream module; acceptance writes regression intent
+before implementation and reviews core; research audits actual callers and
+independently reviews ownership transitions. Root owns final design/manuals,
+integration and merge. Lower-model sidecars: N/A.
+
+Agreed interface: mutating public operations retain their full names as `me`
+methods without a stream parameter; constructors and observers remain free.
+No issuer activation: actual-call audit found no production caller outside the
+primitive. Its future capability boundary remains deliberately unavailable.
+
 ## 2026-10-04 SHA dependency continuation
 
 Base: `f5fec9ccf8cb` on release/1.0. Root integrates in isolated

@@ -9,6 +9,15 @@ integration does not close verification or authorize publication.
 
 ## 2026-10-04 continuation
 
+Canonical stream follow-up: four owner-state scenarios are authored before
+the core migration. Mutating operations now have an authored single-owner method
+contract, builder tag writeback and explicit parent-frame writeback. Integration
+and review evidence is recorded in
+`doc/05_design/compiler/linker/semantic_stream_owner_dependency.md`.
+The previous production-caller claim was corrected: the declaration issuer
+contains future-use comments only and remains unavailable pending five live
+capabilities. Primitive repair must not be reported as issuer activation.
+
 The previous turn made progress by landing source/test slices. Current runtime
 audit still finds no admitted SSpec runner: candidate SHA256
 `aaf13da5942425e19b1aba2ed4b6d272687de1d4710ad7200ed0621d96990879`
@@ -20,7 +29,8 @@ are now authored. See `doc/05_design/compiler/linker/sha_stream_owner_dependency
 Independent source review and external expected-vector checks do not prove
 compilation or execution. Core/MCP/native, SCV hydration, coverage and generated
 manual gates remain UNRUN. The outer canonical compiler stream needs a separate
-owner repair recorded in the 2026-10-04 bug.
+owner repair recorded in the 2026-10-04 bug; that follow-up is now source-repaired
+and reviewed, with native validation still UNRUN.
 
 Provider completion now has six concrete positive scenarios, production routing
 and manifest requirements in `doc/05_design/compiler/linker/linker_provider_positive_acceptance_2026-10-04.md`.
