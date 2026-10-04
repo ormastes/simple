@@ -49,3 +49,14 @@ Working/staged direct-env guards passed. The generated-manual tree contains zero
 executable `_spec.spl` files. These structural checks do not establish behavioral
 correctness. Selected CRT/DSO wire oracles, freestanding archive dispatch and
 concurrent execution of fixed-path scenarios remain additional test gaps.
+
+Final structural evidence: whitespace and numbered-artifact guard passed. The
+eight patches rebased unchanged onto release base
+`c74098886a9f5d59cb3f9b97b48abbe9e912b008` (range-diff all equal).
+Test-tree delta PASS: 3151 inherited offenders, zero introduced. The exact
+offender list is retained at
+`C:/dev/simple/.git/item4-elf-byte-source-preexisting-offenders.txt`, SHA256
+`52ac058b29cffa22e435ff81da0cfb5de6db910b102fa51759866e24fd1d4678`.
+This matches the preceding ELF-operation wave's recorded list. The underlying
+repository-wide divergence guard remains FAIL; the scoped delta is PASS.
+PR: https://github.com/ormastes/simple/pull/2434 (source/test slice only).
