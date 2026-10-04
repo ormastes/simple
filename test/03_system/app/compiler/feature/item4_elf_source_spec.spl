@@ -84,6 +84,54 @@ fn item4_elf_source_check(path: text, expected: i64):
     expect(found).to_equal(1)
 
 describe "ELF file-source operational composition":
+    it "rejects a missing source offer and both source callback mismatches at file sealing":
+        step("Require the fourth facet and exact correspondence between its offer and callback")
+        val defaults = elf_builtin_file_operation_providers_v1()
+        expect(defaults.len()).to_equal(4)
+        if defaults.len() != 4: return
+        val missing = elf_seal_file_operations_v1([defaults[0], defaults[1], defaults[2]], elf_operation_policy_v1())
+        expect(missing.is_err()).to_equal(true)
+        for extra in [false, true]:
+            var providers = defaults
+            val slot = if extra: 0 else: 3
+            var provider = providers[slot]
+            provider.read_bytes = if extra: Some(item4_elf_source_alternate) else: nil
+            providers[slot] = provider
+            val mismatched = elf_seal_file_operations_v1(providers, elf_operation_policy_v1())
+            expect(mismatched.is_err()).to_equal(true)
+
+    it "binds a reordered source provider to the real bytes consumed by the file adapter":
+        step("Move the actual alternate file reader into provider slot zero")
+        val defaults = elf_builtin_file_operation_providers_v1()
+        expect(defaults.len()).to_equal(4)
+        if defaults.len() != 4: return
+        var source = defaults[3]
+        source.read_bytes = Some(item4_elf_source_alternate)
+        val owner = elf_seal_file_operations_v1([source, defaults[2], defaults[0], defaults[1]], elf_operation_policy_v1())
+        expect(owner.is_ok()).to_equal(true)
+        if owner.is_err(): return
+        val receipt = owner.unwrap().composition_receipt()
+        expect(receipt.capsule_count).to_equal(5)
+        expect(receipt.binding_count).to_equal(4)
+        expect(receipt.bindings.len()).to_equal(4)
+        val expected_slots = [2, 3, 1, 0]
+        for kind in 1..5:
+            val facet = elf_operation_facet_id_v1(kind as u32)
+            var found = 0
+            for binding in receipt.bindings:
+                if binding.facet_id.hi == facet.hi and binding.facet_id.lo == facet.lo:
+                    found = found + 1
+                    expect(binding.consumer_slot).to_equal(4)
+                    expect(binding.provider_slot as i64).to_equal(expected_slots[kind - 1])
+            expect(found).to_equal(1)
+        expect(dir_create_all("build/item4_elf_source")).to_equal(true)
+        val output = "build/item4_elf_source/permuted-{getpid()}-{time_now_unix_micros()}"
+        val linked = link_freestanding_with_operations_v1(item4_elf_source_inputs(), [], output,
+            item4_elf_source_config(), owner.unwrap())
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_ok(): item4_elf_source_check(output, 7)
+        expect(remove_file_if_exists(output)).to_equal(true)
+
     it "uses one sealed owner for both the selected real source and selected writer":
         step("Read a real alternate object and mark the real writer image using callbacks from one owner")
         expect(dir_create_all("build/item4_elf_source")).to_equal(true)

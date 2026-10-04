@@ -6,6 +6,8 @@ Status: **UNRUN**. Authored manual; no admitted Simple execution evidence.
 
 | Scenario | Observation |
 |---|---|
+| File-seal rejection | Missing fourth facet, offered source without callback and unoffered source callback all reject |
+| Source permutation | Reordered source still supplies real `base=7` image; every receipt binding matches its actual provider slot |
 | One selected owner | Real alternate source makes ELF `base` equal to 7; the same owner's real writer sets OSABI 9 |
 | Canonical source | Default and explicit file-aware owner produce identical ELF bytes with `base` equal to 2 |
 | Selected read error | Named injected callback error leaves destination sentinel intact |
@@ -40,7 +42,7 @@ After runtime admission:
 <runtime> spipe-docgen test/03_system/app/compiler/feature/item4_elf_source_spec.spl --output doc/06_spec --no-index
 ```
 
-The portable source returns resident byte snapshots. Coverage establishes
+These nine scenarios use portable resident byte snapshots. Coverage establishes
 selected callback consumption and reuse between classification and linking,
 not change-during-read detection, immutable identity, retained handles, or a
 bounded working set. Test-owned files are removed after completed scenarios;
