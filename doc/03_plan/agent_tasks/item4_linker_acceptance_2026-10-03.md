@@ -542,3 +542,21 @@ receipt retains artifacts and fails, while providers without a receipt retain
 their synchronous contract without a universal tree-reaping claim. Root's
 remaining backend fixture checks distinguish assertion failure from a plain
 `fn main` zero-example rejection; the latter is not a compile-negative oracle.
+
+## Hosted ARM64 ADDEND owner split (2026-10-04)
+
+Base `edfb6df1821ff98a0d563cca5496630cedf7789e`, target release/1.0.
+Runtime owns `macho/relocation_pairs.spl`, `relocations.spl` and
+`hosted_fixups.spl`; acceptance owns real ARM64 fixtures, executable acceptance
+and its mirrored manual. Research owns local/domain research, detail design,
+plan linkage and independent source/test review. Root owns integration and final
+exact-head review. Separate worktrees; sidecars N/A; tests before production.
+
+Frozen shared API: `MachORelocationPairV1(relocation,explicit_addend,consumed)`
+and `macho_relocation_pair_v1(relocations,index,arm,input_name:text)`.
+Both consumers must validate/consume the same prefix and follower. Reject dual
+nonzero explicit/embedded addends; preserve zero-prefix support and the existing
+imported nonzero-branch refusal. Pair occupancy is counted once. This remains
+existing REQ004/006 scope, not a separate user-selected requirement. Source and
+runtime statuses are tracked in the linked ADDEND design; no PASS is inferred
+from authored specs or independent LLVM fixture inspection.
