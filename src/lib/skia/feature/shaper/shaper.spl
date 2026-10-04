@@ -304,11 +304,30 @@ fn shaper_with_features(shaper: Shaper, features: [OpenTypeFeature]) -> Shaper:
 fn shaper_with_ot_font(shaper: Shaper, font: OtFont) -> Shaper:
     Shaper(fallback: shaper.fallback, features_enabled: shaper.features_enabled, ot_font: Some(font), ot_font_handle: 0, ot_font_generation: 0, ot_faces: shaper.ot_faces)
 fn shaper_with_ot_face(shaper: Shaper, font_handle: i64, font: OtFont) -> Shaper:
+    shaper_with_ot_face_blob_hex(shaper, font_handle, font, sha256_u8_hex(font.blob))
+
+# Same as `shaper_with_ot_face`, for a caller that already holds the SHA-256
+# hex of `font.blob`. Hashing an 845 KB face in pure Simple is ~45 s in the
+# interpreter, and the font renderer used to pay it on EVERY shaped run of a
+# complex script (each Arabic link on wikipedia.org). The identity check is
+# unchanged; only who computes the digest moves.
+# Memoised SHA-256 hex for `shaper_with_ot_face_blob_hex` callers. The caller
+# supplies the cache key (see font_renderer `_shaped_face_blob_sha256_hex`).
+var _shaper_face_blob_hex_cache: Dict<text, text> = {}
+
+fn shaper_face_blob_sha256_hex_cached(cache_key: text, blob: [u8]) -> text:
+    if _shaper_face_blob_hex_cache.has(cache_key):
+        return _shaper_face_blob_hex_cache[cache_key]
+    val hex = sha256_u8_hex(blob)
+    _shaper_face_blob_hex_cache[cache_key] = hex
+    hex
+
+fn shaper_with_ot_face_blob_hex(shaper: Shaper, font_handle: i64, font: OtFont, blob_sha256_hex: text) -> Shaper:
     val generation = font_face_current_generation(font_handle)
     if font_handle <= 0 or generation <= 0:
         return shaper
     val identity = font_face_identity(font_handle, generation)
-    if not identity.starts_with("sha256=" + sha256_u8_hex(font.blob) + ";axes="):
+    if not identity.starts_with("sha256=" + blob_sha256_hex + ";axes="):
         return shaper
     var faces: [ShaperOtFace] = []
     for face in shaper.ot_faces:
