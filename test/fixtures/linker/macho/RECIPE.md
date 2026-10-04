@@ -110,6 +110,9 @@ llvm-readtapi -stubify --filetype=tbd-v5 hosted_tls_a64.dylib -o tbd_tls_a64_v5.
 llvm-readtapi -stubify --filetype=tbd-v5 tbd_metadata_v4.tbd -o tbd_metadata_v5.tbd
 llvm-readtapi -compare tbd_metadata_v4.tbd tbd_metadata_v5.tbd
 llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v4 tbd_metadata_v5.tbd -o tbd_metadata_x64_oracle_v4.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 tbd_leaf_metadata_v4.tbd -o tbd_leaf_metadata_v5.tbd
+llvm-readtapi -compare tbd_leaf_metadata_v4.tbd tbd_leaf_metadata_v5.tbd
+llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v5 tbd_inline_unmatched_v5.tbd -o /tmp/item4-inline-unmatched-oracle-20261004.tbd
 ```
 
 The metadata v4 file is authored YAML with target-only exports, ObjC categories,

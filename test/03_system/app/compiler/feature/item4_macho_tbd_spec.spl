@@ -28,6 +28,55 @@ fn item4_macho_tbd_config() -> NativeLinkConfig:
     config
 
 describe "actual TextAPI providers through the Mach-O file adapter":
+    it "ITEM4-REQ-007 preserves output when a selected malformed stub precedes a valid archive":
+        for name in ["duplicate_key_v4", "duplicate_key_v5", "truncated_v4", "truncated_v5"]:
+            step("Plan an explicitly selected Mach-O link")
+            val made = dir_create_all("build")
+            expect(made).to_equal(true)
+            if not made: return
+            val created = secure_temp_dir("build", "item4-tbd-rejection-")
+            expect(created.is_ok()).to_equal(true)
+            if created.is_err(): return
+            val parent = created.unwrap()
+            val output = parent + "/app"
+            val stub = file_read_bytes("test/fixtures/linker/macho/tbd_{name}.tbd")
+            val archive = file_read_bytes("test/fixtures/linker/macho/provider_x64.a")
+            expect(stub.len() > 0 and archive.len() > 8).to_equal(true)
+            if stub.len() == 0 or archive.len() <= 8:
+                expect(dir_remove(parent)).to_equal(true)
+                return
+            val stub_written = file_write_bytes(parent + "/libitem4.tbd", stub)
+            val archive_written = file_write_bytes(parent + "/libitem4.a", archive)
+            val sentinel_written = file_write_bytes(output, [17u8, 0u8, 255u8])
+            expect(stub_written and archive_written and sentinel_written).to_equal(true)
+            if stub_written and archive_written and sentinel_written:
+                var config = item4_macho_tbd_config()
+                config.libraries = ["item4"]
+                config.library_paths = [parent]
+                val plan = native_macho_plan_v1("x86_64", config, output)
+                expect(plan.is_ok()).to_equal(true)
+                if plan.is_ok():
+                    step("Preserve the existing destination on selected TextAPI failure")
+                    val rejected = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/hosted_start_x64.o"], [], output)
+                    expect(rejected.is_err()).to_equal(true)
+                    if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("TBD")
+                    expect(file_read_bytes(output)).to_equal([17u8, 0u8, 255u8])
+                    val removed = file_remove(parent + "/libitem4.tbd")
+                    expect(removed).to_equal(true)
+                    if removed:
+                        step("Removing only the rejected stub allows the same plan to select its real archive")
+                        val linked = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/hosted_start_x64.o"], [], output)
+                        expect(linked.is_ok()).to_equal(true)
+                        if linked.is_ok():
+                            val image = file_read_bytes(output)
+                            expect(item4_macho_tbd_read(image, 0, 4)).to_equal(0xfeedfacf)
+                            expect(item4_macho_tbd_read(image, 0x4002, 4)).to_equal(14)
+                            expect(item4_macho_tbd_read(image, 0xc018, 8)).to_equal(0x10000c010)
+            step("Remove owned fixture files")
+            for leaf in ["app", "libitem4.tbd", "libitem4.a"]:
+                if file_exists(parent + "/" + leaf): expect(file_remove(parent + "/" + leaf)).to_equal(true)
+            expect(dir_remove(parent)).to_equal(true)
+
     it "ITEM4-REQ-006 rejects duplicate keys malformed documents target misses and logical parser budget exhaustion":
         val target = MachOTbdTargetV1(arch: RelocArch.X86_64, platform: 1)
         step("Reject malformed TextAPI rather than normalizing ambiguous keys")
