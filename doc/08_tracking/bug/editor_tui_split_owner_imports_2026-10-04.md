@@ -17,17 +17,24 @@ Add explicit imports of those existing nominal types and functions. No duplicate
 types, placeholder functions, visibility widening or behavior substitution is
 introduced. The production delta contains imports only.
 
-Four executable regressions import the affected modules and exercise real group
+The first four executable regressions import the affected modules and exercise real group
 lookup (IDs differ from indices, missing and empty groups) and buffer-backed
 semantic-token rendering (plain and styled output). They open no terminal or
-window. All four are UNRUN; full TUI native qualification is still pending.
+window. Native execution is UNRUN; full TUI qualification is still pending.
 
 Other failures are separate. GUI shell/SDL bridge shared types and GUI helper
 owners need their own repair. The panel's existing reverse call to
 `tui_render_editor_line_at_theme` belongs to `app.editor.tui_shell`; it is not
-provided by `std.editor.backend.tui_backend`. This checkpoint does not introduce
-a circular import to hide that ownership problem. A shared rendering leaf can
-remove that pre-existing coupling in a subsequent scoped change.
+provided by `std.editor.backend.tui_backend`.
+
+The follow-up moves the eight existing line-rendering functions, with unchanged
+bodies, into `app.editor.tui_line_render`. The shell retains explicit re-exports
+of all eight names, and the panel imports the leaf directly. The leaf imports
+only the buffer, path and Markdown table owners; it has no dependency on either
+shell or the controller. This removes the reverse shell dependency without
+duplicating rendering logic or adding a cycle. Two further real-buffer tests
+cover Markdown cell highlighting, viewport offsets and the non-Markdown route.
+All six cases remain UNRUN; structural body equality is not a native PASS.
 
 DrawIR also needs a coherent v4 state contract: the current shared v2 command
 lacks the affine/fractional/raster fields expected by newer consumers. A constant
