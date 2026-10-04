@@ -541,5 +541,6 @@ calls that already return false. Unmatched candidates are dropped before
 the matched order is unchanged). Any edit to the matcher's ancestor semantics
 (new combinators, ctx pseudos on ancestors) MUST update the key derivation too.
 Measure with `SIMPLE_WEB_PHASE_TRACE=1 SIMPLE_WEB_STYLE_COUNTERS=1`
-(`selector_calls`, `sel_sort_ms`). Note the whole engine currently runs in the
-interpreter: the `TextMetrics.char_count` HIR collision drops the entry module.
+(`selector_calls`, `sel_sort_ms`). Before PR #2481 the whole engine ran in the
+interpreter (`TextMetrics.char_count` HIR name collision dropped the entry
+module); re-baseline any timing taken before that merge.
