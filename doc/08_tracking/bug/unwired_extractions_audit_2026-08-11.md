@@ -49,7 +49,7 @@ importers (arm32/arm64/riscv32/riscv64).
 **Still ZERO importers** (exported from `mod.spl`, so re-export masks the orphan):
 - `paging_walker.spl`
 - `sbi_shim.spl`
-- `timer_math.spl`
+- `timer_math.spl` — RESOLVED 2026-10-04: deleted; arm64/arm32/riscv32 timers now use the shared SOSIX `time_v1.sosix_time_scale_u64` (which also fixes their `x * 1e9 / freq` overflow after ~295 s at 62.5 MHz)
 
 Live duplicates: the per-arch paging/timer/SBI copies these were extracted from
 remain live under `src/os/kernel/arch/{arm64,riscv64,x86_64}/`.
