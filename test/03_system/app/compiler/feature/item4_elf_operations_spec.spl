@@ -9,6 +9,7 @@ use std.spec.step
 use std.io_runtime.{file_read_bytes}
 use compiler.backend.linker.elf.elf_operation_bindings.*
 use compiler.backend.linker.elf.elf_static_link.{ElfLinkRequest, elf_link,
+    elf_link_stripped, elf_link_configured, elf_link_structural,
     elf_link_with_operations, ELF_LINK_STATIC_EXEC}
 use compiler.backend.linker.elf.elf_exec_writer.{ElfOutSec, ElfExecPlan,
     elf_exec_plan, elf_write_image}
@@ -51,7 +52,7 @@ fn item4_elf_ops_check(image: [i64], word: i64, byte: i64):
             data_count = data_count + 1
             # Parsed sh_addr is the file offset, not virtual address.
             val offset = object.sections[index].sh_addr
-            expect(object.sections[index].sh_size).to_equal(3)
+            expect(object.sections[index].sh_size).to_be_greater_than(2)
             expect(item4_elf_ops_read(image, offset, 2)).to_equal(word)
             expect(item4_elf_ops_read(image, offset + 2, 1)).to_equal(byte)
     expect(data_count).to_equal(1)
@@ -72,6 +73,30 @@ fn item4_elf_ops_writer(kind: i64, machine: i64, entry: i64,
     image[7] = 9
     Ok(image)
 
+fn item4_elf_ops_relocate_error(arch: RelocArch, bytes: [i64], offset: i64,
+        rtype: i64, symbol: i64, addend: i64, place: i64) -> Result<[i64], text>:
+    Err("item4 selected relocation rejected")
+
+fn item4_elf_ops_layout_error(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan, text>:
+    Err("item4 selected layout rejected")
+
+fn item4_elf_ops_writer_error(kind: i64, machine: i64, entry: i64,
+        plan: ElfExecPlan, contents: [[i64]]) -> Result<[i64], text>:
+    Err("item4 selected writer rejected")
+
+fn item4_elf_ops_relocate_short(arch: RelocArch, bytes: [i64], offset: i64,
+        rtype: i64, symbol: i64, addend: i64, place: i64) -> Result<[i64], text>:
+    Ok([])
+
+fn item4_elf_ops_layout_short(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan, text>:
+    val result = elf_exec_plan(secs, base, page)?
+    Ok(ElfExecPlan(secs: result.secs, offsets: [], vaddrs: result.vaddrs,
+        segments: result.segments, file_end: result.file_end))
+
+fn item4_elf_ops_writer_short(kind: i64, machine: i64, entry: i64,
+        plan: ElfExecPlan, contents: [[i64]]) -> Result<[i64], text>:
+    Ok([127, 69, 76, 70])
+
 describe "Static ELF operational composition dispatch":
     it "preserves canonical wrapper bytes through the sealed default operations":
         step("Link real narrow-relocation objects through both canonical entrypoints")
@@ -85,6 +110,10 @@ describe "Static ELF operational composition dispatch":
         expect(linked.is_ok()).to_equal(true)
         if legacy.is_err() or linked.is_err(): return
         expect(linked.unwrap().image).to_equal(legacy.unwrap())
+        val structural = elf_link_structural(request)
+        expect(structural.is_ok()).to_equal(true)
+        if structural.is_err(): return
+        expect(structural.unwrap()).to_equal(legacy.unwrap())
         item4_elf_ops_check(linked.unwrap().image, 0x1234, 0x7f)
 
     it "uses the selected relocation operation in actual emitted data bytes":
@@ -114,7 +143,9 @@ describe "Static ELF operational composition dispatch":
         val sealed = elf_seal_operations_v1(providers, elf_operation_policy_v1())
         expect(sealed.is_ok()).to_equal(true)
         if sealed.is_err(): return
-        val request = item4_elf_ops_request()
+        var request = item4_elf_ops_request()
+        request.objects = [item4_elf_ops_fixture("operations_header_x64.o"),
+            item4_elf_ops_fixture("abs_narrow_def_x64.o")]
         val baseline = elf_link(request)
         val linked = elf_link_with_operations(request, false, [], sealed.unwrap())
         expect(baseline.is_ok()).to_equal(true)
@@ -123,6 +154,64 @@ describe "Static ELF operational composition dispatch":
         val image = linked.unwrap().image
         item4_elf_ops_check(image, 0x1234, 0x7f)
         expect(item4_elf_ops_read(image, 24, 8)).to_equal(item4_elf_ops_read(baseline.unwrap(), 24, 8) + 4096)
+        val phoff = item4_elf_ops_read(image, 32, 8)
+        val count = item4_elf_ops_read(image, 56, 2)
+        val old_phoff = item4_elf_ops_read(baseline.unwrap(), 32, 8)
+        val valid = phoff >= 64 and phoff <= image.len() and count > 0 and count < 64 and count * 56 <= image.len() - phoff
+        expect(valid).to_equal(true)
+        if not valid: return
+        var loads = 0
+        var header_base: i64 = -1
+        for index in 0..count:
+            val at = phoff + index * 56
+            if item4_elf_ops_read(image, at, 4) == 1:
+                loads = loads + 1
+                if item4_elf_ops_read(image, at + 8, 8) == 0:
+                    header_base = item4_elf_ops_read(image, at + 16, 8)
+                expect(item4_elf_ops_read(image, at + 16, 8)).to_equal(
+                    item4_elf_ops_read(baseline.unwrap(), old_phoff + index * 56 + 16, 8) + 4096)
+        expect(loads).to_be_greater_than(0)
+        expect(header_base).to_be_greater_than(0)
+        val parsed = elf_parse_object(image)
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_err(): return
+        var found = false
+        for index in 0..parsed.unwrap().sections.len():
+            if elf_section_name(parsed.unwrap(), index) == ".data":
+                found = true
+                val section = parsed.unwrap().sections[index]
+                expect(section.sh_size).to_equal(11)
+                expect(item4_elf_ops_read(image, section.sh_addr + 3, 8)).to_equal(header_base)
+        expect(found).to_equal(true)
+
+    it "preserves configured retained roots and strip policy through default operations":
+        step("Retain an otherwise dead relocation-bearing data section while removing symbol tables")
+        var request = item4_elf_ops_request()
+        request.gc_sections = true
+        val baseline = elf_link(request)
+        val configured = elf_link_configured(request, true, ["abs_narrow_slots"])
+        val stripped = elf_link_stripped(item4_elf_ops_request())
+        expect(baseline.is_ok()).to_equal(true)
+        expect(configured.is_ok()).to_equal(true)
+        expect(stripped.is_ok()).to_equal(true)
+        if baseline.is_err() or configured.is_err() or stripped.is_err(): return
+        item4_elf_ops_check(configured.unwrap(), 0x1234, 0x7f)
+        item4_elf_ops_check(stripped.unwrap(), 0x1234, 0x7f)
+        for image in [baseline.unwrap(), configured.unwrap(), stripped.unwrap()]:
+            val parsed = elf_parse_object(image)
+            expect(parsed.is_ok()).to_equal(true)
+            if parsed.is_err(): return
+            var data_count = 0
+            var symbols = 0
+            for index in 0..parsed.unwrap().sections.len():
+                val name = elf_section_name(parsed.unwrap(), index)
+                if name == ".data": data_count = data_count + 1
+                if name == ".symtab" or name == ".strtab": symbols = symbols + 1
+            if image == baseline.unwrap():
+                expect(data_count).to_equal(0)
+            else:
+                expect(data_count).to_equal(1)
+                expect(symbols).to_equal(0)
 
     it "uses the selected writer output without replacing it with the default image":
         step("Delegate real ELF writing and mark its OSABI byte")
@@ -140,3 +229,79 @@ describe "Static ELF operational composition dispatch":
         if linked.is_err(): return
         item4_elf_ops_check(linked.unwrap().image, 0x1234, 0x7f)
         expect(item4_elf_ops_read(linked.unwrap().image, 7, 1)).to_equal(9)
+
+    it "rejects missing required operations before any image is constructed":
+        step("Omit each required provider from the actual sealed owner construction")
+        val defaults = elf_builtin_operation_providers_v1()
+        expect(defaults.len()).to_equal(3)
+        if defaults.len() != 3: return
+        for missing in 0..3:
+            var providers: [ElfOperationProviderV1] = []
+            for index in 0..3:
+                if index != missing: providers.push(defaults[index])
+            val sealed = elf_seal_operations_v1(providers, elf_operation_policy_v1())
+            expect(sealed.is_err()).to_equal(true)
+
+    it "rejects duplicate providers instead of choosing an arbitrary callback":
+        step("Offer an existing operation descriptor a second time")
+        var providers = elf_builtin_operation_providers_v1()
+        expect(providers.len()).to_equal(3)
+        if providers.len() != 3: return
+        providers.push(providers[0])
+        val sealed = elf_seal_operations_v1(providers, elf_operation_policy_v1())
+        expect(sealed.is_err()).to_equal(true)
+
+    it "rejects offers without callbacks and callbacks without matching offers":
+        step("Break both directions of descriptor to callback correspondence")
+        for extra in [false, true]:
+            var providers = elf_builtin_operation_providers_v1()
+            expect(providers.len()).to_equal(3)
+            if providers.len() != 3: return
+            var provider = providers[0]
+            if extra:
+                provider.write_image = Some(item4_elf_ops_writer)
+            else:
+                provider.relocate = nil
+            providers[0] = provider
+            val sealed = elf_seal_operations_v1(providers, elf_operation_policy_v1())
+            expect(sealed.is_err()).to_equal(true)
+
+    it "returns the selected operation error without returning an image":
+        step("Inject a distinct error at each real operation boundary in the full linker")
+        val names = ["relocation", "layout", "writer"]
+        for index in 0..3:
+            var providers = elf_builtin_operation_providers_v1()
+            expect(providers.len()).to_equal(3)
+            if providers.len() != 3: return
+            var provider = providers[index]
+            if index == 0: provider.relocate = Some(item4_elf_ops_relocate_error)
+            if index == 1: provider.layout = Some(item4_elf_ops_layout_error)
+            if index == 2: provider.write_image = Some(item4_elf_ops_writer_error)
+            providers[index] = provider
+            val sealed = elf_seal_operations_v1(providers, elf_operation_policy_v1())
+            expect(sealed.is_ok()).to_equal(true)
+            if sealed.is_err(): return
+            val linked = elf_link_with_operations(item4_elf_ops_request(), false, [], sealed.unwrap())
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_ok(): return
+            expect(linked.unwrap_err()).to_contain("item4 selected " + names[index] + " rejected")
+
+    it "rejects malformed operation results before later indexing or image publication":
+        step("Return a shortened relocated section an invalid layout vector and a truncated writer image")
+        val names = ["relocation", "layout", "writer"]
+        for index in 0..3:
+            var providers = elf_builtin_operation_providers_v1()
+            expect(providers.len()).to_equal(3)
+            if providers.len() != 3: return
+            var provider = providers[index]
+            if index == 0: provider.relocate = Some(item4_elf_ops_relocate_short)
+            if index == 1: provider.layout = Some(item4_elf_ops_layout_short)
+            if index == 2: provider.write_image = Some(item4_elf_ops_writer_short)
+            providers[index] = provider
+            val sealed = elf_seal_operations_v1(providers, elf_operation_policy_v1())
+            expect(sealed.is_ok()).to_equal(true)
+            if sealed.is_err(): return
+            val linked = elf_link_with_operations(item4_elf_ops_request(), false, [], sealed.unwrap())
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_ok(): return
+            expect(linked.unwrap_err()).to_contain(names[index])
