@@ -64,7 +64,8 @@ use compiler.backend.backend.runtime_compiler.{find_c_compiler, hosted_c_compile
 # of an external linker. Same imports link_engine_external.spl uses for its
 # own LinkRequestV1-shaped entry point -- internal_link_native() below is the
 # one shared implementation both callers now use.
-use compiler.backend.linker.elf.elf_static_link.{elf_link_configured, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
+use compiler.backend.linker.elf.elf_static_link.{elf_link_with_operations, ElfLinkRequest, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE}
+use compiler.backend.linker.elf.elf_operation_bindings.{ElfSealedOperationsV1, elf_builtin_file_operations_v1}
 use compiler.backend.linker.native_image_publish.{native_image_publish}
 use compiler.backend.linker.elf.freebsd_hosted.{freebsd_hosted_inputs, freebsd_brand_image}
 use compiler.backend.linker.elf.elf_boot_link.{elf_boot_link_archives_policy}
@@ -1425,6 +1426,57 @@ fn internal_link_simpleos(object_files: [text], output: text, target: text,
         return Err("internal engine: could not publish {output}")
     Ok(output)
 
+struct _InternalElfLoadedLibrary:
+    path: text
+    bytes: [u8]
+    kind: i64
+
+class _InternalElfByteInputs:
+    operations: ElfSealedOperationsV1
+    var cache: {text: [u8]}
+
+    me read(path: text) -> Result<[u8], text>:
+        # Per-link lexical-path reuse only. Aliases can read again; this is not
+        # an immutable filesystem snapshot or an artifact trust assertion.
+        if self.cache.has(path): return Ok(self.cache[path])
+        val bytes = self.operations.read_bytes(path)?
+        self.cache[path] = bytes
+        Ok(bytes)
+
+    me read_i64(path: text) -> Result<[i64], text>:
+        val bytes = self.read(path)?
+        var widened: [i64] = []
+        for byte in bytes: widened.push(byte as i64)
+        Ok(widened)
+
+    me library_path(path: text) -> Result<_InternalElfLoadedLibrary, text>:
+        val bytes = self.read(path)?
+        var kind = 0
+        if internal_coff_is_archive(bytes):
+            kind = 1
+        else if bytes.len() >= 18 and bytes[0] == 0x7f and bytes[1] == 0x45 and
+                bytes[2] == 0x4c and bytes[3] == 0x46 and bytes[16] == 3 and bytes[17] == 0:
+            kind = 2
+        Ok(_InternalElfLoadedLibrary(path: path, bytes: bytes, kind: kind))
+
+    me library(name: text, search_paths: [text]) -> Result<_InternalElfLoadedLibrary, text>:
+        if file_exists(name): return self.library_path(name)
+        var base = name
+        if base.starts_with("-l"): base = base.substring(2)
+        var filenames: [text] = [base]
+        if not base.lower().ends_with(".a") and not base.lower().contains(".so"):
+            filenames = ["lib" + base + ".so", "lib" + base + ".so.6",
+                "lib" + base + ".so.1", "lib" + base + ".so.0", "lib" + base + ".a"]
+        for directory in search_paths:
+            for filename in filenames:
+                val candidate = directory + "/" + filename
+                if not file_exists(candidate): continue
+                val loaded = self.library_path(candidate)?
+                # Preserve skipping GNU ld scripts. An actual read error is
+                # propagated, never hidden by selecting another candidate.
+                if loaded.kind != 0: return Ok(loaded)
+        Err("internal engine: ELF library '{name}' was not found")
+
 fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
         object_files: [text], output: text) -> Result:
     """Link `object_files` with the internal ELF engine (`internal:elf`, lane
@@ -1438,6 +1490,13 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
     `link_engine_external.link_request_internal` (through this facade), so
     there is exactly one place that owns the CRT-discovery/elf_link/write/
     chmod sequence."""
+    val operations = elf_builtin_file_operations_v1()?
+    internal_link_native_with_operations(os, arch, config, object_files, output, operations)
+
+fn internal_link_native_with_operations(os: text, arch: text, config: NativeLinkConfig,
+        object_files: [text], output: text, operations: ElfSealedOperationsV1) -> Result:
+    if not operations.has_byte_source(): return Err("internal engine: ELF byte-source operation is not bound")
+    var source = _InternalElfByteInputs(operations: operations, cache: {})
     var norm_arch = arch
     if arch == "amd64":
         norm_arch = "x86_64"
@@ -1449,9 +1508,6 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
         return Err("internal engine: unsupported architecture '{arch}' (internal:elf supports x86_64 and aarch64 only)")
     if norm_arch != host_arch() or os != host_os():
         return Err("internal engine: unsupported cross-host link (target {os}/{arch}; hosted ELF requires the matching sysroot)")
-    for path in object_files:
-        if not file_exists(path):
-            return Err("internal engine: input {path} cannot be read")
     var before: [text] = []
     var after: [text] = []
     var system_shared: [text] = []
@@ -1491,18 +1547,19 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
             for directory in ["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/lib", "/usr/lib"]:
                 if not system_paths.contains(directory): system_paths.push(directory)
     var objects: [[i64]] = []
-    for path in before: objects.push(internal_link_native_read_i64(path))
+    for path in before: objects.push(source.read_i64(path)?)
     for path in object_files:
-        objects = objects.push(internal_link_native_read_i64(path))
-    for path in after: objects.push(internal_link_native_read_i64(path))
+        objects = objects.push(source.read_i64(path)?)
+    for path in after: objects.push(source.read_i64(path)?)
     var archives: [[i64]] = []
-    for path in system_archives: archives.push(internal_link_native_read_i64(path))
+    for path in system_archives: archives.push(source.read_i64(path)?)
     var runtime_dir = config.runtime_path
     if runtime_dir == "": runtime_dir = find_runtime_lib_dir()
     for path in native_runtime_archive_inputs(runtime_dir, config.runtime_bundle):
-        if internal_elf_library_kind(path) != 1:
+        val loaded = source.library_path(path)?
+        if loaded.kind != 1:
             return Err("internal engine: runtime library '{path}' is not an ar archive")
-        archives = archives.push(internal_link_native_read_i64(path))
+        archives = archives.push(source.read_i64(loaded.path)?)
     var library_paths: [text] = []
     for directory in config.library_paths: library_paths.push(directory)
     for directory in system_paths:
@@ -1510,16 +1567,15 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
     var shared: [[u8]] = []
     var shared_names: [text] = []
     for path in system_shared:
-        shared.push(file_read_bytes(path))
+        shared.push(source.read(path)?)
         shared_names.push(internal_elf_library_needed_name(path, path))
     for library in config.libraries:
-        val path = internal_elf_library_file(library, library_paths)
-        if path == "": return Err("internal engine: ELF library '{library}' was not found")
-        val kind = internal_elf_library_kind(path)
-        if kind == 1:
-            archives = archives.push(internal_link_native_read_i64(path))
-        elif kind == 2:
-            shared = shared.push(file_read_bytes(path))
+        val loaded = source.library(library, library_paths)?
+        val path = loaded.path
+        if loaded.kind == 1:
+            archives = archives.push(source.read_i64(path)?)
+        elif loaded.kind == 2:
+            shared = shared.push(loaded.bytes)
             shared_names = shared_names.push(
                 internal_elf_library_needed_name(library, path))
         else:
@@ -1539,12 +1595,12 @@ fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
         shared_names: shared_names,
         runpath: runpath, bind_now: internal_elf_bind_now(config.extra_flags),
         hash_style: hash_style, as_needed: as_needed, gc_sections: gc_sections)
-    val linked = elf_link_configured(request,
+    val linked = elf_link_with_operations(request,
         config.strip_output or internal_elf_strip_all(config.extra_flags),
-        config.retained_symbols)
+        config.retained_symbols, operations)
     if linked.is_err():
         return Err("internal engine: {linked.unwrap_err()}")
-    var image = linked.unwrap()
+    var image = linked.unwrap().image
     if os == "freebsd": image = freebsd_brand_image(image)?
     var bytes: [u8] = []
     for b in image:
