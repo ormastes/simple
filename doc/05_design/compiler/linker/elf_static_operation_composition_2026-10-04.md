@@ -50,12 +50,19 @@ not an unforgeable security object: source-level visibility or direct aggregate
 construction limitations must be reported honestly. Providers are trusted
 in-process functions, not untrusted plugins.
 
-`elf_builtin_operations_v1()` seals canonical adapters. Existing `elf_link`,
+`elf_builtin_operation_providers_v1()` returns the three canonical provider
+records for explicit in-process selection. `elf_builtin_operations_v1()` seals
+those canonical adapters. Existing `elf_link`,
 `elf_link_stripped`, `elf_link_configured`, `elf_link_structural`, and therefore
 `elf_static_link` all use that built-in owner while preserving their public
 return types. New driver entry
 `elf_link_with_operations(req, strip_output, retained_symbols, owner)` returns
 `Result<ElfComposedImageV1, text>` with `image` and `composition` fields.
+
+A supplied layout may legally change the image base. The driver's synthesized
+header symbols therefore derive their base from the returned header-containing
+PT_LOAD segment; they must not retain the original layout argument. Canonical
+layout and existing wrapper options retain their established behavior.
 
 ## Registry identities and metadata
 

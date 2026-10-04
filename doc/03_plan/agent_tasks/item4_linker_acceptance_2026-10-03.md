@@ -1,5 +1,22 @@
 # Item 4 parallel ownership
 
+## 2026-10-04 static ELF operational composition continuation
+
+Base: `80b5ab3f6f568bd614f28a4c91244713a2bb9381`, target `release/1.0`.
+Root integrates in `C:/dev/simple-item4-sha-owner-20261004` on
+`work/item4-elf-operations-20261004` and owns common plans, verification report,
+final review and merge. Runtime owns the new leaf operation-binding module and
+the existing static-link driver. Acceptance owns executable specs and authored
+manuals. Research owns design/research documents and independent source review.
+Each agent uses a newly isolated worktree and session record at the same base.
+
+Shared types: `ElfOperationProviderV1`, `ElfSealedOperationsV1`,
+`ElfComposedImageV1`. Entry points: `elf_seal_operations_v1`,
+`elf_builtin_operations_v1`, and `elf_link_with_operations`. Tests use
+`item4_elf_ops_` helper names and `std.spec.step`; runtime waits for test intent
+before implementation. Lower-model sidecars: N/A. Structural receipts never
+stand in for runtime execution, trusted manifest admission or resource evidence.
+
 ## 2026-10-04 RV64 initial-exec TLS continuation
 
 Base: `75076715f57c7c9f20e98019a4a9ec5b1bdc0d0d`, target `release/1.0`.

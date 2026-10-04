@@ -9,6 +9,17 @@ integration does not close verification or authorize publication.
 
 ## 2026-10-04 continuation
 
+Static ELF operational composition now seals actual relocation-field, layout
+and image-writer callbacks and routes existing linker entrypoints through those
+selected callbacks. Eleven authored scenarios inspect observable output changes
+and errors at each boundary, missing/duplicate facets, callback/offer mismatch,
+provider permutation, wrapper policies and malformed callback results. The
+writer must preserve selected layout metadata, and synthesized header symbols
+follow the selected header load base. Execution remains UNRUN; see
+`doc/08_tracking/verification/item4_elf_operations_2026-10-04.md`.
+This is an in-process structural binding, not dynamic artifact trust, byte-source
+binding, full relocation ownership, bounded-memory admission or Phase 4 evidence.
+
 RV64 initial-exec TLS source now classifies R_RISCV_TLS_GOT_HI20, allocates a
 TLS-offset GOT entry independently of ordinary address entries, resolves paired
 PCREL_LO12 through its high relocation, and emits the thread-pointer offset.
