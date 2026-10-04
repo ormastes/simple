@@ -8,6 +8,7 @@ Author-created assembly, compiled from repository root with installed
 clang.exe -target arm64-apple-macos11 -c test/fixtures/linker/macho/addend_local_a64.s -o test/fixtures/linker/macho/addend_local_a64.o
 clang.exe -target arm64-apple-macos11 -c test/fixtures/linker/macho/addend_provider_a64.s -o test/fixtures/linker/macho/addend_provider_a64.o
 clang.exe -target arm64-apple-macos11 -c test/fixtures/linker/macho/addend_import_a64.s -o test/fixtures/linker/macho/addend_import_a64.o
+clang.exe -target arm64-apple-macos11 -c test/fixtures/linker/macho/addend_subtractor_a64.s -o test/fixtures/linker/macho/addend_subtractor_a64.o
 llvm-readobj.exe --relocations test/fixtures/linker/macho/addend_local_a64.o
 llvm-readobj.exe --relocations test/fixtures/linker/macho/addend_import_a64.o
 ```
@@ -24,6 +25,11 @@ SHA256:
 | addend_local_a64.o | f5ed59768c60d40ba571dec4066de21e6147d5559b68fef08884e4db4a6ddbf2 |
 | addend_provider_a64.o | 3ea26bd9aa67de41c7623e03b4c63cc8f21017875a60f3078639528ece8737a3 |
 | addend_import_a64.o | a1a5fe1dab46781c03ee9b4ee31583e57589b9af374be8c47c2d6c30f003dddd |
+| addend_subtractor_a64.o | e0597743701fdae8c85bc0df2165ffbc627da1ca11ca9a5726b67447c560a609 |
+
+The subtractor fixture's LLVM relocation dump independently confirms
+SUBTRACTOR then UNSIGNED at dataoffset0. Raw words are0x1e000003/0x0e000004,
+referring to `_branch_target` and `_data_target`; no ADDEND record is involved.
 
 Negative addends in tests are **documented wire mutations**, not claimed direct
 assembler output. During fixture development, clang23 negative literals emitted
