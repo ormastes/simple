@@ -15,14 +15,15 @@
 # read that reports `valid: false` renders as "-" / an explicit reason, never as
 # a plausible zero.
 
-use std.tui.widget.{pad_or_truncate}
+use std.nogc_sync_mut.tui.style.{Style, styled, make_style, COLOR_NONE,
+    COLOR_BLACK, COLOR_BLUE, COLOR_CYAN, COLOR_WHITE}
 use std.nogc_async_mut.sosix.{sosix_proc_usage, sosix_is_running, sosix_which,
     sosix_platform}
 use std.io_runtime.{env_get, file_exists}
 use app.llm_caret.harness_spec.{parse_harness_spec, harness_spec_display}
 use app.llm_caret.pane_backend.{Pane, pane_backend_name,
-    pane_list, pane_select, pane_zoom, pane_spawn, pane_kill, pane_send,
-    pane_capture, pane_send_key, pane_key_bytes}
+    pane_list, pane_select, pane_zoom, pane_spawn_at, pane_resize, pane_kill,
+    pane_send, pane_capture, pane_send_key, pane_key_bytes}
 
 # cpu_pct/rss_mb use -1 as the UNMEASURED sentinel; 0 would be a real idle
 # reading and must stay distinguishable from "we never got a number".
@@ -235,16 +236,91 @@ fn _detail_lines(d: CsDashboard) -> [text]:
         return ["DETAIL  (no agent selected)"]
     val a = d.agents[d.selected]
     val pane = if a.pane_id == "": "(none)" else: a.pane_id
-    ["DETAIL  " + a.agent_id,
+    var out = ["DETAIL  " + a.agent_id,
         "  spec " + a.spec + "   pane " + pane + "   pid " + a.pid.to_text(),
         "  status " + a.status,
         "  " + _usage_text(a),
         "  " + a.detail]
+    val err_path = cs_stderr_path(d.session, a.agent_id)
+    if a.pane_id != "" and err_path != "":
+        out = out + ["  stderr " + err_path]
+    out
+
+# Where a launched agent's stderr goes (compile warnings would otherwise flood
+# its screen). "" where the spawn cannot redirect it (Windows ConPTY).
+fn cs_stderr_path(session: text, agent_id: text) -> text:
+    if sosix_platform() == "windows":
+        return ""
+    var dir = env_get("TMPDIR") ?? ""
+    if dir == "":
+        dir = "/tmp"
+    if dir.ends_with("/"):
+        dir = dir.substring(0, dir.len() - 1)
+    dir + "/cs-" + session + "-" + agent_id + ".stderr"
 
 # Below this width the agent screen would be an unreadable sliver, so the
 # frame stays single-column.
 const CS_SPLIT_MIN_COLS: i64 = 60
 const CS_LEFT_MIN_COLS: i64 = 32
+# Header, help bar and input line: the full-width rows around the split body.
+const CS_CHROME_ROWS: i64 = 3
+# Log entries kept on screen; older ones scroll off.
+const CS_LOG_SHOWN: i64 = 6
+const CS_HELP_BAR: text = "/launch <spec>  /switch <n>  /key <name>  /kill <n>  /quit  ·  Enter send"
+const CS_DIVIDER: text = "│"
+
+# `content` fitted to exactly `width` terminal cells: escape sequences and
+# control characters are dropped, then it is truncated or space-padded. Counts
+# characters, not bytes - text.len() is a byte count and would mis-size any
+# non-ASCII line.
+fn cs_fit(content: text, width: i64) -> text:
+    if width <= 0:
+        return ""
+    var out = ""
+    var n = 0
+    var mode = 0  # 0 text, 1 after ESC, 2 CSI, 3 OSC
+    for ch in content.chars():
+        if mode == 1:
+            mode = 0
+            if ch == "[":
+                mode = 2
+            if ch == "]":
+                mode = 3
+        elif mode == 2:
+            if ch >= "@" and ch <= "~":
+                mode = 0
+        elif mode == 3:
+            if ch == "\x07":
+                mode = 0
+        elif ch == "\x1b":
+            mode = 1
+        elif ch == "\t":
+            if n < width:
+                out = out + " "
+                n = n + 1
+        elif ch >= " " and ch != "\x7f":
+            if n >= width:
+                break
+            out = out + ch
+            n = n + 1
+    while n < width:
+        out = out + " "
+        n = n + 1
+    out
+
+# Left-column width and the selected agent's screen size for a frame. The
+# agent screen is everything right of the divider below its title row, which
+# is the size an agent pane should be given.
+fn _left_width(cols: i64) -> i64:
+    var left_w = cols * 2 / 5
+    if left_w < CS_LEFT_MIN_COLS:
+        left_w = CS_LEFT_MIN_COLS
+    left_w
+
+fn cs_agent_area(cols: i64, rows: i64) -> (i64, i64):
+    if cols < CS_SPLIT_MIN_COLS or rows <= CS_CHROME_ROWS + 1:
+        return (0, 0)
+    (cols - _left_width(cols) - 1, rows - CS_CHROME_ROWS - 1)
 
 # Right-hand region: the selected agent's own terminal output, newest at the
 # bottom, so what the agent is doing right now is always visible.
@@ -265,42 +341,84 @@ fn _screen_lines(d: CsDashboard, height: i64) -> [text]:
         i = i + 1
     out
 
-# The status header is the FIRST row and the input line the LAST, both full
-# width. Between them the dashboard sits on the left and the selected agent's
-# screen on the right. A body longer than its region is truncated; a shorter
-# one is padded with blank lines, which is what pins the input to the bottom.
-fn cs_render(d: CsDashboard, cols: i64, rows: i64) -> text:
-    if cols < CS_SPLIT_MIN_COLS or rows < 3:
-        return _render_single(d, cols, rows)
-    var left_w = cols * 2 / 5
-    if left_w < CS_LEFT_MIN_COLS:
-        left_w = CS_LEFT_MIN_COLS
-    val right_w = cols - left_w - 1
+fn _header(d: CsDashboard, clock: text) -> text:
+    var running = 0
+    for a in d.agents:
+        if a.status == "running":
+            running = running + 1
+    var h = " cs " + d.session + " · " + d.manager_status + " · " +
+        d.agents.len().to_text() + " agents · " + running.to_text() + " running"
+    if clock != "":
+        h = h + " · " + clock
+    h
+
+fn _paint(content: text, width: i64, style: Style, styled_out: bool) -> text:
+    val fitted = cs_fit(content, width)
+    if styled_out:
+        return styled(fitted, style)
+    fitted
+
+fn _is_section(line: text) -> bool:
+    line.starts_with("AGENTS") or line.starts_with("DETAIL") or line == "LOG" or
+        line.starts_with("AGENT ")
+
+# The frame as rows. `styled_out` adds ANSI styling for a live terminal; the
+# plain form is what cs_render returns. The status header is the FIRST row and
+# the input line the LAST, with a help bar above it, all full width. Between
+# them the dashboard sits on the left and the selected agent's screen on the
+# right. A body longer than its region is truncated; a shorter one is padded
+# with blank lines, which is what pins the input to the bottom.
+fn cs_frame_rows(d: CsDashboard, cols: i64, rows: i64, clock: text,
+        styled_out: bool) -> [text]:
+    val header_style = make_style(COLOR_WHITE, COLOR_BLUE, true, false, false, false)
+    val plain = make_style(COLOR_NONE, COLOR_NONE, false, false, false, false)
+    val title = make_style(COLOR_CYAN, COLOR_NONE, true, false, false, false)
+    val chosen = make_style(COLOR_BLACK, COLOR_CYAN, true, false, false, false)
+    val muted = make_style(COLOR_NONE, COLOR_NONE, false, false, false, true)
     val body = _dashboard_lines(d)
-    val mid = rows - 2
+    val input_row = _paint("> " + d.input, cols, plain, false)
+    if cols < CS_SPLIT_MIN_COLS or rows <= CS_CHROME_ROWS:
+        var single: [text] = []
+        val budget = if rows > 1: rows - 1 else: 0
+        var i = 0
+        while i < budget:
+            if i == 0:
+                single = single + [_paint(_header(d, clock), cols, header_style, styled_out)]
+            else:
+                val line = if i < body.len(): body[i] else: ""
+                single = single + [_paint(line, cols, plain, false)]
+            i = i + 1
+        return single + [input_row]
+    val left_w = _left_width(cols)
+    val right_w = cols - left_w - 1
+    val mid = rows - CS_CHROME_ROWS
     val screen = _screen_lines(d, mid)
-    var out = pad_or_truncate(body[0], cols) + "\n"
+    val selected_row = if d.selected >= 0: 2 + d.selected else: -1
+    val divider = if styled_out: styled(CS_DIVIDER, muted) else: CS_DIVIDER
+    var out: [text] = [_paint(_header(d, clock), cols, header_style, styled_out)]
     var i = 0
     while i < mid:
         val left = if i + 1 < body.len(): body[i + 1] else: ""
         val right = if i < screen.len(): screen[i] else: ""
-        out = out + pad_or_truncate(left, left_w) + "|" + pad_or_truncate(right, right_w) + "\n"
+        var left_style = plain
+        var left_styled = false
+        if i + 1 == selected_row:
+            left_style = chosen
+            left_styled = styled_out
+        elif _is_section(left):
+            left_style = title
+            left_styled = styled_out
+        val right_styled = styled_out and i == 0
+        out = out + [_paint(left, left_w, left_style, left_styled) + divider +
+            _paint(right, right_w, title, right_styled)]
         i = i + 1
-    out + pad_or_truncate("> " + d.input, cols)
+    out + [_paint(CS_HELP_BAR, cols, muted, styled_out), input_row]
 
-fn _render_single(d: CsDashboard, cols: i64, rows: i64) -> text:
-    val body = _dashboard_lines(d)
-    val budget = if rows > 1: rows - 1 else: 0
-    var out = ""
-    var i = 0
-    while i < budget:
-        val line = if i < body.len(): body[i] else: ""
-        out = out + pad_or_truncate(line, cols) + "\n"
-        i = i + 1
-    out + pad_or_truncate("> " + d.input, cols)
+fn cs_render(d: CsDashboard, cols: i64, rows: i64) -> text:
+    cs_frame_rows(d, cols, rows, "", false).join("\n")
 
 fn _dashboard_lines(d: CsDashboard) -> [text]:
-    var body: [text] = ["cs " + d.session + "  |  " + d.manager_status,
+    var body: [text] = [_header(d, ""),
         "AGENTS (" + d.agents.len().to_text() + ")"]
     for line in _agent_list_text(d).split("\n"):
         if line != "":
@@ -310,8 +428,13 @@ fn _dashboard_lines(d: CsDashboard) -> [text]:
         body = body + [line]
     if d.log.len() > 0:
         body = body + ["", "LOG"]
-        for entry in d.log:
-            body = body + ["  " + entry]
+        var start = d.log.len() - CS_LOG_SHOWN
+        if start < 0:
+            start = 0
+        var k = start
+        while k < d.log.len():
+            body = body + ["  " + d.log[k]]
+            k = k + 1
     body
 
 # ---------------------------------------------------------------------------
@@ -354,7 +477,6 @@ fn cs_refresh(d: CsDashboard) -> CsDashboard:
     val probe_pid = backend == "tmux"
     val panes = pane_list(d.session)
     var agents: [CsAgent] = []
-    var running = 0
     for a in d.agents:
         var next = _unmeasured(a, "gone: pane closed", "pane " + a.pane_id +
             " is no longer listed")
@@ -362,12 +484,9 @@ fn cs_refresh(d: CsDashboard) -> CsDashboard:
             next = _unmeasured(a, a.status, a.detail)
         for pane in _find_pane(panes, a.pane_id, a.agent_id):
             next = _measured(a, pane, probe_pid)
-        if next.status == "running":
-            running = running + 1
         agents = agents + [next]
-    _with_screen(_dash(d, "connected: " + backend + " session " + d.session + ", " +
-        agents.len().to_text() + " agent(s), " + running.to_text() + " running",
-        agents, d.selected, d.log))
+    # The header derives agent and running counts from the roster itself.
+    _with_screen(_dash(d, "connected: " + backend, agents, d.selected, d.log))
 
 # Lines kept for the right-hand agent screen; the render shows the newest ones
 # that fit.
@@ -382,6 +501,33 @@ fn _with_screen(d: CsDashboard) -> CsDashboard:
     CsDashboard(session: d.session, manager_status: d.manager_status,
         agents: d.agents, selected: d.selected, input: d.input, log: d.log,
         screen: screen)
+
+# Cheap per-tick poll: re-captures the selected agent's screen and, on smux,
+# drains every other agent's PTY as well. A smux child's output is only read
+# by a capture, so an undrained child fills its PTY buffer and stalls. tmux
+# drains its own panes. No process listing or usage probe - that is cs_refresh.
+fn cs_poll_screens(d: CsDashboard) -> CsDashboard:
+    if pane_backend_name() == "smux":
+        var i = 0
+        while i < d.agents.len():
+            val pane_id = d.agents[i].pane_id
+            if i != d.selected and pane_id != "":
+                val _drained = pane_capture(d.session, pane_id, 1)
+            i = i + 1
+    _with_screen(d)
+
+# Agent pane geometry for new spawns; 0 leaves the backend default.
+var _cs_pane_cols: i64 = 0
+var _cs_pane_rows: i64 = 0
+
+# Sizes every agent pane to the right-hand screen, and remembers the size for
+# panes spawned later, so a child lays out for exactly what is shown.
+fn cs_resize_agents(d: CsDashboard, cols: i64, rows: i64):
+    _cs_pane_cols = cols
+    _cs_pane_rows = rows
+    for a in d.agents:
+        if a.pane_id != "":
+            val _r = pane_resize(d.session, a.pane_id, cols, rows)
 
 # Command line for a launch spec. Pure, so the spawned shape is testable
 # without tmux. Element 0 is the command; the rest are its arguments.
@@ -492,7 +638,8 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
         if exe == "":
             return (d, "cannot launch " + agent_id + ": '" + argv[0] +
                 "' is not on PATH and no repo binary was found")
-        val pane = pane_spawn(d.session, agent_id, exe, args)
+        val pane = pane_spawn_at(d.session, agent_id, exe, args, _cs_pane_cols,
+            _cs_pane_rows, cs_stderr_path(d.session, agent_id))
         if pane.pane_id == "":
             return (d, "pane backend could not spawn a pane for " + agent_id)
         return (_attach(d, agent_id, pane), "launched " + agent_id + " in pane " +
@@ -521,4 +668,6 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
 
 export CsAgent, CsDashboard
 export cs_dashboard_new, cs_refresh, cs_render, cs_handle_command, cs_help_text
+export cs_frame_rows, cs_fit, cs_agent_area, cs_stderr_path, cs_poll_screens
+export cs_resize_agents
 export cs_launch_argv, cs_apply_action, cs_resolve_exe, windows_executable_names

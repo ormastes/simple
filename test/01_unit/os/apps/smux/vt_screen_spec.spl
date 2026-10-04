@@ -20,7 +20,7 @@ is not applied; text run together without spaces means cursor-forward is lost.
 # @manual_section: smux-vt-screen
 
 use std.spec
-use os.apps.smux.vt_screen.{vt_new, vt_feed, vt_text}
+use os.apps.smux.vt_screen.{vt_new, vt_feed, vt_resize, vt_text}
 
 fn esc() -> text:
     "\x1b"
@@ -92,3 +92,20 @@ describe "smux pane screen":
         # @capture(tui): only printable text survives
         step("Only the printable text reaches the screen, even across reads")
         expect(vt_text(s)).to_equal("red!")
+
+    it "keeps drawn cells when the pane is resized smaller and larger":
+        # @req REQ-SMUX-VT-001
+        step("Draw two rows on a 3x10 grid")
+        var s = vt_feed(vt_new(3, 10), "abcdef\r\nxyz")
+        step("Shrink to 1x3: only the top-left cells survive")
+        s = vt_resize(s, 1, 3)
+        expect(s.rows).to_equal(1)
+        expect(s.cols).to_equal(3)
+        expect(vt_text(s)).to_equal("abc")
+        step("Grow to 4x12: content stays put, new cells are blank and writable")
+        s = vt_resize(s, 4, 12)
+        expect(s.rows).to_equal(4)
+        expect(s.cols).to_equal(12)
+        s = vt_feed(s, esc() + "[4;10H" + "end")
+        # @capture(tui): 4x12 grid after shrink then grow
+        expect(vt_text(s)).to_equal("abc\n\n\n         end")
