@@ -4098,6 +4098,32 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn shared_emitter_unbox_preserves_non_integer_values() {
+        let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Windows)).unwrap();
+        backend.create_module("unbox_non_integer_passthrough").unwrap();
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let ty = backend.context_ref().f64_type();
+            let function = module.add_function("extract", ty.fn_type(&[ty.into()], false), None);
+            builder.position_at_end(backend.context_ref().append_basic_block(function, "entry"));
+            let original = function.get_first_param().unwrap();
+            let mut values = HashMap::new();
+            values.insert(VReg(0), original);
+            backend.compile_emitter_simd_instruction(
+                &MirInst::UnboxInt { dest: VReg(1), value: VReg(0) },
+                &mut values, &HashMap::new(), builder, module,
+            ).unwrap();
+            assert_eq!(values[&VReg(1)], original);
+            builder.build_return(Some(&values[&VReg(1)])).unwrap();
+        }
+        let ir = backend.get_ir().unwrap();
+        assert!(!ir.contains("rt_value_unbox_int"), "non-integer values must bypass runtime decode: {ir}");
+        backend.verify().unwrap();
+    }
+    #[test]
     fn shared_emitter_integer_extraction_uses_tag_aware_runtime() {
         let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Windows)).unwrap();
         backend.create_module("tag_aware_unbox").unwrap();
