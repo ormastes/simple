@@ -68,6 +68,23 @@ cache, bounded resources, and the actual crashing worker route. Debugging only
 the coordinator does not automatically trace child processes. Do not refresh
 another owner's shared `build/scv` or manufacture an inherited authority binding.
 
+Isolation can be created within this task; it is not inherently a user-approval
+blocker. The existing owner launcher uses `FileShare.None` on
+`.post-bool-exclusive-owner.lock`. A private cache clone can be made while
+holding that exact lease after checking for writers, preserving automatic
+identity validation. Read-only cache inventory measured 3986 files and
+268257748 bytes; relocation does not promise cache hits.
+
+The stock `scripts/bootstrap/bootstrap-scv-prime.shs` calls `check --help`.
+The exact `9737d121...` bootstrap dispatcher has no `check` command, while
+`native-build --help` returns before authority acquisition. Neither help route
+can prime this compiler-only producer. The supported route is an actual minimal
+native build in an isolated checkout, with canonical cold initialization,
+private source/SCV/cache/output/temp ownership, producer identity checks and a
+1800-second ceiling. After successful canonical admission, a separate warm
+debugger replay may proceed with cold initialization unset. Timeout retains
+evidence; it does not authorize blind retries or reuse forged bindings.
+
 No build or debugger reproduction was launched by this investigation, and no
 process or cache was modified. Required acceptance remains: identify and repair
 the actual fault, execute a focused regression with a qualified route, build the
