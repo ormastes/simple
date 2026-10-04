@@ -256,4 +256,3 @@ The existing UnsupportedBudget gate remains in place.
 User constraint: hosted linking keeps external default selection. The mold-style
 Simple linker stays accessible through explicit SIMPLE_LINKER=internal; see
 `doc/07_guide/compiler/linker_selection.md`.
-
