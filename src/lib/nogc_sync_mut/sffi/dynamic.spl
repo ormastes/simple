@@ -139,8 +139,13 @@ fn _sffi_dlopen_checked(path: text) -> Result<i64, text>:
         spl_dlopen_checked(path, &mut handle)
     if status == 0 and handle > 0:
         return Ok(handle)
-    if status != 0:
-        return Err("E-SFFI-001: failed to load provider: {path} (status {status})")
+    if status == 2:
+        return Err("E-SFFI-001: failed to load provider: {path} (dlopen/LoadLibrary returned null: wrong architecture, missing dependency, or not a shared library)")
+    # status 1 (invalid argument) for a non-empty path is the out-slot transport
+    # rejection: the Cranelift JIT lane passes `&mut handle` as the slot VALUE
+    # (0 = null), not its address, so the provider rejects it before dlopen.
+    # Same direct-return fallback as the writeback-loss case below.
+    # doc/08_tracking/bug/jit_refmut_extern_out_param_passes_value_not_address_2026-10-05.md
     # status==0 with handle==0 is the &mut-out-param writeback-loss signature
     # of the seed interpreter lane (spl_dlopen_checked sets the out slot through
     # a BorrowMut the caller never observes). Fall back to the direct-return
@@ -149,7 +154,7 @@ fn _sffi_dlopen_checked(path: text) -> Result<i64, text>:
     val direct = unsafe(capabilities: [ffi]):
         spl_dlopen(path)
     if direct <= 0:
-        return Err("E-SFFI-001: failed to load provider: {path} (status {status})")
+        return Err("E-SFFI-001: failed to load provider: {path} (status {status}; direct dlopen also returned null: wrong architecture, missing dependency, or not a shared library)")
     Ok(direct)
 
 @unsafe(reason: "checked resolver returns an unverified raw function pointer", capabilities: [ffi, raw_ptr])
