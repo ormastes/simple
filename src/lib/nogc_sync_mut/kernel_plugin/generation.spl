@@ -99,6 +99,22 @@ class KpfGenerationTable:
             scanned = scanned + 1
         KpfGenerationPublication(status: KpfSyncStatus.CapacityExceeded, current: KpfGenerationHandle(index: 0, epoch: 0), previous: self.active)
 
+    me retire_active(expected: KpfGenerationHandle) -> KpfSyncStatus:
+        """Retire exactly the expected active generation without allocating.
+
+        Pins remain valid until released. Retirement removes rollback authority;
+        publication may resume later, but only the lifecycle owns terminal state.
+        """
+        if not self._valid_generation(expected): return KpfSyncStatus.StaleHandle
+        if expected.index != self.active.index or expected.epoch != self.active.epoch or
+                not self.generations[expected.index].active:
+            return KpfSyncStatus.GenerationNotActive
+        self.generations[expected.index].active = false
+        self.generations[expected.index].retired = true
+        self.active = KpfGenerationHandle(index: 0, epoch: 0)
+        self.rollback_candidate = KpfGenerationHandle(index: 0, epoch: 0)
+        KpfSyncStatus.Ok
+
     me rollback(handle: KpfGenerationHandle) -> KpfGenerationPublication:
         val current = self.active
         if not self._valid_generation(handle):
