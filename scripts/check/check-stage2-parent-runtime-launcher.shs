@@ -1,0 +1,39 @@
+#!/bin/sh
+# Execute the launcher's actual runtime-selection block with no legacy tuple.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/simple-parent-launcher.XXXXXX")
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+awk '
+    /^if \[ "\$\{full_bootstrap\}" -eq 0 \] && \[ -z "\$\{resume_stage4_output\}" \]/ { active=1 }
+    /^if \[ "\$\{rust_rebuilt\}" -eq 1 \] \|\|/ { if(active) exit }
+    active { print }
+' "$root/scripts/bootstrap/bootstrap-from-scratch.sh" >"$scratch/selection.sh"
+[ -s "$scratch/selection.sh" ] || { echo 'FAIL: launcher selection block absent'; exit 1; }
+run_selection() (
+    set -eu
+    full_bootstrap=$1 bootstrap_stage2_parent_runtime=$2
+    resume_stage4_output= seed_stale=0 rust_rebuilt=0 compiler_backfill_rebuilt=0
+    full_cli=1 bootstrap_mode=dynload PLATFORM=fixture llvm_features=
+    seed_bin=$scratch/missing/simple
+    native_all_lib=$scratch/missing/libsimple_native_all.a
+    compiler_backfill_lib=$scratch/missing/libsimple_compiler_backfill.a
+    bootstrap_stage3_rust_tuple_requires_complete_rebuild() { return 0; }
+    run_rust_authority_cargo() { printf '%s\n' "$1" >>"$scratch/cargo.calls"; }
+    . "$scratch/selection.sh"
+)
+run_selection 0 "$scratch/verified-parent-runtime" >"$scratch/parent.log" 2>&1 || {
+    echo 'FAIL: verified parent still requires nonexistent legacy tuple'; exit 1;
+}
+[ ! -e "$scratch/cargo.calls" ] || { echo 'FAIL: parent refresh invoked Cargo'; exit 1; }
+if run_selection 0 '' >"$scratch/no-parent.log" 2>&1; then
+    echo 'FAIL: missing unadmitted tuple accepted'; exit 1
+fi
+grep -F 'bootstrap needs an existing Rust seed' "$scratch/no-parent.log" >/dev/null
+run_selection 1 '' >"$scratch/full-bootstrap.log" 2>&1
+for step in rust-seed-build rust-native-all-build rust-runtime-nolto-build rust-compiler-backfill-build; do
+    grep -Fx "$step" "$scratch/cargo.calls" >/dev/null || {
+        echo "FAIL: full bootstrap lost required step $step"; exit 1;
+    }
+done
+echo 'PASS: verified parent skips absent legacy tuple; unadmitted parent rejected; full bootstrap retains all four Cargo steps'

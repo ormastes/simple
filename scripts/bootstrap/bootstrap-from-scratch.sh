@@ -3015,7 +3015,8 @@ run_rust_authority_cargo() {
   fi
 }
 
-if [ "${full_bootstrap}" -eq 0 ] && [ -z "${resume_stage4_output}" ]; then
+if [ "${full_bootstrap}" -eq 0 ] && [ -z "${resume_stage4_output}" ] &&
+   [ -z "${bootstrap_stage2_parent_runtime}" ]; then
   # Default/pure-Simple rebuild: reuse the existing Rust seed and runtime
   # library, never invoke cargo. Whether the existing seed CAN build the changed
   # pure-Simple is proven by Stage 2 below: if the new .spl needs a Rust feature
