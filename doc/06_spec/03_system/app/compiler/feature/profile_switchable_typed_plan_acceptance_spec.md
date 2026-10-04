@@ -31,6 +31,11 @@ integrity/ownership unit cases are authored but NOT RUN. The profile scenario
 below still lacks its required profile/site/epoch-to-executed-representation
 evidence and must not be marked passing on the strength of this partial receipt.
 
+The October 4 source review additionally found that the linker consumes mutable
+object paths: before/after digests do not prove which bytes it read. Until owned
+immutable admitted inputs replace those paths, the sidecar is diagnostic only.
+See `doc/08_tracking/bug/collection_native_mutable_link_inputs_2026-10-04.md`.
+
 The suite entry invokes canonical `stage4_verify_candidate_provenance` once for the exact executable, its `.provenance.env`, and this source tree. It retains accepted candidate, provenance and source hashes under `build/test-artifacts/stage4-source-admission-<pid>.txt`; the scenario rechecks candidate and receipt hashes before workload capture.
 
 The runner needs `sh` on `PATH` (the Git POSIX shell on Windows). If it is absent, admission fails MissingEvidence before compilation.
