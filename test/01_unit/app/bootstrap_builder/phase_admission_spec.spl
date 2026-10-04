@@ -9,11 +9,15 @@ use app.bootstrap_builder.phase_admission.{ManagedPhasePolicyV1,
     ManagedPhaseResourceV1, managed_phase_budget_v1,
     managed_phase_policy_encode_v1, managed_phase_policy_decode_v1,
     ManagedPhaseAdmissionV1, managed_phase_restore_journal_v1,
-    managed_phase_completion_result_error_v1, managed_phase_dependency_state_v2, managed_phase_task_root_v2}
+    managed_phase_completion_result_error_v1, managed_phase_barrier_result_error_v1,
+    managed_phase_dependency_state_v2, managed_phase_task_root_v2,
+    managed_phase1_barrier_graph_error_v1}
 use app.bootstrap_builder.grouped_native_run.{NativeGroupedCapacitySampleV1, NativeGroupedCapacityV1}
 use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildInputV1,
     BuildResultV1, builder_task_identity_v1}
 use app.bootstrap_builder.process_port.{builder_process_portable_v1}
+use app.bootstrap_builder.managed_producer_factory.{managed_producer_bind_task_v1,
+    managed_producer_unbound_digest_v1}
 
 fn paired_policy() -> ManagedPhasePolicyV1:
     ManagedPhasePolicyV1(14000000000, 7000000000, 268435456,
@@ -255,3 +259,115 @@ describe "Managed N-task inventory and dependency ledger":
         val wire = managed_phase_policy_encode_v1(dag.policy, dag.resources)
         expect(wire).to_start_with("SIMPLE-MANAGED-PHASE-POLICY-2\n3\n")
         expect(managed_phase_policy_decode_v1(wire).unwrap().1.len()).to_equal(3)
+
+fn phase1_barrier_tasks() -> [BuildTaskV1]:
+    val original = journal_owner().tasks[0]
+    var build = original
+    build.id = "phase1_build"
+    var sanity = original
+    sanity.id = "phase1_sanity"
+    sanity.dependencies = [build.id]
+    var tests = original
+    tests.id = "phase1_tests"
+    tests.dependencies = [sanity.id]
+    [build, sanity, tests]
+
+describe "Phase1 diagnostic barrier preserves qualification failure":
+    it "requires the exact build then sanity then whole-test graph":
+        val tasks = phase1_barrier_tasks()
+        expect(managed_phase1_barrier_graph_error_v1(tasks)).to_equal("")
+        expect(managed_phase1_barrier_graph_error_v1(tasks[0:2]) == "").to_equal(false)
+        var omitted_sanity = phase1_barrier_tasks()
+        omitted_sanity[2].dependencies = ["phase1_build"]
+        expect(managed_phase1_barrier_graph_error_v1(omitted_sanity) == "").to_equal(false)
+        expect(managed_phase1_barrier_graph_error_v1([tasks[1], tasks[0], tasks[2]]) == "").to_equal(false)
+
+    it "continues after an ERROR/1 including zero-case setup failure without admitting test output":
+        val task = phase1_barrier_tasks()[2]
+        val result = BuildResultV1(task.id, task.attempt, builder_task_identity_v1(task),
+            "local", "ERROR", 1, [], 0, 0, 0)
+        expect(managed_phase_barrier_result_error_v1(task, result, result, [], true)).to_equal("")
+        expect(managed_phase_completion_result_error_v1(task, result, result, []) == "").to_equal(false)
+        expect(result.status).to_equal("ERROR")
+        expect(result.exit_code).to_equal(1)
+        val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        expect(managed_phase_barrier_result_error_v1(task, result, result,
+            [BuildInputV1("completion.env", digest)], true) == "").to_equal(false)
+
+    it "does not accept crash timeout blocked missing or mismatched terminal authority":
+        val task = phase1_barrier_tasks()[2]
+        for status in ["CRASHED", "TIMEOUT", "BLOCKED", "NOT_RUN"]:
+            val code = if status == "CRASHED": 139 else: 1
+            val result = BuildResultV1(task.id, task.attempt, builder_task_identity_v1(task),
+                "local", status, code, [], 0, 0, 0)
+            expect(managed_phase_barrier_result_error_v1(task, result, result, [], true) == "").to_equal(false)
+        val failure = BuildResultV1(task.id, task.attempt, builder_task_identity_v1(task),
+            "local", "ERROR", 1, [], 0, 0, 0)
+        var changed = failure
+        changed.cache_misses = 1
+        expect(managed_phase_barrier_result_error_v1(task, failure, changed, [], true)).to_equal(
+            "retained parent and transport phase results differ")
+
+fn next_producer_template() -> BuildTaskV1:
+    var task = journal_owner().tasks[1]
+    task.id = "phase2_llvm_build"
+    task.phase = "phase2"
+    task.program = "managed-producer-unbound"
+    task.producer_digest = managed_producer_unbound_digest_v1()
+    task.outputs = ["bin/compiler.exe"]
+    task
+
+describe "Incremental managed producer binding":
+    it "uses actual declared output bytes and preserves source authority":
+        val parent = phase1_barrier_tasks()[0]
+        val outputs = [BuildInputV1("completion.env", parent.producer_digest)]
+        val result = BuildResultV1(parent.id, parent.attempt, builder_task_identity_v1(parent),
+            "local", "OK", 0, outputs, 0, 0, 0)
+        val template = next_producer_template()
+        val child = managed_producer_bind_task_v1(parent, result, result, outputs,
+            "completion.env", "C:/private/attempt/work/completion.env", template).unwrap()
+        expect(child.program).to_equal("C:/private/attempt/work/completion.env")
+        expect(child.producer_digest).to_equal(outputs[0].digest)
+        expect(child.source_digest).to_equal(template.source_digest)
+        expect(child.inputs).to_equal(template.inputs)
+        expect(child.cache_key == template.cache_key).to_equal(false)
+
+    it "rejects missing future artifacts changed bytes and non-successful parents":
+        val parent = phase1_barrier_tasks()[0]
+        val outputs = [BuildInputV1("completion.env", parent.producer_digest)]
+        val result = BuildResultV1(parent.id, parent.attempt, builder_task_identity_v1(parent),
+            "local", "OK", 0, outputs, 0, 0, 0)
+        val template = next_producer_template()
+        expect(managed_producer_bind_task_v1(parent, result, result, [],
+            "completion.env", "/attempt/work/completion.env", template).is_err()).to_equal(true)
+        expect(managed_producer_bind_task_v1(parent, result, result, outputs,
+            "missing.exe", "/attempt/work/missing.exe", template).is_err()).to_equal(true)
+        val changed = [BuildInputV1("completion.env", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")]
+        expect(managed_producer_bind_task_v1(parent, result, result, changed,
+            "completion.env", "/attempt/work/completion.env", template).is_err()).to_equal(true)
+        for status in ["ERROR", "CRASHED", "TIMEOUT"]:
+            val code = if status == "CRASHED": 139 else: 1
+            val failure = BuildResultV1(parent.id, parent.attempt, builder_task_identity_v1(parent),
+                "local", status, code, [], 0, 0, 0)
+            expect(managed_producer_bind_task_v1(parent, failure, failure, [],
+                "completion.env", "/attempt/work/completion.env", template).is_err()).to_equal(true)
+
+    it "rejects a prebound template and changes identity when real parent lineage changes":
+        val parent = phase1_barrier_tasks()[0]
+        val outputs = [BuildInputV1("completion.env", parent.producer_digest)]
+        val result = BuildResultV1(parent.id, parent.attempt, builder_task_identity_v1(parent),
+            "local", "OK", 0, outputs, 0, 0, 0)
+        val template = next_producer_template()
+        val child = managed_producer_bind_task_v1(parent, result, result, outputs,
+            "completion.env", "/attempt/work/completion.env", template).unwrap()
+        expect(managed_producer_bind_task_v1(parent, result, result, outputs,
+            "completion.env", "/attempt/work/completion.env", child).is_err()).to_equal(true)
+        var another_parent = parent
+        another_parent.args = ["different-source.spl"]
+        val another_result = BuildResultV1(another_parent.id, another_parent.attempt,
+            builder_task_identity_v1(another_parent), "local", "OK", 0, outputs, 0, 0, 0)
+        val another_child = managed_producer_bind_task_v1(another_parent, another_result, another_result, outputs,
+            "completion.env", "/attempt/work/completion.env", template).unwrap()
+        expect(another_child.cache_key == child.cache_key).to_equal(false)
+        expect(managed_producer_bind_task_v1(parent, result, another_result, outputs,
+            "completion.env", "/attempt/work/completion.env", template).is_err()).to_equal(true)
