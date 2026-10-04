@@ -1,6 +1,9 @@
 # Native + SMF-bundle linking — link_to_native and cc/windows/msvc backends.
 use compiler.backend.linker.linker_wrapper.*
 use compiler.backend.linker.native_link_result.{NativeLinkSuccessV1, native_link_success_v1, native_link_output_v1, native_link_engine_id_for_path_v1}
+use compiler.backend.linker.native_config.{NativeLinkConfig}
+use compiler.backend.linker.macho.native_adapter.{native_macho_plan_v1, native_macho_link_files_v1}
+export NativeLinkConfig
 # Direct import from the concrete defining sibling module — the seed mangler
 # bare-externs calls whose import chain crosses the facade wildcard re-export.
 # See doc/08_tracking/bug/mangler_bare_extern_sibling_split_part_2026-07-30.md
@@ -103,43 +106,6 @@ pub fn native_macos_default_std_lib_args(mode: text) -> [text]:
 # ============================================================================
 # Configuration Structs
 # ============================================================================
-
-struct NativeLinkConfig:
-    libraries: [text]
-    library_paths: [text]
-    runtime_path: text       # Path to libsimple_compiler (empty = auto-detect)
-    target_triple: text = ""
-    linker_abi: text = ""
-    pie: bool
-    debug: bool
-    strip_output: bool = false
-    prefer_size_linker: bool = false
-    verbose: bool
-    allow_duplicate_definitions: bool
-    allow_cc_fallback: bool
-    retained_symbols: [text]
-    extra_flags: [text]
-    runtime_bundle: text = "" # Named runtime authority selected by the bootstrap owner
-
-impl NativeLinkConfig:
-    static fn default() -> NativeLinkConfig:
-        NativeLinkConfig(
-            libraries: [],
-            library_paths: [],
-            runtime_path: "",
-            pie: true,
-            debug: false,
-            strip_output: false,
-            prefer_size_linker: false,
-            verbose: false,
-            allow_duplicate_definitions: true,
-            allow_cc_fallback: true,
-            retained_symbols: [],
-            extra_flags: [],
-            target_triple: "",
-            linker_abi: "",
-            runtime_bundle: ""
-        )
 
 # ponytail: CrtFiles has ONE terminal declaration, in
 # compiler.backend.linker.crt_discovery (crt_discovery.spl:10). The copy that used
@@ -387,7 +353,7 @@ fn link_native_unix_with_engine(object_files: [text], output: text, config: Nati
 
     val target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
 
-    # SIMPLE_LINKER=internal: route to the internal ELF engine (internal:elf)
+    # SIMPLE_LINKER=internal: route to the matching internal ELF/Mach-O engine
     # instead of find_linker_path/cc. Checked before the cross-cc and
     # SimpleOS-in-process-LLD arms below because neither of those is
     # something the internal engine can do -- an explicit internal request
@@ -399,7 +365,9 @@ fn link_native_unix_with_engine(object_files: [text], output: text, config: Nati
             return Err("native-link-reproduce-requires-linux-lld")
         val cross_plan = hosted_c_compiler_plan(target, os, arch)
         if cross_plan.requires_cross:
-            return Err("internal engine: unsupported cross target '{target}' (internal:elf requires the matching hosted ELF sysroot)")
+            return Err("internal engine: unsupported cross target '{target}' (internal native linking requires the matching host)")
+        if os == "macos" or os == "darwin":
+            return native_link_success_v1(internal_link_macho_native(os, arch, config, object_files, output), "internal:macho")
         val unsupported_field = internal_elf_unsupported_config_field(config)
         if unsupported_field != "":
             return Err("internal engine: unsupported config field '{unsupported_field}' (internal:elf does not honour it; unset SIMPLE_LINKER to use the external linker)")
@@ -1476,6 +1444,25 @@ class _InternalElfByteInputs:
                 # propagated, never hidden by selecting another candidate.
                 if loaded.kind != 0: return Ok(loaded)
         Err("internal engine: ELF library '{name}' was not found")
+
+fn internal_link_macho_native(os: text, arch: text, config: NativeLinkConfig,
+        object_files: [text], output: text) -> Result<text, text>:
+    if native_tool_strict_requested_v1(): return Err("managed native admission requires the admitted external hosted linker")
+    val host = host_os()
+    val selected_arch = if arch == "arm64": "aarch64" elif arch == "amd64": "x86_64" else: arch
+    val actual_arch = if host_arch() == "arm64": "aarch64" elif host_arch() == "amd64": "x86_64" else: host_arch()
+    if (os != "macos" and os != "darwin") or (host != "macos" and host != "darwin") or selected_arch != actual_arch:
+        return Err("internal engine: unsupported Mach-O cross-host link")
+    # Finish pure configuration checks before runtime discovery or input reads.
+    val plan = native_macho_plan_v1(selected_arch, config, output)?
+    if config.runtime_bundle != "" and config.runtime_bundle != "auto" and not native_runtime_bundle_is_known(config.runtime_bundle):
+        return Err("internal engine: unsupported runtime bundle '{config.runtime_bundle}'")
+    val selection_error = native_runtime_provider_selection_error_for_config(config)
+    if selection_error != "": return Err("internal engine: {selection_error}")
+    var runtime_dir = config.runtime_path
+    if runtime_dir == "": runtime_dir = find_runtime_lib_dir()
+    val runtime_archives = native_runtime_archive_inputs(runtime_dir, config.runtime_bundle)
+    native_macho_link_files_v1(plan, object_files, runtime_archives, output)
 
 fn internal_link_native(os: text, arch: text, config: NativeLinkConfig,
         object_files: [text], output: text) -> Result:
