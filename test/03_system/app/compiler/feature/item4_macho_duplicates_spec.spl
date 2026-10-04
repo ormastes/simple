@@ -168,7 +168,7 @@ describe "Mach-O selected duplicate definitions":
         if static_image.is_err(): expect(static_image.unwrap_err()).to_contain("duplicate")
 
     it "ITEM4-REQ-003 continues archive extraction after a demanded member introduces competing definitions":
-        for mode in 0..3:
+        for mode in 0..4:
             step("Select strict or first-definition policy")
             val made = dir_create_all("build")
             expect(made).to_equal(true)
@@ -183,12 +183,12 @@ describe "Mach-O selected duplicate definitions":
             if not written:
                 expect(dir_remove(parent)).to_equal(true)
                 return
-            var config = item4_macho_duplicates_config(mode == 0)
-            config.libraries = [if mode == 2: "test/fixtures/linker/macho/duplicates_unused_x64.a" else: "test/fixtures/linker/macho/duplicates_chain_x64.a"]
+            var config = item4_macho_duplicates_config(mode == 0 or mode == 3)
+            config.libraries = [if mode >= 2: "test/fixtures/linker/macho/duplicates_unused_x64.a" else: "test/fixtures/linker/macho/duplicates_chain_x64.a"]
             val plan = native_macho_plan_v1("x86_64", config, output)
             expect(plan.is_ok()).to_equal(true)
             if plan.is_ok():
-                val entry = if mode == 2: "duplicates_entry_x64.o" else: "duplicates_archive_entry_x64.o"
+                val entry = if mode >= 2: "duplicates_entry_x64.o" else: "duplicates_archive_entry_x64.o"
                 step("Link real competing definitions")
                 val linked = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/{entry}", "test/fixtures/linker/macho/duplicates_a_x64.o"], [], output)
                 if mode == 1:
@@ -206,6 +206,9 @@ describe "Mach-O selected duplicate definitions":
                             val trigger = item4_macho_duplicates_read(bytes, 0xc008, 8) - 0x100000000
                             val leaf = item4_macho_duplicates_read(bytes, trigger, 8) - 0x100000000
                             expect(item4_macho_duplicates_read(bytes, leaf, 8)).to_equal(77)
+                        else:
+                            # No unused provider data precedes the one required GOT slot.
+                            expect(0x400c + item4_macho_duplicates_relative(bytes, 0x4008)).to_equal(0xc010)
             step("Remove owned fixture files")
             expect(file_remove(output)).to_equal(true)
             expect(dir_remove(parent)).to_equal(true)

@@ -69,3 +69,26 @@ reference executable or successful execution is claimed.
 
 Independent page-hash oracle: .NET `SHA256.HashData` over 4096 zero bytes yields
 `ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7`.
+
+## Duplicate-definition policy fixtures (2026-10-04)
+
+Constructed under WSL Ubuntu using `Ubuntu clang version 21.1.8 (6ubuntu1)`
+and `Ubuntu LLVM version 21.1.8` (`llvm-ar`). Commands run from this fixture
+directory, so `.include` names resolve to the checked-in assembly sources:
+
+```sh
+clang --target=x86_64-apple-macos11 -c duplicates_entry_x64.s duplicates_a_x64.s duplicates_b_x64.s
+clang --target=arm64-apple-macos11 -c duplicates_entry_a64.s duplicates_a_a64.s duplicates_b_a64.s
+clang --target=x86_64-apple-macos11 -c duplicates_archive_entry_x64.s duplicates_archive_member_x64.s duplicates_leaf_x64.s
+llvm-ar rcs duplicates_chain_x64.a duplicates_leaf_x64.o duplicates_archive_member_x64.o
+llvm-ar rcs duplicates_unused_x64.a duplicates_b_x64.o
+clang --target=x86_64-apple-macos11 -c duplicates_weak_a_x64.s duplicates_weak_b_x64.s duplicates_common_x64.s duplicates_common_large_x64.s
+```
+
+Archive member order is intentionally leaf before demanded member: `_trigger`
+selects the later member, whose `_leaf` reference requires another closure pass.
+The demanded member also introduces the competing22 definitions. The unused
+archive contains only B, with no new demand. A/B code and data distinguish11/22;
+weak variants retain the same payload with weak-definition symbol flags. Common
+declarations are size8/align8 and size32/align32. These are external assembly
+construction results only, not Simple SSpec or Darwin execution evidence.
