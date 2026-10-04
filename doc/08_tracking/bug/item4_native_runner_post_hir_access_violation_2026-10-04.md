@@ -127,3 +127,28 @@ Required acceptance remains: identify and repair
 the actual fault, execute a focused regression with a qualified route, build the
 full CLI and runner with complete lineage, then run the pending item4 native
 SSpec/core/MCP/coverage/host gates. This report does not close any of those gates.
+
+## Isolated prime execution followup (2026-10-04, 12:48 UTC)
+
+Changed shared capacity allowed a second admission attempt. Collector preflight
+returned 126 before creating a target process because its output parent did not
+exist. Only this session's reservation was recovered after verifying its exact
+lane/start identity and that its supervisor had exited; no other reservation
+was changed. The output parent was created before the third admission attempt.
+These were three admission attempts, but only one actual compiler launch.
+
+That compiler launch completed at 12:47:23 UTC. The owned collector receipt
+records complete/child-exit, native exit zero, and the supervisor confirms its
+reservation was released. Build log SHA256:
+`8b013eb754a12d7c9d9bfd15e4364ae078e699e8e3c582ecf1e3980eea71f6cb`.
+The isolated `prime-artifact/hello.exe` is 1,369,088 bytes, SHA256
+`e024e3b173ff744e381a1c423cabcaadd8c2407d2916dca0e9cdfb6fadc8d2e9`.
+A separate ten-second-bounded run exited zero with stdout
+`item4 isolated prime` followed by a newline and empty stderr. The retained
+`build/item4-runner-diag/hello-run-receipt.json` records this execution.
+
+This establishes the minimal cold-prime compile/run using the old immutable
+producer and source identified above. It does not reproduce or repair the full
+runner crash, admit that producer, or verify newer release source. Debugger
+attachment and the full runner build remain pending; preserve the primed
+authority and private caches for the next bounded diagnostic.
