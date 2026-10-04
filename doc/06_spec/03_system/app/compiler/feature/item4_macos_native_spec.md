@@ -13,6 +13,12 @@ This manual is authored, not generated execution evidence.
 | ITEM4-REQ-006 | Default configuration refuses unsupported implicit policy rather than silently selecting options. |
 | ITEM4-REQ-006 | A bare library name resolves an actual task-owned dylib through configured library_paths, with explicit image-byte limit checked. |
 
+The named-search case then places a real stub file before a valid archive in the
+same directory. Selecting `.tbd` must fail and preserve a destination sentinel;
+removing only that stub makes the unchanged plan select the archive and produce
+independently checked relocated bytes. This is refusal coverage, not SDK-stub
+parsing support or fallback permission.
+
 The tests use checked-in assembler/linker-produced fixtures in
 `test/fixtures/linker/macho`; reproduction is documented by that directory's
 `RECIPE.md`. Temporary output directories are unique and owned by each case.

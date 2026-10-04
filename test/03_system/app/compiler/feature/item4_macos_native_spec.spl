@@ -115,9 +115,34 @@ describe "explicit internal Mach-O native file adapter":
                 expect(bytes.len() <= 1048576).to_equal(true)
                 expect(item4_macos_native_command(bytes, 0xc) >= 0).to_equal(true)
                 expect(item4_macos_native_read(bytes, 0xc000, 8)).to_equal(0)
+            step("Refuse a selected SDK stub without falling through to a valid archive")
+            val removed_dylib = file_remove(parent + "/libitem4.dylib")
+            expect(removed_dylib).to_equal(true)
+            val archive = file_read_bytes("test/fixtures/linker/macho/provider_x64.a")
+            expect(archive.len() > 8).to_equal(true)
+            val archive_written = if archive.len() > 8: file_write_bytes(parent + "/libitem4.a", archive) else: false
+            val stub_written = file_write_bytes(parent + "/libitem4.tbd", [45u8, 45u8, 45u8, 10u8])
+            val sentinel_written = file_write_bytes(output, [17u8, 0u8, 255u8])
+            expect(archive_written and stub_written and sentinel_written).to_equal(true)
+            if removed_dylib and archive_written and stub_written and sentinel_written:
+                val refused = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/hosted_start_x64.o"], [], output)
+                expect(refused.is_err()).to_equal(true)
+                if refused.is_err(): expect(refused.unwrap_err()).to_contain("tbd")
+                expect(file_read_bytes(output)).to_equal([17u8, 0u8, 255u8])
+                val removed_stub = file_remove(parent + "/libitem4.tbd")
+                expect(removed_stub).to_equal(true)
+                if removed_stub:
+                    val archived = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/hosted_start_x64.o"], [], output)
+                    expect(archived.is_ok()).to_equal(true)
+                    if archived.is_ok():
+                        val bytes = file_read_bytes(output)
+                        item4_macos_native_check_image(bytes, false)
+                        expect(item4_macos_native_read(bytes, 0x4002)).to_equal(14)
+                        expect(item4_macos_native_read(bytes, 0xc018, 8)).to_equal(0x10000c010)
         step("Remove owned fixture files")
         if file_exists(output): expect(file_remove(output)).to_equal(true)
-        expect(file_remove(parent + "/libitem4.dylib")).to_equal(true)
+        for name in ["libitem4.dylib", "libitem4.tbd", "libitem4.a"]:
+            if file_exists(parent + "/" + name): expect(file_remove(parent + "/" + name)).to_equal(true)
         expect(dir_remove(parent)).to_equal(true)
 
     it "ITEM4-REQ-006 consumes real object and archive providers and preserves successful replacement semantics":
