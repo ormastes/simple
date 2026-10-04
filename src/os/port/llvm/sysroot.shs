@@ -590,7 +590,7 @@ cat > "$SYSROOT/share/simpleos/simpleos.ld" << 'LDEOF'
 /* SimpleOS x86_64 userspace linker script
  *
  * Text starts at 0x10000000 — matches kernel bump allocator base.
- * Static linking only (no GOT/PLT).
+ * Static linking only (static GOT kept, no PLT).
  */
 ENTRY(_start)
 
@@ -611,6 +611,18 @@ SECTIONS {
     .data : {
         *(.data .data.*)
         *(.sdata .sdata.*)
+    }
+
+    /* Static-link GOT: keep it placed (NOT discarded). Cranelift objects
+     * address every data/function symbol through R_X86_64_GOTPCREL; lld
+     * bakes the absolute target VAs into these slots at static link time.
+     * Discarding .got (as this script did) left every slot at VA 0..0x18,
+     * so a pure-Simple hello loaded its string and rt_println_str pointer
+     * from address 0x10/0x8 and faulted in ring 3 (measured 2026-10-05).
+     * aarch64/riscv64 sysroot scripts already keep .got. */
+    . = ALIGN(8);
+    .got : {
+        *(.got) *(.got.*)
     }
 
     . = ALIGN(16);
@@ -655,8 +667,6 @@ SECTIONS {
         *(.note .note.*)
         *(.eh_frame)
         *(.eh_frame_hdr)
-        *(.got)
-        *(.got.plt)
         *(.plt)
         *(.rela.plt)
     }
