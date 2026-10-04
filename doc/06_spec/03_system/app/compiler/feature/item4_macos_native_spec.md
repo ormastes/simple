@@ -32,7 +32,7 @@ runtime archive ownership reject before publication; error tokens identify the
 intended failing contract rather than accepting arbitrary failures.
 
 Future command after independent runtime admission:
-`<runtime> test test/03_system/app/compiler/feature/item4_macos_native_spec.spl`
+`<runtime> test test/03_system/app/compiler/feature/item4_macos_native_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose`
 
 These are real same-process file-adapter and byte-construction assertions.
 No successful Darwin launch, executable permission check, full native-build
@@ -40,3 +40,8 @@ receipt routing, managed-runtime admission, bounded RSS, or five-host run is
 claimed. The retained managed gate must remain intact; its host/runtime evidence
 is a separate integration obligation. Publisher replacement is intentional;
 only validation/construction failure promises destination preservation here.
+
+Pending execution follows [the item4 native execution gate](item4_linker_execution_gate.md).
+This command is an unexecuted recipe, not proof that the current CLI or generated
+entry is admitted. Account for all 6 declared scenarios and their actual
+assertion behavior; zero reported examples or missing scenario results cannot pass.

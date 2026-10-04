@@ -21,9 +21,14 @@ The provider type has no virtual-address fields; binary validation precedes its
 projection. No fake dylib is synthesized from typed metadata.
 
 After independent runtime admission:
-`<runtime> test test/03_system/app/compiler/feature/item4_macho_provider_spec.spl`
+`<runtime> test test/03_system/app/compiler/feature/item4_macho_provider_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose`
 
 Still open: v4 YAML and v5 JSON TextAPI parsing, SDK target filtering, transitive
 reexport closure, client/umbrella permission binding, supported weak import
 coalescing, actual Darwin loading, full SDK application execution and resource
 qualification. This is a typed integration prerequisite, not completed SDK support.
+
+Pending execution follows [the item4 native execution gate](item4_linker_execution_gate.md).
+This command is an unexecuted recipe, not proof that the current CLI or generated
+entry is admitted. Account for all 8 declared scenarios and their actual
+assertion behavior; zero reported examples or missing scenario results cannot pass.

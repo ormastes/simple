@@ -19,7 +19,12 @@ Fixtures and their external LLVM construction/inspection provenance are in [RECI
 Pending execution with an admitted pure-Simple runtime:
 
 ```text
-<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_legacy_modes_spec.spl --mode=interpreter
+<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_legacy_modes_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
 ```
 
 Docgen and runtime evidence remain pending; fixture inspection is not Simple execution.
+
+Pending execution follows [the item4 native execution gate](item4_linker_execution_gate.md).
+This command is an unexecuted recipe, not proof that the current CLI or generated
+entry is admitted. Account for all 3 declared scenarios and their actual
+assertion behavior; zero reported examples or missing scenario results cannot pass.

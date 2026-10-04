@@ -22,9 +22,14 @@ owner before returning Err, forbids another destination, and allows discard
 after the blockers are removed while preserving the original sentinel.
 
 Future execution after independent runtime admission:
-`<runtime> test test/03_system/app/compiler/feature/item4_stream_prepare_spec.spl`
+`<runtime> test test/03_system/app/compiler/feature/item4_stream_prepare_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose`
 
 This is same-process owner separation. No cross-process transfer authority,
 worker qualification, no-swap, whole-job memory enforcement, five-host execution,
 or performance result is claimed. Prepare-time cleanup failures still report
 legacy text errors without a returned retry owner; that limitation remains open.
+
+Pending execution follows [the item4 native execution gate](item4_linker_execution_gate.md).
+This command is an unexecuted recipe, not proof that the current CLI or generated
+entry is admitted. Account for all 4 declared scenarios and their actual
+assertion behavior; zero reported examples or missing scenario results cannot pass.

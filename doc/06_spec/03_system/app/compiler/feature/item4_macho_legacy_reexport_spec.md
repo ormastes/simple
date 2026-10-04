@@ -36,8 +36,13 @@ loading, immutable file identity or process memory enforcement.
 Pending execution requires an admitted self-hosted runtime:
 
 ```
-<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_legacy_reexport_spec.spl --mode=interpreter
+<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_legacy_reexport_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
 ```
 
 No Rust seed, bootstrap rebuild, runtime retry or executed RED/GREEN claim was
 used for this acceptance work.
+
+Pending execution follows [the item4 native execution gate](item4_linker_execution_gate.md).
+This command is an unexecuted recipe, not proof that the current CLI or generated
+entry is admitted. Account for all 9 declared scenarios and their actual
+assertion behavior; zero reported examples or missing scenario results cannot pass.
