@@ -348,3 +348,29 @@ cleans retained components and is idempotent when empty. Existing one-shot linki
 uses this real path, preserving early output validation, logical quotas and
 no-clobber publication. Helpers use item4_stream_prepare_* and std.spec.step with
 real assertions. Test intent 623186e2f83 preceded implementation. Runtime UNRUN.
+
+## macOS native facade ownership (2026-10-04)
+
+Base: 4da06603013a468071da66824a933051a4c10b07, target release/1.0.
+Root integrates work/item4-macos-facade-20261004 in its isolated worktree.
+Runtime owns native configuration extraction, Mach-O file adapter, wrapper and
+request dispatch; acceptance owns item4_macos_native_spec and its mirrored
+manual; research owns macos_native_facade design and independent final review.
+Each child uses its own clean worktree and feature branch. Root owns shared
+plans, verification report and final PR review/merge. Lower-model sidecars: N/A.
+
+Shared interfaces: MachONativePlanV1, native_macho_plan_v1(arch,config,output),
+native_macho_link_files_v1(plan,object_files,runtime_archives,output). Move the
+unchanged NativeLinkConfig/default to an acyclic module, preserving existing
+wrapper exports. Production performs real host/admission/runtime resolution;
+the same file adapter permits fixture-based cross-format evidence without
+pretending the fixture runner is Darwin. Tests use item4_macos_native_* helpers
+and real std.spec.step assertions. No silent setup or placeholder passes.
+
+Native image publication retains its existing replacement behavior, distinct
+from the streamed no-clobber API. Planning/construction failure must preserve
+an existing destination. Explicit SDK/platform versions and modeled flags are
+required; unsupported configuration and .tbd/cache providers fail explicitly.
+External default and managed internal-admission refusal remain intact. This
+adapter does not close missing SDK providers, Mach-O semantics, native Darwin
+execution or any other host gate. Simple execution remains UNRUN.

@@ -263,6 +263,8 @@ The Simple linker must run on Windows, Linux, SimpleOS, FreeBSD and macOS,
 while remaining explicit opt-in. The authoritative per-host implementation and
 execution gates are in `host_completion_2026-10-04.md` beside this ledger.
 Cross-generated images do not prove a runnable linker on the target host.
-In particular, macOS native dispatch still reaches the ELF rejection path, and
-SimpleOS image production is not yet evidence of a linker running inside
-SimpleOS. Managed internal-engine admission remains an explicit requirement.
+macOS native dispatch now has an explicit Mach-O file adapter for modeled
+configuration and thin-dylib providers; SDK text stubs/cache providers and actual
+Darwin execution remain open. SimpleOS image production is not yet evidence of
+a linker running inside SimpleOS. Managed internal-engine admission remains an
+explicit requirement.
