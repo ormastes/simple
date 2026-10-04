@@ -1805,7 +1805,13 @@ impl Lowerer {
                         // return type instead of falling back to ANY.
                         if let Some(ref trait_name) = impl_block.trait_name {
                             if let Some(trait_def) =
-                                select_impl_trait(&ast_module.items, trait_name, &impl_method_names)
+                                select_impl_trait(
+                                    &ast_module.items,
+                                    trait_name,
+                                    &impl_method_names,
+                                    methods_owner(&impl_block.methods).as_deref(),
+                                    &self.flatten_owner_import_bindings,
+                                )
                             {
                                 for default_method in &trait_def.methods {
                                     if default_method.is_abstract
@@ -1883,7 +1889,13 @@ impl Lowerer {
                         for method in &s.methods {
                             methods_map.insert(method.name.clone(), format!("{}.{}", s.name, method.name));
                         }
-                        if let Some(trait_def) = select_impl_trait(&ast_module.items, &trait_name, &own) {
+                        if let Some(trait_def) = select_impl_trait(
+                            &ast_module.items,
+                            &trait_name,
+                            &own,
+                            methods_owner(&s.methods).as_deref(),
+                            &self.flatten_owner_import_bindings,
+                        ) {
                             for default_method in &trait_def.methods {
                                 if default_method.is_abstract || own.contains(default_method.name.as_str()) {
                                     continue;
@@ -1956,7 +1968,13 @@ impl Lowerer {
                             // the default body. Each default is lowered fresh per-impl so
                             // `self` resolves against this impl's concrete type.
                             if let Some(trait_def) =
-                                select_impl_trait(&ast_module.items, trait_name, &impl_method_names)
+                                select_impl_trait(
+                                    &ast_module.items,
+                                    trait_name,
+                                    &impl_method_names,
+                                    methods_owner(&impl_block.methods).as_deref(),
+                                    &self.flatten_owner_import_bindings,
+                                )
                             {
                                 for default_method in &trait_def.methods {
                                     if default_method.is_abstract
@@ -2635,24 +2653,76 @@ mod scalar_const_eval_tests {
 /// `invalidate_damage_mirror`, so those defaults were never materialised for
 /// the impl and the call `VulkanBackend.invalidate_damage_mirror` panicked in
 /// codegen (whole module dropped to the interpreter) or crashed with SIGBUS.
-/// Among same-named candidates, pick the one declaring the most of the
-/// impl's own method names. On a tie, a candidate whose method set strictly
-/// contains the current pick's wins (the two stdlib engine2d `RenderBackend`s
-/// differ only by three added defaults, and VulkanBackend overrides 25 of
-/// both); any other tie keeps the first, i.e. the previous behaviour.
+/// Resolution follows the module system first, using the owner tags the
+/// flattener puts on every method (`FLATTEN_MODULE_OWNER_ATTR_PREFIX`) and its
+/// import-binding markers:
+///   1. a single candidate is the trait;
+///   2. a trait declared in the impl's own module;
+///   3. the trait the impl's module imports under that name
+///      (`flatten_owner_import_bindings[owner][name]` -> source owner).
+/// Only when none of these resolves (no owner tags, a re-export facade, an
+/// aliased import) does the overlap heuristic below decide: the candidate
+/// declaring the most of the impl's own method names, and on a tie one whose
+/// method set strictly contains the current pick's (the two engine2d
+/// `RenderBackend`s differ only by three added defaults); any other tie keeps
+/// the first, i.e. the pre-2026-10-04 behaviour.
 fn select_impl_trait<'a>(
     items: &'a [Node],
     trait_name: &str,
     impl_method_names: &std::collections::HashSet<&str>,
+    impl_owner: Option<&str>,
+    import_bindings: &HashMap<String, HashMap<String, (String, String)>>,
+) -> Option<&'a simple_parser::ast::TraitDef> {
+    let candidates: Vec<&'a simple_parser::ast::TraitDef> = items
+        .iter()
+        .filter_map(|item| match item {
+            Node::Trait(t) if t.name == trait_name => Some(t),
+            _ => None,
+        })
+        .collect();
+    if candidates.len() <= 1 {
+        return candidates.first().copied();
+    }
+    let trait_owner = |t: &simple_parser::ast::TraitDef| -> Option<String> {
+        Lowerer::flatten_owner_of(
+            t.methods
+                .iter()
+                .flat_map(|m| m.attributes.iter().map(|a| a.name.as_str())),
+        )
+    };
+    let unique_owned_by = |owner: &str| -> Option<&'a simple_parser::ast::TraitDef> {
+        let mut found = candidates.iter().copied().filter(|t| trait_owner(t).as_deref() == Some(owner));
+        let first = found.next()?;
+        if found.next().is_some() {
+            return None;
+        }
+        Some(first)
+    };
+    if let Some(owner) = impl_owner {
+        if let Some(own) = unique_owned_by(owner) {
+            return Some(own);
+        }
+        if let Some((source_owner, _source_name)) = import_bindings.get(owner).and_then(|b| b.get(trait_name)) {
+            if let Some(imported) = unique_owned_by(source_owner) {
+                return Some(imported);
+            }
+        }
+    }
+    select_impl_trait_by_overlap(&candidates, impl_method_names)
+}
+
+/// Owning module of a flattened impl/struct/trait, read from the owner tag the
+/// flattener puts on each of its methods. None outside the flattened lane.
+fn methods_owner(methods: &[simple_parser::ast::FunctionDef]) -> Option<String> {
+    Lowerer::flatten_owner_of(methods.iter().flat_map(|m| m.attributes.iter().map(|a| a.name.as_str())))
+}
+
+fn select_impl_trait_by_overlap<'a>(
+    candidates: &[&'a simple_parser::ast::TraitDef],
+    impl_method_names: &std::collections::HashSet<&str>,
 ) -> Option<&'a simple_parser::ast::TraitDef> {
     let mut best: Option<(&'a simple_parser::ast::TraitDef, usize)> = None;
-    for item in items {
-        let Node::Trait(t) = item else {
-            continue;
-        };
-        if t.name != trait_name {
-            continue;
-        }
+    for t in candidates.iter().copied() {
         let overlap = t
             .methods
             .iter()

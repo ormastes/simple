@@ -2163,6 +2163,20 @@ impl Lowerer {
         // boxing, so both edges are raw and agree with the static type.
         // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
         let result_ty = self.optional_boxint_scalar_inner(result_ty).unwrap_or(result_ty);
+        // Same for the non-BoxInt scalars (`bool?`, `f32?`, `f64?`): the
+        // coalesced value is the raw inner scalar. Typed as the tagged `T?`,
+        // `val b = maybe_bool() ?? false` kept a tagged word and
+        // `not b` tested it as a raw non-zero word, so false read as true
+        // under the JIT. MIR decodes the then-branch by name + type
+        // (lowering_expr_builtin.rs, `rt_unwrap_or_self`).
+        let result_ty = match self.module.types.get(result_ty) {
+            Some(HirType::Pointer {
+                kind: PointerKind::Shared,
+                inner,
+                ..
+            }) if matches!(*inner, TypeId::BOOL | TypeId::F32 | TypeId::F64) => *inner,
+            _ => result_ty,
+        };
 
         // Restore the concrete owner for arrays and for structs with a
         // same-owner, nonnullable fallback. Retaining the optional wrapper
