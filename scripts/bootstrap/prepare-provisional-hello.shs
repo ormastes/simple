@@ -6,7 +6,12 @@ regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
 digest() { [ "${#1}" -eq 64 ] && case "$1" in *[!0-9a-f]*) return 1 ;; *) return 0 ;; esac; }
 positive() { case "$1" in ''|0|0*|*[!0-9]*) return 1 ;; *) [ "$1" -gt 0 ] 2>/dev/null ;; esac; }
-hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+hash_file() (
+  row=$(sha256sum -- "$1") || exit 1
+  sha=${row%% *}
+  digest "$sha" || exit 1
+  printf '%s\n' "$sha"
+)
 producer= producer_digest= source_checkout= source_snapshot= source_snapshot_digest=
 hello_source= hello_source_digest= output_root= target= memory_bytes= reserve_bytes=
 timeout_seconds=600 memory_policy=enforce
@@ -187,18 +192,23 @@ cmp -s "$run_stdout" "$output_root/expected.lf" ||
   [ "$arg_number" -eq 27 ] || die "hello command transcript argument count differs"
 } >"$compile_command" || die "hello command transcript write failed"
 receipt="$output_root/hello.receipt"
+hello_executable_digest=$(hash_file "$hello_executable") || die "hello executable hash failed"
+stdout_digest=$(hash_file "$run_stdout") || die "hello stdout hash failed"
+stderr_digest=$(hash_file "$run_stderr") || die "hello stderr hash failed"
+compile_command_digest=$(hash_file "$compile_command") || die "hello transcript hash failed"
+compile_log_digest=$(hash_file "$compile_log") || die "hello compile log hash failed"
 {
   printf '%s\n' 'format=SIMPLE-PROVISIONAL-HELLO-1' \
     "producer_path=$producer" "producer_digest=$producer_digest" \
     "hello_source_path=$hello_source" "hello_source_digest=$hello_source_digest" \
     "hello_executable_path=$hello_executable" \
-    "hello_executable_digest=$(hash_file "$hello_executable")" \
+    "hello_executable_digest=$hello_executable_digest" \
     'compile_exit=0' 'run_exit=0' \
-    "stdout_path=$run_stdout" "stdout_digest=$(hash_file "$run_stdout")" \
-    "stderr_path=$run_stderr" "stderr_digest=$(hash_file "$run_stderr")" \
+    "stdout_path=$run_stdout" "stdout_digest=$stdout_digest" \
+    "stderr_path=$run_stderr" "stderr_digest=$stderr_digest" \
     "source_snapshot_digest=$source_snapshot_digest" \
-    "compile_command_path=$compile_command" "compile_command_digest=$(hash_file "$compile_command")" \
-    "compile_log_path=$compile_log" "compile_log_digest=$(hash_file "$compile_log")" \
+    "compile_command_path=$compile_command" "compile_command_digest=$compile_command_digest" \
+    "compile_log_path=$compile_log" "compile_log_digest=$compile_log_digest" \
     'launcher_relation=executed_by_provisional_runner'
 } >"$receipt" || die "hello receipt write failed"
 printf '%s %s\n' "$receipt" "$(hash_file "$receipt")"
