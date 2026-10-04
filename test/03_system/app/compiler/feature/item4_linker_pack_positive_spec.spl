@@ -1,0 +1,260 @@
+"""ITEM4-REQ-002/006/007/010 mapped Linux provider positives. UNRUN.
+
+Requires an admitted native SSpec runner, built V2 provider, Linux x64 CRT/libc,
+and SIMPLE_LINKER=internal. Missing prerequisites fail; no skipped success.
+These are provider API tests, not production CLI/composition admission.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_exists, file_read_bytes, process_run_timeout}
+use std.nogc_sync_mut.io_runtime.{file_hash_sha256_or_empty}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.common.kernel_plugin.schema_header.{KpfSchemaHeaderV1, KpfSchemaRequirementV1}
+use std.nogc_sync_mut.kernel_plugin.generation.{KpfGenerationHandle}
+use std.common.linker.link_request_v1.{LinkRequestV1}
+use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1, LinkExecutionModeV1}
+use std.common.linker.link_receipt_v1.{LinkReceiptV1, LinkOutcomeV1, LinkAccountingClassV1}
+use compiler.backend.linker.link_engine_external.*
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
+use compiler.backend.linker.crt_discovery.{find_crt_files}
+use compiler.backend.linker.mold.{requested_linker_override}
+use compiler.backend.linker.linker_pack.{LinkerPackConfigV1}
+use compiler.backend.linker.linker_pack_query.{LINKER_PACK_ABI_DIGEST}
+use compiler.backend.linker.linker_pack_wire.{linker_pack_policy_digest}
+use compiler.backend.linker.linker_lifecycle.{LinkerLifecycleV1, LinkerProviderV1, LinkerSessionHandleV1}
+use os.smf.provider_loader.{ProviderAdmissionRequestV1}
+
+fn item4_pack_positive_header() -> KpfSchemaHeaderV1:
+    KpfSchemaHeaderV1(abi_version: 1, struct_size: 72, schema_id: KpfId128(hi: 1, lo: 3),
+        schema_major: 1, schema_minor: 0, schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0), reserved0: 0)
+
+fn item4_pack_positive_requirement() -> KpfSchemaRequirementV1:
+    KpfSchemaRequirementV1(schema_id: KpfId128(hi: 1, lo: 3), schema_major: 1, minimum_minor: 0,
+        minimum_struct_size: 72, schema_digest: KpfDigest256(w0: 1, w1: 0, w2: 0, w3: 0))
+
+fn item4_pack_positive_request() -> LinkRequestV1:
+    val header = item4_pack_positive_header()
+    LinkRequestV1(header: header, target: native_host_link_target(), inputs_manifest_digest: header.schema_digest,
+        output_contract: 1, semantic_profile_digest: header.schema_digest, runtime_sysroot_digest: header.schema_digest,
+        required_features: 0, layout_handle: 0, debug_handle: 0, reproducibility: 1)
+
+fn item4_pack_positive_policy() -> LinkExecutionPolicyV1:
+    LinkExecutionPolicyV1(header: item4_pack_positive_header(), mode: LinkExecutionModeV1.Fast,
+        job_memory_limit_bytes: 0, scratch_limit_bytes: 0, max_workers: 1, allowed_placements: 1, enforcement_requirement: 0)
+
+fn item4_pack_positive_recovery(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
+        inputs: [text], output: text, native: NativeLinkConfig) -> LinkReceiptV1:
+    link_request_to_native_with_config(request, policy, native, inputs, output)
+
+fn item4_pack_positive_prerequisites() -> Result<text, text>:
+    step("Require the admitted Linux provider and hosted fixture")
+    val host = native_host_link_target()
+    if host.os != LINK_OS_LINUX or host.arch != LINK_ARCH_X86_64 or host.abi != LINK_ABI_GNU or
+            host.object_format != LINK_OBJECT_FORMAT_ELF or host.endian != LINK_ENDIAN_LITTLE or host.address_width != 64:
+        return Err("prerequisite: Linux x86_64 GNU ELF host required")
+    if requested_linker_override() != "internal": return Err("prerequisite: SIMPLE_LINKER=internal required")
+    if not file_exists("build/providers/item4-linker.so"): return Err("prerequisite: admitted V2 native provider artifact missing")
+    if not file_exists("test/fixtures/linker/elf/pack_main_x64.o"): return Err("prerequisite: hosted main fixture missing")
+    val crt = find_crt_files(true, false)
+    if not crt.found or not file_exists(crt.dynamic_linker): return Err("prerequisite: Linux PIE CRT and dynamic loader missing")
+    val digest = file_hash_sha256_or_empty("build/providers/item4-linker.so")
+    if digest.len() != 64: return Err("prerequisite: provider artifact digest unavailable")
+    Ok(digest)
+
+fn item4_pack_positive_config(digest: text) -> LinkerPackConfigV1:
+    val requirement = item4_pack_positive_requirement()
+    LinkerPackConfigV1(header: item4_pack_positive_header(), provider_id: KpfId128(hi: 4, lo: 21),
+        composition_digest: item4_pack_positive_header().schema_digest, engine_id: "internal:elf",
+        loader: ProviderAdmissionRequestV1(artifact_path: "build/providers/item4-linker.so", artifact_kind: "native",
+            expected_artifact_digest: digest, granted_capability_bits: 0, required_capability_bits: 0,
+            host_abi: 1, minimum_host_abi: 1, maximum_host_abi: 1, requested_interface_major: 1,
+            requested_interface_minor: 0, provided_interface_major: 1, provided_interface_minor: 0),
+        interface_abi_digest: LINKER_PACK_ABI_DIGEST,
+        request_requirement: requirement, policy_requirement: requirement, receipt_requirement: requirement,
+        host: native_host_link_target(), policy_digest: linker_pack_policy_digest(item4_pack_positive_policy()).unwrap())
+
+fn item4_pack_positive_check_receipt(receipt: LinkReceiptV1):
+    step("Inspect the linked ELF and actual engine receipt")
+    expect(receipt.outcome).to_equal(LinkOutcomeV1.Success)
+    expect(receipt.engine_id).to_equal("internal:elf")
+    expect(receipt.accounting_class).to_equal(LinkAccountingClassV1.NotCertified)
+    expect(receipt.target.arch).to_equal(LINK_ARCH_X86_64)
+    expect(receipt.target.os).to_equal(LINK_OS_LINUX)
+
+fn item4_pack_positive_read(image: [u8], offset: i64, width: i64) -> i64:
+    val valid = width >= 1 and width <= 8 and offset >= 0 and offset <= image.len() and width <= image.len() - offset
+    expect(valid).to_equal(true)
+    if not valid: return -1
+    var value: i64 = 0
+    for index in 0..width: value = value | ((image[offset + index] as i64) << (index * 8))
+    value
+
+fn item4_pack_positive_check_image(path: text) -> Result<[u8], text>:
+    val image = file_read_bytes(path)
+    if image.len() < 64: return Err("linked ELF missing or truncated")
+    expect(image[0:7]).to_equal([127u8, 69u8, 76u8, 70u8, 2u8, 1u8, 1u8])
+    expect(item4_pack_positive_read(image, 16, 2)).to_equal(3)
+    expect(item4_pack_positive_read(image, 18, 2)).to_equal(62)
+    val entry = item4_pack_positive_read(image, 24, 8)
+    val phoff = item4_pack_positive_read(image, 32, 8)
+    val count = item4_pack_positive_read(image, 56, 2)
+    if item4_pack_positive_read(image, 54, 2) != 56 or phoff < 64 or phoff > image.len() or
+            count < 1 or count > 64 or count * 56 > image.len() - phoff:
+        return Err("linked ELF program-header bounds invalid")
+    var executable_entry = false
+    var interpreter = false
+    for index in 0..count:
+        val at = phoff + index * 56
+        val kind = item4_pack_positive_read(image, at, 4)
+        val flags = item4_pack_positive_read(image, at + 4, 4)
+        val offset = item4_pack_positive_read(image, at + 8, 8)
+        val address = item4_pack_positive_read(image, at + 16, 8)
+        val filesz = item4_pack_positive_read(image, at + 32, 8)
+        val memsz = item4_pack_positive_read(image, at + 40, 8)
+        if offset < 0 or filesz < 0 or offset > image.len() or filesz > image.len() - offset:
+            return Err("linked ELF segment exceeds file")
+        if kind == 1:
+            expect(filesz <= memsz).to_equal(true)
+            if (flags & 1) != 0 and entry >= address and entry - address < filesz: executable_entry = true
+        if kind == 3:
+            if filesz < 2: return Err("empty PT_INTERP")
+            expect(image[offset + filesz - 1]).to_equal(0u8)
+            interpreter = true
+    expect(executable_entry).to_equal(true)
+    expect(interpreter).to_equal(true)
+    val (stdout, stderr, code) = process_run_timeout(path, [], 5000)
+    expect(code).to_equal(42)
+    expect(stdout).to_equal("")
+    expect(stderr).to_equal("")
+    Ok(image)
+
+class Item4PackPositiveOwner:
+    var registry: LinkerLifecycleV1
+    config: LinkerPackConfigV1
+    native: NativeLinkConfig
+    directory: text
+    var sessions: [LinkerSessionHandleV1]
+    var generations: [KpfGenerationHandle]
+    var outputs: [text]
+
+    me publish() -> Result<KpfGenerationHandle, text>:
+        val generation = self.registry.publish_pack(self.config)?
+        self.generations.push(generation)
+        Ok(generation)
+
+    me open() -> Result<LinkerSessionHandleV1, text>:
+        val session = self.registry.open()?
+        self.sessions.push(session)
+        Ok(session)
+
+    me link(session: LinkerSessionHandleV1, name: text) -> Result<[u8], text>:
+        step("Invoke the mapped provider generation")
+        val path = self.directory + "/" + name
+        self.outputs.push(path)
+        val receipt = self.registry.run_with_config(session, item4_pack_positive_request(), item4_pack_positive_policy(),
+            ["test/fixtures/linker/elf/pack_main_x64.o"], path, self.native)?
+        item4_pack_positive_check_receipt(receipt)
+        item4_pack_positive_check_image(path)
+
+    me scenario(kind: i64) -> Result<bool, text>:
+        val first = self.publish()?
+        val old = self.open()?
+        val initial = self.link(old, "first")?
+        if kind == 1:
+            val again = self.link(old, "again")?
+            expect(again).to_equal(initial)
+        if kind == 2 or kind == 3:
+            val second = self.publish()?
+            expect(first.index != second.index or first.epoch != second.epoch).to_equal(true)
+            val current = self.open()?
+            val old_image = self.link(old, "old-after-replacement")?
+            val new_image = self.link(current, "new-after-replacement")?
+            expect(old_image).to_equal(new_image)
+            if kind == 3:
+                expect(self.registry.collect(first).is_err()).to_equal(true)
+                self.registry.close(old)?
+                self.sessions = [current]
+                self.registry.collect(first)?
+                self.generations = [self.generations[0], second]
+                expect(self.registry.run_with_config(old, item4_pack_positive_request(), item4_pack_positive_policy(),
+                    [], self.directory + "/stale", self.native).is_err()).to_equal(true)
+                val retained = self.link(current, "after-unload")?
+                expect(retained).to_equal(new_image)
+        if kind == 4:
+            var invalid = self.config
+            var loader = invalid.loader
+            loader.expected_artifact_digest = "0".repeat(64)
+            invalid.loader = loader
+            expect(self.registry.publish_pack(invalid).is_err()).to_equal(true)
+            val active = self.registry.active_generation()
+            expect(active.index).to_equal(first.index)
+            expect(active.epoch).to_equal(first.epoch)
+            val retained = self.link(old, "after-rejected-admission")?
+            expect(retained).to_equal(initial)
+        if kind == 5:
+            expect(self.registry.publish_pack(self.config).is_err()).to_equal(true)
+            expect(self.registry.open().is_err()).to_equal(true)
+            val path = self.directory + "/recovery"
+            self.outputs.push(path)
+            val receipt = self.registry.run_recovery_with_config(item4_pack_positive_request(), item4_pack_positive_policy(),
+                ["test/fixtures/linker/elf/pack_main_x64.o"], path, self.native)?
+            item4_pack_positive_check_receipt(receipt)
+            val recovered = item4_pack_positive_check_image(path)?
+            expect(recovered).to_equal(initial)
+        Ok(true)
+
+    me item4_pack_positive_cleanup():
+        step("Release sessions and collect retired mappings")
+        for session in self.sessions: expect(self.registry.close(session).is_ok()).to_equal(true)
+        val active = self.registry.active_generation()
+        for generation in self.generations:
+            if generation.index != active.index or generation.epoch != active.epoch:
+                expect(self.registry.collect(generation).is_ok()).to_equal(true)
+        expect(self.registry.recover().is_ok()).to_equal(true)
+        expect(self.registry.collect(active).is_ok()).to_equal(true)
+        expect(self.registry.cleanup_pending_pack().is_ok()).to_equal(true)
+        for path in self.outputs:
+            if file_exists(path): expect(file_remove(path)).to_equal(true)
+        expect(dir_remove(self.directory, false)).to_equal(true)
+
+fn item4_pack_positive_case(kind: i64):
+    val prerequisite = item4_pack_positive_prerequisites()
+    expect(prerequisite.is_ok()).to_equal(true)
+    if prerequisite.is_err():
+        print prerequisite.unwrap_err()
+        return
+    val recovery = LinkerProviderV1(header: item4_pack_positive_header(), provider_id: KpfId128(hi: 4, lo: 20),
+        composition_digest: item4_pack_positive_header().schema_digest, engine_id: "internal:elf", invoke: link_request_to_native,
+        invoke_with_config: Some(item4_pack_positive_recovery))
+    val created = LinkerLifecycleV1.create(if kind == 5: 2 else: 4, if kind == 5: 1 else: 4,
+        item4_pack_positive_requirement(), recovery)
+    expect(created.is_ok()).to_equal(true)
+    if created.is_err(): return
+    val directory = secure_temp_dir("build", "item4-pack-positive-")
+    expect(directory.is_ok()).to_equal(true)
+    if directory.is_err(): return
+    var native = link_request_to_native_config(item4_pack_positive_request(), item4_pack_positive_policy())
+    native.runtime_path = "none"
+    native.allow_cc_fallback = false
+    var owner = Item4PackPositiveOwner(registry: created.unwrap(), config: item4_pack_positive_config(prerequisite.unwrap()),
+        native: native, directory: directory.unwrap(), sessions: [], generations: [created.unwrap().active_generation()], outputs: [])
+    val result = owner.scenario(kind)
+    expect(result.is_ok()).to_equal(true)
+    if result.is_err(): print result.unwrap_err()
+    owner.item4_pack_positive_cleanup()
+
+describe "ITEM4 mapped provider positive native acceptance":
+    it "links and executes through the first loaded provider":
+        item4_pack_positive_case(0)
+    it "repeats a pinned provider link with identical image bytes":
+        item4_pack_positive_case(1)
+    it "keeps both pinned generations usable after replacement":
+        item4_pack_positive_case(2)
+    it "unloads a retired provider only after its session is released":
+        item4_pack_positive_case(3)
+    it "keeps the admitted provider usable after failed replacement admission":
+        item4_pack_positive_case(4)
+    it "executes static recovery while generation and session tables are exhausted":
+        item4_pack_positive_case(5)

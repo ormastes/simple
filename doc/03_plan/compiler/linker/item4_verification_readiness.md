@@ -9,6 +9,15 @@ integration does not close verification or authorize publication.
 
 ## 2026-10-04 continuation
 
+Configured provider follow-up: V2 argv transport now preserves all 15 native
+configuration fields, the command uses the actual configured adapter, and
+lifecycle dispatch/recovery retain that context. Thirteen new scenario
+declarations cover six transport cases, six actual mapped-provider positive
+cases and legacy-callback refusal. All remain UNRUN. The hosted x64 main object
+is an independently compiled test fixture, not a successfully linked product.
+See `linker_configured_dispatch.md` and `linker_pack_native_config_v2_2026-10-04.md`
+under doc/05_design/compiler/linker for boundaries and remaining authority work.
+
 Canonical stream follow-up: four owner-state scenarios are authored before
 the core migration. Mutating operations now have an authored single-owner method
 contract, builder tag writeback and explicit parent-frame writeback. Integration
@@ -34,9 +43,10 @@ and reviewed, with native validation still UNRUN.
 
 Provider completion now has six concrete positive scenarios, production routing
 and manifest requirements in `doc/05_design/compiler/linker/linker_provider_positive_acceptance_2026-10-04.md`.
-These are planned obligations, not implemented or passing tests. The existing
-unsupported-architecture native test cannot satisfy them. All original eight
-rows below remain in scope.
+The original six production-composition obligations remain open. New positive
+provider API specs require actual image/exit results but do not exercise CLI,
+manifest trust or sealed operation bindings. The existing unsupported-architecture
+native test cannot satisfy them. All original eight rows below remain in scope.
 
 | Item | Implementation to finish | Executable test obligations | Owner / state |
 |---|---|---|---|

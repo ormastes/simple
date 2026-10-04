@@ -23,6 +23,8 @@ use os.smf.provider_loader.{
     provider_session_close_owned_v1, provider_session_invoke_cli_v1
 }
 use compiler.backend.linker.linker_pack_wire.{LinkerPackJobV1, linker_pack_encode_job, linker_pack_decode_receipt, linker_pack_policy_digest}
+use compiler.backend.linker.linker_pack_config_wire.{LinkerPackJobV2, linker_pack_encode_job_v2}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
 
 pub struct LinkerPackConfigV1:
     header: KpfSchemaHeaderV1
@@ -110,6 +112,20 @@ pub class LinkerPackV1:
 
     pub fn invoke(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
             inputs: [text], output: text) -> Result<LinkReceiptV1, text>:
+        self._invoke_preflight(request, policy)?
+        val args = linker_pack_encode_job(LinkerPackJobV1(request: request, policy: policy, inputs: inputs, output: output))?
+        self._invoke_args(request, args)
+
+    pub me invoke_with_config(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
+            inputs: [text], output: text, config: NativeLinkConfig) -> Result<LinkReceiptV1, text>:
+        self._invoke_preflight(request, policy)?
+        val args = linker_pack_encode_job_v2(LinkerPackJobV2(request: request, policy: policy,
+            inputs: inputs, output: output, native_config: config))?
+        # The queried command ABI does not advertise V2. Unknown-tag rejection
+        # is final: never retry by dropping configuration into a V1 job.
+        self._invoke_args(request, args)
+
+    fn _invoke_preflight(request: LinkRequestV1, policy: LinkExecutionPolicyV1) -> Result<bool, text>:
         if not self.ready or self.loader == nil or self.query == nil: return Err("linker pack is not ready")
         val request_error = link_request_v1_validate(request, self.config.request_requirement)
         if request_error != "": return Err(request_error)
@@ -120,7 +136,9 @@ pub class LinkerPackV1:
             return Err("linker pack requires parent-owned resource enforcement")
         if not kpf_digest256_equal(linker_pack_policy_digest(policy)?, self.config.policy_digest):
             return Err("linker pack policy differs from admitted contract")
-        val args = linker_pack_encode_job(LinkerPackJobV1(request: request, policy: policy, inputs: inputs, output: output))?
+        Ok(true)
+
+    fn _invoke_args(request: LinkRequestV1, args: [text]) -> Result<LinkReceiptV1, text>:
         val result = provider_session_invoke_cli_v1(self.loader.unwrap(), self.query.unwrap(),
             "linker-v1", args, SIMPLE_CLI_RUN, 8192)
         if result.status != PROVIDER_SESSION_OK or not result.call.ok: return Err(result.reason)

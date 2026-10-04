@@ -1,5 +1,26 @@
 # Item 4 parallel ownership
 
+## 2026-10-04 configured provider continuation
+
+Base: release `b0f0cf98787`. Root owns lifecycle configured dispatch and final
+integration on `work/item4-provider-positive-20261004` in its isolated worktree.
+Runtime owns versioned native-config transport, command dispatch and mapped-pack
+invocation in a separate worktree. Research owns transport specs before source,
+design and independent source review. Acceptance owns six real mapped-provider
+positive scenarios and fixture bytes in another worktree. Sidecars: N/A.
+
+Shared API: `LinkerPackJobV2` with request, policy, inputs, output and
+native_config; `linker_pack_encode_job_v2`/`decode_job_v2`; pack
+`invoke_with_config`; lifecycle `run_with_config` and `run_recovery_with_config`
+take config last. Configured static callbacks take config last and forward to
+the native adapter's existing config-third signature. Test helpers use
+`item4_pack_positive_*`, actual provider artifacts and independent ELF/exit
+oracles. Missing prerequisites fail by name; no mock mapping or canned success.
+
+Production CLI routing and trusted manifest authority remain separate open
+requirements. The config-preserving transport and positive native cases are
+prerequisites, not substitutes for those requirements or full Phase 4 evidence.
+
 ## 2026-10-04 canonical stream continuation
 
 Base: release `d8680fe6ec21`. Root integrates in its existing clean isolated
