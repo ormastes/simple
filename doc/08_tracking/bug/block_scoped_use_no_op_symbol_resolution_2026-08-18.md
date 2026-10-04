@@ -1,5 +1,19 @@
 # Function-body-scoped `use <path>.{name}` is a silent no-op for symbol resolution
 
+## Windows bootstrap follow-up, 2026-10-04
+
+The frozen LLVM Phase 3 run reproduced unresolved `TargetOS`,
+`is_lld_link_available`, and `is_msvc_available` in the linker, and
+`bytes_to_hex` in SHA-512 wrappers. The current flat frontend implementation,
+`parse_use_stmt_inline`, consumes these local imports and emits a no-op.
+
+The bootstrap repair moves the affected linker and SHA-512 imports to module
+scope, with `@workaround` annotations using this bug's registered canonical
+ID. Existing module-level bindings were checked before introducing these
+names. This is a targeted workaround and does not implement local-import
+semantics or close this bug. Rebuilt-compiler and runtime validation remain
+pending; static inspection is not a native PASS.
+
 - **Filed:** 2026-08-18
 - **Status:** OPEN (compiler defect). Two call sites worked around by hoisting.
 - **Severity:** HIGH — fails at call time with a "function not found" error that

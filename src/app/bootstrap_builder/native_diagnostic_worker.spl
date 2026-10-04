@@ -1,0 +1,168 @@
+# Persistent diagnostic compiler owner hosted by the existing index image.
+# It never opens CURRENT or consumes an index generation after source admission.
+use app.bootstrap_builder.native_group_index_contract.{native_group_index_config_decode_v1}
+use app.bootstrap_builder.native_group_index_build.{NativeGroupIndexAdmissionV1,
+    native_group_index_work_root_v1, native_group_index_resolve_private_v1,
+    native_group_index_manager_context_v1, native_group_source_admit_v1}
+use app.bootstrap_builder.native_group_index_variant.{native_group_index_variant_admit_v1}
+use app.bootstrap_builder.native_diagnostic_partition.*
+use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_begin_v1, driver_admitted_epoch_end_v1, driver_admitted_epoch_counters_v1}
+use compiler.driver.driver_admitted_compile.{driver_admitted_epoch_compile_v1}
+use compiler.common.driver_core_modes.{driver_output_format_smf}
+use compiler.common.driver_compile_result.{compile_result_is_success, compile_result_errors}
+use std.common.build_manager.codec.{builder_wire_line_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.native_runtime_authority_v1.{native_runtime_strict_prepare_v1,
+    native_runtime_strict_revalidate_v1}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
+use app.io.env_ops.{env_get, env_set}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded,
+    file_create_exclusive, file_hash_sha256, file_is_regular_no_follow, file_size}
+
+fn native_diagnostic_write_new_v1(path: text, payload: text) -> Result<bool, text>:
+    if payload == "" or not file_create_exclusive(path, payload):
+        return Err("diagnostic exclusive publication failed")
+    if file_read_regular_no_follow_bounded(path, 16777216)? != payload:
+        return Err("diagnostic publication readback differs")
+    Ok(true)
+
+fn native_diagnostic_run_epoch_v1(admitted: NativeGroupIndexAdmissionV1,
+        handle: i64, config_digest: text, request_digest: text, epoch: text,
+        partition: i64, partitions: i64, output_root: text) -> Result<text, text>:
+    val sources = admitted.sources
+    val config = admitted.config
+    val variant = native_group_index_variant_admit_v1(config)?
+    var expected: [text] = ["SIMPLE-DIAGNOSTIC-SMF-EXPECTED-1\n",
+        builder_wire_line_v1(epoch)]
+    for index in 0..sources.source_count:
+        if native_diagnostic_partition_member_v1(index, sources.source_count, partition, partitions):
+            expected = expected.push(builder_wire_line_v1(sources.source_identities[index]))
+    val _expected = native_diagnostic_write_new_v1(output_root + "/expected.sdn", expected.join(""))?
+    var ledger: [text] = []
+    var attempted: i64 = 0
+    var compiled: i64 = 0
+    var failed: i64 = 0
+    for index in 0..sources.source_count:
+        if not native_diagnostic_partition_member_v1(index, sources.source_count, partition, partitions): continue
+        val identity = sources.source_identities[index]
+        val output = output_root + "/module-" + str(index) + ".smf"
+        var options = variant.options
+        options.output_format = driver_output_format_smf()
+        options.output_file = Some(output)
+        # The source owner supplies fresh input/context state and validates all
+        # dependency reads against the retained epoch, never caller digests.
+        val started = "SIMPLE-DIAGNOSTIC-SMF-STARTED-1\n" + builder_wire_line_v1(epoch) +
+            builder_wire_line_v1(identity) + builder_wire_line_v1(sources.source_digests[index])
+        val _started = native_diagnostic_write_new_v1(output_root + "/started-" + str(index) + ".sdn", started)?
+        val result = driver_admitted_epoch_compile_v1(handle, identity, options)?
+        attempted = attempted + 1
+        var row = NativeDiagnosticEntryResultV1(epoch, identity,
+            sources.source_digests[index], "compiler-failed", "", "")
+        if compile_result_is_success(result):
+            if not file_is_regular_no_follow(output) or file_size(output) <= 300:
+                return Err("successful diagnostic lacks non-stub SMF output")
+            row.status = "compiled"
+            row.artifact_digest = file_hash_sha256(output)
+            compiled = compiled + 1
+        else:
+            val errors: [text] = compile_result_errors(result)
+            val error_text = errors.join("\n")
+            val diagnostic = if error_text == "": "compiler returned failure without diagnostics\n" else: error_text
+            row.diagnostic_digest = sha256_text(diagnostic)
+            val _diagnostic = native_diagnostic_write_new_v1(output_root + "/errors-" + str(index) + ".txt",
+                diagnostic)?
+            failed = failed + 1
+        val counters = driver_admitted_epoch_counters_v1()
+        val _counters = native_diagnostic_write_new_v1(output_root + "/inputs-" + str(index) + ".env",
+            "retained_rows={counters.0}\nverified_reads={counters.1}\n")?
+        val _runtime = native_runtime_strict_revalidate_v1(false)?
+        val payload = native_diagnostic_entry_encode_v1(row)
+        val _row = native_diagnostic_write_new_v1(output_root + "/entry-" + str(index) + ".sdn", payload)?
+        ledger = ledger.push(str(index) + ":" + sha256_text(payload))
+    val summary = native_diagnostic_summary_encode_v1(NativeDiagnosticSummaryV1(
+        config_digest, request_digest, epoch, config.source_inventory_digest,
+        config.phase, config.backend, partition, partitions, sources.source_count,
+        attempted, compiled, failed, sha256_text(expected.join("")), sha256_text(ledger.join("\n"))))
+    if summary == "": return Err("diagnostic traversal does not cover assigned partition")
+    Ok(summary)
+
+fn native_diagnostic_build_managed_v1(config_relative: text, partition: i64,
+        partitions: i64, receipt_template: text) -> Result<text, text>:
+    # Reject before the first compiler call: these selectors are process-memoized
+    # and could otherwise skip work while publishing a complete traversal.
+    for selector in ["SIMPLE_PARSE_SHARD", "SIMPLE_PARSE_SHARD_QUEUE",
+            "SIMPLE_HIR_SHARD", "SIMPLE_HIR_SHARD_QUEUE", "SIMPLE_HIR_SHARD_OWNER"]:
+        if (env_get(selector) ?? "") != "": return Err("diagnostic worker cannot inherit shard selectors")
+    if (env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" or
+            (env_get("SIMPLE_BOOTSTRAP_DIRECT_IR") ?? "") == "1":
+        return Err("diagnostic worker cannot inherit native bootstrap overrides")
+    val work = native_group_index_work_root_v1()?
+    val config_path = native_group_index_resolve_private_v1(work, "@WORK@/" + config_relative, false)?
+    val budget = native_group_index_manager_context_v1(work, config_relative,
+        receipt_template, config_path, partition, partitions)?
+    val payload = file_read_regular_no_follow_bounded(config_path, 65536)?
+    var config = native_group_index_config_decode_v1(payload)?
+    config.index_cache_root = native_group_index_resolve_private_v1(work, config.index_cache_root, true)?
+    config.output_root = native_group_index_resolve_private_v1(work, config.output_root, true)?
+    val artifact_root = native_group_index_resolve_private_v1(work, "@WORK@/private/runtime-std-hir-artifacts", true)?
+    # This is source/producer/SCV admission ONLY, not index CURRENT admission.
+    val admitted = native_group_source_admit_v1(config, artifact_root, budget)?
+    if not native_tool_strict_requested_v1(): return Err("diagnostic runtime/tool selectors absent")
+    val _runtime = native_runtime_strict_prepare_v1(config.backend)?
+    val runtime_digest = env_get("SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256") ?? ""
+    val tools_digest = env_get("SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256") ?? ""
+    val epoch = native_diagnostic_epoch_digest_v1(sha256_text(payload + budget.manager_request_digest),
+        runtime_digest, tools_digest, config.backend, partition, partitions)
+    if epoch == "": return Err("diagnostic epoch identity invalid")
+    val output = native_group_index_resolve_private_v1(work, "@WORK@/diagnostic", true)?
+    val receipt = native_group_index_resolve_private_v1(work, receipt_template, false)?
+    if receipt != output + "/result.sdn": return Err("diagnostic receipt outside owned output")
+    for assignment in [
+            ("SIMPLE_SCV_SNAPSHOT_ROOT", config.snapshot_root),
+            ("SIMPLE_SCV_INVENTORY_DIGEST", config.snapshot_inventory_digest),
+            ("SIMPLE_SCV_REVISION_ID", config.scv_revision_id),
+            ("SIMPLE_SCV_COMMIT_ID", config.scv_commit_id),
+            ("SIMPLE_SCV_TREE_ID", config.scv_tree_id),
+            ("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", config.source_inventory_digest),
+            ("SIMPLE_SCV_INVENTORY_GENERATION", str(config.source_inventory_generation)),
+            ("SIMPLE_SCV_RECEIPT_DIGEST", config.scv_receipt_digest),
+            ("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY", ""),
+            ("SIMPLE_NATIVE_GROUP_MANIFEST", ""), ("SIMPLE_NATIVE_GROUP_SOURCE_ROOT", "")]:
+        if not env_set(assignment.0, assignment.1): return Err("diagnostic epoch environment binding failed")
+    val handle = driver_admitted_epoch_begin_v1(admitted.sources)?
+    val result = native_diagnostic_run_epoch_v1(admitted, handle, sha256_text(payload),
+        budget.manager_request_digest, epoch, partition, partitions, output)
+    val ended = driver_admitted_epoch_end_v1(handle)
+    match ended:
+        Err(reason): return Err(reason)
+        Ok(_): pass
+    val summary = result?
+    val _terminal_runtime = native_runtime_strict_revalidate_v1(true)?
+    val _receipt = native_diagnostic_write_new_v1(receipt, summary)?
+    Ok(summary)
+
+export native_diagnostic_build_managed_v1
+fn native_diagnostic_verify_v1(config_path: text, receipt_path: text,
+        partition: i64, partitions: i64) -> Result<NativeDiagnosticSummaryV1, text>:
+    val config_payload = file_read_regular_no_follow_bounded(config_path, 65536)?
+    val config = native_group_index_config_decode_v1(config_payload)?
+    val receipt_payload = file_read_regular_no_follow_bounded(receipt_path, 16384)?
+    val receipt = native_diagnostic_summary_decode_v1(receipt_payload)?
+    if receipt.config_digest != sha256_text(config_payload) or
+            receipt.inventory_digest != config.source_inventory_digest or
+            receipt.phase != config.phase or receipt.backend != config.backend or
+            receipt.partition != partition or receipt.partitions != partitions or
+            receipt.source_count != config.expected_spl_count:
+        return Err("diagnostic summary does not bind requested partition")
+    if not native_tool_strict_requested_v1(): return Err("diagnostic verifier authority absent")
+    val _runtime = native_runtime_strict_prepare_v1(config.backend)?
+    val expected_epoch = native_diagnostic_epoch_digest_v1(
+        sha256_text(config_payload + receipt.request_digest),
+        env_get("SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256") ?? "",
+        env_get("SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256") ?? "",
+        config.backend, partition, partitions)
+    if expected_epoch == "" or receipt.epoch_digest != expected_epoch:
+        return Err("diagnostic summary runtime/tool epoch differs")
+    Ok(receipt)
+
+export native_diagnostic_verify_v1
