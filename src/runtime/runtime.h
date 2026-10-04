@@ -1419,6 +1419,14 @@ char*    spl_strdup(const char* s);
 
 /* ===== Atomic Handles ===== */
 
+/* CPU parallel raw-pointer atomics: valid aligned i64 storage, SeqCst,
+ * previous-value returns (also on compare-exchange failure). */
+int64_t  rt_par_atomic_add_i64(int64_t* ptr, int64_t value);
+int64_t  rt_par_atomic_sub_i64(int64_t* ptr, int64_t value);
+int64_t  rt_par_atomic_xchg_i64(int64_t* ptr, int64_t value);
+int64_t  rt_par_atomic_cmpxchg_i64(int64_t* ptr, int64_t expected, int64_t value);
+int64_t  rt_par_atomic_min_i64(int64_t* ptr, int64_t value);
+int64_t  rt_par_atomic_max_i64(int64_t* ptr, int64_t value);
 int64_t  rt_atomic_int_new(int64_t initial);
 int64_t  rt_atomic_int_load(int64_t handle);
 void     rt_atomic_int_store(int64_t handle, int64_t value);

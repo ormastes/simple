@@ -37,6 +37,12 @@ build_index() {
 }
 prepare_backend() { printf 'prepare %s %s\n' "$1" "$2" >>"$events"; }
 run_module_backend() { printf 'group %s %s\n' "$1" "$2" >>"$events"; }
+run_native_subsystem() {
+  printf 'native %s %s\n' "$1" "$2" >>"$events"
+  [ "$1:$2" = llvm:compiler ] && return 1
+  [ "$1:$2" = cranelift:interpreter ] && return 20
+  return 0
+}
 . "$script_root/lib/provisional-task-schedule.shs"
 provisional_dispatch_tasks
 [ "$(cat "$hashes")" = "$(printf 'llvm\ncranelift')" ] || {
@@ -51,7 +57,7 @@ provisional_dispatch_tasks
 [ "$(grep -c '^group ' "$events")" -eq 3 ] || {
   echo 'FAIL: only the failed index should block its own group' >&2; exit 1
 }
-[ "$(wc -l <"$statuses" | tr -d ' ')" -eq 44 ] || {
+[ "$(wc -l <"$statuses" | tr -d ' ')" -eq 56 ] || {
   echo 'FAIL: missing task outcome rows' >&2; exit 1
 }
 grep -qx 'phase4_llvm_bootstrap_status=FAILED' "$statuses" || exit 1
@@ -62,7 +68,7 @@ grep -qx 'phase4_llvm_group_status=BLOCKED' "$statuses" || exit 1
 grep -qx 'phase4_cranelift_group_status=SUCCEEDED' "$statuses" || exit 1
 grep -qx 'phase3_llvm_phase3-bootstrap_status=SUCCEEDED' "$statuses" || exit 1
 grep -qx 'phase3_cranelift_group_status=SUCCEEDED' "$statuses" || exit 1
-[ "$(grep -c '=unproven$' "$statuses")" -eq 22 ] || {
+[ "$(grep -c '=unproven$' "$statuses")" -eq 28 ] || {
   echo 'FAIL: per-task actual tool provenance was overstated' >&2; exit 1
 }
 if grep -q '^group phase4 llvm$' "$events"; then
@@ -70,9 +76,22 @@ if grep -q '^group phase4 llvm$' "$events"; then
 fi
 for backend in llvm cranelift; do
   awk -v backend="$backend" '
+    $1=="binary" && $3==backend && $4=="full-cli" { cli=1 }
+    $1=="binary" && $3==backend && $4=="test-runner" { runner=1 }
+    $1=="binary" && $3==backend && $4=="interpreter" { interpreter=1 }
+    $1=="binary" && $3==backend && $4=="mcp" { mcp=1 }
+    $1=="binary" && $3==backend && $4=="lsp" { lsp=1 }
+    $1=="native" && $2==backend { count++; if (!cli || !runner || !interpreter || !mcp || !lsp) bad=1 }
+    $1=="index" && $3==backend && count!=3 { bad=1 }
+    END { exit bad || count!=3 }
+  ' "$events" || { echo 'FAIL: native suites not scheduled after artifacts and before inventory'; exit 1; }
+  awk -v backend="$backend" '
     $1=="binary" && $2=="phase4" && $3==backend { advanced=1 }
     $1=="index" && $2=="phase3" && $3==backend && !advanced { bad=1 }
     END { exit bad || !advanced }
   ' "$events" || { echo 'FAIL: module qualification delayed the next generation'; exit 1; }
 done
+grep -qx 'phase4_llvm_native_compiler_status=FAILED' "$statuses"
+grep -qx 'phase4_llvm_native_loader_status=SUCCEEDED' "$statuses"
+grep -qx 'phase4_cranelift_native_interpreter_status=BLOCKED' "$statuses"
 echo 'PASS: failed Phase 4 task does not suppress independent binaries or groups'
