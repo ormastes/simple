@@ -153,3 +153,23 @@ expected values, and explicit guard returns after nonfatal setup assertions.
 All Simple execution, canonical manual generation, coverage, full compiler and
 application links, and performance/RSS gates remain UNRUN. This document does
 not mark the whole bounded engine or item 4 complete.
+
+## Refinement: inactive and zero-slot GOT
+
+The internal GOT layout has an explicit `active` state. An allocated ordinary
+GOT relocation, or an allocated scalar relocation to the synthetic GOT anchor,
+activates it. A mere unused undefined `_GLOBAL_OFFSET_TABLE_` declaration does
+not activate it. This preserves existing image bytes and length for inputs that
+do not demand GOT semantics.
+
+Let `start` be the end of regular and COMMON storage. The prospective base is
+`align8(start)`. An inactive layout ends at `start` and neither emits nor charges
+alignment padding; unused alignment must not cause an output-budget failure.
+An active zero-slot layout ends at the aligned base. Its synthetic anchor may
+legally be one past the emitted extent; do not invent a reserved GOT entry.
+An active layout with slots extends from that base by checked multiples of eight.
+
+Acceptance must distinguish no GOT demand, unused synthetic declaration,
+base-only demand, and scalar synthetic-anchor demand, and verify exact output
+extent as well as address formulas. First executable test intent is
+`15fc30e3ec3`; implementation and execution status remain separately recorded.
