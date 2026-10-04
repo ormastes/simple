@@ -1,0 +1,53 @@
+# Small context codec shared by manifest preparation, worker and parent.
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.process.observation_v4.{ProcessObservationEnvironmentV4}
+
+struct BuildRunnerTaskContextV1:
+    backend: text
+    runtime_digest: text
+    policy_digest: text
+    environment_digest: text
+
+fn build_runner_context_encode_v1(value: BuildRunnerTaskContextV1) -> Result<text, text>:
+    if value.backend != "llvm" and value.backend != "cranelift":
+        return Err("unsupported build backend context")
+    for digest in [value.runtime_digest, value.policy_digest, value.environment_digest]:
+        if not builder_digest_valid_v1(digest): return Err("invalid build context digest")
+    Ok("SIMPLE-BUILD-TASK-CONTEXT-1\n" + value.backend + "\n" +
+        value.runtime_digest + "\n" + value.policy_digest + "\n" +
+        value.environment_digest + "\n")
+
+fn build_runner_context_decode_v1(payload: text) -> Result<BuildRunnerTaskContextV1, text>:
+    val fields = payload.split("\n")
+    if fields.len() != 6 or fields[0] != "SIMPLE-BUILD-TASK-CONTEXT-1" or fields[5] != "":
+        return Err("invalid build context framing")
+    val value = BuildRunnerTaskContextV1(fields[1], fields[2], fields[3], fields[4])
+    if build_runner_context_encode_v1(value)? != payload: return Err("noncanonical build context")
+    Ok(value)
+
+# Every inherited value is bound, except exact owner-generated private paths
+# which use stable role tokens. The actual request digest still binds those paths.
+fn build_runner_environment_digest_v1(environment: [ProcessObservationEnvironmentV4],
+        attempt_root: text) -> Result<text, text>:
+    var payload = "SIMPLE-BUILD-ENVIRONMENT-1\n"
+    var previous = ""
+    for entry in environment:
+        if entry.key == "" or entry.key <= previous: return Err("environment is not canonical sorted unique")
+        previous = entry.key
+        var value = entry.value
+        var role = ""
+        if entry.key == "SIMPLE_NATIVE_BUILD_CACHE_DIR": role = "native"
+        elif entry.key == "SIMPLE_RT_OBJ_CACHE_DIR": role = "runtime"
+        elif entry.key == "SIMPLE_HIR_CACHE_DIR": role = "hir"
+        elif entry.key == "SIMPLE_FRONTEND_CACHE_DIR": role = "frontend"
+        elif ["TEMP", "TMP", "TMPDIR"].contains(entry.key): role = "temp"
+        if role != "":
+            if value != attempt_root + "/work/.builder-cache/" + role:
+                return Err("owned environment path differs")
+            value = "@OWNED-CACHE@/" + role
+        payload = payload + str(entry.key.len()) + ":" + entry.key + str(value.len()) + ":" + value
+    Ok(sha256_text(payload))
+
+export BuildRunnerTaskContextV1, build_runner_context_encode_v1, build_runner_context_decode_v1
+export build_runner_environment_digest_v1

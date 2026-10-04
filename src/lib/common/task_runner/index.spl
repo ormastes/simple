@@ -1,0 +1,195 @@
+# Existing PureDatabase owns the task index; this module is a typed adapter,
+# not a separate on-disk database/index representation.
+use std.database.pure_sql.{PureDatabase}
+use std.database.sql.types.{DbValue}
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1,
+    task_runner_identity_v1, task_runner_attempt_error_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+
+fn task_runner_storage_escape_v1(value: text) -> text:
+    value.replace("%", "%25").replace("\n", "%0A").replace("\r", "%0D").replace("|", "%7C").replace("\t", "%09")
+
+fn task_runner_storage_unescape_v1(value: text) -> text:
+    value.replace("%09", "\t").replace("%7C", "|").replace("%0D", "\r").replace("%0A", "\n").replace("%25", "%")
+
+fn task_runner_inventory_encode_v1(value: TaskRunnerIdentityV1) -> Result<text, text>:
+    val _identity = task_runner_identity_v1(value)?
+    # Framed escaped fields preserve authored task/case identifiers. Only
+    # digests of execution inputs are retained; no argv/environment payload.
+    var fields: [text] = []
+    for field in [value.kind, value.task_id, value.case_id, value.backend, value.phase,
+            value.producer_digest, value.source_digest, value.runtime_digest,
+            value.toolchain_digest, value.policy_digest, value.execution_digest]:
+        fields = fields.push(task_runner_storage_escape_v1(field))
+    Ok("SIMPLE-TASK-INVENTORY-ROW-1\n" + fields.join("\n") + "\n")
+
+fn task_runner_inventory_decode_v1(payload: text) -> Result<TaskRunnerIdentityV1, text>:
+    val fields = payload.split("\n")
+    if fields.len() != 13 or fields[0] != "SIMPLE-TASK-INVENTORY-ROW-1" or fields[12] != "":
+        return Err("invalid task inventory framing")
+    var f: [text] = []
+    for at in 1..12: f = f.push(task_runner_storage_unescape_v1(fields[at]))
+    val value = TaskRunnerIdentityV1(f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10])
+    if task_runner_inventory_encode_v1(value)? != payload: return Err("noncanonical task inventory")
+    Ok(value)
+
+fn task_runner_inventory_sorted_v1(values: [text]) -> [text]:
+    if values.len() < 2: return values
+    val middle = values.len() / 2
+    val left = task_runner_inventory_sorted_v1(values[0:middle])
+    val right = task_runner_inventory_sorted_v1(values[middle:values.len()])
+    var result: [text] = []
+    var a = 0
+    var b = 0
+    while a < left.len() or b < right.len():
+        if b >= right.len() or (a < left.len() and left[a] < right[b]):
+            result = result.push(left[a])
+            a = a + 1
+        else:
+            result = result.push(right[b])
+            b = b + 1
+    result
+
+fn task_runner_inventory_digest_v1(expected: [TaskRunnerIdentityV1], source: text) -> Result<text, text>:
+    if expected.len() < 1 or expected.len() > 100000: return Err("invalid expected task inventory bound")
+    var identities: [text] = []
+    var seen: Dict<text, bool> = {}
+    var bytes: i64 = 0
+    for row in expected:
+        val identity = task_runner_identity_v1(row)?
+        if row.source_digest != source or seen.contains_key(identity):
+            return Err("expected task source differs or identity duplicated")
+        val encoded = task_runner_inventory_encode_v1(row)?
+        if task_runner_storage_escape_v1(encoded).len() > 65536:
+            return Err("expected task metadata exceeds WAL row bound")
+        bytes = bytes + encoded.len()
+        if bytes > 134217728: return Err("expected task metadata bound exceeded")
+        seen[identity] = true
+        identities = identities.push(identity)
+    identities = task_runner_inventory_sorted_v1(identities)
+    Ok(sha256_text("SIMPLE-TASK-INVENTORY-1\n" + identities.join("\n") + "\n"))
+
+fn task_runner_inventory_registered_v1(db: PureDatabase, identity: text) -> Result<bool, text>:
+    if not builder_digest_valid_v1(identity): return Err("invalid task lookup identity")
+    val found = db.get("task_inventory", "identity", DbValue.Text(identity))
+    if found.is_err(): return Err("task inventory lookup failed")
+    if found.unwrap() == nil: return Err("task identity is not registered")
+    val value = task_runner_inventory_decode_v1(found.unwrap().unwrap().get_text("metadata") ?? "")?
+    if task_runner_identity_v1(value)? != identity: return Err("registered identity differs")
+    Ok(true)
+
+fn task_runner_attempt_encode_v1(row: TaskRunnerAttemptV1) -> Result<text, text>:
+    val invalid = task_runner_attempt_error_v1(row)
+    if invalid != "": return Err(invalid)
+    if row.group_id.contains("\n") or row.group_id.contains("\r") or
+            row.reason.contains("\n") or row.reason.contains("\r"):
+        return Err("attempt contains invalid framing")
+    if row.reason.len() > 128 or (row.result_digest != "" and not builder_digest_valid_v1(row.result_digest)):
+        return Err("attempt storage field exceeds bound")
+    if row.status == "passed" and row.reason != "":
+        return Err("passing storage record must not carry free-form diagnostic text")
+    Ok([row.identity_digest, row.group_id, str(row.attempt), row.mode, str(row.pid),
+        str(row.process_generation), row.status, row.reason, str(row.exit_code),
+        str(row.task_exit_code), str(row.signal_number),
+        if row.tree_reaped: "1" else: "0", if row.result_validated: "1" else: "0",
+        row.stdout_digest, row.stderr_digest, row.result_digest, row.transport_execution_digest].join("\n") + "\n")
+
+fn task_runner_attempt_decode_v1(payload: text) -> Result<TaskRunnerAttemptV1, text>:
+    val f = payload.split("\n")
+    if f.len() != 18 or f[17] != "" or
+            (f[11] != "0" and f[11] != "1") or (f[12] != "0" and f[12] != "1"):
+        return Err("invalid attempt framing")
+    val row = TaskRunnerAttemptV1(f[0], f[1], f[2].to_int() ?? -1, f[3],
+        f[4].to_int() ?? -1, f[5].to_int() ?? -1, f[6], f[7],
+        f[8].to_int() ?? -9999999999, f[9].to_int() ?? -9999999999,
+        f[10].to_int() ?? -1, f[11] == "1", f[12] == "1", f[13], f[14], f[15], f[16])
+    if task_runner_attempt_encode_v1(row)? != payload: return Err("noncanonical attempt")
+    Ok(row)
+
+struct TaskRunnerIndexedAttemptV1:
+    sequence: i64
+    row: TaskRunnerAttemptV1
+
+fn task_runner_index_rows_v1(db: PureDatabase, identity: text) -> Result<[TaskRunnerIndexedAttemptV1], text>:
+    if not builder_digest_valid_v1(identity): return Err("invalid indexed task identity")
+    val found = db.get("task_history", "identity", DbValue.Text(identity))
+    if found.is_err(): return Err("task database history lookup failed")
+    val optional = found.unwrap()
+    if optional == nil: return Ok([])
+    val payload = optional.unwrap().get_text("projection") ?? ""
+    if payload.len() > 131072: return Err("task projection exceeds bound")
+    var result: [TaskRunnerIndexedAttemptV1] = []
+    for line in payload.split("\n"):
+        if line == "": continue
+        val fields = line.split("\t")
+        if fields.len() != 2 or result.len() >= 8: return Err("invalid task projection")
+        val sequence = fields[0].to_int() ?? -1
+        if sequence < 1 or str(sequence) != fields[0]: return Err("invalid projected sequence")
+        val encoded = task_runner_storage_unescape_v1(fields[1])
+        if task_runner_storage_escape_v1(encoded) != fields[1]: return Err("noncanonical projection")
+        val row = task_runner_attempt_decode_v1(encoded)?
+        if row.identity_digest != identity: return Err("task projection identity differs")
+        if result.len() > 0 and result[result.len() - 1].sequence >= sequence:
+            return Err("task projection order differs")
+        result = result.push(TaskRunnerIndexedAttemptV1(sequence, row))
+    Ok(result)
+
+fn task_runner_index_history_v1(db: PureDatabase, identity: text) -> Result<[TaskRunnerAttemptV1], text>:
+    val records = task_runner_index_rows_v1(db, identity)?
+    var rows: [TaskRunnerAttemptV1] = []
+    for record in records: rows = rows.push(record.row)
+    Ok(rows)
+
+fn task_runner_index_apply_v1(db: PureDatabase, sequence: i64,
+        row: TaskRunnerAttemptV1) -> Result<PureDatabase, text>:
+    val encoded = task_runner_attempt_encode_v1(row)?
+    var records = task_runner_index_rows_v1(db, row.identity_digest)?
+    for record in records:
+        if record.sequence == sequence: return Err("duplicate durable task sequence")
+        if record.row.group_id == row.group_id and record.row.attempt == row.attempt:
+            return Err("duplicate attempt in run group")
+    records = records.push(TaskRunnerIndexedAttemptV1(sequence, row))
+    # At most nine records; sorting this bounded projection never scans the DB.
+    var at = 1
+    while at < records.len():
+        var cursor = at
+        while cursor > 0 and records[cursor - 1].sequence > records[cursor].sequence:
+            val saved = records[cursor]
+            records[cursor] = records[cursor - 1]
+            records[cursor - 1] = saved
+            cursor = cursor - 1
+        at = at + 1
+    var first_crash: i64 = -1
+    for index in 0..records.len():
+        if first_crash < 0 and records[index].row.status == "crashed": first_crash = index
+    var selected: [TaskRunnerIndexedAttemptV1] = []
+    # Keep all eight rows when no displaced first crash needs an extra slot.
+    # This also preserves the complete <=8-attempt current-group projection.
+    var start = if records.len() > 8: records.len() - 8 else: 0
+    if first_crash >= 0 and first_crash < start: start = records.len() - 7
+    if first_crash >= 0 and first_crash < start: selected = selected.push(records[first_crash])
+    for index in start..records.len(): selected = selected.push(records[index])
+    var lines: [text] = []
+    for record in selected:
+        lines = lines.push(str(record.sequence) + "\t" +
+            task_runner_storage_escape_v1(task_runner_attempt_encode_v1(record.row)?))
+    var updated = db
+    val existing = updated.get("task_history", "identity", DbValue.Text(row.identity_digest))
+    if existing.is_err(): return Err("task database lookup failed")
+    if existing.unwrap() != nil:
+        val changed = updated.update_value_by_key("task_history", "identity",
+            DbValue.Text(row.identity_digest), "projection", DbValue.Text(lines.join("\n") + "\n"))
+        if changed.is_err() or changed.unwrap() != 1: return Err("task database indexed update failed")
+    else:
+        val inserted = updated.put("task_history", [DbValue.Text(row.identity_digest),
+            DbValue.Text(lines.join("\n") + "\n")])
+        if inserted.is_err(): return Err("task database indexed insert failed")
+    Ok(updated)
+
+export task_runner_inventory_encode_v1, task_runner_inventory_decode_v1
+export task_runner_inventory_digest_v1, task_runner_inventory_registered_v1
+
+export task_runner_attempt_encode_v1, task_runner_attempt_decode_v1
+export task_runner_storage_escape_v1, task_runner_storage_unescape_v1
+export TaskRunnerIndexedAttemptV1, task_runner_index_history_v1, task_runner_index_apply_v1

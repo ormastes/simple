@@ -1,0 +1,310 @@
+"""Operational static ELF composition for trusted in-process callbacks.
+
+The receipt describes selection and declared reservations, not artifact trust,
+measured RSS, or a whole-job memory bound. Zero reservation is not zero usage.
+"""
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256, kpf_id128_equal}
+use std.common.kernel_plugin.contracts.{KpfMemoryContractV1, KpfConcurrencyContractV1}
+use std.mdsocpp.model.{CapsuleDescriptorV1, MdsocppFacetOfferV1, MdsocppFacetRequirementV1,
+    MdsocppClosure, MdsocppSealPolicyV1, MdsocppGenerationReceiptV1, MdsocppProfile}
+use std.mdsocpp.seal.{mdsocpp_seal_v1}
+use std.io_runtime.{file_read_bytes_result}
+use compiler.backend.linker.reloc_engine.{RelocArch, reloc_apply, reloc_patch_bytes}
+use compiler.backend.linker.elf.elf_exec_writer.{ElfOutSec, ElfExecPlan, elf_exec_plan,
+    elf_write_image, SHT_NOBITS_E, PT_LOAD}
+
+pub const ELF_OPERATION_RELOCATE: u32 = 1
+pub const ELF_OPERATION_LAYOUT: u32 = 2
+pub const ELF_OPERATION_WRITE_IMAGE: u32 = 3
+pub const ELF_OPERATION_READ_BYTES: u32 = 4
+
+pub struct ElfOperationProviderV1:
+    descriptor: CapsuleDescriptorV1
+    relocate: Option<fn(RelocArch, [i64], i64, i64, i64, i64, i64) -> Result<[i64], text>> = nil
+    layout: Option<fn([ElfOutSec], i64, i64) -> Result<ElfExecPlan, text>> = nil
+    write_image: Option<fn(i64, i64, i64, ElfExecPlan, [[i64]]) -> Result<[i64], text>> = nil
+    read_bytes: Option<fn(text) -> Result<[u8], text>> = nil
+
+pub struct ElfComposedImageV1:
+    image: [i64]
+    composition: MdsocppGenerationReceiptV1
+
+pub fn elf_operation_facet_id_v1(kind: u32) -> KpfId128:
+    KpfId128(hi: 0x4c494e4b45520002, lo: kind as u64)
+
+pub fn elf_operation_capsule_id_v1(kind: u32) -> KpfId128:
+    KpfId128(hi: 0x4c494e4b45520001, lo: kind as u64)
+
+pub fn elf_operation_descriptor_v1(capsule_id: KpfId128,
+        provided: [MdsocppFacetOfferV1]) -> CapsuleDescriptorV1:
+    CapsuleDescriptorV1(capsule_id: capsule_id, closure: MdsocppClosure.Static,
+        provided_facets: provided, required_facets: [], required_capability_bits: 0,
+        memory: KpfMemoryContractV1(memory_class: 4, initialization_bytes: 0,
+            persistent_bytes_per_instance: 0, bytes_per_session: 0, bytes_per_inflight_request: 0,
+            input_alignment: 8, output_alignment: 8, maximum_sessions: 1,
+            maximum_inflight_per_session: 1, maximum_batch_items: 1,
+            may_allocate_after_activation: 1, reserved0: 0),
+        concurrency: KpfConcurrencyContractV1(mode: 1, reentrancy: 1,
+            maximum_concurrent_calls: 1, deterministic_completion: 1, reserved0: 0),
+        uses_ecs: false, state_migrations: [])
+
+pub fn elf_operation_policy_v1() -> MdsocppSealPolicyV1:
+    MdsocppSealPolicyV1(profile: MdsocppProfile.Userland, critical: false,
+        granted_capability_bits: 0, memory_budget_bytes: 0, maximum_concurrent_calls: 1,
+        generation: 1,
+        # Structural implementation-version token, not a cryptographic digest.
+        composition_digest: KpfDigest256(w0: 0x4c494e4b454c4631, w1: 1, w2: 0, w3: 0))
+
+fn _elf_builtin_relocate(arch: RelocArch, bytes: [i64], offset: i64,
+        kind: i64, symbol: i64, addend: i64, place: i64) -> Result<[i64], text>:
+    val checked = reloc_apply(arch, bytes, offset, kind, symbol, addend, place)
+    if not checked.success: return Err(checked.error)
+    Ok(reloc_patch_bytes(arch, bytes, offset, kind, symbol, addend, place))
+
+fn _elf_builtin_write(kind: i64, machine: i64, entry: i64,
+        plan: ElfExecPlan, contents: [[i64]]) -> Result<[i64], text>:
+    Ok(elf_write_image(kind, machine, entry, plan, contents))
+
+pub fn elf_builtin_operation_providers_v1() -> [ElfOperationProviderV1]:
+    [ElfOperationProviderV1(descriptor: elf_operation_descriptor_v1(elf_operation_capsule_id_v1(2),
+        [MdsocppFacetOfferV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_RELOCATE))]),
+        relocate: Some(_elf_builtin_relocate)),
+     ElfOperationProviderV1(descriptor: elf_operation_descriptor_v1(elf_operation_capsule_id_v1(3),
+        [MdsocppFacetOfferV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_LAYOUT))]),
+        layout: Some(elf_exec_plan)),
+     ElfOperationProviderV1(descriptor: elf_operation_descriptor_v1(elf_operation_capsule_id_v1(4),
+        [MdsocppFacetOfferV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_WRITE_IMAGE))]),
+        write_image: Some(_elf_builtin_write))]
+
+fn _elf_plan_shape(secs: [ElfOutSec], plan: ElfExecPlan) -> Result<bool, text>:
+    if plan.secs.len() != secs.len() or plan.offsets.len() != secs.len() or plan.vaddrs.len() != secs.len():
+        return Err("ELF layout parallel vectors disagree")
+    if secs.len() > 65530 or plan.segments.len() > 65535:
+        return Err("ELF layout table count exceeds ELF64 limits")
+    val header_end = 64 + plan.segments.len() * 56
+    if plan.file_end < header_end: return Err("ELF layout file extent excludes headers")
+    var end = header_end
+    var names: {text: bool} = {}
+    for index in 0..secs.len():
+        val wanted = secs[index]
+        val actual = plan.secs[index]
+        if actual.name != wanted.name or actual.sh_type != wanted.sh_type or
+                actual.sh_flags != wanted.sh_flags or actual.align != wanted.align or
+                actual.size != wanted.size or actual.entsize != wanted.entsize or
+                actual.link != wanted.link or actual.info != wanted.info or actual.seg != wanted.seg:
+            return Err("ELF layout changed section metadata")
+        if names.has(actual.name): return Err("ELF layout duplicate section name")
+        names[actual.name] = true
+        val offset = plan.offsets[index]
+        val address = plan.vaddrs[index]
+        if actual.size < 0 or offset < header_end or address < 0 or
+                actual.size > 9223372036854775807 - address:
+            return Err("ELF layout invalid section extent")
+        if actual.align < 1 or (actual.align & (actual.align - 1)) != 0 or address % actual.align != 0:
+            return Err("ELF layout invalid section alignment")
+        if actual.sh_type != SHT_NOBITS_E:
+            if offset < end or offset > plan.file_end or actual.size > plan.file_end - offset or offset % actual.align != 0:
+                return Err("ELF layout file section range is invalid")
+            end = offset + actual.size
+    var headers = 0
+    for segment in plan.segments:
+        if segment.p_offset < 0 or segment.p_vaddr < 0 or segment.p_paddr < 0 or
+                segment.p_filesz < 0 or segment.p_memsz < segment.p_filesz or
+                segment.p_memsz > 9223372036854775807 - segment.p_vaddr:
+            return Err("ELF layout invalid segment extent")
+        if segment.p_filesz > 0 and (segment.p_offset > plan.file_end or segment.p_filesz > plan.file_end - segment.p_offset):
+            return Err("ELF layout segment exceeds file extent")
+        if segment.p_align < 0 or (segment.p_align > 0 and (segment.p_align & (segment.p_align - 1)) != 0):
+            return Err("ELF layout invalid segment alignment")
+        if segment.p_type == PT_LOAD:
+            if segment.p_align < 1 or segment.p_vaddr % segment.p_align != segment.p_offset % segment.p_align:
+                return Err("ELF layout load congruence mismatch")
+            if segment.p_offset == 0:
+                if segment.p_filesz < header_end: return Err("ELF layout header load is truncated")
+                headers = headers + 1
+    if headers != 1: return Err("ELF layout requires one header load")
+    Ok(true)
+
+fn _elf_word(bytes: [i64], offset: i64, width: i64) -> Result<i64, text>:
+    if offset < 0 or offset > bytes.len() or width > bytes.len() - offset:
+        return Err("ELF writer header field is truncated")
+    var value = 0
+    for index in 0..width:
+        val byte = bytes[offset + index]
+        if byte < 0 or byte > 255 or (index == 7 and byte > 127): return Err("ELF writer field exceeds signed address range")
+        value = value | (byte << (index * 8))
+    Ok(value)
+
+fn _elf_writer_shape(image: [i64], kind: i64, machine: i64, entry: i64,
+        plan: ElfExecPlan) -> Result<bool, text>:
+    if image.len() < 64: return Err("ELF writer header is truncated")
+    if image[0] != 127 or image[1] != 69 or image[2] != 76 or image[3] != 70 or
+            image[4] != 2 or image[5] != 1 or image[6] != 1:
+        return Err("ELF writer identity is invalid")
+    if _elf_word(image, 16, 2)? != kind or _elf_word(image, 18, 2)? != machine or
+            _elf_word(image, 20, 4)? != 1 or _elf_word(image, 24, 8)? != entry or
+            _elf_word(image, 52, 2)? != 64 or _elf_word(image, 54, 2)? != 56 or
+            _elf_word(image, 58, 2)? != 64:
+        return Err("ELF writer header contract mismatch")
+    val phoff = _elf_word(image, 32, 8)?
+    val shoff = _elf_word(image, 40, 8)?
+    val phnum = _elf_word(image, 56, 2)?
+    val shnum = _elf_word(image, 60, 2)?
+    val shstr = _elf_word(image, 62, 2)?
+    if phoff != 64 or phnum != plan.segments.len() or phnum > (image.len() - phoff) / 56 or
+            shoff < plan.file_end or shoff > image.len() or shnum != plan.secs.len() + 2 or
+            shnum > (image.len() - shoff) / 64 or shstr != shnum - 1:
+        return Err("ELF writer table bounds mismatch")
+    for index in 0..phnum:
+        val header = phoff + index * 56
+        val expected = plan.segments[index]
+        if _elf_word(image, header, 4)? != expected.p_type or
+                _elf_word(image, header + 4, 4)? != expected.p_flags or
+                _elf_word(image, header + 8, 8)? != expected.p_offset or
+                _elf_word(image, header + 16, 8)? != expected.p_vaddr or
+                _elf_word(image, header + 24, 8)? != expected.p_paddr or
+                _elf_word(image, header + 32, 8)? != expected.p_filesz or
+                _elf_word(image, header + 40, 8)? != expected.p_memsz or
+                _elf_word(image, header + 48, 8)? != expected.p_align:
+            return Err("ELF writer program header differs from layout")
+    for index in 0..shnum:
+        val header = shoff + index * 64
+        val section_type = _elf_word(image, header + 4, 4)?
+        val offset = _elf_word(image, header + 24, 8)?
+        val size = _elf_word(image, header + 32, 8)?
+        if section_type != SHT_NOBITS_E and (offset > image.len() or size > image.len() - offset):
+            return Err("ELF writer section data is truncated")
+        if index == shstr and (section_type != 3 or offset != plan.file_end or size > shoff - offset):
+            return Err("ELF writer section-name table mismatch")
+        if index > 0 and index < shstr:
+            val expected = plan.secs[index - 1]
+            if section_type != expected.sh_type or offset != plan.offsets[index - 1] or size != expected.size or
+                    _elf_word(image, header + 8, 8)? != expected.sh_flags or
+                    _elf_word(image, header + 16, 8)? != plan.vaddrs[index - 1] or
+                    _elf_word(image, header + 44, 4)? != expected.info or
+                    _elf_word(image, header + 48, 8)? != expected.align or
+                    _elf_word(image, header + 56, 8)? != expected.entsize:
+                return Err("ELF writer section layout mismatch")
+    Ok(true)
+
+pub class ElfSealedOperationsV1:
+    relocate_operation: fn(RelocArch, [i64], i64, i64, i64, i64, i64) -> Result<[i64], text>
+    layout_operation: fn([ElfOutSec], i64, i64) -> Result<ElfExecPlan, text>
+    writer_operation: fn(i64, i64, i64, ElfExecPlan, [[i64]]) -> Result<[i64], text>
+    receipt: MdsocppGenerationReceiptV1
+    read_operation: Option<fn(text) -> Result<[u8], text>> = nil
+
+    pub fn has_byte_source() -> bool: self.read_operation != nil
+
+    pub fn read_bytes(path: text) -> Result<[u8], text>:
+        if self.read_operation == nil: return Err("ELF byte-source operation is not bound")
+        if path == "" or path.contains("\0"): return Err("ELF byte-source path is empty or contains NUL")
+        val read = self.read_operation.unwrap()
+        val bytes = read(path)?
+        if bytes.len() == 0: return Err("ELF byte-source input is empty: {path}")
+        Ok(bytes)
+
+    pub fn relocate(arch: RelocArch, bytes: [i64], offset: i64, kind: i64,
+            symbol: i64, addend: i64, place: i64) -> Result<[i64], text>:
+        val result = self.relocate_operation(arch, bytes, offset, kind, symbol, addend, place)?
+        if result.len() != bytes.len(): return Err("ELF relocation callback changed section length")
+        Ok(result)
+
+    pub fn layout(secs: [ElfOutSec], base: i64, page: i64) -> Result<ElfExecPlan, text>:
+        val plan = self.layout_operation(secs, base, page)?
+        _elf_plan_shape(secs, plan)?
+        Ok(plan)
+
+    pub fn write_image(kind: i64, machine: i64, entry: i64, plan: ElfExecPlan,
+            contents: [[i64]]) -> Result<[i64], text>:
+        if contents.len() != plan.secs.len(): return Err("ELF writer contents count mismatch")
+        for index in 0..contents.len():
+            if plan.secs[index].sh_type != SHT_NOBITS_E and contents[index].len() != plan.secs[index].size:
+                return Err("ELF writer section contents length mismatch")
+        val image = self.writer_operation(kind, machine, entry, plan, contents)?
+        _elf_writer_shape(image, kind, machine, entry, plan)?
+        Ok(image)
+
+    pub fn composition_receipt() -> MdsocppGenerationReceiptV1: self.receipt
+
+pub fn elf_seal_operations_v1(providers: [ElfOperationProviderV1],
+        policy: MdsocppSealPolicyV1) -> Result<ElfSealedOperationsV1, text>:
+    _elf_seal_operations_v1(providers, policy, false)
+
+pub fn elf_seal_file_operations_v1(providers: [ElfOperationProviderV1],
+        policy: MdsocppSealPolicyV1) -> Result<ElfSealedOperationsV1, text>:
+    _elf_seal_operations_v1(providers, policy, true)
+
+fn _elf_seal_operations_v1(providers: [ElfOperationProviderV1],
+        policy: MdsocppSealPolicyV1, requires_source: bool) -> Result<ElfSealedOperationsV1, text>:
+    if providers.len() == 0 or providers.len() > 64: return Err("ELF operation provider count is invalid")
+    var descriptors: [CapsuleDescriptorV1] = []
+    for provider in providers:
+        if provider.descriptor.closure != MdsocppClosure.Static: return Err("ELF operations require static closure")
+        var seen: [bool] = [false, false, false, false]
+        val facet_count = if requires_source: 4 else: 3
+        for offer in provider.descriptor.provided_facets:
+            var found = false
+            for index in 0..facet_count:
+                if kpf_id128_equal(offer.facet_id, elf_operation_facet_id_v1((index + 1) as u32)):
+                    if seen[index]: return Err("ELF duplicate operation offer")
+                    seen[index] = true
+                    found = true
+            if not found: return Err("ELF unknown operation offer")
+        if seen[0] != (provider.relocate != nil) or seen[1] != (provider.layout != nil) or
+                seen[2] != (provider.write_image != nil) or seen[3] != (provider.read_bytes != nil):
+            return Err("ELF operation offer and typed callback disagree")
+        if not seen[0] and not seen[1] and not seen[2] and not seen[3]: return Err("ELF operation provider has no operation")
+        descriptors.push(provider.descriptor)
+    var engine = elf_operation_descriptor_v1(elf_operation_capsule_id_v1(1), [])
+    engine.required_facets = [
+        MdsocppFacetRequirementV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_RELOCATE), optional: false),
+        MdsocppFacetRequirementV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_LAYOUT), optional: false),
+        MdsocppFacetRequirementV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_WRITE_IMAGE), optional: false)]
+    if requires_source:
+        var required = engine.required_facets
+        required.push(MdsocppFacetRequirementV1(
+            facet_id: elf_operation_facet_id_v1(ELF_OPERATION_READ_BYTES), optional: false))
+        engine.required_facets = required
+    descriptors.push(engine)
+    val sealed = mdsocpp_seal_v1(descriptors, policy)
+    if not sealed.status.accepted(): return Err("ELF operation composition rejected at slot {sealed.subject_slot}")
+    var relocation_slot: i64 = -1
+    var layout_slot: i64 = -1
+    var writer_slot: i64 = -1
+    var source_slot: i64 = -1
+    for binding in sealed.receipt.bindings:
+        if binding.consumer_slot == providers.len():
+            if binding.provider_slot >= providers.len(): return Err("ELF operation binding provider is invalid")
+            if kpf_id128_equal(binding.facet_id, elf_operation_facet_id_v1(ELF_OPERATION_RELOCATE)): relocation_slot = binding.provider_slot as i64
+            if kpf_id128_equal(binding.facet_id, elf_operation_facet_id_v1(ELF_OPERATION_LAYOUT)): layout_slot = binding.provider_slot as i64
+            if kpf_id128_equal(binding.facet_id, elf_operation_facet_id_v1(ELF_OPERATION_WRITE_IMAGE)): writer_slot = binding.provider_slot as i64
+            if kpf_id128_equal(binding.facet_id, elf_operation_facet_id_v1(ELF_OPERATION_READ_BYTES)): source_slot = binding.provider_slot as i64
+    if relocation_slot < 0 or layout_slot < 0 or writer_slot < 0: return Err("ELF operation binding is missing")
+    if requires_source and source_slot < 0: return Err("ELF byte-source binding is missing")
+    val read_operation = if source_slot >= 0: providers[source_slot].read_bytes else: nil
+    Ok(ElfSealedOperationsV1(relocate_operation: providers[relocation_slot].relocate.unwrap(),
+        layout_operation: providers[layout_slot].layout.unwrap(),
+        writer_operation: providers[writer_slot].write_image.unwrap(), receipt: sealed.receipt,
+        read_operation: read_operation))
+
+pub fn elf_builtin_operations_v1() -> Result<ElfSealedOperationsV1, text>:
+    elf_seal_operations_v1(elf_builtin_operation_providers_v1(), elf_operation_policy_v1())
+
+pub fn elf_builtin_file_operation_providers_v1() -> [ElfOperationProviderV1]:
+    var providers = elf_builtin_operation_providers_v1()
+    providers.push(ElfOperationProviderV1(
+        descriptor: elf_operation_descriptor_v1(elf_operation_capsule_id_v1(5),
+            [MdsocppFacetOfferV1(facet_id: elf_operation_facet_id_v1(ELF_OPERATION_READ_BYTES))]),
+        read_bytes: Some(file_read_bytes_result)))
+    providers
+
+pub fn elf_builtin_file_operations_v1() -> Result<ElfSealedOperationsV1, text>:
+    elf_seal_file_operations_v1(elf_builtin_file_operation_providers_v1(), elf_operation_policy_v1())
+
+export ElfOperationProviderV1, ElfSealedOperationsV1, ElfComposedImageV1
+export elf_operation_facet_id_v1, elf_operation_capsule_id_v1, elf_operation_descriptor_v1, elf_operation_policy_v1
+export elf_seal_operations_v1, elf_builtin_operations_v1, elf_builtin_operation_providers_v1
+export ELF_OPERATION_RELOCATE, ELF_OPERATION_LAYOUT, ELF_OPERATION_WRITE_IMAGE
+export ELF_OPERATION_READ_BYTES, elf_seal_file_operations_v1
+export elf_builtin_file_operation_providers_v1, elf_builtin_file_operations_v1

@@ -18,6 +18,13 @@ use compiler.driver.driver_parse_shard_entry.{
     driver_run_parse_shard_with_environment_variant_policy_v1}
 use compiler.driver.driver_source_loading.{driver_entry_scan_cache_reset}
 use std.io_runtime.{getpid}
+use app.io.file_ops.{path_absolute}
+use app.io.cli_ops.{cli_kernel_executable_path}
+use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{
+    NativeEntryClosureRequestV1, native_entry_closure_request_read_v1}
 
 fn parse_shard_entry_args() -> [text]:
     val raw_args = get_args()
@@ -110,8 +117,41 @@ fn main() -> i64:
         print "error: parse shard needs an entry and --parse-shard=i/n"
         return 1
     driver_entry_scan_cache_reset()
+    var preclosed: NativeEntryClosureRequestV1? = nil
+    val request_path = env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? ""
+    if request_path != "":
+        if not entry_closure:
+            print "error: parse closure request incompatible with bulk inputs"
+            return 1
+        val source_root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
+        val entry_absolute = compile_source_inventory_plain_checkout_v1(path_absolute(entry_point))
+        if not entry_absolute.starts_with(source_root + "/"):
+            print "error: parse closure entry outside source owner"
+            return 1
+        val identity = entry_absolute.substring(source_root.len() + 1)
+        var roots = native_build_snapshot_source_roots_v1(identity, source_dirs)
+        if not roots.contains(identity): roots = roots.push(identity)
+        val request = native_entry_closure_request_read_v1(request_path,
+            env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? "", source_root, identity, roots,
+            file_hash_sha256(cli_kernel_executable_path()))
+        if request.is_err():
+            print "error: parse closure request rejected: " + request.unwrap_err()
+            return 1
+        val admitted_request = request.unwrap()
+        if admitted_request.snapshot.snapshot_root != (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") or
+                admitted_request.snapshot.revision_id != (env_get("SIMPLE_SCV_REVISION_ID") ?? "") or
+                admitted_request.snapshot.commit_id != (env_get("SIMPLE_SCV_COMMIT_ID") ?? "") or
+                admitted_request.snapshot.tree_id != (env_get("SIMPLE_SCV_TREE_ID") ?? "") or
+                admitted_request.snapshot.inventory_digest != (env_get("SIMPLE_SCV_INVENTORY_DIGEST") ?? "") or
+                admitted_request.source_digest != (env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? "") or
+                admitted_request.generation != ((env_get("SIMPLE_SCV_INVENTORY_GENERATION") ?? "").to_i64() ?? -1):
+            print "error: parse closure request differs from inherited source authority"
+            return 1
+        preclosed = Some(admitted_request)
     var inputs: [text] = []
-    if entry_closure:
+    if preclosed != nil:
+        inputs = [entry_point]
+    elif entry_closure:
         for cf in _native_build_entry_closure(entry_point, source_dirs):
             inputs = inputs.push(cf)
     else:
@@ -125,7 +165,7 @@ fn main() -> i64:
     env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry_point)
     env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
     if driver_run_parse_shard_with_environment_variant_policy_v1(
-            inputs, low_memory, opened.handoff.collection):
+            inputs, low_memory, opened.handoff.collection, preclosed):
         0
     else:
         1

@@ -7,6 +7,128 @@ Owner: `/root`. This is an execution breakdown, not a reduction of requirements.
 **Phase 4 is NOT READY.** Authored tests are not executed tests. Source-only
 integration does not close verification or authorize publication.
 
+## 2026-10-04 continuation
+
+ELF section-group and COMDAT source is now authored for the bounded engine.
+It implements first-signature selection across selected objects, atomic member and
+relocation discard, kept-definition resolution, and consistent layout/GOT/output
+filtering. It validates group words, signatures, membership and relocation ownership
+without resident group maps. Acceptance covers reversed winners, external references, archive
+selection, generic groups, malformed metadata, cancellation and preserved output.
+GNU research distinguishes final undefined-reference errors from archive demand:
+discarded-only undefined references do not fail the final image, but their
+undefined symbol records can still select an archive provider. Preserve that
+behavior instead of inventing a no-extraction optimization. Source completion
+and executed acceptance remain separate gates.
+
+The ordinary static x64 GOT family is now authored in the stream emitter.
+It uses real canonical GOT slots, a
+synthetic base, local/global identity separation, checked relocation operands
+and windowed slot emission after common storage. Merely accepting relocation
+widths would be incorrect. Separate test, implementation and research worktrees
+cover types 3, 9, 25–31 and 41–43, including GNU assembler's undefined GOT anchor.
+Source review found and corrected an archive-loop indentation defect; the exact
+core commit has no remaining P0/P1 findings. Runtime execution is still UNRUN.
+TLS/dynamic relocations and whole-job enforcement remain separate open work.
+
+Common-symbol support is now authored through the existing file-backed
+entrypoint. Its test-first contract covers independent
+maximum size/alignment coalescing, regular/common/weak precedence, canonical
+aligned writable zero storage, real relocations and archive selection. All
+additional scans must consume the work budget and observe cancellation; output
+and scratch failures must preserve the destination. This removes an explicit
+semantic refusal, not the missing whole-job enforcement gate. Shared plans and
+parallel owners are recorded in the agent-task ledger; source and execution
+status is tracked in `item4_stream_common_2026-10-04.md` under verification.
+The fast archive path also now distinguishes unresolved demand from tentative
+demand: a common-only provider satisfies the former without extracting further
+common/weak members, while a later strong definition can replace it. An executed
+GNU ld fixture experiment supports this contract; Simple execution remains UNRUN.
+
+ELF byte-source implementation and nine acceptance scenarios are now authored.
+File adapters require a four-operation seal and consume the selected reader before the
+same owner's relocation/layout/writer operations. Array-input APIs keep their
+existing three-operation contract. Hosted library classification and linking
+must use the same retained callback bytes, while existing image publication and
+configuration behavior are preserved. Portable reads preserve supported hosts
+and symlinks; hostile-path snapshots and change-during-read identity guarantees
+remain open rather than being inferred from path strings or caller digests.
+The scenarios cover one source/writer owner, missing source, invalid inputs,
+alias precedence, hosted archive snapshot reuse, canonical parity and source
+failure preserving output, missing/mismatched source admission and reordered
+receipt bindings tied to real output. All nine remain UNRUN. See
+`doc/08_tracking/verification/item4_elf_byte_source_2026-10-04.md`.
+
+Static ELF operational composition now seals actual relocation-field, layout
+and image-writer callbacks and routes existing linker entrypoints through those
+selected callbacks. Eleven authored scenarios inspect observable output changes
+and errors at each boundary, missing/duplicate facets, callback/offer mismatch,
+provider permutation, wrapper policies and malformed callback results. The
+writer must preserve selected layout metadata, and synthesized header symbols
+follow the selected header load base. Execution remains UNRUN; see
+`doc/08_tracking/verification/item4_elf_operations_2026-10-04.md`.
+This is an in-process structural binding, not dynamic artifact trust, byte-source
+binding, full relocation ownership, bounded-memory admission or Phase 4 evidence.
+
+RV64 initial-exec TLS source now classifies R_RISCV_TLS_GOT_HI20, allocates a
+TLS-offset GOT entry independently of ordinary address entries, resolves paired
+PCREL_LO12 through its high relocation, and emits the thread-pointer offset.
+It also preserves the winning definition's symbol type and includes PT_TLS
+alignment residue in both IE and LE offsets. Test-first acceptance inspects
+linked instruction targets, GOT values and PT_TLS, archive selection and
+malformed inputs; three resolver scenarios cover the prerequisite type repair.
+Independent core source review found no P0/P1. All execution remains UNRUN.
+Static IE does not close RV32, dynamic TLS or relaxation. See
+`doc/08_tracking/verification/item4_riscv_initial_exec_2026-10-04.md`.
+
+Terminal provider shutdown follow-up: four generic retirement scenarios and two
+mapped-provider shutdown scenarios are authored before implementation. Shutdown
+now retires the active generation without allocating a replacement, closes owned
+sessions, retains failed cleanup owners for retry, and rejects new work once
+closing starts. Independent source review found no P0/P1. All six scenarios
+remain UNRUN; real unload-failure injection, CLI/trust/seal integration and the
+full platform corpus remain open. This source slice does not make Phase 4 ready.
+See `doc/08_tracking/verification/item4_provider_shutdown_2026-10-04.md`.
+
+Configured provider follow-up: V2 argv transport now preserves all 15 native
+configuration fields, the command uses the actual configured adapter, and
+lifecycle dispatch/recovery retain that context. Thirteen new scenario
+declarations cover six transport cases, six actual mapped-provider positive
+cases and legacy-callback refusal. All remain UNRUN. The hosted x64 main object
+is an independently compiled test fixture, not a successfully linked product.
+See `linker_configured_dispatch.md` and `linker_pack_native_config_v2_2026-10-04.md`
+under doc/05_design/compiler/linker for boundaries and remaining authority work.
+
+Canonical stream follow-up: four owner-state scenarios are authored before
+the core migration. Mutating operations now have an authored single-owner method
+contract, builder tag writeback and explicit parent-frame writeback. Integration
+and review evidence is recorded in
+`doc/05_design/compiler/linker/semantic_stream_owner_dependency.md`.
+The previous production-caller claim was corrected: the declaration issuer
+contains future-use comments only and remains unavailable pending five live
+capabilities. Primitive repair must not be reported as issuer activation.
+
+The previous turn made progress by landing source/test slices. Current runtime
+audit still finds no admitted SSpec runner: candidate SHA256
+`aaf13da5942425e19b1aba2ed4b6d272687de1d4710ad7200ed0621d96990879`
+has `OBSERVED_NATIVE_LINK_PASS_UNADMITTED`, qualification UNRUN, and no live
+Windows Simple process. No capped build was retried.
+
+SHA stream mutable methods, caller migration and five new scenario declarations
+are now authored. See `doc/05_design/compiler/linker/sha_stream_owner_dependency.md`.
+Independent source review and external expected-vector checks do not prove
+compilation or execution. Core/MCP/native, SCV hydration, coverage and generated
+manual gates remain UNRUN. The outer canonical compiler stream needs a separate
+owner repair recorded in the 2026-10-04 bug; that follow-up is now source-repaired
+and reviewed, with native validation still UNRUN.
+
+Provider completion now has six concrete positive scenarios, production routing
+and manifest requirements in `doc/05_design/compiler/linker/linker_provider_positive_acceptance_2026-10-04.md`.
+The original six production-composition obligations remain open. New positive
+provider API specs require actual image/exit results but do not exercise CLI,
+manifest trust or sealed operation bindings. The existing unsupported-architecture
+native test cannot satisfy them. All original eight rows below remain in scope.
+
 | Item | Implementation to finish | Executable test obligations | Owner / state |
 |---|---|---|---|
 | Input and archive contracts | Retained ELF subranges, ar member iteration, checked member selection without whole archive reads | Malformed/truncated members, long names, padding, child lifetime, selected-member identity | Research / in progress |
@@ -18,7 +140,25 @@ integration does not close verification or authorize publication.
 | Platform/product acceptance | Complete PE ARM64 and FreeBSD corpus, complete compiler/application links | Host loader execution, imports/unwind, startup, full corpus and linker comparison | Root integration / open |
 | Phase 4 evidence | Canonical manuals, requirement trace, coverage, core/lib/MCP checks, NFR results | Every scenario executed; required branch coverage; no stubs; exact-head independent review | All owners / blocked on qualified runtime and preceding source gaps |
 
-## Per-item completion rule
+## Implementation order before Phase 4
+
+| Item | Code already written (execution still UNRUN) | Next implementation and test pair |
+|---|---|---|
+| 1 | Retained subranges and file-source dispatch | Complete archive member identity/lifetime handling; test truncation, long names, padding and child lifetime |
+| 2 | Resident ELF operation selection and a bounded x64 subset | Complete bounded symbol/archive/relocation semantics; compare complete images with the fast path |
+| 3 | UnsupportedBudget refusal | Implement constrained worker admission before allocation and peak accounting; test breach, cancellation, scratch exhaustion and RSS |
+| 4 | Partial hosted Mach-O | Complete TLS/TLV, unwind and weak/reexport handling; test independent bytes and Darwin loader/signing behavior |
+| 5 | RV64 static IE/LE TLS and symbol-type propagation | Implement RV32, relaxation/PC remapping and dynamic TLS; test boundaries and native execution |
+| 6 | Configured mapped-provider calls, shutdown, three/four-operation ELF seals | Wire trusted manifest authority and actual CLI dispatch; test real admission, replacement, pinned unload and recovery |
+| 7 | Partial platform fixtures | Complete PE ARM64/FreeBSD compiler and application links; test loader startup, imports and unwind against reference outputs |
+| 8 | Authored specs and source reviews | Qualify the runtime, execute specs and docgen, collect coverage/core/lib/MCP/NFR evidence; only then decide Phase 4 PASS |
+
+Items are separate acceptance units. Source-only commits do not close their
+rows. The current file-source work advances items 1 and 6; its resident cache
+does not satisfy item 2 or resource enforcement in item 3. These are existing
+requirements, not newly selected scope.
+
+### Completion rule
 
 1. Specify concrete input/output behavior and write executable tests first.
 2. Implement the production caller path; an unused helper does not close an item.

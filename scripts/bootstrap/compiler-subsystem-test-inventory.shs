@@ -20,6 +20,33 @@ use File::Find qw(find);
 use Digest::SHA qw(sha256_hex);
 my $root = shift @ARGV;
 my @rows;
+sub eligible_owner {
+  my ($relative) = @_;
+  return 0 unless $relative =~ /_(?:spec|test)\.spl\z/;
+  return 0 if $relative =~ m{/(?:vendor|fixtures)(?:/|$)};
+  my @parts = split m{/}, $relative;
+  return 0 unless @parts > 3 && $parts[0] eq 'test' &&
+    $parts[1] =~ /\A(?:01_unit|02_integration|03_system)\z/;
+  pop @parts;
+  my %parts = map { $_ => 1 } @parts;
+  my $compiler_root = @parts > 2 && $parts[2] =~ /\A(?:compiler_core|compiler_shared|core)\z/;
+  return $compiler_root || $parts{compiler} || $parts{interpreter} || $parts{loader};
+}
+my %tracked;
+open my $git, '-|', 'git', '-C', $root, 'ls-tree', '-r', '-z', '--name-only',
+  'HEAD', '--', 'test/01_unit', 'test/02_integration', 'test/03_system'
+  or die "cannot enumerate exact HEAD test owners\n";
+{
+  local $/ = "\0";
+  while (my $relative = <$git>) {
+    chomp $relative;
+    next unless eligible_owner($relative);
+    die "unsafe tracked test owner\n" if $relative =~ /[\t\r\n\\]/;
+    $tracked{$relative} = 1;
+  }
+}
+close $git or die "exact HEAD owner enumeration failed\n";
+my %physical;
 for my $level (qw(01_unit 02_integration 03_system)) {
   find({ no_chdir => 1, wanted => sub {
     my $path = $File::Find::name;
@@ -35,13 +62,11 @@ for my $level (qw(01_unit 02_integration 03_system)) {
     die "symlinked test owner: $path\n" if -l $path;
     my $relative = substr($path, length($root) + 1);
     die "unsafe test inventory path\n" if $relative =~ /[\t\r\n\\]/;
+    return unless eligible_owner($relative);
+    die "untracked eligible test owner: $relative\n" unless $tracked{$relative};
+    die "duplicate physical test owner: $relative\n" if $physical{$relative}++;
     my @parts = split m{/}, $relative;
-    pop @parts;
     my %parts = map { $_ => 1 } @parts;
-    # Core/shared compiler suites also have authoritative sibling roots;
-    # requiring only a literal /compiler/ component silently omits them.
-    my $compiler_root = @parts > 2 && $parts[2] =~ /\A(?:compiler_core|compiler_shared|core)\z/;
-    return unless $compiler_root || $parts{compiler} || $parts{interpreter} || $parts{loader};
     my $subsystem = $parts{loader} ? 'loader' : $parts{interpreter} ? 'interpreter' : 'compiler';
     open my $fh, '<:raw', $path or die "unreadable test owner: $path\n";
     local $/;
@@ -49,6 +74,10 @@ for my $level (qw(01_unit 02_integration 03_system)) {
     close $fh or die "test owner close failed: $path\n";
     push @rows, join("\t", $subsystem, $level, $relative, sha256_hex($bytes));
   }}, "$root/test/$level");
+}
+for my $relative (sort keys %tracked) {
+  die "tracked eligible test owner not materialized: $relative\n"
+    unless $physical{$relative};
 }
 die "empty compiler subsystem inventory\n" unless @rows;
 print "subsystem\tlevel\tpath\tsha256\n";

@@ -3,7 +3,17 @@ use std.nogc_sync_mut.composition.provider_contract.{SIMPLE_CLI_RUN}
 use std.nogc_sync_mut.composition.cli_command_wire.{encode_cli_command_result_v1}
 use std.nogc_sync_mut.composition.cli_provider_wire.{CliCommandResultArenaV1, decode_cli_command_request_v1}
 use compiler.backend.linker.linker_pack_wire.{linker_pack_decode_job, linker_pack_encode_receipt, linker_pack_policy_digest}
-use compiler.backend.linker.link_engine_external.{link_request_to_native}
+use compiler.backend.linker.link_engine_external.{link_request_to_native, link_request_to_native_with_config}
+use compiler.backend.linker.linker_pack_config_wire.{linker_pack_decode_job_v2}
+use std.common.linker.link_receipt_v1.{LinkReceiptV1}
+use std.common.kernel_plugin.ids.{KpfDigest256}
+
+fn _pack_command_receipt(receipt: LinkReceiptV1, policy_digest: KpfDigest256) -> CliCommandResultArenaV1:
+    var stamped = receipt
+    stamped.policy_digest = policy_digest
+    val encoded = linker_pack_encode_receipt(stamped)
+    if encoded.is_err(): return encode_cli_command_result_v1(1, "", encoded.unwrap_err())
+    encode_cli_command_result_v1(0, encoded.unwrap(), "")
 
 pub fn linker_pack_command(arena: [u8]) -> CliCommandResultArenaV1:
     if arena.len() > 1048576: return encode_cli_command_result_v1(1, "", "linker command arena too large")
@@ -14,15 +24,21 @@ pub fn linker_pack_command(arena: [u8]) -> CliCommandResultArenaV1:
     # Reserve the complete response before invoking an operation with effects.
     if request.output_capacity < 8192:
         return encode_cli_command_result_v1(1, "", "linker response capacity too small")
+    if request.args.len() > 0 and request.args[0] == "simple-link-job-v2":
+        val decoded_v2 = linker_pack_decode_job_v2(request.args)
+        if decoded_v2.is_err(): return encode_cli_command_result_v1(1, "", decoded_v2.unwrap_err())
+        val job_v2 = decoded_v2.unwrap()
+        val digest_v2 = linker_pack_policy_digest(job_v2.policy)
+        if digest_v2.is_err(): return encode_cli_command_result_v1(1, "", digest_v2.unwrap_err())
+        val receipt_v2 = link_request_to_native_with_config(job_v2.request, job_v2.policy,
+            job_v2.native_config, job_v2.inputs, job_v2.output)
+        return _pack_command_receipt(receipt_v2, digest_v2.unwrap())
     val decoded = linker_pack_decode_job(request.args)
     if decoded.is_err(): return encode_cli_command_result_v1(1, "", decoded.unwrap_err())
     val job = decoded.unwrap()
     val policy_digest = linker_pack_policy_digest(job.policy)
     if policy_digest.is_err(): return encode_cli_command_result_v1(1, "", policy_digest.unwrap_err())
-    var receipt = link_request_to_native(job.request, job.policy, job.inputs, job.output)
-    receipt.policy_digest = policy_digest.unwrap()
-    val encoded = linker_pack_encode_receipt(receipt)
-    if encoded.is_err(): return encode_cli_command_result_v1(1, "", encoded.unwrap_err())
-    encode_cli_command_result_v1(0, encoded.unwrap(), "")
+    val receipt = link_request_to_native(job.request, job.policy, job.inputs, job.output)
+    _pack_command_receipt(receipt, policy_digest.unwrap())
 
 export linker_pack_command

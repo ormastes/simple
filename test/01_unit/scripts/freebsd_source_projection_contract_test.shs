@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+script="$root/scripts/check/check-freebsd-bootstrap-qemu.shs"
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/freebsd-source-projection.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+host="$fixture/host"
+guest="$fixture/guest"
+mkdir -p "$host/src/compiler_rust/target_wt/release/deps" \
+    "$host/src/compiler_rust/target_other" "$host/examples/10_tooling" "$guest"
+printf 'tracked tag\n' >"$host/src/compiler_rust/target_wt/CACHEDIR.TAG"
+printf '{"tracked":true}\n' >"$host/src/compiler_rust/target_wt/.rustc_info.json"
+: >"$host/src/compiler_rust/target_wt/release/.cargo-lock"
+printf 'required example\n' >"$host/examples/10_tooling/probe.spl"
+# A sparse large build artifact makes accidental traversal observable without
+# spending physical space on an unrelated compiler build.
+truncate -s 1073741824 "$host/src/compiler_rust/target_wt/release/deps/untracked.rlib"
+printf 'untracked sibling\n' >"$host/src/compiler_rust/target_wt/untracked.bin"
+printf 'other build output\n' >"$host/src/compiler_rust/target_other/untracked.bin"
+printf 'excluded example\n' >"$host/examples/other.spl"
+# Read the actual production include/exclude order, then execute real rsync.
+awk '
+  /info "Syncing project to VM/ { active=1; next }
+  active && /pass "Project synced/ { exit }
+  active && /--include=/ { split($0, part, "\047"); print "+ " part[2] }
+  active && /--exclude=/ { split($0, part, "\047"); print "- " part[2] }
+' "$script" >"$fixture/filters"
+[ -s "$fixture/filters" ] || fail 'production projection filters absent'
+rsync -a --delete --filter="merge $fixture/filters" "$host/" "$guest/"
+for relative in src/compiler_rust/target_wt/CACHEDIR.TAG \
+    src/compiler_rust/target_wt/.rustc_info.json \
+    src/compiler_rust/target_wt/release/.cargo-lock examples/10_tooling/probe.spl; do
+    cmp -s "$host/$relative" "$guest/$relative" || fail "required authority omitted: $relative"
+done
+for relative in src/compiler_rust/target_wt/release/deps/untracked.rlib \
+    src/compiler_rust/target_wt/untracked.bin \
+    src/compiler_rust/target_other/untracked.bin examples/other.spl; do
+    [ ! -e "$guest/$relative" ] || fail "excluded build/source sibling transferred: $relative"
+done
+printf 'freebsd_source_projection_contract=true\n'

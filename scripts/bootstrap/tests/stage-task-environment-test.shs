@@ -1,0 +1,44 @@
+#!/bin/sh
+# Different executable paths must receive identical complete environments.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+sha() { sha256sum "$1" | cut -d ' ' -f 1; }
+printf 'identity\n' >"$scratch/identity"
+printf 'inventory\n' >"$scratch/inventory"
+cat >"$scratch/entry" <<'EOF'
+#!/usr/bin/perl
+use strict; use warnings;
+open my $out, '>', "$ENV{ENV_PROBE_ROOT}/entry.env" or die $!;
+print $out map { length($_).":$_".length($ENV{$_}).":$ENV{$_}\n" } sort keys %ENV;
+close $out or die $!;
+exit 1;
+EOF
+cat >"$scratch/verifier" <<'EOF'
+#!/usr/bin/perl
+use strict; use warnings;
+open my $out, '>', "$ENV{ENV_PROBE_ROOT}/verifier.env" or die $!;
+print $out map { length($_).":$_".length($ENV{$_}).":$ENV{$_}\n" } sort keys %ENV;
+close $out or die $!;
+open my $underscore, '>', "$ENV{ENV_PROBE_ROOT}/underscore" or die $!;
+print $underscore $ENV{'_'};
+close $underscore or die $!;
+exit 1;
+EOF
+chmod +x "$scratch/entry" "$scratch/verifier"
+ENV_PROBE_ROOT=$scratch
+ENV_PROBE_SENTINEL='space equals=value and underscore retained'
+export ENV_PROBE_ROOT ENV_PROBE_SENTINEL
+code=0
+sh "$repo/scripts/bootstrap/run-stage-task-test.shs" \
+  --entry="$scratch/entry" --entry-sha256="$(sha "$scratch/entry")" \
+  --verifier="$scratch/verifier" --verifier-sha256="$(sha "$scratch/verifier")" \
+  --identity-manifest="$scratch/identity" --identity-manifest-sha256="$(sha "$scratch/identity")" \
+  --inventory-manifest="$scratch/inventory" --inventory-manifest-sha256="$(sha "$scratch/inventory")" \
+  --stage=P2 --backend=llvm --threads=80 --report-root="$scratch/report" --db-root="$scratch/db" || code=$?
+[ "$code" -eq 1 ]
+cmp "$scratch/entry.env" "$scratch/verifier.env"
+[ "$(cat "$scratch/underscore")" = "$scratch/entry" ]
+grep -F "$ENV_PROBE_SENTINEL" "$scratch/verifier.env" >/dev/null
+echo 'PASS: distinct child executables receive identical full environments including frozen underscore'

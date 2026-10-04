@@ -1,0 +1,125 @@
+# Parent adapter for native test tasks. The existing simple-bdd-v1 receipt
+# names an aggregate, not individual cases: never turn its totals into cases.
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1, task_runner_identity_v1, task_runner_attempt_error_v1, task_runner_native_exception_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.process_completion.{ProcessCompletionV1}
+use std.test_runner.aggregate_task_ledger.{AggregateTaskInventoryV1, AggregateTaskProgressV1}
+
+fn _test_task_counts_v1(evidence: text) -> Result<(i64, i64), text>:
+    if evidence.len() > 256: return Err("test count receipt exceeds bound")
+    val fields = evidence.split("\n")
+    if fields.len() != 4 or fields[0] != "simple-bdd-v1" or fields[3] != "":
+        return Err("missing canonical test count receipt")
+    # Bounded digits before conversion prevent overflow from looking like zero.
+    for field in [fields[1], fields[2]]:
+        if field == "" or field.len() > 9: return Err("invalid test count")
+        for character in field:
+            if character < "0" or character > "9": return Err("invalid test count")
+    val passed = fields[1].to_int() ?? -1
+    val failed = fields[2].to_int() ?? -1
+    if str(passed) != fields[1] or str(failed) != fields[2]:
+        return Err("noncanonical test count")
+    if passed + failed == 0: return Err("zero executed tests cannot pass")
+    Ok((passed, failed))
+
+fn test_task_attempt_v1(identity: TaskRunnerIdentityV1, group_id: text,
+        attempt: i64, mode: text, completion: ProcessCompletionV1,
+        evidence: text) -> Result<TaskRunnerAttemptV1, text>:
+    val digest = task_runner_identity_v1(identity)?
+    if identity.kind != "test" or identity.case_id != "":
+        return Err("aggregate BDD receipt cannot identify an individual case")
+    if not completion.tree_reaped: return Err("test process tree is not collected")
+    var status = "aborted"
+    var reason = "infrastructure"
+    var task_exit: i64 = -1
+    var validated = false
+    var result_digest = ""
+    if completion.timed_out:
+        reason = "timed-out"
+    elif completion.cancelled:
+        reason = "cancelled"
+    else:
+        val exception = task_runner_native_exception_v1(completion.exit_code)
+        if completion.signal_number > 0 or exception:
+            status = "crashed"
+            reason = if completion.signal_number > 0: "process-signal" else: "native-exception"
+        else:
+            val (passed, failed) = _test_task_counts_v1(evidence)?
+            # A nonzero raw exit without an assertion receipt remains an
+            # infrastructure failure; exit zero alone is never accepted.
+            if failed == 0 and completion.exit_code != 0:
+                return Err("passing counts disagree with aggregate process exit")
+            status = if failed > 0: "failed" else: "passed"
+            reason = if failed > 0: "assertion" else: "completed"
+            task_exit = if failed > 0: 1 else: 0
+            validated = true
+            result_digest = sha256_text(evidence)
+    val row = TaskRunnerAttemptV1(identity_digest: digest, group_id: group_id,
+        attempt: attempt, mode: mode, pid: completion.pid,
+        process_generation: completion.process_generation, status: status,
+        reason: reason, exit_code: completion.exit_code, task_exit_code: task_exit,
+        signal_number: completion.signal_number, tree_reaped: completion.tree_reaped,
+        result_validated: validated, stdout_digest: completion.stdout_digest,
+        stderr_digest: completion.stderr_digest, result_digest: result_digest,
+        transport_execution_digest: completion.transport_execution_digest)
+    val invalid = task_runner_attempt_error_v1(row)
+    if invalid != "": return Err(invalid)
+    Ok(row)
+
+export test_task_attempt_v1
+
+fn test_case_attempt_v1(identity: TaskRunnerIdentityV1, group_id: text,
+        attempt: i64, mode: text, completion: ProcessCompletionV1,
+        inventory: AggregateTaskInventoryV1,
+        progress: AggregateTaskProgressV1) -> Result<TaskRunnerAttemptV1, text>:
+    test_case_attempt_with_interruption_v1(identity, group_id, attempt, mode,
+        completion, inventory, progress, false)
+
+fn test_case_attempt_with_interruption_v1(identity: TaskRunnerIdentityV1, group_id: text,
+        attempt: i64, mode: text, completion: ProcessCompletionV1,
+        inventory: AggregateTaskInventoryV1, progress: AggregateTaskProgressV1,
+        interrupted: bool) -> Result<TaskRunnerAttemptV1, text>:
+    val digest = task_runner_identity_v1(identity)?
+    if identity.kind != "test" or not inventory.metadata.contains_key(identity.case_id):
+        return Err("case identity is absent from binary enumeration")
+    if not completion.tree_reaped: return Err("case process tree is not collected")
+    var status = "aborted"
+    var reason = "infrastructure"
+    var task_exit: i64 = -1
+    var validated = false
+    var result_digest = ""
+    if progress.outcomes.contains_key(identity.case_id):
+        val outcome = progress.outcomes[identity.case_id]
+        status = if outcome == "pass": "passed" elif outcome == "fail": "failed" elif outcome == "skip": "skipped" else: "pending"
+        reason = if outcome == "pass": "completed" elif outcome == "fail": "assertion" else: status
+        task_exit = if outcome == "fail": 1 else: 0
+        validated = true
+        result_digest = sha256_text(inventory.metadata[identity.case_id] + "\nresult\t" + identity.case_id + "\t" + outcome + "\n")
+    elif completion.timed_out:
+        reason = "timed-out"
+    elif completion.cancelled:
+        reason = "cancelled"
+    elif completion.signal_number > 0 or task_runner_native_exception_v1(completion.exit_code):
+        if progress.active_case == identity.case_id:
+            status = "crashed"
+            reason = if completion.signal_number > 0: "process-signal" else: "native-exception"
+        else:
+            status = "not-run"
+            reason = "group-crashed"
+    elif interrupted and progress.active_case != identity.case_id:
+        status = "not-run"
+        reason = "group-interrupted"
+    val row = TaskRunnerAttemptV1(identity_digest: digest, group_id: group_id,
+        attempt: attempt, mode: mode, pid: completion.pid,
+        process_generation: completion.process_generation, status: status,
+        reason: reason, exit_code: completion.exit_code, task_exit_code: task_exit,
+        signal_number: completion.signal_number, tree_reaped: completion.tree_reaped,
+        result_validated: validated, stdout_digest: completion.stdout_digest,
+        stderr_digest: completion.stderr_digest, result_digest: result_digest,
+        transport_execution_digest: completion.transport_execution_digest)
+    val invalid = task_runner_attempt_error_v1(row)
+    if invalid != "": return Err(invalid)
+    Ok(row)
+
+export test_case_attempt_v1
+export test_case_attempt_with_interruption_v1

@@ -1,0 +1,456 @@
+"""ITEM4-REQ-003/004/009 streamed ELF group selection. Execution UNRUN.
+Real grouped ELF bytes and program-header oracles; no fast-linker parity claim.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes, dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.backend.linker.elf.stream_types.{ElfStreamLimitsV1}
+use compiler.backend.linker.elf.stream_link.{elf_stream_link_file_v1}
+use compiler.backend.linker.elf.stream_inputs.*
+use compiler.backend.linker.elf_parser.{elf_parse_object}
+
+fn item4_stream_comdat_image(objects: [text], archives: [text]) -> Result<[u8], text>:
+    if not dir_create_all("build"): return Err("test build directory unavailable")
+    val directory = secure_temp_dir("build", "item4-stream-comdat-image-")?
+    val output = directory + "/image"
+    val linked = elf_stream_link_file_v1(objects, archives, [95, 115, 116, 97, 114, 116],
+        output, directory, item4_stream_comdat_limits(), item4_stream_comdat_cancelled)
+    var bytes: [u8] = []
+    if linked.is_ok():
+        expect(linked.unwrap().cleanup_pending).to_equal(false)
+        bytes = file_read_bytes(output)
+    if file_exists(output): expect(file_remove(output)).to_equal(true)
+    expect(dir_remove(directory, false)).to_equal(true)
+    if linked.is_err(): return Err(linked.unwrap_err())
+    Ok(bytes)
+
+fn item4_stream_comdat_reject(objects: [text], archives: [text], token: text):
+    expect(dir_create_all("build")).to_equal(true)
+    val created = secure_temp_dir("build", "item4-stream-comdat-reject-")
+    expect(created.is_ok()).to_equal(true)
+    if created.is_err(): return
+    val directory = created.unwrap()
+    val output = directory + "/protected"
+    val sentinel: [u8] = [17, 0, 255, 31]
+    expect(file_write_bytes(output, sentinel)).to_equal(true)
+    val linked = elf_stream_link_file_v1(objects, archives, [95, 115, 116, 97, 114, 116],
+        output, directory, item4_stream_comdat_limits(), item4_stream_comdat_cancelled)
+    expect(linked.is_err()).to_equal(true)
+    if linked.is_err(): expect(linked.unwrap_err()).to_contain(token)
+    expect(file_read_bytes(output)).to_equal(sentinel)
+    expect(file_remove(output)).to_equal(true)
+    expect(dir_remove(directory, false)).to_equal(true)
+
+fn item4_stream_comdat_limits() -> ElfStreamLimitsV1:
+    ElfStreamLimitsV1(input_limit: 16, archive_member_limit: 64u64, metadata_bytes: 262144u64,
+        read_window_bytes: 64, emit_window_bytes: 8, name_bytes: 64,
+        output_bytes: 1048576u64, scratch_bytes: 4194304u64, scan_record_limit: 20000000u64)
+
+fn item4_stream_comdat_cancelled() -> bool: false
+fn item4_stream_comdat_stop() -> bool: true
+
+fn item4_stream_comdat_mutate(kind: i64, empty: bool = false) -> [u8]:
+    var bytes = file_read_bytes(if empty: "test/fixtures/linker/elf/stream_comdat_empty_base.o" else: "test/fixtures/linker/elf/stream_comdat_a.o")
+    var widened: [i64] = []
+    for byte in bytes: widened.push(byte as i64)
+    val parsed = elf_parse_object(widened)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return []
+    val object = parsed.unwrap()
+    for index in 0..object.sections.len():
+        val group = object.sections[index]
+        if group.sh_type == 17:
+            val header = object.header.e_shoff + index * 64
+            val valid = header >= 0 and header <= bytes.len() and 64 <= bytes.len() - header and group.sh_addr >= 0 and group.sh_addr <= bytes.len() and group.sh_size >= 8 and group.sh_size <= bytes.len() - group.sh_addr
+            expect(valid).to_equal(true)
+            if not valid: return []
+            expect(item4_stream_comdat_read(bytes, group.sh_addr, 4)).to_equal(1u64)
+            if item4_stream_comdat_read(bytes, group.sh_addr, 4) != 1u64: return []
+            val member = item4_stream_comdat_read(bytes, group.sh_addr + 4, 4) as i64
+            expect(member > 0 and member < object.sections.len()).to_equal(true)
+            if member <= 0 or member >= object.sections.len(): return []
+            var field = group.sh_addr
+            var width = 4
+            var value = 2u64
+            if empty:
+                expect(group.sh_size).to_equal(8)
+                if group.sh_size != 8: return []
+                val flags_at = object.header.e_shoff + member * 64 + 8
+                val flags = item4_stream_comdat_read(bytes, flags_at, 8)
+                expect((flags & 512u64) != 0u64).to_equal(true)
+                if (flags & 512u64) == 0u64: return []
+                for byte in 0..8: bytes[flags_at + byte] = (((flags ^ 512u64) >> (byte * 8)) & 255u64) as u8
+                field = header + 32
+                width = 8
+                value = 4u64
+            elif kind == 1:
+                field = header + 40
+                value = object.sections.len() as u64
+            elif kind == 2:
+                field = header + 44
+                value = 0u64
+            elif kind == 3 or kind == 4 or kind == 7:
+                field = group.sh_addr + 4
+                value = if kind == 3: 0u64 else: (if kind == 4: object.sections.len() as u64 else: index as u64)
+            elif kind == 5:
+                expect(group.sh_size >= 12).to_equal(true)
+                if group.sh_size < 12: return []
+                field = group.sh_addr + 8
+                value = member as u64
+            elif kind == 6:
+                field = object.header.e_shoff + member * 64 + 8
+                width = 8
+                val flags = item4_stream_comdat_read(bytes, field, 8)
+                expect((flags & 512u64) != 0u64).to_equal(true)
+                if (flags & 512u64) == 0u64: return []
+                value = flags ^ 512u64
+            elif kind == 8:
+                field = header + 56
+                width = 8
+                value = 0u64
+            elif kind == 9 or kind == 10:
+                field = header + 32
+                width = 8
+                value = (group.sh_size - (if kind == 9: 1 else: 4)) as u64
+            elif kind == 11:
+                field = header + 24
+                width = 8
+                value = bytes.len() as u64 + 16u64
+            elif kind == 12:
+                val rela = item4_stream_comdat_read(bytes, group.sh_addr + group.sh_size - 4, 4) as i64
+                expect(rela > 0 and rela < object.sections.len()).to_equal(true)
+                if rela <= 0 or rela >= object.sections.len(): return []
+                expect(object.sections[rela].sh_type).to_equal(4)
+                if object.sections[rela].sh_type != 4: return []
+                # Empty ordinary .text is outside this group; all offsets remain valid.
+                expect((object.sections[2].sh_flags & 512) == 0).to_equal(true)
+                if (object.sections[2].sh_flags & 512) != 0: return []
+                field = object.header.e_shoff + rela * 64 + 44
+                width = 4
+                value = 2u64
+            expect(field >= 0 and field <= bytes.len() and width <= bytes.len() - field).to_equal(true)
+            if field < 0 or field > bytes.len() or width > bytes.len() - field: return []
+            for byte in 0..width: bytes[field + byte] = ((value >> (byte * 8)) & 255u64) as u8
+            return bytes
+    expect(false).to_equal(true)
+    []
+
+fn item4_stream_comdat_read(bytes: [u8], offset: i64, width: i64) -> u64:
+    val valid = offset >= 0 and offset <= bytes.len() and width >= 1 and width <= 8 and width <= bytes.len() - offset
+    expect(valid).to_equal(true)
+    if not valid: return 0u64
+    var value = 0u64
+    for index in 0..width: value = value | ((bytes[offset + index] as u64) << (index * 8))
+    value
+
+fn item4_stream_comdat_find(bytes: [u8], marker: text) -> i64:
+    if bytes.len() < marker.len(): return -1
+    var found = -1
+    for offset in 0..(bytes.len() - marker.len() + 1):
+        var matched = true
+        for index in 0..marker.len():
+            if bytes[offset + index] != marker.byte_at(index) as u8: matched = false
+        if matched:
+            expect(found).to_equal(-1)
+            found = offset
+    found
+
+fn item4_stream_comdat_location(bytes: [u8], address: u64, width: u64, from_file: bool = false) -> i64:
+    val phoff = item4_stream_comdat_read(bytes, 32, 8)
+    val count = item4_stream_comdat_read(bytes, 56, 2)
+    val valid = phoff <= bytes.len() as u64 and count > 0u64 and count < 64u64 and count * 56u64 <= bytes.len() as u64 - phoff
+    expect(valid).to_equal(true)
+    expect(item4_stream_comdat_read(bytes, 54, 2)).to_equal(56u64)
+    if not valid or item4_stream_comdat_read(bytes, 54, 2) != 56u64: return -1
+    for index in 0..(count as i64):
+        val at = phoff as i64 + index * 56
+        if item4_stream_comdat_read(bytes, at, 4) == 1u64:
+            val base = item4_stream_comdat_read(bytes, at + 16, 8)
+            val file_offset = item4_stream_comdat_read(bytes, at + 8, 8)
+            val size = item4_stream_comdat_read(bytes, at + 32, 8)
+            val start = if from_file: file_offset else: base
+            if address >= start and address - start <= size and width <= size - (address - start):
+                return ((if from_file: base else: file_offset) + address - start) as i64
+    expect(false).to_equal(true)
+    -1
+
+fn item4_stream_comdat_check(bytes: [u8], first_a: bool):
+    expect(item4_stream_comdat_read(bytes, 0, 4)).to_equal(0x464c457fu64)
+    expect(item4_stream_comdat_read(bytes, 18, 2)).to_equal(62u64)
+    val root = item4_stream_comdat_find(bytes, "CDATROOT")
+    val kept = item4_stream_comdat_find(bytes, if first_a: "CDGROUPA" else: "CDGROUPB")
+    val removed = item4_stream_comdat_find(bytes, if first_a: "CDGROUPB" else: "CDGROUPA")
+    expect(root >= 0 and kept >= 0).to_equal(true)
+    expect(removed).to_equal(-1)
+    if root < 0 or kept < 0: return
+    val expected = if first_a: 11u64 else: 22u64
+    val value_address = item4_stream_comdat_read(bytes, root + 8, 8)
+    val function_address = item4_stream_comdat_read(bytes, root + 16, 8)
+    val value = item4_stream_comdat_location(bytes, value_address, 8u64)
+    val code = item4_stream_comdat_location(bytes, function_address, 6u64)
+    if value < 0 or code < 0: return
+    expect(item4_stream_comdat_read(bytes, value, 8)).to_equal(expected)
+    expect(item4_stream_comdat_read(bytes, code, 1)).to_equal(0xb8u64)
+    expect(item4_stream_comdat_read(bytes, code + 1, 4)).to_equal(expected)
+    expect(item4_stream_comdat_read(bytes, code + 5, 1)).to_equal(0xc3u64)
+    expect(item4_stream_comdat_read(bytes, kept + 8, 8)).to_equal(value_address)
+
+describe "Streamed COMDAT whole-group selection":
+    it "retains distinct signatures with their own code data and associated relocations":
+        step("Select both independent signatures while discarding only the duplicate of the first")
+        val linked = item4_stream_comdat_image(["test/fixtures/linker/elf/stream_comdat_refs.o",
+            "test/fixtures/linker/elf/stream_comdat_a.o", "test/fixtures/linker/elf/stream_comdat_b.o",
+            "test/fixtures/linker/elf/stream_comdat_distinct.o"], [])
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        item4_stream_comdat_check(image, true)
+        val marker = item4_stream_comdat_find(image, "CDOTHER!")
+        expect(marker >= 0).to_equal(true)
+        if marker < 0: return
+        val data = item4_stream_comdat_location(image, item4_stream_comdat_read(image, marker + 8, 8), 8u64)
+        val code = item4_stream_comdat_location(image, item4_stream_comdat_read(image, marker + 16, 8), 6u64)
+        if data >= 0: expect(item4_stream_comdat_read(image, data, 8)).to_equal(33u64)
+        if code >= 0:
+            expect(item4_stream_comdat_read(image, code, 1)).to_equal(0xb8u64)
+            expect(item4_stream_comdat_read(image, code + 1, 4)).to_equal(33u64)
+            expect(item4_stream_comdat_read(image, code + 5, 1)).to_equal(0xc3u64)
+
+    it "accepts an ordinary retained local reference into a kept group":
+        step("Keep the local's group and inspect the outside relocation target rather than rejecting all group boundaries")
+        val linked = item4_stream_comdat_image(["test/fixtures/linker/elf/stream_comdat_refs.o",
+            "test/fixtures/linker/elf/stream_comdat_local_ref.o"], ["test/fixtures/linker/elf/stream_comdat_missing_provider.a"])
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        item4_stream_comdat_check(image, false)
+        val marker = item4_stream_comdat_find(image, "CDLOCAL!")
+        expect(marker >= 0).to_equal(true)
+        if marker < 0: return
+        val data = item4_stream_comdat_location(image, item4_stream_comdat_read(image, marker + 8, 8), 8u64)
+        if data >= 0: expect(item4_stream_comdat_read(image, data, 8)).to_equal(77u64)
+
+    it "resolves a discarded weak definition to zero or its surviving replacement for scalar and GOT references":
+        step("Link real weak definitions in losing and winning groups then inspect both emitted reference forms")
+        for variant in 0..3:
+            var objects = ["test/fixtures/linker/elf/stream_comdat_refs.o"]
+            if variant != 1: objects.push("test/fixtures/linker/elf/stream_comdat_a.o")
+            objects.push("test/fixtures/linker/elf/stream_comdat_weak_loser.o")
+            if variant == 2: objects.push("test/fixtures/linker/elf/stream_comdat_weak_replacement.o")
+            val linked = item4_stream_comdat_image(objects, [])
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_ok():
+                val image = linked.unwrap()
+                val marker = item4_stream_comdat_find(image, "CDWEAK!!")
+                expect(marker >= 0).to_equal(true)
+                if marker >= 0:
+                    val pointer = item4_stream_comdat_read(image, marker + 8, 8)
+                    val field_address = item4_stream_comdat_location(image, (marker + 16) as u64, 8u64, true)
+                    if field_address >= 0:
+                        val slot_address = (field_address + item4_stream_comdat_read(image, marker + 16, 8) as i64) as u64
+                        val slot = item4_stream_comdat_location(image, slot_address, 8u64)
+                        if slot >= 0: expect(item4_stream_comdat_read(image, slot, 8)).to_equal(pointer)
+                    if variant == 0:
+                        expect(pointer).to_equal(0u64)
+                    else:
+                        val data = item4_stream_comdat_location(image, pointer, 8u64)
+                        if data >= 0: expect(item4_stream_comdat_read(image, data, 8)).to_equal(if variant == 1: 88u64 else: 99u64)
+
+    it "treats a well-formed flags-only empty group as a no-op before a nonempty signature":
+        step("Remove the sole member's group flag and encode an actual flags-only group")
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-comdat-empty-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        val input = directory + "/empty.o"
+        val bytes = item4_stream_comdat_mutate(0, true)
+        expect(bytes.len()).to_be_greater_than(64)
+        if bytes.len() > 64:
+            expect(file_write_bytes(input, bytes)).to_equal(true)
+            val linked = item4_stream_comdat_image(["test/fixtures/linker/elf/stream_comdat_refs.o", input,
+                "test/fixtures/linker/elf/stream_comdat_a.o"], [])
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_ok(): item4_stream_comdat_check(linked.unwrap(), true)
+        if file_exists(input): expect(file_remove(input)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)
+
+    it "rejects malformed group structure even when a valid earlier group would win":
+        step("Mutate checked flags signature table member and extent fields in a real losing candidate")
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-comdat-malformed-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        val input = directory + "/invalid.o"
+        for kind in 0..13:
+            val bytes = item4_stream_comdat_mutate(kind)
+            expect(bytes.len()).to_be_greater_than(64)
+            if bytes.len() > 64:
+                expect(file_write_bytes(input, bytes)).to_equal(true)
+                item4_stream_comdat_reject(["test/fixtures/linker/elf/stream_comdat_refs.o",
+                    "test/fixtures/linker/elf/stream_comdat_a.o", input], [], if kind == 1 or kind == 11: "bounds" else: "COMDAT")
+        if file_exists(input): expect(file_remove(input)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)
+
+    it "charges actual group scans and preserves output on quota cancellation and extent failure":
+        step("Open real grouped objects before exhausting validation and selection scan allowances")
+        val objects = ["test/fixtures/linker/elf/stream_comdat_refs.o", "test/fixtures/linker/elf/stream_comdat_a.o",
+            "test/fixtures/linker/elf/stream_comdat_b.o"]
+        val opened = elf_stream_open_inputs_v1(objects, [], [95, 115, 116, 97, 114, 116],
+            item4_stream_comdat_limits(), item4_stream_comdat_cancelled)
+        expect(opened.is_ok()).to_equal(true)
+        if opened.is_ok():
+            var inputs = opened.unwrap()
+            expect(inputs.objects.len()).to_equal(3)
+            if inputs.objects.len() == 3:
+                inputs.records_left = 0u64
+                val exhausted = inputs.elf_stream_comdat_validate_v1(inputs.objects[1], item4_stream_comdat_cancelled)
+                expect(exhausted.is_err()).to_equal(true)
+                if exhausted.is_err(): expect(exhausted.unwrap_err()).to_contain("scan-work")
+                inputs.records_left = 20000000u64
+                val cancelled = inputs.elf_stream_comdat_section_kept_v1(2, 4, item4_stream_comdat_stop)
+                expect(cancelled.is_err()).to_equal(true)
+                if cancelled.is_err(): expect(cancelled.unwrap_err()).to_contain("cancelled")
+            expect(inputs.elf_stream_close_inputs_v1()).to_equal(true)
+            expect(inputs.closed).to_equal(true)
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-comdat-budget-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        val output = directory + "/protected"
+        val sentinel: [u8] = [17, 0, 255, 31]
+        expect(file_write_bytes(output, sentinel)).to_equal(true)
+        for kind in 0..4:
+            var limits = item4_stream_comdat_limits()
+            if kind == 0: limits.output_bytes = 12288u64
+            if kind == 1: limits.scratch_bytes = 1u64
+            if kind == 2: limits.scan_record_limit = 1u64
+            val linked = elf_stream_link_file_v1(objects, [], [95, 115, 116, 97, 114, 116],
+                output, directory, limits, if kind == 3: item4_stream_comdat_stop else: item4_stream_comdat_cancelled)
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_err():
+                val names = ["output", "scratch", "scan-work", "cancelled"]
+                expect(linked.unwrap_err()).to_contain(names[kind])
+            expect(file_read_bytes(output)).to_equal(sentinel)
+        expect(file_remove(output)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)
+
+    it "ignores discarded-only undefined errors and GOT slots while retaining GNU archive demand":
+        step("Discard actual missing-symbol and GOT relocations together with their losing group")
+        val roots = ["test/fixtures/linker/elf/stream_comdat_refs.o", "test/fixtures/linker/elf/stream_comdat_a.o"]
+        val baseline = item4_stream_comdat_image(roots, [])
+        val discarded = item4_stream_comdat_image(roots + ["test/fixtures/linker/elf/stream_comdat_losing.o",
+            "test/fixtures/linker/elf/stream_comdat_unused_undefined.o"], [])
+        expect(baseline.is_ok()).to_equal(true)
+        expect(discarded.is_ok()).to_equal(true)
+        if baseline.is_ok() and discarded.is_ok(): expect(discarded.unwrap()).to_equal(baseline.unwrap())
+        step("Supply an archive provider and observe GNU-compatible extraction from the surviving undefined record")
+        val pulled = item4_stream_comdat_image(roots + ["test/fixtures/linker/elf/stream_comdat_losing.o"],
+            ["test/fixtures/linker/elf/stream_comdat_missing_provider.a"])
+        expect(pulled.is_ok()).to_equal(true)
+        if pulled.is_ok():
+            item4_stream_comdat_check(pulled.unwrap(), true)
+            expect(item4_stream_comdat_find(pulled.unwrap(), "CDPULLED") >= 0).to_equal(true)
+        item4_stream_comdat_reject(["test/fixtures/linker/elf/stream_comdat_refs.o",
+            "test/fixtures/linker/elf/stream_comdat_losing.o", "test/fixtures/linker/elf/stream_comdat_a.o"], [], "missing_group")
+
+    it "rejects retained references to discarded local and loser-only global definitions":
+        step("Keep a nongroup relocation into a losing member and refuse a nonexistent surviving definition")
+        val roots = ["test/fixtures/linker/elf/stream_comdat_refs.o", "test/fixtures/linker/elf/stream_comdat_a.o"]
+        item4_stream_comdat_reject(roots + ["test/fixtures/linker/elf/stream_comdat_local_ref.o"], [], "discarded local")
+        item4_stream_comdat_reject(roots + ["test/fixtures/linker/elf/stream_comdat_global_ref.o"], [], "loser_only")
+        step("Do not synthesize undefined-record archive demand from a discarded definition")
+        item4_stream_comdat_reject(roots + ["test/fixtures/linker/elf/stream_comdat_global_ref.o"],
+            ["test/fixtures/linker/elf/stream_comdat_loser_provider.a"], "loser_only")
+
+    it "discards a losing group in an archive member selected for another symbol":
+        step("Extract force_archive while preserving the earlier group's code data and RELA winner")
+        val linked = item4_stream_comdat_image(["test/fixtures/linker/elf/stream_comdat_archive_refs.o",
+            "test/fixtures/linker/elf/stream_comdat_a.o"], ["test/fixtures/linker/elf/stream_comdat_archive_member.a"])
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        item4_stream_comdat_check(linked.unwrap(), true)
+        expect(item4_stream_comdat_find(linked.unwrap(), "CDARCHIV") >= 0).to_equal(true)
+
+    it "retains both generic flags-zero groups sharing a local signature":
+        step("Keep generic group members without applying COMDAT signature deduplication")
+        val linked = item4_stream_comdat_image(["test/fixtures/linker/elf/stream_comdat_refs.o",
+            "test/fixtures/linker/elf/stream_comdat_a.o", "test/fixtures/linker/elf/stream_comdat_generic_a.o",
+            "test/fixtures/linker/elf/stream_comdat_generic_b.o"], [])
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        expect(item4_stream_comdat_find(linked.unwrap(), "GENERIC_A") >= 0).to_equal(true)
+        expect(item4_stream_comdat_find(linked.unwrap(), "GENERIC_B") >= 0).to_equal(true)
+        item4_stream_comdat_check(linked.unwrap(), true)
+
+    it "reads real group membership words through a one-byte payload window":
+        step("Use actual one-character entry and signature names so read and name limits remain valid")
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-comdat-tiny-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        val output = directory + "/image"
+        var limits = item4_stream_comdat_limits()
+        limits.read_window_bytes = 1
+        limits.emit_window_bytes = 1
+        limits.name_bytes = 1
+        val linked = elf_stream_link_file_v1(["test/fixtures/linker/elf/stream_comdat_tiny.o",
+            "test/fixtures/linker/elf/stream_comdat_tiny.o"], [], [120], output, directory, limits, item4_stream_comdat_cancelled)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_ok():
+            expect(linked.unwrap().cleanup_pending).to_equal(false)
+            val bytes = file_read_bytes(output)
+            val entry = item4_stream_comdat_read(bytes, 24, 8)
+            val location = item4_stream_comdat_location(bytes, entry, 1u64)
+            if location >= 0: expect(item4_stream_comdat_read(bytes, location, 1)).to_equal(0xc3u64)
+        if file_exists(output): expect(file_remove(output)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)
+
+    it "selects the first signature as one group and reverses the winner with object order":
+        step("Link real local-signature COMDAT groups with code data and associated RELA members")
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-comdat-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        for first_a in [true, false]:
+            val a = "test/fixtures/linker/elf/stream_comdat_a.o"
+            val b = "test/fixtures/linker/elf/stream_comdat_b.o"
+            val objects = ["test/fixtures/linker/elf/stream_comdat_refs.o", if first_a: a else: b, if first_a: b else: a]
+            val output = directory + "/image-{first_a}"
+            var limits = item4_stream_comdat_limits()
+            limits.emit_window_bytes = 1
+            val linked = elf_stream_link_file_v1(objects, [], [95, 115, 116, 97, 114, 116],
+                output, directory, limits, item4_stream_comdat_cancelled)
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_ok():
+                expect(linked.unwrap().cleanup_pending).to_equal(false)
+                item4_stream_comdat_check(file_read_bytes(output), first_a)
+            if file_exists(output): expect(file_remove(output)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)
+
+    it "still rejects selected strong duplicates outside COMDAT and preserves output":
+        step("Add two ordinary strong definitions beside valid selectable groups")
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-comdat-duplicate-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        val output = directory + "/protected"
+        val sentinel: [u8] = [17, 0, 255, 31]
+        expect(file_write_bytes(output, sentinel)).to_equal(true)
+        val linked = elf_stream_link_file_v1([
+            "test/fixtures/linker/elf/stream_comdat_refs.o", "test/fixtures/linker/elf/stream_comdat_a.o",
+            "test/fixtures/linker/elf/stream_comdat_b.o", "test/fixtures/linker/elf/stream_comdat_duplicate_a.o",
+            "test/fixtures/linker/elf/stream_comdat_duplicate_b.o"], [], [95, 115, 116, 97, 114, 116],
+            output, directory, item4_stream_comdat_limits(), item4_stream_comdat_cancelled)
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_err(): expect(linked.unwrap_err()).to_contain("outside_duplicate")
+        expect(file_read_bytes(output)).to_equal(sentinel)
+        expect(file_remove(output)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)

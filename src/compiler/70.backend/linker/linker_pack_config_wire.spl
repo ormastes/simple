@@ -1,0 +1,139 @@
+"""Additive V2 argv protocol preserving the complete native linker configuration.
+
+The command ABI is unchanged. V1 admission does not imply V2 support: providers
+must explicitly decode this tag; callers must never retry V2 as V1. Policy
+digests attest policy only, not this configuration or manifest authority.
+"""
+use std.common.linker.link_request_v1.{LinkRequestV1}
+use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
+use compiler.backend.linker.linker_pack_wire.{LinkerPackJobV1, linker_pack_encode_job, linker_pack_decode_job}
+
+pub struct LinkerPackJobV2:
+    request: LinkRequestV1
+    policy: LinkExecutionPolicyV1
+    inputs: [text]
+    output: text
+    native_config: NativeLinkConfig
+
+fn _config_count(value: text) -> Result<i64, text>:
+    if value == "" or value.len() > 4: return Err("invalid V2 count")
+    if value.len() > 1 and value.starts_with("0"): return Err("noncanonical V2 count")
+    var result = 0
+    for byte in value.bytes():
+        if byte < 48 or byte > 57: return Err("invalid V2 count")
+        val digit = (byte - 48) as i64
+        if result > (4096 - digit) / 10: return Err("V2 count exceeds limit")
+        result = result * 10 + digit
+    Ok(result)
+
+class _ConfigArgs:
+    var args: [text]
+    var arena_bytes: i64
+
+    me append(value: text) -> Result<bool, text>:
+        if self.args.len() >= 4096 or value.len() > 1048576 or value.contains("\0"):
+            return Err("V2 argument limit or NUL")
+        val size = value.bytes().len()
+        if size > 1048576 - self.arena_bytes - 4: return Err("V2 arena exceeds limit")
+        self.args.push(value)
+        self.arena_bytes = self.arena_bytes + 4 + size
+        Ok(true)
+
+    me append_list(values: [text]) -> Result<bool, text>:
+        if values.len() > 4096: return Err("V2 list exceeds limit")
+        self.append("{values.len()}")?
+        for value in values: self.append(value)?
+        Ok(true)
+
+class _ConfigCursor:
+    args: [text]
+    var position: i64
+
+    me take() -> Result<text, text>:
+        if self.position >= self.args.len(): return Err("truncated V2 configuration")
+        val value = self.args[self.position]
+        self.position = self.position + 1
+        Ok(value)
+
+    me boolean() -> Result<bool, text>:
+        val value = self.take()?
+        if value == "0": return Ok(false)
+        if value == "1": return Ok(true)
+        Err("invalid V2 boolean")
+
+    me list() -> Result<[text], text>:
+        val count = _config_count(self.take()?)?
+        if count > self.args.len() - self.position: return Err("truncated V2 list")
+        var values: [text] = []
+        for index in 0..count: values.push(self.take()?)
+        Ok(values)
+
+fn _config_bool(value: bool) -> text:
+    if value: "1" else: "0"
+
+pub fn linker_pack_encode_job_v2(job: LinkerPackJobV2) -> Result<[text], text>:
+    # Bound the legacy envelope's argument construction before it iterates
+    # caller-owned inputs; its decoder checks aggregate bytes afterward.
+    if job.inputs.len() > 4096: return Err("V2 input count exceeds limit")
+    val base = linker_pack_encode_job(LinkerPackJobV1(request: job.request,
+        policy: job.policy, inputs: job.inputs, output: job.output))?
+    # Header, nine-byte linker-v1 command, and argument count.
+    var writer = _ConfigArgs(args: [], arena_bytes: 28 + 9 + 4)
+    writer.append("simple-link-job-v2")?
+    writer.append("{base.len()}")?
+    for arg in base: writer.append(arg)?
+    val config = job.native_config
+    for value in [config.runtime_path, config.target_triple, config.linker_abi, config.runtime_bundle]:
+        writer.append(value)?
+    for value in [config.pie, config.debug, config.strip_output, config.prefer_size_linker,
+            config.verbose, config.allow_duplicate_definitions, config.allow_cc_fallback]:
+        writer.append(_config_bool(value))?
+    writer.append_list(config.libraries)?
+    writer.append_list(config.library_paths)?
+    writer.append_list(config.retained_symbols)?
+    writer.append_list(config.extra_flags)?
+    Ok(writer.args)
+
+pub fn linker_pack_decode_job_v2(args: [text]) -> Result<LinkerPackJobV2, text>:
+    if args.len() < 2 or args.len() > 4096: return Err("invalid V2 argument count")
+    if args[0] != "simple-link-job-v2": return Err("unsupported linker job version")
+    var arena_bytes = 28 + 9 + 4
+    for value in args:
+        if value.len() > 1048576 or value.contains("\0"): return Err("V2 argument limit or NUL")
+        val size = value.bytes().len()
+        if size > 1048576 - arena_bytes - 4: return Err("V2 arena exceeds limit")
+        arena_bytes = arena_bytes + 4 + size
+    val base_count = _config_count(args[1])?
+    if base_count > args.len() - 2: return Err("truncated V2 base job")
+    var base: [text] = []
+    for index in 0..base_count: base.push(args[index + 2])
+    val job = linker_pack_decode_job(base)?
+    var cursor = _ConfigCursor(args: args, position: 2 + base_count)
+    val runtime_path = cursor.take()?
+    val target_triple = cursor.take()?
+    val linker_abi = cursor.take()?
+    val runtime_bundle = cursor.take()?
+    val pie = cursor.boolean()?
+    val debug = cursor.boolean()?
+    val strip_output = cursor.boolean()?
+    val prefer_size_linker = cursor.boolean()?
+    val verbose = cursor.boolean()?
+    val allow_duplicate_definitions = cursor.boolean()?
+    val allow_cc_fallback = cursor.boolean()?
+    val libraries = cursor.list()?
+    val library_paths = cursor.list()?
+    val retained_symbols = cursor.list()?
+    val extra_flags = cursor.list()?
+    if cursor.position != args.len(): return Err("trailing V2 arguments")
+    val config = NativeLinkConfig(libraries: libraries, library_paths: library_paths,
+        runtime_path: runtime_path, target_triple: target_triple, linker_abi: linker_abi,
+        runtime_bundle: runtime_bundle, pie: pie, debug: debug, strip_output: strip_output,
+        prefer_size_linker: prefer_size_linker, verbose: verbose,
+        allow_duplicate_definitions: allow_duplicate_definitions,
+        allow_cc_fallback: allow_cc_fallback, retained_symbols: retained_symbols,
+        extra_flags: extra_flags)
+    Ok(LinkerPackJobV2(request: job.request, policy: job.policy, inputs: job.inputs,
+        output: job.output, native_config: config))
+
+export LinkerPackJobV2, linker_pack_encode_job_v2, linker_pack_decode_job_v2

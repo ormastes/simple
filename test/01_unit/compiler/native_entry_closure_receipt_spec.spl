@@ -1,0 +1,79 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_build.native_entry_closure_receipt.*
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_snapshot_membership_v1,
+    native_entry_closure_request_identity_matches_v1}
+
+fn closure_test_binding() -> NativeEntryClosureBindingV1:
+    NativeEntryClosureBindingV1("revision", "commit", "tree", sha256_text("inventory"),
+        "src/main.spl", ["src/app", "src/lib"], sha256_text("policy"), sha256_text("producer"))
+
+describe "authenticated entry closure selections":
+    it "requires exact owner producer entry and ordered roots at receipt opening":
+        val producer = sha256_text("producer")
+        val roots = ["src/app", "src/lib"]
+        expect(native_entry_closure_request_identity_matches_v1(
+            "checkout", "src/main.spl", roots, producer,
+            "checkout", "src/main.spl", roots, producer)).to_equal(true)
+        expect(native_entry_closure_request_identity_matches_v1(
+            "other", "src/main.spl", roots, producer,
+            "checkout", "src/main.spl", roots, producer)).to_equal(false)
+        expect(native_entry_closure_request_identity_matches_v1(
+            "checkout", "src/other.spl", roots, producer,
+            "checkout", "src/main.spl", roots, producer)).to_equal(false)
+        expect(native_entry_closure_request_identity_matches_v1(
+            "checkout", "src/main.spl", ["src/lib", "src/app"], producer,
+            "checkout", "src/main.spl", roots, producer)).to_equal(false)
+        expect(native_entry_closure_request_identity_matches_v1(
+            "checkout", "src/main.spl", roots, sha256_text("other producer"),
+            "checkout", "src/main.spl", roots, producer)).to_equal(false)
+
+    it "rejects a full-inventory member absent from the admitted snapshot":
+        val selection = NativeEntryClosureSelectionV1(sha256_text("request"),
+            ["src/main.spl", "src/unselected.spl"],
+            [sha256_text("entry"), sha256_text("unselected")], [5, 10])
+        val entry_digest = sha256_text("entry")
+        val snapshot_manifest = "src/main.spl|sha256_{entry_digest}|5"
+        expect(native_entry_closure_snapshot_membership_v1(snapshot_manifest, selection)).to_equal(false)
+
+    it "admits a complete selected entry and transitive source inventory":
+        val binding = closure_test_binding()
+        val identity = native_entry_closure_binding_digest_v1(binding).unwrap()
+        val digests = [sha256_text("entry"), sha256_text("dependency")]
+        val selected = NativeEntryClosureSelectionV1(identity,
+            ["src/main.spl", "src/lib/dependency.spl"], digests, [5, 10])
+        val actual = native_entry_closure_validate_selection_v1(binding, selected,
+            selected.identities, digests, [5, 10])
+        expect(actual.is_ok()).to_equal(true)
+        expect(actual.unwrap().identities.len()).to_equal(2)
+
+    it "rejects stale request identity":
+        val binding = closure_test_binding()
+        val selected = NativeEntryClosureSelectionV1(sha256_text("other request"),
+            ["src/main.spl"], [sha256_text("entry")], [5])
+        expect(native_entry_closure_validate_selection_v1(binding, selected,
+            selected.identities, selected.digests, [5]).is_err()).to_equal(true)
+
+    it "rejects duplicate selected rows and changed source bytes":
+        val binding = closure_test_binding()
+        val identity = native_entry_closure_binding_digest_v1(binding).unwrap()
+        val duplicate = NativeEntryClosureSelectionV1(identity,
+            ["src/main.spl", "src/main.spl"], [sha256_text("entry"), sha256_text("entry")], [5, 5])
+        expect(native_entry_closure_validate_selection_v1(binding, duplicate,
+            ["src/main.spl"], [sha256_text("entry")], [5]).is_err()).to_equal(true)
+        val changed = NativeEntryClosureSelectionV1(identity,
+            ["src/main.spl"], [sha256_text("changed")], [5])
+        expect(native_entry_closure_validate_selection_v1(binding, changed,
+            ["src/main.spl"], [sha256_text("entry")], [5]).is_err()).to_equal(true)
+
+    it "rejects escaping or omitted entry identities":
+        val binding = closure_test_binding()
+        val identity = native_entry_closure_binding_digest_v1(binding).unwrap()
+        val escaping = NativeEntryClosureSelectionV1(identity,
+            ["../main.spl"], [sha256_text("entry")], [5])
+        expect(native_entry_closure_validate_selection_v1(binding, escaping,
+            escaping.identities, escaping.digests, [5]).is_err()).to_equal(true)
+        val omitted = NativeEntryClosureSelectionV1(identity,
+            ["src/lib/dependency.spl"], [sha256_text("dependency")], [10])
+        expect(native_entry_closure_validate_selection_v1(binding, omitted,
+            omitted.identities, omitted.digests, [10]).is_err()).to_equal(true)

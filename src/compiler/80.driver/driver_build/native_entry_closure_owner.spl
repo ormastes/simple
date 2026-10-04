@@ -1,0 +1,142 @@
+use compiler.driver.driver_build.native_entry_closure_receipt.*
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_open_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_snapshot_cache_root_v1,
+    compile_source_inventory_read_at_pointer_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_create_exclusive}
+use std.common.crypto.sha256.{sha256_text}
+
+pub fn native_entry_closure_snapshot_membership_v1(manifest: text,
+        selection: NativeEntryClosureSelectionV1) -> bool:
+    if selection.identities.len() != selection.digests.len() or
+            selection.identities.len() != selection.byte_counts.len(): return false
+    var rows: {text: bool} = {}
+    for row in manifest.split("\n"):
+        rows[row] = true
+    var index = 0
+    while index < selection.identities.len():
+        val row = "{selection.identities[index]}|sha256_{selection.digests[index]}|{selection.byte_counts[index]}"
+        if not rows.has(row): return false
+        index = index + 1
+    true
+
+pub struct NativeEntryClosureRequestV1:
+    source_root: text
+    snapshot: ScvCompileSnapshotV1
+    source_digest: text
+    generation: i64
+    binding: NativeEntryClosureBindingV1
+    receipt_path: text
+    receipt_digest: text
+
+pub fn native_entry_closure_request_identity_matches_v1(
+        actual_root: text, actual_entry: text, actual_roots: [text], actual_producer: text,
+        expected_root: text, expected_entry: text, expected_roots: [text], expected_producer: text
+) -> bool:
+    actual_root == expected_root and actual_entry == expected_entry and
+        actual_roots == expected_roots and actual_producer == expected_producer
+
+pub fn native_entry_closure_request_publish_v1(path: text, request: NativeEntryClosureRequestV1) -> Result<text, text>:
+    val binding = request.binding
+    val fields = [request.source_root, request.snapshot.snapshot_root,
+        binding.revision, binding.commit, binding.tree, binding.inventory_digest,
+        request.source_digest, request.generation.to_text(), binding.entry,
+        binding.policy_digest, binding.producer_digest, request.receipt_path,
+        request.receipt_digest]
+    var wire = "native-entry-closure-request-v1\n"
+    for field in fields:
+        if field == "" or field.contains("\n") or field.contains("\r"):
+            return Err("entry-closure-request-field-invalid")
+        wire = wire + field + "\n"
+    for root in binding.source_roots:
+        if root == "" or root.contains("\n") or root.contains("\r"):
+            return Err("entry-closure-request-root-invalid")
+        wire = wire + root + "\n"
+    if wire.len() > 65536 or not file_create_exclusive(path, wire):
+        return Err("entry-closure-request-publication-failed")
+    Ok(sha256_text(wire))
+
+pub fn native_entry_closure_request_read_v1(path: text, expected_digest: text,
+        expected_source_root: text, expected_entry: text,
+        expected_roots: [text], expected_producer: text
+) -> Result<NativeEntryClosureRequestV1, text>:
+    val opened = file_read_regular_no_follow_bounded(path, 65536)
+    if opened.is_err(): return Err("entry-closure-request-unreadable")
+    val wire = opened.unwrap()
+    if sha256_text(wire) != expected_digest or wire.contains("\r") or not wire.ends_with("\n"):
+        return Err("entry-closure-request-digest-invalid")
+    val rows = wire.split("\n")
+    if rows.len() < 16 or rows[0] != "native-entry-closure-request-v1":
+        return Err("entry-closure-request-schema-invalid")
+    var roots: [text] = []
+    var row = 14
+    while row < rows.len() - 1:
+        roots = roots.push(rows[row])
+        row = row + 1
+    if not native_entry_closure_request_identity_matches_v1(
+            rows[1], rows[9], roots, rows[11], expected_source_root,
+            expected_entry, expected_roots, expected_producer):
+        return Err("entry-closure-request-identity-mismatch")
+    val generation = rows[8].to_i64() ?? -1
+    if generation < 0 or generation.to_text() != rows[8]:
+        return Err("entry-closure-request-generation-invalid")
+    val snapshot = scv_compile_snapshot_open_v1(rows[1], rows[2], rows[3], rows[4], rows[5], rows[6])
+    if not snapshot.valid: return Err("entry-closure-request-snapshot-invalid:" + snapshot.reason)
+    val binding = NativeEntryClosureBindingV1(rows[3], rows[4], rows[5], rows[6],
+        rows[9], roots, rows[10], rows[11])
+    Ok(NativeEntryClosureRequestV1(rows[1], snapshot, rows[7], generation,
+        binding, rows[12], rows[13]))
+
+pub fn native_entry_closure_request_open_v1(request: NativeEntryClosureRequestV1,
+        expected_policy_digest: text) -> Result<NativeEntryClosureSelectionV1, text>:
+    if request.binding.policy_digest != expected_policy_digest:
+        return Err("entry-closure-policy-mismatch")
+    native_entry_closure_open_v1(request.source_root, request.snapshot,
+        request.source_digest, request.generation, request.binding,
+        request.receipt_path, request.receipt_digest)
+
+# Compiler-owned physical admission. It receives a snapshot already opened by
+# SCV and reauthenticates the exact source generation and snapshot membership.
+pub fn native_entry_closure_admit_v1(root: text, snapshot: ScvCompileSnapshotV1,
+        source_digest: text, generation: i64, binding: NativeEntryClosureBindingV1,
+        records: NativeEntryClosureSelectionV1) -> Result<NativeEntryClosureSelectionV1, text>:
+    if not snapshot.valid or binding.revision != snapshot.revision_id or
+            binding.commit != snapshot.commit_id or binding.tree != snapshot.tree_id or
+            binding.inventory_digest != snapshot.inventory_digest:
+        return Err("entry-closure-snapshot-binding-mismatch")
+    val cache_root = compile_source_inventory_snapshot_cache_root_v1(
+        root, snapshot.snapshot_root, snapshot.revision_id)
+    if cache_root == "": return Err("entry-closure-inventory-owner-invalid")
+    val opened = compile_source_inventory_read_at_pointer_v1(cache_root, source_digest)
+    if not opened.valid or opened.inventory == nil or opened.digest != source_digest or
+            opened.inventory!.generation != generation:
+        return Err("entry-closure-inventory-generation-invalid")
+    val manifest = file_read_regular_no_follow_bounded(
+        snapshot.snapshot_root + "/SCV_COMPILE_INVENTORY", 256 * 1024 * 1024)
+    if manifest.is_err(): return Err("entry-closure-inventory-unreadable")
+    val content = manifest.unwrap()
+    if sha256_text(content) != snapshot.inventory_digest:
+        return Err("entry-closure-snapshot-inventory-changed")
+    var identities: [text] = []
+    var digests: [text] = []
+    var counts: [i64] = []
+    var membership: {text: bool} = {}
+    for entry in opened.inventory!.entries:
+        identities = identities.push(entry.source_identity)
+        digests = digests.push(entry.content_digest)
+        counts = counts.push(entry.byte_count)
+        membership["{entry.source_identity}|sha256_{entry.content_digest}|{entry.byte_count}"] = true
+    val rows = if content == "": [] else: content.split("\n")
+    if rows.len() != snapshot.inventory_count:
+        return Err("entry-closure-snapshot-count-invalid")
+    for row in rows:
+        if not membership.has(row): return Err("entry-closure-snapshot-membership-invalid")
+    if not native_entry_closure_snapshot_membership_v1(content, records):
+        return Err("entry-closure-selected-source-not-in-snapshot")
+    native_entry_closure_validate_selection_v1(binding, records, identities, digests, counts)
+
+pub fn native_entry_closure_open_v1(root: text, snapshot: ScvCompileSnapshotV1,
+        source_digest: text, generation: i64, binding: NativeEntryClosureBindingV1,
+        path: text, digest: text) -> Result<NativeEntryClosureSelectionV1, text>:
+    val records = native_entry_closure_open_records_v1(path, digest)
+    if records.is_err(): return Err(records.unwrap_err())
+    native_entry_closure_admit_v1(root, snapshot, source_digest, generation, binding, records.unwrap())

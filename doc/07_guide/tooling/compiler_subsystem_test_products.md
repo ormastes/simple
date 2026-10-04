@@ -32,11 +32,24 @@ the three aggregate executables with binary-owned registration. The managed
 Phase 4 acceptance specs are three-case behavior probes, not full subsystem
 suites. Keep those results separate from the six-product matrix.
 
-Manager integration must schedule each product's build, enumeration and run as
-dependent operations, while unrelated products continue after failure. Preserve
-compatible frontend caches and use the user's current worker budget (40 backend
-jobs per lane for the active Windows repair). Missing binaries block only their
-dependent inventory/run operations; they do not become successful test rows.
+The separate post-Stage2 product manager schedules each product's build,
+binary-owned enumeration and run as dependent operations. A failed build blocks
+only that product's enumeration and run; a failed enumeration blocks only its
+run. Missing compiler admission blocks that backend's three products while the
+other backend continues. The current Linux/FreeBSD budget is 20 build threads
+shared by this matrix, with at least 10 per build and the existing enforced RSS
+cap. No source suffix count is a registered or executed test count.
+
+`scripts/bootstrap/run-compiler-subsystem-test-products.shs` is the standalone
+post-Stage2 entrypoint. It consumes admitted compiler binaries and receipts,
+produces six product jobs and an `INCOMPLETE`, `FAIL`, `PASS_WITH_SKIPS`, or
+`PASS` matrix receipt. `scripts/bootstrap/verify-compiler-subsystem-test-matrix.shs`
+checks a `PASS` receipt against retained binaries, source hashes, raw ledgers,
+watchdog receipts and per-case outcomes without executing tests again. These
+receipts are separate from canonical Phase 4's three-case acceptance probes.
+The manager requires an aggregate product producer and runtime registry; their
+source-bound build and native test results remain necessary for six-product
+acceptance.
 
 `--mode dynload` controls aspect packaging, whereas `--backend-plugin` selects a
 Simple backend provider exporting `simple_backend_plugin_v1`. An LLVM toolchain
@@ -45,6 +58,37 @@ actual loaded provider path/hash/identity, separately from test counts. C++ test
 framework linkage must retain the Simple assertions and share the executable's
 registered cases; merely linking a library cannot establish coverage.
 
-This page defines the requested acceptance boundary and source inventory. It
-does not claim the aggregate harness, enumeration, dynamic compiler providers,
-or complete manager wiring already exists.
+This page defines the acceptance boundary and source inventory. The separate
+manager scripts supply scheduling and verification only; they do not claim an
+aggregate harness, dynamic provider loading, or six passing native products.
+
+## Resume an absent backend without rerunning passed products
+
+Pin the resume-capable manager into the full product source before the first
+run. The first run may omit one backend's compiler/admission arguments. Its
+three products remain BLOCKED; the available backend can produce three PASS
+receipts. The overall matrix remains FAIL until all six products pass.
+
+Once the missing producer is admitted, call the same manager with `--resume`,
+the identical source/output roots and resource limits, and both backend
+compiler/admission inputs. Resume accepts exactly one fully passing backend
+and one wholly absent backend whose nine tasks are BLOCKED. Failed tests,
+partial build artifacts, changed evidence or source, changed limits, and
+non-admitted producer inputs are rejected. This is not a general retry mode.
+
+An exclusive `.product-owner.lock` covers validation through publication.
+A surviving lock after a killed owner requires inspection; never remove it
+while its owner is alive. Before changing the journal, resume checks retained
+hashes and replays the strict product evidence verifier without executing
+native test callbacks. It preserves the old matrix and journal in
+`resume-history/`, leaves passing product files untouched, and runs only the
+previously absent backend. The existing strict six-product final gate remains
+mandatory. Rejected preflight leaves the previous matrix/journal unchanged.
+An interrupted resume retains history and is rejected on a second resume;
+inspect the partial attempt instead of overwriting it.
+
+Products and their source must remain at their original absolute paths.
+Copying evidence to another output root or updating the product source commit
+breaks the recorded source, inventory, binary, command and watchdog bindings.
+Resume does not establish dynamic backend provider loading: the current product
+builder still records builtin provider identity.

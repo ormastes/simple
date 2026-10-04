@@ -86,3 +86,8 @@ sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --stage2     # detached 
 - To retry Stage 2 without paying the Rust builds again, rerun `--stage2`
   WITHOUT `--sync`: the committed Rust authority for the unchanged snapshot is
   reused (a new snapshot changes the Rust input fingerprint -> full rebuild).
+- Run 3 (after the `/proc` sampler, #2417): Stage 2 compiled ~25 min, 3729
+  samples, peak 894 MiB, then ONE sample stalled >5s (20 compile threads on 20
+  TCG vCPUs) -> exit 89 again. The watchdog's observation-budget ceiling is now
+  30000 ms (default still 1000) and this lane exports 30000. The budget only
+  bounds a hung sampler; it never was a hard memory limit.

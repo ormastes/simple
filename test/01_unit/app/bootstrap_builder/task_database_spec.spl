@@ -1,0 +1,65 @@
+use std.common.process.observation_v4.{ProcessObservationEnvironmentV4}
+use app.buildrunner.task_context.{build_runner_environment_digest_v1}
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1}
+use std.common.task_runner.contracts.{task_runner_identity_v1}
+use app.buildrunner.task_database.{BuildRunnerTaskContextV1,
+    build_runner_context_encode_v1, build_runner_context_decode_v1,
+    build_runner_task_identity_v1}
+
+fn context_fixture_task(payload: text) -> BuildTaskV1:
+    val digest = sha256_text("fixture producer")
+    BuildTaskV1(id: "compiler-a", attempt: 1, phase: "phase3",
+        producer_digest: digest, source_digest: digest, toolchain_digest: digest,
+        dependencies: [], program: "compiler", args: ["native-build", "input.spl"],
+        inputs: [BuildInputV1("task-context/compiler-a.sdn", sha256_text(payload)),
+            BuildInputV1("input.spl", digest)], outputs: ["compiler.exe"],
+        cache_key: digest, timeout_ms: 1000, memory_limit_bytes: 1073741824, links: [])
+
+fn context_fixture_payload(env: text) -> text:
+    build_runner_context_encode_v1(BuildRunnerTaskContextV1("llvm",
+        sha256_text("runtime"), sha256_text("policy"), sha256_text(env))).unwrap()
+
+describe "BuildRunner admitted task database identity":
+    it "preserves semantic identity across retry numbers":
+        val payload = context_fixture_payload("env-a")
+        var task = context_fixture_task(payload)
+        val first = task_runner_identity_v1(build_runner_task_identity_v1(task, payload).unwrap()).unwrap()
+        task.attempt = 2
+        val second = task_runner_identity_v1(build_runner_task_identity_v1(task, payload).unwrap()).unwrap()
+        expect(second).to_equal(first)
+
+    it "rejects unadmitted context edits and invalidates admitted environment changes":
+        val original = context_fixture_payload("env-a")
+        val changed = context_fixture_payload("env-b")
+        val task = context_fixture_task(original)
+        expect(build_runner_task_identity_v1(task, changed).is_err()).to_equal(true)
+        val before = task_runner_identity_v1(build_runner_task_identity_v1(task, original).unwrap()).unwrap()
+        val after = task_runner_identity_v1(build_runner_task_identity_v1(context_fixture_task(changed), changed).unwrap()).unwrap()
+        expect(before == after).to_equal(false)
+
+    it "binds ordered arguments and rejects missing context inventory":
+        val payload = context_fixture_payload("env-a")
+        var task = context_fixture_task(payload)
+        val before = task_runner_identity_v1(build_runner_task_identity_v1(task, payload).unwrap()).unwrap()
+        task.args = ["input.spl", "native-build"]
+        val after = task_runner_identity_v1(build_runner_task_identity_v1(task, payload).unwrap()).unwrap()
+        expect(before == after).to_equal(false)
+        task.inputs = []
+        expect(build_runner_task_identity_v1(task, payload).is_err()).to_equal(true)
+        expect(build_runner_context_decode_v1(payload + "extra").is_err()).to_equal(true)
+
+    it "binds inherited environment while normalizing only owned private cache paths":
+        val first = [ProcessObservationEnvironmentV4("FEATURE", "on"),
+            ProcessObservationEnvironmentV4("TEMP", "attempt-a/work/.builder-cache/temp")]
+        val retry = [ProcessObservationEnvironmentV4("FEATURE", "on"),
+            ProcessObservationEnvironmentV4("TEMP", "attempt-b/work/.builder-cache/temp")]
+        expect(build_runner_environment_digest_v1(first, "attempt-a").unwrap()).to_equal(
+            build_runner_environment_digest_v1(retry, "attempt-b").unwrap())
+        val changed = [ProcessObservationEnvironmentV4("FEATURE", "off"),
+            ProcessObservationEnvironmentV4("TEMP", "attempt-b/work/.builder-cache/temp")]
+        expect(build_runner_environment_digest_v1(first, "attempt-a").unwrap() ==
+            build_runner_environment_digest_v1(changed, "attempt-b").unwrap()).to_equal(false)
+        expect(build_runner_environment_digest_v1(first, "wrong-root").is_err()).to_equal(true)
+        expect(build_runner_environment_digest_v1([first[1], first[0]], "attempt-a").is_err()).to_equal(true)
