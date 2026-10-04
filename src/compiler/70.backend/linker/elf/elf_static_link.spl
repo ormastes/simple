@@ -40,7 +40,7 @@ use compiler.backend.linker.elf_parser.{
 use compiler.backend.linker.elf_inspect.{ET_REL, EM_X86_64, EM_AARCH64, SHT_PROGBITS}
 use compiler.backend.linker.sym_resolver.{SymResolution, SymEntry, sym_resolve_objects}
 use compiler.backend.linker.reloc_engine.{
-    RelocArch, reloc_apply, reloc_patch_bytes, reloc_patch_width, reloc_patch_range_valid,
+    RelocArch, reloc_patch_width, reloc_patch_range_valid,
     R_X86_64_GOT32, R_X86_64_GOT64, R_X86_64_GOTPLT64, R_X86_64_GOTOFF64,
     R_X86_64_PLTOFF64, R_X86_64_SIZE64,
     R_AARCH64_MOVW_GOTOFF_G0, R_AARCH64_MOVW_GOTOFF_G3,
@@ -60,6 +60,9 @@ use compiler.backend.linker.elf.riscv_link_support.{elf_riscv_flags, elf_riscv_h
 use compiler.backend.linker.elf.riscv_align.{elf_riscv_align_objects}
 use compiler.backend.linker.elf.riscv_attributes.{elf_riscv_attributes}
 use compiler.backend.linker.elf.elf_nonalloc_section.{elf_append_nonalloc_section}
+use compiler.backend.linker.elf.elf_operation_bindings.{
+    ElfSealedOperationsV1, ElfComposedImageV1, elf_builtin_operations_v1
+}
 use compiler.backend.linker.riscv_static_reloc.{riscv_static_delta, riscv_uleb_width, riscv_uleb_patch}
 use compiler.backend.linker.elf.merge_strings.{
     ElfMergePlan, elf_merge_section, elf_merge_sections, elf_merge_offset
@@ -90,7 +93,7 @@ use compiler.backend.linker.elf.synthetic_sections.{
     GOTPLT_RESERVED
 }
 use compiler.backend.linker.elf.elf_exec_writer.{
-    ElfOutSec, ElfExecPlan, elf_out_sec, elf_exec_plan, elf_exec_find, elf_write_image,
+    ElfOutSec, ElfExecPlan, elf_out_sec, elf_exec_find,
     ELF_SEG_R, ELF_SEG_RX, ELF_SEG_RW,
     SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHT_PROGBITS_E, SHT_STRTAB_E, SHT_NOTE_E, SHT_NOBITS_E
 }
@@ -1252,6 +1255,12 @@ fn elf_link_structural(req: ElfLinkRequest) -> Result<[i64], text>:
 
 fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         retained_symbols: [text]) -> Result<[i64], text>:
+    val operations = elf_builtin_operations_v1()?
+    val result = elf_link_with_operations(req, strip_output, retained_symbols, operations)?
+    Ok(result.image)
+
+fn elf_link_with_operations(req: ElfLinkRequest, strip_output: bool,
+        retained_symbols: [text], operations: ElfSealedOperationsV1) -> Result<ElfComposedImageV1, text>:
     val target = req.target
     val machine = elf_static_machine(target)?
     val mode = req.mode
@@ -1500,7 +1509,11 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     if pie:
         base = 0
         e_type = ET_DYN_T
-    val plan = elf_exec_plan(secs, base, elf_static_page(target))?
+    val plan = operations.layout(secs, base, elf_static_page(target))?
+    # A selected layout may move the image. Synthetic header symbols must
+    # follow its validated header LOAD rather than the requested default base.
+    for segment in plan.segments:
+        if segment.p_type == 1 and segment.p_offset == 0: base = segment.p_vaddr
     var in_to_plan: [i64] = []
     for o in inputs.outs:
         in_to_plan = in_to_plan.push(elf_exec_find(plan, o.name))
@@ -1651,10 +1664,10 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             a = 0
             p = 0
             rtype = if r.rtype == 24: 27 else: 28
-        val applied = reloc_apply(target, contents[k], r.out_off, rtype, s, a, p)
-        if not applied.success:
-            return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {applied.error}")
-        contents[k] = reloc_patch_bytes(target, contents[k], r.out_off, rtype, s, a, p)
+        val applied = operations.relocate(target, contents[k], r.out_off, rtype, s, a, p)
+        if applied.is_err():
+            return Err("object {r.oi}: relocation type {r.rtype} against '{r.name}' at {p}: {applied.unwrap_err()}")
+        contents[k] = applied.unwrap()
         j = j + 1
 
     # --- synthetic contents ---
@@ -1784,7 +1797,12 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
         pk = pk + 1
 
     val entry_addr = elf_entry_addr(ctx, lay, res.defined[req.entry])?
-    var image = elf_write_image(e_type, machine, entry_addr, plan, out)
+    var image = operations.write_image(e_type, machine, entry_addr, plan, out)?
+    val note_index = elf_exec_find(plan, ".note.gnu.build-id")
+    if note_index < 0: return Err("ELF writer build-id section is missing")
+    val note_start = plan.offsets[note_index]
+    if note_start < 0 or note_start > image.len() or 36 > image.len() - note_start:
+        return Err("ELF writer build-id patch range is truncated")
     if target == RelocArch.Riscv64:
         # Header identity participates in the existing final build-id hash.
         image[48] = riscv_flags
@@ -1793,12 +1811,14 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
     if riscv_attributes.len() > 0:
         image = elf_append_nonalloc_section(image, ".riscv.attributes", 0x70000003, riscv_attributes)?
     val digest = sha1_bytes(image)
-    val note_off = plan.offsets[elf_exec_find(plan, ".note.gnu.build-id")] + 16
+    val note_off = note_start + 16
+    if note_off > image.len() or 20 > image.len() - note_off:
+        return Err("ELF writer final build-id patch range is truncated")
     var di: i64 = 0
     while di < 20:
         image[note_off + di] = digest.get(di)
         di = di + 1
-    Ok(image)
+    Ok(ElfComposedImageV1(image: image, composition: operations.composition_receipt()))
 
 # ============================================================================
 # Exports
@@ -1806,5 +1826,6 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
 
 export ElfStaticInputs, ElfLinkRequest
 export elf_static_link, elf_link, elf_link_stripped, elf_link_configured, elf_link_structural
+export elf_link_with_operations, ElfComposedImageV1
 export ELF_STATIC_BASE
 export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
