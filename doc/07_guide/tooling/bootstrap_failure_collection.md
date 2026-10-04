@@ -218,6 +218,28 @@ and use an identity-checked independent diagnostic lane until it is wired.
 Formal qualification, lineage admission and publication still require all
 their evidence; early descendants remain quarantined.
 
+### Bind newly built producers between waves
+
+A fresh bootstrap cannot validate the hashes of compilers it has not built.
+Construct each next wave after the preceding producer and its compile-and-run
+sanity task have retained terminal evidence. The managed task owner must bind
+the actual compiler output path and digest into that wave's commands and cache
+identity. A static inventory that accepts only pre-existing compilers does not
+implement the fresh bootstrap graph above.
+
+The implementation lane adds `managed-tasks-next-producer` to the existing
+managed owner and `managed-next-producer-launch.shs` as argument transport.
+Its native factory checks remain pending until exercised with a built compiler;
+passing shell transport fixtures does not qualify the factory. Keep the whole
+test inventory and early build waves independent after producer sanity, and
+retain failed test summaries as failures.
+
+`--full-bootstrap --stop-after-seed` prepares the canonical seed generation and
+writes `phase1-seed.env`. It records whole tests as `NOT_RUN`, Stage 2 as
+unadmitted and backend dynload as unqualified. Combining seed-stop with receipt
+validation, resume, deployment or later-phase stop options is an error before
+dispatch; no alternate exit may be mistaken for seed preparation success.
+
 ### Windows RC1 completion scope
 
 For the current release, one successful host qualifies the RC: Windows is the
