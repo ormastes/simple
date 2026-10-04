@@ -12,7 +12,7 @@ remain unchanged; Simple linking is selected explicitly.
 | Windows | Native wrapper has internal COFF/PE routing and AMD64/ARM64 handling | Complete runtime/library imports, relocation and unwind corpus; run the actual linker and its produced application on each admitted Windows architecture; preserve explicit selection and no-clobber behavior |
 | Linux | Explicit internal ELF hosted wrapper; retained x64 stream handles COMMON/GOT/COMDAT | Complete remaining ELF/TLS/unwind and full-product semantics, trusted opt-in CLI admission, actual link/load/run corpus and constrained worker evidence |
 | FreeBSD | Hosted ELF wrapper selects FreeBSD CRT/runtime and brands the image | Run actual linker/compiler/application in FreeBSD, validate CRT/interpreter/ABI and failures; use the repository QEMU bootstrap/check entrypoint when exercising from Linux |
-| macOS | Explicit internal native route now selects the x64/arm64 Mach-O file adapter, validates modeled configuration and consumes actual object/archive/thin-dylib inputs | Complete SDK text-stub and dyld-cache provider support, remaining configuration/TLS/TLV/unwind/weak/reexport semantics and managed admission; execute the actual wrapper and Darwin loader/signing checks on both architectures |
+| macOS | Explicit internal native route selects the x64/arm64 Mach-O file adapter, validates modeled configuration and consumes object/archive/thin-dylib inputs; v4/v5 text-stub leaf routing is source-implemented and remains runtime-unverified | Complete SDK dependency/access/binding and dyld-cache provider support, remaining configuration/TLS/TLV/unwind/weak/reexport semantics and managed admission; execute the actual wrapper and Darwin loader/signing checks on both architectures |
 | SimpleOS | Explicit cross-target BootLayoutPlan path emits x64/arm64 images | Separately establish a linker executable running inside SimpleOS, its file/process/runtime owners, and on-guest link/load/run acceptance; host-side image generation and booting a generated image alone are insufficient |
 
 Current production admission also requires review: managed native mode rejects
@@ -32,6 +32,6 @@ A common portable spec may be reused, but every claimed row needs its own run.
 The preparation/publication split and strict Mach-O file adapter are shared
 implementation prerequisites. Neither attests worker authority or closes native
 host execution gates. The Mach-O adapter requires explicit versions/signing
-identity and rejects unsupported policy; its thin-dylib subset does not imply a
+identity and rejects unsupported policy; its binary/text leaf-provider path does not imply a
 normal SDK or full application links successfully. Simple compilation, host/guest
 runs, coverage and full Phase 4 qualification remain UNRUN.
