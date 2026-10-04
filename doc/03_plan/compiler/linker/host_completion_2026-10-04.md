@@ -35,3 +35,7 @@ host execution gates. The Mach-O adapter requires explicit versions/signing
 identity and rejects unsupported policy; its binary/text leaf-provider path does not imply a
 normal SDK or full application links successfully. Simple compilation, host/guest
 runs, coverage and full Phase 4 qualification remain UNRUN.
+
+Runpath source review now covers core `78194e42070`, native routing `ccb9ae0c20b`
+and seven authored acceptance scenarios at `f64c60b4f56`, without concrete P0/P1
+findings. This review does not supply an admitted runtime or complete any host row.

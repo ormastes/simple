@@ -29,6 +29,9 @@ explicit inline-catalog precedence, and does not borrow executable/ancestor
 runpaths. Current LLVM command-line runtime-path fallback and dyld's inherited
 runtime stack are distinct. See `macho_provider_rpaths_2026-10-04.md` in the linker
 design directory for V2 compatibility, SDK rerooting and contextual cache rules.
+Exact core `78194e42070`, native routing `ccb9ae0c20b` and seven-case acceptance
+`f64c60b4f56` received independent source review without concrete P0/P1 findings;
+this closes that candidate review, not the row's execution or SDK qualification.
 
 Managed internal-engine admission, bounded/no-swap worker evidence and Windows,
 Linux, FreeBSD and SimpleOS execution remain separate requirements. External

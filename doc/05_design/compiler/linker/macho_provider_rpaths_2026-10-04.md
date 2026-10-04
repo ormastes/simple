@@ -123,5 +123,18 @@ and retain source review versus execution distinctions.
 - [LLVM TextStubV5.cpp](https://llvm.org/docs/doxygen/TextStubV5_8cpp_source.html):
   target-scoped runpath metadata.
 
-Implementation and final test review evidence are recorded separately after
-exact candidates exist. Full SDK compatibility and native host execution remain open.
+## Source review evidence
+
+Independent review found no concrete P0/P1 in core `78194e42070`, native routing
+`ccb9ae0c20b`, and the seven authored scenarios/manual at `f64c60b4f56`.
+The core retains original envelope validation, distinguishes explicit inline
+catalog entries from cached standalone inputs, charges delivered bytes even
+when another owner resolves a cached path, and charges runpath validation and
+request construction. The tests exercise real binary/V5 paths, native output
+bindings, conflicting physical owners, inline priority/cycles, malformed commands,
+and refusal to borrow executable/ancestor runpaths. This is source review only.
+
+The acceptance matrix above also defines broader obligations; seven scenarios
+do not establish every quota boundary or representative SDK/host workload.
+Full SDK compatibility, generated execution evidence and native host execution
+remain open. No admitted deployed runtime was established in this lane.
