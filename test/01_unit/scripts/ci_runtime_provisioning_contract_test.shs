@@ -14,6 +14,11 @@ check_job() {
   [ "$(printf '%s\n' "$provision" | grep -c '[0-9]')" = 1 ] || return 1
   [ "$(printf '%s\n' "$use_line" | grep -c '[0-9]')" = 1 ] || return 1
   [ "$provision" -lt "$use_line" ] || return 1
+  llvm=$(grep -nF 'sh scripts/ci/install-selfhost-linux-llvm.shs' "$file" | cut -d: -f1)
+  [ "$(printf '%s\n' "$llvm" | grep -c '[0-9]')" = 1 ] || return 1
+  [ "$llvm" -lt "$provision" ] || return 1
+  grep -F 'uses: dtolnay/rust-toolchain@nightly' "$file" >/dev/null || return 1
+  grep -F 'runs-on: ubuntu-24.04' "$file" >/dev/null || return 1
   for required in 'uses: actions/cache@v4' '~/.cargo/registry' '~/.cargo/git' 'src/compiler_rust/target' 'test -x bin/simple' 'bin/simple --version'; do
     grep -F "$required" "$file" >/dev/null || return 1
   done
@@ -27,6 +32,11 @@ for lane in path cache; do
   consumer='sh scripts/ci/cache-promote.shs'
   if [ "$lane" = path ]; then consumer='RESULT=$(bin/simple run test/ci/normalize_path.spl)'; fi
   check_job "$tmp/$lane" "$consumer"
+  sed '/sh scripts\/ci\/install-selfhost-linux-llvm.shs/d' "$tmp/$lane" > "$tmp/no-llvm"
+  if check_job "$tmp/no-llvm" "$consumer"; then echo 'FAIL missing LLVM prerequisite accepted'; exit 1; fi
+  grep -vF 'sh scripts/ci/install-selfhost-linux-llvm.shs' "$tmp/$lane" > "$tmp/late-llvm"
+  printf 'sh scripts/ci/install-selfhost-linux-llvm.shs\n' >> "$tmp/late-llvm"
+  if check_job "$tmp/late-llvm" "$consumer"; then echo 'FAIL late LLVM prerequisite accepted'; exit 1; fi
   sed '/sh scripts\/ci\/provision-cache-writer-runtime.shs/d' "$tmp/$lane" > "$tmp/missing"
   if check_job "$tmp/missing" "$consumer"; then echo 'FAIL missing provision accepted'; exit 1; fi
   printf '%s\n' "$consumer" > "$tmp/reordered"
@@ -38,4 +48,4 @@ for lane in path cache; do
   printf 'cp src/compiler_rust/target/release/simple bin/simple\n' >> "$tmp/seed"
   if check_job "$tmp/seed" "$consumer"; then echo 'FAIL Rust seed normal-tool fallback accepted'; exit 1; fi
 done
-echo 'PASS: two self-hosted CI consumer contracts; eight broken setup mutations rejected'
+echo 'PASS: two self-hosted CI consumer contracts; twelve broken setup mutations rejected'
