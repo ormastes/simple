@@ -179,6 +179,11 @@ impl<'a> MirLowerer<'a> {
     /// `doc/08_tracking/bug/enum_field_i64_zero_destructure_2026-04-28.md`);
     /// the `Some`/`Ok`/`Err` fast paths above bypassed that logic.
     fn box_enum_payload_if_needed(&mut self, value: VReg, arg_ty: TypeId) -> MirLowerResult<VReg> {
+        if arg_ty == TypeId::BOOL {
+            // Enum payloads hold RuntimeValues. Boolean true is SPECIAL_TRUE
+            // (11), not the tagged integer 1 (8) produced by BoxInt.
+            return self.box_scalar_for_tagged_slot(TypeId::ANY, arg_ty, value);
+        }
         if arg_ty == TypeId::U64 {
             return self.box_u64_runtime_value(value);
         }
@@ -191,7 +196,6 @@ impl<'a> MirLowerer<'a> {
                 | TypeId::U8
                 | TypeId::U16
                 | TypeId::U32
-                | TypeId::BOOL
         );
         if !needs_box {
             return Ok(value);
