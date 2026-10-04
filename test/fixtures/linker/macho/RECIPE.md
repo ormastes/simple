@@ -136,3 +136,10 @@ They were not revalidated through LLVM: invalid all-target metadata and decoded
 duplicate-key refusal belong to our frozen strict reader contract, while `$ld$`
 policy is deliberately unsupported by leaf lowering. They do not extend the
 external conversion/comparison PASS observations recorded above.
+
+Final targeted YAML fixture `tbd_quoted_flow_v4.tbd` was accepted once by:
+`llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v4 tbd_quoted_flow_v4.tbd -o /tmp/item4-quoted-flow-oracle-20261004.tbd`.
+Its longest decoded quoted name is32 bytes. The two hand-authored
+`tbd_bad_mapping_separator_v4`/`tbd_bad_target_separator_v4` cases omit YAML
+mapping separator whitespace and are strict-reader rejection inputs; no prior
+successful external check was repeated.

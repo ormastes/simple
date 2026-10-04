@@ -31,9 +31,29 @@ describe "actual TextAPI providers through the Mach-O file adapter":
     it "ITEM4-REQ-006 validates every declared target before selecting an otherwise valid x64 view":
         step("Reject malformed unselected target metadata and decoded duplicate keys")
         val target = MachOTbdTargetV1(arch: RelocArch.X86_64, platform: 1)
+        step("Decode quoted punctuation and multiline flow at the exact name-byte boundary")
+        val quoted = file_read_bytes("test/fixtures/linker/macho/tbd_quoted_flow_v4.tbd")
+        expect(quoted.len() > 32).to_equal(true)
+        if quoted.len() <= 32: return
+        var boundary = macho_tbd_default_limits_v1()
+        boundary.max_name_bytes = 32
+        val accepted = macho_read_tbd_v1(quoted, target, boundary)
+        expect(accepted.is_ok()).to_equal(true)
+        if accepted.is_err(): return
+        expect(accepted.unwrap().main.symbols.len()).to_equal(3)
+        for name in ["_abcdefghijklmnopqrstuvwxyzABCDE", "_comma,#tag'quote", "_colon:value"]:
+            var found = false
+            for symbol in accepted.unwrap().main.symbols:
+                if symbol.name == name: found = true
+            expect(found).to_equal(true)
+        boundary.max_name_bytes = 31
+        val too_long = macho_read_tbd_v1(quoted, target, boundary)
+        expect(too_long.is_err()).to_equal(true)
+        if too_long.is_err(): expect(too_long.unwrap_err()).to_contain("TBD")
         for name in ["bad_unselected_v4", "bad_unselected_v5", "duplicate_unselected_identity_v5",
                 "bad_unselected_versions_v5", "duplicate_unselected_umbrella_v5", "escaped_duplicate_key_v5",
-                "wrong_version_v4", "wrong_version_v5", "version_overflow_v4", "version_overflow_v5"]:
+                "wrong_version_v4", "wrong_version_v5", "version_overflow_v4", "version_overflow_v5",
+                "bad_mapping_separator_v4", "bad_target_separator_v4"]:
             val bytes = file_read_bytes("test/fixtures/linker/macho/tbd_{name}.tbd")
             expect(bytes.len() > 0).to_equal(true)
             if bytes.len() == 0: return
