@@ -37,3 +37,13 @@ At the subsequent process revalidation, test-runner owner 37596 and collector
 records `exit_code: 139`, `compile_exit: 139`, `artifact_sha256: null`, and
 `admitted: false`. This is a terminal failed attempt, not a verified wait or a
 usable test runtime. The exit code alone does not identify its root cause.
+
+Scoped structural checks against `4e18d0fd7f9102b5748e7e4821692c00eea5a097`
+passed whitespace, direct-env runtime guards (working/staged) and numbered
+artifact classification (five classified paths, zero numbered artifacts).
+The prior zero-executable-spec audit for `doc/06_spec` remains applicable: this
+change adds only Markdown there. Test-tree delta reports 3152 inherited
+offenders and zero introduced. Its recorded list is
+`C:/dev/simple/.git/item4-native-source-authority-preexisting-offenders.txt`,
+SHA256 `2fb68a47bab7953e058a449562ecba2df9f135b8d2e2d99c3e14f373b1c1d719`.
+This preserves the existing red-tree debt rather than claiming it is repaired.
