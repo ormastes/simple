@@ -1,0 +1,43 @@
+use std.spec
+use compiler.core.parser.{parser_has_errors}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types_expr.{TypeKind, parser_type_kind_named_name}
+
+describe "composite impl targets survive the flat bridge":
+    it "preserves an array target and its implicit receiver element type":
+        val module = parse_and_build_module("impl<T> Hash for [T] where T: Hash:\n    fn hash() -> i64:\n        0\n", "array_impl.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.impls.len()).to_equal(1)
+        val implementation = module.impls[0]
+        match implementation.type_.kind:
+            case TypeKind.Array(element, _):
+                expect(parser_type_kind_named_name(element.kind)).to_equal("T")
+            case _: fail("array impl target was lost")
+        val method = implementation.methods["hash"] ?? panic("missing hash method")
+        expect(method.params.len()).to_equal(1)
+        match method.params[0].type_.kind:
+            case TypeKind.Array(element, _):
+                expect(parser_type_kind_named_name(element.kind)).to_equal("T")
+            case _: fail("array receiver type was lost")
+
+    it "preserves tuple arity and all generic target elements":
+        val module = parse_and_build_module("impl<A, B, C> Hash for (A, B, C) where A: Hash, B: Hash, C: Hash:\n    fn hash(self) -> i64:\n        0\n", "tuple_impl.spl")
+        expect(parser_has_errors()).to_equal(false)
+        val implementation = module.impls[0]
+        match implementation.type_.kind:
+            case TypeKind.Tuple(elements):
+                expect(elements.len()).to_equal(3)
+                expect(parser_type_kind_named_name(elements[0].kind)).to_equal("A")
+                expect(parser_type_kind_named_name(elements[1].kind)).to_equal("B")
+                expect(parser_type_kind_named_name(elements[2].kind)).to_equal("C")
+            case _: fail("tuple impl target was lost")
+        val method = implementation.methods["hash"] ?? panic("missing hash method")
+        expect(method.params.len()).to_equal(1)
+        match method.params[0].type_.kind:
+            case TypeKind.Tuple(elements): expect(elements.len()).to_equal(3)
+            case _: fail("explicit tuple receiver type was lost")
+
+    it "keeps identifier impl targets on the existing named path":
+        val module = parse_and_build_module("impl Value:\n    fn hash() -> i64:\n        0\n", "named_impl.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(parser_type_kind_named_name(module.impls[0].type_.kind)).to_equal("Value")

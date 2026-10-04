@@ -35,6 +35,7 @@ use compiler.core.ast.{decl_use_import, decl_set_lazy, decl_export_names}
 use compiler.core.ast.{decl_get_imports, decl_get_name, module_add_decl}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
 use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block, decl_set_impl_trait, decl_set_type_params}
+use compiler.frontend.core._Ast.decl_nodes.{decl_impl_block_typed}
 use compiler.core.ast.{decl_set_param_defaults, decl_set_param_muts}
 use compiler.frontend.core.parser_identifiers.{declaration_identifier_text}
 use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
@@ -403,6 +404,9 @@ fn parse_var_decl() -> i64:
 # ===== Class/Impl Method Parsing =====
 
 fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i64:
+    parse_class_body_method_typed(struct_name, is_static, is_me, -1)
+
+fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool, self_type_override: i64) -> i64:
     var _pp = parse_prof_now()
     # Advance past leading keyword (static fn / fn / me)
     if is_static:
@@ -514,6 +518,8 @@ fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i
         val self_type_id = named_type_find(struct_name)
         if self_type_id >= 0:
             self_type = TYPE_NAMED_BASE + self_type_id
+        if self_type_override >= 0:
+            self_type = self_type_override
         # Bug #161: `self` is implicit in Simple methods, but a user may still
         # write it explicitly (`fn get(self)`). The loop above already parsed
         # that explicit `self` into `param_names[0]`, so prepending another
@@ -640,7 +646,12 @@ fn parse_impl_decl() -> i64:
     parser_advance()
     val type_params = parse_type_params()
     var target_name = par_text_get()
-    var head_params = parse_impl_target_type(type_params.len() > 0)
+    var target_type: i64 = -1
+    var head_params: [text] = []
+    if par_kind_get() == TOK_IDENT:
+        head_params = parse_impl_target_type(type_params.len() > 0)
+    else:
+        target_type = parser_parse_type()
     var trait_name = ""
     if par_kind_get() == TOK_KW_FOR:
         # `impl Trait for Type:` — methods attach to the concrete type;
@@ -651,7 +662,12 @@ fn parse_impl_decl() -> i64:
         trait_name = target_name
         parser_advance()
         target_name = par_text_get()
-        val self_params = parse_impl_target_type(type_params.len() > 0)
+        var self_params: [text] = []
+        if par_kind_get() == TOK_IDENT:
+            target_type = -1
+            self_params = parse_impl_target_type(type_params.len() > 0)
+        else:
+            target_type = parser_parse_type()
         for p in self_params:
             head_params.push(p)
     skip_impl_where_clause()
@@ -675,22 +691,22 @@ fn parse_impl_decl() -> i64:
             parser_skip_newlines_and_semicolons()
             continue
         if par_kind_get() == 30:
-            val sm_id = parse_class_body_method(target_name, true, false)
+            val sm_id = parse_class_body_method_typed(target_name, true, false, target_type)
             if sm_id >= 0:
                 method_ids.push(sm_id)
         elif par_kind_get() == 20:
-            val fm_id = parse_class_body_method(target_name, false, false)
+            val fm_id = parse_class_body_method_typed(target_name, false, false, target_type)
             if fm_id >= 0:
                 method_ids.push(fm_id)
         elif par_kind_get() == 34:
-            val mm_id = parse_class_body_method(target_name, false, true)
+            val mm_id = parse_class_body_method_typed(target_name, false, true, target_type)
             if mm_id >= 0:
                 method_ids.push(mm_id)
         else:
             # Skip unknown tokens in impl body gracefully
             parser_advance()
 
-    val impl_idx = decl_impl_block(target_name, method_ids, 0)
+    val impl_idx = decl_impl_block_typed(target_name, method_ids, 0, target_type)
     var all_params = type_params
     for hp in head_params:
         var seen = false
