@@ -1,0 +1,183 @@
+"""ITEM4-REQ-010 native configuration transport V2. Authored TDD; UNRUN.
+
+Command tests prove explicit configuration reaches the real adapter's ordered
+admission checks. They do not claim successful linking or native provider loading.
+"""
+use std.spec.*
+use std.spec.step
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.common.kernel_plugin.schema_header.{KpfSchemaHeaderV1}
+use std.common.linker.link_request_v1.{LinkTargetV1, LinkRequestV1}
+use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1, LinkExecutionModeV1}
+use std.common.linker.link_receipt_v1.{LinkOutcomeV1}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
+use compiler.backend.linker.linker_pack_config_wire.{LinkerPackJobV2, linker_pack_encode_job_v2, linker_pack_decode_job_v2}
+use compiler.backend.linker.linker_pack_wire.{LinkerPackJobV1, linker_pack_encode_job, linker_pack_decode_job, linker_pack_decode_receipt}
+use compiler.backend.linker.linker_pack_command.{linker_pack_command}
+use compiler.backend.linker.link_engine_external.{link_request_to_native_config, native_host_link_target}
+use std.nogc_sync_mut.io_runtime.{env_get}
+use std.nogc_sync_mut.composition.cli_command_wire.{encode_cli_command_request_v1, decode_cli_command_result_v1}
+
+fn item4_pack_config_job() -> LinkerPackJobV2:
+    val header = KpfSchemaHeaderV1(abi_version: 1, struct_size: 72,
+        schema_id: KpfId128(hi: 4, lo: 10), schema_major: 1, schema_minor: 0,
+        schema_digest: KpfDigest256(w0: 1, w1: 2, w2: 3, w3: 0xffffffffffffffffu64), reserved0: 0)
+    val request = LinkRequestV1(header: header,
+        target: LinkTargetV1(arch: 1, os: 1, abi: 1, object_format: 1, endian: 1, address_width: 64),
+        inputs_manifest_digest: header.schema_digest, output_contract: 1,
+        semantic_profile_digest: header.schema_digest, runtime_sysroot_digest: header.schema_digest,
+        required_features: 0, layout_handle: 2, debug_handle: 3, reproducibility: 1)
+    val policy = LinkExecutionPolicyV1(header: header, mode: LinkExecutionModeV1.Bounded,
+        job_memory_limit_bytes: 4096, scratch_limit_bytes: 8192, max_workers: 2,
+        allowed_placements: 1, enforcement_requirement: 1)
+    val config = NativeLinkConfig(libraries: ["fixture", "--literal-lib"],
+        library_paths: ["folder with spaces", ""], runtime_path: "runtime path/µ",
+        target_triple: "explicit-target", linker_abi: "explicit-abi", pie: false,
+        debug: true, strip_output: true, prefer_size_linker: true, verbose: true,
+        allow_duplicate_definitions: false, allow_cc_fallback: false,
+        retained_symbols: ["entry", "symbol\nline"], extra_flags: ["--flag=literal", ""],
+        runtime_bundle: "fixture-runtime")
+    LinkerPackJobV2(request: request, policy: policy, inputs: ["input with spaces.o", "--literal.o"],
+        output: "output with spaces", native_config: config)
+
+fn item4_pack_config_prefix(args: [text], count: i64) -> [text]:
+    expect(count >= 0 and count <= args.len()).to_equal(true)
+    if count < 0 or count > args.len(): return []
+    var result: [text] = []
+    for index in 0..count: result.push(args[index])
+    result
+
+fn item4_pack_config_repeat(count: i64) -> text:
+    var result = "x"
+    while result.len() < count: result = result + result
+    result.substring(0, count)
+
+describe "ITEM4-REQ-010 lossless native link configuration V2":
+    it "round trips all fifteen configuration fields with independent nondefault expectations":
+        step("Encode the complete explicit native configuration with literal strings")
+        val encoded = linker_pack_encode_job_v2(item4_pack_config_job())
+        expect(encoded.is_ok()).to_equal(true)
+        if encoded.is_err(): return
+        expect(encoded.unwrap()[0]).to_equal("simple-link-job-v2")
+        val decoded = linker_pack_decode_job_v2(encoded.unwrap())
+        expect(decoded.is_ok()).to_equal(true)
+        if decoded.is_err(): return
+        val job = decoded.unwrap()
+        val config = job.native_config
+        step("Assert each field separately so projection defaults cannot masquerade as preservation")
+        expect(config.libraries).to_equal(["fixture", "--literal-lib"])
+        expect(config.library_paths).to_equal(["folder with spaces", ""])
+        expect(config.runtime_path).to_equal("runtime path/µ")
+        expect(config.target_triple).to_equal("explicit-target")
+        expect(config.linker_abi).to_equal("explicit-abi")
+        expect(config.runtime_bundle).to_equal("fixture-runtime")
+        expect(config.pie).to_equal(false)
+        expect(config.debug).to_equal(true)
+        expect(config.strip_output).to_equal(true)
+        expect(config.prefer_size_linker).to_equal(true)
+        expect(config.verbose).to_equal(true)
+        expect(config.allow_duplicate_definitions).to_equal(false)
+        expect(config.allow_cc_fallback).to_equal(false)
+        expect(config.retained_symbols).to_equal(["entry", "symbol\nline"])
+        expect(config.extra_flags).to_equal(["--flag=literal", ""])
+        expect(job.inputs).to_equal(["input with spaces.o", "--literal.o"])
+        expect(job.output).to_equal("output with spaces")
+        expect(job.request.layout_handle).to_equal(2u64)
+        expect(job.policy.scratch_limit_bytes).to_equal(8192u64)
+
+    it "rejects malformed boolean and counted-array words and every truncated prefix":
+        val encoded = linker_pack_encode_job_v2(item4_pack_config_job()).unwrap()
+        # V1 argv has 54 fixed entries and two input paths. V2 prefixes two words.
+        val config_at = 58
+        expect(encoded.len()).to_equal(81)
+        if encoded.len() != 81: return
+        expect(encoded[1]).to_equal("56")
+        expect(encoded[config_at + 4]).to_equal("0")
+        step("Reject noncanonical booleans in every boolean slot")
+        for slot in (config_at + 4)..(config_at + 11):
+            for value in ["2", "true", "01", "-1", "18446744073709551616"]:
+                var changed = encoded
+                changed[slot] = value
+                expect(linker_pack_decode_job_v2(changed).is_err()).to_equal(true)
+        step("Reject invalid and overflowing counts without allocating their claimed sizes")
+        for slot in [1, 69, 72, 75, 78]:
+            for value in ["-1", "01", "18446744073709551615", "18446744073709551616"]:
+                var changed = encoded
+                changed[slot] = value
+                expect(linker_pack_decode_job_v2(changed).is_err()).to_equal(true)
+        step("Every strict prefix is incomplete and one extra argument is not ignored")
+        for length in 0..encoded.len():
+            expect(linker_pack_decode_job_v2(item4_pack_config_prefix(encoded, length)).is_err()).to_equal(true)
+        var trailing = encoded
+        trailing.push("unexpected")
+        expect(linker_pack_decode_job_v2(trailing).is_err()).to_equal(true)
+
+    it "rejects unknown versions embedded NUL and excessive arguments or UTF8 arena bytes":
+        val encoded = linker_pack_encode_job_v2(item4_pack_config_job()).unwrap()
+        expect(encoded.len()).to_equal(81)
+        if encoded.len() != 81: return
+        for slot in [0, 2]:
+            var unknown = encoded
+            unknown[slot] = "simple-link-job-v999"
+            expect(linker_pack_decode_job_v2(unknown).is_err()).to_equal(true)
+        step("Reject NUL in each scalar and list string position")
+        for slot in [58, 59, 60, 61, 70, 71, 73, 74, 76, 77, 79, 80]:
+            var nul = encoded
+            nul[slot] = "bad\0value"
+            expect(linker_pack_decode_job_v2(nul).is_err()).to_equal(true)
+        var oversized = encoded
+        oversized[58] = item4_pack_config_repeat(1048576)
+        expect(linker_pack_decode_job_v2(oversized).is_err()).to_equal(true)
+        var many: [text] = []
+        for index in 0..4097: many.push("")
+        expect(linker_pack_decode_job_v2(many).is_err()).to_equal(true)
+        step("The encoder must enforce the same admission limits")
+        var job = item4_pack_config_job()
+        var config = job.native_config
+        config.runtime_path = "bad\0path"
+        job.native_config = config
+        expect(linker_pack_encode_job_v2(job).is_err()).to_equal(true)
+
+    it "preserves V1 compatibility without accepting its bytes as V2":
+        val job = item4_pack_config_job()
+        val legacy = LinkerPackJobV1(request: job.request, policy: job.policy, inputs: job.inputs, output: job.output)
+        val args = linker_pack_encode_job(legacy).unwrap()
+        expect(args[0]).to_equal("simple-link-job-v1")
+        expect(linker_pack_decode_job(args).unwrap().inputs).to_equal(["input with spaces.o", "--literal.o"])
+        expect(linker_pack_decode_job_v2(args).is_err()).to_equal(true)
+        expect(linker_pack_decode_job(linker_pack_encode_job_v2(job).unwrap()).is_err()).to_equal(true)
+
+    it "passes explicit V2 configuration to the real provider adapter before bounded-mode refusal":
+        var job = item4_pack_config_job()
+        var request = job.request
+        request.target = native_host_link_target()
+        job.request = request
+        step("Require an uncontested target environment for the adapter's ordered admission proof")
+        for name in ["SIMPLE_TARGET", "SIMPLE_NATIVE_BUILD_TARGET"]:
+            val value = env_get(name) ?? ""
+            expect(value).to_equal("")
+            if value != "": return
+        step("A mismatching explicit configuration must be rejected before budget admission")
+        val wrong_args = linker_pack_encode_job_v2(job).unwrap()
+        val wrong_arena = encode_cli_command_request_v1(3, "linker-v1", wrong_args, 8192)
+        expect(wrong_arena.ok).to_equal(true)
+        if not wrong_arena.ok: return
+        val wrong_response = linker_pack_command(wrong_arena.bytes)
+        expect(wrong_response.ok).to_equal(true)
+        if not wrong_response.ok: return
+        val wrong = decode_cli_command_result_v1(wrong_response.bytes)
+        expect(wrong.status).to_equal(0)
+        if wrong.status != 0: return
+        expect(linker_pack_decode_receipt(wrong.output).unwrap().outcome).to_equal(LinkOutcomeV1.InputError)
+        step("Correct only configuration identity and require the subsequent real budget decision")
+        job.native_config = link_request_to_native_config(job.request, job.policy)
+        val arena = encode_cli_command_request_v1(3, "linker-v1", linker_pack_encode_job_v2(job).unwrap(), 8192)
+        expect(arena.ok).to_equal(true)
+        if not arena.ok: return
+        val response = linker_pack_command(arena.bytes)
+        expect(response.ok).to_equal(true)
+        if not response.ok: return
+        val result = decode_cli_command_result_v1(response.bytes)
+        expect(result.status).to_equal(0)
+        if result.status != 0: return
+        expect(linker_pack_decode_receipt(result.output).unwrap().outcome).to_equal(LinkOutcomeV1.UnsupportedBudget)
