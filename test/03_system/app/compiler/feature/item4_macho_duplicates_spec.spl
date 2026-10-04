@@ -1,0 +1,110 @@
+"""ITEM4-REQ-003 Mach-O first-definition policy. UNRUN; actual assembled fixtures, no Darwin execution claim."""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{dir_create_all, file_read_bytes, file_exists}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.backend.linker.native_config.{NativeLinkConfig}
+use compiler.backend.linker.macho.native_adapter.{native_macho_plan_v1, native_macho_link_files_v1}
+
+fn item4_macho_duplicates_config(allow: bool) -> NativeLinkConfig:
+    var config = NativeLinkConfig.default()
+    config.runtime_path = "none"
+    config.allow_duplicate_definitions = allow
+    config.allow_cc_fallback = false
+    config.extra_flags = ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "simple.item4.duplicates"]
+    config
+
+fn item4_macho_duplicates_read(bytes: [u8], at: i64, width: i64) -> i64:
+    val valid = width >= 1 and width <= 8 and at >= 0 and at <= bytes.len() and width <= bytes.len() - at
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    var result: i64 = 0
+    for index in 0..width: result = result | ((bytes[at + index] as i64) << (8 * index))
+    result
+
+fn item4_macho_duplicates_relative(bytes: [u8], at: i64) -> i64:
+    val encoded = item4_macho_duplicates_read(bytes, at, 4)
+    if encoded >= 0x80000000: encoded - 0x100000000 else: encoded
+
+fn item4_macho_duplicates_check(bytes: [u8], expected: i64):
+    expect(bytes.len() > 0xc018).to_equal(true)
+    if bytes.len() <= 0xc018: return
+    expect(item4_macho_duplicates_read(bytes, 0, 4)).to_equal(0xfeedfacf)
+    expect(item4_macho_duplicates_read(bytes, 4, 4)).to_equal(0x01000007)
+    expect(item4_macho_duplicates_read(bytes, 12, 4)).to_equal(2)
+    expect(bytes[0x4000]).to_equal(0xe8u8)
+    val called = 0x4005 + item4_macho_duplicates_relative(bytes, 0x4001)
+    val call_valid = called >= 0 and called <= bytes.len() - 6
+    expect(call_valid).to_equal(true)
+    if not call_valid: return
+    expect(bytes[called]).to_equal(0xb8u8)
+    expect(item4_macho_duplicates_read(bytes, called + 1, 4)).to_equal(expected)
+    expect(bytes[called + 5]).to_equal(0xc3u8)
+    expect(bytes[0x4005]).to_equal(0x48u8)
+    expect(bytes[0x4006]).to_equal(0x8bu8)
+    expect(bytes[0x4007]).to_equal(0x0du8)
+    val slot = 0x400c + item4_macho_duplicates_relative(bytes, 0x4008)
+    val pointer = item4_macho_duplicates_read(bytes, 0xc000, 8)
+    expect(item4_macho_duplicates_read(bytes, slot, 8)).to_equal(pointer)
+    val selected = pointer - 0x100000000
+    expect(item4_macho_duplicates_read(bytes, selected, 8)).to_equal(expected)
+
+describe "Mach-O selected duplicate definitions":
+    it "ITEM4-REQ-003 keeps the first strong definition in actual calls pointers and GOT slots":
+        for reversed in [false, true]:
+            step("Select strict or first-definition policy")
+            val made = dir_create_all("build")
+            expect(made).to_equal(true)
+            if not made: return
+            val created = secure_temp_dir("build", "item4-macho-duplicates-")
+            expect(created.is_ok()).to_equal(true)
+            if created.is_err(): return
+            val parent = created.unwrap()
+            val output = parent + "/app"
+            val plan = native_macho_plan_v1("x86_64", item4_macho_duplicates_config(true), output)
+            expect(plan.is_ok()).to_equal(true)
+            if plan.is_err():
+                expect(dir_remove(parent)).to_equal(true)
+                return
+            val first = if reversed: "b" else: "a"
+            val second = if reversed: "a" else: "b"
+            step("Link real competing definitions")
+            val linked = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/duplicates_entry_x64.o",
+                "test/fixtures/linker/macho/duplicates_{first}_x64.o", "test/fixtures/linker/macho/duplicates_{second}_x64.o"], [], output)
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_ok():
+                step("Inspect the selected definition in emitted bytes")
+                item4_macho_duplicates_check(file_read_bytes(output), if reversed: 22 else: 11)
+            step("Remove owned fixture files")
+            if file_exists(output): expect(file_remove(output)).to_equal(true)
+            expect(dir_remove(parent)).to_equal(true)
+
+    it "ITEM4-REQ-003 preserves existing output when strict duplicate rejection is requested":
+        step("Select strict or first-definition policy")
+        val made = dir_create_all("build")
+        expect(made).to_equal(true)
+        if not made: return
+        val created = secure_temp_dir("build", "item4-macho-duplicates-strict-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val output = parent + "/app"
+        val written = file_write_bytes(output, [17u8, 0u8, 255u8])
+        expect(written).to_equal(true)
+        if not written:
+            expect(dir_remove(parent)).to_equal(true)
+            return
+        val plan = native_macho_plan_v1("x86_64", item4_macho_duplicates_config(false), output)
+        expect(plan.is_ok()).to_equal(true)
+        if plan.is_ok():
+            step("Link real competing definitions")
+            val rejected = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/duplicates_entry_x64.o",
+                "test/fixtures/linker/macho/duplicates_a_x64.o", "test/fixtures/linker/macho/duplicates_b_x64.o"], [], output)
+            expect(rejected.is_err()).to_equal(true)
+            if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("duplicate")
+        step("Preserve the destination on strict rejection")
+        expect(file_read_bytes(output)).to_equal([17u8, 0u8, 255u8])
+        step("Remove owned fixture files")
+        expect(file_remove(output)).to_equal(true)
+        expect(dir_remove(parent)).to_equal(true)
