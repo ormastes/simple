@@ -301,6 +301,31 @@ bootstrap_stage3_windows_frontend_policy() {
         SIMPLE_PARSE_SHARD_WORKER_KB=1650000 SIMPLE_HIR_SHARD_WORKER_KB=3000000
 }
 
+# Emit the same Windows scheduling share for every compiler process owner.
+# This is not a host reservation or an RSS limit: callers still own those.
+bootstrap_stage3_windows_frontend_environment() {
+    bootstrap_stage3_policy_cap=$1
+    bootstrap_stage3_policy_mode=$2
+    bootstrap_stage3_policy_budget=$3
+    case "$bootstrap_stage3_policy_cap:$bootstrap_stage3_policy_budget" in
+        *[!0-9:]*|:*|*:) return 1 ;;
+    esac
+    [ "$bootstrap_stage3_policy_cap" -gt 0 ] &&
+        [ "$bootstrap_stage3_policy_cap" -le 6835937 ] &&
+        [ "$bootstrap_stage3_policy_budget" -gt 0 ] &&
+        [ "$bootstrap_stage3_policy_budget" -le 3000000 ] || return 1
+    case "$bootstrap_stage3_policy_mode" in
+        enforce)
+            if [ "$bootstrap_stage3_policy_cap" -lt "$bootstrap_stage3_policy_budget" ]; then
+                bootstrap_stage3_policy_budget=$bootstrap_stage3_policy_cap
+            fi ;;
+        monitor) ;;
+        *) return 1 ;;
+    esac
+    bootstrap_stage3_windows_frontend_policy || return 1
+    printf '%s\n' "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=$bootstrap_stage3_policy_budget"
+}
+
 bootstrap_stage3_run_transcribed() {
     bootstrap_stage3_run_transcript=$1
     bootstrap_stage3_run_cwd=$2
@@ -340,20 +365,18 @@ bootstrap_stage3_run_transcribed() {
             # The compiler has a one-worker floor: a smaller share is NOT an
             # RSS limit. The enclosing owner must still admit one whole worker
             # plus its parent, and the watchdog retains memory enforcement.
-            bootstrap_stage3_run_frontend_budget=${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB:-3000000}
-            case "$bootstrap_stage3_run_frontend_budget" in
-                ''|*[!0-9]*) return 1 ;;
-            esac
-            [ "$bootstrap_stage3_run_frontend_budget" -gt 0 ] &&
-                [ "$bootstrap_stage3_run_frontend_budget" -le 3000000 ] || return 1
-            if [ "$bootstrap_stage3_run_shard_budget" -gt 0 ] &&
-               [ "$bootstrap_stage3_run_shard_budget" -lt "$bootstrap_stage3_run_frontend_budget" ]; then
-                bootstrap_stage3_run_frontend_budget=$bootstrap_stage3_run_shard_budget
-            fi
-            bootstrap_stage3_run_shard_budget=$bootstrap_stage3_run_frontend_budget
-            set -- SIMPLE_SHARD_MEM_CLAMP=1 SIMPLE_PARSE_SHARD_MAX=1 \
-                SIMPLE_PARSE_SHARD_WORKER_KB=1650000 \
-                SIMPLE_HIR_SHARD_WORKER_KB=3000000 "$@"
+            bootstrap_stage3_run_frontend_rows=$(bootstrap_stage3_windows_frontend_environment \
+                "$bootstrap_stage3_run_rss_cap" "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
+                "${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB:-3000000}") || return 1
+            while IFS= read -r bootstrap_stage3_run_frontend_row; do
+                case "$bootstrap_stage3_run_frontend_row" in
+                    SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=*)
+                        bootstrap_stage3_run_shard_budget=${bootstrap_stage3_run_frontend_row#*=} ;;
+                    *) set -- "$bootstrap_stage3_run_frontend_row" "$@" ;;
+                esac
+            done <<EOF
+$bootstrap_stage3_run_frontend_rows
+EOF
             ;;
     esac
     set -- "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=$bootstrap_stage3_run_shard_budget" "$@"
