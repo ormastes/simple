@@ -1,0 +1,36 @@
+use std.spec
+use std.spec.step
+use std.env.variables.{env_set, env_get}
+use app.io.mod.{file_read_text}
+
+"""
+## Purpose and audience
+
+Wrappers that define their own `env_set` / `cwd` must call the unique
+`std.io_runtime` names (`env_set_process`, `cwd_process`). An aliased import
+of the colliding name (`env_set as io_runtime_env_set`) stays unresolved in
+the flattened JIT unit and drops the whole program to the interpreter: under
+the JIT, rendering_gui_core at 3840x2160 took 774 s instead of 4 s.
+Audience: stdlib maintainers.
+
+Bug: doc/08_tracking/bug/jit_io_runtime_alias_import_unresolved_gui_core_interpreted_2026-10-05.md
+"""
+
+fn _defines_and_aliases(path: text, name: text) -> bool:
+    val src = file_read_text(path) ?? ""
+    src.contains("fn " + name + "(") and src.contains("{" + name + " as ")
+
+describe "io_runtime alias collisions":
+    # @req REQ-SSPEC-LOCAL-001
+    it "env_set from env.variables writes the process environment":
+        step("Set a variable through env.variables.env_set and read it back")
+        assert_true(env_set("__SIMPLE_ENV_SET_ALIAS_SPEC__", "v1"))
+        expect(env_get("__SIMPLE_ENV_SET_ALIAS_SPEC__") ?? "").to_equal("v1")
+
+    it "wrappers that define env_set or cwd do not alias the same io_runtime name":
+        step("Scan the wrappers that define their own env_set/cwd")
+        expect(file_read_text("src/lib/nogc_sync_mut/sffi/system.spl") ?? "").to_contain("fn cwd(")
+        assert_false(_defines_and_aliases("src/lib/nogc_sync_mut/env/variables.spl", "env_set"))
+        assert_false(_defines_and_aliases("src/lib/nogc_sync_mut/sffi/system.spl", "cwd"))
+        assert_false(_defines_and_aliases("src/lib/nogc_async_mut/io/mod_stub.spl", "cwd"))
+        assert_false(_defines_and_aliases("src/lib/nogc_sync_mut/io/env_ops.spl", "cwd"))
