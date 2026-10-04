@@ -9,6 +9,29 @@
 > their owning MIR metadata arrays and copies them by scalar local IDs. Its
 > focused native regression is green; Stage 3/4 admission is still pending.
 
+> **Status 2026-10-04 (x86_64 infra readiness, measured):** checklist in
+> [simpleos_bootstrap_infra_readiness_2026-10-04.md](../../../03_plan/os/simpleos/simpleos_bootstrap_infra_readiness_2026-10-04.md).
+> Bootstrap-on-SimpleOS does **not** run today.
+>
+> Measured on release `3f1191dd283`:
+> - OVMF→GRUB-EFI works on the host.
+> - `sysroot.shs` fails on `runtime_native.c`. SimpleOS libc lacks
+>   `st_mtim`/`st_ctim` and `ENOTSUP`.
+> - The seed is refused by both `os test` and `simpleos-native-build.shs`.
+>   An admitted Stage 2+ is required.
+> - The seed-built L4b SSH kernel fails in `sshd/ssh_session*.spl`
+>   (`key_blob` on `ANY`).
+> - `SIMPLE_LINKER=internal` is unsupported by the seed.
+>
+> **SUPERSEDED** by this measurement:
+> - The 2026-08-06 table's AC-3 "seed-built payload links": the D1 seed
+>   route-around is now closed by `simpleos-native-build.shs`, so AC-3 is not
+>   reproducible.
+> - "Key commands: `SIMPLE_BUILD_COMPILER=src/compiler_rust/target/bootstrap/simple`".
+>
+> Rust-seed-on-SimpleOS is an optional track and is BLOCKED (std `libc` has no
+> SimpleOS module). Rust in the guest is not required.
+
 ## Role
 
 Own feature-specific process knowledge for the **clang + Simple migration onto
@@ -28,7 +51,7 @@ Plan of record: `doc/03_plan/os/simpleos/toolchain_selfhost_bootstrap_plan.md`
 |---|---|---|
 | AC-1 | Fork holds all SimpleOS work; `build.spl` pin == fork tip | **DONE** — both `596122063`, verified by `git ls-remote` |
 | AC-2 | Cross clang/lld build **guest-runnable** | **DONE** — `bin/clang-20` 127,572,072 B; `bin/lld` 64,526,504 B; both Type=EXEC, entry `0x40000000`, **0 INTERP** |
-| AC-3 | `bin/release/x86_64-unknown-simpleos/simple` links | **DONE (STAGING)** — 2,300,776 B, ET_EXEC, entry `0x40000000`, 0 INTERP, **0 undefined `rt_*`** |
+| AC-3 | `bin/release/x86_64-unknown-simpleos/simple` links | **DONE (STAGING)** — 2,300,776 B, ET_EXEC, entry `0x40000000`, 0 INTERP, **0 undefined `rt_*`**. **SUPERSEDED 2026-10-04:** this is not reproducible. The seed builder is now refused and the sysroot fails to compile (see the 2026-10-04 status block). |
 | AC-4 | In-guest clang compile → **byte-exact** object under real firmware | **COMPILE PROVEN 2026-08-06 — AC NOT FULLY MET.** Byte-exactness is unproven: L5 host-side `getfile` retrieval returns an empty object, so nothing was compared. Do not report AC-4 as DONE. |
 | AC-5 | In-guest LINK + RUN (`ld.lld` in guest, FS-exec the result) | **NOT DONE** — rungs 3–6 of `scripts/os/ssh_lld_link_uefi.shs` have never executed |
 | AC-6 | Install-image seven paths + live `ssh root@guest /usr/bin/simple /hello.spl` rc=0 | **NOT DONE** |

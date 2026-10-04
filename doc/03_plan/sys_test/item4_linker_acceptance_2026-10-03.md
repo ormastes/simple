@@ -239,3 +239,17 @@ retained-debug undefined-reference errors are not claimed as stream behavior.
 The first executable intent was committed before implementation. Source-review
 corrections are not observed runtime RED/GREEN. Peak RSS and rescanning latency
 remain separate unverified NFR gates.
+
+## Owned worker acceptance still required
+
+ITEM4-REQ-009 requires real kernel/worker observations, separate from the new
+resource-evidence fixture tests. Before the first linker input allocation, the
+worker must independently observe its admitted scope, memory.max and swap.max=0.
+Missing capability must preserve launch/input/output sentinels. A descendant-only
+touched allocation must breach the aggregate cap with a kernel event delta;
+exit 137 alone is not evidence. Peak must come from the same owned scope before
+cleanup. Cancellation must kill/reap descendants, empty the scope and preserve
+the prior output while removing scratch. Finally, run an actual streamed link
+under that worker and prove successful output plus transactional failures under
+output/scratch pressure. All these worker scenarios remain pending implementation
+and execution; parser fixtures do not close them.
