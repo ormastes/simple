@@ -7,32 +7,79 @@
 # provided by the x86_64 baremetal runtime and drive an ARP round trip against
 # the QEMU gateway, so a dead NIC cannot be reported as ready.
 
+@unsafe(reason: "raw boot diagnostic line output ABI", capabilities: [ffi])
 extern fn serial_println(msg: text)
+@unsafe(reason: "raw PCI count ABI; valid provider range is 0 through 32", capabilities: [ffi])
 extern fn rt_pci_device_count() -> i64
+@unsafe(reason: "raw PCI field projection ABI; negative values mean unavailable", capabilities: [ffi])
 extern fn rt_pci_get_field(index: i64, field: i64) -> i64
+@unsafe(reason: "raw network initialization signed-status ABI", capabilities: [ffi])
 extern fn rt_net_init() -> i64
+@unsafe(reason: "raw network transmit-probe signed-status ABI", capabilities: [ffi])
 extern fn rt_net_tx_test() -> i64
+@unsafe(reason: "raw network receive-probe signed-status ABI", capabilities: [ffi])
 extern fn rt_net_rx_ready() -> i64
+@unsafe(reason: "raw network statistics-probe signed-status ABI", capabilities: [ffi])
 extern fn rt_net_stats() -> i64
+
+val X86_64_PCI_DEVICE_LIMIT: i64 = 32
+
+@always_inline
+fn _x86_64_boot_log(msg: text):
+    unsafe(capabilities: [ffi]):
+        serial_println(msg)
+
+@always_inline
+fn _x86_64_pci_device_count() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_pci_device_count()
+
+@always_inline
+fn _x86_64_pci_get_field(index: i64, field: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_pci_get_field(index, field)
+
+@always_inline
+fn _x86_64_net_init() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_net_init()
+
+@always_inline
+fn _x86_64_net_tx_test() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_net_tx_test()
+
+@always_inline
+fn _x86_64_net_rx_ready() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_net_rx_ready()
+
+@always_inline
+fn _x86_64_net_stats() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_net_stats()
 
 var x86_64_network_ok: i64 = 0
 var x86_64_network_device_index: i64 = -1
 
 pub fn init_x86_64_network_service() -> i64:
     """Initialize the x86_64 virtio-net surface for SSH-live boot."""
-    serial_println("========================================")
-    serial_println("[init] Starting SimpleOS x86_64 network service...")
-    serial_println("========================================")
+    _x86_64_boot_log("========================================")
+    _x86_64_boot_log("[init] Starting SimpleOS x86_64 network service...")
+    _x86_64_boot_log("========================================")
 
-    serial_println("[net-x86] Starting network service probe...")
-    val count = rt_pci_device_count()
+    _x86_64_boot_log("[net-x86] Starting network service probe...")
+    val raw_count = _x86_64_pci_device_count()
+    val count = if raw_count >= 0 and raw_count <= X86_64_PCI_DEVICE_LIMIT: raw_count else: 0
+    if raw_count != count:
+        _x86_64_boot_log("[net-x86] Invalid PCI device count {raw_count}")
     x86_64_network_device_index = -1
     var i: i64 = 0
     while i < count:
-        val cls = rt_pci_get_field(i, 3)
-        val sub = rt_pci_get_field(i, 4)
-        val vendor = rt_pci_get_field(i, 5)
-        val device_id = rt_pci_get_field(i, 6)
+        val cls = _x86_64_pci_get_field(i, 3)
+        val sub = _x86_64_pci_get_field(i, 4)
+        val vendor = _x86_64_pci_get_field(i, 5)
+        val device_id = _x86_64_pci_get_field(i, 6)
         val is_virtio_net = cls == 2 and sub == 0 and vendor == 0x1af4 and (device_id == 0x1000 or device_id == 0x1041)
         if is_virtio_net:
             x86_64_network_device_index = i
@@ -41,44 +88,44 @@ pub fn init_x86_64_network_service() -> i64:
 
     var network_ok: i64 = 0
     if x86_64_network_device_index < 0:
-        serial_println("[net-x86] Network unavailable: no PCI Ethernet/VirtIO device")
+        _x86_64_boot_log("[net-x86] Network unavailable: no PCI Ethernet/VirtIO device")
         network_ok = 0
     else:
-        serial_println("[net-x86] PCI network device index {x86_64_network_device_index}")
-        val init_rc = rt_net_init()
+        _x86_64_boot_log("[net-x86] PCI network device index {x86_64_network_device_index}")
+        val init_rc = _x86_64_net_init()
         if init_rc < 0:
-            serial_println("[net-x86] Network init failed rc={init_rc}")
+            _x86_64_boot_log("[net-x86] Network init failed rc={init_rc}")
             network_ok = 0
         else:
-            serial_println("[net-x86] Network device ready")
-            val tx_rc = rt_net_tx_test()
+            _x86_64_boot_log("[net-x86] Network device ready")
+            val tx_rc = _x86_64_net_tx_test()
             if tx_rc < 0:
-                serial_println("[net-x86] Network packet TX unavailable rc={tx_rc}")
+                _x86_64_boot_log("[net-x86] Network packet TX unavailable rc={tx_rc}")
                 network_ok = 0
             else:
-                serial_println("[net-x86] Network packet TX ready")
-                val rx_rc = rt_net_rx_ready()
+                _x86_64_boot_log("[net-x86] Network packet TX ready")
+                val rx_rc = _x86_64_net_rx_ready()
                 if rx_rc < 0:
-                    serial_println("[net-x86] Network packet RX unavailable rc={rx_rc}")
+                    _x86_64_boot_log("[net-x86] Network packet RX unavailable rc={rx_rc}")
                     network_ok = 0
                 else:
-                    serial_println("[net-x86] Network packet RX ready")
-                    val stats_rc = rt_net_stats()
+                    _x86_64_boot_log("[net-x86] Network packet RX ready")
+                    val stats_rc = _x86_64_net_stats()
                     if stats_rc < 0:
-                        serial_println("[net-x86] Network stats probe failed rc={stats_rc}")
+                        _x86_64_boot_log("[net-x86] Network stats probe failed rc={stats_rc}")
                         network_ok = 0
                     else:
                         network_ok = 1
-                        serial_println("[net-x86] Network stats probe rc={stats_rc}")
-                        serial_println("[net-x86] Network service ready")
+                        _x86_64_boot_log("[net-x86] Network stats probe rc={stats_rc}")
+                        _x86_64_boot_log("[net-x86] Network service ready")
 
     x86_64_network_ok = network_ok
     if network_ok == 1:
-        serial_println("[init] network: ready")
+        _x86_64_boot_log("[init] network: ready")
     else:
-        serial_println("[init] network: unavailable")
-    serial_println("[init] x86_64 network init complete")
-    serial_println("========================================")
+        _x86_64_boot_log("[init] network: unavailable")
+    _x86_64_boot_log("[init] x86_64 network init complete")
+    _x86_64_boot_log("========================================")
     network_ok
 
 pub fn x86_64_network_ready() -> bool:

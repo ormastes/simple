@@ -58,8 +58,11 @@ val CPSR_USR: u32 = CPSR_MODE_USR
 # Context Save/Restore (extern — implemented in assembly)
 # ============================================================================
 
+@unsafe(reason: "raw mutable context pointer; provider layout and save semantics are target-owned", capabilities: [ffi, raw_ptr])
 extern fn rt_arm32_context_save(ctx_ptr: u32)
+@unsafe(reason: "raw context pointer; restores privileged state and does not normally return", capabilities: [ffi, raw_ptr])
 extern fn rt_arm32_context_restore(ctx_ptr: u32)
+@unsafe(reason: "raw mutable context pointers; saves and transfers privileged execution state", capabilities: [ffi, raw_ptr])
 extern fn rt_arm32_context_switch(from_ptr: u32, to_ptr: u32)
 
 # ============================================================================
@@ -112,6 +115,7 @@ impl Arm32ContextSwitch:
         else:
             self.create_kernel(entry_point, stack_top)
 
+    @unsafe(reason: "by-value context ABI is not yet proven to persist the saved source state", capabilities: [ffi, raw_ptr])
     fn switch(from_ctx: Arm32Context, to_ctx: Arm32Context):
         """Switch from one context to another.
 
@@ -119,21 +123,26 @@ impl Arm32ContextSwitch:
         Implemented in assembly — performs STM/LDM of all registers
         and restores CPSR + jumps to saved pc.
         """
-        rt_arm32_context_switch((&from_ctx) as u32, (&to_ctx) as u32)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_arm32_context_switch((&from_ctx) as u32, (&to_ctx) as u32)
 
+    @unsafe(reason: "raw assembly provider writes the complete context layout", capabilities: [ffi, raw_ptr])
     fn save_current() -> Arm32Context:
         """Save the current CPU register state and return it."""
         var ctx = _create_context(0, 0, 0, CPSR_SVC_MASKED)
-        rt_arm32_context_save((&ctx) as u32)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_arm32_context_save((&ctx) as u32)
         ctx
 
+    @unsafe(reason: "restores privileged state and transfers control through an unverified provider", capabilities: [ffi, raw_ptr])
     fn restore(ctx: Arm32Context):
         """Restore a previously saved CPU register state.
 
         Loads all registers from ctx and restores CPSR, then jumps
         to the saved pc. Uses MOVS pc, lr or RFE for exception return.
         """
-        rt_arm32_context_restore((&ctx) as u32)
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_arm32_context_restore((&ctx) as u32)
 
 # ============================================================================
 # Context Creation Helper
@@ -150,6 +159,7 @@ fn _create_context(entry: u32, stack: u32, arg: u32, cpsr: u32) -> Arm32Context:
     - pc = entry (program counter)
     - cpsr = cpsr (program status register)
     """
+    val aligned_stack = stack & 0xFFFFFFF8
     Arm32Context(
         r0: arg,
         r1: 0,
@@ -164,7 +174,7 @@ fn _create_context(entry: u32, stack: u32, arg: u32, cpsr: u32) -> Arm32Context:
         r10: 0,
         r11: 0,              # Frame pointer (NULL for initial frame)
         r12: 0,              # Intra-procedure scratch
-        sp: stack,            # Stack pointer (8-byte aligned)
+        sp: aligned_stack,    # Stack pointer (8-byte aligned)
         lr: entry,            # Link register (return address)
         pc: entry,            # Program counter (entry point)
         cpsr: cpsr,           # Program status register

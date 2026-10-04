@@ -42,12 +42,90 @@ struct AttenuationSpec:
                       widening prefix fails the monotonic guard and is rejected).
       depth_limit   — < 0 uses `parent.depth - 1`; otherwise the child depth is
                       `min(parent.depth - 1, depth_limit)` (never larger).
-      single_use    — advisory single-shot flag for the transfer runtime (P5).
+      single_use    — single-shot flag. A grant marked single_use mints a normal
+                      child token, but the token_id is ARMED in a SingleUseLedger
+                      by spawn_with_cspace_tracked(); the transfer runtime must
+                      call `ledger.consume(token_id)` before acting on it, and
+                      the SECOND consume is DENIED. Enforcement lives in
+                      SingleUseLedger below — the flag is no longer advisory.
     """
     rights_mask: u32
     path_prefix: text
     depth_limit: i64
     single_use: bool
+
+fn atten_single_use() -> AttenuationSpec:
+    """No rights/path narrowing, but the minted child token is SINGLE USE:
+    exactly one `SingleUseLedger.consume()` succeeds, every later one is denied."""
+    AttenuationSpec(rights_mask: 0u32, path_prefix: "", depth_limit: -1, single_use: true)
+
+class SingleUseLedger:
+    """Single-use (one-shot) enforcement for minted capability tokens.
+
+    A capability minted from a `single_use` grant is a ONE-SHOT authority: the
+    holder may act on it exactly once. Without a ledger the `single_use` flag was
+    documentation only — any holder could replay the token forever.
+
+    Contract:
+      - `arm(token_id)`     registers a token as one-shot (idempotent-false on a
+                            duplicate arm, so a token can never be re-armed to
+                            refresh its budget).
+      - `consume(token_id)` returns true on the FIRST call for an armed token and
+                            false on EVERY later call (the replay guard), and
+                            false for a token that was never armed (fail closed:
+                            a caller that routes non-single-use tokens through
+                            consume() gets a deny, not an accidental allow).
+    """
+    token_ids: [u64]
+    used: [bool]
+
+impl SingleUseLedger:
+    static fn new() -> SingleUseLedger:
+        SingleUseLedger(token_ids: [], used: [])
+
+    me arm(token_id: u64) -> bool:
+        """Register `token_id` as one-shot. False when already armed (no re-arm:
+        re-arming would silently refund a spent one-shot capability)."""
+        var i = 0
+        while i < self.token_ids.len():
+            if self.token_ids[i] == token_id:
+                return false
+            i = i + 1
+        self.token_ids.push(token_id)
+        self.used.push(false)
+        true
+
+    fn is_armed(token_id: u64) -> bool:
+        var i = 0
+        while i < self.token_ids.len():
+            if self.token_ids[i] == token_id:
+                return true
+            i = i + 1
+        false
+
+    fn is_consumed(token_id: u64) -> bool:
+        var i = 0
+        while i < self.token_ids.len():
+            if self.token_ids[i] == token_id:
+                return self.used[i]
+            i = i + 1
+        false
+
+    me consume(token_id: u64) -> bool:
+        """Spend the one-shot. True exactly once; false on replay and on any
+        token that was never armed."""
+        var i = 0
+        while i < self.token_ids.len():
+            if self.token_ids[i] == token_id:
+                if self.used[i]:
+                    return false
+                self.used[i] = true
+                return true
+            i = i + 1
+        false
+
+    fn armed_count() -> i64:
+        self.token_ids.len()
 
 struct CapGrant:
     """One entry in a pouch recipe: the authority the child should receive.
@@ -158,11 +236,27 @@ fn spawn_with_cspace(parent: CapabilitySet, spec: SpawnSpec, child_owner: u64, g
     """Mint a fresh child C-Space containing EXACTLY the attenuated grants the
     parent is authorized to delegate — never `full()`, never ambient.
 
+    Convenience wrapper over spawn_with_cspace_tracked() with a throwaway ledger:
+    use this only when the recipe has no `single_use` grants. When any grant is
+    single_use, call spawn_with_cspace_tracked() and KEEP the ledger — it is the
+    object that enforces the one-shot.
+    """
+    spawn_with_cspace_tracked(parent, spec, child_owner, gen_base, tid_base, SingleUseLedger.new())
+
+fn spawn_with_cspace_tracked(parent: CapabilitySet, spec: SpawnSpec, child_owner: u64, gen_base: u64, tid_base: u64, ledger: SingleUseLedger) -> CspaceMint:
+    """Mint a fresh child C-Space containing EXACTLY the attenuated grants the
+    parent is authorized to delegate — never `full()`, never ambient.
+
     For each recipe grant: apply attenuation, find an authorizing parent token
     (monotonic guard), and mint a child token linked by parent_token_id with
     depth = parent.depth - 1 (delegation budget). Grants the parent cannot
     authorize are DROPPED and counted in `rejected` (fail closed). The resulting
     set is `is_pledged: true`, so an empty pouch denies every capability check.
+
+    Grants whose attenuation sets `single_use` have their minted token_id ARMED
+    in `ledger`; the transfer runtime must gate on `ledger.consume(token_id)`,
+    which succeeds exactly once. A REJECTED single_use grant is never armed — no
+    one-shot exists for authority that was never delegated.
     """
     var child_caps: [CapabilityToken] = []
     var source_ids: [u64] = []
@@ -191,6 +285,8 @@ fn spawn_with_cspace(parent: CapabilitySet, spec: SpawnSpec, child_owner: u64, g
             )
             child_caps.push(child_tok)
             source_ids.push(src.token_id)
+            if g.atten.single_use:
+                ledger.arm(tid)
             gen = gen + 1
             tid = tid + 1
     CspaceMint(
