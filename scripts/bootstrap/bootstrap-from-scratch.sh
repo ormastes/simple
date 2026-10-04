@@ -3646,6 +3646,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ;;
     *) stage2_timeout_args="--timeout ${SIMPLE_NATIVE_FILE_TIMEOUT}" ;;
   esac
+  stage2_cold_init_env=
+  case "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}" in
+    '') ;;
+    1) stage2_cold_init_env=SIMPLE_SCV_INVENTORY_COLD_INIT=1 ;;
+    *) echo 'error: SIMPLE_SCV_INVENTORY_COLD_INIT must be unset or exactly 1' >&2; exit 1 ;;
+  esac
   stage2_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "SIMPLE_LLVM_BIN=${SIMPLE_LLVM_BIN:-}" \
@@ -3687,6 +3693,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
+      ${stage2_cold_init_env:+"${stage2_cold_init_env}"} \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
       ${k1_composition_source_args} --source src/compiler --source src/app --source src/lib \
@@ -3835,7 +3842,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       ${bootstrap_windows_libpath_env:+"${bootstrap_windows_libpath_env}"} \
       "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_WRITE=${stage2_compatibility_manifest_absolute}" \
       "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT=${stage3_cache_absolute}" \
-      "SIMPLE_BINARY=${stage2_seed_absolute}"
+      "SIMPLE_BINARY=${stage2_seed_absolute}" \
+      ${stage2_cold_init_env:+"${stage2_cold_init_env}"}
     # These three guards are the ONLY pre-exec refusal on this path, and they
     # used to be bare `|| return 1`. A mismatch therefore produced no build log
     # and no reason anywhere, and the script's own failure diagnosis correctly
@@ -3852,7 +3860,7 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       cat "${stage2_refusal_log}" >&2
       return 1
     }
-    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}") || {
+    stage2_expected_env_names=$(bootstrap_stage3_stage2_canonical_env_names "${PLATFORM}" "${SIMPLE_SCV_INVENTORY_COLD_INIT:-}") || {
       echo "error: stage2 pre-exec refusal: no canonical stage2 env name list for ${PLATFORM}" \
         > "${stage2_refusal_log}"
       cat "${stage2_refusal_log}" >&2
