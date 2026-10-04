@@ -8,7 +8,7 @@ Public streaming APIs remain unchanged. Simple execution is UNRUN.
 
 ## Local gap and implementation contract
 
-`elf/stream_inputs.spl` rejects SHN_COMMON (65522) together with unsupported
+At the integration base, `elf/stream_inputs.spl` rejects SHN_COMMON (65522) with
 GNU-unique/TLS/IFUNC symbols. Its charged, cancellable retained-file scans already
 own archive selection and global lookup. `elf/stream_layout.spl` computes
 placement by rescanning selected metadata with only segment summaries resident.
@@ -81,9 +81,10 @@ A common member selected for another unresolved symbol contributes its common
 declarations to normal coalescing. Weak undefined references alone do not create
 strong archive demand.
 
-The fast `elf/archive_closure.spl:62` currently excludes COMMON candidates even
-for real undefined demand. This conflicts with the fourth experiment; root owns
-the narrow fast-path correction and parity regression. Streaming ownership does
+At the integration base, fast `elf/archive_closure.spl:62` excludes COMMON
+candidates even for real undefined demand. This conflicts with the fourth
+experiment; root has authored the fast-path correction and parity regression.
+Streaming ownership does
 not silently absorb the fast-engine source file.
 
 ## Test-first acceptance
