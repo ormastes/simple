@@ -7,7 +7,7 @@ Eight authored ITEM4-REQ-006 scenarios in
 | Scenario | Actual contract |
 |---|---|
 | Binary/typed equivalence | Real x64 and ARM64 dylibs validate then project into metadata. Typed and legacy image paths agree; independent CPU, entry, version, bind, pointer and branch checks prevent equivalence alone being the oracle. |
-| Optional deployment | Absent min/SDK stay absent and link without invented VM metadata; a declared newer minimum rejects. |
+| Optional deployment | Absent min/SDK stay absent and link without invented VM metadata; a shape-valid non-macOS platform and a declared newer minimum reject at the hosted consumer. |
 | Binary validation | A genuine symbol-table fallback works before an export address is corrupted; projection still rejects the unmapped symbol. Binary SDK zero stays Some(0). |
 | Shape rejection | Wrong CPU/platform, invalid names/versions, duplicate exports, invalid kind, out-of-range reexport ordinal and malformed restrictions reject. |
 | Selected unsupported semantics | Selected weak, absolute and reexport imports reject rather than being normalized to ordinary exports. Valid access restrictions retain their values and reject at the unbound hosted policy gate. |
