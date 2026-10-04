@@ -1,0 +1,210 @@
+"""ITEM4-REQ-004/005/006 RV64 static initial-exec TLS. Execution UNRUN.
+
+Full production links, independent instruction/GOT/PT_TLS decoding. This byte
+API has no destination path: publication/sentinel preservation is not claimed.
+Dynamic/RV32/GD/TLSDESC, instruction relaxation and thread execution remain open.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes}
+use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf_parser.{elf_parse_object, elf_section_name, elf_reloc_type}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn item4_riscv_ie_fixture(name: text) -> [i64]:
+    val raw = file_read_bytes("test/fixtures/linker/riscv64/" + name)
+    expect(raw.len()).to_be_greater_than(64)
+    var bytes: [i64] = []
+    for byte in raw: bytes.push(byte as i64)
+    bytes
+
+fn item4_riscv_ie_read(bytes: [i64], offset: i64, width: i64) -> i64:
+    val valid = offset >= 0 and offset <= bytes.len() and width >= 1 and width <= 8 and width <= bytes.len() - offset
+    expect(valid).to_equal(true)
+    if not valid: return -1
+    var value: i64 = 0
+    for index in 0..width: value = value | (bytes[offset + index] << (index * 8))
+    value
+
+fn item4_riscv_ie_put(bytes: [i64], offset: i64, width: i64, value: i64) -> [i64]:
+    val valid = offset >= 0 and offset <= bytes.len() and width >= 1 and width <= 8 and width <= bytes.len() - offset
+    expect(valid).to_equal(true)
+    if not valid: return []
+    var output = bytes
+    for index in 0..width: output[offset + index] = (value >> (index * 8)) & 255
+    output
+
+fn item4_riscv_ie_section(bytes: [i64], name: text) -> [i64]:
+    val parsed = elf_parse_object(bytes)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return [-1, 0, 0]
+    val object = parsed.unwrap()
+    for index in 0..object.sections.len():
+        if elf_section_name(object, index) == name:
+            # Parser sh_addr holds the file offset; wire sh_addr remains VA.
+            return [object.sections[index].sh_addr, object.sections[index].sh_size,
+                item4_riscv_ie_read(bytes, object.header.e_shoff + index * 64 + 16, 8)]
+    expect(false).to_equal(true)
+    [-1, 0, 0]
+
+fn item4_riscv_ie_symbol(bytes: [i64], name: text) -> [i64]:
+    val parsed = elf_parse_object(bytes)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return [-1, -1, -1, -1]
+    var found: [i64] = [-1, -1, -1, -1]
+    var count = 0
+    for index in 0..parsed.unwrap().symbols.len():
+        val symbol = parsed.unwrap().symbols[index]
+        if symbol.name == name:
+            found = [symbol.st_value, index, symbol.st_shndx, symbol.st_info]
+            count = count + 1
+    expect(count).to_equal(1)
+    found
+
+fn item4_riscv_ie_slot(image: [i64], site: text, low_delta: i64) -> i64:
+    val text_section = item4_riscv_ie_section(image, ".text")
+    val got = item4_riscv_ie_section(image, ".got")
+    val address = item4_riscv_ie_symbol(image, site)[0]
+    if text_section[0] < 0 or got[0] < 0 or address < text_section[2]: return -1
+    val place = text_section[0] + address - text_section[2]
+    val high = item4_riscv_ie_read(image, place, 4)
+    val low = item4_riscv_ie_read(image, place + low_delta, 4)
+    expect(high & 127).to_equal(0x17)
+    expect(low & 0x707f).to_equal(0x3003)
+    expect((high >> 7) & 31).to_equal((low >> 15) & 31)
+    var upper = high & 0xfffff000
+    if upper >= 0x80000000: upper = upper - 4294967296
+    var lower = (low >> 20) & 4095
+    if lower >= 2048: lower = lower - 4096
+    val slot = address + upper + lower
+    val valid = slot >= got[2] and slot - got[2] <= got[1] and 8 <= got[1] - (slot - got[2])
+    expect(valid).to_equal(true)
+    if not valid: return -1
+    got[0] + slot - got[2]
+
+fn item4_riscv_ie_check(image: [i64]):
+    expect(item4_riscv_ie_read(image, 16, 2)).to_equal(2)
+    expect(item4_riscv_ie_read(image, 18, 2)).to_equal(243)
+    step("Decode AUIPC and nonadjacent LD immediates to their actual GOT slots")
+    val sites = ["ie_value", "ie_second", "ie_zero", "ie_repeat"]
+    val expected = [4096, 4128, 4160, 4096]
+    var slots: [i64] = []
+    for index in 0..sites.len():
+        val slot = item4_riscv_ie_slot(image, sites[index], if index == 0: 8 else: 4)
+        if slot < 0: return
+        slots.push(slot)
+        expect(item4_riscv_ie_read(image, slot, 8)).to_equal(expected[index])
+    expect(slots[0]).to_equal(slots[3])
+    expect(slots[0] == slots[1] or slots[0] == slots[2] or slots[1] == slots[2]).to_equal(false)
+    for index in 0..3:
+        val names = ["ie_tls_value", "ie_tls_second", "ie_tls_zero"]
+        val symbol = item4_riscv_ie_symbol(image, names[index])
+        expect(symbol[0]).to_equal(expected[index])
+        expect(symbol[3] & 15).to_equal(6)
+    step("Inspect independent PT_TLS alignment file extent memory extent and initializers")
+    val phoff = item4_riscv_ie_read(image, 32, 8)
+    val count = item4_riscv_ie_read(image, 56, 2)
+    val valid = phoff >= 64 and phoff <= image.len() and count > 0 and count < 64 and count * 56 <= image.len() - phoff
+    expect(valid).to_equal(true)
+    if not valid: return
+    expect(item4_riscv_ie_read(image, 54, 2)).to_equal(56)
+    var tls_count = 0
+    for index in 0..count:
+        val at = phoff + index * 56
+        if item4_riscv_ie_read(image, at, 4) == 7:
+            tls_count = tls_count + 1
+            expect(item4_riscv_ie_read(image, at + 32, 8)).to_equal(4136)
+            expect(item4_riscv_ie_read(image, at + 40, 8)).to_equal(4168)
+            expect(item4_riscv_ie_read(image, at + 48, 8)).to_equal(64)
+            expect(item4_riscv_ie_read(image, at + 16, 8) % 64).to_equal(0)
+            val offset = item4_riscv_ie_read(image, at + 8, 8)
+            expect(item4_riscv_ie_read(image, offset + 4096, 8)).to_equal(42)
+            expect(item4_riscv_ie_read(image, offset + 4128, 8)).to_equal(99)
+    expect(tls_count).to_equal(1)
+
+fn item4_riscv_ie_relocation(bytes: [i64], kind: i64) -> i64:
+    val parsed = elf_parse_object(bytes)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return -1
+    val object = parsed.unwrap()
+    var ordinals: {i64: i64} = {}
+    for relocation in object.relocations:
+        val table = relocation.section_idx
+        val ordinal = if ordinals.has(table): ordinals[table] else: 0
+        ordinals[table] = ordinal + 1
+        if elf_reloc_type(relocation) == kind:
+            expect(relocation.r_offset).to_equal(if kind == 21: 0 else: 8)
+            expect(relocation.r_addend).to_equal(0)
+            if relocation.r_addend != 0 or relocation.r_offset != (if kind == 21: 0 else: 8): return -1
+            return object.sections[table].sh_addr + ordinal * 24
+    expect(false).to_equal(true)
+    -1
+
+describe "RV64 static initial-exec TLS full-link acceptance":
+    it "links aligned initialized and zero TLS through dedicated TP-offset GOT entries":
+        step("Load real clang RV64 TLS IE references and definitions")
+        val linked = elf_static_link([item4_riscv_ie_fixture("tls_initial_exec.o"),
+            item4_riscv_ie_fixture("tls_initial_exec_provider.o")], [], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        item4_riscv_ie_check(linked.unwrap())
+
+    it "extracts the TLS definition from a real archive and emits the same TLS contract":
+        step("Resolve the real IE symbols through production archive selection")
+        val linked = elf_static_link([item4_riscv_ie_fixture("tls_initial_exec.o")],
+            [item4_riscv_ie_fixture("libtls_initial_exec.a")], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        item4_riscv_ie_check(linked.unwrap())
+
+    it "uses the winning TLS definition when an undefined reference has no type":
+        step("Change the undefined reference to STT_NOTYPE and resolve the real TLS archive")
+        val original = item4_riscv_ie_fixture("tls_initial_exec.o")
+        val symbol = item4_riscv_ie_symbol(original, "ie_tls_value")
+        val symtab = item4_riscv_ie_section(original, ".symtab")
+        expect(symbol[2]).to_equal(0)
+        expect(symbol[3]).to_equal(0x16)
+        if symbol[1] < 0 or symbol[2] != 0 or symbol[3] != 0x16 or symtab[0] < 0: return
+        val reference = item4_riscv_ie_put(original, symtab[0] + symbol[1] * 24 + 4, 1, 0x10)
+        val linked = elf_static_link([reference], [item4_riscv_ie_fixture("libtls_initial_exec.a")], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        item4_riscv_ie_check(linked.unwrap())
+
+    it "rejects nonzero high and paired-low addends before producing image bytes":
+        for kind in [21, 24]:
+            step("Mutate only a checked zero relocation addend in the real input")
+            val original = item4_riscv_ie_fixture("tls_initial_exec.o")
+            val offset = item4_riscv_ie_relocation(original, kind)
+            if offset < 0: return
+            val malformed = item4_riscv_ie_put(original, offset + 16, 8, 1)
+            val linked = elf_static_link([malformed, item4_riscv_ie_fixture("tls_initial_exec_provider.o")], [], "_start", RelocArch.Riscv64)
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_ok(): return
+            expect(linked.unwrap_err()).to_contain("addend")
+            expect(linked.unwrap_err()).to_contain(if kind == 21: "TLS_GOT_HI20" else: "PCREL_LO12")
+
+    it "rejects an IE reference whose selected definition is not STT_TLS":
+        step("Change the actual selected definition type while retaining the TLS reference")
+        val provider = item4_riscv_ie_fixture("tls_initial_exec_provider.o")
+        val symbol = item4_riscv_ie_symbol(provider, "ie_tls_value")
+        val symtab = item4_riscv_ie_section(provider, ".symtab")
+        expect(symbol[3]).to_equal(0x16)
+        if symbol[1] < 0 or symbol[3] != 0x16 or symtab[0] < 0: return
+        val malformed = item4_riscv_ie_put(provider, symtab[0] + symbol[1] * 24 + 4, 1, 0x11)
+        val linked = elf_static_link([item4_riscv_ie_fixture("tls_initial_exec.o"), malformed], [], "_start", RelocArch.Riscv64)
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("TLS")
+        expect(linked.unwrap_err()).to_contain("ie_tls_value")
+
+    it "rejects a paired low relocation after its TLS high record is removed":
+        step("Replace only the first TLS high relocation with NONE")
+        val original = item4_riscv_ie_fixture("tls_initial_exec.o")
+        val offset = item4_riscv_ie_relocation(original, 21)
+        if offset < 0: return
+        val malformed = item4_riscv_ie_put(original, offset + 8, 4, 0)
+        val linked = elf_static_link([malformed, item4_riscv_ie_fixture("tls_initial_exec_provider.o")], [], "_start", RelocArch.Riscv64)
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_ok(): return
+        expect(linked.unwrap_err()).to_contain("no matching HI20")
