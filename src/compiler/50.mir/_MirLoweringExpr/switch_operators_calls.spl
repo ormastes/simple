@@ -1877,7 +1877,9 @@ impl MirLowering:
 
     me enum_match_expr_type(expr: HirExpr) -> HirType?:
         """Recover a match scrutinee type without depending on lowering order."""
-        if expr.type_ != nil:
+        # Flat/cache transport retains a placeholder even when no expression
+        # type was inferred. Only the presence bit admits that metadata.
+        if expr.has_type_ and expr.type_ != nil:
             val explicit_type = expr.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
             match explicit_type.kind:
                 case HirTypeKind.Infer(_, _): ()
@@ -1885,6 +1887,15 @@ impl MirLowering:
                 case _: return Some(explicit_type)
         match expr.kind:
             case Var(symbol):
+                # Function-local provenance belongs to this binding; a raw
+                # symbol entry can still carry a pre-inference owner/type.
+                if self.local_map.has(symbol.id):
+                    val local = self.local_map[symbol.id]
+                    if val local_type = self.find_local_hir_type(local.id):
+                        match local_type.kind:
+                            case HirTypeKind.Infer(_, _): ()
+                            case HirTypeKind.Error: ()
+                            case _: return Some(local_type)
                 val sym = self.symbols.get_symbol_raw(symbol.id)
                 if val found = sym:
                     if found.type_ != nil:
@@ -1893,11 +1904,14 @@ impl MirLowering:
                             case HirTypeKind.Infer(_, _): ()
                             case HirTypeKind.Error: ()
                             case _: return Some(found_type)
-                if self.local_map.has(symbol.id):
-                    val local = self.local_map[symbol.id]
-                    if val local_type = self.find_local_hir_type(local.id):
-                        return Some(local_type)
             case NamedVar(symbol, _):
+                if self.local_map.has(symbol.id):
+                    val local = self.local_map[symbol.id]
+                    if val local_type = self.find_local_hir_type(local.id):
+                        match local_type.kind:
+                            case HirTypeKind.Infer(_, _): ()
+                            case HirTypeKind.Error: ()
+                            case _: return Some(local_type)
                 val sym = self.symbols.get_symbol_raw(symbol.id)
                 if val found = sym:
                     if found.type_ != nil:
@@ -1906,10 +1920,6 @@ impl MirLowering:
                             case HirTypeKind.Infer(_, _): ()
                             case HirTypeKind.Error: ()
                             case _: return Some(found_type)
-                if self.local_map.has(symbol.id):
-                    val local = self.local_map[symbol.id]
-                    if val local_type = self.find_local_hir_type(local.id):
-                        return Some(local_type)
             case Call(callee, _, _):
                 val callee_type = self.enum_match_expr_type(callee)
                 if callee_type != nil:
