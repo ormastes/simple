@@ -54,6 +54,18 @@ inherited handles, and exposes cancellation/collection proofs. These are useful
 ownership capabilities. Job committed-memory limits and peak committed memory
 are not a no-swap guarantee or an RSS measurement. Do not rename their metric.
 
+Upstream refinement inspected at release
+`bcd4dd3be474a5ff17a22a328e4a35193971515e` (PR 2443): `resource_scope.spl` now
+also exposes `run_in_owned_execution_resource_scope` and the test alias
+`run_in_owned_test_resource_scope`. Its Windows `_run_windows_owned_scope` uses
+the redirected Job owner, memory/deadline controls, bounded cleanup observation,
+quarantine when collection remains unproven, and an additive completion receipt.
+This is a real owned-process facade; it must be preserved when integrating the
+Linux metric-parser repair. It continues to report CPU/RSS resource evidence as
+Unavailable and does not establish no-swap or qualified linker admission. The
+legacy generic observation route also remains present, so describe the selected
+API accurately rather than treating all Windows execution as legacy-only.
+
 ## Primary evidence and parser requirements
 
 The [Linux cgroup v2 documentation](https://www.kernel.org/doc/html/v5.19/admin-guide/cgroup-v2.html)
