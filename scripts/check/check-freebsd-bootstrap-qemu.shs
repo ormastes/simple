@@ -584,6 +584,7 @@ pkg_root() {
         root@localhost "$@"
 }
 
+GIT_AUTHORITY_DIR=
 PHASE2_VM_LOCK=
 if [ "$MODE" = phase2-only ]; then
     mkdir -p "$VM_DIR" || fail "Cannot create isolated Phase 2 VM directory"
@@ -651,6 +652,9 @@ watch_host_free_space() {
 cleanup() {
     cleanup_exit_status=${1:-0}
     trap - HUP INT TERM
+    if [ -n "$GIT_AUTHORITY_DIR" ]; then
+        rm -rf "$GIT_AUTHORITY_DIR"
+    fi
     if [ -n "$DISK_MONITOR_PID" ]; then
         : >"$DISK_MONITOR_STOP"
         wait "$DISK_MONITOR_PID" 2>/dev/null || true
@@ -1140,8 +1144,19 @@ else
         fail "FreeBSD llvm23 package lacks clang or llvm-ar"
     pass "Dependencies installed"
 
+    # Bind the original host authority before projecting files into the VM.
+    SOURCE_AUTHORITY_HELPER="$ROOT_DIR/scripts/bootstrap/lib/freebsd-source-authority.shs"
+    SOURCE_AUTHORITY_HEAD=$(git -C "$ROOT_DIR" rev-parse --verify HEAD) || fail "Cannot bind source HEAD"
+    mkdir -p "$PROVENANCE_DIR"
+    GIT_AUTHORITY_DIR=$(mktemp -d "$VM_DIR/git-authority.XXXXXX") || fail "Cannot isolate Git authority"
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" sh "$SOURCE_AUTHORITY_HELPER" prepare \
+        "$ROOT_DIR" "$GIT_AUTHORITY_DIR" "$SOURCE_AUTHORITY_HEAD" \
+        >"$PROVENANCE_DIR/source-git-authority.env" || fail "Cannot prepare bounded Git authority"
+    SOURCE_AUTHORITY_SHA=$(run_bounded "$QEMU_TRANSFER_TIMEOUT" sh "$SOURCE_AUTHORITY_HELPER" snapshot \
+        "$ROOT_DIR" "$PROVENANCE_DIR/source-inputs-host.txt") || fail "Cannot bind host source content"
+    cp "$PROVENANCE_DIR/source-inputs-host.txt" "$GIT_AUTHORITY_DIR/repo/.git/simple-source-host.snapshot"
     info "Syncing project to VM..."
-    run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az --delete \
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az --delete --no-owner --no-group \
         --exclude='.git' \
         --exclude='.jj/' \
         --exclude='/.claude/worktrees/' \
@@ -1153,7 +1168,9 @@ else
         --exclude='node_modules/' \
         --exclude='/src/runtime/*.o' \
         --exclude='/src/runtime/*.a' \
-        --exclude='/examples/' \
+        --include='/examples/' \
+        --include='/examples/10_tooling/***' \
+        --exclude='/examples/***' \
         --include='/doc/' \
         --include='/doc/04_architecture/' \
         --include='/doc/04_architecture/compiler/' \
@@ -1162,6 +1179,12 @@ else
         --exclude='/doc/**' \
         --exclude='*.qcow2' \
         --exclude='/src/compiler_rust/target/' \
+        --include='/src/compiler_rust/target_wt/' \
+        --include='/src/compiler_rust/target_wt/release/' \
+        --include='/src/compiler_rust/target_wt/CACHEDIR.TAG' \
+        --include='/src/compiler_rust/target_wt/.rustc_info.json' \
+        --include='/src/compiler_rust/target_wt/release/.cargo-lock' \
+        --exclude='/src/compiler_rust/target_wt/***' \
         --exclude='/src/compiler_rust/target_*/' \
         --include='/tools/' \
         --include='/tools/counterpart/' \
@@ -1176,6 +1199,26 @@ else
         -e "$RSYNC_SSH" \
         "${ROOT_DIR}/" "${VM_USER}@localhost:${VM_HOME}/simple/"
     pass "Project synced"
+
+    # Transfer a real depth-one object store, never a worktree .git pointer.
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az --delete --no-owner --no-group \
+        -e "$RSYNC_SSH" "$GIT_AUTHORITY_DIR/repo/.git/" \
+        "${VM_USER}@localhost:${VM_HOME}/simple/.git/" || fail "Cannot transfer bounded Git authority"
+    $VM_SSH "cd '${VM_HOME}/simple' && sh scripts/bootstrap/lib/freebsd-source-authority.shs activate '${VM_HOME}/simple' '$SOURCE_AUTHORITY_HEAD' && sh scripts/bootstrap/lib/freebsd-source-authority.shs compare '${VM_HOME}/simple' '${VM_HOME}/simple/.git/simple-source-host.snapshot' '${VM_HOME}/simple/.git/simple-source-guest.snapshot'" \
+        >"$PROVENANCE_DIR/source-guest-snapshot.sha256" || fail "Guest source authority differs from original host source"
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" sh "$SOURCE_AUTHORITY_HELPER" compare \
+        "$ROOT_DIR" "$PROVENANCE_DIR/source-inputs-host.txt" "$PROVENANCE_DIR/source-inputs-host-after.txt" \
+        >/dev/null || fail "Host source changed during transfer"
+    [ "$(git -C "$ROOT_DIR" rev-parse --verify HEAD)" = "$SOURCE_AUTHORITY_HEAD" ] || fail "Host HEAD changed during transfer"
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az -e "$RSYNC_SSH" \
+        "${VM_USER}@localhost:${VM_HOME}/simple/.git/simple-source-guest.snapshot" \
+        "$PROVENANCE_DIR/source-inputs-guest.txt" || fail "Cannot retain guest source authority"
+    cmp -s "$PROVENANCE_DIR/source-inputs-host.txt" "$PROVENANCE_DIR/source-inputs-guest.txt" || fail "Copied source authority mismatch"
+    printf 'source_commit=%s\nsource_snapshot_sha256=%s\nsource_transfer_status=verified\n' \
+        "$SOURCE_AUTHORITY_HEAD" "$SOURCE_AUTHORITY_SHA" >>"$PROVENANCE_DIR/source-git-authority.env"
+    rm -rf "$GIT_AUTHORITY_DIR"
+    GIT_AUTHORITY_DIR=
+    pass "Original source and bounded Git authority verified in guest"
 
     # The bootstrap policy (bootstrap-from-scratch.sh) rejects a full
     # bootstrap without a planner receipt: reason-receipt-required, exit 64

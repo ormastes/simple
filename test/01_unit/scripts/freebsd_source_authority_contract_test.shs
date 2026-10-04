@@ -1,0 +1,68 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+helper="$root/scripts/bootstrap/lib/freebsd-source-authority.shs"
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/freebsd-source-authority.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+host="$fixture/host"
+guest="$fixture/guest"
+mkdir -p "$host" "$guest" "$fixture/capsule"
+for path in src/compiler src/app src/lib src/os src/runtime src/package_ownership \
+    src/plugins src/compositions examples/10_tooling scripts/bootstrap \
+    scripts/check/lib test/03_system/app/bootstrap_builder/feature \
+    test/fixtures/bootstrap_builder doc; do
+    mkdir -p "$host/$path"
+done
+cp "$root/scripts/check/lib/bootstrap-stage3-provenance.shs" "$host/scripts/check/lib/"
+cp -R "$root/scripts/check/lib/bootstrap-stage3" "$host/scripts/check/lib/"
+printf 'keep\n' >"$host/src/compiler/keep.spl"
+printf 'delete\n' >"$host/src/compiler/delete.spl"
+printf 'rename\n' >"$host/src/compiler/rename-old.spl"
+printf 'example\n' >"$host/examples/10_tooling/probe.spl"
+printf 'excluded\n' >"$host/doc/excluded.md"
+git -C "$host" init -q
+git -C "$host" config user.name contract
+git -C "$host" config user.email contract@example.invalid
+git -C "$host" add .
+git -C "$host" commit -qm baseline
+printf 'second\n' >>"$host/src/compiler/keep.spl"
+git -C "$host" commit -qam second
+expected_head=$(git -C "$host" rev-parse HEAD)
+printf 'dirty\n' >>"$host/src/compiler/keep.spl"
+rm "$host/src/compiler/delete.spl"
+mv "$host/src/compiler/rename-old.spl" "$host/src/compiler/rename-new.spl"
+printf 'untracked\n' >"$host/src/compiler/untracked.spl"
+sh "$helper" prepare "$host" "$fixture/capsule" "$expected_head" >"$fixture/size.env"
+[ "$(git -C "$fixture/capsule/repo" rev-list --count HEAD)" = 1 ] || fail 'history was transferred'
+[ ! -e "$fixture/capsule/repo/.git/objects/info/alternates" ] || fail 'host object dependency remains'
+[ -z "$(git -C "$fixture/capsule/repo" remote)" ] || fail 'host remote remains'
+cp -R "$host/." "$guest/"
+rm -rf "$guest/.git"
+cp -R "$fixture/capsule/repo/.git" "$guest/.git"
+rm "$guest/doc/excluded.md"
+sh "$helper" activate "$guest" "$expected_head"
+[ "$(git -C "$guest" rev-parse HEAD)" = "$expected_head" ] || fail 'original HEAD lost'
+git -C "$guest" diff --name-only HEAD >"$fixture/dirty"
+grep -qx src/compiler/delete.spl "$fixture/dirty" || fail 'genuine deletion hidden'
+grep -qx src/compiler/rename-old.spl "$fixture/dirty" || fail 'rename source hidden'
+grep -qx src/compiler/keep.spl "$fixture/dirty" || fail 'dirty source hidden'
+! grep -qx doc/excluded.md "$fixture/dirty" || fail 'projection omission appears dirty'
+git -C "$guest" ls-files --others --exclude-standard >"$fixture/untracked"
+grep -qx src/compiler/rename-new.spl "$fixture/untracked" || fail 'rename destination missing'
+grep -qx src/compiler/untracked.spl "$fixture/untracked" || fail 'untracked source missing'
+sh "$helper" snapshot "$host" "$fixture/host.snapshot" >"$fixture/host.sha"
+sh "$helper" compare "$guest" "$fixture/host.snapshot" "$fixture/guest.snapshot" >"$fixture/guest.sha"
+cmp -s "$fixture/host.sha" "$fixture/guest.sha" || fail 'identical projection changed content identity'
+printf 'tampered\n' >>"$guest/src/compiler/keep.spl"
+if sh "$helper" compare "$guest" "$fixture/host.snapshot" "$fixture/tampered.snapshot" >"$fixture/tampered.log" 2>&1; then
+    fail 'guest source tampering accepted'
+fi
+if sh "$helper" activate "$guest" 0000000000000000000000000000000000000000 >"$fixture/head.log" 2>&1; then
+    fail 'wrong original HEAD accepted'
+fi
+rm -rf "$guest/examples/10_tooling"
+if sh "$helper" snapshot "$guest" "$fixture/missing.snapshot" >"$fixture/missing.log" 2>&1; then
+    fail 'required tooling authority root omitted'
+fi
+printf 'freebsd_source_authority_contract=true\n'
