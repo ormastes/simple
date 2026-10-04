@@ -122,6 +122,10 @@ impl<'a> MirLowerer<'a> {
         // Lower then branch
         self.set_current_block(then_id)?;
         let then_value = self.lower_expr(then_branch)?;
+        // A tagged branch value (`if v == nil: false else: v` with `v: any?`)
+        // stored into a raw-scalar merge slot must be decoded, exactly like a
+        // return/val slot; otherwise a boxed FALSE reads as true under the JIT.
+        let then_value = self.unbox_scalar_for_raw_slot(expr_ty, then_branch.ty, then_value)?;
         self.with_func(|func, current_block| {
             let block = func.block_mut(current_block).unwrap();
             block.instructions.push(MirInst::Store {
@@ -144,6 +148,10 @@ impl<'a> MirLowerer<'a> {
                 block.instructions.push(MirInst::ConstInt { dest, value: 0 });
                 dest
             })?
+        };
+        let else_value = match else_branch {
+            Some(else_expr) => self.unbox_scalar_for_raw_slot(expr_ty, else_expr.ty, else_value)?,
+            None => else_value,
         };
         self.with_func(|func, current_block| {
             let block = func.block_mut(current_block).unwrap();

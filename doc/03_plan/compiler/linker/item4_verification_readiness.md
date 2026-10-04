@@ -268,3 +268,10 @@ configuration and thin-dylib providers; SDK text stubs/cache providers and actua
 Darwin execution remain open. SimpleOS image production is not yet evidence of
 a linker running inside SimpleOS. Managed internal-engine admission remains an
 explicit requirement.
+
+The Mach-O adapter now forwards native duplicate-definition policy through every
+hosted archive-resolution pass and final binding. True keeps the first selected
+strong definition; false and existing direct API defaults remain strict. This
+removes the ordinary native configuration rejection without changing caller
+defaults. Real competing-definition acceptance is source-authored; execution and
+hosted weak coalescing are still separate open gates.

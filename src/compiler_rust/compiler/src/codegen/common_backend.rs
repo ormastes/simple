@@ -206,6 +206,9 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         names.insert("rt_value_as_int".to_string());
                     }
                     MirInst::Cast { from_ty, to_ty, .. } => {
+                        if *from_ty == TypeId::ANY && *to_ty == TypeId::BOOL {
+                            names.insert("rt_value_truthy".to_string());
+                        }
                         if matches!(*from_ty, TypeId::ANY | TypeId::STRING)
                             && matches!(
                                 *to_ty,
