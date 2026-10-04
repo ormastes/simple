@@ -1,0 +1,109 @@
+# Scan-based ordinary x64 GOT: no symbol-sized map or resident GOT buffer.
+use compiler.backend.linker.elf.stream_types.{ElfStreamInputsV1}
+use compiler.backend.linker.elf.stream_inputs.*
+use compiler.backend.linker.elf.elf_file_reader.{ElfFileSymbolV1, elf_file_section_v1, elf_file_rela_v1}
+
+pub struct ElfStreamGotIdentityV1:
+    is_local: bool
+    owner: i64
+    table: i64
+    ordinal: u64
+    name: [u8]
+
+pub struct ElfStreamGotLayoutV1:
+    base: u64
+    end: u64
+    wanted_slot: Option<u64>
+    active: bool
+
+# 1 = slot PC-relative, 2 = slot offset, 3 = base PC-relative,
+# 4 = symbol minus GOT base. TLS and dynamic relocations are separate contracts.
+pub fn elf_stream_got_kind_v1(kind: u64) -> i64:
+    if kind == 9u64 or kind == 28u64 or kind == 41u64 or kind == 42u64 or kind == 43u64: return 1
+    if kind == 3u64 or kind == 27u64 or kind == 30u64: return 2
+    if kind == 26u64 or kind == 29u64: return 3
+    if kind == 25u64 or kind == 31u64: return 4
+    0
+
+pub fn elf_stream_got_identity_v1(owner: i64, table: i64, ordinal: u64,
+        symbol: ElfFileSymbolV1) -> ElfStreamGotIdentityV1:
+    ElfStreamGotIdentityV1(is_local: symbol.binding == 0, owner: owner,
+        table: table, ordinal: ordinal, name: symbol.name_bytes)
+
+pub fn elf_stream_got_same_v1(left: ElfStreamGotIdentityV1, right: ElfStreamGotIdentityV1) -> bool:
+    if left.is_local != right.is_local: return false
+    if left.is_local:
+        return left.owner == right.owner and left.table == right.table and left.ordinal == right.ordinal
+    left.name == right.name
+
+impl ElfStreamInputsV1:
+    me elf_stream_got_first_v1(owner: i64, table: i64, ordinal: u64,
+            identity: ElfStreamGotIdentityV1, cancelled: fn() -> bool) -> Result<bool, text>:
+        # Stop at the current relocation, not its symbol ordinal. This retains
+        # first-use order while deduplicating across RELA and symbol tables.
+        var candidate_owner = 0
+        for object in self.objects:
+            for candidate_table in 1..object.section_count:
+                self.elf_stream_charge_v1(cancelled)?
+                val section = elf_file_section_v1(object, candidate_table)?
+                if section.section_type != 4u64: continue
+                self.elf_stream_charge_v1(cancelled)?
+                val target = elf_file_section_v1(object, section.info)?
+                if (target.flags & 2u64) == 0u64: continue
+                if section.entry_size != 24u64 or section.size % 24u64 != 0u64: return Err("stream GOT RELA width")
+                var candidate_ordinal = 0u64
+                while candidate_ordinal < section.size / 24u64:
+                    self.elf_stream_charge_v1(cancelled)?
+                    if candidate_owner == owner and candidate_table == table and candidate_ordinal == ordinal: return Ok(true)
+                    val relocation = elf_file_rela_v1(object, candidate_table, candidate_ordinal)?
+                    val kind = elf_stream_got_kind_v1(relocation.relocation_type)
+                    if kind == 1 or kind == 2:
+                        val symbol = self.elf_stream_read_symbol_v1(object, relocation.symbol_table, relocation.symbol_index, cancelled)?
+                        val candidate = elf_stream_got_identity_v1(candidate_owner, relocation.symbol_table, relocation.symbol_index, symbol)
+                        if elf_stream_got_same_v1(identity, candidate): return Ok(false)
+                    candidate_ordinal = candidate_ordinal + 1u64
+            candidate_owner = candidate_owner + 1
+        Err("stream GOT reference disappeared")
+
+    me elf_stream_got_layout_v1(start: u64, wanted: Option<ElfStreamGotIdentityV1>,
+            cancelled: fn() -> bool) -> Result<ElfStreamGotLayoutV1, text>:
+        if start > self.limits.output_bytes: return Err("stream GOT output budget")
+        # start is bounded to 1 TiB by input admission, so this cannot wrap.
+        val base = start + ((8u64 - start % 8u64) % 8u64)
+        var cursor = base
+        var active = false
+        var found: Option<u64> = None
+        var owner = 0
+        for object in self.objects:
+            for table in 1..object.section_count:
+                self.elf_stream_charge_v1(cancelled)?
+                val section = elf_file_section_v1(object, table)?
+                if section.section_type != 4u64: continue
+                self.elf_stream_charge_v1(cancelled)?
+                val target = elf_file_section_v1(object, section.info)?
+                if (target.flags & 2u64) == 0u64: continue
+                if section.entry_size != 24u64 or section.size % 24u64 != 0u64: return Err("stream GOT RELA width")
+                var ordinal = 0u64
+                while ordinal < section.size / 24u64:
+                    self.elf_stream_charge_v1(cancelled)?
+                    val relocation = elf_file_rela_v1(object, table, ordinal)?
+                    if relocation.relocation_type != 0u64:
+                        val kind = elf_stream_got_kind_v1(relocation.relocation_type)
+                        val symbol = self.elf_stream_read_symbol_v1(object, relocation.symbol_table, relocation.symbol_index, cancelled)?
+                        if kind != 0 or elf_stream_got_anchor_v1(symbol):
+                            active = true
+                            if base > self.limits.output_bytes: return Err("stream GOT alignment exceeds output budget")
+                        if kind == 1 or kind == 2:
+                            val identity = elf_stream_got_identity_v1(owner, relocation.symbol_table, relocation.symbol_index, symbol)
+                            if self.elf_stream_got_first_v1(owner, table, ordinal, identity, cancelled)?:
+                                if cursor > self.limits.output_bytes or 8u64 > self.limits.output_bytes - cursor:
+                                    return Err("stream GOT storage exceeds output budget")
+                                if wanted.is_some():
+                                    if elf_stream_got_same_v1(wanted.unwrap(), identity): found = Some(cursor)
+                                cursor = cursor + 8u64
+                    ordinal = ordinal + 1u64
+            owner = owner + 1
+        Ok(ElfStreamGotLayoutV1(base: base, end: if active: cursor else: start, wanted_slot: found, active: active))
+
+export ElfStreamGotIdentityV1, ElfStreamGotLayoutV1
+export elf_stream_got_kind_v1, elf_stream_got_identity_v1, elf_stream_got_same_v1
