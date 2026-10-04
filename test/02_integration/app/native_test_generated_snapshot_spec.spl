@@ -1,0 +1,74 @@
+"""Native generated-source inventory lifecycle. Runtime execution UNRUN."""
+use std.spec.*
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1}
+use app.io.env_ops.{env_get}
+use app.io.file_ops.{path_absolute}
+use std.io_runtime.{dir_create_all, file_write, file_read, file_exists}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_async_mut.sosix.host_facade.{sosix_run}
+use std.nogc_sync_mut.test_runner.native_test_source_stage.{
+    native_test_stage_source_v1, native_test_cleanup_source_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1}
+
+fn generated_snapshot_git(root: text, args: [text]) -> bool:
+    sosix_run("git", ["-C", root, "-c", "core.hooksPath=", "-c", "commit.gpgsign=false"] + args).exit_code == 0
+
+fn generated_snapshot_lifecycle() -> text:
+    val parent = path_absolute("build/test-artifacts")
+    if not dir_create_all(parent): return "fixture-parent"
+    val allocated = secure_temp_dir(parent, "native-source-snapshot-")
+    if allocated.is_err(): return "fixture-allocation"
+    val root = compile_source_inventory_plain_checkout_v1(allocated.unwrap())
+    if not dir_create_all(root + "/src"): return "fixture-src"
+    if not dir_create_all(root + "/test"): return "fixture-test"
+    if not dir_create_all(root + "/build"): return "fixture-build"
+    val tracked_bytes = "fn tracked() -> i64: 17\n"
+    if not file_write(root + "/src/tracked.spl", tracked_bytes): return "fixture-write"
+    if not file_write(root + "/.gitignore", "build/\n"): return "fixture-ignore"
+    if not generated_snapshot_git(root, ["init", "-q"]): return "git-init"
+    if not generated_snapshot_git(root, ["add", "src", ".gitignore"]): return "git-add"
+    if not generated_snapshot_git(root, ["-c", "user.name=Native source fixture",
+            "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]): return "git-commit"
+    val binding_before = env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
+    val cache = root + "/build/scv"
+    val before = compiler_source_authority_acquire_v1(root, cache, ["src", "test"], true)
+    if not before.valid: return "cold:" + before.reason
+    if before.snapshot.inventory_count != 1: return "cold-membership"
+    val old_manifest = file_read(before.snapshot.snapshot_root + "/SCV_COMPILE_INVENTORY")
+    val transformed_bytes = "# generated from real-source_spec.spl\nfn main() -> i64:\n    42\n"
+    val input = root + "/build/transformed.spl"
+    if not file_write(input, transformed_bytes): return "generated-input"
+    val staged = native_test_stage_source_v1(root, input)
+    if staged.is_err(): return "stage:" + staged.unwrap_err()
+    val stage = staged.unwrap()
+    val relative = stage.path.substring(root.len() + 1)
+    if not relative.starts_with("test/native-generated-"): return "stage-scope"
+    if file_exists(before.snapshot.snapshot_root + "/" + relative): return "old-snapshot-grew"
+    val added = compiler_source_authority_acquire_v1(root, cache, ["src", "test"], false)
+    if not added.valid: return "warm-add:" + added.reason
+    if added.inventory_generation <= before.inventory_generation: return "warm-generation"
+    if added.snapshot.revision_id == before.snapshot.revision_id: return "warm-revision"
+    if added.snapshot.inventory_count != 2: return "warm-membership"
+    if file_read(added.snapshot.snapshot_root + "/" + relative) != transformed_bytes: return "warm-frozen-bytes"
+    if file_read(before.snapshot.snapshot_root + "/SCV_COMPILE_INVENTORY") != old_manifest: return "old-manifest-changed"
+    if file_read(before.snapshot.snapshot_root + "/src/tracked.spl") != tracked_bytes: return "old-source-changed"
+    if not native_test_cleanup_source_v1(stage, false): return "stage-cleanup"
+    if file_exists(stage.path): return "stage-retained"
+    val removed = compiler_source_authority_acquire_v1(root, cache, ["src", "test"], false)
+    if not removed.valid: return "warm-delete:" + removed.reason
+    if removed.inventory_generation <= added.inventory_generation: return "delete-generation"
+    if removed.snapshot.inventory_count != 1: return "delete-membership"
+    if file_exists(removed.snapshot.snapshot_root + "/" + relative): return "deleted-entry-admitted"
+    if file_read(added.snapshot.snapshot_root + "/" + relative) != transformed_bytes: return "sealed-source-deleted"
+    if file_read(before.snapshot.snapshot_root + "/SCV_COMPILE_INVENTORY") != old_manifest: return "sealed-manifest-deleted"
+    if file_read(input) != transformed_bytes: return "original-input-deleted"
+    if (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") != binding_before: return "parent-binding-mutated"
+    # Retain the isolated Git fixture and immutable snapshots as inspection evidence.
+    ""
+
+describe "Native generated source uses the canonical warm inventory":
+    it "admits exact new source then observes deletion without changing sealed generations":
+        step("Create an isolated real Git checkout and cold source authority")
+        step("Stage generated bytes and refresh through the canonical warm owner")
+        step("Remove only the stage and verify older immutable snapshots still contain their bytes")
+        expect(generated_snapshot_lifecycle()).to_equal("")

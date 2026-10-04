@@ -1,13 +1,15 @@
-# Native test generated-source authority: pending follow-up
+# Native test generated-source authority
 
 2026-10-04; inspected release `9af9a8c0c70c4a04f6fc3a5bac7db475362854f5`.
 Owner `/root/linker_research`, isolated branch
 `work/item4-generated-source-design-20261004`; sidecars N/A.
-**Status: design proposal only. No implementation, executed regression or
-runtime qualification is supplied by this document.** Root owns subsequent
-scope freeze/integration; source changes require concrete test intent first.
+**Status: frozen repair source-reviewed at `44d01e5fbcb`; all behavioral
+execution UNRUN.** Initial intent `b83b2acb980` preceded production edits.
+The original source mismatch below records the inspected base, not a claim that
+the repaired candidate still has identical behavior. Root owns integration;
+source review and authored tests do not qualify the runtime or close item4.
 
-## Confirmed source mismatch
+## Original confirmed source mismatch
 
 `src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl` writes the native
 SPipe wrapper under the OS temporary directory in `preprocess_spipe_file`.
@@ -54,14 +56,14 @@ nonignored, whereas `test/.tmp_native_example/entry.spl` matches `.tmp*/`.
 This is a current-checkout observation, not permission to bypass future ignore
 or source-membership rules. A staging failure must remain a named error.
 
-## Proposed minimal flow
+## Frozen repair flow
 
 1. Transform the actual input using the existing SPipe/coverage logic. Stage the
    exact resulting bytes in one unique, owned `test` directory before compilation.
    Preserve original-source markers and diagnostics; validate write success.
 2. Request a new source admission explicitly for this generated-entry compile.
-   A proposed coordinator-only option is `--refresh-source-authority`; its name
-   and interface are not frozen yet. The coordinator consumes it, clears the
+   The coordinator-only option is `--refresh-source-authority`. It consumes the
+   option, rejects duplicates and internal-worker use, clears the
    inherited source binding, then invokes the canonical acquire/publish path.
    Do this inside the compiler child, before any shards spawn.
 3. The canonical refresh discovers the newly staged entry and creates a new
@@ -70,7 +72,7 @@ or source-membership rules. A staging failure must remain a named error.
    older generation. Normal inherited compilation does not silently refresh.
 4. Workers receive the newly published generation and compile its frozen entry.
    The explicit refresh option must not leak as an unknown worker argument.
-5. After owned process completion, remove only the owned generated file/directory
+5. After terminal compilation, remove only the owned generated file/directory
    unless keep-artifacts is requested. Report cleanup failures honestly; never
    remove another job's directory or an active source generation. Later normal
    inventory refresh observes source deletion; old immutable snapshots remain.
@@ -82,6 +84,38 @@ V4 process API would be a larger change than this coordinator-owned request.
 Do not clear source authority for all public native builds or weaken the inherited
 snapshot owner's failure behavior. Inventory priming is a distinct prerequisite,
 not an excuse to set cold initialization on every child.
+
+## Authored owners and evidence limits
+
+`native_test_source_stage.spl` exports `NativeTestSourceStageV1{directory,path}`,
+`native_test_stage_source_v1(checkout_root,source_path)` and
+`native_test_cleanup_source_v1(stage,keep_artifacts)`. Reads use the existing
+checked regular-file provider; cleanup validates the exact stage path and never
+recursively removes the directory. A foreign file causes cleanup failure and
+permits retry. The ordinary SMF path remains unchanged.
+
+`native_build_authority_request_v1(args,internal_worker)` returns
+`NativeBuildAuthorityRequestV1{args,refresh}`; ordinary option values retain their
+bytes even if equal to the refresh token. Only the compiler coordinator changes
+its own binding. Coverage and explicit AOT stage the preprocessed source and use
+canonical default roots. Staging cleanup occurs before executing the compiled
+image; keep-artifacts preserves it and cleanup failure preserves the primary
+compilation error.
+
+The compile call requests the existing owned-test process route. On Windows,
+when a completion receipt reports `tree_reaped=false`, the runner fails and
+retains source, image and cache. A missing receipt on other providers uses the
+existing synchronous completion contract. This is not universal proof that all
+descendants were reaped, nor resource-scope qualification.
+
+Five unit scenarios are authored in
+`test/01_unit/lib/test_runner_native_source_authority_spec.spl`; one real Git
+snapshot scenario is authored in
+`test/02_integration/app/native_test_generated_snapshot_spec.spl`
+(`a86230d1301`, manual `9ce30feac71`). The latter calls real cold/warm acquire,
+checks exact staged bytes, deletion and sealed prior generations, and compares
+the caller's snapshot-root binding. It does not invoke the CLI refresh option
+or prove child environment isolation. All six scenarios remain UNRUN.
 
 ## Test-first acceptance before implementation
 
@@ -103,8 +137,9 @@ as substitutes for behavior. At minimum:
   journal writes. Existing compatible caches remain intact.
 - Native backend integration's positive and assertion-failure SPipe fixtures
   must end in `_spec.spl`, because preprocessing deliberately returns ordinary
-  `.spl` files unchanged. A deliberate `fn main` compile-negative fixture stays
-  plain `.spl`; its error must not be confused with skipped preprocessing.
+  `.spl` files unchanged. A deliberate zero-example `fn main` fixture stays
+  plain `.spl`; this fixture intentionally exercises zero-example rejection
+  after execution, not a compile-negative claim.
 
 A real native executable, non-vacuous test summary and expected failure outcome
 are required for eventual behavioral evidence. Authored tests alone remain UNRUN.

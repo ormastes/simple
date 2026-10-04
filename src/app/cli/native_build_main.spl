@@ -6,7 +6,8 @@ use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
 use app.io.file_ops.{path_absolute, file_size_raw}
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
-    compiler_source_authority_publish_v1, compiler_source_authority_open_published_v1}
+    compiler_source_authority_publish_v1, compiler_source_authority_open_published_v1,
+    compiler_source_authority_clear_v1}
 use app.compiler_entrypoint.entry_closure_selection.{compiler_entry_closure_publish_v1}
 use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
 use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureBindingV1}
@@ -216,6 +217,7 @@ fn print_help():
     print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
     print "  --mode <name>        Build mode: dynload (default) or one-binary"
     print "  --cache-dir <dir>    Native cache directory (default: SIMPLE_USER_STORAGE_ROOT/cache/compiler/native-build/v1)"
+    print "  --refresh-source-authority  Admit current checkout sources in this coordinator"
     print "  --timeout <secs>     Worker timeout in seconds (default 7200)"
     print "  --emit-object        Emit relocatable object output"
     print "  --emit-archive       Emit a static archive instead of an executable"
@@ -885,7 +887,39 @@ fn run_hir_shards(args: [text], count: i64, simple_bin: text, timeout_ms: i64) -
     if hir_shard_recovery_blocked(queue_dir): return 1
     hir_shard_aggregate_exit(failed_workers, failed_modules)
 
-pub fn run_native_build_worker(args: [text]) -> i64:
+struct NativeBuildAuthorityRequestV1:
+    args: [text]
+    refresh: bool
+
+pub fn native_build_authority_request_v1(args: [text], internal_worker: bool) -> Result<NativeBuildAuthorityRequestV1, text>:
+    var forwarded: [text] = []
+    var refresh = false
+    var index = 0
+    while index < args.len():
+        val arg = args[index]
+        if arg == "--refresh-source-authority":
+            if internal_worker: return Err("internal worker cannot refresh source authority")
+            if refresh: return Err("duplicate source authority refresh request")
+            refresh = true
+        else:
+            forwarded.push(arg)
+            # Values belong to their preceding option, even when their bytes
+            # happen to equal this coordinator option. Worker validation still
+            # owns malformed/missing ordinary option values.
+            if native_build_is_value_consuming_flag(arg) and index + 1 < args.len():
+                index = index + 1
+                forwarded.push(args[index])
+        index = index + 1
+    Ok(NativeBuildAuthorityRequestV1(args: forwarded, refresh: refresh))
+
+pub fn run_native_build_worker(raw_args: [text]) -> i64:
+    val request = match native_build_authority_request_v1(raw_args,
+            (env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? "") == "1"):
+        case Ok(value): value
+        case Err(reason):
+            eprint "SCV-E-ADMISSION: " + reason
+            return 1
+    val args = request.args
     val fail_fast = compile_fail_fast_requested(args, env_get("SIMPLE_COMPILE_FAIL_FAST") ?? "", env_get("CI") ?? "")
     env_set("SIMPLE_COMPILE_FAIL_FAST", if fail_fast: "1" else: "0")
     # This is the parent coordinator; native_build_worker.spl and shard
@@ -931,7 +965,13 @@ pub fn run_native_build_worker(args: [text]) -> i64:
     # Publish complete immutable authority once, before any shard is spawned.
     # A generation alone leaves the child without a snapshot and makes every
     # child repeat cold inventory admission while the parent retains its work.
-    if (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") == "":
+    # The explicit request is consumed in this compiler coordinator, never in
+    # the test-runner parent or a shard. Ordinary inherited generations remain
+    # immutable and are not silently refreshed.
+    if request.refresh and not compiler_source_authority_clear_v1():
+        eprint "SCV-E-ADMISSION: snapshot-authority-env-clear-failed"
+        return 1
+    if request.refresh or (env_get("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "") == "":
         val scv_root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
         val source_roots = native_build_authority_source_roots_v1(args, scv_root)
         if source_roots.len() == 0:

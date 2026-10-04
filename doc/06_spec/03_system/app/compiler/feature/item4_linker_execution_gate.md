@@ -1,7 +1,7 @@
 # Item4 pending native execution gate
 
 Status: **UNRUN / runtime qualification blocked**. This is an execution recipe
-and source audit at `9af9a8c0c70c4a04f6fc3a5bac7db475362854f5`, not a claim that
+and updated source audit through repair `44d01e5fbcb`, not a claim that
 an available executable supports or has passed these commands. No build,
 Rust-seed fallback, candidate execution or repeated bootstrap attempt occurred.
 
@@ -21,11 +21,11 @@ mode or the plain `--native`/SMF route:
 <admitted-runtime> test <spec.spl> --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
 ```
 
-The selected owner preprocesses SSpec into an executable `fn main()` (:734,
-:897), builds via `native-build` (:1101, :1184), prints an invocation receipt
-with compiler digest/argv/output (:1204), executes the output and parses its
+The selected owner preprocesses SSpec into an executable `fn main()`, stages
+it through `native_test_stage_source_v1`, builds via `native-build`, prints a
+verbose invocation receipt with compiler digest/argv/output, executes the output and parses its
 results. Explicit AOT rejects compilation failure instead of accepting a
-fallback and rejects zero reported examples (:1444). `--keep-artifacts` retains
+fallback and rejects zero reported examples. `--keep-artifacts` retains
 the generated source/image for inspection; it is not evidence of success.
 
 ## Preconditions and currently unresolved admission
@@ -40,13 +40,16 @@ admission. Windows needs its actual native compiler/runtime dependencies;
 Linux likewise needs its qualified LLVM/runtime bundle. WSL is a separate Linux
 host context, not evidence that a Windows candidate can execute these tests.
 
-Two source-level prerequisites require investigation before calling this recipe
-operational. The generator writes its entry under TMPDIR/TMP/TEMP (or platform
-temp) at executor:901. The explicit native argv currently names only
-`--source src/lib --entry-closure` and that generated entry. Item4 specs import
-compiler owners and sometimes app owners. Prove generated-entry inventory
-admission and the complete compiler/app/lib import closure; do not infer them
-from successful helper generation. The existing source-family/cold-inventory
+The source repair stages exact transformed bytes in a unique checkout-owned
+`test/native-generated-*/entry.spl` directory. Both coverage and explicit AOT
+request `--refresh-source-authority` from the compiler child and use canonical
+default source roots. Ordinary inherited builds retain their existing contract.
+The coordinator consumes the option before workers and acquires/publishes a
+fresh immutable generation without modifying the runner parent's environment.
+These are source-reviewed changes, not executed admission evidence. Prove the
+generated-entry inventory transition and complete compiler/app/lib import
+closure with the authored unit, real Git snapshot and backend integration
+scenarios; helper generation alone is insufficient. The existing cold-inventory
 diagnostics stopped before producing a probe executable:
 `doc/08_tracking/bug/item4_source_inventory_cold_init_timeout_2026-10-03.md`.
 That record's three-attempt cap remains in force; this manual authorizes no retry.
