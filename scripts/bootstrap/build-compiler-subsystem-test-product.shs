@@ -112,10 +112,21 @@ case "$receipt" in "$job_root"/*) ;; *) fail 'receipt must be under product job 
   [ ! -e "$job_root/cache-product" ] && \
   [ ! -e "$job_root/source-spans.tsv" ] && [ ! -e "$job_root/main-verdicts.tsv" ] || \
   fail 'product job root contains an earlier attempt'
-for volume in / /dev/shm; do
-  available_kib=$(df -Pk "$volume" | awk 'NR==2 {print $4}')
-  [ "$available_kib" -ge 4194304 ] || fail "less than 4 GiB free on $volume"
-done
+mkdir -p "$job_root" || fail 'product job root unavailable'
+check_disk_space() {
+  required_kib=$1
+  # Product sources, caches, native objects and scratch live below this job
+  # root. Check its actual filesystem; FreeBSD has no /dev/shm by default.
+  for volume in / "$job_root"; do
+    disk_report=$(df -Pk "$volume") || fail "disk probe failed on $volume"
+    available_kib=$(printf '%s\n' "$disk_report" | awk 'NR==2 {print $4}') ||
+      fail "disk report unreadable on $volume"
+    case "$available_kib" in ''|*[!0-9]*) fail "disk probe invalid on $volume" ;; esac
+    [ "$available_kib" -ge "$required_kib" ] ||
+      fail "less than ${required_kib} KiB free on $volume"
+  done
+}
+check_disk_space 4194304
 mkdir -p "$job_root/logs" "$job_root/tools" "$job_root/tmp"
 product_source_snapshot="$job_root/logs/product-source-snapshot.txt"
 bootstrap_stage3_source_snapshot "$product_source_snapshot" "$source_root" || fail 'canonical product source snapshot failed'
@@ -167,10 +178,7 @@ perl -MFile::Find -MDigest::SHA -e '
   close $fh or die $!;
 ' "$overlay" "$overlay_input_manifest" || fail 'overlay input manifest failed'
 overlay_input_sha256=$(hash_file "$overlay_input_manifest")
-for volume in / /dev/shm; do
-  available_kib=$(df -Pk "$volume" | awk 'NR==2 {print $4}')
-  [ "$available_kib" -ge 6291456 ] || fail "less than 4 GiB floor plus 2 GiB build reserve on $volume"
-done
+check_disk_space 6291456
 
 run_native_build() {
   task=$1 entry=$2 produced=$3 build_backend=$4
