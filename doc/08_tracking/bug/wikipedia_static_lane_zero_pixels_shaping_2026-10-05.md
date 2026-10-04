@@ -53,3 +53,40 @@ yet. That is a seed JIT extern ABI defect, open.
 
 Specs: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_style_jit_identity_spec.spl`
 does not cover this. The pixel A/B in the PR body is the evidence.
+
+## Update 2026-10-05: frame no longer discarded; Arabic root cause located
+
+**Frame (FIXED).** The page lane now uses presentable twins of the strict
+engine2d entries (`simple_web_layout_render_html_presentable_engine2d*`,
+`simple_web_engine2d_render_html_presentable`). They return the complete
+framebuffer and print `[web-render] presentable-with-skips skipped=2
+occluded=0 reason=unsupported Draw IR commands skipped: text-font-shaping`.
+`BeRenderResult` carries `skipped_command_count` and `skip_reason`.
+- wikipedia.org main lane: 0 -> 480,000 px.
+- Those pixels are row-identical to the base engine's own
+  `simple_web_layout_render_html_engine2d_result(...).pixels`, i.e. the frame
+  the strict entry computed and threw away.
+- Strict entries are unchanged for oracle, SSR and receipt callers.
+
+**Arabic shaping (OPEN, root cause).** In the bundled Arabic face, both layout
+plans are rejected by `_active_layout_lookup_indices`
+(`skia/feature/glyph/ot_parser_layout.spl`, script-record check), so the run is
+`substitution_complete=false positioning_complete=false` and the text is
+skipped. There are two causes:
+- **GSUB:** ScriptList at +10, LookupList at +48, FeatureList at +144. The
+  Script tables sit at ScriptList+262, beyond the next top-level list.
+  `script_limit` comes from `_nearest_sibling_end`, which assumes a list's
+  subtables lie between it and the next top-level offset. OpenType does not
+  require that, so the check `script_list + offset + 4 > script_limit` rejects
+  a valid font.
+- **GPOS:** `DFLT` and `dev2` share one Script table (offset 184). OpenType
+  allows shared subtables, but the check `script_offsets.contains(offset)`
+  rejects it. The same check exists for LangSys, Feature and Lookup offsets.
+
+The validator's whole bounds model is non-overlapping nested regions.
+Relaxing it is a parser trust-model change: use the table end for subtable
+reach and allow shared offsets while keeping `blob.len()` bounds. It also
+affects every face that goes through this lane. In addition,
+`_selected_text` (ot_layout_shaper.spl) admits only the exact string
+"العربية" for `ar`. Unblock: OT parser owner decides the bounds model; the
+Arabic link then paints instead of being skipped.
