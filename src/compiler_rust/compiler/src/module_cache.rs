@@ -488,6 +488,9 @@ thread_local! {
     /// constant-false.
     static PATH_KEY_CACHE: RefCell<BoundedCache<PathBuf, PathBuf>> =
         RefCell::new(BoundedCache::new(path_key_cache_max(), |_| false));
+    /// `module_owner_key` memo: the last (module path, owner key) pair.
+    /// RETENTION: one entry; cleared together with `PATH_KEY_CACHE`.
+    static LAST_MODULE_OWNER_KEY: RefCell<Option<(PathBuf, Arc<str>)>> = const { RefCell::new(None) };
     /// `filter_functions_from_value` memo: source dict ptr -> (source Arc, filtered Arc).
     ///
     /// RETENTION: bounded (`FILTERED_DICT_CACHE_MAX_DEFAULT`,
@@ -546,6 +549,7 @@ pub fn clear_module_cache() {
     PARTIAL_MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
     PATH_KEY_CACHE.with(|cache| cache.borrow_mut().clear());
+    LAST_MODULE_OWNER_KEY.with(|last| *last.borrow_mut() = None);
     FILTERED_DICT_CACHE.with(|cache| cache.borrow_mut().clear());
     clear_probe_source_cache();
     clear_parsed_source_cache();
@@ -680,6 +684,28 @@ pub(crate) fn total_modules_loaded() -> usize {
 /// Reset total modules loaded counter
 pub fn reset_total_modules() {
     TOTAL_MODULES_LOADED.with(|c| *c.borrow_mut() = 0);
+}
+
+/// Owner key of a module: `normalize_path_key(path)` as text.
+///
+/// A module's evaluation asks for its own owner once per imported name and
+/// once per global, always with the same path. Each ask re-hashed the PathBuf
+/// into `PATH_KEY_CACHE` and allocated a fresh `Arc<str>` -- about 13% of
+/// module-loading CPU in a `sample` of `simple test <spec>`. The one-entry
+/// memo hits only on a byte-identical path and returns exactly the value
+/// computed from `normalize_path_key`, so callers see the same key.
+pub fn module_owner_key(path: &Path) -> Arc<str> {
+    if let Some(owner) = LAST_MODULE_OWNER_KEY.with(|last| {
+        last.borrow()
+            .as_ref()
+            .filter(|(cached, _)| cached.as_os_str() == path.as_os_str())
+            .map(|(_, owner)| owner.clone())
+    }) {
+        return owner;
+    }
+    let owner: Arc<str> = Arc::from(normalize_path_key(path).to_string_lossy().as_ref());
+    LAST_MODULE_OWNER_KEY.with(|last| *last.borrow_mut() = Some((path.to_path_buf(), owner.clone())));
+    owner
 }
 
 /// Normalize a path to a consistent key for caching/tracking.
@@ -1121,6 +1147,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir
+    }
+
+    /// The one-entry owner memo must return exactly `normalize_path_key` as
+    /// text for every path, including when two modules alternate and when a
+    /// distinct spelling of the same file is asked for.
+    #[test]
+    fn module_owner_key_matches_normalize_path_key_across_alternating_paths() {
+        let dir = scratch_dir("owner-key");
+        let a = write_module(&dir, 1);
+        let b = write_module(&dir, 2);
+        let a_dotted = dir.join(".").join("m1.spl");
+        let missing = dir.join("absent.spl");
+        for path in [&a, &a, &b, &a, &a_dotted, &b, &missing, &missing, &a] {
+            let expected = normalize_path_key(path).to_string_lossy().into_owned();
+            assert_eq!(&*super::module_owner_key(path), expected.as_str(), "{}", path.display());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn write_module(dir: &std::path::Path, i: usize) -> std::path::PathBuf {

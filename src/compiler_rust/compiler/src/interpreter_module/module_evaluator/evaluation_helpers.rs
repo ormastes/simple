@@ -19,7 +19,7 @@ use crate::interpreter::{
 };
 
 use crate::interpreter::interpreter_module::export_handler::load_export_source;
-use crate::interpreter::module_cache::{filter_functions_from_value, module_exports_owner, normalize_path_key};
+use crate::interpreter::module_cache::{filter_functions_from_value, module_exports_owner, module_owner_key};
 
 type Enums = HashMap<String, Arc<simple_parser::ast::EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;
@@ -42,7 +42,7 @@ fn tag_methods_owner(methods: &mut [FunctionDef], owner: Option<&Arc<str>>) {
 }
 
 fn module_owner(module_path: Option<&Path>) -> Option<Arc<str>> {
-    module_path.map(|path| Arc::from(normalize_path_key(path).to_string_lossy().as_ref()))
+    module_path.map(module_owner_key)
 }
 
 fn record_owned_global(module_path: Option<&Path>, name: &str, value: &Value) {
