@@ -16,6 +16,10 @@ Scratch directories are uniquely created; setup failures record assertions and
 return before dependent mutation. Corruption changes a real framed payload byte,
 not a canned return value. Blockers are ordinary files, not injected cleanup
 booleans. Output-window size is three bytes, crossing relocation widths.
+The cleanup matrix also combines a real destination collision with both cleanup
+blockers: failed publication retains the unconsumed, unpublished stage and image
+owner before returning Err, forbids another destination, and allows discard
+after the blockers are removed while preserving the original sentinel.
 
 Future execution after independent runtime admission:
 `<runtime> test test/03_system/app/compiler/feature/item4_stream_prepare_spec.spl`

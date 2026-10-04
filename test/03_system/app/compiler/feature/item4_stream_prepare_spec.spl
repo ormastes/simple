@@ -106,7 +106,7 @@ describe "private streamed ELF preparation":
             expect(dir_remove(parent)).to_equal(true)
 
     it "ITEM4-REQ-009 retains independent failed cleanup owners and transfers pending cleanup after commit":
-        for publish in [false, true]:
+        for mode in 0..3:
             step("Create actual unrelated blockers in both owned directories")
             val created = item4_stream_prepare_parent()
             expect(created.is_ok()).to_equal(true)
@@ -137,7 +137,36 @@ describe "private streamed ELF preparation":
                 expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
                 expect(dir_remove(parent)).to_equal(true)
                 return
-            if publish:
+            if mode == 2:
+                step("A failed no-clobber publication retains its changed stage before returning the cleanup error")
+                val output = parent + "/protected.bin"
+                val sentinel_written = file_write_bytes(output, [17u8, 0u8, 255u8])
+                expect(sentinel_written).to_equal(true)
+                if not sentinel_written:
+                    expect(file_remove(image_blocker)).to_equal(true)
+                    expect(file_remove(spill_blocker)).to_equal(true)
+                    expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+                    expect(dir_remove(parent)).to_equal(true)
+                    return
+                val rejected = owner.elf_stream_publish_prepared_v1(output, item4_stream_prepare_cancelled)
+                expect(rejected.is_err()).to_equal(true)
+                if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("cleanup")
+                expect(owner.publication_attempted).to_equal(true)
+                expect(owner.stage.is_some()).to_equal(true)
+                if owner.stage.is_some():
+                    expect(owner.stage.unwrap().consumed).to_equal(false)
+                    expect(owner.stage.unwrap().published).to_equal(false)
+                expect(owner.directory).to_equal(image_directory)
+                expect(file_read_bytes(output)).to_equal([17u8, 0u8, 255u8])
+                expect(owner.elf_stream_publish_prepared_v1(parent + "/retry.bin", item4_stream_prepare_cancelled).is_err()).to_equal(true)
+                expect(file_exists(parent + "/retry.bin")).to_equal(false)
+                expect(file_exists(image_blocker) and file_exists(spill_blocker)).to_equal(true)
+                expect(file_remove(image_blocker)).to_equal(true)
+                expect(file_remove(spill_blocker)).to_equal(true)
+                expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+                expect(file_read_bytes(output)).to_equal([17u8, 0u8, 255u8])
+                expect(file_remove(output)).to_equal(true)
+            else if mode == 1:
                 step("A committed image returns successful publication with cleanup owned only by its result")
                 val published = owner.elf_stream_publish_prepared_v1(parent + "/linked.bin", item4_stream_prepare_cancelled)
                 expect(published.is_ok()).to_equal(true)
