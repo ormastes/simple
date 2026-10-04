@@ -6,7 +6,7 @@ Status: **UNRUN**. Authored manual; no admitted Simple runtime or RED/GREEN evid
 
 | Scenario | Independent oracle |
 |---|---|
-| Maximum size/alignment | Different declarations supply size 80 and alignment 64; relocated references share one zero-filled RW allocation |
+| Maximum size/alignment | Different declarations supply size 80 and alignment 64 in both orders; relocated references share one zero-filled RW allocation |
 | Undefined archive common | Both engines extract a real COMMON-only provider and satisfy the same semantic oracle |
 | Strong precedence | Regular strong initializer wins over common in both input orders |
 | Weak precedence | Common zero storage wins over regular weak initializer in both input orders |
@@ -24,6 +24,8 @@ Eight- and 64-byte emission windows must produce identical stream images.
 Fast/stream comparisons use semantic checks rather than identical layouts.
 Quota and cancellation checks also enter common layout with real retained
 inputs already open, exercise its scan guard, and close the original owner.
+The output limit is 12399 bytes: ordinary sections fit, but the final COMMON
+byte exceeds the limit. The rejection must name both common storage and output.
 
 Fixture sources are `test/fixtures/linker/elf/stream_common_*.s`. Each object was
 assembled with Ubuntu clang using `--target=x86_64-unknown-linux-gnu -c`.

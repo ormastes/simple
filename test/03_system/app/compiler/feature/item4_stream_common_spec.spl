@@ -296,13 +296,15 @@ describe "Streamed ELF common-symbol allocation":
         val errors = ["output", "scratch", "scan-work", "cancelled"]
         for kind in 0..4:
             var limits = item4_stream_common_limits()
-            if kind == 0: limits.output_bytes = 4096u64
+            # Ordinary sections fit; COMMON's final byte exceeds this limit.
+            if kind == 0: limits.output_bytes = 12399u64
             if kind == 1: limits.scratch_bytes = 1u64
             if kind == 2: limits.scan_record_limit = 1u64
             val linked = elf_stream_link_file_v1(item4_stream_common_inputs(), [], [95, 115, 116, 97, 114, 116],
                 output, directory, limits, if kind == 3: item4_stream_common_stop else: item4_stream_common_cancelled)
             expect(linked.is_err()).to_equal(true)
             if linked.is_err(): expect(linked.unwrap_err()).to_contain(errors[kind])
+            if kind == 0 and linked.is_err(): expect(linked.unwrap_err()).to_contain("common")
             expect(file_read_bytes(output)).to_equal(sentinel)
         expect(file_remove(output)).to_equal(true)
         expect(dir_remove(directory, false)).to_equal(true)
@@ -365,6 +367,16 @@ describe "Streamed ELF common-symbol allocation":
         expect(second.is_ok()).to_equal(true)
         if second.is_ok(): expect(second.unwrap().cleanup_pending).to_equal(false)
         if first.is_ok() and second.is_ok(): expect(file_read_bytes(output)).to_equal(file_read_bytes(directory + "/second.elf"))
-        for name in ["first.elf", "second.elf"]:
+        step("Reverse the independent size and alignment declarations and check the same storage semantics")
+        val reversed = elf_stream_link_file_v1([
+            "test/fixtures/linker/elf/stream_common_refs.o",
+            "test/fixtures/linker/elf/stream_common_b.o",
+            "test/fixtures/linker/elf/stream_common_a.o"], [], [95, 115, 116, 97, 114, 116],
+            directory + "/reversed.elf", directory, item4_stream_common_limits(), item4_stream_common_cancelled)
+        expect(reversed.is_ok()).to_equal(true)
+        if reversed.is_ok():
+            expect(reversed.unwrap().cleanup_pending).to_equal(false)
+            item4_stream_common_check(file_read_bytes(directory + "/reversed.elf"))
+        for name in ["first.elf", "second.elf", "reversed.elf"]:
             if file_exists(directory + "/" + name): expect(file_remove(directory + "/" + name)).to_equal(true)
         expect(dir_remove(directory, false)).to_equal(true)
