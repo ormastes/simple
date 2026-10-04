@@ -1,0 +1,156 @@
+# Subresource pump for the app browser's BrowserSession render lane.
+#
+# BrowserSession never touches the network itself: it queues BrowserRequests
+# and waits for the host to commit a BrowserResponse for each. The hosted
+# web-content session (src/os/hosted/hosted_web_content_session.spl) is one
+# such host; until 2026-10-04 the app lane (render_adapter) was NOT one — it
+# called open_html and rendered at once, so a page with any external
+# subresource never finished loading and its stylesheet was never applied
+# (example.com rendered unstyled; doc/08_tracking/bug/
+# browser_real_site_rendering_gaps_2026-10-04.md gap D2).
+#
+# Policy (conservative, owner decision 2026-10-04):
+# - style and image requests are fetched with the hosted lane's own request
+#   rules (fetch mode, header shaping, credentials, HSTS) — shared through
+#   os.hosted.hosted_browser_renderer_policy, not re-implemented here.
+# - remote CODE (script, module, wasm) and script-initiated fetch() are NOT
+#   fetched by default: each is completed as a failed fetch ("blocked by
+#   policy"), which is exactly the session's existing failed-fetch path, so
+#   the load still completes. SIMPLE_BROWSER_REMOTE_SCRIPTS=1 opts in to
+#   fetching them under the same rules.
+# - document requests (script-driven navigation) are refused: the app lane
+#   renders the committed document, it does not navigate.
+
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRequest, BrowserResponse}
+use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, FetchResponse, RequestMode}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin, Url}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, BrowserLogLevel}
+use std.gc_async_mut.io.mod_stub.{env_get}
+use os.hosted.hosted_browser_renderer_policy.{
+    hosted_browser_fetch_mode, hosted_browser_fetch_headers,
+    hosted_browser_has_cookie_header, hosted_browser_network_error,
+    hosted_browser_remove_response_header, hosted_browser_response_header_value,
+    hosted_browser_wasm_hex
+}
+
+extern fn rt_text_to_bytes(value: text) -> [u8]
+
+pub val BROWSER_REMOTE_SCRIPTS_ENV: text = "SIMPLE_BROWSER_REMOTE_SCRIPTS"
+# Upper bound on requests serviced for one render. A real page queues tens of
+# subresources; the bound only stops a self-re-queueing page from spinning.
+pub val BROWSER_SUBRESOURCE_PUMP_LIMIT: i64 = 512
+
+pub fn browser_remote_scripts_enabled() -> bool:
+    (env_get(BROWSER_REMOTE_SCRIPTS_ENV) ?? "") == "1"
+
+pub fn browser_subresource_admitted(kind: text, remote_scripts: bool) -> bool:
+    """True when the app lane fetches a request of `kind`."""
+    if kind == "style" or kind == "image":
+        return true
+    if kind == "script" or kind == "module" or kind == "wasm" or kind == "fetch":
+        return remote_scripts
+    false
+
+pub fn browser_subresource_blocked_reason(kind: text) -> text:
+    if kind == "document":
+        "blocked by policy: the app render lane does not navigate"
+    else:
+        "blocked by policy: remote script execution is disabled ({BROWSER_REMOTE_SCRIPTS_ENV}=1 enables it)"
+
+fn _error_response(request: BrowserRequest, message: text) -> BrowserResponse:
+    BrowserResponse.create(
+        request_id: request.id, kind: request.kind, url: request.url,
+        status: 0, headers: "", body: "", error: message
+    )
+
+struct BrowserFetchedSubresource:
+    response: BrowserResponse
+    # Raw Strict-Transport-Security value (transport state, applied to the
+    # session's HSTS store, never shown to the renderer).
+    hsts: text
+
+fn _fetch_request(
+    session: BrowserSession, engine: FetchEngine, request: BrowserRequest
+) -> Result<BrowserFetchedSubresource, text>:
+    """One request under the hosted lane's rules (see _pump_network_once in
+    hosted_web_content_session.spl): fetch mode by kind, headers shaped,
+    credentials only for CORS, cookies never smuggled into a CORS request,
+    a single hop (redirects go back to the session's own policy), and the
+    HSTS header kept out of the renderer-visible response."""
+    var network = engine
+    val requester_origin = if request.initiator_origin != "":
+        request.initiator_origin
+    else:
+        Origin.from_url(Url.parse_or_opaque(session.document_url)).to_text()
+    network.set_requester_origin(requester_origin)
+    val mode = hosted_browser_fetch_mode(request.kind, request.url, requester_origin)
+    val fetch_request = FetchRequest(
+        url: Url.parse_or_opaque(request.url),
+        method: request.method,
+        headers: hosted_browser_fetch_headers(request.headers, request.content_type),
+        body: rt_text_to_bytes(request.body),
+        mode: mode,
+        credentials: if mode == RequestMode.Cors: request.credentials else: "omit"
+    )
+    if mode == RequestMode.Cors:
+        if ((request.credentials != "omit" and
+            request.credentials != "same-origin") or
+            hosted_browser_has_cookie_header(fetch_request.headers)):
+            return Err("network: Invalid direct CORS request")
+    match network.fetch_single_hop(fetch_request):
+        Err(error):
+            Err(hosted_browser_network_error(fetch_request.url.scheme, error.message))
+        Ok(response):
+            val body = if request.kind == "wasm":
+                hosted_browser_wasm_hex(response.body)
+            else:
+                response.body_text()
+            val hsts = if fetch_request.url.scheme == "https":
+                hosted_browser_response_header_value(
+                    response.headers, "strict-transport-security"
+                )
+            else:
+                ""
+            Ok(BrowserFetchedSubresource(
+                response: BrowserResponse.create(
+                    request_id: request.id, kind: request.kind, url: request.url,
+                    status: response.status.to_i32(),
+                    headers: hosted_browser_remove_response_header(
+                        response.headers, "strict-transport-security"
+                    ),
+                    body: body, error: ""
+                ),
+                hsts: hsts
+            ))
+
+pub fn browser_drain_subresources(session: BrowserSession) -> BrowserSession:
+    """Service every queued request until the session stops asking (load
+    complete) or BROWSER_SUBRESOURCE_PUMP_LIMIT is reached."""
+    var s = session
+    val engine = FetchEngine.new(Logger.new("browser-app-subresource", BrowserLogLevel.Error))
+    val remote_scripts = browser_remote_scripts_enabled()
+    var serviced: i64 = 0
+    while serviced < BROWSER_SUBRESOURCE_PUMP_LIMIT:
+        val next = s.take_pending_request()
+        if next == nil:
+            break
+        val request = next.unwrap()
+        serviced = serviced + 1
+        if not browser_subresource_admitted(request.kind, remote_scripts):
+            val _ = s.commit_network_response(
+                _error_response(request, browser_subresource_blocked_reason(request.kind))
+            )
+            continue
+        match _fetch_request(s, engine, request):
+            Err(message):
+                val _ = s.commit_network_response(_error_response(request, message))
+            Ok(fetched):
+                if fetched.hsts != "":
+                    val _ = s._apply_hsts_header(fetched.hsts, request.url)
+                val _ = s.commit_network_response(fetched.response)
+    s
+
+export BROWSER_REMOTE_SCRIPTS_ENV, BROWSER_SUBRESOURCE_PUMP_LIMIT
+export browser_remote_scripts_enabled, browser_subresource_admitted
+export browser_subresource_blocked_reason, browser_drain_subresources
