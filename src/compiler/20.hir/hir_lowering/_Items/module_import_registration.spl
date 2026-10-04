@@ -128,6 +128,11 @@ impl HirLowering:
         self.materialize_imported_field_package_dependency(
             imported_index, dependency, import_span, materialize_enum)
 
+    fn import_binding_or_invalid(local_name: text) -> SymbolId:
+        if self.registering_lexical_import:
+            return self.symbols.lookup_local_or_invalid(local_name)
+        self.symbols.lookup_or_invalid(local_name)
+
     me register_imported_symbol(imported_index: i64, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
         # Keep the recursive import/materialization boundary scalar. Passing a
         # retained ModuleSurface by value through nested native calls can copy
@@ -174,9 +179,10 @@ impl HirLowering:
             self.registered_import_memo_hash_next = []
             self.registered_import_memo_hash_mask = 0
         val registered_enum_tag = if materialize_enum: " E" else: " -"
-        val registered_key = imported_mod.module_name + " " + imported_name + " " + local_name + registered_enum_tag
+        val registered_scope = if self.registering_lexical_import: " scope=" + self.symbols.current_scope.id.to_string() else: ""
+        val registered_key = imported_mod.module_name + " " + imported_name + " " + local_name + registered_enum_tag + registered_scope
         # A function-scope binding can disappear while the importer memo survives.
-        val bound_now = self.symbols.lookup_or_invalid(local_name).is_valid()
+        val bound_now = self.import_binding_or_invalid(local_name).is_valid()
         if self.registered_import_memo_lookup(registered_key, bound_now):
             self.registered_import_skip_count = self.registered_import_skip_count + 1
             hir_phase_profile_count_imported_symbol_skip()
@@ -187,7 +193,7 @@ impl HirLowering:
         # Record misses too. A changed binding state must replace the old
         # scalar memo state so a later scope pop still triggers registration.
         self.registered_import_memo_record(
-            registered_key, self.symbols.lookup_or_invalid(local_name).is_valid())
+            registered_key, self.import_binding_or_invalid(local_name).is_valid())
 
     me registered_import_memo_lookup(key: text, bound_now: bool) -> bool:
         """Probe scalar hash chains; class-field Dict membership is unreliable
@@ -394,7 +400,7 @@ impl HirLowering:
         hir_phase_profile_add(HIR_PROF_RIS_SCAN, scan_started)
         if composite_position >= 0:
             val composite = imported_mod.composite_values[composite_position]
-            val existing_id = self.symbols.lookup_or_invalid(local_name)
+            val existing_id = self.import_binding_or_invalid(local_name)
             val already_bound = existing_id.is_valid()
             var same_owner = false
             if already_bound and self.symbols.symbols.has(existing_id.id):
@@ -532,7 +538,7 @@ impl HirLowering:
                         qualified_local, import_span, materialize_enum)
                     return
             # CHAINWB (2026-09-01): split from a two-hop chain rooted at `self`.
-            val existing_enum_symbol_id = self.symbols.lookup_or_invalid(local_name)
+            val existing_enum_symbol_id = self.import_binding_or_invalid(local_name)
             val already_bound = existing_enum_symbol_id.is_valid()
             # Repeated imports in sibling scopes retain the materialized ID.
             if materialize_enum and self.imported_enum_symbol_ids.contains_key(local_name):
@@ -563,7 +569,7 @@ impl HirLowering:
                 self.register_materialized_enum_payload_dependencies(imported_mod, imported_mod_name, surface_enum, import_span)
         elif trait_position >= 0:
             # CHAINWB (2026-09-01): split from a two-hop chain rooted at `self`.
-            val existing_trait_symbol_id = self.symbols.lookup_or_invalid(local_name)
+            val existing_trait_symbol_id = self.import_binding_or_invalid(local_name)
             val already_bound = existing_trait_symbol_id.is_valid()
             val imported_trait = self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             if not already_bound:
@@ -637,7 +643,7 @@ impl HirLowering:
                         self.symbols.bind_qualified_type(alias_owner, imported_name, SymbolId(id: target_type))
                     return
             # CHAINWB (2026-09-01): split from a two-hop chain rooted at `self`.
-            val existing_alias_symbol_id = self.symbols.lookup_or_invalid(local_name)
+            val existing_alias_symbol_id = self.import_binding_or_invalid(local_name)
             val already_bound = existing_alias_symbol_id.is_valid()
             if not already_bound:
                 # SymbolTable.define's type-level first-write-wins list does
@@ -671,7 +677,7 @@ impl HirLowering:
             # so guard an exact repeat before define rather than accumulating
             # duplicate rows. Do not suppress a different callable/module that
             # intentionally competes for the same local alias.
-            val existing_id = self.symbols.lookup_or_invalid(local_name)
+            val existing_id = self.import_binding_or_invalid(local_name)
             var exact_repeat = false
             if existing_id.is_valid() and self.symbols.symbols.has(existing_id.id):
                 val existing: HirSymbol = self.symbols.symbols[existing_id.id]
