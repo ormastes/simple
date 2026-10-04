@@ -46,12 +46,59 @@ fn item4_macho_provider_command(bytes: [u8], kind: i64) -> i64:
         if length < 8 or length > 32 + size - at:
             expect(false).to_equal(true)
             return -1
-        if item4_macho_provider_read(bytes, at) == kind: return at
+        if item4_macho_provider_read(bytes, at) == kind:
+            val minimum = if kind == 0x80000022: 48 else: 24
+            expect(length >= minimum).to_equal(true)
+            if length < minimum: return -1
+            return at
         at = at + length
     expect(false).to_equal(true)
     -1
 
 describe "typed Mach-O provider boundary":
+    it "ITEM4-REQ-006 projects real client and umbrella commands without silently dropping access policy":
+        step("Read a real binary provider through its validating reader")
+        val original = file_read_bytes("test/fixtures/linker/macho/provider_x64.dylib")
+        val uuid = item4_macho_provider_command(original, 0x1b)
+        if uuid < 0: return
+        expect(item4_macho_provider_read(original, uuid + 4)).to_equal(24)
+        if item4_macho_provider_read(original, uuid + 4) != 24: return
+        val object = file_read_bytes("test/fixtures/linker/macho/hosted_start_x64.o")
+        for kind in [0x14i64, 0x12i64]:
+            # Replace only the optional UUID command; preserve envelope size and all payload offsets.
+            var bytes = item4_macho_provider_set(original, uuid, 4, kind)
+            bytes = item4_macho_provider_set(bytes, uuid + 8, 4, 12)
+            for index in 12..24: bytes[uuid + index] = 0u8
+            val name = "client"
+            for index in 0..name.len(): bytes[uuid + 12 + index] = name.byte_at(index) as u8
+            val parsed = macho_read_binary_provider_v1(bytes, RelocArch.X86_64)
+            expect(parsed.is_ok()).to_equal(true)
+            if parsed.is_err(): return
+            if kind == 0x14: expect(parsed.unwrap().allowable_clients).to_equal(["client"])
+            else: expect(parsed.unwrap().parent_umbrella).to_equal(Some("client"))
+            step("Preserve unsupported provider semantics")
+            val rejected = macho_hosted_link_with_providers([object], [], [parsed.unwrap()], item4_macho_provider_request(false))
+            expect(rejected.is_err()).to_equal(true)
+            if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("unsupported")
+
+    it "ITEM4-REQ-006 retains valid unused weak reexport and resolver metadata without blanket rejection":
+        step("Read a real binary provider through its validating reader")
+        val parsed = macho_read_binary_provider_v1(file_read_bytes("test/fixtures/linker/macho/provider_x64.dylib"), RelocArch.X86_64)
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_err(): return
+        val object = file_read_bytes("test/fixtures/linker/macho/hosted_start_x64.o")
+        for flags in [4i64, 8i64, 16i64]:
+            var provider = parsed.unwrap()
+            if flags == 8:
+                provider.dependencies = [MachOProviderDependencyV1(install_name: "/usr/lib/libreal.dylib", command: 0x8000001f, current_version: 0x10000, compatibility_version: 0x10000)]
+            val extra = MachOProviderExportV1(name: "_unused", flags: flags,
+                library_ordinal: if flags == 8: 1 else: 0, import_name: if flags == 8: "_unused" else: "")
+            provider.exports = provider.exports + [extra]
+            expect(macho_validate_provider_v1(provider, RelocArch.X86_64).is_ok()).to_equal(true)
+            step("Link through the shared typed provider path")
+            val linked = macho_hosted_link_with_providers([object], [], [provider], item4_macho_provider_request(false))
+            expect(linked.is_ok()).to_equal(true)
+
     it "ITEM4-REQ-006 retains binary address validation and literal zero SDK during projection":
         step("Read a real binary provider through its validating reader")
         val original = file_read_bytes("test/fixtures/linker/macho/provider_x64.dylib")
