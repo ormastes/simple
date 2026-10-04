@@ -276,8 +276,12 @@ impl<'a> Parser<'a> {
             let stmt = self.parse_item()?;
             Expr::DoBlock(vec![stmt])
         } else {
-            // Inline form: parse as expression
-            let expr = self.parse_expression()?;
+            // Inline form: parse as expression. Mark the then-branch so a
+            // trailing `as Type else:` leaves the `else:` to this `if`.
+            let saved_inline_if_then = self.inline_if_then_call_depth.replace(self.call_arg_depth);
+            let parsed = self.parse_expression();
+            self.inline_if_then_call_depth = saved_inline_if_then;
+            let expr = parsed?;
             // A multi-line CONDITION's trailing-operator continuation
             // (`if a == x and\n    b == y: ...`) can leave a compensating
             // pseudo-DEDENT queued in `deferred_dedent_count` (see
