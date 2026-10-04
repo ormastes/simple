@@ -15,6 +15,11 @@ profile_field() {
   # Prefix distinguishes a truly absent legacy field from any supplied value.
   awk -F= '$1=="resource_profile" {n++; value=substr($0,18)} END {if(n>1)exit 1; if(n==1)print "1" value; else print "0"}' "$1"
 }
+verify_profile_workers() {
+  if [ "$1" = qualified-80-v1 ]; then
+    [ "$(field "$3" threads)" = "$2" ] || return 1
+  fi
+}
 source_root= output_root= matrix_candidate=
 for arg in "$@"; do
   case "$arg" in
@@ -52,9 +57,9 @@ build_timeout=$(field "$matrix" build_timeout_seconds) || die "build timeout abs
 test_timeout=$(field "$matrix" test_timeout_seconds) || die "test timeout absent"
 resource_profile=$(profile_field "$matrix") || die "duplicate matrix resource profile"
 for timeout in "$build_timeout" "$test_timeout"; do
-  perl -I "$source_root/scripts/bootstrap/lib" -MBootstrapProductProducer=validate_product_resource_profile \
-    -e 'my $record=shift; my $profile=$record eq "0" ? undef : substr($record,1); validate_product_resource_profile($profile,@ARGV)' \
-    "$resource_profile" qualified "$threads" "$rss_cap_kib" "$timeout" enforce \
+  expected_profile=$(perl -I "$source_root/scripts/bootstrap/lib" -MBootstrapProductProducer=validate_product_resource_profile \
+    -e 'my $record=shift; my $profile=$record eq "0" ? undef : substr($record,1); print validate_product_resource_profile($profile,@ARGV)' \
+    "$resource_profile" qualified "$threads" "$rss_cap_kib" "$timeout" enforce) \
     || die "resource policy differs"
 done
 [ "$(wc -l <"$statuses" | tr -d ' ')" -eq 18 ] || die "six product chains incomplete"
@@ -101,9 +106,8 @@ for backend in llvm cranelift; do
       -e 'my $record=shift; my $profile=$record eq "0" ? undef : substr($record,1); validate_product_resource_profile($profile,@ARGV)' \
       "$product_profile" qualified "$threads" "$rss_cap_kib" "$build_timeout" enforce \
       || die "$backend/$suite product resource profile differs"
-    if [ "$threads" = 80 ]; then
-      [ "$(field "$receipt" threads)" = "$threads" ] || die "$backend/$suite worker count differs"
-    fi
+    verify_profile_workers "$expected_profile" "$threads" "$receipt" \
+      || die "$backend/$suite worker count differs"
     registered=$(field "$receipt" registered) || die "registered count absent"
     passed=$(field "$receipt" passed) || die "passed count absent"
     [ "$registered" -gt 0 ] && [ "$registered" -eq "$passed" ] || die "registered cases did not all pass"

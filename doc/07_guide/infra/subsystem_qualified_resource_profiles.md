@@ -32,3 +32,18 @@ The focused policy and recording-child transport tests are infrastructure tests,
 not native product qualification. A real Windows six-binary matrix with exact
 enumeration, execution counts, positive deadlines, and enforced RSS remains
 required before Windows RC1 admission.
+
+## Test execution concurrency remains separate
+
+This profile controls native compilation workers. The present runner invokes
+each product's `--run` without a worker option. The generated main calls owner
+registration functions sequentially, and `std.spec._aggregate_run_case` invokes
+`_execute_it` synchronously. The shared aggregate task driver also traverses its
+groups sequentially. Consequently this change does **not** deliver the requested
+80-job test execution. That remains a separate implementation requirement before
+claiming the requested build-and-test configuration is complete.
+
+Existing `--case-id` selection can support process-isolated test groups under
+the shared TaskRunner, with parent-authoritative registry/result reconciliation
+and memory admission. Merely adding threads around callbacks would share global
+hook and registry state and is not a safe implementation of that requirement.
