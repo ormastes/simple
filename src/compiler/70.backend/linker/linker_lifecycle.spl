@@ -16,6 +16,7 @@ use std.common.linker.link_request_v1.{LinkRequestV1}
 use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1}
 use std.common.linker.link_receipt_v1.{LinkReceiptV1}
 use compiler.backend.linker.linker_pack.{LinkerPackConfigV1, LinkerPackV1}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
 
 pub struct LinkerProviderV1:
     header: KpfSchemaHeaderV1
@@ -23,6 +24,7 @@ pub struct LinkerProviderV1:
     composition_digest: KpfDigest256
     engine_id: text
     invoke: fn(LinkRequestV1, LinkExecutionPolicyV1, [text], text) -> LinkReceiptV1
+    invoke_with_config: Option<fn(LinkRequestV1, LinkExecutionPolicyV1, [text], text, NativeLinkConfig) -> LinkReceiptV1> = nil
 
 pub struct LinkerSessionHandleV1:
     index: u32
@@ -152,6 +154,16 @@ pub class LinkerLifecycleV1:
 
     pub me run(session: LinkerSessionHandleV1, request: LinkRequestV1,
             policy: LinkExecutionPolicyV1, inputs: [text], output: text) -> Result<LinkReceiptV1, text>:
+        self.run_selected(session, request, policy, inputs, output, nil)
+
+    pub me run_with_config(session: LinkerSessionHandleV1, request: LinkRequestV1,
+            policy: LinkExecutionPolicyV1, inputs: [text], output: text,
+            config: NativeLinkConfig) -> Result<LinkReceiptV1, text>:
+        self.run_selected(session, request, policy, inputs, output, Some(config))
+
+    me run_selected(session: LinkerSessionHandleV1, request: LinkRequestV1,
+            policy: LinkExecutionPolicyV1, inputs: [text], output: text,
+            config: Option<NativeLinkConfig>) -> Result<LinkReceiptV1, text>:
         if not self.valid_session(session): return Err("stale linker session")
         if self.sessions[session.index].running: return Err("linker session is already running")
         val generation = self.sessions[session.index].generation
@@ -159,14 +171,25 @@ pub class LinkerLifecycleV1:
         if not view.status.accepted(): return Err("stale linker generation")
         if self.packs[generation.index] != nil:
             self.sessions[session.index].running = true
-            val result = self.packs[generation.index].unwrap().invoke(request, policy, inputs, output)
+            var pack = self.packs[generation.index].unwrap()
+            val result = if config == nil:
+                pack.invoke(request, policy, inputs, output)
+            else:
+                pack.invoke_with_config(request, policy, inputs, output, config.unwrap())
+            self.packs[generation.index] = Some(pack)
             self.sessions[session.index].running = false
             return result
         val selected = self.providers[generation.index]
         if selected == nil: return Err("linker generation has no operation")
         val provider = selected.unwrap()
+        if config != nil and provider.invoke_with_config == nil:
+            return Err("linker generation has no configured operation")
         self.sessions[session.index].running = true
-        val receipt = provider.invoke(request, policy, inputs, output)
+        val receipt = if config == nil:
+            provider.invoke(request, policy, inputs, output)
+        else:
+            val invoke = provider.invoke_with_config.unwrap()
+            invoke(request, policy, inputs, output, config.unwrap())
         self.sessions[session.index].running = false
         # Preserve the callback's actual engine/outcome/accounting; no invented success.
         Ok(receipt)
@@ -210,9 +233,23 @@ pub class LinkerLifecycleV1:
     pub me run_recovery(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
             inputs: [text], output: text) -> Result<LinkReceiptV1, text>:
         """Execute static recovery without depending on publication/session capacity."""
+        self.run_recovery_selected(request, policy, inputs, output, nil)
+
+    pub me run_recovery_with_config(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
+            inputs: [text], output: text, config: NativeLinkConfig) -> Result<LinkReceiptV1, text>:
+        self.run_recovery_selected(request, policy, inputs, output, Some(config))
+
+    me run_recovery_selected(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
+            inputs: [text], output: text, config: Option<NativeLinkConfig>) -> Result<LinkReceiptV1, text>:
         if self.recovery_running: return Err("recursive linker recovery dispatch")
+        if config != nil and self.recovery.invoke_with_config == nil:
+            return Err("linker recovery has no configured operation")
         self.recovery_running = true
-        val receipt = self.recovery.invoke(request, policy, inputs, output)
+        val receipt = if config == nil:
+            self.recovery.invoke(request, policy, inputs, output)
+        else:
+            val invoke = self.recovery.invoke_with_config.unwrap()
+            invoke(request, policy, inputs, output, config.unwrap())
         self.recovery_running = false
         Ok(receipt)
 
