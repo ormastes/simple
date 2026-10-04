@@ -1614,6 +1614,7 @@ pub(crate) fn exec_assignment(
                     Some(Value::Object { fields, .. }) => match fields.get(field_name) {
                         Some(Value::Array(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                         Some(Value::Dict(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
+                        Some(Value::ByteArray(arc)) => Arc::strong_count(arc) == 1 && Arc::weak_count(arc) == 0,
                         _ => false,
                     },
                     _ => false,
@@ -1633,6 +1634,26 @@ pub(crate) fn exec_assignment(
                                                     arr.push(Value::Nil);
                                                 }
                                                 arr.push(value);
+                                            }
+                                            return Ok(Control::Next);
+                                        }
+                                    }
+                                    // Packed `[u8]` (`rt_bytes_alloc`): same write as the
+                                    // `Value::Object` slow path below (`as_int() as u8`,
+                                    // zero-fill on growth), minus its per-write clone of
+                                    // the whole buffer -- O(n) per byte, which turned a
+                                    // 33 MB fill loop into a hang.
+                                    Value::ByteArray(arc) => {
+                                        if let Some(bytes) = Arc::get_mut(arc) {
+                                            let idx = index_val.as_int()? as usize;
+                                            let byte = value.as_int()? as u8;
+                                            if idx < bytes.len() {
+                                                bytes[idx] = byte;
+                                            } else {
+                                                while bytes.len() < idx {
+                                                    bytes.push(0);
+                                                }
+                                                bytes.push(byte);
                                             }
                                             return Ok(Control::Next);
                                         }

@@ -15,6 +15,9 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend,
     VK_T_FONT_ATLAS_UPLOAD}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.gpu.engine2d.glyph.{render_text_to_buffer}
+use std.nogc_sync_mut.gpu.engine2d.sffi_dispatch.{gpu_sffi_uses_interpreter_array_abi}
+
+extern fn rt_bytes_alloc(n: i64) -> [u8]
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_create_descriptor_set, vulkan_sffi_bind_buffer,
     vulkan_sffi_destroy_descriptor_set, vulkan_sffi_begin_compute,
@@ -429,7 +432,18 @@ impl VulkanBackend:
             self.image_upload_scratch_fallback_count = self.image_upload_scratch_fallback_count + 1
             return false
         if self.image_upload_scratch.len().to_i64() != byte_count:
-            self.image_upload_scratch = [0u8; byte_count]
+            # Interpreter lane: a `[0u8; n]` literal is one 64-byte boxed value
+            # per byte (2,025 MB for a 3840x2160 composite); `rt_bytes_alloc`
+            # is the packed zero-filled `[u8]` (1 byte per byte). Both lanes of
+            # this buffer are byte-identical: it is only index-assigned with
+            # `u8` values, measured with `.len()`, and handed to
+            # `vulkan_sffi_copy_to_buffer_prefix`, whose interpreter marshaller
+            # (`arg_bytes_ptr`) reads packed and boxed arrays to the same bytes.
+            # Native lanes keep the literal (their arrays are already compact).
+            if gpu_sffi_uses_interpreter_array_abi():
+                self.image_upload_scratch = rt_bytes_alloc(byte_count)
+            else:
+                self.image_upload_scratch = [0u8; byte_count]
             self.image_upload_scratch_resize_count = self.image_upload_scratch_resize_count + 1
             vulkan_image_pack_note_resize()
         vulkan_image_pack_note_pack()
