@@ -5,7 +5,7 @@ use std.nogc_sync_mut.env.platform.{get_temp_dir}
 use std.nogc_sync_mut.io.env_ops.{cwd}
 use std.nogc_sync_mut.ffi.io.{path_absolute}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write, file_read, file_exists, file_delete}
-use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove, dir_exists}
 use std.test_runner.test_result_wrapper.{preprocess_spipe_native_result_file_in}
 use std.test_runner.test_runner_execute.{native_test_compile_args_with_threads}
 use std.nogc_sync_mut.test_runner.native_test_source_stage.{NativeTestSourceStageV1, native_test_stage_source_v1, native_test_cleanup_source_v1}
@@ -83,6 +83,66 @@ describe "native generated source authority owner":
         expect(worker.is_err()).to_be(true)
         if worker.is_ok(): return
         expect(worker.unwrap_err()).to_contain("internal worker")
+
+    it "refuses non-checkouts and missing inputs without touching the original":
+        step("Reject invalid staging roots before creating generated authority")
+        val root = item4_native_authority_root()
+        val source = root + "/source.spl"
+        val wrote = file_write(source, "fn main():\n    42\n")
+        expect(wrote).to_be(true)
+        if not wrote: return
+        for invalid in ["", "test", root, source]:
+            val rejected = native_test_stage_source_v1(invalid, source)
+            expect(rejected.is_err()).to_be(true)
+            if rejected.is_ok():
+                native_test_cleanup_source_v1(rejected.unwrap(), false)
+                return
+            expect(rejected.unwrap_err()).to_contain("native-test-source:")
+        val checkout = path_absolute(cwd()).replace("\\", "/")
+        val missing = native_test_stage_source_v1(checkout, root + "/missing.spl")
+        expect(missing.is_err()).to_be(true)
+        if missing.is_ok():
+            native_test_cleanup_source_v1(missing.unwrap(), false)
+            return
+        expect(missing.unwrap_err()).to_contain("native-test-source:")
+        expect(file_read(source)).to_equal("fn main():\n    42\n")
+        expect(file_delete(source)).to_be(true)
+        expect(dir_remove(root, false)).to_be(true)
+
+    it "rejects forged ownership and retries nonrecursive cleanup after a real obstacle":
+        step("Preserve unrelated files during cleanup refusal")
+        val root = item4_native_authority_root()
+        val source = root + "/entry.spl"
+        val wrote = file_write(source, "fn main():\n    42\n")
+        expect(wrote).to_be(true)
+        if not wrote: return
+        val forged = NativeTestSourceStageV1(directory: root, path: source)
+        expect(native_test_cleanup_source_v1(forged, false)).to_be(false)
+        expect(file_read(source)).to_equal("fn main():\n    42\n")
+        val checkout = path_absolute(cwd()).replace("\\", "/")
+        val staged = native_test_stage_source_v1(checkout, source)
+        expect(staged.is_ok()).to_be(true)
+        if staged.is_err(): return
+        val stage = staged.unwrap()
+        val mismatched = NativeTestSourceStageV1(directory: stage.directory, path: source)
+        expect(native_test_cleanup_source_v1(mismatched, false)).to_be(false)
+        expect(file_exists(stage.path)).to_be(true)
+        val obstacle = stage.directory + "/unrelated"
+        val blocked = file_write(obstacle, "preserve this exact obstacle")
+        expect(blocked).to_be(true)
+        if not blocked:
+            native_test_cleanup_source_v1(stage, false)
+            return
+        expect(native_test_cleanup_source_v1(stage, false)).to_be(false)
+        expect(dir_exists(stage.directory)).to_be(true)
+        expect(file_read(obstacle)).to_equal("preserve this exact obstacle")
+        expect(file_read(source)).to_equal("fn main():\n    42\n")
+        step("Retry owned cleanup after removing only the test obstacle")
+        expect(file_delete(obstacle)).to_be(true)
+        expect(native_test_cleanup_source_v1(stage, false)).to_be(true)
+        expect(dir_exists(stage.directory)).to_be(false)
+        expect(file_delete(source)).to_be(true)
+        expect(dir_remove(root, false)).to_be(true)
 
     it "requests refreshed default source discovery from the real native compile argv owner":
         step("Construct compile arguments for the staged entry")
