@@ -1,0 +1,136 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+# XXH64 Known-Answer Tests for the one shared implementation
+# (std.common.crypto.xxhash), used by SimpleOS and by the hosted zstd decoder.
+#
+# Official vectors (xxHash spec / sanity suite / python-xxhash docs):
+#   XXH64("", 0)                                         = 0xEF46DB3751D8E999
+#   XXH64("", 2654435761)                                = 0xAC75FDA2929B17EF
+#   XXH64("a", 0)                                        = 0xD24EC4F1A98C6E5B
+#   XXH64("abc", 0)                                      = 0x44BC2CF5AD770999
+#   XXH64("Nobody inspects the spammish repetition", 0)  = 0xFBCEA83C8A378BF1
+# Bytes 0..99 (exercises the 32-byte stripe loop, 8/4/1-byte tails), computed
+# with an independent reference implementation of the xxHash spec:
+#   seed 0 = 0x6AC1E58032166597, seed 7 = 0x80653E7E9B887CDD
+#
+# Values are compared as 32-bit halves to keep every literal in i64 range.
+
+use std.spec.step
+
+use std.spipe.*
+use std.common.crypto.xxhash.{xxhash64, xxhash64_init, xxhash64_update, xxhash64_finalize}
+use std.nogc_sync_mut.compression.zstd.decoder.{zstd_decode}
+
+fn _hi(h: u64) -> i64:
+    (h >> 32u64).to_i64()
+
+fn _lo(h: u64) -> i64:
+    (h & 0xFFFFFFFFu64).to_i64()
+
+fn _empty() -> [u8]:
+    var out: [u8] = []
+    out
+
+fn _seq(start: i64, end: i64) -> [u8]:
+    var out: [u8] = []
+    var i = start
+    while i < end:
+        out.push(i.to_u8())
+        i = i + 1
+    out
+
+describe "XXH64 one-shot official vectors":
+    # @manual scenario evidence
+
+    it "empty, seed 0 -> 0xEF46DB3751D8E999":
+        # @req REQ-SSPEC-UNIT
+        step("empty, seed 0 -> 0xEF46DB3751D8E999")
+        val h = xxhash64(_empty(), 0u64)
+        expect(_hi(h)).to_equal(0xEF46DB37)
+        expect(_lo(h)).to_equal(0x51D8E999)
+
+    it "empty, seed 2654435761 -> 0xAC75FDA2929B17EF":
+        # @req REQ-SSPEC-UNIT
+        step("empty, seed 2654435761 -> 0xAC75FDA2929B17EF")
+        val h = xxhash64(_empty(), 2654435761u64)
+        expect(_hi(h)).to_equal(0xAC75FDA2)
+        expect(_lo(h)).to_equal(0x929B17EF)
+
+    it "\"a\" -> 0xD24EC4F1A98C6E5B":
+        # @req REQ-SSPEC-UNIT
+        step("a -> 0xD24EC4F1A98C6E5B")
+        val h = xxhash64("a".bytes(), 0u64)
+        expect(_hi(h)).to_equal(0xD24EC4F1)
+        expect(_lo(h)).to_equal(0xA98C6E5B)
+
+    it "\"abc\" -> 0x44BC2CF5AD770999":
+        # @req REQ-SSPEC-UNIT
+        step("abc -> 0x44BC2CF5AD770999")
+        val h = xxhash64("abc".bytes(), 0u64)
+        expect(_hi(h)).to_equal(0x44BC2CF5)
+        expect(_lo(h)).to_equal(0xAD770999)
+
+    it "39-byte phrase (stripe path) -> 0xFBCEA83C8A378BF1":
+        # @req REQ-SSPEC-UNIT
+        step("Nobody inspects the spammish repetition -> 0xFBCEA83C8A378BF1")
+        val h = xxhash64("Nobody inspects the spammish repetition".bytes(), 0u64)
+        expect(_hi(h)).to_equal(0xFBCEA83C)
+        expect(_lo(h)).to_equal(0x8A378BF1)
+
+describe "XXH64 100-byte input with seed":
+
+    it "bytes 0..99, seed 0 -> 0x6AC1E58032166597":
+        # @req REQ-SSPEC-UNIT
+        step("bytes 0..99, seed 0 -> 0x6AC1E58032166597")
+        val h = xxhash64(_seq(0, 100), 0u64)
+        expect(_hi(h)).to_equal(0x6AC1E580)
+        expect(_lo(h)).to_equal(0x32166597)
+
+    it "bytes 0..99, seed 7 -> 0x80653E7E9B887CDD":
+        # @req REQ-SSPEC-UNIT
+        step("bytes 0..99, seed 7 -> 0x80653E7E9B887CDD")
+        val h = xxhash64(_seq(0, 100), 7u64)
+        expect(_hi(h)).to_equal(0x80653E7E)
+        expect(_lo(h)).to_equal(0x9B887CDD)
+
+describe "XXH64 streaming API":
+
+    it "split 13+87 bytes, seed 7 matches the one-shot vector":
+        # @req REQ-SSPEC-UNIT
+        step("streaming bytes 0..99 split 13+87, seed 7 -> 0x80653E7E9B887CDD")
+        val s1 = xxhash64_update(xxhash64_init(7u64), _seq(0, 13))
+        val s2 = xxhash64_update(s1, _seq(13, 100))
+        val h = xxhash64_finalize(s2)
+        expect(_hi(h)).to_equal(0x80653E7E)
+        expect(_lo(h)).to_equal(0x9B887CDD)
+
+# Raw-block zstd frame for "abc" with Content_Checksum_Flag set (FHD 0x24)
+# followed by the 4-byte LE checksum given as `c0..c3`.
+fn _zstd_abc_frame(c0: u8, c1: u8, c2: u8, c3: u8) -> [u8]:
+    val n = 3
+    val hdr = 1 | (n << 3)
+    [0x28u8, 0xB5u8, 0x2Fu8, 0xFDu8, 0x24u8, 3u8,
+     (hdr & 0xFF).to_u8(), ((hdr >> 8) & 0xFF).to_u8(), ((hdr >> 16) & 0xFF).to_u8(),
+     0x61u8, 0x62u8, 0x63u8, c0, c1, c2, c3]
+
+describe "zstd content checksum uses the shared XXH64":
+
+    it "lower 32 bits of XXH64(\"abc\", 0) are 0xAD770999":
+        # @req REQ-SSPEC-UNIT
+        step("zstd checksum(abc) = lower32(xxhash64(abc, 0)) = 0xAD770999")
+        val h = xxhash64("abc".bytes(), 0u64)
+        expect((h & 0xFFFFFFFFu64).to_i64()).to_equal(0xAD770999)
+
+    it "zstd_decode accepts a frame carrying the correct XXH64 checksum":
+        # @req REQ-SSPEC-UNIT
+        step("checksummed raw frame for abc with checksum 0xAD770999 decodes")
+        val result = zstd_decode(_zstd_abc_frame(0x99u8, 0x09u8, 0x77u8, 0xADu8))
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap().len()).to_equal(3)
+
+    it "zstd_decode rejects a frame carrying a wrong checksum":
+        # @req REQ-SSPEC-UNIT
+        step("checksummed raw frame for abc with checksum 0xAD770998 is rejected")
+        val result = zstd_decode(_zstd_abc_frame(0x98u8, 0x09u8, 0x77u8, 0xADu8))
+        expect(result.is_err()).to_equal(true)
