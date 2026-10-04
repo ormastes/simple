@@ -317,7 +317,9 @@ use std.nogc_sync_mut.text_layout.font_provider.{
     browser_font_dylib_candidates,
     browser_serif_font_candidates,
     browser_font_candidates_for_family,
-    browser_family_has_host_face
+    browser_family_has_host_face,
+    browser_platform_hangul_faces,
+    browser_bundled_font_path_for_family
 }
 use std.nogc_sync_mut.text_layout.font_rasterizer.{
     _sffi_glyph_to_cached,
@@ -3585,6 +3587,34 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
     _fr_probe_add_wpush(_fr_probe_now() - _fr_wp0)
     resolved
 
+# First CJK-range codepoint the bound face cannot draw decides the fallback:
+# Hangul -> the platform Korean face when present; otherwise the bundled
+# Noto Sans/Serif SC (Han + kana coverage). Returns "" when the face covers
+# the run, or when `family` is already a bundled/explicit face (so the
+# re-resolve in the caller cannot recurse).
+fn _resolved_font_cjk_fallback_family(renderer: FontRenderer, family: text, codepoints: [i64]) -> text:
+    if family.starts_with("__simple_font_face__|") or browser_bundled_font_path_for_family(family) != "":
+        return ""
+    var missing = false
+    var hangul = false
+    for codepoint in codepoints:
+        if codepoint >= 0x2E80 and codepoint != 0x3000:
+            if ((codepoint >= 0xAC00 and codepoint <= 0xD7AF) or
+                (codepoint >= 0x1100 and codepoint <= 0x11FF) or
+                (codepoint >= 0x3130 and codepoint <= 0x318F)):
+                hangul = true
+            if not missing and not renderer.selected_face_has_glyph(codepoint as i32):
+                missing = true
+    if not missing:
+        return ""
+    if hangul:
+        val faces = browser_platform_hangul_faces()
+        if faces.len() > 0:
+            return "__simple_font_face__|" + faces[0] + "|" + family
+    if _resolved_font_category(family) == "serif":
+        return "Noto Serif SC"
+    "Noto Sans SC"
+
 fn _resolve_font_metrics_with_language_config_uncached(family: text, content: text, font_size: i32,
                                               language: text, render_config_identity: text) -> ResolvedFontMetrics:
     if family.trim() == "" or font_size <= 0 or font_size > 512:
@@ -3652,6 +3682,16 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
     if _WM_TRACE: print("[rfm] at=renderer-bound from_cache={renderer_from_cache} has_ttf={dbg_has_ttf}")
     if not dbg_has_ttf:
         return ResolvedFontMetrics(valid: false, family: resolved_family, identity: "", advances: [], width: 0, line_height: 0, reason: "font-runtime-unavailable", glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: complex_script != 0)
+    # Coverage fallback (gap F): a host Latin face (Helvetica) has no CJK
+    # glyphs, so CJK runs drew .notdef boxes even with lang="zh". When the
+    # chosen face lacks a glyph for any CJK-range codepoint, re-resolve the
+    # run on a face that covers it. Latin-only runs never enter the check.
+    val cjk_fallback = _resolved_font_cjk_fallback_family(renderer, resolved_family, codepoints)
+    if cjk_fallback != "":
+        if not renderer_from_cache:
+            renderer.clear_ttf()
+        return _resolve_font_metrics_with_language_config_uncached(
+            cjk_fallback, content, font_size, language, render_config_identity)
     val _fr_i0 = _fr_probe_now()
     val identity = renderer.current_font_identity()
     _fr_probe_add_faceid(_fr_probe_now() - _fr_i0)
