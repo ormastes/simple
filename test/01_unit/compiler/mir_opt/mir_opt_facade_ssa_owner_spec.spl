@@ -1,0 +1,28 @@
+# @req REQ-SSPEC-COMPILER
+# Keep public-facade resolution under test even when the backend imports the
+# implementation owner directly. This must execute under the native compiler.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use compiler.mir.mir_instructions.{
+    BlockId, MirBlock, MirInst, MirInstKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirType, MirLocal}
+use compiler.mir_opt.{ssa_var_transform_blocks, ssa_alloca_transform_blocks}
+
+describe "public MIR optimization facade resolves SSA owners":
+    it "renames a reassigned local and exposes the alloca transform":
+        step("resolve both named exports and execute nonempty MIR transformations")
+        val local = LocalId(id: 0)
+        val blocks = [MirBlock(id: BlockId.new(0), label: "entry",
+            instructions: [
+                MirInst(kind: MirInstKind.Const(local, MirConstValue.Int(1), MirType.i64()), span: nil),
+                MirInst(kind: MirInstKind.Const(local, MirConstValue.Int(2), MirType.i64()), span: nil)],
+            terminator: MirTerminator.Ret(nil))]
+        val renamed = ssa_var_transform_blocks(blocks)
+        expect(renamed.applied).to_equal(true)
+        expect(renamed.renamed_count).to_equal(1)
+        val locals = [MirLocal(id: local, name: nil, type_: MirType.i64(),
+            kind: LocalKind.Var, is_ghost: false)]
+        val slotted = ssa_alloca_transform_blocks(blocks, locals, BlockId.new(0))
+        expect(slotted.applied).to_equal(true)
+        expect(slotted.blocks.len()).to_equal(1)
+        expect(slotted.blocks[0].instructions.len() > blocks[0].instructions.len()).to_equal(true)
