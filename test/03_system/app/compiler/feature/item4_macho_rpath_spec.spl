@@ -1,0 +1,124 @@
+"""ITEM4-REQ-006 owner-specific link-time run paths. Simple execution UNRUN."""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{dir_create_all, file_read_bytes, file_exists, dir_exists}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.backend.linker.native_config.{NativeLinkConfig}
+use compiler.backend.linker.macho.native_adapter.{native_macho_plan_v1, native_macho_link_files_v1}
+
+fn item4_macho_rpath_read(bytes: [u8], at: i64, width: i64 = 4) -> i64:
+    val valid = width >= 1 and width <= 8 and at >= 0 and at <= bytes.len() and width <= bytes.len() - at
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    var value: i64 = 0
+    for index in 0..width: value = value | ((bytes[at + index] as i64) << (8 * index))
+    value
+
+fn item4_macho_rpath_cleanup(parent: text):
+    for name in ["app", "root.dylib", "root.tbd", "first/libitem4_rpath_leaf.dylib", "x64/libitem4_rpath_leaf.dylib", "a64/libitem4_rpath_leaf.dylib"]:
+        if file_exists(parent + "/" + name): expect(file_remove(parent + "/" + name)).to_equal(true)
+    for name in ["first", "x64", "a64"]:
+        if dir_exists(parent + "/" + name): expect(dir_remove(parent + "/" + name)).to_equal(true)
+    expect(dir_remove(parent)).to_equal(true)
+
+fn item4_macho_rpath_check(image: [u8], arm: bool):
+    expect(image.len() >= 0xc010).to_equal(true)
+    if image.len() < 0xc010: return
+    expect(item4_macho_rpath_read(image, 0)).to_equal(0xfeedfacf)
+    expect(item4_macho_rpath_read(image, 4)).to_equal(if arm: 0x0100000c else: 0x01000007)
+    expect(item4_macho_rpath_read(image, 12)).to_equal(2)
+    expect(item4_macho_rpath_read(image, 0xc008, 8)).to_equal(0x100004000)
+    val size = item4_macho_rpath_read(image, 20)
+    val count = item4_macho_rpath_read(image, 16)
+    val valid = size <= image.len() - 32 and count <= size / 8
+    expect(valid).to_equal(true)
+    if not valid: return
+    var at: i64 = 32
+    var loads: i64 = 0
+    var bindings: i64 = 0
+    for index in 0..count:
+        if at > 32 + size - 8:
+            expect(false).to_equal(true)
+            return
+        val kind = item4_macho_rpath_read(image, at)
+        val length = item4_macho_rpath_read(image, at + 4)
+        if length < 8 or length > 32 + size - at:
+            expect(false).to_equal(true)
+            return
+        if kind == 0xc:
+            loads = loads + 1
+            expect(length >= 24).to_equal(true)
+            if length < 24: return
+            val name = "/usr/lib/libitem4_rpath_root.dylib"
+            val start = item4_macho_rpath_read(image, at + 8)
+            val bounds = start >= 24 and start <= length and name.len() < length - start
+            expect(bounds).to_equal(true)
+            if not bounds: return
+            for byte in 0..name.len(): expect(image[at + start + byte]).to_equal(name.byte_at(byte) as u8)
+            expect(image[at + start + name.len()]).to_equal(0u8)
+        if kind == 0x80000022:
+            bindings = bindings + 1
+            expect(length >= 48).to_equal(true)
+            if length < 48: return
+            val start = item4_macho_rpath_read(image, at + 16)
+            val bytes = item4_macho_rpath_read(image, at + 20)
+            val prefix: [u8] = [0x20, 1, 0x40, 95, 104, 101, 108, 112, 101, 114, 0]
+            val bounds = start >= 0 and start <= image.len() and bytes <= image.len() - start and bytes >= prefix.len()
+            expect(bounds).to_equal(true)
+            if not bounds: return
+            for byte in 0..prefix.len(): expect(image[start + byte]).to_equal(prefix[byte])
+        at = at + length
+    expect(loads).to_equal(1)
+    expect(bindings).to_equal(1)
+
+describe "Mach-O provider-owned link-time run paths":
+    it "ITEM4-REQ-006 resolves real binary and target-scoped TBD run paths through their owner":
+        for variant in 0..4:
+            val arm = variant % 2 == 1
+            val typed = variant >= 2
+            val suffix = if arm: "a64" else: "x64"
+            val made = dir_create_all("build")
+            expect(made).to_equal(true)
+            if not made: return
+            val created = secure_temp_dir("build", "item4-macho-rpath-")
+            expect(created.is_ok()).to_equal(true)
+            if created.is_err(): return
+            val parent = created.unwrap()
+            val directory = if typed: (if arm: "a64" else: "x64") else: "first"
+            val directories = dir_create_all(parent + "/" + directory)
+            expect(directories).to_equal(true)
+            if not directories:
+                item4_macho_rpath_cleanup(parent)
+                return
+            step("Stage actual providers with owner-relative binary or selected TBD run paths")
+            val root = file_read_bytes(if typed: "test/fixtures/linker/macho/rpath_root_v5_interface.tbd" else: "test/fixtures/linker/macho/rpath_root_{suffix}.dylib")
+            val leaf = file_read_bytes("test/fixtures/linker/macho/rpath_leaf_{suffix}.dylib")
+            expect(root.len() > 32 and leaf.len() > 32).to_equal(true)
+            if root.len() <= 32 or leaf.len() <= 32:
+                item4_macho_rpath_cleanup(parent)
+                return
+            val root_path = parent + (if typed: "/root.tbd" else: "/root.dylib")
+            val root_written = file_write_bytes(root_path, root)
+            val leaf_written = file_write_bytes(parent + "/" + directory + "/libitem4_rpath_leaf.dylib", leaf)
+            expect(root_written and leaf_written).to_equal(true)
+            if not root_written or not leaf_written:
+                item4_macho_rpath_cleanup(parent)
+                return
+            var config = NativeLinkConfig.default()
+            config.runtime_path = "none"
+            config.allow_cc_fallback = false
+            config.extra_flags = ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "item4.rpath",
+                "-rpath", "@executable_path/unused-output-path"]
+            val output = parent + "/app"
+            val plan = native_macho_plan_v1(if arm: "aarch64" else: "x86_64", config, output)
+            expect(plan.is_ok()).to_equal(true)
+            if plan.is_ok():
+                step("Link real imports through the requesting provider run paths")
+                val linked = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/hosted_start_{suffix}.o", root_path], [], output)
+                expect(linked.is_ok()).to_equal(true)
+                if linked.is_ok():
+                    step("Inspect the direct root dependency ordinal and actual emitted image")
+                    item4_macho_rpath_check(file_read_bytes(output), arm)
+            step("Remove owned fixture copies and image")
+            item4_macho_rpath_cleanup(parent)
