@@ -29,3 +29,12 @@ retry execution, production CLI routing, trusted manifest activation, required
 operation binding/sealing, bounded resource enforcement, complete Mach-O/RISC-V
 semantics and the platform/product corpus remain open. No full completion,
 Phase 4 admission, release tag or publication is claimed.
+
+Structural checks: whitespace and working/staged environment guards passed;
+`doc/06_spec` contains zero executable specs. The test-tree delta from base
+`8e141ae45a89250f30f694e49cd0312ac3eafa10` through source/report head
+`09092352b429c141c7c3bbcec6c6c28d397d4c38` passed with 3151 pre-existing
+offenders and zero introduced. Base verdict: 3813 diverged versus 965 baselined
+(2979 new, 131 fixed-but-still-baselined), 42 mirror-only (41 unallowlisted).
+The optional offender-list output path could not be written; aggregate and exact
+range are recorded here. This inherited structural debt is not a new test failure.
