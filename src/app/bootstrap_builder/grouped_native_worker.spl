@@ -518,6 +518,14 @@ fn native_group_worker_execute_v1(root: text) -> Result<i64, text>:
     if not file_is_regular_no_follow(request.group_manifest) or
             file_hash_sha256(request.group_manifest) != request.manifest_digest:
         return Err("group manifest changed during compilation")
+    # A crashed compiler can leave a valid prefix and no final result. Preserve
+    # its exact observed exit instead of replacing it with a qualification I/O
+    # error. Only the parent may recover unknown members after broker reaping.
+    if val completed = execution.process.completion:
+        if completed.timed_out or completed.cancelled or completed.signal_number > 0:
+            return Ok(code)
+        if code != 0 and code != 1:
+            return Ok(code)
     val qualification_failed = native_group_worker_qualify_v1(request, manifest, root)?
     if qualification_failed and code == 0: return Ok(1)
     Ok(code)

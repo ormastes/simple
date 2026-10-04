@@ -73,3 +73,25 @@ fn build_runner_process_evidence_completion_v1(identity: text,
         completed.transport_execution_digest))
 
 export build_runner_process_evidence_completion_v1
+
+# Called only after the outer broker's original tree-reap proof is validated.
+# Exit 139 alone is not signal evidence; the inner compiler observation is.
+fn build_runner_process_evidence_bind_v1(payload: text, identity: text,
+        stdout_digest: text, stderr_digest: text, wrapper_exit: i64,
+        outer_reaped: bool) -> Result<BuildRunnerProcessEvidenceV1, text>:
+    if not outer_reaped: return Err("outer compiler worker tree is not reaped")
+    val evidence = build_runner_process_evidence_decode_v1(payload)?
+    if evidence.task_identity != identity or evidence.stdout_digest != stdout_digest or
+            evidence.stderr_digest != stderr_digest:
+        return Err("compiler process evidence differs from manifest or logs")
+    val expected_exit = if evidence.outcome == "timed-out": 124 else:
+        if evidence.outcome == "cancelled": 125 else:
+        if evidence.signal_number > 0: 128 + evidence.signal_number else: evidence.exit_code
+    # The worker may reject a successfully emitted SMF during target-loader
+    # qualification. Its typed failed module rows still need parent validation.
+    val qualification_failure = evidence.outcome == "exited" and evidence.exit_code == 0 and wrapper_exit == 1
+    if wrapper_exit != expected_exit and not qualification_failure:
+        return Err("worker exit differs from compiler observation")
+    Ok(evidence)
+
+export build_runner_process_evidence_bind_v1
