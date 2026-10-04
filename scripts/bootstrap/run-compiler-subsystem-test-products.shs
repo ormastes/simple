@@ -10,11 +10,13 @@ hash_file() {
   printf '%s\n' "${sum%% *}"
 }
 absolute() { case "$1" in /*) return 0 ;; *) return 1 ;; esac; }
+resume=0 resume_reused=
 source_root= output_root= compiler_llvm= compiler_cranelift=
 producer_receipt_llvm= producer_receipt_cranelift=
 threads=20 rss_cap_kib=6835937 build_timeout=1800 test_timeout=7200
 for arg in "$@"; do
   case "$arg" in
+    --resume) resume=1 ;;
     --source-root=*) source_root=${arg#*=} ;;
     --output-root=*) output_root=${arg#*=} ;;
     --compiler-llvm=*) compiler_llvm=${arg#*=} ;;
@@ -46,7 +48,11 @@ output_parent=$(CDPATH= cd -- "$output_parent" && pwd -P) || die "output parent 
 output_root="$output_parent/$(basename -- "$output_root")"
 case "$output_root/" in "$source_root/"*) die "output overlaps source" ;; esac
 case "$source_root/" in "$output_root/"*) die "source overlaps output" ;; esac
-[ ! -e "$output_root" ] && [ ! -L "$output_root" ] || die "fresh output root required"
+if [ "$resume" -eq 0 ]; then
+  [ ! -e "$output_root" ] && [ ! -L "$output_root" ] || die "fresh output root required"
+else
+  [ -d "$output_root" ] && [ ! -L "$output_root" ] || die "resume output root unavailable"
+fi
 case "$threads:$rss_cap_kib:$build_timeout:$test_timeout" in
   *[!0-9:]*|:*|*::*) die "invalid resource policy" ;;
 esac
@@ -65,14 +71,14 @@ for path in "$inventory_program" "$builder" "$verifier" "$watchdog" "$schedule";
   regular "$path" || die "missing source-pinned product tool: $path"
 done
 mkdir -p "$output_root" || die "output root unavailable"
+owner_lock="$output_root/.product-owner.lock"
+mkdir "$owner_lock" 2>/dev/null || die "product owner already active or stale lock requires inspection"
+trap 'rm -rf -- "$owner_lock"' EXIT
+trap 'exit 143' HUP INT TERM
 inventory="$output_root/source-specs.tsv"
-sh "$inventory_program" "$source_root" >"$inventory" || die "source inventory failed"
-regular "$inventory" || die "source inventory absent"
 statuses="$output_root/product-status.tsv"
-: >"$statuses" || die "status journal unavailable"
 matrix="$output_root/matrix.env"
-printf '%s\n' 'format=SIMPLE-SUBSYSTEM-TEST-MATRIX-1' 'status=INCOMPLETE' \
-  "source_root=$source_root" >"$matrix" || die "initial matrix receipt unavailable"
+product_reuse_ready() { [ -n "$resume_reused" ] && [ "$1" = "$resume_reused" ]; }
 
 compiler_for() {
   case "$1" in llvm) printf '%s\n' "$compiler_llvm" ;; cranelift) printf '%s\n' "$compiler_cranelift" ;; esac
@@ -183,6 +189,24 @@ run_test_product() {
     --execution-watchdog="$job/execution-watchdog.env" --execution-exit="$code" \
     --output="$job/result.env" || return 1
 }
+
+if [ "$resume" -eq 1 ]; then
+  . "$script_root/lib/subsystem-product-resume.shs"
+  resume_validate
+  # Only after every retained byte has passed validation may state advance.
+  history="$output_root/resume-history"
+  [ ! -e "$history" ] && [ ! -L "$history" ] || die "resume history already exists"
+  mkdir "$history" || die "cannot preserve prior resume state"
+  cp "$matrix" "$history/matrix.env" && cp "$statuses" "$history/product-status.tsv" || die "cannot archive resume state"
+  awk -F '\t' '$2=="SUCCEEDED" {print}' "$statuses" >"$owner_lock/product-status.tsv"
+  mv "$owner_lock/product-status.tsv" "$statuses" || die "cannot publish retained task state"
+else
+  sh "$inventory_program" "$source_root" >"$inventory" || die "source inventory failed"
+  regular "$inventory" || die "source inventory absent"
+  : >"$statuses" || die "status journal unavailable"
+  printf '%s\n' 'format=SIMPLE-SUBSYSTEM-TEST-MATRIX-1' 'status=INCOMPLETE' \
+    "source_root=$source_root" >"$matrix" || die "initial matrix receipt unavailable"
+fi
 
 . "$schedule"
 schedule_code=0
