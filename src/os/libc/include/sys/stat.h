@@ -10,6 +10,7 @@ extern "C" {
 #endif
 
 #include <sys/types.h>
+#include <time.h>
 
 /* File type flags in st_mode */
 #define S_IFMT   0170000  /* mask for file type */
@@ -54,10 +55,15 @@ struct stat {
     off_t     st_size;
     blksize_t st_blksize;
     blkcnt_t  st_blocks;
-    time_t    st_atime;
-    time_t    st_mtime;
-    time_t    st_ctime;
+    /* POSIX.1-2008 timespec fields. Kernel ABI: atim/mtim/ctim at offsets
+     * 72/88/104, 120 bytes total (kernel/ipc/syscall_file.spl _stat_bytes). */
+    struct timespec st_atim;
+    struct timespec st_mtim;
+    struct timespec st_ctim;
 };
+#define st_atime st_atim.tv_sec
+#define st_mtime st_mtim.tv_sec
+#define st_ctime st_ctim.tv_sec
 
 int stat(const char *path, struct stat *buf);
 int fstat(int fd, struct stat *buf);

@@ -50,6 +50,8 @@ extern int errno;
 #define ENAMETOOLONG 36  /* File name too long */
 #define ENOLCK      37   /* No record locks available */
 #define ENOSYS      38   /* Function not implemented */
+#define EOPNOTSUPP  95   /* Operation not supported (Linux value) */
+#define ENOTSUP     EOPNOTSUPP
 #define ENOTEMPTY   39   /* Directory not empty */
 #define ELOOP       40   /* Too many symbolic links */
 #define ENOMSG      42   /* No message of desired type */
