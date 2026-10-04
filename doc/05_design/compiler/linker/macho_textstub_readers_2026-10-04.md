@@ -1,6 +1,6 @@
 # Mach-O TextStub readers and semantic document boundary
 
-Stage-2 design proposal, 2026-10-04; base
+Stage-2 frozen implementation design, 2026-10-04; base
 `e1495a1e9dd4a8a224e24da2f3e2d21c11652d4d`.
 Owner `/root/linker_research`, session/branch
 `work/item4-macho-tbd-docs-20261004`, isolated worktree
@@ -12,13 +12,13 @@ This supplements `macho_sdk_providers_2026-10-04.md`. Both V4 YAML and V5 JSON,
 then closure/access/binding and real native SDK execution, remain required.
 Reader success does not complete the four-stage SDK plan.
 
-## Proposed shared document contract
+## Shared document contract
 
 Use an acyclic TextStub IR rather than constructing fake binary providers.
-Proposed public names, subject to root's final shared freeze:
+Frozen public names:
 
-- `MachOTbdLimitsV1`: maximum input bytes, nesting depth, syntax nodes,
-  documents, targets, symbols and bytes per name.
+- `MachOTbdLimitsV1`: maximum input bytes, nesting depth, lexical tokens,
+  libraries, source symbol entries and bytes per name.
 - `MachOTbdTargetV1`: architecture and platform, preserving exact target identity.
 - `MachOTbdSymbolV1`: name, encoding kind (global/ObjC class/EH/ivar), role
   (export/reexport/undefined), weak-definition/reference and thread-local flags,
@@ -46,9 +46,12 @@ performs explicit leaf lowering. Root's native file adapter routes actual select
 providers retain real binary validation. Runtime inputs remain archive-only.
 Leaf exports preserve ordinary/weak/TLV flags, with selected unsupported weak
 semantics still rejected by the hosted consumer. Closure, undefined-interface,
-unimplemented flags/clients/umbrella/rpaths/Swift/ObjC/directive semantics must
+unimplemented flags/clients/umbrella/rpaths/nonzero Swift/directive semantics must
 reject explicitly when lowering cannot honor them. This is an implemented leaf
 route prerequisite, not a claim the retained full SDK requirements are complete.
+The one accepted provider flag is `not_app_extension_safe`: current image
+construction leaves `MH_APP_EXTENSION_SAFE` clear, so accepting this metadata
+does not assert extension safety. Other flags remain explicit lowering errors.
 
 Schema parsing precedes target selection. Reject malformed groups even if they
 would not be selected. Main target absence is a named error. An unrelated inline
@@ -57,9 +60,11 @@ preserve that distinction for closure diagnostics. Do not replace a missing
 target with an empty provider or merge macOS with Catalyst/arm64 with arm64e.
 
 Reexport names remain semantic graph edges. Do not invent ordinal 1, flatten
-restrictions, or convert them to regular exports in the reader. ObjC expansion
-and lowering into `MachOProviderV1` belong to explicit later semantic processing
-after their required relationships are known.
+restrictions, or convert them to regular exports in the reader. Leaf lowering
+expands ObjC classes into class/metaclass ABI names, EH entries into EH ABI names,
+and ivars into ivar ABI names. EH alone does not imply class exports. Identical
+expanded names with identical flags coalesce; conflicting flags reject. Export
+name expansion does not implement Objective-C runtime loading or closure.
 
 ## Exact format obligations
 
@@ -89,7 +94,7 @@ At the recorded base `std.common.json.parser.json_parse_strict_with_error`
 returns `(any, text)`, rejecting duplicate decoded object names and trailing
 tokens. Nodes are tagged tuples: object/Dict, array/list, string/text,
 number/f64, boolean/bool, null/nil. `json_object_get` and `json_array_get`
-return `any?`. Check `json_is_*` before extraction; do not collapse wrong type,
+return `any?`. Check node tags before extraction; do not collapse wrong type,
 missing property and explicit null into one default. Versions encoded as strings
 need exact component parsing; format version must be an exact numeric integer.
 
@@ -105,6 +110,21 @@ reject unsupported YAML features explicitly, but must cover both actual fixture
 syntax and SDK-required syntax before claiming SDK completion. Anchors, aliases,
 merge keys and unsupported scalar forms must never be silently normalized.
 
+The implemented YAML profile accepts tagged document streams, block mappings
+and sequences, quoted/plain scalar values, comments and multiline flow lists
+of scalars. It rejects nested flow collections, multiline quoted scalars, tabs,
+graph aliases/anchors, merge keys and block scalar forms. Source and decoded
+names are ASCII-only. These explicit restrictions still require validation
+against representative real SDKs; fixture acceptance is not general YAML or
+complete SDK compatibility. Strict decoded JSON-key rejection intentionally
+exceeds LLVM21's observed acceptance of identical duplicate keys.
+
+Resource accounting bounds lexical tokens and source symbol records, including
+unselected targets. It does not bound whole-process RSS. ObjC class expansion
+may produce two output names per source entry. Name decoding must reject an
+oversized decoded value during construction; multiline flow accumulation must
+join fragments once rather than repeatedly copying an increasing prefix.
+
 ## Acceptance traceability
 
 All cases trace to ITEM4-REQ-006 and the full SDK provider plan. Shared exact
@@ -117,8 +137,8 @@ test helper names/API are frozen by root before implementation.
 | Metadata fidelity | Assert defaults versus absence, 16:8:8 boundaries, flags, Swift ABI, ObjC categories, weak/TLV, clients, umbrella and rpaths. |
 | Document closure inputs | Preserve main plus multiple inline install names and reexport edges without fabricated binding ordinals; malformed duplicate identities fail explicitly. |
 | Strict syntax/schema | Actual files with malformed/truncated tagged YAML/JSON, duplicate decoded keys, quoting/escape cases, unknown fields, wrong node types and invalid versions yield named errors. |
-| Bounded work | Exact and one-over byte/depth/node/document/target/symbol/name limits reject before dependent allocation/recursion; never claim these prove RSS. |
-| Later production wiring | Actual selected .tbd files must eventually flow through native adapter and semantic closure into bindings. Reader-only tests cannot satisfy this obligation. |
+| Bounded work | Byte/token/depth/library/source-symbol/name limits reject before dependent allocation/recursion; never claim these prove RSS. |
+| Production leaf wiring | Actual selected .tbd files flow through native adapter, reader, leaf lowering and hosted bindings; malformed selected files preserve the destination without fallback. Full semantic closure remains required separately. |
 
 External LLVM construction/inspection is separate from Simple SSpec execution.
 Do not accept LLVM link success alone as proof of allowable-client policy:
