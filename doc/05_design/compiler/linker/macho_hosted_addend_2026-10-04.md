@@ -2,7 +2,8 @@
 
 Base `edfb6df1821ff98a0d563cca5496630cedf7789e`; existing ITEM4-REQ-004/006.
 Status: source implemented and independently reviewed at `2a34f353063` without
-P0/P1 findings; final acceptance review pending. All Simple execution UNRUN.
+P0/P1 findings; eight-scenario acceptance through `ded72abf4fa` independently
+source-reviewed without P0/P1 findings. All Simple execution UNRUN.
 Initial executable intent `a1d863b52ea` preceded production edits.
 Local and domain evidence are in
 `doc/01_research/{local,domain}/macho_hosted_addend_2026-10-04.md`.
@@ -66,6 +67,14 @@ documents, canonical acceptance linkage and independent final review. Root owns
 integration and exact-head final review. Separate worktrees; sidecars N/A.
 
 ## Source review and fixture provenance limits
+
+`test/03_system/app/compiler/feature/item4_macho_addend_spec.spl` now authors
+the signed local-image, malformed-pair, dual-addend conflict, zero-prefix
+embedded-addend, decoder boundary, actual file-publication refusal, subtractor
+compatibility and imported-branch policy scenarios. Static and hosted conflict
+and positive paths are both exercised in the authored assertions. The actual
+file adapter checks preserved destination bytes; byte-only cases do not claim
+publication. The mirrored manual records eight authored scenarios, all UNRUN.
 
 The final source uses the shared pair decoder in both consumers. Hosted scanning
 advances by `consumed` and marks only the follower's range; static patching adjusts

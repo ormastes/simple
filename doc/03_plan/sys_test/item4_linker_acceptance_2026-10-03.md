@@ -338,6 +338,11 @@ in for native link/load behavior, ABI correctness or runtime admission.
 
 Existing ITEM4-REQ-004/006; source `2a34f353063` implemented and independently
 reviewed, initial intent `a1d863b52ea` preceded source; all execution **UNRUN**.
+Eight authored scenarios through `ded72abf4fa` in
+`test/03_system/app/compiler/feature/item4_macho_addend_spec.spl` and its manual
+received independent source review. These include actual file-adapter destination
+preservation, static-route controls and subtractor compatibility; no native run
+or coverage receipt is inferred from authorship.
 [Detail contract](../../05_design/compiler/linker/macho_hosted_addend_2026-10-04.md)
 requires one shared checked pair decoder for static and hosted consumers.
 Use actual object fixtures and independent branch/page/scaled-offset decoding,
