@@ -220,7 +220,7 @@ for my $owner (@owners) {
     }
 }
 
-my $entry = "use std.sffi.cli.{cli_get_args}\n" .
+my $entry = "use std.sffi.cli_args.{cli_get_args}\n" .
             "use std.io_runtime.{env_set}\n" .
             "use std.spec.{aggregate_registry_begin, aggregate_owner_begin, aggregate_owner_end, aggregate_registry_finish}\n" .
             join("\n", @imports) . "\n\n" .
