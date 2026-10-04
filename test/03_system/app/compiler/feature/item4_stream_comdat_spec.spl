@@ -145,7 +145,7 @@ fn item4_stream_comdat_find(bytes: [u8], marker: text) -> i64:
             found = offset
     found
 
-fn item4_stream_comdat_location(bytes: [u8], address: u64, width: u64) -> i64:
+fn item4_stream_comdat_location(bytes: [u8], address: u64, width: u64, from_file: bool = false) -> i64:
     val phoff = item4_stream_comdat_read(bytes, 32, 8)
     val count = item4_stream_comdat_read(bytes, 56, 2)
     val valid = phoff <= bytes.len() as u64 and count > 0u64 and count < 64u64 and count * 56u64 <= bytes.len() as u64 - phoff
@@ -156,9 +156,11 @@ fn item4_stream_comdat_location(bytes: [u8], address: u64, width: u64) -> i64:
         val at = phoff as i64 + index * 56
         if item4_stream_comdat_read(bytes, at, 4) == 1u64:
             val base = item4_stream_comdat_read(bytes, at + 16, 8)
+            val file_offset = item4_stream_comdat_read(bytes, at + 8, 8)
             val size = item4_stream_comdat_read(bytes, at + 32, 8)
-            if address >= base and address - base <= size and width <= size - (address - base):
-                return (item4_stream_comdat_read(bytes, at + 8, 8) + address - base) as i64
+            val start = if from_file: file_offset else: base
+            if address >= start and address - start <= size and width <= size - (address - start):
+                return ((if from_file: base else: file_offset) + address - start) as i64
     expect(false).to_equal(true)
     -1
 
@@ -184,6 +186,32 @@ fn item4_stream_comdat_check(bytes: [u8], first_a: bool):
     expect(item4_stream_comdat_read(bytes, kept + 8, 8)).to_equal(value_address)
 
 describe "Streamed COMDAT whole-group selection":
+    it "resolves a discarded weak definition to zero or its surviving replacement for scalar and GOT references":
+        step("Link real weak definitions in losing and winning groups then inspect both emitted reference forms")
+        for variant in 0..3:
+            var objects = ["test/fixtures/linker/elf/stream_comdat_refs.o"]
+            if variant != 1: objects.push("test/fixtures/linker/elf/stream_comdat_a.o")
+            objects.push("test/fixtures/linker/elf/stream_comdat_weak_loser.o")
+            if variant == 2: objects.push("test/fixtures/linker/elf/stream_comdat_weak_replacement.o")
+            val linked = item4_stream_comdat_image(objects, [])
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_ok():
+                val image = linked.unwrap()
+                val marker = item4_stream_comdat_find(image, "CDWEAK!!")
+                expect(marker >= 0).to_equal(true)
+                if marker >= 0:
+                    val pointer = item4_stream_comdat_read(image, marker + 8, 8)
+                    val field_address = item4_stream_comdat_location(image, (marker + 16) as u64, 8u64, true)
+                    if field_address >= 0:
+                        val slot_address = (field_address + item4_stream_comdat_read(image, marker + 16, 8) as i64) as u64
+                        val slot = item4_stream_comdat_location(image, slot_address, 8u64)
+                        if slot >= 0: expect(item4_stream_comdat_read(image, slot, 8)).to_equal(pointer)
+                    if variant == 0:
+                        expect(pointer).to_equal(0u64)
+                    else:
+                        val data = item4_stream_comdat_location(image, pointer, 8u64)
+                        if data >= 0: expect(item4_stream_comdat_read(image, data, 8)).to_equal(if variant == 1: 88u64 else: 99u64)
+
     it "treats a well-formed flags-only empty group as a no-op before a nonempty signature":
         step("Remove the sole member's group flag and encode an actual flags-only group")
         expect(dir_create_all("build")).to_equal(true)

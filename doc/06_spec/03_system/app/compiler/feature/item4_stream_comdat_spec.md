@@ -6,6 +6,7 @@ execution evidence. No admitted Simple runtime was invoked.
 
 | Scenario | Observable contract |
 |---|---|
+| Effective undefined weak | Discarded weak definition yields zero for retained scalar/GOT references; kept weak and surviving strong replacement resolve to actual data |
 | First/reversed winner | Whole local-signature group selects code, data and associated RELA; reversed input order changes 11 to 22 |
 | Ordinary duplicates | Strong definitions outside COMDAT still reject and preserve output |
 | Losing undefined/GOT | No live error or slot from discarded references; a supplied archive still satisfies retained undefined-record demand |
@@ -17,7 +18,7 @@ execution evidence. No admitted Simple runtime was invoked.
 | Malformed structure | Checked flags, signature/table, membership, orphan RELA, entry-size and extent mutations reject even in losing groups |
 | Quotas/cancellation | Real group scans charge the retained owner; full-job failures preserve destination sentinel |
 
-Ten scenarios inspect actual published bytes and translate addresses using
+Eleven scenarios inspect actual published bytes and translate addresses using
 PT_LOAD headers. The retained root's pointers must select the winner's data
 and instruction immediates. A group-internal pointer proves associated RELA
 selection; losing markers must be absent. Fast linker parity is not claimed.
