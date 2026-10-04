@@ -34,3 +34,18 @@ remain open. No host gate is discharged by a source-authored assertion.
 
 Current runtime check: both the primary workspace and integration workspace lack
 their `bin/release` directory. No unadmitted producer or Rust seed was substituted.
+
+Final source/manual review binds core `784e0eb60cb` and acceptance through
+`e5cd4ac2b90`: no P0/P1 findings. Six portable scenarios cover named lookup,
+selected `.tbd` refusal without archive fallback, runtime consistency, actual
+provider forms and independent image oracles. The additional Darwin probe remains
+explicitly invoked and UNRUN.
+
+Integration rebased onto `416a653d887e04f04028d7fee6d13e74973476f9`.
+An interrupted rebase left an unowned index lock and its intended documentation
+patch; after verifying no live owner, recovery completed the remaining sequence.
+Final range-diff showed all 17 reviewed patches equal. Whitespace, direct-env
+working/staged guards, numbered-artifact classification and manual layout passed.
+The committed test-tree delta passed: 3151 inherited offenders, zero introduced.
+Evidence list: `C:/dev/simple/.git/item4-macos-native-preexisting-offenders.txt`.
+These structural results do not change the full verification FAIL/UNRUN status.
