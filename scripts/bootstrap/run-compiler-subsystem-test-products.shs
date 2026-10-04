@@ -10,14 +10,17 @@ hash_file() {
   printf '%s\n' "${sum%% *}"
 }
 absolute() { case "$1" in /*) return 0 ;; *) return 1 ;; esac; }
-resume=0 resume_reused= selected_product= qualification_mode=qualified rss_mode=enforce
+resume=0 resume_reused= selected_product= qualification_mode=qualified rss_mode=enforce manager_work=0
+product_phase=phase4
 source_root= output_root= compiler_llvm= compiler_cranelift=
 producer_receipt_llvm= producer_receipt_cranelift=
 threads=20 rss_cap_kib=6835937 build_timeout=1800 test_timeout=7200
 for arg in "$@"; do
   case "$arg" in
     --resume) resume=1 ;;
+    --manager-work) [ "$manager_work" = 0 ] || die 'duplicate manager work option'; manager_work=1 ;;
     --product=*) selected_product=${arg#*=} ;;
+    --producer-phase=*) product_phase=${arg#*=} ;;
     --qualification-mode=*) qualification_mode=${arg#*=} ;;
     --rss-mode=*) rss_mode=${arg#*=} ;;
     --source-root=*) source_root=${arg#*=} ;;
@@ -37,6 +40,15 @@ case "$selected_product" in
   ''|llvm:compiler|llvm:interpreter|llvm:loader|cranelift:compiler|cranelift:interpreter|cranelift:loader) ;;
   *) die 'invalid product selector' ;;
 esac
+case "$product_phase" in phase2|phase3|phase4) ;; *) die 'invalid product producer phase' ;; esac
+[ "$product_phase" = phase4 ] || [ -n "$selected_product" ] || die 'earlier-phase products require separate managed tasks'
+if [ "$manager_work" = 1 ]; then
+  [ "$output_root" = '@WORK@/product-output' ] && [ "$resume" = 0 ] && [ -n "$selected_product" ] \
+    || die 'manager work requires one fresh attempt-owned product output'
+  manager_work_root=$(pwd -P) || die 'manager work root unavailable'
+  [ -d "$manager_work_root" ] && [ ! -L "$manager_work_root" ] || die 'manager work root is not physical'
+  output_root="$manager_work_root/product-output"
+fi
 [ -z "$selected_product" ] || [ "$resume" = 0 ] || die 'single-product resume requires a distinct verified product owner'
 case "$qualification_mode" in
   qualified) ;;
@@ -224,7 +236,7 @@ else
   regular "$inventory" || die "source inventory absent"
   : >"$statuses" || die "status journal unavailable"
   printf '%s\n' 'format=SIMPLE-SUBSYSTEM-TEST-MATRIX-1' 'status=INCOMPLETE' \
-    "source_root=$source_root" >"$matrix" || die "initial matrix receipt unavailable"
+    "source_root=$source_root" "producer_phase=$product_phase" >"$matrix" || die "initial matrix receipt unavailable"
 fi
 
 . "$schedule"
