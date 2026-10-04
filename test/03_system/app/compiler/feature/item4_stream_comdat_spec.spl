@@ -118,6 +118,18 @@ fn item4_stream_comdat_mutate(kind: i64, empty: bool = false) -> [u8]:
                 field = header + 24
                 width = 8
                 value = bytes.len() as u64 + 16u64
+            elif kind == 12:
+                val rela = item4_stream_comdat_read(bytes, group.sh_addr + group.sh_size - 4, 4) as i64
+                expect(rela > 0 and rela < object.sections.len()).to_equal(true)
+                if rela <= 0 or rela >= object.sections.len(): return []
+                expect(object.sections[rela].sh_type).to_equal(4)
+                if object.sections[rela].sh_type != 4: return []
+                # Empty ordinary .text is outside this group; all offsets remain valid.
+                expect((object.sections[2].sh_flags & 512) == 0).to_equal(true)
+                if (object.sections[2].sh_flags & 512) != 0: return []
+                field = object.header.e_shoff + rela * 64 + 44
+                width = 4
+                value = 2u64
             expect(field >= 0 and field <= bytes.len() and width <= bytes.len() - field).to_equal(true)
             if field < 0 or field > bytes.len() or width > bytes.len() - field: return []
             for byte in 0..width: bytes[field + byte] = ((value >> (byte * 8)) & 255u64) as u8
@@ -186,6 +198,40 @@ fn item4_stream_comdat_check(bytes: [u8], first_a: bool):
     expect(item4_stream_comdat_read(bytes, kept + 8, 8)).to_equal(value_address)
 
 describe "Streamed COMDAT whole-group selection":
+    it "retains distinct signatures with their own code data and associated relocations":
+        step("Select both independent signatures while discarding only the duplicate of the first")
+        val linked = item4_stream_comdat_image(["test/fixtures/linker/elf/stream_comdat_refs.o",
+            "test/fixtures/linker/elf/stream_comdat_a.o", "test/fixtures/linker/elf/stream_comdat_b.o",
+            "test/fixtures/linker/elf/stream_comdat_distinct.o"], [])
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        item4_stream_comdat_check(image, true)
+        val marker = item4_stream_comdat_find(image, "CDOTHER!")
+        expect(marker >= 0).to_equal(true)
+        if marker < 0: return
+        val data = item4_stream_comdat_location(image, item4_stream_comdat_read(image, marker + 8, 8), 8u64)
+        val code = item4_stream_comdat_location(image, item4_stream_comdat_read(image, marker + 16, 8), 6u64)
+        if data >= 0: expect(item4_stream_comdat_read(image, data, 8)).to_equal(33u64)
+        if code >= 0:
+            expect(item4_stream_comdat_read(image, code, 1)).to_equal(0xb8u64)
+            expect(item4_stream_comdat_read(image, code + 1, 4)).to_equal(33u64)
+            expect(item4_stream_comdat_read(image, code + 5, 1)).to_equal(0xc3u64)
+
+    it "accepts an ordinary retained local reference into a kept group":
+        step("Keep the local's group and inspect the outside relocation target rather than rejecting all group boundaries")
+        val linked = item4_stream_comdat_image(["test/fixtures/linker/elf/stream_comdat_refs.o",
+            "test/fixtures/linker/elf/stream_comdat_local_ref.o"], ["test/fixtures/linker/elf/stream_comdat_missing_provider.a"])
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        item4_stream_comdat_check(image, false)
+        val marker = item4_stream_comdat_find(image, "CDLOCAL!")
+        expect(marker >= 0).to_equal(true)
+        if marker < 0: return
+        val data = item4_stream_comdat_location(image, item4_stream_comdat_read(image, marker + 8, 8), 8u64)
+        if data >= 0: expect(item4_stream_comdat_read(image, data, 8)).to_equal(77u64)
+
     it "resolves a discarded weak definition to zero or its surviving replacement for scalar and GOT references":
         step("Link real weak definitions in losing and winning groups then inspect both emitted reference forms")
         for variant in 0..3:
@@ -239,7 +285,7 @@ describe "Streamed COMDAT whole-group selection":
         if created.is_err(): return
         val directory = created.unwrap()
         val input = directory + "/invalid.o"
-        for kind in 0..12:
+        for kind in 0..13:
             val bytes = item4_stream_comdat_mutate(kind)
             expect(bytes.len()).to_be_greater_than(64)
             if bytes.len() > 64:

@@ -7,6 +7,8 @@ execution evidence. No admitted Simple runtime was invoked.
 | Scenario | Observable contract |
 |---|---|
 | Effective undefined weak | Discarded weak definition yields zero for retained scalar/GOT references; kept weak and surviving strong replacement resolve to actual data |
+| Distinct signatures | Both independent groups retain their own code/data/RELA; only the duplicate signature loses |
+| Kept local reference | Outside relocation into a kept group's local definition resolves to actual value 77 |
 | First/reversed winner | Whole local-signature group selects code, data and associated RELA; reversed input order changes 11 to 22 |
 | Ordinary duplicates | Strong definitions outside COMDAT still reject and preserve output |
 | Losing undefined/GOT | No live error or slot from discarded references; a supplied archive still satisfies retained undefined-record demand |
@@ -15,13 +17,15 @@ execution evidence. No admitted Simple runtime was invoked.
 | Generic groups | Both flags-zero groups with the same local signature remain in output |
 | Tiny payload windows | Entry `x` and signature `g` permit read/name/emit limits of one and real four-byte membership-word decoding |
 | Empty group | Flags-only group with removed member group flag does not defeat a later nonempty signature |
-| Malformed structure | Checked flags, signature/table, membership, orphan RELA, entry-size and extent mutations reject even in losing groups |
+| Malformed structure | Checked flags, signature/table, membership, orphan RELA, mismatched RELA target group, entry-size and extent mutations reject even in losing groups |
 | Quotas/cancellation | Real group scans charge the retained owner; full-job failures preserve destination sentinel |
 
-Eleven scenarios inspect actual published bytes and translate addresses using
+Thirteen scenarios inspect actual published bytes and translate addresses using
 PT_LOAD headers. The retained root's pointers must select the winner's data
 and instruction immediates. A group-internal pointer proves associated RELA
 selection; losing markers must be absent. Fast linker parity is not claimed.
+The discarded-GOT case also requires exact equality with the image linked
+without the losing object, detecting extra slots or changed output extent.
 
 Fixture reproduction requires the directory containing the bare `.include`
 paths:
