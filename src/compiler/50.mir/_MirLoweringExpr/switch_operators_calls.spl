@@ -1,6 +1,7 @@
 # Part of src/compiler/50.mir/mir_lowering_expr.spl: switch/if-chain dispatch, binary/unary operators, call lowering
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 # MIR Lowering - Expression Lowering
 #
@@ -2792,7 +2793,8 @@ impl MirLowering:
                     # `p`'s real field index instead of resolve_field_index's
                     # silent default-to-0 fallback (see that map's own field
                     # comment for the full landmine this closes).
-                    val payload_key = "{enum_name}::{enum_variants[ci]}"
+                    val payload_owner_key = if enum_key != "": enum_key else: enum_name
+                    val payload_key = "{payload_owner_key}::{enum_variants[ci]}"
                     val payload_struct = self.enum_payload_struct_names.get(payload_key)
                     val result_payload_type = self.result_variant_payload_type(scrutinee, enum_variants[ci])
                     # Mechanism #1 fix (native_build_cross_module_result_
@@ -2854,7 +2856,7 @@ impl MirLowering:
                                     effective_payload_type = Some(option_inner)
                                 case _: ()
                     val bound_payload = match effective_payload_type:
-                        case Some(found_payload_type): self.enum_payload_value(pl, self.lower_type(found_payload_type))
+                        case Some(found_payload_type): self.decode_declared_enum_payload_slot(pl, found_payload_type)
                         case _: pl
                     # Preserve the declaration on the extracted local as well
                     # as using it for decoding. In particular, an enum payload
@@ -2949,12 +2951,20 @@ impl MirLowering:
                     val gr = bget.emit_call(gf, [mir_operand_copy(tuple_local), mir_operand_copy(idx_local)], MirType.i64())
                     self.builder = bget
                     if val gl = gr:
+                        val tuple_owner_key = if enum_key != "": enum_key else: enum_name
+                        val tuple_payload_key = "{tuple_owner_key}::{enum_variants[ci]}"
+                        var bound_slot = gl
+                        if self.enum_payload_key_uses_declared_slots(tuple_payload_key):
+                            if val slot_types = self.enum_variant_payload_types.get(tuple_payload_key):
+                                val slot_index = bind_pos_row[fi]
+                                if slot_index >= 0 and slot_index < slot_types.len():
+                                    bound_slot = self.decode_declared_enum_payload_slot(gl, slot_types[slot_index])
                         # Text retag: mirror the single-field path — if this
                         # slot was observed TEXT at the construction site,
                         # rt_interp_cstr(gl) produces a genuinely
                         # Opaque("str")-typed local (see the long comment in
                         # the single-field arm for why relabel-in-place fails).
-                        val tuple_text_key = "{enum_name}::{enum_variants[ci]}::{bind_pos_row[fi]}"
+                        val tuple_text_key = "{tuple_owner_key}::{enum_variants[ci]}::{bind_pos_row[fi]}"
                         if self.enum_tuple_text_slots.has(tuple_text_key):
                             var bp_ttext = self.builder
                             val ttext_op = MirOperand(kind: MirOperandKind.Const(
@@ -2967,8 +2977,8 @@ impl MirLowering:
                                 self.local_map[bind_syms[fi].id] = ttext_local
                                 self.bind_local(bind_syms[fi].id, ttext_local)
                         else:
-                            self.local_map[bind_syms[fi].id] = gl
-                            self.bind_local(bind_syms[fi].id, gl)
+                            self.local_map[bind_syms[fi].id] = bound_slot
+                            self.bind_local(bind_syms[fi].id, bound_slot)
                     fi = fi + 1
             # Do not copy HirBlock composites through another pushed array:
             # Stage-2 stores those elements through ANY and repeated enum
@@ -3546,10 +3556,28 @@ impl MirLowering:
         (rt_tuple_get per field) lives in lower_enum_match. 1-field payloads
         never call this -- they keep the original raw-i64 fast path."""
         var lowered: [LocalId] = []
+        val typed_slots = self.enum_payload_key_uses_declared_slots(construct_key)
+        if typed_slots and self.enum_variant_payload_types[construct_key].len() != values.len():
+            self.error_fatal("enum construction '{construct_key}': payload arity mismatch", nil)
+            return self.builder.emit_const_int(0)
         var vi = 0
         while vi < values.len():
-            lowered.push(self.lower_expr(values[vi]))
+            val local = self.lower_expr(values[vi])
+            if typed_slots:
+                val expected = self.enum_variant_payload_types[construct_key][vi]
+                if not self.enum_payload_local_compatible(expected, values[vi], local):
+                    self.error_fatal("enum construction '{construct_key}': payload type mismatch at {vi}", Some(values[vi].span))
+                    return self.builder.emit_const_int(0)
+                lowered.push(self.adapt_declared_enum_payload(expected, local))
+            else:
+                lowered.push(local)
             vi = vi + 1
+        self.box_lowered_enum_tuple_payload(lowered, construct_key)
+
+    me box_lowered_enum_tuple_payload(lowered: [LocalId], construct_key: text) -> LocalId:
+        # The checked constructor path has already evaluated each argument.
+        # This is also the legacy writer: both must store identical words.
+        val typed_slots = self.enum_payload_key_uses_declared_slots(construct_key)
         var bn = self.builder
         val n_local = bn.emit_const_int(lowered.len())
         self.builder = bn
@@ -3571,13 +3599,14 @@ impl MirLowering:
         while si < lowered.len():
             # Record TEXT slots keyed by construct site so lower_enum_match's
             # multi-field unbox can retag them (defect 2, agent_enumslots).
-            if self.local_is_str(lowered[si]):
+            if construct_key != "" and self.local_is_str(lowered[si]):
                 self.enum_tuple_text_slots["{construct_key}::{si}"] = true
+            val stored = if typed_slots: self.encode_declared_enum_payload_slot(lowered[si]) else: lowered[si]
             var bs = self.builder
             val idx_local = bs.emit_const_int(si)
             self.builder = bs
             var bset = self.builder
-            bset.emit_call(set_func, [mir_operand_copy(tuple_local), mir_operand_copy(idx_local), mir_operand_copy(lowered[si])], MirType(kind: MirTypeKind.I8))
+            bset.emit_call(set_func, [mir_operand_copy(tuple_local), mir_operand_copy(idx_local), mir_operand_copy(stored)], MirType(kind: MirTypeKind.I8))
             self.builder = bset
             si = si + 1
         tuple_local
@@ -3594,13 +3623,16 @@ impl MirLowering:
         # Step (c): resolve against THIS declaration's runtime_name when the
         # symbol carries a defining module, so `Shape.Circle(7)` constructs the
         # discriminant of the `Shape` this expression actually names rather than
-        # whichever `Shape` was registered last. `enum_name` stays bare below --
-        # it keys enum_payload_struct_names and appears in diagnostics.
+        # whichever `Shape` was registered last. Payload metadata uses this
+        # same declaration key; the bare name is only for diagnostics.
         val enum_qkey = match type_.kind:
             case Named(qsymbol, _):
                 self.enum_qualified_key(qsymbol)
             case _: ""
         val enum_key = if enum_qkey != "" and self.enum_variant_index_q.has(enum_qkey): enum_qkey else: enum_name
+        if enum_qkey != "" and not self.enum_variant_index_q.has(enum_qkey):
+            self.error_fatal("enum construction: unregistered declaration '{enum_qkey}'", Some(type_.span))
+            return self.builder.emit_const_int(0)
         if not self.enum_has_variants(enum_key):
             self.error("enum construction: unregistered enum '{enum_name}'", nil)
             var be = self.builder
@@ -3617,6 +3649,35 @@ impl MirLowering:
             # out a permanently-unmatchable enum value -- must be fatal.
             val miss_detail = self.enum_variant_miss_detail(enum_name, variant)
             self.error_fatal("enum variant lookup miss: constructing '{enum_name}.{variant}' resolved to discriminant -1{miss_detail}", nil)
+            return self.builder.emit_const_int(0)
+        var payload_values: [HirExpr] = []
+        if val supplied_payload = payload:
+            match supplied_payload:
+                case HirEnumPayload.Tuple(values): payload_values = values
+                case HirEnumPayload.Struct(_):
+                    self.error_fatal("named enum construction requires declared field binding", Some(type_.span))
+                    return self.builder.emit_const_int(0)
+        val payload_reason = self.enum_positional_payload_reason(enum_key, variant, payload_values.len())
+        if payload_reason != "":
+            self.error_fatal("enum construction '{enum_key}.{variant}': {payload_reason}", Some(type_.span))
+            return self.builder.emit_const_int(0)
+        val payload_key = "{enum_key}::{variant}"
+        val declared_payload_types = self.enum_variant_payload_types[payload_key]
+        # Existing generic EnumLit nodes retain their monomorphization path.
+        # The new HIR classifier excludes generic declarations; do not compare
+        # a template TypeParam against an already-specialized argument here.
+        val generic_payload = self.generic_enum_constructor_owners.get(enum_key) ?? false
+        var lowered_payload_values: [LocalId] = []
+        var payload_index = 0
+        while payload_index < payload_values.len():
+            val value = payload_values[payload_index]
+            val local = self.lower_expr(value)
+            if not generic_payload and not self.enum_payload_local_compatible(declared_payload_types[payload_index], value, local):
+                self.error_fatal("enum construction '{enum_key}.{variant}': payload type mismatch at {payload_index}", Some(value.span))
+                return self.builder.emit_const_int(0)
+            val adapted = if generic_payload: local else: self.adapt_declared_enum_payload(declared_payload_types[payload_index], local)
+            lowered_payload_values.push(adapted)
+            payload_index = payload_index + 1
         var b = self.builder
         # I64 (not I32): the cranelift lane is uniformly i64 (see the Bool
         # note in cranelift_codegen_adapter mir_type_to_cl); I32 consts here
@@ -3639,7 +3700,7 @@ impl MirLowering:
             match payload_v:
                 case Tuple(values):
                     if values.len() == 1:
-                        payload_local = self.lower_expr(values[0])
+                        payload_local = lowered_payload_values[0]
                         val payload_ty = self.local_mir_type_of(payload_local)
                         if payload_ty != nil and (payload_ty ?? MirType.i64()).kind == MirTypeKind.U64:
                             payload_local = self.box_u64_runtime_value(payload_local)
@@ -3649,15 +3710,15 @@ impl MirLowering:
                         # -- see enum_payload_struct_names' own field comment.
                         val lit_payload_struct_name = self.struct_value_syms.get(payload_local.id)
                         if lit_payload_struct_name != nil and lit_payload_struct_name != "":
-                            self.enum_payload_struct_names["{enum_name}::{variant}"] = lit_payload_struct_name ?? ""
+                            self.enum_payload_struct_names[payload_key] = lit_payload_struct_name ?? ""
                         elif self.local_is_str(payload_local):
                             # Enum-text bug: record that this variant's payload
                             # is TEXT so lower_enum_match's single-payload bind
                             # arm retypes the bound local instead of leaving it
                             # (wrongly) i64. See enum_text_payload_marker.
-                            self.enum_payload_struct_names["{enum_name}::{variant}"] = enum_text_payload_marker()
+                            self.enum_payload_struct_names[payload_key] = enum_text_payload_marker()
                     elif values.len() > 1:
-                        payload_local = self.box_tuple_payload(values, "{enum_name}::{variant}")
+                        payload_local = self.box_lowered_enum_tuple_payload(lowered_payload_values, payload_key)
                         has_payload = true
                 case _:
                     ()
@@ -3722,6 +3783,26 @@ impl MirLowering:
         `Shape.Circle(7)` arrives as receiver=`Shape`, method=`Circle`. The enum
         is known by NAME (registered in enum_variant_index); the single tuple
         payload is args[0] (0 for Unit variants)."""
+        val metadata_owner = self.enum_constructor_metadata_owner(enum_name)
+        val metadata_key = if metadata_owner != "": "{metadata_owner}::{variant}" else: ""
+        val typed_slots = self.enum_payload_key_uses_declared_slots(metadata_key)
+        if args.len() > 1 and metadata_owner == "":
+            self.error_fatal("enum construction '{enum_name}.{variant}': ambiguous or missing payload owner", nil)
+            return self.builder.emit_const_int(0)
+        if typed_slots:
+            val payload_reason = self.enum_positional_payload_reason(metadata_owner, variant, args.len())
+            if payload_reason != "":
+                self.error_fatal("enum construction '{metadata_key}': {payload_reason}", nil)
+                return self.builder.emit_const_int(0)
+            # Full declaration-order named calls preserve their existing route.
+            # Reordered/default payload binding remains a separate owner task.
+            val declared_names = self.enum_variant_payload_names[metadata_key]
+            var ni = 0
+            while ni < args.len():
+                if args[ni].has_name and (ni >= declared_names.len() or args[ni].name != declared_names[ni]):
+                    self.error_fatal("named enum construction requires declared field binding", Some(args[ni].span))
+                    return self.builder.emit_const_int(0)
+                ni = ni + 1
         val disc = self.enum_variant_discriminant(enum_name, variant)
         if disc < 0:
             # Was a FULLY SILENT -1 (this site had no guard at all, not even the
@@ -3731,6 +3812,7 @@ impl MirLowering:
             # guard above.
             val miss_detail = self.enum_variant_miss_detail(enum_name, variant)
             self.error_fatal("enum variant lookup miss: constructing '{enum_name}.{variant}' (method-call form) resolved to discriminant -1{miss_detail}", nil)
+            return self.builder.emit_const_int(0)
         var b = self.builder
         val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
         b.emit_const(enum_id_local, MirConstValue.Int(self.enum_runtime_id(enum_name)), MirType(kind: MirTypeKind.I32))
@@ -3740,6 +3822,12 @@ impl MirLowering:
         var payload_local = LocalId(id: 0)
         if args.len() == 1:
             payload_local = self.lower_expr(args[0].value)
+            if typed_slots:
+                val expected = self.enum_variant_payload_types[metadata_key][0]
+                if not self.enum_payload_local_compatible(expected, args[0].value, payload_local):
+                    self.error_fatal("enum construction '{metadata_key}': payload type mismatch at 0", Some(args[0].span))
+                    return self.builder.emit_const_int(0)
+                payload_local = self.adapt_declared_enum_payload(expected, payload_local)
             val payload_ty = self.local_mir_type_of(payload_local)
             if payload_ty != nil and (payload_ty ?? MirType.i64()).kind == MirTypeKind.U64:
                 payload_local = self.box_u64_runtime_value(payload_local)
@@ -3754,13 +3842,13 @@ impl MirLowering:
             # way to recover which struct `p` holds and silently defaulted
             # `p.y` to field 0.
             val payload_struct_name = self.struct_value_syms.get(payload_local.id)
-            if payload_struct_name != nil and payload_struct_name != "":
-                self.enum_payload_struct_names["{enum_name}::{variant}"] = payload_struct_name ?? ""
-            elif self.local_is_str(payload_local):
+            if metadata_key != "" and payload_struct_name != nil and payload_struct_name != "":
+                self.enum_payload_struct_names[metadata_key] = payload_struct_name ?? ""
+            elif metadata_key != "" and self.local_is_str(payload_local):
                 # Enum-text bug: same marker as lower_enum_lit above, for the
                 # MethodCall-style construction path (`Shape.Circle(7)` via
                 # receiver=Shape/method=Circle).
-                self.enum_payload_struct_names["{enum_name}::{variant}"] = enum_text_payload_marker()
+                self.enum_payload_struct_names[metadata_key] = enum_text_payload_marker()
         elif args.len() > 1:
             # #164: 2+ constructor args -- box them into a heap tuple so the
             # single scalar payload slot can still carry all of them.
@@ -3769,7 +3857,7 @@ impl MirLowering:
             while ai < args.len():
                 values.push(args[ai].value)
                 ai = ai + 1
-            payload_local = self.box_tuple_payload(values, "{enum_name}::{variant}")
+            payload_local = self.box_tuple_payload(values, metadata_key)
         else:
             var bz = self.builder
             payload_local = bz.emit_const_int(0)
@@ -4745,6 +4833,11 @@ impl MirLowering:
                 lw.struct_method_return_is_optional = self.struct_method_return_is_optional
                 lw.enum_payload_struct_names = self.enum_payload_struct_names
                 lw.enum_single_payload_types = self.enum_single_payload_types
+                lw.enum_variant_payload_types = self.enum_variant_payload_types
+                lw.enum_variant_payload_names = self.enum_variant_payload_names
+                lw.enum_variant_payload_kind = self.enum_variant_payload_kind
+                lw.generic_enum_constructor_owners = self.generic_enum_constructor_owners
+                lw.enum_tuple_text_slots = self.enum_tuple_text_slots
                 lw.enum_variant_index = self.enum_variant_index
                 # Carry the collision registry into the sub-lowering too, or its
                 # miss diagnostics lose the colliding-owner half of the message.
