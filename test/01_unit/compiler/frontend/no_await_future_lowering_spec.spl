@@ -1,0 +1,110 @@
+# @cover src/compiler/10.frontend/desugar/desugar_async.spl
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserFunction}
+use compiler.frontend.parser_types_expr.{ExprKind, StmtKind}
+use compiler.hir.hir_types.{SymbolKind}
+use compiler.hir.hir_definitions.{HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_symbol_table_methods.*
+
+fn ready_helper_callee(func: ParserFunction) -> text:
+    if func.body.stmts.len() != 1:
+        return "invalid-statement-count"
+    match func.body.stmts[0].kind:
+        case StmtKind.Expr(expr):
+            match expr.kind:
+                case ExprKind.Call(callee, args):
+                    match callee.kind:
+                        case ExprKind.Field(owner, method):
+                            if method != "from_value" or args.len() != 1:
+                                return "invalid-constructor"
+                            if args[0].has_name or args[0].name != "": return "invalid-positional-constructor-argument"
+                            match owner.kind:
+                                case ExprKind.Ident(name):
+                                    if name != "Future": return "invalid-owner"
+                                case _: return "invalid-owner-kind"
+                            match args[0].value.kind:
+                                case ExprKind.Call(body_callee, body_args):
+                                    if body_args.len() != func.params.len(): return "missing-argument"
+                                    var index = 0
+                                    while index < body_args.len():
+                                        if body_args[index].has_name or body_args[index].name != "": return "invalid-positional-body-argument"
+                                        match body_args[index].value.kind:
+                                            case ExprKind.Ident(name):
+                                                if name != func.params[index].name: return "wrong-argument"
+                                            case _: return "argument-reevaluation"
+                                        index = index + 1
+                                    match body_callee.kind:
+                                        case ExprKind.Ident(name): return name
+                                        case _: return "not-a-real-function"
+                                case _: return "not-a-call"
+                        case _: ()
+                case _: ()
+        case _: ()
+    "invalid-wrapper"
+
+describe "no-await lowering owns a separate synchronous return scope":
+    it "lowers early returns in a real i64 function rather than the Future wrapper":
+        val source = "async fn choose(value: i64) -> i64:\n    if value < 0:\n        return 17\n    value + 1\n"
+        val parsed = parse_full_frontend(source, "ready_return.spl", "ready_return", Logger(level: 0))
+        val name = ready_helper_callee(parsed.functions["choose"])
+        expect(name).to_equal("__async_ready_body_choose")
+        val helper = parsed.functions[name]
+        expect(helper.is_async).to_equal(false)
+        expect(helper.visibility == Visibility.Private).to_equal(true)
+        expect(parsed.function_headers.contains(name)).to_equal(true)
+        expect(parsed.function_order.contains(name)).to_equal(true)
+        var lowering = HirLowering.with_filename("ready_return.spl")
+        val signature = lowering.declared_callable_type(helper, nil)
+        lowering.symbols.define(name, SymbolKind.Function, signature, helper.span, helper.visibility, false, nil)
+        val lowered = lowering.lower_function(helper)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowered.return_type.kind == HirTypeKind.Int(64, true)).to_equal(true)
+
+    it "forwards defaulted parameters without reevaluating their expression":
+        val source = "async fn defaulted(value: i64 = 7) -> i64:\n    value\n"
+        val parsed = parse_full_frontend(source, "ready_default.spl", "ready_default", Logger(level: 0))
+        val defaulted = parsed.functions["defaulted"]
+        expect(defaulted.params[0].has_default).to_equal(true)
+        expect(ready_helper_callee(defaulted)).to_equal("__async_ready_body_defaulted")
+        expect(parsed.functions["__async_ready_body_defaulted"].params[0].has_default).to_equal(true)
+
+    it "retains generic tail bodies in their original type parameter scope":
+        val source = "async fn identity<T>(value: T) -> T:\n    value\n"
+        val parsed = parse_full_frontend(source, "ready_generic.spl", "ready_generic", Logger(level: 0))
+        val func = parsed.functions["identity"]
+        expect(func.type_params.len()).to_equal(1)
+        expect(func.type_params[0].name).to_equal("T")
+        expect(parsed.functions.contains("__async_ready_body_identity")).to_equal(false)
+        match func.body.stmts[0].kind:
+            case StmtKind.Expr(expr):
+                match expr.kind:
+                    case ExprKind.Call(_, args):
+                        expect(args.len()).to_equal(1)
+                        match args[0].value.kind:
+                            case ExprKind.Block(body): expect(body.stmts.len()).to_equal(1)
+                            case _: fail("generic body was moved to an uninferable helper")
+                    case _: fail("missing ready value constructor")
+            case _: fail("missing generic wrapper body")
+
+    it "avoids authored declarations and parameters deterministically":
+        val source = "fn __async_ready_body_run() -> i64:\n    91\nasync fn run(__async_ready_body_run_1: i64) -> i64:\n    __async_ready_body_run_1\n"
+        val parsed = parse_full_frontend(source, "ready_names.spl", "ready_names", Logger(level: 0))
+        expect(ready_helper_callee(parsed.functions["run"])).to_equal("__async_ready_body_run_2")
+        expect(parsed.functions["__async_ready_body_run"].params.len()).to_equal(0)
+        expect(parsed.function_order.len()).to_equal(3)
+
+    it "preserves the no-return-annotation unit body and synchronous control":
+        val source = "async fn done():\n    ()\nfn untouched(value: i64) -> i64:\n    return value\n"
+        val parsed = parse_full_frontend(source, "ready_unit.spl", "ready_unit", Logger(level: 0))
+        val helper = parsed.functions[ready_helper_callee(parsed.functions["done"])]
+        expect(helper.has_return_type).to_equal(false)
+        expect(helper.is_async).to_equal(false)
+        expect(parsed.functions.contains("__async_ready_body_untouched")).to_equal(false)
+        match parsed.functions["untouched"].body.stmts[0].kind:
+            case StmtKind.Return(_): ()
+            case _: fail("synchronous return was rewritten")
