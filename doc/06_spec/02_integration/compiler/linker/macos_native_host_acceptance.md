@@ -1,11 +1,15 @@
 # Darwin host wrapper acceptance
 
 One authored ITEM4-REQ-002/006 scenario, **UNRUN**, in
-`test/03_system/app/compiler/feature/item4_macos_native_host_spec.spl`.
+`test/02_integration/compiler/linker/macos_native_host_acceptance.spl`.
 This is a manually authored companion, not generated runtime evidence.
 
 Run separately on Darwin using an independently admitted self-hosted runtime:
-`SIMPLE_LINKER=internal <runtime> test test/03_system/app/compiler/feature/item4_macos_native_host_spec.spl`
+`SIMPLE_LINKER=internal <runtime> test test/02_integration/compiler/linker/macos_native_host_acceptance.spl`
+
+The explicit host probe intentionally has no `_spec.spl` suffix and is not
+auto-discovered as a portable suite case. Passing the portable suite cannot
+claim this host gate; it requires the separate command and recorded evidence.
 
 The test requires actual Darwin, a supported host CPU, externally selected
 `internal`, and the ordinary unmanaged route. It changes no environment values.
