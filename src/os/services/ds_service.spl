@@ -75,6 +75,16 @@ fn ds_notify(pid: u32, name: text):
     """
     ds_notify_count = ds_notify_count + 1
 
+fn ds_notify_count_value() -> u64:
+    """Accessor for ds_notify_count.
+
+    Importers must call this instead of reading the module-level `var`
+    directly: cross-module reads of a mutable module global observe the
+    initial value on the self-hosted binary (see
+    doc/08_tracking/bug/ — module-global cross-import read).
+    """
+    ds_notify_count
+
 # ============================================================================
 # DsService — public API
 # ============================================================================
@@ -143,10 +153,15 @@ impl DsService:
                 val current_owner = self.world.owners.dense[owner_slot].pid
                 if current_owner == owner_pid:
                     # Same owner: overwrite endpoint and TTL
+                    # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
                     val ecs_tick = self.world.base.now()
-                    self.world.endpoints.insert(existing, EndpointId(value: endpoint), ecs_tick)
+                    var eps_s = self.world.endpoints
+                    eps_s.insert(existing, EndpointId(value: endpoint), ecs_tick)
+                    self.world.endpoints = eps_s
                     val abs_ttl: u64 = if ttl == 0: 0 else: self.tick + ttl
-                    self.world.ttls.insert(existing, Ttl(ticks: abs_ttl), ecs_tick)
+                    var ttls_s = self.world.ttls
+                    ttls_s.insert(existing, Ttl(ticks: abs_ttl), ecs_tick)
+                    self.world.ttls = ttls_s
                     # Notify subscribers about the endpoint change
                     val sub_slot = self.world.subscribers.get_slot(existing)
                     if sub_slot >= 0:
@@ -155,14 +170,27 @@ impl DsService:
             return existing
 
         # New name: spawn entity and populate all components
-        val e = self.world.base.spawn()
+        # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        var base_s = self.world.base
+        val e = base_s.spawn()
+        self.world.base = base_s
         val ecs_tick = self.world.base.now()
         val abs_ttl: u64 = if ttl == 0: 0 else: self.tick + ttl
-        self.world.names.insert(e,       Name(text: name),                          ecs_tick)
-        self.world.endpoints.insert(e,   EndpointId(value: endpoint),               ecs_tick)
-        self.world.owners.insert(e,      Owner(pid: owner_pid),                     ecs_tick)
-        self.world.subscribers.insert(e, SubscriberList(pids: []),                  ecs_tick)
-        self.world.ttls.insert(e,        Ttl(ticks: abs_ttl),                       ecs_tick)
+        var names_s = self.world.names
+        names_s.insert(e, Name(text: name), ecs_tick)
+        self.world.names = names_s
+        var eps_s = self.world.endpoints
+        eps_s.insert(e, EndpointId(value: endpoint), ecs_tick)
+        self.world.endpoints = eps_s
+        var owners_s = self.world.owners
+        owners_s.insert(e, Owner(pid: owner_pid), ecs_tick)
+        self.world.owners = owners_s
+        var subs_s = self.world.subscribers
+        subs_s.insert(e, SubscriberList(pids: []), ecs_tick)
+        self.world.subscribers = subs_s
+        var ttls_s = self.world.ttls
+        ttls_s.insert(e, Ttl(ticks: abs_ttl), ecs_tick)
+        self.world.ttls = ttls_s
         self.initialized = true
         e
 
@@ -190,13 +218,33 @@ impl DsService:
             return false
         if self.world.owners.dense[owner_slot].pid != owner_pid:
             return false
-        self.world.names.remove(e)
-        self.world.endpoints.remove(e)
-        self.world.owners.remove(e)
-        self.world.subscribers.remove(e)
-        self.world.ttls.remove(e)
-        self.world.base.despawn(e)
+        self.remove_entry(e)
         true
+
+    me remove_entry(self, e: Entity):
+        """Remove all components for e and despawn it.
+
+        two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        (extract-mutate-writeback for every cross-module store).
+        """
+        var names_s = self.world.names
+        names_s.remove(e)
+        self.world.names = names_s
+        var eps_s = self.world.endpoints
+        eps_s.remove(e)
+        self.world.endpoints = eps_s
+        var owners_s = self.world.owners
+        owners_s.remove(e)
+        self.world.owners = owners_s
+        var subs_s = self.world.subscribers
+        subs_s.remove(e)
+        self.world.subscribers = subs_s
+        var ttls_s = self.world.ttls
+        ttls_s.remove(e)
+        self.world.ttls = ttls_s
+        var base_s = self.world.base
+        base_s.despawn(e)
+        self.world.base = base_s
 
     me ds_subscribe(self, name: text, subscriber_pid: u32) -> bool:
         """Add subscriber_pid to the SubscriberList for name.
@@ -215,9 +263,13 @@ impl DsService:
         for pid in current_pids:
             if pid == subscriber_pid:
                 return true
-        val new_pids = current_pids.push(subscriber_pid)
+        var new_pids = current_pids
+        new_pids = new_pids.push(subscriber_pid)
         val ecs_tick = self.world.base.now()
-        self.world.subscribers.insert(e, SubscriberList(pids: new_pids), ecs_tick)
+        # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        var subs_s = self.world.subscribers
+        subs_s.insert(e, SubscriberList(pids: new_pids), ecs_tick)
+        self.world.subscribers = subs_s
         true
 
     me ds_unsubscribe(self, name: text, subscriber_pid: u32) -> bool:
@@ -237,13 +289,19 @@ impl DsService:
             if pid != subscriber_pid:
                 new_pids = new_pids.push(pid)
         val ecs_tick = self.world.base.now()
-        self.world.subscribers.insert(e, SubscriberList(pids: new_pids), ecs_tick)
+        # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        var subs_s = self.world.subscribers
+        subs_s.insert(e, SubscriberList(pids: new_pids), ecs_tick)
+        self.world.subscribers = subs_s
         true
 
     me ds_advance(self) -> u64:
         """Increment tick by 1, run TTL expiry system, return new tick."""
         self.tick = self.tick + 1
-        self.world.base.advance()
+        # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        var base_s = self.world.base
+        base_s.advance()
+        self.world.base = base_s
         self.sys_gc_expired()
         self.tick
 
@@ -268,12 +326,7 @@ impl DsService:
 
         for eid_raw in to_remove:
             val e = Entity(id: eid_raw, generation: 1)
-            self.world.names.remove(e)
-            self.world.endpoints.remove(e)
-            self.world.owners.remove(e)
-            self.world.subscribers.remove(e)
-            self.world.ttls.remove(e)
-            self.world.base.despawn(e)
+            self.remove_entry(e)
 
     fn ds_count(self) -> i32:
         """Return the count of currently published names."""
