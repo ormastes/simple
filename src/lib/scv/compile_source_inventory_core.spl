@@ -3,6 +3,7 @@
 
 use std.common.crypto.sha256.{sha256_text}
 use std.common.text_whitespace.{split_whitespace}
+use std.common.text_bytes.{text_to_utf8_bytes}
 
 val COMPILE_SOURCE_INVENTORY_SCHEMA_V1: i64 = 1
 val COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
@@ -266,11 +267,17 @@ fn compile_source_inventory_text_valid_v1(value: text) -> bool:
         not value.contains("|")
 
 fn compile_source_inventory_digest_valid_v1(value: text) -> bool:
+    # One bulk byte copy instead of 64 `byte_at` calls that each re-validated
+    # the string twice; every entry is checked several times per cold
+    # inventory (initial batch, encode, publication readback, admission).
     if value.len() != 64:
+        return false
+    val raw = text_to_utf8_bytes(value)
+    if raw.len() != 64u64:
         return false
     var index = 0
     while index < 64:
-        val ch = value.byte_at(index) as i64
+        val ch = raw[index] as i64
         if not ((ch >= 48 and ch <= 57) or (ch >= 97 and ch <= 102)):
             return false
         index = index + 1

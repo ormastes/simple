@@ -6288,7 +6288,12 @@ pub extern "C" fn rt_contains(collection: RuntimeValue, value: RuntimeValue) -> 
                     if needle.len() > haystack.len() {
                         return 0;
                     }
-                    return haystack.windows(needle.len()).any(|window| window == needle) as u8;
+                    // Same answer as a `windows(..).any(==)` scan, through the
+                    // SIMD byte finder `rt_string_find` uses: the window scan
+                    // paid a memcmp call per haystack byte, which made every
+                    // `text.contains(text)` in the cold SCV inventory a
+                    // dominant cost (2026-10-04).
+                    return (collection_providers().byte_find)(haystack, needle, 0).is_some() as u8;
                 }
 
                 if value.is_int() {
