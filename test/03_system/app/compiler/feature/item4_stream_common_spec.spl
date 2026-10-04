@@ -102,6 +102,8 @@ fn item4_stream_common_mutated(kind: i64) -> [u8]:
             if not valid: return []
             if kind == 2:
                 bytes[offset + 4] = 1u8
+            elif kind == 3:
+                for byte in 0..8: bytes[offset + 16 + byte] = 255u8
             else:
                 val alignment: u64 = if kind == 0: 0u64 else: 3u64
                 for byte in 0..8: bytes[offset + 8 + byte] = ((alignment >> (byte * 8)) & 255u64) as u8
@@ -293,6 +295,20 @@ describe "Streamed ELF common-symbol allocation":
             if cancelled.is_err(): expect(cancelled.unwrap_err()).to_contain("cancelled")
             expect(inputs.elf_stream_close_inputs_v1()).to_equal(true)
             expect(inputs.closed).to_equal(true)
+        step("Reject a real COMMON record whose unsigned size would overflow address arithmetic")
+        val overflow_input = directory + "/overflow.o"
+        val overflow_bytes = item4_stream_common_mutated(3)
+        expect(overflow_bytes.len()).to_be_greater_than(64)
+        if overflow_bytes.len() > 64:
+            expect(file_write_bytes(overflow_input, overflow_bytes)).to_equal(true)
+            val overflow = elf_stream_link_file_v1([
+                "test/fixtures/linker/elf/stream_common_refs.o", overflow_input], [], [95, 115, 116, 97, 114, 116],
+                output, directory, item4_stream_common_limits(), item4_stream_common_cancelled)
+            expect(overflow.is_err()).to_equal(true)
+            if overflow.is_err():
+                expect(overflow.unwrap_err()).to_contain("common")
+                expect(overflow.unwrap_err()).to_contain("output")
+            expect(file_read_bytes(output)).to_equal(sentinel)
         val errors = ["output", "scratch", "scan-work", "cancelled"]
         for kind in 0..4:
             var limits = item4_stream_common_limits()
@@ -304,9 +320,10 @@ describe "Streamed ELF common-symbol allocation":
                 output, directory, limits, if kind == 3: item4_stream_common_stop else: item4_stream_common_cancelled)
             expect(linked.is_err()).to_equal(true)
             if linked.is_err(): expect(linked.unwrap_err()).to_contain(errors[kind])
-            if kind == 0 and linked.is_err(): expect(linked.unwrap_err()).to_contain("common")
+            if kind == 0 and linked.is_err(): expect(linked.unwrap_err()).to_equal("stream common storage exceeds output budget")
             expect(file_read_bytes(output)).to_equal(sentinel)
         expect(file_remove(output)).to_equal(true)
+        if file_exists(overflow_input): expect(file_remove(overflow_input)).to_equal(true)
         expect(dir_remove(directory, false)).to_equal(true)
 
     it "extracts a common-only archive provider for genuinely undefined references in both engines":

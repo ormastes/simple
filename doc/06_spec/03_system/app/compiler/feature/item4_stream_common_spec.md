@@ -26,6 +26,9 @@ Quota and cancellation checks also enter common layout with real retained
 inputs already open, exercise its scan guard, and close the original owner.
 The output limit is 12399 bytes: ordinary sections fit, but the final COMMON
 byte exceeds the limit. The rejection must name both common storage and output.
+A checked task-owned symbol record also sets COMMON size to unsigned 64-bit
+maximum. Full linking must reject it before address overflow and preserve the
+same destination sentinel.
 
 Fixture sources are `test/fixtures/linker/elf/stream_common_*.s`. Each object was
 assembled with Ubuntu clang using `--target=x86_64-unknown-linux-gnu -c`.
