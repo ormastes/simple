@@ -465,7 +465,7 @@ impl LlvmBackend {
             .coerce_value_to_type(val, Some(i64_type.into()), builder)?
             .into_int_value();
         if i64_type.get_bit_width() == 64 {
-            // Required, not optional, once BoxInt above can produce a
+            // Required, not optional, once BoxInt can produce a
             // wide heap box: such a value carries TAG_HEAP and the
             // select chain below would take the passthrough arm and
             // return a raw POINTER as if it were the integer.
