@@ -80,6 +80,47 @@ fn item4_macos_native_check_image(bytes: [u8], arm: bool):
     expect(item4_macos_native_read(bytes, 0xc008, 8)).to_equal(0x100004000)
 
 describe "explicit internal Mach-O native file adapter":
+    it "ITEM4-REQ-006 resolves a bare library name through an actual configured search directory":
+        step("Plan an explicitly selected Mach-O link")
+        val created = item4_macos_native_parent()
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val provider = file_read_bytes("test/fixtures/linker/macho/provider_x64.dylib")
+        expect(provider.len() > 32).to_equal(true)
+        if provider.len() <= 32:
+            expect(dir_remove(parent)).to_equal(true)
+            return
+        val copied = file_write_bytes(parent + "/libitem4.dylib", provider)
+        expect(copied).to_equal(true)
+        if not copied:
+            expect(dir_remove(parent)).to_equal(true)
+            return
+        var config = item4_macos_native_config()
+        config.libraries = ["item4"]
+        config.library_paths = [parent]
+        config.extra_flags.push("--macho-max-image-bytes")
+        config.extra_flags.push("1048576")
+        val output = parent + "/app"
+        val plan = native_macho_plan_v1("x86_64", config, output)
+        expect(plan.is_ok()).to_equal(true)
+        if plan.is_ok():
+            expect(plan.unwrap().request.max_image_bytes).to_equal(1048576)
+            step("Link real object and provider files")
+            val linked = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/hosted_start_x64.o"], [], output)
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_ok():
+                step("Inspect the published Mach-O commands and bytes")
+                val bytes = file_read_bytes(output)
+                item4_macos_native_check_image(bytes, false)
+                expect(bytes.len() <= 1048576).to_equal(true)
+                expect(item4_macos_native_command(bytes, 0xc) >= 0).to_equal(true)
+                expect(item4_macos_native_read(bytes, 0xc000, 8)).to_equal(0)
+        step("Remove owned fixture files")
+        if file_exists(output): expect(file_remove(output)).to_equal(true)
+        expect(file_remove(parent + "/libitem4.dylib")).to_equal(true)
+        expect(dir_remove(parent)).to_equal(true)
+
     it "ITEM4-REQ-006 consumes real object and archive providers and preserves successful replacement semantics":
         for archived in [false, true]:
             step("Plan an explicitly selected Mach-O link")
@@ -149,7 +190,7 @@ describe "explicit internal Mach-O native file adapter":
         expect(native_macho_plan_v1("x86_64", item4_macos_native_config(), "").is_err()).to_equal(true)
 
     it "ITEM4-REQ-007 preserves destination bytes on missing invalid incompatible and unresolved inputs":
-        for kind in 0..4:
+        for kind in 0..6:
             step("Plan an explicitly selected Mach-O link")
             val created = item4_macos_native_parent()
             expect(created.is_ok()).to_equal(true)
@@ -163,6 +204,7 @@ describe "explicit internal Mach-O native file adapter":
                 return
             var config = item4_macos_native_config()
             if kind == 2: config.libraries = ["test/fixtures/linker/macho/provider_a64.dylib"]
+            if kind == 5: config.runtime_path = parent + "/runtime"
             val plan = native_macho_plan_v1("x86_64", config, output)
             expect(plan.is_ok()).to_equal(true)
             if plan.is_err():
@@ -180,9 +222,12 @@ describe "explicit internal Mach-O native file adapter":
                     return
                 inputs = [parent + "/invalid.o"]
             step("Preserve the existing destination on construction failure")
-            val rejected = native_macho_link_files_v1(plan.unwrap(), inputs, [], output)
+            val runtime_archives: [text] = if kind == 4: ["test/fixtures/linker/macho/provider_x64.a"] else: []
+            val rejected = native_macho_link_files_v1(plan.unwrap(), inputs, runtime_archives, output)
             expect(rejected.is_err()).to_equal(true)
-            if rejected.is_err(): expect(rejected.unwrap_err().len() > 0).to_equal(true)
+            if rejected.is_err():
+                val tokens = ["cannot be read", "unsupported Mach-O input format", "CPU", "unresolved hosted import", "runtime archives with runtime path none", "runtime archives were not resolved"]
+                expect(rejected.unwrap_err()).to_contain(tokens[kind])
             expect(file_read_bytes(output)).to_equal([17u8, 0u8, 255u8])
             step("Remove owned fixture files")
             if file_exists(parent + "/invalid.o"): expect(file_remove(parent + "/invalid.o")).to_equal(true)
@@ -200,7 +245,7 @@ describe "explicit internal Mach-O native file adapter":
             val arch = if arm: "aarch64" else: "x86_64"
             val suffix = if arm: "a64" else: "x64"
             var config = item4_macos_native_config()
-            config.libraries = ["test/fixtures/linker/macho/provider_{suffix}.dylib"]
+            if not arm: config.libraries = ["test/fixtures/linker/macho/provider_{suffix}.dylib"]
             val plan = native_macho_plan_v1(arch, config, output)
             expect(plan.is_ok()).to_equal(true)
             if plan.is_err():
@@ -210,7 +255,9 @@ describe "explicit internal Mach-O native file adapter":
             expect(plan.unwrap().request.sdk).to_equal(0xb0000)
             expect(plan.unwrap().request.entry).to_equal("_main")
             step("Link real object and provider files")
-            val linked = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/hosted_start_{suffix}.o"], [], output)
+            var inputs = ["test/fixtures/linker/macho/hosted_start_{suffix}.o"]
+            if arm: inputs.push("test/fixtures/linker/macho/provider_{suffix}.dylib")
+            val linked = native_macho_link_files_v1(plan.unwrap(), inputs, [], output)
             expect(linked.is_ok()).to_equal(true)
             if linked.is_ok():
                 expect(linked.unwrap()).to_equal(output)
