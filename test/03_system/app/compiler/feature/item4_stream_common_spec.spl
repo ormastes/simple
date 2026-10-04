@@ -10,6 +10,26 @@ use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remov
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use compiler.backend.linker.elf.stream_types.{ElfStreamLimitsV1}
 use compiler.backend.linker.elf.stream_link.{elf_stream_link_file_v1}
+use compiler.backend.linker.elf.elf_static_link.{elf_link, ElfLinkRequest, ELF_LINK_STATIC_EXEC}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+fn item4_stream_common_fast(objects: [text], archives: [text]) -> Result<[u8], text>:
+    var object_bytes: [[i64]] = []
+    var archive_bytes: [[i64]] = []
+    for path in objects:
+        var bytes: [i64] = []
+        for byte in file_read_bytes(path): bytes.push(byte as i64)
+        object_bytes.push(bytes)
+    for path in archives:
+        var bytes: [i64] = []
+        for byte in file_read_bytes(path): bytes.push(byte as i64)
+        archive_bytes.push(bytes)
+    val image = elf_link(ElfLinkRequest(objects: object_bytes, archives: archive_bytes,
+        shared: [], entry: "_start", target: RelocArch.X86_64, mode: ELF_LINK_STATIC_EXEC,
+        interp: "", gc_sections: false))?
+    var output: [u8] = []
+    for byte in image: output.push(byte as u8)
+    Ok(output)
 
 fn item4_stream_common_limits() -> ElfStreamLimitsV1:
     ElfStreamLimitsV1(input_limit: 12, archive_member_limit: 64u64,
@@ -91,6 +111,28 @@ fn item4_stream_common_check(bytes: [u8]):
     item4_stream_common_zero(bytes, other, 16u64)
 
 describe "Streamed ELF common-symbol allocation":
+    it "extracts a common-only archive provider for genuinely undefined references in both engines":
+        step("Resolve real undefined symbols using an actual archive with COMMON definitions")
+        val objects = ["test/fixtures/linker/elf/stream_common_refs.o"]
+        val archives = ["test/fixtures/linker/elf/stream_common_archive.a"]
+        val fast = item4_stream_common_fast(objects, archives)
+        expect(fast.is_ok()).to_equal(true)
+        if fast.is_ok(): item4_stream_common_check(fast.unwrap())
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-common-archive-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        val output = directory + "/image.elf"
+        val linked = elf_stream_link_file_v1(objects, archives, [95, 115, 116, 97, 114, 116],
+            output, directory, item4_stream_common_limits(), item4_stream_common_cancelled)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_ok():
+            expect(linked.unwrap().cleanup_pending).to_equal(false)
+            item4_stream_common_check(file_read_bytes(output))
+        if file_exists(output): expect(file_remove(output)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)
+
     it "merges independent maximum common size and alignment across output windows":
         step("Link real common declarations with size eighty and alignment sixty-four from different objects")
         expect(dir_create_all("build")).to_equal(true)
