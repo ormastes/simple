@@ -32,3 +32,10 @@ generation evidence only. Common-layout checks exercise maximum size/alignment
 on naturally aligned fixtures; they do not prove every misaligned combination.
 Hosted weak coalescing, SDK providers, managed admission and actual host execution
 remain open, and no full coverage or runtime PASS is claimed.
+
+Integration rebased onto `01cde54601b8df6794029e618c6f973474f4fa1c`; all ten
+reviewed patches compare equal. Final whitespace, direct-env working/staged,
+numbered-artifact and manual-layout checks passed. Committed test-tree delta:
+3151 inherited offenders, zero introduced. Retained list:
+`C:/dev/simple/.git/item4-macho-duplicates-preexisting-offenders.txt`.
+These structural results do not change the full verification FAIL/UNRUN status.
