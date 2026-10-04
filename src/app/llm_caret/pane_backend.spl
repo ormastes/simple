@@ -4,9 +4,10 @@
 # currently taking a command, and captures what a pane's child printed (the
 # dashboard's right-hand agent screen). Two backends behind one surface:
 #
-#   tmux  - POSIX hosts where tmux answers a positive probe.
-#   smux  - Simple's own multiplexer (os.apps.smux.api): every other host,
-#           including Windows, where each pane child runs on a real ConPTY.
+#   smux  - Simple's own multiplexer (os.apps.smux.api): the DEFAULT on every
+#           host, including Windows, where each pane child runs on a real ConPTY.
+#   tmux  - opt-in with CS_PANE_BACKEND=tmux, on POSIX hosts where tmux
+#           answers a positive probe.
 #
 # tmux calls go through the sosix facade (std.nogc_async_mut.sosix) - tools
 # depend on sosix, never on process_run/tmux directly. smux is in-process, so
@@ -15,9 +16,10 @@
 use std.nogc_async_mut.sosix.{sosix_platform, sosix_run, sosix_which}
 use os.apps.smux.api.{smux_create_session, smux_list_sessions,
     smux_list_windows, smux_list_panes, smux_split_pane, smux_focus_pane,
-    smux_focused_pane, smux_close_pane, smux_pane_spawn_pty, smux_pane_alive,
+    smux_focused_pane, smux_close_pane, smux_pane_spawn_pty, smux_pane_alive, smux_resize,
     smux_send_command, smux_send_text, smux_capture}
 use std.nogc_sync_mut.io.{thread_sleep_ms}
+use app.io.mod.{env_get}
 
 # Gap between typing a message and pressing Enter, so the TUI sees two input
 # events. Measured enough for codex and kimi on ConPTY.
@@ -80,6 +82,14 @@ fn posix_command_line(cmd: text, args: [text]) -> text:
     var line = posix_quote_arg(cmd)
     for arg in args:
         line = line + " " + posix_quote_arg(arg)
+    line
+
+# `exec` line for a pane shell. A non-empty `stderr_path` appends the child's
+# stderr there, so diagnostics stay on disk instead of flooding the screen.
+fn posix_exec_line(cmd: text, args: [text], stderr_path: text) -> text:
+    var line = "exec " + posix_command_line(cmd, args)
+    if stderr_path != "":
+        line = line + " 2>>" + posix_quote_arg(stderr_path)
     line
 
 # tmux emits one line per pane. pane_title may contain spaces, so it is LAST and
@@ -175,8 +185,12 @@ fn _tmux_available() -> bool:
         return false
     sosix_run("tmux", ["-V"]).exit_code == 0
 
+# Default is Simple's own smux; tmux is opt-in via CS_PANE_BACKEND=tmux.
+fn _use_tmux() -> bool:
+    (env_get("CS_PANE_BACKEND") ?? "") == "tmux" and _tmux_available()
+
 fn pane_backend_name() -> text:
-    if _tmux_available():
+    if _use_tmux():
         return "tmux"
     "smux"
 
@@ -252,7 +266,8 @@ fn _smux_free_pane(scope: SmuxScope) -> text:
         return ""
     split.unwrap().id
 
-fn _smux_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
+fn _smux_spawn(session: text, title: text, cmd: text, args: [text], cols: i64,
+        rows: i64, stderr_path: text) -> Pane:
     val empty = Pane(pane_id: "", title: title, pid: 0, active: false, zoomed: false)
     var scope = _smux_scope(session)
     if scope.session_id == "":
@@ -268,12 +283,15 @@ fn _smux_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
     var line = windows_spawn_command_line(cmd, args)
     if not _is_windows():
         line = "/bin/sh"
+    # The PTY is opened at the slot's geometry, so size the slot first.
+    if cols > 0 and rows > 0:
+        val _r = smux_resize(scope.session_id, scope.window_id, pane_id, cols, rows)
     val spawned = smux_pane_spawn_pty(scope.session_id, scope.window_id, pane_id, line)
     if spawned.is_err():
         return empty
     if not _is_windows():
         val _e = smux_send_command(scope.session_id, scope.window_id, pane_id,
-            "exec " + posix_command_line(cmd, args))
+            posix_exec_line(cmd, args, stderr_path))
     _smux_info = _smux_info + [SmuxPaneInfo(pane_id: pane_id, title: title, pid: spawned.unwrap())]
     val _f = smux_focus_pane(scope.session_id, scope.window_id, pane_id)
     Pane(pane_id: pane_id, title: title, pid: spawned.unwrap(), active: true, zoomed: false)
@@ -283,7 +301,7 @@ fn _smux_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
 # ---------------------------------------------------------------------------
 
 fn pane_list(session: text) -> [Pane]:
-    if not _tmux_available():
+    if not _use_tmux():
         return _smux_list(session)
     val result = sosix_run("tmux", pane_list_argv(session))
     if result.exit_code != 0:
@@ -293,7 +311,7 @@ fn pane_list(session: text) -> [Pane]:
 fn pane_select(session: text, pane_id: text) -> bool:
     if session == "" or pane_id == "":
         return false
-    if not _tmux_available():
+    if not _use_tmux():
         val scope = _smux_scope(session)
         return smux_focus_pane(scope.session_id, scope.window_id, pane_id)
     _tmux_ok(pane_select_argv(pane_id))
@@ -302,7 +320,7 @@ fn pane_select(session: text, pane_id: text) -> bool:
 fn pane_zoom(session: text, pane_id: text) -> bool:
     if session == "" or pane_id == "":
         return false
-    if not _tmux_available():
+    if not _use_tmux():
         var known = false
         for p in _smux_list(session):
             if p.pane_id == pane_id:
@@ -316,7 +334,7 @@ fn pane_zoom(session: text, pane_id: text) -> bool:
 fn pane_kill(session: text, pane_id: text) -> bool:
     if session == "" or pane_id == "":
         return false
-    if not _tmux_available():
+    if not _use_tmux():
         val scope = _smux_scope(session)
         if not smux_close_pane(scope.session_id, scope.window_id, pane_id):
             return false
@@ -328,13 +346,23 @@ fn pane_kill(session: text, pane_id: text) -> bool:
         return true
     _tmux_ok(pane_kill_argv(pane_id))
 
+# Sets a pane's terminal to `cols` x `rows`, so its child lays out for the
+# region the dashboard actually shows.
+fn pane_resize(session: text, pane_id: text, cols: i64, rows: i64) -> bool:
+    if session == "" or pane_id == "" or cols <= 0 or rows <= 0:
+        return false
+    if not _use_tmux():
+        val scope = _smux_scope(session)
+        return smux_resize(scope.session_id, scope.window_id, pane_id, cols, rows).is_ok()
+    _tmux_ok(["resize-pane", "-t", pane_id, "-x", cols.to_text(), "-y", rows.to_text()])
+
 # Delivers `body` into a pane as if typed, then submits it. Returns false
 # rather than half-sending: if the literal write fails, Enter is not sent, so a
 # partial line is never submitted to an agent.
 fn pane_send(session: text, pane_id: text, body: text) -> bool:
     if session == "" or pane_id == "" or body == "":
         return false
-    if not _tmux_available():
+    if not _use_tmux():
         # Type, pause, then press Enter as its own keystroke. Text and "\r" in
         # one write reach a TUI as a single paste, and agent TUIs (codex, kimi)
         # keep a pasted newline in the composer instead of submitting.
@@ -387,7 +415,7 @@ fn pane_key_tmux_name(key: text) -> text:
 fn pane_send_key(session: text, pane_id: text, key: text) -> bool:
     if session == "" or pane_id == "" or pane_key_bytes(key) == "":
         return false
-    if not _tmux_available():
+    if not _use_tmux():
         val scope = _smux_scope(session)
         return smux_send_text(scope.session_id, scope.window_id, pane_id, pane_key_bytes(key)).is_ok()
     _tmux_ok(["send-keys", "-t", pane_id, pane_key_tmux_name(key)])
@@ -399,7 +427,7 @@ fn pane_capture(session: text, pane_id: text, lines: i64) -> [text]:
     if session == "" or pane_id == "":
         return out
     var raw = ""
-    if not _tmux_available():
+    if not _use_tmux():
         val scope = _smux_scope(session)
         val cap = smux_capture(scope.session_id, scope.window_id, pane_id, lines)
         if cap.is_err():
@@ -419,17 +447,27 @@ fn pane_capture(session: text, pane_id: text, lines: i64) -> [text]:
 # Returns a Pane with an empty pane_id when the backend cannot spawn - callers
 # check `pane_id != ""`. Nothing fabricated.
 fn pane_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
+    pane_spawn_at(session, title, cmd, args, 0, 0, "")
+
+# pane_spawn with the child's terminal sized to `cols` x `rows` (0 = backend
+# default) and, when `stderr_path` is non-empty, its stderr appended to that
+# file. Windows children keep their stderr on the console.
+fn pane_spawn_at(session: text, title: text, cmd: text, args: [text], cols: i64,
+        rows: i64, stderr_path: text) -> Pane:
     val empty = Pane(pane_id: "", title: title, pid: 0, active: false, zoomed: false)
     if session == "" or cmd == "":
         return empty
-    if not _tmux_available():
-        return _smux_spawn(session, title, cmd, args)
+    if not _use_tmux():
+        return _smux_spawn(session, title, cmd, args, cols, rows, stderr_path)
     var argv: [text] = []
     if pane_list(session).len() == 0:
         argv = ["new-session", "-d", "-s", session, "-P", "-F", "#{{pane_id}}"]
     else:
         argv = ["split-window", "-d", "-t", session, "-P", "-F", "#{{pane_id}}"]
-    argv = argv + [cmd] + args
+    if stderr_path != "":
+        argv = argv + ["/bin/sh", "-c", posix_exec_line(cmd, args, stderr_path)]
+    else:
+        argv = argv + [cmd] + args
     val result = sosix_run("tmux", argv)
     if result.exit_code != 0:
         return empty
@@ -438,6 +476,8 @@ fn pane_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
         return empty
     if title != "":
         sosix_run("tmux", ["select-pane", "-t", pane_id, "-T", title])
+    if cols > 0 and rows > 0:
+        val _r = pane_resize(session, pane_id, cols, rows)
     for pane in pane_list(session):
         if pane.pane_id == pane_id:
             return pane
@@ -448,7 +488,8 @@ export pane_parse_line, pane_parse_lines
 export pane_list_argv, pane_select_argv, pane_zoom_argv, pane_kill_argv, pane_capture_argv
 export pane_send_literal_argv, pane_send_enter_argv
 export windows_quote_arg, windows_command_line, windows_spawn_command_line
-export posix_quote_arg, posix_command_line
+export posix_quote_arg, posix_command_line, posix_exec_line
 export pane_backend_name
-export pane_list, pane_select, pane_zoom, pane_spawn, pane_kill, pane_send, pane_capture
+export pane_list, pane_select, pane_zoom, pane_spawn, pane_spawn_at, pane_resize
+export pane_kill, pane_send, pane_capture
 export pane_send_key, pane_key_bytes, pane_key_tmux_name
