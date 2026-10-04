@@ -1,0 +1,106 @@
+"""ITEM4 Mach-O file adapter acceptance. UNRUN; image construction is not Darwin execution."""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{dir_create_all, file_exists, file_read_bytes}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.backend.linker.native_config.{NativeLinkConfig}
+use compiler.backend.linker.macho.native_adapter.{native_macho_plan_v1, native_macho_link_files_v1}
+
+fn item4_macos_native_config() -> NativeLinkConfig:
+    var config = NativeLinkConfig.default()
+    config.allow_duplicate_definitions = false
+    config.allow_cc_fallback = false
+    config.runtime_path = "none"
+    config.extra_flags = ["-platform_version", "macos", "11.0", "11.0", "--macho-signing-identifier", "simple.item4.fixture"]
+    config
+
+fn item4_macos_native_parent() -> Result<text, text>:
+    if not dir_create_all("build"): return Err("Mach-O adapter test directory unavailable")
+    secure_temp_dir("build", "item4-macos-native-")
+
+fn item4_macos_native_read(bytes: [u8], offset: i64, width: i64 = 4) -> i64:
+    val valid = width > 0 and width <= 8 and offset >= 0 and offset <= bytes.len() and width <= bytes.len() - offset
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    var value: i64 = 0
+    for index in 0..width: value = value | ((bytes[offset + index] as i64) << (index * 8))
+    value
+
+fn item4_macos_native_command(bytes: [u8], kind: i64) -> i64:
+    expect(bytes.len() >= 32).to_equal(true)
+    if bytes.len() < 32: return -1
+    val count = item4_macos_native_read(bytes, 16)
+    val size = item4_macos_native_read(bytes, 20)
+    expect(size >= 0 and size <= bytes.len() - 32 and count <= size / 8).to_equal(true)
+    if size < 0 or size > bytes.len() - 32 or count > size / 8: return -1
+    var at: i64 = 32
+    for index in 0..count:
+        if at > 32 + size - 8:
+            expect(false).to_equal(true)
+            return -1
+        val length = item4_macos_native_read(bytes, at + 4)
+        if length < 8 or length > 32 + size - at:
+            expect(false).to_equal(true)
+            return -1
+        if item4_macos_native_read(bytes, at) == kind: return at
+        at = at + length
+    expect(false).to_equal(true)
+    -1
+
+fn item4_macos_native_check_image(bytes: [u8], arm: bool):
+    expect(bytes.len() > 0xc010).to_equal(true)
+    if bytes.len() <= 0xc010: return
+    expect(item4_macos_native_read(bytes, 0)).to_equal(0xfeedfacf)
+    expect(item4_macos_native_read(bytes, 4)).to_equal(if arm: 0x0100000c else: 0x01000007)
+    expect(item4_macos_native_read(bytes, 12)).to_equal(2)
+    expect(item4_macos_native_read(bytes, 24) & 0x200000).to_equal(0x200000)
+    val main = item4_macos_native_command(bytes, 0x80000028)
+    if main < 0: return
+    expect(item4_macos_native_read(bytes, main + 8, 8)).to_equal(0x4000)
+    val dyld = item4_macos_native_command(bytes, 0xe)
+    if dyld < 0: return
+    val signature = item4_macos_native_command(bytes, 0x1d)
+    if signature < 0: return
+    expect(item4_macos_native_read(bytes, signature + 12) > 0).to_equal(true)
+    expect(item4_macos_native_read(bytes, 0xc008, 8)).to_equal(0x100004000)
+
+describe "explicit internal Mach-O native file adapter":
+    it "ITEM4-REQ-006 plans and constructs actual x64 and ARM64 dylib-linked executable images":
+        for arm in [false, true]:
+            step("Plan an explicitly selected Mach-O link")
+            val created = item4_macos_native_parent()
+            expect(created.is_ok()).to_equal(true)
+            if created.is_err(): return
+            val parent = created.unwrap()
+            val output = parent + "/app"
+            val arch = if arm: "aarch64" else: "x86_64"
+            val suffix = if arm: "a64" else: "x64"
+            val plan = native_macho_plan_v1(arch, item4_macos_native_config(), output)
+            expect(plan.is_ok()).to_equal(true)
+            if plan.is_err():
+                expect(dir_remove(parent)).to_equal(true)
+                return
+            expect(plan.unwrap().request.minimum_os).to_equal(0xb0000)
+            expect(plan.unwrap().request.sdk).to_equal(0xb0000)
+            expect(plan.unwrap().request.entry).to_equal("_main")
+            step("Link real object and provider files")
+            val linked = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/hosted_start_{suffix}.o", "test/fixtures/linker/macho/provider_{suffix}.dylib"], [], output)
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_ok():
+                expect(linked.unwrap()).to_equal(output)
+                step("Inspect the published Mach-O commands and bytes")
+                val bytes = file_read_bytes(output)
+                item4_macos_native_check_image(bytes, arm)
+                val provider = item4_macos_native_command(bytes, 0xc)
+                expect(provider >= 0).to_equal(true)
+                val fixups = item4_macos_native_command(bytes, 0x80000022)
+                if fixups >= 0: expect(item4_macos_native_read(bytes, fixups + 20) > 20).to_equal(true)
+            step("Remove owned fixture files")
+            if file_exists(output): expect(file_remove(output)).to_equal(true)
+            expect(dir_remove(parent)).to_equal(true)
+
+    it "ITEM4-REQ-006 rejects default unsupported configuration before input reads":
+        step("Reject unsupported configuration before input reads")
+        val rejected = native_macho_plan_v1("x86_64", NativeLinkConfig.default(), "build/item4-macos-never-created")
+        expect(rejected.is_err()).to_equal(true)
