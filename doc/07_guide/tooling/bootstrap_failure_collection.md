@@ -191,6 +191,45 @@ mass-rename or rewrite existing scripts merely to change their extension.
 
 ## Continue by dependency
 
+### Full bootstrap execution graph
+
+For the full profile, plan the following work for both LLVM and Cranelift.
+The user's selected Windows build/test budget is 80 jobs; divide available
+capacity among concurrent lanes and retain memory-aware admission. Eighty
+code-generation jobs do not imply eighty independent frontend processes.
+
+| Producer ready | Work to collect | Diagnostic continuation |
+|---|---|---|
+| Phase 1 | Whole Phase 1 test inventory | Build Phase 2 after the Phase 1 collection reaches its terminal summary. Record failures without discarding a usable, sanity-tested producer. |
+| Phase 2 plus compile-and-run sanity | Build, enumerate and execute compiler, interpreter and loader test binaries for each backend | Start Phase 3 and early Phase 4 using Phase 2 concurrently with tests. |
+| Phase 3 plus compile-and-run sanity | Whole Phase 3 inventory, including binary tools and library tests | Build Phase 4 using Phase 3 concurrently with tests. |
+| Either Phase 4 product cohort | Product sanity and the whole Phase 4 test inventory | Retain separate Phase-2-produced and Phase-3-produced results; neither substitutes for the other. |
+
+Each backend has three Phase 2 subsystem binaries, six across both backends.
+Use Simple's existing aggregate test generation and registry, enumerate the
+actual cases first, then execute every runnable case. Record discovered,
+executed, passed, failed and blocked counts separately; do not assume a target
+count or substitute tests of a third-party framework. A compiler-only CLI
+cannot stand in for the generated test binary or the full CLI's whole suite.
+
+These are execution requirements, not a claim that every platform wrapper
+already implements this graph. A runner lacking an edge must report that gap
+and use an identity-checked independent diagnostic lane until it is wired.
+Formal qualification, lineage admission and publication still require all
+their evidence; early descendants remain quarantined.
+
+### Windows RC1 completion scope
+
+For the current release, one successful host qualifies the RC: Windows is the
+RC1 host. Complete its requested bootstrap graph, required test inventories
+and local deployment before creating the release tag or publishing. Linux,
+macOS and BSD are RC2 targets; record them as unverified for RC1 rather than
+requiring their success or claiming cross-platform validation. Stop GitHub
+synchronization during the local repair/build cycle. After local success,
+inspect current remote state before the requested branch update, landing and
+tag publication, and check the remote release result. A Windows-only scope
+does not waive failed Windows tests or missing Windows artifacts.
+
 Inventory the requested phases, entries, tool builds, and test shards before
 launching them. Record dependencies and plan concurrency against available
 memory and disk, with explicit per-process timeout budgets. Memory planning
@@ -264,3 +303,14 @@ cycles; do not infer unlimited retries. Never repeat an identical failing
 command without a changed input or concrete diagnostic hypothesis, or replay
 green checks for unchanged identities. Stop at convergence. Completing a finite
 work graph is different from repeatedly restarting the same failed operation.
+
+At the third unresolved cycle, enter or update the canonical bug database with
+the failure group, affected rows, producer/source identities, three attempt
+receipts and reproduction. Record a narrow workaround with its bug link,
+scope, original behavior and removal/retest condition. A workaround may route
+independent diagnostic work around the unavailable operation; it cannot turn
+a failed assertion into PASS, fabricate an artifact, or admit a stale cache.
+If no valid workaround exists, leave that dependency BLOCKED and continue
+other work. Preserve progress rather than rebuilding from Phase 1. A later
+rebuild must revisit the owning bug and verify the intended path before
+removing the workaround; restarting a process does not reset the repair count.
