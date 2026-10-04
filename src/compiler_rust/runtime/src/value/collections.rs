@@ -6195,6 +6195,14 @@ pub extern "C" fn rt_array_fill(array: RuntimeValue, value: RuntimeValue) -> boo
 /// exact diagnostic and exit status. An invalid DESTINATION handle (not an
 /// array) keeps the -1 answer: the compiler only emits this call for an array
 /// receiver, so that case is an ABI misuse rather than a program error.
+///
+/// The count is a RAW `i64`, the contract the C twin (`runtime_native.c`), the
+/// pure-Simple MIR lowering (`lower_unresolved_array_write_span`, `-> i64`) and
+/// `RuntimeFuncSpec` all declare. This twin used to return a TAGGED count, so a
+/// seed-compiled native binary linked against the C twin read `count / 8`
+/// (doc/08_tracking/bug/native_write_span_return_count_decoded_as_tagged_2026-10-05.md);
+/// the seed HIR now types `write_span` as `i64` so the raw count is boxed like
+/// every other raw-`i64` builtin (`len`, `index_of`).
 #[no_mangle]
 pub extern "C" fn rt_array_write_span(
     dst: RuntimeValue,
@@ -6202,11 +6210,11 @@ pub extern "C" fn rt_array_write_span(
     dst_off: i64,
     src_off: i64,
     count: i64,
-) -> RuntimeValue {
+) -> i64 {
     if count <= 0 {
-        return RuntimeValue::from_int(0);
+        return 0;
     }
-    let err = RuntimeValue::from_int(-1);
+    let err = -1;
     let dst_arr = as_typed_ptr!(mut dst, HeapObjectType::Array, RuntimeArray, err);
     let Some(src_arr) = crate::value::heap::get_typed_ptr::<RuntimeArray>(src, HeapObjectType::Array) else {
         write_span_fail("write_span expects array source argument");
@@ -6226,7 +6234,7 @@ pub extern "C" fn rt_array_write_span(
             (*dst_arr).as_mut_slice()[dst_off as usize..(dst_off + count) as usize].copy_from_slice(src_slice);
         }
     }
-    RuntimeValue::from_int(count)
+    count
 }
 
 /// Bounds rule shared with the interpreter kernel

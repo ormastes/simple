@@ -3312,6 +3312,15 @@ impl LlvmBackend {
                         } else if let Some(ret_val) = call_site.try_as_basic_value().basic() {
                             let ret_val = if returns_bool {
                                 self.coerce_value_to_type(ret_val, Some(i64_type.into()), builder)?
+                            } else if rt_name == "rt_array_write_span" && ret_val.is_int_value() {
+                                // Raw i64 count from both runtimes; this result is
+                                // consumed as a tagged value, so tag it like
+                                // `rt_value_int`: `(v << 3) | INT(0)`. Same as the
+                                // Cranelift lowering (closures_structs.rs).
+                                builder
+                                    .build_left_shift(ret_val.into_int_value(), i64_type.const_int(3, false), "ws_count_tag")
+                                    .map_err(|e| crate::error::factory::llvm_build_failed("write_span count tag", &e))?
+                                    .into()
                             } else {
                                 ret_val
                             };

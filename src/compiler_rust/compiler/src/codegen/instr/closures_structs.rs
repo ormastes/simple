@@ -2786,6 +2786,14 @@ fn try_compile_builtin_method_call<M: Module>(
         Ok(Some(receiver_val))
     } else if results.is_empty() {
         Ok(Some(builder.ins().iconst(types::I64, 0)))
+    } else if runtime_func == "rt_array_write_span" {
+        // The runtimes return the RAW i64 count (C twin, pure-Simple lowering and
+        // the seed runtime agree); `write_span` is typed `Any` here, so the
+        // result is consumed as a tagged value. Tag it: `(v << 3) | INT(0)`,
+        // exactly `rt_value_int(v)`.
+        // doc/08_tracking/bug/native_write_span_return_count_decoded_as_tagged_2026-10-05.md
+        let count = super::helpers::safe_extend_to_i64(builder, results[0]);
+        Ok(Some(builder.ins().ishl_imm(count, 3)))
     } else {
         let result = results[0];
         // Extend smaller return types (e.g., I8 from rt_contains) to I64
