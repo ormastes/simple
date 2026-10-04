@@ -3,9 +3,10 @@
 - **Filed:** 2026-10-05
 - **Area:** `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` (composition executor)
   × `src/app/ui_showcase/hosts/host_2d_gpu.spl` (receipt check)
-- **Status:** OPEN (pre-existing; it also reproduces in the interpreter)
+- **Status:** FIXED 2026-10-05 for the engine2d executor and the showcase hosts;
+  other strict consumers listed below remain open
 
-## Repro
+## Repro (before)
 
 ```
 SIMPLE_GPU_BACKEND=vulkan SIMPLE_SHOWCASE_W=3840 SIMPLE_SHOWCASE_H=2160 \
@@ -13,29 +14,51 @@ SIMPLE_SHOWCASE_FRAMES=1 <seed> run src/app/ui_showcase/hosts/main_2d_gpu.spl
 showcase status=fail renderer=vulkan reason=metal-drawir-receipt-rejected
 ```
 
-The result fields, from a temporary print in `_accept_result`:
+The result was valid except for `skipped_command_count=2`, and the skips
+carried no `fallback_reason`. The same scene passed at 320x240.
+
+## Root cause
+
+Neither skip is a render failure. Both are **occlusion culls**:
 
 ```
-sel=gpu fb=false fr= skip=2 rend=59 rb=device_readback h=31 dev=1
-ck=293706980 px=8294400 exp=8294400
+OCCLUDED kind=rect id=sc2d_vulkan_panel_left-scrollbar-track  box=1912,24,8x692
+OCCLUDED kind=rect id=sc2d_vulkan_panel_right-scrollbar-track box=3830,24,8x692
 ```
 
-Everything is valid except `skipped_command_count=2`, and those skips carry
-**no** `fallback_reason`. The same scene at 320x240 renders all commands and
-passes (JIT and interpreter captures are byte-identical). The interpreted 4K
-run failed with this same reason on 2026-10-04 (644 s, 4.3 GB), so this is not
-a JIT regression.
+At 4K all rows fit, so each scrollbar thumb covers its whole track, and
+`_engine2d_draw_ir_render_command_plan`'s exact occlusion proof
+(`prove_occlusion`) correctly culls the invisible track. The executor counts a
+cull in `skipped`, the same convention as damage culling
+(`ops_culled_by_damage`). It never reported that count separately, so the
+strict host receipt (`skipped_command_count != 0`) could not tell a
+pixel-exact cull from a command that failed to render.
 
-## Leads
+The same check also gated the Vulkan window present
+(`engine2d_draw_ir_adv_composition_with_images_present` path): a frame with a
+proven cull was never presented.
 
-In `draw_ir_adv.spl`, the paths that count a skip without naming a kind are
-the text branch (`drawn = false` from `draw_text_with_advances_vulkan_only`,
-~line 2978) and `submit_batch()` returning false (~line 2991). A 4K-only
-failure points at a size-dependent budget, for example the font glyph cap or
-the glass/blur work budget. The fix should make the skip name its reason
-(fail-closed) before deciding whether the budget itself is wrong.
+## Fix
 
-## Measured after the 2026-10-05 JIT fixes
+- `Engine2dDrawIrRenderOutcome.occluded` counts occlusion-culled logical
+  operations at the walker. It is carried through the embedded, direct and
+  offscreen batch paths into `Engine2dDrawIrAdvResult.occluded_command_count`.
+  `skipped_command_count` keeps its meaning (culls included), so every
+  existing consumer sees identical numbers.
+- The two showcase hosts (`host_2d_gpu`, `host_2d_engine`) and the
+  window-present gate now accept a skip only when every skipped operation was
+  occlusion-culled: `skipped_command_count != occluded_command_count`. This
+  is not weaker: any non-occlusion skip is still rejected.
 
-The 4K JIT run finishes in 129 s with 2.6 GB max RSS (previously >900 s in the
-interpreter). Only this receipt check remains.
+## Still open: other strict consumers
+
+These use the same `skipped_command_count != 0` rule and will reject any frame
+with a proven occlusion cull:
+- `src/lib/gc_async_mut/ui/gui_content_renderer.spl:102`
+- `src/lib/gc_async_mut/ui/web_render_pixel_backend.spl:133`
+- `src/lib/editor/70.backend/gui_sdl_bridge.spl:194`
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl`
+  (several sites) and `simple_web_html_layout_renderer.spl:382`
+  (`browser_engine/**`, owned by another lane)
+
+Each should switch to `skipped_command_count != occluded_command_count`.
