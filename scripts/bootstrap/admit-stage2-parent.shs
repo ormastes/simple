@@ -1,17 +1,39 @@
 #!/bin/sh
 
 # Admit an existing pure-Simple runtime as the producer of a fresh Stage2.
-# This helper only validates authority; it never copies or executes the binary.
+# This helper validates authority without compiling or copying a candidate.
+# Deployed-runtime admission executes its existing version check; canonical
+# Phase-2 admission validates the recorded probes and their complete bindings.
 
 bootstrap_stage2_parent_admit() {
     _bspa_candidate=$1
     _bspa_root=$2
     [ -n "$_bspa_candidate" ] && [ -n "$_bspa_root" ] || return 64
     . "$_bspa_root/scripts/lib/simple-runtime-provenance.shs" || return 64
-    simple_runtime_provenance_admits "$_bspa_candidate" "$_bspa_root" || return 64
-    BOOTSTRAP_STAGE2_PARENT_PATH=$SIMPLE_RUNTIME_REAL
-    BOOTSTRAP_STAGE2_PARENT_SHA256=$SIMPLE_RUNTIME_SHA256
-    BOOTSTRAP_STAGE2_PARENT_PROVENANCE=$SIMPLE_RUNTIME_PROVENANCE
+    if simple_runtime_receipt_for "$_bspa_candidate" "$_bspa_root" >/dev/null 2>&1; then
+        # An invalid published runtime receipt must never fall through to a
+        # different authority route.
+        simple_runtime_provenance_admits "$_bspa_candidate" "$_bspa_root" || return 64
+        BOOTSTRAP_STAGE2_PARENT_PATH=$SIMPLE_RUNTIME_REAL
+        BOOTSTRAP_STAGE2_PARENT_SHA256=$SIMPLE_RUNTIME_SHA256
+        BOOTSTRAP_STAGE2_PARENT_PROVENANCE=$SIMPLE_RUNTIME_PROVENANCE
+    else
+        _bspa_real=$(simple_runtime_real_path "$_bspa_candidate") || return 64
+        _bspa_parent_dir=$(dirname -- "$_bspa_real")
+        _bspa_stage2_dir=$(dirname -- "$_bspa_parent_dir")
+        [ "$(basename -- "$_bspa_stage2_dir")" = stage2 ] || return 64
+        _bspa_output=$(dirname -- "$_bspa_stage2_dir")
+        _bspa_validation=$(sh "$_bspa_root/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs" \
+            --validate-parent-only --target=//bootstrap:stage3 \
+            --reason=verify-landed-compiler-fix --parent-compiler="$_bspa_real" \
+            --bootstrap-output="$_bspa_output") || return 64
+        BOOTSTRAP_STAGE2_PARENT_PATH=$(printf '%s\n' "$_bspa_validation" | sed -n 's/^parent_path=//p')
+        BOOTSTRAP_STAGE2_PARENT_SHA256=$(printf '%s\n' "$_bspa_validation" | sed -n 's/^parent_sha256=//p')
+        BOOTSTRAP_STAGE2_PARENT_PROVENANCE=$(printf '%s\n' "$_bspa_validation" | sed -n 's/^parent_admission_receipt=//p')
+        [ "$BOOTSTRAP_STAGE2_PARENT_PATH" = "$_bspa_real" ] &&
+            [ -n "$BOOTSTRAP_STAGE2_PARENT_SHA256" ] &&
+            [ -f "$BOOTSTRAP_STAGE2_PARENT_PROVENANCE" ] || return 64
+    fi
     BOOTSTRAP_STAGE2_PARENT_AUTHORITY=admitted-pure-simple-runtime-stage2-trust-root
     export BOOTSTRAP_STAGE2_PARENT_PATH BOOTSTRAP_STAGE2_PARENT_SHA256
     export BOOTSTRAP_STAGE2_PARENT_PROVENANCE BOOTSTRAP_STAGE2_PARENT_AUTHORITY

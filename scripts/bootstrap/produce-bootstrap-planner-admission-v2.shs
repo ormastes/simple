@@ -69,10 +69,12 @@ adm_fail() {
 
 usage() {
     echo "usage: $0 --target=<//bootstrap:stageN> --reason=<typed-reason> --parent-compiler=<path> [--bootstrap-output=<path>] [--runtime-dir=<path>] [--out=<path>]" >&2
+    echo "       --validate-parent-only checks the complete existing Stage-2 authority and exits before planner compilation" >&2
     echo "       $0 --selftest" >&2
 }
 
 selftest=0
+validate_parent_only=0
 adm_target=''
 adm_reason=''
 adm_parent=''
@@ -90,6 +92,7 @@ adm_bootstrap_output=''
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --selftest) selftest=1 ;;
+        --validate-parent-only) validate_parent_only=1 ;;
         --target=*) adm_target=${1#*=} ;;
         --reason=*) adm_reason=${1#*=} ;;
         --parent-compiler=*) adm_parent=${1#*=} ;;
@@ -206,6 +209,15 @@ bootstrap_stage3_verify_stage2_admission_receipt \
     "$(dirname -- "$admission_receiver")/stage2-receiver.log" "$(dirname -- "$admission_receiver")/stage2-receiver.log" \
     "$root" || adm_fail parent-stage2-admission-invalid
 [ "$(bootstrap_planner_v2_hash_file "$admission_candidate")" = "$parent_sha" ] || adm_fail parent-stage2-admission-candidate-mismatch
+
+# Reuse the entire canonical parent verifier when refreshing a generation from
+# an admitted Phase 2. Do not synthesize a weaker runtime-provenance receipt or
+# compile a planner just to establish the already measured parent authority.
+if [ "$validate_parent_only" -eq 1 ]; then
+    printf 'parent_path=%s\nparent_sha256=%s\nparent_admission_receipt=%s\n' \
+        "$parent_file" "$parent_sha" "$admission_file"
+    exit 0
+fi
 
 planner_source="$adm_root/src/app/cli/bootstrap_reason_planner.spl"
 bootstrap_planner_v2_canonical_file "$planner_source" >/dev/null || adm_fail planner-source-missing
