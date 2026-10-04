@@ -113,3 +113,10 @@ manuals traceable to real `step` flows and generate them through canonical tooli
 when available. Parent owns common plan, CLI/native wrapper integration and final
 review. Source slices can land separately with explicit open gates; no release
 tag, publication or full completion follows from this document.
+
+Semantic identity prerequisite clarification (release `d8680fe6ec21`): the
+declaration semantic issuer boundary mentions the canonical stream only in
+future-integration comments and remains unavailable pending five live
+capabilities. It is not a current production caller or an available manifest
+authority source. Repairing SHA/canonical-stream ownership does not activate
+that boundary or supply the independent manifest trust required above.

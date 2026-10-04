@@ -32,10 +32,28 @@ encoders free, but makes every mutating/transitively mutating semantic operation
 values back into the frame array; keep SHA as a mutable owned field. Preserve
 the frozen wire schema and existing independent digest vectors.
 
-Known production caller: `src/compiler/80.driver/cache/gateway/declaration_semantic_issuer_install_boundary_v1.spl`.
-Migrate its own transitive free writers, not only direct SHA calls. Relevant
-tests: `test/01_unit/compiler/cache/semantic_canonical_stream_v1_spec.spl` and
-`declaration_semantic_issuer_install_boundary_v1_spec.spl` in the same directory.
+Caller-audit correction, release `d8680fe6ec21` (2026-10-04): the prior text
+incorrectly identified `src/compiler/80.driver/cache/gateway/declaration_semantic_issuer_install_boundary_v1.spl`
+as a production caller. Its references are comments describing a future
+integration. The file imports only `ThreePayloadFallbackV1`, reports unavailable
+and returns `AuthorityUnavailable`; it has no stream calls or transitive writers.
+The five retained live capabilities are still required. Do not activate this
+boundary or replace its admission with a digest to manufacture an API migration.
+
+A source-wide search for canonical begin/write/end/finish call syntax outside
+the stream implementation found no production calls at that revision. The
+current migration surface is the core and executable specs, principally
+`test/01_unit/compiler/cache/semantic_canonical_stream_v1_spec.spl`.
+The adjacent `declaration_semantic_issuer_install_boundary_v1_spec.spl` should
+continue asserting the closed boundary. This correction narrows the caller
+claim; it does not dismiss the core owner-transition defect or establish runtime
+evidence. New production integration requires a fresh caller/admission review.
+
+Audit owner/session: `/root/linker_research`, `item4-semantic-issuer-owner-20261004`;
+isolated sparse worktree `C:/dev/simple-item4-semantic-issuer-20261004`, branch
+`work/item4-semantic-issuer-owner-20261004`, base/expected target `d8680fe6ec21`.
+No issuer source changes; core and spec ownership remain with their parallel
+agents. Sidecars N/A; all runtime verification remains UNRUN.
 
 Regression contract: exact domain/schema header bytes and digest vector; scalar
 and nested container digest vectors; byte/item/work budgets cumulative across
