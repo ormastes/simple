@@ -231,3 +231,24 @@ Readtapi accepted both selected targets. These observations establish fixture
 metadata only, not inherited dyld search behavior, Simple execution, or Darwin
 loading/signing qualification. The underlying provider object assembly and
 commands are documented earlier in this recipe.
+
+Additional owner-context fixtures use the same LLVM21.1.8 fixture-directory cwd:
+
+```
+ld64.lld -dylib -arch x86_64 -platform_version macos 11 11 -install_name /usr/lib/libitem4_rpath_peer.dylib -rpath @loader_path/first -reexport_library rpath_leaf_x64.dylib -o rpath_peer_x64.dylib
+ld64.lld -dylib -arch x86_64 -platform_version macos 11 11 -install_name /usr/lib/libitem4_rpath_middle.dylib -reexport_library rpath_leaf_x64.dylib -o rpath_middle_x64.dylib
+llvm-objdump --macho --rpaths rpath_peer_x64.dylib
+llvm-objdump --macho --rpaths rpath_middle_x64.dylib
+llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v5 rpath_inline_v5_interface.tbd -o /tmp/item4-rpath-inline-oracle-20261004.tbd
+llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v5 rpath_inline_cycle_v5_interface.tbd -o /tmp/item4-rpath-inline-cycle-oracle-20261004.tbd
+llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v5 rpath_ancestor_v5_interface.tbd -o /tmp/item4-rpath-ancestor-oracle-20261004.tbd
+```
+
+Each listed command succeeded once. Peer has `@loader_path/first`; Middle has
+no LC_RPATH. The three authored v5 documents preserve explicit inline provider
+priority, a bounded inline cycle, and an ancestor-owned path that must not be
+borrowed by an external Middle. An attempted binary ancestor construction via
+`-reexport_library rpath_middle_x64.dylib` without additional dependency search
+failed to locate Middle's @rpath leaf; it produced no retained ancestor fixture.
+The committed ancestor is explicitly authored TBD metadata, not a claimed
+LLD-generated binary. No Simple or Darwin execution was performed.

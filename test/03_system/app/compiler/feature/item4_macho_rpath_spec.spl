@@ -10,6 +10,9 @@ use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.macho.binary_provider.{macho_read_binary_provider_v1}
 use compiler.backend.linker.macho.tbd_types.{MachOTbdTargetV1, macho_tbd_default_limits_v1}
 use compiler.backend.linker.macho.tbd_reader.{macho_read_tbd_v1}
+use compiler.backend.linker.macho.native_provider_search.{native_macho_load_provider_v2}
+use compiler.backend.linker.macho.provider_closure.{macho_provider_closure_v2}
+use compiler.backend.linker.macho.provider_closure_types.{MachOProviderSourceV1, MachOProviderSearchV1, MachOProviderClientV1, MachOProviderRunPathV1, MachOProviderResolveRequestV2, macho_provider_closure_default_limits_v1}
 
 fn item4_macho_rpath_read(bytes: [u8], at: i64, width: i64 = 4) -> i64:
     val valid = width >= 1 and width <= 8 and at >= 0 and at <= bytes.len() and width <= bytes.len() - at
@@ -20,9 +23,9 @@ fn item4_macho_rpath_read(bytes: [u8], at: i64, width: i64 = 4) -> i64:
     value
 
 fn item4_macho_rpath_cleanup(parent: text):
-    for name in ["app", "root.dylib", "root.tbd", "first/libitem4_rpath_leaf.dylib", "second/libitem4_rpath_leaf.dylib", "x64/libitem4_rpath_leaf.dylib", "a64/libitem4_rpath_leaf.dylib"]:
+    for name in ["app", "root.dylib", "root.tbd", "libitem4_rpath_middle.dylib", "first/libitem4_rpath_leaf.dylib", "second/libitem4_rpath_leaf.dylib", "x64/libitem4_rpath_leaf.dylib", "a64/libitem4_rpath_leaf.dylib", "a/root.dylib", "b/root.dylib", "a/first/libitem4_rpath_leaf.dylib", "b/first/libitem4_rpath_leaf.dylib"]:
         if file_exists(parent + "/" + name): expect(file_remove(parent + "/" + name)).to_equal(true)
-    for name in ["first", "second", "x64", "a64"]:
+    for name in ["first", "second", "x64", "a64", "a/first", "b/first", "a", "b"]:
         if dir_exists(parent + "/" + name): expect(dir_remove(parent + "/" + name)).to_equal(true)
     expect(dir_remove(parent)).to_equal(true)
 
@@ -77,8 +80,121 @@ fn item4_macho_rpath_check(image: [u8], arm: bool):
     expect(bindings).to_equal(1)
 
 describe "Mach-O provider-owned link-time run paths":
-    it "ITEM4-REQ-006 does not borrow executable run paths or bypass a malformed first candidate":
-        for mode in 0..2:
+    it "ITEM4-REQ-006 loads real V2 candidates from tagged paths and refuses invalid provenance":
+        val made = dir_create_all("build")
+        expect(made).to_equal(true)
+        if not made: return
+        val created = secure_temp_dir("build", "item4-macho-v2-path-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val directories = dir_create_all(parent + "/first")
+        expect(directories).to_equal(true)
+        if not directories:
+            item4_macho_rpath_cleanup(parent)
+            return
+        val bytes = file_read_bytes("test/fixtures/linker/macho/rpath_leaf_x64.dylib")
+        val written = file_write_bytes(parent + "/first/libitem4_rpath_leaf.dylib", bytes)
+        expect(written and bytes.len() > 32).to_equal(true)
+        if not written or bytes.len() <= 32:
+            item4_macho_rpath_cleanup(parent)
+            return
+        val paths = ["@loader_path", "@executable_path", "/first", "@loader_path/first", "@executable_path/first", "@loader_path", "first"]
+        for kind in 0..paths.len():
+            val owner = parent + (if kind == 0 or kind == 1 or kind == 5: "/first/root.dylib" else: "/root.dylib")
+            val output = parent + (if kind == 1: "/first/app" else: "/app")
+            val tagged_owner = if kind == 5: parent + "/different.dylib" else: owner
+            val request = MachOProviderResolveRequestV2(install_name: "@rpath/libitem4_rpath_leaf.dylib", requester_path: owner,
+                runpaths: [MachOProviderRunPathV1(path: paths[kind], owner_path: tagged_owner)])
+            val search = MachOProviderSearchV1(sdk_root: if kind == 2: parent else: "", library_paths: [], output_path: output)
+            step("Resolve actual bytes through the owner-tagged native V2 loader")
+            val result = native_macho_load_provider_v2(request, search)
+            if kind >= 5:
+                expect(result.is_err()).to_equal(true)
+                if result.is_err(): expect(result.unwrap_err()).to_contain(if kind == 5: "owner provenance" else: "unsupported")
+            else:
+                expect(result.is_ok()).to_equal(true)
+                if result.is_ok():
+                    expect(result.unwrap().bytes).to_equal(bytes)
+                    expect(result.unwrap().path).to_equal(parent.replace("\\", "/") + "/first/libitem4_rpath_leaf.dylib")
+        item4_macho_rpath_cleanup(parent)
+
+    it "ITEM4-REQ-006 rejects the same install identity resolved to different physical owner candidates":
+        val made = dir_create_all("build")
+        expect(made).to_equal(true)
+        if not made: return
+        val created = secure_temp_dir("build", "item4-macho-owner-conflict-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        for name in ["a/first", "b/first"]:
+            val directories = dir_create_all(parent + "/" + name)
+            expect(directories).to_equal(true)
+            if not directories:
+                item4_macho_rpath_cleanup(parent)
+                return
+        val root = file_read_bytes("test/fixtures/linker/macho/rpath_root_x64.dylib")
+        val peer = file_read_bytes("test/fixtures/linker/macho/rpath_peer_x64.dylib")
+        val leaf = file_read_bytes("test/fixtures/linker/macho/rpath_leaf_x64.dylib")
+        expect(root.len() > 32 and peer.len() > 32 and leaf.len() > 32).to_equal(true)
+        if root.len() <= 32 or peer.len() <= 32 or leaf.len() <= 32:
+            item4_macho_rpath_cleanup(parent)
+            return
+        val roots = [root, peer]
+        val directories = ["a", "b"]
+        for index in 0..2:
+            val root_written = file_write_bytes(parent + "/" + directories[index] + "/root.dylib", roots[index])
+            val leaf_written = file_write_bytes(parent + "/" + directories[index] + "/first/libitem4_rpath_leaf.dylib", leaf)
+            expect(root_written and leaf_written).to_equal(true)
+            if not root_written or not leaf_written:
+                item4_macho_rpath_cleanup(parent)
+                return
+        val sentinel: [u8] = [17, 83, 49, 2]
+        val output = parent + "/app"
+        val stored = file_write_bytes(output, sentinel)
+        expect(stored).to_equal(true)
+        if not stored:
+            item4_macho_rpath_cleanup(parent)
+            return
+        var config = NativeLinkConfig.default()
+        config.runtime_path = "none"
+        config.allow_cc_fallback = false
+        config.extra_flags = ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "item4.rpath"]
+        val plan = native_macho_plan_v1("x86_64", config, output)
+        expect(plan.is_ok()).to_equal(true)
+        if plan.is_ok():
+            step("Resolve both real owners rather than reusing an install-name-only external cache")
+            val linked = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/hosted_start_x64.o",
+                parent + "/a/root.dylib", parent + "/b/root.dylib"], [], output)
+            expect(linked.is_err()).to_equal(true)
+            if linked.is_err(): expect(linked.unwrap_err()).to_contain("ambiguous @rpath")
+            expect(file_read_bytes(output)).to_equal(sentinel)
+        item4_macho_rpath_cleanup(parent)
+
+    it "ITEM4-REQ-006 terminates inline owner-context cycles through the production V2 closure":
+        for arm in [false, true]:
+            val path = "test/fixtures/linker/macho/rpath_inline_cycle_v5_interface.tbd"
+            val source = MachOProviderSourceV1(path: path, bytes: file_read_bytes(path))
+            val target = MachOTbdTargetV1(arch: if arm: RelocArch.AArch64 else: RelocArch.X86_64, platform: 1)
+            val search = MachOProviderSearchV1(sdk_root: "", library_paths: [], output_path: "/tmp/item4-app")
+            val client = MachOProviderClientV1(output_install_name: search.output_path, client_name: nil, parent_umbrella: nil)
+            step("Resolve explicit inline providers without borrowing absent external owner paths")
+            val built = macho_provider_closure_v2([source], target, client, search, native_macho_load_provider_v2,
+                macho_provider_closure_default_limits_v1())
+            expect(built.is_ok()).to_equal(true)
+            if built.is_err(): return
+            var closure = built.unwrap()
+            val found = closure.resolve_import("_helper")
+            expect(found.is_ok()).to_equal(true)
+            if found.is_ok():
+                expect(found.unwrap().is_some()).to_equal(true)
+                if found.unwrap().is_some(): expect(found.unwrap().unwrap().root_ordinal).to_equal(1)
+            val absent = closure.resolve_import("_not_exported")
+            expect(absent.is_ok()).to_equal(true)
+            if absent.is_ok(): expect(absent.unwrap().is_none()).to_equal(true)
+
+    it "ITEM4-REQ-006 does not borrow executable or ancestor run paths or bypass a malformed first candidate":
+        for mode in 0..3:
             val made = dir_create_all("build")
             expect(made).to_equal(true)
             if not made: return
@@ -86,15 +202,15 @@ describe "Mach-O provider-owned link-time run paths":
             expect(created.is_ok()).to_equal(true)
             if created.is_err(): return
             val parent = created.unwrap()
-            val directory = if mode == 0: "x64" else: "second"
+            val directory = if mode == 0: "x64" else: (if mode == 1: "second" else: "first")
             val directories = dir_create_all(parent + "/" + directory)
             expect(directories).to_equal(true)
             if not directories:
                 item4_macho_rpath_cleanup(parent)
                 return
-            val root = file_read_bytes("test/fixtures/linker/macho/rpath_root_x64.dylib")
+            val root = file_read_bytes(if mode == 2: "test/fixtures/linker/macho/rpath_ancestor_v5_interface.tbd" else: "test/fixtures/linker/macho/rpath_root_x64.dylib")
             val leaf = file_read_bytes("test/fixtures/linker/macho/rpath_leaf_x64.dylib")
-            val root_path = parent + "/root.dylib"
+            val root_path = parent + (if mode == 2: "/root.tbd" else: "/root.dylib")
             val output = parent + "/app"
             val sentinel: [u8] = [51, 19, 83, 7]
             val root_written = file_write_bytes(root_path, root)
@@ -105,6 +221,13 @@ describe "Mach-O provider-owned link-time run paths":
             if not staged:
                 item4_macho_rpath_cleanup(parent)
                 return
+            if mode == 2:
+                val middle = file_read_bytes("test/fixtures/linker/macho/rpath_middle_x64.dylib")
+                val middle_written = file_write_bytes(parent + "/libitem4_rpath_middle.dylib", middle)
+                expect(middle_written and middle.len() > 32).to_equal(true)
+                if not middle_written or middle.len() <= 32:
+                    item4_macho_rpath_cleanup(parent)
+                    return
             if mode == 1:
                 val first_dir = dir_create_all(parent + "/first")
                 expect(first_dir).to_equal(true)
@@ -119,6 +242,7 @@ describe "Mach-O provider-owned link-time run paths":
             var config = NativeLinkConfig.default()
             config.runtime_path = "none"
             config.allow_cc_fallback = false
+            if mode == 2: config.library_paths = [parent]
             config.extra_flags = ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "item4.rpath",
                 "-rpath", "@executable_path/x64"]
             val plan = native_macho_plan_v1("x86_64", config, output)
@@ -188,7 +312,7 @@ describe "Mach-O provider-owned link-time run paths":
                 expect(rejected.is_err()).to_equal(true)
 
     it "ITEM4-REQ-006 resolves real binary and target-scoped TBD run paths through their owner":
-        for variant in 0..4:
+        for variant in 0..6:
             val arm = variant % 2 == 1
             val typed = variant >= 2
             val suffix = if arm: "a64" else: "x64"
@@ -199,14 +323,16 @@ describe "Mach-O provider-owned link-time run paths":
             expect(created.is_ok()).to_equal(true)
             if created.is_err(): return
             val parent = created.unwrap()
-            val directory = if typed: (if arm: "a64" else: "x64") else: "first"
+            val directory = if typed and variant < 4: (if arm: "a64" else: "x64") else: "first"
             val directories = dir_create_all(parent + "/" + directory)
             expect(directories).to_equal(true)
             if not directories:
                 item4_macho_rpath_cleanup(parent)
                 return
             step("Stage actual providers with owner-relative binary or selected TBD run paths")
-            val root = file_read_bytes(if typed: "test/fixtures/linker/macho/rpath_root_v5_interface.tbd" else: "test/fixtures/linker/macho/rpath_root_{suffix}.dylib")
+            val root_path_fixture = if variant >= 4: "test/fixtures/linker/macho/rpath_inline_v5_interface.tbd" else:
+                (if typed: "test/fixtures/linker/macho/rpath_root_v5_interface.tbd" else: "test/fixtures/linker/macho/rpath_root_{suffix}.dylib")
+            val root = file_read_bytes(root_path_fixture)
             val leaf = file_read_bytes("test/fixtures/linker/macho/rpath_leaf_{suffix}.dylib")
             expect(root.len() > 32 and leaf.len() > 32).to_equal(true)
             if root.len() <= 32 or leaf.len() <= 32:
@@ -214,7 +340,8 @@ describe "Mach-O provider-owned link-time run paths":
                 return
             val root_path = parent + (if typed: "/root.tbd" else: "/root.dylib")
             val root_written = file_write_bytes(root_path, root)
-            val leaf_written = file_write_bytes(parent + "/" + directory + "/libitem4_rpath_leaf.dylib", leaf)
+            # Explicit inline declarations win even when an external candidate is malformed.
+            val leaf_written = file_write_bytes(parent + "/" + directory + "/libitem4_rpath_leaf.dylib", if variant >= 4: [1u8, 2u8, 3u8, 4u8] else: leaf)
             expect(root_written and leaf_written).to_equal(true)
             if not root_written or not leaf_written:
                 item4_macho_rpath_cleanup(parent)
