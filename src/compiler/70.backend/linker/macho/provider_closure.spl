@@ -17,6 +17,16 @@ fn macho_closure_client_leaf_v1(path: text) -> text:
             break
     leaf[0:end]
 
+fn macho_closure_legacy_leaf_v1(path: text) -> text:
+    val parts = path.split("/")
+    parts[parts.len() - 1]
+
+fn macho_closure_legacy_stem_v1(path: text) -> text:
+    val leaf = macho_closure_legacy_leaf_v1(path)
+    for index in 0..leaf.len():
+        if leaf.byte_at(index) == 46 or leaf.byte_at(index) == 95: return leaf[0:index]
+    leaf
+
 fn macho_closure_client_v1(provider: MachOProviderV1, client: MachOProviderClientV1) -> Result<bool, text>:
     if provider.allowable_clients.len() == 0 and provider.parent_umbrella.is_none(): return Ok(true)
     val leaf = macho_closure_client_leaf_v1(client.output_install_name)
@@ -137,7 +147,8 @@ class MachOProviderClosureV1:
             node.provider = Some(macho_tbd_library_provider_v1(library, self.target, true)?)
         val provider = node.provider.unwrap()
         if provider.exports.len() > self.limits.max_symbols - self.symbol_count: return Err("Mach-O closure symbol quota exceeded")
-        self.charge(1 + provider.exports.len() * 2 + provider.dependencies.len() + provider.rpaths.len())?
+        self.charge(1 + provider.exports.len() * 2 + provider.dependencies.len() + provider.rpaths.len() +
+            provider.sub_umbrellas.len() + provider.sub_libraries.len())?
         macho_validate_provider_v1(provider, self.target.arch)?
         if provider.platform != self.target.platform: return Err("Mach-O closure provider platform mismatch")
         var indices: {text: i64} = {}
@@ -172,17 +183,43 @@ class MachOProviderClosureV1:
             for symbol in provider.exports:
                 self.charge(1)?
                 if (symbol.flags & 8) != 0: aliases[symbol.library_ordinal] = true
+            var umbrellas: {text: bool} = {}
+            var libraries: {text: bool} = {}
+            if not provider.no_reexported_dylibs:
+                for name in provider.sub_umbrellas:
+                    self.charge(1)?
+                    umbrellas[name] = true
+                for name in provider.sub_libraries:
+                    self.charge(1)?
+                    libraries[name] = true
+            val infer = provider.infer_subframeworks and not provider.no_reexported_dylibs and node.source_path.contains("/")
+            val parent_name = macho_closure_legacy_leaf_v1(node.source_path)
             var ordinal: i64 = 0
             for dependency in provider.dependencies:
                 self.charge(1)?
                 ordinal = ordinal + 1
-                val needed = dependency.command == 0x8000001f or aliases.has(ordinal)
-                if needed:
+                val ordinary = dependency.command == 12 or dependency.command == 0x80000018
+                var whole = dependency.command == 0x8000001f
+                if ordinary and not provider.no_reexported_dylibs:
+                    if dependency.install_name.contains("/") and umbrellas.has(macho_closure_legacy_leaf_v1(dependency.install_name)):
+                        whole = true
+                    if libraries.has(macho_closure_legacy_stem_v1(dependency.install_name)): whole = true
+                if whole or aliases.has(ordinal) or (ordinary and infer):
                     val child = self.dependency(dependency.install_name, node.source_path, provider.rpaths)?
+                    if ordinary and infer and not whole:
+                        # Probe metadata only. A nonmatching ordinary dependency
+                        # must not become active or acquire deployment checks.
+                        val candidate = self.nodes[child]
+                        var parent: Option<text> = nil
+                        if val library = candidate.library: parent = library.parent_umbrella
+                        elif val binary = candidate.provider: parent = binary.parent_umbrella
+                        if val umbrella = parent:
+                            if umbrella == parent_name: whole = true
+                    if not whole and not aliases.has(ordinal): continue
                     val child_provider = self.provider(child)?
                     if child_provider.current_version < dependency.compatibility_version:
                         return Err("Mach-O closure incompatible dependency version")
-                    self.add_edge(index, child, ordinal, dependency.command == 0x8000001f)?
+                    self.add_edge(index, child, ordinal, whole)?
         Ok(true)
 
     fn direct_providers() -> [MachOProviderV1]:

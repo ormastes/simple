@@ -252,3 +252,109 @@ borrowed by an external Middle. An attempted binary ancestor construction via
 failed to locate Middle's @rpath leaf; it produced no retained ancestor fixture.
 The committed ancestor is explicitly authored TBD metadata, not a claimed
 LLD-generated binary. No Simple or Darwin execution was performed.
+
+## Legacy reexport selector fixtures (2026-10-04)
+
+These are real Ubuntu LLVM21.1.8 binaries plus explicitly documented command
+mutations. Commands ran from this fixture directory. For each pair
+`SUFFIX=x64, ARCH=x86_64` and `SUFFIX=a64, ARCH=arm64`:
+
+```
+ld64.lld -dylib -arch ARCH -platform_version macos 11 11 -install_name /usr/lib/liblegacy.1.dylib -o legacy_leaf_SUFFIX.dylib provider_SUFFIX.o
+ld64.lld -dylib -arch ARCH -platform_version macos 11 11 -install_name /usr/lib/liblegacy_root.dylib -needed_library legacy_leaf_SUFFIX.dylib -o legacy_ordinary_SUFFIX.dylib
+ld64.lld -dylib -arch ARCH -platform_version macos 11 11 -install_name /System/Library/Frameworks/Leaf.framework/Leaf -o legacy_framework_leaf_SUFFIX.dylib provider_SUFFIX.o
+ld64.lld -dylib -arch ARCH -platform_version macos 11 11 -install_name /usr/lib/liblegacy_root.dylib -needed_library legacy_framework_leaf_SUFFIX.dylib -o legacy_framework_ordinary_SUFFIX.dylib
+```
+
+`ARCH` and `SUFFIX` above are explicit substitution labels, not literal shell
+arguments. The paired provider assembly/object provenance appears earlier.
+The roots contain real LC_LOAD_DYLIB commands and header flags0x100085.
+A24-byte LC_UUID command is replaced in-place by LC_SUB_LIBRARY0x15 with
+string `liblegacy`, or LC_SUB_UMBRELLA0x13 with `Leaf`. Set the command's
+relative string offset to12, zero the remaining payload and copy the ASCII name
+plus NUL. `legacy_{library,umbrella}_suppressed_SUFFIX.dylib` preserves the
+original header flag. `legacy_{library,umbrella}_SUFFIX.dylib` clears only
+MH_NO_REEXPORTED_DYLIBS0x100000. Original dependency commands/ordinals stay intact.
+
+Both CPUs' active variants were independently decoded once by:
+
+```
+llvm-objdump --macho --private-headers legacy_library_x64.dylib legacy_library_a64.dylib legacy_umbrella_x64.dylib legacy_umbrella_a64.dylib
+```
+
+Observed command payloads were `sub_library liblegacy (offset 12)` and
+`sub_umbrella Leaf (offset 12)`, each cmdsize24. These are documented mutations,
+not a claim LLD emitted those legacy commands itself.
+
+`legacy_modern_hidden_SUFFIX.dylib` derives from the ordinary library root by
+clearing only0x100000. `legacy_classic_root_SUFFIX.dylib` additionally replaces
+its empty48-byte LC_DYLD_INFO_ONLY command with a40-byte LC_NOTE named
+`item4classic`, offset0/size0. Move the remaining load commands left8 bytes,
+decrease sizeofcmds by8, and zero the vacated8 header bytes; ncmds and all
+section/file addresses remain unchanged. This removes the modern export source
+while preserving the existing validated symbol-table fallback. An initial
+48-byte LC_NOTE attempt was rejected by llvm-objdump for incorrect cmdsize;
+only the corrected40-byte form is committed.
+
+`legacy_child_OldRoot_SUFFIX.dylib` and `legacy_child_Different_SUFFIX.dylib`
+derive from the corresponding real leaf by replacing UUID24 with
+LC_SUB_FRAMEWORK0x12, offset12, and the stated NUL-terminated umbrella name.
+The test's macOS99 child is a separate guarded runtime mutation of the actual
+LC_BUILD_VERSION minimum/SDK words; the committed child remains macOS11.
+
+```
+llvm-objdump --macho --private-headers legacy_classic_root_x64.dylib legacy_classic_root_a64.dylib legacy_child_OldRoot_x64.dylib legacy_child_OldRoot_a64.dylib
+```
+
+The corrected command observation succeeded, reporting LC_NOTE size40 and
+`umbrella OldRoot (offset 12)`. No successful observation was rerun.
+
+The classic root with its own exports starts with this additional real link:
+
+```
+ld64.lld -dylib -arch x86_64 -platform_version macos 11 11 -install_name /usr/lib/liblegacy_root.dylib -needed_library legacy_leaf_x64.dylib -o legacy_classic_own_x64.dylib provider_x64.o
+```
+
+Apply the same suppression-bit clear and corrected LC_NOTE conversion above.
+Independent `llvm-nm --defined-only --extern-only legacy_classic_own_x64.dylib`
+then reported `_helper` at0x318 and `_value` at0x1000. Tests still call the actual
+validating binary reader before relying on the fallback exports.
+
+Signatures are not regenerated after mutations. These fixtures establish
+reader/graph byte contracts only: no code-signing validity, Darwin loadability,
+Simple execution, or full SDK completion is claimed.
+
+Final all-match and modes fixtures derive from the already validated binaries:
+`legacy_all_matches_x64.dylib` copies the LC_LOAD_DYLIB command in
+`legacy_library_x64.dylib` into verified all-zero header padding before byte4096,
+changes the copied install name to `/usr/lib/liblegacy.2.dylib`, and increments
+ncmds/sizeofcmds by1/the copied command size. Existing offsets do not move.
+`legacy_empty_first_x64.dylib` copies the ordinary no-export root and changes
+only LC_ID_DYLIB to `/usr/lib/liblegacy.1.dylib`; its original header suppression
+and modern format keep its own ordinary dependency hidden.
+`legacy_second_x64.dylib` changes only the real leaf's LC_ID_DYLIB to
+`/usr/lib/liblegacy.2.dylib`. Command-relative string capacity and zero padding
+were checked before each mutation.
+
+```
+llvm-objdump --macho --dylibs-used legacy_all_matches_x64.dylib
+llvm-nm --defined-only --extern-only legacy_empty_first_x64.dylib legacy_second_x64.dylib
+```
+
+The first independently reports root then .1 then .2 install identities.
+The first provider has no symbols; the second exports `_helper`0x2e0 and
+`_value`0x1000. Thus the native image test cannot succeed with only the first
+matching edge.
+
+The separate modes lane uses a modern root with its own exports:
+
+```
+ld64.lld -dylib -arch x86_64 -platform_version macos 11 11 -install_name /usr/lib/liblegacy_root.dylib -needed_library legacy_leaf_x64.dylib -o legacy_unmatched_own_x64.dylib provider_x64.o
+```
+
+Clear0x100000 and replace UUID24 with LC_SUB_LIBRARY offset12/name`unmatched`,
+retaining DYLD_INFO. Unlike the classic fixture, this cannot infer an ordinary
+child, allowing an absent unmatched dependency to remain genuinely unvisited.
+Independent `llvm-objdump --macho --private-headers legacy_unmatched_own_x64.dylib`
+reported `sub_library unmatched (offset 12)` and cmdsize24. No completed
+external validation command was repeated; all Simple execution stays UNRUN.
