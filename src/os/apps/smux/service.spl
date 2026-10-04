@@ -8,7 +8,8 @@ use os.apps.smux.contract.{
     MuxSession, MuxWindow, MuxPane, MuxCapture, MuxClientAttachment,
     SmuxMetrics, MuxBackendKind
 }
-use os.apps.smux.vt_screen.{VtScreen, vt_new, vt_feed, vt_resize, vt_text}
+use os.apps.smux.vt_screen.{VtScreen, vt_new, vt_feed, vt_resize, vt_text,
+    vt_styled_text, vt_replies, vt_clear_replies, vt_bracketed_paste}
 
 # Lines of child output a pane keeps. Large enough for a full agent screen
 # (the caret workbench's right-hand region), small enough to stay cheap to
@@ -82,6 +83,26 @@ class PaneRecord:
         if max_lines > 0 and lines.len() > max_lines:
             lines = lines[lines.len() - max_lines:]
         return MuxCapture.create(me.pane.id, lines.join("\n"), lines.len())
+
+    # Rows of the PTY screen with styling as ANSI SGR runs (the piped tail has
+    # no styling, so it is returned plain).
+    me styled_capture(max_lines: int) -> text:
+        var lines = if me.pty_fd >= 0: vt_styled_text(me.screen).split("\n") else: me.tail.split("\n")
+        while lines.len() > 0 and lines[lines.len() - 1].trim() == "":
+            lines = lines[0:lines.len() - 1]
+        if max_lines > 0 and lines.len() > max_lines:
+            lines = lines[lines.len() - max_lines:]
+        return lines.join("\n")
+
+    # Query replies the screen owes the child (DSR, DA, colours, ...).
+    me replies() -> text:
+        return vt_replies(me.screen)
+
+    me without_replies() -> PaneRecord:
+        return PaneRecord(pane: me.pane, focus: me.focus, child_pid: me.child_pid, pty_fd: me.pty_fd, tail: me.tail, screen: vt_clear_replies(me.screen))
+
+    me bracketed_paste() -> bool:
+        return me.pty_fd >= 0 and vt_bracketed_paste(me.screen)
 
     static fn create(p: MuxPane) -> PaneRecord:
         return PaneRecord(pane: p, focus: false, child_pid: -1, pty_fd: -1, tail: "", screen: vt_new(p.rows, p.cols))

@@ -6,21 +6,69 @@
 # grid of cells instead, so a capture is what the program currently shows.
 #
 # A cell holds one character (not one byte), so box drawing and other
-# multi-byte UTF-8 is never cut in half.
+# multi-byte UTF-8 is never cut in half. A wide character (CJK, emoji) takes two
+# cells: the character, then an empty continuation cell ("").
 #
 # Covered: printable text with wrap and scroll, CR/LF/BS/TAB, save/restore
 # cursor (ESC 7/8, CSI s/u), and the CSI layout sequences ConPTY and common TUIs
 # emit — CUP/HVP (H f), CUU/CUD/CUF/CUB (A B C D), CHA (G), VPA (d), EL (K),
 # ED (J), ECH (X), ICH/DCH (@ P), IL/DL (L M), SU/SD (S T) and the scroll
-# region (r). Colours (m), modes (h l) and OSC titles are consumed and dropped;
-# anything else is ignored rather than printed as garbage.
+# region (r); synchronized output (CSI ?2026 h/l, so a capture never shows a
+# half-drawn frame); the alternate screen (?1049 / ?1047 / ?47); cursor
+# visibility (?25); bracketed paste (?2004); and SGR attributes (m) kept per
+# cell for the styled capture.
+#
+# Terminal queries a TUI sends at startup get a pending reply (`vt_replies`)
+# that the owner writes back to the child: DSR (CSI 5n / 6n), DA1 (CSI c),
+# DA2 (CSI > c), XTVERSION (CSI > q), DECRQM (CSI ? Pm $ p), window size
+# (CSI 18 t), colour scheme (CSI ? 996 n) and OSC 10/11 colour queries. The
+# kitty keyboard query (CSI ? u) is deliberately left unanswered: silence is
+# the "not supported" answer, so the child keeps sending plain keys (a raw ESC
+# stays ESC) instead of CSI-u encodings.
+#
+# OSC titles/hyperlinks, DCS/APC strings, charset designators and anything else
+# are consumed and dropped rather than printed as garbage.
 #
 # Pure: state in, state out. No I/O.
+
+# The SGR state applied to the next printed character.
+struct VtPen:
+    bold: bool
+    dim: bool
+    italic: bool
+    underline: bool
+    reverse: bool
+    # "" default, else the SGR parameters selecting it ("31", "38;5;196",
+    # "38;2;r;g;b"; the same with 4x/48 for the background).
+    fg: text
+    bg: text
+
+# Terminal modes and the parser side-channels.
+struct VtModes:
+    cursor_visible: bool
+    bracketed: bool
+    pen: VtPen
+    # Canonical SGR parameters of `pen` ("" = default), stored in each cell.
+    pen_sgr: text
+    # Bytes owed to the child in answer to queries, oldest first.
+    replies: text
+    # Leading bytes of the OSC string being parsed (enough to classify it).
+    osc: text
+
+# The main screen while the alternate screen is shown.
+struct VtAlt:
+    on: bool
+    cells: [[text]]
+    attrs: [[text]]
+    row: i64
+    col: i64
 
 struct VtScreen:
     rows: i64
     cols: i64
     cells: [[text]]
+    # Per-cell canonical SGR parameters, parallel to `cells` ("" = default).
+    attrs: [[text]]
     row: i64
     col: i64
     saved_row: i64
@@ -29,28 +77,48 @@ struct VtScreen:
     top: i64
     bottom: i64
     # Escape-parser state, kept so a sequence split across two reads still
-    # parses: 0 text, 1 after ESC, 2 CSI, 3 OSC.
+    # parses: 0 text, 1 after ESC, 2 CSI, 3 OSC, 4 DCS/APC/PM/SOS string,
+    # 5 one designator byte to skip (ESC ( B and friends).
     mode: i64
     params: text
+    # Synchronized output (DEC mode 2026): while a program holds the mode set,
+    # this is the last complete frame and captures show it instead of the
+    # half-drawn `cells`. Empty when no frame is being drawn.
+    frozen: [[text]]
+    frozen_attrs: [[text]]
+    modes: VtModes
+    alt: VtAlt
 
-fn _blank_row(cols: i64) -> [text]:
+fn _blank_row(cols: i64, blank: text) -> [text]:
     var r: [text] = []
     var i = 0
     while i < cols:
-        r.push(" ")
+        r.push(blank)
         i = i + 1
     r
+
+fn _blank_grid(rows: i64, cols: i64, blank: text) -> [[text]]:
+    var g: [[text]] = []
+    var i = 0
+    while i < rows:
+        g.push(_blank_row(cols, blank))
+        i = i + 1
+    g
+
+fn _pen_default() -> VtPen:
+    VtPen(bold: false, dim: false, italic: false, underline: false,
+        reverse: false, fg: "", bg: "")
 
 pub fn vt_new(rows: i64, cols: i64) -> VtScreen:
     val r = if rows > 0: rows else: 24
     val c = if cols > 0: cols else: 80
-    var cells: [[text]] = []
-    var i = 0
-    while i < r:
-        cells.push(_blank_row(c))
-        i = i + 1
-    VtScreen(rows: r, cols: c, cells: cells, row: 0, col: 0, saved_row: 0,
-        saved_col: 0, top: 0, bottom: r - 1, mode: 0, params: "")
+    val modes = VtModes(cursor_visible: true, bracketed: false,
+        pen: _pen_default(), pen_sgr: "", replies: "", osc: "")
+    val alt = VtAlt(on: false, cells: [], attrs: [], row: 0, col: 0)
+    VtScreen(rows: r, cols: c, cells: _blank_grid(r, c, " "),
+        attrs: _blank_grid(r, c, ""), row: 0, col: 0, saved_row: 0,
+        saved_col: 0, top: 0, bottom: r - 1, mode: 0, params: "", frozen: [],
+        frozen_attrs: [], modes: modes, alt: alt)
 
 fn _clamp(v: i64, lo: i64, hi: i64) -> i64:
     if v < lo:
@@ -72,94 +140,353 @@ fn _param(params: text, n: i64, fallback: i64) -> i64:
         return fallback
     v
 
-fn _copy(s: VtScreen, cells: [[text]], row: i64, col: i64) -> VtScreen:
-    VtScreen(rows: s.rows, cols: s.cols, cells: cells, row: row, col: col,
-        saved_row: s.saved_row, saved_col: s.saved_col, top: s.top,
-        bottom: s.bottom, mode: s.mode, params: s.params)
+fn _at(s0: VtScreen, row: i64, col: i64) -> VtScreen:
+    var s = s0
+    s.row = _clamp(row, 0, s.rows - 1)
+    s.col = _clamp(col, 0, s.cols)
+    s
 
-fn _at(s: VtScreen, row: i64, col: i64) -> VtScreen:
-    _copy(s, s.cells, _clamp(row, 0, s.rows - 1), _clamp(col, 0, s.cols))
+fn _with_parser(s0: VtScreen, mode: i64, params: text) -> VtScreen:
+    var s = s0
+    s.mode = mode
+    s.params = params
+    s
 
-fn _with_parser(s: VtScreen, mode: i64, params: text) -> VtScreen:
-    VtScreen(rows: s.rows, cols: s.cols, cells: s.cells, row: s.row, col: s.col,
-        saved_row: s.saved_row, saved_col: s.saved_col, top: s.top,
-        bottom: s.bottom, mode: mode, params: params)
+fn _reply(s0: VtScreen, bytes: text) -> VtScreen:
+    var s = s0
+    var m = s.modes
+    m.replies = m.replies + bytes
+    s.modes = m
+    s
 
-fn _erase(cells: [[text]], cols: i64, row: i64, from: i64, to: i64) -> [[text]]:
-    var out = cells
+fn _erase(grid: [[text]], cols: i64, row: i64, from: i64, to: i64, blank: text) -> [[text]]:
+    var out = grid
     var line = out[row]
     var c = _clamp(from, 0, cols)
     val end = _clamp(to, 0, cols)
     while c < end:
-        line[c] = " "
+        line[c] = blank
         c = c + 1
     out[row] = line
     out
 
+fn _erase_both(s0: VtScreen, row: i64, from: i64, to: i64) -> VtScreen:
+    var s = s0
+    s.cells = _erase(s.cells, s.cols, row, from, to, " ")
+    s.attrs = _erase(s.attrs, s.cols, row, from, to, "")
+    s
+
 # Removes `n` rows at `at` inside the scroll region and opens blank rows at the
 # region bottom (scroll up / delete lines).
-fn _pull_rows(s: VtScreen, at: i64, n: i64) -> [[text]]:
-    var out = s.cells
+fn _pull_rows(grid: [[text]], bottom: i64, at: i64, n: i64, cols: i64, blank: text) -> [[text]]:
+    var out = grid
     var k = 0
     while k < n:
         var r = at
-        while r < s.bottom:
+        while r < bottom:
             out[r] = out[r + 1]
             r = r + 1
-        out[s.bottom] = _blank_row(s.cols)
+        out[bottom] = _blank_row(cols, blank)
         k = k + 1
     out
 
 # Opens `n` blank rows at `at`, pushing rows below it off the region bottom
 # (scroll down / insert lines).
-fn _push_rows(s: VtScreen, at: i64, n: i64) -> [[text]]:
-    var out = s.cells
+fn _push_rows(grid: [[text]], bottom: i64, at: i64, n: i64, cols: i64, blank: text) -> [[text]]:
+    var out = grid
     var k = 0
     while k < n:
-        var r = s.bottom
+        var r = bottom
         while r > at:
             out[r] = out[r - 1]
             r = r - 1
-        out[at] = _blank_row(s.cols)
+        out[at] = _blank_row(cols, blank)
         k = k + 1
     out
 
+fn _scroll_up(s0: VtScreen, at: i64, n: i64) -> VtScreen:
+    var s = s0
+    s.cells = _pull_rows(s.cells, s.bottom, at, n, s.cols, " ")
+    s.attrs = _pull_rows(s.attrs, s.bottom, at, n, s.cols, "")
+    s
+
+fn _scroll_down(s0: VtScreen, at: i64, n: i64) -> VtScreen:
+    var s = s0
+    s.cells = _push_rows(s.cells, s.bottom, at, n, s.cols, " ")
+    s.attrs = _push_rows(s.attrs, s.bottom, at, n, s.cols, "")
+    s
+
 fn _newline(s: VtScreen) -> VtScreen:
     if s.row == s.bottom:
-        return _copy(s, _pull_rows(s, s.top, 1), s.row, s.col)
+        return _scroll_up(s, s.top, 1)
     _at(s, s.row + 1, s.col)
+
+fn _in(ch: text, lo: text, hi: text) -> bool:
+    ch >= lo and ch <= hi
+
+# Cells a character occupies: 0 for combining marks / variation selectors /
+# zero-width joiners, 2 for East Asian wide and emoji, else 1.
+fn _char_width(ch: text) -> i64:
+    if ch < "\u{300}":
+        return 1
+    if _in(ch, "\u{300}", "\u{36F}") or _in(ch, "\u{200B}", "\u{200F}") or _in(ch, "\u{FE00}", "\u{FE0F}"):
+        return 0
+    if ch < "\u{1100}":
+        return 1
+    if _in(ch, "\u{1100}", "\u{115F}") or _in(ch, "\u{2E80}", "\u{303E}") or _in(ch, "\u{3040}", "\u{A4CF}"):
+        return 2
+    if _in(ch, "\u{AC00}", "\u{D7A3}") or _in(ch, "\u{F900}", "\u{FAFF}") or _in(ch, "\u{FE30}", "\u{FE4F}"):
+        return 2
+    if _in(ch, "\u{FF00}", "\u{FF60}") or _in(ch, "\u{FFE0}", "\u{FFE6}"):
+        return 2
+    if _in(ch, "\u{1F300}", "\u{1F64F}") or _in(ch, "\u{1F900}", "\u{1F9FF}") or _in(ch, "\u{20000}", "\u{3FFFD}"):
+        return 2
+    1
 
 fn _put_char(s0: VtScreen, ch: text) -> VtScreen:
     var s = s0
-    if s.col >= s.cols:
+    var w = _char_width(ch)
+    if w == 0:
+        # A combining mark joins the character drawn just before it.
+        var c = s.col - 1
+        if c >= 0 and c < s.cols and s.cells[s.row][c] == "":
+            c = c - 1
+        if c >= 0 and c < s.cols:
+            var cells = s.cells
+            var line = cells[s.row]
+            line[c] = line[c] + ch
+            cells[s.row] = line
+            s.cells = cells
+        return s
+    if w > s.cols:
+        w = 1
+    if s.col + w > s.cols:
         s = _newline(_at(s, s.row, 0))
     var cells = s.cells
+    var attrs = s.attrs
     var line = cells[s.row]
+    var aline = attrs[s.row]
+    # Overwriting either half of a wide character blanks the other half.
+    if line[s.col] == "" and s.col > 0:
+        line[s.col - 1] = " "
+    if s.col + w < s.cols and line[s.col + w] == "":
+        line[s.col + w] = " "
     line[s.col] = ch
+    aline[s.col] = s.modes.pen_sgr
+    if w == 2:
+        line[s.col + 1] = ""
+        aline[s.col + 1] = s.modes.pen_sgr
     cells[s.row] = line
-    _copy(s, cells, s.row, s.col + 1)
+    attrs[s.row] = aline
+    s.cells = cells
+    s.attrs = attrs
+    s.col = s.col + w
+    s
 
-fn _row_edit(s: VtScreen, final: text, n: i64) -> VtScreen:
-    var cells = s.cells
-    var line = cells[s.row]
-    if final == "@":
-        var c = s.cols - 1
-        while c >= s.col + n:
+fn _shift_line(line0: [text], col: i64, n: i64, cols: i64, insert: bool, blank: text) -> [text]:
+    var line = line0
+    if insert:
+        var c = cols - 1
+        while c >= col + n:
             line[c] = line[c - n]
             c = c - 1
-        var i = s.col
-        while i < s.col + n and i < s.cols:
-            line[i] = " "
+        var i = col
+        while i < col + n and i < cols:
+            line[i] = blank
             i = i + 1
     else:
-        var c = s.col
-        while c < s.cols:
-            line[c] = if c + n < s.cols: line[c + n] else: " "
+        var c = col
+        while c < cols:
+            line[c] = if c + n < cols: line[c + n] else: blank
             c = c + 1
-    cells[s.row] = line
-    _copy(s, cells, s.row, s.col)
+    line
 
-fn _csi(s: VtScreen, final: text, params: text) -> VtScreen:
+fn _row_edit(s0: VtScreen, final: text, n: i64) -> VtScreen:
+    var s = s0
+    val insert = final == "@"
+    var cells = s.cells
+    var attrs = s.attrs
+    cells[s.row] = _shift_line(cells[s.row], s.col, n, s.cols, insert, " ")
+    attrs[s.row] = _shift_line(attrs[s.row], s.col, n, s.cols, insert, "")
+    s.cells = cells
+    s.attrs = attrs
+    s
+
+# --- SGR -------------------------------------------------------------------
+
+fn _pen_sgr(p: VtPen) -> text:
+    var parts: [text] = []
+    if p.bold:
+        parts.push("1")
+    if p.dim:
+        parts.push("2")
+    if p.italic:
+        parts.push("3")
+    if p.underline:
+        parts.push("4")
+    if p.reverse:
+        parts.push("7")
+    if p.fg != "":
+        parts.push(p.fg)
+    if p.bg != "":
+        parts.push(p.bg)
+    parts.join(";")
+
+fn _sgr(pen: VtPen, params: text) -> VtPen:
+    var p = pen
+    val norm = params.replace("::", ":").replace(":", ";")
+    val parts = norm.split(";")
+    val count = parts.len()
+    var i = 0
+    while i < count:
+        val n = parts[i].to_int() ?? 0
+        if n == 38 or n == 48:
+            val kind = if i + 1 < count: parts[i + 1].to_int() ?? 0 else: 0
+            var color = ""
+            if kind == 5 and i + 2 < count:
+                color = "5;" + parts[i + 2]
+                i = i + 2
+            elif kind == 2 and i + 4 < count:
+                color = "2;" + parts[i + 2] + ";" + parts[i + 3] + ";" + parts[i + 4]
+                i = i + 4
+            if color != "":
+                if n == 38:
+                    p.fg = "38;" + color
+                else:
+                    p.bg = "48;" + color
+        elif n == 0:
+            p = _pen_default()
+        elif n == 1:
+            p.bold = true
+        elif n == 2:
+            p.dim = true
+        elif n == 3:
+            p.italic = true
+        elif n == 4:
+            p.underline = true
+        elif n == 7:
+            p.reverse = true
+        elif n == 22:
+            p.bold = false
+            p.dim = false
+        elif n == 23:
+            p.italic = false
+        elif n == 24:
+            p.underline = false
+        elif n == 27:
+            p.reverse = false
+        elif (n >= 30 and n <= 37) or (n >= 90 and n <= 97):
+            p.fg = n.to_text()
+        elif n == 39:
+            p.fg = ""
+        elif (n >= 40 and n <= 47) or (n >= 100 and n <= 107):
+            p.bg = n.to_text()
+        elif n == 49:
+            p.bg = ""
+        i = i + 1
+    p
+
+fn _apply_sgr(s0: VtScreen, params: text) -> VtScreen:
+    var s = s0
+    var m = s.modes
+    m.pen = _sgr(m.pen, params)
+    m.pen_sgr = _pen_sgr(m.pen)
+    s.modes = m
+    s
+
+# --- DEC private modes -----------------------------------------------------
+
+fn _set_alt(s0: VtScreen, on: bool, with_cursor: bool) -> VtScreen:
+    var s = s0
+    if on == s.alt.on:
+        return s
+    if on:
+        s.alt = VtAlt(on: true, cells: s.cells, attrs: s.attrs, row: s.row, col: s.col)
+        s.cells = _blank_grid(s.rows, s.cols, " ")
+        s.attrs = _blank_grid(s.rows, s.cols, "")
+        return s
+    s.cells = s.alt.cells
+    s.attrs = s.alt.attrs
+    if with_cursor:
+        s.row = s.alt.row
+        s.col = s.alt.col
+    s.alt = VtAlt(on: false, cells: [], attrs: [], row: 0, col: 0)
+    s
+
+fn _dec_mode(s0: VtScreen, n: i64, on: bool) -> VtScreen:
+    var s = s0
+    if n == 2026:
+        if on:
+            if s.frozen.len() == 0:
+                s.frozen = s.cells
+                s.frozen_attrs = s.attrs
+        else:
+            s.frozen = []
+            s.frozen_attrs = []
+        return s
+    if n == 25 or n == 2004:
+        var m = s.modes
+        if n == 25:
+            m.cursor_visible = on
+        else:
+            m.bracketed = on
+        s.modes = m
+        return s
+    if n == 1049:
+        return _set_alt(s, on, true)
+    if n == 1047 or n == 47:
+        return _set_alt(s, on, false)
+    s
+
+# DECRQM answer: 1 set, 2 reset, 0 unknown.
+fn _dec_mode_state(s: VtScreen, n: i64) -> i64:
+    var is_set = false
+    if n == 2026:
+        is_set = s.frozen.len() > 0
+    elif n == 25:
+        is_set = s.modes.cursor_visible
+    elif n == 2004:
+        is_set = s.modes.bracketed
+    elif n == 1049 or n == 1047 or n == 47:
+        is_set = s.alt.on
+    else:
+        return 0
+    if is_set: 1 else: 2
+
+# --- Queries ---------------------------------------------------------------
+
+fn _query(s: VtScreen, final: text, params: text) -> VtScreen:
+    val esc = "\x1b"
+    if final == "n" and params == "6":
+        val col = _clamp(s.col, 0, s.cols - 1)
+        return _reply(s, esc + "[" + (s.row + 1).to_text() + ";" + (col + 1).to_text() + "R")
+    if final == "n" and params == "5":
+        return _reply(s, esc + "[0n")
+    if final == "n" and params == "?996":
+        return _reply(s, esc + "[?997;1n")
+    if final == "c" and (params == "" or params == "0"):
+        return _reply(s, esc + "[?62;22c")
+    if final == "c" and (params == ">" or params == ">0"):
+        return _reply(s, esc + "[>0;0;0c")
+    if final == "q" and (params == ">" or params == ">0"):
+        return _reply(s, esc + "P>|smux" + esc + "\\")
+    if final == "p" and params.starts_with("?") and params.ends_with("$"):
+        val n = params[1:params.len() - 1].to_int() ?? 0
+        return _reply(s, esc + "[?" + n.to_text() + ";" + _dec_mode_state(s, n).to_text() + "$y")
+    if final == "t" and params == "18":
+        return _reply(s, esc + "[8;" + s.rows.to_text() + ";" + s.cols.to_text() + "t")
+    s
+
+fn _csi(s0: VtScreen, final: text, params: text) -> VtScreen:
+    var s = s0
+    if final == "m":
+        if params.starts_with(">") or params.starts_with("?") or params.starts_with("<"):
+            return s
+        return _apply_sgr(s, params)
+    if params.starts_with("?") and (final == "h" or final == "l"):
+        for part in params[1:].split(";"):
+            s = _dec_mode(s, part.to_int() ?? 0, final == "h")
+        return s
     if final == "H" or final == "f":
         return _at(s, _param(params, 0, 1) - 1, _param(params, 1, 1) - 1)
     if final == "A":
@@ -174,50 +501,73 @@ fn _csi(s: VtScreen, final: text, params: text) -> VtScreen:
         return _at(s, s.row, _param(params, 0, 1) - 1)
     if final == "d":
         return _at(s, _param(params, 0, 1) - 1, s.col)
-    if final == "s":
-        return VtScreen(rows: s.rows, cols: s.cols, cells: s.cells, row: s.row,
-            col: s.col, saved_row: s.row, saved_col: s.col, top: s.top,
-            bottom: s.bottom, mode: s.mode, params: s.params)
-    if final == "u":
+    if final == "s" and params == "":
+        s.saved_row = s.row
+        s.saved_col = s.col
+        return s
+    if final == "u" and params == "":
         return _at(s, s.saved_row, s.saved_col)
     if final == "X":
-        return _copy(s, _erase(s.cells, s.cols, s.row, s.col, s.col + _param(params, 0, 1)), s.row, s.col)
+        return _erase_both(s, s.row, s.col, s.col + _param(params, 0, 1))
     if final == "@" or final == "P":
         return _row_edit(s, final, _clamp(_param(params, 0, 1), 1, s.cols))
     if final == "L" and s.row >= s.top and s.row <= s.bottom:
-        return _copy(s, _push_rows(s, s.row, _param(params, 0, 1)), s.row, 0)
+        return _at(_scroll_down(s, s.row, _param(params, 0, 1)), s.row, 0)
     if final == "M" and s.row >= s.top and s.row <= s.bottom:
-        return _copy(s, _pull_rows(s, s.row, _param(params, 0, 1)), s.row, 0)
+        return _at(_scroll_up(s, s.row, _param(params, 0, 1)), s.row, 0)
     if final == "S":
-        return _copy(s, _pull_rows(s, s.top, _param(params, 0, 1)), s.row, s.col)
+        return _scroll_up(s, s.top, _param(params, 0, 1))
     if final == "T":
-        return _copy(s, _push_rows(s, s.top, _param(params, 0, 1)), s.row, s.col)
+        return _scroll_down(s, s.top, _param(params, 0, 1))
     if final == "r" and not params.starts_with("?"):
         val top = _clamp(_param(params, 0, 1) - 1, 0, s.rows - 1)
         val bottom = _clamp(_param(params, 1, s.rows) - 1, top, s.rows - 1)
-        return VtScreen(rows: s.rows, cols: s.cols, cells: s.cells, row: 0, col: 0,
-            saved_row: s.saved_row, saved_col: s.saved_col, top: top,
-            bottom: bottom, mode: s.mode, params: s.params)
+        s.top = top
+        s.bottom = bottom
+        return _at(s, 0, 0)
     if final == "K":
         val how = params.to_int() ?? 0
         if how == 1:
-            return _copy(s, _erase(s.cells, s.cols, s.row, 0, s.col + 1), s.row, s.col)
+            return _erase_both(s, s.row, 0, s.col + 1)
         if how == 2:
-            return _copy(s, _erase(s.cells, s.cols, s.row, 0, s.cols), s.row, s.col)
-        return _copy(s, _erase(s.cells, s.cols, s.row, s.col, s.cols), s.row, s.col)
+            return _erase_both(s, s.row, 0, s.cols)
+        return _erase_both(s, s.row, s.col, s.cols)
     if final == "J":
         val how = params.to_int() ?? 0
-        var cells = s.cells
         var r = 0
         while r < s.rows:
             if how >= 2 or (how == 1 and r < s.row) or (how == 0 and r > s.row):
-                cells = _erase(cells, s.cols, r, 0, s.cols)
+                s = _erase_both(s, r, 0, s.cols)
             r = r + 1
         if how == 1:
-            cells = _erase(cells, s.cols, s.row, 0, s.col + 1)
+            s = _erase_both(s, s.row, 0, s.col + 1)
         elif how == 0:
-            cells = _erase(cells, s.cols, s.row, s.col, s.cols)
-        return _copy(s, cells, s.row, s.col)
+            s = _erase_both(s, s.row, s.col, s.cols)
+        return s
+    _query(s, final, params)
+
+# An OSC string ended (`bel` tells whether by BEL or by ST, which the reply
+# mirrors). Only the colour queries need an answer.
+fn _osc_end(s0: VtScreen, bel: bool) -> VtScreen:
+    var s = s0
+    val body = s.modes.osc
+    var m = s.modes
+    m.osc = ""
+    s.modes = m
+    val esc = "\x1b"
+    val term = if bel: "\x07" else: esc + "\\"
+    if body == "10;?":
+        return _reply(s, esc + "]10;rgb:d0d0/d0d0/d0d0" + term)
+    if body == "11;?":
+        return _reply(s, esc + "]11;rgb:0000/0000/0000" + term)
+    s
+
+fn _osc_char(s0: VtScreen, ch: text) -> VtScreen:
+    var s = s0
+    if s.modes.osc.len() < 16:
+        var m = s.modes
+        m.osc = m.osc + ch
+        s.modes = m
     s
 
 # Applies raw terminal output to the screen.
@@ -243,11 +593,18 @@ pub fn vt_feed(screen: VtScreen, raw: text) -> VtScreen:
             if ch == "[":
                 s = _with_parser(s, 2, "")
             elif ch == "]":
+                var m = s.modes
+                m.osc = ""
+                s.modes = m
                 s = _with_parser(s, 3, "")
             elif ch == "7":
                 s = _with_parser(_csi(s, "s", ""), 0, "")
             elif ch == "8":
                 s = _with_parser(_csi(s, "u", ""), 0, "")
+            elif ch == "P" or ch == "_" or ch == "^" or ch == "X":
+                s = _with_parser(s, 4, "")
+            elif ch == "(" or ch == ")" or ch == "*" or ch == "+" or ch == "#" or ch == "%":
+                s = _with_parser(s, 5, "")
             else:
                 s = _with_parser(s, 0, "")
         elif s.mode == 2:
@@ -255,44 +612,134 @@ pub fn vt_feed(screen: VtScreen, raw: text) -> VtScreen:
                 s = _with_parser(_csi(s, ch, s.params), 0, "")
             else:
                 s = _with_parser(s, 2, s.params + ch)
-        else:
+        elif s.mode == 3:
             if ch == bel:
-                s = _with_parser(s, 0, "")
+                s = _with_parser(_osc_end(s, true), 0, "")
             elif ch == esc:
+                s = _with_parser(_osc_end(s, false), 1, "")
+            else:
+                s = _osc_char(s, ch)
+        elif s.mode == 4:
+            if ch == esc:
                 s = _with_parser(s, 1, "")
+            elif ch == bel:
+                s = _with_parser(s, 0, "")
+        else:
+            s = _with_parser(s, 0, "")
     s
+
+fn _fit(grid: [[text]], old_rows: i64, old_cols: i64, r: i64, c: i64, blank: text) -> [[text]]:
+    var out: [[text]] = []
+    var i = 0
+    while i < r:
+        var line = _blank_row(c, blank)
+        if i < old_rows and i < grid.len():
+            val old = grid[i]
+            var j = 0
+            while j < c and j < old_cols:
+                line[j] = old[j]
+                j = j + 1
+        out.push(line)
+        i = i + 1
+    out
 
 # Re-sizes the grid to rows x cols, keeping what is drawn: existing cells stay
 # at their row/column, rows and columns beyond the new size are dropped, new
 # ones are blank. The cursor is clamped inside and the scroll region is reset to
-# the full screen (a program that set one redraws after SIGWINCH anyway).
+# the full screen (a program that set one redraws after SIGWINCH anyway). The
+# main screen held behind the alternate screen is re-sized the same way.
 pub fn vt_resize(screen: VtScreen, rows: i64, cols: i64) -> VtScreen:
+    var s = screen
     val r = if rows > 0: rows else: screen.rows
     val c = if cols > 0: cols else: screen.cols
-    var cells: [[text]] = []
-    var i = 0
-    while i < r:
-        var line = _blank_row(c)
-        if i < screen.rows:
-            val old = screen.cells[i]
-            var j = 0
-            while j < c and j < screen.cols:
-                line[j] = old[j]
-                j = j + 1
-        cells.push(line)
-        i = i + 1
-    VtScreen(rows: r, cols: c, cells: cells, row: _clamp(screen.row, 0, r - 1),
-        col: _clamp(screen.col, 0, c), saved_row: _clamp(screen.saved_row, 0, r - 1),
-        saved_col: _clamp(screen.saved_col, 0, c), top: 0, bottom: r - 1,
-        mode: screen.mode, params: screen.params)
+    s.cells = _fit(screen.cells, screen.rows, screen.cols, r, c, " ")
+    s.attrs = _fit(screen.attrs, screen.rows, screen.cols, r, c, "")
+    if screen.alt.on:
+        s.alt = VtAlt(on: true,
+            cells: _fit(screen.alt.cells, screen.rows, screen.cols, r, c, " "),
+            attrs: _fit(screen.alt.attrs, screen.rows, screen.cols, r, c, ""),
+            row: _clamp(screen.alt.row, 0, r - 1), col: _clamp(screen.alt.col, 0, c))
+    s.rows = r
+    s.cols = c
+    s.row = _clamp(screen.row, 0, r - 1)
+    s.col = _clamp(screen.col, 0, c)
+    s.saved_row = _clamp(screen.saved_row, 0, r - 1)
+    s.saved_col = _clamp(screen.saved_col, 0, c)
+    s.top = 0
+    s.bottom = r - 1
+    s.frozen = []
+    s.frozen_attrs = []
+    s
 
-# The visible rows, right-trimmed, without trailing blank rows.
-pub fn vt_text(screen: VtScreen) -> text:
-    var rows: [text] = []
-    for line in screen.cells:
-        rows.push(line.join("").trim_end())
+fn _drop_blank_tail(rows0: [text]) -> [text]:
+    var rows = rows0
     while rows.len() > 0 and rows[rows.len() - 1] == "":
         rows = rows[0:rows.len() - 1]
-    rows.join("\n")
+    rows
 
-export VtScreen, vt_new, vt_feed, vt_resize, vt_text
+# The visible rows, right-trimmed, without trailing blank rows. During a
+# synchronized update this is the last complete frame, never a partial one.
+pub fn vt_text(screen: VtScreen) -> text:
+    val shown = if screen.frozen.len() > 0: screen.frozen else: screen.cells
+    var rows: [text] = []
+    for line in shown:
+        rows.push(line.join("").trim_end())
+    _drop_blank_tail(rows).join("\n")
+
+# The visible rows with their styling as ANSI SGR runs: a run starts with
+# `ESC[0;<params>m` (or `ESC[0m` back to default) where a cell's attributes
+# differ from the previous cell's, and a styled row ends with `ESC[0m`.
+# Trailing unstyled blanks and trailing blank rows are dropped, as in vt_text.
+pub fn vt_styled_text(screen: VtScreen) -> text:
+    val frozen = screen.frozen.len() > 0
+    val shown = if frozen: screen.frozen else: screen.cells
+    val styles = if frozen: screen.frozen_attrs else: screen.attrs
+    val esc = "\x1b"
+    var rows: [text] = []
+    var r = 0
+    while r < shown.len():
+        val line = shown[r]
+        val aline = styles[r]
+        var end = line.len()
+        while end > 0 and (line[end - 1] == " " or line[end - 1] == "") and aline[end - 1] == "":
+            end = end - 1
+        var out = ""
+        var cur = ""
+        var c = 0
+        while c < end:
+            if aline[c] != cur:
+                cur = aline[c]
+                out = out + (if cur == "": esc + "[0m" else: esc + "[0;" + cur + "m")
+            out = out + line[c]
+            c = c + 1
+        if cur != "":
+            out = out + esc + "[0m"
+        rows.push(out)
+        r = r + 1
+    _drop_blank_tail(rows).join("\n")
+
+# Bytes the child is owed in answer to its queries (write them to the PTY).
+pub fn vt_replies(screen: VtScreen) -> text:
+    screen.modes.replies
+
+pub fn vt_clear_replies(screen: VtScreen) -> VtScreen:
+    var s = screen
+    var m = s.modes
+    m.replies = ""
+    s.modes = m
+    s
+
+# True while the child has bracketed paste (?2004) enabled: pasted text should
+# then be sent as ESC[200~ ... ESC[201~.
+pub fn vt_bracketed_paste(screen: VtScreen) -> bool:
+    screen.modes.bracketed
+
+pub fn vt_cursor_visible(screen: VtScreen) -> bool:
+    screen.modes.cursor_visible
+
+pub fn vt_alt_screen(screen: VtScreen) -> bool:
+    screen.alt.on
+
+export VtScreen, vt_new, vt_feed, vt_resize, vt_text, vt_styled_text,
+    vt_replies, vt_clear_replies, vt_bracketed_paste, vt_cursor_visible,
+    vt_alt_screen
