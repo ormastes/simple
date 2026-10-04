@@ -17,8 +17,10 @@ conflating address and TP-offset payloads.
 `elf/elf_static_link.spl:1616` redirects a paired low relocation to the GOT
 only for high type 20. Both need type 21 integration. The driver already writes
 defined IE GOT payloads through `elf_tls_tprel`; its RV64 branch at line 898
-returns the address minus TLS image start. Tests must independently verify the
-TLS alignment that makes that formula valid. Existing dynamic-mode admission,
+returns the address minus TLS image start. Review showed that individual section
+alignment does not guarantee zero PT_TLS address residue: a later TLS section
+can require larger alignment. The corrected RISC-V TP formula adds that residue,
+and acceptance must cover both zero and nonzero residue. Existing dynamic-mode admission,
 TLS symbol validation, section placement and metadata stay authoritative.
 
 ## Domain evidence

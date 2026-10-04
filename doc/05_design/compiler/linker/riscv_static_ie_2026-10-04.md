@@ -6,9 +6,10 @@ Research: `doc/01_research/compiler/linker/riscv_static_ie_2026-10-04.md`.
 ## Interface and ownership
 
 Preserve `elf_link`, `elf_link_configured`, `ElfLinkRequest`, and all existing
-public relocation APIs. Private new helpers use `item4_riscv_ie_`. Runtime lane
+public relocation APIs. Private test helpers use `item4_riscv_ie_`. Runtime lane
 owns `elf/reloc_scan.spl`, `elf/riscv_link_support.spl`, and
-`elf/elf_static_link.spl`; acceptance lane owns fixtures, executable SSpec and
+`elf/elf_static_link.spl`, plus winning symbol-type propagation in
+`sym_resolver.spl`; acceptance lane owns fixtures, executable SSpec and
 manual; research lane owns this design and its research companion. Root owns
 integration and the common ledger. No sidecars are needed.
 
@@ -30,6 +31,19 @@ integration and the common ledger. No sidecars are needed.
 
 The existing static driver remains the caller. This change must not reroute
 through an external linker or claim a loader performed unresolved work.
+
+The resolver retains the winning definition's symbol type directly in
+`SymEntry`; ELF conversion and common-symbol reconstruction preserve it.
+Relocation resolution uses that value for globals and the actual symbol type
+for locals. This repairs the existing local-exec TLS guard too, without adding
+a per-relocation full symbol scan. Global and local reference identities, and
+ordinary-address and TLS-offset GOT identities, must remain distinct.
+
+The current layout aligns individual sections, so the first TLS section may
+have a smaller alignment than a later TLS section. PT_TLS therefore may have
+nonzero `p_vaddr % p_align`. RISC-V's TP-relative offset includes that residue;
+STT_TLS symbol values remain offsets from the TLS block start. Both IE GOT
+payloads and LE instruction offsets must use the same corrected TP formula.
 
 ## Tests before implementation
 
