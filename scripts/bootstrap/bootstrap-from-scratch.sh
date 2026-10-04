@@ -53,6 +53,9 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
 done
 # -- argv-normalize end
 
+. "${bootstrap_entry_dir}/bootstrap-seed-stop-policy.shs"
+bootstrap_seed_stop_policy_validate "$@" || exit 64
+
 . "${bootstrap_entry_dir}/bootstrap-cache-policy.shs"
 bootstrap_compile_failure_policy "$@"
 
@@ -570,6 +573,7 @@ if [ "${stop_after_seed}" -eq 1 ]; then
     [ -z "${resume_stage3_output}" ] && [ -z "${resume_stage4_output}" ] &&
     [ -z "${refresh_stage2_source_cache}" ] && [ "${full_cli}" -eq 0 ] &&
     [ "${deploy}" -eq 0 ] && [ "${release_tests}" -eq 0 ] && [ "${diagnostic_sweep}" -eq 0 ] &&
+    [ "${validate_bootstrap_receipt}" -eq 0 ] &&
     [ "${produce_managed_receipt_requested}" -eq 0 ] && [ -z "${produce_stage3_receipt_reason}" ] || {
     echo 'error: --stop-after-seed requires --full-bootstrap and excludes pure-stage/resume/deploy/test-admission requests' >&2
     exit 64

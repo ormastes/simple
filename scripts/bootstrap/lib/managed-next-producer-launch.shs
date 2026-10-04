@@ -1,0 +1,41 @@
+#!/bin/sh
+# Existing managed owner verifies a completed producer/sanity inventory and
+# exclusively publishes one next-wave task with the actual output SHA. No
+# shell receipt, guessed compiler hash, admission or child execution is added.
+set -eu
+die() { echo "managed-next-producer: $*" >&2; exit 2; }
+[ "$#" -eq 14 ] || die 'fourteen bound factory arguments required'
+builder=$1 manifest=$2 manifest_sha=$3 policy=$4 policy_sha=$5
+source=$6 state=$7 poll=$8 lifetime=$9
+shift 9
+producer_task=$1 producer_output=$2 template=$3 template_sha=$4 destination=$5
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+sha() {
+    value=$(sha256sum "$1") || return 2
+    value=${value%% *}
+    case "$value" in ''|*[!0-9a-f]*) return 2 ;; esac
+    [ "${#value}" = 64 ] || return 2
+    printf '%s\n' "$value"
+}
+for path in "$builder" "$manifest" "$policy" "$source" "$state" "$template" "$destination"; do
+    absolute "$path" || die 'absolute owner/factory path required'
+done
+for path in "$builder" "$manifest" "$policy" "$template"; do
+    regular "$path" || die 'regular bound factory input required'
+done
+for digest in "$manifest_sha" "$policy_sha" "$template_sha"; do
+    case "$digest" in ''|*[!0-9a-f]*) die 'canonical input digest required' ;; esac
+    [ "${#digest}" = 64 ] || die 'canonical input digest required'
+done
+[ "$(sha "$manifest")" = "$manifest_sha" ] && [ "$(sha "$policy")" = "$policy_sha" ] &&
+    [ "$(sha "$template")" = "$template_sha" ] || die 'bound factory input changed'
+[ ! -e "$destination" ] && [ ! -L "$destination" ] || die 'preserve existing next-wave manifest'
+case "$poll" in ''|0|0*|*[!0-9]*) die 'positive poll interval required' ;; esac
+case "$lifetime" in 0) ;; ''|0*|*[!0-9]*) die 'nonnegative lifetime required' ;; esac
+exec "$builder" managed-tasks-next-producer \
+    --manifest "$manifest" --manifest-sha256 "$manifest_sha" \
+    --policy "$policy" --policy-sha256 "$policy_sha" \
+    --source-root "$source" --state "$state" --poll-ms "$poll" --lifetime-ms "$lifetime" \
+    --producer-task "$producer_task" --producer-output "$producer_output" \
+    --next-template "$template" --next-template-sha256 "$template_sha" --next-manifest "$destination"
