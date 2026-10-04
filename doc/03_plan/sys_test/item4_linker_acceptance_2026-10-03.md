@@ -256,6 +256,17 @@ and execution; parser fixtures do not close them.
 
 ## Native test generated-source authority prerequisite (2026-10-04)
 
+Runtime execution is additionally blocked by the independently diagnosed
+[runner access violation after HIR completion](../../08_tracking/bug/item4_native_runner_post_hir_access_violation_2026-10-04.md).
+That older attempt used producer `776ce2a1...` and source `9737d121...`, not the
+later loader/staging repairs. Its stack is missing. Full-CLI numbered-directory
+and generic-scope repairs are separate, other-owner dependencies; they must not
+be presented as proof of a runner crash fix. Before a debugger replay, establish
+an isolated canonical source-authority context and an exclusively owned cache.
+Then capture the actual failing worker, repair its demonstrated fault and
+execute the following existing gates. Do not count this prerequisite analysis
+as an executed SSpec scenario or a host qualification pass.
+
 Status: implementation underway; all behavioral execution **UNRUN**. This is a
 verification prerequisite for existing item4 requirements, not a replacement or
 completion claim for any linker, SDK, host or resource requirement. The pending
