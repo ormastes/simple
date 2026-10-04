@@ -44,6 +44,7 @@ describe "caller-owned completed adaptive set filter observations":
         filter_test_calls = 0
         val empty = adaptive_set_filter_observed(source, filter_fail_on_b).unwrap()
         expect(filter_test_calls).to_equal(0)
+
         expect(empty.result.snapshot_values()).to_equal([])
         expect(empty.observation).to_be_nil()
         source.insert("b")
@@ -74,3 +75,31 @@ describe "caller-owned completed adaptive set filter observations":
         val no_target = AdaptiveTextSet.with_site_and_target(adaptive_set_default_profile(), "ast-filter", "")
         expect(adaptive_set_filter_observed(no_site, filter_keep_all).is_err()).to_be(true)
         expect(adaptive_set_filter_observed(no_target, filter_keep_all).is_err()).to_be(true)
+
+    it "rejects incomplete snapshots before calling the predicate":
+        var source = AdaptiveTextSet.with_site_and_target(adaptive_set_default_profile(), "ast-filter", "native-test")
+        source.insert("a")
+        # Models the observable invariant after a dropped backing-array push;
+        # this is not allocator fault-injection evidence.
+        source.size = 2
+        filter_test_calls = 0
+        expect(adaptive_set_filter_observed(source, filter_keep_a).is_err()).to_be(true)
+        expect(filter_test_calls).to_equal(0)
+
+    it "rejects a same-length snapshot with duplicate physical keys":
+        var source = AdaptiveTextSet.with_site_and_target(adaptive_set_default_profile(), "ast-filter", "native-test")
+        source.linear_values = ["a", "a"]
+        source.size = 2
+        filter_test_calls = 0
+        expect(adaptive_set_filter_observed(source, filter_keep_a).is_err()).to_be(true)
+        expect(filter_test_calls).to_equal(0)
+
+    it "owns result storage independently of the source":
+        var source = AdaptiveTextSet.with_site_and_target(adaptive_set_default_profile(), "ast-filter", "native-test")
+        source.insert("a")
+        val completed = adaptive_set_filter_observed(source, filter_keep_all).unwrap()
+        var output = completed.result
+        output.insert("b")
+        expect(source.snapshot_values()).to_equal(["a"])
+        expect(output.snapshot_values()).to_equal(["a", "b"])
+        expect(completed.observation.unwrap().accepted).to_equal(1)

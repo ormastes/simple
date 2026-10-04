@@ -1,7 +1,7 @@
 # Caller-owned filter completion data. This module does not publish .sprof or
 # extend the process capture channel. Publication still requires one shared,
 # synchronized owner and source/target admission by its caller.
-use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveTextSet}
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveTextSet, AdaptiveSetAttribute}
 
 struct AdaptiveSetFilterObservation:
     site_id: text
@@ -27,10 +27,23 @@ fn adaptive_set_filter_observed(
     """
     if source.site_id == "" or source.target_profile_id == "":
         return Err("observed filter requires source site and target identities")
-    var result = AdaptiveTextSet.with_profile(source.profile)
+    val snapshot = source.snapshot_values()
+    if source.size < 0 or snapshot.len() != source.size:
+        return Err("observed filter source snapshot is incomplete")
+    # Every representation promises a sorted, unique snapshot. Cardinality
+    # alone must not admit duplicated or malformed backing storage.
+    var index = 1
+    while index < snapshot.len():
+        if snapshot[index - 1] >= snapshot[index]:
+            return Err("observed filter source snapshot is not a sorted set")
+        index = index + 1
+    # insert's boolean denotes novelty, not allocation success. Keep this
+    # result linear so each backing-array append is directly verifiable and
+    # unchecked adaptive promotion cannot discard accepted keys.
+    var result = AdaptiveTextSet.with_attribute(source.profile, "", "", AdaptiveSetAttribute.Linear)
     var evaluated: i64 = 0
     var accepted: i64 = 0
-    for key in source.snapshot_values():
+    for key in snapshot:
         val keep = match predicate(key):
             case Ok(value): value
             case Err(reason): return Err(reason)
@@ -39,6 +52,8 @@ fn adaptive_set_filter_observed(
         evaluated = evaluated + 1
         if keep:
             if not result.insert(key):
+                return Err("observed filter could not materialize an accepted key")
+            if result.linear_values.len() != accepted + 1:
                 return Err("observed filter could not materialize an accepted key")
             accepted = accepted + 1
     var observation: AdaptiveSetFilterObservation? = nil
