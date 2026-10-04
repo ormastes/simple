@@ -1,0 +1,67 @@
+#!/bin/sh
+# Supplemental task-receipt admission while independent module builds continue.
+set -eu
+[ "$#" -eq 2 ] || exit 20
+config=$1 report_root=$2
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+cfg() { perl -MJSON::PP -e 'local $/; open my $f,"<",$ARGV[0] or die $!; my $r=decode_json(<$f>); my $v=$r->{$ARGV[1]}; die "missing/nontext config field\n" if !defined($v)||ref($v)||$v eq ""||$v=~/[\0\r\n]/; print $v' "$config" "$1"; }
+[ -f "$config" ] && [ ! -L "$config" ] || exit 20
+config_sha=$(hash_file "$config")
+root=$(cfg root) source_root=$(cfg source_root) runtime_identity=$(cfg runtime_snapshot_digest)
+artifact_physical=$(CDPATH= cd -- "$root" && pwd -P)
+source_physical=$(CDPATH= cd -- "$source_root" && pwd -P)
+report_parent=$(CDPATH= cd -- "$(dirname -- "$report_root")" && pwd -P)
+report_name=$(basename -- "$report_root")
+case "$report_name" in ''|.|..) exit 20 ;; esac
+report_root="$report_parent/$report_name"
+case "$report_root/" in "$artifact_physical/"*|"$source_physical/"*) exit 20 ;; esac
+mkdir "$report_root" || exit 20
+printf '%s\n' 'diagnostic_only=1' 'admitted=false' 'actual_invoked_tools=unproven' \
+  'whole_run_qualification=PENDING' 'aggregate_binary=UNVERIFIED' 'binary_owned_listing=UNVERIFIED' \
+  "launch_pins_sha256=$config_sha" 'threads_each=40' >"$report_root/inputs.txt"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
+verify_products() {
+  [ "$(hash_file "$config")" = "$config_sha" ] || return 20
+  sh "$script_root/verify-provisional-test-products.shs" "$config" "$backend" "$1"
+}
+dispatch_backend() {
+  backend=$1
+  lane="$report_root/$backend"
+  mkdir "$lane" || return 1
+  : >"$lane/statuses.tsv"
+  for subsystem in compiler interpreter loader; do
+    outcome=BLOCKED status=20
+    if verify_products "$lane/$subsystem.before.source" >"$lane/$subsystem.before.pins" 2>"$lane/$subsystem.before.log"; then
+      if [ ! -e "$lane/products.pins" ]; then cp "$lane/$subsystem.before.pins" "$lane/products.pins"; fi
+      if cmp -s "$lane/products.pins" "$lane/$subsystem.before.pins"; then
+        compiler_sha=$(sed -n 's/^full-cli_sha256=//p' "$lane/products.pins")
+        run_dir="$lane/$subsystem"
+        mkdir "$run_dir" || return 1
+        status=0
+        sh "$script_root/run-provisional-native-subsystem.shs" "$source_root" "$backend" \
+          "$root/phase4/binaries/$backend/full-cli/bin/simple$exe_suffix" "$compiler_sha" \
+          "$root/phase4/binaries/$backend/test-runner/bin/simple_test_runner$exe_suffix" \
+          "$subsystem" "$run_dir" 40 "$source_root/src/runtime" "$runtime_identity" \
+          >"$lane/$subsystem.log" 2>&1 || status=$?
+        case "$status" in 0) outcome=SUCCEEDED ;; 20) outcome=BLOCKED ;; *) outcome=FAILED ;; esac
+        if ! verify_products "$lane/$subsystem.after.source" >"$lane/$subsystem.after.pins" 2>"$lane/$subsystem.after.log" ||
+            ! cmp -s "$lane/products.pins" "$lane/$subsystem.after.pins"; then outcome=BLOCKED; status=20; fi
+      fi
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$backend" "$subsystem" "$outcome" "$status" >>"$lane/statuses.tsv"
+  done
+}
+dispatch_backend llvm &
+llvm_pid=$!
+dispatch_backend cranelift &
+cranelift_pid=$!
+result=0
+wait "$llvm_pid" || result=1
+wait "$cranelift_pid" || result=1
+printf 'backend\tsubsystem\tstatus\texit_code\n' >"$report_root/statuses.tsv"
+for backend in llvm cranelift; do cat "$report_root/$backend/statuses.tsv" >>"$report_root/statuses.tsv" || result=1; done
+awk -F '\t' 'NR>1 {count++; if($3!="SUCCEEDED") bad=1} END {exit bad || count!=6}' "$report_root/statuses.tsv" || result=1
+printf 'diagnostic_exit_code=%s\nstatuses_sha256=%s\n' "$result" "$(hash_file "$report_root/statuses.tsv")" >"$report_root/result.txt"
+echo "$report_root/result.txt"
+exit "$result"

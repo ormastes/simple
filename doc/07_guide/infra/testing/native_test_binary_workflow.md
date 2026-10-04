@@ -86,6 +86,44 @@ suite tasks are additional diagnostic coverage, not six aggregate binaries or
 proof of 1000 executed cases. Provisional admission remains incomplete and
 actual compiler/linker invocation provenance remains unproven.
 
+## Continue an older live manager without rebuilding products
+
+For a manager launched before suite scheduling was added, use the separate
+`scripts/bootstrap/continue-provisional-native-tests-early.shs CONFIG_JSON REPORT_ROOT`.
+The report root must be fresh and outside both the live artifact root and source
+root. This mode needs the original full CLI and test-runner terminal task
+receipts for each backend; it does not wait for unrelated module inventories.
+It verifies the original compiled authority, source snapshot, runtime/tool pins,
+builder image, Phase 3 hello lineage and each original builder receipt before
+and after a suite. It pins only the completed journal rows, allowing the manager
+to append unrelated outcomes. Missing or changed products remain blocked.
+
+The caller records the original launcher values in JSON, without executing or
+inventing a replacement receipt. Required keys are `root`, `source_root`,
+`source_authority`, `source_authority_digest`, `runtime_snapshot`,
+`runtime_snapshot_digest`, `original_source_snapshot`,
+`original_source_snapshot_digest`, `tool_intent`, `tool_intent_digest`,
+`authority_receipt`, `authority_digest`, `authority_program`,
+`authority_image_receipt`, `image_receipt`, `builder_program`, `hello_receipt`,
+`llvm_statuses`, `llvm_hashes`, `cranelift_statuses`, and `cranelift_hashes`.
+The last four paths identify the actual private lane journals under the
+recorded manager root. If discovering them, require exactly one matching lane
+directory; missing or ambiguous selections are blocked, never guessed.
+
+Both early lanes run at 40 compiler workers, with files sequential inside each
+lane. The existing initialized SCV journal is reused with cold initialization
+disabled; source/cursor admission remains enforced. No output is written into
+the original manager root. Reports retain diagnostic-only, unproven tool
+provenance and pending whole-run qualification labels.
+
+After the old manager terminates, the alternative
+`continue-provisional-native-tests.shs TERMINAL_JSON REPORT_ROOT <original verify-provisional-run arguments>`
+requires its real terminal exit 3, matching producer SHA and the complete
+original run verifier. It is an alternative suite invocation, not an automatic
+rerun of already-passing early suites. Full run verification can instead be
+performed read-only to qualify the preserved early evidence later. Neither
+mode creates six aggregate binaries or infers binary-owned test counts.
+
 ## Repair and evidence
 
 Continue independent files and suites after failures using the existing
