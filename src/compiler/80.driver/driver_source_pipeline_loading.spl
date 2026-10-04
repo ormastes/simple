@@ -4,6 +4,9 @@
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
 use std.io_runtime.{file_read_nullable, file_exists, process_run}
+use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1,
+    driver_admitted_epoch_task_active_v1, driver_admitted_epoch_entry_v1,
+    driver_admitted_epoch_error_v1}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{SourceFile}
@@ -94,6 +97,10 @@ extern fn rt_hash_text(data: text) -> i64
 
 @always_inline
 fn _pipeline_source_read_raw(path: text) -> text?:
+    if driver_admitted_epoch_active_v1():
+        val (content, _, _, _) = _driver_cached_entry_source_scan(path)
+        if driver_admitted_epoch_error_v1() != "": return nil
+        return Some(content)
     file_read_nullable(path)
 
 fn driver_source_owner_text_copy(value: text) -> text:
@@ -179,6 +186,10 @@ impl CompilerDriver:
         true
 
     me load_sources_impl() -> (CompileContext, bool):
+        val admitted_task = driver_admitted_epoch_task_active_v1()
+        if driver_admitted_epoch_active_v1() and not admitted_task:
+            self.ctx.add_error("admitted source epoch has no active task")
+            return (self.ctx, false)
         # Build sources list locally to avoid chained method call issue
         # (self.ctx.sources.push() doesn't persist — interpreter limitation)
         var all_sources: [SourceFile] = []
@@ -210,8 +221,13 @@ impl CompilerDriver:
             self.ctx.add_error("full inventory mode marker invalid")
             driver_entry_scan_cache_release()
             return (self.ctx, false)
-        val full_inventory_mode = full_inventory_marker == "1"
+        # This internal task has already admitted the complete source epoch.
+        # Preserve ordinary full-inventory construction for all other callers.
+        val full_inventory_mode = full_inventory_marker == "1" and not admitted_task
         val explicit_entry_input = driver_explicit_source_entry(self.ctx)
+        if admitted_task and explicit_entry_input != driver_admitted_epoch_entry_v1():
+            self.ctx.add_error("admitted source task entry does not match its owner")
+            return (self.ctx, false)
         # In-process `run <file.spl>` (CompileMode.Interpret, one .spl input,
         # no explicit/native entry) must load the file's import closure too.
         # The "interpret mode resolves imports lazily through the interpreter
@@ -237,6 +253,9 @@ impl CompilerDriver:
         else:
             native_entry_input
         var native_group_inputs: [text] = []
+        if admitted_task and native_group_request_path_v1() != "":
+            self.ctx.add_error("admitted source task cannot inherit a native group request")
+            return (self.ctx, false)
         if native_group_request_path_v1() != "":
             match native_group_source_paths_v1():
                 case Ok(paths): native_group_inputs = paths
@@ -265,13 +284,13 @@ impl CompilerDriver:
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_PRODUCER_DIGEST") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_ROOT_GENERATION") ?? "") != "" and
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_VARIANT_DIGEST") ?? "") != ""
-        val package_index_cold_init = native_full_inventory_requires_cold_index_v1(
+        val package_index_cold_init = admitted_task or native_full_inventory_requires_cold_index_v1(
             full_inventory_mode, native_group_inputs.len(),
             (sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1",
             package_index_compat_markers_present)
         var cold_entry_input = requested_entry_input
         val cold_snapshot_root = sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? ""
-        if package_index_cold_init and cold_snapshot_root != "" and
+        if not admitted_task and package_index_cold_init and cold_snapshot_root != "" and
                 requested_entry_input != "":
             val cold_checkout_root = sosix_env_get_nullable(
                 "SIMPLE_PACKAGE_INDEX_SOURCE_ROOT") ?? ""
@@ -1064,6 +1083,10 @@ impl CompilerDriver:
                             all_sources.append(s)
 
         log_phase("phase1:load_sources:bulk:done logical={all_sources.len()}")
+        if admitted_task and driver_admitted_epoch_error_v1() != "":
+            self.ctx.add_error("admitted source rejected: {driver_admitted_epoch_error_v1()}")
+            driver_entry_scan_cache_release()
+            return (self.ctx, false)
         val module_collision = _driver_module_name_collision(all_sources)
         if module_collision != "":
             self.ctx.add_error(module_collision)

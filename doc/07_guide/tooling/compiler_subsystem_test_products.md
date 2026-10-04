@@ -32,11 +32,24 @@ the three aggregate executables with binary-owned registration. The managed
 Phase 4 acceptance specs are three-case behavior probes, not full subsystem
 suites. Keep those results separate from the six-product matrix.
 
-Manager integration must schedule each product's build, enumeration and run as
-dependent operations, while unrelated products continue after failure. Preserve
-compatible frontend caches and use the user's current worker budget (40 backend
-jobs per lane for the active Windows repair). Missing binaries block only their
-dependent inventory/run operations; they do not become successful test rows.
+The separate post-Stage2 product manager schedules each product's build,
+binary-owned enumeration and run as dependent operations. A failed build blocks
+only that product's enumeration and run; a failed enumeration blocks only its
+run. Missing compiler admission blocks that backend's three products while the
+other backend continues. The current Linux/FreeBSD budget is 20 build threads
+shared by this matrix, with at least 10 per build and the existing enforced RSS
+cap. No source suffix count is a registered or executed test count.
+
+`scripts/bootstrap/run-compiler-subsystem-test-products.shs` is the standalone
+post-Stage2 entrypoint. It consumes admitted compiler binaries and receipts,
+produces six product jobs and an `INCOMPLETE`, `FAIL`, `PASS_WITH_SKIPS`, or
+`PASS` matrix receipt. `scripts/bootstrap/verify-compiler-subsystem-test-matrix.shs`
+checks a `PASS` receipt against retained binaries, source hashes, raw ledgers,
+watchdog receipts and per-case outcomes without executing tests again. These
+receipts are separate from canonical Phase 4's three-case acceptance probes.
+The manager requires an aggregate product producer and runtime registry; their
+source-bound build and native test results remain necessary for six-product
+acceptance.
 
 `--mode dynload` controls aspect packaging, whereas `--backend-plugin` selects a
 Simple backend provider exporting `simple_backend_plugin_v1`. An LLVM toolchain
@@ -45,6 +58,6 @@ actual loaded provider path/hash/identity, separately from test counts. C++ test
 framework linkage must retain the Simple assertions and share the executable's
 registered cases; merely linking a library cannot establish coverage.
 
-This page defines the requested acceptance boundary and source inventory. It
-does not claim the aggregate harness, enumeration, dynamic compiler providers,
-or complete manager wiring already exists.
+This page defines the acceptance boundary and source inventory. The separate
+manager scripts supply scheduling and verification only; they do not claim an
+aggregate harness, dynamic provider loading, or six passing native products.

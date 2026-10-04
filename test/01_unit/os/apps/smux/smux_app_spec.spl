@@ -14,6 +14,7 @@ use os.apps.smux.api.{
     smux_list_panes,
     smux_capture
 }
+use std.nogc_sync_mut.io.{thread_sleep_ms}
 use os.apps.smux.smux_app.{
     smux_help_text,
     smux_run_cmd
@@ -62,12 +63,20 @@ describe "smux app":
         val second_window = smux_list_windows(sessions[1].id)[0]
         val first_pane = smux_list_panes(sessions[0].id, first_window.id)[0]
         val second_pane = smux_list_panes(sessions[1].id, second_window.id)[0]
-        val first_capture = smux_capture(sessions[0].id, first_window.id,
-            first_pane.id, 100)
-        val second_capture = smux_capture(sessions[1].id, second_window.id,
-            second_pane.id, 100)
-        expect(first_capture.content).to_equal("")
-        expect(second_capture.content).to_contain("echo hello world")
+        # The second shell runs the line; wait for its OUTPUT ("hello world" on a
+        # line of its own), not just the echo of what was typed.
+        var second_text = ""
+        var tries = 0
+        while tries < 100 and not second_text.contains("\nhello world"):
+            thread_sleep_ms(100)
+            second_text = smux_capture(sessions[1].id, second_window.id,
+                second_pane.id, 100).unwrap().content
+            tries = tries + 1
+        expect(second_text).to_contain("echo hello world")
+        expect(second_text).to_contain("\nhello world")
+        val first_text = smux_capture(sessions[0].id, first_window.id,
+            first_pane.id, 100).unwrap().content
+        expect(first_text.contains("hello world")).to_equal(false)
 
     it "fails when a command names an unknown session":
         # @req REQ-SSPEC-OS

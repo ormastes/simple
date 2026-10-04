@@ -177,6 +177,11 @@ impl PlatformLinkConfig {
                 "secur32",
                 "ncrypt",
                 "iphlpapi",
+                // sysinfo references retained by the native-all runtime archive.
+                "pdh",
+                "netapi32",
+                "psapi",
+                "powrprof",
                 "d3d11",
                 "dxgi",
                 "user32",
@@ -218,6 +223,10 @@ impl PlatformLinkConfig {
                 "secur32",
                 "ncrypt",
                 "iphlpapi",
+                "pdh",
+                "netapi32",
+                "psapi",
+                "powrprof",
                 "d3d11",
                 "dxgi",
                 "user32",
@@ -380,6 +389,15 @@ mod tests {
 
         for library in ["z", "zstd", "tinfo"] {
             assert!(config.libraries.contains(&library));
+        }
+    }
+
+    #[test]
+    fn windows_links_native_all_sysinfo_dependencies() {
+        for config in [PlatformLinkConfig::windows(), PlatformLinkConfig::windows_mingw()] {
+            for library in ["pdh", "netapi32", "psapi", "powrprof"] {
+                assert!(config.libraries.contains(&library), "missing {library}");
+            }
         }
     }
 }

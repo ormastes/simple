@@ -131,6 +131,39 @@ The local path is GGUF through ggml
   `scripts/check/check-slang-ggml-inference.shs`. A load, a `--version`, or
   "the model was found" is not evidence.
 
+## Windows: smux panes, split dashboard, live agents (2026-10-03)
+
+- **Run on phase 1 from current source.** Build the seed driver into a private
+  target dir (`cargo build --profile bootstrap -p simple-driver`, MSVC env
+  sourced, no `llvm` feature so no `LLVM-C.dll`); the deployed seeds predate
+  the fixes below. A seed linked against LLVM dies silently with
+  0xC0000139 unless the matching `LLVM-C.dll` is on PATH.
+- **smux real-child API** lives in `src/os/apps/smux/api.spl`
+  (`smux_pane_spawn` piped, `smux_pane_spawn_pty` on `std.sys.pty` = ConPTY on
+  Windows, `smux_pane_alive`, focus/active window, admission, typed Result
+  capture). It had been lost in the 2026-09-29 transplant while its specs,
+  `service.spl` fields and `pane_team.spl` callers survived — read the spec,
+  not the file, for the contract.
+- **PTY panes are screens, not logs.** `os.apps.smux.vt_screen` applies output
+  to a cell grid (CUP, cursor moves, EL/ED, save/restore, scroll region,
+  insert/delete). Without it a full-screen agent shows every frame it drew and
+  dialog detection never clears.
+- **pane_backend**: tmux when it answers a probe, smux otherwise (always on
+  Windows). Enter is a separate keystroke after a 150 ms pause — codex/kimi
+  treat text+`\r` in one write as a paste and never submit.
+- **cs dashboard**: full-width status row and input row; left = roster/detail/
+  log, right = selected agent's screen (`CsDashboard.screen`, filled by
+  `cs_refresh`). `/key enter|esc|...` answers agent dialogs. PATHEXT lookup
+  (`windows_executable_names`) finds `claude.exe`, `codex.cmd`, `kimi.exe`.
+- **Evidence:** `test/03_system/app/llm_caret/cs_live_agents_system_spec.spl`
+  (claude/codex/kimi answer 4711x3 on the right half, ~20 s each) and
+  `caret_slang_local_hello_system_spec.spl` (Qwen2.5-1.5B via slang, Windows
+  shim `build/sffi/slang_ggml.dll`). Seed defects fixed on the way:
+  `doc/08_tracking/bug/interp_module_global_self_method_assign_reverted_2026-10-03.md`.
+  Open: 0.5B models need the GGUF chat template
+  (`caret_slang_local_ignores_gguf_chat_template_2026-10-03.md`); the workbench
+  e2e manager seam spawns `agent_stub.shs` directly, which Windows cannot exec.
+
 ## Evidence rules specific to this feature
 
 - "Check TUI rendering" means a **captured cell grid** written under

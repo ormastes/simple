@@ -20,13 +20,14 @@ use std.gc_async_mut.slang.model_executor.paged_backend.{PhysicalModelSupport, P
 use std.gc_async_mut.slang.model_executor.paged_executor.{PagedGenerationRequest, paged_executor_error_text, paged_executor_active, paged_executor_pool, paged_executor_telemetry, paged_executor_bind_backend, paged_executor_clear_pending_backend, paged_executor_activate_config, paged_executor_configuration_text, paged_executor_shutdown, paged_executor_generate_observed_request}
 use std.gc_async_mut.slang.model_executor.model_loader.native_formats.{NativeModel, describe_model, scan_model_root}
 use std.gc_async_mut.slang.model_executor.model_loader.memory_budget.{check_fit, default_headroom_bytes}
-use std.io_runtime.{file_exists}
+use std.io_runtime.{file_exists, env_get, host_os}
 
 # Resident state. Module-level because the model IS the process's memory: two
 # engines in one process would mean two copies of a 46 GB tensor set.
 var ENGINE_LOADED_ID = ""
 var ENGINE_BACKEND: GgmlBackend? = nil
-var ENGINE_LIB_PATH = "build/sffi/libslang_ggml.so"
+# Empty = resolve via engine_lib_path() (SLANG_GGML_LIB, then per-OS default).
+var ENGINE_LIB_PATH = ""
 var ENGINE_N_CTX = 4096
 var ENGINE_MATCHED_CPU_THREADS = -1
 var ENGINE_PREFIX_CACHE_ENTRIES = 4
@@ -98,13 +99,24 @@ fn engine_set_prefix_cache_limits(entries: i64, bytes: i64) -> bool:
         return true
     configure_prefix_cache(ENGINE_BACKEND!, entries, bytes)
 
+# One resolver for every reader (advertise, availability, load) so they cannot
+# disagree. Precedence: engine_set_lib_path > SLANG_GGML_LIB > per-OS default
+# (build-slang-ggml-shim.shs emits slang_ggml.dll on Windows, .so elsewhere).
 fn engine_lib_path() -> text:
-    ENGINE_LIB_PATH
+    val env_path = env_get("SLANG_GGML_LIB")
+    if ENGINE_LIB_PATH != "":
+        ENGINE_LIB_PATH
+    elif env_path != "":
+        env_path
+    elif host_os() == "windows":
+        "build/sffi/slang_ggml.dll"
+    else:
+        "build/sffi/libslang_ggml.so"
 
 # Whether a ggml backend is configured AND present. Callers use this to decide
 # what to advertise, so it must answer about the file on disk, not about intent.
 fn engine_backend_available() -> bool:
-    file_exists(ENGINE_LIB_PATH)
+    file_exists(engine_lib_path())
 
 fn engine_loaded_model() -> text:
     ENGINE_LOADED_ID
@@ -215,9 +227,10 @@ fn engine_ensure_loaded(model: NativeModel) -> Result<(), text>:
     val fit = check_fit(model.bytes, _runtime_overhead_bytes(), default_headroom_bytes())
     if not fit.fits:
         return Err("refusing to load '" + model.id + "': " + fit.reason)
-    match open_backend(ENGINE_LIB_PATH):
+    val lib_path = engine_lib_path()
+    match open_backend(lib_path):
         Err(e):
-            return Err("backend unavailable at " + ENGINE_LIB_PATH + ": " + backend_error_text(e))
+            return Err("backend unavailable at " + lib_path + ": " + backend_error_text(e))
         Ok(b):
             val gpu_layers = if ENGINE_PHYSICAL_PAGES_ENABLED or ENGINE_MATCHED_CPU_THREADS > 0: 0 else: -1
             match load_model(b, model.entry_path, gpu_layers):

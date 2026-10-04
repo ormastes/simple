@@ -357,24 +357,46 @@ portable_lock_acquire() {
   done
 }
 
+portable_lock_ownership_failure() {
+  # Evidence only: never refresh an owner or recover a claim on this path.
+  # Bound values because claim bytes can be malformed. Do not emit file paths.
+  printf 'portable-lock: ownership check failed reason=%s expected=%.128s observed=%.128s\n' \
+    "$1" "${2:-unavailable}" "${3:-unavailable}" >&2
+  return 1
+}
+
 portable_lock_handle_is_owned() {
   portable_lock_owned_handle=$1
-  portable_lock_actual_process_identity || return 1
-  portable_lock_load_claim "${portable_lock_owned_handle}" || return 1
-  [ "${PORTABLE_LOCK_LOADED_PID}" = "${PORTABLE_LOCK_OWNER_PID}" ] &&
-    [ "${PORTABLE_LOCK_LOADED_START}" = \
-      "${PORTABLE_LOCK_OWNER_START_HEX}" ] &&
-    [ "${PORTABLE_LOCK_LOADED_PGID}" = "${PORTABLE_LOCK_OWNER_PGID}" ] ||
-    return 1
+  portable_lock_actual_process_identity || {
+    portable_lock_ownership_failure owner-snapshot; return 1;
+  }
+  portable_lock_load_claim "${portable_lock_owned_handle}" || {
+    portable_lock_ownership_failure claim-read; return 1;
+  }
+  [ "${PORTABLE_LOCK_LOADED_PID}" = "${PORTABLE_LOCK_OWNER_PID}" ] || {
+    portable_lock_ownership_failure owner-pid "$PORTABLE_LOCK_LOADED_PID" "$PORTABLE_LOCK_OWNER_PID"; return 1;
+  }
+  [ "${PORTABLE_LOCK_LOADED_START}" = "${PORTABLE_LOCK_OWNER_START_HEX}" ] || {
+    portable_lock_ownership_failure owner-start "$PORTABLE_LOCK_LOADED_START" "$PORTABLE_LOCK_OWNER_START_HEX"; return 1;
+  }
+  [ "${PORTABLE_LOCK_LOADED_PGID}" = "${PORTABLE_LOCK_OWNER_PGID}" ] || {
+    portable_lock_ownership_failure owner-pgid "$PORTABLE_LOCK_LOADED_PGID" "$PORTABLE_LOCK_OWNER_PGID"; return 1;
+  }
   portable_lock_owned_root=${portable_lock_owned_handle%/*}
   portable_lock_owned_stable=\
 "${portable_lock_owned_root}/.${PORTABLE_LOCK_LOADED_NAME}.lock"
   portable_lock_owned_claim_identity=$(portable_lock_identity \
-    "${portable_lock_owned_handle}" 2>/dev/null) || return 1
+    "${portable_lock_owned_handle}" 2>/dev/null) || {
+    portable_lock_ownership_failure claim-identity; return 1;
+  }
   portable_lock_owned_stable_identity=$(portable_lock_identity \
-    "${portable_lock_owned_stable}" 2>/dev/null) || return 1
+    "${portable_lock_owned_stable}" 2>/dev/null) || {
+    portable_lock_ownership_failure lock-identity; return 1;
+  }
   [ "${portable_lock_owned_claim_identity}" = \
-    "${portable_lock_owned_stable_identity}" ]
+    "${portable_lock_owned_stable_identity}" ] || {
+    portable_lock_ownership_failure hardlink-identity "$portable_lock_owned_claim_identity" "$portable_lock_owned_stable_identity"; return 1;
+  }
 }
 
 portable_lock_release() {

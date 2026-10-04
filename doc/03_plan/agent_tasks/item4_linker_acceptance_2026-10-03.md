@@ -105,3 +105,19 @@ in the Mach-O worktree. Acceptance owns remaining RISC-V work in the acceptance
 worktree. All start from release `94a16103a5baeefad8bc7688e70b43b75dcf2914`.
 No agent edits another lane. Tests precede implementation, root reviews source,
 and an independent inherited-model agent reviews root. Lower-model sidecars N/A.
+
+## Historical main forward-port (before branch reconciliation)
+
+The following note describes the earlier main-only adaptation. The reconciled
+tree retains the newer release strict authority and configured-linker owners.
+
+### Main forward-port of release PR #2294 (2026-10-03)
+
+The shared ELF admission and executed-engine fixes landed on `release/1.0` in
+`7d16ab11d2227cbe5f29dc998b76a1eff326abbb`. The targeted main forward-port
+preserves main's existing admission behavior: main lacks the release-only
+strict tool/runtime authority modules, so its typed result wraps the existing
+entrypoint directly, and the fallback spec omits that unavailable import/check.
+All other production guards and acceptance scenarios are carried forward.
+Runtime SSpec, generated-manual, coverage and core/MCP evidence remain unrun;
+this forward-port does not change any requirement's verification status.

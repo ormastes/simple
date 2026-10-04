@@ -40,6 +40,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || die "reposito
 BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 export BOOTSTRAP_STAGE3_FACADE_PATH
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$repo_root/scripts/bootstrap/lib/provisional-binary-producer.shs"
 field() { bootstrap_stage3_manifest_value "$1" "$receipt"; }
 image_field() { bootstrap_stage3_manifest_value "$1" "$image_receipt"; }
 [ "$(field format)" = SIMPLE-PROVISIONAL-RUN-1 ] &&
@@ -102,6 +103,17 @@ for backend in llvm cranelift; do
     case "$outcome" in SUCCEEDED|FAILED|BLOCKED) ;; *) die "$key outcome invalid" ;; esac
     [ "$(field "${key}_tool_evidence")" = unproven ] || die "$key tool evidence mislabeled"
     if [ "$outcome" = SUCCEEDED ]; then
+      if [ "$phase" = phase4 ]; then
+        predecessor="$root/phase3/binaries/$backend/phase3-bootstrap/bin/simple$exe_suffix"
+        predecessor_sha=$(field "phase3_${backend}_phase3-bootstrap") || die "$key predecessor missing"
+        handoff="$root/phase4/hello/$backend/hello.receipt"
+        [ "$(field "phase3_${backend}_phase3-bootstrap_status")" = SUCCEEDED ] &&
+          [ "$(field "${key}_producer_sha256")" = "$predecessor_sha" ] &&
+          [ "$(field "${key}_hello_receipt_sha256")" = "$(hash_file "$handoff")" ] ||
+          die "$key producer lineage changed"
+        provisional_verify_binary_handoff "$handoff" "$predecessor" "$predecessor_sha" \
+          "$(hash_file "$original_source_snapshot")" || die "$key hello handoff changed"
+      fi
       job="$root/$phase/binaries/$backend/$binary"
       published="$job/$output"
       manager_receipt="$job/state/receipts/$binary-$backend.sdn"

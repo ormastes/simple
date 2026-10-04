@@ -1,18 +1,27 @@
 # LLM Caret - pane backend for the `cs` caret-suite dashboard.
 #
-# Lists panes, switches the active pane, and MAXIMIZES (zooms) the pane that is
-# currently taking a command. Two backends behind one surface: tmux (POSIX) and
-# Windows.
+# Lists panes, switches the active pane, MAXIMIZES (zooms) the pane that is
+# currently taking a command, and captures what a pane's child printed (the
+# dashboard's right-hand agent screen). Two backends behind one surface:
 #
-# Every host call goes through the sosix facade (std.nogc_async_mut.sosix) -
-# tools depend on sosix, never on process_run/tmux directly.
+#   tmux  - POSIX hosts where tmux answers a positive probe.
+#   smux  - Simple's own multiplexer (os.apps.smux.api): every other host,
+#           including Windows, where each pane child runs on a real ConPTY.
 #
-# Windows has no tmux. The windows backend does not fake panes: it reports
-# failure with a concrete reason instead of inventing a pane list.
+# tmux calls go through the sosix facade (std.nogc_async_mut.sosix) - tools
+# depend on sosix, never on process_run/tmux directly. smux is in-process, so
+# its panes live as long as the dashboard process does.
 
-use std.nogc_async_mut.sosix.{sosix_platform, sosix_run, sosix_which,
-    sosix_pty_open, sosix_pty_spawn, sosix_pty_write, sosix_pty_close,
-    sosix_pty_is_running}
+use std.nogc_async_mut.sosix.{sosix_platform, sosix_run, sosix_which}
+use os.apps.smux.api.{smux_create_session, smux_list_sessions,
+    smux_list_windows, smux_list_panes, smux_split_pane, smux_focus_pane,
+    smux_focused_pane, smux_close_pane, smux_pane_spawn_pty, smux_pane_alive,
+    smux_send_command, smux_send_text, smux_capture}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+
+# Gap between typing a message and pressing Enter, so the TUI sees two input
+# events. Measured enough for codex and kimi on ConPTY.
+const PANE_SUBMIT_DELAY_MS: i64 = 150
 
 struct Pane:
     pane_id: text
@@ -20,17 +29,6 @@ struct Pane:
     pid: i64
     active: bool
     zoomed: bool
-
-struct WindowsPaneRecord:
-    session: text
-    pane: Pane
-    pty_handle: i32
-
-const WINDOWS_PANE_CAPACITY: i64 = 16
-var _windows_panes: [WindowsPaneRecord] = []
-var _windows_next_pane: i64 = 1
-var _windows_probe_known: bool = false
-var _windows_probe_ok: bool = false
 
 fn windows_quote_arg(arg: text) -> text:
     """Quote one CreateProcess command-line argument using Windows CRT rules."""
@@ -74,24 +72,15 @@ fn windows_spawn_command_line(cmd: text, args: [text]) -> text:
         return windows_command_line("cmd.exe", ["/d", "/c", "call", cmd] + args)
     windows_command_line(cmd, args)
 
-fn _windows_pane_copy(pane: Pane, active: bool, zoomed: bool) -> Pane:
-    Pane(pane_id: pane.pane_id, title: pane.title, pid: pane.pid,
-        active: active, zoomed: zoomed)
+# POSIX shell single-quoting: 'it'\''s'.
+fn posix_quote_arg(arg: text) -> text:
+    "'" + arg.replace("'", "'\\''") + "'"
 
-fn _windows_list(session: text) -> [Pane]:
-    var panes: [Pane] = []
-    var live: [WindowsPaneRecord] = []
-    for record in _windows_panes:
-        if sosix_pty_is_running(record.pty_handle):
-            live = live + [record]
-            if record.session == session:
-                panes = panes + [record.pane]
-        else:
-            # Reap the PTY provider record after the child exits. A false
-            # close is harmless when another owner already completed cleanup.
-            val _closed = sosix_pty_close(record.pty_handle)
-    _windows_panes = live
-    panes
+fn posix_command_line(cmd: text, args: [text]) -> text:
+    var line = posix_quote_arg(cmd)
+    for arg in args:
+        line = line + " " + posix_quote_arg(arg)
+    line
 
 # tmux emits one line per pane. pane_title may contain spaces, so it is LAST and
 # the remaining columns are rejoined into it. `.split(sep, N)` ignores N on this
@@ -163,6 +152,9 @@ fn pane_zoom_argv(pane_id: text) -> [text]:
 fn pane_kill_argv(pane_id: text) -> [text]:
     ["kill-pane", "-t", pane_id]
 
+fn pane_capture_argv(pane_id: text, lines: i64) -> [text]:
+    ["capture-pane", "-p", "-J", "-t", pane_id, "-S", "-" + lines.to_text()]
+
 # Two calls, deliberately: `-l` sends the text LITERALLY, so a message
 # containing tmux key names ("Enter", "C-c") is typed rather than interpreted.
 # The Enter that submits it is therefore a separate, explicit keystroke.
@@ -175,37 +167,124 @@ fn pane_send_enter_argv(pane_id: text) -> [text]:
 fn _is_windows() -> bool:
     sosix_platform() == "windows"
 
-fn pane_backend_name() -> text:
-    if _is_windows():
-        return "windows"
-    if pane_available():
-        return "tmux"
-    "none"
-
 # POSITIVE probe: tmux must be on PATH and must actually answer.
-fn pane_available() -> bool:
+fn _tmux_available() -> bool:
     if _is_windows():
-        if not _windows_probe_known:
-            val handle = sosix_pty_open(2, 2)
-            _windows_probe_ok = handle >= 0
-            if handle >= 0:
-                val _closed = sosix_pty_close(handle)
-            _windows_probe_known = true
-        return _windows_probe_ok
+        return false
     if sosix_which("tmux") == "":
         return false
     sosix_run("tmux", ["-V"]).exit_code == 0
 
+fn pane_backend_name() -> text:
+    if _tmux_available():
+        return "tmux"
+    "smux"
+
 fn _tmux_ok(args: [text]) -> bool:
-    if not pane_available():
-        return false
     sosix_run("tmux", args).exit_code == 0
 
+# ---------------------------------------------------------------------------
+# smux backend. A cs session NAME maps to the smux session of that name, with
+# all agent panes in its first window.
+# ---------------------------------------------------------------------------
+
+struct SmuxScope:
+    session_id: text
+    window_id: text
+
+fn _smux_scope(session: text) -> SmuxScope:
+    for s in smux_list_sessions():
+        if s.name == session:
+            val ws = smux_list_windows(s.id)
+            if ws.len() > 0:
+                return SmuxScope(session_id: s.id, window_id: ws[0].id)
+    SmuxScope(session_id: "", window_id: "")
+
+fn _smux_list(session: text) -> [Pane]:
+    val scope = _smux_scope(session)
+    var out: [Pane] = []
+    if scope.session_id == "":
+        return out
+    val focused = smux_focused_pane(scope.session_id, scope.window_id)
+    val focused_id = if focused.is_ok(): focused.unwrap().id else: ""
+    for p in smux_list_panes(scope.session_id, scope.window_id):
+        val alive = smux_pane_alive(scope.session_id, scope.window_id, p.id)
+        # An empty slot (no child, or an exited one) is not an agent pane.
+        if alive.is_ok() and alive.unwrap():
+            out = out + [Pane(pane_id: p.id, title: _smux_title(p.id),
+                pid: _smux_pid(p.id), active: p.id == focused_id,
+                zoomed: p.id == _smux_zoomed)]
+    out
+
+# smux panes carry no title or pid field; the backend remembers both.
+struct SmuxPaneInfo:
+    pane_id: text
+    title: text
+    pid: i64
+
+var _smux_info: [SmuxPaneInfo] = []
+var _smux_zoomed: text = ""
+
+fn _smux_title(pane_id: text) -> text:
+    for info in _smux_info:
+        if info.pane_id == pane_id:
+            return info.title
+    ""
+
+fn _smux_pid(pane_id: text) -> i64:
+    for info in _smux_info:
+        if info.pane_id == pane_id:
+            return info.pid
+    0
+
+# A free pane slot for a new child: the session's first pane while it is still
+# empty, otherwise a fresh split.
+fn _smux_free_pane(scope: SmuxScope) -> text:
+    val panes = smux_list_panes(scope.session_id, scope.window_id)
+    for p in panes:
+        val alive = smux_pane_alive(scope.session_id, scope.window_id, p.id)
+        if alive.is_ok() and not alive.unwrap() and _smux_pid(p.id) == 0:
+            return p.id
+    if panes.len() == 0:
+        return ""
+    val split = smux_split_pane(scope.session_id, scope.window_id, panes[0].id, "vertical")
+    if split.is_err():
+        return ""
+    split.unwrap().id
+
+fn _smux_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
+    val empty = Pane(pane_id: "", title: title, pid: 0, active: false, zoomed: false)
+    var scope = _smux_scope(session)
+    if scope.session_id == "":
+        if smux_create_session(session).id == "":
+            return empty
+        scope = _smux_scope(session)
+    val pane_id = _smux_free_pane(scope)
+    if pane_id == "":
+        return empty
+    # ponytail: a POSIX pty spawn execs ONE program with no argv, so a command
+    # with arguments runs through `/bin/sh` and an `exec` line. Upgrade: an
+    # argv-taking rt_pty_spawn.
+    var line = windows_spawn_command_line(cmd, args)
+    if not _is_windows():
+        line = "/bin/sh"
+    val spawned = smux_pane_spawn_pty(scope.session_id, scope.window_id, pane_id, line)
+    if spawned.is_err():
+        return empty
+    if not _is_windows():
+        val _e = smux_send_command(scope.session_id, scope.window_id, pane_id,
+            "exec " + posix_command_line(cmd, args))
+    _smux_info = _smux_info + [SmuxPaneInfo(pane_id: pane_id, title: title, pid: spawned.unwrap())]
+    val _f = smux_focus_pane(scope.session_id, scope.window_id, pane_id)
+    Pane(pane_id: pane_id, title: title, pid: spawned.unwrap(), active: true, zoomed: false)
+
+# ---------------------------------------------------------------------------
+# Public surface
+# ---------------------------------------------------------------------------
+
 fn pane_list(session: text) -> [Pane]:
-    if not pane_available():
-        return []
-    if _is_windows():
-        return _windows_list(session)
+    if not _tmux_available():
+        return _smux_list(session)
     val result = sosix_run("tmux", pane_list_argv(session))
     if result.exit_code != 0:
         return []
@@ -214,59 +293,39 @@ fn pane_list(session: text) -> [Pane]:
 fn pane_select(session: text, pane_id: text) -> bool:
     if session == "" or pane_id == "":
         return false
-    if _is_windows():
-        var found = false
-        var next: [WindowsPaneRecord] = []
-        for record in _windows_panes:
-            val selected = record.session == session and record.pane.pane_id == pane_id
-            if selected:
-                found = true
-            val active = if record.session == session: selected else: record.pane.active
-            next = next + [WindowsPaneRecord(session: record.session,
-                pane: _windows_pane_copy(record.pane, active, record.pane.zoomed),
-                pty_handle: record.pty_handle)]
-        if found:
-            _windows_panes = next
-        return found
+    if not _tmux_available():
+        val scope = _smux_scope(session)
+        return smux_focus_pane(scope.session_id, scope.window_id, pane_id)
     _tmux_ok(pane_select_argv(pane_id))
 
 # Toggle maximize on the pane currently taking a command.
 fn pane_zoom(session: text, pane_id: text) -> bool:
     if session == "" or pane_id == "":
         return false
-    if _is_windows():
-        var found = false
-        var next: [WindowsPaneRecord] = []
-        for record in _windows_panes:
-            val selected = record.session == session and record.pane.pane_id == pane_id
-            if selected:
-                found = true
-            val zoomed = if selected: not record.pane.zoomed else: false
-            next = next + [WindowsPaneRecord(session: record.session,
-                pane: _windows_pane_copy(record.pane, record.pane.active, zoomed),
-                pty_handle: record.pty_handle)]
-        if found:
-            _windows_panes = next
-        return found
+    if not _tmux_available():
+        var known = false
+        for p in _smux_list(session):
+            if p.pane_id == pane_id:
+                known = true
+        if not known:
+            return false
+        _smux_zoomed = if _smux_zoomed == pane_id: "" else: pane_id
+        return true
     _tmux_ok(pane_zoom_argv(pane_id))
 
 fn pane_kill(session: text, pane_id: text) -> bool:
     if session == "" or pane_id == "":
         return false
-    if _is_windows():
-        var found = false
-        var closed = false
-        var next: [WindowsPaneRecord] = []
-        for record in _windows_panes:
-            if record.session == session and record.pane.pane_id == pane_id:
-                found = true
-                closed = sosix_pty_close(record.pty_handle)
-            else:
-                next = next + [record]
-        if found and closed:
-            _windows_panes = next
-            return true
-        return false
+    if not _tmux_available():
+        val scope = _smux_scope(session)
+        if not smux_close_pane(scope.session_id, scope.window_id, pane_id):
+            return false
+        var kept: [SmuxPaneInfo] = []
+        for info in _smux_info:
+            if info.pane_id != pane_id:
+                kept = kept + [info]
+        _smux_info = kept
+        return true
     _tmux_ok(pane_kill_argv(pane_id))
 
 # Delivers `body` into a pane as if typed, then submits it. Returns false
@@ -275,40 +334,96 @@ fn pane_kill(session: text, pane_id: text) -> bool:
 fn pane_send(session: text, pane_id: text, body: text) -> bool:
     if session == "" or pane_id == "" or body == "":
         return false
-    if _is_windows():
-        for record in _windows_panes:
-            if record.session == session and record.pane.pane_id == pane_id:
-                return sosix_pty_write(record.pty_handle, body + "\r\n")
-        return false
+    if not _tmux_available():
+        # Type, pause, then press Enter as its own keystroke. Text and "\r" in
+        # one write reach a TUI as a single paste, and agent TUIs (codex, kimi)
+        # keep a pasted newline in the composer instead of submitting.
+        val scope = _smux_scope(session)
+        if smux_send_text(scope.session_id, scope.window_id, pane_id, body).is_err():
+            return false
+        thread_sleep_ms(PANE_SUBMIT_DELAY_MS)
+        return smux_send_text(scope.session_id, scope.window_id, pane_id, "\r").is_ok()
     if not _tmux_ok(pane_send_literal_argv(pane_id, body)):
         return false
     _tmux_ok(pane_send_enter_argv(pane_id))
+
+# Named keys an agent's own dialogs need (accept, dismiss, move, interrupt),
+# as the bytes a terminal sends and as tmux key names. Unknown name -> "".
+fn pane_key_bytes(key: text) -> text:
+    if key == "enter":
+        return "\r"
+    if key == "esc":
+        return "\x1b"
+    if key == "tab":
+        return "\t"
+    if key == "space":
+        return " "
+    if key == "up":
+        return "\x1b[A"
+    if key == "down":
+        return "\x1b[B"
+    if key == "ctrl-c":
+        return "\x03"
+    ""
+
+fn pane_key_tmux_name(key: text) -> text:
+    if key == "enter":
+        return "Enter"
+    if key == "esc":
+        return "Escape"
+    if key == "tab":
+        return "Tab"
+    if key == "space":
+        return "Space"
+    if key == "up":
+        return "Up"
+    if key == "down":
+        return "Down"
+    if key == "ctrl-c":
+        return "C-c"
+    ""
+
+# Presses one named key in the pane, without typing any text.
+fn pane_send_key(session: text, pane_id: text, key: text) -> bool:
+    if session == "" or pane_id == "" or pane_key_bytes(key) == "":
+        return false
+    if not _tmux_available():
+        val scope = _smux_scope(session)
+        return smux_send_text(scope.session_id, scope.window_id, pane_id, pane_key_bytes(key)).is_ok()
+    _tmux_ok(["send-keys", "-t", pane_id, pane_key_tmux_name(key)])
+
+# The last `lines` lines the pane's child printed, oldest first. An unknown
+# pane is an empty list, never invented text.
+fn pane_capture(session: text, pane_id: text, lines: i64) -> [text]:
+    var out: [text] = []
+    if session == "" or pane_id == "":
+        return out
+    var raw = ""
+    if not _tmux_available():
+        val scope = _smux_scope(session)
+        val cap = smux_capture(scope.session_id, scope.window_id, pane_id, lines)
+        if cap.is_err():
+            return out
+        raw = cap.unwrap().content
+    else:
+        val result = sosix_run("tmux", pane_capture_argv(pane_id, lines))
+        if result.exit_code != 0:
+            return out
+        raw = result.stdout
+    if raw == "":
+        return out
+    for line in raw.split("\n"):
+        out = out + [line]
+    out
 
 # Returns a Pane with an empty pane_id when the backend cannot spawn - callers
 # check `pane_id != ""`. Nothing fabricated.
 fn pane_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
     val empty = Pane(pane_id: "", title: title, pid: 0, active: false, zoomed: false)
-    if not pane_available():
-        return empty
     if session == "" or cmd == "":
         return empty
-    if _is_windows():
-        if _windows_panes.len() >= WINDOWS_PANE_CAPACITY:
-            return empty
-        val handle = sosix_pty_open(24, 80)
-        if handle < 0:
-            return empty
-        val pid = sosix_pty_spawn(handle, windows_spawn_command_line(cmd, args))
-        if pid <= 0:
-            val _closed = sosix_pty_close(handle)
-            return empty
-        val pane_id = "%w" + _windows_next_pane.to_text()
-        _windows_next_pane = _windows_next_pane + 1
-        val pane = Pane(pane_id: pane_id, title: title, pid: pid,
-            active: _windows_list(session).len() == 0, zoomed: false)
-        _windows_panes = _windows_panes + [WindowsPaneRecord(
-            session: session, pane: pane, pty_handle: handle)]
-        return pane
+    if not _tmux_available():
+        return _smux_spawn(session, title, cmd, args)
     var argv: [text] = []
     if pane_list(session).len() == 0:
         argv = ["new-session", "-d", "-s", session, "-P", "-F", "#{{pane_id}}"]
@@ -330,8 +445,10 @@ fn pane_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
 
 export Pane, PANE_FORMAT
 export pane_parse_line, pane_parse_lines
-export pane_list_argv, pane_select_argv, pane_zoom_argv, pane_kill_argv
+export pane_list_argv, pane_select_argv, pane_zoom_argv, pane_kill_argv, pane_capture_argv
 export pane_send_literal_argv, pane_send_enter_argv
-export windows_quote_arg, windows_command_line, windows_spawn_command_line, WINDOWS_PANE_CAPACITY
-export pane_backend_name, pane_available
-export pane_list, pane_select, pane_zoom, pane_spawn, pane_kill, pane_send
+export windows_quote_arg, windows_command_line, windows_spawn_command_line
+export posix_quote_arg, posix_command_line
+export pane_backend_name
+export pane_list, pane_select, pane_zoom, pane_spawn, pane_kill, pane_send, pane_capture
+export pane_send_key, pane_key_bytes, pane_key_tmux_name

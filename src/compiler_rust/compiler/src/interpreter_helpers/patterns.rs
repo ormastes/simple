@@ -765,7 +765,7 @@ pub(crate) fn handle_method_call_with_self_update(
 /// name. Both stores are kept in step so a later rebuild cannot resurrect the
 /// pre-write value. When the executing module is unknown there is no owner to
 /// key a patch on, so that path keeps the blunt invalidation.
-fn sync_flat_global(name: &str, value: &Value) {
+pub(crate) fn sync_flat_global(name: &str, value: &Value) {
     let present = crate::interpreter::MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
     if !present {
         return;

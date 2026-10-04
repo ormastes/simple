@@ -20,6 +20,21 @@ run_test_suite() {
   printf 'suite %s %s\n' "$1" "$2" >>"$events"
   if [ "$1:$2" = llvm:compiler ]; then return "${suite_code:-0}"; fi
 }
+product_prerequisite_ready() {
+  if [ "$1" = llvm ]; then return "${llvm_prerequisite_code:-0}"; fi
+}
+build_test_product() {
+  printf 'product-build %s %s\n' "$1" "$2" >>"$events"
+  if [ "$1:$2" = llvm:compiler ]; then return "${product_build_code:-0}"; fi
+}
+enumerate_test_product() {
+  printf 'product-enumerate %s %s\n' "$1" "$2" >>"$events"
+  if [ "$1:$2" = llvm:compiler ]; then return "${product_enumerate_code:-0}"; fi
+}
+run_test_product() {
+  printf 'product-run %s %s\n' "$1" "$2" >>"$events"
+  if [ "$1:$2" = llvm:compiler ]; then return "${product_run_code:-0}"; fi
+}
 build_index() {
   printf 'index %s %s\n' "$1" "$2" >>"$events"
   if [ "${stop_after_index:-0}" = 1 ]; then : >"$SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE"; fi
@@ -113,9 +128,53 @@ suite_code=0
 run_case 0
 [ "$(wc -l <"$statuses" | tr -d ' ')" -eq 28 ]
 [ "$(grep -c 'SUCCEEDED' "$statuses")" -eq 28 ]
+# The failed product's children are blocked; unrelated products still finish.
+run_product_case() {
+  : >"$events"
+  : >"$statuses"
+  code=0
+  (managed_dispatch_products) >"$tmp/stdout" 2>"$tmp/stderr" || code=$?
+  [ "$code" -eq "$1" ] || { echo "FAIL: product schedule expected $1, got $code" >&2; exit 1; }
+  [ "$(wc -l <"$statuses" | tr -d ' ')" -eq 18 ]
+}
+run_product_case 0
+[ "$(grep -c 'SUCCEEDED' "$statuses")" -eq 18 ]
+product_build_code=1
+run_product_case 1
+grep -q '^phase4_llvm_product_compiler_build[[:space:]]FAILED' "$statuses"
+grep -q '^phase4_llvm_product_compiler_enumerate[[:space:]]BLOCKED' "$statuses"
+grep -q '^phase4_llvm_product_compiler_run[[:space:]]BLOCKED' "$statuses"
+! grep -q '^product-enumerate llvm compiler$' "$events"
+grep -q '^product-run llvm loader$' "$events"
+grep -q '^phase4_cranelift_product_compiler_run[[:space:]]SUCCEEDED' "$statuses"
+product_build_code=0 product_enumerate_code=1
+run_product_case 1
+grep -q '^phase4_llvm_product_compiler_enumerate[[:space:]]FAILED' "$statuses"
+grep -q '^phase4_llvm_product_compiler_run[[:space:]]BLOCKED' "$statuses"
+! grep -q '^product-run llvm compiler$' "$events"
+grep -q '^product-run llvm loader$' "$events"
+product_enumerate_code=0 product_run_code=1
+run_product_case 1
+grep -q '^phase4_llvm_product_compiler_run[[:space:]]FAILED' "$statuses"
+grep -q '^product-run cranelift loader$' "$events"
+product_run_code=0
+product_build_code=124
+run_product_case 1
+grep -q '^phase4_llvm_product_compiler_build[[:space:]]FAILED' "$statuses"
+grep -q '^product-run cranelift loader$' "$events"
+product_build_code=0 product_enumerate_code=88
+run_product_case 1
+grep -q '^phase4_llvm_product_compiler_enumerate[[:space:]]FAILED' "$statuses"
+grep -q '^product-run cranelift loader$' "$events"
+product_enumerate_code=0 llvm_prerequisite_code=1
+run_product_case 1
+grep -q '^phase4_llvm_product_compiler_build[[:space:]]BLOCKED' "$statuses"
+! grep -q '^product-build llvm compiler$' "$events"
+grep -q '^product-run cranelift loader$' "$events"
+llvm_prerequisite_code=0
 # Phase entry must not dispatch work from its sibling lane.
 : >"$events"; : >"$statuses"
 managed_dispatch_phase phase3
 [ "$(wc -l <"$statuses" | tr -d ' ')" -eq 6 ]
 ! grep -q 'phase4' "$events"
-echo 'PASS: fourteen binaries, six suites and four index/group lanes; qualified failures continue, authority and owner stops abort'
+echo 'PASS: canonical managed schedule unchanged; separate six-product dependencies block locally, owner stops abort'

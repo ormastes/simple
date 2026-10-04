@@ -1,0 +1,82 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-producer-handoff.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+bootstrap_stage3_manifest_value() {
+  awk -v key="$1" 'index($0,key "=")==1 {count++; value=substr($0,length(key)+2)} END {if(count!=1) exit 1; print value}' "$2"
+}
+. "$script_root/lib/provisional-binary-producer.shs"
+root="$tmp/provisional-v1" source_root="$tmp/source"
+hashes="$tmp/hashes" producer="$tmp/phase2" exe_suffix= backend=llvm
+printf 'phase2\n' >"$producer"
+producer_sha=$(hash_file "$producer")
+task_phase=phase3
+provisional_select_binary_producer
+[ "$task_producer" = "$producer" ] || exit 1
+task_phase=phase4
+if provisional_select_binary_producer; then echo 'FAIL missing predecessor accepted'; exit 1; else [ "$?" -eq 20 ]; fi
+
+predecessor="$root/phase3/binaries/llvm/phase3-bootstrap"
+mkdir -p "$predecessor/bin" "$predecessor/state/receipts" "$root/phase4/hello/llvm"
+printf 'phase3\n' >"$predecessor/bin/simple"
+printf 'manager receipt\n' >"$predecessor/state/receipts/phase3-bootstrap-llvm.sdn"
+printf 'manifest\n' >"$predecessor/manifest.sdn"
+phase3_sha=$(hash_file "$predecessor/bin/simple")
+printf 'phase3_llvm_phase3-bootstrap=%s\nphase3_llvm_phase3-bootstrap_manager_receipt_sha256=%s\n' \
+  "$phase3_sha" "$(hash_file "$predecessor/state/receipts/phase3-bootstrap-llvm.sdn")" >"$hashes"
+builder_program="$tmp/verify-builder"
+printf '#!/bin/sh\n[ "$1" = verify ]\n' >"$builder_program"
+chmod +x "$builder_program"
+original_source_snapshot_digest=source-snapshot-test-identity
+handoff_receipt="$root/phase4/hello/llvm/hello.receipt"
+{
+  printf 'format=SIMPLE-PROVISIONAL-HELLO-1\nproducer_path=%s\nproducer_digest=%s\n' \
+    "$predecessor/bin/simple" "$phase3_sha"
+  printf 'source_snapshot_digest=%s\ncompile_exit=0\nrun_exit=0\n' "$original_source_snapshot_digest"
+  for evidence in hello_source hello_executable stdout stderr compile_command compile_log; do
+    printf '%s\n' "$evidence" >"$tmp/$evidence"
+    printf '%s_path=%s\n%s_digest=%s\n' "$evidence" "$tmp/$evidence" "$evidence" "$(hash_file "$tmp/$evidence")"
+  done
+} >"$handoff_receipt"
+provisional_select_binary_producer
+[ "$task_producer" = "$predecessor/bin/simple" ] && [ "$task_producer_sha" = "$phase3_sha" ] || exit 1
+
+# Exercise a fresh handoff through the hello runner boundary. This mock only
+# validates orchestration; it is never used as bootstrap qualification proof.
+repo_root="$tmp/launcher"
+mkdir -p "$repo_root/scripts/bootstrap"
+hello_receipt="$tmp/original-hello"
+printf 'hello_source_path=%s/test/04_smoke/windows_native_hello.spl\nhello_source_digest=fixture\n' "$source_root" >"$hello_receipt"
+original_source_snapshot="$tmp/snapshot" target=x86_64-pc-windows-msvc
+memory_bytes=6000000000 reserve_bytes=17179869184 lifetime_ms=0 memory_policy=monitor
+HANDOFF_TEMPLATE="$tmp/handoff-template" HANDOFF_EXPECTED_PRODUCER="$task_producer"
+export HANDOFF_TEMPLATE HANDOFF_EXPECTED_PRODUCER
+mv "$handoff_receipt" "$HANDOFF_TEMPLATE"
+cat >"$repo_root/scripts/bootstrap/prepare-provisional-hello.shs" <<'EOF'
+#!/bin/sh
+set -eu
+producer= output= timeout= policy=
+for arg in "$@"; do
+  case "$arg" in --producer=*) producer=${arg#*=} ;; --output-root=*) output=${arg#*=} ;; --timeout-seconds=*) timeout=${arg#*=} ;; --memory-policy=*) policy=${arg#*=} ;; esac
+done
+[ "$producer" = "$HANDOFF_EXPECTED_PRODUCER" ] && [ "$timeout:$policy" = 0:monitor ]
+cp "$HANDOFF_TEMPLATE" "$output/hello.receipt"
+EOF
+provisional_select_binary_producer
+[ -f "$handoff_receipt" ] || exit 1
+
+backend=cranelift
+if provisional_select_binary_producer; then echo 'FAIL cross-backend producer accepted'; exit 1; else [ "$?" -eq 20 ]; fi
+backend=llvm
+printf 'changed\n' >>"$tmp/compile_log"
+if provisional_select_binary_producer; then echo 'FAIL changed hello evidence accepted'; exit 1; else [ "$?" -eq 20 ]; fi
+printf 'compile_log\n' >"$tmp/compile_log"
+printf '#!/bin/sh\nexit 1\n' >"$builder_program"
+if provisional_select_binary_producer; then echo 'FAIL failed manager verification accepted'; exit 1; else [ "$?" -eq 20 ]; fi
+printf '#!/bin/sh\n[ "$1" = verify ]\n' >"$builder_program"
+printf 'changed\n' >>"$predecessor/bin/simple"
+if provisional_select_binary_producer; then echo 'FAIL changed predecessor accepted'; exit 1; else [ "$?" -eq 20 ]; fi
+echo 'PASS: Phase 4 selects its verified Phase 3 producer; missing, changed and cross-lane evidence blocks handoff'

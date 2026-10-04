@@ -1,0 +1,151 @@
+# @cover src/os/kernel/boot/fdt_blob.spl
+# @cover src/os/kernel/boot/fdt_console.spl
+#
+# Console UART selection from a real device tree, host-side.
+#
+# Drives the SAME FdtBlob walkers the riscv64 kernel runs in-guest
+# (examples/09_embedded/simple_os/arch/riscv64/nvfs_root_entry.spl) over two
+# blobs:
+#   * fixtures/qemu_virt_rv64.dtb — dumped from qemu-system-riscv64 10.2
+#     `-machine virt,dumpdtb=... -smp 1 -m 512M` (the QEMU NVFS gate's machine);
+#   * fixtures/jh7110_visionfive2_min.dtb — built by dtc from the .dts beside
+#     it, carrying the VisionFive 2's UART/SDIO facts.
+# What it proves: stdout-path resolution (absolute path and alias), reg
+# decoding with the parent's #address-cells/#size-cells, reg-shift/reg-io-width
+# handling, and the 8250 register address math (LSR at base + (5 << shift)).
+# What it cannot prove: that the VisionFive 2 silicon answers at those
+# addresses — that needs the board transcript (bug record
+# doc/08_tracking/bug/simpleos_riscv64_nvfs_root_board_blocked_2026-10-03.md).
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_bytes}
+use os.kernel.boot.fdt_blob.{
+    FdtBlob, fdt_lit, fdt_find_path, fdt_find_compatible, fdt_node_reg,
+    fdt_node_u32, fdt_node_enabled
+}
+use os.kernel.boot.fdt_console.{
+    fdt_uart_console_select, fdt_uart_console_describe, uart_reg_address,
+    uart_lsr_address, uart_thr_address, fdt_uart_kind_ns16550,
+    fdt_uart_kind_dw_apb, fdt_hex
+}
+
+fn _virt() -> FdtBlob:
+    FdtBlob.from_bytes(file_read_bytes("test/01_unit/os/kernel/boot/fixtures/qemu_virt_rv64.dtb"))
+
+fn _vf2() -> FdtBlob:
+    FdtBlob.from_bytes(file_read_bytes("test/01_unit/os/kernel/boot/fixtures/jh7110_visionfive2_min.dtb"))
+
+describe "8250 register address math":
+    it "places byte-wide ns16550 registers at consecutive bytes":
+        expect(uart_reg_address(0x10000000u64, 0u64, 0u64)).to_equal(0x10000000u64)
+        expect(uart_reg_address(0x10000000u64, 0u64, 5u64)).to_equal(0x10000005u64)
+
+    it "spreads DesignWare reg-shift 2 registers 4 bytes apart":
+        expect(uart_reg_address(0x10000000u64, 2u64, 0u64)).to_equal(0x10000000u64)
+        expect(uart_reg_address(0x10000000u64, 2u64, 3u64)).to_equal(0x1000000Cu64)
+        expect(uart_reg_address(0x10000000u64, 2u64, 5u64)).to_equal(0x10000014u64)
+
+    it "formats addresses without a runtime formatter":
+        expect(fdt_hex(0u64)).to_equal("0x0")
+        expect(fdt_hex(0x10000014u64)).to_equal("0x10000014")
+        expect(fdt_hex(0x16020000u64)).to_equal("0x16020000")
+
+describe "FDT walker on the QEMU virt blob":
+    it "accepts the header and finds nodes by absolute path":
+        val blob = _virt()
+        expect(blob.valid()).to_equal(true)
+        expect(fdt_find_path(blob, fdt_lit("/")).found).to_equal(true)
+        expect(fdt_find_path(blob, fdt_lit("/chosen")).found).to_equal(true)
+        expect(fdt_find_path(blob, fdt_lit("/soc/serial@10000000")).found).to_equal(true)
+        expect(fdt_find_path(blob, fdt_lit("/soc/serial@10000001")).found).to_equal(false)
+        expect(fdt_find_path(blob, fdt_lit("/nonexistent")).found).to_equal(false)
+
+    it "decodes a 2-cell reg under /soc":
+        val blob = _virt()
+        val node = fdt_find_path(blob, fdt_lit("/soc/serial@10000000"))
+        val reg = fdt_node_reg(blob, node, 0u64)
+        expect(reg.found).to_equal(true)
+        expect(reg.addr).to_equal(0x10000000u64)
+        expect(reg.size).to_equal(0x100u64)
+
+    it "enumerates the virtio,mmio transports in blob order":
+        val blob = _virt()
+        var after: u64 = 0u64
+        var count: i64 = 0
+        var seen_first = false
+        var node = fdt_find_compatible(blob, ["virtio,mmio"], after)
+        while node.found:
+            val reg = fdt_node_reg(blob, node, 0u64)
+            if reg.addr == 0x10001000u64:
+                seen_first = true
+            count = count + 1
+            after = node.begin_off
+            node = fdt_find_compatible(blob, ["virtio,mmio"], after)
+        expect(count).to_equal(8)
+        expect(seen_first).to_equal(true)
+
+    it "finds no DW MSHC controller (QEMU has no JH7110 model)":
+        val blob = _virt()
+        val node = fdt_find_compatible(blob, ["starfive,jh7110-mmc", "snps,dw-mshc"], 0u64)
+        expect(node.found).to_equal(false)
+
+    it "selects the byte-wide ns16550a console from an absolute stdout-path":
+        val con = fdt_uart_console_select(_virt())
+        expect(con.found).to_equal(true)
+        expect(con.kind).to_equal(fdt_uart_kind_ns16550())
+        expect(con.base).to_equal(0x10000000u64)
+        expect(con.reg_shift).to_equal(0u64)
+        expect(con.reg_io_width).to_equal(1u64)
+        expect(con.via_alias).to_equal(false)
+        expect(uart_lsr_address(con)).to_equal(0x10000005u64)
+        expect(fdt_uart_console_describe(con)).to_equal(
+            "ns16550a base=0x10000000 reg-shift=0 reg-io-width=1 lsr=0x10000005 stdout-path=path")
+
+describe "FDT walker on the JH7110 VisionFive 2 blob":
+    it "resolves stdout-path serial0:115200n8 through /aliases":
+        val con = fdt_uart_console_select(_vf2())
+        expect(con.found).to_equal(true)
+        expect(con.via_alias).to_equal(true)
+        expect(con.kind).to_equal(fdt_uart_kind_dw_apb())
+
+    it "selects the DesignWare 8250 with 32-bit access and register shift 2":
+        val con = fdt_uart_console_select(_vf2())
+        expect(con.base).to_equal(0x10000000u64)
+        expect(con.reg_shift).to_equal(2u64)
+        expect(con.reg_io_width).to_equal(4u64)
+        expect(uart_thr_address(con)).to_equal(0x10000000u64)
+        expect(uart_lsr_address(con)).to_equal(0x10000014u64)
+        expect(fdt_uart_console_describe(con)).to_equal(
+            "snps,dw-apb-uart base=0x10000000 reg-shift=2 reg-io-width=4 lsr=0x10000014 stdout-path=alias")
+
+    it "lists both enabled SDIO controllers, SD slot second, with their DTB facts":
+        val blob = _vf2()
+        val compat = ["starfive,jh7110-mmc", "snps,dw-mshc"]
+        val first = fdt_find_compatible(blob, compat, 0u64)
+        expect(first.found).to_equal(true)
+        expect(fdt_node_reg(blob, first, 0u64).addr).to_equal(0x16010000u64)
+        expect(fdt_node_u32(blob, first, "bus-width", 1u64)).to_equal(8u64)
+        val second = fdt_find_compatible(blob, compat, first.begin_off)
+        expect(second.found).to_equal(true)
+        expect(fdt_node_reg(blob, second, 0u64).addr).to_equal(0x16020000u64)
+        expect(fdt_node_u32(blob, second, "bus-width", 1u64)).to_equal(4u64)
+        expect(fdt_node_u32(blob, second, "fifo-depth", 0u64)).to_equal(32u64)
+        expect(fdt_node_u32(blob, second, "data-addr", 7u64)).to_equal(0u64)
+        expect(fdt_find_compatible(blob, compat, second.begin_off).found).to_equal(false)
+
+    it "skips a disabled node":
+        val blob = _vf2()
+        val uart1 = fdt_find_path(blob, fdt_lit("/soc/serial@10010000"))
+        expect(uart1.found).to_equal(true)
+        expect(fdt_node_enabled(blob, uart1)).to_equal(false)
+        val uart0 = fdt_find_compatible(blob, ["snps,dw-apb-uart"], 0u64)
+        val next = fdt_find_compatible(blob, ["snps,dw-apb-uart"], uart0.begin_off)
+        expect(next.found).to_equal(false)
+
+describe "fail-closed inputs":
+    it "rejects a blob without FDT magic":
+        val junk = FdtBlob.from_bytes([0u8, 1u8, 2u8, 3u8])
+        expect(junk.valid()).to_equal(false)
+        val con = fdt_uart_console_select(junk)
+        expect(con.found).to_equal(false)
+        expect(fdt_uart_console_describe(con)).to_equal("unresolved (no valid FDT)")
