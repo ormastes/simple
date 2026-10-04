@@ -15,6 +15,7 @@ use std.nogc_sync_mut.tui.terminal.{TerminalSize, terminal_stdin_is_tty,
     terminal_stdout_is_tty, terminal_enter_raw_mode, terminal_exit_raw_mode,
     terminal_get_size}
 use std.sys.pty.{read as pty_read}
+use std.nogc_async_mut.sosix.host_facade.{sosix_platform}
 use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
     cs_render, cs_handle_command, cs_apply_action, cs_frame_rows,
     cs_poll_screens, cs_resize_agents, cs_agent_area}
@@ -352,11 +353,17 @@ fn cs_plain_io() -> CaretIo:
         emit: _plain_emit
     )
 
+# The current timed input owner reads POSIX fd 0. On Windows its argument is
+# a registered ConPTY session id (starting at 1), not console stdin. Raw mode
+# support alone therefore does not establish live-input support.
+fn cs_live_input_supported(platform: text, stdin_tty: bool, stdout_tty: bool) -> bool:
+    platform == "posix" and stdin_tty and stdout_tty
+
 # A real terminal gets the live dashboard; a pipe, or a terminal that refuses
 # raw mode, gets the line loop.
 fn main() -> i64:
     val session = cs_session_from_args(get_cli_args())
-    if terminal_stdin_is_tty() and terminal_stdout_is_tty() and terminal_enter_raw_mode():
+    if cs_live_input_supported(sosix_platform(), terminal_stdin_is_tty(), terminal_stdout_is_tty()) and terminal_enter_raw_mode():
         if cs_run_live(session).ok:
             return 0
         return 1
@@ -365,4 +372,4 @@ fn main() -> i64:
         return 0
     1
 
-export cs_run, cs_run_live, cs_live_paint, cs_session_from_args, cs_effective_size, cs_plain_io, CS_DEFAULT_SESSION
+export cs_live_input_supported, cs_run, cs_run_live, cs_live_paint, cs_session_from_args, cs_effective_size, cs_plain_io, CS_DEFAULT_SESSION

@@ -1,5 +1,5 @@
 # CLI main() entry, help text, JIT/native-build dispatch, and flag filtering.
-use app.cli._CliMain.args_and_os_commands.{GlobalFlags, get_cli_args, parse_global_flags,
+use app.cli._CliMain.args_and_os_commands.{GlobalFlags, get_cli_args, get_version, parse_global_flags,
     apply_fault_detection, print_version, print_targets, print_linkers, run_lex_command,
     print_error, print_error_with_help, run_dashboard, run_llm_dashboard}
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
@@ -280,7 +280,16 @@ fn activate_required_child_coverage_apk() -> bool:
     true
 
 
+# Both native products use the same command, argument, error and receipt owner.
+export cli_interpreter_main
+
 fn main() -> i64:
+    cli_main_with_execution_mode(false)
+
+fn cli_interpreter_main() -> i64:
+    cli_main_with_execution_mode(true)
+
+fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
     val selected_k1_policy = selected_k1_backend_policy_v1()
     # env_get is total (unset -> ""), so `??` never supplied this default: an
     # unset SIMPLE_KERNEL_K1_POLICY made every command of a correctly
@@ -326,6 +335,16 @@ fn main() -> i64:
         return 1
 
     val args = cli_clean_log_args(raw_args)
+    if force_interpreter:
+        # Reuse the CLI's own flag filtering; never inspect script arguments as
+        # compilation commands. Reject conflicts before source admission/build.
+        val entry_args = filter_internal_flags(args)
+        if entry_args.len() > 0:
+            val command = entry_args[0]
+            if str_eq(command, "--compile") or str_eq(command, "compile") or str_eq(command, "build") or str_eq(command, "native-build"):
+                print_error("interpreter entry cannot execute a compilation command")
+                return CLI_USAGE_ERROR_EXIT_CODE
+
 
     if args.len() > 0 and str_eq(args[0], "--dynsmf-status"):
         return run_product_dynsmf_status(raw_args, "full-cli")
@@ -358,7 +377,12 @@ fn main() -> i64:
         if check_self_contained():
             return 0
 
-    val flags = parse_global_flags(args)
+    var flags = parse_global_flags(args)
+    if force_interpreter:
+        flags.force_interpret = true
+        flags.no_jit = true
+        # This compiled product must execute its own admitted interpreter.
+        env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", "1")
     apply_fault_detection(flags)
 
     # native-build: pass raw args directly (bypass filter_internal_flags)

@@ -408,7 +408,13 @@ build_index() {
       manager_status=$?
       verify_shared_source
       verify_image_set
-      [ "$manager_status" -eq 1 ] || die "$backend managed index ownership/admission aborted: $manager_status"
+      if [ "$manager_status" -ne 1 ]; then
+        # This proves ownership settlement, never a usable index. The diagnostic
+        # tasks independently admit their source/runtime inputs and consume no index.
+        "$builder_program" verify-settled --manifest "$job_root/manifest.sdn" \
+          --state "$state_root" --source-root "$input_root" --output-root "$output_root" \
+          || die "$backend managed index ownership remains unresolved: $manager_status"
+      fi
       return 1
     }
   "$builder_program" verify --manifest "$job_root/manifest.sdn" \
@@ -518,6 +524,8 @@ trap 'rm -f "$hashes"' EXIT HUP INT TERM
 : >"$hashes"
 statuses="$scratch/task-outcomes.$$.tsv"
 : >"$statuses" || die "task outcome journal unavailable"
+diagnostic_inventory_digest=$(hash_file "$module_inventory") || die "diagnostic inventory pin unavailable"
+. "$repo_root/scripts/bootstrap/lib/managed-smf-diagnostics.shs" || die "managed diagnostic owner unavailable"
 . "$repo_root/scripts/bootstrap/lib/managed-task-schedule.shs" || die "managed scheduler unavailable"
 dispatch_selected() {
   if [ "$finalize_only" -eq 1 ]; then

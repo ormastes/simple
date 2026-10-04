@@ -65,6 +65,71 @@ managed_attempt_modules() {
     managed_result=$?
     [ "$managed_result" -eq 1 ] || return 2
     printf '%s\tBLOCKED\t1\n' "${managed_phase}_${managed_backend}_group" >>"$statuses" || return 2
+    # Independent source tasks consume no failed index. Their own authority
+    # admission may still refuse; their success never repairs the group status.
+    if managed_attempt "${managed_phase}_${managed_backend}_diagnostic_smf" \
+        run_index_independent_diagnostics "$managed_phase" "$managed_backend" "$3"; then :; else
+      managed_result=$?
+      [ "$managed_result" -eq 1 ] || return 2
+    fi
+  fi
+}
+
+# A product is one aggregate executable, not a source-file count or the
+# three-case Phase 4 acceptance suite. Each binary owns its registration list.
+# A qualified build/enumeration failure blocks only that product's dependents.
+managed_product_attempt() {
+  managed_key=$1
+  shift
+  managed_stop_check
+  if ("$@"); then
+    managed_code=0
+    managed_outcome=SUCCEEDED
+  else
+    managed_code=$?
+    case "$managed_code" in
+      2|74|125|143) managed_outcome=ABORTED ;;
+      *) managed_outcome=FAILED ;;
+    esac
+  fi
+  printf '%s\t%s\t%s\n' "$managed_key" "$managed_outcome" "$managed_code" >>"$statuses" || return 2
+  case "$managed_outcome" in
+    SUCCEEDED) return 0 ;;
+    FAILED) managed_failed=1; return 1 ;;
+    *) return 2 ;;
+  esac
+}
+managed_attempt_product() {
+  managed_product_backend=$1 managed_product_suite=$2
+  managed_product_key="phase4_${managed_product_backend}_product_${managed_product_suite}"
+  if product_prerequisite_ready "$managed_product_backend" "$managed_product_suite"; then :; else
+    managed_product_result=$?
+    [ "$managed_product_result" -eq 1 ] || return 2
+    printf '%s\tBLOCKED\t1\n%s\tBLOCKED\t1\n%s\tBLOCKED\t1\n' \
+      "${managed_product_key}_build" "${managed_product_key}_enumerate" \
+      "${managed_product_key}_run" >>"$statuses" || return 2
+    managed_failed=1
+    return 0
+  fi
+  if managed_product_attempt "${managed_product_key}_build" \
+      build_test_product "$managed_product_backend" "$managed_product_suite"; then :; else
+    managed_product_result=$?
+    [ "$managed_product_result" -eq 1 ] || return 2
+    printf '%s\tBLOCKED\t1\n%s\tBLOCKED\t1\n' \
+      "${managed_product_key}_enumerate" "${managed_product_key}_run" >>"$statuses" || return 2
+    return 0
+  fi
+  if managed_product_attempt "${managed_product_key}_enumerate" \
+      enumerate_test_product "$managed_product_backend" "$managed_product_suite"; then :; else
+    managed_product_result=$?
+    [ "$managed_product_result" -eq 1 ] || return 2
+    printf '%s\tBLOCKED\t1\n' "${managed_product_key}_run" >>"$statuses" || return 2
+    return 0
+  fi
+  if managed_product_attempt "${managed_product_key}_run" \
+      run_test_product "$managed_product_backend" "$managed_product_suite"; then :; else
+    managed_product_result=$?
+    [ "$managed_product_result" -eq 1 ] || return 2
   fi
 }
 
@@ -76,7 +141,7 @@ managed_dispatch_phase() {
     managed_attempt_binary phase4 "$managed_backend" bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix" || return 2
     managed_attempt_binary phase4 "$managed_backend" full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix" || return 2
     managed_cli_ready=$managed_code
-    managed_attempt_binary phase4 "$managed_backend" interpreter src/app/interpreter/main.spl "bin/simple_interpreter$exe_suffix" || return 2
+    managed_attempt_binary phase4 "$managed_backend" interpreter src/app/cli/interpreter_main.spl "bin/simple_interpreter$exe_suffix" || return 2
     managed_interpreter_ready=$managed_code
     managed_attempt_binary phase4 "$managed_backend" mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix" || return 2
     managed_attempt_binary phase4 "$managed_backend" lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix" || return 2
@@ -101,6 +166,19 @@ managed_dispatch_phase() {
     managed_attempt_modules phase3 "$managed_backend" "$managed_config" || return 2
     done
   fi
+  [ "$managed_failed" -eq 0 ]
+}
+
+# Invoked only by the separate post-Stage2 six-product evidence entrypoint.
+# Canonical Phase 4 completion keeps its existing compiled-manager boundary.
+managed_dispatch_products() {
+  managed_failed=0
+  for managed_backend in llvm cranelift; do
+    if command -v product_reuse_ready >/dev/null 2>&1 && product_reuse_ready "$managed_backend"; then continue; fi
+    for managed_product in compiler interpreter loader; do
+      managed_attempt_product "$managed_backend" "$managed_product" || return 2
+    done
+  done
   [ "$managed_failed" -eq 0 ]
 }
 

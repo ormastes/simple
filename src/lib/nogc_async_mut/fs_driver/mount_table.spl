@@ -4,7 +4,7 @@ use std.fs_driver.instance.{DriverInstance}
 use std.fs_driver.error.{FsError}
 use std.fs_driver.capability.{Capability, FsCapabilitySet, FS_CAPABILITY_V1}
 use std.common.structural.digest.hash256.{hash256_hex_valid, hash256_is_zero}
-use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new, sha256_stream_v1_reset, sha256_stream_v1_update, sha256_stream_v1_finish_hex}
+use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new}
 use std.fs_driver.mount_table_support.{PositionedDriverKind, POSITIONED_DRIVER_MAX_BYTES, mount_handle_encode,
     mount_handle_slot, mount_handle_generation, MOUNT_TABLE_MAX_PATH_BYTES,
     mount_path_canonical, text_has_mount_prefix,
@@ -648,7 +648,8 @@ impl MountTable:
             val prior = self.stable_snapshots[slot]
             if not prior.active and not prior.retired:
                 val lease_id = mount_handle_encode(slot, prior.generation)
-                sha256_stream_v1_reset(prior.hash_stream)
+                var hash_stream = prior.hash_stream
+                hash_stream.reset()
                 self.stable_snapshots[slot] = StableFileSnapshotBindingV1(
                     active: true, retired: false, generation: prior.generation,
                     lease_id: lease_id, mount_id: mount_id, file_handle: file_handle,
@@ -659,7 +660,7 @@ impl MountTable:
                     file_generation: file_generation,
                     execute_observation: execute_observation, size: size,
                     sealed: false, content_sha256: "",
-                    hash_stream: prior.hash_stream, hash_tracking: false,
+                    hash_stream: hash_stream, hash_tracking: false,
                     hash_next_offset: 0u64, hash_complete: false, hash_invalid: false)
                 return Ok(StableFileSnapshotLeaseV1(id: lease_id))
             slot = slot + 1
@@ -1088,11 +1089,12 @@ impl MountTable:
         if snapshot.hash_tracking:
             return Ok(())
         val slot = mount_handle_slot(lease.id)
-        sha256_stream_v1_reset(snapshot.hash_stream)
+        var hash_stream = snapshot.hash_stream
+        hash_stream.reset()
         var tracked = self.stable_snapshots[slot]
         # Store the stream that was reset: a bound copy of the row may not
         # alias the row's stream object, so the row must receive it back.
-        tracked.hash_stream = snapshot.hash_stream
+        tracked.hash_stream = hash_stream
         tracked.hash_tracking = true
         tracked.hash_next_offset = 0u64
         tracked.hash_complete = snapshot.size == 0u64
@@ -1129,12 +1131,13 @@ impl MountTable:
         val slot = mount_handle_slot(lease.id)
         if snapshot.hash_tracking:
             var tracked = self.stable_snapshots[slot]
+            var hash_stream = snapshot.hash_stream
             if offset != snapshot.hash_next_offset or chunk.len() != bounded:
                 tracked.hash_invalid = true
-            else if not sha256_stream_v1_update(snapshot.hash_stream, chunk):
+            else if not hash_stream.update(chunk):
                 tracked.hash_invalid = true
             else:
-                tracked.hash_stream = snapshot.hash_stream
+                tracked.hash_stream = hash_stream
                 val next = offset + chunk.len()
                 tracked.hash_next_offset = next
                 tracked.hash_complete = next == snapshot.size
@@ -1173,7 +1176,8 @@ impl MountTable:
         else:
             val slot = mount_handle_slot(lease.id)
             var finished = self.stable_snapshots[slot]
-            val computed = match sha256_stream_v1_finish_hex(snapshot.hash_stream):
+            var hash_stream = snapshot.hash_stream
+            val computed = match hash_stream.finish_hex():
                 case nil:
                     finished.hash_invalid = true
                     self.stable_snapshots[slot] = finished
@@ -1183,7 +1187,7 @@ impl MountTable:
                 finished.hash_invalid = true
                 self.stable_snapshots[slot] = finished
                 return Err(FsError.Corrupt)
-            finished.hash_stream = snapshot.hash_stream
+            finished.hash_stream = hash_stream
             finished.sealed = true
             finished.content_sha256 = computed
             self.stable_snapshots[slot] = finished

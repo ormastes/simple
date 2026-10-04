@@ -259,13 +259,27 @@ impl<'a> Parser<'a> {
                 // Single-line form: fn name(): expr
                 // Parse the expression as the function body
                 let expr_start = self.current.span;
-                let expr = self.parse_expression()?;
-                let expr_end = self.previous.span;
+                // `fn f(): return x` / `break` / `continue` / `pass` are statements,
+                // not expressions: route through the statement parser.
+                let body = if matches!(
+                    self.current.kind,
+                    TokenKind::Return | TokenKind::Break | TokenKind::Continue | TokenKind::Pass
+                ) {
+                    let stmt = self.parse_item()?;
+                    let expr_end = self.previous.span;
+                    Block {
+                        span: Span::new(expr_start.start, expr_end.end, expr_start.line, expr_start.column),
+                        statements: vec![stmt],
+                    }
+                } else {
+                    let expr = self.parse_expression()?;
+                    let expr_end = self.previous.span;
 
-                // Wrap the expression in a Block with a single Expression statement
-                let body = Block {
-                    span: Span::new(expr_start.start, expr_end.end, expr_start.line, expr_start.column),
-                    statements: vec![Node::Expression(expr)],
+                    // Wrap the expression in a Block with a single Expression statement
+                    Block {
+                        span: Span::new(expr_start.start, expr_end.end, expr_start.line, expr_start.column),
+                        statements: vec![Node::Expression(expr)],
+                    }
                 };
 
                 // Single-line functions don't support contracts or bounds blocks

@@ -155,45 +155,47 @@ fn _json_decode_string(s: text) -> text:
     2-byte character), so a 1-unit .slice() walk corrupts every
     multi-byte character. Bracket slices return whole characters there.
     """
-    var out = ""
+    # PERF: parts-array + single join — `out = out + piece` re-copies the
+    # whole accumulated string per character, O(n^2) on large payloads.
+    var parts: [text] = []
     var i = 1
     while true:
         val ch = s[i:i + 1]
         if ch == "" or ch == "\"":
-            return out
+            return parts.join("")
         if ch != "\\":
-            out = out + ch
+            parts.push(ch)
             i = i + 1
         else:
             val esc = s[i + 1:i + 2]
             if esc == "\"":
-                out = out + "\""
+                parts.push("\"")
                 i = i + 2
             else if esc == "\\":
-                out = out + "\\"
+                parts.push("\\")
                 i = i + 2
             else if esc == "/":
-                out = out + "/"
+                parts.push("/")
                 i = i + 2
             else if esc == "b":
-                out = out + "\b"
+                parts.push("\b")
                 i = i + 2
             else if esc == "f":
-                out = out + "\f"
+                parts.push("\f")
                 i = i + 2
             else if esc == "n":
-                out = out + "\n"
+                parts.push("\n")
                 i = i + 2
             else if esc == "r":
-                out = out + "\r"
+                parts.push("\r")
                 i = i + 2
             else if esc == "t":
-                out = out + "\t"
+                parts.push("\t")
                 i = i + 2
             else if esc == "u":
                 val hi = _json_hex4(s, i + 2)
                 if hi < 0:
-                    out = out + 65533.chr()
+                    parts.push(65533.chr())
                     i = i + 6
                 else if hi >= 0xD800 and hi <= 0xDBFF:
                     var lo = -1
@@ -201,24 +203,24 @@ fn _json_decode_string(s: text) -> text:
                         lo = _json_hex4(s, i + 8)
                     if lo >= 0xDC00 and lo <= 0xDFFF:
                         val combined = 0x10000 + ((hi - 0xD800) * 1024) + (lo - 0xDC00)
-                        out = out + combined.chr()
+                        parts.push(combined.chr())
                         i = i + 12
                     else:
-                        out = out + 65533.chr()
+                        parts.push(65533.chr())
                         i = i + 6
                 else if hi >= 0xDC00 and hi <= 0xDFFF:
-                    out = out + 65533.chr()
+                    parts.push(65533.chr())
                     i = i + 6
                 else:
-                    out = out + hi.chr()
+                    parts.push(hi.chr())
                     i = i + 6
             else if esc == "":
                 # Trailing lone backslash at end of input.
-                return out
+                return parts.join("")
             else:
                 # Unknown escape: keep the escaped character (JS-engine
                 # leniency; strict JSON would reject earlier).
-                out = out + esc
+                parts.push(esc)
                 i = i + 2
 
 fn json_is_valid(text: text) -> bool:

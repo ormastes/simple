@@ -1,0 +1,66 @@
+#!/bin/sh
+# Focused ledger validation fixture. A synthetic span tests the adapter's
+# boundary checks; it is never used as evidence for an authentic test owner.
+set -eu
+
+case "${1-}" in
+  --binary=*) adapter_binary=${1#--binary=} ;;
+  *) echo 'usage: check-compiler-subsystem-main-verdict-adapter.shs --binary=ADMITTED_NATIVE_ADAPTER' >&2; exit 2 ;;
+esac
+[ -x "$adapter_binary" ] || { echo 'adapter binary is not executable' >&2; exit 2; }
+
+fixture_root=$(mktemp -d "${TMPDIR:-/tmp}/simple-main-verdict.XXXXXX")
+trap 'rm -rf -- "$fixture_root"' EXIT HUP INT TERM
+source_root="$fixture_root/source"
+owner=test/01_unit/compiler/main_verdict_fixture_spec.spl
+mkdir -p "$source_root/test/01_unit/compiler" "$source_root/config/check"
+cat > "$source_root/$owner" <<'SOURCE'
+fn main() -> i64:
+    0
+SOURCE
+
+sha_file() {
+  perl -MDigest::SHA=sha256_hex -e 'local $/; open my $fh, "<:raw", $ARGV[0] or die $!; print sha256_hex(<$fh>)' "$1"
+}
+owner_sha=$(sha_file "$source_root/$owner")
+owner_size=$(wc -c < "$source_root/$owner" | tr -d ' ')
+inventory="$fixture_root/inventory.tsv"
+spans="$fixture_root/spans.tsv"
+policy="$source_root/config/check/compiler_subsystem_main_verdict_policy.tsv"
+printf 'subsystem\tlevel\tpath\tsha256\ncompiler\t01_unit\t%s\t%s\n' "$owner" "$owner_sha" > "$inventory"
+inventory_sha=$(sha_file "$inventory")
+printf 'simple-subsystem-source-spans-v1\tcompiler\t%s\nowner\t%s\t%s\t1\ndecl\t%s\t0\t1\tmain\t0\t%s\ncomplete\t1\n' \
+  "$inventory_sha" "$owner" "$owner_sha" "$owner" "$owner_size" > "$spans"
+printf 'owner-main-policy-v1\tsubsystem\tpath\tsha256\tverdict-kind\tevidence-id\treason\ncompiler\t%s\t%s\texit-zero\tfixture-i64-zero\t-\ncomplete\t1\n' \
+  "$owner" "$owner_sha" > "$policy"
+
+"$adapter_binary" "--source-root=$source_root" "--inventory=$inventory" \
+  "--spans=$spans" "--output=$fixture_root/valid.tsv" >/dev/null
+grep -F "owner	$owner	$owner_sha	0	exit-zero	fixture-i64-zero	-" "$fixture_root/valid.tsv" >/dev/null
+grep -Fx 'complete	1' "$fixture_root/valid.tsv" >/dev/null
+
+# An unsupported owner is retained in the ledger and returns failure.
+printf 'owner-main-policy-v1\tsubsystem\tpath\tsha256\tverdict-kind\tevidence-id\treason\ncompiler\t%s\t%s\tunsupported\t-\tno-runtime-oracle\ncomplete\t1\n' \
+  "$owner" "$owner_sha" > "$policy"
+if "$adapter_binary" "--source-root=$source_root" "--inventory=$inventory" \
+     "--spans=$spans" "--output=$fixture_root/unsupported.tsv" >/dev/null; then
+  echo 'unsupported owner was accepted' >&2
+  exit 1
+else
+  verdict_status=$?
+fi
+[ "$verdict_status" -eq 1 ] || { echo 'unsupported owner returned wrong status' >&2; exit 1; }
+grep -F "owner	$owner	$owner_sha	0	unsupported	-	no-runtime-oracle" "$fixture_root/unsupported.tsv" >/dev/null
+
+# A source ledger bound to the wrong inventory must not produce output.
+sed "1s/$inventory_sha/0000000000000000000000000000000000000000000000000000000000000000/" "$spans" > "$fixture_root/stale-spans.tsv"
+if "$adapter_binary" "--source-root=$source_root" "--inventory=$inventory" \
+     "--spans=$fixture_root/stale-spans.tsv" "--output=$fixture_root/stale.tsv" >/dev/null; then
+  echo 'stale parser ledger was accepted' >&2
+  exit 1
+else
+  verdict_status=$?
+fi
+[ "$verdict_status" -eq 2 ] || { echo 'stale parser ledger returned wrong status' >&2; exit 1; }
+[ ! -e "$fixture_root/stale.tsv" ] || { echo 'stale parser ledger wrote output' >&2; exit 1; }
+echo 'STATUS: PASS compiler-subsystem-main-verdict-adapter'

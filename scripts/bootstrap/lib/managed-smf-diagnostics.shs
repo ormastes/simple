@@ -1,0 +1,158 @@
+#!/bin/sh
+# Persistent index-free diagnostics: one admitted source epoch per partition.
+# Only small config inputs are staged; source authority is replayed by the
+# compiled adapter and every consumed entry/import buffer by its source owner.
+managed_smf_diagnostic_task() (
+  phase=$1 backend=$2 partition=$3 reservation=$4 config=$5 partitions=$6
+  task_id="diagnostic-$phase-$backend-$partition"
+  job_root="$root/$phase/diagnostic-smf/$backend/partition-$partition"
+  inputs="$job_root/inputs"
+  mkdir -p "$inputs" "$job_root/state" "$job_root/cache" || exit 2
+  disk_preflight "$job_root"
+  if [ -e "$inputs/index.config" ]; then
+    cmp -s "$config" "$inputs/index.config" || exit 2
+  else
+    cp "$config" "$inputs/index.config" || exit 2
+  fi
+  printf 'index.config\n' >"$inputs/source.inventory"
+  : >"$inputs/links.inventory"
+  pending="$job_root/manifest.pending.sdn"
+  [ ! -e "$pending" ] || exit 2
+  "$manifest_program" --job-from-inventory "$template" "$index_program" "$inputs" \
+    "$task_id" "$phase" diagnostic/result.sdn source.inventory \
+    --memory-limit-bytes "$reservation" --links-inventory links.inventory \
+    --work-timeout-ms "$lifetime_ms" --memory-policy "$memory_policy" \
+    --manifest "$pending" -- native-groups-diagnostic-build --manager-work \
+    --config index.config --partition "$partition" --partitions "$partitions" \
+    --receipt @WORK@/diagnostic/result.sdn || exit 2
+  if [ -e "$job_root/manifest.sdn" ]; then
+    cmp -s "$pending" "$job_root/manifest.sdn" || exit 2
+    rm -f "$pending"
+  else
+    mv "$pending" "$job_root/manifest.sdn" || exit 2
+  fi
+  require_current_manifest "$job_root/manifest.sdn"
+  export SIMPLE_CACHE="$job_root/cache" SIMPLE_BINARY="$producer" SIMPLE_NATIVE_BUILD_RUST=0
+  export SIMPLE_MANAGED_NATIVE_TOOLS=1
+  export SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH="$tool_authority"
+  export SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256="$tool_authority_digest"
+  export SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH="$runtime_authority"
+  export SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH="$runtime_snapshot"
+  export SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256="$runtime_snapshot_digest"
+  export SIMPLE_SHARED_PARSE_CAS_ROOT="$shared_parse_cas_root"
+  export SIMPLE_SHARED_PARSE_SOURCE_ROOT="$source_root"
+  export SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_PATH="$source_authority"
+  export SIMPLE_SHARED_PARSE_SOURCE_AUTHORITY_DIGEST="$source_authority_digest"
+  export SIMPLE_BUILD_PRESPAWN_REQUIRED_MEMORY_BYTES="$((reservation + reserve_bytes))"
+  code=0
+  "$builder_program" run --manifest "$job_root/manifest.sdn" \
+    --state "$job_root/state" --source-root "$inputs" --output-root "$job_root" \
+    >"$job_root/manager.stdout.log" 2>"$job_root/manager.stderr.log" || code=$?
+  if [ "$code" -ne 0 ]; then
+    # Expected/started/terminal rows remain in the owned attempt. A missing
+    # final summary is INCOMPLETE, never all-failed or all-attempted.
+    printf 'partition=%s\nstatus=incomplete\nmanager_exit=%s\n' "$partition" "$code" >"$job_root/partition.env"
+    exit 2
+  fi
+  "$builder_program" verify --manifest "$job_root/manifest.sdn" \
+    --state "$job_root/state" --source-root "$inputs" --output-root "$job_root" \
+    >"$job_root/verify.stdout.log" 2>"$job_root/verify.stderr.log" || exit 2
+  "$index_program" native-groups-diagnostic-verify --config "$inputs/index.config" \
+    --receipt "$job_root/diagnostic/result.sdn" --partition "$partition" --partitions "$partitions" \
+    >"$job_root/coverage.stdout.log" 2>"$job_root/coverage.stderr.log" || exit 2
+  printf 'partition=%s\nstatus=diagnostic-traversal-complete\nproduct_qualified=0\n' "$partition" >"$job_root/partition.env"
+)
+
+managed_smf_diagnostic_admit() {
+  verify_shared_source
+  verify_image_set
+  [ "$(hash_file "$producer")" = "$producer_sha" ] &&
+    [ "$(hash_file "$runtime_snapshot")" = "$runtime_snapshot_digest" ] &&
+    [ "$(hash_file "$module_inventory")" = "$diagnostic_inventory_digest" ] || return 2
+  sh "$shared_parse_root_check" "$shared_parse_cas_root" "$shared_parse_cas_root" || return 2
+  sh "$shared_parse_source_check" "$source_authority" "$source_authority_digest" || return 2
+}
+managed_smf_diagnostic_cancel() {
+  [ -n "$diagnostic_pids" ] || return 0
+  cleanup_error=0
+  # Signal the existing compiled manager control protocol, never guessed PIDs.
+  while IFS= read -r state; do
+    [ -n "$state" ] || continue
+    mkdir -p "$state" && : >"$state/cancel.request" || cleanup_error=2
+  done <"$diagnostic_wave_states"
+  remaining=30
+  while [ "$remaining" -gt 0 ]; do
+    live=0
+    for child in $diagnostic_pids; do kill -0 "$child" 2>/dev/null && live=1; done
+    [ "$live" -ne 0 ] || break
+    sleep 1
+    remaining=$((remaining - 1))
+  done
+  if [ "$live" -ne 0 ]; then
+    echo "diagnostic manager cleanup unresolved; retained states: $diagnostic_wave_states" >&2
+    return 2
+  fi
+  for child in $diagnostic_pids; do wait "$child" || :; done
+  diagnostic_pids=
+  # Callback disappearance is not a claim about compiler descendants. Failed
+  # manager settlement remains an incomplete partition for the enclosing owner.
+  return "$cleanup_error"
+}
+
+run_index_independent_diagnostics() (
+  diagnostic_phase=$1 diagnostic_backend=$2 diagnostic_config=$3
+  diagnostic_pids=
+  diagnostic_wave_states="$root/$diagnostic_phase/diagnostic-smf/$diagnostic_backend/wave.states"
+  mkdir -p "$(dirname -- "$diagnostic_wave_states")" || return 2
+  : >"$diagnostic_wave_states" || return 2
+  trap 'code=$?; trap - EXIT HUP INT TERM; managed_smf_diagnostic_cancel || code=2; exit "$code"' EXIT
+  trap 'exit 143' HUP INT TERM
+  diagnostic_workers=$threads
+  [ "$diagnostic_workers" -ge 1 ] && [ "$diagnostic_workers" -le 80 ] || return 2
+  diagnostic_reservation=$((memory_bytes / diagnostic_workers))
+  [ "$diagnostic_reservation" -gt 0 ] || return 2
+  managed_stop_check
+  managed_smf_diagnostic_admit || return 2
+  diagnostic_control=$(mktemp -d "$(dirname -- "$diagnostic_wave_states")/dispatch.XXXXXX") || return 2
+  partition=0
+  while [ "$partition" -lt "$diagnostic_workers" ]; do
+    printf '%s\n' "$root/$diagnostic_phase/diagnostic-smf/$diagnostic_backend/partition-$partition/state" >>"$diagnostic_wave_states" || return 2
+    (
+      code=0
+      (managed_smf_diagnostic_task "$diagnostic_phase" "$diagnostic_backend" "$partition" \
+        "$diagnostic_reservation" "$diagnostic_config" "$diagnostic_workers") || code=$?
+      # Control-only notification; completion authority remains the compiled
+      # manager's typed receipt and its verification inside the task callback.
+      printf '%s\n' "$code" >"$diagnostic_control/$partition.pending" || exit 2
+      mv "$diagnostic_control/$partition.pending" "$diagnostic_control/$partition.done" || exit 2
+      exit "$code"
+    ) &
+    diagnostic_pids="$diagnostic_pids $!"
+    printf '%s %s\n' "$!" "$partition" >>"$diagnostic_control/children" || return 2
+    partition=$((partition + 1))
+  done
+  while :; do
+    managed_stop_check
+    diagnostic_pending=0
+    while read -r child partition; do
+      if [ -f "$diagnostic_control/$partition.done" ]; then
+        read -r code <"$diagnostic_control/$partition.done" || return 2
+        [ "$code" = 0 ] || return 2
+      elif kill -0 "$child" 2>/dev/null; then
+        diagnostic_pending=1
+      else
+        # Death without a terminal notification is incomplete, never success.
+        return 2
+      fi
+    done <"$diagnostic_control/children"
+    [ "$diagnostic_pending" -ne 0 ] || break
+    sleep 1
+  done
+  for child in $diagnostic_pids; do
+    wait "$child" || return 2
+  done
+  diagnostic_pids=
+  managed_smf_diagnostic_admit || return 2
+  # The caller retains the index failure and BLOCKED native group independently.
+  return 0
+)

@@ -1,3 +1,5 @@
+use app.buildrunner.database_session.{BuildRunnerDatabaseSessionV1, build_runner_database_session_open_v1}
+use std.common.task_runner.scheduler.{task_runner_start}
 # One compiled parent owns both phase reservations and real worker transports.
 # This is not a second host policy: all physical/commit/disk/CPU arithmetic is
 # delegated to the existing grouped-process policy. The shell bridge does not
@@ -57,7 +59,7 @@ fn managed_phase_budget_v1(policy: ManagedPhasePolicyV1,
             policy.task_limit_bytes < 1 or policy.task_limit_bytes > maximum or
             policy.owner_memory_bytes < 1 or policy.owner_memory_bytes > maximum or
             policy.host_reserve_bytes < 0 or policy.host_reserve_bytes > maximum or
-            policy.disk_reserve_bytes < 0 or active.len() > 1:
+            policy.disk_reserve_bytes < 0 or active.len() > 255:
         return Err("invalid managed phase policy")
     if policy.commit_required and not sample.commit_measured:
         return Err("aggregate phase admission requires measured commit headroom")
@@ -88,6 +90,31 @@ fn managed_phase_budget_v1(policy: ManagedPhasePolicyV1,
     if not disk.admitted: return Ok("RESOURCE_WAIT: aggregate disk growth")
     Ok("")
 
+fn managed_phase_legacy_inventory_v1(tasks: [BuildTaskV1]) -> bool:
+    tasks.len() == 2 and tasks[0].phase == "phase3" and tasks[1].phase == "phase4" and
+        tasks[0].dependencies.len() == 0 and tasks[1].dependencies.len() == 0
+
+fn managed_phase_task_root_v2(root: text, tasks: [BuildTaskV1], index: i64) -> text:
+    root + "/" + (if managed_phase_legacy_inventory_v1(tasks): tasks[index].phase else: tasks[index].id)
+
+fn managed_phase_dependency_state_v2(owner: ManagedPhaseAdmissionV1, index: i64) -> Result<text, text>:
+    for dependency in owner.tasks[index].dependencies:
+        var found = -1
+        for i in 0..index:
+            if owner.tasks[i].id == dependency: found = i
+        if found < 0: return Err("dependency is outside ordered manifest inventory")
+        if owner.states[found] == "DEPENDENCY_BLOCKED": return Ok("DEPENDENCY_BLOCKED")
+        if owner.states[found] != "REAPED": return Ok("DEPENDENCY_WAIT")
+        if owner.attempts[found] == nil: return Err("dependency has no retained transport")
+        val result = builder_transport_collect_v1(owner.attempts[found]!)?
+        val invalid = builder_validate_result_v1(owner.tasks[found], result)
+        if invalid != "": return Err(invalid)
+        val classification = builder_failure_class_v1(result.status, result.exit_code, true)
+        if classification == "infrastructure-abort": return Err("dependency authority unresolved")
+        if classification != "complete": return Ok("DEPENDENCY_BLOCKED")
+        val _outputs = managed_phase_verify_task_v2(owner, found)?
+    Ok("READY")
+
 class ManagedPhaseAdmissionV1:
     root: text
     source_root: text
@@ -105,8 +132,10 @@ class ManagedPhaseAdmissionV1:
 
 impl ManagedPhaseAdmissionV1:
     fn snapshot() -> text:
-        var payload = "SIMPLE-MANAGED-PHASE-RESERVATIONS-1\n"
+        val legacy = managed_phase_legacy_inventory_v1(self.tasks)
+        var payload = if legacy: "SIMPLE-MANAGED-PHASE-RESERVATIONS-1\n" else: "SIMPLE-MANAGED-PHASE-RESERVATIONS-2\n"
         payload = payload + self.authority_digest + "\n"
+        if not legacy: payload = payload + str(self.tasks.len()) + "\n"
         payload = payload + str(self.policy.aggregate_limit_bytes) + "\n"
         payload = payload + str(self.policy.task_limit_bytes) + "\n"
         payload = payload + str(self.policy.owner_memory_bytes) + "\n"
@@ -114,7 +143,7 @@ impl ManagedPhaseAdmissionV1:
         payload = payload + str(self.policy.disk_reserve_bytes) + "\n"
         payload = payload + str(self.policy.cpu_count) + "\n"
         payload = payload + (if self.policy.commit_required: "1\n" else: "0\n")
-        for i in 0..2:
+        for i in 0..self.tasks.len():
             val row = self.resources[i]
             payload = payload + self.tasks[i].phase + "\n" + builder_task_identity_v1(self.tasks[i]) + "\n"
             payload = payload + self.states[i] + "\n" + str(row.memory_limit_bytes) + "\n"
@@ -128,11 +157,17 @@ impl ManagedPhaseAdmissionV1:
         file_atomic_write(self.root + "/phase-reservations.sdn", self.snapshot())
 
     me try_start(index: i64) -> Result<text, text>:
-        if self.lock < 0 or index < 0 or index > 1: return Err("invalid phase owner/index")
+        if self.lock < 0 or index < 0 or index >= self.tasks.len(): return Err("invalid phase owner/index")
         if self.states[index] != "PENDING" and self.states[index] != "RESOURCE_WAIT":
             return Err("phase is not pending")
+        val dependencies = managed_phase_dependency_state_v2(self, index)?
+        if dependencies == "DEPENDENCY_WAIT": return Ok(dependencies)
+        if dependencies == "DEPENDENCY_BLOCKED":
+            self.states[index] = dependencies
+            if not self.persist(): return Err("cannot persist blocked dependency")
+            return Ok(dependencies)
         var active: [ManagedPhaseResourceV1] = []
-        for i in 0..2:
+        for i in 0..self.tasks.len():
             if self.states[i] == "OWNERSHIP_UNKNOWN" or self.states[i] == "ADMITTING":
                 return Err("unresolved phase ownership blocks admission")
             if self.states[i] == "RUNNING" or self.states[i] == "COLLECTED":
@@ -151,7 +186,7 @@ impl ManagedPhaseAdmissionV1:
         # Reserve BEFORE staging/launch, under the one lifetime owner lock.
         self.states[index] = "ADMITTING"
         if not self.persist(): return Err("cannot persist phase reservation")
-        val phase_root = self.root + "/" + self.tasks[index].phase
+        val phase_root = managed_phase_task_root_v2(self.root, self.tasks, index)
         val attempt = builder_transport_start_v1(self.tasks[index], self.host,
             self.source_root, phase_root, self.process)
         self.attempts[index] = Some(attempt)
@@ -170,7 +205,7 @@ impl ManagedPhaseAdmissionV1:
         reason
 
     me collect(index: i64) -> Result<BuildResultV1?, text>:
-        if self.lock < 0 or index < 0 or index > 1: return Err("invalid phase owner/index")
+        if self.lock < 0 or index < 0 or index >= self.tasks.len(): return Err("invalid phase owner/index")
         if (self.states[index] != "RUNNING" and self.states[index] != "COLLECTED") or self.attempts[index] == nil:
             return Err("phase is not running")
         val attempt = self.attempts[index]!
@@ -191,7 +226,7 @@ impl ManagedPhaseAdmissionV1:
         Ok(Some(result))
 
     me release(index: i64) -> bool:
-        if self.lock < 0 or index < 0 or index > 1 or self.attempts[index] == nil: return false
+        if self.lock < 0 or index < 0 or index >= self.tasks.len() or self.attempts[index] == nil: return false
         if self.states[index] != "COLLECTED" and self.states[index] != "REAPED": return false
         # Idempotent only for this exact owned task/attempt/host; never use a
         # caller's PID or an unrelated terminal process to discharge capacity.
@@ -209,12 +244,12 @@ impl ManagedPhaseAdmissionV1:
         var complete = true
         # Notify both local workers before waiting on either owned tree. A
         # slow first reap must not leave its sibling running without a stop.
-        for i in 0..2:
+        for i in 0..self.tasks.len():
             if self.states[i] == "RUNNING" or self.states[i] == "COLLECTED" or self.states[i] == "OWNERSHIP_UNKNOWN" or self.states[i] == "ADMITTING":
                 if val attempt = self.attempts[i]:
                     if not file_atomic_write(attempt.local_root + "/cancel.request", "cancel\n"):
                         complete = false
-        for i in 0..2:
+        for i in 0..self.tasks.len():
             if self.states[i] == "RUNNING" or self.states[i] == "COLLECTED" or self.states[i] == "OWNERSHIP_UNKNOWN" or self.states[i] == "ADMITTING":
                 if self.attempts[i] == nil:
                     complete = false
@@ -227,7 +262,7 @@ impl ManagedPhaseAdmissionV1:
                     self.states[i] = "OWNERSHIP_UNKNOWN"
                     complete = false
         if not self.persist():
-            for i in 0..2:
+            for i in 0..self.tasks.len():
                 if self.states[i] != "PENDING" and self.states[i] != "RESOURCE_WAIT":
                     self.states[i] = "OWNERSHIP_UNKNOWN"
             return false
@@ -245,17 +280,22 @@ fn managed_phase_authority_valid_v1(root: text, source_root: text,
         policy: ManagedPhasePolicyV1, tasks: [BuildTaskV1],
         resources: [ManagedPhaseResourceV1], host: BuildHostV1,
         authority_digest: text) -> Result<bool, text>:
-    if tasks.len() != 2 or resources.len() != 2 or host.transport != "local":
-        return Err("exactly two local phase tasks required")
+    if tasks.len() < 1 or tasks.len() > 256 or resources.len() != tasks.len() or host.transport != "local":
+        return Err("bounded matching local task inventory required")
     if not builder_digest_valid_v1(authority_digest): return Err("invalid phase authority digest")
     if builder_validate_host_v1(host) != "": return Err("invalid phase host")
-    if tasks[0].phase != "phase3" or tasks[1].phase != "phase4" or tasks[0].id == tasks[1].id or
-            tasks[0].cache_key == tasks[1].cache_key:
-        return Err("phase identities and writable caches must be distinct")
-    for i in 0..2:
-        if builder_validate_task_v1(tasks[i]) != "" or tasks[i].dependencies.len() != 0 or
+    var seen: Dict<text, bool> = {}
+    var caches: Dict<text, bool> = {}
+    for i in 0..tasks.len():
+        if builder_validate_task_v1(tasks[i]) != "" or
                 tasks[i].memory_limit_bytes != resources[i].memory_limit_bytes:
             return Err("phase task differs from admitted resource limit")
+        if seen.contains_key(tasks[i].id) or caches.contains_key(tasks[i].cache_key):
+            return Err("phase identities and writable caches must be distinct")
+        for dependency in tasks[i].dependencies:
+            if not seen.contains_key(dependency): return Err("task inventory must be topologically ordered")
+        seen[tasks[i].id] = true
+        caches[tasks[i].cache_key] = true
     val canonical = path_absolute(root).replace("\\", "/").lower()
     val source = path_absolute(source_root).replace("\\", "/").lower()
     if canonical == "" or source == "" or canonical == source or
@@ -277,8 +317,11 @@ fn managed_phase_admission_open_v1(root: text, source_root: text,
     val lock = file_lock(root + "/phase-owner.lock", 1)
     if lock < 0: return Err("another parent owns phase admission")
     var owner = ManagedPhaseAdmissionV1(root, source_root, lock, policy, tasks,
-        resources, host, process, capacity, ["PENDING", "PENDING"], [nil, nil],
-        [NativeGroupedCapacitySampleV1(0, 0, 0, false), NativeGroupedCapacitySampleV1(0, 0, 0, false)], authority_digest)
+        resources, host, process, capacity, [], [], [], authority_digest)
+    for task in tasks:
+        owner.states = owner.states.push("PENDING")
+        owner.attempts = owner.attempts.push(nil)
+        owner.samples = owner.samples.push(NativeGroupedCapacitySampleV1(0, 0, 0, false))
     val sample = match capacity.probe(root):
         Ok(value): value
         Err(reason):
@@ -306,9 +349,13 @@ export managed_phase_budget_v1, managed_phase_admission_open_v1
 
 fn managed_phase_restore_journal_v1(owner: ManagedPhaseAdmissionV1, payload: text) -> Result<bool, text>:
     var reader = BuilderWireReaderV1.create(payload)
-    if reader.scalar() != "SIMPLE-MANAGED-PHASE-RESERVATIONS-1" or
-            reader.scalar() != owner.authority_digest:
-        return Err("phase recovery authority differs")
+    val header = reader.scalar()
+    if header != "SIMPLE-MANAGED-PHASE-RESERVATIONS-1" and header != "SIMPLE-MANAGED-PHASE-RESERVATIONS-2":
+        return Err("phase recovery schema differs")
+    if reader.scalar() != owner.authority_digest: return Err("phase recovery authority differs")
+    if header == "SIMPLE-MANAGED-PHASE-RESERVATIONS-1":
+        if not managed_phase_legacy_inventory_v1(owner.tasks): return Err("legacy phase inventory differs")
+    elif reader.number(256, false) != owner.tasks.len(): return Err("phase recovery inventory count differs")
     val maximum: i64 = 1125899906842624
     for expected in [owner.policy.aggregate_limit_bytes, owner.policy.task_limit_bytes,
             owner.policy.owner_memory_bytes, owner.policy.host_reserve_bytes,
@@ -317,12 +364,12 @@ fn managed_phase_restore_journal_v1(owner: ManagedPhaseAdmissionV1, payload: tex
         if reader.number(maximum, false) != expected: return Err("phase recovery policy differs")
     var states: [text] = []
     var samples: [NativeGroupedCapacitySampleV1] = []
-    for i in 0..2:
+    for i in 0..owner.tasks.len():
         if reader.scalar() != owner.tasks[i].phase or reader.scalar() != builder_task_identity_v1(owner.tasks[i]):
             return Err("phase recovery task identity differs")
         val state = reader.scalar()
         match state:
-            case "PENDING" | "RESOURCE_WAIT" | "ADMITTING" | "RUNNING" | "COLLECTED" | "REAPED" | "OWNERSHIP_UNKNOWN": pass
+            case "PENDING" | "RESOURCE_WAIT" | "ADMITTING" | "RUNNING" | "COLLECTED" | "REAPED" | "OWNERSHIP_UNKNOWN" | "DEPENDENCY_BLOCKED": pass
             case _: return Err("invalid retained phase state")
         states = states.push(state)
         val row = owner.resources[i]
@@ -341,13 +388,13 @@ fn managed_phase_restore_journal_v1(owner: ManagedPhaseAdmissionV1, payload: tex
     Ok(true)
 
 fn managed_phase_recover_v1(owner: ManagedPhaseAdmissionV1) -> Result<bool, text>:
-    val payload = file_read_regular_no_follow_bounded(owner.root + "/phase-reservations.sdn", 8192)?
+    val payload = file_read_regular_no_follow_bounded(owner.root + "/phase-reservations.sdn", 262144)?
     val _restored = managed_phase_restore_journal_v1(owner, payload)?
     var unresolved = ""
-    for i in 0..2:
-        if owner.states[i] == "PENDING" or owner.states[i] == "RESOURCE_WAIT": continue
+    for i in 0..owner.tasks.len():
+        if owner.states[i] == "PENDING" or owner.states[i] == "RESOURCE_WAIT" or owner.states[i] == "DEPENDENCY_BLOCKED": continue
         val recovered = builder_transport_recover_v1(owner.tasks[i], owner.host,
-            owner.root + "/" + owner.tasks[i].phase, owner.process)
+            managed_phase_task_root_v2(owner.root, owner.tasks, i), owner.process)
         match recovered:
             Ok(attempt):
                 owner.attempts[i] = Some(attempt)
@@ -368,7 +415,8 @@ fn managed_phase_recover_v1(owner: ManagedPhaseAdmissionV1) -> Result<bool, text
 
 fn managed_phase_policy_encode_v1(policy: ManagedPhasePolicyV1,
         resources: [ManagedPhaseResourceV1]) -> text:
-    var payload = "SIMPLE-MANAGED-PHASE-POLICY-1\n"
+    var payload = if resources.len() == 2: "SIMPLE-MANAGED-PHASE-POLICY-1\n" else: "SIMPLE-MANAGED-PHASE-POLICY-2\n"
+    if resources.len() != 2: payload = payload + str(resources.len()) + "\n"
     for value in [policy.aggregate_limit_bytes, policy.task_limit_bytes,
             policy.owner_memory_bytes, policy.host_reserve_bytes,
             policy.disk_reserve_bytes, policy.cpu_count]:
@@ -382,7 +430,10 @@ fn managed_phase_policy_encode_v1(policy: ManagedPhasePolicyV1,
 fn managed_phase_policy_decode_v1(payload: text
         ) -> Result<(ManagedPhasePolicyV1, [ManagedPhaseResourceV1]), text>:
     var reader = BuilderWireReaderV1.create(payload)
-    if reader.scalar() != "SIMPLE-MANAGED-PHASE-POLICY-1": return Err("invalid phase policy header")
+    val header = reader.scalar()
+    if header != "SIMPLE-MANAGED-PHASE-POLICY-1" and header != "SIMPLE-MANAGED-PHASE-POLICY-2": return Err("invalid phase policy header")
+    val count = if header == "SIMPLE-MANAGED-PHASE-POLICY-1": 2 else: reader.number(256, false)
+    if count < 1: return Err("empty phase resource inventory")
     val maximum: i64 = 1125899906842624
     val aggregate = reader.number(maximum, false)
     val task_limit = reader.number(maximum, false)
@@ -393,7 +444,7 @@ fn managed_phase_policy_decode_v1(payload: text
     val commit = reader.number(1, false)
     val policy = ManagedPhasePolicyV1(aggregate, task_limit, owner, reserve, disk, cpus, commit == 1)
     var resources: [ManagedPhaseResourceV1] = []
-    for i in 0..2:
+    for i in 0..count:
         val memory = reader.number(maximum, false)
         val source = reader.number(maximum, false)
         val growth = reader.number(maximum, false)
@@ -405,10 +456,12 @@ fn managed_phase_policy_decode_v1(payload: text
     Ok((policy, resources))
 
 fn managed_phase_cli_locked_v1(owner: ManagedPhaseAdmissionV1,
-        poll_ms: i64, lifetime_ms: i64) -> Result<i64, text>:
+        poll_ms: i64, lifetime_ms: i64,
+        database: BuildRunnerDatabaseSessionV1? = nil) -> Result<i64, text>:
     val deadline = builder_work_deadline_v1(current_time_ms(), lifetime_ms)
     var failed = false
-    for i in 0..2:
+    for i in 0..owner.tasks.len():
+        if owner.states[i] == "DEPENDENCY_BLOCKED": failed = true
         if owner.states[i] == "REAPED":
             if owner.attempts[i] == nil: return Err("retained phase transport absent")
             val result = builder_transport_collect_v1(owner.attempts[i]!)?
@@ -416,29 +469,42 @@ fn managed_phase_cli_locked_v1(owner: ManagedPhaseAdmissionV1,
             if invalid != "": return Err(invalid)
             val classification = builder_failure_class_v1(result.status, result.exit_code, true)
             if classification == "infrastructure-abort": return Err("reaped aborted phase requires an admitted retry; completion is not proven")
-            if classification == "compile-failure": failed = true
+            if classification != "complete": failed = true
+            if val session = database:
+                var outputs: [BuildInputV1] = []
+                if classification == "complete":
+                    val _verified = managed_phase_verify_task_v2(owner, i)?
+                    outputs = result.outputs
+                val _recorded = session.record(owner.tasks[i], result, outputs, owner.attempts[i]!)?
     while not builder_work_deadline_expired_v1(current_time_ms(), deadline):
         if managed_phase_stop_requested_v1(owner.root):
             return Err("managed phase owner stop requested")
-        for i in 0..2:
+        for i in 0..owner.tasks.len():
             if owner.states[i] == "RUNNING":
                 if val result = owner.collect(i)?:
                     val classification = builder_failure_class_v1(result.status, result.exit_code, true)
                     if classification == "infrastructure-abort":
                         return Err("managed phase infrastructure failure")
-                    if classification == "compile-failure": failed = true
-                    val receipt = owner.root + "/" + owner.tasks[i].phase + "/result.sdn"
+                    if classification != "complete": failed = true
+                    val receipt = managed_phase_task_root_v2(owner.root, owner.tasks, i) + "/result.sdn"
                     if not file_atomic_write(receipt, builder_encode_result_v1(result)):
                         return Err(owner.uncertain(i, "cannot retain phase result"))
                     if not owner.release(i): return Err("phase reservation release failed")
+                    if val session = database:
+                        var outputs: [BuildInputV1] = []
+                        if classification == "complete":
+                            val _verified = managed_phase_verify_task_v2(owner, i)?
+                            outputs = result.outputs
+                        val _recorded = session.record(owner.tasks[i], result, outputs, owner.attempts[i]!)?
         var pending = false
         var running = false
-        for i in 0..2:
+        for i in 0..owner.tasks.len():
             if owner.states[i] == "PENDING" or owner.states[i] == "RESOURCE_WAIT":
                 if managed_phase_stop_requested_v1(owner.root):
                     return Err("managed phase owner stop requested")
                 val decision = owner.try_start(i)?
-                if decision != "STARTED": pending = true
+                if decision == "DEPENDENCY_BLOCKED": failed = true
+                elif decision != "STARTED": pending = true
             if owner.states[i] == "RUNNING": running = true
         if not running:
             if not pending: return Ok(if failed: 1 else: 0)
@@ -461,7 +527,7 @@ fn managed_phase_completion_result_error_v1(task: BuildTaskV1,
     val invalid = builder_validate_result_v1(task, result)
     if invalid != "": return invalid
     if builder_failure_class_v1(result.status, result.exit_code, true) != "complete":
-        return "aggregate completion requires two successful phase results"
+        return "aggregate completion requires successful task results"
     if builder_encode_result_v1(published) != builder_encode_result_v1(result):
         return "retained parent and transport phase results differ"
     builder_manager_output_error(task, result, observed)
@@ -470,48 +536,54 @@ fn managed_phase_completion_result_error_v1(task: BuildTaskV1,
 # permitted in this path. Construct an exact local receipt reader only after
 # the retained journal proves both phases have reached REAPED.
 fn managed_phase_verify_retained_v1(owner: ManagedPhaseAdmissionV1) -> Result<bool, text>:
-    val payload = file_read_regular_no_follow_bounded(owner.root + "/phase-reservations.sdn", 8192)?
+    val payload = file_read_regular_no_follow_bounded(owner.root + "/phase-reservations.sdn", 262144)?
     val _restored = managed_phase_restore_journal_v1(owner, payload)?
     for state in owner.states:
         if state != "REAPED": return Err("aggregate phase is not durably reaped")
     if managed_phase_stop_requested_v1(owner.root): return Err("managed phase stop remains requested")
-    for i in 0..2:
-        val task = owner.tasks[i]
-        val _policy = managed_phase_budget_v1(owner.policy, owner.resources[i], [], owner.samples[i])?
-        if not builder_regular_input_parents_safe_v1(task, owner.source_root):
-            return Err("phase source parent is unsafe")
-        for input in task.inputs:
-            val path = owner.source_root + "/" + input.path
-            if not file_is_regular_no_follow(path) or file_hash_sha256(path) != input.digest:
-                return Err("phase source input changed: " + input.path)
-        val links = builder_link_inputs_match_v1(task, owner.source_root)
-        if links != "": return Err(links)
-        val program = if task.program.starts_with("/") or task.program.contains(":"):
-            task.program
-        else: owner.source_root + "/" + task.program
-        if not file_is_regular_no_follow(program) or file_hash_sha256(program) != task.producer_digest:
-            return Err("phase program differs from pinned producer")
-        val phase_root = owner.root + "/" + task.phase
-        val root = phase_root + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + owner.host.id
-        if not dir_is_real_no_follow(root): return Err("phase attempt directory is unsafe")
-        val attempt = BuilderAttemptV1(task.id, task.attempt, owner.host, 0,
-            root, "", "", builder_task_identity_v1(task), owner.process)
-        if not builder_transport_reaped_v1(attempt): return Err("phase exact tree reap is unproven")
-        val result = builder_transport_collect_v1(attempt)?
-        val published = builder_read_result_v1(phase_root + "/result.sdn")?
-        var observed: [BuildInputV1] = []
-        for output in task.outputs:
-            var parent = root + "/work"
-            if not dir_is_real_no_follow(parent): return Err("phase output root is unsafe")
-            val parts = output.split("/")
-            for index in 0..parts.len() - 1:
-                parent = parent + "/" + parts[index]
-                if not dir_is_real_no_follow(parent): return Err("phase output parent is unsafe")
-            val path = root + "/work/" + output
-            if not file_is_regular_no_follow(path): return Err("phase expected output is missing")
-            observed = observed.push(BuildInputV1(output, file_hash_sha256(path)))
-        val outputs = managed_phase_completion_result_error_v1(task, result, published, observed)
-        if outputs != "": return Err(outputs)
+    for i in 0..owner.tasks.len():
+        val _verified = managed_phase_verify_task_v2(owner, i)?
+    Ok(true)
+
+fn managed_phase_verify_task_v2(owner: ManagedPhaseAdmissionV1, i: i64) -> Result<bool, text>:
+    if i < 0 or i >= owner.tasks.len() or owner.states[i] != "REAPED":
+        return Err("dependency task is not durably reaped")
+    val task = owner.tasks[i]
+    val _policy = managed_phase_budget_v1(owner.policy, owner.resources[i], [], owner.samples[i])?
+    if not builder_regular_input_parents_safe_v1(task, owner.source_root):
+        return Err("phase source parent is unsafe")
+    for input in task.inputs:
+        val path = owner.source_root + "/" + input.path
+        if not file_is_regular_no_follow(path) or file_hash_sha256(path) != input.digest:
+            return Err("phase source input changed: " + input.path)
+    val links = builder_link_inputs_match_v1(task, owner.source_root)
+    if links != "": return Err(links)
+    val program = if task.program.starts_with("/") or task.program.contains(":"):
+        task.program
+    else: owner.source_root + "/" + task.program
+    if not file_is_regular_no_follow(program) or file_hash_sha256(program) != task.producer_digest:
+        return Err("phase program differs from pinned producer")
+    val phase_root = managed_phase_task_root_v2(owner.root, owner.tasks, i)
+    val root = phase_root + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + owner.host.id
+    if not dir_is_real_no_follow(root): return Err("phase attempt directory is unsafe")
+    val attempt = BuilderAttemptV1(task.id, task.attempt, owner.host, 0,
+        root, "", "", builder_task_identity_v1(task), owner.process)
+    if not builder_transport_reaped_v1(attempt): return Err("phase exact tree reap is unproven")
+    val result = builder_transport_collect_v1(attempt)?
+    val published = builder_read_result_v1(phase_root + "/result.sdn")?
+    var observed: [BuildInputV1] = []
+    for output in task.outputs:
+        var parent = root + "/work"
+        if not dir_is_real_no_follow(parent): return Err("phase output root is unsafe")
+        val parts = output.split("/")
+        for index in 0..parts.len() - 1:
+            parent = parent + "/" + parts[index]
+            if not dir_is_real_no_follow(parent): return Err("phase output parent is unsafe")
+        val path = root + "/work/" + output
+        if not file_is_regular_no_follow(path): return Err("phase expected output is missing")
+        observed = observed.push(BuildInputV1(output, file_hash_sha256(path)))
+    val outputs = managed_phase_completion_result_error_v1(task, result, published, observed)
+    if outputs != "": return Err(outputs)
     Ok(true)
 
 fn managed_phase_verify_v1(root: text, source_root: text,
@@ -526,9 +598,12 @@ fn managed_phase_verify_v1(root: text, source_root: text,
         return Err("retained phase owner is absent")
     val lock = file_lock(root + "/phase-owner.lock", 1)
     if lock < 0: return Err("phase owner is still active")
-    val owner = ManagedPhaseAdmissionV1(root, source_root, lock, policy, tasks,
-        resources, host, process, capacity, ["PENDING", "PENDING"], [nil, nil],
-        [NativeGroupedCapacitySampleV1(0, 0, 0, false), NativeGroupedCapacitySampleV1(0, 0, 0, false)], authority_digest)
+    var owner = ManagedPhaseAdmissionV1(root, source_root, lock, policy, tasks,
+        resources, host, process, capacity, [], [], [], authority_digest)
+    for task in tasks:
+        owner.states = owner.states.push("PENDING")
+        owner.attempts = owner.attempts.push(nil)
+        owner.samples = owner.samples.push(NativeGroupedCapacitySampleV1(0, 0, 0, false))
     val result = managed_phase_verify_retained_v1(owner)
     if not file_unlock(lock): return Err("phase verification lock release failed")
     result
@@ -537,6 +612,8 @@ fn managed_phase_verify_v1(root: text, source_root: text,
 # passes its existing authoritative capacity probe, not a shell snapshot.
 fn managed_phase_cli_v1(args: [text], process: BuilderProcessPortV1,
         capacity: NativeGroupedCapacityV1) -> i64:
+    if args.len() > 0 and (args[0] == "managed-tasks" or args[0] == "managed-tasks-verify"):
+        return managed_phase_inventory_cli_v2(args, process, capacity)
     if args.len() != 21 or (args[0] != "managed-phases" and args[0] != "managed-phases-verify"): return 2
     var values: {text: text} = {}
     var i = 1
@@ -616,3 +693,99 @@ export managed_phase_policy_encode_v1, managed_phase_policy_decode_v1, managed_p
 export managed_phase_restore_journal_v1
 export managed_phase_verify_v1
 export managed_phase_completion_result_error_v1
+
+# The canonical BuildRun codec is the immutable ordered manifest inventory.
+# Its digest pins dependencies, source/producer identities and per-task inputs.
+fn managed_phase_inventory_cli_v2(args: [text], process: BuilderProcessPortV1,
+        capacity: NativeGroupedCapacityV1) -> i64:
+    if args.len() != 17: return 2
+    var values: Dict<text, text> = {}
+    var index = 1
+    while index < args.len():
+        val key = args[index]
+        if values.contains_key(key): return 2
+        match key:
+            case "--manifest" | "--manifest-sha256" | "--policy" | "--policy-sha256" | "--source-root" | "--state" | "--poll-ms" | "--lifetime-ms":
+                values[key] = args[index + 1]
+            case _: return 2
+        index = index + 2
+    for key in ["--manifest", "--policy", "--source-root", "--state"]:
+        val path = values[key]
+        if path == "" or path.contains("\n") or path.contains("\0") or
+                not (path.starts_with("/") or (path.len() > 2 and path[1:2] == ":")): return 2
+    for pair in [("--manifest", "--manifest-sha256"), ("--policy", "--policy-sha256")]:
+        if not builder_digest_valid_v1(values[pair.1]) or not file_is_regular_no_follow(values[pair.0]) or
+                file_hash_sha256(values[pair.0]) != values[pair.1]: return 2
+    val run = match builder_read_run_v1(values["--manifest"]):
+        Ok(value): value
+        Err(_): return 2
+    if sha256_text(builder_encode_run_v1(run)) != values["--manifest-sha256"] or
+            run.hosts.len() != 1 or not run.keep_going: return 2
+    val payload = match file_read_regular_no_follow_bounded(values["--policy"], 65536):
+        Ok(value): value
+        Err(_): return 2
+    if sha256_text(payload) != values["--policy-sha256"]: return 2
+    val decoded = match managed_phase_policy_decode_v1(payload):
+        Ok(value): value
+        Err(_): return 2
+    if host_os() == "windows" and not decoded.0.commit_required: return 2
+    var timing = BuilderWireReaderV1.create(values["--poll-ms"] + "\n" + values["--lifetime-ms"] + "\n")
+    val poll_ms = timing.number(60000, false)
+    val lifetime_ms = timing.number(604800000, false)
+    if timing.reason != "" or poll_ms < 1 or (lifetime_ms != 0 and lifetime_ms < poll_ms): return 2
+    val authority = sha256_text("SIMPLE-MANAGED-TASK-INVENTORY-2\n" + values["--manifest-sha256"] +
+        "\n" + values["--policy-sha256"] + "\n" + path_absolute(values["--source-root"]))
+    if args[0] == "managed-tasks-verify":
+        match managed_phase_verify_v1(values["--state"], values["--source-root"], decoded.0,
+                run.tasks, decoded.1, run.hosts[0], process, capacity, authority):
+            Ok(_): return 0
+            Err(reason):
+                print "managed tasks verify: {reason}"
+                return 2
+    val owner = match managed_phase_admission_open_v1(values["--state"], values["--source-root"],
+            decoded.0, run.tasks, decoded.1, run.hosts[0], process, capacity, authority):
+        Ok(value): value
+        Err(reason):
+            print "managed tasks admission: {reason}"
+            return 2
+    val maybe_database = match build_runner_database_session_open_v1(run, values["--state"], values["--source-root"]):
+        Ok(value): value
+        Err(reason):
+            print "managed tasks database: {reason}"
+            val _closed = owner.close()
+            return 2
+    if maybe_database == nil:
+        print "managed tasks require complete admitted task contexts"
+        val _closed = owner.close()
+        return 2
+    val database = maybe_database!
+    val outcome = managed_phase_cli_locked_v1(owner, poll_ms, lifetime_ms, Some(database))
+    if outcome.is_err():
+        print "managed tasks aborted: {outcome.unwrap_err()}"
+        if owner.cancel_all():
+            val _closed = owner.close()
+        return 2
+    var settled = task_runner_start(run)
+    for index in 0..owner.tasks.len():
+        if owner.states[index] == "DEPENDENCY_BLOCKED": settled.statuses[index] = "BLOCKED"
+        elif owner.states[index] == "REAPED" and owner.attempts[index] != nil:
+            val result = match builder_transport_collect_v1(owner.attempts[index]!):
+                Ok(value): value
+                Err(_):
+                    val _closed = owner.close()
+                    return 2
+            settled.statuses[index] = if result.status == "OK": "SUCCEEDED" else: "FAILED"
+        else:
+            val _closed = owner.close()
+            return 2
+    if database.settle(settled).is_err():
+        val _closed = owner.close()
+        return 2
+    val finished = database.finish()
+    if not owner.close(): return 2
+    if finished.is_err():
+        print "managed tasks database: {finished.unwrap_err()}"
+        return 2
+    outcome.unwrap()
+
+export managed_phase_dependency_state_v2, managed_phase_task_root_v2

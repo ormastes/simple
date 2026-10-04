@@ -19,9 +19,9 @@ set -eu
 focused_configured_output=0
 case "${1:-}" in
     --configured-output-only) focused_configured_output=1 ;;
-    --windows-candidate-only|--candidate-path-negative-only) ;;
+    --windows-candidate-only|--candidate-path-negative-only|--parent-refresh-only) ;;
     "") ;;
-    *) echo "usage: $0 [--configured-output-only|--windows-candidate-only|--candidate-path-negative-only]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--configured-output-only|--windows-candidate-only|--candidate-path-negative-only|--parent-refresh-only]" >&2; exit 2 ;;
 esac
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
@@ -92,11 +92,25 @@ set -eu
 }
 out=''
 prev=''
+entry=''
+runtime=''
+cache=''
 for a in "$@"; do
     if [ "$prev" = "-o" ]; then out=$a; fi
+    if [ "$prev" = "--entry" ]; then entry=$a; fi
+    if [ "$prev" = "--runtime-path" ]; then runtime=$a; fi
+    if [ "$prev" = "--cache-dir" ]; then cache=$a; fi
     prev=$a
 done
 [ -n "$out" ] || { echo "fixture-cc: no -o" >&2; exit 1; }
+[ "$entry" = "$(pwd -P)/src/app/cli/bootstrap_reason_planner.spl" ] || {
+    echo "fixture-cc: source inventory checkout owner mismatch" >&2; exit 1;
+}
+[ -d "$runtime" ] && [ "$runtime" = "${SIMPLE_RUNTIME_PATH:-}" ] || {
+    echo "fixture-cc: admitted runtime provider missing" >&2; exit 1;
+}
+case "$cache" in "$(dirname -- "$out")"/planner-cache) ;; *)
+    echo "fixture-cc: planner cache is not private" >&2; exit 1 ;; esac
 cat >"$out" <<'PLANNER'
 #!/bin/sh
 set -eu
@@ -302,6 +316,44 @@ check_noncanonical_candidate_path() {
         fail "noncanonical candidate path did not yield the typed diagnostic"
     checked=$((checked + 1))
 }
+
+# Exercise only the new parent-refresh admission route. It must validate the
+# existing complete evidence without building a planner or re-running probes.
+if [ "${1:-}" = --parent-refresh-only ]; then
+    refresh_root="$scratch/parent-refresh"
+    make_fixture "$refresh_root" 'stage2-provenance: pure-simple' strict
+    refresh_root=$(CDPATH= cd -- "$refresh_root" && pwd -P)
+    refresh_output="$refresh_root/build/bootstrap"
+    refresh_candidate="$refresh_output/stage2/fixture-triple/simple"
+    refresh_evidence="$refresh_output/provenance/fixture"
+    . "$root/scripts/bootstrap/admit-stage2-parent.shs"
+    validate_refresh() (
+        SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT=$refresh_output
+        export SIMPLE_BOOTSTRAP_EXTERNAL_OUTPUT_ROOT
+        bootstrap_stage2_parent_admit "$refresh_candidate" "$root"
+    )
+    validate_refresh >"$scratch/refresh-valid.log" 2>&1 ||
+        fail "valid Phase-2 parent refresh rejected: $(tail -3 "$scratch/refresh-valid.log")"
+    [ ! -e "$refresh_output/admission" ] || fail "parent validation built a planner"
+    checked=$((checked + 1))
+    for refresh_input in \
+        "$refresh_candidate" \
+        "$refresh_evidence/source-inputs-before.txt" \
+        "$refresh_evidence/stage2-runtime-authority/deps/libspl_hosted_runtime-fixture.rlib" \
+        "$refresh_evidence/stage2-sanity.env.frontend-bootstrap-0.log"; do
+        cp -p -- "$refresh_input" "$scratch/refresh-original"
+        chmod u+w "$refresh_input"
+        printf '\nchanged after admission\n' >>"$refresh_input"
+        if validate_refresh >"$scratch/refresh-negative.log" 2>&1; then
+            fail "parent refresh admitted changed evidence: $refresh_input"
+        fi
+        cp -p -- "$scratch/refresh-original" "$refresh_input"
+        rm -f -- "$scratch/refresh-original"
+        checked=$((checked + 1))
+    done
+    echo "PASS — $checked fixture(s) checked (parent refresh only)"
+    exit 0
+fi
 
 # Allows a newly added negative case to be verified without replaying already
 # passing producer fixtures during an incremental bootstrap repair.
