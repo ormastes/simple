@@ -27,6 +27,8 @@ use common.ui.draw_ir.{
     draw_ir_source_info,
     draw_ir_style_prop
 }
+use common.ui.draw_ir_v4_state.{DrawIrFractionalGeometry, DrawIrAffine2D, DRAW_IR_RASTER_ALIASED_PIXEL_CENTER}
+use common.ui.draw_ir_v4_codec.{draw_ir_f64_hex, draw_ir_f64_from_hex, draw_ir_f64_from_hex_checked}
 use std.common.base_encoding.utilities.{base_encoding_bytes_to_text as bytes_to_text}
 
 val _DRAW_IR_SDN_MAX_GLYPHS: i32 = 4096
@@ -197,6 +199,12 @@ fn _draw_ir_sdn_emit_command(command: DrawIrCommand) -> text:
     parts.push(_draw_ir_sdn_emit_points("", "point", command.points))
     parts.push(_draw_ir_sdn_emit_advances("", command.advance_widths))
     parts.push(_draw_ir_sdn_emit_glyph_run("", command.glyph_run))
+    if command.fractional_geometry != nil or command.affine_transform != nil or command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER:
+        parts.push(" v4_geometry={command.fractional_geometry != nil} v4_affine={command.affine_transform != nil} v4_raster={_draw_ir_sdn_escape(command.raster_policy)}")
+        if val geometry = command.fractional_geometry:
+            parts.push(" v4_x={draw_ir_f64_hex(geometry.x)} v4_y={draw_ir_f64_hex(geometry.y)} v4_width={draw_ir_f64_hex(geometry.width)} v4_height={draw_ir_f64_hex(geometry.height)}")
+        if val matrix = command.affine_transform:
+            parts.push(" v4_a={draw_ir_f64_hex(matrix.a)} v4_b={draw_ir_f64_hex(matrix.b)} v4_c={draw_ir_f64_hex(matrix.c)} v4_d={draw_ir_f64_hex(matrix.d)} v4_tx={draw_ir_f64_hex(matrix.tx)} v4_ty={draw_ir_f64_hex(matrix.ty)}")
     parts.push(" edge_present={command.edge != nil}")
     if val edge = command.edge:
         parts.push(" edge_id={_draw_ir_sdn_escape(edge.id)} edge_source={_draw_ir_sdn_escape(edge.source)} edge_target={_draw_ir_sdn_escape(edge.target)} edge_routing={_draw_ir_sdn_escape(edge.routing)}")
@@ -369,6 +377,80 @@ fn _draw_ir_sdn_parse_edge(line: text) -> DrawEdge?:
         )
     nil
 
+# Validate the v4 envelope before parsing any command. Empty text cannot
+# distinguish an absent legacy field from an explicitly empty malformed field.
+fn _draw_ir_sdn_validate_v4(line: text) -> Result<bool, text>:
+    val geometry_keys = ["v4_x", "v4_y", "v4_width", "v4_height"]
+    val affine_keys = ["v4_a", "v4_b", "v4_c", "v4_d", "v4_tx", "v4_ty"]
+    var seen: [text] = []
+    for token in line.split(" "):
+        if not token.starts_with("v4_"):
+            continue
+        val equals = token.index_of("=")
+        if equals < 0:
+            return Err("DrawIR v4 field requires a value")
+        val key = token.substring(0, equals)
+        if seen.contains(key):
+            return Err("duplicate DrawIR v4 field: " + key)
+        if key != "v4_geometry" and key != "v4_affine" and key != "v4_raster" and not geometry_keys.contains(key) and not affine_keys.contains(key):
+            return Err("unknown DrawIR v4 field: " + key)
+        seen.push(key)
+    if seen.len() == 0:
+        return Ok(true)
+    if not seen.contains("v4_geometry") or not seen.contains("v4_affine") or not seen.contains("v4_raster"):
+        return Err("incomplete DrawIR v4 envelope")
+    val geometry = _draw_ir_sdn_field(line, "v4_geometry")
+    val affine = _draw_ir_sdn_field(line, "v4_affine")
+    if (geometry != "true" and geometry != "false") or (affine != "true" and affine != "false"):
+        return Err("invalid DrawIR v4 presence")
+    if _draw_ir_sdn_field(line, "v4_raster") == "":
+        return Err("empty explicit DrawIR raster policy")
+    for key in geometry_keys:
+        if geometry == "true":
+            if not seen.contains(key) or draw_ir_f64_from_hex_checked(_draw_ir_sdn_field(line, key)).is_err():
+                return Err("missing or invalid DrawIR fractional field: " + key)
+        elif seen.contains(key):
+            return Err("fractional payload contradicts absent geometry")
+    for key in affine_keys:
+        if affine == "true":
+            if not seen.contains(key) or draw_ir_f64_from_hex_checked(_draw_ir_sdn_field(line, key)).is_err():
+                return Err("missing or invalid DrawIR affine field: " + key)
+        elif seen.contains(key):
+            return Err("affine payload contradicts absent transform")
+    Ok(true)
+
+fn _draw_ir_sdn_parse_fractional(line: text) -> DrawIrFractionalGeometry?:
+    val present = _draw_ir_sdn_field(line, "v4_geometry")
+    if present == "" or present == "false":
+        return nil
+    if present != "true":
+        panic("invalid DrawIR fractional presence")
+    DrawIrFractionalGeometry(
+        x: draw_ir_f64_from_hex(_draw_ir_sdn_field(line, "v4_x")),
+        y: draw_ir_f64_from_hex(_draw_ir_sdn_field(line, "v4_y")),
+        width: draw_ir_f64_from_hex(_draw_ir_sdn_field(line, "v4_width")),
+        height: draw_ir_f64_from_hex(_draw_ir_sdn_field(line, "v4_height")))
+
+fn _draw_ir_sdn_parse_affine(line: text) -> DrawIrAffine2D?:
+    val present = _draw_ir_sdn_field(line, "v4_affine")
+    if present == "" or present == "false":
+        return nil
+    if present != "true":
+        panic("invalid DrawIR affine presence")
+    DrawIrAffine2D(
+        a: draw_ir_f64_from_hex(_draw_ir_sdn_field(line, "v4_a")),
+        b: draw_ir_f64_from_hex(_draw_ir_sdn_field(line, "v4_b")),
+        c: draw_ir_f64_from_hex(_draw_ir_sdn_field(line, "v4_c")),
+        d: draw_ir_f64_from_hex(_draw_ir_sdn_field(line, "v4_d")),
+        tx: draw_ir_f64_from_hex(_draw_ir_sdn_field(line, "v4_tx")),
+        ty: draw_ir_f64_from_hex(_draw_ir_sdn_field(line, "v4_ty")))
+
+fn _draw_ir_sdn_parse_raster(line: text) -> text:
+    val policy = _draw_ir_sdn_field(line, "v4_raster")
+    if policy == "":
+        return DRAW_IR_RASTER_ALIASED_PIXEL_CENTER
+    policy
+
 fn _draw_ir_sdn_parse_command(line: text) -> DrawIrCommand:
     DrawIrCommand(
         kind: _draw_ir_sdn_field(line, "kind"),
@@ -389,6 +471,9 @@ fn _draw_ir_sdn_parse_command(line: text) -> DrawIrCommand:
         parent_id: _draw_ir_sdn_field(line, "parent_id"),
         image_uri: _draw_ir_sdn_field(line, "image_uri"),
         points: _draw_ir_sdn_parse_points(line, "point"),
+        fractional_geometry: _draw_ir_sdn_parse_fractional(line),
+        affine_transform: _draw_ir_sdn_parse_affine(line),
+        raster_policy: _draw_ir_sdn_parse_raster(line),
         glyph_run: _draw_ir_sdn_parse_glyph_run(line)
     )
 
@@ -461,11 +546,10 @@ fn _draw_ir_sdn_parse_commands(lines: [text], start_idx: i32, command_count: i32
         idx = idx + 1
     commands
 
-fn sdn_to_draw_ir(source: text) -> DrawIrComposition:
+fn _draw_ir_sdn_decode_lines(lines: [text]) -> DrawIrComposition:
     var composition_id = ""
     var scene_key = ""
     var backend_target = ""
-    val lines = source.split("\n")
     val batch_count = _draw_ir_sdn_count_batches(lines)
     var batches: [DrawIrBatch] = []
     if batch_count > 0:
@@ -486,3 +570,20 @@ fn sdn_to_draw_ir(source: text) -> DrawIrComposition:
             batch_idx = batch_idx + 1
         idx = idx + 1
     draw_ir_composition(composition_id, scene_key, backend_target, batches)
+
+# Public checked boundary: malformed v4 never reaches the permissive legacy
+# field parser, and no partial composition is returned after an error.
+fn sdn_to_draw_ir_checked(source: text) -> Result<DrawIrComposition, text>:
+    val lines = source.split("\n")
+    for raw in lines:
+        val line = raw.trim()
+        if line.starts_with("command "):
+            val valid = _draw_ir_sdn_validate_v4(line)?
+    Ok(_draw_ir_sdn_decode_lines(lines))
+
+fn sdn_to_draw_ir(source: text) -> DrawIrComposition:
+    match sdn_to_draw_ir_checked(source):
+        Ok(composition): composition
+        Err(error): panic(error)
+
+export sdn_to_draw_ir, sdn_to_draw_ir_checked
