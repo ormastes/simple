@@ -1,6 +1,6 @@
 # JsInterpreter — statement execution methods (execute, exec_*).
 
-use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError, js_nan, js_infinity, js_neg_infinity, is_nan}
+use std.js.engine.js_error.{JsError, js_script_error, JsLogger, LogLevel, JsBrowserResult, JsBrowserError, js_nan, js_infinity, js_neg_infinity, is_nan}
 use std.js.types.pair.{Pair}
 use std.js.types.js_types.JsValue
 use std.js.types.js_types.JsObject
@@ -15,7 +15,7 @@ use std.gc_async_mut.js.engine.interpreter_object.{JsInterpreter}
 
 impl JsInterpreter:
     # Execute a full program (list of statements)
-    me execute(program: [JsStatement]) -> BrowserResult<JsValue>:
+    me execute(program: [JsStatement]) -> JsBrowserResult<JsValue>:
         var result = JsValue.Undefined
         var i = 0
         val len = program.len()
@@ -28,7 +28,7 @@ impl JsInterpreter:
         Ok(result)
 
     # Dispatch a statement
-    me exec_statement(stmt: JsStatement, env: i64) -> BrowserResult<JsValue>:
+    me exec_statement(stmt: JsStatement, env: i64) -> JsBrowserResult<JsValue>:
         if self.call_stack.len() > 256:
             self.logger.warn("Function recursion exceeded maximum depth")
             self.control_return = true
@@ -89,13 +89,13 @@ impl JsInterpreter:
                 return self.exec_statement(body, env)
 
     # Variable declaration
-    me exec_var_decl(name: text, init: JsExpression, env: i64) -> BrowserResult<JsValue>:
+    me exec_var_decl(name: text, init: JsExpression, env: i64) -> JsBrowserResult<JsValue>:
         val value = self.eval_expression(init, env)?
         self.env_stack.define_var(env, name, value)
         Ok(value)
 
     # Destructuring declaration: const {a, b} = obj; const [x, y] = arr
-    me exec_destruct_decl(pattern: JsExpression, init: JsExpression, env: i64) -> BrowserResult<JsValue>:
+    me exec_destruct_decl(pattern: JsExpression, init: JsExpression, env: i64) -> JsBrowserResult<JsValue>:
         val value = self.eval_expression(init, env)?
         self._bind_pattern(pattern, value, env)
         Ok(value)
@@ -143,7 +143,7 @@ impl JsInterpreter:
             _: pass_dn
 
     # Do-while loop
-    me exec_do_while(cond: JsExpression, body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
+    me exec_do_while(cond: JsExpression, body: [JsStatement], env: i64) -> JsBrowserResult<JsValue>:
         var result = JsValue.Undefined
         var cont = true
         var iteration = 0
@@ -175,7 +175,7 @@ impl JsInterpreter:
         Ok(result)
 
     # If / else
-    me exec_if(cond: JsExpression, then_body: [JsStatement], else_body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
+    me exec_if(cond: JsExpression, then_body: [JsStatement], else_body: [JsStatement], env: i64) -> JsBrowserResult<JsValue>:
         val cond_val = self.eval_expression(cond, env)?
         var result = JsValue.Undefined
         if is_truthy(cond_val):
@@ -200,7 +200,7 @@ impl JsInterpreter:
         Ok(result)
 
     # While loop
-    me exec_while(cond: JsExpression, body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
+    me exec_while(cond: JsExpression, body: [JsStatement], env: i64) -> JsBrowserResult<JsValue>:
         var result = JsValue.Undefined
         var iteration = 0
         val max_iterations = 100000
@@ -234,7 +234,7 @@ impl JsInterpreter:
 
     # For loop
     # Note: var declarations in init execute in parent env (JS var is function-scoped)
-    me exec_for(init: JsStatement, cond: JsExpression, update: JsExpression, body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
+    me exec_for(init: JsStatement, cond: JsExpression, update: JsExpression, body: [JsStatement], env: i64) -> JsBrowserResult<JsValue>:
         self.exec_statement(init, env)?
         val for_env = self.env_stack.create_env(env)
 
@@ -271,14 +271,14 @@ impl JsInterpreter:
         Ok(result)
 
     # Return statement
-    me exec_return(value: JsExpression, env: i64) -> BrowserResult<JsValue>:
+    me exec_return(value: JsExpression, env: i64) -> JsBrowserResult<JsValue>:
         val result = self.eval_expression(value, env)?
         self.return_value = result
         self.control_return = true
         Ok(result)
 
     # Function declaration — store in function registry
-    me exec_function_decl(name: text, params: [text], body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
+    me exec_function_decl(name: text, params: [text], body: [JsStatement], env: i64) -> JsBrowserResult<JsValue>:
         val fn_id = self.functions.len()
         val js_fn = JsFunction.create(name, params, body, env)
         self.functions.push(js_fn)
@@ -287,7 +287,7 @@ impl JsInterpreter:
         Ok(fn_val)
 
     # Try/catch/finally
-    me exec_try_catch(try_body: [JsStatement], catch_param: text, catch_body: [JsStatement], finally_body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
+    me exec_try_catch(try_body: [JsStatement], catch_param: text, catch_body: [JsStatement], finally_body: [JsStatement], env: i64) -> JsBrowserResult<JsValue>:
         val try_env = self.env_stack.create_env(env)
         var result = JsValue.Undefined
 
@@ -332,7 +332,7 @@ impl JsInterpreter:
         Ok(result)
 
     # Switch statement
-    me exec_switch(discriminant: JsExpression, cases: [SwitchCase], env: i64) -> BrowserResult<JsValue>:
+    me exec_switch(discriminant: JsExpression, cases: [SwitchCase], env: i64) -> JsBrowserResult<JsValue>:
         val disc_val = self.eval_expression(discriminant, env)?
         var result = JsValue.Undefined
         var matched = false
@@ -375,7 +375,7 @@ impl JsInterpreter:
         Ok(result)
 
     # For-in loop: iterate object keys
-    me exec_for_in(binding: text, object: JsExpression, body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
+    me exec_for_in(binding: text, object: JsExpression, body: [JsStatement], env: i64) -> JsBrowserResult<JsValue>:
         val obj_val = self.eval_expression(object, env)?
         var result = JsValue.Undefined
         var should_exit = false
@@ -414,7 +414,7 @@ impl JsInterpreter:
         Ok(result)
 
     # For-of loop: iterate array elements
-    me exec_for_of(binding: text, iterable: JsExpression, body: [JsStatement], env: i64) -> BrowserResult<JsValue>:
+    me exec_for_of(binding: text, iterable: JsExpression, body: [JsStatement], env: i64) -> JsBrowserResult<JsValue>:
         val iter_val = self.eval_expression(iterable, env)?
         var result = JsValue.Undefined
         var should_exit = false
@@ -451,14 +451,14 @@ impl JsInterpreter:
         Ok(result)
 
     # Throw statement
-    me exec_throw(expr: JsExpression, env: i64) -> BrowserResult<JsValue>:
+    me exec_throw(expr: JsExpression, env: i64) -> JsBrowserResult<JsValue>:
         val value = self.eval_expression(expr, env)?
         self.thrown_value = value
         self.control_thrown = true
         Ok(value)
 
     # Class declaration — register constructor and methods as functions on a prototype object
-    me exec_class_decl(name: text, parent_name: text, constructor: JsStatement, methods: [JsStatement], env: i64) -> BrowserResult<JsValue>:
+    me exec_class_decl(name: text, parent_name: text, constructor: JsStatement, methods: [JsStatement], env: i64) -> JsBrowserResult<JsValue>:
         # Create the prototype object
         val proto_id = self.create_object()
 
