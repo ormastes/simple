@@ -97,6 +97,23 @@ fn item4_elf_ops_writer_short(kind: i64, machine: i64, entry: i64,
         plan: ElfExecPlan, contents: [[i64]]) -> Result<[i64], text>:
     Ok([127, 69, 76, 70])
 
+fn item4_elf_ops_writer_wrong_load(kind: i64, machine: i64, entry: i64,
+        plan: ElfExecPlan, contents: [[i64]]) -> Result<[i64], text>:
+    var image = elf_write_image(kind, machine, entry, plan, contents)
+    val phoff = item4_elf_ops_read(image, 32, 8)
+    val count = item4_elf_ops_read(image, 56, 2)
+    val valid = phoff >= 64 and phoff <= image.len() and count > 0 and count < 64 and count * 56 <= image.len() - phoff
+    expect(valid).to_equal(true)
+    if not valid: return Err("item4 malformed fixture setup failed")
+    for index in 0..count:
+        val at = phoff + index * 56
+        if item4_elf_ops_read(image, at, 4) == 1:
+            val address = item4_elf_ops_read(image, at + 16, 8) + 4096
+            for byte in 0..8: image[at + 16 + byte] = (address >> (byte * 8)) & 255
+            return Ok(image)
+    expect(false).to_equal(true)
+    Err("item4 malformed fixture has no load segment")
+
 describe "Static ELF operational composition dispatch":
     it "preserves canonical wrapper bytes through the sealed default operations":
         step("Link real narrow-relocation objects through both canonical entrypoints")
@@ -318,17 +335,19 @@ describe "Static ELF operational composition dispatch":
             expect(linked.unwrap_err()).to_contain("item4 selected " + names[index] + " rejected")
 
     it "rejects malformed operation results before later indexing or image publication":
-        step("Return a shortened relocated section an invalid layout vector and a truncated writer image")
-        val names = ["relocation", "layout", "writer"]
-        for index in 0..3:
+        step("Reject short results and a real writer image whose PT_LOAD address contradicts the selected plan")
+        val names = ["relocation", "layout", "writer", "writer"]
+        for index in 0..4:
             var providers = elf_builtin_operation_providers_v1()
             expect(providers.len()).to_equal(3)
             if providers.len() != 3: return
-            var provider = providers[index]
+            val slot = if index == 3: 2 else: index
+            var provider = providers[slot]
             if index == 0: provider.relocate = Some(item4_elf_ops_relocate_short)
             if index == 1: provider.layout = Some(item4_elf_ops_layout_short)
             if index == 2: provider.write_image = Some(item4_elf_ops_writer_short)
-            providers[index] = provider
+            if index == 3: provider.write_image = Some(item4_elf_ops_writer_wrong_load)
+            providers[slot] = provider
             val sealed = elf_seal_operations_v1(providers, elf_operation_policy_v1())
             expect(sealed.is_ok()).to_equal(true)
             if sealed.is_err(): return

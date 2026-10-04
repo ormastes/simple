@@ -16,7 +16,7 @@ Status: **UNRUN**; authored manual, not generated execution evidence.
 | Duplicate provider | Repeated provider descriptor prevents sealing |
 | Offer/callback mismatch | Missing callback or extra unoffered callback prevents sealing |
 | Selected error | Each of three operation errors propagates through full linking without an image |
-| Malformed result | Short relocation data, missing layout vector and truncated writer output reject without later unsafe indexing |
+| Malformed result | Short relocation data, missing layout vector, truncated writer output and a serialized PT_LOAD address contradicting the selected plan reject |
 
 The original narrow-relocation fixture bytes are not recreated in test
 callbacks: fixtures are read from disk, parsed, resolved, laid out, relocated,
