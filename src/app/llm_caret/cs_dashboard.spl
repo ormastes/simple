@@ -23,7 +23,7 @@ use std.io_runtime.{env_get, file_exists}
 use app.llm_caret.harness_spec.{parse_harness_spec, harness_spec_display}
 use app.llm_caret.pane_backend.{Pane, pane_backend_name,
     pane_list, pane_select, pane_zoom, pane_spawn_at, pane_resize, pane_kill,
-    pane_send, pane_capture, pane_send_key, pane_key_bytes}
+    pane_send, pane_capture, pane_capture_styled, pane_send_key, pane_key_bytes}
 
 # cpu_pct/rss_mb use -1 as the UNMEASURED sentinel; 0 would be a real idle
 # reading and must stay distinguishable from "we never got a number".
@@ -308,6 +308,46 @@ fn cs_fit(content: text, width: i64) -> text:
         n = n + 1
     out
 
+# cs_fit for an agent's styled screen row: SGR colour runs (CSI ... m) are kept,
+# every other escape is dropped, and the row ends with a reset so its colours
+# never bleed into the divider or the next row.
+fn cs_fit_sgr(content: text, width: i64) -> text:
+    if width <= 0:
+        return ""
+    var out = ""
+    var seq = ""
+    var n = 0
+    var mode = 0  # 0 text, 1 after ESC, 2 CSI, 3 OSC
+    for ch in content.chars():
+        if mode == 1:
+            mode = 0
+            if ch == "[":
+                mode = 2
+                seq = "\x1b["
+            if ch == "]":
+                mode = 3
+        elif mode == 2:
+            seq = seq + ch
+            if ch >= "@" and ch <= "~":
+                mode = 0
+                if ch == "m":
+                    out = out + seq
+        elif mode == 3:
+            if ch == "\x07":
+                mode = 0
+        elif ch == "\x1b":
+            mode = 1
+        elif ch >= " " and ch != "\x7f":
+            if n >= width:
+                break
+            out = out + ch
+            n = n + 1
+    out = out + "\x1b[0m"
+    while n < width:
+        out = out + " "
+        n = n + 1
+    out
+
 # Left-column width and the selected agent's screen size for a frame. The
 # agent screen is everything right of the divider below its title row, which
 # is the size an agent pane should be given.
@@ -408,9 +448,9 @@ fn cs_frame_rows(d: CsDashboard, cols: i64, rows: i64, clock: text,
         elif _is_section(left):
             left_style = title
             left_styled = styled_out
-        val right_styled = styled_out and i == 0
-        out = out + [_paint(left, left_w, left_style, left_styled) + divider +
-            _paint(right, right_w, title, right_styled)]
+        val right_cell = if styled_out and i > 0: cs_fit_sgr(right, right_w)
+            else: _paint(right, right_w, title, styled_out and i == 0)
+        out = out + [_paint(left, left_w, left_style, left_styled) + divider + right_cell]
         i = i + 1
     out + [_paint(CS_HELP_BAR, cols, muted, styled_out), input_row]
 
@@ -480,7 +520,7 @@ fn cs_refresh(d: CsDashboard) -> CsDashboard:
     for a in d.agents:
         var next = _unmeasured(a, "gone: pane closed", "pane " + a.pane_id +
             " is no longer listed")
-        if a.pane_id == "" and a.status.starts_with("pending"):
+        if a.pane_id == "" and (a.status.starts_with("pending") or a.status.starts_with("gone")):
             next = _unmeasured(a, a.status, a.detail)
         for pane in _find_pane(panes, a.pane_id, a.agent_id):
             next = _measured(a, pane, probe_pid)
@@ -497,7 +537,7 @@ fn _with_screen(d: CsDashboard) -> CsDashboard:
     if d.selected >= 0 and d.selected < d.agents.len():
         val pane_id = d.agents[d.selected].pane_id
         if pane_id != "":
-            screen = pane_capture(d.session, pane_id, CS_SCREEN_LINES)
+            screen = pane_capture_styled(d.session, pane_id, CS_SCREEN_LINES)
     CsDashboard(session: d.session, manager_status: d.manager_status,
         agents: d.agents, selected: d.selected, input: d.input, log: d.log,
         screen: screen)
@@ -592,6 +632,17 @@ fn _attach(d: CsDashboard, agent_id: text, pane: Pane) -> CsDashboard:
             agents = agents + [a]
     _dash(d, d.manager_status, agents, d.selected, d.log)
 
+fn _detach(d: CsDashboard, agent_id: text) -> CsDashboard:
+    var agents: [CsAgent] = []
+    for a in d.agents:
+        if a.agent_id == agent_id:
+            agents = agents + [CsAgent(agent_id: a.agent_id, spec: a.spec,
+                status: "gone: killed", pid: a.pid, pane_id: "", cpu_pct: -1.0,
+                rss_mb: -1, detail: "pane " + a.pane_id + " killed")]
+        else:
+            agents = agents + [a]
+    _dash(d, d.manager_status, agents, d.selected, d.log)
+
 # Executes one action line produced by cs_handle_command and reports what
 # actually happened. Anything this cannot do is named, never silently swallowed.
 fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
@@ -617,7 +668,9 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
         return (d, "pane backend refused key " + words[2] + " for pane " + words[1])
     if head == "pane:kill":
         if pane_kill(d.session, words[2]):
-            return (cs_refresh(d), "killed pane " + words[2])
+            # Forget the pane id: a backend may reuse it for the next spawn, and
+            # the killed agent must not then be reported as that pane's owner.
+            return (cs_refresh(_detach(d, words[1])), "killed pane " + words[2])
         return (d, "pane backend refused to kill " + words[2])
     if head.starts_with("launch:"):
         val agent_id = head.split(":")[1]
@@ -668,6 +721,6 @@ fn cs_apply_action(d: CsDashboard, action: text) -> (CsDashboard, text):
 
 export CsAgent, CsDashboard
 export cs_dashboard_new, cs_refresh, cs_render, cs_handle_command, cs_help_text
-export cs_frame_rows, cs_fit, cs_agent_area, cs_stderr_path, cs_poll_screens
+export cs_frame_rows, cs_fit, cs_fit_sgr, cs_agent_area, cs_stderr_path, cs_poll_screens
 export cs_resize_agents
 export cs_launch_argv, cs_apply_action, cs_resolve_exe, windows_executable_names

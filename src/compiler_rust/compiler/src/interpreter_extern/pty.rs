@@ -222,11 +222,12 @@ mod unix_impl {
         if count <= 0 {
             String::new()
         } else {
-            String::from_utf8_lossy(&bytes[..count as usize]).into_owned()
+            simple_runtime::value::pty::decode_pty_utf8(fd as i64, &bytes[..count as usize])
         }
     }
 
     pub(super) fn pty_close(fd: i32) -> bool {
+        simple_runtime::value::pty::forget_pty_utf8(fd as i64);
         if let Ok(mut table) = SLAVE_TABLE.lock() {
             if let Some(slave) = table.remove(&fd) {
                 unsafe {

@@ -153,6 +153,16 @@ fn _drop_last_char(s: text) -> text:
         i = i + 1
     out
 
+fn _same_rows(a: [text], b: [text]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
 fn _char_count(s: text) -> i64:
     var n = 0
     for _ch in s.chars():
@@ -161,7 +171,8 @@ fn _char_count(s: text) -> i64:
 
 # The bytes that bring the screen from `prev` to `next`: only changed rows are
 # rewritten (all of them when `full`), with the cursor hidden while drawing and
-# then parked on the input line. "" when nothing changed. Rows are exactly the
+# then parked on the input line, inside one synchronized update (DEC 2026) so
+# the terminal shows the frame at once. "" when nothing changed. Rows are exactly the
 # terminal width, so no clear-to-EOL is needed (and at the last column it would
 # erase the final cell).
 fn cs_live_paint(prev: [text], next: [text], full: bool, cursor_col: i64) -> text:
@@ -174,8 +185,8 @@ fn cs_live_paint(prev: [text], next: [text], full: bool, cursor_col: i64) -> tex
     if body == "":
         return ""
     val clear = if full: "\x1b[2J" else: ""
-    "\x1b[?25l" + clear + body + "\x1b[" + next.len().to_text() + ";" +
-        cursor_col.to_text() + "H\x1b[?25h"
+    "\x1b[?2026h\x1b[?25l" + clear + body + "\x1b[" + next.len().to_text() + ";" +
+        cursor_col.to_text() + "H\x1b[?25h\x1b[?2026l"
 
 fn _live_end():
     print_raw("\x1b[0m\x1b[?25h\x1b[?1049l")
@@ -214,9 +225,15 @@ fn cs_run_live(session: text) -> CaretLoopResult:
             last_poll = now
             dirty = true
         elif now - last_poll >= _CS_POLL_MS:
-            d = cs_poll_screens(d)
+            # No agents: nothing to drain or capture. Otherwise repaint only
+            # when the captured screen actually changed - an idle agent would
+            # else force a full frame rebuild 5x a second for no visible change.
+            if d.agents.len() > 0:
+                val polled = cs_poll_screens(d)
+                if not _same_rows(polled.screen, d.screen):
+                    dirty = true
+                d = polled
             last_poll = now
-            dirty = true
         val clock = _clock()
         if clock != last_clock:
             last_clock = clock
@@ -318,6 +335,9 @@ fn _plain_read_line() -> (bool, text):
 fn _plain_emit(content: text):
     print content
 
+fn _plain_no_input() -> bool:
+    false
+
 fn cs_plain_io() -> CaretIo:
     CaretIo(
         is_tty: _plain_is_tty,
@@ -328,6 +348,7 @@ fn cs_plain_io() -> CaretIo:
         draw_at: _plain_draw,
         flush: _plain_noop,
         read_byte: _plain_read_byte,
+        input_pending: _plain_no_input,
         read_line: _plain_read_line,
         emit: _plain_emit
     )

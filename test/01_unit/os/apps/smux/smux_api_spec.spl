@@ -17,8 +17,39 @@ use os.apps.smux.api.{
     smux_capture,
     smux_attach,
     smux_detach,
-    smux_resize
+    smux_resize,
+    smux_pane_spawn_pty,
+    smux_pane_close_pty,
+    smux_send_text,
+    smux_capture_styled,
+    smux_pane_bracketed_paste,
+    smux_paste_text
 }
+
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+use std.nogc_async_mut.sosix.{sosix_platform}
+
+# The service is non-blocking; poll the (draining) capture until `needle` shows.
+fn _await_plain(sid: text, wid: text, pid: text, needle: text) -> text:
+    var i = 0
+    var seen = ""
+    while i < 100 and not seen.contains(needle):
+        thread_sleep_ms(50)
+        val cap = smux_capture(sid, wid, pid, 40)
+        if cap.is_ok():
+            seen = cap.unwrap().content
+        i = i + 1
+    return seen
+
+# A fresh PTY-backed /bin/sh pane at 80x24; returns [session, window, pane].
+fn _pty_shell(name: text) -> [text]:
+    smux_reset_for_test()
+    val s = smux_create_session(name)
+    val w = smux_list_windows(s.id)[0]
+    val p = smux_list_panes(s.id, w.id)[0]
+    val _r = smux_resize(s.id, w.id, p.id, 80, 24)
+    val _sp = smux_pane_spawn_pty(s.id, w.id, p.id, "/bin/sh")
+    [s.id, w.id, p.id]
 
 describe "smux api":
     it "creates a session with an initial pane":
@@ -81,3 +112,40 @@ describe "smux api":
         expect(smux_is_deferred_feature("copy-mode")).to_equal(true)
         expect(smux_is_deferred_feature("mouse")).to_equal(true)
         expect(smux_is_deferred_feature("split-pane")).to_equal(false)
+
+    it "answers a PTY child's cursor-position query from the drain":
+        # @req: REQ-TEST-SMUX_SMUX_API-002
+        if sosix_platform() != "windows":
+            step("The child moves to row 5 col 7, asks DSR and reads the 6-byte reply raw")
+            val ids = _pty_shell("dsr")
+            val _t = smux_send_text(ids[0], ids[1], ids[2],
+                "stty -echo -icanon; printf '\\033[5;7H\\033[6n'; r=$(dd bs=1 count=6 2>/dev/null); stty sane; printf '\\ngot:%s.\\n' \"$r\" | tr '\\033' E\r")
+            step("smux wrote ESC[5;7R back without being asked; the child printed it")
+            expect(_await_plain(ids[0], ids[1], ids[2], "got:E")).to_contain("got:E[5;7R.")
+            val _c = smux_pane_close_pty(ids[0], ids[1], ids[2])
+
+    it "pastes bracketed only after the child enabled bracketed paste":
+        # @req: REQ-TEST-SMUX_SMUX_API-002
+        if sosix_platform() != "windows":
+            val ids = _pty_shell("paste")
+            step("Before ?2004h the pane reports bracketed paste off")
+            expect(smux_pane_bracketed_paste(ids[0], ids[1], ids[2]).unwrap()).to_equal(false)
+            val _t = smux_send_text(ids[0], ids[1], ids[2],
+                "stty -echo -icanon; printf '\\033[?2004hready\\n'; r=$(dd bs=1 count=14 2>/dev/null); stty sane; printf 'got:%s.\\n' \"$r\" | tr '\\033' E\r")
+            val _w = _await_plain(ids[0], ids[1], ids[2], "ready")
+            expect(smux_pane_bracketed_paste(ids[0], ids[1], ids[2]).unwrap()).to_equal(true)
+            step("The paste arrives wrapped in ESC[200~ ... ESC[201~")
+            expect(smux_paste_text(ids[0], ids[1], ids[2], "hi").is_ok()).to_equal(true)
+            expect(_await_plain(ids[0], ids[1], ids[2], "got:E")).to_contain("got:E[200~hiE[201~.")
+            val _c = smux_pane_close_pty(ids[0], ids[1], ids[2])
+
+    it "captures a PTY child's colours as SGR runs next to the plain capture":
+        # @req: REQ-TEST-SMUX_SMUX_API-002
+        if sosix_platform() != "windows":
+            val ids = _pty_shell("styled")
+            val _t = smux_send_text(ids[0], ids[1], ids[2], "printf '\\033[1;31mRED\\033[0m plain\\n'\r")
+            step("The plain capture shows text only; the styled one carries bold red")
+            expect(_await_plain(ids[0], ids[1], ids[2], "RED plain")).to_contain("RED plain")
+            val styled = smux_capture_styled(ids[0], ids[1], ids[2], 40).unwrap()
+            expect(styled).to_contain("\x1b[0;1;31mRED\x1b[0m plain")
+            val _c = smux_pane_close_pty(ids[0], ids[1], ids[2])
