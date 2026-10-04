@@ -24,3 +24,11 @@ Simple compilation/specs/docgen, coverage, compiler/lib/MCP/native execution and
 NFR evidence remain UNRUN. Constant auxiliary group state, scan quotas and bounded
 payload reads do not establish whole-job memory enforcement or latency targets.
 No tag or publication is authorized by this source slice.
+
+Independent draft review corrected empty-group winner suppression and identified
+missing effective-undefined semantics for discarded weak definitions. GNU probes
+confirm kept local references are accepted and discarded weak references produce
+zero; the implementation preserves the former and adds a regression for the
+latter. Final source and acceptance reviews bind exact commits before landing.
+Existing bounded-input tests still require live unresolved references to fail
+inside input opening; validation is not deferred solely to image emission.

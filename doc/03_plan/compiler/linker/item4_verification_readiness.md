@@ -9,11 +9,11 @@ integration does not close verification or authorize publication.
 
 ## 2026-10-04 continuation
 
-Next bounded-engine acceptance unit: ELF section groups and COMDAT selection.
-Implement first-signature selection across selected objects, atomic member and
+ELF section-group and COMDAT source is now authored for the bounded engine.
+It implements first-signature selection across selected objects, atomic member and
 relocation discard, kept-definition resolution, and consistent layout/GOT/output
-filtering. Validate group words, signatures, membership and relocation ownership
-without resident group maps. Test reversed winners, external references, archive
+filtering. It validates group words, signatures, membership and relocation ownership
+without resident group maps. Acceptance covers reversed winners, external references, archive
 selection, generic groups, malformed metadata, cancellation and preserved output.
 GNU research distinguishes final undefined-reference errors from archive demand:
 discarded-only undefined references do not fail the final image, but their
