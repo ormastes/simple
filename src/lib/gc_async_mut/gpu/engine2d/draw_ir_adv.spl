@@ -1621,8 +1621,17 @@ fn _engine2d_draw_ir_materialize_image_damage(
             width: 0, height: 0, pixels: [])
     val destination_x = clip.x - x
     val destination_y = clip.y - y
+    # Preallocate the exact crop size: the previous per-pixel push() built the
+    # buffer through amortized growth, recopying every boxed element on each
+    # capacity doubling. The i64 area guard keeps the absurd-size case on the
+    # old push path (which would fail the same allocation either way).
+    val crop_area = clip.width.to_i64() * clip.height.to_i64()
     var cropped: [u32] = []
+    val preallocated = crop_area > 0 and crop_area <= 2147483647
+    if preallocated:
+        cropped = [0u32; crop_area.to_i32()]
     var row = 0
+    var write_at = 0
     while row < clip.height:
         var col = 0
         while col < clip.width:
@@ -1632,8 +1641,13 @@ fn _engine2d_draw_ir_materialize_image_damage(
             val source_y = (
                 (destination_y + row).to_i64() * image.height.to_i64() /
                 command.height.to_i64()).to_i32()
-            cropped.push(image.pixels[
-                source_y * image.width + source_x])
+            if preallocated:
+                cropped[write_at] = image.pixels[
+                    source_y * image.width + source_x]
+                write_at += 1
+            else:
+                cropped.push(image.pixels[
+                    source_y * image.width + source_x])
             col += 1
         row += 1
     Engine2dClippedImage(
@@ -1642,6 +1656,8 @@ fn _engine2d_draw_ir_materialize_image_damage(
 
 fn _engine2d_draw_ir_plain_fill(command: DrawIrCommand) -> bool:
     if command.? == false:
+        return false
+    if draw_ir_command_has_unsupported_v4_state(command):
         return false
     (command.kind == DRAW_IR_COMMAND_RECT and command.width > 0 and
      command.height > 0 and command.computed_style.len() == 0 and
@@ -2481,24 +2497,18 @@ fn _engine2d_draw_ir_parent_region_pixels(
         row = row + 1
     region
 
-# D9: region-limited readback seam. No backend below exposes a device-side
-# region read yet (RenderBackend only has whole-framebuffer
-# read_pixels_with_source()), so this is the DEFAULT implementation: read the
-# full frame once, exactly as every call site already did, and crop on the
-# host with _engine2d_draw_ir_parent_region_pixels. Pixel-for-pixel identical
-# to a caller doing eng.read_pixels_with_source() then cropping itself by
-# hand -- see engine2d_read_pixels_region_equivalence_spec.spl -- so this
-# alone removes no work. What it buys: every "I only need this rect" call
-# site now asks a single seam for exactly its rect instead of the whole
-# framebuffer, so a future backend-specific region read (a real device-side
-# crop) can be dropped in behind this one function with no call-site changes.
+# D9: region-limited readback seam. Originally the DEFAULT implementation
+# lived here (read the full frame once, crop on the host) because no backend
+# exposed a device-side region read. The seam now reaches the backend
+# through RenderBackend.read_pixels_region: SoftwareBackend/CpuBackend copy
+# only the requested rows natively, and every other backend inherits the
+# trait default, which is exactly the old behavior this function had (one
+# whole-frame read + host crop with zero-fill-at-edge). Pixels are
+# pixel-for-pixel identical either way -- see
+# engine2d_read_pixels_region_equivalence_spec.spl.
 fn _engine2d_read_pixels_region(engine: Engine2D, x: i32, y: i32, width: i32, height: i32) -> Engine2DReadback:
     var eng = engine
-    val full = eng.read_pixels_with_source()
-    val cropped = _engine2d_draw_ir_parent_region_pixels(
-        full, eng.width(), eng.height(), x, y, width, height)
-    engine2d_readback_with_identity(
-        cropped, full.source, full.backend_handle, full.device_identity)
+    eng.read_pixels_region(x, y, width, height)
 
 fn _engine2d_draw_ir_parent_material_padding(batch: DrawIrBatch) -> i32:
     var padding = 0
