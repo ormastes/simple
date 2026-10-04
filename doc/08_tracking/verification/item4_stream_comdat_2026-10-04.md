@@ -32,3 +32,14 @@ zero; the implementation preserves the former and adds a regression for the
 latter. Final source and acceptance reviews bind exact commits before landing.
 Existing bounded-input tests still require live unresolved references to fail
 inside input opening; validation is not deferred solely to image emission.
+
+Final exact source review: core 8c926ceee33 and acceptance through 7572f1720ca
+have no remaining P0/P1 findings. Thirteen authored scenarios and the manual
+cover the agreed behavior; execution remains UNRUN. Working/staged direct-env,
+whitespace and numbered-artifact guards passed; doc/06_spec executable count 0.
+The eleven-commit rebase onto 3f1191dd28351da8aa4a91119fd3210d91f976ec was unchanged.
+Structural CI passed on source head d7e5b5758471a4ddfd7cf809ab97ef3cd6572e0b.
+Test-tree delta PASS: 3151 inherited offenders, zero introduced by this range.
+Offender list: C:/dev/simple/.git/item4-stream-comdat-preexisting-offenders.txt
+SHA-256: 52ac058b29cffa22e435ff81da0cfb5de6db910b102fa51759866e24fd1d4678.
+These structural/source results do not establish runtime or Phase 4 PASS.
