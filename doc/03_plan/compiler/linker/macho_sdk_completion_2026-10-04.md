@@ -9,7 +9,7 @@ Design authority: `doc/05_design/compiler/linker/macho_sdk_providers_2026-10-04.
 |---|---|---|
 | Shared provider metadata | Address-free typed providers used by actual hosted fixups/image construction; binary inputs retain their original validation before projection | Source implemented and independently reviewed; eight authored scenarios cover both architectures, binding/TLV bytes, malformed binary/metadata refusal, absent versions and explicit unsupported access policies; execution UNRUN |
 | Both SDK text formats | Strict tagged/multi-document v4 YAML and v5 JSON readers with target selection, schema/default semantics and resource bounds | Source implemented: independent LLVM TextAPI fixtures and nine authored scenarios cover target/default semantics, metadata retention, malformed inputs, logical quotas, actual leaf/TLV image flow and file-route output preservation; all Simple execution UNRUN. See text-stub reader design for explicit accepted/rejected syntax; broad SDK compatibility remains unverified |
-| Dependency and access rules | Inline/external reexport closure with exact identities, bounded cycles, aliases and root binding ordinals; actual client/umbrella enforcement and explicit SDK/search ownership | Graph, direct-client policy and native SDK/search source implemented; owner-specific dependency @rpath source candidate now retains binary/V5 metadata and routes real native lookup through owner context. Acceptance covers real transitive imports and aliases without promoting leaf loads; runpath candidate assertions cover real files and malformed-input output preservation. All execution remains UNRUN. Final candidate review, broad SDK compatibility, legacy reexport commands and remaining policy semantics stay open; this row is not qualified complete |
+| Dependency and access rules | Inline/external reexport closure with exact identities, bounded cycles, aliases and root binding ordinals; actual client/umbrella enforcement and explicit SDK/search ownership | Graph, direct-client policy and native SDK/search source implemented; independently reviewed owner-specific dependency @rpath retains binary/V5 metadata and routes real native lookup through owner context. Legacy selector and old-format subframework inference implementation is the next active source lane, with exact matching/suppression and real-file acceptance defined. All execution remains UNRUN. Legacy implementation/final review, broad SDK compatibility and remaining policy semantics stay open; this row is not qualified complete |
 | SDK binding and qualification | Correct weak/TLV semantics, Objective-C export expansion and linker-directive handling, normal SDK discovery/integration and native Darwin qualification | Open: correct bind flags/ordinals, missing weak imports, real x64/ARM64 link/load/run/signing evidence plus full compiler/application corpus |
 
 Existing strict JSON parsing can reject duplicate decoded keys and trailing data,
@@ -29,6 +29,11 @@ explicit inline-catalog precedence, and does not borrow executable/ancestor
 runpaths. Current LLVM command-line runtime-path fallback and dyld's inherited
 runtime stack are distinct. See `macho_provider_rpaths_2026-10-04.md` in the linker
 design directory for V2 compatibility, SDK rerooting and contextual cache rules.
+The legacy continuation is specified in `macho_legacy_reexports_2026-10-04.md`:
+all matching ordinary dependency edges, unmatched-selector no-op, exact
+header-derived library stems, checked command strings, header suppression and
+old-format-only subframework inference. It must not turn modern ordinary SDK
+dependencies into an unconditional recursive discovery workload.
 Exact core `78194e42070`, native routing `ccb9ae0c20b` and seven-case acceptance
 `f64c60b4f56` received independent source review without concrete P0/P1 findings;
 this closes that candidate review, not the row's execution or SDK qualification.
