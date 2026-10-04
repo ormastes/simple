@@ -5,6 +5,7 @@ die() { echo "managed-phases: $*" >&2; exit 2; }
 regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
 sha() { sha256sum "$1" | cut -d ' ' -f 1; }
 root= source= inventory= builder= emitter= template= cap= reserve= threads= disk= floor= poll= lifetime= memory_policy=enforce
+task_inventory= task_inventory_sha= task_policy= task_policy_sha=
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
 for arg in "$@"; do
   case "$arg" in
@@ -16,8 +17,20 @@ for arg in "$@"; do
     --minimum-free-disk-bytes=*) floor=${arg#*=} ;; --poll-ms=*) poll=${arg#*=} ;;
     --lifetime-ms=*) lifetime=${arg#*=} ;;
     --memory-policy=*) memory_policy=${arg#*=} ;;
+    --task-inventory=*) task_inventory=${arg#*=} ;;
+    --task-inventory-sha256=*) task_inventory_sha=${arg#*=} ;;
+    --task-policy=*) task_policy=${arg#*=} ;;
+    --task-policy-sha256=*) task_policy_sha=${arg#*=} ;;
   esac
 done
+# An admitted stage graph supersedes the legacy two-driver envelope. Its
+# task contexts bind actual producer identities; no Phase3 digest is invented
+# before that compiler and its Hello receipt exist. Each graph epoch is private.
+if [ -n "$task_inventory$task_inventory_sha$task_policy$task_policy_sha" ]; then
+  exec sh "$repo/scripts/bootstrap/lib/managed-task-inventory-launch.shs" \
+    "$builder" "$task_inventory" "$task_inventory_sha" "$task_policy" "$task_policy_sha" \
+    "$source" "$root" "$poll" "$lifetime"
+fi
 case "$memory_policy" in enforce|monitor) ;; *) die "invalid memory policy" ;; esac
 for path in "$root" "$source" "$inventory" "$builder" "$emitter" "$template"; do
   case "$path" in /*|[A-Za-z]:/*) ;; *) die "absolute admitted inputs required" ;; esac
