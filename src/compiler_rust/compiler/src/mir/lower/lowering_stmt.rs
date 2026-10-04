@@ -1957,6 +1957,25 @@ impl<'a> MirLowerer<'a> {
                 // Body: get element, store to loop var, execute body, increment index
                 self.set_current_block(body_id)?;
 
+                // A statically-typed array iterable reads its elements with
+                // `rt_array_get(array, i64)` directly -- exactly the call
+                // `rt_index_get`'s Array arm makes with the same index, so the
+                // element (and the NIL answered past a body-shortened end) is
+                // identical. The generic `IndexGet` path validated the handle
+                // against the global heap registry TWICE per element (once in
+                // `rt_index_get`'s `heap_type()`, again in `rt_array_get`),
+                // a mutex + SipHash lookup each: a 3840x2160 `[u32]` for-in
+                // took ~1.3 s where the indexed `while` over the same array
+                // (already `rt_array_get`, see lower_index_expr) took ~40 ms.
+                // Text iterables (normalized by `rt_string_chars`) and dicts
+                // (an entries array from `rt_for_iterable`) are not statically
+                // `Array`, so they keep the generic path unchanged.
+                let iterable_is_array = !iterable_is_text
+                    && self
+                        .type_registry
+                        .and_then(|registry| registry.get(iterable.ty))
+                        .is_some_and(|ty| matches!(ty, HirType::Array { .. }));
+
                 // Determine element type for unboxing after IndexGet
                 let element_ty = if let Some(registry) = self.type_registry {
                     if let Some(crate::hir::HirType::Array { element, .. }) = registry.get(iterable.ty) {
@@ -2027,18 +2046,29 @@ impl<'a> MirLowerer<'a> {
                         ty: crate::hir::TypeId::I64,
                     });
 
-                    // Box the raw i64 index for rt_index_get (expects RuntimeValue)
-                    block.instructions.push(MirInst::BoxInt {
-                        dest: boxed_idx,
-                        value: current_idx,
-                    });
+                    if iterable_is_array {
+                        // Same element read as rt_index_get's Array arm, minus
+                        // the second registry validation (see iterable_is_array).
+                        let _ = boxed_idx;
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(raw_element),
+                            target: crate::mir::CallTarget::from_name("rt_array_get"),
+                            args: vec![collection_reg, current_idx],
+                        });
+                    } else {
+                        // Box the raw i64 index for rt_index_get (expects RuntimeValue)
+                        block.instructions.push(MirInst::BoxInt {
+                            dest: boxed_idx,
+                            value: current_idx,
+                        });
 
-                    // Get element via IndexGet (which calls rt_index_get internally)
-                    block.instructions.push(MirInst::IndexGet {
-                        dest: raw_element,
-                        collection: collection_reg,
-                        index: boxed_idx,
-                    });
+                        // Get element via IndexGet (which calls rt_index_get internally)
+                        block.instructions.push(MirInst::IndexGet {
+                            dest: raw_element,
+                            collection: collection_reg,
+                            index: boxed_idx,
+                        });
+                    }
 
                     // Unbox element if it's a native type (rt_index_get returns RuntimeValue)
                     if needs_int_unbox {

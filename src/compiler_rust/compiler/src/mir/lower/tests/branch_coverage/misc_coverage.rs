@@ -123,8 +123,25 @@ fn coverage_local_addr() {
 
 #[test]
 fn coverage_for_each_index_get() {
+    // A statically-typed array iterable reads elements with rt_array_get
+    // directly (the call rt_index_get's Array arm makes), not the generic
+    // IndexGet dispatcher, which re-validated the handle per element.
     let mir = compile_to_mir(
         "fn test() -> i64:\n    val arr = [1, 2, 3]\n    var sum: i64 = 0\n    for x in arr:\n        sum = sum + x\n    return sum\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_array_get"))
+    }));
+    assert!(!has_inst(&mir, |i| matches!(i, MirInst::IndexGet { .. })));
+}
+
+#[test]
+fn coverage_for_each_dict_keeps_generic_index_get() {
+    // A non-array iterable (dict -> entries array via rt_for_iterable) keeps
+    // the generic IndexGet path.
+    let mir = compile_to_mir(
+        "fn test() -> i64:\n    val d = {\"a\": 1}\n    var n: i64 = 0\n    for e in d:\n        n = n + 1\n    return n\n",
     )
     .unwrap();
     assert!(has_inst(&mir, |i| matches!(i, MirInst::IndexGet { .. })));
