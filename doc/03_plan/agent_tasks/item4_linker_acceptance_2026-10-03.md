@@ -422,3 +422,29 @@ Inspect provider metadata and emitted bindings; Reject invalid metadata before
 publication; Preserve unsupported provider semantics. Initial executable intent
 precedes source changes. The four-stage SDK plan remains mandatory; this seam
 alone does not satisfy either text format, dependency closure or native execution.
+
+## SDK text-stub readers and real file routing (2026-10-04)
+
+Base: e1495a1e9dd4a8a224e24da2f3e2d21c11652d4d, target release/1.0.
+Root owns work/item4-macho-text-stubs-20261004, native_adapter.spl, shared
+tracking and integration. Runtime owns new tbd_* source modules; acceptance
+owns TextAPI fixtures, executable specifications and manual; research owns
+reader design and independent final source/test review. Separate worktrees;
+sidecars N/A. Initial fixture/adapter intent bc11b811906 precedes adapter source;
+reader intent ca8bf6a6374 precedes reader implementation. No RED execution is
+claimed without the admitted runtime.
+
+The frozen reader returns target-selected semantic documents, retaining scoped
+install identities and unsupported semantic metadata. Both v4 and v5 are
+required. Leaf lowering explicitly rejects unresolved dependency/access and
+other unsupported semantics instead of erasing them. The native adapter reads
+selected .tbd files through this reader and lowerer into the actual typed hosted
+engine, preserving library selection and destination preservation on error.
+
+Helpers use item4_macho_tbd_*; shared steps include Plan an explicitly selected
+Mach-O link; Link real object and provider files; Inspect the published Mach-O
+commands and bytes; Preserve the destination on selected-provider failure;
+Remove owned fixture files. Reader/schema, resource-limit, metadata, TLV and
+Objective-C assertions complement actual file-route checks. LLVM fixture
+validation is independent syntax/metadata evidence, not Simple execution.
+Full SDK closure, binding, discovery and all-five-host execution remain open.
