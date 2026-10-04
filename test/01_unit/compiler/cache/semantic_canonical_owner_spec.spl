@@ -1,0 +1,108 @@
+"""REQ-CSM-003 REQ-CSM-006 original-owner regression intent; execution UNRUN."""
+use std.spec.*
+use std.spec.step
+use compiler.common.cache_contract.semantic_canonical_stream_v1.*
+
+fn semantic_owner_start(bytes: i64, items: i64, work: i64) -> SemanticCanonicalStreamV1:
+    semantic_canonical_begin_v1("d", "a".repeat(64),
+        SemanticCanonicalLimitsV1(max_bytes: bytes, max_items: items,
+            max_depth: 8, max_work: work)).unwrap()
+
+describe "Semantic canonical persistent owner":
+    it "keeps cumulative byte item and work charges on the original receiver":
+        step("Observe the frozen 82-byte header and its 450-unit admission charge")
+        var writer = semantic_owner_start(4096, 32, 4096)
+        expect(writer.encoded_bytes).to_equal(82)
+        expect(writer.encoded_items).to_equal(0)
+        expect(writer.charged_work).to_equal(450)
+        step("Open a container then attach a scalar through successive mutable calls")
+        writer.semantic_canonical_begin_option_v1(true)
+        expect(writer.encoded_bytes).to_equal(83)
+        expect(writer.encoded_items).to_equal(1)
+        expect(writer.charged_work).to_equal(456)
+        writer.semantic_canonical_write_bool_v1(true)
+        expect(writer.encoded_bytes).to_equal(85)
+        expect(writer.encoded_items).to_equal(2)
+        expect(writer.charged_work).to_equal(461)
+        expect(writer.frames.len()).to_equal(1)
+        if writer.frames.len() != 1: return
+        expect(writer.frames[0].children.len()).to_equal(1)
+        writer.semantic_canonical_end_option_v1()
+        expect(writer.frames.len()).to_equal(0)
+        expect(writer.root_count).to_equal(1)
+        expect(writer.semantic_canonical_finish_v1().is_ok()).to_equal(true)
+
+    it "rejects the second cumulative charge atomically and preserves the first error":
+        for kind in 0..3:
+            var writer = semantic_owner_start(
+                if kind == 0: 84 else: 4096,
+                if kind == 1: 1 else: 32,
+                if kind == 2: 460 else: 4096)
+            step("Admit the option before the scalar exceeds one remaining quota")
+            writer.semantic_canonical_begin_option_v1(true)
+            writer.semantic_canonical_write_bool_v1(true)
+            val errors = ["byte_limit_exceeded", "item_limit_exceeded", "work_limit_exceeded"]
+            expect(writer.error.is_some()).to_equal(true)
+            if writer.error.is_none(): return
+            expect(semantic_revision_error_code_v1(writer.error.unwrap())).to_equal(errors[kind])
+            expect(writer.encoded_bytes).to_equal(83)
+            expect(writer.encoded_items).to_equal(1)
+            expect(writer.charged_work).to_equal(456)
+            step("Attempt a different invalid mutation and close without replacing the original error")
+            writer.semantic_canonical_write_i8_v1(999)
+            writer.semantic_canonical_end_record_v1()
+            val finished = writer.semantic_canonical_finish_v1()
+            expect(finished.is_err()).to_equal(true)
+            if finished.is_ok(): return
+            expect(semantic_revision_error_code_v1(finished.unwrap_err())).to_equal(errors[kind])
+            expect(writer.encoded_bytes).to_equal(83)
+            expect(writer.charged_work).to_equal(456)
+
+    it "attaches a closed nested container to its parent then closes exactly one root":
+        var writer = semantic_owner_start(4096, 32, 4096)
+        step("Build two nested options with one true scalar")
+        writer.semantic_canonical_begin_option_v1(true)
+        writer.semantic_canonical_begin_option_v1(true)
+        writer.semantic_canonical_write_bool_v1(true)
+        writer.semantic_canonical_end_option_v1()
+        expect(writer.frames.len()).to_equal(1)
+        if writer.frames.len() != 1: return
+        expect(writer.frames[0].children.len()).to_equal(1)
+        expect(writer.root_count).to_equal(0)
+        writer.semantic_canonical_end_option_v1()
+        expect(writer.frames.len()).to_equal(0)
+        expect(writer.root_count).to_equal(1)
+        val result = writer.semantic_canonical_finish_v1()
+        expect(result.is_ok()).to_equal(true)
+        if result.is_err(): return
+        expect(writer.finished).to_equal(true)
+        expect(result.unwrap().encoded_bytes).to_equal(86)
+        # Independent .NET SHA-256 over Begin01 header + 17 17 20 01.
+        expect(result.unwrap().digest).to_equal("e78940c9d372c44fcc16f1cd97ae64198ac42478b6a3f9015de06e1bcf22be47")
+
+    it "rejects a second root and a second finish on their original owners":
+        var root = semantic_owner_start(4096, 32, 4096)
+        root.semantic_canonical_write_bool_v1(true)
+        root.semantic_canonical_write_bool_v1(false)
+        expect(root.root_count).to_equal(1)
+        expect(root.error.is_some()).to_equal(true)
+        if root.error.is_none(): return
+        expect(semantic_revision_error_code_v1(root.error.unwrap())).to_equal("root_arity_exceeded")
+        step("Finish a separate valid stream once and reject both repeat finish and late writes")
+        var writer = semantic_owner_start(4096, 32, 4096)
+        writer.semantic_canonical_write_i64_v1(-2)
+        val first = writer.semantic_canonical_finish_v1()
+        expect(first.is_ok()).to_equal(true)
+        if first.is_err(): return
+        expect(first.unwrap().digest).to_equal("ae531cbc56bef3a2f48a0d25dd67d269c96bf6445aceaab84551a20e28514f29")
+        val work = writer.charged_work
+        val again = writer.semantic_canonical_finish_v1()
+        expect(again.is_err()).to_equal(true)
+        if again.is_ok(): return
+        expect(semantic_revision_error_code_v1(again.unwrap_err())).to_equal("already_finished")
+        writer.semantic_canonical_write_bool_v1(false)
+        expect(writer.charged_work).to_equal(work)
+        expect(writer.error.is_some()).to_equal(true)
+        if writer.error.is_none(): return
+        expect(semantic_revision_error_code_v1(writer.error.unwrap())).to_equal("already_finished")
+        expect(writer.semantic_canonical_finish_v1().is_err()).to_equal(true)
