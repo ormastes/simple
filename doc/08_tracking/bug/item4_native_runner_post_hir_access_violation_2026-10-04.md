@@ -152,3 +152,64 @@ producer and source identified above. It does not reproduce or repair the full
 runner crash, admit that producer, or verify newer release source. Debugger
 attachment and the full runner build remain pending; preserve the primed
 authority and private caches for the next bounded diagnostic.
+
+## Full-runner diagnostic admission followup (2026-10-04)
+
+This sequence is separate from the successful minimal prime and its admission
+attempts above. The first two full-runner diagnostic admission requests were
+denied; they do not count as compiler execution or crash reproductions. The
+third acquired admission, but the launched build Bash process returned exit 1
+after approximately two seconds, with an empty collector log. No actual worker
+debugger attachment was attempted (`attach_attempted=false`).
+
+Admission success proves only that the request obtained its resource reservation.
+The short exit and empty log do not locate a compiler fault, demonstrate HIR
+completion, or reproduce the earlier access violation. Empty capture also cannot
+prove that the attempted command emitted no diagnostics. Preserve the attempted
+command, private output paths and terminal receipts; do not relabel or overwrite
+the earlier prime, runner or admission evidence.
+
+Evidence root is
+`C:/dev/simple-item4-runner-diag-20261004/build/item4-runner-diag/`:
+
+- `runner-admission2-launch-result.json` records
+  `NOT_LAUNCHED_RESOURCE_RESERVATION_UNAVAILABLE`, with no reservation.
+- `runner-admission3-launch-result.json` records terminal collector exit 1 and
+  `reservation_released=true`; `runner-debug-result.json` records build exit 1,
+  null debugger exit, and no attach attempt.
+- `runner-collector/collector.receipt.env` records complete/child-exit and
+  zero captured bytes. Its empty-log digest is
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+
+The separately owned `echo-forwarding-probe.ps1` used asynchronous BaseStream
+copies of both child pipes into the outer collector. Its five-second-bounded
+receipt records exit 0 and 114 captured bytes, containing `ITEM4_ECHO_STDOUT`
+and `ITEM4_ECHO_STDERR` plus two PowerShell `VoidTaskResult` lines. This proves
+small-command stream visibility, not the cause of the earlier Bash exit.
+The v2 driver suppresses the task-result values and uses the same explicit
+streaming for both build and debugger children, without a full-output buffer.
+
+Prepared `runner-v2-request.json` has SHA256
+`5b8aeea583a7988e70edf7a2cd2ccd84a1445ccf2e9159f1fa95dc9087b0ae47`.
+The immutable prepared request specifies one actual compiler thread and fresh
+output paths. Its advisory memory reservation is not a hard memory limit or
+measured peak. The subsequent `runner-v2-launch-result.json`, observed at
+2026-10-04T13:26:01.5713804Z, records
+`NOT_LAUNCHED_RESOURCE_RESERVATION_UNAVAILABLE`, null reservation and
+`admitted=false`. This is the first admission attempt for v2; it did not launch
+a compiler or debugger.
+
+The later read-only `v2-post-refusal-admission-observation.json` records a
+locked snapshot at 2026-10-04T13:26:39.5357473Z: two existing reservations
+(owners 67492 and 43428), both upstream collectors terminal, and free commit
+capacity 19,051,814,912 bytes below the required 21,474,836,480 bytes. This is
+a later capacity observation, not proof of the exact earlier refusal cause.
+Free commit capacity is distinct from the launch receipt's free physical
+memory. The observation's private guard was released; other owners' state was
+not modified.
+
+The root reviewer also recorded `bash -n runner-v2.shs` passing: syntax only,
+without executing the shell body. No further diagnostic attempt is planned
+in this wave. The original Bash exit cause, full-runner crash and runtime
+qualification remain unresolved; no item4 assertions ran. Preserve all earlier
+outputs, prepared request and refusal evidence for a separately admitted run.
