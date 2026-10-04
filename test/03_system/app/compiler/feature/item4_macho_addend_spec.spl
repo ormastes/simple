@@ -33,6 +33,21 @@ fn item4_macho_addend_request() -> MachOHostedRequest:
 fn item4_macho_addend_sign(value: i64, bits: i64) -> i64:
     if (value & (1 << (bits - 1))) != 0: value - (1 << bits) else: value
 
+fn item4_macho_addend_data_command(image: [u8]) -> i64:
+    if image.len() < 32: return -1
+    val count = item4_macho_addend_read(image, 16)
+    expect(count > 0 and count < 128).to_be(true)
+    if count <= 0 or count >= 128: return -1
+    var at: i64 = 32
+    for index in 0..count:
+        if at > image.len() - 8: return -1
+        val size = item4_macho_addend_read(image, at + 4)
+        if size < 8 or size > image.len() - at: return -1
+        if item4_macho_addend_read(image, at) == 0x19 and size >= 72:
+            if item4_macho_addend_read(image, at + 8, 8) == 0x415441445f5f: return at
+        at = at + size
+    -1
+
 fn item4_macho_addend_baseline(bytes: [u8]) -> bool:
     if bytes.len() < 184: return false
     val relocation_offset = item4_macho_addend_read(bytes, 160)
@@ -75,15 +90,20 @@ describe "Hosted ARM64 signed ADDEND pairs":
             expect(linked.is_ok()).to_be(true)
             if linked.is_err(): return
             val image = linked.unwrap()
-            expect(image.len()).to_be_greater_than(0xc010)
-            if image.len() <= 0xc010: return
+            expect(image.len()).to_be_greater_than(0x8010)
+            if image.len() <= 0x8010: return
             step("Check independent instruction targets")
             # The first object has28text bytes; provider target is4bytes into its text.
             val base: i64 = 0x100000000
             val symbol: i64 = base + 0x4020
+            val data_command = item4_macho_addend_data_command(image)
+            expect(data_command).to_be_greater_than(0)
+            if data_command < 0: return
+            expect(item4_macho_addend_read(image, data_command + 24, 8)).to_equal(base + 0x8000)
+            expect(item4_macho_addend_read(image, data_command + 40, 8)).to_equal(0x8000)
             expect(item4_macho_addend_read(image, 0x4020)).to_equal(0xd503201f)
-            expect(item4_macho_addend_read(image, 0xc000, 8)).to_equal(77)
-            expect(item4_macho_addend_read(image, 0xc008, 8)).to_equal(88)
+            expect(item4_macho_addend_read(image, 0x8000, 8)).to_equal(77)
+            expect(item4_macho_addend_read(image, 0x8008, 8)).to_equal(88)
             for index in 0..2:
                 val place = 0x4000 + index * 4
                 val word = item4_macho_addend_read(image, place)
@@ -99,4 +119,104 @@ describe "Hosted ARM64 signed ADDEND pairs":
                 val low_value = ((low >> 10) & 0xfff) * (if index == 0: 1 else: 8)
                 expect(low & 0xffc003ff).to_equal(if index == 0: 0x91000000 else: 0xf9400021)
                 val target = base + 0x4000 + page_delta + low_value
-                expect(target).to_equal(base + 0xc008 + (if index == 0: 4096 elif negative: -16 else: 16))
+                expect(target).to_equal(base + 0x8008 + (if index == 0: 4096 elif negative: -16 else: 16))
+
+    it "ITEM4-REQ-004 rejects malformed prefixes, followers and duplicate patches":
+        step("Inspect assembler-produced ARM64 ADDEND pairs")
+        val baseline = item4_macho_addend_fixture("addend_local_a64.o")
+        if not item4_macho_addend_baseline(baseline): return
+        val provider = item4_macho_addend_fixture("addend_provider_a64.o")
+        val relocations = item4_macho_addend_read(baseline, 160)
+        for kind in 0..8:
+            var object = baseline
+            if kind == 0: object = item4_macho_addend_put(object, 164, 1)
+            elif kind == 1: object = item4_macho_addend_put(object, relocations + 4, 0xac000010)
+            elif kind == 2: object = item4_macho_addend_put(object, relocations + 4, 0xa5000010)
+            elif kind == 3: object = item4_macho_addend_put(object, relocations + 4, 0xa6000010)
+            elif kind == 4: object = item4_macho_addend_put(object, relocations + 8, 16)
+            elif kind == 5: object = item4_macho_addend_put(object, relocations + 12, 0x6c000003)
+            elif kind == 6:
+                object = item4_macho_addend_put(object, relocations, 28)
+                object = item4_macho_addend_put(object, relocations + 8, 28)
+            else:
+                object = item4_macho_addend_put(object, relocations + 16, 20)
+                object = item4_macho_addend_put(object, relocations + 24, 20)
+            step("Reject malformed pairs before publication")
+            val linked = macho_hosted_link([object, provider], [], [], item4_macho_addend_request())
+            expect(linked.is_err()).to_be(true)
+            if linked.is_ok(): return
+            expect(linked.unwrap_err()).to_contain(if kind < 6: "ADDEND" elif kind == 6: "outside input section" else: "overlapping")
+
+    it "ITEM4-REQ-004 rejects simultaneous explicit and embedded instruction addends":
+        val baseline = item4_macho_addend_fixture("addend_local_a64.o")
+        if not item4_macho_addend_baseline(baseline): return
+        val text_offset = item4_macho_addend_read(baseline, 152)
+        val valid = text_offset >= 184 and text_offset <= baseline.len() and 28 <= baseline.len() - text_offset
+        expect(valid).to_be(true)
+        if not valid: return
+        val provider = item4_macho_addend_fixture("addend_provider_a64.o")
+        for instruction in [0, 4, 8, 12, 20]:
+            val word = item4_macho_addend_read(baseline, text_offset + instruction)
+            # Independent instruction-field bit: branch imm26, ADRP immlo or imm12.
+            val mask = if instruction < 8: 1 elif instruction == 8: 0x20000000 else: 0x400
+            expect(word & mask).to_equal(0)
+            if (word & mask) != 0: return
+            val opcode = if instruction == 4: word & 0x7fffffff else: word
+            val object = item4_macho_addend_put(baseline, text_offset + instruction, opcode | mask)
+            val linked = macho_hosted_link([object, provider], [], [], item4_macho_addend_request())
+            expect(linked.is_err()).to_be(true)
+            if linked.is_ok(): return
+            expect(linked.unwrap_err()).to_contain("addend")
+
+    it "ITEM4-REQ-004 retains embedded local addends when the explicit prefix is zero":
+        val baseline = item4_macho_addend_fixture("addend_local_a64.o")
+        if not item4_macho_addend_baseline(baseline): return
+        val relocations = item4_macho_addend_read(baseline, 160)
+        val text_offset = item4_macho_addend_read(baseline, 152)
+        val valid = text_offset >= 184 and text_offset <= baseline.len() and 28 <= baseline.len() - text_offset
+        expect(valid).to_be(true)
+        if not valid: return
+        val provider = item4_macho_addend_fixture("addend_provider_a64.o")
+        for instruction in [0, 8, 12, 20]:
+            val pair = (20 - instruction) / 4
+            var object = item4_macho_addend_put(baseline, relocations + pair * 16 + 4, 0xa4000000)
+            val word = item4_macho_addend_read(baseline, text_offset + instruction)
+            val embedded = if instruction == 0: 1 elif instruction == 8: 0x20000000 elif instruction == 12: 0x400 else: 0x800
+            object = item4_macho_addend_put(object, text_offset + instruction, word | embedded)
+            val linked = macho_hosted_link([object, provider], [], [], item4_macho_addend_request())
+            expect(linked.is_ok()).to_be(true)
+            if linked.is_err(): return
+            val expected = if instruction == 0: 0x94000009 elif instruction == 8: 0xb0000020 elif instruction == 12: 0x91002400 else: 0xf9400c21
+            expect(item4_macho_addend_read(linked.unwrap(), 0x4000 + instruction)).to_equal(expected)
+
+    it "ITEM4-REQ-004 permits a zero explicit imported branch but rejects either nonzero source":
+        val baseline = item4_macho_addend_fixture("addend_import_a64.o")
+        if baseline.len() < 184: return
+        val relocations = item4_macho_addend_read(baseline, 160)
+        val text_offset = item4_macho_addend_read(baseline, 152)
+        val valid = item4_macho_addend_read(baseline, 164) == 2 and relocations >= 184 and
+            relocations <= baseline.len() and 16 <= baseline.len() - relocations and
+            item4_macho_addend_read(baseline, relocations) == 0 and
+            item4_macho_addend_read(baseline, relocations + 4) == 0xa4000004 and
+            item4_macho_addend_read(baseline, relocations + 8) == 0 and
+            item4_macho_addend_read(baseline, relocations + 12) == 0x2d000002 and
+            item4_macho_addend_read(baseline, text_offset) == 0x94000000
+        expect(valid).to_be(true)
+        if not valid: return
+        val library = item4_macho_addend_fixture("provider_a64.dylib")
+        val zero = item4_macho_addend_put(baseline, relocations + 4, 0xa4000000)
+        val linked = macho_hosted_link([zero], [], [library], item4_macho_addend_request())
+        expect(linked.is_ok()).to_be(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        # One imported slot puts its 16-byte stub at the reserved text page0x8000.
+        expect(item4_macho_addend_read(image, 0x4000)).to_equal(0x94001000)
+        expect(item4_macho_addend_read(image, 0x8008)).to_equal(0xd61f0200)
+        for kind in 0..3:
+            var object = baseline
+            if kind == 1: object = item4_macho_addend_put(baseline, relocations + 4, 0xa4fffffc)
+            elif kind == 2: object = item4_macho_addend_put(zero, text_offset, 0x94000001)
+            val rejected = macho_hosted_link([object], [], [library], item4_macho_addend_request())
+            expect(rejected.is_err()).to_be(true)
+            if rejected.is_ok(): return
+            expect(rejected.unwrap_err()).to_contain("hosted imported branch addend must be zero")
