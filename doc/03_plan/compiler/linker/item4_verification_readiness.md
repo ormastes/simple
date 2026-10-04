@@ -9,6 +9,19 @@ integration does not close verification or authorize publication.
 
 ## 2026-10-04 continuation
 
+ELF byte-source implementation and seven acceptance scenarios are now authored.
+File adapters require a four-operation seal and consume the selected reader before the
+same owner's relocation/layout/writer operations. Array-input APIs keep their
+existing three-operation contract. Hosted library classification and linking
+must use the same retained callback bytes, while existing image publication and
+configuration behavior are preserved. Portable reads preserve supported hosts
+and symlinks; hostile-path snapshots and change-during-read identity guarantees
+remain open rather than being inferred from path strings or caller digests.
+The scenarios cover one source/writer owner, missing source, invalid inputs,
+alias precedence, hosted archive snapshot reuse, canonical parity and source
+failure preserving output. All seven remain UNRUN. See
+`doc/08_tracking/verification/item4_elf_byte_source_2026-10-04.md`.
+
 Static ELF operational composition now seals actual relocation-field, layout
 and image-writer callbacks and routes existing linker entrypoints through those
 selected callbacks. Eleven authored scenarios inspect observable output changes
@@ -90,7 +103,25 @@ native test cannot satisfy them. All original eight rows below remain in scope.
 | Platform/product acceptance | Complete PE ARM64 and FreeBSD corpus, complete compiler/application links | Host loader execution, imports/unwind, startup, full corpus and linker comparison | Root integration / open |
 | Phase 4 evidence | Canonical manuals, requirement trace, coverage, core/lib/MCP checks, NFR results | Every scenario executed; required branch coverage; no stubs; exact-head independent review | All owners / blocked on qualified runtime and preceding source gaps |
 
-## Per-item completion rule
+## Implementation order before Phase 4
+
+| Item | Code already written (execution still UNRUN) | Next implementation and test pair |
+|---|---|---|
+| 1 | Retained subranges and file-source dispatch | Complete archive member identity/lifetime handling; test truncation, long names, padding and child lifetime |
+| 2 | Resident ELF operation selection and a bounded x64 subset | Complete bounded symbol/archive/relocation semantics; compare complete images with the fast path |
+| 3 | UnsupportedBudget refusal | Implement constrained worker admission before allocation and peak accounting; test breach, cancellation, scratch exhaustion and RSS |
+| 4 | Partial hosted Mach-O | Complete TLS/TLV, unwind and weak/reexport handling; test independent bytes and Darwin loader/signing behavior |
+| 5 | RV64 static IE/LE TLS and symbol-type propagation | Implement RV32, relaxation/PC remapping and dynamic TLS; test boundaries and native execution |
+| 6 | Configured mapped-provider calls, shutdown, three/four-operation ELF seals | Wire trusted manifest authority and actual CLI dispatch; test real admission, replacement, pinned unload and recovery |
+| 7 | Partial platform fixtures | Complete PE ARM64/FreeBSD compiler and application links; test loader startup, imports and unwind against reference outputs |
+| 8 | Authored specs and source reviews | Qualify the runtime, execute specs and docgen, collect coverage/core/lib/MCP/NFR evidence; only then decide Phase 4 PASS |
+
+Items are separate acceptance units. Source-only commits do not close their
+rows. The current file-source work advances items 1 and 6; its resident cache
+does not satisfy item 2 or resource enforcement in item 3. These are existing
+requirements, not newly selected scope.
+
+### Completion rule
 
 1. Specify concrete input/output behavior and write executable tests first.
 2. Implement the production caller path; an unused helper does not close an item.

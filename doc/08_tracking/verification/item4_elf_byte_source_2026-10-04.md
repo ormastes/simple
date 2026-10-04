@@ -1,0 +1,38 @@
+# ELF byte-source verification
+
+STATUS: FAIL — full item4 and Phase 4 remain incomplete.
+
+Scope: a selected file-reader operation actually supplies bytes to freestanding
+and hosted ELF linking, using the same sealed owner for subsequent image
+operations. Pure array-input entrypoints retain their three-facet contract.
+File adapters require the additional byte-source facet before any input I/O.
+
+Hosted library probing previously classified a pathname through an independent
+read and later loaded it again. Source-aware selection must retain the returned
+bytes and classify/link that same data. This is a per-link byte snapshot, not
+proof against mutation during the read, filesystem alias substitution or
+untrusted callback behavior. Native image publication remains the existing
+staging/rename path after successful input acquisition and linking.
+
+The portable default uses the existing Result-returning file facade. The current
+retained-handle helper is not a universal substitute: it lacks FreeBSD/macOS
+support and rejects symlinks used by hosted libraries. No before/after pathname
+hash or self-reported digest is treated as immutable identity or authentication.
+
+Acceptance must use real files and independently inspect linked output to prove
+selected source dispatch; error paths preserve a pre-existing destination.
+Hosted acceptance requires real host CRT/DSO prerequisites and must not label a
+freestanding result as hosted execution. Source-only test ordering is not an
+observed RED/GREEN run.
+
+Native Simple compilation/tests, canonical docgen, coverage, core/lib/MCP checks,
+native smoke and NFR measurements remain UNRUN. No capped runtime build retry is
+authorized by this source continuation; full readiness remains unproven.
+
+Initial source integration: the freestanding adapter selects file operations for
+ELF and preserves the legacy Mach-O path. Hosted ELF reads CRT, objects, runtime
+archives and shared libraries through a mutable per-link lexical-path cache.
+The same owner reaches the production ELF engine. Independent review of both
+implementations found no P0/P1. The cache retains raw arrays alongside widened
+ELF inputs during linking; avoiding repeat reads costs resident memory and is
+not a bounded-working-set implementation.

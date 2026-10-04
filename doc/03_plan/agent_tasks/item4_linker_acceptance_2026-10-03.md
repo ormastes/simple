@@ -1,5 +1,22 @@
 # Item 4 parallel ownership
 
+## 2026-10-04 ELF byte-source continuation
+
+Base: `d945e61704c7baeca8fe354eb812e390b156a561`, target `release/1.0`.
+Root integrates on `work/item4-elf-byte-source-20261004` and owns the freestanding
+adapter, common plans/report, final review and merge. Runtime owns the operation
+binding extension and hosted `_LinkerWrapper/native_linking.spl` integration.
+Acceptance owns executable specs, fixtures and authored manuals. Research owns
+design and independent review. Agents create separate worktrees at this base;
+root reuses its clean integration worktree. Lower-model sidecars: N/A.
+
+Keep the three-facet array-input APIs unchanged. New file APIs are
+`elf_builtin_file_operation_providers_v1`, `elf_builtin_file_operations_v1`,
+`elf_seal_file_operations_v1`, `has_byte_source`, `read_bytes`,
+`link_freestanding_with_operations_v1`, and
+`internal_link_native_with_operations`. Test helpers use `item4_elf_source_`
+and `std.spec.step`. Concrete test intent precedes implementation.
+
 ## 2026-10-04 static ELF operational composition continuation
 
 Base: `80b5ab3f6f568bd614f28a4c91244713a2bb9381`, target `release/1.0`.
