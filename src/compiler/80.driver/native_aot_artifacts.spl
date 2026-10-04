@@ -1,0 +1,24 @@
+# Private AOT artifact naming and diagnostic lifetime.
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.path.{dirname}
+use std.nogc_sync_mut.io.file_ops.{file_is_regular_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.io_runtime.{file_size_raw}
+
+# Hash both length-framed identities: distinct output bases in one directory
+# must not share an object. The fixed ASCII leaf also bounds UTF-8 components
+# and leaves room for capsule-receipt and temporary-publication suffixes.
+pub fn native_aot_object_path_v1(output_base: text, module_name: text) -> text:
+    val identity = "native-aot-object-v1|{output_base.len()}:{output_base}|{module_name.len()}:{module_name}"
+    dirname(output_base) + "/aot-" + sha256_text(identity) + ".o"
+
+# Only a successful, physically valid object permits cleanup. Failed evidence
+# belongs to this private attempt directory until its build owner removes it;
+# never evict another attempt or erase IR retained by llvm_object_stage_fail.
+pub fn native_aot_finish_diagnostics_v1(
+    diagnostic_dir: text, backend_status: i64, object_path: text
+) -> bool:
+    if backend_status != 0 or not file_is_regular_no_follow(object_path)
+            or file_size_raw(object_path) <= 0:
+        return true
+    dir_remove(diagnostic_dir, true)

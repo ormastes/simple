@@ -1,0 +1,110 @@
+"""Mutable SHA-256 owner regression intent. Execution UNRUN.
+
+Padding vectors independently produced by .NET SHA256.HashData over repeated
+ASCII 'a'. Counter/failure checks inspect the original mutable owner.
+"""
+use std.spec.*
+use std.common.crypto.sha256.{sha256_stream_v1_new}
+
+describe "SHA-256 streaming mutable owner":
+    it "preserves original counters and hashes across every padding boundary":
+        val lengths = [55, 56, 63, 64, 65, 119, 120]
+        val expected = [
+            "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+            "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a",
+            "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34",
+            "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+            "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0",
+            "31eba51c313a5c08226adf18d4a359cfdfd8d2e816b13f4af952f7ea6584dcfb",
+            "2f3d335432c70b580af0e8e1b3674a7c020d683aa5f73aaaedfdc55af904c21c"]
+        for index in 0..lengths.len():
+            var whole = sha256_stream_v1_new()
+            expect(whole.update([97u8; lengths[index]])).to_equal(true)
+            expect(whole.total_bytes).to_equal(lengths[index] as u64)
+            expect(whole.block_len).to_equal(lengths[index] % 64)
+            expect(whole.finish_hex().unwrap()).to_equal(expected[index])
+            var partitioned = sha256_stream_v1_new()
+            var consumed = 0
+            while consumed < lengths[index]:
+                val remaining = lengths[index] - consumed
+                val chunk = if remaining < 7: remaining else: 7
+                expect(partitioned.update([])).to_equal(true)
+                expect(partitioned.total_bytes).to_equal(consumed as u64)
+                expect(partitioned.update([97u8; chunk])).to_equal(true)
+                consumed = consumed + chunk
+                expect(partitioned.total_bytes).to_equal(consumed as u64)
+                expect(partitioned.block_len).to_equal(consumed % 64)
+                expect(partitioned.finished).to_equal(false)
+            expect(partitioned.finish_hex().unwrap()).to_equal(expected[index])
+            var stream = sha256_stream_v1_new()
+            expect(stream.update([97u8; 17])).to_equal(true)
+            expect(stream.total_bytes).to_equal(17u64)
+            expect(stream.block_len).to_equal(17)
+            for byte in 17..lengths[index]:
+                expect(stream.update_byte(97u8)).to_equal(true)
+                expect(stream.total_bytes).to_equal((byte + 1) as u64)
+                expect(stream.block_len).to_equal((byte + 1) % 64)
+            expect(stream.finish_hex().unwrap()).to_equal(expected[index])
+            expect(stream.total_bytes).to_equal(lengths[index] as u64)
+            expect(stream.block_len).to_equal(0)
+            expect(stream.finished).to_equal(true)
+
+    it "finalizes once and rejects later updates without mutating digest state":
+        var stream = sha256_stream_v1_new()
+        expect(stream.update([97u8, 98u8, 99u8])).to_equal(true)
+        expect(stream.finish_hex().unwrap()).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        val state = stream.state
+        val block = stream.block
+        val schedule = stream.schedule
+        expect(stream.finish_hex()).to_be_nil()
+        expect(stream.update([1u8])).to_equal(false)
+        expect(stream.update_byte(2u8)).to_equal(false)
+        expect(stream.update([])).to_equal(false)
+        expect(stream.state).to_equal(state)
+        expect(stream.block).to_equal(block)
+        expect(stream.schedule).to_equal(schedule)
+        expect(stream.total_bytes).to_equal(3u64)
+        stream.reset()
+        expect(stream.total_bytes).to_equal(0u64)
+        expect(stream.block_len).to_equal(0)
+        expect(stream.finished).to_equal(false)
+        expect(stream.state).to_equal([1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225])
+        expect(stream.block).to_equal([0; 64])
+        expect(stream.schedule).to_equal([0; 64])
+        expect(stream.finish_hex().unwrap()).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+    it "rejects length overflow atomically before touching buffers":
+        var stream = sha256_stream_v1_new()
+        expect(stream.update_byte(97u8)).to_equal(true)
+        stream.total_bytes = 0x1fffffffffffffffu64
+        val block = stream.block
+        val state = stream.state
+        val schedule = stream.schedule
+        expect(stream.update([98u8])).to_equal(false)
+        expect(stream.update_byte(98u8)).to_equal(false)
+        expect(stream.total_bytes).to_equal(0x1fffffffffffffffu64)
+        expect(stream.block_len).to_equal(1)
+        expect(stream.block).to_equal(block)
+        expect(stream.state).to_equal(state)
+        expect(stream.schedule).to_equal(schedule)
+        stream.total_bytes = 0x2000000000000000u64
+        expect(stream.update([])).to_equal(false)
+        expect(stream.finish_hex()).to_be_nil()
+        expect(stream.finished).to_equal(false)
+
+    it "wipes and disables the original owner until an explicit reset":
+        var stream = sha256_stream_v1_new()
+        expect(stream.update([97u8; 65])).to_equal(true)
+        expect(stream.zeroize()).to_equal(true)
+        expect(stream.state).to_equal([0; 8])
+        expect(stream.block).to_equal([0; 64])
+        expect(stream.schedule).to_equal([0; 64])
+        expect(stream.total_bytes).to_equal(0u64)
+        expect(stream.block_len).to_equal(0)
+        expect(stream.finished).to_equal(true)
+        expect(stream.update_byte(97u8)).to_equal(false)
+        expect(stream.finish_hex()).to_be_nil()
+        expect(stream.zeroize()).to_equal(true)
+        stream.reset()
+        expect(stream.update([97u8, 98u8, 99u8])).to_equal(true)
+        expect(stream.finish_hex().unwrap()).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")

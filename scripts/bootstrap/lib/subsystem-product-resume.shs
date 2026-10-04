@@ -1,0 +1,84 @@
+#!/bin/sh
+# Sourced by the pinned product owner. No native callbacks are run here.
+resume_field() {
+  awk -F= -v key="$2" '$1==key {n++; value=substr($0,length(key)+2)} END {if(n!=1)exit 1; print value}' "$1"
+}
+resume_expect() {
+  [ "$(resume_field "$matrix" "$1")" = "$2" ] || die "resume matrix differs: $1"
+}
+resume_validate() {
+  regular "$matrix" && regular "$statuses" && regular "$inventory" || die 'resume evidence missing'
+  # Reject duplicate/malformed authority fields; matrix also embeds its TSV journal.
+  awk 'index($0,"\t") {next} !/^[a-zA-Z0-9_]+=/ {exit 1} {k=$0;sub(/=.*/,"",k);if(seen[k]++)exit 1}' "$matrix" || die 'malformed resume matrix'
+  resume_expect format SIMPLE-SUBSYSTEM-TEST-MATRIX-1
+  resume_expect status FAIL
+  resume_expect source_root "$source_root"
+  resume_expect execution_cwd "$source_root"
+  resume_expect runtime_mode native
+  resume_expect threads "$threads"
+  resume_expect rss_cap_kib "$rss_cap_kib"
+  resume_expect build_timeout_seconds "$build_timeout"
+  resume_expect test_timeout_seconds "$test_timeout"
+  resume_expect inventory_sha256 "$(hash_file "$inventory")"
+  resume_expect schedule_sha256 "$(hash_file "$statuses")"
+  [ "$(wc -l <"$statuses" | tr -d ' ')" -eq 18 ] || die 'resume journal must have 18 tasks'
+  awk 'index($0,"\t") {print}' "$matrix" >"$owner_lock/embedded-journal"
+  cmp -s "$statuses" "$owner_lock/embedded-journal" || die 'embedded resume journal differs'
+  sh "$inventory_program" "$source_root" >"$owner_lock/inventory" || die 'resume inventory failed'
+  cmp -s "$inventory" "$owner_lock/inventory" || die 'resume inventory changed'
+  resume_reused= resume_missing=
+  for backend in llvm cranelift; do
+    compiler=$(compiler_for "$backend")
+    producer_receipt=$(receipt_for "$backend")
+    regular "$compiler" && regular "$producer_receipt" || die 'resume needs both admitted producer inputs'
+    [ "$(resume_field "$producer_receipt" schema)" = simple-bootstrap-stage2-admission-v2 ] &&
+      [ "$(resume_field "$producer_receipt" status)" = admitted ] &&
+      [ "$(resume_field "$producer_receipt" candidate_path)" = "$compiler" ] &&
+      [ "$(resume_field "$producer_receipt" candidate_sha256)" = "$(hash_file "$compiler")" ] &&
+      [ "$producer_receipt" = "$(dirname "$compiler")/admission.env" ] || die 'resume producer is not admitted'
+    old_compiler=$(resume_field "$matrix" "compiler_${backend}_sha256") || die 'resume compiler identity absent'
+    if [ "$old_compiler" = MISSING ]; then
+      resume_missing="$backend"
+      resume_expect "producer_receipt_${backend}_path" ''
+      resume_expect "producer_receipt_${backend}_sha256" MISSING
+      [ ! -e "$output_root/$backend" ] && [ ! -L "$output_root/$backend" ] || die 'blocked backend has partial artifacts'
+      expected=BLOCKED
+    else
+      [ -z "$resume_reused" ] || die 'resume has no absent backend'
+      resume_reused="$backend"
+      resume_expect "compiler_${backend}_sha256" "$(hash_file "$compiler")"
+      resume_expect "producer_receipt_${backend}_path" "$producer_receipt"
+      resume_expect "producer_receipt_${backend}_sha256" "$(hash_file "$producer_receipt")"
+      expected=SUCCEEDED
+    fi
+    for suite in compiler interpreter loader; do
+      for stage in build enumerate run; do
+        awk -F '\t' -v k="phase4_${backend}_product_${suite}_${stage}" -v expected="$expected" \
+          '$1==k {n++; if(NF!=3 || $2!=expected || $3!=(expected=="SUCCEEDED"?0:1))bad=1} END {exit(n!=1 || bad)}' \
+          "$statuses" || die 'resume rejects failed, partial or duplicate tasks'
+      done
+      [ "$expected" = SUCCEEDED ] || continue
+      job=$(job_for "$backend" "$suite")
+      resume_expect "${backend}_${suite}_receipt_sha256" "$(hash_file "$job/result.env")"
+      [ "$(resume_field "$job/result.env" status)" = PASS ] || die 'resume requires full product PASS'
+      for evidence in build.exit build.stdout.log build.stderr.log build.env \
+          enumeration.exit enumeration.tsv enumeration.stdout.log enumeration.stderr.log enumeration-watchdog.env \
+          execution.exit execution.tsv execution.stdout.log execution.stderr.log execution-watchdog.env; do
+        evidence_key=$(printf '%s' "$evidence" | tr '.-' '__')
+        resume_expect "${backend}_${suite}_${evidence_key}_sha256" "$(hash_file "$job/$evidence")"
+      done
+      for stage in build enumeration execution; do
+        resume_expect "${backend}_${suite}_${stage}_exit" 0
+        [ "$(cat "$job/$stage.exit")" = 0 ] || die 'resume exit differs'
+      done
+      verify_base "$backend" "$suite" complete \
+        --enumeration="$job/enumeration.tsv" --enumeration-stdout="$job/enumeration.stdout.log" \
+        --enumeration-stderr="$job/enumeration.stderr.log" --enumeration-watchdog="$job/enumeration-watchdog.env" --enumeration-exit=0 \
+        --execution="$job/execution.tsv" --execution-stdout="$job/execution.stdout.log" \
+        --execution-stderr="$job/execution.stderr.log" --execution-watchdog="$job/execution-watchdog.env" --execution-exit=0 \
+        --output="$owner_lock/${backend}_${suite}.env" || die 'resume product raw evidence rejected'
+      cmp -s "$job/result.env" "$owner_lock/${backend}_${suite}.env" || die 'resume product receipt differs'
+    done
+  done
+  [ -n "$resume_reused" ] && [ -n "$resume_missing" ] || die 'resume requires one complete and one absent backend'
+}

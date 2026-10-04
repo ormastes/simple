@@ -1,0 +1,129 @@
+"""Focused executable contract for the opt-in aggregate spec registry.
+
+Run with SPEC_AGGREGATE_LEDGER_BASE set to a fresh absolute output stem.
+The fixture deliberately uses live callbacks and hooks as its oracle.
+"""
+use std.nogc_sync_mut.spec.{
+    aggregate_registry_begin, aggregate_owner_begin, aggregate_owner_end,
+    aggregate_registry_finish, describe, context, it, slow_it, planned, skip,
+    before_all, before_each, after_each, after_all
+}
+use std.io_runtime.{env_get, file_read}
+
+var events: [text] = []
+
+fn register_examples():
+    describe "outer":
+        before_all:
+            events.push("before_all")
+        before_each:
+            events.push("before_each")
+        after_each:
+            events.push("after_each")
+        context "inner":
+            it "repeated":
+                events.push("first")
+            it "repeated":
+                events.push("second")
+            slow_it "slow":
+                events.push("slow")
+            planned("planned", "fixture")
+            skip("skipped", "fixture")
+        after_all:
+            events.push("after_all")
+
+fn declarations(ledger: text) -> text:
+    var rows: [text] = []
+    for line in ledger.split("\n"):
+        if line.starts_with("declare\t"):
+            rows.push(line)
+    rows.join("\n")
+
+fn register_from_hook():
+    describe "unsupported callback registration":
+        before_all:
+            it "must not appear only in run mode":
+                events.push("unexpected")
+
+fn main() -> i64:
+    val base = env_get("SPEC_AGGREGATE_LEDGER_BASE") ?? ""
+    if not base.starts_with("/"):
+        return 10
+    val sha = "a".repeat(64)
+    val owner_sha = "b".repeat(64)
+    val source = "test/fixtures/spec_aggregate_registry/main.spl"
+    if not aggregate_registry_begin("enumerate", "llvm", "fixture", sha, sha, base + ".enum"):
+        return 11
+    if not aggregate_owner_begin(source, owner_sha):
+        return 12
+    register_examples()
+    if events.len() != 0:
+        return 13
+    if not aggregate_owner_end():
+        return 14
+    if not aggregate_owner_begin("test/fixtures/spec_aggregate_registry/empty.spl", owner_sha):
+        return 15
+    if not aggregate_owner_end():
+        return 16
+    if aggregate_registry_finish() != 0:
+        return 17
+    if aggregate_registry_begin("enumerate", "llvm", "fixture", sha, sha, base + ".enum"):
+        return 31
+    val enum_ledger = file_read(base + ".enum")
+    if not enum_ledger.contains("complete\tregistration_ok=1\ttest_callbacks_executed=0\thook_callbacks_executed=0\n"):
+        return 18
+    if enum_ledger.contains("result\t") or not enum_ledger.contains("owner_end\ttest/fixtures/spec_aggregate_registry/empty.spl\t0\tok"):
+        return 19
+    if not aggregate_registry_begin("run", "llvm", "fixture", sha, sha, base + ".run"):
+        return 20
+    if not aggregate_owner_begin(source, owner_sha):
+        return 21
+    register_examples()
+    if not aggregate_owner_end():
+        return 22
+    if not aggregate_owner_begin("test/fixtures/spec_aggregate_registry/empty.spl", owner_sha):
+        return 23
+    if not aggregate_owner_end():
+        return 24
+    if aggregate_registry_finish() != 0:
+        return 25
+    val run_ledger = file_read(base + ".run")
+    if declarations(enum_ledger) != declarations(run_ledger):
+        return 26
+    if run_ledger.split("\ndeclare\t").len() != 6:
+        return 27
+    if not run_ledger.contains("complete\tregistration_ok=1\ttest_callbacks_executed=3\thook_callbacks_executed=8\n"):
+        return 28
+    if not run_ledger.contains("\tpass\n") or not run_ledger.contains("\tpending\n") or not run_ledger.contains("\tskip\n"):
+        return 29
+    if events.join(",") != "before_all,before_each,first,after_each,before_each,second,after_each,before_each,slow,after_each,after_all":
+        return 30
+    if not aggregate_registry_begin("run", "llvm", "fixture", sha, sha, base + ".unsupported"):
+        return 32
+    if not aggregate_owner_begin(source, owner_sha):
+        return 33
+    register_from_hook()
+    if aggregate_owner_end():
+        return 34
+    if aggregate_registry_finish() != 2:
+        return 35
+    val unsupported = file_read(base + ".unsupported")
+    if not unsupported.contains("\tunsupported\n") or unsupported.contains("complete\t"):
+        return 36
+    if not aggregate_registry_begin("enumerate", "llvm", "fixture", sha, sha, base + ".duplicate"):
+        return 37
+    if not aggregate_owner_begin(source, owner_sha):
+        return 38
+    register_examples()
+    if not aggregate_owner_end():
+        return 39
+    val empty_path = "test/fixtures/spec_aggregate_registry/empty.spl"
+    if not aggregate_owner_begin(empty_path, owner_sha):
+        return 40
+    if not aggregate_owner_end():
+        return 41
+    if aggregate_owner_begin(empty_path, owner_sha):
+        return 42
+    if aggregate_registry_finish() != 2 or file_read(base + ".duplicate").contains("complete\t"):
+        return 43
+    0

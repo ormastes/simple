@@ -1,0 +1,109 @@
+# Shared decoder for the existing aggregate task manifests. This validates
+# caller-bound bytes and constructs one logical inventory for entry and DAG.
+# It does not grant bootstrap admission to caller-supplied identity receipts.
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.fs.host_path.{host_path_is_absolute}
+use std.io_runtime.{file_hash_sha256_or_empty}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1}
+use std.test_runner.aggregate_task_executor.{AggregateTestCommandV1, aggregate_test_environment_digest_v1}
+use std.test_runner.aggregate_task_ledger.{AggregateTaskInventoryV1}
+use std.test_runner.aggregate_task_driver.{aggregate_task_identities_v1}
+use std.test_runner.aggregate_task_summary.{AggregateTaskSummaryExpectedV1}
+
+struct AggregateTaskManifestV1:
+    identity_manifest_digest: text
+    inventory_manifest_digest: text
+    template: TaskRunnerIdentityV1
+    command: AggregateTestCommandV1
+
+fn aggregate_task_manifest_fields_v1(payload: text, expected_digest: text) -> Result<Dict<text, text>, text>:
+    if payload.len() > 1048576 or not builder_digest_valid_v1(expected_digest) or sha256_text(payload) != expected_digest:
+        return Err("task manifest payload differs from frozen digest")
+    if not payload.ends_with("\n"): return Err("incomplete task manifest")
+    var fields: Dict<text, text> = {}
+    for line in payload.split("\n"):
+        if line == "": continue
+        val split = line.index_of("=")
+        if split <= 0: return Err("malformed task manifest")
+        val key = line[0:split]
+        if fields.contains_key(key): return Err("duplicate task manifest field")
+        fields[key] = line[split + 1:]
+    Ok(fields)
+
+fn _task_field(fields: Dict<text, text>, key: text) -> Result<text, text>:
+    if not fields.contains_key(key) or fields[key] == "": return Err("missing task field: " + key)
+    Ok(fields[key])
+
+fn _task_bound_file(fields: Dict<text, text>, name: text) -> Result<text, text>:
+    val path = _task_field(fields, name + "_path")?
+    val digest = _task_field(fields, name + "_digest")?
+    if not host_path_is_absolute(path) or not builder_digest_valid_v1(digest):
+        return Err("invalid bound task file: " + name)
+    if file_hash_sha256_or_empty(path) != digest: return Err("changed bound task file: " + name)
+    Ok(digest)
+
+fn aggregate_task_manifest_read_v1(identity_path: text, identity_digest: text,
+        inventory_path: text, inventory_digest: text, stage: text, backend: text,
+        report_root: text) -> Result<AggregateTaskManifestV1, text>:
+    if not host_path_is_absolute(identity_path) or not host_path_is_absolute(inventory_path) or
+            not host_path_is_absolute(report_root): return Err("task manifest paths must be absolute")
+    val identity = aggregate_task_manifest_fields_v1(file_read_regular_no_follow_bounded(identity_path, 1048576)?, identity_digest)?
+    val product = aggregate_task_manifest_fields_v1(file_read_regular_no_follow_bounded(inventory_path, 1048576)?, inventory_digest)?
+    if _task_field(identity, "format")? != "SIMPLE-AGGREGATE-TASK-IDENTITY-1" or
+            _task_field(product, "format")? != "SIMPLE-AGGREGATE-TASK-PRODUCT-1":
+        return Err("unsupported aggregate task manifest")
+    if not ["P2", "earlyP4-fromP2", "properP4-fromP3"].contains(stage) or
+            not ["llvm", "cranelift"].contains(backend) or
+            _task_field(identity, "stage")? != stage or _task_field(identity, "backend")? != backend:
+        return Err("stage or backend differs from frozen task identity")
+    val producer = _task_bound_file(identity, "producer")?
+    val source = _task_bound_file(identity, "source")?
+    val runtime = _task_bound_file(identity, "runtime")?
+    val toolchain = _task_bound_file(identity, "toolchain")?
+    val policy = _task_bound_file(identity, "policy")?
+    val execution = _task_bound_file(identity, "execution")?
+    val program_digest = _task_bound_file(product, "program")?
+    val artifact_digest = _task_bound_file(product, "artifact")?
+    val whole = _task_field(product, "whole_inventory_digest")?
+    val subset = _task_field(product, "subset_digest")?
+    if not builder_digest_valid_v1(whole) or not builder_digest_valid_v1(subset):
+        return Err("invalid product inventory digest")
+    val subsystem = _task_field(product, "subsystem")?
+    if not ["compiler", "interpreter", "loader"].contains(subsystem): return Err("invalid test subsystem")
+    val runtime_mode = _task_field(product, "runtime_mode")?
+    val count_text = _task_field(product, "prefix_count")?
+    if count_text.len() > 2: return Err("command prefix exceeds bound")
+    val prefix_count = count_text.to_int() ?? -1
+    if prefix_count < 0 or prefix_count > 16 or str(prefix_count) != count_text:
+        return Err("invalid command prefix count")
+    var prefix: [text] = []
+    for index in 0..prefix_count: prefix.push(_task_field(product, "prefix_" + str(index))?)
+    val nonce = _task_field(identity, "run_nonce")?
+    val command = AggregateTestCommandV1(program: _task_field(product, "program_path")?,
+        program_digest: program_digest, environment_digest: aggregate_test_environment_digest_v1()?,
+        prefix_args: prefix, artifact_path: _task_field(product, "artifact_path")?,
+        artifact_digest: artifact_digest, runtime_mode: runtime_mode, work_root: report_root,
+        group_id: nonce, expected_header: "simple-subsystem-registry-v1\t" + backend +
+            "\t" + subsystem + "\t" + whole + "\t" + subset)
+    val template = TaskRunnerIdentityV1("test", subsystem, "", backend, stage,
+        producer, source, runtime, toolchain, policy, execution)
+    Ok(AggregateTaskManifestV1(identity_digest, inventory_digest, template, command))
+
+fn aggregate_task_manifest_identities_v1(bound: AggregateTaskManifestV1,
+        inventory: AggregateTaskInventoryV1) -> Result<[TaskRunnerIdentityV1], text>:
+    if inventory.header != bound.command.expected_header or inventory.case_ids.len() == 0:
+        return Err("registered inventory differs from bound product")
+    aggregate_task_identities_v1(bound.template, bound.command, inventory)
+
+fn aggregate_task_manifest_summary_expected_v1(bound: AggregateTaskManifestV1,
+        inventory: AggregateTaskInventoryV1, db_root: text) -> Result<AggregateTaskSummaryExpectedV1, text>:
+    if not host_path_is_absolute(db_root): return Err("task database root must be absolute")
+    val identities = aggregate_task_manifest_identities_v1(bound, inventory)?
+    val template = bound.template
+    Ok(AggregateTaskSummaryExpectedV1(template.phase, template.backend,
+        bound.identity_manifest_digest, bound.inventory_manifest_digest,
+        template.producer_digest, template.source_digest, template.runtime_digest,
+        template.toolchain_digest, template.policy_digest, template.execution_digest,
+        bound.command.work_root, db_root, identities, bound.command.group_id))

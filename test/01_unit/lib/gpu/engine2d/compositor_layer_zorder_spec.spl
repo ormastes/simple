@@ -154,3 +154,31 @@ describe "Compositor layer z-order compositing":
             a_be.shutdown()
             b_be.shutdown()
             c_be.shutdown()
+
+    it "out-of-range or overflowing layer dims produce an inert empty layer, not a wrap (F4 regression)":
+        # @req REQ-SSPEC-LIB
+        step("overflowing or negative layer dims produce an inert empty layer")
+        # F4 hardened Layer.create with an i64 area guard: a layer whose
+        # width*height overflows i32 (or is non-positive) must start empty
+        # and inert instead of wrapping into a wrong-sized buffer.
+        val huge = Layer.create(0, 0, 65536, 65537)
+        expect(huge.pixels.len()).to_equal(0)
+        expect(huge.width).to_equal(0)
+        expect(huge.height).to_equal(0)
+        val negative = Layer.create(0, 0, -4, 4)
+        expect(negative.pixels.len()).to_equal(0)
+        expect(negative.width).to_equal(0)
+        # Compositing an inert layer must not crash and must not touch dst.
+        var comp = Compositor.create()
+        comp.add_layer(huge)
+        comp.add_layer(negative)
+        expect(comp.layer_count()).to_equal(2)
+        var dst = make_dst(16)
+        comp.composite_to_buffer(dst, 4, 4)
+        var touched = 0
+        var i = 0
+        while i < 16:
+            if dst[i] != 0u32:
+                touched = touched + 1
+            i = i + 1
+        expect(touched).to_equal(0)

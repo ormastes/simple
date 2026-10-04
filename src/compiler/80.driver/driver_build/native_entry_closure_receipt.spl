@@ -1,0 +1,134 @@
+# Entry-closure selection identity. Wire records contain inventory identities,
+# never executable filesystem paths. Physical publication/open belongs to the
+# existing SCV owner and must validate this contract before driver admission.
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.scv.compile_source_inventory_core.{compile_source_inventory_path_valid_v1}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_read_regular_no_follow_bounded}
+
+pub struct NativeEntryClosureBindingV1:
+    revision: text
+    commit: text
+    tree: text
+    inventory_digest: text
+    entry: text
+    source_roots: [text]
+    policy_digest: text
+    producer_digest: text
+
+pub struct NativeEntryClosureSelectionV1:
+    binding_digest: text
+    identities: [text]
+    digests: [text]
+    byte_counts: [i64]
+
+pub fn native_entry_closure_publish_records_v1(path: text, selection: NativeEntryClosureSelectionV1) -> Result<text, text>:
+    if path == "" or not builder_digest_valid_v1(selection.binding_digest) or
+            selection.identities.len() < 1 or selection.identities.len() > 20000 or
+            selection.identities.len() != selection.digests.len() or
+            selection.identities.len() != selection.byte_counts.len():
+        return Err("entry-closure-publication-invalid")
+    var wire = "native-entry-closure-selection-v1\n" + selection.binding_digest + "\n"
+    var row = 0
+    while row < selection.identities.len():
+        val identity = selection.identities[row]
+        if not compile_source_inventory_path_valid_v1(identity) or identity.contains("|") or
+                identity.contains("\n") or identity.contains("\r") or
+                not builder_digest_valid_v1(selection.digests[row]) or selection.byte_counts[row] < 0:
+            return Err("entry-closure-publication-row-invalid")
+        wire = wire + identity + "|" + selection.digests[row] + "|" + selection.byte_counts[row].to_text() + "\n"
+        row = row + 1
+    if wire.len() > 8 * 1024 * 1024: return Err("entry-closure-publication-too-large")
+    if not file_create_exclusive(path, wire): return Err("entry-closure-publication-conflict")
+    Ok(sha256_text(wire))
+
+pub fn native_entry_closure_open_records_v1(path: text, expected_digest: text) -> Result<NativeEntryClosureSelectionV1, text>:
+    if not builder_digest_valid_v1(expected_digest): return Err("entry-closure-receipt-digest-invalid")
+    val opened = file_read_regular_no_follow_bounded(path, 8 * 1024 * 1024)
+    if opened.is_err(): return Err("entry-closure-receipt-unreadable")
+    val wire = opened.unwrap()
+    if sha256_text(wire) != expected_digest or not wire.ends_with("\n") or wire.contains("\r"):
+        return Err("entry-closure-receipt-framing-invalid")
+    val rows = wire.split("\n")
+    if rows.len() < 4 or rows.len() > 20003 or rows[0] != "native-entry-closure-selection-v1" or
+            not builder_digest_valid_v1(rows[1]) or rows[rows.len() - 1] != "":
+        return Err("entry-closure-receipt-schema-invalid")
+    var identities: [text] = []
+    var digests: [text] = []
+    var counts: [i64] = []
+    var row = 2
+    while row < rows.len() - 1:
+        val fields = rows[row].split("|")
+        if fields.len() != 3: return Err("entry-closure-receipt-row-invalid")
+        val count = fields[2].to_i64() ?? -1
+        if count < 0 or count.to_text() != fields[2]: return Err("entry-closure-receipt-count-invalid")
+        identities = identities.push(fields[0])
+        digests = digests.push(fields[1])
+        counts = counts.push(count)
+        row = row + 1
+    Ok(NativeEntryClosureSelectionV1(rows[1], identities, digests, counts))
+
+fn closure_identity_field_v1(value: text) -> text:
+    value.len().to_text() + ":" + value
+
+pub fn native_entry_closure_binding_digest_v1(binding: NativeEntryClosureBindingV1) -> Result<text, text>:
+    if binding.revision == "" or binding.commit == "" or binding.tree == "" or
+            not builder_digest_valid_v1(binding.inventory_digest) or
+            not builder_digest_valid_v1(binding.policy_digest) or
+            not builder_digest_valid_v1(binding.producer_digest) or
+            not compile_source_inventory_path_valid_v1(binding.entry) or
+            binding.source_roots.len() == 0:
+        return Err("entry-closure-binding-invalid")
+    var material = "native-entry-closure-binding-v1\n"
+    for field in [binding.revision, binding.commit, binding.tree,
+            binding.inventory_digest, binding.entry, binding.policy_digest,
+            binding.producer_digest]:
+        material = material + closure_identity_field_v1(field)
+    for root in binding.source_roots:
+        if not compile_source_inventory_path_valid_v1(root):
+            return Err("entry-closure-root-invalid")
+        material = material + closure_identity_field_v1(root)
+    Ok(sha256_text(material))
+
+# Inventory vectors are supplied only by the authenticated SCV inventory
+# owner. A valid receipt digest alone cannot admit a selected source.
+pub fn native_entry_closure_validate_selection_v1(
+    binding: NativeEntryClosureBindingV1,
+    selection: NativeEntryClosureSelectionV1,
+    inventory_identities: [text], inventory_digests: [text],
+    inventory_byte_counts: [i64]
+) -> Result<NativeEntryClosureSelectionV1, text>:
+    val expected = native_entry_closure_binding_digest_v1(binding)
+    if expected.is_err(): return Err(expected.unwrap_err())
+    if selection.binding_digest != expected.unwrap() or
+            selection.identities.len() < 1 or selection.identities.len() > 20000 or
+            selection.digests.len() != selection.identities.len() or
+            selection.byte_counts.len() != selection.identities.len() or
+            inventory_identities.len() != inventory_digests.len() or
+            inventory_identities.len() != inventory_byte_counts.len():
+        return Err("entry-closure-selection-invalid")
+    var seen: {text: bool} = {}
+    var inventory: {text: i64} = {}
+    var row = 0
+    while row < inventory_identities.len():
+        val identity = inventory_identities[row]
+        if inventory.has(identity): return Err("entry-closure-inventory-duplicate")
+        inventory[identity] = row
+        row = row + 1
+    row = 0
+    while row < selection.identities.len():
+        val identity = selection.identities[row]
+        if not compile_source_inventory_path_valid_v1(identity) or
+                not identity.ends_with(".spl") or seen.has(identity) or
+                not inventory.has(identity):
+            return Err("entry-closure-source-invalid")
+        seen[identity] = true
+        val inventory_row = inventory[identity]
+        if not builder_digest_valid_v1(selection.digests[row]) or
+                selection.byte_counts[row] < 0 or
+                selection.digests[row] != inventory_digests[inventory_row] or
+                selection.byte_counts[row] != inventory_byte_counts[inventory_row]:
+            return Err("entry-closure-source-changed")
+        row = row + 1
+    if not seen.has(binding.entry): return Err("entry-closure-entry-omitted")
+    Ok(selection)

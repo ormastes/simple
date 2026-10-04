@@ -5,6 +5,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 guard=${RSS_GUARD_UNDER_TEST:-$root/scripts/resource/process-tree-rss-watchdog.pl}
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# Faults are injected through a fake `ps` on PATH; pin that sampler on Linux.
+SIMPLE_PROCESS_TREE_OBSERVER=ps; export SIMPLE_PROCESS_TREE_OBSERVER
 mkdir "$tmp/bin"
 export RSS_TEST_REAL_PS RSS_TEST_PS_DELAY RSS_TEST_PS_FAIL_AFTER
 RSS_TEST_REAL_PS=$(command -v ps)
@@ -46,7 +48,7 @@ PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/darwin-slow.env" -- sleep 1.
 grep -Fxq 'status=complete' "$tmp/darwin-slow.env" || fail 'bounded override failed'
 grep -Fxq 'observation_budget_ms=5000' "$tmp/darwin-slow.env" || fail 'override absent from receipt'
 
-for invalid_budget in 999 5001 invalid; do
+for invalid_budget in 999 30001 invalid; do
     status=0
     SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=$invalid_budget perl "$guard" \
         -- /bin/sh -c 'touch "$1"' sh "$tmp/invalid-budget" >/dev/null 2>&1 || status=$?
@@ -77,4 +79,12 @@ PATH="$tmp/bin:$PATH" perl "$guard" --receipt="$tmp/failed.env" -- \
 grep -Fxq 'status=rss-measurement-failed' "$tmp/failed.env" || fail 'missing read failure'
 grep -Fxq 'quiescent=0' "$tmp/failed.env" || fail 'unmeasured cleanup claimed quiescence'
 kill -0 "$(cat "$tmp/root.pid")" 2>/dev/null && fail 'anchored workload survived read failure'
+# Linux default backend reads /proc in-process: no ps fork per sample.
+if [ "$(uname -s)" = Linux ]; then
+    env -u SIMPLE_PROCESS_TREE_OBSERVER perl "$guard" --receipt="$tmp/proc.env" -- sleep 1 ||
+        fail "linux-proc sampler failed"
+    grep -Fxq "observer_backend=linux-proc" "$tmp/proc.env" || fail "Linux did not select /proc sampler"
+    grep -Fxq "status=complete" "$tmp/proc.env" || fail "linux-proc receipt not complete"
+    grep -Eq "^samples=[1-9]" "$tmp/proc.env" || fail "linux-proc took no samples"
+fi
 echo 'PASS: slow valid observations, honest cadence, bounded hang, persistent read failure cleanup'

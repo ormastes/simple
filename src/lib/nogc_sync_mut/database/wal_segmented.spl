@@ -1,0 +1,153 @@
+# Opt-in immutable committed WAL segments for PureDatabase-backed owners.
+# CURRENT is a process-crash commit boundary; orphaned objects are uncommitted.
+# This owner does not claim power-loss durability: existing I/O facades do
+# not authenticate fsync/FlushFileBuffers of every file and containing directory.
+# No task-specific database representation or permissive legacy replay.
+use std.database.wal.{WalEntry, WalEntryType, wal_entry_to_line, wal_entry_from_line}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive,
+    file_publish_noreplace, file_read_regular_no_follow_bounded, file_atomic_write,
+    file_lock, file_unlock}
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove, file_delete, file_exists}
+
+# Generic database boundary; no build-manager domain dependency.
+fn database_wal_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for at in 0..64:
+        val code = value.byte_at(at) as i64
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+    true
+
+struct DatabaseWalRevisionV1:
+    digest: text
+    parent: text
+    database_identity: text
+    first_sequence: i64
+    last_sequence: i64
+    segment_digest: text
+
+fn database_wal_object_v1(root: text, digest: text) -> Result<text, text>:
+    if not database_wal_digest_valid_v1(digest): return Err("invalid WAL object identity")
+    val payload = file_read_regular_no_follow_bounded(root + "/objects/" + digest, 1048576)?
+    if sha256_text(payload) != digest: return Err("committed WAL object corrupted")
+    Ok(payload)
+
+fn database_wal_publish_v1(root: text, payload: text) -> Result<text, text>:
+    if payload.len() < 1 or payload.len() > 1048576: return Err("WAL segment size exceeded")
+    dir_create(root + "/objects", true)
+    val digest = sha256_text(payload)
+    val private_dir = secure_temp_dir(root + "/objects", "wal-stage")?
+    val staged = private_dir + "/payload"
+    if not file_create_exclusive(staged, payload):
+        file_delete(staged)
+        dir_remove(private_dir, false)
+        return Err("WAL private write failed")
+    val actual = file_read_regular_no_follow_bounded(staged, 1048576)
+    if actual.is_err() or sha256_text(actual.unwrap()) != digest:
+        file_delete(staged)
+        dir_remove(private_dir, false)
+        return Err("WAL staged checksum differs")
+    val publication = file_publish_noreplace(staged, root + "/objects/" + digest)
+    file_delete(staged)
+    dir_remove(private_dir, false)
+    if publication.is_err(): return Err("WAL publication failed")
+    val winner = database_wal_object_v1(root, digest)?
+    if winner != payload: return Err("WAL immutable winner differs")
+    Ok(digest)
+
+fn database_wal_revision_open_v1(root: text, digest: text) -> Result<DatabaseWalRevisionV1, text>:
+    val payload = database_wal_object_v1(root, digest)?
+    val rows = payload.split("\n")
+    if rows.len() != 7 or rows[0] != "SIMPLE-DATABASE-WAL-COMMIT-1" or rows[6] != "":
+        return Err("invalid WAL commit framing")
+    val first = rows[3].to_int() ?? -1
+    val last = rows[4].to_int() ?? -1
+    if (rows[1] != "" and not database_wal_digest_valid_v1(rows[1])) or
+            not database_wal_digest_valid_v1(rows[2]) or not database_wal_digest_valid_v1(rows[5]) or
+            first < 1 or last < first or last - first >= 256 or last > 10000000 or
+            str(first) != rows[3] or str(last) != rows[4]:
+        return Err("invalid WAL commit values")
+    Ok(DatabaseWalRevisionV1(digest, rows[1], rows[2], first, last, rows[5]))
+
+fn database_wal_segment_read_strict_v1(root: text,
+        revision: DatabaseWalRevisionV1) -> Result<[WalEntry], text>:
+    val admitted = database_wal_revision_open_v1(root, revision.digest)?
+    if admitted.parent != revision.parent or admitted.database_identity != revision.database_identity or
+            admitted.first_sequence != revision.first_sequence or admitted.last_sequence != revision.last_sequence or
+            admitted.segment_digest != revision.segment_digest:
+        return Err("WAL revision value differs")
+    val payload = database_wal_object_v1(root, revision.segment_digest)?
+    val rows = payload.split("\n")
+    if rows.len() != revision.last_sequence - revision.first_sequence + 3 or
+            rows[0] != "#wal-version:2" or rows[rows.len() - 1] != "":
+        return Err("committed WAL segment truncated")
+    var result: [WalEntry] = []
+    var expected = revision.first_sequence
+    for index in 1..rows.len() - 1:
+        val decoded = wal_entry_from_line(rows[index])
+        if decoded == nil: return Err("committed WAL entry corrupt")
+        val entry = decoded.unwrap()
+        if entry.sequence != expected or entry.entry_type == WalEntryType.Checkpoint or
+                wal_entry_to_line(entry) != rows[index] + "\n":
+            return Err("committed WAL entry noncanonical or out of order")
+        result = result.push(entry)
+        expected = expected + 1
+    Ok(result)
+
+fn database_wal_current_v1(root: text, identity: text) -> Result<text, text>:
+    if not database_wal_digest_valid_v1(identity): return Err("invalid database identity")
+    if not file_exists(root + "/CURRENT"): return Ok("")
+    val pointer = file_read_regular_no_follow_bounded(root + "/CURRENT", 128)?
+    if pointer.len() != 65 or not pointer.ends_with("\n"): return Err("invalid WAL CURRENT")
+    val digest = pointer[0:64]
+    val revision = database_wal_revision_open_v1(root, digest)?
+    if revision.database_identity != identity: return Err("WAL database identity differs")
+    val _rows = database_wal_segment_read_strict_v1(root, revision)?
+    Ok(digest)
+
+fn database_wal_commit_v1(root: text, identity: text, expected_parent: text,
+        entries: [WalEntry]) -> Result<DatabaseWalRevisionV1, text>:
+    if entries.len() < 1 or entries.len() > 256 or not database_wal_digest_valid_v1(identity):
+        return Err("invalid WAL transaction bound")
+    var first: i64 = 1
+    if expected_parent != "":
+        val parent = database_wal_revision_open_v1(root, expected_parent)?
+        if parent.database_identity != identity: return Err("WAL parent database differs")
+        first = parent.last_sequence + 1
+    if first + entries.len() - 1 > 10000000: return Err("WAL sequence capacity exceeded")
+    var lines: [text] = ["#wal-version:2"]
+    var sequence = first
+    for entry in entries:
+        if entry.table_name.len() < 1 or entry.table_name.len() > 128 or
+                entry.row_key.len() > 4096 or entry.data.len() > 65536 or
+                entry.table_name.contains("|") or entry.table_name.contains("\n") or
+                entry.row_key.contains("|") or entry.row_key.contains("\n") or
+                entry.data.contains("\n") or entry.entry_type == WalEntryType.Checkpoint:
+            return Err("invalid WAL entry field")
+        val numbered = WalEntry(sequence, entry.entry_type, entry.table_name,
+            entry.row_key, entry.data, entry.timestamp)
+        val line = wal_entry_to_line(numbered)
+        lines = lines.push(line[0:line.len() - 1])
+        sequence = sequence + 1
+    val segment = database_wal_publish_v1(root, lines.join("\n") + "\n")?
+    val last = sequence - 1
+    val commit = database_wal_publish_v1(root,
+        "SIMPLE-DATABASE-WAL-COMMIT-1\n{expected_parent}\n{identity}\n{first}\n{last}\n{segment}\n")?
+    val revision = database_wal_revision_open_v1(root, commit)?
+    val _checked = database_wal_segment_read_strict_v1(root, revision)?
+    # Stable lock makes compare-and-publish indivisible across parents. Objects
+    # published by a losing/crashed writer remain unreachable, not committed.
+    val lock = file_lock(root + "/commit.lock", 10)
+    if lock < 0: return Err("WAL commit lock unavailable")
+    val current = database_wal_current_v1(root, identity)
+    if current.is_err() or current.unwrap() != expected_parent:
+        file_unlock(lock)
+        return Err("stale or corrupt WAL commit parent")
+    val published = file_atomic_write(root + "/CURRENT", commit + "\n")
+    file_unlock(lock)
+    if not published: return Err("WAL commit marker publication failed")
+    Ok(revision)
+
+export DatabaseWalRevisionV1, database_wal_current_v1, database_wal_commit_v1
+export database_wal_revision_open_v1, database_wal_segment_read_strict_v1

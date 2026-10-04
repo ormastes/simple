@@ -17,10 +17,7 @@
 use std.nogc_sync_mut.redis.server.{RedisServer, parse_next_request}
 use std.common.crypto.sha256.{
     Sha256StreamV1, sha256_text, sha256_u8_hex, sha256_u8_hex_zeroizing,
-    sha256_stream_v1_new, sha256_stream_v1_reset,
-    sha256_stream_v1_update_byte, sha256_stream_v1_finish_hex,
-    sha256_stream_v1_zeroize
-}
+    sha256_stream_v1_new}
 use std.common.crypto.secure_memory.{secure_zero_u8_slots}
 
 pub val DBD_MAX_JOURNAL_BYTES: i64 = 1024 * 1024
@@ -267,7 +264,7 @@ pub class DbdBootCredentialOwnerV1:
     """Boot/reload credential owner that never retains raw credential bytes."""
     state: DbdBootCredentialStateV1
     principal: text
-    stream: Sha256StreamV1
+    var stream: Sha256StreamV1
     byte_count: u64
     provider: DbdCredentialProvider
     hash_workspace_zeroized: bool
@@ -285,7 +282,7 @@ pub class DbdBootCredentialOwnerV1:
 
     me quarantine(reason: text) -> bool:
         self.provider.revoke()
-        self.hash_workspace_zeroized = sha256_stream_v1_zeroize(self.stream)
+        self.hash_workspace_zeroized = self.stream.zeroize()
         self.state = DbdBootCredentialStateV1.Quarantined
         self.last_error = reason
         false
@@ -301,7 +298,7 @@ pub class DbdBootCredentialOwnerV1:
             return self.quarantine("dbd-boot-credential-boundary-invalid")
         var index: u64 = 0u64
         while index < source.len():
-            if not sha256_stream_v1_update_byte(self.stream, source[index]):
+            if not self.stream.update_byte(source[index]):
                 val _ = secure_zero_u8_slots(source)
                 return self.quarantine("dbd-boot-credential-hash-rejected")
             index = index + 1u64
@@ -309,10 +306,10 @@ pub class DbdBootCredentialOwnerV1:
         val report = secure_zero_u8_slots(source)
         if not report.verified() or report.slot_count != self.byte_count:
             return self.quarantine("dbd-boot-credential-source-wipe-unverified")
-        val digest = sha256_stream_v1_finish_hex(self.stream)
+        val digest = self.stream.finish_hex()
         if digest == nil:
             return self.quarantine("dbd-boot-credential-hash-failed")
-        self.hash_workspace_zeroized = sha256_stream_v1_zeroize(self.stream)
+        self.hash_workspace_zeroized = self.stream.zeroize()
         if not self.hash_workspace_zeroized:
             return self.quarantine("dbd-boot-credential-workspace-wipe-unverified")
         if not self.provider.configure_owned_digest(self.principal, digest.unwrap()):
@@ -325,7 +322,7 @@ pub class DbdBootCredentialOwnerV1:
         if self.state != DbdBootCredentialStateV1.Admitted:
             return false
         self.provider.revoke()
-        sha256_stream_v1_reset(self.stream)
+        self.stream.reset()
         self.state = DbdBootCredentialStateV1.Loading
         self.principal = principal
         self.byte_count = 0u64
@@ -335,7 +332,7 @@ pub class DbdBootCredentialOwnerV1:
 
     pub me revoke():
         self.provider.revoke()
-        self.hash_workspace_zeroized = sha256_stream_v1_zeroize(self.stream)
+        self.hash_workspace_zeroized = self.stream.zeroize()
         self.principal = ""
         self.byte_count = 0u64
         self.state = DbdBootCredentialStateV1.Revoked

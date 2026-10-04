@@ -1,0 +1,35 @@
+# Read-only acceptance of a completed aggregate product. No callback executes.
+# The enclosing BuildRunner still owns process reaping and bootstrap admission.
+use std.sffi.cli_args.{cli_get_args}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.test_runner.aggregate_task_manifest.{aggregate_task_manifest_read_v1, aggregate_task_manifest_summary_expected_v1}
+use std.test_runner.aggregate_task_ledger.{aggregate_task_inventory_v1}
+use std.test_runner.aggregate_task_summary.{aggregate_task_summary_verify_v1}
+use app.test.aggregate_task_verify_options.{aggregate_task_verify_options_v1}
+
+fn verify_summary(options: Dict<text, text>) -> Result<i64, text>:
+    val root = options["report-root"]
+    val bound = aggregate_task_manifest_read_v1(options["identity-manifest"],
+        options["identity-manifest-sha256"], options["inventory-manifest"],
+        options["inventory-manifest-sha256"], options["stage"], options["backend"], root)?
+    val inventory = aggregate_task_inventory_v1(
+        file_read_regular_no_follow_bounded(root + "/enumeration.tsv", 67108864)?)?
+    val expected = aggregate_task_manifest_summary_expected_v1(bound, inventory, options["db-root"])?
+    val verified = aggregate_task_summary_verify_v1(
+        file_read_regular_no_follow_bounded(root + "/summary.env", 65536)?, expected)?
+    if verified.program_digest != bound.command.program_digest or
+            verified.artifact_digest != bound.command.artifact_digest:
+        return Err("test summary program or artifact differs from frozen product")
+    Ok(verified.aggregate_exit)
+
+fn main() -> i64:
+    val options = match aggregate_task_verify_options_v1(cli_get_args()):
+        case Ok(value): value
+        case Err(reason):
+            print "aggregate verifier arguments rejected: {reason}"
+            return 2
+    match verify_summary(options):
+        case Ok(code): return code
+        case Err(reason):
+            print "aggregate summary rejected: {reason}"
+            return 2

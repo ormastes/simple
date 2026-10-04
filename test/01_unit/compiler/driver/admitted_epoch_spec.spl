@@ -1,0 +1,344 @@
+use std.spec.*
+use app.io.env_ops.{env_get, env_set}
+use app.io.file_ops.{path_absolute}
+use app.io.time_ops.{time_now_unix_micros}
+use std.io_runtime.{dir_create_all, file_write}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
+use compiler.driver.driver_build.native_full_inventory_sources.{NativeFullInventorySourcesV1}
+use compiler.driver.driver_admitted_epoch.*
+use compiler.driver.driver_admitted_compile.{driver_admitted_epoch_compile_v1}
+use compiler.driver.driver_source_loading.{_driver_cached_entry_source_scan,
+    driver_entry_scan_cache_reset, driver_entry_scan_cache_release}
+use compiler.driver.driver.{compiler_driver_create}
+use compiler.driver.driver_source_pipeline_loading.*
+use compiler.common.driver_compile_options.{driver_core_compile_options_default}
+use compiler.common.driver_core_modes.{CompileMode, OutputFormat}
+use compiler.common.driver_core_types.{CompileResult}
+
+fn epoch_test_env_names() -> [text]:
+    ["SIMPLE_SCV_SNAPSHOT_ROOT", "SIMPLE_SCV_INVENTORY_DIGEST",
+        "SIMPLE_SCV_REVISION_ID", "SIMPLE_SCV_COMMIT_ID", "SIMPLE_SCV_TREE_ID",
+        "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", "SIMPLE_SCV_INVENTORY_GENERATION",
+        "SIMPLE_SCV_RECEIPT_DIGEST", "SIMPLE_PACKAGE_INDEX_FULL_INVENTORY",
+        "SIMPLE_NATIVE_GROUP_MANIFEST", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE",
+        "SIMPLE_NATIVE_BUILD_ENTRY", "SIMPLE_BOOTSTRAP_DIRECT_IR", "SIMPLE_BOOTSTRAP",
+        "SIMPLE_PARSE_SHARD", "SIMPLE_PARSE_SHARD_QUEUE", "SIMPLE_HIR_SHARD",
+        "SIMPLE_HIR_SHARD_QUEUE", "SIMPLE_HIR_SHARD_OWNER"]
+
+fn epoch_test_save() -> [text]:
+    var saved: [text] = []
+    for name in epoch_test_env_names(): saved = saved.push(env_get(name) ?? "")
+    saved
+
+fn epoch_test_restore(saved: [text]):
+    val names = epoch_test_env_names()
+    for index in 0..names.len(): env_set(names[index], saved[index])
+    driver_entry_scan_cache_reset()
+
+fn epoch_test_root() -> text:
+    path_absolute(".").replace("\\", "/")
+
+fn epoch_test_directory(label: text) -> text:
+    val relative = "build/admitted-epoch-{label}-{time_now_unix_micros()}"
+    dir_create_all(epoch_test_root() + "/" + relative)
+    relative
+
+# Unit seam: these rows stand in for the result of canonical admission. This
+# fixture deliberately does not claim that publishing environment is admission.
+fn epoch_test_publish(identities: [text], contents: [text], snapshot_root: text = "") -> NativeFullInventorySourcesV1:
+    val root = if snapshot_root == "": epoch_test_root() else: snapshot_root
+    var paths: [text] = []
+    var digests: [text] = []
+    var counts: [i64] = []
+    var rows: [text] = []
+    for index in 0..identities.len():
+        val path = root + "/" + identities[index]
+        expect(file_write(path, contents[index])).to_be(true)
+        paths = paths.push(path)
+        digests = digests.push(sha256_text(contents[index]))
+        counts = counts.push(contents[index].len())
+        rows = rows.push("{identities[index]}|sha256_{digests[index]}|{counts[index]}")
+    val snapshot_digest = sha256_text(rows.join("\n"))
+    val inventory_digest = sha256_text("epoch-unit-inventory:" + rows.join("\n"))
+    val receipt_digest = sha256_text("epoch-unit-receipt")
+    expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)).to_be(true)
+    expect(env_set("SIMPLE_SCV_INVENTORY_DIGEST", snapshot_digest)).to_be(true)
+    expect(env_set("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", inventory_digest)).to_be(true)
+    expect(env_set("SIMPLE_SCV_RECEIPT_DIGEST", receipt_digest)).to_be(true)
+    expect(env_set("SIMPLE_SCV_REVISION_ID", "unit-epoch")).to_be(true)
+    expect(env_set("SIMPLE_SCV_COMMIT_ID", "1111111111111111111111111111111111111111")).to_be(true)
+    expect(env_set("SIMPLE_SCV_TREE_ID", "2222222222222222222222222222222222222222")).to_be(true)
+    expect(env_set("SIMPLE_SCV_INVENTORY_GENERATION", "0")).to_be(true)
+    for name in ["SIMPLE_PACKAGE_INDEX_FULL_INVENTORY", "SIMPLE_NATIVE_GROUP_MANIFEST",
+            "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "SIMPLE_NATIVE_BUILD_ENTRY",
+            "SIMPLE_BOOTSTRAP_DIRECT_IR", "SIMPLE_BOOTSTRAP", "SIMPLE_PARSE_SHARD",
+            "SIMPLE_PARSE_SHARD_QUEUE", "SIMPLE_HIR_SHARD", "SIMPLE_HIR_SHARD_QUEUE",
+            "SIMPLE_HIR_SHARD_OWNER"]:
+        env_set(name, "")
+    NativeFullInventorySourcesV1(paths, identities, digests, counts,
+        identities.len(), snapshot_digest, inventory_digest, receipt_digest)
+
+describe "persistent admitted source epoch":
+    it "retains one row map across two tasks and task cache release":
+        val saved = epoch_test_save()
+        val dir = epoch_test_directory("retain")
+        val identity = dir + "/main.spl"
+        val code = "fn main() -> i64: 7\n"
+        val owner = driver_admitted_epoch_begin_v1(epoch_test_publish([identity], [code])).unwrap()
+        for iteration in 0..2:
+            val path = driver_admitted_epoch_task_begin_v1(owner, identity).unwrap()
+            driver_entry_scan_cache_reset()
+            val (loaded, _, _, _) = _driver_cached_entry_source_scan(path)
+            expect(loaded).to_equal(code)
+            driver_entry_scan_cache_release()
+            expect(driver_admitted_epoch_task_finish_v1(owner).is_ok()).to_be(true)
+        val (rows, reads) = driver_admitted_epoch_counters_v1()
+        expect(rows).to_equal(1)
+        expect(reads).to_equal(2)
+        expect(driver_admitted_epoch_end_v1(owner).is_ok()).to_be(true)
+        epoch_test_restore(saved)
+
+    it "does not return a private cache buffer and detects a same-length edit on a hit":
+        val saved = epoch_test_save()
+        val dir = epoch_test_directory("transition")
+        val identity = dir + "/main.spl"
+        val path = epoch_test_root() + "/" + identity
+        driver_entry_scan_cache_reset()
+        expect(file_write(path, "fn main() -> i64: 1\n")).to_be(true)
+        val (old, _, _, _) = _driver_cached_entry_source_scan(path)
+        expect(old).to_contain("1")
+        val code = "fn main() -> i64: 2\n"
+        val owner = driver_admitted_epoch_begin_v1(epoch_test_publish([identity], [code])).unwrap()
+        driver_admitted_epoch_task_begin_v1(owner, identity).unwrap()
+        val (fresh, _, _, hit) = _driver_cached_entry_source_scan(path)
+        expect(fresh).to_equal(code)
+        expect(hit).to_be(false)
+        expect(file_write(path, "fn main() -> i64: 3\n")).to_be(true)
+        val (rejected, _, _, _) = _driver_cached_entry_source_scan(path)
+        expect(rejected).to_equal("")
+        expect(driver_admitted_epoch_task_finish_v1(owner).unwrap_err()).to_equal("admitted-epoch-source-content-mismatch")
+        expect(driver_admitted_epoch_task_begin_v1(owner, identity).is_err()).to_be(true)
+        expect(driver_admitted_epoch_end_v1(owner).is_err()).to_be(true)
+        epoch_test_restore(saved)
+
+    it "propagates an actual unlisted transitive import through load_sources_impl":
+        val saved = epoch_test_save()
+        val dir = epoch_test_directory("dependency")
+        val identity = dir + "/main.spl"
+        val code = "use .dep.{value}\nfn main() -> i64: value()\n"
+        val owner = driver_admitted_epoch_begin_v1(epoch_test_publish([identity], [code])).unwrap()
+        expect(file_write(epoch_test_root() + "/" + dir + "/dep.spl", "fn value() -> i64: 9\n")).to_be(true)
+        val entry = driver_admitted_epoch_task_begin_v1(owner, identity).unwrap()
+        var options = driver_core_compile_options_default()
+        options.input_files = [entry]
+        options.bootstrap_input_count = 0
+        var driver = compiler_driver_create(options)
+        driver.ctx.config["compiler_source_entry"] = entry
+        val (ctx, accepted) = driver.load_sources_impl()
+        expect(accepted).to_be(false)
+        expect(ctx.has_errors()).to_be(true)
+        expect(driver_admitted_epoch_error_v1()).to_equal("admitted-epoch-source-not-admitted")
+        expect(driver_admitted_epoch_task_finish_v1(owner).is_err()).to_be(true)
+        expect(driver_admitted_epoch_end_v1(owner).is_err()).to_be(true)
+        epoch_test_restore(saved)
+
+    it "retains the verified dependency buffer in the actual loaded context":
+        val saved = epoch_test_save()
+        val dir = epoch_test_directory("dependency-buffer")
+        val main = dir + "/main.spl"
+        val dep = dir + "/dep.spl"
+        val dependency = "fn value() -> i64: 4\n"
+        val owner = driver_admitted_epoch_begin_v1(epoch_test_publish([main, dep],
+            ["use .dep.{value}\nfn main() -> i64: value()\n", dependency])).unwrap()
+        val entry = driver_admitted_epoch_task_begin_v1(owner, main).unwrap()
+        var options = driver_core_compile_options_default()
+        options.input_files = [entry]
+        options.bootstrap_input_count = 0
+        var driver = compiler_driver_create(options)
+        driver.ctx.config["compiler_source_entry"] = entry
+        val (ctx, accepted) = driver.load_sources_impl()
+        expect(accepted).to_be(true)
+        expect(file_write(epoch_test_root() + "/" + dep, "fn value() -> i64: 8\n")).to_be(true)
+        var dependency_seen = false
+        for source in ctx.sources:
+            if source.path == epoch_test_root() + "/" + dep:
+                dependency_seen = true
+                expect(source.content).to_equal(dependency)
+        expect(dependency_seen).to_be(true)
+        expect(driver_admitted_epoch_task_finish_v1(owner).is_ok()).to_be(true)
+        driver_admitted_epoch_end_v1(owner).unwrap()
+        epoch_test_restore(saved)
+
+    it "rejects an escaped canonical path even if its bytes equal an admitted file":
+        val saved = epoch_test_save()
+        val dir = epoch_test_directory("escape")
+        val identity = dir + "/main.spl"
+        val owner = driver_admitted_epoch_begin_v1(epoch_test_publish([identity], ["fn main(): 1\n"])).unwrap()
+        val path = driver_admitted_epoch_task_begin_v1(owner, identity).unwrap()
+        expect(driver_admitted_epoch_read_v1(path, "/outside/main.spl").unwrap_err()).to_equal("admitted-epoch-source-escape")
+        expect(driver_admitted_epoch_task_finish_v1(owner).is_err()).to_be(true)
+        expect(driver_admitted_epoch_end_v1(owner).is_err()).to_be(true)
+        epoch_test_restore(saved)
+
+    it "rejects duplicate normalized rows before installing the epoch":
+        val saved = epoch_test_save()
+        val dir = epoch_test_directory("duplicate")
+        val identity = dir + "/main.spl"
+        val duplicate = epoch_test_publish([identity, identity], ["fn main(): 1\n", "fn main(): 1\n"])
+        expect(driver_admitted_epoch_begin_v1(duplicate).unwrap_err()).to_equal("admitted-epoch-source-row-invalid")
+        expect(driver_admitted_epoch_active_v1()).to_be(false)
+        epoch_test_restore(saved)
+
+    it "rejects a real leaf symlink even when its admitted target bytes match":
+        val saved = epoch_test_save()
+        val dir = epoch_test_directory("symlink")
+        val identity = dir + "/main.spl"
+        val owner = driver_admitted_epoch_begin_v1(epoch_test_publish([identity], ["fn main(): 1\n"])).unwrap()
+        driver_admitted_epoch_task_begin_v1(owner, identity).unwrap()
+        val alias = epoch_test_root() + "/" + dir + "/alias.spl"
+        expect(snapshot_symlink_create_nofollow_v1(epoch_test_root(), alias, "main.spl", 1)).to_be(true)
+        val (content, _, _, _) = _driver_cached_entry_source_scan(alias)
+        expect(content).to_equal("")
+        expect(driver_admitted_epoch_error_v1()).to_equal("admitted-epoch-source-unreadable")
+        expect(driver_admitted_epoch_task_finish_v1(owner).is_err()).to_be(true)
+        expect(driver_admitted_epoch_end_v1(owner).is_err()).to_be(true)
+        epoch_test_restore(saved)
+
+    it "rejects cleared authority without downgrading to an ordinary reader":
+        val saved = epoch_test_save()
+        val dir = epoch_test_directory("binding")
+        val identity = dir + "/main.spl"
+        val owner = driver_admitted_epoch_begin_v1(epoch_test_publish([identity], ["fn main(): 1\n"])).unwrap()
+        val entry = driver_admitted_epoch_task_begin_v1(owner, identity).unwrap()
+        env_set("SIMPLE_SCV_TREE_ID", "")
+        val (content, _, _, _) = _driver_cached_entry_source_scan(entry)
+        expect(content).to_equal("")
+        expect(driver_admitted_epoch_error_v1()).to_equal("admitted-epoch-binding-changed")
+        expect(driver_admitted_epoch_task_finish_v1(owner).is_err()).to_be(true)
+        expect(driver_admitted_epoch_end_v1(owner).is_err()).to_be(true)
+        epoch_test_restore(saved)
+
+    it "rejects overlap, active end and stale handles after a new epoch":
+        val saved = epoch_test_save()
+        val dir = epoch_test_directory("lifecycle")
+        val identity = dir + "/main.spl"
+        val admitted = epoch_test_publish([identity], ["fn main(): 1\n"])
+        val owner = driver_admitted_epoch_begin_v1(admitted).unwrap()
+        driver_admitted_epoch_task_begin_v1(owner, identity).unwrap()
+        expect(driver_admitted_epoch_task_begin_v1(owner, identity).unwrap_err()).to_equal("admitted-epoch-task-overlap")
+        expect(driver_admitted_epoch_end_v1(owner).unwrap_err()).to_equal("admitted-epoch-task-active")
+        driver_admitted_epoch_task_finish_v1(owner).unwrap()
+        driver_admitted_epoch_end_v1(owner).unwrap()
+        val next = driver_admitted_epoch_begin_v1(admitted).unwrap()
+        expect(driver_admitted_epoch_task_begin_v1(owner, identity).unwrap_err()).to_equal("admitted-epoch-owner-invalid")
+        driver_admitted_epoch_end_v1(next).unwrap()
+        epoch_test_restore(saved)
+
+    it "reports an idle end binding change while still releasing the owner":
+        val saved = epoch_test_save()
+        val dir = epoch_test_directory("end-binding")
+        val identity = dir + "/main.spl"
+        val admitted = epoch_test_publish([identity], ["fn main(): 1\n"])
+        val owner = driver_admitted_epoch_begin_v1(admitted).unwrap()
+        env_set("SIMPLE_SCV_TREE_ID", "changed")
+        expect(driver_admitted_epoch_end_v1(owner).unwrap_err()).to_equal("admitted-epoch-binding-changed")
+        expect(driver_admitted_epoch_active_v1()).to_be(false)
+        env_set("SIMPLE_SCV_TREE_ID", "2222222222222222222222222222222222222222")
+        val next = driver_admitted_epoch_begin_v1(admitted).unwrap()
+        expect(driver_admitted_epoch_task_begin_v1(owner, identity).is_err()).to_be(true)
+        driver_admitted_epoch_end_v1(next).unwrap()
+        epoch_test_restore(saved)
+
+    it "resolves qualified dependencies under the epoch root rather than cwd":
+        val saved = epoch_test_save()
+        val root = epoch_test_root() + "/" + epoch_test_directory("non-cwd")
+        dir_create_all(root + "/src/app")
+        val owner = driver_admitted_epoch_begin_v1(epoch_test_publish(
+            ["src/app/main.spl", "src/app/dep.spl"],
+            ["use app.dep.{value}\nfn main() -> i64: value()\n", "fn value() -> i64: 5\n"], root)).unwrap()
+        val entry = driver_admitted_epoch_task_begin_v1(owner, "src/app/main.spl").unwrap()
+        var options = driver_core_compile_options_default()
+        options.input_files = [entry]
+        options.bootstrap_input_count = 0
+        var driver = compiler_driver_create(options)
+        driver.ctx.config["compiler_source_entry"] = entry
+        val (ctx, accepted) = driver.load_sources_impl()
+        expect(accepted).to_be(true)
+        var dependency_seen = false
+        for source in ctx.sources:
+            if source.module_name == "app.dep":
+                dependency_seen = true
+                expect(source.path).to_equal(root + "/src/app/dep.spl")
+                expect(source.content).to_equal("fn value() -> i64: 5\n")
+        expect(dependency_seen).to_be(true)
+        driver_admitted_epoch_task_finish_v1(owner).unwrap()
+        driver_admitted_epoch_end_v1(owner).unwrap()
+        epoch_test_restore(saved)
+
+    it "normalizes Windows provider prefixes without folding Linux case":
+        expect(driver_admitted_epoch_normalize_v1("\\\\?\\D:\\Root\\Src\\A.spl", true)).to_equal("d:/root/src/a.spl")
+        expect(driver_admitted_epoch_normalize_v1("/mnt/Root/Src/A.spl", false)).to_equal("/mnt/Root/Src/A.spl")
+
+    it "rejects native and shard overrides before a diagnostic task starts":
+        val saved = epoch_test_save()
+        val dir = epoch_test_directory("dispatch")
+        val identity = dir + "/main.spl"
+        val owner = driver_admitted_epoch_begin_v1(epoch_test_publish([identity], ["fn main(): 1\n"])).unwrap()
+        var options = driver_core_compile_options_default()
+        options.mode = CompileMode.Aot
+        options.output_format = OutputFormat.Smf
+        options.backend = "llvm"
+        env_set("SIMPLE_BOOTSTRAP_DIRECT_IR", "1")
+        expect(driver_admitted_epoch_compile_v1(owner, identity, options).unwrap_err()).to_equal("admitted-epoch-native-override:SIMPLE_BOOTSTRAP_DIRECT_IR")
+        expect(driver_admitted_epoch_task_active_v1()).to_be(false)
+        env_set("SIMPLE_BOOTSTRAP_DIRECT_IR", "")
+        env_set("SIMPLE_HIR_SHARD", "0/2")
+        expect(driver_admitted_epoch_compile_v1(owner, identity, options).unwrap_err()).to_equal("admitted-epoch-shard-override:SIMPLE_HIR_SHARD")
+        expect(driver_admitted_epoch_task_active_v1()).to_be(false)
+        env_set("SIMPLE_HIR_SHARD", "")
+        options.backend = "vhdl"
+        expect(driver_admitted_epoch_compile_v1(owner, identity, options).unwrap_err()).to_equal("admitted-epoch-backend-unsupported")
+        driver_admitted_epoch_end_v1(owner).unwrap()
+        epoch_test_restore(saved)
+
+    it "compiles valid A, failing B and valid C with fresh contexts in one epoch":
+        val saved = epoch_test_save()
+        val dir = epoch_test_directory("compile-settlement")
+        val bad = dir + "/bad.spl"
+        val first_good = dir + "/first.spl"
+        val good = dir + "/good.spl"
+        val owner = driver_admitted_epoch_begin_v1(epoch_test_publish(
+            [first_good, bad, good], ["fn main() -> i64: 1\n", "fn main() -> i64: missing_epoch_value()\n", "fn main() -> i64: 0\n"])).unwrap()
+        var options = driver_core_compile_options_default()
+        options.mode = CompileMode.Aot
+        options.output_format = OutputFormat.Smf
+        options.backend = "llvm"
+        options.cli_mode_text = "aot"
+        options.output_file = Some(epoch_test_root() + "/" + dir + "/first.smf")
+        val initial = driver_admitted_epoch_compile_v1(owner, first_good, options)
+        expect(initial.is_ok()).to_be(true)
+        val initially_passed = match initial.unwrap():
+            case CompileResult.Success(_): true
+            case _: false
+        expect(initially_passed).to_be(true)
+        options.output_file = Some(epoch_test_root() + "/" + dir + "/bad.smf")
+        val first = driver_admitted_epoch_compile_v1(owner, bad, options)
+        expect(first.is_ok()).to_be(true)
+        val failed = match first.unwrap():
+            case CompileResult.Success(_): false
+            case _: true
+        expect(failed).to_be(true)
+        options.output_file = Some(epoch_test_root() + "/" + dir + "/good.smf")
+        val second = driver_admitted_epoch_compile_v1(owner, good, options)
+        expect(second.is_ok()).to_be(true)
+        val passed = match second.unwrap():
+            case CompileResult.Success(_): true
+            case _: false
+        expect(passed).to_be(true)
+        expect(driver_admitted_epoch_error_v1()).to_equal("")
+        val (rows, reads) = driver_admitted_epoch_counters_v1()
+        expect(rows).to_equal(3)
+        expect(reads).to_be_greater_than(2)
+        driver_admitted_epoch_end_v1(owner).unwrap()
+        epoch_test_restore(saved)

@@ -1,3 +1,5 @@
+use compiler.frontend.core.parser_use_path.{parse_use_decl}
+use compiler.core.ast_stmt.{stmt_use_import}
 # Parser — Statement Module
 #
 # Statement parsing: parse_block, parse_statement, control flow statements,
@@ -38,6 +40,7 @@ use compiler.core.ast.{EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT}
 use compiler.core.ast.{EXPR_BINARY, EXPR_UNARY, EXPR_CALL, EXPR_METHOD_CALL, EXPR_ARRAY_LIT}
 use compiler.core.ast.{expr_ident, expr_call, expr_binary, expr_nil_lit, expr_field_access, expr_bool_lit, expr_string_lit}
 use compiler.core.ast.{expr_int_lit, expr_float_lit}
+use compiler.core.ast_expr.{expr_mark_colon_block}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_expr}
 use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_todo_call, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_unit, expr_block, expr_lambda}
@@ -398,51 +401,9 @@ fn parse_block() -> [i64]:
     stmts.push(s)
     stmts
 
-# Inline consumer for `use` inside function bodies.
-# Avoids circular dependency: parser_decls_use.spl already imports parse_block from here,
-# so we cannot import parse_use_decl back. Instead, consume the use-path and import list
-# tokens and return a no-op pass statement so the rest of the function body parses cleanly.
+# Retain lexical imports as statements; do not add them to module imports.
 fn parse_use_stmt_inline() -> i64:
-    # Consume 'use' keyword (kind 27)
-    parser_advance()
-    # Skip optional 'lazy' modifier (kind 194)
-    if par_kind_get() == 194:
-        parser_advance()
-    # Consume relative or dotted path: ...parent, ..parent, .sibling, ident(.ident)*
-    while true:
-        val uk = par_kind_get()
-        val is_ident_seg: bool = uk == 6
-        val is_dot_seg: bool = uk == 164
-        val is_double_dot_seg: bool = uk == 165
-        val is_triple_dot_seg: bool = uk == 173
-        val is_star_seg: bool = uk == 62
-        val is_keyword_seg: bool = keyword_lookup(tok_kind_name(uk)) == uk
-        val is_seg: bool = is_ident_seg or is_dot_seg or is_double_dot_seg or
-            is_triple_dot_seg or is_star_seg or is_keyword_seg
-        if not is_seg:
-            break
-        parser_advance()
-    # Consume optional brace import list: .{name, name, ...} or {name, ...}
-    if par_kind_get() == 142:
-        parser_advance()
-        while true:
-            val ulk = par_kind_get()
-            if ulk == 143 or ulk == 190:
-                break
-            parser_advance()
-        if par_kind_get() == 143:
-            parser_advance()
-    # Consume optional paren import list: .(name, name) or (name, ...)
-    if par_kind_get() == 140:
-        parser_advance()
-        while true:
-            val upk = par_kind_get()
-            if upk == 141 or upk == 190:
-                break
-            parser_advance()
-        if par_kind_get() == 141:
-            parser_advance()
-    stmt_expr_stmt(expr_pass(0), 0)
+    stmt_use_import(parse_use_decl(), 0)
 
 # extern fn declaration inside a function body: register the signature
 # globally (same as a top-level extern) and emit a no-op statement.

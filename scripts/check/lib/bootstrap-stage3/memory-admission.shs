@@ -9,6 +9,48 @@ bootstrap_stage3_memory_is_uint() {
     case "${1-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
 }
 
+# Read the kernel's NUL-delimited argv, not ps's flattened display string.
+# Return starttime (PID-reuse identity) and one plain -m RAM limit in KiB.
+# Complex memory backends/configuration are deliberately unsupported here.
+bootstrap_stage3_memory_qemu_identity() {
+    [ "$#" -eq 2 ] || return 1
+    bootstrap_stage3_memory_is_uint "$2" || return 1
+    perl -e '
+        use strict; use warnings;
+        my ($root, $pid) = @ARGV;
+        open my $stat, "<", "$root/$pid/stat" or exit 1;
+        my $line = <$stat>; close $stat;
+        defined($line) && $line =~ /^\Q$pid\E \(.+\) (.+)$/ or exit 1;
+        my @fields = split /\s+/, $1;
+        my $start = $fields[19];
+        defined($start) && $start =~ /^\d+$/ or exit 1;
+        open my $cmd, "<:raw", "$root/$pid/cmdline" or exit 1;
+        local $/; my $bytes = <$cmd>; close $cmd;
+        defined($bytes) && $bytes =~ /\0\z/ or exit 1;
+        my @args = split /\0/, $bytes;
+        @args && $args[0] =~ m{(?:^|/)qemu-system-[A-Za-z0-9_+-]+\z} or exit 1;
+        my $memory;
+        for (my $i = 1; $i < @args; $i++) {
+            my $arg = $args[$i];
+            $arg =~ s/^--/-/;
+            if ($arg eq "-m") {
+                !defined($memory) && $i + 1 < @args or exit 1;
+                $memory = $args[++$i];
+            } elsif ($arg =~ /^-(?:readconfig|object|numa|mem-path|mem-prealloc|qmp|monitor)(?:=|$)/ ||
+                     $arg =~ /^-m(?:=|emory)/ ||
+                     ($arg =~ /^-(?:machine|M)(?:=|$)/ &&
+                      ($arg =~ /memory-backend/ ||
+                       ($i + 1 < @args && $args[$i + 1] =~ /memory-backend/)))) {
+                exit 1;
+            }
+        }
+        defined($memory) && $memory =~ /\A([1-9][0-9]*)([mMgG]?)\z/ or exit 1;
+        my $mib = $1 * (lc($2) eq "g" ? 1024 : 1);
+        $mib > 0 && $mib <= 1048576 or exit 1;
+        print "$start|", $mib * 1024, "\n";
+    ' "$1" "$2"
+}
+
 # Darwin cannot enforce the virtual-memory limit with ulimit -v. Keep its RSS
 # watchdog at or below both the validated Stage 3 process cap and the existing
 # process-tree cap. Reject an invalid tree cap instead of masking it with min().
@@ -529,6 +571,21 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
                 "$bootstrap_stage3_memory_rss"
             printf 'process_%s_cmd=%s\n' "$bootstrap_stage3_memory_process_count" \
                 "$bootstrap_stage3_memory_cmd_safe"
+            if [ "$bootstrap_stage3_memory_kind" = qemu ]; then
+                bootstrap_stage3_memory_proc_root=/proc
+                if [ "$bootstrap_stage3_memory_process_source" = fixture ]; then
+                    bootstrap_stage3_memory_proc_root=\
+${SIMPLE_BOOTSTRAP_STAGE3_PROC_ROOT:-/proc}
+                fi
+                bootstrap_stage3_memory_qemu_observed=$( \
+                    bootstrap_stage3_memory_qemu_identity \
+                        "$bootstrap_stage3_memory_proc_root" \
+                        "$bootstrap_stage3_memory_pid" 2>/dev/null) ||
+                    bootstrap_stage3_memory_qemu_observed=unavailable
+                printf 'process_%s_qemu_identity=%s\n' \
+                    "$bootstrap_stage3_memory_process_count" \
+                    "$bootstrap_stage3_memory_qemu_observed"
+            fi
         } >>"$bootstrap_stage3_memory_process_output" || {
             rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
     done <"$bootstrap_stage3_memory_process_tmp"
@@ -549,11 +606,17 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
 # released 841 surfaces; that retention is still an unresolved compiler defect,
 # not an expected registry cost. A point-in-time MemAvailable check alone cannot
 # protect the host when another native build or QEMU guest starts growing.
-# Refuse that known unsafe overlap before the runner is launched.  One outer
-# bootstrap coordinator is allowed because it may exec this resume helper.
+# Native-build peers still require exclusive ownership. A QEMU guest may
+# coexist only when the final Linux sample covers the Stage 3 cgroup maximum
+# and all configured guest RAM. Whole-process RSS includes QEMU overhead, so
+# subtracting it would understate possible guest growth. One outer bootstrap
+# coordinator is allowed because it may exec this resume helper.
 bootstrap_stage3_memory_require_exclusive_heavy() {
-    [ "$#" -eq 1 ] || return 2
+    [ "$#" -eq 2 ] || return 2
     bootstrap_stage3_memory_exclusive_evidence=$1
+    bootstrap_stage3_memory_exclusive_stage3_max_kib=$2
+    bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_exclusive_stage3_max_kib" &&
+        [ "$bootstrap_stage3_memory_exclusive_stage3_max_kib" -gt 0 ] || return 2
     [ -f "$bootstrap_stage3_memory_exclusive_evidence" ] &&
         [ ! -L "$bootstrap_stage3_memory_exclusive_evidence" ] || return 2
     [ "$(bootstrap_stage3_manifest_value process_scan_status \
@@ -571,9 +634,100 @@ bootstrap_stage3_memory_require_exclusive_heavy() {
         bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_exclusive_value" || return 2
     done
     if [ "$bootstrap_stage3_memory_exclusive_native" -gt 0 ] ||
-       [ "$bootstrap_stage3_memory_exclusive_bootstrap" -gt 1 ] ||
-       [ "$bootstrap_stage3_memory_exclusive_qemu" -gt 0 ]; then
+       [ "$bootstrap_stage3_memory_exclusive_bootstrap" -gt 1 ]; then
         echo "Stage 3 memory admission blocked: concurrent heavy work (native=$bootstrap_stage3_memory_exclusive_native bootstrap=$bootstrap_stage3_memory_exclusive_bootstrap qemu=$bootstrap_stage3_memory_exclusive_qemu)" >&2
+        return 75
+    fi
+    [ "$bootstrap_stage3_memory_exclusive_qemu" -gt 0 ] || return 0
+    [ "$(bootstrap_stage3_manifest_value status \
+        "$bootstrap_stage3_memory_exclusive_evidence")" = ready ] &&
+    [ "$(bootstrap_stage3_manifest_value provider \
+        "$bootstrap_stage3_memory_exclusive_evidence")" = linux-proc-meminfo-cgroup-v2 ] &&
+    [ "$(bootstrap_stage3_manifest_value sample_3_status \
+        "$bootstrap_stage3_memory_exclusive_evidence")" = ready ] || return 75
+    bootstrap_stage3_memory_exclusive_total=$(bootstrap_stage3_manifest_value \
+        sample_3_total_kib "$bootstrap_stage3_memory_exclusive_evidence") || return 75
+    bootstrap_stage3_memory_exclusive_available=$(bootstrap_stage3_manifest_value \
+        sample_3_available_kib "$bootstrap_stage3_memory_exclusive_evidence") || return 75
+    bootstrap_stage3_memory_exclusive_headroom=$(bootstrap_stage3_manifest_value \
+        headroom_mib "$bootstrap_stage3_memory_exclusive_evidence") || return 75
+    bootstrap_stage3_memory_exclusive_earlyoom=$(bootstrap_stage3_manifest_value \
+        sample_3_earlyoom_status "$bootstrap_stage3_memory_exclusive_evidence") || return 75
+    bootstrap_stage3_memory_exclusive_earlyoom_percent=$(bootstrap_stage3_manifest_value \
+        sample_3_earlyoom_percent "$bootstrap_stage3_memory_exclusive_evidence") || return 75
+    bootstrap_stage3_memory_exclusive_count=$(bootstrap_stage3_manifest_value \
+        concurrent_process_count "$bootstrap_stage3_memory_exclusive_evidence") || return 75
+    for bootstrap_stage3_memory_exclusive_value in \
+        "$bootstrap_stage3_memory_exclusive_total" \
+        "$bootstrap_stage3_memory_exclusive_available" \
+        "$bootstrap_stage3_memory_exclusive_headroom" \
+        "$bootstrap_stage3_memory_exclusive_count"; do
+        bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_exclusive_value" || return 75
+    done
+    [ "$bootstrap_stage3_memory_exclusive_total" -gt 0 ] &&
+        [ "$bootstrap_stage3_memory_exclusive_count" -le 1024 ] || return 75
+    bootstrap_stage3_memory_exclusive_reserve_kib=0
+    case "$bootstrap_stage3_memory_exclusive_earlyoom" in
+        active)
+            bootstrap_stage3_memory_is_uint \
+                "$bootstrap_stage3_memory_exclusive_earlyoom_percent" &&
+                [ "$bootstrap_stage3_memory_exclusive_earlyoom_percent" -ge 1 ] &&
+                [ "$bootstrap_stage3_memory_exclusive_earlyoom_percent" -le 99 ] || return 75
+            bootstrap_stage3_memory_exclusive_reserve_kib=$((
+                bootstrap_stage3_memory_exclusive_total *
+                bootstrap_stage3_memory_exclusive_earlyoom_percent / 100)) ;;
+        inactive) ;;
+        *) return 75 ;;
+    esac
+    bootstrap_stage3_memory_exclusive_guest_budget_kib=0
+    bootstrap_stage3_memory_exclusive_seen=0
+    bootstrap_stage3_memory_exclusive_index=1
+    while [ "$bootstrap_stage3_memory_exclusive_index" -le \
+        "$bootstrap_stage3_memory_exclusive_count" ]; do
+        bootstrap_stage3_memory_exclusive_kind=$(bootstrap_stage3_manifest_value \
+            "process_${bootstrap_stage3_memory_exclusive_index}_kind" \
+            "$bootstrap_stage3_memory_exclusive_evidence") || return 75
+        if [ "$bootstrap_stage3_memory_exclusive_kind" = qemu ]; then
+            bootstrap_stage3_memory_exclusive_seen=$((bootstrap_stage3_memory_exclusive_seen + 1))
+            bootstrap_stage3_memory_exclusive_pid=$(bootstrap_stage3_manifest_value \
+                "process_${bootstrap_stage3_memory_exclusive_index}_pid" \
+                "$bootstrap_stage3_memory_exclusive_evidence") || return 75
+            bootstrap_stage3_memory_exclusive_saved_identity=$(bootstrap_stage3_manifest_value \
+                "process_${bootstrap_stage3_memory_exclusive_index}_qemu_identity" \
+                "$bootstrap_stage3_memory_exclusive_evidence") || return 75
+            bootstrap_stage3_memory_exclusive_proc_root=/proc
+            if [ "$(bootstrap_stage3_manifest_value process_scan_source \
+                "$bootstrap_stage3_memory_exclusive_evidence")" = fixture ]; then
+                bootstrap_stage3_memory_exclusive_proc_root=\
+${SIMPLE_BOOTSTRAP_STAGE3_PROC_ROOT:-/proc}
+            fi
+            bootstrap_stage3_memory_exclusive_live_identity=$( \
+                bootstrap_stage3_memory_qemu_identity \
+                    "$bootstrap_stage3_memory_exclusive_proc_root" \
+                    "$bootstrap_stage3_memory_exclusive_pid" 2>/dev/null) || return 75
+            [ "$bootstrap_stage3_memory_exclusive_live_identity" = \
+                "$bootstrap_stage3_memory_exclusive_saved_identity" ] || return 75
+            bootstrap_stage3_memory_exclusive_max_kib=${bootstrap_stage3_memory_exclusive_live_identity#*|}
+            bootstrap_stage3_memory_is_uint \
+                "$bootstrap_stage3_memory_exclusive_max_kib" || return 75
+            [ "$bootstrap_stage3_memory_exclusive_max_kib" -le \
+                "$bootstrap_stage3_memory_exclusive_total" ] || return 75
+            bootstrap_stage3_memory_exclusive_guest_budget_kib=$((
+                bootstrap_stage3_memory_exclusive_guest_budget_kib +
+                bootstrap_stage3_memory_exclusive_max_kib))
+        fi
+        bootstrap_stage3_memory_exclusive_index=$((bootstrap_stage3_memory_exclusive_index + 1))
+    done
+    [ "$bootstrap_stage3_memory_exclusive_seen" -eq \
+        "$bootstrap_stage3_memory_exclusive_qemu" ] || return 75
+    bootstrap_stage3_memory_exclusive_required_kib=$((
+        bootstrap_stage3_memory_exclusive_reserve_kib +
+        bootstrap_stage3_memory_exclusive_headroom * 1024 +
+        bootstrap_stage3_memory_exclusive_stage3_max_kib +
+        bootstrap_stage3_memory_exclusive_guest_budget_kib))
+    if [ "$bootstrap_stage3_memory_exclusive_available" -le \
+        "$bootstrap_stage3_memory_exclusive_required_kib" ]; then
+        echo "Stage 3 memory admission blocked: QEMU overlap needs ${bootstrap_stage3_memory_exclusive_required_kib}KiB available, measured ${bootstrap_stage3_memory_exclusive_available}KiB" >&2
         return 75
     fi
     return 0

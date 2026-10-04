@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/bootstrap/lib/managed-smf-diagnostics.shs"
+work=$(mktemp -d "${TMPDIR:-/tmp}/managed-smf-worker-bound.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+root="$work/run"
+mkdir -p "$root"
+managed_stop_check() { :; }
+managed_smf_diagnostic_admit() { :; }
+managed_smf_diagnostic_task() {
+  [ "$6" = 80 ] && [ "$4" = 1024 ] || return 2
+  printf '%s\n' "$3" >"$work/worker-$3"
+}
+threads=80 memory_bytes=81920
+run_index_independent_diagnostics phase4 llvm unused
+count=0
+while [ "$count" -lt 80 ]; do
+  [ "$(cat "$work/worker-$count")" = "$count" ] || exit 1
+  count=$((count + 1))
+done
+threads=81
+code=0
+run_index_independent_diagnostics phase3 llvm unused || code=$?
+[ "$code" = 2 ] || exit 1
+[ ! -e "$work/worker-80" ] || exit 1
+printf '%s\n' 'PASS: eighty independent diagnostic partitions; overflow rejected before spawn'

@@ -1,0 +1,58 @@
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, execution_resource_scope, run_in_owned_test_resource_scope}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use std.io_runtime.{file_hash_sha256_or_empty}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1}
+use std.common.task_runner.recovery.{task_runner_execution_mode_v1}
+use std.test_runner.task_runner_adapter.{test_task_attempt_v1}
+
+fn main() -> i64:
+    val child = env_get("SIMPLE_TASK_RUNNER_FAULT_CHILD") ?? ""
+    val root = env_get("SIMPLE_TASK_RUNNER_PROBE_ROOT") ?? ""
+    if child == "" or root == "": return 77
+    val child_digest = file_hash_sha256_or_empty(child)
+    if child_digest.len() != 64: return 78
+    val producer_digest = env_get("SIMPLE_TASK_RUNNER_PRODUCER_SHA256") ?? ""
+    val source_digest = env_get("SIMPLE_TASK_RUNNER_SOURCE_SHA256") ?? ""
+    val runtime_digest = env_get("SIMPLE_TASK_RUNNER_RUNTIME_SHA256") ?? ""
+    val toolchain_digest = env_get("SIMPLE_TASK_RUNNER_TOOLCHAIN_SHA256") ?? ""
+    for digest in [producer_digest, source_digest, runtime_digest, toolchain_digest]:
+        if digest.len() != 64: return 79
+    var failures = 0
+    var executed = 0
+    var previous_generation: i64 = 0
+    # The assertion and crash must not prevent the third binary execution.
+    for mode in ["assertion", "crash", "pass"]:
+        val receipt_path = root + "/" + mode + ".bdd"
+        val scoped = run_in_owned_test_resource_scope(
+            execution_resource_scope(ExecutionResourceClass.Unit, 10000, 65536),
+            child, [mode, receipt_path])
+        executed = executed + 1
+        match scoped.process.completion:
+            case nil: failures = failures + 1
+            case Some(completion):
+                if completion.pid <= 0 or not completion.tree_reaped or completion.process_generation <= previous_generation:
+                    failures = failures + 1
+                previous_generation = completion.process_generation
+                if completion.stdout_digest != sha256_text(scoped.process.stdout) or completion.stderr_digest != sha256_text(scoped.process.stderr):
+                    failures = failures + 1
+                val identity = TaskRunnerIdentityV1(kind: "test", task_id: mode,
+                    case_id: "", backend: "native-fixture", phase: "probe",
+                    producer_digest: producer_digest, source_digest: source_digest,
+                    runtime_digest: runtime_digest, toolchain_digest: toolchain_digest,
+                    policy_digest: sha256_text("unit:10000:65536"),
+                    execution_digest: sha256_text(child_digest + ":" + mode + ":" + receipt_path))
+                val evidence = if mode == "crash": "" else: file_read_text(receipt_path)
+                match test_task_attempt_v1(identity, "probe", 1, "grouped", completion, evidence):
+                    case Err(reason): failures = failures + 1
+                    case Ok(row):
+                        val expected = if mode == "crash": "crashed" elif mode == "assertion": "failed" else: "passed"
+                        if row.status != expected: failures = failures + 1
+                        match task_runner_execution_mode_v1(row.identity_digest, [row]):
+                            case Err(reason): failures = failures + 1
+                            case Ok(next_mode):
+                                if next_mode != (if mode == "crash": "isolated" else: "grouped"): failures = failures + 1
+    print "TaskRunner binaries executed={executed} failed={failures}"
+    if executed != 3 or failures != 0: return 1
+    0

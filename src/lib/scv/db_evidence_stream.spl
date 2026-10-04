@@ -1,23 +1,25 @@
 # Exact incremental sibling of db_evidence_digest. No new digest protocol.
-use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new, sha256_stream_v1_update, sha256_stream_v1_finish_hex}
+use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new}
 use std.scv.db_canonical.{db_domain_bytes, db_u64_bytes, db_frame, db_canonical_text}
 
 fn db_evidence_stream_start(content_bytes: u64) -> Result<Sha256StreamV1, text>:
-    val stream = sha256_stream_v1_new()
-    if not sha256_stream_v1_update(stream, db_domain_bytes("evidence-envelope", [])? + [1u8] + db_u64_bytes(content_bytes)):
+    var stream = sha256_stream_v1_new()
+    if not stream.update(db_domain_bytes("evidence-envelope", [])? + [1u8] + db_u64_bytes(content_bytes)):
         return Err("SCVDB_EVIDENCE_HASH")
     Ok(stream)
 
-fn db_evidence_stream_finish(stream: Sha256StreamV1, dependencies: [text]) -> Result<text, text>:
+# Finalization consumes a local owner; callers must not reuse their input.
+fn db_evidence_stream_finish(input: Sha256StreamV1, dependencies: [text]) -> Result<text, text>:
+    var stream = input
     var previous = ""
     for dependency in dependencies:
         if dependency.len() != 64 or dependency <= previous: return Err("SCVDB_EVIDENCE_DEPENDENCY")
         for byte in dependency.bytes():
             if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)): return Err("SCVDB_EVIDENCE_DEPENDENCY")
-        if not sha256_stream_v1_update(stream, db_frame(2u8, db_canonical_text(dependency)?)):
+        if not stream.update(db_frame(2u8, db_canonical_text(dependency)?)):
             return Err("SCVDB_EVIDENCE_HASH")
         previous = dependency
-    match sha256_stream_v1_finish_hex(stream):
+    match stream.finish_hex():
         Some(digest): Ok(digest)
         nil: Err("SCVDB_EVIDENCE_HASH")
 

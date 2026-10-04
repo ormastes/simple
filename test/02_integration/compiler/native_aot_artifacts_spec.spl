@@ -1,0 +1,70 @@
+# @req REQ-SSPEC-COMPILER
+# Real filesystem checks for object names and private diagnostic ownership.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_write_exact, file_read_nullable, file_exists}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.path.{basename}
+use compiler.driver.native_aot_artifacts.{
+    native_aot_object_path_v1, native_aot_finish_diagnostics_v1}
+
+describe "AOT artifact component bounds and diagnostic ownership":
+    it "publishes distinct bounded objects for long module and output names":
+        step("long identities remain names in metadata rather than filesystem components")
+        val root = secure_temp_dir_raw(".", "aot-name-spec")
+        expect(root.len() > 0).to_equal(true)
+        var long_name = ""
+        for index in 0..263:
+            long_name = long_name + "m"
+        val output_base = root + "/" + long_name
+        val first = native_aot_object_path_v1(output_base, long_name)
+        val second = native_aot_object_path_v1(output_base, long_name + "x")
+        val other_output = native_aot_object_path_v1(output_base + "x", long_name)
+        expect(basename(first).len()).to_equal(70)
+        expect(first == second).to_equal(false)
+        expect(first == other_output).to_equal(false)
+        expect(native_aot_object_path_v1(output_base, long_name)).to_equal(first)
+        expect(file_write_exact(first, "first-object")).to_equal(true)
+        expect(file_write_exact(second, "second-object")).to_equal(true)
+        expect(file_read_nullable(first) ?? "missing").to_equal("first-object")
+        expect(file_read_nullable(second) ?? "missing").to_equal("second-object")
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "keeps failure IR and message even when an older object exists":
+        step("nonzero provider status cannot erase its retained reproduction")
+        val root = secure_temp_dir_raw(".", "aot-evidence-spec")
+        expect(root.len() > 0).to_equal(true)
+        val failed = secure_temp_dir_raw(root, "failed")
+        val succeeded = secure_temp_dir_raw(root, "succeeded")
+        expect(failed.len() > 0).to_equal(true)
+        expect(succeeded.len() > 0).to_equal(true)
+        val object_path = root + "/object.o"
+        expect(file_write_exact(object_path, "old-object")).to_equal(true)
+        expect(file_write_exact(failed + "/message", "publication failed")).to_equal(true)
+        val ir = r"define i32 @main() { ret i32 0 }" + "\n"
+        expect(file_write_exact(failed + "/message.module.ll", ir)).to_equal(true)
+        expect(native_aot_finish_diagnostics_v1(failed, 1, object_path)).to_equal(true)
+        expect(file_read_nullable(failed + "/message") ?? "missing").to_equal("publication failed")
+        expect(file_read_nullable(failed + "/message.module.ll") ?? "missing").to_contain("ret i32 0")
+        expect(file_write_exact(succeeded + "/message", "warning")).to_equal(true)
+        expect(native_aot_finish_diagnostics_v1(succeeded, 0, object_path)).to_equal(true)
+        expect(file_exists(succeeded + "/message")).to_equal(false)
+        expect(file_exists(failed + "/message.module.ll")).to_equal(true)
+        expect(file_exists(object_path)).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "retains evidence when successful status has missing or empty output":
+        step("object validation precedes diagnostic cleanup")
+        val root = secure_temp_dir_raw(".", "aot-invalid-spec")
+        expect(root.len() > 0).to_equal(true)
+        val diagnostic = secure_temp_dir_raw(root, "invalid")
+        expect(diagnostic.len() > 0).to_equal(true)
+        val object_path = root + "/object.o"
+        expect(file_write_exact(diagnostic + "/message", "provider returned zero")).to_equal(true)
+        expect(native_aot_finish_diagnostics_v1(diagnostic, 0, object_path)).to_equal(true)
+        expect(file_exists(diagnostic + "/message")).to_equal(true)
+        expect(file_write_exact(object_path, "")).to_equal(true)
+        expect(native_aot_finish_diagnostics_v1(diagnostic, 0, object_path)).to_equal(true)
+        expect(file_exists(diagnostic + "/message")).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)

@@ -1,0 +1,289 @@
+#!/bin/sh
+# Six independent post-Stage2 test products. This is separate from the
+# canonical managed Phase 4 three-case acceptance suites.
+set -eu
+die() { echo "subsystem-products: $*" >&2; exit 2; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+hash_file() {
+  regular "$1" || die "hash input unavailable: $1"
+  sum=$(sha256sum "$1") || die "hash input unreadable: $1"
+  printf '%s\n' "${sum%% *}"
+}
+absolute() { case "$1" in /*) return 0 ;; *) return 1 ;; esac; }
+resume=0 resume_reused=
+source_root= output_root= compiler_llvm= compiler_cranelift=
+producer_receipt_llvm= producer_receipt_cranelift=
+threads=20 rss_cap_kib=6835937 build_timeout=1800 test_timeout=7200
+for arg in "$@"; do
+  case "$arg" in
+    --resume) resume=1 ;;
+    --source-root=*) source_root=${arg#*=} ;;
+    --output-root=*) output_root=${arg#*=} ;;
+    --compiler-llvm=*) compiler_llvm=${arg#*=} ;;
+    --compiler-cranelift=*) compiler_cranelift=${arg#*=} ;;
+    --producer-receipt-llvm=*) producer_receipt_llvm=${arg#*=} ;;
+    --producer-receipt-cranelift=*) producer_receipt_cranelift=${arg#*=} ;;
+    --threads=*) threads=${arg#*=} ;;
+    --rss-cap-kib=*) rss_cap_kib=${arg#*=} ;;
+    --build-timeout-seconds=*) build_timeout=${arg#*=} ;;
+    --test-timeout-seconds=*) test_timeout=${arg#*=} ;;
+    *) die "unknown option: $arg" ;;
+  esac
+done
+for path in "$source_root" "$output_root"; do
+  [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
+done
+for path in "$compiler_llvm" "$compiler_cranelift" \
+    "$producer_receipt_llvm" "$producer_receipt_cranelift"; do
+  [ -z "$path" ] || absolute "$path" || die "absolute compiler or receipt path required: $path"
+done
+[ -d "$source_root" ] && [ ! -L "$source_root" ] || die "source root unavailable"
+source_root=$(CDPATH= cd -- "$source_root" && pwd -P) || die "source root unavailable"
+case "$output_root" in
+  *'/../'*|*'/./'*|*'/..'|*'/.'|*'//'*) die "unsafe output root" ;;
+esac
+output_parent=$(dirname -- "$output_root")
+[ -d "$output_parent" ] && [ ! -L "$output_parent" ] || die "output parent unavailable"
+output_parent=$(CDPATH= cd -- "$output_parent" && pwd -P) || die "output parent unavailable"
+output_root="$output_parent/$(basename -- "$output_root")"
+case "$output_root/" in "$source_root/"*) die "output overlaps source" ;; esac
+case "$source_root/" in "$output_root/"*) die "source overlaps output" ;; esac
+if [ "$resume" -eq 0 ]; then
+  [ ! -e "$output_root" ] && [ ! -L "$output_root" ] || die "fresh output root required"
+else
+  [ -d "$output_root" ] && [ ! -L "$output_root" ] || die "resume output root unavailable"
+fi
+case "$threads:$rss_cap_kib:$build_timeout:$test_timeout" in
+  *[!0-9:]*|:*|*::*) die "invalid resource policy" ;;
+esac
+[ "$threads" -ge 10 ] && [ "$threads" -le 20 ] && \
+  [ "$rss_cap_kib" -gt 0 ] && [ "$rss_cap_kib" -le 6835937 ] && \
+  [ "$build_timeout" -gt 0 ] && [ "$test_timeout" -gt 0 ] \
+  || die "resource policy outside 20-thread/legal-cap bounds"
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || die "script root unavailable"
+case "$script_root" in "$source_root/scripts/bootstrap") ;; *) die "manager must run from pinned source root" ;; esac
+inventory_program="$script_root/compiler-subsystem-test-inventory.shs"
+builder="$script_root/build-compiler-subsystem-test-product.shs"
+verifier="$script_root/verify-compiler-subsystem-test-product.pl"
+watchdog="$script_root/run-process-group-timeout.shs"
+schedule="$script_root/lib/managed-task-schedule.shs"
+for path in "$inventory_program" "$builder" "$verifier" "$watchdog" "$schedule"; do
+  regular "$path" || die "missing source-pinned product tool: $path"
+done
+mkdir -p "$output_root" || die "output root unavailable"
+owner_lock="$output_root/.product-owner.lock"
+mkdir "$owner_lock" 2>/dev/null || die "product owner already active or stale lock requires inspection"
+trap 'rm -rf -- "$owner_lock"' EXIT
+trap 'exit 143' HUP INT TERM
+inventory="$output_root/source-specs.tsv"
+statuses="$output_root/product-status.tsv"
+matrix="$output_root/matrix.env"
+product_reuse_ready() { [ -n "$resume_reused" ] && [ "$1" = "$resume_reused" ]; }
+
+compiler_for() {
+  case "$1" in llvm) printf '%s\n' "$compiler_llvm" ;; cranelift) printf '%s\n' "$compiler_cranelift" ;; esac
+}
+receipt_for() {
+  case "$1" in llvm) printf '%s\n' "$producer_receipt_llvm" ;; cranelift) printf '%s\n' "$producer_receipt_cranelift" ;; esac
+}
+job_for() { printf '%s/%s/%s\n' "$output_root" "$1" "$2"; }
+product_prerequisite_ready() {
+  compiler=$(compiler_for "$1")
+  producer_receipt=$(receipt_for "$1")
+  regular "$compiler" && regular "$producer_receipt"
+}
+disk_preflight() {
+  free_kib=$(df -Pk "$output_root" | awk 'NR==2 {print $4}') || die "disk probe failed"
+  [ "$free_kib" -ge 4194304 ] || die "less than 4 GiB free before product task"
+}
+verify_base() {
+  backend=$1 suite=$2 phase=$3
+  shift 3
+  job=$(job_for "$backend" "$suite")
+  compiler=$(compiler_for "$backend")
+  producer_receipt=$(receipt_for "$backend")
+  perl "$verifier" --phase="$phase" --source-root="$source_root" \
+    --inventory="$inventory" --backend="$backend" --subsystem="$suite" \
+    --compiler="$compiler" --binary="$job/product" \
+    --compiler-producer-receipt="$producer_receipt" \
+    --build-receipt="$job/build.env" --threads="$threads" \
+    --rss-cap-kib="$rss_cap_kib" --build-timeout-seconds="$build_timeout" "$@"
+}
+build_test_product() {
+  backend=$1 suite=$2
+  job=$(job_for "$backend" "$suite")
+  mkdir -p "$job/tmp-build" || die "product job root unavailable"
+  disk_preflight
+  compiler=$(compiler_for "$backend")
+  producer_receipt=$(receipt_for "$backend")
+  compiler_sha=$(hash_file "$compiler") || return 2
+  code=0
+  SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$rss_cap_kib" \
+  SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce TMPDIR="$job/tmp-build" \
+    sh "$builder" --source-root="$source_root" --compiler="$compiler" \
+      --compiler-sha256="$compiler_sha" \
+      --compiler-producer-receipt="$producer_receipt" \
+      --backend="$backend" --subsystem="$suite" --inventory="$inventory" \
+      --threads="$threads" --rss-cap-kib="$rss_cap_kib" \
+      --build-timeout-seconds="$build_timeout" \
+      --output="$job/product" --receipt="$job/build.env" \
+      >"$job/build.stdout.log" 2>"$job/build.stderr.log" || code=$?
+  printf '%s\n' "$code" >"$job/build.exit"
+  [ "$code" -eq 0 ] || return "$code"
+  verify_base "$backend" "$suite" build || return 1
+}
+enumerate_test_product() {
+  backend=$1 suite=$2
+  job=$(job_for "$backend" "$suite")
+  mkdir -p "$job/tmp-enumerate" || die "enumeration scratch unavailable"
+  disk_preflight
+  verify_base "$backend" "$suite" build || return 1
+  code=0
+  (
+    cd "$source_root" || exit 125
+    TMPDIR="$job/tmp-enumerate" SIMPLE_RUNTIME_MODE=native SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$rss_cap_kib" \
+    SIMPLE_PROCESS_TREE_RSS_RECEIPT="$job/enumeration-watchdog.env" \
+      sh "$watchdog" "$test_timeout" 20 "$job/product" --enumerate \
+        --registry-output="$job/enumeration.tsv"
+  ) >"$job/enumeration.stdout.log" 2>"$job/enumeration.stderr.log" || code=$?
+  printf '%s\n' "$code" >"$job/enumeration.exit"
+  [ "$code" -eq 0 ] || return "$code"
+  verify_base "$backend" "$suite" enumerate \
+    --enumeration="$job/enumeration.tsv" \
+    --enumeration-stdout="$job/enumeration.stdout.log" \
+    --enumeration-stderr="$job/enumeration.stderr.log" \
+    --enumeration-watchdog="$job/enumeration-watchdog.env" \
+    --enumeration-exit="$code" || return 1
+}
+run_test_product() {
+  backend=$1 suite=$2
+  job=$(job_for "$backend" "$suite")
+  mkdir -p "$job/tmp-run" || die "execution scratch unavailable"
+  disk_preflight
+  verify_base "$backend" "$suite" enumerate \
+    --enumeration="$job/enumeration.tsv" \
+    --enumeration-stdout="$job/enumeration.stdout.log" \
+    --enumeration-stderr="$job/enumeration.stderr.log" \
+    --enumeration-watchdog="$job/enumeration-watchdog.env" \
+    --enumeration-exit=0 || return 1
+  code=0
+  (
+    cd "$source_root" || exit 125
+    TMPDIR="$job/tmp-run" SIMPLE_RUNTIME_MODE=native SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$rss_cap_kib" \
+    SIMPLE_PROCESS_TREE_RSS_RECEIPT="$job/execution-watchdog.env" \
+      sh "$watchdog" "$test_timeout" 20 "$job/product" --run \
+        --registry-output="$job/execution.tsv"
+  ) >"$job/execution.stdout.log" 2>"$job/execution.stderr.log" || code=$?
+  printf '%s\n' "$code" >"$job/execution.exit"
+  if [ "$code" -gt 1 ]; then return "$code"; fi
+  verify_base "$backend" "$suite" complete \
+    --enumeration="$job/enumeration.tsv" \
+    --enumeration-stdout="$job/enumeration.stdout.log" \
+    --enumeration-stderr="$job/enumeration.stderr.log" \
+    --enumeration-watchdog="$job/enumeration-watchdog.env" \
+    --enumeration-exit=0 --execution="$job/execution.tsv" \
+    --execution-stdout="$job/execution.stdout.log" \
+    --execution-stderr="$job/execution.stderr.log" \
+    --execution-watchdog="$job/execution-watchdog.env" --execution-exit="$code" \
+    --output="$job/result.env" || return 1
+}
+
+if [ "$resume" -eq 1 ]; then
+  . "$script_root/lib/subsystem-product-resume.shs"
+  resume_validate
+  # Only after every retained byte has passed validation may state advance.
+  history="$output_root/resume-history"
+  [ ! -e "$history" ] && [ ! -L "$history" ] || die "resume history already exists"
+  mkdir "$history" || die "cannot preserve prior resume state"
+  cp "$matrix" "$history/matrix.env" && cp "$statuses" "$history/product-status.tsv" || die "cannot archive resume state"
+  awk -F '\t' '$2=="SUCCEEDED" {print}' "$statuses" >"$owner_lock/product-status.tsv"
+  mv "$owner_lock/product-status.tsv" "$statuses" || die "cannot publish retained task state"
+else
+  sh "$inventory_program" "$source_root" >"$inventory" || die "source inventory failed"
+  regular "$inventory" || die "source inventory absent"
+  : >"$statuses" || die "status journal unavailable"
+  printf '%s\n' 'format=SIMPLE-SUBSYSTEM-TEST-MATRIX-1' 'status=INCOMPLETE' \
+    "source_root=$source_root" >"$matrix" || die "initial matrix receipt unavailable"
+fi
+
+. "$schedule"
+schedule_code=0
+managed_dispatch_products || schedule_code=$?
+case "$schedule_code" in 0|1) ;; *) die "product owner aborted; journal: $statuses" ;; esac
+matrix_status=PASS
+[ "$schedule_code" -eq 0 ] || matrix_status=FAIL
+for backend in llvm cranelift; do
+  for suite in compiler interpreter loader; do
+    job=$(job_for "$backend" "$suite")
+    if regular "$job/result.env"; then
+      product_status=$(awk -F= '$1=="status" {print $2}' "$job/result.env")
+      case "$product_status" in
+        PASS) ;;
+        PASS_WITH_SKIPS) if [ "$matrix_status" = PASS ]; then matrix_status=PASS_WITH_SKIPS; fi ;;
+        *) matrix_status=FAIL ;;
+      esac
+    else
+      matrix_status=FAIL
+    fi
+  done
+done
+inventory_sha=$(hash_file "$inventory") || die "inventory changed before matrix receipt"
+schedule_sha=$(hash_file "$statuses") || die "status journal unreadable"
+compiler_llvm_sha=MISSING compiler_cranelift_sha=MISSING
+producer_receipt_llvm_sha=MISSING producer_receipt_cranelift_sha=MISSING
+if regular "$compiler_llvm"; then compiler_llvm_sha=$(hash_file "$compiler_llvm") || die "LLVM compiler changed"; fi
+if regular "$compiler_cranelift"; then compiler_cranelift_sha=$(hash_file "$compiler_cranelift") || die "Cranelift compiler changed"; fi
+if regular "$producer_receipt_llvm"; then producer_receipt_llvm_sha=$(hash_file "$producer_receipt_llvm") || die "LLVM producer receipt changed"; fi
+if regular "$producer_receipt_cranelift"; then producer_receipt_cranelift_sha=$(hash_file "$producer_receipt_cranelift") || die "Cranelift producer receipt changed"; fi
+matrix_tmp="$matrix.tmp.$$"
+{
+  printf '%s\n' 'format=SIMPLE-SUBSYSTEM-TEST-MATRIX-1' "status=$matrix_status" \
+    "source_root=$source_root" "inventory_sha256=$inventory_sha" \
+    "compiler_llvm_sha256=$compiler_llvm_sha" \
+    "compiler_cranelift_sha256=$compiler_cranelift_sha" \
+    "producer_receipt_llvm_path=$producer_receipt_llvm" \
+    "producer_receipt_cranelift_path=$producer_receipt_cranelift" \
+    "producer_receipt_llvm_sha256=$producer_receipt_llvm_sha" \
+    "producer_receipt_cranelift_sha256=$producer_receipt_cranelift_sha" \
+    "threads=$threads" "rss_cap_kib=$rss_cap_kib" \
+    "build_timeout_seconds=$build_timeout" "test_timeout_seconds=$test_timeout" \
+    'runtime_mode=native' "execution_cwd=$source_root" \
+    "schedule_sha256=$schedule_sha"
+  cat "$statuses"
+  for backend in llvm cranelift; do
+    for suite in compiler interpreter loader; do
+      job=$(job_for "$backend" "$suite")
+      if regular "$job/result.env"; then digest=$(hash_file "$job/result.env") || die "product receipt unreadable"; else digest=MISSING; fi
+      printf '%s=%s\n' "${backend}_${suite}_receipt_sha256" "$digest"
+      for evidence in build.exit build.stdout.log build.stderr.log build.env \
+          enumeration.exit enumeration.tsv enumeration.stdout.log enumeration.stderr.log enumeration-watchdog.env \
+          execution.exit execution.tsv execution.stdout.log execution.stderr.log execution-watchdog.env; do
+        path="$job/$evidence"
+        if regular "$path"; then evidence_digest=$(hash_file "$path") || die "product evidence unreadable"; else evidence_digest=MISSING; fi
+        evidence_key=$(printf '%s' "$evidence" | tr '.-' '__')
+        printf '%s=%s\n' "${backend}_${suite}_${evidence_key}_sha256" "$evidence_digest"
+      done
+      for stage in build enumeration execution; do
+        path="$job/$stage.exit"
+        if regular "$path"; then
+          IFS= read -r exit_status <"$path" || die "product exit status unreadable"
+          case "$exit_status" in ''|*[!0-9]*) die "product exit status invalid" ;; esac
+        else
+          exit_status=MISSING
+        fi
+        printf '%s=%s\n' "${backend}_${suite}_${stage}_exit" "$exit_status"
+      done
+    done
+  done
+} >"$matrix_tmp" || die "matrix receipt write failed"
+if [ "$matrix_status" = PASS ]; then
+  sh "$script_root/verify-compiler-subsystem-test-matrix.shs" \
+    --source-root="$source_root" --output-root="$output_root" \
+    --matrix-candidate="$matrix_tmp" >/dev/null \
+    || { rm -f "$matrix_tmp"; die "six-product matrix evidence rejected"; }
+fi
+mv "$matrix_tmp" "$matrix" || die "matrix receipt publication failed"
+printf '%s\n' "$matrix"
+[ "$matrix_status" = PASS ] || exit 1

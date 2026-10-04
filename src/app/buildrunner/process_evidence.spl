@@ -1,0 +1,97 @@
+use std.nogc_sync_mut.io.process_completion.{ProcessCompletionV1}
+# A worker-authored observation projection, consumed only alongside the original
+# BuildResult and exact compiler.reaped proof. This is not admission by itself.
+use std.common.process.observation_v4.{ProcessObservationReceiptV4, ProcessObservationRequestV4,
+    canonical_encode_process_observation_request_v4,
+    freeze_process_observation_receipt_v4, ProcessObservationFailureReasonV4}
+use std.common.task_runner.contracts.{task_runner_process_outcome_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_u8_hex, sha256_text}
+
+struct BuildRunnerProcessEvidenceV1:
+    task_identity: text
+    pid: i64
+    process_generation: i64
+    native_identity_digest: text
+    exit_code: i64
+    signal_number: i64
+    outcome: text
+    stdout_digest: text
+    stderr_digest: text
+    transport_execution_digest: text
+
+fn build_runner_process_evidence_encode_v1(value: BuildRunnerProcessEvidenceV1) -> Result<text, text>:
+    for digest in [value.task_identity, value.native_identity_digest, value.stdout_digest, value.stderr_digest, value.transport_execution_digest]:
+        if not builder_digest_valid_v1(digest): return Err("invalid process evidence digest")
+    if value.pid < 1 or value.process_generation < 1 or value.signal_number < 0 or value.signal_number > 64:
+        return Err("invalid process evidence identity")
+    val observed = task_runner_process_outcome_v1(value.exit_code, value.signal_number,
+        value.outcome == "timed-out", value.outcome == "cancelled", true)?
+    if observed != value.outcome: return Err("process evidence outcome differs")
+    Ok("SIMPLE-BUILD-PROCESS-EVIDENCE-1\n" + value.task_identity + "\n" + str(value.pid) + "\n" +
+        str(value.process_generation) + "\n" + value.native_identity_digest + "\n" +
+        str(value.exit_code) + "\n" + str(value.signal_number) + "\n" + value.outcome + "\n" +
+        value.stdout_digest + "\n" + value.stderr_digest + "\n" + value.transport_execution_digest + "\n")
+
+fn build_runner_process_evidence_freeze_v1(identity: text,
+        receipt: ProcessObservationReceiptV4, request: ProcessObservationRequestV4, cancelled: bool) -> Result<text, text>:
+    val frozen = freeze_process_observation_receipt_v4(receipt)?
+    if not frozen.packet.tree_empty: return Err("process evidence requires complete tree closure")
+    val packet = frozen.packet
+    val native_identity = sha256_text(str(packet.ticket_high) + ":" + str(packet.ticket_low) + ":" +
+        str(packet.request_id_high) + ":" + str(packet.request_id_low) + ":" + sha256_u8_hex(frozen.binding_digest))
+    val outcome = task_runner_process_outcome_v1(packet.exit_code, packet.signal_number,
+        packet.failure_reason == ProcessObservationFailureReasonV4.ExecutionDeadline, cancelled, true)?
+    build_runner_process_evidence_encode_v1(BuildRunnerProcessEvidenceV1(identity, packet.pid,
+        packet.process_started_ns, native_identity, packet.exit_code, packet.signal_number, outcome,
+        sha256_u8_hex(frozen.stdout), sha256_u8_hex(frozen.stderr),
+        sha256_u8_hex(canonical_encode_process_observation_request_v4(request)?)))
+
+fn build_runner_process_evidence_decode_v1(payload: text) -> Result<BuildRunnerProcessEvidenceV1, text>:
+    if payload.len() > 2048: return Err("process evidence exceeds bound")
+    val rows = payload.split("\n")
+    if rows.len() != 12 or rows[0] != "SIMPLE-BUILD-PROCESS-EVIDENCE-1" or rows[11] != "":
+        return Err("invalid process evidence framing")
+    val value = BuildRunnerProcessEvidenceV1(rows[1], rows[2].to_int() ?? -1, rows[3].to_int() ?? -1, rows[4],
+        rows[5].to_int() ?? -1, rows[6].to_int() ?? -1, rows[7], rows[8], rows[9], rows[10])
+    if build_runner_process_evidence_encode_v1(value)? != payload: return Err("noncanonical process evidence")
+    Ok(value)
+
+export BuildRunnerProcessEvidenceV1, build_runner_process_evidence_encode_v1
+export build_runner_process_evidence_freeze_v1, build_runner_process_evidence_decode_v1
+
+fn build_runner_process_evidence_completion_v1(identity: text,
+        completed: ProcessCompletionV1) -> Result<text, text>:
+    if not completed.tree_reaped: return Err("compiler tree is not collected")
+    val outcome = task_runner_process_outcome_v1(completed.exit_code, completed.signal_number,
+        completed.timed_out, completed.cancelled, completed.tree_reaped)?
+    val native_identity = sha256_text(str(completed.pid) + ":" + str(completed.process_generation) + ":" +
+        completed.transport_execution_digest)
+    build_runner_process_evidence_encode_v1(BuildRunnerProcessEvidenceV1(identity,
+        completed.pid, completed.process_generation, native_identity, completed.exit_code,
+        completed.signal_number, outcome, completed.stdout_digest, completed.stderr_digest,
+        completed.transport_execution_digest))
+
+export build_runner_process_evidence_completion_v1
+
+# Called only after the outer broker's original tree-reap proof is validated.
+# Exit 139 alone is not signal evidence; the inner compiler observation is.
+fn build_runner_process_evidence_bind_v1(payload: text, identity: text,
+        stdout_digest: text, stderr_digest: text, wrapper_exit: i64,
+        outer_reaped: bool) -> Result<BuildRunnerProcessEvidenceV1, text>:
+    if not outer_reaped: return Err("outer compiler worker tree is not reaped")
+    val evidence = build_runner_process_evidence_decode_v1(payload)?
+    if evidence.task_identity != identity or evidence.stdout_digest != stdout_digest or
+            evidence.stderr_digest != stderr_digest:
+        return Err("compiler process evidence differs from manifest or logs")
+    val expected_exit = if evidence.outcome == "timed-out": 124 else:
+        if evidence.outcome == "cancelled": 125 else:
+        if evidence.signal_number > 0: 128 + evidence.signal_number else: evidence.exit_code
+    # The worker may reject a successfully emitted SMF during target-loader
+    # qualification. Its typed failed module rows still need parent validation.
+    val qualification_failure = evidence.outcome == "exited" and evidence.exit_code == 0 and wrapper_exit == 1
+    if wrapper_exit != expected_exit and not qualification_failure:
+        return Err("worker exit differs from compiler observation")
+    Ok(evidence)
+
+export build_runner_process_evidence_bind_v1

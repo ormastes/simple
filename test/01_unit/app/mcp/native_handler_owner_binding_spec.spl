@@ -1,0 +1,35 @@
+# Real handler outputs through their production owner imports; no subprocesses.
+use std.spec.{describe, it, expect}
+use app.simple_lsp_mcp.main.{lsp_handle_message}
+use app.mcp.main_lazy_debug_tools.{handle_debug_close_session}
+use app.mcp.main_lazy_diag_tools.{handle_simple_read}
+use app.mcp.main_lazy_dialog_tools.{handle_debug_dialog_list}
+
+describe "native MCP and LSP handler owner bindings":
+    it "preserves a numeric LSP request id through the actual ping handler":
+        val reply = lsp_handle_message(r"""{"jsonrpc":"2.0","id":73,"method":"ping"}""")
+        expect(reply).to_equal(r"""{"jsonrpc":"2.0","id":73,"result":{}}""")
+
+    it "preserves a quoted LSP request id and suppresses initialized notifications":
+        val reply = lsp_handle_message(r"""{"jsonrpc":"2.0","id":"request-7","method":"ping"}""")
+        expect(reply).to_equal(r"""{"jsonrpc":"2.0","id":"request-7","result":{}}""")
+        expect(lsp_handle_message(r"""{"jsonrpc":"2.0","method":"notifications/initialized"}""")).to_equal("")
+
+    it "returns a structured debug parameter error without launching a session":
+        val reply = handle_debug_close_session("17", r"{}")
+        expect(reply).to_contain("\"id\":17")
+        expect(reply).to_contain("\"isError\":true")
+        expect(reply).to_contain("\"code\":-32602")
+        expect(reply).to_contain("Missing required parameter: session_id")
+
+    it "returns a structured read parameter error without reading a file":
+        val reply = handle_simple_read("23", r"{}")
+        expect(reply).to_contain("\"id\":23")
+        expect(reply).to_contain("\"isError\":true")
+        expect(reply).to_contain("Missing required parameter: path")
+
+    it "uses the shared hardware-session validator before any dialog command":
+        val reply = handle_debug_dialog_list("29", r"""{"session_id":"missing-owner-regression"}""")
+        expect(reply).to_contain("\"id\":29")
+        expect(reply).to_contain("\"code\":-32602")
+        expect(reply).to_contain("Session not found: missing-owner-regression")

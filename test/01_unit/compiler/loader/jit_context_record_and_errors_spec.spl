@@ -1,0 +1,36 @@
+use std.spec.{describe, it, expect}
+use compiler.loader.loader.jit_context.{JitCompilationContext}
+use compiler.loader.loader.jit_instantiator.{TemplateBytes}
+use compiler.loader.loader.compiler_sffi.{CompilerContext, TypeInfo}
+
+fn inert_jit_context() -> JitCompilationContext:
+    JitCompilationContext(
+        compiler_ctx: CompilerContext(handle: 0, alive: false),
+        smf_templates: {}, recorded: []
+    )
+
+describe "Runtime JIT context owner errors and recording":
+    it "retains the supplied mangled name instead of overwriting it with nil":
+        var ctx = inert_jit_context()
+        ctx.record_instantiation("identity", [], "identity_i32", false, "failed")
+        val rows = ctx.get_recorded()
+        expect(rows.len()).to_equal(1)
+        expect(rows[0].mangled_name).to_equal("identity_i32")
+        expect(rows[0].success).to_equal(false)
+        expect(rows[0].error).to_equal("failed")
+
+    it "rejects mismatched template arity before invoking the compiler owner":
+        val ctx = inert_jit_context()
+        val tmpl = TemplateBytes(bytes: [], name: "identity", param_count: 1)
+        val message = match ctx.compile_template(tmpl, []):
+            Ok(_): "unexpected success"
+            Err(error): error
+        expect(message).to_equal("Template type argument count mismatch")
+
+    it "propagates a real invalid compiler handle without inventing code":
+        val ctx = inert_jit_context()
+        val tmpl = TemplateBytes(bytes: [], name: "identity", param_count: 0)
+        val message = match ctx.compile_template(tmpl, []):
+            Ok(_): "unexpected success"
+            Err(error): error
+        expect(message).to_equal("Invalid context handle")
