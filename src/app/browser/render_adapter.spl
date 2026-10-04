@@ -18,7 +18,7 @@ use app.ui.render.types.{RenderConfig, RenderResult}
 use app.ui.render.html.{html_page, html_escape, css_dark_theme, css_light_theme, css_reset}
 use app.ui.render.ansi.{colorize, BOLD, DIM, CYAN, GREEN, RED}
 use app.ui.render.css.{css_for_components}
-use app.browser.render_lane.{browser_render_html_to_pixel_array, browser_render_html_frame,
+use app.browser.render_lane.{browser_render_html_to_pixel_array, browser_render_html_frame, browser_render_html_frame_dpr,
     browser_render_lane_selected, BrowserVulkanFrame}
 use std.io_runtime.{env_get, file_write_bytes}
 use std.common.image.png_encode.{encode_argb_to_png_rgb}
@@ -45,10 +45,17 @@ pub val SIMPLE_BROWSER_ENGINE_VIEWPORT_H: i32 = 2160
 pub val SIMPLE_BROWSER_VIEWPORT_ENV: text = "SIMPLE_BROWSER_VIEWPORT"
 # When set to a path, the rendered frame is written there as a PNG.
 pub val SIMPLE_BROWSER_DUMP_PNG_ENV: text = "SIMPLE_BROWSER_DUMP_PNG"
+# Device pixel ratio (integer, 1..4). The page is laid out in CSS pixels at
+# viewport / ratio and rasterized at the ratio, like a browser on a HiDPI
+# display. Default: 2 for the default 4K viewport (a 1920x1080 CSS page on a
+# 2x Retina screen), 1 when SIMPLE_BROWSER_VIEWPORT is overridden.
+pub val SIMPLE_BROWSER_DPR_ENV: text = "SIMPLE_BROWSER_DPR"
+pub val SIMPLE_BROWSER_DEFAULT_DPR: i32 = 2
 
 class BrowserViewport:
     width: i32
     height: i32
+    device_pixel_ratio: i32 = 1
 
 pub fn browser_parse_viewport(spec: text) -> BrowserViewport?:
     """Parse `<W>x<H>` (both positive). nil for anything else."""
@@ -61,17 +68,33 @@ pub fn browser_parse_viewport(spec: text) -> BrowserViewport?:
         return nil
     BrowserViewport(width: w.to_i32(), height: h.to_i32())
 
+pub fn browser_parse_dpr(spec: text) -> i32:
+    """Parse an integer device pixel ratio in 1..4; 0 for anything else."""
+    val v = spec.trim().to_i64() ?? 0
+    if v < 1 or v > 4:
+        return 0
+    v.to_i32()
+
 pub fn browser_viewport() -> BrowserViewport:
-    """The page viewport in device pixels: the env override when it parses,
-    else the 4K default. A malformed override falls back to the default
-    rather than rendering at a nonsense size."""
+    """The page viewport in device pixels plus its device pixel ratio: the
+    env overrides when they parse, else the 4K default at DPR 2. A malformed
+    override falls back to the default rather than rendering at a nonsense
+    size. A ratio that does not divide the viewport renders at ratio 1."""
     val spec = env_get(SIMPLE_BROWSER_VIEWPORT_ENV) ?? ""
+    var vp = BrowserViewport(width: SIMPLE_BROWSER_ENGINE_VIEWPORT_W,
+                             height: SIMPLE_BROWSER_ENGINE_VIEWPORT_H,
+                             device_pixel_ratio: SIMPLE_BROWSER_DEFAULT_DPR)
     match browser_parse_viewport(spec):
-        case Some(vp):
-            vp
+        case Some(parsed):
+            vp = parsed
         case None:
-            BrowserViewport(width: SIMPLE_BROWSER_ENGINE_VIEWPORT_W,
-                            height: SIMPLE_BROWSER_ENGINE_VIEWPORT_H)
+            ()
+    val dpr = browser_parse_dpr(env_get(SIMPLE_BROWSER_DPR_ENV) ?? "")
+    if dpr > 0:
+        vp.device_pixel_ratio = dpr
+    if vp.width % vp.device_pixel_ratio != 0 or vp.height % vp.device_pixel_ratio != 0:
+        vp.device_pixel_ratio = 1
+    vp
 
 pub fn browser_dump_png_if_requested(pixels: [u32], width: i32, height: i32) -> text:
     """Write the frame to $SIMPLE_BROWSER_DUMP_PNG when set. Returns a one-line
@@ -220,6 +243,11 @@ pub fn browser_engine_pixels_at(url: text, width: i32, height: i32) -> [u32]:
     browser_engine_frame_at(url, width, height).pixels
 
 pub fn browser_engine_frame_at(url: text, width: i32, height: i32) -> BrowserVulkanFrame:
+    """`browser_engine_frame_at_dpr` at device pixel ratio 1."""
+    browser_engine_frame_at_dpr(url, width, height, 1)
+
+pub fn browser_engine_frame_at_dpr(url: text, width: i32, height: i32,
+                                   device_pixel_ratio: i32) -> BrowserVulkanFrame:
     """`browser_engine_pixels_at` plus provenance: which backend produced the
     pixels ("vulkan" only for a real device readback; "software" with a
     reason when the Vulkan lane fell back; "cpu", "blink-cpu",
@@ -239,10 +267,11 @@ pub fn browser_engine_frame_at(url: text, width: i32, height: i32) -> BrowserVul
             Err(_):
                 return BrowserVulkanFrame(pixels: [], backend: "refused", reason: "sandbox worker failed")
     if browser_document_needs_session(html):
+        val why = if device_pixel_ratio > 1: "session lane ignores device pixel ratio {device_pixel_ratio}" else: ""
         return BrowserVulkanFrame(
             pixels: browser_session_pixels_at_time(url, html, width, height, 0),
-            backend: "cpu-session", reason: "")
-    browser_render_html_frame(html, width, height)
+            backend: "cpu-session", reason: why)
+    browser_render_html_frame_dpr(html, width, height, device_pixel_ratio)
 
 pub fn browser_document_needs_session(html: text) -> bool:
     """True when the document carries <script> or CSS @keyframes content, so
@@ -314,12 +343,12 @@ fn browser_render_proof(url: text) -> text:
     with a real (non-zero for real content) painted-pixel count and the
     lane/backend that actually produced the pixels."""
     val vp = browser_viewport()
-    val frame = browser_engine_frame_at(url, vp.width, vp.height)
+    val frame = browser_engine_frame_at_dpr(url, vp.width, vp.height, vp.device_pixel_ratio)
     val painted = browser_engine_painted_pixel_count(frame.pixels)
     val why = if frame.reason != "": " ({frame.reason})" else: ""
     val dump = browser_dump_png_if_requested(frame.pixels, vp.width, vp.height)
     val dump_line = if dump != "": "\n" + dump else: ""
-    "Rendered by Simple Browser engine: {vp.width}x{vp.height}px, {painted} pixels painted, lane={browser_render_lane_selected()}, backend={frame.backend}{why}{dump_line}"
+    "Rendered by Simple Browser engine: {vp.width}x{vp.height}px @{vp.device_pixel_ratio}x, {painted} pixels painted, lane={browser_render_lane_selected()}, backend={frame.backend}{why}{dump_line}"
 
 fn browser_page_body_html(url: text) -> text:
     """The page content area's real markup. Every window that opens this

@@ -67,6 +67,48 @@ trait RenderBackend:
     fn read_pixels_with_source() -> Engine2DReadback
     fn width() -> i32
     fn height() -> i32
+    # The three defaults below mirror std.gc_async_mut.gpu.engine2d.backend
+    # (see the sync note above). Without them, whichever RenderBackend
+    # registered first decided the slots: under the whole-program JIT the
+    # browser's `core.read_pixels_region(...)` (engine2d backend_emu_adv) had
+    # no slot and died with "Function 'RenderBackend.read_pixels_region' not
+    # found" (2026-10-05).
+    me read_pixels_damaged(max_rects: i32) -> [u32]:
+        """Borrowed retained mirror when a backend supports one; the default
+        is an ordinary full read."""
+        self.read_pixels()
+    me invalidate_damage_mirror():
+        """Force the next damaged read to seed a complete retained mirror.
+        Backends without a retained mirror keep their existing behavior."""
+        pass_dn
+    me read_pixels_region(x: i32, y: i32, width: i32, height: i32) -> Engine2DReadback:
+        """One whole-frame read, then a host crop with out-of-bounds pixels
+        as 0u32 (identical to the gc_async_mut default)."""
+        val full = self.read_pixels_with_source()
+        var cropped: [u32] = []
+        if (self.width() > 0 and self.height() > 0 and width > 0 and height > 0 and
+            full.pixels.len() == self.width().to_i64() * self.height().to_i64()):
+            val total = width.to_i64() * height.to_i64()
+            if total > 0 and total <= 2147483647:
+                cropped = [0u32; total.to_i32()]
+                var row = 0
+                while row < height:
+                    var col = 0
+                    while col < width:
+                        val source_x = x + col
+                        val source_y = y + row
+                        if (source_x >= 0 and source_y >= 0 and
+                            source_x < self.width() and source_y < self.height()):
+                            cropped[row.to_i64() * width.to_i64() + col.to_i64()] =
+                                full.pixels[source_y.to_i64() * self.width().to_i64() +
+                                    source_x.to_i64()]
+                        col = col + 1
+                    row = row + 1
+        Engine2DReadback(pixels: cropped, source: full.source,
+                         backend_handle: full.backend_handle,
+                         device_identity: full.device_identity,
+                         pixel_count: cropped.len().to_i64(),
+                         checksum: engine2d_readback_checksum(cropped))
 
 trait Engine2DExtended:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32)

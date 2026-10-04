@@ -36,7 +36,7 @@
 # second place to edit and nothing to un-delete.
 
 use std.io_runtime.{env_get}
-use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixel_array}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixel_array, render_html_to_pixel_array_dpr}
 use std.blink.lane.html_pixels.{blink_render_html_to_pixel_array}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
 
@@ -102,15 +102,21 @@ class BrowserVulkanFrame:
     reason: text
 
 pub fn browser_render_html_vulkan(html: text, width: i32, height: i32) -> BrowserVulkanFrame:
-    """Render `html` on the live CPU engine, then present the frame through
-    the engine2d VulkanBackend and return the DEVICE readback.
+    """`browser_render_html_vulkan_dpr` at device pixel ratio 1."""
+    browser_render_html_vulkan_dpr(html, width, height, 1)
+
+pub fn browser_render_html_vulkan_dpr(html: text, width: i32, height: i32,
+                                      device_pixel_ratio: i32) -> BrowserVulkanFrame:
+    """Render `html` on the live CPU engine (laid out at CSS size, rasterized
+    at `device_pixel_ratio`), then present the frame through the engine2d
+    VulkanBackend and return the DEVICE readback.
 
     Fail-closed provenance: when Vulkan cannot initialize on the running
     binary (e.g. a seed built without the vulkan feature), or the readback is
     not a device readback, the CPU frame is returned with backend="software"
     and a non-empty reason — this function never labels software pixels as
     "vulkan"."""
-    val page = render_html_to_pixel_array(html, width, height)
+    val page = render_html_to_pixel_array_dpr(html, width, height, device_pixel_ratio)
     var b = VulkanBackend.create()
     if not b.init(width, height):
         return BrowserVulkanFrame(pixels: page, backend: "software",
@@ -125,21 +131,34 @@ pub fn browser_render_html_vulkan(html: text, width: i32, height: i32) -> Browse
 
 pub fn browser_render_html_frame_via(lane: text, html: text,
                                      width: i32, height: i32) -> BrowserVulkanFrame:
-    """Render through `lane` and keep the provenance: `backend` is "vulkan"
-    only for a real device readback, "software" for a Vulkan fallback (with
-    the reason), and "cpu" / "blink-cpu" for the CPU-only lanes."""
+    """`browser_render_html_frame_via_dpr` at device pixel ratio 1."""
+    browser_render_html_frame_via_dpr(lane, html, width, height, 1)
+
+pub fn browser_render_html_frame_via_dpr(lane: text, html: text, width: i32, height: i32,
+                                         device_pixel_ratio: i32) -> BrowserVulkanFrame:
+    """Render through `lane` at `device_pixel_ratio` and keep the provenance:
+    `backend` is "vulkan" only for a real device readback, "software" for a
+    Vulkan fallback (with the reason), and "cpu" / "blink-cpu" for the
+    CPU-only lanes. The blink lane has no DPR support: it renders unscaled
+    and says so in `reason`."""
     if lane == BROWSER_RENDER_LANE_BLINK:
+        val why = if device_pixel_ratio > 1: "blink lane ignores device pixel ratio {device_pixel_ratio}" else: ""
         BrowserVulkanFrame(pixels: blink_render_html_to_pixel_array(html, width, height),
-                           backend: "blink-cpu", reason: "")
+                           backend: "blink-cpu", reason: why)
     elif lane == BROWSER_RENDER_LANE_VULKAN:
-        browser_render_html_vulkan(html, width, height)
+        browser_render_html_vulkan_dpr(html, width, height, device_pixel_ratio)
     else:
-        BrowserVulkanFrame(pixels: render_html_to_pixel_array(html, width, height),
+        BrowserVulkanFrame(pixels: render_html_to_pixel_array_dpr(html, width, height, device_pixel_ratio),
                            backend: "cpu", reason: "")
 
 pub fn browser_render_html_frame(html: text, width: i32, height: i32) -> BrowserVulkanFrame:
     """`browser_render_html_frame_via` on the lane this process selected."""
     browser_render_html_frame_via(browser_render_lane_selected(), html, width, height)
+
+pub fn browser_render_html_frame_dpr(html: text, width: i32, height: i32,
+                                     device_pixel_ratio: i32) -> BrowserVulkanFrame:
+    """`browser_render_html_frame_via_dpr` on the lane this process selected."""
+    browser_render_html_frame_via_dpr(browser_render_lane_selected(), html, width, height, device_pixel_ratio)
 
 pub fn browser_render_html_to_pixel_array(html: text, width: i32,
                                           height: i32) -> [u32]:
@@ -200,3 +219,4 @@ export browser_render_lane_is_known, browser_render_lane_selected
 export render_html_to_pixel_array_via, browser_render_html_to_pixel_array
 export BrowserVulkanFrame, browser_render_html_vulkan
 export browser_render_html_frame_via, browser_render_html_frame
+export browser_render_html_vulkan_dpr, browser_render_html_frame_via_dpr, browser_render_html_frame_dpr

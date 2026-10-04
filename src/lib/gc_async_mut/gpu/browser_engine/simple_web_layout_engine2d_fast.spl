@@ -50,6 +50,7 @@ use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_draw_census_line, vulkan_draw_census_reset, vulkan_readback_census_line, vulkan_readback_census_reset, vulkan_timing_table, vulkan_timing_reset}
 use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 use common.ui.draw_ir.{DrawIrComposition}
+use common.ui.draw_ir_dpr.{draw_ir_dpr_scale_composition}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 
 # Shared clock for the perf-instrumentation start/end pairs below (phase
@@ -1332,6 +1333,39 @@ pub fn simple_web_layout_render_html_pixels_engine2d(html: text, width: i32, hei
         return []
     execution.render.pixels
 
+pub fn simple_web_layout_render_html_pixels_engine2d_dpr(
+    html: text, width: i32, height: i32, device_pixel_ratio: i32, backend_name: text
+) -> [u32]:
+    """HiDPI variant of simple_web_layout_render_html_pixels_engine2d.
+
+    `width`/`height` are DEVICE pixels. The page is laid out in CSS pixels
+    (device / ratio, the window size in points on a 2x display) and the
+    resulting Draw IR is scaled by the integer ratio before rasterizing, so
+    boxes and text land at their CSS size on screen, text re-rasterized at
+    the scaled font size. Ratio 1 (or anything that does not divide the
+    surface) is exactly the non-DPR entry."""
+    if device_pixel_ratio <= 1 or width % device_pixel_ratio != 0 or height % device_pixel_ratio != 0:
+        return simple_web_layout_render_html_pixels_engine2d(html, width, height, backend_name)
+    if width <= 0 or height <= 0:
+        return []
+    val css_width = width / device_pixel_ratio
+    val css_height = height / device_pixel_ratio
+    val layout_result = _simple_web_layout_draw_ir_cached(
+        html, css_width, css_height, -1, [], [], true)
+    val device_composition = draw_ir_dpr_scale_composition(
+        layout_result.composition, device_pixel_ratio)
+    if (
+        web_gpu_paint_enabled() and
+        web_gpu_paint_backend_verdict(backend_name) == "gpu-paint-candidate"
+    ):
+        return _web_draw_ir_choose_route(device_composition, width, height, backend_name)
+    val execution = _simple_web_layout_execute_draw_ir_composition(
+        device_composition, layout_result.material_witness,
+        width, height, backend_name, [])
+    if execution.render.skipped_command_count != 0:
+        return []
+    execution.render.pixels
+
 pub fn simple_web_layout_render_html_pixels_engine2d_with_images(
     html: text, width: i32, height: i32, backend_name: text,
     images: [SimpleOsHostGpuImageResource]
@@ -1480,7 +1514,7 @@ pub fn engine2d_fast_metal_available() -> bool:
     val probe = Engine2D.probe_backend(1, 1, "metal")
     probe.status == BackendStatus.Initialized
 
-export simple_web_layout_render_html_pixels_engine2d
+export simple_web_layout_render_html_pixels_engine2d, simple_web_layout_render_html_pixels_engine2d_dpr
 export simple_web_layout_render_html_readback_engine2d
 export simple_web_layout_render_html_readback_engine2d_result
 export simple_web_layout_render_html_engine2d_result

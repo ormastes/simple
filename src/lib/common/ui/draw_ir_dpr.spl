@@ -1,0 +1,159 @@
+# Draw IR device-pixel-ratio scaling.
+#
+# A page is laid out in CSS pixels; a HiDPI surface rasterizes in device
+# pixels (2x on a Retina display: a 1920x1080-point window is a 3840x2160
+# buffer). This module maps a CSS-pixel composition to device pixels by
+# multiplying every length by an INTEGER ratio: command geometry, the four
+# rects, path points, edge points, shaped-glyph positions, advance widths, and
+# every `<number>px` token in computed-style values (font-size, border widths,
+# radii, shadows, ...). Text is therefore re-rasterized at the scaled font
+# size -- it is crisp, not an upscaled bitmap. Unitless numbers (line-height,
+# opacity, colors, percentages) are left alone, exactly as CSS defines.
+#
+# Integer ratios only: every scaled coordinate stays exact. A ratio < 1 is
+# rejected by returning the composition unchanged with ratio 1.
+
+use common.ui.draw_ir.{DrawIrComposition, DrawIrBatch, DrawIrCommand, DrawIrRect,
+    DrawIrPoint, DrawIrStyleProp, DrawIrGlyphRunPayload, DrawEdge,
+    DrawIrEmbeddingConfig}
+
+fn _dpr_i32(v: i32, ratio: i32) -> i32:
+    v * ratio
+
+fn _dpr_rect(r: DrawIrRect, ratio: i32) -> DrawIrRect:
+    DrawIrRect(present: r.present, x: r.x * ratio, y: r.y * ratio,
+               width: r.width * ratio, height: r.height * ratio)
+
+fn _dpr_points(points: [DrawIrPoint], ratio: i32) -> [DrawIrPoint]:
+    var out: [DrawIrPoint] = []
+    var i = 0
+    while i < points.len():
+        val p = points[i]
+        out.push(DrawIrPoint(x: p.x * ratio, y: p.y * ratio))
+        i = i + 1
+    out
+
+fn _dpr_i32_array(values: [i32], ratio: i32) -> [i32]:
+    var out: [i32] = []
+    var i = 0
+    while i < values.len():
+        out.push(values[i] * ratio)
+        i = i + 1
+    out
+
+fn _is_digit(c: text) -> bool:
+    c >= "0" and c <= "9"
+
+fn _format_scaled(number: text, ratio: i32) -> text:
+    """Scale a CSS number literal (`16`, `-1.5`, `.5`) by an integer ratio,
+    keeping integer formatting for integers."""
+    if number.contains("."):
+        val f = number.to_f64() ?? 0.0
+        val scaled = f * (ratio as f64)
+        val whole = scaled.to_i64()
+        if (whole as f64) == scaled:
+            return "{whole}"
+        return "{scaled}"
+    val n = number.to_i64() ?? 0
+    "{n * (ratio as i64)}"
+
+pub fn draw_ir_dpr_scale_css_px(value: text, ratio: i32) -> text:
+    """Multiply every `<number>px` token in a CSS value by `ratio`; leave all
+    other text (colors, keywords, unitless numbers, %, em) untouched."""
+    if ratio == 1 or not value.contains("px"):
+        return value
+    var out = ""
+    var i = 0
+    val n = value.len()
+    while i < n:
+        val c = value[i]
+        val starts_number = _is_digit(c) or
+            ((c == "-" or c == ".") and i + 1 < n and (_is_digit(value[i + 1]) or value[i + 1] == "."))
+        # A digit glued to a preceding letter/#/% is part of an identifier or
+        # a hex color (`#1e90ff`, `h1`), never a length.
+        val glued = i > 0 and (value[i - 1] == "#" or value[i - 1] == "_" or
+            (value[i - 1] >= "a" and value[i - 1] <= "z") or
+            (value[i - 1] >= "A" and value[i - 1] <= "Z") or _is_digit(value[i - 1]))
+        if starts_number and not glued:
+            var j = i + 1
+            while j < n and (_is_digit(value[j]) or value[j] == "."):
+                j = j + 1
+            if j + 1 < n and value[j] == "p" and value[j + 1] == "x":
+                out = out + _format_scaled(value.slice(i, j), ratio) + "px"
+                i = j + 2
+                continue
+            out = out + value.slice(i, j)
+            i = j
+            continue
+        out = out + c
+        i = i + 1
+    out
+
+fn _dpr_style(props: [DrawIrStyleProp], ratio: i32) -> [DrawIrStyleProp]:
+    var out: [DrawIrStyleProp] = []
+    var i = 0
+    while i < props.len():
+        val p = props[i]
+        out.push(DrawIrStyleProp(key: p.key, value: draw_ir_dpr_scale_css_px(p.value, ratio)))
+        i = i + 1
+    out
+
+fn _dpr_glyph_run(run: DrawIrGlyphRunPayload, ratio: i32) -> DrawIrGlyphRunPayload:
+    DrawIrGlyphRunPayload(glyph_ids: run.glyph_ids, xs: _dpr_i32_array(run.xs, ratio),
+                          ys: _dpr_i32_array(run.ys, ratio), clusters: run.clusters,
+                          valid: run.valid)
+
+fn _dpr_edge(edge: DrawEdge?, ratio: i32) -> DrawEdge?:
+    if val e = edge:
+        return Some(DrawEdge(id: e.id, source: e.source, target: e.target, routing: e.routing,
+                             points: _dpr_points(e.points, ratio), style: _dpr_style(e.style, ratio)))
+    nil
+
+pub fn draw_ir_dpr_scale_command(c: DrawIrCommand, ratio: i32) -> DrawIrCommand:
+    DrawIrCommand(
+        kind: c.kind, component_id: c.component_id,
+        x: c.x * ratio, y: c.y * ratio, width: c.width * ratio, height: c.height * ratio,
+        color: c.color, text_value: c.text_value,
+        advance_widths: _dpr_i32_array(c.advance_widths, ratio),
+        border_rect: _dpr_rect(c.border_rect, ratio),
+        content_rect: _dpr_rect(c.content_rect, ratio),
+        hit_rect: _dpr_rect(c.hit_rect, ratio),
+        clip_rect: _dpr_rect(c.clip_rect, ratio),
+        computed_style: _dpr_style(c.computed_style, ratio),
+        edge: _dpr_edge(c.edge, ratio),
+        parent_id: c.parent_id, image_uri: c.image_uri,
+        points: _dpr_points(c.points, ratio),
+        glyph_run: _dpr_glyph_run(c.glyph_run, ratio))
+
+fn _dpr_embedding(e: DrawIrEmbeddingConfig, ratio: i32) -> DrawIrEmbeddingConfig:
+    DrawIrEmbeddingConfig(surface_id: e.surface_id, component_id: e.component_id,
+                          x: e.x * ratio, y: e.y * ratio, width: e.width * ratio,
+                          height: e.height * ratio, layer: e.layer,
+                          opacity_milli: e.opacity_milli, clip: e.clip)
+
+pub fn draw_ir_dpr_scale_composition(comp: DrawIrComposition, ratio: i32) -> DrawIrComposition:
+    """Map a CSS-pixel composition to device pixels at an integer `ratio`.
+    `ratio <= 1` returns the composition unchanged."""
+    if ratio <= 1:
+        return comp
+    var batches: [DrawIrBatch] = []
+    var b = 0
+    while b < comp.batches.len():
+        val batch = comp.batches[b]
+        var commands: [DrawIrCommand] = []
+        var k = 0
+        while k < batch.commands.len():
+            commands.push(draw_ir_dpr_scale_command(batch.commands[k], ratio))
+            k = k + 1
+        batches.push(DrawIrBatch(schema: batch.schema, batch_id: batch.batch_id,
+                                 backend_target: batch.backend_target, source: batch.source,
+                                 embedding: _dpr_embedding(batch.embedding, ratio),
+                                 commands: commands))
+        b = b + 1
+    # A scaled composition is a new value; never reuse the source's
+    # generation token (consumers memoize on it).
+    DrawIrComposition(schema: comp.schema, composition_id: comp.composition_id,
+                      scene_key: "{comp.scene_key}@dpr{ratio}",
+                      backend_target: comp.backend_target, batches: batches, generation: 0)
+
+export draw_ir_dpr_scale_composition, draw_ir_dpr_scale_command, draw_ir_dpr_scale_css_px

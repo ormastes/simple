@@ -1,0 +1,97 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UI
+# @cover src/lib/common/ui/draw_ir_dpr.spl 80%
+"""
+# Draw IR device-pixel-ratio scaling
+
+**Category:** UI / Rendering
+**Status:** New capability
+
+## Purpose and Audience
+
+A HiDPI (2x Retina) browser window is laid out in CSS pixels and rasterized
+into a buffer twice as large in each direction. `draw_ir_dpr_scale_composition`
+is the step between the two: it multiplies every length in a CSS-pixel Draw IR
+composition by an integer ratio, including `px` lengths inside computed style
+(so text is re-rasterized at the scaled font size, never upscaled as a
+bitmap), and leaves everything that is not a length alone.
+
+The audience is anyone wiring a HiDPI surface to the Draw IR renderers.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use common.ui.draw_ir.{DrawIrComposition, DrawIrBatch, DrawIrCommand, DrawIrRect,
+    DrawIrPoint, DrawIrStyleProp, DrawIrGlyphRunPayload, DrawIrSourceInfo,
+    DrawIrEmbeddingConfig}
+use common.ui.draw_ir_dpr.{draw_ir_dpr_scale_composition, draw_ir_dpr_scale_css_px}
+
+fn _no_rect() -> DrawIrRect:
+    DrawIrRect(present: false, x: 0, y: 0, width: 0, height: 0)
+
+fn _text_command() -> DrawIrCommand:
+    DrawIrCommand(
+        kind: "text", component_id: "t1", x: 8, y: 21, width: 120, height: 37,
+        color: 0xFF000000u32, text_value: "Hello", advance_widths: [10, 9, 4],
+        border_rect: _no_rect(), content_rect: DrawIrRect(present: true, x: 8, y: 21, width: 120, height: 37),
+        hit_rect: _no_rect(), clip_rect: DrawIrRect(present: true, x: 0, y: 0, width: 64, height: 36),
+        computed_style: [DrawIrStyleProp(key: "font-size", value: "32px"),
+                         DrawIrStyleProp(key: "line-height", value: "1.5"),
+                         DrawIrStyleProp(key: "color", value: "#1e90ff")],
+        edge: nil, parent_id: "", image_uri: "", points: [DrawIrPoint(x: 1, y: 2)],
+        glyph_run: DrawIrGlyphRunPayload(glyph_ids: [7u32], xs: [3], ys: [4], clusters: [0], valid: true))
+
+fn _composition() -> DrawIrComposition:
+    DrawIrComposition(
+        schema: "s", composition_id: "c", scene_key: "k", backend_target: "auto",
+        batches: [DrawIrBatch(schema: "s", batch_id: "b", backend_target: "auto",
+            source: DrawIrSourceInfo(source_kind: "", source_id: "", html_tag: "", html_node_id: "",
+                                     css_selector: "", css_class: "", style_key: "", style_revision: ""),
+            embedding: DrawIrEmbeddingConfig(surface_id: "", component_id: "", x: 0, y: 0,
+                                             width: 64, height: 36, layer: 0, opacity_milli: 1000, clip: false),
+            commands: [_text_command()])],
+        generation: 5)
+
+describe "Draw IR device-pixel-ratio scaling":
+    # @manual scenario evidence
+
+    it "doubles every geometric length at ratio 2":
+        # @req REQ-SSPEC-UI
+        step("doubles every geometric length at ratio 2")
+        val scaled = draw_ir_dpr_scale_composition(_composition(), 2)
+        val c = scaled.batches[0].commands[0]
+        expect(c.x).to_equal(16)
+        expect(c.y).to_equal(42)
+        expect(c.width).to_equal(240)
+        expect(c.height).to_equal(74)
+        expect(c.advance_widths).to_equal([20, 18, 8])
+        expect(c.clip_rect.width).to_equal(128)
+        expect(c.content_rect.x).to_equal(16)
+        expect(c.points[0].y).to_equal(4)
+        expect(c.glyph_run.xs).to_equal([6])
+        expect(c.glyph_run.glyph_ids).to_equal([7u32])
+        expect(scaled.batches[0].embedding.width).to_equal(128)
+
+    it "scales px lengths in style but not unitless values or colors":
+        # @req REQ-SSPEC-UI
+        step("scales px lengths in style but not unitless values or colors")
+        val c = draw_ir_dpr_scale_composition(_composition(), 2).batches[0].commands[0]
+        expect(c.computed_style[0].value).to_equal("64px")
+        expect(c.computed_style[1].value).to_equal("1.5")
+        expect(c.computed_style[2].value).to_equal("#1e90ff")
+        expect(draw_ir_dpr_scale_css_px("1px solid rgb(10, 20, 30)", 2)).to_equal("2px solid rgb(10, 20, 30)")
+        expect(draw_ir_dpr_scale_css_px("0 2.5px 4px -1px #00000080", 2)).to_equal("0 5px 8px -2px #00000080")
+        expect(draw_ir_dpr_scale_css_px("50%", 2)).to_equal("50%")
+
+    it "leaves the composition untouched at ratio 1":
+        # @req REQ-SSPEC-UI
+        step("leaves the composition untouched at ratio 1")
+        val same = draw_ir_dpr_scale_composition(_composition(), 1)
+        expect(same.batches[0].commands[0].x).to_equal(8)
+        expect(same.generation).to_equal(5)
+
+    it "never reuses the source generation token":
+        # @req REQ-SSPEC-UI
+        step("never reuses the source generation token")
+        expect(draw_ir_dpr_scale_composition(_composition(), 2).generation).to_equal(0)
