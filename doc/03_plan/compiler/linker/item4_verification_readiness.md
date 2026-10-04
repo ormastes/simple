@@ -9,7 +9,7 @@ integration does not close verification or authorize publication.
 
 ## 2026-10-04 continuation
 
-ELF byte-source implementation and seven acceptance scenarios are now authored.
+ELF byte-source implementation and nine acceptance scenarios are now authored.
 File adapters require a four-operation seal and consume the selected reader before the
 same owner's relocation/layout/writer operations. Array-input APIs keep their
 existing three-operation contract. Hosted library classification and linking
@@ -19,7 +19,8 @@ and symlinks; hostile-path snapshots and change-during-read identity guarantees
 remain open rather than being inferred from path strings or caller digests.
 The scenarios cover one source/writer owner, missing source, invalid inputs,
 alias precedence, hosted archive snapshot reuse, canonical parity and source
-failure preserving output. All seven remain UNRUN. See
+failure preserving output, missing/mismatched source admission and reordered
+receipt bindings tied to real output. All nine remain UNRUN. See
 `doc/08_tracking/verification/item4_elf_byte_source_2026-10-04.md`.
 
 Static ELF operational composition now seals actual relocation-field, layout

@@ -36,3 +36,16 @@ The same owner reaches the production ELF engine. Independent review of both
 implementations found no P0/P1. The cache retains raw arrays alongside widened
 ELF inputs during linking; avoiding repeat reads costs resident memory and is
 not a bounded-working-set implementation.
+
+Nine executable scenarios now cover one source/writer owner, missing source,
+invalid inputs, alias precedence, real hosted archive snapshot reuse, canonical
+parity, selected-source errors, seal admission mismatches and provider-order
+binding receipts tied to real output bytes. The manual is authored and explicitly
+UNRUN; it is not canonical docgen output. Test fixtures were independently
+assembled and inspected. Independent source review of the final scenarios and
+explicit required-facet field writeback found no P0/P1 findings.
+
+Working/staged direct-env guards passed. The generated-manual tree contains zero
+executable `_spec.spl` files. These structural checks do not establish behavioral
+correctness. Selected CRT/DSO wire oracles, freestanding archive dispatch and
+concurrent execution of fixed-path scenarios remain additional test gaps.
