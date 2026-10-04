@@ -305,3 +305,31 @@ compile receipts with an unreaped tree retain artifacts; providers without a
 receipt retain their prior synchronous contract, not a universal tree proof.
 No new diagnostic retry
 or runtime qualification follows from this plan linkage.
+
+## Windows native-all platform dependencies (2026-10-04)
+
+Status: source repair `52d43348d7c` and intent `f73e8a13155` source-reviewed;
+Simple execution **UNRUN**. The repair addresses a
+specific dependency-table omission under existing item4 Windows host scope,
+not full Windows or five-host qualification. See the
+[pure-Simple owner design](../../05_design/compiler/linker/windows_native_all_import_libraries_2026-10-04.md).
+The historical PR 2392 fix was Rust-only; its validation is not evidence for
+these Simple helpers or their production consumers.
+
+Initial intent `f73e8a13155` extends
+`test/01_unit/compiler/linker/native_link_hardening_spec.spl` before production
+changes, using the real shared owners and one new exactly-once dependency
+scenario plus existing boundary controls. All assertions remain UNRUN.
+
+| Acceptance unit | Actual owner and independent oracle |
+|---|---|
+| MSVC selection | Call `native_all_msvc_support_libraries` with recognized native-all input; require `pdh.lib`, `netapi32.lib`, `psapi.lib`, `powrprof.lib` |
+| MinGW selection | Call `native_all_gnu_support_args` for `windows-mingw`; require the corresponding four `-l` arguments |
+| Runtime boundary | Core-only and rejected filename lookalikes add no native-all dependencies |
+| Platform boundary | Non-Windows results retain existing policy and gain none of the four Windows libraries |
+| Eventual native proof | Real SDK-symbol references link through the selected production route and run on a qualified Windows host; invocation and artifact identities retained, MinGW separately evidenced |
+
+Only the unchanged shared helper APIs are involved. Existing external MSVC,
+internal PE support lookup and shared-link consumers must continue using that
+owner. Pure metadata assertions are useful policy regressions but cannot stand
+in for native link/load behavior, ABI correctness or runtime admission.
