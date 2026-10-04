@@ -1245,7 +1245,7 @@ impl<'a> MirLowerer<'a> {
                                     pushed
                                 })?;
                                 self.store_array_push_receiver_back(receiver, pushed)?;
-                                let ret_ty = self.with_func(|func, _| func.return_type)?;
+                                let ret_ty = self.expr_stmt_tail_ty()?;
                                 let result = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, pushed)?;
                                 let result = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, result)?;
                                 self.last_expr_value = Some(result);
@@ -1271,7 +1271,7 @@ impl<'a> MirLowerer<'a> {
                             // Keep that receiver just like lower_method_call;
                             // dropping it leaves value-returning helpers with
                             // an Unreachable terminator instead of a return.
-                            let ret_ty = self.with_func(|func, _| func.return_type)?;
+                            let ret_ty = self.expr_stmt_tail_ty()?;
                             let result = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, receiver_reg)?;
                             let result = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, result)?;
                             self.last_expr_value = Some(result);
@@ -1294,7 +1294,7 @@ impl<'a> MirLowerer<'a> {
                 // rescue it. `return 42` was already correct, which is what
                 // pinned the defect to this path.
                 // See doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
-                let ret_ty = self.with_func(|func, _| func.return_type)?;
+                let ret_ty = self.expr_stmt_tail_ty()?;
                 let vreg = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, vreg)?;
                 let vreg = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, vreg)?;
                 self.last_expr_value = Some(vreg);

@@ -348,6 +348,10 @@ pub struct MirLowerer<'a> {
     pub(super) current_file: Option<String>,
     /// Last expression value for implicit returns (non-void functions)
     pub(super) last_expr_value: Option<super::super::instructions::VReg>,
+    /// `(function name, type)` while lowering a block EXPRESSION in that function:
+    /// its tail `HirStmt::Expr` is the block's value, so it is coerced to the
+    /// block's type rather than to the function's return type.
+    pub(super) block_expr_tail: Option<(String, crate::hir::TypeId)>,
     /// (line, column) of the decision currently being lowered — set around
     /// `lower_expr(condition)` for `if`/`while`/`assert`/`assume` so nested
     /// `and`/`or` sub-condition probes (emitted deep inside `lower_binary_expr`,
@@ -414,6 +418,7 @@ impl<'a> MirLowerer<'a> {
             path_counter: 0,
             current_file: None,
             last_expr_value: None,
+            block_expr_tail: None,
             current_decision_span: None,
             tagged_vregs: std::collections::HashSet::new(),
             tagged_locals: std::collections::HashSet::new(),
@@ -469,6 +474,7 @@ impl<'a> MirLowerer<'a> {
             path_counter: 0,
             current_file: None,
             last_expr_value: None,
+            block_expr_tail: None,
             current_decision_span: None,
         }
     }
@@ -1595,6 +1601,17 @@ impl<'a> MirLowerer<'a> {
     /// same array was fine, which is exactly why this class reads as a silently
     /// wrong number rather than a crash.
     /// Bug: `doc/08_tracking/bug/untyped_list_element_read_seed_rootcause_2026-07-30.md`.
+    /// The slot type an expression statement's value flows into if it is a
+    /// tail: the enclosing block EXPRESSION's type when one is being lowered
+    /// in the current function, otherwise the function's return type.
+    pub(super) fn expr_stmt_tail_ty(&mut self) -> MirLowerResult<TypeId> {
+        let (name, ret) = self.with_func(|func, _| (func.name.clone(), func.return_type))?;
+        Ok(match &self.block_expr_tail {
+            Some((owner, ty)) if *owner == name => *ty,
+            _ => ret,
+        })
+    }
+
     pub(super) fn unbox_scalar_for_raw_slot(
         &mut self,
         declared_ty: TypeId,

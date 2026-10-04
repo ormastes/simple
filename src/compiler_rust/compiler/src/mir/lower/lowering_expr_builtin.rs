@@ -344,6 +344,31 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // Same contract for the non-BoxInt scalars a `T?` can hold: `bool?`
+        // is tagged through `rt_value_bool` and `f64?` through
+        // `rt_value_float`, so the decoders are `rt_value_truthy` and
+        // `UnboxFloat` (exactly what `unbox_scalar_for_raw_slot` uses for a
+        // raw bool/float local). Producer: `??` on `bool?`/`f32?`/`f64?`
+        // (hir lower_coalesce), whose result is typed as the raw scalar.
+        if name == "rt_unwrap_or_self"
+            && args.len() == 1
+            && args[0].ty != TypeId::ANY
+            && self.slot_holds_tagged_value(args[0].ty)
+            && matches!(expr_ty, TypeId::BOOL | TypeId::F32 | TypeId::F64)
+        {
+            let arg_reg = self.lower_expr(&args[0])?;
+            let raw_result = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: CallTarget::from_name("rt_unwrap_or_self"),
+                    args: vec![arg_reg],
+                });
+                dest
+            })?;
+            return self.unbox_scalar_for_raw_slot(expr_ty, args[0].ty, raw_result);
+        }
+
         // Both enum payload readers and checked unwrap return the payload in
         // the runtime's tagged slot. Decode a native scalar only after the
         // checked helper has had the chance to trap on None/Err.
