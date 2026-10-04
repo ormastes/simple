@@ -66,7 +66,7 @@ use compiler.backend.linker.elf.merge_strings.{
 }
 use compiler.backend.linker.elf.reloc_scan.{
     ElfScanRef, ElfScan, elf_reloc_scan, elf_reloc_class, elf_x86_can_relax,
-    elf_mode_pie, elf_mode_dynamic, elf_target_is_a64,
+    elf_mode_pie, elf_mode_dynamic, elf_target_is_a64, elf_got_key,
     ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE,
     SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS,
     RC_NONE, RC_ABS64, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_TLS_LD, RC_TLS_MOD, RC_SIZE, RC_PLTOFF
@@ -605,24 +605,46 @@ fn elf_symref(ctx: ElfLinkCtx, oi: i64, sym_idx: i64) -> Result<ElfScanRef, text
         if ctx.res.defined.has(sym.name):
             val definition = ctx.res.defined[sym.name]
             if definition.section_idx == SHN_ABS:
-                return Ok(elf_ref(oi, sym_idx, SYMREF_ABS, sym.name, sym.name, 0, definition.size, 1, weak))
-            return Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, sym.name, 0, definition.size, 1, weak))
+                return Ok(elf_ref(oi, sym_idx, SYMREF_ABS, sym.name, "global:" + sym.name, definition.stype, definition.size, 1, weak))
+            return Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, "global:" + sym.name, definition.stype, definition.size, 1, weak))
         if elf_is_synth(sym.name):
-            return Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, sym.name, 0, sym.st_size, 1, weak))
+            return Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, "global:" + sym.name, 0, sym.st_size, 1, weak))
         val t = elf_lib_export(ctx.libs, sym.name)
         if t >= 0:
-            return Ok(elf_ref(oi, sym_idx, SYMREF_IMPORT, sym.name, sym.name, t,
+            return Ok(elf_ref(oi, sym_idx, SYMREF_IMPORT, sym.name, "global:" + sym.name, t,
                 elf_lib_export_size(ctx.libs, sym.name), elf_lib_export_align(ctx.libs, sym.name), weak))
         if weak:
-            return Ok(elf_ref(oi, sym_idx, SYMREF_WEAK_ZERO, sym.name, sym.name, 0, 0, 1, weak))
+            return Ok(elf_ref(oi, sym_idx, SYMREF_WEAK_ZERO, sym.name, "global:" + sym.name, 0, 0, 1, weak))
         return Err("undefined symbol: {sym.name}")
     if sym.st_shndx == SHN_ABS or sym.st_shndx == SHN_UNDEF:
-        return Ok(elf_ref(oi, sym_idx, SYMREF_ABS, sym.name, "{oi}#{sym_idx}", 0, sym.st_size, 1, false))
+        return Ok(elf_ref(oi, sym_idx, SYMREF_ABS, sym.name, "local:{oi}#{sym_idx}", elf_symbol_type(sym), sym.st_size, 1, false))
     if sym.st_shndx == SHN_COMMON:
         return Err("local symbol {sym.name}: SHN_COMMON is invalid")
     if sym.st_shndx >= SHN_LORESERVE:
         return Err("symbol {sym.name}: reserved section index {sym.st_shndx} unsupported")
-    Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, "{oi}#{sym_idx}", 0, sym.st_size, 1, false))
+    Ok(elf_ref(oi, sym_idx, SYMREF_DEFINED, sym.name, "local:{oi}#{sym_idx}", elf_symbol_type(sym), sym.st_size, 1, false))
+
+fn item4_riscv_ie_validate_definition(ctx: ElfLinkCtx, reference: ElfScanRef) -> Result<bool, text>:
+    if reference.kind != SYMREF_DEFINED or reference.stype != 6:
+        return Err("RISC-V TLS relocation requires a defined TLS symbol: {reference.name}")
+    val symbol = ctx.inputs.objects[reference.oi].symbols[reference.sym_idx]
+    var oi = reference.oi
+    var section = symbol.st_shndx
+    var offset = symbol.st_value
+    if elf_symbol_binding(symbol) != STB_LOCAL and ctx.res.defined.has(symbol.name):
+        val selected = ctx.res.defined[symbol.name]
+        oi = selected.obj_idx
+        section = selected.section_idx
+        offset = selected.offset
+    if oi < 0 or oi >= ctx.inputs.objects.len(): return Err("RISC-V TLS definition object is invalid")
+    val object = ctx.inputs.objects[oi]
+    if section < 0 or section >= object.sections.len(): return Err("RISC-V TLS definition section is invalid")
+    val input = object.sections[section]
+    if (input.sh_flags & SHF_TLS) == 0:
+        return Err("RISC-V TLS definition requires SHF_TLS: {reference.name}")
+    if offset < 0 or offset > input.sh_size or reference.size < 0 or reference.size > input.sh_size - offset:
+        return Err("RISC-V TLS definition exceeds its input section: {reference.name}")
+    Ok(true)
 
 # reason: positional ElfScanRef seed (placement fields are filled by the caller)
 fn elf_ref(oi: i64, sym_idx: i64, kind: i64, name: text, key: text, stype: i64,
@@ -745,6 +767,8 @@ fn elf_collect_refs(ctx: ElfLinkCtx, contents: [[i64]]) -> Result<[ElfScanRef], 
             val rtype = elf_reloc_type(r)
             if ctx.target == RelocArch.Riscv64 and rtype == 20 and r.r_addend != 0:
                 return Err("object {oi}: RISC-V GOT_HI20 addend must be zero")
+            if ctx.target == RelocArch.Riscv64 and rtype == 21 and r.r_addend != 0:
+                return Err("object {oi}: RISC-V TLS_GOT_HI20 addend must be zero")
             if ctx.target == RelocArch.Riscv64 and (rtype == 24 or rtype == 25):
                 if r.r_addend != 0: return Err("object {oi}: RISC-V PCREL_LO12 addend must be zero")
                 val symbol = elf_reloc_sym(r)
@@ -760,6 +784,8 @@ fn elf_collect_refs(ctx: ElfLinkCtx, contents: [[i64]]) -> Result<[ElfScanRef], 
             if not reloc_patch_range_valid(obj.sections[tsec].sh_size, r.r_offset, patch_width):
                 return Err("object {oi}: relocation type {rtype} patch [{r.r_offset}, {r.r_offset + patch_width}) exceeds target section size {obj.sections[tsec].sh_size}")
             val seed = elf_symref(ctx, oi, elf_reloc_sym(r))?
+            if ctx.target == RelocArch.Riscv64 and (rtype == 21 or (rtype >= 29 and rtype <= 32)):
+                item4_riscv_ie_validate_definition(ctx, seed)?
             val place = elf_placed_offset(inputs, oi, tsec, r.r_offset)?
             val rclass = elf_reloc_class(ctx.target, rtype)
             # only a symbol DEFINED in this link may relax: undefined-weak and SHN_ABS keep
@@ -896,7 +922,10 @@ fn elf_tls_tprel(plan: ElfExecPlan, target: RelocArch, address: i64) -> Result<i
     if start < 0 or end < 0:
         return Err("TLS relocation has no PT_TLS image")
     if target == RelocArch.Riscv64:
-        return Ok(address - start)
+        # TP precedes the TLS block's alignment residue, not necessarily its
+        # first byte. STT_TLS values remain block-relative in the symbol table.
+        val offset = elf_symtab_address(plan, 6, address)?
+        return riscv_static_delta(offset, start % elf_tls_align(plan), 0)
     # Same p_memsz/p_align the writer publishes in PT_TLS.
     Ok(elf_tls_tpoff(elf_target_is_a64(target), address, start, end - start,
         elf_tls_align(plan)))
@@ -1549,7 +1578,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             if target == RelocArch.Riscv64:
                 if r.stype != 6 or r.kind != SYMREF_DEFINED:
                     return Err("RISC-V local-exec relocation requires a defined TLS symbol: {r.name}")
-                val tls_offset = elf_symtab_address(plan, r.stype, s)?
+                val tls_offset = elf_tls_tprel(plan, target, s)?
                 s = riscv_static_delta(tls_offset, a, 0)?
             else:
                 s = elf_tls_tprel(plan, target, s + a)?
@@ -1569,8 +1598,11 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             else:
                 rtype = 10  # R_X86_64_32 applies Z + A with width checking
         else if r.rclass == RC_TLS_IE:
-            s = got_v + sc.got_idx[r.key] * 8
-            if a64:
+            s = got_v + sc.got_idx[elf_got_key(r)] * 8
+            if target == RelocArch.Riscv64:
+                a = 0
+                rtype = 23 # TLS_GOT_HI20 addresses the slot using AUIPC.
+            else if a64:
                 a = 0
                 if r.rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G1 or
                         r.rtype == R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC:
@@ -1578,7 +1610,7 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             else:
                 rtype = 2  # R_X86_64_PC32 applies GOTTPOFF's GOT + A - P formula
         else if (r.rclass == RC_GOT or r.rclass == RC_GOT_RELAX) and not r.relax:
-            s = got_v + sc.got_idx[r.key] * 8
+            s = got_v + sc.got_idx[elf_got_key(r)] * 8
             if target == RelocArch.X86_64 and (r.rtype == R_X86_64_GOT32 or
                     r.rtype == R_X86_64_GOT64 or
                     r.rtype == R_X86_64_GOTPLT64): s = s - gotplt_v
@@ -1613,7 +1645,8 @@ fn elf_link_mode(req: ElfLinkRequest, strip_output: bool,
             val high_place = plan.vaddrs[in_to_plan[high.out_sec]] + high.out_off
             val high_value = elf_ref_value(ctx, lay, high)?
             var high_target = high_value.address
-            if high.rtype == 20: high_target = got_v + sc.got_idx[high.key] * 8
+            if high.rtype == 20 or high.rtype == 21:
+                high_target = got_v + sc.got_idx[elf_got_key(high)] * 8
             s = riscv_static_delta(high_target, high_value.addend, high_place)?
             a = 0
             p = 0

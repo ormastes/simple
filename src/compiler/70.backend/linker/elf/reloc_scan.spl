@@ -69,6 +69,7 @@ fn elf_reloc_class(target: RelocArch, rtype: i64) -> i64:
         if rtype == 0 or rtype == 51: return RC_NONE
         if rtype == 2: return RC_ABS64
         if rtype >= 29 and rtype <= 32: return RC_TLS_LE
+        if target == RelocArch.Riscv64 and rtype == 21: return RC_TLS_IE
         if rtype == 20 or rtype == 41: return RC_GOT
         if rtype == 16 or rtype == 17 or rtype == 18 or rtype == 19 or rtype == 44 or rtype == 45 or rtype == 59:
             return RC_BRANCH
@@ -199,6 +200,12 @@ fn elf_target_is_a64(target: RelocArch) -> bool:
         case _:
             false
 
+fn elf_got_key(reference: ElfScanRef) -> text:
+    # Both domains are tagged, so arbitrary symbol names cannot impersonate
+    # another relocation domain. Address and TP-offset slots never alias.
+    if reference.rclass == RC_TLS_IE: return "tls-ie:" + reference.key
+    "address:" + reference.key
+
 fn elf_raw_dynamic_tls_relocation(target: RelocArch, rtype: i64) -> bool:
     match target:
         case X86_64:
@@ -247,6 +254,7 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
     while j < refs.len():
         val r = refs[j]
         val c = r.rclass
+        val got_key = elf_got_key(r)
         if c == RC_NONE:
             j = j + 1
             continue
@@ -279,9 +287,9 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
                     plt_names = plt_names.push(r.name)
             if copy_idx.has(r.name):
                 if c == RC_GOT or c == RC_GOT_RELAX or c == RC_TLS_IE:
-                    if not got_idx.has(r.key):
-                        got_idx[r.key] = got_keys.len()
-                        got_keys = got_keys.push(r.key)
+                    if not got_idx.has(got_key):
+                        got_idx[got_key] = got_keys.len()
+                        got_keys = got_keys.push(got_key)
                         got_ref = got_ref.push(j)
                 j = j + 1
                 continue
@@ -292,9 +300,9 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
                     plt_idx[r.name] = plt_names.len()
                     plt_names = plt_names.push(r.name)
             else if c == RC_GOT or c == RC_GOT_RELAX or c == RC_TLS_IE:
-                if not got_idx.has(r.key):
-                    got_idx[r.key] = got_keys.len()
-                    got_keys = got_keys.push(r.key)
+                if not got_idx.has(got_key):
+                    got_idx[got_key] = got_keys.len()
+                    got_keys = got_keys.push(got_key)
                     got_ref = got_ref.push(j)
             else if c == RC_ABS64:
                 if not r.writable:
@@ -310,9 +318,9 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
                     return Err("{elf_reloc_what(r)}: GOT relocation with non-zero addend {r.addend} is unsupported")
                 if c != RC_TLS_IE and r.kind == SYMREF_DEFINED and mode == ELF_LINK_STATIC_PIE:
                     return Err("{elf_reloc_what(r)}: GOT slot needs an R_*_RELATIVE dynamic relocation, which a static PIE without a self-relocating startup cannot apply; compile with -fPIE or link without -pie")
-                if not got_idx.has(r.key):
-                    got_idx[r.key] = got_keys.len()
-                    got_keys = got_keys.push(r.key)
+                if not got_idx.has(got_key):
+                    got_idx[got_key] = got_keys.len()
+                    got_keys = got_keys.push(got_key)
                     got_ref = got_ref.push(j)
             else if c == RC_ABS64 and pie and r.kind == SYMREF_DEFINED:
                 if mode == ELF_LINK_STATIC_PIE:
@@ -356,7 +364,7 @@ fn elf_reloc_scan(refs: [ElfScanRef], target: RelocArch, mode: i64) -> Result<El
 
 export ElfScanRef, ElfScan
 export elf_reloc_scan, elf_reloc_class, elf_target_is_a64, elf_x86_can_relax
-export elf_raw_dynamic_tls_relocation, elf_mode_pie, elf_mode_dynamic
+export elf_raw_dynamic_tls_relocation, elf_mode_pie, elf_mode_dynamic, elf_got_key
 export ELF_LINK_STATIC_EXEC, ELF_LINK_STATIC_PIE, ELF_LINK_DYNAMIC_EXEC, ELF_LINK_DYNAMIC_PIE
 export SYMREF_DEFINED, SYMREF_IMPORT, SYMREF_WEAK_ZERO, SYMREF_ABS
 export RC_NONE, RC_ABS64, RC_ABS_NARROW, RC_PCREL, RC_BRANCH, RC_GOT, RC_GOT_RELAX, RC_TLS_LE, RC_TLS_IE, RC_SIZE, RC_TLS_LD, RC_TLS_MOD, RC_PLTOFF
