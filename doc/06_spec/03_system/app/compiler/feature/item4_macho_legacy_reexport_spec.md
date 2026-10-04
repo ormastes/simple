@@ -26,9 +26,10 @@ inference additionally requires absence of modern export commands and the
 header suppression flag. Raw dependency command identities remain unchanged.
 
 Weak/lazy/upward class boundaries and physically missing matched/unmatched
-providers are assigned to the separate `item4_macho_legacy_modes_spec.spl`
-acceptance lane; they are not counted among these nine scenarios. Additional
-alias interactions remain separate acceptance obligations. This does not
+providers are covered by the separately authored
+[legacy modes acceptance](item4_macho_legacy_modes_spec.md); they are not counted
+among these nine scenarios. Additional alias interactions and dedicated quota
+boundaries remain separate acceptance obligations. Both specs remain UNRUN. This does not
 claim complete SDK or native Darwin qualification, signing validity, runtime
 loading, immutable file identity or process memory enforcement.
 
