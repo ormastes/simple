@@ -49,6 +49,21 @@ from semantic admission: the existing bootstrap verifier must validate the
 receipts and actual stage lineage. No manual manifest creates source authority.
 The entry always reports `provenance_status=caller-bound-unadmitted`.
 
+The shared owner `std.test_runner.aggregate_task_manifest` provides
+`aggregate_task_manifest_read_v1(identity_path, identity_sha, product_path,
+product_sha, stage, backend, report_root)`. It hashes the actual bounded text
+payload it decodes and returns `AggregateTaskManifestV1` with the frozen
+identity template and command. The compiled entry and DAG use this same decoder.
+After successful binary enumeration,
+`aggregate_task_manifest_identities_v1(bound, inventory)` constructs the exact
+registered identities before execution. The inventory header must match the
+bound product and an empty inventory is rejected.
+`aggregate_task_manifest_summary_expected_v1(bound, inventory, db_root)` creates
+the typed expectations for independent summary/snapshot verification, including
+the same group nonce. These APIs validate caller bindings; bootstrap admission
+still belongs to the canonical receipt owner. Their native execution remains
+unverified until the shared runner closure is compiled and tested.
+
 The product manifest describes the existing generated registry entry:
 
 ```text

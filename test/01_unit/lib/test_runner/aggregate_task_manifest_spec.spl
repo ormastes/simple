@@ -1,0 +1,48 @@
+use std.spec
+use std.common.crypto.sha256.{sha256_text}
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, task_runner_identity_v1}
+use std.test_runner.aggregate_task_executor.{AggregateTestCommandV1}
+use std.test_runner.aggregate_task_ledger.{AggregateTaskInventoryV1}
+use std.test_runner.aggregate_task_manifest.{AggregateTaskManifestV1, aggregate_task_manifest_fields_v1, aggregate_task_manifest_identities_v1}
+
+fn bound_product() -> AggregateTaskManifestV1:
+    val digest = sha256_text("fixture")
+    val template = TaskRunnerIdentityV1("test", "compiler", "", "llvm", "P2",
+        digest, digest, digest, digest, digest, digest)
+    val command = AggregateTestCommandV1("/fixture/compiler-tests", digest, digest, [],
+        "/fixture/compiler-tests", digest, "native", "/fixture/report", "run-one", "registered-header")
+    AggregateTaskManifestV1(digest, digest, template, command)
+
+describe "shared aggregate task manifest bindings":
+    it "decodes the exact hashed bytes including equals in a field value":
+        val payload = "format=fixture\nargument=one=two\n"
+        val fields = aggregate_task_manifest_fields_v1(payload, sha256_text(payload)).unwrap()
+        expect(fields["argument"]).to_equal("one=two")
+        expect(fields.len()).to_equal(2)
+
+    it "rejects changed payload and duplicate fields with otherwise valid hashes":
+        val original = "backend=llvm\n"
+        expect(aggregate_task_manifest_fields_v1("backend=cranelift\n", sha256_text(original)).is_err()).to_equal(true)
+        val duplicate = "backend=llvm\nbackend=cranelift\n"
+        expect(aggregate_task_manifest_fields_v1(duplicate, sha256_text(duplicate)).is_err()).to_equal(true)
+
+    it "rejects a truncated final record rather than treating it as a complete manifest":
+        val partial = "backend=llvm"
+        expect(aggregate_task_manifest_fields_v1(partial, sha256_text(partial)).is_err()).to_equal(true)
+
+    it "constructs the same case identity before execution and rejects another registry":
+        val bound = bound_product()
+        val case_id = sha256_text("case-one")
+        val metadata: Dict<text, text> = {case_id: sha256_text("case-metadata")}
+        val owners: Dict<text, text> = {case_id: "test/one_spec.spl"}
+        var inventory = AggregateTaskInventoryV1("registered-header", [], [case_id], metadata, owners)
+        val first = aggregate_task_manifest_identities_v1(bound, inventory).unwrap()
+        val repeated = aggregate_task_manifest_identities_v1(bound, inventory).unwrap()
+        expect(first.len()).to_equal(1)
+        expect(first[0].case_id).to_equal(case_id)
+        expect(task_runner_identity_v1(first[0]).unwrap()).to_equal(task_runner_identity_v1(repeated[0]).unwrap())
+        inventory.header = "another-registry"
+        expect(aggregate_task_manifest_identities_v1(bound, inventory).is_err()).to_equal(true)
+        inventory.header = "registered-header"
+        inventory.case_ids = []
+        expect(aggregate_task_manifest_identities_v1(bound, inventory).is_err()).to_equal(true)
