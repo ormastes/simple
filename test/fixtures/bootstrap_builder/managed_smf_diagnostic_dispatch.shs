@@ -1,0 +1,72 @@
+#!/bin/sh
+# Shell callback qualification only: these markers are not manager receipts.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+work=${1:?private new fixture output required}
+[ ! -e "$work" ] || exit 2
+mkdir -p "$work"
+. "$repo/scripts/bootstrap/lib/managed-task-schedule.shs"
+. "$repo/scripts/bootstrap/lib/managed-smf-diagnostics.shs"
+threads=2 memory_bytes=200
+managed_smf_diagnostic_admit() { [ "$scenario" != authority-refusal ]; }
+managed_smf_diagnostic_task() (
+  partition=$3
+  state="$root/$1/diagnostic-smf/$2/partition-$partition/state"
+  mkdir -p "$state"
+  while ! mkdir "$root/counter.lock" 2>/dev/null; do sleep 0.05; done
+  read -r live <"$root/live"
+  live=$((live + 1))
+  printf '%s\n' "$live" >"$root/live"
+  read -r peak <"$root/peak"
+  [ "$live" -le "$peak" ] || printf '%s\n' "$live" >"$root/peak"
+  rmdir "$root/counter.lock"
+  settle() {
+    while ! mkdir "$root/counter.lock" 2>/dev/null; do sleep 0.05; done
+    read -r live <"$root/live"
+    printf '%s\n' "$((live - 1))" >"$root/live"
+    rmdir "$root/counter.lock"
+    : >"$root/$partition.settled"
+  }
+  trap settle EXIT
+  : >"$root/$partition.started"
+  while [ ! -f "$root/0.started" ] || [ ! -f "$root/1.started" ]; do sleep 0.05; done
+  case "$scenario" in
+    mixed-traversal)
+      printf 'compiled=2\nfailed=1\n' >"$root/$partition.inner"
+      sleep 0.1
+      exit 0 ;;
+    infrastructure)
+      [ "$partition" -ne 1 ] || exit 2 ;;
+    stop-during-work)
+      [ "$partition" -ne 1 ] || : >"$SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE" ;;
+  esac
+  while [ ! -e "$state/cancel.request" ]; do sleep 0.1; done
+  : >"$root/$partition.cancel-observed"
+  exit 2
+)
+for scenario in mixed-traversal infrastructure stop-during-work authority-refusal stop-before-start; do
+  root="$work/$scenario"
+  mkdir -p "$root"
+  printf '0\n' >"$root/live"
+  printf '0\n' >"$root/peak"
+  SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE="$root/stop.request"
+  SIMPLE_MODULE_SYSTEMIC_STOP_FILE=
+  [ "$scenario" != stop-before-start ] || : >"$SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE"
+  code=0
+  run_index_independent_diagnostics phase3 llvm unused-config || code=$?
+  case "$scenario" in
+    mixed-traversal) [ "$code" -eq 0 ]; [ -f "$root/1.inner" ] ;;
+    infrastructure) [ "$code" -eq 2 ]; [ -f "$root/0.cancel-observed" ] ;;
+    stop-during-work) [ "$code" -eq 143 ]; [ -f "$root/0.cancel-observed" ]; [ -f "$root/1.cancel-observed" ] ;;
+    authority-refusal) [ "$code" -eq 2 ]; [ ! -e "$root/0.started" ] ;;
+    stop-before-start) [ "$code" -eq 143 ]; [ ! -e "$root/0.started" ] ;;
+  esac
+  read -r live <"$root/live"
+  read -r peak <"$root/peak"
+  [ "$live" -eq 0 ] && [ "$peak" -le "$threads" ]
+  case "$scenario" in
+    mixed-traversal|infrastructure|stop-during-work)
+      [ "$peak" -eq 2 ] && [ -f "$root/0.settled" ] && [ -f "$root/1.settled" ] ;;
+  esac
+done
+printf '%s\n' 'PASS persistent callback dispatch: mixed traversal, infrastructure cancellation, live stop, pre-admission refusal, pre-start stop; peak <= 2 and all callbacks settled. No native/manager qualification.'

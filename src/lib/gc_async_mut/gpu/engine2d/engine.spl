@@ -49,7 +49,7 @@ use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
 use std.gpu.engine2d.backend_directx.{DirectXBackend}
 use std.gpu.engine2d.backend_opencl.{OpenClBackend}
 use std.gpu.engine2d.backend_opengl.{OpenGLBackend}
-use std.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gpu.engine2d.backend_software.{SoftwareBackend, TILE_SIZE}
 use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled, active_arch_text, active_feature_text}
 use std.nogc_sync_mut.gpu.engine2d.simd_native_rows.{engine2d_simd_native_hits}
 use std.gpu.engine2d.backend_metal.{MetalBackend}
@@ -188,8 +188,13 @@ fn engine2d_composite_region_milli(src: [u32], fb: [u32], fb_width: i32, fb_heig
     doc/08_tracking/bug/engine2d_parent_sampling_embed_opacity_one_ulp_parity_2026-08-16.md)."""
     val a8 = (opacity_milli * 255) / 1000
     val inv8 = 256 - a8
-    val count = src.len()
-    var out: [u32] = [0u32; count]
+    # i64 product: the i32 multiply wraps past ~46341^2 (same guard as
+    # compositor.spl Layer.create). Only w*h entries are ever written here and
+    # the sole caller (draw_ir_composite_readback) guarantees
+    # src.len() == w*h, so sizing to the region -- not src.len() -- keeps the
+    # array exactly the written extent.
+    val total = (width.to_i64() * height.to_i64()).to_i32()
+    var out: [u32] = [0u32; total]
     var row = 0
     while row < height:
         var col = 0
@@ -466,9 +471,31 @@ class Engine2D with DrawIrRenderTarget:
             vulkan.mark_completion_unknown()
             self.vulkan_backend = Some(vulkan)
         var software = SoftwareBackend.create()
-        software.init(self.w, self.h)
         if fallback_pixels.len() == self.w.to_i64() * self.h.to_i64():
+            # Adopt the caller's restore buffer directly. The previous shape
+            # called software.init() first -- which allocates AND fills the
+            # whole surface opaque black -- and then threw that filled buffer
+            # away here, paying a full-surface write on an error path for
+            # nothing. Replicating init_with_initial_color's metadata (keep in
+            # lockstep with backend_software.spl) skips only the discarded
+            # fill; every observable field ends up identical to init() +
+            # buf-replace.
+            software.w = self.w
+            software.h = self.h
+            software.tiles_x = (self.w + TILE_SIZE - 1) / TILE_SIZE
+            software.tiles_y = (self.h + TILE_SIZE - 1) / TILE_SIZE
+            software.dirty_tiles = [true; software.tiles_x * software.tiles_y]
+            software.clip_x = 0
+            software.clip_y = 0
+            software.clip_w = self.w
+            software.clip_h = self.h
+            software.clip_enabled = false
             software.buf = fallback_pixels
+            software.initialized = true
+        else:
+            # Size mismatch: no adoptable buffer, so take the normal
+            # initialized-black surface.
+            software.init(self.w, self.h)
         self.capability = software.capability()
         self.backend = software
         self.software_backend = Some(software)
@@ -614,8 +641,10 @@ class Engine2D with DrawIrRenderTarget:
         once composited, instead of punching an opaque black hole in it.
         """
         var sw = SoftwareBackend.create()
-        sw.init(width, height)
-        sw.clear(0x00000000u32)
+        # Transparent in ONE pass through init_with_initial_color: the old
+        # init()+clear() pair wrote every pixel twice (opaque black fill,
+        # then a transparent clear) before the first embedded draw.
+        sw.init_with_initial_color(width, height, 0x00000000u32)
         val capability = sw.capability()
         # NOTE(2026-07-16): explicitly pin every optional accelerator-backend
         # field to nil rather than relying on the class-level `= nil` default
@@ -2970,10 +2999,16 @@ class Engine2D with DrawIrRenderTarget:
             # Milli-exact composite (floor /1000) against the current
             # framebuffer, then an opaque draw — never the 8-bit alpha-scale
             # + /255 double-floor, which is one ulp off the milli oracle.
-            val fb = self.read_pixels()
+            # Only the dst rect is read back (D9 region read; backends
+            # without a native region read fall back to one whole-frame
+            # read + host crop). The region result is indexed locally, so
+            # the composite targets (0,0) with fb dims (width,height);
+            # pixels past the framebuffer edge read 0u32 here, exactly the
+            # value the old full-frame bounds check produced.
+            val fb = self.read_pixels_region(dst_x, dst_y, width, height)
             pixels = engine2d_composite_region_milli(
-                pixels, fb, self.width(), self.height(),
-                dst_x, dst_y, width, height, opacity_milli)
+                pixels, fb.pixels, width, height,
+                0, 0, width, height, opacity_milli)
             self.draw_image(dst_x, dst_y, width, height, pixels)
             return true
         self.draw_image_blend(dst_x, dst_y, width, height, pixels)
@@ -3314,6 +3349,41 @@ class Engine2D with DrawIrRenderTarget:
             readback
         else:
             self.backend.read_pixels_with_source()
+
+    me read_pixels_region(x: i32, y: i32, width: i32, height: i32) -> Engine2DReadback:
+        """Region-limited readback (D9 seam). Routes like
+        read_pixels_with_source(); backends without a native region read
+        (Vulkan/Metal/...) inherit the RenderBackend default (one
+        whole-frame read + host crop), while software/cpu backends copy
+        only the requested rows."""
+        if self.vulkan_font_state_unknown:
+            # Poisoned lane: report the demoted CPU surface with honest
+            # provenance, exactly like read_pixels_with_source() above.
+            val rb = self.backend.read_pixels_region(x, y, width, height)
+            return engine2d_readback_with_identity(
+                rb.pixels, "cpu_fallback", rb.backend_handle, rb.device_identity)
+        if val Some(vg) = self.virtio_gpu_backend:
+            vg.read_pixels_region(x, y, width, height)
+        elif val Some(bm) = self.baremetal_backend:
+            bm.read_pixels_region(x, y, width, height)
+        elif self.selected_backend_name == "cuda":
+            val cuda = self.cuda_backend.?
+            val readback = cuda.read_pixels_region(x, y, width, height)
+            self.cuda_backend = cuda
+            self.backend = cuda
+            readback
+        elif val Some(vulkan) = self._vulkan_primitive_target():
+            val pending_status = vulkan._flush_pending_compute_at("engine.read_pixels_region")
+            if pending_status < 0:
+                vulkan.mark_completion_unknown()
+            elif pending_status != 1:
+                vulkan.mark_cpu_fallback("primitive-batch-read-flush-ineligible")
+            val readback = vulkan.read_pixels_region(x, y, width, height)
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+            readback
+        else:
+            self.backend.read_pixels_region(x, y, width, height)
 
     me read_pixels_damaged(max_rects: i32) -> [u32]:
         """Borrowed retained damage mirror from the active backend.

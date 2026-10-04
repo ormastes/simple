@@ -20,6 +20,9 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use compiler.driver.driver_admitted_epoch.{driver_admitted_epoch_active_v1,
+    driver_admitted_epoch_read_v1, driver_admitted_epoch_root_v1,
+    driver_admitted_epoch_normalize_v1, driver_admitted_epoch_declares_path_v1}
 
 @unsafe(reason: "raw source-path probe; false includes absent, inaccessible, or provider failure", capabilities: [ffi])
 extern fn rt_file_exists(path: text) -> bool
@@ -185,6 +188,13 @@ fn _driver_text_index_of(value: text, needle: text) -> i64:
     if not value.contains(needle):
         return -1
     value.split(needle)[0].len()
+
+fn _driver_resolver_path_exists_v1(path: text) -> bool:
+    # A declared dependency remains a required read after deletion; do not let
+    # filesystem probing silently resolve it to a different parent module.
+    if driver_admitted_epoch_declares_path_v1(path): return true
+    unsafe(capabilities: [ffi]):
+        rt_file_exists(path)
 
 pub fn _driver_should_skip_dir(name: text) -> bool:
     var i = 0
@@ -438,8 +448,12 @@ fn _driver_physical_module_name(path: text, fallback: text) -> text:
     if resolved == "":
         return fallback
     var root = ""
-    unsafe(capabilities: [ffi]):
-        root = rt_path_absolute(".") ?? ""
+    if driver_admitted_epoch_active_v1():
+        root = driver_admitted_epoch_root_v1()
+        resolved = driver_admitted_epoch_normalize_v1(resolved, host_is_windows_host())
+    else:
+        unsafe(capabilities: [ffi]):
+            root = rt_path_absolute(".") ?? ""
     if root == "":
         return fallback
     if not resolved.starts_with(root + "/"):
@@ -791,8 +805,20 @@ pub fn _driver_entry_import_module_paths(content: text) -> [text]:
 pub fn _driver_cached_entry_source_scan(path: text) -> (text, [text], [text], bool):
     """Read and scan one physical source at most once during build phase 1."""
     driver_closure_scan_phase_trace("cached_scan:start", path)
-    val key = _driver_physical_source_key(path)
-    if _g_entry_scan_content_by_path.contains_key(key):
+    val key = if driver_admitted_epoch_active_v1():
+        _driver_physical_source_key_strict_v1(path)
+    else:
+        _driver_physical_source_key(path)
+    # An epoch owns membership, not an immutable filesystem. Verify every
+    # requested read, including cache hits, and parse the returned buffer.
+    # Task scan caches may be reset without discarding the epoch row map.
+    val epoch_active = driver_admitted_epoch_active_v1()
+    var epoch_content = ""
+    if epoch_active:
+        match driver_admitted_epoch_read_v1(path, key):
+            case Ok(content): epoch_content = content
+            case Err(_): return ("", [], [], false)
+    if not epoch_active and _g_entry_scan_content_by_path.contains_key(key):
         _g_entry_scan_hit_count = _g_entry_scan_hit_count + 1
         driver_closure_scan_phase_trace("cached_scan:hit", path)
         return (
@@ -802,7 +828,7 @@ pub fn _driver_cached_entry_source_scan(path: text) -> (text, [text], [text], bo
             true)
     var content = ""
     driver_closure_scan_phase_trace("read:start", path)
-    content = file_read_nullable(path) ?? ""
+    content = if epoch_active: epoch_content else: file_read_nullable(path) ?? ""
     if _g_spec_prelude_entry_key != "" and key == _g_spec_prelude_entry_key:
         content = driver_spec_prelude_source(content)
     _g_entry_scan_read_count = _g_entry_scan_read_count + 1
@@ -903,7 +929,7 @@ fn _driver_numbered_child_dir(parent: text, segment: text) -> text:
         return ""
     var parent_exists = false
     unsafe(capabilities: [ffi]):
-        parent_exists = rt_file_exists(parent)
+        parent_exists = _driver_resolver_path_exists_v1(parent)
     if not parent_exists:
         return ""
     unsafe(capabilities: [ffi]):
@@ -919,7 +945,7 @@ fn _driver_numbered_child_dir(parent: text, segment: text) -> text:
                 val candidate = parent + "/" + entry
                 var candidate_exists = false
                 unsafe(capabilities: [ffi]):
-                    candidate_exists = rt_file_exists(candidate)
+                    candidate_exists = _driver_resolver_path_exists_v1(candidate)
                 if candidate_exists:
                     return candidate
     ""
@@ -934,7 +960,7 @@ fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
         val direct = if current == "": parts[i] else: current + "/" + parts[i]
         var direct_exists = false
         unsafe(capabilities: [ffi]):
-            direct_exists = rt_file_exists(direct)
+            direct_exists = _driver_resolver_path_exists_v1(direct)
         if direct_exists:
             current = direct
         else:
@@ -947,24 +973,29 @@ fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
     val spl_path = base + ".spl"
     var spl_exists = false
     unsafe(capabilities: [ffi]):
-        spl_exists = rt_file_exists(spl_path)
+        spl_exists = _driver_resolver_path_exists_v1(spl_path)
     if spl_exists:
         return spl_path
     val mod_path = base + "/mod.spl"
     var mod_exists = false
     unsafe(capabilities: [ffi]):
-        mod_exists = rt_file_exists(mod_path)
+        mod_exists = _driver_resolver_path_exists_v1(mod_path)
     if mod_exists:
         return mod_path
     val init_path = base + "/__init__.spl"
     var init_exists = false
     unsafe(capabilities: [ffi]):
-        init_exists = rt_file_exists(init_path)
+        init_exists = _driver_resolver_path_exists_v1(init_path)
     if init_exists:
         return init_path
     ""
 
 fn _driver_entry_import_checkout_prefix(entry_dir: text) -> text:
+    if driver_admitted_epoch_active_v1():
+        # An admitted worker keeps cwd in its manager-owned output directory.
+        # Resolution is rooted in the retained capsule; reads still validate
+        # membership and bytes, including paths reached through aliases.
+        return driver_admitted_epoch_root_v1() + "/"
     # Admission owns snapshot validation. An importer within that frozen tree
     # must resolve qualified imports in the same tree, including failed probes.
     # Keep ordinary checkout resolution unchanged outside the path boundary.
@@ -987,19 +1018,19 @@ fn _driver_try_entry_import_rel(rel: text, entry_dir: text) -> text:
         val spl_path = base + ".spl"
         var spl_exists = false
         unsafe(capabilities: [ffi]):
-            spl_exists = rt_file_exists(spl_path)
+            spl_exists = _driver_resolver_path_exists_v1(spl_path)
         if spl_exists:
             return spl_path
         val mod_path = base + "/mod.spl"
         var mod_exists = false
         unsafe(capabilities: [ffi]):
-            mod_exists = rt_file_exists(mod_path)
+            mod_exists = _driver_resolver_path_exists_v1(mod_path)
         if mod_exists:
             return mod_path
         val init_path = base + "/__init__.spl"
         var init_exists = false
         unsafe(capabilities: [ffi]):
-            init_exists = rt_file_exists(init_path)
+            init_exists = _driver_resolver_path_exists_v1(init_path)
         if init_exists:
             return init_path
     # Resolver-transparent `NN.name` directories are a fallback only: ordinary
@@ -1162,19 +1193,19 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
         val lib_spl_path = lib_base + ".spl"
         var lib_spl_exists = false
         unsafe(capabilities: [ffi]):
-            lib_spl_exists = rt_file_exists(lib_spl_path)
+            lib_spl_exists = _driver_resolver_path_exists_v1(lib_spl_path)
         if lib_spl_exists:
             return lib_spl_path
         val lib_mod_path = lib_base + "/mod.spl"
         var lib_mod_exists = false
         unsafe(capabilities: [ffi]):
-            lib_mod_exists = rt_file_exists(lib_mod_path)
+            lib_mod_exists = _driver_resolver_path_exists_v1(lib_mod_path)
         if lib_mod_exists:
             return lib_mod_path
         val lib_init_path = lib_base + "/__init__.spl"
         var lib_init_exists = false
         unsafe(capabilities: [ffi]):
-            lib_init_exists = rt_file_exists(lib_init_path)
+            lib_init_exists = _driver_resolver_path_exists_v1(lib_init_path)
         if lib_init_exists:
             return lib_init_path
         for family in ["nogc_async_mut", "nogc_async_immut", "nogc_sync_immut", "nogc_sync_mut", "common", "gc_async_mut", "gc_async_immut", "gc_sync_mut", "gc_sync_immut", "nogc_async_mut_noalloc"]:
@@ -1182,19 +1213,19 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
             val family_spl_path = family_base + ".spl"
             var family_spl_exists = false
             unsafe(capabilities: [ffi]):
-                family_spl_exists = rt_file_exists(family_spl_path)
+                family_spl_exists = _driver_resolver_path_exists_v1(family_spl_path)
             if family_spl_exists:
                 return family_spl_path
             val family_mod_path = family_base + "/mod.spl"
             var family_mod_exists = false
             unsafe(capabilities: [ffi]):
-                family_mod_exists = rt_file_exists(family_mod_path)
+                family_mod_exists = _driver_resolver_path_exists_v1(family_mod_path)
             if family_mod_exists:
                 return family_mod_path
             val family_init_path = family_base + "/__init__.spl"
             var family_init_exists = false
             unsafe(capabilities: [ffi]):
-                family_init_exists = rt_file_exists(family_init_path)
+                family_init_exists = _driver_resolver_path_exists_v1(family_init_path)
             if family_init_exists:
                 return family_init_path
     if module_path.starts_with("std."):
@@ -1202,19 +1233,19 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
         val lib_spl_path = lib_base + ".spl"
         var lib_spl_exists = false
         unsafe(capabilities: [ffi]):
-            lib_spl_exists = rt_file_exists(lib_spl_path)
+            lib_spl_exists = _driver_resolver_path_exists_v1(lib_spl_path)
         if lib_spl_exists:
             return lib_spl_path
         val lib_mod_path = lib_base + "/mod.spl"
         var lib_mod_exists = false
         unsafe(capabilities: [ffi]):
-            lib_mod_exists = rt_file_exists(lib_mod_path)
+            lib_mod_exists = _driver_resolver_path_exists_v1(lib_mod_path)
         if lib_mod_exists:
             return lib_mod_path
         val lib_init_path = lib_base + "/__init__.spl"
         var lib_init_exists = false
         unsafe(capabilities: [ffi]):
-            lib_init_exists = rt_file_exists(lib_init_path)
+            lib_init_exists = _driver_resolver_path_exists_v1(lib_init_path)
         if lib_init_exists:
             return lib_init_path
         val lib_subpath = rel.substring(4)
@@ -1223,19 +1254,19 @@ fn _driver_resolve_entry_import_exact(module_path: text, entry_dir: text) -> tex
             val family_spl_path = family_base + ".spl"
             var family_spl_exists = false
             unsafe(capabilities: [ffi]):
-                family_spl_exists = rt_file_exists(family_spl_path)
+                family_spl_exists = _driver_resolver_path_exists_v1(family_spl_path)
             if family_spl_exists:
                 return family_spl_path
             val family_mod_path = family_base + "/mod.spl"
             var family_mod_exists = false
             unsafe(capabilities: [ffi]):
-                family_mod_exists = rt_file_exists(family_mod_path)
+                family_mod_exists = _driver_resolver_path_exists_v1(family_mod_path)
             if family_mod_exists:
                 return family_mod_path
             val family_init_path = family_base + "/__init__.spl"
             var family_init_exists = false
             unsafe(capabilities: [ffi]):
-                family_init_exists = rt_file_exists(family_init_path)
+                family_init_exists = _driver_resolver_path_exists_v1(family_init_path)
             if family_init_exists:
                 return family_init_path
 
@@ -1476,7 +1507,7 @@ fn _driver_bulk_source_candidate_allowed(path: text) -> bool:
 
 fn _driver_load_bulk_source_file(path: text, native_entry_active: bool) -> [SourceFile]:
     var content = ""
-    if native_entry_active:
+    if native_entry_active or driver_admitted_epoch_active_v1():
         val (cached_content, _, _, _) = _driver_cached_entry_source_scan(path)
         content = cached_content
     else:
@@ -1539,7 +1570,7 @@ pub fn _driver_collect_sources(p: text) -> [SourceFile]:
         var content = ""
         var native_entry = ""
         native_entry = sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
-        if native_entry != "":
+        if native_entry != "" or driver_admitted_epoch_active_v1():
             val (cached_content, _, _, _) = _driver_cached_entry_source_scan(p)
             content = cached_content
         else:
