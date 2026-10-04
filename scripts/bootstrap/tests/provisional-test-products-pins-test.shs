@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-product-pins-test.XXXXXX")
+mkdir -p "$tmp/repo/scripts/bootstrap/lib" "$tmp/repo/scripts/check/lib" "$tmp/source" "$tmp/provisional-v1/run"
+cp "$script_root/verify-provisional-test-products.shs" "$tmp/repo/scripts/bootstrap/"
+cp "$script_root/lib/provisional-binary-producer.shs" "$tmp/repo/scripts/bootstrap/lib/"
+cat >"$tmp/repo/scripts/check/lib/bootstrap-stage3-provenance.shs" <<'FACADE'
+# Source/compiled-authority fixtures only; real shell pin checks remain in use.
+bootstrap_stage3_manifest_value() { awk -F= -v key="$1" '$1==key {v=substr($0,index($0,"=")+1); n++} END {if(n!=1) exit 1; print v}' "$2"; }
+bootstrap_stage3_source_snapshot() { cp "$2/source.bytes" "$1"; }
+FACADE
+hash() { sha256sum "$1" | cut -d ' ' -f 1; }
+root="$tmp/provisional-v1/run"
+for file in original runtime authority-receipt initial-hello proof; do printf '%s\n' "$file" >"$tmp/$file"; done
+printf 'source bytes\n' >"$tmp/source/source.bytes"
+cp "$tmp/source/source.bytes" "$tmp/source-authority"
+for tool in authority builder compiler linker; do printf '#!/bin/sh\nexit 0\n' >"$tmp/$tool"; chmod +x "$tmp/$tool"; done
+printf 'format=SIMPLE-PROVISIONAL-IMAGES-1\nstage=authority\nauthority_program=%s\nauthority_sha256=%s\n' \
+  "$tmp/authority" "$(hash "$tmp/authority")" >"$tmp/authority-images"
+printf 'format=SIMPLE-PROVISIONAL-IMAGES-1\nstage=manager\ndiagnostic_only=1\nbuilder_program=%s\nbuilder_sha256=%s\n' \
+  "$tmp/builder" "$(hash "$tmp/builder")" >"$tmp/images"
+printf 'format=SIMPLE-PROVISIONAL-TOOL-1\nactual_invocation_relation=unproven\nmanager_images_digest=%s\ncompiler_tool_path=%s\ncompiler_tool_digest=%s\nlinker_tool_path=%s\nlinker_tool_digest=%s\n' \
+  "$(hash "$tmp/images")" "$tmp/compiler" "$(hash "$tmp/compiler")" "$tmp/linker" "$(hash "$tmp/linker")" >"$tmp/tool-intent"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) suffix=.exe ;; *) suffix= ;; esac
+predecessor="$root/phase3/binaries/llvm/phase3-bootstrap/bin/simple$suffix"
+mkdir -p "$(dirname -- "$predecessor")" "$root/phase4/hello/llvm"
+printf 'phase3 compiler\n' >"$predecessor"
+handoff="$root/phase4/hello/llvm/hello.receipt"
+printf 'format=SIMPLE-PROVISIONAL-HELLO-1\nproducer_path=%s\nproducer_digest=%s\nsource_snapshot_digest=%s\ncompile_exit=0\nrun_exit=0\n' \
+  "$predecessor" "$(hash "$predecessor")" "$(hash "$tmp/original")" >"$handoff"
+for proof in hello_source hello_executable stdout stderr compile_command compile_log; do
+  printf '%s_path=%s\n%s_digest=%s\n' "$proof" "$tmp/proof" "$proof" "$(hash "$tmp/proof")" >>"$handoff"
+done
+: >"$root/statuses"; : >"$root/hashes"
+for product in phase3-bootstrap full-cli test-runner; do
+  case "$product" in phase3-bootstrap) phase=phase3; name=simple ;; full-cli) phase=phase4; name=simple ;; *) phase=phase4; name=simple_test_runner ;; esac
+  job="$root/$phase/binaries/llvm/$product"
+  mkdir -p "$job/bin" "$job/state/receipts"
+  [ "$phase" = phase3 ] || printf '%s\n' "$product" >"$job/bin/$name$suffix"
+  printf 'terminal task receipt\n' >"$job/state/receipts/$product-llvm.sdn"
+  printf 'original manifest\n' >"$job/manifest.sdn"
+  key="${phase}_llvm_${product}"
+  printf '%s_status=SUCCEEDED\n' "$key" >>"$root/statuses"
+  printf '%s=%s\n%s_manager_receipt_sha256=%s\n' "$key" "$(hash "$job/bin/$name$suffix")" "$key" "$(hash "$job/state/receipts/$product-llvm.sdn")" >>"$root/hashes"
+  if [ "$phase" = phase4 ]; then
+    printf '%s_producer_sha256=%s\n%s_hello_receipt_sha256=%s\n' "$key" "$(hash "$predecessor")" "$key" "$(hash "$handoff")" >>"$root/hashes"
+  fi
+done
+perl -MJSON::PP -e 'my %r=@ARGV;print encode_json(\%r)' \
+  root "$root" source_root "$tmp/source" source_authority "$tmp/source-authority" source_authority_digest "$(hash "$tmp/source-authority")" \
+  runtime_snapshot "$tmp/runtime" runtime_snapshot_digest "$(hash "$tmp/runtime")" original_source_snapshot "$tmp/original" original_source_snapshot_digest "$(hash "$tmp/original")" \
+  tool_intent "$tmp/tool-intent" tool_intent_digest "$(hash "$tmp/tool-intent")" authority_receipt "$tmp/authority-receipt" authority_digest "$(hash "$tmp/authority-receipt")" \
+  authority_program "$tmp/authority" authority_image_receipt "$tmp/authority-images" image_receipt "$tmp/images" builder_program "$tmp/builder" hello_receipt "$tmp/initial-hello" \
+  llvm_statuses "$root/statuses" llvm_hashes "$root/hashes" >"$tmp/config.json"
+verify="$tmp/repo/scripts/bootstrap/verify-provisional-test-products.shs"
+sh "$verify" "$tmp/config.json" llvm "$tmp/observed-good" >"$tmp/pins"
+grep -q '^full-cli_sha256=' "$tmp/pins"
+attempt=0
+for path in "$tmp/source/source.bytes" "$tmp/source-authority" "$tmp/runtime" "$tmp/original" "$tmp/tool-intent" "$tmp/images" "$tmp/authority-images" "$tmp/authority-receipt" "$tmp/proof" "$handoff" \
+  "$predecessor" "$root/phase3/binaries/llvm/phase3-bootstrap/state/receipts/phase3-bootstrap-llvm.sdn" \
+  "$root/phase4/binaries/llvm/full-cli/bin/simple$suffix" "$root/phase4/binaries/llvm/full-cli/state/receipts/full-cli-llvm.sdn" \
+  "$root/phase4/binaries/llvm/test-runner/bin/simple_test_runner$suffix" "$root/phase4/binaries/llvm/test-runner/state/receipts/test-runner-llvm.sdn"; do
+  attempt=$((attempt+1))
+  cp "$path" "$tmp/backup"
+  printf 'corrupt\n' >"$path"
+  if sh "$verify" "$tmp/config.json" llvm "$tmp/observed-$attempt" >"$tmp/mutation-$attempt.log" 2>&1; then echo "FAIL accepted mutation $path"; exit 1; fi
+  cp "$tmp/backup" "$path"
+done
+printf 'phase4_llvm_full-cli_status=SUCCEEDED\n' >>"$root/statuses"
+if sh "$verify" "$tmp/config.json" llvm "$tmp/observed-ambiguous" >"$tmp/ambiguous.log" 2>&1; then echo 'FAIL ambiguous journal row'; exit 1; fi
+echo 'PASS: 16 source/authority/runtime/product/receipt/lineage mutations and ambiguous completed journal row rejected'

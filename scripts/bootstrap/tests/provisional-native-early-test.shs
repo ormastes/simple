@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-native-early-test.XXXXXX")
+mkdir -p "$tmp/scripts" "$tmp/source" "$tmp/artifacts"
+cp "$script_root/continue-provisional-native-tests-early.shs" "$tmp/scripts/"
+sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+printf '{"root":"%s/artifacts","source_root":"%s/source","runtime_snapshot_digest":"%s"}\n' "$tmp" "$tmp" "$sha" >"$tmp/config.json"
+# These fixtures exercise early admission orchestration, not compiled authority.
+cat >"$tmp/scripts/verify-provisional-test-products.shs" <<'VERIFY'
+#!/bin/sh
+set -eu
+root=$(perl -MJSON::PP -e 'local $/;open my $f,"<",$ARGV[0] or die;print decode_json(<$f>)->{root}' "$1")
+[ -f "$root/ready.$2" ] || exit 20
+[ "$(cat "$root/product.$2")" = original ] || exit 20
+printf 'source fixture\n' >"$3"
+printf 'full-cli_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+VERIFY
+cat >"$tmp/scripts/run-provisional-native-subsystem.shs" <<'SUITE'
+#!/bin/sh
+set -eu
+[ "$8" = 40 ] || exit 99
+printf 'attempted\n' >"$7/attempted"
+case "$2:$6" in llvm:compiler) exit 7 ;; esac
+SUITE
+result=0
+sh "$tmp/scripts/continue-provisional-native-tests-early.shs" "$tmp/config.json" "$tmp/not-ready" >"$tmp/not-ready.log" 2>&1 || result=$?
+[ "$result" -eq 1 ] && [ "$(grep -c BLOCKED "$tmp/not-ready/statuses.tsv")" -eq 6 ] || exit 1
+for backend in llvm cranelift; do touch "$tmp/artifacts/ready.$backend"; printf 'original\n' >"$tmp/artifacts/product.$backend"; done
+result=0
+sh "$tmp/scripts/continue-provisional-native-tests-early.shs" "$tmp/config.json" "$tmp/report" >"$tmp/report.log" 2>&1 || result=$?
+[ "$result" -eq 1 ] || exit 1
+expected=$(printf 'llvm\nllvm\nllvm\ncranelift\ncranelift\ncranelift')
+[ "$(tail -n +2 "$tmp/report/statuses.tsv" | cut -f1)" = "$expected" ] || exit 1
+grep -q 'llvm.*compiler.*FAILED.*7' "$tmp/report/statuses.tsv"
+grep -q 'llvm.*loader.*SUCCEEDED' "$tmp/report/statuses.tsv"
+grep -qx 'whole_run_qualification=PENDING' "$tmp/report/inputs.txt"
+printf 'tampered\n' >"$tmp/artifacts/product.llvm"
+result=0
+sh "$tmp/scripts/continue-provisional-native-tests-early.shs" "$tmp/config.json" "$tmp/tampered" >"$tmp/tampered.log" 2>&1 || result=$?
+[ "$result" -eq 1 ] && [ "$(grep -c BLOCKED "$tmp/tampered/statuses.tsv")" -eq 3 ] || exit 1
+result=0
+sh "$tmp/scripts/continue-provisional-native-tests-early.shs" "$tmp/config.json" "$tmp/artifacts/forbidden" >/dev/null 2>&1 || result=$?
+[ "$result" -eq 20 ] && [ ! -e "$tmp/artifacts/forbidden" ] || exit 1
+echo 'PASS: early missing/tampered products block only their lane, failures continue, immutable roots protected'
