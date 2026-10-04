@@ -38,7 +38,7 @@ The file adapter remains the owner of external reads and output publication.
   max_symbols, max_work, max_depth}`; all counters are `i64`.
 - `MachOProviderBindingV1 {root_ordinal: i64, name: text, flags: i64}`.
 - `macho_provider_closure_default_limits_v1()` returns defaults of 4096 graph
-  sources, 64MiB input bytes, 65536 edges, 1048576 symbols, 10000000 work units
+  sources, 64MiB input bytes, 65536 edges, 1000000 symbols, 10000000 work units
   and depth64. Inline graph nodes count toward max_sources.
 
 `provider_closure.spl` exports `macho_provider_closure_v1(roots, target,
@@ -102,6 +102,8 @@ Cycles are not automatically malformed. Bound traversal with visited
 `(provider identity, requested symbol)` pairs; aliases can change the name while
 remaining within the same provider graph. A cycle with a reachable definition
 must resolve; a closed alias cycle must terminate without a fabricated binding.
+An unsuccessful alias branch returns no match to its parent traversal; it must
+not abort a later sibling reexport edge that can provide the requested symbol.
 Unmodeled legacy `LC_SUB_UMBRELLA`/`LC_SUB_LIBRARY` semantics must explicitly
 reject until implemented rather than disappear during binary projection.
 
@@ -118,6 +120,9 @@ semantics, not signature identity. Native execution plans store explicit
 `-client_name`, but use the actual file-link call's output path, not a stale
 planning path. The native executable grammar does not accept `-umbrella`;
 generic caller context can represent that relationship explicitly.
+Convert directory separators for cross-host output identity, but preserve its
+actual spelling (including `./`) for the source-defined parent/slash condition.
+Filesystem canonicalization is a separate operation.
 
 An executable linking through an allowed umbrella does not need to appear in
 every transitive leaf's client list. Conversely, explicitly naming a restricted
