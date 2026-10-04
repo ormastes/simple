@@ -58,3 +58,10 @@ offenders. Retained list:
 SHA256: `2fb68a47bab7953e058a449562ecba2df9f135b8d2e2d99c3e14f373b1c1d719`.
 This scope result does not convert the inherited full-tree failure or any
 UNRUN runtime/host gate into PASS.
+
+Before landing, release advanced to 12e6a0362cf7d9bd84ec72a796ecfe9ce099312f
+with 54 SSH/crypto repair paths and no owned-path overlap. Rebase preserved all
+18 patches exactly (`range-diff` equality). The committed test-tree delta against
+that new base also passed: 3152 inherited offenders, zero introduced. Its list
+is `C:/dev/simple/.git/item4-macho-legacy-reexports-final-preexisting-offenders.txt`,
+with the same SHA256 above. Source checks were not rerun for unchanged patches.
