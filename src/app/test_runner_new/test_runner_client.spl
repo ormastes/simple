@@ -324,6 +324,9 @@ fn ensure_daemon() -> bool:
         return true
     report_stale_lock()
     file_delete(LIGHT_LOCK)
+    # The binary record belongs to the dead lock holder; clear it so the wait
+    # below can only be satisfied by the daemon spawned here.
+    file_delete(LIGHT_BINARY)
     val binary = simple_binary()
     val (_daemon_out, _daemon_err, daemon_code) = process_run(
         "/bin/sh",
@@ -332,9 +335,13 @@ fn ensure_daemon() -> bool:
     if daemon_code != 0:
         file_write("/tmp/simple-test-daemon-light.log", "failed to spawn light daemon: {daemon_code}\n")
         return false
+    # The daemon claims LIGHT_LOCK first and publishes LIGHT_BINARY right
+    # after. Returning on the lock alone raced that publish: the caller then
+    # read no binary record, reported "identity unavailable or mismatched" and
+    # bypassed the daemon it had just started. Wait for both.
     var waits = 0
     while waits < 40:
-        if file_exists(LIGHT_LOCK):
+        if file_exists(LIGHT_LOCK) and file_exists(LIGHT_BINARY):
             return true
         thread_sleep(50)
         waits = waits + 1
