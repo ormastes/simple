@@ -45,6 +45,10 @@ build_index() {
   if [ "${stop_after_index:-0}" = 1 ]; then : >"$SIMPLE_MODULE_COLLECTION_STOP_REQUEST_FILE"; fi
   if [ "$1:$2" = phase4:llvm ]; then return "$index_code"; fi
 }
+run_index_independent_diagnostics() {
+  printf 'diagnostic %s %s\n' "$1" "$2" >>"$events"
+  return "${diagnostic_code:-0}"
+}
 prepare_backend() {
   printf 'prepare %s %s\n' "$1" "$2" >>"$events"
   return "$prepare_code"
@@ -69,12 +73,24 @@ run_case 1
 [ "$(grep -c '^suite ' "$events")" -eq 6 ]
 [ "$(grep -c '^index ' "$events")" -eq 4 ]
 [ "$(grep -c '^group ' "$events")" -eq 3 ]
-[ "$(wc -l <"$statuses" | tr -d ' ')" -eq 28 ]
+[ "$(wc -l <"$statuses" | tr -d ' ')" -eq 29 ]
+[ "$(grep -c '^diagnostic ' "$events")" -eq 1 ]
+grep -q '^phase4_llvm_diagnostic_smf[[:space:]]SUCCEEDED[[:space:]]0$' "$statuses"
 grep -q '^phase4_llvm_bootstrap[[:space:]]FAILED[[:space:]]1$' "$statuses"
 grep -q '^phase4_llvm_group[[:space:]]BLOCKED[[:space:]]1$' "$statuses"
 grep -q '^phase3_llvm_group[[:space:]]FAILED[[:space:]]1$' "$statuses"
 grep -q '^phase3_cranelift_group[[:space:]]SUCCEEDED[[:space:]]0$' "$statuses"
 ! grep -q '^group phase4 llvm$' "$events"
+
+# A qualified independent diagnostic failure still preserves later lanes.
+diagnostic_code=1
+run_case 1
+grep -q '^phase4_llvm_diagnostic_smf[[:space:]]FAILED[[:space:]]1$' "$statuses"
+grep -q '^group phase4 cranelift$' "$events"
+# Its authority rejection must still abort the owner.
+diagnostic_code=2
+run_case 2
+diagnostic_code=0
 
 # Admission, resource, containment and signal errors are never continuation.
 for binary_code in 2 74 124 130 137 143; do
