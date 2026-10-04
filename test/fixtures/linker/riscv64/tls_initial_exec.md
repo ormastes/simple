@@ -15,6 +15,8 @@ llvm-objdump -d /tmp/item4-riscv-ie-oracle.elf
 clang --target=riscv64-unknown-linux-gnu -march=rv64ima -mabi=lp64 -c tls_initial_exec_residue_provider.s -o tls_initial_exec_residue_provider.o
 clang --target=riscv64-unknown-linux-gnu -march=rv64ima -mabi=lp64 -c tls_initial_exec_padded.s -o tls_initial_exec_padded.o
 clang --target=riscv64-unknown-linux-gnu -march=rv64ima -mabi=lp64 -c tls_initial_exec_mixed.s -o tls_initial_exec_mixed.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64ima -mabi=lp64 -c tls_initial_exec_le.s -o tls_initial_exec_le.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64ima -mabi=lp64 -c tls_initial_exec_le_padded.s -o tls_initial_exec_le_padded.o
 ```
 
 Observed independent LLD output: TLS symbols have offsets 4096, 4128, 4160;
@@ -40,6 +42,11 @@ Independent LLD inspection also succeeded for this fixture: three TLS slots
 contain 4096/4128/4160, while the fourth contains `ie_plain`'s virtual address.
 This is coexistence coverage, not a claim that ordinary GOT references to TLS
 symbols are ABI-admitted.
+
+The LE variants append real TPREL_HI20/TPREL_ADD/TPREL_LO12_I relocations.
+LLVM disassembly confirms LUI/ADD/LD opcodes and symbol targets. The regression
+decodes the linked high/low immediate and compares it to 4096 plus actual
+PT_TLS start residue, while the output STT_TLS symbol must remain 4096.
 
 Only fixture construction and external LLVM inspection ran. No fixture
 executable or Simple spec was executed.

@@ -14,12 +14,13 @@ and independent ELF inspection succeeded; they do not establish Simple RED or GR
 | Archive provider | Real archive extraction produces the same initialized/zero TLS contract |
 | Mixed ordinary/TLS GOT | Ordinary slot holds a virtual address; IE slots hold TP offsets |
 | TLS alignment residue | Two text sizes exercise nonzero TLS-start residue with `.tdata` alignment 8 and `.tbss` alignment 64 |
+| Local-exec residue | Decode actual LUI/ADD/LD TP offset while output TLS symbol remains block-relative |
 | Undefined STT_NOTYPE | Winning STT_TLS definition supplies symbol type |
 | Nonzero high/low addends | Named rejection before returning image bytes |
 | Non-TLS winning definition | TLS reference cannot disguise an ordinary definition |
 | Missing paired high | Named orphan-low rejection |
 
-Eight full-link scenarios plus one scanner unit prerequisite include RISC-V ELF64 executable machine/type, output STT_TLS
+Nine full-link scenarios plus one scanner unit prerequisite include RISC-V ELF64 executable machine/type, output STT_TLS
 offsets, PT_TLS alignment and extents, and exact initialized values 42/99.
 Mutation helpers validate their fixture assumptions before modifying wire bytes.
 The same-key scanner case is deliberately synthetic resolved input; it does not

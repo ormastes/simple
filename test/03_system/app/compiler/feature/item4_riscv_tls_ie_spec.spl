@@ -252,6 +252,49 @@ describe "RV64 static initial-exec TLS full-link acceptance":
             expect(tls_count).to_equal(1)
         expect(saw_residue).to_equal(true)
 
+    it "includes TLS alignment residue in local-exec instructions but not symbol values":
+        step("Link real LE LUI ADD LD references beside IE with two text sizes")
+        var saw_residue = false
+        for fixture in ["tls_initial_exec_le.o", "tls_initial_exec_le_padded.o"]:
+            val linked = elf_static_link([item4_riscv_ie_fixture(fixture),
+                item4_riscv_ie_fixture("tls_initial_exec_residue_provider.o")], [], "_start", RelocArch.Riscv64)
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_err(): return
+            val image = linked.unwrap()
+            val text_section = item4_riscv_ie_section(image, ".text")
+            val site = item4_riscv_ie_symbol(image, "ie_local_exec")[0]
+            val tls_symbol = item4_riscv_ie_symbol(image, "ie_tls_value")
+            expect(tls_symbol[0]).to_equal(4096)
+            expect(tls_symbol[3] & 15).to_equal(6)
+            if text_section[0] < 0 or site < text_section[2]: return
+            val place = text_section[0] + site - text_section[2]
+            val high = item4_riscv_ie_read(image, place, 4)
+            val add_instruction = item4_riscv_ie_read(image, place + 4, 4)
+            val low = item4_riscv_ie_read(image, place + 8, 4)
+            expect(high & 4095).to_equal(0x7b7)
+            expect(add_instruction).to_equal(0x004787b3)
+            expect(low & 0xfffff).to_equal(0x7b783)
+            var upper = high & 0xfffff000
+            if upper >= 0x80000000: upper = upper - 4294967296
+            var lower = (low >> 20) & 4095
+            if lower >= 2048: lower = lower - 4096
+            val phoff = item4_riscv_ie_read(image, 32, 8)
+            val count = item4_riscv_ie_read(image, 56, 2)
+            val valid = phoff >= 64 and phoff <= image.len() and count > 0 and count < 64 and count * 56 <= image.len() - phoff
+            expect(valid).to_equal(true)
+            if not valid: return
+            var tls_count = 0
+            for index in 0..count:
+                val at = phoff + index * 56
+                if item4_riscv_ie_read(image, at, 4) == 7:
+                    tls_count = tls_count + 1
+                    expect(item4_riscv_ie_read(image, at + 48, 8)).to_equal(64)
+                    val residue = item4_riscv_ie_read(image, at + 16, 8) % 64
+                    if residue != 0: saw_residue = true
+                    expect(upper + lower).to_equal(4096 + residue)
+            expect(tls_count).to_equal(1)
+        expect(saw_residue).to_equal(true)
+
     it "rejects nonzero high and paired-low addends before producing image bytes":
         for kind in [21, 24]:
             step("Mutate only a checked zero relocation addend in the real input")
