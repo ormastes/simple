@@ -33,3 +33,13 @@ check. Simple compilation, SSpec, generated manuals, coverage, core/lib/MCP,
 native host and performance checks remain UNRUN. No seed fallback or repeated
 bootstrap diagnostic was used. Full SDK semantics, managed admission, broader
 linker work and execution on all five requested hosts remain open.
+
+Acceptance now includes nine scenarios in the main legacy suite and three in
+the separate dependency-modes suite. The added all-matches case requires a later
+dependency's real exports after the first match exports nothing. Other cases
+cover both CPU selector paths, physical-parent inference, inactive high-minimum
+children, malformed strings, exact stems, dormant metadata, present weak versus
+lazy/upward visibility, matched-missing failure and unmatched-absent success.
+Native image and destination-byte assertions exercise the production route.
+These are authored tests, not execution receipts; present weak-provider coverage
+does not establish absent weak-import or general SDK weak semantics.
