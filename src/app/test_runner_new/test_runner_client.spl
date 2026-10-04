@@ -5,7 +5,7 @@ use app.io.process_ops.{process_run, process_run_bounded}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use app.io.cli_ops.{cli_current_exe_path}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs, resolve_timeout_secs, timeout_value_is_well_formed}
-use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests}
+use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests, daemon_claim_wait_expired}
 use app.test_runner_new.no_examples_gate.{no_examples_is_silent_green, no_examples_exit_code}
 use std.test_runner.test_runner_args.{parse_test_args}
 use std.test_runner.test_config.{load_test_config}
@@ -55,6 +55,10 @@ val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
 # client can tell whether the daemon lane would silently substitute a different
 # compiler for the one the caller invoked.
 val LIGHT_BINARY: text = ".build/test_daemon_light/daemon.binary"
+# run_one_via_daemon result: the request was withdrawn unclaimed (busy worker);
+# the caller runs the spec directly. Distinct from every real exit code and
+# from LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT.
+val LIGHT_DAEMON_WITHDRAWN_RESULT: i64 = -750076
 
 struct ClientRun:
     # First requested path. Retained for error reporting only; execution
@@ -575,11 +579,28 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64,
         print "ERROR: test daemon request write failed: {req_path}"
         return 1
     val deadline = expiry_micros + (LIGHT_REQUEST_RESPONSE_GRACE_MS * 1000)
+    val submitted_micros = time_now_unix_micros()
+    var claimed = false
     while time_now_unix_micros() < deadline:
         if file_exists(resp_path):
             val content = read_file_text(resp_path)
             file_delete(resp_path)
             return print_response(path, content)
+        if not claimed:
+            # The worker claims by renaming our `.req` away. Unclaimed after
+            # the claim window means it is busy with another spec; every
+            # further millisecond in the queue is taken from this spec's own
+            # budget. Withdraw (rename our own `.req`) and run directly with
+            # the full budget. Rename is atomic, so exactly one of the
+            # worker's claim and our withdrawal wins.
+            if not file_exists(req_path):
+                claimed = true
+            elif daemon_claim_wait_expired((time_now_unix_micros() - submitted_micros) / 1000):
+                val withdrawn_path = "{req_path}.withdrawn"
+                if file_rename(req_path, withdrawn_path):
+                    file_delete(withdrawn_path)
+                    return LIGHT_DAEMON_WITHDRAWN_RESULT
+                claimed = true
         thread_sleep(100)
     # No response inside the budget + grace. Emit a verdict so the spec reads
     # BROKEN, not UNRUN, and name the lock + the one-line remedy: the most
@@ -880,6 +901,9 @@ fn main() -> i64:
                 daemon_ok = false
                 binary = candidate_binary
                 code = run_one_direct(binary, p, run.timeout_secs)
+            elif code == LIGHT_DAEMON_WITHDRAWN_RESULT:
+                print "daemon-busy: the single test-daemon worker did not claim the request; running directly"
+                code = run_one_direct(candidate_binary, p, run.timeout_secs)
         else:
             code = run_one_direct(binary, p, run.timeout_secs)
         executed = executed + 1
