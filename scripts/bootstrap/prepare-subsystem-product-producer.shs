@@ -1,0 +1,95 @@
+#!/bin/sh
+# One managed preparation task per Hello-qualified producer. The compiled
+# authority owner validates the source/Hello once; product tasks reuse the
+# resulting immutable pins. This receipt is explicitly NOT Stage2 admission.
+set -eu
+die() { echo "subsystem-product-producer: $*" >&2; exit 2; }
+source_root= verifier= verifier_sha= authority= authority_sha= capsule= capsule_sha= output=
+for arg do
+    case "$arg" in
+        --source-root=*) source_root=${arg#*=} ;;
+        --authority-verifier=*) verifier=${arg#*=} ;;
+        --authority-verifier-sha256=*) verifier_sha=${arg#*=} ;;
+        --authority-receipt=*) authority=${arg#*=} ;;
+        --authority-sha256=*) authority_sha=${arg#*=} ;;
+        --runtime-capsule=*) capsule=${arg#*=} ;;
+        --runtime-capsule-sha256=*) capsule_sha=${arg#*=} ;;
+        --output-root=*) output=${arg#*=} ;;
+        *) die "unknown option: $arg" ;;
+    esac
+done
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+sha() { value=$(sha256sum "$1") || return 2; printf '%s\n' "${value%% *}"; }
+field() {
+    awk -F= -v key="$1" '$1==key {n++; value=substr($0,length(key)+2)} END {if(n!=1 || value=="")exit 2; print value}' "$2"
+}
+digest() { case "$1" in ''|*[!0-9a-f]*) return 1 ;; esac; [ "${#1}" = 64 ]; }
+pin() { regular "$1" && digest "$2" && [ "$(sha "$1")" = "$2" ]; }
+for path in "$source_root" "$verifier" "$authority" "$capsule" "$output"; do
+    absolute "$path" || die 'absolute preparation paths required'
+    case "$path" in *'/../'*|*'/./'*|*'/..'|*'/.'|*'//'*) die 'unsafe preparation path' ;; esac
+done
+[ -d "$source_root" ] && [ ! -L "$source_root" ] || die 'source root unavailable'
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+[ "$script_root" = "$source_root/scripts/bootstrap" ] || die 'preparation must use pinned source tools'
+pin "$verifier" "$verifier_sha" && pin "$authority" "$authority_sha" || die 'authority owner/receipt changed'
+[ "$(field schema "$authority")" = SIMPLE-PROVISIONAL-AUTHORITY-1 ] &&
+    [ "$(field diagnostic_only "$authority")" = 1 ] || die 'explicit provisional authority required'
+producer=$(field producer_path "$authority")
+producer_sha=$(field producer_digest "$authority")
+snapshot=$(field source_snapshot_path "$authority")
+snapshot_sha=$(field source_snapshot_digest "$authority")
+hello=$(field hello_receipt_path "$authority")
+hello_sha=$(field hello_receipt_digest "$authority")
+pin "$producer" "$producer_sha" && pin "$snapshot" "$snapshot_sha" && pin "$hello" "$hello_sha" || die 'producer/source/Hello bytes changed'
+capsule_receipt="$capsule/phase2-runtime-capsule.env"
+pin "$capsule_receipt" "$capsule_sha" || die 'runtime capsule receipt changed'
+[ "$(field status "$capsule_receipt")" = frozen ] &&
+    [ "$(field compiler_sha256 "$capsule_receipt")" = "$producer_sha" ] || die 'capsule belongs to a different compiler'
+runtime=$(field source_authority_path "$capsule_receipt")
+runtime_receipt="$runtime/hosted-runtime.env"
+regular "$runtime_receipt" || die 'hosted runtime authority missing'
+[ "$(sha "$runtime_receipt")" = "$(field hosted_authority_receipt_sha256 "$capsule_receipt")" ] || die 'hosted runtime receipt differs'
+[ ! -e "$output" ] && [ ! -L "$output" ] || die 'fresh producer proof root required'
+case "$output/" in "$source_root/"*|"$capsule/"*) die 'proof root overlaps immutable inputs' ;; esac
+mkdir "$output" || die 'proof parent must already exist'
+printf '%s\n' 'schema=simple-subsystem-provisional-preparation-v1' 'status=BLOCKED' >"$output/status.env"
+code=0
+"$verifier" native-groups-provisional-authority-verify \
+    --receipt "$authority" --digest "$authority_sha" --source-snapshot "$snapshot" --hello-receipt "$hello" \
+    >"$output/authority-verify.stdout" 2>"$output/authority-verify.stderr" || code=$?
+printf '%s\n' "$code" >"$output/authority-verify.exit"
+[ "$code" = 0 ] || die 'compiled provisional authority verification failed; evidence retained'
+code=0
+sh "$script_root/phase2-runtime-capsule.shs" verify "$capsule" \
+    >"$output/runtime-verify.stdout" 2>"$output/runtime-verify.stderr" || code=$?
+printf '%s\n' "$code" >"$output/runtime-verify.exit"
+[ "$code" = 0 ] || die 'canonical runtime capsule verification failed; evidence retained'
+# Recheck the small immutable authority boundary after both real validators.
+pin "$verifier" "$verifier_sha" && pin "$authority" "$authority_sha" &&
+    pin "$producer" "$producer_sha" && pin "$snapshot" "$snapshot_sha" &&
+    pin "$hello" "$hello_sha" && pin "$capsule_receipt" "$capsule_sha" || die 'preparation inputs changed'
+set -C
+{
+    printf '%s\n' 'schema=simple-subsystem-provisional-producer-v1' 'status=hello-qualified' \
+        'diagnostic_only=1' 'stage2_admitted=0' 'dynload_provider=NOT_QUALIFIED' \
+        "candidate_path=$producer" "candidate_sha256=$producer_sha" \
+        "source_snapshot_path=$snapshot" "source_snapshot_sha256=$snapshot_sha" \
+        "runtime_authority_path=$runtime" "runtime_capsule_path=$capsule" "runtime_capsule_sha256=$capsule_sha" \
+        "authority_path=$authority" "authority_sha256=$authority_sha" \
+        "hello_receipt_path=$hello" "hello_receipt_sha256=$hello_sha" \
+        "authority_verifier_path=$verifier" "authority_verifier_sha256=$verifier_sha" \
+        "runtime_verifier_path=$script_root/phase2-runtime-capsule.shs" \
+        "runtime_verifier_sha256=$(sha "$script_root/phase2-runtime-capsule.shs")"
+    for stage in authority runtime; do
+        for kind in stdout stderr exit; do
+            path="$output/$stage-verify.$kind"
+            printf '%s\n' "${stage}_${kind}_path=$path" "${stage}_${kind}_sha256=$(sha "$path")"
+        done
+    done
+} >"$output/producer.env" || die 'exclusive producer proof publication failed'
+printf '%s\n' 'schema=simple-subsystem-provisional-preparation-v1' 'status=PREPARED' \
+    'stage2_admitted=0' "producer_receipt_sha256=$(sha "$output/producer.env")" >"$output/status.next.env"
+mv "$output/status.next.env" "$output/status.env" || die 'preparation status publication failed'
+printf '%s\n' "$output/producer.env"

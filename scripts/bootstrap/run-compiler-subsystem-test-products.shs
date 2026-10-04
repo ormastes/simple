@@ -10,7 +10,7 @@ hash_file() {
   printf '%s\n' "${sum%% *}"
 }
 absolute() { case "$1" in /*) return 0 ;; *) return 1 ;; esac; }
-resume=0 resume_reused= selected_product=
+resume=0 resume_reused= selected_product= qualification_mode=qualified rss_mode=enforce
 source_root= output_root= compiler_llvm= compiler_cranelift=
 producer_receipt_llvm= producer_receipt_cranelift=
 threads=20 rss_cap_kib=6835937 build_timeout=1800 test_timeout=7200
@@ -18,6 +18,8 @@ for arg in "$@"; do
   case "$arg" in
     --resume) resume=1 ;;
     --product=*) selected_product=${arg#*=} ;;
+    --qualification-mode=*) qualification_mode=${arg#*=} ;;
+    --rss-mode=*) rss_mode=${arg#*=} ;;
     --source-root=*) source_root=${arg#*=} ;;
     --output-root=*) output_root=${arg#*=} ;;
     --compiler-llvm=*) compiler_llvm=${arg#*=} ;;
@@ -36,6 +38,11 @@ case "$selected_product" in
   *) die 'invalid product selector' ;;
 esac
 [ -z "$selected_product" ] || [ "$resume" = 0 ] || die 'single-product resume requires a distinct verified product owner'
+case "$qualification_mode" in
+  qualified) ;;
+  diagnostic) [ -n "$selected_product" ] && [ "$resume" = 0 ] || die 'diagnostic products require isolated selected-product tasks' ;;
+  *) die 'invalid product qualification mode' ;;
+esac
 for path in "$source_root" "$output_root"; do
   [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
 done
@@ -62,10 +69,12 @@ fi
 case "$threads:$rss_cap_kib:$build_timeout:$test_timeout" in
   *[!0-9:]*|:*|*::*) die "invalid resource policy" ;;
 esac
-[ "$threads" -ge 10 ] && [ "$threads" -le 20 ] && \
-  [ "$rss_cap_kib" -gt 0 ] && [ "$rss_cap_kib" -le 6835937 ] && \
-  [ "$build_timeout" -gt 0 ] && [ "$test_timeout" -gt 0 ] \
-  || die "resource policy outside 20-thread/legal-cap bounds"
+for timeout in "$build_timeout" "$test_timeout"; do
+  perl -I "$source_root/scripts/bootstrap/lib" -MBootstrapProductProducer=validate_product_resources \
+    -e 'validate_product_resources(@ARGV)' "$qualification_mode" "$threads" "$rss_cap_kib" "$timeout" "$rss_mode" \
+    || die 'product resource policy rejected'
+done
+[ "${SIMPLE_SHARD_MEM_CLAMP:-1}" = 1 ] || die 'unbounded frontend fanout forbidden'
 script_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || die "script root unavailable"
 case "$script_root" in "$source_root/scripts/bootstrap") ;; *) die "manager must run from pinned source root" ;; esac
 inventory_program="$script_root/compiler-subsystem-test-inventory.shs"
@@ -112,6 +121,8 @@ verify_base() {
     --inventory="$inventory" --backend="$backend" --subsystem="$suite" \
     --compiler="$compiler" --binary="$job/product" \
     --compiler-producer-receipt="$producer_receipt" \
+    --qualification-mode="$qualification_mode" \
+    --rss-mode="$rss_mode" \
     --build-receipt="$job/build.env" --threads="$threads" \
     --rss-cap-kib="$rss_cap_kib" --build-timeout-seconds="$build_timeout" "$@"
 }
@@ -125,10 +136,12 @@ build_test_product() {
   compiler_sha=$(hash_file "$compiler") || return 2
   code=0
   SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$rss_cap_kib" \
-  SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce TMPDIR="$job/tmp-build" \
+  SIMPLE_BOOTSTRAP_RSS_CAP_MODE="$rss_mode" TMPDIR="$job/tmp-build" \
     sh "$builder" --source-root="$source_root" --compiler="$compiler" \
       --compiler-sha256="$compiler_sha" \
       --compiler-producer-receipt="$producer_receipt" \
+      --qualification-mode="$qualification_mode" \
+      --rss-mode="$rss_mode" \
       --backend="$backend" --subsystem="$suite" --inventory="$inventory" \
       --threads="$threads" --rss-cap-kib="$rss_cap_kib" \
       --build-timeout-seconds="$build_timeout" \
@@ -147,7 +160,7 @@ enumerate_test_product() {
   code=0
   (
     cd "$source_root" || exit 125
-    TMPDIR="$job/tmp-enumerate" SIMPLE_RUNTIME_MODE=native SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce \
+    TMPDIR="$job/tmp-enumerate" SIMPLE_RUNTIME_MODE=native SIMPLE_BOOTSTRAP_RSS_CAP_MODE="$rss_mode" \
     SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$rss_cap_kib" \
     SIMPLE_PROCESS_TREE_RSS_RECEIPT="$job/enumeration-watchdog.env" \
       sh "$watchdog" "$test_timeout" 20 "$job/product" --enumerate \
@@ -176,7 +189,7 @@ run_test_product() {
   code=0
   (
     cd "$source_root" || exit 125
-    TMPDIR="$job/tmp-run" SIMPLE_RUNTIME_MODE=native SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce \
+    TMPDIR="$job/tmp-run" SIMPLE_RUNTIME_MODE=native SIMPLE_BOOTSTRAP_RSS_CAP_MODE="$rss_mode" \
     SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$rss_cap_kib" \
     SIMPLE_PROCESS_TREE_RSS_RECEIPT="$job/execution-watchdog.env" \
       sh "$watchdog" "$test_timeout" 20 "$job/product" --run \
@@ -230,7 +243,11 @@ if [ -n "$selected_product" ]; then
   regular "$selected_receipt" || die 'product owner produced no verified result'
   selected_status=$(awk -F= '$1=="status" {n++; s=$2} END {if(n!=1)exit 2; print s}' "$selected_receipt") || die 'product result has no unique status'
   printf '%s\n' "$selected_receipt"
-  [ "$selected_status" = PASS ] || exit 1
+  if [ "$qualification_mode" = diagnostic ]; then
+    [ "$selected_status" = DIAGNOSTIC_PASS ] || exit 1
+  else
+    [ "$selected_status" = PASS ] || exit 1
+  fi
   exit 0
 fi
 schedule_code=0
