@@ -125,6 +125,28 @@ fn scv_compile_snapshot_source_digest_v1(path: text) -> text:
     val content = scv_compile_snapshot_read_source_v1(path)
     if content == nil: "" else: scv_content_id_for_u8(text_to_utf8_bytes(content!))
 
+fn scv_compile_snapshot_logical_member_v1(
+    root: text, source_roots: [text], source_identity: text
+) -> bool:
+    # Inventory identities name modules in the checkout namespace. Resolving
+    # a declared directory alias before selection moves src/app/foo into its
+    # physical examples/... owner and silently drops it from the src/app scope.
+    if not scv_worktree_path_safe(source_identity):
+        return false
+    val logical = root + "/" + source_identity
+    for source_root in source_roots:
+        if logical == source_root or logical.starts_with(source_root + "/"):
+            return true
+    false
+
+fn scv_compile_snapshot_physical_source_owned_v1(root: text, resolved: text) -> bool:
+    if resolved == "" or resolved == root or not resolved.starts_with(root + "/"):
+        return false
+    for cache in [root + "/build/scv", root + "/.simple/scv"]:
+        if resolved == cache or resolved.starts_with(cache + "/"):
+            return false
+    true
+
 fn scv_compile_snapshot_inventory_entries_v1(
     root: text, cache_root: text, source_roots: [text]
 ) -> [CompileSourceInventoryEntryV1]?:
@@ -136,6 +158,9 @@ fn scv_compile_snapshot_inventory_entries_v1(
     for source_root in source_roots:
         val candidate = scv_compile_snapshot_source_candidate_for_v1(root, source_root, platform)
         if candidate == "": return nil
+        val logical = scv_compile_snapshot_plain_path_v1(candidate)
+        if not scv_compile_snapshot_physical_source_owned_v1(root, logical):
+            return nil
         val absolute = scv_compile_snapshot_plain_path_v1(path_absolute(host_path_native(candidate)))
         if (absolute == "" or (absolute != root and
                 not absolute.starts_with(root + "/"))):
@@ -143,16 +168,20 @@ fn scv_compile_snapshot_inventory_entries_v1(
         if (absolute == root or absolute.starts_with(root + "/build/scv") or
                 absolute.starts_with(root + "/.simple/scv")):
             return nil
-        roots = roots.push(absolute)
+        roots = roots.push(logical)
     var entries: [CompileSourceInventoryEntryV1] = []
     for entry in admitted.inventory!.entries:
+        if not scv_worktree_path_safe(entry.source_identity):
+            return nil
+        if not scv_compile_snapshot_logical_member_v1(root, roots, entry.source_identity):
+            continue
+        # Selection is logical; physical containment remains independent and
+        # fail-closed. A selected alias may target another owned source root,
+        # but it may not point outside the checkout or back into SCV caches.
         val absolute = scv_compile_snapshot_plain_path_v1(path_absolute("{root}/{entry.source_identity}"))
-        var selected = false
-        for source_root in roots:
-            if absolute == source_root or absolute.starts_with(source_root + "/"):
-                selected = true
-        if selected:
-            entries = entries.push(entry)
+        if not scv_compile_snapshot_physical_source_owned_v1(root, absolute):
+            return nil
+        entries = entries.push(entry)
     Some(entries)
 
 fn scv_compile_snapshot_source_candidate_for_v1(root: text, source_root: text, platform: text) -> text:
@@ -298,6 +327,9 @@ fn scv_compile_snapshot_materialize_source_unscoped_v1(
     if not scv_worktree_path_safe(rel):
         return ScvCompileMaterializedSourceV1("snapshot-path-unsafe:{rel}", "", false)
     val path = "{canonical_root}/{rel}"
+    val resolved = scv_compile_snapshot_plain_path_v1(path_absolute(host_path_native(path)))
+    if not scv_compile_snapshot_physical_source_owned_v1(canonical_root, resolved):
+        return ScvCompileMaterializedSourceV1("snapshot-source-outside-owner:{rel}", "", false)
     val content = scv_compile_snapshot_read_source_v1(path)
     if content == nil:
         return ScvCompileMaterializedSourceV1("snapshot-read-failed:{rel}", "", false)
