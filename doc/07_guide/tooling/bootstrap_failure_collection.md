@@ -311,6 +311,22 @@ the overall run unsuccessful and its orchestration exit status nonzero. If the
 tool cannot express this, report its raw status and the unresolved aggregate
 failure explicitly. No finite sweep proves the absence of all bugs.
 
+### Windows log observers and collector failures
+
+Open an active temporary log with read, write **and delete** sharing. A reader
+that denies delete sharing can prevent the collector's final rename or cleanup:
+a controlled Windows test reproduced collector exit 126 and a missing receipt
+even though the child had already returned its ordinary failure. Avoid plain
+`Get-Content` for active temporary logs; use an explicit shared file handle or
+wait for the published terminal log.
+
+Capture the collector's own stdout and stderr separately from its bounded child
+log. A missing collector receipt is a process-owner failure, not a successful
+or ordinary failed compiler receipt. Preserve the raw child evidence and the
+reservation until closure is proved or explicitly recovered under the shared
+admission lock. External recovery must retain its own evidence and must never
+fabricate the missing native completion receipt.
+
 ## Repair without losing evidence
 
 Group failures by the first actionable root cause, retain each affected row,
