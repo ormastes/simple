@@ -21,10 +21,13 @@ The existing `native_backend_contract_spec.spl` checks thread flag/value adjacen
 instead of obsolete numeric positions. Its scenario count is unchanged.
 
 Pending command after producer and generated-entry admission are available:
+Set `SIMPLE_BINARY` to the exact same absolute admitted producer path before
+invocation; child discovery must not fall back to a seed or another executable.
+Retain verbose invocation receipts with the producer digest and actual argv.
 
 ```text
-<admitted-runtime> test test/01_unit/lib/test_runner_native_source_authority_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
-<admitted-runtime> test test/01_unit/lib/nogc_sync_mut/test_runner/native_backend_contract_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
+<admitted-runtime> test test/01_unit/lib/test_runner_native_source_authority_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
+<admitted-runtime> test test/01_unit/lib/nogc_sync_mut/test_runner/native_backend_contract_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
 ```
 
 Require five executed scenarios, no failures and actual assertion evaluation for
@@ -33,3 +36,12 @@ File/argv tests do not establish canonical snapshot publication, refresh ownersh
 across processes, successful native compilation, or execution of staged bodies.
 Those remain real coordinator/worker end-to-end gates with exact producer,
 generated-source and inventory provenance. No Rust seed fallback is authorized.
+
+The existing `test/02_integration/app/test_runner_native_backend_spec.spl` now
+uses genuine `*_spec.spl` passing/failing fixtures and a separate plain source
+for the runtime zero-example rejection. Its positive fixture imports the real
+app argument parser, exercising source discovery beyond std. Both LLVM and
+Cranelift cases compare all eight parent source-authority environment bindings
+before and after each child request without changing those bindings themselves.
+These two scenarios remain UNRUN and do not require a preexisting parent snapshot;
+the separate canonical inventory integration covers old/new snapshot bytes.
