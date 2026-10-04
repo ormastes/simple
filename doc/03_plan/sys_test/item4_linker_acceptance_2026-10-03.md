@@ -336,7 +336,8 @@ in for native link/load behavior, ABI correctness or runtime admission.
 
 ## Hosted ARM64 ADDEND continuation (2026-10-04)
 
-Existing ITEM4-REQ-004/006; source pending, all execution **UNRUN**.
+Existing ITEM4-REQ-004/006; source `2a34f353063` implemented and independently
+reviewed, initial intent `a1d863b52ea` preceded source; all execution **UNRUN**.
 [Detail contract](../../05_design/compiler/linker/macho_hosted_addend_2026-10-04.md)
 requires one shared checked pair decoder for static and hosted consumers.
 Use actual object fixtures and independent branch/page/scaled-offset decoding,

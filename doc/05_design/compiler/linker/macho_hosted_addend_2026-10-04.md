@@ -1,8 +1,10 @@
 # Hosted ARM64 explicit-addend relocation pairs
 
 Base `edfb6df1821ff98a0d563cca5496630cedf7789e`; existing ITEM4-REQ-004/006.
-Status: frozen test-first contract; source implementation pending and all Simple
-execution UNRUN. Local and domain evidence are in
+Status: source implemented and independently reviewed at `2a34f353063` without
+P0/P1 findings; final acceptance review pending. All Simple execution UNRUN.
+Initial executable intent `a1d863b52ea` preceded production edits.
+Local and domain evidence are in
 `doc/01_research/{local,domain}/macho_hosted_addend_2026-10-04.md`.
 
 ## Shared operation
@@ -62,3 +64,20 @@ Runtime owns the new pair utility and two relocation consumers; acceptance owns
 fixtures, executable specs and mirrored manual; research owns these evidence
 documents, canonical acceptance linkage and independent final review. Root owns
 integration and exact-head final review. Separate worktrees; sidecars N/A.
+
+## Source review and fixture provenance limits
+
+The final source uses the shared pair decoder in both consumers. Hosted scanning
+advances by `consumed` and marks only the follower's range; static patching adjusts
+its existing index increment without changing subtractor consumption. Nonzero
+explicit/embedded conflicts are checked in the final shared patch pass before
+writing branch, page or page-offset results. Imported nonzero branches reject
+before stub selection is applied.
+
+The fixture lane observed LLVM 23 emitting `0xfffffff8` for a negative prefix
+whose valid header/payload encoding is `0xa4fffff8`. Negative tests therefore use
+a proven positive object and guarded mutation of the 24-bit payload, preserving
+the ADDEND header. This is fixture provenance, not a Simple compiler defect or
+executed RED/GREEN result. Similarly, correcting a no-import hosted data offset
+oracle to derive it from the emitted DATA segment is test-authoring correction,
+not evidence that the Simple linker ran.
