@@ -4,7 +4,9 @@ use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1,
 use std.common.task_runner.journal.{task_runner_journal_open_v1, task_runner_journal_append_v1,
     task_runner_journal_history_v1, task_runner_journal_release_v1, task_runner_journal_missing_v1,
     task_runner_journal_identity_v1}
-use std.common.task_runner.snapshot.{task_runner_snapshot_commit_v1, task_runner_snapshot_open_v1}
+use std.common.task_runner.snapshot.{task_runner_snapshot_commit_v1, task_runner_snapshot_open_v1,
+    task_runner_snapshot_view_v1, task_runner_snapshot_inventory_v1,
+    task_runner_snapshot_history_v1, task_runner_snapshot_window_history_v1}
 use std.nogc_sync_mut.database.wal_segmented.{database_wal_revision_open_v1}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write, file_unlock,
     file_read_regular_no_follow_bounded}
@@ -20,6 +22,33 @@ fn task_storage_pass_v1(identity: text, group: text, generation: i64) -> TaskRun
         0, 0, 0, true, true, identity, identity, identity, identity)
 
 describe "PureDatabase task history with durable database revisions":
+    it "reads physical inventory and all eight selected-group attempts independently of later groups":
+        val root = secure_temp_dir("build", "task-snapshot-view").unwrap()
+        val source = sha256_text("source")
+        val expected = [task_storage_identity_v1(source)]
+        val identity = task_runner_identity_v1(expected[0]).unwrap()
+        var owner = task_runner_journal_open_v1(root, sha256_text("parent"), source, expected).unwrap()
+        for number in 1..9:
+            val row = TaskRunnerAttemptV1(identity, "selected-run", number, "grouped", 124, number,
+                "passed", "", 0, 0, 0, true, true, identity, identity, identity, identity)
+            owner = task_runner_journal_append_v1(owner, row).unwrap()
+        for number in 1..11:
+            owner = task_runner_journal_append_v1(owner,
+                task_storage_pass_v1(identity, "later-{number}", number + 8)).unwrap()
+        val frozen = owner.revision
+        val view = task_runner_snapshot_view_v1(root, frozen, source, expected, "selected-run").unwrap()
+        expect(task_runner_snapshot_inventory_v1(view).unwrap()).to_equal(expected)
+        val selected = task_runner_snapshot_window_history_v1(view, identity).unwrap()
+        expect(selected.len()).to_equal(8)
+        expect(selected[0].attempt).to_equal(1)
+        expect(selected[7].attempt).to_equal(8)
+        expect(task_runner_snapshot_history_v1(view, identity).unwrap().len()).to_equal(8)
+        expect(task_runner_snapshot_window_history_v1(view, sha256_text("unregistered")).is_err()).to_equal(true)
+        expect(task_runner_snapshot_view_v1(root, frozen, sha256_text("wrong-source"), expected, "selected-run").is_err()).to_equal(true)
+        expect(task_runner_snapshot_view_v1(root, frozen, source, expected, "").is_err()).to_equal(true)
+        expect(owner.revision).to_equal(frozen)
+        expect(task_runner_journal_release_v1(owner).unwrap()).to_equal(true)
+
     it "recovers a released v2 writer without deleting legacy leases":
         val root = secure_temp_dir("build", "task-db-v2-recovery").unwrap()
         val source = sha256_text("source")
@@ -78,5 +107,7 @@ describe "PureDatabase task history with durable database revisions":
         val revision = database_wal_revision_open_v1(root + "/database-wal", reopened.revision).unwrap()
         expect(file_atomic_write(root + "/database-wal/objects/" + revision.segment_digest, "truncated")).to_equal(true)
         expect(task_runner_snapshot_open_v1(root, reopened.revision, reopened.database_identity).is_err()).to_equal(true)
+        expect(task_runner_snapshot_view_v1(root, reopened.revision, source, expected,
+            "new-build-after-reopen").is_err()).to_equal(true)
         expect(task_runner_journal_open_v1(root, sha256_text("corruption-parent"), source, expected).is_err()).to_equal(true)
         expect(dir_remove(root, true)).to_equal(true)
