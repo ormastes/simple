@@ -66,6 +66,112 @@ fn item4_macos_native_check_image(bytes: [u8], arm: bool):
     expect(item4_macos_native_read(bytes, 0xc008, 8)).to_equal(0x100004000)
 
 describe "explicit internal Mach-O native file adapter":
+    it "ITEM4-REQ-006 consumes real object and archive providers and preserves successful replacement semantics":
+        for archived in [false, true]:
+            step("Plan an explicitly selected Mach-O link")
+            val created = item4_macos_native_parent()
+            expect(created.is_ok()).to_equal(true)
+            if created.is_err(): return
+            val parent = created.unwrap()
+            val output = parent + "/app"
+            val written = file_write_bytes(output, [17u8, 0u8, 255u8])
+            expect(written).to_equal(true)
+            if not written:
+                expect(dir_remove(parent)).to_equal(true)
+                return
+            val plan = native_macho_plan_v1("x86_64", item4_macos_native_config(), output)
+            expect(plan.is_ok()).to_equal(true)
+            if plan.is_err():
+                expect(file_remove(output)).to_equal(true)
+                expect(dir_remove(parent)).to_equal(true)
+                return
+            val provider = if archived: "provider_x64.a" else: "provider_x64.o"
+            step("Link real object and provider files")
+            val linked = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/hosted_start_x64.o", "test/fixtures/linker/macho/{provider}"], [], output)
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_ok():
+                step("Inspect the published Mach-O commands and bytes")
+                val bytes = file_read_bytes(output)
+                item4_macos_native_check_image(bytes, false)
+                expect(item4_macos_native_read(bytes, 0x4002)).to_equal(14)
+                expect(item4_macos_native_read(bytes, 0xc018, 8)).to_equal(0x10000c010)
+                val fixups = item4_macos_native_command(bytes, 0x80000022)
+                if fixups >= 0: expect(item4_macos_native_read(bytes, fixups + 20)).to_equal(1)
+            step("Remove owned fixture files")
+            expect(file_remove(output)).to_equal(true)
+            expect(dir_remove(parent)).to_equal(true)
+
+    it "ITEM4-REQ-006 rejects malformed flags unsupported policy and targets before reading input files":
+        step("Reject unsupported configuration before input reads")
+        val flag_sets: [[text]] = [
+            [], ["-platform_version"], ["-platform_version", "ios", "11", "11"],
+            ["-platform_version", "macos", "10.15", "11"],
+            ["-platform_version", "macos", "11.256", "12"],
+            ["-platform_version", "macos", "12", "11"],
+            ["--macho-signing-identifier"],
+            ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "x", "--unknown"],
+            ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "x", "-e"],
+            ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "x", "-e", "_main", "-e", "_main"],
+            ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "x", "--macho-max-image-bytes", "invalid"],
+            ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "x\0y"]]
+        for flags in flag_sets:
+            var config = item4_macos_native_config()
+            config.extra_flags = flags
+            expect(native_macho_plan_v1("x86_64", config, "build/never-read/app").is_err()).to_equal(true)
+        for kind in 0..8:
+            var config = item4_macos_native_config()
+            if kind == 0: config.pie = false
+            if kind == 1: config.debug = true
+            if kind == 2: config.strip_output = true
+            if kind == 3: config.prefer_size_linker = true
+            if kind == 4: config.allow_duplicate_definitions = true
+            if kind == 5: config.retained_symbols = ["_helper"]
+            if kind == 6: config.libraries = ["bad\0lib"]
+            if kind == 7: config.library_paths = ["bad\0path"]
+            expect(native_macho_plan_v1("x86_64", config, "build/never-read/app").is_err()).to_equal(true)
+        expect(native_macho_plan_v1("riscv64", item4_macos_native_config(), "build/never-read/app").is_err()).to_equal(true)
+        expect(native_macho_plan_v1("x86_64", item4_macos_native_config(), "").is_err()).to_equal(true)
+
+    it "ITEM4-REQ-007 preserves destination bytes on missing invalid incompatible and unresolved inputs":
+        for kind in 0..4:
+            step("Plan an explicitly selected Mach-O link")
+            val created = item4_macos_native_parent()
+            expect(created.is_ok()).to_equal(true)
+            if created.is_err(): return
+            val parent = created.unwrap()
+            val output = parent + "/app"
+            val written = file_write_bytes(output, [17u8, 0u8, 255u8])
+            expect(written).to_equal(true)
+            if not written:
+                expect(dir_remove(parent)).to_equal(true)
+                return
+            val plan = native_macho_plan_v1("x86_64", item4_macos_native_config(), output)
+            expect(plan.is_ok()).to_equal(true)
+            if plan.is_err():
+                expect(file_remove(output)).to_equal(true)
+                expect(dir_remove(parent)).to_equal(true)
+                return
+            var inputs = ["test/fixtures/linker/macho/hosted_start_x64.o"]
+            if kind == 0: inputs = [parent + "/missing.o"]
+            if kind == 1:
+                val invalid_written = file_write_bytes(parent + "/invalid.o", [1u8, 2u8, 3u8])
+                expect(invalid_written).to_equal(true)
+                if not invalid_written:
+                    expect(file_remove(output)).to_equal(true)
+                    expect(dir_remove(parent)).to_equal(true)
+                    return
+                inputs = [parent + "/invalid.o"]
+            if kind == 2: inputs.push("test/fixtures/linker/macho/provider_a64.dylib")
+            step("Preserve the existing destination on construction failure")
+            val rejected = native_macho_link_files_v1(plan.unwrap(), inputs, [], output)
+            expect(rejected.is_err()).to_equal(true)
+            if rejected.is_err(): expect(rejected.unwrap_err().len() > 0).to_equal(true)
+            expect(file_read_bytes(output)).to_equal([17u8, 0u8, 255u8])
+            step("Remove owned fixture files")
+            if file_exists(parent + "/invalid.o"): expect(file_remove(parent + "/invalid.o")).to_equal(true)
+            expect(file_remove(output)).to_equal(true)
+            expect(dir_remove(parent)).to_equal(true)
+
     it "ITEM4-REQ-006 plans and constructs actual x64 and ARM64 dylib-linked executable images":
         for arm in [false, true]:
             step("Plan an explicitly selected Mach-O link")
