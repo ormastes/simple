@@ -1,0 +1,97 @@
+# File lookup for explicit SDK dependencies, not artifact or loader admission.
+use compiler.backend.linker.macho.provider_closure_types.{MachOProviderSourceV1, MachOProviderSearchV1, macho_provider_closure_default_limits_v1}
+use std.io_runtime.{file_exists, file_read_bytes_result, file_size}
+
+fn macho_provider_path_v1(path: text) -> Result<text, text>:
+    if path == "" or path.contains("\0"): return Err("invalid Mach-O provider path")
+    val value = path.replace("\\", "/")
+    var prefix = ""
+    var start: i64 = 0
+    var floor: i64 = 0
+    if value.starts_with("//"):
+        prefix = "//"
+        start = 2
+        floor = 2
+    elif value.starts_with("/"):
+        prefix = "/"
+        start = 1
+    elif value.len() >= 2 and value.byte_at(1) == 58:
+        val drive = value.byte_at(0) as i64
+        if not ((drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)) or value.len() < 3 or value.byte_at(2) != 47:
+            return Err("invalid Mach-O drive-relative provider path")
+        prefix = value[0:3]
+        start = 3
+    var parts: [text] = []
+    for part in value[start:value.len()].split("/"):
+        if part == "" or part == ".": continue
+        if part == "..":
+            if parts.len() > floor and parts[parts.len() - 1] != "..":
+                parts = parts[0:parts.len() - 1]
+            elif prefix == "":
+                parts = parts.push(part)
+            else:
+                return Err("invalid Mach-O provider path traversal")
+        else:
+            parts = parts.push(part)
+    if prefix == "//" and parts.len() < 2: return Err("invalid Mach-O UNC provider path")
+    val normalized = prefix + parts.join("/")
+    Ok(if normalized == "": "." else: normalized)
+
+fn macho_provider_parent_v1(path: text) -> Result<text, text>:
+    val normalized = macho_provider_path_v1(path)?
+    var separator: i64 = -1
+    for index in 0..normalized.len():
+        if normalized.byte_at(index) == 47: separator = index
+    if separator < 0: return Ok(".")
+    if separator == 0: return Ok("/")
+    if separator == 2 and normalized.byte_at(1) == 58: return Ok(normalized[0:3])
+    Ok(normalized[0:separator])
+
+fn macho_provider_candidates_v1(path: text) -> Result<[text], text>:
+    val normalized = macho_provider_path_v1(path)?
+    if normalized.ends_with(".tbd"): return Ok([normalized])
+    val stub = if normalized.ends_with(".dylib"): normalized[0:normalized.len() - 6] + ".tbd" else: normalized + ".tbd"
+    Ok([stub, normalized])
+
+fn macho_provider_child_v1(directory: text, child: text) -> Result<text, text>:
+    val parent = macho_provider_path_v1(directory)?
+    macho_provider_path_v1(parent + (if parent.ends_with("/"): "" else: "/") + child)
+
+fn native_macho_load_provider_v1(install_name: text, requester_path: text,
+        search: MachOProviderSearchV1) -> Result<MachOProviderSourceV1, text>:
+    """Resolve one dependency from explicit paths, retaining the chosen identity."""
+    if install_name == "" or install_name.contains("\0") or install_name.contains("\\"):
+        return Err("invalid Mach-O provider install path")
+    var candidates: [text] = []
+    if install_name.starts_with("@loader_path/"):
+        candidates = macho_provider_candidates_v1(macho_provider_child_v1(macho_provider_parent_v1(requester_path)?, install_name[13:install_name.len()])?)?
+    elif install_name.starts_with("@executable_path/"):
+        candidates = macho_provider_candidates_v1(macho_provider_child_v1(macho_provider_parent_v1(search.output_path)?, install_name[17:install_name.len()])?)?
+    elif install_name.starts_with("@"):
+        return Err("unsupported Mach-O provider install token; owner-specific @rpath resolution is required")
+    else:
+        val parts = install_name.split("/")
+        val leaf = parts[parts.len() - 1]
+        if leaf == "" or leaf == "." or leaf == "..": return Err("invalid Mach-O provider install path")
+        for part in parts:
+            if part == "..": return Err("invalid Mach-O SDK install path traversal")
+        for directory in search.library_paths:
+            for candidate in macho_provider_candidates_v1(macho_provider_child_v1(directory, leaf)?)?: candidates = candidates.push(candidate)
+        if install_name.starts_with("/") and search.sdk_root != "":
+            for candidate in macho_provider_candidates_v1(macho_provider_child_v1(search.sdk_root, install_name[1:install_name.len()])?)?: candidates = candidates.push(candidate)
+    for candidate in candidates:
+        if file_exists(candidate):
+            # This preflight and post-read bound are logical guards, not a
+            # race-free bounded reader or a whole-process memory guarantee.
+            val maximum = macho_provider_closure_default_limits_v1().max_total_bytes
+            val size = file_size(candidate)
+            if size < 0: return Err("Mach-O provider cannot be read: {candidate}")
+            if size > maximum: return Err("invalid Mach-O provider source byte quota exceeded")
+            val read = file_read_bytes_result(candidate)
+            if read.is_err(): return Err("Mach-O provider cannot be read: {candidate}: {read.unwrap_err()}")
+            val bytes = read.unwrap()
+            if bytes.len() > maximum: return Err("invalid Mach-O provider source byte quota exceeded")
+            return Ok(MachOProviderSourceV1(path: candidate, bytes: bytes))
+    Err("Mach-O provider cannot be read from explicit SDK/search paths: {install_name}")
+
+export native_macho_load_provider_v1, macho_provider_path_v1
