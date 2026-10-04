@@ -45,7 +45,10 @@ strong definitions must not cause duplicate-definition errors or win lookup;
 losing relocation tables must not allocate GOT slots or apply patches.
 
 The gABI converts discarded-group GLOBAL/WEAK definitions to undefined symbols;
-discarded LOCAL definitions cannot be referenced from outside the group. Retain
+discarded LOCAL definitions cannot supply surviving outside references. The
+gABI forbids outside-group LOCAL references generally, but GNU accepts a live
+outside relocation to a retained LOCAL group member. Preserve that compatible
+kept-member behavior; do not introduce a broader rejection in this slice. Retain
 undefined symbol records even when only discarded members referenced them.
 Distinguish archive demand from final missing-symbol diagnostics. Root selected
 the following policy after the external probes below: existing undefined records
@@ -85,6 +88,8 @@ had unreliable status interpolation and is not the status oracle.
 | Live outside relocation to discarded loser_only | exit 1, undefined loser_only |
 | Same live reference plus later provider archive | exit 1; BFD did not extract replacement |
 | Undefined reference solely in retained .debug_info | exit 1 |
+| Outside reference to retained LOCAL group member | exit 0, actual LOCAL relocation resolves |
+| Outside reference to discarded WEAK definition | exit 0, pointer becomes zero |
 
 Thus dead-group reference suppression does not justify suppressing archive
 extraction. Discarded-definition replacement through an archive is a distinct
@@ -110,7 +115,9 @@ flags 0 to prove ordinary groups are not deduplicated. Include LOCAL signatures.
 Check losing bytes, relocation effects and GOT slots are all absent atomically.
 
 Cover live outside GLOBAL references binding to the winner, malformed outside
-LOCAL references failing, discarded-only undefined links succeeding without a
+references to discarded LOCAL definitions failing, retained LOCAL references
+succeeding, and discarded WEAK definitions resolving as undefined weak zero.
+Cover discarded-only undefined links succeeding without a
 provider, and the same input extracting a supplied archive provider. Preserve
 entry demand and distinguish unused undefined declarations. Include archive
 members selected for another symbol that carry competing groups.
