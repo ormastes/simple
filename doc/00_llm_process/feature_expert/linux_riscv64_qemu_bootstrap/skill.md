@@ -76,3 +76,13 @@ sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --stage2     # detached 
   under `src/` or `test/` (`SCV-E-ADMISSION: source-inventory-scope-unsupported`)
   and, the first time, `SIMPLE_SCV_INVENTORY_COLD_INIT=1`. Cold inventory under
   TCG exceeded 90 min; cross-build from the host for fast probes.
+- First full run (2026-10-03/04, 20 vCPU, cranelift): cargo 10.7h, then
+  `check-bootstrap-preflight.shs` re-runs `cargo check --release --bin simple`
+  (2.8h, PASS 5/5), then Stage 2 died in seconds with exit 89
+  `status=rss-measurement-failed samples=0`: the RSS watchdog's first `ps`
+  sample (~560ms + ~330ms perl start on this guest) blew the 1000ms
+  `SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS` default. `--stage2` now exports
+  5000 (the knob's max; same precedent as `check-phase2-gpu-vulkan-pipeline.shs`).
+- To retry Stage 2 without paying the Rust builds again, rerun `--stage2`
+  WITHOUT `--sync`: the committed Rust authority for the unchanged snapshot is
+  reused (a new snapshot changes the Rust input fingerprint -> full rebuild).
