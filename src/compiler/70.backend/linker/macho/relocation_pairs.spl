@@ -1,0 +1,31 @@
+# Decode pair metadata once; only the returned follower owns a patch site.
+use compiler.backend.linker.macho_parser.{MachORelocationEntry}
+use compiler.backend.linker.macho.input.{macho_sign}
+
+struct MachORelocationPairV1:
+    relocation: MachORelocationEntry
+    explicit_addend: i64
+    consumed: i64
+
+fn macho_relocation_pair_v1(relocations: [MachORelocationEntry], index: i64,
+        arm: bool, input_name: text) -> Result<MachORelocationPairV1, text>:
+    """Decode one relocation or an ARM64 ADDEND plus its instruction follower.
+
+    A normal record consumes one entry with addend zero. ADDEND consumes two;
+    its unsigned 24-bit payload 0xffffff represents signed addend -1.
+    Bounds and pair shape failures retain the originating input name.
+    """
+    if index < 0 or index >= relocations.len():
+        return Err("{input_name}: Mach-O relocation index outside table")
+    val relocation = relocations[index]
+    if not arm or relocation.r_type != 10:
+        return Ok(MachORelocationPairV1(relocation: relocation, explicit_addend: 0, consumed: 1))
+    if relocation.r_extern or relocation.r_pcrel or relocation.r_length != 2 or index >= relocations.len() - 1:
+        return Err("{input_name}: malformed ARM64_RELOC_ADDEND pair")
+    val following = relocations[index + 1]
+    if following.r_address != relocation.r_address or (following.r_type != 2 and following.r_type != 3 and following.r_type != 4):
+        return Err("{input_name}: invalid ARM64_RELOC_ADDEND follower")
+    Ok(MachORelocationPairV1(relocation: following,
+        explicit_addend: macho_sign(relocation.r_symbolnum, 24), consumed: 2))
+
+export MachORelocationPairV1, macho_relocation_pair_v1
