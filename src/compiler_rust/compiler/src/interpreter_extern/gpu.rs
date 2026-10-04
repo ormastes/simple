@@ -741,9 +741,11 @@ pub fn rt_cuda_launch_kernel_name_array_fn(args: &[Value]) -> Result<Value, Comp
 pub fn rt_font_load_array_fn(args: &[Value]) -> Result<Value, CompileError> {
     let bytes = strict_owned_bytes(args, 0, "rt_font_load_array", 1)?;
     let owner = runtime_byte_owner(&bytes);
-    let result = simple_runtime::packed_byte_adapters::rt_font_load_array(owner);
+    let raw = simple_runtime::packed_byte_adapters::rt_font_load_array(owner);
     release_runtime_owner(owner);
-    Ok(Value::Int(result))
+    // Park the raw FontData* in the font handle table; Simple only ever sees
+    // the opaque, generation-checked handle (see font.rs).
+    Ok(Value::Int(super::font::font_handle_for_raw(raw)))
 }
 
 pub fn rt_metal_load_library_array_fn(args: &[Value]) -> Result<Value, CompileError> {
