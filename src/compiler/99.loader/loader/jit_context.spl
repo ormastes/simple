@@ -24,7 +24,6 @@ struct JitContextRecord:
     success: bool
     error: text?
     output_file: text?
-    mangled_name: text?
 
 impl JitCompilationContext:
     static fn from_smf(tmpls: Dict<text, TemplateBytes>) -> JitCompilationContext:
@@ -64,7 +63,18 @@ impl JitCompilationContext:
             Ok(code) - Compiled machine code
             Err(message) - Compilation error
         """
-        self.compiler_ctx.instantiate(tmpl, type_args)
+        if tmpl.param_count < 0 or tmpl.param_count.to_i64() != type_args.len():
+            return Err("Template type argument count mismatch")
+        var type_params: [text] = []
+        for ty in type_args:
+            type_params = type_params.push(type_to_string(ty))
+        val compiled = compiler_instantiate_template_typed(
+            self.compiler_ctx.handle, tmpl.name, type_params, type_args
+        )
+        if compiled.success:
+            Ok(compiled.code)
+        else:
+            Err(if compiled.has_error: compiled.error else: "Unknown compilation error")
 
     me record_instantiation(template_name: text, type_args: [TypeInfo], mangled_name: text, success: bool, error: text?):
         """Record an instantiation attempt."""
@@ -74,8 +84,7 @@ impl JitCompilationContext:
             mangled_name: mangled_name,
             success: success,
             error: error,
-            output_file: nil,
-            mangled_name: nil
+            output_file: nil
         )
         self.recorded = self.recorded.push(record)
 
