@@ -1,0 +1,130 @@
+"""
+# Inline If With As-Cast Arms Parser Regression
+
+An inline `if c: X as T else: Y` must keep its else arm: the `as T` cast in the
+then arm ends before `else`, it never absorbs it. Covers then-arm, else-arm and
+both-arm casts, indexed/method-call operands, generic and array cast types, and
+nesting. See doc/08_tracking/bug/inline_if_then_arm_as_cast_drops_else_2026-10-05.md.
+"""
+
+use compiler.core.parser.{parser_init, parse_expr, parse_statement}
+use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_right, expr_get_extra, expr_get_stmts, expr_get_args}
+use compiler.core.ast.{EXPR_IF, EXPR_CAST, EXPR_INT_LIT, EXPR_BLOCK}
+use compiler.core.ast_stmt.{stmt_get_expr}
+
+# An inline arm is stored as a one-statement block; return the arm's value
+# expression, or -1 when the arm is empty (the dropped-else symptom).
+fn arm_value(arm: i64) -> i64:
+    if arm < 0:
+        return -1
+    if expr_get_tag(arm) != EXPR_BLOCK:
+        return arm
+    val stmts = expr_get_stmts(arm)
+    if stmts.len() != 1:
+        return -1
+    stmt_get_expr(stmts[0])
+
+fn arm_tag(arm: i64) -> i64:
+    val v = arm_value(arm)
+    if v < 0:
+        return -1
+    expr_get_tag(v)
+
+fn call_first_arg(call: i64) -> i64:
+    val args = expr_get_args(call)
+    if args.len() == 0:
+        return -1
+    args[0]
+
+fn parse_if(src: text) -> i64:
+    parser_init(src)
+    val e = parse_expr()
+    if expr_get_tag(e) != EXPR_IF:
+        return -1
+    e
+
+fn then_tag(src: text) -> i64:
+    val e = parse_if(src)
+    if e < 0:
+        return -1
+    arm_tag(expr_get_right(e))
+
+fn else_tag(src: text) -> i64:
+    val e = parse_if(src)
+    if e < 0:
+        return -1
+    arm_tag(expr_get_extra(e))
+
+# Runtime witnesses: these are parsed by whichever compiler runs this spec
+# (the Rust seed under `simple test`), so they pin the executing parser too.
+fn rt_then_cast(c: bool, x: i64) -> i64:
+    val v = if c: x as i64 else: 7
+    v
+
+fn rt_both_cast(c: bool, a: [u8]) -> i64:
+    if c: a[0] as i64 else: a[1] as i64
+
+describe "Inline if with as-cast arms at runtime":
+    it "evaluates the else arm after a then-arm cast":
+        expect(rt_then_cast(true, 3)).to_equal(3)
+        expect(rt_then_cast(false, 3)).to_equal(7)
+
+    it "evaluates both cast arms":
+        val a: [u8] = [5, 9]
+        expect(rt_both_cast(true, a)).to_equal(5)
+        expect(rt_both_cast(false, a)).to_equal(9)
+
+describe "Inline if with as-cast arms":
+    it "keeps the else arm after a then-arm cast":
+        expect(then_tag("if c: x as i64 else: 7")).to_equal(EXPR_CAST)
+        expect(else_tag("if c: x as i64 else: 7")).to_equal(EXPR_INT_LIT)
+
+    it "keeps the else arm after an indexed then-arm cast":
+        expect(then_tag("if c: bytes[i] as i64 else: 7")).to_equal(EXPR_CAST)
+        expect(else_tag("if c: bytes[i] as i64 else: 7")).to_equal(EXPR_INT_LIT)
+
+    it "keeps a cast else arm after a cast then arm":
+        expect(then_tag("if c: bytes[i] as i64 else: bytes[j] as i64")).to_equal(EXPR_CAST)
+        expect(else_tag("if c: bytes[i] as i64 else: bytes[j] as i64")).to_equal(EXPR_CAST)
+
+    it "keeps a cast else arm after a plain then arm":
+        expect(else_tag("if c: 7 else: x as i64")).to_equal(EXPR_CAST)
+
+    it "keeps the else arm after a method-call cast":
+        expect(else_tag("if c: v.len() as i32 else: 0")).to_equal(EXPR_INT_LIT)
+
+    it "keeps the else arm after a generic cast type":
+        expect(else_tag("if c: v as Option<i64> else: 0")).to_equal(EXPR_INT_LIT)
+
+    it "keeps the else arm after an array cast type":
+        expect(else_tag("if c: v as [u8] else: 0")).to_equal(EXPR_INT_LIT)
+
+    it "keeps the else arm after a chained cast":
+        expect(else_tag("if c: x as i32 as i64 else: 7")).to_equal(EXPR_INT_LIT)
+
+    it "keeps every arm of an elif chain with cast arms":
+        val outer = parse_if("if a: x as i64 elif b: y as i64 else: 9")
+        expect(outer >= 0).to_equal(true)
+        val inner = expr_get_extra(outer)
+        expect(expr_get_tag(inner)).to_equal(EXPR_IF)
+        expect(arm_tag(expr_get_right(inner))).to_equal(EXPR_CAST)
+        val inner_else = arm_value(expr_get_extra(inner))
+        expect(expr_get_tag(inner_else)).to_equal(EXPR_INT_LIT)
+        expect(expr_get_int(inner_else)).to_equal(9)
+
+    it "keeps the else arm in a val initializer and a return value":
+        parser_init("val v = if c: bytes[i] as i64 else: 7")
+        val decl_init = stmt_get_expr(parse_statement())
+        expect(expr_get_tag(decl_init)).to_equal(EXPR_IF)
+        expect(arm_tag(expr_get_extra(decl_init))).to_equal(EXPR_INT_LIT)
+        parser_init("return if c: x as i64 else: 7")
+        val ret_value = stmt_get_expr(parse_statement())
+        expect(expr_get_tag(ret_value)).to_equal(EXPR_IF)
+        expect(arm_tag(expr_get_extra(ret_value))).to_equal(EXPR_INT_LIT)
+
+    it "keeps the else arm in a call argument":
+        parser_init("id(if c: x as i64 else: 7)")
+        val call = parse_expr()
+        val arg = call_first_arg(call)
+        expect(expr_get_tag(arg)).to_equal(EXPR_IF)
+        expect(arm_tag(expr_get_extra(arg))).to_equal(EXPR_INT_LIT)

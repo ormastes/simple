@@ -1,7 +1,69 @@
 # Inline `if c: X as T else: Y` loses the else arm (2026-10-05)
 
-**Status:** open (compiler). Linker call sites worked around by parenthesizing
-the cast arm; the grammar/lowering defect itself is unfixed.
+**Status:** fixed in the Rust seed parser (2026-10-05, `work/inline-if-as-cast-else`).
+The pure-Simple parser was measured correct and needed no change. Takes effect
+for a seed binary rebuilt from this commit; the linker's parenthesized sites
+stay (still valid).
+
+## Root cause
+
+Rust seed only. `x as T else: f` is a real postfix form in the seed
+(`Expr::CastElse`, cast with fallback, `parser/src/expressions/postfix.rs`
+`TokenKind::As` arm). The inline-if THEN arm was parsed with a plain
+`parse_expression()`, so after `as i64` the cast-suffix match saw `else`,
+consumed `else: 7` as the cast fallback, and the `if` ended with
+`else_branch: None`:
+
+```
+If { condition: c, then_branch: CastElse { expr: x, target_type: i64, fallback_fn: 7 }, else_branch: None }
+```
+
+A false condition therefore evaluated the missing else (JIT `0`, interpreter
+`nil`). The `then ... else 7` form failed to parse outright (`expected Colon`),
+and so did a ternary whose condition ends in a cast (`a if n as bool else b`).
+
+The pure-Simple parser (`src/compiler/10.frontend/core/parser_expr.spl`
+`parse_unary` cast loop) has no `as T else:` suffix and stops the cast at
+`else`; `test/01_unit/compiler/parser/inline_if_as_cast_else_spec.spl` was
+11/11 green against it before any change. The Stage 2 symptom therefore did not
+come from that parser; the binary that misread the linker source was compiled
+through the seed's parser (that path is not re-measured here, and no Stage 2
+rebuild was done).
+
+## Fix
+
+`Parser::no_cast_else` (`parser_impl/core.rs`) disables the `as T else:` suffix.
+`parse_without_cast_else` (`expressions/helpers.rs`) sets it, then restores the
+previous value, also on error, around:
+
+- the inline then arm of `parse_if_expr` (expression and diverging-statement forms),
+- the inline then arm of statement `parse_if` (expression, assignment and
+  `return`/`break` forms) and inline `elif` bodies,
+- the condition of the postfix ternary `a if c else b`.
+
+The else arm and block bodies are unchanged, so `val v = x as T else: f`,
+`if c: 7 else: x as T else: f` and `as T else:` inside a block-form arm still
+parse as `CastElse`. Census: `grep -rnE " as [A-Za-z0-9_<>]+ else:" src --include=*.spl | grep -vE "(if|elif) [^:]+:"`
+finds 0 standalone `CastElse` uses in `src/`, so existing code cannot change
+behaviour.
+
+## Evidence
+
+- `cargo test -p simple-parser --lib inline_if_as_cast_else`
+  (`parser/src/inline_if_as_cast_else_test.rs`, 12 tests): with the fix
+  reverted, 2 passed / 10 failed. With the fix, 12/12 passed. The full
+  `cargo test -p simple-parser --no-fail-fast` has the same 5 failures before and
+  after (`test_python_def_detection`, `test_multiple_decorators`,
+  `test_danger_block_is_unsafe_boundary_not_call`,
+  `unsafe_block_is_valid_in_value_position_and_calls_stay_calls`,
+  `stage2_failure_consumers_parse_strictly`); none was introduced by this fix.
+- Probe (then-arm, indexed, both arms, `return`, nested, call argument) on the
+  seed, before → after rebuild (`cargo build --profile bootstrap -p simple-driver`):
+  JIT `g1(false)=0, g2(true)=3, g5(false,true)=0` → `7, 9, 4`. Interpreter:
+  `nil is forbidden by the non-optional return contract` → all values correct.
+- `test/01_unit/compiler/parser/inline_if_as_cast_else_spec.spl`: 13/13 on the
+  rebuilt seed (2 runtime witnesses + 11 pure-Simple AST shapes);
+  `test/01_unit/compiler/backend/linker/simpleos_internal_entry_spec.spl` 2/2.
 
 ## Symptom
 
@@ -37,26 +99,23 @@ A cast only in the ELSE arm, or a parenthesized THEN-arm cast, is correct.
 LOCAL and no global entered the resolver. The internal ELF engine therefore
 failed every link with `entry symbol not defined: _start` — first seen as the
 SimpleOS x86_64 user internal link failure from the pure-Simple Stage 2
-candidate (built from `release/1.0` `a5cda768103`), which shows the pure-Simple
-compiler path is affected too, not only the seed.
+candidate (built from `release/1.0` `a5cda768103`). That was first read as the
+pure-Simple compiler being affected too. The parser-level measurement under
+Root cause shows the pure-Simple parser is correct.
 
 Fixed by parenthesizing the cast arms in the 6 linker sites
 (`elf_parser.spl`, `elf/stream_emit.spl` x2, `elf/archive_file.spl`,
 `elf/elf_file_reader.spl`); regression spec
 `test/01_unit/compiler/backend/linker/simpleos_internal_entry_spec.spl`.
 
-## Remaining unfixed call sites (same form, outside the linker)
+## Other call sites (same form, outside the linker): now safe
 
-`grep -rnE "if [^:]+: [^()]+ as [a-z0-9]+ else:" src/` lists ~25 more, e.g.
+These were latent miscompiles under the old seed. They are now safe once the
+seed is rebuilt from the fix commit; no source edit is needed. Census
+(26 sites at the fix commit):
+`grep -rnE "if [^:]+: [^()]+ as [a-zA-Z0-9_<>]+ else:" src --include=*.spl`. Examples:
 `src/os/sosix/process.spl:141`, `src/os/kernel/ipc/syscall_ipc.spl:113`,
 `src/lib/skia/feature/glyph/subpixel.spl:33-55`,
 `src/lib/nogc_async_mut/link_working_set/file_store.spl:173`,
 `src/lib/gc_async_mut/gpu/engine2d/draw_ir_box_effects.spl:302-305`.
-Each is a latent miscompile until the parser/lowering is fixed.
-
-## Fix direction
-
-Find where the `as` type operand is parsed inside an inline-if THEN arm (Rust
-seed parser and the pure-Simple parser both) and stop it from consuming or
-mis-associating the following `else:`; then add a parser spec with the table
-above and drop the parenthesized workarounds.
+The parenthesized linker sites are kept on purpose. Both spellings are valid.
