@@ -78,7 +78,11 @@ my $windows = $^O =~ /\A(?:msys|cygwin|MSWin32)\z/ ? 1 : 0;
 # Windows uses Job Objects, and native MSWin32 Perl does not provide getppid.
 my $controller_pid = $windows ? 0 : getppid();
 my $observer_backend = $windows ? 'win32-job-object' :
-    $^O eq 'darwin' ? 'darwin-sysctl-libproc' : 'ps';
+    $^O eq 'darwin' ? 'darwin-sysctl-libproc' :
+    $^O eq 'linux' && -r '/proc/self/stat' &&
+    ($ENV{SIMPLE_PROCESS_TREE_OBSERVER} // '') ne 'ps' ? 'linux-proc' : 'ps';
+my $proc_page_kib = $observer_backend eq 'linux-proc' ?
+    POSIX::sysconf(POSIX::_SC_PAGESIZE()) / 1024 : 0;
 my $containment_scope = $windows ? 'win32-job-object-no-breakaway' :
     'observed-descendants-and-process-groups';
 my $extra_receipt = '';
@@ -579,6 +583,27 @@ sub snapshot {
         ++$sample_overruns if $duration_ms > $opt{'interval-ms'};
         return $all;
     }
+    if ($observer_backend eq 'linux-proc') {
+        # Forking ps per sample costs ~0.5-5s on slow hosts (riscv64 TCG guest:
+        # 4985ms under load, exit 89). /proc/<pid>/stat carries the same columns;
+        # starttime (field 22) is the reuse-proof identity, rss (24) is in pages.
+        my %all;
+        opendir(my $proc, '/proc') or die "cannot open /proc";
+        for my $pid (grep { /\A[0-9]+\z/ } readdir($proc)) {
+            open(my $stat, '<', "/proc/$pid/stat") or next;  # exited since readdir
+            my $line = <$stat>;
+            close($stat);
+            next unless defined($line);
+            $line =~ /\A\Q$pid\E \(.*\) (\S) (\d+) (\d+) (\d+) (?:\S+ ){15}(\d+) \S+ (-?\d+) /s
+                or die "malformed /proc/$pid/stat";
+            $all{$pid} = { parent => 0+$2, group => 0+$3, session => 0+$4,
+                           rss => $6 * $proc_page_kib,
+                           zombie => ($1 eq 'Z' ? 1 : 0), identity => "t$5" };
+        }
+        closedir($proc);
+        %all or die "empty /proc listing";
+        return finish_snapshot(\%all);
+    }
     local $ENV{LC_ALL} = 'C';
     # List form bypasses shell pipelines, so a failing ps cannot be hidden by awk.
     # One -o per column: FreeBSD ps treats everything after the first '=' in a
@@ -600,12 +625,24 @@ sub snapshot {
     close($ps) or die "ps failed";
     alarm 0;
     %all or die "empty ps output";
+    return finish_snapshot(\%all);
+}
+
+sub finish_snapshot {
+    my ($all) = @_;
     ++$samples;
     if ($leader && defined($session_helper) && !$helper_failed &&
-        ($session_root_confirmed || (exists($all{$leader}) && $all{$leader}{group} == $leader))) {
-        my @live = members(\%all);
+        ($session_root_confirmed || (exists($all->{$leader}) && $all->{$leader}{group} == $leader))) {
+        my @live = members($all);
         my $remaining = $observation_budget_ms / 1000 - (time - $sample_started_at);
-        my $sids = observe_sessions($remaining, @live);
+        # /proc already carries each PID's session (stat field 6): spawning the
+        # getsid helper per sample is what cost ~1s per sample under TCG.
+        # The helper's integrity is still verified every sample: swapping the
+        # session-exec binary mid-run must fail closed on either backend.
+        my $sids = $observer_backend eq 'linux-proc' ?
+            do { verify_session_helper();
+                 +{ map { ++$session_checks; ($_ => $all->{$_}{session}) } @live } } :
+            observe_sessions($remaining, @live);
         $session_root_confirmed = 1 if ($sids->{$leader} || 0) == $session_id;
         for my $id (keys %$sids) {
             $unexpected_sid{$id} = $sids->{$id} if $sids->{$id} && $sids->{$id} != $session_id;
@@ -615,7 +652,7 @@ sub snapshot {
     $duration_ms <= $observation_budget_ms or die "process observation exceeded observation budget";
     $sample_duration_max_ms = $duration_ms if $duration_ms > $sample_duration_max_ms;
     ++$sample_overruns if $duration_ms > $opt{'interval-ms'};
-    return \%all;
+    return $all;
 }
 
 sub members {
