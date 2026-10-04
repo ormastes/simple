@@ -3297,6 +3297,12 @@ int64_t rt_value_bool(int64_t value) {
     return rt_core_from_special(value ? RT_VALUE_SPECIAL_TRUE : RT_VALUE_SPECIAL_FALSE);
 }
 
+/* Match RuntimeValue::as_bool: decode the tagged true value, not truthiness.
+ * The native compiler declares this provider as I64 -> I8. */
+int8_t rt_value_as_bool(int64_t value) {
+    return value == rt_core_from_special(RT_VALUE_SPECIAL_TRUE) ? 1 : 0;
+}
+
 int64_t rt_value_nil(void) {
     return rt_core_nil();
 }
