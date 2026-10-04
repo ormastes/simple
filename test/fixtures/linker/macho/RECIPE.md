@@ -209,3 +209,25 @@ The hand-authored closure_future_leaf_v5_interface.tbd requires macOS 12.0 for
 a reachable x64 leaf under a macOS 11 request. Its specific minimum-OS rejection
 and destination preservation are authored acceptance, not an external LLVM or
 Simple execution claim.
+
+## Owner-rpath provider fixture construction (2026-10-04)
+
+From this fixture directory, Ubuntu LLVM21.1.8 built actual x64/ARM64 providers:
+
+```
+ld64.lld -dylib -arch x86_64 -platform_version macos 11 11 -install_name @rpath/libitem4_rpath_leaf.dylib -o rpath_leaf_x64.dylib provider_x64.o
+ld64.lld -dylib -arch arm64 -platform_version macos 11 11 -install_name @rpath/libitem4_rpath_leaf.dylib -o rpath_leaf_a64.dylib provider_a64.o
+ld64.lld -dylib -arch x86_64 -platform_version macos 11 11 -install_name /usr/lib/libitem4_rpath_root.dylib -rpath @loader_path/first -rpath @loader_path/second -reexport_library rpath_leaf_x64.dylib -o rpath_root_x64.dylib
+ld64.lld -dylib -arch arm64 -platform_version macos 11 11 -install_name /usr/lib/libitem4_rpath_root.dylib -rpath @loader_path/first -rpath @loader_path/second -reexport_library rpath_leaf_a64.dylib -o rpath_root_a64.dylib
+llvm-objdump --macho --rpaths rpath_root_x64.dylib rpath_root_a64.dylib
+llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v5 rpath_root_v5_interface.tbd -o /tmp/item4-rpath-x64-oracle-20261004.tbd
+llvm-readtapi -extract --arch=arm64 --filetype=tbd-v5 rpath_root_v5_interface.tbd -o /tmp/item4-rpath-a64-oracle-20261004.tbd
+```
+
+Commands succeeded once. Objdump reports `@loader_path/first`, then
+`@loader_path/second` for each binary root. The authored v5 interface scopes
+`@loader_path/x64` or `@loader_path/a64` before the common second directory.
+Readtapi accepted both selected targets. These observations establish fixture
+metadata only, not inherited dyld search behavior, Simple execution, or Darwin
+loading/signing qualification. The underlying provider object assembly and
+commands are documented earlier in this recipe.
