@@ -85,6 +85,41 @@ private source/SCV/cache/output/temp ownership, producer identity checks and a
 debugger replay may proceed with cold initialization unset. Timeout retains
 evidence; it does not authorize blind retries or reuse forged bindings.
 
+## Prepared isolation and resource admission result
+
+Preparation subsequently created
+`C:/dev/simple-item4-runner-diag-20261004` on its own work branch at exact
+`9737d1217bc44439b56bba6c2ef16faaff51bd20`. Tracked source stayed clean; the only
+owned source addition is `test/fixtures/item4_runner_diag_prime/main.spl`.
+All 3986 cloned cache files matched their donor SHA256 values while the exclusive
+lease was held, and that lease was released. No donor SCV state was copied.
+Private temporary, user-storage and worktree-storage directories are explicit;
+LLVM precedence is pinned. Independent prelaunch review corrected missing
+directory creation and an inherited LLVM-prefix override before admission.
+
+The reviewed `build/item4-runner-diag/prime-request.json` SHA256 is
+`854999222cc45a1a355bf39b79650e3082320beb470df75e02bbfaa6efb3daf3`.
+Its existing Windows Job collector enforces the 1800-second/32-MiB log bounds
+and owned-tree cleanup. Compiler threads are one. The shared five-GiB memory
+reservation is advisory, not hard RSS enforcement; its legacy metadata records
+80 threads, which is explicitly distinguished from the actual one-thread argv.
+
+At `2026-10-04T12:28:28Z`, the one-shot resource reservation returned null.
+`build/item4-runner-diag/launch-result.json` records
+`NOT_LAUNCHED_RESOURCE_RESERVATION_UNAVAILABLE`, no reservation and no compiler
+launch. A subsequent capacity observation found 18.02 GiB free commit and
+three existing five-GiB reservations. The helper requires at least 10 GiB plus
+those reservations, before any outstanding upstream estimates. No other lane's
+reservation was removed and no automatic retry occurred. Preserve this result
+and revalidate changed capacity before creating a separately identified attempt.
+
+LLDB initialization was also repaired locally by selecting the already installed
+Python313 directory through process-local PATH/PYTHONHOME; no shared tool/DLL
+installation changed. LLDB 23.1.2 initializes successfully. Actual worker attach
+and fault capture remain UNRUN. A future replay should attach to the verified
+worker PID/creation identity within its owned coordinator tree, preserve the
+stack/register/module evidence, and use the existing Job owner for tree cleanup.
+
 No build or debugger reproduction was launched during the initial read-only
 triage. No independently owned process or cache was changed. Subsequent private
 checkout/cache preparation is separate from an executed reproduction.
