@@ -99,20 +99,20 @@ Tool: WSL Ubuntu `llvm-readtapi`, LLVM21.1.8. All binary sources above are
 repository-authored, not copied Apple SDK material. Run in this directory:
 
 ```sh
-llvm-readtapi -stubify --filetype=tbd-v4 provider_x64.dylib -o tbd_provider_x64_v4.tbd
-llvm-readtapi -stubify --filetype=tbd-v5 provider_x64.dylib -o tbd_provider_x64_v5.tbd
-llvm-readtapi -stubify --filetype=tbd-v5 provider_a64.dylib -o tbd_provider_a64_v5.tbd
-llvm-readtapi -merge --filetype=tbd-v4 tbd_provider_x64_v4.tbd tbd_provider_a64_v5.tbd -o tbd_provider_multi_v4.tbd
-llvm-readtapi -merge --filetype=tbd-v5 tbd_provider_x64_v4.tbd tbd_provider_a64_v5.tbd -o tbd_provider_multi_v5.tbd
-llvm-readtapi -compare tbd_provider_multi_v4.tbd tbd_provider_multi_v5.tbd
-llvm-readtapi -stubify --filetype=tbd-v4 hosted_tls_x64.dylib -o tbd_tls_x64_v4.tbd
-llvm-readtapi -stubify --filetype=tbd-v5 hosted_tls_a64.dylib -o tbd_tls_a64_v5.tbd
-llvm-readtapi -stubify --filetype=tbd-v5 tbd_metadata_v4.tbd -o tbd_metadata_v5.tbd
-llvm-readtapi -compare tbd_metadata_v4.tbd tbd_metadata_v5.tbd
-llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v4 tbd_metadata_v5.tbd -o tbd_metadata_x64_oracle_v4.tbd
-llvm-readtapi -stubify --filetype=tbd-v5 tbd_leaf_metadata_v4.tbd -o tbd_leaf_metadata_v5.tbd
-llvm-readtapi -compare tbd_leaf_metadata_v4.tbd tbd_leaf_metadata_v5.tbd
-llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v5 tbd_inline_unmatched_v5.tbd -o /tmp/item4-inline-unmatched-oracle-20261004.tbd
+llvm-readtapi -stubify --filetype=tbd-v4 provider_x64.dylib -o tbd_provider_x64_v4_interface.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 provider_x64.dylib -o tbd_provider_x64_v5_interface.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 provider_a64.dylib -o tbd_provider_a64_v5_interface.tbd
+llvm-readtapi -merge --filetype=tbd-v4 tbd_provider_x64_v4_interface.tbd tbd_provider_a64_v5_interface.tbd -o tbd_provider_multi_v4_interface.tbd
+llvm-readtapi -merge --filetype=tbd-v5 tbd_provider_x64_v4_interface.tbd tbd_provider_a64_v5_interface.tbd -o tbd_provider_multi_v5_interface.tbd
+llvm-readtapi -compare tbd_provider_multi_v4_interface.tbd tbd_provider_multi_v5_interface.tbd
+llvm-readtapi -stubify --filetype=tbd-v4 hosted_tls_x64.dylib -o tbd_tls_x64_v4_interface.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 hosted_tls_a64.dylib -o tbd_tls_a64_v5_interface.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 tbd_metadata_v4_interface.tbd -o tbd_metadata_v5_interface.tbd
+llvm-readtapi -compare tbd_metadata_v4_interface.tbd tbd_metadata_v5_interface.tbd
+llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v4 tbd_metadata_v5_interface.tbd -o tbd_metadata_x64_oracle_v4_interface.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 tbd_leaf_metadata_v4_interface.tbd -o tbd_leaf_metadata_v5_interface.tbd
+llvm-readtapi -compare tbd_leaf_metadata_v4_interface.tbd tbd_leaf_metadata_v5_interface.tbd
+llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v5 tbd_inline_unmatched_v5_interface.tbd -o /tmp/item4-inline-unmatched-oracle-20261004.tbd
 ```
 
 The metadata v4 file is authored YAML with target-only exports, ObjC categories,
@@ -137,8 +137,8 @@ duplicate-key refusal belong to our frozen strict reader contract, while `$ld$`
 policy is deliberately unsupported by leaf lowering. They do not extend the
 external conversion/comparison PASS observations recorded above.
 
-Final targeted YAML fixture `tbd_quoted_flow_v4.tbd` was accepted once by:
-`llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v4 tbd_quoted_flow_v4.tbd -o /tmp/item4-quoted-flow-oracle-20261004.tbd`.
+Final targeted YAML fixture `tbd_quoted_flow_v4_interface.tbd` was accepted once by:
+`llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v4 tbd_quoted_flow_v4_interface.tbd -o /tmp/item4-quoted-flow-oracle-20261004.tbd`.
 Its longest decoded quoted name is32 bytes. The two hand-authored
 `tbd_bad_mapping_separator_v4`/`tbd_bad_target_separator_v4` cases omit YAML
 mapping separator whitespace and are strict-reader rejection inputs; no prior
