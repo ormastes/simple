@@ -72,6 +72,9 @@ Explicit host drive/UNC paths remain host paths. Never retry the unrooted POSIX
 path after a rooted candidate fails. Runpath provenance must equal the normalized
 requester source path. Bare relative paths, recursive `@rpath` and unknown tokens
 reject; there is no invented CWD or owner-relative base for plain relative text.
+Mach-O metadata uses forward slashes, including explicit drive/UNC spellings;
+backslashes in runpath metadata reject. Native owner and output filesystem paths
+are normalized separately and may arrive with host-native separators.
 Selected malformed files fail immediately; do not try the next path after reading
 a bad candidate. Existing non-runpath dependency-search precedence is preserved.
 
