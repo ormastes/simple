@@ -1,0 +1,508 @@
+"""ITEM4-REQ-006 reexport closure acceptance. UNRUN; LLVM fixtures are not Darwin load evidence."""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{dir_create_all, file_read_bytes, file_exists, dir_exists}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.backend.linker.native_config.{NativeLinkConfig}
+use compiler.backend.linker.macho.native_adapter.{native_macho_plan_v1, native_macho_link_files_v1}
+use compiler.backend.linker.macho.native_provider_search.{macho_provider_path_v1, native_macho_load_provider_v1}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.macho.tbd_types.{MachOTbdTargetV1}
+use compiler.backend.linker.macho.provider_closure_types.{MachOProviderSourceV1, MachOProviderSearchV1, MachOProviderClientV1, macho_provider_closure_default_limits_v1}
+use compiler.backend.linker.macho.provider_closure.{macho_provider_closure_v1}
+use compiler.backend.linker.macho.binary_provider.{macho_read_binary_provider_v1}
+use compiler.backend.linker.macho.hosted_link.{MachOHostedRequest, macho_hosted_link_with_closure}
+
+fn item4_macho_closure_load(name: text, requester: text, search: MachOProviderSearchV1) -> Result<MachOProviderSourceV1, text>:
+    if not name.starts_with("/usr/lib/"): return Err("test fixture has no configured provider path for {name}")
+    val path = search.sdk_root + name
+    if not file_exists(path): return Err("test fixture provider file missing: {path}")
+    val bytes = file_read_bytes(path)
+    if bytes.len() == 0: return Err("test fixture provider file empty: {path}")
+    Ok(MachOProviderSourceV1(path: path, bytes: bytes))
+
+fn item4_macho_closure_target(arm: bool) -> MachOTbdTargetV1:
+    MachOTbdTargetV1(arch: if arm: RelocArch.AArch64 else: RelocArch.X86_64, platform: 1)
+
+fn item4_macho_closure_client() -> MachOProviderClientV1:
+    MachOProviderClientV1(output_install_name: "/tmp/denied", client_name: nil, parent_umbrella: nil)
+
+fn item4_macho_closure_read(bytes: [u8], at: i64, width: i64 = 4) -> i64:
+    val valid = width >= 1 and width <= 8 and at >= 0 and at <= bytes.len() and width <= bytes.len() - at
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    var value: i64 = 0
+    for index in 0..width: value = value | ((bytes[at + index] as i64) << (index * 8))
+    value
+
+fn item4_macho_closure_command(bytes: [u8], kind: i64) -> i64:
+    expect(bytes.len() >= 32).to_equal(true)
+    if bytes.len() < 32: return -1
+    val size = item4_macho_closure_read(bytes, 20)
+    val count = item4_macho_closure_read(bytes, 16)
+    val valid = size >= 0 and size <= bytes.len() - 32 and count <= size / 8
+    expect(valid).to_equal(true)
+    if not valid: return -1
+    var at: i64 = 32
+    for index in 0..count:
+        if at > 32 + size - 8:
+            expect(false).to_equal(true)
+            return -1
+        val length = item4_macho_closure_read(bytes, at + 4)
+        if length < 8 or length > 32 + size - at:
+            expect(false).to_equal(true)
+            return -1
+        if item4_macho_closure_read(bytes, at) == kind:
+            expect(length >= (if kind == 0x80000022: 48 else: 24)).to_equal(true)
+            if length < (if kind == 0x80000022: 48 else: 24): return -1
+            return at
+        at = at + length
+    expect(false).to_equal(true)
+    -1
+
+fn item4_macho_closure_config(parent: text) -> NativeLinkConfig:
+    var config = NativeLinkConfig.default()
+    config.runtime_path = "none"
+    config.allow_cc_fallback = false
+    config.extra_flags = ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "not.the.client",
+        "-rpath", "@loader_path", "-syslibroot", parent + "/sdk"]
+    config
+
+fn item4_macho_closure_cleanup(parent: text):
+    for name in ["app", "sdk/usr/lib/libitem4_closure_leaf.tbd", "sdk/usr/lib/libitem4_alias_leaf.dylib", "sdk/usr/lib/libitem4_alias.dylib"]:
+        if file_exists(parent + "/" + name): expect(file_remove(parent + "/" + name)).to_equal(true)
+    for name in ["sdk/usr/lib", "sdk/usr", "sdk"]:
+        if dir_exists(parent + "/" + name): expect(dir_remove(parent + "/" + name)).to_equal(true)
+    expect(dir_remove(parent)).to_equal(true)
+
+fn item4_macho_closure_check(image: [u8], arm: bool):
+    expect(image.len() > 0xc010).to_equal(true)
+    if image.len() <= 0xc010: return
+    expect(item4_macho_closure_read(image, 0)).to_equal(0xfeedfacf)
+    expect(item4_macho_closure_read(image, 4)).to_equal(if arm: 0x0100000c else: 0x01000007)
+    expect(item4_macho_closure_read(image, 12)).to_equal(2)
+    val dependency = item4_macho_closure_command(image, 0xc)
+    val info = item4_macho_closure_command(image, 0x80000022)
+    if dependency < 0 or info < 0: return
+    expect(item4_macho_closure_read(image, dependency + 16)).to_equal(0x030201)
+    val name = "@rpath/libitem4_closure_root.dylib"
+    val name_at = item4_macho_closure_read(image, dependency + 8)
+    val command_size = item4_macho_closure_read(image, dependency + 4)
+    val name_valid = name_at >= 24 and name_at <= command_size and name.len() < command_size - name_at
+    expect(name_valid).to_equal(true)
+    if not name_valid: return
+    for index in 0..name.len(): expect(image[dependency + name_at + index]).to_equal(name.byte_at(index) as u8)
+    expect(image[dependency + name_at + name.len()]).to_equal(0u8)
+    var loads: i64 = 0
+    var cursor: i64 = 32
+    for index in 0..item4_macho_closure_read(image, 16):
+        val length = item4_macho_closure_read(image, cursor + 4)
+        if length < 8 or cursor > image.len() - length:
+            expect(false).to_equal(true)
+            return
+        if item4_macho_closure_read(image, cursor) == 0xc: loads = loads + 1
+        cursor = cursor + length
+    expect(loads).to_equal(1)
+    val expected: [u8] = [0x20, 1, 0x40, 95, 104, 101, 108, 112, 101, 114, 0, 0x51, 0x60, 0, 0x72, 16, 0x90,
+        0x20, 1, 0x40, 95, 118, 97, 108, 117, 101, 0, 0x51, 0x60, 0, 0x72, 24, 0x90,
+        0x20, 1, 0x40, 95, 118, 97, 108, 117, 101, 0, 0x51, 0x60, 0, 0x72, 0, 0x90, 0]
+    val start = item4_macho_closure_read(image, info + 16)
+    val size = item4_macho_closure_read(image, info + 20)
+    expect(size).to_equal(expected.len())
+    val bounds = start >= 0 and start <= image.len() and size <= image.len() - start
+    expect(bounds).to_equal(true)
+    if not bounds or size != expected.len(): return
+    for index in 0..expected.len(): expect(image[start + index]).to_equal(expected[index])
+    expect(item4_macho_closure_read(image, 0xc008, 8)).to_equal(0x100004000)
+
+describe "Mach-O SDK reexport closure":
+    it "ITEM4-REQ-006 normalizes explicit provider paths without crossing absolute roots":
+        val inputs = ["C:\\SDK\\..\\SDK", "//server/share/a/../b", "/a/../b", "/", "../sdk/./lib", "a/.."]
+        val expected = ["C:/SDK", "//server/share/b", "/b", "/", "../sdk/lib", "."]
+        step("Normalize actual provider paths while preserving drive UNC and POSIX roots")
+        for index in 0..inputs.len():
+            val result = macho_provider_path_v1(inputs[index])
+            expect(result.is_ok()).to_equal(true)
+            if result.is_ok(): expect(result.unwrap()).to_equal(expected[index])
+        for path in ["//server/share/../escape", "/../escape", "C:/../escape", "C:relative", "//server", "", "bad\0path"]:
+            expect(macho_provider_path_v1(path).is_err()).to_equal(true)
+
+    it "ITEM4-REQ-006 reads loader and executable relative providers from actual files":
+        val made = dir_create_all("build")
+        expect(made).to_equal(true)
+        if not made: return
+        val created = secure_temp_dir("build", "item4-macho-path-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val directories = dir_create_all(parent + "/sdk/usr/lib")
+        expect(directories).to_equal(true)
+        if not directories:
+            item4_macho_closure_cleanup(parent)
+            return
+        val bytes = file_read_bytes("test/fixtures/linker/macho/closure_leaf_v4_interface.tbd")
+        val written = file_write_bytes(parent + "/sdk/usr/lib/libitem4_closure_leaf.tbd", bytes)
+        expect(written and bytes.len() > 32).to_equal(true)
+        if not written or bytes.len() <= 32:
+            item4_macho_closure_cleanup(parent)
+            return
+        val search = MachOProviderSearchV1(sdk_root: "", library_paths: [], output_path: parent + "/app")
+        step("Read the selected real file through both relative dependency tokens")
+        for name in ["@loader_path/libitem4_closure_leaf.dylib", "@executable_path/sdk/usr/lib/libitem4_closure_leaf.dylib"]:
+            val loaded = native_macho_load_provider_v1(name, parent + "/sdk/usr/lib/root.tbd", search)
+            expect(loaded.is_ok()).to_equal(true)
+            if loaded.is_ok():
+                expect(loaded.unwrap().bytes).to_equal(bytes)
+                expect(loaded.unwrap().path).to_equal(parent.replace("\\", "/") + "/sdk/usr/lib/libitem4_closure_leaf.tbd")
+        expect(native_macho_load_provider_v1("@rpath/libitem4_closure_leaf.dylib", parent + "/root.tbd", search).is_err()).to_equal(true)
+        item4_macho_closure_cleanup(parent)
+
+    it "ITEM4-REQ-006 rejects missing and duplicate SDK and client flag values before file reads":
+        val variants = [["-syslibroot"], ["-client_name"], ["-syslibroot", "sdk"], ["-client_name", "a", "-client_name", "b"]]
+        for index in 0..variants.len():
+            var config = item4_macho_closure_config("does-not-exist")
+            if index == 0:
+                config.extra_flags = ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "not.the.client"]
+            config.extra_flags = config.extra_flags + variants[index]
+            step("Reject unsupported configuration before input reads")
+            val plan = native_macho_plan_v1("x86_64", config, "not-created/app")
+            expect(plan.is_err()).to_equal(true)
+
+    it "ITEM4-REQ-006 enforces closure work and graph limits on an otherwise valid cyclic graph":
+        val path = "test/fixtures/linker/macho/closure_cycle_v4_interface.tbd"
+        val source = MachOProviderSourceV1(path: path, bytes: file_read_bytes(path))
+        val target = item4_macho_closure_target(false)
+        val client = item4_macho_closure_client()
+        val search = MachOProviderSearchV1(sdk_root: "", library_paths: [], output_path: "/tmp/app")
+        val baseline = macho_provider_closure_v1([source], target, client, search, item4_macho_closure_load, macho_provider_closure_default_limits_v1())
+        expect(baseline.is_ok()).to_equal(true)
+        if baseline.is_err(): return
+        for kind in 0..6:
+            var limits = macho_provider_closure_default_limits_v1()
+            if kind == 0: limits.max_sources = 1
+            if kind == 1: limits.max_total_bytes = source.bytes.len() - 1
+            if kind == 2: limits.max_edges = 1
+            if kind == 3: limits.max_symbols = 1
+            if kind == 4: limits.max_work = 1
+            if kind == 5: limits.max_depth = 1
+            step("Reject insufficient graph budgets without an image")
+            val result = macho_provider_closure_v1([source], target, client, search, item4_macho_closure_load, limits)
+            if kind == 5:
+                expect(result.is_ok()).to_equal(true)
+                if result.is_ok():
+                    var owner = result.unwrap()
+                    expect(owner.resolve_import("_not_in_cycle").is_err()).to_equal(true)
+            else:
+                expect(result.is_err()).to_equal(true)
+
+    it "ITEM4-REQ-006 rejects duplicate direct identities and conflicting declarations":
+        val path = "test/fixtures/linker/macho/closure_leaf_v4_interface.tbd"
+        val source = MachOProviderSourceV1(path: path, bytes: file_read_bytes(path))
+        val target = item4_macho_closure_target(false)
+        var client = item4_macho_closure_client()
+        client.client_name = Some("allowed_client")
+        val search = MachOProviderSearchV1(sdk_root: "", library_paths: [], output_path: "/tmp/app")
+        val baseline = macho_provider_closure_v1([source], target, client, search,
+            item4_macho_closure_load, macho_provider_closure_default_limits_v1())
+        expect(baseline.is_ok()).to_equal(true)
+        if baseline.is_err(): return
+        for kind in 0..2:
+            val second = if kind == 0: source else: MachOProviderSourceV1(
+                path: "test/fixtures/linker/macho/closure_restricted_v4_interface.tbd",
+                bytes: file_read_bytes("test/fixtures/linker/macho/closure_restricted_v4_interface.tbd"))
+            val result = macho_provider_closure_v1([source, second], target, client, search,
+                item4_macho_closure_load, macho_provider_closure_default_limits_v1())
+            expect(result.is_err()).to_equal(true)
+
+    it "ITEM4-REQ-006 uses explicit native client identity rather than the signing identifier":
+        val made = dir_create_all("build")
+        expect(made).to_equal(true)
+        if not made: return
+        val created = secure_temp_dir("build", "item4-macho-client-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val output = parent + "/app"
+        val sentinel: [u8] = [71, 19, 83, 2]
+        for format in ["v4", "v5"]:
+            for allowed in [false, true]:
+                val written = file_write_bytes(output, sentinel)
+                expect(written).to_equal(true)
+                if not written:
+                    item4_macho_closure_cleanup(parent)
+                    return
+                var config = item4_macho_closure_config(parent)
+                # A matching signing identifier is deliberately not an access grant.
+                config.extra_flags = ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "allowed_client"]
+                if allowed: config.extra_flags = config.extra_flags + ["-client_name", "allowed_client"]
+                val plan = native_macho_plan_v1("x86_64", config, output)
+                expect(plan.is_ok()).to_equal(true)
+                if plan.is_err():
+                    item4_macho_closure_cleanup(parent)
+                    return
+                val result = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/hosted_start_x64.o",
+                    "test/fixtures/linker/macho/closure_restricted_{format}_interface.tbd"], [], output)
+                if allowed:
+                    expect(result.is_ok()).to_equal(true)
+                    if result.is_ok():
+                        val image = file_read_bytes(output)
+                        expect(item4_macho_closure_read(image, 0)).to_equal(0xfeedfacf)
+                        expect(item4_macho_closure_read(image, 0xc008, 8)).to_equal(0x100004000)
+                        val info = item4_macho_closure_command(image, 0x80000022)
+                        if info >= 0: expect(item4_macho_closure_read(image, info + 20) > 0).to_equal(true)
+                else:
+                    expect(result.is_err()).to_equal(true)
+                    expect(file_read_bytes(output)).to_equal(sentinel)
+        item4_macho_closure_cleanup(parent)
+
+    it "ITEM4-REQ-006 preserves a destination for missing mismatched or incompatible external SDK providers":
+        for format in ["v4", "v5"]:
+            val made = dir_create_all("build")
+            expect(made).to_equal(true)
+            if not made: return
+            val created = secure_temp_dir("build", "item4-macho-missing-")
+            expect(created.is_ok()).to_equal(true)
+            if created.is_err(): return
+            val parent = created.unwrap()
+            val directories = dir_create_all(parent + "/sdk/usr/lib")
+            expect(directories).to_equal(true)
+            if not directories:
+                item4_macho_closure_cleanup(parent)
+                return
+            val output = parent + "/app"
+            val sentinel: [u8] = [71, 19, 83, 2]
+            val written = file_write_bytes(output, sentinel)
+            expect(written).to_equal(true)
+            if not written:
+                item4_macho_closure_cleanup(parent)
+                return
+            val plan = native_macho_plan_v1("x86_64", item4_macho_closure_config(parent), output)
+            expect(plan.is_ok()).to_equal(true)
+            if plan.is_err():
+                item4_macho_closure_cleanup(parent)
+                return
+            for mode in 0..4:
+                if mode > 0:
+                    val wrong_path = if mode == 1: "test/fixtures/linker/macho/closure_cycle_{format}_interface.tbd" else:
+                        (if mode == 2: "test/fixtures/linker/macho/tbd_arm64e_only_v4_interface.tbd" else: "test/fixtures/linker/macho/closure_future_leaf_v5_interface.tbd")
+                    val wrong = file_read_bytes(wrong_path)
+                    val stored = file_write_bytes(parent + "/sdk/usr/lib/libitem4_closure_leaf.tbd", wrong)
+                    expect(stored and wrong.len() > 32).to_equal(true)
+                    if not stored or wrong.len() <= 32:
+                        item4_macho_closure_cleanup(parent)
+                        return
+                step("Preserve the destination when graph construction cannot resolve the declared leaf")
+                val result = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/hosted_start_x64.o",
+                    "test/fixtures/linker/macho/closure_root_{format}_interface.tbd"], [], output)
+                expect(result.is_err()).to_equal(true)
+                if mode == 3 and result.is_err(): expect(result.unwrap_err()).to_contain("minimum OS")
+                expect(file_read_bytes(output)).to_equal(sentinel)
+            item4_macho_closure_cleanup(parent)
+
+    it "ITEM4-REQ-006 continues to a defining sibling after a cyclic binary alias branch":
+        val made = dir_create_all("build")
+        expect(made).to_equal(true)
+        if not made: return
+        val created = secure_temp_dir("build", "item4-macho-alias-cycle-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val directories = dir_create_all(parent + "/sdk/usr/lib")
+        expect(directories).to_equal(true)
+        if not directories:
+            item4_macho_closure_cleanup(parent)
+            return
+        val bytes = file_read_bytes("test/fixtures/linker/macho/closure_alias_cycle_x64.dylib")
+        val checked = macho_read_binary_provider_v1(bytes, RelocArch.X86_64)
+        expect(checked.is_ok()).to_equal(true)
+        if checked.is_err():
+            item4_macho_closure_cleanup(parent)
+            return
+        expect(checked.unwrap().dependencies.len()).to_equal(1)
+        if checked.unwrap().dependencies.len() != 1:
+            item4_macho_closure_cleanup(parent)
+            return
+        expect(checked.unwrap().dependencies[0].install_name).to_equal("/usr/lib/a.dylib")
+        var alias_found = false
+        for symbol in checked.unwrap().exports:
+            if symbol.name == "_alias" and symbol.import_name == "_alias" and symbol.library_ordinal == 1: alias_found = true
+        expect(alias_found).to_equal(true)
+        if not alias_found:
+            item4_macho_closure_cleanup(parent)
+            return
+        val written = file_write_bytes(parent + "/sdk/usr/lib/libitem4_alias.dylib", bytes)
+        expect(written).to_equal(true)
+        if not written:
+            item4_macho_closure_cleanup(parent)
+            return
+        for format in ["v4", "v5"]:
+            val path = "test/fixtures/linker/macho/closure_alias_sibling_{format}_interface.tbd"
+            val source = MachOProviderSourceV1(path: path, bytes: file_read_bytes(path))
+            val search = MachOProviderSearchV1(sdk_root: parent + "/sdk", library_paths: [], output_path: parent + "/app")
+            step("Resolve a genuine binary alias cycle before the later defining inline sibling")
+            val built = macho_provider_closure_v1([source], item4_macho_closure_target(false), item4_macho_closure_client(),
+                search, item4_macho_closure_load, macho_provider_closure_default_limits_v1())
+            expect(built.is_ok()).to_equal(true)
+            if built.is_ok():
+                var closure = built.unwrap()
+                val found = closure.resolve_import("_alias")
+                expect(found.is_ok()).to_equal(true)
+                if found.is_ok():
+                    expect(found.unwrap().is_some()).to_equal(true)
+                    if found.unwrap().is_some():
+                        expect(found.unwrap().unwrap().name).to_equal("_alias")
+                        expect(found.unwrap().unwrap().root_ordinal).to_equal(1)
+        item4_macho_closure_cleanup(parent)
+
+    it "ITEM4-REQ-006 retains the outward binary alias and root ordinal through actual image binding":
+        for arm in [false, true]:
+            val suffix = if arm: "a64" else: "x64"
+            val target = item4_macho_closure_target(arm)
+            step("Read the independently inspected alias trie through the validating binary reader")
+            val path = "test/fixtures/linker/macho/closure_alias_{suffix}.dylib"
+            val bytes = file_read_bytes(path)
+            val checked = macho_read_binary_provider_v1(bytes, target.arch)
+            expect(checked.is_ok()).to_equal(true)
+            if checked.is_err(): return
+            var alias_found = false
+            for symbol in checked.unwrap().exports:
+                if symbol.name == "_alias":
+                    expect(symbol.flags & 8).to_equal(8)
+                    expect(symbol.import_name).to_equal("_helper")
+                    expect(symbol.library_ordinal).to_equal(1)
+                    alias_found = true
+            expect(alias_found).to_equal(true)
+            if not alias_found: return
+            val made = dir_create_all("build")
+            expect(made).to_equal(true)
+            if not made: return
+            val created = secure_temp_dir("build", "item4-macho-alias-")
+            expect(created.is_ok()).to_equal(true)
+            if created.is_err(): return
+            val parent = created.unwrap()
+            val directories = dir_create_all(parent + "/sdk/usr/lib")
+            expect(directories).to_equal(true)
+            if not directories:
+                item4_macho_closure_cleanup(parent)
+                return
+            val leaf = file_read_bytes("test/fixtures/linker/macho/closure_alias_leaf_{suffix}.dylib")
+            val written = file_write_bytes(parent + "/sdk/usr/lib/libitem4_alias_leaf.dylib", leaf)
+            expect(written and leaf.len() > 32).to_equal(true)
+            if not written or leaf.len() <= 32:
+                item4_macho_closure_cleanup(parent)
+                return
+            val search = MachOProviderSearchV1(sdk_root: parent + "/sdk", library_paths: [], output_path: parent + "/app")
+            val built = macho_provider_closure_v1([MachOProviderSourceV1(path: path, bytes: bytes)], target,
+                item4_macho_closure_client(), search, item4_macho_closure_load, macho_provider_closure_default_limits_v1())
+            expect(built.is_ok()).to_equal(true)
+            if built.is_ok():
+                var closure = built.unwrap()
+                val binding = closure.resolve_import("_alias")
+                expect(binding.is_ok()).to_equal(true)
+                if binding.is_ok():
+                    expect(binding.unwrap().is_some()).to_equal(true)
+                    if binding.unwrap().is_some():
+                        expect(binding.unwrap().unwrap().name).to_equal("_alias")
+                        expect(binding.unwrap().unwrap().root_ordinal).to_equal(1)
+                val request = MachOHostedRequest(target: target.arch, entry: "_main", minimum_os: 0xb0000, sdk: 0xb0000,
+                    max_image_bytes: 1048576, identifier: "not.the.client", rpaths: [])
+                val linked = macho_hosted_link_with_closure([file_read_bytes("test/fixtures/linker/macho/closure_alias_entry_{suffix}.o")], [], closure, request)
+                expect(linked.is_ok()).to_equal(true)
+                if linked.is_ok():
+                    val image = linked.unwrap()
+                    val info = item4_macho_closure_command(image, 0x80000022)
+                    if info >= 0:
+                        val start = item4_macho_closure_read(image, info + 16)
+                        val expected: [u8] = [0x20, 1, 0x40, 95, 97, 108, 105, 97, 115, 0]
+                        val valid = start >= 0 and start <= image.len() and expected.len() <= image.len() - start
+                        expect(valid).to_equal(true)
+                        if valid:
+                            for index in 0..expected.len(): expect(image[start + index]).to_equal(expected[index])
+            item4_macho_closure_cleanup(parent)
+
+    it "ITEM4-REQ-006 terminates cyclic reexport lookup while finding a reachable definition":
+        for format in ["v4", "v5"]:
+            val path = "test/fixtures/linker/macho/closure_cycle_{format}_interface.tbd"
+            val source = MachOProviderSourceV1(path: path, bytes: file_read_bytes(path))
+            val search = MachOProviderSearchV1(sdk_root: "", library_paths: [], output_path: "/tmp/app")
+            val built = macho_provider_closure_v1([source], item4_macho_closure_target(false), item4_macho_closure_client(),
+                search, item4_macho_closure_load, macho_provider_closure_default_limits_v1())
+            expect(built.is_ok()).to_equal(true)
+            if built.is_err(): return
+            var closure = built.unwrap()
+            expect(closure.direct_providers().len()).to_equal(1)
+            val found = closure.resolve_import("_helper")
+            expect(found.is_ok()).to_equal(true)
+            if found.is_ok():
+                expect(found.unwrap().is_some()).to_equal(true)
+                if found.unwrap().is_some(): expect(found.unwrap().unwrap().root_ordinal).to_equal(1)
+            val missing = closure.resolve_import("_not_in_cycle")
+            expect(missing.is_ok()).to_equal(true)
+            if missing.is_ok(): expect(missing.unwrap().is_none()).to_equal(true)
+
+    it "ITEM4-REQ-006 applies direct client and umbrella permission to actual output identity":
+        for format in ["v4", "v5"]:
+            val path = "test/fixtures/linker/macho/closure_restricted_{format}_interface.tbd"
+            val source = MachOProviderSourceV1(path: path, bytes: file_read_bytes(path))
+            val search = MachOProviderSearchV1(sdk_root: "", library_paths: [], output_path: "/tmp/denied")
+            for mode in 0..5:
+                var client = item4_macho_closure_client()
+                if mode == 1: client.client_name = Some("allowed_client")
+                if mode == 2: client.parent_umbrella = Some("AllowedUmbrella")
+                if mode == 3: client.client_name = Some("allowed")
+                if mode == 4: client.client_name = Some("allowed_client_extra")
+                val built = macho_provider_closure_v1([source], item4_macho_closure_target(false), client,
+                    search, item4_macho_closure_load, macho_provider_closure_default_limits_v1())
+                if mode == 0 or mode == 4:
+                    expect(built.is_err()).to_equal(true)
+                else:
+                    expect(built.is_ok()).to_equal(true)
+                    if built.is_ok():
+                        var closure = built.unwrap()
+                        val found = closure.resolve_import("_helper")
+                        expect(found.is_ok()).to_equal(true)
+                        if found.is_ok(): expect(found.unwrap().is_some()).to_equal(true)
+
+    it "ITEM4-REQ-006 follows inline and external reexports while binding through the direct root ordinal":
+        for variant in 0..8:
+            val arm = variant % 2 == 1
+            val format = if variant % 4 >= 2: "v5" else: "v4"
+            val suffix = if arm: "a64" else: "x64"
+            step("Stage real root inline middle and external SDK leaf providers")
+            val made = dir_create_all("build")
+            expect(made).to_equal(true)
+            if not made: return
+            val created = secure_temp_dir("build", "item4-macho-closure-")
+            expect(created.is_ok()).to_equal(true)
+            if created.is_err(): return
+            val parent = created.unwrap()
+            val directories = dir_create_all(parent + "/sdk/usr/lib")
+            expect(directories).to_equal(true)
+            if not directories:
+                item4_macho_closure_cleanup(parent)
+                return
+            val leaf_kind = if variant >= 4: "restricted" else: "leaf"
+            val leaf = file_read_bytes("test/fixtures/linker/macho/closure_{leaf_kind}_{format}_interface.tbd")
+            expect(leaf.len() > 32).to_equal(true)
+            if leaf.len() <= 32:
+                item4_macho_closure_cleanup(parent)
+                return
+            val written = file_write_bytes(parent + "/sdk/usr/lib/libitem4_closure_leaf.tbd", leaf)
+            expect(written).to_equal(true)
+            if not written:
+                item4_macho_closure_cleanup(parent)
+                return
+            val output = parent + "/app"
+            val plan = native_macho_plan_v1(if arm: "aarch64" else: "x86_64", item4_macho_closure_config(parent), output)
+            expect(plan.is_ok()).to_equal(true)
+            if plan.is_ok():
+                step("Link real object imports through the complete selected provider graph")
+                val linked = native_macho_link_files_v1(plan.unwrap(), ["test/fixtures/linker/macho/hosted_start_{suffix}.o",
+                    "test/fixtures/linker/macho/closure_root_{format}_interface.tbd"], [], output)
+                expect(linked.is_ok()).to_equal(true)
+                if linked.is_ok():
+                    step("Inspect the outward symbols and direct root ordinal in emitted bindings")
+                    item4_macho_closure_check(file_read_bytes(output), arm)
+            step("Remove only owned SDK and output files")
+            item4_macho_closure_cleanup(parent)

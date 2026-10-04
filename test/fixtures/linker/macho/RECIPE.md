@@ -143,3 +143,69 @@ Its longest decoded quoted name is32 bytes. The two hand-authored
 `tbd_bad_mapping_separator_v4`/`tbd_bad_target_separator_v4` cases omit YAML
 mapping separator whitespace and are strict-reader rejection inputs; no prior
 successful external check was repeated.
+
+## Stage 3 provider closure fixtures (2026-10-04)
+
+All commands below ran from `test/fixtures/linker/macho` in WSL Ubuntu with
+LLVM 21.1.8 (Ubuntu clang 21.1.8 6ubuntu1). This is external construction and
+inspection evidence only; all Simple closure tests remain UNRUN.
+
+The root, leaf, whole-library cycle, restricted-client and alias-sibling v4
+interfaces are authored inputs. Their v5 counterparts were converted with:
+
+```
+llvm-readtapi -stubify --filetype=tbd-v5 closure_root_v4_interface.tbd -o closure_root_v5_interface.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 closure_leaf_v4_interface.tbd -o closure_leaf_v5_interface.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 closure_cycle_v4_interface.tbd -o closure_cycle_v5_interface.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 closure_restricted_v4_interface.tbd -o closure_restricted_v5_interface.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 closure_alias_sibling_v4_interface.tbd -o closure_alias_sibling_v5_interface.tbd
+llvm-readtapi -compare closure_root_v4_interface.tbd closure_root_v5_interface.tbd
+llvm-readtapi -compare closure_cycle_v4_interface.tbd closure_cycle_v5_interface.tbd
+```
+
+Each command succeeded once. No LLVM client-access authorization is inferred.
+The alias entry assembly differs from the earlier hosted entry only by calling
+`_alias` instead of `_helper`. Exact construction:
+
+```
+clang --target=x86_64-apple-macos11 -c closure_alias_entry_x64.s
+clang --target=arm64-apple-macos11 -c closure_alias_entry_a64.s
+ld64.lld -dylib -arch x86_64 -platform_version macos 11 11 -install_name /usr/lib/libitem4_alias_leaf.dylib -o closure_alias_leaf_x64.dylib provider_x64.o
+ld64.lld -dylib -arch arm64 -platform_version macos 11 11 -install_name /usr/lib/libitem4_alias_leaf.dylib -o closure_alias_leaf_a64.dylib provider_a64.o
+ld64.lld -dylib -arch x86_64 -platform_version macos 11 11 -install_name /usr/lib/libitem4_alias.dylib -reexport_library closure_alias_leaf_x64.dylib -o closure_alias_x64.dylib
+ld64.lld -dylib -arch arm64 -platform_version macos 11 11 -install_name /usr/lib/libitem4_alias.dylib -reexport_library closure_alias_leaf_a64.dylib -o closure_alias_a64.dylib
+```
+
+LLD's attempted `-alias _helper _alias` with a reexport provider failed with
+`TODO: support aliasing to symbols of kind 3`. Accordingly the two real binary
+roots above were explicitly mutated, rather than described as LLD-generated
+aliases. Append the following export trie byte sequence at original EOF:
+`00 01 5f 61 6c 69 61 73 00 0a 0a 08 01 5f 68 65 6c 70 65 72 00 00`.
+Set LC_DYLD_INFO_ONLY export offset/size to that appended span, extend __LINKEDIT
+file size to EOF and round its VM size up to16384. It encodes `_alias`, flags8,
+reexport dependency ordinal1, import `_helper`. Existing signatures are not
+recomputed: no signature validity or Darwin loading claim is made.
+
+`closure_alias_cycle_x64.dylib` derives from this checked-base x64 root. Its
+LC_REEXPORT_DYLIB name is replaced within the existing command by
+`/usr/lib/a.dylib` and zero padding. The alias terminal size changes10 to9;
+import bytes become `_alias` plus NUL and the next child-count byte remains0.
+The v4/v5 sibling fixture's A reexports this binary B before inline C; C defines
+`_alias`. This is an intentional mixed alias-cycle regression.
+
+Independent observations, each executed once:
+
+```
+llvm-objdump --macho --exports-trie closure_alias_x64.dylib closure_alias_a64.dylib
+llvm-objdump --macho --exports-trie closure_alias_cycle_x64.dylib
+```
+
+The first prints `[re-export] _alias (_helper from libitem4_alias_leaf)` for
+both CPUs; the second prints `[re-export] _alias (_alias from a)`. These are
+binary export-trie observations, not application execution or a fake provider
+VM-address construction. No new archive ordering is involved in this lane.
+
+The hand-authored closure_future_leaf_v5_interface.tbd requires macOS 12.0 for
+a reachable x64 leaf under a macOS 11 request. Its specific minimum-OS rejection
+and destination preservation are authored acceptance, not an external LLVM or
+Simple execution claim.

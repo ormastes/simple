@@ -1,4 +1,4 @@
-use compiler.backend.linker.macho.tbd_types.{MachOTbdDocumentV1, MachOTbdTargetV1}
+use compiler.backend.linker.macho.tbd_types.{MachOTbdDocumentV1, MachOTbdTargetV1, MachOTbdLibraryV1}
 use compiler.backend.linker.macho.tbd_values.{tbd_target_name}
 use compiler.backend.linker.macho.provider_types.{MachOProviderV1, MachOProviderExportV1, macho_validate_provider_v1}
 
@@ -7,23 +7,28 @@ fn macho_tbd_main_provider_v1(document: MachOTbdDocumentV1, target: MachOTbdTarg
     val wanted = tbd_target_name(target)?
     if tbd_target_name(document.target)? != wanted: return Err("TBD lowering target mismatch")
     if document.format_version != 4 and document.format_version != 5: return Err("TBD invalid lowering format")
-    val library = document.main
+    macho_tbd_library_provider_v1(document.main, target, false)
+
+fn macho_tbd_library_provider_v1(library: MachOTbdLibraryV1, target: MachOTbdTargetV1, closure: bool) -> Result<MachOProviderV1, text>:
+    """The graph owns named reexports and policy; never invent dependency ordinals."""
+    val wanted = tbd_target_name(target)?
     if not library.selected or not library.declared_targets.contains(wanted) or library.install_name.is_none():
         return Err("TBD unavailable main provider")
-    if library.reexported_libraries.len() > 0: return Err("TBD unsupported reexport library closure")
+    if not closure and library.reexported_libraries.len() > 0: return Err("TBD unsupported reexport library closure")
     # Current executable output never sets MH_APP_EXTENSION_SAFE, so an unsafe
     # dependency adds no missing output restriction. Other flags need policy.
     for flag in library.flags:
         if flag != "not_app_extension_safe": return Err("TBD unsupported provider flags: {flag}")
     if val swift = library.swift_abi:
         if swift != 0: return Err("TBD unsupported Swift ABI metadata")
-    if library.allowable_clients.len() > 0: return Err("TBD unsupported allowable clients policy")
-    if library.parent_umbrella.is_some(): return Err("TBD unsupported parent umbrella policy")
+    if not closure and library.allowable_clients.len() > 0: return Err("TBD unsupported allowable clients policy")
+    if not closure and library.parent_umbrella.is_some(): return Err("TBD unsupported parent umbrella policy")
     if library.rpaths.len() > 0: return Err("TBD unsupported provider rpath policy")
     var exports: [MachOProviderExportV1] = []
     var names: {text: i64} = {}
     for symbol in library.symbols:
-        if symbol.role != "export": return Err("TBD unsupported {symbol.role} symbol closure")
+        if symbol.role != "export" and not (closure and symbol.role == "reexport"):
+            return Err("TBD unsupported {symbol.role} symbol closure")
         if symbol.weak_referenced: return Err("TBD invalid weak reference export")
         if symbol.name.starts_with("$ld$"): return Err("TBD unsupported linker directive symbol")
         var emitted: [text] = []
@@ -43,9 +48,9 @@ fn macho_tbd_main_provider_v1(document: MachOTbdDocumentV1, target: MachOTbdTarg
     val provider = MachOProviderV1(target: target.arch, platform: target.platform, install_name: library.install_name.unwrap(),
         current_version: library.current_version, compatibility_version: library.compatibility_version,
         minimum_os: library.minimum_os, sdk: nil, dependencies: [], exports: exports,
-        allowable_clients: [], parent_umbrella: nil)
+        allowable_clients: library.allowable_clients, parent_umbrella: library.parent_umbrella)
     val valid = macho_validate_provider_v1(provider, target.arch)
     if valid.is_err(): return Err("TBD invalid lowered provider: {valid.unwrap_err()}")
     Ok(provider)
 
-export macho_tbd_main_provider_v1
+export macho_tbd_main_provider_v1, macho_tbd_library_provider_v1

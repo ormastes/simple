@@ -33,11 +33,19 @@ Supply actual matching Mach-O objects, archives and thin dylib providers through
 explicit library paths. Providers with an `@rpath/` install name also require an
 explicit runtime search path such as `-rpath @loader_path`; a library search
 directory alone does not supply that runtime path. Explicit `.tbd` files use
-the v4 YAML or v5 JSON reader and target selection before leaf-provider linking.
+the v4 YAML or v5 JSON reader and target selection before provider-graph linking.
 Named libraries search each configured directory in `.dylib`, `.tbd`, `.a`
 order. A selected stub's error does not fall back to the archive or another
-directory. Unresolved reexports, access restrictions and other unsupported SDK
-semantics fail explicitly; this is not complete SDK dependency resolution.
+directory. Reexport graphs retain direct-library ordinals and outward alias
+names. Use `-syslibroot SDK_DIRECTORY` for an explicit SDK dependency root;
+configured library directories are searched first, with dependency `.tbd`
+candidates before their binary equivalents. Actual requesting/output directories
+resolve `@loader_path`/`@executable_path`; there is no implicit host SDK fallback.
+Direct client restrictions use the actual output identity or explicit
+`-client_name NAME`, independently of the signing identifier. Indirect providers
+do not acquire the executable's direct-client restriction. Unsupported
+owner-specific `@rpath`, legacy reexport commands and other SDK semantics still
+fail explicitly; this is not complete SDK qualification.
 Dyld shared-cache providers remain unsupported, and an SDK version flag does
 not discover or admit an SDK. The reader's documented syntax and metadata limits
 are in `doc/05_design/compiler/linker/macho_textstub_readers_2026-10-04.md`.

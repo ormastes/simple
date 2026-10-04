@@ -448,3 +448,28 @@ Remove owned fixture files. Reader/schema, resource-limit, metadata, TLV and
 Objective-C assertions complement actual file-route checks. LLVM fixture
 validation is independent syntax/metadata evidence, not Simple execution.
 Full SDK closure, binding, discovery and all-five-host execution remain open.
+
+## Mach-O provider graph and SDK resolution (2026-10-04)
+
+Base: 9f4a7c01a0dbe2cd0bb83b9bc4980ad1cbf126e5, target release/1.0.
+Root owns work/item4-macho-sdk-closure-20261004, native adapter/search modules,
+shared tracking and landing. Runtime owns closure types/source/graph, shared
+TBD lowering and hosted lookup integration. Acceptance owns real closure/alias
+fixtures and specifications/manuals. Research owns closure detail design and
+independent final source/test review. Separate worktrees; sidecars N/A.
+
+Initial real SDK-chain intent 865f0a73251 precedes implementation. The graph
+retains direct roots and dependency edges; imports preserve original outward
+names and direct root ordinals. Client restrictions apply to direct providers
+using actual output identity or explicit -client_name, never signing identity.
+Root's loader callback uses explicit SDK/search paths and requester provenance.
+It cannot silently select another provider after a chosen file fails validation.
+
+Helpers use item4_macho_closure_*; shared steps cover Construct a real SDK
+dependency tree; Resolve inline and external providers; Inspect direct load
+commands and outward bindings; Enforce direct client restrictions; Preserve
+the destination on closure failure; Remove owned fixture files. Cycles and
+aliases require bounded pair-aware lookup. Both architectures/formats, missing
+and ambiguous identities, actual access outcomes and budgets need assertions.
+No executed RED/GREEN, runtime coverage or host qualification is inferred from
+authored intent and independent external fixture inspection.

@@ -6,6 +6,7 @@ use compiler.backend.linker.macho.symbols.{macho_definitions, macho_unresolved, 
 use compiler.backend.linker.macho.relocations.{macho_relocate}
 use compiler.backend.linker.macho.provider_types.{MachOProviderV1, macho_validate_provider_v1}
 use compiler.backend.linker.macho.binary_provider.{macho_read_binary_provider_v1}
+use compiler.backend.linker.macho.provider_closure.{MachOProviderClosureV1}
 use compiler.backend.linker.macho.hosted_fixups.{macho_hosted_slots, macho_hosted_fixups}
 use compiler.backend.linker.macho.hosted_image.{macho_hosted_stubs, macho_hosted_image}
 
@@ -53,6 +54,14 @@ fn macho_hosted_request_v1(request: MachOHostedRequest) -> Result<bool, text>:
     Ok(arm)
 
 fn macho_hosted_link_with_providers(objects: [[u8]], archives: [[u8]], providers: [MachOProviderV1], request: MachOHostedRequest) -> Result<[u8], text>:
+    macho_hosted_link_selected_v1(objects, archives, providers, nil, request)
+
+fn macho_hosted_link_with_closure(objects: [[u8]], archives: [[u8]], closure: MachOProviderClosureV1, request: MachOHostedRequest) -> Result<[u8], text>:
+    closure.validate_for_request(request.target, request.minimum_os)?
+    macho_hosted_link_selected_v1(objects, archives, closure.direct_providers(), Some(closure), request)
+
+fn macho_hosted_link_selected_v1(objects: [[u8]], archives: [[u8]], providers: [MachOProviderV1],
+        closure: Option<MachOProviderClosureV1>, request: MachOHostedRequest) -> Result<[u8], text>:
     """Construct a two-level PIE main image with eager dyld fixups and signing.
 
     No Apple loader execution/trust is inferred from a successful byte result.
@@ -69,8 +78,9 @@ fn macho_hosted_link_with_providers(objects: [[u8]], archives: [[u8]], providers
         if library.platform != 1: return Err("hosted provider platform/minimum OS mismatch")
         if val minimum = library.minimum_os:
             if minimum > request.minimum_os: return Err("hosted provider platform/minimum OS mismatch")
-        if library.allowable_clients.len() > 0: return Err("unsupported hosted provider allowable clients")
-        if library.parent_umbrella.is_some(): return Err("unsupported hosted provider parent umbrella")
+        if closure.is_none():
+            if library.allowable_clients.len() > 0: return Err("unsupported hosted provider allowable clients")
+            if library.parent_umbrella.is_some(): return Err("unsupported hosted provider parent umbrella")
         if install_names.has(library.install_name): return Err("duplicate hosted dylib install name")
         if library.install_name.starts_with("@rpath/") and request.rpaths.len() == 0:
             return Err("hosted @rpath provider requires an explicit runtime search path")
@@ -113,7 +123,7 @@ fn macho_hosted_link_with_providers(objects: [[u8]], archives: [[u8]], providers
                     return Err("hosted section discovery semantics unsupported: {section.segname},{section.sectname}")
     val definitions = macho_definitions(inputs, request.allow_duplicate_definitions)?
     if not definitions.has(request.entry): return Err("undefined hosted entry {request.entry}")
-    val slots = macho_hosted_slots(inputs, definitions, providers, arm)?
+    val slots = macho_hosted_slots(inputs, definitions, providers, arm, closure)?
     val text_reserve = macho_align(slots.len() * 16, 0x4000)
     val layout = macho_layout(inputs, limit, text_reserve)?
     val chosen = definitions[request.entry]
@@ -140,4 +150,4 @@ fn macho_hosted_link_with_providers(objects: [[u8]], archives: [[u8]], providers
     bytes = macho_hosted_stubs(bytes, got, stubs, fixups.slot_values, arm)?
     macho_hosted_image(bytes, layout, providers, fixups, entry, arm, request.minimum_os, request.sdk, request.identifier, request.rpaths, limit)
 
-export MachOHostedRequest, macho_hosted_link, macho_hosted_link_with_providers
+export MachOHostedRequest, macho_hosted_link, macho_hosted_link_with_providers, macho_hosted_link_with_closure

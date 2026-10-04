@@ -36,8 +36,8 @@ Joint freeze refinement: target is `{arch: RelocArch, platform: i64}`. Retain
 and selected `install_name: Option<text>`. Unavailable inline target selection
 uses `None`; do not invent a name from the first scoped identity. Main requires a
 selected identity. Library `declared_targets` and `selected` preserve availability.
-Limits default to max_bytes=16777216, max_tokens=1048576, max_depth=64,
-max_libraries=4096, max_symbols=1048576 and max_name_bytes=4096. Callers may lower
+Limits default to max_bytes=16777216, max_tokens=1000000, max_depth=64,
+max_libraries=4096, max_symbols=1000000 and max_name_bytes=4096. Callers may lower
 these limits; defaults also cap accepted limit settings.
 
 `macho_tbd_main_provider_v1(document, target) -> Result<MachOProviderV1, text>`
