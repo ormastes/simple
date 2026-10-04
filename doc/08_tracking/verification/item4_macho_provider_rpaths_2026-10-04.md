@@ -34,3 +34,16 @@ check. Simple compilation, SSpec, docgen, coverage, core/lib/MCP, native host an
 performance checks remain UNRUN. No Rust seed fallback was used. Legacy SDK
 reexport commands, broader provider semantics, complete application integration,
 managed admission and all five native host qualifications remain open.
+
+Independent final acceptance review binds f64c60b4f56 without concrete P0/P1.
+Scoped whitespace, direct-env working/staged and numbered-artifact checks passed
+against release base 860b367839dbd6c6c7b0974c9505efacc013113d. The core owner
+checked zero tracked executable specs under doc/06_spec; this lane adds only a
+Markdown manual there. Subsequent review documentation changes are Markdown only.
+
+Committed test-tree comparison passed: 3152 inherited offenders, zero introduced.
+The retained list is
+`C:/dev/simple/.git/item4-macho-provider-rpaths-preexisting-offenders.txt`, SHA256
+`2fb68a47bab7953e058a449562ecba2df9f135b8d2e2d99c3e14f373b1c1d719`.
+This delta result does not turn the repository's inherited full-tree failure or
+any UNRUN execution gate into PASS.
