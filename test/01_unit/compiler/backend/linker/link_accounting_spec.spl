@@ -4,7 +4,7 @@ use std.common.linker.link_receipt_v1.{LinkAccountingClassV1}
 use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, TerminationCause}
 use compiler.backend.linker.link_accounting.{link_accounting_observation_v1}
 
-fn usage(peak: i64, quality: ResourceEvidenceQuality) -> ResourceUsage:
+fn item4_resource_evidence_usage(peak: i64, quality: ResourceEvidenceQuality) -> ResourceUsage:
     ResourceUsage(
         wall_ms: 1, user_cpu_ms: 1, system_cpu_ms: 0,
         peak_tree_charge_bytes: peak, peak_direct_child_rss_bytes: 0,
@@ -15,20 +15,25 @@ fn usage(peak: i64, quality: ResourceEvidenceQuality) -> ResourceUsage:
     )
 
 describe "linker accounting evidence":
-    it "qualifies only exact cgroup tree charge below the admitted limit":
-        step("Classify exact-tree evidence on both sides of the strict limit")
-        val below = link_accounting_observation_v1(usage(5999999999, ResourceEvidenceQuality.ExactTree), 6000000000)
-        assert_equal(below.accounting_class, LinkAccountingClassV1.QualifiedJobScope)
-        assert_true(below.certified_under_limit)
-        val at_limit = link_accounting_observation_v1(usage(6000000000, ResourceEvidenceQuality.ExactTree), 6000000000)
-        assert_equal(at_limit.accounting_class, LinkAccountingClassV1.QualifiedJobScope)
-        assert_false(at_limit.certified_under_limit)
+    it "ITEM4-REQ-009 never certifies enforcement from measurements and a caller supplied limit":
+        step("Classify every available observation quality below at and above a claimed limit")
+        for quality in [ResourceEvidenceQuality.ExactTree, ResourceEvidenceQuality.ExactDirectChild, ResourceEvidenceQuality.SampledTree, ResourceEvidenceQuality.ProcessOnly]:
+            for peak in [0i64, 5999999999i64, 6000000000i64, 6000000001i64]:
+                for limit in [0u64, 6000000000u64]:
+                    val observed = link_accounting_observation_v1(item4_resource_evidence_usage(peak, quality), limit)
+                    expect(observed.accounting_class).to_equal(LinkAccountingClassV1.MeasuredOnly)
+                    expect(observed.measured_peak_bytes).to_equal(peak as u64)
+                    expect(observed.admitted_limit_bytes).to_equal(limit)
+                    expect(observed.certified_under_limit).to_equal(false)
 
-    it "never promotes weaker or absent evidence":
-        step("Keep process-only measurements outside the release gate")
-        val measured = link_accounting_observation_v1(usage(100, ResourceEvidenceQuality.ProcessOnly), 6000000000)
-        assert_equal(measured.accounting_class, LinkAccountingClassV1.MeasuredOnly)
-        assert_false(measured.certified_under_limit)
-        val absent = link_accounting_observation_v1(usage(-1, ResourceEvidenceQuality.Unavailable), 6000000000)
-        assert_equal(absent.accounting_class, LinkAccountingClassV1.NotCertified)
-        assert_equal(absent.measured_peak_bytes, 0u64)
+    it "ITEM4-REQ-009 rejects invalid and unavailable measurements regardless of claimed limit":
+        step("Reject negative peaks for every quality and all unavailable observations")
+        for quality in [ResourceEvidenceQuality.ExactTree, ResourceEvidenceQuality.ExactDirectChild, ResourceEvidenceQuality.SampledTree, ResourceEvidenceQuality.ProcessOnly, ResourceEvidenceQuality.Unavailable]:
+            for peak in [-1i64, 0i64, 42i64]:
+                if peak >= 0 and quality != ResourceEvidenceQuality.Unavailable: continue
+                for limit in [0u64, 6000000000u64]:
+                    val observed = link_accounting_observation_v1(item4_resource_evidence_usage(peak, quality), limit)
+                    expect(observed.accounting_class).to_equal(LinkAccountingClassV1.NotCertified)
+                    expect(observed.measured_peak_bytes).to_equal(0u64)
+                    expect(observed.admitted_limit_bytes).to_equal(limit)
+                    expect(observed.certified_under_limit).to_equal(false)

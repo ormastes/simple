@@ -235,3 +235,24 @@ existing release consumers were migrated on release/1.0. Shared retained-file
 regressions use direct stdlib imports and private temporary files on both
 branches. References to that SCV caller chain in the SHA bug/report describe the
 release-side dependency; they do not assert those paths exist on main.
+
+## Resource-enforcement prerequisite, 2026-10-04
+
+Measurement integrity is now a separate acceptance unit: missing, malformed or
+incoherent cgroup memory counters cannot become an exact zero; failed/truncated
+systemd observations cannot supply valid peak/CPU metrics; measurement-only linker
+classification never issues QualifiedJobScope. Five resource-observation and
+two classifier scenarios exercise actual metric files and production parser paths.
+These are authored tests, not kernel enforcement or execution evidence.
+
+Item 3 still requires the parent-owned worker described in
+`doc/05_design/compiler/linker/resource_evidence_and_worker_2026-10-04.md`: enforce
+and read back limits/no-swap before workload execution, retain descendants,
+collect complete peak/event/identity evidence, and publish worker-private output
+only from the parent. Missing delegation or artifact admission must reject before
+input allocation. Windows committed-memory evidence is not RSS/no-swap proof.
+The existing UnsupportedBudget gate remains in place.
+
+User constraint: hosted linking keeps external default selection. The mold-style
+Simple linker stays accessible through explicit SIMPLE_LINKER=internal; see
+`doc/07_guide/compiler/linker_selection.md`.

@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/memory-admission.shs"
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/stage3-actual-peer.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+make_peer() {
+  peer_pid=$1
+  peer_exe=$2
+  shift 2
+  mkdir -p "$tmp/$peer_pid"
+  ln -s "$peer_exe" "$tmp/$peer_pid/exe"
+  printf '%s\0' "$@" >"$tmp/$peer_pid/cmdline"
+}
+
+# A retained shell command string may mention two builds, but the shell is
+# waiting on unrelated work. Only the actual native-build child counts.
+make_peer 101 /bin/bash /bin/bash -c \
+  'echo simple native-build; echo scripts/bootstrap/bootstrap-from-scratch.sh'
+[ "$(bootstrap_stage3_memory_linux_actual_kind "$tmp" 101)" = none ] ||
+  fail 'shell command text was counted as a build'
+make_peer 102 "$tmp/simple" "$tmp/simple" native-build --threads 4
+[ "$(bootstrap_stage3_memory_linux_actual_kind "$tmp" 102)" = native-build ] ||
+  fail 'actual native-build child was not counted'
+make_peer 106 "$tmp/compiler.snapshot" "$tmp/compiler.snapshot" native-build --threads 4
+[ "$(bootstrap_stage3_memory_linux_actual_kind "$tmp" 106)" = native-build ] ||
+  fail 'canonical compiler.snapshot native-build was not counted'
+make_peer 103 /bin/bash /bin/bash scripts/bootstrap/bootstrap-from-scratch.sh --resume
+[ "$(bootstrap_stage3_memory_linux_actual_kind "$tmp" 103)" = bootstrap ] ||
+  fail 'direct bootstrap script was not counted'
+make_peer 107 /bin/sh /bin/sh -e -- scripts/bootstrap/bootstrap-from-scratch.sh --resume
+[ "$(bootstrap_stage3_memory_linux_actual_kind "$tmp" 107)" = bootstrap ] ||
+  fail 'direct sh -e -- bootstrap was not counted'
+make_peer 108 /bin/bash /bin/bash -o pipefail scripts/bootstrap/bootstrap-from-scratch.sh
+[ "$(bootstrap_stage3_memory_linux_actual_kind "$tmp" 108)" = bootstrap ] ||
+  fail 'direct bash -o pipefail bootstrap was not counted'
+make_peer 109 /bin/bash /bin/bash -l scripts/bootstrap/bootstrap-from-scratch.sh
+[ "$(bootstrap_stage3_memory_linux_actual_kind "$tmp" 109)" = bootstrap ] ||
+  fail 'direct bash -l bootstrap was not counted'
+make_peer 104 /usr/bin/qemu-system-aarch64 /usr/bin/qemu-system-aarch64 -m 36G
+[ "$(bootstrap_stage3_memory_linux_actual_kind "$tmp" 104)" = qemu ] ||
+  fail 'actual QEMU process was not counted'
+make_peer 105 /bin/bash /bin/bash -c \
+  'ssh host sh scripts/bootstrap/bootstrap-from-scratch.sh'
+[ "$(bootstrap_stage3_memory_linux_actual_kind "$tmp" 105)" = none ] ||
+  fail 'SSH coordinator text was counted as a bootstrap'
+
+echo 'PASS: Stage 3 peers require actual executable and argv identity'

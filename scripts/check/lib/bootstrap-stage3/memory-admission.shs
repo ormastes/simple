@@ -51,6 +51,63 @@ bootstrap_stage3_memory_qemu_identity() {
     ' "$1" "$2"
 }
 
+# ps flattens argv into one string. A long-lived `sh -c` command can contain
+# the text of a native-build or bootstrap command without running either one.
+# Classify the kernel-owned executable and argument vector instead. The ps
+# display remains in the receipt for diagnosis, never as Linux authority.
+bootstrap_stage3_memory_linux_actual_kind() {
+    [ "$#" -eq 2 ] || return 1
+    bootstrap_stage3_memory_is_uint "$2" || return 1
+    perl -e '
+        use strict; use warnings;
+        my ($root, $pid) = @ARGV;
+        my $exe = readlink "$root/$pid/exe";
+        defined($exe) or exit 1;
+        $exe =~ s/ \(deleted\)\z//;
+        $exe =~ s{.*/}{};
+        open my $cmd, "<:raw", "$root/$pid/cmdline" or exit 1;
+        local $/; my $bytes = <$cmd>; close $cmd;
+        defined($bytes) && $bytes =~ /\0\z/ or exit 1;
+        my @args = split /\0/, $bytes;
+        @args or exit 1;
+        if ($exe =~ /^qemu-system-[A-Za-z0-9_+-]+$/ &&
+            $args[0] =~ m{(?:^|/)qemu-system-[A-Za-z0-9_+-]+\z}) {
+            print "qemu\n";
+        } elsif ($exe !~ /^(?:sh|bash|dash|qemu-system-[A-Za-z0-9_+-]+)$/ &&
+                 @args > 1 && $args[1] eq "native-build") {
+            print "native-build\n";
+        } elsif ($exe eq "simple" && @args > 2 && $args[1] eq "replay" &&
+                 $args[2] eq "missing-build-log.json") {
+            print "replay-chain\n";
+        } elsif ($exe =~ /^(?:sh|bash|dash)$/) {
+            my $i = 1;
+            while ($i < @args && $args[$i] =~ /^[+-]/) {
+                if ($args[$i] eq "--") {
+                    $i++; last;
+                } elsif ($args[$i] =~ /^-[A-Za-z]*c[A-Za-z]*$/ ||
+                         $args[$i] eq "--command") {
+                    print "none\n"; exit 0;
+                } elsif ($args[$i] =~ /^-[eluxn]+$/ ||
+                         $args[$i] =~ /^--(?:login|noprofile|norc|posix)$/) {
+                    $i++;
+                } elsif ($args[$i] eq "-o" || $args[$i] eq "+o") {
+                    $i += 2;
+                } else {
+                    print "uncertain\n"; exit 0;
+                }
+            }
+            if ($i < @args &&
+                $args[$i] =~ m{(?:^|/)scripts/bootstrap/bootstrap-from-scratch\.sh\z}) {
+                print "bootstrap\n";
+            } else {
+                print "none\n";
+            }
+        } else {
+            print "none\n";
+        }
+    ' "$1" "$2"
+}
+
 # Darwin cannot enforce the virtual-memory limit with ulimit -v. Keep its RSS
 # watchdog at or below both the validated Stage 3 process cap and the existing
 # process-tree cap. Reject an invalid tree cap instead of masking it with min().
@@ -542,20 +599,47 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
         bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_pid" &&
             bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_ppid" &&
             bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_rss" || continue
-        case "$bootstrap_stage3_memory_cmd" in
+        if [ "$bootstrap_stage3_memory_process_source" = ps ] &&
+            [ "$(uname -s 2>/dev/null || echo unknown)" = Linux ]; then
+            case "$bootstrap_stage3_memory_cmd" in
+                *qemu-system-*|*native-build*|*bootstrap-from-scratch.sh*|*missing-build-log.json*) ;;
+                *) continue ;;
+            esac
+            if [ ! -d "/proc/$bootstrap_stage3_memory_pid" ]; then
+                # A vanished PID is harmless; a still-listed but hidden /proc
+                # entry must fail closed instead of being treated as idle.
+                if bootstrap_stage3_memory_peer_recheck=$( \
+                    ps -p "$bootstrap_stage3_memory_pid" -o pid= 2>&1); then
+                    rm -f "$bootstrap_stage3_memory_process_tmp"; return 1
+                fi
+                [ -z "$bootstrap_stage3_memory_peer_recheck" ] || {
+                    rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
+                continue
+            fi
+            bootstrap_stage3_memory_kind=$( \
+                bootstrap_stage3_memory_linux_actual_kind /proc \
+                    "$bootstrap_stage3_memory_pid") || {
+                rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
+            [ "$bootstrap_stage3_memory_kind" != none ] || continue
+        else
+            case "$bootstrap_stage3_memory_cmd" in
             *qemu-system-*)
-                bootstrap_stage3_memory_kind=qemu
-                bootstrap_stage3_memory_qemu_count=$((bootstrap_stage3_memory_qemu_count + 1)) ;;
+                bootstrap_stage3_memory_kind=qemu ;;
             *'/simple replay missing-build-log.json'*)
-                bootstrap_stage3_memory_kind=replay-chain
-                bootstrap_stage3_memory_replay_count=$((bootstrap_stage3_memory_replay_count + 1)) ;;
+                bootstrap_stage3_memory_kind=replay-chain ;;
             *scripts/bootstrap/bootstrap-from-scratch.sh*)
-                bootstrap_stage3_memory_kind=bootstrap
-                bootstrap_stage3_memory_bootstrap_count=$((bootstrap_stage3_memory_bootstrap_count + 1)) ;;
+                bootstrap_stage3_memory_kind=bootstrap ;;
             *'/simple native-build '*|*'/simple native-build')
-                bootstrap_stage3_memory_kind=native-build
-                bootstrap_stage3_memory_native_count=$((bootstrap_stage3_memory_native_count + 1)) ;;
+                bootstrap_stage3_memory_kind=native-build ;;
             *) continue ;;
+            esac
+        fi
+        case "$bootstrap_stage3_memory_kind" in
+            qemu) bootstrap_stage3_memory_qemu_count=$((bootstrap_stage3_memory_qemu_count + 1)) ;;
+            replay-chain) bootstrap_stage3_memory_replay_count=$((bootstrap_stage3_memory_replay_count + 1)) ;;
+            bootstrap) bootstrap_stage3_memory_bootstrap_count=$((bootstrap_stage3_memory_bootstrap_count + 1)) ;;
+            native-build) bootstrap_stage3_memory_native_count=$((bootstrap_stage3_memory_native_count + 1)) ;;
+            *) rm -f "$bootstrap_stage3_memory_process_tmp"; return 1 ;;
         esac
         bootstrap_stage3_memory_process_count=$((bootstrap_stage3_memory_process_count + 1))
         bootstrap_stage3_memory_cmd_safe=$(bootstrap_stage3_memory_sanitize_text \
