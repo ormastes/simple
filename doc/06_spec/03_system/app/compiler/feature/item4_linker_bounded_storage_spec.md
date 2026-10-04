@@ -23,3 +23,10 @@ SPipe regeneration are **UNRUN**. This is not generated PASS evidence.
 
 Scratch accounting is logical bytes, not whole-job memory or filesystem
 allocation. Full bounded linker admission remains unsupported.
+# Owner API correction (2026-10-03)
+
+The executable spec now keeps one named `var` stage through
+`stage.link_publish_staged_v1(destination, cancelled)` and
+`stage.link_discard_staged_v1()`. Published/consumed checks inspect that same owner,
+including duplicate publication and cleanup retry. Internal spill IO owns both
+mutable retained cursors. This source correction remains UNRUN.

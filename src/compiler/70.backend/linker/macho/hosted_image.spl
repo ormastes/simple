@@ -1,0 +1,143 @@
+use compiler.backend.linker.macho.input.{macho_put}
+use compiler.backend.linker.macho.layout.{MachOLayout, macho_align, macho_segment}
+use compiler.backend.linker.macho.dylib.{MachODylib}
+use compiler.backend.linker.macho.hosted_fixups.{MachOHostedFixups, macho_hosted_bind_stream, macho_hosted_rebase_stream}
+use compiler.backend.linker.macho.hosted_signature.{macho_hosted_sign, macho_hosted_signature_size}
+use compiler.backend.linker.reloc_engine.{reloc_apply_aarch64}
+use std.common.crypto.sha256.{sha256_bytes}
+
+fn macho_hosted_text(bytes: [u8], at: i64, value: text) -> [u8]:
+    var out = bytes
+    for index in 0..value.len(): out[at + index] = value.byte_at(index) as u8
+    out
+
+fn macho_hosted_stubs(bytes: [u8], got: i64, stubs: i64, values: [i64], arm: bool) -> Result<[u8], text>:
+    var out = bytes
+    for index in 0..values.len():
+        val at = stubs + index * 16
+        val slot = got + index * 8
+        out = macho_put(out, slot, 8, values[index])
+        if arm:
+            val page = reloc_apply_aarch64([], 0, 275, 0x100000000 + slot, 0, 0x100000000 + at)
+            if not page.success: return Err(page.error)
+            out = macho_put(out, at, 4, 0x90000010 | ((page.value & 3) << 29) | (((page.value >> 2) & 0x7ffff) << 5))
+            out = macho_put(out, at + 4, 4, 0xf9400210 | (((slot & 4095) / 8) << 10))
+            out = macho_put(out, at + 8, 4, 0xd61f0200)
+            out = macho_put(out, at + 12, 4, 0xd503201f)
+        else:
+            val displacement = slot - at - 6
+            if displacement < -2147483648 or displacement > 2147483647: return Err("hosted x64 stub GOT displacement overflow")
+            out[at] = 0xffu8
+            out[at + 1] = 0x25u8
+            out = macho_put(out, at + 2, 4, displacement)
+            for pad in 6..16: out[at + pad] = 0x90u8
+    Ok(out)
+
+fn macho_hosted_image(payload: [u8], layout: MachOLayout, libraries: [MachODylib],
+        fixups: MachOHostedFixups, entry: i64, arm: bool, minimum_os: i64, sdk: i64,
+        identifier: text, rpaths: [text], limit: i64) -> Result<[u8], text>:
+    val rebases = macho_hosted_rebase_stream(fixups.rebases, layout.data_offset)
+    val binds = macho_hosted_bind_stream(fixups.binds, layout.data_offset)
+    val linkedit = macho_align(payload.len(), 0x4000)
+    if linkedit > limit or rebases.len() > limit - linkedit: return Err("hosted rebase stream exceeds image budget")
+    val bind_offset = linkedit + rebases.len()
+    if binds.len() > limit - bind_offset: return Err("hosted bind stream exceeds image budget")
+    val export_offset = bind_offset + binds.len()
+    # Deliberately no dynamic exports in this first executable request contract.
+    # A valid empty trie is not a substitute for a future explicit exports API.
+    val signature_offset = macho_align(export_offset + 2, 16)
+    val signature_size = macho_hosted_signature_size(signature_offset, identifier)
+    if signature_offset > limit or signature_size > limit - signature_offset: return Err("hosted signature exceeds image budget")
+    val image_size = signature_offset + signature_size
+    var system_declared = false
+    for library in libraries:
+        if library.install_name == "/usr/lib/libSystem.B.dylib": system_declared = true
+    val system_name = "/usr/lib/libSystem.B.dylib"
+    val system_size = if system_declared: 0 else: macho_align(24 + system_name.len() + 1, 8)
+    var command_size: i64 = 288 + 48 + 24 + 32 + 24 + 16 + 24 + system_size
+    for library in libraries: command_size = command_size + macho_align(24 + library.install_name.len() + 1, 8)
+    for path in rpaths: command_size = command_size + macho_align(12 + path.len() + 1, 8)
+    if command_size > 0x4000 - 32: return Err("hosted load commands exceed reserved header")
+    var out: [u8] = [0u8; image_size]
+    for index in 0..payload.len(): out[index] = payload[index]
+    out = macho_put(out, 0, 4, 0xfeedfacf)
+    out = macho_put(out, 4, 4, if arm: 0x0100000c else: 0x01000007)
+    out = macho_put(out, 8, 4, if arm: 0 else: 3)
+    out = macho_put(out, 12, 4, 2)
+    out = macho_put(out, 16, 4, 10 + libraries.len() + rpaths.len() + (if system_declared: 0 else: 1))
+    out = macho_put(out, 20, 4, command_size)
+    out = macho_put(out, 24, 4, 0x200085)
+    out = macho_segment(out, 32, "__PAGEZERO", 0, 0x100000000, 0, 0, 0)
+    out = macho_segment(out, 104, "__TEXT", 0x100000000, layout.data_offset, 0, layout.data_offset, 5)
+    out = macho_segment(out, 176, "__DATA", 0x100000000 + layout.data_offset,
+        linkedit - layout.data_offset, layout.data_offset, linkedit - layout.data_offset, 3)
+    out = macho_segment(out, 248, "__LINKEDIT", 0x100000000 + linkedit,
+        macho_align(image_size - linkedit, 0x4000), linkedit, image_size - linkedit, 1)
+    var at: i64 = 320
+    out = macho_put(out, at, 4, 0x80000022)
+    out = macho_put(out, at + 4, 4, 48)
+    out = macho_put(out, at + 8, 4, linkedit)
+    out = macho_put(out, at + 12, 4, rebases.len())
+    out = macho_put(out, at + 16, 4, bind_offset)
+    out = macho_put(out, at + 20, 4, binds.len())
+    out = macho_put(out, at + 40, 4, export_offset)
+    out = macho_put(out, at + 44, 4, 2)
+    at = at + 48
+    out = macho_put(out, at, 4, 0x80000028)
+    out = macho_put(out, at + 4, 4, 24)
+    out = macho_put(out, at + 8, 8, entry - 0x100000000)
+    at = at + 24
+    out = macho_put(out, at, 4, 14)
+    out = macho_put(out, at + 4, 4, 32)
+    out = macho_put(out, at + 8, 4, 12)
+    out = macho_hosted_text(out, at + 12, "/usr/lib/dyld")
+    at = at + 32
+    out = macho_put(out, at, 4, 0x32)
+    out = macho_put(out, at + 4, 4, 24)
+    out = macho_put(out, at + 8, 4, 1)
+    out = macho_put(out, at + 12, 4, minimum_os)
+    out = macho_put(out, at + 16, 4, sdk)
+    at = at + 24
+    for library in libraries:
+        val size = macho_align(24 + library.install_name.len() + 1, 8)
+        out = macho_put(out, at, 4, 12)
+        out = macho_put(out, at + 4, 4, size)
+        out = macho_put(out, at + 8, 4, 24)
+        out = macho_put(out, at + 16, 4, library.current_version)
+        out = macho_put(out, at + 20, 4, library.compatibility_version)
+        out = macho_hosted_text(out, at + 24, library.install_name)
+        at = at + size
+    if not system_declared:
+        out = macho_put(out, at, 4, 12)
+        out = macho_put(out, at + 4, 4, system_size)
+        out = macho_put(out, at + 8, 4, 24)
+        out = macho_hosted_text(out, at + 24, system_name)
+        at = at + system_size
+    for path in rpaths:
+        val size = macho_align(12 + path.len() + 1, 8)
+        out = macho_put(out, at, 4, 0x8000001c)
+        out = macho_put(out, at + 4, 4, size)
+        out = macho_put(out, at + 8, 4, 12)
+        out = macho_hosted_text(out, at + 12, path)
+        at = at + size
+    val uuid = at
+    out = macho_put(out, at, 4, 0x1b)
+    out = macho_put(out, at + 4, 4, 24)
+    at = at + 24
+    out = macho_put(out, at, 4, 0x1d)
+    out = macho_put(out, at + 4, 4, 16)
+    out = macho_put(out, at + 8, 4, signature_offset)
+    out = macho_put(out, at + 12, 4, signature_size)
+    for index in 0..rebases.len(): out[linkedit + index] = rebases[index]
+    for index in 0..binds.len(): out[bind_offset + index] = binds[index]
+    # Content-derived UUID is fixed before hashing signed pages. This digest is
+    # over the unsigned image with the UUID bytes initially zero, avoiding a cycle.
+    var identity_bytes: [i64] = [0; signature_offset]
+    for index in 0..signature_offset: identity_bytes[index] = out[index] as i64
+    val identity = sha256_bytes(identity_bytes)
+    for index in 0..16: out[uuid + 8 + index] = identity[index] as u8
+    out[uuid + 14] = ((out[uuid + 14] & 15) | 0x50) as u8
+    out[uuid + 16] = ((out[uuid + 16] & 63) | 0x80) as u8
+    macho_hosted_sign(out, signature_offset, layout.data_offset, identifier)
+
+export macho_hosted_stubs, macho_hosted_image

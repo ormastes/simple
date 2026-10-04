@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+script="$root/scripts/check/check-freebsd-bootstrap-qemu.shs"
+fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
+
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/freebsd-disk-capacity.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+sed -n '/^is_valid_disk_size() {/,/^}/p' "$script" > "$fixture/validate.sh"
+[ -s "$fixture/validate.sh" ] || fail 'disk-size validator is missing'
+. "$fixture/validate.sh"
+
+is_valid_disk_size 40G || fail 'minimum virtual disk capacity was rejected'
+is_valid_disk_size 48G || fail 'default virtual disk capacity was rejected'
+is_valid_disk_size 2048G || fail 'maximum virtual disk capacity was rejected'
+for invalid in 30G 39G 0G 048G 40M 2T 48 48.5G 999999999999999999999999G; do
+    if is_valid_disk_size "$invalid"; then
+        fail "unsafe or undersized virtual disk capacity accepted: $invalid"
+    fi
+done
+
+grep -Fq 'QEMU_DISK_SIZE="${QEMU_DISK_SIZE:-48G}"' "$script" || fail '48G virtual disk default missing'
+grep -Fq 'preflight_try disk_size preflight_disk_size' "$script" || fail 'disk-size validator is missing from preflight'
+grep -Fq 'freebsd_qemu_preflight_checks=27' "$script" || fail 'preflight check count omits disk size or host free space'
+grep -Fq 'Invalid QEMU_DISK_SIZE:' "$script" || fail 'normal execution does not reject invalid disk size'
+
+# Execute the exact production resize line with a mocked bounded runner.
+grep -F 'run_bounded "$QEMU_TRANSFER_TIMEOUT" qemu-img resize "$OVERLAY_IMAGE" "$QEMU_DISK_SIZE"' "$script" > "$fixture/resize.sh"
+[ "$(wc -l < "$fixture/resize.sh")" -eq 1 ] || fail 'overlay resize command is missing or ambiguous'
+run_bounded() { printf '%s\n' "$@" > "$fixture/argv"; }
+QEMU_TRANSFER_TIMEOUT=60
+OVERLAY_IMAGE="$fixture/overlay.qcow2"
+QEMU_DISK_SIZE=48G
+. "$fixture/resize.sh"
+printf '%s\n' 60 qemu-img resize "$OVERLAY_IMAGE" 48G > "$fixture/expected"
+cmp -s "$fixture/expected" "$fixture/argv" || fail 'default capacity did not reach qemu-img resize'
+
+QEMU_DISK_SIZE=64G
+. "$fixture/resize.sh"
+printf '%s\n' 60 qemu-img resize "$OVERLAY_IMAGE" 64G > "$fixture/expected"
+cmp -s "$fixture/expected" "$fixture/argv" || fail 'configured capacity did not reach qemu-img resize'
+
+printf 'freebsd_qemu_disk_capacity_contract=true\n'

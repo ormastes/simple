@@ -54,3 +54,34 @@ dynamic/PIE and TLS output remain unsupported. Native execution and the Simple
 acceptance run are pending. Arithmetic/branch encodings follow the
 [RISC-V psABI](https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/master/riscv-elf.adoc)
 and [LLVM LLD implementation](https://llvm.googlesource.com/llvm-project/lld/+/6ef5ac64475f61262e794c705a06f0c0ffe769dd/ELF/Arch/RISCV.cpp).
+
+Attribute fixtures added in the phase-4 continuation:
+
+```sh
+clang --target=riscv64-unknown-linux-gnu -march=rv64i -mabi=lp64 -c attr_start.s -o attr_start.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64imac_zicsr -mabi=lp64 -c attr_provider.s -o attr_provider.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64i -mabi=lp64 -c attr_stack32.s -o attr_stack32.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64i -mabi=lp64 -c attr_atomic7.s -o attr_atomic7.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64i -mabi=lp64 -c attr_gp_shadow.s -o attr_gp_shadow.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64if -mabi=lp64 -c attr_start.s -o attr_float_start.o
+clang --target=riscv64-unknown-linux-gnu -march=rv64izfinx -mabi=lp64 -c attr_provider.s -o attr_finx_provider.o
+llvm-ar rcs libattr_provider.a attr_provider.o attr_stack32.o
+```
+
+These commands ran with clang21.1.8. LLD linked the compatible pair and rejected
+the f/zfinx pair. Its tag16 warnings mean LLVM21 is not an x3-policy oracle;
+the dedicated attribute spec follows the newer psABI table. The ordinary
+driver now merges admitted attributes; broader ISA catalogs remain open.
+
+## Static local-exec TLS
+
+`tls_local_exec.s` uses explicit nonrelaxed TPREL HI20/ADD/LO12 sequences.
+Constructed with clang21.1.8 targeting riscv64-unknown-linux-gnu, march=rv64ima,
+mabi=lp64. LLD21.1.8 `--no-relax -static -e _start` supplied the independent
+instruction and TLS-symbol oracle. No output executable was run.
+
+`../elf/tls_symbol_offsets.c` was separately compiled for x86_64-unknown-linux-gnu
+and aarch64-unknown-linux-gnu using `-O0 -ftls-model=local-exec -ffreestanding
+-fno-stack-protector -fno-unwind-tables -fno-asynchronous-unwind-tables`.
+Both objects were linked by LLD21.1.8 as static images and inspected for
+global/local/hidden TLS offsets. The Simple acceptance spec remains UNRUN.

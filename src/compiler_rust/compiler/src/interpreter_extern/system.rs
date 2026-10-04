@@ -1646,11 +1646,21 @@ pub fn rt_process_read_stdout(args: &[Value]) -> Result<Value, CompileError> {
     if let Some(stdout) = map.get_mut(&pid).and_then(|c| c.stdout.as_mut()) {
         let mut buf = [0u8; 8192];
         loop {
-            match stdout.read(&mut buf) {
+            // Windows anonymous pipes have no O_NONBLOCK: a read with nothing
+            // pending blocks until the child writes. Ask how much is waiting
+            // and read only that, so "no data yet" is "" here too.
+            #[cfg(windows)]
+            let want = match piped_bytes_available(stdout) {
+                0 => break,
+                n => n.min(buf.len()),
+            };
+            #[cfg(not(windows))]
+            let want = buf.len();
+            match stdout.read(&mut buf[..want]) {
                 Ok(0) => break,
                 Ok(n) => {
                     out.extend_from_slice(&buf[..n]);
-                    if n < buf.len() {
+                    if n < want {
                         break;
                     }
                 }
@@ -1661,6 +1671,39 @@ pub fn rt_process_read_stdout(args: &[Value]) -> Result<Value, CompileError> {
         }
     }
     Ok(Value::text(String::from_utf8_lossy(&out).into_owned()))
+}
+
+/// Bytes waiting in a child's stdout pipe; 0 when empty or on any error
+/// (a broken pipe means the child is gone, which is also "nothing to read").
+#[cfg(windows)]
+fn piped_bytes_available(stdout: &std::process::ChildStdout) -> usize {
+    use std::os::windows::io::AsRawHandle;
+    unsafe extern "system" {
+        fn PeekNamedPipe(
+            pipe: *mut std::ffi::c_void,
+            buffer: *mut std::ffi::c_void,
+            size: u32,
+            read: *mut u32,
+            available: *mut u32,
+            left: *mut u32,
+        ) -> i32;
+    }
+    let mut available: u32 = 0;
+    let ok = unsafe {
+        PeekNamedPipe(
+            stdout.as_raw_handle() as *mut std::ffi::c_void,
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            &mut available,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        0
+    } else {
+        available as usize
+    }
 }
 
 /// Is a piped child still running?

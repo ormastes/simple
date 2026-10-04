@@ -10,6 +10,7 @@ maximum() { if [ "$1" -ge "$2" ]; then printf '%s\n' "$1"; else printf '%s\n' "$
 minimum() { if [ "$1" -le "$2" ]; then printf '%s\n' "$1"; else printf '%s\n' "$2"; fi; }
 producer= source_checkout= output_root= target= shared_parse_cas_root=
 compiler_tool= linker_tool= threads= memory_override= reserve_override=
+lifetime_ms=21600000 memory_policy=enforce
 for arg in "$@"; do
   case "$arg" in
     --producer=*) producer=${arg#*=} ;;
@@ -22,9 +23,16 @@ for arg in "$@"; do
     --threads=*) threads=${arg#*=} ;;
     --memory-bytes=*) memory_override=${arg#*=} ;;
     --reserve-bytes=*) reserve_override=${arg#*=} ;;
+    --lifetime-ms=*) lifetime_ms=${arg#*=} ;;
+    --memory-policy=*) memory_policy=${arg#*=} ;;
     *) die "unknown option: $arg" ;;
   esac
 done
+case "$memory_policy" in enforce|monitor) ;; *) die "invalid memory policy" ;; esac
+case "$lifetime_ms" in 0) ;; *) positive "$lifetime_ms" || die "nonnegative work lifetime required" ;; esac
+# Pre-ready compilation uses the same explicit policy as managed tasks.
+# Round upward so a positive sub-second lifetime does not become unlimited.
+startup_timeout_seconds=$(((lifetime_ms + 999) / 1000))
 for path in "$producer" "$source_checkout" "$output_root" "$shared_parse_cas_root" "$compiler_tool" "$linker_tool"; do
   [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
 done
@@ -122,6 +130,7 @@ if [ ! -e "$hello_receipt" ]; then
     --source-snapshot-digest="$snapshot_digest" --hello-source="$hello_source" \
     --hello-source-digest="$hello_source_digest" --output-root="$hello_root" \
     --target="$target" --memory-bytes="$memory_bytes" --reserve-bytes="$reserve_bytes" \
+    --timeout-seconds="$startup_timeout_seconds" --memory-policy="$memory_policy" \
     || die "provisional hello failed; no manager dispatch"
 fi
 regular "$hello_receipt" || die "successful hello receipt unavailable"
@@ -153,6 +162,7 @@ sh "$repo_root/scripts/bootstrap/prepare-provisional-manager-images.shs" \
   --hello-receipt-digest="$hello_digest" --output-root="$authority_images" \
   --target="$target" --runtime-path="$source_checkout/src/runtime" \
   --memory-bytes="$memory_bytes" --reserve-bytes="$reserve_bytes" \
+  --threads="$threads" --timeout-seconds="$startup_timeout_seconds" --memory-policy="$memory_policy" \
   --compiler-tool="$compiler_tool" --compiler-tool-digest="$compiler_tool_digest" \
   --linker-tool="$linker_tool" --linker-tool-digest="$linker_tool_digest" \
   || die "provisional authority image build failed"
@@ -194,6 +204,7 @@ sh "$repo_root/scripts/bootstrap/prepare-provisional-manager-images.shs" \
   --hello-receipt-digest="$hello_digest" --output-root="$manager_images" \
   --target="$target" --runtime-path="$source_root/src/runtime" \
   --memory-bytes="$memory_bytes" --reserve-bytes="$reserve_bytes" \
+  --threads="$threads" --timeout-seconds="$startup_timeout_seconds" --memory-policy="$memory_policy" \
   --authority-program="$authority_program" --authority-receipt="$authority_receipt" \
   --authority-digest="$authority_digest" --authority-image-receipt="$authority_image_receipt" \
   --compiler-tool="$compiler_tool" --compiler-tool-digest="$compiler_tool_digest" \
@@ -240,5 +251,6 @@ sh "$repo_root/scripts/bootstrap/bootstrap-provisional-phase3-phase4.shs" \
   --phase3-cranelift-index-config="$(authority_field phase3_cranelift_index_config_path)" \
   --threads="$threads" --memory-bytes="$memory_bytes" --reserve-bytes="$reserve_bytes" \
   --target="$target" --group-size=32 --max-attempts=3 --poll-ms=1000 \
-  --lifetime-ms=21600000 --estimated-group-disk-bytes="$estimated_group_disk_bytes" \
+  --lifetime-ms="$lifetime_ms" --memory-policy="$memory_policy" \
+  --estimated-group-disk-bytes="$estimated_group_disk_bytes" \
   --minimum-free-disk-bytes="$minimum_free_disk_bytes"

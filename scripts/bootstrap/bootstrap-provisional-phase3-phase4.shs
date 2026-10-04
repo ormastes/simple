@@ -10,8 +10,19 @@ hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
 require_current_manifest() {
   regular "$1" || die "generic task manifest is not a regular file: $1"
   IFS= read -r manifest_header <"$1" || die "generic task manifest header unreadable"
-  [ "$manifest_header" = SIMPLE-BUILD-RUN-4 ] \
-    || die "generic task manifest uses obsolete wire; preserve it and use a new output root"
+  case "$manifest_header" in SIMPLE-BUILD-RUN-4|SIMPLE-BUILD-RUN-5) ;; \
+    *) die "generic task manifest uses obsolete wire; preserve it and use a new output root" ;; esac
+}
+publish_task_manifest() {
+  pending=$1 destination=$2
+  regular "$pending" || die "task manifest candidate unavailable"
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    regular "$destination" && cmp -s "$pending" "$destination" \
+      || die "retained task manifest differs; preserve it and use a new output root"
+    rm -f "$pending"
+  else
+    mv "$pending" "$destination" || die "task manifest publication failed"
+  fi
 }
 disk_preflight() {
   available_disk_bytes=$(df -Pk "$1" | awk 'NR==2 { printf "%.0f\n", $4*1024 }') \
@@ -33,7 +44,7 @@ shared_parse_cas_root=
 root= template= manifest_program= builder_program= group_program= group_worker= group_broker= index_program=
 authority_program= authority_receipt= authority_digest= authority_image_receipt= image_receipt=
 llvm_index_config= cranelift_index_config= phase3_llvm_index_config= phase3_cranelift_index_config=
-threads= memory_bytes= reserve_bytes= target= group_size= max_attempts= poll_ms= lifetime_ms=
+threads= memory_bytes= reserve_bytes= target= group_size= max_attempts= poll_ms= lifetime_ms= memory_policy=enforce
 estimated_group_disk_bytes= minimum_free_disk_bytes=
 for arg in "$@"; do
   case "$arg" in
@@ -76,6 +87,7 @@ for arg in "$@"; do
     --phase3-cranelift-index-config=*) phase3_cranelift_index_config=${arg#*=} ;;
     --threads=*) threads=${arg#*=} ;;
     --memory-bytes=*) memory_bytes=${arg#*=} ;;
+    --memory-policy=*) memory_policy=${arg#*=} ;;
     --reserve-bytes=*) reserve_bytes=${arg#*=} ;;
     --target=*) target=${arg#*=} ;;
     --group-size=*) group_size=${arg#*=} ;;
@@ -87,6 +99,8 @@ for arg in "$@"; do
     *) die "unknown option: $arg" ;;
   esac
 done
+case "$memory_policy" in enforce|monitor) ;; *) die "invalid memory policy" ;; esac
+case "$lifetime_ms" in 0) ;; *) positive "$lifetime_ms" || die "nonnegative work lifetime required" ;; esac
 for path in "$hello_receipt" "$source_authority" "$original_source_snapshot" "$tool_intent" "$runtime_snapshot" \
     "$scv_receipt" "$source_root" "$source_inventory" "$source_links" \
     "$module_inventory" "$excluded_inventory" "$module_role_policy" "$shared_parse_cas_root" \
@@ -114,7 +128,7 @@ case "$source_links" in "$source_root"/*) source_links_relative=${source_links#"
 case "$root/" in "$source_root/"*) die "output root overlaps immutable source root" ;; esac
 case "$source_root/" in "$root/"*) die "immutable source root overlaps output root" ;; esac
 for n in "$threads" "$memory_bytes" "$reserve_bytes" "$group_size" "$max_attempts" \
-    "$poll_ms" "$lifetime_ms" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes"; do
+    "$poll_ms" "$estimated_group_disk_bytes" "$minimum_free_disk_bytes"; do
   positive "$n" || die "positive resource policy required"
 done
 [ "$memory_bytes" -le 1125899906842624 ] \
@@ -177,7 +191,7 @@ prepare_backend() {
     --shared-parse-cas-root="$shared_parse_cas_root" \
     --output-root="$backend_root" --manager-program="$group_program" \
     --worker-program="$group_worker" --broker-program="$group_broker" \
-    --threads="$threads" --memory-bytes="$memory_bytes" \
+    --threads="$threads" --memory-bytes="$memory_bytes" --memory-policy="$memory_policy" \
     --manifest="$backend_root/state/manifest.sdn" --target="$target" \
     --reserve-bytes="$reserve_bytes" --group-size="$group_size" \
     --max-attempts="$max_attempts" --poll-ms="$poll_ms" \
@@ -204,7 +218,7 @@ verify_shared_source() {
     regular "$tool_path" && [ "$(hash_file "$tool_path")" = "$tool_sha" ] \
       || die "$role declared tool candidate changed"
   done
-  observed="$root/source-canonical.$$.txt"
+  observed=$(mktemp "$root/source-canonical.XXXXXX") || die "source snapshot scratch unavailable"
   bootstrap_stage3_source_snapshot "$observed" "$source_root" \
     || die "private source snapshot failed; evidence retained: $observed"
   cmp -s "$observed" "$source_authority" \
@@ -251,25 +265,72 @@ verify_image_set() {
 
 # The manager's worker runs in its own work root, so output and cache paths in
 # the compiler argv are relative. Output publication is hash checked by run.
+verify_native_test_artifact() {
+  native_id=$1 native_output=$2
+  native_job="$root/phase4/binaries/$backend/$native_id"
+  native_key="phase4_${backend}_${native_id}"
+  [ "$(bootstrap_stage3_manifest_value "${native_key}_status" "$statuses")" = SUCCEEDED ] || return 20
+  native_sha=$(bootstrap_stage3_manifest_value "$native_key" "$hashes") || return 20
+  native_receipt_sha=$(bootstrap_stage3_manifest_value "${native_key}_manager_receipt_sha256" "$hashes") || return 20
+  regular "$native_job/$native_output" && regular "$native_job/state/receipts/$native_id-$backend.sdn" || return 20
+  [ "$(hash_file "$native_job/$native_output")" = "$native_sha" ] &&
+    [ "$(hash_file "$native_job/state/receipts/$native_id-$backend.sdn")" = "$native_receipt_sha" ] || return 20
+  require_current_manifest "$native_job/manifest.sdn"
+  "$builder_program" verify --manifest "$native_job/manifest.sdn" \
+    --state "$native_job/state" --source-root "$source_root" \
+    --output-root "$native_job" || return 20
+}
+
+run_native_subsystem() {
+  backend=$1 subsystem=$2
+  verify_shared_source
+  verify_native_test_artifact full-cli "bin/simple$exe_suffix" || return 20
+  compiler_sha=$native_sha
+  verify_native_test_artifact test-runner "bin/simple_test_runner$exe_suffix" || return 20
+  native_dir="$root/phase4/native-tests/$backend/$subsystem"
+  mkdir -p "$(dirname -- "$native_dir")" || return 20
+  mkdir "$native_dir" || return 20
+  native_status=0
+  sh "$repo_root/scripts/bootstrap/run-provisional-native-subsystem.shs" \
+    "$source_root" "$backend" \
+    "$root/phase4/binaries/$backend/full-cli/bin/simple$exe_suffix" "$compiler_sha" \
+    "$root/phase4/binaries/$backend/test-runner/bin/simple_test_runner$exe_suffix" \
+    "$subsystem" "$native_dir" "$threads" "$source_root/src/runtime" \
+    "$runtime_snapshot_digest" || native_status=$?
+  verify_shared_source
+  verify_native_test_artifact full-cli "bin/simple$exe_suffix" || return 20
+  verify_native_test_artifact test-runner "bin/simple_test_runner$exe_suffix" || return 20
+  for native_evidence in inventory.tsv results.tsv limitations.txt; do
+    if regular "$native_dir/$native_evidence"; then
+      printf '%s=%s\n' "phase4_${backend}_native_${subsystem}_${native_evidence}_sha256" \
+        "$(hash_file "$native_dir/$native_evidence")" >>"$hashes"
+    fi
+  done
+  return "$native_status"
+}
+
 build_binary() {
   id=$1 entry=$2 output=$3 task_phase=$4 backend=$5
+  provisional_select_binary_producer || return 20
   task_id="$id-$backend"
   job_root="$root/$task_phase/binaries/$backend/$id"
   mkdir -p "$job_root/bin" "$job_root/cache" "$job_root/state" || die "job directories unavailable"
   verify_shared_source
   disk_preflight "$job_root" || exit 20
-  if [ ! -f "$job_root/manifest.sdn" ]; then
+  pending_manifest="$job_root/manifest.sdn.pending.$$"
+  [ ! -e "$pending_manifest" ] && [ ! -L "$pending_manifest" ] || die "task manifest scratch already exists"
     verify_image_set
-    "$manifest_program" --job-from-inventory "$template" "$producer" "$source_root" \
+    "$manifest_program" --job-from-inventory "$template" "$task_producer" "$source_root" \
       "$task_id" "$task_phase" "$output" "$source_inventory_relative" \
       --memory-limit-bytes "$memory_bytes" --links-inventory "$source_links_relative" \
-      --manifest "$job_root/manifest.sdn" -- \
+      --work-timeout-ms "$lifetime_ms" --memory-policy "$memory_policy" \
+      --manifest "$pending_manifest" -- \
       native-build --target "$target" --backend "$backend" \
-      --source src/compiler --source src/app --source src/lib \
+      --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app --source src/lib --source src/os --source src/plugins --source src/package_ownership --source src/compositions \
       --entry-closure --entry "$entry" --threads "$threads" \
-      --cache-dir "cache/$task_id" --output "$output" \
+      --cache-dir "cache/$task_id" --mode dynload --output "$output" \
       || die "$id manifest blocked"
-  fi
+  publish_task_manifest "$pending_manifest" "$job_root/manifest.sdn"
   require_current_manifest "$job_root/manifest.sdn"
   verify_image_set
   sh "$shared_parse_root_check" "$shared_parse_cas_root" "$shared_parse_cas_root" \
@@ -294,6 +355,11 @@ build_binary() {
   printf '%s=%s\n' "${task_phase}_${backend}_${id}" "$(hash_file "$job_root/$output")" >>"$hashes"
   printf '%s=%s\n' "${task_phase}_${backend}_${id}_manager_receipt_sha256" \
     "$(hash_file "$job_root/state/receipts/$task_id.sdn")" >>"$hashes"
+  printf '%s=%s\n' "${task_phase}_${backend}_${id}_producer_sha256" "$task_producer_sha" >>"$hashes"
+  if [ "$task_phase" = phase4 ]; then
+    printf '%s=%s\n' "${task_phase}_${backend}_${id}_hello_receipt_sha256" \
+      "$(hash_file "$handoff_receipt")" >>"$hashes"
+  fi
 }
 
 # The complete V2 index is a post-readiness build task. Its only staged input
@@ -332,17 +398,19 @@ build_index() {
   else
     : >"$input_root/links.inventory" || die "$backend empty link inventory unavailable"
   fi
-  if [ ! -e "$job_root/manifest.sdn" ]; then
+  pending_manifest="$job_root/manifest.sdn.pending.$$"
+  [ ! -e "$pending_manifest" ] && [ ! -L "$pending_manifest" ] || die "task manifest scratch already exists"
     verify_image_set
     "$manifest_program" --job-from-inventory "$template" "$index_program" \
       "$input_root" "index-$backend" "$task_phase" index-output/receipt.sdn \
       source.inventory --memory-limit-bytes "$memory_bytes" \
       --links-inventory links.inventory \
-      --manifest "$job_root/manifest.sdn" -- \
+      --work-timeout-ms "$lifetime_ms" --memory-policy "$memory_policy" \
+      --manifest "$pending_manifest" -- \
       native-groups-index-build --manager-work --config index.config \
       --receipt @WORK@/index-output/receipt.sdn \
       || die "$backend index manifest blocked"
-  fi
+  publish_task_manifest "$pending_manifest" "$job_root/manifest.sdn"
   require_current_manifest "$job_root/manifest.sdn"
   verify_image_set
   sh "$shared_parse_root_check" "$shared_parse_cas_root" "$shared_parse_cas_root" \
@@ -406,6 +474,7 @@ build_phase4_binaries() {
   backend=$1
   build_binary bootstrap src/app/cli/bootstrap_main.spl "bin/simple_bootstrap$exe_suffix" phase4 "$backend"
   build_binary full-cli src/app/cli/_CliMain/main_and_help.spl "bin/simple$exe_suffix" phase4 "$backend"
+  build_binary interpreter src/app/interpreter/main.spl "bin/simple_interpreter$exe_suffix" phase4 "$backend"
   build_binary mcp src/app/mcp/main.spl "bin/simple_mcp_server$exe_suffix" phase4 "$backend"
   build_binary lsp src/app/simple_lsp_mcp/main.spl "bin/simple_lsp_mcp_server$exe_suffix" phase4 "$backend"
   build_binary test-runner src/app/test_runner_new/main.spl "bin/simple_test_runner$exe_suffix" phase4 "$backend"
@@ -415,6 +484,7 @@ build_phase4_binaries() {
 BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 export BOOTSTRAP_STAGE3_FACADE_PATH
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$repo_root/scripts/bootstrap/lib/provisional-binary-producer.shs"
 authority_field() {
   "$authority_program" native-groups-provisional-authority-field \
     --receipt "$authority_receipt" --digest "$authority_digest" --field "$1"

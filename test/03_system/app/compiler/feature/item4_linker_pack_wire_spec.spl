@@ -1,0 +1,142 @@
+"""ITEM4-REQ-010: lossless linker pack transport. Runtime status: UNRUN."""
+use std.spec.*
+use std.spec.step
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.common.kernel_plugin.schema_header.{KpfSchemaHeaderV1}
+use std.common.linker.link_request_v1.{LinkTargetV1, LinkRequestV1}
+use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1, LinkExecutionModeV1}
+use std.common.linker.link_receipt_v1.{LinkReceiptV1, LinkAccountingClassV1, LinkOutcomeV1}
+use compiler.backend.linker.linker_pack_wire.{
+    LinkerPackJobV1, linker_pack_encode_job, linker_pack_decode_job,
+    linker_pack_encode_receipt, linker_pack_decode_receipt, linker_pack_policy_digest
+}
+use compiler.backend.linker.linker_pack_command.{linker_pack_command}
+use compiler.backend.linker.linker_pack_query.{linker_pack_query_result}
+use std.nogc_sync_mut.composition.provider_contract.{SimpleProviderQueryV1, SIMPLE_CLI_COMMAND_V1_INTERFACE}
+use std.nogc_sync_mut.composition.cli_command_wire.{encode_cli_command_request_v1, decode_cli_command_result_v1}
+
+fn item4_pack_header() -> KpfSchemaHeaderV1:
+    KpfSchemaHeaderV1(abi_version: 1, struct_size: 72,
+        schema_id: KpfId128(hi: 4, lo: 10), schema_major: 1, schema_minor: 0,
+        schema_digest: KpfDigest256(w0: 1, w1: 2, w2: 3, w3: 0xffffffffffffffffu64), reserved0: 0)
+
+fn item4_pack_job() -> LinkerPackJobV1:
+    val header = item4_pack_header()
+    val target = LinkTargetV1(arch: 1, os: 1, abi: 1, object_format: 1, endian: 1, address_width: 64)
+    val request = LinkRequestV1(header: header, target: target,
+        inputs_manifest_digest: header.schema_digest, output_contract: 1,
+        semantic_profile_digest: header.schema_digest, runtime_sysroot_digest: header.schema_digest,
+        required_features: 0xffffffffffffffffu64, layout_handle: 2, debug_handle: 3, reproducibility: 1)
+    val policy = LinkExecutionPolicyV1(header: header, mode: LinkExecutionModeV1.Fast,
+        job_memory_limit_bytes: 0, scratch_limit_bytes: 13, max_workers: 2,
+        allowed_placements: 1, enforcement_requirement: 0)
+    LinkerPackJobV1(request: request, policy: policy,
+        inputs: ["input with spaces.o", "--literal.o"], output: "result with spaces")
+
+describe "Linker pack transport preserves fixed-width contracts":
+    it "rejects incompatible host ABI at the provider boundary itself":
+        var query = SimpleProviderQueryV1(descriptor_size: 44, interface_id: SIMPLE_CLI_COMMAND_V1_INTERFACE,
+            minimum_major: 1, minimum_minor: 0, host_abi: 1, target_offset: 0, target_length: 0, requested_capability_bits: 0)
+        expect(linker_pack_query_result(query).status).to_equal(0)
+        expect(linker_pack_query_result(query).descriptor_size).to_equal(28)
+        query.host_abi = 2
+        expect(linker_pack_query_result(query).status).to_equal(4)
+        expect(linker_pack_query_result(query).interface_handle).to_equal(0)
+        query.host_abi = 1
+        query.target_length = 1
+        expect(linker_pack_query_result(query).status).to_equal(4)
+
+    it "binds policy identity to values rather than only its schema":
+        var policy = item4_pack_job().policy
+        val before = linker_pack_policy_digest(policy).unwrap()
+        # Independent SHA-256 oracle from .NET over the documented UTF-8 policy
+        # contract, including its maximum unsigned word and no trailing newline.
+        expect(before.w0).to_equal(0x001a1240713bbd37u64)
+        expect(before.w1).to_equal(0x352a8c8095c36758u64)
+        expect(before.w2).to_equal(0xd70b3e0b881bc332u64)
+        expect(before.w3).to_equal(0xc7a73015bcedb223u64)
+        policy.max_workers = 3
+        val after = linker_pack_policy_digest(policy).unwrap()
+        expect(after.w0 == before.w0 and after.w1 == before.w1 and after.w2 == before.w2 and after.w3 == before.w3).to_be(false)
+        policy.max_workers = 2
+        expect(linker_pack_policy_digest(policy).unwrap().w0).to_equal(before.w0)
+
+    it "dispatches the decoded command to the real adapter and preserves target rejection":
+        var job = item4_pack_job()
+        var request = job.request
+        var target = request.target
+        target.arch = 999
+        request.target = target
+        job.request = request
+        val args = linker_pack_encode_job(job).unwrap()
+        val arena = encode_cli_command_request_v1(3, "linker-v1", args, 8192)
+        expect(arena.ok).to_be(true)
+        val response = linker_pack_command(arena.bytes)
+        expect(response.ok).to_be(true)
+        val result = decode_cli_command_result_v1(response.bytes)
+        expect(result.status).to_equal(0)
+        val receipt = linker_pack_decode_receipt(result.output).unwrap()
+        expect(receipt.outcome).to_equal(LinkOutcomeV1.UnsupportedFeature)
+        expect(receipt.engine_id).to_equal("none")
+        expect(receipt.policy_digest.w0).to_equal(linker_pack_policy_digest(job.policy).unwrap().w0)
+
+    it "rejects wrong operation and undersized response before dispatch":
+        val args = linker_pack_encode_job(item4_pack_job()).unwrap()
+        for arena in [encode_cli_command_request_v1(1, "linker-v1", args, 8192),
+                encode_cli_command_request_v1(3, "linker-v1", args, 32),
+                encode_cli_command_request_v1(3, "other", args, 8192)]:
+            val response = decode_cli_command_result_v1(linker_pack_command(arena.bytes).bytes)
+            expect(response.status).to_equal(1)
+            expect(response.output).to_equal("")
+
+    it "round trips every request and policy scalar with literal argument paths":
+        step("Encode a request containing the maximum unsigned digest word and feature mask")
+        val job = item4_pack_job()
+        val args = linker_pack_encode_job(job).unwrap()
+        step("Decode the provider arguments without shell parsing or signed truncation")
+        val decoded = linker_pack_decode_job(args).unwrap()
+        expect(decoded.request.required_features).to_equal(0xffffffffffffffffu64)
+        expect(decoded.request.header.schema_digest.w3).to_equal(0xffffffffffffffffu64)
+        expect(decoded.request.layout_handle).to_equal(2)
+        expect(decoded.policy.scratch_limit_bytes).to_equal(13)
+        expect(decoded.policy.max_workers).to_equal(2)
+        expect(decoded.inputs).to_equal(job.inputs)
+        expect(decoded.output).to_equal(job.output)
+
+    it "rejects unsigned overflow, negative and noncanonical numbers before decode":
+        for bad in ["18446744073709551616", "-1", "01", "1x", ""]:
+            var args = linker_pack_encode_job(item4_pack_job()).unwrap()
+            args[1] = bad
+            expect(linker_pack_decode_job(args).is_err()).to_be(true)
+
+    it "rejects narrowing overflow and invalid enum codes":
+        var args = linker_pack_encode_job(item4_pack_job()).unwrap()
+        args[1] = "4294967296"
+        expect(linker_pack_decode_job(args).is_err()).to_be(true)
+        args = linker_pack_encode_job(item4_pack_job()).unwrap()
+        args[46] = "3"
+        expect(linker_pack_decode_job(args).is_err()).to_be(true)
+
+    it "rejects missing, trailing and embedded NUL path arguments":
+        var args = linker_pack_encode_job(item4_pack_job()).unwrap()
+        args.push("unexpected")
+        expect(linker_pack_decode_job(args).is_err()).to_be(true)
+        var job = item4_pack_job()
+        job.output = "bad\0path"
+        expect(linker_pack_encode_job(job).is_err()).to_be(true)
+        expect(linker_pack_decode_job([]).is_err()).to_be(true)
+
+    it "round trips the receipt rather than inventing successful accounting":
+        val job = item4_pack_job()
+        val receipt = LinkReceiptV1(header: job.request.header, engine_id: "internal-elf",
+            host: job.request.target, target: job.request.target, policy_digest: job.request.inputs_manifest_digest,
+            accounting_class: LinkAccountingClassV1.NotCertified, measured_peak_bytes: 0,
+            outcome: LinkOutcomeV1.UnsupportedBudget)
+        val encoded = linker_pack_encode_receipt(receipt).unwrap()
+        val decoded = linker_pack_decode_receipt(encoded).unwrap()
+        expect(decoded.engine_id).to_equal("internal-elf")
+        expect(decoded.outcome).to_equal(LinkOutcomeV1.UnsupportedBudget)
+        expect(decoded.accounting_class).to_equal(LinkAccountingClassV1.NotCertified)
+        expect(decoded.policy_digest.w3).to_equal(0xffffffffffffffffu64)
+        expect(linker_pack_decode_receipt(encoded + "\nextra").is_err()).to_be(true)
+        expect(linker_pack_decode_receipt("success").is_err()).to_be(true)

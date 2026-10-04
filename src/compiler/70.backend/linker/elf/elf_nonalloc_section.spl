@@ -1,0 +1,67 @@
+"""Append metadata without changing existing section indices or load segments."""
+use compiler.backend.linker.elf_parser.{elf_parse_object, elf_section_name}
+
+fn elf_metadata_put(bytes: [i64], offset: i64, width: i64, value: i64) -> [i64]:
+    var result = bytes
+    var i: i64 = 0
+    while i < width:
+        result[offset + i] = (value >> (i * 8)) & 255
+        i = i + 1
+    result
+
+fn elf_append_nonalloc_section(image: [i64], name: text, kind: i64, payload: [i64]) -> Result<[i64], text>:
+    if name == "" or name.contains("\0"): return Err("ELF metadata section name is invalid")
+    if kind < 0 or kind > 4294967295: return Err("ELF metadata section type exceeds 32 bits")
+    var raw: [u8] = []
+    for byte in image:
+        if byte < 0 or byte > 255: return Err("ELF metadata image contains a non-byte value")
+        raw.push(byte as u8)
+    for byte in payload:
+        if byte < 0 or byte > 255: return Err("ELF metadata payload contains a non-byte value")
+    val object = elf_parse_object(raw)?
+    if raw.len() < 64 or raw[4] != 2 or raw[5] != 1:
+        return Err("ELF metadata append requires little-endian ELF64")
+    val count = object.sections.len()
+    val strings_index = object.header.e_shstrndx
+    if count >= 65279 or strings_index <= 0 or strings_index >= count:
+        return Err("ELF metadata section table cannot be extended")
+    var i: i64 = 0
+    while i < count:
+        if elf_section_name(object, i) == name: return Err("duplicate ELF metadata section {name}")
+        i = i + 1
+    val strings = object.sections[strings_index]
+    if strings.sh_type != 3 or strings.sh_addr < 0 or strings.sh_addr > image.len() or strings.sh_size < 1 or strings.sh_size > image.len() - strings.sh_addr:
+        return Err("ELF metadata section-name table is invalid")
+    var result = image
+    val payload_offset = result.len()
+    for byte in payload: result.push(byte)
+    val strings_offset = result.len()
+    i = 0
+    while i < strings.sh_size:
+        result.push(image[strings.sh_addr + i])
+        i = i + 1
+    for byte in name.bytes(): result.push(byte as i64)
+    result.push(0)
+    while result.len() % 8 != 0: result.push(0)
+    val headers_offset = result.len()
+    i = 0
+    while i < count * 64:
+        result.push(image[object.header.e_shoff + i])
+        i = i + 1
+    val new_header = result.len()
+    i = 0
+    while i < 64:
+        result.push(0)
+        i = i + 1
+    result = elf_metadata_put(result, headers_offset + strings_index * 64 + 24, 8, strings_offset)
+    result = elf_metadata_put(result, headers_offset + strings_index * 64 + 32, 8, strings.sh_size + name.bytes().len() + 1)
+    result = elf_metadata_put(result, new_header, 4, strings.sh_size)
+    result = elf_metadata_put(result, new_header + 4, 4, kind)
+    result = elf_metadata_put(result, new_header + 24, 8, payload_offset)
+    result = elf_metadata_put(result, new_header + 32, 8, payload.len())
+    result = elf_metadata_put(result, new_header + 48, 8, 1)
+    result = elf_metadata_put(result, 40, 8, headers_offset)
+    result = elf_metadata_put(result, 60, 2, count + 1)
+    Ok(result)
+
+export elf_append_nonalloc_section

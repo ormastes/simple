@@ -599,6 +599,14 @@ wrong repository subsystem. Link detailed guides instead of duplicating them.
 - **Scope:** native FreeBSD x86_64 bootstrap inside QEMU (`check-freebsd-bootstrap-qemu.shs --full`)
   through Stage 3 PASS, then Stage 4 full CLI and FreeBSD spec runs.
 - **Timeouts:** ssh cap >= bootstrap budget (#1121); Stage 2 per-file cap 1800s under TCG (#1122).
+
+## Linux riscv64 QEMU bootstrap lane
+
+- **Expert note:** `doc/00_llm_process/feature_expert/linux_riscv64_qemu_bootstrap/skill.md`.
+- **Scope:** native riscv64 Linux guest (Ubuntu cloud image, OpenSBI -> U-Boot, 20 vCPU TCG)
+  via `check-linux-riscv64-bootstrap-qemu.shs`; trust-root Stage 2 with `--backend=cranelift`.
+- **Triple:** cargo needs `riscv64gc-unknown-linux-gnu` (`PLATFORM_RUST_TRIPLE`), Simple keeps `riscv64-unknown-linux-gnu`.
+
 ## Robust lifecycle persistence
 
 - **Canonical owner:** `std.lifecycle_persistence`, implemented under
@@ -1139,3 +1147,12 @@ is `tools/claude-plugin/repo-and-pull-req/skills/gh_pull_req_review/SKILL.md`.
   `0ea0:2211` exposes storage/HID only and must be rejected.
 - If OpenOCD reports the FTDI device absent, stop. Do not substitute CN22 CPLD
   service JTAG, guess CPU TAP wiring, or loop software resets.
+
+## Existing Simple native test binaries
+
+For compiled test executables like GoogleTest, use Simple's existing native
+runner, not a newly introduced foreign framework. Start with the
+[native test binary workflow](../07_guide/infra/testing/native_test_binary_workflow.md):
+explicit LLVM/Cranelift AOT commands, retained executables, source-list versus
+binary-owned counts, and the six-product compiler/interpreter/loader matrix.
+Research and repair existing aggregate/list entrypoints before replacing them.

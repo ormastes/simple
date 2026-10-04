@@ -906,6 +906,17 @@ fn reloc_apply_riscv(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i
 
 # reason: positional linker reloc_engine API plus target XLEN
 fn reloc_apply_riscv_xlen(bytes: [i64], offset: i64, rtype: i64, s: i64, a: i64, p: i64, xlen: i64) -> RelocResult:
+    if rtype == 32:
+        if not reloc_patch_range_valid(bytes.len(), offset, 4):
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "RISC-V TPREL_ADD requires a four-byte instruction")
+        val instruction = read_u32_le(bytes, offset)
+        val rs1 = (instruction >> 15) & 31
+        val rs2 = (instruction >> 20) & 31
+        if (instruction & 0xfe00707f) != 0x33 or (rs1 != 4 and rs2 != 4):
+            return RelocResult(success: false, offset: offset, value: 0,
+                error: "RISC-V TPREL_ADD requires ADD with tp")
+        return RelocResult(success: true, offset: offset, value: 0, error: "")
     if rtype == R_RISCV_NONE or rtype == 51:
         return RelocResult(success: true, offset: offset, value: 0, error: "")
 
@@ -1273,7 +1284,7 @@ fn reloc_patch_bytes(arch: RelocArch, bytes: [i64], offset: i64, rtype: i64, s: 
             reloc_patch_riscv_bytes(bytes, offset, rtype, result.value)
 
 fn reloc_patch_riscv_bytes(bytes: [i64], offset: i64, rtype: i64, value: i64) -> [i64]:
-    if rtype == R_RISCV_NONE or rtype == 51: return bytes
+    if rtype == R_RISCV_NONE or rtype == 51 or rtype == 32: return bytes
     val width = reloc_patch_width(RelocArch.Riscv64, rtype)
     if not reloc_patch_range_valid(bytes.len(), offset, width): return bytes
     if rtype == R_RISCV_64 or rtype == 36 or rtype == 40: return patch_u64_le(bytes, offset, value)

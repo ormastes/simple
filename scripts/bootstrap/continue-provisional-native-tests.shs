@@ -1,0 +1,95 @@
+#!/bin/sh
+# Read-only reuse of a terminal manager's products; all new evidence is private.
+set -eu
+die() { echo "provisional-native-continuation: $*" >&2; exit 20; }
+[ "$#" -ge 3 ] || die 'usage: TERMINAL_JSON REPORT_ROOT original verify-provisional-run arguments...'
+terminal=$1 report_root=$2
+shift 2
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+artifact_root= receipt= source_root= runtime_snapshot=
+for arg in "$@"; do
+  case "$arg" in
+    --root=*) artifact_root=${arg#*=} ;;
+    --receipt=*) receipt=${arg#*=} ;;
+    --source-root=*) source_root=${arg#*=} ;;
+    --runtime-snapshot=*) runtime_snapshot=${arg#*=} ;;
+  esac
+done
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+field() { awk -F= -v key="$1" '$1==key {value=substr($0,index($0,"=")+1); count++} END {if(count!=1) exit 1; print value}' "$receipt"; }
+regular "$terminal" && regular "$receipt" || die 'terminal result or original receipt missing'
+terminal_producer=$(perl -MJSON::PP -e '
+  local $/; open my $f,"<",$ARGV[0] or die $!; my $r=decode_json(<$f>);
+  die "not a terminal provisional manager result\n" unless
+    ($r->{state}//"") eq "terminal" && defined($r->{exit_code}) && $r->{exit_code}==3 &&
+    ($r->{threads_each}//0)==40 && exists($r->{admitted}) && !$r->{admitted};
+  my $sha=lc($r->{producer_sha256}//""); die "invalid producer\n" unless $sha=~/\A[0-9a-f]{64}\z/;
+  print $sha;
+' "$terminal") || die 'manager has no acceptable terminal result'
+[ "$terminal_producer" = "$(field producer_sha256)" ] || die 'terminal producer differs from original receipt'
+terminal_sha=$(hash_file "$terminal") receipt_sha=$(hash_file "$receipt")
+verify_original() {
+  [ "$(hash_file "$terminal")" = "$terminal_sha" ] && [ "$(hash_file "$receipt")" = "$receipt_sha" ] || return 1
+  sh "$script_root/verify-provisional-run.shs" "$@"
+}
+verify_original "$@" || die 'original provisional evidence rejected'
+artifact_physical=$(CDPATH= cd -- "$artifact_root" && pwd -P) || die 'artifact root unavailable'
+source_physical=$(CDPATH= cd -- "$source_root" && pwd -P) || die 'source root unavailable'
+report_parent=$(CDPATH= cd -- "$(dirname -- "$report_root")" && pwd -P) || die 'report parent unavailable'
+report_name=$(basename -- "$report_root")
+case "$report_name" in ''|.|..) die 'invalid report name' ;; esac
+report_root="$report_parent/$report_name"
+case "$report_root/" in "$artifact_physical/"*|"$source_physical/"*) die 'report root must be outside immutable artifact and source roots' ;; esac
+mkdir "$report_root" || die 'fresh report root required'
+printf '%s\n' 'diagnostic_only=1' 'admitted=false' 'actual_invoked_tools=unproven' \
+  'aggregate_binary=UNVERIFIED' 'binary_owned_listing=UNVERIFIED' \
+  "terminal_result_sha256=$terminal_sha" "original_receipt_sha256=$receipt_sha" \
+  "original_artifact_root=$artifact_root" "threads_each=40" \
+  "verifier_sha256=$(hash_file "$script_root/verify-provisional-run.shs")" \
+  "suite_wrapper_sha256=$(hash_file "$script_root/run-provisional-native-subsystem.shs")" >"$report_root/inputs.txt"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
+runtime_identity=$(field runtime_snapshot_sha256) || die 'runtime identity missing'
+dispatch_backend() {
+  backend=$1
+  shift
+  lane="$report_root/$backend"
+  mkdir "$lane" || return 1
+  : >"$lane/statuses.tsv"
+  for subsystem in compiler interpreter loader; do
+    outcome=BLOCKED
+    status=20
+    if verify_original "$@" >"$lane/$subsystem.before.log" 2>&1 &&
+        [ "$(field "phase4_${backend}_full-cli_status")" = SUCCEEDED ] &&
+        [ "$(field "phase4_${backend}_test-runner_status")" = SUCCEEDED ]; then
+      compiler="$artifact_root/phase4/binaries/$backend/full-cli/bin/simple$exe_suffix"
+      runner="$artifact_root/phase4/binaries/$backend/test-runner/bin/simple_test_runner$exe_suffix"
+      compiler_sha=$(field "phase4_${backend}_full-cli") || return 1
+      run_dir="$lane/$subsystem"
+      mkdir "$run_dir" || return 1
+      status=0
+      sh "$script_root/run-provisional-native-subsystem.shs" "$source_root" "$backend" \
+        "$compiler" "$compiler_sha" "$runner" "$subsystem" "$run_dir" 40 \
+        "$source_root/src/runtime" "$runtime_identity" >"$lane/$subsystem.log" 2>&1 || status=$?
+      case "$status" in 0) outcome=SUCCEEDED ;; 20) outcome=BLOCKED ;; *) outcome=FAILED ;; esac
+      if ! verify_original "$@" >"$lane/$subsystem.after.log" 2>&1; then outcome=BLOCKED; status=20; fi
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$backend" "$subsystem" "$outcome" "$status" >>"$lane/statuses.tsv"
+  done
+}
+dispatch_backend llvm "$@" &
+llvm_pid=$!
+dispatch_backend cranelift "$@" &
+cranelift_pid=$!
+result=0
+wait "$llvm_pid" || result=1
+wait "$cranelift_pid" || result=1
+printf 'backend\tsubsystem\tstatus\texit_code\n' >"$report_root/statuses.tsv"
+for backend in llvm cranelift; do
+  cat "$report_root/$backend/statuses.tsv" >>"$report_root/statuses.tsv" || result=1
+done
+awk -F '\t' 'NR>1 {count++; if($3!="SUCCEEDED") bad=1} END {exit bad || count!=6}' "$report_root/statuses.tsv" || result=1
+verify_original "$@" >"$report_root/final-verification.log" 2>&1 || result=1
+printf 'diagnostic_exit_code=%s\nstatuses_sha256=%s\n' "$result" "$(hash_file "$report_root/statuses.tsv")" >"$report_root/result.txt"
+echo "$report_root/result.txt"
+exit "$result"

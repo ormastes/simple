@@ -92,3 +92,32 @@ acceptance reviews root's hosted/adapter changes and research reviews integrated
 Mach-O/adapter changes. Root is the merge owner. Runtime tests, generated-manual
 validation and coverage are UNRUN, so source review cannot award verify PASS.
 The prior three-attempt runtime diagnostic cap is unchanged.
+
+## Verification readiness continuation (2026-10-03)
+
+The user requests remaining items be divided into implementation and test work
+before Phase 4. The authoritative current breakdown is
+`doc/03_plan/compiler/linker/item4_verification_readiness.md`.
+Root integrates on `work/item4-verification-readiness-20261003`, owns provider
+lifecycle binding and common documents. Research owns retained archive/bounded
+execution in its original isolated research worktree. Runtime owns hosted Mach-O
+in the Mach-O worktree. Acceptance owns remaining RISC-V work in the acceptance
+worktree. All start from release `94a16103a5baeefad8bc7688e70b43b75dcf2914`.
+No agent edits another lane. Tests precede implementation, root reviews source,
+and an independent inherited-model agent reviews root. Lower-model sidecars N/A.
+
+## Historical main forward-port (before branch reconciliation)
+
+The following note describes the earlier main-only adaptation. The reconciled
+tree retains the newer release strict authority and configured-linker owners.
+
+### Main forward-port of release PR #2294 (2026-10-03)
+
+The shared ELF admission and executed-engine fixes landed on `release/1.0` in
+`7d16ab11d2227cbe5f29dc998b76a1eff326abbb`. The targeted main forward-port
+preserves main's existing admission behavior: main lacks the release-only
+strict tool/runtime authority modules, so its typed result wraps the existing
+entrypoint directly, and the fallback spec omits that unavailable import/check.
+All other production guards and acceptance scenarios are carried forward.
+Runtime SSpec, generated-manual, coverage and core/MCP evidence remain unrun;
+this forward-port does not change any requirement's verification status.

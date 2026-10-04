@@ -1,0 +1,212 @@
+# Console UART selection from the firmware device tree, pure Simple.
+#
+# MDSOC: feature dimension, kernel boot layer.
+#
+# Resolves /chosen stdout-path (or linux,stdout-path) — either an absolute node
+# path or an /aliases name, with any ":115200n8" option suffix dropped — to a
+# UART node, and decodes the register layout from that node:
+#
+#   compatible            kind              defaults
+#   ns16550a / ns16550    16550, byte-wide  reg-shift 0, reg-io-width 1
+#   snps,dw-apb-uart      DesignWare 8250   reg-shift 0, reg-io-width 1
+#
+# reg-shift / reg-io-width are always taken from the node when present. QEMU
+# `virt` gives ns16550a@0x10000000 (shift 0, width 1); the JH7110 (VisionFive
+# 2) gives snps,dw-apb-uart@0x10000000 with reg-shift = <2>, reg-io-width = <4>,
+# i.e. LSR at 0x10000014 read as a 32-bit word.
+#
+# The selection is a pure function of the blob. The riscv64 C console sink
+# (boot_entry.c rv64_console_putc) only stores the three scalars it is given;
+# fdt_uart_console_putc below is its Simple twin over the same address math.
+#
+# Firmware already programmed the divisor (U-Boot printed through this UART),
+# so nothing here touches LCR/DLL/DLH — on the DW 8250 an LCR write while busy
+# is silently dropped, and re-programming the baud is not this module's job.
+
+use os.kernel.boot.fdt_blob.{
+    FdtBlob, FdtNode, FdtStr, fdt_lit, fdt_blob_str, fdt_str_at,
+    fdt_find_path, fdt_node_prop, fdt_prop_has_string, fdt_node_reg,
+    fdt_node_u32, fdt_node_none
+}
+use os.kernel.boot.mmio_hardware.{
+    hardware_mmio_read8, hardware_mmio_write8,
+    hardware_mmio_read32, hardware_mmio_write32
+}
+
+pub fn fdt_uart_kind_none() -> u64: 0u64
+pub fn fdt_uart_kind_ns16550() -> u64: 1u64
+pub fn fdt_uart_kind_dw_apb() -> u64: 2u64
+
+fn _uart_thr() -> u64: 0u64
+fn _uart_lsr() -> u64: 5u64
+fn _uart_lsr_thre() -> u64: 0x20u64
+
+struct FdtUartConsole:
+    found: bool
+    kind: u64
+    base: u64
+    reg_shift: u64
+    reg_io_width: u64
+    via_alias: bool
+    reason: text
+
+fn _console_none(reason: text) -> FdtUartConsole:
+    FdtUartConsole(found: false, kind: 0u64, base: 0u64, reg_shift: 0u64,
+                   reg_io_width: 1u64, via_alias: false, reason: reason)
+
+pub fn uart_reg_address(base: u64, reg_shift: u64, index: u64) -> u64:
+    """8250 register `index` (THR=0 ... LSR=5) at base + (index << reg-shift)."""
+    base + (index << reg_shift)
+
+pub fn uart_thr_address(con: FdtUartConsole) -> u64:
+    uart_reg_address(con.base, con.reg_shift, _uart_thr())
+
+pub fn uart_lsr_address(con: FdtUartConsole) -> u64:
+    uart_reg_address(con.base, con.reg_shift, _uart_lsr())
+
+pub fn fdt_uart_kind_name(kind: u64) -> text:
+    if kind == fdt_uart_kind_ns16550():
+        return "ns16550a"
+    if kind == fdt_uart_kind_dw_apb():
+        return "snps,dw-apb-uart"
+    "none"
+
+# The stdout-path value up to ':' or NUL, as a blob byte run.
+fn _stdout_value(blob: FdtBlob, off: u64, len: u64) -> FdtStr:
+    var n: u64 = 0u64
+    while n < len:
+        val c = blob.byte(off + n)
+        if c == 0u64 or c == 58u64:
+            return fdt_blob_str(off, n)
+        n = n + 1u64
+    fdt_blob_str(off, n)
+
+fn _blob_strz(blob: FdtBlob, off: u64, len: u64) -> FdtStr:
+    var n: u64 = 0u64
+    while n < len and blob.byte(off + n) != 0u64:
+        n = n + 1u64
+    fdt_blob_str(off, n)
+
+pub fn fdt_stdout_node(blob: FdtBlob) -> FdtNode:
+    """The node /chosen stdout-path designates, alias-resolved."""
+    val chosen = fdt_find_path(blob, fdt_lit("/chosen"))
+    if not chosen.found:
+        return fdt_node_none()
+    var prop = fdt_node_prop(blob, chosen, fdt_lit("stdout-path"))
+    if not prop.found:
+        prop = fdt_node_prop(blob, chosen, fdt_lit("linux,stdout-path"))
+    if not prop.found:
+        return fdt_node_none()
+    val value = _stdout_value(blob, prop.off, prop.len)
+    if value.len == 0u64:
+        return fdt_node_none()
+    if fdt_str_at(blob, value, 0u64) == 47u64:
+        return fdt_find_path(blob, value)
+    val aliases = fdt_find_path(blob, fdt_lit("/aliases"))
+    val target = fdt_node_prop(blob, aliases, value)
+    if not target.found:
+        return fdt_node_none()
+    fdt_find_path(blob, _blob_strz(blob, target.off, target.len))
+
+fn _stdout_is_alias(blob: FdtBlob) -> bool:
+    val chosen = fdt_find_path(blob, fdt_lit("/chosen"))
+    var prop = fdt_node_prop(blob, chosen, fdt_lit("stdout-path"))
+    if not prop.found:
+        prop = fdt_node_prop(blob, chosen, fdt_lit("linux,stdout-path"))
+    prop.found and prop.len > 0u64 and blob.byte(prop.off) != 47u64
+
+pub fn fdt_uart_console_select(blob: FdtBlob) -> FdtUartConsole:
+    """Decode the stdout UART; found=false (with a reason) when unusable."""
+    if not blob.valid():
+        return _console_none("no valid FDT")
+    val node = fdt_stdout_node(blob)
+    if not node.found:
+        return _console_none("no /chosen stdout-path node")
+    val compat = fdt_node_prop(blob, node, fdt_lit("compatible"))
+    var kind = fdt_uart_kind_none()
+    if fdt_prop_has_string(blob, compat, "snps,dw-apb-uart"):
+        kind = fdt_uart_kind_dw_apb()
+    else if fdt_prop_has_string(blob, compat, "ns16550a") or fdt_prop_has_string(blob, compat, "ns16550"):
+        kind = fdt_uart_kind_ns16550()
+    if kind == fdt_uart_kind_none():
+        return _console_none("stdout node is not an 8250-family UART")
+    val reg = fdt_node_reg(blob, node, 0u64)
+    if not reg.found or reg.addr == 0u64:
+        return _console_none("stdout UART has no usable reg")
+    val shift = fdt_node_u32(blob, node, "reg-shift", 0u64)
+    val width = fdt_node_u32(blob, node, "reg-io-width", 1u64)
+    if shift > 3u64:
+        return _console_none("stdout UART reg-shift out of range")
+    if width != 1u64 and width != 4u64:
+        return _console_none("stdout UART reg-io-width is neither 1 nor 4")
+    FdtUartConsole(found: true, kind: kind, base: reg.addr, reg_shift: shift,
+                   reg_io_width: width, via_alias: _stdout_is_alias(blob), reason: "")
+
+fn _hex_digit(v: u64) -> text:
+    if v < 8u64:
+        if v < 4u64:
+            if v < 2u64:
+                return if v == 0u64: "0" else: "1"
+            return if v == 2u64: "2" else: "3"
+        if v < 6u64:
+            return if v == 4u64: "4" else: "5"
+        return if v == 6u64: "6" else: "7"
+    if v < 12u64:
+        if v < 10u64:
+            return if v == 8u64: "8" else: "9"
+        return if v == 10u64: "a" else: "b"
+    if v < 14u64:
+        return if v == 12u64: "c" else: "d"
+    if v == 14u64: "e" else: "f"
+
+pub fn fdt_hex(v: u64) -> text:
+    """0x-prefixed lower-case hex without leading zeros (no runtime formatter)."""
+    if v == 0u64:
+        return "0x0"
+    var out = ""
+    var rest = v
+    while rest != 0u64:
+        out = _hex_digit(rest & 0xFu64) + out
+        rest = rest >> 4u64
+    "0x" + out
+
+pub fn fdt_small(v: u64) -> text:
+    """Decimal for 0..9, hex otherwise."""
+    if v < 10u64:
+        return _hex_digit(v)
+    fdt_hex(v)
+
+pub fn fdt_uart_console_describe(con: FdtUartConsole) -> text:
+    if not con.found:
+        return "unresolved (" + con.reason + ")"
+    val source = if con.via_alias: "alias" else: "path"
+    fdt_uart_kind_name(con.kind) + " base=" + fdt_hex(con.base) +
+        " reg-shift=" + fdt_small(con.reg_shift) + " reg-io-width=" + fdt_small(con.reg_io_width) +
+        " lsr=" + fdt_hex(uart_lsr_address(con)) + " stdout-path=" + source
+
+pub fn fdt_uart_console_putc(con: FdtUartConsole, byte: u8):
+    """Simple twin of the C sink rv64_console_putc: poll LSR.THRE, write THR."""
+    val lsr = uart_lsr_address(con)
+    val thr = uart_thr_address(con)
+    var spin: i64 = 0
+    while spin < 100000:
+        var status: u64 = 0u64
+        if con.reg_io_width == 4u64:
+            status = hardware_mmio_read32(lsr) as u64
+        else:
+            status = hardware_mmio_read8(lsr) as u64
+        if (status & _uart_lsr_thre()) != 0u64:
+            break
+        spin = spin + 1
+    if con.reg_io_width == 4u64:
+        hardware_mmio_write32(thr, byte as u32)
+    else:
+        hardware_mmio_write8(thr, byte)
+
+pub fn fdt_uart_console_println(con: FdtUartConsole, line: text):
+    var i: i64 = 0
+    while i < line.len():
+        fdt_uart_console_putc(con, line.byte_at(i) as u8)
+        i = i + 1
+    fdt_uart_console_putc(con, 13u8)
+    fdt_uart_console_putc(con, 10u8)

@@ -1,0 +1,9 @@
+# U43F-017: coalesced receiver identity
+
+Frozen failure: source43f626850b6a5531e89110f75cd1eaedc24adcd1, producer e58968bba401407bb04d6b581e62cf1dcf480847ec56338bb7a06ad4003283ff, LSP binary attempt U43F-017. Its MIR errors include contains in json_helpers and is_empty in minimal_runtime_ops. Both callers use a non-optional returning call followed by a compatibility `??` default.
+
+The coalesce lowerer defaulted an unannotated result to i64 and only recovered text from an Optional inner type. A directly returned text local therefore lost its proven MIR text identity. The correction preserves that already-lowered text type without evaluating the default early. Separately, the is_empty runtime lowering required a HIR receiver annotation even when the lowered local proved array/dict/text identity. Recovery now accepts only those proven built-in locals, reuses an already-lowered receiver, and preserves custom/unknown dispatch.
+
+Real regression specs exercise frontend→HIR→MIR and require runtime-call selection, no lowering diagnostics, preserved custom dispatch, and rejection of scalar is_empty. A standalone native fixture checks receiver evaluation once, lazy default effects, text contains, and array emptiness. These tests are **UNRUN** pending a qualified changed compiler/test runner and a reserved Linux/Windows slot; no source-string census or old producer result is presented as validation.
+
+This patch does **not** claim all U43F-017 failures fixed. VirtualSourceRegistrationStatusV1 enum comparison and trait-typed VirtualSourceStoreV1 read/list/stat/page remain separate unresolved nominal/trait paths. It is independent of the global Dict annotation repair. The source fix is based on the concrete lowering paths; reproducing the old failure and validating the changed native compiler remain release blockers.

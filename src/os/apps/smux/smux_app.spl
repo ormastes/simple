@@ -11,8 +11,10 @@ use os.apps.smux.api.{
     smux_split_pane,
     smux_capture,
     smux_send_command,
-    smux_is_deferred_feature
+    smux_is_deferred_feature,
+    smux_pane_spawn_pty
 }
+use std.sys.pty.{platform_default_shell}
 
 pub fn smux_help_text() -> text:
     return "smux <command> [args]\n  new <name>           create session\n  list                 list sessions\n  send <name> <cmd>    send command to active pane\n  capture <name>       capture active pane output\n  split <name>         split active pane\n  smux deferred <feature>  check deferred feature\n"
@@ -42,7 +44,15 @@ pub fn smux_run_cmd(args: [text]) -> int:
     if cmd == "new":
         if args.len() < 2:
             return 1
-        smux_create_session(args[1])
+        # Like `tmux new-session`: the first pane runs the platform shell on a
+        # real terminal, so `send` has a child to type into.
+        val session = smux_create_session(args[1])
+        if session.id == "":
+            return 1
+        val window = smux_list_windows(session.id)[0]
+        val pane = smux_list_panes(session.id, window.id)[0]
+        if smux_pane_spawn_pty(session.id, window.id, pane.id, platform_default_shell()).is_err():
+            return 1
         return 0
 
     if cmd == "list":

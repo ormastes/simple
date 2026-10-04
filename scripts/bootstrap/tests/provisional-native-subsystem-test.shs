@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-native-subsystem-test.XXXXXX")
+mkdir -p "$tmp/scripts" "$tmp/source/test/01_unit/compiler" "$tmp/source/test/02_integration/compiler" \
+  "$tmp/source/test/03_system/loader" "$tmp/run"
+cp "$script_root/run-provisional-native-subsystem.shs" "$script_root/compiler-subsystem-test-inventory.shs" "$tmp/scripts/"
+printf 'first\n' >"$tmp/source/test/01_unit/compiler/a_spec.spl"
+printf 'second\n' >"$tmp/source/test/02_integration/compiler/b_test.spl"
+printf 'other subsystem\n' >"$tmp/source/test/03_system/loader/c_spec.spl"
+# This test verifies scheduling/evidence handling only, not native execution.
+cat >"$tmp/scripts/run-native-aot-suite.shs" <<'FIXTURE'
+#!/bin/sh
+test "${SIMPLE_SCV_INVENTORY_COLD_INIT:-missing}" = 0 || exit 99
+printf '%s\n' "$6" >>"$1/events"
+printf 'retained runner diagnostic\n' >"$7/runner.log"
+case "$6" in *a_spec.spl) exit 7 ;; esac
+printf 'assertions_passed=4\n' >"$7/evidence.tsv"
+FIXTURE
+result=0
+sh "$tmp/scripts/run-provisional-native-subsystem.shs" "$tmp/source" llvm compiler sha runner compiler \
+  "$tmp/run" 40 - identity || result=$?
+[ "$result" -eq 1 ] || { echo 'FAIL: failing first file was hidden'; exit 1; }
+[ "$(wc -l <"$tmp/source/events" | tr -d ' ')" -eq 2 ] || { echo 'FAIL: did not continue exact subsystem inventory'; exit 1; }
+grep -q 'a_spec.spl.*FAILED.*7.*UNKNOWN' "$tmp/run/results.tsv"
+grep -q 'b_test.spl.*PASSED.*0.*4' "$tmp/run/results.tsv"
+grep -qx 'aggregate_binary=UNVERIFIED' "$tmp/run/limitations.txt"
+grep -qx 'binary_owned_listing=UNVERIFIED' "$tmp/run/limitations.txt"
+test -f "$tmp/run/file-1/runner.log"
+mkdir "$tmp/empty"
+result=0
+sh "$tmp/scripts/run-provisional-native-subsystem.shs" "$tmp/source" llvm compiler sha runner interpreter \
+  "$tmp/empty" 40 - identity || result=$?
+[ "$result" -eq 20 ] || { echo 'FAIL: empty subsystem admitted'; exit 1; }
+echo 'PASS: full subsystem inventory, failure continuation, unknown failed counts and listing gap'

@@ -1,0 +1,126 @@
+# Dyld executable image construction. Runtime and host qualification are separate.
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.macho.input.{MachOInput, macho_checked_object, macho_archive_inputs}
+use compiler.backend.linker.macho.layout.{macho_layout, macho_align}
+use compiler.backend.linker.macho.symbols.{macho_definitions, macho_unresolved, macho_member_needed, macho_symbol_address}
+use compiler.backend.linker.macho.relocations.{macho_relocate}
+use compiler.backend.linker.macho.dylib.{MachODylib, macho_read_dylib}
+use compiler.backend.linker.macho.hosted_fixups.{macho_hosted_slots, macho_hosted_fixups}
+use compiler.backend.linker.macho.hosted_image.{macho_hosted_stubs, macho_hosted_image}
+
+struct MachOHostedRequest:
+    target: RelocArch
+    entry: text
+    minimum_os: i64
+    sdk: i64
+    max_image_bytes: i64
+    identifier: text
+    rpaths: [text]
+
+fn macho_hosted_link(objects: [[u8]], archives: [[u8]], providers: [[u8]], request: MachOHostedRequest) -> Result<[u8], text>:
+    """Construct a two-level PIE main image with eager dyld fixups and signing.
+
+    No Apple loader execution/trust is inferred from a successful byte result.
+    Unsupported TLS, unwind, weak coalescing and dynamic exports fail or remain
+    outside this explicit executable request contract; they are open item4 gates.
+    """
+    var arm = false
+    match request.target:
+        case RelocArch.X86_64: arm = false
+        case RelocArch.AArch64: arm = true
+        case _: return Err("unsupported hosted Mach-O target")
+    val cpu = if arm: 0x0100000c else: 0x01000007
+    val limit = request.max_image_bytes
+    if limit < 32768 or limit > 0x7fffffff: return Err("invalid hosted image byte budget")
+    if request.entry == "" or request.entry.contains("\0"): return Err("invalid hosted entry name")
+    if request.identifier == "" or request.identifier.len() > 4096 or request.identifier.contains("\0"):
+        return Err("invalid hosted signing identifier")
+    for index in 0..request.identifier.len():
+        if request.identifier.byte_at(index) > 127: return Err("unsupported non-ASCII signing identifier")
+    if request.minimum_os < 0xb0000 or request.minimum_os > 0xffffff or request.sdk < request.minimum_os or request.sdk > 0xffffff:
+        return Err("hosted Mach-O requires explicit macOS 11+ minimum/SDK versions")
+    if request.rpaths.len() > 128: return Err("hosted rpath count limit exceeded")
+    var paths: {text: bool} = {}
+    for path in request.rpaths:
+        if path == "" or path.len() > 4096 or path.contains("\0") or paths.has(path): return Err("invalid or duplicate hosted rpath")
+        for index in 0..path.len():
+            if path.byte_at(index) > 127: return Err("unsupported non-ASCII hosted rpath")
+        paths[path] = true
+    var inputs: [MachOInput] = []
+    var index: i64 = 0
+    for bytes in objects:
+        val object = macho_checked_object(bytes)?
+        inputs = inputs.push(MachOInput(name: "object {index}", object: object))
+        index = index + 1
+    var members: [MachOInput] = []
+    for bytes in archives:
+        val archive_members = macho_archive_inputs(bytes)?
+        for member in archive_members: members = members.push(member)
+    var selected: {i64: bool} = {}
+    var changed = true
+    while changed:
+        changed = false
+        val unresolved = macho_unresolved(inputs, request.entry)?
+        index = 0
+        for member in members:
+            if not selected.has(index) and macho_member_needed(member, unresolved):
+                selected[index] = true
+                inputs = inputs.push(member)
+                changed = true
+                break
+            index = index + 1
+    for input in inputs:
+        if input.object.header.filetype != 1 or input.object.header.cputype != cpu or input.object.header.cpusubtype != (if arm: 0 else: 3):
+            return Err("hosted input must be matching baseline CPU MH_OBJECT")
+        for segment in input.object.segments:
+            for section in segment.sections:
+                val kind = section.flags & 255
+                if kind >= 17 and kind <= 21: return Err("hosted local TLS definitions and initialization are not implemented")
+                if section.sectname == "__eh_frame" or section.sectname == "__compact_unwind":
+                    return Err("hosted Mach-O unwind tables are not implemented")
+                if section.segname != "__DWARF" and section.sectname != "__text" and section.sectname != "__const" and
+                        section.sectname != "__cstring" and section.sectname != "__literal4" and section.sectname != "__literal8" and
+                        section.sectname != "__literal16" and section.sectname != "__data" and section.sectname != "__bss" and section.sectname != "__common":
+                    return Err("hosted section discovery semantics unsupported: {section.segname},{section.sectname}")
+    val definitions = macho_definitions(inputs)?
+    if not definitions.has(request.entry): return Err("undefined hosted entry {request.entry}")
+    var libraries: [MachODylib] = []
+    var install_names: {text: bool} = {}
+    for bytes in providers:
+        if libraries.len() >= 255: return Err("hosted dependency count exceeds 255")
+        val library = macho_read_dylib(bytes, request.target)?
+        if library.platform != 1 or library.minimum_os > request.minimum_os:
+            return Err("hosted provider platform/minimum OS mismatch")
+        if install_names.has(library.install_name): return Err("duplicate hosted dylib install name")
+        if library.install_name.starts_with("@rpath/") and request.rpaths.len() == 0:
+            return Err("hosted @rpath provider requires an explicit runtime search path")
+        install_names[library.install_name] = true
+        libraries = libraries.push(library)
+    val slots = macho_hosted_slots(inputs, definitions, libraries, arm)?
+    val text_reserve = macho_align(slots.len() * 16, 0x4000)
+    val layout = macho_layout(inputs, limit, text_reserve)?
+    val chosen = definitions[request.entry]
+    val entry = macho_symbol_address(inputs[chosen.owner], chosen.owner, chosen.symbol, layout)?
+    var executable = false
+    var ordinal: i64 = 1
+    for segment in inputs[chosen.owner].object.segments:
+        for section in segment.sections:
+            if ordinal == chosen.symbol.n_sect and section.segname == "__TEXT" and (section.flags & 0x80000400) != 0 and chosen.symbol.n_value < section.addr + section.size:
+                executable = true
+            ordinal = ordinal + 1
+    if not executable or (arm and entry % 4 != 0): return Err("hosted entry must address executable instruction bytes")
+    val got = macho_align(layout.size, 8)
+    if got > limit or slots.len() * 8 > limit - got: return Err("hosted GOT exceeds image byte budget")
+    val payload_size = got + slots.len() * 8
+    val stubs = layout.data_offset - text_reserve
+    val fixups = macho_hosted_fixups(inputs, definitions, layout, slots, got, stubs, arm)?
+    var bytes: [u8] = [0u8; payload_size]
+    for placement in layout.placements:
+        if not placement.zerofill:
+            for byte in 0..placement.size:
+                bytes[placement.offset + byte] = inputs[placement.owner].object.raw[placement.source_offset + byte]
+    bytes = macho_relocate(bytes, inputs, definitions, layout, arm, fixups.targets, fixups.bound_sites)?
+    bytes = macho_hosted_stubs(bytes, got, stubs, fixups.slot_values, arm)?
+    macho_hosted_image(bytes, layout, libraries, fixups, entry, arm, request.minimum_os, request.sdk, request.identifier, request.rpaths, limit)
+
+export MachOHostedRequest, macho_hosted_link

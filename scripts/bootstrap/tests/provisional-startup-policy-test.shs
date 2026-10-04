@@ -1,0 +1,42 @@
+#!/bin/sh
+# Execute production startup invocations with an argv spy, never a fake receipt.
+set -eu
+base=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+test_parent=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+test_root=$(mktemp -d "$test_parent/simple-provisional-startup-policy.XXXXXX")
+cleanup() {
+  case "$test_root" in "$test_parent"/simple-provisional-startup-policy.*) rm -rf -- "$test_root" ;; *) exit 2 ;; esac
+}
+trap cleanup EXIT HUP INT TERM
+launcher="$base/run-provisional-phase3-phase4.shs"
+awk '/^startup_timeout_seconds=/ {print}' "$launcher" > "$test_root/timeout.shs"
+[ -s "$test_root/timeout.shs" ] || exit 1
+for pair in 0:0 1:1 1000:1 1001:2; do
+  lifetime_ms=${pair%:*}
+  . "$test_root/timeout.shs"
+  [ "$startup_timeout_seconds" = "${pair#*:}" ] || { echo 'FAIL: timeout rounding'; exit 1; }
+done
+for variable in repo_root producer producer_digest source_checkout snapshot snapshot_digest hello_source hello_source_digest hello_root hello_receipt hello_digest authority_images target compiler_tool compiler_tool_digest linker_tool linker_tool_digest source_root manager_images authority_program authority_receipt authority_digest authority_image_receipt; do
+  eval "$variable=\$test_root/pin"
+done
+threads=40 startup_timeout_seconds=0 memory_policy=monitor
+memory_bytes=6000000000 reserve_bytes=1000000000
+calls=0
+sh() {
+  calls=$((calls + 1))
+  printf '%s\n' "$@" > "$test_root/call-$calls"
+}
+die() { echo "FAIL: $*" >&2; exit 1; }
+awk '/^[ ]*sh .*prepare-provisional-(hello|manager-images)\.shs/ {copy=1} copy {print} copy && /\|\| die/ {copy=0}' "$launcher" > "$test_root/startup.shs"
+[ -s "$test_root/startup.shs" ] || exit 1
+. "$test_root/startup.shs"
+[ "$calls" = 3 ] || die "expected hello and two image calls"
+for index in 1 2 3; do
+  for arg in --timeout-seconds=0 --memory-policy=monitor; do
+    grep -qx -- "$arg" "$test_root/call-$index" || die "call $index lost $arg"
+  done
+done
+for index in 2 3; do
+  grep -qx -- '--threads=40' "$test_root/call-$index" || die "image call lost threads"
+done
+echo 'PASS: production startup calls preserve unlimited timeout, memory monitoring, image threads, and positive timeout rounding'

@@ -15,7 +15,7 @@
 # reports the arithmetic it used. A refusal a caller can read is worth more than
 # a verdict it has to trust.
 
-use std.io_runtime.{read_file}
+use std.io_runtime.{read_file, host_os}
 use std.nogc_sync_mut.io.process_ops.{shell_int}
 
 # Bytes to leave for the OS, the page cache and whatever else shares this
@@ -51,7 +51,21 @@ fn mem_total_bytes() -> i64:
                 val t = part.trim()
                 if t != "" and t != "MemTotal:" and t != "kB":
                     return t.to_i64() * 1024
+    if host_os() == "windows":
+        return _win32_os_kib("TotalVisibleMemorySize")
     shell_int("sysctl -n hw.memsize", -1)
+
+# Windows has neither /proc/meminfo nor sysctl. Win32_OperatingSystem reports
+# TotalVisibleMemorySize and FreePhysicalMemory in KiB. FreePhysicalMemory is
+# used as the MemAvailable analogue (measured 2026-10-03 within 10% of the
+# perf counter Memory\AvailableKBytes, at ~1.2 s per probe vs ~3.3 s). Same
+# PowerShell/CIM probe the test runner's system_monitor uses.
+# -1 when the probe fails, which check_fit turns into a refusal.
+fn _win32_os_kib(field: text) -> i64:
+    val kib = shell_int("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem)." + field + "\"", -1)
+    if kib <= 0:
+        return -1
+    kib * 1024
 
 struct FitVerdict:
     fits: bool
@@ -69,6 +83,8 @@ fn mem_available_bytes() -> i64:
     val linux = _mem_available_linux()
     if linux > 0:
         return linux
+    if host_os() == "windows":
+        return _win32_os_kib("FreePhysicalMemory")
     _mem_available_darwin()
 
 fn _mem_available_linux() -> i64:
@@ -122,7 +138,7 @@ fn check_fit(model_bytes: i64, overhead_bytes: i64, headroom_bytes: i64) -> FitV
     if available < 0:
         return FitVerdict(fits: false, model_bytes: model_bytes, available_bytes: -1,
             headroom_bytes: headroom_bytes,
-            reason: "could not establish available memory (no MemAvailable in /proc/meminfo, and no usable sysctl/vm_stat); refusing rather than loading blind")
+            reason: "could not establish available memory (no MemAvailable in /proc/meminfo, no usable sysctl/vm_stat, and no Win32_OperatingSystem via PowerShell); refusing rather than loading blind")
     if needed > available:
         return FitVerdict(fits: false, model_bytes: model_bytes, available_bytes: available,
             headroom_bytes: headroom_bytes,

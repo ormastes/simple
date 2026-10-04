@@ -10,7 +10,17 @@ description: "Codex system test design skill (Codex-specific strength). Step-bas
 
 Codex excels at systematic test generation with full requirement traceability. Use this skill for test-focused tasks.
 
-## Tools
+## Existing compiled test workflow
+
+For native test executables, first read the
+[Simple native test guide](../../../doc/07_guide/infra/testing/native_test_binary_workflow.md).
+Simple already builds/runs test binaries: use the existing
+`--native-backend=llvm|cranelift` route and repair it before proposing a new
+framework. "Like GoogleTest" describes behavior, not an external dependency.
+Preserve artifacts and actual build/run evidence. Source `--list` output is not
+a binary-owned case count; verify the executable's supported listing interface.
+
+## Navigation tools
 
 - **Simple MCP** — query codebase structure, existing tests
 - **Simple LSP MCP** — symbol lookup, type signatures for test targets

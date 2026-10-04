@@ -21,6 +21,7 @@ for arg do case "$arg" in
     --work-root=*) work=${arg#*=};;
     --compiler-sha256=*) sha=${arg#*=};;
     --backend=*) backend=${arg#*=};;
+    --source-root=*) source=${arg#*=};;
 esac; done
 mkdir -p "$work/outputs/compiler-tools/fixture"
 cp "$TEST_TOOL" "$work/outputs/compiler-tools/fixture/simple_cli"
@@ -44,6 +45,7 @@ runner_sha=$(sha256sum "$runner" | awk '{print $1}')
     echo status=frozen
     echo "phase=$phase"
     echo "verification_backend=$backend"
+    echo "target_runtime_source_path=$source/src/runtime"
     echo "compiler_cli_path=$cli"
     echo "compiler_cli_sha256=$cli_sha"
     echo "test_runner_path=$runner"
@@ -53,11 +55,15 @@ receipt_sha=$(sha256sum "$receipt" | awk '{print $1}')
 {
     echo "phase=$phase"
     echo "verification_backend=$backend"
+    echo "target_runtime_source_path=$source/src/runtime"
     echo 'hash_policy=canonical'
     echo "expected_compiler_sha256=$sha"
     echo "actual_compiler_sha256=$sha"
     echo 'task=compiler_cli_build|result=PASS|status=0'
     echo 'task=test_runner_build|result=PASS|status=0'
+    echo 'task=compiler_bootstrap_tests|result=PASS|status=0'
+    echo 'task=interpreter_interpreter_tests|result=PASS|status=0'
+    echo 'task=loader_interpreter_tests|result=PASS|status=0'
     echo 'terminal_failures=0'
     echo "overall=$outcome"
     echo "command_owner_receipt=$receipt"
@@ -75,6 +81,12 @@ case "$1" in
 run) echo 42;;
 native-build)
     [ "$TEST_CASE" != stale ] || exit 0
+    if [ -n "${TEST_EXPECT_BACKEND:-}" ]; then
+        case " $* " in
+            *" --backend $TEST_EXPECT_BACKEND "*) ;;
+            *) exit 9 ;;
+        esac
+    fi
     while [ "$#" -gt 0 ]; do
         if [ "$1" = --output ]; then shift; printf '#!/bin/sh\necho 42\n' >"$1"; chmod +x "$1"; break; fi
         shift
@@ -138,5 +150,100 @@ for os in Linux FreeBSD; do
         fi
     done
 done
+export TEST_OS=FreeBSD TEST_CASE=good TEST_EXPECT_BACKEND=cranelift
+cranelift_work="$tmp/FreeBSD-cranelift"
+status=0
+sh "$root/scripts/bootstrap/run-freebsd-phase2-tests.shs" \
+    "--compiler=$tmp/tool" \
+    --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    "--runtime-path=$tmp/runtime" "--work-root=$cranelift_work" \
+    "--source-root=$tmp/source" --backend=cranelift --phase=stage2 --hash-policy=canonical \
+    >"$tmp/cranelift-run.log" 2>&1 || status=$?
+checks=$((checks + 1))
+if [ "$status" -ne 0 ] ||
+   ! grep -qx 'overall=PASS' "$cranelift_work/post-phase2-summary.env"; then
+    echo 'FAIL: FreeBSD Cranelift native module probe did not select Cranelift' >&2
+    failed=$((failed + 1))
+fi
+unset TEST_EXPECT_BACKEND
+export TEST_OS=FreeBSD TEST_CASE=good
+reuse_work="$tmp/FreeBSD-reuse"
+set -- "--compiler=$tmp/tool" \
+    --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    "--runtime-path=$tmp/runtime" "--work-root=$reuse_work" \
+    "--source-root=$tmp/source" --backend=llvm --phase=stage2 --hash-policy=canonical
+sh "$root/scripts/bootstrap/run-freebsd-phase2-tests.shs" "$@" >"$tmp/reuse-first.log" 2>&1 || {
+    echo 'FAIL: FreeBSD reuse fixture initial verifier run failed' >&2
+    exit 1
+}
+cat >"$tmp/source/scripts/bootstrap/bootstrap-phase-verification.shs" <<EOF
+#!/bin/sh
+touch "$tmp/reuse-verifier-was-invoked"
+exit 91
+EOF
+status=0
+sh "$root/scripts/bootstrap/run-freebsd-phase2-tests.shs" --reuse-base "$@" \
+    >"$tmp/reuse-second.log" 2>&1 || status=$?
+checks=$((checks + 1))
+if [ "$status" -ne 0 ] || [ -e "$tmp/reuse-verifier-was-invoked" ]; then
+    echo 'FAIL: FreeBSD reuse reran verifier or rejected its valid pinned summary' >&2
+    failed=$((failed + 1))
+fi
+status=0
+sh "$root/scripts/bootstrap/run-freebsd-phase2-tests.shs" --reuse-base \
+    "--compiler=$tmp/tool" \
+    --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    "--runtime-path=$tmp/runtime" "--work-root=$reuse_work" \
+    "--source-root=$tmp/source" --backend=cranelift --phase=stage2 --hash-policy=canonical \
+    >"$tmp/reuse-wrong-backend.log" 2>&1 || status=$?
+checks=$((checks + 1))
+if [ "$status" -eq 0 ] || grep -qx 'overall=PASS' "$reuse_work/post-phase2-summary.env"; then
+    echo 'FAIL: FreeBSD reuse accepted an LLVM matrix as Cranelift' >&2
+    failed=$((failed + 1))
+fi
+mkdir -p "$tmp/other-source"
+status=0
+sh "$root/scripts/bootstrap/run-freebsd-phase2-tests.shs" --reuse-base \
+    "--compiler=$tmp/tool" \
+    --compiler-sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    "--runtime-path=$tmp/runtime" "--work-root=$reuse_work" \
+    "--source-root=$tmp/other-source" --backend=llvm --phase=stage2 --hash-policy=canonical \
+    >"$tmp/reuse-wrong-source.log" 2>&1 || status=$?
+checks=$((checks + 1))
+if [ "$status" -eq 0 ] || grep -qx 'overall=PASS' "$reuse_work/post-phase2-summary.env"; then
+    echo 'FAIL: FreeBSD reuse accepted a different source root' >&2
+    failed=$((failed + 1))
+fi
+sed -i '/^task=loader_interpreter_tests|/d' "$reuse_work/summary.env"
+status=0
+sh "$root/scripts/bootstrap/run-freebsd-phase2-tests.shs" --reuse-base "$@" \
+    >"$tmp/reuse-missing-suite.log" 2>&1 || status=$?
+checks=$((checks + 1))
+if [ "$status" -eq 0 ] || grep -qx 'overall=PASS' "$reuse_work/post-phase2-summary.env"; then
+    echo 'FAIL: FreeBSD reuse accepted a missing loader suite' >&2
+    failed=$((failed + 1))
+fi
+printf '%s\n' 'task=loader_interpreter_tests|result=PASS|status=0' >>"$reuse_work/summary.env"
+printf '%s\n' 'task=loader_interpreter_tests|result=PASS|status=0' >>"$reuse_work/summary.env"
+status=0
+sh "$root/scripts/bootstrap/run-freebsd-phase2-tests.shs" --reuse-base "$@" \
+    >"$tmp/reuse-duplicate-suite.log" 2>&1 || status=$?
+checks=$((checks + 1))
+if [ "$status" -eq 0 ] || grep -qx 'overall=PASS' "$reuse_work/post-phase2-summary.env"; then
+    echo 'FAIL: FreeBSD reuse accepted duplicate loader suite rows' >&2
+    failed=$((failed + 1))
+fi
+status=0
+sh "$root/scripts/bootstrap/run-freebsd-phase2-tests.shs" --reuse-base \
+    "--compiler=$tmp/tool" \
+    --compiler-sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    "--runtime-path=$tmp/runtime" "--work-root=$reuse_work" \
+    "--source-root=$tmp/source" --backend=llvm --phase=stage2 --hash-policy=canonical \
+    >"$tmp/reuse-wrong-hash.log" 2>&1 || status=$?
+checks=$((checks + 1))
+if [ "$status" -eq 0 ] || grep -qx 'overall=PASS' "$reuse_work/post-phase2-summary.env"; then
+    echo 'FAIL: FreeBSD reuse accepted an unrelated compiler hash' >&2
+    failed=$((failed + 1))
+fi
 echo "$checks runner scenarios; $failed failures"
 [ "$failed" = 0 ]

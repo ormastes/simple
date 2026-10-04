@@ -1,0 +1,101 @@
+"""Real file-backed static ELF construction with checked transactional publication.
+
+This x64 candidate connects file operations without resident input/output images.
+Mutable owners use me transitions, including one writer owning inputs and output
+through errors. Logical quota code is authored but runtime verification, RSS,
+no-swap and native admission remain pending. UnsupportedBudget must remain set;
+this source is not an admitted bounded engine.
+"""
+use compiler.backend.linker.elf.stream_types.{ElfStreamLimitsV1}
+use compiler.backend.linker.elf.stream_inputs.{elf_stream_open_inputs_v1}
+use compiler.backend.linker.elf.stream_layout.*
+use compiler.backend.linker.elf.stream_emit.{ElfStreamWriterV1}
+use std.nogc_sync_mut.io.retained_file.{retained_file_open, retained_file_sync, retained_directory_is_real_no_follow}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_exists, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_async_mut.link_working_set.file_store.{LinkStagedFileV1, link_spill_required_scratch_v1, link_stage_file_v1}
+
+pub class ElfStreamLinkResultV1:
+    output: text
+    published_bytes: u64
+    var stage: LinkStagedFileV1
+    var directory: text
+    var cleanup_pending: bool
+
+fn elf_stream_cleanup_directory(directory: text) -> bool:
+    if not retained_directory_is_real_no_follow(directory): return false
+    val image = directory + "/image.bin"
+    if file_exists(image) and not file_remove(image): return false
+    dir_remove(directory, false)
+
+pub fn elf_stream_link_file_v1(objects: [text], archives: [text], entry: [u8],
+        output: text, scratch_parent: text, limits: ElfStreamLimitsV1,
+        cancelled: fn() -> bool) -> Result<ElfStreamLinkResultV1, text>:
+    if output == "" or output.contains("\0"): return Err("stream output path invalid")
+    if not retained_directory_is_real_no_follow(scratch_parent): return Err("stream scratch parent is not a real directory")
+    var inputs = elf_stream_open_inputs_v1(objects, archives, entry, limits, cancelled)?
+    val planned = inputs.elf_stream_layout_v1(entry, cancelled)
+    if planned.is_err():
+        val closed = inputs.elf_stream_close_inputs_v1()
+        return Err(planned.unwrap_err())
+    val layout = planned.unwrap()
+    val reserved = link_spill_required_scratch_v1(layout.file_bytes, limits.read_window_bytes)
+    if reserved.is_err():
+        val closed = inputs.elf_stream_close_inputs_v1()
+        return Err(reserved.unwrap_err())
+    # Retain the original private image concurrently with spill and replay output.
+    if layout.file_bytes > limits.scratch_bytes or reserved.unwrap() > limits.scratch_bytes - layout.file_bytes:
+        val closed = inputs.elf_stream_close_inputs_v1()
+        return Err("stream scratch budget exceeded")
+    if reserved.unwrap() - layout.file_bytes > 1099511627776u64:
+        val closed = inputs.elf_stream_close_inputs_v1()
+        return Err("stream spill exceeds retained-file capacity")
+    val created = secure_temp_dir(scratch_parent, "simple-elf-stream-")
+    if created.is_err():
+        val closed = inputs.elf_stream_close_inputs_v1()
+        return Err(created.unwrap_err())
+    val directory = created.unwrap()
+    val opened = retained_file_open(directory + "/image.bin", layout.file_bytes, true)
+    if opened.is_err():
+        val closed = inputs.elf_stream_close_inputs_v1()
+        if not elf_stream_cleanup_directory(directory): return Err("stream cleanup failed after output open: {directory}")
+        return Err(opened.unwrap_err())
+    var writer = ElfStreamWriterV1(inputs: inputs, output: opened.unwrap())
+    val emitted = writer.elf_stream_emit_v1(layout, cancelled)
+    var synced = false
+    if emitted.is_ok(): synced = retained_file_sync(writer.output)
+    val output_closed = writer.output.close()
+    val inputs_closed = writer.inputs.elf_stream_close_inputs_v1()
+    if emitted.is_err() or not synced or not output_closed or not inputs_closed:
+        if not elf_stream_cleanup_directory(directory): return Err("stream cleanup failed after emission: {directory}")
+        if emitted.is_err(): return Err(emitted.unwrap_err())
+        return Err("stream output sync or retained input/output close failed")
+    val staged = link_stage_file_v1(directory + "/image.bin", scratch_parent, limits.read_window_bytes,
+        limits.scratch_bytes - layout.file_bytes, cancelled)
+    if staged.is_err():
+        if not elf_stream_cleanup_directory(directory): return Err("stream cleanup failed after spill: {directory}")
+        return Err(staged.unwrap_err())
+    var stage = staged.unwrap()
+    val published = stage.link_publish_staged_v1(output, cancelled)
+    if published.is_err():
+        var stage_clean = true
+        if not stage.consumed: stage_clean = stage.link_discard_staged_v1().is_ok()
+        val image_clean = elf_stream_cleanup_directory(directory)
+        if not stage_clean or not image_clean: return Err("stream failed publication cleanup pending: {directory}; {stage.directory}")
+        return Err(published.unwrap_err())
+    # Publication has committed. Cleanup problems must never masquerade as a
+    # pre-publication Err; retain the cleanup capabilities in the typed outcome.
+    val cleaned = elf_stream_cleanup_directory(directory)
+    Ok(ElfStreamLinkResultV1(output: output, published_bytes: published.unwrap().published_bytes,
+        stage: stage, directory: if cleaned: "" else: directory,
+        cleanup_pending: published.unwrap().cleanup_pending or not cleaned))
+
+export ElfStreamLinkResultV1, elf_stream_link_file_v1
+impl ElfStreamLinkResultV1:
+    me elf_stream_cleanup_result_v1() -> Result<bool, text>:
+        if not self.stage.consumed: self.stage.link_discard_staged_v1()?
+        if self.directory != "":
+            if not elf_stream_cleanup_directory(self.directory): return Err("stream committed image cleanup pending: {self.directory}")
+            self.directory = ""
+        self.cleanup_pending = false
+        Ok(true)

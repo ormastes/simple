@@ -12,9 +12,7 @@ use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remov
 use std.nogc_sync_mut.io.dir_ops.{dir_remove}
 use std.nogc_sync_mut.io.retained_file.{retained_directory_is_real_no_follow}
 use std.nogc_async_mut.link_working_set.file_store.{
-    link_spill_required_scratch_v1, link_stage_file_v1, link_publish_staged_v1,
-    link_discard_staged_v1
-}
+    link_spill_required_scratch_v1, link_stage_file_v1}
 
 fn item4_spill_never_cancel() -> bool: false
 
@@ -106,18 +104,19 @@ describe "ITEM4-REQ-009 linker spill storage execution":
         val staged = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
         expect(staged.is_ok()).to_equal(true)
         if staged.is_err(): return
-        expect(staged.unwrap().content_bytes).to_equal(8u64)
-        expect(staged.unwrap().spill_bytes).to_equal(72u64)
-        expect(staged.unwrap().scratch_reserved_bytes).to_equal(80u64)
+        var staged_owner = staged.unwrap()
+        expect(staged_owner.content_bytes).to_equal(8u64)
+        expect(staged_owner.spill_bytes).to_equal(72u64)
+        expect(staged_owner.scratch_reserved_bytes).to_equal(80u64)
         expect(file_exists(output)).to_equal(false)
         step("Replay checked frames into a private output and publish without replacement")
-        val published = link_publish_staged_v1(staged.unwrap(), output, item4_spill_never_cancel)
+        val published = staged_owner.link_publish_staged_v1(output, item4_spill_never_cancel)
         expect(published.is_ok()).to_equal(true)
         if published.is_ok():
             expect(published.unwrap().published_bytes).to_equal(8u64)
             expect(published.unwrap().cleanup_pending).to_equal(false)
         expect(file_read_bytes(output)).to_equal([0u8, 255u8, 128u8, 1u8, 2u8, 0u8, 4u8, 5u8])
-        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
+        expect(dir_exists(staged_owner.directory)).to_equal(false)
         item4_spill_cleanup(parent, source, output)
 
     it "reports committed publication separately from pending cleanup and allows only cleanup retry":
@@ -131,24 +130,25 @@ describe "ITEM4-REQ-009 linker spill storage execution":
         val staged = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
         expect(staged.is_ok()).to_equal(true)
         if staged.is_err(): return
-        val blocker = staged.unwrap().directory + "/unrelated.marker"
-        val published = link_publish_staged_v1(staged.unwrap(), output, \: item4_spill_prevent_cleanup(blocker))
+        var staged_owner = staged.unwrap()
+        val blocker = staged_owner.directory + "/unrelated.marker"
+        val published = staged_owner.link_publish_staged_v1(output, \: item4_spill_prevent_cleanup(blocker))
         step("Observe successful publication even though owned-directory cleanup remains pending")
         expect(published.is_ok()).to_equal(true)
         if published.is_ok():
             expect(published.unwrap().published_bytes).to_equal(8u64)
             expect(published.unwrap().cleanup_pending).to_equal(true)
         expect(file_read_bytes(output)).to_equal([0u8, 255u8, 128u8, 1u8, 2u8, 0u8, 4u8, 5u8])
-        expect(staged.unwrap().published).to_equal(true)
-        expect(staged.unwrap().consumed).to_equal(false)
-        val duplicate = link_publish_staged_v1(staged.unwrap(), parent + "/duplicate.bin", item4_spill_never_cancel)
+        expect(staged_owner.published).to_equal(true)
+        expect(staged_owner.consumed).to_equal(false)
+        val duplicate = staged_owner.link_publish_staged_v1(parent + "/duplicate.bin", item4_spill_never_cancel)
         expect(duplicate.is_err()).to_equal(true)
         if duplicate.is_err(): expect(duplicate.unwrap_err()).to_contain("already published")
         expect(file_exists(parent + "/duplicate.bin")).to_equal(false)
         step("Remove only the independently created marker and retry cleanup without another publication")
         expect(file_remove(blocker)).to_equal(true)
-        expect(link_discard_staged_v1(staged.unwrap()).is_ok()).to_equal(true)
-        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
+        expect(staged_owner.link_discard_staged_v1().is_ok()).to_equal(true)
+        expect(dir_exists(staged_owner.directory)).to_equal(false)
         item4_spill_cleanup(parent, source, output)
 
     it "rejects scratch and window boundaries before creating a staged transaction":
@@ -172,7 +172,9 @@ describe "ITEM4-REQ-009 linker spill storage execution":
         step("The exact admitted boundary succeeds and can be explicitly discarded")
         val accepted = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
         expect(accepted.is_ok()).to_equal(true)
-        if accepted.is_ok(): expect(link_discard_staged_v1(accepted.unwrap()).is_ok()).to_equal(true)
+        if accepted.is_ok():
+            var accepted_owner = accepted.unwrap()
+            expect(accepted_owner.link_discard_staged_v1().is_ok()).to_equal(true)
         item4_spill_cleanup(parent, source, parent + "/unused")
 
     it "rejects a corrupt spill payload and leaves an existing destination untouched":
@@ -187,18 +189,19 @@ describe "ITEM4-REQ-009 linker spill storage execution":
         val staged = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
         expect(staged.is_ok()).to_equal(true)
         if staged.is_err(): return
+        var staged_owner = staged.unwrap()
         step("Change one payload byte after the 16-byte file header and 24-byte frame header")
-        var corrupt = file_read_bytes(staged.unwrap().directory + "/frames.bin")
+        var corrupt = file_read_bytes(staged_owner.directory + "/frames.bin")
         expect(corrupt.len()).to_equal(72)
         if corrupt.len() != 72: return
         corrupt[40] = corrupt[40] ^ 1u8
-        expect(file_write_bytes(staged.unwrap().directory + "/frames.bin", corrupt)).to_equal(true)
+        expect(file_write_bytes(staged_owner.directory + "/frames.bin", corrupt)).to_equal(true)
         step("Replay fails its checksum before publication and removes only owned stage files")
-        val rejected = link_publish_staged_v1(staged.unwrap(), output, item4_spill_never_cancel)
+        val rejected = staged_owner.link_publish_staged_v1(output, item4_spill_never_cancel)
         expect(rejected.is_err()).to_equal(true)
         if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("checksum mismatch")
         expect(file_read_bytes(output)).to_equal([9u8, 8u8, 7u8])
-        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
+        expect(dir_exists(staged_owner.directory)).to_equal(false)
         item4_spill_cleanup(parent, source, output)
 
     it "closes retained handles and cleans private output when cancellation arrives after output creation":
@@ -212,13 +215,14 @@ describe "ITEM4-REQ-009 linker spill storage execution":
         val staged = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
         expect(staged.is_ok()).to_equal(true)
         if staged.is_err(): return
-        val private_output = staged.unwrap().directory + "/payload.tmp"
+        var staged_owner = staged.unwrap()
+        val private_output = staged_owner.directory + "/payload.tmp"
         step("Use actual private-output existence as the cancellation signal while handles are open")
-        val rejected = link_publish_staged_v1(staged.unwrap(), output, \: file_exists(private_output))
+        val rejected = staged_owner.link_publish_staged_v1(output, \: file_exists(private_output))
         expect(rejected.is_err()).to_equal(true)
         if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("cancelled")
         expect(file_exists(output)).to_equal(false)
-        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
+        expect(dir_exists(staged_owner.directory)).to_equal(false)
         item4_spill_cleanup(parent, source, output)
 
     it "rejects a truncated spill before publication":
@@ -232,18 +236,19 @@ describe "ITEM4-REQ-009 linker spill storage execution":
         val staged = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
         expect(staged.is_ok()).to_equal(true)
         if staged.is_err(): return
-        val complete = file_read_bytes(staged.unwrap().directory + "/frames.bin")
+        var staged_owner = staged.unwrap()
+        val complete = file_read_bytes(staged_owner.directory + "/frames.bin")
         expect(complete.len()).to_equal(72)
         if complete.len() != 72: return
         var short: [u8] = []
         for index in 0..(complete.len() - 1): short.push(complete[index])
-        expect(file_write_bytes(staged.unwrap().directory + "/frames.bin", short)).to_equal(true)
+        expect(file_write_bytes(staged_owner.directory + "/frames.bin", short)).to_equal(true)
         step("Reject the length mismatch, preserve destination absence, and clean the transaction")
-        val rejected = link_publish_staged_v1(staged.unwrap(), output, item4_spill_never_cancel)
+        val rejected = staged_owner.link_publish_staged_v1(output, item4_spill_never_cancel)
         expect(rejected.is_err()).to_equal(true)
         if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("spill size mismatch")
         expect(file_exists(output)).to_equal(false)
-        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
+        expect(dir_exists(staged_owner.directory)).to_equal(false)
         item4_spill_cleanup(parent, source, output)
 
     it "never replaces an existing destination even after every spill frame validates":
@@ -258,10 +263,11 @@ describe "ITEM4-REQ-009 linker spill storage execution":
         val staged = link_stage_file_v1(source, parent, 4, 80u64, item4_spill_never_cancel)
         expect(staged.is_ok()).to_equal(true)
         if staged.is_err(): return
+        var staged_owner = staged.unwrap()
         step("Require the atomic no-replace collision, not a destructive overwrite")
-        val rejected = link_publish_staged_v1(staged.unwrap(), output, item4_spill_never_cancel)
+        val rejected = staged_owner.link_publish_staged_v1(output, item4_spill_never_cancel)
         expect(rejected.is_err()).to_equal(true)
         if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("destination exists")
         expect(file_read_bytes(output)).to_equal([6u8, 5u8])
-        expect(dir_exists(staged.unwrap().directory)).to_equal(false)
+        expect(dir_exists(staged_owner.directory)).to_equal(false)
         item4_spill_cleanup(parent, source, output)

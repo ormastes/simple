@@ -1,0 +1,181 @@
+"""Lossless argv transport over the canonical SimpleCliCommandV1 byte arena.
+
+No shell grammar or language-private object representation crosses the ABI.
+Schema requirements are independently checked by the admitting caller.
+"""
+use std.common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.nogc_sync_mut.composition.provider_contract.{simple_provider_digest_from_hex_v1}
+use std.common.kernel_plugin.schema_header.{KpfSchemaHeaderV1}
+use std.common.linker.link_request_v1.{LinkRequestV1, LinkTargetV1, link_target_v1_validate}
+use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1, LinkExecutionModeV1, link_execution_mode_v1_from_code}
+use std.common.linker.link_receipt_v1.{
+    LinkReceiptV1, link_accounting_class_v1_from_name, link_outcome_v1_from_name
+}
+
+pub struct LinkerPackJobV1:
+    request: LinkRequestV1
+    policy: LinkExecutionPolicyV1
+    inputs: [text]
+    output: text
+
+fn _pack_number(value: text) -> Result<u64, text>:
+    if value == "" or value.len() > 20: return Err("invalid pack integer")
+    if value.len() > 1 and value.starts_with("0"): return Err("noncanonical pack integer")
+    var result = 0u64
+    for byte in value.bytes():
+        if byte < 48 or byte > 57: return Err("invalid pack integer")
+        val digit = (byte - 48) as u64
+        if result > (0xffffffffffffffffu64 - digit) / 10u64:
+            return Err("pack integer overflow")
+        result = result * 10u64 + digit
+    Ok(result)
+
+fn _pack_numbers(args: [text], count: i64) -> Result<[u64], text>:
+    if args.len() < count + 1: return Err("truncated pack scalars")
+    var out: [u64] = []
+    for index in 0..count: out.push(_pack_number(args[index + 1])?)
+    Ok(out)
+
+fn _pack_digest_words(digest: KpfDigest256) -> [u64]:
+    [digest.w0, digest.w1, digest.w2, digest.w3]
+
+fn _pack_header_words(header: KpfSchemaHeaderV1) -> [u64]:
+    [header.abi_version as u64, header.struct_size as u64,
+        header.schema_id.hi, header.schema_id.lo,
+        header.schema_major as u64, header.schema_minor as u64,
+        header.schema_digest.w0, header.schema_digest.w1,
+        header.schema_digest.w2, header.schema_digest.w3, header.reserved0]
+
+fn _pack_target_words(target: LinkTargetV1) -> [u64]:
+    [target.arch as u64, target.os as u64, target.abi as u64,
+        target.object_format as u64, target.endian as u64, target.address_width as u64]
+
+fn _pack_policy_words(policy: LinkExecutionPolicyV1) -> [u64]:
+    var words = _pack_header_words(policy.header)
+    val mode = match policy.mode:
+        LinkExecutionModeV1.Fast: 0u64
+        LinkExecutionModeV1.Bounded: 1u64
+        LinkExecutionModeV1.Auto: 2u64
+    for word in [mode, policy.job_memory_limit_bytes, policy.scratch_limit_bytes,
+            policy.max_workers as u64, policy.allowed_placements, policy.enforcement_requirement as u64]:
+        words.push(word)
+    words
+
+pub fn linker_pack_policy_digest(policy: LinkExecutionPolicyV1) -> Result<KpfDigest256, text>:
+    var payload = "simple-link-policy-v1"
+    for word in _pack_policy_words(policy): payload = payload + "\n{word}"
+    val hex = sha256_u8_hex(payload.bytes())
+    if hex.len() != 64: return Err("pack policy digest unavailable")
+    val digest = simple_provider_digest_from_hex_v1(hex)
+    Ok(KpfDigest256(w0: ((digest.word0 as u64) << 32) | digest.word1 as u64,
+        w1: ((digest.word2 as u64) << 32) | digest.word3 as u64,
+        w2: ((digest.word4 as u64) << 32) | digest.word5 as u64,
+        w3: ((digest.word6 as u64) << 32) | digest.word7 as u64))
+
+fn _pack_digest(words: [u64], index: i64) -> KpfDigest256:
+    KpfDigest256(w0: words[index], w1: words[index + 1], w2: words[index + 2], w3: words[index + 3])
+
+fn _pack_header(words: [u64], index: i64) -> Result<KpfSchemaHeaderV1, text>:
+    for offset in [0, 1, 4, 5]:
+        if words[index + offset] > 0xffffffffu64: return Err("pack header narrowing overflow")
+    if words[index] != 1 or words[index + 1] < 72 or words[index + 10] != 0:
+        return Err("invalid pack schema header")
+    Ok(KpfSchemaHeaderV1(abi_version: words[index] as u32, struct_size: words[index + 1] as u32,
+        schema_id: KpfId128(hi: words[index + 2], lo: words[index + 3]),
+        schema_major: words[index + 4] as u32, schema_minor: words[index + 5] as u32,
+        schema_digest: _pack_digest(words, index + 6), reserved0: words[index + 10]))
+
+fn _pack_target(words: [u64], index: i64) -> Result<LinkTargetV1, text>:
+    for offset in 0..6:
+        if words[index + offset] > 0xffffffffu64: return Err("pack target narrowing overflow")
+    val target = LinkTargetV1(arch: words[index] as u32, os: words[index + 1] as u32,
+        abi: words[index + 2] as u32, object_format: words[index + 3] as u32,
+        endian: words[index + 4] as u32, address_width: words[index + 5] as u32)
+    val reason = link_target_v1_validate(target)
+    if reason != "": return Err(reason)
+    Ok(target)
+
+fn _pack_path(value: text) -> bool:
+    value != "" and value.bytes().len() <= 1048576 and not value.contains("\0")
+
+pub fn linker_pack_encode_job(job: LinkerPackJobV1) -> Result<[text], text>:
+    val request = job.request
+    val policy = job.policy
+    var words = _pack_header_words(request.header)
+    for word in _pack_target_words(request.target): words.push(word)
+    for word in _pack_digest_words(request.inputs_manifest_digest): words.push(word)
+    words.push(request.output_contract as u64)
+    for word in _pack_digest_words(request.semantic_profile_digest): words.push(word)
+    for word in _pack_digest_words(request.runtime_sysroot_digest): words.push(word)
+    for word in [request.required_features, request.layout_handle, request.debug_handle, request.reproducibility as u64]:
+        words.push(word)
+    for word in _pack_policy_words(policy): words.push(word)
+    var args: [text] = ["simple-link-job-v1"]
+    for word in words: args.push("{word}")
+    args.push(job.output)
+    args.push("{job.inputs.len()}")
+    for path in job.inputs: args.push(path)
+    val checked = linker_pack_decode_job(args)
+    if checked.is_err(): return Err(checked.unwrap_err())
+    Ok(args)
+
+pub fn linker_pack_decode_job(args: [text]) -> Result<LinkerPackJobV1, text>:
+    if args.len() < 55 or args.len() > 4096: return Err("invalid pack argument count")
+    var arena_bytes = 28 + 9 + 4
+    for arg in args:
+        if arg.len() > 1048576: return Err("pack command arena too large")
+        arena_bytes = arena_bytes + 4 + arg.bytes().len()
+        if arena_bytes > 1048576: return Err("pack command arena too large")
+    if args[0] != "simple-link-job-v1": return Err("unknown pack job protocol")
+    val words = _pack_numbers(args, 51)?
+    for index in [21, 33, 48, 50]:
+        if words[index] > 0xffffffffu64: return Err("pack field narrowing overflow")
+    if words[33] > 1 or words[48] == 0 or words[50] > 1: return Err("invalid pack job policy")
+    if words[45] > 2: return Err("invalid pack execution mode")
+    val mode = link_execution_mode_v1_from_code(words[45] as i64).unwrap()
+    val count = _pack_number(args[53])?
+    if count != (args.len() - 54) as u64: return Err("pack input count mismatch")
+    if not _pack_path(args[52]): return Err("invalid pack output path")
+    var inputs: [text] = []
+    for index in 54..args.len():
+        if not _pack_path(args[index]): return Err("invalid pack input path")
+        inputs.push(args[index])
+    val request = LinkRequestV1(header: _pack_header(words, 0)?, target: _pack_target(words, 11)?,
+        inputs_manifest_digest: _pack_digest(words, 17), output_contract: words[21] as u32,
+        semantic_profile_digest: _pack_digest(words, 22), runtime_sysroot_digest: _pack_digest(words, 26),
+        required_features: words[30], layout_handle: words[31], debug_handle: words[32], reproducibility: words[33] as u32)
+    val policy = LinkExecutionPolicyV1(header: _pack_header(words, 34)?, mode: mode,
+        job_memory_limit_bytes: words[46], scratch_limit_bytes: words[47], max_workers: words[48] as u32,
+        allowed_placements: words[49], enforcement_requirement: words[50] as u32)
+    Ok(LinkerPackJobV1(request: request, policy: policy, inputs: inputs, output: args[52]))
+
+pub fn linker_pack_encode_receipt(receipt: LinkReceiptV1) -> Result<text, text>:
+    var words = _pack_header_words(receipt.header)
+    for word in _pack_target_words(receipt.host): words.push(word)
+    for word in _pack_target_words(receipt.target): words.push(word)
+    for word in _pack_digest_words(receipt.policy_digest): words.push(word)
+    words.push(receipt.measured_peak_bytes)
+    var out = "simple-link-receipt-v1"
+    for word in words: out = out + "\n{word}"
+    out = out + "\n" + receipt.engine_id + "\n" + receipt.accounting_class.name() + "\n" + receipt.outcome.name()
+    val checked = linker_pack_decode_receipt(out)
+    if checked.is_err(): return Err(checked.unwrap_err())
+    Ok(out)
+
+pub fn linker_pack_decode_receipt(payload: text) -> Result<LinkReceiptV1, text>:
+    if payload.bytes().len() > 4096 or payload.contains("\0"): return Err("invalid pack receipt size")
+    val args = payload.split("\n")
+    if args.len() != 32 or args[0] != "simple-link-receipt-v1": return Err("invalid pack receipt protocol")
+    val words = _pack_numbers(args, 28)?
+    if args[29] == "" or args[29].contains("\r"): return Err("invalid pack engine identity")
+    val accounting = link_accounting_class_v1_from_name(args[30])
+    val outcome = link_outcome_v1_from_name(args[31])
+    if accounting == nil or outcome == nil: return Err("unknown pack receipt enum")
+    Ok(LinkReceiptV1(header: _pack_header(words, 0)?, engine_id: args[29],
+        host: _pack_target(words, 11)?, target: _pack_target(words, 17)?, policy_digest: _pack_digest(words, 23),
+        accounting_class: accounting.unwrap(), measured_peak_bytes: words[27], outcome: outcome.unwrap()))
+
+export LinkerPackJobV1, linker_pack_encode_job, linker_pack_decode_job
+export linker_pack_encode_receipt, linker_pack_decode_receipt
+export linker_pack_policy_digest

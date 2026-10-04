@@ -1,0 +1,77 @@
+#!/bin/sh
+# Read-only early task admission. Config records original launch pins/journals;
+# it is supplemental input, never a replacement manager or authority receipt.
+set -eu
+[ "$#" -eq 3 ] || exit 20
+config=$1 backend=$2 observed=$3
+case "$backend" in llvm|cranelift|authority) ;; *) exit 20 ;; esac
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+cfg() { perl -MJSON::PP -e 'local $/; open my $f,"<",$ARGV[0] or die $!; my $r=decode_json(<$f>); my $v=$r->{$ARGV[1]}; die "missing/nontext config field\n" if !defined($v)||ref($v)||$v eq ""||$v=~/[\0\r\n]/; print $v' "$config" "$1"; }
+pin() { regular "$1" && [ "$(hash_file "$1")" = "$2" ]; }
+regular "$config" || exit 20
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+BOOTSTRAP_STAGE3_FACADE_PATH="$repo_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$repo_root/scripts/bootstrap/lib/provisional-binary-producer.shs"
+root=$(cfg root) source_root=$(cfg source_root)
+source_authority=$(cfg source_authority) source_sha=$(cfg source_authority_digest)
+runtime_snapshot=$(cfg runtime_snapshot) runtime_sha=$(cfg runtime_snapshot_digest)
+original_source_snapshot=$(cfg original_source_snapshot) original_sha=$(cfg original_source_snapshot_digest)
+tool_intent=$(cfg tool_intent) tool_sha=$(cfg tool_intent_digest)
+authority_receipt=$(cfg authority_receipt) authority_digest=$(cfg authority_digest)
+authority_program=$(cfg authority_program) authority_images=$(cfg authority_image_receipt)
+image_receipt=$(cfg image_receipt) builder_program=$(cfg builder_program) hello_receipt=$(cfg hello_receipt)
+case "$root/" in */provisional-v1/*) ;; *) exit 20 ;; esac
+pin "$source_authority" "$source_sha" && pin "$runtime_snapshot" "$runtime_sha" &&
+  pin "$original_source_snapshot" "$original_sha" && pin "$tool_intent" "$tool_sha" &&
+  pin "$authority_receipt" "$authority_digest" || exit 20
+value() { bootstrap_stage3_manifest_value "$1" "$2"; }
+[ "$(value format "$tool_intent")" = SIMPLE-PROVISIONAL-TOOL-1 ] &&
+  [ "$(value actual_invocation_relation "$tool_intent")" = unproven ] &&
+  [ "$(value manager_images_digest "$tool_intent")" = "$(hash_file "$image_receipt")" ] || exit 20
+for role in compiler linker; do
+  pin "$(value "${role}_tool_path" "$tool_intent")" "$(value "${role}_tool_digest" "$tool_intent")" || exit 20
+done
+[ "$(value format "$image_receipt")" = SIMPLE-PROVISIONAL-IMAGES-1 ] &&
+  [ "$(value stage "$image_receipt")" = manager ] && [ "$(value diagnostic_only "$image_receipt")" = 1 ] &&
+  [ "$(value builder_program "$image_receipt")" = "$builder_program" ] &&
+  pin "$builder_program" "$(value builder_sha256 "$image_receipt")" || exit 20
+[ "$(value format "$authority_images")" = SIMPLE-PROVISIONAL-IMAGES-1 ] &&
+  [ "$(value stage "$authority_images")" = authority ] &&
+  [ "$(value authority_program "$authority_images")" = "$authority_program" ] &&
+  pin "$authority_program" "$(value authority_sha256 "$authority_images")" || exit 20
+# Caller owns this scratch path outside the live manager/source roots.
+[ ! -e "$observed" ] && [ ! -L "$observed" ] || exit 20
+bootstrap_stage3_source_snapshot "$observed" "$source_root" || exit 20
+cmp -s "$observed" "$source_authority" || exit 20
+"$authority_program" native-groups-provisional-authority-verify --receipt "$authority_receipt" \
+  --digest "$authority_digest" --source-snapshot "$original_source_snapshot" \
+  --hello-receipt "$hello_receipt" >/dev/null || exit 20
+[ "$backend" != authority ] || exit 0
+statuses=$(cfg "${backend}_statuses") hashes=$(cfg "${backend}_hashes")
+case "$statuses" in "$root"/*) ;; *) exit 20 ;; esac
+case "$hashes" in "$root"/*) ;; *) exit 20 ;; esac
+regular "$statuses" && regular "$hashes" || exit 20
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exe_suffix=.exe ;; *) exe_suffix= ;; esac
+predecessor="$root/phase3/binaries/$backend/phase3-bootstrap/bin/simple$exe_suffix"
+predecessor_sha=$(value "phase3_${backend}_phase3-bootstrap" "$hashes") || exit 20
+handoff="$root/phase4/hello/$backend/hello.receipt"
+provisional_verify_binary_handoff "$handoff" "$predecessor" "$predecessor_sha" "$original_sha" || exit 20
+for product in phase3-bootstrap full-cli test-runner; do
+  case "$product" in phase3-bootstrap) phase=phase3; output="bin/simple$exe_suffix" ;; full-cli) phase=phase4; output="bin/simple$exe_suffix" ;; *) phase=phase4; output="bin/simple_test_runner$exe_suffix" ;; esac
+  key="${phase}_${backend}_${product}"
+  job="$root/$phase/binaries/$backend/$product"
+  [ "$(value "${key}_status" "$statuses")" = SUCCEEDED ] || exit 20
+  product_sha=$(value "$key" "$hashes") receipt_sha=$(value "${key}_manager_receipt_sha256" "$hashes")
+  pin "$job/$output" "$product_sha" && pin "$job/state/receipts/$product-$backend.sdn" "$receipt_sha" || exit 20
+  if [ "$phase" = phase4 ]; then
+    [ "$(value "${key}_producer_sha256" "$hashes")" = "$predecessor_sha" ] &&
+      [ "$(value "${key}_hello_receipt_sha256" "$hashes")" = "$(hash_file "$handoff")" ] || exit 20
+  fi
+  "$builder_program" verify --manifest "$job/manifest.sdn" --state "$job/state" \
+    --source-root "$source_root" --output-root "$job" >/dev/null || exit 20
+  printf '%s_sha256=%s\n%s_receipt_sha256=%s\n' "$product" "$product_sha" "$product" "$receipt_sha"
+done
+printf 'source_authority_sha256=%s\nruntime_snapshot_sha256=%s\n' "$source_sha" "$runtime_sha"
