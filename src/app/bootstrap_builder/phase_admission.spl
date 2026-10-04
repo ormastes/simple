@@ -1,3 +1,5 @@
+use app.buildrunner.database_session.{BuildRunnerDatabaseSessionV1, build_runner_database_session_open_v1}
+use std.common.task_runner.scheduler.{task_runner_start}
 # One compiled parent owns both phase reservations and real worker transports.
 # This is not a second host policy: all physical/commit/disk/CPU arithmetic is
 # delegated to the existing grouped-process policy. The shell bridge does not
@@ -454,7 +456,8 @@ fn managed_phase_policy_decode_v1(payload: text
     Ok((policy, resources))
 
 fn managed_phase_cli_locked_v1(owner: ManagedPhaseAdmissionV1,
-        poll_ms: i64, lifetime_ms: i64) -> Result<i64, text>:
+        poll_ms: i64, lifetime_ms: i64,
+        database: BuildRunnerDatabaseSessionV1? = nil) -> Result<i64, text>:
     val deadline = builder_work_deadline_v1(current_time_ms(), lifetime_ms)
     var failed = false
     for i in 0..owner.tasks.len():
@@ -467,6 +470,12 @@ fn managed_phase_cli_locked_v1(owner: ManagedPhaseAdmissionV1,
             val classification = builder_failure_class_v1(result.status, result.exit_code, true)
             if classification == "infrastructure-abort": return Err("reaped aborted phase requires an admitted retry; completion is not proven")
             if classification != "complete": failed = true
+            if val session = database:
+                var outputs: [BuildInputV1] = []
+                if classification == "complete":
+                    val _verified = managed_phase_verify_task_v2(owner, i)?
+                    outputs = result.outputs
+                val _recorded = session.record(owner.tasks[i], result, outputs, owner.attempts[i]!)?
     while not builder_work_deadline_expired_v1(current_time_ms(), deadline):
         if managed_phase_stop_requested_v1(owner.root):
             return Err("managed phase owner stop requested")
@@ -481,6 +490,12 @@ fn managed_phase_cli_locked_v1(owner: ManagedPhaseAdmissionV1,
                     if not file_atomic_write(receipt, builder_encode_result_v1(result)):
                         return Err(owner.uncertain(i, "cannot retain phase result"))
                     if not owner.release(i): return Err("phase reservation release failed")
+                    if val session = database:
+                        var outputs: [BuildInputV1] = []
+                        if classification == "complete":
+                            val _verified = managed_phase_verify_task_v2(owner, i)?
+                            outputs = result.outputs
+                        val _recorded = session.record(owner.tasks[i], result, outputs, owner.attempts[i]!)?
         var pending = false
         var running = false
         for i in 0..owner.tasks.len():
@@ -733,13 +748,44 @@ fn managed_phase_inventory_cli_v2(args: [text], process: BuilderProcessPortV1,
         Err(reason):
             print "managed tasks admission: {reason}"
             return 2
-    val outcome = managed_phase_cli_locked_v1(owner, poll_ms, lifetime_ms)
+    val maybe_database = match build_runner_database_session_open_v1(run, values["--state"], values["--source-root"]):
+        Ok(value): value
+        Err(reason):
+            print "managed tasks database: {reason}"
+            val _closed = owner.close()
+            return 2
+    if maybe_database == nil:
+        print "managed tasks require complete admitted task contexts"
+        val _closed = owner.close()
+        return 2
+    val database = maybe_database!
+    val outcome = managed_phase_cli_locked_v1(owner, poll_ms, lifetime_ms, Some(database))
     if outcome.is_err():
         print "managed tasks aborted: {outcome.unwrap_err()}"
         if owner.cancel_all():
             val _closed = owner.close()
         return 2
+    var settled = task_runner_start(run)
+    for index in 0..owner.tasks.len():
+        if owner.states[index] == "DEPENDENCY_BLOCKED": settled.statuses[index] = "BLOCKED"
+        elif owner.states[index] == "REAPED" and owner.attempts[index] != nil:
+            val result = match builder_transport_collect_v1(owner.attempts[index]!):
+                Ok(value): value
+                Err(_):
+                    val _closed = owner.close()
+                    return 2
+            settled.statuses[index] = if result.status == "OK": "SUCCEEDED" else: "FAILED"
+        else:
+            val _closed = owner.close()
+            return 2
+    if database.settle(settled).is_err():
+        val _closed = owner.close()
+        return 2
+    val finished = database.finish()
     if not owner.close(): return 2
+    if finished.is_err():
+        print "managed tasks database: {finished.unwrap_err()}"
+        return 2
     outcome.unwrap()
 
 export managed_phase_dependency_state_v2, managed_phase_task_root_v2
