@@ -580,7 +580,7 @@ pub(crate) fn try_place_mutation_in_place(
                 Some(Value::Array(arc)) => {
                     note_place_mutation(arc.len(), Arc::strong_count(arc));
                     let written = super::super::interpreter_method::collections::array_write_span(
-                        &mut **Arc::make_mut(arc),
+                        Arc::make_mut(arc),
                         &src,
                         ints[0],
                         ints[1],
@@ -1266,7 +1266,7 @@ fn handle_method_call_with_self_update_inner(
                     let len = arr.len() as i64;
                     let real_idx = if idx < 0 { len + idx } else { idx };
                     if real_idx >= 0 && real_idx < len {
-                        let elem = arr[real_idx as usize].clone();
+                        let elem = arr.get_value(real_idx as usize).expect("index checked against len");
                         match elem {
                             Value::Object {
                                 class: obj_class,

@@ -1747,47 +1747,321 @@ impl ClassInstance {
 
 /// Element storage of a mutable `Value::Array`.
 ///
-/// Today it is exactly a `Vec<Value>` and derefs to one, so every existing
-/// use is unchanged. It exists as the single seam where a compact
-/// representation for word arrays can be added without a new `Value`
-/// variant (a variant that unaware `match` arms would silently mishandle) --
-/// see doc/05_design/compiler/interpreter/packed_word_array_storage_2026-10-05.md.
-#[derive(Clone, Default)]
+/// Two representations, chosen so that every observable behaviour is that of
+/// the boxed `Vec<Value>` (doc/05_design/compiler/interpreter/packed_word_array_storage_2026-10-05.md):
+///
+/// * `Boxed` -- one `Value` per element (64 bytes each).
+/// * `Packed` -- exact compact storage for arrays whose every element is
+///   `Value::Int(v)` with `0 <= v <= u32::MAX` or `Value::UInt { width: 32 }`:
+///   a `u32` word plus one kind bit per element, about 4 bytes per element.
+///   Reading an element rebuilds exactly the `Value` that was stored.
+///
+/// Invariants that make the packed form unobservable:
+/// * `Deref` (`&Vec<Value>`) on a packed array materializes a boxed VIEW once
+///   (`OnceLock`) and returns it. The view is derived from the words; nothing
+///   can write through `&Vec<Value>`, so the view stays equal to the words.
+/// * `DerefMut` (`&mut Vec<Value>`) permanently converts a packed array to
+///   boxed first (reusing the view when one exists). Every mutation the
+///   interpreter has not been taught about therefore runs on a boxed array --
+///   correct by construction, at the old memory cost.
+/// * Packed-aware mutators (`assign_index`, `write_span_from`) take `&mut
+///   self`, write the words, and drop any materialized view, so the view can
+///   never go stale.
 pub struct ArrayData {
-    values: Vec<Value>,
+    store: ArrayStore,
+}
+
+enum ArrayStore {
+    Boxed(Vec<Value>),
+    Packed(Box<PackedWords>),
+}
+
+/// Kind of one packed element.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WordKind {
+    Int,
+    U32,
+}
+
+struct PackedWords {
+    words: Vec<u32>,
+    /// One bit per element: set = `Value::Int`, clear = `Value::UInt { width: 32 }`.
+    int_bits: Vec<u64>,
+    /// Boxed view, built on first `Deref`.
+    view: std::sync::OnceLock<Vec<Value>>,
+}
+
+/// Process-wide count of packed arrays materialized to a boxed view or
+/// converted to boxed storage (element counts). `SIMPLE_MEM_TRACE` reports
+/// it; a framebuffer-sized entry means a hot path is not packed-aware.
+pub static ARRAY_MATERIALIZE_ELEMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static ARRAY_MATERIALIZE_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Smallest array the repeat literal stores packed. Below it the boxed form is
+/// cheap and the packed bookkeeping is not worth having.
+pub const PACKED_WORDS_MIN_LEN: usize = 1024;
+
+fn packed_word_of(value: &Value) -> Option<(u32, WordKind)> {
+    match value {
+        Value::Int(v) if (0..=i64::from(u32::MAX)).contains(v) => Some((*v as u32, WordKind::Int)),
+        Value::UInt { value, width: 32 } if *value <= u64::from(u32::MAX) => Some((*value as u32, WordKind::U32)),
+        _ => None,
+    }
+}
+
+impl PackedWords {
+    fn len(&self) -> usize {
+        self.words.len()
+    }
+
+    fn kind(&self, i: usize) -> WordKind {
+        if self.int_bits[i / 64] & (1u64 << (i % 64)) != 0 {
+            WordKind::Int
+        } else {
+            WordKind::U32
+        }
+    }
+
+    fn value(&self, i: usize) -> Value {
+        let w = self.words[i];
+        match self.kind(i) {
+            WordKind::Int => Value::Int(i64::from(w)),
+            WordKind::U32 => Value::UInt {
+                value: u64::from(w),
+                width: 32,
+            },
+        }
+    }
+
+    fn set(&mut self, i: usize, word: u32, kind: WordKind) {
+        self.words[i] = word;
+        let bit = 1u64 << (i % 64);
+        match kind {
+            WordKind::Int => self.int_bits[i / 64] |= bit,
+            WordKind::U32 => self.int_bits[i / 64] &= !bit,
+        }
+        // Any materialized view is now stale; drop it (we hold `&mut`).
+        self.view = std::sync::OnceLock::new();
+    }
+
+    fn to_values(&self) -> Vec<Value> {
+        ARRAY_MATERIALIZE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ARRAY_MATERIALIZE_ELEMS.fetch_add(self.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        if crate::mem_trace::enabled() && self.len() >= 1 << 16 {
+            eprintln!(
+                "[mem][array-materialize] packed array of {} elements boxed; interp stack: {}\n{}",
+                self.len(),
+                crate::mem_trace::interp_stack_tail(8),
+                std::backtrace::Backtrace::force_capture()
+                    .to_string()
+                    .lines()
+                    .filter(|l| l.contains("simple_compiler::") && !l.contains("value::ArrayData") && !l.contains("PackedWords") && !l.contains("mem_trace"))
+                    .take(10)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+        }
+        (0..self.len()).map(|i| self.value(i)).collect()
+    }
+
+    fn repeat(word: u32, kind: WordKind, n: usize) -> Self {
+        let fill = if kind == WordKind::Int { u64::MAX } else { 0 };
+        PackedWords {
+            words: vec![word; n],
+            int_bits: vec![fill; n.div_ceil(64)],
+            view: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl Clone for PackedWords {
+    fn clone(&self) -> Self {
+        // The view is a cache; a clone rebuilds it only if it is needed.
+        PackedWords {
+            words: self.words.clone(),
+            int_bits: self.int_bits.clone(),
+            view: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl Clone for ArrayData {
+    fn clone(&self) -> Self {
+        ArrayData {
+            store: match &self.store {
+                ArrayStore::Boxed(values) => ArrayStore::Boxed(values.clone()),
+                ArrayStore::Packed(p) => ArrayStore::Packed(p.clone()),
+            },
+        }
+    }
+}
+
+impl Default for ArrayData {
+    fn default() -> Self {
+        ArrayData {
+            store: ArrayStore::Boxed(Vec::new()),
+        }
+    }
 }
 
 impl ArrayData {
+    /// `[value; n]`: packed when `value` is in the packed domain and the
+    /// array is large, boxed otherwise. Element-for-element equal either way.
+    pub fn repeat(value: Value, n: usize) -> Self {
+        if n >= PACKED_WORDS_MIN_LEN {
+            if let Some((word, kind)) = packed_word_of(&value) {
+                return ArrayData {
+                    store: ArrayStore::Packed(Box::new(PackedWords::repeat(word, kind, n))),
+                };
+            }
+        }
+        ArrayData::from(vec![value; n])
+    }
+
     /// The boxed elements, by value.
     pub fn into_vec(self) -> Vec<Value> {
-        self.values
+        match self.store {
+            ArrayStore::Boxed(values) => values,
+            ArrayStore::Packed(mut p) => p.view.take().unwrap_or_else(|| p.to_values()),
+        }
+    }
+
+    /// Whether the elements are currently stored packed (tests, tracing).
+    pub fn is_packed(&self) -> bool {
+        matches!(self.store, ArrayStore::Packed(_))
+    }
+
+    /// Element count, without materializing a packed array.
+    pub fn len(&self) -> usize {
+        match &self.store {
+            ArrayStore::Boxed(values) => values.len(),
+            ArrayStore::Packed(p) => p.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Element `i` by value, without materializing a packed array.
+    pub fn get_value(&self, i: usize) -> Option<Value> {
+        match &self.store {
+            ArrayStore::Boxed(values) => values.get(i).cloned(),
+            ArrayStore::Packed(p) => (i < p.len()).then(|| p.value(i)),
+        }
+    }
+
+    /// A boxed copy of the elements. Shadows `<[Value]>::to_vec` so a packed
+    /// array is copied once, without also building (and keeping) its view.
+    pub fn to_vec(&self) -> Vec<Value> {
+        match &self.store {
+            ArrayStore::Boxed(values) => values.clone(),
+            ArrayStore::Packed(p) => match p.view.get() {
+                Some(view) => view.clone(),
+                None => (0..p.len()).map(|i| p.value(i)).collect(),
+            },
+        }
+    }
+
+    /// Iterate the elements by value, without materializing a packed array.
+    pub fn values_iter(&self) -> impl Iterator<Item = Value> + '_ {
+        (0..self.len()).map(move |i| self.get_value(i).expect("index below len"))
+    }
+
+    /// `arr[idx] = value`, with exactly the boxed semantics the interpreter's
+    /// index-assignment paths implement: overwrite when `idx < len`, otherwise
+    /// pad with `nil` up to `idx` and append. A packed array stays packed when
+    /// the store is an in-range overwrite with an in-domain value; any other
+    /// store converts it to boxed first.
+    pub fn assign_index(&mut self, idx: usize, value: Value) {
+        if let ArrayStore::Packed(p) = &mut self.store {
+            if idx < p.len() {
+                if let Some((word, kind)) = packed_word_of(&value) {
+                    p.set(idx, word, kind);
+                    return;
+                }
+            }
+        }
+        let arr: &mut Vec<Value> = self;
+        if idx < arr.len() {
+            arr[idx] = value;
+        } else {
+            while arr.len() < idx {
+                arr.push(Value::Nil);
+            }
+            arr.push(value);
+        }
+    }
+
+    /// `dst[dst_off..dst_off+n] = src[src_off..src_off+n]` for a range the
+    /// caller has already validated, where `src` is a snapshot taken before
+    /// this call (memmove semantics). Stays packed when every copied element
+    /// is in the packed domain.
+    pub fn write_span_from(&mut self, src: &ArrayData, dst_off: usize, src_off: usize, n: usize) {
+        if let (ArrayStore::Packed(dst), ArrayStore::Packed(s)) = (&mut self.store, &src.store) {
+            dst.words[dst_off..dst_off + n].copy_from_slice(&s.words[src_off..src_off + n]);
+            for i in 0..n {
+                let kind = s.kind(src_off + i);
+                let bit = 1u64 << ((dst_off + i) % 64);
+                match kind {
+                    WordKind::Int => dst.int_bits[(dst_off + i) / 64] |= bit,
+                    WordKind::U32 => dst.int_bits[(dst_off + i) / 64] &= !bit,
+                }
+            }
+            dst.view = std::sync::OnceLock::new();
+            return;
+        }
+        if let ArrayStore::Packed(dst) = &mut self.store {
+            let words: Option<Vec<(u32, WordKind)>> =
+                (src_off..src_off + n).map(|i| src.get_value(i).and_then(|v| packed_word_of(&v))).collect();
+            if let Some(words) = words {
+                for (k, (word, kind)) in words.into_iter().enumerate() {
+                    dst.set(dst_off + k, word, kind);
+                }
+                return;
+            }
+        }
+        let dst: &mut Vec<Value> = self;
+        for k in 0..n {
+            dst[dst_off + k] = src.get_value(src_off + k).expect("validated span");
+        }
     }
 }
 
 impl std::ops::Deref for ArrayData {
     type Target = Vec<Value>;
     fn deref(&self) -> &Vec<Value> {
-        &self.values
+        match &self.store {
+            ArrayStore::Boxed(values) => values,
+            ArrayStore::Packed(p) => p.view.get_or_init(|| p.to_values()),
+        }
     }
 }
 
 impl std::ops::DerefMut for ArrayData {
     fn deref_mut(&mut self) -> &mut Vec<Value> {
-        &mut self.values
+        if let ArrayStore::Packed(p) = &mut self.store {
+            let values = p.view.take().unwrap_or_else(|| p.to_values());
+            self.store = ArrayStore::Boxed(values);
+        }
+        match &mut self.store {
+            ArrayStore::Boxed(values) => values,
+            ArrayStore::Packed(_) => unreachable!("converted to boxed above"),
+        }
     }
 }
 
 impl From<Vec<Value>> for ArrayData {
     fn from(values: Vec<Value>) -> Self {
-        ArrayData { values }
+        ArrayData {
+            store: ArrayStore::Boxed(values),
+        }
     }
 }
 
 impl FromIterator<Value> for ArrayData {
     fn from_iter<I: IntoIterator<Item = Value>>(iter: I) -> Self {
-        ArrayData {
-            values: iter.into_iter().collect(),
-        }
+        ArrayData::from(iter.into_iter().collect::<Vec<Value>>())
     }
 }
 
@@ -1795,13 +2069,21 @@ impl FromIterator<Value> for ArrayData {
 /// `{:?}`-based diagnostic and probe is byte-identical.
 impl std::fmt::Debug for ArrayData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&self.values, f)
+        match &self.store {
+            ArrayStore::Boxed(values) => std::fmt::Debug::fmt(values, f),
+            ArrayStore::Packed(_) => f.debug_list().entries(self.values_iter()).finish(),
+        }
     }
 }
 
+/// Element-wise `Value` equality: the same answer the boxed `Vec<Value>`
+/// comparison gave, for any mix of representations.
 impl PartialEq for ArrayData {
     fn eq(&self, other: &Self) -> bool {
-        self.values == other.values
+        match (&self.store, &other.store) {
+            (ArrayStore::Boxed(a), ArrayStore::Boxed(b)) => a == b,
+            _ => self.len() == other.len() && self.values_iter().zip(other.values_iter()).all(|(a, b)| a == b),
+        }
     }
 }
 
@@ -1809,7 +2091,8 @@ impl<'a> IntoIterator for &'a ArrayData {
     type Item = &'a Value;
     type IntoIter = std::slice::Iter<'a, Value>;
     fn into_iter(self) -> Self::IntoIter {
-        self.values.iter()
+        let values: &'a Vec<Value> = self;
+        values.iter()
     }
 }
 

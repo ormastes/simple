@@ -904,6 +904,18 @@ pub(crate) fn evaluate_method_call(
             }
         }
         Value::Array(arr) => {
+            if let Some(result) = collections::handle_packed_array_methods(
+                arr,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
+                return Ok(result);
+            }
             if let Some(result) =
                 collections::handle_array_methods(arr, method, args, env, functions, classes, enums, impl_methods)?
             {
