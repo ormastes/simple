@@ -1,0 +1,121 @@
+"""ITEM4-REQ-004/009 static x64 GOT stream acceptance. UNRUN.
+Real ELF input/output bytes, no dynamic/TLS or measured memory admission claim.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes, dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_remove, file_exists, file_write_bytes}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.backend.linker.elf.stream_types.{ElfStreamLimitsV1}
+use compiler.backend.linker.elf.stream_link.{elf_stream_link_file_v1}
+
+fn item4_stream_got_limits() -> ElfStreamLimitsV1:
+    ElfStreamLimitsV1(input_limit: 12, archive_member_limit: 64u64, metadata_bytes: 262144u64,
+        read_window_bytes: 64, emit_window_bytes: 8, name_bytes: 64,
+        output_bytes: 1048576u64, scratch_bytes: 4194304u64, scan_record_limit: 2000000u64)
+
+fn item4_stream_got_cancelled() -> bool: false
+
+fn item4_stream_got_read(bytes: [u8], offset: i64, width: i64) -> u64:
+    val valid = offset >= 0 and offset <= bytes.len() and width >= 1 and width <= 8 and width <= bytes.len() - offset
+    expect(valid).to_equal(true)
+    if not valid: return 0u64
+    var value = 0u64
+    for index in 0..width: value = value | ((bytes[offset + index] as u64) << (index * 8))
+    value
+
+fn item4_stream_got_marker(bytes: [u8], marker: text) -> i64:
+    var found = -1
+    var count = 0
+    if bytes.len() < marker.len():
+        expect(false).to_equal(true)
+        return -1
+    for offset in 0..(bytes.len() - marker.len() + 1):
+        var matched = true
+        for index in 0..marker.len():
+            if bytes[offset + index] != marker.byte_at(index) as u8: matched = false
+        if matched:
+            found = offset
+            count = count + 1
+    expect(count).to_equal(1)
+    if count != 1: return -1
+    found
+
+fn item4_stream_got_translate(bytes: [u8], value: u64, from_file: bool) -> [u64]:
+    val phoff = item4_stream_got_read(bytes, 32, 8)
+    val count = item4_stream_got_read(bytes, 56, 2)
+    val valid = phoff <= bytes.len() as u64 and count > 0u64 and count < 64u64 and count * 56u64 <= bytes.len() as u64 - phoff
+    expect(valid).to_equal(true)
+    if not valid: return []
+    for index in 0..(count as i64):
+        val at = phoff as i64 + index * 56
+        if item4_stream_got_read(bytes, at, 4) == 1u64:
+            val offset = item4_stream_got_read(bytes, at + 8, 8)
+            val address = item4_stream_got_read(bytes, at + 16, 8)
+            val size = item4_stream_got_read(bytes, at + 32, 8)
+            val start = if from_file: offset else: address
+            if value >= start and value - start < size:
+                return [if from_file: address + value - offset else: offset + value - address,
+                    item4_stream_got_read(bytes, at + 4, 4), size - (value - start)]
+    expect(false).to_equal(true)
+    []
+
+fn item4_stream_got_check(bytes: [u8]):
+    expect(item4_stream_got_read(bytes, 0, 4)).to_equal(0x464c457fu64)
+    expect(item4_stream_got_read(bytes, 18, 2)).to_equal(62u64)
+    val marker = item4_stream_got_marker(bytes, "GOTCASE!")
+    if marker < 0: return
+    expect(item4_stream_got_read(bytes, marker + 8, 3)).to_equal(0x058b48u64)
+    expect(item4_stream_got_read(bytes, marker + 15, 2)).to_equal(0x15ffu64)
+    expect(item4_stream_got_read(bytes, marker + 21, 3)).to_equal(0x058b48u64)
+    var slots: [u64] = []
+    val fields = [11, 17, 24]
+    for index in 0..fields.len():
+        val field = marker + fields[index]
+        val address = item4_stream_got_translate(bytes, field as u64, true)
+        if address.len() != 3: return
+        var displacement = item4_stream_got_read(bytes, field, 4) as i64
+        if displacement >= 2147483648: displacement = displacement - 4294967296
+        val slot = (address[0] as i64 + 4 + displacement) as u64
+        slots.push(slot)
+        val location = item4_stream_got_translate(bytes, slot, false)
+        if location.len() != 3: return
+        expect(location[1]).to_equal(6u64)
+        expect(location[2] >= 8u64).to_equal(true)
+        if location[2] < 8u64: return
+        val target = item4_stream_got_read(bytes, location[0] as i64, 8)
+        val payload = item4_stream_got_translate(bytes, target, false)
+        if payload.len() != 3: return
+        if index == 1:
+            expect(payload[1]).to_equal(5u64)
+            expect(item4_stream_got_read(bytes, payload[0] as i64, 1)).to_equal(0xc3u64)
+        else:
+            expect(item4_stream_got_read(bytes, payload[0] as i64, 8)).to_equal(0x0102030405060708u64)
+    expect(slots[0]).to_equal(slots[2])
+    expect(slots[0] == slots[1]).to_equal(false)
+
+describe "Streamed static x64 GOT relocation families":
+    it "emits actual GOTPCREL and unrelaxed GOTPCRELX slots across narrow windows":
+        step("Link real types nine forty-one and forty-two and decode instruction to slot to target")
+        expect(dir_create_all("build")).to_equal(true)
+        val created = secure_temp_dir("build", "item4-stream-got-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val directory = created.unwrap()
+        var baseline: [u8] = []
+        for window in [1, 3, 8, 64]:
+            var limits = item4_stream_got_limits()
+            limits.emit_window_bytes = window
+            val output = directory + "/window-{window}.elf"
+            val linked = elf_stream_link_file_v1(["test/fixtures/linker/elf/stream_got_refs.o",
+                "test/fixtures/linker/elf/stream_got_provider.o"], [], [95, 115, 116, 97, 114, 116],
+                output, directory, limits, item4_stream_got_cancelled)
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_ok():
+                expect(linked.unwrap().cleanup_pending).to_equal(false)
+                val image = file_read_bytes(output)
+                item4_stream_got_check(image)
+                if window == 1: baseline = image
+                else: expect(image).to_equal(baseline)
+            if file_exists(output): expect(file_remove(output)).to_equal(true)
+        expect(dir_remove(directory, false)).to_equal(true)
