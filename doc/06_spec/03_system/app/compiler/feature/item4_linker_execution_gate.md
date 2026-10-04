@@ -18,7 +18,7 @@ Select the explicit native backend, rather than relying on default interpreter
 mode or the plain `--native`/SMF route:
 
 ```
-<admitted-runtime> test <spec.spl> --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
+<admitted-runtime> test <spec.spl> --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
 ```
 
 The selected owner preprocesses SSpec into an executable `fn main()` (:734,
@@ -32,9 +32,10 @@ the generated source/image for inspection; it is not evidence of success.
 
 Use an admitted pure-Simple full CLI, not the bootstrap-only command subset or
 Rust seed. Record its absolute path, SHA256, source revision, qualification and
-runtime-bundle lineage. Pin child selection to the same admitted binary using
-the existing `SIMPLE_BINARY`/`SIMPLE_RUNTIME` policy when needed; the emitted
-producer receipt must identify that binary. A diagnostic `--help` result is not
+runtime-bundle lineage. Before execution, set `SIMPLE_BINARY` to that admitted
+binary's absolute path; explicit AOT rejects an empty `SIMPLE_BINARY` even if
+another runtime selector is available. The required `--verbose` option emits
+the invocation receipt, which must identify that binary. A diagnostic `--help` result is not
 admission. Windows needs its actual native compiler/runtime dependencies;
 Linux likewise needs its qualified LLVM/runtime bundle. WSL is a separate Linux
 host context, not evidence that a Windows candidate can execute these tests.

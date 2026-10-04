@@ -34,7 +34,7 @@ this metadata does not claim extension safety. Other unsupported flags retain
 their explicit lowering refusal.
 
 After independent runtime admission:
-`<runtime> test test/03_system/app/compiler/feature/item4_macho_tbd_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts`
+`<runtime> test test/03_system/app/compiler/feature/item4_macho_tbd_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose`
 
 Open full-SDK obligations include transitive reexport closure, client/umbrella
 access binding, selected weak import coalescing, actual SDK/framework workloads,

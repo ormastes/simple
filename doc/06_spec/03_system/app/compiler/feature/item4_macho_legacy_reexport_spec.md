@@ -36,7 +36,7 @@ loading, immutable file identity or process memory enforcement.
 Pending execution requires an admitted self-hosted runtime:
 
 ```
-<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_legacy_reexport_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
+<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_legacy_reexport_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
 ```
 
 No Rust seed, bootstrap rebuild, runtime retry or executed RED/GREEN claim was

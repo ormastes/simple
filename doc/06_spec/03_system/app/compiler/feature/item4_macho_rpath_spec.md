@@ -24,7 +24,7 @@ whole-process memory qualification claim.
 Pending execution with an admitted self-hosted runtime:
 
 ```
-<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_rpath_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
+<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_rpath_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
 ```
 
 These are authored assertions, not observed runtime passes. Immutable file

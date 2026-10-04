@@ -47,7 +47,7 @@ it does not claim GNU behavior for emitted nonallocated debug relocations.
 After runtime admission:
 
 ```text
-<runtime> test test/03_system/app/compiler/feature/item4_stream_comdat_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
+<runtime> test test/03_system/app/compiler/feature/item4_stream_comdat_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
 <runtime> spipe-docgen test/03_system/app/compiler/feature/item4_stream_comdat_spec.spl --output doc/06_spec --no-index
 ```
 

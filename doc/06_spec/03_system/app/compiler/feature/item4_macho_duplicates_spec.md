@@ -19,7 +19,7 @@ weak-definition support remains outside this slice. No whole-product, host,
 memory qualification or timing result is inferred.
 
 After independent runtime admission:
-`<runtime> test test/03_system/app/compiler/feature/item4_macho_duplicates_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts`
+`<runtime> test test/03_system/app/compiler/feature/item4_macho_duplicates_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose`
 
 Pending execution follows [the item4 native execution gate](item4_linker_execution_gate.md).
 This command is an unexecuted recipe, not proof that the current CLI or generated

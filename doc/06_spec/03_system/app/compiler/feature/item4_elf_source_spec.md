@@ -38,7 +38,7 @@ tool results do not establish Simple RED/GREEN.
 After runtime admission:
 
 ```text
-<runtime> test test/03_system/app/compiler/feature/item4_elf_source_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
+<runtime> test test/03_system/app/compiler/feature/item4_elf_source_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
 <runtime> spipe-docgen test/03_system/app/compiler/feature/item4_elf_source_spec.spl --output doc/06_spec --no-index
 ```
 

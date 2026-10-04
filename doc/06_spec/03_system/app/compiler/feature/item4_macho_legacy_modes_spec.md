@@ -19,7 +19,7 @@ Fixtures and their external LLVM construction/inspection provenance are in [RECI
 Pending execution with an admitted pure-Simple runtime:
 
 ```text
-<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_legacy_modes_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
+<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_legacy_modes_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
 ```
 
 Docgen and runtime evidence remain pending; fixture inspection is not Simple execution.

@@ -32,7 +32,7 @@ runtime archive ownership reject before publication; error tokens identify the
 intended failing contract rather than accepting arbitrary failures.
 
 Future command after independent runtime admission:
-`<runtime> test test/03_system/app/compiler/feature/item4_macos_native_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts`
+`<runtime> test test/03_system/app/compiler/feature/item4_macos_native_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose`
 
 These are real same-process file-adapter and byte-construction assertions.
 No successful Darwin launch, executable permission check, full native-build

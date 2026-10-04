@@ -21,7 +21,7 @@ The provider type has no virtual-address fields; binary validation precedes its
 projection. No fake dylib is synthesized from typed metadata.
 
 After independent runtime admission:
-`<runtime> test test/03_system/app/compiler/feature/item4_macho_provider_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts`
+`<runtime> test test/03_system/app/compiler/feature/item4_macho_provider_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose`
 
 Still open: v4 YAML and v5 JSON TextAPI parsing, SDK target filtering, transitive
 reexport closure, client/umbrella permission binding, supported weak import

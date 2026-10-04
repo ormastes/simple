@@ -22,7 +22,7 @@ Fixture provenance and external LLVM21.1.8 observations are recorded in `test/fi
 An admitted self-hosted runtime is required for the pending command:
 
 ```
-<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_closure_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
+<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_closure_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
 ```
 
 These tests do not qualify Darwin loading, native execution, real SDK completeness, dynamic weak import behavior, signing validity, immutable file identity, bounded whole-process memory, or `@rpath` dependency search. Those remain separate product/runtime gates. No Rust seed, rebuild or runtime retry was used.

@@ -30,7 +30,7 @@ fixture uses an ordinary non-TLS symbol.
 Once an admitted runtime exists, run from repository root:
 
 ```text
-<runtime> test test/03_system/app/compiler/feature/item4_riscv_tls_ie_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
+<runtime> test test/03_system/app/compiler/feature/item4_riscv_tls_ie_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
 <runtime> spipe-docgen test/03_system/app/compiler/feature/item4_riscv_tls_ie_spec.spl --output doc/06_spec --no-index
 ```
 
