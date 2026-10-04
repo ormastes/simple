@@ -456,6 +456,9 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                     // suffix so this family is only pulled in for programs
                     // that actually use one of these methods.
                     MirInst::MethodCallStatic { func_name, .. } => {
+                        // try_emit_vtable_type_switch (closures_structs.rs)
+                        // falls back to rt_method_not_found on a vtable miss.
+                        names.insert("rt_method_not_found".to_string());
                         let method_suffix = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
                         const MATH_METHODS: &[&str] = &[
                             "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp", "ln", "log2",

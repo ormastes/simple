@@ -2939,6 +2939,13 @@ fn try_emit_vtable_type_switch<M: Module>(
     if arms.is_empty() {
         return Ok(false);
     }
+    // The miss arm below calls rt_method_not_found. Runtime functions are
+    // declared per MIR-instruction family (common_backend.rs), so refuse the
+    // switch -- before emitting any IR -- rather than panicking on a missing
+    // map entry; the caller then takes its ordinary dispatch path.
+    if !ctx.runtime_funcs.contains_key("rt_method_not_found") {
+        return Ok(false);
+    }
 
     let recv = get_vreg_or_default(ctx, builder, &receiver);
     let arg_vals: Vec<cranelift_codegen::ir::Value> =
