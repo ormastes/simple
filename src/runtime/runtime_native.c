@@ -11094,7 +11094,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
      * LOCKFILE_EXCLUSIVE_LOCK alone blocks; adding LOCKFILE_FAIL_IMMEDIATELY
      * gives the LOCK_NB poll the timeout path needs. The whole file is locked
      * (MAXDWORD:MAXDWORD), matching flock's whole-file semantics. */
-    int fd = _open(path, _O_RDWR | _O_CREAT | _O_BINARY, _S_IREAD | _S_IWRITE);
+    int fd = _open(path, _O_RDWR | _O_CREAT | _O_BINARY | _O_NOINHERIT, _S_IREAD | _S_IWRITE);
     if (fd < 0) return -1;
     HANDLE handle = (HANDLE)_get_osfhandle(fd);
     if (handle == INVALID_HANDLE_VALUE) { _close(fd); return -1; }
@@ -11125,7 +11125,7 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
         Sleep(50); /* 50ms, matching the POSIX branch's poll interval */
     }
 #else
-    int fd = open(path, O_RDWR | O_CREAT, 0644);
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0) return -1;
     if (timeout_secs <= 0) {
         for (;;) {
