@@ -14,6 +14,14 @@ from Phase 2. After Phase 3 sanity, overlap its whole tools/library tests with
 Phase 4 from Phase 3, then run each Phase 4 cohort's whole tests. Enumerate
 actual test cases and retain separate producer lineages. Apply the selected
 job budget across concurrent lanes with memory-aware admission.
+Count frontend subprocess fan-out separately from code-generation threads.
+Do not disable frontend memory clamping to obtain an 80-job code-generation
+budget: a measured Windows diagnostic spawned 72 parse workers and consumed
+over 43 GiB in children against a 15 GiB reservation. If the reservation cannot
+cover the actual process tree, stop that owned lane with verified cleanup,
+retain its cache/evidence, and record a resource-aborted result before applying
+a scoped concurrency workaround. Never release its reservation before reaping
+the tree or label resource termination as a successful compile.
 
 After three unresolved repair cycles, update the canonical bug database and
 record a scoped bug-linked workaround or an explicit blocked dependency.
