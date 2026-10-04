@@ -97,6 +97,21 @@ Text mode (`main.spl https://<site>`) for the three big sites also exceeds
   l, f, h) are offset vertically from their neighbours on every page.
 - **F. Non-Latin text renders as tofu** (google.com Korean locale page) and
   inline runs overlap ("I'm Feeling Lucky" drawn over other labels).
+  **Tofu: FIXED (work/browser-cjk-fallback).** Root cause: font resolution
+  preferred the host face (Helvetica on macOS) for every run that was not
+  Arabic/Devanagari, so Han/kana/Hangul - even with `lang="zh"` - went to a
+  face with no CJK glyphs. `font_renderer.spl` now checks the bound face's
+  cmap coverage for CJK-range codepoints and re-resolves an uncovered run:
+  Han/kana -> bundled Noto Sans/Serif SC; Hangul -> platform AppleGothic
+  (`font_provider.browser_platform_hangul_faces`). Measured coverage: Noto
+  Sans SC has Han+kana, no Hangul; AppleSDGothicNeo has all three but is
+  CFF (`unsupported-sfnt-version` in the glyf rasterizer); AppleGothic.ttf is
+  glyf with Hangul. **Open:** the repo bundles no Hangul-capable font (only
+  a vendored rustdoc woff under `src/compiler_rust/vendor/deltae`), so on
+  Linux/CI Hangul stays .notdef until a Korean face (e.g. Noto Sans KR) is
+  added to the selected-font catalog. Also open: the bundled SC faces
+  resolve to their thin master (`axes=wght=100`), so CJK runs render light.
+  Overlapping inline runs: still open.
 - **I. news.ycombinator.com table layout** — the orange header bar paints,
   but the nav cell's inline children land on three separate rows ("|"
   separators, links, "Hacker News" title), links are blue instead of the
