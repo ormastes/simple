@@ -1,3 +1,4 @@
+use std.common.task_runner.contracts.{task_runner_process_outcome_v1}
 # Worker owns its compiler lease and attempt-local writable files. Only the
 # manager may publish a result into the shared cache or canonical output tree.
 use app.bootstrap_builder.contracts.{BuildTaskV1, BuildResultV1, BuildInputV1, builder_task_identity_v1, builder_validate_task_v1, builder_identifier_valid_v1}
@@ -232,13 +233,18 @@ fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result
             val memory_receipt = builder_memory_receipt_for_task_v1(task, "none", peak, metric)?
             if not file_atomic_write(root + "/compiler.memory", memory_receipt):
                 return Err("cannot persist process memory policy receipt")
-            if cancelled: return Ok(("ERROR", 125))
-            if receipt.packet.failure_reason == ProcessObservationFailureReasonV4.ExecutionDeadline:
-                return Ok(("TIMEOUT", 124))
-            if receipt.packet.exit_code == 0 and receipt.packet.signal_number == 0:
-                return Ok(("OK", 0))
-            if receipt.packet.exit_code != 0: return Ok(("ERROR", receipt.packet.exit_code))
-            return Ok(("CRASHED", 128 + receipt.packet.signal_number))
+            val outcome = task_runner_process_outcome_v1(receipt.packet.exit_code,
+                receipt.packet.signal_number,
+                receipt.packet.failure_reason == ProcessObservationFailureReasonV4.ExecutionDeadline,
+                cancelled, receipt.packet.leader_reaped and receipt.packet.tree_empty)?
+            if outcome == "cancelled": return Ok(("ERROR", 125))
+            if outcome == "timed-out": return Ok(("TIMEOUT", 124))
+            if outcome == "crashed":
+                val crash_code = if receipt.packet.signal_number > 0:
+                    128 + receipt.packet.signal_number else: receipt.packet.exit_code
+                return Ok(("CRASHED", crash_code))
+            if receipt.packet.exit_code == 0: return Ok(("OK", 0))
+            return Ok(("ERROR", receipt.packet.exit_code))
         sleep_ms(10)
     Err("unreachable compiler observation state")
 

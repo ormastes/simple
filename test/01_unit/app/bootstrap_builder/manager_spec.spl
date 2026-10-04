@@ -2,7 +2,7 @@
 # Native process isolation and cache file hashing are exercised by CLI tests.
 use std.spec.{describe, it, expect}
 use app.bootstrap_builder.contracts.{BuildInputV1, BuildTaskV1, BuildHostV1, BuildResultV1, BuildRunV1, builder_task_identity_v1}
-use app.bootstrap_builder.manager.{builder_manager_start, builder_manager_ready, builder_manager_dispatch, builder_manager_reap, builder_manager_accept, builder_manager_resume, builder_manager_done, builder_manager_succeeded, builder_manager_host_slots, builder_manager_encode_v1, builder_manager_decode_v1, builder_manager_unresolved}
+use app.bootstrap_builder.manager.{builder_manager_task_index, builder_manager_start, builder_manager_ready, builder_manager_dispatch, builder_manager_reap, builder_manager_accept, builder_manager_resume, builder_manager_done, builder_manager_succeeded, builder_manager_host_slots, builder_manager_encode_v1, builder_manager_decode_v1, builder_manager_unresolved}
 
 fn manager_test_digest() -> text:
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -15,7 +15,7 @@ fn manager_test_run(tasks: [BuildTaskV1], keep_going: bool, max_attempts: i64) -
 
 fn manager_test_result(task: BuildTaskV1, status: text) -> BuildResultV1:
     var outputs: [BuildInputV1] = []
-    var exit_code = 1
+    var exit_code = if status == "CRASHED": 139 else: 1
     if status == "OK":
         exit_code = 0
         for path in task.outputs:
@@ -270,3 +270,45 @@ describe "Bootstrap builder parent scheduling":
                 expect(restored.run.keep_going).to_equal(true)
             Err(reason):
                 expect(reason).to_contain("manifest identity")
+
+    it "continues independent work without retrying ordinary nonzero failure or timeout":
+        for status in ["ERROR", "TIMEOUT", "BLOCKED", "NOT_RUN"]:
+            val tasks = [manager_test_task("a", []), manager_test_task("b", [])]
+            var state = builder_manager_start(manager_test_run(tasks, true, 3))
+            state = builder_manager_dispatch(state, 0, "local")
+            state = builder_manager_reap(state, "a", 1)
+            var failure = manager_test_result(tasks[0], status)
+            failure.exit_code = if status == "ERROR": 17 else: 124
+            state = builder_manager_accept(state, failure, [])
+            expect(state.error).to_equal("")
+            expect(state.statuses).to_equal(["FAILED", "PENDING"])
+            expect(state.tasks[0].attempt).to_equal(1)
+            expect(builder_manager_ready(state)).to_equal([1])
+            val cached = manager_test_result(tasks[1], "OK")
+            state = builder_manager_resume(state, cached, cached.outputs)
+            expect(state.statuses).to_equal(["FAILED", "SUCCEEDED"])
+            expect(builder_manager_done(state)).to_equal(true)
+            expect(builder_manager_succeeded(state)).to_equal(false)
+
+    it "keeps a crash retry bounded and waits for an explicit reap":
+        val task = manager_test_task("a", [])
+        var state = builder_manager_start(manager_test_run([task], true, 2))
+        state = builder_manager_dispatch(state, 0, "local")
+        val premature = builder_manager_accept(state, manager_test_result(task, "CRASHED"), [])
+        expect(premature.error != "").to_equal(true)
+        state = builder_manager_reap(state, "a", 1)
+        state = builder_manager_accept(state, manager_test_result(task, "CRASHED"), [])
+        expect(state.tasks[0].attempt).to_equal(2)
+        state = builder_manager_dispatch(state, 0, "local")
+        state = builder_manager_reap(state, "a", 2)
+        state = builder_manager_accept(state, manager_test_result(state.tasks[0], "CRASHED"), [])
+        expect(state.statuses).to_equal(["FAILED"])
+        expect(state.tasks[0].attempt).to_equal(2)
+
+    it "indexes task identities and rejects a stale derived lookup":
+        val tasks = [manager_test_task("a", []), manager_test_task("b", [])]
+        var state = builder_manager_start(manager_test_run(tasks, true, 2))
+        expect(builder_manager_task_index(state, "b")).to_equal(1)
+        expect(builder_manager_task_index(state, "missing")).to_equal(-1)
+        state.task_indices["b"] = 0
+        expect(builder_manager_task_index(state, "b")).to_equal(-1)
