@@ -6,6 +6,9 @@ use Digest::SHA qw(sha256_hex);
 use Getopt::Long qw(GetOptions);
 use POSIX qw(uname);
 use File::Find qw(find);
+use FindBin;
+use lib "$FindBin::Bin/lib";
+use BootstrapNativeImage qw(verify_native_image);
 
 my %arg;
 GetOptions(
@@ -67,22 +70,8 @@ sub sha_file {
 }
 sub native_image {
   my ($path) = @_;
-  -f $path && !-l $path && -x $path or die "native product missing or not executable\n";
-  open my $fh, '<:raw', $path or die "cannot inspect native product\n";
-  read($fh, my $header, 64) >= 20 or die "native product header short\n";
-  close $fh or die "cannot close native product\n";
   my @uts = uname();
-  my ($system, $machine) = @uts[0, 4];
-  $system =~ /\A(?:Linux|FreeBSD)\z/ or die "native product host unsupported by this gate\n";
-  substr($header, 0, 4) eq "\x7fELF" && ord(substr($header, 4, 1)) == 2 &&
-    ord(substr($header, 5, 1)) == 1 &&
-    (unpack('v', substr($header, 16, 2)) == 2 ||
-     unpack('v', substr($header, 16, 2)) == 3)
-    or die "product is not a host ELF executable image\n";
-  my %host_machine = (x86_64 => 62, amd64 => 62, aarch64 => 183, arm64 => 183);
-  exists($host_machine{lc $machine}) &&
-    unpack('v', substr($header, 18, 2)) == $host_machine{lc $machine}
-    or die "product ELF machine differs from host target\n";
+  verify_native_image($path, $uts[0], $uts[4]);
 }
 sub no_link_components {
   my ($path) = @_;
