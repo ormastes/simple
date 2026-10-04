@@ -48,3 +48,17 @@ intent is claimed to precede implementation. A real binary alias fixture was
 created by documented export-trie mutation after ld64.lld reported aliasing to
 imported symbols unsupported. Independent decoding is distinct from code-signing
 or loader acceptance, and no fabricated text-provider VM addresses are used.
+
+Final independent source review binds core 9876f149efa, tests through
+c4b6d473ada (twelve scenarios), native lookup through 6fc4b83f77a and design
+through 1d6798e9c88: no remaining P0/P1 findings. Coverage includes real
+inline/external graphs on both formats/CPUs, alias and mixed-cycle behavior,
+direct versus indirect permissions, deployment/budget/identity refusals,
+actual relative-path file reads and preserved destinations. The final Windows
+expected-path correction normalizes separators independently of production code.
+
+Integration rebased onto 8287f9bc3a6b10fda5b8da505508ca459f6c11ce with all
+15 existing patches unchanged; intervening release work had no owned-path
+overlap. Final scope whitespace, direct-env working/staged and numbered-artifact
+checks passed. The tracked manual tree has zero executable specs; this lane
+adds only its Markdown manual there. These checks do not change runtime UNRUN.

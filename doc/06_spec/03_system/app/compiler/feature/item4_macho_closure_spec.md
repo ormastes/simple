@@ -10,7 +10,7 @@ Twelve authored scenarios in `test/03_system/app/compiler/feature/item4_macho_cl
 | Graph limits | A valid real cyclic graph rejects insufficient source, byte, edge, symbol and cumulative work budgets; a shallow lookup limit rejects traversal. These are logical quotas, not process memory enforcement. |
 | Duplicate identity | Repeated direct providers and conflicting declarations of one install name reject. |
 | Native client identity | Matching signing identifier alone cannot grant access; actual `-client_name` permits the same real provider and object to produce a Mach-O image. Denial preserves the destination. |
-| Missing SDK provider | Missing leaf, mismatched install identity and wrong target refuse construction while preserving sentinel bytes. |
+| Unusable SDK provider | Missing leaf, mismatched install identity, wrong target and a reachable leaf requiring macOS 12 for a macOS 11 request refuse construction while preserving sentinel bytes. The deployment case checks the specific minimum-OS diagnostic. |
 | Alias cycle and sibling | A genuinely binary-parsed alias branch cycles back to the root; lookup continues to a later inline defining sibling in both TBD formats. |
 | Binary alias image | Both CPU fixtures preserve outward `_alias` and direct root ordinal1 in real emitted binding bytes while resolving the internal `_helper` name. |
 | Whole-library cycle | Both formats find a reachable definition and terminate absent-symbol lookup without inventing an export. |

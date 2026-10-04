@@ -204,3 +204,8 @@ The first prints `[re-export] _alias (_helper from libitem4_alias_leaf)` for
 both CPUs; the second prints `[re-export] _alias (_alias from a)`. These are
 binary export-trie observations, not application execution or a fake provider
 VM-address construction. No new archive ordering is involved in this lane.
+
+The hand-authored closure_future_leaf_v5_interface.tbd requires macOS 12.0 for
+a reachable x64 leaf under a macOS 11 request. Its specific minimum-OS rejection
+and destination preservation are authored acceptance, not an external LLVM or
+Simple execution claim.
