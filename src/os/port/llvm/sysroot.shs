@@ -10,10 +10,100 @@
 #
 # Usage:
 #   sh src/os/port/llvm/sysroot.shs
+#   sh src/os/port/llvm/sysroot.shs --census            # census an existing sysroot only
+#   sh src/os/port/llvm/sysroot.shs --census-selftest   # prove the census discriminates
 #
 # Output: build/os/sysroot/
 
 set -e
+
+# -- Strong-symbol census (fail-closed) --------------------------------------
+# A SimpleOS payload links libsimpleos_c.a and the real runtime archive
+# (libsimple_runtime_native.a; on x86_64 libsimple_runtime.a is a copy) together.
+# Every strong (T/D/B/R) global must be defined exactly once, inside each
+# archive and across the two; a second strong copy is a latent
+# "duplicate symbol" link error that only fires once some object pulls both
+# members. Weak definitions (W/V) are intentional fallbacks and are ignored.
+# Verdict is the last stdout line: PASS (exit 0) / FAIL (exit 1) /
+# ERROR — nothing was checked (exit 2).
+sysroot_strong_syms() {
+    "${NM:-nm}" -g --defined-only -A "$1" 2>/dev/null |
+        awk '$(NF-1) ~ /^[TDBR]$/ {print $NF}'
+}
+
+sysroot_dup_census() {
+    census_libc="$1"; census_rt="$2"
+    for census_a in "$census_libc" "$census_rt"; do
+        if [ ! -f "$census_a" ]; then
+            echo "[sysroot] census: missing archive $census_a" >&2
+            echo "ERROR — nothing was checked"; return 2
+        fi
+    done
+    census_dir="$(mktemp -d)"
+    sysroot_strong_syms "$census_libc" | sort > "$census_dir/libc"
+    sysroot_strong_syms "$census_rt" | sort > "$census_dir/rt"
+    census_n=$(cat "$census_dir/libc" "$census_dir/rt" | wc -l | tr -d ' ')
+    uniq -d "$census_dir/libc" | sed 's/^/libc-intra: /' > "$census_dir/dups"
+    uniq -d "$census_dir/rt" | sed 's/^/runtime-intra: /' >> "$census_dir/dups"
+    sort -u "$census_dir/libc" > "$census_dir/libc.u"
+    sort -u "$census_dir/rt" > "$census_dir/rt.u"
+    comm -12 "$census_dir/libc.u" "$census_dir/rt.u" | sed 's/^/cross-archive: /' >> "$census_dir/dups"
+    census_d=$(wc -l < "$census_dir/dups" | tr -d ' ')
+    if [ "$census_n" -eq 0 ]; then
+        rm -rf "$census_dir"; echo "ERROR — nothing was checked"; return 2
+    fi
+    if [ "$census_d" -ne 0 ]; then
+        sed 's/^/[sysroot] duplicate strong symbol /' "$census_dir/dups" >&2
+        rm -rf "$census_dir"
+        echo "FAIL — $census_n strong symbol(s) checked, $census_d duplicate(s)"; return 1
+    fi
+    rm -rf "$census_dir"
+    echo "PASS — $census_n strong symbol(s) checked, 0 duplicates"
+    return 0
+}
+
+sysroot_census_selftest() {
+    st="$(mktemp -d)"
+    st_cc="${CC:-clang}"; st_ar="${AR:-llvm-ar}"
+    command -v "$st_ar" >/dev/null 2>&1 || st_ar=ar
+    st_obj() { printf '%s\n' "$2" > "$st/$1.c"; "$st_cc" --target=x86_64-unknown-none-elf -ffreestanding -c "$st/$1.c" -o "$st/$1.o"; }
+    st_obj a 'int sym_a(void){return 1;}'
+    st_obj a2 'int sym_a(void){return 2;}'
+    st_obj b 'int sym_b(void){return 1;}'
+    st_obj w '__attribute__((weak)) int sym_b(void){return 3;}'
+    "$st_ar" rcs "$st/clean_libc.a" "$st/a.o"
+    "$st_ar" rcs "$st/clean_rt.a" "$st/b.o" "$st/w.o"
+    "$st_ar" rcs "$st/intra.a" "$st/a.o" "$st/a2.o"
+    "$st_ar" rcs "$st/cross.a" "$st/b.o"
+    : > "$st/empty.c"; "$st_cc" --target=x86_64-unknown-none-elf -c "$st/empty.c" -o "$st/empty.o"
+    "$st_ar" rcs "$st/empty.a" "$st/empty.o"
+    st_fail=0
+    sysroot_dup_census "$st/clean_libc.a" "$st/clean_rt.a" >/dev/null 2>&1 && st_rc=0 || st_rc=$?
+    [ "$st_rc" -eq 0 ] || { echo "[sysroot] selftest: clean+weak fixture rc=$st_rc, want 0" >&2; st_fail=1; }
+    sysroot_dup_census "$st/intra.a" "$st/clean_rt.a" >/dev/null 2>&1 && st_rc=0 || st_rc=$?
+    [ "$st_rc" -eq 1 ] || { echo "[sysroot] selftest: intra-archive dup rc=$st_rc, want 1" >&2; st_fail=1; }
+    sysroot_dup_census "$st/clean_libc.a" "$st/cross.a" >/dev/null 2>&1 && st_rc=0 || st_rc=$?
+    [ "$st_rc" -eq 0 ] || { echo "[sysroot] selftest: disjoint fixture rc=$st_rc, want 0" >&2; st_fail=1; }
+    sysroot_dup_census "$st/cross.a" "$st/clean_rt.a" >/dev/null 2>&1 && st_rc=0 || st_rc=$?
+    [ "$st_rc" -eq 1 ] || { echo "[sysroot] selftest: cross-archive dup rc=$st_rc, want 1" >&2; st_fail=1; }
+    sysroot_dup_census "$st/empty.a" "$st/empty.a" >/dev/null 2>&1 && st_rc=0 || st_rc=$?
+    [ "$st_rc" -eq 2 ] || { echo "[sysroot] selftest: empty fixture rc=$st_rc, want 2" >&2; st_fail=1; }
+    sysroot_dup_census "$st/missing.a" "$st/clean_rt.a" >/dev/null 2>&1 && st_rc=0 || st_rc=$?
+    [ "$st_rc" -eq 2 ] || { echo "[sysroot] selftest: missing archive rc=$st_rc, want 2" >&2; st_fail=1; }
+    rm -rf "$st"
+    if [ "$st_fail" -ne 0 ]; then echo "FAIL — census selftest"; return 1; fi
+    echo "PASS — census selftest, 6 fixtures"
+    return 0
+}
+
+SYSROOT_MODE="${1:-build}"
+case "$SYSROOT_MODE" in
+    build|--census|--census-selftest) ;;
+    *) echo "[sysroot] ERROR: unknown argument $SYSROOT_MODE" >&2; exit 2 ;;
+esac
+if [ "$SYSROOT_MODE" = "--census-selftest" ]; then
+    sysroot_census_selftest; exit $?
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
@@ -36,6 +126,10 @@ case "$TRIPLE" in
 esac
 LIBC_BUILD="$REPO_ROOT/build/os/libc-$TRIPLE"
 LIBCXX_BUILD="$REPO_ROOT/build/os/libcxx-$TRIPLE"
+
+if [ "$SYSROOT_MODE" = "--census" ]; then
+    sysroot_dup_census "$SYSROOT/lib/libsimpleos_c.a" "$SYSROOT/lib/libsimple_runtime_native.a"; exit $?
+fi
 
 echo "[sysroot] Building SimpleOS sysroot at $SYSROOT ..."
 
@@ -117,7 +211,7 @@ build_libc_runtime() {
             RT_CFLAGS="--target=x86_64-unknown-none-elf -ffreestanding -nostdlib \
                 -nostdlibinc -fno-builtin -mno-red-zone -fno-stack-protector \
                 -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables \
-                -ffunction-sections -fdata-sections -O2 -D__simpleos__=1 \
+                -ffunction-sections -fdata-sections -O2 -D__simpleos__=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -DSIMPLE_RUNTIME_TIME_OWNER=1 \
                 -isystem $LIBC_DIR/include"
             RT_OBJS=""
             # startup/baremetal/runtime_log provides the real UART emitter
@@ -313,7 +407,7 @@ ASMEOF
             RT_CFLAGS="--target=$TRIPLE -ffreestanding -nostdlib -nostdlibinc \
                 -fno-builtin -fno-stack-protector -fno-exceptions \
                 -fno-unwind-tables -fno-asynchronous-unwind-tables \
-                -ffunction-sections -fdata-sections -O2 -D__simpleos__=1 \
+                -ffunction-sections -fdata-sections -O2 -D__simpleos__=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -DSIMPLE_RUNTIME_TIME_OWNER=1 \
                 -isystem $LIBC_DIR/include"
             RT_OBJS=""
             for rt_src in runtime_native runtime_simd_utf8 runtime_contracts \
@@ -343,6 +437,9 @@ ASMEOF
 
 build_libc_runtime
 echo "[sysroot] Installed libsimpleos_c.a"
+# Fail closed on any duplicate strong definition before anything links them.
+sysroot_census_selftest >/dev/null || { echo "[sysroot] ERROR: census selftest failed" >&2; exit 1; }
+sysroot_dup_census "$SYSROOT/lib/libsimpleos_c.a" "$SYSROOT/lib/libsimple_runtime_native.a" || exit $?
 
 # -- libc++ runtime ----------------------------------------------------------
 

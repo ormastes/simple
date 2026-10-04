@@ -163,8 +163,5 @@ int dup3(int oldfd, int newfd, int flags) {
     return fd;
 }
 
-int socketpair(int domain, int type, int protocol, int sv[2]) {
-    (void)domain; (void)type; (void)protocol; (void)sv;
-    errno = ENOSYS;
-    return -1;
-}
+/* socketpair() lives in simpleos_socket.c (Linux-host fallback + ENOSYS on
+ * SimpleOS); a second definition here made every user link a duplicate. */
