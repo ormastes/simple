@@ -31,8 +31,9 @@ measurements — treat that as a product defect, not a test artifact.
 use std.spec.*
 use app.llm_caret.cs_dashboard.{cs_resolve_exe, windows_executable_names,
     CsAgent, CsDashboard, cs_dashboard_new, cs_refresh, cs_render,
-    cs_handle_command, cs_help_text, cs_launch_argv, cs_apply_action
+    cs_handle_command, cs_help_text, cs_launch_argv, cs_apply_action, cs_fit_sgr
 }
+use app.llm_caret.pane_backend.{pane_spawn, pane_kill}
 
 fn _launched(session: text, specs: [text]) -> CsDashboard:
     var d = cs_dashboard_new(session)
@@ -416,3 +417,38 @@ describe "cs dashboard - honest state when nothing can be measured":
         val (_after, action) = cs_handle_command(d, "ping")
         val (_after2, result) = cs_apply_action(d, action)
         expect(result).to_contain("cannot deliver")
+
+describe "cs dashboard - killing an agent":
+    it "keeps a killed agent gone when its pane id is reused by the next spawn":
+        # @req REQ-CSDASH-013
+        # @capture(protocol): roster state after kill and a respawn into the same slot
+        val session = "cs-dashboard-spec-kill-reuse"
+        step("attach agent a1 to a live shell pane")
+        val first = pane_spawn(session, "a1", "sh", [])
+        expect(first.pane_id).to_not_equal("")
+        val a1 = CsAgent(agent_id: "a1", spec: "caret:glm/glm-4.6", status: "running",
+            pid: first.pid, pane_id: first.pane_id, cpu_pct: -1.0, rss_mb: -1, detail: "")
+        val d = CsDashboard(session: session, manager_status: "", agents: [a1],
+            selected: 0, input: "", log: [], screen: [])
+
+        step("kill a1, then spawn another child that may reuse the same pane id")
+        val (killed, outcome) = cs_apply_action(d, "pane:kill a1 " + first.pane_id)
+        expect(outcome).to_contain("killed pane")
+        val second = pane_spawn(session, "a2", "sh", [])
+        expect(second.pane_id).to_not_equal("")
+
+        step("a refresh must not hand the new pane to the killed agent")
+        val polled = cs_refresh(killed)
+        assert_false(polled.agents[0].status == "running")
+        expect(polled.agents[0].status).to_contain("gone")
+        assert_true(pane_kill(session, second.pane_id))
+
+describe "cs dashboard - agent screen colours":
+    it "keeps an agent's colour runs, drops other escapes and resets each row":
+        step("Fit a styled agent row with a colour run and a cursor-hide escape")
+        val row = cs_fit_sgr("\x1b[0;32mok\x1b[?25l done", 7)
+        # @capture(text): fitted styled row
+        step("Colours survive, the mode escape does not, the row ends reset and padded")
+        expect(row).to_equal("\x1b[0;32mok done\x1b[0m")
+        step("A long styled row is cut at the visible width, escapes not counted")
+        expect(cs_fit_sgr("\x1b[1mabcdef", 3)).to_equal("\x1b[1mabc\x1b[0m")
