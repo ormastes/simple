@@ -435,7 +435,7 @@ pub(super) fn eval_call_expr(
                                 )? {
                                     let mut new_arr = (*arr).clone();
                                     new_arr[real_idx as usize] = updated_elem;
-                                    let new_arr_val = Value::Array(std::sync::Arc::new(new_arr));
+                                    let new_arr_val = Value::array(new_arr);
                                     env.insert(arr_name.clone(), new_arr_val.clone());
                                     if !env.is_local(arr_name)
                                         && super::super::MODULE_GLOBALS

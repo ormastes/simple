@@ -839,7 +839,7 @@ mod tests {
     #[test]
     fn rt_array_concat_preserves_interpreter_array_values() {
         let result = rt_array_concat_fn(&[
-            Value::FrozenArray(std::sync::Arc::new(vec![Value::UInt { value: 1, width: 8 }])),
+            Value::frozen_array(vec![Value::UInt { value: 1, width: 8 }]),
             Value::FixedSizeArray {
                 size: 1,
                 data: vec![Value::UInt { value: 2, width: 8 }],

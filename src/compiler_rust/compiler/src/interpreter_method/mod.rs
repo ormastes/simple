@@ -1496,7 +1496,7 @@ pub(crate) fn evaluate_method_call(
                 return Ok(Value::Bool(gen.is_done()));
             }
             "collect" => {
-                return Ok(Value::Array(Arc::new(gen.collect_remaining())));
+                return Ok(Value::array(gen.collect_remaining()));
             }
             _ => {
                 return Err(CompileError::semantic(format!(

@@ -426,7 +426,7 @@ mod tests {
 
         let fd = fd_of(&open(path, 1));
         assert!(fd >= 0, "WriteOnly open failed on a fresh path");
-        let data = Value::array((0u8..10).map(|b| Value::Int((b'0' + b) as i64)).collect());
+        let data = Value::array((0u8..10).map(|b| Value::Int((b'0' + b) as i64)).collect::<Vec<Value>>());
         let ok = rt_io_file_write_all(&[Value::Int(fd), data]).unwrap();
         assert_eq!(ok, Value::Bool(true));
         assert_eq!(rt_io_file_close(&[Value::Int(fd)]).unwrap(), Value::Bool(true));

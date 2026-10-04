@@ -305,15 +305,15 @@ mod tests {
     #[test]
     fn u8_array_matches_text_and_is_not_silently_dropped() {
         let handle = new_handle();
-        let arr = Value::Array(Arc::new(
+        let arr = Value::array(
             b"abc"
                 .iter()
                 .map(|b| Value::UInt {
                     value: *b as u64,
                     width: 8,
                 })
-                .collect(),
-        ));
+                .collect::<Vec<Value>>(),
+        );
         rt_sha256_write(&[Value::Int(handle), arr, Value::Int(3)]).unwrap();
         assert_eq!(
             text_of(rt_sha256_finish(&[Value::Int(handle)]).unwrap()),
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn non_byte_element_errors() {
         let handle = new_handle();
-        let arr = Value::Array(Arc::new(vec![Value::Int(1), Value::text("x".to_string())]));
+        let arr = Value::array(vec![Value::Int(1), Value::text("x".to_string())]);
         assert!(rt_sha256_write(&[Value::Int(handle), arr, Value::Int(2)]).is_err());
     }
 

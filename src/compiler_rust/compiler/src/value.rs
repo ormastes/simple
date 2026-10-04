@@ -1745,6 +1745,74 @@ impl ClassInstance {
     }
 }
 
+/// Element storage of a mutable `Value::Array`.
+///
+/// Today it is exactly a `Vec<Value>` and derefs to one, so every existing
+/// use is unchanged. It exists as the single seam where a compact
+/// representation for word arrays can be added without a new `Value`
+/// variant (a variant that unaware `match` arms would silently mishandle) --
+/// see doc/05_design/compiler/interpreter/packed_word_array_storage_2026-10-05.md.
+#[derive(Clone, Default)]
+pub struct ArrayData {
+    values: Vec<Value>,
+}
+
+impl ArrayData {
+    /// The boxed elements, by value.
+    pub fn into_vec(self) -> Vec<Value> {
+        self.values
+    }
+}
+
+impl std::ops::Deref for ArrayData {
+    type Target = Vec<Value>;
+    fn deref(&self) -> &Vec<Value> {
+        &self.values
+    }
+}
+
+impl std::ops::DerefMut for ArrayData {
+    fn deref_mut(&mut self) -> &mut Vec<Value> {
+        &mut self.values
+    }
+}
+
+impl From<Vec<Value>> for ArrayData {
+    fn from(values: Vec<Value>) -> Self {
+        ArrayData { values }
+    }
+}
+
+impl FromIterator<Value> for ArrayData {
+    fn from_iter<I: IntoIterator<Item = Value>>(iter: I) -> Self {
+        ArrayData {
+            values: iter.into_iter().collect(),
+        }
+    }
+}
+
+/// Debug renders exactly as the `Vec<Value>` it replaced, so every
+/// `{:?}`-based diagnostic and probe is byte-identical.
+impl std::fmt::Debug for ArrayData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.values, f)
+    }
+}
+
+impl PartialEq for ArrayData {
+    fn eq(&self, other: &Self) -> bool {
+        self.values == other.values
+    }
+}
+
+impl<'a> IntoIterator for &'a ArrayData {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter()
+    }
+}
+
 /// Runtime value representation.
 #[derive(Debug)]
 pub enum Value {
@@ -1783,12 +1851,14 @@ pub enum Value {
     StrBytes(Arc<Vec<u8>>),
     Symbol(String),
     /// Mutable array (default for array literals)
-    /// Wrapped in Arc for O(1) clone (COW via Arc::make_mut for mutations)
-    Array(Arc<Vec<Value>>),
+    /// Wrapped in Arc for O(1) clone (COW via Arc::make_mut for mutations).
+    /// `ArrayData` derefs to `Vec<Value>`; it is the storage seam for packed
+    /// word arrays (doc/05_design/compiler/interpreter/packed_word_array_storage_2026-10-05.md).
+    Array(Arc<ArrayData>),
     /// Packed mutable `[u8]` storage. Mutations use `Arc::make_mut` COW.
     ByteArray(Arc<Vec<u8>>),
     /// Immutable frozen array (created via freeze(), copy-on-freeze semantics)
-    FrozenArray(Arc<Vec<Value>>),
+    FrozenArray(Arc<ArrayData>),
     /// Packed immutable `[u8]` storage.
     FrozenByteArray(Arc<Vec<u8>>),
     /// Fixed-size array with runtime size checking ([T; N] syntax)
@@ -1999,8 +2069,8 @@ impl Value {
     }
 
     /// Create a new mutable array value (default for array literals)
-    pub fn array(vec: Vec<Value>) -> Self {
-        Value::Array(Arc::new(vec))
+    pub fn array(vec: impl Into<ArrayData>) -> Self {
+        Value::Array(Arc::new(vec.into()))
     }
 
     pub fn byte_array(vec: Vec<u8>) -> Self {
@@ -2008,8 +2078,8 @@ impl Value {
     }
 
     /// Create a new frozen (immutable) array value
-    pub fn frozen_array(vec: Vec<Value>) -> Self {
-        Value::FrozenArray(Arc::new(vec))
+    pub fn frozen_array(vec: impl Into<ArrayData>) -> Self {
+        Value::FrozenArray(Arc::new(vec.into()))
     }
 
     pub fn frozen_byte_array(vec: Vec<u8>) -> Self {

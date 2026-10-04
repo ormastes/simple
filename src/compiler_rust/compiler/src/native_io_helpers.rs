@@ -168,22 +168,22 @@ mod tests {
 
     #[test]
     fn extract_bytes_accepts_typed_u8_elements() {
-        let args = [Value::Array(Arc::new(vec![
+        let args = [Value::array(vec![
             Value::UInt { value: 0, width: 8 },
             Value::UInt { value: 255, width: 8 },
-        ]))];
+        ])];
         assert_eq!(extract_bytes(&args, 0).unwrap(), vec![0, 255]);
     }
 
     #[test]
     fn extract_bytes_preserves_untyped_integer_compatibility() {
-        let args = [Value::Array(Arc::new(vec![Value::Int(1), Value::Int(258)]))];
+        let args = [Value::array(vec![Value::Int(1), Value::Int(258)])];
         assert_eq!(extract_bytes(&args, 0).unwrap(), vec![1, 2]);
     }
 
     #[test]
     fn extract_bytes_rejects_non_byte_unsigned_elements() {
-        let args = [Value::Array(Arc::new(vec![Value::UInt { value: 1, width: 16 }]))];
+        let args = [Value::array(vec![Value::UInt { value: 1, width: 16 }])];
         let err = extract_bytes(&args, 0).unwrap_err().to_string();
         assert!(err.contains("byte array element must be integer, got u16"));
     }
