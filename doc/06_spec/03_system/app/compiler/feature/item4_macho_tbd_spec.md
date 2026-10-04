@@ -23,6 +23,10 @@ identical duplicate JSON keys, so the required JSON duplicate rejection is an
 intentional stricter policy, not an LLVM agreement claim. V4 deployment is None;
 V5 omitted deployment means Some(0), while explicit arm64 deployment remains11.
 No SDK version or VM address is inferred from absence.
+The real provider's `not_app_extension_safe` flag remains in reader metadata;
+the emitted Mach-O header must leave MH_APP_EXTENSION_SAFE unset. Accepting
+this metadata does not claim extension safety. Other unsupported flags retain
+their explicit lowering refusal.
 
 After independent runtime admission:
 `<runtime> test test/03_system/app/compiler/feature/item4_macho_tbd_spec.spl`
