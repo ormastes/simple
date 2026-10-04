@@ -9,6 +9,7 @@ and independent ELF inspection succeeded; they do not establish Simple RED or GR
 
 | Scenario | Observable contract |
 |---|---|
+| Scanner unit prerequisite | Same key gets separate address/IE slots; repeated IE reuses its slot |
 | Direct objects | Decode actual AUIPC/LD targets; inspect distinct TP-offset GOT slots and repeated-slot reuse |
 | Archive provider | Real archive extraction produces the same initialized/zero TLS contract |
 | Mixed ordinary/TLS GOT | Ordinary slot holds a virtual address; IE slots hold TP offsets |
@@ -18,9 +19,12 @@ and independent ELF inspection succeeded; they do not establish Simple RED or GR
 | Non-TLS winning definition | TLS reference cannot disguise an ordinary definition |
 | Missing paired high | Named orphan-low rejection |
 
-These eight scenarios include RISC-V ELF64 executable machine/type, output STT_TLS
+Eight full-link scenarios plus one scanner unit prerequisite include RISC-V ELF64 executable machine/type, output STT_TLS
 offsets, PT_TLS alignment and extents, and exact initialized values 42/99.
 Mutation helpers validate their fixture assumptions before modifying wire bytes.
+The same-key scanner case is deliberately synthetic resolved input; it does not
+claim ordinary GOT references to TLS symbols are ABI-admitted. The mixed binary
+fixture uses an ordinary non-TLS symbol.
 
 Once an admitted runtime exists, run from repository root:
 

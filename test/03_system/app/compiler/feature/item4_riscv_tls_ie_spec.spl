@@ -10,6 +10,14 @@ use std.io_runtime.{file_read_bytes}
 use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
 use compiler.backend.linker.elf_parser.{elf_parse_object, elf_section_name, elf_reloc_type}
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf.reloc_scan.{ElfScanRef, elf_reloc_scan,
+    ELF_LINK_STATIC_EXEC, SYMREF_DEFINED, RC_TLS_IE, RC_GOT}
+
+fn item4_riscv_ie_scan_ref(kind: i64) -> ElfScanRef:
+    ElfScanRef(oi: 0, sym_idx: 1, out_sec: 0, out_off: 0, writable: false,
+        rtype: if kind == RC_TLS_IE: 21 else: 20, rclass: kind,
+        kind: SYMREF_DEFINED, key: "same-symbol", name: "same-symbol",
+        stype: 6, size: 8, alignment: 8, weak: false, addend: 0, relax: false)
 
 fn item4_riscv_ie_fixture(name: text) -> [i64]:
     val raw = file_read_bytes("test/fixtures/linker/riscv64/" + name)
@@ -142,6 +150,22 @@ fn item4_riscv_ie_relocation(bytes: [i64], kind: i64) -> i64:
     -1
 
 describe "RV64 static initial-exec TLS full-link acceptance":
+    it "allocates separate scanner domains for the same key and reuses repeated IE":
+        step("Exercise the real scanner allocation prerequisite with explicit resolved references")
+        # This is a scanner unit contract, not an ABI-admitted object fixture.
+        val scanned = elf_reloc_scan([item4_riscv_ie_scan_ref(RC_TLS_IE),
+            item4_riscv_ie_scan_ref(RC_GOT), item4_riscv_ie_scan_ref(RC_TLS_IE)],
+            RelocArch.Riscv64, ELF_LINK_STATIC_EXEC)
+        expect(scanned.is_ok()).to_equal(true)
+        if scanned.is_err(): return
+        val result = scanned.unwrap()
+        expect(result.got_keys.len()).to_equal(2)
+        expect(result.got_ref.len()).to_equal(2)
+        if result.got_keys.len() != 2 or result.got_ref.len() != 2: return
+        expect(result.got_keys[0] == result.got_keys[1]).to_equal(false)
+        expect(result.got_ref[0]).to_equal(0)
+        expect(result.got_ref[1]).to_equal(1)
+
     it "links aligned initialized and zero TLS through dedicated TP-offset GOT entries":
         step("Load real clang RV64 TLS IE references and definitions")
         val linked = elf_static_link([item4_riscv_ie_fixture("tls_initial_exec.o"),
