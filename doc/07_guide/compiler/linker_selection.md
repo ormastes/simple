@@ -17,6 +17,23 @@ executable name searched on PATH. Unsupported targets/configuration produce a
 named error rather than silently selecting another engine. Target-specific
 SimpleOS linking retains its separate explicit-target behavior.
 
+The macOS internal adapter requires explicit `-platform_version macos MIN SDK`
+and `--macho-signing-identifier IDENTIFIER` flags in native link configuration.
+It accepts `-e ENTRY`, repeated `-rpath PATH`, and
+`--macho-max-image-bytes BYTES`; the last is an image-size cap, not a process
+memory guarantee. Minimum macOS version is 11.0. Unsupported flags and policies
+fail explicitly. The current Mach-O builder requires PIE and strict duplicate
+definitions, so native configuration must set `allow_duplicate_definitions`
+to false; its general default is true. Debug, stripping, size preference and
+retained-symbol policies remain unsupported in this adapter.
+
+Supply actual matching Mach-O objects, archives and thin dylib providers through
+explicit library paths. SDK `.tbd` files and dyld shared-cache providers are not
+yet supported, and an SDK version flag does not discover or admit an SDK.
+Managed native builds still require their admitted external hosted linker.
+This source-level adapter availability does not establish native Darwin execution
+or complete macOS support. See the five-host completion matrix for open gates.
+
 Availability is not full qualification. The retained streaming engine and its
 logical quotas do not currently satisfy whole-job hard-memory/no-swap admission.
 Requests requiring that enforcement continue to return `UnsupportedBudget`.
