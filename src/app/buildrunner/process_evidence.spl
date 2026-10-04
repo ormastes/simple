@@ -1,0 +1,60 @@
+# A worker-authored observation projection, consumed only alongside the original
+# BuildResult and exact compiler.reaped proof. This is not admission by itself.
+use std.common.process.observation_v4.{ProcessObservationReceiptV4, ProcessObservationRequestV4,
+    canonical_encode_process_observation_request_v4,
+    freeze_process_observation_receipt_v4, ProcessObservationFailureReasonV4}
+use std.common.task_runner.contracts.{task_runner_process_outcome_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_u8_hex, sha256_text}
+
+struct BuildRunnerProcessEvidenceV1:
+    task_identity: text
+    pid: i64
+    process_started_ns: i64
+    native_identity_digest: text
+    exit_code: i64
+    signal_number: i64
+    outcome: text
+    stdout_digest: text
+    stderr_digest: text
+    transport_execution_digest: text
+
+fn build_runner_process_evidence_encode_v1(value: BuildRunnerProcessEvidenceV1) -> Result<text, text>:
+    for digest in [value.task_identity, value.native_identity_digest, value.stdout_digest, value.stderr_digest, value.transport_execution_digest]:
+        if not builder_digest_valid_v1(digest): return Err("invalid process evidence digest")
+    if value.pid < 1 or value.process_started_ns < 1 or value.signal_number < 0 or value.signal_number > 64:
+        return Err("invalid process evidence identity")
+    val observed = task_runner_process_outcome_v1(value.exit_code, value.signal_number,
+        value.outcome == "timed-out", value.outcome == "cancelled", true)?
+    if observed != value.outcome: return Err("process evidence outcome differs")
+    Ok("SIMPLE-BUILD-PROCESS-EVIDENCE-1\n" + value.task_identity + "\n" + str(value.pid) + "\n" +
+        str(value.process_started_ns) + "\n" + value.native_identity_digest + "\n" +
+        str(value.exit_code) + "\n" + str(value.signal_number) + "\n" + value.outcome + "\n" +
+        value.stdout_digest + "\n" + value.stderr_digest + "\n" + value.transport_execution_digest + "\n")
+
+fn build_runner_process_evidence_freeze_v1(identity: text,
+        receipt: ProcessObservationReceiptV4, request: ProcessObservationRequestV4, cancelled: bool) -> Result<text, text>:
+    val frozen = freeze_process_observation_receipt_v4(receipt)?
+    if not frozen.packet.tree_empty: return Err("process evidence requires complete tree closure")
+    val packet = frozen.packet
+    val native_identity = sha256_text(str(packet.ticket_high) + ":" + str(packet.ticket_low) + ":" +
+        str(packet.request_id_high) + ":" + str(packet.request_id_low) + ":" + sha256_u8_hex(frozen.binding_digest))
+    val outcome = task_runner_process_outcome_v1(packet.exit_code, packet.signal_number,
+        packet.failure_reason == ProcessObservationFailureReasonV4.ExecutionDeadline, cancelled, true)?
+    build_runner_process_evidence_encode_v1(BuildRunnerProcessEvidenceV1(identity, packet.pid,
+        packet.process_started_ns, native_identity, packet.exit_code, packet.signal_number, outcome,
+        sha256_u8_hex(frozen.stdout), sha256_u8_hex(frozen.stderr),
+        sha256_u8_hex(canonical_encode_process_observation_request_v4(request)?)))
+
+fn build_runner_process_evidence_decode_v1(payload: text) -> Result<BuildRunnerProcessEvidenceV1, text>:
+    if payload.len() > 2048: return Err("process evidence exceeds bound")
+    val rows = payload.split("\n")
+    if rows.len() != 12 or rows[0] != "SIMPLE-BUILD-PROCESS-EVIDENCE-1" or rows[11] != "":
+        return Err("invalid process evidence framing")
+    val value = BuildRunnerProcessEvidenceV1(rows[1], rows[2].to_int(), rows[3].to_int(), rows[4],
+        rows[5].to_int(), rows[6].to_int(), rows[7], rows[8], rows[9], rows[10])
+    if build_runner_process_evidence_encode_v1(value)? != payload: return Err("noncanonical process evidence")
+    Ok(value)
+
+export BuildRunnerProcessEvidenceV1, build_runner_process_evidence_encode_v1
+export build_runner_process_evidence_freeze_v1, build_runner_process_evidence_decode_v1

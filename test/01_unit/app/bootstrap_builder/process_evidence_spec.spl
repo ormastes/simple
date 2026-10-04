@@ -1,0 +1,37 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use app.buildrunner.process_evidence.{BuildRunnerProcessEvidenceV1,
+    build_runner_process_evidence_encode_v1, build_runner_process_evidence_decode_v1}
+
+fn process_evidence_fixture() -> BuildRunnerProcessEvidenceV1:
+    val digest = sha256_text("test digest")
+    BuildRunnerProcessEvidenceV1(digest, 123, 987654321, digest, 139, 11,
+        "crashed", digest, digest, digest)
+
+# Codec decisions only; these authored rows do not prove any real process ran.
+describe "BuildRunner frozen process evidence framing":
+    it "preserves compiler process identity and transport digest":
+        val evidence = process_evidence_fixture()
+        val payload = build_runner_process_evidence_encode_v1(evidence).unwrap()
+        val decoded = build_runner_process_evidence_decode_v1(payload).unwrap()
+        expect(decoded.pid).to_equal(123)
+        expect(decoded.process_started_ns).to_equal(987654321)
+        expect(decoded.signal_number).to_equal(11)
+        expect(decoded.transport_execution_digest).to_equal(evidence.transport_execution_digest)
+
+    it "rejects crash labels without crash evidence and noncanonical numbers":
+        var evidence = process_evidence_fixture()
+        evidence.signal_number = 0
+        evidence.exit_code = 2
+        expect(build_runner_process_evidence_encode_v1(evidence).is_err()).to_equal(true)
+        val payload = build_runner_process_evidence_encode_v1(process_evidence_fixture()).unwrap()
+        expect(build_runner_process_evidence_decode_v1(payload.replace("\n123\n", "\n0123\n")).is_err()).to_equal(true)
+        expect(build_runner_process_evidence_decode_v1(payload + "extra").is_err()).to_equal(true)
+
+    it "requires real identity fields and complete launch digests":
+        var evidence = process_evidence_fixture()
+        evidence.process_started_ns = 0
+        expect(build_runner_process_evidence_encode_v1(evidence).is_err()).to_equal(true)
+        evidence = process_evidence_fixture()
+        evidence.transport_execution_digest = ""
+        expect(build_runner_process_evidence_encode_v1(evidence).is_err()).to_equal(true)
