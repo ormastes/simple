@@ -281,6 +281,22 @@ fn index_int_unboxing() {
     assert!(has_inst(&mir, |i| matches!(i, MirInst::UnboxInt { .. })));
 }
 
+/// `fn f(v: any) -> bool: v` must decode the tagged value: a boxed FALSE is a
+/// non-zero word and read as true under the JIT when returned raw
+/// (llm_caret claude_cli `_json_bool` printed `ERROR: <reply>`).
+#[test]
+fn any_to_bool_return_and_local_unboxing() {
+    let is_truthy_call =
+        |i: &MirInst| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_truthy"));
+    let ret = compile_to_mir("fn test(v: any) -> bool:\n    v\n").unwrap();
+    assert!(has_inst(&ret, is_truthy_call));
+    let local = compile_to_mir("fn test(v: any) -> bool:\n    val b: bool = v\n    b\n").unwrap();
+    assert!(has_inst(&local, is_truthy_call));
+    // The exact `_json_bool` shape: tagged else-branch into a bool if-merge slot.
+    let merged = compile_to_mir("fn test(v: any?) -> bool:\n    if v == nil: false else: v\n").unwrap();
+    assert!(has_inst(&merged, is_truthy_call));
+}
+
 #[test]
 fn index_float_unboxing() {
     let mir = compile_to_mir("fn test() -> f64:\n    val arr = [1.5, 2.5]\n    return arr[0]\n").unwrap();
