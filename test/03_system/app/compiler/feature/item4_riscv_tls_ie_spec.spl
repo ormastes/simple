@@ -83,6 +83,7 @@ fn item4_riscv_ie_slot(image: [i64], site: text, low_delta: i64) -> i64:
     got[0] + slot - got[2]
 
 fn item4_riscv_ie_check(image: [i64]):
+    expect(item4_riscv_ie_read(image, 4, 1)).to_equal(2)
     expect(item4_riscv_ie_read(image, 16, 2)).to_equal(2)
     expect(item4_riscv_ie_read(image, 18, 2)).to_equal(243)
     step("Decode AUIPC and nonadjacent LD immediates to their actual GOT slots")
@@ -157,6 +158,23 @@ describe "RV64 static initial-exec TLS full-link acceptance":
         if linked.is_err(): return
         item4_riscv_ie_check(linked.unwrap())
 
+    it "keeps ordinary virtual-address GOT slots separate from TLS TP-offset slots":
+        step("Link a real ordinary GOT reference alongside the four TLS IE pairs")
+        val linked = elf_static_link([item4_riscv_ie_fixture("tls_initial_exec_mixed.o"),
+            item4_riscv_ie_fixture("tls_initial_exec_provider.o")], [], "_start", RelocArch.Riscv64)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        val image = linked.unwrap()
+        item4_riscv_ie_check(image)
+        val ordinary = item4_riscv_ie_slot(image, "ie_ordinary", 4)
+        val tls = item4_riscv_ie_slot(image, "ie_value", 8)
+        if ordinary < 0 or tls < 0: return
+        expect(ordinary == tls).to_equal(false)
+        expect(item4_riscv_ie_read(image, ordinary, 8)).to_equal(item4_riscv_ie_symbol(image, "ie_plain")[0])
+        val data = item4_riscv_ie_section(image, ".data")
+        if data[0] < 0: return
+        expect(item4_riscv_ie_read(image, data[0], 8)).to_equal(77)
+
     it "uses the winning TLS definition when an undefined reference has no type":
         step("Change the undefined reference to STT_NOTYPE and resolve the real TLS archive")
         val original = item4_riscv_ie_fixture("tls_initial_exec.o")
@@ -170,6 +188,45 @@ describe "RV64 static initial-exec TLS full-link acceptance":
         expect(linked.is_ok()).to_equal(true)
         if linked.is_err(): return
         item4_riscv_ie_check(linked.unwrap())
+
+    it "includes a nonzero PT_TLS alignment residue in IE TP offsets":
+        step("Link two text sizes with initialized TLS alignment eight and zero TLS alignment sixty-four")
+        var saw_residue = false
+        for fixture in ["tls_initial_exec.o", "tls_initial_exec_padded.o"]:
+            val linked = elf_static_link([item4_riscv_ie_fixture(fixture),
+                item4_riscv_ie_fixture("tls_initial_exec_residue_provider.o")], [], "_start", RelocArch.Riscv64)
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_err(): return
+            val image = linked.unwrap()
+            val tdata = item4_riscv_ie_section(image, ".tdata")
+            val tbss = item4_riscv_ie_section(image, ".tbss")
+            if tdata[0] < 0 or tbss[0] < 0: return
+            val residue = tdata[2] % 64
+            if residue != 0: saw_residue = true
+            expect(tbss[2] % 64).to_equal(0)
+            val sites = ["ie_value", "ie_second", "ie_zero", "ie_repeat"]
+            val offsets = [4096, 4128, tbss[2] - tdata[2], 4096]
+            for index in 0..sites.len():
+                val slot = item4_riscv_ie_slot(image, sites[index], if index == 0: 8 else: 4)
+                if slot < 0: return
+                expect(item4_riscv_ie_read(image, slot, 8)).to_equal(offsets[index] + residue)
+            val phoff = item4_riscv_ie_read(image, 32, 8)
+            val count = item4_riscv_ie_read(image, 56, 2)
+            val valid = phoff >= 64 and phoff <= image.len() and count > 0 and count < 64 and count * 56 <= image.len() - phoff
+            expect(valid).to_equal(true)
+            if not valid: return
+            var tls_count = 0
+            for index in 0..count:
+                val at = phoff + index * 56
+                if item4_riscv_ie_read(image, at, 4) == 7:
+                    tls_count = tls_count + 1
+                    expect(item4_riscv_ie_read(image, at + 16, 8)).to_equal(tdata[2])
+                    expect(item4_riscv_ie_read(image, at + 8, 8) % 64).to_equal(residue)
+                    expect(item4_riscv_ie_read(image, at + 48, 8)).to_equal(64)
+                    expect(item4_riscv_ie_read(image, at + 32, 8)).to_equal(4136)
+                    expect(item4_riscv_ie_read(image, at + 40, 8)).to_equal(offsets[2] + 8)
+            expect(tls_count).to_equal(1)
+        expect(saw_residue).to_equal(true)
 
     it "rejects nonzero high and paired-low addends before producing image bytes":
         for kind in [21, 24]:
