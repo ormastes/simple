@@ -6,6 +6,15 @@ use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.macho.provider_types.{MachOProviderV1, MachOProviderExportV1, MachOProviderDependencyV1, macho_validate_provider_v1}
 use compiler.backend.linker.macho.binary_provider.{macho_read_binary_provider_v1}
 use compiler.backend.linker.macho.hosted_link.{MachOHostedRequest, macho_hosted_link, macho_hosted_link_with_providers}
+use compiler.backend.linker.macho_parser.{macho_parse_object}
+
+fn item4_macho_provider_set(bytes: [u8], at: i64, width: i64, value: i64) -> [u8]:
+    val valid = width >= 1 and width <= 8 and at >= 0 and at <= bytes.len() and width <= bytes.len() - at
+    expect(valid).to_equal(true)
+    if not valid: return []
+    var changed = bytes
+    for index in 0..width: changed[at + index] = ((value >> (index * 8)) & 255) as u8
+    changed
 
 fn item4_macho_provider_request(arm: bool) -> MachOHostedRequest:
     MachOHostedRequest(target: if arm: RelocArch.AArch64 else: RelocArch.X86_64,
@@ -43,6 +52,136 @@ fn item4_macho_provider_command(bytes: [u8], kind: i64) -> i64:
     -1
 
 describe "typed Mach-O provider boundary":
+    it "ITEM4-REQ-006 retains binary address validation and literal zero SDK during projection":
+        step("Read a real binary provider through its validating reader")
+        val original = file_read_bytes("test/fixtures/linker/macho/provider_x64.dylib")
+        val parsed = macho_parse_object(original)
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_err(): return
+        val info = item4_macho_provider_command(original, 0x80000022)
+        val symtab = item4_macho_provider_command(original, 2)
+        val version = item4_macho_provider_command(original, 0x32)
+        if info < 0 or symtab < 0 or version < 0: return
+        val zero_sdk = item4_macho_provider_set(original, version + 16, 4, 0)
+        val zero = macho_read_binary_provider_v1(zero_sdk, RelocArch.X86_64)
+        expect(zero.is_ok()).to_equal(true)
+        if zero.is_ok(): expect(zero.unwrap().sdk).to_equal(Some(0))
+        var chosen: i64 = -1
+        for index in 0..parsed.unwrap().symbols.len():
+            if parsed.unwrap().symbols[index].name == "_helper": chosen = index
+        expect(chosen >= 0).to_equal(true)
+        if chosen < 0: return
+        val table = item4_macho_provider_read(original, symtab + 8)
+        val count = item4_macho_provider_read(original, symtab + 12)
+        expect(chosen < count).to_equal(true)
+        if chosen >= count: return
+        var changed = item4_macho_provider_set(original, info + 40, 4, 0)
+        changed = item4_macho_provider_set(changed, info + 44, 4, 0)
+        # Confirm the genuine fallback symbol table is accepted before corrupting an address.
+        expect(macho_read_binary_provider_v1(changed, RelocArch.X86_64).is_ok()).to_equal(true)
+        changed = item4_macho_provider_set(changed, table + chosen * 16 + 8, 8, 0x700000000000)
+        step("Reject invalid metadata before publication")
+        val rejected = macho_read_binary_provider_v1(changed, RelocArch.X86_64)
+        expect(rejected.is_err()).to_equal(true)
+        if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("symbol")
+
+    it "ITEM4-REQ-006 rejects inconsistent typed metadata without assigning fabricated binary addresses":
+        step("Read a real binary provider through its validating reader")
+        val parsed = macho_read_binary_provider_v1(file_read_bytes("test/fixtures/linker/macho/provider_x64.dylib"), RelocArch.X86_64)
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_err(): return
+        for kind in 0..13:
+            var provider = parsed.unwrap()
+            expect(provider.exports.len()).to_equal(2)
+            if provider.exports.len() != 2: return
+            if kind == 0: provider.target = RelocArch.AArch64
+            if kind == 1: provider.platform = 2
+            if kind == 2: provider.install_name = ""
+            if kind == 3: provider.install_name = "bad\0name"
+            if kind == 4: provider.current_version = -1
+            if kind == 5: provider.compatibility_version = 0x100000000
+            if kind == 6: provider.minimum_os = Some(-1)
+            if kind == 7: provider.sdk = Some(-1)
+            if kind == 8: provider.exports = provider.exports + [provider.exports[0]]
+            if kind == 9:
+                var symbol = provider.exports[0]
+                symbol.flags = 3
+                provider.exports[0] = symbol
+            if kind == 10:
+                var symbol = provider.exports[0]
+                symbol.flags = 8
+                symbol.library_ordinal = 1
+                symbol.import_name = symbol.name
+                provider.exports[0] = symbol
+            if kind == 11: provider.allowable_clients = ["bad\0client"]
+            if kind == 12: provider.parent_umbrella = Some("")
+            step("Reject invalid metadata before publication")
+            val rejected = macho_validate_provider_v1(provider, RelocArch.X86_64)
+            expect(rejected.is_err()).to_equal(true)
+            if rejected.is_err(): expect(rejected.unwrap_err().len() > 0).to_equal(true)
+
+    it "ITEM4-REQ-006 keeps weak absolute and reexport imports explicit and rejects unbound client restrictions":
+        step("Read a real binary provider through its validating reader")
+        val parsed = macho_read_binary_provider_v1(file_read_bytes("test/fixtures/linker/macho/provider_x64.dylib"), RelocArch.X86_64)
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_err(): return
+        val object = file_read_bytes("test/fixtures/linker/macho/hosted_start_x64.o")
+        expect(object.len() > 32).to_equal(true)
+        if object.len() <= 32: return
+        for kind in 0..5:
+            var provider = parsed.unwrap()
+            if kind < 3:
+                expect(provider.exports.len() > 0).to_equal(true)
+                if provider.exports.len() == 0: return
+                var symbol = provider.exports[0]
+                symbol.flags = if kind == 0: 4 elif kind == 1: 2 else: 8
+                if kind == 2:
+                    provider.dependencies = [MachOProviderDependencyV1(install_name: "/usr/lib/libreal.dylib", command: 0x8000001f, current_version: 0x10000, compatibility_version: 0x10000)]
+                    symbol.library_ordinal = 1
+                    symbol.import_name = symbol.name
+                provider.exports[0] = symbol
+            if kind == 3: provider.allowable_clients = ["authorized-client"]
+            if kind == 4: provider.parent_umbrella = Some("FrameworkOwner")
+            expect(macho_validate_provider_v1(provider, RelocArch.X86_64).is_ok()).to_equal(true)
+            step("Preserve unsupported provider semantics")
+            val rejected = macho_hosted_link_with_providers([object], [], [provider], item4_macho_provider_request(false))
+            expect(rejected.is_err()).to_equal(true)
+            if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("unsupported")
+
+    it "ITEM4-REQ-006 carries actual TLV exports through the typed path on both architectures":
+        for arm in [false, true]:
+            step("Read a real binary provider through its validating reader")
+            val suffix = if arm: "a64" else: "x64"
+            val raw = file_read_bytes("test/fixtures/linker/macho/hosted_tls_{suffix}.dylib")
+            val object = file_read_bytes("test/fixtures/linker/macho/hosted_tlv_{suffix}.o")
+            expect(raw.len() > 32 and object.len() > 32).to_equal(true)
+            if raw.len() <= 32 or object.len() <= 32: return
+            val request = item4_macho_provider_request(arm)
+            val parsed = macho_read_binary_provider_v1(raw, request.target)
+            expect(parsed.is_ok()).to_equal(true)
+            if parsed.is_err(): return
+            var found = false
+            for symbol in parsed.unwrap().exports:
+                if symbol.name == "_tls":
+                    expect(symbol.flags & 3).to_equal(1)
+                    found = true
+            expect(found).to_equal(true)
+            if not found: return
+            step("Link through the shared typed provider path")
+            val typed = macho_hosted_link_with_providers([object], [], [parsed.unwrap()], request)
+            val legacy = macho_hosted_link([object], [], [raw], request)
+            expect(typed.is_ok() and legacy.is_ok()).to_equal(true)
+            if typed.is_err() or legacy.is_err(): return
+            val image = typed.unwrap()
+            expect(image).to_equal(legacy.unwrap())
+            step("Inspect provider metadata and emitted bindings")
+            if arm:
+                expect(item4_macho_provider_read(image, 0x4004)).to_equal(0x90000040)
+                expect(item4_macho_provider_read(image, 0x4008)).to_equal(0xf9400000)
+            else:
+                expect(item4_macho_provider_read(image, 0x4004)).to_equal(0x7ff8)
+            expect(item4_macho_provider_read(image, 0xc000, 8)).to_equal(0)
+
     it "ITEM4-REQ-006 preserves real binary providers through the typed image path on both architectures":
         for arm in [false, true]:
             step("Read a real binary provider through its validating reader")
