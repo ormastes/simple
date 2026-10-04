@@ -138,3 +138,24 @@ test helpers use `item4_macho_legacy_`. Guard actual mutation targets before acc
 External fixture inspection, source review, authored tests and executed Simple
 acceptance are separate evidence. Native host/compiler corpus, manuals generated
 from execution, coverage and representative latency/RSS remain open.
+
+## Exact candidate source review
+
+Independent review found no concrete P0/P1 in four-file core `89da96988ee`,
+hosted API guard `c6dcb1f96bb` with classic-leaf refinement `f77ad587503`, and
+acceptance/manual `15c94d7c645` including `1313c86ed7e`. The guard requires a
+closure for unsuppressed selector metadata or inferred visibility with at least
+one ordinary/weak dependency; provenance alone does not refuse a classic leaf.
+
+Eight authored scenarios cover real both-CPU selectors, hidden/suppressed
+dependencies, classic physical-parent inference and modern controls, command
+string mutations, exact dot/underscore stems with shorter/longer mismatches,
+dormant no-closure compatibility, and inactive high-deployment children.
+The last case uses a root's real symbol-table exports and a validated macOS99
+child whose nonmatching umbrella must not activate deployment checks.
+
+This wave does not assert all multi-match, weak/lazy/upward, missing-unmatched
+dependency, quota and alias-interaction boundaries in the broader matrix above.
+Those remain acceptance obligations. The fixture recipe records original LLVM
+construction and subsequent bounded mutations; signatures were not regenerated.
+All Simple/native execution remains UNRUN and no SDK/host row is complete.
