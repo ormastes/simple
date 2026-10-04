@@ -268,14 +268,15 @@ git_sha=$(bootstrap_planner_v2_hash_file "$adm_dir/git-state.txt")
 # one-file planner never calls. The closure is exactly what the closure snapshot
 # already records, so narrowing the compile set does not narrow the receipt.
 #
-# The build runs with cwd = "$stage" (a fresh mktemp dir) so the parent resolves
-# its relative `build/simple-core/libsimple_runtime.a` inside the staging dir and
-# builds that archive from the runtime tree that was just snapshotted. The
-# repo-root archive is a shared artifact that a concurrent lane can leave stale
-# at any moment; admission must not depend on, or mutate, it.
+# Source inventory admission owns paths relative to the real checkout. A fresh
+# temporary cwd makes every absolute source selector appear outside that owner.
+# Keep cwd at the measured checkout, with an explicit admitted runtime provider
+# and a private planner cache so ambient repo-root archives are never selected.
 build_planner_out=$(bootstrap_planner_v2_planner_path "$adm_dir" "$parent_file") || adm_fail planner-path-invalid
-if ! ( cd "$stage" && SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime" "$parent_file" \
+if ! ( cd "$adm_root" && SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$admission_root/stage2-runtime-authority" "$parent_file" \
         native-build --source "$adm_root/src/app/cli" --source "$adm_root/src/lib" \
+        --runtime-path "$admission_root/stage2-runtime-authority" --runtime-bundle core-c-bootstrap \
+        --cache-dir "$adm_dir/planner-cache" \
         --entry-closure --entry "$planner_source" -o "$build_planner_out" ) >"$adm_dir/planner-build.log" 2>&1; then
     adm_fail planner-build-failed
 fi
