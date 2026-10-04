@@ -1,0 +1,72 @@
+#!/bin/sh
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-native-continuation-test.XXXXXX")
+mkdir -p "$tmp/scripts" "$tmp/source" "$tmp/artifacts"
+cp "$script_root/continue-provisional-native-tests.shs" "$tmp/scripts/"
+sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+printf '{"state":"terminal","exit_code":3,"threads_each":40,"admitted":false,"producer_sha256":"%s"}\n' "$sha" >"$tmp/terminal.json"
+printf 'producer_sha256=%s\nruntime_snapshot_sha256=%s\n' "$sha" "$sha" >"$tmp/receipt"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) suffix=.exe ;; *) suffix= ;; esac
+for backend in llvm cranelift; do
+  for product in full-cli test-runner; do
+    mkdir -p "$tmp/artifacts/phase4/binaries/$backend/$product/bin"
+    case "$product" in full-cli) name=simple ;; *) name=simple_test_runner ;; esac
+    printf 'original product\n' >"$tmp/artifacts/phase4/binaries/$backend/$product/bin/$name$suffix"
+    product_sha=$(sha256sum "$tmp/artifacts/phase4/binaries/$backend/$product/bin/$name$suffix" | cut -d ' ' -f 1)
+    printf 'phase4_%s_%s_status=SUCCEEDED\nphase4_%s_%s=%s\n' "$backend" "$product" "$backend" "$product" "$product_sha" >>"$tmp/receipt"
+  done
+done
+# Test fixture authority checks real product digests; it does not claim a real
+# compiled manager verification or native suite execution.
+cat >"$tmp/scripts/verify-provisional-run.shs" <<'VERIFY'
+#!/bin/sh
+set -eu
+for arg in "$@"; do case "$arg" in --root=*) root=${arg#*=} ;; --receipt=*) receipt=${arg#*=} ;; esac; done
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) suffix=.exe ;; *) suffix= ;; esac
+for backend in llvm cranelift; do
+  for product in full-cli test-runner; do
+    case "$product" in full-cli) name=simple ;; *) name=simple_test_runner ;; esac
+    expected=$(sed -n "s/^phase4_${backend}_${product}=//p" "$receipt")
+    actual=$(sha256sum "$root/phase4/binaries/$backend/$product/bin/$name$suffix" | cut -d ' ' -f 1)
+    [ "$expected" = "$actual" ] || exit 1
+  done
+done
+VERIFY
+cat >"$tmp/scripts/run-provisional-native-subsystem.shs" <<'SUITE'
+#!/bin/sh
+set -eu
+[ "$8" = 40 ] || exit 99
+if [ "$6" = compiler ]; then
+  reports=$(dirname -- "$(dirname -- "$7")")
+  touch "$reports/$2.started"
+  case "$2" in llvm) peer=cranelift ;; *) peer=llvm ;; esac
+  attempts=0
+  until [ -f "$reports/$peer.started" ]; do
+    attempts=$((attempts+1)); [ "$attempts" -lt 10 ] || exit 98; sleep 1
+  done
+fi
+printf 'attempted fixture suite\n' >"$7/attempted"
+case "$2:$6" in llvm:compiler) exit 7 ;; cranelift:interpreter) exit 20 ;; esac
+SUITE
+result=0
+sh "$tmp/scripts/continue-provisional-native-tests.shs" "$tmp/missing.json" "$tmp/missing-report" \
+  --root="$tmp/artifacts" --receipt="$tmp/receipt" --source-root="$tmp/source" >/dev/null 2>&1 || result=$?
+[ "$result" -eq 20 ] && [ ! -e "$tmp/missing-report" ] || exit 1
+result=0
+sh "$tmp/scripts/continue-provisional-native-tests.shs" "$tmp/terminal.json" "$tmp/report" \
+  --root="$tmp/artifacts" --receipt="$tmp/receipt" --source-root="$tmp/source" >"$tmp/run.log" 2>&1 || result=$?
+[ "$result" -eq 1 ] || { cat "$tmp/run.log"; exit 1; }
+expected=$(printf 'llvm\nllvm\nllvm\ncranelift\ncranelift\ncranelift')
+[ "$(tail -n +2 "$tmp/report/statuses.tsv" | cut -f 1)" = "$expected" ] || exit 1
+grep -q 'llvm.*compiler.*FAILED.*7' "$tmp/report/statuses.tsv"
+grep -q 'cranelift.*interpreter.*BLOCKED.*20' "$tmp/report/statuses.tsv"
+for backend in llvm cranelift; do
+  for subsystem in compiler interpreter loader; do test -f "$tmp/report/$backend/$subsystem/attempted"; done
+done
+printf 'tamper\n' >>"$tmp/artifacts/phase4/binaries/llvm/full-cli/bin/simple$suffix"
+result=0
+sh "$tmp/scripts/continue-provisional-native-tests.shs" "$tmp/terminal.json" "$tmp/tampered-report" \
+  --root="$tmp/artifacts" --receipt="$tmp/receipt" --source-root="$tmp/source" >/dev/null 2>&1 || result=$?
+[ "$result" -eq 20 ] && [ ! -e "$tmp/tampered-report" ] || exit 1
+echo 'PASS: missing terminal and tampered products blocked; two40-worker lanes collect all six outcomes deterministically'

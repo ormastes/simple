@@ -300,18 +300,9 @@ pub unsafe extern "C" fn rt_file_read_text(path_ptr: *const u8, path_len: u64) -
                 return RuntimeValue::NIL;
             }
             let len = raw.len() as u64;
-            if raw.contains(&b'\r') {
-                let normalized: Vec<u8> = raw.iter().copied().filter(|byte| *byte != b'\r').collect();
-                let value = rt_string_new_with_len_hash(normalized.as_ptr(), normalized.len() as u64);
-                if let Ok(mut guard) = read_text_cache().lock() {
-                    *guard = Some(ReadTextCache {
-                        path: path_str.to_string(),
-                        stamp,
-                        value,
-                    });
-                }
-                return value;
-            }
+            // Source admission hashes the on-disk bytes. Preserve CRLF and
+            // standalone CR just like the C runtime and bounded reader;
+            // newline interpretation belongs to the consumer.
             let Some(ptr) = alloc_runtime_string(len) else {
                 return RuntimeValue::NIL;
             };
@@ -2510,6 +2501,27 @@ mod tests {
             let result = rt_file_read_text(path_ptr, path_len);
             let read_content = extract_string(result);
             assert_eq!(read_content, content);
+        }
+    }
+
+    #[test]
+    fn test_file_read_text_preserves_crlf_and_carriage_returns() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("exact-source.spl");
+        let content = "# UTF-8: λ\r\nfn main():\r\n    print \"hello\"\r\n# bare\rcarriage\n";
+        fs::write(&file_path, content.as_bytes()).unwrap();
+        let path = file_path.to_str().unwrap();
+        let (ptr, len) = str_to_ptr(path);
+        unsafe {
+            // Repeat to cover the cached transport as well as the first read.
+            for _ in 0..2 {
+                let result = rt_file_read_text(ptr, len);
+                assert!(!result.is_nil());
+                assert_eq!(rt_string_len(result) as usize, content.len());
+                assert_eq!(extract_string(result).as_bytes(), content.as_bytes());
+            }
+            let path_value = rt_string_new_with_len_hash(ptr, len);
+            assert_eq!(extract_string(rt_file_read_text_rv(path_value)), content);
         }
     }
 

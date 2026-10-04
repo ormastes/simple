@@ -1692,6 +1692,20 @@ pub extern "C" fn rt_cpuid(leaf: i32, subleaf: i32) -> RtCpuidResult {
     }
 }
 
+/// Simple's tuple ABI is one runtime handle, not the platform C aggregate ABI.
+#[no_mangle]
+pub extern "C" fn rt_cpuid_tuple(leaf: i32, subleaf: i32) -> RuntimeValue {
+    let regs = rt_cpuid(leaf, subleaf);
+    let tuple = rt_tuple_new(4);
+    if tuple.is_nil() {
+        return tuple;
+    }
+    for (index, value) in [regs.a, regs.b, regs.c, regs.d].into_iter().enumerate() {
+        rt_tuple_set(tuple, index as u64, RuntimeValue::from_int(value as i64));
+    }
+    tuple
+}
+
 /// 1 when this runtime was built for x86_64, else 0 (C twin: `rt_cpu_is_x86_64`).
 #[no_mangle]
 pub extern "C" fn rt_cpu_is_x86_64() -> i32 {
@@ -2479,6 +2493,19 @@ mod tests {
             assert_eq!((zero.a, zero.b, zero.c, zero.d), (0, 0, 0, 0));
             let also_zero = rt_cpuid(7, 1);
             assert_eq!((also_zero.a, also_zero.b, also_zero.c, also_zero.d), (0, 0, 0, 0));
+        }
+    }
+
+    #[test]
+    fn test_cpuid_tuple_preserves_registers() {
+        let expected = rt_cpuid(0, 0);
+        let tuple = rt_cpuid_tuple(0, 0);
+        assert!(!tuple.is_nil());
+        for (index, register) in [expected.a, expected.b, expected.c, expected.d]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(rt_tuple_get(tuple, index as u64).as_int(), register as i64);
         }
     }
 
