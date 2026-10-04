@@ -37,3 +37,14 @@ Common runner/build adapter owner: phase3_snapshot_fix. Test adapter owner: astr
 The recovery `group_id` names one stable retry window, including grouped and isolated attempts. Each physical child has its own PID/generation; it must not change the recovery window. A fresh invocation has a fresh window. Persistent history feeds only initial execution-mode selection; recovery rejects rows from another window. Previously admitted cached success must be revalidated and recorded for the current window before it counts.
 
 Logical case execution identity binds test semantics and case selection independent of batching. Every accepted attempt additionally requires `transport_execution_digest`, binding the full actual argv/environment/fixture/config, including grouped or isolated selection switches. The parent validates that selection against the expected logical case mapping; dropping selection switches from all evidence is forbidden.
+
+
+## Admission inventory migration
+
+`managed-tasks` and `managed-tasks-verify` use a canonical BuildRun manifest plus its SHA256 and a separately pinned resource policy. Task order must be topological; IDs and writable cache keys are unique. The existing capacity, worker transport, tree-reap and output validators remain authoritative. V2 reservation journals bind the task count and ordered full task identities. The old two-independent-phase manifest retains V1 journal bytes and its existing phase paths. V2 uses task IDs for paths so two backend tasks in the same phase cannot collide.
+
+A pending prerequisite yields DEPENDENCY_WAIT. An ordinary failed prerequisite blocks only its descendants, with durable DEPENDENCY_BLOCKED rows; unrelated tasks remain eligible. A REAPED marker alone cannot enable children: the original producer, source inputs, links, task result, output hashes and exact process-tree proof are revalidated. This stage ledger is distinct from release qualification.
+
+The initial bootstrap epoch is intended to contain both Phase2 hello checks, each backend's proper Phase3 build, its three subsystem test binaries (six across both backends), and early Phase4 diagnostic work. Actual produced Phase3 digests cannot be guessed in that epoch. Proper Phase4 requires a subsequent immutable expansion bound to the predecessor epoch, actual Phase3 artifact and hello evidence. Phase4 test work must bind its own produced artifacts rather than borrow Phase2 coverage. Expansion publication and default manifest generation are still pending implementation; the current N-task entrypoint alone does not complete bootstrap orchestration.
+
+Verification status: new native contract/DAG regressions are written but unrun. No process-overlap, crash-injection, full bootstrap or database recovery qualification is claimed by the extraction checkpoints.
