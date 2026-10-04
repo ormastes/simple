@@ -241,3 +241,23 @@ entrypoint directly, and the fallback spec omits that unavailable import/check.
 All other production guards and acceptance scenarios are carried forward.
 Runtime SSpec, generated-manual, coverage and core/MCP evidence remain unrun;
 this forward-port does not change any requirement's verification status.
+
+## Bounded COMMON implementation ownership (2026-10-04)
+
+Base and expected release target: `63d5f8b20208c92275cfb4c9a105a26b2b51b774`.
+Root integrates on `work/item4-stream-common-20261004` in
+`C:/dev/simple-item4-sha-owner-20261004`, owning shared plans, evidence and merge.
+Runtime owns stream_inputs/layout/emit in the separate
+`simple-item4-stream-common-core-20261004` worktree; acceptance owns the new
+`item4_stream_common_spec.spl`, its manual and real fixtures in
+`simple-item4-stream-common-tests-20261004`; research owns the design and
+provider-authority findings in `simple-item4-stream-common-docs-20261004`.
+All child worktrees are under `C:/dev/`, on matching `work/*` branches.
+
+Shared public link API and layout fields remain unchanged. New helpers use
+`elf_stream_common_*` for production and `item4_stream_common_*` in specs.
+Use real setup/checker assertions and fail immediately on missing prerequisites.
+Acceptance commits test intent before runtime implementation starts. Root and
+research review final source/test behavior. Lower-model sidecars: N/A; inherited
+models retained. No admitted runtime exists in this lane; authored tests remain
+UNRUN and cannot establish TDD RED/GREEN, coverage or Phase 4 PASS.
