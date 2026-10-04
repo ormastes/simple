@@ -566,3 +566,87 @@ describe "Bencode torrent-style metadata":
         # @req REQ-SSPEC-UNIT
         step("full metainfo dict round-trips with 2 top-level keys")
         expect(_torrent_metainfo()).to_equal(true)
+
+# ============================================================================
+# Churn-regression helpers (perf-fix content equivalence)
+# ============================================================================
+# The encoder/decoder were rewritten for churn (in-place insertion sort,
+# parts.join instead of per-item text concat, hoisted .bytes() in decode
+# loops). These cases pin the BYTE-IDENTICAL output of the old slow paths on
+# non-trivial inputs — they are the equivalence oracle for those rewrites.
+
+fn _churn_repeat(s: text, n: i64) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < n:
+        parts.push(s)
+        i = i + 1
+    parts.join("")
+
+fn _churn_dict_encode() -> text:
+    # Reverse-sorted keys exercise the insertion sort's shift path; the
+    # nested list and mixed value kinds exercise the join-based encoder.
+    # Hand-computed BEP 3 encoding:
+    #   d 5:alpha 1:x 3:mid li2ei3ee 4:zeta i1e e
+    var pairs: [(text, BencodeValue)] = []
+    pairs.push(("zeta", BencodeValue.BInt(1)))
+    pairs.push(("alpha", BencodeValue.BStr("x")))
+    pairs.push(("mid", BencodeValue.BList([BencodeValue.BInt(2), BencodeValue.BInt(3)])))
+    bencode_encode(BencodeValue.BDict(pairs))
+
+fn _churn_list_encode() -> text:
+    var items: [text] = []
+    var i = 0
+    while i < 40:
+        items.push(bencode_encode_int(i))
+        i = i + 1
+    bencode_encode_list(items)
+
+fn _churn_long_str_decode() -> bool:
+    # 360-byte payload exercises the hoisted-bytes decode loop on a long
+    # byte string; content must survive decode -> re-encode untouched.
+    val payload = _churn_repeat("abcdefghijklmnopqrstuvwxyz0123", 10)
+    val enc = bencode_encode_str(payload)
+    match bencode_decode_value(enc):
+        case Result.Ok(BencodeValue.BStr(s)):
+            s == payload
+        case _:
+            false
+
+fn _churn_dict_roundtrip() -> bool:
+    val enc = _churn_dict_encode()
+    match bencode_decode_value(enc):
+        case Result.Ok(v):
+            bencode_encode(v) == enc
+        case _:
+            false
+
+describe "Bencode churn-regression (perf-fix equivalence)":
+
+    it "dict encode is byte-identical to hand-computed BEP 3 form":
+        # @req REQ-SSPEC-UNIT
+        step("dict encode is byte-identical to hand-computed BEP 3 form")
+        expect(_churn_dict_encode()).to_equal("d5:alpha1:x3:midli2ei3ee4:zetai1ee")
+
+    it "reverse-sorted keys encode in lexicographic order":
+        # @req REQ-SSPEC-UNIT
+        step("reverse-sorted keys encode in lexicographic order")
+        expect(_churn_dict_encode().starts_with("d5:alpha")).to_equal(true)
+
+    it "40-item list encode is one l...e frame with i0e..i39e":
+        # @req REQ-SSPEC-UNIT
+        step("40-item list encode is one l...e frame with i0e..i39e")
+        val enc = _churn_list_encode()
+        expect(enc.len()).to_equal(2 + 10 * 3 + 30 * 4)  # i0e..i9e are 3 chars, i10e..i39e are 4
+        expect(enc.starts_with("li0ei1e")).to_equal(true)
+        expect(enc.ends_with("i39ee")).to_equal(true)
+
+    it "360-byte string decodes to identical content (hoisted-bytes decode)":
+        # @req REQ-SSPEC-UNIT
+        step("360-byte string decodes to identical content (hoisted-bytes decode)")
+        expect(_churn_long_str_decode()).to_equal(true)
+
+    it "nested dict decode -> re-encode round-trips byte-identically":
+        # @req REQ-SSPEC-UNIT
+        step("nested dict decode -> re-encode round-trips byte-identically")
+        expect(_churn_dict_roundtrip()).to_equal(true)
