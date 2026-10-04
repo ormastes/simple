@@ -19,7 +19,8 @@ use std.common.build_manager.grouped_native_process_policy.{NativeGroupActiveCha
     native_group_process_budget_v1, native_group_disk_budget_v1,
     native_group_disk_required_v1}
 use app.io.file_ops.{file_lock, file_unlock, file_exists, file_atomic_write, path_absolute, file_create_exclusive}
-use app.bootstrap_builder.managed_producer_factory.{managed_producer_bind_task_v1}
+use app.bootstrap_builder.managed_producer_factory.{managed_producer_bind_task_v1,
+    managed_producer_bind_hello_callback_v1}
 use app.io.dir_ops.{dir_create_all}
 use app.bootstrap_builder.codec.{builder_read_run_v1, builder_encode_run_v1, builder_encode_result_v1,
     builder_read_result_v1}
@@ -655,6 +656,7 @@ fn managed_phase_verify_mode_v1(root: text, source_root: text,
 fn managed_phase_factory_publish_v1(owner: ManagedPhaseAdmissionV1,
         values: Dict<text, text>) -> Result<bool, text>:
     val producer_id = values["--producer-task"]
+    val hello_callback = values.contains_key("factory-kind") and values["factory-kind"] == "hello"
     if not producer_id.ends_with("_build"): return Err("producer task must be a build node")
     val sanity_id = producer_id[0:producer_id.len() - 6] + "_sanity"
     var producer_index: i64 = -1
@@ -665,8 +667,16 @@ fn managed_phase_factory_publish_v1(owner: ManagedPhaseAdmissionV1,
             if owner.tasks[index].dependencies != [producer_id]:
                 return Err("producer sanity dependency differs")
             sanity_found = true
-    if producer_index < 0 or not sanity_found: return Err("producer and its sanity task are required")
-    val _verified = managed_phase_verify_retained_v1(owner, producer_id == "phase1_build")?
+    if producer_index < 0: return Err("producer build task is required")
+    if hello_callback:
+        # Fresh build output opens ONLY its diagnostic Hello callback. It
+        # cannot claim the absent sanity result or pass the promotion barrier.
+        if owner.tasks.len() != 1 or owner.tasks[0].dependencies.len() != 0:
+            return Err("fresh Hello factory requires one independent producer build")
+    elif not sanity_found:
+        return Err("producer and its sanity task are required")
+    val _verified = managed_phase_verify_retained_v1(owner,
+        not hello_callback and producer_id == "phase1_build")?
     val task = owner.tasks[producer_index]
     val phase_root = managed_phase_task_root_v2(owner.root, owner.tasks, producer_index)
     val attempt_root = phase_root + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + owner.host.id
@@ -692,8 +702,19 @@ fn managed_phase_factory_publish_v1(owner: ManagedPhaseAdmissionV1,
             child_host.worker_program != owner.host.worker_program or child_host.worker_digest != owner.host.worker_digest or
             child_host.slots != owner.host.slots: return Err("next template changes host authority")
     val output = values["--producer-output"]
-    val child = managed_producer_bind_task_v1(task, result, published, observed,
-        output, attempt_root + "/work/" + output, template.tasks[0])?
+    val child = if hello_callback:
+        managed_producer_bind_hello_callback_v1(task, result, published, observed,
+            output, attempt_root + "/work/" + output, template.tasks[0])?
+    else:
+        managed_producer_bind_task_v1(task, result, published, observed,
+            output, attempt_root + "/work/" + output, template.tasks[0])?
+    if hello_callback:
+        val callback_program = if child.program.starts_with("/") or child.program.contains(":"):
+            child.program
+        else: owner.source_root + "/" + child.program
+        if not file_is_regular_no_follow(callback_program) or
+                file_hash_sha256(callback_program) != child.producer_digest:
+            return Err("Hello callback executable changed")
     # Context/source members are already source-generation bound. Validate
     # only new declarations. The retained owner just authenticated the parent
     # generation; do not hash all of those same bytes again for this child.
@@ -767,7 +788,8 @@ fn managed_phase_factory_v1(root: text, source_root: text,
 fn managed_phase_cli_v1(args: [text], process: BuilderProcessPortV1,
         capacity: NativeGroupedCapacityV1) -> i64:
     if args.len() > 0 and (args[0] == "managed-tasks" or args[0] == "managed-tasks-verify" or
-            args[0] == "managed-tasks-phase1-barrier" or args[0] == "managed-tasks-next-producer"):
+            args[0] == "managed-tasks-phase1-barrier" or args[0] == "managed-tasks-next-producer" or
+            args[0] == "managed-tasks-next-hello"):
         return managed_phase_inventory_cli_v2(args, process, capacity)
     if args.len() != 21 or (args[0] != "managed-phases" and args[0] != "managed-phases-verify"): return 2
     var values: {text: text} = {}
@@ -855,7 +877,8 @@ export managed_phase1_barrier_graph_error_v1
 # Its digest pins dependencies, source/producer identities and per-task inputs.
 fn managed_phase_inventory_cli_v2(args: [text], process: BuilderProcessPortV1,
         capacity: NativeGroupedCapacityV1) -> i64:
-    val factory = args.len() > 0 and args[0] == "managed-tasks-next-producer"
+    val factory = args.len() > 0 and (args[0] == "managed-tasks-next-producer" or
+        args[0] == "managed-tasks-next-hello")
     if args.len() != (if factory: 27 else: 17): return 2
     var values: Dict<text, text> = {}
     var index = 1
@@ -905,6 +928,7 @@ fn managed_phase_inventory_cli_v2(args: [text], process: BuilderProcessPortV1,
     val authority = sha256_text("SIMPLE-MANAGED-TASK-INVENTORY-2\n" + values["--manifest-sha256"] +
         "\n" + values["--policy-sha256"] + "\n" + path_absolute(values["--source-root"]))
     if factory:
+        values["factory-kind"] = if args[0] == "managed-tasks-next-hello": "hello" else: "producer"
         if not builder_digest_valid_v1(values["--next-template-sha256"]) or
                 not file_is_regular_no_follow(values["--next-template"]) or
                 file_hash_sha256(values["--next-template"]) != values["--next-template-sha256"]: return 2

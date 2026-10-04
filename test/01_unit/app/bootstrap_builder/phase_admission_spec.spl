@@ -17,7 +17,7 @@ use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildInputV1,
     BuildResultV1, builder_task_identity_v1}
 use app.bootstrap_builder.process_port.{builder_process_portable_v1}
 use app.bootstrap_builder.managed_producer_factory.{managed_producer_bind_task_v1,
-    managed_producer_unbound_digest_v1}
+    managed_producer_unbound_digest_v1, managed_producer_bind_hello_callback_v1}
 
 fn paired_policy() -> ManagedPhasePolicyV1:
     ManagedPhasePolicyV1(14000000000, 7000000000, 268435456,
@@ -371,3 +371,73 @@ describe "Incremental managed producer binding":
         expect(another_child.cache_key == child.cache_key).to_equal(false)
         expect(managed_producer_bind_task_v1(parent, result, another_result, outputs,
             "completion.env", "/attempt/work/completion.env", template).is_err()).to_equal(true)
+
+fn next_hello_template() -> BuildTaskV1:
+    var task = journal_owner().tasks[1]
+    task.id = "phase1_sanity"
+    task.phase = "diagnostic-sanity"
+    task.program = "/tools/sh"
+    task.args = ["prepare-provisional-hello.shs", "--producer=@managed-producer-path-v1@",
+        "--producer-digest=@managed-producer-digest-v1@", "--threads=80", "--timeout-seconds=0"]
+    task
+
+describe "Fresh producer to diagnostic Hello callback":
+    it "binds real producer arguments without replacing the callback executable identity":
+        val parent = phase1_barrier_tasks()[0]
+        val outputs = [BuildInputV1("completion.env", parent.producer_digest)]
+        val result = BuildResultV1(parent.id, parent.attempt, builder_task_identity_v1(parent),
+            "local", "OK", 0, outputs, 0, 0, 0)
+        val template = next_hello_template()
+        val child = managed_producer_bind_hello_callback_v1(parent, result, result, outputs,
+            "completion.env", "C:/private producer/simple.exe", template).unwrap()
+        expect(child.program).to_equal(template.program)
+        expect(child.producer_digest).to_equal(template.producer_digest)
+        expect(child.args[1]).to_equal("--producer=C:/private producer/simple.exe")
+        expect(child.args[2]).to_equal("--producer-digest=" + outputs[0].digest)
+        expect(child.args[3:5]).to_equal(["--threads=80", "--timeout-seconds=0"])
+        expect(child.source_digest).to_equal(template.source_digest)
+        expect(child.cache_key == template.cache_key).to_equal(false)
+        expect(child.phase).to_equal("diagnostic-sanity")
+
+    it "refuses duplicate malformed missing and prebound slots":
+        val parent = phase1_barrier_tasks()[0]
+        val outputs = [BuildInputV1("completion.env", parent.producer_digest)]
+        val result = BuildResultV1(parent.id, parent.attempt, builder_task_identity_v1(parent),
+            "local", "OK", 0, outputs, 0, 0, 0)
+        val template = next_hello_template()
+        for extra in ["--producer=@managed-producer-path-v1@", "--producer=/stale.exe",
+                "--producer-digest=stale", "prefix@managed-producer-path-v1@suffix"]:
+            var changed = template
+            changed.args = changed.args.push(extra)
+            expect(managed_producer_bind_hello_callback_v1(parent, result, result, outputs,
+                "completion.env", "/private/simple.exe", changed).is_err()).to_equal(true)
+        var missing = template
+        missing.args = ["--producer=@managed-producer-path-v1@"]
+        expect(managed_producer_bind_hello_callback_v1(parent, result, result, outputs,
+            "completion.env", "/private/simple.exe", missing).is_err()).to_equal(true)
+
+    it "cannot bind promotion or a different producer sanity node":
+        val parent = phase1_barrier_tasks()[0]
+        val outputs = [BuildInputV1("completion.env", parent.producer_digest)]
+        val result = BuildResultV1(parent.id, parent.attempt, builder_task_identity_v1(parent),
+            "local", "OK", 0, outputs, 0, 0, 0)
+        var promotion = next_hello_template()
+        promotion.phase = "release-admission"
+        expect(managed_producer_bind_hello_callback_v1(parent, result, result, outputs,
+            "completion.env", "/private/simple.exe", promotion).is_err()).to_equal(true)
+        var other = next_hello_template()
+        other.id = "phase2_sanity"
+        expect(managed_producer_bind_hello_callback_v1(parent, result, result, outputs,
+            "completion.env", "/private/simple.exe", other).is_err()).to_equal(true)
+
+    it "refuses crashed parents and changed physical outputs before opening the callback":
+        val parent = phase1_barrier_tasks()[0]
+        val outputs = [BuildInputV1("completion.env", parent.producer_digest)]
+        val crashed = BuildResultV1(parent.id, parent.attempt, builder_task_identity_v1(parent),
+            "local", "CRASHED", 139, [], 0, 0, 0)
+        expect(managed_producer_bind_hello_callback_v1(parent, crashed, crashed, [],
+            "completion.env", "/private/simple.exe", next_hello_template()).is_err()).to_equal(true)
+        val result = BuildResultV1(parent.id, parent.attempt, builder_task_identity_v1(parent),
+            "local", "OK", 0, outputs, 0, 0, 0)
+        expect(managed_producer_bind_hello_callback_v1(parent, result, result, [],
+            "completion.env", "/private/simple.exe", next_hello_template()).is_err()).to_equal(true)

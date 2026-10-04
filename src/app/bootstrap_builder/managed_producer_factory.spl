@@ -11,6 +11,50 @@ use std.common.crypto.sha256.{sha256_text}
 pub fn managed_producer_unbound_digest_v1() -> text:
     sha256_text("simple-managed-producer-slot-unbound-v1")
 
+# The shell owner is already a real, hash-bound program. Only these two
+# complete arguments are deferred; never replace substrings in arbitrary argv.
+pub fn managed_producer_bind_hello_callback_v1(parent: BuildTaskV1, result: BuildResultV1,
+        published: BuildResultV1, observed: [BuildInputV1], output: text,
+        physical_output: text, template: BuildTaskV1) -> Result<BuildTaskV1, text>:
+    if template.program == "managed-producer-unbound" or
+            template.producer_digest == managed_producer_unbound_digest_v1():
+        return Err("Hello callback requires an existing bound executable owner")
+    val invalid = builder_validate_task_v1(template)
+    if invalid != "": return Err(invalid)
+    if not parent.id.ends_with("_build") or
+            template.id != parent.id[0:parent.id.len() - 6] + "_sanity" or
+            template.phase != "diagnostic-sanity":
+        return Err("Hello callback must be the producer diagnostic sanity node")
+    var path_slots = 0
+    var digest_slots = 0
+    for argument in template.args:
+        if argument == "--producer=@managed-producer-path-v1@": path_slots = path_slots + 1
+        elif argument == "--producer-digest=@managed-producer-digest-v1@": digest_slots = digest_slots + 1
+        elif argument.starts_with("--producer=") or argument.starts_with("--producer-digest=") or
+                argument.contains("@managed-producer-"):
+            return Err("Hello callback contains an ambiguous producer argument")
+    if path_slots != 1 or digest_slots != 1:
+        return Err("Hello callback requires exactly one path and digest slot")
+    var deferred = template
+    deferred.program = "managed-producer-unbound"
+    deferred.producer_digest = managed_producer_unbound_digest_v1()
+    val bound = managed_producer_bind_task_v1(parent, result, published, observed,
+        output, physical_output, deferred)?
+    var callback = bound
+    callback.program = template.program
+    callback.producer_digest = template.producer_digest
+    callback.args = []
+    for argument in template.args:
+        if argument == "--producer=@managed-producer-path-v1@":
+            callback.args = callback.args.push("--producer=" + bound.program)
+        elif argument == "--producer-digest=@managed-producer-digest-v1@":
+            callback.args = callback.args.push("--producer-digest=" + bound.producer_digest)
+        else:
+            callback.args = callback.args.push(argument)
+    val callback_error = builder_validate_task_v1(callback)
+    if callback_error != "": return Err(callback_error)
+    Ok(callback)
+
 pub fn managed_producer_bind_task_v1(parent: BuildTaskV1, result: BuildResultV1,
         published: BuildResultV1, observed: [BuildInputV1], output: text,
         physical_output: text, template: BuildTaskV1) -> Result<BuildTaskV1, text>:
