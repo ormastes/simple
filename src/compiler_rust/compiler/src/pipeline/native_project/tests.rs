@@ -8988,6 +8988,7 @@ fn native_extension_method_defaults_reach_separate_caller() {
     let ast = Parser::new(&files[2].1).parse().unwrap();
     let resolver = ModuleResolver::new(dir.path().to_path_buf(), root.clone());
     let mut lowerer = Lowerer::with_module_resolver(resolver, files[2].0.clone());
+    lowerer.set_global_fn_return_types(std::sync::Arc::new(imports.fn_return_types));
     lowerer.set_global_method_param_defaults(std::sync::Arc::new(imports.method_param_defaults));
     let hir = lowerer.lower_module(&ast).unwrap();
     for (name, is_nil) in [("omitted", true), ("explicit", false)] {
