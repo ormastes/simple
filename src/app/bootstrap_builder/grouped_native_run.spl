@@ -18,6 +18,7 @@ use app.io.file_ops.{file_copy, file_rename}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.build_manager.contracts.{builder_digest_valid_v1}
 use app.bootstrap_builder.failure_policy.{builder_failure_class_v1}
+use app.buildrunner.process_evidence.{build_runner_process_evidence_bind_v1}
 
 struct NativeGroupedRunOutcomeV1:
     exit_code: i64
@@ -619,6 +620,24 @@ fn native_group_prepare_attempt_v1(run: NativeGroupRunV1, manifest: NativeGroupM
         if not native_group_save_v1(next): return Err("cannot persist final pre-spawn resource measurement")
     Ok(NativeGroupPreparedV1(next, request, recovering, source_bytes))
 
+fn native_group_check_compiler_evidence_v1(run: NativeGroupRunV1,
+        manifest: NativeGroupManifestV1, code: i64) -> Result<bool, text>:
+    val root = native_group_attempt_root_v1(run, manifest)
+    val path = root + "/compiler.process"
+    # Older workers and the current POSIX provider may lack inner completion.
+    # Absence grants no crash authority; legacy failure classification remains
+    # fail-closed. This helper never substitutes for the outer broker reap.
+    if not file_exists(path): return Ok(false)
+    for name in ["compiler.stdout.log", "compiler.stderr.log"]:
+        if not file_is_regular_no_follow(root + "/" + name):
+            return Err("compiler observation log is not regular")
+    val payload = file_read_regular_no_follow_bounded(path, 2048)?
+    val _evidence = build_runner_process_evidence_bind_v1(payload,
+        native_group_manifest_identity_v1(manifest),
+        file_hash_sha256(root + "/compiler.stdout.log"),
+        file_hash_sha256(root + "/compiler.stderr.log"), code, true)?
+    Ok(true)
+
 fn native_group_run_attempt_v1(run: NativeGroupRunV1, manifest: NativeGroupManifestV1,
         capacity: NativeGroupedCapacityV1) -> Result<NativeGroupRunV1, text>:
     val prepared = native_group_prepare_attempt_v1(run, manifest, capacity)?
@@ -626,6 +645,7 @@ fn native_group_run_attempt_v1(run: NativeGroupRunV1, manifest: NativeGroupManif
     val request = prepared.request
     val recovering = prepared.recovering
     val (code, peak, timed_out) = native_group_reap_v1(next, manifest, request, recovering)?
+    val _compiler_evidence = native_group_check_compiler_evidence_v1(next, manifest, code)?
     val result = native_group_recover_result_v1(next, manifest, code, peak, timed_out)?
     var all_ok = true
     for row in result.modules:
@@ -884,6 +904,7 @@ fn native_group_check_receipt_v1(run: NativeGroupRunV1,
     if not observed.terminal or not observed.leader_reaped or not observed.tree_empty:
         return Err("group tree is not reaped")
     val _reap = group_process_collect_reap_v1(owner, native_group_lease_v1(run, manifest))?
+    val _compiler_evidence = native_group_check_compiler_evidence_v1(run, manifest, observed.exit_code)?
     val reconstructed = native_group_recover_result_v1(run, manifest,
         observed.exit_code, observed.memory_peak_bytes, observed.timed_out)?
     if native_group_result_encode_v1(reconstructed) != native_group_result_encode_v1(result):

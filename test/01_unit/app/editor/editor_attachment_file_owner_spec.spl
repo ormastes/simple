@@ -1,0 +1,36 @@
+# @req REQ-SSPEC-COMPILER
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_write_exact, file_read_nullable, file_exists}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use app.editor.editor_attachment_template.{_editor_store_attachment_for_note}
+
+describe "editor attachment filesystem owner":
+    it "writes real attachment bytes and preserves a previous destination":
+        step("copy twice through the editor helper and read both physical results")
+        val root = secure_temp_dir_raw(".", "editor-attachment-owner")
+        expect(root.len() > 0).to_equal(true)
+        val source = root + "/sample.txt"
+        expect(file_write_exact(source, "first attachment\n")).to_equal(true)
+        val first = _editor_store_attachment_for_note(root + "/note.md", source, "attachments")
+        expect(first).to_equal("attachments/sample.txt")
+        expect(file_write_exact(source, "second attachment\n")).to_equal(true)
+        val second = _editor_store_attachment_for_note(root + "/note.md", source, "attachments")
+        expect(second).to_equal("attachments/sample-1.txt")
+        expect(file_read_nullable(root + "/" + first) ?? "missing").to_equal("first attachment\n")
+        expect(file_read_nullable(root + "/" + second) ?? "missing").to_equal("second attachment\n")
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "distinguishes missing input from a real empty attachment":
+        step("failed input does not publish, while an empty physical file does")
+        val root = secure_temp_dir_raw(".", "editor-empty-attachment")
+        expect(root.len() > 0).to_equal(true)
+        expect(_editor_store_attachment_for_note(root + "/note.md", root + "/missing.txt", "attachments")).to_equal("")
+        expect(file_exists(root + "/attachments/missing.txt")).to_equal(false)
+        expect(file_write_exact(root + "/empty.txt", "")).to_equal(true)
+        val result = _editor_store_attachment_for_note(root + "/note.md", root + "/empty.txt", "attachments")
+        expect(result).to_equal("attachments/empty.txt")
+        expect(file_exists(root + "/" + result)).to_equal(true)
+        expect(file_read_nullable(root + "/" + result) ?? "missing").to_equal("")
+        expect(dir_remove(root, true)).to_equal(true)

@@ -1,0 +1,84 @@
+# Pure parent decisions; no process, filesystem or admission side effects.
+use std.common.task_runner.contracts.{TaskRunnerAttemptV1, task_runner_attempt_error_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+
+struct TaskRunnerRecoveryPlanV1:
+    passed: [text]
+    failed: [text]
+    isolated: [text]
+    exhausted: [text]
+    aborted: [text]
+    skipped: [text]
+    pending: [text]
+    grouped: [text]
+
+fn task_runner_execution_mode_v1(identity_digest: text,
+        history: [TaskRunnerAttemptV1]) -> Result<text, text>:
+    if not builder_digest_valid_v1(identity_digest): return Err("invalid task identity")
+    if history.len() > 8: return Err("indexed task history exceeds attempt bound")
+    var isolated = false
+    for row in history:
+        if row.identity_digest != identity_digest: continue
+        val invalid = task_runner_attempt_error_v1(row)
+        if invalid != "": return Err(invalid)
+        if row.status == "crashed": isolated = true
+    Ok(if isolated: "isolated" else: "grouped")
+
+fn task_runner_recovery_plan_v1(group_id: text, expected: [text], attempts: [TaskRunnerAttemptV1],
+        group_crashed: bool, tree_reaped: bool, group_attempt: i64,
+        max_attempts: i64, group_interrupted: bool = false) -> Result<TaskRunnerRecoveryPlanV1, text>:
+    if group_id == "" or group_id.len() > 4096: return Err("invalid recovery window")
+    if expected.len() < 1 or expected.len() > 20000: return Err("invalid task inventory bound")
+    if not tree_reaped: return Err("cannot recover a live group")
+    if group_crashed and group_interrupted: return Err("ambiguous group termination reason")
+    if max_attempts < 1 or max_attempts > 8 or group_attempt < 1 or group_attempt > max_attempts:
+        return Err("invalid retry bound")
+    if attempts.len() > expected.len() * max_attempts: return Err("attempt inventory exceeds bound")
+    var expected_set: Dict<text, bool> = {}
+    for identity in expected:
+        if not builder_digest_valid_v1(identity) or expected_set.contains_key(identity):
+            return Err("invalid or duplicate expected task")
+        expected_set[identity] = true
+    var latest: Dict<text, i64> = {}
+    var seen: Dict<text, bool> = {}
+    for index in 0..attempts.len():
+        val row = attempts[index]
+        val invalid = task_runner_attempt_error_v1(row)
+        if invalid != "": return Err(invalid)
+        if row.group_id != group_id: return Err("attempt belongs to another recovery window")
+        if not expected_set.contains_key(row.identity_digest) or row.attempt > group_attempt:
+            return Err("attempt differs from expected inventory or generation")
+        val key = row.identity_digest + ":" + str(row.attempt)
+        if seen.contains_key(key): return Err("duplicate task attempt")
+        seen[key] = true
+        if not latest.contains_key(row.identity_digest):
+            latest[row.identity_digest] = index
+        elif attempts[latest[row.identity_digest]].attempt < row.attempt:
+            latest[row.identity_digest] = index
+    var passed: [text] = []
+    var failed: [text] = []
+    var isolated: [text] = []
+    var exhausted: [text] = []
+    var aborted: [text] = []
+    var skipped: [text] = []
+    var pending: [text] = []
+    var grouped: [text] = []
+    for identity in expected:
+        var status = "not-run"
+        if latest.contains_key(identity): status = attempts[latest[identity]].status
+        if status == "passed": passed.push(identity)
+        elif status == "failed": failed.push(identity)
+        elif status == "aborted": aborted.push(identity)
+        elif status == "skipped": skipped.push(identity)
+        elif status == "pending": pending.push(identity)
+        else:
+            if group_crashed:
+                if group_attempt < max_attempts: isolated.push(identity)
+                else: exhausted.push(identity)
+            elif group_interrupted:
+                if group_attempt < max_attempts: grouped.push(identity)
+                else: exhausted.push(identity)
+            else: aborted.push(identity)
+    Ok(TaskRunnerRecoveryPlanV1(passed, failed, isolated, exhausted, aborted, skipped, pending, grouped))
+
+export TaskRunnerRecoveryPlanV1, task_runner_execution_mode_v1, task_runner_recovery_plan_v1

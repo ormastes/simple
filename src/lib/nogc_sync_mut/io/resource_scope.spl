@@ -4,7 +4,10 @@
 # an already-owned delegated scope and converts kernel files into typed evidence
 # without relabeling cgroup charge as RSS.
 
-use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text, file_write}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text, file_write, file_size, file_delete}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.process_completion.{ProcessCompletionV1}
+use std.nogc_sync_mut.io.windows_redirected_process.{windows_redirected_spawn_with_memory, windows_redirected_wait, windows_redirected_completion, windows_redirected_is_running, windows_redirected_failure_reason, windows_redirected_quarantine}
 use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_remove}
 use std.nogc_sync_mut.io.process_governor.{proc_slot_acquire, proc_slot_release}
 use std.nogc_sync_mut.io.process_ops.{process_run_bounded, process_bounded_timed_out, process_bounded_kill_signal}
@@ -28,6 +31,7 @@ struct ObservedProcessResult:
     stdout_truncated: bool
     stderr_truncated: bool
     runtime_error: i64
+    completion: Option<ProcessCompletionV1> = nil
 
 pub enum ExecutionResourceClass:
     Unit
@@ -640,6 +644,70 @@ pub fn run_in_execution_resource_scope(scope: ExecutionResourceScope, cmd: text,
         val _ = dir_remove(cgroup_path, false)
         observed
     ExecutionScopeResult(process: process, budget_decision: evaluate_resource_budget(process.usage, scope.budget))
+
+pub fn run_in_owned_execution_resource_scope(scope: ExecutionResourceScope, cmd: text, args: [text]) -> ExecutionScopeResult:
+    if not host_is_windows_host(): return run_in_execution_resource_scope(scope, cmd, args)
+    val observed = _run_windows_owned_scope(scope, cmd, args)
+    ExecutionScopeResult(process: observed,
+        budget_decision: evaluate_resource_budget(observed.usage, scope.budget))
+
+pub fn run_in_owned_test_resource_scope(scope: ExecutionResourceScope, cmd: text, args: [text]) -> ExecutionScopeResult:
+    run_in_owned_execution_resource_scope(scope, cmd, args)
+
+export run_in_owned_test_resource_scope, run_in_owned_execution_resource_scope
+
+var _windows_scope_sequence: i64 = 0
+
+fn _run_windows_owned_scope(scope: ExecutionResourceScope, cmd: text,
+        args: [text]) -> ObservedProcessResult:
+    # Avoid the historical raw tuple ABI. Memory/deadline are enforced by the
+    # JobObject owner; CPU/RSS measurements remain explicitly unavailable.
+    val started = time_now_unix_micros()
+    _windows_scope_sequence = _windows_scope_sequence + 1
+    val temporary = env_get("TMPDIR") ?? env_get("TEMP") ?? ""
+    if temporary == "":
+        return ObservedProcessResult("", "owned Windows temporary root unavailable",
+            _unavailable_usage(0, -1), false, false, -1)
+    val prefix = temporary + "/simple-owned-{getpid()}-{started}-{_windows_scope_sequence}"
+    val output = prefix + ".out"
+    val error = prefix + ".err"
+    proc_slot_acquire()
+    val token = windows_redirected_spawn_with_memory(cmd, args, output, error,
+        scope.timeout_ms, scope.max_output_bytes, scope.budget.max_tree_charge_bytes)
+    if token < 0:
+        proc_slot_release()
+        return ObservedProcessResult("", "owned Windows process admission failed",
+            _unavailable_usage(0, -1), false, false, -1)
+    var raw_exit = windows_redirected_wait(token, 0)
+    if windows_redirected_is_running(token):
+        # An observation error has already requested owned cancellation. Give
+        # that exact lease one bounded cleanup observation, never another run.
+        raw_exit = windows_redirected_wait(token, 5000)
+    # Keep admission and capture ownership if cleanup is unproven.
+    if windows_redirected_is_running(token):
+        windows_redirected_quarantine()
+        return ObservedProcessResult("", windows_redirected_failure_reason(token),
+            _unavailable_usage((time_now_unix_micros() - started) / 1000, -1), false, false, -1)
+    proc_slot_release()
+    val stdout_size = file_size(output)
+    val stderr_size = file_size(error)
+    val stdout = if stdout_size >= 0 and stdout_size <= scope.max_output_bytes: file_read_text(output) else: ""
+    val stderr = if stderr_size >= 0 and stderr_size <= scope.max_output_bytes: file_read_text(error) else: ""
+    val completed = windows_redirected_completion(token)
+    val wall_ms = (time_now_unix_micros() - started) / 1000
+    var result = ObservedProcessResult(stdout, stderr, _unavailable_usage(wall_ms, raw_exit),
+        stdout_size > scope.max_output_bytes, stderr_size > scope.max_output_bytes, -1)
+    match completed:
+        case Ok(receipt):
+            result.completion = Some(receipt)
+            result.usage.exit_code = receipt.exit_code
+            result.usage.termination = if receipt.timed_out: TerminationCause.WallTimeout elif receipt.cancelled: TerminationCause.InfrastructureFailure else: TerminationCause.Exited
+            result.runtime_error = if receipt.cancelled and not receipt.timed_out: -1 else: 0
+        case Err(reason): result.stderr = result.stderr + "\n" + reason
+    val removed_output = file_delete(output)
+    val removed_error = file_delete(error)
+    if not removed_output or not removed_error: result.runtime_error = -1
+    result
 
 export CgroupV2Events, CgroupV2Observation, ObservedProcessResult
 export ExecutionResourceClass, ExecutionResourceScope, ExecutionScopeResult

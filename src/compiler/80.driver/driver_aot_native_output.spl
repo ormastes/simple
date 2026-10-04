@@ -35,6 +35,8 @@ use std.platform.{get_host_os, get_host_arch}
 use std.nogc_async_mut.sosix.host_facade.{sosix_run}
 use compiler.driver.native_relocatable_link.{native_relocatable_link_plan}
 use compiler.driver.driver_log_helpers.{log_phase, log_error}
+use compiler.driver.native_aot_artifacts.{
+    native_aot_object_path_v1, native_aot_finish_diagnostics_v1}
 use compiler.backend.backend_plugin.session_authority_v2.{BackendSessionOwnedLeaseV2, BackendSessionAuthorityErrorV2}
 use compiler.driver.driver_backend_plugin_selection.{
     driver_aot_uses_versioned_backend, driver_aot_backend_plugin_request_v1
@@ -3609,8 +3611,8 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
             "MIR module has no functions or static data")
     val empty_native_obj = env_get_nullable("SIMPLE_BOOTSTRAP_EMPTY_NATIVE_OBJ") ?? ""
     if empty_native_obj == "1":
-        val c_path = "{output_base}.{name}.bootstrap_empty.c"
-        val obj_path = "{output_base}.{name}.o"
+        val obj_path = native_aot_object_path_v1(output_base, name)
+        val c_path = obj_path + ".bootstrap_empty.c"
         val c_ok = _sffi_file_write_text(c_path, "int main(int argc, char **argv) { (void)argc; (void)argv; return 0; }\n")
         if not c_ok:
             return Err("Failed to write bootstrap empty C file {c_path}")
@@ -3623,7 +3625,7 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
     # conditional composite temporary can outlive its active flat payload and
     # later render that raw word as `<invalid-heap:...>`.
     if val session = backend_session:
-        val obj_path = "{output_base}.{name}.o"
+        val obj_path = native_aot_object_path_v1(output_base, name)
         val diagnostic_dir = secure_temp_dir_raw(
             dirname(obj_path), "simple-aot-diagnostic")
         if diagnostic_dir == "":
@@ -3633,6 +3635,10 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
             mir_module, is_release, opt_level, frozen_target_cpu,
             storage_snapshot.sites, obj_path, diagnostic_path)
         if status != 0:
+            val _retained = native_aot_finish_diagnostics_v1(
+                diagnostic_dir, status, obj_path)
+            log_error("backend AOT evidence retained at {diagnostic_dir}")
+            _sffi_stdout_flush()
             # Deliver the reason from INSIDE the arm that binds it. This block
             # used to hoist the payload into a `var detail` in the enclosing
             # frame and call `_aot_compile_failure(name, detail)` afterwards;
@@ -3665,7 +3671,7 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
             #      just been handed. `message.len() > 0` rejects nil (-1) and
             #      empty (0) alike, so a corrupt payload now falls through to the
             #      literal default instead of erasing it.
-            # Cleanup is reported by printing, never by interpolating the reason
+            # Retention is reported separately, never by interpolating the reason
             # into a longer string: an operand that can be corrupt must not be
             # able to silence the text around it.
             # Why the fallback says WHICH way the diagnostic was lost: every
@@ -3694,25 +3700,16 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
             match file_read_regular_no_follow_bounded(diagnostic_path, 4096):
                 case Ok(message):
                     if message.len() > 0:
-                        if not dir_remove(diagnostic_dir, true):
-                            print "warning: diagnostic staging cleanup failed: {diagnostic_dir}"
-                            _sffi_stdout_flush()
                         return _aot_compile_failure(name, message)
                     if diagnostic_size > 0:
                         val recovered = _sffi_file_read_text(diagnostic_path) ?? ""
                         if recovered.len() > 0:
-                            if not dir_remove(diagnostic_dir, true):
-                                print "warning: diagnostic staging cleanup failed: {diagnostic_dir}"
-                                _sffi_stdout_flush()
                             return _aot_compile_failure(name, recovered)
                         diagnostic_note = "diagnostic {diagnostic_size} bytes on disk, payload lost on read"
                     else:
                         diagnostic_note = "diagnostic file empty"
                 case Err(read_error):
                     diagnostic_note = "diagnostic unreadable: {read_error}"
-            if not dir_remove(diagnostic_dir, true):
-                print "warning: diagnostic staging cleanup failed: {diagnostic_dir}"
-                _sffi_stdout_flush()
             return _aot_compile_failure(name,
                 "backend object-path status {status} ({diagnostic_note}; path {diagnostic_path})")
         match file_read_regular_no_follow_bounded(diagnostic_path, 4096):
@@ -3723,11 +3720,15 @@ fn _compile_selected_module(backend_name: text, is_release: bool, opt_level: i64
                 if message.len() > 0:
                     print "warning: backend AOT: {message}"
             case Err(_): ()
-        if not dir_remove(diagnostic_dir, true):
-            print "warning: published object; diagnostic staging cleanup failed: {diagnostic_dir}"
         if (not file_is_regular_no_follow(obj_path)
             or file_size_raw(obj_path) <= 0):
+            val _retained = native_aot_finish_diagnostics_v1(
+                diagnostic_dir, status, obj_path)
+            log_error("backend AOT evidence retained at {diagnostic_dir}")
+            _sffi_stdout_flush()
             return _aot_compile_failure(name, "invalid object output")
+        if not native_aot_finish_diagnostics_v1(diagnostic_dir, status, obj_path):
+            print "warning: published object; diagnostic staging cleanup failed: {diagnostic_dir}"
         return Ok(obj_path)
     _finish_selected_module_compile(
         compile_module_with_backend_target_cpu_storage_bindings(
@@ -3747,7 +3748,7 @@ fn _finish_selected_module_compile(
             _aot_compile_failure(name, err.to_text())
         case Ok(module):
             if val obj_bytes = module.object_code:
-                val obj_path = "{output_base}.{name}.o"
+                val obj_path = native_aot_object_path_v1(output_base, name)
                 if (env_get_nullable("SIMPLE_BOOTSTRAP") ?? "") == "1":
                     val bootstrap_obj = llvm_bootstrap_last_object_path()
                     if bootstrap_obj != "" and _sffi_file_copy(bootstrap_obj, obj_path):

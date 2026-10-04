@@ -8,6 +8,7 @@ use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.path.{normalize as normalize_source_selector}
 use std.scv.compile_snapshot.{ScvCompileSnapshotV1,
     scv_compile_snapshot_acquire_v1, scv_compile_snapshot_open_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryV1}
 use std.scv.compile_source_inventory.{CompileSourceInventoryReadV1,
     CompileSourceInventoryBindingV1, compile_source_inventory_binding_reason_v1,
     compile_source_inventory_read_current_v1, compile_source_inventory_read_at_pointer_v1,
@@ -20,6 +21,24 @@ struct CompilerSourceAuthorityV1:
     snapshot: ScvCompileSnapshotV1
     source_inventory_digest: text
     inventory_generation: i64
+
+# Return precisely the generation admitted by the inherited snapshot, not
+# CURRENT. Receiving selection owners still check their request and every row.
+pub fn compiler_source_authority_inventory_v1(root: text, authority: CompilerSourceAuthorityV1) -> Result<CompileSourceInventoryV1, text>:
+    if not authority.valid: return Err(authority.reason)
+    val cache_root = compile_source_inventory_snapshot_cache_root_v1(
+        root, authority.snapshot.snapshot_root, authority.snapshot.revision_id)
+    if cache_root == "": return Err("snapshot-source-owner-mismatch")
+    val admitted = compile_source_inventory_read_at_pointer_v1(
+        cache_root, authority.source_inventory_digest)
+    val manifest = file_read_regular_no_follow_bounded(
+        authority.snapshot.snapshot_root + "/SCV_COMPILE_INVENTORY", 256 * 1024 * 1024)
+    if manifest.is_err(): return Err("snapshot-source-manifest-unreadable")
+    val reason = compiler_source_authority_binding_reason_v1(
+        authority.snapshot, authority.source_inventory_digest,
+        authority.inventory_generation, admitted, manifest.unwrap())
+    if reason != "ok": return Err(reason)
+    Ok(admitted.inventory!)
 
 fn compiler_source_authority_invalid_v1(reason: text) -> CompilerSourceAuthorityV1:
     val snapshot = ScvCompileSnapshotV1(

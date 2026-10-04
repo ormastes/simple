@@ -23,6 +23,36 @@ describe "workaround store maintenance":
         expect(workaround_status_paths("R  src/a.spl\0").is_err()).to_equal(true)
         expect(workaround_tracked_paths("../outside.spl\0").is_err()).to_equal(true)
 
+    it "deduplicates destination and source paths in first encounter order":
+        val status = " M src/a.spl\0R  src/new name.spl\0src/a.spl\0C  src/copy.spl\0src/new name.spl\0?? src/a.spl\0"
+        expect(workaround_status_paths(status).unwrap()).to_equal(
+            ["src/a.spl", "src/new name.spl", "src/copy.spl"])
+
+    it "rejects writer contention before Git discovery and releases failed discovery":
+        step("An unborn repository has no usable HEAD for refresh")
+        expect(workaround_host_mkdir("build/test-artifacts")).to_equal(true)
+        val root = workaround_host_temp_dir("build/test-artifacts", "workaround-lock-first-").unwrap()
+        workaround_test_git(root, ["init", "-q"])
+        expect(workaround_host_mkdir(root + "/.simple")).to_equal(true)
+        val lock_path = root + "/.simple/workarounds.sdn.lock"
+        val held = workaround_host_lock(lock_path, 1)
+        expect(held >= 0).to_equal(true)
+        val contended = refresh_workarounds_at(root, false, [])
+        val released = workaround_host_unlock(held)
+        expect(released).to_equal(true)
+        expect(contended.is_err()).to_equal(true)
+        expect(contended.unwrap_err()).to_equal("workaround writer lock unavailable")
+        step("Without contention the same request reaches the failing Git owner")
+        val discovery_failed = refresh_workarounds_at(root, false, [])
+        expect(discovery_failed.is_err()).to_equal(true)
+        expect(discovery_failed.unwrap_err()).to_start_with("workaround Git failed (")
+        val reacquired = workaround_host_lock(lock_path, 1)
+        val reacquired_ok = reacquired >= 0
+        val reacquired_released = if reacquired_ok: workaround_host_unlock(reacquired) else: false
+        expect(reacquired_ok).to_equal(true)
+        expect(reacquired_released).to_equal(true)
+        expect(load_workarounds_at(root).is_err()).to_equal(true)
+
     it "publishes complete batches and preserves bytes on malformed or unknown links":
         step("Create an isolated Git fixture and canonical bug snapshot")
         expect(workaround_host_mkdir("build/test-artifacts")).to_equal(true)

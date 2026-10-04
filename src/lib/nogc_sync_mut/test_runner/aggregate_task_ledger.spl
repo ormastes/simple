@@ -1,0 +1,154 @@
+# Parent parser for the existing simple-subsystem-registry-v1 wire format.
+# Enumeration is complete before a run. A crashed run may supply a valid
+# prefix; that prefix never becomes a successful complete ledger.
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+
+struct AggregateTaskInventoryV1:
+    header: text
+    declarations: [text]
+    case_ids: [text]
+    metadata: Dict<text, text>
+    owners: Dict<text, text>
+
+struct AggregateTaskProgressV1:
+    outcomes: Dict<text, text>
+    active_case: text
+    complete: bool
+    trailing_partial: bool
+    test_callbacks: i64
+    hook_callbacks: i64
+
+fn _aggregate_task_counter(field: text, prefix: text) -> Result<i64, text>:
+    if not field.starts_with(prefix): return Err("missing aggregate counter")
+    val digits = field[prefix.len():]
+    if digits == "" or digits.len() > 9: return Err("aggregate counter exceeds bound")
+    for index in 0..digits.len():
+        if not "0123456789".contains(digits[index:index + 1]): return Err("invalid aggregate counter")
+    val value = digits.to_int() ?? -1
+    if str(value) != digits: return Err("noncanonical aggregate counter")
+    Ok(value)
+
+fn aggregate_task_inventory_v1(payload: text) -> Result<AggregateTaskInventoryV1, text>:
+    if payload.len() > 67108864 or not payload.ends_with("\n"):
+        return Err("enumeration is oversized or incomplete")
+    val lines = payload.split("\n")
+    if lines.len() < 5: return Err("enumeration is empty")
+    val header = lines[0].split("\t")
+    if header.len() != 5 or header[0] != "simple-subsystem-registry-v1" or
+            not builder_digest_valid_v1(header[3]) or not builder_digest_valid_v1(header[4]):
+        return Err("invalid aggregate registry header")
+    if lines[lines.len() - 2] != "complete\tregistration_ok=1\ttest_callbacks_executed=0\thook_callbacks_executed=0":
+        return Err("enumeration incomplete or executed callbacks")
+    var declarations: [text] = []
+    var ids: [text] = []
+    var metadata: Dict<text, text> = {}
+    var owners: Dict<text, text> = {}
+    var seen_owners: Dict<text, bool> = {}
+    var owner = ""
+    var count: i64 = 0
+    for index in 1..(lines.len() - 2):
+        val line = lines[index]
+        val fields = line.split("\t")
+        if fields[0] == "owner_begin":
+            if fields.len() != 3 or owner != "" or fields[1] == "" or
+                    seen_owners.contains_key(fields[1]) or not builder_digest_valid_v1(fields[2]):
+                return Err("invalid enumeration owner")
+            owner = fields[1]
+            seen_owners[owner] = true
+            count = 0
+        elif fields[0] == "declare":
+            if fields.len() != 3 or owner == "" or not builder_digest_valid_v1(fields[1]) or
+                    not builder_digest_valid_v1(fields[2]) or metadata.contains_key(fields[1]):
+                return Err("invalid or duplicate enumeration case")
+            if ids.len() >= 20000: return Err("aggregate task inventory exceeds bound")
+            ids.push(fields[1])
+            metadata[fields[1]] = fields[2]
+            owners[fields[1]] = owner
+            count = count + 1
+        elif fields[0] == "owner_end":
+            if fields.len() != 4 or owner == "" or fields[1] != owner or
+                    fields[2] != str(count) or fields[3] != "ok":
+                return Err("enumeration owner incomplete")
+            owner = ""
+        else:
+            return Err("unexpected enumeration record")
+        declarations.push(line)
+    if owner != "" or ids.len() == 0: return Err("enumeration has no complete cases")
+    Ok(AggregateTaskInventoryV1(lines[0], declarations, ids, metadata, owners))
+
+fn aggregate_task_progress_v1(inventory: AggregateTaskInventoryV1,
+        payload: text, selected_cases: [text] = []) -> Result<AggregateTaskProgressV1, text>:
+    if payload.len() > 67108864: return Err("execution ledger exceeds bound")
+    var selection: Dict<text, bool> = {}
+    for selected_case in selected_cases:
+        if not inventory.metadata.contains_key(selected_case) or selection.contains_key(selected_case):
+            return Err("selected case was not enumerated or was duplicated")
+        selection[selected_case] = true
+    val lines = payload.split("\n")
+    if lines.len() < 2 or lines[0] != inventory.header: return Err("execution header differs")
+    val trailing_partial = not payload.ends_with("\n")
+    var outcomes: Dict<text, text> = {}
+    var declared: Dict<text, bool> = {}
+    var begun: Dict<text, bool> = {}
+    var owner = ""
+    var active = ""
+    var cursor: i64 = 0
+    var complete = false
+    var test_callbacks: i64 = -1
+    var hook_callbacks: i64 = -1
+    for index in 1..(lines.len() - 1):
+        val line = lines[index]
+        val fields = line.split("\t")
+        if complete: return Err("records follow execution completion")
+        if fields[0] == "owner_begin" or fields[0] == "declare" or fields[0] == "owner_end":
+            if cursor >= inventory.declarations.len() or line != inventory.declarations[cursor]:
+                return Err("execution registration differs from enumeration")
+            cursor = cursor + 1
+            if fields[0] == "owner_begin": owner = fields[1]
+            elif fields[0] == "declare": declared[fields[1]] = true
+            else:
+                if active != "": return Err("owner ended with active case")
+                owner = ""
+        elif fields[0] == "begin" or fields[0] == "result":
+            val is_begin = fields[0] == "begin"
+            if fields.len() != (if is_begin: 2 else: 3): return Err("malformed case event")
+            val id = fields[1]
+            if not declared.contains_key(id) or inventory.owners[id] != owner or outcomes.contains_key(id):
+                return Err("case event is outside its declaration owner")
+            if selection.len() > 0 and not selection.contains_key(id): return Err("unselected case executed")
+            if is_begin:
+                if active != "" or begun.contains_key(id): return Err("overlapping or duplicate case begin")
+                active = id
+                begun[id] = true
+            else:
+                if not ["pass", "fail", "skip", "pending"].contains(fields[2]): return Err("invalid case outcome")
+                if active != "" and active != id: return Err("case result differs from active case")
+                outcomes[id] = fields[2]
+                active = ""
+        elif fields[0] == "complete":
+            if fields.len() != 4 or fields[1] != "registration_ok=1" or
+                    not fields[2].starts_with("test_callbacks_executed=") or
+                    not fields[3].starts_with("hook_callbacks_executed=") or
+                    cursor != inventory.declarations.len() or owner != "" or active != "":
+                return Err("invalid execution completion")
+            val expected = if selection.len() == 0: inventory.case_ids.len() else: selection.len()
+            if outcomes.len() != expected: return Err("completed ledger lacks expected outcomes")
+            test_callbacks = _aggregate_task_counter(fields[2], "test_callbacks_executed=")?
+            hook_callbacks = _aggregate_task_counter(fields[3], "hook_callbacks_executed=")?
+            var minimum_callbacks: i64 = 0
+            var maximum_callbacks: i64 = 0
+            for id in inventory.case_ids:
+                if outcomes.contains_key(id):
+                    val outcome = outcomes[id]
+                    if outcome == "pass" or outcome == "pending": minimum_callbacks = minimum_callbacks + 1
+                    if outcome != "skip": maximum_callbacks = maximum_callbacks + 1
+            if test_callbacks < minimum_callbacks or test_callbacks > maximum_callbacks:
+                return Err("aggregate callback count differs from validated outcomes")
+            complete = true
+        else:
+            return Err("unknown execution ledger record")
+    if complete and trailing_partial: return Err("partial record follows completion")
+    Ok(AggregateTaskProgressV1(outcomes, active, complete, trailing_partial, test_callbacks, hook_callbacks))
+
+export AggregateTaskInventoryV1, AggregateTaskProgressV1
+export aggregate_task_inventory_v1, aggregate_task_progress_v1

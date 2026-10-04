@@ -6,7 +6,7 @@
 # - Structured error formatting helpers for type, borrow, coherence, and trait errors
 
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
-use std.io_runtime.{file_read_nullable}
+use std.io_runtime.{file_read_nullable, dir_exists}
 use compiler.common.driver_core_types.{SourceFile, source_file_coverage_identity}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.types.type_infer.*
@@ -932,6 +932,7 @@ fn _driver_numbered_child_dir(parent: text, segment: text) -> text:
         parent_exists = _driver_resolver_path_exists_v1(parent)
     if not parent_exists:
         return ""
+    var matched = ""
     unsafe(capabilities: [ffi]):
         for entry in rt_dir_list(parent):
             var prefix_len = 0
@@ -943,12 +944,14 @@ fn _driver_numbered_child_dir(parent: text, segment: text) -> text:
                 prefix_len = prefix_len + 1
             if prefix_len >= 1 and prefix_len <= 3 and prefix_len < entry_len and entry.char_at(prefix_len) == "." and entry.substring(prefix_len + 1) == segment:
                 val candidate = parent + "/" + entry
-                var candidate_exists = false
-                unsafe(capabilities: [ffi]):
-                    candidate_exists = _driver_resolver_path_exists_v1(candidate)
-                if candidate_exists:
-                    return candidate
-    ""
+                if dir_exists(candidate):
+                    # Directory enumeration order is not module identity.
+                    # Reject ambiguous 00.name / 10.name siblings rather than
+                    # admitting whichever the filesystem happened to return.
+                    if matched != "":
+                        return ""
+                    matched = candidate
+    matched
 
 fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
     val parts = rel.split("/")
@@ -958,9 +961,7 @@ fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
     var i = 0
     while i + 1 < parts.len():
         val direct = if current == "": parts[i] else: current + "/" + parts[i]
-        var direct_exists = false
-        unsafe(capabilities: [ffi]):
-            direct_exists = _driver_resolver_path_exists_v1(direct)
+        val direct_exists = dir_exists(direct)
         if direct_exists:
             current = direct
         else:
@@ -976,13 +977,18 @@ fn _driver_try_numbered_entry_import_rel(root: text, rel: text) -> text:
         spl_exists = _driver_resolver_path_exists_v1(spl_path)
     if spl_exists:
         return spl_path
-    val mod_path = base + "/mod.spl"
+    var module_dir = base
+    if not dir_exists(module_dir):
+        module_dir = _driver_numbered_child_dir(current, parts[parts.len() - 1])
+    if module_dir == "":
+        return ""
+    val mod_path = module_dir + "/mod.spl"
     var mod_exists = false
     unsafe(capabilities: [ffi]):
         mod_exists = _driver_resolver_path_exists_v1(mod_path)
     if mod_exists:
         return mod_path
-    val init_path = base + "/__init__.spl"
+    val init_path = module_dir + "/__init__.spl"
     var init_exists = false
     unsafe(capabilities: [ffi]):
         init_exists = _driver_resolver_path_exists_v1(init_path)

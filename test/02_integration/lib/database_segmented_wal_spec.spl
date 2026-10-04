@@ -1,0 +1,49 @@
+use std.spec.{describe, it, expect}
+use std.common.crypto.sha256.{sha256_text}
+use std.database.wal.{WalEntry, WalEntryType}
+use std.nogc_sync_mut.database.wal_segmented.{database_wal_commit_v1,
+    database_wal_current_v1, database_wal_revision_open_v1, database_wal_segment_read_strict_v1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write}
+use std.nogc_sync_mut.io_runtime.{dir_remove, file_delete}
+
+describe "Existing database WAL strict segmented transactions":
+    it "restores counters and rejects stale competing publications":
+        val root = secure_temp_dir("build", "db-segment-spec").unwrap()
+        val identity = sha256_text("database")
+        val row = WalEntry(999, WalEntryType.Insert, "items", "first", "value", 0)
+        val first = database_wal_commit_v1(root, identity, "", [row]).unwrap()
+        expect(first.first_sequence).to_equal(1)
+        expect(first.last_sequence).to_equal(1)
+        expect(database_wal_commit_v1(root, identity, "", [row]).is_err()).to_equal(true)
+        expect(database_wal_current_v1(root, identity).unwrap()).to_equal(first.digest)
+        val reopened = database_wal_revision_open_v1(root, first.digest).unwrap()
+        val second = database_wal_commit_v1(root, identity, reopened.digest, [row, row]).unwrap()
+        expect(second.first_sequence).to_equal(2)
+        expect(second.last_sequence).to_equal(3)
+        val recovered = database_wal_segment_read_strict_v1(root, second).unwrap()
+        expect(recovered.len()).to_equal(2)
+        expect(recovered[0].sequence).to_equal(2)
+        expect(recovered[1].sequence).to_equal(3)
+        expect(database_wal_current_v1(root, sha256_text("other-db")).is_err()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "ignores an uncommitted staging tail but rejects missing committed bytes":
+        val root = secure_temp_dir("build", "db-tail-spec").unwrap()
+        val identity = sha256_text("database")
+        val row = WalEntry(0, WalEntryType.Insert, "items", "row", "value", 0)
+        val committed = database_wal_commit_v1(root, identity, "", [row]).unwrap()
+        expect(file_atomic_write(root + "/objects/uncommitted-partial", "unfinished")).to_equal(true)
+        expect(database_wal_current_v1(root, identity).unwrap()).to_equal(committed.digest)
+        expect(file_delete(root + "/objects/" + committed.segment_digest)).to_equal(true)
+        expect(database_wal_current_v1(root, identity).is_err()).to_equal(true)
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "rejects excessive batches and does not change durable CURRENT":
+        val root = secure_temp_dir("build", "db-bound-spec").unwrap()
+        val identity = sha256_text("database")
+        val row = WalEntry(0, WalEntryType.Insert, "items", "row", "value", 0)
+        var entries: [WalEntry] = []
+        for index in 0..257: entries = entries.push(row)
+        expect(database_wal_commit_v1(root, identity, "", entries).is_err()).to_equal(true)
+        expect(database_wal_current_v1(root, identity).unwrap()).to_equal("")
+        expect(dir_remove(root, true)).to_equal(true)

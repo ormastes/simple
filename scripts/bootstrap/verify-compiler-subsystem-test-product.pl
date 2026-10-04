@@ -527,6 +527,7 @@ sub decode_registry {
   my (@ordered, @declared, @outcomes, $owner_index, $inside, $owner_count, $zero_owners);
   $owner_index = 0; $inside = 0; $owner_count = 0; $zero_owners = 0;
   my (%seen_case, %seen_result, %result_for, %case_owner);
+  my (%seen_begin, $active_case);
   for my $line (@lines) {
     my @f = split /\t/, $line, -1;
     if ($f[0] eq 'owner_begin') {
@@ -544,6 +545,12 @@ sub decode_registry {
       push @declared, $f[1];
       $case_owner{$f[1]} = $owner_index;
       $owner_count++;
+    } elsif ($f[0] eq 'begin') {
+      $mode eq 'execution' && $inside && @f == 2 &&
+        $seen_case{$f[1]} && !$seen_result{$f[1]} && !$seen_begin{$f[1]}++ &&
+        $case_owner{$f[1]} == $owner_index && !defined($active_case)
+        or die "$mode case begin invalid or overlapping\n";
+      $active_case = $f[1];
     } elsif ($f[0] eq 'result') {
       $mode eq 'execution' && $inside && @f == 3 &&
         $f[1] =~ /\A[0-9a-f]{64}\z/ && $seen_case{$f[1]} &&
@@ -551,8 +558,12 @@ sub decode_registry {
         !$seen_result{$f[1]}++ && $f[2] =~ /\A(?:pass|fail|skip|pending)\z/
         or die "$mode result invalid or duplicate\n";
       $result_for{$f[1]} = $f[2];
+      if (defined $active_case) {
+        $active_case eq $f[1] or die "$mode result differs from active case\n";
+        undef $active_case;
+      }
     } elsif ($f[0] eq 'owner_end') {
-      $inside && @f == 4 && $f[1] eq $owners[$owner_index][0] &&
+      $inside && !defined($active_case) && @f == 4 && $f[1] eq $owners[$owner_index][0] &&
         $f[2] =~ /\A(?:0|[1-9][0-9]*)\z/ && $f[2] == $owner_count &&
         $f[3] eq 'ok' or die "$mode owner incomplete or unsupported\n";
       if (($main_kind{$f[1]} // '') eq 'aggregate-registry-declare') {

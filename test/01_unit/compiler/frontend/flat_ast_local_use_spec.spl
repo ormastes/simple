@@ -1,0 +1,50 @@
+use std.spec
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module,
+    parse_and_build_module_scoped, flat_pool_capture_arm, flat_pool_capture_take,
+    build_module_from_flat_pool_blob}
+use compiler.frontend.parser_types_expr.{StmtKind}
+
+describe "Flat AST lexical imports":
+    it "retains the relative path and alias at the statement position":
+        val module = parse_and_build_module("fn probe() -> i64:\n    use .helper.{value as renamed}\n    return renamed()\n", "local_use.spl")
+        expect(module.imports.len()).to_equal(0)
+        val body = module.functions["probe"].body
+        expect(body.stmts.len()).to_equal(2)
+        var signature = "missing-import"
+        match body.stmts[0].kind:
+            case StmtKind.Import(path, items, import_lazy):
+                signature = path + "|" + items[0]
+                expect(import_lazy).to_equal(false)
+            case _: pass
+        expect(signature).to_equal(".helper|value:renamed")
+
+    it "retains lazy imports without adding an eager module import":
+        val module = parse_and_build_module("fn unused() -> i64:\n    use lazy .helper.{value}\n    return value()\n", "lazy_use.spl")
+        expect(module.imports.len()).to_equal(0)
+        var retained_lazy = false
+        match module.functions["unused"].body.stmts[0].kind:
+            case StmtKind.Import(path, items, import_lazy):
+                retained_lazy = import_lazy and path == ".helper" and items[0] == "value"
+            case _: pass
+        expect(retained_lazy).to_equal(true)
+
+    it "restores lexical import declarations after the flat pools are reused":
+        val source = "fn cached() -> i64:\n    use lazy .helper.{value as renamed}\n    return renamed()\n"
+        flat_pool_capture_arm()
+        val original = parse_and_build_module_scoped(source, "cached_use.spl", false)
+        val captured = flat_pool_capture_take()
+        expect(original.functions.len()).to_equal(1)
+        val replacement = parse_and_build_module_scoped(
+            "fn other() -> i64:\n    return 9\n", "other.spl", false)
+        expect(replacement.functions["other"].name).to_equal("other")
+        val restored = build_module_from_flat_pool_blob(captured, source, "cached_use.spl")
+        expect(restored.is_some()).to_equal(true)
+        val module = restored.unwrap()
+        expect(module.imports.len()).to_equal(0)
+        var signature = "missing-cached-import"
+        match module.functions["cached"].body.stmts[0].kind:
+            case StmtKind.Import(path, items, import_lazy):
+                signature = path + "|" + items[0]
+                expect(import_lazy).to_equal(true)
+            case _: pass
+        expect(signature).to_equal(".helper|value:renamed")

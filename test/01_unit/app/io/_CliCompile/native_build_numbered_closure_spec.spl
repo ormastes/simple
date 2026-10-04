@@ -1,0 +1,66 @@
+# @req REQ-SSPEC-COMPILER
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{dir_create_all, file_write_exact, file_read_nullable}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
+use app.io._CliCompile.native_build_closure.{_nb_resolve_under_root}
+
+describe "native closure numbered directory owner":
+    it "resolves nested numbered editor declarations to their physical bytes":
+        step("the shared closure resolver includes editor/00.common/types")
+        val root = secure_temp_dir_raw(".", "numbered-closure")
+        expect(root.len() > 0).to_equal(true)
+        expect(dir_create_all(root + "/editor/00.common")).to_equal(true)
+        val owner = root + "/editor/00.common/types.spl"
+        expect(file_write_exact(owner, "class EditorBufferId:\n    value: i64\n")).to_equal(true)
+        val resolved = _nb_resolve_under_root(root, ["editor", "common", "types"])
+        expect(resolved).to_equal(owner)
+        expect(file_read_nullable(resolved) ?? "missing").to_contain("EditorBufferId")
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "resolves a numbered final package segment and prefers mod over init":
+        step("numbered package facades use the same lookup as intermediate directories")
+        val root = secure_temp_dir_raw(".", "numbered-package")
+        expect(root.len() > 0).to_equal(true)
+        expect(dir_create_all(root + "/10.frontend")).to_equal(true)
+        expect(file_write_exact(root + "/10.frontend/__init__.spl", "val initial = 1\n")).to_equal(true)
+        expect(_nb_resolve_under_root(root, ["frontend"])).to_equal(root + "/10.frontend/__init__.spl")
+        expect(file_write_exact(root + "/10.frontend/mod.spl", "val module_value = 2\n")).to_equal(true)
+        expect(_nb_resolve_under_root(root, ["frontend"])).to_equal(root + "/10.frontend/mod.spl")
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "rejects ambiguous numbered siblings while preserving exact precedence":
+        step("filesystem enumeration order cannot select between two owners")
+        val root = secure_temp_dir_raw(".", "ambiguous-numbered")
+        expect(root.len() > 0).to_equal(true)
+        expect(dir_create_all(root + "/00.common")).to_equal(true)
+        expect(dir_create_all(root + "/10.common")).to_equal(true)
+        expect(file_write_exact(root + "/00.common/types.spl", "val first = 1\n")).to_equal(true)
+        expect(file_write_exact(root + "/10.common/types.spl", "val second = 2\n")).to_equal(true)
+        expect(_nb_resolve_under_root(root, ["common", "types"])).to_equal("")
+        expect(dir_create_all(root + "/common")).to_equal(true)
+        expect(file_write_exact(root + "/common/types.spl", "val exact = 3\n")).to_equal(true)
+        expect(_nb_resolve_under_root(root, ["common", "types"])).to_equal(root + "/common/types.spl")
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "does not interpret a Git symlink placeholder as a module directory":
+        step("only real materialized source can enter the closure")
+        val root = secure_temp_dir_raw(".", "placeholder-closure")
+        expect(root.len() > 0).to_equal(true)
+        expect(file_write_exact(root + "/alias", "real")).to_equal(true)
+        expect(_nb_resolve_under_root(root, ["alias", "mod"])).to_equal("")
+        expect(dir_remove(root, true)).to_equal(true)
+
+    it "resolves checked in-root directory links to numbered target owners":
+        step("create a real checked link rather than a successful mock")
+        val root = secure_temp_dir_raw(".", "linked-numbered")
+        expect(root.len() > 0).to_equal(true)
+        expect(dir_create_all(root + "/real/00.common")).to_equal(true)
+        expect(file_write_exact(root + "/real/00.common/types.spl", "val linked_owner = 7\n")).to_equal(true)
+        expect(snapshot_symlink_create_nofollow_v1(root, root + "/alias", "real", 2)).to_equal(true)
+        val resolved = _nb_resolve_under_root(root, ["alias", "common", "types"])
+        expect(resolved).to_equal(root + "/alias/00.common/types.spl")
+        expect(file_read_nullable(resolved) ?? "missing").to_equal("val linked_owner = 7\n")
+        expect(dir_remove(root, true)).to_equal(true)

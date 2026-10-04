@@ -24,6 +24,7 @@ use std.spec.skip_governance.{
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 use std.io_runtime.{file_append_text, file_exists, file_read}
+use std.nogc_sync_mut.fs.host_path.{host_path_is_absolute}
 
 # ================================================================
 # Global Test State
@@ -68,6 +69,8 @@ var _aggregate_seen_owner_paths: [text] = []
 var _aggregate_in_test: [i64] = []
 var _aggregate_in_hook: [i64] = []
 var _aggregate_failed_cases: [i64] = []
+var _aggregate_selected_case: [text] = []
+var _aggregate_selected_results: [text] = []
 
 fn _aggregate_active() -> bool:
     _aggregate_ledger_paths.len() == 1
@@ -149,6 +152,8 @@ fn _aggregate_declare(name: text, kind: text) -> text:
 fn _aggregate_result(id: text, outcome: text):
     if id != "":
         val _ = _aggregate_append("result\t{id}\t{outcome}")
+        if _aggregate_selected_case.contains(id):
+            _aggregate_selected_results.push(id)
         if outcome == "fail":
             _aggregate_failed_cases.push(1)
 
@@ -159,7 +164,7 @@ pub fn aggregate_registry_begin(mode: text, backend: text, subsystem: text, whol
         return false
     if not _aggregate_valid_sha(whole_inventory_sha) or not _aggregate_valid_sha(subset_sha):
         return false
-    if not ledger_path.starts_with("/") or not _aggregate_valid_field(ledger_path):
+    if not host_path_is_absolute(ledger_path) or not _aggregate_valid_field(ledger_path):
         return false
     val header = "simple-subsystem-registry-v1\t{backend}\t{subsystem}\t{whole_inventory_sha}\t{subset_sha}\n"
     # The check is diagnostic only; the exclusive create below owns the race.
@@ -212,6 +217,17 @@ pub fn aggregate_owner_begin(path: text, source_sha: text) -> bool:
     current_test_errors.clear()
     _aggregate_append("owner_begin\t{path}\t{source_sha}")
 
+pub fn aggregate_registry_select_case(id: text) -> bool:
+    # Selection follows complete enumeration in the parent. It does not alter
+    # registration or stable IDs and cannot manufacture skipped outcomes.
+    if not _aggregate_active() or _aggregate_enum() or not _aggregate_valid_sha(id): return false
+    if _aggregate_selected_case.contains(id) or _aggregate_all_ids.len() != 0: return false
+    _aggregate_selected_case.push(id)
+    true
+
+fn _aggregate_case_selected(id: text) -> bool:
+    _aggregate_selected_case.len() == 0 or _aggregate_selected_case.contains(id)
+
 pub fn aggregate_owner_end() -> bool:
     if not _aggregate_active():
         return false
@@ -243,7 +259,8 @@ pub fn aggregate_owner_end() -> bool:
 pub fn aggregate_registry_finish() -> i64:
     if not _aggregate_active():
         return 2
-    val valid = _aggregate_owner_paths.len() == 0 and _aggregate_owner_count.len() > 0 and _aggregate_all_ids.len() > 0 and _aggregate_errors.len() == 0
+    val selection_valid = _aggregate_selected_case.len() == 0 or _aggregate_selected_results.len() == _aggregate_selected_case.len()
+    val valid = selection_valid and _aggregate_owner_paths.len() == 0 and _aggregate_owner_count.len() > 0 and _aggregate_all_ids.len() > 0 and _aggregate_errors.len() == 0
     var result = 2
     if valid:
         if _aggregate_append("complete\tregistration_ok=1\ttest_callbacks_executed={_aggregate_test_callback_marks.len()}\thook_callbacks_executed={_aggregate_hook_callback_marks.len()}"):
@@ -268,6 +285,8 @@ pub fn aggregate_registry_finish() -> i64:
     _aggregate_in_test.clear()
     _aggregate_in_hook.clear()
     _aggregate_failed_cases.clear()
+    _aggregate_selected_case.clear()
+    _aggregate_selected_results.clear()
     result
 
 # NOTE: passed_test_names for pending_on dependency tracking is defined
@@ -405,21 +424,23 @@ fn _execute_it(name: text, block: fn()) -> text:
 
 fn _aggregate_run_case(name: text, kind: text, block: fn()):
     val id = _aggregate_declare(name, kind)
-    if _aggregate_enum() or id == "":
+    if _aggregate_enum() or id == "" or not _aggregate_case_selected(id):
         return
+    if not _aggregate_append("begin\t{id}"): return
     val outcome = _execute_it(name, block)
     _aggregate_result(id, outcome)
 
 fn _aggregate_skipped_case(name: text, kind: text):
     val id = _aggregate_declare(name, kind)
-    if not _aggregate_enum():
+    if not _aggregate_enum() and _aggregate_case_selected(id):
         _aggregate_result(id, "skip")
 
 fn _aggregate_conditional_case(name: text, kind: text, block: fn(), eligible: bool):
     val id = _aggregate_declare(name, kind)
-    if _aggregate_enum() or id == "":
+    if _aggregate_enum() or id == "" or not _aggregate_case_selected(id):
         return
     if eligible:
+        if not _aggregate_append("begin\t{id}"): return
         _aggregate_result(id, _execute_it(name, block))
     else:
         test_skipped = test_skipped + 1
@@ -622,7 +643,7 @@ pub fn skip(name: text, reason: text):
 pub fn skip_via_ref(name: text, id: text, block: fn()):
     if _aggregate_active():
         val case_id = _aggregate_declare(name, "skip_via_ref")
-        if _aggregate_enum() or case_id == "":
+        if _aggregate_enum() or case_id == "" or not _aggregate_case_selected(case_id):
             return
         val record = skip_ref(id)
         val validation = validate_skip_ref_record(record, _active_assurance_profile())

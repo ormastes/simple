@@ -1,0 +1,153 @@
+# A task snapshot is the actual durable database WAL revision, never a copy
+# of an in-memory task table or an invented admission receipt.
+use std.common.task_runner.journal.{TaskRunnerJournalV1, task_runner_journal_lease_check_v1}
+use std.nogc_sync_mut.database.wal_segmented.{DatabaseWalRevisionV1,
+    database_wal_current_v1, database_wal_revision_open_v1, database_wal_segment_read_strict_v1}
+use std.database.pure_sql.{PureDatabase}
+use std.database.sql.types.{DbValue}
+use std.database.wal.{WalEntryType}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1, task_runner_identity_v1}
+use std.common.task_runner.index.{task_runner_inventory_digest_v1,
+    task_runner_inventory_encode_v1, task_runner_inventory_decode_v1,
+    task_runner_inventory_registered_v1, task_runner_storage_unescape_v1,
+    task_runner_storage_escape_v1, task_runner_attempt_decode_v1,
+    task_runner_index_apply_v1, task_runner_index_history_v1}
+
+# Read-only physical revision view. These transient indexes are rebuilt from
+# authenticated WAL records, never published as a new database or snapshot.
+struct TaskRunnerSnapshotViewV1:
+    revision: text
+    database_identity: text
+    source_authority_digest: text
+    current_group: text
+    db: PureDatabase
+    window_db: PureDatabase
+
+fn task_runner_snapshot_view_v1(root: text, revision: text, source: text,
+        expected: [TaskRunnerIdentityV1], current_group: text) -> Result<TaskRunnerSnapshotViewV1, text>:
+    if current_group.len() < 1 or current_group.len() > 4096: return Err("invalid snapshot execution group")
+    val inventory = task_runner_inventory_digest_v1(expected, source)?
+    val identity = sha256_text("SIMPLE-TASK-DB-1\n" + source + "\n" + inventory)
+    val created = PureDatabase.memory_deferred()
+    val window_created = PureDatabase.memory_deferred()
+    if created.is_err() or window_created.is_err(): return Err("snapshot PureDatabase initialization failed")
+    var db = created.unwrap()
+    var window = window_created.unwrap()
+    for sql in ["CREATE TABLE task_history (identity TEXT PRIMARY KEY, projection TEXT)",
+            "CREATE TABLE task_inventory (identity TEXT PRIMARY KEY, metadata TEXT)"]:
+        if db.exec_sql(sql).is_err(): return Err("snapshot index schema failed")
+    if window.exec_sql("CREATE TABLE task_history (identity TEXT PRIMARY KEY, projection TEXT)").is_err():
+        return Err("snapshot execution window schema failed")
+    for row in expected:
+        val key = task_runner_identity_v1(row)?
+        if db.put("task_inventory", [DbValue.Text(key),
+                DbValue.Text(task_runner_inventory_encode_v1(row)?)]).is_err():
+            return Err("snapshot expected inventory insertion failed")
+
+    var cursor = revision
+    var expected_last: i64 = -1
+    var seen: i64 = 0
+    var registered: Dict<text, bool> = {}
+    var complete_sequence: i64 = -1
+    var first_task_sequence: i64 = 10000001
+    while cursor != "":
+        if seen >= 10000000: return Err("snapshot task history bound exceeded")
+        val committed = database_wal_revision_open_v1(root + "/database-wal", cursor)?
+        if committed.database_identity != identity: return Err("snapshot task database authority differs")
+        if expected_last >= 0 and committed.last_sequence != expected_last:
+            return Err("snapshot task sequence gap")
+        expected_last = committed.first_sequence - 1
+        val entries = database_wal_segment_read_strict_v1(root + "/database-wal", committed)?
+        for entry in entries:
+            if entry.entry_type != WalEntryType.Insert: return Err("snapshot task operation unsupported")
+            if entry.table_name == "task_inventory":
+                if registered.contains_key(entry.row_key): return Err("snapshot duplicate inventory row")
+                val physical = task_runner_storage_unescape_v1(entry.data)
+                if task_runner_storage_escape_v1(physical) != entry.data:
+                    return Err("snapshot inventory encoding differs")
+                val found = db.get("task_inventory", "identity", DbValue.Text(entry.row_key))
+                if found.is_err() or found.unwrap() == nil: return Err("snapshot unregistered persisted identity")
+                if (found.unwrap().unwrap().get_text("metadata") ?? "") != physical:
+                    return Err("snapshot persisted inventory metadata differs")
+                registered[entry.row_key] = true
+            elif entry.table_name == "task_inventory_complete":
+                if complete_sequence >= 0 or entry.row_key != inventory or entry.data != str(expected.len()):
+                    return Err("snapshot inventory completion differs")
+                complete_sequence = entry.sequence
+            elif entry.table_name == "task_attempts":
+                val _registered = task_runner_inventory_registered_v1(db, entry.row_key)?
+                val payload = task_runner_storage_unescape_v1(entry.data)
+                if task_runner_storage_escape_v1(payload) != entry.data:
+                    return Err("snapshot attempt encoding differs")
+                val row = task_runner_attempt_decode_v1(payload)?
+                if row.identity_digest != entry.row_key: return Err("snapshot attempt key differs")
+                if entry.sequence < first_task_sequence: first_task_sequence = entry.sequence
+                db = task_runner_index_apply_v1(db, entry.sequence, row)?
+                # Filter before projection. Current-group rows must not vanish
+                # behind the newest terminals of unrelated later invocations.
+                if row.group_id == current_group:
+                    window = task_runner_index_apply_v1(window, entry.sequence, row)?
+            else: return Err("snapshot task table unsupported")
+        seen = seen + 1
+        cursor = committed.parent
+    if seen == 0 or expected_last != 0 or registered.len() != expected.len() or
+       complete_sequence != expected.len() + 1 or first_task_sequence <= complete_sequence:
+        return Err("snapshot task registration incomplete or misordered")
+    Ok(TaskRunnerSnapshotViewV1(revision, identity, source, current_group, db, window))
+
+fn task_runner_snapshot_inventory_v1(view: TaskRunnerSnapshotViewV1) -> Result<[TaskRunnerIdentityV1], text>:
+    val scanned = view.db.scan_all("task_inventory")
+    if scanned.is_err(): return Err("snapshot inventory scan failed")
+    val physical = scanned.unwrap()
+    if physical.len() < 1 or physical.len() > 100000: return Err("snapshot inventory count outside bound")
+    var result: [TaskRunnerIdentityV1] = []
+    for stored in physical:
+        val row = task_runner_inventory_decode_v1(stored.get_text("metadata") ?? "")?
+        if task_runner_identity_v1(row)? != (stored.get_text("identity") ?? ""):
+            return Err("snapshot inventory identity differs")
+        result = result.push(row)
+    Ok(result)
+
+fn task_runner_snapshot_history_v1(view: TaskRunnerSnapshotViewV1,
+        identity: text) -> Result<[TaskRunnerAttemptV1], text>:
+    val _registered = task_runner_inventory_registered_v1(view.db, identity)?
+    task_runner_index_history_v1(view.db, identity)
+
+fn task_runner_snapshot_window_history_v1(view: TaskRunnerSnapshotViewV1,
+        identity: text) -> Result<[TaskRunnerAttemptV1], text>:
+    val _registered = task_runner_inventory_registered_v1(view.db, identity)?
+    task_runner_index_history_v1(view.window_db, identity)
+
+fn task_runner_snapshot_commit_v1(owner: TaskRunnerJournalV1,
+        expected_revision: text) -> Result<text, text>:
+    val _lease = task_runner_journal_lease_check_v1(owner)?
+    if expected_revision != owner.revision: return Err("snapshot task revision differs")
+    val current = database_wal_current_v1(owner.root + "/database-wal", owner.database_identity)?
+    if current != owner.revision or current == "": return Err("no matching durable task revision")
+    Ok(current)
+
+fn task_runner_snapshot_open_v1(root: text, revision: text,
+        database_identity: text) -> Result<DatabaseWalRevisionV1, text>:
+    val value = database_wal_revision_open_v1(root + "/database-wal", revision)?
+    if value.database_identity != database_identity: return Err("snapshot database identity differs")
+    # Cold snapshot opening verifies reachable committed history once. Hot
+    # snapshot capture above is only the already-owned current revision.
+    var cursor = value
+    var seen: i64 = 0
+    while true:
+        if seen >= 10000000: return Err("snapshot history bound exceeded")
+        if cursor.database_identity != database_identity: return Err("snapshot history database differs")
+        val _entries = database_wal_segment_read_strict_v1(root + "/database-wal", cursor)?
+        seen = seen + 1
+        if cursor.parent == "":
+            if cursor.first_sequence != 1: return Err("snapshot history genesis missing")
+            break
+        val parent = database_wal_revision_open_v1(root + "/database-wal", cursor.parent)?
+        if parent.last_sequence != cursor.first_sequence - 1: return Err("snapshot history sequence gap")
+        cursor = parent
+    Ok(value)
+
+export task_runner_snapshot_commit_v1, task_runner_snapshot_open_v1
+export TaskRunnerSnapshotViewV1, task_runner_snapshot_view_v1
+export task_runner_snapshot_inventory_v1, task_runner_snapshot_history_v1, task_runner_snapshot_window_history_v1
