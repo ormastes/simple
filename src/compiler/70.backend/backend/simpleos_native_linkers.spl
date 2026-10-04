@@ -33,7 +33,7 @@ use compiler.backend.verify.allocator_symbol_scan.{flight_allocator_scan_for_pro
 # resolves doc/08_tracking/bug/compiler_native_link_direct_runtime_facade_2026-07-12.md.
 use std.nogc_sync_mut.io_runtime.{env_get, file_copy, file_delete, file_exists, file_read, file_write, file_hash_sha256, file_hash_sha256_or_empty, file_size_raw, remove_file_if_exists, process_run, process_run_timeout, dir_create_all, dir_exists, dir_remove_all}
 use compiler.backend.backend.llvm_native_link_hosted_support.{compile_entry_point_c}
-use compiler.backend.backend.simpleos_native_symbols.{simpleos_x86_64_sysroot, simpleos_x86_64_user_link_inputs, compile_simpleos_x86_64_c, simpleos_x86_64_c_flags, compile_simpleos_arm64, simpleos_spl_start_symbol}
+use compiler.backend.backend.simpleos_native_symbols.{simpleos_x86_64_sysroot, simpleos_x86_64_user_link_inputs, compile_simpleos_x86_64_c, simpleos_x86_64_c_flags, simpleos_x86_64_clang, compile_simpleos_arm64, simpleos_spl_start_symbol}
 use compiler.backend.backend.simpleos_native_guards.{simpleos_entry_key, simpleos_check_no_forbidden_allocators, simpleos_check_no_fabricated_rt_stubs, simpleos_module_init_symbols, simpleos_module_init_caller_source, simpleos_module_init_caller_source_for_symbol}
 
 fn _simpleos_internal_requested() -> bool:
@@ -209,7 +209,14 @@ fn link_simpleos_x86_64(user_objects: [text], output: text, verbose: bool, opt_l
         if not file_exists(linker_script):
             return Err("SimpleOS x86_64 sysroot is incomplete: missing {linker_script}; run sh src/os/port/llvm/sysroot.shs or set SIMPLE_SYSROOT")
 
-        val entry_result = compile_entry_point_c([], getpid(), verbose, opt_level)
+        # The entry shim is a SimpleOS cross object: use the same Clang and
+        # target as every other SimpleOS C input. The hosted C-compiler probe
+        # rejects simpleos targets (OS mismatch) and returned "No C compiler
+        # found" for every pure-Simple SimpleOS link.
+        val entry_cc = match simpleos_x86_64_clang():
+            case Ok(cc): cc
+            case Err(e): return Err("SimpleOS x86_64 entry compilation failed: {e}")
+        val entry_result = compile_entry_point_c([], getpid(), verbose, opt_level, entry_cc, "x86_64-unknown-none-elf")
         val entry_object = match entry_result:
             case Ok(path): path
             case Err(e): return Err("SimpleOS x86_64 entry compilation failed: {e}")
