@@ -31,6 +31,25 @@ Proposed public names, subject to root's final shared freeze:
   library collection.
 - `macho_read_tbd_v1(bytes, target, limits) -> Result<MachOTbdDocumentV1, text>`.
 
+Joint freeze refinement: target is `{arch: RelocArch, platform: i64}`. Retain
+`install_names: [MachOTbdInstallNameV1]`, each with `{targets: [text], name: text}`,
+and selected `install_name: Option<text>`. Unavailable inline target selection
+uses `None`; do not invent a name from the first scoped identity. Main requires a
+selected identity. Library `declared_targets` and `selected` preserve availability.
+Limits default to max_bytes=16777216, max_tokens=1048576, max_depth=64,
+max_libraries=4096, max_symbols=1048576 and max_name_bytes=4096. Callers may lower
+these limits; defaults also cap accepted limit settings.
+
+`macho_tbd_main_provider_v1(document, target) -> Result<MachOProviderV1, text>`
+performs explicit leaf lowering. Root's native file adapter routes actual selected
+`.tbd` bytes through read/lower into the same hosted provider consumer; binary
+providers retain real binary validation. Runtime inputs remain archive-only.
+Leaf exports preserve ordinary/weak/TLV flags, with selected unsupported weak
+semantics still rejected by the hosted consumer. Closure, undefined-interface,
+unimplemented flags/clients/umbrella/rpaths/Swift/ObjC/directive semantics must
+reject explicitly when lowering cannot honor them. This is an implemented leaf
+route prerequisite, not a claim the retained full SDK requirements are complete.
+
 Schema parsing precedes target selection. Reject malformed groups even if they
 would not be selected. Main target absence is a named error. An unrelated inline
 library may lack the chosen target without invalidating the main interface;
