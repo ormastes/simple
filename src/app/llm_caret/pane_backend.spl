@@ -4,9 +4,10 @@
 # currently taking a command, and captures what a pane's child printed (the
 # dashboard's right-hand agent screen). Two backends behind one surface:
 #
-#   tmux  - POSIX hosts where tmux answers a positive probe.
-#   smux  - Simple's own multiplexer (os.apps.smux.api): every other host,
-#           including Windows, where each pane child runs on a real ConPTY.
+#   smux  - Simple's own multiplexer (os.apps.smux.api): the DEFAULT on every
+#           host, including Windows, where each pane child runs on a real ConPTY.
+#   tmux  - opt-in with CS_PANE_BACKEND=tmux, on POSIX hosts where tmux
+#           answers a positive probe.
 #
 # tmux calls go through the sosix facade (std.nogc_async_mut.sosix) - tools
 # depend on sosix, never on process_run/tmux directly. smux is in-process, so
@@ -18,6 +19,7 @@ use os.apps.smux.api.{smux_create_session, smux_list_sessions,
     smux_focused_pane, smux_close_pane, smux_pane_spawn_pty, smux_pane_alive,
     smux_send_command, smux_send_text, smux_capture}
 use std.nogc_sync_mut.io.{thread_sleep_ms}
+use app.io.mod.{env_get}
 
 # Gap between typing a message and pressing Enter, so the TUI sees two input
 # events. Measured enough for codex and kimi on ConPTY.
@@ -175,8 +177,12 @@ fn _tmux_available() -> bool:
         return false
     sosix_run("tmux", ["-V"]).exit_code == 0
 
+# Default is Simple's own smux; tmux is opt-in via CS_PANE_BACKEND=tmux.
+fn _use_tmux() -> bool:
+    (env_get("CS_PANE_BACKEND") ?? "") == "tmux" and _tmux_available()
+
 fn pane_backend_name() -> text:
-    if _tmux_available():
+    if _use_tmux():
         return "tmux"
     "smux"
 
@@ -283,7 +289,7 @@ fn _smux_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
 # ---------------------------------------------------------------------------
 
 fn pane_list(session: text) -> [Pane]:
-    if not _tmux_available():
+    if not _use_tmux():
         return _smux_list(session)
     val result = sosix_run("tmux", pane_list_argv(session))
     if result.exit_code != 0:
@@ -293,7 +299,7 @@ fn pane_list(session: text) -> [Pane]:
 fn pane_select(session: text, pane_id: text) -> bool:
     if session == "" or pane_id == "":
         return false
-    if not _tmux_available():
+    if not _use_tmux():
         val scope = _smux_scope(session)
         return smux_focus_pane(scope.session_id, scope.window_id, pane_id)
     _tmux_ok(pane_select_argv(pane_id))
@@ -302,7 +308,7 @@ fn pane_select(session: text, pane_id: text) -> bool:
 fn pane_zoom(session: text, pane_id: text) -> bool:
     if session == "" or pane_id == "":
         return false
-    if not _tmux_available():
+    if not _use_tmux():
         var known = false
         for p in _smux_list(session):
             if p.pane_id == pane_id:
@@ -316,7 +322,7 @@ fn pane_zoom(session: text, pane_id: text) -> bool:
 fn pane_kill(session: text, pane_id: text) -> bool:
     if session == "" or pane_id == "":
         return false
-    if not _tmux_available():
+    if not _use_tmux():
         val scope = _smux_scope(session)
         if not smux_close_pane(scope.session_id, scope.window_id, pane_id):
             return false
@@ -334,7 +340,7 @@ fn pane_kill(session: text, pane_id: text) -> bool:
 fn pane_send(session: text, pane_id: text, body: text) -> bool:
     if session == "" or pane_id == "" or body == "":
         return false
-    if not _tmux_available():
+    if not _use_tmux():
         # Type, pause, then press Enter as its own keystroke. Text and "\r" in
         # one write reach a TUI as a single paste, and agent TUIs (codex, kimi)
         # keep a pasted newline in the composer instead of submitting.
@@ -387,7 +393,7 @@ fn pane_key_tmux_name(key: text) -> text:
 fn pane_send_key(session: text, pane_id: text, key: text) -> bool:
     if session == "" or pane_id == "" or pane_key_bytes(key) == "":
         return false
-    if not _tmux_available():
+    if not _use_tmux():
         val scope = _smux_scope(session)
         return smux_send_text(scope.session_id, scope.window_id, pane_id, pane_key_bytes(key)).is_ok()
     _tmux_ok(["send-keys", "-t", pane_id, pane_key_tmux_name(key)])
@@ -399,7 +405,7 @@ fn pane_capture(session: text, pane_id: text, lines: i64) -> [text]:
     if session == "" or pane_id == "":
         return out
     var raw = ""
-    if not _tmux_available():
+    if not _use_tmux():
         val scope = _smux_scope(session)
         val cap = smux_capture(scope.session_id, scope.window_id, pane_id, lines)
         if cap.is_err():
@@ -422,7 +428,7 @@ fn pane_spawn(session: text, title: text, cmd: text, args: [text]) -> Pane:
     val empty = Pane(pane_id: "", title: title, pid: 0, active: false, zoomed: false)
     if session == "" or cmd == "":
         return empty
-    if not _tmux_available():
+    if not _use_tmux():
         return _smux_spawn(session, title, cmd, args)
     var argv: [text] = []
     if pane_list(session).len() == 0:
