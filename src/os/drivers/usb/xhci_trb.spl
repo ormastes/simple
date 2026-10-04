@@ -51,7 +51,15 @@ val TRB_CYCLE: u32        = 0x1    # Cycle bit — producer/consumer sync
 val TRB_TOGGLE_CYCLE: u32 = 0x2    # Toggle Cycle on Link TRB
 val TRB_IOC: u32          = 0x20   # Interrupt On Completion
 val TRB_IDT: u32          = 0x40   # Immediate Data (data in TRB itself)
-val TRB_DIR_IN: u32       = 0x10   # Transfer Direction = IN (Status/Data stage)
+# DIR is bit 16 of the Data/Status Stage TRB control word (xHCI spec Table
+# 6-29/6-31). It was previously defined as 0x10 — that is bit 4 = Chain (CH),
+# which chained the Data TRB and marked the data stage OUT; devices answered
+# GET_DESCRIPTOR with a STALL (completion code 6) under QEMU.
+val TRB_DIR_IN: u32       = 0x10000
+# TRT (Transfer Type) field of the Setup Stage TRB, bits [17:16]:
+# 0 = no data stage, 2 = OUT data stage, 3 = IN data stage.
+val TRB_TRT_OUT_DATA: u32 = 0x20000
+val TRB_TRT_IN_DATA: u32  = 0x30000
 val TRB_ISP: u32          = 0x4    # Interrupt on Short Packet
 
 # ============================================================================
@@ -154,6 +162,13 @@ fn trb_setup(request_type: u8, request: u8, value: u16, index: u16, length: u16,
     # Status: transfer length = 8 (SETUP packet always 8 bytes)
     val stat: u32 = 8
     var ctrl = trb_type_field(TRB_TYPE_SETUP) | TRB_IDT
+    # TRT (bits [17:16]) tells the controller whether/which way a data stage
+    # follows: required by the xHCI spec for Setup Stage TRBs.
+    if length > 0:
+        if (request_type & 0x80) != 0:
+            ctrl = ctrl | TRB_TRT_IN_DATA
+        else:
+            ctrl = ctrl | TRB_TRT_OUT_DATA
     if cycle:
         ctrl = ctrl | TRB_CYCLE
     (param, stat, ctrl)
