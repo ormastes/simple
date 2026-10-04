@@ -69,9 +69,23 @@ fn emu_draw_image_blend(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32,
     if core.name() == "cpu":
         core.draw_image_blend(x, y, w, h, pixels)
         return
-    val fb: [u32] = core.read_pixels()
     val fb_w = core.width()
     val fb_h = core.height()
+    # The blend reads only the destination rectangle. The software backend
+    # has a native region read that copies exactly those rows out of the SAME
+    # `buf` its whole-frame `read_pixels` snapshots, so `region[py*w+px]`
+    # equals `fb[fy*fb_w+fx]` for every in-bounds pixel -- the only pixels read
+    # below. A whole-frame snapshot at 3840x2160 was 506 MB per blended glyph
+    # quad. Other backends keep the whole-frame read: their region seam is the
+    # trait default built on `read_pixels_with_source`, not `read_pixels`.
+    var use_region = false
+    var region: [u32] = []
+    var fb: [u32] = []
+    if core.name() == "software":
+        region = core.read_pixels_region(x, y, w, h).pixels
+        use_region = region.len().to_i64() == w.to_i64() * h.to_i64()
+    if not use_region:
+        fb = core.read_pixels()
     var result: [u32] = [0u32; w * h]
     var py: i32 = 0
     # cpu-lane-loop-ok: image blend scanline walk: one iteration per destination row
@@ -86,11 +100,12 @@ fn emu_draw_image_blend(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32,
             if fx >= 0 and fx < fb_w and fy >= 0 and fy < fb_h:
                 if sa == 255:
                     result[py * w + px] = src
-                else if sa == 0:
-                    result[py * w + px] = fb[fy * fb_w + fx]
                 else:
-                    val dst = fb[fy * fb_w + fx]
-                    result[py * w + px] = _emu_blend_over(color_r(src), color_g(src), color_b(src), sa, dst)
+                    val dst = if use_region: region[py * w + px] else: fb[fy * fb_w + fx]
+                    if sa == 0:
+                        result[py * w + px] = dst
+                    else:
+                        result[py * w + px] = _emu_blend_over(color_r(src), color_g(src), color_b(src), sa, dst)
             px = px + 1
         py = py + 1
     core.draw_image(x, y, w, h, result)

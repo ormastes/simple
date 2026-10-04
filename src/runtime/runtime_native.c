@@ -8513,7 +8513,22 @@ int8_t rt_array_push_i64_raw(SplArray* a, int64_t val) {
 /* Bulk element copy between two array handles: copies `count` slots from
  * src[src_off..] into dst[dst_off..]. Contract mirrors the seed runtime's
  * rt_array_write_span (compiler_rust/runtime value/collections.rs): returns
- * 0 for count <= 0, -1 on any out-of-bounds or invalid handle, else count.
+ * 0 for count <= 0 and -1 for an invalid DESTINATION handle, else count.
+ * An out-of-range span or a non-array source is a program error: like the
+ * interpreter (and the seed runtime), it prints
+ * `error: semantic: write_span ...` and exits with status 1 instead of
+ * returning a -1 that no compiled call site checks. */
+static void rt_array_write_span_fail_range(int64_t dst_off, int64_t src_off, int64_t count,
+                                           int64_t dst_len, int64_t src_len) {
+    fprintf(stderr,
+            "error: semantic: write_span out of range: dst_off=%lld src_off=%lld count=%lld "
+            "dst_len=%lld src_len=%lld\n",
+            (long long)dst_off, (long long)src_off, (long long)count,
+            (long long)dst_len, (long long)src_len);
+    exit(1);
+}
+
+/* Contract (continued):
  * Overlap-safe for dst == src (memmove). The memmove fast path requires the
  * FULL storage layout to match — BOTH the BYTES flag AND the U64_PACKED flag
  * (same pairwise flag-equality discipline as rt_core_array_eq above): a
@@ -8528,11 +8543,16 @@ int64_t rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,
     if (count <= 0) return 0;
     RtCoreArray* d = rt_core_array_ptr(dst);
     RtCoreArray* s = rt_core_array_ptr(src);
-    if (!d || !s) return -1;
+    if (!d) return -1;
+    if (!s) {
+        fprintf(stderr, "error: semantic: write_span expects array source argument\n");
+        exit(1);
+    }
     /* Explicit count-vs-len checks first so `len - count` can never
      * underflow below the signed range (pathological huge counts). */
     if (dst_off < 0 || src_off < 0 || count > d->len || count > s->len ||
-        dst_off > d->len - count || src_off > s->len - count) return -1;
+        dst_off > d->len - count || src_off > s->len - count)
+        rt_array_write_span_fail_range(dst_off, src_off, count, (int64_t)d->len, (int64_t)s->len);
     int d_bytes = (d->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
     int s_bytes = (s->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
     int d_u64 = (d->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;

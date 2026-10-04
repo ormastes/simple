@@ -6101,10 +6101,17 @@ pub extern "C" fn rt_array_fill(array: RuntimeValue, value: RuntimeValue) -> boo
 /// `array_write_span`), added for
 /// doc/08_tracking/bug/engine2d_interpreter_span_kernel_marshalling_perf_gap_2026-08-14.md.
 /// Semantics mirror the interpreter kernel: count <= 0 is a no-op returning 0;
-/// out-of-range NEVER writes and never grows the destination (returns tagged -1
-/// here, where the interpreter raises a loud error — a C ABI cannot); overlap is
+/// out-of-range NEVER writes and never grows the destination; overlap is
 /// memmove-style (`copy_within` when dst and src are the same heap object).
 /// Returns the count written.
+///
+/// An out-of-range span, or a non-array source, is a program error that the
+/// interpreter raises (`write_span out of range: ...`, exit 1). This lane used
+/// to return a tagged -1 that no call site checks, so the same program ran
+/// SILENTLY to completion under the JIT. It now fails with the interpreter's
+/// exact diagnostic and exit status. An invalid DESTINATION handle (not an
+/// array) keeps the -1 answer: the compiler only emits this call for an array
+/// receiver, so that case is an ABI misuse rather than a program error.
 #[no_mangle]
 pub extern "C" fn rt_array_write_span(
     dst: RuntimeValue,
@@ -6118,12 +6125,14 @@ pub extern "C" fn rt_array_write_span(
     }
     let err = RuntimeValue::from_int(-1);
     let dst_arr = as_typed_ptr!(mut dst, HeapObjectType::Array, RuntimeArray, err);
-    let src_arr = as_typed_ptr!(src, HeapObjectType::Array, RuntimeArray, err);
+    let Some(src_arr) = crate::value::heap::get_typed_ptr::<RuntimeArray>(src, HeapObjectType::Array) else {
+        write_span_fail("write_span expects array source argument");
+    };
     unsafe {
         let dst_len = (*dst_arr).len as i64;
         let src_len = (*src_arr).len as i64;
-        if dst_off < 0 || src_off < 0 || dst_off + count > dst_len || src_off + count > src_len {
-            return err;
+        if let Err(message) = write_span_range_check(dst_off, src_off, count, dst_len, src_len) {
+            write_span_fail(&message);
         }
         if std::ptr::eq(dst_arr as *const RuntimeArray, src_arr as *const RuntimeArray) {
             (*dst_arr)
@@ -6135,6 +6144,61 @@ pub extern "C" fn rt_array_write_span(
         }
     }
     RuntimeValue::from_int(count)
+}
+
+/// Bounds rule shared with the interpreter kernel
+/// (`interpreter_method/collections.rs::array_write_span`), with its exact
+/// message text. `count > 0` is the caller's precondition.
+fn write_span_range_check(dst_off: i64, src_off: i64, count: i64, dst_len: i64, src_len: i64) -> Result<(), String> {
+    // `checked_add`: a pathological offset must be reported, never wrap into range.
+    let dst_end = dst_off.checked_add(count);
+    let src_end = src_off.checked_add(count);
+    let in_range = dst_off >= 0
+        && src_off >= 0
+        && dst_end.is_some_and(|end| end <= dst_len)
+        && src_end.is_some_and(|end| end <= src_len);
+    if in_range {
+        Ok(())
+    } else {
+        Err(format!(
+            "write_span out of range: dst_off={dst_off} src_off={src_off} count={count} dst_len={dst_len} src_len={src_len}"
+        ))
+    }
+}
+
+/// Fail a `write_span` call the way the interpreter does for the same program:
+/// `error: semantic: <message>` on stderr, exit status 1.
+fn write_span_fail(message: &str) -> ! {
+    eprintln!("error: semantic: {message}");
+    std::process::exit(1);
+}
+
+#[cfg(test)]
+mod write_span_range_tests {
+    use super::write_span_range_check;
+
+    #[test]
+    fn in_range_spans_pass() {
+        assert!(write_span_range_check(0, 0, 3, 3, 3).is_ok());
+        assert!(write_span_range_check(2, 1, 1, 3, 2).is_ok());
+    }
+
+    #[test]
+    fn out_of_range_matches_the_interpreter_message() {
+        assert_eq!(
+            write_span_range_check(2, 0, 5, 3, 5).unwrap_err(),
+            "write_span out of range: dst_off=2 src_off=0 count=5 dst_len=3 src_len=5"
+        );
+        assert!(write_span_range_check(-1, 0, 1, 3, 3).is_err());
+        assert!(write_span_range_check(0, -1, 1, 3, 3).is_err());
+        assert!(write_span_range_check(0, 3, 1, 3, 3).is_err());
+    }
+
+    #[test]
+    fn overflowing_offsets_are_reported_not_wrapped() {
+        assert!(write_span_range_check(i64::MAX, 0, 2, 3, 3).is_err());
+        assert!(write_span_range_check(0, i64::MAX, 2, 3, 3).is_err());
+    }
 }
 
 /// Create a new array filled with a value
