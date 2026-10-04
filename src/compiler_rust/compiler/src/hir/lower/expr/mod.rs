@@ -1291,7 +1291,15 @@ impl Lowerer {
         // signatures agree.  This is especially important for `T?` returns:
         // losing `MouseEvent?` here makes `if val event = backend.poll_mouse()`
         // bind `event` as ANY and rejects every subsequent field access.
-        if recv_ty == TypeId::ANY {
+        // A nullable trait receiver (`Provider?`, i.e. `Pointer { inner: ANY }`,
+        // as bound by `if val p = optional_provider:`) is the same erased
+        // trait value: without this, a trait with no implementor in the unit
+        // left exactly one unrelated `Other.resolve` in the suffix search
+        // below, and its return type (`WidgetNode`) won.
+        // doc/08_tracking/bug/jit_nullable_trait_receiver_method_typed_by_unrelated_struct_2026-10-05.md
+        let trait_like_receiver = recv_ty == TypeId::ANY
+            || matches!(self.module.types.get(recv_ty), Some(HirType::Pointer { inner, .. }) if *inner == TypeId::ANY);
+        if trait_like_receiver {
             if let Some(return_type) = self.agreed_trait_method_return_type(method) {
                 return return_type;
             }

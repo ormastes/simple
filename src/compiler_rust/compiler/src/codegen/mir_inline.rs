@@ -220,6 +220,7 @@ fn inline_call(
             &mut vreg_map,
             &local_map,
             &call_args,
+            &callee.params,
         );
         let terminator = remap_terminator(
             caller,
@@ -248,10 +249,11 @@ fn remap_instructions(
     vreg_map: &mut HashMap<VReg, VReg>,
     local_map: &HashMap<usize, usize>,
     call_args: &[VReg],
+    callee_params: &[crate::mir::MirLocal],
 ) {
     let mut index = 0;
     while index < source.len() {
-        if let Some(inst) = remap_param_load(caller, source, index, vreg_map, call_args) {
+        if let Some(inst) = remap_param_load(caller, source, index, vreg_map, call_args, callee_params) {
             out.push(inst);
             index += 2;
             continue;
@@ -267,6 +269,7 @@ fn remap_param_load(
     index: usize,
     vreg_map: &mut HashMap<VReg, VReg>,
     call_args: &[VReg],
+    callee_params: &[crate::mir::MirLocal],
 ) -> Option<MirInst> {
     let MirInst::LocalAddr {
         dest: addr,
@@ -278,6 +281,19 @@ fn remap_param_load(
     let Some(arg) = call_args.get(*local_index).copied() else {
         return None;
     };
+    // A float parameter must be read back from its slot (the entry `Store`
+    // above converts the argument to the parameter's float width). Forwarding
+    // the caller vreg directly made it cross into the inlined blocks as an
+    // i64-coerced Variable (f64 bits), which a later float->int `Cast` read as
+    // an integer: `floor(-0.41)` gave -1610612736 and bitmap text_bg glyphs
+    // lost most of their coverage under the JIT.
+    // doc/08_tracking/bug/jit_inlined_float_param_cast_reads_f64_bits_as_int_2026-10-05.md
+    if callee_params
+        .get(*local_index)
+        .is_some_and(|param| matches!(param.ty, crate::hir::TypeId::F32 | crate::hir::TypeId::F64))
+    {
+        return None;
+    }
     let MirInst::Load {
         dest, addr: load_addr, ..
     } = source.get(index + 1)?
