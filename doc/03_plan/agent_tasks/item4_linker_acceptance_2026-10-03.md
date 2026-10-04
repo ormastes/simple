@@ -1,5 +1,23 @@
 # Item 4 parallel ownership
 
+## 2026-10-04 terminal shutdown continuation
+
+Base: `8e141ae45a89250f30f694e49cd0312ac3eafa10`, target `release/1.0`.
+Root integrates on `work/item4-provider-shutdown-20261004` in the existing
+clean `C:/dev/simple-item4-sha-owner-20261004` worktree and owns the readiness
+ledger, verification report, review and merge. Separate worktree lanes:
+
+- Research: `C:/dev/simple-item4-generation-spec-20261004`; four test-first
+  retirement scenarios, design/manual, independent core and acceptance review.
+- Acceptance: `C:/dev/simple-item4-shutdown-tests-20261004`; two real mapped
+  shutdown scenarios and terminal cleanup of the six existing positives.
+- Runtime: `C:/dev/simple-item4-shutdown-core-20261004`; generation retirement
+  and lifecycle shutdown, after both test intents were committed.
+
+Shared APIs are `retire_active(expected)`, `shutdown()`, `is_closing()` and
+`is_closed()`. Lower-model sidecars: N/A. Root is final integration reviewer.
+Runtime tests and canonical docgen remain UNRUN; source review is not admission.
+
 ## 2026-10-04 configured provider continuation
 
 Base: release `b0f0cf98787`. Root owns lifecycle configured dispatch and final

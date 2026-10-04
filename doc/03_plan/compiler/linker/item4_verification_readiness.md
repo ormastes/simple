@@ -9,6 +9,15 @@ integration does not close verification or authorize publication.
 
 ## 2026-10-04 continuation
 
+Terminal provider shutdown follow-up: four generic retirement scenarios and two
+mapped-provider shutdown scenarios are authored before implementation. Shutdown
+now retires the active generation without allocating a replacement, closes owned
+sessions, retains failed cleanup owners for retry, and rejects new work once
+closing starts. Independent source review found no P0/P1. All six scenarios
+remain UNRUN; real unload-failure injection, CLI/trust/seal integration and the
+full platform corpus remain open. This source slice does not make Phase 4 ready.
+See `doc/08_tracking/verification/item4_provider_shutdown_2026-10-04.md`.
+
 Configured provider follow-up: V2 argv transport now preserves all 15 native
 configuration fields, the command uses the actual configured adapter, and
 lifecycle dispatch/recovery retain that context. Thirteen new scenario
