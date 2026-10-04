@@ -8,7 +8,7 @@ use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
 use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
 use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_same, path_identity_contains, path_entry_present}
 use std.scv.db_canonical.{db_domain_bytes, db_canonical_text, db_u64_bytes, db_frame}
-use std.common.crypto.sha256.{sha256_stream_v1_new, sha256_stream_v1_update, sha256_stream_v1_finish_hex}
+use std.common.crypto.sha256.{sha256_stream_v1_new}
 
 struct DbEvidenceClosureQuota:
     object_quota: DbEvidenceStoreQuota
@@ -40,10 +40,10 @@ fn _closure_enqueue(stage: text, digest: text, depth: u64, count: u64, quota: Db
 fn _closure_run(store: text, stage: text, roots: [text], quota: DbEvidenceClosureQuota) -> Result<DbEvidenceClosureReceipt, text>:
     var count = 0u64
     for digest in roots: count = _closure_enqueue(stage, digest, 0, count, quota)?
-    val stream = sha256_stream_v1_new()
-    if not sha256_stream_v1_update(stream, db_domain_bytes("evidence-closure", [])?): return Err("SCVDB_EVIDENCE_HASH")
+    var stream = sha256_stream_v1_new()
+    if not stream.update(db_domain_bytes("evidence-closure", [])?): return Err("SCVDB_EVIDENCE_HASH")
     for root in roots:
-        if not sha256_stream_v1_update(stream, db_frame(1u8, db_canonical_text(root)?)): return Err("SCVDB_EVIDENCE_HASH")
+        if not stream.update(db_frame(1u8, db_canonical_text(root)?)): return Err("SCVDB_EVIDENCE_HASH")
     var cursor = 0u64
     var total = 0u64
     while cursor < count:
@@ -62,11 +62,11 @@ fn _closure_run(store: text, stage: text, roots: [text], quota: DbEvidenceClosur
         if remaining < (object_quota.max_content_bytes as u64): object_quota.max_content_bytes = remaining as i64
         val info = db_evidence_inspect_at(store, fields[0], object_quota)?
         total = total + info.content_bytes
-        if not sha256_stream_v1_update(stream, db_frame(2u8, db_canonical_text(info.digest)? + db_frame(3u8, db_u64_bytes(info.content_bytes)))): return Err("SCVDB_EVIDENCE_HASH")
+        if not stream.update(db_frame(2u8, db_canonical_text(info.digest)? + db_frame(3u8, db_u64_bytes(info.content_bytes)))): return Err("SCVDB_EVIDENCE_HASH")
         for dependency in info.dependencies:
             count = _closure_enqueue(stage, dependency, depth + 1u64, count, quota)?
         cursor = cursor + 1u64
-    val digest = sha256_stream_v1_finish_hex(stream) ?? ""
+    val digest = stream.finish_hex() ?? ""
     if digest == "": return Err("SCVDB_EVIDENCE_HASH")
     Ok(DbEvidenceClosureReceipt(roots: roots, object_count: count, content_bytes: total, closure_digest: digest))
 

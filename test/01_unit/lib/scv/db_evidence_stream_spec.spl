@@ -1,15 +1,31 @@
 use std.spec.{describe, it, expect}
 use std.scv.db_evidence_stream.*
 use std.scv.db_retention.{db_evidence_digest}
-use std.common.crypto.sha256.{sha256_stream_v1_update}
 
 describe "Evidence digest streaming compatibility":
+    it "retains domain and chunk state against an independent envelope vector":
+        # SHA256 of ASCII scv-db/evidence-envelope/v1, NUL, then
+        # bytes 01 05 00 ff 0a 80 2a; independently computed with .NET.
+        var stream = db_evidence_stream_start(5u64).unwrap()
+        val header_bytes = stream.total_bytes
+        expect(header_bytes).to_equal(30u64)
+        expect(stream.update([0u8, 255u8])).to_be(true)
+        expect(stream.total_bytes).to_equal(32u64)
+        expect(stream.update([10u8, 128u8, 42u8])).to_be(true)
+        expect(stream.total_bytes).to_equal(35u64)
+        expect(db_evidence_stream_finish(stream, []).unwrap()).to_equal(
+            "4d8932856ed6228d33ac6427eb3784cfa690d0ee29a9bdd1d2caec1b50425565")
+
     it "matches the original canonical envelope across binary chunk boundaries":
         val content = [0u8,255u8,10u8,128u8,42u8]
         val dependencies = ["1111111111111111111111111111111111111111111111111111111111111111", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
-        val stream = db_evidence_stream_start(5u64).unwrap()
-        expect(sha256_stream_v1_update(stream, content[0:2])).to_be(true)
-        expect(sha256_stream_v1_update(stream, content[2:5])).to_be(true)
+        var stream = db_evidence_stream_start(5u64).unwrap()
+        val header_bytes = stream.total_bytes
+        expect(header_bytes).to_be_greater_than(0u64)
+        expect(stream.update(content[0:2])).to_be(true)
+        expect(stream.total_bytes).to_equal(header_bytes + 2u64)
+        expect(stream.update(content[2:5])).to_be(true)
+        expect(stream.total_bytes).to_equal(header_bytes + 5u64)
         expect(db_evidence_stream_finish(stream, dependencies).unwrap()).to_equal(db_evidence_digest(content, dependencies).unwrap())
         expect(db_evidence_stream_finish(db_evidence_stream_start(0u64).unwrap(), []).unwrap()).to_equal(db_evidence_digest([], []).unwrap())
         expect(db_evidence_stream_finish(db_evidence_stream_start(0u64).unwrap(), []).unwrap()).to_equal("d47edfd786539c6e9d91617afb65a582217fb65edf184cdef89cc1427e538d0b")

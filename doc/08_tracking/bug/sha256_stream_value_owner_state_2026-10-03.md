@@ -1,6 +1,21 @@
 # Streaming SHA-256 loses value-owner updates
 
-Status: OPEN; source-level finding, native regression execution UNRUN.
+Status: core repair and caller API migration authored; native regression
+execution remains OPEN / UNRUN. The separate compiler canonical-stream outer
+owner defect is tracked in `semantic_canonical_stream_owner_writeback_2026-10-04.md`.
+
+2026-10-04 core repair: `Sha256StreamV1` owns mutable state through `reset`,
+`update`, `update_byte`, `zeroize`, `finish_hex` methods and internal mutable
+compression/push methods. Constructor `sha256_stream_v1_new` remains; deceptive
+mutating free functions are removed. Integration migrates all source/test uses,
+the AST generator and generated output, SCV, mount snapshots and OS consumers.
+No compilation or full intermediate-wrapper correctness is claimed.
+
+New `test/01_unit/lib/common/crypto/sha256_stream_owner_spec.spl` checks exact
+original-owner counters, whole/partitioned/byte updates, lengths 55/56/63/64/65/
+119/120 against independent .NET SHA256.HashData vectors, overflow rejection,
+finalize-once, reset and wipe. Existing partition tests use the mutable API.
+All Simple execution and coverage remain UNRUN. One-shot SHA code is unchanged.
 Found while repairing retained-file ownership for item4. This is a separate
 crypto API migration, not fixed by the retained-file patch.
 
