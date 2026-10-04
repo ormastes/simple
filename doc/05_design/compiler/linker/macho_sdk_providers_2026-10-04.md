@@ -45,6 +45,29 @@ projection and independently inspect the emitted metadata. Deliberately changed
 typed contracts must produce corresponding bytes or a specific rejection.
 Public value construction is caller-trusted, not a security or manifest seal.
 
+Frozen immediate interfaces: `provider_types.spl` defines `MachOProviderV1`
+with target/platform, install name, packed current/compatibility versions,
+`Option` minimum_os/sdk, dependencies (command/name/versions), exports
+(name/flags/library_ordinal/import_name), `allowable_clients: [text]` and
+`parent_umbrella: Option<text>`. No VM address is present.
+`macho_validate_provider_v1(provider, target) -> Result<bool, text>` validates
+metadata shape without granting authority.
+
+`binary_provider.spl:macho_read_binary_provider_v1(bytes, target)` returns that
+provider only after `macho_read_dylib` succeeds. It then checks the bounded
+LC_SUB_CLIENT (`0x14`) and LC_SUB_FRAMEWORK (`0x12`) strings and preserves them.
+The original binary reader remains intact. Preserve `Some(0)` for a real binary
+SDK field even when minimum_os is positive; it is not invented absence. Preserve
+resolver flag 16 and unused unsupported export metadata. Existing selected
+weak/absolute/reexport import rejection remains at actual binding selection.
+
+`macho_hosted_link_with_providers(objects, archives, providers, request)` is the
+typed production consumer; the original byte-provider API decodes and delegates.
+Fixup and image construction consume the same typed metadata. For this initial
+seam, nonempty clients or a parent umbrella fail explicitly because actual client
+binding is not implemented yet. This prevents policy erasure while retaining
+the full stage-3 requirement to implement those permissions positively.
+
 ### 2. Both format readers
 
 V4 requires tagged YAML `!tapi-tbd`, version 4, target lists, install name,
