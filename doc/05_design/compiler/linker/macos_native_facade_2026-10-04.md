@@ -29,6 +29,20 @@ caller compatibility. New `macho/native_adapter.spl` exports
 real files, invokes `macho_hosted_link`, and uses the existing image publisher.
 It must not import the wrapper, avoiding a wrapper/adapter cycle.
 
+Exact public signatures:
+`native_macho_plan_v1(arch: text, config: NativeLinkConfig, output: text)
+-> Result<MachONativePlanV1, text>` and
+`native_macho_link_files_v1(plan: MachONativePlanV1, object_files: [text],
+runtime_archives: [text], output: text) -> Result<text, text>`.
+Plan fields are `request: MachOHostedRequest`, `libraries: [text]`,
+`library_paths: [text]`, `runtime_path: text`, `runtime_bundle: text`, and
+`verbose: bool`. Literal `runtime_path="none"` selects no runtime and rejects
+nonempty supplied runtime archives. Empty runtime_path retains existing wrapper
+auto-resolution; it must not silently mean no runtime. Other selections require
+actual runtime archive inputs at the file-adapter boundary. Passing paths is
+not a new authority issuer: production remains responsible for existing runtime
+selection/admission before invoking the shared adapter.
+
 The production macOS internal arm uses this exact adapter after existing managed
 admission, host matching and runtime-provider validation. Successful receipts
 identify `internal:macho`. Existing managed native admission requires its admitted
