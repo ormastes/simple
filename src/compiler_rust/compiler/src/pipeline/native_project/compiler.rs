@@ -459,6 +459,7 @@ impl NativeProjectBuilder {
         // Whole-graph suffix index: identical for every module, so build it
         // once per compile phase instead of once per compiled module.
         let global_suffix_index = shared_suffix_index(&imports, &backend, no_mangle);
+        let admission = NativeCompileAdmission::default();
 
         // Large public aggregation facades spend most of their time resolving
         // hundreds of re-exports.  Running one beside every LLVM worker made
@@ -473,7 +474,9 @@ impl NativeProjectBuilder {
         let mut results = if contention_sensitive.is_empty() {
             Vec::new()
         } else {
-            self.compile_entries_sequential(&contention_sensitive, &temp_dir, &canonical_entry, &imports)
+            self.compile_entries_sequential_with_admission(
+                &contention_sensitive, &temp_dir, &canonical_entry, &imports, &admission,
+            )
         };
 
         let mut parallel_results: Vec<_> = regular
@@ -498,6 +501,7 @@ impl NativeProjectBuilder {
                     is_entry,
                     imports.clone(),
                     global_suffix_index.clone(),
+                    &admission,
                 ) {
                     Ok(obj_code) => {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
@@ -529,6 +533,19 @@ impl NativeProjectBuilder {
         canonical_entry: &Option<PathBuf>,
         imports: &ModuleImports,
     ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
+        self.compile_entries_sequential_with_admission(
+            entries, temp_dir, canonical_entry, imports, &NativeCompileAdmission::default(),
+        )
+    }
+
+    fn compile_entries_sequential_with_admission(
+        &self,
+        entries: &[(usize, PathBuf, std::sync::Arc<str>, Option<PathBuf>)],
+        temp_dir: &Path,
+        canonical_entry: &Option<PathBuf>,
+        imports: &ModuleImports,
+        admission: &NativeCompileAdmission,
+    ) -> Vec<Result<(usize, PathBuf), (PathBuf, String)>> {
         let total = entries.len();
         // Same hoist as `compile_entries_parallel`: one whole-graph index for
         // the whole phase, not one per module.
@@ -556,6 +573,7 @@ impl NativeProjectBuilder {
                     is_entry,
                     imports.clone(),
                     global_suffix_index.clone(),
+                    admission,
                 ) {
                     Ok(obj_code) => {
                         let obj_path = temp_dir.join(format!("mod_{}.o", idx));
@@ -1033,6 +1051,29 @@ pub(crate) fn compile_file_to_object(
     Ok(obj)
 }
 
+/// Stop replacement admission after a timeout: dropping a Rust JoinHandle
+/// cannot cancel its worker. Already admitted files retain bounded waits, and
+/// normal compiler errors still allow the remaining files to be attempted.
+#[derive(Default)]
+pub(crate) struct NativeCompileAdmission(std::sync::atomic::AtomicBool);
+
+impl NativeCompileAdmission {
+    fn run<T>(&self, compile: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        use std::sync::atomic::Ordering;
+        if self.0.load(Ordering::SeqCst) {
+            return Err("NOT_ATTEMPTED: previous native worker timed out; refusing replacement admission".into());
+        }
+        let result = compile();
+        if let Err(error) = &result {
+            if error.starts_with("timeout (") && error.ends_with("s)") {
+                // Publish before this scheduler slot can accept another file.
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        result
+    }
+}
+
 /// Compile a file with panic catching and timeout.
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub(crate) fn compile_file_safe(
@@ -1049,41 +1090,27 @@ pub(crate) fn compile_file_safe(
     is_entry: bool,
     imports: ModuleImports,
     global_suffix_index: Option<std::sync::Arc<std::collections::HashMap<String, Vec<String>>>>,
+    admission: &NativeCompileAdmission,
 ) -> Result<Vec<u8>, String> {
     use std::sync::mpsc;
 
-    let (tx, rx) = mpsc::channel();
-    let handle = std::thread::Builder::new()
-        .name(format!(
-            "compile-{}",
-            file_path.file_name().unwrap_or_default().to_string_lossy()
-        ))
-        .stack_size(stack_size)
-        .spawn(move || {
-            // Bound this worker's parsed-source memo. The cache is
-            // thread-local, so the phase-wide default (4096) would otherwise
-            // let one worker retain a whole-graph source+AST copy; entries
-            // are pure recomputable memos, so eviction only costs a re-read
-            // and re-parse on a later miss within this worker.
-            crate::interpreter::parsed_source_cache_set_limit(crate::interpreter::parsed_source_cache_compile_max());
-            let source_root = source_root_for_file(&file_path, &source_dirs, &fallback_root);
-            let result = if std::env::var("SIMPLE_NO_CATCH").is_ok() {
-                compile_file_to_object(
-                    &source,
-                    &file_path,
-                    &project_root,
-                    &source_root,
-                    &fallback_root,
-                    &source_dirs,
-                    no_mangle,
-                    &backend,
-                    opt_level,
-                    is_entry,
-                    &imports,
-                    &global_suffix_index,
-                )
-            } else {
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    admission.run(|| {
+        let (tx, rx) = mpsc::channel();
+        let handle = std::thread::Builder::new()
+            .name(format!(
+                "compile-{}",
+                file_path.file_name().unwrap_or_default().to_string_lossy()
+            ))
+            .stack_size(stack_size)
+            .spawn(move || {
+                // Bound this worker's parsed-source memo. The cache is
+                // thread-local, so the phase-wide default (4096) would otherwise
+                // let one worker retain a whole-graph source+AST copy; entries
+                // are pure recomputable memos, so eviction only costs a re-read
+                // and re-parse on a later miss within this worker.
+                crate::interpreter::parsed_source_cache_set_limit(crate::interpreter::parsed_source_cache_compile_max());
+                let source_root = source_root_for_file(&file_path, &source_dirs, &fallback_root);
+                let result = if std::env::var("SIMPLE_NO_CATCH").is_ok() {
                     compile_file_to_object(
                         &source,
                         &file_path,
@@ -1098,26 +1125,43 @@ pub(crate) fn compile_file_safe(
                         &imports,
                         &global_suffix_index,
                     )
-                })) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let msg = if let Some(s) = e.downcast_ref::<String>() {
-                            format!("panic: {s}")
-                        } else if let Some(s) = e.downcast_ref::<&str>() {
-                            format!("panic: {s}")
-                        } else {
-                            "panic: unknown".to_string()
-                        };
-                        Err(msg)
+                } else {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        compile_file_to_object(
+                            &source,
+                            &file_path,
+                            &project_root,
+                            &source_root,
+                            &fallback_root,
+                            &source_dirs,
+                            no_mangle,
+                            &backend,
+                            opt_level,
+                            is_entry,
+                            &imports,
+                            &global_suffix_index,
+                        )
+                    })) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let msg = if let Some(s) = e.downcast_ref::<String>() {
+                                format!("panic: {s}")
+                            } else if let Some(s) = e.downcast_ref::<&str>() {
+                                format!("panic: {s}")
+                            } else {
+                                "panic: unknown".to_string()
+                            };
+                            Err(msg)
+                        }
                     }
-                }
-            };
-            let _ = tx.send(());
-            result
-        })
-        .map_err(|e| format!("spawn: {e}"))?;
+                };
+                let _ = tx.send(());
+                result
+            })
+            .map_err(|e| format!("spawn: {e}"))?;
 
-    wait_for_compiler_thread(rx, handle, timeout_secs)
+        wait_for_compiler_thread(rx, handle, timeout_secs)
+    })
 }
 
 /// Wait for one native compilation worker.
@@ -1137,6 +1181,81 @@ fn wait_for_compiler_thread(
     match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
         Ok(()) => handle.join().unwrap_or_else(|_| Err("thread join error".to_string())),
         Err(_) => Err(format!("timeout ({}s)", timeout_secs)),
+    }
+}
+
+#[cfg(test)]
+mod native_compile_admission_tests {
+    use super::{NativeCompileAdmission, wait_for_compiler_thread};
+    use std::sync::{Arc, Barrier, mpsc};
+    use std::time::Duration;
+
+    #[test]
+    fn timeout_stops_replacement_but_normal_errors_continue() {
+        let admission = NativeCompileAdmission::default();
+        assert_eq!(admission.run::<()>(|| Err("invalid input".into())), Err("invalid input".into()));
+        assert_eq!(admission.run(|| Ok(7)), Ok(7));
+        let (tx, rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            release_rx.recv().unwrap();
+            let _ = tx.send(());
+            done_tx.send(()).unwrap();
+            Ok(Vec::new())
+        });
+        let result = admission.run(|| wait_for_compiler_thread(rx, worker, 1));
+        // Release and drain even if the following regression assertion fails.
+        release_tx.send(()).unwrap();
+        done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(result, Err("timeout (1s)".into()));
+        let mut attempted = false;
+        let result = admission.run(|| { attempted = true; Ok(()) });
+        assert!(!attempted);
+        assert!(result.unwrap_err().starts_with("NOT_ATTEMPTED:"));
+    }
+
+    #[test]
+    fn already_admitted_workers_have_bounded_waits_without_replacements() {
+        let admission = Arc::new(NativeCompileAdmission::default());
+        let barrier = Arc::new(Barrier::new(2));
+        let (result_tx, result_rx) = mpsc::channel();
+        let mut releases = Vec::new();
+        let mut completions = Vec::new();
+        let mut schedulers = Vec::new();
+        for _ in 0..2 {
+            let admission = admission.clone();
+            let barrier = barrier.clone();
+            let result_tx = result_tx.clone();
+            let (release_tx, release_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            releases.push(release_tx);
+            completions.push(done_rx);
+            schedulers.push(std::thread::spawn(move || {
+                let result = admission.run(|| {
+                    let (tx, rx) = mpsc::channel();
+                    let worker = std::thread::spawn(move || {
+                        release_rx.recv().unwrap();
+                        let _ = tx.send(());
+                        done_tx.send(()).unwrap();
+                        Ok(Vec::new())
+                    });
+                    barrier.wait();
+                    wait_for_compiler_thread(rx, worker, 1)
+                });
+                result_tx.send(result).unwrap();
+            }));
+        }
+        let first = result_rx.recv_timeout(Duration::from_secs(3));
+        let second = result_rx.recv_timeout(Duration::from_secs(3));
+        for release in releases { release.send(()).unwrap(); }
+        for completion in completions { completion.recv_timeout(Duration::from_secs(3)).unwrap(); }
+        for scheduler in schedulers { scheduler.join().unwrap(); }
+        assert_eq!(first.unwrap(), Err("timeout (1s)".into()));
+        assert_eq!(second.unwrap(), Err("timeout (1s)".into()));
+        let mut attempted = false;
+        assert!(admission.run(|| { attempted = true; Ok(()) }).is_err());
+        assert!(!attempted);
     }
 }
 

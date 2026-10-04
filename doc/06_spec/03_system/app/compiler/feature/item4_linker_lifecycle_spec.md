@@ -13,6 +13,8 @@ Executable: `test/03_system/app/compiler/feature/item4_linker_lifecycle_spec.spl
   original entrypoint semantics. Collection waits for release.
 - Reject incompatible provider schemas without changing the active generation.
 - Reject stale session handles after close and slot reuse.
+- Reject configured jobs and configured recovery through legacy-only callbacks,
+  retaining session cleanup rather than dropping explicit native options.
 
 The callback scenarios use actual linker calls. Native loading is covered by the
 separate native pack spec; no callback success substitutes for its execution.

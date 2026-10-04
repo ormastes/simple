@@ -1,0 +1,298 @@
+"""Source-bound verdict policy for authored compiler subsystem main functions.
+
+The parser span ledger, rather than a text search, decides whether an owner
+defines main. A policy row cannot turn printed output into a passing test.
+"""
+
+use std.sffi.cli_args.{cli_get_args}
+use std.io_runtime.{file_exists, file_read, file_write}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.convert.{try_parse_int}
+
+struct VerdictArgs:
+    source_root: text
+    inventory: text
+    spans: text
+    policy: text
+    output: text
+
+struct VerdictPolicy:
+    subsystem: text
+    path: text
+    sha256: text
+    kind: text
+    evidence_id: text
+    reason: text
+    matched: bool
+
+struct InventoryOwner:
+    path: text
+    sha256: text
+
+fn parse_args(raw: [text]) -> VerdictArgs:
+    var result = VerdictArgs(source_root: "", inventory: "", spans: "", policy: "", output: "")
+    for arg in raw:
+        if arg.starts_with("--source-root="):
+            result.source_root = arg[14:]
+        elif arg.starts_with("--inventory="):
+            result.inventory = arg[12:]
+        elif arg.starts_with("--spans="):
+            result.spans = arg[8:]
+        elif arg.starts_with("--policy="):
+            result.policy = arg[9:]
+        elif arg.starts_with("--output="):
+            result.output = arg[9:]
+    result
+
+fn valid_sha256(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not "0123456789abcdef".contains(ch):
+            return false
+    true
+
+fn valid_path(path: text) -> bool:
+    if not path.starts_with("test/") or path.contains("\\") or path.contains("\t"):
+        return false
+    if path.contains("\n") or path.contains("\r") or path.contains("//"):
+        return false
+    if path.contains("/../") or path.ends_with("/..") or path.contains("/./"):
+        return false
+    path.ends_with("_spec.spl") or path.ends_with("_test.spl")
+
+fn inventory_has_owner(inventory: text, subsystem: text, path: text, sha: text) -> bool:
+    for line in inventory.split("\n"):
+        if line == subsystem + "\t" + "01_unit" + "\t" + path + "\t" + sha:
+            return true
+        if line == subsystem + "\t" + "02_integration" + "\t" + path + "\t" + sha:
+            return true
+        if line == subsystem + "\t" + "03_system" + "\t" + path + "\t" + sha:
+            return true
+    false
+
+fn load_policies(policy_text: text, inventory: text, source_root: text) -> [VerdictPolicy]?:
+    val lines = policy_text.split("\n")
+    if lines.len() < 3 or lines[0] != "owner-main-policy-v1\tsubsystem\tpath\tsha256\tverdict-kind\tevidence-id\treason":
+        print "invalid owner-main policy header"
+        return nil
+    var policies: [VerdictPolicy] = []
+    var completed = false
+    for line in lines[1:]:
+        if line == "":
+            continue
+        val fields = line.split("\t")
+        if fields[0] == "complete":
+            if completed or fields.len() != 2 or fields[1] != "{policies.len()}":
+                print "invalid owner-main policy completion"
+                return nil
+            completed = true
+            continue
+        if completed or fields.len() != 6:
+            print "invalid owner-main policy row"
+            return nil
+        val subsystem = fields[0]
+        val path = fields[1]
+        val sha = fields[2]
+        val kind = fields[3]
+        val evidence_id = fields[4]
+        val reason = fields[5]
+        if (subsystem != "compiler" and subsystem != "interpreter" and subsystem != "loader") or not valid_path(path) or not valid_sha256(sha):
+            print "invalid owner-main policy identity"
+            return nil
+        if not inventory_has_owner(inventory, subsystem, path, sha):
+            print "policy owner absent from inventory: {path}"
+            return nil
+        if sha256_text(file_read(source_root + "/" + path)) != sha:
+            print "policy source hash mismatch: {path}"
+            return nil
+        if kind == "exit-zero":
+            if evidence_id == "-" or reason != "-":
+                return nil
+        elif kind == "aggregate-registry-declare":
+            if evidence_id != "std.spec.registry-v1" or reason != "-":
+                return nil
+        elif kind == "unsupported":
+            if evidence_id != "-" or reason == "-" or reason == "":
+                return nil
+        else:
+            print "invalid owner-main verdict kind: {kind}"
+            return nil
+        for previous in policies:
+            if previous.path == path:
+                print "duplicate owner-main policy: {path}"
+                return nil
+        policies.push(VerdictPolicy(subsystem: subsystem, path: path, sha256: sha,
+                                    kind: kind, evidence_id: evidence_id,
+                                    reason: reason, matched: false))
+    if not completed:
+        print "missing owner-main policy completion"
+        return nil
+    policies
+
+fn main() -> i64:
+    val args = parse_args(cli_get_args())
+    if args.source_root == "" or args.inventory == "" or args.spans == "" or args.output == "":
+        print "usage: main-verdict --source-root=ROOT --inventory=TSV --spans=TSV --output=TSV [--policy=TSV]"
+        return 2
+    if file_exists(args.output):
+        print "owner-main verdict output already exists"
+        return 2
+    val policy_path = if args.policy == "":
+        args.source_root + "/config/check/compiler_subsystem_main_verdict_policy.tsv"
+    else:
+        args.policy
+    val inventory = file_read(args.inventory)
+    if not inventory.starts_with("subsystem\tlevel\tpath\tsha256\n"):
+        print "invalid authoritative inventory"
+        return 2
+    val spans = file_read(args.spans)
+    val span_lines = spans.split("\n")
+    if span_lines.len() < 3:
+        print "missing parser span ledger"
+        return 2
+    val header = span_lines[0].split("\t")
+    if header.len() != 3 or header[0] != "simple-subsystem-source-spans-v1" or header[2] != sha256_text(inventory):
+        print "parser span ledger does not match inventory"
+        return 2
+    val subsystem = header[1]
+    if subsystem != "compiler" and subsystem != "interpreter" and subsystem != "loader":
+        print "invalid parser span subsystem"
+        return 2
+    var selected_inventory: [InventoryOwner] = []
+    val inventory_lines = inventory.split("\n")
+    for line in inventory_lines[1:]:
+        if line == "":
+            continue
+        val fields = line.split("\t")
+        if fields.len() != 4:
+            print "invalid inventory row"
+            return 2
+        if fields[0] == subsystem:
+            selected_inventory.push(InventoryOwner(path: fields[2], sha256: fields[3]))
+    val policies_opt = load_policies(file_read(policy_path), inventory, args.source_root)
+    if policies_opt == nil:
+        return 2
+    var policies = policies_opt ?? []
+    var verdict_rows: [text] = []
+    var current_path = ""
+    var current_sha = ""
+    var current_source = ""
+    var current_main_count = 0
+    var current_decl_expected = 0
+    var current_decl_seen = 0
+    var owner_count = 0
+    var main_count = 0
+    var unsupported_count = 0
+    var completed = false
+    for line in span_lines[1:]:
+        if line == "":
+            continue
+        val fields = line.split("\t")
+        if fields[0] == "owner":
+            if completed or fields.len() != 4 or (current_path != "" and current_decl_seen != current_decl_expected):
+                print "invalid parser owner boundary"
+                return 2
+            if owner_count >= selected_inventory.len():
+                print "extra parser owner"
+                return 2
+            current_path = fields[1]
+            current_sha = fields[2]
+            current_main_count = 0
+            current_decl_seen = 0
+            val expected_opt = try_parse_int(fields[3])
+            if expected_opt == nil:
+                print "invalid parser declaration count"
+                return 2
+            current_decl_expected = expected_opt ?? -1
+            if current_decl_expected < 0 or not valid_path(current_path) or not valid_sha256(current_sha):
+                print "invalid parser owner identity"
+                return 2
+            if current_path != selected_inventory[owner_count].path or current_sha != selected_inventory[owner_count].sha256:
+                print "parser owner order or hash differs from inventory"
+                return 2
+            current_source = ""
+            owner_count = owner_count + 1
+        elif fields[0] == "decl":
+            if completed or current_path == "" or fields.len() != 7 or fields[1] != current_path or fields[2] != "{current_decl_seen}":
+                print "invalid parser declaration boundary"
+                return 2
+            current_decl_seen = current_decl_seen + 1
+            if current_decl_seen > current_decl_expected:
+                print "extra parser declaration"
+                return 2
+            if fields[3] != "1" or fields[4] != "main":
+                continue
+            current_main_count = current_main_count + 1
+            if current_main_count > 1:
+                print "multiple authored main declarations: {current_path}"
+                return 2
+            current_source = file_read(args.source_root + "/" + current_path)
+            if sha256_text(current_source) != current_sha:
+                print "authored main source changed: {current_path}"
+                return 2
+            val begin_opt = try_parse_int(fields[5])
+            val end_opt = try_parse_int(fields[6])
+            if begin_opt == nil or end_opt == nil:
+                print "invalid main source interval"
+                return 2
+            val begin = begin_opt ?? -1
+            val end = end_opt ?? -1
+            if begin < 0 or end <= begin or end > current_source.len():
+                print "main source interval out of bounds"
+                return 2
+            val main_source = current_source.slice(begin, end)
+            var policy_index = -1
+            var i = 0
+            for policy in policies:
+                if policy.subsystem == subsystem and policy.path == current_path and policy.sha256 == current_sha:
+                    policy_index = i
+                i = i + 1
+            if policy_index < 0:
+                print "unsupported authored main without policy: {current_path}"
+                return 2
+            var policy = policies[policy_index]
+            if policy.matched:
+                print "duplicate authored main policy match"
+                return 2
+            if policy.kind == "exit-zero" and not main_source.contains("fn main() -> i64:"):
+                print "exit-zero main lacks i64 signature: {current_path}"
+                return 2
+            if policy.kind == "aggregate-registry-declare" and not main_source.contains("describe"):
+                print "registry declaration main lacks describe block: {current_path}"
+                return 2
+            policy.matched = true
+            policies[policy_index] = policy
+            verdict_rows.push("owner\t" + current_path + "\t" + current_sha + "\t" + fields[2] +
+                              "\t" + policy.kind + "\t" + policy.evidence_id + "\t" + policy.reason)
+            main_count = main_count + 1
+            if policy.kind == "unsupported":
+                unsupported_count = unsupported_count + 1
+        elif fields[0] == "complete":
+            if completed or fields.len() != 2 or fields[1] != "{owner_count}" or owner_count != selected_inventory.len() or current_decl_seen != current_decl_expected:
+                print "invalid parser span completion"
+                return 2
+            completed = true
+        else:
+            print "unknown parser span row"
+            return 2
+    if not completed:
+        print "missing parser span completion"
+        return 2
+    for policy in policies:
+        if policy.subsystem == subsystem and not policy.matched:
+            print "policy has no parser-authored main: {policy.path}"
+            return 2
+    verdict_rows.sort()
+    var output_rows: [text] = []
+    output_rows.push("owner-main-verdict-v1\t" + sha256_text(inventory) + "\t" + sha256_text(spans))
+    for row in verdict_rows:
+        output_rows.push(row)
+    output_rows.push("complete\t{main_count}")
+    if not file_write(args.output, output_rows.join("\n") + "\n"):
+        print "cannot write owner-main verdict ledger"
+        return 2
+    if unsupported_count > 0:
+        print "owner-main verdict unsupported for {unsupported_count} authored main(s)"
+        return 1
+    0

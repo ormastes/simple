@@ -5,7 +5,7 @@ decoded on demand, with an explicit finite scan-work budget and cancellation.
 No claim of whole-job RSS enforcement or full hosted ELF semantics is made.
 """
 use compiler.backend.linker.elf.stream_types.{ElfStreamLimitsV1, ElfStreamInputsV1, ElfStreamBindingV1}
-use compiler.backend.linker.elf.elf_file_reader.{ElfFileObjectV1, ElfFileSymbolV1, elf_file_open_v1, elf_file_view_v1, elf_file_section_v1, elf_file_symbol_v1}
+use compiler.backend.linker.elf.elf_file_reader.{ElfFileObjectV1, ElfFileSymbolV1, elf_file_open_v1, elf_file_view_v1, elf_file_section_v1, elf_file_symbol_v1, elf_file_section_window_v1, elf_file_rela_v1}
 use compiler.backend.linker.elf.archive_file.{archive_file_open_v1}
 use std.string_core.{char_from_code}
 
@@ -13,6 +13,9 @@ pub fn elf_stream_name_v1(name: [u8]) -> text:
     var result = ""
     for byte in name: result = result + char_from_code(byte as i64)
     result
+
+pub fn elf_stream_got_anchor_v1(symbol: ElfFileSymbolV1) -> bool:
+    symbol.binding > 0 and symbol.name_bytes == [95u8, 71u8, 76u8, 79u8, 66u8, 65u8, 76u8, 95u8, 79u8, 70u8, 70u8, 83u8, 69u8, 84u8, 95u8, 84u8, 65u8, 66u8, 76u8, 69u8, 95u8]
 
 pub fn elf_stream_symbol_count_v1(object: ElfFileObjectV1, index: i64) -> Result<u64, text>:
     val table = elf_file_section_v1(object, index)?
@@ -40,8 +43,140 @@ pub fn elf_stream_open_inputs_v1(objects: [text], archives: [text], entry: [u8],
 
 export elf_stream_open_inputs_v1
 export elf_stream_symbol_count_v1, elf_stream_name_v1
+export elf_stream_got_anchor_v1
+
+fn elf_stream_common_valid_v1(symbol: ElfFileSymbolV1) -> Result<bool, text>:
+    if symbol.section_index != 65522: return Ok(true)
+    if symbol.binding == 0: return Err("stream local common symbol unsupported")
+    if symbol.name_bytes.len() == 0: return Err("stream common symbol name is empty")
+    if symbol.value == 0u64 or (symbol.value & (symbol.value - 1u64)) != 0u64:
+        return Err("stream common alignment must be a positive power of two")
+    Ok(true)
+
+fn elf_stream_definition_rank_v1(symbol: ElfFileSymbolV1) -> i64:
+    if symbol.section_index == 65522: return 2
+    if symbol.binding == 1: return 3
+    1
 
 impl ElfStreamInputsV1:
+    me elf_stream_comdat_word_v1(object: ElfFileObjectV1, group: i64, ordinal: u64,
+            cancelled: fn() -> bool) -> Result<u64, text>:
+        # Group words are fixed metadata; read even a four-byte word in chunks
+        # when the configured payload window is smaller. No group array lives.
+        var value = 0u64
+        var offset = 0
+        while offset < 4:
+            self.elf_stream_charge_v1(cancelled)?
+            val remaining = 4 - offset
+            val count = if remaining < object.max_window_bytes: remaining else: object.max_window_bytes
+            val bytes = elf_file_section_window_v1(object, group, ordinal * 4u64 + offset as u64, count)?
+            for index in 0..bytes.len(): value = value | ((bytes[index] as u64) << ((offset + index) * 8))
+            offset = offset + count
+        Ok(value)
+
+    me elf_stream_comdat_signature_v1(object: ElfFileObjectV1, group: i64,
+            cancelled: fn() -> bool) -> Result<[u8], text>:
+        self.elf_stream_charge_v1(cancelled)?
+        val section = elf_file_section_v1(object, group)?
+        self.elf_stream_charge_v1(cancelled)?
+        val symbols = elf_file_section_v1(object, section.link)?
+        if symbols.section_type != 2u64: return Err("stream COMDAT signature requires SYMTAB")
+        val signature = self.elf_stream_read_symbol_v1(object, section.link, section.info as u64, cancelled)?
+        if signature.name_bytes.len() == 0: return Err("stream COMDAT signature name is empty")
+        Ok(signature.name_bytes)
+
+    me elf_stream_comdat_group_v1(object: ElfFileObjectV1, index: i64,
+            cancelled: fn() -> bool) -> Result<i64, text>:
+        var found = -1
+        for group in 1..object.section_count:
+            self.elf_stream_charge_v1(cancelled)?
+            val section = elf_file_section_v1(object, group)?
+            if section.section_type != 17u64: continue
+            if section.entry_size != 4u64 or section.size < 4u64 or section.size % 4u64 != 0u64:
+                return Err("stream COMDAT group word shape")
+            var ordinal = 1u64
+            while ordinal < section.size / 4u64:
+                val member = self.elf_stream_comdat_word_v1(object, group, ordinal, cancelled)?
+                if member == index as u64:
+                    if found >= 0: return Err("stream COMDAT duplicate group membership")
+                    found = group
+                ordinal = ordinal + 1u64
+        Ok(found)
+
+    me elf_stream_comdat_validate_v1(object: ElfFileObjectV1,
+            cancelled: fn() -> bool) -> Result<bool, text>:
+        val validated = self.elf_stream_comdat_validate_structure_v1(object, cancelled)
+        if validated.is_err(): return Err("stream COMDAT validation: {validated.unwrap_err()}")
+        validated
+
+    me elf_stream_comdat_validate_structure_v1(object: ElfFileObjectV1,
+            cancelled: fn() -> bool) -> Result<bool, text>:
+        # Validate losers too. A malformed duplicate must not hide behind a
+        # winning group. Fixed-size reads and rescans share the scan quota.
+        for group in 1..object.section_count:
+            self.elf_stream_charge_v1(cancelled)?
+            val section = elf_file_section_v1(object, group)?
+            if section.section_type != 17u64: continue
+            if section.entry_size != 4u64 or section.size < 4u64 or section.size % 4u64 != 0u64:
+                return Err("stream COMDAT group word shape")
+            val flags = self.elf_stream_comdat_word_v1(object, group, 0u64, cancelled)?
+            if flags > 1u64: return Err("stream COMDAT unknown group flags")
+            val signature = self.elf_stream_comdat_signature_v1(object, group, cancelled)?
+            var ordinal = 1u64
+            while ordinal < section.size / 4u64:
+                val member = self.elf_stream_comdat_word_v1(object, group, ordinal, cancelled)?
+                if member == 0u64 or member >= object.section_count as u64:
+                    return Err("stream COMDAT member index bounds")
+                self.elf_stream_charge_v1(cancelled)?
+                val selected = elf_file_section_v1(object, member as i64)?
+                if selected.section_type == 17u64 or (selected.flags & 512u64) == 0u64:
+                    return Err("stream COMDAT member requires SHF_GROUP and cannot be a group")
+                ordinal = ordinal + 1u64
+        for index in 1..object.section_count:
+            self.elf_stream_charge_v1(cancelled)?
+            val section = elf_file_section_v1(object, index)?
+            val group = self.elf_stream_comdat_group_v1(object, index, cancelled)?
+            if ((section.flags & 512u64) != 0u64) != (group >= 0):
+                return Err("stream COMDAT SHF_GROUP membership mismatch")
+            if section.section_type == 4u64:
+                val target_group = self.elf_stream_comdat_group_v1(object, section.info, cancelled)?
+                if group != target_group: return Err("stream COMDAT relocation group differs from target")
+        Ok(true)
+
+    me elf_stream_comdat_candidate_kept_v1(object: ElfFileObjectV1, owner: i64,
+            index: i64, cancelled: fn() -> bool) -> Result<bool, text>:
+        val group = self.elf_stream_comdat_group_v1(object, index, cancelled)?
+        if group < 0: return Ok(true)
+        if self.elf_stream_comdat_word_v1(object, group, 0u64, cancelled)? == 0u64: return Ok(true)
+        val signature = self.elf_stream_comdat_signature_v1(object, group, cancelled)?
+        var prior_owner = 0
+        # A candidate archive member is checked after all selected objects but
+        # before ownership is appended. Within an object, group index wins.
+        while prior_owner <= owner:
+            val candidate = if prior_owner == owner: object else: self.objects[prior_owner]
+            val end = if prior_owner == owner: group else: candidate.section_count
+            for prior_group in 1..end:
+                self.elf_stream_charge_v1(cancelled)?
+                val section = elf_file_section_v1(candidate, prior_group)?
+                if section.section_type != 17u64: continue
+                if section.size == 4u64: continue
+                if self.elf_stream_comdat_word_v1(candidate, prior_group, 0u64, cancelled)? != 1u64: continue
+                val prior_signature = self.elf_stream_comdat_signature_v1(candidate, prior_group, cancelled)?
+                if prior_signature == signature: return Ok(false)
+            prior_owner = prior_owner + 1
+        Ok(true)
+
+    me elf_stream_comdat_section_kept_v1(owner: i64, index: i64,
+            cancelled: fn() -> bool) -> Result<bool, text>:
+        if owner < 0 or owner >= self.objects.len(): return Err("stream COMDAT object owner bounds")
+        if index < 0 or index >= self.objects[owner].section_count: return Err("stream COMDAT section bounds")
+        self.elf_stream_comdat_candidate_kept_v1(self.objects[owner], owner, index, cancelled)
+
+    me elf_stream_comdat_symbol_kept_v1(object: ElfFileObjectV1, owner: i64,
+            symbol: ElfFileSymbolV1, cancelled: fn() -> bool) -> Result<bool, text>:
+        if symbol.section_index == 0 or symbol.section_index >= 65280: return Ok(true)
+        self.elf_stream_comdat_candidate_kept_v1(object, owner, symbol.section_index, cancelled)
+
     me elf_stream_charge_v1(cancelled: fn() -> bool) -> Result<bool, text>:
         if self.closed: return Err("stream input set closed")
         if cancelled(): return Err("stream link cancelled")
@@ -60,78 +195,157 @@ impl ElfStreamInputsV1:
         var owner = 0
         for object in self.objects:
             for table in 0..object.section_count:
+                self.elf_stream_charge_v1(cancelled)?
                 val count = elf_stream_symbol_count_v1(object, table)?
                 var ordinal: u64 = 0
                 while ordinal < count:
                     val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
                     if (symbol.binding == 1 or symbol.binding == 2) and symbol.section_index != 0 and symbol.name_bytes == name:
+                        elf_stream_common_valid_v1(symbol)?
+                        if not self.elf_stream_comdat_symbol_kept_v1(object, owner, symbol, cancelled)?:
+                            ordinal = ordinal + 1u64
+                            continue
                         val binding = ElfStreamBindingV1(owner: owner, table: table, ordinal: ordinal, symbol: symbol)
                         if found.is_none():
                             found = Some(binding)
-                        elif symbol.binding == 1:
-                            if found.unwrap().symbol.binding == 1:
+                        else:
+                            var selected = found.unwrap()
+                            val rank = elf_stream_definition_rank_v1(symbol)
+                            val old_rank = elf_stream_definition_rank_v1(selected.symbol)
+                            if rank == 3 and old_rank == 3:
                                 return Err("duplicate symbol {elf_stream_name_v1(name)}")
-                            found = Some(binding)
+                            if rank > old_rank:
+                                found = Some(binding)
+                            elif rank == 2 and old_rank == 2:
+                                # Keep the first COMMON record as representative,
+                                # but coalesce size and alignment independently.
+                                var combined = selected.symbol
+                                if symbol.size > combined.size: combined.size = symbol.size
+                                if symbol.value > combined.value: combined.value = symbol.value
+                                selected.symbol = combined
+                                found = Some(selected)
                     ordinal = ordinal + 1u64
             owner = owner + 1
         Ok(found)
 
-    me elf_stream_admit_object(object: ElfFileObjectV1) -> Result<bool, text>:
+    me elf_stream_admit_object(object: ElfFileObjectV1, cancelled: fn() -> bool) -> Result<bool, text>:
         if object.machine != 62 or object.flags != 0u64: return Err("stream static slice requires x86_64 ELF flags zero")
         if self.objects.len() >= self.limits.input_limit: return Err("stream selected input budget exceeded")
         if object.metadata_table_bytes > self.limits.metadata_bytes - self.metadata_used:
             return Err("stream cumulative metadata budget exceeded")
         for index in 0..object.section_count:
+            self.elf_stream_charge_v1(cancelled)?
             val section = elf_file_section_v1(object, index)?
-            if section.section_type == 9u64 or section.section_type == 17u64 or (section.flags & 0xe00u64) != 0u64:
-                return Err("stream REL/COMDAT/TLS/compressed sections unsupported")
+            if section.section_type == 9u64 or (section.flags & 0xc00u64) != 0u64:
+                return Err("stream REL/TLS/compressed sections unsupported")
             if section.section_type == 4u64:
                 if section.info < 1 or section.info >= object.section_count: return Err("stream RELA target section bounds")
                 val symbols = elf_file_section_v1(object, section.link)?
                 if symbols.section_type != 2u64: return Err("stream RELA requires static symbol table")
+        self.elf_stream_comdat_validate_v1(object, cancelled)?
         self.metadata_used = self.metadata_used + object.metadata_table_bytes
         self.objects = self.objects.push(object)
         Ok(true)
 
-    me elf_stream_unresolved_name(name: [u8], entry: [u8], cancelled: fn() -> bool) -> Result<bool, text>:
-        if self.elf_stream_lookup_v1(name, cancelled)?.is_some(): return Ok(false)
+    me elf_stream_unresolved_name(name: [u8], entry: [u8], cancelled: fn() -> bool,
+            strong_regular: bool = false) -> Result<bool, text>:
+        val selected = self.elf_stream_lookup_v1(name, cancelled)?
+        if selected.is_some():
+            # GNU ELF tentative demand extracts a real strong definition only.
+            # Neither a weak nor another COMMON member upgrades a COMMON alone.
+            return Ok(strong_regular and selected.unwrap().symbol.section_index == 65522)
         if name == entry: return Ok(true)
         for object in self.objects:
             for table in 0..object.section_count:
+                self.elf_stream_charge_v1(cancelled)?
                 val count = elf_stream_symbol_count_v1(object, table)?
                 var ordinal: u64 = 0
                 while ordinal < count:
                     val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
-                    if symbol.binding == 1 and symbol.section_index == 0 and symbol.name_bytes == name: return Ok(true)
+                    if symbol.binding == 1 and symbol.section_index == 0 and symbol.name_bytes == name and not elf_stream_got_anchor_v1(symbol): return Ok(true)
                     ordinal = ordinal + 1u64
         Ok(false)
 
     me elf_stream_member_needed(object: ElfFileObjectV1, entry: [u8], cancelled: fn() -> bool) -> Result<bool, text>:
+        self.elf_stream_comdat_validate_v1(object, cancelled)?
         for table in 0..object.section_count:
+            self.elf_stream_charge_v1(cancelled)?
             val count = elf_stream_symbol_count_v1(object, table)?
             var ordinal: u64 = 0
             while ordinal < count:
                 val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
                 if (symbol.binding == 1 or symbol.binding == 2) and symbol.section_index != 0 and symbol.name_bytes.len() > 0:
-                    if self.elf_stream_unresolved_name(symbol.name_bytes, entry, cancelled)?: return Ok(true)
+                    if not self.elf_stream_comdat_symbol_kept_v1(object, self.objects.len(), symbol, cancelled)?:
+                        ordinal = ordinal + 1u64
+                        continue
+                    # The linker owns this anchor; it never creates archive
+                    # demand. A member selected for another name is checked
+                    # for conflicting definitions during final validation.
+                    if elf_stream_got_anchor_v1(symbol):
+                        ordinal = ordinal + 1u64
+                        continue
+                    val strong_regular = symbol.binding == 1 and symbol.section_index != 65522
+                    if self.elf_stream_unresolved_name(symbol.name_bytes, entry, cancelled, strong_regular)?: return Ok(true)
                 ordinal = ordinal + 1u64
         Ok(false)
 
     me elf_stream_validate_symbols(entry: [u8], cancelled: fn() -> bool) -> Result<bool, text>:
         if self.elf_stream_lookup_v1(entry, cancelled)?.is_none(): return Err("undefined entry symbol {elf_stream_name_v1(entry)}")
+        var owner = 0
         for object in self.objects:
             for table in 0..object.section_count:
+                self.elf_stream_charge_v1(cancelled)?
                 val count = elf_stream_symbol_count_v1(object, table)?
                 var ordinal: u64 = 0
                 while ordinal < count:
                     val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
-                    if symbol.binding > 2 or symbol.symbol_type == 6 or symbol.symbol_type == 10 or symbol.section_index == 65522:
-                        return Err("stream GNU-unique/TLS/IFUNC/common symbols unsupported")
-                    if symbol.binding > 0 and symbol.name_bytes.len() > 0:
+                    elf_stream_common_valid_v1(symbol)?
+                    if symbol.binding > 2 or symbol.symbol_type == 6 or symbol.symbol_type == 10:
+                        return Err("stream GNU-unique/TLS/IFUNC symbols unsupported")
+                    if elf_stream_got_anchor_v1(symbol):
+                        if symbol.section_index != 0: return Err("stream reserved GOT anchor definition")
+                        ordinal = ordinal + 1u64
+                        continue
+                    if symbol.binding > 0 and symbol.name_bytes.len() > 0 and symbol.section_index != 0 and
+                            self.elf_stream_comdat_symbol_kept_v1(object, owner, symbol, cancelled)?:
                         val binding = self.elf_stream_lookup_v1(symbol.name_bytes, cancelled)?
                         if binding.is_none() and symbol.binding == 1:
                             return Err("undefined symbol {elf_stream_name_v1(symbol.name_bytes)}")
                     ordinal = ordinal + 1u64
+            owner = owner + 1
+        self.elf_stream_comdat_validate_references_v1(cancelled)
+
+    me elf_stream_comdat_validate_references_v1(cancelled: fn() -> bool) -> Result<bool, text>:
+        # Archive closure intentionally uses UND records, including references
+        # in discarded groups. Final errors instead follow live output bytes.
+        # This stream profile omits nonallocated debug sections altogether.
+        var owner = 0
+        for object in self.objects:
+            for table in 1..object.section_count:
+                self.elf_stream_charge_v1(cancelled)?
+                val section = elf_file_section_v1(object, table)?
+                if section.section_type != 4u64: continue
+                if not self.elf_stream_comdat_section_kept_v1(owner, table, cancelled)?: continue
+                if not self.elf_stream_comdat_section_kept_v1(owner, section.info, cancelled)?: continue
+                self.elf_stream_charge_v1(cancelled)?
+                val target = elf_file_section_v1(object, section.info)?
+                if (target.flags & 2u64) == 0u64: continue
+                if section.entry_size != 24u64 or section.size % 24u64 != 0u64: return Err("stream RELA entry width unsupported")
+                var ordinal = 0u64
+                while ordinal < section.size / 24u64:
+                    self.elf_stream_charge_v1(cancelled)?
+                    val relocation = elf_file_rela_v1(object, table, ordinal)?
+                    ordinal = ordinal + 1u64
+                    if relocation.relocation_type == 0u64: continue
+                    val symbol = self.elf_stream_read_symbol_v1(object, relocation.symbol_table, relocation.symbol_index, cancelled)?
+                    if symbol.binding == 0:
+                        if not self.elf_stream_comdat_symbol_kept_v1(object, owner, symbol, cancelled)?:
+                            return Err("stream COMDAT reference to discarded local section")
+                    elif not elf_stream_got_anchor_v1(symbol):
+                        val binding = self.elf_stream_lookup_v1(symbol.name_bytes, cancelled)?
+                        if binding.is_none() and symbol.binding != 2:
+                            return Err("undefined symbol {elf_stream_name_v1(symbol.name_bytes)}")
+            owner = owner + 1
         Ok(true)
 
     me elf_stream_close_inputs_v1() -> bool:
@@ -152,7 +366,7 @@ impl ElfStreamInputsV1:
         for path in objects:
             self.elf_stream_charge_v1(cancelled)?
             var object = elf_file_open_v1(path, self.limits.metadata_bytes, self.limits.read_window_bytes)?
-            val admitted = self.elf_stream_admit_object(object)
+            val admitted = self.elf_stream_admit_object(object, cancelled)
             if admitted.is_err():
                 val closed = object.elf_file_close_v1()
                 return Err(admitted.unwrap_err())
@@ -186,7 +400,7 @@ impl ElfStreamInputsV1:
                         val closed = object.elf_file_close_v1()
                         return Err(needed.unwrap_err())
                     if needed.unwrap():
-                        val admitted = self.elf_stream_admit_object(object)
+                        val admitted = self.elf_stream_admit_object(object, cancelled)
                         if admitted.is_err():
                             val closed = object.elf_file_close_v1()
                             return Err(admitted.unwrap_err())

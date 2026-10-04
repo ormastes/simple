@@ -1,0 +1,125 @@
+"""ITEM4-REQ-009 observation integrity. Authored tests UNRUN; file fixtures are not kernel enforcement evidence."""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{dir_create_all, file_exists}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.resource_scope.{read_cgroup_v2_observation, resource_scope_nonnegative_counter_v1, resource_scope_systemd_metrics_v1}
+
+fn item4_resource_evidence_write(path: text, value: text) -> bool:
+    var bytes: [u8] = []
+    for index in 0..value.len(): bytes.push(value.byte_at(index) as u8)
+    val written = file_write_bytes(path, bytes)
+    expect(written).to_equal(true)
+    written
+
+fn item4_resource_evidence_cleanup(parent: text):
+    for name in ["memory.current", "memory.peak", "memory.events", "cpu.stat"]:
+        if file_exists(parent + "/" + name): expect(file_remove(parent + "/" + name)).to_equal(true)
+    expect(dir_remove(parent)).to_equal(true)
+
+fn item4_resource_evidence_fixture() -> Result<text, text>:
+    if not dir_create_all("build"): return Err("resource evidence build directory unavailable")
+    val parent = secure_temp_dir("build", "item4-resource-evidence-")?
+    if not item4_resource_evidence_write(parent + "/memory.current", "0\n"):
+        item4_resource_evidence_cleanup(parent)
+        return Err("memory.current fixture write failed")
+    if not item4_resource_evidence_write(parent + "/memory.events", "high 0\nmax 0\noom 0\noom_kill 0\n"):
+        item4_resource_evidence_cleanup(parent)
+        return Err("memory.events fixture write failed")
+    if not item4_resource_evidence_write(parent + "/cpu.stat", "user_usec 12\nsystem_usec 34\n"):
+        item4_resource_evidence_cleanup(parent)
+        return Err("cpu.stat fixture write failed")
+    Ok(parent)
+
+describe "resource scope metric-file observation integrity":
+    it "ITEM4-REQ-009 parses strict counters without treating absence or syntax errors as zero":
+        step("Reject signed decorated missing and overflowing counters")
+        for value in ["", " \n", "-1", "+0", "infinity", "[not set]", "0x10", "1_000", "1.0", "1 2", "1152921504606846976", "18446744073709551615"]:
+            expect(resource_scope_nonnegative_counter_v1(value).is_none()).to_equal(true)
+        step("Preserve genuine zero whitespace and the portable positive boundary")
+        val values = ["0", " \t42\n", "1152921504606846975"]
+        val expected = [0i64, 42i64, 1152921504606846975i64]
+        for index in 0..values.len():
+            val parsed = resource_scope_nonnegative_counter_v1(values[index])
+            expect(parsed.is_some()).to_equal(true)
+            if parsed.is_some(): expect(parsed.unwrap()).to_equal(expected[index])
+
+    it "ITEM4-REQ-009 accepts systemd measurements only from successful complete valid show output":
+        step("Parse observations rather than inventing enforcement qualification")
+        for peak in ["0", "65536"]:
+            val parsed = resource_scope_systemd_metrics_v1("Result=success\nMemoryPeak={peak}\nCPUUsageNSec=17\n", 0, 0, false, false)
+            expect(parsed.is_some()).to_equal(true)
+            if parsed.is_some():
+                val (memory, cpu) = parsed.unwrap()
+                expect(memory).to_equal(if peak == "0": 0 else: 65536)
+                expect(cpu).to_equal(17)
+        step("Refuse failed runtime failed show and either truncated capture")
+        val valid = "Result=success\nMemoryPeak=65536\nCPUUsageNSec=17\n"
+        expect(resource_scope_systemd_metrics_v1(valid, 1, 0, false, false).is_none()).to_equal(true)
+        expect(resource_scope_systemd_metrics_v1(valid, 0, 1, false, false).is_none()).to_equal(true)
+        expect(resource_scope_systemd_metrics_v1(valid, 0, 0, true, false).is_none()).to_equal(true)
+        expect(resource_scope_systemd_metrics_v1(valid, 0, 0, false, true).is_none()).to_equal(true)
+        step("Require Result and both numeric properties even if the other property is valid")
+        for output in ["", "MemoryPeak=1\nCPUUsageNSec=2", "Result=\nMemoryPeak=1\nCPUUsageNSec=2", "Result=success\nCPUUsageNSec=2", "Result=success\nMemoryPeak=1"]:
+            expect(resource_scope_systemd_metrics_v1(output, 0, 0, false, false).is_none()).to_equal(true)
+        for invalid in ["", "garbage", "-1", "[not set]", "1152921504606846976"]:
+            expect(resource_scope_systemd_metrics_v1("Result=success\nMemoryPeak={invalid}\nCPUUsageNSec=2", 0, 0, false, false).is_none()).to_equal(true)
+            expect(resource_scope_systemd_metrics_v1("Result=success\nMemoryPeak=1\nCPUUsageNSec={invalid}", 0, 0, false, false).is_none()).to_equal(true)
+
+    it "ITEM4-REQ-009 refuses missing or malformed peak instead of fabricating exact zero":
+        step("Create actual metric files in a unique task-owned directory without memory.peak")
+        val created = item4_resource_evidence_fixture()
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val missing = read_cgroup_v2_observation(parent)
+        expect(missing.available).to_equal(false)
+        expect(missing.unavailable_reason.len() > 0).to_equal(true)
+        step("Read real empty invalid negative and overflowing peak files through the production reader")
+        for value in ["", " \n", "invalid", "-1", "+1", "1.5", "0x10", "1_000", "18446744073709551615", "1152921504606846976"]:
+            if not item4_resource_evidence_write(parent + "/memory.peak", value):
+                item4_resource_evidence_cleanup(parent)
+                return
+            val observed = read_cgroup_v2_observation(parent)
+            expect(observed.available).to_equal(false)
+            expect(observed.unavailable_reason.len() > 0).to_equal(true)
+        item4_resource_evidence_cleanup(parent)
+
+    it "ITEM4-REQ-009 preserves valid zero positive and portable maximum peaks as observations":
+        step("Read explicit peak counters with legitimate surrounding whitespace")
+        val created = item4_resource_evidence_fixture()
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val values = ["0\n", " 65536\n", "1152921504606846975"]
+        val expected = [0i64, 65536i64, 1152921504606846975i64]
+        for index in 0..values.len():
+            if not item4_resource_evidence_write(parent + "/memory.peak", values[index]):
+                item4_resource_evidence_cleanup(parent)
+                return
+            val observed = read_cgroup_v2_observation(parent)
+            expect(observed.available).to_equal(true)
+            expect(observed.memory_peak_bytes).to_equal(expected[index])
+            expect(observed.memory_current_bytes).to_equal(0)
+            expect(observed.user_cpu_micros).to_equal(12)
+            expect(observed.system_cpu_micros).to_equal(34)
+        item4_resource_evidence_cleanup(parent)
+
+    it "ITEM4-REQ-009 refuses invalid current charge and an impossible peak below current":
+        step("Read actual inconsistent metric files without granting exact observation status")
+        val created = item4_resource_evidence_fixture()
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        if not item4_resource_evidence_write(parent + "/memory.peak", "64"):
+            item4_resource_evidence_cleanup(parent)
+            return
+        for value in ["", "invalid", "-1", "1152921504606846976", "65"]:
+            if not item4_resource_evidence_write(parent + "/memory.current", value):
+                item4_resource_evidence_cleanup(parent)
+                return
+            val observed = read_cgroup_v2_observation(parent)
+            expect(observed.available).to_equal(false)
+            expect(observed.unavailable_reason.len() > 0).to_equal(true)
+        item4_resource_evidence_cleanup(parent)

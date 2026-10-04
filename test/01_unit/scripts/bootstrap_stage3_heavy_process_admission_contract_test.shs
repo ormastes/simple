@@ -10,6 +10,23 @@ export BOOTSTRAP_STAGE3_FACADE_PATH
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/stage3-heavy-admission.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT HUP INT TERM
 fail() { echo "FAIL: $*" >&2; exit 1; }
+mkdir "$tmp/proc"
+fixture_qemu() {
+  fixture_pid=$1
+  fixture_memory=$2
+  mkdir -p "$tmp/proc/$fixture_pid"
+  {
+    printf '%s (qemu-system-aarch64) S' "$fixture_pid"
+    fixture_field=4
+    while [ "$fixture_field" -le 21 ]; do
+      printf ' 0'
+      fixture_field=$((fixture_field + 1))
+    done
+    printf ' 12345 0\n'
+  } >"$tmp/proc/$fixture_pid/stat"
+  printf '%s\0' '/usr/bin/qemu-system-aarch64' '-m' "$fixture_memory" \
+    >"$tmp/proc/$fixture_pid/cmdline"
+}
 
 printf '%s\n%s\n%s\n' \
   'linux|134217728|90000000|1073741824|120259084288|10|fixture' \
@@ -25,15 +42,19 @@ SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM=Linux
 SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE="$tmp/memory"
 SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT="$tmp/processes"
 SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_INTERVAL_SECONDS=0
+SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB=8192
+SIMPLE_BOOTSTRAP_STAGE3_PROC_ROOT="$tmp/proc"
 export SIMPLE_BOOTSTRAP_STAGE3_MEMORY_PLATFORM \
   SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_FIXTURE \
   SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT \
-  SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_INTERVAL_SECONDS
+  SIMPLE_BOOTSTRAP_STAGE3_MEMORY_SAMPLE_INTERVAL_SECONDS \
+  SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB SIMPLE_BOOTSTRAP_STAGE3_PROC_ROOT
 
 bootstrap_stage3_memory_admission_preflight "$tmp/evidence" ||
   fail 'ample-memory fixture was refused'
+stage3_max_kib=$((6144 * 1024))
 set +e
-bootstrap_stage3_memory_require_exclusive_heavy "$tmp/evidence"
+bootstrap_stage3_memory_require_exclusive_heavy "$tmp/evidence" "$stage3_max_kib"
 status=$?
 set -e
 [ "$status" -eq 75 ] || fail "heavy overlap returned $status, expected 75"
@@ -48,7 +69,7 @@ export SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT
 bootstrap_stage3_memory_admission_preflight "$tmp/no-scan-evidence" ||
   fail 'process-scan failure unexpectedly changed memory-provider status'
 set +e
-bootstrap_stage3_memory_require_exclusive_heavy "$tmp/no-scan-evidence"
+bootstrap_stage3_memory_require_exclusive_heavy "$tmp/no-scan-evidence" "$stage3_max_kib"
 no_scan_status=$?
 set -e
 [ "$no_scan_status" -eq 75 ] ||
@@ -70,7 +91,7 @@ bootstrap_stage3_memory_admission_preflight "$tmp/failed-ps-evidence" ||
 PATH=$old_path
 export PATH
 set +e
-bootstrap_stage3_memory_require_exclusive_heavy "$tmp/failed-ps-evidence"
+bootstrap_stage3_memory_require_exclusive_heavy "$tmp/failed-ps-evidence" "$stage3_max_kib"
 failed_ps_status=$?
 set -e
 [ "$failed_ps_status" -eq 75 ] ||
@@ -81,8 +102,57 @@ SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT="$tmp/processes"
 export SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT
 bootstrap_stage3_memory_admission_preflight "$tmp/clear-evidence" ||
   fail 'clear fixture failed memory preflight'
-bootstrap_stage3_memory_require_exclusive_heavy "$tmp/clear-evidence" ||
+bootstrap_stage3_memory_require_exclusive_heavy "$tmp/clear-evidence" "$stage3_max_kib" ||
   fail 'clear fixture was refused'
+
+# A known QEMU allocation can coexist only if the final host sample covers
+# the Stage 3 cgroup ceiling, its own reserve, and all configured guest RAM.
+printf '%s\n' '302|1|31457280|/usr/bin/qemu-system-aarch64 -m 36G' >"$tmp/processes"
+fixture_qemu 302 36G
+bootstrap_stage3_memory_admission_preflight "$tmp/qemu-ready" ||
+  fail 'ample-memory QEMU fixture failed preflight'
+bootstrap_stage3_memory_require_exclusive_heavy "$tmp/qemu-ready" "$stage3_max_kib" ||
+  fail 'budgeted QEMU was refused'
+printf '%s\0' '/usr/bin/qemu-system-aarch64' '-m' '1G' '-m' '36G' \
+  >"$tmp/proc/302/cmdline"
+set +e
+bootstrap_stage3_memory_require_exclusive_heavy "$tmp/qemu-ready" "$stage3_max_kib"
+duplicate_status=$?
+set -e
+[ "$duplicate_status" -eq 75 ] || fail "duplicate QEMU -m returned $duplicate_status"
+fixture_qemu 302 36G
+sed 's/12345/54321/' "$tmp/proc/302/stat" >"$tmp/proc/302/stat.changed"
+mv "$tmp/proc/302/stat.changed" "$tmp/proc/302/stat"
+set +e
+bootstrap_stage3_memory_require_exclusive_heavy "$tmp/qemu-ready" "$stage3_max_kib"
+reused_status=$?
+set -e
+[ "$reused_status" -eq 75 ] || fail "changed QEMU identity returned $reused_status"
+
+printf '%s\n' '303|1|14680064|/usr/bin/qemu-system-aarch64 -m 36G' >"$tmp/processes"
+fixture_qemu 303 36G
+printf '%s\n%s\n%s\n' \
+  'linux|134217728|23068672|1073741824|120259084288|10|fixture' \
+  'linux|134217728|23068672|1073741824|120259084288|10|fixture' \
+  'linux|134217728|23068672|1073741824|120259084288|10|fixture' \
+  >"$tmp/memory"
+bootstrap_stage3_memory_admission_preflight "$tmp/qemu-low" ||
+  fail 'low-overlap fixture should pass baseline memory preflight'
+set +e
+bootstrap_stage3_memory_require_exclusive_heavy "$tmp/qemu-low" "$stage3_max_kib"
+low_status=$?
+set -e
+[ "$low_status" -eq 75 ] || fail "unbudgeted QEMU returned $low_status"
+
+printf '%s\n' '304|1|1024|/usr/bin/qemu-system-aarch64 -m unknown' >"$tmp/processes"
+fixture_qemu 304 unknown
+bootstrap_stage3_memory_admission_preflight "$tmp/qemu-unknown" ||
+  fail 'unknown-QEMU fixture failed baseline memory preflight'
+set +e
+bootstrap_stage3_memory_require_exclusive_heavy "$tmp/qemu-unknown" "$stage3_max_kib"
+unknown_status=$?
+set -e
+[ "$unknown_status" -eq 75 ] || fail "unknown QEMU RAM returned $unknown_status"
 
 # A TERM-resistant nested descendant remains in the unit cgroup even if its
 # parent exits/reparents it, and must not survive bounded cgroup escalation.
@@ -154,7 +224,7 @@ grep -Fq -- '--property=KillMode=control-group' \
 grep -Fq ': "${SIMPLE_BOOTSTRAP_STAGE3_HEADROOM_MIB:=49152}"' \
   "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
   fail 'resume launcher does not reserve 48 GiB headroom'
-grep -Fq 'bootstrap_stage3_memory_require_exclusive_heavy "$memory_admission"' \
+grep -Fq 'bootstrap_stage3_memory_require_exclusive_heavy "$memory_admission" "$stage3_process_max_kib"' \
   "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
   fail 'resume launcher does not enforce heavy-process exclusivity'
 grep -Fq ': "${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB:=51200}"' \
@@ -170,4 +240,4 @@ grep -Fq 'runtime_headroom_watch_result=reserve-crossed' \
   "$root/scripts/bootstrap/resume-stage3-from-admitted.sh" ||
   fail 'resume launcher does not monitor headroom after admission'
 
-echo 'PASS: Stage 3 recovery rejects native-build/QEMU overlap before launch'
+echo 'PASS: Stage 3 recovery budgets QEMU overlap and rejects native-build peers'

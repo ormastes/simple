@@ -1,0 +1,35 @@
+#!/bin/sh
+# Execute an already-built native interpreter; never bootstrap or choose a seed.
+set -eu
+[ "$#" -eq 1 ] || { echo 'usage: canonical-interpreter-product-test.shs ABSOLUTE_NATIVE_BINARY' >&2; exit 2; }
+interpreter=$1
+[ -x "$interpreter" ] || exit 2
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-interpreter-product.XXXXXX")
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+cat > "$tmp/program.spl" <<'SPL'
+fn main() -> i64:
+    print "canonical interpreter product"
+    0
+SPL
+printf 'fn broken(\n' > "$tmp/broken.spl"
+# The product must use itself even if the caller inherited a bootstrap override.
+SIMPLE_BOOTSTRAP_DRIVER="$tmp/forbidden-missing-seed" SIMPLE_EXECUTION_MODE_RECEIPT=1 \
+  "$interpreter" "$tmp/program.spl" > "$tmp/stdout" 2> "$tmp/stderr"
+tr -d '\r' < "$tmp/stdout" > "$tmp/normalized"
+grep -qx 'canonical interpreter product' "$tmp/normalized"
+grep -q 'simple_execution_mode_v1 requested=interpreter actual=interpreter fallback=false' "$tmp/stderr"
+# Backend/JIT options must not turn this product into a JIT or compile entry.
+SIMPLE_EXECUTION_MODE_RECEIPT=1 "$interpreter" "$tmp/program.spl" --backend=llvm --jit-threshold=1 \
+  > "$tmp/forced.stdout" 2> "$tmp/forced.stderr"
+grep -q 'simple_execution_mode_v1 requested=interpreter actual=interpreter fallback=false' "$tmp/forced.stderr"
+for command in --compile compile build native-build; do
+  code=0
+  "$interpreter" "$command" "$tmp/program.spl" > "$tmp/conflict.stdout" 2> "$tmp/conflict.stderr" || code=$?
+  [ "$code" -eq 2 ] || { echo "FAIL: compilation conflict $command returned $code" >&2; exit 1; }
+done
+code=0
+"$interpreter" "$tmp/broken.spl" > "$tmp/error.stdout" 2> "$tmp/error.stderr" || code=$?
+[ "$code" -ne 0 ] || { echo 'FAIL: parser error was reported as success' >&2; exit 1; }
+"$interpreter" --help > "$tmp/help.stdout" 2> "$tmp/help.stderr"
+"$interpreter" --version > "$tmp/version.stdout" 2> "$tmp/version.stderr"
+echo 'PASS: canonical interpreter product mode, conflicts, errors and CLI surface'

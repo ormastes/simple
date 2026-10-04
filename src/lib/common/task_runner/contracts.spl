@@ -1,0 +1,114 @@
+# Frozen messages shared by BuildRunner and the native test runner.
+# Only the parent may mark a result validated or append an accepted attempt.
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+
+struct TaskRunnerIdentityV1:
+    kind: text
+    task_id: text
+    case_id: text
+    backend: text
+    phase: text
+    producer_digest: text
+    source_digest: text
+    runtime_digest: text
+    toolchain_digest: text
+    policy_digest: text
+    execution_digest: text
+
+struct TaskRunnerAttemptV1:
+    identity_digest: text
+    group_id: text
+    attempt: i64
+    mode: text
+    pid: i64
+    process_generation: i64
+    status: text
+    reason: text
+    exit_code: i64
+    task_exit_code: i64
+    signal_number: i64
+    tree_reaped: bool
+    result_validated: bool
+    stdout_digest: text
+    stderr_digest: text
+    result_digest: text
+    transport_execution_digest: text
+
+fn task_runner_identity_v1(value: TaskRunnerIdentityV1) -> Result<text, text>:
+    if value.kind != "build" and value.kind != "test": return Err("invalid task kind")
+    for field in [value.task_id, value.backend, value.phase]:
+        if field == "" or field.len() > 4096: return Err("invalid task identity field")
+    if value.case_id.len() > 4096: return Err("task case identity exceeds bound")
+    for digest in [value.producer_digest, value.source_digest, value.runtime_digest,
+            value.toolchain_digest, value.policy_digest, value.execution_digest]:
+        if not builder_digest_valid_v1(digest): return Err("invalid task identity digest")
+    var payload = "SIMPLE-TASK-IDENTITY-1\n"
+    for field in [value.kind, value.task_id, value.case_id, value.backend, value.phase,
+            value.producer_digest, value.source_digest, value.runtime_digest,
+            value.toolchain_digest, value.policy_digest, value.execution_digest]:
+        payload = payload + str(field.len()) + ":" + field
+    Ok(sha256_text(payload))
+
+fn task_runner_attempt_error_v1(value: TaskRunnerAttemptV1) -> text:
+    if not builder_digest_valid_v1(value.identity_digest): return "invalid attempt identity"
+    if value.group_id == "" or value.group_id.len() > 4096: return "invalid attempt group"
+    if value.attempt < 1 or value.attempt > 8: return "attempt bound exceeded"
+    if value.mode != "grouped" and value.mode != "isolated": return "invalid execution mode"
+    if value.pid <= 0 or value.process_generation < 1: return "missing process identity"
+    if not value.tree_reaped: return "attempt tree is not reaped"
+    for digest in [value.stdout_digest, value.stderr_digest, value.transport_execution_digest]:
+        if not builder_digest_valid_v1(digest): return "invalid attempt log digest"
+    if value.status == "passed" or value.status == "failed":
+        if not value.result_validated or not builder_digest_valid_v1(value.result_digest):
+            return "terminal task lacks validated per-task evidence"
+        # A later sibling crash must not erase validated completed task evidence.
+        if value.status == "passed" and value.task_exit_code != 0:
+            return "passing task has failed task result"
+        if value.status == "failed" and value.reason != "compile" and value.reason != "assertion":
+            return "ordinary failure lacks attributable reason"
+    elif value.status == "skipped" or value.status == "pending":
+        if not value.result_validated or not builder_digest_valid_v1(value.result_digest):
+            return "nonexecuted task lacks validated per-task evidence"
+        if value.reason != value.status: return "nonexecuted task reason differs"
+    elif value.status == "crashed":
+        if value.reason == "process-signal":
+            if value.signal_number <= 0 or value.signal_number > 64:
+                return "crash lacks signal evidence"
+        elif value.reason == "native-exception":
+            if not task_runner_native_exception_v1(value.exit_code):
+                return "crash lacks exception evidence"
+        else:
+            return "crash lacks confirmed process reason"
+    elif value.status == "not-run":
+        if value.reason != "group-crashed" and value.reason != "group-interrupted":
+            return "unattributed task lacks group interruption reason"
+    elif value.status == "aborted":
+        if value.reason != "timed-out" and value.reason != "cancelled" and value.reason != "infrastructure":
+            return "invalid abort reason"
+    else:
+        return "invalid attempt status"
+    ""
+
+export TaskRunnerIdentityV1, TaskRunnerAttemptV1
+export task_runner_identity_v1, task_runner_attempt_error_v1
+
+fn task_runner_native_exception_v1(exit_code: i64) -> bool:
+    var exception = exit_code
+    if exception < 0: exception = exception + 4294967296
+    exception == 3221225477 or exception == 3221225501 or
+        exception == 3221225620 or exception == 3221225621 or
+        exception == 3221225725 or exception == 3221226505 or
+        exception == 3221226356
+
+fn task_runner_process_outcome_v1(exit_code: i64, signal_number: i64,
+        timed_out: bool, cancelled: bool, tree_reaped: bool) -> Result<text, text>:
+    if not tree_reaped: return Err("process tree is not reaped")
+    if signal_number < 0 or signal_number > 64: return Err("invalid process signal")
+    if cancelled: return Ok("cancelled")
+    if timed_out: return Ok("timed-out")
+    if signal_number > 0 or task_runner_native_exception_v1(exit_code): return Ok("crashed")
+    # A normal exit is only a transport outcome, never task/test success.
+    Ok("exited")
+
+export task_runner_native_exception_v1, task_runner_process_outcome_v1

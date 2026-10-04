@@ -1,0 +1,125 @@
+"""Parser-owned source intervals for compiler subsystem product generation.
+
+This program runs as a native binary built by the admitted Stage 2 compiler.
+It validates every selected inventory owner with the canonical frontend and
+records declaration byte intervals. A failed/unsupported owner aborts before
+the span ledger is written; callers must never infer cases from file names.
+"""
+
+use std.sffi.cli_args.{cli_get_args}
+use std.io_runtime.{file_read, file_write}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.core.ast.{ast_reset, module_get_decls, decl_get_tag, decl_get_name, decl_get_span}
+use compiler.core.types.{span_is_valid, span_start, span_end}
+use compiler.frontend.core.frontend.{core_frontend_parse_reset}
+
+struct GenerateArgs:
+    source_root: text
+    inventory: text
+    subsystem: text
+    output: text
+
+var output_rows: [text] = []
+
+fn parse_args(raw: [text]) -> GenerateArgs:
+    var result = GenerateArgs(source_root: "", inventory: "", subsystem: "", output: "")
+    for arg in raw:
+        if arg.starts_with("--source-root="):
+            result.source_root = arg[14:]
+        elif arg.starts_with("--inventory="):
+            result.inventory = arg[12:]
+        elif arg.starts_with("--subsystem="):
+            result.subsystem = arg[12:]
+        elif arg.starts_with("--output="):
+            result.output = arg[9:]
+    result
+
+fn valid_relative_path(path: text) -> bool:
+    if not path.starts_with("test/") or path.contains("\\") or path.contains("\t"):
+        return false
+    if path.contains("\n") or path.contains("\r") or path.contains("//"):
+        return false
+    if path.contains("/../") or path.ends_with("/..") or path.contains("/./"):
+        return false
+    path.ends_with("_spec.spl") or path.ends_with("_test.spl")
+
+fn is_lower_sha256(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not "0123456789abcdef".contains(ch):
+            return false
+    true
+
+fn add_owner_spans(source_root: text, relative_path: text,
+                   expected_sha: text) -> bool:
+    val absolute_path = source_root + "/" + relative_path
+    val source = file_read(absolute_path)
+    if sha256_text(source) != expected_sha:
+        print "source hash mismatch: {relative_path}"
+        return false
+    ast_reset()
+    if not core_frontend_parse_reset(source, relative_path):
+        print "parser rejected inventory owner: {relative_path}"
+        return false
+    val decls = module_get_decls()
+    output_rows.push("owner\t" + relative_path + "\t" + expected_sha + "\t" + "{decls.len()}")
+    var previous_end = 0
+    var ordinal = 0
+    for decl in decls:
+        val span = decl_get_span(decl)
+        if not span_is_valid(span):
+            print "missing parser source span: {relative_path} declaration {ordinal}"
+            return false
+        val begin = span_start(span)
+        val end = span_end(span)
+        if begin < previous_end or end <= begin or end > source.len():
+            print "invalid parser source span: {relative_path} declaration {ordinal}"
+            return false
+        val name = decl_get_name(decl)
+        if name.contains("\t") or name.contains("\n") or name.contains("\r"):
+            print "unsafe parser declaration name: {relative_path} declaration {ordinal}"
+            return false
+        output_rows.push("decl\t" + relative_path + "\t" + "{ordinal}" + "\t" +
+                  "{decl_get_tag(decl)}" + "\t" + name + "\t" +
+                  "{begin}" + "\t" + "{end}")
+        previous_end = end
+        ordinal = ordinal + 1
+    true
+
+fn main() -> i64:
+    val args = parse_args(cli_get_args())
+    if args.source_root == "" or args.inventory == "" or args.output == "":
+        print "usage: generator --source-root=ROOT --inventory=TSV --subsystem=compiler|interpreter|loader --output=SPAN-TSV"
+        return 2
+    if args.subsystem != "compiler" and args.subsystem != "interpreter" and args.subsystem != "loader":
+        print "invalid subsystem"
+        return 2
+    val inventory = file_read(args.inventory)
+    val lines = inventory.split("\n")
+    if lines.len() == 0 or lines[0] != "subsystem\tlevel\tpath\tsha256":
+        print "invalid inventory header"
+        return 2
+    output_rows.clear()
+    output_rows.push("simple-subsystem-source-spans-v1\t" + args.subsystem + "\t" + sha256_text(inventory))
+    var selected = 0
+    for line in lines[1:]:
+        if line == "":
+            continue
+        val fields = line.split("\t")
+        if fields.len() != 4 or not valid_relative_path(fields[2]) or not is_lower_sha256(fields[3]):
+            print "invalid inventory row"
+            return 2
+        if fields[0] != args.subsystem:
+            continue
+        if not add_owner_spans(args.source_root, fields[2], fields[3]):
+            return 1
+        selected = selected + 1
+    if selected == 0:
+        print "empty selected subsystem inventory"
+        return 1
+    output_rows.push("complete\t{selected}")
+    if not file_write(args.output, output_rows.join("\n") + "\n"):
+        print "cannot write parser span ledger"
+        return 1
+    0

@@ -27,6 +27,10 @@ for path in test/01_unit/compiler/core/one_spec.spl \
   test/unit/compiler/excluded_spec.spl; do
   printf '# fixture %s\n' "$path" >"$fixture/$path"
 done
+git -C "$fixture" init -q
+git -C "$fixture" add test
+git -C "$fixture" -c user.name=InventoryTest -c user.email=inventory@example.invalid \
+  commit -qm fixture
 sh "$script_root/compiler-subsystem-test-inventory.shs" "$fixture" >"$fixture/inventory.tsv" 2>"$fixture/inventory.log"
 [ ! -s "$fixture/inventory.log" ]
 perl - "$fixture" <<'PERL'
@@ -55,4 +59,21 @@ if sh "$script_root/compiler-subsystem-test-inventory.shs" "$fixture" >"$fixture
   exit 1
 fi
 [ ! -s "$fixture/missing.tsv" ]
-printf 'PASS: source ownership, exclusions, hashes, ordering and missing-tree rejection; fixture=%s\n' "$fixture"
+mv "$fixture/test/missing-system" "$fixture/test/03_system"
+# The HEAD tree remains authoritative when a sparse checkout has omitted an
+# otherwise eligible tracked file from a present test directory.
+rm "$fixture/test/01_unit/compiler/core/one_spec.spl"
+if sh "$script_root/compiler-subsystem-test-inventory.shs" "$fixture" >"$fixture/sparse.tsv" 2>"$fixture/sparse.log"; then
+  echo 'FAIL: unmaterialized tracked owner accepted' >&2
+  exit 1
+fi
+grep -q 'tracked eligible test owner not materialized' "$fixture/sparse.log"
+git -C "$fixture" checkout -q -- test/01_unit/compiler/core/one_spec.spl
+# An untracked eligible source also changes the product's apparent owner set.
+printf '# untracked owner\n' >"$fixture/test/01_unit/compiler/core/extra_spec.spl"
+if sh "$script_root/compiler-subsystem-test-inventory.shs" "$fixture" >"$fixture/untracked.tsv" 2>"$fixture/untracked.log"; then
+  echo 'FAIL: untracked eligible owner accepted' >&2
+  exit 1
+fi
+grep -q 'untracked eligible test owner' "$fixture/untracked.log"
+printf 'PASS: source ownership, exclusions, hashes, ordering, missing-tree, sparse and untracked rejection; fixture=%s\n' "$fixture"

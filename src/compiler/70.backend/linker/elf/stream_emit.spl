@@ -6,6 +6,7 @@ whole-section buffers or out-of-window writes. Overlapping patches fail closed.
 """
 use compiler.backend.linker.elf.stream_types.{ElfStreamInputsV1, ElfStreamLayoutV1}
 use compiler.backend.linker.elf.stream_inputs.*
+use compiler.backend.linker.elf.stream_got.*
 use compiler.backend.linker.elf.stream_layout.{ELF_STREAM_BASE_V1, elf_stream_group_v1, elf_stream_section_align_v1}
 use compiler.backend.linker.elf.elf_file_reader.{elf_file_section_v1, elf_file_section_window_v1, elf_file_rela_v1}
 use compiler.backend.linker.reloc_engine.{reloc_apply_x86_64}
@@ -48,10 +49,12 @@ fn elf_stream_header(layout: ElfStreamLayoutV1) -> [u8]:
 
 fn elf_stream_reloc_width(kind: u64) -> Result<i64, text>:
     if kind == 1u64 or kind == 24u64: return Ok(8)
+    if kind == 25u64 or kind == 27u64 or kind == 28u64 or kind == 29u64 or kind == 30u64 or kind == 31u64: return Ok(8)
     if kind == 2u64 or kind == 4u64 or kind == 10u64 or kind == 11u64: return Ok(4)
+    if kind == 3u64 or kind == 9u64 or kind == 26u64 or kind == 41u64 or kind == 42u64 or kind == 43u64: return Ok(4)
     if kind == 12u64 or kind == 13u64: return Ok(2)
     if kind == 14u64 or kind == 15u64: return Ok(1)
-    Err("stream x64 relocation {kind} requires an unsupported GOT/TLS/other contract")
+    Err("stream x64 relocation {kind} requires an unsupported TLS/dynamic/other contract")
 
 pub class ElfStreamWriterV1:
     var inputs: ElfStreamInputsV1
@@ -66,8 +69,10 @@ impl ElfStreamWriterV1:
         var assigned: [bool] = []
         for index in 0..bytes.len(): assigned.push(false)
         for table_index in 1..object.section_count:
+            self.inputs.elf_stream_charge_v1(cancelled)?
             val table = elf_file_section_v1(object, table_index)?
             if table.section_type != 4u64 or table.info != section_index: continue
+            if not self.inputs.elf_stream_comdat_section_kept_v1(owner, table_index, cancelled)?: continue
             if table.entry_size != 24u64 or table.size % 24u64 != 0u64: return Err("stream RELA entry width unsupported")
             var ordinal: u64 = 0
             while ordinal < table.size / 24u64:
@@ -81,8 +86,22 @@ impl ElfStreamWriterV1:
                 val end = relocation.offset + width as u64
                 if end <= offset or relocation.offset >= offset + bytes.len() as u64: continue
                 val symbol = self.inputs.elf_stream_read_symbol_v1(object, relocation.symbol_table, relocation.symbol_index, cancelled)?
-                val target = self.inputs.elf_stream_symbol_address_v1(owner, symbol, cancelled)?
-                val place = ELF_STREAM_BASE_V1 + section_offset + relocation.offset
+                var target = self.inputs.elf_stream_symbol_address_v1(owner, symbol, cancelled)?
+                var place = ELF_STREAM_BASE_V1 + section_offset + relocation.offset
+                val kind = elf_stream_got_kind_v1(relocation.relocation_type)
+                if kind != 0:
+                    val base = self.inputs.elf_stream_got_base_v1(cancelled)?
+                    if kind == 1 or kind == 2:
+                        val identity = elf_stream_got_identity_v1(owner, relocation.symbol_table, relocation.symbol_index, symbol)
+                        val got = self.inputs.elf_stream_got_layout_v1(base, Some(identity), cancelled)?
+                        if got.wanted_slot.is_none(): return Err("stream GOT slot disappeared")
+                        val slot = got.wanted_slot.unwrap()
+                        target = if kind == 1: ELF_STREAM_BASE_V1 + slot else: slot - base
+                    elif kind == 3:
+                        target = ELF_STREAM_BASE_V1 + base
+                    else:
+                        # Static PLTOFF64 has no PLT indirection: resolved S-GOT.
+                        place = ELF_STREAM_BASE_V1 + base
                 val applied = reloc_apply_x86_64([], 0, relocation.relocation_type as i64,
                     target as i64, relocation.addend, place as i64)
                 if not applied.success: return Err("stream relocation failed: {applied.error}")
@@ -107,6 +126,7 @@ impl ElfStreamWriterV1:
             for object in self.inputs.objects:
                 for index in 1..object.section_count:
                     self.inputs.elf_stream_charge_v1(cancelled)?
+                    if not self.inputs.elf_stream_comdat_section_kept_v1(owner, index, cancelled)?: continue
                     val section = elf_file_section_v1(object, index)?
                     if elf_stream_group_v1(section)? != group: continue
                     val placement = elf_stream_section_align_v1(self.output.position, section.alignment, self.inputs.limits.output_bytes)?
@@ -123,10 +143,58 @@ impl ElfStreamWriterV1:
                         self.output.write(patched)?
                         offset = offset + count as u64
                 owner = owner + 1
+        # COMMON addresses remain unchanged. GOT follows its zero-filled tail;
+        # inactive GOT layouts retain the exact prior file extent.
+        val common = self.inputs.elf_stream_common_layout_v1(self.output.position, [], cancelled)?
+        self.elf_stream_zeros(common.0, self.inputs.limits.emit_window_bytes, cancelled)?
+        val got = self.inputs.elf_stream_got_layout_v1(common.0, None, cancelled)?
+        if got.active:
+            self.elf_stream_zeros(got.base, self.inputs.limits.emit_window_bytes, cancelled)?
+            self.elf_stream_emit_got_v1(cancelled)?
+        if self.output.position != got.end: return Err("stream GOT length differs from plan")
         if self.output.position != layout.file_bytes: return Err("stream output length differs from plan")
         for object in self.inputs.objects: retained_file_identity_unchanged(object.file)?
         if cancelled(): return Err("stream link cancelled")
         Ok(self.output.position)
+
+    me elf_stream_emit_got_v1(cancelled: fn() -> bool) -> Result<bool, text>:
+        var owner = 0
+        for object in self.inputs.objects:
+            for table in 1..object.section_count:
+                self.inputs.elf_stream_charge_v1(cancelled)?
+                val section = elf_file_section_v1(object, table)?
+                if section.section_type != 4u64: continue
+                if not self.inputs.elf_stream_comdat_section_kept_v1(owner, table, cancelled)?: continue
+                if not self.inputs.elf_stream_comdat_section_kept_v1(owner, section.info, cancelled)?: continue
+                self.inputs.elf_stream_charge_v1(cancelled)?
+                val target = elf_file_section_v1(object, section.info)?
+                if (target.flags & 2u64) == 0u64: continue
+                if section.entry_size != 24u64 or section.size % 24u64 != 0u64: return Err("stream GOT RELA width")
+                var ordinal = 0u64
+                while ordinal < section.size / 24u64:
+                    self.inputs.elf_stream_charge_v1(cancelled)?
+                    val relocation = elf_file_rela_v1(object, table, ordinal)?
+                    val kind = elf_stream_got_kind_v1(relocation.relocation_type)
+                    if kind == 1 or kind == 2:
+                        val symbol = self.inputs.elf_stream_read_symbol_v1(object, relocation.symbol_table, relocation.symbol_index, cancelled)?
+                        val identity = elf_stream_got_identity_v1(owner, relocation.symbol_table, relocation.symbol_index, symbol)
+                        if self.inputs.elf_stream_got_first_v1(owner, table, ordinal, identity, cancelled)?:
+                            # Slot payload excludes every use-site addend. The
+                            # existing symbol owner resolves weak, COMMON, local
+                            # and synthetic anchor addresses consistently.
+                            val address = self.inputs.elf_stream_symbol_address_v1(owner, symbol, cancelled)?
+                            var offset = 0
+                            while offset < 8:
+                                if cancelled(): return Err("stream link cancelled")
+                                val remaining = 8 - offset
+                                val count = if remaining < self.inputs.limits.emit_window_bytes: remaining else: self.inputs.limits.emit_window_bytes
+                                var bytes: [u8] = []
+                                for index in 0..count: bytes.push((address >> ((offset + index) * 8)) as u8)
+                                self.output.write(bytes)?
+                                offset = offset + count
+                    ordinal = ordinal + 1u64
+            owner = owner + 1
+        Ok(true)
 
     me elf_stream_zeros(target: u64, window: i64, cancelled: fn() -> bool) -> Result<bool, text>:
         if self.output.position > target: return Err("stream output cursor exceeds planned offset")

@@ -6,7 +6,8 @@ artifact, not memory use. This entrypoint cannot certify bounded execution.
 use std.io_runtime.{file_exists, file_read_bytes, cwd, host_os}
 use std.path.{resolve, normalize}
 use compiler.backend.linker.reloc_engine.{RelocArch}
-use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
+use compiler.backend.linker.elf.elf_static_link.{ElfLinkRequest, elf_link_with_operations, ELF_LINK_STATIC_EXEC}
+use compiler.backend.linker.elf.elf_operation_bindings.{ElfSealedOperationsV1, elf_builtin_file_operations_v1}
 use compiler.backend.linker.macho.macho_static_link.{macho_static_link}
 use compiler.backend.linker.native_image_publish.{native_image_publish}
 use compiler.backend.linker.native_link_result.{NativeLinkSuccessV1}
@@ -22,14 +23,18 @@ struct NativeFreestandingLinkConfig:
     output_byte_limit: i64
     executable: bool
 
-fn freestanding_inputs(paths: [text]) -> Result<[[u8]], text>:
+fn freestanding_inputs(paths: [text], operations: Option<ElfSealedOperationsV1>) -> Result<[[u8]], text>:
     var inputs: [[u8]] = []
     for path in paths:
-        if path == "" or path.contains("\0") or not file_exists(path):
-            return Err("freestanding input cannot be read: {path}")
-        val bytes = file_read_bytes(path)
-        if bytes.len() == 0: return Err("freestanding input is empty or unreadable: {path}")
-        inputs.push(bytes)
+        if operations != nil:
+            val owner = operations.unwrap()
+            inputs.push(owner.read_bytes(path)?)
+        else:
+            if path == "" or path.contains("\0") or not file_exists(path):
+                return Err("freestanding input cannot be read: {path}")
+            val bytes = file_read_bytes(path)
+            if bytes.len() == 0: return Err("freestanding input is empty or unreadable: {path}")
+            inputs.push(bytes)
     Ok(inputs)
 
 fn freestanding_widen(inputs: [[u8]]) -> [[i64]]:
@@ -50,6 +55,26 @@ fn freestanding_path_key(path: text, base: text, windows: bool) -> text:
 
 fn link_freestanding_to_native_v1(objects: [text], archives: [text], output: text,
         config: NativeFreestandingLinkConfig) -> Result<NativeLinkSuccessV1, text>:
+    if config.format == NativeFreestandingFormat.Elf:
+        val operations = elf_builtin_file_operations_v1()?
+        return link_freestanding_with_operations_v1(objects, archives, output, config, operations)
+    link_freestanding_selected(objects, archives, output, config, nil)
+
+fn link_freestanding_with_operations_v1(objects: [text], archives: [text], output: text,
+        config: NativeFreestandingLinkConfig, operations: ElfSealedOperationsV1) -> Result<NativeLinkSuccessV1, text>:
+    """Use one sealed owner for real file acquisition and ELF image operations.
+
+    Read/link failure returns before publication. The source is caller-trusted;
+    the receipt is not an immutable-file or filesystem-alias certificate.
+    """
+    if config.format != NativeFreestandingFormat.Elf:
+        return Err("sealed ELF file operations require ELF format")
+    if not operations.has_byte_source():
+        return Err("freestanding ELF operation owner has no byte source")
+    link_freestanding_selected(objects, archives, output, config, Some(operations))
+
+fn link_freestanding_selected(objects: [text], archives: [text], output: text,
+        config: NativeFreestandingLinkConfig, operations: Option<ElfSealedOperationsV1>) -> Result<NativeLinkSuccessV1, text>:
     """Link explicitly freestanding files and report the engine that produced them.
 
     Unsupported configuration and all linker failures precede publication.
@@ -76,15 +101,18 @@ fn link_freestanding_to_native_v1(objects: [text], archives: [text], output: tex
     for path in objects + archives:
         if freestanding_path_key(path, base, windows) == output_key:
             return Err("freestanding output aliases an input path")
-    val object_bytes = freestanding_inputs(objects)?
-    val archive_bytes = freestanding_inputs(archives)?
+    val object_bytes = freestanding_inputs(objects, operations)?
+    val archive_bytes = freestanding_inputs(archives, operations)?
     var image: [u8] = []
     var engine = ""
     match config.format:
         case Elf:
-            val linked = elf_static_link(freestanding_widen(object_bytes),
-                freestanding_widen(archive_bytes), config.entry, config.target)?
-            for byte in linked: image.push(byte as u8)
+            if operations == nil: return Err("freestanding ELF operation owner is missing")
+            val request = ElfLinkRequest(objects: freestanding_widen(object_bytes),
+                archives: freestanding_widen(archive_bytes), shared: [], entry: config.entry,
+                target: config.target, mode: ELF_LINK_STATIC_EXEC, interp: "")
+            val linked = elf_link_with_operations(request, false, [], operations.unwrap())?
+            for byte in linked.image: image.push(byte as u8)
             engine = "internal:elf"
         case MachO:
             image = macho_static_link(object_bytes, archive_bytes, config.entry,
@@ -97,3 +125,4 @@ fn link_freestanding_to_native_v1(objects: [text], archives: [text], output: tex
     Ok(NativeLinkSuccessV1(output: output, engine_id: engine))
 
 export NativeFreestandingFormat, NativeFreestandingLinkConfig, link_freestanding_to_native_v1
+export link_freestanding_with_operations_v1

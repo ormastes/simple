@@ -32,6 +32,8 @@ set -eu
 #   QEMU_MEM             RAM (default: 32G)
 #   QEMU_DISK_SIZE       Sparse overlay virtual capacity in GiB (default: 48G;
 #                        accepted range: 40G..2048G)
+#   QEMU_HOST_FREE_FLOOR_GIB Minimum physical free space on the overlay
+#                        filesystem in GiB (default: 4; accepted: 1..1024)
 #   QEMU_CPUS            CPUs (default: 10)
 #   Per-host config (untracked, gitignored): .simple/qemu-host.conf at the
 #   repo root or ~/.simple/qemu-host.conf is sourced at startup; use
@@ -79,6 +81,7 @@ QEMU_PORT="${QEMU_PORT:-2222}"
 QEMU_USER="${QEMU_USER:-freebsd}"
 QEMU_MEM="${QEMU_MEM:-32G}"
 QEMU_DISK_SIZE="${QEMU_DISK_SIZE:-48G}"
+QEMU_HOST_FREE_FLOOR_GIB="${QEMU_HOST_FREE_FLOOR_GIB:-4}"
 QEMU_CPUS="${QEMU_CPUS:-10}"
 QEMU_PHASE2_BACKEND="${QEMU_PHASE2_BACKEND:-both}"
 QEMU_PHASE2_JOBS="${QEMU_PHASE2_JOBS:-${QEMU_CPUS}}"
@@ -195,6 +198,45 @@ is_valid_disk_size() {
         [ "$_disk_gib" -le 2048 ] 2>/dev/null
 }
 
+is_valid_host_free_floor() {
+    case "$1" in 0*) return 1 ;; esac
+    is_positive_integer "$1" && [ "$1" -le 1024 ] 2>/dev/null
+}
+
+# df must inspect the filesystem that will hold the overlay. Before VM_DIR
+# exists, its nearest existing parent is on that same filesystem.
+overlay_df_path() {
+    _disk_path=$VM_DIR
+    while [ ! -e "$_disk_path" ]; do
+        _disk_parent=${_disk_path%/*}
+        [ "$_disk_parent" != "$_disk_path" ] || _disk_parent=.
+        [ -n "$_disk_parent" ] || _disk_parent=/
+        _disk_path=$_disk_parent
+    done
+    [ -d "$_disk_path" ] || return 1
+    printf '%s\n' "$_disk_path"
+}
+
+overlay_free_kib() {
+    _disk_probe_path=$(overlay_df_path) || return 1
+    _disk_df=$(df -Pk "$_disk_probe_path" 2>/dev/null) || return 1
+    _disk_rows=$(printf '%s\n' "$_disk_df" | awk 'END { print NR }')
+    [ "$_disk_rows" -eq 2 ] || return 1
+    _disk_available=$(printf '%s\n' "$_disk_df" | awk 'NR == 2 { print $4 }')
+    case "$_disk_available" in ''|0[0-9]*|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$_disk_available"
+}
+
+host_free_space_receipt() {
+    _disk_available_kib=$(overlay_free_kib) || return 1
+    _disk_required_kib=$((QEMU_HOST_FREE_FLOOR_GIB * 1048576))
+    _disk_actual_path=$(overlay_df_path) || return 1
+    printf 'overlay_filesystem_path=%s\n' "$_disk_actual_path"
+    printf 'overlay_available_bytes=%s\n' "$((_disk_available_kib * 1024))"
+    printf 'overlay_required_bytes=%s\n' "$((_disk_required_kib * 1024))"
+    [ "$_disk_available_kib" -ge "$_disk_required_kib" ]
+}
+
 is_valid_port() {
     is_positive_integer "$1" || return 1
     [ "$1" -le 65535 ] 2>/dev/null
@@ -212,7 +254,7 @@ if [ -z "$TIMEOUT_BIN" ]; then
     TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
 fi
 
-PREFLIGHT_ORDER="mode,port,user,memory,disk_size,cpus,phase2_backend,phase2_jobs,phase2_build_threads,phase2_test_workers,phase2_isolation,ssh_timeout,root_ssh_timeout,timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool,admitted_media,ssh_public_key,ssh_private_key,workspace"
+PREFLIGHT_ORDER="mode,port,user,memory,disk_size,host_free_floor,host_free_space,cpus,phase2_backend,phase2_jobs,phase2_build_threads,phase2_test_workers,phase2_isolation,ssh_timeout,root_ssh_timeout,timeout,architecture,qemu_system,qemu_img,ssh,rsync,iso_tool,admitted_media,ssh_public_key,ssh_private_key,workspace"
 PREFLIGHT_REASON="none"
 
 preflight_try() {
@@ -233,6 +275,11 @@ preflight_port() { is_valid_port "$QEMU_PORT"; }
 preflight_user() { is_valid_user "$QEMU_USER"; }
 preflight_memory() { is_valid_memory "$QEMU_MEM"; }
 preflight_disk_size() { is_valid_disk_size "$QEMU_DISK_SIZE"; }
+preflight_host_free_floor() { is_valid_host_free_floor "$QEMU_HOST_FREE_FLOOR_GIB"; }
+preflight_host_free_space() {
+    is_valid_host_free_floor "$QEMU_HOST_FREE_FLOOR_GIB" || return 1
+    host_free_space_receipt >/dev/null
+}
 preflight_cpus() { is_positive_integer "$QEMU_CPUS"; }
 preflight_phase2_backend() {
     case "$QEMU_PHASE2_BACKEND" in both|llvm|cranelift) return 0 ;; *) return 1 ;; esac
@@ -340,6 +387,8 @@ run_preflight() {
     preflight_try user preflight_user
     preflight_try memory preflight_memory
     preflight_try disk_size preflight_disk_size
+    preflight_try host_free_floor preflight_host_free_floor
+    preflight_try host_free_space preflight_host_free_space
     preflight_try cpus preflight_cpus
     preflight_try phase2_backend preflight_phase2_backend
     preflight_try phase2_jobs preflight_phase2_jobs
@@ -366,7 +415,7 @@ run_preflight() {
         PREFLIGHT_STATUS="fail"
     fi
     printf 'freebsd_qemu_preflight_status=%s\n' "$PREFLIGHT_STATUS"
-    printf 'freebsd_qemu_preflight_checks=25\n'
+    printf 'freebsd_qemu_preflight_checks=27\n'
     printf 'freebsd_qemu_preflight_order=%s\n' "$PREFLIGHT_ORDER"
     printf 'freebsd_qemu_preflight_reason=%s\n' "$PREFLIGHT_REASON"
     [ "$PREFLIGHT_STATUS" = "pass" ]
@@ -395,6 +444,10 @@ if ! is_valid_memory "$QEMU_MEM"; then
 fi
 if ! is_valid_disk_size "$QEMU_DISK_SIZE"; then
     printf 'Invalid QEMU_DISK_SIZE: %s (expected 40G..2048G)\n' "$QEMU_DISK_SIZE" >&2
+    exit 1
+fi
+if ! is_valid_host_free_floor "$QEMU_HOST_FREE_FLOOR_GIB"; then
+    printf 'Invalid QEMU_HOST_FREE_FLOOR_GIB: %s (expected 1..1024)\n' "$QEMU_HOST_FREE_FLOOR_GIB" >&2
     exit 1
 fi
 if ! is_positive_integer "$QEMU_CPUS"; then
@@ -531,6 +584,7 @@ pkg_root() {
         root@localhost "$@"
 }
 
+GIT_AUTHORITY_DIR=
 PHASE2_VM_LOCK=
 if [ "$MODE" = phase2-only ]; then
     mkdir -p "$VM_DIR" || fail "Cannot create isolated Phase 2 VM directory"
@@ -539,23 +593,126 @@ if [ "$MODE" = phase2-only ]; then
     printf '%s\n' "$$" >"$PHASE2_VM_LOCK/owner"
 fi
 SCRIPT_OK=0
-cleanup() {
-    if [ -f "$PID_FILE" ]; then
-        pid=$(cat "$PID_FILE" 2>/dev/null || true)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            if [ -n "${VM_SSH:-}" ]; then
-                info "Requesting guest shutdown"
-                $VM_SSH "shutdown -p now" >/dev/null 2>&1 || true
-                sleep 5
-            fi
-            info "Stopping QEMU (pid=$pid)"
-            kill "$pid" 2>/dev/null || true
-            sleep 1
-            kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+SUCCESS_MESSAGE=
+PHASE2_SUMMARY_SUCCESS_PENDING=0
+PROC_ROOT=/proc
+QEMU_PID=
+QEMU_START_TOKEN=
+QEMU_PID_FILE_ID=
+QEMU_DRIVE_ARG="file=${OVERLAY_IMAGE},format=qcow2,if=virtio,werror=report,rerror=report"
+DISK_MONITOR_PID=
+DISK_MONITOR_STOP="${VM_DIR}/.disk-monitor-stop.$$"
+DISK_FLOOR_MARKER="${VM_DIR}/disk-floor-breach.$$.env"
+
+process_start_token() {
+    _identity_pid=$1
+    is_positive_integer "$_identity_pid" || return 1
+    [ -r "$PROC_ROOT/$_identity_pid/stat" ] || return 1
+    _identity_token=$(awk '{ sub(/^.*\) /, ""); print $20 }' "$PROC_ROOT/$_identity_pid/stat") || return 1
+    is_positive_integer "$_identity_token" || return 1
+    printf '%s\n' "$_identity_token"
+}
+
+qemu_owned_alive() {
+    [ -n "$QEMU_PID" ] && [ -n "$QEMU_START_TOKEN" ] || return 1
+    [ "$(process_start_token "$QEMU_PID" 2>/dev/null || true)" = "$QEMU_START_TOKEN" ] || return 1
+    [ -r "$PROC_ROOT/$QEMU_PID/cmdline" ] || return 1
+    tr '\000' '\n' <"$PROC_ROOT/$QEMU_PID/cmdline" |
+        grep -Fqx -- "$QEMU_DRIVE_ARG"
+}
+
+watch_host_free_space() {
+    _monitor_parent_pid=$1
+    _monitor_parent_token=$2
+    while [ ! -e "$DISK_MONITOR_STOP" ]; do
+        sleep 5
+        [ ! -e "$DISK_MONITOR_STOP" ] || break
+        [ "$(process_start_token "$_monitor_parent_pid" 2>/dev/null || true)" = "$_monitor_parent_token" ] || break
+        qemu_owned_alive || break
+        if _monitor_receipt=$(host_free_space_receipt); then
+            continue
         fi
+        {
+            printf 'host_disk_guard_status=fail\n'
+            printf '%s\n' "$_monitor_receipt"
+        } >"$DISK_FLOOR_MARKER"
+        # The start token and exact overlay argument bind both signals to the
+        # QEMU this invocation launched, even if a PID has been recycled.
+        if qemu_owned_alive; then
+            kill -TERM "$QEMU_PID" 2>/dev/null || true
+            sleep 1
+            qemu_owned_alive && kill -KILL "$QEMU_PID" 2>/dev/null || true
+        fi
+        [ "$(process_start_token "$_monitor_parent_pid" 2>/dev/null || true)" = "$_monitor_parent_token" ] &&
+            kill -TERM "$_monitor_parent_pid" 2>/dev/null || true
+        break
+    done
+}
+
+cleanup() {
+    cleanup_exit_status=${1:-0}
+    trap - HUP INT TERM
+    if [ -n "$GIT_AUTHORITY_DIR" ]; then
+        rm -rf "$GIT_AUTHORITY_DIR"
+    fi
+    if [ -n "$DISK_MONITOR_PID" ]; then
+        : >"$DISK_MONITOR_STOP"
+        wait "$DISK_MONITOR_PID" 2>/dev/null || true
+        rm -f "$DISK_MONITOR_STOP"
+    fi
+    if [ -f "$DISK_FLOOR_MARKER" ]; then
+        SCRIPT_OK=0
+        cleanup_exit_status=88
+        cat "$DISK_FLOOR_MARKER" >&2
+        info "Host disk floor breached; overlay and logs preserved: $DISK_FLOOR_MARKER"
+    fi
+    if qemu_owned_alive; then
+        if [ -n "${VM_SSH:-}" ]; then
+            info "Requesting guest shutdown"
+            $VM_SSH "shutdown -p now" >/dev/null 2>&1 || true
+            sleep 5
+        fi
+        if qemu_owned_alive; then
+            info "Stopping QEMU (pid=$QEMU_PID)"
+            kill "$QEMU_PID" 2>/dev/null || true
+            sleep 1
+            if qemu_owned_alive; then
+                kill -9 "$QEMU_PID" 2>/dev/null || true
+                sleep 1
+            fi
+        fi
+    fi
+    if [ -n "$QEMU_PID" ] && [ -n "$QEMU_START_TOKEN" ] &&
+       [ "$(process_start_token "$QEMU_PID" 2>/dev/null || true)" = "$QEMU_START_TOKEN" ]; then
+        # A still-live process with changed command line cannot be safely
+        # signaled; keep its backing image even on an otherwise green run.
+        SCRIPT_OK=0
+        cleanup_exit_status=88
+        info "QEMU exit could not be confirmed; overlay preserved: $OVERLAY_IMAGE"
+    fi
+    if [ "$SCRIPT_OK" -eq 1 ] && ! host_free_space_receipt >"$DISK_FLOOR_MARKER"; then
+        SCRIPT_OK=0
+        cleanup_exit_status=88
+        info "Host disk floor breached during cleanup; overlay and logs preserved: $DISK_FLOOR_MARKER"
+    else
+        [ "$SCRIPT_OK" -ne 1 ] || rm -f "$DISK_FLOOR_MARKER"
+    fi
+    if [ "$PHASE2_SUMMARY_SUCCESS_PENDING" -eq 1 ]; then
+        if [ "$cleanup_exit_status" -eq 0 ] && [ "$SCRIPT_OK" -eq 1 ]; then
+            if ! printf 'overall=PASS\n' >>"$PHASE2_HOST_SUMMARY"; then
+                SCRIPT_OK=0
+                cleanup_exit_status=88
+            fi
+        else
+            printf 'overall=FAIL\n' >>"$PHASE2_HOST_SUMMARY" || true
+        fi
+    fi
+    if [ -n "$QEMU_PID_FILE_ID" ] && [ -f "$PID_FILE" ] &&
+       [ "$(stat -c '%d:%i' "$PID_FILE" 2>/dev/null || true)" = "$QEMU_PID_FILE_ID" ] &&
+       [ "$(cat "$PID_FILE" 2>/dev/null || true)" = "$QEMU_PID" ]; then
         rm -f "$PID_FILE"
     fi
-    if [ "$SCRIPT_OK" -eq 1 ]; then
+    if [ "$cleanup_exit_status" -eq 0 ] && [ "$SCRIPT_OK" -eq 1 ]; then
         rm -f "$OVERLAY_IMAGE" "$SERIAL_LOG"
     else
         [ -f "$SERIAL_LOG" ] && info "Serial log preserved: $SERIAL_LOG"
@@ -565,8 +722,22 @@ cleanup() {
         rm -f "$PHASE2_VM_LOCK/owner"
         rmdir "$PHASE2_VM_LOCK" 2>/dev/null || true
     fi
+    if [ "$cleanup_exit_status" -eq 0 ] && [ "$SCRIPT_OK" -eq 1 ] && [ -n "$SUCCESS_MESSAGE" ]; then
+        printf '\n%s\n' "$SUCCESS_MESSAGE"
+    fi
+    return "$cleanup_exit_status"
 }
-trap cleanup EXIT
+on_exit() {
+    exit_status=$?
+    trap - EXIT HUP INT TERM
+    if cleanup "$exit_status"; then
+        exit 0
+    else
+        exit $?
+    fi
+}
+trap on_exit EXIT
+trap 'exit 88' HUP INT TERM
 
 # ── Prerequisites ──────────────────────────────────────────────────────
 printf 'FreeBSD QEMU Bootstrap Check (%s mode)\n\n' "$MODE"
@@ -656,6 +827,11 @@ RSYNC_SSH="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Ba
 printf '[3/7] Base image\n'
 
 mkdir -p "$VM_DIR"
+HOST_DISK_RECEIPT=$(host_free_space_receipt) || {
+    printf '%s\n' "$HOST_DISK_RECEIPT" >&2
+    fail "Overlay filesystem has insufficient or unreadable physical free space: $VM_DIR"
+}
+printf '%s\n' "$HOST_DISK_RECEIPT"
 
 MEDIA_RECEIPT="$(sh "$MEDIA_CHECKER" --check --path "$QEMU_VM_PATH")" || {
     printf '%s\n' "$MEDIA_RECEIPT" >&2
@@ -723,6 +899,10 @@ pass "Cloud-init ISO: $QEMU_CLOUDINIT_ISO"
 # ── Create Overlay ─────────────────────────────────────────────────────
 printf '[5/7] QEMU overlay + start\n'
 
+HOST_DISK_RECEIPT=$(host_free_space_receipt) || {
+    printf '%s\n' "$HOST_DISK_RECEIPT" >&2
+    fail "Overlay filesystem fell below host free-space floor before overlay creation: $VM_DIR"
+}
 rm -f "$OVERLAY_IMAGE"
 run_bounded "$QEMU_TRANSFER_TIMEOUT" qemu-img create -f qcow2 -b "$QEMU_VM_PATH" -F qcow2 "$OVERLAY_IMAGE" >/dev/null 2>&1
 run_bounded "$QEMU_TRANSFER_TIMEOUT" qemu-img resize "$OVERLAY_IMAGE" "$QEMU_DISK_SIZE" >/dev/null 2>&1
@@ -770,7 +950,7 @@ if ! run_bounded "$QEMU_BOOTSTRAP_TIMEOUT" "$QEMU_SYSTEM" \
     $MACHINE_ARGS \
     -m "$QEMU_MEM" \
     -smp "$QEMU_CPUS" \
-    -drive "file=${OVERLAY_IMAGE},format=qcow2,if=virtio" \
+    -drive "$QEMU_DRIVE_ARG" \
     -drive "file=${QEMU_CLOUDINIT_ISO},format=raw,if=virtio,media=cdrom" \
     -net nic,model=virtio \
     -net "user,hostfwd=tcp::${QEMU_PORT}-:22" \
@@ -783,15 +963,22 @@ if ! run_bounded "$QEMU_BOOTSTRAP_TIMEOUT" "$QEMU_SYSTEM" \
 fi
 
 QEMU_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-if [ -n "$QEMU_PID" ] && kill -0 "$QEMU_PID" 2>/dev/null; then
+QEMU_START_TOKEN=$(process_start_token "$QEMU_PID" 2>/dev/null || true)
+if qemu_owned_alive; then
+    QEMU_PID_FILE_ID=$(stat -c '%d:%i' "$PID_FILE" 2>/dev/null || true)
+    [ -n "$QEMU_PID_FILE_ID" ] || fail "Cannot establish QEMU pidfile ownership"
     pass "QEMU started (pid=${QEMU_PID}, accel=${ACCEL})"
 else
     [ -s "$QEMU_START_LOG" ] && tail -10 "$QEMU_START_LOG" >&2
     fail "QEMU failed to start"
 fi
+MONITOR_PARENT_TOKEN=$(process_start_token "$$" 2>/dev/null || true)
+[ -n "$MONITOR_PARENT_TOKEN" ] || fail "Cannot establish host disk monitor process ownership"
+watch_host_free_space "$$" "$MONITOR_PARENT_TOKEN" &
+DISK_MONITOR_PID=$!
 
 require_qemu_alive() {
-    if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+    if ! qemu_owned_alive; then
         [ -s "$QEMU_START_LOG" ] && tail -10 "$QEMU_START_LOG" >&2
         [ -s "$SERIAL_LOG" ] && tail -20 "$SERIAL_LOG" >&2
         fail "QEMU exited while waiting for SSH"
@@ -910,7 +1097,7 @@ if [ "$MODE" = "smoke" ]; then
     pass "Trivial C compilation works"
 
     SCRIPT_OK=1
-    printf '\nFreeBSD %s QEMU smoke PASS\n' "$QEMU_ARCH"
+    SUCCESS_MESSAGE="FreeBSD $QEMU_ARCH QEMU smoke PASS"
 else
     # Full: install deps, rsync project, build seed, run bootstrap
     rm -f "$PROVENANCE_RECEIPT"
@@ -957,8 +1144,19 @@ else
         fail "FreeBSD llvm23 package lacks clang or llvm-ar"
     pass "Dependencies installed"
 
+    # Bind the original host authority before projecting files into the VM.
+    SOURCE_AUTHORITY_HELPER="$ROOT_DIR/scripts/bootstrap/lib/freebsd-source-authority.shs"
+    SOURCE_AUTHORITY_HEAD=$(git -C "$ROOT_DIR" rev-parse --verify HEAD) || fail "Cannot bind source HEAD"
+    mkdir -p "$PROVENANCE_DIR"
+    GIT_AUTHORITY_DIR=$(mktemp -d "$VM_DIR/git-authority.XXXXXX") || fail "Cannot isolate Git authority"
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" sh "$SOURCE_AUTHORITY_HELPER" prepare \
+        "$ROOT_DIR" "$GIT_AUTHORITY_DIR" "$SOURCE_AUTHORITY_HEAD" \
+        >"$PROVENANCE_DIR/source-git-authority.env" || fail "Cannot prepare bounded Git authority"
+    SOURCE_AUTHORITY_SHA=$(run_bounded "$QEMU_TRANSFER_TIMEOUT" sh "$SOURCE_AUTHORITY_HELPER" snapshot \
+        "$ROOT_DIR" "$PROVENANCE_DIR/source-inputs-host.txt") || fail "Cannot bind host source content"
+    cp "$PROVENANCE_DIR/source-inputs-host.txt" "$GIT_AUTHORITY_DIR/repo/.git/simple-source-host.snapshot"
     info "Syncing project to VM..."
-    run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az --delete \
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az --delete --no-owner --no-group \
         --exclude='.git' \
         --exclude='.jj/' \
         --exclude='/.claude/worktrees/' \
@@ -970,7 +1168,9 @@ else
         --exclude='node_modules/' \
         --exclude='/src/runtime/*.o' \
         --exclude='/src/runtime/*.a' \
-        --exclude='/examples/' \
+        --include='/examples/' \
+        --include='/examples/10_tooling/***' \
+        --exclude='/examples/***' \
         --include='/doc/' \
         --include='/doc/04_architecture/' \
         --include='/doc/04_architecture/compiler/' \
@@ -979,6 +1179,12 @@ else
         --exclude='/doc/**' \
         --exclude='*.qcow2' \
         --exclude='/src/compiler_rust/target/' \
+        --include='/src/compiler_rust/target_wt/' \
+        --include='/src/compiler_rust/target_wt/release/' \
+        --include='/src/compiler_rust/target_wt/CACHEDIR.TAG' \
+        --include='/src/compiler_rust/target_wt/.rustc_info.json' \
+        --include='/src/compiler_rust/target_wt/release/.cargo-lock' \
+        --exclude='/src/compiler_rust/target_wt/***' \
         --exclude='/src/compiler_rust/target_*/' \
         --include='/tools/' \
         --include='/tools/counterpart/' \
@@ -993,6 +1199,26 @@ else
         -e "$RSYNC_SSH" \
         "${ROOT_DIR}/" "${VM_USER}@localhost:${VM_HOME}/simple/"
     pass "Project synced"
+
+    # Transfer a real depth-one object store, never a worktree .git pointer.
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az --delete --no-owner --no-group \
+        -e "$RSYNC_SSH" "$GIT_AUTHORITY_DIR/repo/.git/" \
+        "${VM_USER}@localhost:${VM_HOME}/simple/.git/" || fail "Cannot transfer bounded Git authority"
+    $VM_SSH "cd '${VM_HOME}/simple' && sh scripts/bootstrap/lib/freebsd-source-authority.shs activate '${VM_HOME}/simple' '$SOURCE_AUTHORITY_HEAD' && sh scripts/bootstrap/lib/freebsd-source-authority.shs compare '${VM_HOME}/simple' '${VM_HOME}/simple/.git/simple-source-host.snapshot' '${VM_HOME}/simple/.git/simple-source-guest.snapshot'" \
+        >"$PROVENANCE_DIR/source-guest-snapshot.sha256" || fail "Guest source authority differs from original host source"
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" sh "$SOURCE_AUTHORITY_HELPER" compare \
+        "$ROOT_DIR" "$PROVENANCE_DIR/source-inputs-host.txt" "$PROVENANCE_DIR/source-inputs-host-after.txt" \
+        >/dev/null || fail "Host source changed during transfer"
+    [ "$(git -C "$ROOT_DIR" rev-parse --verify HEAD)" = "$SOURCE_AUTHORITY_HEAD" ] || fail "Host HEAD changed during transfer"
+    run_bounded "$QEMU_TRANSFER_TIMEOUT" rsync -az -e "$RSYNC_SSH" \
+        "${VM_USER}@localhost:${VM_HOME}/simple/.git/simple-source-guest.snapshot" \
+        "$PROVENANCE_DIR/source-inputs-guest.txt" || fail "Cannot retain guest source authority"
+    cmp -s "$PROVENANCE_DIR/source-inputs-host.txt" "$PROVENANCE_DIR/source-inputs-guest.txt" || fail "Copied source authority mismatch"
+    printf 'source_commit=%s\nsource_snapshot_sha256=%s\nsource_transfer_status=verified\n' \
+        "$SOURCE_AUTHORITY_HEAD" "$SOURCE_AUTHORITY_SHA" >>"$PROVENANCE_DIR/source-git-authority.env"
+    rm -rf "$GIT_AUTHORITY_DIR"
+    GIT_AUTHORITY_DIR=
+    pass "Original source and bounded Git authority verified in guest"
 
     # The bootstrap policy (bootstrap-from-scratch.sh) rejects a full
     # bootstrap without a planner receipt: reason-receipt-required, exit 64
@@ -1129,9 +1355,9 @@ else
             printf 'overall=FAIL\n' >>"$PHASE2_HOST_SUMMARY"
             fail "FreeBSD Phase 2 failed; terminal rows: $PHASE2_HOST_SUMMARY"
         fi
-        printf 'overall=PASS\n' >>"$PHASE2_HOST_SUMMARY"
+        PHASE2_SUMMARY_SUCCESS_PENDING=1
         SCRIPT_OK=1
-        printf '\nFreeBSD %s QEMU Phase 2 PASS\n' "$QEMU_ARCH"
+        SUCCESS_MESSAGE="FreeBSD $QEMU_ARCH QEMU Phase 2 PASS"
         exit 0
     fi
     GUEST_STAGE2='stage2=$(find build/bootstrap/stage2 -type f -name simple -print -quit) && test -n "$stage2"'
@@ -1301,5 +1527,5 @@ else
     pass "Scoped FreeBSD x86_64 QEMU provenance receipt: $PROVENANCE_RECEIPT"
 
     SCRIPT_OK=1
-    printf '\nFreeBSD x86_64 QEMU full bootstrap PASS\n'
+    SUCCESS_MESSAGE='FreeBSD x86_64 QEMU full bootstrap PASS'
 fi

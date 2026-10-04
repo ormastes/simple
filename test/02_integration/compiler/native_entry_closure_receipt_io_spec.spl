@@ -1,0 +1,23 @@
+use std.spec.*
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write, file_delete}
+use std.common.crypto.sha256.{sha256_text}
+use compiler.driver.driver_build.native_entry_closure_receipt.*
+
+describe "immutable entry closure receipt IO":
+    it "publishes once and rejects replaced or truncated physical receipts":
+        val root = secure_temp_dir(get_temp_dir(), "closure-receipt-").unwrap()
+        val path = root + "/selection.v1"
+        val selection = NativeEntryClosureSelectionV1(sha256_text("request"),
+            ["src/main.spl", "src/helper.spl"],
+            [sha256_text("main"), sha256_text("helper")], [4, 6])
+        val published = native_entry_closure_publish_records_v1(path, selection)
+        expect(published.is_ok()).to_equal(true)
+        val opened = native_entry_closure_open_records_v1(path, published.unwrap())
+        expect(opened.is_ok()).to_equal(true)
+        expect(opened.unwrap().identities).to_equal(selection.identities)
+        expect(native_entry_closure_publish_records_v1(path, selection).is_err()).to_equal(true)
+        expect(file_write(path, "truncated")).to_equal(true)
+        expect(native_entry_closure_open_records_v1(path, published.unwrap()).is_err()).to_equal(true)
+        expect(file_delete(path)).to_equal(true)
+        expect(native_entry_closure_open_records_v1(path, published.unwrap()).is_err()).to_equal(true)

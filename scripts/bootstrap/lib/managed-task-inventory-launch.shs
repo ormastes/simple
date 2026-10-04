@@ -1,0 +1,29 @@
+#!/bin/sh
+# The N-task compiled owner validates the complete immutable BuildRun inventory,
+# contexts, dependency graph, resource policy and PureDB inventory. Stage test
+# commands use run-stage-task-test.shs with the actual producer's stage label.
+# This bridge grants no source/provider admission and synthesizes no tasks.
+set -eu
+die() { echo "managed-task-inventory: $*" >&2; exit 2; }
+[ "$#" -eq 9 ] || die "nine bound launch arguments required"
+builder=$1 manifest=$2 manifest_sha=$3 policy=$4 policy_sha=$5
+source=$6 root=$7 poll=$8 lifetime=$9
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+sha() { sha256sum "$1" | cut -d ' ' -f 1; }
+for path in "$builder" "$manifest" "$policy" "$source" "$root"; do
+  absolute "$path" || die "absolute launch path required"
+done
+for file in "$builder" "$manifest" "$policy"; do regular "$file" || die "regular launch input required"; done
+for digest in "$manifest_sha" "$policy_sha"; do
+  case "$digest" in ''|*[!0-9a-f]*) die "canonical digest required" ;; esac
+  [ "${#digest}" -eq 64 ] || die "canonical digest required"
+done
+[ "$(sha "$manifest")" = "$manifest_sha" ] && [ "$(sha "$policy")" = "$policy_sha" ] || die "admitted graph input changed"
+case "$poll" in ''|0|0*|*[!0-9]*) die "positive poll interval required" ;; esac
+case "$lifetime" in 0) ;; ''|0*|*[!0-9]*) die "nonnegative lifetime required" ;; esac
+# exec preserves the compiled owner's actual aggregate exit and process-tree
+# lifecycle. Failed tasks stay failed; independent DAG tasks remain eligible.
+exec "$builder" managed-tasks --manifest "$manifest" --manifest-sha256 "$manifest_sha" \
+  --policy "$policy" --policy-sha256 "$policy_sha" --source-root "$source" \
+  --state "$root" --poll-ms "$poll" --lifetime-ms "$lifetime"

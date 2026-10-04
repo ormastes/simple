@@ -1,0 +1,54 @@
+"""
+## Purpose and audience
+Behavioral specification for the SkCpuSurface CPU-backed pixel buffer's
+readback path. Audience: compiler/runtime developers and spec maintainers
+who need to verify this component's observable behavior and pinned values.
+"""
+# @req: REQ-SSPEC-LIB
+# SkCpuSurface.read_pixels regression coverage (W2: one-shot preallocation
+# of the 4*w*h result on the in-bounds fast path, with the original push
+# loop kept verbatim for the degenerate out-of-bounds path).
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.skia.backend.cpu.backend.{SkCpuSurface, sk_cpu_surface_make}
+use std.skia.entity.geometry.{sk_irect}
+
+describe "SkCpuSurface.read_pixels":
+    it "reads back a full in-bounds rect with exact row content (W2 regression)":
+        # @req: REQ-SSPEC-LIB
+        step("Verify: full in-bounds rect reads back exact row content")
+        var surface = sk_cpu_surface_make(4, 3)
+        var i = 0
+        while i < 4 * 3 * 4:
+            surface.pixels[i] = i as i64
+            i += 1
+        val result = surface.read_pixels(sk_irect(0, 0, 4, 3))
+        expect(result.len()).to_equal(48)  # oracle: 4*3*4
+        expect(result[0]).to_equal(0)
+        expect(result[1]).to_equal(1)
+        expect(result[2]).to_equal(2)
+        expect(result[3]).to_equal(3)
+        expect(result[44]).to_equal(44)
+        expect(result[45]).to_equal(45)
+        expect(result[46]).to_equal(46)
+        expect(result[47]).to_equal(47)
+
+    it "keeps the shortened out-of-bounds result on the push fallback (W2 regression)":
+        # @req: REQ-SSPEC-LIB
+        step("Verify: out-of-bounds rect keeps the shortened push-loop result")
+        # Rows at y=3 are past the 3-row buffer, so every pixel there is
+        # skipped by the guarded fallback, exactly as before W2.
+        var surface = sk_cpu_surface_make(4, 3)
+        var i = 0
+        while i < 4 * 3 * 4:
+            surface.pixels[i] = i as i64
+            i += 1
+        val result = surface.read_pixels(sk_irect(1, 2, 4, 4))
+        expect(result.len()).to_equal(12)  # oracle: 3 in-bounds pixels * 4
+        expect(result[0]).to_equal(36)
+        expect(result[1]).to_equal(37)
+        expect(result[2]).to_equal(38)
+        expect(result[3]).to_equal(39)
+        expect(result[4]).to_equal(40)
+        expect(result[11]).to_equal(47)

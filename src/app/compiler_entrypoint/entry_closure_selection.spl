@@ -1,0 +1,78 @@
+# Physical closure selections stay bound to the existing SCV authority.
+use app.compiler_entrypoint.source_authority.{CompilerSourceAuthorityV1,
+    compiler_source_authority_inventory_v1}
+use compiler.driver.driver_build.native_entry_closure_receipt.{
+    NativeEntryClosureBindingV1, NativeEntryClosureSelectionV1,
+    native_entry_closure_binding_digest_v1,
+    native_entry_closure_validate_selection_v1,
+    native_entry_closure_publish_records_v1,
+    native_entry_closure_open_records_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_admit_v1}
+
+pub fn compiler_entry_closure_select_v1(root: text,
+        authority: CompilerSourceAuthorityV1, binding: NativeEntryClosureBindingV1,
+        paths: [text]) -> Result<NativeEntryClosureSelectionV1, text>:
+    val snapshot = authority.snapshot
+    if not authority.valid or binding.revision != snapshot.revision_id or
+            binding.commit != snapshot.commit_id or binding.tree != snapshot.tree_id or
+            binding.inventory_digest != snapshot.inventory_digest:
+        return Err("entry-closure-snapshot-binding-mismatch")
+    val opened = compiler_source_authority_inventory_v1(root, authority)
+    if opened.is_err(): return Err(opened.unwrap_err())
+    val inventory = opened.unwrap()
+    var identities: [text] = []
+    var digests: [text] = []
+    var counts: [i64] = []
+    var by_identity: {text: i64} = {}
+    var index = 0
+    for entry in inventory.entries:
+        by_identity[entry.source_identity] = index
+        identities = identities.push(entry.source_identity)
+        digests = digests.push(entry.content_digest)
+        counts = counts.push(entry.byte_count)
+        index = index + 1
+    var selected: [text] = []
+    var selected_digests: [text] = []
+    var selected_counts: [i64] = []
+    for path in paths:
+        if not path.starts_with(snapshot.snapshot_root + "/"):
+            return Err("entry-closure-source-outside-snapshot")
+        val identity = path.substring(snapshot.snapshot_root.len() + 1)
+        if not by_identity.has(identity): return Err("entry-closure-source-not-admitted")
+        val row = by_identity[identity]
+        selected = selected.push(identity)
+        selected_digests = selected_digests.push(digests[row])
+        selected_counts = selected_counts.push(counts[row])
+    val digest = native_entry_closure_binding_digest_v1(binding)
+    if digest.is_err(): return Err(digest.unwrap_err())
+    val validated = native_entry_closure_validate_selection_v1(binding,
+        NativeEntryClosureSelectionV1(digest.unwrap(), selected, selected_digests, selected_counts),
+        identities, digests, counts)
+    if validated.is_err(): return Err(validated.unwrap_err())
+    native_entry_closure_admit_v1(root, authority.snapshot,
+        authority.source_inventory_digest, authority.inventory_generation,
+        binding, validated.unwrap())
+
+pub fn compiler_entry_closure_publish_v1(root: text,
+        authority: CompilerSourceAuthorityV1, binding: NativeEntryClosureBindingV1,
+        paths: [text], receipt_path: text) -> Result<text, text>:
+    val admitted = compiler_entry_closure_select_v1(root, authority, binding, paths)
+    if admitted.is_err(): return Err(admitted.unwrap_err())
+    native_entry_closure_publish_records_v1(receipt_path, admitted.unwrap())
+
+pub fn compiler_entry_closure_open_v1(root: text,
+        authority: CompilerSourceAuthorityV1, binding: NativeEntryClosureBindingV1,
+        receipt_path: text, receipt_digest: text) -> Result<NativeEntryClosureSelectionV1, text>:
+    val records = native_entry_closure_open_records_v1(receipt_path, receipt_digest)
+    if records.is_err(): return Err(records.unwrap_err())
+    val untrusted = records.unwrap()
+    var paths: [text] = []
+    for identity in untrusted.identities:
+        paths = paths.push(authority.snapshot.snapshot_root + "/" + identity)
+    val admitted = compiler_entry_closure_select_v1(root, authority, binding, paths)
+    if admitted.is_err(): return Err(admitted.unwrap_err())
+    val actual = admitted.unwrap()
+    if actual.binding_digest != untrusted.binding_digest or
+            actual.digests != untrusted.digests or actual.byte_counts != untrusted.byte_counts:
+        return Err("entry-closure-receipt-inventory-mismatch")
+    Ok(actual)

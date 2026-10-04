@@ -690,7 +690,7 @@ esac
 stage3_process_max_kib=$((SIMPLE_BOOTSTRAP_STAGE3_PROCESS_MAX_MIB * 1024))
 bootstrap_stage3_memory_admission_preflight "$memory_admission" ||
   bootstrap_stage3_error "Stage 3 memory headroom admission refused; see $memory_admission"
-bootstrap_stage3_memory_require_exclusive_heavy "$memory_admission" ||
+bootstrap_stage3_memory_require_exclusive_heavy "$memory_admission" "$stage3_process_max_kib" ||
   bootstrap_stage3_error "concurrent heavy process admission refused; see $memory_admission"
 stage3_guard_watch=disabled-platform
 case "$platform" in

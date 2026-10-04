@@ -16,6 +16,7 @@ use std.common.linker.link_request_v1.{LinkRequestV1}
 use std.common.linker.link_policy_v1.{LinkExecutionPolicyV1}
 use std.common.linker.link_receipt_v1.{LinkReceiptV1}
 use compiler.backend.linker.linker_pack.{LinkerPackConfigV1, LinkerPackV1}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
 
 pub struct LinkerProviderV1:
     header: KpfSchemaHeaderV1
@@ -23,6 +24,7 @@ pub struct LinkerProviderV1:
     composition_digest: KpfDigest256
     engine_id: text
     invoke: fn(LinkRequestV1, LinkExecutionPolicyV1, [text], text) -> LinkReceiptV1
+    invoke_with_config: Option<fn(LinkRequestV1, LinkExecutionPolicyV1, [text], text, NativeLinkConfig) -> LinkReceiptV1> = nil
 
 pub struct LinkerSessionHandleV1:
     index: u32
@@ -39,6 +41,7 @@ pub class LinkerLifecycleV1:
     var generations: KpfGenerationTable
     var providers: [Option<LinkerProviderV1>]
     var packs: [Option<LinkerPackV1>]
+    var owned_generations: [Option<KpfGenerationHandle>]
     var pending_pack: Option<LinkerPackV1>
     var sessions: [_LinkerSessionSlotV1]
     requirement: KpfSchemaRequirementV1
@@ -46,6 +49,8 @@ pub class LinkerLifecycleV1:
     var active: KpfGenerationHandle
     var registry_revision: u64
     var recovery_running: bool
+    var closing: bool
+    var closed: bool
 
     pub static fn create(capacity: u32, session_capacity: u32,
             requirement: KpfSchemaRequirementV1, recovery: LinkerProviderV1) -> Result<LinkerLifecycleV1, text>:
@@ -53,11 +58,13 @@ pub class LinkerLifecycleV1:
             return Err("linker lifecycle capacities must be nonzero")
         var providers: [Option<LinkerProviderV1>] = []
         var packs: [Option<LinkerPackV1>] = []
+        var owned_generations: [Option<KpfGenerationHandle>] = []
         var sessions: [_LinkerSessionSlotV1] = []
         var index: u32 = 0
         while index < capacity:
             providers.push(nil)
             packs.push(nil)
+            owned_generations.push(nil)
             index = index + 1
         index = 0
         while index < session_capacity:
@@ -67,15 +74,17 @@ pub class LinkerLifecycleV1:
             index = index + 1
         var owner = LinkerLifecycleV1(
             generations: KpfGenerationTable.create(capacity, session_capacity),
-            providers: providers, packs: packs, pending_pack: nil, sessions: sessions,
+            providers: providers, packs: packs, owned_generations: owned_generations,
+            pending_pack: nil, sessions: sessions,
             requirement: requirement, recovery: recovery,
             active: KpfGenerationHandle(index: 0, epoch: 0), registry_revision: 0,
-            recovery_running: false)
+            recovery_running: false, closing: false, closed: false)
         val initialized = owner.publish(recovery)
         if initialized.is_err(): return Err(initialized.unwrap_err())
         Ok(owner)
 
     pub me publish(provider: LinkerProviderV1) -> Result<KpfGenerationHandle, text>:
+        if self.closing: return Err("linker lifecycle is closing")
         val schema = kpf_validate_schema_header_v1(provider.header, self.requirement)
         if not schema.accepted():
             return Err("linker provider schema rejected: code={schema.code()}")
@@ -88,6 +97,7 @@ pub class LinkerLifecycleV1:
         if not published.status.accepted():
             return Err("linker generation publish rejected: code={published.status.code()}")
         self.providers[published.current.index] = Some(provider)
+        self.owned_generations[published.current.index] = Some(published.current)
         self.active = published.current
         self.registry_revision = self.registry_revision + 1
         Ok(published.current)
@@ -107,6 +117,7 @@ pub class LinkerLifecycleV1:
         A failure preserves the active generation and retains cleanup ownership.
         Only one failed pack may be retained, preventing unbounded failed loads.
         """
+        if self.closing: return Err("linker lifecycle is closing")
         self.cleanup_pending_pack()?
         val schema = kpf_validate_schema_header_v1(config.header, self.requirement)
         if not schema.accepted(): return Err("linker pack schema rejected: code={schema.code()}")
@@ -124,6 +135,7 @@ pub class LinkerLifecycleV1:
             if closed.is_err(): return Err("pack publication failed; " + closed.unwrap_err())
             return Err("linker generation publish rejected: code={published.status.code()}")
         self.packs[published.current.index] = Some(pack)
+        self.owned_generations[published.current.index] = Some(published.current)
         self.providers[published.current.index] = nil
         self.pending_pack = nil
         self.active = published.current
@@ -131,6 +143,7 @@ pub class LinkerLifecycleV1:
         Ok(published.current)
 
     pub me open() -> Result<LinkerSessionHandleV1, text>:
+        if self.closing: return Err("linker lifecycle is closing")
         var index: u32 = 0
         while index < self.sessions.len():
             if not self.sessions[index].occupied:
@@ -152,6 +165,17 @@ pub class LinkerLifecycleV1:
 
     pub me run(session: LinkerSessionHandleV1, request: LinkRequestV1,
             policy: LinkExecutionPolicyV1, inputs: [text], output: text) -> Result<LinkReceiptV1, text>:
+        self.run_selected(session, request, policy, inputs, output, nil)
+
+    pub me run_with_config(session: LinkerSessionHandleV1, request: LinkRequestV1,
+            policy: LinkExecutionPolicyV1, inputs: [text], output: text,
+            config: NativeLinkConfig) -> Result<LinkReceiptV1, text>:
+        self.run_selected(session, request, policy, inputs, output, Some(config))
+
+    me run_selected(session: LinkerSessionHandleV1, request: LinkRequestV1,
+            policy: LinkExecutionPolicyV1, inputs: [text], output: text,
+            config: Option<NativeLinkConfig>) -> Result<LinkReceiptV1, text>:
+        if self.closing: return Err("linker lifecycle is closing")
         if not self.valid_session(session): return Err("stale linker session")
         if self.sessions[session.index].running: return Err("linker session is already running")
         val generation = self.sessions[session.index].generation
@@ -159,14 +183,25 @@ pub class LinkerLifecycleV1:
         if not view.status.accepted(): return Err("stale linker generation")
         if self.packs[generation.index] != nil:
             self.sessions[session.index].running = true
-            val result = self.packs[generation.index].unwrap().invoke(request, policy, inputs, output)
+            var pack = self.packs[generation.index].unwrap()
+            val result = if config == nil:
+                pack.invoke(request, policy, inputs, output)
+            else:
+                pack.invoke_with_config(request, policy, inputs, output, config.unwrap())
+            self.packs[generation.index] = Some(pack)
             self.sessions[session.index].running = false
             return result
         val selected = self.providers[generation.index]
         if selected == nil: return Err("linker generation has no operation")
         val provider = selected.unwrap()
+        if config != nil and provider.invoke_with_config == nil:
+            return Err("linker generation has no configured operation")
         self.sessions[session.index].running = true
-        val receipt = provider.invoke(request, policy, inputs, output)
+        val receipt = if config == nil:
+            provider.invoke(request, policy, inputs, output)
+        else:
+            val invoke = provider.invoke_with_config.unwrap()
+            invoke(request, policy, inputs, output, config.unwrap())
         self.sessions[session.index].running = false
         # Preserve the callback's actual engine/outcome/accounting; no invented success.
         Ok(receipt)
@@ -201,6 +236,7 @@ pub class LinkerLifecycleV1:
             return Err("linker generation collect rejected: code={collected.code()}")
         self.providers[generation.index] = nil
         self.packs[generation.index] = nil
+        self.owned_generations[generation.index] = nil
         Ok(true)
 
     pub me recover() -> Result<KpfGenerationHandle, text>:
@@ -210,11 +246,66 @@ pub class LinkerLifecycleV1:
     pub me run_recovery(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
             inputs: [text], output: text) -> Result<LinkReceiptV1, text>:
         """Execute static recovery without depending on publication/session capacity."""
+        self.run_recovery_selected(request, policy, inputs, output, nil)
+
+    pub me run_recovery_with_config(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
+            inputs: [text], output: text, config: NativeLinkConfig) -> Result<LinkReceiptV1, text>:
+        self.run_recovery_selected(request, policy, inputs, output, Some(config))
+
+    me run_recovery_selected(request: LinkRequestV1, policy: LinkExecutionPolicyV1,
+            inputs: [text], output: text, config: Option<NativeLinkConfig>) -> Result<LinkReceiptV1, text>:
+        if self.closing: return Err("linker lifecycle is closing")
         if self.recovery_running: return Err("recursive linker recovery dispatch")
+        if config != nil and self.recovery.invoke_with_config == nil:
+            return Err("linker recovery has no configured operation")
         self.recovery_running = true
-        val receipt = self.recovery.invoke(request, policy, inputs, output)
+        val receipt = if config == nil:
+            self.recovery.invoke(request, policy, inputs, output)
+        else:
+            val invoke = self.recovery.invoke_with_config.unwrap()
+            invoke(request, policy, inputs, output, config.unwrap())
         self.recovery_running = false
         Ok(receipt)
+
+    pub me shutdown() -> Result<bool, text>:
+        """Terminal, retryable cleanup without publishing a replacement generation.
+
+        Busy refusal is atomic. Once cleanup starts no new work is admitted.
+        Each failed session or mapping retains its owner for a later retry.
+        """
+        if self.closed: return Ok(true)
+        if self.recovery_running: return Err("linker recovery is still running")
+        for session in self.sessions:
+            if session.occupied and session.running: return Err("linker session is still running")
+        self.closing = true
+        var first_error = ""
+        var index = 0u32
+        while index < self.sessions.len():
+            if self.sessions[index].occupied:
+                val result = self.close(LinkerSessionHandleV1(index: index, epoch: self.sessions[index].epoch))
+                if result.is_err() and first_error == "": first_error = result.unwrap_err()
+            index = index + 1
+        if self.active.epoch != 0:
+            val retired = self.generations.retire_active(self.active)
+            if retired.accepted():
+                self.active = KpfGenerationHandle(index: 0, epoch: 0)
+            else:
+                if first_error == "": first_error = "linker retirement rejected: code={retired.code()}"
+        index = 0
+        while index < self.owned_generations.len():
+            if self.owned_generations[index] != nil:
+                val result = self.collect(self.owned_generations[index].unwrap())
+                if result.is_err() and first_error == "": first_error = result.unwrap_err()
+            index = index + 1
+        val pending = self.cleanup_pending_pack()
+        if pending.is_err() and first_error == "": first_error = pending.unwrap_err()
+        if first_error != "": return Err(first_error)
+        self.closed = true
+        Ok(true)
+
+    pub fn is_closing() -> bool: self.closing
+
+    pub fn is_closed() -> bool: self.closed
 
     pub fn active_generation() -> KpfGenerationHandle:
         self.active

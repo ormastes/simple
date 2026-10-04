@@ -1,0 +1,61 @@
+use std.spec.{describe, it, expect}
+use compiler.core.parser.{parser_has_errors}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types_expr.{TypeKind, parser_type_kind_named_name}
+
+describe "nested composite impl target regressions":
+    it "retains a tuple element inside an array target and implicit receiver":
+        val module = parse_and_build_module("impl<A, B> Hash for [(A, B)] where A: Hash, B: Hash:\n    fn hash() -> i64:\n        0\n", "array_of_tuple_impl.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.impls.len()).to_equal(1)
+        val implementation = module.impls[0]
+        match implementation.type_.kind:
+            case TypeKind.Array(element, _):
+                match element.kind:
+                    case TypeKind.Tuple(fields):
+                        expect(fields.len()).to_equal(2)
+                        expect(parser_type_kind_named_name(fields[0].kind)).to_equal("A")
+                        expect(parser_type_kind_named_name(fields[1].kind)).to_equal("B")
+                    case _: fail("array element tuple was flattened or lost")
+            case _: fail("outer array target was lost")
+        val method = implementation.methods["hash"] ?? panic("missing hash method")
+        expect(method.params.len()).to_equal(1)
+        match method.params[0].type_.kind:
+            case TypeKind.Array(element, _):
+                match element.kind:
+                    case TypeKind.Tuple(fields): expect(fields.len()).to_equal(2)
+                    case _: fail("implicit receiver tuple element was lost")
+            case _: fail("implicit receiver array was lost")
+
+    it "retains an array field beside a generic scalar in a tuple target":
+        val module = parse_and_build_module("impl<T> Hash for ([T], T) where T: Hash:\n    fn hash(self) -> i64:\n        0\n", "tuple_with_array_impl.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(module.impls.len()).to_equal(1)
+        match module.impls[0].type_.kind:
+            case TypeKind.Tuple(fields):
+                expect(fields.len()).to_equal(2)
+                match fields[0].kind:
+                    case TypeKind.Array(element, _):
+                        expect(parser_type_kind_named_name(element.kind)).to_equal("T")
+                    case _: fail("tuple array field was lost")
+                expect(parser_type_kind_named_name(fields[1].kind)).to_equal("T")
+            case _: fail("tuple target was lost")
+
+    it "keeps two nesting levels rather than converting nested delimiters to a name":
+        val module = parse_and_build_module("impl<T> Hash for (([T], T), [T]) where T: Hash:\n    fn hash() -> i64:\n        0\n", "nested_tuple_impl.spl")
+        expect(parser_has_errors()).to_equal(false)
+        match module.impls[0].type_.kind:
+            case TypeKind.Tuple(fields):
+                expect(fields.len()).to_equal(2)
+                match fields[0].kind:
+                    case TypeKind.Tuple(inner): expect(inner.len()).to_equal(2)
+                    case _: fail("nested tuple target was flattened")
+                match fields[1].kind:
+                    case TypeKind.Array(element, _):
+                        expect(parser_type_kind_named_name(element.kind)).to_equal("T")
+                    case _: fail("second array target was lost")
+            case _: fail("outer tuple target was lost")
+
+    it "rejects an unterminated array impl target instead of publishing a clean parse":
+        val module = parse_and_build_module("impl<T> Hash for [T:\n    fn hash() -> i64:\n        0\n", "bad_array_impl.spl")
+        expect(parser_has_errors()).to_equal(true)

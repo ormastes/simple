@@ -1,0 +1,34 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+sha() { sha256sum "$1" | cut -d ' ' -f 1; }
+printf 'frozen inventory\n' >"$scratch/inventory"
+printf 'frozen policy\n' >"$scratch/policy"
+cat >"$scratch/builder" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >"$OWNER_ARGS"
+exit 1
+EOF
+chmod +x "$scratch/builder"
+OWNER_ARGS="$scratch/owner-args"; export OWNER_ARGS
+manifest_sha=$(sha "$scratch/inventory")
+invoke() {
+  sh "$repo/scripts/bootstrap/bootstrap-managed-phases.shs" \
+    --builder-program="$scratch/builder" --source-root="$scratch" --root="$scratch/state" \
+    --task-inventory="$scratch/inventory" --task-inventory-sha256="$manifest_sha" \
+    --task-policy="$scratch/policy" --task-policy-sha256="$(sha "$scratch/policy")" \
+    --poll-ms=10 --lifetime-ms=0
+}
+code=0; invoke || code=$?
+[ "$code" -eq 1 ]
+[ "$(head -n 1 "$OWNER_ARGS")" = managed-tasks ]
+grep -Fx -- "$manifest_sha" "$OWNER_ARGS" >/dev/null
+grep -Fx -- "$scratch/state" "$OWNER_ARGS" >/dev/null
+mv "$OWNER_ARGS" "$scratch/retained-owner-args"
+printf 'changed\n' >>"$scratch/inventory"
+code=0; invoke 2>"$scratch/rejected.log" || code=$?
+[ "$code" -eq 2 ] && [ ! -e "$OWNER_ARGS" ]
+grep -F 'admitted graph input changed' "$scratch/rejected.log" >/dev/null
+echo 'PASS: canonical N-task routing retains aggregate failure; changed graph rejected before owner'
