@@ -9,12 +9,14 @@ integration does not close verification or authorize publication.
 
 ## 2026-10-04 continuation
 
-The next bounded-engine step is the ordinary static x64 GOT family, currently
-rejected by the stream emitter. It requires real canonical GOT slots, a
+The ordinary static x64 GOT family is now authored in the stream emitter.
+It uses real canonical GOT slots, a
 synthetic base, local/global identity separation, checked relocation operands
 and windowed slot emission after common storage. Merely accepting relocation
 widths would be incorrect. Separate test, implementation and research worktrees
 cover types 3, 9, 25–31 and 41–43, including GNU assembler's undefined GOT anchor.
+Source review found and corrected an archive-loop indentation defect; the exact
+core commit has no remaining P0/P1 findings. Runtime execution is still UNRUN.
 TLS/dynamic relocations and whole-job enforcement remain separate open work.
 
 Common-symbol support is now authored through the existing file-backed
