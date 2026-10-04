@@ -3890,3 +3890,22 @@ mod nested_struct_pattern_in_enum_payload_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod optional_bool_binding_tests {
+    use super::super::lower;
+    use crate::hir::types::TypeId;
+    use simple_parser::Parser;
+
+    #[test]
+    fn if_val_binds_bool_payload_as_bool_not_optional_presence() {
+        let source = "fn inspect(value: bool?) -> i64:\n    if val opened = value:\n        return if opened: 19 else: 23\n    -17\n";
+        let ast = Parser::new(source).parse().expect("optional bool fixture parses");
+        let module = lower(&ast).expect("optional bool fixture lowers");
+        let function = module.functions.iter().find(|function| function.name == "inspect")
+            .expect("inspect function exists");
+        let binding = function.locals.iter().find(|local| local.name == "opened")
+            .expect("if-val binding exists");
+        assert_eq!(binding.ty, TypeId::BOOL, "payload condition must inspect bool value, not presence");
+    }
+}
