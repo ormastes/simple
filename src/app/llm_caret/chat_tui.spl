@@ -512,11 +512,20 @@ fn _draw_if_visible(io: CaretIo, rows: i64, row: i64, col: i64, content: text):
     if row >= 0 and row < rows:
         io.draw_at(row, col, content)
 
+# Last frame's geometry. Every row of a frame is drawn full width, so the
+# screen only needs clearing when the size changes; clearing every frame made
+# each keystroke flash a blank screen.
+var _FRAME_COLS: i64 = -1
+var _FRAME_ROWS: i64 = -1
+
 fn _draw_frame(ui: ChatTui, io: CaretIo):
-    io.clear_screen()
     # One geometry snapshot owns this entire frame. A resize can affect the
     # next frame, but cannot mix dimensions within the current render.
     val size = io.terminal_size()
+    if size.cols != _FRAME_COLS or size.rows != _FRAME_ROWS:
+        io.clear_screen()
+        _FRAME_COLS = size.cols
+        _FRAME_ROWS = size.rows
     val cols = size.cols
     val inner_h = _inner_height(size.rows)
     val box_h = inner_h + 2
@@ -524,9 +533,13 @@ fn _draw_frame(ui: ChatTui, io: CaretIo):
     val box = make_box_widget_with_content(ui.title, fg_style(COLOR_CYAN), content)
     val box_area = make_rect(0, 0, cols, box_h)
     val box_lines = box_render(box, box_area)
+    # Synchronized output (DEC 2026): the zero-width markers open on the first
+    # row and close after the last, so a terminal or multiplexer that supports
+    # the mode shows the whole frame at once; others ignore it.
     var i = 0
     while i < box_lines.len():
-        _draw_if_visible(io, size.rows, i, 0, render_line(box_lines[i]))
+        val sync_open = if i == 0: "\x1b[?2026h" else: ""
+        _draw_if_visible(io, size.rows, i, 0, sync_open + render_line(box_lines[i]))
         i = i + 1
     val input_area = make_rect(0, box_h, cols, 1)
     val input_lines = input_render(ui.input, input_area)
@@ -537,6 +550,8 @@ fn _draw_frame(ui: ChatTui, io: CaretIo):
     _draw_if_visible(io, size.rows, box_h + 1, 0, hint)
     val status = styled(pad_or_truncate(_status_line(ui, TURN_COUNT, AWAITING_RESPONSE), cols), hint_style)
     _draw_if_visible(io, size.rows, box_h + 2, 0, status)
+    if size.rows > 0:
+        io.draw_at(size.rows - 1, 0, "\x1b[?2026l")
     io.flush()
 
 # ============================================================================
@@ -552,8 +567,13 @@ fn _read_line(ui0: ChatTui, io: CaretIo) -> (ChatTui, text, i64):
     var result_text = ""
     var status = 1
     var raw_line = make_raw_line_state(ui.input)
+    var first = true
     while not done:
-        _draw_frame(ui, io)
+        # Redraw only once the pending input is consumed: a frame per byte made
+        # a burst (an injected message plus its Enter) queue for seconds.
+        if first or not io.input_pending():
+            _draw_frame(ui, io)
+        first = false
         val b = io.read_byte()
         val next = step_raw_line_byte(raw_line, b)
         raw_line = next.state

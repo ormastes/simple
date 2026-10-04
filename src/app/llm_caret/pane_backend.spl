@@ -16,8 +16,9 @@
 use std.nogc_async_mut.sosix.{sosix_platform, sosix_run, sosix_which}
 use os.apps.smux.api.{smux_create_session, smux_list_sessions,
     smux_list_windows, smux_list_panes, smux_split_pane, smux_focus_pane,
-    smux_focused_pane, smux_close_pane, smux_pane_spawn_pty, smux_pane_alive, smux_resize,
-    smux_send_command, smux_send_text, smux_capture}
+    smux_focused_pane, smux_close_pane, smux_pane_close_pty, smux_pane_spawn_pty, smux_pane_alive, smux_resize,
+    smux_send_command, smux_send_text, smux_capture, smux_capture_styled,
+    smux_paste_text}
 use std.nogc_sync_mut.io.{thread_sleep_ms}
 use app.io.mod.{env_get}
 
@@ -290,8 +291,13 @@ fn _smux_spawn(session: text, title: text, cmd: text, args: [text], cols: i64,
     if spawned.is_err():
         return empty
     if not _is_windows():
+        # The child is not inside tmux even when cs is; an inherited TMUX makes
+        # CLIs (kimi) warn and fall back on keys. smux emulates xterm-256color.
+        # The shell echoes the typed launch line; clear it first so a CLI that
+        # draws on the main screen (kimi) starts on a blank pane.
         val _e = smux_send_command(scope.session_id, scope.window_id, pane_id,
-            posix_exec_line(cmd, args, stderr_path))
+            "printf '\\033[H\\033[2J'; " + posix_exec_line("env", ["-u", "TMUX", "-u", "TMUX_PANE",
+                "TERM=xterm-256color", cmd] + args, stderr_path))
     _smux_info = _smux_info + [SmuxPaneInfo(pane_id: pane_id, title: title, pid: spawned.unwrap())]
     val _f = smux_focus_pane(scope.session_id, scope.window_id, pane_id)
     Pane(pane_id: pane_id, title: title, pid: spawned.unwrap(), active: true, zoomed: false)
@@ -336,7 +342,13 @@ fn pane_kill(session: text, pane_id: text) -> bool:
         return false
     if not _use_tmux():
         val scope = _smux_scope(session)
-        if not smux_close_pane(scope.session_id, scope.window_id, pane_id):
+        # Never remove the window's LAST pane: an empty window has nothing to
+        # split, so every later spawn would fail. End its child instead and
+        # keep the slot, which `_smux_free_pane` then reuses.
+        if smux_list_panes(scope.session_id, scope.window_id).len() <= 1:
+            if not smux_pane_close_pty(scope.session_id, scope.window_id, pane_id):
+                return false
+        elif not smux_close_pane(scope.session_id, scope.window_id, pane_id):
             return false
         var kept: [SmuxPaneInfo] = []
         for info in _smux_info:
@@ -366,8 +378,10 @@ fn pane_send(session: text, pane_id: text, body: text) -> bool:
         # Type, pause, then press Enter as its own keystroke. Text and "\r" in
         # one write reach a TUI as a single paste, and agent TUIs (codex, kimi)
         # keep a pasted newline in the composer instead of submitting.
+        # Pasted (bracketed when the child enabled ?2004), so a CLI composer
+        # takes the body as one paste rather than as typed keystrokes.
         val scope = _smux_scope(session)
-        if smux_send_text(scope.session_id, scope.window_id, pane_id, body).is_err():
+        if smux_paste_text(scope.session_id, scope.window_id, pane_id, body).is_err():
             return false
         thread_sleep_ms(PANE_SUBMIT_DELAY_MS)
         return smux_send_text(scope.session_id, scope.window_id, pane_id, "\r").is_ok()
@@ -423,18 +437,35 @@ fn pane_send_key(session: text, pane_id: text, key: text) -> bool:
 # The last `lines` lines the pane's child printed, oldest first. An unknown
 # pane is an empty list, never invented text.
 fn pane_capture(session: text, pane_id: text, lines: i64) -> [text]:
+    _pane_capture(session, pane_id, lines, false)
+
+# pane_capture with the child's colours and attributes kept as SGR runs, so the
+# dashboard can show an agent's own TUI as it drew it.
+fn pane_capture_styled(session: text, pane_id: text, lines: i64) -> [text]:
+    _pane_capture(session, pane_id, lines, true)
+
+fn _pane_capture(session: text, pane_id: text, lines: i64, styled: bool) -> [text]:
     var out: [text] = []
     if session == "" or pane_id == "":
         return out
     var raw = ""
     if not _use_tmux():
         val scope = _smux_scope(session)
-        val cap = smux_capture(scope.session_id, scope.window_id, pane_id, lines)
-        if cap.is_err():
-            return out
-        raw = cap.unwrap().content
+        if styled:
+            val cap = smux_capture_styled(scope.session_id, scope.window_id, pane_id, lines)
+            if cap.is_err():
+                return out
+            raw = cap.unwrap()
+        else:
+            val cap = smux_capture(scope.session_id, scope.window_id, pane_id, lines)
+            if cap.is_err():
+                return out
+            raw = cap.unwrap().content
     else:
-        val result = sosix_run("tmux", pane_capture_argv(pane_id, lines))
+        var argv = pane_capture_argv(pane_id, lines)
+        if styled:
+            argv = argv + ["-e"]
+        val result = sosix_run("tmux", argv)
         if result.exit_code != 0:
             return out
         raw = result.stdout
@@ -491,5 +522,5 @@ export windows_quote_arg, windows_command_line, windows_spawn_command_line
 export posix_quote_arg, posix_command_line, posix_exec_line
 export pane_backend_name
 export pane_list, pane_select, pane_zoom, pane_spawn, pane_spawn_at, pane_resize
-export pane_kill, pane_send, pane_capture
+export pane_kill, pane_send, pane_capture, pane_capture_styled
 export pane_send_key, pane_key_bytes, pane_key_tmux_name
