@@ -12,6 +12,18 @@ description: "Simple language coding rules for Codex. Key syntax, generics, patt
 
 Full syntax: `doc/07_guide/quick_reference/syntax_quick_reference.md`
 
+## Configured variants and compiler generations
+
+For library-owner or aggregate repairs, read
+`doc/07_guide/compiler/configured_variants_and_aggregate_validation.md`.
+Preserve configured implementation selection and importer family behind stable
+interfaces; fallback ordering must not override them. Do not globally pin a
+GC/concurrency family to hide a resolver defect. Rust/Pure-Simple selection
+parity is active work, not a verified property. Bind failures and tests to the
+actual producer, source, backend, linked runtime/provider, and cache scope;
+old producers can repeat failures despite newer source fixes. Validate actual
+array/tuple values, negative contracts and real test counts, not file counts.
+
 ## Core Syntax
 
 ### Variables
