@@ -10,6 +10,7 @@ use compiler.backend.linker.reloc_engine.{RelocArch}
 use compiler.backend.linker.macho.tbd_types.{MachOTbdTargetV1, macho_tbd_default_limits_v1}
 use compiler.backend.linker.macho.tbd_reader.{macho_read_tbd_v1}
 use compiler.backend.linker.macho.tbd_lower.{macho_tbd_main_provider_v1}
+use compiler.backend.linker.macho.hosted_link.{MachOHostedRequest, macho_hosted_link_with_providers}
 
 fn item4_macho_tbd_read(bytes: [u8], at: i64, width: i64) -> i64:
     val valid = width >= 1 and width <= 8 and at >= 0 and at <= bytes.len() and width <= bytes.len() - at
@@ -27,6 +28,96 @@ fn item4_macho_tbd_config() -> NativeLinkConfig:
     config
 
 describe "actual TextAPI providers through the Mach-O file adapter":
+    it "ITEM4-REQ-006 rejects duplicate keys malformed documents target misses and logical parser budget exhaustion":
+        val target = MachOTbdTargetV1(arch: RelocArch.X86_64, platform: 1)
+        step("Reject malformed TextAPI rather than normalizing ambiguous keys")
+        for name in ["duplicate_key_v4", "duplicate_key_v5", "truncated_v4", "truncated_v5"]:
+            val bytes = file_read_bytes("test/fixtures/linker/macho/tbd_{name}.tbd")
+            expect(bytes.len() > 0).to_equal(true)
+            if bytes.len() == 0: return
+            val rejected = macho_read_tbd_v1(bytes, target, macho_tbd_default_limits_v1())
+            expect(rejected.is_err()).to_equal(true)
+            if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("TBD")
+        step("Apply byte token nesting library symbol and name limits to real documents")
+        for format in ["v4", "v5"]:
+            val bytes = file_read_bytes("test/fixtures/linker/macho/tbd_metadata_{format}.tbd")
+            val baseline = macho_read_tbd_v1(bytes, target, macho_tbd_default_limits_v1())
+            expect(baseline.is_ok()).to_equal(true)
+            if baseline.is_err(): return
+            for kind in 0..6:
+                var limits = macho_tbd_default_limits_v1()
+                if kind == 0: limits.max_bytes = bytes.len() - 1
+                if kind == 1: limits.max_tokens = 1
+                if kind == 2: limits.max_depth = 1
+                if kind == 3: limits.max_libraries = 1
+                if kind == 4: limits.max_symbols = 1
+                if kind == 5: limits.max_name_bytes = 8
+                val rejected = macho_read_tbd_v1(bytes, target, limits)
+                expect(rejected.is_err()).to_equal(true)
+                if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("TBD")
+            val missing = macho_read_tbd_v1(bytes, MachOTbdTargetV1(arch: RelocArch.X86_64, platform: 2), macho_tbd_default_limits_v1())
+            expect(missing.is_err()).to_equal(true)
+            if missing.is_err(): expect(missing.unwrap_err()).to_contain("TBD")
+
+    it "ITEM4-REQ-006 preserves unmatched inline identity instead of inventing a selected install name":
+        step("Read an independently validated TextAPI fixture")
+        val parsed = macho_read_tbd_v1(file_read_bytes("test/fixtures/linker/macho/tbd_inline_unmatched_v5.tbd"),
+            MachOTbdTargetV1(arch: RelocArch.X86_64, platform: 1), macho_tbd_default_limits_v1())
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_err(): return
+        val document = parsed.unwrap()
+        expect(document.main.install_name).to_equal(Some("/usr/lib/libitem4_main.dylib"))
+        expect(document.libraries.len()).to_equal(1)
+        if document.libraries.len() != 1: return
+        val library = document.libraries[0]
+        expect(library.selected).to_equal(false)
+        expect(library.install_name.is_none()).to_equal(true)
+        expect(library.install_names.len()).to_equal(1)
+        if library.install_names.len() == 1:
+            expect(library.install_names[0].targets).to_equal(["arm64-macos"])
+            expect(library.install_names[0].name).to_equal("/usr/lib/libitem4_arm_only.dylib")
+
+    it "ITEM4-REQ-006 lowers ObjC and TLV names into actual typed provider behavior in both formats":
+        for variant in 0..4:
+            val arm = variant % 2 == 1
+            val format = if variant >= 2: "v5" else: "v4"
+            val target = MachOTbdTargetV1(arch: if arm: RelocArch.AArch64 else: RelocArch.X86_64, platform: 1)
+            val parsed = macho_read_tbd_v1(file_read_bytes("test/fixtures/linker/macho/tbd_leaf_metadata_{format}.tbd"), target, macho_tbd_default_limits_v1())
+            expect(parsed.is_ok()).to_equal(true)
+            if parsed.is_err(): return
+            step("Lower the selected leaf provider without inventing SDK or virtual addresses")
+            val lowered = macho_tbd_main_provider_v1(parsed.unwrap(), target)
+            expect(lowered.is_ok()).to_equal(true)
+            if lowered.is_err(): return
+            val provider = lowered.unwrap()
+            for name in ["_OBJC_CLASS_$_Item4Class", "_OBJC_METACLASS_$_Item4Class", "_OBJC_EHTYPE_$_Item4Exception", "_OBJC_IVAR_$_Item4Class.field"]:
+                var found = false
+                for symbol in provider.exports:
+                    if symbol.name == name: found = true
+                expect(found).to_equal(true)
+            var weak = false
+            var tls = false
+            for symbol in provider.exports:
+                if symbol.name == "_unused_weak" and (symbol.flags & 4) != 0: weak = true
+                if symbol.name == "_tls" and (symbol.flags & 3) == 1: tls = true
+            expect(weak and tls).to_equal(true)
+            val suffix = if arm: "a64" else: "x64"
+            val object = file_read_bytes("test/fixtures/linker/macho/hosted_tlv_{suffix}.o")
+            expect(object.len() > 32).to_equal(true)
+            if object.len() <= 32: return
+            val request = MachOHostedRequest(target: target.arch, entry: "_main", minimum_os: 0xb0000,
+                sdk: 0xb0000, max_image_bytes: 1048576, identifier: "simple.item4.tbd.tlv", rpaths: [])
+            step("Link real TLV relocations against the lowered TextAPI provider")
+            val linked = macho_hosted_link_with_providers([object], [], [provider], request)
+            expect(linked.is_ok()).to_equal(true)
+            if linked.is_ok():
+                val image = linked.unwrap()
+                if arm:
+                    expect(item4_macho_tbd_read(image, 0x4004, 4)).to_equal(0x90000040)
+                    expect(item4_macho_tbd_read(image, 0x4008, 4)).to_equal(0xf9400000)
+                else:
+                    expect(item4_macho_tbd_read(image, 0x4004, 4)).to_equal(0x7ff8)
+                expect(item4_macho_tbd_read(image, 0xc000, 8)).to_equal(0)
     it "ITEM4-REQ-006 selects actual v4 and v5 targets and preserves literal version semantics":
         for variant in 0..4:
             val arm = variant % 2 == 1
@@ -87,7 +178,7 @@ describe "actual TextAPI providers through the Mach-O file adapter":
                 if symbol.name == "_weak": weak = symbol.weak_defined
                 if symbol.name == "_tls": tls = symbol.thread_local
                 if symbol.name == "Item4Class": objc = symbol.encoding == "objc_class"
-                if symbol.name == "Item4Exception": exception = symbol.encoding == "objc_eh_type"
+                if symbol.name == "Item4Exception" and symbol.encoding == "objc_eh_type": exception = true
                 if symbol.name == "Item4Class.field": ivar = symbol.encoding == "objc_ivar"
             expect(selected and not wrong_target).to_equal(true)
             expect(weak and tls and objc and exception and ivar).to_equal(true)
