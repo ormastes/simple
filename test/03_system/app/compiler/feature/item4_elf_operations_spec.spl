@@ -132,6 +132,37 @@ describe "Static ELF operational composition dispatch":
         if linked.is_err(): return
         item4_elf_ops_check(linked.unwrap().image, 0x1235, 0x80)
 
+    it "dispatches reordered providers according to the returned facet bindings":
+        step("Move the relocation provider to slot one and prove its callback still patches the image")
+        val defaults = elf_builtin_operation_providers_v1()
+        expect(defaults.len()).to_equal(3)
+        if defaults.len() != 3: return
+        var relocation = defaults[0]
+        relocation.relocate = Some(item4_elf_ops_relocate)
+        val providers = [defaults[2], relocation, defaults[1]]
+        val sealed = elf_seal_operations_v1(providers, elf_operation_policy_v1())
+        expect(sealed.is_ok()).to_equal(true)
+        if sealed.is_err(): return
+        val linked = elf_link_with_operations(item4_elf_ops_request(), false, [], sealed.unwrap())
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        item4_elf_ops_check(linked.unwrap().image, 0x1235, 0x80)
+        step("Match every engine consumer binding to the actual reordered provider and facet")
+        val receipt = linked.unwrap().composition
+        expect(receipt.capsule_count).to_equal(4)
+        expect(receipt.binding_count).to_equal(3)
+        expect(receipt.bindings.len()).to_equal(3)
+        val expected_slots = [1, 2, 0]
+        for kind in 1..4:
+            val facet = elf_operation_facet_id_v1(kind as u32)
+            var found = 0
+            for binding in receipt.bindings:
+                if binding.facet_id.hi == facet.hi and binding.facet_id.lo == facet.lo:
+                    found = found + 1
+                    expect(binding.consumer_slot).to_equal(3)
+                    expect(binding.provider_slot as i64).to_equal(expected_slots[kind - 1])
+            expect(found).to_equal(1)
+
     it "uses the selected layout operation to move actual entry and load addresses":
         step("Delegate real layout with one additional page in the image base")
         var providers = elf_builtin_operation_providers_v1()

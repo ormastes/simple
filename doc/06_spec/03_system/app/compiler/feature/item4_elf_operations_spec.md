@@ -8,6 +8,7 @@ Status: **UNRUN**; authored manual, not generated execution evidence.
 |---|---|
 | Canonical owner | Explicit sealed operations, legacy wrapper and structural alias produce identical image bytes |
 | Relocation dispatch | Real checked relocation with symbol plus one emits `35 12 80` instead of `34 12 7f` |
+| Provider permutation | Reordered relocation callback changes bytes; receipt binds each facet to its actual provider slot and engine consumer |
 | Layout dispatch | Entry and PT_LOAD addresses move by 4096; real `__ehdr_start` relocation matches selected header load base |
 | Writer dispatch | Actual writer output retains selected OSABI byte 9 and valid fixture data |
 | Configured wrappers | Retained root survives GC; strip removes `.symtab` and `.strtab` |
@@ -41,5 +42,5 @@ After runtime admission:
 <runtime> spipe-docgen test/03_system/app/compiler/feature/item4_elf_operations_spec.spl --output doc/06_spec --no-index
 ```
 
-Static callbacks remain caller-trusted. These tests do not certify sandboxing,
+The eleven scenarios use static caller-trusted callbacks. They do not certify sandboxing,
 bounded memory, dynamic loading, hosted execution, or complete item 4 readiness.
