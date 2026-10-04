@@ -12,7 +12,7 @@ fn item4_macos_native_config() -> NativeLinkConfig:
     config.allow_duplicate_definitions = false
     config.allow_cc_fallback = false
     config.runtime_path = "none"
-    config.extra_flags = ["-platform_version", "macos", "11.0", "11.0", "--macho-signing-identifier", "simple.item4.fixture"]
+    config.extra_flags = ["-platform_version", "macos", "11.0", "11.0", "--macho-signing-identifier", "simple.item4.fixture", "-rpath", "@loader_path"]
     config
 
 fn item4_macos_native_parent() -> Result<text, text>:
@@ -44,7 +44,7 @@ fn item4_macos_native_command(bytes: [u8], kind: i64) -> i64:
             expect(false).to_equal(true)
             return -1
         if item4_macos_native_read(bytes, at) == kind:
-            val minimum = if kind == 0x80000022: 48 elif kind == 0x1d: 16 elif kind == 0xe: 12 else: 24
+            val minimum = if kind == 0x80000022: 48 elif kind == 0x1d: 16 elif kind == 0xe or kind == 0x8000001c: 12 else: 24
             expect(length >= minimum).to_equal(true)
             if length < minimum: return -1
             return at
@@ -132,7 +132,7 @@ describe "explicit internal Mach-O native file adapter":
             var config = item4_macos_native_config()
             config.extra_flags = flags
             expect(native_macho_plan_v1("x86_64", config, "build/never-read/app").is_err()).to_equal(true)
-        for kind in 0..8:
+        for kind in 0..10:
             var config = item4_macos_native_config()
             if kind == 0: config.pie = false
             if kind == 1: config.debug = true
@@ -142,6 +142,8 @@ describe "explicit internal Mach-O native file adapter":
             if kind == 5: config.retained_symbols = ["_helper"]
             if kind == 6: config.libraries = ["bad\0lib"]
             if kind == 7: config.library_paths = ["bad\0path"]
+            if kind == 8: config.target_triple = "aarch64-apple-darwin"
+            if kind == 9: config.linker_abi = "elf"
             expect(native_macho_plan_v1("x86_64", config, "build/never-read/app").is_err()).to_equal(true)
         expect(native_macho_plan_v1("riscv64", item4_macos_native_config(), "build/never-read/app").is_err()).to_equal(true)
         expect(native_macho_plan_v1("x86_64", item4_macos_native_config(), "").is_err()).to_equal(true)
@@ -212,6 +214,16 @@ describe "explicit internal Mach-O native file adapter":
                 step("Inspect the published Mach-O commands and bytes")
                 val bytes = file_read_bytes(output)
                 item4_macos_native_check_image(bytes, arm)
+                val rpath = item4_macos_native_command(bytes, 0x8000001c)
+                if rpath >= 0:
+                    val rpath_size = item4_macos_native_read(bytes, rpath + 4)
+                    val rpath_offset = item4_macos_native_read(bytes, rpath + 8)
+                    val expected_path = "@loader_path"
+                    val path_valid = rpath_offset >= 12 and rpath_offset <= rpath_size and expected_path.len() < rpath_size - rpath_offset
+                    expect(path_valid).to_equal(true)
+                    if path_valid:
+                        for index in 0..expected_path.len(): expect(bytes[rpath + rpath_offset + index]).to_equal(expected_path.byte_at(index) as u8)
+                        expect(bytes[rpath + rpath_offset + expected_path.len()]).to_equal(0u8)
                 val provider = item4_macos_native_command(bytes, 0xc)
                 expect(provider >= 0).to_equal(true)
                 if provider >= 0:
