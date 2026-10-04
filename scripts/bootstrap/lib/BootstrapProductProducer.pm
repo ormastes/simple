@@ -3,7 +3,7 @@ use strict;
 use warnings;
 use Exporter 'import';
 use Digest::SHA qw(sha256_hex);
-our @EXPORT_OK = qw(read_product_producer validate_product_resources);
+our @EXPORT_OK = qw(read_product_producer validate_product_resources product_resource_profile validate_product_resource_profile);
 
 sub validate_product_resources {
     my ($mode, $threads, $rss, $timeout, $rss_mode) = @_;
@@ -14,12 +14,32 @@ sub validate_product_resources {
     }
     $rss > 0 && $rss <= 6835937 or die "invalid product RSS observation limit\n";
     if ($mode eq 'qualified') {
-        $threads >= 10 && $threads <= 20 && $timeout > 0 && $rss_mode eq 'enforce'
+        (($threads >= 10 && $threads <= 20) || $threads == 80) && $timeout > 0 && $rss_mode eq 'enforce'
             or die "qualified product policy differs\n";
     } else {
         $threads >= 1 && $threads <= 80 or die "diagnostic product workers exceed allocation\n";
     }
     return 1;
+}
+
+# Worker count is independent of frontend memory admission. Qualification still
+# requires a finite deadline, enforced RSS, and the admitted producer proof.
+sub product_resource_profile {
+    validate_product_resources(@_);
+    my ($mode, $threads) = @_;
+    return 'diagnostic-v1' if $mode eq 'diagnostic';
+    return $threads == 80 ? 'qualified-80-v1' : 'qualified-10-20-v1';
+}
+
+sub validate_product_resource_profile {
+    my ($recorded, @resources) = @_;
+    my $expected = product_resource_profile(@resources);
+    # Old receipts are compatible only with the previously supported profiles.
+    # New qualified80 evidence must explicitly bind every recorded layer.
+    return $expected if !defined($recorded) && $expected ne 'qualified-80-v1';
+    defined($recorded) && $recorded eq $expected
+        or die "product resource profile differs\n";
+    return $expected;
 }
 
 sub bytes {

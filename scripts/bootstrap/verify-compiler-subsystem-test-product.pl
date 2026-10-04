@@ -10,7 +10,7 @@ use FindBin;
 use lib "$FindBin::Bin/lib";
 use BootstrapNativeImage qw(verify_native_image);
 use BootstrapProductOverlay qw(verify_product_overlay verify_product_source);
-use BootstrapProductProducer qw(read_product_producer validate_product_resources);
+use BootstrapProductProducer qw(read_product_producer validate_product_resources product_resource_profile validate_product_resource_profile);
 
 my %arg;
 GetOptions(
@@ -49,7 +49,8 @@ for my $key (@required) {
 }
 $arg{backend} =~ /\A(?:llvm|cranelift)\z/ or die "invalid backend\n";
 $arg{subsystem} =~ /\A(?:compiler|interpreter|loader)\z/ or die "invalid subsystem\n";
-validate_product_resources(@arg{qw(qualification_mode threads rss_cap_kib build_timeout_seconds rss_mode)});
+my @resource_policy = @arg{qw(qualification_mode threads rss_cap_kib build_timeout_seconds rss_mode)};
+my $resource_profile = product_resource_profile(@resource_policy);
 my $rss_enforced = $arg{rss_mode} eq 'enforce' ? '1' : '0';
 for my $key (grep { defined $arg{$_} } qw(enumeration_exit execution_exit)) {
   $arg{$key} =~ /\A\d+\z/ && $arg{$key} <= 255 or die "invalid $key\n";
@@ -197,6 +198,7 @@ $build{schema} && $build{schema} eq 'simple-subsystem-product-v1' &&
   $build{generated_tree_sha256} && $build{generated_tree_sha256} =~ /\A[0-9a-f]{64}\z/ &&
   defined($build{generated_owner_count}) && $build{generated_owner_count} eq scalar(@owners)
   or die "product build receipt authority differs\n";
+validate_product_resource_profile($build{resource_profile}, @resource_policy);
 my $generated_manifest = $build{generated_manifest_path} // '';
 my $binary_dir = $arg{binary};
 $binary_dir =~ s{/[^/]+\z}{} or die "binary path invalid\n";
@@ -382,7 +384,7 @@ for my $task (@tasks) {
     or die "$task command schema differs\n";
   my %command;
   my %command_keys = map { $_ => 1 } qw(source_root source_overlay compiler_sha256
-    runtime_authority rss_cap_kib rss_mode timeout_seconds task simple_bootstrap_empty_native_obj simple_bootstrap
+    runtime_authority rss_cap_kib rss_mode resource_profile timeout_seconds task simple_bootstrap_empty_native_obj simple_bootstrap
     simple_shard_mem_clamp simple_parse_shard_max simple_parse_shard_worker_kb
     simple_hir_shard_worker_kb simple_shard_tree_memory_budget_kib simple_native_file_timeout);
   my @argv;
@@ -401,6 +403,7 @@ for my $task (@tasks) {
     ($command{rss_mode} // 'enforce') eq $arg{rss_mode} &&
     $command{task} && $command{task} eq $task
     or die "$task command authority differs\n";
+  validate_product_resource_profile($command{resource_profile}, @resource_policy);
   if ($task eq 'generator' || $task eq 'main_adapter' || $task eq 'product') {
     if ($arg{qualification_mode} eq 'diagnostic' || exists $command{simple_native_file_timeout}) {
       defined($command{simple_native_file_timeout}) &&
@@ -623,7 +626,8 @@ else {
 my $receipt = join('',
   "format=SIMPLE-SUBSYSTEM-TEST-PRODUCT-1\n", "status=$status\n", "reason=$reason\n",
   "qualification_mode=$arg{qualification_mode}\n",
-  "rss_mode=$arg{rss_mode}\n",
+  "rss_mode=$arg{rss_mode}\n", "resource_profile=$resource_profile\n",
+  "threads=$arg{threads}\n",
   "backend=$arg{backend}\n", "subsystem=$arg{subsystem}\n",
   "inventory_sha256=$whole_sha\n", "subset_sha256=$subset_sha\n",
   "source_head=$build{source_head}\n", "actual_backend=$build{actual_backend}\n",
