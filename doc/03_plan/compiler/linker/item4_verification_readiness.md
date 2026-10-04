@@ -7,6 +7,27 @@ Owner: `/root`. This is an execution breakdown, not a reduction of requirements.
 **Phase 4 is NOT READY.** Authored tests are not executed tests. Source-only
 integration does not close verification or authorize publication.
 
+## 2026-10-04 continuation
+
+The previous turn made progress by landing source/test slices. Current runtime
+audit still finds no admitted SSpec runner: candidate SHA256
+`aaf13da5942425e19b1aba2ed4b6d272687de1d4710ad7200ed0621d96990879`
+has `OBSERVED_NATIVE_LINK_PASS_UNADMITTED`, qualification UNRUN, and no live
+Windows Simple process. No capped build was retried.
+
+SHA stream mutable methods, caller migration and five new scenario declarations
+are now authored. See `doc/05_design/compiler/linker/sha_stream_owner_dependency.md`.
+Independent source review and external expected-vector checks do not prove
+compilation or execution. Core/MCP/native, SCV hydration, coverage and generated
+manual gates remain UNRUN. The outer canonical compiler stream needs a separate
+owner repair recorded in the 2026-10-04 bug.
+
+Provider completion now has six concrete positive scenarios, production routing
+and manifest requirements in `doc/05_design/compiler/linker/linker_provider_positive_acceptance_2026-10-04.md`.
+These are planned obligations, not implemented or passing tests. The existing
+unsupported-architecture native test cannot satisfy them. All original eight
+rows below remain in scope.
+
 | Item | Implementation to finish | Executable test obligations | Owner / state |
 |---|---|---|---|
 | Input and archive contracts | Retained ELF subranges, ar member iteration, checked member selection without whole archive reads | Malformed/truncated members, long names, padding, child lifetime, selected-member identity | Research / in progress |

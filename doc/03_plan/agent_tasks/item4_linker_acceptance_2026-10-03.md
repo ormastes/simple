@@ -1,5 +1,21 @@
 # Item 4 parallel ownership
 
+## 2026-10-04 SHA dependency continuation
+
+Base: `f5fec9ccf8cb` on release/1.0. Root integrates in isolated
+`C:/dev/simple-item4-sha-owner-20261004`, branch `work/item4-sha-owner-20261004`.
+Runtime owns core SHA methods and regression intent in its separate sha-core
+worktree; acceptance owns independent source/vector review; research owns the
+provider-positive design supplement and outer semantic-stream defect report in
+its separate provider-docs worktree. Root owns caller migration, documentation,
+merge and final status. Lower-model sidecars: N/A.
+
+Shared API agreed before coding: constructor `sha256_stream_v1_new`, mutable
+`reset`, `update`, `update_byte`, `finish_hex`, `zeroize`; private mutable
+compression and byte-push. Tests use actual owners and fixed digest oracles.
+No admitted runtime exists in current evidence. Native tests/docgen/coverage
+and full Phase 4 remain UNRUN/FAIL; no passing placeholder replaces them.
+
 Date: 2026-10-03. Initial inspection base and target at allocation:
 `e9cd3153c881c55f59eaaa2573b4b8a5e803023a` (`origin/release/1.0`).
 

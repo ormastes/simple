@@ -5,8 +5,7 @@
 # owner, prove liveness, or issue an authority receipt. Structural children
 # can enter the stream only through typed APIs; callers cannot inject a
 # pre-encoded child or choose an opcode.
-use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new,
-    sha256_stream_v1_update, sha256_stream_v1_finish_hex}
+use std.common.crypto.sha256.{Sha256StreamV1, sha256_stream_v1_new}
 use std.common.string_core.{text_to_bytes}
 use std.common.encoding.utf8.{text_byte_len}
 use std.common.binary_io.{f32_to_bits, f64_to_bits}
@@ -97,7 +96,7 @@ class SemanticCanonicalByteBuilderV1:
     me append(source: [u8]):
         for byte in source: self.bytes.push(byte)
 pub class SemanticCanonicalStreamV1:
-    stream: Sha256StreamV1
+    var stream: Sha256StreamV1
     limits: SemanticCanonicalLimitsV1
     encoded_bytes: i64
     encoded_items: i64
@@ -238,13 +237,13 @@ pub fn semantic_canonical_begin_v1(domain: text, schema_digest: text,
         return Err(SemanticRevisionErrorV1.ByteLimitExceeded)
     if header_work > limits.max_work:
         return Err(SemanticRevisionErrorV1.WorkLimitExceeded)
-    val value = SemanticCanonicalStreamV1(stream: sha256_stream_v1_new(),
+    var value = SemanticCanonicalStreamV1(stream: sha256_stream_v1_new(),
         limits: limits, encoded_bytes: 0, encoded_items: 0, charged_work: 0,
         root_count: 0, frames: [], error: nil, finished: false)
     if not _precharge_v1(value, header_size, 0, header_work):
         return Err(value.error.unwrap())
     val header = _begin_header_v1(domain, schema_digest)
-    if not sha256_stream_v1_update(value.stream, header):
+    if not value.stream.update(header):
         return Err(SemanticRevisionErrorV1.Sha256UpdateFailed)
     Ok(value)
 pub fn semantic_canonical_stream_v1_ok(value: SemanticCanonicalStreamV1) -> bool:
@@ -292,13 +291,16 @@ fn _child_slot_available_v1(value: SemanticCanonicalStreamV1,
         _fail_v1(value, SemanticRevisionErrorV1.ContainerArityExceeded)
         return false
     true
-fn _attach_precharged_v1(value: SemanticCanonicalStreamV1, encoded: [u8],
+fn _attach_precharged_v1(input: SemanticCanonicalStreamV1, encoded: [u8],
         child_is_field: bool):
+    # Local SHA owner migration only. The outer copied-owner API remains
+    # tracked by semantic_canonical_stream_owner_writeback_2026-10-04.md.
+    var value = input
     if value.error.is_some(): return
     if not _child_slot_available_v1(value, child_is_field): return
     if value.frames.len() == 0:
         value.root_count = value.root_count + 1
-        if not sha256_stream_v1_update(value.stream, encoded):
+        if not value.stream.update(encoded):
             _fail_v1(value, SemanticRevisionErrorV1.Sha256UpdateFailed)
     else:
         value.frames[value.frames.len() - 1].children.push(encoded)
@@ -765,8 +767,9 @@ fn _write_owner_revision_v1(value: SemanticCanonicalStreamV1,
     semantic_canonical_write_i64_v1(value, revision.authority_serial)
     semantic_canonical_end_field_v1(value)
     semantic_canonical_end_record_v1(value)
-pub fn semantic_canonical_finish_v1(value: SemanticCanonicalStreamV1
+pub fn semantic_canonical_finish_v1(input: SemanticCanonicalStreamV1
     ) -> Result<SemanticCanonicalDigestV1, SemanticRevisionErrorV1>:
+    var value = input
     if val error = value.error: return Err(error)
     if value.finished: return Err(SemanticRevisionErrorV1.AlreadyFinished)
     if value.frames.len() != 0:
@@ -779,7 +782,7 @@ pub fn semantic_canonical_finish_v1(value: SemanticCanonicalStreamV1
             SEMANTIC_CANONICAL_SHA_FINISH_WORK_V1):
         return Err(value.error.unwrap())
     value.finished = true
-    val digest = sha256_stream_v1_finish_hex(value.stream)
+    val digest = value.stream.finish_hex()
     if val result = digest:
         Ok(SemanticCanonicalDigestV1(digest: result,
             encoded_bytes: value.encoded_bytes,
