@@ -327,3 +327,24 @@ separate implementation obligations. All Simple tests remain UNRUN.
 
 User selection: the mold-style Simple linker stays accessible through explicit
 SIMPLE_LINKER=internal and is not made the default hosted linker.
+
+## Private stream preparation ownership (2026-10-04)
+
+Base/expected target: 02e4836a820507d8bdf38f1feea31c44c649ee92, release/1.0.
+Root integrates work/item4-stream-prepare-20261004 in the existing isolated root
+worktree. Child agents reuse their clean prior core/test/doc worktrees on new
+work/item4-stream-prepare-* branches and session records. Runtime owns
+stream_link.spl; acceptance owns item4_stream_prepare_spec.spl and its manual;
+research owns design and independent review. Root owns host matrix, shared plans,
+reports and final merge. Lower-model sidecars: N/A.
+
+Frozen API: elf_stream_prepare_file_v1 has no destination argument and returns
+ElfStreamPreparedV1 with optional stage, directory and publication_attempted.
+Its me elf_stream_publish_prepared_v1 transfers remaining cleanup ownership to
+the existing ElfStreamLinkResultV1 on success and clears prepared ownership.
+Every publication or discard attempt retires publication permission before work;
+cleanup retries remain available. me elf_stream_discard_prepared_v1 independently
+cleans retained components and is idempotent when empty. Existing one-shot linking
+uses this real path, preserving early output validation, logical quotas and
+no-clobber publication. Helpers use item4_stream_prepare_* and std.spec.step with
+real assertions. Test intent 623186e2f83 preceded implementation. Runtime UNRUN.
