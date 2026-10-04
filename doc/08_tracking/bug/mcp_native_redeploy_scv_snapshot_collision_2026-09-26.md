@@ -153,3 +153,37 @@ passed initialize, tools/list, and `simple_search` after deployment.
    the production wrappers.
 4. Run the repository's MCP native smoke and relevant source checks before
    declaring the redeploy complete.
+
+## Reproduced by the macOS Stage 2 compiler-test matrix (2026-10-04)
+
+On `release/1.0` (after PRs #2352, #2372, #2374, #2375, #2377, #2379, #2380),
+`bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2` on
+aarch64-apple-darwin **admits Stage 2** (compiler sha256
+`0f71926ac3976ef6ef53da7b44cf43cb0a2eb744b45257c35503bffa77f65cfb`, runs 7
+and 9). The post-admission phase verification matrix then fails on this same
+defect, so `--stop-after-stage2` still exits 1:
+
+- `compiler_cli_build` (31 s): `build/scv/snapshots/<rev>/src/lib/common/window_protocol/geometry.spl`
+  and `src/lib/common/window_protocol/geometry.spl` both map to
+  `lib.common.window_protocol.geometry`.
+- `test_runner_build`: the same pattern for `compiler.hir.hir_types`
+  (`src/compiler/20.hir/hir_types.spl`).
+- `stage2_tool_workers` fails behind them.
+
+Observations (not yet proved as the cause):
+
+- `src/compiler_rust/compiler/src/pipeline/native_project/discovery.rs`
+  (`discover_reachable_files_with_sources`, ~L867-880) always adds the live
+  `project_root/src` as an extra resolver when it is not one of
+  `source_dirs`. With `--entry-closure` the `source_dirs` are SCV snapshot
+  roots, so every module has a second, live root. Once one import resolves
+  there, that file's relative imports stay in the live tree.
+- In the error, the first path is absolute (snapshot) while the second is
+  **relative and uncanonicalized** (`src/lib/...`). That points to which
+  resolution path produced the live copy.
+
+Open owner decision on where to fix: the Rust fallback (prefer the snapshot's
+own `src` when `source_dirs` are snapshot roots), or the Simple
+`native-build` caller (stop handing a live `project_root`). Behind this, the
+matrix still has the full-CLI `host-gpu` link gap, which has never passed on
+any platform.

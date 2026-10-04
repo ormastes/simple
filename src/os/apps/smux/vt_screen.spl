@@ -1,0 +1,274 @@
+# vt_screen.spl — The visible screen of a terminal pane.
+#
+# A full-screen program (an agent TUI, an editor, ConPTY itself) does not print
+# lines; it moves the cursor and overwrites cells. Keeping its output as a line
+# log shows every frame it ever drew. This applies the output to a rows x cols
+# grid of cells instead, so a capture is what the program currently shows.
+#
+# A cell holds one character (not one byte), so box drawing and other
+# multi-byte UTF-8 is never cut in half.
+#
+# Covered: printable text with wrap and scroll, CR/LF/BS/TAB, save/restore
+# cursor (ESC 7/8, CSI s/u), and the CSI layout sequences ConPTY and common TUIs
+# emit — CUP/HVP (H f), CUU/CUD/CUF/CUB (A B C D), CHA (G), VPA (d), EL (K),
+# ED (J), ECH (X), ICH/DCH (@ P), IL/DL (L M), SU/SD (S T) and the scroll
+# region (r). Colours (m), modes (h l) and OSC titles are consumed and dropped;
+# anything else is ignored rather than printed as garbage.
+#
+# Pure: state in, state out. No I/O.
+
+struct VtScreen:
+    rows: i64
+    cols: i64
+    cells: [[text]]
+    row: i64
+    col: i64
+    saved_row: i64
+    saved_col: i64
+    # Scroll region, inclusive rows.
+    top: i64
+    bottom: i64
+    # Escape-parser state, kept so a sequence split across two reads still
+    # parses: 0 text, 1 after ESC, 2 CSI, 3 OSC.
+    mode: i64
+    params: text
+
+fn _blank_row(cols: i64) -> [text]:
+    var r: [text] = []
+    var i = 0
+    while i < cols:
+        r.push(" ")
+        i = i + 1
+    r
+
+pub fn vt_new(rows: i64, cols: i64) -> VtScreen:
+    val r = if rows > 0: rows else: 24
+    val c = if cols > 0: cols else: 80
+    var cells: [[text]] = []
+    var i = 0
+    while i < r:
+        cells.push(_blank_row(c))
+        i = i + 1
+    VtScreen(rows: r, cols: c, cells: cells, row: 0, col: 0, saved_row: 0,
+        saved_col: 0, top: 0, bottom: r - 1, mode: 0, params: "")
+
+fn _clamp(v: i64, lo: i64, hi: i64) -> i64:
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    v
+
+# The n-th `;`-separated CSI parameter, or `fallback` when absent/empty/zero.
+fn _param(params: text, n: i64, fallback: i64) -> i64:
+    var clean = params
+    if clean.starts_with("?") or clean.starts_with(">"):
+        clean = clean[1:]
+    val parts = clean.split(";")
+    if n >= parts.len():
+        return fallback
+    val v = parts[n].to_int() ?? 0
+    if v <= 0:
+        return fallback
+    v
+
+fn _copy(s: VtScreen, cells: [[text]], row: i64, col: i64) -> VtScreen:
+    VtScreen(rows: s.rows, cols: s.cols, cells: cells, row: row, col: col,
+        saved_row: s.saved_row, saved_col: s.saved_col, top: s.top,
+        bottom: s.bottom, mode: s.mode, params: s.params)
+
+fn _at(s: VtScreen, row: i64, col: i64) -> VtScreen:
+    _copy(s, s.cells, _clamp(row, 0, s.rows - 1), _clamp(col, 0, s.cols))
+
+fn _with_parser(s: VtScreen, mode: i64, params: text) -> VtScreen:
+    VtScreen(rows: s.rows, cols: s.cols, cells: s.cells, row: s.row, col: s.col,
+        saved_row: s.saved_row, saved_col: s.saved_col, top: s.top,
+        bottom: s.bottom, mode: mode, params: params)
+
+fn _erase(cells: [[text]], cols: i64, row: i64, from: i64, to: i64) -> [[text]]:
+    var out = cells
+    var line = out[row]
+    var c = _clamp(from, 0, cols)
+    val end = _clamp(to, 0, cols)
+    while c < end:
+        line[c] = " "
+        c = c + 1
+    out[row] = line
+    out
+
+# Removes `n` rows at `at` inside the scroll region and opens blank rows at the
+# region bottom (scroll up / delete lines).
+fn _pull_rows(s: VtScreen, at: i64, n: i64) -> [[text]]:
+    var out = s.cells
+    var k = 0
+    while k < n:
+        var r = at
+        while r < s.bottom:
+            out[r] = out[r + 1]
+            r = r + 1
+        out[s.bottom] = _blank_row(s.cols)
+        k = k + 1
+    out
+
+# Opens `n` blank rows at `at`, pushing rows below it off the region bottom
+# (scroll down / insert lines).
+fn _push_rows(s: VtScreen, at: i64, n: i64) -> [[text]]:
+    var out = s.cells
+    var k = 0
+    while k < n:
+        var r = s.bottom
+        while r > at:
+            out[r] = out[r - 1]
+            r = r - 1
+        out[at] = _blank_row(s.cols)
+        k = k + 1
+    out
+
+fn _newline(s: VtScreen) -> VtScreen:
+    if s.row == s.bottom:
+        return _copy(s, _pull_rows(s, s.top, 1), s.row, s.col)
+    _at(s, s.row + 1, s.col)
+
+fn _put_char(s0: VtScreen, ch: text) -> VtScreen:
+    var s = s0
+    if s.col >= s.cols:
+        s = _newline(_at(s, s.row, 0))
+    var cells = s.cells
+    var line = cells[s.row]
+    line[s.col] = ch
+    cells[s.row] = line
+    _copy(s, cells, s.row, s.col + 1)
+
+fn _row_edit(s: VtScreen, final: text, n: i64) -> VtScreen:
+    var cells = s.cells
+    var line = cells[s.row]
+    if final == "@":
+        var c = s.cols - 1
+        while c >= s.col + n:
+            line[c] = line[c - n]
+            c = c - 1
+        var i = s.col
+        while i < s.col + n and i < s.cols:
+            line[i] = " "
+            i = i + 1
+    else:
+        var c = s.col
+        while c < s.cols:
+            line[c] = if c + n < s.cols: line[c + n] else: " "
+            c = c + 1
+    cells[s.row] = line
+    _copy(s, cells, s.row, s.col)
+
+fn _csi(s: VtScreen, final: text, params: text) -> VtScreen:
+    if final == "H" or final == "f":
+        return _at(s, _param(params, 0, 1) - 1, _param(params, 1, 1) - 1)
+    if final == "A":
+        return _at(s, s.row - _param(params, 0, 1), s.col)
+    if final == "B":
+        return _at(s, s.row + _param(params, 0, 1), s.col)
+    if final == "C":
+        return _at(s, s.row, s.col + _param(params, 0, 1))
+    if final == "D":
+        return _at(s, s.row, s.col - _param(params, 0, 1))
+    if final == "G":
+        return _at(s, s.row, _param(params, 0, 1) - 1)
+    if final == "d":
+        return _at(s, _param(params, 0, 1) - 1, s.col)
+    if final == "s":
+        return VtScreen(rows: s.rows, cols: s.cols, cells: s.cells, row: s.row,
+            col: s.col, saved_row: s.row, saved_col: s.col, top: s.top,
+            bottom: s.bottom, mode: s.mode, params: s.params)
+    if final == "u":
+        return _at(s, s.saved_row, s.saved_col)
+    if final == "X":
+        return _copy(s, _erase(s.cells, s.cols, s.row, s.col, s.col + _param(params, 0, 1)), s.row, s.col)
+    if final == "@" or final == "P":
+        return _row_edit(s, final, _clamp(_param(params, 0, 1), 1, s.cols))
+    if final == "L" and s.row >= s.top and s.row <= s.bottom:
+        return _copy(s, _push_rows(s, s.row, _param(params, 0, 1)), s.row, 0)
+    if final == "M" and s.row >= s.top and s.row <= s.bottom:
+        return _copy(s, _pull_rows(s, s.row, _param(params, 0, 1)), s.row, 0)
+    if final == "S":
+        return _copy(s, _pull_rows(s, s.top, _param(params, 0, 1)), s.row, s.col)
+    if final == "T":
+        return _copy(s, _push_rows(s, s.top, _param(params, 0, 1)), s.row, s.col)
+    if final == "r" and not params.starts_with("?"):
+        val top = _clamp(_param(params, 0, 1) - 1, 0, s.rows - 1)
+        val bottom = _clamp(_param(params, 1, s.rows) - 1, top, s.rows - 1)
+        return VtScreen(rows: s.rows, cols: s.cols, cells: s.cells, row: 0, col: 0,
+            saved_row: s.saved_row, saved_col: s.saved_col, top: top,
+            bottom: bottom, mode: s.mode, params: s.params)
+    if final == "K":
+        val how = params.to_int() ?? 0
+        if how == 1:
+            return _copy(s, _erase(s.cells, s.cols, s.row, 0, s.col + 1), s.row, s.col)
+        if how == 2:
+            return _copy(s, _erase(s.cells, s.cols, s.row, 0, s.cols), s.row, s.col)
+        return _copy(s, _erase(s.cells, s.cols, s.row, s.col, s.cols), s.row, s.col)
+    if final == "J":
+        val how = params.to_int() ?? 0
+        var cells = s.cells
+        var r = 0
+        while r < s.rows:
+            if how >= 2 or (how == 1 and r < s.row) or (how == 0 and r > s.row):
+                cells = _erase(cells, s.cols, r, 0, s.cols)
+            r = r + 1
+        if how == 1:
+            cells = _erase(cells, s.cols, s.row, 0, s.col + 1)
+        elif how == 0:
+            cells = _erase(cells, s.cols, s.row, s.col, s.cols)
+        return _copy(s, cells, s.row, s.col)
+    s
+
+# Applies raw terminal output to the screen.
+pub fn vt_feed(screen: VtScreen, raw: text) -> VtScreen:
+    val esc = "\x1b"
+    val bel = "\x07"
+    var s = screen
+    for ch in raw.chars():
+        if s.mode == 0:
+            if ch == esc:
+                s = _with_parser(s, 1, "")
+            elif ch == "\r":
+                s = _at(s, s.row, 0)
+            elif ch == "\n":
+                s = _newline(s)
+            elif ch == "\b":
+                s = _at(s, s.row, s.col - 1)
+            elif ch == "\t":
+                s = _at(s, s.row, (s.col / 8 + 1) * 8)
+            elif ch >= " " and ch != "\x7f":
+                s = _put_char(s, ch)
+        elif s.mode == 1:
+            if ch == "[":
+                s = _with_parser(s, 2, "")
+            elif ch == "]":
+                s = _with_parser(s, 3, "")
+            elif ch == "7":
+                s = _with_parser(_csi(s, "s", ""), 0, "")
+            elif ch == "8":
+                s = _with_parser(_csi(s, "u", ""), 0, "")
+            else:
+                s = _with_parser(s, 0, "")
+        elif s.mode == 2:
+            if ch >= "@" and ch <= "~":
+                s = _with_parser(_csi(s, ch, s.params), 0, "")
+            else:
+                s = _with_parser(s, 2, s.params + ch)
+        else:
+            if ch == bel:
+                s = _with_parser(s, 0, "")
+            elif ch == esc:
+                s = _with_parser(s, 1, "")
+    s
+
+# The visible rows, right-trimmed, without trailing blank rows.
+pub fn vt_text(screen: VtScreen) -> text:
+    var rows: [text] = []
+    for line in screen.cells:
+        rows.push(line.join("").trim_end())
+    while rows.len() > 0 and rows[rows.len() - 1] == "":
+        rows = rows[0:rows.len() - 1]
+    rows.join("\n")
+
+export VtScreen, vt_new, vt_feed, vt_text

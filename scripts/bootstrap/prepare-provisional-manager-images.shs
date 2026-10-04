@@ -1,6 +1,6 @@
 #!/bin/sh
 # Private diagnostic images. A hello-qualified producer is not Stage 2 admitted.
-# Pre-ready image builds use sampled process-tree RSS enforcement, not a kernel memory cap.
+# Pre-ready image builds record sampled process-tree RSS policy, not a kernel memory cap.
 set -eu
 die() { echo "provisional-images: $*" >&2; exit 1; }
 regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
@@ -13,6 +13,7 @@ hello_receipt= hello_receipt_digest= output_root= target= runtime_path=
 memory_bytes= reserve_bytes= authority_program= authority_receipt= authority_digest=
 authority_image_receipt=
 compiler_tool= compiler_tool_digest= linker_tool= linker_tool_digest=
+threads=40 timeout_seconds=21600 memory_policy=enforce
 for arg in "$@"; do
   case "$arg" in
     --mode=*) mode=${arg#*=} ;;
@@ -28,6 +29,9 @@ for arg in "$@"; do
     --runtime-path=*) runtime_path=${arg#*=} ;;
     --memory-bytes=*) memory_bytes=${arg#*=} ;;
     --reserve-bytes=*) reserve_bytes=${arg#*=} ;;
+    --threads=*) threads=${arg#*=} ;;
+    --timeout-seconds=*) timeout_seconds=${arg#*=} ;;
+    --memory-policy=*) memory_policy=${arg#*=} ;;
     --authority-program=*) authority_program=${arg#*=} ;;
     --authority-receipt=*) authority_receipt=${arg#*=} ;;
     --authority-digest=*) authority_digest=${arg#*=} ;;
@@ -39,6 +43,9 @@ for arg in "$@"; do
     *) die "unknown option: $arg" ;;
   esac
 done
+positive "$threads" && [ "$threads" -le 80 ] || die "threads must be from 1 to 80"
+case "$timeout_seconds" in 0) ;; *) positive "$timeout_seconds" || die "timeout must be a nonnegative integer" ;; esac
+case "$memory_policy" in enforce|monitor) ;; *) die "invalid memory policy" ;; esac
 case "$mode" in authority|remaining) ;; *) die "mode must be authority or remaining" ;; esac
 for path in "$producer" "$source_root" "$source_snapshot" "$hello_receipt" "$output_root" "$runtime_path"; do
   [ -n "$path" ] && absolute "$path" || die "absolute path required: $path"
@@ -117,8 +124,8 @@ build_image() {
   entry_digest=$(hash_file "$source_root/$entry")
   argv_digest=$(printf '%s\n' "$producer" native-build "$entry" --backend llvm \
     --target "$target" --runtime-bundle core-c-bootstrap --runtime-path "$runtime_path" \
-    --source src/compiler --source src/app --source src/lib --entry-closure \
-    --cache-dir "$output_root/cache/$name" --mode one-binary --output "$image" |
+    --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app --source src/lib --source src/os --source src/plugins --source src/package_ownership --source src/compositions --entry-closure \
+    --threads "$threads" --cache-dir "$output_root/cache/$name" --mode one-binary --output "$image" |
     sha256sum | cut -d ' ' -f 1) || die "image argv digest unavailable"
   image_wire() {
     printf '%s\n' 'format=SIMPLE-PROVISIONAL-IMAGE-1' 'diagnostic_only=1' \
@@ -129,8 +136,8 @@ build_image() {
       "compiler_tool_digest=$compiler_tool_digest" "linker_tool_digest=$linker_tool_digest" \
       "runtime_path=$runtime_path" 'runtime_bundle=core-c-bootstrap' \
       "target=$target" "memory_limit_bytes=$memory_bytes" \
-      'memory_enforcement=sampled-process-tree-rss' \
-      "memory_reserve_bytes=$reserve_bytes" 'timeout_seconds=21600' \
+      "memory_enforcement=sampled-process-tree-rss-$memory_policy" \
+      "memory_reserve_bytes=$reserve_bytes" "timeout_seconds=$timeout_seconds" "threads=$threads" \
       "watchdog_digest=$(hash_file "$watchdog")" "argv_digest=$argv_digest" \
       "image_path=$image" "image_sha256=$(hash_file "$image")"
   }
@@ -167,12 +174,12 @@ build_image() {
   if (CDPATH= cd -- "$source_root" && \
     env -u SIMPLE_BOOTSTRAP_SESSION_ID -u SIMPLE_BOOTSTRAP_SESSION_EXEC \
     TMPDIR="$output_root/tmp" SIMPLE_NO_STUB_FALLBACK=1 \
-    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce \
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE="$memory_policy" \
     SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$cap_kib" \
-    "$watchdog" 21600 5 "$producer" native-build "$entry" --backend llvm --target "$target" \
+    "$watchdog" "$timeout_seconds" 5 "$producer" native-build "$entry" --backend llvm --target "$target" \
       --runtime-bundle core-c-bootstrap --runtime-path "$runtime_path" \
-      --source src/compiler --source src/app --source src/lib --entry-closure \
-      --cache-dir "$output_root/cache/$name" --mode one-binary --output "$image") \
+      --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app --source src/lib --source src/os --source src/plugins --source src/package_ownership --source src/compositions --entry-closure \
+      --threads "$threads" --cache-dir "$output_root/cache/$name" --mode one-binary --output "$image") \
       >"$output_root/logs/$name.attempt$attempt.stdout.log" \
       2>"$output_root/logs/$name.attempt$attempt.stderr.log"; then
     :
@@ -200,6 +207,7 @@ if [ "$mode" = authority ]; then
     printf '%s\n' 'format=SIMPLE-PROVISIONAL-IMAGES-1' 'stage=authority' 'diagnostic_only=1' \
       "producer_digest=$producer_digest" "source_snapshot_digest=$source_snapshot_digest" \
       "hello_receipt_digest=$hello_receipt_digest" "target=$target" \
+      "threads=$threads" "timeout_seconds=$timeout_seconds" "memory_policy=$memory_policy" \
       "compiler_tool_digest=$compiler_tool_digest" "linker_tool_digest=$linker_tool_digest" \
       "authority_program=$image" "authority_sha256=$(hash_file "$image")"
   } >"$tmp"
@@ -253,7 +261,7 @@ else
       "hello_receipt_digest=$hello_receipt_digest" "authority_digest=$authority_digest" \
       "compiler_tool_digest=$compiler_tool_digest" "linker_tool_digest=$linker_tool_digest" \
       "target=$target" "memory_limit_bytes=$memory_bytes" "memory_reserve_bytes=$reserve_bytes" \
-      'memory_enforcement=sampled-process-tree-rss' 'timeout_seconds=21600'
+      "memory_enforcement=sampled-process-tree-rss-$memory_policy" "timeout_seconds=$timeout_seconds" "threads=$threads"
     for name in manifest builder worker group-manager group-worker group-broker index-builder; do
       image="$output_root/images/$name$suffix"
       case "$name" in
@@ -288,7 +296,7 @@ if [ "$mode" = remaining ]; then
       "manager_images_path=$receipt" "manager_images_digest=$(hash_file "$receipt")" \
       "source_root=$source_root" "source_snapshot_digest=$source_snapshot_digest" \
       "runtime_path=$runtime_path" "target=$target" \
-      "build_argv_template=native-build {entry} --backend llvm --target $target --runtime-bundle core-c-bootstrap --runtime-path $runtime_path --source src/compiler --source src/app --source src/lib --entry-closure --cache-dir {private-cache} --mode one-binary --output {private-image}"
+      "build_argv_template=native-build {entry} --backend llvm --target $target --runtime-bundle core-c-bootstrap --runtime-path $runtime_path --source src/compositions/kernel_llvm_cranelift --source src/compiler --source src/app --source src/lib --source src/os --source src/plugins --source src/package_ownership --source src/compositions --entry-closure --threads $threads --cache-dir {private-cache} --mode one-binary --output {private-image}"
   } >"$tool_tmp" || die "tool intent write failed"
   if [ -e "$tool_intent" ]; then
     regular "$tool_intent" && cmp -s "$tool_tmp" "$tool_intent" \

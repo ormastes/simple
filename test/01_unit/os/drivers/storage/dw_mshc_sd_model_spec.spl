@@ -1,0 +1,477 @@
+# @cover src/os/drivers/storage/dw_mshc_sd.spl
+# @cover src/os/drivers/storage/mbr_window.spl
+#
+# DW MSHC (JH7110 SDIO) SD-card driver against an SD-card register model.
+#
+# The model below is a host-side DesignWare MSHC with an SD card attached: it
+# decodes every CMD register write (start bit, update-clock, CMD index,
+# CMDARG), runs the SD card state machine (idle -> ready -> ident -> stby ->
+# tran), answers with the real response formats (R1/R3/R6/R7, R2 CID/CSD in
+# RESP3..RESP0), sets RINTSTS bits, and moves 512-byte blocks through a
+# 32-word data FIFO reported in STATUS.fifo_count. The production driver
+# (DwMshcSd) runs UNMODIFIED against it through the DwMshcRegs trait — the
+# same code path the VisionFive 2 kernel takes through DwMshcMmio.
+#
+# Model state lives in module globals rather than fields because the
+# interpreter passes a class into a trait-typed parameter by value: state kept
+# in fields would be invisible to the spec after DwMshcSd.open() took its copy.
+#
+# What this proves: command order and arguments, response decoding (RCA, OCR
+# CCS, CSD capacity for v1 and v2), block vs byte addressing, FIFO PIO for
+# single/multi-block read and write with explicit CMD12, error paths (no card,
+# data CRC), clock-divider programming, and the MBR partition window NVFS is
+# mounted through.
+# What it cannot prove: real JH7110 timing, clocks, pinmux, or a physical card.
+# The driver is UNVERIFIED ON HARDWARE until the board transcript exists
+# (doc/08_tracking/bug/simpleos_riscv64_nvfs_root_board_blocked_2026-10-03.md).
+
+use std.spec.{describe, it, expect}
+use os.drivers.storage.dw_mshc_sd.{
+    DwMshcRegs, DwMshcSd, DwMshcConfig, dw_mshc_clock_divider,
+    dw_mshc_data_offset, sd_csd_capacity_sectors
+}
+use os.drivers.storage.mbr_window.{BlockWindow, mbr_partition_at, mbr_has_signature}
+
+var _m_regs: [u32] = []
+var _m_data_off: u64 = 0x200u64
+var _m_present: bool = true
+var _m_v2: bool = true
+var _m_hc: bool = true
+var _m_busy_rounds: i64 = 1
+var _m_state: i64 = 0
+var _m_after_cmd55: bool = false
+var _m_bus4: bool = false
+var _m_sectors: u64 = 4096u64
+var _m_storage: [u8] = []
+var _m_fifo: [u32] = []
+var _m_fifo_head: i64 = 0
+var _m_wbuf: [u8] = []
+var _m_write_lba: u64 = 0u64
+var _m_write_bytes: u64 = 0u64
+var _m_inject_dcrc: bool = false
+var _m_acmd41_without_cmd55: bool = false
+var _m_cmds: [i64] = []
+var _m_args: [u32] = []
+var _m_clkdivs: [u32] = []
+
+fn _rca() -> u32: 0x1234u32
+fn _backed_sectors() -> u64: 32u64
+fn _clear_bits(value: u32, bits: u32) -> u32: value - (value & bits)
+
+fn _pattern(sector: u64, i: u64) -> u8:
+    ((sector * 7u64 + i) & 0xFFu64) as u8
+
+fn sd_model_reset(present: bool, v2: bool, high_capacity: bool, verid: u32, fifoth: u32):
+    _m_regs = []
+    var r: i64 = 0
+    while r < 256:
+        _m_regs.push(0u32)
+        r = r + 1
+    _m_regs[0x6C / 4] = verid
+    _m_regs[0x4C / 4] = fifoth
+    _m_data_off = if (verid & 0xFFFFu32) < 0x240Au32: 0x100u64 else: 0x200u64
+    _m_present = present
+    _m_v2 = v2
+    _m_hc = high_capacity
+    _m_busy_rounds = 1
+    _m_state = 0
+    _m_after_cmd55 = false
+    _m_bus4 = false
+    _m_sectors = 4096u64
+    # Only the first _backed_sectors() sectors are stored; the rest of the
+    # advertised capacity reads back the deterministic pattern.
+    _m_storage = []
+    var s: u64 = 0u64
+    while s < _backed_sectors() * 512u64:
+        _m_storage.push(_pattern(s / 512u64, s % 512u64))
+        s = s + 1u64
+    _m_fifo = []
+    _m_fifo_head = 0
+    _m_wbuf = []
+    _m_write_lba = 0u64
+    _m_write_bytes = 0u64
+    _m_inject_dcrc = false
+    _m_acmd41_without_cmd55 = false
+    _m_cmds = []
+    _m_args = []
+    _m_clkdivs = []
+
+fn sd_model_inject_dcrc():
+    _m_inject_dcrc = true
+
+fn _reg(off: u64) -> u32:
+    _m_regs[(off / 4u64) as i64]
+
+fn _set_reg(off: u64, value: u32):
+    _m_regs[(off / 4u64) as i64] = value
+
+fn _raise(bits: u32):
+    _set_reg(0x44u64, _reg(0x44u64) | bits)
+
+fn _r1(value: u32):
+    _set_reg(0x30u64, value)
+
+fn _r2(w0: u32, w1: u32, w2: u32, w3: u32):
+    _set_reg(0x3Cu64, w0)
+    _set_reg(0x38u64, w1)
+    _set_reg(0x34u64, w2)
+    _set_reg(0x30u64, w3)
+
+fn sd_model_csd(v2: bool, sectors: u64) -> [u32]:
+    if v2:
+        # CSD 2.0: structure 01, READ_BL_LEN 9, C_SIZE (69:48) = sectors/1024 - 1.
+        val c_size = (sectors / 1024u64 - 1u64) as u32
+        return [0x400E0032u32, 0x5B590000u32 | ((c_size >> 16u32) & 0x3Fu32),
+                ((c_size & 0xFFFFu32) << 16u32) | 0x7F80u32, 0x0A400000u32]
+    # CSD 1.0: READ_BL_LEN 9, C_SIZE_MULT 7 -> sectors = (C_SIZE + 1) * 512.
+    val c_size = (sectors / 512u64 - 1u64) as u32
+    [0x002E0032u32, 0x5F590000u32 | ((c_size >> 2u32) & 0x3FFu32),
+     ((c_size & 0x3u32) << 30u32) | (7u32 << 15u32), 0x0A400000u32]
+
+fn _byte_at(addr: u64) -> u8:
+    if addr < _backed_sectors() * 512u64:
+        return _m_storage[addr as i64]
+    _pattern(addr / 512u64, addr % 512u64)
+
+fn _block_of(arg: u32) -> u64:
+    if _m_hc:
+        return arg as u64
+    (arg as u64) / 512u64
+
+fn _model_command(index: i64, arg: u32):
+    _m_cmds.push(index)
+    _m_args.push(arg)
+    val was_app = _m_after_cmd55
+    _m_after_cmd55 = false
+    if not _m_present and index != 0:
+        _raise(0x104u32)
+        return
+    if index == 0:
+        _m_state = 0
+    else if index == 8:
+        if not _m_v2:
+            _raise(0x104u32)
+            return
+        _r1(arg & 0xFFFu32)
+    else if index == 55:
+        _m_after_cmd55 = true
+        _r1(0x120u32)
+    else if index == 41:
+        if not was_app:
+            _m_acmd41_without_cmd55 = true
+        if _m_busy_rounds > 0:
+            _m_busy_rounds = _m_busy_rounds - 1
+            _r1(0x00FF8000u32)
+        else:
+            var ocr = 0x80FF8000u32
+            if _m_hc and (arg & 0x40000000u32) != 0u32:
+                ocr = ocr | 0x40000000u32
+            _m_state = 1
+            _r1(ocr)
+    else if index == 2:
+        if _m_state != 1:
+            _raise(0x104u32)
+            return
+        _m_state = 2
+        _r2(0x1D414453u32, 0x4D454D4Fu32, 0x52591234u32, 0x5678ABCDu32)
+    else if index == 3:
+        _m_state = 3
+        _r1(_rca() << 16u32)
+    else if index == 9:
+        if (arg >> 16u32) != _rca():
+            _raise(0x104u32)
+            return
+        val w = sd_model_csd(_m_v2, _m_sectors)
+        _r2(w[0], w[1], w[2], w[3])
+    else if index == 7:
+        if (arg >> 16u32) != _rca():
+            _raise(0x104u32)
+            return
+        _m_state = 4
+        _r1(0x700u32)
+    else if index == 6 and was_app:
+        _m_bus4 = arg == 2u32
+        _r1(0x920u32)
+    else if index == 16:
+        _r1(0x900u32)
+    else if index == 13:
+        _r1(((_m_state as u32) << 9u32) | 0x100u32)
+    else if index == 12:
+        _r1(0xB00u32)
+    else if index == 17 or index == 18:
+        val lba = _block_of(arg)
+        val count = (_reg(0x20u64) as u64) / 512u64
+        var b: u64 = lba * 512u64
+        while b < (lba + count) * 512u64:
+            val w = (_byte_at(b) as u32) | ((_byte_at(b + 1u64) as u32) << 8u32) |
+                ((_byte_at(b + 2u64) as u32) << 16u32) | ((_byte_at(b + 3u64) as u32) << 24u32)
+            _m_fifo.push(w)
+            b = b + 4u64
+        _r1(0x900u32)
+        _raise(0x28u32)
+        if _m_inject_dcrc:
+            _raise(0x80u32)
+    else if index == 24 or index == 25:
+        _m_write_lba = _block_of(arg)
+        _m_write_bytes = _reg(0x20u64) as u64
+        _m_wbuf = []
+        _r1(0x900u32)
+        _raise(0x10u32)
+    _raise(0x4u32)
+
+fn _model_data_in(w: u32):
+    _m_wbuf.push((w & 0xFFu32) as u8)
+    _m_wbuf.push(((w >> 8u32) & 0xFFu32) as u8)
+    _m_wbuf.push(((w >> 16u32) & 0xFFu32) as u8)
+    _m_wbuf.push(((w >> 24u32) & 0xFFu32) as u8)
+    if (_m_wbuf.len() as u64) == _m_write_bytes:
+        val base = (_m_write_lba * 512u64) as i64
+        var i: i64 = 0
+        while i < _m_wbuf.len() and base + i < _m_storage.len():
+            _m_storage[base + i] = _m_wbuf[i]
+            i = i + 1
+        _raise(0x8u32)
+
+class SdModelPort:
+    id: i64
+
+impl DwMshcRegs for SdModelPort:
+    fn rd(off: u64) -> u32:
+        if off == _m_data_off:
+            if _m_fifo_head >= _m_fifo.len():
+                return 0u32
+            val w = _m_fifo[_m_fifo_head]
+            _m_fifo_head = _m_fifo_head + 1
+            return w
+        if off == 0x48u64:
+            # STATUS: fifo_count (bits 29:17), capped at the 32-word FIFO.
+            var pending = (_m_fifo.len() - _m_fifo_head) as u32
+            if pending > 32u32:
+                pending = 32u32
+            return pending << 17u32
+        _reg(off)
+
+    fn wr(off: u64, value: u32):
+        if off == _m_data_off:
+            _model_data_in(value)
+            return
+        if off == 0x44u64:
+            _set_reg(off, _clear_bits(_reg(off), value))
+            return
+        if off == 0x00u64:
+            # Resets self-clear immediately; a FIFO reset drops stale data.
+            if (value & 2u32) != 0u32:
+                _m_fifo = []
+                _m_fifo_head = 0
+            _set_reg(off, _clear_bits(value, 7u32))
+            return
+        if off == 0x2Cu64 and (value & 0x80000000u32) != 0u32:
+            if (value & 0x200000u32) != 0u32:
+                _m_clkdivs.push(_reg(0x08u64))
+            else:
+                _model_command((value & 0x3Fu32) as i64, _reg(0x28u64))
+            _set_reg(off, _clear_bits(value, 0x80000000u32))
+            return
+        _set_reg(off, value)
+
+fn _cfg(fifo_depth: u64, bus_width: u64) -> DwMshcConfig:
+    DwMshcConfig(base: 0x16020000u64, fifo_depth: fifo_depth, data_offset: 0u64,
+                 bus_width: bus_width, ciu_hz: 100000000u64, max_hz: 100000000u64)
+
+fn _sdhc_open() -> DwMshcSd:
+    sd_model_reset(true, true, true, 0x5342290Au32, 0x001F0000u32)
+    DwMshcSd.open(SdModelPort(id: 0), _cfg(32u64, 4u64)).unwrap()
+
+fn _cmds_text() -> text:
+    var out = ""
+    for c in _m_cmds:
+        out = out + "," + c.to_text()
+    out
+
+fn _last_cmd(back: i64) -> i64:
+    _m_cmds[_m_cmds.len() - back]
+
+fn _last_arg() -> u32:
+    _m_args[_m_args.len() - 1]
+
+fn _sector_bytes(fill: i64, count: i64) -> [u8]:
+    var data: [u8] = []
+    var i: i64 = 0
+    while i < count:
+        data.push(((i * 3 + fill) & 0xFF) as u8)
+        i = i + 1
+    data
+
+describe "DW MSHC pure helpers":
+    it "derives CLKDIV so the card clock never exceeds the target":
+        expect(dw_mshc_clock_divider(100000000u64, 400000u64)).to_equal(125u32)
+        expect(dw_mshc_clock_divider(50000000u64, 400000u64)).to_equal(63u32)
+        expect(dw_mshc_clock_divider(100000000u64, 25000000u64)).to_equal(2u32)
+        expect(dw_mshc_clock_divider(20000000u64, 25000000u64)).to_equal(0u32)
+
+    it "picks the data FIFO window from VERID unless the DTB overrides it":
+        expect(dw_mshc_data_offset(0x5342290Au32, 0u64)).to_equal(0x200u64)
+        expect(dw_mshc_data_offset(0x5342210Au32, 0u64)).to_equal(0x100u64)
+        expect(dw_mshc_data_offset(0x5342290Au32, 0x100u64)).to_equal(0x100u64)
+
+    it "decodes CSD capacity for v2 (SDHC) and v1 (SDSC)":
+        val hc = sd_model_csd(true, 4096u64)
+        expect(sd_csd_capacity_sectors(hc[0], hc[1], hc[2])).to_equal(4096u64)
+        val sc = sd_model_csd(false, 4096u64)
+        expect(sd_csd_capacity_sectors(sc[0], sc[1], sc[2])).to_equal(4096u64)
+
+describe "DW MSHC SD card bring-up against the register model":
+    it "runs the SDHC identification sequence to TRAN with a 4-bit bus":
+        sd_model_reset(true, true, true, 0x5342290Au32, 0x001F0000u32)
+        val opened = DwMshcSd.open(SdModelPort(id: 0), _cfg(32u64, 4u64))
+        expect(opened.is_ok()).to_equal(true)
+        val sd = opened.unwrap()
+        expect(_cmds_text()).to_equal(",0,8,55,41,55,41,2,3,9,7,55,6")
+        expect(_m_args[1]).to_equal(0x1AAu32)
+        expect((_m_args[3] & 0x40000000u32) != 0u32).to_equal(true)
+        expect(_m_args[8]).to_equal(0x12340000u32)
+        expect(_m_acmd41_without_cmd55).to_equal(false)
+        expect(sd.high_capacity).to_equal(true)
+        expect(sd.rca).to_equal(0x1234u32)
+        expect(sd.capacity_sectors).to_equal(4096u64)
+        expect(_m_bus4).to_equal(true)
+        expect(_reg(0x18u64)).to_equal(1u32)
+        expect(_m_state).to_equal(4)
+
+    it "identifies at 400 kHz and switches to 25 MHz from a 100 MHz CIU clock":
+        _sdhc_open()
+        # Each clock change issues update-clock three times (off, divider, on).
+        expect(_m_clkdivs.len()).to_equal(6)
+        expect(_m_clkdivs[1]).to_equal(125u32)
+        expect(_m_clkdivs[5]).to_equal(2u32)
+        expect(_reg(0x10u64)).to_equal(1u32)
+
+    it "programs the FIFO watermarks from the DTB fifo-depth":
+        _sdhc_open()
+        expect(_reg(0x4Cu64)).to_equal(0x200F0010u32)
+
+    it "falls back to the FIFOTH reset value when the DTB has no fifo-depth":
+        sd_model_reset(true, true, true, 0x5342290Au32, 0x000F0000u32)
+        val sd = DwMshcSd.open(SdModelPort(id: 0), _cfg(0u64, 4u64)).unwrap()
+        expect(sd.fifo_depth).to_equal(16u64)
+
+    it "drives an SDSC v1 card with byte addresses and CMD16":
+        sd_model_reset(true, false, false, 0x5342210Au32, 0x001F0000u32)
+        val opened = DwMshcSd.open(SdModelPort(id: 0), _cfg(32u64, 1u64))
+        expect(opened.is_ok()).to_equal(true)
+        var sd = opened.unwrap()
+        expect(sd.high_capacity).to_equal(false)
+        expect(sd.data_off).to_equal(0x100u64)
+        expect(_cmds_text()).to_equal(",0,8,55,41,55,41,2,3,9,7,16")
+        expect((_m_args[3] & 0x40000000u32) != 0u32).to_equal(false)
+        val sector = sd.read_blocks(3u64, 1u64)
+        expect(sector.is_ok()).to_equal(true)
+        expect(_last_arg()).to_equal(1536u32)
+        expect(sector.unwrap()[0]).to_equal(_pattern(3u64, 0u64))
+
+    it "fails closed when no card answers":
+        sd_model_reset(false, true, true, 0x5342290Au32, 0x001F0000u32)
+        val opened = DwMshcSd.open(SdModelPort(id: 0), _cfg(32u64, 4u64))
+        expect(opened.is_err()).to_equal(true)
+        expect(opened.unwrap_err()).to_contain("no SD card answered ACMD41")
+
+describe "DW MSHC block I/O against the register model":
+    it "reads one block with CMD17 through the FIFO":
+        var sd = _sdhc_open()
+        val got = sd.read_sector(5u64)
+        expect(got.is_ok()).to_equal(true)
+        val bytes = got.unwrap()
+        expect(bytes.len()).to_equal(512)
+        expect(bytes[0]).to_equal(_pattern(5u64, 0u64))
+        expect(bytes[511]).to_equal(_pattern(5u64, 511u64))
+        expect(_last_cmd(1)).to_equal(17)
+        expect(_last_arg()).to_equal(5u32)
+
+    it "reads several blocks with CMD18 followed by CMD12":
+        var sd = _sdhc_open()
+        val got = sd.read_blocks(10u64, 3u64)
+        expect(got.is_ok()).to_equal(true)
+        val bytes = got.unwrap()
+        expect(bytes.len()).to_equal(1536)
+        expect(bytes[512]).to_equal(_pattern(11u64, 0u64))
+        expect(bytes[1535]).to_equal(_pattern(12u64, 511u64))
+        expect(_last_cmd(2)).to_equal(18)
+        expect(_last_cmd(1)).to_equal(12)
+
+    it "writes one block with CMD24 and reads it back":
+        var sd = _sdhc_open()
+        expect(sd.write_sector(7u64, _sector_bytes(1, 512)).is_ok()).to_equal(true)
+        expect(_last_cmd(1)).to_equal(24)
+        expect(_m_storage[7 * 512 + 2]).to_equal(7u8)
+        val back = sd.read_sector(7u64).unwrap()
+        expect(back[511]).to_equal(((511 * 3 + 1) & 0xFF) as u8)
+
+    it "writes several blocks with CMD25 followed by CMD12":
+        var sd = _sdhc_open()
+        expect(sd.write_blocks(20u64, _sector_bytes(0, 1024)).is_ok()).to_equal(true)
+        expect(_last_cmd(2)).to_equal(25)
+        expect(_last_cmd(1)).to_equal(12)
+        expect(_m_storage[21 * 512 + 5]).to_equal(((517 * 3) & 0xFF) as u8)
+
+    it "reports a data CRC error instead of returning bytes":
+        var sd = _sdhc_open()
+        sd_model_inject_dcrc()
+        val got = sd.read_sector(1u64)
+        expect(got.is_err()).to_equal(true)
+        expect(got.unwrap_err()).to_contain("read data error")
+
+    it "refuses I/O past the card and flushes through CMD13":
+        var sd = _sdhc_open()
+        expect(sd.read_sector(4096u64).is_err()).to_equal(true)
+        expect(sd.flush().is_ok()).to_equal(true)
+        expect(_last_cmd(1)).to_equal(13)
+
+describe "MBR partition window over the SD card":
+    it "maps NVFS partition LBAs onto the card":
+        var sd = _sdhc_open()
+        # MBR: p1 FAT32-LBA at 64 (+1024), p2 type 0xDA at 1088 (+2048).
+        var mbr = _sector_bytes(0, 512)
+        var i: i64 = 446
+        while i < 512:
+            mbr[i] = 0u8
+            i = i + 1
+        mbr[446 + 4] = 0x0Cu8
+        mbr[446 + 8] = 64u8
+        mbr[446 + 13] = 4u8
+        mbr[462 + 4] = 0xDAu8
+        mbr[462 + 8] = 0x40u8
+        mbr[462 + 9] = 0x04u8
+        mbr[462 + 13] = 8u8
+        mbr[510] = 0x55u8
+        mbr[511] = 0xAAu8
+        expect(sd.write_sector(0u64, mbr).is_ok()).to_equal(true)
+        val sector0 = sd.read_sector(0u64).unwrap()
+        expect(mbr_has_signature(sector0)).to_equal(true)
+        val p2 = mbr_partition_at(sector0, 1u64)
+        expect(p2.found).to_equal(true)
+        expect(p2.kind).to_equal(0xDAu64)
+        expect(p2.start).to_equal(1088u64)
+        expect(p2.count).to_equal(2048u64)
+        expect(mbr_partition_at(sector0, 2u64).found).to_equal(false)
+        var window = BlockWindow.partition(sd, p2).unwrap()
+        expect(window.sector_count()).to_equal(2048u64)
+        val first = window.read_sector(0u64).unwrap()
+        expect(first[0]).to_equal(_pattern(1088u64, 0u64))
+        expect(_last_arg()).to_equal(1088u32)
+        expect(window.read_sector(2048u64).is_err()).to_equal(true)
+
+    it "rejects a partition that runs past the card":
+        val sd = _sdhc_open()
+        var mbr = _sector_bytes(0, 512)
+        var i: i64 = 446
+        while i < 512:
+            mbr[i] = 0u8
+            i = i + 1
+        mbr[446 + 4] = 0xDAu8
+        mbr[446 + 8] = 1u8
+        mbr[446 + 13] = 0x20u8
+        mbr[510] = 0x55u8
+        mbr[511] = 0xAAu8
+        val part = mbr_partition_at(mbr, 0u64)
+        expect(part.found).to_equal(true)
+        expect(BlockWindow.partition(sd, part).is_err()).to_equal(true)

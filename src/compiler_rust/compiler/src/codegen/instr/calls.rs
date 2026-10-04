@@ -733,12 +733,18 @@ fn compile_inline_typed_bytes_le_unchecked<M: Module>(
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
     let ptr_mask = builder.ins().iconst(types::I64, !7i64);
     let ptr_bits = builder.ins().band(array, ptr_mask);
-    let loaded = if ctx.fam_arrays {
+    let loaded = if ctx.fam_arrays || ctx.baremetal {
         // FAM byte arrays store each element as a tagged RuntimeValue slot at
         // items@16 (never raw-packed), so the little-endian value must be
         // composed from per-slot decodes — mirroring the freestanding C
         // rt_arm_array_get_u16_le / rt_arm_array_get_u32_le helpers.
-        let items = array_items_base(builder, ptr_bits, true);
+        // The NON-FAM freestanding runtimes (riscv64 / x86_64 baremetal_stubs,
+        // rt_extras.c) keep the hosted header (items POINTER @24) but also
+        // store tagged 8-byte slots, never packed bytes — only the hosted
+        // runtime has the packed RT_CORE_ARRAY_FLAG_BYTES layout. Reading
+        // packed bytes there made adler32 (and every DBFS checkpoint check
+        // built on it) wrong on riscv64.
+        let items = array_items_base(builder, ptr_bits, ctx.fam_arrays);
         let mut acc: Option<Value> = None;
         for i in 0..width {
             let off = builder.ins().iadd_imm(index, i);
@@ -1708,9 +1714,10 @@ fn compile_inline_typed_bytes_data_at<M: Module>(
     };
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
-    let widened = if ctx.fam_arrays {
-        // The hoisted data pointer is the FAM items base (header+16); elements
-        // are tagged slots, so decode the byte instead of reading raw memory.
+    let widened = if ctx.fam_arrays || ctx.baremetal {
+        // The hoisted data pointer is the items base (FAM: header+16; non-FAM
+        // freestanding: the items pointer); elements are tagged slots on every
+        // freestanding runtime, so decode the byte instead of reading raw memory.
         let slot_off = builder.ins().imul_imm(index, 8);
         let slot_ptr = builder.ins().iadd(data_ptr, slot_off);
         let slot = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);

@@ -36,3 +36,12 @@ argv from display text. Named/GUI migration remains open. This change is
 TEST_BLOCKED pending self-hosted runtime/docgen/CLI qualification; see
 `doc/03_plan/sys_test/simpleos_sealed_cli_dispatch.md` and the matching feature
 expert `simpleos_sealed_cli_dispatch`. It provides no matrix or release PASS.
+
+## RV64 NVFS-root real-firmware lane
+
+`scripts/check/check-simpleos-riscv64-nvfs-qemu.shs` admits QEMU through
+`simple-qemu-host-admission.shs --arch riscv64 --accelerator tcg` and records the
+binary identity in its receipt. It boots OpenSBI `fw_jump` -> U-Boot -> `booti`
+(no `-kernel`), copies the NVFS image per run, and judges only serial markers.
+Feature expert: `simpleos_riscv64_nvfs_root`. QEMU-only; board blocker in
+`doc/08_tracking/bug/simpleos_riscv64_nvfs_root_board_blocked_2026-10-03.md`.

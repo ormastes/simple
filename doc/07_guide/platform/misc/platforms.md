@@ -42,6 +42,22 @@ Covers supported platforms, cross-compilation, platform abstraction library, and
 
 **Requirements:** FreeBSD 13+, 64-bit kernel and userspace.
 
+### Linux riscv64 (QEMU lane)
+
+No released binary yet. Bootstrap runs natively inside a riscv64 Linux guest:
+
+```bash
+sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --smoke       # PASS: arch=riscv64 nproc=20
+sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --provision   # rustup nightly in guest
+sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --sync origin/release/1.0
+sh scripts/check/check-linux-riscv64-bootstrap-qemu.shs --stage2      # cranelift; no LLVM 23 on riscv64
+```
+
+Host packages: `qemu-system-riscv opensbi u-boot-qemu qemu-utils cloud-image-utils`.
+Knobs: `QEMU_CPUS` (20), `QEMU_MEM` (32G), `QEMU_DISK` (160G), `QEMU_PORT` (2223),
+`RISCV_LINUX_VM_DIR`, `STAGE2_BACKEND`. Expert note:
+`doc/00_llm_process/feature_expert/linux_riscv64_qemu_bootstrap/skill.md`.
+
 Hosted Simple compiler binaries currently require 64-bit kernel/userspace. SimpleOS guest targets are separate from hosted compiler binaries and include 32-bit OS build lanes.
 
 ### SimpleOS Guest Targets

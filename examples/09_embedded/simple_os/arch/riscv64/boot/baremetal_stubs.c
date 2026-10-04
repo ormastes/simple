@@ -4,6 +4,7 @@
 typedef intptr_t RuntimeValue;
 
 #define UART_BASE 0x10000000UL
+#define SIMPLEOS_RV64_FDT_CONSOLE 1
 #include "../../common/baremetal_16550_serial.h"
 #define SIFIVE_TEST_BASE 0x100000UL
 #define VIRTIO_MMIO_BASE 0x10001000UL
@@ -723,6 +724,240 @@ RuntimeValue rt_enum_check_discriminant(RuntimeValue value, RuntimeValue expecte
     RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
     if (!e || e->hdr.type != HEAP_ENUM) return 0;
     return e->discriminant == (uint32_t)(int32_t)expected ? 1 : 0;
+}
+
+/* The seed lowers `match`/`is_ok()` on Result/Option to this typed predicate
+ * (hosted twin: src/runtime/runtime_native.c rt_enum_check_variant; arm64
+ * twin: arch/arm64/boot/baremetal_stubs.c). Without it every riscv64 kernel
+ * whose closure matches a Result fails to link. Enum id 0 is the untyped lane
+ * (Result/Option), so it matches any id. */
+int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant)
+{
+    if (!IS_HEAP((RuntimeValue)value)) return 0;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR((RuntimeValue)value);
+    if (!e || e->hdr.type != HEAP_ENUM) return 0;
+    if ((int64_t)e->discriminant != expected_discriminant) return 0;
+    return expected_enum_id == 0 || e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
+}
+
+/* Hosted-ABI ports needed by the stdlib NVFS/DBFS closure (riscv64 NVFS-root
+ * lane, examples/09_embedded/simple_os/arch/riscv64/nvfs_root_entry.spl).
+ * Twins: src/runtime/runtime_native.c and arch/arm64/boot/baremetal_stubs.c. */
+
+/* `.?` presence: nil and a nil-payload enum (None) are absent (arm64 twin's
+ * rt_is_none rule). */
+int8_t rt_is_present(int64_t value)
+{
+    RuntimeValue v = (RuntimeValue)value;
+    if (v == NIL_VALUE) return 0;
+    if (IS_HEAP(v)) {
+        RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(v);
+        if (e && e->hdr.type == HEAP_ENUM && e->payload == NIL_VALUE) return 0;
+    }
+    return 1;
+}
+
+/* Erased `.to_i64()`: parse a string receiver, identity for anything else. */
+RuntimeValue rt_string_to_int(RuntimeValue value);
+int64_t rt_to_int_dynamic(int64_t value)
+{
+    RuntimeValue v = (RuntimeValue)value;
+    if (IS_HEAP(v)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(v);
+        if (h && h->type == HEAP_STRING) return (int64_t)rt_string_to_int(v);
+    }
+    return value;
+}
+
+/* Full-width u64 boxing for erased slots. Values that fit the 61-bit tagged
+ * int lane stay tagged; larger ones are boxed so no high bits are lost. */
+#define HEAP_WIDE_UINT 21U
+typedef struct { HeapHeader hdr; uint64_t value; } RuntimeWideUInt;
+
+RuntimeValue rt_value_u64(RuntimeValue bits)
+{
+    uint64_t value = (uint64_t)bits;
+    if (value <= (uint64_t)(INT64_MAX >> 3)) return ENCODE_INT((int64_t)value);
+    RuntimeWideUInt *u = (RuntimeWideUInt *)rv_alloc(sizeof(RuntimeWideUInt));
+    if (!u) return ENCODE_INT((int64_t)value);
+    u->hdr.type = HEAP_WIDE_UINT;
+    u->hdr.size = (uint32_t)sizeof(RuntimeWideUInt);
+    u->value = value;
+    return ENCODE_PTR(u);
+}
+
+RuntimeValue rt_value_as_u64(RuntimeValue value)
+{
+    if (IS_HEAP(value)) {
+        HeapHeader *h = (HeapHeader *)DECODE_PTR(value);
+        if (h && h->type == HEAP_WIDE_UINT) return (RuntimeValue)((RuntimeWideUInt *)h)->value;
+    }
+    if (IS_INT(value)) return (RuntimeValue)((uint64_t)value >> 3);
+    return value;
+}
+
+RuntimeValue rt_array_remove(RuntimeValue arr, RuntimeValue idx)
+{
+    if (!IS_HEAP(arr)) return NIL_VALUE;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
+    int64_t i = IS_INT(idx) ? DECODE_INT(idx) : (int64_t)idx;
+    if (i < 0 || (uint64_t)i >= a->len) return NIL_VALUE;
+    RuntimeValue removed = a->items[i];
+    for (uint64_t j = (uint64_t)i; j + 1 < a->len; j++) a->items[j] = a->items[j + 1];
+    a->len--;
+    a->items[a->len] = NIL_VALUE;
+    return removed;
+}
+
+/* `n.chr()`: the codegen passes a RAW scalar value (runtime_sffi.rs registers
+ * rt_char_from_code(I64) -> I64; hosted twin runtime_native.c). It must NOT be
+ * tag-decoded: '0' (48) and '8' (56) have zero low bits and would otherwise be
+ * misread as tagged ints, silently dropping every '0'/'8' from DBFS's
+ * byte->text checkpoint decode. Encodes UTF-8; invalid scalars yield "". */
+RuntimeValue rt_char_from_code(RuntimeValue code)
+{
+    int64_t c = (int64_t)code;
+    char buf[5] = { 0, 0, 0, 0, 0 };
+    if (c <= 0 || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) return rt_string_from_cstr("");
+    uint32_t cp = (uint32_t)c;
+    if (cp < 0x80U) {
+        buf[0] = (char)cp;
+    } else if (cp < 0x800U) {
+        buf[0] = (char)(0xC0U | (cp >> 6));
+        buf[1] = (char)(0x80U | (cp & 0x3FU));
+    } else if (cp < 0x10000U) {
+        buf[0] = (char)(0xE0U | (cp >> 12));
+        buf[1] = (char)(0x80U | ((cp >> 6) & 0x3FU));
+        buf[2] = (char)(0x80U | (cp & 0x3FU));
+    } else {
+        buf[0] = (char)(0xF0U | (cp >> 18));
+        buf[1] = (char)(0x80U | ((cp >> 12) & 0x3FU));
+        buf[2] = (char)(0x80U | ((cp >> 6) & 0x3FU));
+        buf[3] = (char)(0x80U | (cp & 0x3FU));
+    }
+    return rt_string_from_cstr(buf);
+}
+
+RuntimeValue rt_text_to_bytes(RuntimeValue str)
+{
+    if (!IS_HEAP(str)) return rt_array_new(0);
+    RuntimeString *s = (RuntimeString *)DECODE_PTR(str);
+    if (!s || s->hdr.type != HEAP_STRING) return rt_array_new(0);
+    RuntimeValue arr = rt_array_new((RuntimeValue)s->len);
+    for (uint64_t i = 0; i < s->len; i++)
+        rt_array_push(arr, ENCODE_INT((int64_t)(unsigned char)s->data[i]));
+    return arr;
+}
+
+int8_t rt_typed_words_u64_set(RuntimeValue arr, int64_t idx, int64_t val)
+{
+    /* riscv64 rt_array_set takes a RAW index (see rt_index_set). */
+    rt_array_set(arr, (RuntimeValue)idx, ENCODE_INT(val));
+    return 1;
+}
+
+/* Zero-filled [u8] of exactly `len` tagged slots (raw i64 argument; hosted
+ * twin rt_byte_array_new_len). */
+RuntimeValue rt_byte_array_new_len(RuntimeValue len)
+{
+    int64_t n = (int64_t)len;
+    if (n < 0 || n > 0x1000000) return NIL_VALUE;
+    RuntimeValue arr = rt_array_new((RuntimeValue)n);
+    if (arr == NIL_VALUE) return NIL_VALUE;
+    for (int64_t i = 0; i < n; i++) {
+        if (!rt_array_push(arr, ENCODE_INT(0))) return NIL_VALUE;
+    }
+    return arr;
+}
+
+/* Raw address of the element slots (non-FAM header: items pointer). */
+RuntimeValue rt_array_data_ptr(RuntimeValue arr)
+{
+    if (!IS_HEAP(arr)) return 0;
+    RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
+    if (!a || a->hdr.type != HEAP_ARRAY) return 0;
+    return (RuntimeValue)(uintptr_t)a->items;
+}
+
+/* No process cwd in the kernel: the root is the working directory. */
+RuntimeValue rt_env_cwd(void)
+{
+    return rt_string_from_cstr("/");
+}
+
+/* FNV-1a 64 over the text bytes (hosted twin runtime_native.c rt_hash_text),
+ * accepting a raw literal under the same guard as rt_native_eq so a heap
+ * string and an equal literal hash identically. */
+RuntimeValue rt_hash_text(RuntimeValue value)
+{
+    uint64_t hash = 14695981039346656037ULL;
+    const RuntimeString *s = riscv_heap_string(value);
+    if (s) {
+        for (uint64_t i = 0; i < (uint64_t)s->len; i++) {
+            hash ^= (uint8_t)s->data[i];
+            hash *= 1099511628211ULL;
+        }
+        return (RuntimeValue)hash;
+    }
+    if (!riscv_plausible_raw_text(value)) return 0;
+    for (const char *p = (const char *)(uintptr_t)value; *p; p++) {
+        hash ^= (uint8_t)*p;
+        hash *= 1099511628211ULL;
+    }
+    return (RuntimeValue)hash;
+}
+
+int8_t rt_heap_ref_wellformed(int64_t value)
+{
+    return (((uint64_t)value) & ~(uint64_t)TAG_MASK) >= 4096U ? 1 : 0;
+}
+
+RuntimeValue rt_volatile_read_u64(RuntimeValue addr)
+{
+    return (RuntimeValue)*(volatile uint64_t *)(uintptr_t)(uint64_t)addr;
+}
+
+RuntimeValue rt_volatile_write_u64(RuntimeValue addr, RuntimeValue value)
+{
+    *(volatile uint64_t *)(uintptr_t)(uint64_t)addr = (uint64_t)value;
+    return NIL_VALUE;
+}
+
+/* Real (spinning) mutex provider for std.thread_sffi on freestanding riscv64.
+ *
+ * DBFS's device commit owner (device_commit_owner.spl) admits a lock provider
+ * on SimpleOS only through a behavioural probe whose load-bearing leg is the
+ * DOUBLE UNLOCK: releasing an already-released word must fail. A constant
+ * "success" stub is rejected (fail closed), so this is a genuine lock word:
+ * amoswap-acquire to take it, amoswap-release to drop it, and an unlock of a
+ * word that was not held reports failure. Handles are 1-based slot indexes;
+ * 0 means "no handle" and every op on it fails. */
+#define RV_MUTEX_SLOTS 64U
+static volatile uint32_t g_rv_mutex_words[RV_MUTEX_SLOTS + 1U];
+static volatile uint32_t g_rv_mutex_next = 1U;
+
+int64_t spl_mutex_create(void)
+{
+    uint32_t slot = __atomic_fetch_add(&g_rv_mutex_next, 1U, __ATOMIC_RELAXED);
+    if (slot == 0U || slot > RV_MUTEX_SLOTS) return 0;
+    g_rv_mutex_words[slot] = 0U;
+    return (int64_t)slot;
+}
+
+int8_t spl_mutex_lock(int64_t handle)
+{
+    if (handle <= 0 || (uint64_t)handle > RV_MUTEX_SLOTS) return 0;
+    while (__atomic_exchange_n(&g_rv_mutex_words[handle], 1U, __ATOMIC_ACQUIRE) != 0U) {
+        __asm__ volatile("nop");
+    }
+    return 1;
+}
+
+int8_t spl_mutex_unlock(int64_t handle)
+{
+    if (handle <= 0 || (uint64_t)handle > RV_MUTEX_SLOTS) return 0;
+    return __atomic_exchange_n(&g_rv_mutex_words[handle], 0U, __ATOMIC_RELEASE) == 1U ? 1 : 0;
 }
 
 RuntimeValue rt_string_char_at(RuntimeValue str, RuntimeValue idx)

@@ -962,10 +962,13 @@ pub(crate) fn exec_assignment(
             // Check if this is a module-level global variable (for function access)
             let is_global = MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
             if is_global && !env.contains_key(name) {
-                // Update module-level global
-                MODULE_GLOBALS.with(|cell| {
-                    cell.borrow_mut().insert(name.clone(), value);
-                });
+                // Update module-level global. Write the per-module owner store
+                // too, not only the flat map: `g = g.me_method()` reaches here
+                // after the receiver path removed `g` from the frame and synced
+                // the OLD receiver into the owner store, and a function frame
+                // republishes the owner store on exit -- a flat-only write was
+                // silently reverted (interpreter only; JIT was correct).
+                super::interpreter_helpers::sync_flat_global(name, &value);
             } else {
                 env.insert(name.clone(), value);
 

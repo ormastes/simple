@@ -6929,6 +6929,8 @@ fn test_libc_names_are_not_stub_candidates() {
         "pthread_mutex_trylock",
         "__assert_fail",
         "__clear_cache",
+        // riscv64 glibc: libgcc __clear_cache calls it; a stub shadowed the real icache flush.
+        "__riscv_flush_icache",
         "__sigsetjmp",
         // glibc >= 2.38 emits these C23 spellings; a host newer than the list
         // anticipated used to stub them.
