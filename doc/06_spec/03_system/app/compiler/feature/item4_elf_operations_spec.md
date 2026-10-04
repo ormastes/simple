@@ -38,9 +38,14 @@ provenance only. No Simple runtime or generated executable was run.
 After runtime admission:
 
 ```text
-<runtime> test test/03_system/app/compiler/feature/item4_elf_operations_spec.spl --native
+<runtime> test test/03_system/app/compiler/feature/item4_elf_operations_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
 <runtime> spipe-docgen test/03_system/app/compiler/feature/item4_elf_operations_spec.spl --output doc/06_spec --no-index
 ```
 
 The eleven scenarios use static caller-trusted callbacks. They do not certify sandboxing,
 bounded memory, dynamic loading, hosted execution, or complete item 4 readiness.
+
+Pending execution follows [the item4 native execution gate](item4_linker_execution_gate.md).
+This command is an unexecuted recipe, not proof that the current CLI or generated
+entry is admitted. Account for all 11 declared scenarios and their actual
+assertion behavior; zero reported examples or missing scenario results cannot pass.

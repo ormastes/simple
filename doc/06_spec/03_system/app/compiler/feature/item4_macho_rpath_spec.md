@@ -24,9 +24,14 @@ whole-process memory qualification claim.
 Pending execution with an admitted self-hosted runtime:
 
 ```
-<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_rpath_spec.spl --mode=interpreter
+<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_rpath_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
 ```
 
 These are authored assertions, not observed runtime passes. Immutable file
 identity, inherited dyld runtime behavior and native Darwin qualification remain
 outside this link-time acceptance evidence.
+
+Pending execution follows [the item4 native execution gate](item4_linker_execution_gate.md).
+This command is an unexecuted recipe, not proof that the current CLI or generated
+entry is admitted. Account for all 7 declared scenarios and their actual
+assertion behavior; zero reported examples or missing scenario results cannot pass.

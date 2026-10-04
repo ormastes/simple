@@ -22,7 +22,12 @@ Fixture provenance and external LLVM21.1.8 observations are recorded in `test/fi
 An admitted self-hosted runtime is required for the pending command:
 
 ```
-<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_closure_spec.spl --mode=interpreter
+<admitted-runtime> test test/03_system/app/compiler/feature/item4_macho_closure_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
 ```
 
 These tests do not qualify Darwin loading, native execution, real SDK completeness, dynamic weak import behavior, signing validity, immutable file identity, bounded whole-process memory, or `@rpath` dependency search. Those remain separate product/runtime gates. No Rust seed, rebuild or runtime retry was used.
+
+Pending execution follows [the item4 native execution gate](item4_linker_execution_gate.md).
+This command is an unexecuted recipe, not proof that the current CLI or generated
+entry is admitted. Account for all 12 declared scenarios and their actual
+assertion behavior; zero reported examples or missing scenario results cannot pass.

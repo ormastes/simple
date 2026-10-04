@@ -34,9 +34,14 @@ this metadata does not claim extension safety. Other unsupported flags retain
 their explicit lowering refusal.
 
 After independent runtime admission:
-`<runtime> test test/03_system/app/compiler/feature/item4_macho_tbd_spec.spl`
+`<runtime> test test/03_system/app/compiler/feature/item4_macho_tbd_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts`
 
 Open full-SDK obligations include transitive reexport closure, client/umbrella
 access binding, selected weak import coalescing, actual SDK/framework workloads,
 Darwin dyld execution, bounded whole-job enforcement and host qualification.
 Reader metadata coverage does not claim these behaviors are implemented.
+
+Pending execution follows [the item4 native execution gate](item4_linker_execution_gate.md).
+This command is an unexecuted recipe, not proof that the current CLI or generated
+entry is admitted. Account for all 9 declared scenarios and their actual
+assertion behavior; zero reported examples or missing scenario results cannot pass.

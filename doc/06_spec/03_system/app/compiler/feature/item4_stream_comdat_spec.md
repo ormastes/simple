@@ -47,10 +47,15 @@ it does not claim GNU behavior for emitted nonallocated debug relocations.
 After runtime admission:
 
 ```text
-<runtime> test test/03_system/app/compiler/feature/item4_stream_comdat_spec.spl --native
+<runtime> test test/03_system/app/compiler/feature/item4_stream_comdat_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
 <runtime> spipe-docgen test/03_system/app/compiler/feature/item4_stream_comdat_spec.spl --output doc/06_spec --no-index
 ```
 
 Secure task-specific directories isolate outputs and must become removable
 after cleanup. Logical scan/output/scratch checks do not establish measured RSS,
 no-swap behavior, hosted execution, or complete item 4 readiness.
+
+Pending execution follows [the item4 native execution gate](item4_linker_execution_gate.md).
+This command is an unexecuted recipe, not proof that the current CLI or generated
+entry is admitted. Account for all 13 declared scenarios and their actual
+assertion behavior; zero reported examples or missing scenario results cannot pass.

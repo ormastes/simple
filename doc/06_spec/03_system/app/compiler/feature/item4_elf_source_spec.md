@@ -38,7 +38,7 @@ tool results do not establish Simple RED/GREEN.
 After runtime admission:
 
 ```text
-<runtime> test test/03_system/app/compiler/feature/item4_elf_source_spec.spl --native
+<runtime> test test/03_system/app/compiler/feature/item4_elf_source_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts
 <runtime> spipe-docgen test/03_system/app/compiler/feature/item4_elf_source_spec.spl --output doc/06_spec --no-index
 ```
 
@@ -48,3 +48,8 @@ not change-during-read detection, immutable identity, retained handles, or a
 bounded working set. Test-owned files are removed after completed scenarios;
 there is no retained-handle cleanup claim. Full item 4 host/runtime and memory
 gates remain open.
+
+Pending execution follows [the item4 native execution gate](item4_linker_execution_gate.md).
+This command is an unexecuted recipe, not proof that the current CLI or generated
+entry is admitted. Account for all 9 declared scenarios and their actual
+assertion behavior; zero reported examples or missing scenario results cannot pass.
