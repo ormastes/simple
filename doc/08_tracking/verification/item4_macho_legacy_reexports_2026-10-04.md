@@ -43,3 +43,18 @@ lazy/upward visibility, matched-missing failure and unmatched-absent success.
 Native image and destination-byte assertions exercise the production route.
 These are authored tests, not execution receipts; present weak-provider coverage
 does not establish absent weak-import or general SDK weak semantics.
+
+Final independent source review binds main acceptance 006e145c405 and manual
+7052901d52d, modes 9a4e14a9eb4, core 89da96988ee and the hosted guard commits
+above: no concrete P0/P1 findings. Scoped whitespace, direct-env working/staged
+and numbered-artifact checks passed against release base
+487d64cfac314787e89c8bb7304e0a24eae3d450. The tracked doc/06_spec tree contains
+zero executable specs; this increment adds only Markdown manuals there.
+Subsequent review/report changes are Markdown only.
+
+Committed test-tree delta passed with 3152 inherited offenders and zero new
+offenders. Retained list:
+`C:/dev/simple/.git/item4-macho-legacy-reexports-preexisting-offenders.txt`.
+SHA256: `2fb68a47bab7953e058a449562ecba2df9f135b8d2e2d99c3e14f373b1c1d719`.
+This scope result does not convert the inherited full-tree failure or any
+UNRUN runtime/host gate into PASS.
