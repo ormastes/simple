@@ -45,14 +45,17 @@ impl ElfStreamInputsV1:
         var cursor = 4096u64
         for group in 0..3:
             cursor = elf_stream_align_v1(cursor, 4096u64, self.limits.output_bytes)?
+            var owner = 0
             for object in self.objects:
                 for index in 1..object.section_count:
                     self.elf_stream_charge_v1(cancelled)?
+                    if not self.elf_stream_comdat_section_kept_v1(owner, index, cancelled)?: continue
                     val section = elf_file_section_v1(object, index)?
                     if elf_stream_group_v1(section)? != group: continue
                     cursor = elf_stream_section_align_v1(cursor, section.alignment, self.limits.output_bytes)?
                     if section.size > self.limits.output_bytes - cursor: return Err("stream section exceeds output budget")
                     cursor = cursor + section.size
+                owner = owner + 1
         Ok(cursor)
 
     me elf_stream_common_layout_v1(start: u64, wanted: [u8],
@@ -94,6 +97,7 @@ impl ElfStreamInputsV1:
             for object in self.objects:
                 for candidate_index in 1..object.section_count:
                     self.elf_stream_charge_v1(cancelled)?
+                    if not self.elf_stream_comdat_section_kept_v1(candidate_owner, candidate_index, cancelled)?: continue
                     val section = elf_file_section_v1(object, candidate_index)?
                     if elf_stream_group_v1(section)? == group:
                         cursor = elf_stream_section_align_v1(cursor, section.alignment, self.limits.output_bytes)?
@@ -115,6 +119,11 @@ impl ElfStreamInputsV1:
             val binding = self.elf_stream_lookup_v1(symbol.name_bytes, cancelled)?
             if binding.is_none():
                 if symbol.binding == 2 and symbol.section_index == 0: return Ok(0u64)
+                # A discarded weak definition has the same effective binding
+                # as an undefined weak reference when no selected winner exists.
+                if symbol.binding == 2 and symbol.section_index > 0 and symbol.section_index < 65280:
+                    if not self.elf_stream_comdat_section_kept_v1(owner, symbol.section_index, cancelled)?:
+                        return Ok(0u64)
                 return Err("undefined symbol {elf_stream_name_v1(symbol.name_bytes)}")
             definition = binding.unwrap().symbol
             defining_owner = binding.unwrap().owner
@@ -129,6 +138,8 @@ impl ElfStreamInputsV1:
             if common.1.is_none(): return Err("stream common allocation disappeared")
             return Ok(ELF_STREAM_BASE_V1 + common.1.unwrap())
         if defining_owner < 0 or defining_owner >= self.objects.len(): return Err("stream symbol owner bounds")
+        if not self.elf_stream_comdat_section_kept_v1(defining_owner, definition.section_index, cancelled)?:
+            return Err("stream COMDAT reference to discarded local section")
         val section = elf_file_section_v1(self.objects[defining_owner], definition.section_index)?
         if definition.value > section.size: return Err("stream symbol value exceeds section")
         val offset = self.elf_stream_section_offset_v1(defining_owner, definition.section_index, cancelled)?
@@ -142,14 +153,17 @@ impl ElfStreamInputsV1:
             cursor = elf_stream_align_v1(cursor, 4096u64, self.limits.output_bytes)?
             val start = cursor
             starts.push(start)
+            var owner = 0
             for object in self.objects:
                 for index in 1..object.section_count:
                     self.elf_stream_charge_v1(cancelled)?
+                    if not self.elf_stream_comdat_section_kept_v1(owner, index, cancelled)?: continue
                     val section = elf_file_section_v1(object, index)?
                     if elf_stream_group_v1(section)? == group:
                         cursor = elf_stream_section_align_v1(cursor, section.alignment, self.limits.output_bytes)?
                         if section.size > self.limits.output_bytes - cursor: return Err("stream section exceeds output budget")
                         cursor = cursor + section.size
+                owner = owner + 1
             if group == 2:
                 val common = self.elf_stream_common_layout_v1(cursor, [], cancelled)?
                 val got = self.elf_stream_got_layout_v1(common.0, None, cancelled)?
