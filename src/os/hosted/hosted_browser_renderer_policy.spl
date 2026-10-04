@@ -11,6 +11,8 @@ use std.gc_async_mut.web.browser_session_url.{
     normalize_network_navigation_url
 }
 
+use common.string_builder.{StringBuilder}
+
 extern fn rt_text_to_bytes(value: text) -> [u8]
 
 pub struct HostedBrowserNavigationPermit:
@@ -259,6 +261,52 @@ pub fn hosted_browser_network_origin(url: text) -> text:
     if not parsed_opt.?:
         return ""
     Origin.from_url(parsed_opt!).to_text()
+
+pub fn hosted_browser_fetch_mode(
+    kind: text, url: text, requester_origin: text
+) -> RequestMode:
+    """Fetch mode for a BrowserSession request of `kind` - the single owner
+    shared by the hosted web-content session and the app browser lane."""
+    if kind == "document":
+        return RequestMode.Navigate
+    if kind == "style" or kind == "script":
+        return RequestMode.NoCors
+    if (kind == "fetch" and requester_origin != "" and
+        hosted_browser_network_origin(url) != requester_origin):
+        return RequestMode.Cors
+    RequestMode.SameOrigin
+
+pub fn hosted_browser_fetch_headers(headers: text, content_type: text) -> text:
+    var lines: [text] = []
+    var has_content_type = false
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        if line.to_lower().starts_with("content-type:"):
+            has_content_type = true
+        lines.push(line)
+    if content_type != "" and not has_content_type:
+        lines.push("Content-Type: {content_type}")
+    lines.join("\r\n")
+
+pub fn hosted_browser_wasm_hex(data: [u8]) -> text:
+    """Wasm response bodies cross into BrowserSession as lowercase hex."""
+    var out = StringBuilder.new()
+    for byte in data:
+        val numeric = byte.to_i64()
+        val piece = numeric.to_hex()
+        out.push(if piece.len() == 1: "0{piece}" else: piece)
+    out.build()
+
+pub fn hosted_browser_has_cookie_header(headers: text) -> bool:
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        val colon = line.index_of(":")
+        if (colon > 0 and
+            line.slice(0, colon).trim().to_lower() == "cookie"):
+            return true
+    false
 
 pub fn hosted_browser_response_header_value(
     headers: text, expected_name: text

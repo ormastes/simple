@@ -1,0 +1,103 @@
+"""
+## Purpose and audience
+Purpose: Pin the app browser's subresource policy and the BrowserSession
+external-script load cursor. Before 2026-10-04 the app lane never serviced
+subresource requests, and BrowserSession re-requested the same external
+classic script after every committed response, so a page with
+`<script src=...>` never finished loading and its stylesheet was never
+applied (example.com rendered unstyled).
+Audience: maintainers of src/app/browser and gc_async_mut/web.
+## Operator workflow
+Run with the test runner; offline (scripts are blocked by policy, so no
+network request is made).
+## Compatibility and limitations
+Bug record: doc/08_tracking/bug/browser_real_site_rendering_gaps_2026-10-04.md (D2)
+"""
+# @req: REQ-WEB-BROWSER-015
+
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserResponse}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_loading.*
+use app.browser.subresource_pump.{
+    browser_subresource_admitted, browser_subresource_blocked_reason,
+    browser_drain_subresources, browser_subresource_scheme_allowed
+}
+
+val PAGE: text = "<html><head><style>p{color:red}</style></head><body><p>x</p><script src=\"/a.js\"></script><script>document.title = 'after';</script></body></html>"
+
+describe "App browser subresource policy":
+    it "fetches styles and images, and remote code only when opted in":
+        assert_true(browser_subresource_admitted("style", false))
+        assert_true(browser_subresource_admitted("image", false))
+        for kind in ["script", "module", "wasm", "fetch"]:
+            assert_false(browser_subresource_admitted(kind, false))
+            assert_true(browser_subresource_admitted(kind, true))
+        assert_false(browser_subresource_admitted("document", true))
+
+    it "names the opt-in in the blocked-script reason":
+        expect(browser_subresource_blocked_reason("script")).to_contain("SIMPLE_BROWSER_REMOTE_SCRIPTS=1")
+
+    it "completes a load whose external script is blocked by policy":
+        step("open a page with a blocked external script, an inline script and a style")
+        var s = BrowserSession.new()
+        val _ = s.open_html("https://example.com/", PAGE)
+        assert_true(s.has_pending_requests())
+        s = browser_drain_subresources(s)
+        step("the load finished: the later inline script ran and the style applied")
+        assert_false(s.has_pending_requests())
+        assert_true(s.active_load == nil)
+        expect(s.current_title).to_equal("after")
+        expect(s.current_style_html).to_contain("p{color:red}")
+
+describe "BrowserSession external script cursor":
+    it "advances past an external script after a successful response":
+        var s = BrowserSession.new()
+        val _ = s.open_html("https://example.com/", PAGE)
+        val r = s.take_pending_request().unwrap()
+        expect(r.kind).to_equal("script")
+        val c = s.commit_network_response(BrowserResponse.create(
+            request_id: r.id, kind: r.kind, url: r.url, status: 200,
+            headers: "Content-Type: text/javascript",
+            body: "document.title = 'A';", error: ""
+        ))
+        assert_true(c.is_ok())
+        step("no second request for the same script; the load completed")
+        assert_false(s.has_pending_requests())
+        expect(s.current_title).to_equal("after")
+
+    it "advances past an external script after a failed fetch":
+        var s = BrowserSession.new()
+        val _ = s.open_html("https://example.com/", PAGE)
+        val r = s.take_pending_request().unwrap()
+        val c = s.commit_network_response(BrowserResponse.create(
+            request_id: r.id, kind: r.kind, url: r.url, status: 0,
+            headers: "", body: "", error: "network: Network request failed"
+        ))
+        assert_true(c.is_ok())
+        assert_false(s.has_pending_requests())
+        expect(s.current_title).to_equal("after")
+
+describe "App browser subresource scheme policy":
+    it "carries only http and https subresources":
+        assert_true(browser_subresource_scheme_allowed("https://example.com/a.css"))
+        assert_true(browser_subresource_scheme_allowed("http://example.com/a.png"))
+        for url in ["file:///etc/passwd", "FILE:///etc/passwd", "data:text/css,p{}",
+                    "about:blank", "simple://home", "javascript:alert(1)", "not a url"]:
+            assert_false(browser_subresource_scheme_allowed(url))
+
+    it "never loads an https document's file:/// stylesheet":
+        step("an https page links a local file as its stylesheet")
+        var s = BrowserSession.new()
+        val _ = s.open_html("https://example.com/", "<html><head><link rel=\"stylesheet\" href=\"file:///etc/passwd\"></head><body><p>x</p></body></html>")
+        s = browser_drain_subresources(s)
+        step("the load completes, the file is reported as refused, and nothing is applied")
+        assert_false(s.has_pending_requests())
+        assert_true(s.active_load == nil)
+        expect(s.current_style_html).to_equal("")
+        var refused = false
+        for warning in s.warnings:
+            if warning.contains("file:///etc/passwd"):
+                refused = true
+        assert_true(refused)
