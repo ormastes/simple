@@ -1,0 +1,117 @@
+# Actual self-hosted native regression: while-val shares if-val payload scope.
+extern fn rt_value_bool(value: bool) -> i64
+extern fn rt_enum_new(enum_id: i32, discriminant: i32, payload: i64) -> bool?
+
+fn tagged_bool(value: bool) -> bool?:
+    rt_enum_new(1, 0, rt_value_bool(value))
+
+fn iterate_values(tagged: bool) -> i64:
+    var current: bool? = if tagged: tagged_bool(false) else: Some(false)
+    var visits = 0
+    var score = 0
+    while val payload = current:
+        visits = visits + 1
+        if visits > 3:
+            return -100
+        score = score + (if payload: 7 else: 3)
+        current = if visits == 1:
+            if tagged: tagged_bool(true) else: Some(true)
+        else:
+            nil
+    visits * 100 + score
+
+fn empty_loop() -> i64:
+    val absent: bool? = nil
+    var visits = 0
+    while val payload = absent:
+        visits = visits + 1
+        break
+    visits
+
+fn break_on_false() -> i64:
+    val current = tagged_bool(false)
+    var score = 0
+    while val payload = current:
+        score = if payload: -100 else: 23
+        break
+    score
+
+fn continue_to_true() -> i64:
+    var current = tagged_bool(false)
+    var visits = 0
+    while val payload = current:
+        visits = visits + 1
+        if visits > 3:
+            return -100
+        if not payload:
+            current = tagged_bool(true)
+            continue
+        current = nil
+    visits
+
+fn return_payload(value: bool?) -> i64:
+    while val payload = value:
+        return if payload: 19 else: 23
+    -17
+
+fn preserve_outer_binding() -> i64:
+    val payload = true
+    var current = tagged_bool(false)
+    while val payload = current:
+        if payload:
+            return -100
+        current = nil
+    if payload: 1 else: 0
+
+var next_calls = 0
+
+fn next_value() -> bool?:
+    next_calls = next_calls + 1
+    if next_calls == 1:
+        return tagged_bool(false)
+    if next_calls == 2:
+        return tagged_bool(true)
+    nil
+
+fn initializer_once() -> i64:
+    next_calls = 0
+    var score = 0
+    while val payload = next_value():
+        if next_calls > 3:
+            return -100
+        score = score + (if payload: 7 else: 3)
+    next_calls * 100 + score
+
+fn float_payload() -> i64:
+    var current: f64? = Some(2.5)
+    var total = 0.0
+    var visits = 0
+    while val payload = current:
+        visits = visits + 1
+        if visits > 2:
+            return -100
+        total = total + payload
+        current = nil
+    if total == 2.5: visits else: -100
+
+fn check_case(label: text, actual: i64, expected: i64) -> i64:
+    if actual == expected:
+        print "PASS {label}"
+        return 0
+    print "FAIL {label} actual={actual} expected={expected}"
+    1
+
+fn main() -> i64:
+    var failed = 0
+    failed = failed + check_case("raw-false-true-nil", iterate_values(false), 210)
+    failed = failed + check_case("tagged-false-true-nil", iterate_values(true), 210)
+    failed = failed + check_case("nil-does-not-enter", empty_loop(), 0)
+    failed = failed + check_case("break-target", break_on_false(), 23)
+    failed = failed + check_case("continue-target", continue_to_true(), 2)
+    failed = failed + check_case("return-false", return_payload(tagged_bool(false)), 23)
+    failed = failed + check_case("return-true", return_payload(tagged_bool(true)), 19)
+    failed = failed + check_case("outer-binding-restored", preserve_outer_binding(), 1)
+    failed = failed + check_case("initializer-once-per-test", initializer_once(), 310)
+    failed = failed + check_case("float-payload-boundary", float_payload(), 1)
+    print "while-val scalar payload: 10 checks, {failed} failures"
+    if failed == 0: 0 else: 1

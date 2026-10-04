@@ -9,4 +9,10 @@ That gap permits a RuntimeValue-backed false payload (19) to remain a nonzero in
 
 The eleven-case native fixture exercises native and RuntimeValue-backed producers, false/true/absent, elif, and ordinary presence. It must be compiled and executed by refreshed self-hosted LLVM and Cranelift producers. It has NOT been run and is not admission evidence. The Rust seed seven-case fixture remains independently owned.
 
-Scope boundary: while-val currently desugars to a nil-break guard followed by the body rather than the present arm used here. Typed scalar rebinding for that form needs separate provenance-aware control-flow work; this candidate does not claim it fixed. Explicit optional access followed by manual nil guards shares the existing Float mechanism; broad optional ABI redesign is outside this repair.
+## Separate while-val repair candidate
+
+The original while-val form used a nil-break guard followed by the body, outside the present-arm typed payload boundary. The follow-up changes only identifier-form parser desugaring to a marked binding plus `if NAME != nil: BODY else: break` inside the existing unconditional loop. The initializer is still evaluated once per loop test, and break/continue/return retain their surrounding loop/function targets. The selected arm reuses the existing float/Boolean MIR binding and restores the raw binding afterward. Constructor-pattern loops remain on their existing match route.
+
+The separate ten-case native fixture covers raw and tagged false→true→nil streams, initial absence, break, continue, return, outer-name shadowing, exact initializer-call count (including the terminating nil test), and the float path. Both fixtures remain UNRUN; source review and parser/source-bound cache invalidation are required before a refreshed producer can establish native correctness. No flat AST wire fields/tags changed; parser-source identity must invalidate cached old desugarings through the existing authority owner, never forced cache reuse.
+
+Explicit optional access followed by manual nil guards shares the existing Float mechanism; broad optional ABI redesign is outside this repair.
