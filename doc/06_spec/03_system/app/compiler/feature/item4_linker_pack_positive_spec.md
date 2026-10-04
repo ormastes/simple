@@ -16,11 +16,16 @@ Explicit native configuration disables cc fallback and selects no Simple runtime
 | Retired mapping collection | Refuse collection while pinned, release and collect, reject stale session, link through replacement |
 | Rejected replacement | Wrong artifact digest cannot change active generation; old session still links and executes |
 | Exhausted tables | Real mapped link succeeds, new generation/session fail, independent static recovery still links and executes |
+| Full-table shutdown | Real mapped link and execution precede terminal cleanup; sessions and mappings disappear without increasing registry revision, repeated shutdown succeeds, old/new dispatch leaves no output |
+| Busy refusal and retry | A separately loaded real pending mapping and active pack survive explicitly injected recovery/session busy flags; active pack links again, then shutdown closes both owners |
 
 Receipts require Success, actual `internal:elf`, matching Linux x64 target and
-NotCertified accounting. Cleanup releases retained sessions before collection,
-publishes static recovery before collecting the final mapped generation, and
-removes only outputs in the fixture's unique temporary directory.
+NotCertified accounting. Cleanup uses terminal shutdown, which closes owned pins
+and mappings without publishing recovery, and removes only outputs in the
+fixture's unique temporary directory. Busy flags are injected state-machine
+preconditions; this does not prove real concurrent callback/reentrant behavior.
+Actual unload-failure injection and cleanup-error retry remain open; no fake
+unload result or fabricated successful receipt is used.
 
 This tests provider APIs. Production CLI selection, registered composition/seal,
 immutable dependency closure, resource enforcement, latency/RSS and full native

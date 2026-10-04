@@ -20,7 +20,7 @@ use compiler.backend.linker.link_engine_external.*
 use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
 use compiler.backend.linker.crt_discovery.{find_crt_files}
 use compiler.backend.linker.mold.{requested_linker_override}
-use compiler.backend.linker.linker_pack.{LinkerPackConfigV1}
+use compiler.backend.linker.linker_pack.{LinkerPackConfigV1, LinkerPackV1}
 use compiler.backend.linker.linker_pack_query.{LINKER_PACK_ABI_DIGEST}
 use compiler.backend.linker.linker_pack_wire.{linker_pack_policy_digest}
 use compiler.backend.linker.linker_lifecycle.{LinkerLifecycleV1, LinkerProviderV1, LinkerSessionHandleV1}
@@ -203,18 +203,66 @@ class Item4PackPositiveOwner:
             item4_pack_positive_check_receipt(receipt)
             val recovered = item4_pack_positive_check_image(path)?
             expect(recovered).to_equal(initial)
+        if kind == 6 or kind == 7:
+            step("Shut down a real mapped owner without publishing a recovery generation")
+            if kind == 6:
+                expect(self.registry.publish_pack(self.config).is_err()).to_equal(true)
+                expect(self.registry.open().is_err()).to_equal(true)
+            if kind == 7:
+                step("Retain a separate real pending mapping and inject only the busy-state guard")
+                val pending = LinkerPackV1.load(self.config)
+                # Transfer this independent owner; never clone a registered mapping.
+                self.registry.pending_pack = Some(pending)
+                expect(pending.ready).to_equal(true)
+                if not pending.ready: return Err("pending provider admission failed: " + pending.diagnostic)
+                val revision = self.registry.registry_revision
+                self.registry.recovery_running = true
+                val recovery_busy = self.registry.shutdown()
+                expect(recovery_busy.is_err()).to_equal(true)
+                expect(self.registry.is_closing()).to_equal(false)
+                expect(self.registry.is_closed()).to_equal(false)
+                expect(self.registry.registry_revision).to_equal(revision)
+                expect(self.registry.pending_pack.is_some()).to_equal(true)
+                self.registry.recovery_running = false
+                self.registry.sessions[old.index].running = true
+                val session_busy = self.registry.shutdown()
+                expect(session_busy.is_err()).to_equal(true)
+                expect(self.registry.is_closing()).to_equal(false)
+                expect(self.registry.sessions[old.index].occupied).to_equal(true)
+                expect(self.registry.pending_pack.is_some()).to_equal(true)
+                self.registry.sessions[old.index].running = false
+                # This actual call proves refusal left the mapped owner usable.
+                val retry_image = self.link(old, "after-busy-refusal")?
+                expect(retry_image).to_equal(initial)
+            val revision = self.registry.registry_revision
+            self.registry.shutdown()?
+            expect(self.registry.is_closed()).to_equal(true)
+            expect(self.registry.is_closing()).to_equal(true)
+            expect(self.registry.registry_revision).to_equal(revision)
+            expect(self.registry.pending_pack.is_none()).to_equal(true)
+            for pack in self.registry.packs: expect(pack.is_none()).to_equal(true)
+            for session in self.registry.sessions: expect(session.occupied).to_equal(false)
+            expect(self.registry.shutdown().is_ok()).to_equal(true)
+            step("Reject all old handles and new work after terminal cleanup")
+            val late = self.directory + "/after-shutdown"
+            self.outputs.push(late)
+            expect(self.registry.run_with_config(old, item4_pack_positive_request(), item4_pack_positive_policy(),
+                ["test/fixtures/linker/elf/pack_main_x64.o"], late, self.native).is_err()).to_equal(true)
+            expect(self.registry.run(old, item4_pack_positive_request(), item4_pack_positive_policy(), [], late).is_err()).to_equal(true)
+            expect(self.registry.close(old).is_err()).to_equal(true)
+            expect(self.registry.open().is_err()).to_equal(true)
+            expect(self.registry.publish_pack(self.config).is_err()).to_equal(true)
+            expect(self.registry.recover().is_err()).to_equal(true)
+            expect(self.registry.run_recovery_with_config(item4_pack_positive_request(), item4_pack_positive_policy(),
+                ["test/fixtures/linker/elf/pack_main_x64.o"], late, self.native).is_err()).to_equal(true)
+            expect(self.registry.run_recovery(item4_pack_positive_request(), item4_pack_positive_policy(), [], late).is_err()).to_equal(true)
+            expect(file_exists(late)).to_equal(false)
         Ok(true)
 
     me item4_pack_positive_cleanup():
-        step("Release sessions and collect retired mappings")
-        for session in self.sessions: expect(self.registry.close(session).is_ok()).to_equal(true)
-        val active = self.registry.active_generation()
-        for generation in self.generations:
-            if generation.index != active.index or generation.epoch != active.epoch:
-                expect(self.registry.collect(generation).is_ok()).to_equal(true)
-        expect(self.registry.recover().is_ok()).to_equal(true)
-        expect(self.registry.collect(active).is_ok()).to_equal(true)
-        expect(self.registry.cleanup_pending_pack().is_ok()).to_equal(true)
+        step("Release sessions and mappings through terminal shutdown")
+        expect(self.registry.shutdown().is_ok()).to_equal(true)
+        expect(self.registry.is_closed()).to_equal(true)
         for path in self.outputs:
             if file_exists(path): expect(file_remove(path)).to_equal(true)
         expect(dir_remove(self.directory, false)).to_equal(true)
@@ -228,7 +276,8 @@ fn item4_pack_positive_case(kind: i64):
     val recovery = LinkerProviderV1(header: item4_pack_positive_header(), provider_id: KpfId128(hi: 4, lo: 20),
         composition_digest: item4_pack_positive_header().schema_digest, engine_id: "internal:elf", invoke: link_request_to_native,
         invoke_with_config: Some(item4_pack_positive_recovery))
-    val created = LinkerLifecycleV1.create(if kind == 5: 2 else: 4, if kind == 5: 1 else: 4,
+    val created = LinkerLifecycleV1.create(if kind == 5 or kind == 6: 2 else: 4,
+        if kind == 5 or kind == 6: 1 else: 4,
         item4_pack_positive_requirement(), recovery)
     expect(created.is_ok()).to_equal(true)
     if created.is_err(): return
@@ -258,3 +307,8 @@ describe "ITEM4 mapped provider positive native acceptance":
         item4_pack_positive_case(4)
     it "executes static recovery while generation and session tables are exhausted":
         item4_pack_positive_case(5)
+    it "shuts down full generation and session tables without recovery publication":
+        item4_pack_positive_case(6)
+    it "preserves real mapped owners across injected busy refusal before shutdown retry":
+        # Injected state-machine precondition, not evidence of a running callback.
+        item4_pack_positive_case(7)
