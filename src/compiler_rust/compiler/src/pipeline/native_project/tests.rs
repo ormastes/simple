@@ -915,6 +915,7 @@ fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -6739,6 +6740,7 @@ int main(void) { app_call(); return 0; }
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -6853,6 +6855,7 @@ void __module_init_security_registry(void) {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7096,6 +7099,7 @@ int main(int argc, char** argv) {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7233,6 +7237,7 @@ int main(void) {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7305,6 +7310,7 @@ int main(void) {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7371,6 +7377,7 @@ int main(void) { return (int)run_check(); }
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -8154,6 +8161,7 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -8959,6 +8967,66 @@ fn test_discover_files_full_scan_keeps_declaration_cfg_files() {
 // Safe-incremental object reuse (SIMPLE_NATIVE_INCREMENTAL=1) — INCR-BUILD lane
 // ---------------------------------------------------------------------------
 
+#[test]
+fn native_extension_method_defaults_reach_separate_caller() {
+    use crate::hir::{HirExprKind, HirStmt, Lowerer};
+    use crate::module_resolver::ModuleResolver;
+    use simple_parser::Parser;
+    let dir = crate::test_helpers::create_test_project();
+    let root = dir.path().join("src");
+    let files = vec![
+        (root.join("owner.spl"), "class Table:\n    var n: i64\n".to_string()),
+        (root.join("extension.spl"), "use owner.{Table}\nimpl Table:\n    fn probe(tag: text? = nil) -> bool:\n        tag == nil\n".to_string()),
+        (root.join("caller.spl"), "use owner.{Table}\nfn omitted() -> bool:\n    Table(n: 1).probe()\nfn explicit() -> bool:\n    Table(n: 1).probe(\"given\")\n".to_string()),
+    ];
+    for (path, source) in &files {
+        std::fs::write(path, source).unwrap();
+    }
+    let imports = super::imports::build_import_map(&files, std::slice::from_ref(&root), &root);
+    let defaults = imports.method_param_defaults.get("Table.probe").expect("extension contract");
+    assert!(matches!(defaults.as_slice(), [Some(simple_parser::ast::Expr::Nil)]));
+    let ast = Parser::new(&files[2].1).parse().unwrap();
+    let resolver = ModuleResolver::new(dir.path().to_path_buf(), root.clone());
+    let mut lowerer = Lowerer::with_module_resolver(resolver, files[2].0.clone());
+    lowerer.set_global_method_param_defaults(std::sync::Arc::new(imports.method_param_defaults));
+    let hir = lowerer.lower_module(&ast).unwrap();
+    for (name, is_nil) in [("omitted", true), ("explicit", false)] {
+        let function = hir.functions.iter().find(|f| f.name == name).unwrap();
+        let expr = function.body.iter().find_map(|stmt| match stmt {
+            HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        }).unwrap();
+        let HirExprKind::MethodCall { args, .. } = &expr.kind else { panic!("{expr:?}") };
+        assert_eq!(args.len(), 1, "{name}: {args:?}");
+        if is_nil {
+            assert!(matches!(args[0].kind, HirExprKind::Nil));
+        } else {
+            assert!(matches!(&args[0].kind, HirExprKind::String(s) if s == "given"));
+        }
+    }
+}
+
+#[test]
+fn native_method_defaults_do_not_cross_ambiguous_owners() {
+    let root = std::path::PathBuf::from("/tmp/native-default-owners/src");
+    let files = vec![
+        (root.join("one.spl"), "class Same:\n    var n: i64\n    fn probe(flag: bool = true) -> bool:\n        flag\n".to_string()),
+        (root.join("two.spl"), "class Same:\n    var n: i64\n    fn probe(flag: bool = false) -> bool:\n        flag\n".to_string()),
+    ];
+    let imports = super::imports::build_import_map(&files, std::slice::from_ref(&root), &root);
+    assert!(!imports.method_param_defaults.contains_key("Same.probe"));
+}
+
+#[test]
+fn native_method_default_change_invalidates_caller_cache() {
+    let mut imports = empty_import_map_result();
+    imports.method_param_defaults.insert("Owner.probe".to_string(), vec![Some(simple_parser::ast::Expr::Bool(false))]);
+    let before = super::cross_module_layout_fingerprint(&imports);
+    imports.method_param_defaults.insert("Owner.probe".to_string(), vec![Some(simple_parser::ast::Expr::Bool(true))]);
+    let after = super::cross_module_layout_fingerprint(&imports);
+    assert_ne!(before, after);
+}
+
 /// Build an all-empty `ImportMapResult` for fingerprint unit tests.
 fn empty_import_map_result() -> imports::ImportMapResult {
     imports::ImportMapResult {
@@ -8979,6 +9047,7 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         data_exports: std::collections::HashSet::new(),
         fn_arities: std::collections::HashMap::new(),
         fn_return_types: std::collections::HashMap::new(),
+        method_param_defaults: std::collections::HashMap::new(),
     }
 }
 
@@ -9236,6 +9305,7 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
+        method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };

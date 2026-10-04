@@ -119,6 +119,7 @@ pub struct Lowerer {
     /// their call results become ANY and field access on them fails. Resolved
     /// into `method_return_types` in Pass 0.5c (additive: upgrade-only).
     pub(super) global_fn_return_types: Option<std::sync::Arc<HashMap<String, Type>>>,
+    pub(super) global_method_param_defaults: Option<std::sync::Arc<std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>>>>,
     /// Module-qualified source call (`variables.env_get`) to its exact native
     /// owner. Native-project builds populate this before expression lowering
     /// so duplicate bare functions do not turn the namespace into a global.
@@ -278,6 +279,7 @@ impl Lowerer {
             fn_param_defaults: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
+            global_method_param_defaults: None,
             qualified_import_functions: None,
             lenient_types: false,
             lenient_globals: LenientGlobalCollector::new(),
@@ -341,6 +343,7 @@ impl Lowerer {
             fn_param_defaults: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
+            global_method_param_defaults: None,
             qualified_import_functions: None,
             lenient_types: false,
             lenient_globals: LenientGlobalCollector::new(),
@@ -427,6 +430,7 @@ impl Lowerer {
             fn_param_defaults: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
+            global_method_param_defaults: None,
             qualified_import_functions: None,
             lenient_types: false,
             lenient_globals: LenientGlobalCollector::new(),
@@ -518,6 +522,10 @@ impl Lowerer {
     }
 
     /// Set the whole-program free-function return-type map (see field doc).
+    pub fn set_global_method_param_defaults(&mut self, defs: std::sync::Arc<std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>>>) {
+        self.global_method_param_defaults = Some(defs);
+    }
+
     pub fn set_global_fn_return_types(&mut self, defs: std::sync::Arc<HashMap<String, Type>>) {
         self.global_fn_return_types = Some(defs);
     }
