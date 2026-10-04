@@ -1,0 +1,22 @@
+# Seed compiler can lower known nominal fields to slot zero
+
+Status: confirmed unsafe lowering path; runtime corruption is a risk, not yet observed in this FreeBSD run.
+
+## Evidence
+
+- Frozen FreeBSD source `de37d9879ae74e1521df0f75e6aa0c48d2dea955` and current local release `92566311cc8a13496576c844c703d0c9bf014246` both retain the same branch in `src/compiler_rust/compiler/src/hir/lower/type_resolver.rs:868-882`. When a nominal struct field is absent from the local/registered/global views and its spelling is globally ambiguous, `get_field_info` emits a warning and returns physical field index `0` with type `ANY`. This is a concrete, unchecked layout substitution.
+- The live FreeBSD Cranelift Stage 2 log at `/root/simple/build/bootstrap-freebsd-phase2-release-de37-cranelift/logs/aarch64-unknown-freebsd/stage2-native-build.log` recorded this branch for `Template.name`, `Template.type_params`, `Template.body`, and repeated `ElfSymbol.name` accesses. A read-only copy was captured at `2026-10-04T06:44:23Z` in the isolated worktree's `build/seed-field-fallback/freebsd-cranelift-stage2-native-build-warning.log` (SHA-256 `4d1002c21f8a6e2a17cf3e17aa127fdd083002e7a6c07388b98d590cb13b0f65`). The warning lacks a source path or receiver declaration identity.
+- `src/compiler/70.backend/linker/obj_taker.spl:70-76` declares `Template` in this order: `name` slot 0, `type_params` slot 1, `kind` slot 2, `body` slot 3, `constraints` slot 4. The logged fallbacks for `type_params` and `body` select slot 0, so executing those lowered accesses would read `name` in place of an array. Calls in the same file at lines 381, 392, and 468 visibly use `type_params`; the warning does not identify the `.body` source access.
+- Three distinct `ElfSymbol` declarations exist: `backend/native/elf_writer.spl:161` has `name` at slot 0; `linker/elf_parser.spl:57` has `name` at slot 6; `introspection/elf_symbols.spl:8` has `name` at slot 0. The log alone cannot bind each warning to a declaration, so its actual slot correctness is unknown. The `Template` mismatch is independent of this same-name collision because only one `Template` declaration was found under `src/`.
+
+## Cause and scope
+
+The receiver's `HirType::Struct` lacks the requested field when `get_field_info` runs. It tries the global owner and same-name registered variants, then substitutes slot 0 solely because another struct declares the same field spelling. The precise earlier loss of the `Template` declaration/layout (registration order, import-map ownership, or type erasure) still needs a focused trace. Renaming duplicate `ElfSymbol` types cannot repair the unique `Template` case. A pure-Simple accessor would still need a valid field layout when compiled by this seed; no safe source-only workaround is established.
+
+## Correctness gate for a repair
+
+1. Add a focused bootstrap compiler regression that reproduces the actual incomplete nominal view: a `Template`-shaped receiver type with missing local fields, ambiguous global spellings for `type_params` and `body`, and a canonical declaration that places those fields in slots 1 and 3. Assert the emitted indices are 1 and 3, then separately remove the canonical owner and require an error instead of guessed slot 0. An ordinary fully registered struct does not exercise this branch.
+2. Trace the nominal owner and registration view at the warning branch, then recover a field index only from the receiver's actual declaration. If that owner cannot be proven, fail closed with a diagnostic carrying source span and receiver identity. Do not globally disable ambiguity checks or substitute another guessed slot.
+3. Rebuild and admit a corrected bootstrap producer before qualifying affected Stage 2 output; compiling changed Simple source with the old producer does not change this resolver behavior.
+
+No build was stopped or rerun for this report. The FreeBSD Stage 2 result and any runtime effect remain unqualified.
