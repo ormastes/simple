@@ -14,3 +14,14 @@ passes a matching source inventory through the actual receipt owner, and
 requires an error naming the module/source. It remains UNRUN. A rebuilt
 producer must identify and repair the actual MCP declaration before this
 product can pass; improved diagnostics alone do not qualify the build.
+
+The lowered-source batch owner also returned on the first receipt error. It
+now collects ABI errors from each distinct admitted source in source order and
+returns one newline-separated error after visiting the batch. A single error
+keeps its prior exact text. Source/inventory authentication failures still
+stop immediately; no partial successful receipt list escapes a failed batch.
+Four additional regressions cover a valid module followed by two invalid
+modules (including a repeated source), and an entirely valid deduplicated
+batch, immediate rejection of a module/source binding mismatch after an
+earlier ABI failure, and exact single-error text. These native regressions remain UNRUN pending the repaired
+producer.

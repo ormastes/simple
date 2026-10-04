@@ -7,7 +7,8 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
     ColdHirSemanticInputV1, cold_hir_semantic_seed_v1,
     cold_hir_semantic_seeds_v1,
-    cold_hir_typed_receipt_from_admitted_entry_v1
+    cold_hir_typed_receipt_from_admitted_entry_v1,
+    cold_hir_typed_receipts_from_lowered_sources_v1, ColdHirTypedReceiptV1
 }
 use compiler.hir.abi_interface.{
     hir_abi_interface_digest_v1, hir_abi_interface_encoded_v1
@@ -43,7 +44,68 @@ fn test_inventory(content: text, duplicate: bool = false) -> CompileSourceInvent
         entries.push(entry)
     CompileSourceInventoryV1(1, 1, entries)
 
+fn test_receipt_batch(invalid: bool, wrong_path: bool = false,
+    one_invalid: bool = false) -> Result<[ColdHirTypedReceiptV1], text>:
+    val content = "pub val value = 1\n"
+    val digest = sha256_text(content)
+    val empty = sha256_text("")
+    var entries: [CompileSourceInventoryEntryV1] = []
+    var modules: Dict<text, HirModule> = {}
+    var rows: [text] = []
+    for suffix in ["a", "b", "c"]:
+        val identity = "pkg/{suffix}.spl"
+        val name = "pkg.{suffix}"
+        entries.push(CompileSourceInventoryEntryV1(
+            identity, digest, empty, empty, empty, empty, content.len()))
+        rows.push("{identity}|sha256_{digest}|{content.len()}")
+        var module = test_module("/repo/{identity}", [], name)
+        if wrong_path and suffix == "c":
+            module.path = "/repo/pkg/different.spl"
+        if invalid and suffix != "a" and (not one_invalid or suffix == "b"):
+            val span = Span.empty()
+            val unresolved = HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+            val symbol = SymbolId.new(1)
+            module.constants[symbol] = HirConst(symbol: symbol, name: "value",
+                type_: unresolved,
+                value: HirExpr(kind: HirExprKind.UnitLit, has_type_: false,
+                    type_: unresolved, span: span),
+                is_mutable: false, visibility: Visibility.Public, is_public: true,
+                is_volatile: false, has_fixed_address: false, fixed_address: 0, span: span)
+        modules[name] = module
+    val inventory = CompileSourceInventoryV1(1, 1, entries)
+    val snapshot = rows.join("\n")
+    # Repeated admitted identity must not duplicate either receipts or errors.
+    cold_hir_typed_receipts_from_lowered_sources_v1(
+        "/repo", compile_source_inventory_digest_v1(inventory), inventory,
+        snapshot, sha256_text(snapshot),
+        ["/repo/pkg/a.spl", "/repo/pkg/b.spl", "/repo/pkg/b.spl", "/repo/pkg/c.spl"],
+        [digest, digest, digest, digest],
+        [content.len(), content.len(), content.len(), content.len()],
+        ["pkg.a", "pkg.b", "pkg.b", "pkg.c"], modules)
+
 describe "cold HIR semantic seed":
+    it "collects both invalid modules once and rejects the valid partial receipt":
+        val result = test_receipt_batch(true)
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_equal(
+            "cold-hir-abi-unresolved:unresolved-inference:0:0:module=pkg.b:source=pkg/b.spl\ncold-hir-abi-unresolved:unresolved-inference:0:0:module=pkg.c:source=pkg/c.spl")
+
+    it "preserves successful batch receipts and deduplicates repeated sources":
+        val result = test_receipt_batch(false)
+        expect(result.is_ok()).to_be(true)
+        expect(result.unwrap().len()).to_equal(3)
+
+    it "rejects a module binding mismatch immediately even after an ABI error":
+        val result = test_receipt_batch(true, true)
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_equal("cold-hir-module-source-mismatch")
+
+    it "preserves exact single ABI error text for a batch":
+        val result = test_receipt_batch(true, false, true)
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_equal(
+            "cold-hir-abi-unresolved:unresolved-inference:0:0:module=pkg.b:source=pkg/b.spl")
+
     it "identifies the source and module when public ABI inference is unresolved":
         val content = "pub val unresolved = []\n"
         val inventory = test_inventory(content)
