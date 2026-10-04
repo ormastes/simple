@@ -16,7 +16,7 @@
 use std.common.crypto.word_ops.{rotr32}
 use std.common.crypto.sha256_core.{sha256_initial_hash, sha256_pad_message, sha256_process_block}
 use std.common.crypto.secure_memory.{SecureZeroReport, secure_zero_i64_slots}
-use std.common.text_bytes.{text_to_utf8_bytes}
+use std.common.text_bytes.{text_to_utf8_bytes, bytes_to_text}
 
 # SHA-256 round constants (first 32 bits of fractional parts of cube roots of first 64 primes).
 fn _sha256_k() -> [i64]:
@@ -229,17 +229,20 @@ fn sha256_u8_fast_hex(raw: [u8]) -> text:
     # remove this guard only once that defect is fixed and re-measured.
     if digest.len() != 32u64:
         return sha256_u8_hex(raw)
-    val hex_digits = "0123456789abcdef"
-    var out: [text] = [""; 64]
+    # ASCII hex digits written into one byte buffer and converted once: the
+    # previous 64 one-character substrings + join cost ~170 runtime calls and
+    # 64 heap strings per digest, a measurable share of the Stage 2 cold SCV
+    # inventory (five digests per source file, 2026-10-04).
+    var out: [u8] = [0u8; 64]
     var oi = 0
-    while oi < digest.len():
+    while oi < 32:
         val v = digest[oi] as i64
         val hi = (v >> 4) & 15
         val lo = v & 15
-        out[oi * 2] = hex_digits.substring(hi, hi + 1)
-        out[oi * 2 + 1] = hex_digits.substring(lo, lo + 1)
+        out[oi * 2] = (if hi < 10: 48 + hi else: 87 + hi).to_u8()
+        out[oi * 2 + 1] = (if lo < 10: 48 + lo else: 87 + lo).to_u8()
         oi = oi + 1
-    out.join("")
+    bytes_to_text(out)
 
 # Virtual byte j of the SHA-256 padded message for `data` (padding computed,
 # never materialized): data bytes, then 0x80, zeros, and the 8-byte big-endian

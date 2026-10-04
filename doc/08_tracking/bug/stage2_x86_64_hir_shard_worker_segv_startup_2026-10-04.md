@@ -4,8 +4,8 @@
 - **Status:** FIXED for the crash (root cause repaired upstream by `01c7e678a79`,
   re-qualified here on x86_64 Linux); release tip additionally needed three
   nominal-field repairs (this change) before Stage 2 would build at all.
-  **Still open:** the bootstrap sanity smoke's 180 s budget is exceeded by the
-  cold source inventory alone (see "Remaining blocker").
+  The bootstrap sanity smoke's 180 s budget, exceeded by the cold source
+  inventory alone, is met since 2026-10-05 (see "Remaining blocker: fixed").
 - **Host:** WSL2 Ubuntu 26.04, x86_64, clang/lld 21, no LLVM 23, so Stage 2 used
   `--backend=cranelift`.
 - **Related:** `native_extension_method_default_argument_2026_10_04.md` (same root
@@ -127,3 +127,59 @@ is the cold source inventory (`SIMPLE_SCV_INVENTORY_COLD_INIT=1`) before the
 first HIR shard is spawned, plus ~75 s link. The crash is gone; the time budget
 is not met. The next step is either to make the inventory warm or cheap for the
 smoke, or to fix the cold-inventory performance under the native candidate.
+
+## Remaining blocker: fixed (cold inventory performance, 2026-10-05)
+
+Measured on the rebuilt candidate (`b17935f2…`, same command as above) by
+attaching gdb every 20 s (18 samples until the first HIR shard):
+44,758 `.spl`/`simple.sdn` files under `src`+`test`, 307 MB, 7.4M lines. No
+per-file processes (one `git ls-files`), no re-reads; the time was runtime
+calls per line and per byte:
+
+| where | share | cause |
+|---|---|---|
+| `compile_source_inventory_event_from_content_v1` canonicalization | ~55% | ~35 runtime calls per source line (split, trim, `split_whitespace`'s split + per-token trim, join, seven prefix tests), each validating its operands through the global heap registry |
+| `sha256_text` -> `rt_tls13_sha256` (Rust lane) | ~33% | the accelerator read its `[u8]` argument with one registry-checked `rt_array_get` per byte |
+| `compile_source_inventory_digest_valid_v1` | ~10% | 64 `byte_at` calls per digest, ~4 checks per entry |
+
+A second profile after the first fix showed `rt_contains` (what
+`text.contains(text)` lowers to) at ~40%: its string branch scanned
+`windows(n).any(==)`, a memcmp call per haystack byte; plus the 64-substring +
+join hex encoder in `sha256_u8_fast_hex`.
+
+Fix (digests and admission semantics unchanged; nothing was narrowed):
+
+- `src/lib/scv/compile_source_inventory_core.spl`: files whose only
+  whitespace is space/newline are canonicalized with whole-text
+  replace/split (`compile_source_inventory_whole_text_*_v1`); any other
+  character `trim` could remove (tab, CR, VT, FF, Unicode White_Space) keeps
+  the per-line reference path. Digest validation reads one bulk byte copy.
+- `src/lib/common/crypto/sha256.spl`: hex digits written into one `[u8]`.
+- Rust runtime (`collections.rs`, `sffi/hash/sha256.rs`): `rt_tls13_sha256`
+  reads the array through one validated borrow with the same accept/reject
+  contract; `rt_contains` on strings uses the SIMD byte finder
+  `rt_string_find` already used. These are runtime (not codegen) changes, so
+  Stage 2 needed a `--full-bootstrap --invalidate-cache=stage2` rebuild.
+- Spec: `test/01_unit/lib/scv/compile_source_inventory_whole_text_spec.spl`
+  (whole-text == per-line reference for texts and all five event digests,
+  ineligible-whitespace routing built from raw bytes, digest validation);
+  mutation-checked. Rust: `test_bulk_byte_read_matches_per_element_contract`,
+  `test_rt_contains_string_matches_window_scan`.
+
+Timing, same command, same host, back to back (load 1.8-5.6):
+
+| candidate | until first HIR shard | total | p2_add output |
+|---|---|---|---|
+| before `b17935f2…` | 276 s | 312 s | `5` |
+| after `b34e25f3…` | 107 s | 139 s | `5` |
+
+(Under load ~12 the before run took 439 s, ~360 s of it inventory.) The
+bootstrap rebuild with this change passed `candidate_frontend_smoke` and
+wrote `stage2-sanity: pass` for `b34e25f3…`. The run then stopped at
+`stage2-compiler-tests` on an unrelated precondition: delegated rows need
+`SIMPLE_MCDC_OFF_WAIVER_REASON` (or `BOOTSTRAP_STAGE2_TEST_DELEGATE=0`).
+
+Still slow, not addressed here: 107 s of cold inventory remains; the
+next costs are per-line allocations inside `split`, path/plain-checkout
+validation (`split("/")` per entry), and the heap-registry lookup (a global
+mutex + SipHash `HashMap`) that every runtime string/array call performs.

@@ -613,6 +613,45 @@ pub(crate) fn packed_byte_array_bytes(value: RuntimeValue) -> Option<Vec<u8>> {
     Some(unsafe { std::slice::from_raw_parts(array.data.cast::<u8>(), len) }.to_vec())
 }
 
+/// Bytes of a `[u8]` under the exact contract of the per-element loop
+/// `rt_array_get(i)` + `is_int()` + `0..=255` (`None` = rejected), read
+/// through ONE validated borrow instead of a registry-checked call per byte.
+///
+/// The outer `None` means "not decided here" and the caller must keep its
+/// per-element loop: non-arrays, corrupt headers and `u64`-packed arrays
+/// (whose `rt_array_get` re-tags each word) are left to that loop verbatim.
+/// Packed byte arrays are `u8` by construction; boxed-element arrays yield the
+/// same slots `rt_array_get` reads, checked identically.
+pub(crate) fn checked_byte_array_bytes(value: RuntimeValue) -> Option<Option<Vec<u8>>> {
+    let array = get_typed_ptr::<RuntimeArray>(value, HeapObjectType::Array)?;
+    let array = unsafe { &*array };
+    if array.len > array.capacity || array.is_u64_packed() {
+        return None;
+    }
+    let len = usize::try_from(array.len).ok()?;
+    if len == 0 {
+        return Some(Some(Vec::new()));
+    }
+    if array.data.is_null() {
+        return None;
+    }
+    if array.is_byte_packed() {
+        return Some(Some(unsafe { std::slice::from_raw_parts(array.data.cast::<u8>(), len) }.to_vec()));
+    }
+    let mut out = Vec::with_capacity(len);
+    for value in unsafe { array.as_slice() } {
+        if !value.is_int() {
+            return Some(None);
+        }
+        let byte = value.as_int();
+        if !(0..=255).contains(&byte) {
+            return Some(None);
+        }
+        out.push(byte as u8);
+    }
+    Some(Some(out))
+}
+
 /// Write bytes into either native representation of Simple `[u8]`.
 pub(crate) fn byte_array_write(value: RuntimeValue, bytes: &[u8]) -> bool {
     let Some(array) = get_typed_ptr_mut::<RuntimeArray>(value, HeapObjectType::Array) else {
@@ -6249,7 +6288,12 @@ pub extern "C" fn rt_contains(collection: RuntimeValue, value: RuntimeValue) -> 
                     if needle.len() > haystack.len() {
                         return 0;
                     }
-                    return haystack.windows(needle.len()).any(|window| window == needle) as u8;
+                    // Same answer as a `windows(..).any(==)` scan, through the
+                    // SIMD byte finder `rt_string_find` uses: the window scan
+                    // paid a memcmp call per haystack byte, which made every
+                    // `text.contains(text)` in the cold SCV inventory a
+                    // dominant cost (2026-10-04).
+                    return (collection_providers().byte_find)(haystack, needle, 0).is_some() as u8;
                 }
 
                 if value.is_int() {

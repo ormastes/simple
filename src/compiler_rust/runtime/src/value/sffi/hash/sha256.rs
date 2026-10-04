@@ -16,6 +16,14 @@ lazy_static::lazy_static! {
 static SHA256_COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
 fn runtime_byte_array_to_vec(data: RuntimeValue) -> Option<Vec<u8>> {
+    // PERF (2026-10-04): one validated borrow instead of a registry-checked
+    // `rt_array_get` per byte. That per-byte round trip made `sha256_text`
+    // cost ~1/3 of the ~360 s Stage 2 cold SCV inventory (x86_64 Linux); see
+    // doc/08_tracking/bug/stage2_x86_64_hir_shard_worker_segv_startup_2026-10-04.md.
+    // Same accept/reject contract; undecided shapes keep the loop below.
+    if let Some(decided) = crate::value::collections::checked_byte_array_bytes(data) {
+        return decided;
+    }
     let len = crate::value::collections::rt_array_len(data);
     if len < 0 {
         return None;
@@ -249,6 +257,48 @@ mod tests {
             got.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
+    }
+
+    // Reference: the per-element loop the bulk read replaced.
+    fn per_element_bytes(data: RuntimeValue) -> Option<Vec<u8>> {
+        let len = crate::value::collections::rt_array_len(data);
+        if len < 0 {
+            return None;
+        }
+        let mut out = Vec::new();
+        for i in 0..len {
+            let value = crate::value::collections::rt_array_get(data, i);
+            if !value.is_int() || !(0..=255).contains(&value.as_int()) {
+                return None;
+            }
+            out.push(value.as_int() as u8);
+        }
+        Some(out)
+    }
+
+    #[test]
+    fn test_bulk_byte_read_matches_per_element_contract() {
+        use crate::value::collections::{rt_array_new, rt_array_push, rt_string_bytes, rt_string_new};
+        let text = "pub fn x(): 1 -- \u{e9}";
+        let string = unsafe { rt_string_new(text.as_ptr(), text.len() as u64) };
+        // Boxed-element (tagged) array, the shape `rt_text_to_bytes` returns.
+        let tagged = rt_string_bytes(string);
+        assert!(crate::value::collections::checked_byte_array_bytes(tagged).is_some());
+        assert_eq!(runtime_byte_array_to_vec(tagged), Some(text.as_bytes().to_vec()));
+        assert_eq!(runtime_byte_array_to_vec(tagged), per_element_bytes(tagged));
+        // Rejections stay rejections: out of range, negative, non-int.
+        for bad in [RuntimeValue::from_int(256), RuntimeValue::from_int(-1), string] {
+            let array = rt_array_new(2);
+            assert!(rt_array_push(array, RuntimeValue::from_int(7)));
+            assert!(rt_array_push(array, bad));
+            assert_eq!(per_element_bytes(array), None);
+            assert_eq!(runtime_byte_array_to_vec(array), None);
+        }
+        // Empty and non-array inputs keep their previous answers.
+        let empty = rt_array_new(0);
+        assert_eq!(runtime_byte_array_to_vec(empty), Some(Vec::new()));
+        assert_eq!(runtime_byte_array_to_vec(string), per_element_bytes(string));
+        assert_eq!(runtime_byte_array_to_vec(RuntimeValue::NIL), per_element_bytes(RuntimeValue::NIL));
     }
 
     fn digest_hex(out: &[u8; 32]) -> String {
