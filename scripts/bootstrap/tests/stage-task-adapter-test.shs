@@ -1,0 +1,50 @@
+#!/bin/sh
+# Real shell callbacks exercise transport acceptance; no native test PASS claim.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+adapter="$repo/scripts/bootstrap/run-stage-task-test.shs"
+sha() { sha256sum "$1" | cut -d ' ' -f 1; }
+printf 'identity\n' >"$scratch/identity"
+printf 'inventory\n' >"$scratch/inventory"
+cat >"$scratch/entry" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >"$ARG_LOG"
+exit "$ENTRY_CODE"
+EOF
+cat >"$scratch/verifier" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >"$VERIFY_LOG"
+exit "$VERIFY_CODE"
+EOF
+chmod +x "$scratch/entry" "$scratch/verifier"
+ordinal=0
+run_case() {
+  ENTRY_CODE=$1 VERIFY_CODE=$2 expected=$3 stage=$4
+  ordinal=$((ordinal + 1))
+  ARG_LOG="$scratch/args.$ordinal" VERIFY_LOG="$scratch/verify.$ordinal"
+  export ENTRY_CODE VERIFY_CODE ARG_LOG VERIFY_LOG
+  code=0
+  sh "$adapter" --entry="$scratch/entry" --entry-sha256="$(sha "$scratch/entry")" \
+    --verifier="$scratch/verifier" --verifier-sha256="$(sha "$scratch/verifier")" \
+    --identity-manifest="$scratch/identity" --identity-manifest-sha256="$(sha "$scratch/identity")" \
+    --inventory-manifest="$scratch/inventory" --inventory-manifest-sha256="$(sha "$scratch/inventory")" \
+    --stage="$stage" --backend=llvm --threads=80 \
+    --report-root="$scratch/report.$ordinal" --db-root="$scratch/db.$ordinal" || code=$?
+  [ "$code" -eq "$expected" ] || { echo "unexpected result $ordinal: $code" >&2; exit 1; }
+  cmp "$ARG_LOG" "$VERIFY_LOG"
+  grep -Fx -- "--stage=$stage" "$ARG_LOG" >/dev/null
+  grep -Fx -- '--threads=80' "$ARG_LOG" >/dev/null
+  grep -Fx -- "aggregate_exit=$expected" "$scratch/report.$ordinal/adapter-result.env" >/dev/null
+}
+run_case 0 0 0 P2
+run_case 1 1 1 earlyP4-fromP2
+run_case 0 2 2 properP4-fromP3
+run_case 139 0 2 P2
+run_case 1 0 2 P2
+run_case 0 1 2 P2
+# Continue after earlier failed callbacks, retaining every earlier result.
+run_case 0 0 0 properP4-fromP3
+[ "$(find "$scratch" -name adapter-result.env | wc -l | tr -d ' ')" -eq 7 ]
+echo 'PASS: 7 stage adapter transport contracts; native summary verifier UNRUN'

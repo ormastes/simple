@@ -1,0 +1,66 @@
+#!/bin/sh
+# One generic BuildRunner task, inside its already admitted process owner.
+# The parent owns global resources and reaps this entire tree before admitting
+# successors. This adapter neither promotes a receipt nor opens a second owner.
+set -eu
+die() { echo "stage-task-test: $*" >&2; exit 2; }
+regular() { [ -f "$1" ] && [ ! -L "$1" ]; }
+sha() { sha256sum "$1" | cut -d ' ' -f 1; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
+entry= entry_sha= verifier= verifier_sha= stage= backend= identity= identity_sha=
+inventory= inventory_sha= report= db= threads=80
+for arg in "$@"; do
+  case "$arg" in
+    --entry=*) entry=${arg#*=} ;; --entry-sha256=*) entry_sha=${arg#*=} ;;
+    --verifier=*) verifier=${arg#*=} ;; --verifier-sha256=*) verifier_sha=${arg#*=} ;;
+    --stage=*) stage=${arg#*=} ;; --backend=*) backend=${arg#*=} ;;
+    --identity-manifest=*) identity=${arg#*=} ;; --identity-manifest-sha256=*) identity_sha=${arg#*=} ;;
+    --inventory-manifest=*) inventory=${arg#*=} ;; --inventory-manifest-sha256=*) inventory_sha=${arg#*=} ;;
+    --report-root=*) report=${arg#*=} ;; --db-root=*) db=${arg#*=} ;;
+    --threads=*) threads=${arg#*=} ;; *) die "unknown argument" ;;
+  esac
+done
+case "$stage" in P2|earlyP4-fromP2|properP4-fromP3) ;; *) die "explicit producer stage required" ;; esac
+case "$backend" in llvm|cranelift) ;; *) die "backend required" ;; esac
+[ "$threads" = 80 ] || die "expected admitted 80-worker policy"
+for path in "$entry" "$verifier" "$identity" "$inventory" "$report" "$db"; do
+  absolute "$path" || die "absolute path required"
+done
+for digest in "$entry_sha" "$verifier_sha" "$identity_sha" "$inventory_sha"; do
+  case "$digest" in ''|*[!0-9a-f]*) die "canonical digest required" ;; esac
+  [ "${#digest}" -eq 64 ] || die "canonical digest required"
+done
+pins() {
+  regular "$entry" && regular "$verifier" && regular "$identity" && regular "$inventory" &&
+    [ "$(sha "$entry")" = "$entry_sha" ] && [ "$(sha "$verifier")" = "$verifier_sha" ] &&
+    [ "$(sha "$identity")" = "$identity_sha" ] && [ "$(sha "$inventory")" = "$inventory_sha" ]
+}
+pins || die "frozen input changed"
+[ ! -L "$report" ] && [ ! -L "$db" ] || die "output root cannot be symlinked"
+mkdir -p "$report" "$db" || die "private output unavailable"
+[ ! -e "$report/adapter-result.env" ] && [ ! -e "$report/summary.env" ] || die "fresh attempt report required"
+# Both child invocations inherit exactly the same cwd/environment. The typed
+# verifier reconstructs the expected identities from the retained enumeration,
+# checks the PureDB snapshot and compares the actual product/program digests.
+set -- "--stage=$stage" "--backend=$backend" \
+  "--identity-manifest=$identity" "--identity-manifest-sha256=$identity_sha" \
+  "--inventory-manifest=$inventory" "--inventory-manifest-sha256=$inventory_sha" \
+  "--report-root=$report" "--db-root=$db" --threads=80
+run_code=0
+"$entry" "$@" >"$report/parent.stdout.log" 2>"$report/parent.stderr.log" || run_code=$?
+verify_code=2
+if pins; then
+  verify_code=0
+  "$verifier" "$@" >"$report/verification.stdout.log" 2>"$report/verification.stderr.log" || verify_code=$?
+fi
+result=2
+# Native crash/noncanonical parent exits cannot be washed away by a preserved
+# passing summary. A complete ordinary failure is retained as exit 1.
+case "$run_code:$verify_code" in 0:0) result=0 ;; 1:1) result=1 ;; esac
+pins || result=2
+(set -C; printf '%s\n' format=SIMPLE-STAGE-TASK-ADAPTER-1 \
+  provenance_status=caller-bound-unadmitted "stage=$stage" "backend=$backend" \
+  "identity_manifest_digest=$identity_sha" "inventory_manifest_digest=$inventory_sha" \
+  "parent_exit=$run_code" "verification_exit=$verify_code" "aggregate_exit=$result" \
+  >"$report/adapter-result.env") || die "attempt result publication failed"
+exit "$result"
