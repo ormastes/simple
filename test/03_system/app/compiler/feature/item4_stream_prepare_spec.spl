@@ -1,0 +1,299 @@
+"""ITEM4-REQ-009 private ELF preparation/publication ownership. Authored, UNRUN."""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{dir_create_all, dir_exists, file_read_bytes, file_exists}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.backend.linker.elf.stream_types.{ElfStreamLimitsV1}
+use compiler.backend.linker.elf.stream_link.{elf_stream_prepare_file_v1, elf_stream_link_file_v1}
+
+fn item4_stream_prepare_limits() -> ElfStreamLimitsV1:
+    ElfStreamLimitsV1(input_limit: 8, archive_member_limit: 64u64, metadata_bytes: 65536u64,
+        read_window_bytes: 64, emit_window_bytes: 3, name_bytes: 64, output_bytes: 1048576u64,
+        scratch_bytes: 4194304u64, scan_record_limit: 20000000u64)
+
+fn item4_stream_prepare_cancelled() -> bool: false
+
+fn item4_stream_prepare_parent() -> Result<text, text>:
+    if not dir_create_all("build"): return Err("prepare test build directory unavailable")
+    secure_temp_dir("build", "item4-stream-prepare-")
+
+fn item4_stream_prepare_read(bytes: [u8], offset: i64, width: i64) -> u64:
+    val valid = width >= 1 and width <= 8 and offset >= 0 and offset <= bytes.len() and width <= bytes.len() - offset
+    expect(valid).to_equal(true)
+    if not valid: return 0u64
+    var value = 0u64
+    for index in 0..width: value = value | ((bytes[offset + index] as u64) << (index * 8))
+    value
+
+fn item4_stream_prepare_check(bytes: [u8]):
+    expect(bytes.len()).to_equal(12304)
+    if bytes.len() != 12304: return
+    expect(item4_stream_prepare_read(bytes, 0, 4)).to_equal(0x464c457fu64)
+    expect(item4_stream_prepare_read(bytes, 16, 2)).to_equal(2u64)
+    expect(item4_stream_prepare_read(bytes, 18, 2)).to_equal(62u64)
+    expect(item4_stream_prepare_read(bytes, 24, 8)).to_equal(4198400u64)
+    expect(item4_stream_prepare_read(bytes, 4108, 4)).to_equal(4202496u64)
+    expect(item4_stream_prepare_read(bytes, 4125, 4)).to_equal(31u64)
+    expect(item4_stream_prepare_read(bytes, 8192, 4)).to_equal(0x000a6968u64)
+    expect(item4_stream_prepare_read(bytes, 12288, 8)).to_equal(2u64)
+    expect(item4_stream_prepare_read(bytes, 12296, 8)).to_equal(0u64)
+
+describe "private streamed ELF preparation":
+    it "ITEM4-REQ-009 burns publication rights on invalid destination collision cancellation and corruption":
+        for kind in 0..4:
+            step("Prepare a real image and preserve an existing destination sentinel")
+            val created = item4_stream_prepare_parent()
+            expect(created.is_ok()).to_equal(true)
+            if created.is_err(): return
+            val parent = created.unwrap()
+            val output = parent + "/protected.bin"
+            val written = file_write_bytes(output, [17u8, 0u8, 255u8])
+            expect(written).to_equal(true)
+            if not written:
+                expect(dir_remove(parent)).to_equal(true)
+                return
+            val prepared = elf_stream_prepare_file_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+                [95u8, 115u8, 116u8, 97u8, 114u8, 116u8], parent, item4_stream_prepare_limits(), item4_stream_prepare_cancelled)
+            expect(prepared.is_ok()).to_equal(true)
+            if prepared.is_err():
+                expect(file_remove(output)).to_equal(true)
+                expect(dir_remove(parent)).to_equal(true)
+                return
+            var owner = prepared.unwrap()
+            expect(owner.stage.is_some()).to_equal(true)
+            if owner.stage.is_none():
+                expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+                expect(file_remove(output)).to_equal(true)
+                expect(dir_remove(parent)).to_equal(true)
+                return
+            val image_directory = owner.directory
+            val spill_directory = owner.stage.unwrap().directory
+            if kind == 3:
+                var bytes = file_read_bytes(spill_directory + "/frames.bin")
+                expect(bytes.len() > 40).to_equal(true)
+                if bytes.len() <= 40:
+                    expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+                    expect(file_remove(output)).to_equal(true)
+                    expect(dir_remove(parent)).to_equal(true)
+                    return
+                bytes[40] = bytes[40] ^ 1u8
+                val corrupted = file_write_bytes(spill_directory + "/frames.bin", bytes)
+                expect(corrupted).to_equal(true)
+                if not corrupted:
+                    expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+                    expect(file_remove(output)).to_equal(true)
+                    expect(dir_remove(parent)).to_equal(true)
+                    return
+            step("Reject the actual invalid path collision live replay cancellation or checksum error")
+            val result = if kind == 2:
+                owner.elf_stream_publish_prepared_v1(output, \: file_exists(spill_directory + "/payload.tmp"))
+            else:
+                owner.elf_stream_publish_prepared_v1(if kind == 0: "" else: output, item4_stream_prepare_cancelled)
+            expect(result.is_err()).to_equal(true)
+            if result.is_err():
+                val tokens = ["output", "destination exists", "cancelled", "checksum"]
+                expect(result.unwrap_err()).to_contain(tokens[kind])
+            expect(owner.publication_attempted).to_equal(true)
+            expect(file_read_bytes(output)).to_equal([17u8, 0u8, 255u8])
+            expect(owner.elf_stream_publish_prepared_v1(parent + "/retry.bin", item4_stream_prepare_cancelled).is_err()).to_equal(true)
+            expect(file_exists(parent + "/retry.bin")).to_equal(false)
+            expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+            expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+            expect(dir_exists(image_directory)).to_equal(false)
+            expect(dir_exists(spill_directory)).to_equal(false)
+            expect(file_remove(output)).to_equal(true)
+            expect(dir_remove(parent)).to_equal(true)
+
+    it "ITEM4-REQ-009 retains independent failed cleanup owners and transfers pending cleanup after commit":
+        for mode in 0..3:
+            step("Create actual unrelated blockers in both owned directories")
+            val created = item4_stream_prepare_parent()
+            expect(created.is_ok()).to_equal(true)
+            if created.is_err(): return
+            val parent = created.unwrap()
+            val prepared = elf_stream_prepare_file_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+                [95u8, 115u8, 116u8, 97u8, 114u8, 116u8], parent, item4_stream_prepare_limits(), item4_stream_prepare_cancelled)
+            expect(prepared.is_ok()).to_equal(true)
+            if prepared.is_err():
+                expect(dir_remove(parent)).to_equal(true)
+                return
+            var owner = prepared.unwrap()
+            expect(owner.stage.is_some()).to_equal(true)
+            if owner.stage.is_none():
+                expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+                expect(dir_remove(parent)).to_equal(true)
+                return
+            val image_directory = owner.directory
+            val spill_directory = owner.stage.unwrap().directory
+            val image_blocker = image_directory + "/unrelated.marker"
+            val spill_blocker = spill_directory + "/unrelated.marker"
+            val image_written = file_write_bytes(image_blocker, [11u8])
+            val spill_written = file_write_bytes(spill_blocker, [22u8])
+            expect(image_written and spill_written).to_equal(true)
+            if not image_written or not spill_written:
+                if image_written: expect(file_remove(image_blocker)).to_equal(true)
+                if spill_written: expect(file_remove(spill_blocker)).to_equal(true)
+                expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+                expect(dir_remove(parent)).to_equal(true)
+                return
+            if mode == 2:
+                step("A failed no-clobber publication retains its changed stage before returning the cleanup error")
+                val output = parent + "/protected.bin"
+                val sentinel_written = file_write_bytes(output, [17u8, 0u8, 255u8])
+                expect(sentinel_written).to_equal(true)
+                if not sentinel_written:
+                    expect(file_remove(image_blocker)).to_equal(true)
+                    expect(file_remove(spill_blocker)).to_equal(true)
+                    expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+                    expect(dir_remove(parent)).to_equal(true)
+                    return
+                val rejected = owner.elf_stream_publish_prepared_v1(output, item4_stream_prepare_cancelled)
+                expect(rejected.is_err()).to_equal(true)
+                if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("cleanup")
+                expect(owner.publication_attempted).to_equal(true)
+                expect(owner.stage.is_some()).to_equal(true)
+                if owner.stage.is_some():
+                    expect(owner.stage.unwrap().consumed).to_equal(false)
+                    expect(owner.stage.unwrap().published).to_equal(false)
+                expect(owner.directory).to_equal(image_directory)
+                expect(file_read_bytes(output)).to_equal([17u8, 0u8, 255u8])
+                expect(owner.elf_stream_publish_prepared_v1(parent + "/retry.bin", item4_stream_prepare_cancelled).is_err()).to_equal(true)
+                expect(file_exists(parent + "/retry.bin")).to_equal(false)
+                expect(file_exists(image_blocker) and file_exists(spill_blocker)).to_equal(true)
+                expect(file_remove(image_blocker)).to_equal(true)
+                expect(file_remove(spill_blocker)).to_equal(true)
+                expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+                expect(file_read_bytes(output)).to_equal([17u8, 0u8, 255u8])
+                expect(file_remove(output)).to_equal(true)
+            else if mode == 1:
+                step("A committed image returns successful publication with cleanup owned only by its result")
+                val published = owner.elf_stream_publish_prepared_v1(parent + "/linked.bin", item4_stream_prepare_cancelled)
+                expect(published.is_ok()).to_equal(true)
+                if published.is_ok():
+                    var result = published.unwrap()
+                    expect(result.cleanup_pending).to_equal(true)
+                    expect(owner.stage.is_none()).to_equal(true)
+                    expect(owner.directory).to_equal("")
+                    item4_stream_prepare_check(file_read_bytes(parent + "/linked.bin"))
+                    expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+                    expect(file_exists(image_blocker) and file_exists(spill_blocker)).to_equal(true)
+                    expect(result.elf_stream_cleanup_result_v1().is_err()).to_equal(true)
+                    expect(file_remove(spill_blocker)).to_equal(true)
+                    expect(result.elf_stream_cleanup_result_v1().is_err()).to_equal(true)
+                    expect(dir_exists(spill_directory)).to_equal(false)
+                    expect(dir_exists(image_directory)).to_equal(true)
+                    expect(file_remove(image_blocker)).to_equal(true)
+                    expect(result.elf_stream_cleanup_result_v1().is_ok()).to_equal(true)
+                    expect(result.cleanup_pending).to_equal(false)
+                    expect(owner.elf_stream_publish_prepared_v1(parent + "/duplicate.bin", item4_stream_prepare_cancelled).is_err()).to_equal(true)
+                    expect(file_exists(parent + "/duplicate.bin")).to_equal(false)
+                    expect(file_remove(parent + "/linked.bin")).to_equal(true)
+                else:
+                    expect(file_remove(image_blocker)).to_equal(true)
+                    expect(file_remove(spill_blocker)).to_equal(true)
+                    expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+            else:
+                step("Discard failure retains both capabilities and retries each cleanup independently")
+                expect(owner.elf_stream_discard_prepared_v1().is_err()).to_equal(true)
+                expect(owner.publication_attempted).to_equal(true)
+                expect(owner.elf_stream_publish_prepared_v1(parent + "/after-discard.bin", item4_stream_prepare_cancelled).is_err()).to_equal(true)
+                expect(file_exists(parent + "/after-discard.bin")).to_equal(false)
+                expect(owner.stage.is_some()).to_equal(true)
+                expect(owner.directory).to_equal(image_directory)
+                expect(file_exists(image_blocker) and file_exists(spill_blocker)).to_equal(true)
+                expect(file_remove(image_blocker)).to_equal(true)
+                expect(owner.elf_stream_discard_prepared_v1().is_err()).to_equal(true)
+                expect(owner.directory).to_equal("")
+                expect(owner.stage.is_some()).to_equal(true)
+                expect(dir_exists(image_directory)).to_equal(false)
+                expect(file_remove(spill_blocker)).to_equal(true)
+                expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+            expect(dir_exists(image_directory)).to_equal(false)
+            expect(dir_exists(spill_directory)).to_equal(false)
+            expect(dir_remove(parent)).to_equal(true)
+
+    it "ITEM4-REQ-009 prepares without a destination then explicitly publishes the real ELF":
+        step("Prepare real ELF inputs without supplying any destination")
+        val created = item4_stream_prepare_parent()
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val prepared = elf_stream_prepare_file_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+            [95u8, 115u8, 116u8, 97u8, 114u8, 116u8], parent, item4_stream_prepare_limits(), item4_stream_prepare_cancelled)
+        expect(prepared.is_ok()).to_equal(true)
+        if prepared.is_err():
+            expect(dir_remove(parent)).to_equal(true)
+            return
+        var owner = prepared.unwrap()
+        expect(owner.stage.is_some()).to_equal(true)
+        if owner.stage.is_none():
+            expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+            expect(dir_remove(parent)).to_equal(true)
+            return
+        val image_directory = owner.directory
+        val spill_directory = owner.stage.unwrap().directory
+        expect(file_exists(image_directory + "/image.bin")).to_equal(true)
+        expect(file_exists(spill_directory + "/frames.bin")).to_equal(true)
+        expect(file_exists(parent + "/linked.bin")).to_equal(false)
+        expect(owner.publication_attempted).to_equal(false)
+        step("Transfer cleanup ownership to the publication result and inspect independent image bytes")
+        val published = owner.elf_stream_publish_prepared_v1(parent + "/linked.bin", item4_stream_prepare_cancelled)
+        expect(published.is_ok()).to_equal(true)
+        expect(owner.publication_attempted).to_equal(true)
+        if published.is_ok():
+            var result = published.unwrap()
+            expect(owner.stage.is_none()).to_equal(true)
+            expect(owner.directory).to_equal("")
+            expect(result.published_bytes).to_equal(12304u64)
+            item4_stream_prepare_check(file_read_bytes(parent + "/linked.bin"))
+            expect(result.elf_stream_cleanup_result_v1().is_ok()).to_equal(true)
+        else:
+            expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+        expect(dir_exists(image_directory)).to_equal(false)
+        expect(dir_exists(spill_directory)).to_equal(false)
+        step("Preserve the one-shot wrapper bytes and reject a second publication")
+        val direct = elf_stream_link_file_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+            [95u8, 115u8, 116u8, 97u8, 114u8, 116u8], parent + "/direct.bin", parent, item4_stream_prepare_limits(), item4_stream_prepare_cancelled)
+        expect(direct.is_ok()).to_equal(true)
+        if direct.is_ok():
+            var result = direct.unwrap()
+            expect(file_read_bytes(parent + "/direct.bin")).to_equal(file_read_bytes(parent + "/linked.bin"))
+            expect(result.elf_stream_cleanup_result_v1().is_ok()).to_equal(true)
+        expect(owner.elf_stream_publish_prepared_v1(parent + "/duplicate.bin", item4_stream_prepare_cancelled).is_err()).to_equal(true)
+        expect(file_exists(parent + "/duplicate.bin")).to_equal(false)
+        expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+        for name in ["linked.bin", "direct.bin"]:
+            if file_exists(parent + "/" + name): expect(file_remove(parent + "/" + name)).to_equal(true)
+        expect(dir_remove(parent)).to_equal(true)
+
+    it "ITEM4-REQ-009 discards both private artifacts and cannot subsequently publish":
+        step("Retain a real prepared image and spill owner before discarding")
+        val created = item4_stream_prepare_parent()
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val prepared = elf_stream_prepare_file_v1(["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"], [],
+            [95u8, 115u8, 116u8, 97u8, 114u8, 116u8], parent, item4_stream_prepare_limits(), item4_stream_prepare_cancelled)
+        expect(prepared.is_ok()).to_equal(true)
+        if prepared.is_err():
+            expect(dir_remove(parent)).to_equal(true)
+            return
+        var owner = prepared.unwrap()
+        expect(owner.stage.is_some()).to_equal(true)
+        if owner.stage.is_none():
+            expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+            expect(dir_remove(parent)).to_equal(true)
+            return
+        val image_directory = owner.directory
+        val spill_directory = owner.stage.unwrap().directory
+        step("Discard owns cleanup of both directories and is idempotent once empty")
+        expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+        expect(owner.stage.is_none()).to_equal(true)
+        expect(owner.directory).to_equal("")
+        expect(dir_exists(image_directory)).to_equal(false)
+        expect(dir_exists(spill_directory)).to_equal(false)
+        expect(owner.elf_stream_discard_prepared_v1().is_ok()).to_equal(true)
+        expect(owner.elf_stream_publish_prepared_v1(parent + "/late.bin", item4_stream_prepare_cancelled).is_err()).to_equal(true)
+        expect(file_exists(parent + "/late.bin")).to_equal(false)
+        expect(dir_remove(parent)).to_equal(true)

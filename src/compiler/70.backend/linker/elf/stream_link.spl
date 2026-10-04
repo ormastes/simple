@@ -22,16 +22,24 @@ pub class ElfStreamLinkResultV1:
     var directory: text
     var cleanup_pending: bool
 
+pub class ElfStreamPreparedV1:
+    # API-owned mutable capability; value copying is not a security boundary.
+    # None means the stage was discarded or transferred to the published result.
+    var stage: Option<LinkStagedFileV1>
+    var directory: text
+    var publication_attempted: bool
+
 fn elf_stream_cleanup_directory(directory: text) -> bool:
     if not retained_directory_is_real_no_follow(directory): return false
     val image = directory + "/image.bin"
     if file_exists(image) and not file_remove(image): return false
     dir_remove(directory, false)
 
-pub fn elf_stream_link_file_v1(objects: [text], archives: [text], entry: [u8],
-        output: text, scratch_parent: text, limits: ElfStreamLimitsV1,
-        cancelled: fn() -> bool) -> Result<ElfStreamLinkResultV1, text>:
-    if output == "" or output.contains("\0"): return Err("stream output path invalid")
+pub fn elf_stream_prepare_file_v1(objects: [text], archives: [text], entry: [u8],
+        scratch_parent: text, limits: ElfStreamLimitsV1,
+        cancelled: fn() -> bool) -> Result<ElfStreamPreparedV1, text>:
+    # No destination is accepted here. All output remains in private scratch.
+    # Existing lower-stage text-only cleanup errors retain their prior contract.
     if not retained_directory_is_real_no_follow(scratch_parent): return Err("stream scratch parent is not a real directory")
     var inputs = elf_stream_open_inputs_v1(objects, archives, entry, limits, cancelled)?
     val planned = inputs.elf_stream_layout_v1(entry, cancelled)
@@ -75,22 +83,68 @@ pub fn elf_stream_link_file_v1(objects: [text], archives: [text], entry: [u8],
     if staged.is_err():
         if not elf_stream_cleanup_directory(directory): return Err("stream cleanup failed after spill: {directory}")
         return Err(staged.unwrap_err())
-    var stage = staged.unwrap()
-    val published = stage.link_publish_staged_v1(output, cancelled)
-    if published.is_err():
-        var stage_clean = true
-        if not stage.consumed: stage_clean = stage.link_discard_staged_v1().is_ok()
-        val image_clean = elf_stream_cleanup_directory(directory)
-        if not stage_clean or not image_clean: return Err("stream failed publication cleanup pending: {directory}; {stage.directory}")
-        return Err(published.unwrap_err())
-    # Publication has committed. Cleanup problems must never masquerade as a
-    # pre-publication Err; retain the cleanup capabilities in the typed outcome.
-    val cleaned = elf_stream_cleanup_directory(directory)
-    Ok(ElfStreamLinkResultV1(output: output, published_bytes: published.unwrap().published_bytes,
-        stage: stage, directory: if cleaned: "" else: directory,
-        cleanup_pending: published.unwrap().cleanup_pending or not cleaned))
+    Ok(ElfStreamPreparedV1(stage: Some(staged.unwrap()), directory: directory,
+        publication_attempted: false))
 
-export ElfStreamLinkResultV1, elf_stream_link_file_v1
+pub fn elf_stream_link_file_v1(objects: [text], archives: [text], entry: [u8],
+        output: text, scratch_parent: text, limits: ElfStreamLimitsV1,
+        cancelled: fn() -> bool) -> Result<ElfStreamLinkResultV1, text>:
+    # Preserve the legacy early destination check before opening any inputs.
+    if output == "" or output.contains("\0"): return Err("stream output path invalid")
+    var prepared = elf_stream_prepare_file_v1(objects, archives, entry, scratch_parent, limits, cancelled)?
+    val published = prepared.elf_stream_publish_prepared_v1(output, cancelled)
+    if published.is_err():
+        val directory = prepared.directory
+        val stage_directory = if prepared.stage.is_some(): prepared.stage.unwrap().directory else: ""
+        val discarded = prepared.elf_stream_discard_prepared_v1()
+        if discarded.is_err(): return Err("stream failed publication cleanup pending: {directory}; {stage_directory}")
+        return Err(published.unwrap_err())
+    published
+
+export ElfStreamPreparedV1, ElfStreamLinkResultV1, elf_stream_prepare_file_v1, elf_stream_link_file_v1
+
+impl ElfStreamPreparedV1:
+    me elf_stream_publish_prepared_v1(output: text,
+            cancelled: fn() -> bool) -> Result<ElfStreamLinkResultV1, text>:
+        if self.publication_attempted: return Err("stream prepared publication already attempted")
+        # Even invalid destinations consume the right to publish. Cleanup has
+        # an independent retry lifecycle and never re-arms publication.
+        self.publication_attempted = true
+        if output == "" or output.contains("\0"): return Err("stream output path invalid")
+        if self.stage.is_none(): return Err("stream prepared stage unavailable")
+        var stage = self.stage.unwrap()
+        val published = stage.link_publish_staged_v1(output, cancelled)
+        self.stage = Some(stage)
+        if published.is_err(): return Err(published.unwrap_err())
+        # Publication has committed. Transfer every remaining cleanup capability
+        # to the result even if private-image cleanup fails after the commit.
+        val cleaned = elf_stream_cleanup_directory(self.directory)
+        val result = ElfStreamLinkResultV1(output: output,
+            published_bytes: published.unwrap().published_bytes, stage: stage,
+            directory: if cleaned: "" else: self.directory,
+            cleanup_pending: published.unwrap().cleanup_pending or not cleaned)
+        self.stage = None
+        self.directory = ""
+        Ok(result)
+
+    me elf_stream_discard_prepared_v1() -> Result<bool, text>:
+        self.publication_attempted = true
+        var failure = ""
+        if self.stage.is_some():
+            var stage = self.stage.unwrap()
+            if not stage.consumed:
+                val discarded = stage.link_discard_staged_v1()
+                if discarded.is_err(): failure = discarded.unwrap_err()
+            self.stage = if stage.consumed: None else: Some(stage)
+        # Do not let a spill cleanup failure prevent independent image cleanup.
+        if self.directory != "":
+            if elf_stream_cleanup_directory(self.directory):
+                self.directory = ""
+            elif failure == "":
+                failure = "stream prepared image cleanup pending: {self.directory}"
+        if failure != "": return Err(failure)
+        Ok(true)
+
 impl ElfStreamLinkResultV1:
     me elf_stream_cleanup_result_v1() -> Result<bool, text>:
         if not self.stage.consumed: self.stage.link_discard_staged_v1()?

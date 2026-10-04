@@ -256,3 +256,13 @@ The existing UnsupportedBudget gate remains in place.
 User constraint: hosted linking keeps external default selection. The mold-style
 Simple linker stays accessible through explicit SIMPLE_LINKER=internal; see
 `doc/07_guide/compiler/linker_selection.md`.
+
+## Explicit five-host completion requirement (2026-10-04)
+
+The Simple linker must run on Windows, Linux, SimpleOS, FreeBSD and macOS,
+while remaining explicit opt-in. The authoritative per-host implementation and
+execution gates are in `host_completion_2026-10-04.md` beside this ledger.
+Cross-generated images do not prove a runnable linker on the target host.
+In particular, macOS native dispatch still reaches the ELF rejection path, and
+SimpleOS image production is not yet evidence of a linker running inside
+SimpleOS. Managed internal-engine admission remains an explicit requirement.
