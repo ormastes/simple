@@ -14,6 +14,14 @@ digests and point-in-time process evidence are appended to the original
 `item4_source_inventory_cold_init_timeout_2026-10-03.md` bug report. Summary
 aggregates can contain older attempts and are not current completion receipts.
 
+Revalidation at 2026-10-04 20:47 +09:00 found full-CLI owner 64728 and
+collector 34464 no longer live. Its attempt-specific
+`phase34-post-link4/cranelift/phase4-full-cli/artifact/result.json` records
+`exit_code: 1`, `compile_exit: 1`, `artifact_sha256: null`, `admitted: false`.
+The separate test-runner owner 37596 and collector 22612 were still live at
+that observation. This terminal full-CLI failure does not justify a restart or
+establish that the loader-only repair resolves all reported compilation errors.
+
 Actual fatal log diagnostics identify three module-loader calls to helpers
 absent from its imported implementation module. Intent 9db11f8734e exercises
 real generic-name identity before repair 1adc1bff730 replaces those calls with
