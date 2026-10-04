@@ -65,7 +65,7 @@ divergences are between the interpreter and the compiled lanes:
 - `u8` arithmetic wraps in the interpreter but not in compiled code.
 - Writes at or past the end grow the array in the interpreter but are ignored
   in compiled code.
-- The JIT crashes on the packed block.
+- The JIT crashed on the packed block (fixed, see section 3).
 
 Packed was not changed to deopt on these stores. Deopting would move it away
 from the compiled lanes, and it would silently unpack existing
@@ -73,4 +73,23 @@ from the compiled lanes, and it would silently unpack existing
 
 **Unblock condition:** an owner decision on `[u8]` store semantics. Either
 truncate in every lane, or make the boxed interpreter path the reference and
-change the compiled lanes to match. Also a separate fix for the JIT SIGSEGV.
+change the compiled lanes to match.
+
+## 3. JIT SIGSEGV on a packed `[u8]` (FIXED 2026-10-05, branch `work/jit-bytearray-bridge`)
+
+**Root cause.** The JIT has no native `rt_bytes_alloc`, so the call is spliced
+into the interpreter (`hybrid-interp-splice`). The result comes back through
+`runtime_bridge::value_to_runtime`. That function had no arm for
+`Value::ByteArray` / `Value::FrozenByteArray`, so the value fell through to the
+`_ => RuntimeValue::NIL` wildcard. Compiled code then read `a.len() == 0`, and
+the next `a[i] = b` stored through NIL and crashed with SIGSEGV (rc 139).
+
+**Fix.** A packed `[u8]` now crosses the bridge as a runtime array of `u8`
+values, the same marshalling as a boxed `[u8]`.
+
+**Evidence:**
+- Cargo test `runtime_bridge::tests::value_to_runtime_packed_bytes_are_a_real_array_not_nil`.
+- Fixture `test/fixtures/compiler/jit_packed_bytes_bridge_probe.spl`: before,
+  `len=0` then rc 139; after, `len=4`, `a1=7`, rc 0.
+- `u8_ill_typed_store_lane_probe.spl` under the JIT: the packed block now
+  prints the same lines as the JIT boxed block and the native lane.
