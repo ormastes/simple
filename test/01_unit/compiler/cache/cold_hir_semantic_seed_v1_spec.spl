@@ -1,5 +1,8 @@
 use std.spec.*
 use compiler.hir.hir_types.{HirModule, HirImport, SymbolTable}
+use compiler.hir.hir_types.{SymbolId, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirConst, HirExpr, HirExprKind}
+use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.diagnostics.span.{Span}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
     ColdHirSemanticInputV1, cold_hir_semantic_seed_v1,
@@ -41,6 +44,26 @@ fn test_inventory(content: text, duplicate: bool = false) -> CompileSourceInvent
     CompileSourceInventoryV1(1, 1, entries)
 
 describe "cold HIR semantic seed":
+    it "identifies the source and module when public ABI inference is unresolved":
+        val content = "pub val unresolved = []\n"
+        val inventory = test_inventory(content)
+        var module = test_module("/repo/pkg/mod.spl", [])
+        val span = Span.empty()
+        val unresolved = HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+        val symbol = SymbolId.new(1)
+        module.constants[symbol] = HirConst(symbol: symbol, name: "unresolved",
+            type_: unresolved,
+            value: HirExpr(kind: HirExprKind.UnitLit, has_type_: false,
+                type_: unresolved, span: span),
+            is_mutable: false, visibility: Visibility.Public, is_public: true,
+            is_volatile: false, has_fixed_address: false, fixed_address: 0, span: span)
+        val receipt = cold_hir_typed_receipt_from_admitted_entry_v1(
+            module, "/repo", "pkg/mod.spl", content,
+            compile_source_inventory_digest_v1(inventory), inventory.entries[0])
+        expect(receipt.is_err()).to_be(true)
+        expect(receipt.unwrap_err()).to_equal(
+            "cold-hir-abi-unresolved:unresolved-inference:0:0:module=pkg.mod:source=pkg/mod.spl")
+
     it "emits a real ABI section from canonical typed HIR bytes":
         val module = test_module("/repo/pkg/mod.spl", [])
         val result = cold_hir_abi_smf_section_v1(module)
