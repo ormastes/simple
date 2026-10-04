@@ -12,7 +12,7 @@ Eight authored ITEM4-REQ-006 scenarios in
 | Shape rejection | Wrong CPU/platform, invalid names/versions, duplicate exports, invalid kind, out-of-range reexport ordinal and malformed restrictions reject. |
 | Selected unsupported semantics | Selected weak, absolute and reexport imports reject rather than being normalized to ordinary exports. Valid access restrictions retain their values and reject at the unbound hosted policy gate. |
 | Real TLV provider | Both architectures preserve actual TLV export kind and emitted instruction/pointer behavior through typed linking. |
-| Binary access commands | Size-preserving LC_UUID replacement creates actual LC_SUB_CLIENT/LC_SUB_FRAMEWORK command bytes; projection retains policy and hosted linking refuses unsupported access binding. |
+| Binary access commands | Size-preserving LC_UUID replacement creates actual LC_SUB_CLIENT/LC_SUB_FRAMEWORK command bytes; projection retains policy and hosted linking refuses unsupported access binding. Command-relative offset at the end, missing terminator and empty name each reject. |
 | Unused metadata | Valid unused weak/reexport/resolver metadata remains admissible; no blanket rejection substitutes for selected-import semantics. |
 
 All binary inputs derive from the authored fixture corpus and its LLVM recipe.
