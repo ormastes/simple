@@ -27,3 +27,24 @@ Graph limits and pre/post file-size checks are logical bounds. Resident file
 reads are not a race-free bounded-I/O or whole-job memory certificate. Managed
 admission, weak coalescing, remaining SDK semantics and all actual host execution
 remain separate open requirements.
+
+Core implementation 9876f149efa adds typed sources/search/client/limits, an
+explicit graph and actual hosted lookup. Legacy byte/typed hosted entrypoints
+retain their prior policy refusals; the new closure entry checks reachable
+deployment versions and supplies direct roots only to image construction.
+Native wiring and deterministic filesystem lookup are owned by this integration.
+Actual output spelling is preserved for permission rules, with Windows separator
+adaptation separate from filesystem normalization.
+
+Independent exact-source review found no remaining P0/P1 after alias-cycle
+continuation and accounting/performance fixes. Per-node export indexes and alias
+ordinal sets avoid repeated export scans; validated metadata is cached with
+explicit writeback. One mutable lookup owner retains cumulative work across all
+imports. Parsed symbol counts include unselected interfaces; expanded symbols
+are separately bounded. These are reviewed algorithms, not measured performance.
+
+The mixed alias-cycle regression was added during review; only initial SDK-chain
+intent is claimed to precede implementation. A real binary alias fixture was
+created by documented export-trie mutation after ld64.lld reported aliasing to
+imported symbols unsupported. Independent decoding is distinct from code-signing
+or loader acceptance, and no fabricated text-provider VM addresses are used.
