@@ -1,0 +1,130 @@
+"""ITEM4-REQ-001/002/007 real file-source operations. Execution UNRUN.
+
+Selected sources perform actual filesystem reads. Portable snapshots do not
+certify immutable identity, retained-handle cleanup or bounded working sets.
+"""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read_bytes, file_read_bytes_result, file_write_bytes,
+    dir_create_all, remove_file_if_exists}
+use compiler.backend.linker.elf.elf_operation_bindings.*
+use compiler.backend.linker.native_freestanding.{NativeFreestandingFormat,
+    NativeFreestandingLinkConfig, link_freestanding_to_native_v1,
+    link_freestanding_with_operations_v1}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.elf_parser.{elf_parse_object, elf_section_name}
+
+fn item4_elf_source_config() -> NativeFreestandingLinkConfig:
+    NativeFreestandingLinkConfig(format: NativeFreestandingFormat.Elf,
+        target: RelocArch.X86_64, entry: "_start", output_byte_limit: 1048576,
+        executable: false)
+
+fn item4_elf_source_inputs() -> [text]:
+    ["test/fixtures/linker/elf/start_x64.o", "test/fixtures/linker/elf/lib_x64.o"]
+
+fn item4_elf_source_alternate(path: text) -> Result<[u8], text>:
+    if path.ends_with("/lib_x64.o"):
+        return file_read_bytes_result("test/fixtures/linker/elf/source_provider_x64.o")
+    file_read_bytes_result(path)
+
+fn item4_elf_source_error(path: text) -> Result<[u8], text>:
+    # Named injected read error; no claim that the operating system failed.
+    Err("item4 selected source read error: " + path)
+
+fn item4_elf_source_read(bytes: [i64], offset: i64, width: i64) -> i64:
+    val valid = offset >= 0 and offset <= bytes.len() and width >= 1 and width <= 8 and width <= bytes.len() - offset
+    expect(valid).to_equal(true)
+    if not valid: return -1
+    var value: i64 = 0
+    for index in 0..width: value = value | (bytes[offset + index] << (index * 8))
+    value
+
+fn item4_elf_source_check(path: text, expected: i64):
+    val raw = file_read_bytes(path)
+    expect(raw.len()).to_be_greater_than(64)
+    if raw.len() <= 64: return
+    var bytes: [i64] = []
+    for byte in raw: bytes.push(byte as i64)
+    expect(item4_elf_source_read(bytes, 0, 4)).to_equal(0x464c457f)
+    expect(item4_elf_source_read(bytes, 18, 2)).to_equal(62)
+    val parsed = elf_parse_object(bytes)
+    expect(parsed.is_ok()).to_equal(true)
+    if parsed.is_err(): return
+    val object = parsed.unwrap()
+    var found = 0
+    for symbol in object.symbols:
+        if symbol.name == "base":
+            found = found + 1
+            val valid = symbol.st_shndx > 0 and symbol.st_shndx < object.sections.len()
+            expect(valid).to_equal(true)
+            if not valid: return
+            val section = object.sections[symbol.st_shndx]
+            val address = item4_elf_source_read(bytes, object.header.e_shoff + symbol.st_shndx * 64 + 16, 8)
+            expect(symbol.st_value >= address).to_equal(true)
+            if symbol.st_value < address: return
+            expect(item4_elf_source_read(bytes, section.sh_addr + symbol.st_value - address, 8)).to_equal(expected)
+    expect(found).to_equal(1)
+
+describe "ELF file-source operational composition":
+    it "consumes the selected real alternate object through the production file adapter":
+        step("Select a provider that reads a different real ELF object from disk")
+        expect(dir_create_all("build/item4_elf_source")).to_equal(true)
+        val output = "build/item4_elf_source/alternate"
+        expect(remove_file_if_exists(output)).to_equal(true)
+        var providers = elf_builtin_file_operation_providers_v1()
+        expect(providers.len()).to_equal(4)
+        if providers.len() != 4: return
+        var source = providers[3]
+        source.read_bytes = Some(item4_elf_source_alternate)
+        providers[3] = source
+        val sealed = elf_seal_file_operations_v1(providers, elf_operation_policy_v1())
+        expect(sealed.is_ok()).to_equal(true)
+        if sealed.is_err(): return
+        val linked = link_freestanding_with_operations_v1(item4_elf_source_inputs(), [], output,
+            item4_elf_source_config(), sealed.unwrap())
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_err(): return
+        expect(linked.unwrap().engine_id).to_equal("internal:elf")
+        item4_elf_source_check(output, 7)
+        expect(remove_file_if_exists(output)).to_equal(true)
+
+    it "preserves canonical file-adapter output through the explicit default source owner":
+        step("Link the same real files through legacy and explicit file-aware owner entrypoints")
+        expect(dir_create_all("build/item4_elf_source")).to_equal(true)
+        val first = "build/item4_elf_source/default"
+        val second = "build/item4_elf_source/explicit"
+        val owner = elf_builtin_file_operations_v1()
+        expect(owner.is_ok()).to_equal(true)
+        if owner.is_err(): return
+        val legacy = link_freestanding_to_native_v1(item4_elf_source_inputs(), [], first, item4_elf_source_config())
+        val explicit = link_freestanding_with_operations_v1(item4_elf_source_inputs(), [], second,
+            item4_elf_source_config(), owner.unwrap())
+        expect(legacy.is_ok()).to_equal(true)
+        expect(explicit.is_ok()).to_equal(true)
+        if legacy.is_err() or explicit.is_err(): return
+        item4_elf_source_check(first, 2)
+        expect(file_read_bytes(first)).to_equal(file_read_bytes(second))
+        expect(remove_file_if_exists(first)).to_equal(true)
+        expect(remove_file_if_exists(second)).to_equal(true)
+
+    it "preserves an existing output when the selected source rejects a read":
+        step("Seed the destination and inject a named source error into the full adapter")
+        expect(dir_create_all("build/item4_elf_source")).to_equal(true)
+        val output = "build/item4_elf_source/preserved"
+        val sentinel: [u8] = [23, 0, 255, 10]
+        expect(file_write_bytes(output, sentinel)).to_equal(true)
+        var providers = elf_builtin_file_operation_providers_v1()
+        expect(providers.len()).to_equal(4)
+        if providers.len() != 4: return
+        var source = providers[3]
+        source.read_bytes = Some(item4_elf_source_error)
+        providers[3] = source
+        val sealed = elf_seal_file_operations_v1(providers, elf_operation_policy_v1())
+        expect(sealed.is_ok()).to_equal(true)
+        if sealed.is_err(): return
+        val linked = link_freestanding_with_operations_v1(item4_elf_source_inputs(), [], output,
+            item4_elf_source_config(), sealed.unwrap())
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_err(): expect(linked.unwrap_err()).to_contain("item4 selected source read error")
+        expect(file_read_bytes(output)).to_equal(sentinel)
+        expect(remove_file_if_exists(output)).to_equal(true)
