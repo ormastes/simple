@@ -53,8 +53,15 @@ class RasterSurface:
     var clip_y: i32
     var clip_w: i32
     var clip_h: i32
+    # Device pixels per logical unit. Every drawing call takes LOGICAL
+    # coordinates; width/height/pixels/clip are DEVICE pixels. 1 keeps the
+    # previous 1:1 behaviour byte for byte.
+    var scale: i32
 
     static fn new(width: i32, height: i32, bg: u32) -> RasterSurface:
+        RasterSurface.new_scaled(width, height, bg, 1)
+
+    static fn new_scaled(width: i32, height: i32, bg: u32, scale: i32) -> RasterSurface:
         var px: [u32] = []
         val n = width.to_i64() * height.to_i64()
         var i: i64 = 0
@@ -63,14 +70,16 @@ class RasterSurface:
             i = i + 1
         RasterSurface(
             width: width, height: height, pixels: px,
-            clip_x: 0, clip_y: 0, clip_w: width, clip_h: height
+            clip_x: 0, clip_y: 0, clip_w: width, clip_h: height,
+            scale: if scale < 1: 1 else: scale
         )
 
     me set_clip(x: i32, y: i32, w: i32, h: i32):
-        self.clip_x = x
-        self.clip_y = y
-        self.clip_w = w
-        self.clip_h = h
+        val s = self.scale
+        self.clip_x = x * s
+        self.clip_y = y * s
+        self.clip_w = w * s
+        self.clip_h = h * s
 
     me clear_clip():
         self.clip_x = 0
@@ -113,6 +122,11 @@ class RasterSurface:
         self.pixels[idx] = (4278190080 + r * 65536 + g * 256 + b).to_u32()
 
     me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        """LOGICAL rect; painted at the surface's device scale."""
+        val s = self.scale
+        self.fill_device_rect(x * s, y * s, w * s, h * s, color)
+
+    me fill_device_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
         if w <= 0 or h <= 0:
             return
         val alpha = ((color >> 24) & 255u32).to_i32()
@@ -174,6 +188,7 @@ class RasterSurface:
         (see _raster_text_run) and it lives at the call site."""
         if gi < 0:
             return
+        val s = self.scale
         var row = 0
         while row < RASTER_GLYPH_H:
             val bits = glyph_row_bits(gi, row)
@@ -181,7 +196,12 @@ class RasterSurface:
             while col < RASTER_GLYPH_W:
                 val mask = 1 << (RASTER_GLYPH_W - 1 - col)
                 if (bits & mask) != 0:
-                    self.put(x + col, y + row, color)
+                    if s == 1:
+                        self.put(x + col, y + row, color)
+                    else:
+                        # The 5x7 font has no finer source: one font cell
+                        # covers s x s device pixels.
+                        self.fill_device_rect((x + col) * s, (y + row) * s, s, s, color)
                 col = col + 1
             row = row + 1
 
@@ -266,7 +286,9 @@ fn _raster_path(surface: RasterSurface, scene: DrawIrV3Scene, cmd: DrawIrV3Comma
         return
     val stroke_width = paint.stroke_width_milli / 1000
     val color = if stroke_width > 0: paint.stroke_color else: paint.fill_color
-    val thickness = if stroke_width > 0: stroke_width else: 1
+    # Strokes are rasterized at device resolution: endpoints and width scale.
+    val s = surface.scale
+    val thickness = (if stroke_width > 0: stroke_width else: 1) * s
     var pen_x: i32 = 0
     var pen_y: i32 = 0
     var start_x: i32 = 0
@@ -278,8 +300,8 @@ fn _raster_path(surface: RasterSurface, scene: DrawIrV3Scene, cmd: DrawIrV3Comma
         val point = draw_ir_v3_path_point_at(scene.path_points, span.point_start + i.to_u32())
         if not point.present:
             return
-        val px = point.x + ox
-        val py = point.y + oy
+        val px = (point.x + ox) * s
+        val py = (point.y + oy) * s
         if point.verb == DRAW_IR_V3_VERB_MOVE:
             pen_x = px
             pen_y = py
@@ -376,6 +398,13 @@ fn raster_scene_argb(scene: DrawIrV3Scene, width: i32, height: i32) -> [u32]:
     raster_scene_into(surface, scene)
     surface.pixels
 
+fn raster_scene_argb_scaled(scene: DrawIrV3Scene, device_w: i32, device_h: i32, scale: i32) -> [u32]:
+    """`scene` laid out in logical units, rasterized into a device_w x
+    device_h frame at `scale` device pixels per logical unit (HiDPI)."""
+    val surface = RasterSurface.new_scaled(device_w, device_h, RASTER_BG, scale)
+    raster_scene_into(surface, scene)
+    surface.pixels
+
 # =========================================================================
 # Capture helpers (used by the 2d host's framebuffer dump)
 # =========================================================================
@@ -424,5 +453,5 @@ fn raster_to_ppm_bytes(pixels: [u32], width: i32, height: i32) -> [u8]:
     out
 
 export RasterSurface, RASTER_BG, RASTER_GLYPH_W, RASTER_GLYPH_H
-export raster_scene_into, raster_scene_argb
+export raster_scene_into, raster_scene_argb, raster_scene_argb_scaled
 export raster_distinct_pixel_count, raster_to_ppm_bytes
