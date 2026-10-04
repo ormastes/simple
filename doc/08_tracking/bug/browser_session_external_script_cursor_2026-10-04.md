@@ -44,3 +44,23 @@ still not centred and wraps one word per line: `max-width: 26em` is read as
 26px (`decl_apply.spl` parses min/max-width with `parse_int`, no em/rem),
 and `margin: auto` + `max-width` / inherited `text-align: center` are not
 applied by layout (gaps A, B, C in the parent record).
+
+## Security review of the pump (2026-10-05)
+
+- Scheme: the pump admits only http/https subresource URLs
+  (`browser_subresource_scheme_allowed`); anything else is committed as
+  "blocked by policy: subresource scheme is not http/https" before any
+  transport is touched. This matches what the hosted lane can carry (its
+  runtime job and `h1_client` reject non-http(s) with "unsupported URL
+  scheme"). Independently, BrowserSession never queues an https document's
+  `file:///` stylesheet at all - it records
+  `stylesheet load error: unsupported-scheme:file:///etc/passwd`
+  (spec: "never loads an https document's file:/// stylesheet").
+- Private network / localhost: the hosted lane has no extra block beyond the
+  session's mixed-content rule (https document -> http subresource blocked,
+  loopback http excepted); the pump inherits exactly that and adds nothing.
+- Found while probing, NOT fixed here: `<link rel=stylesheet
+  href="data:text/css,...">` is resolved as a RELATIVE URL
+  (`https://example.com/data:text/css,...`) and fetched from the document's
+  origin instead of being decoded inline. Same-origin http only, so not a
+  data leak, but data: stylesheets never apply.

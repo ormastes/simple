@@ -52,6 +52,15 @@ pub fn browser_subresource_admitted(kind: text, remote_scripts: bool) -> bool:
         return remote_scripts
     false
 
+pub fn browser_subresource_scheme_allowed(url: text) -> bool:
+    """Subresources travel over http/https only — the same set the hosted
+    lane's transport (rt_browser_http_job / h1_client) can carry. file:,
+    data:, about:, simple:, javascript: and anything unparseable are refused
+    here, before any transport is touched, regardless of the document's own
+    scheme (the app lane never reads local files on a page's behalf)."""
+    val scheme = Url.parse_or_opaque(url).scheme.lower()
+    scheme == "http" or scheme == "https"
+
 pub fn browser_subresource_blocked_reason(kind: text) -> text:
     if kind == "document":
         "blocked by policy: the app render lane does not navigate"
@@ -142,6 +151,11 @@ pub fn browser_drain_subresources(session: BrowserSession) -> BrowserSession:
                 _error_response(request, browser_subresource_blocked_reason(request.kind))
             )
             continue
+        if not browser_subresource_scheme_allowed(request.url):
+            val _ = s.commit_network_response(_error_response(
+                request, "blocked by policy: subresource scheme is not http/https"
+            ))
+            continue
         match _fetch_request(s, engine, request):
             Err(message):
                 val _ = s.commit_network_response(_error_response(request, message))
@@ -154,3 +168,4 @@ pub fn browser_drain_subresources(session: BrowserSession) -> BrowserSession:
 export BROWSER_REMOTE_SCRIPTS_ENV, BROWSER_SUBRESOURCE_PUMP_LIMIT
 export browser_remote_scripts_enabled, browser_subresource_admitted
 export browser_subresource_blocked_reason, browser_drain_subresources
+export browser_subresource_scheme_allowed

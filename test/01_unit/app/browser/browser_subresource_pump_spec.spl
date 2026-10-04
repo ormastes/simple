@@ -22,7 +22,7 @@ use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_loading.*
 use app.browser.subresource_pump.{
     browser_subresource_admitted, browser_subresource_blocked_reason,
-    browser_drain_subresources
+    browser_drain_subresources, browser_subresource_scheme_allowed
 }
 
 val PAGE: text = "<html><head><style>p{color:red}</style></head><body><p>x</p><script src=\"/a.js\"></script><script>document.title = 'after';</script></body></html>"
@@ -78,3 +78,26 @@ describe "BrowserSession external script cursor":
         assert_true(c.is_ok())
         assert_false(s.has_pending_requests())
         expect(s.current_title).to_equal("after")
+
+describe "App browser subresource scheme policy":
+    it "carries only http and https subresources":
+        assert_true(browser_subresource_scheme_allowed("https://example.com/a.css"))
+        assert_true(browser_subresource_scheme_allowed("http://example.com/a.png"))
+        for url in ["file:///etc/passwd", "FILE:///etc/passwd", "data:text/css,p{}",
+                    "about:blank", "simple://home", "javascript:alert(1)", "not a url"]:
+            assert_false(browser_subresource_scheme_allowed(url))
+
+    it "never loads an https document's file:/// stylesheet":
+        step("an https page links a local file as its stylesheet")
+        var s = BrowserSession.new()
+        val _ = s.open_html("https://example.com/", "<html><head><link rel=\"stylesheet\" href=\"file:///etc/passwd\"></head><body><p>x</p></body></html>")
+        s = browser_drain_subresources(s)
+        step("the load completes, the file is reported as refused, and nothing is applied")
+        assert_false(s.has_pending_requests())
+        assert_true(s.active_load == nil)
+        expect(s.current_style_html).to_equal("")
+        var refused = false
+        for warning in s.warnings:
+            if warning.contains("file:///etc/passwd"):
+                refused = true
+        assert_true(refused)
