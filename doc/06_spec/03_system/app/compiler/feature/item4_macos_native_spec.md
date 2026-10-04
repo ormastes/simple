@@ -23,7 +23,9 @@ The tests use checked-in assembler/linker-produced fixtures in
 `test/fixtures/linker/macho`; reproduction is documented by that directory's
 `RECIPE.md`. Temporary output directories are unique and owned by each case.
 Positive requests explicitly supply platform, SDK and signing identifier, with
-PIE enabled and unsupported duplicates/debug/strip/retained policy disabled.
+PIE enabled, strict duplicate policy selected, and unsupported debug/strip/retained
+policy disabled. Permissive first-definition selection is covered separately by
+`item4_macho_duplicates_spec.spl`; it is no longer rejected by planning.
 Dylib coverage uses both positional inputs and configured library paths, with
 an explicit emitted LC_RPATH. Runtime-none/nonempty-archives and unresolved
 runtime archive ownership reject before publication; error tokens identify the

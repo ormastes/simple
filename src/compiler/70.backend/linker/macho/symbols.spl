@@ -6,7 +6,7 @@ struct MachOBinding:
     owner: i64
     symbol: MachOSymbolEntry
 
-fn macho_definitions(inputs: [MachOInput]) -> Result<{text: MachOBinding}, text>:
+fn macho_definitions(inputs: [MachOInput], allow_duplicate_definitions: bool = false) -> Result<{text: MachOBinding}, text>:
     var definitions: {text: MachOBinding} = {}
     var owner: i64 = 0
     for input in inputs:
@@ -22,7 +22,10 @@ fn macho_definitions(inputs: [MachOInput]) -> Result<{text: MachOBinding}, text>
                         val weak = (symbol.n_desc & 0x80) != 0
                         val previous_common = (previous.symbol.n_type & 14) == 0
                         val common = kind == 0
-                        if not previous_common and not common and not previous_weak and not weak:
+                        # Permissive links retain the first selected strong
+                        # binding; subsequent strong definitions never replace
+                        # it. Weak/common precedence below remains unchanged.
+                        if not previous_common and not common and not previous_weak and not weak and not allow_duplicate_definitions:
                             return Err("duplicate symbol {symbol.name}")
                         if (previous_common and not common) or (not common and previous_weak and not weak):
                             definitions[symbol.name] = MachOBinding(owner: owner, symbol: symbol)
@@ -31,8 +34,8 @@ fn macho_definitions(inputs: [MachOInput]) -> Result<{text: MachOBinding}, text>
         owner = owner + 1
     Ok(definitions)
 
-fn macho_unresolved(inputs: [MachOInput], entry: text) -> Result<{text: bool}, text>:
-    val definitions = macho_definitions(inputs)?
+fn macho_unresolved(inputs: [MachOInput], entry: text, allow_duplicate_definitions: bool = false) -> Result<{text: bool}, text>:
+    val definitions = macho_definitions(inputs, allow_duplicate_definitions)?
     var unresolved: {text: bool} = {}
     if not definitions.has(entry): unresolved[entry] = true
     for input in inputs:

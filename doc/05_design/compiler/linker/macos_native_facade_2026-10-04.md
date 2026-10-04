@@ -67,7 +67,7 @@ fail before input consumption/publication rather than silently dropping policy.
 | strip_output | Reject true until actual strip policy exists. |
 | prefer_size_linker | Reject true until an implemented equivalent exists. |
 | verbose | Diagnostics only; must not alter linked bytes or dispatch. |
-| allow_duplicate_definitions | Reject true while the core implements strict definitions only. |
+| allow_duplicate_definitions | Forward the real value: true retains the first selected strong definition; false rejects duplicate strong definitions. See macho_duplicate_policy_2026-10-04.md. |
 | allow_cc_fallback | Explicit internal requests never silently fall back, consistent with the existing internal selection contract. |
 | retained_symbols | Reject nonempty until actual root retention is implemented. |
 | extra_flags | Parse only the explicitly frozen Mach-O grammar; reject unknown, missing or conflicting options. |

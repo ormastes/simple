@@ -53,6 +53,15 @@ pub fn compile_cast<M: Module>(
         eprintln!("[cast-ty] from={:?} to={:?}", from_ty, to_ty);
     }
 
+    // `any as bool`: the source is a tagged RuntimeValue whose FALSE is a
+    // non-zero word, so the default copy below read every boxed bool as true.
+    // Decode with the interpreter's `as bool` semantics (truthiness).
+    if from_ty == TypeId::ANY && to_ty == TypeId::BOOL {
+        let decoded = super::helpers::call_runtime_1(ctx, builder, "rt_value_truthy", src_val);
+        ctx.vreg_values.insert(dest, decoded);
+        return Ok(());
+    }
+
     if runtime_integer_cast_requires_decode(from_ty, to_ty) {
         match to_ty {
             TypeId::I8
