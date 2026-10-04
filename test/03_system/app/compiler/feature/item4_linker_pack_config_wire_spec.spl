@@ -147,6 +147,39 @@ describe "ITEM4-REQ-010 lossless native link configuration V2":
         expect(linker_pack_decode_job_v2(args).is_err()).to_equal(true)
         expect(linker_pack_decode_job(linker_pack_encode_job_v2(job).unwrap()).is_err()).to_equal(true)
 
+    it "admits exact argument and byte boundaries and rejects one beyond each":
+        var job = item4_pack_config_job()
+        var config = job.native_config
+        var flags: [text] = []
+        for index in 0..4017: flags.push("")
+        config.extra_flags = flags
+        job.native_config = config
+        step("Fill exactly 4096 literal argv entries without exceeding the byte arena")
+        val exact_count = linker_pack_encode_job_v2(job)
+        expect(exact_count.is_ok()).to_equal(true)
+        if exact_count.is_err(): return
+        expect(exact_count.unwrap().len()).to_equal(4096)
+        expect(linker_pack_decode_job_v2(exact_count.unwrap()).unwrap().native_config.extra_flags.len()).to_equal(4017)
+        flags.push("")
+        config.extra_flags = flags
+        job.native_config = config
+        expect(linker_pack_encode_job_v2(job).is_err()).to_equal(true)
+        step("Use the independently specified command arena framing to reach exactly one MiB")
+        var args = linker_pack_encode_job_v2(item4_pack_config_job()).unwrap()
+        expect(args.len()).to_equal(81)
+        if args.len() != 81: return
+        # 28-byte header, 9 UTF-8 command bytes and 4-byte argument count.
+        var overhead = 41
+        for index in 0..args.len():
+            overhead = overhead + 4
+            if index != 58: overhead = overhead + args[index].bytes().len()
+        expect(overhead < 1048576).to_equal(true)
+        if overhead >= 1048576: return
+        args[58] = item4_pack_config_repeat(1048576 - overhead)
+        expect(linker_pack_decode_job_v2(args).is_ok()).to_equal(true)
+        args[58] = args[58] + "x"
+        expect(linker_pack_decode_job_v2(args).is_err()).to_equal(true)
+
     it "passes explicit V2 configuration to the real provider adapter before bounded-mode refusal":
         var job = item4_pack_config_job()
         var request = job.request
