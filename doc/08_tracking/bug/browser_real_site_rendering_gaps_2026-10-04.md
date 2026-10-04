@@ -78,6 +78,21 @@ Text mode (`main.spl https://<site>`) for the three big sites also exceeds
   through BrowserSession, and the 800x600 render shows white background and
   full-width text even though the same HTML through the static lane picks up
   the `html{background}` rule.
+  **Root cause (2026-10-04, work/browser-script-stall):** the app's session
+  lane (`render_adapter.browser_session_pixels_at_time`) calls `open_html`
+  and renders immediately, but never services the session's subresource
+  requests (`take_pending_request` / `commit_network_response`), so the load
+  stays blocked on the external `/s.js` and `_finalize_active_load` — the
+  only place that copies `load.stylesheet_html()` into `current_style_html`
+  — never runs; `render_html_document()` then emits `<head>` with no
+  `<style>`. Reproduced offline with the exact example.com markup:
+  `current_style_html` is empty after `open_html`. Not fixed here: the
+  correct fix is a network pump in the app lane with the hosted lane's
+  request policy (`_hosted_fetch_mode`/headers/HSTS stripping in
+  `src/os/hosted/hosted_web_content_session.spl`), which also starts
+  executing remote scripts — a feature/security decision, not a contained
+  fix. Unblock: share the hosted pump (or an equivalent policy owner) with
+  `src/app/browser`.
 - **E. Glyph baseline jitter** — glyphs with ascenders/descenders (i, t, d,
   l, f, h) are offset vertically from their neighbours on every page.
 - **F. Non-Latin text renders as tofu** (google.com Korean locale page) and
@@ -96,6 +111,40 @@ Text mode (`main.spl https://<site>`) for the three big sites also exceeds
   'char_count'`), and documents with `<script>` go through BrowserSession
   script execution. Unblock: fix the TextMetrics JIT lowering (another lane
   owns the TextMetrics rename) and profile with `SIMPLE_WEB_PHASE_TRACE=1`.
+  **Root cause found and fixed (2026-10-04, work/browser-script-stall):**
+  `SIMPLE_INTERPRETER_CALL_TRACE=all` showed the session binding ~4
+  elements/s; `SIMPLE_PERF_COUNTERS=1` and the code showed why. The JS
+  engine's `ObjectStore` is a flat list of every property of every object,
+  and `set_object_property`, `get_object_property`, `ObjectStore.get_property`
+  and `get_object` each scanned ALL of it (a property write did two full
+  scans: the frozen check and the existing-key lookup). `_bind_dom_node`
+  does ~10 writes + several reads per element, so binding N elements cost
+  O(N * total properties) = quadratic. Fix: `ObjectStore.prop_slot_index`
+  ("{obj_id}:{key}" -> latest slot) and `obj_slot_index` (obj_id -> slots in
+  ascending order), kept in sync on append and rebuilt on removal or
+  compaction; lookups fall back to the old scan whenever the index does not
+  cover every slot, so answers are identical. Pinned by
+  `test/01_unit/lib/nogc_sync_mut/js/engine/object_store_slot_index_spec.spl`.
+  Measured (same seed, same saved HTML, before = origin/main tree):
+  `open_html` on a synthetic N-element scripted page 112.3s -> 3.5s at
+  N=100 and 363.2s -> 9.5s at N=200; news.ycombinator.com full render
+  1133-1922s -> ~130-270s (host load varied); github.com never finished in
+  1800s -> 276-497s. example.com and google.com pixel checksums identical
+  before/after.
+- **K. www.wikipedia.org: C font SFFI not wired into the seed interpreter.**
+  With G fixed, wikipedia reaches rendering and fails with
+  `semantic: unknown extern function: rt_font_glyph_index` (multi-script
+  fallback in `src/lib/skia/feature/shaper/font_fallback.spl:71`). Only
+  `rt_font_load_array` is registered in
+  `src/compiler_rust/compiler/src/interpreter_extern/mod.rs`; the other 14
+  `rt_font_*` externs of `src/lib/nogc_sync_mut/io/font_sffi.spl`
+  (`rt_font_free`, `rt_font_glyph_bitmap`, `rt_font_bitmap_*`, ...) are
+  implemented in `src/runtime/runtime_font.c` but unreachable from `run`.
+  They take raw C pointers, so wiring them needs a handle owner on the Rust
+  side (not just `insert_simple!`) to keep a stale or forged handle from
+  becoming a use-after-free. Unblock: add that owner + the 15 externs.
+- **J. github.com layout** — renders, but the nav menu's collapsed panels
+  are laid out expanded and link/description columns overlap.
 - **H. Stale deployed seed** — `/Users/ormastes/simple/bin/simple` predates
   `faa15917adc` (host `@when` stripping), so it cannot parse origin/main's
   `src/lib/nogc_sync_mut/io/windows_redirected_process.spl` ("expected Fn,
