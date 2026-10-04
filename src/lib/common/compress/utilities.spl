@@ -11,6 +11,7 @@ use std.common.compress.deflate.{deflate_compress_sync_flush, deflate_decompress
 use std.common.compress.lzma2.{lzma2_compress_xz, lzma2_decompress_xz}
 use std.simd.{SimdTier, detect_profile, profile_name}
 use std.common.crypto.crc32.{crc32}
+use std.common.crypto.xxhash.{xxhash32}
 
 pub use std.common.compress.types.{CompressionSimdTier}
 
@@ -198,63 +199,11 @@ pub fn crc32_bytes_for_tier(data: [u8], tier: CompressionSimdTier) -> u32:
     crc32_bytes_scalar(data)
 
 # ── XXHash32 ───────────────────────────────────────────────────────────────
-# Mirrors lz4.spl's algorithm exactly (private names prefixed _utl_ to avoid collision).
-
-val _UTLXXH_P1: u32 = 2654435761u32
-val _UTLXXH_P2: u32 = 2246822519u32
-val _UTLXXH_P3: u32 = 3266489917u32
-val _UTLXXH_P4: u32 = 668265263u32
-val _UTLXXH_P5: u32 = 374761393u32
-
-fn _utl_xxh32_rotl(v: u32, r: i64) -> u32:
-    (v << r.to_u32()) | (v >> (32 - r).to_u32())
-
-fn _utl_xxh32_round(acc: u32, v: u32) -> u32:
-    val a = acc + (v * _UTLXXH_P2)
-    _utl_xxh32_rotl(a, 13) * _UTLXXH_P1
-
-fn _utl_xxh32_read_le32(data: [u8], off: i64) -> u32:
-    data[off].to_u32() |
-        (data[off + 1].to_u32() << 8u32) |
-        (data[off + 2].to_u32() << 16u32) |
-        (data[off + 3].to_u32() << 24u32)
+# One shared implementation (std.common.crypto.xxhash), also used by lz4.
 
 pub fn xxhash32_bytes(data: [u8], seed: u32) -> u32:
     """Compute xxHash32 of `data` with given `seed`."""
-    val n = data.len()
-    var h: u32 = 0u32
-    var pos = 0
-    if n >= 16:
-        var v1 = seed + _UTLXXH_P1 + _UTLXXH_P2
-        var v2 = seed + _UTLXXH_P2
-        var v3 = seed + 0u32
-        var v4 = seed - _UTLXXH_P1
-        val limit = n - 16
-        while pos <= limit:
-            v1 = _utl_xxh32_round(v1, _utl_xxh32_read_le32(data, pos))
-            pos = pos + 4
-            v2 = _utl_xxh32_round(v2, _utl_xxh32_read_le32(data, pos))
-            pos = pos + 4
-            v3 = _utl_xxh32_round(v3, _utl_xxh32_read_le32(data, pos))
-            pos = pos + 4
-            v4 = _utl_xxh32_round(v4, _utl_xxh32_read_le32(data, pos))
-            pos = pos + 4
-        h = (_utl_xxh32_rotl(v1, 1) + _utl_xxh32_rotl(v2, 7) +
-             _utl_xxh32_rotl(v3, 12) + _utl_xxh32_rotl(v4, 18))
-    else:
-        h = seed + _UTLXXH_P5
-    h = h + n.to_u32()
-    while pos + 4 <= n:
-        h = h + (_utl_xxh32_read_le32(data, pos) * _UTLXXH_P3)
-        h = _utl_xxh32_rotl(h, 17) * _UTLXXH_P4
-        pos = pos + 4
-    while pos < n:
-        h = h + (data[pos].to_u32() * _UTLXXH_P5)
-        h = _utl_xxh32_rotl(h, 11) * _UTLXXH_P1
-        pos = pos + 1
-    h = (h ^ (h >> 15u32)) * _UTLXXH_P2
-    h = (h ^ (h >> 13u32)) * _UTLXXH_P3
-    h ^ (h >> 16u32)
+    xxhash32(data, seed)
 
 pub fn xxhash32_bytes_scalar(data: [u8], seed: u32) -> u32:
     xxhash32_bytes(data, seed)
