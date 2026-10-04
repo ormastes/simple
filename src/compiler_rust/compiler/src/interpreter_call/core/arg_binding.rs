@@ -41,11 +41,11 @@ fn copy_value_type_in_place(value: &mut Value, classes: &HashMap<String, Arc<Cla
             }) {
                 crate::perf_counters::bump(&crate::perf_counters::VT_ARRAY_CLONES, 1);
                 crate::perf_counters::bump(&crate::perf_counters::VT_ARRAY_ELEMS_CLONED, items.len() as u64);
-                let mut copied: Vec<Value> = (**items).clone();
+                let mut copied: Vec<Value> = items.to_vec();
                 for item in copied.iter_mut() {
                     copy_value_type_in_place(item, classes);
                 }
-                *items = Arc::new(copied);
+                *items = Arc::new(ArrayData::from(copied));
             }
         }
         _ => {}
@@ -906,8 +906,8 @@ mod scalar_array_param_tests {
             param("chars", Some(array_of(Type::Simple("text".into())))),
             param("pts", Some(array_of(Type::Simple("Point".into())))),
         ];
-        let chars = Arc::new(vec![Value::text("a"), Value::text("b")]);
-        let pts = Arc::new(vec![pt]);
+        let chars = Arc::new(ArrayData::from(vec![Value::text("a"), Value::text("b")]));
+        let pts = Arc::new(ArrayData::from(vec![pt]));
         let mut bound: HashMap<String, Value> = HashMap::new();
         bound.insert("chars".to_string(), Value::Array(Arc::clone(&chars)));
         bound.insert("pts".to_string(), Value::Array(Arc::clone(&pts)));

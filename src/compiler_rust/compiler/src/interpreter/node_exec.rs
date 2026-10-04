@@ -209,7 +209,7 @@ pub(crate) fn exec_node(
                                         arc_data.len()
                                     )));
                                 }
-                                let data = Arc::unwrap_or_clone(arc_data);
+                                let data = Arc::unwrap_or_clone(arc_data).into_vec();
                                 Value::FixedSizeArray { size, data }
                             }
                             _ => {
@@ -2144,7 +2144,7 @@ pub(crate) fn exec_assignment(
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         let values: Vec<Value> = match value {
             Value::Tuple(v) => v,
-            Value::Array(arc) => Arc::unwrap_or_clone(arc),
+            Value::Array(arc) => Arc::unwrap_or_clone(arc).into_vec(),
             _ => {
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
@@ -3238,13 +3238,13 @@ mod indexed_augmented_assignment_tests {
         let mut env = Env::new();
         env.insert(
             "xs".to_string(),
-            Value::Array(Arc::new(vec![
+            Value::array(vec![
                 Value::Int(10),
                 Value::Int(20),
                 Value::Int(30),
                 Value::Int(40),
                 Value::Int(50),
-            ])),
+            ]),
         );
 
         run_indexed_aug("xs", Expr::Integer(0), AssignOp::AddAssign, 5, &mut env);
@@ -3265,7 +3265,7 @@ mod indexed_augmented_assignment_tests {
         let mut env = Env::new();
         env.insert(
             "xs".to_string(),
-            Value::Array(Arc::new(vec![Value::Int(1), Value::Int(2)])),
+            Value::array(vec![Value::Int(1), Value::Int(2)]),
         );
         // A non-literal subscript: the desugaring must bind it to a temp,
         // then restore the environment so no `__aug_*_temp__` name leaks.

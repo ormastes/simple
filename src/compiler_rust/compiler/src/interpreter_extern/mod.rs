@@ -218,7 +218,7 @@ fn rt_browser_http_job_poll_stub(_args: &[Value]) -> Result<Value, CompileError>
 }
 
 fn rt_browser_http_job_take_response_stub(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Array(std::sync::Arc::new(Vec::new())))
+    Ok(Value::array(Vec::new()))
 }
 
 fn rt_browser_http_job_take_error_stub(_args: &[Value]) -> Result<Value, CompileError> {

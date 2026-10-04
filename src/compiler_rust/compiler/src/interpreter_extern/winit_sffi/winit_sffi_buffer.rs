@@ -255,7 +255,7 @@ fn call7(sym_addr: usize, a: [i64; 7]) -> i64 {
 fn honest_failure_for(name: &str) -> Value {
     match name {
         "rt_winit_buffer_create" | "rt_winit_buffer_read_pixel" => int_value(0),
-        "rt_winit_buffer_get_pixels" => Value::Array(Arc::new(vec![])),
+        "rt_winit_buffer_get_pixels" => Value::array(vec![]),
         // free is idempotent (nothing to free either way) even under total
         // cdylib unavailability — matches the real cdylib's own contract
         // (rt_winit_buffer_free always reports 1: removing an absent key
@@ -438,7 +438,7 @@ pub(super) fn dispatch_buffer(name: &str, args: &[Value]) -> Result<Value, Compi
                 )));
             }
             let values: Vec<Value> = out.iter().map(|&p| Value::Int(p as i64)).collect();
-            Ok(Value::Array(Arc::new(values)))
+            Ok(Value::array(values))
         }
         "rt_winit_buffer_free" => {
             let buf = get_i64(args, 0, name)?;

@@ -580,7 +580,7 @@ pub(crate) fn try_place_mutation_in_place(
                 Some(Value::Array(arc)) => {
                     note_place_mutation(arc.len(), Arc::strong_count(arc));
                     let written = super::super::interpreter_method::collections::array_write_span(
-                        Arc::make_mut(arc),
+                        &mut **Arc::make_mut(arc),
                         &src,
                         ints[0],
                         ints[1],
@@ -1286,7 +1286,7 @@ fn handle_method_call_with_self_update_inner(
                                     // Write updated element back into the array.
                                     let mut new_arr = (*arr).clone();
                                     new_arr[real_idx as usize] = updated_elem;
-                                    let new_arr_val = Value::Array(Arc::new(new_arr));
+                                    let new_arr_val = Value::array(new_arr);
                                     // Update local env.
                                     env.insert(arr_name.clone(), new_arr_val.clone());
                                     // Sync to MODULE_GLOBALS if this variable lives there.
@@ -1318,7 +1318,7 @@ fn handle_method_call_with_self_update_inner(
                                 if let Some((_, updated_elem)) = updated_elem_opt {
                                     let mut new_arr = (*arr).clone();
                                     new_arr[real_idx as usize] = updated_elem;
-                                    let new_arr_val = Value::Array(Arc::new(new_arr));
+                                    let new_arr_val = Value::array(new_arr);
                                     env.insert(arr_name.clone(), new_arr_val.clone());
                                     sync_flat_global(arr_name.as_ref(), &new_arr_val);
                                     return Ok((result, Some((arr_name.clone(), new_arr_val))));
@@ -2125,7 +2125,7 @@ fn bind_let_pattern_element(pat: &Pattern, val: Value, is_mutable: bool, env: &m
 fn for_loop_tuple_elements(value: Value, arity: usize) -> Vec<Value> {
     let mut values: Vec<Value> = match value {
         Value::Tuple(vals) => vals,
-        Value::Array(vals) | Value::FrozenArray(vals) => (*vals).clone(),
+        Value::Array(vals) | Value::FrozenArray(vals) => vals.to_vec(),
         _ => Vec::new(),
     };
     values.truncate(arity);
@@ -2174,14 +2174,14 @@ pub(crate) fn bind_pattern_value(pat: &Pattern, val: Value, is_mutable: bool, en
             // Allow tuple pattern to match both Tuple and Array
             let values: Vec<Value> = match val {
                 Value::Tuple(v) => v,
-                Value::Array(v) => (*v).clone(),
+                Value::Array(v) => v.to_vec(),
                 _ => Vec::new(),
             };
             bind_collection_pattern(patterns, values, is_mutable, env);
         }
         Pattern::Array(patterns) => {
             if let Value::Array(values) = val {
-                bind_collection_pattern(patterns, (*values).clone(), is_mutable, env);
+                bind_collection_pattern(patterns, values.to_vec(), is_mutable, env);
             }
         }
         _ => bind_let_pattern_element(pat, val, is_mutable, env),
@@ -2527,7 +2527,7 @@ mod cow_alias_mechanism_tests {
         // Exactly the elements a boxed [u8] destination would now hold.
         let expected = vec![u8v(0), Value::Int(300), u8v(7)];
         match field_of(&env, "o", "xs") {
-            Value::Array(values) => assert_eq!(values.as_ref(), &expected),
+            Value::Array(values) => assert_eq!(values.as_slice(), expected.as_slice()),
             other => panic!("expected widened boxed array, got {:?}", other),
         }
     }
@@ -2561,7 +2561,7 @@ mod cow_alias_mechanism_tests {
         env.insert("row".to_string(), Value::byte_array(vec![4, 5]));
         run_update(&write_span_call(o_xs(), "row", 1, 0, 2), &mut env);
         match field_of(&env, "o", "xs") {
-            Value::Array(values) => assert_eq!(values.as_ref(), &vec![Value::Int(0), u8v(4), u8v(5)]),
+            Value::Array(values) => assert_eq!(values.as_slice(), &[Value::Int(0), u8v(4), u8v(5)]),
             other => panic!("expected boxed array, got {:?}", other),
         }
     }

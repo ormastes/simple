@@ -249,7 +249,7 @@ fn array_ndim(arr: &[Value]) -> i64 {
 /// result afterwards.
 fn generic_array_values(value: &Value) -> Option<Vec<Value>> {
     match value {
-        Value::Array(values) | Value::FrozenArray(values) => Some(values.as_ref().clone()),
+        Value::Array(values) | Value::FrozenArray(values) => Some(values.to_vec()),
         Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => Some(Value::byte_array_values(bytes)),
         Value::FixedSizeArray { data, .. } => Some(data.clone()),
         _ => None,
@@ -641,11 +641,11 @@ pub fn handle_array_methods(
         }
         "take" => {
             let n = eval_arg_usize(args, 0, arr.len(), env, functions, classes, enums, impl_methods)?;
-            Value::array(arr.iter().take(n).cloned().collect())
+            Value::array(arr.iter().take(n).cloned().collect::<Vec<Value>>())
         }
         "skip" | "drop" => {
             let n = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            Value::array(arr.iter().skip(n).cloned().collect())
+            Value::array(arr.iter().skip(n).cloned().collect::<Vec<Value>>())
         }
         "take_while" => {
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -913,7 +913,7 @@ pub fn handle_array_methods(
                 }
             }
 
-            Value::array(result.into_iter().map(Value::array).collect())
+            Value::array(result.into_iter().map(Value::array).collect::<Vec<Value>>())
         }
         "fetch" => {
             // Get element at index with default value if out of bounds
@@ -1078,7 +1078,7 @@ pub fn handle_tuple_methods(
 /// Handle FrozenArray methods (read-only operations only)
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_frozen_array_methods(
-    arr: &std::sync::Arc<Vec<Value>>,
+    arr: &std::sync::Arc<crate::value::ArrayData>,
     method: &str,
     args: &[Argument],
     env: &mut Env,

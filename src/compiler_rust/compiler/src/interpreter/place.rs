@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn write_through_array_element_field() {
         let elem = object("Elem", vec![("n", Value::Int(1))]);
-        let holder = object("Holder", vec![("items", Value::Array(Arc::new(vec![elem])))]);
+        let holder = object("Holder", vec![("items", Value::array(vec![elem]))]);
 
         let mut env = Env::new();
         env.insert("h".into(), holder);
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn out_of_bounds_index_is_not_a_live_place() {
-        let holder = object("Holder", vec![("items", Value::Array(Arc::new(vec![Value::Int(1)])))]);
+        let holder = object("Holder", vec![("items", Value::array(vec![Value::Int(1)]))]);
         let mut env = Env::new();
         env.insert("h".into(), holder);
 

@@ -506,8 +506,8 @@ pub(crate) use interpreter_helpers_option_result::*;
 /// Convert a value to an iterable vector (for comprehensions)
 pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
     match val {
-        Value::Array(arr) => Ok(arr.as_ref().clone()),
-        Value::FrozenArray(arr) => Ok(arr.as_ref().clone()),
+        Value::Array(arr) => Ok(arr.to_vec()),
+        Value::FrozenArray(arr) => Ok(arr.to_vec()),
         Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => Ok(Value::byte_array_values(bytes)),
         Value::FixedSizeArray { data, .. } => Ok(data.clone()),
         Value::Tuple(tup) => Ok(tup.clone()),

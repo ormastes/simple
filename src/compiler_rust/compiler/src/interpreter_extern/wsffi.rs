@@ -1027,11 +1027,11 @@ mod tests {
     #[test]
     fn spl_wffi_call_f64_invokes_function_pointer() {
         let fptr = add_scaled as usize as i64;
-        let args = Value::Array(Arc::new(vec![
+        let args = Value::array(vec![
             Value::Float(1.25),
             Value::Float(2.75),
             Value::Float(0.5),
-        ]));
+        ]);
 
         let result = spl_wffi_call_f64(&[Value::Int(fptr), args, Value::Int(3)]).unwrap();
 
@@ -1053,7 +1053,7 @@ mod tests {
 
     #[test]
     fn integer_bridge_rejects_boolean_coercion() {
-        let values = Value::Array(Arc::new(vec![Value::Bool(true)]));
+        let values = Value::array(vec![Value::Bool(true)]);
         assert!(spl_wffi_call_i64(&[Value::Int(return_i64 as usize as i64), values, Value::Int(1),]).is_err());
     }
 

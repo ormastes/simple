@@ -674,9 +674,9 @@ pub fn rt_io_tcp_read_interp(args: &[Value]) -> Result<Value, CompileError> {
     match with_tcp_stream_mut(handle, |stream| stream.read(&mut buf)) {
         Ok(n) => {
             buf.truncate(n);
-            Ok(Value::Array(Arc::new(
-                buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
-            )))
+            Ok(Value::array(
+                buf.into_iter().map(|b| Value::Int(b as i64)).collect::<Vec<Value>>(),
+            ))
         }
         Err(_) => Ok(Value::Nil),
     }
@@ -687,10 +687,10 @@ pub fn rt_io_tcp_read_exact_interp(args: &[Value]) -> Result<Value, CompileError
     let size = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(4096).max(0) as usize;
     let mut buf = vec![0u8; size];
     match with_tcp_stream_mut(handle, |stream| stream.read_exact(&mut buf)) {
-        Ok(()) => Ok(Value::Array(Arc::new(
-            buf.into_iter().map(|b| Value::Int(b as i64)).collect(),
-        ))),
-        Err(_) => Ok(Value::Array(Arc::new(Vec::new()))),
+        Ok(()) => Ok(Value::array(
+            buf.into_iter().map(|b| Value::Int(b as i64)).collect::<Vec<Value>>(),
+        )),
+        Err(_) => Ok(Value::array(Vec::new())),
     }
 }
 
@@ -782,7 +782,7 @@ pub fn rt_io_tcp_write_http_interp(args: &[Value]) -> Result<Value, CompileError
     let handle = extract_handle(args, 0)?;
     let parts = match args.get(1) {
         Some(Value::Array(arr)) => arr.clone(),
-        _ => Arc::new(Vec::new()),
+        _ => Arc::new(crate::value::ArrayData::default()),
     };
     match with_tcp_stream_mut(handle, |stream| {
         for part in parts.iter() {
