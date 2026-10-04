@@ -50,13 +50,17 @@ proven cull was never presented.
   occlusion-culled: `skipped_command_count != occluded_command_count`. This
   is not weaker: any non-occlusion skip is still rejected.
 
-## Still open: other strict consumers
+## Other strict consumers
 
-These use the same `skipped_command_count != 0` rule and will reject any frame
-with a proven occlusion cull:
-- `src/lib/gc_async_mut/ui/gui_content_renderer.spl:102`
-- `src/lib/gc_async_mut/ui/web_render_pixel_backend.spl:133`
-- `src/lib/editor/70.backend/gui_sdl_bridge.spl:194`
+Switched to `skipped_command_count != occluded_command_count` (2026-10-05,
+follow-up PR): `src/lib/gc_async_mut/ui/gui_content_renderer.spl`,
+`src/lib/gc_async_mut/ui/web_render_pixel_backend.spl`,
+`src/lib/editor/70.backend/gui_sdl_bridge.spl` (its source-contract pin in
+`test/03_system/gui/editor_gui_sdl_spec.spl` updated to the new rule).
+`host_2d_vulkan` is left unchanged: its strict primitive lane never
+occlusion-culls, so `occluded_command_count` is always 0 there.
+
+Still open, routed to the browser_engine owner (same rule, same fix):
 - `src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_fast.spl`
   (several sites) and `simple_web_html_layout_renderer.spl:382`
   (`browser_engine/**`, owned by another lane)
