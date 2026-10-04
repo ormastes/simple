@@ -42,6 +42,26 @@ mod if_expr_cast_else {
         assert!(dump.contains("else_branch: Some"), "{dump}");
     }
 
+    /// Statement-position inline `if` (the tail of a block-form if-expression,
+    /// FontRenderer.get_glyph_advance_milli's shape) took a different parse
+    /// path that did not mark the then-branch.
+    #[test]
+    fn nested_statement_position_inline_if_cast_keeps_the_if_else() {
+        let src = "fn f(a: i64, r: i32) -> i32:\n    val x = if r > 0:\n        if a > 0: a as i32 else: r * 1000\n    else:\n        7\n    x\n";
+        let dump = ast(src);
+        assert!(!dump.contains("CastElse"), "{dump}");
+        assert_eq!(dump.matches("else_branch: Some").count(), 2, "both ifs keep their else: {dump}");
+    }
+
+    /// Generalisation: a bare statement-level inline `if` with a cast branch.
+    #[test]
+    fn statement_inline_if_cast_keeps_the_if_else() {
+        let src = "fn f(a: i64) -> i32:\n    if a > 0: a as i32 else: 0\n";
+        let dump = ast(src);
+        assert!(!dump.contains("CastElse"), "{dump}");
+        assert!(dump.contains("else_branch: Some"), "{dump}");
+    }
+
     #[test]
     fn else_branch_cast_is_unchanged() {
         let dump = ast("fn f(g: i32) -> i64:\n    val s: i64 = if g < 0: 5 else: g as i64\n    s\n");

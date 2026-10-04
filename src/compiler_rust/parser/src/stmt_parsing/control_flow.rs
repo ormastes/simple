@@ -264,7 +264,17 @@ impl<'a> Parser<'a> {
             // (`if cond:\n    d[k] = v`) has always worked. An assignment is
             // not an expression, so such an `if` can only be statement-form
             // and is finished by a separate path below.
-            let then_node = self.parse_expression_or_assignment()?;
+            // Mark the then-branch exactly as the expression-position `if`
+            // does (`expressions/helpers.rs`), so `x as T else:` leaves the
+            // `else:` to this `if` instead of becoming a CastElse fallback.
+            // Without it a statement-position inline `if` -- e.g. the tail
+            // expression of a block-form `val v = if a:\n    if b: x as T
+            // else: y` -- lost its else (nil in the interpreter, 3/0 in the
+            // JIT; FontRenderer.get_glyph_advance_milli's direct lane).
+            let saved_inline_if_then = self.inline_if_then_call_depth.replace(self.call_arg_depth);
+            let then_parsed = self.parse_expression_or_assignment();
+            self.inline_if_then_call_depth = saved_inline_if_then;
+            let then_node = then_parsed?;
             // Same reconciliation as the inline-statement arm above: an
             // expression-bodied `if cond_continued: expr` carries the same
             // pending pseudo-dedent.
