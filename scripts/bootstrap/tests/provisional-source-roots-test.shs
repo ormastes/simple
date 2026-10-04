@@ -4,7 +4,7 @@ set -eu
 base=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 check_roots() {
   count=0
-  for expected in src/compiler src/app src/lib src/os; do
+  for expected in src/compositions/kernel_llvm_cranelift src/compiler src/app src/lib src/os src/plugins src/package_ownership src/compositions; do
     [ "$#" -ge 2 ] && [ "$1" = --source ] && [ "$2" = "$expected" ] || {
       echo "FAIL: provisional build source roots omit or reorder $expected" >&2
       exit 1
@@ -12,12 +12,12 @@ check_roots() {
     count=$((count + 1))
     shift 2
   done
-  [ "$count" = 4 ]
+  [ "$count" = 8 ]
 }
 # These lines are shared by argv hashing, image execution, the receipt template,
 # and the compiler-task manifest. Extract arguments rather than whole scripts:
 # executing the real build would require an admitted producer and image receipts.
-rows=$(sed -n 's/.*\(--source src\/compiler.*\)/\1/p' \
+rows=$(sed -n 's/.*\(--source src\/compositions\/kernel_llvm_cranelift.*\)/\1/p' \
   "$base/prepare-provisional-manager-images.shs" \
   "$base/bootstrap-provisional-phase3-phase4.shs")
 [ "$(printf '%s\n' "$rows" | wc -l | tr -d ' ')" = 4 ] || {
@@ -28,5 +28,12 @@ printf '%s\n' "$rows" | while IFS= read -r row; do
   # Splitting the fixed literal root arguments is intentional; do not eval code.
   set -- $row
   check_roots "$@"
+  for missing in src/compositions/kernel_llvm_cranelift src/plugins src/package_ownership src/compositions; do
+    damaged=$(printf '%s\n' "$row" | sed "s@--source $missing @@")
+    if (set -- $damaged; check_roots "$@") >/dev/null 2>&1; then
+      echo "FAIL: missing source root was accepted: $missing" >&2
+      exit 1
+    fi
+  done
 done
-echo 'PASS: manager image identity and Phase3/4 task arguments include src/os'
+echo 'PASS: four argument sites select the kernel first; sixteen missing-owner mutations rejected'
