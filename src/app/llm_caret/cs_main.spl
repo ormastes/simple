@@ -11,11 +11,15 @@
 
 use app.llm_caret.tui_io.{CaretIo, CaretLoopResult, CaretTerminalResult, caret_terminal_ok}
 use std.nogc_sync_mut.io.pipe.{Stdin}
-use std.nogc_sync_mut.tui.terminal.{TerminalSize}
+use std.nogc_sync_mut.tui.terminal.{TerminalSize, terminal_stdin_is_tty,
+    terminal_stdout_is_tty, terminal_enter_raw_mode, terminal_exit_raw_mode,
+    terminal_get_size}
+use std.sys.pty.{read as pty_read}
 use app.llm_caret.cs_dashboard.{CsDashboard, cs_dashboard_new, cs_refresh,
-    cs_render, cs_handle_command, cs_apply_action}
+    cs_render, cs_handle_command, cs_apply_action, cs_frame_rows,
+    cs_poll_screens, cs_resize_agents, cs_agent_area}
 use std.nogc_sync_mut.cli.cli_util.{get_cli_args}
-use std.io_runtime.{env_get}
+use std.io_runtime.{env_get, time_now_unix_micros, time_now_monotonic_ms}
 
 const CS_DEFAULT_SESSION: text = "caret"
 const _CS_MIN_COLS: i64 = 40
@@ -55,6 +59,17 @@ fn cs_session_from_args(args: [text]) -> text:
             session = arg
     session
 
+# One submitted line: the command reducer, then its action. Returns the next
+# dashboard, the outcome to show, and whether the operator quit.
+fn _cs_step(d: CsDashboard, line: text) -> (CsDashboard, text, bool):
+    val (after_cmd, action) = cs_handle_command(d, line)
+    if action == "quit":
+        return (after_cmd, "", true)
+    val (after_action, outcome) = cs_apply_action(after_cmd, action)
+    # Re-poll so the next frame shows the real post-action state rather than
+    # the optimistic one the reducer produced.
+    (cs_refresh(after_action), outcome, false)
+
 fn cs_run(io: CaretIo, session: text) -> CaretLoopResult:
     var d = cs_refresh(cs_dashboard_new(session))
     var reason = "eof"
@@ -73,26 +88,189 @@ fn cs_run(io: CaretIo, session: text) -> CaretLoopResult:
                     continue
             else:
                 consecutive_empty_reads = 0
-            val (after_cmd, action) = cs_handle_command(d, line)
-            if action == "quit":
-                d = after_cmd
+            val (next, outcome, quit) = _cs_step(d, line)
+            d = next
+            if quit:
                 reason = "quit"
                 running = false
-            else:
-                val (after_action, outcome) = cs_apply_action(after_cmd, action)
-                # Re-poll so the next frame shows the real post-action state
-                # rather than the optimistic one the reducer produced.
-                d = cs_refresh(after_action)
-                if outcome != "":
-                    io.emit(outcome)
+            elif outcome != "":
+                io.emit(outcome)
         else:
             running = false
     CaretLoopResult(mode: "cs", ok: true, exit_reason: reason, error: "")
 
-# `cs` is a LINE-oriented dashboard: it prints a frame and reads a whole line.
-# It therefore deliberately does NOT use `production_caret_io()`, whose adapter
-# wires raw mode, the alternate screen and signal recovery — that path fails on
-# the current toolchain with
+# ---------------------------------------------------------------------------
+# Live terminal dashboard: raw-mode keys, in-place repaint, agents polled on a
+# timer so their PTYs are drained even while the operator is not typing.
+# ---------------------------------------------------------------------------
+
+# Key poll timeout; also the loop's idle tick.
+const _CS_TICK_MS: i64 = 50
+# Drain agent PTYs and re-capture the selected screen this often.
+const _CS_POLL_MS: i64 = 200
+# Full roster refresh (pane listing + per-process usage via `ps`) this often.
+const _CS_REFRESH_MS: i64 = 2000
+# A hung-up tty makes every read return "" at once; this many back-to-back
+# instant empty reads is treated as EOF instead of spinning.
+const _CS_MAX_INSTANT_EMPTY_READS: i64 = 200
+
+fn _with_input(d: CsDashboard, input: text, log: [text]) -> CsDashboard:
+    CsDashboard(session: d.session, manager_status: d.manager_status,
+        agents: d.agents, selected: d.selected, input: input, log: log,
+        screen: d.screen)
+
+fn _logged_outcome(d: CsDashboard, outcome: text) -> CsDashboard:
+    var log = d.log
+    for line in outcome.split("\n"):
+        if line.trim() != "":
+            log = log + [line]
+    _with_input(d, d.input, log)
+
+fn _two(n: i64) -> text:
+    if n < 10:
+        return "0" + n.to_text()
+    n.to_text()
+
+fn _clock() -> text:
+    val day = (time_now_unix_micros() / 1000000) % 86400
+    _two(day / 3600) + ":" + _two((day / 60) % 60) + ":" + _two(day % 60) + " UTC"
+
+fn _live_size() -> TerminalSize:
+    val size = terminal_get_size()
+    if size.cols > 0 and size.rows > 0:
+        return size
+    _plain_size()
+
+fn _drop_last_char(s: text) -> text:
+    var chars: [text] = []
+    for ch in s.chars():
+        chars = chars + [ch]
+    var out = ""
+    var i = 0
+    while i + 1 < chars.len():
+        out = out + chars[i]
+        i = i + 1
+    out
+
+fn _char_count(s: text) -> i64:
+    var n = 0
+    for _ch in s.chars():
+        n = n + 1
+    n
+
+# The bytes that bring the screen from `prev` to `next`: only changed rows are
+# rewritten (all of them when `full`), with the cursor hidden while drawing and
+# then parked on the input line. "" when nothing changed. Rows are exactly the
+# terminal width, so no clear-to-EOL is needed (and at the last column it would
+# erase the final cell).
+fn cs_live_paint(prev: [text], next: [text], full: bool, cursor_col: i64) -> text:
+    var body = ""
+    var i = 0
+    while i < next.len():
+        if full or i >= prev.len() or prev[i] != next[i]:
+            body = body + "\x1b[" + (i + 1).to_text() + ";1H" + next[i] + "\x1b[0m"
+        i = i + 1
+    if body == "":
+        return ""
+    val clear = if full: "\x1b[2J" else: ""
+    "\x1b[?25l" + clear + body + "\x1b[" + next.len().to_text() + ";" +
+        cursor_col.to_text() + "H\x1b[?25h"
+
+fn _live_end():
+    print_raw("\x1b[0m\x1b[?25h\x1b[?1049l")
+    val _ok = terminal_exit_raw_mode()
+
+# Requires raw mode to be on already; always leaves it off and the alternate
+# screen closed, whichever way the loop ends.
+fn cs_run_live(session: text) -> CaretLoopResult:
+    print_raw("\x1b[?1049h")
+    var d = cs_refresh(cs_dashboard_new(session))
+    var prev: [text] = []
+    var last_cols = -1
+    var last_rows = -1
+    var last_poll = time_now_monotonic_ms()
+    var last_refresh = last_poll
+    var last_clock = ""
+    var dirty = true
+    var instant_empty = 0
+    var reason = "quit"
+    var running = true
+    while running:
+        val size = _live_size()
+        val (cols, rows) = cs_effective_size(size.cols, size.rows)
+        var full = false
+        if cols != last_cols or rows != last_rows:
+            last_cols = cols
+            last_rows = rows
+            full = true
+            val (pane_cols, pane_rows) = cs_agent_area(cols, rows)
+            if pane_cols > 0:
+                cs_resize_agents(d, pane_cols, pane_rows)
+        val now = time_now_monotonic_ms()
+        if now - last_refresh >= _CS_REFRESH_MS:
+            d = cs_refresh(d)
+            last_refresh = now
+            last_poll = now
+            dirty = true
+        elif now - last_poll >= _CS_POLL_MS:
+            d = cs_poll_screens(d)
+            last_poll = now
+            dirty = true
+        val clock = _clock()
+        if clock != last_clock:
+            last_clock = clock
+            dirty = true
+        if dirty or full:
+            val frame = cs_frame_rows(d, cols, rows, clock, true)
+            var cursor = 3 + _char_count(d.input)
+            if cursor > cols:
+                cursor = cols
+            val paint = cs_live_paint(prev, frame, full, cursor)
+            if paint != "":
+                print_raw(paint)
+            prev = frame
+            dirty = false
+        val before = time_now_monotonic_ms()
+        val chunk = pty_read(0, 50)
+        if chunk == "":
+            if time_now_monotonic_ms() - before < 5:
+                instant_empty = instant_empty + 1
+                if instant_empty >= _CS_MAX_INSTANT_EMPTY_READS:
+                    reason = "eof"
+                    running = false
+            continue
+        instant_empty = 0
+        dirty = true
+        # An escape sequence (arrow, function key) is not text input.
+        if chunk.starts_with("\x1b") and chunk != "\x1b":
+            continue
+        for ch in chunk.chars():
+            if not running:
+                break
+            if ch == "\x03" or ch == "\x04":
+                running = false
+            elif ch == "\r" or ch == "\n":
+                val line = d.input
+                d = _with_input(d, "", d.log)
+                if line.trim() != "":
+                    val (next, outcome, quit) = _cs_step(d, line)
+                    d = _logged_outcome(next, outcome)
+                    last_refresh = time_now_monotonic_ms()
+                    if quit:
+                        running = false
+            elif ch == "\x7f" or ch == "\x08":
+                d = _with_input(d, _drop_last_char(d.input), d.log)
+            elif ch == "\x1b":
+                d = _with_input(d, "", d.log)
+            elif ch >= " ":
+                d = _with_input(d, d.input + ch, d.log)
+    _live_end()
+    CaretLoopResult(mode: "cs", ok: true, exit_reason: reason, error: "")
+
+# The line loop (`cs_plain_io`) prints a frame and reads a whole line. Neither
+# loop uses `production_caret_io()`, whose adapter wires raw mode, the
+# alternate screen and signal recovery — that path fails on the current
+# toolchain with
 #   semantic: dynamic SFFI dispatch has no compiler-owned ABI contract
 #             for function 'rt_signal_check'
 # and none of it is needed to print a frame and read a line. Using the heavier
@@ -153,10 +331,17 @@ fn cs_plain_io() -> CaretIo:
         emit: _plain_emit
     )
 
+# A real terminal gets the live dashboard; a pipe, or a terminal that refuses
+# raw mode, gets the line loop.
 fn main() -> i64:
-    val result = cs_run(cs_plain_io(), cs_session_from_args(get_cli_args()))
+    val session = cs_session_from_args(get_cli_args())
+    if terminal_stdin_is_tty() and terminal_stdout_is_tty() and terminal_enter_raw_mode():
+        if cs_run_live(session).ok:
+            return 0
+        return 1
+    val result = cs_run(cs_plain_io(), session)
     if result.ok:
         return 0
     1
 
-export cs_run, cs_session_from_args, cs_effective_size, cs_plain_io, CS_DEFAULT_SESSION
+export cs_run, cs_run_live, cs_live_paint, cs_session_from_args, cs_effective_size, cs_plain_io, CS_DEFAULT_SESSION
