@@ -9,6 +9,17 @@ integration does not close verification or authorize publication.
 
 ## 2026-10-04 continuation
 
+RV64 initial-exec TLS source now classifies R_RISCV_TLS_GOT_HI20, allocates a
+TLS-offset GOT entry independently of ordinary address entries, resolves paired
+PCREL_LO12 through its high relocation, and emits the thread-pointer offset.
+It also preserves the winning definition's symbol type and includes PT_TLS
+alignment residue in both IE and LE offsets. Test-first acceptance inspects
+linked instruction targets, GOT values and PT_TLS, archive selection and
+malformed inputs; three resolver scenarios cover the prerequisite type repair.
+Independent core source review found no P0/P1. All execution remains UNRUN.
+Static IE does not close RV32, dynamic TLS or relaxation. See
+`doc/08_tracking/verification/item4_riscv_initial_exec_2026-10-04.md`.
+
 Terminal provider shutdown follow-up: four generic retirement scenarios and two
 mapped-provider shutdown scenarios are authored before implementation. Shutdown
 now retires the active generation without allocating a replacement, closes owned

@@ -1,5 +1,21 @@
 # Item 4 parallel ownership
 
+## 2026-10-04 RV64 initial-exec TLS continuation
+
+Base: `75076715f57c7c9f20e98019a4a9ec5b1bdc0d0d`, target `release/1.0`.
+Root integrates on `work/item4-riscv-ie-20261004`, owns common plans and the
+verification report, and is final merge reviewer. Acceptance owns test-first
+full-link SSpec, assembly/object fixtures and authored manual in a new isolated
+worktree. Runtime owns relocation classification, high/low pairing and the
+existing static linker path in another new isolated worktree. Research owns
+psABI research, detail design and independent source review in a third worktree.
+All lanes start from the same base and record their session bindings.
+
+No new public schema or callback interface is required. Private test helpers use
+`item4_riscv_ie_`; scenario steps use `std.spec.step`. Tests must assert real
+linked bytes against independent ABI expectations. Missing runtime evidence is
+UNRUN, never a placeholder pass. Lower-model sidecars: N/A.
+
 ## 2026-10-04 terminal shutdown continuation
 
 Base: `8e141ae45a89250f30f694e49cd0312ac3eafa10`, target `release/1.0`.
