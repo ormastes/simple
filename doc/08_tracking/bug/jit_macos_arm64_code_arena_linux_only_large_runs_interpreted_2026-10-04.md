@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-10-04
 - **Area:** Rust seed JIT (`vendor/cranelift-jit/src/memory.rs` local patch), driver hybrid splice, Vulkan runtime feature
-- **Status:** OPEN — fix prototyped and measured, NOT landed (it exposes a second defect, below)
+- **Status:** FIXED 2026-10-05, together with the five defects it was hiding (see "Resolution" at the end)
 - **Related:** `jit_aarch64_branch_relocation_out_of_range_abort_2026-09-05.md` (the Linux fix),
   `host_vulkan_lavapipe_graphics_entry_points_stubbed_without_vulkan_feature_2026-08-11.md`
 
@@ -93,3 +93,51 @@ the 320x240 capture is byte-identical (`cmp`) to the interpreted capture.
 SIMPLE_GPU_BACKEND=vulkan SIMPLE_SHOWCASE_FRAMES=1 \
   "$SEED" run src/app/ui_showcase/hosts/main_2d_gpu.spl 2>&1 | grep -E 'PANIC|engine-demotion'
 ```
+
+## Resolution (2026-10-05)
+
+Making `main_2d_gpu.spl` run JIT'd with Vulkan on macOS took six fixes. Each
+one was hidden behind the previous one, because every earlier failure dropped
+the whole module to the interpreter:
+
+1. **Code arena on macOS.** Widened the arena `cfg` gates in
+   `vendor/cranelift-jit/src/memory.rs` to `any(linux, macos)`, keeping the
+   Linux-only BTI `mprotect` gate. Updated `.cargo-checksum.json`.
+2. **"device unavailable" root cause.** JIT code linked the runtime's
+   `not(feature = "vulkan")` stubs. `driver/Cargo.toml` now enables
+   `simple-runtime/vulkan` on `target_os = "macos"`. ash loads the loader at
+   runtime (`Entry::load`), so Vulkan-less hosts still start. This needs no
+   bootstrap script change: cargo unifies the feature for every build route.
+3. **Codegen panic, "no entry found for key".** (Fixed upstream in 0a669ff0c14 while this lane ran; this lane's duplicate fix was dropped on rebase.) The erased-receiver vtable type
+   switch emits `rt_method_not_found`, which was not a codegen root
+   (`codegen/common_backend.rs`). It made `Engine2D.read_pixels_region`,
+   `read_pixels_damaged` and `invalidate_damage_mirror` fail to compile.
+4. **Same-named traits.** Three stdlib traits are named `RenderBackend`. The
+   impl took the first trait's (missing) defaults, so
+   `VulkanBackend.invalidate_damage_mirror` was never materialised.
+   `select_impl_trait` (`hir/lower/module_lowering/module_pass.rs`) now picks
+   by method overlap, and on a tie prefers the extended superset.
+5. **`_i64(width)` returned 0.** `rsplit_once("__")` cut the leading
+   underscore off the flattened helper `…___i64`, and `compile_call` then ran
+   the lenient `i64(text)` builtin. `strip_call_module_prefix`
+   (`codegen/instr/calls.rs`) keeps the underscores. The Vulkan framebuffer was
+   being allocated with size 0.
+6. **Implicit `T?` field read.** `val parent = active` after a nil check, then
+   `parent.session`, read a boxed `Some` object as the payload and segfaulted.
+   Field access on a `T?` struct receiver now normalises through
+   `rt_unwrap_or_self` (`hir/lower/expr/access.rs`); the raw form passes
+   through.
+7. **`[u8] + [u8]` garbage.** `rt_array_concat` read byte-packed and
+   u64-packed arrays as tagged words. The font SPIR-V blob (head + tail) was
+   therefore rejected as invalid, and text fell back to CPU. Same-layout
+   operands keep their layout; mixed layouts decode per element.
+
+Specs:
+- `compiler/tests/trait_receiver_jit.rs` (8)
+- `hir/lower/tests/same_named_trait_default_tests.rs` (4)
+- `codegen/instr/calls.rs` `module_prefix_strip_*` (2)
+- `common_backend.rs` `synthesized_runtime_symbols_are_retained`
+- runtime `test_array_concat_*` (2)
+
+Result: the 320x240 Vulkan capture is byte-identical between the JIT and the
+interpreter, and the run passes with a device receipt.

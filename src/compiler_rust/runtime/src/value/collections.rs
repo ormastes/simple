@@ -5525,8 +5525,70 @@ pub extern "C" fn rt_array_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeVa
     unsafe {
         let len_a = (*arr_a).len;
         let len_b = (*arr_b).len;
+
+        // PACKED arrays store raw element words/bytes, not tagged RuntimeValues
+        // (see rt_array_copy below). The generic loop read a byte-packed
+        // `[u8]` as tagged words, so `head + tail` of a SPIR-V blob came back
+        // as garbage under the JIT ([3 2 35 7 ...] -> [3 45 43 160 ...]) and
+        // the Vulkan font pipeline rejected it as invalid SPIR-V. Same-layout
+        // operands keep their layout; mixed layouts decode each element the
+        // way rt_array_get does into a generic (tagged) result.
+        let a_bytes = (*arr_a).is_byte_packed();
+        let b_bytes = (*arr_b).is_byte_packed();
+        let a_words = (*arr_a).is_u64_packed();
+        let b_words = (*arr_b).is_u64_packed();
+        if a_bytes && b_bytes {
+            let total = len_a + len_b;
+            let result = rt_byte_array_new(total.max(1));
+            if result.is_nil() {
+                return result;
+            }
+            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            if len_a > 0 {
+                std::ptr::copy_nonoverlapping((*arr_a).data as *const u8, (*dst).data as *mut u8, len_a as usize);
+            }
+            if len_b > 0 {
+                std::ptr::copy_nonoverlapping(
+                    (*arr_b).data as *const u8,
+                    ((*dst).data as *mut u8).add(len_a as usize),
+                    len_b as usize,
+                );
+            }
+            (*dst).len = total;
+            return result;
+        }
+        if a_words && b_words {
+            let total = len_a + len_b;
+            let result = rt_array_new_uninit_u64(total.max(1));
+            if result.is_nil() {
+                return result;
+            }
+            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            if len_a > 0 {
+                std::ptr::copy_nonoverlapping((*arr_a).data as *const u64, (*dst).data as *mut u64, len_a as usize);
+            }
+            if len_b > 0 {
+                std::ptr::copy_nonoverlapping(
+                    (*arr_b).data as *const u64,
+                    ((*dst).data as *mut u64).add(len_a as usize),
+                    len_b as usize,
+                );
+            }
+            (*dst).len = total;
+            return result;
+        }
+
         let result = rt_array_new(len_a + len_b);
         if result.is_nil() {
+            return result;
+        }
+        if a_bytes || b_bytes || a_words || b_words {
+            for i in 0..len_a as i64 {
+                rt_array_push(result, rt_array_get(a, i));
+            }
+            for i in 0..len_b as i64 {
+                rt_array_push(result, rt_array_get(b, i));
+            }
             return result;
         }
 

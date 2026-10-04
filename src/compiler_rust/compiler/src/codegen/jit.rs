@@ -461,7 +461,7 @@ impl JitCompiler {
                         // Mirror the alias expansion in referenced_call_names
                         // (common_backend.rs): a Call to `rt_file_delete` also
                         // needs `rt_file_remove` declared/resolved.
-                        let base = raw.rsplit_once("__").map(|(_, t)| t).unwrap_or(raw);
+                        let base = super::instr::calls::strip_call_module_prefix(raw);
                         if let Some(alias) = super::instr::calls::sffi_alias_target(base) {
                             directly_called.insert(alias);
                         }
