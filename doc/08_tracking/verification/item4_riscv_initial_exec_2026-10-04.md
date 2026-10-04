@@ -45,3 +45,17 @@ renamed a production helper, separated resolver-test helper names, and avoided
 constructing GOT keys for non-GOT relocations. LLVM fixture assembly/inspection
 succeeded, which verifies fixture construction only. Simple execution remains
 UNRUN. Test-first here records source ordering, not observed RED/GREEN runs.
+
+Structural verification passed: whitespace, working/staged environment guards,
+numbered-artifact classification and zero executable specs under `doc/06_spec`.
+The release base advanced only in an unrelated bootstrap script; a private
+rebase to `d046032483f9045c60d33cd62052c9c9526cd817` preserved all eight patches
+unchanged according to `git range-diff`.
+
+Test-tree delta through `292c9d2a9c35072ee9bf4f8970d70c2576ce50f5`: PASS,
+3151 inherited offenders, zero introduced. The exact inherited list is retained
+at `C:/dev/simple/.git/item4-riscv-ie-preexisting-offenders.txt`, SHA256
+`52ac058b29cffa22e435ff81da0cfb5de6db910b102fa51759866e24fd1d4678`.
+Base verdict: 3813 diverged versus 965 baselined; 2979 new to that baseline,
+131 fixed-but-still-baselined; 42 mirror-only, 41 unallowlisted. These are
+inherited repository findings, not new failures introduced by this range.
