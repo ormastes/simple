@@ -1,0 +1,80 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{LocalId}
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+fn projected_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn projected_type_label(found: HirType?) -> text:
+    if val type_ = found:
+        match type_.kind:
+            case HirTypeKind.Array(element, _): return "array:" + projected_type_label(Some(element))
+            case HirTypeKind.Slice(element): return "slice:" + projected_type_label(Some(element))
+            case HirTypeKind.Str: return "text"
+            case HirTypeKind.Int(64, true): return "i64"
+            case _: return "other"
+    "missing"
+
+fn projected_base() -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(SymbolId(id: 99999)), has_type_: false,
+        type_: projected_type(HirTypeKind.Unit), span: Span.empty())
+
+describe "Declared array types survive MIR projections":
+    it "preserves the i64 element declaration on an erased field local":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.struct_value_syms[10] = "ArrayBox"
+        lowering.struct_field_hir_type["ArrayBox"] = [projected_type(HirTypeKind.Array(projected_type(HirTypeKind.Int(64, true)), nil))]
+        lowering.remember_field_projection_provenance(projected_base(), LocalId(id: 10), 0, LocalId(id: 11))
+        expect(projected_type_label(lowering.find_local_hir_type(11))).to_equal("array:i64")
+        expect(lowering.local_is_runtime_array(LocalId(id: 11))).to_equal(true)
+
+    it "retains text slice fields without substituting integer elements":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.struct_value_syms[10] = "SliceBox"
+        lowering.struct_field_hir_type["SliceBox"] = [projected_type(HirTypeKind.Slice(projected_type(HirTypeKind.Str)))]
+        lowering.remember_field_projection_provenance(projected_base(), LocalId(id: 10), 0, LocalId(id: 12))
+        expect(projected_type_label(lowering.find_local_hir_type(12))).to_equal("slice:text")
+        expect(lowering.local_is_runtime_array(LocalId(id: 12))).to_equal(true)
+
+    it "registers an indexed array handle with its declared text elements":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val inner = projected_type(HirTypeKind.Array(projected_type(HirTypeKind.Str), nil))
+        lowering.remember_local_hir_type(20, projected_type(HirTypeKind.Array(inner, nil)), 0, 0)
+        lowering.remember_array_index_projection_provenance(LocalId(id: 20), LocalId(id: 21))
+        expect(projected_type_label(lowering.find_local_hir_type(21))).to_equal("array:text")
+        expect(lowering.local_is_runtime_array(LocalId(id: 21))).to_equal(true)
+
+    it "preserves declarations across two consecutive array projections":
+        var lowering = MirLowering.new(SymbolTable.new())
+        val inner = projected_type(HirTypeKind.Array(projected_type(HirTypeKind.Int(64, true)), nil))
+        val middle = projected_type(HirTypeKind.Array(inner, nil))
+        lowering.remember_local_hir_type(30, projected_type(HirTypeKind.Slice(middle)), 0, 0)
+        lowering.remember_array_index_projection_provenance(LocalId(id: 30), LocalId(id: 31))
+        lowering.remember_array_index_projection_provenance(LocalId(id: 31), LocalId(id: 32))
+        expect(projected_type_label(lowering.find_local_hir_type(32))).to_equal("array:i64")
+        expect(lowering.local_is_runtime_array(LocalId(id: 32))).to_equal(true)
+
+    it "does not treat a scalar array element as another array":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.remember_local_hir_type(40, projected_type(HirTypeKind.Array(projected_type(HirTypeKind.Int(64, true)), nil)), 0, 0)
+        lowering.remember_array_index_projection_provenance(LocalId(id: 40), LocalId(id: 41))
+        expect(projected_type_label(lowering.find_local_hir_type(41))).to_equal("missing")
+        expect(lowering.local_is_runtime_array(LocalId(id: 41))).to_equal(false)
+
+    it "does not invent element types for unknown base locals":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.remember_array_index_projection_provenance(LocalId(id: 50), LocalId(id: 51))
+        expect(projected_type_label(lowering.find_local_hir_type(51))).to_equal("missing")
+        expect(lowering.local_is_runtime_array(LocalId(id: 51))).to_equal(false)
+
+    it "does not read a declaration outside the resolved field range":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.struct_value_syms[60] = "EmptyBox"
+        lowering.struct_field_hir_type["EmptyBox"] = []
+        lowering.remember_field_projection_provenance(projected_base(), LocalId(id: 60), 0, LocalId(id: 61))
+        expect(projected_type_label(lowering.find_local_hir_type(61))).to_equal("missing")
+        expect(lowering.local_is_runtime_array(LocalId(id: 61))).to_equal(false)

@@ -740,12 +740,30 @@ impl MirLowering:
                         # of element kind. Marking is idempotent with the
                         # element-name path above.
                         case HirTypeKind.Array(_, _):
+                            self.remember_local_hir_type(result.id, decl_field_types[field_idx], 0, 0)
                             self.runtime_array_locals[result.id] = true
                             self.mark_runtime_value_local(result.id)
                         case HirTypeKind.Slice(_):
+                            self.remember_local_hir_type(result.id, decl_field_types[field_idx], 0, 0)
                             self.runtime_array_locals[result.id] = true
                             self.mark_runtime_value_local(result.id)
                         case _: ()
+
+    me remember_array_index_projection_provenance(base_local: LocalId, result: LocalId):
+        # The mutation writeback path reads a slot once, without lower_expr(Index).
+        # Preserve its declared array element type as well as handle identity;
+        # pop needs the leaf type even when the current MIR word is erased i64.
+        # Unknown/scalar elements do not acquire array identity from a method name.
+        if val base_type = self.find_local_hir_type(base_local.id):
+            match base_type.kind:
+                case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
+                    match element_type.kind:
+                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                            self.remember_local_hir_type(result.id, element_type, 0, 0)
+                            self.runtime_array_locals[result.id] = true
+                            self.mark_runtime_value_local(result.id)
+                        case _: ()
+                case _: ()
 
     fn mir_type_is_integer(t: MirType) -> bool:
         """True for the MIR kinds `decode_runtime_value` unboxes with `>> 3`.
@@ -2486,6 +2504,7 @@ impl MirLowering:
                 # defaulting to field index 0 for every field name.
                 if has_real_struct_name:
                     self.struct_value_syms[decoded_elem.id] = esn
+                self.remember_array_index_projection_provenance(base_local, decoded_elem)
                 decoded_elem
             else:
                 base_local
