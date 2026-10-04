@@ -8,7 +8,8 @@
 # - normalize_runtime_request_url: fix up JS runtime fetch URLs
 # - find_text: low-level substring search used by many helpers
 
-use std.common.string_core.{text_to_bytes}
+use std.common.string_core.{text_to_bytes, bytes_to_text}
+use std.common.base_encoding.base64.{base64_decode_bytes}
 use std.common.encoding.utf8.{
     text_is_valid_utf8, text_without_last_codepoint
 }
@@ -286,6 +287,11 @@ fn resolve_relative_url(base_url: text, href: text) -> text:
     if href == "":
         return base_url
     if href.starts_with("http://") or href.starts_with("https://") or href.starts_with("file://") or href.starts_with("about:"):
+        return href
+    # A data: URL is absolute (URL Standard: scheme "data"); joining it onto
+    # the base turned `data:text/css,...` into
+    # `https://host/data:text/css,...` and fetched it from the origin.
+    if href.lower().starts_with("data:"):
         return href
     if href.starts_with("//"):
         return url_protocol(base_url) + href
@@ -578,3 +584,57 @@ fn normalize_runtime_request_url(base_url: text, request_url: text) -> text:
     if request_url.starts_with("nil/"):
         return resolve_relative_url(base_url, request_url.slice(3, request_url.len()))
     resolve_relative_url(base_url, request_url)
+
+# ── data: URLs (RFC 2397 / Fetch "data: URL processor") ─────────────────────
+# Decoded in the session, never sent to a transport.
+
+struct BrowserDataUrl:
+    mime: text
+    body: [u8]
+
+fn _data_url_hex(code: i64) -> i64:
+    if code >= 48 and code <= 57:
+        return code - 48
+    if code >= 65 and code <= 70:
+        return code - 55
+    if code >= 97 and code <= 102:
+        return code - 87
+    -1
+
+fn _data_url_percent_decode(raw: text) -> [u8]:
+    val bytes = text_to_bytes(raw)
+    var out: [u8] = []
+    var i = 0
+    while i < bytes.len():
+        val b = bytes[i].to_i64()
+        if b == 37 and i + 2 < bytes.len():
+            val hi = _data_url_hex(bytes[i + 1].to_i64())
+            val lo = _data_url_hex(bytes[i + 2].to_i64())
+            if hi >= 0 and lo >= 0:
+                out.push((hi * 16 + lo) as u8)
+                i = i + 3
+                continue
+        out.push(bytes[i])
+        i = i + 1
+    out
+
+fn browser_data_url_decode(url: text) -> BrowserDataUrl?:
+    """Split `data:[<mediatype>][;base64],<data>`; nil when `url` is not a
+    well-formed data: URL. The media type defaults to text/plain."""
+    if not url.lower().starts_with("data:"):
+        return nil
+    val comma = url.index_of(",")
+    if comma < 5:
+        return nil
+    val header = url.slice(5, comma).trim()
+    val payload = url.slice(comma + 1, url.len())
+    val header_lower = header.lower()
+    val is_base64 = header_lower.ends_with(";base64")
+    val mime_part = if is_base64: header.slice(0, header.len() - 7) else: header
+    val mime = if mime_part.trim() == "": "text/plain" else: mime_part.trim()
+    val decoded = _data_url_percent_decode(payload)
+    val body = if is_base64:
+        base64_decode_bytes(bytes_to_text(decoded))
+    else:
+        decoded
+    Some(BrowserDataUrl(mime: mime, body: body))

@@ -1,0 +1,56 @@
+"""
+## Purpose and audience
+Purpose: Pin data: URL handling in BrowserSession - a data: href is an
+absolute URL (it used to be joined onto the document, becoming
+`https://host/data:text/css,...`), and data: stylesheets and images are
+decoded inside the session with no transport request.
+Audience: maintainers of gc_async_mut/web and the browser hosts.
+## Operator workflow
+Run with the test runner; offline.
+## Compatibility and limitations
+Bug record: doc/08_tracking/bug/browser_session_external_script_cursor_2026-10-04.md
+(security review section).
+"""
+# @req: REQ-WEB-BROWSER-015
+
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_url.{resolve_relative_url, browser_data_url_decode}
+use std.common.string_core.{bytes_to_text}
+
+describe "data: URL resolution and decoding":
+    it "keeps a data: href absolute":
+        expect(resolve_relative_url("https://example.com/a/b.html", "data:text/css,p{}")).to_equal("data:text/css,p{}")
+        expect(resolve_relative_url("https://example.com/a/b.html", "DATA:text/css,p{}")).to_equal("DATA:text/css,p{}")
+        expect(resolve_relative_url("https://example.com/a/b.html", "c.css")).to_equal("https://example.com/a/c.css")
+
+    it "decodes percent-encoded and base64 payloads with their media type":
+        val plain = browser_data_url_decode("data:text/css,p%7Bcolor:red%7D").unwrap()
+        expect(plain.mime).to_equal("text/css")
+        expect(bytes_to_text(plain.body)).to_equal("p{color:red}")
+        val b64 = browser_data_url_decode("data:text/plain;base64,aGVsbG8=").unwrap()
+        expect(bytes_to_text(b64.body)).to_equal("hello")
+        val bare = browser_data_url_decode("data:,x").unwrap()
+        expect(bare.mime).to_equal("text/plain")
+        assert_true(browser_data_url_decode("data:no-comma") == nil)
+        assert_true(browser_data_url_decode("https://example.com/") == nil)
+
+describe "data: subresources load without a transport":
+    it "applies a data: stylesheet and queues no request":
+        var s = BrowserSession.new()
+        val _ = s.open_html("https://example.com/", "<html><head><link rel=\"stylesheet\" href=\"data:text/css,p%7Bcolor:red%7D\"></head><body><p>x</p></body></html>")
+        assert_false(s.has_pending_requests())
+        expect(s.current_style_html).to_contain("p{color:red}")
+
+    it "stores a data: PNG image and queues no request":
+        step("a 1x1 PNG encoded as a base64 data: URL")
+        val png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+        val src = "data:image/png;base64,{png_b64}"
+        var s = BrowserSession.new()
+        val _ = s.open_html("https://example.com/", "<html><body><img src=\"{src}\"></body></html>")
+        assert_false(s.has_pending_requests())
+        expect(s.image_resources.len()).to_equal(1)
+        expect(s.image_resources[0].width).to_equal(1)

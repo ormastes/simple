@@ -11,11 +11,12 @@
 
 use std.js.types.pair.{Pair}
 use std.js.types.js_types.{JsValue}
+use std.common.string_core.{bytes_to_text}
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserImageSource, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse, BrowserWasmModuleRecord, BrowserHstsPolicy, BrowserHstsSnapshot, BrowserHstsSnapshotEntry, BROWSER_MAX_IMAGE_RESOURCES, BROWSER_MAX_IMAGE_PIXELS, browser_header_media_type, browser_header_is_javascript, browser_header_has_nosniff, browser_history_push_bounded}
 use std.gc_async_mut.web.browser_session_storage.{pair_value, upsert_pair}
 use std.gc_async_mut.web.browser_session_url.{
     network_navigation_hostname_valid, normalize_network_navigation_url,
-    resolve_relative_url, url_hostname
+    resolve_relative_url, url_hostname, browser_data_url_decode
 }
 use common.web.public_suffix.{is_public_suffix}
 use common.web.host_policy.{is_ip_host_literal}
@@ -35,7 +36,8 @@ use std.gc_async_mut.gpu.browser_engine.script.event_loop.{
     event_loop_clock_micros
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
-    BROWSER_MAX_DOCUMENT_SUBRESOURCES, BROWSER_MAX_RESOURCE_BYTES
+    BROWSER_MAX_DOCUMENT_SUBRESOURCES, BROWSER_MAX_RESOURCE_BYTES,
+    browser_resource_size_allowed
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_serialize_html
@@ -94,6 +96,18 @@ fn _image_hex_bytes(canonical_hex: text) -> Result<[u8], text>:
         bytes.push((hi * 16 + lo).to_u8())
         index = index + 2
     bytes
+
+# Inverse of `_image_hex_bytes`: the canonical lowercase-hex image body that
+# every image response (network or data: URL) carries into the session.
+# (Spelled out instead of `.to_hex()`: in this module's scope that name
+# resolves to a colour helper taking a struct, not the integer method.)
+fn _image_bytes_hex(bytes: [u8]) -> text:
+    val digits = "0123456789abcdef"
+    var pieces: [text] = []
+    for byte in bytes:
+        val v = byte.to_i64()
+        pieces.push(digits.slice(v / 16, v / 16 + 1) + digits.slice(v % 16, v % 16 + 1))
+    pieces.join("")
 
 fn _image_content_type_is_png(headers: text) -> bool:
     browser_header_media_type(headers) == "image/png"
@@ -856,6 +870,31 @@ impl BrowserSession:
                 self._remove_failed_image_source(render_resource_key)
                 return Err(warning)
             return Ok(false)
+        if source.resolved_url.lower().starts_with("data:"):
+            # data: images are decoded here, never fetched; the decoded bytes
+            # enter the same store a network response does.
+            val data_url = browser_data_url_decode(source.resolved_url)
+            val warning = if data_url == nil:
+                "image load error: malformed data: URL"
+            elif not browser_resource_size_allowed(data_url.unwrap().body.len()):
+                "image load error: data: URL exceeds 50 MiB resource limit"
+            else:
+                self._store_image_response(
+                    BrowserResponse.create(
+                        request_id: "",
+                        kind: "image",
+                        url: source.resolved_url,
+                        status: 200,
+                        headers: "Content-Type: {data_url.unwrap().mime}",
+                        body: _image_bytes_hex(data_url.unwrap().body),
+                        error: ""
+                    ),
+                    render_resource_key
+                )
+            if warning != "":
+                self._remove_failed_image_source(render_resource_key)
+                return Err(warning)
+            return Ok(false)
         var request = self._build_request(
             "image", source.resolved_url, "GET", "", "", ""
         )
@@ -932,6 +971,23 @@ impl BrowserSession:
                         load.document_url, resolved, false
                     ) and not self._broker_hsts_candidate(resolved):
                         load.append_warning("CSP blocked style: {resolved}")
+                        continue
+                    if resolved.lower().starts_with("data:"):
+                        # data: stylesheets are decoded here, never fetched.
+                        if val Some(data_url) = browser_data_url_decode(resolved):
+                            if browser_resource_size_allowed(data_url.body.len()):
+                                if val Some(expanded) = load.admit_stylesheet(
+                                    load.document_url, load.document_url,
+                                    bytes_to_text(data_url.body),
+                                    source.csp_policy, source.source_offset
+                                ):
+                                    if expanded.sources.len() > 0:
+                                        load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+                                        style_source_count = load.style_sources.len()
+                            else:
+                                load.append_warning("stylesheet load error: data: URL exceeds 50 MiB resource limit")
+                        else:
+                            load.append_warning("stylesheet load error: malformed data: URL")
                         continue
                     if val Some(override_body) = pair_value(self.resource_overrides, resolved):
                         if val Some(expanded) = load.admit_stylesheet(
