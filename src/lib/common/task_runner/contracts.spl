@@ -33,6 +33,7 @@ struct TaskRunnerAttemptV1:
     stdout_digest: text
     stderr_digest: text
     result_digest: text
+    transport_execution_digest: text
 
 fn task_runner_identity_v1(value: TaskRunnerIdentityV1) -> Result<text, text>:
     if value.kind != "build" and value.kind != "test": return Err("invalid task kind")
@@ -56,7 +57,7 @@ fn task_runner_attempt_error_v1(value: TaskRunnerAttemptV1) -> text:
     if value.mode != "grouped" and value.mode != "isolated": return "invalid execution mode"
     if value.pid <= 0 or value.process_generation < 1: return "missing process identity"
     if not value.tree_reaped: return "attempt tree is not reaped"
-    for digest in [value.stdout_digest, value.stderr_digest]:
+    for digest in [value.stdout_digest, value.stderr_digest, value.transport_execution_digest]:
         if not builder_digest_valid_v1(digest): return "invalid attempt log digest"
     if value.status == "passed" or value.status == "failed":
         if not value.result_validated or not builder_digest_valid_v1(value.result_digest):
@@ -66,6 +67,10 @@ fn task_runner_attempt_error_v1(value: TaskRunnerAttemptV1) -> text:
             return "passing task has failed task result"
         if value.status == "failed" and value.reason != "compile" and value.reason != "assertion":
             return "ordinary failure lacks attributable reason"
+    elif value.status == "skipped" or value.status == "pending":
+        if not value.result_validated or not builder_digest_valid_v1(value.result_digest):
+            return "nonexecuted task lacks validated per-task evidence"
+        if value.reason != value.status: return "nonexecuted task reason differs"
     elif value.status == "crashed":
         if value.reason == "process-signal":
             if value.signal_number <= 0 or value.signal_number > 64:

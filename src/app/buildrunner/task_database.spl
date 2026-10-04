@@ -1,0 +1,98 @@
+# Build-specific binding over the shared PureDatabase task journal.
+# Context is an immutable manifest input, never reconstructed from filenames.
+use std.common.build_manager.contracts.{BuildTaskV1, BuildRunV1,
+    builder_digest_valid_v1, builder_task_identity_v1}
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1,
+    task_runner_identity_v1}
+use std.common.task_runner.journal.{TaskRunnerJournalV1, task_runner_journal_open_v1,
+    task_runner_journal_identity_v1, task_runner_journal_history_v1,
+    task_runner_journal_append_v1, task_runner_journal_missing_v1,
+    task_runner_journal_release_v1}
+use std.common.task_runner.snapshot.{task_runner_snapshot_commit_v1}
+use std.common.task_runner.recovery.{task_runner_execution_mode_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+struct BuildRunnerTaskContextV1:
+    backend: text
+    runtime_digest: text
+    policy_digest: text
+    environment_digest: text
+
+fn build_runner_context_encode_v1(value: BuildRunnerTaskContextV1) -> Result<text, text>:
+    if value.backend != "llvm" and value.backend != "cranelift":
+        return Err("unsupported build backend context")
+    for digest in [value.runtime_digest, value.policy_digest, value.environment_digest]:
+        if not builder_digest_valid_v1(digest): return Err("invalid build context digest")
+    Ok("SIMPLE-BUILD-TASK-CONTEXT-1\n" + value.backend + "\n" +
+        value.runtime_digest + "\n" + value.policy_digest + "\n" +
+        value.environment_digest + "\n")
+
+fn build_runner_context_decode_v1(payload: text) -> Result<BuildRunnerTaskContextV1, text>:
+    val fields = payload.split("\n")
+    if fields.len() != 6 or fields[0] != "SIMPLE-BUILD-TASK-CONTEXT-1" or fields[5] != "":
+        return Err("invalid build context framing")
+    val value = BuildRunnerTaskContextV1(fields[1], fields[2], fields[3], fields[4])
+    if build_runner_context_encode_v1(value)? != payload: return Err("noncanonical build context")
+    Ok(value)
+
+fn build_runner_task_identity_v1(task: BuildTaskV1, payload: text) -> Result<TaskRunnerIdentityV1, text>:
+    val context = build_runner_context_decode_v1(payload)?
+    val path = "task-context/" + task.id + ".sdn"
+    var bound = false
+    for input in task.inputs:
+        if input.path == path:
+            if bound or input.digest != sha256_text(payload): return Err("build context input differs")
+            bound = true
+    if not bound: return Err("build context is not an admitted task input")
+    # Retry number is transport state, not semantic identity. Keep every other
+    # ordered argument/input/dependency/output and policy field in the hash.
+    var canonical = task
+    canonical.attempt = 1
+    val execution = builder_task_identity_v1(canonical)
+    if not builder_digest_valid_v1(execution): return Err("invalid build task contract")
+    val identity = TaskRunnerIdentityV1("build", task.id, "", context.backend,
+        task.phase, task.producer_digest, task.source_digest, context.runtime_digest,
+        task.toolchain_digest, context.policy_digest, execution)
+    val _valid = task_runner_identity_v1(identity)?
+    Ok(identity)
+
+fn build_runner_database_open_v1(root: text, nonce: text, run: BuildRunV1,
+        contexts: Dict<text, text>) -> Result<TaskRunnerJournalV1, text>:
+    if run.tasks.len() == 0 or contexts.len() != run.tasks.len():
+        return Err("build task context inventory differs")
+    var expected: [TaskRunnerIdentityV1] = []
+    var seen: Dict<text, bool> = {}
+    for task in run.tasks:
+        if seen.contains_key(task.id) or not contexts.contains_key(task.id):
+            return Err("duplicate or absent build task context")
+        seen[task.id] = true
+        expected = expected.push(build_runner_task_identity_v1(task, contexts[task.id])?)
+    task_runner_journal_open_v1(root, nonce, run.tasks[0].source_digest, expected)
+
+fn build_runner_database_mode_v1(owner: TaskRunnerJournalV1, task: BuildTaskV1,
+        context: text) -> Result<text, text>:
+    val identity = task_runner_identity_v1(build_runner_task_identity_v1(task, context)?)?
+    val _registered = task_runner_journal_identity_v1(owner, identity)?
+    task_runner_execution_mode_v1(identity, task_runner_journal_history_v1(owner, identity)?)
+
+fn build_runner_database_append_v1(owner: TaskRunnerJournalV1, task: BuildTaskV1,
+        context: text, accepted: TaskRunnerAttemptV1) -> Result<TaskRunnerJournalV1, text>:
+    val identity = task_runner_identity_v1(build_runner_task_identity_v1(task, context)?)?
+    if accepted.identity_digest != identity or accepted.attempt != task.attempt:
+        return Err("accepted build attempt identity differs")
+    task_runner_journal_append_v1(owner, accepted)
+
+fn build_runner_database_finish_v1(owner: TaskRunnerJournalV1) -> Result<text, text>:
+    # Release even on an incomplete ledger or snapshot failure. A process still
+    # owning live workers must not call finish; its supervisor owns closure.
+    val missing = task_runner_journal_missing_v1(owner)
+    val snapshot = task_runner_snapshot_commit_v1(owner, owner.revision)
+    val released = task_runner_journal_release_v1(owner)
+    if released.is_err(): return Err(released.unwrap_err())
+    if missing.is_err(): return Err(missing.unwrap_err())
+    if missing.unwrap().len() > 0: return Err("build task ledger has missing outcomes")
+    snapshot
+
+export BuildRunnerTaskContextV1, build_runner_context_encode_v1, build_runner_context_decode_v1
+export build_runner_task_identity_v1, build_runner_database_open_v1
+export build_runner_database_mode_v1, build_runner_database_append_v1, build_runner_database_finish_v1

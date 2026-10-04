@@ -8,6 +8,8 @@ struct TaskRunnerRecoveryPlanV1:
     isolated: [text]
     exhausted: [text]
     aborted: [text]
+    skipped: [text]
+    pending: [text]
 
 fn task_runner_execution_mode_v1(identity_digest: text,
         history: [TaskRunnerAttemptV1]) -> Result<text, text>:
@@ -21,9 +23,10 @@ fn task_runner_execution_mode_v1(identity_digest: text,
         if row.status == "crashed": isolated = true
     Ok(if isolated: "isolated" else: "grouped")
 
-fn task_runner_recovery_plan_v1(expected: [text], attempts: [TaskRunnerAttemptV1],
+fn task_runner_recovery_plan_v1(group_id: text, expected: [text], attempts: [TaskRunnerAttemptV1],
         group_crashed: bool, tree_reaped: bool, group_attempt: i64,
         max_attempts: i64) -> Result<TaskRunnerRecoveryPlanV1, text>:
+    if group_id == "" or group_id.len() > 4096: return Err("invalid recovery window")
     if expected.len() < 1 or expected.len() > 20000: return Err("invalid task inventory bound")
     if not tree_reaped: return Err("cannot recover a live group")
     if max_attempts < 1 or max_attempts > 8 or group_attempt < 1 or group_attempt > max_attempts:
@@ -40,6 +43,7 @@ fn task_runner_recovery_plan_v1(expected: [text], attempts: [TaskRunnerAttemptV1
         val row = attempts[index]
         val invalid = task_runner_attempt_error_v1(row)
         if invalid != "": return Err(invalid)
+        if row.group_id != group_id: return Err("attempt belongs to another recovery window")
         if not expected_set.contains_key(row.identity_digest) or row.attempt > group_attempt:
             return Err("attempt differs from expected inventory or generation")
         val key = row.identity_digest + ":" + str(row.attempt)
@@ -54,16 +58,20 @@ fn task_runner_recovery_plan_v1(expected: [text], attempts: [TaskRunnerAttemptV1
     var isolated: [text] = []
     var exhausted: [text] = []
     var aborted: [text] = []
+    var skipped: [text] = []
+    var pending: [text] = []
     for identity in expected:
         var status = "not-run"
         if latest.contains_key(identity): status = attempts[latest[identity]].status
         if status == "passed": passed.push(identity)
         elif status == "failed": failed.push(identity)
         elif status == "aborted": aborted.push(identity)
+        elif status == "skipped": skipped.push(identity)
+        elif status == "pending": pending.push(identity)
         else:
             if not group_crashed: aborted.push(identity)
             elif group_attempt < max_attempts: isolated.push(identity)
             else: exhausted.push(identity)
-    Ok(TaskRunnerRecoveryPlanV1(passed, failed, isolated, exhausted, aborted))
+    Ok(TaskRunnerRecoveryPlanV1(passed, failed, isolated, exhausted, aborted, skipped, pending))
 
 export TaskRunnerRecoveryPlanV1, task_runner_execution_mode_v1, task_runner_recovery_plan_v1
