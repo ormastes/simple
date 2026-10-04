@@ -65,14 +65,26 @@ Text mode (`main.spl https://<site>`) for the three big sites also exceeds
 
 ## Open rendering gaps (unblock condition per item)
 
-- **A. `text-align` on `body` not inherited to `<p>`** — text stays left.
-  Repro: `body{text-align:center}` + `<p>`. Unblock: inherit text-align.
-- **B. `margin:auto` with `max-width` does not center a block.**
-  Repro: `body{max-width:200px;margin:auto}`.
-- **C. `max-width:26em` resolves far too narrow** (one word per line at a
-  400px viewport where 26em=416px). em units in max-width are mis-resolved.
-- **D. `padding:25vh 2em 2em` (3-value shorthand / vh) ignored** — no top
-  padding. Repro `body{padding:100px 2em 2em}` also ignored.
+- **A. FIXED (work/browser-layout-width).** Not an inheritance bug:
+  `text-align` inherits fine and the CPU raster path aligned lines, but the
+  Draw IR text emitters (`simple_web_html_layout_renderer_paint_layout.spl`)
+  drew every line at the content-box left edge. They now place each line
+  with the raster path's `text_line_aligned_x` and width model.
+- **B. FIXED.** `margin:auto` centring only considered an explicit `width`;
+  a width:auto box clamped by `max-width` now shares the free space
+  (`simple_web_html_layout_renderer_layout_engine.spl`).
+- **C. FIXED.** `min-width`/`max-width` were read with `parse_int`
+  (26em -> 26px); em now uses the element's font-size and rem the 16px root
+  (`simple_web_html_layout_renderer_decl_apply.spl`).
+  Spec for A/B/C: `test/01_unit/browser_engine/simple_web_width_centering_spec.spl`.
+- **D. `padding:25vh 2em 2em` ignored (OPEN).** `_padding_integer_px` in
+  `simple_web_html_layout_renderer_declarations.spl` accepts only integer
+  px / 0, and one unsupported token rejects the whole shorthand. em/rem
+  would be contained, but example.com's `25vh` needs the viewport height at
+  cascade time (or a vh sentinel resolved at every pad_t/pad_b use in
+  layout, as margins do with `margin_token_vh_px`). Until then example.com
+  is centred and width-correct but lacks its 150px top padding and 32px
+  side padding.
 - **D2. Author sheet ignored on the BrowserSession lane** — example.com
   carries `<script src=/s.js>`, so `browser_document_needs_session` routes it
   through BrowserSession, and the 800x600 render shows white background and
