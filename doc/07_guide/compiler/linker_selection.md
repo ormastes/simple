@@ -22,10 +22,12 @@ and `--macho-signing-identifier IDENTIFIER` flags in native link configuration.
 It accepts `-e ENTRY`, repeated `-rpath PATH`, and
 `--macho-max-image-bytes BYTES`; the last is an image-size cap, not a process
 memory guarantee. Minimum macOS version is 11.0. Unsupported flags and policies
-fail explicitly. The current Mach-O builder requires PIE and strict duplicate
-definitions, so native configuration must set `allow_duplicate_definitions`
-to false; its general default is true. Debug, stripping, size preference and
-retained-symbol policies remain unsupported in this adapter.
+fail explicitly. The current Mach-O builder requires PIE. Native configuration
+with `allow_duplicate_definitions=true` retains the first selected strong
+definition; false rejects duplicate strong definitions. Existing direct hosted
+and static APIs default to strict rejection. This explicit Simple policy does
+not claim equivalence to an Apple linker flag or add weak coalescing. Debug,
+stripping, size preference and retained-symbol policies remain unsupported.
 
 Supply actual matching Mach-O objects, archives and thin dylib providers through
 explicit library paths. Providers with an `@rpath/` install name also require an

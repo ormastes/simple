@@ -374,3 +374,27 @@ required; unsupported configuration and .tbd/cache providers fail explicitly.
 External default and managed internal-admission refusal remain intact. This
 adapter does not close missing SDK providers, Mach-O semantics, native Darwin
 execution or any other host gate. Simple execution remains UNRUN.
+
+## Mach-O duplicate policy ownership (2026-10-04)
+
+Base: fb54131d4092053c0850ae3337fea5bde17853eb, target release/1.0.
+Root owns integration branch work/item4-macho-duplicates-20261004, plans, guide,
+verification report and final merge. Runtime owns symbols.spl, hosted_link.spl
+and native_adapter.spl. Acceptance owns real fixture variants, duplicate-policy
+SSpec and mirrored manual. Research owns the policy design and independent final
+source/test review. All agents use their own clean worktrees; sidecars N/A.
+
+Frozen interfaces: MachOHostedRequest.allow_duplicate_definitions defaults false;
+macho_definitions and macho_unresolved accept the same optional false policy.
+Hosted archive fixed-point scans and final definitions both consume that field.
+The adapter forwards the real NativeLinkConfig value. True retains the first
+selected strong definition; false preserves duplicate failure. Existing Mach-O
+defined-strong, defined-weak, common precedence and common layout remain intact.
+Existing static/default-hosted callers retain strict behavior.
+
+Test helpers use item4_macho_duplicates_* and shared steps: Select strict or
+first-definition policy; Link real competing definitions; Inspect the selected
+definition in emitted bytes; Preserve the destination on strict rejection;
+Remove owned fixture files. Initial test intent must precede implementation.
+Weak/common resolver assertions do not establish hosted weak-coalescing support.
+SDK providers, managed admission and actual native host execution remain open.
