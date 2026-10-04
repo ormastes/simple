@@ -225,6 +225,14 @@ fn build_vreg_types(
                         }
                     } else if args.is_empty() {
                         let dotted = func_name.replace("_dot_", ".");
+                        // Builtin casts produce an unboxed float even when no
+                        // user-function return signature exists. Consumers
+                        // such as comparisons must retain that carrier type.
+                        match dotted.rsplit('.').next() {
+                            Some("to_float" | "to_f64") => { types_map.insert(*dest, TypeId::F64); }
+                            Some("to_f32") => { types_map.insert(*dest, TypeId::F32); }
+                            _ => {}
+                        }
                         if matches!(dotted.rsplit('.').next(), Some("floor" | "ceil" | "round")) {
                             if let Some(ty @ (TypeId::F32 | TypeId::F64)) = types_map.get(receiver).copied() {
                                 types_map.insert(*dest, ty);
@@ -2745,6 +2753,38 @@ impl LlvmBackend {
                     let f64_ty = self.context_ref().f64_type();
                     let target_ty = if bits == 32 { f32_ty } else { f64_ty };
                     let from_ty = vreg_types.get(receiver).copied();
+                    // Text is a runtime handle, not a numeric integer. Match
+                    // Cranelift: parse the text, then unbox the counted float.
+                    // Numerically casting the handle corrupts the self-hosted
+                    // parser's expr_get_float(...).to_float() literals.
+                    if from_ty == Some(TypeId::STRING) {
+                        let text = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
+                        let parse_type = i64_type.fn_type(&[i64_type.into()], false);
+                        let parse_fn = module.get_function("rt_string_to_float")
+                            .unwrap_or_else(|| module.add_function("rt_string_to_float", parse_type, None));
+                        let parsed = builder.build_call(parse_fn, &[text.into()], "parse_float")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("text float parse", &e))?
+                            .try_as_basic_value().basic()
+                            .ok_or_else(|| CompileError::semantic("text float parse returned no value".to_string()))?;
+                        let unbox_type = f64_ty.fn_type(&[i64_type.into()], false);
+                        let unbox_fn = module.get_function("rt_value_as_float")
+                            .unwrap_or_else(|| module.add_function("rt_value_as_float", unbox_type, None));
+                        let raw = builder.build_call(unbox_fn, &[parsed.into()], "unbox_float")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("text float unbox", &e))?
+                            .try_as_basic_value().basic()
+                            .ok_or_else(|| CompileError::semantic("text float unbox returned no value".to_string()))?
+                            .into_float_value();
+                        let converted = if bits == 32 {
+                            builder.build_float_trunc(raw, f32_ty, "text_fptrunc")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("text to_f32", &e))?
+                        } else {
+                            raw
+                        };
+                        if let Some(d) = dest {
+                            vreg_map.insert(*d, converted.into());
+                        }
+                        return Ok(());
+                    }
                     let converted: inkwell::values::BasicValueEnum<'static> = match recv_val {
                         inkwell::values::BasicValueEnum::FloatValue(fv) => {
                             let cur = fv.get_type();
@@ -4037,6 +4077,56 @@ mod tests {
     use crate::mir::{CallTarget, LocalKind, MirInst, MirLocal, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
+
+    #[test]
+    fn text_float_cast_parses_and_unboxes_instead_of_converting_handle() {
+        for (method, result_ty) in [
+            ("to_float", crate::hir::TypeId::F64),
+            ("to_f64", crate::hir::TypeId::F64),
+            ("to_f32", crate::hir::TypeId::F32),
+        ] {
+            let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Windows)).unwrap();
+            backend.create_module(method).unwrap();
+            let mut func = MirFunction::new("parse".to_string(), result_ty, simple_parser::ast::Visibility::Public);
+            func.params.push(MirLocal {
+                name: "text".to_string(), ty: crate::hir::TypeId::STRING,
+                kind: LocalKind::Parameter, is_ghost: false,
+            });
+            func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(VReg(1)), receiver: VReg(0), func_name: method.to_string(), args: vec![],
+            });
+            func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+            assert_eq!(build_vreg_types(&func, &HashMap::new()).get(&VReg(1)), Some(&result_ty));
+            backend.compile_function(&func).unwrap();
+            let ir = backend.get_ir().unwrap();
+            assert!(ir.contains("call i64 @rt_string_to_float("), "{ir}");
+            assert!(ir.contains("call double @rt_value_as_float("), "{ir}");
+            assert!(!ir.contains("sitofp") && !ir.contains("uitofp"), "text handle cast numerically: {ir}");
+            if result_ty == crate::hir::TypeId::F32 { assert!(ir.contains("fptrunc double"), "{ir}"); }
+            backend.verify().unwrap();
+        }
+    }
+
+    #[test]
+    fn numeric_float_cast_keeps_signed_and_unsigned_conversion() {
+        for (input_ty, instruction) in [(crate::hir::TypeId::I64, "sitofp"), (crate::hir::TypeId::U64, "uitofp")] {
+            let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Windows)).unwrap();
+            backend.create_module(instruction).unwrap();
+            let mut func = MirFunction::new("convert".to_string(), crate::hir::TypeId::F64, simple_parser::ast::Visibility::Public);
+            func.params.push(MirLocal {
+                name: "number".to_string(), ty: input_ty, kind: LocalKind::Parameter, is_ghost: false,
+            });
+            func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(VReg(1)), receiver: VReg(0), func_name: "to_float".to_string(), args: vec![],
+            });
+            func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+            backend.compile_function(&func).unwrap();
+            let ir = backend.get_ir().unwrap();
+            assert!(ir.contains(instruction), "{ir}");
+            assert!(!ir.contains("rt_string_to_float") && !ir.contains("rt_value_as_float"), "{ir}");
+            backend.verify().unwrap();
+        }
+    }
 
     #[test]
     fn typed_dict_len_llvm_uses_runtime_owner() {

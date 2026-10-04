@@ -1,0 +1,99 @@
+"""
+## Purpose and audience
+As an operator with no cloud agent I point caret at a small local GGUF model
+through slang's in-process ggml backend and talk to it the way I talk to
+Claude: one prompt in, a reply out. This spec launches the REAL model. It is
+for the maintainers of slang (`src/lib/gc_async_mut/slang/`) and of caret's
+`slang_local` provider.
+## Operator workflow
+SIMPLE_BINARY=<simple> SLANG_MODEL_ROOT=<model root> \
+bin/simple test test/03_system/app/llm_caret/caret_slang_local_hello_system_spec.spl
+`CARET_SLANG_MODEL` picks the model directory (default
+`Qwen2.5-1.5B-Instruct-GGUF`). The ggml shim must be built first:
+`sh scripts/check/build-slang-ggml-shim.shs` (Windows: `slang_ggml.dll`).
+## Compatibility and limitations
+A missing binary, model root, model or shim is a FAILED scenario that names
+what is missing, never a skip. The 0.5B Qwen2.5 model loads and generates but
+does not follow caret's raw transcript format; see
+doc/08_tracking/bug/caret_slang_local_ignores_gguf_chat_template_2026-10-03.md.
+## Verification guidance and troubleshooting
+"refusing to load" means the memory gate found too little free RAM for the
+model plus caret's context window; close other processes and rerun.
+"backend unavailable" means the shim was not built in this tree.
+"""
+# Lifecycle: doc/01_research/domain/slang_paged_kv_backend.md ;
+# doc/02_requirements/feature/slang_paged_kv_backend.md
+# @manual_section: caret-slang-local
+
+use std.spec
+use std.io_runtime.{env_get, file_exists}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+val DEFAULT_MODEL = "Qwen2.5-1.5B-Instruct-GGUF"
+val RUN_TIMEOUT_MS = 600000
+val MAX_OUTPUT_BYTES = 1048576
+
+fn _env(name: text) -> text:
+    env_get(name) ?? ""
+
+fn _model() -> text:
+    val m = _env("CARET_SLANG_MODEL")
+    if m == "":
+        return DEFAULT_MODEL
+    m
+
+# What is missing for a live run, or "" when everything is in place.
+fn _missing() -> text:
+    val bin = _env("SIMPLE_BINARY")
+    if bin == "" or not file_exists(bin):
+        return "SIMPLE_BINARY unset or missing: '" + bin + "'"
+    val root = _env("SLANG_MODEL_ROOT")
+    if root == "" or not file_exists(root + "/" + _model()):
+        return "model '" + _model() + "' not under SLANG_MODEL_ROOT '" + root + "'"
+    ""
+
+describe "caret talks to a small local model through slang":
+
+    it "the inference gate reaches a generation verdict for the local model root":
+        # @req REQ-CARET-SLANG-001
+        step("Confirm the binary and the model root are in place")
+        expect(_missing()).to_equal("")
+        step("Run the slang inference gate over the model root")
+        val (out, err, code) = process_run_bounded("sh",
+            ["scripts/check/check-slang-ggml-inference.shs", "--models", _env("SLANG_MODEL_ROOT")],
+            RUN_TIMEOUT_MS, MAX_OUTPUT_BYTES)
+        # @capture(text): gate verdict line
+        step("The gate passes and at least one model generated tokens")
+        expect(code).to_equal(0)
+        expect(out).to_contain("PASS")
+        expect(out.contains(" 0 generated")).to_equal(false)
+        expect(err.contains("silent")).to_equal(false)
+
+    it "caret answers 'hello' from the local model like it does from Claude":
+        # @req REQ-CARET-SLANG-002
+        step("Confirm the binary and the model are in place")
+        expect(_missing()).to_equal("")
+        step("Send one prompt through caret's slang_local provider")
+        val (out, err, code) = process_run_bounded(_env("SIMPLE_BINARY"),
+            ["run", "src/app/llm_caret/main.spl", "--provider", "slang_local",
+                "--model", _model(), "--prompt", "Say exactly: hello"],
+            RUN_TIMEOUT_MS, MAX_OUTPUT_BYTES)
+        # @capture(protocol): caret stdout for the hello prompt
+        step("caret exits cleanly and the model's reply says hello")
+        expect(err.contains("refusing to load")).to_equal(false)
+        expect(err.contains("backend unavailable")).to_equal(false)
+        expect(code).to_equal(0)
+        expect(out.lower()).to_contain("hello")
+
+    it "rejects a model that is not under the model root instead of inventing a reply":
+        # @req REQ-CARET-SLANG-003
+        step("Ask caret for a model directory that does not exist")
+        expect(_env("SIMPLE_BINARY") != "").to_equal(true)
+        val (out, err, code) = process_run_bounded(_env("SIMPLE_BINARY"),
+            ["run", "src/app/llm_caret/main.spl", "--provider", "slang_local",
+                "--model", "no-such-model-9f2", "--prompt", "Say exactly: hello"],
+            RUN_TIMEOUT_MS, MAX_OUTPUT_BYTES)
+        # @capture(protocol): caret output for an unknown model
+        step("caret names the missing model and prints no reply")
+        expect((out + err)).to_contain("no-such-model-9f2")
+        expect(out.lower().contains("hello")).to_equal(false)

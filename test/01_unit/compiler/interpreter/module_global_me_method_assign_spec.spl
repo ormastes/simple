@@ -1,0 +1,67 @@
+"""
+## Purpose and audience
+For maintainers of the seed interpreter. A module function that reassigns a
+module `var` from a method called on that same var — `_box = _box.bumped()` —
+must leave the NEW value visible to every later call. Under the interpreter the
+write used to be reverted when the function returned (the JIT was correct),
+which silently broke stateful services such as smux: attaching a client or
+closing a pane reported success and changed nothing.
+## Operator workflow
+bin/simple test test/01_unit/compiler/interpreter/module_global_me_method_assign_spec.spl
+## Compatibility and limitations
+`simple test` runs specs under the interpreter, which is the engine that had
+the defect; `simple run` (JIT) never did.
+## Verification guidance and troubleshooting
+A value of 0 after a bump means the per-module global store was not updated by
+the assignment. See doc/08_tracking/bug/interp_module_global_self_method_assign_reverted_2026-10-03.md.
+"""
+# @manual_section: interpreter-module-globals
+
+use std.spec
+
+class Counter:
+    n: int
+
+    me bumped() -> Counter:
+        return Counter(n: me.n + 1)
+
+var _box: Counter = Counter(n: 0)
+
+fn reset_box():
+    _box = Counter(n: 0)
+
+fn box_value() -> int:
+    return _box.n
+
+# The shape that used to be reverted: receiver and target are the same global.
+fn bump_box_in_place():
+    _box = _box.bumped()
+
+# The same reassignment followed by a read in the SAME frame.
+fn bump_box_and_read() -> int:
+    _box = _box.bumped()
+    return _box.n
+
+describe "module globals reassigned from their own method result":
+
+    it "keeps the new value after the function that assigned it returns":
+        # @req REQ-INTERP-GLOBAL-ASSIGN-001
+        step("Reset the module counter to zero")
+        reset_box()
+        step("Bump it three times through a function that writes the global in place")
+        bump_box_in_place()
+        bump_box_in_place()
+        bump_box_in_place()
+        # @capture(text): counter value read back through a second function
+        step("Read the counter back through a different function")
+        expect(box_value()).to_equal(3)  # oracle: three bumps from zero
+
+    it "sees the new value inside the assigning function and after it":
+        # @req REQ-INTERP-GLOBAL-ASSIGN-001
+        step("Reset, then bump and read in the same frame")
+        reset_box()
+        # @capture(text): in-frame and post-return readings
+        val inside = bump_box_and_read()
+        step("The in-frame read and the post-return read agree")
+        expect(inside).to_equal(1)  # oracle: one bump from zero
+        expect(box_value()).to_equal(inside)
