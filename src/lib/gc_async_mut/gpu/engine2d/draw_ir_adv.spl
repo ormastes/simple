@@ -94,6 +94,9 @@ struct Engine2dDrawIrAdvResult:
     fallback_reason: text
     rendered_command_count: i32
     skipped_command_count: i32
+    # Part of skipped_command_count culled by an exact occlusion proof:
+    # invisible in the final frame, so the pixels are unaffected.
+    occluded_command_count: i32 = 0
     pixels: [u32]
     readback_source: text
     backend_handle: i64
@@ -253,6 +256,11 @@ struct Engine2dDrawIrRenderOutcome:
     glass_backend_handle: i64
     glass_device_identity: i64
     css_background_pixel_work_remaining: i64
+    # Logical operations culled because an exact occlusion proof showed later
+    # opaque fills cover them (`prove_occlusion`). Included in `skipped`, as
+    # damage culls are, and reported separately so a strict caller can tell
+    # a proven-invisible cull from a command that failed to render.
+    occluded: i32
 
 struct Engine2dDrawIrBoxOutcome:
     engine: Engine2D
@@ -276,9 +284,11 @@ fn _engine2d_draw_ir_render_outcome(
     glass_execution_target: text = "",
     glass_backend_handle: i64 = 0,
     glass_device_identity: i64 = 0,
-    css_background_pixel_work_remaining: i64 = -1
+    css_background_pixel_work_remaining: i64 = -1,
+    occluded: i32 = 0
 ) -> Engine2dDrawIrRenderOutcome:
     Engine2dDrawIrRenderOutcome(
+        occluded: occluded,
         engine: engine,
         rendered: rendered,
         skipped: skipped,
@@ -2082,6 +2092,7 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
     val surface_fb_h = eng.height()
     var rendered = 0
     var skipped = 0
+    var occluded = 0
     var unsupported_kinds = ""
     var cpu_composited_material_count = 0
     var metal_device_glass_material_count = 0
@@ -2117,6 +2128,7 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
                 ENGINE2D_DRAW_IR_OCCLUSION_PROOF_BUDGET)
             if proof.covered:
                 skipped = skipped + command_weight
+                occluded = occluded + command_weight
                 continue
         val command_kind: text = command.kind
         val x = offset_x + command.x
@@ -2396,7 +2408,8 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
         glass_execution_target,
         glass_backend_handle,
         glass_device_identity,
-        css_background_pixel_work_remaining
+        css_background_pixel_work_remaining,
+        occluded
     )
 
 fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool, active_clip: DrawIrRect, css_background_pixel_work_budget: i64) -> Engine2dDrawIrRenderOutcome:
@@ -2693,7 +2706,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
                     inner.glass_execution_target,
                     inner.glass_backend_handle,
                     inner.glass_device_identity,
-                    inner.css_background_pixel_work_remaining)
+                    inner.css_background_pixel_work_remaining,
+                    inner.occluded)
     if not use_embedded_surface:
         val apply_clip = embedding.clip and not fills_target_exactly
         if apply_clip:
@@ -2730,7 +2744,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             direct.glass_execution_target,
             direct.glass_backend_handle,
             direct.glass_device_identity,
-            direct.css_background_pixel_work_remaining
+            direct.css_background_pixel_work_remaining,
+            direct.occluded
         )
 
     # Seed-JIT compatibility (hot path): a mutable `Engine2D? = nil` binding
@@ -2818,7 +2833,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         inner.metal_device_glass_requested_count,
         inner.metal_device_glass_requested_count,
         _engine2d_draw_ir_unfulfilled_metal_receipts(batch),
-        "", 0, 0, inner.css_background_pixel_work_remaining
+        "", 0, 0, inner.css_background_pixel_work_remaining,
+        inner.occluded
     )
 
 fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:
@@ -2843,6 +2859,7 @@ fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, 
         readback
     )
     result.cpu_composited_material_count = outcome.cpu_composited_material_count
+    result.occluded_command_count = outcome.occluded
     result.metal_device_glass_material_count = (
         outcome.metal_device_glass_material_count)
     result.metal_device_glass_requested_count = (
@@ -2889,7 +2906,7 @@ fn engine2d_draw_ir_adv_composition_window_present_with_images(engine: Engine2D,
     result.async_admission_reason = async_admission.reason
     result.async_packet_checksum = async_admission.packet.checksum
     result.async_claim = async_admission.async_claim
-    if result.fallback_required or result.skipped_command_count != 0:
+    if result.fallback_required or result.skipped_command_count != result.occluded_command_count:
         return result
     if not engine.present_window_device():
         result.fallback_required = true
@@ -3226,6 +3243,7 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     var eng = engine
     var rendered = 0
     var skipped = 0
+    var occluded = 0
     var unsupported_kinds = ""
     var cpu_composited_material_count = 0
     var metal_device_glass_material_count = 0
@@ -3255,6 +3273,7 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
         eng = outcome.engine
         rendered = rendered + outcome.rendered
         skipped = skipped + outcome.skipped
+        occluded = occluded + outcome.occluded
         cpu_composited_material_count = (
             cpu_composited_material_count +
             outcome.cpu_composited_material_count
@@ -3327,6 +3346,7 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     # Single line: the parser needs the expression on the same line as `=`;
     # a newline straight after the assignment operator does not continue.
     result.cpu_composited_material_count = cpu_composited_material_count
+    result.occluded_command_count = occluded
     result.metal_device_glass_material_count = (
         metal_device_glass_material_count)
     result.metal_device_glass_requested_count = (
