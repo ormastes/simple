@@ -282,3 +282,25 @@ relocation addend. GOT base follows COMMON, independent of slot contents. The
 ordinary types are 3,9,25,26,27,28,29,30,31,41,42,43. TLS/dynamic work stays open.
 Test intent precedes implementation. Root and research review exact changes;
 lower-model sidecars N/A. No admitted runtime or RED/GREEN execution is claimed.
+
+## ELF COMDAT implementation ownership (2026-10-04)
+
+Base/expected release target: `07c4fb746ccbdd06be1934662cc5dcad9b7b4046`.
+Root integrates on `work/item4-stream-comdat-20261004` in the existing isolated
+`C:/dev/simple-item4-sha-owner-20261004` worktree. Child agents reuse their own
+clean GOT core/tests/docs worktrees on new matching `work/item4-stream-comdat-*`
+branches. Sparse unrelated root deletions remain outside their source commits.
+Runtime owns ELF group reading and stream input/layout/GOT/emission integration;
+acceptance owns `item4_stream_comdat_spec.spl`, fixtures and manual; research owns
+ABI/GNU experiments, design and independent source review. Root owns plans,
+reports, final review and the release-branch PR. Lower-model sidecars: N/A.
+
+Shared public methods on `ElfStreamInputsV1` are
+`elf_stream_comdat_validate_v1(object, cancelled)` and
+`elf_stream_comdat_section_kept_v1(owner, index, cancelled)`, returning
+`Result<bool, text>`. Existing public link/layout APIs remain unchanged.
+Test helpers use `item4_stream_comdat_*` and `std.spec.step`, real setup assertions
+and explicit failures. Initial executable intent precedes production edits.
+Undefined symbol archive demand follows the GNU experiment, while final errors
+follow surviving allocated references. No runtime RED/GREEN or coverage is
+claimed without an admitted self-hosted executable.
