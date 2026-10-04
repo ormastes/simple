@@ -1,6 +1,6 @@
 # Mach-O TextAPI v4/v5 acceptance
 
-Seven authored scenarios in `test/03_system/app/compiler/feature/item4_macho_tbd_spec.spl`.
+Nine authored scenarios in `test/03_system/app/compiler/feature/item4_macho_tbd_spec.spl`.
 **Simple execution UNRUN**. This manually authored companion is not a generated
 test receipt. External fixture evidence is recorded separately below.
 
@@ -13,6 +13,8 @@ test receipt. External fixture evidence is recorded separately below.
 | ITEM4-REQ-006 | An unmatched inline library has no fabricated selected identity; its scoped install-name declarations remain available. |
 | ITEM4-REQ-006 | ObjC names expand to ABI symbols, weak/TLV flags survive, and real x64/ARM64 TLV relocations link through typed providers derived from each format. |
 | ITEM4-REQ-007 | Malformed selected stubs preserve destination sentinels without archive fallback; removing only the stub permits the unchanged plan to link the real archive. |
+| ITEM4-REQ-006 | Malformed unselected groups, overlapping install identities, incompatible unselected versions, duplicate unselected umbrellas, escaped duplicate JSON keys, wrong format versions and version component overflow reject before selection. Arm64e and Catalyst cannot satisfy baseline arm64 macOS. |
+| ITEM4-REQ-006 | `$ld$` directives remain literal reader metadata and reject at unsupported lowering rather than becoming ordinary exports. |
 
 Fixtures are authored or converted from repository-authored binaries using LLVM
 21.1.8 `llvm-readtapi`; `test/fixtures/linker/macho/RECIPE.md` records commands.

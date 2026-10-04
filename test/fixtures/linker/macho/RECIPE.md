@@ -127,3 +127,12 @@ is intentionally stricter, not an LLVM-equivalence claim. The v5 duplicate-key
 file repeats version5 so an unrelated wrong-version error cannot mask that test.
 These are external TextAPI construction/validation observations, not Simple
 test execution, client-access approval, transitive linker or Darwin SDK proof.
+
+The `tbd_bad_unselected_*`, `tbd_duplicate_unselected_*`,
+`tbd_escaped_duplicate_key_v5`, `tbd_wrong_version_*`,
+`tbd_version_overflow_*`, `tbd_arm64e_only_v4`, `tbd_catalyst_only_v5` and
+`tbd_ld_directive_*` fixtures are hand-authored schema/selection regressions.
+They were not revalidated through LLVM: invalid all-target metadata and decoded
+duplicate-key refusal belong to our frozen strict reader contract, while `$ld$`
+policy is deliberately unsupported by leaf lowering. They do not extend the
+external conversion/comparison PASS observations recorded above.

@@ -28,6 +28,42 @@ fn item4_macho_tbd_config() -> NativeLinkConfig:
     config
 
 describe "actual TextAPI providers through the Mach-O file adapter":
+    it "ITEM4-REQ-006 validates every declared target before selecting an otherwise valid x64 view":
+        step("Reject malformed unselected target metadata and decoded duplicate keys")
+        val target = MachOTbdTargetV1(arch: RelocArch.X86_64, platform: 1)
+        for name in ["bad_unselected_v4", "bad_unselected_v5", "duplicate_unselected_identity_v5",
+                "bad_unselected_versions_v5", "duplicate_unselected_umbrella_v5", "escaped_duplicate_key_v5",
+                "wrong_version_v4", "wrong_version_v5", "version_overflow_v4", "version_overflow_v5"]:
+            val bytes = file_read_bytes("test/fixtures/linker/macho/tbd_{name}.tbd")
+            expect(bytes.len() > 0).to_equal(true)
+            if bytes.len() == 0: return
+            val rejected = macho_read_tbd_v1(bytes, target, macho_tbd_default_limits_v1())
+            expect(rejected.is_err()).to_equal(true)
+            if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("TBD")
+        step("Do not substitute baseline arm64 macOS for arm64e or Catalyst target identities")
+        for name in ["arm64e_only_v4", "catalyst_only_v5"]:
+            val bytes = file_read_bytes("test/fixtures/linker/macho/tbd_{name}.tbd")
+            expect(bytes.len() > 0).to_equal(true)
+            if bytes.len() == 0: return
+            val rejected = macho_read_tbd_v1(bytes, MachOTbdTargetV1(arch: RelocArch.AArch64, platform: 1), macho_tbd_default_limits_v1())
+            expect(rejected.is_err()).to_equal(true)
+            if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("TBD")
+
+    it "ITEM4-REQ-006 retains linker directives in reader metadata but refuses unsupported directive lowering":
+        val target = MachOTbdTargetV1(arch: RelocArch.X86_64, platform: 1)
+        for format in ["v4", "v5"]:
+            step("Read an authored TextAPI linker directive without evaluating its policy")
+            val parsed = macho_read_tbd_v1(file_read_bytes("test/fixtures/linker/macho/tbd_ld_directive_{format}.tbd"), target, macho_tbd_default_limits_v1())
+            expect(parsed.is_ok()).to_equal(true)
+            if parsed.is_err(): return
+            expect(parsed.unwrap().main.symbols.len()).to_equal(1)
+            if parsed.unwrap().main.symbols.len() != 1: return
+            expect(parsed.unwrap().main.symbols[0].name).to_equal("$ld$hide$os11.0$_helper")
+            step("Refuse unsupported directive semantics rather than exporting a fabricated ordinary symbol")
+            val rejected = macho_tbd_main_provider_v1(parsed.unwrap(), target)
+            expect(rejected.is_err()).to_equal(true)
+            if rejected.is_err(): expect(rejected.unwrap_err()).to_contain("TBD")
+
     it "ITEM4-REQ-007 preserves output when a selected malformed stub precedes a valid archive":
         for name in ["duplicate_key_v4", "duplicate_key_v5", "truncated_v4", "truncated_v5"]:
             step("Plan an explicitly selected Mach-O link")
