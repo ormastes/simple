@@ -638,14 +638,41 @@ describe "Native linker hardening":
         expect(native_all_input_present(["/tmp/my_libsimple_native_all.a"])).to_be(false)
 
     it "keeps native-all support out of core-only links":
+        step("Keep SDK dependencies gated by the actual archive basename")
         for os in ["linux", "macos", "freebsd", "windows-mingw"]:
             expect(native_all_gnu_support_args(["runtime.o"], os, "/brew")).to_equal([])
         expect(native_all_msvc_support_libraries(["runtime.obj"])).to_equal([])
+        for input in ["simple_compiler.lib", "libsimple_compiler_backfill.a",
+                "libsimple_native_all.dll.a", "simple_native_all.lib.tmp",
+                "prefix_simple_native_all.lib", "/tmp/libsimple_native_all.a/other.o"]:
+            expect(native_all_msvc_support_libraries([input])).to_equal([])
+            expect(native_all_gnu_support_args([input], "windows-mingw", "")).to_equal([])
+
+    it "adds each Windows native-all resource dependency once for either archive spelling":
+        step("Resolve SDK libraries through the actual native-all support owners")
+        for input in ["/runtime/libsimple_native_all.a", "C:\\runtime\\SIMPLE_NATIVE_ALL.LIB"]:
+            # Repeated selected inputs must not duplicate the emitted support table.
+            val inputs = ["user.obj", input, input]
+            val msvc = native_all_msvc_support_libraries(inputs)
+            val mingw = native_all_gnu_support_args(inputs, "windows-mingw", "")
+            for library in ["pdh", "netapi32", "psapi", "powrprof"]:
+                var msvc_count = 0
+                var mingw_count = 0
+                for arg in msvc:
+                    if arg == library + ".lib": msvc_count = msvc_count + 1
+                for arg in mingw:
+                    if arg == "-l" + library: mingw_count = mingw_count + 1
+                expect(msvc_count).to_equal(1)
+                expect(mingw_count).to_equal(1)
+            expect(msvc).to_contain("kernel32.lib")
+            expect(msvc).to_contain("vcruntime.lib")
+            expect(mingw).to_contain("-lkernel32")
+            expect(mingw).to_contain("-lgcc")
 
     it "supplies hosted native-all transitive dependencies":
         val archive = ["/runtime/libsimple_native_all.a"]
         expect(native_all_gnu_support_args(archive, "linux", "")).to_equal([
-            "-lstdc++", "-lsqlite3", "-lz", "-lzstd", "-ltinfo", "-lffi", "-lxml2", "-lncurses"
+            "-u", "rt_vulkan_provider_is_available", "-lstdc++", "-lsqlite3", "-lz", "-lzstd", "-ltinfo", "-lffi", "-lxml2", "-lncurses"
         ])
         val macos = native_all_gnu_support_args(archive, "macos", "/custom/brew")
         expect(macos).to_contain("-L/custom/brew/lib")
@@ -653,8 +680,13 @@ describe "Native linker hardening":
         expect(macos).to_contain("AppKit")
         expect(macos).to_contain("CoreGraphics")
         expect(native_all_gnu_support_args(archive, "freebsd", "")).to_equal([
-            "-L/usr/local/lib", "-lc++", "-lexecinfo", "-lz", "-lzstd", "-lutil", "-lrt"
+            "-u", "rt_vulkan_provider_is_available", "-L/usr/local/lib", "-lc++", "-lexecinfo", "-lz", "-lzstd", "-lutil", "-lrt"
         ])
+        for os in ["linux", "macos", "darwin", "freebsd"]:
+            val support = native_all_gnu_support_args(archive, os, "/custom/brew")
+            for library in ["pdh", "netapi32", "psapi", "powrprof"]:
+                expect(support.contains("-l" + library)).to_be(false)
+                expect(support.contains(library + ".lib")).to_be(false)
         val mingw = native_all_gnu_support_args(["C:\\runtime\\simple_native_all.lib"], "windows-mingw", "")
         expect(mingw).to_contain("-ldbghelp")
         expect(mingw).to_contain("-lruntimeobject")
