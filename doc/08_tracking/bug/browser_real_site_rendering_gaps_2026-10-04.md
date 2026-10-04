@@ -77,14 +77,20 @@ Text mode (`main.spl https://<site>`) for the three big sites also exceeds
   (26em -> 26px); em now uses the element's font-size and rem the 16px root
   (`simple_web_html_layout_renderer_decl_apply.spl`).
   Spec for A/B/C: `test/01_unit/browser_engine/simple_web_width_centering_spec.spl`.
-- **D. `padding:25vh 2em 2em` ignored (OPEN).** `_padding_integer_px` in
-  `simple_web_html_layout_renderer_declarations.spl` accepts only integer
-  px / 0, and one unsupported token rejects the whole shorthand. em/rem
-  would be contained, but example.com's `25vh` needs the viewport height at
-  cascade time (or a vh sentinel resolved at every pad_t/pad_b use in
-  layout, as margins do with `margin_token_vh_px`). Until then example.com
-  is centred and width-correct but lacks its 150px top padding and 32px
-  side padding.
+- **D. `padding:25vh 2em 2em` (3-value shorthand / vh) ignored** —
+  **FIXED except % (work/browser-padding-units).** `_padding_integer_px`
+  accepted only integer px/0 and one unsupported token dropped the whole
+  declaration. Padding tokens now take em (element font size), rem (16px),
+  and vw/vh resolved at computed-value time from the cascade pass's
+  viewport: `compute_styles(..., viewport_w, viewport_h)` sets it for that
+  pass only (cleared after; part of the cascade memo key), the render entry
+  points pass their width/height, and with no viewport a vw/vh declaration
+  is dropped exactly as before. Spec:
+  `test/01_unit/browser_engine/simple_web_padding_units_spec.spl`.
+  **Still open: percent padding** (relative to the containing block's WIDTH,
+  which only layout knows); `padding: 10%` is still dropped. Unblock: resolve
+  a percent sentinel per child in the block/flex/table layout paths and have
+  paint read the layout-resolved padding.
 - **D2. Author sheet ignored on the BrowserSession lane** — example.com
   carries `<script src=/s.js>`, so `browser_document_needs_session` routes it
   through BrowserSession, and the 800x600 render shows white background and
