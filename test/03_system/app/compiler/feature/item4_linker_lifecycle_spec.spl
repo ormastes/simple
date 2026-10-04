@@ -21,6 +21,7 @@ use compiler.backend.linker.linker_pack_wire.{linker_pack_policy_digest}
 use os.smf.provider_loader.{ProviderAdmissionRequestV1}
 use compiler.backend.linker.elf.elf_static_link.{elf_static_link}
 use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig}
 
 fn item4_lifecycle_digest(value: u64) -> KpfDigest256:
     KpfDigest256(w0: value, w1: 0, w2: 0, w3: 0)
@@ -110,6 +111,26 @@ fn item4_pack_config() -> LinkerPackConfigV1:
         policy_digest: linker_pack_policy_digest(item4_lifecycle_policy()).unwrap())
 
 describe "ITEM4-REQ-010 linker generation lifecycle":
+    it "refuses configured dispatch through a legacy callback without discarding options":
+        step("Register a legacy operation and pin it with explicit nondefault options")
+        var lifecycle = LinkerLifecycleV1.create(2, 2, item4_lifecycle_requirement(), item4_lifecycle_provider(false, 1)).unwrap()
+        val session = lifecycle.open().unwrap()
+        var config = NativeLinkConfig.default()
+        config.retained_symbols = ["required-symbol"]
+        config.allow_cc_fallback = false
+        val result = lifecycle.run_with_config(session, item4_lifecycle_request(),
+            item4_lifecycle_policy(), item4_lifecycle_inputs(), "unused", config)
+        expect(result.is_err()).to_be(true)
+        if result.is_ok(): return
+        expect(result.unwrap_err()).to_contain("configured operation")
+        step("Refusal leaves the session releasable and static recovery equally explicit")
+        expect(lifecycle.close(session).unwrap()).to_be(true)
+        val recovered = lifecycle.run_recovery_with_config(item4_lifecycle_request(),
+            item4_lifecycle_policy(), item4_lifecycle_inputs(), "unused", config)
+        expect(recovered.is_err()).to_be(true)
+        if recovered.is_ok(): return
+        expect(recovered.unwrap_err()).to_contain("configured operation")
+
     it "refuses dynamic pack admission before changing the active callback":
         step("Pin the working static linker before offering an unauthorized pack path")
         var lifecycle = LinkerLifecycleV1.create(2, 2, item4_lifecycle_requirement(), item4_lifecycle_provider(false, 1)).unwrap()
