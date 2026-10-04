@@ -1,6 +1,11 @@
 # Explicit hosted Mach-O file adapter. Byte construction is not loader admission.
 use compiler.backend.linker.native_config.{NativeLinkConfig}
-use compiler.backend.linker.macho.hosted_link.{MachOHostedRequest, macho_hosted_link}
+use compiler.backend.linker.macho.hosted_link.{MachOHostedRequest, macho_hosted_link_with_providers}
+use compiler.backend.linker.macho.provider_types.{MachOProviderV1}
+use compiler.backend.linker.macho.binary_provider.{macho_read_binary_provider_v1}
+use compiler.backend.linker.macho.tbd_types.{MachOTbdTargetV1, macho_tbd_default_limits_v1}
+use compiler.backend.linker.macho.tbd_reader.{macho_read_tbd_v1}
+use compiler.backend.linker.macho.tbd_lower.{macho_tbd_main_provider_v1}
 use compiler.backend.linker.native_image_publish.{native_image_publish}
 use compiler.backend.linker.reloc_engine.{RelocArch}
 use std.io_runtime.{file_exists, file_read_bytes_result}
@@ -111,8 +116,8 @@ fn _native_macho_library(library: text, paths: [text]) -> Result<text, text>:
         return Ok(library)
     for directory in paths:
         if directory == "" or directory.contains("\0"): return Err("internal engine: invalid Mach-O library search path")
-        # Preserve directory order and reject a selected SDK stub rather than
-        # silently changing providers to a later archive or directory.
+        # Preserve directory order. A selected provider's parse/link error must
+        # not silently change selection to a later archive or directory.
         for suffix in [".dylib", ".tbd", ".a"]:
             val candidate = directory + "/lib" + library + suffix
             if file_exists(candidate): return Ok(candidate)
@@ -120,10 +125,17 @@ fn _native_macho_library(library: text, paths: [text]) -> Result<text, text>:
 
 fn _native_macho_read(path: text) -> Result<[u8], text>:
     if path == "" or path.contains("\0"): return Err("internal engine: invalid Mach-O input path")
-    if path.ends_with(".tbd"): return Err("internal engine: unsupported Mach-O .tbd provider")
     val bytes = file_read_bytes_result(path)
     if bytes.is_err(): return Err("internal engine: Mach-O input cannot be read: {path}: {bytes.unwrap_err()}")
     bytes
+
+fn _native_macho_tbd(bytes: [u8], arch: RelocArch) -> Result<MachOProviderV1, text>:
+    val target = MachOTbdTargetV1(arch: arch, platform: 1)
+    val document = macho_read_tbd_v1(bytes, target, macho_tbd_default_limits_v1())
+    if document.is_err(): return Err("internal engine: invalid Mach-O TBD: {document.unwrap_err()}")
+    val provider = macho_tbd_main_provider_v1(document.unwrap(), target)
+    if provider.is_err(): return Err("internal engine: invalid Mach-O TBD: {provider.unwrap_err()}")
+    provider
 
 fn _native_macho_kind(bytes: [u8]) -> Result<i64, text>:
     if bytes.len() >= 8 and bytes[0] == 33u8 and bytes[1] == 60u8 and bytes[2] == 97u8 and
@@ -150,26 +162,33 @@ fn native_macho_link_files_v1(plan: MachONativePlanV1, object_files: [text],
         return Err("internal engine: Mach-O runtime archives were not resolved")
     var objects: [[u8]] = []
     var archives: [[u8]] = []
-    var providers: [[u8]] = []
+    var providers: [MachOProviderV1] = []
     for path in object_files:
         val bytes = _native_macho_read(path)?
-        val kind = _native_macho_kind(bytes)?
-        if kind == 0: objects.push(bytes)
-        elif kind == 1: archives.push(bytes)
-        else: providers.push(bytes)
+        if path.ends_with(".tbd"):
+            providers.push(_native_macho_tbd(bytes, plan.request.target)?)
+        else:
+            val kind = _native_macho_kind(bytes)?
+            if kind == 0: objects.push(bytes)
+            elif kind == 1: archives.push(bytes)
+            else: providers.push(macho_read_binary_provider_v1(bytes, plan.request.target)?)
     for path in runtime_archives:
+        if path.ends_with(".tbd"): return Err("internal engine: unsupported TBD runtime archive")
         val bytes = _native_macho_read(path)?
         if _native_macho_kind(bytes)? != 1: return Err("internal engine: unsupported non-archive Mach-O runtime provider")
         archives.push(bytes)
     for library in plan.libraries:
         val path = _native_macho_library(library, plan.library_paths)?
         val bytes = _native_macho_read(path)?
-        val kind = _native_macho_kind(bytes)?
-        if kind == 1: archives.push(bytes)
-        elif kind == 2: providers.push(bytes)
-        else: return Err("internal engine: unsupported object in Mach-O libraries")
+        if path.ends_with(".tbd"):
+            providers.push(_native_macho_tbd(bytes, plan.request.target)?)
+        else:
+            val kind = _native_macho_kind(bytes)?
+            if kind == 1: archives.push(bytes)
+            elif kind == 2: providers.push(macho_read_binary_provider_v1(bytes, plan.request.target)?)
+            else: return Err("internal engine: unsupported object in Mach-O libraries")
     if plan.verbose: debug("native-macho", "linking {objects.len()} objects, {archives.len()} archives, {providers.len()} dylibs")
-    val linked = macho_hosted_link(objects, archives, providers, plan.request)
+    val linked = macho_hosted_link_with_providers(objects, archives, providers, plan.request)
     if linked.is_err(): return Err("internal engine: {linked.unwrap_err()}")
     if not native_image_publish(output, linked.unwrap(), true): return Err("internal engine: could not publish Mach-O executable {output}")
     Ok(output)

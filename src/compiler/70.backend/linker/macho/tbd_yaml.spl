@@ -1,0 +1,205 @@
+# Deliberately strict TAPI YAML: mappings, sequences, quoted/plain scalars and
+# flow scalar lists. Unsupported YAML graph features fail rather than disappear.
+use std.common.json.parser.{json_parse_strict_with_error}
+use compiler.backend.linker.macho.tbd_types.{MachOTbdLimitsV1}
+
+struct TbdYamlLine:
+    indent: i64
+    body: text
+
+fn tbd_yaml_colon(value: text) -> i64:
+    var quote: i64 = 0
+    var escaped = false
+    for index in 0..value.len():
+        val byte = value.byte_at(index) as i64
+        if escaped:
+            escaped = false
+        elif quote == 34 and byte == 92:
+            escaped = true
+        elif quote != 0:
+            if byte == quote: quote = 0
+        elif byte == 34 or byte == 39:
+            quote = byte
+        elif byte == 58 and (index + 1 == value.len() or value.byte_at(index + 1) == 32):
+            return index
+    -1
+
+fn tbd_yaml_scalar(value: text, limits: MachOTbdLimitsV1) -> Result<any, text>:
+    val item = value.trim()
+    if item == "": return Err("TBD empty YAML scalar")
+    if item.starts_with("\""):
+        if item.len() > limits.max_name_bytes * 6 + 2: return Err("TBD YAML name quota exceeded")
+        val decoded = json_parse_strict_with_error(item)
+        if decoded.1 != "" or decoded.0 == nil or decoded.0.0 != "string": return Err("TBD invalid quoted YAML scalar")
+        val name: text = decoded.0.1
+        if name.len() > limits.max_name_bytes: return Err("TBD YAML name quota exceeded")
+        return Ok(decoded.0)
+    if item.starts_with("'"):
+        if item.len() < 2 or not item.ends_with("'"): return Err("TBD unterminated YAML quote")
+        if item.len() > limits.max_name_bytes * 2 + 2: return Err("TBD YAML name quota exceeded")
+        var name = ""
+        var index: i64 = 1
+        while index < item.len() - 1:
+            if item.byte_at(index) == 39:
+                if index + 1 >= item.len() - 1 or item.byte_at(index + 1) != 39: return Err("TBD invalid YAML single quote")
+                index = index + 1
+            name = name + item[index:index + 1]
+            if name.len() > limits.max_name_bytes: return Err("TBD YAML name quota exceeded")
+            index = index + 1
+        return Ok(("string", name))
+    if item.starts_with("["):
+        if not item.ends_with("]"): return Err("TBD unterminated YAML flow sequence")
+        var values: [any] = []
+        var start: i64 = 1
+        var quote: i64 = 0
+        var escaped = false
+        var index: i64 = 1
+        while index < item.len() - 1:
+            val byte = item.byte_at(index) as i64
+            if escaped:
+                escaped = false
+            elif quote == 34 and byte == 92:
+                escaped = true
+            elif quote != 0:
+                if byte == quote: quote = 0
+            elif byte == 34 or byte == 39:
+                quote = byte
+            elif byte == 91 or byte == 123 or byte == 93 or byte == 125:
+                return Err("TBD unsupported nested YAML flow collection")
+            elif byte == 44:
+                values = values.push(tbd_yaml_scalar(item[start:index], limits)?)
+                start = index + 1
+            index = index + 1
+        if quote != 0: return Err("TBD unterminated YAML flow quote")
+        val tail = item[start:item.len() - 1].trim()
+        if tail != "": values = values.push(tbd_yaml_scalar(tail, limits)?)
+        return Ok(("array", values))
+    if item.starts_with("&") or item.starts_with("*") or item.starts_with("!") or item.starts_with("{") or
+            item.starts_with("|") or item.starts_with(">") or item == "~" or item == "null":
+        return Err("TBD unsupported YAML scalar syntax")
+    if item.contains(": ") or item.contains("[") or item.contains("]") or item.contains("{") or item.contains("}"):
+        return Err("TBD invalid plain YAML scalar")
+    if item.len() > limits.max_name_bytes: return Err("TBD YAML name quota exceeded")
+    Ok(("string", item))
+
+class TbdYamlParser:
+    lines: [TbdYamlLine]
+    var cursor: i64
+    limits: MachOTbdLimitsV1
+
+    me mapping(indent: i64, first: text, depth: i64) -> Result<any, text>:
+        if depth > self.limits.max_depth: return Err("TBD YAML depth quota exceeded")
+        var fields: {text: any} = {}
+        var pending = first
+        while pending != "" or self.cursor < self.lines.len():
+            var body = pending
+            if pending == "":
+                val line = self.lines[self.cursor]
+                if line.indent < indent: break
+                if line.indent != indent or line.body.starts_with("-"): return Err("TBD invalid YAML mapping indentation")
+                body = line.body
+                self.cursor = self.cursor + 1
+            pending = ""
+            val colon = tbd_yaml_colon(body)
+            if colon <= 0: return Err("TBD expected YAML mapping entry")
+            val key_value = tbd_yaml_scalar(body[0:colon], self.limits)?
+            if key_value.0 != "string": return Err("TBD invalid YAML mapping key")
+            val key: text = key_value.1
+            if key == "<<" or fields.has(key): return Err("TBD duplicate or merge YAML key")
+            val rest = body[colon + 1:body.len()].trim()
+            if rest == "":
+                if self.cursor >= self.lines.len() or self.lines[self.cursor].indent <= indent:
+                    return Err("TBD missing YAML mapping value")
+                fields[key] = self.block(self.lines[self.cursor].indent, depth + 1)?
+            else:
+                fields[key] = tbd_yaml_scalar(rest, self.limits)?
+        Ok(("object", fields))
+
+    me block(indent: i64, depth: i64) -> Result<any, text>:
+        if depth > self.limits.max_depth or self.cursor >= self.lines.len(): return Err("TBD YAML depth or input exhausted")
+        if not self.lines[self.cursor].body.starts_with("- "):
+            return self.mapping(indent, "", depth)
+        var values: [any] = []
+        while self.cursor < self.lines.len():
+            val line = self.lines[self.cursor]
+            if line.indent < indent: break
+            if line.indent != indent or not line.body.starts_with("- "): return Err("TBD invalid YAML sequence indentation")
+            val rest = line.body[2:line.body.len()].trim()
+            self.cursor = self.cursor + 1
+            if tbd_yaml_colon(rest) >= 0:
+                values = values.push(self.mapping(indent + 2, rest, depth + 1)?)
+            else:
+                values = values.push(tbd_yaml_scalar(rest, self.limits)?)
+        Ok(("array", values))
+
+fn tbd_yaml_documents(source: text, limits: MachOTbdLimitsV1) -> Result<[any], text>:
+    var documents: [any] = []
+    var lines: [TbdYamlLine] = []
+    var active = false
+    var ended = false
+    var pending: [text] = []
+    var pending_indent: i64 = 0
+    var brackets: i64 = 0
+    for raw in source.split("\n"):
+        if raw.contains("\t"): return Err("TBD unsupported YAML tab indentation")
+        var quote: i64 = 0
+        var escaped = false
+        var stop = raw.len()
+        for index in 0..raw.len():
+            val byte = raw.byte_at(index) as i64
+            if escaped:
+                escaped = false
+            elif quote == 34 and byte == 92:
+                escaped = true
+            elif quote != 0:
+                if byte == quote: quote = 0
+            elif byte == 34 or byte == 39:
+                quote = byte
+            elif byte == 35 and (index == 0 or raw.byte_at(index - 1) == 32):
+                stop = index
+                break
+            elif byte == 91:
+                brackets = brackets + 1
+            elif byte == 93:
+                brackets = brackets - 1
+                if brackets < 0: return Err("TBD unbalanced YAML flow sequence")
+        if quote != 0: return Err("TBD unsupported multiline YAML quote")
+        val body = raw[0:stop].trim()
+        if body == "": continue
+        if body.starts_with("---") or body == "...":
+            if pending.len() != 0 or brackets != 0: return Err("TBD unfinished YAML sequence")
+            if active:
+                if lines.len() == 0: return Err("TBD empty YAML document")
+                var parser = TbdYamlParser(lines: lines, cursor: 0, limits: limits)
+                documents = documents.push(parser.block(0, 1)?)
+                if parser.cursor != lines.len(): return Err("TBD unconsumed YAML document")
+                if documents.len() > limits.max_libraries: return Err("TBD library quota exceeded")
+                lines = []
+            if body == "...":
+                if not active: return Err("TBD unexpected YAML document end")
+                active = false
+                ended = true
+            else:
+                if body != "--- !tapi-tbd": return Err("TBD unsupported YAML document tag")
+                active = true
+                ended = false
+            continue
+        if not active or ended: return Err("TBD missing YAML TAPI document tag")
+        if pending.len() == 0:
+            pending_indent = 0
+            while pending_indent < raw.len() and raw.byte_at(pending_indent) == 32:
+                pending_indent = pending_indent + 1
+        pending = pending.push(body)
+        if brackets == 0:
+            lines = lines.push(TbdYamlLine(indent: pending_indent, body: pending.join(" ")))
+            pending = []
+    if pending.len() != 0 or brackets != 0: return Err("TBD unterminated YAML flow sequence")
+    if active:
+        if lines.len() == 0: return Err("TBD empty YAML document")
+        var parser = TbdYamlParser(lines: lines, cursor: 0, limits: limits)
+        documents = documents.push(parser.block(0, 1)?)
+        if parser.cursor != lines.len(): return Err("TBD unconsumed YAML document")
+    if documents.len() == 0 or documents.len() > limits.max_libraries: return Err("TBD library quota exceeded")
+    Ok(documents)
+
+export tbd_yaml_documents
