@@ -91,7 +91,8 @@ fi
 source_root=$(CDPATH= cd -P -- "$source_root" && pwd -P) || fail 'source root missing'
 [ -d "$source_root/src/compiler" ] && [ -d "$source_root/src/lib" ] && [ -d "$source_root/test" ] || fail 'incomplete source root'
 source_head=$(git -C "$source_root" rev-parse HEAD) || fail 'source commit unavailable'
-[ -z "$(git -C "$source_root" status --porcelain=v1)" ] || fail 'source checkout is not clean'
+perl "$source_root/scripts/bootstrap/product-overlay.pl" source-check "$source_root" \
+  || fail 'source checkout differs beyond verified declared aliases'
 producer_source_snapshot=$(field source_snapshot_path "$compiler_producer_receipt") || fail 'admitted source snapshot absent'
 physical_file "$producer_source_snapshot" || fail 'admitted source snapshot missing'
 producer_source_snapshot_sha256=$(field source_snapshot_sha256 "$compiler_producer_receipt") || fail 'admitted source snapshot SHA absent'
@@ -163,40 +164,22 @@ physical_file "$watchdog" || fail 'process watchdog missing'
 # root and manifest are both inside this product job. Never mutate the pinned
 # caller's source checkout or transiently populate a full worktree.
 overlay="$job_root/source-overlay"
-git -C "$source_root" worktree add --no-checkout --detach "$overlay" "$source_head" \
+git -C "$source_root" -c core.hooksPath=NUL -c core.longpaths=true worktree add --no-checkout --detach "$overlay" "$source_head" \
   >"$job_root/logs/source-overlay.log" 2>&1 || fail 'isolated source overlay creation failed'
-git -C "$overlay" sparse-checkout init --cone \
-  >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'sparse overlay init failed'
-git -C "$overlay" sparse-checkout set src/compiler src/lib src/app src/plugins src/compositions \
-  >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'sparse overlay checkout failed'
-git -C "$overlay" checkout -f HEAD \
-  >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'sparse overlay materialization failed'
+git -C "$overlay" -c core.hooksPath=NUL -c core.longpaths=true read-tree HEAD \
+  >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'overlay index initialization failed'
 [ "$(git -C "$overlay" rev-parse HEAD)" = "$source_head" ] || fail 'overlay source HEAD differs'
+overlay_input_manifest="$job_root/logs/source-overlay-inputs.tsv"
+perl "$source_root/scripts/bootstrap/product-overlay.pl" materialize \
+  "$source_root" "$overlay" "$overlay_input_manifest" \
+  >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'physical product overlay materialization failed'
 [ -f "$overlay/src/app/compiler_subsystem_product_generator/main.spl" ] && \
   [ -f "$overlay/src/app/compiler_subsystem_main_verdict/main.spl" ] && \
-  [ -f "$overlay/src/lib/nogc_sync_mut/spec.spl" ] || fail 'sparse overlay lacks product sources'
-[ -z "$(git -C "$overlay" status --porcelain=v1)" ] || fail 'sparse overlay is not clean before generation'
+  [ -f "$overlay/src/lib/nogc_sync_mut/spec.spl" ] || fail 'overlay lacks product sources'
+# The exact catalog check replaces Git porcelain here: declared Git symlinks
+# intentionally have regular, byte-bound physical expansions in this overlay.
 overlay_allocated_kib=$(du -sk "$overlay" | awk '{print $1}')
 overlay_allocated_bytes=$((overlay_allocated_kib * 1024))
-overlay_input_manifest="$job_root/logs/source-overlay-inputs.tsv"
-perl -MFile::Find -MDigest::SHA -e '
-  my ($root, $out) = @ARGV; my @rows;
-  for my $dir (qw(src/compiler src/lib src/app src/plugins src/compositions)) {
-    find({no_chdir => 1, wanted => sub {
-      my $path = $File::Find::name;
-      die "linked overlay file: $path\n" if -l $path;
-      return unless -f $path;
-      my $relative = substr($path, length($root) + 1);
-      die "unsafe overlay path\n" if $relative =~ /[\t\r\n\\]/;
-      open my $fh, "<:raw", $path or die $!;
-      my $sha = Digest::SHA->new(256); $sha->addfile($fh);
-      push @rows, "$relative\t" . $sha->hexdigest . "\n";
-    }}, "$root/$dir");
-  }
-  open my $fh, ">:raw", $out or die $!;
-  print {$fh} "path\tsha256\n", sort @rows or die $!;
-  close $fh or die $!;
-' "$overlay" "$overlay_input_manifest" || fail 'overlay input manifest failed'
 overlay_input_sha256=$(hash_file "$overlay_input_manifest")
 check_disk_space 6291456
 

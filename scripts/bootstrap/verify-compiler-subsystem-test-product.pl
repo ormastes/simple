@@ -9,6 +9,7 @@ use File::Find qw(find);
 use FindBin;
 use lib "$FindBin::Bin/lib";
 use BootstrapNativeImage qw(verify_native_image);
+use BootstrapProductOverlay qw(verify_product_overlay verify_product_source);
 use BootstrapProductProducer qw(read_product_producer validate_product_resources);
 
 my %arg;
@@ -106,8 +107,7 @@ sub git_output_for {
 my $actual_head = git_output_for($arg{source_root}, 'rev-parse', '--verify', 'HEAD');
 $actual_head =~ s/\n\z//;
 $actual_head =~ /\A[0-9a-f]{40}\z/ or die "pinned source HEAD invalid\n";
-git_output_for($arg{source_root}, 'status', '--porcelain', '--untracked-files=all') eq ''
-  or die "pinned source has changed or untracked inputs\n";
+verify_product_source($arg{source_root});
 my $inventory_bytes = regular_bytes($arg{inventory});
 my $whole_sha = sha256_hex($inventory_bytes);
 my @inventory_lines = split /\n/, $inventory_bytes, -1;
@@ -299,39 +299,7 @@ $overlay_manifest eq "$binary_dir/logs/source-overlay-inputs.tsv" &&
   sha_file($overlay_manifest) eq $build{source_overlay_input_sha256}
   or die "source overlay input manifest differs\n";
 no_link_components($overlay_manifest);
-my @overlay_rows = split /\n/, regular_bytes($overlay_manifest), -1;
-pop @overlay_rows if @overlay_rows && $overlay_rows[-1] eq '';
-shift(@overlay_rows) eq "path\tsha256" && @overlay_rows
-  or die "source overlay input manifest invalid\n";
-my $previous_overlay = '';
-my %manifested_overlay;
-for my $row (@overlay_rows) {
-  my @f = split /\t/, $row, -1;
-  @f == 2 && $f[0] =~ m{\Asrc/(?:compiler|lib|app|plugins|compositions)/} &&
-    $f[0] !~ m{(?:\A|/)\.\.?(/|\z)} && $f[0] !~ /[\t\r\n\\]/ &&
-    $f[0] gt $previous_overlay && $f[1] =~ /\A[0-9a-f]{64}\z/ &&
-    sha_file("$overlay/$f[0]") eq $f[1] &&
-    sha_file("$arg{source_root}/$f[0]") eq $f[1]
-    or die "source overlay input differs from pinned root\n";
-  no_link_components("$overlay/$f[0]");
-  $manifested_overlay{$f[0]} = 1;
-  $previous_overlay = $f[0];
-}
-my %populated_overlay;
-for my $scope (qw(compiler lib app plugins compositions)) {
-  next unless -d "$overlay/src/$scope";
-  find({ no_chdir => 1, wanted => sub {
-    my $path = $File::Find::name;
-    -l $path and die "linked source overlay input\n";
-    return unless -f $path;
-    my $relative = substr($path, length($overlay) + 1);
-    return if $relative eq 'src/app/generated-manifest.tsv' ||
-      $relative =~ m{\Asrc/app/product/};
-    $populated_overlay{$relative} = 1;
-  } }, "$overlay/src/$scope");
-}
-join("\n", sort keys %populated_overlay) eq join("\n", sort keys %manifested_overlay)
-  or die "source overlay input manifest omits populated source\n";
+verify_product_overlay($arg{source_root}, $overlay, $overlay_manifest);
 for my $pair (['source_spans_path','source_spans_sha256'],
               ['main_policy_path','main_policy_sha256'],
               ['main_verdicts_path','main_verdicts_sha256'],
