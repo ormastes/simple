@@ -1006,13 +1006,19 @@ pub fn load_and_merge_module(
     } else {
         None
     };
+    // Release this lane's handle on the entry so `take_shared_ast` can see
+    // whether anyone besides the cache still borrows the AST.
+    drop(shared);
     let parsed = match reusable {
         Some(Ok(ast)) => {
             crate::perf_counters::bump(&crate::perf_counters::INTERP_MODULE_AST_REUSE, 1);
-            // `Node` owns its definitions by value, so this is a deep copy: the
-            // interpreter gets a tree it alone owns, identical to the one the
-            // fresh parse produced, without lexing the file a second time.
-            Ok((*ast).clone())
+            // `Node` owns its definitions by value, so the interpreter needs a
+            // tree it alone owns, identical to the one a fresh parse produces,
+            // without lexing the file a second time. When no other lane still
+            // borrows the cached parse it is MOVED out of the cache instead of
+            // deep-copied (one AST alive instead of two); otherwise it is
+            // cloned exactly as before.
+            Ok(crate::interpreter::take_shared_ast(&module_path, ast))
         }
         Some(Err(message)) => Err(message.to_string()),
         None => {
@@ -2122,6 +2128,48 @@ mod cross_lane_parsed_source_tests {
                 "{name}: the interpreter lane must not replace the shared parse"
             );
         }
+    }
+
+    #[test]
+    fn unborrowed_parse_is_moved_to_the_interpreter_not_duplicated() {
+        crate::interpreter::clear_module_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let entry = temp.path().join("entry.spl");
+        fs::write(&entry, "").unwrap();
+        let module = temp.path().join("solo.spl");
+        let original = "fn solo_value(): 1\nexport solo_value\n";
+        fs::write(&module, original).unwrap();
+
+        // Lane 1 fills the cache and then lets go of its handle, as the HIR
+        // lowerer does when the JIT attempt finishes.
+        let lowered = crate::hir::lower::import_loader::parsed_imported_module(&module).expect("parses");
+        let expected = (*lowered).clone();
+        drop(lowered);
+        assert_eq!(parsed_source_cache_len(), 1);
+
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let mut enums = HashMap::new();
+        load_and_merge_module(
+            &glob_use("solo"),
+            Some(&entry),
+            &mut functions,
+            &mut classes,
+            &mut enums,
+        )
+        .expect("module loads");
+        assert!(functions.contains_key("solo_value"), "moved parse still yields the exports");
+        assert_eq!(parsed_source_cache_len(), 0, "the unborrowed AST was moved out, not copied");
+
+        // A later lookup re-parses the bytes first read -- never the edited
+        // file -- so it is indistinguishable from the entry having stayed.
+        fs::write(&module, "fn edited(): 2\n").unwrap();
+        let SharedSource::Parsed { source, ast: Ok(again) } = shared_source(&module) else {
+            panic!("released entry must re-parse from its retained source");
+        };
+        assert_eq!(source.as_str(), original);
+        assert_eq!(*again, expected, "re-parse of the retained bytes equals the original parse");
+        assert_eq!(parsed_source_cache_len(), 1);
     }
 
     #[test]

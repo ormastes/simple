@@ -141,6 +141,13 @@ impl<K: Eq + Hash + Clone, V: Clone> BoundedCache<K, V> {
         }
     }
 
+    /// Remove one entry and hand its value back. Like `retain`, this is an
+    /// owner-driven removal, not a retention decision, so it does not count as
+    /// an eviction.
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        self.map.remove(key).map(|e| e.value)
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
