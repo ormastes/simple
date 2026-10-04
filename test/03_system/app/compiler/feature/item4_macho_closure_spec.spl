@@ -69,7 +69,7 @@ fn item4_macho_closure_config(parent: text) -> NativeLinkConfig:
     config
 
 fn item4_macho_closure_cleanup(parent: text):
-    for name in ["app", "sdk/usr/lib/libitem4_closure_leaf.tbd", "sdk/usr/lib/libitem4_alias_leaf.dylib"]:
+    for name in ["app", "sdk/usr/lib/libitem4_closure_leaf.tbd", "sdk/usr/lib/libitem4_alias_leaf.dylib", "sdk/usr/lib/libitem4_alias.dylib"]:
         if file_exists(parent + "/" + name): expect(file_remove(parent + "/" + name)).to_equal(true)
     for name in ["sdk/usr/lib", "sdk/usr", "sdk"]:
         if dir_exists(parent + "/" + name): expect(dir_remove(parent + "/" + name)).to_equal(true)
@@ -116,6 +116,61 @@ fn item4_macho_closure_check(image: [u8], arm: bool):
     expect(item4_macho_closure_read(image, 0xc008, 8)).to_equal(0x100004000)
 
 describe "Mach-O SDK reexport closure":
+    it "ITEM4-REQ-006 continues to a defining sibling after a cyclic binary alias branch":
+        val made = dir_create_all("build")
+        expect(made).to_equal(true)
+        if not made: return
+        val created = secure_temp_dir("build", "item4-macho-alias-cycle-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val directories = dir_create_all(parent + "/sdk/usr/lib")
+        expect(directories).to_equal(true)
+        if not directories:
+            item4_macho_closure_cleanup(parent)
+            return
+        val bytes = file_read_bytes("test/fixtures/linker/macho/closure_alias_cycle_x64.dylib")
+        val checked = macho_read_binary_provider_v1(bytes, RelocArch.X86_64)
+        expect(checked.is_ok()).to_equal(true)
+        if checked.is_err():
+            item4_macho_closure_cleanup(parent)
+            return
+        expect(checked.unwrap().dependencies.len()).to_equal(1)
+        if checked.unwrap().dependencies.len() != 1:
+            item4_macho_closure_cleanup(parent)
+            return
+        expect(checked.unwrap().dependencies[0].install_name).to_equal("/usr/lib/a.dylib")
+        var alias_found = false
+        for symbol in checked.unwrap().exports:
+            if symbol.name == "_alias" and symbol.import_name == "_alias" and symbol.library_ordinal == 1: alias_found = true
+        expect(alias_found).to_equal(true)
+        if not alias_found:
+            item4_macho_closure_cleanup(parent)
+            return
+        val written = file_write_bytes(parent + "/sdk/usr/lib/libitem4_alias.dylib", bytes)
+        expect(written).to_equal(true)
+        if not written:
+            item4_macho_closure_cleanup(parent)
+            return
+        for format in ["v4", "v5"]:
+            val path = "test/fixtures/linker/macho/closure_alias_sibling_{format}_interface.tbd"
+            val source = MachOProviderSourceV1(path: path, bytes: file_read_bytes(path))
+            val search = MachOProviderSearchV1(sdk_root: parent + "/sdk", library_paths: [], output_path: parent + "/app")
+            step("Resolve a genuine binary alias cycle before the later defining inline sibling")
+            val built = macho_provider_closure_v1([source], item4_macho_closure_target(false), item4_macho_closure_client(),
+                search, item4_macho_closure_load, macho_provider_closure_default_limits_v1())
+            expect(built.is_ok()).to_equal(true)
+            if built.is_ok():
+                var closure = built.unwrap()
+                val found = closure.resolve_import("_alias")
+                expect(found.is_ok()).to_equal(true)
+                if found.is_ok():
+                    expect(found.unwrap().is_some()).to_equal(true)
+                    if found.unwrap().is_some():
+                        expect(found.unwrap().unwrap().name).to_equal("_alias")
+                        expect(found.unwrap().unwrap().root_ordinal).to_equal(1)
+        item4_macho_closure_cleanup(parent)
+
     it "ITEM4-REQ-006 retains the outward binary alias and root ordinal through actual image binding":
         for arm in [false, true]:
             val suffix = if arm: "a64" else: "x64"
