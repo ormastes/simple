@@ -1,0 +1,101 @@
+"""
+## Purpose and audience
+Purpose: Pin the example.com width/centering fixes - `max-width` in em/rem
+(gap C), `margin: auto` centring a width:auto box clamped by `max-width`
+(gap B), and Draw IR text honouring `text-align` (gap A).
+Audience: maintainers of the Simple Web layout and Draw IR paint path.
+## Operator workflow
+Run with the test runner; offline, layout only (no pixels).
+## Compatibility and limitations
+Bug record: doc/08_tracking/bug/browser_real_site_rendering_gaps_2026-10-04.md
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+use std.common.ui.draw_ir.{DRAW_IR_COMMAND_TEXT}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    parse_html, extract_css_vw, build_child_index, compute_styles,
+    zero_i32_list, empty_i32_lists, neg_one_i32_list, layout,
+    apply_decls, renderer_default_style, simple_web_layout_render_html_draw_ir
+}
+
+fn index_of_tag(html: text, tag: text) -> i32:
+    val nodes = parse_html(html)
+    var i = 0
+    while i < nodes.len() as i32:
+        if nodes[i].tag == tag:
+            return i
+        i = i + 1
+    -1
+
+# (x, width) of the first `tag` box at a 800x600 viewport.
+fn box_of(html: text, tag: text) -> (i32, i32):
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, 800, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
+    val n = nodes.len() as i32
+    val boxes = layout(
+        nodes, styles, child_index, 0, 0, 0, 800, 600,
+        zero_i32_list(n), zero_i32_list(n), zero_i32_list(n), zero_i32_list(n),
+        empty_i32_lists(n), empty_i32_lists(n), neg_one_i32_list(n)
+    )
+    val i = index_of_tag(html, tag)
+    (boxes.bx[i], boxes.bw[i])
+
+describe "max-width in font-relative units":
+    it "resolves em against the element's own font-size":
+        val st = apply_decls(renderer_default_style(), "font-size:16px;max-width:26em;letter-spacing:0px", 16)
+        expect(st.max_width_px).to_equal(416)
+
+    it "resolves rem against the 16px root and min-width too":
+        val st = apply_decls(renderer_default_style(), "font-size:20px;max-width:10rem;min-width:2.5em;letter-spacing:0px", 16)
+        expect(st.max_width_px).to_equal(160)
+        expect(st.min_width_px).to_equal(50)
+
+    it "keeps plain px values unchanged":
+        val st = apply_decls(renderer_default_style(), "max-width:300px;letter-spacing:0px", 16)
+        expect(st.max_width_px).to_equal(300)
+
+describe "margin:auto with max-width":
+    it "centres a width:auto block clamped by max-width":
+        step("body is 400px wide at most; the 800px viewport leaves 400px free")
+        val (x, w) = box_of("<html><head><style>body{margin:auto;max-width:400px}</style></head><body><p>x</p></body></html>", "body")
+        expect(w).to_equal(400)
+        expect(x).to_equal(200)
+
+    it "centres a 26em body including its padding":
+        step("26em = 416px content + 2x 32px padding = 480px border box")
+        val (x, w) = box_of("<html><head><style>body{font-size:16px;max-width:26em;margin:auto;padding:0 32px}</style></head><body><p>x</p></body></html>", "body")
+        expect(w).to_equal(480)
+        expect(x).to_equal(160)
+
+    it "leaves a block without max-width at the left edge":
+        val (x, w) = box_of("<html><head><style>body{margin:auto}</style></head><body><p>x</p></body></html>", "body")
+        expect(x).to_equal(0)
+        expect(w).to_equal(800)
+
+# x of the first Draw IR text command whose text contains `needle`.
+fn draw_ir_text_x(html: text, needle: text) -> i32:
+    val composition = simple_web_layout_render_html_draw_ir(html, 400, 200)
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == DRAW_IR_COMMAND_TEXT and command.text_value.contains(needle):
+                return command.x
+    -1
+
+describe "Draw IR text honours text-align":
+    it "keeps left-aligned text at the content edge":
+        val x = draw_ir_text_x("<html><body><p>hello</p></body></html>", "hello")
+        expect(x).to_equal(8)
+
+    it "centres and right-aligns a short line, inherited or direct":
+        step("one short word in a 384px content box")
+        val left = draw_ir_text_x("<html><body><p>hello</p></body></html>", "hello")
+        val centre = draw_ir_text_x("<html><head><style>p{text-align:center}</style></head><body><p>hello</p></body></html>", "hello")
+        val inherited = draw_ir_text_x("<html><head><style>body{text-align:center}</style></head><body><p>hello</p></body></html>", "hello")
+        val right = draw_ir_text_x("<html><head><style>p{text-align:right}</style></head><body><p>hello</p></body></html>", "hello")
+        assert_true(centre > left + 100)
+        expect(inherited).to_equal(centre)
+        assert_true(right > centre + 100)
