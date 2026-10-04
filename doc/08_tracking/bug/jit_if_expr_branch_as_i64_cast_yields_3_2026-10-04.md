@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-10-04
 - **Area:** Rust seed JIT (Cranelift), HIR/MIR lowering of value-producing `if` with an `as` cast
-- **Status:** OPEN — deterministic, pre-existing (reproduces on a seed built before this lane's changes)
+- **Status:** FIXED 2026-10-04 (seed parser; see "Root cause" below)
 - **Severity:** high — silent wrong numbers; breaks text layout in every JIT'd UI run
 
 ## Minimal repro
@@ -53,9 +53,34 @@ the interpreter (see
 Any change that lets such a module JIT (smaller code, the macOS arena) makes it
 visible; on Linux, where the arena already works, JIT'd UI runs are exposed today.
 
-## Next step
+## Root cause (FIXED 2026-10-04)
 
-Dump MIR for `v1` (`SIMPLE_DUMP_MIR=v1`) and compare the if-expression result
-slot with `v3`: the value 3 looks like a tagged/boolean RuntimeValue reaching an
-i64 slot, i.e. the branch value of a `Cast` inside an if-expression is not
-unboxed/converted to the if's result type.
+The problem is in the parser, not the JIT. The seed parser read
+`if c: x as i64 else: 5` as `if c: (x as i64 else: 5)`, which is the
+`CastElse` lazy-fallback form (`expr as T else: fn`). That left the `if`
+with **no else branch**. The interpreter then returned nil on the false
+path (`nil is forbidden by the non-optional return contract`), and the JIT
+used the constants 3/0. The pure-Simple parser has no `CastElse`, so the
+two front ends disagreed. 48 `.spl` sites use this shape (for example
+`src/lib/skia/feature/glyph/subpixel.spl:33`), and no `.spl` site uses
+`CastElse` on purpose.
+
+Fix: `Parser::inline_if_then_call_depth`
+(`src/compiler_rust/parser/src/parser_impl/core.rs`) is set while
+`parse_if_expr` parses an inline then-branch
+(`expressions/helpers.rs`). At that call depth, `expressions/postfix.rs`
+leaves `else:` to the `if`. `CastElse` is unchanged everywhere else,
+including inside a call argument within the then-branch.
+
+Specs (`src/compiler_rust/parser/src/if_expr_cast_else_test.rs`):
+- the exact repro: `inline_if_then_cast_keeps_the_if_else`
+- generalization tests:
+  - `parenthesised_multiline_if_then_cast_keeps_the_if_else`
+  - `else_branch_cast_is_unchanged`
+  - `cast_else_outside_an_if_is_unchanged`
+  - `cast_else_in_a_call_argument_inside_the_then_branch_is_unchanged`
+
+Before the fix, the two repro tests fail (parser suite 1227 passed / 7 failed).
+After the fix, the suite is 1229 passed / 5 failed; the 5 are pre-existing,
+the same set as before. The probe now prints `7200 5 5` under both the JIT
+and the interpreter.
