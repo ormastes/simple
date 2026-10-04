@@ -92,3 +92,35 @@ archive contains only B, with no new demand. A/B code and data distinguish11/22;
 weak variants retain the same payload with weak-definition symbol flags. Common
 declarations are size8/align8 and size32/align32. These are external assembly
 construction results only, not Simple SSpec or Darwin execution evidence.
+
+## TextAPI fixtures (2026-10-04)
+
+Tool: WSL Ubuntu `llvm-readtapi`, LLVM21.1.8. All binary sources above are
+repository-authored, not copied Apple SDK material. Run in this directory:
+
+```sh
+llvm-readtapi -stubify --filetype=tbd-v4 provider_x64.dylib -o tbd_provider_x64_v4.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 provider_x64.dylib -o tbd_provider_x64_v5.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 provider_a64.dylib -o tbd_provider_a64_v5.tbd
+llvm-readtapi -merge --filetype=tbd-v4 tbd_provider_x64_v4.tbd tbd_provider_a64_v5.tbd -o tbd_provider_multi_v4.tbd
+llvm-readtapi -merge --filetype=tbd-v5 tbd_provider_x64_v4.tbd tbd_provider_a64_v5.tbd -o tbd_provider_multi_v5.tbd
+llvm-readtapi -compare tbd_provider_multi_v4.tbd tbd_provider_multi_v5.tbd
+llvm-readtapi -stubify --filetype=tbd-v4 hosted_tls_x64.dylib -o tbd_tls_x64_v4.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 hosted_tls_a64.dylib -o tbd_tls_a64_v5.tbd
+llvm-readtapi -stubify --filetype=tbd-v5 tbd_metadata_v4.tbd -o tbd_metadata_v5.tbd
+llvm-readtapi -compare tbd_metadata_v4.tbd tbd_metadata_v5.tbd
+llvm-readtapi -extract --arch=x86_64 --filetype=tbd-v4 tbd_metadata_v5.tbd -o tbd_metadata_x64_oracle_v4.tbd
+```
+
+The metadata v4 file is authored YAML with target-only exports, ObjC categories,
+weak/TLV names, restrictions and an inline reexported child. Conversion,
+comparison and extraction succeeded. V4 cannot preserve deployment metadata;
+the merged V5 fixture therefore omits x64 min_deployment while retaining arm64
+11.0 from its binary-derived V5 source. No SDK value is invented.
+
+LLVM rejects duplicate YAML mapping keys and the truncated fixtures. LLVM21
+accepts repeated identical JSON version keys; our planned duplicate-key refusal
+is intentionally stricter, not an LLVM-equivalence claim. The v5 duplicate-key
+file repeats version5 so an unrelated wrong-version error cannot mask that test.
+These are external TextAPI construction/validation observations, not Simple
+test execution, client-access approval, transitive linker or Darwin SDK proof.

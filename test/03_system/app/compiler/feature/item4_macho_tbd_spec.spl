@@ -1,0 +1,82 @@
+"""ITEM4-REQ-006 SDK TextAPI file acceptance. UNRUN; external LLVM fixture validation is separate."""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{dir_create_all, file_read_bytes, file_exists}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.backend.linker.native_config.{NativeLinkConfig}
+use compiler.backend.linker.macho.native_adapter.{native_macho_plan_v1, native_macho_link_files_v1}
+
+fn item4_macho_tbd_read(bytes: [u8], at: i64, width: i64) -> i64:
+    val valid = width >= 1 and width <= 8 and at >= 0 and at <= bytes.len() and width <= bytes.len() - at
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    var value: i64 = 0
+    for index in 0..width: value = value | ((bytes[at + index] as i64) << (index * 8))
+    value
+
+fn item4_macho_tbd_config() -> NativeLinkConfig:
+    var config = NativeLinkConfig.default()
+    config.runtime_path = "none"
+    config.allow_cc_fallback = false
+    config.extra_flags = ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "simple.item4.tbd", "-rpath", "@loader_path"]
+    config
+
+describe "actual TextAPI providers through the Mach-O file adapter":
+    it "ITEM4-REQ-006 consumes both TextAPI formats through positional and named providers on both CPUs":
+        for variant in 0..8:
+            val arm = variant % 2 == 1
+            val named = variant >= 4
+            val version = if (variant / 2) % 2 == 0: "v4" else: "v5"
+            val suffix = if arm: "a64" else: "x64"
+            step("Plan an explicitly selected Mach-O link")
+            val made = dir_create_all("build")
+            expect(made).to_equal(true)
+            if not made: return
+            val created = secure_temp_dir("build", "item4-macho-tbd-")
+            expect(created.is_ok()).to_equal(true)
+            if created.is_err(): return
+            val parent = created.unwrap()
+            val output = parent + "/app"
+            val source = "test/fixtures/linker/macho/tbd_provider_multi_{version}.tbd"
+            var config = item4_macho_tbd_config()
+            var inputs = ["test/fixtures/linker/macho/hosted_start_{suffix}.o"]
+            if named:
+                val raw = file_read_bytes(source)
+                expect(raw.len() > 32).to_equal(true)
+                if raw.len() <= 32:
+                    expect(dir_remove(parent)).to_equal(true)
+                    return
+                val written = file_write_bytes(parent + "/libitem4.tbd", raw)
+                expect(written).to_equal(true)
+                if not written:
+                    expect(dir_remove(parent)).to_equal(true)
+                    return
+                config.libraries = ["item4"]
+                config.library_paths = [parent]
+            else:
+                inputs.push(source)
+            val plan = native_macho_plan_v1(if arm: "aarch64" else: "x86_64", config, output)
+            expect(plan.is_ok()).to_equal(true)
+            if plan.is_ok():
+                step("Link real object and provider files")
+                val linked = native_macho_link_files_v1(plan.unwrap(), inputs, [], output)
+                expect(linked.is_ok()).to_equal(true)
+                if linked.is_ok():
+                    step("Inspect the published Mach-O commands and bytes")
+                    val image = file_read_bytes(output)
+                    expect(image.len() > 0xc010).to_equal(true)
+                    if image.len() > 0xc010:
+                        expect(item4_macho_tbd_read(image, 0, 4)).to_equal(0xfeedfacf)
+                        expect(item4_macho_tbd_read(image, 4, 4)).to_equal(if arm: 0x0100000c else: 0x01000007)
+                        expect(item4_macho_tbd_read(image, 12, 4)).to_equal(2)
+                        expect(item4_macho_tbd_read(image, 0xc008, 8)).to_equal(0x100004000)
+                        if arm:
+                            expect(item4_macho_tbd_read(image, 0x4008, 4)).to_equal(0x14000ffe)
+                            expect(item4_macho_tbd_read(image, 0x8008, 4)).to_equal(0xd61f0200)
+                        else:
+                            expect(item4_macho_tbd_read(image, 0x4002, 4)).to_equal(0x3ffa)
+            step("Remove owned fixture files")
+            if file_exists(output): expect(file_remove(output)).to_equal(true)
+            if file_exists(parent + "/libitem4.tbd"): expect(file_remove(parent + "/libitem4.tbd")).to_equal(true)
+            expect(dir_remove(parent)).to_equal(true)
