@@ -267,8 +267,10 @@ retains qualified-runtime and nonvacuous-result obligations.
 Initial intent `b83b2acb980` creates
 `test/01_unit/lib/test_runner_native_source_authority_spec.spl` before source
 implementation. It calls the real wrapper, staging owner, coordinator request
-parser and compile-argument builder. Three scenarios are initially authored;
-invalid-input and cleanup-retry followups are planned. Counts describe authorship,
+parser and compile-argument builder. Five unit scenarios are now authored,
+including invalid-input and cleanup-retry followups. One real Git snapshot
+scenario (`a86230d1301`) adds cold/warm acquire, exact-byte and deletion oracles.
+Counts describe authorship,
 not executed examples or evidence that every obligation below is implemented.
 
 | Acceptance obligation | Required observable evidence |
@@ -279,12 +281,16 @@ not executed examples or evidence that every obligation below is implemented.
 | Canonical closure | Coverage and explicit AOT use the staged entry plus canonical default source roots, without the hardcoded `--source src/lib` restriction |
 | Fresh immutable authority | In a qualified integration run, a prior snapshot lacks the generated entry; coordinator refresh acquires a new generation containing it while preserving the prior generation and parent runner bindings |
 | Inventory lifetime | Real canonical inventory observes creation/deletion; missing, ignored or outside-scope entries fail closed; compatible caches and journals are not manually rewritten |
-| Native harness result | Correct `_spec.spl` positive/assertion-failure fixtures produce a real executable and expected nonzero example summary; a deliberate compile-negative `fn main` fixture remains plain `.spl` |
+| Native harness result | Correct `_spec.spl` positive/assertion-failure fixtures produce a real executable and expected nonzero example summary; a deliberate plain `.spl` `fn main` fixture exercises zero-example rejection, not compile failure |
 
 The frozen implementation interfaces are `native_test_stage_source_v1` and
 `native_test_cleanup_source_v1` in the new standard-library staging owner, plus
 `native_build_authority_request_v1` in the CLI coordinator. Unit parser/argv
 assertions do not prove real snapshot refresh, child environment isolation,
 inventory updates, compiler imports or native execution. Those integration
-obligations remain open until independently evidenced. No new diagnostic retry
+obligations remain open until independently evidenced. The snapshot scenario
+does not exercise the CLI flag or child environment isolation. Windows owned
+compile receipts with an unreaped tree retain artifacts; providers without a
+receipt retain their prior synchronous contract, not a universal tree proof.
+No new diagnostic retry
 or runtime qualification follows from this plan linkage.

@@ -531,3 +531,14 @@ workers inherit the acquired generation. The parent test runner must not mutate
 its own SCV environment. Coverage and explicit AOT omit the restricted source
 list and use canonical default roots. Runtime execution, fresh-generation
 integration and all original item4 release gates remain UNRUN/open.
+
+Source candidate `44d01e5fbcb` implements the three owned production paths.
+Five staging/parser/argv unit scenarios and root's one real Git snapshot
+scenario (`a86230d1301`, manual `9ce30feac71`) are authored, all UNRUN.
+The root snapshot test covers real acquire and immutable generations without
+publishing bindings; it is not CLI refresh or child-isolation evidence.
+Compilation uses the existing owned-test route: an explicit unreaped-tree
+receipt retains artifacts and fails, while providers without a receipt retain
+their synchronous contract without a universal tree-reaping claim. Root's
+remaining backend fixture checks distinguish assertion failure from a plain
+`fn main` zero-example rejection; the latter is not a compile-negative oracle.
