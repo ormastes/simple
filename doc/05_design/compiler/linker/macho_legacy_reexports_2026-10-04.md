@@ -142,20 +142,29 @@ from execution, coverage and representative latency/RSS remain open.
 ## Exact candidate source review
 
 Independent review found no concrete P0/P1 in four-file core `89da96988ee`,
-hosted API guard `c6dcb1f96bb` with classic-leaf refinement `f77ad587503`, and
-acceptance/manual `15c94d7c645` including `1313c86ed7e`. The guard requires a
+hosted API guard `c6dcb1f96bb` with classic-leaf refinement `f77ad587503`, main
+acceptance through `006e145c405`/manual `7052901d52d`, and modes acceptance/manual
+`9a4e14a9eb4`. Initial intent preceded production; later review-driven coverage
+was added after implementation, without claiming observed RED/GREEN. The guard requires a
 closure for unsuppressed selector metadata or inferred visibility with at least
 one ordinary/weak dependency; provenance alone does not refuse a classic leaf.
 
-Eight authored scenarios cover real both-CPU selectors, hidden/suppressed
+Nine main authored scenarios cover real both-CPU selectors, hidden/suppressed
 dependencies, classic physical-parent inference and modern controls, command
 string mutations, exact dot/underscore stems with shorter/longer mismatches,
 dormant no-closure compatibility, and inactive high-deployment children.
-The last case uses a root's real symbol-table exports and a validated macOS99
+The inactive-child case uses a root's real symbol-table exports and a validated macOS99
 child whose nonmatching umbrella must not activate deployment checks.
+The all-match case uses two real dependency identities: an empty first provider
+and a later provider supplying the required imports, retaining outward root1.
 
-This wave does not assert all multi-match, weak/lazy/upward, missing-unmatched
-dependency, quota and alias-interaction boundaries in the broader matrix above.
-Those remain acceptance obligations. The fixture recipe records original LLVM
+Three separately authored modes scenarios add ordinary-to-weak/lazy/upward
+command mutations with a present provider, matched missing-file failure with
+destination preservation, and unmatched absent dependency success through a
+modern root's own exports. The weak case verifies command-class visibility only;
+absent weak dependencies and weak-import binding semantics remain open.
+
+Dedicated quota and additional alias-interaction boundaries in the broader
+matrix remain acceptance obligations. The fixture recipe records original LLVM
 construction and subsequent bounded mutations; signatures were not regenerated.
 All Simple/native execution remains UNRUN and no SDK/host row is complete.

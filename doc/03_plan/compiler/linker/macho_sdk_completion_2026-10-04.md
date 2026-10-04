@@ -9,7 +9,7 @@ Design authority: `doc/05_design/compiler/linker/macho_sdk_providers_2026-10-04.
 |---|---|---|
 | Shared provider metadata | Address-free typed providers used by actual hosted fixups/image construction; binary inputs retain their original validation before projection | Source implemented and independently reviewed; eight authored scenarios cover both architectures, binding/TLV bytes, malformed binary/metadata refusal, absent versions and explicit unsupported access policies; execution UNRUN |
 | Both SDK text formats | Strict tagged/multi-document v4 YAML and v5 JSON readers with target selection, schema/default semantics and resource bounds | Source implemented: independent LLVM TextAPI fixtures and nine authored scenarios cover target/default semantics, metadata retention, malformed inputs, logical quotas, actual leaf/TLV image flow and file-route output preservation; all Simple execution UNRUN. See text-stub reader design for explicit accepted/rejected syntax; broad SDK compatibility remains unverified |
-| Dependency and access rules | Inline/external reexport closure with exact identities, bounded cycles, aliases and root binding ordinals; actual client/umbrella enforcement and explicit SDK/search ownership | Graph, direct-client policy, native SDK/search and owner-specific dependency @rpath source are independently reviewed. Legacy selector and old-format subframework inference source is now implemented/reviewed with eight authored real-file scenarios. All execution remains UNRUN. Remaining legacy boundary assertions, broad SDK compatibility and other policy semantics stay open; this row is not qualified complete |
+| Dependency and access rules | Inline/external reexport closure with exact identities, bounded cycles, aliases and root binding ordinals; actual client/umbrella enforcement and explicit SDK/search ownership | Graph, direct-client policy, native SDK/search and owner-specific dependency @rpath source are independently reviewed. Legacy selector and old-format subframework inference source is implemented/reviewed with nine main plus three modes authored real-file scenarios. All execution remains UNRUN. Dedicated alias/quota boundaries, broad SDK compatibility and other policy semantics stay open; this row is not qualified complete |
 | SDK binding and qualification | Correct weak/TLV semantics, Objective-C export expansion and linker-directive handling, normal SDK discovery/integration and native Darwin qualification | Open: correct bind flags/ordinals, missing weak imports, real x64/ARM64 link/load/run/signing evidence plus full compiler/application corpus |
 
 Existing strict JSON parsing can reject duplicate decoded keys and trailing data,
@@ -35,9 +35,12 @@ header-derived library stems, checked command strings, header suppression and
 old-format-only subframework inference. It must not turn modern ordinary SDK
 dependencies into an unconditional recursive discovery workload.
 Legacy source review covers `89da96988ee`, hosted guards `c6dcb1f96bb` and
-`f77ad587503`, and eight-scenario acceptance `15c94d7c645`, without concrete
-P0/P1 findings. Multi-match, weak/lazy/upward class boundaries, missing-unmatched
-dependencies and additional alias/quota cases remain authored-coverage gaps.
+`f77ad587503`, nine main scenarios through `006e145c405`/manual `7052901d52d`,
+and three modes scenarios/manual `9a4e14a9eb4`, without concrete P0/P1 findings.
+All-matches, weak/lazy/upward command classes and matched/unmatched missing-file
+cases now have authored assertions. Weak visibility uses a present provider;
+absent weak dependencies, weak-import semantics and additional alias/quota
+boundaries remain open. No execution or complete-SDK claim follows.
 Exact core `78194e42070`, native routing `ccb9ae0c20b` and seven-case acceptance
 `f64c60b4f56` received independent source review without concrete P0/P1 findings;
 this closes that candidate review, not the row's execution or SDK qualification.

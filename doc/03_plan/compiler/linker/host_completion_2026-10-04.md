@@ -39,3 +39,9 @@ runs, coverage and full Phase 4 qualification remain UNRUN.
 Runpath source review now covers core `78194e42070`, native routing `ccb9ae0c20b`
 and seven authored acceptance scenarios at `f64c60b4f56`, without concrete P0/P1
 findings. This review does not supply an admitted runtime or complete any host row.
+
+The subsequent legacy provider wave has nine main and three modes authored
+scenarios, independently source-reviewed through `006e145c405`, `7052901d52d`
+and `9a4e14a9eb4`. Present-provider weak command visibility does not qualify
+absent weak dependencies or weak-import binding. Actual five-host execution,
+broader SDK behavior and resource qualification remain open.
