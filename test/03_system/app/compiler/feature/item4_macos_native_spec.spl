@@ -43,7 +43,11 @@ fn item4_macos_native_command(bytes: [u8], kind: i64) -> i64:
         if length < 8 or length > 32 + size - at:
             expect(false).to_equal(true)
             return -1
-        if item4_macos_native_read(bytes, at) == kind: return at
+        if item4_macos_native_read(bytes, at) == kind:
+            val minimum = if kind == 0x80000022: 48 elif kind == 0x1d: 16 elif kind == 0xe: 12 else: 24
+            expect(length >= minimum).to_equal(true)
+            if length < minimum: return -1
+            return at
         at = at + length
     expect(false).to_equal(true)
     -1
@@ -62,7 +66,17 @@ fn item4_macos_native_check_image(bytes: [u8], arm: bool):
     if dyld < 0: return
     val signature = item4_macos_native_command(bytes, 0x1d)
     if signature < 0: return
-    expect(item4_macos_native_read(bytes, signature + 12) > 0).to_equal(true)
+    val signature_offset = item4_macos_native_read(bytes, signature + 8)
+    val signature_size = item4_macos_native_read(bytes, signature + 12)
+    val signature_valid = signature_size >= 12 and signature_offset >= 0 and signature_offset <= bytes.len() and signature_size <= bytes.len() - signature_offset
+    expect(signature_valid).to_equal(true)
+    if not signature_valid: return
+    expect(item4_macos_native_read(bytes, signature_offset)).to_equal(0xc00cdefa)
+    val version = item4_macos_native_command(bytes, 0x32)
+    if version < 0: return
+    expect(item4_macos_native_read(bytes, version + 8)).to_equal(1)
+    expect(item4_macos_native_read(bytes, version + 12)).to_equal(0xb0000)
+    expect(item4_macos_native_read(bytes, version + 16)).to_equal(0xb0000)
     expect(item4_macos_native_read(bytes, 0xc008, 8)).to_equal(0x100004000)
 
 describe "explicit internal Mach-O native file adapter":
@@ -200,6 +214,15 @@ describe "explicit internal Mach-O native file adapter":
                 item4_macos_native_check_image(bytes, arm)
                 val provider = item4_macos_native_command(bytes, 0xc)
                 expect(provider >= 0).to_equal(true)
+                if provider >= 0:
+                    val size = item4_macos_native_read(bytes, provider + 4)
+                    val name_offset = item4_macos_native_read(bytes, provider + 8)
+                    val expected_name = "@rpath/libitem4.dylib"
+                    val name_valid = name_offset >= 24 and name_offset <= size and expected_name.len() < size - name_offset
+                    expect(name_valid).to_equal(true)
+                    if name_valid:
+                        for index in 0..expected_name.len(): expect(bytes[provider + name_offset + index]).to_equal(expected_name.byte_at(index) as u8)
+                        expect(bytes[provider + name_offset + expected_name.len()]).to_equal(0u8)
                 val fixups = item4_macos_native_command(bytes, 0x80000022)
                 if fixups >= 0: expect(item4_macos_native_read(bytes, fixups + 20) > 20).to_equal(true)
             step("Remove owned fixture files")
