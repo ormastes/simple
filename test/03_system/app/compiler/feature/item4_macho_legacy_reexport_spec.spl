@@ -111,6 +111,47 @@ fn item4_macho_legacy_name(bytes: [u8], command: i64, name: text) -> [u8]:
     changed
 
 describe "Legacy Mach-O whole-library reexport selectors":
+    it "ITEM4-REQ-006 leaves an unmatched classic child with a higher deployment target inactive":
+        val root = file_read_bytes("test/fixtures/linker/macho/legacy_classic_own_x64.dylib")
+        val root_checked = macho_read_binary_provider_v1(root, RelocArch.X86_64)
+        expect(root_checked.is_ok()).to_equal(true)
+        if root_checked.is_err(): return
+        expect(root_checked.unwrap().infer_subframeworks).to_equal(true)
+        val original_child = file_read_bytes("test/fixtures/linker/macho/legacy_child_Different_x64.dylib")
+        val checked = macho_read_binary_provider_v1(original_child, RelocArch.X86_64)
+        expect(checked.is_ok()).to_equal(true)
+        if checked.is_err(): return
+        expect(checked.unwrap().parent_umbrella).to_equal(Some("Different"))
+        val version = item4_macho_legacy_command(original_child, 0x32)
+        if version < 0: return
+        var child = original_child
+        # Independent packed version mutation: major99, minor0, patch0.
+        for byte in 0..4:
+            child[version + 12 + byte] = ((0x630000 >> (8 * byte)) & 255) as u8
+            child[version + 16 + byte] = ((0x630000 >> (8 * byte)) & 255) as u8
+        val changed = macho_read_binary_provider_v1(child, RelocArch.X86_64)
+        expect(changed.is_ok()).to_equal(true)
+        if changed.is_err(): return
+        expect(changed.unwrap().minimum_os).to_equal(Some(0x630000))
+        val made = dir_create_all("build")
+        expect(made).to_equal(true)
+        if not made: return
+        val created = secure_temp_dir("build", "item4-legacy-inactive-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val root_written = file_write_bytes(parent + "/OldRoot", root)
+        val child_written = file_write_bytes(parent + "/liblegacy.1.dylib", child)
+        expect(root_written and child_written).to_equal(true)
+        if not root_written or not child_written:
+            item4_macho_legacy_cleanup(parent)
+            return
+        step("Resolve the classic root's own exports without activating its unmatched child")
+        val linked = item4_macho_legacy_link(parent, parent + "/OldRoot", false)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_ok(): item4_macho_legacy_check(file_read_bytes(parent + "/app"), false)
+        item4_macho_legacy_cleanup(parent)
+
     it "ITEM4-REQ-006 validates selector strings even when the header suppresses legacy visibility":
         for suffix in ["x64", "a64"]:
             val arch = if suffix == "a64": RelocArch.AArch64 else: RelocArch.X86_64
@@ -143,7 +184,8 @@ describe "Legacy Mach-O whole-library reexport selectors":
         val dependency = item4_macho_legacy_command(original, 12)
         val selector = item4_macho_legacy_command(original, 0x15)
         if dependency < 0 or selector < 0: return
-        for matching in [true, false]:
+        for mode in 0..3:
+            val matching = mode == 0
             val made = dir_create_all("build")
             expect(made).to_equal(true)
             if not made: return
@@ -152,7 +194,7 @@ describe "Legacy Mach-O whole-library reexport selectors":
             if created.is_err(): return
             val parent = created.unwrap()
             var changed = item4_macho_legacy_name(original, dependency, "/usr/lib/liblegacy_x.dylib")
-            if not matching: changed = item4_macho_legacy_name(changed, selector, "liblega")
+            if not matching: changed = item4_macho_legacy_name(changed, selector, if mode == 1: "liblega" else: "liblegacyX")
             val leaf_bytes = file_read_bytes("test/fixtures/linker/macho/legacy_leaf_x64.dylib")
             val leaf_checked = macho_read_binary_provider_v1(leaf_bytes, RelocArch.X86_64)
             expect(leaf_checked.is_ok()).to_equal(true)
