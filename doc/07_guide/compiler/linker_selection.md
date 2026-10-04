@@ -28,7 +28,9 @@ to false; its general default is true. Debug, stripping, size preference and
 retained-symbol policies remain unsupported in this adapter.
 
 Supply actual matching Mach-O objects, archives and thin dylib providers through
-explicit library paths. SDK `.tbd` files and dyld shared-cache providers are not
+explicit library paths. Providers with an `@rpath/` install name also require an
+explicit runtime search path such as `-rpath @loader_path`; a library search
+directory alone does not supply that runtime path. SDK `.tbd` files and dyld shared-cache providers are not
 yet supported, and an SDK version flag does not discover or admit an SDK.
 Managed native builds still require their admitted external hosted linker.
 This source-level adapter availability does not establish native Darwin execution
