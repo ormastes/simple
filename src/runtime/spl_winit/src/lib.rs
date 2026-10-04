@@ -216,9 +216,23 @@ impl Inner {
         }
         let reqs: Vec<CreateReq> = self.create_requests.drain(..).collect();
         for req in reqs {
+            // The request is in PHYSICAL pixels. Never ask for more than the
+            // monitor has: a 3840x2160 request on a 1x 1920x1080 screen would
+            // otherwise open a window larger than the display. The OS still
+            // trims the result to the visible frame (menu bar, title bar);
+            // callers read the real extent back via
+            // rt_winit_window_inner_width/height.
+            let (mut req_w, mut req_h) = (req.width.max(1), req.height.max(1));
+            if let Some(monitor) = target.primary_monitor().or_else(|| target.available_monitors().next()) {
+                let size = monitor.size();
+                if size.width > 0 && size.height > 0 {
+                    req_w = req_w.min(size.width);
+                    req_h = req_h.min(size.height);
+                }
+            }
             let attrs = Window::default_attributes()
                 .with_title(req.title.clone())
-                .with_inner_size(PhysicalSize::new(req.width.max(1), req.height.max(1)))
+                .with_inner_size(PhysicalSize::new(req_w, req_h))
                 .with_decorations(true)
                 .with_resizable(true)
                 .with_visible(true);
@@ -247,8 +261,9 @@ impl Inner {
                     continue;
                 }
             };
-            let nw = NonZeroU32::new(req.width.max(1)).unwrap();
-            let nh = NonZeroU32::new(req.height.max(1)).unwrap();
+            let actual = window.inner_size();
+            let nw = NonZeroU32::new(actual.width.max(1)).unwrap();
+            let nh = NonZeroU32::new(actual.height.max(1)).unwrap();
             let _ = surface.resize(nw, nh);
 
             let wid = next_native_id();

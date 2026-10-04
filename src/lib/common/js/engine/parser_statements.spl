@@ -3,7 +3,7 @@
 # variable declarations, control flow, try/catch, switch, class declarations,
 # destructuring patterns, and expression statements.
 
-use std.common.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
+use std.common.js.engine.js_error.{JsError, js_script_error, JsLogger, LogLevel, JsBrowserResult, JsBrowserError}
 use std.common.js.types.pair.{Pair}
 use std.common.js.types.js_types.JsValue
 use std.common.js.types.ast_types.{JsExpression, JsStatement, SwitchCase, FnParam, DestructProp, ImportSpec, ExportSpec, JsAstFactory}
@@ -12,7 +12,7 @@ use std.common.js.engine.parser.{JsParser}
 impl JsParser:
 
     # var/let/const declaration
-    me parse_var_declaration(kind: text) -> BrowserResult<JsStatement>:
+    me parse_var_declaration(kind: text) -> JsBrowserResult<JsStatement>:
         self.advance()  # consume var/let/const
 
         # Check for destructuring pattern
@@ -38,7 +38,7 @@ impl JsParser:
         Ok(JsAstFactory.var_decl(name: name, init: init_expr))
 
     # Parse destructuring pattern: { a, b: c, d = 5 } or [a, b, ...rest]
-    me _parse_destruct_pattern() -> BrowserResult<JsExpression>:
+    me _parse_destruct_pattern() -> JsBrowserResult<JsExpression>:
         if self.check("OpenBrace"):
             self.advance()  # consume '{'
             var props: [DestructProp] = []
@@ -77,7 +77,7 @@ impl JsParser:
             self.expect("CloseBracket")?
             return Ok(JsAstFactory.array_pattern(elements: elements))
 
-    me _parse_destruct_prop() -> BrowserResult<DestructProp>:
+    me _parse_destruct_prop() -> JsBrowserResult<DestructProp>:
         val key = self.expect("Identifier")?
         # Check for rename: { key: local_name }
         if self.match_token("Colon"):
@@ -95,7 +95,7 @@ impl JsParser:
         Ok(DestructProp(key: key, value: JsAstFactory.identifier(name: key), default_value: default_val, is_computed: false))
 
     # function declaration
-    me parse_function_declaration() -> BrowserResult<JsStatement>:
+    me parse_function_declaration() -> JsBrowserResult<JsStatement>:
         self.advance()  # consume 'function'
         val name = self.expect("Identifier")?
         self.expect("OpenParen")?
@@ -113,7 +113,7 @@ impl JsParser:
         Ok(JsAstFactory.fn_decl(name: name, params: params, body: body))
 
     # return statement
-    me parse_return_statement() -> BrowserResult<JsStatement>:
+    me parse_return_statement() -> JsBrowserResult<JsStatement>:
         self.advance()  # consume 'return'
         var value = JsAstFactory.literal(value: JsValue.Undefined)
         val is_end = self.check("Semicolon") or self.check("CloseBrace") or self.is_at_end()
@@ -123,7 +123,7 @@ impl JsParser:
         Ok(JsAstFactory.return_stmt(value: value))
 
     # if / else if / else
-    me parse_if_statement() -> BrowserResult<JsStatement>:
+    me parse_if_statement() -> JsBrowserResult<JsStatement>:
         self.advance()  # consume 'if'
         self.expect("OpenParen")?
         val cond = self.parse_expression()?
@@ -150,7 +150,7 @@ impl JsParser:
         Ok(JsAstFactory.if_stmt(cond: cond, then_body: then_body, else_body: else_body))
 
     # while loop
-    me parse_while_statement() -> BrowserResult<JsStatement>:
+    me parse_while_statement() -> JsBrowserResult<JsStatement>:
         self.advance()  # consume 'while'
         self.expect("OpenParen")?
         val cond = self.parse_expression()?
@@ -166,7 +166,7 @@ impl JsParser:
         Ok(JsAstFactory.while_stmt(cond: cond, body: body))
 
     # do...while loop
-    me parse_do_while_statement() -> BrowserResult<JsStatement>:
+    me parse_do_while_statement() -> JsBrowserResult<JsStatement>:
         self.advance()  # consume 'do'
         var body: [JsStatement] = []
         if self.check("OpenBrace"):
@@ -181,7 +181,7 @@ impl JsParser:
         Ok(JsAstFactory.do_while(cond: cond, body: body))
 
     # for loop — C-style, for-in, for-of
-    me parse_for_statement() -> BrowserResult<JsStatement>:
+    me parse_for_statement() -> JsBrowserResult<JsStatement>:
         self.advance()  # consume 'for'
         self.expect("OpenParen")?
 
@@ -270,7 +270,7 @@ impl JsParser:
         Ok(JsAstFactory.for_stmt(init: init_stmt, cond: cond, update: update, body: body))
 
     # JsExpression statement
-    me parse_expression_statement() -> BrowserResult<JsStatement>:
+    me parse_expression_statement() -> JsBrowserResult<JsStatement>:
         val expr = self.parse_expression()?
         # Check for labeled statement: Identifier followed by Colon
         val ident_name = self.ident_name(expr)
@@ -282,7 +282,7 @@ impl JsParser:
         Ok(JsAstFactory.expr_stmt(expr: expr))
 
     # try / catch / finally
-    me parse_try_statement() -> BrowserResult<JsStatement>:
+    me parse_try_statement() -> JsBrowserResult<JsStatement>:
         self.advance()  # consume 'try'
         val try_body = self.parse_block()?
 
@@ -302,7 +302,7 @@ impl JsParser:
         Ok(JsAstFactory.try_catch(try_body: try_body, catch_param: catch_param, catch_body: catch_body, finally_body: finally_body))
 
     # switch statement with proper SwitchCase nodes
-    me parse_switch_statement() -> BrowserResult<JsStatement>:
+    me parse_switch_statement() -> JsBrowserResult<JsStatement>:
         self.advance()  # consume 'switch'
         self.expect("OpenParen")?
         val discriminant = self.parse_expression()?
@@ -333,14 +333,14 @@ impl JsParser:
         Ok(JsAstFactory.switch_stmt(discriminant: discriminant, cases: cases))
 
     # throw statement
-    me parse_throw_statement() -> BrowserResult<JsStatement>:
+    me parse_throw_statement() -> JsBrowserResult<JsStatement>:
         self.advance()  # consume 'throw'
         val expr = self.parse_expression()?
         self.match_token("Semicolon")
         Ok(JsAstFactory.throw_stmt(expr: expr))
 
     # class declaration: class Name [extends Parent] { constructor(...) {...} method(...) {...} }
-    me parse_class_declaration() -> BrowserResult<JsStatement>:
+    me parse_class_declaration() -> JsBrowserResult<JsStatement>:
         self.advance()  # consume 'class'
         var class_name = ""
         if self.check("Identifier"):

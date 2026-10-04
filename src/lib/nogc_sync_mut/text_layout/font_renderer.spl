@@ -2730,6 +2730,32 @@ class FontRenderer:
         self.text_phase_layout_nonempty = layout.len() > 0
         if layout.len() == 0:
             return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
+        # Baseline for the fallback layout. The fallback entries carry only a
+        # pen x (y = 0), so placing every glyph bitmap at y = 0 TOP-aligned
+        # each glyph: "o" hung from the cap line and "," / "." rose to
+        # apostrophe height (measured: every glyph's top ink row identical).
+        # Place them exactly like the shaped path
+        # (_font_shaped_glyph_destination): top = baseline - bearing_y -
+        # height, left = pen + bearing_x, where bearing_y is the bitmap's
+        # bottom offset from the baseline. The baseline is the face ascender
+        # when the selected outline face reports one; otherwise the run's
+        # tallest ink top, which keeps uniform-cell bitmap fonts (bearing 0,
+        # equal heights) at y = 0 exactly as before.
+        var fallback_baseline: i32 = 0
+        if fallback_cps.len() > 0:
+            var fi = 0
+            while fi < fallback_cps.len():
+                val fg = self.get_glyph(fallback_cps[fi], font_size)
+                val ink_top = fg.bearing_y + fg.height
+                if ink_top > fallback_baseline:
+                    fallback_baseline = ink_top
+                fi = fi + 1
+            if self.selected_outline_blob.len() > 0:
+                var ascent_meta: [i64] = [0; 20]
+                sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT,
+                    fallback_cps[0].to_i64(), font_size.to_i64(), ascent_meta)
+                if ascent_meta[7] == 310031 and ascent_meta[17] > 0:
+                    fallback_baseline = ascent_meta[17].to_i32()
         var attempt = 0
         while attempt < 2:
             var quads: [FontRenderQuad] = []
@@ -2753,6 +2779,9 @@ class FontRenderer:
                     quad_dst_y = 0
                     quad_byte_offset = i.to_i64()
                 val glyph = self.get_glyph(requad_cp, font_size)
+                if i < fallback_cps.len():
+                    quad_dst_x = quad_dst_x + glyph.bearing_x.to_i64()
+                    quad_dst_y = fallback_baseline.to_i64() - glyph.bearing_y.to_i64() - glyph.height.to_i64()
                 if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
                     _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                     print("[vec-glyph-probe] quadloop-after-reget i={i} cp={positioned.codepoint} w={glyph.width} h={glyph.height} face_id={glyph.face_id} face_gen={glyph.face_generation} glyph_index={glyph.glyph_index}")

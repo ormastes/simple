@@ -9,59 +9,84 @@
 # rt_winit_* externs here, see gui_renderer.spl's header for why). Requires
 # `build/sffi/libspl_winit.<so|dylib|dll>` (build with
 # scripts/build/build_spl_winit.shs) and a reachable display (X11/Wayland on
-# Linux; macOS additionally needs SIMPLE_GUI=1 so winit runs on the main
-# thread). Headless environments without a display: run under Xvfb (or a
+# Linux; on macOS the seed driver runs `browser --open` on the main thread
+# itself, as SIMPLE_GUI=1 does). Headless environments without a display: run under Xvfb (or a
 # container providing one), same as app.ui.browser.
 
-use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GUI_EVT_NONE, GUI_EVT_CLOSE}
+use nogc_sync_mut.ui.gui_renderer.{GuiRenderer, GUI_EVT_NONE, GUI_EVT_CLOSE, GUI_EVT_RESIZED}
 use nogc_sync_mut.src.time.{sleep_ms}
 
-pub fn run_browser_window_gui(url: text, width: i32, height: i32, pixels: [u32]) -> i64:
-    """Open a real window, paint one already-rendered real-engine frame into
-    it, and block until the user closes the window. Returns 0 on a clean
-    close, 1 on any window failure (GuiRenderer already prints an honest
-    reason). The caller renders the pixels (main.spl, via
-    browser_engine_pixels_at): rendering inside THIS function ran the whole
-    engine ~10-50x slower — this module's GuiRenderer/extern import chain
-    trips the JIT into a silent tree-walk fallback that poisons every callee,
-    so the same 64x36 render that takes ~45s from main.spl's call chain never
-    finished a 1800s budget from here. Measured 2026-08-06, container + host.
-    Keep the render in the caller until the fallback bug is fixed."""
-    val created = GuiRenderer.create("auto", width, height, "Simple Browser - {url}")
-    match created:
-        case None:
-            return 1
-        case Some(gui):
-            var g = gui
-            if not g.present_argb_u32(width.to_i64(), height.to_i64(), pixels):
-                print "Error: failed to present the rendered frame to the window"
-                g.close()
-                return 1
+pub fn browser_window_open(url: text, width: i32, height: i32) -> GuiRenderer?:
+    """Open the browser window. `width`/`height` are PHYSICAL pixels, so a
+    3840x2160 request on a 2x Retina display is a 1920x1080-point window.
+    The OS may clamp it to the visible screen area (menu bar, title bar);
+    read the real drawable extent back with `browser_window_drawable` and
+    render at THAT size so the present maps 1:1 onto the backing store.
+    nil (GuiRenderer already printed an honest reason) on any failure."""
+    GuiRenderer.create("auto", width, height, "Simple Browser - {url}")
 
-            var running = true
-            while running:
-                val ev = g.poll_event()
-                if ev.kind == GUI_EVT_CLOSE:
-                    running = false
-                elif ev.kind == GUI_EVT_NONE:
-                    # ponytail: fixed poll interval, not an OS-level blocking
-                    # wait — good enough for a single static frame with no
-                    # animation; switch to a blocking wait if/when this window
-                    # needs to redraw on a timer.
-                    sleep_ms(16)
-            g.close()
-            0
+pub fn browser_window_drawable(g: GuiRenderer, fallback_w: i32, fallback_h: i32) -> [i32]:
+    """[width, height] of the window's drawable area in physical pixels, or
+    the requested size when the provider cannot report it."""
+    val size = g.inner_size()
+    if size[0] > 0 and size[1] > 0:
+        [size[0].to_i32(), size[1].to_i32()]
+    else:
+        [fallback_w, fallback_h]
+
+pub fn browser_window_present(g: GuiRenderer, width: i32, height: i32, pixels: [u32]) -> bool:
+    """Present one already-rendered frame 1:1 (no scaling)."""
+    if g.present_argb_u32(width.to_i64(), height.to_i64(), pixels):
+        return true
+    print "Error: failed to present the rendered frame to the window"
+    false
+
+pub fn browser_window_wait(g: GuiRenderer, width: i32, height: i32) -> [i32]:
+    """Block until the window closes ([0, 0]) or its drawable size settles
+    at a new extent ([w, h], physical pixels). Rendering stays in the caller
+    (main.spl): running the engine from inside this module's call chain
+    used to trip a whole-module tree-walk fallback (measured 2026-08-06).
+    Resize bursts are coalesced: the size is only reported once no further
+    resize event arrives for ~150ms, so a drag re-renders once, not per
+    intermediate frame."""
+    var pending_w: i32 = 0
+    var pending_h: i32 = 0
+    var quiet_ms: i64 = 0
+    while true:
+        val ev = g.poll_event()
+        if ev.kind == GUI_EVT_CLOSE:
+            return [0, 0]
+        if ev.kind == GUI_EVT_RESIZED:
+            val nw = ev.x.to_i64().to_i32()
+            val nh = ev.y.to_i64().to_i32()
+            if nw > 0 and nh > 0:
+                pending_w = nw
+                pending_h = nh
+                quiet_ms = 0
+        elif ev.kind == GUI_EVT_NONE:
+            # ponytail: fixed poll interval, not an OS-level blocking wait —
+            # fine for a static page; switch to a blocking wait if the window
+            # needs timer-driven redraws.
+            sleep_ms(16)
+            if pending_w > 0:
+                quiet_ms = quiet_ms + 16
+                if quiet_ms >= 150:
+                    if pending_w != width or pending_h != height:
+                        return [pending_w, pending_h]
+                    pending_w = 0
+                    pending_h = 0
+    [0, 0]
 
 pub fn run_browser_window_gui_frames(
     url: text, width: i32, height: i32, frames: [[u32]], frame_ms: i64
 ) -> i64:
-    """Animated variant of run_browser_window_gui: cycles through frames
+    """Animated variant of the single-frame window flow: cycles through frames
     pre-rendered by the caller (app.browser.render_adapter's
     browser_engine_animated_frames — one BrowserSession whose advance_time
     drives JS timers/rAF and the CSS keyframe clock between renders).
     Frames are pre-rendered because running the engine from inside THIS
     module trips the silent tree-walk fallback described in
-    run_browser_window_gui's docstring. Returns 0 on clean close, 1 on any
+    browser_window_wait's docstring. Returns 0 on clean close, 1 on any
     window failure or when frames is empty."""
     if frames.len() == 0:
         print "Error: no frames to present"
