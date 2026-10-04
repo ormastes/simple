@@ -14,6 +14,9 @@ pub fn elf_stream_name_v1(name: [u8]) -> text:
     for byte in name: result = result + char_from_code(byte as i64)
     result
 
+pub fn elf_stream_got_anchor_v1(symbol: ElfFileSymbolV1) -> bool:
+    symbol.binding > 0 and symbol.name_bytes == [95u8, 71u8, 76u8, 79u8, 66u8, 65u8, 76u8, 95u8, 79u8, 70u8, 70u8, 83u8, 69u8, 84u8, 95u8, 84u8, 65u8, 66u8, 76u8, 69u8, 95u8]
+
 pub fn elf_stream_symbol_count_v1(object: ElfFileObjectV1, index: i64) -> Result<u64, text>:
     val table = elf_file_section_v1(object, index)?
     if table.section_type != 2u64: return Ok(0u64)
@@ -40,6 +43,7 @@ pub fn elf_stream_open_inputs_v1(objects: [text], archives: [text], entry: [u8],
 
 export elf_stream_open_inputs_v1
 export elf_stream_symbol_count_v1, elf_stream_name_v1
+export elf_stream_got_anchor_v1
 
 fn elf_stream_common_valid_v1(symbol: ElfFileSymbolV1) -> Result<bool, text>:
     if symbol.section_index != 65522: return Ok(true)
@@ -130,21 +134,29 @@ impl ElfStreamInputsV1:
         if name == entry: return Ok(true)
         for object in self.objects:
             for table in 0..object.section_count:
+                self.elf_stream_charge_v1(cancelled)?
                 val count = elf_stream_symbol_count_v1(object, table)?
                 var ordinal: u64 = 0
                 while ordinal < count:
                     val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
-                    if symbol.binding == 1 and symbol.section_index == 0 and symbol.name_bytes == name: return Ok(true)
+                    if symbol.binding == 1 and symbol.section_index == 0 and symbol.name_bytes == name and not elf_stream_got_anchor_v1(symbol): return Ok(true)
                     ordinal = ordinal + 1u64
         Ok(false)
 
     me elf_stream_member_needed(object: ElfFileObjectV1, entry: [u8], cancelled: fn() -> bool) -> Result<bool, text>:
         for table in 0..object.section_count:
+            self.elf_stream_charge_v1(cancelled)?
             val count = elf_stream_symbol_count_v1(object, table)?
             var ordinal: u64 = 0
             while ordinal < count:
                 val symbol = self.elf_stream_read_symbol_v1(object, table, ordinal, cancelled)?
                 if (symbol.binding == 1 or symbol.binding == 2) and symbol.section_index != 0 and symbol.name_bytes.len() > 0:
+                    # The linker owns this anchor; it never creates archive
+                    # demand. A member selected for another name is checked
+                    # for conflicting definitions during final validation.
+                    if elf_stream_got_anchor_v1(symbol):
+                        ordinal = ordinal + 1u64
+                        continue
                     val strong_regular = symbol.binding == 1 and symbol.section_index != 65522
                     if self.elf_stream_unresolved_name(symbol.name_bytes, entry, cancelled, strong_regular)?: return Ok(true)
                 ordinal = ordinal + 1u64
@@ -154,6 +166,7 @@ impl ElfStreamInputsV1:
         if self.elf_stream_lookup_v1(entry, cancelled)?.is_none(): return Err("undefined entry symbol {elf_stream_name_v1(entry)}")
         for object in self.objects:
             for table in 0..object.section_count:
+                self.elf_stream_charge_v1(cancelled)?
                 val count = elf_stream_symbol_count_v1(object, table)?
                 var ordinal: u64 = 0
                 while ordinal < count:
@@ -161,6 +174,10 @@ impl ElfStreamInputsV1:
                     elf_stream_common_valid_v1(symbol)?
                     if symbol.binding > 2 or symbol.symbol_type == 6 or symbol.symbol_type == 10:
                         return Err("stream GNU-unique/TLS/IFUNC symbols unsupported")
+                    if elf_stream_got_anchor_v1(symbol):
+                        if symbol.section_index != 0: return Err("stream reserved GOT anchor definition")
+                        ordinal = ordinal + 1u64
+                        continue
                     if symbol.binding > 0 and symbol.name_bytes.len() > 0:
                         val binding = self.elf_stream_lookup_v1(symbol.name_bytes, cancelled)?
                         if binding.is_none() and symbol.binding == 1:
