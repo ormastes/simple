@@ -421,11 +421,14 @@ for my $task (@tasks) {
   shift(@command) eq 'schema=simple-native-product-command-v1'
     or die "$task command schema differs\n";
   my %command;
+  my %command_keys = map { $_ => 1 } qw(source_root source_overlay compiler_sha256
+    runtime_authority rss_cap_kib timeout_seconds task simple_bootstrap_empty_native_obj simple_bootstrap);
   my @argv;
   for my $line (@command) {
     if ($line =~ /\Aargv-hex=([0-9a-f]*)\z/) {
       push @argv, pack('H*', $1);
-    } elsif ($line =~ /\A([a-z_]+)=(.*)\z/ && !exists $command{$1}) {
+    } elsif ($line =~ /\A([a-z_][a-z0-9_]*)=(.*)\z/ &&
+             $command_keys{$1} && !exists $command{$1}) {
       $command{$1} = $2;
     } else { die "$task command malformed\n"; }
   }
@@ -451,8 +454,13 @@ for my $task (@tasks) {
           $argv[$i] eq '--output' || $argv[$i] eq '--source' ||
           $argv[$i] eq '--cache-dir') {
         $i + 1 < @argv or die "$task command missing option value\n";
-        if ($argv[$i] eq '--source') { $source{$argv[++$i]}++; }
-        else { $flag{$argv[$i]} = $argv[++$i]; }
+        my $option = $argv[$i];
+        my $value = $argv[++$i];
+        if ($option eq '--source') { $source{$value}++; }
+        else {
+          !exists $flag{$option} or die "$task duplicate native option\n";
+          $flag{$option} = $value;
+        }
       }
     }
     $argv[0] eq $arg{compiler} && $argv[1] eq 'native-build' &&
