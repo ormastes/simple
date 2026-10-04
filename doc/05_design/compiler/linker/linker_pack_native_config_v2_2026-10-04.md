@@ -33,9 +33,10 @@ contract; no truncating fallback to V1 is permitted.
 
 The provider selects the version then calls `link_request_to_native_with_config`
 for V2. V1 keeps historical default projection. Preserve actual engine identity,
-target/host/policy receipt checks and independent lifecycle ownership. Updating
-the admitted ABI digest/version for V2 support belongs to the runtime owner;
-do not silently identify incompatible implementations as identical.
+target/host/policy receipt checks and independent lifecycle ownership. V2 is an
+additive versioned argument protocol over the existing CLI command ABI; the V1
+command ABI digest is not a promise that an older artifact accepts V2 argv.
+Older providers reject the unknown job tag. Never retry as V1 and lose options.
 
 The command regression uses an existing valid request with bounded policy:
 incorrect explicit configuration target must yield InputError; correcting that
@@ -43,10 +44,7 @@ configuration must reach UnsupportedBudget. A default-projecting V2 handler woul
 fail the first expectation. This is real configuration-path evidence when run,
 not a successful link, native mapping, whole-job budget or CLI completion claim.
 
-Production integration remains `llvm_native_link_orchestrator.spl` after runtime
-and entry object assembly and `llvm_apply_explicit_link_options`, before the final
-link dispatch. Thread explicit selection through CLI validation, compile options
-and NativeLinkOptions; keep the provider's leaf adapter direct to avoid recursion.
-Real trusted manifest authority, dependency admission, sealed operation binding,
-successful mapped-provider corpus, native host execution and all full-item gates
-remain required. No manifest trust is synthesized by this wire extension.
+Production callsite, explicit configuration dispatch and open authority/CLI/seal
+work are owned by `linker_configured_dispatch.md`. This transport supplement
+neither implements that integration nor supplies trusted manifest authority.
+The six PACK-POS obligations remain separate from these six transport scenarios.
