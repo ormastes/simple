@@ -19,3 +19,19 @@ managed internal admission and actual host execution remain required. Compilatio
 SSpec/docgen, coverage, core/MCP/native and performance checks remain UNRUN without
 an admitted deployed self-hosted runtime. Source and structural evidence are
 recorded separately and cannot establish release qualification.
+
+Source `5174cc67df7` implements the five-file shared path. Initial executable
+intent `31aa0b0eb56` preceded source changes. Final independent review binds
+source and acceptance/manual through `d38027c870e`: no P0/P1. Eight scenarios
+cover both architectures, independent image/TLV/binding data, binary-address
+validation, optional None/Some(0) versions, selected unsupported exports, retained
+unused metadata and actual client/umbrella command payload failures.
+
+The old byte API validates/delegates, so equality alone is not an independent
+oracle; the literal command, version, entry, relocation and binding assertions
+remain necessary. Callsite review found no additional consumers of the migrated
+slot/image helpers. The projection adds a linear metadata pass and a bounded
+resident command scan, not a new byte read or hard-memory qualification.
+Invalid provider metadata now rejects before malformed object contents; request
+validation remains first. Current runtime recheck found both workspace release
+binary directories absent; no seed/unadmitted substitute was used.
