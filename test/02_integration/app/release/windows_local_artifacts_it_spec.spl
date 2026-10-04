@@ -1,0 +1,130 @@
+"""Physical artifact validation through isolated persisted candidate authority.
+
+Fixture bytes are test data, not a qualified compiler or real release receipt.
+"""
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256, secure_temp_dir, file_remove}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use app.io.mod.{process_run_bounded, dir_create_all, file_atomic_write, getpid}
+use app.release.policy.{ReleaseSession, CandidateManifest, ReleaseAdmission, candidate_identity}
+use app.release.session_authority.{register_release_session}
+use app.release.candidate_authority.{create_candidate_plan, load_candidate_status, record_candidate_admission}
+use app.release.windows_local_artifacts.{windows_rc1_artifact_names, check_windows_rc1_local_artifacts}
+
+fn run_checked(command: text, arguments: [text]) -> text:
+    val (stdout, _stderr, code) = process_run_bounded(command, arguments, 10000, 262144)
+    expect(code).to_equal(0)
+    stdout.trim()
+
+fn fixture_git(root: text, arguments: [text]) -> text:
+    run_checked("git", ["-C", root] + arguments)
+
+fn digest(letter: text) -> text:
+    letter.repeat(64)
+
+fn support_fixture() -> text:
+    "support:\nschema: simple-release-support/2\nrc:\n- target: x86_64-pc-windows-msvc\n  tier: tier_1\n  runner: windows-local-phase4\n  required: true\n  availability: supported\n  bootstrap: full\n  whole_tests: required\n"
+
+fn fixture() -> (text, text, ReleaseSession, CandidateManifest):
+    var parent = env_get("TMPDIR")
+    if parent.len() <= 0: parent = env_get("TEMP")
+    if parent.len() <= 0: parent = "/tmp"
+    val owned = secure_temp_dir(parent, "simple-windows-rc1-artifacts-").unwrap()
+    val primary = owned + "/primary"
+    val workspace = owned + "/candidate-work"
+    val artifacts = owned + "/artifacts"
+    expect(dir_create_all(primary + "/.spipe/policy")).to_equal(true)
+    expect(dir_create_all(primary + "/release")).to_equal(true)
+    expect(file_atomic_write(primary + "/.spipe/policy/vcs.sdn", "policy: fixture\n")).to_equal(true)
+    expect(file_atomic_write(primary + "/release/support.sdn", support_fixture())).to_equal(true)
+    val _init = fixture_git(primary, ["init", "-b", "main"])
+    val _email = fixture_git(primary, ["config", "user.email", "windows-rc1@example.invalid"])
+    val _name = fixture_git(primary, ["config", "user.name", "Windows RC1 Artifact Spec"])
+    val _line_endings = fixture_git(primary, ["config", "core.autocrlf", "false"])
+    val _add = fixture_git(primary, ["add", "."])
+    val _commit = fixture_git(primary, ["commit", "-m", "isolated fixture authority"])
+    val base = fixture_git(primary, ["rev-parse", "HEAD"])
+    val _origin = fixture_git(primary, ["update-ref", "refs/remotes/origin/main", base])
+    val branch = "work/release/windows-rc1-fixture"
+    val _worktree = fixture_git(primary, ["worktree", "add", "-b", branch, workspace, base])
+    val root = fixture_git(workspace, ["rev-parse", "--show-toplevel"])
+    val session = ReleaseSession(session_id: "windows-rc1-" + getpid().to_text(), workspace_path: root,
+        main_workspace_path: fixture_git(primary, ["rev-parse", "--show-toplevel"]), work_branch: branch,
+        target_ref: "main", base_sha: base, expected_target_sha: base,
+        policy_sha256: file_hash_sha256(root + "/.spipe/policy/vcs.sdn"))
+    expect(dir_create_all(artifacts)).to_equal(true)
+    var manifest = ""
+    for name in windows_rc1_artifact_names():
+        val bytes = if name == "support.sdn": support_fixture() else: "isolated fixture " + name + "\n"
+        expect(file_atomic_write(artifacts + "/" + name, bytes)).to_equal(true)
+        manifest = manifest + file_hash_sha256(artifacts + "/" + name) + "  " + name + "\n"
+    expect(file_atomic_write(artifacts + "/artifacts.sha256", manifest)).to_equal(true)
+    # A qualification receipt refers to artifacts.sha256, so it is separate
+    # from that manifest and admitted by its own digest.
+    expect(file_atomic_write(artifacts + "/qualification.json", "isolated qualification fixture\n")).to_equal(true)
+    val candidate = CandidateManifest(version: "1.0.0-rc.1", attempt: 1,
+        candidate_ref: "candidate/v1.0.0-rc.1/a001", commit_sha: base,
+        source_tree_sha256: digest("a"), policy_sha256: session.policy_sha256,
+        version_manifest_sha256: digest("b"), toolchain_manifest_sha256: digest("c"),
+        support_manifest_sha256: file_hash_sha256(root + "/release/support.sdn"),
+        build_graph_sha256: digest("d"), creator_identity: session.session_id,
+        evidence_manifest_sha256: digest("e"))
+    (root, artifacts, session, candidate)
+
+fn fixture_admission(candidate: CandidateManifest, artifacts: text) -> ReleaseAdmission:
+    ReleaseAdmission(candidate_version: candidate.version, candidate_attempt: candidate.attempt,
+        candidate_ref: candidate.candidate_ref, candidate_identity: candidate_identity(candidate),
+        candidate_commit_sha: candidate.commit_sha, source_tree_sha256: candidate.source_tree_sha256,
+        policy_sha256: candidate.policy_sha256, version_manifest_sha256: candidate.version_manifest_sha256,
+        toolchain_manifest_sha256: candidate.toolchain_manifest_sha256,
+        support_manifest_sha256: candidate.support_manifest_sha256, build_graph_sha256: candidate.build_graph_sha256,
+        creator_identity: candidate.creator_identity, artifact_manifest_sha256: file_hash_sha256(artifacts + "/artifacts.sha256"),
+        evidence_manifest_sha256: candidate.evidence_manifest_sha256,
+        qualification_receipt_sha256: file_hash_sha256(artifacts + "/qualification.json"),
+        admission_receipt_schema: "spipe-review-admission/1", admission_receipt_sha256: digest("f"))
+
+describe "Windows RC1 physical artifacts and persisted authority":
+    it "rejects unadmitted and stale state, then validates exact physical files and rejects a missing file":
+        val (root, artifacts, session, candidate) = fixture()
+        expect(register_release_session(root, session).valid).to_equal(true)
+        val created = create_candidate_plan(root, session, candidate)
+        expect(created.valid).to_equal(true)
+        val pending = load_candidate_status(root, candidate.version, candidate.attempt)
+        expect(check_windows_rc1_local_artifacts(root, candidate.version, candidate.attempt, pending.state_digest, "x86_64-pc-windows-msvc", artifacts).reason).to_contain("no persisted release admission")
+        expect(record_candidate_admission(root, session, created.state_sha256, fixture_admission(candidate, artifacts)).valid).to_equal(true)
+        val admitted = load_candidate_status(root, candidate.version, candidate.attempt)
+        step("A stale pre-admission state digest cannot select the admitted files")
+        expect(check_windows_rc1_local_artifacts(root, candidate.version, candidate.attempt, pending.state_digest, "x86_64-pc-windows-msvc", artifacts).reason).to_contain("stale")
+        step("The real persisted state and physical checksums select the exact fixture")
+        expect(check_windows_rc1_local_artifacts(root, candidate.version, candidate.attempt, admitted.state_digest, "x86_64-pc-windows-msvc", artifacts).valid).to_equal(true)
+        expect(file_remove(artifacts + "/simple.exe")).to_equal(true)
+        expect(check_windows_rc1_local_artifacts(root, candidate.version, candidate.attempt, admitted.state_digest, "x86_64-pc-windows-msvc", artifacts).reason).to_contain("required artifact is absent")
+    it "rejects changed physical bytes even while admission and manifest are unchanged":
+        val (root, artifacts, session, candidate) = fixture()
+        expect(register_release_session(root, session).valid).to_equal(true)
+        val created = create_candidate_plan(root, session, candidate)
+        expect(created.valid).to_equal(true)
+        expect(record_candidate_admission(root, session, created.state_sha256, fixture_admission(candidate, artifacts)).valid).to_equal(true)
+        val admitted = load_candidate_status(root, candidate.version, candidate.attempt)
+        expect(file_atomic_write(artifacts + "/simple.exe", "mutated fixture bytes\n")).to_equal(true)
+        expect(check_windows_rc1_local_artifacts(root, candidate.version, candidate.attempt, admitted.state_digest, "x86_64-pc-windows-msvc", artifacts).reason).to_contain("checksum records are stale")
+    it "cannot replace canonical support policy with a private profile":
+        val (root, artifacts, session, candidate) = fixture()
+        expect(register_release_session(root, session).valid).to_equal(true)
+        val created = create_candidate_plan(root, session, candidate)
+        expect(created.valid).to_equal(true)
+        expect(record_candidate_admission(root, session, created.state_sha256, fixture_admission(candidate, artifacts)).valid).to_equal(true)
+        val admitted = load_candidate_status(root, candidate.version, candidate.attempt)
+        expect(dir_create_all(root + "/release/profiles")).to_equal(true)
+        expect(file_atomic_write(root + "/release/profiles/windows-rc1.sdn", support_fixture())).to_equal(true)
+        expect(file_atomic_write(root + "/release/support.sdn", support_fixture() + "# changed canonical policy\n")).to_equal(true)
+        expect(check_windows_rc1_local_artifacts(root, candidate.version, candidate.attempt, admitted.state_digest, "x86_64-pc-windows-msvc", artifacts).reason).to_contain("support policy differs")
+    it "rejects a changed separately bound qualification receipt":
+        val (root, artifacts, session, candidate) = fixture()
+        expect(register_release_session(root, session).valid).to_equal(true)
+        val created = create_candidate_plan(root, session, candidate)
+        expect(created.valid).to_equal(true)
+        expect(record_candidate_admission(root, session, created.state_sha256, fixture_admission(candidate, artifacts)).valid).to_equal(true)
+        val admitted = load_candidate_status(root, candidate.version, candidate.attempt)
+        expect(file_atomic_write(artifacts + "/qualification.json", "changed qualification fixture\n")).to_equal(true)
+        expect(check_windows_rc1_local_artifacts(root, candidate.version, candidate.attempt, admitted.state_digest, "x86_64-pc-windows-msvc", artifacts).reason).to_contain("qualification receipt differs")

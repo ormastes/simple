@@ -1,0 +1,89 @@
+# codex-impl
+# Read-only Windows RC1 preflight. Persisted release admission remains the
+# authority; this owner never compiles, signs, publishes, or admits a candidate.
+use app.release.policy.{ReleaseCheck}
+use app.release.candidate_authority.{load_candidate_status, plan_persisted_candidate_promotion}
+use app.release.support_policy.{load_support_policy, check_single_job_coverage}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read, file_hash_sha256}
+
+fn release_pass() -> ReleaseCheck:
+    ReleaseCheck(valid: true, reason: "")
+
+fn release_fail(reason: text) -> ReleaseCheck:
+    ReleaseCheck(valid: false, reason: reason)
+
+fn windows_rc1_artifact_names() -> [text]:
+    # qualification.json binds this manifest's digest, so including that
+    # receipt here would introduce an impossible circular hash dependency.
+    ["simple.exe", "simple-1.0.0-rc.1-x86_64-pc-windows-msvc.tar.gz", "simple.spdx.json", "support.sdn", "convergence.json", "release-notes.md"]
+
+fn _sha256_valid(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for index in 0..64:
+        val code = value.char_code_at(index)
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+    true
+
+# Canonical checksum bytes are exactly one ordered record per selected role.
+# Digests passed here are observations, not an admission or qualification claim.
+fn check_windows_rc1_checksum_records(manifest: text, digests: [text]) -> ReleaseCheck:
+    val names = windows_rc1_artifact_names()
+    if digests.len() != names.len():
+        return release_fail("Windows RC1 artifact set is incomplete")
+    var expected = ""
+    for index in 0..names.len():
+        if not _sha256_valid(digests[index]):
+            return release_fail("Windows RC1 artifact is missing or has an invalid digest")
+        expected = expected + digests[index] + "  " + names[index] + "\n"
+    if manifest != expected:
+        return release_fail("Windows RC1 checksum records are stale, reordered, or contain extra artifacts")
+    release_pass()
+
+fn check_windows_rc1_local_artifacts(root: text, version: text, attempt: i64, state_digest: text, target: text, artifact_dir: text) -> ReleaseCheck:
+    if version != "1.0.0-rc.1":
+        return release_fail("Windows-only profile is scoped to 1.0.0-rc.1")
+    if target != "x86_64-pc-windows-msvc":
+        return release_fail("Windows RC1 requires a native Windows MSVC artifact")
+    if artifact_dir.len() <= 0:
+        return release_fail("Windows RC1 artifact directory is missing")
+    val promotion = plan_persisted_candidate_promotion(root, version, attempt, state_digest)
+    if not promotion.valid:
+        return release_fail(promotion.reason)
+    val status = load_candidate_status(root, version, attempt)
+    if not status.valid or not status.admission_present or status.state_digest != state_digest:
+        return release_fail("Windows RC1 persisted admission changed during preflight")
+    # One policy owner for CI and local qualification. A private RC profile
+    # must not select a weaker support matrix than the admitted candidate.
+    val profile_path = root + "/release/support.sdn"
+    val policy = load_support_policy(profile_path)
+    val coverage = check_single_job_coverage(policy, "rc", target)
+    if coverage != "":
+        return release_fail(coverage)
+    if file_hash_sha256(profile_path) != status.admission.support_manifest_sha256:
+        return release_fail("Windows RC1 support policy differs from admitted policy")
+    val manifest_path = artifact_dir + "/artifacts.sha256"
+    if not file_exists(manifest_path) or file_hash_sha256(manifest_path) != status.admission.artifact_manifest_sha256:
+        return release_fail("Windows RC1 artifact manifest is absent or differs from admission")
+    var digests: [text] = []
+    for name in windows_rc1_artifact_names():
+        val path = artifact_dir + "/" + name
+        if not file_exists(path):
+            return release_fail("Windows RC1 required artifact is absent: " + name)
+        digests.push(file_hash_sha256(path))
+    val records = check_windows_rc1_checksum_records(file_read(manifest_path), digests)
+    if not records.valid:
+        return records
+    val qualification_path = artifact_dir + "/qualification.json"
+    if not file_exists(qualification_path) or file_hash_sha256(qualification_path) != status.admission.qualification_receipt_sha256:
+        return release_fail("Windows RC1 qualification receipt differs from admission")
+    if digests[3] != status.admission.support_manifest_sha256:
+        return release_fail("Windows RC1 packaged support policy differs from admission")
+    # Re-read create-once state after inspecting the physical artifact bytes.
+    val final_plan = plan_persisted_candidate_promotion(root, version, attempt, state_digest)
+    if not final_plan.valid:
+        return release_fail(final_plan.reason)
+    release_pass()
+
+export windows_rc1_artifact_names, check_windows_rc1_checksum_records, check_windows_rc1_local_artifacts
