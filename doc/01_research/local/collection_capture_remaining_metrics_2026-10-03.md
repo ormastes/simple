@@ -103,3 +103,16 @@ plus one synchronized shared owner consuming the count pair with capture
 begin/finish/abort lifetime, followed by interpreter/native parity evidence.
 Filter selectivity and full P6 remain incomplete; the watchdog-only PR #2345
 landing does not establish completion of item 7.
+
+### October 4 materialization review
+
+Array append and snapshot construction can fail without propagating an error
+through the existing collection API. The observed filter now checks snapshot
+cardinality against logical size and strict sorted uniqueness before calling
+the predicate. Its independently allocated output is explicitly Linear so the
+physical array length can be checked after each accepted insertion; this avoids
+unchecked representation promotion during result materialization. Three added
+scenarios cover incomplete snapshots, duplicate backing data, and independent
+source/result mutation. All seven scenarios remain NOT RUN. Malformed ordered
+tree traversal and concurrent mutation are not repaired by post-snapshot checks;
+allocator-failure execution evidence and shared capture publication remain open.
