@@ -2282,7 +2282,22 @@ impl<M: Module> CodegenBackend<M> {
                     }
                 }
             }
-            match self.compile_function(func) {
+            let fn_compile_start = if native_trace { Some(std::time::Instant::now()) } else { None };
+            let compiled = self.compile_function(func);
+            if let Some(start) = fn_compile_start {
+                let elapsed = start.elapsed();
+                if elapsed.as_millis() >= 500 {
+                    let insts: usize = func.blocks.iter().map(|b| b.instructions.len()).sum();
+                    eprintln!(
+                        "[rust-jit] slow function {} took {} ms (blocks={} insts={})",
+                        func.name,
+                        elapsed.as_millis(),
+                        func.blocks.len(),
+                        insts
+                    );
+                }
+            }
+            match compiled {
                 Ok(()) => {}
                 Err(_e) => {
                     // Loud, distinctive marker so missing-body bugs cannot hide
