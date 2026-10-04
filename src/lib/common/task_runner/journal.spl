@@ -13,8 +13,9 @@ use std.common.task_runner.index.{task_runner_index_apply_v1, task_runner_index_
 use std.database.sql.types.{DbValue}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.build_manager.contracts.{builder_digest_valid_v1}
-use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_read_regular_no_follow_bounded}
-use std.nogc_sync_mut.io_runtime.{dir_create, file_delete}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_read_regular_no_follow_bounded,
+    file_atomic_write, file_lock, file_unlock}
+use std.nogc_sync_mut.io_runtime.{dir_create, file_delete, file_exists}
 
 struct TaskRunnerJournalV1:
     root: text
@@ -24,8 +25,10 @@ struct TaskRunnerJournalV1:
     sequence: i64
     revision: text
     db: PureDatabase
+    parent_lock: i64
 
 fn task_runner_journal_lease_check_v1(owner: TaskRunnerJournalV1) -> Result<bool, text>:
+    if owner.parent_lock < 0: return Err("task database parent lock unavailable")
     val lease = file_read_regular_no_follow_bounded(owner.root + "/parent.lease", 512)?
     if sha256_text(lease) != owner.lease_digest: return Err("stale task database lease")
     Ok(true)
@@ -37,10 +40,27 @@ fn task_runner_journal_open_v1(root: text, nonce: text,
     val inventory = task_runner_inventory_digest_v1(expected, source)?
     val identity = sha256_text("SIMPLE-TASK-DB-1\n" + source + "\n" + inventory)
     dir_create(root, true)
-    val lease = "SIMPLE-TASK-DB-LEASE-1\n{nonce}\n{identity}\n"
-    if not file_create_exclusive(root + "/parent.lease", lease):
-        return Err("task database already owned; recovery requires old process closure")
-    # Initialization failure deliberately preserves the lease for explicit recovery.
+    # Never remove the stable OS lock file. Its handle must be non-inheritable.
+    val held = file_lock(root + "/parent.lock", 1)
+    if held < 0: return Err("task database parent lock already owned")
+    val opened = task_runner_journal_open_locked_v2(root, nonce, source, expected, identity, held)
+    if opened.is_err():
+        val _released = file_unlock(held)
+    opened
+
+fn task_runner_journal_open_locked_v2(root: text, nonce: text, source: text,
+        expected: [TaskRunnerIdentityV1], identity: text, held: i64) -> Result<TaskRunnerJournalV1, text>:
+    # Acquiring the lock proves no v2 writer remains. A legacy v1 owner did not
+    # acquire this lock, so its lease can never be adopted by this protocol.
+    if file_exists(root + "/parent.lease"):
+        val prior = file_read_regular_no_follow_bounded(root + "/parent.lease", 512)?
+        val rows = prior.split("\n")
+        if rows.len() != 4 or rows[0] != "SIMPLE-TASK-DB-LEASE-2" or
+           not builder_digest_valid_v1(rows[1]) or rows[2] != identity or rows[3] != "":
+            return Err("task database prior lease is legacy, malformed, or has different authority")
+    val lease = "SIMPLE-TASK-DB-LEASE-2\n{nonce}\n{identity}\n"
+    if not file_atomic_write(root + "/parent.lease", lease):
+        return Err("task database v2 lease publication failed")
     val created = PureDatabase.memory_deferred()
     if created.is_err(): return Err("task PureDatabase initialization failed")
     var db = created.unwrap()
@@ -118,7 +138,7 @@ fn task_runner_journal_open_v1(root: text, nonce: text,
     if expected_last != 0 or registered.len() != expected.len() or
             complete_sequence != expected.len() + 1 or first_task_sequence <= complete_sequence:
         return Err("task WAL inventory incomplete or tasks preceded registration")
-    Ok(TaskRunnerJournalV1(root, sha256_text(lease), source, identity, sequence, latest, db))
+    Ok(TaskRunnerJournalV1(root, sha256_text(lease), source, identity, sequence, latest, db, held))
 
 fn task_runner_journal_history_v1(owner: TaskRunnerJournalV1,
         identity: text) -> Result<[TaskRunnerAttemptV1], text>:
@@ -150,11 +170,12 @@ fn task_runner_journal_append_v1(owner: TaskRunnerJournalV1,
     val updated = applied.unwrap()
     val _still_owned = task_runner_journal_lease_check_v1(owner)?
     Ok(TaskRunnerJournalV1(owner.root, owner.lease_digest, owner.source_authority_digest,
-        owner.database_identity, committed.last_sequence, committed.digest, updated))
+        owner.database_identity, committed.last_sequence, committed.digest, updated, owner.parent_lock))
 
 fn task_runner_journal_release_v1(owner: TaskRunnerJournalV1) -> Result<bool, text>:
     val _lease = task_runner_journal_lease_check_v1(owner)?
     if not file_delete(owner.root + "/parent.lease"): return Err("task database lease release failed")
+    if not file_unlock(owner.parent_lock): return Err("task database parent lock release failed")
     Ok(true)
 
 fn task_runner_journal_identity_v1(owner: TaskRunnerJournalV1,

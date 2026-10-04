@@ -6,7 +6,8 @@ use std.common.task_runner.journal.{task_runner_journal_open_v1, task_runner_jou
     task_runner_journal_identity_v1}
 use std.common.task_runner.snapshot.{task_runner_snapshot_commit_v1, task_runner_snapshot_open_v1}
 use std.nogc_sync_mut.database.wal_segmented.{database_wal_revision_open_v1}
-use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write, file_unlock,
+    file_read_regular_no_follow_bounded}
 use std.nogc_sync_mut.io_runtime.{dir_remove}
 
 fn task_storage_identity_v1(source: text) -> TaskRunnerIdentityV1:
@@ -19,6 +20,25 @@ fn task_storage_pass_v1(identity: text, group: text, generation: i64) -> TaskRun
         0, 0, 0, true, true, identity, identity, identity, identity)
 
 describe "PureDatabase task history with durable database revisions":
+    it "recovers a released v2 writer without deleting legacy leases":
+        val root = secure_temp_dir("build", "task-db-v2-recovery").unwrap()
+        val source = sha256_text("source")
+        val expected = [task_storage_identity_v1(source)]
+        val old = task_runner_journal_open_v1(root, sha256_text("old-parent"), source, expected).unwrap()
+        # Explicitly model the OS releasing the parent handle, leaving metadata.
+        # A separate native fixture proves actual parent-crash/noninherit behavior.
+        expect(file_unlock(old.parent_lock)).to_equal(true)
+        val recovered = task_runner_journal_open_v1(root, sha256_text("new-parent"), source, expected).unwrap()
+        expect(recovered.revision).to_equal(old.revision)
+        expect(task_runner_journal_missing_v1(recovered).unwrap().len()).to_equal(1)
+        expect(task_runner_journal_release_v1(old).is_err()).to_equal(true)
+        expect(task_runner_journal_release_v1(recovered).unwrap()).to_equal(true)
+
+        val legacy = "SIMPLE-TASK-DB-LEASE-1\n" + sha256_text("legacy") + "\n" + old.database_identity + "\n"
+        expect(file_atomic_write(root + "/parent.lease", legacy)).to_equal(true)
+        expect(task_runner_journal_open_v1(root, sha256_text("refused"), source, expected).is_err()).to_equal(true)
+        expect(file_read_regular_no_follow_bounded(root + "/parent.lease", 512).unwrap()).to_equal(legacy)
+
     it "retains crash isolation across more than eight fresh runs and reopen":
         val root = secure_temp_dir("build", "task-pure-db-spec").unwrap()
         val source = sha256_text("source")
