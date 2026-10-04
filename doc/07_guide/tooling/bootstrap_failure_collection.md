@@ -259,6 +259,16 @@ policy exception in its own attempt; never bypass guards to publish admission.
 
 ## Preserve truthful terminal results
 
+When using the Rust seed for bootstrap with `--runtime-bundle core-c-bootstrap`,
+the runtime source checkout takes precedence over a prebuilt `--runtime-path`.
+The current source resolver searches the working directory's ancestors, then
+the seed's build-time manifest ancestors. `SIMPLE_PROJECT_ROOT` alone does not
+select this C runtime source. Run from the intended frozen checkout and retain
+the actual C compiler input paths/hashes in the receipt. An explicit runtime
+path is not evidence that a provider source fix was compiled. This rule is
+specific to that seed runtime lane; inspect the actual command owner for other
+producers instead of assuming identical selection behavior.
+
 Keep one terminal row per planned operation, with phase, producer hash, source
 revision, entry/shard, exact command, log path, exit status, elapsed time,
 dependency reason, and bug ID where applicable:
