@@ -39,6 +39,9 @@ use compiler.driver.driver_build.native_full_inventory_sources.{
     native_full_inventory_source_paths_v1,
     native_full_inventory_requires_cold_index_v1,
     native_cold_entry_snapshot_path_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{
+    NativeEntryClosureRequestV1, native_entry_closure_request_open_v1}
+use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureSelectionV1}
 use compiler.common.cache.phase_compatibility_path_io.{
     phase_compatibility_existing_artifact_io_v1}
 use compiler.driver.driver_log_helpers.{log_phase, log_build_progress}
@@ -185,8 +188,11 @@ impl CompilerDriver:
                     return false
         true
 
-    me load_sources_impl() -> (CompileContext, bool):
+    me load_sources_impl(preclosed: NativeEntryClosureRequestV1? = nil) -> (CompileContext, bool):
         val admitted_task = driver_admitted_epoch_task_active_v1()
+        if preclosed != nil and driver_admitted_epoch_active_v1():
+            self.ctx.add_error("preclosed parse selection cannot compose with admitted source epoch")
+            return (self.ctx, false)
         if driver_admitted_epoch_active_v1() and not admitted_task:
             self.ctx.add_error("admitted source epoch has no active task")
             return (self.ctx, false)
@@ -215,6 +221,25 @@ impl CompilerDriver:
         else:
             driver_inputs = self.ctx.options.input_files
         val closure_source_roots = driver_inputs
+        var admitted_preclosed: NativeEntryClosureSelectionV1? = nil
+        var preclosed_snapshot_root = ""
+        var preclosed_row_by_identity: Dict<text, i64> = {}
+        if val request = preclosed:
+            val selected = native_entry_closure_request_open_v1(
+                request, self.ctx.environment_variant_policy_digest)
+            if selected.is_err():
+                self.ctx.add_error("preclosed source request rejected: " + selected.unwrap_err())
+                driver_entry_scan_cache_release()
+                return (self.ctx, false)
+            admitted_preclosed = Some(selected.unwrap())
+            preclosed_snapshot_root = request.snapshot.snapshot_root
+            driver_inputs = []
+            var selected_row = 0
+            for identity in selected.unwrap().identities:
+                driver_inputs = driver_inputs.push(preclosed_snapshot_root + "/" + identity)
+                preclosed_row_by_identity[identity] = selected_row
+                selected_row = selected_row + 1
+            log_phase("phase1:load_sources:preclosed:admitted selected={driver_inputs.len()} closure_walks=0")
         val full_inventory_marker =
             sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_FULL_INVENTORY") ?? ""
         if full_inventory_marker != "" and full_inventory_marker != "1":
@@ -268,9 +293,13 @@ impl CompilerDriver:
             self.ctx.add_error("full inventory mode cannot use an entry or native group request")
             driver_entry_scan_cache_release()
             return (self.ctx, false)
+        if admitted_preclosed != nil and (full_inventory_mode or native_group_inputs.len() > 0):
+            self.ctx.add_error("preclosed entry selection is incompatible with full/group inventory")
+            driver_entry_scan_cache_release()
+            return (self.ctx, false)
         val native_entry_closure_pre = (sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val explicit_entry_closure = explicit_entry_input != ""
-        val entry_closure_walk = not full_inventory_mode and (explicit_entry_closure or (
+        val entry_closure_walk = admitted_preclosed == nil and not full_inventory_mode and (explicit_entry_closure or (
             native_entry_input != "" and not native_entry_closure_pre) or
             native_group_inputs.len() > 0)
         # The persistent package index route (package_index_route_current_v1)
@@ -312,7 +341,7 @@ impl CompilerDriver:
             self.ctx.config["compiler_source_entry"] = cold_entry_input
         var package_index_routed = false
         var package_read_root = machine_cache_root()
-        if not package_index_cold_init:
+        if admitted_preclosed == nil and not package_index_cold_init:
             val package_resolution_started_ns = demand_compile_phase_begin_v1()
             val changed_text = sosix_env_get_nullable("SIMPLE_PACKAGE_INDEX_CHANGED_MODULES") ?? ""
             val changed_modules = match package_index_route_changed_modules_v1(changed_text):
@@ -738,7 +767,20 @@ impl CompilerDriver:
             # then works only by evading the substring filter. Native-build
             # imports retain packaging exclusions; the compiler-owned explicit
             # API admits the exact authored source graph without those filters.
-            val loaded = if full_inventory_mode:
+            val loaded = if admitted_preclosed != nil:
+                val selected = admitted_preclosed.unwrap()
+                val identity = input_path.substring(preclosed_snapshot_root.len() + 1)
+                if not preclosed_row_by_identity.has(identity):
+                    self.ctx.add_error("preclosed source identity missing")
+                    return (self.ctx, false)
+                val row = preclosed_row_by_identity[identity]
+                match _driver_collect_frozen_compiler_source_v1(
+                        input_path, selected.digests[row], selected.byte_counts[row]):
+                    case Ok(sources): sources
+                    case Err(reason):
+                        self.ctx.add_error("preclosed source rejected: " + reason)
+                        return (self.ctx, false)
+            elif full_inventory_mode:
                 if i >= full_source_identities.len() or
                         i >= full_source_digests.len() or
                         self.ctx.runtime_std_cfg_source_identity_by_path.has(input_path):
@@ -1058,7 +1100,7 @@ impl CompilerDriver:
         # module loader. Bulk-loading the four trees here defeats that contract:
         # even a one-file test or the native-build worker parses 600+ unrelated
         # modules before its entry can run, exceeding the normal CPU/RSS guard.
-        val nb_entry_closure = explicit_entry_closure or native_group_inputs.len() > 0 or (
+        val nb_entry_closure = admitted_preclosed != nil or explicit_entry_closure or native_group_inputs.len() > 0 or (
             sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         val compile_mode = self.ctx.options.mode
         val needs_bulk_project_sources = compile_mode != CompileMode.Check and compile_mode != CompileMode.Interpret
