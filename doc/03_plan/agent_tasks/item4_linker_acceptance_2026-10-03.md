@@ -304,3 +304,26 @@ and explicit failures. Initial executable intent precedes production edits.
 Undefined symbol archive demand follows the GNU experiment, while final errors
 follow surviving allocated references. No runtime RED/GREEN or coverage is
 claimed without an admitted self-hosted executable.
+
+## Resource evidence and worker ownership (2026-10-04)
+
+Root integrates `work/item4-resource-evidence-20261004` in the existing isolated
+root worktree from release base d11536cc67be20934752b566f63e2bb10ccfe7ee.
+Child agents reuse their own prior clean core/test/doc worktrees on matching
+`work/item4-resource-evidence-*` branches with new session records. Root owns
+link_accounting.spl, common plans, opt-in linker guide, review and merge; runtime
+owns the production resource_scope.spl observation path; acceptance owns
+classifier and real-file observation specs/manuals; research owns primary-source
+worker design and independent review. Sidecars N/A. Test intent precedes fixes.
+
+Shared production test seam: resource_scope_systemd_metrics_v1(show_output,
+exit_code, runtime_error, stdout_truncated, stderr_truncated), returning
+Option<(peak_bytes, cpu_ns)> from the actual systemd observation caller. Tests
+use item4_resource_evidence_* helper prefixes, std.spec.step and real assertions.
+Measurement-only APIs must not manufacture QualifiedJobScope. Missing or invalid
+peak files/properties must remain unavailable. The full worker's before-exec
+limits, no-swap, descendant ownership and parent-authoritative publication remain
+separate implementation obligations. All Simple tests remain UNRUN.
+
+User selection: the mold-style Simple linker stays accessible through explicit
+SIMPLE_LINKER=internal and is not made the default hosted linker.
