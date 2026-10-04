@@ -1,0 +1,162 @@
+# Supported client transport only. Optional legacy server/WebSocket handles
+# remain in http_sffi and are not dependencies of a client-only entry.
+export use std.nogc_sync_mut.io.http_get_core.{rt_http_get}
+export use std.nogc_sync_mut.io.http_client_types.{HttpMethod, HttpStatus, HttpResponse, method_to_string, status_to_code, code_to_status, make_http_response}
+export use std.nogc_sync_mut.http.url.{url_encode, url_decode}
+
+# Advanced request with headers
+@unsafe(reason: "raw method/URL/header-array/body ABI and runtime-owned response tuple", capabilities: [ffi])
+extern fn rt_http_request(
+    method: text,
+    url: text,
+    headers: [text],  # ["Key: Value", "Key2: Value2"]
+    body: text
+) -> (i64, text, text)
+
+# Lossless v2 request. Raw response headers remain one CRLF-delimited text
+# block so the boundary performs one allocation rather than one allocation per
+# header; safe callers parse/lift it after transport success.
+@unsafe(reason: "raw method/URL/header-array/binary-body ABI; contract: status -1 exclusively denotes typed transport or validation failure", capabilities: [ffi])
+extern fn rt_http_request_v2(
+    method: text,
+    url: text,
+    headers: [text],
+    body: [u8],
+    timeout_ms: i64
+) -> (i64, text, text, [u8], text)
+
+# Download file
+@unsafe(reason: "raw URL/path text and runtime-owned status/byte-count/error tuple ABI", capabilities: [ffi])
+extern fn rt_http_download(url: text, output_path: text) -> (i64, i64, text)  # (status, bytes, error)
+
+
+fn http_request_raw(method: text, url: text, headers_text: text, body: text) -> (i64, text, text):
+    """Perform an HTTP request with newline-delimited headers and return the raw runtime tuple."""
+    var headers: [text] = []
+    if headers_text != "":
+        headers = headers_text.split("\n")
+    unsafe(capabilities: [ffi]):
+        rt_http_request(method, url, headers, body)
+
+fn http_request_v2_raw(method: text, url: text, headers: [text], body: [u8],
+                       timeout_ms: i64) -> (i64, text, text, [u8], text):
+    """Lossless raw request tuple; callers must lift status/error and parse headers."""
+    if timeout_ms < 0:
+        return (-1, "", "", [], "HTTP timeout cannot be negative")
+    unsafe(capabilities: [ffi]):
+        rt_http_request_v2(method, url, headers, body, timeout_ms)
+
+fn http_get(url: text) -> HttpResponse:
+    """
+    Perform HTTP GET request.
+
+    Example:
+        val response = http_get("https://api.example.com/users")
+        if response.is_ok:
+            print response.body
+    """
+    unsafe(capabilities: [ffi]):
+        make_http_response(rt_http_get(url))
+
+fn http_post(url: text, body: text) -> HttpResponse:
+    """
+    Perform HTTP POST request with JSON body.
+
+    Example:
+        val json = '{"name": "Alice", "age": 30}'
+        val response = http_post("https://api.example.com/users", json)
+    """
+    unsafe(capabilities: [ffi]):
+        make_http_response(rt_http_request("POST", url, ["Content-Type: application/json"], body))
+
+fn http_post_form(url: text, body: text) -> HttpResponse:
+    """
+    Perform HTTP POST request with form data.
+
+    Example:
+        val form = "name=Alice&age=30"
+        val response = http_post_form("https://api.example.com/submit", form)
+    """
+    unsafe(capabilities: [ffi]):
+        make_http_response(rt_http_request("POST", url, ["Content-Type: application/x-www-form-urlencoded"], body))
+
+fn http_put(url: text, body: text) -> HttpResponse:
+    """Perform HTTP PUT request."""
+    unsafe(capabilities: [ffi]):
+        make_http_response(rt_http_request("PUT", url, ["Content-Type: application/json"], body))
+
+fn http_delete(url: text) -> HttpResponse:
+    """Perform HTTP DELETE request."""
+    unsafe(capabilities: [ffi]):
+        make_http_response(rt_http_request("DELETE", url, [], ""))
+
+fn http_patch(url: text, body: text) -> HttpResponse:
+    """Perform HTTP PATCH request."""
+    unsafe(capabilities: [ffi]):
+        make_http_response(rt_http_request("PATCH", url, ["Content-Type: application/json"], body))
+
+fn http_head(url: text) -> HttpResponse:
+    """Perform HTTP HEAD request (headers only)."""
+    unsafe(capabilities: [ffi]):
+        make_http_response(rt_http_request("HEAD", url, [], ""))
+
+fn http_request(method: HttpMethod, url: text, headers: [text], body: text) -> HttpResponse:
+    """
+    Perform HTTP request with custom method and headers.
+
+    Example:
+        val headers = ["Authorization: Bearer token123", "Accept: application/json"]
+        val response = http_request(HttpMethod.POST, "https://api.example.com/data", headers, body)
+    """
+    val method_str = method_to_string(method)
+    unsafe(capabilities: [ffi]):
+        make_http_response(rt_http_request(method_str, url, headers, body))
+
+fn http_download(url: text, output_path: text) -> HttpResponse:
+    """
+    Download file from URL to local path.
+
+    Example:
+        val response = http_download("https://example.com/file.zip", "/tmp/file.zip")
+        if response.is_ok:
+            print "Downloaded {response.status_code} bytes"
+    """
+    val result = unsafe(capabilities: [ffi]):
+        rt_http_download(url, output_path)
+    val status_code = result.0
+    val bytes = result.1
+    val error = result.2
+
+    HttpResponse(
+        status_code: status_code,
+        status: code_to_status(status_code),
+        body: "{bytes}",
+        error: error,
+        is_ok: status_code >= 200 and status_code < 300
+    )
+
+fn http_get_json(url: text) -> HttpResponse:
+    """GET request expecting JSON response."""
+    val headers = ["Accept: application/json"]
+    http_request(HttpMethod.GET, url, headers, "")
+
+fn http_post_json(url: text, json: text) -> HttpResponse:
+    """POST request with JSON body."""
+    val headers = ["Content-Type: application/json"]
+    http_request(HttpMethod.POST, url, headers, json)
+
+fn http_is_success(response: HttpResponse) -> bool:
+    """Check if response is successful (2xx)."""
+    response.status_code >= 200 and response.status_code < 300
+
+fn http_is_redirect(response: HttpResponse) -> bool:
+    """Check if response is redirect (3xx)."""
+    response.status_code >= 300 and response.status_code < 400
+
+fn http_is_client_error(response: HttpResponse) -> bool:
+    """Check if response is client error (4xx)."""
+    response.status_code >= 400 and response.status_code < 500
+
+fn http_is_server_error(response: HttpResponse) -> bool:
+    """Check if response is server error (5xx)."""
+    response.status_code >= 500 and response.status_code < 600

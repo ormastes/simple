@@ -1,0 +1,37 @@
+# The local fixture server must echo METHOD|Content-Type|body with status 200.
+# This compiled probe never contacts an external service.
+use std.sffi.cli.{cli_get_args}
+use std.nogc_sync_mut.io.http_client_core.{HttpMethod, HttpResponse, http_get, http_post, http_post_form, http_put, http_patch, http_delete, http_head, http_request, url_encode, url_decode}
+
+fn check(condition: bool, label: text) -> i64:
+    if condition: return 0
+    print("FAIL: " + label)
+    1
+
+fn response_matches(response: HttpResponse, expected: text) -> bool:
+    response.status_code == 200 and response.is_ok and response.error == "" and response.body == expected
+
+fn main() -> i64:
+    var url = ""
+    for arg in cli_get_args():
+        if arg.starts_with("--url="): url = arg[6:]
+    if not url.starts_with("http://127.0.0.1:"): return 2
+    var failures = 0
+    failures = failures + check(url_encode("AZaz09-._~") == "AZaz09-._~", "unreserved URL bytes")
+    failures = failures + check(url_encode("a b/+") == "a%20b%2F%2B", "reserved URL bytes")
+    failures = failures + check(url_encode("é한") == "%C3%A9%ED%95%9C", "UTF-8 URL bytes")
+    failures = failures + check(url_decode("%C3%A9%ED%95%9C") == "é한", "UTF-8 URL decode")
+    failures = failures + check(url_decode("a%2G%") == "a%2G%", "malformed escape preservation")
+    failures = failures + check(url_decode("a+b") == "a b", "form plus decode")
+    failures = failures + check(response_matches(http_get(url), "GET||"), "GET transport")
+    failures = failures + check(response_matches(http_post(url, "payload"), "POST|application/json|payload"), "JSON POST transport")
+    failures = failures + check(response_matches(http_post_form(url, "a=b"), "POST|application/x-www-form-urlencoded|a=b"), "form POST transport")
+    failures = failures + check(response_matches(http_put(url, "put"), "PUT|application/json|put"), "PUT transport")
+    failures = failures + check(response_matches(http_patch(url, "patch"), "PATCH|application/json|patch"), "PATCH transport")
+    failures = failures + check(response_matches(http_delete(url), "DELETE||"), "DELETE transport")
+    failures = failures + check(response_matches(http_head(url), ""), "HEAD transport")
+    failures = failures + check(response_matches(http_request(HttpMethod.OPTIONS, url, ["Content-Type: text/plain"], "options"), "OPTIONS|text/plain|options"), "custom request transport")
+    val invalid = http_request(HttpMethod.GET, "unsupported-scheme://invalid", [], "")
+    failures = failures + check(invalid.status_code < 0 and not invalid.is_ok and invalid.error != "", "transport error preservation")
+    print("HTTP client core: 15 checks, " + str(failures) + " failures")
+    if failures == 0: 0 else: 1
