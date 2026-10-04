@@ -35,3 +35,10 @@ resident command scan, not a new byte read or hard-memory qualification.
 Invalid provider metadata now rejects before malformed object contents; request
 validation remains first. Current runtime recheck found both workspace release
 binary directories absent; no seed/unadmitted substitute was used.
+
+Integration rebased onto `7cbd5437d7f5278b7d7ce7f0b0131d978b307b33`; all 13
+reviewed patches compare equal. Whitespace, direct-env working/staged guards,
+numbered-artifact and manual-layout checks passed. Committed test-tree delta:
+3151 inherited offenders, zero introduced. Retained list:
+`C:/dev/simple/.git/item4-macho-providers-preexisting-offenders.txt`.
+These source/structural results do not change full verification FAIL/UNRUN.
