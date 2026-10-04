@@ -1,5 +1,24 @@
 # Item 4 parallel ownership
 
+## Mach-O legacy reexport continuation (2026-10-04)
+
+Base: `487d64cfac314787e89c8bb7304e0a24eae3d450`, target `release/1.0`.
+Root owns integration, the no-closure hosted guard, verification report and
+final review/merge. Runtime owns provider metadata, validating binary projection
+and actual closure selector/inference integration. Acceptance owns real binary
+fixtures, `item4_macho_legacy_reexport_spec.spl` and its authored manual. Research
+owns the legacy detail design, SDK/host progress plans and independent exact
+source/test review. Each lane uses its own clean worktree and fresh branch;
+lower-model sidecars N/A. Initial test intent `bf0ff4730f8` precedes production.
+
+Additive provider metadata: `sub_umbrellas`, `sub_libraries`,
+`no_reexported_dylibs`, `infer_subframeworks`; defaults preserve existing callers.
+The detail design freezes matching all ordinary/weak dependency records,
+unmatched no-ops, header suppression and old-format-only subframework inference.
+Test helpers use `item4_macho_legacy_` and canonical `std.spec.step`, actual
+production calls, guarded fixture mutations and independent output assertions.
+Simple execution remains UNRUN; source review does not complete SDK or host gates.
+
 ## 2026-10-04 ELF byte-source continuation
 
 Base: `d945e61704c7baeca8fe354eb812e390b156a561`, target `release/1.0`.
