@@ -45,3 +45,10 @@ conflicts, exact GOT output budgets, scan exhaustion and cancellation. Negative
 cases preserve a pre-existing output sentinel. Independent review of commits
 304c0f4e0cf and 38f18319261 found no remaining P0/P1. Runtime results remain UNRUN.
 Working and staged direct-env guards passed; executable specs under doc/06_spec: 0.
+
+Final structural evidence: whitespace and numbered-artifact guards PASS.
+Committed test-tree delta PASS: 3151 inherited offenders, zero introduced,
+base 92566311cc8a13496576c844c703d0c9bf014246, source head 887c094555e3c30de5f66fb3190c9767c49cb947.
+Offender list: C:/dev/simple/.git/item4-stream-got-preexisting-offenders.txt
+SHA-256: 52ac058b29cffa22e435ff81da0cfb5de6db910b102fa51759866e24fd1d4678.
+Structural CI passed on that source head. These checks do not execute Simple.
