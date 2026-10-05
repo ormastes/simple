@@ -336,7 +336,15 @@ fn build_bootstrap_hosted_native_all_archive(native_all_name: &str, temp_dir: &P
         return None;
     }
     let target_dir = temp_dir.join("hosted_native_all");
+    // Preserve caller-relative cache paths when changing only the child's cwd.
+    let target_dir = if target_dir.is_absolute() {
+        target_dir
+    } else {
+        std::env::current_dir().ok()?.join(target_dir)
+    };
     let status = std::process::Command::new("cargo")
+        // --manifest-path does not change Cargo's .cargo/config.toml discovery root.
+        .current_dir(manifest.parent()?)
         .arg("build")
         .arg("--release")
         .arg("--manifest-path")

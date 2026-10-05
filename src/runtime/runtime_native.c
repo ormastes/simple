@@ -15547,6 +15547,15 @@ int64_t rt_call_ptr_3(int64_t addr, int64_t a1, int64_t a2, int64_t a3) {
     return ((rt_call_ptr_3_fn)(uintptr_t)addr)(a1, a2, a3);
 }
 
+/* Rust dynlib_sffi exposes this exact integer-only ABI. Keep the C runtime
+ * twin aligned so native Simple executables can use the same checked loader
+ * wrapper. Unlike rt_call_ptr_3, a bad dynamic address is a recoverable error. */
+int64_t rt_dyncall_3(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2) {
+    typedef int64_t (*rt_dyncall_3_fn)(int64_t, int64_t, int64_t);
+    if (fn_ptr <= 0) return -1;
+    return ((rt_dyncall_3_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2);
+}
+
 /* Exact SimpleProviderQueryV1 discovery call.  Keep this separate from the
  * generic i64 dynamic-call family: the provider ABI returns int32_t. */
 int32_t rt_provider_query_v1_call(int64_t fn_ptr, int64_t request_ptr, int64_t result_ptr) {
