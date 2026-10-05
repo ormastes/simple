@@ -14,6 +14,11 @@
 #endif
 #endif
 #define EXPORT __attribute__((visibility("default")))
+#ifdef SIMPLE_VECTOR_ENABLE_HTTP_AVX512
+#define SUPPORTED_CAPS UINT64_C(15)
+#else
+#define SUPPORTED_CAPS UINT64_C(3)
+#endif
 static atomic_uint_fast64_t vector_iterations;
 #ifdef SIMPLE_VECTOR_TEST_OBSERVER
 /* Test build only: a constructor reports loading to the harness, never a getter. */
@@ -51,6 +56,18 @@ static int available(void) {
     return 0;
 #endif
 }
+#ifdef SIMPLE_VECTOR_ENABLE_HTTP_AVX512
+static int http_available(void) {
+#if defined(__x86_64__) && !defined(SIMPLE_VECTOR_FORCE_NO_AVX512BW)
+    if(!available()) return 0;
+    unsigned int a,b,c,d;
+    __cpuid_count(7,0,a,b,c,d);
+    return (b&(1u<<30))!=0; /* AVX512BW, in addition to F + OS XSTATE. */
+#else
+    return 0;
+#endif
+}
+#endif
 /* Diagnostic counter observes executed vector loops; does not activate loader. */
 EXPORT uint64_t simple_vector_executed_iterations_v1(void) {
     return atomic_load_explicit(&vector_iterations,memory_order_relaxed);
@@ -65,7 +82,7 @@ EXPORT int32_t simple_provider_query_v1(uint64_t req,uint64_t res) {
     else if(simple_vector_rd32(q+12)!=1) status=2;
     else if(simple_vector_rd32(q+16)!=0) status=7;
     else if(simple_vector_rd64(q+20)!=1 || simple_vector_rd32(q+28) || simple_vector_rd32(q+32)) status=4;
-    else if(simple_vector_rd64(q+36)&~UINT64_C(3)) status=5;
+    else if(simple_vector_rd64(q+36)&~SUPPORTED_CAPS) status=5;
     memset(r,0,84); simple_vector_wr32(r,status); simple_vector_wr32(r+12,84);
     if(status) return (int32_t)status;
     static const uint8_t digest[32]=SIMPLE_VECTOR_ABI_DIGEST_BYTES;
@@ -84,6 +101,12 @@ static int span(uint64_t p,uint64_t n) {
 static int overlap(uint64_t a,uint64_t b,uint64_t n) {
     return n && a<b+n && b<a+n;
 }
+#ifdef SIMPLE_VECTOR_ENABLE_HTTP_AVX512
+static int byte_span(uint64_t p,uint64_t n) {
+    if(!n) return p==0;
+    return p && n<=SIMPLE_VECTOR_MAX_SPAN_BYTES && p<=SIMPLE_VECTOR_MAX_ADDRESS-n;
+}
+#endif
 EXPORT int64_t simple_vector_apply_v1(int64_t handle,int64_t req,int64_t res) {
     if(req<=0||res<=0) return -1;
     const uint8_t *q=(const uint8_t *)(uintptr_t)req;
@@ -92,10 +115,24 @@ EXPORT int64_t simple_vector_apply_v1(int64_t handle,int64_t req,int64_t res) {
     uint64_t a=simple_vector_rd64(q+8),n=simple_vector_rd64(q+16),
         b=simple_vector_rd64(q+24),bn=simple_vector_rd64(q+32),
         out=simple_vector_rd64(q+40),cap=simple_vector_rd64(q+48),written=0;
+    int64_t found=-1;
     if(simple_vector_rd32(q)!=64) status=SIMPLE_VECTOR_INVALID_REQUEST;
-    else if(op!=1&&op!=2) status=SIMPLE_VECTOR_UNSUPPORTED_OPERATION;
-    else if(((uint64_t)handle&~UINT64_C(3))!=UINT64_C(0x53494d4400000000)||
+    else if(op<1||op>4||!(SUPPORTED_CAPS&(UINT64_C(1)<<(op-1)))) status=SIMPLE_VECTOR_UNSUPPORTED_OPERATION;
+    else if(((uint64_t)handle&~SUPPORTED_CAPS)!=UINT64_C(0x53494d4400000000)||
             !((uint64_t)handle&(UINT64_C(1)<<(op-1)))) status=SIMPLE_VECTOR_CAPABILITY_DENIED;
+#ifdef SIMPLE_VECTOR_ENABLE_HTTP_AVX512
+    else if(op==3||op==4) {
+        uint64_t argument=simple_vector_rd64(q+56);
+        if(b||bn||out||cap||!byte_span(a,n)||(op==3?argument>255:argument!=0))
+            status=SIMPLE_VECTOR_RANGE_INVALID;
+        else if(!http_available()) status=SIMPLE_VECTOR_FEATURE_UNAVAILABLE;
+        else {
+            uint64_t ran=simple_http_kernel(op,(const uint8_t *)(uintptr_t)a,(size_t)n,(uint8_t)argument,&found);
+            if(ran==UINT64_MAX) { status=SIMPLE_VECTOR_EXECUTION_FAILED; found=-1; }
+            else atomic_fetch_add_explicit(&vector_iterations,ran,memory_order_relaxed);
+        }
+    }
+#endif
     else if(n%4||bn!=n||cap!=n||simple_vector_rd64(q+56)||
             !span(a,n)||!span(b,n)||!span(out,n)||overlap(out,a,n)||overlap(out,b,n))
         status=SIMPLE_VECTOR_RANGE_INVALID;
@@ -107,6 +144,6 @@ EXPORT int64_t simple_vector_apply_v1(int64_t handle,int64_t req,int64_t res) {
         else { written=n; atomic_fetch_add_explicit(&vector_iterations,ran,memory_order_relaxed); }
     }
     memset(r,0,24); simple_vector_wr32(r,24); simple_vector_wr32(r+4,status);
-    simple_vector_wr64(r+8,written); simple_vector_wr64(r+16,UINT64_MAX);
+    simple_vector_wr64(r+8,written); simple_vector_wr64(r+16,(uint64_t)found);
     return 0;
 }
