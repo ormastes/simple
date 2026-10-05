@@ -29,3 +29,15 @@ Next validation uses the current P2 producer in a fresh owned overlay with cache
 preserved; no compiler rebuild or previous capped numeric-payload retry is part
 of this patch. No runtime correctness/RSS/timing PASS is claimed. Static cost is
 unchanged for cursor construction and lower for ASCII conversion (no slice).
+
+## Additional ASCII/conversion group
+
+effect_parse_budget and asm target-version parse_int_text also used text.ord.
+Both grammars are ASCII decimal, now checked with byte codes48..57. The effect
+budget rejects any nondigit; the existing ASM helper deliberately skips nondigits,
+and that distinction remains tested. Neither change changes general Unicode ord.
+CLI integer defaults now call the existing string_to_int owner explicitly rather
+than unresolved text.to_int dispatch; default token text and AST type are retained.
+native_helper_frontend_ascii exercises those three real owner entry points,
+including invalid Unicode digits and the parsed CLI integer AST payload.
+Execution remains UNRUN; CoreLexer and HashMap receiver work is a separate lane.
