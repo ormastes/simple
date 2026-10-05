@@ -1,0 +1,197 @@
+"""
+## Purpose and audience
+Purpose: Pin the pure-Simple WebP lossy (VP8 key frame) decoder and its
+ALPH alpha plane, used by the browser for `image/webp` responses: boolean
+decoder, segment / quantizer / loop-filter headers, token partitions,
+16x16 and all ten 4x4 intra modes, chroma prediction, inverse DCT/WHT,
+simple and normal loop filters, fancy chroma upsampling and libwebp's
+fixed-point YUV->RGB, plus raw and VP8L-compressed alpha with every
+unfilter method — and prove hostile bytes are refused, never crash.
+Audience: maintainers of the image decoders used by the browser engine.
+## Operator workflow
+Run with the test runner from the repo root. Fixtures live in
+test/fixtures/image/webp_lossy/<case>/: `input.webp` was produced by the
+libwebp bundled with Pillow 12.1.1 through its advanced encoder API
+(WebPConfig: quality / method / filter type / strength / sharpness /
+segments / partitions / alpha compression and filtering as named by the
+case); `expected.rgba` (u32le width, u32le height, RGBA bytes) is libwebp's
+own decode of that file, so it is the reference decoder's output.
+alpha_filter_{horizontal,vertical,gradient} are alpha_raw with the ALPH
+filter bits rewritten (libwebp decoded each rewritten file for the oracle).
+## Compatibility and limitations
+The decoder mirrors libwebp's integer pipeline, so every pixel must match
+exactly. Not reachable from libwebp's encoder and therefore not covered by
+a fixture: loop-filter reference/mode deltas (libwebp never writes them).
+Animation and non-key frames are rejected.
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+# @cover src/lib/common/image/webp_vp8_decode.spl 90%
+
+use std.spec.*
+use std.spec.step
+use std.common.image.webp_decode.{decode_webp_to_argb, decode_webp_to_argb_bounded}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes}
+
+val FIXTURES = "test/fixtures/image/webp_lossy/"
+
+fn fixture(case_name: text, file: text) -> [u8]:
+    file_read_bytes(FIXTURES + case_name + "/" + file)
+
+fn mismatches(case_name: text) -> i64:
+    """Pixels differing from libwebp's decode; -1 on failure."""
+    val decoded = decode_webp_to_argb(fixture(case_name, "input.webp"))
+    if decoded.is_err():
+        return -1
+    val image = decoded.unwrap()
+    val ref = fixture(case_name, "expected.rgba")
+    val w = ref[0].to_i64() | (ref[1].to_i64() << 8)
+    val h = ref[4].to_i64() | (ref[5].to_i64() << 8)
+    if image.width.to_i64() != w or image.height.to_i64() != h:
+        return -1
+    var bad: i64 = 0
+    var i: i64 = 0
+    while i < w * h:
+        val p = 8 + i * 4
+        val want = (ref[p + 3].to_u32() << 24) | (ref[p].to_u32() << 16) | (ref[p + 1].to_u32() << 8) | ref[p + 2].to_u32()
+        if image.pixels[i] != want:
+            bad = bad + 1
+        i = i + 1
+    bad
+
+fn le32(v: i64) -> [u8]:
+    [(v & 255).to_u8(), ((v >> 8) & 255).to_u8(), ((v >> 16) & 255).to_u8(), ((v >> 24) & 255).to_u8()]
+
+fn riff_vp8(payload: [u8]) -> [u8]:
+    """Simple-format container around one `VP8 ` chunk, sizes consistent."""
+    val padded = payload.len() + (payload.len() & 1)
+    var out: [u8] = [82u8, 73u8, 70u8, 70u8]
+    for b in le32(4 + 8 + padded):
+        out.push(b)
+    for b in [87u8, 69u8, 66u8, 80u8, 86u8, 80u8, 56u8, 32u8]:
+        out.push(b)
+    for b in le32(payload.len()):
+        out.push(b)
+    for b in payload:
+        out.push(b)
+    if (payload.len() & 1) == 1:
+        out.push(0u8)
+    out
+
+fn vp8_payload(file: [u8]) -> [u8]:
+    val size = file[16].to_i64() | (file[17].to_i64() << 8) | (file[18].to_i64() << 16) | (file[19].to_i64() << 24)
+    prefix_from(file, 20, size)
+
+fn prefix_from(data: [u8], start: i64, n: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < n and start + i < data.len():
+        out.push(data[start + i])
+        i = i + 1
+    out
+
+describe "WebP lossy decode matches libwebp exactly":
+    it "decodes odd sizes, strips and a single pixel":
+        expect(mismatches("tiny_1x1")).to_equal(0)
+        expect(mismatches("strip_17x1")).to_equal(0)
+        expect(mismatches("strip_1x17")).to_equal(0)
+        expect(mismatches("q75_odd")).to_equal(0)
+
+    it "applies the normal and the simple loop filter":
+        step("normal filter with 4 segments, simple filter, sharpness 5, filter off")
+        expect(mismatches("q75_normal_filter")).to_equal(0)
+        expect(mismatches("simple_filter")).to_equal(0)
+        expect(mismatches("sharpness")).to_equal(0)
+        expect(mismatches("no_filter")).to_equal(0)
+
+    it "decodes 16x16 and 4x4 intra modes across the quality range":
+        expect(mismatches("q10_skip")).to_equal(0)
+        expect(mismatches("q100_i4")).to_equal(0)
+        expect(mismatches("one_segment")).to_equal(0)
+
+    it "decodes skipped macroblocks and multiple token partitions":
+        step("a mostly flat 160x128 frame with the skip probability and 8 partitions; a 4-partition photo")
+        expect(mismatches("flat_skip_parts")).to_equal(0)
+        expect(mismatches("partitions_4")).to_equal(0)
+
+    it "applies raw and lossless-compressed alpha with every unfilter method":
+        expect(mismatches("alpha_raw")).to_equal(0)
+        expect(mismatches("alpha_lossless")).to_equal(0)
+        expect(mismatches("alpha_filter_horizontal")).to_equal(0)
+        expect(mismatches("alpha_filter_vertical")).to_equal(0)
+        expect(mismatches("alpha_filter_gradient")).to_equal(0)
+        assert_false(decode_webp_to_argb(fixture("alpha_raw", "input.webp")).unwrap().lossless)
+
+describe "WebP lossy decode rejects hostile input before allocating":
+    it "refuses a 16383x16383 frame header":
+        var payload = vp8_payload(fixture("q75_odd", "input.webp"))
+        payload[6] = 255u8
+        payload[7] = 63u8
+        payload[8] = 255u8
+        payload[9] = 63u8
+        expect(decode_webp_to_argb(riff_vp8(payload)).unwrap_err()).to_equal("WebP dimensions exceed decoder limits")
+
+    it "enforces the caller's pixel budget":
+        val bytes = fixture("q75_odd", "input.webp")
+        expect(decode_webp_to_argb_bounded(bytes, 560).unwrap_err()).to_equal("WebP dimensions exceed decoder limits")
+        assert_true(decode_webp_to_argb_bounded(bytes, 561).is_ok())
+
+    it "rejects non-key frames, bad start codes and oversized partition 0":
+        val good = vp8_payload(fixture("q75_odd", "input.webp"))
+        var inter = prefix_from(good, 0, good.len())
+        inter[0] = (inter[0].to_i64() | 1).to_u8()
+        expect(decode_webp_to_argb(riff_vp8(inter)).unwrap_err()).to_equal("WebP VP8 frame is not a key frame")
+        var bad_start = prefix_from(good, 0, good.len())
+        bad_start[3] = 0u8
+        expect(decode_webp_to_argb(riff_vp8(bad_start)).unwrap_err()).to_equal("WebP VP8 start code is invalid")
+        var big_part = prefix_from(good, 0, good.len())
+        big_part[2] = 255u8
+        expect(decode_webp_to_argb(riff_vp8(big_part)).unwrap_err()).to_equal("WebP VP8 partition 0 exceeds the chunk")
+
+    it "rejects every truncation of a VP8 frame":
+        step("re-wrap each 17-byte-stepped prefix of the frame in a consistent container")
+        for case_name in ["q75_normal_filter", "flat_skip_parts"]:
+            val payload = vp8_payload(fixture(case_name, "input.webp"))
+            var n: i64 = 0
+            var tried: i64 = 0
+            var failed: i64 = 0
+            while n < payload.len() - 8:
+                tried = tried + 1
+                if decode_webp_to_argb(riff_vp8(prefix_from(payload, 0, n))).is_err():
+                    failed = failed + 1
+                n = n + 17
+            expect(failed).to_equal(tried)
+
+    it "survives corrupted frame and alpha bytes":
+        step("flip bytes across a lossy+alpha file; decoding must return, never crash")
+        val full = fixture("alpha_lossless", "input.webp")
+        var pos: i64 = 30
+        var tried: i64 = 0
+        var returned: i64 = 0
+        while pos < full.len():
+            var mutated = prefix_from(full, 0, full.len())
+            mutated[pos] = (mutated[pos].to_i64() ^ 0x5A).to_u8()
+            val r = decode_webp_to_argb(mutated)
+            tried = tried + 1
+            if r.is_ok():
+                val image = r.unwrap()
+                expect(image.pixels.len()).to_equal(image.width.to_i64() * image.height.to_i64())
+            returned = returned + 1
+            pos = pos + 23
+        expect(returned).to_equal(tried)
+
+    it "rejects a truncated raw alpha plane and an invalid ALPH header":
+        val full = fixture("alpha_raw", "input.webp")
+        var at: i64 = 0
+        var i: i64 = 12
+        while i + 4 <= full.len() and at == 0:
+            if full[i] == 65u8 and full[i + 1] == 76u8 and full[i + 2] == 80u8 and full[i + 3] == 72u8:
+                at = i
+            i = i + 1
+        var bad_header = prefix_from(full, 0, full.len())
+        bad_header[at + 8] = 0xC0u8
+        expect(decode_webp_to_argb(bad_header).unwrap_err()).to_equal("WebP ALPH header is invalid")
+        var short_alpha = prefix_from(full, 0, full.len())
+        short_alpha[at + 4] = 10u8
+        short_alpha[at + 5] = 0u8
+        val r = decode_webp_to_argb(short_alpha)
+        assert_true(r.is_err())

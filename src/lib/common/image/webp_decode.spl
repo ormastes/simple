@@ -1,5 +1,5 @@
-# WebP Decode — bounded RIFF/WebP container + lossless (VP8L) bitstream to
-# ARGB [u32].
+# WebP Decode — bounded RIFF/WebP container + lossless (VP8L) and lossy (VP8,
+# optional ALPH alpha) bitstreams to ARGB [u32].
 #
 # Input is untrusted network bytes: every container read is bounds-checked,
 # the VP8L header size is checked against `max_pixels` before any pixel
@@ -8,12 +8,15 @@
 # zero bits). Prefix-code groups are capped (WEBP_MAX_HTREE_GROUPS) so a tiny
 # stream cannot demand unbounded lookup tables.
 #
-# Supported: simple-format `VP8L` and extended-format (`VP8X`) files whose
-# image is `VP8L`; every VP8L transform (predictor, cross-color, subtract
-# green, color indexing with pixel bundling), color cache, meta prefix codes,
-# LZ77 backward references.
-# Rejected with an error: animation (ANIM/ANMF), lossy `VP8 ` frames (until a
-# VP8 decoder lands), unknown versions.
+# Supported: simple-format `VP8L` / `VP8 ` and extended-format (`VP8X`) files;
+# every VP8L transform (predictor, cross-color, subtract green, color indexing
+# with pixel bundling), color cache, meta prefix codes, LZ77 backward
+# references; VP8 key frames (webp_vp8_decode.spl) converted to RGB with
+# libwebp's fancy chroma upsampling and fixed-point YUV->RGB; `ALPH` alpha
+# (raw or VP8L-compressed, with horizontal / vertical / gradient unfiltering).
+# Rejected with an error: animation (ANIM/ANMF), unknown versions.
+
+use std.common.image.webp_vp8_decode.{decode_vp8_bounded, Vp8Planes}
 
 struct WebpImage:
     """Decoded WebP image as ARGB pixel buffer (row-major)."""
@@ -85,6 +88,8 @@ fn decode_webp_to_argb_bounded(data: [u8], max_pixels: i64) -> Result<WebpImage,
     var pos: i64 = 12
     var canvas_w: i64 = -1
     var canvas_h: i64 = -1
+    var alpha_pos: i64 = -1
+    var alpha_size: i64 = 0
     var first = true
     while pos + 8 <= end:
         val size = _webp_le32(data, pos + 4)
@@ -109,8 +114,25 @@ fn decode_webp_to_argb_bounded(data: [u8], max_pixels: i64) -> Result<WebpImage,
             if canvas_w >= 0 and (image.width.to_i64() != canvas_w or image.height.to_i64() != canvas_h):
                 return Err("WebP canvas size does not match the image")
             return Ok(image)
+        elif _webp_fourcc_is(data, pos, 65, 76, 80, 72):
+            # ALPH: only meaningful inside VP8X, before the VP8 frame.
+            if canvas_w >= 0 and alpha_pos < 0:
+                alpha_pos = body
+                alpha_size = size
         elif _webp_fourcc_is(data, pos, 86, 80, 56, 32):
-            return Err("WebP lossy (VP8) is unsupported")
+            val frame = decode_vp8_bounded(data, body, size, pixel_limit)
+            if val Err(reason) = frame:
+                return Err(reason)
+            val planes = frame.unwrap()
+            if canvas_w >= 0 and (planes.width != canvas_w or planes.height != canvas_h):
+                return Err("WebP canvas size does not match the image")
+            var alpha: [i64] = []
+            if alpha_pos >= 0:
+                val decoded_alpha = _webp_decode_alpha(data, alpha_pos, alpha_size, planes.width, planes.height)
+                if val Err(reason) = decoded_alpha:
+                    return Err(reason)
+                alpha = decoded_alpha.unwrap()
+            return Ok(_webp_yuv_to_argb(planes, alpha))
         elif _webp_fourcc_is(data, pos, 65, 78, 73, 77) or _webp_fourcc_is(data, pos, 65, 78, 77, 70):
             return Err("animated WebP is unsupported")
         elif first:
@@ -118,6 +140,145 @@ fn decode_webp_to_argb_bounded(data: [u8], max_pixels: i64) -> Result<WebpImage,
         first = false
         pos = body + size + (size & 1)
     Err("WebP has no image data")
+
+# ----------------------------------------------------------------------
+# Lossy output: YUV 4:2:0 -> ARGB (libwebp yuv.h + fancy upsampler)
+# ----------------------------------------------------------------------
+
+fn _webp_yuv_clip8(v: i64) -> i64:
+    """libwebp VP8Clip8 on a 6-bit fixed-point value."""
+    if v >= 0 and v < 16384:
+        return v >> 6
+    if v < 0: 0 else: 255
+
+fn _webp_yuv_pixel(y: i64, u: i64, v: i64) -> i64:
+    val yy = (y * 19077) >> 8
+    val r = _webp_yuv_clip8(yy + ((v * 26149) >> 8) - 14234)
+    val g = _webp_yuv_clip8(yy - ((u * 6419) >> 8) - ((v * 13320) >> 8) + 8708)
+    val b = _webp_yuv_clip8(yy + ((u * 33050) >> 8) - 17685)
+    (r << 16) | (g << 8) | b
+
+fn _webp_upsample_row(near: [i64], far: [i64], width: i64) -> [i64]:
+    """One row of chroma at full width (libwebp UPSAMPLE_FUNC): `near` is
+    the chroma row closer to this output row, `far` the other one."""
+    var out: [i64] = [0; width]
+    out[0] = (3 * near[0] + far[0] + 2) >> 2
+    val last_pair = (width - 1) >> 1
+    var x: i64 = 1
+    while x <= last_pair:
+        val avg = near[x - 1] + near[x] + far[x - 1] + far[x] + 8
+        val diag_12 = (avg + 2 * (near[x] + far[x - 1])) >> 3
+        val diag_03 = (avg + 2 * (near[x - 1] + far[x])) >> 3
+        out[2 * x - 1] = (diag_12 + near[x - 1]) >> 1
+        out[2 * x] = (diag_03 + near[x]) >> 1
+        x = x + 1
+    if (width & 1) == 0:
+        out[width - 1] = (3 * near[last_pair] + far[last_pair] + 2) >> 2
+    out
+
+fn _webp_chroma_row(plane: [i64], stride: i64, row: i64, n: i64) -> [i64]:
+    var out: [i64] = [0; n]
+    var i: i64 = 0
+    while i < n:
+        out[i] = plane[row * stride + i]
+        i = i + 1
+    out
+
+fn _webp_yuv_to_argb(planes: Vp8Planes, alpha: [i64]) -> WebpImage:
+    val w = planes.width
+    val h = planes.height
+    val cw = (w + 1) / 2
+    val ch = (h + 1) / 2
+    var out: [u32] = [0u32; w * h]
+    var y: i64 = 0
+    while y < h:
+        # Chroma rows nearest / farther from output row y (libwebp
+        # EmitFancyRGB pairing; edges reuse the nearest row).
+        var near_row: i64 = 0
+        var far_row: i64 = 0
+        if y > 0:
+            if (y & 1) == 1:
+                near_row = (y - 1) / 2
+                far_row = if (y + 1) / 2 < ch: (y + 1) / 2 else: near_row
+            else:
+                near_row = y / 2
+                far_row = y / 2 - 1
+        val u = _webp_upsample_row(_webp_chroma_row(planes.u, planes.uv_stride, near_row, cw), _webp_chroma_row(planes.u, planes.uv_stride, far_row, cw), w)
+        val v = _webp_upsample_row(_webp_chroma_row(planes.v, planes.uv_stride, near_row, cw), _webp_chroma_row(planes.v, planes.uv_stride, far_row, cw), w)
+        var x: i64 = 0
+        while x < w:
+            val a = if alpha.len() > 0: alpha[y * w + x] else: 255
+            out[y * w + x] = ((a << 24) | _webp_yuv_pixel(planes.y[y * planes.y_stride + x], u[x], v[x])).to_u32()
+            x = x + 1
+        y = y + 1
+    WebpImage(pixels: out, width: w.to_i32(), height: h.to_i32(), lossless: false)
+
+# ----------------------------------------------------------------------
+# ALPH chunk (WebP container spec "Alpha")
+# ----------------------------------------------------------------------
+
+fn _webp_decode_alpha(data: [u8], start: i64, size: i64, w: i64, h: i64) -> Result<[i64], text>:
+    if size < 1:
+        return Err("WebP ALPH chunk is truncated")
+    val header = data[start].to_i64()
+    val method = header & 3
+    val filter = (header >> 2) & 3
+    val pre = (header >> 4) & 3
+    if method > 1 or pre > 1 or (header >> 6) != 0:
+        return Err("WebP ALPH header is invalid")
+    var raw: [i64] = [0; w * h]
+    if method == 0:
+        if size - 1 < w * h:
+            return Err("WebP ALPH data is truncated")
+        var i: i64 = 0
+        while i < w * h:
+            raw[i] = data[start + 1 + i].to_i64()
+            i = i + 1
+    else:
+        var dec = _vp8l_decoder_new(data, start + 1, start + size, w * h)
+        val err = dec.decode_image(w, h)
+        if err != "":
+            return Err(err)
+        var i: i64 = 0
+        while i < w * h:
+            raw[i] = (dec.out_pixels[i] >> 8u32).to_i64() & 255
+            i = i + 1
+    if filter == 0:
+        return Ok(raw)
+    var out: [i64] = [0; w * h]
+    var y: i64 = 0
+    while y < h:
+        val row = y * w
+        if y == 0 or filter == 1:
+            # Horizontal; the first sample predicts from the row above (0 on row 0).
+            var pred: i64 = if y == 0: 0 else: out[row - w]
+            var x: i64 = 0
+            while x < w:
+                pred = (pred + raw[row + x]) & 255
+                out[row + x] = pred
+                x = x + 1
+        elif filter == 2:
+            var x: i64 = 0
+            while x < w:
+                out[row + x] = (out[row - w + x] + raw[row + x]) & 255
+                x = x + 1
+        else:
+            var left = out[row - w]
+            var top_left = left
+            var x: i64 = 0
+            while x < w:
+                val top = out[row - w + x]
+                var g = left + top - top_left
+                if g < 0:
+                    g = 0
+                if g > 255:
+                    g = 255
+                left = (raw[row + x] + g) & 255
+                top_left = top
+                out[row + x] = left
+                x = x + 1
+        y = y + 1
+    Ok(out)
 
 fn decode_vp8l_bounded(data: [u8], start: i64, length: i64, pixel_limit: i64) -> Result<WebpImage, text>:
     """Decode one VP8L bitstream occupying data[start, start + length)."""
@@ -543,6 +704,11 @@ class _Vp8lDecoder:
         val version = self.read(3)
         if version != 0:
             return "WebP VP8L version is unsupported"
+        self.decode_image(w, h)
+
+    me decode_image(w: i64, h: i64) -> text:
+        """Transforms + entropy-coded ARGB image of w x h (the part of a
+        VP8L stream after its header; also the ALPH chunk payload)."""
         if w * h > self.pixel_limit:
             return "WebP dimensions exceed decoder limits"
         self.width = w

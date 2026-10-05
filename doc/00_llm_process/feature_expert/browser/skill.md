@@ -440,12 +440,13 @@ unchanged PNG path; `image/jpeg` (also `image/jpg`, `image/pjpeg`) goes to
 `src/lib/common/image/jpeg_decode.spl` — baseline + progressive Huffman,
 any sampling, restart markers, bit-exact with `djpeg -dct int`.
 `image/webp` goes to `src/lib/common/image/webp_decode.spl` (RIFF + VP8X
-container; VP8L lossless with all transforms, color cache, meta codes;
-lossy VP8 and animation rejected by name until a VP8 decoder lands). The session
+container; VP8L lossless with all transforms, color cache, meta codes; lossy
+VP8 key frames via `webp_vp8_decode.spl` plus ALPH alpha — all bit-identical
+to libwebp; animation rejected by name). The session
 pixel budget (`BROWSER_MAX_IMAGE_PIXELS`) is passed in and enforced from the
 JPEG SOF before allocation. EXIF orientation is recorded
 (`JpegImage.exif_orientation`), not applied. Note `img src` data: URLs are
 capped at 256 bytes (`SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES`), so real image
 bodies only arrive over the network path. Specs:
-`test/01_unit/lib/common/image/{jpeg_decode,webp_lossless_decode,browser_image_decode_dispatch}_spec.spl`;
-fixtures `test/fixtures/image/{jpeg,webp_lossless}/` (kept out of LFS by a local `.gitattributes`).
+`test/01_unit/lib/common/image/{jpeg_decode,webp_lossless_decode,webp_lossy_decode,browser_image_decode_dispatch}_spec.spl`;
+fixtures `test/fixtures/image/{jpeg,webp_lossless,webp_lossy}/` (kept out of LFS by a local `.gitattributes`).
