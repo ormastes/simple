@@ -407,7 +407,10 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     }
 
     fn emit_const_bool(&mut self, dest: VReg, value: bool) -> Result<(), String> {
-        let bits = if value { 11u64 } else { 19u64 };
+        // MIR scalar booleans remain raw until an explicit runtime boxing call.
+        // Result payload extraction also yields raw bits; tagged constants
+        // would compare unequal to the same boolean after extraction.
+        let bits = u64::from(value);
         let val = self.backend.runtime_int_type().const_int(bits, false);
         self.set(dest, val.into());
         Ok(())
