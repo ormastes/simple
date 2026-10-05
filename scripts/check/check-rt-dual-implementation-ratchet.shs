@@ -100,10 +100,84 @@ extract_lanes() {
     # C lane: `rt_NAME(...) {` definitions in owned C sources. Vendored runtime
     # source is excluded per CLAUDE.md's Owned-Code Scope.
     if [ -d "$el_root/src/runtime" ]; then
-        find "$el_root/src/runtime" -name '*.c' -not -path '*/vendor/*' -print0 2>/dev/null \
-            | xargs -0 grep -hoE '\brt_[A-Za-z0-9_]+[[:space:]]*\([^;]*\)[[:space:]]*\{' 2>/dev/null \
-            | grep -oE '^rt_[A-Za-z0-9_]+' \
-            | sort -u > "$el_out/c_syms.txt"
+        # Lexical definitions, not physical lines. Do not evaluate #if/TEST
+        # conditions: this remains a source census, not a preprocessed build.
+        perl - "$el_root/src/runtime" > "$el_out/c_syms.txt" <<'PERL'
+use strict;
+use warnings;
+use File::Find;
+my %symbols;
+my $limit = 16 * 1024 * 1024;
+find({ no_chdir => 1, wanted => sub {
+    if (-d $_ && /(?:^|\/)vendor$/) { $File::Find::prune = 1; return; }
+    return unless /\.c$/ && -f $_;
+    my $path = $_;
+    open my $fh, '<', $path or die "C extractor open $path: $!\n";
+    my $source = '';
+    while (length($source) <= $limit) {
+        my $n = read($fh, my $chunk, $limit + 1 - length($source));
+        defined $n or die "C extractor read $path: $!\n";
+        last unless $n;
+        $source .= $chunk;
+    }
+    close $fh or die "C extractor close $path: $!\n";
+    length($source) <= $limit or die "C extractor file too large: $path\n";
+    $source =~ s/\\\r?\n//g; # C translation-phase line splicing precedes comments.
+    my @tokens;
+    pos($source) = 0;
+    while (pos($source) < length($source)) {
+        next if $source =~ /\G\s+/gc;
+        next if $source =~ m{\G//[^\n]*}gc;
+        next if $source =~ m{\G/\*.*?\*/}gcs;
+        die "C extractor unterminated comment: $path\n" if substr($source, pos($source), 2) eq '/*';
+        next if $source =~ /\G"(?:\\.|[^"\\])*"/gcs;
+        next if $source =~ /\G'(?:\\.|[^'\\])*'/gcs;
+        die "C extractor unterminated literal: $path\n" if substr($source, pos($source), 1) =~ /["']/;
+        next if $source =~ /\G\#[^\n]*/gc; # Skip directives, not conditional bodies.
+        $source =~ /\G([A-Za-z_][A-Za-z0-9_]*|.)/gcs or die "C extractor token failure: $path\n";
+        push @tokens, $1;
+        @tokens <= 1_000_000 or die "C extractor token limit: $path\n";
+    }
+    my $statement = 0;
+    for (my $i = 0; $i < @tokens; ++$i) {
+        my $t = $tokens[$i];
+        if ($t =~ /^rt_[A-Za-z0-9_]+$/ && $i > $statement
+                && ($tokens[$i + 1] // '') eq '(') {
+            my @prefix = @tokens[$statement .. $i - 1];
+            # A function needs a declaration prefix. Calls/prototypes cannot
+            # qualify merely because they occur near a brace. Do not track
+            # global brace depth: mutually exclusive #if openings need not
+            # balance until preprocessing, which this census does not do.
+            if (!grep { /^(?:=|,|return|if|else|while|for|switch|case|sizeof|\?|:|\+|-|\.|->)$/ } @prefix) {
+                my $j = $i + 1;
+                my $parens = 0;
+                do {
+                    $parens++ if $tokens[$j] eq '(';
+                    $parens-- if $tokens[$j] eq ')';
+                    ++$j;
+                } while ($j < @tokens && $parens > 0);
+                $parens == 0 or die "C extractor unclosed declarator: $path\n";
+                # Attributes after the parameter list are declaration syntax.
+                while (($tokens[$j] // '') =~ /^(?:__attribute__|__declspec)$/) {
+                    ++$j;
+                    ($tokens[$j] // '') eq '(' or die "C extractor malformed attribute: $path\n";
+                    my $attrs = 0;
+                    do {
+                        $attrs++ if $tokens[$j] eq '(';
+                        $attrs-- if $tokens[$j] eq ')';
+                        ++$j;
+                    } while ($j < @tokens && $attrs > 0);
+                    $attrs == 0 or die "C extractor unclosed attribute: $path\n";
+                }
+                $symbols{$t} = 1 if ($tokens[$j] // '') eq '{';
+            }
+        }
+        $statement = $i + 1 if $t eq ';' || $t eq '{' || $t eq '}';
+    }
+}}, $ARGV[0]);
+print "$_\n" for sort keys %symbols;
+PERL
+        [ $? -eq 0 ] || return 1
     fi
 
     # Rust lane: `fn rt_*` definitions. Test modules are excluded by path; a
@@ -156,7 +230,7 @@ selftest() {
     # single-lane symbols — never the shared one.
     mkfixture f1
     mkdir -p "$st_dir/w1"
-    extract_lanes "$st_dir/f1" "$st_dir/w1"
+    extract_lanes "$st_dir/f1" "$st_dir/w1" || { rm -rf "$st_dir"; return 1; }
     single_lane "$st_dir/w1" > "$st_dir/w1/sl.txt"
     st_got=$(cat "$st_dir/w1/sl.txt")
     st_want="$(printf 'rt_conly\tc-only\nrt_ronly\trust-only')"
@@ -182,7 +256,7 @@ selftest() {
     printf 'pub fn rt_brand_new_rust_only() -> i64 { 7 }\n' \
         >> "$st_dir/f3/src/compiler_rust/runtime/src/lib.rs"
     mkdir -p "$st_dir/w3"
-    extract_lanes "$st_dir/f3" "$st_dir/w3"
+    extract_lanes "$st_dir/f3" "$st_dir/w3" || { rm -rf "$st_dir"; return 1; }
     single_lane "$st_dir/w3" > "$st_dir/w3/sl.txt"
     st_new=$(comm -23 "$st_dir/w3/sl.txt" "$st_dir/base_ok.txt")
     if [ "$st_new" != "$(printf 'rt_brand_new_rust_only\trust-only')" ]; then
@@ -197,7 +271,7 @@ selftest() {
     mkfixture f4
     printf 'int64_t rt_ronly(void) { return 2; }\n' >> "$st_dir/f4/src/runtime/r.c"
     mkdir -p "$st_dir/w4"
-    extract_lanes "$st_dir/f4" "$st_dir/w4"
+    extract_lanes "$st_dir/f4" "$st_dir/w4" || { rm -rf "$st_dir"; return 1; }
     single_lane "$st_dir/w4" > "$st_dir/w4/sl.txt"
     st_stale=$(comm -13 "$st_dir/w4/sl.txt" "$st_dir/base_ok.txt")
     if [ "$st_stale" != "$(printf 'rt_ronly\trust-only')" ]; then
@@ -210,7 +284,7 @@ selftest() {
     mkfixture f5
     printf 'int64_t rt_shared(int64_t a) { return a; }\n' > "$st_dir/f5/src/runtime/r.c"
     mkdir -p "$st_dir/w5"
-    extract_lanes "$st_dir/f5" "$st_dir/w5"
+    extract_lanes "$st_dir/f5" "$st_dir/w5" || { rm -rf "$st_dir"; return 1; }
     single_lane "$st_dir/w5" > "$st_dir/w5/sl.txt"
     st_stale=$(comm -13 "$st_dir/w5/sl.txt" "$st_dir/base_ok.txt" | grep -c 'rt_conly')
     if [ "$st_stale" -ne 1 ]; then
@@ -222,13 +296,62 @@ selftest() {
     # Fixture 6: an empty tree must yield 0 symbols, so the caller is FORCED to
     # ERROR rather than reporting a vacuous pass. Non-vacuity is absolute.
     mkdir -p "$st_dir/f6" "$st_dir/w6"
-    extract_lanes "$st_dir/f6" "$st_dir/w6"
+    extract_lanes "$st_dir/f6" "$st_dir/w6" || { rm -rf "$st_dir"; return 1; }
     st_empty=$(single_lane "$st_dir/w6" | wc -l | tr -d ' ')
     if [ "$st_empty" -ne 0 ]; then
         echo "selftest: FAILED — empty tree yielded $st_empty symbol(s)"
         rm -rf "$st_dir"; return 1
     fi
     st_n=$((st_n + 1))
+
+    # Lexical C fixtures use the production extractor, including conditional
+    # alternative openings whose raw braces deliberately do not balance.
+    mkdir -p "$st_dir/lex/src/runtime" "$st_dir/lex/src/compiler_rust/runtime/src" "$st_dir/lexout"
+    cat > "$st_dir/lex/src/runtime/definitions.c" <<'C'
+int64_t
+rt_multiline(
+    int64_t first,
+    int64_t second
+)
+{ return first + second; }
+int rt_attribute(void) __attribute__((visibility("default")))
+{ return 1; }
+/* int rt_comment(void) { return 0; } */
+// int rt_line_comment(void) { return 0; }
+const char *text = "int rt_string(void) { return 0; }";
+char quote = '\'';
+int rt_prototype(
+    int a);
+void caller(void) {
+    rt_call(1);
+    if (rt_condition()) { rt_nested_call(); }
+    return rt_return_call();
+}
+#define FAKE(x) int rt_macro(void) { \
+    return (x); }
+#if SELECT_FIRST
+int rt_branch(int a) {
+#else
+int rt_branch(void) {
+#endif
+    return 1;
+}
+int rt_after_branch(void)
+{ return 2; }
+C
+    if ! extract_lanes "$st_dir/lex" "$st_dir/lexout"; then
+        echo 'selftest: FAILED C lexical extraction'; rm -rf "$st_dir"; return 1
+    fi
+    printf '%s\n' rt_after_branch rt_attribute rt_branch rt_multiline > "$st_dir/lexexpected"
+    if ! cmp -s "$st_dir/lexexpected" "$st_dir/lexout/c_syms.txt"; then
+        echo 'selftest: FAILED C definitions/calls/comments/conditional openings'
+        cat "$st_dir/lexout/c_syms.txt"; rm -rf "$st_dir"; return 1
+    fi
+    printf '/* unterminated\n' > "$st_dir/lex/src/runtime/broken.c"
+    if extract_lanes "$st_dir/lex" "$st_dir/lexout" 2>/dev/null; then
+        echo 'selftest: FAILED C lexical error accepted'; rm -rf "$st_dir"; return 1
+    fi
+    st_n=$((st_n + 2))
 
     # Fixture 7: --rev must read the COMMITTED tree and the COMMITTED baseline,
     # never the working checkout. This replays the 2026-09-06 incident directly:
@@ -339,7 +462,7 @@ if [ $RC -ne 0 ]; then
 fi
 
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — 8 fixture(s) checked, selftest only, no real tree scanned"
+    echo "PASS — $st_n fixture(s) checked, selftest only, no real tree scanned"
     exit 0
 fi
 
@@ -400,7 +523,10 @@ if [ "$BASELINE_EXPLICIT" -eq 1 ] && [ -n "$REV" ]; then
     echo "note: --baseline overrides the baseline committed at $REV" >&2
 fi
 
-extract_lanes "$SCAN_ROOT" "$WORK"
+if ! extract_lanes "$SCAN_ROOT" "$WORK"; then
+    echo 'ERROR — nothing was checked (C extraction failed)'
+    exit 2
+fi
 single_lane "$WORK" > "$WORK/current.txt"
 
 CUR_N=$(wc -l < "$WORK/current.txt" | tr -d ' ')
@@ -487,7 +613,10 @@ if [ -n "$BASELINE_REV" ]; then
             exit 2
         fi
         mkdir -p "$WORK/basework"
-        extract_lanes "$WORK/base" "$WORK/basework"
+        if ! extract_lanes "$WORK/base" "$WORK/basework"; then
+            echo 'ERROR — nothing was checked (base C extraction failed)'
+            exit 2
+        fi
         single_lane "$WORK/basework" > "$WORK/base.txt"
         if [ -n "$CENSUS_KEY" ] && [ -s "$WORK/base.txt" ] && mkdir -p "$CENSUS_DIR" 2>/dev/null; then
             cp "$WORK/base.txt" "$CENSUS_DIR/$CENSUS_KEY.tmp.$$" 2>/dev/null &&
