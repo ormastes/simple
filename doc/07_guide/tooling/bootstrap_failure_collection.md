@@ -3,11 +3,12 @@
 During bootstrap diagnosis, reach the end of all independently runnable build
 and test work instead of ending the investigation at the first failure. This
 is the shared agent policy for SPipe, bootstrap, builds, tests, and bug repair.
-Native-build and the bootstrap phase matrix collect independent failures by
-default on a host. CI (`CI=true` or `CI=1`) defaults to fail fast. Select the
+Full bootstrap and its phase matrix collect independent failures by default on
+hosts and CI (`CI=true` or `CI=1`). Compatible caches are reused by default.
+Select the
 policy with `--keep-going` or `--fail-fast`; the last explicit flag wins.
-`SIMPLE_COMPILE_FAIL_FAST=0` or `1` overrides the CI/host default and is inherited
-by worker processes. An empty or other environment value uses the CI/host
+`SIMPLE_COMPILE_FAIL_FAST=0` or `1` overrides that default and is inherited
+by worker processes. An empty or other environment value uses the go-to-end
 default. This policy does not change inventory scope (`normal` versus `full`).
 
 The phase matrix retains its first failure and exits nonzero even if later rows
@@ -32,6 +33,32 @@ group them by cause and delegate independent repairs to parallel agents with
 separate writable source/cache ownership. A repair already understood may run
 while collection continues. Distinguish logic defects, performance defects,
 resource-policy exits and unavailable prerequisites.
+
+When a bug appears during an active diagnostic bootstrap, register it in the
+bug database and repair it in parallel. Prefer a scoped, semantics-preserving
+workaround with the current compiler over returning to an earlier compiler or
+rebuilding the producer immediately. Keep the failed attempt and workaround
+identity separate. Apply changed inputs only to a new isolated attempt after
+the relevant owner has finished; do not patch a running source snapshot.
+Continue remaining independent cases to the end of Phase 4 where prerequisites
+permit. After that collection run ends, rebuild the full chain with accumulated
+fixes and required checks restored. A workaround is not proof that the underlying
+bug is fixed, and cannot turn a failed assertion or missing output into a pass.
+
+Every temporary workaround must identify its open underlying bug, background
+repair owner, original failing form and removal check. Keep the root-cause fix
+separate from the workaround. The later full rebuild must exercise the original
+form with the corrected producer before retiring the workaround, then run the
+affected regression cases without it. Do not leave a workaround permanently in
+place merely because the altered form passes, and do not remove it before the
+replacement is verified. Record explicitly which diagnostic policy exceptions
+are restored for qualification.
+
+For every performance fix, check memory behavior as well as elapsed time. For
+every memory fix, check performance as well as lifetime and peak usage. Run
+relevant correctness regressions in both cases. Record comparable inputs and
+producer identities; measurements without a comparable baseline are evidence,
+not a claimed improvement. Preserve valid caches while making these comparisons.
 
 When the user authorizes continuation past a time, memory or other policy
 failure, record that authorization and the exact disabled check in a separate

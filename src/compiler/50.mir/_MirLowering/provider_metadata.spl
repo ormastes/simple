@@ -24,10 +24,10 @@ fn mir_provider_callable_identity(owner: text, source_name: text) -> text:
         return name
     "{module_name}.{name}"
 
-fn mir_provider_declares_enum_owner(provider: SymbolTable, module_name: text, type_name: text, owner_key: text) -> bool:
-    # Provider method registration runs before consumer enum registration on
-    # the flat path. Inspect the declaration in its own SymbolTable instead
-    # of requiring a consumer class layout or reusing a foreign SymbolId.
+fn mir_provider_declares_value_method_owner(provider: SymbolTable, module_name: text, type_name: text, owner_key: text) -> bool:
+    # Struct/enum methods do not have a consumer class layout. Inspect the
+    # declaration in its own SymbolTable and require its exact qualified owner;
+    # a matching bare spelling never authorizes a foreign receiver method.
     val owner = _hir_symbol_owner_module(module_name)
     var owner_id = provider.lookup_qualified_type_raw(owner, type_name)
     if owner_id < 0:
@@ -37,7 +37,7 @@ fn mir_provider_declares_enum_owner(provider: SymbolTable, module_name: text, ty
         return false
     if val declaration = provider.get_symbol_raw(owner_id):
         match declaration.kind:
-            case Enum: return mir_class_identity(declaration) == owner_key
+            case Enum | Struct: return mir_class_identity(declaration) == owner_key
             case _: ()
     false
 
@@ -132,7 +132,7 @@ impl MirLowering:
         val method_name = parts[parts.len() - 1]
         val class_key = identity.substring(0, identity.len() - method_name.len() - 1)
         if not self.class_type_names.has(class_key):
-            if not mir_provider_declares_enum_owner(provider, source.defining_module ?? "", parts[parts.len() - 2], class_key):
+            if not mir_provider_declares_value_method_owner(provider, source.defining_module ?? "", parts[parts.len() - 2], class_key):
                 return
         val method = self.relocate_provider_callable(func.symbol, provider, links)
         if method.id < 0:

@@ -1,0 +1,33 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_serialization.{serialize_mir_module}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn early_let_receiver_mir(source: text) -> (i64, text):
+    val filename = "early_let_receivers.spl"
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_owner = HirLowering.with_filename(filename)
+    val hir = hir_owner.lower_module(parsed)
+    var mir_owner = MirLowering.new(hir.symbols)
+    val mir = mir_owner.lower_module(hir)
+    (hir_owner.errors.len() + mir_owner.errors.len(), serialize_mir_module(mir))
+
+describe "early Let receiver metadata", tag: ["only-compiled"]:
+    it "preserves text across consecutive typed array-element bindings":
+        val (errors, mir) = early_let_receiver_mir("fn probe(values: [text]) -> i64:\n    val first: text = values[0]\n    val second: text = first\n    second.byte_at(0) as i64\n")
+        expect(errors).to_equal(0)
+        expect(mir).to_contain("__simple_rt_string_byte_at")
+
+    it "preserves a named receiver and its mutable method across bindings":
+        val (errors, mir) = early_let_receiver_mir("struct Counter:\n    value: i64\nimpl Counter:\n    me insert(delta: i64):\n        self.value = self.value + delta\n    fn get() -> i64:\n        self.value\nfn probe(values: [Counter]) -> i64:\n    val first: Counter = values[0]\n    var second: Counter = first\n    second.insert(3)\n    second.get()\n")
+        expect(errors).to_equal(0)
+        expect(mir).to_contain("insert")
+        expect(mir).to_contain("get")
+
+    it "does not grant text methods to a scalar rebind":
+        val (errors, _) = early_let_receiver_mir("fn probe(values: [i64]) -> i64:\n    val first: i64 = values[0]\n    val second: i64 = first\n    second.byte_at(0) as i64\n")
+        expect(errors).to_be_greater_than(0)

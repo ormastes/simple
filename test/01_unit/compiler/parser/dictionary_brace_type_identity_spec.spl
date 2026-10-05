@@ -1,0 +1,57 @@
+use std.spec.*
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types_expr.{TypeKind, parser_type_kind_named_name, parser_type_kind_named_args}
+use compiler.core.parser.{parser_set_had_error, parser_has_errors}
+
+fn dictionary_annotation_kind(annotation: text) -> TypeKind:
+    parser_set_had_error(false)
+    val source = "fn accept(value: " + annotation + ") -> i64:\n    0\n"
+    val module = parse_and_build_module(source, "dictionary_type_identity.spl")
+    expect(parser_has_errors()).to_be(false)
+    val function = module.functions["accept"] ?? panic("missing parsed function")
+    function.params[0].type_.kind
+
+fn dictionary_value_kind(kind: TypeKind) -> TypeKind:
+    expect(parser_type_kind_named_name(kind)).to_equal("Dict")
+    val args = parser_type_kind_named_args(kind)
+    expect(args.len()).to_equal(2)
+    expect(parser_type_kind_named_name(args[0].kind)).to_equal("text")
+    args[1].kind
+
+describe "Brace dictionary annotations preserve structural value types":
+    it "preserves array elements for both dictionary spellings":
+        for annotation in ["{{text: [text]}}", "Dict<text, [text]>"]:
+            match dictionary_value_kind(dictionary_annotation_kind(annotation)):
+                case TypeKind.Array(element, _):
+                    expect(parser_type_kind_named_name(element.kind)).to_equal("text")
+                case _: fail("dictionary array value was erased")
+
+    it "preserves dictionary and nested array values recursively":
+        val outer = dictionary_value_kind(dictionary_annotation_kind("{{text: {{text: [[i64]]}}}}"))
+        match dictionary_value_kind(outer):
+            case TypeKind.Array(row, _):
+                match row.kind:
+                    case TypeKind.Array(element, _):
+                        expect(parser_type_kind_named_name(element.kind)).to_equal("i64")
+                    case _: fail("nested array row was erased")
+            case _: fail("dictionary nested array was erased")
+
+    it "retains the optional suffix around the whole dictionary":
+        match dictionary_annotation_kind("{{text: [bool]}}?"):
+            case TypeKind.Optional(inner):
+                match dictionary_value_kind(inner.kind):
+                    case TypeKind.Array(element, _):
+                        expect(parser_type_kind_named_name(element.kind)).to_equal("bool")
+                    case _: fail("optional dictionary value was erased")
+            case _: fail("dictionary optional suffix was lost")
+
+    it "retains generic arguments of the dictionary value":
+        val value = dictionary_value_kind(dictionary_annotation_kind("{{text: Result<[i64], text>}}"))
+        expect(parser_type_kind_named_name(value)).to_equal("Result")
+        val args = parser_type_kind_named_args(value)
+        expect(args.len()).to_equal(2)
+        match args[0].kind:
+            case TypeKind.Array(element, _):
+                expect(parser_type_kind_named_name(element.kind)).to_equal("i64")
+            case _: fail("generic argument array was erased")
+        expect(parser_type_kind_named_name(args[1].kind)).to_equal("text")

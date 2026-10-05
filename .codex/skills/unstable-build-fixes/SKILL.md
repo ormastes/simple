@@ -35,11 +35,11 @@ compiler must compile Hello World and execute its output successfully before
 starting the next provisional phase; full qualification may continue alongside
 it. Formal admission remains required for promotion. Follow the
 [shared collection policy](../../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
-cache preservation, and bug evidence. Host native-build/bootstrap runs default
-to collecting independent failures; CI=true/1 defaults to fail fast. Use
-`--keep-going` to collect CI diagnostics or `--fail-fast` for a short host run.
-The last flag wins over `SIMPLE_COMPILE_FAIL_FAST=0|1`, which overrides CI/host
-defaults. Preserve nonzero aggregate failure and explicit unrun SKIPPED/BLOCKED
+cache preservation, and bug evidence. Full bootstrap defaults to compatible
+cache reuse and collecting independent failures on hosts and CI. Use
+`--fail-fast` only for an explicitly requested short run. The last policy flag
+wins over `SIMPLE_COMPILE_FAIL_FAST=0|1`, which overrides the go-to-end default.
+Preserve nonzero aggregate failure and explicit unrun SKIPPED/BLOCKED
 rows. User-authorized time, memory or policy exceptions belong to separate
 monitored DIAGNOSTIC attempts; record the disabled check and authority, preserve
 the failed attempt, and continue eligible work without claiming admission.
@@ -56,10 +56,15 @@ existing files.
 
 ## Cache policy during repairs
 
-Use cached builds until the known failures are fixed, then perform one explicit
-clean rebuild as the final verification. Follow the
+Use compatible caches throughout full bootstrap and verification by default.
+Run a separate clean rebuild only when explicitly requested or required by the
+selected qualification plan; preserve the successful cached output. Follow the
 [bootstrap cache guide](../../../doc/07_guide/tooling/bootstrap_cache_policy.md)
 for supported invalidation commands and their scope.
+
+For every performance fix, check memory behavior; for every memory fix, check
+performance. Include correctness regressions and comparable input/producer
+identities. Report measurements separately from unproven improvement claims.
 
 - Before creating a cache, locate the previous attempt's cache for the same
   platform, phase and entry. Compare its recorded producer, source/dependencies,

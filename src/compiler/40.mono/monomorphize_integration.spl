@@ -92,6 +92,8 @@ class MonomorphizationPass:
     # Module whose function bodies are being rewritten right now (scopes the
     # two maps above).
     current_module: text
+    # Function return context is scoped and suspended for nested lambdas.
+    current_return_type: HirType?
     # Specializations whose bodies still have to be walked (FIFO worklist).
     spec_queue: [text]
     # Mangled name -> SymbolId allocated for the specialized function.
@@ -135,6 +137,7 @@ impl MonomorphizationPass:
             spec_module: {},
             sym_names: {},
             current_module: "",
+            current_return_type: nil,
             fn_sigs: {},
             named_types: {},
             named_ambiguous: {},
@@ -329,6 +332,8 @@ impl MonomorphizationPass:
         pre-collects every annotated `let` (SymbolIds are unique per module,
         so scoping cannot alias two lets)."""
         self.env = {}
+        val previous_return_type = self.current_return_type
+        self.current_return_type = func.return_type
         for p in func.params:
             val pt: HirParam = p
             val ps: SymbolId = pt.symbol
@@ -337,7 +342,8 @@ impl MonomorphizationPass:
             eprint("[mono-diag] rewrite_function {func.name} stmts={func.body.stmts.len()}")
         self.collect_lets_block(func.body)
         var out = func
-        out.body = self.rewrite_block(func.body)
+        out.body = self.rewrite_block(func.body, func.return_type)
+        self.current_return_type = previous_return_type
         out
 
     me drain_worklist():
@@ -526,7 +532,7 @@ impl MonomorphizationPass:
             return self.sym_names[k]
         "sym_{s.id}"
 
-    me infer_call_type_args(template: HirFunction, args: [HirCallArg]) -> [HirType]:
+    me infer_call_type_args(template: HirFunction, args: [HirCallArg], expected_result: HirType? = nil) -> [HirType]:
         """Infer the template's type arguments from the call's argument types.
 
         Unifies each declared parameter type against the locally inferred
@@ -550,6 +556,11 @@ impl MonomorphizationPass:
                 if not bind_type_params(pt.type_, arg_ty, bindings):
                     return []
             i = i + 1
+        if expected_result != nil:
+            val expected: HirType = expected_result
+            if hir_type_is_concrete(expected):
+                if not bind_type_params(template.return_type, expected, bindings):
+                    return []
         var out: [HirType] = []
         for tp in template.type_params:
             val tpt: HirTypeParam = tp
@@ -970,7 +981,7 @@ impl MonomorphizationPass:
     # Step 2b: Call-site rewriting (exhaustive over nested expressions)
     # ========================================================================
 
-    me rewrite_block(block: HirBlock) -> HirBlock:
+    me rewrite_block(block: HirBlock, expected_result: HirType? = nil) -> HirBlock:
         """Rewrite generic call sites inside a block. Nil-guarded: freshly
         single-file-lowered HIR can carry nil sub-blocks where the seed's
         ANY-erased payloads mis-resolved during lowering."""
@@ -984,7 +995,7 @@ impl MonomorphizationPass:
         out.stmts = stmts
         if block.has:
             val bv: HirExpr = block.value
-            out.value = self.rewrite_expr(bv)
+            out.value = self.rewrite_expr_with_context(bv, expected_result)
         out
 
     me rewrite_block_opt(block: HirBlock?) -> HirBlock?:
@@ -1050,7 +1061,7 @@ impl MonomorphizationPass:
         match stmt.kind:
             case HirStmtKind.Let(sym, ty, init):
                 val init_t: HirExpr = init
-                out.kind = HirStmtKind.Let(sym, ty, self.rewrite_expr(init_t))
+                out.kind = HirStmtKind.Let(sym, ty, self.rewrite_expr_with_context(init_t, ty))
             case HirStmtKind.Assign(target, op, value):
                 val target_t: HirExpr = target
                 val value_t: HirExpr = value
@@ -1065,7 +1076,7 @@ impl MonomorphizationPass:
                 pass_do_nothing("no nested expression")
         out
 
-    me rewrite_call(callee: HirExpr, args: [HirCallArg], type_args: [HirType]) -> HirExprKind:
+    me rewrite_call(callee: HirExpr, args: [HirCallArg], type_args: [HirType], expected_result: HirType? = nil) -> HirExprKind:
         """Rewrite one call site.
 
         A call to a generic function becomes a plain call to its
@@ -1088,7 +1099,7 @@ impl MonomorphizationPass:
                 explicit = true
                 targs = type_args
         if not explicit:
-            targs = self.infer_call_type_args(template, new_args)
+            targs = self.infer_call_type_args(template, new_args, expected_result)
         val expected: [HirTypeParam] = template.type_params
         if targs.len() != expected.len():
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
@@ -1114,6 +1125,21 @@ impl MonomorphizationPass:
         new_type_args = []
         HirExprKind.Call(new_callee, new_args, new_type_args)
 
+    me rewrite_expr_with_context(expr: HirExpr, expected: HirType?) -> HirExpr:
+        # Context is used only for this call, never inherited by its arguments.
+        if expr == nil:
+            return expr
+        match expr.kind:
+            case HirExprKind.Call(callee, args, type_args):
+                val ct: HirExpr = callee
+                val at: [HirCallArg] = args
+                var out = expr
+                val context: HirType? = if expected != nil: expected else: (if expr.has_type_: expr.type_ else: nil)
+                out.kind = self.rewrite_call(ct, at, type_args, context)
+                out
+            case _:
+                self.rewrite_expr(expr)
+
     me rewrite_expr(expr: HirExpr) -> HirExpr:
         """Rewrite generic call sites inside an expression.
 
@@ -1130,7 +1156,8 @@ impl MonomorphizationPass:
             case HirExprKind.Call(callee, args, type_args):
                 val callee_t: HirExpr = callee
                 val args_t: [HirCallArg] = args
-                out.kind = self.rewrite_call(callee_t, args_t, type_args)
+                val expected: HirType? = if expr.has_type_: expr.type_ else: nil
+                out.kind = self.rewrite_call(callee_t, args_t, type_args, expected)
 
             # Collections
             case HirExprKind.ArrayLit(elements, elem_ty):
@@ -1243,7 +1270,16 @@ impl MonomorphizationPass:
             # Closures and blocks
             case HirExprKind.Lambda(params, body, captures):
                 val lbody: HirExpr = body
-                out.kind = HirExprKind.Lambda(params, self.rewrite_expr(lbody), captures)
+                val previous_return_type = self.current_return_type
+                self.current_return_type = nil
+                if expr.has_type_:
+                    match expr.type_.kind:
+                        case HirTypeKind.Function(_, ret, _):
+                            self.current_return_type = ret
+                        case _:
+                            pass
+                out.kind = HirExprKind.Lambda(params, self.rewrite_expr_with_context(lbody, self.current_return_type), captures)
+                self.current_return_type = previous_return_type
             case HirExprKind.Block(block):
                 val bk: HirBlock = block
                 out.kind = HirExprKind.Block(self.rewrite_block(bk))
@@ -1254,7 +1290,12 @@ impl MonomorphizationPass:
 
             # Control transfer
             case HirExprKind.Return(value):
-                out.kind = HirExprKind.Return(self.rewrite_expr_opt(value))
+                match value:
+                    Some(v):
+                        val rv: HirExpr = v
+                        out.kind = HirExprKind.Return(self.rewrite_expr_with_context(rv, self.current_return_type))
+                    nil:
+                        pass
             case HirExprKind.Break(label, value):
                 out.kind = HirExprKind.Break(label, self.rewrite_expr_opt(value))
             case HirExprKind.Throw(value):
@@ -1629,6 +1670,10 @@ fn bind_type_params(param_ty: HirType, arg_ty: HirType, bindings: Dict<text, Hir
                 case Union(ams): bind_type_lists(pms, ams, bindings)
                 case _: false
         case Named(psym, pargs):
+            # A fixed nominal parameter binds no generics. Its local SymbolId
+            # cannot be compared with the caller table's ID; HIR checked it.
+            if pargs.len() == 0:
+                return true
             match arg_ty.kind:
                 case Named(asym, aargs):
                     if psym.id != asym.id:

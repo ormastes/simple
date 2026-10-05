@@ -8,6 +8,7 @@ use compiler.driver.driver_hir_recovery.{hir_shard_recovery_can_replace, hir_sha
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim, hir_shard_recovery_terminal, hir_shard_recovery_seal, hir_shard_recovery_progress, hir_shard_recovery_failure_count, hir_shard_recovery_complete, hir_shard_recovery_finished}
 use compiler.driver.driver_hir_recovery.{hir_shard_recovery_inventory, hir_shard_recovery_close_inventory}
 use std.io_runtime.{dir_create_all, dir_exists, dir_list, dir_list_optional, file_read, file_write, getpid}
+use std.common.crypto.sha256.{sha256_text}
 
 # Each scenario owns a new queue. Keep receipts for inspection after the run.
 fn recovery_fixture(label: text) -> text:
@@ -35,6 +36,84 @@ fn only_recovery_terminal(queue: text) -> text:
     record
 
 describe "HIR shard bounded recovery decisions":
+    describe "explicit HIR parallelism ledger invariants":
+        # These are real ledger interleavings, not simultaneous process tests.
+        it "keeps twenty owners distinct and permits one cache terminal per module":
+            step("Publish twenty modules and assign each to a different owner")
+            val queue = recovery_fixture("twenty-owner-exact-once")
+            var paths: [text] = []
+            for index in 0..20:
+                paths = paths.push("module-{index}.spl")
+            expect(hir_shard_recovery_inventory(queue, "closure-twenty", paths)).to_equal(true)
+            for index in 0..20:
+                val path = paths[index]
+                val owner = "worker-{index}"
+                expect(hir_shard_recovery_claim(queue, owner, path, "key-{index}")).to_equal(1)
+                val other_index = (index + 1) % 20
+                val other = "worker-{other_index}"
+                expect(hir_shard_recovery_claim(queue, other, path, "key-{index}")).to_equal(0)
+                expect(hir_shard_recovery_terminal(queue, other, path, "PASS", true)).to_equal(false)
+                expect(hir_shard_recovery_terminal(queue, owner, path, "PASS", true)).to_equal(true)
+                val terminal_path = "{queue}/{sha256_text(path)}.terminal"
+                val original = file_read(terminal_path)
+                expect(hir_shard_recovery_terminal(queue, owner, path, "PASS", false)).to_equal(false)
+                expect(file_read(terminal_path)).to_equal(original)
+                expect(original).to_contain("\n{owner}\n{path}\nkey-{index}\nCACHE_STORED\n")
+                expect(hir_shard_recovery_progress(queue, owner)).to_equal(1)
+                expect(hir_shard_recovery_complete(queue, owner)).to_equal(true)
+                expect(hir_shard_recovery_finished(queue, owner)).to_equal(true)
+            var terminals = 0
+            for name in dir_list(queue):
+                if name.ends_with(".terminal"): terminals = terminals + 1
+            expect(terminals).to_equal(20)
+            expect(hir_shard_recovery_close_inventory(queue, false)).to_equal(0)
+            expect(hir_shard_recovery_failure_count(queue)).to_equal(0)
+
+        it "does not admit owner completion while a claim remains unknown":
+            step("Complete the traversal marker while one module has no terminal")
+            val queue = recovery_fixture("done-is-not-module-success")
+            expect(hir_shard_recovery_inventory(queue, "closure-mixed", ["good.spl", "unknown.spl", "next.spl"])).to_equal(true)
+            expect(hir_shard_recovery_claim(queue, "dead", "good.spl", "good-key")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "dead", "good.spl", "PASS", true)).to_equal(true)
+            val good_digest = sha256_text("good.spl")
+            val good_path = "{queue}/{good_digest}.terminal"
+            val good_receipt = file_read(good_path)
+            expect(hir_shard_recovery_claim(queue, "dead", "unknown.spl", "unknown-key")).to_equal(1)
+            expect(hir_shard_recovery_complete(queue, "dead")).to_equal(true)
+            expect(hir_shard_recovery_finished(queue, "dead")).to_equal(true)
+            val incomplete = hir_shard_recovery_close_inventory(queue, false)
+            expect(incomplete).to_equal(-1)
+            expect(hir_shard_aggregate_exit(0, incomplete)).to_equal(1)
+            step("After a proven reap seal the unknown claim and continue only unclaimed work")
+            expect(hir_shard_recovery_seal(queue, "dead", "CRASH")).to_equal(1)
+            expect(hir_shard_recovery_claim(queue, "replacement", "unknown.spl", "unknown-key")).to_equal(0)
+            expect(hir_shard_recovery_claim(queue, "replacement", "next.spl", "next-key")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "replacement", "next.spl", "PASS", true)).to_equal(true)
+            expect(file_read(good_path)).to_equal(good_receipt)
+            expect(hir_shard_recovery_close_inventory(queue, false)).to_equal(0)
+            expect(hir_shard_recovery_failure_count(queue)).to_equal(1)
+            expect(hir_shard_aggregate_exit(1, hir_shard_recovery_failure_count(queue))).to_equal(1)
+
+        it "rejects a cached PASS transplanted from another owner and module":
+            step("Produce two valid cached terminals then corrupt only the second receipt")
+            val queue = recovery_fixture("cached-pass-owner-transplant")
+            expect(hir_shard_recovery_inventory(queue, "closure-pair", ["a.spl", "b.spl"])).to_equal(true)
+            expect(hir_shard_recovery_claim(queue, "a-owner", "a.spl", "key-a")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "a-owner", "a.spl", "PASS", true)).to_equal(true)
+            expect(hir_shard_recovery_claim(queue, "b-owner", "b.spl", "key-b")).to_equal(1)
+            expect(hir_shard_recovery_terminal(queue, "b-owner", "b.spl", "PASS", true)).to_equal(true)
+            val a_digest = sha256_text("a.spl")
+            val b_digest = sha256_text("b.spl")
+            val a_path = "{queue}/{a_digest}.terminal"
+            val b_path = "{queue}/{b_digest}.terminal"
+            val original = file_read(a_path)
+            expect(file_write(b_path, original)).to_equal(true)
+            expect(hir_shard_recovery_close_inventory(queue, false)).to_equal(0)
+            val invalid = hir_shard_recovery_failure_count(queue)
+            expect(invalid).to_equal(-1)
+            expect(hir_shard_aggregate_exit(0, invalid)).to_equal(1)
+            expect(file_read(a_path)).to_equal(original)
+
     describe "REQ-KG-004: unavailable queues are not empty successful queues":
         it "should preserve missing versus empty directory results through the runtime facade":
             step("Create an empty queue and leave a child directory absent")

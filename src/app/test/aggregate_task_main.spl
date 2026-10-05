@@ -13,13 +13,14 @@ use std.common.task_runner.snapshot.{task_runner_snapshot_commit_v1}
 use std.test_runner.aggregate_task_executor.{aggregate_test_enumerate_v1}
 use std.test_runner.aggregate_task_driver.{aggregate_task_run_v1}
 use std.test_runner.aggregate_task_manifest.{aggregate_task_manifest_read_v1, aggregate_task_manifest_identities_v1}
+use app.test.aggregate_task_options.{aggregate_task_concurrency_report_v1}
 
 fn _task_field(fields: Dict<text, text>, key: text) -> Result<text, text>:
     if not fields.contains_key(key) or fields[key] == "": return Err("missing task field: " + key)
     Ok(fields[key])
 
 fn _task_run(options: Dict<text, text>) -> Result<text, text>:
-    if _task_field(options, "threads")? != "80": return Err("expected 80-worker diagnostic policy")
+    val concurrency = aggregate_task_concurrency_report_v1(_task_field(options, "threads")?)?
     val bound = aggregate_task_manifest_read_v1(_task_field(options, "identity-manifest")?,
         _task_field(options, "identity-manifest-sha256")?, _task_field(options, "inventory-manifest")?,
         _task_field(options, "inventory-manifest-sha256")?, _task_field(options, "stage")?,
@@ -62,6 +63,7 @@ fn _task_run(options: Dict<text, text>) -> Result<text, text>:
         totals.crashed > 0 or totals.exhausted > 0 or totals.aborted > 0 or
         totals.not_run > 0 or totals.pending > 0 or totals.passed == 0
     var summary = "format=SIMPLE-AGGREGATE-TASK-SUMMARY-1\n"
+    summary = summary + concurrency
     summary = summary + "provenance_status=caller-bound-unadmitted\nstage=" + stage + "\nbackend=" + backend + "\nsubsystem=" + subsystem + "\nruntime_mode=" + runtime_mode + "\n"
     summary = summary + "identity_manifest_digest=" + identity_digest + "\ninventory_manifest_digest=" + inventory_digest + "\n"
     summary = summary + "producer_digest=" + producer + "\nsource_digest=" + source + "\nruntime_digest=" + runtime + "\ntoolchain_digest=" + toolchain + "\npolicy_digest=" + policy + "\nexecution_digest=" + execution + "\n"
@@ -99,6 +101,9 @@ fn main() -> i64:
             code = if value.contains("\naggregate_exit=0\n"): 0 else: 1
         case Err(message):
             summary = "format=SIMPLE-AGGREGATE-TASK-SUMMARY-1\nprovenance_status=caller-bound-unadmitted\nstage=" + options["stage"] + "\nbackend=" + options["backend"] + "\ncompletion=0\nexpected_count=-1\naggregate_exit=2\nerror_digest=" + sha256_text(message) + "\n"
+            match aggregate_task_concurrency_report_v1(options["threads"]):
+                case Ok(concurrency): summary = summary + concurrency
+                case Err(_): ()
             print "aggregate task error: " + message
     if not file_create_excl(summary_path, summary): return 2
     code

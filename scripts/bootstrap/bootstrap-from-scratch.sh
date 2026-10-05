@@ -259,8 +259,8 @@ Options:
                      loader suites through them. A failing suite, an incomplete
                      verification summary, or a missing admitted artifact stops
                      the bootstrap.
-  --fail-fast        Stop independent work after the first failure (CI default).
-  --keep-going       Collect all independent failures (host default). Last policy
+  --fail-fast        Explicitly stop independent work after the first failure.
+  --keep-going       Collect all independent failures (host and CI default). Last policy
                      flag wins over SIMPLE_COMPILE_FAIL_FAST=1. Admission and
                      prerequisite failures still block dependent stages.
   --strategy=<name>  Bootstrap scheduling strategy: adhoc, normal, or full

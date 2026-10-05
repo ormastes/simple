@@ -1,6 +1,7 @@
 # Pure-Simple packed transport for the versioned backend plugin runtime bridge.
 
 use std.common.string_core.{text_to_bytes, bytes_to_text}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use compiler.common.backend_plugin.model.{BackendRole, BackendCapability,
     BackendPluginRequestV1}
 use compiler.mir.mir_data.{MirModule}
@@ -9,7 +10,9 @@ use compiler.mir.mir_serialization.{serialize_mir_module}
 val BACKEND_PLUGIN_BRIDGE_MAGIC_V1: i64 = 0x31504253
 val BACKEND_PLUGIN_BRIDGE_VERSION_V1: i64 = 1
 val BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1: i64 = 32
-val BACKEND_PLUGIN_REQUEST_SIZE_V1: i64 = 16
+val BACKEND_PLUGIN_REQUEST_SIZE_V1: i64 = 48
+val BACKEND_PLUGIN_REQUEST_MAGIC_V1: i64 = 0x31514253
+val BACKEND_PLUGIN_REQUEST_MAX_V1: i64 = 65536
 val BACKEND_PLUGIN_PROVIDER_HANDLE_MAGIC_V1: i64 = 0x31484253
 val BACKEND_PLUGIN_PROVIDER_HANDLE_SIZE_V1: i64 = 16
 
@@ -125,14 +128,96 @@ fn backend_plugin_capability_bit_v1(capability: BackendCapability) -> i64:
         case BackendCapability.IncrementalCompilation: 32
 
 fn backend_plugin_request_encode_v1(request: BackendPluginRequestV1) -> [u8]:
+    # Selection-only plugin_path stays local; all provider configuration is
+    # transported. Empty output is an invalid request, never a legacy prefix.
+    if request.features.len() > 128: return []
+    var features: [u8] = []
+    backend_plugin_push_u32_le_v1(features, request.features.len())
+    for feature in request.features:
+        if feature.len() == 0 or feature.len() > 4096 or feature.contains("\0"): return []
+        val bytes = text_to_bytes(feature)
+        if bytes.len() > 4096: return []
+        backend_plugin_push_u32_le_v1(features, bytes.len())
+        for byte in bytes: features.push(byte)
+        if features.len() > 32768: return []
+    for field in [request.backend_name, request.target, request.cpu, request.optimization, request.mir_abi_digest]:
+        if field.len() > 4096 or field.contains("\0"): return []
+        if text_to_bytes(field).len() > 4096: return []
+    if request.backend_name == "" or request.target == "" or request.optimization == "" or request.mir_abi_digest == "": return []
+    val fields: [[u8]] = [text_to_bytes(request.backend_name), text_to_bytes(request.target),
+        text_to_bytes(request.cpu), features, text_to_bytes(request.optimization),
+        text_to_bytes(request.mir_abi_digest)]
     var out: [u8] = []
+    backend_plugin_push_u32_le_v1(out, BACKEND_PLUGIN_REQUEST_MAGIC_V1)
+    backend_plugin_push_u32_le_v1(out, BACKEND_PLUGIN_BRIDGE_VERSION_V1)
     backend_plugin_push_u32_le_v1(out, BACKEND_PLUGIN_BRIDGE_VERSION_V1)
     backend_plugin_push_u32_le_v1(out, backend_plugin_role_wire_v1(request.role))
     var capabilities = 0
     for capability in request.required_capabilities:
         capabilities = capabilities | backend_plugin_capability_bit_v1(capability)
     backend_plugin_push_u64_le_v1(out, capabilities)
+    for field in fields: backend_plugin_push_u32_le_v1(out, field.len())
+    for field in fields:
+        for byte in field: out.push(byte)
+    if out.len() > BACKEND_PLUGIN_REQUEST_MAX_V1: return []
     out
+
+fn backend_plugin_request_text_v1(data: [u8], offset: i64, length: i64) -> Result<text, text>:
+    val bytes = backend_plugin_copy_range_v1(data, offset, length)
+    # Raw string conversion can preserve malformed bytes verbatim. A byte/text
+    # roundtrip is therefore not validation and disagrees with the C bridge.
+    val value = match validated_utf8_bytes_to_text_linear(bytes):
+        case Ok(decoded): decoded
+        case Err(_): return Err("request-text-utf8")
+    if value.contains("\0"): return Err("request-text-nul")
+    Ok(value)
+
+fn backend_plugin_request_decode_v1(data: [u8]) -> Result<BackendPluginRequestV1, text>:
+    if data.len() < BACKEND_PLUGIN_REQUEST_SIZE_V1 or data.len() > BACKEND_PLUGIN_REQUEST_MAX_V1:
+        return Err("request-size")
+    if backend_plugin_read_u32_le_v1(data, 0) != BACKEND_PLUGIN_REQUEST_MAGIC_V1 or
+            backend_plugin_read_u32_le_v1(data, 4) != 1 or backend_plugin_read_u32_le_v1(data, 8) != 1:
+        return Err("request-schema")
+    val role = backend_plugin_read_u32_le_v1(data, 12)
+    val caps = backend_plugin_read_u64_le_v1(data, 16)
+    if (role != 1 and role != 2) or caps < 0 or caps > 63: return Err("request-role-capabilities")
+    var offset = BACKEND_PLUGIN_REQUEST_SIZE_V1
+    var texts: [text] = []
+    var features: [text] = []
+    var field = 0
+    while field < 6:
+        val length = backend_plugin_read_u32_le_v1(data, 24 + field * 4)
+        val limit = if field == 3: 32768 else: 4096
+        if length > limit or length > data.len() - offset: return Err("request-field-length")
+        if field == 3:
+            if length < 4: return Err("request-feature-header")
+            val end = offset + length
+            val count = backend_plugin_read_u32_le_v1(data, offset)
+            if count > 128: return Err("request-feature-count")
+            var cursor = offset + 4
+            var item = 0
+            while item < count:
+                if end - cursor < 4: return Err("request-feature-length")
+                val size = backend_plugin_read_u32_le_v1(data, cursor)
+                cursor = cursor + 4
+                if size == 0 or size > 4096 or size > end - cursor: return Err("request-feature-length")
+                features.push(backend_plugin_request_text_v1(data, cursor, size)?)
+                cursor = cursor + size
+                item = item + 1
+            if cursor != end: return Err("request-feature-trailing")
+        else:
+            if length == 0 and field != 2: return Err("request-empty-field")
+            texts.push(backend_plugin_request_text_v1(data, offset, length)?)
+        offset = offset + length
+        field = field + 1
+    if offset != data.len(): return Err("request-trailing")
+    var capabilities: [BackendCapability] = []
+    for capability in [BackendCapability.JitExecute, BackendCapability.ObjectEmit,
+            BackendCapability.DebugInfo, BackendCapability.Optimization,
+            BackendCapability.CrossTarget, BackendCapability.IncrementalCompilation]:
+        if (caps & backend_plugin_capability_bit_v1(capability)) != 0: capabilities.push(capability)
+    Ok(BackendPluginRequestV1(if role == 1: BackendRole.InterpreterJit else: BackendRole.CompilerAot,
+        texts[0], texts[1], texts[2], features, texts[3], texts[4], capabilities, "", false))
 
 fn backend_plugin_provider_handle_encode_v1(handle: i64) -> [u8]:
     var out: [u8] = []
@@ -193,6 +278,8 @@ fn backend_plugin_run_module_v1(
     if provider_path == "":
         return backend_plugin_bridge_invalid_v1("missing-provider-path")
     val request_bytes = backend_plugin_request_encode_v1(request)
+    if request_bytes.len() == 0:
+        return backend_plugin_bridge_invalid_v1("invalid-provider-request")
     val mir_bytes = text_to_bytes(serialize_mir_module(module))
     val response = unsafe(capabilities: [ffi]):
         spl_backend_plugin_run_v1(
@@ -205,6 +292,8 @@ fn backend_plugin_run_admitted_module_v1(
     if provider_handle <= 0:
         return backend_plugin_bridge_invalid_v1("missing-provider-handle")
     val request_bytes = backend_plugin_request_encode_v1(request)
+    if request_bytes.len() == 0:
+        return backend_plugin_bridge_invalid_v1("invalid-provider-request")
     val mir_bytes = text_to_bytes(serialize_mir_module(module))
     val response = unsafe(capabilities: [ffi]):
         spl_backend_plugin_run_v1(
@@ -218,6 +307,8 @@ fn backend_plugin_open_admitted_batch_v1(
     if provider_handle <= 0:
         return Err("missing-provider-handle")
     val request_bytes = backend_plugin_request_encode_v1(request)
+    if request_bytes.len() == 0:
+        return Err("invalid-provider-request")
     val handle = unsafe(capabilities: [ffi]):
         spl_backend_plugin_batch_open_v1(
             backend_plugin_provider_handle_encode_v1(provider_handle), request_bytes)
@@ -245,7 +336,7 @@ export BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1, BACKEND_PLUGIN_REQUEST_SIZE_V1
 export BACKEND_PLUGIN_PROVIDER_HANDLE_MAGIC_V1, BACKEND_PLUGIN_PROVIDER_HANDLE_SIZE_V1
 export BackendPluginBridgeEnvelopeV1
 export BackendPluginBatchBridgeV1
-export backend_plugin_request_encode_v1, backend_plugin_provider_handle_encode_v1
+export backend_plugin_request_encode_v1, backend_plugin_request_decode_v1, backend_plugin_provider_handle_encode_v1
 export backend_plugin_envelope_encode_v1, backend_plugin_envelope_decode_v1
 export backend_plugin_run_module_v1, backend_plugin_run_admitted_module_v1
 export backend_plugin_open_admitted_batch_v1
