@@ -1476,7 +1476,7 @@ impl<M: Module> CodegenBackend<M> {
         locally_defined_names: &HashSet<String>,
     ) -> BackendResult<HashMap<&'static str, cranelift_module::FuncId>> {
         let mut funcs = HashMap::new();
-        let call_conv = super::shared::platform_call_conv();
+        let call_conv = module.isa().default_call_conv();
 
         for spec in runtime_funcs_for_target(target) {
             if locally_defined_names.contains(spec.name) {
@@ -1500,7 +1500,7 @@ impl<M: Module> CodegenBackend<M> {
         referenced_names: &HashSet<String>,
         locally_defined_names: &HashSet<String>,
     ) -> BackendResult<()> {
-        let call_conv = super::shared::platform_call_conv();
+        let call_conv = self.module.isa().default_call_conv();
 
         for spec in runtime_funcs_for_target(&self.target) {
             if self.runtime_funcs.contains_key(spec.name) {
@@ -1578,7 +1578,7 @@ impl<M: Module> CodegenBackend<M> {
                 continue;
             }
 
-            let sig = super::shared::build_mir_signature(func);
+            let sig = super::shared::build_mir_signature(func, self.module.isa().default_call_conv());
 
             // Determine linkage and symbol name.
             //
@@ -1751,7 +1751,7 @@ impl<M: Module> CodegenBackend<M> {
                             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
                     let is_data_export = self.data_exports.contains(resolved) || self.data_exports.contains(&sanitized);
                     if !is_data_export && !looks_like_const_data {
-                        let call_conv = super::shared::platform_call_conv();
+                        let call_conv = self.module.isa().default_call_conv();
                         let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
                         sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                         sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
@@ -1912,7 +1912,7 @@ impl<M: Module> CodegenBackend<M> {
             return Ok(());
         }
 
-        let sig = build_mir_signature(func);
+        let sig = build_mir_signature(func, self.module.isa().default_call_conv());
         self.ctx.func.signature = sig;
         self.ctx.func.name = UserFuncName::user(0, func_id.as_u32());
 
@@ -2365,7 +2365,7 @@ impl<M: Module> CodegenBackend<M> {
                     continue;
                 }
                 // Create a stub with the correct signature
-                let sig = build_mir_signature(func);
+                let sig = build_mir_signature(func, self.module.isa().default_call_conv());
                 self.ctx.func.signature = sig.clone();
                 self.ctx.func.name = UserFuncName::user(0, func_id.as_u32());
 
@@ -2544,7 +2544,7 @@ impl<M: Module> CodegenBackend<M> {
         };
 
         // Declare the init function: fn() -> void
-        let call_conv = super::shared::platform_call_conv();
+        let call_conv = self.module.isa().default_call_conv();
         let sig = cranelift_codegen::ir::Signature::new(call_conv);
         // COFF WeakExternal definitions can resolve to the generated
         // /ALTERNATENAME empty fallback instead of this initializer, leaving
@@ -3689,6 +3689,49 @@ mod tests {
         assert!(!module_init_trace_enabled_for(None));
         assert!(!module_init_trace_enabled_for(Some("0")));
         assert!(module_init_trace_enabled_for(Some("1")));
+    }
+
+    #[test]
+    fn cross_target_signatures_follow_object_isa() {
+        use simple_common::target::TargetArch;
+        use object::Object;
+
+        // Exercise both directions on every host: the historical host-based
+        // helper necessarily gives the wrong ABI for one of these targets.
+        for (os, expected, format) in [
+            (TargetOS::Windows, CallConv::WindowsFastcall, object::BinaryFormat::Coff),
+            (TargetOS::Linux, CallConv::SystemV, object::BinaryFormat::Elf),
+        ] {
+            let target = Target::new(TargetArch::X86_64, os);
+            let settings = BackendSettings::aot_for_target(target);
+            let (_, isa) = create_isa_and_flags(&settings).expect("target ISA");
+            let builder = ObjectBuilder::new(isa, "cross_abi", cranelift_module::default_libcall_names())
+                .expect("object builder");
+            let mut backend = CodegenBackend::with_module_and_target(ObjectModule::new(builder), target)
+                .expect("target backend");
+            backend.set_module_prefix("cross_abi".to_string());
+
+            let mut mir = MirModule::new();
+            mir.functions.push(main_returning_zero());
+            backend.compile_all_functions(&mir).expect("compile MIR function");
+            let strings = HashMap::from([("message".to_string(), "cross-target global string".to_string())]);
+            backend.ensure_runtime_functions_declared(
+                &HashSet::from(["rt_string_new".to_string()]), &HashSet::new(),
+            ).expect("declare runtime string allocator");
+            backend.generate_module_init(&strings, &Default::default(), &Default::default(), &Default::default(), &[])
+                .expect("compile initializer calling runtime");
+            super::super::shared::create_body_stub(&mut backend.module, &mut backend.ctx, "outlined_body")
+                .expect("compile outlined body");
+
+            for (_, declaration) in backend.module.declarations().get_functions() {
+                assert_eq!(declaration.signature.call_conv, expected, "target {os:?}: {:?}", declaration.name);
+            }
+            assert_eq!(backend.module.declarations().get_function_decl(backend.runtime_funcs["rt_string_new"])
+                .signature.call_conv, expected);
+            let bytes = backend.module.finish().emit().expect("emit target object");
+            let object = object::File::parse(bytes.as_slice()).expect("parse target object");
+            assert_eq!(object.format(), format);
+        }
     }
 
     #[cfg(target_os = "windows")]

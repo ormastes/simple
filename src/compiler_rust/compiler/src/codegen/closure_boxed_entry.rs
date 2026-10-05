@@ -41,7 +41,7 @@ use crate::hir::TypeId;
 use crate::mir::MirFunction;
 
 use super::common_backend::{BackendError, BackendResult, CodegenBackend};
-use super::shared::{build_mir_signature, platform_call_conv};
+use super::shared::build_mir_signature;
 
 /// Suffix appended to an outlined lambda's name to form its boxed entry.
 pub const BOXED_ENTRY_SUFFIX: &str = "$boxed";
@@ -148,12 +148,12 @@ impl<M: Module> CodegenBackend<M> {
 
         // The outlined lambda's params are [ctx, p1..pn]; the boxed entry has
         // the same arity but every slot is a tagged RuntimeValue (i64).
-        let target_sig = build_mir_signature(lambda);
+        let target_sig = build_mir_signature(lambda, self.module.isa().default_call_conv());
         let skip = usize::from(has_ctx);
         let user_params: Vec<TypeId> = lambda.params.iter().skip(skip).map(|p| p.ty).collect();
         let ret_ty = lambda.return_type;
 
-        let mut sig = Signature::new(platform_call_conv());
+        let mut sig = Signature::new(self.module.isa().default_call_conv());
         sig.params.push(AbiParam::new(types::I64)); // closure handle
         for _ in &user_params {
             sig.params.push(AbiParam::new(types::I64));
@@ -458,8 +458,8 @@ impl<M: Module> CodegenBackend<M> {
             let Some(&target_id) = self.func_ids.get(&func.name) else {
                 continue;
             };
-            let target_sig = build_mir_signature(func);
-            let mut sig = Signature::new(platform_call_conv());
+            let target_sig = build_mir_signature(func, self.module.isa().default_call_conv());
+            let mut sig = Signature::new(self.module.isa().default_call_conv());
             sig.params.push(AbiParam::new(types::I64)); // receiver, dropped
             for p in &target_sig.params {
                 sig.params.push(AbiParam::new(p.value_type));

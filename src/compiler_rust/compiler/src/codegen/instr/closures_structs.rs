@@ -7,7 +7,6 @@ use cranelift_module::{FuncId, Linkage, Module};
 use crate::hir::TypeId;
 use crate::mir::VReg;
 
-use super::super::shared::platform_call_conv;
 use super::super::types_util::type_id_to_cranelift;
 use super::helpers::{
     adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, create_string_constant,
@@ -380,7 +379,7 @@ pub(crate) fn compile_closure_create<M: Module>(
                 std::borrow::Cow::Borrowed(resolved)
             };
             // Declare as import with a generic i64 → i64 signature (closure body)
-            let call_conv = platform_call_conv();
+            let call_conv = ctx.module.isa().default_call_conv();
             let mut sig = Signature::new(call_conv);
             sig.params.push(AbiParam::new(types::I64)); // closure pointer
             sig.returns.push(AbiParam::new(types::I64));
@@ -450,7 +449,7 @@ pub(crate) fn compile_indirect_call<M: Module>(
     let closure_ptr = get_vreg_or_default(ctx, builder, &callee);
     let fn_ptr = call_runtime_1(ctx, builder, "rt_closure_func_ptr", closure_ptr);
 
-    let mut sig = Signature::new(platform_call_conv());
+    let mut sig = Signature::new(ctx.module.isa().default_call_conv());
     sig.params.push(AbiParam::new(types::I64));
     for _ in param_types {
         sig.params.push(AbiParam::new(types::I64));
@@ -1435,7 +1434,7 @@ pub(crate) fn compile_method_call_static<M: Module>(
             let fid = resolve_unique_module_qualified_func(ctx, resolved.as_ref())
                 .or_else(|| ctx.func_ids.get(resolved.as_ref()).copied())
                 .unwrap_or_else(|| {
-                    let call_conv = platform_call_conv();
+                    let call_conv = ctx.module.isa().default_call_conv();
                     let mut sig = Signature::new(call_conv);
                     let param_count = if is_free_fn { args.len() } else { args.len() + 1 };
                     for _ in 0..param_count {
@@ -2009,7 +2008,7 @@ fn try_compile_builtin_method_call<M: Module>(
             let func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_string_to_int") {
                 fid
             } else {
-                let mut sig = cranelift_codegen::ir::Signature::new(platform_call_conv());
+                let mut sig = cranelift_codegen::ir::Signature::new(ctx.module.isa().default_call_conv());
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 let fid = ctx
@@ -2053,7 +2052,7 @@ fn try_compile_builtin_method_call<M: Module>(
             let func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_string_to_float") {
                 fid
             } else {
-                let mut sig = cranelift_codegen::ir::Signature::new(platform_call_conv());
+                let mut sig = cranelift_codegen::ir::Signature::new(ctx.module.isa().default_call_conv());
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 let fid = ctx
@@ -2069,7 +2068,7 @@ fn try_compile_builtin_method_call<M: Module>(
             let unbox_func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_value_as_float") {
                 fid
             } else {
-                let mut sig = cranelift_codegen::ir::Signature::new(platform_call_conv());
+                let mut sig = cranelift_codegen::ir::Signature::new(ctx.module.isa().default_call_conv());
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::F64));
                 let fid = ctx
@@ -2385,7 +2384,7 @@ fn try_compile_builtin_method_call<M: Module>(
             let func_id = if let Some(&fid) = ctx.runtime_funcs.get("rt_expect_or_trap") {
                 fid
             } else {
-                let call_conv = crate::codegen::shared::platform_call_conv();
+                let call_conv = ctx.module.isa().default_call_conv();
                 let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                 sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
@@ -2473,7 +2472,7 @@ fn try_compile_builtin_method_call<M: Module>(
             let fid = if let Some(&existing) = ctx.func_ids.get("rt_char_from_code") {
                 existing
             } else {
-                let mut sig = Signature::new(platform_call_conv());
+                let mut sig = Signature::new(ctx.module.isa().default_call_conv());
                 sig.params.push(AbiParam::new(types::I64));
                 sig.returns.push(AbiParam::new(types::I64));
                 match ctx.module.declare_function("rt_char_from_code", Linkage::Import, &sig) {
@@ -2658,7 +2657,7 @@ fn try_compile_builtin_method_call<M: Module>(
     let func_id = if let Some(&fid) = ctx.runtime_funcs.get(runtime_func) {
         fid
     } else {
-        let call_conv = crate::codegen::shared::platform_call_conv();
+        let call_conv = ctx.module.isa().default_call_conv();
         let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
         for _ in 0..(args.len() + 1) {
             sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
@@ -2847,7 +2846,7 @@ pub(crate) fn compile_method_call_virtual<M: Module>(
     let slot_offset = (vtable_slot as i32) * 8;
     let method_ptr = builder.ins().load(types::I64, MemFlags::new(), vtable_ptr, slot_offset);
 
-    let mut sig = Signature::new(platform_call_conv());
+    let mut sig = Signature::new(ctx.module.isa().default_call_conv());
     sig.params.push(AbiParam::new(types::I64));
     for param_ty in param_types {
         sig.params.push(AbiParam::new(type_id_to_cranelift(*param_ty)));
