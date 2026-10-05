@@ -5,6 +5,7 @@ use compiler.driver.cache.cold_hir_native_object_persistence_v1.{
 }
 use compiler.driver.cache.binary_object_cas.{binary_object_cas_read}
 use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_build.incremental.{FileFingerprint}
 use compiler.common.driver_core_types.{driver_core_compile_options_default}
 use compiler.driver.driver_aot_native_output.{
     driver_cold_hir_record_verified_object_v1,
@@ -26,12 +27,49 @@ fn main() -> i64:
         print "FAIL create root"
         return 1
     val path = root + "/module-a.o"
+    val text_path = root + "/text.txt"
+    if not file_write(text_path, "abc"):
+        print "FAIL create text fingerprint input"
+        return 20
+    val text_fp = FileFingerprint.from_file(text_path)
+    if text_fp == nil:
+        print "FAIL text fingerprint absent"
+        return 21
+    if text_fp.unwrap().content_hash != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad":
+        print "FAIL text fingerprint is not SHA-256"
+        return 22
+    if FileFingerprint.from_file(root + "/missing.txt") != nil:
+        print "FAIL missing fingerprint is not a cache miss"
+        return 26
+    if not file_write(text_path, "abd"):
+        print "FAIL replace same-size text"
+        return 27
+    val changed_fp = FileFingerprint.from_file(text_path)
+    if changed_fp == nil:
+        print "FAIL changed fingerprint absent"
+        return 28
+    if changed_fp.unwrap().content_hash.len() != 64 or
+            changed_fp.unwrap().content_hash == text_fp.unwrap().content_hash:
+        print "FAIL same-size edit did not invalidate fingerprint"
+        return 29
     val bytes: [u8] = [0x7F_u8, 0x45_u8, 0x4C_u8, 0x46_u8,
-        0x02_u8, 0x01_u8, 0x01_u8, 0x31_u8]
+        0x02_u8, 0x01_u8, 0x00_u8, 0xFF_u8]
     val digest = sha256_u8_hex(bytes)
-    if not file_write_bytes(path, bytes) or
-            not file_write(path + ".capsule-receipt",
-                "native-capsule-result-v1\nidentity-a\n{path}\n8\n{digest}\n"):
+    if not file_write_bytes(path, bytes):
+        print "FAIL create binary fingerprint input"
+        return 23
+    val object_fp = FileFingerprint.from_file(path)
+    if object_fp == nil:
+        print "FAIL binary fingerprint absent"
+        return 24
+    # Use the real capsule writer's fingerprint owner. A hand-written digest
+    # here previously hid its decimal rt_hash_text vs SHA-256 mismatch.
+    val receipt_digest = object_fp.unwrap().content_hash
+    if receipt_digest != digest:
+        print "FAIL binary fingerprint differs from independent byte digest"
+        return 25
+    if not file_write(path + ".capsule-receipt",
+                "native-capsule-result-v1\nidentity-a\n{path}\n8\n{receipt_digest}\n"):
         print "FAIL create object and capsule receipt"
         return 2
     val receipts = [ColdHirTypedReceiptV1(
