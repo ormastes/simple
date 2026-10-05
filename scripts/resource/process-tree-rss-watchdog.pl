@@ -14,6 +14,7 @@ use Config;
 use Fcntl qw(O_RDONLY O_NOFOLLOW);
 use Digest::SHA;
 use IPC::Open2 qw(open2);
+use Errno qw(ESRCH ENOENT);
 
 # EPIPE must be a caught observation failure even during pre-workload admission.
 my $workload_sigpipe = $SIG{PIPE} // 'DEFAULT';
@@ -586,7 +587,12 @@ sub read_proc_stat_record {
     my $record = '';
     while (1) {
         my $count = read($fh, my $chunk, 65537 - length($record));
-        defined($count) or die "cannot read /proc stat record: $!";
+        if (!defined($count)) {
+            # A task may exit after /proc/PID/stat was opened. Discard even
+            # a partial record; every other read error remains fatal.
+            return undef if $! == ESRCH || $! == ENOENT;
+            die "cannot read /proc stat record: $!";
+        }
         last unless $count;
         $record .= $chunk;
         length($record) <= 65536 or die "oversized /proc stat record";
@@ -623,6 +629,7 @@ sub snapshot {
             open(my $stat, '<', "/proc/$pid/stat") or next;  # exited since readdir
             my $line = read_proc_stat_record($stat);
             close($stat);
+            next unless defined($line);  # exited after open, before read
             next unless length($line);
             $line =~ /\A\Q$pid\E \(.*\) (\S) (\d+) (\d+) (\d+) (?:\S+ ){15}(\d+) \S+ (-?\d+) /s
                 or die "malformed /proc/$pid/stat";
