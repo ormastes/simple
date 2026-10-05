@@ -1,0 +1,62 @@
+# Image decode dispatch — maps a declared media type to its bounded decoder.
+#
+# Consumers (the browser image store) resolve the response media type to a
+# format key once, check that format's magic bytes, then decode under a
+# caller-supplied pixel budget. Every decoder enforces the budget from its
+# header before allocating pixel storage.
+
+use std.common.image.png_decode.{decode_png_to_argb_bounded}
+use std.common.image.jpeg_decode.{decode_jpeg_to_argb_bounded, jpeg_signature_valid}
+
+struct DecodedImage:
+    """Decoded image as a row-major ARGB pixel buffer."""
+    pixels: [u32]
+    width: i32
+    height: i32
+
+fn image_decoder_format(media_type: text) -> text:
+    """Format key ("png", "jpeg") for a lowercase media type with a decoder,
+    or "" when no decoder handles it."""
+    if media_type == "image/png":
+        return "png"
+    if media_type == "image/jpeg" or media_type == "image/jpg" or media_type == "image/pjpeg":
+        return "jpeg"
+    ""
+
+fn image_format_label(format: text) -> text:
+    if format == "png":
+        return "PNG"
+    if format == "jpeg":
+        return "JPEG"
+    "image"
+
+fn _png_signature_valid(bytes: [u8]) -> bool:
+    bytes.len() >= 8 and
+        bytes[0] == 137u8 and bytes[1] == 80u8 and
+        bytes[2] == 78u8 and bytes[3] == 71u8 and
+        bytes[4] == 13u8 and bytes[5] == 10u8 and
+        bytes[6] == 26u8 and bytes[7] == 10u8
+
+fn image_signature_valid(format: text, bytes: [u8]) -> bool:
+    """Magic-byte check for `format`; false for an unknown format."""
+    if format == "png":
+        return _png_signature_valid(bytes)
+    if format == "jpeg":
+        return jpeg_signature_valid(bytes)
+    false
+
+fn decode_image_to_argb_bounded(format: text, bytes: [u8], max_pixels: i64) -> Result<DecodedImage, text>:
+    """Decode `bytes` as `format` within `max_pixels`."""
+    if format == "png":
+        val png = decode_png_to_argb_bounded(bytes, max_pixels)
+        if val Err(reason) = png:
+            return Err(reason)
+        val image = png.unwrap()
+        return Ok(DecodedImage(pixels: image.pixels, width: image.width, height: image.height))
+    if format == "jpeg":
+        val jpeg = decode_jpeg_to_argb_bounded(bytes, max_pixels)
+        if val Err(reason) = jpeg:
+            return Err(reason)
+        val image = jpeg.unwrap()
+        return Ok(DecodedImage(pixels: image.pixels, width: image.width, height: image.height))
+    Err("image format is unsupported")
