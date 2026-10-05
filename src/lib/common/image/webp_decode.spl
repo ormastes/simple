@@ -1,0 +1,846 @@
+# WebP Decode — bounded RIFF/WebP container + lossless (VP8L) bitstream to
+# ARGB [u32].
+#
+# Input is untrusted network bytes: every container read is bounds-checked,
+# the VP8L header size is checked against `max_pixels` before any pixel
+# storage is allocated, entropy decoding is bounded by the pixel count, and
+# reading past the end of the bitstream is an error (never an endless run of
+# zero bits). Prefix-code groups are capped (WEBP_MAX_HTREE_GROUPS) so a tiny
+# stream cannot demand unbounded lookup tables.
+#
+# Supported: simple-format `VP8L` and extended-format (`VP8X`) files whose
+# image is `VP8L`; every VP8L transform (predictor, cross-color, subtract
+# green, color indexing with pixel bundling), color cache, meta prefix codes,
+# LZ77 backward references.
+# Rejected with an error: animation (ANIM/ANMF), lossy `VP8 ` frames (until a
+# VP8 decoder lands), unknown versions.
+
+struct WebpImage:
+    """Decoded WebP image as ARGB pixel buffer (row-major)."""
+    pixels: [u32]
+    width: i32
+    height: i32
+    lossless: bool
+
+val WEBP_MAX_PIXELS: i64 = 16777216
+val WEBP_MAX_HTREE_GROUPS: i64 = 4096
+
+# VP8L distance-code -> (dx, dy) plane table, packed as (dy << 4) | (8 - dx)
+# (RFC 9649 section 4.2.2; byte-identical to libwebp kCodeToPlane).
+val _VP8L_CODE_TO_PLANE: [i64] = [
+    0x18, 0x07, 0x17, 0x19, 0x28, 0x06, 0x27, 0x29, 0x16, 0x1a,
+    0x26, 0x2a, 0x38, 0x05, 0x37, 0x39, 0x15, 0x1b, 0x36, 0x3a,
+    0x25, 0x2b, 0x48, 0x04, 0x47, 0x49, 0x14, 0x1c, 0x35, 0x3b,
+    0x46, 0x4a, 0x24, 0x2c, 0x58, 0x45, 0x4b, 0x34, 0x3c, 0x03,
+    0x57, 0x59, 0x13, 0x1d, 0x56, 0x5a, 0x23, 0x2d, 0x44, 0x4c,
+    0x55, 0x5b, 0x33, 0x3d, 0x68, 0x02, 0x67, 0x69, 0x12, 0x1e,
+    0x66, 0x6a, 0x22, 0x2e, 0x54, 0x5c, 0x43, 0x4d, 0x65, 0x6b,
+    0x32, 0x3e, 0x78, 0x01, 0x77, 0x79, 0x53, 0x5d, 0x11, 0x1f,
+    0x64, 0x6c, 0x42, 0x4e, 0x76, 0x7a, 0x21, 0x2f, 0x75, 0x7b,
+    0x31, 0x3f, 0x63, 0x6d, 0x52, 0x5e, 0x00, 0x74, 0x7c, 0x41,
+    0x4f, 0x10, 0x20, 0x62, 0x6e, 0x30, 0x73, 0x7d, 0x51, 0x5f,
+    0x40, 0x72, 0x7e, 0x61, 0x6f, 0x50, 0x71, 0x7f, 0x60, 0x70
+]
+
+# Order in which code-length code lengths are transmitted.
+val _VP8L_CODE_LENGTH_ORDER: [i64] = [17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+val _VP8L_LOOK_BITS: i64 = 8
+
+fn webp_signature_valid(data: [u8]) -> bool:
+    """`RIFF` .... `WEBP`."""
+    data.len() >= 12 and
+        data[0] == 82u8 and data[1] == 73u8 and data[2] == 70u8 and data[3] == 70u8 and
+        data[8] == 87u8 and data[9] == 69u8 and data[10] == 66u8 and data[11] == 80u8
+
+fn decode_webp_to_argb(data: [u8]) -> Result<WebpImage, text>:
+    decode_webp_to_argb_bounded(data, WEBP_MAX_PIXELS)
+
+fn _webp_le32(data: [u8], pos: i64) -> i64:
+    data[pos].to_i64() | (data[pos + 1].to_i64() << 8) |
+        (data[pos + 2].to_i64() << 16) | (data[pos + 3].to_i64() << 24)
+
+fn _webp_le24(data: [u8], pos: i64) -> i64:
+    data[pos].to_i64() | (data[pos + 1].to_i64() << 8) | (data[pos + 2].to_i64() << 16)
+
+fn _webp_fourcc_is(data: [u8], pos: i64, a: i64, b: i64, c: i64, d: i64) -> bool:
+    data[pos].to_i64() == a and data[pos + 1].to_i64() == b and
+        data[pos + 2].to_i64() == c and data[pos + 3].to_i64() == d
+
+fn decode_webp_to_argb_bounded(data: [u8], max_pixels: i64) -> Result<WebpImage, text>:
+    """Strictly decode a bounded still WebP image. `max_pixels` (capped at
+    WEBP_MAX_PIXELS) is enforced from the bitstream header before
+    allocation."""
+    if max_pixels <= 0:
+        return Err("WebP pixel limit is invalid")
+    val pixel_limit = if max_pixels < WEBP_MAX_PIXELS: max_pixels else: WEBP_MAX_PIXELS
+    if data.len() < 20:
+        return Err("WebP data is truncated")
+    if not webp_signature_valid(data):
+        return Err("Invalid WebP signature")
+    val riff_size = _webp_le32(data, 4)
+    if riff_size < 12 or riff_size + 8 > data.len():
+        return Err("WebP RIFF size exceeds input")
+    val end = riff_size + 8
+    var pos: i64 = 12
+    var canvas_w: i64 = -1
+    var canvas_h: i64 = -1
+    var first = true
+    while pos + 8 <= end:
+        val size = _webp_le32(data, pos + 4)
+        val body = pos + 8
+        if size < 0 or size > end - body:
+            return Err("WebP chunk size exceeds input")
+        if first and _webp_fourcc_is(data, pos, 86, 80, 56, 88):
+            # VP8X: flags(1) reserved(3) canvas width-1 (3) canvas height-1 (3)
+            if size < 10:
+                return Err("WebP VP8X chunk is invalid")
+            if (data[body].to_i64() & 2) != 0:
+                return Err("animated WebP is unsupported")
+            canvas_w = _webp_le24(data, body + 4) + 1
+            canvas_h = _webp_le24(data, body + 7) + 1
+            if canvas_w * canvas_h > pixel_limit:
+                return Err("WebP dimensions exceed decoder limits")
+        elif _webp_fourcc_is(data, pos, 86, 80, 56, 76):
+            val decoded = decode_vp8l_bounded(data, body, size, pixel_limit)
+            if val Err(reason) = decoded:
+                return Err(reason)
+            val image = decoded.unwrap()
+            if canvas_w >= 0 and (image.width.to_i64() != canvas_w or image.height.to_i64() != canvas_h):
+                return Err("WebP canvas size does not match the image")
+            return Ok(image)
+        elif _webp_fourcc_is(data, pos, 86, 80, 56, 32):
+            return Err("WebP lossy (VP8) is unsupported")
+        elif _webp_fourcc_is(data, pos, 65, 78, 73, 77) or _webp_fourcc_is(data, pos, 65, 78, 77, 70):
+            return Err("animated WebP is unsupported")
+        elif first:
+            return Err("WebP first chunk is invalid")
+        first = false
+        pos = body + size + (size & 1)
+    Err("WebP has no image data")
+
+fn decode_vp8l_bounded(data: [u8], start: i64, length: i64, pixel_limit: i64) -> Result<WebpImage, text>:
+    """Decode one VP8L bitstream occupying data[start, start + length)."""
+    if length < 5:
+        return Err("WebP VP8L header is truncated")
+    if data[start] != 47u8:
+        return Err("WebP VP8L signature is invalid")
+    var dec = _vp8l_decoder_new(data, start + 1, start + length, pixel_limit)
+    val err = dec.run()
+    if err != "":
+        return Err(err)
+    Ok(WebpImage(pixels: dec.out_pixels, width: dec.width.to_i32(), height: dec.height.to_i32(), lossless: true))
+
+fn _vp8l_decoder_new(data: [u8], pos: i64, end: i64, pixel_limit: i64) -> _Vp8lDecoder:
+    _Vp8lDecoder(
+        data: data,
+        pos: pos,
+        end: end,
+        start: pos,
+        bitbuf: 0,
+        bitcnt: 0,
+        pixel_limit: pixel_limit,
+        width: 0,
+        height: 0,
+        error: "",
+        code_kind: [],
+        code_sym0: [],
+        code_sym1: [],
+        code_look_off: [],
+        code_canon_off: [],
+        code_sorted_off: [],
+        look: [],
+        canon_first: [],
+        canon_count: [],
+        canon_index: [],
+        sorted: [],
+        t_count: 0,
+        t_type: [0; 4],
+        t_bits: [0; 4],
+        t_xsize: [0; 4],
+        t_data: [],
+        out_pixels: []
+    )
+
+fn _vp8l_avg2(a: i64, b: i64) -> i64:
+    (((a ^ b) & 0xFEFEFEFE) >> 1) + (a & b)
+
+fn _vp8l_add_pixels(a: i64, b: i64) -> i64:
+    val ag = ((a & 0xFF00FF00) + (b & 0xFF00FF00)) & 0xFF00FF00
+    val rb = ((a & 0x00FF00FF) + (b & 0x00FF00FF)) & 0x00FF00FF
+    ag | rb
+
+fn _vp8l_clip255(v: i64) -> i64:
+    if v < 0:
+        return 0
+    if v > 255:
+        return 255
+    v
+
+fn _vp8l_abs(v: i64) -> i64:
+    if v < 0: 0 - v else: v
+
+fn _vp8l_select(left: i64, top: i64, top_left: i64) -> i64:
+    """RFC 9649 Select: the neighbour whose channels are closer to the
+    gradient estimate L + T - TL (Manhattan distance)."""
+    var p_left: i64 = 0
+    var p_top: i64 = 0
+    var sh: i64 = 0
+    while sh < 32:
+        val l = (left >> sh) & 255
+        val t = (top >> sh) & 255
+        val tl = (top_left >> sh) & 255
+        p_left = p_left + _vp8l_abs(t - tl)
+        p_top = p_top + _vp8l_abs(l - tl)
+        sh = sh + 8
+    if p_left < p_top: left else: top
+
+fn _vp8l_clamp_add_sub_full(a: i64, b: i64, c: i64) -> i64:
+    var out: i64 = 0
+    var sh: i64 = 0
+    while sh < 32:
+        val v = _vp8l_clip255(((a >> sh) & 255) + ((b >> sh) & 255) - ((c >> sh) & 255))
+        out = out | (v << sh)
+        sh = sh + 8
+    out
+
+fn _vp8l_clamp_add_sub_half(a: i64, b: i64) -> i64:
+    var out: i64 = 0
+    var sh: i64 = 0
+    while sh < 32:
+        val x = (a >> sh) & 255
+        val y = (b >> sh) & 255
+        # C integer division truncates toward zero.
+        val d = x - y
+        val half = if d < 0: 0 - ((0 - d) / 2) else: d / 2
+        out = out | (_vp8l_clip255(x + half) << sh)
+        sh = sh + 8
+    out
+
+fn _vp8l_predict(mode: i64, left: i64, top: i64, top_right: i64, top_left: i64) -> i64:
+    if mode == 1:
+        return left
+    if mode == 2:
+        return top
+    if mode == 3:
+        return top_right
+    if mode == 4:
+        return top_left
+    if mode == 5:
+        return _vp8l_avg2(_vp8l_avg2(left, top_right), top)
+    if mode == 6:
+        return _vp8l_avg2(left, top_left)
+    if mode == 7:
+        return _vp8l_avg2(left, top)
+    if mode == 8:
+        return _vp8l_avg2(top_left, top)
+    if mode == 9:
+        return _vp8l_avg2(top, top_right)
+    if mode == 10:
+        return _vp8l_avg2(_vp8l_avg2(left, top_left), _vp8l_avg2(top, top_right))
+    if mode == 11:
+        return _vp8l_select(left, top, top_left)
+    if mode == 12:
+        return _vp8l_clamp_add_sub_full(left, top, top_left)
+    if mode == 13:
+        return _vp8l_clamp_add_sub_half(_vp8l_avg2(left, top), top_left)
+    # Mode 0, and the padding modes 14/15 (libwebp maps them to mode 0).
+    0xFF000000
+
+fn _vp8l_sign8(v: i64) -> i64:
+    if v >= 128: v - 256 else: v
+
+fn _vp8l_subsample(size: i64, bits: i64) -> i64:
+    (size + (1 << bits) - 1) >> bits
+
+class _Vp8lDecoder:
+    """VP8L decoder state. Prefix codes live in flat arrays indexed by a
+    code number (5 per group: green, red, blue, alpha, distance)."""
+    data: [u8]
+    pos: i64
+    end: i64
+    start: i64
+    bitbuf: i64
+    bitcnt: i64
+    pixel_limit: i64
+    width: i64
+    height: i64
+    error: text
+    # kind 0: single symbol (0 bits), 1: two symbols (1 bit), 2: table.
+    code_kind: [i64]
+    code_sym0: [i64]
+    code_sym1: [i64]
+    code_look_off: [i64]
+    code_canon_off: [i64]
+    code_sorted_off: [i64]
+    look: [i64]
+    canon_first: [i64]
+    canon_count: [i64]
+    canon_index: [i64]
+    sorted: [i64]
+    t_count: i64
+    t_type: [i64]
+    t_bits: [i64]
+    t_xsize: [i64]
+    t_data: [[i64]]
+    out_pixels: [u32]
+
+    # ------------------------------------------------------------------
+    # LSB-first bit reader
+    # ------------------------------------------------------------------
+
+    me fill():
+        while self.bitcnt <= 48:
+            var b: i64 = 0
+            if self.pos < self.end:
+                b = self.data[self.pos].to_i64()
+            self.pos = self.pos + 1
+            self.bitbuf = self.bitbuf | (b << self.bitcnt)
+            self.bitcnt = self.bitcnt + 8
+
+    me read(n: i64) -> i64:
+        if n == 0:
+            return 0
+        if self.bitcnt < n:
+            self.fill()
+        val v = self.bitbuf & ((1 << n) - 1)
+        self.bitbuf = self.bitbuf >> n
+        self.bitcnt = self.bitcnt - n
+        v
+
+    fn overran() -> bool:
+        """True once more bits were consumed than the stream holds."""
+        (self.pos - self.start) * 8 - self.bitcnt > (self.end - self.start) * 8
+
+    # ------------------------------------------------------------------
+    # Prefix codes
+    # ------------------------------------------------------------------
+
+    me build_code(lengths: [i64], alphabet: i64) -> text:
+        """Append one canonical prefix code built from `lengths`."""
+        var count: [i64] = [0; 16]
+        var nonzero: i64 = 0
+        var only: i64 = 0
+        var s: i64 = 0
+        while s < alphabet:
+            val l = lengths[s]
+            if l > 0:
+                if l > 15:
+                    return "WebP prefix code length is invalid"
+                count[l] = count[l] + 1
+                nonzero = nonzero + 1
+                only = s
+            s = s + 1
+        self.code_canon_off.push(self.canon_first.len())
+        self.code_sorted_off.push(self.sorted.len())
+        self.code_look_off.push(self.look.len())
+        if nonzero == 0:
+            return "WebP prefix code is empty"
+        if nonzero == 1:
+            self.code_kind.push(0)
+            self.code_sym0.push(only)
+            self.code_sym1.push(0)
+            return ""
+        var left: i64 = 1
+        var l: i64 = 1
+        while l <= 15:
+            left = (left << 1) - count[l]
+            if left < 0:
+                return "WebP prefix code is oversubscribed"
+            l = l + 1
+        if left != 0:
+            return "WebP prefix code is incomplete"
+        # Canonical first code / sorted-symbol index per length.
+        var first: [i64] = [0; 16]
+        var index: [i64] = [0; 16]
+        var code: i64 = 0
+        var idx: i64 = 0
+        l = 1
+        while l <= 15:
+            code = (code + count[l - 1]) << 1
+            first[l] = code
+            index[l] = idx
+            idx = idx + count[l]
+            l = l + 1
+        var next: [i64] = [0; 16]
+        l = 1
+        while l <= 15:
+            next[l] = index[l]
+            l = l + 1
+        val sorted_base = self.sorted.len()
+        var k: i64 = 0
+        while k < nonzero:
+            self.sorted.push(0)
+            k = k + 1
+        s = 0
+        while s < alphabet:
+            val ls = lengths[s]
+            if ls > 0:
+                self.sorted[sorted_base + next[ls]] = s
+                next[ls] = next[ls] + 1
+            s = s + 1
+        l = 0
+        while l < 16:
+            self.canon_first.push(first[l])
+            self.canon_count.push(count[l])
+            self.canon_index.push(index[l])
+            l = l + 1
+        # 8-bit lookup indexed by the next stream bits (LSB-first), so a
+        # code's bits appear reversed in the index.
+        val look_base = self.look.len()
+        var f: i64 = 0
+        while f < 256:
+            self.look.push(-1)
+            f = f + 1
+        l = 1
+        while l <= _VP8L_LOOK_BITS:
+            var j: i64 = 0
+            while j < count[l]:
+                val c = first[l] + j
+                var rev: i64 = 0
+                var b: i64 = 0
+                while b < l:
+                    rev = (rev << 1) | ((c >> b) & 1)
+                    b = b + 1
+                val sym = self.sorted[sorted_base + index[l] + j]
+                var fill: i64 = rev
+                while fill < 256:
+                    self.look[look_base + fill] = (l << 16) | sym
+                    fill = fill + (1 << l)
+                j = j + 1
+            l = l + 1
+        self.code_kind.push(2)
+        self.code_sym0.push(0)
+        self.code_sym1.push(0)
+        ""
+
+    me read_symbol(code: i64) -> i64:
+        val kind = self.code_kind[code]
+        if kind == 0:
+            return self.code_sym0[code]
+        if self.bitcnt < 16:
+            self.fill()
+        if kind == 1:
+            return if self.read(1) == 0: self.code_sym0[code] else: self.code_sym1[code]
+        val e = self.look[self.code_look_off[code] + (self.bitbuf & 255)]
+        if e >= 0:
+            val n = e >> 16
+            self.bitbuf = self.bitbuf >> n
+            self.bitcnt = self.bitcnt - n
+            return e & 0xFFFF
+        val canon = self.code_canon_off[code]
+        var acc: i64 = 0
+        var l: i64 = 1
+        while l <= 15:
+            acc = (acc << 1) | ((self.bitbuf >> (l - 1)) & 1)
+            val rel = acc - self.canon_first[canon + l]
+            if rel >= 0 and rel < self.canon_count[canon + l]:
+                self.bitbuf = self.bitbuf >> l
+                self.bitcnt = self.bitcnt - l
+                return self.sorted[self.code_sorted_off[code] + self.canon_index[canon + l] + rel]
+            l = l + 1
+        -1
+
+    me read_code(alphabet: i64) -> text:
+        """Read one prefix code (simple or normal form) and append it."""
+        if self.read(1) == 1:
+            val num = self.read(1) + 1
+            val first_bits = if self.read(1) == 1: 8 else: 1
+            val s0 = self.read(first_bits)
+            val s1 = if num == 2: self.read(8) else: s0
+            if s0 >= alphabet or s1 >= alphabet:
+                return "WebP prefix code symbol is out of range"
+            self.code_canon_off.push(self.canon_first.len())
+            self.code_sorted_off.push(self.sorted.len())
+            self.code_look_off.push(self.look.len())
+            if num == 1 or s0 == s1:
+                self.code_kind.push(0)
+                self.code_sym0.push(s0)
+                self.code_sym1.push(0)
+            else:
+                # Two 1-bit codes, assigned in symbol order (canonical).
+                self.code_kind.push(1)
+                self.code_sym0.push(if s0 < s1: s0 else: s1)
+                self.code_sym1.push(if s0 < s1: s1 else: s0)
+            return ""
+        # Normal form: a code-length code, then run-length coded lengths.
+        var cl_lengths: [i64] = [0; 19]
+        val num_cl = self.read(4) + 4
+        var i: i64 = 0
+        while i < num_cl:
+            cl_lengths[_VP8L_CODE_LENGTH_ORDER[i]] = self.read(3)
+            i = i + 1
+        val cl_code = self.code_kind.len()
+        val err = self.build_code(cl_lengths, 19)
+        if err != "":
+            return err
+        var lengths: [i64] = [0; alphabet]
+        var max_symbol = alphabet
+        if self.read(1) == 1:
+            val length_nbits = 2 + 2 * self.read(3)
+            max_symbol = 2 + self.read(length_nbits)
+            if max_symbol > alphabet:
+                return "WebP prefix code length count is invalid"
+        var symbol: i64 = 0
+        var prev_len: i64 = 8
+        while symbol < alphabet:
+            if max_symbol == 0:
+                break
+            max_symbol = max_symbol - 1
+            val cl = self.read_symbol(cl_code)
+            if cl < 0:
+                return "WebP prefix code is invalid"
+            if cl < 16:
+                lengths[symbol] = cl
+                symbol = symbol + 1
+                if cl != 0:
+                    prev_len = cl
+            else:
+                val extra = if cl == 16: 2 elif cl == 17: 3 else: 7
+                val offset = if cl == 18: 11 else: 3
+                val repeat = self.read(extra) + offset
+                if symbol + repeat > alphabet:
+                    return "WebP prefix code lengths overflow the alphabet"
+                val v = if cl == 16: prev_len else: 0
+                var r: i64 = 0
+                while r < repeat:
+                    lengths[symbol] = v
+                    symbol = symbol + 1
+                    r = r + 1
+            if self.overran():
+                return "WebP VP8L data is truncated"
+        # Drop the temporary code-length code so code numbers stay 5/group.
+        self.drop_last_code()
+        self.build_code(lengths, alphabet)
+
+    me drop_last_code():
+        """Remove the most recently appended code (the code-length code)."""
+        val n = self.code_kind.len() - 1
+        val look_off = self.code_look_off[n]
+        val canon_off = self.code_canon_off[n]
+        val sorted_off = self.code_sorted_off[n]
+        if self.code_kind[n] == 2:
+            self.look = self.look.slice(0, look_off)
+            self.canon_first = self.canon_first.slice(0, canon_off)
+            self.canon_count = self.canon_count.slice(0, canon_off)
+            self.canon_index = self.canon_index.slice(0, canon_off)
+            self.sorted = self.sorted.slice(0, sorted_off)
+        self.code_kind = self.code_kind.slice(0, n)
+        self.code_sym0 = self.code_sym0.slice(0, n)
+        self.code_sym1 = self.code_sym1.slice(0, n)
+        self.code_look_off = self.code_look_off.slice(0, n)
+        self.code_canon_off = self.code_canon_off.slice(0, n)
+        self.code_sorted_off = self.code_sorted_off.slice(0, n)
+
+    # ------------------------------------------------------------------
+    # Image streams
+    # ------------------------------------------------------------------
+
+    me run() -> text:
+        val w = self.read(14) + 1
+        val h = self.read(14) + 1
+        val _alpha_hint = self.read(1)
+        val version = self.read(3)
+        if version != 0:
+            return "WebP VP8L version is unsupported"
+        if w * h > self.pixel_limit:
+            return "WebP dimensions exceed decoder limits"
+        self.width = w
+        self.height = h
+        # Transforms (each type at most once), recorded in stream order.
+        var xsize = w
+        var seen: [i64] = [0; 4]
+        while self.read(1) == 1:
+            val ttype = self.read(2)
+            if seen[ttype] != 0:
+                return "WebP VP8L transform is repeated"
+            seen[ttype] = 1
+            if self.t_count >= 4:
+                return "WebP VP8L has too many transforms"
+            val ti = self.t_count
+            self.t_type[ti] = ttype
+            self.t_xsize[ti] = xsize
+            if ttype == 0 or ttype == 1:
+                val bits = self.read(3) + 2
+                self.t_bits[ti] = bits
+                val sub = self.decode_stream(_vp8l_subsample(xsize, bits), _vp8l_subsample(h, bits), false)
+                if self.error != "":
+                    return self.error
+                self.t_data.push(sub)
+            elif ttype == 3:
+                val table_size = self.read(8) + 1
+                val bits = if table_size > 16: 0 elif table_size > 4: 1 elif table_size > 2: 2 else: 3
+                self.t_bits[ti] = bits
+                var table = self.decode_stream(table_size, 1, false)
+                if self.error != "":
+                    return self.error
+                # Delta-coded palette; entries past the table are transparent black.
+                var k: i64 = 1
+                while k < table_size:
+                    table[k] = _vp8l_add_pixels(table[k], table[k - 1])
+                    k = k + 1
+                while table.len() < 256:
+                    table.push(0)
+                self.t_data.push(table)
+                xsize = _vp8l_subsample(xsize, bits)
+            else:
+                self.t_bits[ti] = 0
+                self.t_data.push([])
+            self.t_count = self.t_count + 1
+        var px = self.decode_stream(xsize, h, true)
+        if self.error != "":
+            return self.error
+        # Inverse transforms in reverse order.
+        var t = self.t_count - 1
+        while t >= 0:
+            px = self.inverse_transform(t, px)
+            t = t - 1
+        var out: [u32] = [0u32; w * h]
+        var i: i64 = 0
+        while i < w * h:
+            out[i] = px[i].to_u32()
+            i = i + 1
+        self.out_pixels = out
+        ""
+
+    me decode_stream(xsize: i64, ysize: i64, level0: bool) -> [i64]:
+        """Entropy-coded image of xsize x ysize ARGB pixels; on failure sets
+        `error` and returns []."""
+        var cache_bits: i64 = 0
+        if self.read(1) == 1:
+            cache_bits = self.read(4)
+            if cache_bits < 1 or cache_bits > 11:
+                self.error = "WebP color cache size is invalid"
+                return []
+        var meta_bits: i64 = 0
+        var meta: [i64] = []
+        var meta_w: i64 = 0
+        var groups: i64 = 1
+        if level0 and self.read(1) == 1:
+            meta_bits = self.read(3) + 2
+            meta_w = _vp8l_subsample(xsize, meta_bits)
+            val entropy = self.decode_stream(meta_w, _vp8l_subsample(ysize, meta_bits), false)
+            if self.error != "":
+                return []
+            meta = [0; entropy.len()]
+            var i: i64 = 0
+            var max_group: i64 = 0
+            while i < entropy.len():
+                val g = (entropy[i] >> 8) & 0xFFFF
+                meta[i] = g
+                if g > max_group:
+                    max_group = g
+                i = i + 1
+            groups = max_group + 1
+            if groups > WEBP_MAX_HTREE_GROUPS:
+                self.error = "WebP has too many prefix code groups"
+                return []
+        val cache_size = if cache_bits > 0: 1 << cache_bits else: 0
+        val green_alphabet = 256 + 24 + cache_size
+        val code_base = self.code_kind.len()
+        var g: i64 = 0
+        while g < groups:
+            var e = self.read_code(green_alphabet)
+            if e == "":
+                e = self.read_code(256)
+            if e == "":
+                e = self.read_code(256)
+            if e == "":
+                e = self.read_code(256)
+            if e == "":
+                e = self.read_code(40)
+            if e == "" and self.overran():
+                e = "WebP VP8L data is truncated"
+            if e != "":
+                self.error = e
+                return []
+            g = g + 1
+        val total = xsize * ysize
+        var px: [i64] = [0; total]
+        var cache: [i64] = [0; if cache_size > 0: cache_size else: 1]
+        val cache_shift = 32 - cache_bits
+        val meta_mask = (1 << meta_bits) - 1
+        var pos: i64 = 0
+        var code = code_base
+        var last_cached: i64 = 0
+        var after_copy = false
+        while pos < total:
+            val x = pos % xsize
+            val y = pos / xsize
+            # Re-select the group at every block boundary and after a
+            # backward copy (which can land mid-block).
+            if meta_bits > 0 and ((x & meta_mask) == 0 or after_copy):
+                code = code_base + 5 * meta[(y >> meta_bits) * meta_w + (x >> meta_bits)]
+            after_copy = false
+            val s = self.read_symbol(code)
+            if s < 0:
+                self.error = "WebP prefix code is invalid"
+                return []
+            if s < 256:
+                val red = self.read_symbol(code + 1)
+                val blue = self.read_symbol(code + 2)
+                val alpha = self.read_symbol(code + 3)
+                if red < 0 or blue < 0 or alpha < 0:
+                    self.error = "WebP prefix code is invalid"
+                    return []
+                px[pos] = (alpha << 24) | (red << 16) | (s << 8) | blue
+                pos = pos + 1
+            elif s < 280:
+                val length = self.read_prefix_value(s - 256)
+                val dsym = self.read_symbol(code + 4)
+                if dsym < 0:
+                    self.error = "WebP prefix code is invalid"
+                    return []
+                val dcode = self.read_prefix_value(dsym)
+                var dist: i64 = 0
+                if dcode > 120:
+                    dist = dcode - 120
+                else:
+                    val plane = _VP8L_CODE_TO_PLANE[dcode - 1]
+                    dist = (plane >> 4) * xsize + (8 - (plane & 15))
+                    if dist < 1:
+                        dist = 1
+                if dist > pos or length > total - pos:
+                    self.error = "WebP backward reference is out of range"
+                    return []
+                var k: i64 = 0
+                while k < length:
+                    px[pos] = px[pos - dist]
+                    pos = pos + 1
+                    k = k + 1
+                after_copy = true
+            else:
+                val ci = s - 280
+                if ci >= cache_size:
+                    self.error = "WebP color cache index is out of range"
+                    return []
+                # Every decoded pixel enters the cache in order; inserting
+                # lazily up to `pos` right before a lookup is equivalent.
+                while last_cached < pos:
+                    val v = px[last_cached]
+                    cache[((0x1E35A7BD * v) & 0xFFFFFFFF) >> cache_shift] = v
+                    last_cached = last_cached + 1
+                px[pos] = cache[ci]
+                pos = pos + 1
+            if x == 0 and self.overran():
+                self.error = "WebP VP8L data is truncated"
+                return []
+        if self.overran():
+            self.error = "WebP VP8L data is truncated"
+            return []
+        # Discard this stream's codes; later streams index from their own base.
+        self.truncate_codes(code_base)
+        px
+
+    me truncate_codes(n: i64):
+        if n >= self.code_kind.len():
+            return
+        self.look = self.look.slice(0, self.first_look_at(n))
+        val canon = self.first_canon_at(n)
+        self.canon_first = self.canon_first.slice(0, canon)
+        self.canon_count = self.canon_count.slice(0, canon)
+        self.canon_index = self.canon_index.slice(0, canon)
+        self.sorted = self.sorted.slice(0, self.first_sorted_at(n))
+        self.code_kind = self.code_kind.slice(0, n)
+        self.code_sym0 = self.code_sym0.slice(0, n)
+        self.code_sym1 = self.code_sym1.slice(0, n)
+        self.code_look_off = self.code_look_off.slice(0, n)
+        self.code_canon_off = self.code_canon_off.slice(0, n)
+        self.code_sorted_off = self.code_sorted_off.slice(0, n)
+
+    fn first_look_at(n: i64) -> i64:
+        """Offset in `look` where code n's storage begins (table codes only
+        own storage; others record the running end)."""
+        self.code_look_off[n]
+
+    fn first_canon_at(n: i64) -> i64:
+        self.code_canon_off[n]
+
+    fn first_sorted_at(n: i64) -> i64:
+        self.code_sorted_off[n]
+
+    me read_prefix_value(prefix: i64) -> i64:
+        """LZ77 length / distance prefix coding (RFC 9649 section 5.2.2)."""
+        if prefix < 4:
+            return prefix + 1
+        val extra = (prefix - 2) >> 1
+        val offset = (2 + (prefix & 1)) << extra
+        offset + self.read(extra) + 1
+
+    # ------------------------------------------------------------------
+    # Inverse transforms
+    # ------------------------------------------------------------------
+
+    fn inverse_transform(t: i64, px_in: [i64]) -> [i64]:
+        val ttype = self.t_type[t]
+        val xsize = self.t_xsize[t]
+        val bits = self.t_bits[t]
+        val data = self.t_data[t]
+        val h = self.height
+        var px = px_in
+        if ttype == 2:
+            var i: i64 = 0
+            while i < px.len():
+                val v = px[i]
+                val green = (v >> 8) & 255
+                val red = (((v >> 16) & 255) + green) & 255
+                val blue = ((v & 255) + green) & 255
+                px[i] = (v & 0xFF00FF00) | (red << 16) | blue
+                i = i + 1
+            return px
+        if ttype == 0:
+            val tw = _vp8l_subsample(xsize, bits)
+            var y: i64 = 0
+            while y < h:
+                var x: i64 = 0
+                while x < xsize:
+                    val p = y * xsize + x
+                    var pred: i64 = 0
+                    if y == 0:
+                        pred = if x == 0: 0xFF000000 else: px[p - 1]
+                    elif x == 0:
+                        pred = px[p - xsize]
+                    else:
+                        val mode = (data[(y >> bits) * tw + (x >> bits)] >> 8) & 15
+                        # Top-right of the last column is the first pixel of
+                        # the current row (flat index p - xsize + 1).
+                        pred = _vp8l_predict(mode, px[p - 1], px[p - xsize], px[p - xsize + 1], px[p - xsize - 1])
+                    px[p] = _vp8l_add_pixels(px[p], pred)
+                    x = x + 1
+                y = y + 1
+            return px
+        if ttype == 1:
+            val tw = _vp8l_subsample(xsize, bits)
+            var y: i64 = 0
+            while y < h:
+                var x: i64 = 0
+                while x < xsize:
+                    val p = y * xsize + x
+                    val m = data[(y >> bits) * tw + (x >> bits)]
+                    val green_to_red = _vp8l_sign8(m & 255)
+                    val green_to_blue = _vp8l_sign8((m >> 8) & 255)
+                    val red_to_blue = _vp8l_sign8((m >> 16) & 255)
+                    val v = px[p]
+                    val green = _vp8l_sign8((v >> 8) & 255)
+                    val red = (((v >> 16) & 255) + ((green_to_red * green) >> 5)) & 255
+                    val blue = ((v & 255) + ((green_to_blue * green) >> 5) + ((red_to_blue * _vp8l_sign8(red)) >> 5)) & 255
+                    px[p] = (v & 0xFF00FF00) | (red << 16) | blue
+                    x = x + 1
+                y = y + 1
+            return px
+        # Color indexing: expand bundled indices through the palette.
+        val packed_w = _vp8l_subsample(xsize, bits)
+        val bpp = 8 >> bits
+        val mask = (1 << bpp) - 1
+        val xmask = (1 << bits) - 1
+        var out: [i64] = [0; xsize * h]
+        var y: i64 = 0
+        while y < h:
+            var x: i64 = 0
+            while x < xsize:
+                val packed = (px[y * packed_w + (x >> bits)] >> 8) & 255
+                val idx = (packed >> ((x & xmask) * bpp)) & mask
+                out[y * xsize + x] = data[idx]
+                x = x + 1
+            y = y + 1
+        out
