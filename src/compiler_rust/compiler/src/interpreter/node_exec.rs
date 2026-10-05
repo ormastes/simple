@@ -730,14 +730,7 @@ fn try_assign_module_global_index(
             Value::Array(arc) => {
                 let idx = index_val.as_int()? as usize;
                 let arr = Arc::make_mut(arc);
-                if idx < arr.len() {
-                    arr[idx] = value;
-                } else {
-                    while arr.len() < idx {
-                        arr.push(Value::Nil);
-                    }
-                    arr.push(value);
-                }
+                arr.assign_index(idx, value);
                 Ok(None)
             }
             Value::Dict(dict) => {
@@ -1429,14 +1422,7 @@ pub(crate) fn exec_assignment(
                         Value::Array(arc) => {
                             if let Some(arr) = Arc::get_mut(arc) {
                                 let idx = index_val.as_int()? as usize;
-                                if idx < arr.len() {
-                                    arr[idx] = value;
-                                } else {
-                                    while arr.len() < idx {
-                                        arr.push(Value::Nil);
-                                    }
-                                    arr.push(value);
-                                }
+                                arr.assign_index(idx, value);
                                 return Ok(Control::Next);
                             }
                         }
@@ -1462,15 +1448,7 @@ pub(crate) fn exec_assignment(
                     Value::Array(mut arc) => {
                         let arr = Arc::make_mut(&mut arc);
                         let idx = index_val.as_int()? as usize;
-                        if idx < arr.len() {
-                            arr[idx] = value;
-                        } else {
-                            // Extend array if index is at the end
-                            while arr.len() < idx {
-                                arr.push(Value::Nil);
-                            }
-                            arr.push(value);
-                        }
+                        arr.assign_index(idx, value);
                         Value::Array(arc)
                     }
                     // `rt_bytes_alloc` / `rt_byte_array_new` hand back a packed
@@ -1627,14 +1605,7 @@ pub(crate) fn exec_assignment(
                                     Value::Array(arc) => {
                                         if let Some(arr) = Arc::get_mut(arc) {
                                             let idx = index_val.as_int()? as usize;
-                                            if idx < arr.len() {
-                                                arr[idx] = value;
-                                            } else {
-                                                while arr.len() < idx {
-                                                    arr.push(Value::Nil);
-                                                }
-                                                arr.push(value);
-                                            }
+                                            arr.assign_index(idx, value);
                                             return Ok(Control::Next);
                                         }
                                     }
@@ -1691,14 +1662,7 @@ pub(crate) fn exec_assignment(
                                             CompileError::semantic("array index must be an integer".to_string())
                                         })?;
                                         let arr = Arc::make_mut(arc);
-                                        if idx < arr.len() {
-                                            arr[idx] = value.clone();
-                                        } else {
-                                            while arr.len() < idx {
-                                                arr.push(Value::Nil);
-                                            }
-                                            arr.push(value.clone());
-                                        }
+                                        arr.assign_index(idx, value.clone());
                                         Ok(())
                                     }
                                     // A buffer handed back by a runtime allocator
@@ -1819,14 +1783,7 @@ pub(crate) fn exec_assignment(
                                     Value::Array(mut arc) => {
                                         let arr = Arc::make_mut(&mut arc);
                                         let idx = index_val.as_int()? as usize;
-                                        if idx < arr.len() {
-                                            arr[idx] = value;
-                                        } else {
-                                            while arr.len() < idx {
-                                                arr.push(Value::Nil);
-                                            }
-                                            arr.push(value);
-                                        }
+                                        arr.assign_index(idx, value);
                                         Value::Array(arc)
                                     }
                                     // Same runtime-allocator buffer case as the
@@ -1979,14 +1936,7 @@ pub(crate) fn exec_assignment(
                             Value::Array(arc) => {
                                 let arr = Arc::make_mut(arc);
                                 let idx = index_val.as_int()? as usize;
-                                if idx < arr.len() {
-                                    arr[idx] = value;
-                                } else {
-                                    while arr.len() < idx {
-                                        arr.push(Value::Nil);
-                                    }
-                                    arr.push(value);
-                                }
+                                arr.assign_index(idx, value);
                             }
                             // Same runtime-allocator buffer case as the
                             // ClassInstance path above (`rt_byte_array_new` /

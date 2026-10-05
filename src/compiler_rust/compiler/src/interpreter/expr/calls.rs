@@ -420,7 +420,7 @@ pub(super) fn eval_call_expr(
                         let len = arr.len() as i64;
                         let real_idx = if idx < 0 { len + idx } else { idx };
                         if real_idx >= 0 && real_idx < len {
-                            let elem = arr[real_idx as usize].clone();
+                            let elem = arr.get_value(real_idx as usize).expect("index checked against len");
                             if let Value::Object { class, fields } = elem {
                                 if let Some((result, updated_elem)) = super::super::find_and_exec_method_with_self(
                                     method,
