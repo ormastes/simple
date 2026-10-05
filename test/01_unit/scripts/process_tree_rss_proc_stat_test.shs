@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+perl - "$root/scripts/resource/process-tree-rss-watchdog.pl" <<'PERL'
+use strict;
+use warnings;
+open(my $guard, '<', $ARGV[0]) or die $!;
+my $source=do { local $/; <$guard> };
+$source =~ /(^sub parse_proc_stat_record \{.*?^\})/ms or die "parser not found";
+eval $1; die $@ if $@;
+open(my $stat, '<', "/proc/$$/stat") or die $!;
+my $live=do { local $/; <$stat> };
+my $record=parse_proc_stat_record($$, $live, 4);
+defined($record) && $record->{rss} > 0 && $record->{identity} =~ /^t[0-9]+$/ or die "live process lost";
+# Exact bytes retained from the failed canonical seed build.
+my $dead=pack('H*', '313232333720286275696c645f7363726970745f62752920582030202d31202d312030202d3120343232373038342031313720302030203020302030203020302032302030203020302033303636393333203020302030203020302030203020302030203020302030203120302030203137203420302030203020302030203020302030203020302030203020300a');
+!defined(parse_proc_stat_record(12237,$dead,4)) or die "dead task retained";
+my $newline=$live; $newline =~ s/\(.*\) /("task\nwith ) parentheses") /s;
+my $with_newline=parse_proc_stat_record($$,$newline,4);
+$with_newline->{identity} eq $record->{identity} or die "multiline comm misparsed";
+my $negative=$live; $negative =~ s/(\) \S \d+) \d+ /$1 -1 /;
+eval { parse_proc_stat_record($$,$negative,4) }; $@ =~ /malformed/ or die "negative live group admitted";
+eval { parse_proc_stat_record($$, "malformed stat",4) }; $@ =~ /malformed/ or die "malformed record admitted";
+my $memory_dead=$live; $memory_dead =~ s/(\) )\S /${1}X /;
+eval { parse_proc_stat_record($$,$memory_dead,4) }; $@ =~ /malformed/ or die "dead record with RSS admitted";
+print "PASS: live stat, dead exit race, multiline comm, negative live group, malformed record, dead RSS rejection\n";
+PERL
