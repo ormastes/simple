@@ -11,6 +11,9 @@ converged for inputs above ~1e4 (a 1000 px segment measured ~2000 px).
 Audience: maintainers of std.skia's CPU backend and its consumers.
 ## Operator workflow
 Run with the test runner; offline, no fixtures.
+`fill_rect` / `fill_rrect` had the same full-coverage `set_pixel` overwrite
+(found by the repaired parity reftest suite): a translucent rect replaced the
+pixels underneath and was stored un-premultiplied on the N32-premul canvas.
 ## Compatibility and limitations
 Coverage is sampled on 4 sub-scanlines per row (vertical resolution 1/4
 pixel) with exact horizontal span overlap, so vertical-edge coverage is
@@ -24,7 +27,8 @@ use std.spec.step
 use std.skia.entity.color.{SkColor4f}
 use std.skia.entity.enums.{SkPathFillType}
 use std.skia.entity.path.{SkPath, SkPathVerb, sk_path_new}
-use std.skia.backend.cpu.raster_prims.{Bitmap, fill_path_aa}
+use std.skia.backend.cpu.raster_prims.{Bitmap, fill_path_aa, fill_rect, fill_rrect}
+use std.skia.entity.geometry.{SkRect}
 use std.skia.feature.stroke.expand.{expand_stroke, stroke_params_new, StrokeCap, StrokeJoin}
 use std.skia.feature.stroke.dash.{dash_path, dash_pattern_new}
 
@@ -107,6 +111,30 @@ describe "fill_path_aa anti-aliasing":
         expect(b).to_be_greater_than(124)
         expect(b).to_be_less_than(132)
         expect(alpha_at(bm, 1, 1)).to_equal(255)
+
+describe "fill_rect and fill_rrect compositing":
+    it "fill_rect blends a translucent colour instead of overwriting":
+        step("opaque blue, then red at alpha 0.5 over it: the result mixes both")
+        var bm = Bitmap.zeros(4, 4)
+        fill_rect(bm, SkRect(left: 0.0, top: 0.0, right: 4.0, bottom: 4.0), SkColor4f(r: 0.0, g: 0.0, b: 1.0, a: 1.0))
+        fill_rect(bm, SkRect(left: 0.0, top: 0.0, right: 4.0, bottom: 4.0), red(0.5))
+        expect(channel_at(bm, 1, 1, 0)).to_be_greater_than(124)
+        expect(channel_at(bm, 1, 1, 2)).to_be_greater_than(124)
+        expect(alpha_at(bm, 1, 1)).to_equal(255)
+
+    it "fill_rect stores a translucent colour premultiplied on an empty canvas":
+        var bm = Bitmap.zeros(4, 4)
+        fill_rect(bm, SkRect(left: 0.0, top: 0.0, right: 4.0, bottom: 4.0), red(0.5))
+        expect(alpha_at(bm, 2, 2)).to_be_greater_than(124)
+        expect(alpha_at(bm, 2, 2)).to_be_less_than(132)
+        expect(channel_at(bm, 2, 2, 0)).to_be_less_than(132)
+
+    it "fill_rrect blends a translucent colour instead of overwriting":
+        var bm = Bitmap.zeros(12, 12)
+        fill_rect(bm, SkRect(left: 0.0, top: 0.0, right: 12.0, bottom: 12.0), SkColor4f(r: 0.0, g: 0.0, b: 1.0, a: 1.0))
+        fill_rrect(bm, SkRect(left: 0.0, top: 0.0, right: 12.0, bottom: 12.0), 3.0, 3.0, red(0.5))
+        expect(channel_at(bm, 6, 6, 2)).to_be_greater_than(124)
+        expect(channel_at(bm, 6, 6, 0)).to_be_greater_than(124)
 
 describe "skia square roots on long geometry":
     it "offsets a 1000 px stroke by half its width":
