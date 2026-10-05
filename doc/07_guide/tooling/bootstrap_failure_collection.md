@@ -34,6 +34,17 @@ separate writable source/cache ownership. A repair already understood may run
 while collection continues. Distinguish logic defects, performance defects,
 resource-policy exits and unavailable prerequisites.
 
+When a bug appears during an active diagnostic bootstrap, register it in the
+bug database and repair it in parallel. Prefer a scoped, semantics-preserving
+workaround with the current compiler over returning to an earlier compiler or
+rebuilding the producer immediately. Keep the failed attempt and workaround
+identity separate. Apply changed inputs only to a new isolated attempt after
+the relevant owner has finished; do not patch a running source snapshot.
+Continue remaining independent cases to the end of Phase 4 where prerequisites
+permit. After that collection run ends, rebuild the full chain with accumulated
+fixes and required checks restored. A workaround is not proof that the underlying
+bug is fixed, and cannot turn a failed assertion or missing output into a pass.
+
 For every performance fix, check memory behavior as well as elapsed time. For
 every memory fix, check performance as well as lifetime and peak usage. Run
 relevant correctness regressions in both cases. Record comparable inputs and
