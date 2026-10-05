@@ -25,10 +25,10 @@ class ToolAuthorityTests(unittest.TestCase):
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         self.entry = self.root / 'scripts/bootstrap/entry.shs'
         self.entry.parent.mkdir(parents=True)
-        self.entry.write_text('echo pinned\n')
+        self.entry.write_text('echo pinned\n', newline='\n')
         self.facade = self.root / 'scripts/check/lib/facade.shs'
         self.facade.parent.mkdir(parents=True)
-        self.facade.write_text('true\n')
+        self.facade.write_text('true\n', newline='\n')
         subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
         subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=Test',
             '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'fixture'], check=True)
@@ -40,7 +40,7 @@ class ToolAuthorityTests(unittest.TestCase):
         self.pin()
 
     def pin(self):
-        self.manifest.write_text(json.dumps(self.value))
+        self.manifest.write_text(json.dumps(self.value), newline='\n')
         self.expected = authority.sha(self.manifest)
 
     def validate(self):
@@ -49,22 +49,22 @@ class ToolAuthorityTests(unittest.TestCase):
     def test_separate_source_is_not_tool_authority(self):
         source = Path(self.temp.name) / 'source'
         source.mkdir()
-        (source / 'compiler.spl').write_text('frozen source')
+        (source / 'compiler.spl').write_text('frozen source', newline='\n')
         self.assertEqual(self.validate()['tool_head'], self.value['tool_head'])
         self.assertEqual((source / 'compiler.spl').read_text(), 'frozen source')
 
     def test_modified_transitive_tool_rejected(self):
-        self.facade.write_text('false\n')
+        self.facade.write_text('false\n', newline='\n')
         with self.assertRaisesRegex(ValueError, 'tool bytes differ'):
             self.validate()
 
     def test_unlisted_import_rejected(self):
-        (self.entry.parent / 'injected.py').write_text('raise RuntimeError()')
+        (self.entry.parent / 'injected.py').write_text('raise RuntimeError()', newline='\n')
         with self.assertRaisesRegex(ValueError, 'complete physical closure'):
             self.validate()
 
     def test_manifest_tamper_rejected(self):
-        self.manifest.write_text('{}')
+        self.manifest.write_text('{}', newline='\n')
         with self.assertRaisesRegex(ValueError, 'manifest identity'):
             self.validate()
 
@@ -95,7 +95,7 @@ class ToolAuthorityTests(unittest.TestCase):
             '. "$script_root/lib/product-tool-authority.shs"\n'
             '[ "$tool_root" != "$source_root" ]\n'
             'printf "%s\\n" "$source_root" "$tool_root"\n'
-            'bootstrap_product_tool_verify\n')
+            'bootstrap_product_tool_verify\n', newline='\n')
         self.value['files'] = {p.relative_to(self.root).as_posix(): authority.sha(p)
             for p in (self.entry, self.facade, validator, library)}
         subprocess.run(['git', '-C', str(self.root), 'add', '.'], check=True)
@@ -114,14 +114,14 @@ class ToolAuthorityTests(unittest.TestCase):
         self.assertEqual(len(run.stdout.splitlines()), 2)
         self.assertTrue(run.stdout.splitlines()[0].endswith('/source'))
         self.assertTrue(run.stdout.splitlines()[1].endswith('/tools'))
-        self.facade.write_text('changed after pin\n')
+        self.facade.write_text('changed after pin\n', newline='\n')
         rejected = subprocess.run([shell, self.entry.as_posix(), source.as_posix()],
                                   env=env, capture_output=True, text=True)
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn('tool bytes differ', rejected.stderr)
 
     def test_rehashed_dirty_tool_cannot_claim_committed_identity(self):
-        self.entry.write_text('echo unreviewed\n')
+        self.entry.write_text('echo unreviewed\n', newline='\n')
         self.value['files'][self.entry.relative_to(self.root).as_posix()] = authority.sha(self.entry)
         self.pin()
         with self.assertRaisesRegex(ValueError, 'not from pinned commit'):
