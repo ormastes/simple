@@ -62,3 +62,10 @@ it does not alter receiver ownership, ambiguity checks, or lookup fallback.
 an imported struct, reads, mutation, a computed result, and two instances.
 The fixture intentionally declares no class or enum in its provider. Native
 execution with a rebuilt producer is still required before claiming repair.
+
+Review found a second gate inside `register_provider_method`: without a class
+layout, it accepted only an enum declaration from the provider SymbolTable.
+The corrected candidate accepts struct or enum declarations only when their
+qualified declaration identity exactly matches the method's owner. Missing
+declarations, wrong kinds, and a same-name declaration from another module
+remain rejected. The initial outer-loop-only checkpoint is insufficient alone.
