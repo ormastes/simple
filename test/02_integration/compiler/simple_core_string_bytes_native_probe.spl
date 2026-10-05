@@ -1,0 +1,68 @@
+# Native regression: word-backed text bytes preserve all octets and typed reads.
+use std.common.base_encoding.base64.{base64url_encode, base64url_decode_strict}
+extern fn malloc(size: i64) -> i64
+extern fn free(ptr: i64)
+extern fn spl_store_u8(ptr: i64, offset: i64, value: i64)
+extern fn rt_string_new(data: i64, length: i64) -> text
+
+struct ByteHolder:
+    data: [u8]
+
+fn raw_octet_text(count: i64) -> text:
+    unsafe(capabilities: [ffi]):
+        val raw = malloc(count)
+        if raw <= 0: return ""
+        var i = 0
+        while i < count:
+            spl_store_u8(raw, i, i)
+            i = i + 1
+        val result = rt_string_new(raw, count)
+        free(raw)
+        result
+
+fn typed_octets_match(data: [u8], count: i64) -> bool:
+    if data.len() != count: return false
+    var i = 0
+    while i < count:
+        if data[i].to_i64() != i: return false
+        i = i + 1
+    true
+
+fn integer_octets_match(data: [i64], count: i64) -> bool:
+    if data.len() != count: return false
+    var i = 0
+    while i < count:
+        if data[i] != i: return false
+        i = i + 1
+    true
+
+fn holder_octets_match(holder: ByteHolder, count: i64) -> bool:
+    var i = 0
+    while i < count:
+        if holder.data[i].to_i64() != i: return false
+        i = i + 1
+    true
+
+fn main() -> i64:
+    val text_octets = raw_octet_text(256)
+    if text_octets.len() != 256: return 1
+    val inferred = text_octets.bytes()
+    var i = 0
+    while i < 256:
+        if inferred[i] as i64 != i:
+            print "inferred byte mismatch {i}"
+            return 2
+        i = i + 1
+    if not typed_octets_match(text_octets.bytes(), 256): return 3
+    if not integer_octets_match(text_octets.bytes(), 256): return 4
+    val holder = ByteHolder(data: text_octets.bytes())
+    if not holder_octets_match(holder, 256): return 5
+    if base64url_encode("simple") != "c2ltcGxl": return 6
+    val ascii = raw_octet_text(128)
+    val encoded = base64url_encode(ascii)
+    match base64url_decode_strict(encoded):
+        case Ok(decoded):
+            if decoded != ascii: return 7
+        case Err(_): return 8
+    print "simple-core-string-bytes: all 256 octets, typed reads and Base64 PASS"
+    0
