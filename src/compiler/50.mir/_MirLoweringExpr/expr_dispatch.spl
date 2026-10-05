@@ -720,6 +720,12 @@ impl MirLowering:
                 # trusted on presence alone).
                 if decl_field_types != nil and field_idx >= 0 and field_idx < decl_field_types.len():
                     match decl_field_types[field_idx].kind:
+                        case HirTypeKind.Named(_, _):
+                            # Named enum fields share a Struct-shaped MIR word
+                            # with nominal aggregates. Preserve the declared
+                            # owner so enum equality can distinguish them after
+                            # projecting through a typed parameter.
+                            self.remember_local_hir_type(result.id, decl_field_types[field_idx], 0, 0)
                         case HirTypeKind.Dict(_, _):
                             self.runtime_dict_locals[result.id] = true
                         # Array/Slice half of the SAME defect. The Dict arm
@@ -822,6 +828,12 @@ impl MirLowering:
                 case HirTypeKind.Named(symbol, _):
                     val enum_name = self.symbols.symbol_name_scalar_raw(symbol.id)
                     if enum_name != "" and self.enum_variant_index.contains(enum_name):
+                        val qualified = self.enum_qualified_key(symbol)
+                        if qualified != "" and not self.enum_variant_index_q.has(qualified):
+                            # A nominal struct in another module can share the
+                            # enum's bare name. Its new field metadata must not
+                            # grant it the other declaration's enum storage.
+                            return -1
                         # An imported alias and its declaration can have different
                         # HIR symbol ids. Use the existing owner-aware MIR type
                         # identity, as aggregate layouts already do; a shared
