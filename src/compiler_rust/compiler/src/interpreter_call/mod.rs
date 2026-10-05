@@ -112,7 +112,7 @@ fn value_matches_type(value: &Value, ty: &Type) -> bool {
             // item 6, bisected to a10935e78a). Bounding this to O(1) removes the
             // cliff without changing which overload is selected for homogeneous
             // arrays.
-            Value::Array(items) => items.first().is_none_or(|item| value_matches_type(item, element)),
+            Value::Array(items) => items.get_value(0).is_none_or(|item| value_matches_type(&item, element)),
             Value::FrozenArray(items) => items.first().is_none_or(|item| value_matches_type(item, element)),
             // A `[u8]` parameter receives a packed byte buffer at runtime, not
             // a Value::Array — and a byte buffer can ONLY hold u8 elements, so

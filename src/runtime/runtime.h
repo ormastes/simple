@@ -546,6 +546,7 @@ int64_t  rt_tls_client_write(int64_t handle, int64_t data);
 int64_t  rt_tls_client_write_timeout(int64_t handle, int64_t data, int64_t timeout_ms);
 int64_t  rt_tls_client_read(int64_t handle, int64_t max_bytes);
 int64_t  rt_tls_client_read_timeout(int64_t handle, int64_t max_bytes, int64_t timeout_ms);
+int64_t  rt_tls_client_read_bytes_timeout_checked(int64_t handle, int64_t max_bytes, int64_t timeout_ms);
 int64_t  rt_tls_get_protocol_version(int64_t handle);
 int8_t   rt_tls_client_close(int64_t handle);
 int64_t  rt_strcat_tagged(int64_t left, int64_t right);
@@ -969,6 +970,7 @@ int64_t  rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_
 int64_t  rt_string_to_int(int64_t value);
 int64_t  rt_string_to_int_lenient(int64_t value);
 int64_t  rt_to_int_dynamic(int64_t value);
+int64_t  rt_any_to_int(int64_t value);
 void     rt_print_str(const uint8_t* ptr, uint64_t len);
 void     rt_println_str(const uint8_t* ptr, uint64_t len);
 void     rt_eprint_str(const uint8_t* ptr, uint64_t len);

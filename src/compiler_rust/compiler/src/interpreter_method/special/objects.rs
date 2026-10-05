@@ -79,8 +79,8 @@ fn constructor_value_matches_type(value: &Value, ty: &Type, type_params: &HashSe
         Type::Generic { name, args } if matches!(name.as_str(), "List" | "Array" | "Vec") && args.len() == 1 => {
             match value {
                 Value::Array(items) => items
-                    .iter()
-                    .all(|item| constructor_value_matches_type(item, &args[0], type_params)),
+                    .values_iter()
+                    .all(|item| constructor_value_matches_type(&item, &args[0], type_params)),
                 Value::FrozenArray(items) => items
                     .iter()
                     .all(|item| constructor_value_matches_type(item, &args[0], type_params)),
@@ -95,8 +95,8 @@ fn constructor_value_matches_type(value: &Value, ty: &Type, type_params: &HashSe
         }
         Type::Array { element, .. } => match value {
             Value::Array(items) => items
-                .iter()
-                .all(|item| constructor_value_matches_type(item, element, type_params)),
+                .values_iter()
+                .all(|item| constructor_value_matches_type(&item, element, type_params)),
             Value::FrozenArray(items) => items
                 .iter()
                 .all(|item| constructor_value_matches_type(item, element, type_params)),

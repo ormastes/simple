@@ -63,6 +63,46 @@ Specs: `test/01_unit/lib/gc_async_mut/gpu/browser_engine/browser_real_site_compa
 Text mode (`main.spl https://<site>`) for the three big sites also exceeds
 600s, because text mode runs the same engine render for its proof line.
 
+### Re-test 2026-10-05 (origin/main `9e82198e397`, seed built from it)
+
+Launch, one site at a time: `simple run build/scratch/dump_png.spl
+https://<site> out.png 800 600` (scratch script: `browser_engine_pixels_at`
++ `encode_argb_to_png`), PNG viewed after each run.
+
+| site | result | wall | what the PNG shows |
+|---|---|---|---|
+| example.com | OK | 74s | Matches the real page: light-grey background, centred ~416px column, 150px top padding (A-D fixed). The fetched page has no `<h1>` today, so no title is correct. |
+| www.google.com | OK | 153s | Korean UI text renders (F). Missing: logo image, search box. Buttons "Google 검색" and "I'm Feeling Lucky" overlap in the bottom-left (F overlap, still open). "Gmail" in monospace; dark-grey 15px bar down the right edge; 로그인 button clipped by it. |
+| www.wikipedia.org | OK (was 0 px before #2515) | 184s | Layout mostly present. Wordmark and tagline drawn as visible text in a coarse bitmap font (L); language ring overlaps (M); 日本語/中文 tofu (N); black bar near the bottom (O); globe image missing. Style budget still breaks at nodes 125 and 882 of 1898. |
+| news.ycombinator.com | OK | 86s | Unchanged gap I: the header bar takes ~330px, nav cell split across three rows, blue links, no logo, no story rows. |
+| github.com | TIMEOUT at 2400s | - | No PNG. On 2026-10-04 after the object-store fix it rendered in 276-497s, so this is a regression or a load effect (P). |
+
+- **L. Visually hidden text is painted** (wikipedia wordmark): the rule is
+  `.central-textlogo__image{color:transparent;overflow:hidden;
+  text-indent:-10000px}` with the wordmark as a background sprite, but the
+  text "Wikipedia" / "The Free Encyclopedia" is drawn in a bitmap-looking
+  serif fallback, clipped mid-word. Two defects: `color:transparent` and/or
+  `text-indent` are not honoured, and the serif stack `Linux Libertine,
+  Hoefler Text,Georgia,Times New Roman,Times,serif` resolves to a coarse
+  bitmap face instead of a vector serif. Unblock: honour `color:transparent`
+  (alpha 0 = no paint) and negative `text-indent`; map generic `serif` to a
+  bundled vector serif.
+- **M. Absolutely positioned language ring overlaps** (wikipedia
+  `.central-featured-lang` items, positioned around the globe): the names and
+  article counts are stacked over each other near the centre.
+- **N. CJK still tofu in bold runs** (wikipedia `<strong>日本語</strong>`,
+  中文): the gap F fallback covers regular-weight runs; the bold ones still
+  show boxes. Unblock: apply the coverage fallback when the bold variant face
+  is selected too.
+- **O. Black full-width bar near the bottom of wikipedia** (around y=575):
+  probably the search form or the language dropdown painted with a black
+  background.
+- **P. github.com does not finish within 2400s** on `9e82198e397` (no PNG, no
+  `[web-phase]` line in the live log). The saved fixture is being re-run
+  with `SIMPLE_WEB_PHASE_TRACE=1` to locate the stall.
+- **Q. google.com: dark-grey right-edge bar (~15px)** across the full height,
+  clipping the 로그인 button; logo and search input not painted.
+
 ## Open rendering gaps (unblock condition per item)
 
 - **A. FIXED (work/browser-layout-width).** Not an inheritance bug:

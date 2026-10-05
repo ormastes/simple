@@ -9,8 +9,9 @@
 //!    fell through to `dynamic_sffi::try_call_dynamic`.
 //! 2. **The dynamic fallthrough cannot express the native signature.**
 //!    `dynamic_sffi` coerces every argument *and* the return value through
-//!    `i64`. The native `rt_sha256_write` takes a raw `(*const u8, u64)`
-//!    pointer pair — an interpreted `[u8]` is a `Vec<Value>`, not a byte
+//!    `i64`. The native `rt_sha256_write` took a raw `(*const u8, u64)`
+//!    pointer pair (since 2026-10-05 it takes the same tagged `text | [u8]`
+//!    value this wrapper accepts) — an interpreted `[u8]` is a `Vec<Value>`, not a byte
 //!    buffer, so `value_to_i64` hands it an unrelated pointer — and
 //!    `rt_sha256_finish` returns a **packed `RuntimeValue`**, not an `i64`, so
 //!    the returned bits get reinterpreted as an integer. That is why the family

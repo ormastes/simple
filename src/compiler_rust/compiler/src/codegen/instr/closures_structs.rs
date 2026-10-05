@@ -1047,6 +1047,23 @@ pub(crate) fn compile_method_call_static<M: Module>(
                         && !ks.ends_with(&current_fn_tail_sanitized)
                 })
                 .collect();
+            // A same-named method whose declared parameter count cannot accept
+            // this call (receiver + args) can never be the target, so it must
+            // not make an otherwise-decidable call ambiguous: `d.dispatch(req)`
+            // on a FetchDispatch was refused because VulkanFfi also has a
+            // 4-argument `dispatch` (2026-10-05). Only applied when at least one
+            // candidate DOES fit, so a call no candidate fits keeps today's path.
+            let candidates: Vec<_> = if candidates.len() > 1 {
+                let wanted = args.len() + 1;
+                let fits = |id: &FuncId| ctx.module.declarations().get_function_decl(*id).signature.params.len() == wanted;
+                if candidates.iter().any(|(_, id)| fits(id)) {
+                    candidates.into_iter().filter(|(_, id)| fits(id)).collect()
+                } else {
+                    candidates
+                }
+            } else {
+                candidates
+            };
 
             if let Some(tq) = type_qualifier {
                 // A trait name is not proof that an arbitrary implementation
@@ -1924,6 +1941,9 @@ fn try_compile_builtin_method_call<M: Module>(
 ) -> InstrResult<Option<cranelift_codegen::ir::Value>> {
     let receiver_val = get_vreg_or_default(ctx, builder, &receiver);
 
+    // A BARE (unqualified) name is only emitted for an erased receiver, whose
+    // value is a tagged RuntimeValue (see compile_method_call_static).
+    let erased_receiver = !method.contains('.');
     // Extract plain method name from qualified name (e.g., "text.len" -> "len")
     let method = method.rsplit('.').next().unwrap_or(method);
 
@@ -2028,6 +2048,25 @@ fn try_compile_builtin_method_call<M: Module>(
                 TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, parsed),
                 TypeId::U64 | TypeId::I64 => parsed,
                 _ => parsed,
+            };
+            return Ok(Some(converted));
+        }
+
+        // Erased receiver (`list` element, `[Any]` slot): the value is TAGGED,
+        // and HIR types every integer cast on an ANY receiver as its RAW
+        // target type (hir/lower/expr/mod.rs). `rt_to_int_dynamic`'s verbatim
+        // non-text answer is `n << 3`, and the narrow casts reduced that tagged
+        // word. Decode it (text still parses), then narrow. Under the JIT the
+        // inflate decoder's `data[byte_pos].to_i64()` read every byte 8x too
+        // large and `symbol.to_u8()` pushed the low byte of the tag word.
+        let recv_ty_known = ctx.vreg_types.get(&receiver).copied();
+        if erased_receiver && to_is_int && matches!(recv_ty_known, None | Some(TypeId::ANY)) {
+            let decoded = call_runtime_1(ctx, builder, "rt_any_to_int", receiver_val);
+            let converted = match to_ty {
+                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, decoded),
+                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, decoded),
+                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, decoded),
+                _ => decoded,
             };
             return Ok(Some(converted));
         }

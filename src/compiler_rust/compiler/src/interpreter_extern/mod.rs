@@ -2146,9 +2146,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_sha1_reset", crypto::rt_sha1_reset);
     insert_simple!("rt_sha1_write", crypto::rt_sha1_write);
     // SHA-256 hasher family. Previously AOT-only: the native symbols exist in
-    // `simple_runtime` but `rt_sha256_write` takes a raw `(*const u8, u64)`
-    // pointer pair and `rt_sha256_finish` returns a packed `RuntimeValue`,
-    // neither of which the `dynamic_sffi` i64-coercing fallthrough can express.
+    // `simple_runtime` but `rt_sha256_write` takes a tagged `text | [u8]`
+    // RuntimeValue (it took a raw `(*const u8, u64)` pair until 2026-10-05) and
+    // `rt_sha256_finish` returns a packed `RuntimeValue`, neither of which the
+    // `dynamic_sffi` i64-coercing fallthrough can express.
     // See `interpreter_extern/sha256.rs` and
     // doc/08_tracking/bug/vulkan_font_whole_atlas_sha256_per_upload_2026-08-04.md.
     insert_simple!("rt_sha256_finish", sha256::rt_sha256_finish);
@@ -3004,6 +3005,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!(
         "rt_tls_client_read_timeout_checked",
         net_tls_client::rt_tls_client_read_timeout_checked
+    );
+    insert_simple!(
+        "rt_tls_client_read_bytes_timeout_checked",
+        net_tls_client::rt_tls_client_read_bytes_timeout_checked
     );
     insert_simple!("rt_tls_client_close", net_tls_client::rt_tls_client_close);
     insert_simple!(

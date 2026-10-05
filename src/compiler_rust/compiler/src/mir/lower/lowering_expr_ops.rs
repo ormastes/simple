@@ -22,11 +22,11 @@ impl<'a> MirLowerer<'a> {
             let (line, column) = self.current_decision_span.unwrap_or((0, 0));
 
             // Lower left operand and emit condition probe
-            let left_reg = self.lower_expr(left)?;
+            let left_reg = self.lower_condition_expr(left)?;
             self.emit_condition_probe(decision_id, left_reg, line, column)?;
 
             // Lower right operand and emit condition probe
-            let right_reg = self.lower_expr(right)?;
+            let right_reg = self.lower_condition_expr(right)?;
             self.emit_condition_probe(decision_id, right_reg, line, column)?;
 
             // Compute the final result
@@ -423,7 +423,7 @@ impl<'a> MirLowerer<'a> {
     /// (interpreter/expr/ops.rs) and the block/temp-local merge pattern used
     /// for `HirStmt::If` (lowering_stmt.rs).
     fn lower_short_circuit_logical(&mut self, op: BinOp, left: &HirExpr, right: &HirExpr) -> MirLowerResult<VReg> {
-        let left_reg = self.lower_expr(left)?;
+        let left_reg = self.lower_condition_expr(left)?;
 
         // Temp local to carry the boolean result across the two branches into
         // the merge block (VRegs don't survive block boundaries without a
@@ -496,7 +496,7 @@ impl<'a> MirLowerer<'a> {
         // eval_rhs_block: result is `right`'s truthiness (right is only ever
         // lowered here, never on the short-circuit path).
         self.set_current_block(eval_rhs_block)?;
-        let right_reg = self.lower_expr(right)?;
+        let right_reg = self.lower_condition_expr(right)?;
         self.with_func(|func, current_block| {
             let addr = func.new_vreg();
             let block = func.block_mut(current_block).unwrap();
@@ -532,7 +532,11 @@ impl<'a> MirLowerer<'a> {
     }
 
     pub(super) fn lower_unary_expr(&mut self, op: UnaryOp, operand: &HirExpr) -> MirLowerResult<VReg> {
-        let operand_reg = self.lower_expr(operand)?;
+        let operand_reg = if op == UnaryOp::Not {
+            self.lower_condition_expr(operand)?
+        } else {
+            self.lower_expr(operand)?
+        };
 
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();

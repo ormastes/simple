@@ -35,7 +35,8 @@ fn copy_value_type_in_place(value: &mut Value, classes: &HashMap<String, Arc<Cla
             // Recurse only when an element is itself a VALUE-type object: the
             // pre-2026-08-21 code never touched arrays, so cloning an array of
             // reference-class objects here would change aliasing semantics.
-            if items.iter().any(|item| {
+            // A packed array holds only Int / u32 scalars, never an object.
+            if !items.is_packed() && items.iter().any(|item| {
                 matches!(item, Value::Object { class, .. }
                     if classes.get(class.as_str()).is_some_and(|def| def.is_value_type))
             }) {

@@ -1191,6 +1191,14 @@ impl<'a> MirLowerer<'a> {
                         if let Some(target) = typed_push_target {
                             let receiver_reg = self.lower_expr(receiver)?;
                             let value_reg = self.lower_expr(&args[0])?;
+                            // An `ANY` element is a TAGGED word; the typed byte
+                            // push stores its low byte (JIT inflate:
+                            // `out.push(block_out[k])` stored 104 as 0x40).
+                            let value_reg = if target == "rt_typed_bytes_u8_push" && args[0].ty == TypeId::ANY {
+                                self.unbox_scalar_for_raw_slot(TypeId::U8, TypeId::ANY, value_reg)?
+                            } else {
+                                value_reg
+                            };
                             let append_ptrs = self.active_array_append_ptrs(receiver);
                             let append_index = append_ptrs
                                 .map(|ptrs| ptrs.index_local_index)
@@ -1309,7 +1317,7 @@ impl<'a> MirLowerer<'a> {
             } => {
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_expr(condition)?;
+                let cond_reg = self.lower_condition_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for coverage (before branch)
@@ -1537,7 +1545,7 @@ impl<'a> MirLowerer<'a> {
                 self.set_current_block(cond_id)?;
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_expr(condition)?;
+                let cond_reg = self.lower_condition_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for while condition coverage
@@ -1696,7 +1704,7 @@ impl<'a> MirLowerer<'a> {
                 // Lower the assertion condition
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_expr(condition)?;
+                let cond_reg = self.lower_condition_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for assert condition coverage (#674)
@@ -2171,7 +2179,7 @@ impl<'a> MirLowerer<'a> {
                 // At runtime, we treat it as an assertion
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_expr(condition)?;
+                let cond_reg = self.lower_condition_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for assume condition coverage (#674)
