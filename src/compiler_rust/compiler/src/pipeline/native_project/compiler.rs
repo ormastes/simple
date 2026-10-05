@@ -790,8 +790,8 @@ pub(crate) fn compile_file_to_object(
         lowerer.set_global_enum_defs(std::sync::Arc::clone(&imports.enum_defs));
         lowerer.register_global_enums();
     }
-    let mut hir = lowerer
-        .lower_module(&ast)
+    let (mut hir, function_return_types) = lowerer
+        .lower_module_with_return_types(&ast)
         .map_err(|e| format!("{}: hir: {e}", file_path.display()))?;
     let module_prefix = module_prefix_from_path(file_path, source_root);
     assign_native_dynamic_initializer_identity(&mut hir, &module_prefix);
@@ -1040,6 +1040,7 @@ pub(crate) fn compile_file_to_object(
     codegen.set_use_map(use_map);
     codegen.set_data_exports(imports.data_exports.clone());
     codegen.set_fn_arities(imports.fn_arities.clone());
+    codegen.set_function_return_types(function_return_types);
     codegen.set_enum_defs(imports.enum_defs.clone());
     codegen.set_tag_runtime_pool_join_result(true);
     if !no_mangle {
