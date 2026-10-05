@@ -115,6 +115,13 @@ impl Codegen {
         self.backend.set_fn_arities(arities);
     }
 
+    pub(crate) fn set_function_return_types(
+        &mut self,
+        return_types: std::collections::HashMap<String, crate::hir::TypeId>,
+    ) {
+        self.backend.set_function_return_types(return_types);
+    }
+
     pub fn set_enum_defs(
         &mut self,
         defs: std::sync::Arc<std::collections::HashMap<String, Vec<(String, Option<Vec<simple_parser::Type>>)>>>,
