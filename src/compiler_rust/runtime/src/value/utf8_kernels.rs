@@ -163,43 +163,17 @@ pub(crate) fn neon_find_invalid(bytes: &[u8]) -> i64 {
     scalar_find_invalid(bytes)
 }
 
-// AVX-512 variants. Each widens the existing AVX2 "ASCII-prefix" trick (skip
-// over a leading run of pure-ASCII bytes with SIMD, then hand the remainder
-// to the scalar implementation) to 64-byte lanes instead of 32. This keeps
-// the AVX-512 result byte-for-byte identical to the scalar result for every
-// input, including malformed UTF-8 — the naive "count/skip bytes that are
-// not continuation bytes" formulation is NOT equivalent to
-// `scalar_count_codepoints` on malformed input (a stray continuation byte,
-// or a would-be lead byte sitting where a continuation byte was expected,
-// makes the two diverge), so it is deliberately not used here. See
-// `avx512_ascii_prefix_len` below.
+// Optional-wide requests use guarded AVX2/scalar in the default core.
+// Malformed UTF8 behavior remains owned by the existing scalar remainder.
 pub(crate) fn avx512_count_codepoints(bytes: &[u8]) -> i64 {
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
-            return avx512_count_codepoints_impl(bytes);
-        }
-    }
     avx2_count_codepoints(bytes)
 }
 
 pub(crate) fn avx512_validate(bytes: &[u8]) -> bool {
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
-            return avx512_validate_impl(bytes);
-        }
-    }
     avx2_validate(bytes)
 }
 
 pub(crate) fn avx512_find_invalid(bytes: &[u8]) -> i64 {
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
-            return avx512_find_invalid_impl(bytes);
-        }
-    }
     avx2_find_invalid(bytes)
 }
 
@@ -438,64 +412,14 @@ unsafe fn neon_find_invalid_impl(bytes: &[u8]) -> i64 {
     }
 }
 
-// The load goes through `read_unaligned` rather than `_mm512_loadu_si512`
-// deliberately — see the comment in `byte_kernels.rs` (that intrinsic's
-// pointer type has changed across Rust releases; `read_unaligned` compiles
-// to the same `vmovdqu64` regardless).
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bw")]
-unsafe fn avx512_ascii_prefix_len(bytes: &[u8]) -> usize {
-    use std::arch::x86_64::{__m512i, _mm512_set1_epi8, _mm512_test_epi8_mask};
-
-    let high_bit = _mm512_set1_epi8(0x80u8 as i8);
-    let mut idx = 0usize;
-    while idx + 64 <= bytes.len() {
-        let chunk = std::ptr::read_unaligned(bytes.as_ptr().add(idx) as *const __m512i);
-        // Bit i of the mask is set exactly where byte i has its high bit
-        // set, i.e. is non-ASCII. Any set bit ends the ASCII prefix.
-        let mask = _mm512_test_epi8_mask(chunk, high_bit);
-        if mask != 0 {
-            break;
-        }
-        idx += 64;
-    }
-    idx
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bw")]
-unsafe fn avx512_count_codepoints_impl(bytes: &[u8]) -> i64 {
-    let prefix = avx512_ascii_prefix_len(bytes);
-    prefix as i64 + scalar_count_codepoints(&bytes[prefix..])
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bw")]
-unsafe fn avx512_validate_impl(bytes: &[u8]) -> bool {
-    let prefix = avx512_ascii_prefix_len(bytes);
-    scalar_validate(&bytes[prefix..])
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bw")]
-unsafe fn avx512_find_invalid_impl(bytes: &[u8]) -> i64 {
-    let prefix = avx512_ascii_prefix_len(bytes);
-    let invalid = scalar_find_invalid(&bytes[prefix..]);
-    if invalid < 0 {
-        -1
-    } else {
-        prefix as i64 + invalid
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         avx2_count_codepoints, avx2_find_invalid, avx2_validate, avx512_count_codepoints, avx512_find_invalid,
         avx512_validate, count_codepoints_for_tier, find_invalid_for_tier, neon_count_codepoints, neon_find_invalid,
         neon_validate, rt_swi_build, rt_swi_byte_to_char, rt_swi_char_to_byte, rt_swi_free, rt_text_count_codepoints,
-        rt_utf8_count_codepoints, rt_utf8_find_invalid, rt_utf8_validate, scalar_count_codepoints,
-        scalar_find_invalid, scalar_validate, validate_for_tier,
+        rt_utf8_count_codepoints, rt_utf8_find_invalid, rt_utf8_validate, scalar_count_codepoints, scalar_find_invalid,
+        scalar_validate, validate_for_tier,
     };
     use crate::value::{rt_array_new, rt_array_push, rt_string_new, RuntimeValue};
     use simple_simd::SimdTier;
