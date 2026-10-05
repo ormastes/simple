@@ -1,0 +1,32 @@
+use std.spec.*
+use app.io.minimal_runtime_ops.{env_get, process_run}
+
+describe "portable source emitter preserves raw output", tag: ["only-compiled"]:
+    it "emits shader text between its source markers through the canonical output owner":
+        val binary = env_get("SIMPLE_PORTABLE_COMPUTE_TEST_BINARY")
+        expect(binary != "").to_be(true)
+        for target in ["webgpu", "vulkan"]:
+            val (stdout, stderr, code) = process_run(binary, [target])
+            expect(code).to_equal(0)
+            expect(stderr).to_equal("")
+            val begin = "__PORTABLE_FONT_SOURCE_BEGIN__\n"
+            val end = "__PORTABLE_FONT_SOURCE_END__\n"
+            val sections = stdout.split(begin)
+            expect(sections.len()).to_equal(2)
+            val content_and_end = sections[1].split(end)
+            expect(content_and_end.len()).to_equal(2)
+            expect(content_and_end[0].trim().len()).to_be_greater_than(0)
+            expect(content_and_end[1]).to_equal("")
+            if target == "webgpu":
+                expect(stdout).to_contain("__PORTABLE_COMPUTE_EMITTER_SOURCE_SHA256__=")
+                expect(stdout).to_contain("__PORTABLE_COMPUTE_SOURCE_BEGIN__\n")
+            else:
+                expect(stdout).to_contain("__VULKAN_FONT_EMITTER_SOURCE_SHA256__=")
+
+    it "rejects an unknown target without pretending that shader emission succeeded":
+        val binary = env_get("SIMPLE_PORTABLE_COMPUTE_TEST_BINARY")
+        expect(binary != "").to_be(true)
+        val (stdout, stderr, code) = process_run(binary, ["invalid-target"])
+        expect(code).to_equal(2)
+        expect(stdout).to_contain("unsupported target: invalid-target")
+        expect(stdout.contains("__PORTABLE_FONT_SOURCE_BEGIN__")).to_be(false)
