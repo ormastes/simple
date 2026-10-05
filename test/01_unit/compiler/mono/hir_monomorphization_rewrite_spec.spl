@@ -356,3 +356,32 @@ describe "contextual generic inference preserves checked types":
         expect(pass_.spec_queue.len()).to_equal(1)
         expect(rewritten.body.stmts.len()).to_equal(2)
         expect(pass_.current_return_type).to_be_nil()
+
+    it "restores the outer return type after rewriting a typed lambda":
+        val pass_ = context_pass()
+        val scalar = mk_type(HirTypeKind.Int(64, true))
+        val array = mk_type(HirTypeKind.Array(mk_type(HirTypeKind.Str), nil))
+        val outer_result = mk_type(HirTypeKind.Result(scalar, mk_type(HirTypeKind.Str)))
+        val inner_result = mk_type(HirTypeKind.Result(array, mk_type(HirTypeKind.Str)))
+        pass_.current_return_type = outer_result
+        var lambda_expr = mk_expr(HirExprKind.Lambda([], mk_expr(HirExprKind.Return(context_call())), []))
+        lambda_expr.has_type_ = true
+        lambda_expr.type_ = mk_type(HirTypeKind.Function([], inner_result, []))
+        val rewritten_lambda = pass_.rewrite_expr(lambda_expr)
+        expect(hir_type_key(pass_.current_return_type.unwrap())).to_equal(hir_type_key(outer_result))
+        expect(pass_.stats.call_sites_found).to_equal(1)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+        expect(pass_.stats.specializations_created).to_equal(1)
+        val inner_name = pass_.mangled_name("context_failure", [array])
+        expect(pass_.specialized_functions.has(inner_name)).to_equal(true)
+        val inner_function: HirFunction = pass_.specialized_functions[inner_name]
+        expect(hir_type_key(inner_function.return_type)).to_equal(hir_type_key(inner_result))
+        val rewritten_return = pass_.rewrite_expr(mk_expr(HirExprKind.Return(context_call())))
+        val outer_name = pass_.mangled_name("context_failure", [scalar])
+        expect(pass_.specialized_functions.has(outer_name)).to_equal(true)
+        val outer_function: HirFunction = pass_.specialized_functions[outer_name]
+        expect(hir_type_key(outer_function.return_type)).to_equal(hir_type_key(outer_result))
+        expect(pass_.stats.call_sites_found).to_equal(2)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+        expect(pass_.stats.specializations_created).to_equal(2)
+        expect(hir_type_key(pass_.current_return_type.unwrap())).to_equal(hir_type_key(outer_result))
