@@ -177,3 +177,47 @@ describe "qualified enum payload validation":
         expect((mir.local_mir_type_of(decoded_float) ?? MirType.unit()).kind == MirTypeKind.F32).to_be(true)
         val encoded_float = mir.encode_declared_enum_payload_slot(decoded_float)
         expect((mir.local_mir_type_of(encoded_float) ?? MirType.unit()).kind == MirTypeKind.I64).to_be(true)
+
+    it "retains collection handles and element metadata on declared payload extraction":
+        var mir = MirLowering.new(SymbolTable.new())
+        var builder = mir.builder
+        builder.begin_function(SymbolId(id: 92), "collection_payload_probe", MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+        val raw_array = builder.emit_const_int(4097)
+        val raw_dict = builder.emit_const_int(8193)
+        val raw_scalar = builder.emit_const_int(17)
+        mir.builder = builder
+        val element = enum_test_type(HirTypeKind.Int(64, true))
+        val array_type = enum_test_type(HirTypeKind.Array(element, nil))
+        val array = mir.decode_declared_enum_payload_slot(raw_array, array_type)
+        expect(array.id).to_equal(raw_array.id)
+        expect(mir.runtime_array_locals.get(array.id) ?? false).to_be(true)
+        expect(mir.runtime_dict_locals.get(array.id) ?? false).to_be(false)
+        val array_element: MirType = mir.runtime_elem_value_type[array.id]
+        expect(array_element.kind == MirTypeKind.I64).to_be(true)
+        val dict_type = enum_test_type(HirTypeKind.Dict(enum_test_type(HirTypeKind.Str), element))
+        val dict = mir.decode_declared_enum_payload_slot(raw_dict, dict_type)
+        expect(dict.id).to_equal(raw_dict.id)
+        expect(mir.runtime_dict_locals.get(dict.id) ?? false).to_be(true)
+        expect(mir.runtime_array_locals.get(dict.id) ?? false).to_be(false)
+        val dict_element: MirType = mir.runtime_elem_value_type[dict.id]
+        expect(dict_element.kind == MirTypeKind.I64).to_be(true)
+        val scalar = mir.decode_declared_enum_payload_slot(raw_scalar, element)
+        expect(scalar.id).to_equal(raw_scalar.id)
+        expect(mir.runtime_array_locals.get(scalar.id) ?? false).to_be(false)
+        expect(mir.runtime_dict_locals.get(scalar.id) ?? false).to_be(false)
+
+    it "retains nested slice element metadata without decoding the handle":
+        var mir = MirLowering.new(SymbolTable.new())
+        var builder = mir.builder
+        builder.begin_function(SymbolId(id: 93), "slice_payload_probe", MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+        val raw = builder.emit_const_int(12289)
+        mir.builder = builder
+        val nested = enum_test_type(HirTypeKind.Array(enum_test_type(HirTypeKind.Int(64, true)), nil))
+        val decoded = mir.decode_declared_enum_payload_slot(raw, enum_test_type(HirTypeKind.Slice(nested)))
+        expect(decoded.id).to_equal(raw.id)
+        expect(mir.runtime_array_locals.get(decoded.id) ?? false).to_be(true)
+        val actual_element: MirType = mir.runtime_elem_value_type[decoded.id]
+        val expected_element = mir.lower_type(nested)
+        expect(actual_element.kind == expected_element.kind).to_be(true)
