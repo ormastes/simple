@@ -1063,7 +1063,7 @@ fn test_array_sorted_orders_text_like_the_interpreter() {
 /// after ASCII -- exactly Rust `String` ordering, which the interpreter uses.
 #[test]
 fn test_array_sort_and_sort_desc_order_text_bytewise() {
-    let input = ["b", "ab", "a", "B", "\u{e9}", ""];
+    let input = ["b", "ab", "a", "B", "\u{e9}", "", "a\0z", "\u{1f600}"];
     let mut expected: Vec<String> = input.iter().map(|s| s.to_string()).collect();
     expected.sort();
 
@@ -1086,6 +1086,25 @@ fn test_array_sort_and_sort_desc_order_text_bytewise() {
     assert_eq!(got_desc, expected_desc);
 }
 
+#[test]
+fn test_array_sorted_text_mixed_pairs_preserve_existing_ordering() {
+    let text = text_value("pear");
+    for other in [RuntimeValue::from_int(7), RuntimeValue::from_float(2.5), RuntimeValue::from_bool(true), RuntimeValue::NIL] {
+        for pair in [[text, other], [other, text]] {
+            let input = rt_array_new(2);
+            for value in pair { assert!(rt_array_push(input, value)); }
+            let output = rt_array_sorted(input);
+            assert_eq!(rt_array_get(output, 0).to_raw(), pair[0].to_raw());
+            assert_eq!(rt_array_get(output, 1).to_raw(), pair[1].to_raw());
+        }
+    }
+    let input = rt_array_new(2);
+    assert!(rt_array_push(input, RuntimeValue::from_float(-100.0)));
+    assert!(rt_array_push(input, RuntimeValue::from_int(100)));
+    let output = rt_array_sorted(input);
+    assert_eq!(rt_array_get(output, 0).as_int(), 100);
+    assert_eq!(rt_array_get(output, 1).as_float(), -100.0);
+}
 #[test]
 fn test_array_first_last() {
     let array = rt_array_new(3);
