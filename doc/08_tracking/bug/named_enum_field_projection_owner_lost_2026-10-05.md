@@ -47,3 +47,12 @@ caches and failed attempts. No running Phase2/3/4 input changes from this lane.
 This patch addresses the proven projection omission only. Result factory
 inference, optional text, enum-arm and I64 iterable failures remain distinct
 until their own probes or source traces establish a shared cause.
+
+Peer-review correction: ownerless Named symbols must be actual Enum declarations
+before using the bare-name variant table. A same-named Struct without a defining
+module cannot borrow another declaration's enum storage. The scalar SymbolTable
+reader keeps HirSymbol Optional transport inside its existing owner boundary.
+Qualified imported aliases retain their owner-qualified variant-table admission.
+The fifth unit case rejects the ownerless Struct, accepts an ownerless Enum and
+rejects a missing symbol. Native correctness and elapsed/RSS validation remain
+UNRUN; this follow-up does not qualify the compiler or change live build inputs.
