@@ -67,6 +67,8 @@ use compiler.driver.driver_typecheck_severity.{TypecheckPassSeverity, typecheck_
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.hir_codec.{hir_codec_roundtrip_selfcheck, hir_codec_roundtrip_line}
 use compiler.driver.driver_hir_cache.{hir_cache_enabled, hir_cache_closure_digest, hir_cache_key, hir_cache_has, hir_cache_load, hir_cache_store, hir_cache_summary, hir_cache_last_warnings, hir_shard_active, hir_shard_owns, hir_shard_levels, hir_shard_level_count, hir_shard_visit_order, hir_shard_summary}
+use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
+use compiler.driver.driver_hir_cache.{hir_cache_store_in_owned_scope, hir_cache_clear_last_warnings}
 use compiler.driver.driver_hir_cache.{hir_shard_begin, hir_shard_finish, hir_shard_complete, hir_shard_guard_block, hir_shard_inventory}
 use compiler.hir.hir_lowering.items.{bootstrap_hir_modules_add_from_module, hir_module_logical_name_from_path}
 use compiler.common.cache.reverse_reference_facts.{
@@ -447,6 +449,121 @@ impl CompilerDriver:
             return Err("transient parser scope end failed for {source.path}")
         Ok(hir_module)
 
+    me lower_streaming_hir_shard_transaction_v1(
+        lowering: HirLowering, source: SourceFile, is_entry: bool, cache_key: text
+    ) -> i64:
+        # 0 = validated cache hit, 1 = published full HIR, 2 = source diagnostic,
+        # -1 = infrastructure/ownership failure. No HirModule escapes this scope.
+        if not rt_transient_array_scope_begin():
+            self.ctx.add_error("HIR shard transient scope unavailable for {source.path}")
+            return -1
+        val reverse_token = reverse_reference_module_begin_v1()
+        if reverse_token < 0:
+            val ended = driver_end_transient_parse_scope()
+            self.ctx.add_error("HIR shard reverse-reference scope unavailable; cleanup={ended}")
+            return -1
+        val parser_generation = parser_initialization_generation_v1()
+        val flat_rows_before = bootstrap_hir_module_count()
+        lowering.begin_module(source.path)
+        var module: HirModule = nil
+        var cached = false
+        var stored = false
+        var infrastructure_error = ""
+        var errors: [text] = []
+        var warnings: [text] = []
+        val cache_result = hir_cache_load(cache_key)
+        if val found = cache_result:
+            module = found
+            cached = true
+            warnings = hir_cache_last_warnings()
+        else:
+            val parsed = self.parse_full_frontend_in_borrowed_scope_selected_v1(
+                source.content, source.path, source.module_name)
+            if parsed.is_err():
+                errors.push(parsed.unwrap_err())
+            else:
+                val parser_module = parsed.unwrap()
+                driver_register_parser_module_source_aliases_v1(parser_module, source.path)
+                if par_had_error_get():
+                    errors.push(driver_parse_error_message(source.path))
+                else:
+                    module = lowering.lower_parser_module_unstub(parser_module, is_entry)
+                    var error_index = 0
+                    while error_index < lowering.lowering_error_count():
+                        val message = lowering.lowering_error_message_at(error_index, source.module_name)
+                        if lowering.lowering_error_is_recovered_at(error_index):
+                            warnings.push(message)
+                        else:
+                            if errors.len() < 10:
+                                eprint("[hir-fatal] path={source.path} error_idx={error_index} text={message}")
+                            errors.push(message)
+                        error_index = error_index + 1
+                    if module == nil and errors.len() == 0:
+                        infrastructure_error = "HIR shard lowering returned no module"
+        if errors.len() == 0 and infrastructure_error == "":
+            if not cached and (env_get("SIMPLE_HIR_CODEC_ROUNDTRIP")) == "1":
+                val round_trip = hir_codec_roundtrip_selfcheck(module)
+                print hir_codec_roundtrip_line(round_trip, source.path)
+                module = round_trip.module
+            driver_log_typed_hir_abi_interface_v1(module, source.path)
+            if cached:
+                stored = true
+            else:
+                # Reuse the existing atomic codec writer while OUR scope owns
+                # its scratch. hir_cache_store would try to nest a new scope.
+                stored = hir_cache_store_in_owned_scope(cache_key, module, warnings)
+                if not stored:
+                    infrastructure_error = "HIR shard cache publication failed for {source.path}"
+
+        # Retain diagnostics and genuinely phase-wide memo/registry roots only.
+        # Module bodies and their symbol-table snapshots stay transient, including
+        # cache-hit decodes. A completed worker never needs these for MIR/codegen.
+        if not rt_transient_array_scope_pause():
+            driver_rollback_flat_hir_row_or_abort(flat_rows_before)
+            val ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            # Retained memos may still reference this failed scope. Do not return
+            # to the driver or inspect the lowerer after reclamation.
+            eprint("HIR shard scope pause failed; cleanup={ended}")
+            exit(1)
+            return -1
+        val errors_owned = rt_transient_heap_promote(errors)
+        val warnings_owned = rt_transient_heap_promote(warnings)
+        val failure_owned = infrastructure_error == "" or rt_transient_heap_promote(infrastructure_error)
+        val memos_owned = lowering.promote_phase_memo_transient_owners()
+        val frontend_owned = driver_promote_retained_frontend_owners_v1(
+            parser_initialization_generation_v1() != parser_generation)
+        # Flat rows are unnecessary in a cache worker. Remove their references
+        # before reclaiming the graph; the final compiler loads the complete cache.
+        driver_rollback_flat_hir_row_or_abort(flat_rows_before)
+        # Reset all module-local owners while allocations are paused, so no field
+        # on the retained lowerer points into the scope about to be reclaimed.
+        lowering.begin_module(source.path)
+        hir_cache_clear_last_warnings()
+        if not (errors_owned and warnings_owned and failure_owned and memos_owned and frontend_owned):
+            val ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
+            # Partial root promotion cannot authorize another task in this
+            # process. The parent records an incomplete infrastructure failure.
+            eprint("HIR shard retained-root promotion failed; cleanup={ended}")
+            exit(1)
+            return -1
+        if not driver_publish_reverse_reference_parse_scope_v1(reverse_token):
+            self.ctx.add_error("HIR shard scope publication/reclamation failed for {source.path}")
+            return -1
+        # These context allocations happen AFTER scratch reclamation.
+        for message in warnings:
+            if not driver_hir_ambient_bootstrap_enabled(self.ctx):
+                self.ctx.add_warning(message)
+        for message in errors:
+            self.ctx.add_error(message)
+        if infrastructure_error != "":
+            self.ctx.add_error(infrastructure_error)
+            return -1
+        if errors.len() > 0: return 2
+        if not stored:
+            self.ctx.add_error("HIR shard completed without a durable module")
+            return -1
+        if cached: 0 else: 1
+
     me lower_and_check_streaming_surfaces_impl() -> bool:
         if not self.streaming_surface_owner_ready:
             self.ctx.add_error("Streaming module surfaces missing after phase 2")
@@ -465,6 +582,7 @@ impl CompilerDriver:
         if driver_hir_explicit_semantic_policy(self.ctx):
             lowering.use_explicit_semantic_policy()
         var lowered_by_surface: Dict<i64, HirModule> = {}
+        var shard_completed_surfaces: Dict<i64, bool> = {}
         var poisoned_by_surface: Dict<i64, bool> = {}
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
         var validation_module_keys: [text] = []
@@ -534,6 +652,9 @@ impl CompilerDriver:
                 hir_shard_guard_block("durable memory snapshot or source identity guard failed")
                 mem_snapshot_abort()
                 return false
+            if hir_shard_mode and shard_completed_surfaces.contains_key(surface_index):
+                hir_loop_pos = hir_loop_pos + 1
+                continue
             if lowered_by_surface.contains_key(surface_index):
                 val alias_hir = lowered_by_surface[surface_index]
                 if not phase_hir_modules.contains_key(source.module_name):
@@ -609,6 +730,30 @@ impl CompilerDriver:
                 if claim == 0:
                     hir_loop_pos = hir_loop_pos + 1
                     continue
+                val shard_status = self.lower_streaming_hir_shard_transaction_v1(
+                    lowering, source, is_requested_bootstrap_entry, hir_stream_key)
+                if shard_status < 0:
+                    hir_shard_guard_block("HIR shard transaction failed before safe completion")
+                    return false
+                val source_failed = shard_status == 2
+                if not hir_shard_finish(source.path, if source_failed: "FAILED" else: "PASS", not source_failed):
+                    hir_shard_guard_block("HIR shard terminal receipt publication failed")
+                    self.ctx.add_error("HIR shard terminal receipt publication failed")
+                    return false
+                if source_failed:
+                    poisoned_by_surface[surface_index] = true
+                    var poison_ctx = self.ctx
+                    poison_ctx.mark_module_poisoned(source.module_name)
+                    if poison_ctx.poison_budget_exhausted(): return false
+                else:
+                    shard_completed_surfaces[surface_index] = true
+                    progress_hir_done = progress_hir_done + 1
+                    if shard_status == 1: hir_shard_lowered = hir_shard_lowered + 1
+                log_build_progress("hir", "modules", progress_hir_done,
+                    surfaces.surfaces.len(), source.module_name, 2, 6, 0,
+                    self.ctx.poisoned_module_count_value, "running")
+                hir_loop_pos = hir_loop_pos + 1
+                continue
             val hir_stream_cached: HirModule? = if hir_stream_key != "":
                 hir_cache_load(hir_stream_key)
             else:
