@@ -16,12 +16,14 @@ int64_t rt_array_len_safe(int64_t v){return ((TestBytes *)(uintptr_t)v)->len;}
 int64_t rt_array_data_ptr(SplArray *v){return (int64_t)(uintptr_t)((TestBytes *)v)->data;}
 int64_t rt_bytes_from_raw(int64_t p,int64_t n){TestBytes*b=calloc(1,sizeof(*b));b->len=n;b->data=malloc(n?n:1);if(n)memcpy(b->data,(void*)(uintptr_t)p,n);return(int64_t)(uintptr_t)b;}
 static TestBytes boxed(uint8_t *p,int64_t n){TestBytes b={p,n};return b;}
+#include "backend_plugin_v1_request_wire.h"
 int main(int argc,char**argv){
  if(argc<3)return 2;
  int expected=atoi(argv[2]);
- uint8_t request[16]={1,0,0,0,2,0,0,0,2,0,0,0,0,0,0,0};
+ uint8_t request[512];
  uint8_t mir[4]={'M','I','R','1'};
- int64_t request_len=(argc>3&&strcmp(argv[3],"bad-request")==0)?8:16;
+ int64_t request_len=(int64_t)fixture_request_mutate(request,fixture_request(request),argc>3?argv[3]:NULL);
+ if(argc>3&&strcmp(argv[3],"bad-request")==0)request_len=8;
  int64_t mir_len=(argc>3&&strcmp(argv[3],"bad-mir")==0)?0:4;
  TestBytes path=boxed((uint8_t*)argv[1],strlen(argv[1])),req=boxed(request,request_len),m=boxed(mir,mir_len);
 #ifdef _WIN32

@@ -54,6 +54,23 @@ not replace the primary compile error.
 
 ## C ABI v1 wire and ownership contract
 
+The complete request packet uses `SBQ1` magic, schema1 and ABI1, followed by
+role/capabilities and six length-prefixed fields: backend name, target, CPU,
+features, optimization and MIR ABI digest. Features use a u32 item count and
+u32 length per UTF-8 item, preserving order and embedded delimiters. The packet
+header is48bytes; total size is at most64KiB. Text/item lengths are at most4KiB,
+feature count128 and feature section32KiB. Only CPU may be empty to explicitly
+request the provider default. Required text is nonempty, strict UTF-8 and NUL-free.
+Unknown schema/ABI/role/capability bits, truncation and trailing bytes are rejected
+before provider loading. The incomplete historical16byte packet is unsupported.
+Plugin path remains a local selection field, separate from provider configuration.
+
+Pure-Simple transport owns encoding and roundtrip validation. Runtime ABI glue
+decodes bounded borrowed slices without heap allocation; providers must copy
+configuration they retain after open_session returns. Single/batch release and
+borrowed-library lifetime are unchanged. This does not implement production
+provider descriptors, full MIR fidelity or dynamic loader completion.
+
 `simple_backend_plugin_v1()` returns a borrowed immutable descriptor. Every
 structure begins with `abi_version` and `struct_size`, validated before its tail
 is read. Text and MIR inputs are borrowed byte slices valid only during a call.

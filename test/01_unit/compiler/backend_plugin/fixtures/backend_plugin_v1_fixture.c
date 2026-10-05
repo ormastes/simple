@@ -20,7 +20,16 @@ static int32_t owned(const char *s, uint32_t kind, simple_backend_compile_result
     memcpy(p, s, n); out->abi_version=1; out->struct_size=sizeof(*out);
     out->result_kind=kind; out->status=0; out->payload=(simple_backend_owned_buffer_v1){p,n,(uint64_t)(uintptr_t)p}; return 0;
 }
-static int32_t open_(const simple_backend_request_v1 *r,uint64_t *s){if(SBP_FAIL_STAGE==1)return 31;if(!r||!s||r->abi_version!=1||r->struct_size<sizeof(*r))return 20;opens++;*s=0x51A7E;return 0;}
+static int32_t open_(const simple_backend_request_v1 *r,uint64_t *s){if(SBP_FAIL_STAGE==1)return 31;if(!r||!s||r->abi_version!=1||r->struct_size<sizeof(*r))return 20;
+#ifdef SBP_REQUIRE_CONFIG
+ const char *expected[]={"cranelift","x86_64-pc-windows-msvc","znver3","speed","mir-config-v1"};
+ simple_backend_slice_v1 values[]={r->backend_name,r->target,r->cpu,r->optimization,r->mir_abi_digest};
+ static const uint8_t features[]={2,0,0,0,5,0,0,0,'+','s','s','e','2',4,0,0,0,'-','a','v','x'};
+ if(r->role!=2||r->required_capabilities!=10)return 40;
+ for(unsigned i=0;i<5;++i)if(values[i].size!=strlen(expected[i])||!values[i].data||memcmp(values[i].data,expected[i],values[i].size))return 41;
+ if(r->features_wire.size!=sizeof(features)||!r->features_wire.data||memcmp(r->features_wire.data,features,sizeof(features)))return 42;
+#endif
+ opens++;*s=0x51A7E;return 0;}
 static int32_t compile_(uint64_t s,simple_backend_slice_v1 m,simple_backend_compile_result_v1 *o){if(SBP_FAIL_STAGE==2)return 32;if(s!=0x51A7E||!m.data||m.size!=4)return 21;return owned("module-ok",1,o);}
 static int32_t finalize_(uint64_t s,simple_backend_compile_result_v1 *o){if(SBP_FAIL_STAGE==3)return 33;return s==0x51A7E?owned("object-ok",2,o):22;}
 static int32_t diagnostics_(uint64_t s,simple_backend_owned_buffer_v1 *o){if(SBP_FAIL_STAGE==4)return 34;simple_backend_compile_result_v1 r;int32_t rc=owned("fixture-diagnostic",0,&r);if(!rc)*o=r.payload;return s==0x51A7E?rc:23;}

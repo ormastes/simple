@@ -4,23 +4,51 @@ use compiler.common.backend_plugin.model.{BackendRole, BackendCapability,
     BackendPluginRequestV1}
 use compiler.backend_plugin.transport.{BACKEND_PLUGIN_BRIDGE_MAGIC_V1,
     BACKEND_PLUGIN_BRIDGE_VERSION_V1, BACKEND_PLUGIN_BRIDGE_HEADER_SIZE_V1,
-    BACKEND_PLUGIN_REQUEST_SIZE_V1, backend_plugin_request_encode_v1,
+    BACKEND_PLUGIN_REQUEST_SIZE_V1, backend_plugin_request_encode_v1, backend_plugin_request_decode_v1,
     backend_plugin_envelope_encode_v1, backend_plugin_envelope_decode_v1}
 
 fn transport_request() -> BackendPluginRequestV1:
     BackendPluginRequestV1(
-        BackendRole.CompilerAot, "dynamic", "host", "generic", [], "debug",
+        BackendRole.CompilerAot, "dynamic", "host", "generic", ["+sse2", "-avx"], "debug",
         "mir-v1", [BackendCapability.ObjectEmit, BackendCapability.Optimization],
         "/tmp/provider.so", true)
 
 describe "backend plugin packed transport":
-    it "encodes the frozen request prefix in little-endian order":
+    it "round trips every provider configuration field without provider path leakage":
         val wire = backend_plugin_request_encode_v1(transport_request())
-        expect(wire.len()).to_equal(BACKEND_PLUGIN_REQUEST_SIZE_V1)
-        expect(wire[0] as i64).to_equal(BACKEND_PLUGIN_BRIDGE_VERSION_V1)
-        expect(wire[4] as i64).to_equal(2)
-        expect(wire[8] as i64).to_equal(10)
-        expect(wire[9] as i64).to_equal(0)
+        expect(wire.len()).to_be_greater_than(BACKEND_PLUGIN_REQUEST_SIZE_V1)
+        val decoded = backend_plugin_request_decode_v1(wire).unwrap()
+        expect(decoded.backend_name).to_equal("dynamic")
+        expect(decoded.target).to_equal("host")
+        expect(decoded.cpu).to_equal("generic")
+        expect(decoded.features).to_equal(["+sse2", "-avx"])
+        expect(decoded.optimization).to_equal("debug")
+        expect(decoded.mir_abi_digest).to_equal("mir-v1")
+        expect(decoded.required_capabilities).to_equal([BackendCapability.ObjectEmit, BackendCapability.Optimization])
+        expect(decoded.has_plugin_path).to_equal(false)
+        expect(backend_plugin_request_encode_v1(decoded)).to_equal(wire)
+
+    it "rejects incomplete legacy requests unsupported versions and malformed lengths":
+        expect(backend_plugin_request_decode_v1([1, 0, 0, 0]).is_err()).to_equal(true)
+        var version = backend_plugin_request_encode_v1(transport_request())
+        version[4] = 2
+        expect(backend_plugin_request_decode_v1(version).is_err()).to_equal(true)
+        var length = backend_plugin_request_encode_v1(transport_request())
+        length[27] = 255
+        expect(backend_plugin_request_decode_v1(length).is_err()).to_equal(true)
+        var trailing = backend_plugin_request_encode_v1(transport_request())
+        trailing.push(0)
+        expect(backend_plugin_request_decode_v1(trailing).is_err()).to_equal(true)
+
+    it "preserves empty CPU and ordered feature boundaries and rejects empty required fields":
+        var request = transport_request()
+        request.cpu = ""
+        request.features = ["a,b", "c"]
+        val decoded = backend_plugin_request_decode_v1(backend_plugin_request_encode_v1(request)).unwrap()
+        expect(decoded.cpu).to_equal("")
+        expect(decoded.features).to_equal(["a,b", "c"])
+        request.target = ""
+        expect(backend_plugin_request_encode_v1(request).len()).to_equal(0)
 
     it "round trips payload and diagnostic through the frozen envelope":
         val wire = backend_plugin_envelope_encode_v1(-7, 3, [1, 2, 255], "bad provider")
