@@ -1,6 +1,30 @@
 """Inner pipe adapter for the reviewed bounded logger; outer owner owns CFEC."""
 import hashlib,importlib.util,json,pathlib,queue,subprocess,threading,time
 
+def diagnostic_evidence(output):
+    """Compact verified evidence for result rows and failure triage, not verdicts."""
+    output=pathlib.Path(output)
+    receipt=json.loads((output/'stream.json').read_text(encoding='utf-8'))
+    path=output/'diagnostics.json'
+    assert pathlib.Path(receipt['diagnostic_summary_path']).resolve()==path.resolve()
+    with path.open('rb') as source:data=source.read(512*1024+1)
+    assert len(data)<=512*1024,'Default diagnostic summary exceeds bounded schema'
+    assert hashlib.sha256(data).hexdigest()==receipt['diagnostic_summary_sha256']
+    summary=json.loads(data)
+    assert summary['schema']=='bounded-live-diagnostic-events-v1'
+    assert summary['stream_sha256']==receipt['stream_sha256'] and summary['stream_bytes']==receipt['bytes_seen']
+    assert summary['events_retained']==len(summary['records'])<=64
+    assert summary['events_observed']==summary['events_retained']+summary['events_dropped']
+    counts={}
+    for row in summary['records']:
+        marker=row['marker'].lower();counts[marker]=counts.get(marker,0)+1
+    return dict(path=str(path),sha256=receipt['diagnostic_summary_sha256'],
+                events_observed=summary['events_observed'],events_dropped=summary['events_dropped'],
+                truncated_events=summary['truncated_events'],retained_markers=counts,
+                excerpts=[dict(offset=r['offset'],text=r['text'][:512],truncated=r['truncated'] or len(r['text'])>512) for r in summary['records'][-4:]],
+                qualification='OBSERVATION_ONLY_NOT_A_VERDICT')
+
+
 def load_logger(path, expected_sha):
     path=pathlib.Path(path)
     with path.open('rb') as source:

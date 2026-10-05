@@ -67,3 +67,10 @@ eight-chunk queue. Older P2 drain wrappers using `read(65536)` and exit-only
 publication must adopt this reviewed adapter in a new packet; active frozen
 wrappers are not edited. A source pin and root-reviewed caller change remain
 required for that P2 integration.
+
+The pending P3 runner consumes `diagnostic_evidence()` into each compile result:
+summary path/SHA, marker counts, explicit drops/truncation and at most four
+512-character excerpts. The reader verifies the summary against the stream
+receipt and digest; a ninth focused test PASS in0.023 seconds checks consumption,
+truncation visibility and tampering rejection. Thus failure triage receives the
+summary instead of depending on an otherwise unused sidecar JSON file.

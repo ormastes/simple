@@ -20,6 +20,20 @@ M=module('diagnostic_subject',ROOT/'bounded-error-summary.py')
 A=module('adapter_subject',ROOT/'bounded-stream-live-adapter.py')
 
 class DiagnosticsTests(unittest.TestCase):
+    def test_triage_consumes_only_bound_summary_and_reports_truncation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            t=pathlib.Path(temp);s=M.DiagnosticStreamSummary(max_events=1,event_bytes=64)
+            s.feed(b'[hir-fatal] first\n[hir-fatal] '+b'x'*200)
+            summary=s.finish();data=json.dumps(summary).encode();p=t/'diagnostics.json';p.write_bytes(data)
+            receipt=dict(diagnostic_summary_path=str(p),diagnostic_summary_sha256=hashlib.sha256(data).hexdigest(),stream_sha256=summary['stream_sha256'],bytes_seen=summary['stream_bytes'])
+            (t/'stream.json').write_text(json.dumps(receipt))
+            row=A.diagnostic_evidence(t)
+            self.assertEqual(row['retained_markers'],{'[hir-fatal]':1})
+            self.assertEqual(row['events_dropped'],1);self.assertEqual(row['truncated_events'],1)
+            self.assertTrue(row['excerpts'][0]['truncated'])
+            p.write_bytes(data+b' ')
+            with self.assertRaises(AssertionError):A.diagnostic_evidence(t)
+
     def test_sparse_output_is_visible_before_child_eof(self):
         class Retention:
             def __init__(self,stream,cap,mode):
