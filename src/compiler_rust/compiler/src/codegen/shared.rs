@@ -39,10 +39,11 @@ pub(crate) fn enum_runtime_type_id(runtime_name: &str) -> u32 {
     (positive.rem_euclid(2_147_483_646) as u32) + 2
 }
 
-/// Return the platform-appropriate calling convention.
+/// Return the host calling convention for host-only JIT/FFI entry points.
 ///
 /// On Windows, Cranelift JIT-compiled code must use WindowsFastcall to match
 /// the ABI that Rust `fn()` pointers expect. On other platforms, SystemV is used.
+/// Cross-target code generation must use the owning module ISA instead.
 pub fn platform_call_conv() -> CallConv {
     if cfg!(target_os = "windows") {
         CallConv::WindowsFastcall
@@ -67,7 +68,7 @@ pub fn create_body_stub<M: Module>(
     ctx: &mut cranelift_codegen::Context,
     name: &str,
 ) -> Result<cranelift_module::FuncId, String> {
-    let call_conv = platform_call_conv();
+    let call_conv = module.isa().default_call_conv();
     let sig = Signature::new(call_conv);
 
     let func_id = module
@@ -107,7 +108,7 @@ pub fn declare_functions<M: Module>(
             continue;
         }
 
-        let sig = build_mir_signature(func);
+        let sig = build_mir_signature(func, module.isa().default_call_conv());
 
         // Determine linkage:
         // - Extern functions (empty blocks) use Import linkage
@@ -137,8 +138,8 @@ pub fn declare_functions<M: Module>(
 /// import convention. All Simple values are i64-tagged at the ABI level,
 /// and function body variables are declared as I64 (body.rs).
 /// `adapt_args_to_signature` handles type conversions at call sites.
-pub fn build_mir_signature(func: &MirFunction) -> Signature {
-    let call_conv = platform_call_conv();
+/// The caller supplies the target module convention, never the compiler host.
+pub fn build_mir_signature(func: &MirFunction, call_conv: CallConv) -> Signature {
     let mut sig = Signature::new(call_conv);
     let runtime_param_types = crate::codegen::runtime_sffi::RUNTIME_FUNCS
         .iter()
@@ -243,7 +244,7 @@ mod tests {
         func.params.push(param("discriminant", TypeId::I32));
         func.params.push(param("payload", TypeId::I64));
 
-        let sig = build_mir_signature(&func);
+        let sig = build_mir_signature(&func, platform_call_conv());
 
         assert_eq!(sig.params[0].value_type, types::I32);
         assert_eq!(sig.params[1].value_type, types::I32);
@@ -258,7 +259,7 @@ mod tests {
         func.params.push(param("discriminant", TypeId::I64));
         func.params.push(param("payload", TypeId::I64));
 
-        let sig = build_mir_signature(&func);
+        let sig = build_mir_signature(&func, platform_call_conv());
 
         assert_eq!(sig.params[0].value_type, types::I64);
         assert_eq!(sig.params[1].value_type, types::I64);

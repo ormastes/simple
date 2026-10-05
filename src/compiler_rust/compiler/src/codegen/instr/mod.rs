@@ -574,7 +574,7 @@ pub fn compile_instruction<M: Module>(
                     // Cross-module function reference used as a value.
                     // Data exports are handled above so imported top-level vals do
                     // not get lowered to function addresses.
-                    let call_conv = crate::codegen::shared::platform_call_conv();
+                    let call_conv = ctx.module.isa().default_call_conv();
                     let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
                     sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
                     sig.returns.push(cranelift_codegen::ir::AbiParam::new(types::I64));
@@ -708,7 +708,7 @@ pub fn compile_instruction<M: Module>(
             let func_id = if let Some(func_id) = ctx.func_ids.get(&symbol).copied() {
                 func_id
             } else {
-                let sig = Signature::new(super::shared::platform_call_conv());
+                let sig = Signature::new(ctx.module.isa().default_call_conv());
                 let func_id = ctx
                     .module
                     .declare_function(&symbol, Linkage::Import, &sig)
