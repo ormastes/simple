@@ -1,0 +1,222 @@
+# Before source freeze: create a private candidate, then admit it only after
+# canonical TaskRunner original-form receipts. Never mutate an input checkout.
+use app.bug.workaround_retirement.{WorkaroundRetirementV1, WorkaroundTestProofV1,
+    workaround_retirement_validate_v1, workaround_retirement_encode_v1,
+    workaround_retirement_hunk_v1, workaround_retirement_source_v1,
+    workaround_retirement_proofs_v1, workaround_commit_valid_v1,
+    workaround_retirement_proof_encode_v1}
+use app.bug.workaround_store.{workaround_git, workaround_bug_snapshot}
+use app.bug.workaround_index.{workaround_sdn_quote}
+use app.bootstrap_builder.native_group_phase2_admission.{phase2_stage2_admission_open_v1}
+use app.bootstrap_builder.native_group_phase2_source_snapshot.{phase2_source_authority_decode_v1}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_contains}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read,
+    workaround_host_publish, workaround_host_temp_dir, workaround_host_exists}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_is_regular_no_follow}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+
+struct WorkaroundRebuildCandidateV1:
+    transaction_root: text
+    source_root: text
+    revision: text
+    source_digest: text
+    patch_digest: text
+    record_digest: text
+    producer_digest: text
+    producer_source: text
+    rollback_revision: text
+    root_proof_digest: text
+    producer_receipt: text
+    producer_receipt_digest: text
+
+fn workaround_rebuild_outside_v1(parent: text, source: text) -> Result<bool, text>:
+    val outer = path_final_existing(parent)?
+    val inner = path_final_existing(source)?
+    Ok(not path_identity_contains(outer, inner) and not path_identity_contains(inner, outer))
+
+fn workaround_rebuild_index_visible_v1(root: text) -> Result<bool, text>:
+    val rows = workaround_git(root, ["ls-files", "-v", "-z"])?
+    for row in rows.split("\0"):
+        if row == "": continue
+        # H is an ordinary cached entry. Lowercase marks assume-unchanged;
+        # S marks skip-worktree. Neither may hide candidate source changes.
+        if not row.starts_with("H "):
+            return Err("blocked-retirement: nonordinary or hidden Git index entry")
+    Ok(true)
+
+fn workaround_rebuild_producer_v1(root: text, fix: text, revision: text,
+        digest: text, receipt: text) -> Result<text, text>:
+    val admitted = phase2_stage2_admission_open_v1(receipt)?
+    if admitted.producer_digest != digest:
+        return Err("producer artifact differs from its actual admission")
+    val authority = workaround_host_read(admitted.source_authority_path, 67108864)?
+    if sha256_text(authority) != admitted.source_authority_digest:
+        return Err("producer source authority changed")
+    val records = phase2_source_authority_decode_v1(authority)?
+    val changed = workaround_git(root, ["diff-tree", "--no-commit-id", "--name-only", "-z",
+        "-r", fix + "^", fix, "--", "src/"])?
+    var count = 0
+    for path in changed.split("\0"):
+        if path == "": continue
+        val fixed = workaround_git(root, ["show", fix + ":" + path])?
+        val actual_revision = workaround_git(root, ["show", revision + ":" + path])?
+        if actual_revision != fixed:
+            return Err("producer revision changed the linked root-fix source; requires reviewed new record")
+        var found = false
+        for entry in records:
+            if entry.relative_path == path:
+                if entry.kind != "file-hex" or entry.digest != sha256_text(fixed):
+                    return Err("actual producer source does not contain the linked root-fix bytes")
+                found = true
+        if not found: return Err("root-fix source absent from actual producer authority")
+        count = count + 1
+    if count == 0: return Err("root fix has no authenticated source change")
+    Ok(admitted.receipt_digest)
+
+fn workaround_rebuild_lineage_v1(root: text, value: WorkaroundRetirementV1,
+        revision: text, producer_source: text) -> Result<bool, text>:
+    if not workaround_commit_valid_v1(revision) or not workaround_commit_valid_v1(producer_source):
+        return Err("invalid rebuild or producer source revision")
+    val head = workaround_git(root, ["rev-parse", "--verify", "HEAD"])?
+    if head.trim() != revision:
+        return Err("rebuild source revision changed")
+    # Fetched objects and database status are deliberately insufficient.
+    if workaround_git(root, ["merge-base", "--is-ancestor", value.fix_commit, revision]).is_err():
+        return Err("blocked-retirement: fix_available is not fix_applied to this rebuild revision")
+    workaround_git(root, ["merge-base", "--is-ancestor", value.workaround_commit, revision])?
+    workaround_git(root, ["merge-base", "--is-ancestor", value.fix_commit, producer_source])?
+    Ok(true)
+
+fn workaround_rebuild_regular_v1(root: text, path: text) -> bool:
+    if not dir_is_real_no_follow(root): return false
+    val parts = path.split("/")
+    var current = root
+    for index in 0..parts.len() - 1:
+        current = current + "/" + parts[index]
+        if not dir_is_real_no_follow(current): return false
+    file_is_regular_no_follow(root + "/" + path)
+
+fn workaround_rebuild_pin_v1(value: WorkaroundRebuildCandidateV1) -> text:
+    var out = "workaround_rebuild |schema, revision, source, patch, registry, producer, producer_source, rollback, root_proof, producer_receipt|\n    1"
+    for field in [value.revision, value.source_digest, value.patch_digest,
+            value.record_digest, value.producer_digest, value.producer_source, value.rollback_revision,
+            value.root_proof_digest, value.producer_receipt_digest]:
+        out = out + ", " + workaround_sdn_quote(field)
+    out + "\n"
+
+fn workaround_rebuild_prepare_v1(root: text, private_parent: text,
+        revision: text, producer_source: text, producer_digest: text,
+        record: WorkaroundRetirementV1,
+        root_fix_proofs: [WorkaroundTestProofV1], producer_receipt: text) -> Result<WorkaroundRebuildCandidateV1, text>:
+    workaround_retirement_validate_v1(record)?
+    if record.kind != "source-hunks":
+        return Err("blocked-retirement: config restoration requires its configuration owner")
+    if not workaround_rebuild_outside_v1(private_parent, root)? or
+            not dir_is_real_no_follow(private_parent):
+        return Err("blocked-retirement: candidate parent overlaps input or is not a real directory")
+    workaround_rebuild_lineage_v1(root, record, revision, producer_source)?
+    workaround_rebuild_index_visible_v1(root)?
+    if workaround_git(root, ["status", "--porcelain=v1", "--untracked-files=all"] )? != "":
+        return Err("blocked-retirement: source must be a committed clean rebuild revision")
+    val bugs = workaround_bug_snapshot(root)?
+    if not bugs.get_bug(record.bug_id).?: return Err("unknown authoritative bug ID")
+    val before = workaround_retirement_source_v1(revision, "")?
+    workaround_retirement_proofs_v1(root_fix_proofs, record.proof_task,
+        record.backends, before, producer_digest)?
+    val producer_receipt_digest = workaround_rebuild_producer_v1(root, record.fix_commit,
+        producer_source, producer_digest, producer_receipt)?
+    # Verify the reviewed fragments against the actual linked commit, not a
+    # caller-generated inverse of all files in a possibly mixed commit.
+    for hunk in record.hunks:
+        val introduced = workaround_git(root, ["show", record.workaround_commit + ":" + hunk.path])?
+        val prior = workaround_git(root, ["show", record.workaround_commit + "^:" + hunk.path])?
+        if not introduced.contains(hunk.workaround) or not prior.contains(hunk.original) or
+                prior.contains(hunk.workaround) or introduced.contains(hunk.original):
+            return Err("blocked-retirement: hunk is not bound to the workaround commit")
+    val transaction = workaround_host_temp_dir(private_parent, "workaround-rebuild-")?
+    val candidate_root = transaction + "/source"
+    # secure_temp_dir created an exclusive empty transaction root; no caller
+    # may provide an existing destination, frozen checkout or active worktree.
+    workaround_git(root, ["-c", "core.hooksPath=" + transaction + "/no-hooks",
+        "-c", "core.autocrlf=false", "-c", "core.eol=lf",
+        "worktree", "add", "--detach", candidate_root, revision])?
+    var contents: {text: text} = {}
+    var paths: [text] = []
+    var source_bytes: i64 = 0
+    for hunk in record.hunks:
+        if not contents.contains_key(hunk.path):
+            if not workaround_rebuild_regular_v1(candidate_root, hunk.path):
+                return Err("blocked-retirement: source path has a nonregular component")
+            val source_content = workaround_host_read(candidate_root + "/" + hunk.path, 8388608)?
+            source_bytes = source_bytes + source_content.len()
+            if source_bytes > 33554432: return Err("retirement changed-source batch exceeds bound")
+            contents[hunk.path] = source_content
+            paths.push(hunk.path)
+        val content: text = contents[hunk.path]
+        contents[hunk.path] = workaround_retirement_hunk_v1(content, hunk)?
+    # Every hunk must match before any file is written, preserving conflicts.
+    for path in paths:
+        val content: text = contents[path]
+        if not workaround_host_publish(candidate_root + "/" + path, content):
+            return Err("blocked-retirement: candidate write failed; retain unpublished transaction")
+    val patch = workaround_git(candidate_root,
+        ["diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--"])?
+    val source = workaround_retirement_source_v1(revision, patch)?
+    val proof_payload = workaround_retirement_proof_encode_v1(root_fix_proofs)?
+    val value = WorkaroundRebuildCandidateV1(transaction_root: transaction,
+        source_root: candidate_root, revision: revision, source_digest: source,
+        patch_digest: sha256_text(patch), record_digest: sha256_text(workaround_retirement_encode_v1(record)?),
+        producer_digest: producer_digest, producer_source: producer_source, rollback_revision: revision,
+        root_proof_digest: sha256_text(proof_payload), producer_receipt: producer_receipt,
+        producer_receipt_digest: producer_receipt_digest)
+    if not file_create_exclusive(transaction + "/inverse.patch", patch) or
+            not file_create_exclusive(transaction + "/registry.sdn", workaround_retirement_encode_v1(record)?) or
+            not file_create_exclusive(transaction + "/root-proof.sdn", proof_payload) or
+            not file_create_exclusive(transaction + "/prepared.sdn", workaround_rebuild_pin_v1(value)):
+        return Err("blocked-retirement: candidate pin publication failed")
+    Ok(value)
+
+fn workaround_rebuild_admit_v1(value: WorkaroundRebuildCandidateV1,
+        record: WorkaroundRetirementV1,
+        original_form_proofs: [WorkaroundTestProofV1]) -> Result<text, text>:
+    val encoded = workaround_retirement_encode_v1(record)?
+    if value.record_digest != sha256_text(encoded) or value.source_root != value.transaction_root + "/source":
+        return Err("retirement transaction identity differs")
+    val pin = workaround_rebuild_pin_v1(value)
+    if workaround_host_read(value.transaction_root + "/prepared.sdn", 16384)? != pin:
+        return Err("retirement candidate ownership pin differs")
+    if workaround_host_read(value.transaction_root + "/registry.sdn", 4194304)? != encoded:
+        return Err("retirement registry changed")
+    if sha256_text(workaround_host_read(value.transaction_root + "/root-proof.sdn", 32768)?) != value.root_proof_digest:
+        return Err("root-fix verification receipt changed")
+    workaround_rebuild_lineage_v1(value.source_root, record, value.revision, value.producer_source)?
+    workaround_rebuild_index_visible_v1(value.source_root)?
+    if workaround_rebuild_producer_v1(value.source_root, record.fix_commit, value.producer_source,
+            value.producer_digest, value.producer_receipt)? != value.producer_receipt_digest:
+        return Err("producer admission changed after preparation")
+    val patch = workaround_git(value.source_root,
+        ["diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--"])?
+    if sha256_text(patch) != value.patch_digest or
+            workaround_retirement_source_v1(value.revision, patch)? != value.source_digest or
+            workaround_host_read(value.transaction_root + "/inverse.patch", 16777216)? != patch:
+        return Err("retirement candidate changed after original-form test identity freeze")
+    if workaround_git(value.source_root, ["ls-files", "--others"] )? != "":
+        return Err("retirement candidate contains untracked source")
+    workaround_retirement_proofs_v1(original_form_proofs, record.removal_test,
+        record.backends, value.source_digest, value.producer_digest)?
+    # This source-scoped transition does not mark the global bug done. The
+    # existing preparation owner freezes this derived source only after return.
+    val receipt = pin + "retirement |id, bug_id, state, invalidation|\n    " +
+        workaround_sdn_quote(record.id) + ", " + workaround_sdn_quote(record.bug_id) +
+        ", \"retired\", \"changed-dependency-identities-only\"\n" +
+        workaround_retirement_proof_encode_v1(original_form_proofs)?
+    val receipt_path = value.transaction_root + "/retired.sdn"
+    if workaround_host_exists(receipt_path):
+        if workaround_host_read(receipt_path, 32768)? != receipt:
+            return Err("conflicting retirement publication")
+    elif not file_create_exclusive(receipt_path, receipt):
+        return Err("retirement publication failed")
+    Ok(value.source_root)
+
+export WorkaroundRebuildCandidateV1, workaround_rebuild_prepare_v1, workaround_rebuild_admit_v1
