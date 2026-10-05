@@ -6,13 +6,8 @@ use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
 use app.io.file_ops.{path_absolute, file_size_raw}
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
-    compiler_source_authority_publish_v1, compiler_source_authority_open_published_v1}
-use app.compiler_entrypoint.entry_closure_selection.{compiler_entry_closure_publish_v1}
-use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
-use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureBindingV1}
-use compiler.driver.driver_build.native_entry_closure_owner.{NativeEntryClosureRequestV1,
-    native_entry_closure_request_publish_v1}
-use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+    compiler_source_authority_publish_v1}
+use app.cli.native_build_parse_closure_owner.{native_build_publish_parse_closure_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
     compile_source_inventory_checkout_cache_root_v1}
 use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
@@ -1029,10 +1024,6 @@ pub fn run_native_build_worker(args: [text]) -> i64:
             if roots.len() == 0:
                 eprint "error: parse-shard closure request has no authority roots"
                 return 1
-            val authority = compiler_source_authority_open_published_v1(source_root)
-            if not authority.valid:
-                eprint "error: parse-shard closure authority rejected: " + authority.reason
-                return 1
             var selected_entry = ""
             var entry_arg_index = 0
             while entry_arg_index < args.len():
@@ -1052,34 +1043,9 @@ pub fn run_native_build_worker(args: [text]) -> i64:
                 eprint "error: parse-shard closure entry outside source authority"
                 return 1
             val entry_identity = absolute_entry.substring(source_root.len() + 1)
-            val paths = _native_build_entry_closure(source_root + "/" + entry_identity, roots)
-            val binding = NativeEntryClosureBindingV1(authority.snapshot.revision_id,
-                authority.snapshot.commit_id, authority.snapshot.tree_id,
-                authority.snapshot.inventory_digest, entry_identity, roots,
-                policy.handoff.policy_digest, file_hash_sha256(simple_bin))
-            val request_root = frontend_cache_dir + "/closure-request-" + getpid().to_text()
-            if frontend_cache_dir == "" or not dir_create_all(request_root):
-                eprint "error: parse-shard closure request requires private frontend cache"
+            if not native_build_publish_parse_closure_v1(source_root, roots,
+                    entry_identity, policy.handoff.policy_digest, simple_bin, frontend_cache_dir):
                 return 1
-            val selection_path = request_root + "/selection.v1"
-            val published = compiler_entry_closure_publish_v1(source_root, authority,
-                binding, paths, selection_path)
-            if published.is_err():
-                eprint "error: parse-shard closure publication rejected: " + published.unwrap_err()
-                return 1
-            val request = NativeEntryClosureRequestV1(source_root, authority.snapshot,
-                authority.source_inventory_digest, authority.inventory_generation,
-                binding, selection_path, published.unwrap())
-            val request_path = request_root + "/request.v1"
-            val request_digest = native_entry_closure_request_publish_v1(request_path, request)
-            if request_digest.is_err():
-                eprint "error: parse-shard closure request publication failed"
-                return 1
-            if not env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", request_digest.unwrap()) or
-                    not env_set("SIMPLE_PARSE_CLOSURE_REQUEST", request_path):
-                eprint "error: parse-shard closure request publication failed"
-                return 1
-            print "[parse-closure] parent_walks=1 selected={paths.len()} request={request_digest.unwrap()}"
         run_parse_shards(forwarded_args, shard_count, simple_bin, native_build_timeout_ms(args))
         env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
         env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
