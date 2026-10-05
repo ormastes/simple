@@ -1,7 +1,14 @@
+#ifdef _WIN32
+#define _CRT_SECURE_NO_WARNINGS
+#endif
 #include "simple_backend_plugin_v1.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 static int releases;
 static int opens;
 static int closes;
@@ -28,5 +35,18 @@ static const uint8_t id[]="fixture",ver[]="1.0.0",build[]="fixture-build",digest
 #define SBP_DESCRIPTOR_SIZE sizeof(desc)
 #endif
 static const simple_backend_descriptor_v1 desc={SBP_DESCRIPTOR_ABI,SBP_DESCRIPTOR_SIZE,{id,sizeof(id)-1},{ver,sizeof(ver)-1},{build,sizeof(build)-1},{digest,sizeof(digest)-1},2,2,{targets,sizeof(targets)-1},&vt};
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
 const simple_backend_descriptor_v1 *simple_backend_plugin_v1(void){return &desc;}
-__attribute__((destructor)) static void unloaded(void){const char*p=getenv("SBP_FIXTURE_UNLOAD_MARKER");if(p){FILE*f=fopen(p,"w");if(f){fprintf(f,"closed=%d releases=%d opens=%d closes=%d\n",closes>0,releases,opens,closes);fclose(f);}}}
+#ifndef _WIN32
+__attribute__((destructor))
+#endif
+static void unloaded(void){const char*p=getenv("SBP_FIXTURE_UNLOAD_MARKER");if(p){FILE*f=fopen(p,"w");if(f){fprintf(f,"closed=%d releases=%d opens=%d closes=%d\n",closes>0,releases,opens,closes);fclose(f);}}}
+#ifdef _WIN32
+BOOL WINAPI DllMain(HINSTANCE instance,DWORD reason,LPVOID reserved){
+    (void)instance;(void)reserved;
+    if(reason==DLL_PROCESS_DETACH)unloaded();
+    return TRUE;
+}
+#endif

@@ -1,7 +1,8 @@
 # Windows production dynamic backend providers are incomplete
 
-Status: OPEN (P1). Confirmed source-level gaps; no production repair or native provider
-validation performed in this audit. Blocks the requested same-frontend,
+Status: OPEN (P1). Windows bridge invocation repaired and fixture-tested below;
+production codegen providers and remaining transport/admission gaps are unqualified.
+Blocks the requested same-frontend,
 dynamically selected LLVM/Cranelift full-bootstrap claim.
 
 Audited source: `release_temp` base `cc05d7f451467657a6cf5fc464dfd09d8239ef9f`
@@ -11,7 +12,23 @@ backend-provider issue, not the hosted runtime's ordinary library primitives.
 
 ## Confirmed gaps
 
-1. **Windows consumer invocation is unsupported.**
+Update 2026-10-05: the Windows invocation gap in item 1 is repaired in the
+existing runtime bridge through platform-specific open/symbol/close helpers.
+Single and batch calls share the established session and buffer ownership path.
+Borrowed admitted handles remain loaded until their external owner releases them;
+legacy UTF-8 paths use Windows wide-character loading. No compiler logic moved
+to C and no production provider export was added by this repair.
+
+`backend_plugin_v1_windows_bridge_test.shs` passed 13 actual native fixture cases
+with clang 23/MSVC: single/batch path and retained-handle calls, four provider
+failure stages with release/close counts, bad descriptor ABI/size, malformed
+request/MIR and missing DLL. Batch tests reject compile/finalize after finalization.
+The first two setup attempts failed on Windows CRT deprecation warnings; the
+third completed successfully. This is fixture lifecycle evidence, not full
+provider qualification or a performance/RSS improvement measurement. POSIX suite
+execution was not available in this Windows run. Items 2–5 remain open.
+
+1. **Windows consumer invocation was unsupported (platform repair fixture-tested).**
    `src/runtime/runtime_backend_plugin.c:149` implements
    `spl_backend_plugin_run_v1`; its `_WIN32` branch at 161 returns status 102.
    Batch open at 192 returns -102 on Windows; batch compile at 224 and finalize
