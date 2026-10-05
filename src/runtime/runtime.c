@@ -1641,11 +1641,15 @@ int64_t rt_enum_payload(int64_t value) {
     return enum_value ? enum_value->payload : 0;
 }
 
+/* Keep every legacy enum operation weak: mixed bundles use the registered
+ * tagged enum owner in runtime_native.c for construction AND checking. */
+SPL_WEAK
 int8_t rt_enum_check_discriminant(int64_t value, int64_t expected) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     return enum_value && enum_value->discriminant == (int32_t)expected;
 }
 
+SPL_WEAK
 int8_t rt_enum_check_variant(int64_t value, int64_t expected_enum_id, int64_t expected_discriminant) {
     SplRuntimeEnum* enum_value = spl_enum_from_handle(value);
     if (!enum_value || enum_value->discriminant != (int32_t)expected_discriminant) return 0;
