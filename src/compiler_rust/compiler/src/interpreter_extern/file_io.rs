@@ -2683,6 +2683,22 @@ pub fn rt_dir_exists(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(std::path::Path::new(&path).is_dir()))
 }
 
+/// Accept a directory only when its final component is not a symlink/reparse point.
+pub fn rt_dir_is_real_no_follow(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return Ok(Value::Bool(false));
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Ok(Value::Bool(false));
+        }
+    }
+    Ok(Value::Bool(metadata.is_dir() && !metadata.file_type().is_symlink()))
+}
+
 /// Create directory
 pub fn rt_dir_create(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;

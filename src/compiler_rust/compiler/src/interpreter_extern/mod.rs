@@ -1343,6 +1343,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_dir_create_all", file_io::rt_dir_create_all);
     insert_simple!("rt_dir_create", file_io::rt_dir_create);
     insert_simple!("rt_dir_exists", file_io::rt_dir_exists);
+    insert_simple!("rt_dir_is_real_no_follow", file_io::rt_dir_is_real_no_follow);
     insert_simple!("rt_dir_glob", file_io::rt_dir_glob);
     insert_simple!("rt_dir_list", file_io::rt_dir_list);
     insert_simple!("rt_dir_remove_all", file_io::rt_dir_remove_all);
