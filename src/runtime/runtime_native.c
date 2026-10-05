@@ -4528,9 +4528,16 @@ int64_t rt_native_cmp(int64_t left, int64_t right) {
     if (left_string || right_string) {
         return rt_text_cmp_any(left, right);
     }
-    if (rt_core_is_float(left) || rt_core_is_float(right)) {
-        double a = rt_core_is_float(left) ? rt_core_as_float(left) : (double)left;
-        double b = rt_core_is_float(right) ? rt_core_as_float(right) : (double)right;
+    /* This boundary also accepts RAW signed integers from erased native
+     * operators. Low tag bits cannot identify a float here: raw 2 is the
+     * legacy inline encoding of 0.0, and raw 98 decodes as a tiny subnormal.
+     * Only registered heap floats carry unambiguous float provenance. Keep
+     * legacy decoding in the explicitly tagged-value APIs, not this boundary. */
+    RtCoreFloat* left_float = rt_core_as_heap_float(left);
+    RtCoreFloat* right_float = rt_core_as_heap_float(right);
+    if (left_float || right_float) {
+        double a = left_float ? left_float->value : (double)left;
+        double b = right_float ? right_float->value : (double)right;
         if (a < b) return -1;
         if (a > b) return 1;
         return 0;
