@@ -1,0 +1,149 @@
+# Real parser -> HIR -> MIR assertions. Native execution is required for the
+# erased-composite carrier regression; source inspection is not a PASS.
+use std.spec.*
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.driver_core_compile_options_default
+use compiler.driver.driver_mir_target.driver_mir_target_context
+
+fn route_error_contains(messages: [text], needle: text) -> bool:
+    for message in messages:
+        if message.contains(needle): return true
+    false
+
+fn route_has_discriminant(module_: MirModule) -> bool:
+    for function in module_.functions.values():
+        val typed_function: MirFunction = function
+        if typed_function.name == "route":
+            for block in typed_function.blocks:
+                val typed_block: MirBlock = block
+                for instruction in typed_block.instructions:
+                    val typed_instruction: MirInst = instruction
+                    match typed_instruction.kind:
+                        case MirInstKind.Call(_, operand, _):
+                            match operand.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    if name == "rt_enum_discriminant": return true
+                                case _: ()
+                        case _: ()
+    false
+
+describe "typed original match arms retain enum routing":
+    it "qualified unit plus capture default":
+        val source = "enum Choice:\n    First\n    Second\nfn route(value: Choice) -> i64:\n    match value:\n        case Choice.First: 11\n        case rest: 29\n"
+        val parsed = parse_full_frontend(source, "match_route.spl", "match_route", Logger(level: 0))
+        var frontend = HirLowering.with_filename("match_route.spl")
+        val hir = frontend.lower_module(parsed)
+        expect(frontend.errors.len()).to_equal(0)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        val mir = lowering.lower_module(hir)
+        var messages: [text] = []
+        for error in lowering.errors:
+            messages = messages.push(error.message)
+        expect(messages.len()).to_equal(0)
+        expect(route_has_discriminant(mir)).to_equal(true)
+
+    it "bare unit plus capture default":
+        val source = "enum Choice:\n    First\n    Second\nfn route(value: Choice) -> i64:\n    match value:\n        case First: 11\n        case rest: 29\n"
+        val parsed = parse_full_frontend(source, "match_route.spl", "match_route", Logger(level: 0))
+        var frontend = HirLowering.with_filename("match_route.spl")
+        val hir = frontend.lower_module(parsed)
+        expect(frontend.errors.len()).to_equal(0)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        val mir = lowering.lower_module(hir)
+        var messages: [text] = []
+        for error in lowering.errors:
+            messages = messages.push(error.message)
+        expect(messages.len()).to_equal(0)
+        expect(route_has_discriminant(mir)).to_equal(true)
+
+    it "payload and unit arms preserve a capture default":
+        val source = "enum Choice:\n    First\n    Number(i64)\n    Second\nfn route(value: Choice) -> i64:\n    match value:\n        case Choice.Number(n): n\n        case First: 11\n        case rest: 29\n"
+        val parsed = parse_full_frontend(source, "match_route.spl", "match_route", Logger(level: 0))
+        var frontend = HirLowering.with_filename("match_route.spl")
+        val hir = frontend.lower_module(parsed)
+        expect(frontend.errors.len()).to_equal(0)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        val mir = lowering.lower_module(hir)
+        var messages: [text] = []
+        for error in lowering.errors:
+            messages = messages.push(error.message)
+        expect(messages.len()).to_equal(0)
+        expect(route_has_discriminant(mir)).to_equal(true)
+
+    it "enum wildcard duplicates are rejected":
+        val source = "enum Choice:\n    First\n    Second\nfn route(value: Choice) -> i64:\n    match value:\n        case Choice.First: 11\n        case _: 29\n        case _: 31\n"
+        val parsed = parse_full_frontend(source, "match_route.spl", "match_route", Logger(level: 0))
+        var frontend = HirLowering.with_filename("match_route.spl")
+        val hir = frontend.lower_module(parsed)
+        expect(frontend.errors.len()).to_equal(0)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        val mir = lowering.lower_module(hir)
+        var messages: [text] = []
+        for error in lowering.errors:
+            messages = messages.push(error.message)
+        expect(route_error_contains(messages, "enum match: multiple wildcard/binding default arms")).to_equal(true)
+
+    it "enum wildcard then binding is rejected":
+        val source = "enum Choice:\n    First\n    Second\nfn route(value: Choice) -> i64:\n    match value:\n        case Choice.First: 11\n        case _: 29\n        case rest: 31\n"
+        val parsed = parse_full_frontend(source, "match_route.spl", "match_route", Logger(level: 0))
+        var frontend = HirLowering.with_filename("match_route.spl")
+        val hir = frontend.lower_module(parsed)
+        expect(frontend.errors.len()).to_equal(0)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        val mir = lowering.lower_module(hir)
+        var messages: [text] = []
+        for error in lowering.errors:
+            messages = messages.push(error.message)
+        expect(route_error_contains(messages, "enum match: multiple wildcard/binding default arms")).to_equal(true)
+
+    it "enum binding then wildcard is rejected":
+        val source = "enum Choice:\n    First\n    Second\nfn route(value: Choice) -> i64:\n    match value:\n        case Choice.First: 11\n        case rest: 29\n        case _: 31\n"
+        val parsed = parse_full_frontend(source, "match_route.spl", "match_route", Logger(level: 0))
+        var frontend = HirLowering.with_filename("match_route.spl")
+        val hir = frontend.lower_module(parsed)
+        expect(frontend.errors.len()).to_equal(0)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        val mir = lowering.lower_module(hir)
+        var messages: [text] = []
+        for error in lowering.errors:
+            messages = messages.push(error.message)
+        expect(route_error_contains(messages, "enum match: multiple wildcard/binding default arms")).to_equal(true)
+
+    it "integer duplicate defaults retain their guard":
+        val source = "fn route(value: i64) -> i64:\n    match value:\n        case 1: 11\n        case _: 29\n        case rest: 31\n"
+        val parsed = parse_full_frontend(source, "match_route.spl", "match_route", Logger(level: 0))
+        var frontend = HirLowering.with_filename("match_route.spl")
+        val hir = frontend.lower_module(parsed)
+        expect(frontend.errors.len()).to_equal(0)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        val mir = lowering.lower_module(hir)
+        var messages: [text] = []
+        for error in lowering.errors:
+            messages = messages.push(error.message)
+        expect(route_error_contains(messages, "B5b: match has multiple wildcard/binding default arms")).to_equal(true)
+
+    it "ordinary integer capture remains integer dispatch":
+        val source = "fn route(value: i64) -> i64:\n    match value:\n        case 1: 11\n        case rest: rest + 10\n"
+        val parsed = parse_full_frontend(source, "match_route.spl", "match_route", Logger(level: 0))
+        var frontend = HirLowering.with_filename("match_route.spl")
+        val hir = frontend.lower_module(parsed)
+        expect(frontend.errors.len()).to_equal(0)
+        val target = driver_mir_target_context(driver_core_compile_options_default())
+        var lowering = MirLowering.new_for_target(hir.symbols, target)
+        val mir = lowering.lower_module(hir)
+        var messages: [text] = []
+        for error in lowering.errors:
+            messages = messages.push(error.message)
+        expect(messages.len()).to_equal(0)
+        expect(route_has_discriminant(mir)).to_equal(false)

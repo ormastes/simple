@@ -5450,6 +5450,10 @@ impl MirLowering:
         # real binding like `case x:`) or 2+ enums (genuinely ambiguous) is
         # left as an ordinary Binding, unchanged, so plain bindings keep
         # working exactly as before.
+        # Preserve classification from the typed original carrier. Reading
+        # `norm_arms[i].pattern.kind` after push crosses the same erased
+        # composite-array boundary avoided by the direct route above.
+        var has_enum_arm = direct_enum_seen
         var norm_arms: [HirMatchArm] = []
         var norm_i = 0
         while norm_i < arms.len():
@@ -5469,6 +5473,7 @@ impl MirLowering:
                     if bname != "":
                         owner_count = self.variant_owner_keys(bname).len()
                     if owner_count == 1:
+                        has_enum_arm = true
                         val enum_pat = HirPattern(
                             kind: HirPatternKind.Enum(
                                 HirType(kind: HirTypeKind.Error, span: arm0.pattern.span),
@@ -5493,15 +5498,6 @@ impl MirLowering:
 
         # Route enum-pattern matches (case Variant(x):) to the enum path, which
         # dispatches on rt_enum_discriminant + binds payloads via rt_enum_payload.
-        var has_enum_arm = false
-        var scan_i = 0
-        while scan_i < norm_arms.len():
-            match norm_arms[scan_i].pattern.kind:
-                case Enum(_, _, _):
-                    has_enum_arm = true
-                case _:
-                    ()
-            scan_i = scan_i + 1
         if has_enum_arm:
             return self.lower_enum_match(scrutinee, norm_arms, expected_type)
 
