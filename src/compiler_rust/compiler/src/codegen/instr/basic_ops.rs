@@ -12,6 +12,18 @@ use crate::mir::VReg;
 use super::helpers::adapted_call;
 use super::{InstrContext, InstrResult};
 
+/// Is `vreg` the result of a direct `Call`? Only consulted on the rare
+/// float->int cast whose source is an i64 register, so the linear scan is not
+/// on any hot path.
+fn vreg_defined_by_call(func: &crate::mir::MirFunction, vreg: VReg) -> bool {
+    func.blocks.iter().any(|block| {
+        block
+            .instructions
+            .iter()
+            .any(|inst| matches!(inst, crate::mir::MirInst::Call { dest: Some(d), .. } if *d == vreg))
+    })
+}
+
 fn runtime_integer_cast_requires_decode(from_ty: TypeId, to_ty: TypeId) -> bool {
     matches!(from_ty, TypeId::ANY | TypeId::STRING)
         && matches!(
@@ -158,6 +170,21 @@ pub fn compile_cast<M: Module>(
         // tagged i64 ABI even when HIR typed the expression as float (e.g.
         // `floor(x + 0.5)` mis-typed f32 — verifier rejected fcvt_to_sint on
         // an i64 arg, 2026-06-12). Dispatch on the actual value type.
+        let src_ty = builder.func.dfg.value_type(src_val);
+        // A float-typed Call result arrives in the uniform i64 return slot as
+        // the BITS of the promoted f64 (see the Return lowering in body.rs).
+        // Decode it instead of converting the bit pattern as an integer:
+        // `clamp_pos(-2.75) as i64` returned -4590856870150799360.
+        // Other int-typed sources keep the integer path below.
+        // doc/08_tracking/bug/jit_cross_block_float_cast_reads_f64_bits_as_int_2026-10-05.md
+        let src_val = if src_ty == types::I64
+            && matches!(ctx.vreg_types.get(&source).copied(), Some(TypeId::F32 | TypeId::F64))
+            && vreg_defined_by_call(ctx.func, source)
+        {
+            builder.ins().bitcast(types::F64, MemFlags::new(), src_val)
+        } else {
+            src_val
+        };
         let src_ty = builder.func.dfg.value_type(src_val);
         let widened = if src_ty.is_int() {
             if src_ty.bits() < 64 {

@@ -20,6 +20,10 @@ class GposDataAnchor:
     valid: bool
 class GposDataBudget:
     remaining: i64
+    # Run direction for mark attachment offsets (HarfBuzz convention: a mark's
+    # x_offset is relative to its own pen in VISUAL order). Rides on the budget
+    # because the budget is the one per-apply object threaded to every reader.
+    rtl: bool = false
 class GposDataContext:
     ppem: i64
     normalized_coords: [f64]
@@ -41,9 +45,19 @@ class _GposDataRawValue:
 fn gpos_data_context(ppem: i64 = 0, normalized_coords: [f64] = []) -> GposDataContext:
     GposDataContext(ppem: ppem, normalized_coords: normalized_coords)
 
+# Work budget for one validate/apply pass. Validation walks every record of
+# every active lookup (a mark-to-base table alone is bases x classes anchors),
+# so the run-derived term alone (9 x 13 x 64 = 7,488 for an 8-glyph Arabic
+# run) ran out half-way through NotoSansArabic's tables and rejected a valid
+# face. The table's own byte length bounds the reads a well-formed table can
+# need; the total stays capped, so a hostile table still cannot buy unbounded
+# work.
 fn gpos_data_budget(records: [LayoutGlyphRecord], lookups: [GposLookup]) -> GposDataBudget:
     var limit = (records.len() + 1) * (lookups.len() + 1) * 64
-    if limit > 65536: limit = 65536
+    if lookups.len() > 0:
+        val table_bytes = (lookups[0].table_end as i64) - (lookups[0].table_start as i64)
+        if table_bytes > 0: limit = limit + table_bytes
+    if limit > 1048576: limit = 1048576
     GposDataBudget(remaining: limit)
 fn gpos_data_take(budget: GposDataBudget) -> bool:
     if budget.remaining <= 0: return false
@@ -257,7 +271,7 @@ fn gpos_data_variation_delta(font: OtFont, outer_index: i64, inner_index: i64,
     normalized_coords: [f64]) -> GposDataDelta:
     if outer_index < 0 or inner_index < 0:
         return GposDataDelta(delta: 0, valid: false)
-    val table = match find_table(font, 1195656006u32):
+    val table = match find_table(font, 1195656518u32):
         Some(value): value
         None: return GposDataDelta(delta: 0, valid: false)
     val base = table.offset as i64
@@ -411,7 +425,7 @@ fn gpos_data_anchor_adjusted(font: OtFont, offset: i64, limit: i64,
         y: read_i16_be(font.blob, offset + 4) as i64 + y_delta.delta, valid: true)
 
 fn gpos_data_glyph_class(font: OtFont, glyph: u32, budget: GposDataBudget) -> GposDataHit:
-    val table = match find_table(font, 1195656006u32):
+    val table = match find_table(font, 1195656518u32):
         Some(value): value
         None: return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val base = table.offset as i64
@@ -421,7 +435,7 @@ fn gpos_data_glyph_class(font: OtFont, glyph: u32, budget: GposDataBudget) -> Gp
     if offset == 0: return GposDataHit(index: 0, count: 0, found: false, valid: false)
     gpos_data_class(font.blob, base + offset, limit, glyph, budget)
 fn gpos_data_in_mark_set(font: OtFont, set: i64, glyph: u32, budget: GposDataBudget) -> GposDataHit:
-    val table = match find_table(font, 1195656006u32):
+    val table = match find_table(font, 1195656518u32):
         Some(value): value
         None: return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val base = table.offset as i64

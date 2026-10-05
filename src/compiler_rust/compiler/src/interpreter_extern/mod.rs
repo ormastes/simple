@@ -2511,6 +2511,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_torch_to_cpu", torch::rt_torch_to_cpu);
     insert_simple!("rt_torch_to_cuda", torch::rt_torch_to_cuda);
     insert_simple!("rt_typed_bytes_u32_le_at", sffi_array::rt_bytes_u32_le_at_fn);
+    // JIT/interpreter parity for declared accessors the Cranelift backend
+    // lowers inline (codegen::instr::calls::is_inline_lowered_byte_accessor).
+    insert_simple!("rt_typed_bytes_u32_le_unchecked", sffi_array::rt_bytes_u32_le_at_fn);
+    insert_simple!("rt_typed_bytes_u8_at", sffi_array::rt_bytes_u8_at_fn);
     insert_simple!("rt_typed_bytes_u64_le_at", sffi_array::rt_bytes_u64_le_at_fn);
     insert_simple!("rt_typed_bytes_u64_le_unchecked", sffi_array::rt_bytes_u64_le_at_fn);
     insert_simple!("rt_typed_bytes_u8_push", sffi_array::rt_typed_bytes_u8_push_fn);

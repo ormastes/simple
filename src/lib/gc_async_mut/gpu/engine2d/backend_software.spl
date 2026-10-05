@@ -1764,6 +1764,78 @@ impl SoftwareBackend:
             r = r + 1
         SoftwareBackendPackedDamage(rects: rects, pixels: packed, valid: true)
 
+    me read_pixels_regions_packed(rects: [i32]) -> SoftwareBackendPackedDamage:
+        """Pack caller-supplied rectangle rows, in supplied order.
+
+        The damage-driven twin of read_damage_pixels_packed for owners that
+        already know which regions they need (e.g. a validated retained base
+        plus an external dirty list). Like that API it neither creates a
+        full mirror nor clears dirty tiles.
+
+        Fail-closed transport: ANY malformed, out-of-bounds, or overlapping
+        rectangle invalidates the WHOLE request -- no partial payload, same
+        subtraction-form bounds checks as read_damage_pixels_packed. Half-open
+        rectangle semantics: edge-adjacent regions do not overlap.
+        """
+        if not self.initialized or self.w <= 0 or self.h <= 0:
+            return SoftwareBackendPackedDamage(rects: [], pixels: [], valid: false)
+        if rects.len() == 0:
+            return SoftwareBackendPackedDamage(rects: [], pixels: [], valid: true)
+        if rects.len() % 4 != 0:
+            return SoftwareBackendPackedDamage(rects: [], pixels: [], valid: false)
+        val rect_count = rects.len() / 4
+        # Pass 1: validate bounds and pairwise overlap, and size the payload.
+        # Every earlier rect already passed the bounds check, so the overlap
+        # endpoint sums below cannot overflow i32.
+        var total: i64 = 0
+        var r = 0
+        while r < rect_count:
+            val o = r * 4
+            val rx = rects[o]
+            val ry = rects[o + 1]
+            val rw = rects[o + 2]
+            val rh = rects[o + 3]
+            if (rx < 0 or ry < 0 or rw <= 0 or rh <= 0 or
+                rx > self.w - rw or ry > self.h - rh):
+                return SoftwareBackendPackedDamage(rects: [], pixels: [], valid: false)
+            val area = rw.to_i64() * rh.to_i64()
+            if area > 2147483647 - total:
+                return SoftwareBackendPackedDamage(rects: [], pixels: [], valid: false)
+            total = total + area
+            var q = 0
+            while q < r:
+                val qo = q * 4
+                if (rx < rects[qo] + rects[qo + 2] and
+                    rects[qo] < rx + rw and
+                    ry < rects[qo + 1] + rects[qo + 3] and
+                    rects[qo + 1] < ry + rh):
+                    return SoftwareBackendPackedDamage(rects: [], pixels: [], valid: false)
+                q = q + 1
+            r = r + 1
+        # Pass 2: row-copy each rectangle in supplied order.
+        var packed: [u32] = [0u32; total.to_i32()]
+        var write = 0
+        r = 0
+        while r < rect_count:
+            val o = r * 4
+            val rx = rects[o]
+            val ry = rects[o + 1]
+            val rw = rects[o + 2]
+            val rh = rects[o + 3]
+            var row = 0
+            while row < rh:
+                val base = (ry + row) * self.w + rx
+                var col = 0
+                # cpu-lane-loop-ok: packed sparse transport copy; boxed [u32]
+                # elements cannot be passed to memcpy as pixels.
+                while col < rw:
+                    packed[write] = self.buf[base + col]
+                    write = write + 1
+                    col = col + 1
+                row = row + 1
+            r = r + 1
+        SoftwareBackendPackedDamage(rects: rects, pixels: packed, valid: true)
+
     me invalidate_mirror():
         """Drop the frame-persistent mirror; the next damaged read reseeds."""
         self.mirror = []

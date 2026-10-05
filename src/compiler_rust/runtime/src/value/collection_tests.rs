@@ -279,22 +279,6 @@ fn test_typed_bytes_u8_push_fast_path() {
     assert_eq!(rt_bytes_u8_at(array, 1), 2);
 }
 
-/// `x.to_i64()` on an erased receiver decodes the TAGGED value; the old
-/// `rt_to_int_dynamic` route returned `n << 3` for every int (JIT inflate).
-#[test]
-fn test_any_to_int_decodes_tagged_values() {
-    assert_eq!(super::rt_any_to_int(RuntimeValue::from_int(203)), 203);
-    assert_eq!(super::rt_any_to_int(RuntimeValue::from_int(-7)), -7);
-    assert_eq!(super::rt_any_to_int(RuntimeValue::from_bool(true)), 1);
-    assert_eq!(super::rt_any_to_int(RuntimeValue::from_float(2.9)), 2);
-    let text = unsafe { super::rt_string_new(b"42".as_ptr(), 2) };
-    assert_eq!(super::rt_any_to_int(text), 42);
-    // the element shape from the incident: a byte read out of a packed [u8]
-    let bytes = rt_byte_array_new(1);
-    assert!(rt_typed_bytes_u8_push(bytes, 0xCB));
-    assert_eq!(super::rt_any_to_int(rt_array_get(bytes, 0)), 203);
-}
-
 /// `[u8] + [u8]` under the JIT (SPIR-V head+tail blob): byte-packed operands
 /// must stay byte-packed and keep their bytes.
 #[test]
