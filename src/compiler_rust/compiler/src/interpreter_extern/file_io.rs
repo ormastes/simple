@@ -3532,7 +3532,7 @@ pub fn rt_file_is_regular_no_follow(args: &[Value]) -> Result<Value, CompileErro
 }
 
 #[cfg(unix)]
-fn safe_artifact_open_root(root: &str) -> Option<i32> {
+pub(super) fn safe_artifact_open_root(root: &str) -> Option<i32> {
     if !root.starts_with('/') || root.len() > 4095 || root.contains("//") || (root != "/" && root.ends_with('/')) {
         return None;
     }
