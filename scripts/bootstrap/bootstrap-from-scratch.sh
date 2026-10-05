@@ -53,6 +53,9 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
 done
 # -- argv-normalize end
 
+. "${bootstrap_entry_dir}/bootstrap-seed-stop-policy.shs"
+bootstrap_seed_stop_policy_validate "$@" || exit 64
+
 . "${bootstrap_entry_dir}/bootstrap-cache-policy.shs"
 bootstrap_compile_failure_policy "$@"
 
@@ -69,7 +72,7 @@ if [ "${SIMPLE_BOOTSTRAP_STRATEGY_SUPERVISED:-0}" != 1 ]; then
     case "${bootstrap_strategy_option}" in
       --strategy=*) bootstrap_strategy_arg=${bootstrap_strategy_option#*=} ;;
       --output=*) bootstrap_strategy_output=${bootstrap_strategy_option#*=} ;;
-      --help|--validate-bootstrap-receipt|--stop-after-stage2|--stop-after-stage3|\
+      --help|--validate-bootstrap-receipt|--stop-after-seed|--stop-after-stage2|--stop-after-stage3|\
       --produce-stage3-receipt=*|\
       --resume-stage3-from-admitted=*|--resume-stage4-from-admitted=*|\
       --resume-managed-from-admitted=*|--diagnostic-sweep)
@@ -265,6 +268,11 @@ Options:
                      normal reuses incremental caches and schedules isolated
                      phase verification; full inventories every eligible build
                      and test to a terminal summary even after task crashes.
+  --stop-after-seed
+                     With --full-bootstrap, prepare and validate the canonical
+                     Rust seed/runtime generation, then stop before any pure-
+                     Simple build. Writes phase1-seed.env; no test qualification,
+                     Stage 2 admission, dynload success or deployment is implied.
   --stop-after-stage2
                      With --full-bootstrap, build and admit the measured
                      Stage-2 trust root, run the Stage 2 compiler tests
@@ -360,6 +368,7 @@ jobs=""
 jobs_memory_policy=auto
 pure_simple=0
 full_bootstrap=0
+stop_after_seed=0
 resume_stage3_output=""
 resume_stage4_output=""
 full_cli=0
@@ -482,6 +491,9 @@ while [ "$#" -gt 0 ]; do
     --stop-after-stage2)
       stop_after_stage2=1
       ;;
+    --stop-after-seed)
+      stop_after_seed=1
+      ;;
     --diagnostics)
       diagnostics_mode=debug
       ;;
@@ -554,6 +566,22 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 # -- argv-parse end
+
+if [ "${stop_after_seed}" -eq 1 ]; then
+  [ "${full_bootstrap}" -eq 1 ] && [ "${stop_after_stage2}" -eq 0 ] &&
+    [ "${stop_after_stage3}" -eq 0 ] && [ "${pure_simple}" -eq 0 ] &&
+    [ -z "${resume_stage3_output}" ] && [ -z "${resume_stage4_output}" ] &&
+    [ -z "${refresh_stage2_source_cache}" ] && [ "${full_cli}" -eq 0 ] &&
+    [ "${deploy}" -eq 0 ] && [ "${release_tests}" -eq 0 ] && [ "${diagnostic_sweep}" -eq 0 ] &&
+    [ "${validate_bootstrap_receipt}" -eq 0 ] &&
+    [ "${produce_managed_receipt_requested}" -eq 0 ] && [ -z "${produce_stage3_receipt_reason}" ] || {
+    echo 'error: --stop-after-seed requires --full-bootstrap and excludes pure-stage/resume/deploy/test-admission requests' >&2
+    exit 64
+  }
+  case "${target}" in simpleos-*|*-simpleos|freebsd-*)
+    echo 'error: --stop-after-seed is a canonical local host prerequisite' >&2; exit 64 ;;
+  esac
+fi
 
 . "${bootstrap_entry_dir}/bootstrap-build-jobs-policy.shs"
 bootstrap_startup_jobs_policy_validate "${jobs_memory_policy}" "${jobs}" || exit 1
@@ -628,7 +656,14 @@ bootstrap_stage2_trust_root=0
 bootstrap_stage2_parent_override=
 bootstrap_stage2_parent_authority=
 bootstrap_stage2_parent_runtime=
-if [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] &&
+if [ "${stop_after_seed}" -eq 1 ]; then
+  # Seed construction precedes any pure-Simple planner. Its existing Cargo
+  # fingerprint/immutable generation publisher remains the authority owner.
+  # The explicit stop below prevents this exception from starting Phase 2.
+  bootstrap_stage2_trust_root=1
+  bootstrap_stage2_parent_authority=explicit-full-bootstrap-seed-prerequisite
+  bootstrap_reason=seed-prerequisite-refresh
+elif [ "${stop_after_stage2}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ] &&
    { [ -z "${bootstrap_receipt_path}" ] || [ ! -f "${bootstrap_receipt_path}" ]; }; then
   # The first independently admitted pure-Simple parent cannot itself require
   # a receipt produced by that parent. Keep this trust-root exception narrower
@@ -3179,6 +3214,15 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     SIMPLE_BOOTSTRAP_PREFLIGHT_EXPECTED_CONFIG
 fi
 bootstrap_step_mark bootstrap-preflight
+
+if [ "${stop_after_seed}" -eq 1 ]; then
+  . "${bootstrap_entry_dir}/bootstrap-seed-handoff.shs"
+  bootstrap_seed_handoff_publish "${repo_root}" "$(absolute_path "${seed_bin}")" \
+    "$(absolute_path "${bootstrap_preflight_receipt}")" \
+    "$(absolute_path "${output_dir}")/phase1-seed.env" || exit 1
+  echo 'Rust seed/runtime prerequisite prepared; Phase 1 whole tests and pure-Simple phases remain pending.'
+  exit 0
+fi
 
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
 # The full CLI `build bootstrap` command doesn't forward the runtime path

@@ -1,0 +1,84 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_write_exact, read_file_text, dir_create, dir_exists, dir_remove}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.editor.core.session.{EditSession}
+use std.editor.common.types.{EditCommand}
+use app.editor.editor_controller.{EditorController}
+use app.editor.editor_ctrl_wiki.{ctrl_wiki_template_insert, ctrl_wiki_vault_task_batch}
+use app.editor.commands.{editor_dispatch_session}
+
+fn wiki_owner_fixture() -> text:
+    match secure_temp_dir(".", "wiki-owner"):
+        Ok(path): path
+        Err(error): panic(error)
+
+describe "editor wiki and Markdown command owners":
+    it "appends a rendered template to a real existing note":
+        val root = wiki_owner_fixture()
+        val template = root + "/template.md"
+        val target = root + "/note.md"
+        val template_written = file_write_exact(template, "# {{title}} / {{date}}")
+        val note_written = file_write_exact(target, "existing")
+        var ctrl = EditorController.new(EditSession.new())
+        val action = ctrl_wiki_template_insert(ctrl, template + "|" + target + "|Planning|2026-10-04")
+        val content = read_file_text(target)
+        val removed = dir_remove(root, true)
+        expect(template_written).to_equal(true)
+        expect(note_written).to_equal(true)
+        expect(removed).to_equal(true)
+        expect(action.status_msg).to_equal("inserted template: " + template)
+        expect(content).to_equal("existing\n# Planning / 2026-10-04")
+
+    it "preserves a failed write instead of creating a missing parent and retrying":
+        val root = wiki_owner_fixture()
+        val template = root + "/template.md"
+        val written = file_write_exact(template, "# {{title}}")
+        val missing_parent = root + "/absent"
+        var ctrl = EditorController.new(EditSession.new())
+        val action = ctrl_wiki_template_insert(ctrl, template + "|" + missing_parent + "/note.md|Planning|")
+        val created_parent = dir_exists(missing_parent)
+        val removed = dir_remove(root, true)
+        expect(written).to_equal(true)
+        expect(removed).to_equal(true)
+        expect(action.status_msg).to_equal("failed to insert template")
+        expect(created_parent).to_equal(false)
+
+    it "walks nested Markdown notes while leaving non-Markdown files unchanged":
+        val root = wiki_owner_fixture()
+        val nested_created = dir_create(root + "/nested", false)
+        val first_written = file_write_exact(root + "/one.md", "- [ ] first\n")
+        val second_written = file_write_exact(root + "/nested/two.md", "- [ ] second\n")
+        val other_written = file_write_exact(root + "/keep.txt", "- [ ] untouched\n")
+        var ctrl = EditorController.new(EditSession.new())
+        val action = ctrl_wiki_vault_task_batch(ctrl, root + "|done")
+        val first = read_file_text(root + "/one.md")
+        val second = read_file_text(root + "/nested/two.md")
+        val other = read_file_text(root + "/keep.txt")
+        val removed = dir_remove(root, true)
+        expect(nested_created).to_equal(true)
+        expect(first_written).to_equal(true)
+        expect(second_written).to_equal(true)
+        expect(other_written).to_equal(true)
+        expect(removed).to_equal(true)
+        expect(action.status_msg).to_equal("vault tasks changed: 2")
+        expect(first).to_equal("- [x] first\n")
+        expect(second).to_equal("- [x] second\n")
+        expect(other).to_equal("- [ ] untouched\n")
+
+    it "saves a real Markdown buffer through the command diagnostic route":
+        val root = wiki_owner_fixture()
+        val path = root + "/note.md"
+        val written = file_write_exact(path, "# Before\n")
+        var session = EditSession.new()
+        session.open_file(path)
+        var buffer = session.active_buffer()
+        buffer.replace_content("# After\n")
+        session.update_active_buffer(buffer)
+        val result = editor_dispatch_session(session, EditCommand(name: "save", payload: "", count: 1))
+        val content = read_file_text(path)
+        val removed = dir_remove(root, true)
+        expect(written).to_equal(true)
+        expect(removed).to_equal(true)
+        expect(result.ok).to_equal(true)
+        expect(result.message).to_start_with("saved")
+        expect(content).to_equal("# After\n")

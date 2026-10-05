@@ -32,6 +32,7 @@
 #include <windows.h>
 #include <winioctl.h>
 #include "platform/runtime_win_long_path.h"
+#include "platform/windows_system_processor_count.h"
 #include <sys/stat.h>
 #ifndef SYMLINK_FLAG_RELATIVE
 /* SymbolicLinkReparseBuffer.Flags bit 0 is the relative-target marker.
@@ -821,9 +822,7 @@ int64_t rt_time_format(int64_t ts_seconds, int64_t fmt_value) {
 
 int64_t rt_cpu_count(void) {
 #if defined(_WIN32)
-    SYSTEM_INFO info;
-    GetSystemInfo(&info);
-    return info.dwNumberOfProcessors > 0 ? (int64_t)info.dwNumberOfProcessors : -1;
+    return spl_windows_active_processor_count();
 #elif defined(__FreeBSD__)
     /* FreeBSD hides the non-POSIX _SC_NPROCESSORS_ONLN the same way macOS
      * does (see the _DARWIN_C_SOURCE note at the top of this file); the

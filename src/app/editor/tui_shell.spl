@@ -17,6 +17,7 @@ use std.editor.view.dock_zone.*
 use std.editor.view.markdown_state.*
 use std.editor.view.lsp_popup.*
 use std.editor.services.diagnostics.*
+use std.editor.services.md_doc_stats.{md_stats_to_status_bar}
 use std.editor.extensions.builtin.md_edit_assist.*
 use std.editor.view.diagnostics_panel.*
 use std.editor.view.lsp_result_panel.*
@@ -24,6 +25,18 @@ use std.editor.view.wiki_panel.*
 use app.editor.editor_controller.*
 use app.editor.editor_controller_types.*
 use app.editor.tui_shell_panels.*
+use app.editor.tui_line_render.{
+    tui_render_line_with_semantic_tokens,
+    tui_render_line_with_semantic_tokens_at,
+    tui_render_line_with_semantic_tokens_theme,
+    tui_render_line_with_semantic_tokens_at_theme,
+    tui_render_editor_line_at_theme,
+    tui_render_markdown_table_focus_line,
+    tui_render_line_with_selection,
+    _tui_semantic_token_style
+}
+export tui_render_line_with_semantic_tokens, tui_render_line_with_semantic_tokens_at, tui_render_line_with_semantic_tokens_theme, tui_render_line_with_semantic_tokens_at_theme, tui_render_editor_line_at_theme, tui_render_markdown_table_focus_line, tui_render_line_with_selection, _tui_semantic_token_style
+
 
 extern fn stdin_read_char() -> text
 
@@ -194,131 +207,6 @@ fn _tui_render_status_bar(ctrl: EditorController, zones: LayoutZones, width: i64
     else:
         terminal_write("\x1b[7m" + left_status + fill + right_status + "\x1b[0m")
 
-
-fn tui_render_line_with_semantic_tokens(buffer: EditorBuffer, row: i64, line: text) -> text:
-    tui_render_line_with_semantic_tokens_at_theme(buffer, row, line, 0, "dark")
-
-
-fn tui_render_line_with_semantic_tokens_at(buffer: EditorBuffer, row: i64, line: text, source_col_offset: i64) -> text:
-    tui_render_line_with_semantic_tokens_at_theme(buffer, row, line, source_col_offset, "dark")
-
-
-fn tui_render_line_with_semantic_tokens_theme(buffer: EditorBuffer, row: i64, line: text, theme: text) -> text:
-    tui_render_line_with_semantic_tokens_at_theme(buffer, row, line, 0, theme)
-
-
-fn tui_render_line_with_semantic_tokens_at_theme(buffer: EditorBuffer, row: i64, line: text, source_col_offset: i64, theme: text) -> text:
-    if buffer != nil and buffer.line_has_selection(row):
-        return tui_render_line_with_selection(buffer, row, line, source_col_offset)
-    if buffer == nil or buffer.semantic_tokens.len() == 0:
-        return line
-    var out = ""
-    var col = 0
-    var active_type = -1
-    var open_style = false
-    while col < line.len():
-        val token_type = buffer.semantic_token_type_at(row, source_col_offset + col)
-        if token_type != active_type:
-            if open_style:
-                out = out + "\x1b[0m"
-                open_style = false
-            if token_type >= 0:
-                out = out + _tui_semantic_token_style(token_type, theme)
-                open_style = true
-            active_type = token_type
-        out = out + line.char_at(col)
-        col = col + 1
-    if open_style:
-        out = out + "\x1b[0m"
-    out
-
-fn tui_render_editor_line_at_theme(buffer: EditorBuffer, row: i64, line: text, source_col_offset: i64, theme: text, path: text) -> text:
-    if editor_is_markdown_path(path) and buffer != nil and row == buffer.cursor_row:
-        val table_line = buffer.line_at(row)
-        if md_table_is_row(table_line) and not md_table_is_separator_row(table_line):
-            return tui_render_markdown_table_focus_line(buffer, row, line, source_col_offset)
-    tui_render_line_with_semantic_tokens_at_theme(buffer, row, line, source_col_offset, theme)
-
-fn tui_render_markdown_table_focus_line(buffer: EditorBuffer, row: i64, line: text, source_col_offset: i64) -> text:
-    val table_line = buffer.line_at(row)
-    val active_col = md_table_column_at(table_line, buffer.cursor_col)
-    val starts = md_table_cell_start_columns(table_line)
-    if active_col < 0 or active_col >= starts.len():
-        return line
-    val cell_start = starts[active_col]
-    var cell_end = cell_start
-    while cell_end < table_line.len() and table_line.char_at(cell_end) != "|":
-        cell_end = cell_end + 1
-    while cell_end > cell_start and table_line.char_at(cell_end - 1) == " ":
-        cell_end = cell_end - 1
-    var out = ""
-    var highlighted = false
-    var i = 0
-    while i < line.len():
-        val source_col = source_col_offset + i
-        val in_cell = source_col >= cell_start and source_col < cell_end
-        if in_cell and not highlighted:
-            out = out + "\x1b[7m"
-            highlighted = true
-        elif highlighted and not in_cell:
-            out = out + "\x1b[0m"
-            highlighted = false
-        out = out + line.char_at(i)
-        i = i + 1
-    if highlighted:
-        out = out + "\x1b[0m"
-    out
-
-fn tui_render_line_with_selection(buffer: EditorBuffer, row: i64, line: text, source_col_offset: i64) -> text:
-    var out = ""
-    var col = 0
-    var selected = false
-    while col < line.len():
-        val source_col = source_col_offset + col
-        val is_selected = buffer.position_selected(row, source_col)
-        if is_selected != selected:
-            if selected:
-                out = out + "\x1b[0m"
-            if is_selected:
-                out = out + "\x1b[7m"
-            selected = is_selected
-        out = out + line.char_at(col)
-        col = col + 1
-    if selected:
-        out = out + "\x1b[0m"
-    out
-
-
-fn _tui_semantic_token_style(token_type: i64, theme: text) -> text:
-    if theme == "light":
-        if token_type == 1:
-            return "\x1b[34m"
-        if token_type == 2:
-            return "\x1b[35m"
-        if token_type == 3:
-            return "\x1b[32m"
-        if token_type == 4:
-            return "\x1b[36m"
-        return "\x1b[33m"
-    if theme == "solarized":
-        if token_type == 1:
-            return "\x1b[36m"
-        if token_type == 2:
-            return "\x1b[33m"
-        if token_type == 3:
-            return "\x1b[32m"
-        if token_type == 4:
-            return "\x1b[34m"
-        return "\x1b[35m"
-    if token_type == 1:
-        return "\x1b[36m"
-    if token_type == 2:
-        return "\x1b[35m"
-    if token_type == 3:
-        return "\x1b[32m"
-    if token_type == 4:
-        return "\x1b[34m"
-    "\x1b[33m"
 
 fn tui_render_lsp_hover_popup_lines(popup: LspHoverPopup, width: i64) -> [text]:
     if not popup.visible:

@@ -1,0 +1,110 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolKind, SymbolTable}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{LocalId}
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+
+fn receiver_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn receiver_result_type() -> HirType:
+    receiver_type(HirTypeKind.Result(receiver_type(HirTypeKind.Str), receiver_type(HirTypeKind.Str)))
+
+fn receiver_type_label(found: HirType?) -> text:
+    if val admitted = found:
+        match admitted.kind:
+            case HirTypeKind.Result(_, _): return "Result"
+            case HirTypeKind.Str: return "text"
+            case HirTypeKind.Unit: return "Unit"
+            case _: return "other"
+    "missing"
+
+fn receiver_variable(symbol: SymbolId, named: bool, present: bool) -> HirExpr:
+    val kind = if named: HirExprKind.NamedVar(symbol, "value") else: HirExprKind.Var(symbol)
+    HirExpr(kind: kind, has_type_: present,
+        type_: receiver_type(HirTypeKind.Unit), span: Span.empty())
+
+describe "MIR receiver type transport":
+    it "ignores an absent Unit placeholder and recovers the declared Result":
+        var symbols = SymbolTable.new()
+        val symbol = symbols.define("value", SymbolKind.Variable, receiver_result_type(),
+            Span.empty(), Visibility.Private, false, nil)
+        var lowering = MirLowering.new(symbols)
+        expect(receiver_type_label(lowering.enum_match_expr_type(
+            receiver_variable(symbol, false, false)))).to_equal("Result")
+
+    it "prefers the NamedVar binding over a stale raw text symbol":
+        var symbols = SymbolTable.new()
+        val symbol = symbols.define("value", SymbolKind.Variable, receiver_type(HirTypeKind.Str),
+            Span.empty(), Visibility.Private, false, nil)
+        var lowering = MirLowering.new(symbols)
+        lowering.bind_local(symbol.id, LocalId(id: 42))
+        lowering.remember_local_hir_type(42, receiver_result_type(), 0, 0)
+        expect(receiver_type_label(lowering.enum_match_expr_type(
+            receiver_variable(symbol, true, false)))).to_equal("Result")
+
+    it "does not turn a locally text receiver into the raw symbol's Result":
+        var symbols = SymbolTable.new()
+        val symbol = symbols.define("value", SymbolKind.Variable, receiver_result_type(),
+            Span.empty(), Visibility.Private, false, nil)
+        var lowering = MirLowering.new(symbols)
+        lowering.bind_local(symbol.id, LocalId(id: 43))
+        lowering.remember_local_hir_type(43, receiver_type(HirTypeKind.Str), 0, 0)
+        expect(receiver_type_label(lowering.enum_match_expr_type(
+            receiver_variable(symbol, false, false)))).to_equal("text")
+
+    it "retains an explicitly present expression type":
+        var symbols = SymbolTable.new()
+        val symbol = symbols.define("value", SymbolKind.Variable, receiver_result_type(),
+            Span.empty(), Visibility.Private, false, nil)
+        var lowering = MirLowering.new(symbols)
+        expect(receiver_type_label(lowering.enum_match_expr_type(
+            receiver_variable(symbol, true, true)))).to_equal("Unit")
+
+    it "falls through unresolved local metadata to the declared symbol":
+        var symbols = SymbolTable.new()
+        val symbol = symbols.define("value", SymbolKind.Variable, receiver_result_type(),
+            Span.empty(), Visibility.Private, false, nil)
+        var lowering = MirLowering.new(symbols)
+        lowering.bind_local(symbol.id, LocalId(id: 44))
+        lowering.remember_local_hir_type(44, receiver_type(HirTypeKind.Infer(0, 0)), 0, 0)
+        expect(receiver_type_label(lowering.enum_match_expr_type(
+            receiver_variable(symbol, true, false)))).to_equal("Result")
+
+    it "recovers a function's Result return despite absent call and callee types":
+        var symbols = SymbolTable.new()
+        val signature = receiver_type(HirTypeKind.Function([], receiver_result_type(), []))
+        val symbol = symbols.define("decode", SymbolKind.Function, signature,
+            Span.empty(), Visibility.Private, false, nil)
+        var lowering = MirLowering.new(symbols)
+        val call = HirExpr(kind: HirExprKind.Call(receiver_variable(symbol, true, false), [], []),
+            has_type_: false, type_: receiver_type(HirTypeKind.Unit), span: Span.empty())
+        expect(receiver_type_label(lowering.enum_match_expr_type(call))).to_equal("Result")
+
+    it "falls through explicitly present Infer and Error metadata":
+        var symbols = SymbolTable.new()
+        val symbol = symbols.define("value", SymbolKind.Variable, receiver_result_type(),
+            Span.empty(), Visibility.Private, false, nil)
+        var lowering = MirLowering.new(symbols)
+        for incomplete in [HirTypeKind.Infer(0, 0), HirTypeKind.Error]:
+            val expression = HirExpr(kind: HirExprKind.Var(symbol), has_type_: true,
+                type_: receiver_type(incomplete), span: Span.empty())
+            expect(receiver_type_label(lowering.enum_match_expr_type(expression))).to_equal("Result")
+
+    it "falls through an Error local without hiding the declared Result":
+        var symbols = SymbolTable.new()
+        val symbol = symbols.define("value", SymbolKind.Variable, receiver_result_type(),
+            Span.empty(), Visibility.Private, false, nil)
+        var lowering = MirLowering.new(symbols)
+        lowering.bind_local(symbol.id, LocalId(id: 45))
+        lowering.remember_local_hir_type(45, receiver_type(HirTypeKind.Error), 0, 0)
+        expect(receiver_type_label(lowering.enum_match_expr_type(
+            receiver_variable(symbol, false, false)))).to_equal("Result")
+
+    it "does not infer a Result from an unknown symbol":
+        var lowering = MirLowering.new(SymbolTable.new())
+        expect(receiver_type_label(lowering.enum_match_expr_type(
+            receiver_variable(SymbolId(id: 99999), true, false)))).to_equal("missing")

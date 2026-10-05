@@ -138,6 +138,7 @@ use compiler.common.mir_target_context.{MirTargetContext, mir_target_context_fro
 # Import split modules so their impl blocks are linked
 use compiler.mir._MirLoweringExpr.expr_dispatch.*
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir.mir_lowering_stmts.*
 use compiler.mir.mir_lowering_ml.*
@@ -439,6 +440,7 @@ impl MirLowering:
             enum_variant_payload_types: {},
             enum_variant_payload_names: {},
             enum_variant_payload_kind: {},
+            generic_enum_constructor_owners: {},
             enum_tuple_text_slots: {},
             runtime_array_locals: {},
             runtime_dict_locals: {},
@@ -738,6 +740,10 @@ impl MirLowering:
 
     me register_enum_variants(enum_def: HirEnum):
         """Register names and resolved portable runtime discriminants."""
+        val generic_constructor = enum_def.type_params.len() > 0 or enum_def.is_generic_template
+        self.generic_enum_constructor_owners[enum_def.name] = generic_constructor
+        if enum_def.runtime_name != "":
+            self.generic_enum_constructor_owners[enum_def.runtime_name] = generic_constructor
         var names: [text] = []
         var discriminants: [i64] = []
         var next_value: i64 = 0
@@ -796,6 +802,15 @@ impl MirLowering:
             self.enum_variant_payload_types[payload_key] = full_types
             self.enum_variant_payload_names[payload_key] = full_names
             self.enum_variant_payload_kind[payload_key] = payload_kind
+            # Constructor validation must use the same declaration identity as
+            # the qualified variant/discriminant maps. Bare names can collide.
+            if enum_def.runtime_name != "":
+                val qualified_payload_key = "{enum_def.runtime_name}::{variant.name}"
+                self.enum_variant_payload_types[qualified_payload_key] = full_types
+                self.enum_variant_payload_names[qualified_payload_key] = full_names
+                self.enum_variant_payload_kind[qualified_payload_key] = payload_kind
+                if full_types.len() == 1:
+                    self.enum_single_payload_types[qualified_payload_key] = full_types[0]
             next_value = value + 1
             vi = vi + 1
         # Bare-name collision registry (2026-08-01). enum_variant_index is keyed
@@ -2401,21 +2416,14 @@ impl MirLowering:
     # ========================================================================
 
     me prescan_enum_owner_for_variant(name: text) -> text:
-        """Which enum owns variant `name`, mirroring lower_call's own Ok/Err/
-        Some/None interception plus its bare-variant enum_variant_index scan.
-        "" when `name` is not a known enum variant at all (an ordinary struct
-        or free-function call)."""
-        if name == "Ok" or name == "Err":
-            return "Result"
-        if name == "Some" or name == "None":
-            return "Option"
-        # Step (c): scan the QUALIFIED keyspace so an evicted same-bare-named
-        # declaration is still found, and return the BARE owner name -- this
-        # prescan's result feeds struct_field_type_name, which is bare-keyed.
-        val owner_keys = self.variant_owner_keys(name)
-        if owner_keys.len() > 0:
-            return self.enum_bare_of(owner_keys[0])
-        ""
+        # Metadata cannot use the discriminant-only deduplication used by
+        # variant patterns: equal variant leaves may carry different types.
+        var owner = ""
+        for key in self.enum_variant_index_q.keys():
+            if self.enum_variant_discriminant(key, name) >= 0:
+                if owner != "" and owner != key: return ""
+                owner = key
+        owner
 
     me prescan_block_for_struct_types(block: HirBlock):
         """Read-only HIR walk over a function body (no MIR emitted): finds
@@ -2508,7 +2516,17 @@ impl MirLowering:
                     case _:
                         ()
                 if name != "":
-                    val owner_enum = self.prescan_enum_owner_for_variant(name)
+                    var owner_enum = ""
+                    if expr.has_type_:
+                        match expr.type_.kind:
+                            case Named(owner_symbol, _):
+                                owner_enum = self.enum_constructor_symbol_owner(owner_symbol)
+                            case HirTypeKind.Result(_, _): owner_enum = "Result"
+                            case HirTypeKind.Optional(_): owner_enum = "Option"
+                            case _: ()
+                    if owner_enum == "": owner_enum = self.prescan_enum_owner_for_variant(name)
+                    if owner_enum != "" and self.enum_variant_discriminant(owner_enum, name) < 0:
+                        owner_enum = ""
                     if owner_enum != "" and args.len() == 1:
                         # Enum/Result payload chain fix: `Ok(make(3))` /
                         # `Circle(make_point())` constructs a payload that may
@@ -2597,7 +2615,7 @@ impl MirLowering:
                 if val eb = else_:
                     self.prescan_block_for_struct_types(eb)
                 ""
-            case MethodCall(mc_receiver, mc_method, mc_args, _):
+            case MethodCall(mc_receiver, mc_method, mc_args, mc_resolution):
                 # Dot-qualified enum construction (`Shape.Circle(make(9))`)
                 # actually arrives as a MethodCall (receiver=Shape,
                 # method=Circle), reclassified into enum construction only at
@@ -2609,15 +2627,17 @@ impl MirLowering:
                 var mc_recv_enum_name = ""
                 match mc_receiver.kind:
                     case Var(mc_rsym):
-                        val mc_rs = self.symbols.get_symbol_raw(mc_rsym.id)
-                        if mc_rs.?: mc_recv_enum_name = mc_rs.name
-                    case NamedVar(_, mc_rname):
-                        mc_recv_enum_name = mc_rname
+                        mc_recv_enum_name = self.enum_constructor_symbol_owner(mc_rsym)
+                    case NamedVar(mc_rsym, _):
+                        mc_recv_enum_name = self.enum_constructor_symbol_owner(mc_rsym)
                     case _:
                         ()
+                match mc_resolution:
+                    case MethodResolution.Unresolved: ()
+                    case _: mc_recv_enum_name = ""
                 var mc_is_variant = false
-                if mc_recv_enum_name != "" and self.enum_variant_index.has(mc_recv_enum_name):
-                    for mc_vn in self.enum_variant_index[mc_recv_enum_name]:
+                if mc_recv_enum_name != "" and self.enum_variant_index_q.has(mc_recv_enum_name):
+                    for mc_vn in self.enum_variant_index_q[mc_recv_enum_name]:
                         if mc_vn == mc_method:
                             mc_is_variant = true
                 if mc_is_variant and mc_args.len() == 1:
@@ -2639,8 +2659,7 @@ impl MirLowering:
                 var elit_enum_name = ""
                 match type_.kind:
                     case Named(elit_sym, _):
-                        val elit_s = self.symbols.get_symbol_raw(elit_sym.id)
-                        if elit_s.?: elit_enum_name = elit_s.name
+                        elit_enum_name = self.enum_constructor_symbol_owner(elit_sym)
                     case _:
                         ()
                 if val elit_payload = payload:

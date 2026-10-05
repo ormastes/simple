@@ -3,6 +3,16 @@
 **Use when:** Writing new tests, fixing failing tests, running test suite, analyzing test results.
 **Skills:** `/test`, `/spipe`
 
+For full bootstrap, follow the
+[collection graph](../../doc/07_guide/tooling/bootstrap_failure_collection.md#full-bootstrap-execution-graph).
+Use Simple's aggregate compiler/interpreter/loader binaries for LLVM and
+Cranelift: six Phase 2 binaries. Enumerate actual cases before execution,
+retain every failure and blocked row, and run independently of Phase 3 and
+early Phase 4 builds after producer sanity. Whole Phase 1, Phase 3 and both
+Phase 4 cohorts include binary tools and libraries. Preserve compatible caches
+and record a bug-linked workaround after three unresolved repair cycles;
+neither skipped tests nor an empty registry count as a pass.
+
 ## Quick Start
 
 ```simple

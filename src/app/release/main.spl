@@ -23,13 +23,14 @@ use app.release.convergence.{
 }
 use app.release.support_policy.{load_support_policy, check_required_support, check_single_job_coverage, required_support_json, support_matrix_json}
 use app.release.session_authority.{
-    register_release_session, verify_registered_release_session,
+    register_release_session, verify_registered_release_session, verify_release_session,
     check_release_session_cleanup, close_release_session
 }
 use app.release.candidate_authority.{
     create_candidate_plan, load_candidate_status, record_candidate_admission,
     plan_persisted_candidate_promotion
 }
+use app.release.windows_local_artifacts.{check_windows_rc1_local_artifacts}
 use app.release.self_review_policy.{
     SelfReviewRequest, load_self_review_policy_db,
     load_self_review_changed_manifest, evaluate_self_review,
@@ -63,6 +64,7 @@ fn print_help():
     print "  candidate-admit      Persist create-once qualification/admission state"
     print "  support-check        Validate and render policy-required release support"
     print "  promote-check        Plan promotion from persisted candidate/admission state"
+    print "  windows-local-check  Verify exact admitted local Windows RC1 artifacts"
     print "  withdraw-check       Validate non-destructive rollback/withdrawal"
     print ""
     print "Release policy invariants:"
@@ -119,7 +121,7 @@ fn print_plan_json():
     print "{\"output_version\":\"simple-release/v1\",\"command\":\"release plan\",\"status\":\"blocked\",\"steps\":4,\"implemented\":2,\"partial\":0,\"pending\":2,\"reason\":\"release execution evidence and the external signed review broker remain unavailable\"}"
 
 fn print_help_json():
-    print "{\"output_version\":\"simple-release/v1\",\"command\":\"release help\",\"status\":\"ok\",\"mutation\":\"none\",\"commands\":[\"plan\",\"version-check\",\"version-render-plan\",\"version-bump-plan\",\"version-bump\",\"session-register\",\"session-status\",\"session-cleanup-check\",\"session-close\",\"beta-prepare\",\"backport-check\",\"convergence-discover\",\"convergence-receipt\",\"convergence-admission\",\"self-review-plan\",\"candidate-check\",\"candidate-create\",\"candidate-status\",\"candidate-admit\",\"support-check\",\"promote-check\",\"withdraw-check\"]}"
+    print "{\"output_version\":\"simple-release/v1\",\"command\":\"release help\",\"status\":\"ok\",\"mutation\":\"none\",\"commands\":[\"plan\",\"version-check\",\"version-render-plan\",\"version-bump-plan\",\"version-bump\",\"session-register\",\"session-status\",\"session-cleanup-check\",\"session-close\",\"beta-prepare\",\"backport-check\",\"convergence-discover\",\"convergence-receipt\",\"convergence-admission\",\"self-review-plan\",\"candidate-check\",\"candidate-create\",\"candidate-status\",\"candidate-admit\",\"support-check\",\"promote-check\",\"windows-local-check\",\"withdraw-check\"]}"
 
 fn arg_value(args: [text], key: text) -> text:
     val prefix = "--{key}="
@@ -856,6 +858,26 @@ fn run_promote_check(args: [text], as_json: bool) -> i64:
         error("release", plan.reason)
     if plan.valid: 0 else: 1
 
+fn run_windows_local_check(args: [text], as_json: bool) -> i64:
+    var keys = _candidate_lookup_value_keys()
+    keys.push("state-digest")
+    keys.push("target")
+    keys.push("artifact-dir")
+    val args_check = _validate_command_args(args, keys, [])
+    if not args_check.valid:
+        return _print_release_check("windows-local-check", args_check, as_json)
+    val root = if arg_value(args, "root") == "": "." else: arg_value(args, "root")
+    val registered = verify_registered_release_session(root, _session_from_args(args))
+    if not registered.valid:
+        return _print_release_check("windows-local-check", ReleaseCheck(valid: false, reason: registered.reason), as_json)
+    val attempt = arg_value(args, "attempt").to_int() ?? -1
+    val status = load_candidate_status(root, arg_value(args, "version"), attempt)
+    val observed = verify_release_session(root, _session_from_args(args))
+    if not observed.valid or not status.valid or status.candidate.commit_sha != observed.current_head:
+        return _print_release_check("windows-local-check", ReleaseCheck(valid: false, reason: "local Windows candidate does not match registered source HEAD"), as_json)
+    val check = check_windows_rc1_local_artifacts(root, arg_value(args, "version"), attempt, arg_value(args, "state-digest"), arg_value(args, "target"), arg_value(args, "artifact-dir"))
+    _print_release_check("windows-local-check", check, as_json)
+
 fn run_withdraw_check(args: [text], as_json: bool) -> i64:
     val args_check = _validate_command_args(args, ["redeploy"], ["delete-tag", "move-tag", "reuse-version"])
     if not args_check.valid:
@@ -955,6 +977,8 @@ fn run_release(args: [text]) -> i64:
             return run_support_check(sub_args, as_json)
         case "promote-check":
             return run_promote_check(sub_args, as_json)
+        case "windows-local-check":
+            return run_windows_local_check(sub_args, as_json)
         case "withdraw-check":
             return run_withdraw_check(sub_args, as_json)
         case "-h" | "--help" | "help":
