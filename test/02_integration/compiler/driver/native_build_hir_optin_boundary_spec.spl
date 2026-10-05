@@ -1,0 +1,226 @@
+use std.spec.*
+use app.io.env_ops.{env_get, env_set}
+use app.io.file_ops.{path_absolute}
+use app.io.process_ops.{process_run}
+use std.io_runtime.{dir_create_all, dir_list, file_write, file_read, file_exists, getpid}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.common.crypto.sha256.{sha256_text}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
+    compiler_source_authority_publish_v1}
+use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1}
+use app.cli.native_build_main.{native_build_hir_shard_count, run_native_build_worker}
+
+fn hir_boundary_env_keys() -> [text]:
+    ["SIMPLE_SCV_SNAPSHOT_ROOT", "SIMPLE_SCV_REVISION_ID", "SIMPLE_SCV_COMMIT_ID",
+     "SIMPLE_SCV_TREE_ID", "SIMPLE_SCV_INVENTORY_DIGEST", "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST",
+     "SIMPLE_SCV_INVENTORY_GENERATION", "SIMPLE_SCV_SOURCE_DRIFTED",
+     "SIMPLE_HIR_SHARDING", "SIMPLE_PARSE_SHARDING", "SIMPLE_HIR_SHARD", "SIMPLE_PARSE_SHARD",
+     "SIMPLE_HIR_CACHE", "SIMPLE_FRONTEND_CACHE", "SIMPLE_HIR_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_DIR",
+     "SIMPLE_HIR_SHARD_QUEUE", "SIMPLE_HIR_SHARD_OWNER", "SIMPLE_SHARD_MEM_CLAMP",
+     "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "SIMPLE_NATIVE_BUILD_WORKER",
+     "SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE", "SIMPLE_STAGE3_STREAMING_SURFACES",
+     "SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING", "SIMPLE_NATIVE_GROUP_RESULT",
+     "SIMPLE_EXECUTION_MODE", "SIMPLE_BINARY", "SIMPLE_BIN", "SIMPLE_COMPILE_FAIL_FAST"]
+
+fn hir_boundary_candidate() -> text:
+    # No implicit wrapper or earlier compiler: the native qualification owner
+    # supplies the exact candidate path and immutable binary digest.
+    val requested = env_get("SIMPLE_HIR_BOUNDARY_CANDIDATE") ?? ""
+    val expected = env_get("SIMPLE_HIR_BOUNDARY_CANDIDATE_SHA256") ?? ""
+    expect(requested == "").to_equal(false)
+    expect(expected.len()).to_equal(64)
+    val candidate = path_absolute(requested)
+    expect(file_exists(candidate)).to_equal(true)
+    expect(file_hash_sha256(candidate)).to_equal(expected)
+    candidate
+
+fn hir_boundary_save(keys: [text]) -> [text]:
+    var values: [text] = []
+    for key in keys: values.push(env_get(key) ?? "")
+    values
+
+fn hir_boundary_restore(keys: [text], values: [text]):
+    var index = 0
+    while index < keys.len():
+        env_set(keys[index], values[index])
+        index = index + 1
+
+fn hir_boundary_queue_count(root: text) -> i64:
+    var count = 0
+    for name in dir_list(root):
+        if name.starts_with("queue-"): count = count + 1
+    count
+
+# This invokes the actual candidate compiler in a tiny real Git checkout with
+# a canonical snapshot. It does not substitute a launcher or shard worker.
+fn hir_boundary_build(label: text, corrupt_field: text) -> (text, i64, text):
+    val checkout = compile_source_inventory_plain_checkout_v1(path_absolute("."))
+    val root = checkout + "/build/test_output/hir_optin_boundary/{getpid()}-{label}"
+    val producer = hir_boundary_candidate()
+    expect(dir_create_all(root + "/src/app")).to_equal(true)
+    expect(file_write(root + "/src/app/main.spl", "use app.util_a.{double}\nfn main() -> i64:\n    if double(21) != 42: return 1\n    0\n")).to_equal(true)
+    expect(file_write(root + "/src/app/util_a.spl", "pub fn double(x: i64) -> i64:\n    x * 2\n")).to_equal(true)
+    val (_, _, init_code) = process_run("git", ["-C", root, "init", "-q"])
+    expect(init_code).to_equal(0)
+    val (_, _, add_code) = process_run("git", ["-C", root, "add", "src"])
+    expect(add_code).to_equal(0)
+    val (_, _, commit_code) = process_run("git", ["-C", root, "-c", "user.name=HIR boundary fixture",
+        "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"])
+    expect(commit_code).to_equal(0)
+    val authority = compiler_source_authority_acquire_v1(root, root + "/build/scv", [root + "/src/app"], true)
+    expect(authority.valid).to_equal(true)
+    val keys = hir_boundary_env_keys()
+    val saved = hir_boundary_save(keys)
+    val published = compiler_source_authority_publish_v1(authority)
+    if not published:
+        hir_boundary_restore(keys, saved)
+        return ("fixture authority publication failed", 99, root)
+    env_set("SIMPLE_PARSE_SHARDING", "0")
+    env_set("SIMPLE_HIR_SHARDING", "1")
+    env_set("SIMPLE_HIR_SHARD", "")
+    env_set("SIMPLE_PARSE_SHARD", "")
+    env_set("SIMPLE_NATIVE_BUILD_WORKER", "")
+    env_set("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING", "")
+    env_set("SIMPLE_NATIVE_GROUP_RESULT", "")
+    env_set("SIMPLE_EXECUTION_MODE", "")
+    env_set("SIMPLE_BINARY", producer)
+    env_set("SIMPLE_BIN", producer)
+    env_set("SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE", "")
+    env_set("SIMPLE_HIR_CACHE", "1")
+    env_set("SIMPLE_FRONTEND_CACHE", "1")
+    env_set("SIMPLE_HIR_CACHE_DIR", root + "/hir")
+    env_set("SIMPLE_FRONTEND_CACHE_DIR", root + "/frontend")
+    env_set("SIMPLE_HIR_SHARD_QUEUE", "")
+    env_set("SIMPLE_HIR_SHARD_OWNER", "")
+    env_set("SIMPLE_SHARD_MEM_CLAMP", "0")
+    env_set("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "0")
+    env_set("SIMPLE_STAGE3_STREAMING_SURFACES", "1")
+    if corrupt_field != "": env_set(corrupt_field, "")
+    # Positional shell arguments preserve spaces without interpolating paths
+    # into shell code. The child must inherit the exact published generation.
+    val (out, err, code) = process_run("sh", ["-c", "cd \"$1\" && shift && exec \"$@\"", "hir-boundary",
+        root, producer, "native-build", "--source", "src/app", "--entry-closure",
+        "--entry", "src/app/main.spl", "--threads", "20", "--cache-dir", root + "/cache",
+        "--runtime-bundle", "core-c-bootstrap", "--runtime-path", checkout + "/src/runtime",
+        "--output", root + "/out.exe"])
+    hir_boundary_restore(keys, saved)
+    return (out + "\n" + err, code, root)
+
+describe "explicit HIR-only native admission boundary":
+    slow_it "starts the requested twenty-worker pool from valid pinned authority":
+        val (log, code, root) = hir_boundary_build("valid", "")
+        expect(code).to_equal(0)
+        expect(log).to_contain("[hir-shard] completed_workers=20 failed_workers=0 failed_modules=0 unfinished=0")
+        expect(hir_boundary_queue_count(root + "/hir")).to_equal(1)
+        var queue = ""
+        for name in dir_list(root + "/hir"):
+            if name.starts_with("queue-"): queue = root + "/hir/" + name
+        var done_count = 0
+        for name in dir_list(queue):
+            if name.ends_with(".done"): done_count = done_count + 1
+        expect(done_count).to_equal(20)
+        var owner_index = 0
+        while owner_index < 20:
+            val owner = "{owner_index}/20@0"
+            expect(file_read(queue + "/" + sha256_text(owner) + ".done")).to_equal(owner)
+            owner_index = owner_index + 1
+        expect(file_exists(root + "/out.exe")).to_equal(true)
+        val (_, _, run_code) = process_run(root + "/out.exe", [])
+        expect(run_code).to_equal(0)
+
+    slow_it "rejects a missing source inventory digest before creating a child queue":
+        val (log, code, root) = hir_boundary_build("missing-digest", "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST")
+        expect(code == 0).to_equal(false)
+        expect(log).to_contain("SCV-E-HIR-ADMISSION:")
+        expect(log.contains("[hir-shard]")).to_equal(false)
+        expect(hir_boundary_queue_count(root + "/hir")).to_equal(0)
+        expect(file_exists(root + "/out.exe")).to_equal(false)
+
+    slow_it "rejects a missing generation instead of silently running serially":
+        val (log, code, root) = hir_boundary_build("missing-generation", "SIMPLE_SCV_INVENTORY_GENERATION")
+        expect(code == 0).to_equal(false)
+        expect(log).to_contain("SCV-E-HIR-ADMISSION:")
+        expect(log.contains("[hir-shard]")).to_equal(false)
+        expect(hir_boundary_queue_count(root + "/hir")).to_equal(0)
+        expect(file_exists(root + "/out.exe")).to_equal(false)
+
+    slow_it "restores coordinator markers and preserves rejected authority in process":
+        val keys = hir_boundary_env_keys()
+        val saved = hir_boundary_save(keys)
+        val producer = hir_boundary_candidate()
+        val root = path_absolute("build/test_output/hir_optin_boundary/{getpid()}-restore")
+        expect(dir_create_all(root + "/hir")).to_equal(true)
+        env_set("SIMPLE_BINARY", producer)
+        env_set("SIMPLE_BIN", producer)
+        env_set("SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING", "")
+        env_set("SIMPLE_NATIVE_GROUP_RESULT", "")
+        env_set("SIMPLE_EXECUTION_MODE", "")
+        env_set("SIMPLE_HIR_SHARD", "")
+        env_set("SIMPLE_PARSE_SHARD", "")
+        env_set("SIMPLE_PARSE_SHARDING", "0")
+        env_set("SIMPLE_HIR_SHARDING", "1")
+        env_set("SIMPLE_HIR_CACHE", "1")
+        env_set("SIMPLE_FRONTEND_CACHE", "1")
+        env_set("SIMPLE_HIR_CACHE_DIR", root + "/hir")
+        env_set("SIMPLE_FRONTEND_CACHE_DIR", root + "/frontend")
+        env_set("SIMPLE_SHARD_MEM_CLAMP", "0")
+        env_set("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "0")
+        env_set("SIMPLE_NATIVE_BUILD_WORKER", "prior-worker-marker")
+        env_set("SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE", "prior-warm-candidate")
+        # A nonempty unavailable root must be rejected, never refreshed into
+        # a different authority. Capture actual fields before calling the real
+        # coordinator so its restoration is tested before test cleanup runs.
+        env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root + "/missing-snapshot")
+        val before = hir_boundary_save(keys)
+        val code = run_native_build_worker(["--source", "src/app", "--entry-closure",
+            "--entry", "src/app/cli/bootstrap_main.spl", "--threads", "20",
+            "--cache-dir", root + "/cache", "--output", root + "/out.exe"])
+        val actual_worker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
+        val actual_candidate = env_get("SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE") ?? ""
+        val after = hir_boundary_save(keys)
+        hir_boundary_restore(keys, saved)
+        expect(code).to_equal(1)
+        expect(actual_worker).to_equal("prior-worker-marker")
+        expect(actual_candidate).to_equal("prior-warm-candidate")
+        # First eight keys are the immutable authority tuple.
+        var index = 0
+        while index < 8:
+            expect(after[index]).to_equal(before[index])
+            index = index + 1
+        expect(hir_boundary_queue_count(root + "/hir")).to_equal(0)
+        expect(file_exists(root + "/out.exe")).to_equal(false)
+
+    it "suppresses explicit opt-in for disabled caches and recursive shard children":
+        val keys = hir_boundary_env_keys()
+        val saved = hir_boundary_save(keys)
+        env_set("SIMPLE_PARSE_SHARDING", "0")
+        env_set("SIMPLE_HIR_SHARDING", "1")
+        env_set("SIMPLE_HIR_SHARD", "")
+        env_set("SIMPLE_PARSE_SHARD", "")
+        env_set("SIMPLE_HIR_CACHE", "1")
+        env_set("SIMPLE_FRONTEND_CACHE", "1")
+        env_set("SIMPLE_SHARD_MEM_CLAMP", "0")
+        env_set("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "0")
+        val args = ["--threads", "20"]
+        val enabled = native_build_hir_shard_count(args)
+        env_set("SIMPLE_HIR_CACHE", "0")
+        val hir_cache_off = native_build_hir_shard_count(args)
+        env_set("SIMPLE_HIR_CACHE", "1")
+        env_set("SIMPLE_FRONTEND_CACHE", "0")
+        val frontend_cache_off = native_build_hir_shard_count(args)
+        env_set("SIMPLE_FRONTEND_CACHE", "1")
+        env_set("SIMPLE_HIR_SHARD", "0/20")
+        val hir_child = native_build_hir_shard_count(args)
+        env_set("SIMPLE_HIR_SHARD", "")
+        env_set("SIMPLE_PARSE_SHARD", "0/20")
+        val parse_child = native_build_hir_shard_count(args)
+        env_set("SIMPLE_PARSE_SHARD", "")
+        env_set("SIMPLE_HIR_SHARDING", "0")
+        val explicit_disable = native_build_hir_shard_count(args)
+        hir_boundary_restore(keys, saved)
+        expect(enabled).to_equal(20)
+        expect(hir_cache_off).to_equal(0)
+        expect(frontend_cache_off).to_equal(0)
+        expect(hir_child).to_equal(0)
+        expect(parse_child).to_equal(0)
+        expect(explicit_disable).to_equal(0)
