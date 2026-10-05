@@ -5,11 +5,13 @@ This is a bounded native C check for the test-instrumented vector provider apply
 Source is based on release commit `62e10c94cb9a2749911a64419cf8064e064e50ba` in isolated worktree `D:/dev/simple-item5-vector-test-events-20261006`. The final four source SHA-256 values are:
 
 - `src/runtime/providers/vector/bitmap_provider.c`: `731DD327A2C8F70FB2264FD11B8FD01582FDF3E3613414FAE78B0C5E40E3DDEE`
-- `scripts/check/check-vector-provider-test-events.shs`: `A81E743D9683CC81152223A41EAC4717A4FC7D062D3519E147C125B52FAC4F4B`
+- `scripts/check/check-vector-provider-test-events.shs`: `C6854E655C81A2E22212344D873523EB7D96C78C023EE26484286106953DDA99`
 - `src/runtime/test/vector_provider_event_selfcheck.c`: `924D9AACA9F004E6F8FFD6C8B54DF9FFCE501240D5DA2AB8FFFCA26E13B8AD2F`
 - `src/runtime/test/vector_provider_test_events.c`: `2A1BFF259EEDC401918C9D012AE4C72248516B22654B99F318CD45392B0D8113`
 
-The script ran in a private WSL clone at base `62e10c9` and exited 0:
+The script ran in a private WSL clone at base `62e10c9` and exited 0. The recorded `source.sha256` checker digest from that run is `A81E743D9683CC81152223A41EAC4717A4FC7D062D3519E147C125B52FAC4F4B`; the committed checker digest above reflects only removal of a trailing space from its final output line. No executable logic changed and no native rerun was made after this whitespace cleanup.
+
+The command was:
 
 ```sh
 sh scripts/check/check-vector-provider-test-events.shs /var/tmp/item5-vector-events-native-provider_callpaths-cycle2-20261006
