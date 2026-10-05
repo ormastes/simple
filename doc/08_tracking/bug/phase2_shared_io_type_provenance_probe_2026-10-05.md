@@ -7,7 +7,8 @@ No production workaround or compiler root fix is established by this change.
 `native_shared_io_type_provenance.spl` preserves the failing source shapes:
 an inferred static Result factory local, its inferred payload and method
 Result, optional `if val` text binding, and a Result-returned nested enum
-field comparison. `native_shared_io_type_provenance_typed.spl` adds explicit
+field comparison through a typed parameter, matching process_ops failure spans
+1094 and 1117. `native_shared_io_type_provenance_typed.spl` adds explicit
 Result/payload/enum locals and coalesces optional text to an explicitly typed
 empty string. Both are self-contained diagnostic fixtures, not replacements
 for process pinning, collection or authority checks.
