@@ -11,7 +11,7 @@ source = (root / "scripts/resource/process-tree-rss-watchdog.pl").read_text()
 reader = source[source.index("sub read_proc_stat_record {"):source.index("sub snapshot {")]
 start = source.index("            $line =~ /", source.index("sub snapshot {"))
 parser = source[start:source.index("            $all{$pid}", start)]
-program = "use strict; use warnings;\n" + reader + """
+program = "use strict; use warnings; use Errno qw(ESRCH ENOENT);\n" + reader + """
 my ($path, $pid) = @ARGV;
 open(my $fh, '<', $path) or die $!;
 my $line = read_proc_stat_record($fh);
@@ -53,4 +53,39 @@ with tempfile.TemporaryDirectory(prefix="rss-stat-record-") as temporary:
         path.write_bytes(data)
         result = inspect(path, 123)
         assert result.returncode != 0 and expected in result.stderr, result.stderr
-print("PASS: real normal/newline process names, field identities, malformed and oversized rejection")
+
+# Exercise the real reader deterministically at the post-open read boundary.
+# A disappearing process is benign, but an unreadable live process is not.
+race_program = "use strict; use warnings; use Errno qw(ESRCH ENOENT EACCES EIO);\n" + reader + r"""
+package FailingStat;
+sub TIEHANDLE { bless { errno => $_[1], partial => $_[2] }, $_[0] }
+sub READ {
+    if ($_[0]->{partial}) {
+        $_[0]->{partial} = 0;
+        $_[1] = '123 (partial';
+        return length($_[1]);
+    }
+    $! = $_[0]->{errno};
+    return undef;
+}
+package main;
+for my $gone (ESRCH, ENOENT) {
+    for my $partial (0, 1) {
+        tie *STAT, 'FailingStat', $gone, $partial;
+        my $record = read_proc_stat_record(\*STAT);
+        die "vanished task retained a record" if defined($record);
+        untie *STAT;
+    }
+}
+for my $fatal (EACCES, EIO) {
+    tie *STAT, 'FailingStat', $fatal, 0;
+    my $ok = eval { read_proc_stat_record(\*STAT); 1 };
+    die "unexpected read error was hidden" if $ok;
+    die "unexpected diagnostic: $@" unless $@ =~ /cannot read \/proc stat record/;
+    untie *STAT;
+}
+print "PASS: vanished process and fatal read errors\n";
+"""
+race = subprocess.run(["perl", "-e", race_program], capture_output=True, check=False)
+assert race.returncode == 0, race.stderr.decode()
+print("PASS: real normal/newline process names, field identities, malformed and oversized rejection; ESRCH/ENOENT before/after partial read; EACCES/EIO remain fatal")
