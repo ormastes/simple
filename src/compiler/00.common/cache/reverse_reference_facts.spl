@@ -26,6 +26,7 @@ class ReverseReferenceModuleBatchV1:
     valid: bool
     facts: [ReverseReferenceOwnerFactV1]
     known_families: [text]
+    incomplete_families: [text]
     aliases: [ReverseReferenceSourceAliasV1]
 
 # Lookup scratch is deliberately not reachable from the promoted batch root.
@@ -34,6 +35,7 @@ class ReverseReferenceModuleIndexV1:
 
 var _reverse_reference_owner_facts_v1: [ReverseReferenceOwnerFactV1] = []
 var _reverse_reference_known_families_v1: [text] = []
+var _reverse_reference_incomplete_families_v1: [text] = []
 var _reverse_reference_owner_active_v1: bool = false
 var _reverse_reference_source_aliases_v1: {text: [text]} = {}
 var _reverse_reference_owner_generation_v1: i64 = 0
@@ -44,6 +46,7 @@ var _reverse_reference_module_index_v1: ReverseReferenceModuleIndexV1? = nil
 fn reverse_reference_owner_clear_v1():
     _reverse_reference_owner_facts_v1 = []
     _reverse_reference_known_families_v1 = []
+    _reverse_reference_incomplete_families_v1 = []
     _reverse_reference_source_aliases_v1 = {}
     _reverse_reference_module_batch_v1 = nil
     _reverse_reference_module_index_v1 = nil
@@ -59,7 +62,8 @@ fn reverse_reference_module_begin_v1() -> i64:
     val token = _reverse_reference_module_next_token_v1
     _reverse_reference_module_batch_v1 = ReverseReferenceModuleBatchV1(
         token: token, generation: _reverse_reference_owner_generation_v1,
-        sealed: false, valid: true, facts: [], known_families: [], aliases: [])
+        sealed: false, valid: true, facts: [], known_families: [],
+        incomplete_families: [], aliases: [])
     _reverse_reference_module_index_v1 = ReverseReferenceModuleIndexV1(aliases: {})
     token
 
@@ -106,6 +110,9 @@ fn reverse_reference_module_publish_v1(token: i64) -> bool:
         return false
     for family in batch.known_families:
         _reverse_reference_known_families_v1.push(family)
+    for family in batch.incomplete_families:
+        if not _reverse_reference_incomplete_families_v1.contains(family):
+            _reverse_reference_incomplete_families_v1.push(family)
     for fact in batch.facts:
         _reverse_reference_owner_facts_v1.push(fact)
     for alias in batch.aliases:
@@ -133,9 +140,10 @@ fn reverse_reference_owner_register_source_alias_v1(identity: text, source: text
     if not reverse_reference_module_accepts_registration_v1():
         return
     if _reverse_reference_module_batch_v1 != nil:
-        if _reverse_reference_source_aliases_v1.contains_key(identity) and
-                _reverse_reference_source_aliases_v1[identity].contains(source):
-            return
+        if _reverse_reference_source_aliases_v1.contains_key(identity):
+            val phase_sources: [text] = _reverse_reference_source_aliases_v1[identity]
+            if phase_sources.contains(source):
+                return
         val batch = _reverse_reference_module_batch_v1.unwrap()
         val index = _reverse_reference_module_index_v1.unwrap()
         var pending_sources: [text] = if index.aliases.contains_key(identity):
@@ -160,12 +168,14 @@ fn reverse_reference_owner_source_aliases_v1(identity: text) -> [text]:
     if _reverse_reference_module_batch_v1 != nil:
         var combined: [text] = []
         if _reverse_reference_source_aliases_v1.contains_key(identity):
-            for source in _reverse_reference_source_aliases_v1[identity]:
+            val phase_sources: [text] = _reverse_reference_source_aliases_v1[identity]
+            for source in phase_sources:
                 combined.push(source)
         if _reverse_reference_module_index_v1 != nil:
             val index = _reverse_reference_module_index_v1.unwrap()
             if index.aliases.contains_key(identity):
-                for source in index.aliases[identity]:
+                val pending_sources: [text] = index.aliases[identity]
+                for source in pending_sources:
                     combined.push(source)
         else:
             for alias in _reverse_reference_module_batch_v1.unwrap().aliases:
@@ -203,15 +213,40 @@ fn reverse_reference_owner_mark_known_v1(family: text):
         _reverse_reference_known_families_v1 =
             _reverse_reference_known_families_v1.push(family)
 
+# Missing owner information invalidates completeness for this compilation.
+# Keep this in the module batch so abort rolls it back and seal promotes it.
+# A later known fact must never repair an earlier missing dependency.
+fn reverse_reference_owner_mark_incomplete_v1(family: text):
+    if not _reverse_reference_owner_active_v1:
+        return
+    if not reverse_reference_module_accepts_registration_v1():
+        return
+    if _reverse_reference_module_batch_v1 != nil:
+        val batch = _reverse_reference_module_batch_v1.unwrap()
+        if not batch.incomplete_families.contains(family):
+            batch.incomplete_families.push(family)
+        return
+    if not _reverse_reference_incomplete_families_v1.contains(family):
+        _reverse_reference_incomplete_families_v1.push(family)
+
+fn reverse_reference_owner_family_complete_v1(family: text) -> bool:
+    if _reverse_reference_incomplete_families_v1.contains(family):
+        return false
+    if _reverse_reference_module_batch_v1 != nil:
+        if _reverse_reference_module_batch_v1.unwrap().incomplete_families.contains(family):
+            return false
+    true
+
 fn reverse_reference_owner_register_v1(family: text, subject: text,
         consumer: text, evidence: text):
     if not _reverse_reference_owner_active_v1:
         return
     if not reverse_reference_module_accepts_registration_v1():
         return
-    reverse_reference_owner_mark_known_v1(family)
     if subject == "" or consumer == "":
+        reverse_reference_owner_mark_incomplete_v1(family)
         return
+    reverse_reference_owner_mark_known_v1(family)
     val digest = reverse_reference_fact_digest_v1(
         family, subject, consumer, evidence)
     val fact = ReverseReferenceOwnerFactV1(family, subject, consumer, digest)
@@ -302,19 +337,26 @@ fn reverse_reference_owner_snapshot_v1() -> ReverseReferenceOwnerSnapshotV1:
         for fact in _reverse_reference_module_batch_v1.unwrap().facts:
             facts.push(fact)
         for family in _reverse_reference_known_families_v1:
-            families.push(family)
+            if reverse_reference_owner_family_complete_v1(family):
+                families.push(family)
         for family in _reverse_reference_module_batch_v1.unwrap().known_families:
-            families.push(family)
+            if reverse_reference_owner_family_complete_v1(family):
+                families.push(family)
         return ReverseReferenceOwnerSnapshotV1(facts, families)
+    var families: [text] = []
+    for family in _reverse_reference_known_families_v1:
+        if reverse_reference_owner_family_complete_v1(family):
+            families.push(family)
     ReverseReferenceOwnerSnapshotV1(
         _reverse_reference_owner_facts_v1,
-        _reverse_reference_known_families_v1)
+        families)
 
 export ReverseReferenceOwnerFactV1, ReverseReferenceOwnerSnapshotV1
 export reverse_reference_owner_begin_v1, reverse_reference_owner_end_v1
 export reverse_reference_module_begin_v1, reverse_reference_module_seal_v1
 export reverse_reference_module_publish_v1, reverse_reference_module_abort_v1
 export reverse_reference_owner_mark_known_v1
+export reverse_reference_owner_mark_incomplete_v1
 export reverse_reference_owner_register_source_alias_v1
 export reverse_reference_owner_source_aliases_v1
 export reverse_reference_owner_register_v1, reverse_reference_owner_snapshot_v1

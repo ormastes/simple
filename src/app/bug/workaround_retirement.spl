@@ -1,0 +1,167 @@
+# A parent-owned next-rebuild transaction, never a command to revert a commit.
+use app.bug.workaround_index.{workaround_bug_id_valid, workaround_path_valid,
+    workaround_sdn_quote, workaround_sdn_fields}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1,
+    task_runner_identity_v1, task_runner_attempt_error_v1}
+
+struct WorkaroundHunkV1:
+    path: text
+    workaround: text
+    original: text
+
+struct WorkaroundRetirementV1:
+    id: text
+    bug_id: text
+    kind: text
+    workaround_commit: text
+    fix_commit: text
+    proof_task: text
+    removal_test: text
+    backends: [text]
+    hunks: [WorkaroundHunkV1]
+
+struct WorkaroundTestProofV1:
+    identity: TaskRunnerIdentityV1
+    attempt: TaskRunnerAttemptV1
+    registered: i64
+    passed: i64
+    failed: i64
+
+fn workaround_commit_valid_v1(value: text) -> bool:
+    if value.len() != 40 and value.len() != 64: return false
+    for ch in value:
+        if not "0123456789abcdef".contains(ch): return false
+    true
+
+fn workaround_retirement_validate_v1(value: WorkaroundRetirementV1) -> Result<bool, text>:
+    for field in [value.id, value.bug_id, value.proof_task, value.removal_test]:
+        if field.len() > 4096: return Err("retirement metadata exceeds bound")
+    if not workaround_bug_id_valid(value.id) or not workaround_bug_id_valid(value.bug_id):
+        return Err("invalid workaround or bug ID")
+    if value.kind != "source-hunks" and value.kind != "config-restore":
+        return Err("unsupported workaround retirement kind")
+    if not workaround_commit_valid_v1(value.workaround_commit) or
+            not workaround_commit_valid_v1(value.fix_commit):
+        return Err("retirement requires full applied commit identities")
+    if value.workaround_commit == value.fix_commit:
+        return Err("workaround is not its own root fix")
+    if not workaround_path_valid(value.proof_task) or not workaround_path_valid(value.removal_test):
+        return Err("missing root-fix proof task or original-form removal test")
+    if value.backends.len() == 0 or value.backends.len() > 8:
+        return Err("retirement backend coverage is empty or oversized")
+    var seen: [text] = []
+    for backend in value.backends:
+        if not workaround_bug_id_valid(backend) or seen.contains(backend):
+            return Err("invalid or duplicate retirement backend")
+        seen.push(backend)
+    if value.hunks.len() == 0 or value.hunks.len() > 128:
+        return Err("retirement hunk count exceeds bounds")
+    var size: i64 = 0
+    for hunk in value.hunks:
+        if hunk.path.len() > 4096 or not workaround_path_valid(hunk.path) or hunk.path.starts_with(".git/") or
+                hunk.path == ".git" or hunk.path.starts_with(".simple/"):
+            return Err("unsafe retirement path")
+        if hunk.workaround == "" or hunk.original == "" or
+                hunk.workaround == hunk.original or hunk.workaround.contains("\0") or
+                hunk.original.contains("\0"):
+            return Err("retirement requires two distinct nonempty exact hunks")
+        size = size + hunk.workaround.len() + hunk.original.len() + hunk.path.len()
+        if size > 1048576: return Err("retirement payload exceeds bound")
+    Ok(true)
+
+fn workaround_retirement_encode_v1(value: WorkaroundRetirementV1) -> Result<text, text>:
+    workaround_retirement_validate_v1(value)?
+    var out = "workaround_retirement |schema, id, bug_id, kind, workaround_commit, fix_commit, proof_task, removal_test, backends|\n    1"
+    for field in [value.id, value.bug_id, value.kind, value.workaround_commit,
+            value.fix_commit, value.proof_task, value.removal_test, value.backends.join(";")]:
+        out = out + ", " + workaround_sdn_quote(field)
+    out = out + "\nhunks |path, workaround, original|\n"
+    for hunk in value.hunks:
+        out = out + "    " + workaround_sdn_quote(hunk.path) + ", " +
+            workaround_sdn_quote(hunk.workaround) + ", " + workaround_sdn_quote(hunk.original) + "\n"
+    Ok(out)
+
+fn workaround_retirement_decode_v1(payload: text) -> Result<WorkaroundRetirementV1, text>:
+    if payload.len() > 4194304 or payload.contains("\0"):
+        return Err("retirement SDN exceeds bound")
+    val lines = payload.split("\n")
+    if lines.len() < 4 or lines[0] != "workaround_retirement |schema, id, bug_id, kind, workaround_commit, fix_commit, proof_task, removal_test, backends|" or
+            lines[2] != "hunks |path, workaround, original|":
+        return Err("unknown retirement schema")
+    val fields = workaround_sdn_fields(lines[1].trim())?
+    if fields.len() != 9 or fields[0] != "1": return Err("invalid retirement metadata")
+    var hunks: [WorkaroundHunkV1] = []
+    for index in 3..lines.len():
+        if lines[index].trim() == "": continue
+        val row = workaround_sdn_fields(lines[index].trim())?
+        if row.len() != 3: return Err("invalid retirement hunk row")
+        hunks.push(WorkaroundHunkV1(path: row[0], workaround: row[1], original: row[2]))
+        if hunks.len() > 128: return Err("retirement hunk count exceeds bound")
+    val value = WorkaroundRetirementV1(id: fields[1], bug_id: fields[2], kind: fields[3],
+        workaround_commit: fields[4], fix_commit: fields[5], proof_task: fields[6],
+        removal_test: fields[7], backends: fields[8].split(";"), hunks: hunks)
+    workaround_retirement_validate_v1(value)?
+    Ok(value)
+
+fn workaround_retirement_hunk_v1(content: text, hunk: WorkaroundHunkV1) -> Result<text, text>:
+    if content.len() > 8388608: return Err("retirement source exceeds bound")
+    if hunk.workaround == "" or hunk.original == "" or hunk.workaround == hunk.original:
+        return Err("invalid retirement hunk")
+    val at = content.find(hunk.workaround)
+    if at < 0:
+        # Idempotence belongs to the admitted transaction receipt. An original
+        # fragment elsewhere cannot excuse a changed or missing workaround.
+        return Err("blocked-retirement: workaround hunk changed or missing")
+    if content.substring(at + 1).find(hunk.workaround) >= 0:
+        return Err("blocked-retirement: ambiguous workaround hunk")
+    if content.len() - hunk.workaround.len() + hunk.original.len() > 8388608:
+        return Err("retired source exceeds bound")
+    Ok(content.substring(0, at) + hunk.original + content.substring(at + hunk.workaround.len()))
+
+fn workaround_retirement_source_v1(revision: text, patch: text) -> Result<text, text>:
+    if not workaround_commit_valid_v1(revision) or patch.len() > 16777216:
+        return Err("invalid retirement source identity")
+    Ok(sha256_text("SIMPLE-RETIREMENT-SOURCE-1\n" + revision + "\n" + patch))
+
+fn workaround_retirement_proofs_v1(proofs: [WorkaroundTestProofV1], task: text,
+        backends: [text], source: text, producer: text) -> Result<bool, text>:
+    if not builder_digest_valid_v1(source) or not builder_digest_valid_v1(producer):
+        return Err("invalid retirement proof identity")
+    if backends.len() == 0 or backends.len() > 8:
+        return Err("invalid retirement proof backend count")
+    if proofs.len() != backends.len(): return Err("incomplete retirement proof coverage")
+    var seen: [text] = []
+    for proof in proofs:
+        val identity = proof.identity
+        val attempt = proof.attempt
+        if identity.kind != "test" or identity.task_id != task or
+                identity.source_digest != source or identity.producer_digest != producer or
+                not backends.contains(identity.backend) or seen.contains(identity.backend):
+            return Err("retirement proof does not match exact task, source, producer and backend")
+        if task_runner_identity_v1(identity)? != attempt.identity_digest or
+                task_runner_attempt_error_v1(attempt) != "" or attempt.status != "passed" or
+                attempt.exit_code != 0 or attempt.task_exit_code != 0 or attempt.signal_number != 0:
+            return Err("retirement proof is not a validated successful reaped task")
+        if proof.registered <= 0 or proof.passed != proof.registered or proof.failed != 0:
+            return Err("retirement proof lacks positive complete original-form tests")
+        seen.push(identity.backend)
+    Ok(true)
+
+fn workaround_retirement_proof_encode_v1(proofs: [WorkaroundTestProofV1]) -> Result<text, text>:
+    var out = "retirement_tests |identity, transport, result, stdout, stderr, registered, passed, failed|\n"
+    for proof in proofs:
+        val attempt = proof.attempt
+        out = out + "    " + workaround_sdn_quote(task_runner_identity_v1(proof.identity)?)
+        for field in [attempt.transport_execution_digest, attempt.result_digest,
+                attempt.stdout_digest, attempt.stderr_digest]:
+            out = out + ", " + workaround_sdn_quote(field)
+        out = out + ", {proof.registered}, {proof.passed}, {proof.failed}\n"
+    Ok(out)
+
+export WorkaroundHunkV1, WorkaroundRetirementV1, WorkaroundTestProofV1
+export workaround_commit_valid_v1, workaround_retirement_validate_v1
+export workaround_retirement_encode_v1, workaround_retirement_decode_v1
+export workaround_retirement_hunk_v1, workaround_retirement_source_v1, workaround_retirement_proofs_v1
+export workaround_retirement_proof_encode_v1

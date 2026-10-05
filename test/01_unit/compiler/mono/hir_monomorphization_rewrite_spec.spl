@@ -63,7 +63,7 @@ use std.spec
 use std.spec.step
 use compiler.hir.hir.*
 use compiler.common.diagnostics.span.{Span}
-use compiler.mono.monomorphize_integration.{run_monomorphization}
+use compiler.mono.monomorphize_integration.{run_monomorphization, MonomorphizationPass, bind_type_params, hir_type_key}
 
 
 fn mk_span() -> Span:
@@ -260,3 +260,99 @@ describe "HIR monomorphization pass (#158 Phase B)":
                             pass
         expect(type_arg_count).to_equal(0)
         expect(callee_id).to_equal(spec_id)
+
+fn context_template(with_argument: bool) -> HirFunction:
+    val tp = HirTypeParam(symbol: SymbolId(id: 90), name: "T", bounds: [],
+        has_default: false, default: nil, span: mk_span())
+    val generic = mk_type(HirTypeKind.TypeParam("T", []))
+    var params: [HirParam] = []
+    if with_argument:
+        params = params.push(HirParam(symbol: SymbolId(id: 91), name: "value",
+            type_: generic, has_default: false, default: nil, span: mk_span(), is_mutable: false))
+    mk_fn(1, "context_failure", [tp], params,
+        mk_type(HirTypeKind.Result(generic, mk_type(HirTypeKind.Str))), mk_block([]))
+
+fn context_call() -> HirExpr:
+    mk_expr(HirExprKind.Call(mk_expr(HirExprKind.Var(SymbolId(id: 1))), [], []))
+
+fn context_pass() -> MonomorphizationPass:
+    val pass_ = MonomorphizationPass.create()
+    pass_.current_module = "context"
+    pass_.generic_functions["context_failure"] = context_template(false)
+    pass_.template_module["context_failure"] = "context"
+    pass_.sym_names["context#1"] = "context_failure"
+    pass_.next_symbol = 100
+    pass_
+
+describe "contextual generic inference preserves checked types":
+    it "binds return-only generics to scalar and array contexts independently":
+        val pass_ = MonomorphizationPass.create()
+        val scalar = mk_type(HirTypeKind.Int(64, true))
+        val array = mk_type(HirTypeKind.Array(mk_type(HirTypeKind.Str), nil))
+        val first = pass_.infer_call_type_args(context_template(false), [],
+            mk_type(HirTypeKind.Result(scalar, mk_type(HirTypeKind.Str))))
+        val second = pass_.infer_call_type_args(context_template(false), [],
+            mk_type(HirTypeKind.Result(array, mk_type(HirTypeKind.Str))))
+        expect(first.len()).to_equal(1)
+        expect(second.len()).to_equal(1)
+        expect(hir_type_key(first[0])).to_equal(hir_type_key(scalar))
+        expect(hir_type_key(second[0])).to_equal(hir_type_key(array))
+        expect(hir_type_key(first[0])).to_equal(hir_type_key(scalar))
+
+    it "rejects missing context and conflicting argument versus result bindings":
+        val pass_ = MonomorphizationPass.create()
+        expect(pass_.infer_call_type_args(context_template(false), []).len()).to_equal(0)
+        val args = [HirCallArg(has_name: false, name: "",
+            value: mk_expr(HirExprKind.IntLit(7, nil)), span: mk_span())]
+        val wrong = mk_type(HirTypeKind.Result(mk_type(HirTypeKind.Str), mk_type(HirTypeKind.Str)))
+        expect(pass_.infer_call_type_args(context_template(true), args, wrong).len()).to_equal(0)
+        expect(pass_.infer_call_type_args(context_template(false), [], mk_type(HirTypeKind.Any)).len()).to_equal(0)
+
+    it "does not compare concrete nominal IDs from different module tables":
+        var bindings: Dict<text, HirType> = {}
+        val formal = mk_type(HirTypeKind.Named(SymbolId(id: 12), []))
+        val actual = mk_type(HirTypeKind.Named(SymbolId(id: 80), []))
+        expect(bind_type_params(formal, actual, bindings)).to_equal(true)
+        expect(bindings.len()).to_equal(0)
+        val generic = mk_type(HirTypeKind.TypeParam("T", []))
+        val parameterized = mk_type(HirTypeKind.Named(SymbolId(id: 12), [generic]))
+        val wrong_owner = mk_type(HirTypeKind.Named(SymbolId(id: 80), [mk_type(HirTypeKind.Str)]))
+        expect(bind_type_params(parameterized, wrong_owner, bindings)).to_equal(false)
+        expect(bindings.len()).to_equal(0)
+
+    it "rewrites a function tail exactly once using its declared Result":
+        val pass_ = context_pass()
+        var body = mk_block([])
+        body.has = true
+        body.value = context_call()
+        val result = mk_type(HirTypeKind.Result(mk_type(HirTypeKind.Int(64, true)), mk_type(HirTypeKind.Str)))
+        val rewritten = pass_.rewrite_function(mk_fn(2, "caller", [], [], result, body))
+        expect(pass_.stats.call_sites_found).to_equal(1)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+        expect(pass_.stats.specializations_created).to_equal(1)
+        expect(pass_.current_return_type).to_be_nil()
+        expect(rewritten.body.has).to_equal(true)
+
+    it "does not lend the enclosing return context to an untyped lambda":
+        val pass_ = context_pass()
+        pass_.current_return_type = mk_type(HirTypeKind.Result(mk_type(HirTypeKind.Int(64, true)), mk_type(HirTypeKind.Str)))
+        val lambda_body = mk_expr(HirExprKind.Return(context_call()))
+        val lambda_expr = mk_expr(HirExprKind.Lambda([], lambda_body, []))
+        val rewritten = pass_.rewrite_expr(lambda_expr)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(1)
+        expect(pass_.stats.specializations_created).to_equal(0)
+        expect(pass_.current_return_type != nil).to_equal(true)
+
+    it "uses annotated locals and explicit returns without duplicate specialization":
+        val pass_ = context_pass()
+        val result = mk_type(HirTypeKind.Result(mk_type(HirTypeKind.Int(64, true)), mk_type(HirTypeKind.Str)))
+        val local = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 4), result, context_call()), span: mk_span())
+        val ret = HirStmt(kind: HirStmtKind.Expr(mk_expr(HirExprKind.Return(context_call()))), span: mk_span())
+        val rewritten = pass_.rewrite_function(mk_fn(2, "caller", [], [], result, mk_block([local, ret])))
+        expect(pass_.stats.call_sites_found).to_equal(2)
+        expect(pass_.stats.unresolved_generic_calls).to_equal(0)
+        expect(pass_.stats.specializations_created).to_equal(1)
+        expect(pass_.specialized_functions.len()).to_equal(1)
+        expect(pass_.spec_queue.len()).to_equal(1)
+        expect(rewritten.body.stmts.len()).to_equal(2)
+        expect(pass_.current_return_type).to_be_nil()

@@ -34,6 +34,33 @@ fn test_module(path: text, imports: [HirImport], name: text = "pkg.mod") -> HirM
         static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
         mock_decls: [], types: [], extend_enums: [])
 
+fn receipt_constant(type_: HirType, public_: bool = true) -> HirConst:
+    val span = Span.new(0, 0, 0, 0)
+    HirConst(symbol: SymbolId(id: 0), name: "symbols", type_: type_,
+        value: HirExpr(kind: HirExprKind.NilLit, has_type_: true,
+            type_: type_, span: span), is_mutable: false,
+        visibility: Visibility.Public, is_public: public_, is_volatile: false,
+        has_fixed_address: false, fixed_address: 0, span: span)
+
+describe "cold receipt unresolved declaration diagnostics":
+    it "rejects an unresolved public constant and identifies its declaration":
+        val span = Span.new(0, 0, 0, 0)
+        var module = test_module("/repo/pkg/mod.spl", [])
+        module.constants[SymbolId(id: 0)] = receipt_constant(HirType(kind: HirTypeKind.Infer(0, 0), span: span))
+        val result = hir_abi_interface_encoded_v1(module)
+        expect(result.is_err()).to_be(true)
+        expect(result.unwrap_err()).to_equal("unresolved-inference:0:0:declaration=constant:symbols")
+
+    it "accepts the explicit text array identity while excluding private inference":
+        val span = Span.new(0, 0, 0, 0)
+        var module = test_module("/repo/pkg/mod.spl", [])
+        val array_type = HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Str, span: span), nil), span: span)
+        module.constants[SymbolId(id: 0)] = receipt_constant(array_type)
+        val result = hir_abi_interface_encoded_v1(module)
+        expect(result.is_ok()).to_be(true)
+        module.constants[SymbolId(id: 1)] = receipt_constant(HirType(kind: HirTypeKind.Infer(0, 0), span: span), false)
+        expect(hir_abi_interface_encoded_v1(module).unwrap()).to_equal(result.unwrap())
+
 fn test_inventory(content: text, duplicate: bool = false) -> CompileSourceInventoryV1:
     val empty = sha256_text("")
     val entry = CompileSourceInventoryEntryV1(

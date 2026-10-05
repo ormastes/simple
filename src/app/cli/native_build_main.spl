@@ -6,7 +6,9 @@ use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
 use app.io.file_ops.{path_absolute, file_size_raw}
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
-    compiler_source_authority_publish_v1, compiler_source_authority_clear_v1}
+    compiler_source_authority_publish_v1, compiler_source_authority_clear_v1,
+    compiler_source_authority_open_published_v1}
+use app.cli.native_build_shard_admission.{native_build_hir_shard_policy_v1}
 use app.cli.native_build_parse_closure_owner.{native_build_publish_parse_closure_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
     compile_source_inventory_checkout_cache_root_v1}
@@ -763,12 +765,11 @@ fn native_build_hir_shard_count(args: [text]) -> i64:
         return 0      # already a shard child; never recurse
     if (env_get("SIMPLE_HIR_CACHE") ?? "") == "0":
         return 0      # nothing to fill
-    if (env_get("SIMPLE_HIR_SHARDING") ?? "") == "0":
+    if native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "",
+            env_get("SIMPLE_HIR_SHARDING") ?? "") == 0:
         return 0
     if (env_get("SIMPLE_FRONTEND_CACHE") ?? "") == "0":
         return 0      # the HIR cache keys off the front-end cache scope
-    if (env_get("SIMPLE_PARSE_SHARDING") ?? "") == "0":
-        return 0
     val requested = native_build_shard_threads(args, shard_worker_budget_kb("SIMPLE_HIR_SHARD_WORKER_KB", 3000000))
     # One isolated worker still contains a module crash in a serial build.
     if requested > 0: requested else: 1
@@ -1095,6 +1096,18 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
     # phase is then pure cache hits.
     val hir_shard_count = native_build_hir_shard_count(args)
     if hir_shard_count > 0:
+        # Explicit HIR-only warming may bypass the parse-publication phase,
+        # but never its immutable source ownership requirement. Inherited
+        # environment fields alone are not proof of an admitted generation.
+        if native_build_hir_shard_policy_v1(env_get("SIMPLE_PARSE_SHARDING") ?? "",
+                env_get("SIMPLE_HIR_SHARDING") ?? "") == 2:
+            val source_root = compile_source_inventory_plain_checkout_v1(path_absolute("."))
+            val authority = compiler_source_authority_open_published_v1(source_root)
+            if not authority.valid:
+                env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
+                env_set(NATIVE_BUILD_WARM_CANDIDATE_ENV, old_warm_candidate)
+                eprint "SCV-E-HIR-ADMISSION: " + authority.reason
+                return 1
         val hir_result = run_hir_shards(forwarded_args, hir_shard_count, simple_bin, native_build_timeout_ms(args))
         if hir_result != 0:
             env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)

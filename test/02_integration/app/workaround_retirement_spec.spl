@@ -1,0 +1,200 @@
+# REQ-WR-001..006: contract tests do not substitute for a corrected compiler's
+# original-form regression receipts. Synthetic receipts only exercise admission.
+use std.spec.{describe, it, expect, step}
+use app.bug.workaround_retirement.{WorkaroundRetirementV1, WorkaroundHunkV1,
+    WorkaroundTestProofV1, workaround_retirement_encode_v1, workaround_retirement_decode_v1,
+    workaround_retirement_hunk_v1, workaround_retirement_proofs_v1,
+    workaround_retirement_source_v1}
+use app.bootstrap_builder.workaround_rebuild.{workaround_rebuild_prepare_v1,
+    workaround_rebuild_admit_v1}
+use app.bug.workaround_store.{workaround_git}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.task_runner.contracts.{TaskRunnerIdentityV1, TaskRunnerAttemptV1,
+    task_runner_identity_v1}
+use std.nogc_async_mut.sosix.workaround_host.{workaround_host_mkdir,
+    workaround_host_temp_dir, workaround_host_publish, workaround_host_read,
+    workaround_host_exists, workaround_host_remove}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
+
+fn retirement_fixture_producer(parent: text, fixed_source: text) -> text:
+    val root = workaround_host_temp_dir(parent, "producer-").unwrap()
+    val artifact = root + "/compiler"
+    val authority = root + "/source.authority"
+    val receipt = root + "/admission.receipt"
+    val digest = sha256_text("fixture-only")
+    val sources = "file-hex:11:7372632f6669782e73706c:0:" + sha256_text(fixed_source) + "\n"
+    val source_digest = sha256_text(sources)
+    expect(workaround_host_publish(artifact, "fixture-only")).to_equal(true)
+    expect(workaround_host_publish(authority, sources)).to_equal(true)
+    val identity = sha256_text([
+        "schema=simple-bootstrap-stage2-admission-identity-v1", "artifact_sha256=" + digest,
+        "source_snapshot_sha256=" + source_digest, "runtime_snapshot_sha256=" + digest,
+        "tool_authority_sha256=" + digest, "build_args_sha256=" + digest,
+        "sanity_evidence_sha256=" + digest, "receiver_evidence_sha256=" + digest,
+        "hosted_runtime_relative_path=deps/libspl_hosted_runtime.rlib", "hosted_runtime_sha256=" + digest].join("\n") + "\n")
+    val payload = ["schema=simple-bootstrap-stage2-admission-v2", "status=admitted",
+        "admission_receipt_path=" + receipt, "candidate_path=" + artifact, "candidate_sha256=" + digest,
+        "source_snapshot_path=" + authority, "source_snapshot_sha256=" + source_digest,
+        "runtime_snapshot_path=" + artifact, "runtime_snapshot_sha256=" + digest,
+        "runtime_authority_path=" + artifact, "hosted_runtime_relative_path=deps/libspl_hosted_runtime.rlib",
+        "hosted_runtime_sha256=" + digest, "tool_authority_path=" + artifact, "tool_authority_sha256=" + digest,
+        "build_args_sha256=" + digest, "simple_abi_policy=v1", "simple_abi_version=1", "simple_abi_deferred=0",
+        "sanity_evidence_path=" + artifact, "sanity_evidence_sha256=" + digest,
+        "receiver_evidence_path=" + artifact, "receiver_evidence_sha256=" + digest,
+        "receiver_log_path=" + artifact, "receiver_log_sha256=" + digest,
+        "admission_identity=" + identity, "checks_executed_at_admission=1", "checks_replayed_during_stage3=0"].join("\n") + "\n"
+    expect(workaround_host_publish(receipt, payload)).to_equal(true)
+    receipt
+
+fn retirement_fixture_record(workaround: text, fix: text) -> WorkaroundRetirementV1:
+    WorkaroundRetirementV1(id: "WR-test", bug_id: "sample_bug", kind: "source-hunks",
+        workaround_commit: workaround, fix_commit: fix, proof_task: "root-fix",
+        removal_test: "original-form", backends: ["llvm"], hunks: [
+            WorkaroundHunkV1(path: "src/a.spl", workaround: "fn a(): 2\n", original: "fn a(): 1\n")])
+
+fn retirement_fixture_proof(task: text, source: text) -> WorkaroundTestProofV1:
+    val digest = sha256_text("fixture-only")
+    val identity = TaskRunnerIdentityV1(kind: "test", task_id: task, case_id: "case-a",
+        backend: "llvm", phase: "rebuild", producer_digest: digest, source_digest: source,
+        runtime_digest: digest, toolchain_digest: digest, policy_digest: digest, execution_digest: digest)
+    val attempt = TaskRunnerAttemptV1(identity_digest: task_runner_identity_v1(identity).unwrap(),
+        group_id: "fixture", attempt: 1, mode: "isolated", pid: 1, process_generation: 1,
+        status: "passed", reason: "", exit_code: 0, task_exit_code: 0, signal_number: 0,
+        tree_reaped: true, result_validated: true, stdout_digest: digest, stderr_digest: digest,
+        result_digest: digest, transport_execution_digest: digest)
+    WorkaroundTestProofV1(identity: identity, attempt: attempt, registered: 3, passed: 3, failed: 0)
+
+fn retirement_fixture_commit(root: text, message: text) -> text:
+    workaround_git(root, ["add", "."]).unwrap()
+    workaround_git(root, ["-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", message]).unwrap()
+    workaround_git(root, ["rev-parse", "HEAD"]).unwrap().trim()
+
+describe "exact-source workaround retirement":
+    it "round trips strict SDN and rejects unsupported versions and truncated rows":
+        val record = retirement_fixture_record("1111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222")
+        val encoded = workaround_retirement_encode_v1(record).unwrap()
+        val decoded = workaround_retirement_decode_v1(encoded).unwrap()
+        expect(decoded.hunks[0].workaround).to_equal("fn a(): 2\n")
+        expect(workaround_retirement_encode_v1(decoded).unwrap()).to_equal(encoded)
+        expect(workaround_retirement_decode_v1(encoded.replace("    1,", "    2,")).is_err()).to_equal(true)
+        expect(workaround_retirement_decode_v1(encoded.substring(0, encoded.len() - 3)).is_err()).to_equal(true)
+        var unsafe = record
+        unsafe.hunks = [WorkaroundHunkV1(path: "../active.spl", workaround: "two", original: "one")]
+        expect(workaround_retirement_encode_v1(unsafe).is_err()).to_equal(true)
+
+    it "changes only the exact hunk and preserves unrelated edits":
+        val hunk = WorkaroundHunkV1(path: "src/a.spl", workaround: "fn a(): 2\n", original: "fn a(): 1\n")
+        expect(workaround_retirement_hunk_v1("# unrelated change\nfn a(): 2\nfn b(): 99\n", hunk).unwrap()).to_equal(
+            "# unrelated change\nfn a(): 1\nfn b(): 99\n")
+        expect(workaround_retirement_hunk_v1("fn a(): 3\n", hunk).is_err()).to_equal(true)
+        expect(workaround_retirement_hunk_v1("fn a(): 2\nfn a(): 2\n", hunk).is_err()).to_equal(true)
+        expect(workaround_retirement_hunk_v1("fn a(): 1\nfn a(): 3\n", hunk).is_err()).to_equal(true)
+
+    it "rejects unverified, zero-count, failed, wrong-source and unreaped proofs":
+        val source = sha256_text("source")
+        val producer = sha256_text("fixture-only")
+        val proof = retirement_fixture_proof("root-fix", source)
+        expect(workaround_retirement_proofs_v1([proof], "root-fix", ["llvm"], source, producer).unwrap()).to_equal(true)
+        expect(workaround_retirement_proofs_v1([], "root-fix", ["llvm"], source, producer).is_err()).to_equal(true)
+        expect(workaround_retirement_proofs_v1([proof], "root-fix", ["llvm", "cranelift"], source, producer).is_err()).to_equal(true)
+        expect(workaround_retirement_proofs_v1([proof], "root-fix", ["llvm"], sha256_text("other"), producer).is_err()).to_equal(true)
+        var invalid = proof
+        invalid.registered = 0
+        invalid.passed = 0
+        expect(workaround_retirement_proofs_v1([invalid], "root-fix", ["llvm"], source, producer).is_err()).to_equal(true)
+        invalid = proof
+        invalid.failed = 1
+        expect(workaround_retirement_proofs_v1([invalid], "root-fix", ["llvm"], source, producer).is_err()).to_equal(true)
+        invalid = proof
+        invalid.attempt.result_validated = false
+        expect(workaround_retirement_proofs_v1([invalid], "root-fix", ["llvm"], source, producer).is_err()).to_equal(true)
+        invalid = proof
+        invalid.attempt.tree_reaped = false
+        expect(workaround_retirement_proofs_v1([invalid], "root-fix", ["llvm"], source, producer).is_err()).to_equal(true)
+
+    it "requires an applied fix and preserves the input while admitting an isolated original form":
+        step("Create an independent Git fixture with a mixed workaround commit")
+        expect(workaround_host_mkdir("build/test-artifacts")).to_equal(true)
+        val root = workaround_host_temp_dir("build/test-artifacts", "retirement-source-").unwrap()
+        val private_parent = workaround_host_temp_dir("build/test-artifacts", "retirement-next-").unwrap()
+        expect(workaround_host_mkdir(root + "/src")).to_equal(true)
+        expect(workaround_host_mkdir(root + "/doc/08_tracking/bug")).to_equal(true)
+        expect(workaround_host_publish(root + "/doc/08_tracking/bug/bug_db.sdn",
+            "bugs |id, severity, status, title, valid|\n    sample_bug, P2, fixed, Sample, true\n")).to_equal(true)
+        expect(workaround_host_publish(root + "/src/a.spl", "fn a(): 1\n")).to_equal(true)
+        expect(workaround_host_publish(root + "/.gitignore", "ignored.spl\n")).to_equal(true)
+        expect(workaround_host_publish(root + "/src/untouched.spl", "fn older(): 1\nfn newer(): 2\n")).to_equal(true)
+        workaround_git(root, ["init", "-q"]).unwrap()
+        val initial = retirement_fixture_commit(root, "original")
+        expect(workaround_host_publish(root + "/src/a.spl", "fn a(): 2\nfn unrelated(): 99\n")).to_equal(true)
+        val workaround = retirement_fixture_commit(root, "mixed workaround and independent function")
+        expect(workaround_host_publish(root + "/src/fix.spl", "fn fixed(): 1\n")).to_equal(true)
+        val fix = retirement_fixture_commit(root, "fixture root fix source")
+        val record = retirement_fixture_record(workaround, fix)
+        val source = workaround_retirement_source_v1(fix, "").unwrap()
+        val proof = retirement_fixture_proof("root-fix", source)
+        val producer = sha256_text("fixture-only")
+        val producer_receipt = retirement_fixture_producer(private_parent, "fn fixed(): 1\n")
+        val old_source_receipt = retirement_fixture_producer(private_parent, "fn fixed(): 0\n")
+        step("A fixed bug and locally available commit do not imply applied fix")
+        workaround_git(root, ["checkout", "--detach", workaround]).unwrap()
+        expect(workaround_rebuild_prepare_v1(root, private_parent, workaround, fix,
+            producer, record, [proof], producer_receipt).is_err()).to_equal(true)
+        workaround_git(root, ["checkout", "--detach", fix]).unwrap()
+        expect(workaround_rebuild_prepare_v1(root, private_parent, fix, initial,
+            producer, record, [proof], producer_receipt).is_err()).to_equal(true)
+        expect(workaround_rebuild_prepare_v1(root, root, fix, fix,
+            producer, record, [proof], producer_receipt).is_err()).to_equal(true)
+        expect(workaround_rebuild_prepare_v1(root, private_parent, fix, fix,
+            producer, record, [], producer_receipt).is_err()).to_equal(true)
+        expect(workaround_rebuild_prepare_v1(root, private_parent, fix, fix,
+            producer, record, [proof], producer_receipt + ".missing").is_err()).to_equal(true)
+        expect(workaround_rebuild_prepare_v1(root, private_parent, fix, fix,
+            producer, record, [proof], old_source_receipt).is_err()).to_equal(true)
+        var unchanged = record
+        unchanged.hunks = [WorkaroundHunkV1(path: "src/untouched.spl", workaround: "fn newer(): 2\n", original: "fn older(): 1\n")]
+        expect(workaround_rebuild_prepare_v1(root, private_parent, fix, fix,
+            producer, unchanged, [proof], producer_receipt).is_err()).to_equal(true)
+        step("Prepare only a new checkout and retain unrelated portions of the mixed commit")
+        val candidate = workaround_rebuild_prepare_v1(root, private_parent, fix, fix,
+            producer, record, [proof], producer_receipt).unwrap()
+        expect(workaround_host_read(root + "/src/a.spl", 8192).unwrap()).to_equal("fn a(): 2\nfn unrelated(): 99\n")
+        expect(workaround_host_read(candidate.source_root + "/src/a.spl", 8192).unwrap()).to_equal("fn a(): 1\nfn unrelated(): 99\n")
+        expect(workaround_rebuild_admit_v1(candidate, record, []).is_err()).to_equal(true)
+        expect(workaround_host_exists(candidate.transaction_root + "/retired.sdn")).to_equal(false)
+        val removal = retirement_fixture_proof("original-form", candidate.source_digest)
+        val admitted = workaround_rebuild_admit_v1(candidate, record, [removal]).unwrap()
+        expect(admitted).to_equal(candidate.source_root)
+        val receipt = workaround_host_read(candidate.transaction_root + "/retired.sdn", 32768).unwrap()
+        expect(workaround_rebuild_admit_v1(candidate, record, [removal]).unwrap()).to_equal(admitted)
+        expect(workaround_host_read(candidate.transaction_root + "/retired.sdn", 32768).unwrap()).to_equal(receipt)
+        step("Ignored source and hidden Git index flags cannot reuse the candidate proof")
+        expect(workaround_host_publish(candidate.source_root + "/ignored.spl", "fn injected(): 9\n")).to_equal(true)
+        expect(workaround_rebuild_admit_v1(candidate, record, [removal]).is_err()).to_equal(true)
+        expect(workaround_host_remove(candidate.source_root + "/ignored.spl")).to_equal(true)
+        workaround_git(candidate.source_root, ["update-index", "--assume-unchanged", "src/a.spl"]).unwrap()
+        expect(workaround_rebuild_admit_v1(candidate, record, [removal]).is_err()).to_equal(true)
+        workaround_git(candidate.source_root, ["update-index", "--no-assume-unchanged", "src/a.spl"]).unwrap()
+        workaround_git(candidate.source_root, ["update-index", "--skip-worktree", "src/a.spl"]).unwrap()
+        expect(workaround_rebuild_admit_v1(candidate, record, [removal]).is_err()).to_equal(true)
+        workaround_git(candidate.source_root, ["update-index", "--no-skip-worktree", "src/a.spl"]).unwrap()
+        step("An edited candidate cannot reuse old original-form evidence")
+        expect(workaround_host_publish(candidate.source_root + "/src/a.spl", "fn a(): 7\n")).to_equal(true)
+        expect(workaround_rebuild_admit_v1(candidate, record, [removal]).is_err()).to_equal(true)
+        # Retain fixture trees and receipts for inspection; no force cleanup.
+
+    it "rejects a real directory reached through an ancestor alias into the input":
+        expect(workaround_host_mkdir("build/test-artifacts")).to_equal(true)
+        val base = workaround_host_temp_dir("build/test-artifacts", "retirement-alias-").unwrap()
+        val source = base + "/source"
+        expect(workaround_host_mkdir(source + "/child")).to_equal(true)
+        expect(snapshot_symlink_create_nofollow_v1(base, base + "/alias", "source", 2)).to_equal(true)
+        val record = retirement_fixture_record("1111111111111111111111111111111111111111",
+            "2222222222222222222222222222222222222222")
+        val outcome = workaround_rebuild_prepare_v1(source, base + "/alias/child",
+            record.fix_commit, record.fix_commit, sha256_text("fixture-only"), record, [], "absent")
+        match outcome:
+            case Err(reason): expect(reason).to_contain("candidate parent overlaps input")
+            case Ok(_): expect(false).to_equal(true)

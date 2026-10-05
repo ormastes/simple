@@ -19,6 +19,29 @@ fn lower_result_unwrap_function(source: text, target: text) -> (text, text):
     ("", errors)
 
 describe "Result unwrap struct provenance", tag: ["only-compiled"]:
+    it "lowers boolean unwrap with a typed result and a wrong-variant panic":
+        val source = "fn choose(value: Result<bool, text>) -> bool:\n    not value.unwrap()\n"
+        val (mir, errors) = lower_result_unwrap_function(source, "choose")
+        expect(errors).to_equal("")
+        expect(mir).to_contain("rt_enum_discriminant")
+        expect(mir).to_contain("rt_enum_payload")
+        expect(mir).to_contain("rt_panic")
+        expect(mir).to_contain("called `.unwrap()` on an Err Result")
+
+    it "keeps array payload indexing and rejects the opposite variant":
+        val source = "fn choose(value: Result<[i64], text>) -> i64:\n    val items = value.unwrap()\n    items[0] + items.len()\n"
+        val (mir, errors) = lower_result_unwrap_function(source, "choose")
+        expect(errors).to_equal("")
+        expect(mir).to_contain("rt_enum_payload")
+        expect(mir).to_contain("rt_array")
+        expect(mir).to_contain("called `.unwrap()` on an Err Result")
+
+    it "unwraps an array error payload with the correct opposite-variant panic":
+        val source = "fn choose(value: Result<text, [i64]>) -> i64:\n    val items = value.unwrap_err()\n    items[0]\n"
+        val (mir, errors) = lower_result_unwrap_function(source, "choose")
+        expect(errors).to_equal("")
+        expect(mir).to_contain("called `.unwrap_err()` on an Ok Result")
+
     it "keeps an unannotated struct payload on its method owner":
         val source = "struct A:\n    value: i64\n\nimpl A:\n    fn emit_object(self) -> i64: self.value\n\nstruct B:\n    value: i64\n\nimpl B:\n    fn emit_object(self) -> i64: self.value + 100\n\nfn make() -> Result<A, text>:\n    Ok(A(value: 7))\n\nfn choose() -> i64:\n    val pending = make()\n    val module = pending.unwrap()\n    module.emit_object()\n"
         val (mir, errors) = lower_result_unwrap_function(source, "choose")

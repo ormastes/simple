@@ -6,6 +6,12 @@ Compiler rebuilds, one-binary mode, successful Phase 2 completion and cache age
 never authorize deletion. Failed attempts retain completed native objects,
 frontend records, runtime objects and logs.
 
+Full bootstrap combines this cache default with go-to-end collection on hosts
+and CI. A retry or later bootstrap phase does not imply a clean build. Use an
+explicit clean/invalidation option only for the requested scope, and preserve
+other valid entries. See [failure collection](bootstrap_failure_collection.md)
+for continuing independent work and recording temporary diagnostic exceptions.
+
 ### Release branch adaptation
 
 Release runs Stage 2 and Stage 3 inline. Its command hashes and recovery replay

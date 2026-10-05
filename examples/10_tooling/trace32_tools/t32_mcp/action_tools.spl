@@ -1,4 +1,4 @@
-use std.io.{file_exists}
+use std.io_runtime.{file_exists}
 @allow(unnamed_duplicate_typed_args)
 # T32 MCP — Action and field tool handlers
 # Handles: action_invoke, field_get, field_set, screenshot, history_tail,
@@ -11,6 +11,10 @@ use app.mcp_t32.headless_tools.{handle_t32_setup_headless, handle_t32_area_read,
 use app.mcp_t32.gap_tools.{handle_t32_session_info, handle_t32_action_list, handle_t32_status_snapshot, handle_t32_cmm_validate}
 use app.mcp_t32.job_manager.{t32_job_list, t32_job_get, t32_job_cancel, t32_job_to_json}
 use app.mcp_t32.dialog_tools.{handle_t32_dialog_parse, handle_t32_dialog_get, handle_t32_dialog_set, handle_t32_dialog_click}
+use app.mcp_t32.json_helpers.{t32_LB, t32_RB, t32_SB_L, t32_SB_R, t32_escape_json, t32_js, t32_jp, t32_jo1, t32_jo2, t32_extract_field, t32_extract_field_raw, t32_extract_nested, t32_make_error, t32_make_json_result, t32_make_tool_error, t32_make_tool_result}
+use app.mcp_t32.session_tools.{t32_find_current_session, t32_run_remote, t32_add_history}
+use app.mcp_t32.session_state.{MCP_T32_SESSIONS, MCP_T32_CURRENT_CORE, MCP_T32_HISTORY}
+pub use app.mcp_t32.tool_common.{t32_mcp_session_ids}
 
 # --- Action/field state ---
 # Field state is stored per-session in a T32FieldDict
@@ -116,12 +120,6 @@ fn t32_mcp_action_keys() -> [text]:
         for aentry in actions:
             keys.push(t32_key_before_pipe(aentry))
     keys
-
-fn t32_mcp_session_ids() -> [text]:
-    var ids: [text] = []
-    for s in MCP_T32_SESSIONS:
-        ids.push(s.id)
-    ids
 
 # --- Tool handlers ---
 
@@ -567,24 +565,24 @@ fn t32_dispatch_tool(id: text, body: text) -> text:
         val job_id = t32_extract_field(args_raw, "job_id")
         val job = t32_job_get(job_id)
         if job.status == "not_found":
-            return t32_make_tool_error(id, "Job not found: " + job_id)
+            return t32_make_tool_error(id, -32602, "Job not found: " + job_id)
         return t32_make_tool_result(id, t32_job_to_json(job))
     elif tool_name == "t32_job_cancel":
         val job_id = t32_extract_field(args_raw, "job_id")
         val ok = t32_job_cancel(job_id)
         if ok:
             return t32_make_tool_result(id, t32_jo1(t32_jp("cancelled", "true")))
-        return t32_make_tool_error(id, "Cannot cancel job: " + job_id + " (not found or already terminal)")
+        return t32_make_tool_error(id, -32000, "Cannot cancel job: " + job_id + " (not found or already terminal)")
     elif tool_name == "t32_job_result":
         val job_id = t32_extract_field(args_raw, "job_id")
         val job = t32_job_get(job_id)
         if job.status == "not_found":
-            return t32_make_tool_error(id, "Job not found: " + job_id)
+            return t32_make_tool_error(id, -32602, "Job not found: " + job_id)
         if job.status == "completed":
             return t32_make_tool_result(id, t32_jo2(t32_jp("job_id", t32_js(job_id)), t32_jp("result", job.result)))
         if job.status == "failed":
-            return t32_make_tool_error(id, "Job failed: " + job.error)
-        return t32_make_tool_error(id, "Job not yet complete (status: " + job.status + ")")
+            return t32_make_tool_error(id, -32000, "Job failed: " + job.error)
+        return t32_make_tool_error(id, -32000, "Job not yet complete (status: " + job.status + ")")
 
     # Dialog tools
     elif tool_name == "t32_dialog_parse":

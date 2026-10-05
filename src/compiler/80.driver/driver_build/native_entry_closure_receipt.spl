@@ -2,6 +2,7 @@
 # never executable filesystem paths. Physical publication/open belongs to the
 # existing SCV owner and must validate this contract before driver admission.
 use std.common.crypto.sha256.{sha256_text}
+use std.common.text_bytes.{text_to_utf8_bytes}
 use std.common.build_manager.contracts.{builder_digest_valid_v1}
 use std.scv.compile_source_inventory_core.{compile_source_inventory_path_valid_v1}
 use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_read_regular_no_follow_bounded}
@@ -71,6 +72,24 @@ pub fn native_entry_closure_open_records_v1(path: text, expected_digest: text) -
 fn closure_identity_field_v1(value: text) -> text:
     value.len().to_text() + ":" + value
 
+pub fn native_entry_closure_root_valid_v1(value: text) -> bool:
+    # Roots select logical subtrees OR individual files. The inventory-member
+    # validator intentionally accepts only .spl/simple.sdn and cannot validate
+    # directories such as src/compiler. Do not normalize or broaden a receipt's
+    # ordered selectors here: its producer and consumer must bind exact bytes.
+    if value == "" or value.starts_with("/") or value.contains("\\") or
+            value.contains(":") or value.contains("|"):
+        return false
+    for segment in value.split("/"):
+        if segment == "" or segment == "." or segment == "..":
+            return false
+    # Inspect every UTF-8 byte, including controls after multibyte characters;
+    # a text-length/codepoint loop must not truncate the validation window.
+    for byte in text_to_utf8_bytes(value):
+        if byte < 32 or byte == 127:
+            return false
+    true
+
 pub fn native_entry_closure_binding_digest_v1(binding: NativeEntryClosureBindingV1) -> Result<text, text>:
     if binding.revision == "" or binding.commit == "" or binding.tree == "" or
             not builder_digest_valid_v1(binding.inventory_digest) or
@@ -85,7 +104,7 @@ pub fn native_entry_closure_binding_digest_v1(binding: NativeEntryClosureBinding
             binding.producer_digest]:
         material = material + closure_identity_field_v1(field)
     for root in binding.source_roots:
-        if not compile_source_inventory_path_valid_v1(root):
+        if not native_entry_closure_root_valid_v1(root):
             return Err("entry-closure-root-invalid")
         material = material + closure_identity_field_v1(root)
     Ok(sha256_text(material))

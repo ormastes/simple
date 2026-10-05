@@ -4,11 +4,12 @@
 # Split from traits.spl for modularity.
 
 use compiler.hir.hir.*
+use compiler.hir.hir_types.{SymbolTable}
 use compiler.frontend.core.lexer.*
 use compiler.traits.trait_def.{SolverTraitDef, SolverTraitBound, AssocTypeDef, MethodSignature}
 use compiler.traits.trait_impl.{ImplBlock}
 use compiler.common.cache.reverse_reference_facts.{
-    reverse_reference_owner_mark_known_v1,
+    reverse_reference_owner_mark_incomplete_v1,
     reverse_reference_register_trait_candidate_v1
 }
 use compiler.traits.trait_coherence.{impls_overlap}
@@ -102,29 +103,59 @@ impl ObligationCause:
 # Trait Solver
 # ============================================================================
 
-fn trait_reverse_type_identity_v1(ty: HirType) -> text:
+pub fn trait_reverse_symbol_identity_v1(symbol: HirSymbol) -> text:
+    if symbol.name == "":
+        return ""
+    if val owner = symbol.defining_module:
+        if owner != "":
+            return "{owner}::{symbol.name}"
+    ""
+
+# SymbolId is local to this table. Callers must supply the same module's
+# table that owns the HIR type, never a table selected by matching raw IDs.
+# An absent owner or unsupported shape means unknown, not a shared identity.
+pub fn trait_reverse_type_identity_v1(ty: HirType, symbols: SymbolTable?) -> text:
     match ty.kind:
-        case Named(symbol, _): "symbol#{symbol.id}"
+        case Named(symbol, args):
+            if symbols == nil:
+                return ""
+            val table = symbols.unwrap()
+            if val resolved = table.get_symbol_raw(symbol.id):
+                var identity = trait_reverse_symbol_identity_v1(resolved)
+                if identity == "":
+                    return ""
+                if args.len() == 0:
+                    return identity
+                identity = identity + "<"
+                for arg in args:
+                    val arg_identity = trait_reverse_type_identity_v1(arg, symbols)
+                    if arg_identity == "":
+                        return ""
+                    identity = identity + "{arg_identity.len()}:{arg_identity}"
+                return identity + ">"
+            ""
         case Int(bits, signed): if signed: "i{bits}" else: "u{bits}"
         case Float(bits): "f{bits}"
         case Bool: "bool"
         case Char: "char"
         case Str: "text"
         case Unit: "unit"
-        case _: "other-type"
+        case _: ""
 
 fn trait_reverse_cause_identity_v1(cause: ObligationCause,
         fallback: text) -> text:
     match cause:
-        case FunctionCall(symbol): symbol.name
-        case MethodCall(symbol, _): symbol.name
-        case SolverTraitBound(symbol): symbol.name
-        case FieldAccess(symbol, _): symbol.name
+        case FunctionCall(symbol): trait_reverse_symbol_identity_v1(symbol)
+        case MethodCall(symbol, _): trait_reverse_symbol_identity_v1(symbol)
+        case SolverTraitBound(symbol): trait_reverse_symbol_identity_v1(symbol)
+        case FieldAccess(symbol, _): trait_reverse_symbol_identity_v1(symbol)
         case BuiltIn: fallback
 
 pub fn trait_solver_publish_trait_candidate_v1(subject: text,
         consumer: text, evidence: text):
-    reverse_reference_owner_mark_known_v1("trait-type-implementation")
+    if subject == "" or consumer == "":
+        reverse_reference_owner_mark_incomplete_v1("trait-type-implementation")
+        return
     reverse_reference_register_trait_candidate_v1(subject, consumer, evidence)
 
 class TraitSolver:
@@ -164,10 +195,13 @@ class TraitSolver:
     # Used by resolve_strategies for method dispatch
     trait_methods: Dict<text, [HirSymbol]>
 
+    # A module snapshot holds its containers by reference, with no per-fact
+    # copy and no global retention. The ownerless legacy API stays conservative.
+    reverse_symbols: SymbolTable?
+
 impl TraitSolver:
     static fn create() -> TraitSolver:
         """Create a new trait solver."""
-        reverse_reference_owner_mark_known_v1("trait-type-implementation")
         TraitSolver(
             traits: {},
             impls: {},
@@ -176,8 +210,14 @@ impl TraitSolver:
             obligations: [],
             errors: [],
             assoc_resolver: AssocTypeResolver.create(),
-            trait_methods: {}
+            trait_methods: {},
+            reverse_symbols: nil
         )
+
+    static fn create_with_symbols(symbols: SymbolTable) -> TraitSolver:
+        var solver = TraitSolver.create()
+        solver.reverse_symbols = Some(symbols.module_snapshot())
+        solver
 
     me add_trait(trait_def: SolverTraitDef):
         """Register a trait definition.
@@ -207,13 +247,24 @@ impl TraitSolver:
         Also registers with the associated type resolver.
         """
         val trait_name = impl_block.trait_name
-        val impl_consumer = if impl_block.methods.len() > 0:
-            impl_block.methods[0].name
-        else:
-            trait_reverse_type_identity_v1(impl_block.for_type)
+        val type_identity = trait_reverse_type_identity_v1(
+            impl_block.for_type, self.reverse_symbols)
+        # An impl can live outside both the trait and target type's module.
+        # Resolve the actual method owner; never substitute the target owner.
+        # Methodless impls lack declaration ownership in ImplBlock and must
+        # remain incomplete until that information is explicitly available.
+        var impl_consumer = ""
+        if self.reverse_symbols != nil and impl_block.methods.len() > 0:
+            val table = self.reverse_symbols.unwrap()
+            val method = impl_block.methods[0]
+            if val resolved = table.get_symbol_raw(method.symbol.id):
+                if resolved.name == method.name:
+                    impl_consumer = trait_reverse_symbol_identity_v1(resolved)
+        if type_identity == "":
+            reverse_reference_owner_mark_incomplete_v1("trait-type-implementation")
         trait_solver_publish_trait_candidate_v1(
-            trait_name.name, impl_consumer,
-            "impl:{trait_name.name}:{impl_block.methods.len()}")
+            trait_reverse_symbol_identity_v1(trait_name), impl_consumer,
+            "impl:{type_identity}:{impl_block.methods.len()}")
 
         # Index by trait name
         var impl_list_by_trait: [ImplBlock] = if self.impls[trait_name].?:
@@ -240,11 +291,14 @@ impl TraitSolver:
     me add_obligation(ty: HirType, trait_: HirSymbol, cause: ObligationCause, span: Span):
         """Add an obligation to solve."""
         val obligation = Obligation.create(ty, trait_, cause, span)
+        val type_identity = trait_reverse_type_identity_v1(ty, self.reverse_symbols)
+        if type_identity == "":
+            reverse_reference_owner_mark_incomplete_v1("trait-type-implementation")
         trait_solver_publish_trait_candidate_v1(
-            trait_.name,
+            trait_reverse_symbol_identity_v1(trait_),
             trait_reverse_cause_identity_v1(
-                cause, trait_reverse_type_identity_v1(ty)),
-            "obligation:{trait_.name}:{trait_reverse_type_identity_v1(ty)}")
+                cause, type_identity),
+            "obligation:{type_identity}")
         self.obligations = self.obligations.push(obligation)
 
     fn has_obligations() -> bool:
