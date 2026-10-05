@@ -1,0 +1,19 @@
+# Phase1 test monitor escaped bootstrap session
+
+Whole Linux Phase1 discovery and execution stopped with watchdog status bootstrap-session-escaped, exit90, before any assertions. Retained receipts: /home/ormastes/simple-linux-rc1-20261005/phase1-inventory/discovery.rss.env and execution.rss.env. Original compiler SHA and source authority are recorded alongside them. This is infrastructure failure, not a passing or failing source suite.
+
+Rust seed test dispatch arms a detached setsid global kill monitor before discovery. Under the admitted bootstrap process-tree guard this descendant escapes containment. The seed now relies on the existing managed guard only after validating current SID, live root, pinned same-owner read-only admission and pinned helper digest. Missing or malformed authority preserves ordinary global monitoring.
+
+Focused integration accepts an explicit bootstrap compiler and source spec, runs the same enforcing process-tree guard, requires positive discovery, and retains receipts. Unit tests cover absent/malformed admission, mode mismatch and helper tampering. Whole suite remains pending until resumed by coordinator. Usage accounting is unavailable for this isolated diagnostic lane.
+
+Focused rebuilt-seed proof: compiler SHA256 `26aad9a927c056bffe403a698e9e4df05e3dd6c91f213dd5131013ecc644ba6e`, guarded discovery status complete/exit0 and total_listed1. Evidence /home/ormastes/simple-linux-rc1-20261005/phase1-monitor-regression/fixed/. Original untraced whole discovery+execution receipts retain exit90. The isolated strace trace proves exec of setsid owner but ptrace retained the daemon and produced timeout124, so that trace is cause evidence, not a faithful exit90 reproduction.
+
+Expanded unit contract tests PASS3 (serial): missing/partial/environment invalid contract; admission missing/malformed/duplicate/schema/status/SID/helper/root mismatch; oversized/no-newline receipt; nonexecutable/missing/symlink helper; admission symlink/permissions and helper tampering. IO failure and another UID are not exercised, and branch coverage is not quantified; no100%coverage claim. Runtime body exact comparison confirmed unchanged when supplemental tests appended.
+
+Provider usage: Codex input tokens unavailable, output tokens unavailable, cache tokens unavailable, cost unavailable. Other-provider usage unavailable. Cohort average cost unavailable; ratio to cohort unavailable. No usage or cost is estimated.
+
+Bug DB registration: `phase1_test_monitor_session_escape_2026_10_05` in [bug_db.sdn](bug_db.sdn); status fix-implemented-verification-pending retains whole-suite qualification gap.
+
+Focused nightly coverage (actual production file included via #[path], no copied implementation): production emitted conditional branch outcomes 44/44, whole module including test-only restoration branches48/50 (96%). Module regions275/284 (96.83%), lines144/145; remaining uncovered explicit conditional branches are test-only env restoration with absent initial values. Rust ? early returns/IO failures are not all represented by emitted conditional branches, so this does not claim every failure path or MC/DC. Coverage data /home/ormastes/simple-linux-rc1-20261005/phase1-session-coverage.json and .profdata; first and second coverage logs retained. Tests-only additions preserve exact production body versus tested compiler source2df05ba1c48.
+
+Portability correction: negative session identity uses actualSID+1 rather than hardcoded1; other-owner helper fixture safely chowned in a private temp directory under root, system root-owned regular helper under nonroot. Affected contract test passed separately as uid1000 and uid0; logs phase1-session-portability-user.log and -root.log. Runtime owner body remains unchanged. Prior coverage remains historical evidence for unchanged production; new test-only root/nonroot branches were exercised functionally without claiming fresh quantified coverage.

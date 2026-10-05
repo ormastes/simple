@@ -1,0 +1,44 @@
+#!/bin/sh
+# Actual CUDA device requirement: unsupported is exit 77, never PASS.
+set -eu
+case $(uname -s) in Linux) ;; *) echo 'UNSUPPORTED Linux CUDA provider host required'; exit 77;; esac
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:?usage: check-cuda-bitmap-provider-v1.shs NEW_ABSOLUTE_OUTPUT_DIRECTORY}
+mode=${2:-}
+case "$mode" in ''|--maximum-only) ;; *) echo 'unknown test mode' >&2; exit 2;; esac
+case "$out" in /*) ;; *) echo 'output must be absolute' >&2; exit 2;; esac
+mkdir "$out"
+cc=${CC:-cc}
+"$cc" --version > "$out/toolchain.txt"
+sha256sum "$repo/src/runtime/providers/cuda/bitmap_provider_v1.c" \
+    "$repo/test/02_integration/runtime/cuda_bitmap_provider_v1.c" \
+    "$repo/src/runtime/test/cuda_bitmap_provider_failure_selfcheck.c" \
+    "$repo/src/runtime/runtime_native.c" "$repo/src/runtime/runtime_dynload.c" > "$out/source.sha256"
+"$cc" -std=c11 -O1 -Wall -Wextra -Werror -fPIC -shared -pthread \
+    -I"$repo/src/runtime" "$repo/src/runtime/providers/cuda/bitmap_provider_v1.c" \
+    -ldl -o "$out/provider.so" > "$out/compile.log" 2>&1
+"$cc" -std=c11 -O1 -Wall -Wextra -Werror -pthread -I"$repo/src/runtime" \
+    "$repo/src/runtime/test/cuda_bitmap_provider_failure_selfcheck.c" -ldl \
+    -o "$out/failure-check" >> "$out/compile.log" 2>&1
+timeout 10 "$out/failure-check" > "$out/failure.log" 2>&1
+digest=$(sha256sum "$out/provider.so" | awk '{print $1}')
+"$cc" -std=c11 -O1 -ffunction-sections -fdata-sections -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1 \
+    -I"$repo/src/runtime" -I"$repo/src/runtime/platform" \
+    -c "$repo/src/runtime/runtime_native.c" -o "$out/runtime_native.o" >> "$out/compile.log" 2>&1
+"$cc" -std=c11 -O1 -ffunction-sections -fdata-sections -I"$repo/src/runtime" \
+    -I"$repo/src/runtime/platform" -c "$repo/src/runtime/runtime_dynload.c" \
+    -o "$out/runtime_dynload.o" >> "$out/compile.log" 2>&1
+"$cc" -std=c11 -O1 -Wall -Wextra -Werror -pthread -Wl,--gc-sections -I"$repo/src/runtime" \
+    "$repo/test/02_integration/runtime/cuda_bitmap_provider_v1.c" \
+    "$out/runtime_dynload.o" "$out/runtime_native.o" -ldl -lm -o "$out/check" >> "$out/compile.log" 2>&1
+sha256sum "$out/provider.so" "$out/check" > "$out/artifacts.sha256"
+"$out/check" "$out/provider.so" 0000000000000000000000000000000000000000000000000000000000000000 denied > "$out/denied.log" 2>&1
+set +e
+perl "$repo/scripts/resource/process-tree-rss-watchdog.pl" --max-rss-kib=1000000 \
+    --rss-cap-mode=enforce --timeout-seconds=60 --receipt="$out/run.rss.env" \
+    -- "$out/check" "$out/provider.so" "$digest" $mode > "$out/run.log" 2>&1
+result=$?
+set -e
+printf 'run_exit=%s\n' "$result" > "$out/status.txt"
+cat "$out/failure.log" "$out/denied.log" "$out/run.log" "$out/status.txt"
+exit "$result"
