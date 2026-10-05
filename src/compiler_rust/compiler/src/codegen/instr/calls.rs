@@ -934,7 +934,13 @@ fn compile_inline_array_get<M: Module>(
         let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
         let byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
         let byte_value = builder.ins().uextend(types::I64, byte);
-        builder.ins().jump(done_block, &[byte_value]);
+        // Tag it (`from_int`: `v << 3`), exactly what the runtime
+        // `rt_array_get` returns for a byte-packed array and what every MIR
+        // consumer decodes (UnboxInt). The raw byte used to escape here, so a
+        // byte that is a multiple of 8 was shifted on decode: `for b in bytes`
+        // read 104 as 13 under the JIT, while 101 passed through untouched.
+        let tagged_byte = builder.ins().ishl_imm(byte_value, 3);
+        builder.ins().jump(done_block, &[tagged_byte]);
         builder.seal_block(byte_block);
     }
 

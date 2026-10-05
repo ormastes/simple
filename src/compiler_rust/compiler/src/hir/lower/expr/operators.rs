@@ -100,6 +100,25 @@ impl Lowerer {
             // it decoded the raw 0/1 as a heap handle ("nil"/"0"). Branching
             // still worked, which is why this hid behind `if x not in y`.
             ast::BinOp::And | ast::BinOp::Or | ast::BinOp::Is | ast::BinOp::In | ast::BinOp::NotIn => TypeId::BOOL,
+            // `int * text` is repetition (MIR -> rt_string_repeat), so it is
+            // TEXT; falling through to `left_hir.ty` typed `3 * "ab"` as i64.
+            // (`text * int` already gets TEXT from the left operand.)
+            ast::BinOp::Mul
+                if right_hir.ty == TypeId::STRING
+                    && matches!(
+                        left_hir.ty,
+                        TypeId::I8
+                            | TypeId::I16
+                            | TypeId::I32
+                            | TypeId::I64
+                            | TypeId::U8
+                            | TypeId::U16
+                            | TypeId::U32
+                            | TypeId::U64
+                    ) =>
+            {
+                TypeId::STRING
+            }
             // An arithmetic/bit op with an ANY operand has an ANY RESULT, because
             // `mir/lower/lowering_expr_ops.rs` deliberately RE-BOXES that result
             // (a consumer of an ANY value always decodes the tag-boxed form; see
