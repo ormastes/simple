@@ -37,3 +37,18 @@ directories. The compiler owns cache invalidation; no cache identity is forged.
 This policy workaround remains unqualified until actual helper compile/run and
 source-bound parser/verdict ledger validation succeed. Original failures remain
 distinct evidence regardless of the retry outcome.
+
+The retained-HIR generator retry reached MIR and still failed, but its complete
+stderr contained no duplicate-provider errors. The remaining 25 diagnostics
+include process result/owner receivers, imported enum comparisons, lexer
+receivers, optional text operations and array iteration. This is evidence for
+a narrower metadata route difference, not evidence of a successful helper.
+
+The candidate source workaround adds explicit existing `Result`, pin and
+inspection-receipt types at the reported process call chains, and concrete text
+locals for optional OS detection. All process branches, error handling and close
+operations remain in place. Nil and empty OS values still return false; mixed
+case and substring behavior remain unchanged. The `helper_optional_text` native
+fixture checks seven such cases against the actual library owner. Both source
+workarounds and the fixture remain native-unverified. They do not claim to repair
+the independent enum or lexer receiver failures.
