@@ -1,0 +1,67 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind, HirBlock}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_lowering_stmts.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir.mir_types.{MirType, MirTypeKind, MirSignature}
+use compiler.mir.mir_serialization.{serialize_mir_function}
+
+fn iterator_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn lower_erased_iterator(declared: HirType?, representation: MirType) -> (i64, text):
+    var lowering = MirLowering.new(SymbolTable.new())
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 90), "probe", MirSignature(params: [],
+        return_type: MirType.unit(), is_variadic: false), Span.empty())
+    val local = builder.new_temp(representation)
+    lowering.builder = builder
+    lowering.bind_local(20, local)
+    if val known = declared:
+        lowering.remember_local_hir_type(local.id, known, 0, 0)
+    # No array/text representation marker: only declared provenance survives.
+    val expression = HirExpr(kind: HirExprKind.Var(SymbolId(id: 20)),
+        has_type_: false, type_: nil, span: Span.empty())
+    val empty = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: Span.empty())
+    val body = HirBlock(stmts: [], has: false, value: empty, span: Span.empty())
+    val result = lowering.lower_for_iterator(SymbolId(id: 21), expression, body, Span.empty())
+    var finished = lowering.builder
+    val function = finished.end_function()
+    (lowering.errors.len(), serialize_mir_function(function))
+
+describe "iteration dispatch retains declared collection provenance":
+    it "uses Array and Slice metadata on word locals without integer-unboxing handles":
+        val element = iterator_type(HirTypeKind.Str)
+        for collection in [iterator_type(HirTypeKind.Array(element, nil)), iterator_type(HirTypeKind.Slice(element))]:
+            val (errors, mir) = lower_erased_iterator(collection, MirType.i64())
+            expect(errors).to_equal(0)
+            expect(mir).to_contain("rt_array_len")
+            expect(mir).to_contain("rt_array_get")
+            expect(mir.contains("rt_panic")).to_be(false)
+            expect(mir.contains("rt_value_as_int_wide")).to_be(false)
+
+    it "uses the Unicode splitter for declared text with erased word representation":
+        val (errors, mir) = lower_erased_iterator(iterator_type(HirTypeKind.Str), MirType.i64())
+        expect(errors).to_equal(0)
+        expect(mir).to_contain("rt_string_chars")
+        expect(mir).to_contain("rt_array_get")
+        expect(mir.contains("rt_panic")).to_be(false)
+
+    it "rejects unknown words, integers, dictionaries and Any instead of guessing":
+        val integer = iterator_type(HirTypeKind.Int(64, true))
+        for declared in [integer, iterator_type(HirTypeKind.Dict(integer, integer)), iterator_type(HirTypeKind.Any)]:
+            val (errors, mir) = lower_erased_iterator(declared, MirType.i64())
+            expect(errors).to_be_greater_than(0)
+            expect(mir).to_contain("rt_panic")
+            expect(mir.contains("rt_array_get")).to_be(false)
+        val (unknown_errors, unknown_mir) = lower_erased_iterator(nil, MirType.i64())
+        expect(unknown_errors).to_be_greater_than(0)
+        expect(unknown_mir.contains("rt_array_get")).to_be(false)
+
+    it "does not reinterpret floating locals even when contradictory collection metadata exists":
+        val declared = iterator_type(HirTypeKind.Array(iterator_type(HirTypeKind.Str), nil))
+        val (errors, mir) = lower_erased_iterator(declared, MirType(kind: MirTypeKind.F64))
+        expect(errors).to_be_greater_than(0)
+        expect(mir.contains("rt_array_get")).to_be(false)
