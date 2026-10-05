@@ -4,6 +4,9 @@
 #include <sys/auxv.h>
 #include <string.h>
 #include <stdatomic.h>
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#include <cpuid.h>
+#endif
 #ifdef __aarch64__
 #include <asm/hwcap.h>
 #endif
@@ -15,7 +18,22 @@ extern void simple_vector_test_loaded(void);
 __attribute__((constructor)) static void observed_load(void) { simple_vector_test_loaded(); }
 #endif
 static int available(void) {
-#if defined(__aarch64__)
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#ifdef SIMPLE_VECTOR_FORCE_NO_AVX512
+    return 0;
+#else
+    unsigned int eax=0,ebx=0,ecx=0,edx=0;
+    if(__get_cpuid_max(0,0)<7 || !__get_cpuid(1,&eax,&ebx,&ecx,&edx)) return 0;
+    const unsigned int xsave_osxsave_avx=(1u<<26)|(1u<<27)|(1u<<28);
+    if((ecx&xsave_osxsave_avx)!=xsave_osxsave_avx) return 0;
+    unsigned int xcr0_lo=0,xcr0_hi=0;
+    __asm__ volatile("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
+    const uint64_t xcr0=((uint64_t)xcr0_hi<<32)|xcr0_lo;
+    if((xcr0&UINT64_C(0xe6))!=UINT64_C(0xe6)) return 0;
+    __cpuid_count(7,0,eax,ebx,ecx,edx);
+    return (ebx&(1u<<16))!=0;
+#endif
+#elif defined(__aarch64__)
     return (getauxval(AT_HWCAP)&HWCAP_ASIMD)!=0;
 #elif defined(__riscv)
     return (getauxval(AT_HWCAP)&(1UL<<('V'-'A')))!=0;
