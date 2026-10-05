@@ -146,7 +146,12 @@ impl<'a> Parser<'a> {
     /// This wrapper is kept as a named call site for readability/documentation
     /// at each of the four `elif`/`else if` locations below.
     fn parse_elif_or_else_if_body(&mut self) -> Result<Block, ParseError> {
-        self.parse_inline_or_block()
+        // An inline elif body may be followed by `else:` on the same line.
+        if self.check(&TokenKind::Newline) {
+            self.parse_inline_or_block()
+        } else {
+            self.parse_without_cast_else(|p| p.parse_inline_or_block())
+        }
     }
 
     pub(crate) fn parse_if(&mut self) -> Result<Node, ParseError> {
@@ -167,7 +172,7 @@ impl<'a> Parser<'a> {
             // These don't require an else clause since they're control flow statements
             if self.is_inline_statement() {
                 // Parse inline statement like match_arm does
-                let stmt = self.parse_item()?;
+                let stmt = self.parse_without_cast_else(|p| p.parse_item())?;
                 // bug: parser_trailing_operator_line_continuation_2026-07-13.
                 // A condition that used a trailing-operator line continuation
                 // left a pseudo-INDENT whose compensating DEDENT is still in
@@ -264,17 +269,9 @@ impl<'a> Parser<'a> {
             // (`if cond:\n    d[k] = v`) has always worked. An assignment is
             // not an expression, so such an `if` can only be statement-form
             // and is finished by a separate path below.
-            // Mark the then-branch exactly as the expression-position `if`
-            // does (`expressions/helpers.rs`), so `x as T else:` leaves the
-            // `else:` to this `if` instead of becoming a CastElse fallback.
-            // Without it a statement-position inline `if` -- e.g. the tail
-            // expression of a block-form `val v = if a:\n    if b: x as T
-            // else: y` -- lost its else (nil in the interpreter, 3/0 in the
-            // JIT; FontRenderer.get_glyph_advance_milli's direct lane).
-            let saved_inline_if_then = self.inline_if_then_call_depth.replace(self.call_arg_depth);
-            let then_parsed = self.parse_expression_or_assignment();
-            self.inline_if_then_call_depth = saved_inline_if_then;
-            let then_node = then_parsed?;
+            // `as T` in this arm must not claim the `else:` as its cast
+            // fallback (`if c: x as i64 else: 7`).
+            let then_node = self.parse_without_cast_else(|p| p.parse_expression_or_assignment())?;
             // Same reconciliation as the inline-statement arm above: an
             // expression-bodied `if cond_continued: expr` carries the same
             // pending pseudo-dedent.

@@ -1,0 +1,87 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-hello-profile.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+mkdir -p "$tmp/repo/scripts/bootstrap" "$tmp/repo/scripts/check/lib" \
+  "$tmp/source/src/runtime" "$tmp/source/test/04_smoke" "$tmp/output" \
+  "$tmp/runtime space/sub" "$tmp/bin"
+cp "$repo/scripts/bootstrap/prepare-provisional-hello.shs" "$tmp/repo/scripts/bootstrap/"
+cp "$repo/scripts/bootstrap/provisional-hello-runtime-inputs.shs" "$tmp/repo/scripts/bootstrap/"
+printf 'runtime\n' >"$tmp/runtime space/sub/provider.lib"
+printf 'snapshot\n' >"$tmp/source.snapshot"
+check_runtime_links() {
+  . "$repo/scripts/bootstrap/provisional-hello-runtime-inputs.shs"
+  if ! MSYS=winsymlinks:nativestrict ln -s "$tmp/source.snapshot" "$tmp/runtime space/linked" 2>"$tmp/link-create.log"; then
+    echo 'SKIP: native symlink creation unavailable; runtime link rejection unverified'
+    return
+  fi
+  test -L "$tmp/runtime space/linked" || { echo 'FAIL: fixture is not a real symlink' >&2; exit 1; }
+  if provisional_hello_runtime_inputs "$tmp/runtime space" "$tmp/linked.manifest" >"$tmp/link.log" 2>&1; then
+    echo 'FAIL linked runtime accepted' >&2; exit 1
+  fi
+  echo 'PASS: real linked runtime input rejected'
+}
+if [ "${1:-}" = --links-only ]; then check_runtime_links; exit 0; fi
+printf 'fn main() -> i64:\n    print("windows native hello")\n    return 0\n' >"$tmp/source/test/04_smoke/windows_native_hello.spl"
+cat >"$tmp/repo/scripts/check/lib/bootstrap-stage3-provenance.shs" <<'SH'
+bootstrap_stage3_source_snapshot() { cp "$TEST_SOURCE_SNAPSHOT" "$1"; }
+SH
+cat >"$tmp/repo/scripts/bootstrap/run-process-group-timeout.shs" <<'SH'
+#!/bin/sh
+shift 2
+exec "$@"
+SH
+cat >"$tmp/bin/df" <<'SH'
+#!/bin/sh
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted\nfixture 100000000 0 100000000 0%% /\n'
+SH
+cat >"$tmp/producer space" <<'SH'
+#!/bin/sh
+printf '%s\n' "$@" >"$TEST_CAPTURE"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then shift; output=$1; break; fi
+  shift
+done
+cat >"$output" <<'HELLO'
+#!/bin/sh
+printf 'windows native hello\n'
+if [ "${TEST_MUTATE_RUNTIME:-0}" = 1 ]; then printf 'changed\n' >>"$TEST_RUNTIME_FILE"; fi
+HELLO
+chmod +x "$output"
+SH
+chmod +x "$tmp/producer space" "$tmp/repo/scripts/bootstrap/run-process-group-timeout.shs" "$tmp/bin/df"
+export TEST_SOURCE_SNAPSHOT="$tmp/source.snapshot" TEST_CAPTURE="$tmp/capture"
+export TEST_RUNTIME_FILE="$tmp/runtime space/sub/provider.lib"
+PATH="$tmp/bin:$PATH"; export PATH
+producer_sha=$(sha256sum "$tmp/producer space" | cut -d ' ' -f 1)
+snapshot_sha=$(sha256sum "$tmp/source.snapshot" | cut -d ' ' -f 1)
+fixture_sha=$(sha256sum "$tmp/source/test/04_smoke/windows_native_hello.spl" | cut -d ' ' -f 1)
+run_profile() {
+  sh "$tmp/repo/scripts/bootstrap/prepare-provisional-hello.shs" \
+    --producer="$tmp/producer space" --producer-digest="$producer_sha" \
+    --source-checkout="$tmp/source" --source-snapshot="$tmp/source.snapshot" \
+    --source-snapshot-digest="$snapshot_sha" \
+    --hello-source="$tmp/source/test/04_smoke/windows_native_hello.spl" \
+    --hello-source-digest="$fixture_sha" --output-root="$tmp/output/$1" \
+    --target=x86_64-unknown-linux-gnu --memory-bytes=1024 --reserve-bytes=1024 \
+    --backend=cranelift --threads=80 --mode=dynload \
+    --runtime-path="$tmp/runtime space" --runtime-bundle=bootstrap-tools
+}
+run_profile accepted >"$tmp/accepted.log" 2>&1
+grep -qx 'SIMPLE-PROVISIONAL-HELLO-COMMAND-2' "$tmp/output/accepted/compile.argv"
+grep -qx 'arg_5=cranelift' "$tmp/output/accepted/compile.argv"
+grep -qx 'arg_14=80' "$tmp/output/accepted/compile.argv"
+grep -qx 'arg_18=dynload' "$tmp/output/accepted/compile.argv"
+grep -qx 'arg_22=bootstrap-tools' "$tmp/output/accepted/compile.argv"
+grep -Fx "arg_24=$tmp/runtime space" "$tmp/output/accepted/compile.argv" >/dev/null
+sed -n 's/^arg_[0-9]*=//p' "$tmp/output/accepted/compile.argv" | sed '1d' >"$tmp/transcribed"
+cmp "$tmp/capture" "$tmp/transcribed"
+test -s "$tmp/output/accepted/hello.receipt"
+TEST_MUTATE_RUNTIME=1; export TEST_MUTATE_RUNTIME
+if run_profile changed >"$tmp/changed.log" 2>&1; then echo 'FAIL runtime drift accepted' >&2; exit 1; fi
+grep -q 'runtime inputs changed' "$tmp/changed.log"
+test ! -e "$tmp/output/changed/hello.receipt"
+unset TEST_MUTATE_RUNTIME
+echo 'PASS: profile argv equals actual worker args; runtime drift rejects without receipt'
+check_runtime_links

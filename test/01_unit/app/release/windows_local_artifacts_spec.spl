@@ -1,0 +1,47 @@
+use std.spec.{describe, it, expect}
+use app.release.windows_local_artifacts.{windows_rc1_artifact_names, check_windows_rc1_checksum_records, check_windows_rc1_local_artifacts}
+use app.release.support_policy.{parse_support_policy, check_single_job_coverage}
+
+fn fixture_digest() -> text:
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+fn fixture_digests() -> [text]:
+    var digests: [text] = []
+    for name in windows_rc1_artifact_names():
+        digests.push(fixture_digest())
+    digests
+
+fn fixture_manifest() -> text:
+    var manifest = ""
+    for name in windows_rc1_artifact_names():
+        manifest = manifest + fixture_digest() + "  " + name + "\n"
+    manifest
+
+describe "Windows RC1 exact local artifact checksum contract":
+    it "rejects other versions and platforms before consulting admission":
+        expect(check_windows_rc1_local_artifacts("missing-root", "1.0.0-rc.2", 1, "", "x86_64-pc-windows-msvc", "missing").valid).to_equal(false)
+        expect(check_windows_rc1_local_artifacts("missing-root", "1.0.0-rc.1", 1, "", "x86_64-unknown-linux-gnu", "missing").valid).to_equal(false)
+        expect(check_windows_rc1_local_artifacts("missing-root", "1.0.0-rc.1", 1, "", "x86_64-pc-windows-msvc", "").valid).to_equal(false)
+    it "keeps wrong-platform support evidence fail closed":
+        val policy = parse_support_policy("support:\nschema: simple-release-support/2\nrc:\n- target: x86_64-pc-windows-msvc\n  tier: tier_1\n  runner: windows-local-phase4\n  required: true\n  availability: supported\n  bootstrap: full\n  whole_tests: required\n")
+        expect(policy.valid).to_equal(true)
+        expect(check_single_job_coverage(policy, "rc", "x86_64-pc-windows-msvc")).to_equal("")
+        expect(check_single_job_coverage(policy, "rc", "x86_64-unknown-linux-gnu") == "").to_equal(false)
+    it "accepts all ordered artifact roles without granting admission":
+        expect(windows_rc1_artifact_names().len()).to_equal(6)
+        expect(windows_rc1_artifact_names().contains("qualification.json")).to_equal(false)
+        expect(check_windows_rc1_checksum_records(fixture_manifest(), fixture_digests()).valid).to_equal(true)
+    it "rejects an incomplete observed artifact set":
+        expect(check_windows_rc1_checksum_records(fixture_manifest(), []).valid).to_equal(false)
+    it "rejects missing and malformed artifact hashes":
+        var digests = fixture_digests()
+        digests[0] = ""
+        expect(check_windows_rc1_checksum_records(fixture_manifest(), digests).valid).to_equal(false)
+        digests[0] = "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        expect(check_windows_rc1_checksum_records(fixture_manifest(), digests).valid).to_equal(false)
+    it "rejects changed bytes, extra records and CRLF normalization":
+        var digests = fixture_digests()
+        digests[0] = "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        expect(check_windows_rc1_checksum_records(fixture_manifest(), digests).valid).to_equal(false)
+        expect(check_windows_rc1_checksum_records(fixture_manifest() + "extra\n", fixture_digests()).valid).to_equal(false)
+        expect(check_windows_rc1_checksum_records(fixture_manifest().replace("\n", "\r\n"), fixture_digests()).valid).to_equal(false)

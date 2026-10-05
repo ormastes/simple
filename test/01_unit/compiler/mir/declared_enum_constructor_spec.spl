@@ -1,0 +1,179 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{ParserEnum}
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Expressions.declared_enum_constructor.*
+use compiler.hir.hir_lowering._Expressions.expression_components.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
+use compiler.mir.mir_data.{MirSignature, MirType, MirTypeKind}
+
+fn enum_test_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn enum_test_expr(symbol: SymbolId) -> HirExpr:
+    HirExpr(kind: HirExprKind.NamedVar(symbol, "Admission"), has_type_: false,
+        type_: enum_test_type(HirTypeKind.Unit), span: Span.empty())
+
+fn enum_test_parser_declaration(name: text) -> ParserEnum:
+    ParserEnum(name: name, type_params: [], variants: [],
+        visibility: Visibility.Public, is_public: true,
+        has_doc_comment: false, doc_comment: "", span: Span.empty())
+
+fn enum_test_definition(owner: text, payload: [HirType]) -> HirEnum:
+    val empty = HirExpr(kind: HirExprKind.NilLit, has_type_: false,
+        type_: enum_test_type(HirTypeKind.Unit), span: Span.empty())
+    val variant = HirVariant(symbol: SymbolId(id: 91), name: "Started",
+        kind: HirVariantKind.Tuple(payload), has_discriminant: false,
+        discriminant: empty, span: Span.empty())
+    val unit = HirVariant(symbol: SymbolId(id: 92), name: "Ready",
+        kind: HirVariantKind.Unit, has_discriminant: false,
+        discriminant: empty, span: Span.empty())
+    HirEnum(symbol: SymbolId(id: 90), name: "Admission", runtime_name: owner,
+        type_params: [], variants: [variant, unit], visibility: Visibility.Public,
+        is_public: true, doc_comment: nil, span: Span.empty(),
+        is_generic_template: false, specialization_of: nil, type_bindings: {})
+
+fn enum_test_owner(expression: HirExpr?) -> i64:
+    if val present = expression:
+        match present.kind:
+            case HirExprKind.EnumLit(type_, _, _):
+                match type_.kind:
+                    case HirTypeKind.Named(owner, _): return owner.id
+                    case _: ()
+            case _: ()
+    -1
+
+describe "declared enum constructor ownership":
+    it "retains distinct enum declarations with a colliding variant leaf":
+        var hir = HirLowering.new()
+        val first = hir.symbols.define("AdmissionA", SymbolKind.Enum, nil,
+            Span.empty(), Visibility.Private, false, Some("a"))
+        val second = hir.symbols.define("AdmissionB", SymbolKind.Enum, nil,
+            Span.empty(), Visibility.Private, false, Some("b"))
+        hir.register_enum_unit_patterns(enum_test_parser_declaration("AdmissionA"), "AdmissionA")
+        hir.register_enum_unit_patterns(enum_test_parser_declaration("AdmissionB"), "AdmissionB")
+        val first_owner = hir.declared_enum_constructor_owner(enum_test_expr(first), MethodResolution.Unresolved)
+        val second_owner = hir.declared_enum_constructor_owner(enum_test_expr(second), MethodResolution.Unresolved)
+        expect(enum_test_owner(hir.declared_enum_constructor_expr(first_owner, "Unknown", [], Span.empty()))).to_equal(first.id)
+        expect(enum_test_owner(hir.declared_enum_constructor_expr(second_owner, "Unknown", [], Span.empty()))).to_equal(second.id)
+
+    it "preserves a selected static method on an enum":
+        var hir = HirLowering.new()
+        val owner = hir.symbols.define("Admission", SymbolKind.Enum, nil,
+            Span.empty(), Visibility.Private, false, nil)
+        hir.register_enum_unit_patterns(enum_test_parser_declaration("Admission"), "Admission")
+        expect(hir.declared_enum_constructor_owner(enum_test_expr(owner),
+            MethodResolution.StaticMethod(owner, SymbolId(id: 123)))).to_equal(-1)
+
+    it "does not treat a shadowing local as an enum declaration":
+        var hir = HirLowering.new()
+        val local = hir.symbols.define("Admission", SymbolKind.Variable,
+            enum_test_type(HirTypeKind.Int(64, true)), Span.empty(), Visibility.Private, false, nil)
+        hir.register_enum_unit_patterns(enum_test_parser_declaration("Admission"), "Admission")
+        expect(hir.declared_enum_constructor_owner(enum_test_expr(local), MethodResolution.Unresolved)).to_equal(-1)
+
+    it "leaves named arguments on their original binding route":
+        var hir = HirLowering.new()
+        val value = HirExpr(kind: HirExprKind.IntLit(7, nil), has_type_: false,
+            type_: enum_test_type(HirTypeKind.Unit), span: Span.empty())
+        val arg = HirCallArg(has_name: true, name: "lease", value: value, span: Span.empty())
+        expect(hir.declared_enum_constructor_expr(1, "Started", [arg], Span.empty())).to_be_nil()
+
+    it "leaves generic declarations on their existing specialization route":
+        var hir = HirLowering.new()
+        val owner = hir.symbols.define("PayloadBox", SymbolKind.Enum, nil,
+            Span.empty(), Visibility.Private, false, nil)
+        val parsed = parse_full_frontend("enum PayloadBox<T>:\n    Value(value: T)\n", "payload.spl", "payload", Logger(level: 0))
+        hir.register_enum_unit_patterns(parsed.enums["PayloadBox"], "PayloadBox")
+        expect(hir.generic_enum_constructor_owners.get(owner.id) ?? false).to_be(true)
+        expect(hir.declared_enum_constructor_owner(enum_test_expr(owner), MethodResolution.Unresolved)).to_equal(-1)
+
+    it "does not assume declaration-only imported enums are nongeneric":
+        var hir = HirLowering.new()
+        val owner = hir.symbols.define("Unmaterialized", SymbolKind.Enum, nil,
+            Span.empty(), Visibility.Private, false, Some("provider"))
+        expect(hir.declared_enum_constructor_owner(enum_test_expr(owner), MethodResolution.Unresolved)).to_equal(-1)
+
+describe "qualified enum payload validation":
+    it "retains payload signatures for two same-named declarations":
+        var mir = MirLowering.new(SymbolTable.new())
+        mir.register_enum_variants(enum_test_definition("left.Admission", [enum_test_type(HirTypeKind.Str)]))
+        mir.register_enum_variants(enum_test_definition("right.Admission", [enum_test_type(HirTypeKind.Int(64, true))]))
+        expect(mir.enum_variant_payload_types["left.Admission::Started"][0].kind == HirTypeKind.Str).to_be(true)
+        expect(mir.enum_variant_payload_types["right.Admission::Started"][0].kind == HirTypeKind.Int(64, true)).to_be(true)
+
+    it "does not deduplicate distinct payload owners by equal variant discriminants":
+        var mir = MirLowering.new(SymbolTable.new())
+        mir.register_enum_variants(enum_test_definition("left.Admission", [enum_test_type(HirTypeKind.Str)]))
+        mir.register_enum_variants(enum_test_definition("right.Admission", [enum_test_type(HirTypeKind.Int(64, true))]))
+        expect(mir.prescan_enum_owner_for_variant("Started")).to_equal("")
+        expect(mir.enum_constructor_metadata_owner("Admission")).to_equal("")
+        expect(mir.enum_constructor_metadata_owner("left.Admission")).to_equal("left.Admission")
+        expect(mir.enum_constructor_metadata_owner("right.Admission")).to_equal("right.Admission")
+
+    it "does not let an exact bare registry row hide another declaration":
+        var mir = MirLowering.new(SymbolTable.new())
+        mir.register_enum_variants(enum_test_definition("Admission", [enum_test_type(HirTypeKind.Str)]))
+        mir.register_enum_variants(enum_test_definition("right.Admission", [enum_test_type(HirTypeKind.Int(64, true))]))
+        expect(mir.enum_constructor_metadata_owner("Admission")).to_equal("")
+
+    it "uses the same generic exclusion at tuple encoding and decoding":
+        var mir = MirLowering.new(SymbolTable.new())
+        mir.register_enum_variants(enum_test_definition("left.Admission", [enum_test_type(HirTypeKind.Str)]))
+        expect(mir.enum_payload_key_uses_declared_slots("left.Admission::Started")).to_be(true)
+        mir.generic_enum_constructor_owners["left.Admission"] = true
+        expect(mir.enum_payload_key_uses_declared_slots("left.Admission::Started")).to_be(false)
+        expect(mir.enum_payload_key_uses_declared_slots("missing.Admission::Started")).to_be(false)
+
+    it "accepts exact unit and positional tuple arities":
+        var mir = MirLowering.new(SymbolTable.new())
+        mir.register_enum_variants(enum_test_definition("a.Admission",
+            [enum_test_type(HirTypeKind.Str), enum_test_type(HirTypeKind.Int(64, true))]))
+        expect(mir.enum_positional_payload_reason("a.Admission", "Ready", 0)).to_equal("")
+        expect(mir.enum_positional_payload_reason("a.Admission", "Started", 2)).to_equal("")
+        expect(mir.enum_positional_payload_reason("a.Admission", "Ready", 1)).to_equal("payload arity mismatch")
+        expect(mir.enum_positional_payload_reason("a.Admission", "Started", 1)).to_equal("payload arity mismatch")
+        expect(mir.enum_positional_payload_reason("a.Admission", "Missing", 0)).to_equal("unknown variant")
+
+    it "rejects unrelated primitive and nominal types":
+        expect(enum_payload_types_compatible(enum_test_type(HirTypeKind.Str), enum_test_type(HirTypeKind.Int(64, true)))).to_be(false)
+        expect(enum_payload_types_compatible(enum_test_type(HirTypeKind.Named(SymbolId(id: 41), [])),
+            enum_test_type(HirTypeKind.Named(SymbolId(id: 42), [])))).to_be(false)
+        expect(enum_payload_types_compatible(enum_test_type(HirTypeKind.Str), enum_test_type(HirTypeKind.Str))).to_be(true)
+
+    it "adapts accepted numeric widths before payload storage":
+        var mir = MirLowering.new(SymbolTable.new())
+        var builder = mir.builder
+        builder.begin_function(SymbolId(id: 90), "numeric_payload_probe", MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+        val wide = builder.emit_const_int(200)
+        mir.builder = builder
+        val narrow = mir.adapt_declared_enum_payload(enum_test_type(HirTypeKind.Int(8, false)), wide)
+        val narrow_type = mir.local_mir_type_of(narrow) ?? MirType.unit()
+        expect(narrow_type.kind == MirTypeKind.U8).to_be(true)
+        val widened = mir.adapt_declared_enum_payload(enum_test_type(HirTypeKind.Int(64, true)), narrow)
+        val widened_type = mir.local_mir_type_of(widened) ?? MirType.unit()
+        expect(widened_type.kind == MirTypeKind.I64).to_be(true)
+
+    it "round trips the declared MIR type across float and narrow tuple slots":
+        var mir = MirLowering.new(SymbolTable.new())
+        var builder = mir.builder
+        builder.begin_function(SymbolId(id: 91), "tuple_payload_probe", MirSignature(
+            params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+        val raw = builder.emit_const_int(7)
+        mir.builder = builder
+        val narrow_type = enum_test_type(HirTypeKind.Int(8, true))
+        val narrow = mir.decode_declared_enum_payload_slot(raw, narrow_type)
+        expect((mir.local_mir_type_of(narrow) ?? MirType.unit()).kind == MirTypeKind.I8).to_be(true)
+        val float_type = enum_test_type(HirTypeKind.Float(32))
+        val decoded_float = mir.decode_declared_enum_payload_slot(raw, float_type)
+        expect((mir.local_mir_type_of(decoded_float) ?? MirType.unit()).kind == MirTypeKind.F32).to_be(true)
+        val encoded_float = mir.encode_declared_enum_payload_slot(decoded_float)
+        expect((mir.local_mir_type_of(encoded_float) ?? MirType.unit()).kind == MirTypeKind.I64).to_be(true)

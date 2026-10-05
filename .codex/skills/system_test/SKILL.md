@@ -22,6 +22,16 @@ a binary-owned case count; verify the executable's supported listing interface.
 
 ## Navigation tools
 
+For bootstrap test execution, use the
+[full bootstrap collection graph](../../../doc/07_guide/tooling/bootstrap_failure_collection.md#full-bootstrap-execution-graph).
+Phase 2 builds Simple aggregate compiler/interpreter/loader test binaries for
+LLVM and Cranelift (six total). Enumerate actual cases before running all
+runnable cases; preserve failed, blocked and unexecuted counts. Phase 1,
+Phase 3 and both Phase 4 producer cohorts need their whole inventories,
+including binary tools and libraries. Tests overlap independent builds after
+producer compile/run sanity. After three unresolved cycles, retain the bug
+and scoped workaround without presenting skipped or failed tests as passes.
+
 - **Simple MCP** — query codebase structure, existing tests
 - **Simple LSP MCP** — symbol lookup, type signatures for test targets
 

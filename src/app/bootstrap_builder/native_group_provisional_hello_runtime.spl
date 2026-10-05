@@ -1,0 +1,83 @@
+# Physical inputs used by a v2 Hello command, distinct from source-runtime authority.
+use app.bootstrap_builder.native_group_index_contract.{native_group_index_absolute_v1}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{dir_list_optional}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256, file_is_regular_no_follow, file_read_regular_no_follow_bounded}
+
+fn _hello_runtime_collect_v2(root: text, relative: text, depth: i64,
+        rows: [text]) -> Result<[text], text>:
+    if depth > 32 or rows.len() > 4096:
+        return Err("provisional hello runtime inventory limit")
+    val path = if relative == "": root else: root + "/" + relative
+    if not dir_is_real_no_follow(path):
+        return Err("provisional hello runtime directory linked or absent")
+    val maybe_children = dir_list_optional(path)
+    val children = match maybe_children:
+        Some(names): names
+        None: return Err("provisional hello runtime listing failed")
+    if children.len() > 4096:
+        return Err("provisional hello runtime directory entry limit")
+    var result = rows
+    for name in children:
+        if name == "" or name == "." or name == ".." or
+                name.contains("/") or name.contains("\\") or
+                name.contains("\n") or name.contains("\r") or name.contains("\0"):
+            return Err("provisional hello runtime child invalid")
+        val child = if relative == "": name else: relative + "/" + name
+        val physical = root + "/" + child
+        if dir_is_real_no_follow(physical):
+            if result.len() >= 4096:
+                return Err("provisional hello runtime inventory limit")
+            result = result.push("directory " + child)
+            result = _hello_runtime_collect_v2(root, child, depth + 1, result)?
+        elif file_is_regular_no_follow(physical):
+            if result.len() >= 4096:
+                return Err("provisional hello runtime inventory limit")
+            val digest = file_hash_sha256(physical)
+            if not builder_digest_valid_v1(digest):
+                return Err("provisional hello runtime hash failed")
+            result = result.push(digest + " " + child)
+        else:
+            return Err("provisional hello runtime nonregular input")
+    Ok(result)
+
+fn native_group_provisional_hello_runtime_verify_v2(
+        root: text, manifest: text, digest: text) -> Result<text, text>:
+    if not native_group_index_absolute_v1(root) or
+            not native_group_index_absolute_v1(manifest) or
+            root.contains("\\") or root.contains("//") or
+            root.contains("/./") or root.contains("/../") or
+            root.ends_with("/.") or root.ends_with("/..") or root.ends_with("/") or
+            not builder_digest_valid_v1(digest) or
+            not file_is_regular_no_follow(manifest) or
+            file_hash_sha256(manifest) != digest:
+        return Err("provisional hello runtime manifest pin differs")
+    # Reject ancestor aliases too; a regular leaf beneath a linked directory
+    # is not an independently owned runtime profile.
+    val parts = root.split("/")
+    var ancestor = parts[0]
+    for index in 1..parts.len():
+        ancestor = ancestor + "/" + parts[index]
+        if not dir_is_real_no_follow(ancestor):
+            return Err("provisional hello runtime ancestor changed")
+    val payload = file_read_regular_no_follow_bounded(manifest, 1024 * 1024)?
+    if sha256_text(payload) != digest or not payload.ends_with("\n") or
+            payload.contains("\r") or payload.contains("\0"):
+        return Err("provisional hello runtime manifest framing invalid")
+    val rows = payload.split("\n")
+    val actual = _hello_runtime_collect_v2(root, "", 0, [])?
+    if actual.len() == 0 or rows.len() != actual.len() + 1:
+        return Err("provisional hello runtime inventory differs")
+    var expected: {text: bool} = {}
+    for index in 0..rows.len() - 1:
+        if expected.has(rows[index]):
+            return Err("provisional hello runtime duplicate input")
+        expected[rows[index]] = true
+    for row in actual:
+        if not expected.has(row):
+            return Err("provisional hello runtime input changed")
+    Ok(root)
+
+export native_group_provisional_hello_runtime_verify_v2

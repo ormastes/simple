@@ -4,6 +4,9 @@ use app.bootstrap_builder.native_group_index_contract.{
     native_group_index_absolute_v1
 }
 
+use app.bootstrap_builder.native_group_provisional_hello_runtime.{native_group_provisional_hello_runtime_verify_v2}
+
+val PROVISIONAL_HELLO_COMMAND_SCHEMA_V2 = "SIMPLE-PROVISIONAL-HELLO-COMMAND-2"
 val PROVISIONAL_HELLO_COMMAND_SCHEMA_V1 =
     "SIMPLE-PROVISIONAL-HELLO-COMMAND-1"
 
@@ -28,13 +31,17 @@ fn native_group_provisional_hello_command_decode_v1(
             not payload.ends_with("\n") or payload.contains("\r") or
             payload.contains("\0"):
         return Err("provisional hello compile transcript framing invalid")
-    val keys = ["producer_path", "producer_digest",
+    val version2 = payload.starts_with(PROVISIONAL_HELLO_COMMAND_SCHEMA_V2 + "\n")
+    var keys = ["producer_path", "producer_digest",
         "hello_source_path", "hello_source_digest",
         "hello_executable_path", "cache_root", "runtime_root",
         "target", "backend", "compile_exit", "run_exit", "arg_count"]
+    if version2:
+        keys = keys.push("threads").push("mode").push("runtime_bundle").push("runtime_manifest_path").push("runtime_manifest_digest")
     val rows = payload.split("\n")
     if rows.len() != 1 + keys.len() + 27 + 1 or
-            rows[0] != PROVISIONAL_HELLO_COMMAND_SCHEMA_V1 or
+            (rows[0] != PROVISIONAL_HELLO_COMMAND_SCHEMA_V1 and
+                rows[0] != PROVISIONAL_HELLO_COMMAND_SCHEMA_V2) or
             rows[rows.len() - 1] != "":
         return Err("provisional hello compile transcript row count invalid")
     var fields: {text: text} = {}
@@ -56,7 +63,8 @@ fn native_group_provisional_hello_command_decode_v1(
             return Err("provisional hello compile argv invalid")
         args = args.push(value)
     if fields["arg_count"] != "27" or
-            fields["backend"] != "llvm" or
+            (fields["backend"] != "llvm" and
+                (not version2 or fields["backend"] != "cranelift")) or
             fields["compile_exit"] != "0" or
             fields["run_exit"] != "0" or
             fields["target"] != target or
@@ -76,26 +84,44 @@ fn native_group_provisional_hello_command_decode_v1(
         hello["hello_executable_path"])
     if not _provisional_hello_command_plain_absolute_v1(checkout) or
             not _provisional_hello_command_plain_absolute_v1(private_root) or
-            fields["runtime_root"] != checkout + "/src/runtime" or
+            (not version2 and fields["runtime_root"] != checkout + "/src/runtime") or
             fields["cache_root"] != private_root + "/cache/hello" or
             hello["compile_command_path"] !=
                 private_root + "/compile.argv" or
             hello["compile_log_path"] !=
                 private_root + "/compile.log":
         return Err("provisional hello compile root ownership differs")
+    var threads = "1"
+    var mode = "one-binary"
+    var bundle = "core-c-bootstrap"
+    if version2:
+        threads = fields["threads"]
+        mode = fields["mode"]
+        bundle = fields["runtime_bundle"]
+        val workers = threads.to_i64() ?? -1
+        if workers < 1 or workers > 80 or str(workers) != threads or
+                (mode != "one-binary" and mode != "dynload") or
+                (bundle != "core-c-bootstrap" and bundle != "bootstrap-tools") or
+                not _provisional_hello_command_plain_absolute_v1(fields["runtime_root"]) or
+                fields["runtime_manifest_path"] != private_root + "/runtime.inputs":
+            return Err("provisional hello compile profile invalid")
     val expected = [hello["producer_path"], "native-build",
-        "--target", target, "--backend", "llvm", "--source",
+        "--target", target, "--backend", fields["backend"], "--source",
         "src/compiler", "--source", "src/app", "--source", "src/lib",
-        "--entry-closure", "--threads", "1", "--cache-dir",
-        fields["cache_root"], "--mode", "one-binary", "--entry",
+        "--entry-closure", "--threads", threads, "--cache-dir",
+        fields["cache_root"], "--mode", mode, "--entry",
         "test/04_smoke/windows_native_hello.spl",
-        "--runtime-bundle", "core-c-bootstrap", "--runtime-path",
+        "--runtime-bundle", bundle, "--runtime-path",
         fields["runtime_root"], "-o", hello["hello_executable_path"]]
     for index in 0..27:
         if args[index] != expected[index]:
             return Err("provisional hello compile argv differs at " +
                 str(index))
+    if version2:
+        val _runtime = native_group_provisional_hello_runtime_verify_v2(
+            fields["runtime_root"], fields["runtime_manifest_path"],
+            fields["runtime_manifest_digest"])?
     Ok(fields["cache_root"])
 
-export PROVISIONAL_HELLO_COMMAND_SCHEMA_V1
+export PROVISIONAL_HELLO_COMMAND_SCHEMA_V1, PROVISIONAL_HELLO_COMMAND_SCHEMA_V2
 export native_group_provisional_hello_command_decode_v1

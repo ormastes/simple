@@ -4,7 +4,9 @@ use compiler.backend.linker.macho.input.{MachOInput, macho_checked_object, macho
 use compiler.backend.linker.macho.layout.{macho_layout, macho_align}
 use compiler.backend.linker.macho.symbols.{macho_definitions, macho_unresolved, macho_member_needed, macho_symbol_address}
 use compiler.backend.linker.macho.relocations.{macho_relocate}
-use compiler.backend.linker.macho.dylib.{MachODylib, macho_read_dylib}
+use compiler.backend.linker.macho.provider_types.{MachOProviderV1, macho_validate_provider_v1}
+use compiler.backend.linker.macho.binary_provider.{macho_read_binary_provider_v1}
+use compiler.backend.linker.macho.provider_closure.{MachOProviderClosureV1}
 use compiler.backend.linker.macho.hosted_fixups.{macho_hosted_slots, macho_hosted_fixups}
 use compiler.backend.linker.macho.hosted_image.{macho_hosted_stubs, macho_hosted_image}
 
@@ -16,20 +18,23 @@ struct MachOHostedRequest:
     max_image_bytes: i64
     identifier: text
     rpaths: [text]
+    allow_duplicate_definitions: bool = false
 
 fn macho_hosted_link(objects: [[u8]], archives: [[u8]], providers: [[u8]], request: MachOHostedRequest) -> Result<[u8], text>:
-    """Construct a two-level PIE main image with eager dyld fixups and signing.
+    """Validate actual binary providers before using the shared metadata path."""
+    macho_hosted_request_v1(request)?
+    if providers.len() > 255: return Err("hosted dependency count exceeds 255")
+    var libraries: [MachOProviderV1] = []
+    for bytes in providers:
+        libraries = libraries.push(macho_read_binary_provider_v1(bytes, request.target)?)
+    macho_hosted_link_with_providers(objects, archives, libraries, request)
 
-    No Apple loader execution/trust is inferred from a successful byte result.
-    Unsupported TLS, unwind, weak coalescing and dynamic exports fail or remain
-    outside this explicit executable request contract; they are open item4 gates.
-    """
+fn macho_hosted_request_v1(request: MachOHostedRequest) -> Result<bool, text>:
     var arm = false
     match request.target:
         case RelocArch.X86_64: arm = false
         case RelocArch.AArch64: arm = true
         case _: return Err("unsupported hosted Mach-O target")
-    val cpu = if arm: 0x0100000c else: 0x01000007
     val limit = request.max_image_bytes
     if limit < 32768 or limit > 0x7fffffff: return Err("invalid hosted image byte budget")
     if request.entry == "" or request.entry.contains("\0"): return Err("invalid hosted entry name")
@@ -46,6 +51,48 @@ fn macho_hosted_link(objects: [[u8]], archives: [[u8]], providers: [[u8]], reque
         for index in 0..path.len():
             if path.byte_at(index) > 127: return Err("unsupported non-ASCII hosted rpath")
         paths[path] = true
+    Ok(arm)
+
+fn macho_hosted_link_with_providers(objects: [[u8]], archives: [[u8]], providers: [MachOProviderV1], request: MachOHostedRequest) -> Result<[u8], text>:
+    macho_hosted_link_selected_v1(objects, archives, providers, nil, request)
+
+fn macho_hosted_link_with_closure(objects: [[u8]], archives: [[u8]], closure: MachOProviderClosureV1, request: MachOHostedRequest) -> Result<[u8], text>:
+    closure.validate_for_request(request.target, request.minimum_os)?
+    macho_hosted_link_selected_v1(objects, archives, closure.direct_providers(), Some(closure), request)
+
+fn macho_hosted_link_selected_v1(objects: [[u8]], archives: [[u8]], providers: [MachOProviderV1],
+        closure: Option<MachOProviderClosureV1>, request: MachOHostedRequest) -> Result<[u8], text>:
+    """Construct a two-level PIE main image with eager dyld fixups and signing.
+
+    No Apple loader execution/trust is inferred from a successful byte result.
+    Unsupported TLS, unwind, weak coalescing and dynamic exports fail or remain
+    outside this explicit executable request contract; they are open item4 gates.
+    """
+    val arm = macho_hosted_request_v1(request)?
+    val cpu = if arm: 0x0100000c else: 0x01000007
+    val limit = request.max_image_bytes
+    if providers.len() > 255: return Err("hosted dependency count exceeds 255")
+    var install_names: {text: bool} = {}
+    for library in providers:
+        macho_validate_provider_v1(library, request.target)?
+        if library.platform != 1: return Err("hosted provider platform/minimum OS mismatch")
+        if val minimum = library.minimum_os:
+            if minimum > request.minimum_os: return Err("hosted provider platform/minimum OS mismatch")
+        if closure.is_none():
+            if library.allowable_clients.len() > 0: return Err("unsupported hosted provider allowable clients")
+            if library.parent_umbrella.is_some(): return Err("unsupported hosted provider parent umbrella")
+            var infer_legacy = false
+            if library.infer_subframeworks:
+                for dependency in library.dependencies:
+                    if dependency.command == 0xc or dependency.command == 0x80000018:
+                        infer_legacy = true
+                        break
+            if not library.no_reexported_dylibs and (library.sub_umbrellas.len() > 0 or library.sub_libraries.len() > 0 or infer_legacy):
+                return Err("hosted legacy reexports require a provider closure")
+        if install_names.has(library.install_name): return Err("duplicate hosted dylib install name")
+        if library.install_name.starts_with("@rpath/") and request.rpaths.len() == 0:
+            return Err("hosted @rpath provider requires an explicit runtime search path")
+        install_names[library.install_name] = true
     var inputs: [MachOInput] = []
     var index: i64 = 0
     for bytes in objects:
@@ -60,7 +107,7 @@ fn macho_hosted_link(objects: [[u8]], archives: [[u8]], providers: [[u8]], reque
     var changed = true
     while changed:
         changed = false
-        val unresolved = macho_unresolved(inputs, request.entry)?
+        val unresolved = macho_unresolved(inputs, request.entry, request.allow_duplicate_definitions)?
         index = 0
         for member in members:
             if not selected.has(index) and macho_member_needed(member, unresolved):
@@ -82,21 +129,9 @@ fn macho_hosted_link(objects: [[u8]], archives: [[u8]], providers: [[u8]], reque
                         section.sectname != "__cstring" and section.sectname != "__literal4" and section.sectname != "__literal8" and
                         section.sectname != "__literal16" and section.sectname != "__data" and section.sectname != "__bss" and section.sectname != "__common":
                     return Err("hosted section discovery semantics unsupported: {section.segname},{section.sectname}")
-    val definitions = macho_definitions(inputs)?
+    val definitions = macho_definitions(inputs, request.allow_duplicate_definitions)?
     if not definitions.has(request.entry): return Err("undefined hosted entry {request.entry}")
-    var libraries: [MachODylib] = []
-    var install_names: {text: bool} = {}
-    for bytes in providers:
-        if libraries.len() >= 255: return Err("hosted dependency count exceeds 255")
-        val library = macho_read_dylib(bytes, request.target)?
-        if library.platform != 1 or library.minimum_os > request.minimum_os:
-            return Err("hosted provider platform/minimum OS mismatch")
-        if install_names.has(library.install_name): return Err("duplicate hosted dylib install name")
-        if library.install_name.starts_with("@rpath/") and request.rpaths.len() == 0:
-            return Err("hosted @rpath provider requires an explicit runtime search path")
-        install_names[library.install_name] = true
-        libraries = libraries.push(library)
-    val slots = macho_hosted_slots(inputs, definitions, libraries, arm)?
+    val slots = macho_hosted_slots(inputs, definitions, providers, arm, closure)?
     val text_reserve = macho_align(slots.len() * 16, 0x4000)
     val layout = macho_layout(inputs, limit, text_reserve)?
     val chosen = definitions[request.entry]
@@ -121,6 +156,6 @@ fn macho_hosted_link(objects: [[u8]], archives: [[u8]], providers: [[u8]], reque
                 bytes[placement.offset + byte] = inputs[placement.owner].object.raw[placement.source_offset + byte]
     bytes = macho_relocate(bytes, inputs, definitions, layout, arm, fixups.targets, fixups.bound_sites)?
     bytes = macho_hosted_stubs(bytes, got, stubs, fixups.slot_values, arm)?
-    macho_hosted_image(bytes, layout, libraries, fixups, entry, arm, request.minimum_os, request.sdk, request.identifier, request.rpaths, limit)
+    macho_hosted_image(bytes, layout, providers, fixups, entry, arm, request.minimum_os, request.sdk, request.identifier, request.rpaths, limit)
 
-export MachOHostedRequest, macho_hosted_link
+export MachOHostedRequest, macho_hosted_link, macho_hosted_link_with_providers, macho_hosted_link_with_closure

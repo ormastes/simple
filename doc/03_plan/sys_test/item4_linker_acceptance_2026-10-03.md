@@ -253,3 +253,102 @@ the prior output while removing scratch. Finally, run an actual streamed link
 under that worker and prove successful output plus transactional failures under
 output/scratch pressure. All these worker scenarios remain pending implementation
 and execution; parser fixtures do not close them.
+
+## Native test generated-source authority prerequisite (2026-10-04)
+
+Runtime execution is additionally blocked by the independently diagnosed
+[runner access violation after HIR completion](../../08_tracking/bug/item4_native_runner_post_hir_access_violation_2026-10-04.md).
+That older attempt used producer `776ce2a1...` and source `9737d121...`, not the
+later loader/staging repairs. Its stack is missing. Full-CLI numbered-directory
+and generic-scope repairs are separate, other-owner dependencies; they must not
+be presented as proof of a runner crash fix. Before a debugger replay, establish
+an isolated canonical source-authority context and an exclusively owned cache.
+Then capture the actual failing worker, repair its demonstrated fault and
+execute the following existing gates. Do not count this prerequisite analysis
+as an executed SSpec scenario or a host qualification pass.
+
+Status: implementation underway; all behavioral execution **UNRUN**. This is a
+verification prerequisite for existing item4 requirements, not a replacement or
+completion claim for any linker, SDK, host or resource requirement. The pending
+[detail design](../../05_design/compiler/linker/native_test_generated_source_authority_2026-10-04.md)
+records the current OS-temp entry and restricted source-root mismatch. The
+[execution gate](../../06_spec/03_system/app/compiler/feature/item4_linker_execution_gate.md)
+retains qualified-runtime and nonvacuous-result obligations.
+
+Initial intent `b83b2acb980` creates
+`test/01_unit/lib/test_runner_native_source_authority_spec.spl` before source
+implementation. It calls the real wrapper, staging owner, coordinator request
+parser and compile-argument builder. Five unit scenarios are now authored,
+including invalid-input and cleanup-retry followups. One real Git snapshot
+scenario (`a86230d1301`) adds cold/warm acquire, exact-byte and deletion oracles.
+Counts describe authorship,
+not executed examples or evidence that every obligation below is implemented.
+
+| Acceptance obligation | Required observable evidence |
+|---|---|
+| Source staging | Transform a genuine `_spec.spl`; preserve exact transformed bytes in unique nonignored `test/native-generated-*/entry.spl` paths beneath the validated checkout |
+| Ownership and cleanup | Keep-artifacts retains the stage; cleanup removes only its exact file and directory, preserves another stage, and exposes failure so cleanup can be retried |
+| Coordinator request | Parse one `--refresh-source-authority`, strip it from downstream arguments, reject duplicate or internal-worker requests, and preserve ordinary inherited requests |
+| Canonical closure | Coverage and explicit AOT use the staged entry plus canonical default source roots, without the hardcoded `--source src/lib` restriction |
+| Fresh immutable authority | In a qualified integration run, a prior snapshot lacks the generated entry; coordinator refresh acquires a new generation containing it while preserving the prior generation and parent runner bindings |
+| Inventory lifetime | Real canonical inventory observes creation/deletion; missing, ignored or outside-scope entries fail closed; compatible caches and journals are not manually rewritten |
+| Native harness result | Correct `_spec.spl` positive/assertion-failure fixtures produce a real executable and expected nonzero example summary; a deliberate plain `.spl` `fn main` fixture exercises zero-example rejection, not compile failure |
+
+The frozen implementation interfaces are `native_test_stage_source_v1` and
+`native_test_cleanup_source_v1` in the new standard-library staging owner, plus
+`native_build_authority_request_v1` in the CLI coordinator. Unit parser/argv
+assertions do not prove real snapshot refresh, child environment isolation,
+inventory updates, compiler imports or native execution. Those integration
+obligations remain open until independently evidenced. The snapshot scenario
+does not exercise the CLI flag or child environment isolation. Windows owned
+compile receipts with an unreaped tree retain artifacts; providers without a
+receipt retain their prior synchronous contract, not a universal tree proof.
+No new diagnostic retry
+or runtime qualification follows from this plan linkage.
+
+## Windows native-all platform dependencies (2026-10-04)
+
+Status: source repair `52d43348d7c` and intent `f73e8a13155` source-reviewed;
+Simple execution **UNRUN**. The repair addresses a
+specific dependency-table omission under existing item4 Windows host scope,
+not full Windows or five-host qualification. See the
+[pure-Simple owner design](../../05_design/compiler/linker/windows_native_all_import_libraries_2026-10-04.md).
+The historical PR 2392 fix was Rust-only; its validation is not evidence for
+these Simple helpers or their production consumers.
+
+Initial intent `f73e8a13155` extends
+`test/01_unit/compiler/linker/native_link_hardening_spec.spl` before production
+changes, using the real shared owners and one new exactly-once dependency
+scenario plus existing boundary controls. All assertions remain UNRUN.
+
+| Acceptance unit | Actual owner and independent oracle |
+|---|---|
+| MSVC selection | Call `native_all_msvc_support_libraries` with recognized native-all input; require `pdh.lib`, `netapi32.lib`, `psapi.lib`, `powrprof.lib` |
+| MinGW selection | Call `native_all_gnu_support_args` for `windows-mingw`; require the corresponding four `-l` arguments |
+| Runtime boundary | Core-only and rejected filename lookalikes add no native-all dependencies |
+| Platform boundary | Non-Windows results retain existing policy and gain none of the four Windows libraries |
+| Eventual native proof | Real SDK-symbol references link through the selected production route and run on a qualified Windows host; invocation and artifact identities retained, MinGW separately evidenced |
+
+Only the unchanged shared helper APIs are involved. Existing external MSVC,
+internal PE support lookup and shared-link consumers must continue using that
+owner. Pure metadata assertions are useful policy regressions but cannot stand
+in for native link/load behavior, ABI correctness or runtime admission.
+
+## Hosted ARM64 ADDEND continuation (2026-10-04)
+
+Existing ITEM4-REQ-004/006; source `2a34f353063` implemented and independently
+reviewed, initial intent `a1d863b52ea` preceded source; all execution **UNRUN**.
+Eight authored scenarios through `ded72abf4fa` in
+`test/03_system/app/compiler/feature/item4_macho_addend_spec.spl` and its manual
+received independent source review. These include actual file-adapter destination
+preservation, static-route controls and subtractor compatibility; no native run
+or coverage receipt is inferred from authorship.
+[Detail contract](../../05_design/compiler/linker/macho_hosted_addend_2026-10-04.md)
+requires one shared checked pair decoder for static and hosted consumers.
+Use actual object fixtures and independent branch/page/scaled-offset decoding,
+including signed addends, page crossings and real imported zero-addend stubs.
+Malformed prefix/follower/address/overlap and dual-nonzero addends must reject;
+file-route failures preserve destination bytes. Imported nonzero branch addends
+remain refused. Signed-24 payload boundaries are distinct from ISA range checks.
+No GOT/TLV follower expansion, native host execution or full SDK completion is
+claimed by this pair-handling slice.

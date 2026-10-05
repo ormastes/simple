@@ -9,6 +9,56 @@ use super::helpers::*;
 use crate::hir::BinOp;
 use crate::mir::{CallTarget, MirInst};
 
+fn assert_bool_enum_payload(source: &str, kind: &str) {
+    let mir = compile_to_mir(source).expect("boolean enum fixture lowers");
+    let instructions: Vec<_> = mir.functions.iter()
+        .flat_map(|function| function.blocks.iter())
+        .flat_map(|block| block.instructions.iter()).collect();
+    let boxed: Vec<_> = instructions.iter().filter_map(|instruction| match instruction {
+        MirInst::Call { dest: Some(dest), target, .. }
+            if target == &CallTarget::from_name("rt_value_bool") => Some(*dest),
+        _ => None,
+    }).collect();
+    assert_eq!(boxed.len(), 1, "one boolean payload must be boxed as bool");
+    assert!(instructions.iter().any(|instruction| match instruction {
+        MirInst::OptionSome { value, .. } if kind == "Some" => *value == boxed[0],
+        MirInst::ResultOk { value, .. } if kind == "Ok" => *value == boxed[0],
+        MirInst::ResultErr { value, .. } if kind == "Err" => *value == boxed[0],
+        _ => false,
+    }), "constructor must store the actual boolean-boxing result");
+    assert!(!has_inst(&mir, |instruction| matches!(instruction, MirInst::BoxInt { .. })),
+        "boolean enum payload must never use integer boxing");
+}
+
+#[test]
+fn enum_bool_payload_direct_some_uses_bool_tag() {
+    assert_bool_enum_payload("fn test() -> bool?:\n    Some(true)\n", "Some");
+}
+
+#[test]
+fn enum_bool_payload_returned_some_uses_bool_tag() {
+    assert_bool_enum_payload("fn test(value: bool) -> bool?:\n    Some(value)\n", "Some");
+}
+
+#[test]
+fn enum_bool_payload_result_ok_uses_bool_tag() {
+    assert_bool_enum_payload("fn test(value: bool) -> Result<bool, text>:\n    Ok(value)\n", "Ok");
+}
+
+#[test]
+fn enum_bool_payload_result_err_uses_bool_tag() {
+    assert_bool_enum_payload("fn test(value: bool) -> Result<text, bool>:\n    Err(value)\n", "Err");
+}
+
+#[test]
+fn enum_bool_payload_integer_some_keeps_integer_tag() {
+    let mir = compile_to_mir("fn test(value: i64) -> i64?:\n    Some(value)\n")
+        .expect("integer enum fixture lowers");
+    assert!(has_inst(&mir, |instruction| matches!(instruction, MirInst::BoxInt { .. })));
+    assert!(!has_inst(&mir, |instruction| matches!(instruction,
+        MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_value_bool"))));
+}
+
 // =============================================================================
 // Coverage-enabled compound boolean (lowering_expr.rs line 82)
 // =============================================================================

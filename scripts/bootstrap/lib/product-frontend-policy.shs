@@ -1,0 +1,25 @@
+# Uses the canonical Windows frontend owner. Products deliberately use the
+# conservative share on every host; codegen parallelism remains independent.
+bootstrap_product_frontend_policy() {
+    product_policy_mode=$1 product_policy_cap=$2 product_policy_rss_mode=$3
+    product_policy_share=${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB:-}
+    if [ "$product_policy_mode" = diagnostic ]; then
+        [ -n "$product_policy_share" ] || {
+            echo 'product frontend requires an explicit admitted lane share' >&2
+            return 1
+        }
+    else
+        product_policy_share=${product_policy_share:-3000000}
+    fi
+    product_policy_rows=$(bootstrap_stage3_windows_frontend_environment \
+        "$product_policy_cap" "$product_policy_rss_mode" "$product_policy_share") || return 1
+    # Reject inherited contradictory scheduling requests rather than quietly
+    # masking them. No eval, host-memory query, or unchecked fanout override.
+    [ "${SIMPLE_SHARD_MEM_CLAMP:-1}" = 1 ] &&
+        [ "${SIMPLE_PARSE_SHARD_MAX:-1}" = 1 ] &&
+        [ "${SIMPLE_PARSE_SHARD_WORKER_KB:-1650000}" = 1650000 ] &&
+        [ "${SIMPLE_HIR_SHARD_WORKER_KB:-3000000}" = 3000000 ] || return 1
+    product_policy_effective=${product_policy_rows##*=}
+    [ "${SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB:-$product_policy_effective}" = "$product_policy_effective" ] || return 1
+    printf '%s\n' "$product_policy_rows"
+}

@@ -38,6 +38,7 @@
 #   unchanged command.
 
 use common.ui.draw_ir.{
+    draw_ir_command_v4_equal,
     DrawIrBatch,
     DrawIrCommand,
     DrawIrComposition,
@@ -48,10 +49,12 @@ use common.ui.draw_ir.{
     draw_ir_batch,
     draw_ir_embedding_config,
     draw_ir_next_composition_generation,
+    draw_ir_commands_schema,
     draw_ir_no_rect,
     draw_ir_rect,
     draw_ir_rect_bounds
 }
+use common.ui.draw_ir_v4_bounds.{draw_ir_v4_damage_bounds}
 use common.ui.draw_ir_diff.{
     DrawIrCommandIndex,
     draw_ir_build_command_index,
@@ -112,7 +115,7 @@ fn _draw_ir_patch_points_bounds(points: [DrawIrPoint]) -> DrawIrRect:
         left.to_i32(), top.to_i32(),
         (right - left + 1).to_i32(), (bottom - top + 1).to_i32())
 
-fn _draw_ir_patch_bounds(command: DrawIrCommand) -> DrawIrRect:
+fn _draw_ir_patch_legacy_bounds(command: DrawIrCommand) -> DrawIrRect:
     # Linear strokes ignore command geometry: PATH reads command.points and
     # EDGE reads edge.points. Check those authoritative payloads first, since
     # decoded commands can carry stale nonzero geometry alongside fresh points.
@@ -127,8 +130,14 @@ fn _draw_ir_patch_bounds(command: DrawIrCommand) -> DrawIrRect:
             command.x, command.y, command.width, command.height)
     _draw_ir_patch_points_bounds(command.points)
 
+fn _draw_ir_patch_bounds(command: DrawIrCommand) -> DrawIrRect:
+    val legacy = _draw_ir_patch_legacy_bounds(command)
+    if command.fractional_geometry != nil or command.affine_transform != nil:
+        return draw_ir_v4_damage_bounds(command, legacy)
+    legacy
+
 fn _draw_ir_patch_geometry_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
-    a.x != b.x or a.y != b.y or a.width != b.width or a.height != b.height
+    not draw_ir_command_v4_equal(a, b) or a.x != b.x or a.y != b.y or a.width != b.width or a.height != b.height
 
 # NOTE: deliberately avoids returning text? (nilable) from a per-property
 # lookup and comparing via `== nil` / `!=` -- that optional-return pattern
@@ -419,7 +428,7 @@ fn draw_ir_patch_apply(composition: DrawIrComposition, patch: DrawIrPatch) -> Dr
     val commands = _draw_ir_patch_apply_commands(base_index, patch)
     val base_batch = _draw_ir_patch_base_batch(composition)
     val patched_batch = DrawIrBatch(
-        schema: base_batch.schema,
+        schema: draw_ir_commands_schema(commands),
         batch_id: base_batch.batch_id,
         backend_target: base_batch.backend_target,
         source: base_batch.source,
@@ -427,7 +436,7 @@ fn draw_ir_patch_apply(composition: DrawIrComposition, patch: DrawIrPatch) -> Dr
         commands: commands
     )
     val patched_composition = DrawIrComposition(
-        schema: composition.schema,
+        schema: patched_batch.schema,
         composition_id: patch.target_revision,
         scene_key: composition.scene_key,
         backend_target: composition.backend_target,
@@ -450,6 +459,8 @@ fn draw_ir_patch_commands_equal(a: DrawIrComposition, b: DrawIrComposition) -> b
     while i < a_index.commands.len():
         val ca = a_index.commands[i]
         val cb = b_index.commands[i]
+        if not draw_ir_command_v4_equal(ca, cb):
+            return false
         if ca.kind != cb.kind:
             return false
         if ca.component_id != cb.component_id:

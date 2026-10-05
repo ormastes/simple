@@ -385,7 +385,7 @@ already; plus existing `arch/arm/pl011_common.spl`.)
 | Console framing (`writeln`, `write`, hex/dec format) | ~50 each | `arch/common/console_framing.spl` | ~80 | 6 × ~30 = 180 |
 | Paging tree-walk skeleton (level descent loop, flag mask) | ~120 each | `arch/common/paging_walker.spl` | ~150 | 6 × ~80 = 480 |
 | Interrupt vector dispatch shell (mask/unmask/eoi switch) | ~60 each | `arch/common/interrupt_dispatch.spl` | ~100 | 6 × ~40 = 240 |
-| Timer deadline math (ns ↔ ticks, jitter clamp) | ~60 each | `arch/common/timer_math.spl` | ~80 | 6 × ~40 = 240 |
+| Timer deadline math (ns ↔ ticks, jitter clamp) | ~60 each | `std.common.contracts.sosix.time_v1` (shared with hosted SOSIX) | ~80 | 6 × ~40 = 240 |
 | Context-switch fixed-frame format (offsets, magic) | ~40 each | `arch/common/context_layout.spl` | ~60 | 6 × ~25 = 150 |
 | RV32+RV64 SBI ECALL shim | ~150 each (rv only) | `arch/common/sbi_shim.spl` | ~180 | 2 × ~100 = 200 |
 | ARM32+ARM64 GIC v2/v3 dispatch | ~80 each (arm only) | `arch/common/gic_common.spl` | ~120 | 2 × ~60 = 120 |
@@ -427,7 +427,7 @@ src/os/kernel/arch/common/
 ├── console_framing.spl          # writeln, hex, dec, byte-string framing
 ├── paging_walker.spl            # generic level-descent + PTE encode helper
 ├── interrupt_dispatch.spl       # mask/unmask/eoi switch table
-├── timer_math.spl               # ns ↔ ticks, deadline jitter clamp
+(timer unit conversion: std.common.contracts.sosix.time_v1 sosix_time_scale_u64)
 ├── context_layout.spl           # ArchContext common-frame magic + offsets
 ├── sbi_shim.spl                 # RV-only SBI ECALL helpers
 ├── gic_common.spl               # ARM-only GIC v2/v3 dispatch
@@ -582,7 +582,7 @@ which are runtime-only, not on-disk.
 | `src/os/kernel/arch/common/console_framing.spl` | CREATE |
 | `src/os/kernel/arch/common/paging_walker.spl` | CREATE |
 | `src/os/kernel/arch/common/interrupt_dispatch.spl` | CREATE |
-| `src/os/kernel/arch/common/timer_math.spl` | CREATE |
+| `src/os/kernel/arch/common/timer_math.spl` | SUPERSEDED 2026-10-04: never wired; deleted for `std.common.contracts.sosix.time_v1` |
 | `src/os/kernel/arch/common/context_layout.spl` | CREATE |
 | `src/os/kernel/arch/common/sbi_shim.spl` | CREATE |
 | `src/os/kernel/arch/common/gic_common.spl` | CREATE |
@@ -604,7 +604,7 @@ For each `<arch>` ∈ {x86_64, x86_32, arm64, arm32, riscv64, riscv32}:
 | `src/os/kernel/arch/<arch>/paging.spl` | MODIFY — refactor to use `arch/common/paging_walker.spl`, target ≤270 LoC each |
 | `src/os/kernel/arch/<arch>/console.spl` | MODIFY — use `arch/common/console_framing.spl` |
 | `src/os/kernel/arch/<arch>/interrupt.spl` | MODIFY — use `arch/common/interrupt_dispatch.spl` |
-| `src/os/kernel/arch/<arch>/timer.spl` | MODIFY — use `arch/common/timer_math.spl` |
+| `src/os/kernel/arch/<arch>/timer.spl` | MODIFY — use `std.common.contracts.sosix.time_v1.sosix_time_scale_u64` |
 | `src/os/kernel/arch/<arch>/context.spl` | MODIFY — use `arch/common/context_layout.spl` |
 
 Disjoint per-arch scope means the 6 agents can run in parallel.
@@ -749,7 +749,7 @@ src/os/kernel/arch/
 │   ├── console_framing.spl
 │   ├── paging_walker.spl
 │   ├── interrupt_dispatch.spl
-│   ├── timer_math.spl
+│   (timer math: std.common.contracts.sosix.time_v1)
 │   ├── context_layout.spl
 │   ├── sbi_shim.spl
 │   ├── gic_common.spl

@@ -1,5 +1,24 @@
 # Item 4 parallel ownership
 
+## Mach-O legacy reexport continuation (2026-10-04)
+
+Base: `487d64cfac314787e89c8bb7304e0a24eae3d450`, target `release/1.0`.
+Root owns integration, the no-closure hosted guard, verification report and
+final review/merge. Runtime owns provider metadata, validating binary projection
+and actual closure selector/inference integration. Acceptance owns real binary
+fixtures, `item4_macho_legacy_reexport_spec.spl` and its authored manual. Research
+owns the legacy detail design, SDK/host progress plans and independent exact
+source/test review. Each lane uses its own clean worktree and fresh branch;
+lower-model sidecars N/A. Initial test intent `bf0ff4730f8` precedes production.
+
+Additive provider metadata: `sub_umbrellas`, `sub_libraries`,
+`no_reexported_dylibs`, `infer_subframeworks`; defaults preserve existing callers.
+The detail design freezes matching all ordinary/weak dependency records,
+unmatched no-ops, header suppression and old-format-only subframework inference.
+Test helpers use `item4_macho_legacy_` and canonical `std.spec.step`, actual
+production calls, guarded fixture mutations and independent output assertions.
+Simple execution remains UNRUN; source review does not complete SDK or host gates.
+
 ## 2026-10-04 ELF byte-source continuation
 
 Base: `d945e61704c7baeca8fe354eb812e390b156a561`, target `release/1.0`.
@@ -327,3 +346,217 @@ separate implementation obligations. All Simple tests remain UNRUN.
 
 User selection: the mold-style Simple linker stays accessible through explicit
 SIMPLE_LINKER=internal and is not made the default hosted linker.
+
+## Private stream preparation ownership (2026-10-04)
+
+Base/expected target: 02e4836a820507d8bdf38f1feea31c44c649ee92, release/1.0.
+Root integrates work/item4-stream-prepare-20261004 in the existing isolated root
+worktree. Child agents reuse their clean prior core/test/doc worktrees on new
+work/item4-stream-prepare-* branches and session records. Runtime owns
+stream_link.spl; acceptance owns item4_stream_prepare_spec.spl and its manual;
+research owns design and independent review. Root owns host matrix, shared plans,
+reports and final merge. Lower-model sidecars: N/A.
+
+Frozen API: elf_stream_prepare_file_v1 has no destination argument and returns
+ElfStreamPreparedV1 with optional stage, directory and publication_attempted.
+Its me elf_stream_publish_prepared_v1 transfers remaining cleanup ownership to
+the existing ElfStreamLinkResultV1 on success and clears prepared ownership.
+Every publication or discard attempt retires publication permission before work;
+cleanup retries remain available. me elf_stream_discard_prepared_v1 independently
+cleans retained components and is idempotent when empty. Existing one-shot linking
+uses this real path, preserving early output validation, logical quotas and
+no-clobber publication. Helpers use item4_stream_prepare_* and std.spec.step with
+real assertions. Test intent 623186e2f83 preceded implementation. Runtime UNRUN.
+
+## macOS native facade ownership (2026-10-04)
+
+Base: 4da06603013a468071da66824a933051a4c10b07, target release/1.0.
+Root integrates work/item4-macos-facade-20261004 in its isolated worktree.
+Runtime owns native configuration extraction, Mach-O file adapter, wrapper and
+request dispatch; acceptance owns item4_macos_native_spec and its mirrored
+manual; research owns macos_native_facade design and independent final review.
+Each child uses its own clean worktree and feature branch. Root owns shared
+plans, verification report and final PR review/merge. Lower-model sidecars: N/A.
+
+Shared interfaces: MachONativePlanV1, native_macho_plan_v1(arch,config,output),
+native_macho_link_files_v1(plan,object_files,runtime_archives,output). Move the
+unchanged NativeLinkConfig/default to an acyclic module, preserving existing
+wrapper exports. Production performs real host/admission/runtime resolution;
+the same file adapter permits fixture-based cross-format evidence without
+pretending the fixture runner is Darwin. Tests use item4_macos_native_* helpers
+and real std.spec.step assertions. No silent setup or placeholder passes.
+
+Native image publication retains its existing replacement behavior, distinct
+from the streamed no-clobber API. Planning/construction failure must preserve
+an existing destination. Explicit SDK/platform versions and modeled flags are
+required; unsupported configuration and .tbd/cache providers fail explicitly.
+External default and managed internal-admission refusal remain intact. This
+adapter does not close missing SDK providers, Mach-O semantics, native Darwin
+execution or any other host gate. Simple execution remains UNRUN.
+
+## Mach-O duplicate policy ownership (2026-10-04)
+
+Base: fb54131d4092053c0850ae3337fea5bde17853eb, target release/1.0.
+Root owns integration branch work/item4-macho-duplicates-20261004, plans, guide,
+verification report and final merge. Runtime owns symbols.spl, hosted_link.spl
+and native_adapter.spl. Acceptance owns real fixture variants, duplicate-policy
+SSpec and mirrored manual. Research owns the policy design and independent final
+source/test review. All agents use their own clean worktrees; sidecars N/A.
+
+Frozen interfaces: MachOHostedRequest.allow_duplicate_definitions defaults false;
+macho_definitions and macho_unresolved accept the same optional false policy.
+Hosted archive fixed-point scans and final definitions both consume that field.
+The adapter forwards the real NativeLinkConfig value. True retains the first
+selected strong definition; false preserves duplicate failure. Existing Mach-O
+defined-strong, defined-weak, common precedence and common layout remain intact.
+Existing static/default-hosted callers retain strict behavior.
+
+Test helpers use item4_macho_duplicates_* and shared steps: Select strict or
+first-definition policy; Link real competing definitions; Inspect the selected
+definition in emitted bytes; Preserve the destination on strict rejection;
+Remove owned fixture files. Initial test intent must precede implementation.
+Weak/common resolver assertions do not establish hosted weak-coalescing support.
+SDK providers, managed admission and actual native host execution remain open.
+
+## Typed Mach-O providers and full SDK dependency plan (2026-10-04)
+
+Base: 44b0d32606481ce7daf2d1971b0a973b5d065e60, target release/1.0.
+Root integrates work/item4-macho-providers-20261004 and owns shared plans,
+verification and merge. Runtime owns provider_types.spl, binary_provider.spl,
+hosted_link.spl, hosted_fixups.spl and hosted_image.spl. Acceptance owns the typed
+provider spec/manual and any scoped fixtures. Research owns full SDK design and
+independent exact source/acceptance review. Separate clean worktrees; sidecars N/A.
+
+Frozen API and types are recorded in macho_sdk_providers_2026-10-04.md. The
+actual hosted consumer accepts address-free MachOProviderV1 metadata; the old
+byte API calls the real binary reader before projection. Optional version
+absence is preserved. Client and umbrella declarations are retained but refused
+by hosted linking until actual access binding exists. Existing selected-export
+unsupported gates remain; unused weak/reexport metadata and resolver flags must
+not be erased or needlessly rejected.
+
+Helpers use item4_macho_provider_* with shared steps: Read a real binary provider
+through its validating reader; Link through the shared typed provider path;
+Inspect provider metadata and emitted bindings; Reject invalid metadata before
+publication; Preserve unsupported provider semantics. Initial executable intent
+precedes source changes. The four-stage SDK plan remains mandatory; this seam
+alone does not satisfy either text format, dependency closure or native execution.
+
+## SDK text-stub readers and real file routing (2026-10-04)
+
+Base: e1495a1e9dd4a8a224e24da2f3e2d21c11652d4d, target release/1.0.
+Root owns work/item4-macho-text-stubs-20261004, native_adapter.spl, shared
+tracking and integration. Runtime owns new tbd_* source modules; acceptance
+owns TextAPI fixtures, executable specifications and manual; research owns
+reader design and independent final source/test review. Separate worktrees;
+sidecars N/A. Initial fixture/adapter intent bc11b811906 precedes adapter source;
+reader intent ca8bf6a6374 precedes reader implementation. No RED execution is
+claimed without the admitted runtime.
+
+The frozen reader returns target-selected semantic documents, retaining scoped
+install identities and unsupported semantic metadata. Both v4 and v5 are
+required. Leaf lowering explicitly rejects unresolved dependency/access and
+other unsupported semantics instead of erasing them. The native adapter reads
+selected .tbd files through this reader and lowerer into the actual typed hosted
+engine, preserving library selection and destination preservation on error.
+
+Helpers use item4_macho_tbd_*; shared steps include Plan an explicitly selected
+Mach-O link; Link real object and provider files; Inspect the published Mach-O
+commands and bytes; Preserve the destination on selected-provider failure;
+Remove owned fixture files. Reader/schema, resource-limit, metadata, TLV and
+Objective-C assertions complement actual file-route checks. LLVM fixture
+validation is independent syntax/metadata evidence, not Simple execution.
+Full SDK closure, binding, discovery and all-five-host execution remain open.
+
+## Mach-O provider graph and SDK resolution (2026-10-04)
+
+Base: 9f4a7c01a0dbe2cd0bb83b9bc4980ad1cbf126e5, target release/1.0.
+Root owns work/item4-macho-sdk-closure-20261004, native adapter/search modules,
+shared tracking and landing. Runtime owns closure types/source/graph, shared
+TBD lowering and hosted lookup integration. Acceptance owns real closure/alias
+fixtures and specifications/manuals. Research owns closure detail design and
+independent final source/test review. Separate worktrees; sidecars N/A.
+
+Initial real SDK-chain intent 865f0a73251 precedes implementation. The graph
+retains direct roots and dependency edges; imports preserve original outward
+names and direct root ordinals. Client restrictions apply to direct providers
+using actual output identity or explicit -client_name, never signing identity.
+Root's loader callback uses explicit SDK/search paths and requester provenance.
+It cannot silently select another provider after a chosen file fails validation.
+
+Helpers use item4_macho_closure_*; shared steps cover Construct a real SDK
+dependency tree; Resolve inline and external providers; Inspect direct load
+commands and outward bindings; Enforce direct client restrictions; Preserve
+the destination on closure failure; Remove owned fixture files. Cycles and
+aliases require bounded pair-aware lookup. Both architectures/formats, missing
+and ambiguous identities, actual access outcomes and budgets need assertions.
+No executed RED/GREEN, runtime coverage or host qualification is inferred from
+authored intent and independent external fixture inspection.
+
+## Native test generated-source authority repair (2026-10-04)
+
+Base: `9af9a8c0c70c4a04f6fc3a5bac7db475362854f5`, target release/1.0.
+This pending prerequisite follows the independent loader-helper recovery; it
+does not mark item4 or the test harness verified. See the
+[acceptance obligations](../sys_test/item4_linker_acceptance_2026-10-03.md#native-test-generated-source-authority-prerequisite-2026-10-04)
+and [detail design](../../05_design/compiler/linker/native_test_generated_source_authority_2026-10-04.md).
+
+| Owner | Exclusive work |
+|---|---|
+| Runtime agent | New `src/lib/nogc_sync_mut/test_runner/native_test_source_stage.spl`; native integration in `test_runner_execute.spl`; coordinator parsing/admission in `src/app/cli/native_build_main.spl` |
+| Acceptance agent | `test/01_unit/lib/test_runner_native_source_authority_spec.spl`, its mirrored manual, and coordinated native-backend integration fixture corrections |
+| Research agent | Pending detail design and canonical plan linkage; independent source/test review |
+| Root | Integration, shared status/evidence, exact-head final review and landing |
+
+Separate isolated worktrees preserve ownership. Sidecars: N/A. Initial executable
+intent `b83b2acb980` precedes implementation; no observed RED/GREEN is claimed.
+Helpers use `item4_native_authority_*`. Shared steps are: Transform a genuine spec
+suffix through the production wrapper; Stage generated bytes under checkout
+authority; Retain then remove only owned generated artifacts; Parse the actual
+coordinator authority request; Construct compile arguments for the staged entry.
+
+Frozen staging API: `NativeTestSourceStageV1{directory, path}`;
+`native_test_stage_source_v1(checkout_root, source_path)` returns a checked stage
+or error; `native_test_cleanup_source_v1(stage, keep_artifacts)` reports cleanup
+success without recursive deletion or removal of unrelated files. Native paths
+stage the preprocessed source; the original SMF path stays unchanged. Cleanup
+occurs after terminal compilation, preserving its primary error and retaining
+artifacts when requested.
+
+Frozen coordinator API: `NativeBuildAuthorityRequestV1{args, refresh}` and
+`native_build_authority_request_v1(args, internal_worker)`. Only an explicitly
+requested coordinator clears/acquires/publishes authority; duplicate flags and
+worker refresh requests reject. Downstream arguments omit the refresh flag;
+workers inherit the acquired generation. The parent test runner must not mutate
+its own SCV environment. Coverage and explicit AOT omit the restricted source
+list and use canonical default roots. Runtime execution, fresh-generation
+integration and all original item4 release gates remain UNRUN/open.
+
+Source candidate `44d01e5fbcb` implements the three owned production paths.
+Five staging/parser/argv unit scenarios and root's one real Git snapshot
+scenario (`a86230d1301`, manual `9ce30feac71`) are authored, all UNRUN.
+The root snapshot test covers real acquire and immutable generations without
+publishing bindings; it is not CLI refresh or child-isolation evidence.
+Compilation uses the existing owned-test route: an explicit unreaped-tree
+receipt retains artifacts and fails, while providers without a receipt retain
+their synchronous contract without a universal tree-reaping claim. Root's
+remaining backend fixture checks distinguish assertion failure from a plain
+`fn main` zero-example rejection; the latter is not a compile-negative oracle.
+
+## Hosted ARM64 ADDEND owner split (2026-10-04)
+
+Base `edfb6df1821ff98a0d563cca5496630cedf7789e`, target release/1.0.
+Runtime owns `macho/relocation_pairs.spl`, `relocations.spl` and
+`hosted_fixups.spl`; acceptance owns real ARM64 fixtures, executable acceptance
+and its mirrored manual. Research owns local/domain research, detail design,
+plan linkage and independent source/test review. Root owns integration and final
+exact-head review. Separate worktrees; sidecars N/A; tests before production.
+
+Frozen shared API: `MachORelocationPairV1(relocation,explicit_addend,consumed)`
+and `macho_relocation_pair_v1(relocations,index,arm,input_name:text)`.
+Both consumers must validate/consume the same prefix and follower. Reject dual
+nonzero explicit/embedded addends; preserve zero-prefix support and the existing
+imported nonzero-branch refusal. Pair occupancy is counted once. This remains
+existing REQ004/006 scope, not a separate user-selected requirement. Source and
+runtime statuses are tracked in the linked ADDEND design; no PASS is inferred
+from authored specs or independent LLVM fixture inspection.

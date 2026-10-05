@@ -740,12 +740,30 @@ impl MirLowering:
                         # of element kind. Marking is idempotent with the
                         # element-name path above.
                         case HirTypeKind.Array(_, _):
+                            self.remember_local_hir_type(result.id, decl_field_types[field_idx], 0, 0)
                             self.runtime_array_locals[result.id] = true
                             self.mark_runtime_value_local(result.id)
                         case HirTypeKind.Slice(_):
+                            self.remember_local_hir_type(result.id, decl_field_types[field_idx], 0, 0)
                             self.runtime_array_locals[result.id] = true
                             self.mark_runtime_value_local(result.id)
                         case _: ()
+
+    me remember_array_index_projection_provenance(base_local: LocalId, result: LocalId):
+        # The mutation writeback path reads a slot once, without lower_expr(Index).
+        # Preserve its declared array element type as well as handle identity;
+        # pop needs the leaf type even when the current MIR word is erased i64.
+        # Unknown/scalar elements do not acquire array identity from a method name.
+        if val base_type = self.find_local_hir_type(base_local.id):
+            match base_type.kind:
+                case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
+                    match element_type.kind:
+                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                            self.remember_local_hir_type(result.id, element_type, 0, 0)
+                            self.runtime_array_locals[result.id] = true
+                            self.mark_runtime_value_local(result.id)
+                        case _: ()
+                case _: ()
 
     fn mir_type_is_integer(t: MirType) -> bool:
         """True for the MIR kinds `decode_runtime_value` unboxes with `>> 3`.
@@ -797,14 +815,18 @@ impl MirLowering:
             return self.mir_type_is_str(type_)
         false
 
-    fn local_enum_type_id(local: LocalId) -> i64:
-        """Return the declared enum symbol id for a proven enum local."""
+    me local_enum_type_id(local: LocalId) -> i64:
+        """Return the canonical declared owner id for a proven enum local."""
         if val hir_type = self.find_local_hir_type(local.id):
             match hir_type.kind:
                 case HirTypeKind.Named(symbol, _):
                     val enum_name = self.symbols.symbol_name_scalar_raw(symbol.id)
                     if enum_name != "" and self.enum_variant_index.contains(enum_name):
-                        return symbol.id
+                        # An imported alias and its declaration can have different
+                        # HIR symbol ids. Use the existing owner-aware MIR type
+                        # identity, as aggregate layouts already do; a shared
+                        # bare name never merges different defining modules.
+                        return self.canonical_mir_type_symbol(symbol).id
                 case _:
                     ()
         -1
@@ -2486,6 +2508,7 @@ impl MirLowering:
                 # defaulting to field index 0 for every field name.
                 if has_real_struct_name:
                     self.struct_value_syms[decoded_elem.id] = esn
+                self.remember_array_index_projection_provenance(base_local, decoded_elem)
                 decoded_elem
             else:
                 base_local
@@ -4663,24 +4686,26 @@ impl MirLowering:
                     self.runtime_dict_locals[result_local.id] = true
                 if result_struct_name != "":
                     self.struct_value_syms[result_local.id] = result_struct_name
-                # Float payload provenance. `.?` keeps its result slot i64 on
+                # Scalar payload provenance. `.?` keeps its result slot i64 on
                 # purpose: `if val v = opt:` is parser-desugared to this binding
                 # plus `v != nil`, and the nil sentinel comparison must run on
                 # the raw word (a float-typed slot cannot even hold the integer
                 # sentinel -- llc: "integer constant must have integer type").
                 # The decode therefore belongs in the PRESENT branch, which
                 # lower_if/lower_if_chain already implement
-                # (mir_lowering_stmts.spl, `has_if_val_float_binding`) -- but
+                # (mir_lowering_stmts.spl, `has_if_val_scalar_binding`) -- but
                 # that code asks `find_local_hir_type` for the binder's
                 # SEMANTIC type, and nothing ever registered one here, so it
                 # never fired and the binder printed the raw IEEE-754 bits.
+                # Bool uses the same present-only boundary: a tagged false
+                # payload (19) must not become a truthy raw-word condition.
                 # Record the payload's own HIR type on the result local: that
                 # is the provenance the present-branch decode needs, carried
                 # forward from the Option's declared inner type rather than
                 # re-sniffed from the desugared shape.
                 if val exists_payload_type = self.option_inner_hir_type_for_local(base, base_local):
                     match exists_payload_type.kind:
-                        case HirTypeKind.Float(_):
+                        case HirTypeKind.Float(_) | HirTypeKind.Bool:
                             self.remember_local_hir_type(result_local.id, exists_payload_type, 0, 0)
                         case _: ()
 

@@ -6,7 +6,7 @@
 #
 # Shortcut table:
 #   Tab       → CycleFocus       (scancode 0x0F)
-#   1/2/3     → FocusWindow      (scancode 0x02/0x03/0x04)
+#   1..9      → FocusWindow      (scancode 0x02..0x0A, contiguous make-codes)
 #   T         → ToggleTheme      (scancode 0x14)
 #   Q         → Quit             (scancode 0x10)
 #   M         → Minimize         (scancode 0x32)
@@ -20,6 +20,12 @@ val SC_TAB: u64 = 0x0F
 val SC_1: u64 = 0x02
 val SC_2: u64 = 0x03
 val SC_3: u64 = 0x04
+val SC_4: u64 = 0x05
+val SC_5: u64 = 0x06
+val SC_6: u64 = 0x07
+val SC_7: u64 = 0x08
+val SC_8: u64 = 0x09
+val SC_9: u64 = 0x0A
 val SC_Q: u64 = 0x10
 val SC_W: u64 = 0x11
 val SC_R: u64 = 0x13
@@ -85,15 +91,20 @@ impl ShortcutHandler:
     fn _match_scancode(scancode: u64) -> WmAction:
         # Alt+key shortcuts (compositor mode)
         if self.alt_held:
+            # NOTE: CycleFocus stays insertion/creation order (not MRU) — no
+            # focus-history/MRU list exists anywhere in the WM/compositor
+            # sources (grepped os/services/wm, os/compositor, os/desktop);
+            # building one is out of scope for this hardening pass.
             if scancode == SC_TAB: return WmAction.CycleFocus
             if scancode == SC_F4: return WmAction.Close
             if scancode == SC_F5: return WmAction.Minimize
 
         # Direct key shortcuts (standalone WM mode)
         if scancode == SC_TAB: return WmAction.CycleFocus
-        if scancode == SC_1: return WmAction.FocusWindow(idx: 0)
-        if scancode == SC_2: return WmAction.FocusWindow(idx: 1)
-        if scancode == SC_3: return WmAction.FocusWindow(idx: 2)
+        # 1..9 map to FocusWindow(0..8) via the scancode table above rather
+        # than one literal arm per key: SC_1..SC_9 are contiguous make-codes
+        # (0x02..0x0A), so the index is a direct offset from SC_1.
+        if scancode >= SC_1 and scancode <= SC_9: return WmAction.FocusWindow(idx: scancode - SC_1)
         if scancode == SC_T: return WmAction.ToggleTheme
         if scancode == SC_Q: return WmAction.Quit
         if scancode == SC_M: return WmAction.Minimize
@@ -110,9 +121,9 @@ fn uart_char_to_action(ch: u64) -> WmAction:
     instead of PS/2 scancodes.
     """
     if ch == 9: return WmAction.CycleFocus     # Tab
-    if ch == 49: return WmAction.FocusWindow(idx: 0)  # '1'
-    if ch == 50: return WmAction.FocusWindow(idx: 1)  # '2'
-    if ch == 51: return WmAction.FocusWindow(idx: 2)  # '3'
+    # '1'..'9' (ASCII 49..57) -> FocusWindow(0..8), same contiguous-offset
+    # approach as the PS/2 scancode table above.
+    if ch >= 49 and ch <= 57: return WmAction.FocusWindow(idx: ch - 49)
     if ch == 116: return WmAction.ToggleTheme  # 't'
     if ch == 84: return WmAction.ToggleTheme   # 'T'
     if ch == 113: return WmAction.Quit         # 'q'

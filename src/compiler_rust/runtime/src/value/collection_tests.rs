@@ -2334,6 +2334,18 @@ fn test_rt_contains_array() {
 }
 
 #[test]
+fn test_rt_contains_string_matches_window_scan() {
+    let hay_text = "fn f():\n  val x = \"\u{a0}\u{2014}\"\n# c\n";
+    let hay = rt_string_new(hay_text.as_ptr(), hay_text.len() as u64);
+    for needle in ["", "f", "\n#", "  ", "\n\n", "\u{a0}", "\u{2014}\"\n", "\u{3000}", "x = \"", "# c\n", "# c\n!", "zz"] {
+        let value = rt_string_new(needle.as_ptr(), needle.len() as u64);
+        let expected = needle.is_empty()
+            || hay_text.as_bytes().windows(needle.len()).any(|window| window == needle.as_bytes());
+        assert_eq!(rt_contains(hay, value), expected as u8, "needle {needle:?}");
+    }
+}
+
+#[test]
 fn test_rt_contains_dict() {
     let dict = rt_dict_new(5);
     let key = rt_string_new("exists".as_ptr(), 6);

@@ -4,6 +4,7 @@
 # (magic 0x184D2204) in pure Simple.  Consumers import lz4_compress_frame.
 
 use std.common.compress.types.{CompressionError, CompressionCodec}
+use std.common.crypto.xxhash.{xxhash32}
 
 pub struct CompressionLevel:
     """Compression level wrapper."""
@@ -24,74 +25,6 @@ pub struct CompressionOptions:
 # ============================================================================
 
 val LZ4_MAGIC: i64 = 0x184D2204
-
-# ============================================================================
-# xxHash32 — pure Simple implementation used for frame checksums
-# ============================================================================
-
-# xxHash32 primes
-val _XXH32_P1: u32 = 2654435761u32
-val _XXH32_P2: u32 = 2246822519u32
-val _XXH32_P3: u32 = 3266489917u32
-val _XXH32_P4: u32 = 668265263u32
-val _XXH32_P5: u32 = 374761393u32
-
-fn _xxh32_rotl(v: u32, r: i64) -> u32:
-    """Rotate left 32-bit."""
-    (v << r.to_u32()) | (v >> (32 - r).to_u32())
-
-fn _xxh32_round(acc: u32, v: u32) -> u32:
-    val a = acc + (v * _XXH32_P2)
-    _xxh32_rotl(a, 13) * _XXH32_P1
-
-fn _xxh32_read_le32_u(data: [u8], off: i64) -> u32:
-    data[off].to_u32() |
-        (data[off + 1].to_u32() << 8u32) |
-        (data[off + 2].to_u32() << 16u32) |
-        (data[off + 3].to_u32() << 24u32)
-
-pub fn xxhash32_bytes(data: [u8], seed: u32) -> u32:
-    """Compute xxHash32 of `data` with given `seed`."""
-    val n = data.len()
-    var h: u32 = 0u32
-    var pos = 0
-
-    if n >= 16:
-        var v1 = seed + _XXH32_P1 + _XXH32_P2
-        var v2 = seed + _XXH32_P2
-        var v3 = seed + 0u32
-        var v4 = seed - _XXH32_P1
-        val limit = n - 16
-        while pos <= limit:
-            v1 = _xxh32_round(v1, _xxh32_read_le32_u(data, pos))
-            pos = pos + 4
-            v2 = _xxh32_round(v2, _xxh32_read_le32_u(data, pos))
-            pos = pos + 4
-            v3 = _xxh32_round(v3, _xxh32_read_le32_u(data, pos))
-            pos = pos + 4
-            v4 = _xxh32_round(v4, _xxh32_read_le32_u(data, pos))
-            pos = pos + 4
-        h = (_xxh32_rotl(v1, 1) + _xxh32_rotl(v2, 7) +
-             _xxh32_rotl(v3, 12) + _xxh32_rotl(v4, 18))
-    else:
-        h = seed + _XXH32_P5
-
-    h = h + n.to_u32()
-
-    while pos + 4 <= n:
-        h = h + (_xxh32_read_le32_u(data, pos) * _XXH32_P3)
-        h = _xxh32_rotl(h, 17) * _XXH32_P4
-        pos = pos + 4
-
-    while pos < n:
-        h = h + (data[pos].to_u32() * _XXH32_P5)
-        h = _xxh32_rotl(h, 11) * _XXH32_P1
-        pos = pos + 1
-
-    h = (h ^ (h >> 15u32)) * _XXH32_P2
-    h = (h ^ (h >> 13u32)) * _XXH32_P3
-    h = h ^ (h >> 16u32)
-    h
 
 # ============================================================================
 # LZ4 block-level helpers
@@ -209,7 +142,7 @@ fn _lz4_build_descriptor(flg: u8, bd: u8, content_size: i64?) -> [u8]:
 
 fn _lz4_compute_header_checksum(desc: [u8]) -> u8:
     """Compute the HC byte: second byte of xxhash32(descriptor, seed=0)."""
-    ((xxhash32_bytes(desc, 0u32) >> 8u32) & 0xFFu32).to_u8()
+    ((xxhash32(desc, 0u32) >> 8u32) & 0xFFu32).to_u8()
 
 # ============================================================================
 # Public API
@@ -282,7 +215,7 @@ pub fn lz4_compress_frame(data: [u8], opts: CompressionOptions) -> [u8]:
 
         # Optional block checksum
         if want_checksum:
-            val bc = xxhash32_bytes(block_data, 0u32)
+            val bc = xxhash32(block_data, 0u32)
             out = _lz4_append_bytes(out, _lz4_write_le32_u(bc))
 
     # End mark
@@ -290,7 +223,7 @@ pub fn lz4_compress_frame(data: [u8], opts: CompressionOptions) -> [u8]:
 
     # Optional content checksum
     if want_checksum:
-        val cc = xxhash32_bytes(data, 0u32)
+        val cc = xxhash32(data, 0u32)
         out = _lz4_append_bytes(out, _lz4_write_le32_u(cc))
 
     out
@@ -380,7 +313,7 @@ pub fn lz4_decompress_frame(data: [u8]) -> Result<[u8], CompressionError>:
                     return Err(CompressionError.TruncatedInput("lz4 content checksum truncated"))
                 val stored_cc = _lz4_read_le32_u(data, pos)
                 pos = pos + 4
-                val computed_cc = xxhash32_bytes(out, 0u32)
+                val computed_cc = xxhash32(out, 0u32)
                 if stored_cc != computed_cc:
                     return Err(CompressionError.ChecksumMismatch("lz4 content checksum mismatch"))
             # Reject trailing bytes
@@ -418,7 +351,7 @@ pub fn lz4_decompress_frame(data: [u8]) -> Result<[u8], CompressionError>:
             while bi < block_bytes_start + block_len:
                 block_bytes = block_bytes.push(data[bi])
                 bi = bi + 1
-            val computed_bc = xxhash32_bytes(block_bytes, 0u32)
+            val computed_bc = xxhash32(block_bytes, 0u32)
             if stored_bc != computed_bc:
                 return Err(CompressionError.ChecksumMismatch("lz4 block checksum mismatch"))
 

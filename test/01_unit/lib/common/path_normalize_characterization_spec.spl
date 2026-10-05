@@ -1,0 +1,108 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+# Path normalization characterization (G3 C3).
+#
+# Pins the observable output of every lexical path normalizer shared between
+# SimpleOS (src/os) and hosted std (src/lib) on one input table, so routing them
+# through one implementation cannot change behaviour for any caller.
+#
+#   std.common.path_pure.path_normalize     THE shared implementation
+#   std.nogc_sync_mut.path.normalize        lexical; backslash is a filename char
+#   std.nogc_sync_mut.path.normalize_path   backslash -> "/" then lexical
+#   bm_path_normalize (noalloc baremetal)   backslash -> "/" then lexical
+#   SimpleOS shell resolver (was _normalize_path, now path_normalize) on
+#                                           absolute inputs only (its callers
+#                                           always build an absolute path)
+#   app_namespace _normalize_absolute       STRICTER, kept separate: rejects
+#                                           ".." above root (nil) and trims
+#                                           whitespace around components
+
+use std.spec.step
+
+use std.spipe.*
+use std.nogc_sync_mut.path.{normalize, normalize_path}
+use std.nogc_async_mut_noalloc.path.baremetal_path.{bm_path_normalize}
+use std.common.path_pure.{path_normalize}
+use os.kernel.loader.app_namespace.{_normalize_absolute}
+
+describe "lexical normalize (no backslash conversion)":
+    # @manual scenario evidence
+
+    it "empty, dot and root forms":
+        # @req REQ-SSPEC-UNIT
+        step("'' -> '.', '.' -> '.', '/' -> '/', '//' -> '/'")
+        expect(normalize("")).to_equal(".")
+        expect(normalize(".")).to_equal(".")
+        expect(normalize("/")).to_equal("/")
+        expect(normalize("//")).to_equal("/")
+
+    it "relative paths keep leading .. and fold interior ..":
+        # @req REQ-SSPEC-UNIT
+        step("a/./b -> a/b, a/../b -> b, ../a -> ../a, a/../.. -> .., ../.. -> ../..")
+        expect(normalize("a")).to_equal("a")
+        expect(normalize("a/./b")).to_equal("a/b")
+        expect(normalize("a/../b")).to_equal("b")
+        expect(normalize("../a")).to_equal("../a")
+        expect(normalize("a/../..")).to_equal("..")
+        expect(normalize("../..")).to_equal("../..")
+
+    it "absolute paths clamp .. at root and drop empty components":
+        # @req REQ-SSPEC-UNIT
+        step("/.. -> /, /a/../.. -> /, /a//b -> /a/b, /a/b/ -> /a/b")
+        expect(normalize("/..")).to_equal("/")
+        expect(normalize("/a/../..")).to_equal("/")
+        expect(normalize("/a//b")).to_equal("/a/b")
+        expect(normalize("/a/b/")).to_equal("/a/b")
+        expect(normalize("/a/../b")).to_equal("/b")
+
+    it "backslash is an ordinary filename character":
+        # @req REQ-SSPEC-UNIT
+        step("a\\b stays a\\b")
+        expect(normalize("a\\b")).to_equal("a\\b")
+
+describe "backslash-converting normalize (hosted normalize_path == bm_path_normalize)":
+
+    it "same table as lexical normalize for slash-only input":
+        # @req REQ-SSPEC-UNIT
+        step("both converters agree with normalize on slash-only inputs")
+        val inputs = ["", ".", "/", "//", "a", "a/./b", "a/../b", "../a", "a/../..", "/..", "/a/../..", "/a//b", "/a/b/"]
+        for p in inputs:
+            expect(normalize_path(p)).to_equal(normalize(p))
+            expect(bm_path_normalize(p)).to_equal(normalize(p))
+
+    it "backslashes become separators before folding":
+        # @req REQ-SSPEC-UNIT
+        step("a\\b -> a/b, /a\\..\\b -> /b, \\\\x\\.\\y -> /x/y")
+        expect(normalize_path("a\\b")).to_equal("a/b")
+        expect(bm_path_normalize("a\\b")).to_equal("a/b")
+        expect(normalize_path("/a\\..\\b")).to_equal("/b")
+        expect(bm_path_normalize("/a\\..\\b")).to_equal("/b")
+        expect(normalize_path("\\\\x\\.\\y")).to_equal("/x/y")
+        expect(bm_path_normalize("\\\\x\\.\\y")).to_equal("/x/y")
+
+describe "shared path_normalize (SimpleOS shell resolver calls it) on absolute input":
+
+    it "matches lexical normalize on every absolute input":
+        # @req REQ-SSPEC-UNIT
+        step("shell normalizer == normalize for absolute inputs")
+        val inputs = ["/", "//", "/a", "/a/b/", "/a/./b", "/a/../b", "/..", "/a/../..", "/a//b", "/usr/bin/../lib/./x"]
+        for p in inputs:
+            expect(path_normalize(p)).to_equal(normalize(p))
+        expect(path_normalize("/usr/bin/../lib/./x")).to_equal("/usr/lib/x")
+
+describe "app namespace normalizer stays stricter (security boundary)":
+
+    it "rejects .. that would escape the namespace root":
+        # @req REQ-SSPEC-UNIT
+        step("/a/../.. -> nil, /.. -> nil (lexical normalize clamps both to /)")
+        expect(_normalize_absolute("/a/../..") == nil).to_equal(true)
+        expect(_normalize_absolute("/..") == nil).to_equal(true)
+        expect(normalize("/a/../..")).to_equal("/")
+
+    it "folds in-root .. and trims component whitespace":
+        # @req REQ-SSPEC-UNIT
+        step("/a/../b -> /b, /a/ b /c -> /a/b/c, relative a/b -> /a/b")
+        expect(_normalize_absolute("/a/../b").unwrap()).to_equal("/b")
+        expect(_normalize_absolute("/a/ b /c").unwrap()).to_equal("/a/b/c")
+        expect(_normalize_absolute("a/b").unwrap()).to_equal("/a/b")

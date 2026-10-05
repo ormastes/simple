@@ -1,0 +1,154 @@
+# Declared positional enum payload validation. A carrier word or a variant
+# spelling alone never grants a nominal or container payload type.
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+
+fn enum_payload_types_compatible(expected: HirType, actual: HirType) -> bool:
+    # The existing native argument boundary permits integer width and float
+    # width conversions; unrelated primitive/nominal types remain distinct.
+    match expected.kind:
+        case HirTypeKind.Any: return true
+        case HirTypeKind.Int(_, _):
+            match actual.kind:
+                case HirTypeKind.Int(_, _): return true
+                case _: return false
+        case HirTypeKind.Float(_):
+            match actual.kind:
+                case HirTypeKind.Float(_): return true
+                case _: return false
+        case _: hir_types_equal(expected, actual)
+
+impl MirLowering:
+    me enum_constructor_symbol_owner(owner: SymbolId) -> text:
+        if not owner.is_valid(): return ""
+        if val declaration = self.symbols.get_symbol_raw(owner.id):
+            match declaration.kind:
+                case SymbolKind.Enum:
+                    val qualified = self.enum_qualified_key(owner)
+                    if qualified != "":
+                        if self.enum_variant_index_q.has(qualified): return qualified
+                        return ""
+                    if self.enum_variant_index_q.has(declaration.name): return declaration.name
+                case _: ()
+        ""
+
+    me enum_constructor_metadata_owner(enum_name: text) -> text:
+        if self.enum_variant_index_q.has(enum_name) and self.enum_bare_of(enum_name) != enum_name:
+            return enum_name
+        # A bare legacy constructor carries no declaration symbol. Do not
+        # select the last registered sibling, even when its variants happen
+        # to have identical names/discriminants but different payload types.
+        var owner = ""
+        for key in self.enum_variant_index_q.keys():
+            if self.enum_bare_of(key) == enum_name:
+                if owner != "" and owner != key: return ""
+                owner = key
+        owner
+
+    me enum_payload_key_uses_declared_slots(key: text) -> bool:
+        if key == "" or not self.enum_variant_payload_types.has(key): return false
+        val separator = key.last_index_of("::")
+        if separator < 0: return false
+        val owner = key.substring(0, separator)
+        not (self.generic_enum_constructor_owners.get(owner) ?? false)
+
+    me enum_positional_payload_reason(enum_key: text, variant: text, count: i64) -> text:
+        if self.enum_variant_discriminant(enum_key, variant) < 0:
+            return "unknown variant"
+        val key = "{enum_key}::{variant}"
+        if not self.enum_variant_payload_kind.has(key) or not self.enum_variant_payload_types.has(key):
+            return "missing declared payload metadata"
+        val kind = self.enum_variant_payload_kind[key]
+        if kind != "unit" and kind != "tuple" and kind != "struct":
+            return "invalid declared payload kind"
+        if self.enum_variant_payload_types[key].len() != count:
+            return "payload arity mismatch"
+        ""
+
+    me enum_payload_local_compatible(expected: HirType, expression: HirExpr, local: LocalId) -> bool:
+        if val actual = self.find_local_hir_type(local.id):
+            match actual.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error: ()
+                case _: return enum_payload_types_compatible(expected, actual)
+        if val actual = self.enum_match_expr_type(expression):
+            match actual.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error: ()
+                case _: return enum_payload_types_compatible(expected, actual)
+        val maybe_actual_mir = self.local_mir_type_of(local)
+        if not maybe_actual_mir.?: return false
+        val actual_mir = maybe_actual_mir ?? MirType.unit()
+        # Primitive MIR types are sufficient evidence for literals and typed
+        # operations on the native no-inference path. Opaque i64 is not enough
+        # evidence for Result, Optional, arrays or nominal enum/class payloads.
+        match expected.kind:
+            case HirTypeKind.Any: return true
+            case HirTypeKind.Str: return self.local_is_str(local)
+            case HirTypeKind.Bool: return actual_mir.kind == MirTypeKind.Bool
+            case HirTypeKind.Char: return actual_mir.kind == MirTypeKind.Char
+            case HirTypeKind.Int(_, _):
+                match actual_mir.kind:
+                    case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64 | MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: return true
+                    case _: return false
+            case HirTypeKind.Float(_):
+                return actual_mir.kind == MirTypeKind.F32 or actual_mir.kind == MirTypeKind.F64
+            case HirTypeKind.Named(owner, _):
+                match actual_mir.kind:
+                    case MirTypeKind.Struct(actual_owner):
+                        if actual_owner.id == owner.id: return true
+                    case _: ()
+                if val actual_owner = self.struct_value_syms.get(local.id):
+                    if val declaration = self.symbols.get_symbol_raw(owner.id):
+                        match declaration.kind:
+                            case SymbolKind.Class:
+                                return actual_owner == mir_class_identity(declaration)
+                            case _: ()
+                return false
+            case _: return false
+
+    me adapt_declared_enum_payload(expected: HirType, local: LocalId) -> LocalId:
+        # Do not merely accept numeric widths: normalize them before moving
+        # into the enum's scalar/tuple carrier, like the direct-call boundary.
+        match expected.kind:
+            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_):
+                val target = self.lower_type(expected)
+                val actual = self.local_mir_type_of(local) ?? MirType.unit()
+                if actual.kind != target.kind:
+                    var builder = self.builder
+                    val converted = builder.emit_cast(mir_operand_copy(local), target)
+                    self.builder = builder
+                    return converted
+            case HirTypeKind.Any: return self.box_runtime_value(local)
+            case _: ()
+        local
+
+    me encode_declared_enum_payload_slot(local: LocalId) -> LocalId:
+        val actual = self.local_mir_type_of(local) ?? MirType.unit()
+        if actual.kind == MirTypeKind.U64:
+            return self.box_u64_runtime_value(local)
+        self.bitcast_float_enum_payload(local)
+
+    me decode_declared_enum_payload_slot(raw: LocalId, expected: HirType) -> LocalId:
+        val target = self.lower_type(expected)
+        var value = self.enum_payload_value(raw, target)
+        match expected.kind:
+            case HirTypeKind.Int(_, _):
+                val actual = self.local_mir_type_of(value) ?? MirType.unit()
+                if actual.kind != target.kind:
+                    var builder = self.builder
+                    value = builder.emit_cast(mir_operand_copy(value), target)
+                    self.builder = builder
+            case HirTypeKind.Any:
+                self.mark_runtime_value_local(value.id)
+            case _: ()
+        self.remember_local_hir_type(value.id, expected, 0, 0)
+        value
+
+export enum_payload_types_compatible

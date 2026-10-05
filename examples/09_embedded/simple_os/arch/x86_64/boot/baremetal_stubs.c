@@ -13905,10 +13905,50 @@ RuntimeValue rt_thread_current(void)        { return ENCODE_INT(0); }  /* thread
  * freestanding-native body `void rt_thread_sleep(int64_t millis)` lives below
  * (~line 17420, single i64 param per RuntimeFuncSpec). A RuntimeValue-typed
  * stub of the same name collides with it at C link/compile time. */
-TRAP_STUB_RET(rt_mutex_new, 0)
-TRAP_STUB_RET(rt_mutex_lock, 1)
-TRAP_STUB_RET(rt_mutex_unlock, 1)
-TRAP_STUB_RET(rt_mutex_try_lock, 1)
+/* Boxed RuntimeValue mutex — mirrors the arm64 baremetal_stubs.c port. Was a
+ * TRAP stub, but module inits (the fs capsule/identity/lease owner modules)
+ * now create these before spl_start, so every x86_64 kernel halted at
+ * "[TRAP] rt_mutex_new called on baremetal". Spinlock + pause: correct for
+ * the single-threaded init phase and for SMP. Contract per
+ * src/lib/nogc_sync_mut/concurrent/mutex.spl: lock returns the protected
+ * value (nil = stale/foreign handle), try_lock returns nil when contended,
+ * unlock stores new_value and returns 1 (0 = invalid handle). */
+typedef struct { uint64_t locked; RuntimeValue value; } X86RtMutex;
+
+RuntimeValue rt_mutex_new(RuntimeValue initial) {
+    X86RtMutex *m = (X86RtMutex *)calloc(1, sizeof(X86RtMutex));
+    if (!m) return NIL_VALUE;
+    m->locked = 0;
+    m->value = initial;
+    return ENCODE_PTR(m);
+}
+
+RuntimeValue rt_mutex_lock(RuntimeValue handle) {
+    if (!IS_HEAP(handle)) return NIL_VALUE;
+    X86RtMutex *m = (X86RtMutex *)DECODE_PTR(handle);
+    if (!m) return NIL_VALUE;
+    while (__atomic_exchange_n(&m->locked, 1, __ATOMIC_ACQUIRE) != 0)
+        __asm__ volatile("pause");
+    return m->value;
+}
+
+RuntimeValue rt_mutex_try_lock(RuntimeValue handle) {
+    if (!IS_HEAP(handle)) return NIL_VALUE;
+    X86RtMutex *m = (X86RtMutex *)DECODE_PTR(handle);
+    if (!m) return NIL_VALUE;
+    if (__atomic_exchange_n(&m->locked, 1, __ATOMIC_ACQUIRE) != 0)
+        return NIL_VALUE;
+    return m->value;
+}
+
+RuntimeValue rt_mutex_unlock(RuntimeValue handle, RuntimeValue new_value) {
+    if (!IS_HEAP(handle)) return ENCODE_INT(0);
+    X86RtMutex *m = (X86RtMutex *)DECODE_PTR(handle);
+    if (!m) return ENCODE_INT(0);
+    m->value = new_value;
+    __atomic_store_n(&m->locked, 0, __ATOMIC_RELEASE);
+    return ENCODE_INT(1);
+}
 TRAP_STUB_RET(rt_condvar_new, 0)
 TRAP_STUB_RET(rt_condvar_wait, 1)
 TRAP_STUB_RET(rt_condvar_notify, 1)
@@ -16103,19 +16143,6 @@ int64_t rt_x86_tss_init(void) {
  * -------------------------------------------------------------------------- */
 int64_t rt_syscall_dispatch(uint64_t num, uint64_t a0, uint64_t a1, uint64_t a2,
                             uint64_t a3, uint64_t a4, uint64_t a5) {
-    /* Exit-path diagnostic (2026-09-24): unconditional first-8 trace proving
-     * whether a ring-3 syscall reaches this dispatcher and in what mode. */
-    {
-        static int _disp_trace = 0;
-        if (_disp_trace < 8) {
-            _disp_trace++;
-            serial_puts("[disp] n=");
-            serial_put_dec((int64_t)num);
-            serial_puts(" mode=");
-            serial_put_dec((int64_t)_bare_exec_mode);
-            serial_puts("\r\n");
-        }
-    }
     /* Bare-exec mode (installed by rt_x86_exec_token_install before a ring-3
      * handoff): route through the boot-layer handler FIRST. This is what
      * wires the exit(2)-resumes-the-kernel path on x86_64 — without it the

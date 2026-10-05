@@ -2,7 +2,7 @@ use std.spec.*
 use app.io.env_ops.{env_get, env_set}
 use app.io.file_ops.{path_absolute}
 use app.io.time_ops.{time_now_unix_micros}
-use std.io_runtime.{dir_create_all, file_write, file_read}
+use std.io_runtime.{dir_create_all, dir_exists, file_write, file_read}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.driver.driver_source_loading.{_driver_resolve_entry_import,
     _driver_module_name_collision, _driver_unique_physical_sources}
@@ -79,3 +79,54 @@ describe "entry imports retain their admitted frozen source tree":
             SourceFile(path: other, content: file_read(other), module_name: "app.mcp.shared")]
         expect(_driver_unique_physical_sources(sources).len()).to_equal(2)
         expect(_driver_module_name_collision(sources)).to_contain("native module name collision after path sanitization")
+
+    it "resolves numbered editor providers without a src/std alias":
+        val root = frozen_import_fixture()
+        expect(dir_exists(root + "/src/std")).to_be(false)
+        expect(dir_create_all(root + "/src/lib/editor/00.common")).to_be(true)
+        expect(dir_create_all(root + "/src/lib/editor/70.backend")).to_be(true)
+        expect(file_write(root + "/src/lib/editor/00.common/types.spl", "class EditorDocumentId:\n    value: i64\n")).to_be(true)
+        expect(file_write(root + "/src/lib/editor/70.backend/gui_backend.spl", "fn gui_backend_default_config() -> i64: 7\n")).to_be(true)
+        val previous = env_get("SIMPLE_SCV_SNAPSHOT_ROOT")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)).to_be(true)
+        val common = _driver_resolve_entry_import("std.editor.common.types", root + "/src/app/mcp")
+        val backend = _driver_resolve_entry_import("std.editor.backend.gui_backend", root + "/src/app/mcp")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", previous)).to_be(true)
+        expect(common).to_equal(root + "/src/lib/editor/00.common/types.spl")
+        expect(backend).to_equal(root + "/src/lib/editor/70.backend/gui_backend.spl")
+
+    it "resolves a numbered provider inside a physical library family":
+        val root = frozen_import_fixture()
+        expect(dir_create_all(root + "/src/lib/nogc_sync_mut/probe/00.common")).to_be(true)
+        expect(file_write(root + "/src/lib/nogc_sync_mut/probe/00.common/value.spl", "fn answer() -> i64: 7\n")).to_be(true)
+        val previous = env_get("SIMPLE_SCV_SNAPSHOT_ROOT")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)).to_be(true)
+        val resolved = _driver_resolve_entry_import("std.probe.common.value", root + "/src/app/mcp")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", previous)).to_be(true)
+        expect(resolved).to_equal(root + "/src/lib/nogc_sync_mut/probe/00.common/value.spl")
+
+    it "rejects ambiguous numbered library directories":
+        val root = frozen_import_fixture()
+        expect(dir_create_all(root + "/src/lib/probe/00.common")).to_be(true)
+        expect(dir_create_all(root + "/src/lib/probe/10.common")).to_be(true)
+        expect(file_write(root + "/src/lib/probe/00.common/value.spl", "fn answer() -> i64: 7\n")).to_be(true)
+        expect(file_write(root + "/src/lib/probe/10.common/value.spl", "fn answer() -> i64: 8\n")).to_be(true)
+        val previous = env_get("SIMPLE_SCV_SNAPSHOT_ROOT")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)).to_be(true)
+        val resolved = _driver_resolve_entry_import("std.probe.common.value", root + "/src/app/mcp")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", previous)).to_be(true)
+        expect(resolved).to_equal("")
+
+    it "keeps exact library directories ahead of numbered siblings":
+        val root = frozen_import_fixture()
+        expect(dir_create_all(root + "/src/lib/probe/common")).to_be(true)
+        expect(dir_create_all(root + "/src/lib/probe/00.common")).to_be(true)
+        expect(dir_create_all(root + "/src/lib/probe/10.common")).to_be(true)
+        expect(file_write(root + "/src/lib/probe/common/value.spl", "fn answer() -> i64: 6\n")).to_be(true)
+        expect(file_write(root + "/src/lib/probe/00.common/value.spl", "fn answer() -> i64: 7\n")).to_be(true)
+        expect(file_write(root + "/src/lib/probe/10.common/value.spl", "fn answer() -> i64: 8\n")).to_be(true)
+        val previous = env_get("SIMPLE_SCV_SNAPSHOT_ROOT")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", root)).to_be(true)
+        val resolved = _driver_resolve_entry_import("std.probe.common.value", root + "/src/app/mcp")
+        expect(env_set("SIMPLE_SCV_SNAPSHOT_ROOT", previous)).to_be(true)
+        expect(resolved).to_equal(root + "/src/lib/probe/common/value.spl")

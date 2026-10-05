@@ -1,0 +1,27 @@
+#!/bin/sh
+# Exercise the matrix's actual field reader, including duplicate/missing fields.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+perl -0777 -ne 's/\r\n/\n/g; /^(profile_field\(\) \{.*?^\})/sm or die "profile reader absent"; print "$1\n"' \
+  "$repo/scripts/bootstrap/verify-compiler-subsystem-test-matrix.shs" >"$scratch/reader.sh"
+. "$scratch/reader.sh"
+validate() {
+  record=$(profile_field "$scratch/receipt") || return 1
+  perl -I "$repo/scripts/bootstrap/lib" -MBootstrapProductProducer=validate_product_resource_profile \
+    -e 'my $record=shift; my $profile=$record eq "0" ? undef : substr($record,1); validate_product_resource_profile($profile,@ARGV)' \
+    "$record" qualified "$1" 3000000 1800 enforce
+}
+printf 'resource_profile=qualified-80-v1\n' >"$scratch/receipt"
+validate 80
+printf 'status=PASS\n' >"$scratch/receipt"
+if validate 80 2>/dev/null; then exit 1; fi
+validate 20
+printf 'resource_profile=LEGACY\n' >"$scratch/receipt"
+if validate 20 2>/dev/null; then exit 1; fi
+printf 'resource_profile=qualified-80-v1\nresource_profile=qualified-80-v1\n' >"$scratch/receipt"
+if validate 80 2>/dev/null; then exit 1; fi
+printf 'resource_profile=\n' >"$scratch/receipt"
+if validate 20 2>/dev/null; then exit 1; fi
+printf 'PASS matrix profile reader: 6 cases, including duplicate and forged legacy rejection\n'

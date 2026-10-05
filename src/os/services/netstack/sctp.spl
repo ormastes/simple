@@ -23,6 +23,7 @@
 
 use std.common.net.byte_cursor.{ByteReader, ByteWriter}
 use std.common.net.addr.{Port}
+use std.common.crypto.crc32.{crc32c}
 
 # ============================================================================
 # Chunk-type constants (integer dispatch, NOT a payload-carrying enum).
@@ -45,48 +46,9 @@ val SCTP_CHUNK_SHUTDOWN_COMPLETE: u8 = 14
 val SCTP_COMMON_HEADER_SIZE: u64 = 12
 
 # ============================================================================
-# CRC32c (Castagnoli) -- table-driven.
-#
-# FLAG: promotion candidate for src/lib/common/net (host-agnostic, pure).
-# A 256-entry table over [u32] -- exercises array-element correctness + the
-# per-byte loop perf. The table is built lazily-once via a builder fn.
+# CRC32c (Castagnoli): the one shared implementation, std.common.crypto.crc32.
+# Known-answer: crc32c(b"123456789") == 0xE3069283.
 # ============================================================================
-
-val SCTP_CRC32C_POLY: u32 = 0x82F63B78  # reversed (LSB-first) Castagnoli poly
-
-fn sctp_crc32c_table() -> [u32]:
-    """Build the 256-entry CRC32c lookup table (reversed-bit form)."""
-    var table: [u32] = []
-    var n: u32 = 0
-    while n < 256:
-        var crc: u32 = n
-        var k: u64 = 0
-        while k < 8:
-            if (crc & 1) != 0:
-                crc = (crc >> 1) ^ SCTP_CRC32C_POLY
-            else:
-                crc = crc >> 1
-            k = k + 1
-        table.push(crc)
-        n = n + 1
-    table
-
-# Built once at module load -- avoids rebuilding the 256-entry table per call.
-val SCTP_CRC32C_TABLE: [u32] = sctp_crc32c_table()
-
-fn sctp_crc32c(data: [u8]) -> u32:
-    """CRC32c (Castagnoli) over `data`. Returns the raw 32-bit CRC integer.
-
-    Known-answer: sctp_crc32c(b"123456789") == 0xE3069283.
-    """
-    val table = SCTP_CRC32C_TABLE
-    var crc: u32 = 0xFFFFFFFF
-    var i: u64 = 0
-    while i < data.len():
-        val idx: u64 = ((crc ^ data[i].to_u32()) & 0xFF).to_u64()
-        crc = (crc >> 8) ^ table[idx]
-        i = i + 1
-    crc ^ 0xFFFFFFFF
 
 # ============================================================================
 # Common header
@@ -152,7 +114,7 @@ fn sctp_packet_checksum(packet: [u8]) -> u32:
         else:
             buf.push(packet[i])
         i = i + 1
-    sctp_crc32c(buf)
+    crc32c(buf)
 
 # ============================================================================
 # Generic chunk (TLV) with 4-byte padding

@@ -1,0 +1,37 @@
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering._Expressions.expression_support.{_hir_expr_symbol_or_invalid}
+
+impl HirLowering:
+    fn declared_enum_constructor_owner(receiver: HirExpr, resolution: MethodResolution) -> i64:
+        # Capture the scalar declaration owner before lowering argument
+        # expressions can advance native/interpreter enum payload storage.
+        match resolution:
+            case MethodResolution.Unresolved: ()
+            case _: return -1
+        val owner = _hir_expr_symbol_or_invalid(receiver.kind)
+        if not owner.is_valid(): return -1
+        # Declaration-only imports can have a symbol without a materialized
+        # ParserEnum. Unknown genericity must not erase receiver type args.
+        if not self.generic_enum_constructor_owners.contains_key(owner.id): return -1
+        if self.generic_enum_constructor_owners.get(owner.id) ?? false:
+            return -1
+        if val declaration = self.symbols.get_symbol_raw(owner.id):
+            match declaration.kind:
+                case SymbolKind.Enum: return owner.id
+                case _: ()
+        -1
+
+    fn declared_enum_constructor_expr(owner: i64, variant: text, args: [HirCallArg], span: Span) -> HirExpr?:
+        if owner < 0: return nil
+        # Named/default binding needs its own declaration-aware owner. Keep
+        # those calls on the original path instead of dropping their names.
+        var values: [HirExpr] = []
+        for arg in args:
+            if arg.has_name: return nil
+            values.push(arg.value)
+        val declared = HirType(kind: HirTypeKind.Named(SymbolId(id: owner), []), span: span)
+        Some(HirExpr(kind: HirExprKind.EnumLit(declared, variant,
+            Some(HirEnumPayload.Tuple(values))), has_type_: true, type_: declared, span: span))

@@ -1,9 +1,10 @@
 #!/bin/sh
 # Build one source-bound compiler/interpreter/loader aggregate test executable.
-# The admitted Stage 2 compiler is the only compiler allowed on this path.
+# Formal admission or explicit Hello-qualified diagnostic authority is required.
 set -eu
 
 source_root= compiler= compiler_sha256= compiler_producer_receipt=
+qualification_mode=qualified rss_mode=enforce
 backend= subsystem= inventory= threads= rss_cap_kib=
 build_timeout_seconds= output= receipt=
 for arg do
@@ -12,6 +13,8 @@ for arg do
     --compiler=*) compiler=${arg#*=} ;;
     --compiler-sha256=*) compiler_sha256=${arg#*=} ;;
     --compiler-producer-receipt=*) compiler_producer_receipt=${arg#*=} ;;
+    --qualification-mode=*) qualification_mode=${arg#*=} ;;
+    --rss-mode=*) rss_mode=${arg#*=} ;;
     --backend=*) backend=${arg#*=} ;;
     --subsystem=*) subsystem=${arg#*=} ;;
     --inventory=*) inventory=${arg#*=} ;;
@@ -23,6 +26,7 @@ for arg do
     *) echo "unknown product-builder argument: $arg" >&2; exit 2 ;;
   esac
 done
+case "$qualification_mode" in qualified|diagnostic) ;; *) echo 'invalid product qualification mode' >&2; exit 2 ;; esac
 case "$backend:$subsystem" in
   llvm:compiler|llvm:interpreter|llvm:loader|cranelift:compiler|cranelift:interpreter|cranelift:loader) ;;
   *) echo 'invalid product backend/subsystem' >&2; exit 2 ;;
@@ -30,9 +34,11 @@ esac
 case "$threads:$rss_cap_kib:$build_timeout_seconds" in
   *[!0-9:]*|:*|*:) echo 'invalid product resource bounds' >&2; exit 2 ;;
 esac
-[ "$threads" -ge 10 ] && [ "$threads" -le 20 ] || { echo 'product threads must be 10..20' >&2; exit 2; }
-[ "$rss_cap_kib" -gt 0 ] && [ "$rss_cap_kib" -le 6835937 ] || { echo 'invalid legal RSS cap' >&2; exit 2; }
-[ "$build_timeout_seconds" -gt 0 ] || { echo 'invalid build timeout' >&2; exit 2; }
+resource_profile=$(perl -I "$source_root/scripts/bootstrap/lib" -MBootstrapProductProducer=product_resource_profile \
+  -e 'print product_resource_profile(@ARGV)' "$qualification_mode" "$threads" "$rss_cap_kib" "$build_timeout_seconds" "$rss_mode") || exit 2
+[ "${SIMPLE_SHARD_MEM_CLAMP:-1}" = 1 ] || { echo 'unbounded frontend fanout forbidden' >&2; exit 2; }
+rss_enforced=1
+[ "$rss_mode" = enforce ] || rss_enforced=0
 for value in "$source_root" "$compiler" "$compiler_sha256" "$compiler_producer_receipt" "$inventory" "$output" "$receipt"; do
   [ -n "$value" ] || { echo 'missing required product-builder argument' >&2; exit 2; }
 done
@@ -73,31 +79,45 @@ physical_file "$compiler" || fail 'admitted compiler missing or linked'
 physical_file "$compiler_producer_receipt" || fail 'admission receipt missing or linked'
 physical_file "$inventory" || fail 'inventory missing or linked'
 [ "$(hash_file "$compiler")" = "$compiler_sha256" ] || fail 'compiler SHA differs'
-[ "$(field schema "$compiler_producer_receipt")" = simple-bootstrap-stage2-admission-v2 ] || fail 'admission schema differs'
-[ "$(field status "$compiler_producer_receipt")" = admitted ] || fail 'compiler is not admitted'
-[ "$(field candidate_path "$compiler_producer_receipt")" = "$compiler" ] || fail 'admitted compiler path differs'
-[ "$(field candidate_sha256 "$compiler_producer_receipt")" = "$compiler_sha256" ] || fail 'admitted compiler SHA differs'
-[ "$compiler_producer_receipt" = "$(dirname "$compiler")/admission.env" ] || fail 'admission is not compiler adjacent'
+# The diagnostic binding is produced by the actual provisional authority
+# owner after Hello and capsule verification. It never pretends to be the
+# formal Stage2 admission schema, and the final product retains that mode.
+perl "$source_root/scripts/bootstrap/product-producer-fields.pl" \
+  "$compiler_producer_receipt" "$qualification_mode" "$compiler" "$compiler_sha256" "$source_root" \
+  >/dev/null || fail 'compiler producer authority differs'
+if [ "$qualification_mode" = qualified ]; then
+  [ "$compiler_producer_receipt" = "$(dirname "$compiler")/admission.env" ] || fail 'admission is not compiler adjacent'
+fi
 source_root=$(CDPATH= cd -P -- "$source_root" && pwd -P) || fail 'source root missing'
 [ -d "$source_root/src/compiler" ] && [ -d "$source_root/src/lib" ] && [ -d "$source_root/test" ] || fail 'incomplete source root'
 source_head=$(git -C "$source_root" rev-parse HEAD) || fail 'source commit unavailable'
-[ -z "$(git -C "$source_root" status --porcelain=v1)" ] || fail 'source checkout is not clean'
+perl "$source_root/scripts/bootstrap/product-overlay.pl" source-check "$source_root" \
+  || fail 'source checkout differs beyond verified declared aliases'
 producer_source_snapshot=$(field source_snapshot_path "$compiler_producer_receipt") || fail 'admitted source snapshot absent'
 physical_file "$producer_source_snapshot" || fail 'admitted source snapshot missing'
 producer_source_snapshot_sha256=$(field source_snapshot_sha256 "$compiler_producer_receipt") || fail 'admitted source snapshot SHA absent'
 [ "$(hash_file "$producer_source_snapshot")" = "$producer_source_snapshot_sha256" ] || fail 'admitted source snapshot SHA differs'
 BOOTSTRAP_STAGE3_FACADE_PATH="$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$source_root/scripts/bootstrap/lib/product-frontend-policy.shs"
+product_frontend_environment=$(bootstrap_product_frontend_policy \
+  "$qualification_mode" "$rss_cap_kib" "$rss_mode") || fail 'frontend lane policy rejected'
 
 runtime_authority=$(field runtime_authority_path "$compiler_producer_receipt") || fail 'runtime authority absent'
 capsule_binding="$(dirname "$compiler")/runtime-capsule.env"
-physical_file "$capsule_binding" || fail 'runtime capsule binding missing'
-[ "$(field schema "$capsule_binding")" = simple-phase2-runtime-binding-v1 ] || fail 'runtime binding schema differs'
-[ "$(field compiler_sha256 "$capsule_binding")" = "$compiler_sha256" ] || fail 'runtime binding compiler differs'
-capsule=$(field capsule_path "$capsule_binding") || fail 'capsule path absent'
+if [ "$qualification_mode" = qualified ]; then
+  physical_file "$capsule_binding" || fail 'runtime capsule binding missing'
+  [ "$(field schema "$capsule_binding")" = simple-phase2-runtime-binding-v1 ] || fail 'runtime binding schema differs'
+  [ "$(field compiler_sha256 "$capsule_binding")" = "$compiler_sha256" ] || fail 'runtime binding compiler differs'
+  capsule=$(field capsule_path "$capsule_binding") || fail 'capsule path absent'
+  capsule_expected_sha=$(field capsule_receipt_sha256 "$capsule_binding") || fail 'capsule SHA absent'
+else
+  capsule=$(field runtime_capsule_path "$compiler_producer_receipt") || fail 'diagnostic capsule path absent'
+  capsule_expected_sha=$(field runtime_capsule_sha256 "$compiler_producer_receipt") || fail 'diagnostic capsule SHA absent'
+fi
 capsule_receipt="$capsule/phase2-runtime-capsule.env"
 physical_file "$capsule_receipt" || fail 'frozen runtime capsule missing'
-[ "$(hash_file "$capsule_receipt")" = "$(field capsule_receipt_sha256 "$capsule_binding")" ] || fail 'capsule receipt SHA differs'
+[ "$(hash_file "$capsule_receipt")" = "$capsule_expected_sha" ] || fail 'capsule receipt SHA differs'
 [ "$(field status "$capsule_receipt")" = frozen ] || fail 'runtime capsule not frozen'
 [ "$(field compiler_sha256 "$capsule_receipt")" = "$compiler_sha256" ] || fail 'runtime capsule compiler differs'
 [ "$(field source_authority_path "$capsule_receipt")" = "$runtime_authority" ] || fail 'runtime authority differs'
@@ -144,40 +164,22 @@ physical_file "$watchdog" || fail 'process watchdog missing'
 # root and manifest are both inside this product job. Never mutate the pinned
 # caller's source checkout or transiently populate a full worktree.
 overlay="$job_root/source-overlay"
-git -C "$source_root" worktree add --no-checkout --detach "$overlay" "$source_head" \
+git -C "$source_root" -c core.hooksPath=NUL -c core.longpaths=true worktree add --no-checkout --detach "$overlay" "$source_head" \
   >"$job_root/logs/source-overlay.log" 2>&1 || fail 'isolated source overlay creation failed'
-git -C "$overlay" sparse-checkout init --cone \
-  >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'sparse overlay init failed'
-git -C "$overlay" sparse-checkout set src/compiler src/lib src/app src/plugins src/compositions \
-  >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'sparse overlay checkout failed'
-git -C "$overlay" checkout -f HEAD \
-  >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'sparse overlay materialization failed'
+git -C "$overlay" -c core.hooksPath=NUL -c core.longpaths=true read-tree HEAD \
+  >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'overlay index initialization failed'
 [ "$(git -C "$overlay" rev-parse HEAD)" = "$source_head" ] || fail 'overlay source HEAD differs'
+overlay_input_manifest="$job_root/logs/source-overlay-inputs.tsv"
+perl "$source_root/scripts/bootstrap/product-overlay.pl" materialize \
+  "$source_root" "$overlay" "$overlay_input_manifest" \
+  >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'physical product overlay materialization failed'
 [ -f "$overlay/src/app/compiler_subsystem_product_generator/main.spl" ] && \
   [ -f "$overlay/src/app/compiler_subsystem_main_verdict/main.spl" ] && \
-  [ -f "$overlay/src/lib/nogc_sync_mut/spec.spl" ] || fail 'sparse overlay lacks product sources'
-[ -z "$(git -C "$overlay" status --porcelain=v1)" ] || fail 'sparse overlay is not clean before generation'
+  [ -f "$overlay/src/lib/nogc_sync_mut/spec.spl" ] || fail 'overlay lacks product sources'
+# The exact catalog check replaces Git porcelain here: declared Git symlinks
+# intentionally have regular, byte-bound physical expansions in this overlay.
 overlay_allocated_kib=$(du -sk "$overlay" | awk '{print $1}')
 overlay_allocated_bytes=$((overlay_allocated_kib * 1024))
-overlay_input_manifest="$job_root/logs/source-overlay-inputs.tsv"
-perl -MFile::Find -MDigest::SHA -e '
-  my ($root, $out) = @ARGV; my @rows;
-  for my $dir (qw(src/compiler src/lib src/app src/plugins src/compositions)) {
-    find({no_chdir => 1, wanted => sub {
-      my $path = $File::Find::name;
-      die "linked overlay file: $path\n" if -l $path;
-      return unless -f $path;
-      my $relative = substr($path, length($root) + 1);
-      die "unsafe overlay path\n" if $relative =~ /[\t\r\n\\]/;
-      open my $fh, "<:raw", $path or die $!;
-      my $sha = Digest::SHA->new(256); $sha->addfile($fh);
-      push @rows, "$relative\t" . $sha->hexdigest . "\n";
-    }}, "$root/$dir");
-  }
-  open my $fh, ">:raw", $out or die $!;
-  print {$fh} "path\tsha256\n", sort @rows or die $!;
-  close $fh or die $!;
-' "$overlay" "$overlay_input_manifest" || fail 'overlay input manifest failed'
 overlay_input_sha256=$(hash_file "$overlay_input_manifest")
 check_disk_space 6291456
 
@@ -194,6 +196,9 @@ run_native_build() {
     printf '%s\n' "source_root=$source_root" "source_overlay=$overlay" "compiler_sha256=$compiler_sha256"
     printf '%s\n' "runtime_authority=$runtime_authority" "rss_cap_kib=$rss_cap_kib"
     printf '%s\n' "timeout_seconds=$build_timeout_seconds" "task=$task"
+    printf '%s\n' "simple_native_file_timeout=$build_timeout_seconds"
+    printf '%s\n' "rss_mode=$rss_mode" "resource_profile=$resource_profile"
+    printf '%s\n' "$product_frontend_environment" | tr '[:upper:]' '[:lower:]'
     printf '%s\n' 'simple_bootstrap_empty_native_obj=unset' 'simple_bootstrap=unset'
     perl -e 'for my $arg (@ARGV) { print "argv-hex=", unpack("H*", $arg), "\n" }' "$@"
   } >"$job_root/logs/$task.command.tsv"
@@ -204,8 +209,16 @@ run_native_build() {
     export SIMPLE_PROJECT_ROOT="$overlay" SIMPLE_LIB="$overlay/src"
     export SIMPLE_RUNTIME_PATH="$runtime_authority" SIMPLE_NATIVE_RUNTIME_BUNDLE=core-c-bootstrap
     export SIMPLE_NATIVE_BUILD_THREADS="$threads" SIMPLE_NO_STUB_FALLBACK=1
+    # Zero is supported by the native file-timeout environment owner, but the
+    # self-hosted CLI rejects --timeout 0. Keep argv free of that invalid option.
+    export SIMPLE_NATIVE_FILE_TIMEOUT="$build_timeout_seconds"
     export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$rss_cap_kib"
-    export SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    export SIMPLE_BOOTSTRAP_RSS_CAP_MODE="$rss_mode" SIMPLE_SHARD_MEM_CLAMP=1
+    while IFS= read -r product_frontend_binding; do
+      export "$product_frontend_binding"
+    done <<EOF
+$product_frontend_environment
+EOF
     export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=5000
     export SIMPLE_SCV_INVENTORY_COLD_INIT=1
     # These bootstrap diagnostics can publish a successful object without
@@ -218,7 +231,7 @@ run_native_build() {
   physical_file "$job_root/logs/$task.watchdog.env" || return 1
   [ "$(field status "$job_root/logs/$task.watchdog.env")" = complete ] || return 1
   [ "$(field exit_status "$job_root/logs/$task.watchdog.env")" = 0 ] || return 1
-  [ "$(field rss_cap_enforced "$job_root/logs/$task.watchdog.env")" = 1 ] || return 1
+  [ "$(field rss_cap_enforced "$job_root/logs/$task.watchdog.env")" = "$rss_enforced" ] || return 1
   [ "$(field rss_limit_kib "$job_root/logs/$task.watchdog.env")" = "$rss_cap_kib" ]
 }
 
@@ -229,6 +242,7 @@ run_native_tool() {
     printf '%s\n' 'schema=simple-native-product-command-v1'
     printf '%s\n' "source_root=$source_root" "compiler_sha256=$compiler_sha256"
     printf '%s\n' "rss_cap_kib=$rss_cap_kib" "timeout_seconds=$build_timeout_seconds" "task=$task"
+    printf '%s\n' "rss_mode=$rss_mode" "resource_profile=$resource_profile"
     perl -e 'for my $arg (@ARGV) { print "argv-hex=", unpack("H*", $arg), "\n" }' "$@"
   } >"$job_root/logs/$task.command.tsv"
   mkdir -p "$job_root/tmp/$task"
@@ -236,7 +250,7 @@ run_native_tool() {
     cd "$source_root"
     export TMPDIR="$job_root/tmp/$task"
     export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$rss_cap_kib"
-    export SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    export SIMPLE_BOOTSTRAP_RSS_CAP_MODE="$rss_mode"
     export SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS=5000
     export SIMPLE_PROCESS_TREE_RSS_RECEIPT="$job_root/logs/$task.watchdog.env"
     sh "$watchdog" "$build_timeout_seconds" 5 "$@"
@@ -244,7 +258,7 @@ run_native_tool() {
   physical_file "$job_root/logs/$task.watchdog.env" || return 1
   [ "$(field status "$job_root/logs/$task.watchdog.env")" = complete ] || return 1
   [ "$(field exit_status "$job_root/logs/$task.watchdog.env")" = 0 ] || return 1
-  [ "$(field rss_cap_enforced "$job_root/logs/$task.watchdog.env")" = 1 ] || return 1
+  [ "$(field rss_cap_enforced "$job_root/logs/$task.watchdog.env")" = "$rss_enforced" ] || return 1
   [ "$(field rss_limit_kib "$job_root/logs/$task.watchdog.env")" = "$rss_cap_kib" ]
 }
 
@@ -297,6 +311,8 @@ case "$provider_identity" in *[!0-9a-f]*) fail 'invalid builtin provider receipt
 
 {
   printf '%s\n' 'schema=simple-subsystem-product-v1' 'status=produced'
+  printf '%s\n' "qualification_mode=$qualification_mode"
+  printf '%s\n' "rss_mode=$rss_mode" "resource_profile=$resource_profile"
   printf '%s\n' "source_root=$source_root" "source_head=$source_head"
   printf '%s\n' "producer_source_snapshot_path=$producer_source_snapshot"
   printf '%s\n' "producer_source_snapshot_sha256=$producer_source_snapshot_sha256"

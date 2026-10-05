@@ -1,0 +1,36 @@
+#!/bin/sh
+# Exact argument/failure transport only; a spy is not native owner validation.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+sha() { value=$(sha256sum "$1") || return 2; printf '%s\n' "${value%% *}"; }
+for file in manifest policy template; do printf '%s fixture\n' "$file" >"$scratch/$file"; done
+cat >"$scratch/builder" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >"$FACTORY_ARGS"
+exit 2
+EOF
+chmod +x "$scratch/builder"
+FACTORY_ARGS="$scratch/args"; export FACTORY_ARGS
+template_sha=$(sha "$scratch/template")
+invoke() {
+    sh "$repo/scripts/bootstrap/lib/managed-next-producer-launch.shs" \
+        "$scratch/builder" "$scratch/manifest" "$(sha "$scratch/manifest")" \
+        "$scratch/policy" "$(sha "$scratch/policy")" "$scratch" "$scratch/state" 10 0 \
+        phase1_build bin/simple.exe "$scratch/template" "$template_sha" "$scratch/next.sdn"
+}
+code=0; invoke || code=$?
+[ "$code" = 2 ]
+[ "$(wc -l <"$FACTORY_ARGS" | tr -d ' ')" = 27 ]
+[ "$(head -n 1 "$FACTORY_ARGS")" = managed-tasks-next-producer ]
+grep -Fx -- phase1_build "$FACTORY_ARGS" >/dev/null
+grep -Fx -- bin/simple.exe "$FACTORY_ARGS" >/dev/null
+grep -Fx -- "$template_sha" "$FACTORY_ARGS" >/dev/null
+[ ! -e "$scratch/next.sdn" ]
+mv "$FACTORY_ARGS" "$scratch/first-args"
+printf 'changed\n' >>"$scratch/template"
+code=0; invoke 2>"$scratch/rejected.log" || code=$?
+[ "$code" = 2 ] && [ ! -e "$FACTORY_ARGS" ]
+grep -q 'bound factory input changed' "$scratch/rejected.log"
+printf 'PASS next-producer transport: exact27argv, raw refusal retained, changed template never invokes owner\n'

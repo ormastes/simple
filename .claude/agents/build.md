@@ -2,6 +2,16 @@
 
 ## Bootstrap failure collection
 
+Use the [full bootstrap execution graph](../../doc/07_guide/tooling/bootstrap_failure_collection.md#full-bootstrap-execution-graph).
+Phase 2 sanity opens three parallel branches: six LLVM/Cranelift subsystem
+test binaries, Phase 3, and early Phase 4 from Phase 2. Phase 3 sanity opens
+whole tools/library tests and Phase 4 from Phase 3. Test both Phase 4 cohorts.
+The selected 80-job code-generation budget must not create 80 frontend
+processes; use shared resource admission and retain frontend memory clamping.
+After three unresolved cycles, record the bug and scoped workaround instead
+of restarting from Phase 1. Windows alone qualifies the current RC1 after
+its required builds, tests and local deployment pass.
+
 Continue independent bootstrap phases and entries after errors. Start the next
 diagnostic phase on a usable artifact plus minimum sanity, with bounded
 resources and isolated caches; aggregate failures at the end. Follow the

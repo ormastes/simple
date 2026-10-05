@@ -1,0 +1,130 @@
+# Run this compiled executable in a NEW private Git fixture directory using
+# native_parent_parse_closure_scope_test.py. Never run in the source checkout.
+use std.io_runtime.{get_args, dir_create_all, file_write}
+use app.io.env_ops.{env_get, env_set, cwd}
+use std.nogc_async_mut.sosix.host_facade.{sosix_run}
+use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
+    compiler_source_authority_publish_v1, compiler_source_authority_clear_v1}
+use app.cli.native_build_parse_closure_owner.{native_build_publish_parse_closure_v1}
+use app.io._CliCompile.native_build_closure.{_native_build_entry_closure,
+    native_build_closure_release_snapshot_memo_v1}
+use compiler.driver.driver_source_loading.{driver_entry_scan_cache_release}
+use compiler.driver.driver_build.native_entry_closure_owner.{
+    native_entry_closure_request_read_v1, native_entry_closure_request_open_v1}
+
+extern fn rt_heap_registry_count() -> i64
+var checks = 0
+var failures = 0
+
+fn check(value: bool, name: text):
+    checks = checks + 1
+    if not value:
+        failures = failures + 1
+        print "FAIL {name}"
+
+fn git_ok(root: text, args: [text]) -> bool:
+    sosix_run("git", ["-C", root] + args).exit_code == 0
+
+fn transport_empty() -> bool:
+    (env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "") == "" and
+        (env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? "") == ""
+
+fn open_paths(root: text, roots: [text], producer: text, policy: text) -> [text]:
+    val request = native_entry_closure_request_read_v1(
+        env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? "",
+        env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? "",
+        root, "src/app/main.spl", roots, file_hash_sha256(producer))
+    check(request.is_ok(), "request survives reclaimed scratch")
+    if request.is_err(): return []
+    val selected = native_entry_closure_request_open_v1(request.unwrap(), policy)
+    check(selected.is_ok(), "selection survives reclaimed scratch and revalidates bytes")
+    if selected.is_err(): return []
+    selected.unwrap().identities
+
+fn main() -> i64:
+    val root = cwd().replace("\\", "/")
+    val args = get_args() ?? []
+    if args.len() != 2 or (env_get("SIMPLE_PARENT_CLOSURE_FIXTURE_ROOT") ?? "") != root:
+        print "private fixture root and actual executable argument required"
+        return 2
+    val producer = args[1]
+    val roots = [root + "/src/app"]
+    val policy = sha256_text("parent-closure-scope-fixture")
+    if not dir_create_all(root + "/src/app"): return 2
+    if not file_write(root + "/src/app/main.spl", "use app.helper.{answer}\nfn main() -> i64: answer()\n"): return 2
+    if not file_write(root + "/src/app/helper.spl", "pub fn answer() -> i64: 37\n"): return 2
+    if not git_ok(root, ["init", "-q"]): return 2
+    if not git_ok(root, ["add", "src"]): return 2
+    if not git_ok(root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-qm", "fixture"]): return 2
+    if not compiler_source_authority_clear_v1(): return 2
+    val authority = compiler_source_authority_acquire_v1(root, root + "/build/scv", roots, true)
+    check(authority.valid, "real cold authority")
+    if not authority.valid: return 1
+    if not compiler_source_authority_publish_v1(authority): return 2
+
+    val first = native_build_publish_parse_closure_v1(root, roots, "src/app/main.spl",
+        policy, producer, root + "/build/frontend/cold")
+    check(first, "cold-selected request publishes after cleanup")
+    if not first: return 1
+    val cold = open_paths(root, roots, producer, policy)
+    check(cold.len() == 2 and cold.contains("src/app/main.spl") and cold.contains("src/app/helper.spl"),
+        "complete two-file closure")
+    val warm = native_build_publish_parse_closure_v1(root, roots, "src/app/main.spl",
+        policy, producer, root + "/build/frontend/warm")
+    check(warm, "warm request reopens reset memo")
+    if not warm: return 1
+    check(open_paths(root, roots, producer, policy) == cold, "cold and warm identity/order equal")
+
+    # Same real closure walk, with scan caches reset in both measurements.
+    # Baseline does LESS work than scoped publication, so fewer retained
+    # allocations cannot be attributed to skipped authority/receipt checks.
+    driver_entry_scan_cache_release()
+    native_build_closure_release_snapshot_memo_v1()
+    val before_baseline = rt_heap_registry_count()
+    val baseline_paths = _native_build_entry_closure(root + "/src/app/main.spl", roots)
+    val baseline_live = rt_heap_registry_count() - before_baseline
+    driver_entry_scan_cache_release()
+    native_build_closure_release_snapshot_memo_v1()
+    val before_scoped = rt_heap_registry_count()
+    val scoped = native_build_publish_parse_closure_v1(root, roots, "src/app/main.spl",
+        policy, producer, root + "/build/frontend/measured")
+    val scoped_live = rt_heap_registry_count() - before_scoped
+    check(scoped and baseline_paths.len() == 2, "both measured paths perform real closure")
+    check(baseline_live > 0 and scoped_live >= 0 and scoped_live * 2 < baseline_live,
+        "scope removes more than half the retained allocations")
+    print "allocation_baseline={baseline_live} allocation_scoped={scoped_live}"
+
+    # Existing request path forces the atomic publication owner to reject.
+    check(not native_build_publish_parse_closure_v1(root, roots, "src/app/main.spl",
+        policy, producer, root + "/build/frontend/measured"), "existing request rejects")
+    check(transport_empty(), "publication failure leaves no child permission")
+    val saved_digest = env_get("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST") ?? ""
+    if not env_set("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", ""): return 2
+    check(not native_build_publish_parse_closure_v1(root, roots, "src/app/main.spl",
+        policy, producer, root + "/build/frontend/invalid"), "invalid authority rejects")
+    check(transport_empty(), "authority error leaves no child permission")
+    if not env_set("SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", saved_digest): return 2
+    check(native_build_publish_parse_closure_v1(root, roots, "src/app/main.spl",
+        policy, producer, root + "/build/frontend/recovered"), "error cleanup permits next valid scope")
+    check(open_paths(root, roots, producer, policy) == cold, "recovered result preserves closure")
+
+    # A failed nested begin must not end/reclaim the caller's active scope.
+    val platform_before = host_is_windows_host()
+    val began = transient_scope_begin()
+    check(began, "outer fault scope begins")
+    if began:
+        check(not native_build_publish_parse_closure_v1(root, roots, "src/app/main.spl",
+            policy, producer, root + "/build/frontend/nested"), "nested owner rejects")
+        check(transport_empty(), "nested refusal clears transport")
+        val paused = transient_scope_pause()
+        val ended = transient_scope_end()
+        check(paused and ended, "nested refusal preserved outer ownership")
+        check(host_is_windows_host() == platform_before, "host cache remains valid after caller scope ends")
+        check(native_build_publish_parse_closure_v1(root, roots, "src/app/main.spl",
+            policy, producer, root + "/build/frontend/after-nested"), "scan and snapshot globals remain valid after nested refusal")
+    print "parent-closure checks={checks} failures={failures}"
+    if failures == 0: 0 else: 1

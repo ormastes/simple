@@ -876,22 +876,12 @@ impl Lowerer {
                             }
                             return Ok((idx, field_ty));
                         }
-                    } else {
-                        // The field is real but globally AMBIGUOUS (declared
-                        // on several structs), so no static offset is
-                        // trustworthy -- the same best-effort situation the
-                        // Any branch faces for dynamic receivers. Degrade to
-                        // slot 0 with ANY rather than reject programs the
-                        // self-hosted compiler and the interpreter accept
-                        // (observed live: `name` reads on SymbolId/Template
-                        // in debug-identity helpers). Proper fix is dynamic
-                        // field-access nodes in the seed, matching the
-                        // self-hosted lowering.
-                        eprintln!(
-                            "warning: field '{field}' not declared on struct '{name}' and is globally ambiguous; degrading to slot 0 (ANY) -- best-effort, matching the dynamic-receiver risk class"
-                        );
-                        return Ok((0, TypeId::ANY));
                     }
+                    // An ambiguous spelling cannot supply a physical offset
+                    // for this nominal receiver. In particular, a missing
+                    // Template layout must not make type_params (slot 1) or
+                    // body (slot 3) read name (slot 0). Fall through to the
+                    // nominal error until the declaring layout is available.
                     // A nominal receiver is authoritative.  If `name` does not
                     // declare `field` in any same-name definition, borrowing a
                     // slot from an unrelated struct fabricates a field and can
@@ -1146,5 +1136,62 @@ impl Lowerer {
         } else {
             Err(LowerError::CannotInferIndexType(format!("TypeId({:?})", arr_ty)))
         }
+    }
+}
+
+#[cfg(test)]
+mod nominal_field_slot_tests {
+    use super::*;
+
+    fn incomplete_template() -> (Lowerer, TypeId) {
+        let mut lowerer = Lowerer::new();
+        let template = lowerer.module.types.register_named(
+            "Template".to_string(),
+            HirType::Struct {
+                name: "Template".to_string(),
+                fields: vec![],
+                has_snapshot: false,
+                generic_params: vec![],
+                is_generic_template: false,
+                type_bindings: std::collections::HashMap::new(),
+            },
+        );
+        lowerer.set_ambiguous_field_names(std::sync::Arc::new(
+            ["type_params".to_string(), "body".to_string()]
+                .into_iter()
+                .collect(),
+        ));
+        (lowerer, template)
+    }
+
+    #[test]
+    fn incomplete_ambiguous_nominal_never_guesses_slot_zero() {
+        let (mut lowerer, template) = incomplete_template();
+        for field_name in ["type_params", "body"] {
+            assert!(matches!(
+                lowerer.get_field_info(template, field_name),
+                Err(LowerError::CannotInferFieldType { struct_name, field, .. })
+                    if struct_name == "Template" && field == field_name
+            ));
+        }
+    }
+
+    #[test]
+    fn known_template_owner_recovers_nonzero_field_slots() {
+        let (mut lowerer, template) = incomplete_template();
+        let fields = ["name", "type_params", "kind", "body", "constraints"]
+            .into_iter()
+            .map(|name| (name.to_string(), Type::Simple("text".to_string())))
+            .collect();
+        lowerer.set_global_struct_defs(std::sync::Arc::new(
+            [("linker__Template".to_string(), fields)].into_iter().collect(),
+        ));
+        lowerer.set_unique_global_struct_owners(std::sync::Arc::new(
+            [("Template".to_string(), "linker__Template".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+        assert_eq!(lowerer.get_field_info(template, "type_params").unwrap().0, 1);
+        assert_eq!(lowerer.get_field_info(template, "body").unwrap().0, 3);
     }
 }

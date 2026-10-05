@@ -1,0 +1,81 @@
+#!/bin/sh
+# Actual transcribed transport with a fake worker/watchdog. No compiler or RSS
+# qualification is claimed by this lightweight environment/argv regression.
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/../../.." && pwd -P)
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+bootstrap_stage3_canonical_path() (CDPATH= cd -- "$1" && pwd -P)
+bootstrap_stage3_hash_file() { sha256sum "$1" | cut -d ' ' -f 1; }
+mkdir -p "$root/build"
+scratch=$(mktemp -d "$root/build/windows-frontend-policy.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+mkdir "$scratch/home" "$scratch/tmp"
+cat > "$scratch/worker with spaces.shs" <<'WORKER'
+#!/bin/sh
+printf '%s\n' "clamp=${SIMPLE_SHARD_MEM_CLAMP-unset}" \
+  "parse=${SIMPLE_PARSE_SHARD_MAX-unset}" \
+  "parse_kib=${SIMPLE_PARSE_SHARD_WORKER_KB-unset}" \
+  "hir_kib=${SIMPLE_HIR_SHARD_WORKER_KB-unset}" \
+  "tree=${SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB-unset}"
+for arg in "$@"; do printf 'arg=%s\n' "$arg"; done
+WORKER
+# Replace only the watchdog process in this transport test; execute its actual
+# env-i command so quoting and explicit-env preservation are exercised.
+perl() {
+    while [ "$#" -gt 0 ] && [ "$1" != -- ]; do shift; done
+    [ "${1-}" = -- ] || return 1
+    shift
+    "$@"
+}
+host=MINGW64_NT
+uname() { printf '%s\n' "$host"; }
+SystemRoot='C:/Windows' SystemDrive=C: ProgramData='C:/Program Data'
+export SystemRoot SystemDrive ProgramData
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=5859375
+SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+export SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_BOOTSTRAP_RSS_CAP_MODE
+run() {
+    bootstrap_stage3_run_transcribed "$scratch/$1.transcript" "$root" \
+      "$scratch/$1.log" "$scratch/home" "$scratch/tmp" \
+      '/usr/bin:/c/Program Files/Git/bin' -- /bin/sh \
+      "$scratch/worker with spaces.shs" --threads 80 'C:\fixture with spaces\entry.spl'
+}
+run enforced
+cat > "$scratch/expected" <<'EXPECTED'
+clamp=1
+parse=1
+parse_kib=1650000
+hir_kib=3000000
+tree=3000000
+arg=--threads
+arg=80
+arg=C:\fixture with spaces\entry.spl
+EXPECTED
+cmp "$scratch/expected" "$scratch/enforced.log"
+grep -Eq '^explicit-env:[0-9]+:SIMPLE_SHARD_MEM_CLAMP=1$' "$scratch/enforced.transcript"
+grep -Eq '^explicit-env:[0-9]+:SIMPLE_PARSE_SHARD_MAX=1$' "$scratch/enforced.transcript"
+grep -q '^argv:2:80$' "$scratch/enforced.transcript"
+SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+run monitored
+cmp "$scratch/expected" "$scratch/monitored.log"
+grep -Eq '^explicit-env:[0-9]+:SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=3000000$' "$scratch/monitored.transcript"
+for setting in SIMPLE_SHARD_MEM_CLAMP=0 SIMPLE_PARSE_SHARD_MAX=80 \
+    SIMPLE_PARSE_SHARD_WORKER_KB=1 SIMPLE_HIR_SHARD_WORKER_KB=1 \
+    simple_shard_mem_clamp=0; do
+    if bootstrap_stage3_run_transcribed "$scratch/rejected.transcript" "$root" \
+        "$scratch/rejected.log" "$scratch/home" "$scratch/tmp" /usr/bin \
+        "$setting" -- /bin/sh -c 'exit 0'; then
+        echo "accepted caller override: $setting" >&2; exit 1
+    fi
+done
+for budget in 0 3000001 invalid; do
+    SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB=$budget
+    export SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB
+    if run invalid-budget; then echo "accepted invalid scheduling budget: $budget" >&2; exit 1; fi
+done
+unset SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB
+host=Linux
+run posix
+grep -q '^clamp=unset$' "$scratch/posix.log"
+grep -q '^parse=unset$' "$scratch/posix.log"
+echo 'PASS: Windows frontend policy, 80-codegen argv, quoted paths, monitor mode, override rejection, POSIX unchanged'

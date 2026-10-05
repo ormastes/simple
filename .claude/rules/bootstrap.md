@@ -20,6 +20,20 @@ normal gates before formal admission or promotion. Never turn missing inputs
 or failed assertions into PASS. Preserve compatible frontend/HIR/native caches
 and freeze latest requested release plus reviewed applicable unmerged fixes at
 the next actual restart, without changing live source/producer bytes.
+
+Full bootstrap follows the
+[parallel collection graph](../../doc/07_guide/tooling/bootstrap_failure_collection.md#full-bootstrap-execution-graph):
+build/sanity-check Phase 1 and collect its whole suite; build Phase 2; after
+Phase 2 compile/run sanity, overlap its six subsystem test binaries with
+Phase 3 and early Phase 4 from Phase 2. After Phase 3 sanity, overlap whole
+tools/library tests with Phase 4 from Phase 3. Test both Phase 4 cohorts.
+Use the shared managed-task owner for admission and process cleanup. Keep
+frontend process limits separate from the selected code-generation job count.
+After three unresolved repair cycles, retain the bug and scoped workaround,
+continue independent cached work, and revisit the bug on the later rebuild.
+Current RC1 qualification is Windows-only; remote synchronization and release
+publication follow successful local bootstrap, tests and deployment.
+
 Follow the
 [shared collection policy](../../doc/07_guide/tooling/bootstrap_failure_collection.md) for terminal statuses, budgets,
 cache preservation, and bug evidence. This is agent workflow guidance; it does

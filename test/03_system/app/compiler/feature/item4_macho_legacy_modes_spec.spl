@@ -1,0 +1,208 @@
+"""ITEM4-REQ-006 legacy dependency command modes. Simple execution UNRUN."""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{dir_create_all, file_read_bytes, file_exists}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_write_bytes, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.backend.linker.native_config.{NativeLinkConfig}
+use compiler.backend.linker.macho.native_adapter.{native_macho_plan_v1, native_macho_link_files_v1}
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.macho.binary_provider.{macho_read_binary_provider_v1}
+fn item4_macho_legacy_mode_read(bytes: [u8], at: i64, width: i64 = 4) -> i64:
+    val valid = width >= 1 and width <= 8 and at >= 0 and at <= bytes.len() and width <= bytes.len() - at
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    var value: i64 = 0
+    for index in 0..width: value = value | ((bytes[at + index] as i64) << (8 * index))
+    value
+
+fn item4_macho_legacy_mode_check(image: [u8], arm: bool):
+    expect(image.len() >= 0xc010).to_equal(true)
+    if image.len() < 0xc010: return
+    expect(item4_macho_legacy_mode_read(image, 0)).to_equal(0xfeedfacf)
+    expect(item4_macho_legacy_mode_read(image, 4)).to_equal(if arm: 0x0100000c else: 0x01000007)
+    expect(item4_macho_legacy_mode_read(image, 12)).to_equal(2)
+    expect(item4_macho_legacy_mode_read(image, 0xc008, 8)).to_equal(0x100004000)
+    val size = item4_macho_legacy_mode_read(image, 20)
+    val count = item4_macho_legacy_mode_read(image, 16)
+    val valid = size <= image.len() - 32 and count <= size / 8
+    expect(valid).to_equal(true)
+    if not valid: return
+    var at: i64 = 32
+    var loads: i64 = 0
+    var bindings: i64 = 0
+    for index in 0..count:
+        if at > 32 + size - 8:
+            expect(false).to_equal(true)
+            return
+        val kind = item4_macho_legacy_mode_read(image, at)
+        val length = item4_macho_legacy_mode_read(image, at + 4)
+        if length < 8 or length % 8 != 0 or length > 32 + size - at:
+            expect(false).to_equal(true)
+            return
+        if kind == 0xc:
+            loads = loads + 1
+            expect(length >= 24).to_equal(true)
+            if length < 24: return
+            val name = "/usr/lib/liblegacy_root.dylib"
+            val start = item4_macho_legacy_mode_read(image, at + 8)
+            val bounds = start >= 24 and start <= length and name.len() < length - start
+            expect(bounds).to_equal(true)
+            if not bounds: return
+            for byte in 0..name.len(): expect(image[at + start + byte]).to_equal(name.byte_at(byte) as u8)
+            expect(image[at + start + name.len()]).to_equal(0u8)
+        if kind == 0x80000022:
+            bindings = bindings + 1
+            expect(length >= 48).to_equal(true)
+            if length < 48: return
+            val start = item4_macho_legacy_mode_read(image, at + 16)
+            val bytes = item4_macho_legacy_mode_read(image, at + 20)
+            val prefix: [u8] = [0x20, 1, 0x40, 95, 104, 101, 108, 112, 101, 114, 0]
+            val bounds = start >= 0 and start <= image.len() and bytes <= image.len() - start and bytes >= prefix.len()
+            expect(bounds).to_equal(true)
+            if not bounds: return
+            for byte in 0..prefix.len(): expect(image[start + byte]).to_equal(prefix[byte])
+        at = at + length
+    expect(loads).to_equal(1)
+    expect(bindings).to_equal(1)
+
+fn item4_macho_legacy_mode_cleanup(parent: text):
+    for name in ["app", "root.dylib", "liblegacy.1.dylib"]:
+        if file_exists(parent + "/" + name): expect(file_remove(parent + "/" + name)).to_equal(true)
+    expect(dir_remove(parent)).to_equal(true)
+
+fn item4_macho_legacy_mode_link(parent: text, path: text, arm: bool) -> Result<text, text>:
+    var config = NativeLinkConfig.default()
+    config.runtime_path = "none"
+    config.allow_cc_fallback = false
+    config.library_paths = [parent]
+    config.extra_flags = ["-platform_version", "macos", "11", "11", "--macho-signing-identifier", "item4.legacy"]
+    val output = parent + "/app"
+    val plan = native_macho_plan_v1(if arm: "aarch64" else: "x86_64", config, output)?
+    val suffix = if arm: "a64" else: "x64"
+    native_macho_link_files_v1(plan, ["test/fixtures/linker/macho/hosted_start_{suffix}.o", path], [], output)
+
+fn item4_macho_legacy_mode_change(bytes: [u8], kind: i64) -> Result<[u8], text>:
+    if bytes.len() < 32: return Err("fixture header truncated")
+    val size = item4_macho_legacy_mode_read(bytes, 20)
+    val count = item4_macho_legacy_mode_read(bytes, 16)
+    if size > bytes.len() - 32 or count > size / 8: return Err("fixture command bounds")
+    var changed = bytes
+    var at: i64 = 32
+    var matches: i64 = 0
+    for index in 0..count:
+        if at > 32 + size - 8: return Err("fixture command header bounds")
+        val length = item4_macho_legacy_mode_read(bytes, at + 4)
+        if length < 8 or length % 8 != 0 or length > 32 + size - at: return Err("fixture command size")
+        if item4_macho_legacy_mode_read(bytes, at) == 12:
+            if length < 24: return Err("fixture dependency truncated")
+            matches = matches + 1
+            for byte in 0..4: changed[at + byte] = ((kind >> (8 * byte)) & 255) as u8
+        at = at + length
+    if matches != 1 or at != 32 + size: return Err("fixture dependency count")
+    Ok(changed)
+
+describe "Legacy Mach-O dependency command visibility":
+    it "should expose a present weak provider but hide lazy and upward providers (ITEM4-REQ-006)":
+        step("Read a real legacy selector and mutate only its dependency command class")
+        val original = file_read_bytes("test/fixtures/linker/macho/legacy_library_x64.dylib")
+        val checked = macho_read_binary_provider_v1(original, RelocArch.X86_64)
+        expect(checked.is_ok()).to_equal(true)
+        if checked.is_err(): return
+        expect(checked.unwrap().sub_libraries).to_equal(["liblegacy"])
+        expect(checked.unwrap().no_reexported_dylibs).to_equal(false)
+        val leaf = file_read_bytes("test/fixtures/linker/macho/legacy_leaf_x64.dylib")
+        expect(leaf.len() > 32).to_equal(true)
+        if leaf.len() <= 32: return
+        val made = dir_create_all("build")
+        expect(made).to_equal(true)
+        if not made: return
+        for kind in [0x80000018, 0x20, 0x80000023]:
+            val changed = item4_macho_legacy_mode_change(original, kind)
+            expect(changed.is_ok()).to_equal(true)
+            if changed.is_err(): return
+            val parsed = macho_read_binary_provider_v1(changed.unwrap(), RelocArch.X86_64)
+            expect(parsed.is_ok()).to_equal(true)
+            if parsed.is_err(): return
+            expect(parsed.unwrap().dependencies.len()).to_equal(1)
+            if parsed.unwrap().dependencies.len() != 1: return
+            expect(parsed.unwrap().dependencies[0].command).to_equal(kind)
+            val created = secure_temp_dir("build", "item4-legacy-mode-")
+            expect(created.is_ok()).to_equal(true)
+            if created.is_err(): return
+            val parent = created.unwrap()
+            val sentinel: [u8] = [73, 52, 76, 77, 19]
+            val root_written = file_write_bytes(parent + "/root.dylib", changed.unwrap())
+            val leaf_written = file_write_bytes(parent + "/liblegacy.1.dylib", leaf)
+            val output_written = file_write_bytes(parent + "/app", sentinel)
+            expect(root_written and leaf_written and output_written).to_equal(true)
+            if not root_written or not leaf_written or not output_written:
+                item4_macho_legacy_mode_cleanup(parent)
+                return
+            step("Link real imports with the provider physically present")
+            val linked = item4_macho_legacy_mode_link(parent, parent + "/root.dylib", false)
+            if kind == 0x80000018:
+                expect(linked.is_ok()).to_equal(true)
+                if linked.is_ok(): item4_macho_legacy_mode_check(file_read_bytes(parent + "/app"), false)
+            else:
+                expect(linked.is_err()).to_equal(true)
+                if linked.is_err(): expect(linked.unwrap_err()).to_contain("unresolved hosted import")
+                expect(file_read_bytes(parent + "/app")).to_equal(sentinel)
+            item4_macho_legacy_mode_cleanup(parent)
+
+    it "should preserve the destination when a matched dependency is missing (ITEM4-REQ-006)":
+        val made = dir_create_all("build")
+        expect(made).to_equal(true)
+        if not made: return
+        val created = secure_temp_dir("build", "item4-legacy-missing-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val sentinel: [u8] = [73, 52, 77, 73, 83, 83]
+        val written = file_write_bytes(parent + "/app", sentinel)
+        expect(written).to_equal(true)
+        if not written:
+            item4_macho_legacy_mode_cleanup(parent)
+            return
+        expect(file_exists(parent + "/liblegacy.1.dylib")).to_equal(false)
+        step("Resolve a selected dependency through an empty explicit search directory")
+        val linked = item4_macho_legacy_mode_link(parent, "test/fixtures/linker/macho/legacy_library_x64.dylib", false)
+        expect(linked.is_err()).to_equal(true)
+        if linked.is_err():
+            expect(linked.unwrap_err()).to_contain("cannot be read from explicit SDK/search paths")
+            expect(linked.unwrap_err()).to_contain("liblegacy.1.dylib")
+        expect(file_read_bytes(parent + "/app")).to_equal(sentinel)
+        item4_macho_legacy_mode_cleanup(parent)
+
+    it "should use root exports without probing an unmatched dependency (ITEM4-REQ-006)":
+        val path = "test/fixtures/linker/macho/legacy_unmatched_own_x64.dylib"
+        val checked = macho_read_binary_provider_v1(file_read_bytes(path), RelocArch.X86_64)
+        expect(checked.is_ok()).to_equal(true)
+        if checked.is_err(): return
+        val provider = checked.unwrap()
+        expect(provider.sub_libraries).to_equal(["unmatched"])
+        expect(provider.infer_subframeworks).to_equal(false)
+        expect(provider.no_reexported_dylibs).to_equal(false)
+        expect(provider.dependencies.len()).to_equal(1)
+        if provider.dependencies.len() != 1: return
+        expect(provider.dependencies[0].command).to_equal(12)
+        var helper = false
+        var value = false
+        for symbol in provider.exports:
+            if symbol.name == "_helper": helper = true
+            if symbol.name == "_value": value = true
+        expect(helper and value).to_equal(true)
+        if not helper or not value: return
+        val made = dir_create_all("build")
+        expect(made).to_equal(true)
+        if not made: return
+        val created = secure_temp_dir("build", "item4-legacy-unmatched-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        expect(file_exists(parent + "/liblegacy.1.dylib")).to_equal(false)
+        step("Link the root's real exports with its unselected dependency absent")
+        val linked = item4_macho_legacy_mode_link(parent, path, false)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_ok(): item4_macho_legacy_mode_check(file_read_bytes(parent + "/app"), false)
+        item4_macho_legacy_mode_cleanup(parent)

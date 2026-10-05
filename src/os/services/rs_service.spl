@@ -102,15 +102,28 @@ impl RsService:
 
         Returns the new Entity handle for the capsule.
         """
-        val e = self.world.base.spawn()
+        # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        var base_s = self.world.base
+        val e = base_s.spawn()
+        self.world.base = base_s
         val ecs_tick = self.world.base.now()
         # Use a sequential id derived from current store length + 1
         val capsule_id_val = self.world.ids.len().to_u64() + 1
-        self.world.ids.insert(e, CapsuleId(value: capsule_id_val), ecs_tick)
-        self.world.manifests.insert(e, Manifest(name: name, binary_path: binary_path, auto_restart: auto_restart), ecs_tick)
-        self.world.heartbeats.insert(e, Heartbeat(last_tick: self.tick, interval_ticks: heartbeat_interval, timeout_ticks: timeout), ecs_tick)
-        self.world.policies.insert(e, RestartPolicy(max_restarts: max_restarts, restarts_so_far: 0, backoff_ticks: 0, last_restart_tick: 0), ecs_tick)
-        self.world.crashes.insert(e, LastCrashInfo(reason: RS_REASON_NONE, exit_code: 0, crashed_at_tick: 0), ecs_tick)
+        var ids_s = self.world.ids
+        ids_s.insert(e, CapsuleId(value: capsule_id_val), ecs_tick)
+        self.world.ids = ids_s
+        var manifests_s = self.world.manifests
+        manifests_s.insert(e, Manifest(name: name, binary_path: binary_path, auto_restart: auto_restart), ecs_tick)
+        self.world.manifests = manifests_s
+        var heartbeats_s = self.world.heartbeats
+        heartbeats_s.insert(e, Heartbeat(last_tick: self.tick, interval_ticks: heartbeat_interval, timeout_ticks: timeout), ecs_tick)
+        self.world.heartbeats = heartbeats_s
+        var policies_s = self.world.policies
+        policies_s.insert(e, RestartPolicy(max_restarts: max_restarts, restarts_so_far: 0, backoff_ticks: 0, last_restart_tick: 0), ecs_tick)
+        self.world.policies = policies_s
+        var crashes_s = self.world.crashes
+        crashes_s.insert(e, LastCrashInfo(reason: RS_REASON_NONE, exit_code: 0, crashed_at_tick: 0), ecs_tick)
+        self.world.crashes = crashes_s
         self.initialized = true
         e
 
@@ -125,13 +138,19 @@ impl RsService:
             return false
         val hb = self.world.heartbeats.dense[slot]
         val ecs_tick = self.world.base.now()
-        self.world.heartbeats.insert(capsule, Heartbeat(last_tick: self.tick, interval_ticks: hb.interval_ticks, timeout_ticks: hb.timeout_ticks), ecs_tick)
+        # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        var heartbeats_s = self.world.heartbeats
+        heartbeats_s.insert(capsule, Heartbeat(last_tick: self.tick, interval_ticks: hb.interval_ticks, timeout_ticks: hb.timeout_ticks), ecs_tick)
+        self.world.heartbeats = heartbeats_s
         true
 
     me rs_advance(self) -> u64:
         """Increment tick, run heartbeat check + restart systems, return new tick."""
         self.tick = self.tick + 1
-        self.world.base.advance()
+        # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        var base_s = self.world.base
+        base_s.advance()
+        self.world.base = base_s
         self.sys_check_heartbeats()
         self.tick
 
@@ -159,7 +178,10 @@ impl RsService:
         for eid_raw in timed_out:
             val e = Entity(id: eid_raw, generation: 0)
             val ecs_tick = self.world.base.now()
-            self.world.crashes.insert(e, LastCrashInfo(reason: RS_REASON_HEARTBEAT_TIMEOUT, exit_code: 0, crashed_at_tick: self.tick), ecs_tick)
+            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+            var crashes_s = self.world.crashes
+            crashes_s.insert(e, LastCrashInfo(reason: RS_REASON_HEARTBEAT_TIMEOUT, exit_code: 0, crashed_at_tick: self.tick), ecs_tick)
+            self.world.crashes = crashes_s
             self.rs_restart(e)
 
     me rs_restart(self, capsule: Entity) -> bool:
@@ -175,12 +197,15 @@ impl RsService:
         if pol.restarts_so_far >= pol.max_restarts:
             return false
         val ecs_tick = self.world.base.now()
-        self.world.policies.insert(capsule, RestartPolicy(
+        # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        var policies_s = self.world.policies
+        policies_s.insert(capsule, RestartPolicy(
             max_restarts:      pol.max_restarts,
             restarts_so_far:   pol.restarts_so_far + 1,
             backoff_ticks:     pol.backoff_ticks,
             last_restart_tick: self.tick
         ), ecs_tick)
+        self.world.policies = policies_s
         true
 
     fn rs_is_alive(self, capsule: Entity) -> bool:

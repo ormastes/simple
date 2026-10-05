@@ -1,6 +1,7 @@
 # mold-based MDSOC++ Linker — Plan (2026-09-18)
 
 **Current status (2026-10-03):** internal ELF/COFF implementation exists; whole-item acceptance is unverified. See the current acceptance continuation below. Historical RC1 lane states are retained as dated history, not current certification. **Design:** `doc/05_design/compiler/linker/mold_mdsocpp_linker_design.md`.
+**Status update (2026-10-05):** internal ELF engine now links a SimpleOS x86_64 user program (real sysroot `crt0.o` + C `main` + `libsimple_runtime.a`/`libsimpleos_c.a`, sysroot `simpleos.ld`; `e_entry` = `_start` = `0x10000000`). Root cause of `entry symbol not defined: _start` was the ELF parser reading `st_info` through a miscompiled inline `if c: X as T else: Y` (every ELF64 symbol parsed LOCAL); fixed by parenthesizing (bug `doc/08_tracking/bug/inline_if_then_arm_as_cast_drops_else_2026-10-05.md`), regression `test/01_unit/compiler/backend/linker/simpleos_internal_entry_spec.spl`. Stage 2 picks this up only after a rebuild; SimpleOS G4 default flip still needs an end-to-end Simple program link + boot.
 **Research/audit:** `doc/01_research/compiler/linker/{mold_mdsocpp_linker_2026-09-15,linker_loader_inventory_2026-09-18}.md`.
 **Base:** `simple-rc1-share` @ `cc205ae0778`. **Host for evidence:** aarch64, `bin/release/aarch64-unknown-linux-gnu/simple`.
 `L/` = `src/compiler/70.backend/linker/`, `LD/` = `src/compiler/99.loader/`, `T/` = `test/01_unit/`.
