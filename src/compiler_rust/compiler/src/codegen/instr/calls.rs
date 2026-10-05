@@ -4133,7 +4133,7 @@ pub fn compile_call<M: Module>(
                 } else {
                     // On-demand declaration: MIR referenced "str.starts_with" etc.
                     // but referenced_names only had the dotted form, not the rt_ name.
-                    let call_conv = crate::codegen::shared::platform_call_conv();
+                    let call_conv = ctx.module.isa().default_call_conv();
                     let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
                     let param_count = args.len();
                     for _ in 0..param_count {
@@ -4337,7 +4337,7 @@ pub fn compile_call<M: Module>(
                     func_name, resolved_name
                 ));
             }
-            let call_conv = crate::codegen::shared::platform_call_conv();
+            let call_conv = ctx.module.isa().default_call_conv();
             let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
             // Same single-source-of-truth arity as the receiver-strip above:
             // never re-key this lookup independently of `callee_arity`.

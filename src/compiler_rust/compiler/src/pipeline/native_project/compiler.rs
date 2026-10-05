@@ -790,8 +790,8 @@ pub(crate) fn compile_file_to_object(
         lowerer.set_global_enum_defs(std::sync::Arc::clone(&imports.enum_defs));
         lowerer.register_global_enums();
     }
-    let mut hir = lowerer
-        .lower_module(&ast)
+    let (mut hir, function_return_types) = lowerer
+        .lower_module_with_return_types(&ast)
         .map_err(|e| format!("{}: hir: {e}", file_path.display()))?;
     let module_prefix = module_prefix_from_path(file_path, source_root);
     assign_native_dynamic_initializer_identity(&mut hir, &module_prefix);
@@ -1040,6 +1040,7 @@ pub(crate) fn compile_file_to_object(
     codegen.set_use_map(use_map);
     codegen.set_data_exports(imports.data_exports.clone());
     codegen.set_fn_arities(imports.fn_arities.clone());
+    codegen.set_function_return_types(function_return_types);
     codegen.set_enum_defs(imports.enum_defs.clone());
     codegen.set_tag_runtime_pool_join_result(true);
     if !no_mangle {
@@ -1179,9 +1180,25 @@ fn wait_for_compiler_thread(
         return handle.join().unwrap_or_else(|_| Err("thread join error".to_string()));
     }
 
+    let started = std::time::Instant::now();
     match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
-        Ok(()) => handle.join().unwrap_or_else(|_| Err("thread join error".to_string())),
-        Err(_) => Err(format!("timeout ({}s)", timeout_secs)),
+        Ok(()) => {
+            handle.join().unwrap_or_else(|_| Err("thread join error".to_string()))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            // A sender can be dropped before its worker exits. Preserve the
+            // positive deadline instead of joining that worker indefinitely.
+            while !handle.is_finished() {
+                if started.elapsed() >= Duration::from_secs(timeout_secs) {
+                    return Err(format!("timeout ({}s)", timeout_secs));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            handle.join().unwrap_or_else(|_| Err("thread join error".to_string()))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(format!("timeout ({}s)", timeout_secs))
+        }
     }
 }
 
@@ -1288,6 +1305,38 @@ mod native_compile_timeout_tests {
         });
 
         assert_eq!(wait_for_compiler_thread(rx, handle, 1), Err("timeout (1s)".to_string()));
+    }
+
+    #[test]
+    fn disconnected_worker_reports_join_error_instead_of_timeout() {
+        let (tx, rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || -> Result<Vec<u8>, String> {
+            drop(tx);
+            panic!("worker exited before signaling completion");
+        });
+
+        assert_eq!(
+            wait_for_compiler_thread(rx, handle, 1),
+            Err("thread join error".to_string())
+        );
+    }
+
+    #[test]
+    fn disconnected_live_worker_keeps_positive_deadline() {
+        let (tx, rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || -> Result<Vec<u8>, String> {
+            drop(tx);
+            std::thread::sleep(Duration::from_millis(1_100));
+            done_tx.send(()).unwrap();
+            Ok(Vec::new())
+        });
+
+        assert_eq!(
+            wait_for_compiler_thread(rx, handle, 1),
+            Err("timeout (1s)".to_string())
+        );
+        done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
     }
 
     #[test]

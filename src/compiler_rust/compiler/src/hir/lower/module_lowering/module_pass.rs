@@ -1655,7 +1655,18 @@ impl Lowerer {
         }
     }
 
-    pub fn lower_module(mut self, ast_module: &Module) -> LowerResult<HirModule> {
+    pub fn lower_module(self, ast_module: &Module) -> LowerResult<HirModule> {
+        self.lower_module_with_return_types(ast_module)
+            .map(|(module, _)| module)
+    }
+
+    /// Preserve resolved callable result types for separately compiled modules.
+    /// These TypeIds belong to the returned module's registry; re-resolving the
+    /// project AST annotations in codegen would lose aliases and owner identity.
+    pub(crate) fn lower_module_with_return_types(
+        mut self,
+        ast_module: &Module,
+    ) -> LowerResult<(HirModule, HashMap<String, TypeId>)> {
         // Hoist nested type definitions (e.g. `class Foo:` defined inside an
         // SPipe `it` block) to module scope so the rest of the lowering
         // pipeline registers them as if they were authored at the top level.
@@ -2251,7 +2262,10 @@ impl Lowerer {
             });
         }
 
-        Ok(self.module)
+        // Absence keeps codegen's existing builtin inference available; ANY
+        // placeholders are not authoritative result-type declarations.
+        self.method_return_types.retain(|_, ty| *ty != TypeId::ANY);
+        Ok((self.module, self.method_return_types))
     }
 
     /// Lower an AST module to HIR and return warnings along with the module
