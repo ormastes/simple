@@ -687,6 +687,7 @@ pub fn compile_instruction<M: Module>(
                 None
             };
             compile_call(ctx, builder, dest, target, args)?;
+            pointers::writeback_extern_out_slots(ctx, builder, args);
             if let (Some(is_nil), Some(dest_reg)) = (nil_flag, dest.as_ref()) {
                 if let Some(&numeric) = ctx.vreg_values.get(dest_reg) {
                     let (ptr, len) = helpers::create_string_constant(ctx, builder, "nil")?;
