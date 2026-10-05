@@ -1179,9 +1179,25 @@ fn wait_for_compiler_thread(
         return handle.join().unwrap_or_else(|_| Err("thread join error".to_string()));
     }
 
+    let started = std::time::Instant::now();
     match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
-        Ok(()) => handle.join().unwrap_or_else(|_| Err("thread join error".to_string())),
-        Err(_) => Err(format!("timeout ({}s)", timeout_secs)),
+        Ok(()) => {
+            handle.join().unwrap_or_else(|_| Err("thread join error".to_string()))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            // A sender can be dropped before its worker exits. Preserve the
+            // positive deadline instead of joining that worker indefinitely.
+            while !handle.is_finished() {
+                if started.elapsed() >= Duration::from_secs(timeout_secs) {
+                    return Err(format!("timeout ({}s)", timeout_secs));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            handle.join().unwrap_or_else(|_| Err("thread join error".to_string()))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(format!("timeout ({}s)", timeout_secs))
+        }
     }
 }
 
@@ -1288,6 +1304,38 @@ mod native_compile_timeout_tests {
         });
 
         assert_eq!(wait_for_compiler_thread(rx, handle, 1), Err("timeout (1s)".to_string()));
+    }
+
+    #[test]
+    fn disconnected_worker_reports_join_error_instead_of_timeout() {
+        let (tx, rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || -> Result<Vec<u8>, String> {
+            drop(tx);
+            panic!("worker exited before signaling completion");
+        });
+
+        assert_eq!(
+            wait_for_compiler_thread(rx, handle, 1),
+            Err("thread join error".to_string())
+        );
+    }
+
+    #[test]
+    fn disconnected_live_worker_keeps_positive_deadline() {
+        let (tx, rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || -> Result<Vec<u8>, String> {
+            drop(tx);
+            std::thread::sleep(Duration::from_millis(1_100));
+            done_tx.send(()).unwrap();
+            Ok(Vec::new())
+        });
+
+        assert_eq!(
+            wait_for_compiler_thread(rx, handle, 1),
+            Err("timeout (1s)".to_string())
+        );
+        done_rx.recv_timeout(Duration::from_secs(3)).unwrap();
     }
 
     #[test]
