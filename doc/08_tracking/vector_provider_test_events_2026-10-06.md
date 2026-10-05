@@ -1,6 +1,6 @@
-﻿# Item 5 vector apply-event native check
+# Item 5 vector apply-event native check
 
-This is a bounded native C check for the production vector provider apply boundary. It does not qualify the Simple provider loader or a Simple DB/HTTP application.
+This is a bounded native C check for the test-instrumented vector provider apply boundary. It does not qualify the Simple provider loader or a Simple DB/HTTP application.
 
 Source is based on release commit `62e10c94cb9a2749911a64419cf8064e064e50ba` in isolated worktree `D:/dev/simple-item5-vector-test-events-20261006`. The final four source SHA-256 values are:
 
@@ -17,7 +17,7 @@ sh scripts/check/check-vector-provider-test-events.shs /var/tmp/item5-vector-eve
 
 Cycle 2 passed 11 cases with scalar oracles and strict receipts: no provider load (0 loads/0 events); load without call (1/0); 15-word scalar-tail bitmap AND (success, 0 loops); 33-word bitmap AND and OR (2 AVX512 loops each); 193-byte HTTP byte search and CRLF search (3 loops each); invalid request (status 1, 0 loops); and forced no-AVX bitmap, no-AVX HTTP, and no-BW HTTP (status 5, 0 loops each). The host advertised AVX512F/BW. The harness records the launched selfcheck PID and checks it against the observer receipt PID.
 
-The receipt validator rejected 11 malformed fixtures covering appended and same-line-count duplicate keys, missing fields, extra fields, wrong PID, status/event sum mismatch, loops without success, malformed number, u64 overflow, oversize input, and missing final newline. Receipts are capped at 4096 bytes; instrumentation aborts on receipt/counter overflow or write failure.
+The receipt validator rejected 11 malformed fixtures covering appended and same-line-count duplicate keys, missing fields, extra fields, wrong PID, status/event sum mismatch, loops without success, malformed number, u64 overflow, oversize input, and missing final newline. Receipts are capped at 4096 bytes. The observer marks counter overflow for validator rejection; receipt truncation or write failure exits with status 74.
 
 The production-flag-off provider object is byte-identical to the pinned release source object under the same feature flags and generated identity. Both objects have SHA-256 `cb62ff9beff45a1fb27d4874a52619423869d2a0fc0161d337a57998882a7bc7`. Bounded disassembly scans found no ZMM, kmov, or byte-compare target families in the baseline provider object and found ZMM instructions in the bitmap and HTTP kernel objects. This scan is not a complete ISA audit.
 
