@@ -37,4 +37,31 @@ mv "$evidence/original.lock" "$stable"
 portable_lock_handle_is_owned "$handle"
 portable_lock_release "$handle"
 [ ! -e "$stable" ] && [ ! -e "$handle" ]
+if [ "$(uname -s)" = Linux ]; then
+  # Simulate a wall-clock correction after acquisition without changing the
+  # real process identity. The old ps-lstart implementation loses ownership.
+  real_ps=$(command -v ps)
+  mkdir "$evidence/bin"
+  cat >"$evidence/bin/ps" <<'SH'
+#!/bin/sh
+if [ "$1" = -o ] && [ "$2" = lstart= ] && [ -f "$LOCK_CLOCK_SHIFT" ]; then
+  printf 'Tue Jan  1 00:00:00 2030\n'
+else
+  exec "$LOCK_REAL_PS" "$@"
+fi
+SH
+  chmod +x "$evidence/bin/ps"
+  LOCK_REAL_PS=$real_ps
+  LOCK_CLOCK_SHIFT=$evidence/clock-shift
+  export LOCK_REAL_PS LOCK_CLOCK_SHIFT
+  PATH="$evidence/bin:$PATH"
+  export PATH
+  portable_lock_acquire "$evidence" clock-test 2
+  clock_handle=$PORTABLE_LOCK_HANDLE
+  touch "$LOCK_CLOCK_SHIFT"
+  portable_lock_handle_is_owned "$clock_handle"
+  portable_lock_release "$clock_handle"
+  [ ! -e "$clock_handle" ] && [ ! -e "$evidence/.clock-test.lock" ]
+  printf 'PASS: Linux ownership and release survive ps wall-clock correction\n'
+fi
 printf 'PASS: parent ownership, child rejection, absent claim, replacement identity, release; evidence=%s\n' "$evidence"

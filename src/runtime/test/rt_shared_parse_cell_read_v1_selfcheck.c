@@ -14,6 +14,7 @@ int64_t rt_shared_parse_cell_read_v1(const uint8_t *, uint64_t, int64_t);
 static uint64_t observed_size;
 static uint8_t observed_bytes[32];
 
+#ifndef SIMPLE_TEST_CORE_RUNTIME
 int64_t rt_string_new(const uint8_t *bytes, uint64_t size) {
     observed_size = size;
     memset(observed_bytes, 0, sizeof observed_bytes);
@@ -21,11 +22,20 @@ int64_t rt_string_new(const uint8_t *bytes, uint64_t size) {
         memcpy(observed_bytes, bytes, (size_t)size);
     return 1;
 }
+#endif
 
 static int read_expect(const char *path, int64_t max, uint64_t size) {
     observed_size = UINT64_MAX;
-    (void)rt_shared_parse_cell_read_v1((const uint8_t *)path,
-                                      (uint64_t)strlen(path), max);
+    int64_t value = rt_shared_parse_cell_read_v1((const uint8_t *)path,
+                                                (uint64_t)strlen(path), max);
+#ifdef SIMPLE_TEST_CORE_RUNTIME
+    observed_size = (uint64_t)rt_string_len(value);
+    memset(observed_bytes, 0, sizeof observed_bytes);
+    if (observed_size <= sizeof observed_bytes && observed_size != 0)
+        memcpy(observed_bytes, rt_string_data(value), (size_t)observed_size);
+#else
+    (void)value;
+#endif
     return observed_size == size;
 }
 

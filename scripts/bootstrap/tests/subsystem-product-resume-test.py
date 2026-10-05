@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix='subsystem-resume-unit.') as td:
     inventory.write_text('fixture inventory\n')
     inventory_program = top / 'inventory.sh'
     inventory_program.write_text('#!/bin/sh\nprintf "fixture inventory\\n"\n')
-    fields = dict(format='SIMPLE-SUBSYSTEM-TEST-MATRIX-1', status='FAIL', source_root=str(source),
+    fields = dict(format='SIMPLE-SUBSYSTEM-TEST-MATRIX-1', status='FAIL', producer_phase='phase2', source_root=str(source),
                   execution_cwd=str(source), runtime_mode='native', threads='20', rss_cap_kib='6835937',
                   build_timeout_seconds='1800', test_timeout_seconds='7200', inventory_sha256=sha(inventory))
     rows = []
@@ -43,7 +43,7 @@ with tempfile.TemporaryDirectory(prefix='subsystem-resume-unit.') as td:
         fields[f'producer_receipt_{backend}_sha256'] = sha(receipt) if backend == 'cranelift' else 'MISSING'
         for suite in ('compiler', 'interpreter', 'loader'):
             for stage in ('build', 'enumerate', 'run'):
-                rows.append(f'phase4_{backend}_product_{suite}_{stage}\t' +
+                rows.append(f'phase2_{backend}_product_{suite}_{stage}\t' +
                             ('SUCCEEDED\t0\n' if backend == 'cranelift' else 'BLOCKED\t1\n'))
             if backend == 'llvm':
                 continue
@@ -74,6 +74,7 @@ inventory='{inventory}'
 inventory_program='{inventory_program}'
 statuses='{statuses}'
 matrix='{matrix}'
+product_phase=phase2
 threads=20 rss_cap_kib=6835937 build_timeout=1800 test_timeout=7200
 regular() {{ [ -f "$1" ] && [ ! -L "$1" ]; }}
 hash_file() {{ regular "$1" || exit 2; sha256sum "$1" | cut -d ' ' -f 1; }}
@@ -88,6 +89,7 @@ verify_base() {{
   for arg do case "$arg" in --output=*) target=${{arg#*=}} ;; esac; done
   cp "$(job_for "$backend" "$suite")/result.env" "$target"
 }}
+. '{ROOT}/lib/subsystem-product-phase.shs'
 . '{ROOT}/lib/subsystem-product-resume.shs'
 resume_validate
 [ "$resume_reused" = cranelift ] && [ "$resume_missing" = llvm ]
@@ -106,6 +108,8 @@ managed_dispatch_products
     assert (top / 'dispatch').read_text().splitlines() == ['llvm/compiler', 'llvm/interpreter', 'llvm/loader']
     assert matrix.read_bytes() == original_matrix
     run(False, 'REJECT_REPLAY=1\n')
+    matrix.write_bytes(original_matrix.replace(b'producer_phase=phase2', b'producer_phase=phase4'))
+    run(False)
     matrix.write_bytes(original_matrix + b'threads=20\n')
     run(False)
     matrix.write_bytes(original_matrix)
@@ -125,6 +129,14 @@ managed_dispatch_products
     source_receipt.write_bytes(saved + b'status=admitted\n')
     run(False)
     source_receipt.write_bytes(saved)
+    # Rehashed journal relabelling must not bypass the phase receipt.
+    changed = original_status.replace(b'phase2_', b'phase4_')
+    statuses.write_bytes(changed)
+    matrix.write_bytes(original_matrix.replace(original_status, changed).replace(
+        fields['schedule_sha256'].encode(), sha(statuses).encode()))
+    result = subprocess.run(['sh', '-c', script], capture_output=True)
+    assert result.returncode != 0
+    statuses.write_bytes(original_status)
     # Reject partial/failed journals even if their outer hash is updated.
     changed = original_status.replace(b'BLOCKED\t1', b'FAILED\t1', 1)
     statuses.write_bytes(changed)
