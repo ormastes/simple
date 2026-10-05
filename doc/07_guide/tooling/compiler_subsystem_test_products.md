@@ -92,3 +92,29 @@ Copying evidence to another output root or updating the product source commit
 breaks the recorded source, inventory, binary, command and watchdog bindings.
 Resume does not establish dynamic backend provider loading: the current product
 builder still records builtin provider identity.
+
+## Explicit Phase 2 six-product matrix
+
+Pass `--producer-phase=phase2` to the standalone product manager to build and run
+all six products using the admitted Phase 2 LLVM and Cranelift compiler inputs.
+No `--product` selector is needed. The owner publishes `producer_phase=phase2`
+in the matrix and names its 18 build/enumerate/run tasks `phase2_*`; final
+verification and `--resume` require that same phase. Both compiler inputs still
+require formal Stage 2 admission and frozen runtime capsule bindings. Source
+inventory counts alone never qualify an executable or replace its enumeration
+and native execution evidence.
+
+The default remains `phase4` for existing callers. Older matrix receipts lacking
+the phase field are interpreted only as legacy Phase 4; explicit empty,
+unknown, duplicate or Phase 3 aggregate values are rejected. Phase 3 continues
+to require separate managed selected-product tasks. A phase change during
+resume, or a journal relabelled to another phase, is rejected even if its outer
+hash was recomputed. No native tests are replayed just to validate retained
+receipts.
+
+On the 20-vCPU FreeBSD guest, explicitly pass `--threads=20` (the general tool
+default is 80), use a fresh product output outside the source root, and retain
+the exact product source throughout initial execution and any resume. Bind
+`--compiler-llvm`/`--compiler-cranelift` and their producer receipt options to the
+actual admitted Phase 2 binary paths; do not replace them with a seed or invoke
+an interpreter in place of the six requested native test executables.
