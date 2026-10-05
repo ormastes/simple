@@ -68,4 +68,28 @@ mod if_expr_cast_else {
         assert!(!dump.contains("CastElse"), "{dump}");
         assert!(dump.contains("else_branch: Some"), "{dump}");
     }
+
+    #[test]
+    fn nested_call_cast_fallback_survives_statement_and_condition_guards() {
+        for source in [
+            "fn f(g: i32):\n    var r = 0\n    if g > 0: r = h(g as i64 else: \\: 0) else: r = 5\n",
+            "fn f(g: i32):\n    if g > 0: return h(g as i64 else: \\: 0) else: return 5\n",
+            "fn f(g: i32):\n    val r = 1 if h(g as i64 else: \\: 0) else 2\n",
+        ] {
+            let dump = ast(source);
+            assert!(dump.contains("CastElse"), "nested fallback lost: {dump}");
+            assert!(dump.contains("else_branch: Some") || dump.contains("else_block: Some"),
+                "outer else lost: {dump}");
+        }
+    }
+
+    #[test]
+    fn cast_guard_restores_outer_scope_after_parse_error() {
+        let mut parser = crate::Parser::new(")");
+        parser.inline_if_then_call_depth = Some(7);
+        parser.call_arg_depth = 2;
+        let result = parser.parse_without_cast_else(|p| p.parse_expression());
+        assert!(result.is_err());
+        assert_eq!(parser.inline_if_then_call_depth, Some(7));
+    }
 }

@@ -1,0 +1,130 @@
+use std.spec.{describe, it, expect}
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.cache.reverse_reference_facts.*
+use compiler.traits.trait_solver.{TraitSolver, ObligationCause,
+    trait_reverse_type_identity_v1, trait_solver_publish_trait_candidate_v1}
+use compiler.traits.trait_impl.{ImplBlock}
+
+fn reverse_named_type(symbol: SymbolId, args: [HirType]) -> HirType:
+    HirType(kind: HirTypeKind.Named(symbol, args), span: Span.empty())
+
+fn reverse_test_type(table: SymbolTable, name: text, owner: text?) -> SymbolId:
+    table.define(name, SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, owner)
+
+describe "Trait reverse-reference identities retain their symbol owner":
+    it "distinguishes identical local IDs and names in different owning tables":
+        var left = SymbolTable.new()
+        var right = SymbolTable.new()
+        val left_id = reverse_test_type(left, "Item", Some("left.module"))
+        val right_id = reverse_test_type(right, "Item", Some("right.module"))
+        expect(left_id.id).to_equal(right_id.id)
+        expect(trait_reverse_type_identity_v1(reverse_named_type(left_id, []), Some(left))).to_equal("left.module::Item")
+        expect(trait_reverse_type_identity_v1(reverse_named_type(right_id, []), Some(right))).to_equal("right.module::Item")
+
+    it "retains generic argument identities including their owners":
+        var table = SymbolTable.new()
+        val box = reverse_test_type(table, "Box", Some("containers"))
+        val left = reverse_test_type(table, "LeftItem", Some("left"))
+        val right = reverse_test_type(table, "RightItem", Some("right"))
+        val left_ty = reverse_named_type(box, [reverse_named_type(left, [])])
+        val right_ty = reverse_named_type(box, [reverse_named_type(right, [])])
+        expect(trait_reverse_type_identity_v1(left_ty, Some(table))).to_equal("containers::Box<14:left::LeftItem>")
+        expect(trait_reverse_type_identity_v1(right_ty, Some(table))).to_equal("containers::Box<16:right::RightItem>")
+        val unresolved = HirType(kind: HirTypeKind.TypeParam("T", []), span: Span.empty())
+        expect(trait_reverse_type_identity_v1(reverse_named_type(box, [unresolved]), Some(table))).to_equal("")
+
+    it "does not invent identities for missing tables symbols or owners":
+        var table = SymbolTable.new()
+        val missing_owner = reverse_test_type(table, "Item", nil)
+        expect(trait_reverse_type_identity_v1(reverse_named_type(missing_owner, []), Some(table))).to_equal("")
+        expect(trait_reverse_type_identity_v1(reverse_named_type(missing_owner, []), nil)).to_equal("")
+        expect(trait_reverse_type_identity_v1(reverse_named_type(SymbolId(id: 9999), []), Some(table))).to_equal("")
+
+    it "keeps the owning module snapshot when the lowerer reuses its table":
+        var table = SymbolTable.new()
+        val old_id = reverse_test_type(table, "Item", Some("old.module"))
+        val solver = TraitSolver.create_with_symbols(table)
+        table.reset_module()
+        val new_id = reverse_test_type(table, "Item", Some("new.module"))
+        expect(old_id.id).to_equal(new_id.id)
+        expect(trait_reverse_type_identity_v1(reverse_named_type(old_id, []), solver.reverse_symbols)).to_equal("old.module::Item")
+        expect(trait_reverse_type_identity_v1(reverse_named_type(new_id, []), Some(table))).to_equal("new.module::Item")
+
+    it "keeps an unknown publication incomplete after later valid facts":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        trait_solver_publish_trait_candidate_v1("traits::Show", "", "missing-owner")
+        trait_solver_publish_trait_candidate_v1("traits::Show", "users::Item", "known-owner")
+        reverse_reference_owner_mark_known_v1("trait-type-implementation")
+        val snapshot = reverse_reference_owner_snapshot_v1()
+        expect(snapshot.facts.len()).to_equal(1)
+        expect(snapshot.known_families.contains("trait-type-implementation")).to_equal(false)
+        reverse_reference_owner_end_v1()
+
+    it "also rejects an empty identity through the direct registry API":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        reverse_reference_register_trait_candidate_v1("", "users::Item", "missing-subject")
+        reverse_reference_register_trait_candidate_v1("traits::Show", "users::Item", "known")
+        expect(reverse_reference_owner_snapshot_v1().known_families.contains("trait-type-implementation")).to_equal(false)
+        reverse_reference_owner_end_v1()
+
+    it "does not announce complete facts merely by constructing an ownerless solver":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        val solver = TraitSolver.create()
+        expect(solver.has_obligations()).to_equal(false)
+        expect(reverse_reference_owner_snapshot_v1().known_families.contains("trait-type-implementation")).to_equal(false)
+        reverse_reference_owner_end_v1()
+
+    it "publishes an owned obligation and rejects an unresolved type even with a known cause":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        var table = SymbolTable.new()
+        val item = reverse_test_type(table, "Item", Some("users"))
+        val trait_id = table.define("Show", SymbolKind.Trait, nil, Span.empty(), Visibility.Public, false, Some("traits"))
+        val caller_id = table.define("show", SymbolKind.Function, nil, Span.empty(), Visibility.Public, false, Some("users"))
+        val trait_symbol = table.get_symbol_raw(trait_id.id).unwrap()
+        val caller = table.get_symbol_raw(caller_id.id).unwrap()
+        var solver = TraitSolver.create_with_symbols(table)
+        solver.add_obligation(reverse_named_type(item, []), trait_symbol, ObligationCause.FunctionCall(caller), Span.empty())
+        val known = reverse_reference_owner_snapshot_v1()
+        expect(known.facts.len()).to_equal(1)
+        expect(known.facts[0].subject_identity).to_equal("traits::Show")
+        expect(known.facts[0].consumer_identity).to_equal("users::show")
+        expect(known.known_families.contains("trait-type-implementation")).to_equal(true)
+        solver.add_obligation(reverse_named_type(SymbolId(id: 9999), []), trait_symbol, ObligationCause.FunctionCall(caller), Span.empty())
+        expect(reverse_reference_owner_snapshot_v1().known_families.contains("trait-type-implementation")).to_equal(false)
+        reverse_reference_owner_end_v1()
+
+    it "does not confuse a methodless implementation owner with the target type owner":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        var table = SymbolTable.new()
+        val item = reverse_test_type(table, "Item", Some("users"))
+        val trait_id = table.define("Marker", SymbolKind.Trait, nil, Span.empty(), Visibility.Public, false, Some("traits"))
+        val trait_symbol = table.get_symbol_raw(trait_id.id).unwrap()
+        var solver = TraitSolver.create_with_symbols(table)
+        solver.add_impl(ImplBlock.create(trait_symbol, reverse_named_type(item, []), Span.empty()))
+        expect(reverse_reference_owner_snapshot_v1().facts.len()).to_equal(0)
+        expect(reverse_reference_owner_snapshot_v1().known_families.contains("trait-type-implementation")).to_equal(false)
+        reverse_reference_owner_end_v1()
+
+    it "keeps batch incompleteness local on abort and resets it between owners":
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        reverse_reference_owner_mark_known_v1("trait-type-implementation")
+        val token = reverse_reference_module_begin_v1()
+        expect(token > 0).to_equal(true)
+        trait_solver_publish_trait_candidate_v1("traits::Show", "", "missing-owner")
+        expect(reverse_reference_owner_snapshot_v1().known_families.contains("trait-type-implementation")).to_equal(false)
+        expect(reverse_reference_module_abort_v1(token)).to_equal(true)
+        expect(reverse_reference_owner_snapshot_v1().known_families.contains("trait-type-implementation")).to_equal(true)
+        reverse_reference_owner_mark_incomplete_v1("trait-type-implementation")
+        reverse_reference_owner_end_v1()
+        expect(reverse_reference_owner_begin_v1()).to_equal(true)
+        reverse_reference_owner_mark_known_v1("trait-type-implementation")
+        expect(reverse_reference_owner_snapshot_v1().known_families.contains("trait-type-implementation")).to_equal(true)
+        reverse_reference_owner_end_v1()

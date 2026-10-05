@@ -1,0 +1,115 @@
+# Deterministic publisher interleavings at the real filesystem commit boundary.
+# Run as a standalone native process; external owner records peak tree RSS.
+use std.scv.compile_snapshot.{scv_compile_snapshot_write_chunk_v1,
+    scv_compile_snapshot_publish_staged_chunk_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir_raw, file_write_bytes,
+    file_create_exclusive, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.io_runtime.{dir_create, dir_remove, file_exists, dir_list}
+use app.io.time_ops.{time_now_nanos}
+
+var checks: i64 = 0
+var failures: i64 = 0
+
+fn check(label: text, condition: bool):
+    checks = checks + 1
+    if not condition:
+        failures = failures + 1
+        print "FAIL {label}"
+
+fn same_bytes(path: text, expected: text) -> bool:
+    val read = file_read_regular_no_follow_bounded(path, 1048576)
+    if val Ok(content) = read:
+        return content == expected
+    false
+
+fn main() -> i64:
+    val parent = "build/test-artifacts"
+    if not dir_create(parent, true): return 90
+    val root = secure_temp_dir_raw(parent, "scv-chunk-proof")
+    if root.len() <= 0: return 91
+    val stage_a = secure_temp_dir_raw(root, "writer-a")
+    val stage_b = secure_temp_dir_raw(root, "writer-b")
+    if stage_a.len() <= 0 or stage_b.len() <= 0:
+        dir_remove(root, true)
+        return 92
+    val cache = root + "/cache"
+    val chunks = cache + "/objects/chunks"
+    check("chunk parent", dir_create(chunks, true))
+    check("secure writers are distinct", stage_a != stage_b)
+    val content = "fn main() -> i64:\r\n    # 한글\r\n    42\r\n"
+    val digest = "sha256_" + sha256_text(content)
+    val final_path = chunks + "/" + digest + ".blob"
+    val private_a = stage_a + "/.scv-chunk-" + digest
+
+    # Writer A has only a prefix. Reader sees no final name. Writer B then
+    # publishes all bytes; A finishes afterward and loses without overwriting.
+    check("A partial private write", file_create_exclusive(private_a, "fn main"))
+    check("partial stage does not expose final", not file_exists(final_path))
+    check("B complete publication", scv_compile_snapshot_write_chunk_v1(cache, stage_b, digest, content))
+    check("reader sees complete winner", same_bytes(final_path, content))
+    check("A still owns private prefix", same_bytes(private_a, "fn main"))
+    check("A completes privately", file_write_bytes(private_a, text_to_utf8_bytes(content)))
+    check("A validates complete winner", scv_compile_snapshot_publish_staged_chunk_v1(private_a, final_path, digest))
+    check("loser stage cleaned", not file_exists(private_a))
+    check("winner unchanged", same_bytes(final_path, content))
+    check("B stage empty", dir_list(stage_b).len() == 0)
+    # A warm hit must not need or create any private stage.
+    check("warm hit needs no stage directory", scv_compile_snapshot_write_chunk_v1(cache, root + "/absent-stage", digest, content))
+    check("warm hit retains complete bytes", same_bytes(final_path, content))
+
+    # Invalid staged content cannot create a final object.
+    val bad_digest = "sha256_" + sha256_text("expected")
+    val bad_stage = stage_a + "/bad"
+    val bad_final = chunks + "/" + bad_digest + ".blob"
+    check("bad private write", file_create_exclusive(bad_stage, "wrong"))
+    check("bad private content rejected", not scv_compile_snapshot_publish_staged_chunk_v1(bad_stage, bad_final, bad_digest))
+    check("bad private cleaned", not file_exists(bad_stage))
+    check("bad final absent", not file_exists(bad_final))
+
+    # A corrupt existing final is preserved as evidence, never repaired in place.
+    check("corrupt final installed", file_create_exclusive(bad_final, "corrupt"))
+    check("corrupt warm winner rejected", not scv_compile_snapshot_write_chunk_v1(cache, stage_a, bad_digest, "expected"))
+    check("racing good stage", file_create_exclusive(bad_stage, "expected"))
+    check("corrupt racing winner rejected", not scv_compile_snapshot_publish_staged_chunk_v1(bad_stage, bad_final, bad_digest))
+    check("corrupt winner preserved", same_bytes(bad_final, "corrupt"))
+    check("corrupt race stage cleaned", not file_exists(bad_stage))
+
+    # Missing destination parent forces publication failure after stage hashing.
+    val failed_stage = stage_a + "/publish-failure"
+    check("failed publish private write", file_create_exclusive(failed_stage, content))
+    check("publish failure returned", not scv_compile_snapshot_publish_staged_chunk_v1(failed_stage, root + "/missing/final", digest))
+    check("failed publish stage cleaned", not file_exists(failed_stage))
+    check("alias guard preserves winner", not scv_compile_snapshot_publish_staged_chunk_v1(final_path, final_path, digest) and same_bytes(final_path, content))
+
+    # An exclusive-create collision belongs to someone else; never delete it.
+    val collision_digest = "sha256_" + sha256_text("collision")
+    val collision = stage_a + "/.scv-chunk-" + collision_digest
+    check("collision installed", file_create_exclusive(collision, "owned prefix"))
+    check("collision refused", not scv_compile_snapshot_write_chunk_v1(cache, stage_a, collision_digest, "collision"))
+    check("collision preserved", same_bytes(collision, "owned prefix"))
+    check("collision final absent", not file_exists(chunks + "/" + collision_digest + ".blob"))
+
+    # Actual cold/warm work, not source-string/per-file-count arithmetic. Report
+    # elapsed time without treating a noisy host threshold as correctness.
+    var payload = ""
+    for index in 0..256:
+        payload = payload + "source payload — 한글\r\n"
+    val cold_start = time_now_nanos()
+    for index in 0..16:
+        val bytes = payload + str(index)
+        val key = "sha256_" + sha256_text(bytes)
+        check("cold batch {index}", scv_compile_snapshot_write_chunk_v1(cache, stage_b, key, bytes))
+    val cold_ns = time_now_nanos() - cold_start
+    val warm_start = time_now_nanos()
+    for index in 0..16:
+        val bytes = payload + str(index)
+        val key = "sha256_" + sha256_text(bytes)
+        check("warm batch {index}", scv_compile_snapshot_write_chunk_v1(cache, root + "/absent-stage", key, bytes))
+    val warm_ns = time_now_nanos() - warm_start
+    check("no per-file stage entries remain", dir_list(stage_b).len() == 0)
+    check("owned fixture cleanup", dir_remove(root, true))
+    print "SCV_CHUNK_PERF cold_ns={cold_ns} warm_ns={warm_ns} chunks=16"
+    print "SCV_CHUNK_PUBLICATION checks={checks} failures={failures}"
+    if failures == 0: 0 else: 1

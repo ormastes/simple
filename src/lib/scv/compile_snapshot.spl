@@ -13,12 +13,12 @@ use app.io.mod.{
 use app.io.file_ops.{path_absolute}
 use std.nogc_sync_mut.fs.host_path.{host_path_native, host_path_native_for,
     host_path_canonical_for, host_is_windows_host}
-use app.io.time_ops.{time_now_unix_micros}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.text_bytes.{text_to_utf8_bytes}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
     transient_scope_pause, transient_scope_end, transient_promote}
-use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes,
+    secure_temp_dir_raw, file_publish_noreplace_raw}
 use std.nogc_sync_mut.io_runtime.{
     dir_list, dir_remove, file_rename,
     process_is_running
@@ -292,18 +292,43 @@ fn scv_compile_snapshot_open_v1(
         receipt_path: receipt_path,
         source_drifted: false)
 
+fn scv_compile_snapshot_publish_staged_chunk_v1(
+    staged_path: text, final_path: text, digest: text
+) -> bool:
+    # Caller owns this exclusively created file in its private snapshot stage.
+    # Keep this boundary separate so a reader/writer interleaving can be tested
+    # without a process-global fault hook or a partially visible final object.
+    if staged_path == final_path or digest == "":
+        return false
+    if scv_compile_snapshot_source_digest_v1(staged_path) != digest:
+        file_delete(staged_path)
+        return false
+    val published = file_publish_noreplace_raw(staged_path, final_path)
+    # Windows/renameat2 consume the stage; the POSIX link fallback or a losing
+    # publisher can leave it. Never delete or replace the winning final object.
+    if file_exists(staged_path) and not file_delete(staged_path):
+        return false
+    if published == 1:
+        return true
+    if published == 0:
+        return scv_compile_snapshot_source_digest_v1(final_path) == digest
+    false
+
 fn scv_compile_snapshot_write_chunk_v1(
-    cache_root: text, digest: text, content: text
+    cache_root: text, staging: text, digest: text, content: text
 ) -> bool:
     val chunk_dir = "{cache_root}/objects/chunks"
     dir_create(chunk_dir, true)
     val final_path = "{chunk_dir}/{digest}.blob"
     if file_exists(final_path):
         return scv_compile_snapshot_source_digest_v1(final_path) == digest
-    if file_create_excl(final_path, content):
-        return scv_compile_snapshot_source_digest_v1(final_path) == digest
-    file_exists(final_path) and
-        scv_compile_snapshot_source_digest_v1(final_path) == digest
+    # One secure directory belongs to the whole snapshot invocation, not each
+    # file. A failed exclusive write is cleaned by its enclosing stage owner;
+    # it must never expose a final path or delete an unowned collision.
+    val staged_path = "{staging}/.scv-chunk-{digest}"
+    if not file_create_excl(staged_path, content):
+        return false
+    scv_compile_snapshot_publish_staged_chunk_v1(staged_path, final_path, digest)
 
 # rt_path_absolute canonicalizes EXISTING paths on Windows into the verbatim
 # `\\?\C:\...` form but leaves not-yet-created ones (build/scv) plain, so the
@@ -338,7 +363,7 @@ fn scv_compile_snapshot_materialize_source_unscoped_v1(
     val digest = scv_content_id_for_u8(bytes)
     if digest != "sha256_{entry.content_digest}" or bytes.len() != entry.byte_count:
         return ScvCompileMaterializedSourceV1("snapshot-index-drift:{rel}", "", false)
-    if not scv_compile_snapshot_write_chunk_v1(cache_root, digest, content!):
+    if not scv_compile_snapshot_write_chunk_v1(cache_root, staging, digest, content!):
         return ScvCompileMaterializedSourceV1("snapshot-chunk-publish-failed:{rel}", "", false)
     val destination = "{staging}/{rel}"
     scv_create_parent_dir(destination)
@@ -430,10 +455,13 @@ fn scv_compile_snapshot_acquire_v1(
         # CRLF by an older runtime): it can never become valid, and keeping it
         # would wedge every later publish on snapshot-destination-conflict.
         dir_remove(planned_destination, true)
-    val staging = "{owned_cache_root}/snapshots/.tmp.{rt_getpid()}.{time_now_unix_micros()}"
-    if dir_exists(staging):
-        return scv_compile_snapshot_invalid_v1("snapshot-staging-busy")
-    if not dir_create(staging, true):
+    val staging_parent = "{owned_cache_root}/snapshots"
+    if not dir_create(staging_parent, true):
+        return scv_compile_snapshot_invalid_v1("snapshot-staging-create-failed")
+    # Existing secure owner primitive creates a unique private directory. Keep
+    # the PID in the same recovery field; no time-only identity or retry loop.
+    val staging = secure_temp_dir_raw(staging_parent, ".tmp.{rt_getpid()}.")
+    if staging.len() <= 0:
         return scv_compile_snapshot_invalid_v1("snapshot-staging-create-failed")
     var inventory_rows: [text] = []
     var source_drifted = false

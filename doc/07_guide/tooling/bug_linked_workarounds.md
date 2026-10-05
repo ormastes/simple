@@ -4,6 +4,15 @@ Status: accepted contract; implementation is pending runtime qualification.
 These examples describe the intended interface, not a recorded CLI or SPipe
 PASS. Use a qualified self-hosted full CLI that contains the feature.
 
+The user-selected next-rebuild retirement extension is documented in
+[workaround_retirement.md](../../05_design/workaround_retirement.md). Its
+prepare/admit API is a draft awaiting native qualification and bootstrap
+wiring. It requires an applied linked root fix, actual producer/source
+admission, and original-form tests in a new isolated checkout. Neither an
+existing marker, fetched commit nor a fixed bug status alone authorizes
+retirement. Current retained entries are listed in
+[the lifecycle inventory](../../08_tracking/bug/workaround_retirement_inventory_2026-10-05.md).
+
 ## Mark the affected block
 
 Place a comment immediately before the source block that temporarily avoids a

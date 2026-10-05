@@ -14,6 +14,16 @@
 #define SIMPLE_BACKEND_BRIDGE_MAGIC_V1 UINT32_C(0x31504253) /* "SBP1" */
 #define SIMPLE_BACKEND_BRIDGE_VERSION_V1 UINT32_C(1)
 #define SIMPLE_BACKEND_BRIDGE_HEADER_SIZE_V1 UINT32_C(32)
+/* Complete request, little endian: magic/version/ABI/role:u32, caps:u64,
+ * six u32 byte lengths, then backend/target/cpu/features/optimization/MIR ABI.
+ * Features are count:u32 followed by length:u32 + UTF-8 bytes per item.
+ * Text slices are borrowed only during open_session. Legacy 16-byte requests
+ * are rejected; empty CPU explicitly means the provider's default CPU.
+ * Limits: 64 KiB request, 4 KiB text/item, 128 features, 32 KiB feature wire. */
+#define SIMPLE_BACKEND_REQUEST_MAGIC_V1 UINT32_C(0x31514253) /* SBQ1 */
+#define SIMPLE_BACKEND_REQUEST_VERSION_V1 UINT32_C(1)
+#define SIMPLE_BACKEND_REQUEST_HEADER_SIZE_V1 UINT32_C(48)
+#define SIMPLE_BACKEND_REQUEST_MAX_V1 UINT32_C(65536)
 /* The existing boxed first argument remains ABI-compatible. Production
  * admitted calls encode the already-open provider handle instead of a path:
  * magic:u32, version:u32, handle:u64. Untagged bytes retain legacy path mode. */

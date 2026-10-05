@@ -1,0 +1,63 @@
+# Standalone process: exercises real lexer state and HashMap-backed site IDs.
+use compiler.core.lexer.{lex_init, lex_next, lex_token_text, lex_source_char_at, lex_source_slice}
+use compiler.core.lexer.{lex_snapshot_save, lex_snapshot_restore, lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation, current_core_lexer_slot, lex_env_i64}
+use compiler.frontend.core.lexer_struct.{CoreLexer, make_core_lexer}
+use compiler.core.collection_feedback.{parser_collection_site_reset, parser_collection_local_site_id, parser_collection_site_owner_push, parser_collection_site_owner_restore}
+use std.io_runtime.{env_set}
+
+var checks: i64 = 0
+var failures: i64 = 0
+
+fn check(name: text, okay: bool):
+    checks = checks + 1
+    if not okay:
+        failures = failures + 1
+        print "FAIL {name}"
+
+fn main() -> i64:
+    lex_init("alpha beta\n")
+    check("slot character receiver", lex_source_char_at(0) == "a")
+    check("slot slice receiver", lex_source_slice(0, 5) == "alpha")
+    val first = lex_next()
+    check("first token", first > 0 and lex_token_text() == "alpha")
+    val saved = lex_snapshot_save()
+    val next_kind = lex_next()
+    val next_text: text = lex_token_text()
+    lex_snapshot_restore(saved)
+    val replay_kind = lex_next()
+    check("snapshot token replay", next_kind == replay_kind and next_text == "beta" and lex_token_text() == next_text)
+
+    lex_init("éx\n")
+    check("UTF8 character remains codepoint indexed", lex_source_char_at(0) == "é" and lex_source_char_at(1) == "x")
+    check("UTF8 slice remains codepoint indexed", lex_source_slice(0, 1) == "é")
+    var owner: CoreLexer = current_core_lexer_slot[0]
+    owner.indent_stack = [0, 4]
+    owner.paren_depth = 2
+    current_core_lexer_slot[0] = owner
+    lex_pop_indent()
+    val popped: CoreLexer = current_core_lexer_slot[0]
+    check("pop writes owner slot", popped.indent_stack.len() == 1 and popped.indent_stack[0] == 0)
+    lex_enable_forced_indentation()
+    val enabled: CoreLexer = current_core_lexer_slot[0]
+    check("enable writes owner slot", enabled.force_indent_bracket_depths.len() == 1 and enabled.force_indent_bracket_depths[0] == 2)
+    lex_disable_forced_indentation()
+    val disabled: CoreLexer = current_core_lexer_slot[0]
+    check("disable writes owner slot", disabled.force_indent_bracket_depths.len() == 0)
+    val ascii: CoreLexer = make_core_lexer("abc")
+    check("indexed text byte match", ascii.chars_match(0, 3, "abc"))
+    check("indexed text mismatch", not ascii.chars_match(0, 3, "abd"))
+    check("decimal facade signed value", env_set("SIMPLE_HELPER_LEX_I64", "-42") and lex_env_i64("SIMPLE_HELPER_LEX_I64", 9) == -42)
+    check("decimal facade empty fallback", env_set("SIMPLE_HELPER_LEX_I64", "") and lex_env_i64("SIMPLE_HELPER_LEX_I64", 9) == 9)
+
+    parser_collection_site_reset()
+    val stem = parser_collection_local_site_id("unit", "cache", 17)
+    check("HashMap optional first allocation", stem == "ast://unit/local/cache#17")
+    check("HashMap retained ordinal", parser_collection_local_site_id("unit", "cache", 17) == stem + ":1")
+    val previous = parser_collection_site_owner_push("Worker")
+    check("HashMap distinct lexical owner", parser_collection_local_site_id("unit", "cache", 17) == "ast://unit/Worker/local/cache#17")
+    parser_collection_site_owner_restore(previous)
+    check("HashMap prior owner restored", parser_collection_local_site_id("unit", "cache", 17) == stem + ":2")
+    parser_collection_site_reset()
+    check("HashMap reset resets ordinal", parser_collection_local_site_id("unit", "cache", 17) == stem)
+    print "helper lexer typed receivers: {checks} checks, {failures} failures"
+    if failures == 0: 0 else: 1

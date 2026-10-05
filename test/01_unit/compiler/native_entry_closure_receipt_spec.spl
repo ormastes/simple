@@ -9,6 +9,56 @@ fn closure_test_binding() -> NativeEntryClosureBindingV1:
         "src/main.spl", ["src/app", "src/lib"], sha256_text("policy"), sha256_text("producer"))
 
 describe "authenticated entry closure selections":
+    it "accepts the full CLI packet directory roots and its individual entry":
+        val roots = ["src/compositions/kernel_llvm_cranelift", "src/compiler",
+            "src/app", "src/lib", "src/os", "src/plugins",
+            "src/package_ownership", "src/compositions", "src/app/cli/main.spl"]
+        for root in roots:
+            expect(native_entry_closure_root_valid_v1(root)).to_equal(true)
+        val binding = NativeEntryClosureBindingV1("revision", "commit", "tree",
+            sha256_text("inventory"), "src/app/cli/main.spl", roots,
+            sha256_text("policy"), sha256_text("producer"))
+        expect(native_entry_closure_binding_digest_v1(binding).is_ok()).to_equal(true)
+        expect(native_entry_closure_root_valid_v1("src/한글 sources/main.spl")).to_equal(true)
+        expect(native_entry_closure_root_valid_v1("test/fixtures/simple.sdn")).to_equal(true)
+
+    it "rejects checkout-wide, escaping, absolute and ambiguous root spellings":
+        val invalid = ["", ".", "..", "src/../other", "src/./lib", "./src/lib",
+            "/outside/src", "C:/outside/src", "C:src", "\\\\server\\share",
+            "src\\lib", "src//lib", "src/lib/", "src|lib", "src\nlib", "src\rlib", "src\tlib", "src/한글\n"]
+        for root in invalid:
+            expect(native_entry_closure_root_valid_v1(root)).to_equal(false)
+            val binding = NativeEntryClosureBindingV1("revision", "commit", "tree",
+                sha256_text("inventory"), "src/main.spl", [root],
+                sha256_text("policy"), sha256_text("producer"))
+            val rejected = native_entry_closure_binding_digest_v1(binding)
+            expect(rejected.is_err()).to_equal(true)
+            expect(rejected.unwrap_err()).to_equal("entry-closure-root-invalid")
+
+    it "retains stable exact identity and distinguishes changed or reordered roots":
+        val binding = closure_test_binding()
+        val same = closure_test_binding()
+        val swapped = NativeEntryClosureBindingV1(binding.revision, binding.commit,
+            binding.tree, binding.inventory_digest, binding.entry, ["src/lib", "src/app"],
+            binding.policy_digest, binding.producer_digest)
+        val changed = NativeEntryClosureBindingV1(binding.revision, binding.commit,
+            binding.tree, binding.inventory_digest, binding.entry, ["src/app", "src/compiler"],
+            binding.policy_digest, binding.producer_digest)
+        val digest = native_entry_closure_binding_digest_v1(binding).unwrap()
+        expect(native_entry_closure_binding_digest_v1(same).unwrap()).to_equal(digest)
+        expect(native_entry_closure_binding_digest_v1(swapped).unwrap() == digest).to_equal(false)
+        expect(native_entry_closure_binding_digest_v1(changed).unwrap() == digest).to_equal(false)
+
+    it "does not admit directory rows as source inventory members":
+        val binding = closure_test_binding()
+        val digest = native_entry_closure_binding_digest_v1(binding).unwrap()
+        val selection = NativeEntryClosureSelectionV1(digest,
+            ["src/main.spl", "src/lib"], [sha256_text("entry"), sha256_text("directory")], [5, 0])
+        val rejected = native_entry_closure_validate_selection_v1(binding, selection,
+            selection.identities, selection.digests, selection.byte_counts)
+        expect(rejected.is_err()).to_equal(true)
+        expect(rejected.unwrap_err()).to_equal("entry-closure-source-invalid")
+
     it "requires exact owner producer entry and ordered roots at receipt opening":
         val producer = sha256_text("producer")
         val roots = ["src/app", "src/lib"]

@@ -1,0 +1,190 @@
+"""
+## Purpose and audience
+Purpose: Pin the pure-Simple WebP lossless (VP8L) decoder the browser uses
+for `image/webp` responses: every VP8L transform (predictor, cross-color,
+subtract-green, color indexing with 1/2/4/8-bit pixel bundling), color
+cache, meta prefix codes (entropy image), LZ77 backward references, alpha,
+and the extended (VP8X) container — and prove hostile bytes are refused
+with an error, never a crash or an unbounded allocation.
+Audience: maintainers of the image decoders used by the browser engine.
+## Operator workflow
+Run with the test runner from the repo root. Fixtures live in
+test/fixtures/image/webp_lossless/<case>/: `input.webp` was written by
+Pillow 12.1.1 (bundled libwebp) with `lossless=True, exact=True` and the
+method/quality named per case below; `expected.rgba` is the source image
+(u32le width, u32le height, then RGBA bytes). Pillow's own decode of each
+file was asserted byte-identical to the source when they were generated,
+so the oracle is the source pixels themselves. `cwebp`/`dwebp` are not
+installed on the authoring host.
+Cases: one_pixel (1x1 RGBA), palette_2/4/16/200 (color indexing with
+8/4/2/1 pixels per byte; 16 and 200 also use a color cache), photo_m0
+(subtract-green + predictor), photo_m6 / alpha_gradient / vp8x_exif
+(predictor + cross-color; vp8x_exif adds a VP8X header and an EXIF chunk),
+mixed_meta (160x120, 7 prefix-code groups via an entropy image, color
+cache, backward references that cross group blocks).
+## Compatibility and limitations
+Lossless is exact: every pixel must match. Lossy VP8 and animation are
+rejected with named reasons here.
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+# @cover src/lib/common/image/webp_decode.spl 90%
+
+use std.spec.*
+use std.spec.step
+use std.common.image.webp_decode.{decode_webp_to_argb, decode_webp_to_argb_bounded, webp_signature_valid}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes}
+
+val FIXTURES = "test/fixtures/image/webp_lossless/"
+
+fn fixture(case_name: text, file: text) -> [u8]:
+    file_read_bytes(FIXTURES + case_name + "/" + file)
+
+fn mismatches(case_name: text) -> i64:
+    """Pixels differing from the source image; -1 on decode failure or a
+    geometry mismatch."""
+    val decoded = decode_webp_to_argb(fixture(case_name, "input.webp"))
+    if decoded.is_err():
+        return -1
+    val image = decoded.unwrap()
+    val ref = fixture(case_name, "expected.rgba")
+    val w = ref[0].to_i64() | (ref[1].to_i64() << 8)
+    val h = ref[4].to_i64() | (ref[5].to_i64() << 8)
+    if image.width.to_i64() != w or image.height.to_i64() != h:
+        return -1
+    var bad: i64 = 0
+    var i: i64 = 0
+    while i < w * h:
+        val p = 8 + i * 4
+        val want = (ref[p + 3].to_u32() << 24) | (ref[p].to_u32() << 16) | (ref[p + 1].to_u32() << 8) | ref[p + 2].to_u32()
+        if image.pixels[i] != want:
+            bad = bad + 1
+        i = i + 1
+    bad
+
+fn le32(v: i64) -> [u8]:
+    [(v & 255).to_u8(), ((v >> 8) & 255).to_u8(), ((v >> 16) & 255).to_u8(), ((v >> 24) & 255).to_u8()]
+
+fn riff_with_chunk(fourcc: [u8], payload: [u8]) -> [u8]:
+    """RIFF/WEBP container holding one chunk, sizes consistent."""
+    val padded = payload.len() + (payload.len() & 1)
+    var out: [u8] = [82u8, 73u8, 70u8, 70u8]
+    for b in le32(4 + 8 + padded):
+        out.push(b)
+    for b in [87u8, 69u8, 66u8, 80u8]:
+        out.push(b)
+    for b in fourcc:
+        out.push(b)
+    for b in le32(payload.len()):
+        out.push(b)
+    for b in payload:
+        out.push(b)
+    if (payload.len() & 1) == 1:
+        out.push(0u8)
+    out
+
+fn vp8l_payload(file: [u8]) -> [u8]:
+    """The VP8L chunk body of a simple-format lossless file."""
+    val size = file[16].to_i64() | (file[17].to_i64() << 8) | (file[18].to_i64() << 16) | (file[19].to_i64() << 24)
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < size:
+        out.push(file[20 + i])
+        i = i + 1
+    out
+
+fn prefix(data: [u8], n: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < n and i < data.len():
+        out.push(data[i])
+        i = i + 1
+    out
+
+val VP8L_TAG: [u8] = [86u8, 80u8, 56u8, 76u8]
+
+describe "WebP lossless decode is exact":
+    it "decodes palette images with every pixel-bundling width":
+        step("2, 4, 16 and 200 colors pack 8, 4, 2 and 1 pixels per index byte")
+        expect(mismatches("palette_2")).to_equal(0)
+        expect(mismatches("palette_4")).to_equal(0)
+        expect(mismatches("palette_16")).to_equal(0)
+        expect(mismatches("palette_200")).to_equal(0)
+
+    it "inverts subtract-green, predictor and cross-color transforms":
+        expect(mismatches("photo_m0")).to_equal(0)
+        expect(mismatches("photo_m6")).to_equal(0)
+
+    it "keeps alpha and decodes a single pixel":
+        expect(mismatches("alpha_gradient")).to_equal(0)
+        expect(mismatches("one_pixel")).to_equal(0)
+        val one = decode_webp_to_argb(fixture("one_pixel", "input.webp")).unwrap()
+        expect(one.pixels[0]).to_equal(0x280A141Eu32)
+        assert_true(one.lossless)
+
+    it "decodes the extended VP8X container with metadata chunks":
+        expect(mismatches("vp8x_exif")).to_equal(0)
+
+    it "decodes meta prefix codes, color cache and backward references":
+        expect(mismatches("mixed_meta")).to_equal(0)
+
+describe "WebP decode rejects hostile input before allocating":
+    it "rejects empty, short and non-WebP input":
+        val empty: [u8] = []
+        assert_true(decode_webp_to_argb(empty).is_err())
+        assert_true(decode_webp_to_argb([82u8, 73u8, 70u8, 70u8]).is_err())
+        assert_false(webp_signature_valid([255u8, 216u8, 255u8, 224u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]))
+        assert_true(webp_signature_valid(fixture("one_pixel", "input.webp")))
+
+    it "rejects a RIFF size larger than the input":
+        val full = fixture("photo_m6", "input.webp")
+        expect(decode_webp_to_argb(prefix(full, full.len() - 1)).unwrap_err()).to_equal("WebP RIFF size exceeds input")
+
+    it "refuses a 16384x16384 VP8L header without allocating":
+        step("signature 0x2f, then 14-bit width-1 = 16383 and height-1 = 16383")
+        val payload: [u8] = [47u8, 255u8, 255u8, 255u8, 15u8, 0u8]
+        val r = decode_webp_to_argb(riff_with_chunk(VP8L_TAG, payload))
+        expect(r.unwrap_err()).to_equal("WebP dimensions exceed decoder limits")
+
+    it "enforces the caller's pixel budget":
+        val bytes = fixture("photo_m6", "input.webp")
+        expect(decode_webp_to_argb_bounded(bytes, 560).unwrap_err()).to_equal("WebP dimensions exceed decoder limits")
+        assert_true(decode_webp_to_argb_bounded(bytes, 561).is_ok())
+        assert_true(decode_webp_to_argb_bounded(bytes, 0).is_err())
+
+    it "rejects every truncation of the VP8L bitstream":
+        step("re-wrap each 23-byte-stepped prefix in a consistent container")
+        for case_name in ["photo_m6", "palette_16"]:
+            val payload = vp8l_payload(fixture(case_name, "input.webp"))
+            var n: i64 = 0
+            var tried: i64 = 0
+            var failed: i64 = 0
+            while n < payload.len() - 1:
+                tried = tried + 1
+                if decode_webp_to_argb(riff_with_chunk(VP8L_TAG, prefix(payload, n))).is_err():
+                    failed = failed + 1
+                n = n + 23
+            expect(failed).to_equal(tried)
+
+    it "survives corrupted bitstream bytes":
+        step("flip bytes across the meta-code fixture; decoding must return, never crash")
+        val full = fixture("mixed_meta", "input.webp")
+        var pos: i64 = 20
+        var returned: i64 = 0
+        var tried: i64 = 0
+        while pos < full.len():
+            var mutated = prefix(full, full.len())
+            mutated[pos] = (mutated[pos].to_i64() ^ 0x5A).to_u8()
+            val r = decode_webp_to_argb(mutated)
+            tried = tried + 1
+            if r.is_ok():
+                val image = r.unwrap()
+                expect(image.pixels.len()).to_equal(image.width.to_i64() * image.height.to_i64())
+            returned = returned + 1
+            pos = pos + 397
+        expect(returned).to_equal(tried)
+
+    it "rejects unsupported VP8L versions and animation":
+        val bad_version: [u8] = [47u8, 0u8, 0u8, 0u8, 32u8, 0u8]
+        expect(decode_webp_to_argb(riff_with_chunk(VP8L_TAG, bad_version)).unwrap_err()).to_equal("WebP VP8L version is unsupported")
+        val vp8x_animated: [u8] = [2u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+        expect(decode_webp_to_argb(riff_with_chunk([86u8, 80u8, 56u8, 88u8], vp8x_animated)).unwrap_err()).to_equal("animated WebP is unsupported")
