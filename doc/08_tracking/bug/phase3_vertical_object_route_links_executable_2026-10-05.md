@@ -26,7 +26,13 @@ The command contract covers both backends, spaces in paths and an empty inherite
 output-mode environment. It passed on Windows via Git Bash. This shell test
 does not prove native compilation or linking.
 
-Native probe: `windows-restart-20261004/p3-explicit-object-probe20-1`, two
+Native probe: `windows-restart-20261004/p3-explicit-object-probe20-2`, two
 completed entries above, isolated outputs and their closed existing caches.
-Request SHA256: `15f22727cbe8b55d9cec773d62f772882adafd87b549257103fa374e1ec7b707`.
+Request SHA256: `a54290f427efcbeeb8015745aaebb372721d3b600c156d1425099c5bf8ba13c2`.
 No cache stamp rewriting; no success is inferred from a cache directory.
+
+The first probe ended before valid compilation: its generated inventory had
+CRLF endings, leaving a carriage return in shell-read entry paths. Its failures
+are harness input errors, not new compiler regressions. The successor requires
+exact LF-only inventory bytes before hashing/admission and preserves the first
+attempt's evidence.
