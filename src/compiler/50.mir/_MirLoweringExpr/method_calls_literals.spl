@@ -1300,6 +1300,22 @@ impl MirLowering:
             self.array_element_struct_syms[result.id] = element_owner ?? ""
         result
 
+    me declared_record_receiver_owner(receiver: HirExpr) -> i64:
+        # Only a bound runtime value can use instance recovery. A type-valued
+        # static receiver must retain its existing static dispatch path.
+        var binding: i64 = -1
+        match receiver.kind:
+            case HirExprKind.Var(symbol): binding = symbol.id
+            case HirExprKind.NamedVar(symbol, _): binding = symbol.id
+            case _: return -1
+        if not self.local_map.has(binding): return -1
+        if val declared = self.receiver_declared_type(receiver):
+            match declared.kind:
+                case HirTypeKind.Named(owner, _):
+                    if self.symbols.record_owner_identity_scalar_raw(owner.id) != "": return owner.id
+                case _: ()
+        -1
+
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution, static_receiver_name_hint: text, static_receiver_symbol_hint: i64) -> LocalId:
         """Lower method call based on resolution.
 
@@ -3257,6 +3273,7 @@ impl MirLowering:
                 result
 
             case Unresolved:
+                val known_record_owner = self.declared_record_receiver_owner(receiver)
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] resolution-arm=unresolved method={method}\n")
                 # Bug #138/#156 keystone: minimal-viable native resolution of
@@ -3350,7 +3367,7 @@ impl MirLowering:
                                             case _: ()
                                     case _: ()
                             case _: ()
-                if static_method_id == nil and static_receiver_name == "":
+                if static_method_id == nil and static_receiver_name == "" and known_record_owner < 0:
                     static_method_id = self.symbols.lookup_unique_static_method(method)
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] unresolved-static method={method}\n")
@@ -3394,6 +3411,9 @@ impl MirLowering:
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] unresolved-receiver method={method} local={unresolved_receiver_local.id}\n")
                 var unresolved_struct_name = self.struct_value_syms.get(unresolved_receiver_local.id)
+                val declared_record_owner = if unresolved_struct_name == nil or unresolved_struct_name == "": known_record_owner else: -1
+                if declared_record_owner >= 0:
+                    unresolved_struct_name = Some(self.symbols.record_owner_identity_scalar_raw(declared_record_owner))
                 # Enum values carry runtime enum handles, not struct layouts.
                 # Their declared owner is still authoritative for instance
                 # methods when flat HIR leaves MethodResolution unresolved.
@@ -3415,7 +3435,10 @@ impl MirLowering:
                     val unresolved_method_key = "{unresolved_struct_name}::{method}"
                     # Method symbols are owner-qualified during HIR lowering,
                     # so unrelated types may safely expose the same method name.
-                    val unresolved_method_id: SymbolId? = if self.struct_method_syms.contains(unresolved_method_key):
+                    val unresolved_method_id: SymbolId? = if declared_record_owner >= 0:
+                        val candidate: i64 = self.symbols.record_instance_method_scalar_raw(declared_record_owner, method)
+                        if candidate >= 0: Some(SymbolId(id: candidate)) else: nil
+                    elif self.struct_method_syms.contains(unresolved_method_key):
                         Some(self.struct_method_syms[unresolved_method_key])
                     else:
                         match self.receiver_declared_type(receiver):
@@ -3445,7 +3468,7 @@ impl MirLowering:
                     # up through the symbol table's owner-qualified registry,
                     # which covers inline class methods cross-module.
                     var final_unresolved_method_id = unresolved_method_id
-                    if final_unresolved_method_id == nil:
+                    if final_unresolved_method_id == nil and declared_record_owner < 0:
                         val unresolved_owner_type_id = self.symbols.lookup_or_invalid(unresolved_struct_name ?? "")
                         if unresolved_owner_type_id.is_valid():
                             if val name_derived_method_id = self.symbols.lookup_method_in_type(unresolved_owner_type_id, method):

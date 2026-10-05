@@ -1,0 +1,108 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, HirSymbol, SymbolId, SymbolKind, SymbolTable, ScopeId, MethodResolution}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{MirType, MirSignature}
+use compiler.mir.mir_instructions.{MirConstValue}
+use compiler.mir.mir_serialization.{serialize_mir_function}
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+
+fn recovery_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn recovery_symbol(id: i64, name: text, kind: SymbolKind, owner: text?, type_: HirType?) -> HirSymbol:
+    HirSymbol(id: SymbolId(id: id), name: name, kind: kind, type_: type_,
+        scope: ScopeId(id: 0), span: Span.empty(), visibility: Visibility.Public,
+        is_public: true, is_mutable: false, defining_module: owner)
+
+fn recovery_symbols(owner_kind: SymbolKind, include_method: bool) -> SymbolTable:
+    var symbols = SymbolTable.new()
+    val receiver = recovery_type(HirTypeKind.Named(SymbolId(id: 10), []))
+    symbols.register_preserved_symbol(recovery_symbol(10, "Box", owner_kind, Some("src/left.spl"), nil))
+    symbols.register_preserved_symbol(recovery_symbol(11, "Box", SymbolKind.Struct, Some("src/right.spl"), nil))
+    symbols.register_preserved_symbol(recovery_symbol(20, "value", SymbolKind.Parameter, nil, receiver))
+    val signature = recovery_type(HirTypeKind.Function([receiver], recovery_type(HirTypeKind.Int(64, true))))
+    if include_method:
+        symbols.register_preserved_symbol(recovery_symbol(30, "left.Box::inspect", SymbolKind.Method, Some("src/left.spl"), signature))
+    symbols.register_preserved_symbol(recovery_symbol(31, "right.Box::inspect", SymbolKind.Method, Some("src/right.spl"), signature))
+    symbols.register_preserved_symbol(recovery_symbol(32, "right.Other::inspect", SymbolKind.Function, Some("src/right.spl"),
+        recovery_type(HirTypeKind.Function([], recovery_type(HirTypeKind.Int(64, true))))))
+    symbols
+
+fn force_record_recovery(symbols: SymbolTable, method: text) -> (i64, text):
+    var lowering = MirLowering.new(symbols)
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 90), "probe", MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+    val local = builder.new_temp(MirType.i64())
+    builder.emit_const(local, MirConstValue.Int(0), MirType.i64())
+    lowering.builder = builder
+    lowering.bind_local(20, local)
+    lowering.remember_local_hir_type(local.id, recovery_type(HirTypeKind.Named(SymbolId(id: 10), [])), 0, 0)
+    # Deliberately erase representation ownership and poison the unrelated
+    # bare-name registry: only the exact declared owner may resolve the call.
+    lowering.struct_method_syms["Box::" + method] = SymbolId(id: 31)
+    val receiver = HirExpr(kind: HirExprKind.Var(SymbolId(id: 20)), has_type_: false,
+        type_: recovery_type(HirTypeKind.Unit), span: Span.empty())
+    val _result = lowering.lower_method_call(receiver, method, [], MethodResolution.Unresolved, "", -1)
+    var finished = lowering.builder
+    val function = finished.end_function()
+    (lowering.errors.len(), serialize_mir_function(function))
+
+describe "declared record method recovery with erased receiver ownership":
+    it "recovers Struct and Class methods from the exact declared owner":
+        for kind in [SymbolKind.Struct, SymbolKind.Class]:
+            val (errors, mir) = force_record_recovery(recovery_symbols(kind, true), "inspect")
+            expect(errors).to_equal(0)
+            expect(mir).to_contain("left.Box")
+            expect(mir.contains("right.Box")).to_be(false)
+            expect(mir.contains("right.Other")).to_be(false)
+
+    it "rejects a missing method instead of borrowing same-name methods or statics":
+        val (errors, mir) = force_record_recovery(recovery_symbols(SymbolKind.Struct, false), "inspect")
+        expect(errors).to_be_greater_than(0)
+        expect(mir.contains("right.Box")).to_be(false)
+        expect(mir.contains("right.Other")).to_be(false)
+
+    it "rejects forged exact mappings and non-Method declarations":
+        var symbols = recovery_symbols(SymbolKind.Struct, true)
+        symbols.exact_symbols["left.Box::inspect"] = 31
+        expect(symbols.record_instance_method_scalar_raw(10, "inspect")).to_equal(-1)
+        symbols.exact_symbols["left.Box::inspect"] = 32
+        expect(symbols.record_instance_method_scalar_raw(10, "inspect")).to_equal(-1)
+        expect(symbols.record_instance_method_scalar_raw(99999, "inspect")).to_equal(-1)
+        symbols.register_preserved_symbol(recovery_symbol(42, "left.Box::inspect", SymbolKind.Method, Some("src/right.spl"), nil))
+        symbols.exact_symbols["left.Box::inspect"] = 42
+        expect(symbols.record_instance_method_scalar_raw(10, "inspect")).to_equal(-1)
+
+    it "rejects an ownerless record borrowing an owned method and permits a genuine ownerless method":
+        var symbols = recovery_symbols(SymbolKind.Struct, true)
+        symbols.register_preserved_symbol(recovery_symbol(40, "Box", SymbolKind.Struct, nil, nil))
+        symbols.exact_symbols["Box::inspect"] = 30
+        expect(symbols.record_instance_method_scalar_raw(40, "inspect")).to_equal(-1)
+        symbols.register_preserved_symbol(recovery_symbol(41, "Box::inspect", SymbolKind.Method, nil, nil))
+        symbols.exact_symbols["Box::inspect"] = 41
+        expect(symbols.record_instance_method_scalar_raw(40, "inspect")).to_equal(41)
+
+    it "does not admit non-record symbol kinds as record owners":
+        for kind in [SymbolKind.Enum, SymbolKind.Variable, SymbolKind.Import, SymbolKind.TypeAlias]:
+            val symbols = recovery_symbols(kind, true)
+            expect(symbols.record_owner_identity_scalar_raw(10)).to_equal("")
+            expect(symbols.record_instance_method_scalar_raw(10, "inspect")).to_equal(-1)
+
+    it "preserves a custom get method instead of treating its owner as a runtime Dict":
+        var symbols = recovery_symbols(SymbolKind.Struct, false)
+        val receiver = recovery_type(HirTypeKind.Named(SymbolId(id: 10), []))
+        symbols.register_preserved_symbol(recovery_symbol(33, "left.Box::get", SymbolKind.Method, Some("src/left.spl"),
+            recovery_type(HirTypeKind.Function([receiver], recovery_type(HirTypeKind.Int(64, true))))))
+        val (errors, mir) = force_record_recovery(symbols, "get")
+        expect(errors).to_equal(0)
+        expect(mir).to_contain("left.Box")
+        expect(mir.contains("rt_dict_get")).to_be(false)
+
+    it "keeps an unbound type-valued receiver out of instance recovery":
+        var lowering = MirLowering.new(recovery_symbols(SymbolKind.Struct, true))
+        val receiver = HirExpr(kind: HirExprKind.Var(SymbolId(id: 10)), has_type_: true,
+            type_: recovery_type(HirTypeKind.Named(SymbolId(id: 10), [])), span: Span.empty())
+        expect(lowering.declared_record_receiver_owner(receiver)).to_equal(-1)
