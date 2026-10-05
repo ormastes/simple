@@ -1,0 +1,89 @@
+#!/bin/sh
+# Native provider-only check: raw bitmap wire, AVX512 instruction dispatch, and
+# fail-closed feature refusal. This does not qualify Simple DB/HTTP callsites.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:-${RUNNER_TEMP:-/tmp}/simple-vector-bitmap-x86-avx512-$$}
+case "$out" in /*) ;; *) echo 'absolute output path required' >&2; exit 2;; esac
+[ ! -e "$out" ] || { echo 'fresh output required' >&2; exit 2; }
+mkdir -p "$out"
+exec 3>&1
+exec >"$out/build.log" 2>&1
+cc=${CLANG:-clang}
+objdump=${OBJDUMP:-objdump}
+src=$root/src/runtime/providers/vector
+abi=$root/src/runtime/simple_vector_kernel_abi_v1.h
+selfcheck=$root/src/runtime/test/vector_bitmap_target_selfcheck.c
+
+"$cc" --version >"$out/toolchain.txt"
+"$objdump" --version >>"$out/toolchain.txt"
+grep -m1 '^flags' /proc/cpuinfo >"$out/host-cpu-flags.txt" || true
+sha256sum "$src/bitmap_provider.c" "$src/bitmap_avx512.c" \
+    "$src/bitmap_kernel_private.h" "$abi" "$selfcheck" >"$out/source.sha256"
+
+provider_sha=$(printf '%s' 'simple-vector-bitmap-v1:x86_64-avx512' | sha256sum | cut -d ' ' -f 1)
+implementation_sha=$(cat "$src/bitmap_provider.c" "$src/bitmap_avx512.c" \
+    "$src/bitmap_kernel_private.h" "$abi" | sha256sum | cut -d ' ' -f 1)
+common='--target=x86_64-linux-gnu -std=c11 -O2 -Wall -Wextra -Werror -fno-vectorize -fno-slp-vectorize'
+base="$common -march=x86-64 -fPIC -fvisibility=hidden"
+vector="$base"
+mkdir "$out/id" "$out/forced-id"
+write_identity() {
+    dir=$1
+    implementation=$2
+    printf '#define SIMPLE_VECTOR_PROVIDER_ID UINT64_C(0x%s)\n#define SIMPLE_VECTOR_IMPLEMENTATION_ID UINT64_C(0x%s)\n' \
+        "$(printf %s "$provider_sha" | cut -c1-16)" \
+        "$(printf %s "$implementation" | cut -c1-16)" >"$dir/provider_identity.h"
+}
+forced_implementation_sha=$(printf '%s' "$implementation_sha:test-force-no-avx512" | sha256sum | cut -d ' ' -f 1)
+write_identity "$out/id" "$implementation_sha"
+write_identity "$out/forced-id" "$forced_implementation_sha"
+
+compile() { timeout 60 "$@"; }
+set -x
+compile "$cc" $base -DSIMPLE_VECTOR_TEST_OBSERVER=1 -I"$out/id" \
+    -c "$src/bitmap_provider.c" -o "$out/provider.o"
+# No global -mavx512 flag: only the target-attributed function in this TU may
+# contain AVX512 instructions.
+compile "$cc" $vector -c "$src/bitmap_avx512.c" -o "$out/kernel.o"
+compile "$cc" --target=x86_64-linux-gnu -shared "$out/provider.o" "$out/kernel.o" \
+    -o "$out/provider.so"
+compile "$cc" $common -march=x86-64 -rdynamic "$selfcheck" -ldl \
+    -o "$out/selfcheck"
+compile "$cc" $base -DSIMPLE_VECTOR_TEST_OBSERVER=1 \
+    -DSIMPLE_VECTOR_FORCE_NO_AVX512 -I"$out/forced-id" \
+    -c "$src/bitmap_provider.c" -o "$out/provider-forced.o"
+compile "$cc" --target=x86_64-linux-gnu -shared "$out/provider-forced.o" "$out/kernel.o" \
+    -o "$out/provider-forced.so"
+set +x
+
+"$objdump" -d "$out/provider.o" >"$out/provider.disasm"
+"$objdump" -d "$out/kernel.o" >"$out/kernel.disasm"
+if grep -Eiq 'zmm[0-9]+|\bkmov[a-z0-9]*\b' "$out/provider.disasm"; then
+    echo 'FAIL baseline provider object contains AVX512 register instructions' >&2
+    exit 1
+fi
+if ! grep -Eiq 'zmm[0-9]+' "$out/kernel.disasm"; then
+    echo 'FAIL target kernel object contains no ZMM instructions' >&2
+    exit 1
+fi
+
+supported=0
+if grep -m1 '^flags' /proc/cpuinfo | grep -qw avx512f; then supported=1; fi
+printf 'host_avx512f_flag=%s\n' "$supported" >"$out/host-feature.env"
+for name in native forced; do
+    library=$out/provider.so
+    expected=$supported
+    if [ "$name" = forced ]; then library=$out/provider-forced.so; expected=0; fi
+    code=0
+    perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
+        --max-rss-kib=524288 --rss-cap-mode=enforce --timeout-seconds=60 \
+        --receipt="$out/$name.rss.env" -- \
+        "$out/selfcheck" "$library" "$expected" >"$out/$name.log" 2>&1 || code=$?
+    printf '%s\t%s\n' "$name" "$code" >>"$out/results.tsv"
+    if [ "$code" != 0 ]; then cat "$out/$name.log" >&2; exit "$code"; fi
+done
+sha256sum "$out/provider.so" "$out/provider-forced.so" \
+    "$out/provider.o" "$out/kernel.o" "$out/selfcheck" >"$out/artifacts.sha256"
+cat "$out/results.tsv" >&3
+printf '%s\n' 'PASS 3 checked: baseline ISA guard, AVX512 kernel emission, provider equivalence/refusal' >&3
