@@ -1382,6 +1382,16 @@ impl<'a> Parser<'a> {
             statements: vec![then_stmt],
         };
 
+        self.finish_inline_statement_if_block(start_span, let_pattern, condition, then_block)
+    }
+
+    fn finish_inline_statement_if_block(
+        &mut self,
+        start_span: Span,
+        let_pattern: Option<Pattern>,
+        condition: Expr,
+        then_block: Block,
+    ) -> Result<Node, ParseError> {
         // Only consume the separating newlines when elif/else actually
         // follows; otherwise they belong to the enclosing block parser.
         if self.check(&TokenKind::Newline) || self.check(&TokenKind::Dedent) {
@@ -1402,15 +1412,7 @@ impl<'a> Parser<'a> {
             self.expect(&TokenKind::Colon)?;
             let nested = if self.check(&TokenKind::Newline) {
                 let block = self.parse_block()?;
-                Node::If(IfStmt {
-                    span: elif_span,
-                    let_pattern: elif_pattern,
-                    condition: elif_condition,
-                    then_block: block,
-                    elif_branches: Vec::new(),
-                    else_block: None,
-                    is_suspend: false,
-                })
+                self.finish_inline_statement_if_block(elif_span, elif_pattern, elif_condition, block)?
             } else {
                 let stmt = self.parse_expression_or_assignment()?;
                 self.finish_inline_statement_if(elif_span, elif_pattern, elif_condition, stmt)?
