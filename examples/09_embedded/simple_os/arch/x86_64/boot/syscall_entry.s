@@ -28,7 +28,8 @@
  *   launcher path → posix_spawn → syscall(13, ...)). Hardware does not
  *   record the caller's CPL, so the trampoline tells ring-0 callers from
  *   ring-3 callers by comparing the saved caller RIP (rcx) against the
- *   kernel image bounds [0x100000, _kernel_end). A caller RIP inside that
+ *   kernel text bounds [_kernel_start, _kernel_text_end) (fallback
+ *   [0x100000, _kernel_end) when the script lacks them). A caller RIP inside that
  *   window is ring 0 by construction — ring-3 user text lives outside the
  *   kernel image. Ring-0 callers return via `jmp *%rcx` so execution stays
  *   in ring 0; ring-3 callers get the standard `sysretq` that transitions
@@ -51,23 +52,16 @@
  *   _kernel_syscall_stack_top     - top of the global kernel stack
  *   _kernel_syscall_scratch_rsp   - scratch slot for caller rsp
  *   _kernel_end                   - linker-provided top of kernel image
+ *   _kernel_start, _kernel_text_end - (weak) kernel text bounds
  */
+    .weak _kernel_start
+    .weak _kernel_text_end
 
     .section .text
     .globl kernel_syscall_entry_asm
     .type kernel_syscall_entry_asm, @function
     .align 16
 kernel_syscall_entry_asm:
-    /* L7 diagnostic (2026-09-24): 'S' = trampoline entered (so LSTAR/SCE are
-     * live); 's' = reached the dispatcher call. If the payload's exit syscall
-     * #UDs instead, NEITHER prints and the defect is in the MSR install. */
-    pushq   %rax
-    pushq   %rdx
-    movw    $0x3f8, %dx
-    movb    $'S', %al
-    outb    %al, %dx
-    popq    %rdx
-    popq    %rax
     /* Save caller rsp and switch to the global kernel syscall stack.
      * Using a global stack is safe on single-CPU SimpleOS. When SMP
      * lands, replace with per-CPU GS-base scratch (see comment at top). */
@@ -91,14 +85,6 @@ kernel_syscall_entry_asm:
     movq    %rsi, %rdx      /* C arg2: a1 */
     movq    %rdi, %rsi      /* C arg1: a0 */
     movq    %rax, %rdi      /* C arg0: syscall number */
-    /* L7 diagnostic: 's' = about to call the C dispatcher. */
-    pushq   %rax
-    pushq   %rdx
-    movw    $0x3f8, %dx
-    movb    $'s', %al
-    outb    %al, %dx
-    popq    %rdx
-    popq    %rax
     call    rt_syscall_dispatch
     /* rax now holds the int64_t return value from the dispatcher. */
 
@@ -114,12 +100,29 @@ kernel_syscall_entry_asm:
      *
      * rax holds the dispatcher return value and must be preserved through
      * both return paths — use rdx as the scratch comparison register. */
+    /* Only kernel CODE can issue a ring-0 `syscall`, so the window is the
+     * kernel TEXT range [_kernel_start, _kernel_text_end) when the linker
+     * script provides those (weak; linker_128mb.ld does). The old
+     * [0x100000, _kernel_end) window included .bss/.heap/.stack: with the
+     * 128 MiB kernel _kernel_end is ~0x1625f000, so a SimpleOS user program
+     * linked at the standard 0x10000000 user base was classified ring 0,
+     * got its first syscall "returned" by jmp at CPL0 and faulted on the
+     * next one (measured 2026-10-05, mmap(10) x2 then #GP at cs=0x8). Scripts
+     * without the symbols keep the old bounds. */
+    leaq    _kernel_start(%rip), %rdx
+    testq   %rdx, %rdx
+    jnz     1f
     movq    $0x100000, %rdx
+1:
     cmpq    %rdx, %rcx
-    jb      .Lkse_ring3_return      /* rcx < 1MB  -> ring 3 */
+    jb      .Lkse_ring3_return      /* rcx < kernel start -> ring 3 */
+    leaq    _kernel_text_end(%rip), %rdx
+    testq   %rdx, %rdx
+    jnz     2f
     leaq    _kernel_end(%rip), %rdx
+2:
     cmpq    %rdx, %rcx
-    jae     .Lkse_ring3_return      /* rcx >= _kernel_end -> ring 3 */
+    jae     .Lkse_ring3_return      /* rcx >= kernel text end -> ring 3 */
 
     /* Ring-0 return: restore RFLAGS from r11, restore the caller's RSP,
      * and jump to the saved RIP. Keeps CPL=0; sysretq would forcibly

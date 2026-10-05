@@ -1,0 +1,74 @@
+# @cover src/compiler/10.frontend/core/parser.spl
+# Uses the process-global flat pools; run this spec in its own test process.
+use std.spec.*
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module, flat_pools_dump_all, build_module_from_flat_pool_blob}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+use compiler.core.types.{reset_all_pools}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+
+fn nested_ast_shape(type_: Type) -> text:
+    match type_.kind:
+        case TypeKind.Array(element, _): "[" + nested_ast_shape(element) + "]"
+        case TypeKind.Named(name, _): name
+        case _: "unexpected-type"
+
+fn nested_hir_shape(type_: HirType) -> text:
+    match type_.kind:
+        case HirTypeKind.Array(element, _): "[" + nested_hir_shape(element) + "]"
+        case HirTypeKind.Str: "text"
+        case HirTypeKind.Int(64, true): "i64"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Any: "Any"
+        case _: "unexpected-type"
+
+fn nested_return_shape(source: text) -> text:
+    val parsed = parse_and_build_module(source, "nested_array_types.spl")
+    val function = parsed.functions["sample"] ?? panic("sample declaration missing")
+    nested_ast_shape(function.return_type)
+
+describe "Nested array declarations retain their complete element shape":
+    it "preserves two array levels around text":
+        expect(nested_return_shape("fn sample() -> [[text]]:\n    []\n")).to_equal("[[text]]")
+
+    it "preserves three array levels around signed integers":
+        expect(nested_return_shape("fn sample() -> [[[i64]]]:\n    []\n")).to_equal("[[[i64]]]")
+
+    it "preserves nested bool and fixed-width elements":
+        expect(nested_return_shape("fn sample() -> [[bool]]:\n    []\n")).to_equal("[[bool]]")
+        expect(nested_return_shape("fn sample() -> [[u8]]:\n    []\n")).to_equal("[[u8]]")
+
+    it "leaves the existing dedicated scalar-array tags unchanged":
+        expect(nested_return_shape("fn sample() -> [text]:\n    []\n")).to_equal("[text]")
+        expect(nested_return_shape("fn sample() -> [i64]:\n    []\n")).to_equal("[i64]")
+        expect(nested_return_shape("fn sample() -> [bool]:\n    []\n")).to_equal("[bool]")
+
+    it "restores nested specialization references from the real flat cache blob":
+        val source = "fn sample() -> [[[text]]]:\n    []\n"
+        val parsed = parse_and_build_module(source, "nested_cache.spl")
+        expect(nested_ast_shape((parsed.functions["sample"] ?? panic("sample missing")).return_type)).to_equal("[[[text]]]")
+        val blob = flat_pools_dump_all()
+        expect(blob != "").to_equal(true)
+        reset_all_pools()
+        val restored = build_module_from_flat_pool_blob(blob, source, "nested_cache.spl") ?? panic("flat cache restore failed")
+        expect(nested_ast_shape((restored.functions["sample"] ?? panic("restored sample missing")).return_type)).to_equal("[[[text]]]")
+
+    it "retains nested parameter declarations through HIR cache transport":
+        val source = "fn sample(words: [[text]], deep: [[[i64]]], flags: [[bool]]) -> i64:\n    0\n"
+        val parsed = parse_and_build_module(source, "nested_hir.spl")
+        var lowering = HirLowering.with_filename("nested_hir.spl")
+        val hir = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val symbol = hir.symbols.lookup("sample") ?? panic("HIR sample missing")
+        expect(nested_hir_shape(hir.functions[symbol].params[0].type_)).to_equal("[[text]]")
+        expect(nested_hir_shape(hir.functions[symbol].params[1].type_)).to_equal("[[[i64]]]")
+        expect(nested_hir_shape(hir.functions[symbol].params[2].type_)).to_equal("[[bool]]")
+        val blob = hir_module_encode(hir)
+        expect(blob != "").to_equal(true)
+        val restored = hir_module_decode(blob) ?? panic("HIR cache restore failed")
+        val restored_symbol = restored.symbols.lookup("sample") ?? panic("restored HIR sample missing")
+        expect(nested_hir_shape(restored.functions[restored_symbol].params[0].type_)).to_equal("[[text]]")
+        expect(nested_hir_shape(restored.functions[restored_symbol].params[1].type_)).to_equal("[[[i64]]]")
+        expect(nested_hir_shape(restored.functions[restored_symbol].params[2].type_)).to_equal("[[bool]]")

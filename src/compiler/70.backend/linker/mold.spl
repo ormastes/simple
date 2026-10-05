@@ -742,14 +742,12 @@ fn find_linker_path() -> Result<text, text>:
     if requested_linker != "":
         return find_requested_linker(requested_linker)
 
-    # Try mold first
     val mold_path = find_mold_path()
-    if mold_path.?:
-        return Ok(mold_path.unwrap())
-
-    # Try lld
     val lld_path = find_lld_path()
-    if lld_path.?:
+    val engine = link_engine_policy("", false, mold_path.?, lld_path.?)
+    if engine == "mold":
+        return Ok(mold_path.unwrap())
+    if engine == "lld":
         return Ok(lld_path.unwrap())
 
     # Try system ld
@@ -758,6 +756,30 @@ fn find_linker_path() -> Result<text, text>:
         return Ok(ld_path.unwrap())
 
     Err("No linker found. Please install mold, lld, or ensure ld is in PATH.")
+
+fn link_engine_policy(requested: text, simpleos: bool, has_mold: bool, has_lld: bool) -> text:
+    """The one linker-selection policy (doc/03_plan/os/simpleos/
+    simpleos_selfhost_seed_linker_plan_2026-10-04.md, G4).
+
+    An explicit SIMPLE_LINKER always wins. SimpleOS (as target or host) uses
+    the pure-Simple mold-like engine so no clang/lld is needed in the guest.
+    Other hosts prefer mold, then ld.lld, then system ld."""
+    val explicit = requested.trim().lower()
+    if explicit != "":
+        return explicit
+    if simpleos:
+        return "internal"
+    if has_mold:
+        return "mold"
+    if has_lld:
+        return "lld"
+    "ld"
+
+fn simpleos_uses_internal_linker() -> bool:
+    """SimpleOS links with the pure-Simple engine unless SIMPLE_LINKER names
+    another linker. Default since 2026-10-05: an internally linked x86_64
+    SimpleOS hello passed the OVMF in-guest lane (7/7 rungs)."""
+    link_engine_policy(requested_linker_override(), true, false, false) == "internal"
 
 fn find_size_linker_path(os_name: text) -> Result<text, text>:
     """Use LLD for Linux size builds when available; preserve explicit overrides."""
@@ -811,6 +833,8 @@ export find_requested_linker
 export find_size_linker_path
 export linker_type_for_path
 export requested_linker_override
+export link_engine_policy
+export simpleos_uses_internal_linker
 export linker_fuse_ld_name
 export MoldDiagnostic
 export parse_linker_diagnostics

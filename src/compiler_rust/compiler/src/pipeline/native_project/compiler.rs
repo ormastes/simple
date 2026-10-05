@@ -774,6 +774,7 @@ pub(crate) fn compile_file_to_object(
     // reached via the global import map (no `use` import) get a real result
     // type instead of ANY (Pass 0.5c in module_pass.rs resolves them).
     lowerer.set_global_fn_return_types(std::sync::Arc::clone(&imports.fn_return_types));
+    lowerer.set_global_method_param_defaults(std::sync::Arc::clone(&imports.method_param_defaults));
     lowerer.set_qualified_import_functions(std::sync::Arc::new(use_map.clone()));
     // W15-H: seed the lowerer with the project-wide enum table and
     // eagerly register every entry into `module.types` + `self.globals`

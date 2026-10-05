@@ -42,7 +42,8 @@ Completion matrix (source implementation is not execution evidence):
 | Compact unwind / DWARF personalities and exceptions | OPEN |
 | Native Darwin execution/signature qualification | UNRUN |
 | SSpec/docgen/maintain/core/MCP smoke | UNRUN: admitted runtime unavailable |
-| ARM64 ADDEND hosted pairing / executable dynamic exports | OPEN; explicit rejection / no exports contract |
+| ARM64 ADDEND hosted pairing | Source `2a34f353063` and eight authored scenarios through `ded72abf4fa` independently reviewed; shared checked prefix/follower handling, execution UNRUN; see `macho_hosted_addend_2026-10-04.md` |
+| Executable dynamic exports | OPEN; no exports contract |
 | Runtime-discovered Objective-C/Swift/custom section metadata | OPEN; unrecognized section names explicitly rejected |
 
 Performance qualification is also UNRUN. Arrays are preallocated for image/page

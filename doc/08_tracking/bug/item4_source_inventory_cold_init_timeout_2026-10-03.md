@@ -53,3 +53,44 @@ probe. Do not call the 120-second diagnostic limit a production performance SLO.
 Resume linker behavioral verification only after a usable execution route exists.
 Even a successful unadmitted probe is diagnostic-only; modern SSpec, core/MCP,
 manual-generation and release gates still require their admitted runtimes.
+
+## 2026-10-04 evidence-led revalidation
+
+The original receipt still records timeout 124 with the Windows job reaped.
+Its captured output is only the workaround-coverage note; it does not identify
+the inventory phase consuming the bound. The retained refresh.lock is empty,
+and no matching compiler process was observed for that old worktree during
+this audit. No lock, cache or failed receipt was removed and no old probe was
+restarted. The three-attempt diagnostic cap remains in force.
+
+The canonical `scripts/bootstrap/bootstrap-scv-prime.shs` separates cold
+inventory priming from warm admission and documents a much longer measured
+Windows snapshot initialization. That observation does not prove the cause of
+this older timeout or turn its 120-second limit into a product performance SLO.
+
+Newer independent evidence exists under
+`C:/Users/user/.simple/worktrees/simple/runtime/windows-restart-20261004/`.
+`cross-backend-llvm-hello1/verified-hello.json` records
+`state=diagnostic-hello-pass`, source
+`9737d1217bc44439b56bba6c2ef16faaff51bd20`, and producer
+`p2-post-bool-link-repair2/cranelift/compiler.exe`, SHA256
+`776ce2a1b8b0f92d44e5dd70b5fac365ba96187f76cfa0ffc2c5bdcac8fdae40`.
+This is a retained-object diagnostic relink with `admitted=false`; it does not
+establish an admitted full CLI or test runner. The Hello result records actual
+compile/run success; binary presence or `--help` was not substituted for it.
+
+The separately owned full-CLI and test-runner jobs under
+`phase34-post-link4/cranelift/` had live owner/collector pairs
+64728/34464 and 37596/22612 at this audit, with no usable product executable.
+These are point-in-time process observations, not permanent wait handles.
+Their processes and writable caches were preserved. Summary rows may reference
+retained earlier attempts, so aggregate counts alone are not current-attempt
+completion evidence. Actual fatal diagnostics in the full-CLI owner's
+`.build.log.tmp.34464` instead identify actionable source failures, including
+the separately tracked loader compatibility-helper calls.
+
+The linker execution recipe is now
+`doc/06_spec/03_system/app/compiler/feature/item4_linker_execution_gate.md`.
+Its explicit native path still needs generated-entry admission and a qualified
+full CLI. Corrected commands and the newer Hello receipt do not close this bug
+or establish linker behavioral verification.

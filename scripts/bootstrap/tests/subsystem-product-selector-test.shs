@@ -1,0 +1,51 @@
+#!/bin/sh
+# Dispatch/blocked-evidence regression only; this does not simulate native PASS.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+source="$scratch/source"
+mkdir -p "$source/scripts/bootstrap/lib"
+for tool in run-compiler-subsystem-test-products.shs build-compiler-subsystem-test-product.shs \
+    verify-compiler-subsystem-test-product.pl run-process-group-timeout.shs; do
+    cp "$repo/scripts/bootstrap/$tool" "$source/scripts/bootstrap/$tool"
+done
+cp "$repo/scripts/bootstrap/lib/managed-task-schedule.shs" "$source/scripts/bootstrap/lib/"
+cp "$repo/scripts/bootstrap/lib/BootstrapProductProducer.pm" "$source/scripts/bootstrap/lib/"
+# A fixed discovery fixture: neither compiler is present, so no build,
+# enumeration or execution callback is permitted to claim a result.
+printf '#!/bin/sh\nprintf "suite\\tpath\\tsha256\\n"\n' >"$source/scripts/bootstrap/compiler-subsystem-test-inventory.shs"
+count=0
+for backend in llvm cranelift; do
+    for suite in compiler interpreter loader; do
+        output="$scratch/$backend-$suite"
+        code=0
+        sh "$source/scripts/bootstrap/run-compiler-subsystem-test-products.shs" \
+            --source-root="$source" --output-root="$output" --product="$backend:$suite" \
+            >"$scratch/$backend-$suite.log" 2>&1 || code=$?
+        [ "$code" = 1 ]
+        [ "$(wc -l <"$output/product-status.tsv" | tr -d ' ')" = 3 ]
+        for stage in build enumerate run; do
+            printf 'phase4_%s_product_%s_%s\tBLOCKED\t1\n' "$backend" "$suite" "$stage"
+        done >"$scratch/expected"
+        cmp "$scratch/expected" "$output/product-status.tsv"
+        grep -qx 'status=INCOMPLETE' "$output/matrix.env"
+        [ ! -e "$output/$backend/$suite/result.env" ]
+        count=$((count + 1))
+    done
+done
+for option in --product=llvm:unknown --product=other:compiler; do
+    code=0
+    sh "$source/scripts/bootstrap/run-compiler-subsystem-test-products.shs" "$option" \
+        >"$scratch/rejected.log" 2>&1 || code=$?
+    [ "$code" = 2 ]
+    grep -q 'invalid product selector' "$scratch/rejected.log"
+    count=$((count + 1))
+done
+code=0
+sh "$source/scripts/bootstrap/run-compiler-subsystem-test-products.shs" --product=llvm:compiler --resume \
+    >"$scratch/rejected.log" 2>&1 || code=$?
+[ "$code" = 2 ]
+grep -q 'single-product resume' "$scratch/rejected.log"
+count=$((count + 1))
+printf 'PASS product selector: %s cases; missing producers remain BLOCKED, no native success claimed\n' "$count"

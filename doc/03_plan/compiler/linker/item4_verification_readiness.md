@@ -256,3 +256,22 @@ The existing UnsupportedBudget gate remains in place.
 User constraint: hosted linking keeps external default selection. The mold-style
 Simple linker stays accessible through explicit SIMPLE_LINKER=internal; see
 `doc/07_guide/compiler/linker_selection.md`.
+
+## Explicit five-host completion requirement (2026-10-04)
+
+The Simple linker must run on Windows, Linux, SimpleOS, FreeBSD and macOS,
+while remaining explicit opt-in. The authoritative per-host implementation and
+execution gates are in `host_completion_2026-10-04.md` beside this ledger.
+Cross-generated images do not prove a runnable linker on the target host.
+macOS native dispatch now has an explicit Mach-O file adapter for modeled
+configuration and thin-dylib providers; SDK text stubs/cache providers and actual
+Darwin execution remain open. SimpleOS image production is not yet evidence of
+a linker running inside SimpleOS. Managed internal-engine admission remains an
+explicit requirement.
+
+The Mach-O adapter now forwards native duplicate-definition policy through every
+hosted archive-resolution pass and final binding. True keeps the first selected
+strong definition; false and existing direct API defaults remain strict. This
+removes the ordinary native configuration rejection without changing caller
+defaults. Real competing-definition acceptance is source-authored; execution and
+hosted weak coalescing are still separate open gates.

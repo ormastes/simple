@@ -39,7 +39,7 @@ and inspection ran; generated images and Simple specs did not.
 After runtime admission:
 
 ```text
-<runtime> test test/03_system/app/compiler/feature/item4_stream_got_spec.spl --native
+<runtime> test test/03_system/app/compiler/feature/item4_stream_got_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
 <runtime> spipe-docgen test/03_system/app/compiler/feature/item4_stream_got_spec.spl --output doc/06_spec --no-index
 ```
 
@@ -47,3 +47,8 @@ Secure task-specific output directories must become removable after cleanup.
 Logical quotas are not measured RSS, allocator overhead or complete bounded
 admission. Dynamic GOT/PLT, TLS, host execution, other architectures and overall
 item 4 readiness remain separate gates.
+
+Pending execution follows [the item4 native execution gate](item4_linker_execution_gate.md).
+This command is an unexecuted recipe, not proof that the current CLI or generated
+entry is admitted. Account for all 6 declared scenarios and their actual
+assertion behavior; zero reported examples or missing scenario results cannot pass.

@@ -1,0 +1,189 @@
+use compiler.backend.linker.macho.tbd_types.{MachOTbdLimitsV1, MachOTbdInstallNameV1, MachOTbdLibraryV1, MachOTbdSymbolV1}
+use compiler.backend.linker.macho.tbd_values.{tbd_object, tbd_array, tbd_text, tbd_keys, tbd_required, tbd_names, tbd_version, tbd_integer, tbd_scope, tbd_declared_target}
+
+fn tbd_append_names(previous: [text], additions: [text]) -> [text]:
+    var output = previous
+    for name in additions:
+        if not output.contains(name): output = output.push(name)
+    output
+
+class TbdSchemaState:
+    limits: MachOTbdLimitsV1
+    var symbol_count: i64
+
+    me symbols(fields: {text: any}, role: text, segment: text, yaml: bool, selected: bool) -> Result<[MachOTbdSymbolV1], text>:
+        val categories = if yaml: ["symbols", "weak-symbols", "thread-local-symbols", "objc-classes", "objc-eh-types", "objc-ivars"] else:
+            ["global", "weak", "thread_local", "objc_class", "objc_eh_type", "objc_ivar"]
+        var allowed = categories
+        if yaml: allowed = allowed.push("targets")
+        tbd_keys(fields, allowed)?
+        var symbols: [MachOTbdSymbolV1] = []
+        for index in 0..categories.len():
+            val category = categories[index]
+            if not fields.has(category): continue
+            val names = tbd_names(fields[category], self.limits)?
+            if names.len() > self.limits.max_symbols - self.symbol_count: return Err("TBD symbol quota exceeded")
+            self.symbol_count = self.symbol_count + names.len()
+            var encoding = "global"
+            if index == 3: encoding = "objc_class"
+            elif index == 4: encoding = "objc_eh_type"
+            elif index == 5: encoding = "objc_ivar"
+            for name in names:
+                if selected:
+                    symbols = symbols.push(MachOTbdSymbolV1(name: name, encoding: encoding, role: role, segment: segment,
+                        weak_defined: index == 1 and role != "undefined", weak_referenced: index == 1 and role == "undefined",
+                        thread_local: index == 2))
+        Ok(symbols)
+
+    me library(value: any, yaml: bool, wanted: text) -> Result<MachOTbdLibraryV1, text>:
+        val fields = tbd_object(value)?
+        if yaml:
+            tbd_keys(fields, ["tbd-version", "targets", "install-name", "current-version", "compatibility-version", "flags",
+                "swift-abi-version", "allowable-clients", "parent-umbrella", "reexported-libraries", "exports", "re-exports", "undefineds"])?
+            if tbd_integer(tbd_required(fields, "tbd-version")?, 5, true, self.limits)? != 4:
+                return Err("TBD unsupported YAML version")
+        else:
+            tbd_keys(fields, ["target_info", "install_names", "current_versions", "compatibility_versions", "flags", "swift_abi",
+                "allowable_clients", "parent_umbrellas", "reexported_libraries", "rpaths", "exported_symbols", "reexported_symbols", "undefined_symbols"])?
+        var targets: [text] = []
+        var minimum: Option<i64> = nil
+        if yaml:
+            targets = tbd_names(tbd_required(fields, "targets")?, self.limits)?
+        else:
+            for item in tbd_array(tbd_required(fields, "target_info")?)?:
+                val info = tbd_object(item)?
+                tbd_keys(info, ["target", "min_deployment"])?
+                val target = tbd_text(tbd_required(info, "target")?, self.limits)?
+                if targets.contains(target): return Err("TBD duplicate target info")
+                targets = targets.push(target)
+                var deployment: i64 = 0
+                if info.has("min_deployment"): deployment = tbd_version(info["min_deployment"], self.limits)?
+                if target == wanted: minimum = Some(deployment)
+        if targets.len() == 0: return Err("TBD empty declared targets")
+        for target in targets: tbd_declared_target(target)?
+        val selected = targets.contains(wanted)
+        var install_names: [MachOTbdInstallNameV1] = []
+        var install_name: Option<text> = nil
+        if yaml:
+            val name = tbd_text(tbd_required(fields, "install-name")?, self.limits)?
+            install_names = install_names.push(MachOTbdInstallNameV1(targets: targets, name: name))
+            if selected: install_name = Some(name)
+        else:
+            var named_targets: {text: bool} = {}
+            for item in tbd_array(tbd_required(fields, "install_names")?)?:
+                val info = tbd_object(item)?
+                tbd_keys(info, ["targets", "name"])?
+                val scope = tbd_scope(info, targets, false, self.limits)?
+                val name = tbd_text(tbd_required(info, "name")?, self.limits)?
+                for target in scope:
+                    if named_targets.has(target): return Err("TBD duplicate scoped install name")
+                    named_targets[target] = true
+                install_names = install_names.push(MachOTbdInstallNameV1(targets: scope, name: name))
+                if scope.contains(wanted): install_name = Some(name)
+            for target in targets:
+                if not named_targets.has(target): return Err("TBD missing target install name")
+        var current: i64 = 0x10000
+        var compatible: i64 = 0x10000
+        var swift: Option<i64> = nil
+        var flags: [text] = []
+        var clients: [text] = []
+        var umbrella: Option<text> = nil
+        var paths: [text] = []
+        var libraries: [text] = []
+        var symbols: [MachOTbdSymbolV1] = []
+        var currents: {text: i64} = {}
+        var compatibles: {text: i64} = {}
+        for target in targets:
+            currents[target] = 0x10000
+            compatibles[target] = 0x10000
+        # Scalars are target-scoped in v5; validate all scopes before selection.
+        val scalar_keys = if yaml: ["current-version", "compatibility-version", "swift-abi-version"] else:
+            ["current_versions", "compatibility_versions", "swift_abi"]
+        for index in 0..scalar_keys.len():
+            val key = scalar_keys[index]
+            if not fields.has(key): continue
+            var values: [any] = []
+            if yaml:
+                val field = if index == 2: "abi" else: "version"
+                values = [("object", {field: fields[key]})]
+            else:
+                values = tbd_array(fields[key])?
+            var covered: {text: bool} = {}
+            for item in values:
+                val info = tbd_object(item)?
+                val field = if index == 2: "abi" else: "version"
+                tbd_keys(info, ["targets", field])?
+                val scope = tbd_scope(info, targets, false, self.limits)?
+                val number = if index == 2: tbd_integer(tbd_required(info, field)?, 255, yaml, self.limits)? else:
+                    tbd_version(tbd_required(info, field)?, self.limits)?
+                for target in scope:
+                    if covered.has(target): return Err("TBD duplicate scoped scalar")
+                    covered[target] = true
+                    if index == 0: currents[target] = number
+                    elif index == 1: compatibles[target] = number
+                if scope.contains(wanted):
+                    if index == 0: current = number
+                    elif index == 1: compatible = number
+                    else: swift = Some(number)
+        for target in targets:
+            if compatibles[target] > currents[target]: return Err("TBD compatibility version exceeds current version")
+        if fields.has("flags"):
+            var groups: [any] = []
+            if yaml: groups = [("object", {"attributes": fields["flags"]})]
+            else: groups = tbd_array(fields["flags"])?
+            for item in groups:
+                val info = tbd_object(item)?
+                tbd_keys(info, ["targets", "attributes"])?
+                val scope = tbd_scope(info, targets, false, self.limits)?
+                val attributes = tbd_names(tbd_required(info, "attributes")?, self.limits)?
+                for attribute in attributes:
+                    if not ["flat_namespace", "not_app_extension_safe", "sim_support", "not_for_dyld_shared_cache"].contains(attribute):
+                        return Err("TBD unsupported flag {attribute}")
+                if scope.contains(wanted): flags = tbd_append_names(flags, attributes)
+        val group_keys = if yaml: ["allowable-clients", "parent-umbrella", "reexported-libraries"] else:
+            ["allowable_clients", "parent_umbrellas", "reexported_libraries", "rpaths"]
+        for index in 0..group_keys.len():
+            val key = group_keys[index]
+            if not fields.has(key): continue
+            var umbrellas: {text: bool} = {}
+            for item in tbd_array(fields[key])?:
+                val info = tbd_object(item)?
+                val field = if index == 0: "clients" else: (if index == 1: "umbrella" else: (if index == 2: (if yaml: "libraries" else: "names") else: "paths"))
+                tbd_keys(info, ["targets", field])?
+                val scope = tbd_scope(info, targets, yaml, self.limits)?
+                if index == 1:
+                    val name = tbd_text(tbd_required(info, field)?, self.limits)?
+                    for target in scope:
+                        if umbrellas.has(target): return Err("TBD duplicate scoped parent umbrella")
+                        umbrellas[target] = true
+                    if scope.contains(wanted):
+                        umbrella = Some(name)
+                else:
+                    val names = tbd_names(tbd_required(info, field)?, self.limits)?
+                    if scope.contains(wanted):
+                        if index == 0: clients = tbd_append_names(clients, names)
+                        elif index == 2: libraries = tbd_append_names(libraries, names)
+                        else: paths = tbd_append_names(paths, names)
+        val symbol_keys = if yaml: ["exports", "re-exports", "undefineds"] else: ["exported_symbols", "reexported_symbols", "undefined_symbols"]
+        for index in 0..symbol_keys.len():
+            val key = symbol_keys[index]
+            if not fields.has(key): continue
+            val role = if index == 0: "export" else: (if index == 1: "reexport" else: "undefined")
+            for item in tbd_array(fields[key])?:
+                val info = tbd_object(item)?
+                val scope = tbd_scope(info, targets, yaml, self.limits)?
+                if yaml:
+                    val additions = self.symbols(info, role, "unspecified", true, scope.contains(wanted))?
+                    for symbol in additions: symbols = symbols.push(symbol)
+                else:
+                    tbd_keys(info, ["targets", "text", "data"])?
+                    for segment in ["text", "data"]:
+                        if info.has(segment):
+                            val additions = self.symbols(tbd_object(info[segment])?, role, segment, false, scope.contains(wanted))?
+                            for symbol in additions: symbols = symbols.push(symbol)
+        Ok(MachOTbdLibraryV1(declared_targets: targets, selected: selected, install_names: install_names,
+            install_name: install_name, current_version: current, compatibility_version: compatible, minimum_os: minimum,
+            flags: flags, swift_abi: swift, allowable_clients: clients, parent_umbrella: umbrella,
+            rpaths: paths, reexported_libraries: libraries, symbols: symbols))
+
+export TbdSchemaState

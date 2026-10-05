@@ -1,0 +1,54 @@
+#!/bin/sh
+# Execute the production command owner with a recording child. No native PASS.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+perl -0777 -ne 's/\r\n/\n/g; /^(run_native_build\(\) \{.*?^\})\n\nrun_native_tool/sm or die "native owner absent"; print "$1\n"' \
+  "$repo/scripts/bootstrap/build-compiler-subsystem-test-product.shs" >"$scratch/owner.sh"
+. "$scratch/owner.sh"
+source_root=$repo job_root="$scratch/job" overlay="$scratch/source"
+mkdir -p "$job_root/logs" "$overlay"
+compiler="$scratch/child.sh" watchdog="$scratch/watchdog.sh"
+compiler_sha256=fixture runtime_authority="$scratch/runtime"
+threads=80 rss_cap_kib=3000000 rss_mode=enforce rss_enforced=1 build_timeout_seconds=1800
+resource_profile=$(perl -I "$repo/scripts/bootstrap/lib" -MBootstrapProductProducer=product_resource_profile \
+  -e 'print product_resource_profile(@ARGV)' qualified "$threads" "$rss_cap_kib" "$build_timeout_seconds" "$rss_mode")
+product_frontend_environment='SIMPLE_SHARD_MEM_CLAMP=1
+SIMPLE_PARSE_SHARD_MAX=1
+SIMPLE_PARSE_SHARD_WORKER_KB=1650000
+SIMPLE_HIR_SHARD_WORKER_KB=3000000
+SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=3000000'
+cat >"$compiler" <<'CHILD'
+#!/bin/sh
+set -eu
+[ "$SIMPLE_NATIVE_BUILD_THREADS" = 80 ]
+[ "$SIMPLE_NATIVE_FILE_TIMEOUT" = 1800 ]
+[ "$SIMPLE_SHARD_MEM_CLAMP" = 1 ] && [ "$SIMPLE_PARSE_SHARD_MAX" = 1 ]
+[ "$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB" = 3000000 ]
+[ "$SIMPLE_BOOTSTRAP_RSS_CAP_MODE" = enforce ]
+[ "$1" = native-build ] && [ "$2" = --backend=llvm ] && [ "$3" = --threads ] && [ "$4" = 80 ]
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = --output ]; then shift; printf 'transport fixture only\n' >"$1"; fi
+  shift
+done
+CHILD
+cat >"$watchdog" <<'WATCHDOG'
+#!/bin/sh
+set -eu
+[ "$1" = 1800 ] && [ "$2" = 5 ]
+[ "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB" = 3000000 ]
+shift 2
+"$@"
+# Fixture-only receipt: tests command transport, never submitted for admission.
+printf 'status=complete\nexit_status=0\nrss_cap_enforced=1\nrss_limit_kib=3000000\n' >"$SIMPLE_PROCESS_TREE_RSS_RECEIPT"
+WATCHDOG
+chmod +x "$compiler" "$watchdog"
+physical_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
+field() { awk -F= -v key="$1" '$1==key {print $2}' "$2"; }
+run_native_build product src/app/main.spl "$job_root/output" llvm
+[ "$(field resource_profile "$job_root/logs/product.command.tsv")" = qualified-80-v1 ]
+perl -I "$repo/scripts/bootstrap/lib" -MBootstrapProductProducer=validate_product_resource_profile \
+  -e 'validate_product_resource_profile(@ARGV)' \
+  "$(field resource_profile "$job_root/logs/product.command.tsv")" qualified 80 3000000 1800 enforce
+printf 'PASS qualified80 production command owner: child argv/environment, finite watchdog, transcript profile; no native compilation\n'

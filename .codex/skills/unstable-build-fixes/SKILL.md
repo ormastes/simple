@@ -7,6 +7,28 @@ description: Use when a Simple bootstrap/native-build is unstable, slow, or fail
 
 ## Bootstrap failure collection
 
+For full bootstrap, follow the execution graph in the shared collection policy:
+Phase 1 whole tests, then Phase 2 build; after Phase 2 compile/run sanity, run
+its six backend subsystem test binaries alongside Phase 3 and early Phase 4
+from Phase 2. After Phase 3 sanity, overlap its whole tools/library tests with
+Phase 4 from Phase 3, then run each Phase 4 cohort's whole tests. Enumerate
+actual test cases and retain separate producer lineages. Apply the selected
+job budget across concurrent lanes with memory-aware admission.
+Count frontend subprocess fan-out separately from code-generation threads.
+Do not disable frontend memory clamping to obtain an 80-job code-generation
+budget: a measured Windows diagnostic spawned 72 parse workers and consumed
+over 43 GiB in children against a 15 GiB reservation. If the reservation cannot
+cover the actual process tree, stop that owned lane with verified cleanup,
+retain its cache/evidence, and record a resource-aborted result before applying
+a scoped concurrency workaround. Never release its reservation before reaping
+the tree or label resource termination as a successful compile.
+
+After three unresolved repair cycles, update the canonical bug database and
+record a scoped bug-linked workaround or an explicit blocked dependency.
+Continue independent work using valid caches; do not restart from Phase 1
+or reset the cycle count by changing attempt names. Later rebuilds must revisit
+the bug and verify the intended path before removing its workaround.
+
 Finish all independently runnable build modules and test rows, collect their
 failures, and delegate separate causes to parallel repair agents. The exact
 compiler must compile Hello World and execute its output successfully before

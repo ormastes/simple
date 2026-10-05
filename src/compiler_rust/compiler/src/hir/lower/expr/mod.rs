@@ -1065,7 +1065,9 @@ impl Lowerer {
         if args.iter().all(|arg| arg.name.is_none()) {
             if let Some(owner) = self.module.types.get_type_name(receiver_hir.ty) {
                 let key = format!("{}.{}", owner, method);
-                if let Some(params) = self.fn_param_defaults.get(&key).cloned() {
+                if let Some(params) = self.fn_param_defaults.get(&key)
+                    .or_else(|| self.global_method_param_defaults.as_ref().and_then(|defs| defs.get(&key)))
+                    .cloned() {
                     for default in params.iter().skip(hir_args.len()) {
                         match default {
                             Some(expr) if Self::is_constant_default(expr) => hir_args.push(self.lower_expr(expr, ctx)?),

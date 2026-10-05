@@ -11,6 +11,15 @@ hash_file() {
 field() {
   awk -F= -v key="$2" '$1==key {n++; value=substr($0,length(key)+2)} END {if(n!=1)exit 1; print value}' "$1"
 }
+profile_field() {
+  # Prefix distinguishes a truly absent legacy field from any supplied value.
+  awk -F= '$1=="resource_profile" {n++; value=substr($0,18)} END {if(n>1)exit 1; if(n==1)print "1" value; else print "0"}' "$1"
+}
+verify_profile_workers() {
+  if [ "$1" = qualified-80-v1 ]; then
+    [ "$(field "$3" threads)" = "$2" ] || return 1
+  fi
+}
 source_root= output_root= matrix_candidate=
 for arg in "$@"; do
   case "$arg" in
@@ -24,6 +33,8 @@ done
   [ -d "$output_root" ] && [ ! -L "$output_root" ] || die "source or output root missing"
 source_root=$(CDPATH= cd -- "$source_root" && pwd -P) || die "source root unavailable"
 output_root=$(CDPATH= cd -- "$output_root" && pwd -P) || die "output root unavailable"
+output_root=$(perl "$source_root/scripts/bootstrap/product-root.pl" resolve "$output_root" "$source_root") \
+  || die 'product generation reference rejected'
 if [ -n "$matrix_candidate" ]; then
   case "$matrix_candidate" in "$output_root"/matrix.env.tmp.*) ;; *) die "matrix candidate outside fresh output" ;; esac
   matrix=$matrix_candidate
@@ -43,9 +54,14 @@ regular "$matrix" && regular "$inventory" && regular "$statuses" || die "matrix 
 threads=$(field "$matrix" threads) || die "threads absent"
 rss_cap_kib=$(field "$matrix" rss_cap_kib) || die "RSS cap absent"
 build_timeout=$(field "$matrix" build_timeout_seconds) || die "build timeout absent"
-[ "$threads" -ge 10 ] && [ "$threads" -le 20 ] &&
-  [ "$rss_cap_kib" -gt 0 ] && [ "$rss_cap_kib" -le 6835937 ] &&
-  [ "$build_timeout" -gt 0 ] || die "resource policy differs"
+test_timeout=$(field "$matrix" test_timeout_seconds) || die "test timeout absent"
+resource_profile=$(profile_field "$matrix") || die "duplicate matrix resource profile"
+for timeout in "$build_timeout" "$test_timeout"; do
+  expected_profile=$(perl -I "$source_root/scripts/bootstrap/lib" -MBootstrapProductProducer=validate_product_resource_profile \
+    -e 'my $record=shift; my $profile=$record eq "0" ? undef : substr($record,1); print validate_product_resource_profile($profile,@ARGV)' \
+    "$resource_profile" qualified "$threads" "$rss_cap_kib" "$timeout" enforce) \
+    || die "resource policy differs"
+done
 [ "$(wc -l <"$statuses" | tr -d ' ')" -eq 18 ] || die "six product chains incomplete"
 script_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || die "verifier path unavailable"
 [ "$script_root" = "$source_root/scripts/bootstrap" ] || die "verifier outside pinned source"
@@ -85,6 +101,13 @@ for backend in llvm cranelift; do
       [ "$(field "$receipt" failed)" = 0 ] &&
       [ "$(field "$receipt" skipped)" = 0 ] &&
       [ "$(field "$receipt" pending)" = 0 ] || die "$backend/$suite product lacks full pass"
+    product_profile=$(profile_field "$receipt") || die "duplicate product resource profile"
+    perl -I "$source_root/scripts/bootstrap/lib" -MBootstrapProductProducer=validate_product_resource_profile \
+      -e 'my $record=shift; my $profile=$record eq "0" ? undef : substr($record,1); validate_product_resource_profile($profile,@ARGV)' \
+      "$product_profile" qualified "$threads" "$rss_cap_kib" "$build_timeout" enforce \
+      || die "$backend/$suite product resource profile differs"
+    verify_profile_workers "$expected_profile" "$threads" "$receipt" \
+      || die "$backend/$suite worker count differs"
     registered=$(field "$receipt" registered) || die "registered count absent"
     passed=$(field "$receipt" passed) || die "passed count absent"
     [ "$registered" -gt 0 ] && [ "$registered" -eq "$passed" ] || die "registered cases did not all pass"

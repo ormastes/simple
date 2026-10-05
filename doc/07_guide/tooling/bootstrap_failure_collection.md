@@ -191,6 +191,67 @@ mass-rename or rewrite existing scripts merely to change their extension.
 
 ## Continue by dependency
 
+### Full bootstrap execution graph
+
+For the full profile, plan the following work for both LLVM and Cranelift.
+The user's selected Windows build/test budget is 80 jobs; divide available
+capacity among concurrent lanes and retain memory-aware admission. Eighty
+code-generation jobs do not imply eighty independent frontend processes.
+
+| Producer ready | Work to collect | Diagnostic continuation |
+|---|---|---|
+| Phase 1 | Whole Phase 1 test inventory | Build Phase 2 after the Phase 1 collection reaches its terminal summary. Record failures without discarding a usable, sanity-tested producer. |
+| Phase 2 plus compile-and-run sanity | Build, enumerate and execute compiler, interpreter and loader test binaries for each backend | Start Phase 3 and early Phase 4 using Phase 2 concurrently with tests. |
+| Phase 3 plus compile-and-run sanity | Whole Phase 3 inventory, including binary tools and library tests | Build Phase 4 using Phase 3 concurrently with tests. |
+| Either Phase 4 product cohort | Product sanity and the whole Phase 4 test inventory | Retain separate Phase-2-produced and Phase-3-produced results; neither substitutes for the other. |
+
+Each backend has three Phase 2 subsystem binaries, six across both backends.
+Use Simple's existing aggregate test generation and registry, enumerate the
+actual cases first, then execute every runnable case. Record discovered,
+executed, passed, failed and blocked counts separately; do not assume a target
+count or substitute tests of a third-party framework. A compiler-only CLI
+cannot stand in for the generated test binary or the full CLI's whole suite.
+
+These are execution requirements, not a claim that every platform wrapper
+already implements this graph. A runner lacking an edge must report that gap
+and use an identity-checked independent diagnostic lane until it is wired.
+Formal qualification, lineage admission and publication still require all
+their evidence; early descendants remain quarantined.
+
+### Bind newly built producers between waves
+
+A fresh bootstrap cannot validate the hashes of compilers it has not built.
+Construct each next wave after the preceding producer and its compile-and-run
+sanity task have retained terminal evidence. The managed task owner must bind
+the actual compiler output path and digest into that wave's commands and cache
+identity. A static inventory that accepts only pre-existing compilers does not
+implement the fresh bootstrap graph above.
+
+The implementation lane adds `managed-tasks-next-producer` to the existing
+managed owner and `managed-next-producer-launch.shs` as argument transport.
+Its native factory checks remain pending until exercised with a built compiler;
+passing shell transport fixtures does not qualify the factory. Keep the whole
+test inventory and early build waves independent after producer sanity, and
+retain failed test summaries as failures.
+
+`--full-bootstrap --stop-after-seed` prepares the canonical seed generation and
+writes `phase1-seed.env`. It records whole tests as `NOT_RUN`, Stage 2 as
+unadmitted and backend dynload as unqualified. Combining seed-stop with receipt
+validation, resume, deployment or later-phase stop options is an error before
+dispatch; no alternate exit may be mistaken for seed preparation success.
+
+### Windows RC1 completion scope
+
+For the current release, one successful host qualifies the RC: Windows is the
+RC1 host. Complete its requested bootstrap graph, required test inventories
+and local deployment before creating the release tag or publishing. Linux,
+macOS and BSD are RC2 targets; record them as unverified for RC1 rather than
+requiring their success or claiming cross-platform validation. Stop GitHub
+synchronization during the local repair/build cycle. After local success,
+inspect current remote state before the requested branch update, landing and
+tag publication, and check the remote release result. A Windows-only scope
+does not waive failed Windows tests or missing Windows artifacts.
+
 Inventory the requested phases, entries, tool builds, and test shards before
 launching them. Record dependencies and plan concurrency against available
 memory and disk, with explicit per-process timeout budgets. Memory planning
@@ -220,6 +281,16 @@ policy exception in its own attempt; never bypass guards to publish admission.
 
 ## Preserve truthful terminal results
 
+When using the Rust seed for bootstrap with `--runtime-bundle core-c-bootstrap`,
+the runtime source checkout takes precedence over a prebuilt `--runtime-path`.
+The current source resolver searches the working directory's ancestors, then
+the seed's build-time manifest ancestors. `SIMPLE_PROJECT_ROOT` alone does not
+select this C runtime source. Run from the intended frozen checkout and retain
+the actual C compiler input paths/hashes in the receipt. An explicit runtime
+path is not evidence that a provider source fix was compiled. This rule is
+specific to that seed runtime lane; inspect the actual command owner for other
+producers instead of assuming identical selection behavior.
+
 Keep one terminal row per planned operation, with phase, producer hash, source
 revision, entry/shard, exact command, log path, exit status, elapsed time,
 dependency reason, and bug ID where applicable:
@@ -239,6 +310,22 @@ after all runnable rows finish: any FAILED or required BLOCKED/SKIPPED row keeps
 the overall run unsuccessful and its orchestration exit status nonzero. If the
 tool cannot express this, report its raw status and the unresolved aggregate
 failure explicitly. No finite sweep proves the absence of all bugs.
+
+### Windows log observers and collector failures
+
+Open an active temporary log with read, write **and delete** sharing. A reader
+that denies delete sharing can prevent the collector's final rename or cleanup:
+a controlled Windows test reproduced collector exit 126 and a missing receipt
+even though the child had already returned its ordinary failure. Avoid plain
+`Get-Content` for active temporary logs; use an explicit shared file handle or
+wait for the published terminal log.
+
+Capture the collector's own stdout and stderr separately from its bounded child
+log. A missing collector receipt is a process-owner failure, not a successful
+or ordinary failed compiler receipt. Preserve the raw child evidence and the
+reservation until closure is proved or explicitly recovered under the shared
+admission lock. External recovery must retain its own evidence and must never
+fabricate the missing native completion receipt.
 
 ## Repair without losing evidence
 
@@ -264,3 +351,14 @@ cycles; do not infer unlimited retries. Never repeat an identical failing
 command without a changed input or concrete diagnostic hypothesis, or replay
 green checks for unchanged identities. Stop at convergence. Completing a finite
 work graph is different from repeatedly restarting the same failed operation.
+
+At the third unresolved cycle, enter or update the canonical bug database with
+the failure group, affected rows, producer/source identities, three attempt
+receipts and reproduction. Record a narrow workaround with its bug link,
+scope, original behavior and removal/retest condition. A workaround may route
+independent diagnostic work around the unavailable operation; it cannot turn
+a failed assertion into PASS, fabricate an artifact, or admit a stale cache.
+If no valid workaround exists, leave that dependency BLOCKED and continue
+other work. Preserve progress rather than rebuilding from Phase 1. A later
+rebuild must revisit the owning bug and verify the intended path before
+removing the workaround; restarting a process does not reset the repair count.

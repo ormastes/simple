@@ -1,0 +1,112 @@
+# @cover src/compiler/20.hir/hir_lowering/_Items/module_declarations_bootstrap.spl
+# Generic parameters occur only in the implicit receiver, not method generics.
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.hir.hir_symbol_table_methods.*
+
+describe "generic composite impl signature preregistration":
+    it "defers a two-element tuple receiver until its impl scope exists":
+        val source = "trait Hash:\n    fn hash() -> i64\nimpl<T1, T2> Hash for (T1, T2):\n    fn hash() -> i64:\n        0\n"
+        val parsed = parse_full_frontend(source, "tuple_two.spl", "tuple_two", Logger(level: 0))
+        expect(parsed.impls.len()).to_equal(1)
+        expect(parsed.impls[0].type_params.len()).to_equal(2)
+        expect(parsed.impls[0].methods["hash"].type_params.len()).to_equal(0)
+        var lowering = HirLowering.with_filename("tuple_two.spl")
+        lowering.declare_module_symbols(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.symbols.lookup_or_invalid("hash").is_valid()).to_equal(true)
+        val lowered = lowering.lower_impl(parsed.impls[0])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowered.type_params.len()).to_equal(2)
+
+    it "retains three tuple receiver parameters":
+        val source = "trait Hash:\n    fn hash() -> i64\nimpl<T1, T2, T3> Hash for (T1, T2, T3):\n    fn hash() -> i64:\n        0\n"
+        val parsed = parse_full_frontend(source, "tuple_three.spl", "tuple_three", Logger(level: 0))
+        expect(parsed.impls[0].type_params.len()).to_equal(3)
+        var lowering = HirLowering.with_filename("tuple_three.spl")
+        lowering.declare_module_symbols(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val lowered = lowering.lower_impl(parsed.impls[0])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowered.type_params.len()).to_equal(3)
+
+    it "retains four tuple receiver parameters":
+        val source = "trait Hash:\n    fn hash() -> i64\nimpl<T1, T2, T3, T4> Hash for (T1, T2, T3, T4):\n    fn hash() -> i64:\n        0\n"
+        val parsed = parse_full_frontend(source, "tuple_four.spl", "tuple_four", Logger(level: 0))
+        expect(parsed.impls[0].type_params.len()).to_equal(4)
+        var lowering = HirLowering.with_filename("tuple_four.spl")
+        lowering.declare_module_symbols(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val lowered = lowering.lower_impl(parsed.impls[0])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowered.type_params.len()).to_equal(4)
+
+    it "preserves a generic array impl with a multi-letter parameter":
+        val source = "trait Hash:\n    fn hash() -> i64\nimpl<Element> Hash for [Element]:\n    fn hash() -> i64:\n        0\n"
+        val parsed = parse_full_frontend(source, "array_impl.spl", "array_impl", Logger(level: 0))
+        expect(parsed.impls[0].type_params.len()).to_equal(1)
+        var lowering = HirLowering.with_filename("array_impl.spl")
+        lowering.declare_module_symbols(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val lowered = lowering.lower_impl(parsed.impls[0])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowered.type_params.len()).to_equal(1)
+
+    it "also defers an inherited trait method for a generic tuple impl":
+        val source = "trait Hash:\n    fn hash() -> i64:\n        0\nimpl<T1, T2> Hash for (T1, T2):\n    fn extra() -> i64:\n        1\n"
+        val parsed = parse_full_frontend(source, "default_impl.spl", "default_impl", Logger(level: 0))
+        expect(parsed.impls[0].methods.contains_key("hash")).to_equal(false)
+        var lowering = HirLowering.with_filename("default_impl.spl")
+        lowering.declare_module_symbols(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.symbols.lookup_or_invalid("hash").is_valid()).to_equal(true)
+        expect(lowering.symbols.lookup_or_invalid("extra").is_valid()).to_equal(true)
+        val lowered_trait = lowering.lower_trait(parsed.traits["Hash"])
+        val lowered = lowering.lower_impl(parsed.impls[0])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowered.methods.contains_key("hash")).to_equal(true)
+
+    it "still rejects an undeclared tuple type during actual impl lowering":
+        val source = "trait Hash:\n    fn hash() -> i64\nimpl<T1> Hash for (T1, MissingTupleElement):\n    fn hash() -> i64:\n        0\n"
+        val parsed = parse_full_frontend(source, "bad_generic.spl", "bad_generic", Logger(level: 0))
+        var lowering = HirLowering.with_filename("bad_generic.spl")
+        lowering.declare_module_symbols(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val lowered = lowering.lower_impl(parsed.impls[0])
+        var rejected = false
+        for diagnostic in lowering.errors:
+            if diagnostic.message.contains("unresolved type: MissingTupleElement"):
+                rejected = true
+        expect(rejected).to_equal(true)
+
+    it "keeps nongeneric impl signatures checked during preregistration":
+        val source = "trait Hash:\n    fn hash() -> i64\nimpl Hash for (i64, MissingTupleElement):\n    fn hash() -> i64:\n        0\n"
+        val parsed = parse_full_frontend(source, "bad_concrete.spl", "bad_concrete", Logger(level: 0))
+        var lowering = HirLowering.with_filename("bad_concrete.spl")
+        lowering.declare_module_symbols(parsed)
+        var rejected = false
+        for diagnostic in lowering.errors:
+            if diagnostic.message.contains("unresolved type: MissingTupleElement"):
+                rejected = true
+        expect(rejected).to_equal(true)
+
+    it "does not leak an impl parameter into a sibling function":
+        val source = "trait Hash:\n    fn hash() -> i64\nimpl<T1, T2> Hash for (T1, T2):\n    fn hash() -> i64:\n        0\n"
+        val parsed = parse_full_frontend(source, "scope_leak.spl", "scope_leak", Logger(level: 0))
+        var lowering = HirLowering.with_filename("scope_leak.spl")
+        lowering.declare_module_symbols(parsed)
+        val lowered = lowering.lower_impl(parsed.impls[0])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowering.symbols.lookup_or_invalid("T1").is_valid()).to_equal(false)
+        expect(lowering.symbols.lookup_or_invalid("T2").is_valid()).to_equal(false)
+        val sibling = parse_full_frontend("fn bad(value: T1) -> i64:\n    0\n", "scope_leak.spl", "scope_leak", Logger(level: 0))
+        lowering.declare_module_symbols(sibling)
+        var rejected = false
+        for diagnostic in lowering.errors:
+            if diagnostic.message.contains("unresolved type: T1"):
+                rejected = true
+        expect(rejected).to_equal(true)

@@ -1,0 +1,54 @@
+use compiler.backend.linker.macho.provider_types.{MachOProviderV1}
+use compiler.backend.linker.macho.binary_provider.{macho_read_binary_provider_v1}
+use compiler.backend.linker.macho.provider_closure_types.{MachOProviderSourceV1}
+use compiler.backend.linker.macho.tbd_types.{MachOTbdLibraryV1, MachOTbdTargetV1, MachOTbdLimitsV1, macho_tbd_default_limits_v1}
+use compiler.backend.linker.macho.tbd_reader.{macho_read_tbd_v1}
+
+struct MachOClosureEdgeV1:
+    child: i64
+    ordinal: i64
+    whole_library: bool
+
+struct MachOClosureNodeV1:
+    source_path: text
+    install_name: text
+    var provider: Option<MachOProviderV1>
+    library: Option<MachOTbdLibraryV1>
+    var active: bool
+    var counted: bool = false
+    var export_indices: {text: i64} = {}
+    inline_document: bool = false
+    var edges: [MachOClosureEdgeV1]
+
+struct MachOClosureSourceBatchV1:
+    nodes: [MachOClosureNodeV1]
+    declared_count: i64
+    declared_symbols: i64
+
+fn macho_closure_source_v1(source: MachOProviderSourceV1, target: MachOTbdTargetV1, remaining_nodes: i64, remaining_symbols: i64) -> Result<MachOClosureSourceBatchV1, text>:
+    if source.path == "" or source.path.contains("\0"): return Err("Mach-O closure invalid source path")
+    if remaining_nodes < 1: return Err("Mach-O closure source quota exceeded")
+    var first: i64 = 0
+    while first < source.bytes.len() and (source.bytes[first] == 32 or source.bytes[first] == 9 or source.bytes[first] == 10 or source.bytes[first] == 13):
+        first = first + 1
+    val textual = source.path.ends_with(".tbd") or (first < source.bytes.len() and (source.bytes[first] == 123 or source.bytes[first] == 45))
+    if textual:
+        val defaults = macho_tbd_default_limits_v1()
+        val limits = MachOTbdLimitsV1(max_bytes: defaults.max_bytes, max_tokens: defaults.max_tokens,
+            max_depth: defaults.max_depth, max_libraries: remaining_nodes,
+            max_symbols: if remaining_symbols > 0: remaining_symbols else: 1, max_name_bytes: defaults.max_name_bytes)
+        val document = macho_read_tbd_v1(source.bytes, target, limits)?
+        var nodes: [MachOClosureNodeV1] = []
+        var document_index: i64 = 0
+        for library in [document.main] + document.libraries:
+            if library.selected:
+                nodes = nodes.push(MachOClosureNodeV1(source_path: source.path, install_name: library.install_name.unwrap(),
+                    provider: nil, library: Some(library), active: false, edges: [], inline_document: document_index > 0))
+            document_index = document_index + 1
+        return Ok(MachOClosureSourceBatchV1(nodes: nodes, declared_count: 1 + document.libraries.len(),
+            declared_symbols: document.parsed_symbol_count))
+    val provider = macho_read_binary_provider_v1(source.bytes, target.arch)?
+    Ok(MachOClosureSourceBatchV1(nodes: [MachOClosureNodeV1(source_path: source.path, install_name: provider.install_name,
+        provider: Some(provider), library: nil, active: false, edges: [])], declared_count: 1, declared_symbols: provider.exports.len()))
+
+export MachOClosureEdgeV1, MachOClosureNodeV1, MachOClosureSourceBatchV1, macho_closure_source_v1

@@ -1,0 +1,69 @@
+# The binary reader validates real addresses before projecting address-free data.
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.macho.dylib.{macho_read_dylib}
+use compiler.backend.linker.macho.input.{macho_read}
+use compiler.backend.linker.macho.export_trie.{macho_bounded_string}
+use compiler.backend.linker.macho.provider_types.{MachOProviderV1, MachOProviderDependencyV1, MachOProviderExportV1, macho_validate_provider_v1}
+
+fn macho_read_binary_provider_v1(bytes: [u8], target: RelocArch) -> Result<MachOProviderV1, text>:
+    """Read a real thin dylib, retaining restrictions and dependency ordinals."""
+    val library = macho_read_dylib(bytes, target)?
+    var dependencies: [MachOProviderDependencyV1] = []
+    for dependency in library.dependencies:
+        dependencies = dependencies.push(MachOProviderDependencyV1(install_name: dependency.install_name,
+            command: dependency.command, current_version: dependency.current_version,
+            compatibility_version: dependency.compatibility_version))
+    var exports: [MachOProviderExportV1] = []
+    for symbol in library.exports:
+        exports = exports.push(MachOProviderExportV1(name: symbol.name, flags: symbol.flags,
+            library_ordinal: symbol.library_ordinal, import_name: symbol.import_name))
+    var clients: [text] = []
+    var umbrella: Option<text> = nil
+    var rpaths: [text] = []
+    var sub_umbrellas: [text] = []
+    var sub_libraries: [text] = []
+    var compressed = false
+    var modern_reexport = false
+    # Original reader has checked the complete command envelope and each length.
+    # Policy commands were opaque there; validate their own string payload here.
+    var at: i64 = 32
+    for index in 0..macho_read(bytes, 16, 4):
+        val kind = macho_read(bytes, at, 4)
+        val length = macho_read(bytes, at + 4, 4)
+        if kind == 0x22 or kind == 0x80000022 or kind == 0x80000033: compressed = true
+        if kind == 0x8000001f: modern_reexport = true
+        if kind == 0x8000001c:
+            if length < 16: return Err("truncated Mach-O provider rpath command")
+            val offset = macho_read(bytes, at + 8, 4)
+            if offset < 12 or offset >= length: return Err("Mach-O provider rpath outside command")
+            val path = macho_bounded_string(bytes, at + offset, at + length)?
+            if path == "": return Err("empty Mach-O provider rpath")
+            rpaths = rpaths.push(path)
+        elif kind == 0x12 or kind == 0x14 or kind == 0x13 or kind == 0x15:
+            val category = if kind == 0x13 or kind == 0x15: "legacy" else: "client/umbrella"
+            if length < 16: return Err("truncated Mach-O provider {category} command")
+            val offset = macho_read(bytes, at + 8, 4)
+            if offset < 12 or offset >= length: return Err("Mach-O provider {category} name outside command")
+            val name = macho_bounded_string(bytes, at + offset, at + length)?
+            if name == "": return Err("empty Mach-O provider {category} name")
+            if kind == 0x14:
+                clients = clients.push(name)
+            elif kind == 0x12:
+                if umbrella.is_some(): return Err("duplicate Mach-O provider parent umbrella")
+                umbrella = Some(name)
+            elif kind == 0x13:
+                sub_umbrellas = sub_umbrellas.push(name)
+            else:
+                sub_libraries = sub_libraries.push(name)
+        at = at + length
+    val no_reexports = (macho_read(bytes, 24, 4) & 0x100000) != 0
+    val provider = MachOProviderV1(target: target, platform: library.platform, install_name: library.install_name,
+        current_version: library.current_version, compatibility_version: library.compatibility_version,
+        minimum_os: Some(library.minimum_os), sdk: Some(library.sdk), dependencies: dependencies,
+        exports: exports, allowable_clients: clients, parent_umbrella: umbrella, rpaths: rpaths,
+        sub_umbrellas: sub_umbrellas, sub_libraries: sub_libraries, no_reexported_dylibs: no_reexports,
+        infer_subframeworks: not compressed and not modern_reexport and not no_reexports)
+    macho_validate_provider_v1(provider, target)?
+    Ok(provider)
+
+export macho_read_binary_provider_v1

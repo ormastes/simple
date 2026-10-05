@@ -1,0 +1,69 @@
+"""Darwin-only ITEM4-REQ-002/006 wrapper evidence. UNRUN. Off-host prerequisites FAIL explicitly."""
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{host_os, host_arch, dir_create_all, file_read_bytes, file_exists, process_run}
+use std.nogc_sync_mut.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_remove}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.native_tool_authority_v1.{native_tool_strict_requested_v1}
+use compiler.backend.linker.linker_wrapper.{NativeLinkConfig, link_to_native_with_engine}
+
+fn item4_macos_native_host_read(bytes: [u8], offset: i64, width: i64 = 4) -> i64:
+    val valid = width > 0 and width <= 8 and offset >= 0 and offset <= bytes.len() and width <= bytes.len() - offset
+    expect(valid).to_equal(true)
+    if not valid: return 0
+    var value: i64 = 0
+    for index in 0..width: value = value | ((bytes[offset + index] as i64) << (index * 8))
+    value
+
+describe "Darwin host wrapper internal Mach-O admission":
+    it "ITEM4-REQ-002 links real host objects through the selected wrapper and records internal macho":
+        step("Require an actual Darwin host and externally selected internal linker without changing process environment")
+        val os = host_os()
+        val arch = host_arch()
+        val darwin = os == "macos" or os == "darwin"
+        expect(darwin).to_equal(true)
+        if not darwin: return
+        val supported_arch = arch == "x86_64" or arch == "aarch64" or arch == "arm64"
+        expect(supported_arch).to_equal(true)
+        if not supported_arch: return
+        val selected = env_get_opt("SIMPLE_LINKER") ?? ""
+        expect(selected).to_equal("internal")
+        if selected != "internal": return
+        # The ordinary explicit override path is separate from managed native authority.
+        expect(native_tool_strict_requested_v1()).to_equal(false)
+        if native_tool_strict_requested_v1(): return
+        val made = dir_create_all("build")
+        expect(made).to_equal(true)
+        if not made: return
+        val created = secure_temp_dir("build", "item4-macos-native-host-")
+        expect(created.is_ok()).to_equal(true)
+        if created.is_err(): return
+        val parent = created.unwrap()
+        val output = parent + "/app"
+        val arm = arch == "aarch64" or arch == "arm64"
+        val suffix = if arm: "a64" else: "x64"
+        var config = NativeLinkConfig.default()
+        config.runtime_path = "none"
+        config.allow_duplicate_definitions = false
+        config.allow_cc_fallback = false
+        config.extra_flags = ["-platform_version", "macos", "11.0", "11.0", "--macho-signing-identifier", "simple.item4.host"]
+        step("Link real object and provider files through the native wrapper")
+        val linked = link_to_native_with_engine(["test/fixtures/linker/macho/hosted_start_{suffix}.o", "test/fixtures/linker/macho/provider_{suffix}.o"], output, config)
+        expect(linked.is_ok()).to_equal(true)
+        if linked.is_ok():
+            expect(linked.unwrap().engine_id).to_equal("internal:macho")
+            expect(linked.unwrap().output).to_equal(output)
+            step("Inspect the published Mach-O bytes and executable permission independently")
+            val bytes = file_read_bytes(output)
+            expect(bytes.len() > 0xc010).to_equal(true)
+            if bytes.len() > 0xc010:
+                expect(item4_macos_native_host_read(bytes, 0)).to_equal(0xfeedfacf)
+                expect(item4_macos_native_host_read(bytes, 4)).to_equal(if arm: 0x0100000c else: 0x01000007)
+                expect(item4_macos_native_host_read(bytes, 12)).to_equal(2)
+                expect(item4_macos_native_host_read(bytes, 0xc008, 8)).to_equal(0x100004000)
+            val (_out, _err, code) = process_run("/bin/test", ["-x", output])
+            expect(code).to_equal(0)
+        step("Remove owned fixture files")
+        if file_exists(output): expect(file_remove(output)).to_equal(true)
+        expect(dir_remove(parent)).to_equal(true)

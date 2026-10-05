@@ -607,34 +607,44 @@ impl Lowerer {
             // but are themselves still placeholders (0 fields).
             let mut needs_registration: Vec<String> = Vec::new();
 
+            let mut pending = Vec::new();
             for (_tid, hir_ty) in self.module.types.iter() {
                 if let HirType::Struct { fields, .. } = hir_ty {
-                    if fields.is_empty() {
-                        continue; // This is itself a placeholder, skip
-                    }
-                    for (_field_name, field_type_id) in fields {
-                        if let Some(HirType::Struct {
-                            name: ref dep_name,
-                            fields: ref dep_fields,
-                            ..
-                        }) = self.module.types.get(*field_type_id)
-                        {
-                            if dep_fields.is_empty() && !transitive_processed.contains(dep_name) {
-                                needs_registration.push(dep_name.clone());
-                            }
-                        }
-                        // Also check enum placeholders (0 variants)
-                        if let Some(HirType::Enum {
-                            name: ref dep_name,
-                            variants: ref dep_variants,
-                            ..
-                        }) = self.module.types.get(*field_type_id)
-                        {
-                            if dep_variants.is_empty() && !transitive_processed.contains(dep_name) {
-                                needs_registration.push(dep_name.clone());
-                            }
+                    pending.extend(fields.iter().map(|(_, ty)| *ty));
+                }
+            }
+            // Container edges retain declaration dependencies too: importing
+            // ElfObject must complete its [ElfSymbol] element layout from THIS
+            // declaration file, not guess among same-named global layouts.
+            // TypeIds may form cycles (including recursive containers), so visit
+            // each registry node once per registration pass.
+            let mut visited = std::collections::HashSet::new();
+            while let Some(ty) = pending.pop() {
+                if !visited.insert(ty) {
+                    continue;
+                }
+                match self.module.types.get(ty) {
+                    Some(HirType::Struct { name, fields, .. }) => {
+                        if fields.is_empty() && !transitive_processed.contains(name) {
+                            needs_registration.push(name.clone());
                         }
                     }
+                    Some(HirType::Enum { name, variants, .. }) => {
+                        if variants.is_empty() && !transitive_processed.contains(name) {
+                            needs_registration.push(name.clone());
+                        }
+                        pending.extend(variants.iter().filter_map(|(_, payload)| payload.as_ref()).flatten().copied());
+                    }
+                    Some(HirType::Array { element, .. } | HirType::Simd { element, .. }) => pending.push(*element),
+                    Some(HirType::Pointer { inner, .. } | HirType::Promise { inner }) => pending.push(*inner),
+                    Some(HirType::Tuple(elements) | HirType::Union { variants: elements }) => pending.extend(elements.iter().copied()),
+                    Some(HirType::LabeledTuple(fields)) => pending.extend(fields.iter().map(|(_, ty)| *ty)),
+                    Some(HirType::Dict { key, value }) => pending.extend([*key, *value]),
+                    Some(HirType::Function { params, ret }) => {
+                        pending.extend(params.iter().copied());
+                        pending.push(*ret);
+                    }
+                    _ => {}
                 }
             }
 

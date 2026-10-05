@@ -280,6 +280,34 @@ impl<'a> MirLowerer<'a> {
             return result;
         }
 
+        // Optional bool payloads use rt_value_bool, not BoxInt. After HIR
+        // peels bool? for an if-val binding, decode the tagged payload into
+        // a native bool. Do not use rt_is_some: Some(false) is present.
+        if name == "rt_unwrap_or_self"
+            && args.len() == 1
+            && expr_ty == TypeId::BOOL
+            && args[0].ty != TypeId::ANY
+            && self.slot_holds_tagged_value(args[0].ty)
+        {
+            let arg_reg = self.lower_expr(&args[0])?;
+            return self.with_func(|func, current_block| {
+                let payload = func.new_vreg();
+                let boolean = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(payload),
+                    target: CallTarget::from_name("rt_unwrap_or_self"),
+                    args: vec![arg_reg],
+                });
+                block.instructions.push(MirInst::Call {
+                    dest: Some(boolean),
+                    target: CallTarget::from_name("rt_value_as_bool"),
+                    args: vec![payload],
+                });
+                boolean
+            });
+        }
+
         // `rt_unwrap_or_self` returns a tagged RuntimeValue. When the HIR site
         // typed the RESULT as a BoxInt-family scalar while the ARGUMENT is a
         // tagged optional slot (`T?` over a scalar — never plain ANY, whose

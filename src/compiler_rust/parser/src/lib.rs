@@ -66,3 +66,4 @@ mod if_expr_multiline_condition_test;
 mod if_expr_cast_else_test;
 mod try_probe_test;
 mod pipe_lambda_typed_param_test;
+mod inline_if_as_cast_else_test;

@@ -273,7 +273,7 @@ fn classify_internal_error(message: text) -> LinkOutcomeV1:
     """Map an `internal_link_native`/`elf_link` Err payload to a LinkOutcomeV1."""
     if message.contains("UnsupportedFeature") or message.contains("unsupported") or message.contains("slice 1"):
         return LinkOutcomeV1.UnsupportedFeature
-    if message.contains("undefined symbol") or message.contains("duplicate symbol") or message.contains("entry symbol") or message.contains("not a relocatable") or message.contains("e_machine") or message.contains("cannot be read"):
+    if message.contains("undefined symbol") or message.contains("duplicate symbol") or message.contains("entry symbol") or message.contains("not a relocatable") or message.contains("e_machine") or message.contains("cannot be read") or message.contains("invalid Mach-O") or message.contains("undefined hosted entry") or message.contains("unresolved hosted import"):
         return LinkOutcomeV1.InputError
     LinkOutcomeV1.ResourceFailure
 
@@ -281,17 +281,18 @@ fn link_request_internal(req: LinkRequestV1, policy: LinkExecutionPolicyV1,
         config: NativeLinkConfig, object_files: [text], output: text) -> LinkReceiptV1:
     """Admit the requested format, then use the canonical native execution path.
 
-    Both ELF and PE retain wrapper tool/runtime admission and post-link checks.
+    ELF, Mach-O and PE retain wrapper tool/runtime admission and post-link checks.
     The wrapper must never fall back externally for an explicit internal route.
     """
     val pe = req.target.os == LINK_OS_WINDOWS and req.target.object_format == LINK_OBJECT_FORMAT_PE
-    val engine = if pe: "internal:coff" else: INTERNAL_ELF_ENGINE_ID
+    val macho = req.target.os == LINK_OS_MACOS and req.target.object_format == LINK_OBJECT_FORMAT_MACHO
+    val engine = if pe: "internal:coff" elif macho: "internal:macho" else: INTERNAL_ELF_ENGINE_ID
     if not pe:
         val host = native_host_link_target()
-        if req.target.object_format != LINK_OBJECT_FORMAT_ELF or
-                (req.target.os != LINK_OS_LINUX and req.target.os != LINK_OS_FREEBSD) or
-                req.target.os != host.os or req.target.arch != host.arch:
-            debug("link-engine-external", "internal ELF requires Linux/FreeBSD and the matching host sysroot")
+        val elf = req.target.object_format == LINK_OBJECT_FORMAT_ELF and
+            (req.target.os == LINK_OS_LINUX or req.target.os == LINK_OS_FREEBSD)
+        if (not elf and not macho) or req.target.os != host.os or req.target.arch != host.arch:
+            debug("link-engine-external", "internal native link requires the matching ELF or macOS host")
             return base_receipt(req, policy, engine,
                 LinkOutcomeV1.UnsupportedFeature, LinkAccountingClassV1.NotCertified)
     # SMF embedding is a separate output contract, not an internal native link.

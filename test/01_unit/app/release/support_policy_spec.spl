@@ -1,5 +1,5 @@
 use std.spec.{describe, it, expect, step}
-use app.release.support_policy.{parse_support_policy, support_for_channel, required_support, check_required_support, check_single_job_coverage, required_support_json, support_matrix_json}
+use app.release.support_policy.{load_support_policy, parse_support_policy, support_for_channel, required_support, check_required_support, check_single_job_coverage, required_support_json, support_matrix_json}
 
 fn valid_policy() -> text:
     """support:
@@ -92,3 +92,35 @@ describe "release support policy":
         ))
         expect(duplicate.valid).to_be(false)
         expect(duplicate.error).to_contain("duplicate")
+
+describe "RC1 Windows support selection":
+    it "requires exactly the Windows MSVC host with complete qualification":
+        val policy = load_support_policy("release/support.sdn")
+        expect(policy.valid).to_be(true)
+        val required = required_support(policy, "rc")
+        expect(required.len()).to_equal(1)
+        expect(required[0].target).to_equal("x86_64-pc-windows-msvc")
+        expect(required[0].bootstrap).to_equal("full")
+        expect(required[0].whole_tests).to_equal("required")
+        expect(check_single_job_coverage(policy, "rc", "x86_64-pc-windows-msvc")).to_equal("")
+
+    it "rejects Linux or an absent target as Windows RC coverage":
+        val policy = load_support_policy("release/support.sdn")
+        expect(check_single_job_coverage(policy, "rc", "x86_64-unknown-linux-gnu")).to_contain("does not match")
+        expect(check_single_job_coverage(policy, "rc", "")).to_contain("does not match")
+
+    it "does not mark the other RC hosts as passed":
+        val policy = load_support_policy("release/support.sdn")
+        val matrix = support_matrix_json(policy, "rc", "x86_64-pc-windows-msvc")
+        expect(matrix).to_contain("\"target\":\"x86_64-unknown-linux-gnu\"")
+        expect(matrix).to_contain("\"status\":\"not_executed\"")
+        expect(matrix).to_contain("\"target\":\"aarch64-unknown-linux-gnu\"")
+        expect(matrix).to_contain("\"status\":\"experimental\"")
+        expect(matrix.split("\"status\":\"passed\"").len()).to_equal(2)
+
+    it "keeps the other channels on their existing Linux coverage":
+        val policy = load_support_policy("release/support.sdn")
+        for channel in ["alpha", "beta", "stable"]:
+            expect(required_support(policy, channel).len()).to_equal(1)
+            expect(check_single_job_coverage(policy, channel, "x86_64-unknown-linux-gnu")).to_equal("")
+            expect(check_single_job_coverage(policy, channel, "x86_64-pc-windows-msvc")).to_contain("does not match")

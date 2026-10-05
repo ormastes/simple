@@ -1,0 +1,61 @@
+# Generated native entry ownership. Source admission remains compiler-owned.
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_size_raw,
+    file_read_regular_no_follow_bounded_bytes, file_write_bytes, file_delete, secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.io_runtime.{dir_exists}
+use std.scv.compile_source_inventory_core.{compile_source_inventory_plain_checkout_v1}
+
+struct NativeTestSourceStageV1:
+    directory: text
+    path: text
+
+fn native_test_source_checkout_v1(root: text) -> bool:
+    root != "" and not root.contains("\0") and not root.contains("\n") and
+        compile_source_inventory_plain_checkout_v1(root) == root and
+        (dir_exists(root + "/.git") or file_exists(root + "/.git")) and
+        dir_exists(root + "/test")
+
+fn native_test_source_stage_valid_v1(stage: NativeTestSourceStageV1) -> bool:
+    val marker = "/test/native-generated-"
+    val split = stage.directory.last_index_of(marker)
+    if split < 1: return false
+    val root = stage.directory[0:split]
+    val leaf = stage.directory[split + marker.len():]
+    native_test_source_checkout_v1(root) and leaf != "" and
+        not leaf.contains("/") and not leaf.contains("\\") and
+        not leaf.contains("..") and not leaf.contains("\0") and
+        not leaf.contains("\n") and stage.path == stage.directory + "/entry.spl"
+
+fn native_test_cleanup_source_v1(stage: NativeTestSourceStageV1, keep_artifacts: bool) -> bool:
+    # Never recursively remove a caller-supplied path. A foreign child leaves
+    # the directory in place and makes cleanup fail, allowing explicit retry.
+    if not native_test_source_stage_valid_v1(stage): return false
+    if keep_artifacts: return true
+    if file_exists(stage.path) and not file_delete(stage.path): return false
+    if not dir_exists(stage.directory): return true
+    dir_remove(stage.directory, false)
+
+fn native_test_stage_source_v1(checkout_root: text, source_path: text) -> Result<NativeTestSourceStageV1, text>:
+    val root = compile_source_inventory_plain_checkout_v1(checkout_root)
+    if not native_test_source_checkout_v1(root):
+        return Err("native-test-source: canonical checkout root with a test directory is required")
+    if source_path == "" or source_path.contains("\0") or not file_exists(source_path):
+        return Err("native-test-source: source is missing")
+    val size = file_size_raw(source_path)
+    if size < 0: return Err("native-test-source: source size is unavailable")
+    val bytes = match file_read_regular_no_follow_bounded_bytes(source_path, size):
+        case Ok(value): value
+        case Err(reason): return Err("native-test-source: source read failed: " + reason)
+    val directory = match secure_temp_dir(root + "/test", "native-generated-"):
+        case Ok(value): compile_source_inventory_plain_checkout_v1(value)
+        case Err(reason): return Err("native-test-source: staging directory failed: " + reason)
+    val stage = NativeTestSourceStageV1(directory: directory, path: directory + "/entry.spl")
+    if not native_test_source_stage_valid_v1(stage):
+        return Err("native-test-source: staging provider returned an invalid owned path")
+    if not file_write_bytes(stage.path, bytes):
+        val cleaned = native_test_cleanup_source_v1(stage, false)
+        return Err("native-test-source: source write failed" +
+            (if cleaned: "" else: "; cleanup failed: " + stage.directory))
+    Ok(stage)
+
+export NativeTestSourceStageV1, native_test_stage_source_v1, native_test_cleanup_source_v1

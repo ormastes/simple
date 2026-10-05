@@ -1,0 +1,327 @@
+use compiler.backend.linker.reloc_engine.{RelocArch}
+use compiler.backend.linker.macho.tbd_types.{MachOTbdTargetV1}
+use compiler.backend.linker.macho.tbd_values.{tbd_target_name}
+use compiler.backend.linker.macho.tbd_lower.{macho_tbd_library_provider_v1}
+use compiler.backend.linker.macho.provider_types.{MachOProviderV1, macho_validate_provider_v1}
+use compiler.backend.linker.macho.provider_closure_types.{MachOProviderSourceV1, MachOProviderSearchV1, MachOProviderClientV1, MachOProviderClosureLimitsV1, MachOProviderBindingV1, MachOProviderRunPathV1, MachOProviderResolveRequestV2, macho_provider_closure_default_limits_v1}
+use compiler.backend.linker.macho.provider_closure_source.{MachOClosureNodeV1, MachOClosureEdgeV1, macho_closure_source_v1}
+
+fn macho_closure_client_leaf_v1(path: text) -> text:
+    val parts = path.split("/")
+    var leaf = parts[parts.len() - 1]
+    if leaf.starts_with("lib"): leaf = leaf[3:leaf.len()]
+    var end = leaf.len()
+    for index in 0..leaf.len():
+        if leaf.byte_at(index) == 46 or leaf.byte_at(index) == 95:
+            end = index
+            break
+    leaf[0:end]
+
+fn macho_closure_legacy_leaf_v1(path: text) -> text:
+    val parts = path.split("/")
+    parts[parts.len() - 1]
+
+fn macho_closure_legacy_stem_v1(path: text) -> text:
+    val leaf = macho_closure_legacy_leaf_v1(path)
+    for index in 0..leaf.len():
+        if leaf.byte_at(index) == 46 or leaf.byte_at(index) == 95: return leaf[0:index]
+    leaf
+
+fn macho_closure_client_v1(provider: MachOProviderV1, client: MachOProviderClientV1) -> Result<bool, text>:
+    if provider.allowable_clients.len() == 0 and provider.parent_umbrella.is_none(): return Ok(true)
+    val leaf = macho_closure_client_leaf_v1(client.output_install_name)
+    if val parent = provider.parent_umbrella:
+        if client.output_install_name.contains("/") and leaf == parent: return Ok(true)
+        if val sibling = client.parent_umbrella:
+            if sibling == parent: return Ok(true)
+    var effective = leaf
+    if val explicit = client.client_name: effective = explicit
+    if effective == "": return Err("Mach-O closure empty effective client identity")
+    for allowed in provider.allowable_clients:
+        if allowed.starts_with(effective): return Ok(true)
+    Err("Mach-O closure direct provider client policy denied: {provider.install_name}")
+
+class MachOProviderClosureV1:
+    # Construction and mutation belong to this module. No external trust is
+    # established by a caller-owned metadata value or these structural checks.
+    var nodes: [MachOClosureNodeV1]
+    var roots: [i64]
+    var identities: {text: i64}
+    var paths: {text: i64}
+    target: MachOTbdTargetV1
+    client: MachOProviderClientV1
+    search: MachOProviderSearchV1
+    load: Option<fn(text, text, MachOProviderSearchV1) -> Result<MachOProviderSourceV1, text>>
+    load_v2: Option<fn(MachOProviderResolveRequestV2, MachOProviderSearchV1) -> Result<MachOProviderSourceV1, text>>
+    limits: MachOProviderClosureLimitsV1
+    var declared_count: i64
+    var total_bytes: i64
+    var symbol_count: i64
+    var parsed_symbols: i64
+    var edge_count: i64
+    var work: i64
+    var visited: {text: bool}
+    var resolutions: {text: i64}
+
+    me charge(amount: i64) -> Result<bool, text>:
+        if amount < 0 or amount > self.limits.max_work - self.work: return Err("Mach-O closure work quota exceeded")
+        self.work = self.work + amount
+        Ok(true)
+
+    me add_source(source: MachOProviderSourceV1) -> Result<i64, text>:
+        self.charge(1)?
+        if source.path == "" or source.path.contains("\0"): return Err("Mach-O closure invalid source path")
+        # Charge all delivered bytes, including another context's read of a
+        # cached path. This bounds read volume rather than only resident input.
+        if source.bytes.len() > self.limits.max_total_bytes - self.total_bytes: return Err("Mach-O closure byte quota exceeded")
+        self.total_bytes = self.total_bytes + source.bytes.len()
+        if self.paths.has(source.path): return Ok(self.paths[source.path])
+        val batch = macho_closure_source_v1(source, self.target, self.limits.max_sources - self.declared_count,
+            self.limits.max_symbols - self.parsed_symbols)?
+        if batch.nodes.len() == 0: return Err("Mach-O closure unavailable source target")
+        if batch.declared_count > self.limits.max_sources - self.declared_count: return Err("Mach-O closure source quota exceeded")
+        if batch.declared_symbols > self.limits.max_symbols - self.parsed_symbols: return Err("Mach-O closure symbol quota exceeded")
+        self.charge(batch.declared_count + batch.declared_symbols)?
+        val main = self.nodes.len()
+        for node in batch.nodes:
+            self.charge(1)?
+            if self.identities.has(node.install_name): return Err("Mach-O closure conflicting install identity: {node.install_name}")
+            self.identities[node.install_name] = self.nodes.len()
+            self.nodes = self.nodes.push(node)
+        self.paths[source.path] = main
+        self.declared_count = self.declared_count + batch.declared_count
+        self.parsed_symbols = self.parsed_symbols + batch.declared_symbols
+        Ok(main)
+
+    me dependency(name: text, requester: text, owner_rpaths: [text]) -> Result<i64, text>:
+        self.charge(1)?
+        val contextual = name.starts_with("@rpath/")
+        if self.identities.has(name):
+            val existing = self.identities[name]
+            # Retain the explicit global inline catalog policy. A previously
+            # loaded standalone provider is not an owner-context resolution.
+            if not contextual or self.nodes[existing].inline_document: return Ok(existing)
+        if contextual and self.load_v2.is_none():
+            return Err("Mach-O closure unsupported external @rpath with V1 loader")
+        var key_parts = ["{requester.len()}:{requester}{name.len()}:{name}"]
+        var runpaths: [MachOProviderRunPathV1] = []
+        for path in owner_rpaths:
+            self.charge(1)?
+            key_parts = key_parts.push("{path.len()}:{path}")
+            runpaths = runpaths.push(MachOProviderRunPathV1(path: path, owner_path: requester))
+        val key = key_parts.join("")
+        if self.resolutions.has(key): return Ok(self.resolutions[key])
+        var loaded: Option<MachOProviderSourceV1> = nil
+        if val callback = self.load_v2:
+            loaded = Some(callback(MachOProviderResolveRequestV2(install_name: name, requester_path: requester, runpaths: runpaths), self.search)?)
+        elif val callback = self.load:
+            loaded = Some(callback(name, requester, self.search)?)
+        else:
+            return Err("Mach-O closure missing provider loader")
+        val source = loaded.unwrap()
+        if contextual and self.identities.has(name):
+            val existing = self.nodes[self.identities[name]]
+            if existing.source_path != source.path:
+                return Err("Mach-O closure ambiguous @rpath physical provider identity: {name}")
+        self.add_source(source)?
+        if not self.identities.has(name): return Err("Mach-O closure dependency install identity mismatch: {name}")
+        # A file may declare the requested identity as an inline document.
+        val child = self.identities[name]
+        self.resolutions[key] = child
+        Ok(child)
+
+    me provider(index: i64) -> Result<MachOProviderV1, text>:
+        if index < 0 or index >= self.nodes.len(): return Err("Mach-O closure node index outside graph")
+        var node = self.nodes[index]
+        if node.counted: return Ok(node.provider.unwrap())
+        if node.provider.is_none():
+            if node.library.is_none(): return Err("Mach-O closure node lacks metadata")
+            val library = node.library.unwrap()
+            var maximum_exports: i64 = 0
+            for symbol in library.symbols:
+                self.charge(1)?
+                val count = if symbol.encoding == "objc_class": 2 else: 1
+                if count > self.limits.max_symbols - self.symbol_count - maximum_exports:
+                    return Err("Mach-O closure symbol quota exceeded")
+                maximum_exports = maximum_exports + count
+            node.provider = Some(macho_tbd_library_provider_v1(library, self.target, true)?)
+        val provider = node.provider.unwrap()
+        if provider.exports.len() > self.limits.max_symbols - self.symbol_count: return Err("Mach-O closure symbol quota exceeded")
+        self.charge(1 + provider.exports.len() * 2 + provider.dependencies.len() + provider.rpaths.len() +
+            provider.sub_umbrellas.len() + provider.sub_libraries.len())?
+        macho_validate_provider_v1(provider, self.target.arch)?
+        if provider.platform != self.target.platform: return Err("Mach-O closure provider platform mismatch")
+        var indices: {text: i64} = {}
+        for ordinal in 0..provider.exports.len(): indices[provider.exports[ordinal].name] = ordinal
+        node.export_indices = indices
+        self.symbol_count = self.symbol_count + provider.exports.len()
+        node.counted = true
+        self.nodes[index] = node
+        Ok(provider)
+
+    me add_edge(parent: i64, child: i64, ordinal: i64, whole_library: bool) -> Result<bool, text>:
+        self.charge(1)?
+        if self.edge_count >= self.limits.max_edges: return Err("Mach-O closure edge quota exceeded")
+        var node = self.nodes[parent]
+        node.edges = node.edges.push(MachOClosureEdgeV1(child: child, ordinal: ordinal, whole_library: whole_library))
+        self.nodes[parent] = node
+        self.edge_count = self.edge_count + 1
+        Ok(true)
+
+    me expand(index: i64) -> Result<bool, text>:
+        if self.nodes[index].active: return Ok(true)
+        val provider = self.provider(index)?
+        var node = self.nodes[index]
+        node.active = true
+        self.nodes[index] = node
+        if val library = node.library:
+            for name in library.reexported_libraries:
+                val child = self.dependency(name, node.source_path, provider.rpaths)?
+                self.add_edge(index, child, 0, true)?
+        else:
+            var aliases: {i64: bool} = {}
+            for symbol in provider.exports:
+                self.charge(1)?
+                if (symbol.flags & 8) != 0: aliases[symbol.library_ordinal] = true
+            var umbrellas: {text: bool} = {}
+            var libraries: {text: bool} = {}
+            if not provider.no_reexported_dylibs:
+                for name in provider.sub_umbrellas:
+                    self.charge(1)?
+                    umbrellas[name] = true
+                for name in provider.sub_libraries:
+                    self.charge(1)?
+                    libraries[name] = true
+            val infer = provider.infer_subframeworks and not provider.no_reexported_dylibs and node.source_path.contains("/")
+            val parent_name = macho_closure_legacy_leaf_v1(node.source_path)
+            var ordinal: i64 = 0
+            for dependency in provider.dependencies:
+                self.charge(1)?
+                ordinal = ordinal + 1
+                val ordinary = dependency.command == 12 or dependency.command == 0x80000018
+                var whole = dependency.command == 0x8000001f
+                if ordinary and not provider.no_reexported_dylibs:
+                    if dependency.install_name.contains("/") and umbrellas.has(macho_closure_legacy_leaf_v1(dependency.install_name)):
+                        whole = true
+                    if libraries.has(macho_closure_legacy_stem_v1(dependency.install_name)): whole = true
+                if whole or aliases.has(ordinal) or (ordinary and infer):
+                    val child = self.dependency(dependency.install_name, node.source_path, provider.rpaths)?
+                    if ordinary and infer and not whole:
+                        # Probe metadata only. A nonmatching ordinary dependency
+                        # must not become active or acquire deployment checks.
+                        val candidate = self.nodes[child]
+                        var parent: Option<text> = nil
+                        if val library = candidate.library: parent = library.parent_umbrella
+                        elif val binary = candidate.provider: parent = binary.parent_umbrella
+                        if val umbrella = parent:
+                            if umbrella == parent_name: whole = true
+                    if not whole and not aliases.has(ordinal): continue
+                    val child_provider = self.provider(child)?
+                    if child_provider.current_version < dependency.compatibility_version:
+                        return Err("Mach-O closure incompatible dependency version")
+                    self.add_edge(index, child, ordinal, whole)?
+        Ok(true)
+
+    fn direct_providers() -> [MachOProviderV1]:
+        var providers: [MachOProviderV1] = []
+        for root in self.roots: providers = providers.push(self.nodes[root].provider.unwrap())
+        providers
+
+    fn validate_for_request(target: RelocArch, minimum_os: i64) -> Result<bool, text>:
+        if self.target.arch != target or self.target.platform != 1: return Err("Mach-O closure request target mismatch")
+        for node in self.nodes:
+            if node.active:
+                if node.provider.is_none(): return Err("Mach-O closure incomplete active node")
+                val provider = node.provider.unwrap()
+                if val minimum = provider.minimum_os:
+                    if minimum > minimum_os: return Err("Mach-O closure reachable provider minimum OS mismatch")
+        Ok(true)
+
+    me lookup(index: i64, name: text, depth: i64) -> Result<Option<i64>, text>:
+        self.charge(1)?
+        if depth > self.limits.max_depth: return Err("Mach-O closure lookup depth quota exceeded")
+        val key = "{index}:{name}"
+        if self.visited.has(key): return Ok(nil)
+        self.visited[key] = true
+        val node = self.nodes[index]
+        val provider = node.provider.unwrap()
+        if node.export_indices.has(name):
+            self.charge(1)?
+            val symbol = provider.exports[node.export_indices[name]]
+            if (symbol.flags & 8) == 0: return Ok(Some(symbol.flags))
+            for edge in node.edges:
+                self.charge(1)?
+                if edge.ordinal == symbol.library_ordinal:
+                    val found = self.lookup(edge.child, symbol.import_name, depth + 1)?
+                    if found.is_none(): return Ok(nil)
+                    return Ok(Some(found.unwrap() | (symbol.flags & 4)))
+            return Err("Mach-O closure missing reexport alias dependency")
+        for edge in node.edges:
+            self.charge(1)?
+            if edge.whole_library:
+                val found = self.lookup(edge.child, name, depth + 1)?
+                if found.is_some(): return Ok(found)
+        Ok(nil)
+
+    me resolve_import(name: text) -> Result<Option<MachOProviderBindingV1>, text>:
+        if name == "" or name.contains("\0"): return Err("Mach-O closure invalid import name")
+        self.visited = {}
+        var ordinal: i64 = 0
+        for root in self.roots:
+            ordinal = ordinal + 1
+            val found = self.lookup(root, name, 1)?
+            if val flags = found:
+                return Ok(Some(MachOProviderBindingV1(root_ordinal: ordinal, name: name, flags: flags)))
+        Ok(nil)
+
+fn macho_provider_closure_v1(roots: [MachOProviderSourceV1], target: MachOTbdTargetV1, client: MachOProviderClientV1,
+        search: MachOProviderSearchV1, load: fn(text, text, MachOProviderSearchV1) -> Result<MachOProviderSourceV1, text>,
+        limits: MachOProviderClosureLimitsV1) -> Result<MachOProviderClosureV1, text>:
+    macho_provider_closure_selected_v1(roots, target, client, search, Some(load), nil, limits)
+
+fn macho_provider_closure_v2(roots: [MachOProviderSourceV1], target: MachOTbdTargetV1, client: MachOProviderClientV1,
+        search: MachOProviderSearchV1, load: fn(MachOProviderResolveRequestV2, MachOProviderSearchV1) -> Result<MachOProviderSourceV1, text>,
+        limits: MachOProviderClosureLimitsV1) -> Result<MachOProviderClosureV1, text>:
+    """Resolve using each requesting dylib's own runpaths, never output/ancestor paths."""
+    macho_provider_closure_selected_v1(roots, target, client, search, nil, Some(load), limits)
+
+fn macho_provider_closure_selected_v1(roots: [MachOProviderSourceV1], target: MachOTbdTargetV1, client: MachOProviderClientV1,
+        search: MachOProviderSearchV1,
+        load: Option<fn(text, text, MachOProviderSearchV1) -> Result<MachOProviderSourceV1, text>>,
+        load_v2: Option<fn(MachOProviderResolveRequestV2, MachOProviderSearchV1) -> Result<MachOProviderSourceV1, text>>,
+        limits: MachOProviderClosureLimitsV1) -> Result<MachOProviderClosureV1, text>:
+    tbd_target_name(target)?
+    val maximum = macho_provider_closure_default_limits_v1()
+    if limits.max_sources < 1 or limits.max_sources > maximum.max_sources or limits.max_total_bytes < 1 or limits.max_total_bytes > maximum.max_total_bytes or
+            limits.max_edges < 1 or limits.max_edges > maximum.max_edges or limits.max_symbols < 1 or limits.max_symbols > maximum.max_symbols or
+            limits.max_work < 1 or limits.max_work > maximum.max_work or limits.max_depth < 1 or limits.max_depth > maximum.max_depth:
+        return Err("Mach-O closure invalid limits")
+    if roots.len() > 255 or roots.len() > limits.max_sources: return Err("Mach-O closure direct root quota exceeded")
+    if client.output_install_name == "" or client.output_install_name.contains("\0"): return Err("Mach-O closure invalid output identity")
+    if val explicit = client.client_name:
+        if explicit == "" or explicit.contains("\0"): return Err("Mach-O closure invalid client name")
+    if val umbrella = client.parent_umbrella:
+        if umbrella == "" or umbrella.contains("\0"): return Err("Mach-O closure invalid client umbrella")
+    var closure = MachOProviderClosureV1(nodes: [], roots: [], identities: {}, paths: {}, target: target, client: client,
+        search: search, load: load, load_v2: load_v2, limits: limits, declared_count: 0, total_bytes: 0, symbol_count: 0,
+        parsed_symbols: 0, edge_count: 0, work: 0, visited: {}, resolutions: {})
+    # Index all direct sources and their inline documents before external loads.
+    var root_indices: [i64] = []
+    for source in roots:
+        val root = closure.add_source(source)?
+        if root_indices.contains(root): return Err("Mach-O closure duplicate direct provider")
+        root_indices = root_indices.push(root)
+    closure.roots = root_indices
+    var pending = root_indices
+    var cursor: i64 = 0
+    while cursor < pending.len():
+        val index = pending[cursor]
+        cursor = cursor + 1
+        if closure.nodes[index].active: continue
+        closure.expand(index)?
+        for edge in closure.nodes[index].edges:
+            if not closure.nodes[edge.child].active: pending = pending.push(edge.child)
+    for root in closure.roots: macho_closure_client_v1(closure.nodes[root].provider.unwrap(), client)?
+    Ok(closure)
+
+export MachOProviderClosureV1, macho_provider_closure_v1, macho_provider_closure_v2

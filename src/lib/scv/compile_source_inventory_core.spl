@@ -3,6 +3,7 @@
 
 use std.common.crypto.sha256.{sha256_text}
 use std.common.text_whitespace.{split_whitespace}
+use std.common.text_bytes.{text_to_utf8_bytes}
 
 val COMPILE_SOURCE_INVENTORY_SCHEMA_V1: i64 = 1
 val COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
@@ -87,13 +88,88 @@ fn compile_source_inventory_facet_text_v1(content: text, facet: text) -> text:
     compile_source_inventory_facet_rows_from_canonical_v1(
         compile_source_inventory_strip_comments_v1(content), facet)
 
+# Whole-text canonicalization. The per-line reference above costs ~35 runtime
+# calls per source line (split, trim, split_whitespace's split + per-token
+# trim, join, seven prefix tests); over a 44,758-file / 7.4M-line src+test
+# cold inventory that was ~200 s of the ~360 s Stage 2 cold init (x86_64
+# Linux, 2026-10-04, see
+# doc/08_tracking/bug/stage2_x86_64_hir_shard_worker_segv_startup_2026-10-04.md).
+# The functions below compute the SAME texts with a handful of whole-text
+# replace/split calls per file, so runtime calls scale with comment and facet
+# lines instead of with every token of every line.
+#
+# They are exact only when space and newline are the sole whitespace in the
+# file: then `trim` + `split_whitespace(...).join(" ")` of a line is "collapse
+# space runs, drop one edge space", which whole-text replaces reproduce.
+# Every other character that `trim` (Unicode White_Space on the Rust lane) or
+# the per-token trim could remove sends the file to the reference path.
+fn compile_source_inventory_whole_text_eligible_v1(content: text) -> bool:
+    for needle in ["\t", "\r", "\u{b}", "\u{c}", "\u{85}", "\u{a0}", "\u{1680}",
+            "\u{2000}", "\u{2001}", "\u{2002}", "\u{2003}", "\u{2004}", "\u{2005}",
+            "\u{2006}", "\u{2007}", "\u{2008}", "\u{2009}", "\u{200a}", "\u{2028}",
+            "\u{2029}", "\u{202f}", "\u{205f}", "\u{3000}"]:
+        if content.contains(needle):
+            return false
+    true
+
+# Canonical text of an eligible file: the reference loop's non-blank,
+# non-comment lines, each trimmed with space runs collapsed, joined by "\n".
+fn compile_source_inventory_whole_text_canonical_v1(content: text) -> text:
+    var body = content
+    while body.contains("  "):
+        body = body.replace("  ", " ")
+    # Runs are single spaces now, so one leading/trailing space per line is
+    # all that trim would remove. Framing newlines make every line uniform.
+    body = ("\n" + body + "\n").replace("\n ", "\n").replace(" \n", "\n")
+    while body.contains("\n\n"):
+        body = body.replace("\n\n", "\n")
+    # body is "\n" or "\n" + lines + "\n" with no blank line. A doubled
+    # newline therefore marks exactly the comment lines; drop each marked
+    # piece's first line (the comment) and keep the rest of that piece.
+    if body.contains("\n#"):
+        var pieces = body.replace("\n#", "\n\n#").split("\n\n")
+        var index = 1
+        while index < pieces.len():
+            var rows = pieces[index].split("\n")
+            rows[0] = ""
+            pieces[index] = rows.join("\n")
+            index = index + 1
+        body = pieces.join("")
+    # Every kept line is non-empty and edge-trimmed, so trim removes exactly
+    # the two framing newlines ("\n" alone becomes "").
+    body.trim()
+
+# Rows of `canonical` that start with any of `prefixes`, in source order,
+# joined by "\n" -- compile_source_inventory_facet_rows_from_canonical_v1 for
+# one facet. `prefixes` must not be prefixes of one another.
+fn compile_source_inventory_whole_text_rows_v1(canonical: text, prefixes: [text]) -> text:
+    if canonical == "":
+        return ""
+    val lined = "\n" + canonical + "\n"
+    var marked = lined
+    for prefix in prefixes:
+        marked = marked.replace("\n" + prefix, "\n\n" + prefix)
+    # Canonical text has no blank line, so "\n\n" occurs only at a match.
+    if not marked.contains("\n\n"):
+        return ""
+    val pieces = marked.split("\n\n")
+    var rows: [text] = []
+    var index = 1
+    while index < pieces.len():
+        rows.push(pieces[index].split("\n")[0])
+        index = index + 1
+    rows.join("\n")
+
 # NOTE on hashing cost: `sha256_text` is already
 # runtime-native — src/lib/common/crypto/sha256.spl:211 calls the extern
 # `rt_tls13_sha256` and only falls back to an interpreted compression loop on
 # an invalid-length result. So a per-file "pass a natively-hashed digest in"
 # path would not skip interpreted hashing; it would just add a second,
 # redundant file read (fs::read via rt_file_hash_sha256, on top of the
-# content this function already has in hand) for no compute benefit. That
+# content this function already has in hand) for no compute benefit, and it
+# would hash bytes other than the ones canonicalized here. (The Rust-lane
+# accelerator itself read its [u8] argument with one registry-checked call per
+# byte until 2026-10-04; that cost belonged in the runtime, not here.) That
 # path was tried and removed here — see
 # doc/08_tracking/bug/windows_scv_inventory_cold_init_untracked_walk_slow_2026-09-13.md
 # for what IS still interpreted-only in this file (the comment/whitespace
@@ -104,29 +180,39 @@ fn compile_source_inventory_event_from_content_v1(
     if operation == "delete":
         return CompileSourceEventV1(
             source, operation, source_identity, "", "", "", "", "", 0)
-    # Build all views while each normalized line is already available. The
-    # public single-facet helpers retain their contract; cold inventory need
-    # not split and allocate the complete canonical source three more times.
-    var semantic_rows: [text] = []
-    var export_rows: [text] = []
-    var initializer_rows: [text] = []
-    var provider_rows: [text] = []
-    for line in content.split("\n"):
-        val trimmed = line.trim()
-        if trimmed == "" or trimmed.starts_with("#"):
-            continue
-        val normalized = split_whitespace(trimmed).join(" ")
-        semantic_rows = semantic_rows.push(normalized)
-        if normalized.starts_with("export ") or normalized.starts_with("pub "):
-            export_rows = export_rows.push(normalized)
-        if normalized.starts_with("val ") or normalized.starts_with("var ") or normalized.starts_with("init "):
-            initializer_rows = initializer_rows.push(normalized)
-        if normalized.starts_with("use ") or normalized.starts_with("impl ") or normalized.starts_with("provider "):
-            provider_rows = provider_rows.push(normalized)
-    val canonical = semantic_rows.join("\n")
-    val exports = export_rows.join("\n")
-    val initializers = initializer_rows.join("\n")
-    val providers = provider_rows.join("\n")
+    var canonical = ""
+    var exports = ""
+    var initializers = ""
+    var providers = ""
+    if compile_source_inventory_whole_text_eligible_v1(content):
+        canonical = compile_source_inventory_whole_text_canonical_v1(content)
+        exports = compile_source_inventory_whole_text_rows_v1(canonical, ["export ", "pub "])
+        initializers = compile_source_inventory_whole_text_rows_v1(canonical, ["val ", "var ", "init "])
+        providers = compile_source_inventory_whole_text_rows_v1(canonical, ["use ", "impl ", "provider "])
+    else:
+        # Reference path. Build all views while each normalized line is
+        # already available; the public single-facet helpers retain their
+        # contract.
+        var semantic_rows: [text] = []
+        var export_rows: [text] = []
+        var initializer_rows: [text] = []
+        var provider_rows: [text] = []
+        for line in content.split("\n"):
+            val trimmed = line.trim()
+            if trimmed == "" or trimmed.starts_with("#"):
+                continue
+            val normalized = split_whitespace(trimmed).join(" ")
+            semantic_rows = semantic_rows.push(normalized)
+            if normalized.starts_with("export ") or normalized.starts_with("pub "):
+                export_rows = export_rows.push(normalized)
+            if normalized.starts_with("val ") or normalized.starts_with("var ") or normalized.starts_with("init "):
+                initializer_rows = initializer_rows.push(normalized)
+            if normalized.starts_with("use ") or normalized.starts_with("impl ") or normalized.starts_with("provider "):
+                provider_rows = provider_rows.push(normalized)
+        canonical = semantic_rows.join("\n")
+        exports = export_rows.join("\n")
+        initializers = initializer_rows.join("\n")
+        providers = provider_rows.join("\n")
     val content_digest = sha256_text(content)
     val semantic_digest = if canonical == content:
         content_digest
@@ -181,11 +267,17 @@ fn compile_source_inventory_text_valid_v1(value: text) -> bool:
         not value.contains("|")
 
 fn compile_source_inventory_digest_valid_v1(value: text) -> bool:
+    # One bulk byte copy instead of 64 `byte_at` calls that each re-validated
+    # the string twice; every entry is checked several times per cold
+    # inventory (initial batch, encode, publication readback, admission).
     if value.len() != 64:
+        return false
+    val raw = text_to_utf8_bytes(value)
+    if raw.len() != 64u64:
         return false
     var index = 0
     while index < 64:
-        val ch = value.byte_at(index) as i64
+        val ch = raw[index] as i64
         if not ((ch >= 48 and ch <= 57) or (ch >= 97 and ch <= 102)):
             return false
         index = index + 1
@@ -456,6 +548,9 @@ export CompileSourceInventoryChangeV1
 export compile_source_inventory_strip_comments_v1, compile_source_inventory_identity_cmp_v1
 export compile_source_inventory_facet_rows_from_canonical_v1
 export compile_source_inventory_facet_text_v1
+export compile_source_inventory_whole_text_eligible_v1
+export compile_source_inventory_whole_text_canonical_v1
+export compile_source_inventory_whole_text_rows_v1
 export compile_source_inventory_event_from_content_v1
 export compile_source_inventory_git_event_v1
 export compile_source_inventory_filesystem_event_v1

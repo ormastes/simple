@@ -3,6 +3,9 @@
 # This is a pure Simple boundary. GPU execution is deliberately deferred to
 # backend plugins that consume these batches and report fallback decisions.
 
+use common.ui.draw_ir_v4_state.{DrawIrFractionalGeometry, DrawIrAffine2D, DRAW_IR_SCHEMA_VERSION_V4, DRAW_IR_RASTER_ALIASED_PIXEL_CENTER, DRAW_IR_RASTER_COVERAGE_AA, draw_ir_v4_payload_equal}
+export DrawIrFractionalGeometry, DrawIrAffine2D, DRAW_IR_SCHEMA_VERSION_V4, DRAW_IR_RASTER_ALIASED_PIXEL_CENTER, DRAW_IR_RASTER_COVERAGE_AA
+
 pub val DRAW_IR_SCHEMA_VERSION: text = "simple-draw-ir-v2"
 pub val DRAW_IR_BACKEND_CPU: text = "cpu"
 pub val DRAW_IR_BACKEND_GPU: text = "gpu"
@@ -85,6 +88,31 @@ struct DrawIrCommand:
     image_uri: text
     points: [DrawIrPoint]
     glyph_run: DrawIrGlyphRunPayload
+    fractional_geometry: DrawIrFractionalGeometry? = nil
+    affine_transform: DrawIrAffine2D? = nil
+    raster_policy: text = "aliased-pixel-center"
+
+# This predicate describes the existing scalar Skia wire boundary. Fractional
+# geometry is independently supported there; legacy integer renderers must
+# additionally reject fractional_geometry before rasterizing.
+fn draw_ir_command_has_unsupported_v4_state(command: DrawIrCommand) -> bool:
+    command.affine_transform != nil or command.raster_policy != DRAW_IR_RASTER_ALIASED_PIXEL_CENTER
+
+fn draw_ir_composition_has_v4_state(composition: DrawIrComposition) -> bool:
+    for batch in composition.batches:
+        if draw_ir_commands_schema(batch.commands) == DRAW_IR_SCHEMA_VERSION_V4:
+            return true
+    false
+
+fn draw_ir_command_v4_equal(a: DrawIrCommand, b: DrawIrCommand) -> bool:
+    draw_ir_v4_payload_equal(a.fractional_geometry, a.affine_transform, a.raster_policy,
+        b.fractional_geometry, b.affine_transform, b.raster_policy)
+
+fn draw_ir_commands_schema(commands: [DrawIrCommand]) -> text:
+    for command in commands:
+        if command.fractional_geometry != nil or draw_ir_command_has_unsupported_v4_state(command):
+            return DRAW_IR_SCHEMA_VERSION_V4
+    DRAW_IR_SCHEMA_VERSION
 
 struct DrawIrSourceInfo:
     source_kind: text
@@ -511,7 +539,7 @@ fn draw_ir_source_html_ast(source_id: text, html_tag: text, html_node_id: text, 
 
 fn draw_ir_batch_with_source(batch_id: text, backend_target: text, embedding: DrawIrEmbeddingConfig, commands: [DrawIrCommand], source: DrawIrSourceInfo) -> DrawIrBatch:
     DrawIrBatch(
-        schema: DRAW_IR_SCHEMA_VERSION,
+        schema: draw_ir_commands_schema(commands),
         batch_id: batch_id,
         backend_target: backend_target,
         source: source,
@@ -536,8 +564,12 @@ pub fn draw_ir_next_composition_generation() -> i64:
     _draw_ir_composition_generation
 
 fn draw_ir_composition(composition_id: text, scene_key: text, backend_target: text, batches: [DrawIrBatch]) -> DrawIrComposition:
+    var schema = DRAW_IR_SCHEMA_VERSION
+    for batch in batches:
+        if batch.schema == DRAW_IR_SCHEMA_VERSION_V4 or draw_ir_commands_schema(batch.commands) == DRAW_IR_SCHEMA_VERSION_V4:
+            schema = DRAW_IR_SCHEMA_VERSION_V4
     DrawIrComposition(
-        schema: DRAW_IR_SCHEMA_VERSION,
+        schema: schema,
         composition_id: composition_id,
         scene_key: scene_key,
         backend_target: backend_target,
@@ -762,3 +794,5 @@ fn simple_2d_draw_ir_adv_composition_plan(composition: DrawIrComposition, gpu_av
     )
 
 export DRAW_IR_BACKEND_AUTO, DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_EDGE, DRAW_IR_COMMAND_GROUP, DRAW_IR_COMMAND_IMAGE, DRAW_IR_COMMAND_PATH, DRAW_IR_COMMAND_PORT, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_EDGE_BEZIER, DRAW_IR_EDGE_ORTHOGONAL, DRAW_IR_EDGE_STRAIGHT, DRAW_IR_SCHEMA_VERSION, DRAW_IR_SOURCE_GUI_AST, DRAW_IR_SOURCE_HTML_AST, DRAW_IR_SOURCE_MANUAL, DRAW_IR_SOURCE_WM_SCENE
+
+export draw_ir_command_has_unsupported_v4_state, draw_ir_command_v4_equal, draw_ir_commands_schema, draw_ir_composition_has_v4_state

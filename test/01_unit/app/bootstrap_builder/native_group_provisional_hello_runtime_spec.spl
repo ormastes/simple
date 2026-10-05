@@ -1,0 +1,58 @@
+use std.spec.{describe, it, expect, fail}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid_checked}
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_hash_sha256, file_write, file_exists, file_delete}
+use std.common.crypto.sha256.{sha256_text}
+use app.bootstrap_builder.native_group_provisional_hello_runtime.{native_group_provisional_hello_runtime_verify_v2}
+
+fn _hello_runtime_test_root(suffix: text) -> Result<text, text>:
+    val pid = getpid_checked()?
+    val root = get_temp_dir().replace("\\", "/") + "/hello-profile-" + str(pid) + "-" + suffix
+    if file_exists(root) or not file_create_exclusive(root + ".claim", "owned test fixture\n"):
+        return Err("existing Hello profile fixture must be preserved")
+    if not dir_create_all(root):
+        return Err("Hello profile fixture creation failed")
+    Ok(root)
+
+describe "provisional Hello physical runtime profile":
+    it "accepts real complete inputs then rejects changed bytes and unlisted inputs":
+        val root = _hello_runtime_test_root("mutations").unwrap()
+        val runtime = root + "/runtime"
+        expect(dir_create_all(runtime)).to_equal(true)
+        val provider = runtime + "/provider.lib"
+        expect(file_create_exclusive(provider, "original provider bytes")).to_equal(true)
+        val payload = file_hash_sha256(provider) + " provider.lib\n"
+        val manifest = root + "/runtime.inputs"
+        expect(file_create_exclusive(manifest, payload)).to_equal(true)
+        val digest = sha256_text(payload)
+        match native_group_provisional_hello_runtime_verify_v2(runtime, manifest, digest):
+            Ok(observed): expect(observed).to_equal(runtime)
+            Err(reason): fail(reason)
+        expect(file_write(provider, "changed provider bytes")).to_equal(true)
+        match native_group_provisional_hello_runtime_verify_v2(runtime, manifest, digest):
+            Ok(_): fail("changed runtime accepted")
+            Err(reason): expect(reason).to_contain("changed")
+        expect(file_write(provider, "original provider bytes")).to_equal(true)
+        expect(file_create_exclusive(runtime + "/unlisted.lib", "unlisted")).to_equal(true)
+        match native_group_provisional_hello_runtime_verify_v2(runtime, manifest, digest):
+            Ok(_): fail("unlisted runtime input accepted")
+            Err(reason): expect(reason).to_contain("inventory differs")
+        expect(dir_remove(root, true)).to_equal(true)
+        expect(file_delete(root + ".claim")).to_equal(true)
+
+    it "rejects a manifest whose duplicate row hides a missing input":
+        val root = _hello_runtime_test_root("duplicates").unwrap()
+        val runtime = root + "/runtime"
+        expect(dir_create_all(runtime)).to_equal(true)
+        expect(file_create_exclusive(runtime + "/a.lib", "a")).to_equal(true)
+        expect(file_create_exclusive(runtime + "/b.lib", "b")).to_equal(true)
+        val row = file_hash_sha256(runtime + "/a.lib") + " a.lib\n"
+        val payload = row + row
+        val manifest = root + "/runtime.inputs"
+        expect(file_create_exclusive(manifest, payload)).to_equal(true)
+        match native_group_provisional_hello_runtime_verify_v2(runtime, manifest, sha256_text(payload)):
+            Ok(_): fail("duplicate inventory accepted")
+            Err(reason): expect(reason).to_contain("duplicate")
+        expect(dir_remove(root, true)).to_equal(true)
+        expect(file_delete(root + ".claim")).to_equal(true)

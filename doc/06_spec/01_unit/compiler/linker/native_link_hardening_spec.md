@@ -610,3 +610,33 @@ test/01_unit/compiler/linker/native_link_hardening_spec.spl:88:1: warning SSDOC-
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 <!-- sspec-maintain:scorecard:end -->
+## 2026-10-04 Windows native-all dependency regression
+
+Manually authored update; runtime execution and docgen remain **UNRUN**.
+Executable intent `f73e8a13155` preceded the pure-Simple table correction.
+The existing helper-array suite now requires `pdh`, `netapi32`, `psapi` and
+`powrprof` exactly once as MSVC `.lib` entries or MinGW `-l` flags, only when
+an actual canonical native-all archive basename is present. Both archive
+spellings, Windows case/path normalization and repeated inputs are covered.
+Core-only inputs, import archives, suffix/prefix lookalikes and matching directory
+names do not activate the table. Linux, FreeBSD and macOS/Darwin arrays remain
+pinned to their prior values; Windows dependencies must not leak into them.
+The Linux/FreeBSD expected arrays now include their already-shipped Vulkan
+`-u` anchor; this update does not introduce new non-Windows production behavior.
+
+This is actual helper behavior coverage, not SDK availability or successful
+native linking evidence. The historical Rust-only repair did not cover these
+pure-Simple owners. Tests-first here records authoring order, not an executed
+RED/GREEN result. No lower-level seed execution is allowed.
+
+Pending execution: set `SIMPLE_BINARY` to the exact absolute admitted full CLI,
+then invoke the same producer from the checkout root:
+
+```text
+<admitted-runtime> test test/01_unit/compiler/linker/native_link_hardening_spec.spl --native-backend=llvm --sequential --no-cache --no-db --no-session-daemon --assert-ran --keep-artifacts --verbose
+```
+
+Retain invocation hashes and actual nonzero scenario results. Real Windows
+native-all MSVC/MinGW linking and five-host product qualification remain separate
+execution gates. This authored update does not replace the earlier generated
+manual's provenance or claim its scorecard was regenerated.

@@ -1,0 +1,85 @@
+# Expand only the fixed Phase2 subsystem product family. Source/producer
+# admission remains with the inventory emitter and the real product callbacks.
+# This is a manifest factory, not a second process or resource scheduler.
+use std.common.build_manager.contracts.{BuildTaskV1, builder_validate_task_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+pub fn managed_product_wave_v1(template: BuildTaskV1) -> Result<[BuildTaskV1], text>:
+    val invalid = builder_validate_task_v1(template)
+    if invalid != "": return Err(invalid)
+    if template.phase != "phase2" or template.dependencies.len() != 0 or template.attempt != 1:
+        return Err("product wave requires a fresh independent Phase2 template")
+    var backend = ""
+    if template.id == "phase2_llvm_product_compiler": backend = "llvm"
+    elif template.id == "phase2_cranelift_product_compiler": backend = "cranelift"
+    else: return Err("product wave requires the selected backend compiler task")
+    var selectors = 0
+    var diagnostic_modes = 0
+    var output_roots = 0
+    var producer_receipts = 0
+    var compilers = 0
+    var source_roots = 0
+    var source_root = ""
+    var manager_work = 0
+    var producer_phases = 0
+    for argument in template.args:
+        if argument.starts_with("--product="):
+            if argument != "--product=" + backend + ":compiler": return Err("product selector differs")
+            selectors = selectors + 1
+        elif argument.starts_with("--qualification-mode="):
+            if argument != "--qualification-mode=diagnostic": return Err("product wave must remain diagnostic")
+            diagnostic_modes = diagnostic_modes + 1
+        elif argument.starts_with("--output-root="):
+            if argument != "--output-root=@WORK@/product-output": return Err("product output must be attempt-owned")
+            output_roots = output_roots + 1
+        elif argument.starts_with("--producer-receipt-"):
+            val prefix = "--producer-receipt-" + backend + "="
+            if not argument.starts_with(prefix) or argument.len() <= prefix.len():
+                return Err("product producer receipt backend differs or is absent")
+            producer_receipts = producer_receipts + 1
+        elif argument.starts_with("--compiler-"):
+            val prefix = "--compiler-" + backend + "="
+            if not argument.starts_with(prefix) or argument.len() <= prefix.len():
+                return Err("product compiler backend differs or is absent")
+            compilers = compilers + 1
+        elif argument.starts_with("--source-root="):
+            source_root = argument[14:]
+            source_roots = source_roots + 1
+        elif argument == "--manager-work":
+            manager_work = manager_work + 1
+        elif argument.starts_with("--producer-phase="):
+            if argument != "--producer-phase=phase2": return Err("product callback phase differs")
+            producer_phases = producer_phases + 1
+        elif argument == "--resume":
+            return Err("fresh product wave cannot reuse an unverified previous owner")
+    if selectors != 1 or diagnostic_modes != 1 or output_roots != 1 or producer_receipts != 1 or compilers != 1 or source_roots != 1 or manager_work != 1 or producer_phases != 1:
+        return Err("product callback requires one exact selector, mode, producer and output root")
+    val callback = "scripts/bootstrap/run-compiler-subsystem-test-products.shs"
+    if source_root == "" or template.args.len() == 0 or template.args[0] != source_root + "/" + callback:
+        return Err("product wave must execute the canonical source-owned callback")
+    var callback_inputs = 0
+    for input in template.inputs:
+        if input.path == callback: callback_inputs = callback_inputs + 1
+    if callback_inputs != 1: return Err("product callback must be a hash-bound source input")
+    if template.outputs != ["product-output/" + backend + "/compiler/result.env"]:
+        return Err("product callback output does not name its verified result")
+    var tasks: [BuildTaskV1] = []
+    for suite in ["compiler", "interpreter", "loader"]:
+        var task = template
+        task.id = "phase2_" + backend + "_product_" + suite
+        task.outputs = ["product-output/" + backend + "/" + suite + "/result.env"]
+        task.args = []
+        for argument in template.args:
+            if argument == "--product=" + backend + ":compiler":
+                task.args = task.args.push("--product=" + backend + ":" + suite)
+            else:
+                task.args = task.args.push(argument)
+        var contexts = 0
+        for input in task.inputs:
+            if input.path == "task-context/" + task.id + ".sdn": contexts = contexts + 1
+        if contexts != 1: return Err("each product requires its source-bound task context")
+        task.cache_key = sha256_text("simple-phase2-product-wave-v1\n" + template.cache_key + "\n" + suite)
+        val task_error = builder_validate_task_v1(task)
+        if task_error != "": return Err(task_error)
+        tasks = tasks.push(task)
+    Ok(tasks)

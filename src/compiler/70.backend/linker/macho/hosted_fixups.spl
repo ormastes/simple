@@ -2,8 +2,11 @@
 use compiler.backend.linker.macho.input.{MachOInput, macho_read}
 use compiler.backend.linker.macho.layout.{MachOLayout}
 use compiler.backend.linker.macho.symbols.{MachOBinding, macho_resolve_symbol}
-use compiler.backend.linker.macho.dylib.{MachODylib}
+use compiler.backend.linker.macho.provider_types.{MachOProviderV1}
+use compiler.backend.linker.macho.provider_closure.{MachOProviderClosureV1}
+use compiler.backend.linker.macho.provider_closure_types.{MachOProviderBindingV1}
 use compiler.backend.linker.macho_parser.{macho_parse_relocations}
+use compiler.backend.linker.macho.relocation_pairs.{macho_relocation_pair_v1}
 
 struct MachOHostedSlot:
     key: text
@@ -29,7 +32,20 @@ struct MachOHostedFixups:
 fn macho_hosted_symbol_key(owner: i64, index: i64, name: text, external: bool) -> text:
     if external: "external:{name}" else: "local:{owner}:{index}"
 
-fn macho_hosted_slots(inputs: [MachOInput], definitions: {text: MachOBinding}, libraries: [MachODylib], arm: bool) -> Result<[MachOHostedSlot], text>:
+fn macho_hosted_slots(inputs: [MachOInput], definitions: {text: MachOBinding}, libraries: [MachOProviderV1], arm: bool,
+        closure: Option<MachOProviderClosureV1> = nil) -> Result<[MachOHostedSlot], text>:
+    var resolved: {text: MachOProviderBindingV1} = {}
+    if val graph = closure:
+        # One mutable owner for the complete job: cumulative lookup work cannot
+        # reset through repeatedly unwrapping a copied optional owner.
+        var lookup = graph
+        for input in inputs:
+            for symbol in input.object.symbols:
+                if (symbol.n_type & 0xef) == 1 and symbol.n_value == 0 and not definitions.has(symbol.name) and not resolved.has(symbol.name):
+                    if resolved.len() >= 100000: return Err("hosted Mach-O import count limit exceeded")
+                    val binding = lookup.resolve_import(symbol.name)?
+                    if binding.is_none(): return Err("unresolved hosted import {symbol.name}")
+                    resolved[symbol.name] = binding.unwrap()
     var slots: [MachOHostedSlot] = []
     var seen: {text: bool} = {}
     var owner: i64 = 0
@@ -45,14 +61,20 @@ fn macho_hosted_slots(inputs: [MachOInput], definitions: {text: MachOBinding}, l
                     var ordinal: i64 = 0
                     var tls = false
                     var library_index: i64 = 0
-                    for library in libraries:
-                        for symbol_export in library.exports:
-                            if symbol_export.name == symbol.name and ordinal == 0:
-                                if (symbol_export.flags & 14) != 0:
-                                    return Err("unsupported hosted absolute/weak/reexport provider for {symbol.name}")
-                                ordinal = library_index + 1
-                                tls = (symbol_export.flags & 1) != 0
-                        library_index = library_index + 1
+                    if closure.is_some():
+                        val binding = resolved[symbol.name]
+                        if (binding.flags & 14) != 0: return Err("unsupported hosted absolute/weak/reexport provider for {symbol.name}")
+                        ordinal = binding.root_ordinal
+                        tls = (binding.flags & 1) != 0
+                    else:
+                        for library in libraries:
+                            for symbol_export in library.exports:
+                                if symbol_export.name == symbol.name and ordinal == 0:
+                                    if (symbol_export.flags & 14) != 0:
+                                        return Err("unsupported hosted absolute/weak/reexport provider for {symbol.name}")
+                                    ordinal = library_index + 1
+                                    tls = (symbol_export.flags & 1) != 0
+                            library_index = library_index + 1
                     if ordinal == 0: return Err("unresolved hosted import {symbol.name}")
                     seen[key] = true
                     slots = slots.push(MachOHostedSlot(key: key, name: symbol.name, owner: owner,
@@ -111,7 +133,10 @@ fn macho_hosted_fixups(inputs: [MachOInput], definitions: {text: MachOBinding}, 
                 if layout.offsets.has(section_key):
                     val relocations = macho_parse_relocations(input.object.raw, section, input.object.byte_order)
                     var previous_subtractor = false
-                    for relocation in relocations:
+                    var relocation_index: i64 = 0
+                    while relocation_index < relocations.len():
+                        val pair = macho_relocation_pair_v1(relocations, relocation_index, arm, input.name)?
+                        val relocation = pair.relocation
                         val input_kind = section.flags & 255
                         if (input_kind == 1 or input_kind == 12) and relocation.r_type != 0:
                             return Err("hosted instruction/pair relocation in zero-fill section")
@@ -121,7 +146,6 @@ fn macho_hosted_fixups(inputs: [MachOInput], definitions: {text: MachOBinding}, 
                         val offset = layout.offsets[section_key] + relocation.r_address
                         val site = "{owner}:{ordinal}:{relocation.r_address}"
                         val subtractor = relocation.r_type == (if arm: 1 else: 5)
-                        if arm and relocation.r_type == 10: return Err("hosted ARM64 ADDEND pairing is not yet supported")
                         if not previous_subtractor:
                             for byte in 0..width:
                                 if occupied.has(offset + byte): return Err("overlapping hosted relocation patches")
@@ -147,7 +171,7 @@ fn macho_hosted_fixups(inputs: [MachOInput], definitions: {text: MachOBinding}, 
                         elif imported and relocation.r_type == 2:
                             if slots[slot_index].thread_local: return Err("cannot branch to a hosted TLS export")
                             val encoded = macho_read(input.object.raw, section.offset + relocation.r_address, width)
-                            if (arm and (encoded & 0x3ffffff) != 0) or (not arm and encoded != 0):
+                            if pair.explicit_addend != 0 or (arm and (encoded & 0x3ffffff) != 0) or (not arm and encoded != 0):
                                 return Err("hosted imported branch addend must be zero")
                             targets[site] = 0x100000000 + stub_offset + slot_index * 16
                         elif imported and relocation.r_type == 0:
@@ -171,6 +195,7 @@ fn macho_hosted_fixups(inputs: [MachOInput], definitions: {text: MachOBinding}, 
                                 if width != 8 or offset < layout.data_offset: return Err("PIE rebases require writable 64-bit pointer storage")
                                 rebases = rebases.push(offset)
                         previous_subtractor = subtractor
+                        relocation_index = relocation_index + pair.consumed
                 ordinal = ordinal + 1
         owner = owner + 1
     Ok(MachOHostedFixups(targets: targets, bound_sites: bound_sites, binds: binds, rebases: rebases, slot_values: slot_values))

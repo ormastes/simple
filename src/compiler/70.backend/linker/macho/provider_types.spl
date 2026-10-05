@@ -1,0 +1,94 @@
+# Address-free link metadata. Shape validation is not artifact authentication.
+use compiler.backend.linker.reloc_engine.{RelocArch}
+
+struct MachOProviderDependencyV1:
+    install_name: text
+    command: i64
+    current_version: i64
+    compatibility_version: i64
+
+struct MachOProviderExportV1:
+    name: text
+    flags: i64
+    library_ordinal: i64
+    import_name: text
+
+struct MachOProviderV1:
+    target: RelocArch
+    platform: i64
+    install_name: text
+    current_version: i64
+    compatibility_version: i64
+    minimum_os: Option<i64>
+    sdk: Option<i64>
+    dependencies: [MachOProviderDependencyV1]
+    exports: [MachOProviderExportV1]
+    allowable_clients: [text]
+    parent_umbrella: Option<text>
+    rpaths: [text] = []
+    sub_umbrellas: [text] = []
+    sub_libraries: [text] = []
+    no_reexported_dylibs: bool = false
+    infer_subframeworks: bool = false
+
+fn macho_provider_name_v1(name: text) -> bool:
+    if name == "" or name.len() > 4096 or name.contains("\0"): return false
+    for index in 0..name.len():
+        if name.byte_at(index) > 127: return false
+    true
+
+fn macho_provider_versions_v1(current: i64, compatible: i64) -> bool:
+    current >= 0 and current <= 0xffffffff and compatible >= 0 and compatible <= current
+
+fn macho_validate_provider_v1(provider: MachOProviderV1, target: RelocArch) -> Result<bool, text>:
+    """Check the metadata consumed by linking, without inventing source authority."""
+    match target:
+        case RelocArch.X86_64:
+            if provider.target != RelocArch.X86_64: return Err("Mach-O provider target mismatch")
+        case RelocArch.AArch64:
+            if provider.target != RelocArch.AArch64: return Err("Mach-O provider target mismatch")
+        case _: return Err("unsupported Mach-O provider target")
+    if provider.platform < 0 or provider.platform > 0xffffffff: return Err("invalid Mach-O provider platform")
+    if not macho_provider_name_v1(provider.install_name): return Err("invalid Mach-O provider install name")
+    if not macho_provider_versions_v1(provider.current_version, provider.compatibility_version):
+        return Err("invalid Mach-O provider compatibility/current version")
+    if val minimum = provider.minimum_os:
+        if minimum < 0 or minimum > 0xffffffff: return Err("invalid Mach-O provider minimum OS")
+    if val sdk = provider.sdk:
+        if sdk < 0 or sdk > 0xffffffff: return Err("invalid Mach-O provider SDK")
+    # Dependency order is significant: reexport ordinals refer to these slots.
+    for dependency in provider.dependencies:
+        if not macho_provider_name_v1(dependency.install_name): return Err("invalid Mach-O provider dependency name")
+        if not macho_provider_versions_v1(dependency.current_version, dependency.compatibility_version):
+            return Err("invalid Mach-O provider dependency version")
+        val command = dependency.command
+        if command != 12 and command != 0x20 and command != 0x80000018 and command != 0x8000001f and command != 0x80000023:
+            return Err("invalid Mach-O provider dependency command")
+    var names: {text: bool} = {}
+    for symbol in provider.exports:
+        if not macho_provider_name_v1(symbol.name): return Err("invalid Mach-O provider export name")
+        if names.has(symbol.name): return Err("duplicate Mach-O provider export name")
+        names[symbol.name] = true
+        if symbol.flags < 0 or symbol.flags > 31 or (symbol.flags & 3) == 3:
+            return Err("invalid Mach-O provider export flags")
+        if (symbol.flags & 8) != 0:
+            if (symbol.flags & 19) != 0: return Err("incompatible Mach-O provider reexport flags")
+            if symbol.library_ordinal < 1 or symbol.library_ordinal > provider.dependencies.len():
+                return Err("invalid Mach-O provider reexport ordinal")
+            if not macho_provider_name_v1(symbol.import_name): return Err("invalid Mach-O provider reexport import name")
+        else:
+            if symbol.library_ordinal != 0 or symbol.import_name != "": return Err("invalid Mach-O provider non-reexport metadata")
+            if (symbol.flags & 16) != 0 and (symbol.flags & 3) != 0: return Err("invalid Mach-O provider resolver kind")
+    for client in provider.allowable_clients:
+        if not macho_provider_name_v1(client): return Err("invalid Mach-O provider allowable client")
+    if val umbrella = provider.parent_umbrella:
+        if not macho_provider_name_v1(umbrella): return Err("invalid Mach-O provider parent umbrella")
+    for path in provider.rpaths:
+        if not macho_provider_name_v1(path): return Err("invalid Mach-O provider rpath")
+    for name in provider.sub_umbrellas:
+        if not macho_provider_name_v1(name): return Err("invalid Mach-O provider legacy sub-umbrella")
+    for name in provider.sub_libraries:
+        if not macho_provider_name_v1(name): return Err("invalid Mach-O provider legacy sub-library")
+    Ok(true)
+
+export MachOProviderV1, MachOProviderDependencyV1, MachOProviderExportV1, macho_validate_provider_v1
