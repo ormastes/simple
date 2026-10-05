@@ -406,6 +406,7 @@ double   rt_value_as_float(int64_t value);
 int8_t   rt_value_is_float(int64_t value);
 int64_t  rt_value_bool(int64_t value);
 int8_t   rt_value_as_bool(int64_t value);
+int8_t   rt_value_truthy(int64_t value);
 int64_t  rt_value_nil(void);
 void*    rt_alloc(int64_t size);
 void*    rt_struct_alloc(int64_t size);
@@ -968,6 +969,7 @@ int64_t  rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_
 int64_t  rt_string_to_int(int64_t value);
 int64_t  rt_string_to_int_lenient(int64_t value);
 int64_t  rt_to_int_dynamic(int64_t value);
+int64_t  rt_any_to_int(int64_t value);
 void     rt_print_str(const uint8_t* ptr, uint64_t len);
 void     rt_println_str(const uint8_t* ptr, uint64_t len);
 void     rt_eprint_str(const uint8_t* ptr, uint64_t len);

@@ -22,6 +22,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_file_view.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_fd_stat_rust_bridge.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_secure_staging.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_shared_parse_cell_private.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_bootstrap_linux_provider.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memory_guard.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_time.c");
