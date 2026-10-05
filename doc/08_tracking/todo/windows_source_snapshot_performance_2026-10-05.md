@@ -73,6 +73,14 @@ full-reconciliation membership. Existing corruption, lock, WAL and index-byte
 preservation cases remain required. No source-snapshot identity shortcut or
 successful native test execution is claimed.
 
+A separate real-Git host oracle passed both status and fullscan parity for
+eligible-to-ineligible and reverse renames, eligible-to-vendor and reverse
+renames, case-sensitive suffix selection, root-level source and dirty/deleted/
+untracked files. It observed 12 eligible status paths and 10 fullscan paths.
+Exact retained sets and the original full-source comparison are recorded in
+`doc/09_report/workaround_git_selection_host_2026-10-05.json`. This host oracle
+does not execute the Simple implementation and does not replace its native tests.
+
 `test/05_perf/app/bug/workaround_git_discovery_workload.spl` provides the native
 paired workload. Each fresh process selects `baseline` or `scoped` through
 `SIMPLE_WORKAROUND_PROFILE_MODE`, reads the same private fixture root from
