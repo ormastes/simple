@@ -6313,13 +6313,51 @@ pub extern "C" fn rt_array_write_span(
         if let Err(message) = write_span_range_check(dst_off, src_off, count, dst_len, src_len) {
             write_span_fail(&message);
         }
-        if std::ptr::eq(dst_arr as *const RuntimeArray, src_arr as *const RuntimeArray) {
-            (*dst_arr)
-                .as_mut_slice()
-                .copy_within(src_off as usize..(src_off + count) as usize, dst_off as usize);
+        let dst_bytes = (*dst_arr).is_byte_packed();
+        let src_bytes = (*src_arr).is_byte_packed();
+        let dst_words = (*dst_arr).is_u64_packed();
+        let src_words = (*src_arr).is_u64_packed();
+        if dst_bytes == src_bytes && dst_words == src_words {
+            // ptr::copy is memmove: preserve overlap and the actual element width.
+            if dst_bytes {
+                std::ptr::copy(
+                    (*src_arr).data.cast::<u8>().add(src_off as usize),
+                    (*dst_arr).data.cast::<u8>().add(dst_off as usize),
+                    count as usize,
+                );
+            } else {
+                std::ptr::copy(
+                    (*src_arr).data.add(src_off as usize),
+                    (*dst_arr).data.add(dst_off as usize),
+                    count as usize,
+                );
+            }
         } else {
-            let src_slice = &(*src_arr).as_slice()[src_off as usize..(src_off + count) as usize];
-            (*dst_arr).as_mut_slice()[dst_off as usize..(dst_off + count) as usize].copy_from_slice(src_slice);
+            // Different layouts imply different arrays. Match the C twin's
+            // raw-u64 conversion, retaining high bits through the boxed owner.
+            for i in 0..count as usize {
+                let source = src_off as usize + i;
+                let target = dst_off as usize + i;
+                let raw = if src_bytes {
+                    *(*src_arr).data.cast::<u8>().add(source) as u64
+                } else if src_words {
+                    *(*src_arr).data.cast::<u64>().add(source)
+                } else {
+                    let value = *(*src_arr).data.add(source);
+                    value.as_heap_u64().unwrap_or_else(|| value.as_int() as u64)
+                };
+                if dst_bytes {
+                    *(*dst_arr).data.cast::<u8>().add(target) = raw as u8;
+                } else if dst_words {
+                    *(*dst_arr).data.cast::<u64>().add(target) = raw;
+                } else {
+                    *(*dst_arr).data.add(target) = if raw <= (i64::MAX as u64 >> 3) {
+                        RuntimeValue::from_int(raw as i64)
+                    } else {
+                        RuntimeValue::from_u64(raw)
+                    };
+                }
+            }
         }
     }
     count
@@ -6355,6 +6393,109 @@ fn write_span_fail(message: &str) -> ! {
 #[cfg(test)]
 mod write_span_range_tests {
     use super::write_span_range_check;
+
+    // Oversized real allocations make the old eight-byte copy observable
+    // through sentinels without allowing an out-of-allocation write.
+    #[test]
+    fn packed_write_span_byte_sentinels_and_overlap() {
+        use super::*;
+        unsafe {
+            let source = rt_byte_array_new(64);
+            let target = rt_byte_array_new(64);
+            let s = crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(source, HeapObjectType::Array).unwrap();
+            let d = crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(target, HeapObjectType::Array).unwrap();
+            std::ptr::write_bytes((*s).data.cast::<u8>(), 0x5a, 64);
+            std::ptr::write_bytes((*d).data.cast::<u8>(), 0xa5, 64);
+            (*s).len = 4;
+            (*d).len = 4;
+            assert_eq!(rt_array_write_span(target, source, 0, 0, 4), 4);
+            assert_eq!(std::slice::from_raw_parts((*d).data.cast::<u8>(), 4), &[0x5a; 4]);
+            assert_eq!(std::slice::from_raw_parts((*d).data.cast::<u8>().add(4), 60), &[0xa5; 60]);
+            (*d).len = 8;
+            for i in 0..8 { *(*d).data.cast::<u8>().add(i) = i as u8; }
+            assert_eq!(rt_array_write_span(target, target, 2, 0, 6), 6);
+            assert_eq!(std::slice::from_raw_parts((*d).data.cast::<u8>(), 8), &[0, 1, 0, 1, 2, 3, 4, 5]);
+            assert_eq!(rt_array_write_span(target, target, 0, 2, 6), 6);
+            assert_eq!(std::slice::from_raw_parts((*d).data.cast::<u8>(), 8), &[0, 1, 2, 3, 4, 5, 4, 5]);
+            rt_array_free(source);
+            rt_array_free(target);
+        }
+    }
+
+    #[test]
+    fn packed_write_span_layout_matrix_preserves_words() {
+        use super::*;
+        unsafe {
+            for src_layout in 0..3 {
+                for dst_layout in 0..3 {
+                    let make = |layout| match layout {
+                        0 => rt_byte_array_new(64),
+                        1 => rt_array_new_uninit_u64(8),
+                        _ => rt_array_new(8),
+                    };
+                    let source = make(src_layout);
+                    let target = make(dst_layout);
+                    let s = crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(source, HeapObjectType::Array).unwrap();
+                    let d = crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(target, HeapObjectType::Array).unwrap();
+                    (*s).len = 4;
+                    (*d).len = 4;
+                    let words = if src_layout == 0 { [0, 255, 128, 7] } else { [0, u64::MAX, 1 << 63, 7] };
+                    for i in 0..4 {
+                        match src_layout {
+                            0 => *(*s).data.cast::<u8>().add(i) = words[i] as u8,
+                            1 => *(*s).data.cast::<u64>().add(i) = words[i],
+                            _ => *(*s).data.add(i) = RuntimeValue::from_u64(words[i]),
+                        }
+                        match dst_layout {
+                            0 => *(*d).data.cast::<u8>().add(i) = 42,
+                            1 => *(*d).data.cast::<u64>().add(i) = 42,
+                            _ => *(*d).data.add(i) = RuntimeValue::from_int(42),
+                        }
+                    }
+                    assert_eq!(rt_array_write_span(target, source, 1, 1, 2), 2);
+                    for i in 0..4 {
+                        let actual = match dst_layout {
+                            0 => *(*d).data.cast::<u8>().add(i) as u64,
+                            1 => *(*d).data.cast::<u64>().add(i),
+                            _ => { let v = *(*d).data.add(i); v.as_heap_u64().unwrap_or_else(|| v.as_int() as u64) },
+                        };
+                        let expected = if i == 1 || i == 2 { words[i] } else { 42 };
+                        assert_eq!(actual, if dst_layout == 0 { expected & 255 } else { expected });
+                    }
+                    assert_eq!(rt_array_write_span(target, source, i64::MAX, i64::MAX, 0), 0);
+                    assert_eq!(rt_array_write_span(target, source, -1, -1, -3), 0);
+                    rt_array_free(source);
+                    rt_array_free(target);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_write_span_tagged_objects_and_signed_words() {
+        use super::*;
+        let text = unsafe { rt_string_new(b"preserved".as_ptr(), 9) };
+        let source = rt_array_new(3);
+        let target = rt_array_new(3);
+        let values = [text, RuntimeValue::from_float(1.5), RuntimeValue::from_int(i64::MIN)];
+        for value in values { assert!(rt_array_push(source, value)); assert!(rt_array_push(target, RuntimeValue::NIL)); }
+        assert_eq!(rt_array_write_span(target, source, 0, 0, 3), 3);
+        for (i, value) in values.into_iter().enumerate() { assert_eq!(rt_array_get(target, i as i64).to_raw(), value.to_raw()); }
+        let words = rt_array_new_uninit_u64(3);
+        unsafe {
+            let w = crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(words, HeapObjectType::Array).unwrap();
+            (*w).len = 3;
+            assert_eq!(rt_array_write_span(words, source, 0, 2, 1), 1);
+            assert_eq!(*(*w).data.cast::<u64>(), i64::MIN as u64);
+            *(*w).data.cast::<u64>().add(1) = u64::MAX;
+            *(*w).data.cast::<u64>().add(2) = 7;
+            assert_eq!(rt_array_write_span(words, words, 1, 0, 2), 2);
+            assert_eq!(std::slice::from_raw_parts((*w).data.cast::<u64>(), 3), &[1 << 63, 1 << 63, u64::MAX]);
+        }
+        rt_array_free(source);
+        rt_array_free(target);
+        rt_array_free(words);
+    }
 
     #[test]
     fn in_range_spans_pass() {
