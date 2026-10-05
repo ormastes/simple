@@ -105,6 +105,22 @@ archive identities. This is local native qualification, not an executed CI
 workflow result. No DB/web correctness or AVX512 performance claim follows
 from this source change.
 
+Clean-CI review also found that the native job only restored an optional
+Cargo cache, which cannot guarantee the archive pair required by the
+produced compiler's linker. The Linux seed job now builds both canonical
+`simple-native-all` with `spl_hosted_runtime` and `simple-compiler-backfill`
+for the explicit Linux target using the bootstrap profile, records
+their SHA-256 values, and uploads a required runtime artifact named for the
+same source revision. Before Hello, the native job downloads that artifact,
+checks both digests, and explicitly sets `SIMPLE_RUNTIME_PATH` to its
+directory. Normal source-inventory cold initialization is enabled for the
+fresh job. This runtime authority belongs to the produced compiler's Hello
+link; the seed still builds Phase 2 with its core-C runtime. Qualification
+does not depend on a successful or fresh optional Cargo-cache restore.
+The package set follows the canonical Linux bootstrap recipe, without the
+optional driver-compat feature. Unlike an already provisioned local build,
+CI permits locked dependency downloads rather than requiring offline mode.
+
 Static validation: the edited workflow parses with PyYAML 6.0.3; all three
 changed shell blocks pass `bash -n`; `git diff --check` passes. These checks
 do not execute the compiler or establish native qualification.

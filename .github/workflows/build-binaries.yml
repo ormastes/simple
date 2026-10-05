@@ -112,10 +112,30 @@ jobs:
             cargo +nightly build --profile bootstrap -p simple-driver
           fi
 
-      - name: Build native_all library (Linux only)
+      - name: Build native runtime authority (Linux only)
         if: matrix.target == 'linux'
         working-directory: src/compiler_rust
-        run: cargo +nightly build --profile bootstrap -p simple-native-all --features driver-compat
+        run: |
+          # Match bootstrap's Linux authority package set. Allow dependency
+          # downloads on a cache miss; this job must not require --offline.
+          cargo +nightly build --locked --profile bootstrap --target x86_64-unknown-linux-gnu \
+            -p simple-native-all -p spl_hosted_runtime
+          cargo +nightly build --locked --profile bootstrap --target x86_64-unknown-linux-gnu \
+            -p simple-compiler-backfill
+          cd target/x86_64-unknown-linux-gnu/bootstrap
+          sha256sum libsimple_native_all.a libsimple_compiler_backfill.a > runtime-authority.sha256
+
+      - name: Upload native runtime authority (Linux only)
+        if: matrix.target == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-linux-x86_64-${{ github.sha }}
+          path: |
+            src/compiler_rust/target/x86_64-unknown-linux-gnu/bootstrap/libsimple_native_all.a
+            src/compiler_rust/target/x86_64-unknown-linux-gnu/bootstrap/libsimple_compiler_backfill.a
+            src/compiler_rust/target/x86_64-unknown-linux-gnu/bootstrap/runtime-authority.sha256
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Verify seed binary
         run: |
@@ -246,6 +266,18 @@ jobs:
           file bin/simple_stage2
           ls -lh bin/simple_stage2
 
+      - name: Download native runtime authority (Linux)
+        if: matrix.target == 'linux'
+        uses: actions/download-artifact@v4
+        with:
+          name: runtime-linux-x86_64-${{ github.sha }}
+          path: runtime-authority
+
+      - name: Verify native runtime authority (Linux)
+        if: matrix.target == 'linux'
+        working-directory: runtime-authority
+        run: sha256sum --check runtime-authority.sha256
+
       - name: Qualify Stage 2 Hello compilation and execution (Linux)
         if: matrix.target == 'linux'
         run: |
@@ -257,7 +289,8 @@ jobs:
           # the Rust seed's Cranelift backend used to produce this executable.
           # This gate must succeed before the binary is uploaded: --version
           # alone does not prove that the selected K1 composition can compile.
-          HW_BACKEND=llvm HW_THREADS=1 HW_BUILD_TIMEOUT_SECONDS=300 \
+          SIMPLE_RUNTIME_PATH="$PWD/runtime-authority" SIMPLE_SCV_INVENTORY_COLD_INIT=1 \
+            HW_BACKEND=llvm HW_THREADS=1 HW_BUILD_TIMEOUT_SECONDS=300 \
             sh scripts/check/check-stage2-hello-world-native-build.shs \
               --candidate "$PWD/bin/simple_stage2"
 
