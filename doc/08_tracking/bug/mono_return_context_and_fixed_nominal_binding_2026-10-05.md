@@ -1,4 +1,4 @@
-# mono_return_context_and_fixed_nominal_binding_2026-10-06
+# mono_return_context_and_fixed_nominal_binding_2026-10-05
 
 Status: OPEN. Workaround source prepared; native validation UNRUN.
 
@@ -36,3 +36,21 @@ Retirement requires the original implicit calls to compile with a new actual
 producer carrying the repair, focused runtime assertions, then cached P3
 with all modules and zero unresolved generic calls. Explicit arguments are
 not evidence that the compiler defect is fixed. No frozen source was edited.
+
+Underlying candidate now implements checked direct-call result contexts from
+expression metadata, annotated locals, function tail values and explicit
+returns. Lambda context is saved/reset/restored; an untyped lambda cannot
+borrow the enclosing function result. Argument/result conflicts still reject.
+Fixed Named parameters with no type arguments bind nothing and no longer
+compare table-local IDs; parameterized nominal checks are unchanged.
+
+Six HIR cases assert independent scalar/array bindings, missing/Any/conflict
+rejection, fixed/parameterized nominal handling, exactly one tail rewrite,
+lambda isolation, and local/return specialization deduplication. No new global
+cache or HIR clone was added; the pass retains one scoped optional return type.
+Nominal handling adds one O(1) empty-argument check. Result unification traverses
+one declared return shape per inferred call; no repeated subtree concreteness
+walk was added to the recursive binder. Actual memory/performance measurements
+and all new native execution remain UNRUN, not inferred PASS. General expected
+context propagation through untyped if/match/block expressions remains outside
+this narrow repair; existing checked expression metadata still applies.
