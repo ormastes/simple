@@ -1,0 +1,137 @@
+#!/bin/sh
+# Harness/receipt validation only. This never executes a Simple app.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+runner=$root/scripts/check/run-item5-app-vector-receipts.shs
+validator=$root/scripts/check/lib/vector-provider-receipt.pl
+stage_helper=$root/scripts/check/lib/stage-verified-file.shs
+tmp=$(mktemp -d)
+cleanup() { chmod -R u+w "$tmp" 2>/dev/null || true; rm -rf "$tmp"; }
+trap cleanup EXIT HUP INT TERM
+
+write_zero_receipt() {
+    file=$1 pid=$2
+    {
+        echo SIMPLE_VECTOR_TEST_EVENTS_V1
+        echo "pid=$pid"
+        echo loads=0
+        echo events=0
+        echo malformed=0
+        echo overflow=0
+        for op in 1 2 3 4; do
+            echo "op${op}_loops=0"
+            for status in 0 1 2 3 4 5 6; do echo "op${op}_status${status}=0"; done
+        done
+    } >"$file"
+}
+expect_rejected() {
+    if "$@" >/dev/null 2>&1; then echo 'FAIL harness accepted invalid input' >&2; exit 1; fi
+}
+
+write_zero_receipt "$tmp/valid.events" 4242
+perl "$validator" "$tmp/valid.events" 4242 --no-load
+expect_rejected perl "$validator" "$tmp/valid.events" 4243 --no-load
+expect_rejected perl "$validator" "$tmp/valid.events" 4242 --require-op=3:1:1
+cp "$tmp/valid.events" "$tmp/duplicate.events"
+echo 'pid=4242' >>"$tmp/duplicate.events"
+expect_rejected perl "$validator" "$tmp/duplicate.events" 4242
+sed '$d' "$tmp/valid.events" >"$tmp/truncated.events"
+expect_rejected perl "$validator" "$tmp/truncated.events" 4242
+printf 'stage helper pinned bytes\n' >"$tmp/stage-source"
+stage_sha=$(sha256sum "$tmp/stage-source" | awk '{print $1}')
+sh "$stage_helper" "$tmp/stage-source" "$tmp/staged-copy" 0444 "$stage_sha"
+cmp "$tmp/stage-source" "$tmp/staged-copy"
+[ "$(stat -c %a "$tmp/staged-copy")" = 444 ] || { echo 'FAIL staged copy is writable' >&2; exit 1; }
+expect_rejected sh "$stage_helper" "$tmp/stage-source" "$tmp/staged-wrong-hash" 0444 "$(printf '0%.0s' $(seq 1 64))"
+[ ! -e "$tmp/staged-wrong-hash" ] || { echo 'FAIL bad hash left a staged artifact' >&2; exit 1; }
+sh "$runner" --help >/dev/null
+
+printf 'dummy producer' >"$tmp/producer.bin"
+printf 'dummy observer' >"$tmp/observer.so"
+printf 'dummy provider' >"$tmp/provider.so"
+for role in db-scalar db-vector http-scalar http-vector; do printf 'dummy %s\n' "$role" >"$tmp/$role"; chmod 0555 "$tmp/$role"; done
+missing_sha=$(sha256sum "$tmp/db-vector" | awk '{print $1}')
+rm "$tmp/db-vector"
+printf '{"status":"pass","gate_exit_status":0,"compiler_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}\n' >"$tmp/hello.json"
+cat >"$tmp/apps.json" <<JSON
+{"schema":"item5-simple-app-build-v1","compiler_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","apps":{
+"db-scalar":{"status":"pass","sha256":"$(sha256sum "$tmp/db-scalar" | awk '{print $1}')","compiler_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+"db-vector":{"status":"pass","sha256":"$missing_sha","compiler_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+"http-scalar":{"status":"pass","sha256":"$(sha256sum "$tmp/http-scalar" | awk '{print $1}')","compiler_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+"http-vector":{"status":"pass","sha256":"$(sha256sum "$tmp/http-vector" | awk '{print $1}')","compiler_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+JSON
+expect_rejected sh "$runner" --output "$tmp/out" \
+    --producer-receipt "$tmp/hello.json" --producer-receipt-sha256 "$(sha256sum "$tmp/hello.json" | awk '{print $1}')" \
+    --app-build-manifest "$tmp/apps.json" --app-build-manifest-sha256 "$(sha256sum "$tmp/apps.json" | awk '{print $1}')" \
+    --provider-dso "$tmp/provider.so" --provider-sha256 "$(sha256sum "$tmp/provider.so" | awk '{print $1}')" \
+    --observer "$tmp/observer.so" --observer-sha256 "$(sha256sum "$tmp/observer.so" | awk '{print $1}')" \
+    --provider-id 6001412934163845681 --implementation-id 1 \
+    --db-scalar "$tmp/db-scalar" --db-scalar-sha256 "$(sha256sum "$tmp/db-scalar" | awk '{print $1}')" \
+    --db-vector "$tmp/db-vector" --db-vector-sha256 "$missing_sha" \
+    --http-scalar "$tmp/http-scalar" --http-scalar-sha256 "$(sha256sum "$tmp/http-scalar" | awk '{print $1}')" \
+    --http-vector "$tmp/http-vector" --http-vector-sha256 "$(sha256sum "$tmp/http-vector" | awk '{print $1}')"
+[ ! -e "$tmp/out" ] || { echo 'FAIL runner created output after rejecting a missing binary' >&2; exit 1; }
+if [ "$#" -gt 0 ]; then
+    [ "$#" = 4 ] && [ "$1" = '--staging-negative' ] || { echo 'usage: test... [--staging-negative PROVIDER_DSO OBSERVER_SO EVIDENCE_DIR]' >&2; exit 2; }
+    provider=$2 observer=$3 evidence_dir=$4
+    [ -r "$provider" ] && [ -r "$observer" ] || { echo 'negative-run DSO inputs must be readable' >&2; exit 2; }
+    case "$evidence_dir" in /*) ;; *) echo 'negative-run evidence path must be absolute' >&2; exit 2 ;; esac
+    [ ! -e "$evidence_dir" ] || { echo 'negative-run evidence path must be fresh' >&2; exit 2; }
+    cc=${CC:-clang}
+    command -v "$cc" >/dev/null 2>&1 || { echo 'negative-run requires a C compiler' >&2; exit 77; }
+    printf 'int main(void) { return 1; }\n' >"$tmp/exit-one.c"
+    "$cc" -std=c11 -O2 -Wall -Wextra -Werror "$tmp/exit-one.c" -o "$tmp/exit-one"
+    for role in db-scalar db-vector http-scalar http-vector; do cp "$tmp/exit-one" "$tmp/$role"; chmod 0555 "$tmp/$role"; done
+    app_sha=$(sha256sum "$tmp/exit-one" | awk '{print $1}')
+    provider_sha=$(sha256sum "$provider" | awk '{print $1}')
+    observer_sha=$(sha256sum "$observer" | awk '{print $1}')
+    cat >"$tmp/apps-full.json" <<JSON
+{"schema":"item5-simple-app-build-v1","compiler_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","apps":{
+"db-scalar":{"status":"pass","sha256":"$app_sha","compiler_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+"db-vector":{"status":"pass","sha256":"$app_sha","compiler_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+"http-scalar":{"status":"pass","sha256":"$app_sha","compiler_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+"http-vector":{"status":"pass","sha256":"$app_sha","compiler_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
+JSON
+    if sh "$runner" --output "$tmp/staging-run" \
+        --producer-receipt "$tmp/hello.json" --producer-receipt-sha256 "$(sha256sum "$tmp/hello.json" | awk '{print $1}')" \
+        --app-build-manifest "$tmp/apps-full.json" --app-build-manifest-sha256 "$(sha256sum "$tmp/apps-full.json" | awk '{print $1}')" \
+        --provider-dso "$provider" --provider-sha256 "$provider_sha" \
+        --observer "$observer" --observer-sha256 "$observer_sha" \
+        --provider-id 6001412934163845681 --implementation-id 1 \
+        --db-scalar "$tmp/db-scalar" --db-scalar-sha256 "$app_sha" \
+        --db-vector "$tmp/db-vector" --db-vector-sha256 "$app_sha" \
+        --http-scalar "$tmp/http-scalar" --http-scalar-sha256 "$app_sha" \
+        --http-vector "$tmp/http-vector" --http-vector-sha256 "$app_sha" >"$tmp/staging-run.log" 2>&1; then
+        echo 'FAIL negative /bin/false runner fixture unexpectedly completed' >&2; exit 1
+    fi
+    grep -F 'db-scalar execution failed with status 1' "$tmp/staging-run.log" >/dev/null || {
+        cat "$tmp/staging-run.log" >&2; echo 'FAIL runner did not reject the negative app as expected' >&2; exit 1;
+    }
+    rss="$tmp/staging-run/receipts/db-scalar.rss.env"
+    events="$tmp/staging-run/receipts/db-scalar.events"
+    [ -f "$rss" ] && [ -f "$events" ] || { echo 'FAIL watchdog/observer receipts missing from negative run' >&2; exit 1; }
+    rss_field() { awk -F= -v key="$2" '$1==key { n++; v=substr($0,index($0,"=")+1) } END { if(n!=1) exit 1; print v }' "$1"; }
+    [ "$(rss_field "$rss" status)" = complete ] &&
+        [ "$(rss_field "$rss" exit_status)" = 1 ] &&
+        [ "$(rss_field "$rss" quiescent)" = 1 ] &&
+        [ "$(rss_field "$rss" rss_cap_mode)" = enforce ] &&
+        [ "$(rss_field "$rss" rss_cap_enforced)" = 1 ] || {
+        echo 'FAIL negative watchdog receipt lacks completed bounded supervision' >&2; exit 1;
+    }
+    mkdir -p "$evidence_dir"
+    cp -R "$tmp/staging-run/." "$evidence_dir/"
+    {
+        echo 'case=synthetic-negative-harness-only'
+        echo 'app=native-C-return-one-test-helper'
+        echo "app_sha256=$app_sha"
+        echo "provider_sha256=$provider_sha"
+        echo "observer_sha256=$observer_sha"
+        echo 'app_qualification=none'
+    } >"$evidence_dir/harness-note.env"
+    pid=$(awk -F= '$1=="root_pid" { n++; v=$2 } END { if (n==1) print v; else exit 1 }' "$rss")
+    perl "$validator" "$events" "$pid" --no-load
+    [ ! -e "$tmp/staging-run/evidence.env" ] || { echo 'FAIL negative run published completion evidence' >&2; exit 1; }
+    echo 'PASS staging/supervisor negative test only; synthetic native C helper, no Simple app qualification'
+else
+    echo 'PASS parser/staging preflight tests only; no app executed'
+fi
