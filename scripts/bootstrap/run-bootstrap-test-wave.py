@@ -30,6 +30,24 @@ def publish(path, value):
     temporary.replace(path)
 
 
+def load_tool_authority(tool_root, manifest, expected):
+    """Authenticate executable validator bytes before importing any of them."""
+    if manifest.stat().st_size > 8 * 1024 * 1024 or digest(manifest) != expected:
+        raise ValueError('tool manifest identity or size differs before import')
+    value = json.loads(manifest.read_text(encoding='utf-8'))
+    if value.get('schema') != 'simple-bootstrap-tool-code-v1':
+        raise ValueError('tool manifest schema differs before import')
+    relative = 'scripts/bootstrap/tool-code-authority.py'
+    validator = tool_root / relative
+    if (not isinstance(value.get('files'), dict)
+            or value['files'].get(relative) != digest(validator)):
+        raise ValueError('tool validator bytes differ before import')
+    spec = importlib.util.spec_from_file_location('tool_code_authority', validator)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def ensure_phase1_terminal(output, child_exit, request_sha):
     """A callback startup crash is terminal infrastructure failure, not a hang."""
     receipt = output / 'result.json'
@@ -80,10 +98,8 @@ def main():
     if tool_root != source:
         if not args.tool_manifest or not args.tool_manifest_sha256:
             parser.error('separate tool root requires a pinned complete tool manifest')
-        authority_spec = importlib.util.spec_from_file_location(
-            'tool_code_authority', scripts / 'tool-code-authority.py')
-        tool_authority = importlib.util.module_from_spec(authority_spec)
-        authority_spec.loader.exec_module(tool_authority)
+        tool_authority = load_tool_authority(tool_root, args.tool_manifest,
+                                             args.tool_manifest_sha256)
         tool_authority.validate(tool_root, args.tool_manifest,
                                 args.tool_manifest_sha256, Path(__file__))
         environment.update(SIMPLE_BOOTSTRAP_TOOL_ROOT=str(tool_root),
