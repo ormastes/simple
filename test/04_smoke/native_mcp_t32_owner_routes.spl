@@ -1,0 +1,44 @@
+# Run in a fresh process. These checks do not connect to TRACE32, launch a
+# backend, mutate session state, or create a window.
+use app.mcp_t32.json_helpers.{t32_LB, t32_RB, t32_jp, t32_js, t32_extract_field}
+use app.mcp_t32.action_tools.{t32_dispatch_tool}
+use app.mcp_t32.session_tools.{handle_t32_session_resume}
+use app.mcp_t32.gap_tools.{handle_t32_session_info}
+use app.mcp_t32.headless_tools.{handle_t32_setup_headless}
+use app.mcp_t32.ctypes_bridge.{t32_ctypes_available}
+use app.mcp_t32.tool_common.{t32_mcp_session_ids}
+use app.mcp_t32.session_state.{MCP_T32_AREA_READY, MCP_T32_AREA_NAME}
+use app.mcp_t32.window_tools.{t32_parse_action_sdn}
+
+fn check(label: text, ok: bool) -> i64:
+    if ok:
+        print "PASS {label}"
+        return 0
+    print "FAIL {label}"
+    1
+
+fn main() -> i64:
+    var failed: i64 = 0
+    val empty = t32_LB() + t32_RB()
+    val ids: [text] = t32_mcp_session_ids()
+    failed = failed + check("fresh session inventory is empty", ids.len() == 0)
+    failed = failed + check("ctypes availability does not load a provider", not t32_ctypes_available())
+    val json = t32_LB() + t32_jp("value", t32_js("alpha")) + t32_RB()
+    failed = failed + check("JSON owner extraction and quote escaping", t32_extract_field(json, "value") == "alpha" and t32_js("a\"b") == "\"a\\\"b\"")
+    val missing_name = t32_dispatch_tool("1", empty)
+    failed = failed + check("dispatch reports missing name", missing_name.contains("-32602") and missing_name.contains("error"))
+    val missing_session = handle_t32_session_resume("2", empty)
+    failed = failed + check("resume reports missing session", missing_session.contains("isError") and missing_session.contains("true"))
+    val missing_info = handle_t32_session_info("3", empty)
+    failed = failed + check("session info rejects absent session", missing_info.contains("isError") and missing_info.contains("true"))
+    val headless = handle_t32_setup_headless("4", empty)
+    failed = failed + check("headless setup rejects absent session", headless.contains("isError") and headless.contains("true"))
+    failed = failed + check("failed setup preserves AREA state", not MCP_T32_AREA_READY and MCP_T32_AREA_NAME == "")
+    val actions: [text] = t32_parse_action_sdn("action refresh\n  label: Refresh\n  type: execute\n  command: Register.view\n  target: register_view\n")
+    failed = failed + check("catalog records one actual action", actions.len() == 1)
+    if actions.len() == 1:
+        failed = failed + check("catalog retains command and target", actions[0] == "refresh|Refresh|execute|Register.view|register_view")
+    else:
+        failed = failed + check("catalog retains command and target", false)
+    print "MCP_T32_OWNER_ROUTES checks=10 failed={failed}"
+    if failed == 0: 0 else: 1
