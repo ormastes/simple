@@ -1,0 +1,51 @@
+#!/bin/sh
+# Real owner generates BLOCKED matrices; never synthesizes a native PASS.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+source="$scratch/source"
+mkdir -p "$source/scripts/bootstrap/lib"
+for tool in run-compiler-subsystem-test-products.shs build-compiler-subsystem-test-product.shs \
+    verify-compiler-subsystem-test-product.pl run-process-group-timeout.shs; do
+    cp "$repo/scripts/bootstrap/$tool" "$source/scripts/bootstrap/$tool"
+done
+for tool in managed-task-schedule.shs BootstrapProductProducer.pm subsystem-product-phase.shs; do
+    cp "$repo/scripts/bootstrap/lib/$tool" "$source/scripts/bootstrap/lib/$tool"
+done
+printf '#!/bin/sh\nprintf "suite\\tpath\\tsha256\\n"\n' >"$source/scripts/bootstrap/compiler-subsystem-test-inventory.shs"
+. "$repo/scripts/bootstrap/lib/subsystem-product-phase.shs"
+for phase in phase2 phase4; do
+  output="$scratch/$phase"
+  code=0
+  sh "$source/scripts/bootstrap/run-compiler-subsystem-test-products.shs" \
+    --source-root="$source" --output-root="$output" --producer-phase="$phase" --threads=20 \
+    >"$scratch/$phase.log" 2>&1 || code=$?
+  [ "$code" = 1 ]
+  [ "$(product_matrix_phase "$output/matrix.env")" = "$phase" ]
+  grep -qx 'status=FAIL' "$output/matrix.env"
+  : >"$scratch/expected"
+  for backend in llvm cranelift; do
+    for suite in compiler interpreter loader; do
+      for stage in build enumerate run; do
+        printf '%s_%s_product_%s_%s\tBLOCKED\t1\n' "$phase" "$backend" "$suite" "$stage" >>"$scratch/expected"
+      done
+      [ ! -e "$output/$backend/$suite/result.env" ]
+    done
+  done
+  cmp "$scratch/expected" "$output/product-status.tsv"
+done
+printf 'status=PASS\n' >"$scratch/old-receipt"
+[ "$(product_matrix_phase "$scratch/old-receipt")" = phase4 ]
+for invalid in phase3 bogus ''; do
+  printf 'producer_phase=%s\n' "$invalid" >"$scratch/bad-receipt"
+  if product_matrix_phase "$scratch/bad-receipt" >/dev/null; then exit 1; fi
+done
+printf 'producer_phase=phase2\nproducer_phase=phase2\n' >"$scratch/bad-receipt"
+if product_matrix_phase "$scratch/bad-receipt" >/dev/null; then exit 1; fi
+code=0
+sh "$source/scripts/bootstrap/run-compiler-subsystem-test-products.shs" --producer-phase=phase3 \
+  >"$scratch/rejected.log" 2>&1 || code=$?
+[ "$code" = 2 ]
+grep -q 'phase3 products require separate managed tasks' "$scratch/rejected.log"
+printf 'PASS: real phase2/phase4 18-task BLOCKED matrices; legacy phase4, malformed/duplicate/phase3 rejection; no native PASS claim\n'
