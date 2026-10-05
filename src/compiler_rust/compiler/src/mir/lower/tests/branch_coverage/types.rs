@@ -334,6 +334,24 @@ fn any_push_into_u8_array_is_decoded() {
     }));
 }
 
+/// `text * int` and `int * text` are repetition, not a native multiply on the
+/// string pointer (JIT `"x" * 4000` had len -1).
+#[test]
+fn text_times_int_lowers_to_string_repeat() {
+    let is_repeat =
+        |i: &MirInst| matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_string_repeat"));
+    for src in [
+        "fn test(n: i64) -> text:\n    \"x\" * n\n",
+        "fn test(n: i64) -> text:\n    n * \"ab\"\n",
+        "fn test(n: i32) -> text:\n    \"-\" * n\n",
+    ] {
+        let mir = compile_to_mir(src).unwrap();
+        assert!(has_inst(&mir, is_repeat), "missing rt_string_repeat for:\n{src}");
+    }
+    let num = compile_to_mir("fn test(a: i64, b: i64) -> i64:\n    a * b\n").unwrap();
+    assert!(!has_inst(&num, is_repeat));
+}
+
 #[test]
 fn index_float_unboxing() {
     let mir = compile_to_mir("fn test() -> f64:\n    val arr = [1.5, 2.5]\n    return arr[0]\n").unwrap();
