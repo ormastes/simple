@@ -1,0 +1,83 @@
+# phase2_subsystem_helper_mir_failures_2026-10-05: declared owner, not a guessed
+# method name or numeric enum cast, controls the projected receiver.
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable, HirSymbol, SymbolKind, ScopeId}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{LocalId}
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+fn named_projection_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: Span.empty())
+
+fn named_projection_base() -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(SymbolId(id: 99999)), has_type_: false,
+        type_: named_projection_type(HirTypeKind.Unit), span: Span.empty())
+
+fn named_projection_owner(found: HirType?) -> i64:
+    if val value = found:
+        match value.kind:
+            case HirTypeKind.Named(symbol, _): return symbol.id
+            case _: return -1
+    -1
+
+describe "Named field projection preserves declared owner":
+    it "retains different declared owners rather than only a shared representation":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.struct_value_syms[10] = "Envelope"
+        lowering.struct_field_hir_type["Envelope"] = [
+            named_projection_type(HirTypeKind.Named(SymbolId(id: 201), [])),
+            named_projection_type(HirTypeKind.Named(SymbolId(id: 202), []))]
+        lowering.remember_field_projection_provenance(named_projection_base(), LocalId(id: 10), 0, LocalId(id: 11))
+        lowering.remember_field_projection_provenance(named_projection_base(), LocalId(id: 10), 1, LocalId(id: 12))
+        expect(named_projection_owner(lowering.find_local_hir_type(11))).to_equal(201)
+        expect(named_projection_owner(lowering.find_local_hir_type(12))).to_equal(202)
+        expect(lowering.local_is_runtime_array(LocalId(id: 11))).to_equal(false)
+
+    it "does not manufacture a declaration for missing or out-of-range fields":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.struct_value_syms[10] = "Envelope"
+        lowering.struct_field_hir_type["Envelope"] = [named_projection_type(HirTypeKind.Error)]
+        lowering.remember_field_projection_provenance(named_projection_base(), LocalId(id: 10), 0, LocalId(id: 11))
+        lowering.remember_field_projection_provenance(named_projection_base(), LocalId(id: 10), 9, LocalId(id: 12))
+        lowering.remember_field_projection_provenance(named_projection_base(), LocalId(id: 99), 0, LocalId(id: 13))
+        expect(named_projection_owner(lowering.find_local_hir_type(11))).to_equal(-1)
+        expect(named_projection_owner(lowering.find_local_hir_type(12))).to_equal(-1)
+        expect(named_projection_owner(lowering.find_local_hir_type(13))).to_equal(-1)
+
+    it "does not borrow enum storage from another module's same-named declaration":
+        var symbols = SymbolTable.new()
+        symbols.register_preserved_symbol(HirSymbol(id: SymbolId(id: 77), name: "State",
+            kind: SymbolKind.Struct, type_: nil, scope: ScopeId(id: 0), span: Span.empty(),
+            visibility: Visibility.Public, is_public: true, is_mutable: false,
+            defining_module: Some("src/record.spl")))
+        symbols.register_preserved_symbol(HirSymbol(id: SymbolId(id: 78), name: "State",
+            kind: SymbolKind.Enum, type_: nil, scope: ScopeId(id: 0), span: Span.empty(),
+            visibility: Visibility.Public, is_public: true, is_mutable: false,
+            defining_module: Some("src/enum_owner.spl")))
+        var lowering = MirLowering.new(symbols)
+        lowering.enum_variant_index["State"] = ["Ready"]
+        lowering.enum_variant_index_q["enum_owner.State"] = ["Ready"]
+        lowering.struct_value_syms[10] = "Envelope"
+        lowering.struct_field_hir_type["Envelope"] = [
+            named_projection_type(HirTypeKind.Named(SymbolId(id: 77), [])),
+            named_projection_type(HirTypeKind.Named(SymbolId(id: 78), []))]
+        lowering.remember_field_projection_provenance(named_projection_base(), LocalId(id: 10), 0, LocalId(id: 11))
+        lowering.remember_field_projection_provenance(named_projection_base(), LocalId(id: 10), 1, LocalId(id: 12))
+        expect(lowering.local_enum_type_id(LocalId(id: 11))).to_equal(-1)
+        expect(lowering.local_enum_type_id(LocalId(id: 12))).to_be_greater_than(-1)
+
+    it "keeps neighboring arrays as arrays and scalar fields out of named ownership":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.struct_value_syms[10] = "Envelope"
+        lowering.struct_field_hir_type["Envelope"] = [
+            named_projection_type(HirTypeKind.Array(named_projection_type(HirTypeKind.Int(64, true)), nil)),
+            named_projection_type(HirTypeKind.Int(64, true))]
+        lowering.remember_field_projection_provenance(named_projection_base(), LocalId(id: 10), 0, LocalId(id: 11))
+        lowering.remember_field_projection_provenance(named_projection_base(), LocalId(id: 10), 1, LocalId(id: 12))
+        expect(lowering.local_is_runtime_array(LocalId(id: 11))).to_equal(true)
+        expect(named_projection_owner(lowering.find_local_hir_type(11))).to_equal(-1)
+        expect(lowering.local_is_runtime_array(LocalId(id: 12))).to_equal(false)
+        expect(named_projection_owner(lowering.find_local_hir_type(12))).to_equal(-1)
