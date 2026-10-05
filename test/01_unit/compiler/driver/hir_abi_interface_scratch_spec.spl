@@ -4,13 +4,16 @@ The allocation comparison requires the native runtime's heap registry. An
 interpreter-only pass does not establish reclamation.
 """
 use std.spec.*
+use app.io.time_ops.{time_now_unix_micros}
 use compiler.hir.hir_types.{HirModule, SymbolTable, SymbolId, HirType, HirTypeKind}
 use compiler.hir.hir_definitions.{HirConst, HirExpr, HirExprKind}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.hir.abi_interface.{hir_abi_interface_digest_v1}
-use compiler.driver.driver_hir_abi_interface.{driver_hir_abi_interface_digest_v1}
-use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+use compiler.driver.driver_hir_abi_interface.{driver_hir_abi_interface_digest_v1,
+    driver_hir_abi_interface_digest_in_owned_scope_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
 
 extern fn rt_heap_registry_count() -> i64
 
@@ -49,6 +52,13 @@ describe "HIR ABI receipt scratch ownership":
             is_mutable: false, visibility: Visibility.Public, is_public: true,
             is_volatile: false, has_fixed_address: false, fixed_address: 0, span: span)
         val reason = driver_hir_abi_interface_digest_v1(module).unwrap_err()
+        expect(transient_scope_begin()).to_equal(true)
+        val borrowed_error = driver_hir_abi_interface_digest_in_owned_scope_v1(module)
+        val paused = transient_scope_pause()
+        val retained = paused and transient_promote(borrowed_error)
+        val ended = transient_scope_end()
+        expect(paused and retained and ended).to_equal(true)
+        expect(borrowed_error.unwrap_err()).to_equal(reason)
         expect(driver_hir_abi_interface_digest_v1(abi_scratch_module()).is_ok()).to_equal(true)
         expect(reason).to_equal("unresolved-symbol:9001")
 
@@ -60,6 +70,52 @@ describe "HIR ABI receipt scratch ownership":
         expect(refused).to_equal(true)
         expect(owner_closed).to_equal(true)
         expect(driver_hir_abi_interface_digest_v1(module).is_ok()).to_equal(true)
+
+    it "computes a shard receipt in its owner and preserves it after reclamation":
+        val module = abi_scratch_module()
+        val expected = driver_hir_abi_interface_digest_v1(module).unwrap()
+        expect(transient_scope_begin()).to_equal(true)
+        val receipt = (module.name, driver_hir_abi_interface_digest_in_owned_scope_v1(module))
+        val paused = transient_scope_pause()
+        val retained = paused and transient_promote(receipt)
+        val ended = transient_scope_end()
+        expect(paused and retained and ended).to_equal(true)
+        expect(receipt.0).to_equal("fixture.abi_scratch")
+        expect(receipt.1.is_ok()).to_equal(true)
+        expect(receipt.1.unwrap()).to_equal(expected)
+        # The borrowed operation neither closes nor replaces the owner's scope.
+        expect(driver_hir_abi_interface_digest_v1(module).unwrap()).to_equal(expected)
+
+    it "reclaims the shard encoder graph instead of retaining it with the receipt":
+        val module = abi_scratch_module()
+        val expected = hir_abi_interface_digest_v1(module).unwrap()
+        var matched = true
+        var index = 0
+        val scoped_started = time_now_unix_micros()
+        val scoped_before = rt_heap_registry_count()
+        while index < 8:
+            val begun = transient_scope_begin()
+            val receipt = (module.name, driver_hir_abi_interface_digest_in_owned_scope_v1(module))
+            val paused = transient_scope_pause()
+            val retained = paused and transient_promote(receipt)
+            val ended = transient_scope_end()
+            matched = matched and begun and paused and retained and ended
+            matched = matched and receipt.1.unwrap() == expected
+            index = index + 1
+        val scoped_growth = rt_heap_registry_count() - scoped_before
+        val scoped_elapsed = time_now_unix_micros() - scoped_started
+        index = 0
+        val unscoped_started = time_now_unix_micros()
+        val unscoped_before = rt_heap_registry_count()
+        while index < 8:
+            val digest = hir_abi_interface_digest_v1(module).unwrap()
+            matched = matched and digest == expected
+            index = index + 1
+        val unscoped_growth = rt_heap_registry_count() - unscoped_before
+        val unscoped_elapsed = time_now_unix_micros() - unscoped_started
+        expect(matched).to_equal(true)
+        expect(unscoped_growth).to_be_greater_than(scoped_growth * 4)
+        print "abi-shard-scratch iterations=8 borrowed_us={scoped_elapsed} borrowed_retained={scoped_growth} unscoped_us={unscoped_elapsed} unscoped_retained={unscoped_growth}"
 
     it "retains substantially fewer allocations than the unscoped digest":
         val module = abi_scratch_module()

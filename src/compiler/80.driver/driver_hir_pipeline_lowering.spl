@@ -20,7 +20,8 @@ use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
 use compiler.driver.perf.compiler_work_counters.{compiler_work_hir_schedule_v1}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir.*
-use compiler.driver.driver_hir_abi_interface.{driver_hir_abi_interface_digest_v1}
+use compiler.driver.driver_hir_abi_interface.{driver_hir_abi_interface_digest_v1,
+    driver_hir_abi_interface_digest_in_owned_scope_v1}
 use compiler.hir.hir_lowering.items.{
     bootstrap_hir_modules_reset,
     bootstrap_hir_module_count,
@@ -81,11 +82,15 @@ extern fn rt_heap_ref_wellformed(value: Any) -> bool
 extern fn rt_stdout_flush()
 
 fn driver_log_typed_hir_abi_interface_v1(module: HirModule, path: text):
-    match driver_hir_abi_interface_digest_v1(module):
+    driver_log_typed_hir_abi_result_v1(module.name,
+        driver_hir_abi_interface_digest_v1(module), path)
+
+fn driver_log_typed_hir_abi_result_v1(module_name: text, result: Result<text, text>, path: text):
+    match result:
         case Ok(digest):
-            log_phase("[abi-interface] source=typed-hir module={module.name} digest={digest} path={path}")
+            log_phase("[abi-interface] source=typed-hir module={module_name} digest={digest} path={path}")
         case Err(reason):
-            log_warn("[abi-interface-unavailable] source=typed-hir module={module.name} reason={reason} path={path}")
+            log_warn("[abi-interface-unavailable] source=typed-hir module={module_name} reason={reason} path={path}")
 
 fn driver_hir_explicit_semantic_policy(ctx: CompileContext) -> bool:
     (ctx.config["compiler_explicit_semantic_policy"] ?? "") == "1"
@@ -469,6 +474,7 @@ impl CompilerDriver:
         var cached = false
         var stored = false
         var infrastructure_error = ""
+        var abi_receipt: (text, Result<text, text>) = ("", Err(""))
         var errors: [text] = []
         var warnings: [text] = []
         val cache_result = hir_cache_load(cache_key)
@@ -505,7 +511,9 @@ impl CompilerDriver:
                 val round_trip = hir_codec_roundtrip_selfcheck(module)
                 print hir_codec_roundtrip_line(round_trip, source.path)
                 module = round_trip.module
-            driver_log_typed_hir_abi_interface_v1(module, source.path)
+            # This transaction already owns the scope. Retain only the receipt;
+            # reacquiring a scope here rejects every shard's ABI digest.
+            abi_receipt = (module.name, driver_hir_abi_interface_digest_in_owned_scope_v1(module))
             if cached:
                 stored = true
             else:
@@ -529,6 +537,7 @@ impl CompilerDriver:
         val errors_owned = rt_transient_heap_promote(errors)
         val warnings_owned = rt_transient_heap_promote(warnings)
         val failure_owned = infrastructure_error == "" or rt_transient_heap_promote(infrastructure_error)
+        val abi_owned = rt_transient_heap_promote(abi_receipt)
         val memos_owned = lowering.promote_phase_memo_transient_owners()
         val frontend_owned = driver_promote_retained_frontend_owners_v1(
             parser_initialization_generation_v1() != parser_generation)
@@ -539,7 +548,7 @@ impl CompilerDriver:
         # on the retained lowerer points into the scope about to be reclaimed.
         lowering.begin_module(source.path)
         hir_cache_clear_last_warnings()
-        if not (errors_owned and warnings_owned and failure_owned and memos_owned and frontend_owned):
+        if not (errors_owned and warnings_owned and failure_owned and abi_owned and memos_owned and frontend_owned):
             val ended = driver_abort_reverse_reference_parse_scope_v1(reverse_token)
             # Partial root promotion cannot authorize another task in this
             # process. The parent records an incomplete infrastructure failure.
@@ -550,6 +559,8 @@ impl CompilerDriver:
             self.ctx.add_error("HIR shard scope publication/reclamation failed for {source.path}")
             return -1
         # These context allocations happen AFTER scratch reclamation.
+        if abi_receipt.0 != "":
+            driver_log_typed_hir_abi_result_v1(abi_receipt.0, abi_receipt.1, source.path)
         for message in warnings:
             if not driver_hir_ambient_bootstrap_enabled(self.ctx):
                 self.ctx.add_warning(message)
