@@ -42,6 +42,10 @@ int64_t rt_fork_parent_peak_rss_bytes(void) { return 0; }
 
 const char* rt_fork_parent_stdout(void) { return ""; }
 const char* rt_fork_parent_stderr(void) { return "fork not supported on Windows"; }
+void simple_fork_parent_capture_lengths(uint64_t* stdout_bytes, uint64_t* stderr_bytes) {
+    *stdout_bytes = 0;
+    *stderr_bytes = sizeof("fork not supported on Windows") - 1;
+}
 
 void rt_fork_child_exit(int64_t exit_code) {
     exit((int)exit_code);
@@ -71,6 +75,8 @@ static int s_stderr_read_fd = -1;
 /* Stored results from last rt_fork_parent_wait() */
 static char* s_result_stdout = NULL;
 static char* s_result_stderr = NULL;
+static uint64_t s_result_stdout_length = 0;
+static uint64_t s_result_stderr_length = 0;
 static bool s_result_timed_out = false;
 static bool s_result_signaled = false;
 static struct rusage s_result_rusage;
@@ -193,6 +199,8 @@ static void set_nonblocking(int fd) {
 static void free_results(void) {
     if (s_result_stdout) { SPL_FREE(s_result_stdout); s_result_stdout = NULL; }
     if (s_result_stderr) { SPL_FREE(s_result_stderr); s_result_stderr = NULL; }
+    s_result_stdout_length = 0;
+    s_result_stderr_length = 0;
 }
 
 static pid_t wait4_nointr(pid_t pid, int* status, int options) {
@@ -490,16 +498,18 @@ int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
     /* Linearize retained head/tail data and insert truncation markers. */
     size_t out_len = capture_finish(&out_capture);
     size_t err_len = capture_finish(&err_capture);
-    (void)capture_note_incomplete(&out_capture, out_len,
+    out_len = capture_note_incomplete(&out_capture, out_len,
         stdout_read_error ? "read error on the stdout pipe"
                           : (stdout_open ? stop_reason : NULL));
-    (void)capture_note_incomplete(&err_capture, err_len,
+    err_len = capture_note_incomplete(&err_capture, err_len,
         stderr_read_error ? "read error on the stderr pipe"
                           : (stderr_open ? stop_reason : NULL));
 
     /* Store results for getter functions */
     s_result_stdout = out_buf;
     s_result_stderr = err_buf;
+    s_result_stdout_length = out_len;
+    s_result_stderr_length = err_len;
 
     /* Timeout/wait failure cleanup completed before the final pipe drain. */
     if (timed_out || wait_failed) {
@@ -612,6 +622,11 @@ const char* rt_fork_parent_stdout(void) {
 
 const char* rt_fork_parent_stderr(void) {
     return s_result_stderr ? s_result_stderr : "";
+}
+
+void simple_fork_parent_capture_lengths(uint64_t* stdout_bytes, uint64_t* stderr_bytes) {
+    *stdout_bytes = s_result_stdout_length;
+    *stderr_bytes = s_result_stderr_length;
 }
 
 void rt_fork_child_exit(int64_t exit_code) {

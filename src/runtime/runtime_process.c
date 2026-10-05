@@ -151,14 +151,18 @@ bool rt_process_kill(int64_t pid) {
 }
 #endif
 
-static SplArray* process_timeout_result(const char* stdout_text, const char* stderr_text, int64_t code, int timed_out, int64_t timeout_ms) {
+static SplArray* process_capture_result(const char* stdout_text, size_t stdout_len,
+                                       const char* stderr_text, size_t stderr_len,
+                                       int64_t code, int timed_out, int64_t timeout_ms) {
     const char* out = stdout_text ? stdout_text : "";
     const char* err = stderr_text ? stderr_text : "";
+    if (!stdout_text) stdout_len = 0;
+    if (!stderr_text) stderr_len = 0;
     char* timeout_error = NULL;
     if (timed_out) {
         char marker[96];
         snprintf(marker, sizeof(marker), "[TIMEOUT: Process killed after %lldms]", (long long)timeout_ms);
-        size_t err_len = strlen(err);
+        size_t err_len = stderr_len;
         size_t marker_len = strlen(marker);
         timeout_error = (char*)malloc(err_len + marker_len + 2);
         if (timeout_error) {
@@ -166,14 +170,22 @@ static SplArray* process_timeout_result(const char* stdout_text, const char* std
             if (err_len > 0) timeout_error[err_len++] = '\n';
             memcpy(timeout_error + err_len, marker, marker_len + 1);
             err = timeout_error;
+            stderr_len = err_len + marker_len;
         }
     }
     SplArray* result = rt_array_new(3);
-    rt_array_push(result, rt_string_new((const uint8_t*)out, (uint64_t)strlen(out)));
-    rt_array_push(result, rt_string_new((const uint8_t*)err, (uint64_t)strlen(err)));
+    rt_array_push(result, rt_string_new((const uint8_t*)out, (uint64_t)stdout_len));
+    rt_array_push(result, rt_string_new((const uint8_t*)err, (uint64_t)stderr_len));
     rt_array_push(result, rt_value_int(code));
     free(timeout_error);
     return result;
+}
+
+static SplArray* process_timeout_result(const char* stdout_text, const char* stderr_text,
+                                       int64_t code, int timed_out, int64_t timeout_ms) {
+    return process_capture_result(stdout_text, stdout_text ? strlen(stdout_text) : 0,
+                                  stderr_text, stderr_text ? strlen(stderr_text) : 0,
+                                  code, timed_out, timeout_ms);
 }
 
 #ifdef _WIN32
@@ -1977,8 +1989,11 @@ static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, Sp
     if (rt_fork_parent_signaled()) code = -1;
     const char* out = rt_fork_parent_stdout();
     const char* err = rt_fork_parent_stderr();
+    uint64_t out_len = 0, err_len = 0;
+    simple_fork_parent_capture_lengths(&out_len, &err_len);
     if (code == 127 && err && strstr(err, "rt_process_run_timeout execvp") != NULL) code = -1;
-    return process_timeout_result(out, err, code, timed_out, timeout_ms);
+    return process_capture_result(out, (size_t)out_len, err, (size_t)err_len,
+                                  code, timed_out, timeout_ms);
 }
 
 /* (cmd_ptr, cmd_len, args, timeout_ms) -> RuntimeValue (array), per

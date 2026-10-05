@@ -406,6 +406,7 @@ double   rt_value_as_float(int64_t value);
 int8_t   rt_value_is_float(int64_t value);
 int64_t  rt_value_bool(int64_t value);
 int8_t   rt_value_as_bool(int64_t value);
+int8_t   rt_value_truthy(int64_t value);
 int64_t  rt_value_nil(void);
 void*    rt_alloc(int64_t size);
 void*    rt_struct_alloc(int64_t size);

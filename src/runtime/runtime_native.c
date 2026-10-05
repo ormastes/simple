@@ -9581,6 +9581,8 @@ int64_t rt_array_reduce(SplArray* array, int64_t init, int64_t closure_value) {
  * arms are subsumed by the one test. */
 static inline int rt_core_value_truthy(int64_t value) {
     if (rt_core_is_float(value)) return rt_core_as_float(value) != 0.0;
+    RtCoreUInt* unsigned_value = rt_core_as_heap_uint(value);
+    if (unsigned_value) return unsigned_value->value != 0;
     switch (((uint64_t)value) & RT_VALUE_TAG_MASK) {
     case RT_VALUE_TAG_INT:
         return rt_core_as_int(value) != 0;
@@ -9591,6 +9593,11 @@ static inline int rt_core_value_truthy(int64_t value) {
     default:
         return 0;
     }
+}
+
+/* Compiler condition ABI: boolean results use an eight-bit return. */
+int8_t rt_value_truthy(int64_t value) {
+    return (int8_t)rt_core_value_truthy(value);
 }
 
 /* Predicate-driven collection ops.
@@ -17396,3 +17403,6 @@ int64_t rt_hosted_safe_artifact_bundle_identity_v1(int64_t a,int64_t b){(void)a;
 int64_t rt_hosted_safe_artifact_bundle_stage_scr1_v1(int64_t a,const uint8_t*b,uint64_t c,int64_t d){(void)a;(void)b;(void)c;(void)d;return 0;}
 int64_t rt_hosted_safe_artifact_bundle_finish_v1(int64_t a,int64_t b){(void)a;(void)b;return 0;}
 #endif
+
+/* Same bounded provider as the narrow native-all owner, without its duplicate ABI exports. */
+#include "runtime_shared_parse_cell_private.h"
