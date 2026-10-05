@@ -546,6 +546,7 @@ int64_t  rt_tls_client_write(int64_t handle, int64_t data);
 int64_t  rt_tls_client_write_timeout(int64_t handle, int64_t data, int64_t timeout_ms);
 int64_t  rt_tls_client_read(int64_t handle, int64_t max_bytes);
 int64_t  rt_tls_client_read_timeout(int64_t handle, int64_t max_bytes, int64_t timeout_ms);
+int64_t  rt_tls_client_read_bytes_timeout_checked(int64_t handle, int64_t max_bytes, int64_t timeout_ms);
 int64_t  rt_tls_get_protocol_version(int64_t handle);
 int8_t   rt_tls_client_close(int64_t handle);
 int64_t  rt_strcat_tagged(int64_t left, int64_t right);
