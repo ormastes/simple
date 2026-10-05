@@ -3311,6 +3311,26 @@ int64_t rt_function_not_found(const uint8_t* name, uint64_t len) {
     return rt_core_nil();
 }
 
+/* Twin of the seed runtime's rt_method_not_found (sffi/error_handling.rs):
+ * the code generator's vtable type switch falls back to it, so a native binary
+ * built against this runtime could not link without it. Same diagnostic and
+ * exit status (70) as the seed: it never substitutes a placeholder value. */
+int64_t rt_method_not_found(const uint8_t* type_name, uint64_t type_len,
+                            const uint8_t* method_name, uint64_t method_len) {
+    fputs("Runtime error: Method '", stderr);
+    if (method_name && method_len > 0) fwrite(method_name, 1, (size_t)method_len, stderr);
+    else fputs("<unknown method>", stderr);
+    fputs("' not found on type '", stderr);
+    if (type_name && type_len > 0) fwrite(type_name, 1, (size_t)type_len, stderr);
+    else fputs("<unknown type>", stderr);
+    fputs("'\nRuntime error: unresolved symbol -- this is a code-generation dispatch gap, "
+          "not a program error. Refusing to substitute a placeholder value (it would "
+          "render as the text 'error' and silently corrupt output).\n", stderr);
+    fflush(stderr);
+    fflush(stdout);
+    exit(70);
+}
+
 int64_t rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv) {
     (void)argc;
     (void)argv;
@@ -6344,6 +6364,17 @@ int64_t rt_string_to_int(int64_t value) {
 int64_t rt_to_int_dynamic(int64_t value) {
     if (rt_core_as_string(value)) return rt_string_to_int(value);
     return value;
+}
+
+/* `x.to_i64()` on an ERASED (tagged) receiver: text parses like
+ * rt_to_int_dynamic; a float truncates; every other value is decoded tag-aware
+ * (rt_value_unbox_int). rt_to_int_dynamic returns a non-text value VERBATIM,
+ * which for a tagged int is `n << 3` -- the JIT inflate decoder read every
+ * byte 8x too large. Twin: Rust runtime value/collections.rs. */
+int64_t rt_any_to_int(int64_t value) {
+    if (rt_core_as_string(value)) return rt_string_to_int(value);
+    if (rt_value_is_float(value)) return (int64_t)rt_value_as_float(value);
+    return rt_value_unbox_int(value);
 }
 
 /* Task #178 (text3 lane): backs the `int("42")` global builtin's native MIR

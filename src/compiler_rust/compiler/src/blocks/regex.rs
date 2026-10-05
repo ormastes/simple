@@ -79,7 +79,7 @@ fn parse_regex(payload: &str) -> Result<Value, CompileError> {
     );
     result.insert(
         "capture_groups".to_string(),
-        Value::array(capture_groups.into_iter().map(Value::text).collect()),
+        Value::array(capture_groups.into_iter().map(Value::text).collect::<Vec<Value>>()),
     );
 
     Ok(Value::dict(result))

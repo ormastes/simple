@@ -90,7 +90,7 @@ fn is_condition_present(condition_expr: &Expr, val: &Value) -> bool {
 ///     contents even when the destination is mutated in place (the in-place path's
 ///     `Arc::make_mut` sees the src argument holding a second strong ref and clones).
 pub(crate) fn array_write_span(
-    dst: &mut Vec<Value>,
+    dst: &mut crate::value::ArrayData,
     src: &Value,
     dst_off: i64,
     src_off: i64,
@@ -99,9 +99,21 @@ pub(crate) fn array_write_span(
     if count <= 0 {
         return Ok(0);
     }
-    let source = write_span_source(src)?;
-    write_span_range_check(dst.len(), source.len(), dst_off, src_off, count)?;
+    // Validate against lengths only: a packed source is not materialized.
+    let src_len = match src {
+        Value::Array(values) => values.len(),
+        _ => write_span_source(src)?.len(),
+    };
+    write_span_range_check(dst.len(), src_len, dst_off, src_off, count)?;
     let (d, s, n) = (dst_off as usize, src_off as usize, count as usize);
+    if let Value::Array(values) = src {
+        // Same elements as the slice copy below; keeps a packed destination
+        // packed when the copied elements are packed-domain values.
+        dst.write_span_from(values, d, s, n);
+        return Ok(count);
+    }
+    let source = write_span_source(src)?;
+    let dst: &mut Vec<Value> = dst;
     match source {
         WriteSpanSource::Boxed(values) => dst[d..d + n].clone_from_slice(&values[s..s + n]),
         // A packed `[u8]` source reads as `u8` values, exactly what indexing it
@@ -249,11 +261,65 @@ fn array_ndim(arr: &[Value]) -> i64 {
 /// result afterwards.
 fn generic_array_values(value: &Value) -> Option<Vec<Value>> {
     match value {
-        Value::Array(values) | Value::FrozenArray(values) => Some(values.as_ref().clone()),
+        Value::Array(values) | Value::FrozenArray(values) => Some(values.to_vec()),
         Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => Some(Value::byte_array_values(bytes)),
         Value::FixedSizeArray { data, .. } => Some(data.clone()),
         _ => None,
     }
+}
+
+/// Methods of a PACKED array answered without materializing its boxed view.
+///
+/// `handle_array_methods` takes `&[Value]`, so dispatching a packed array to it
+/// builds the whole boxed view (64 bytes per element) -- per call, for the
+/// `self.buf.len()` a framebuffer loop makes on every scanline. These arms
+/// return exactly what the boxed arms return; every other method falls through
+/// to the boxed handler unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn handle_packed_array_methods(
+    arr: &crate::value::ArrayData,
+    method: &str,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    if !arr.is_packed() {
+        return Ok(None);
+    }
+    Ok(Some(match method {
+        // The boxed arms ignore (do not evaluate) any arguments.
+        "len" | "length" => Value::Int(arr.len() as i64),
+        "is_empty" => Value::Bool(arr.is_empty()),
+        "first" => arr.get_value(0).unwrap_or(Value::Nil),
+        "last" => arr.len().checked_sub(1).and_then(|i| arr.get_value(i)).unwrap_or(Value::Nil),
+        // Same evaluation order and errors as the boxed `write_span` arm.
+        "write_span" => {
+            let src = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let dst_off = eval_arg(args, 1, Value::Int(-1), env, functions, classes, enums, impl_methods)?
+                .as_int()
+                .unwrap_or(-1);
+            let src_off = eval_arg(args, 2, Value::Int(-1), env, functions, classes, enums, impl_methods)?
+                .as_int()
+                .unwrap_or(-1);
+            let count = eval_arg(args, 3, Value::Int(0), env, functions, classes, enums, impl_methods)?
+                .as_int()
+                .unwrap_or(0);
+            if count <= 0 {
+                Value::Int(0)
+            } else {
+                let src_len = match &src {
+                    Value::Array(values) => values.len(),
+                    _ => write_span_source(&src)?.len(),
+                };
+                write_span_range_check(arr.len(), src_len, dst_off, src_off, count)?;
+                Value::Int(count)
+            }
+        }
+        _ => return Ok(None),
+    }))
 }
 
 /// Handle Array methods
@@ -362,9 +428,18 @@ pub fn handle_array_methods(
             let count = eval_arg(args, 3, Value::Int(0), env, functions, classes, enums, impl_methods)?
                 .as_int()
                 .unwrap_or(0);
-            let mut tmp = arr.to_vec();
-            let written = array_write_span(&mut tmp, &src, dst_off, src_off, count)?;
-            Value::Int(written)
+            // Validation and count only (the same errors `array_write_span`
+            // raises); the write itself is the owning caller's.
+            if count <= 0 {
+                Value::Int(0)
+            } else {
+                let src_len = match &src {
+                    Value::Array(values) => values.len(),
+                    _ => write_span_source(&src)?.len(),
+                };
+                write_span_range_check(arr.len(), src_len, dst_off, src_off, count)?;
+                Value::Int(count)
+            }
         }
         "concat" | "extend" | "merge" => {
             let other = eval_arg(
@@ -641,11 +716,11 @@ pub fn handle_array_methods(
         }
         "take" => {
             let n = eval_arg_usize(args, 0, arr.len(), env, functions, classes, enums, impl_methods)?;
-            Value::array(arr.iter().take(n).cloned().collect())
+            Value::array(arr.iter().take(n).cloned().collect::<Vec<Value>>())
         }
         "skip" | "drop" => {
             let n = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
-            Value::array(arr.iter().skip(n).cloned().collect())
+            Value::array(arr.iter().skip(n).cloned().collect::<Vec<Value>>())
         }
         "take_while" => {
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -913,7 +988,7 @@ pub fn handle_array_methods(
                 }
             }
 
-            Value::array(result.into_iter().map(Value::array).collect())
+            Value::array(result.into_iter().map(Value::array).collect::<Vec<Value>>())
         }
         "fetch" => {
             // Get element at index with default value if out of bounds
@@ -1078,7 +1153,7 @@ pub fn handle_tuple_methods(
 /// Handle FrozenArray methods (read-only operations only)
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_frozen_array_methods(
-    arr: &std::sync::Arc<Vec<Value>>,
+    arr: &std::sync::Arc<crate::value::ArrayData>,
     method: &str,
     args: &[Argument],
     env: &mut Env,

@@ -2190,7 +2190,7 @@ mod tests {
 
     #[test]
     fn transient_heap_promote_accepts_interpreter_owned_graphs() {
-        let graph = Value::Array(std::sync::Arc::new(vec![Value::Int(1)]));
+        let graph = Value::array(vec![Value::Int(1)]);
         assert!(matches!(rt_transient_heap_promote(&[graph]), Ok(Value::Bool(true))));
         assert!(matches!(
             rt_transient_heap_promote(&[Value::Int(0)]),

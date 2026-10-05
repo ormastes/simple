@@ -1,0 +1,38 @@
+"""
+## Purpose and audience
+Purpose: Pin RFC 1951 back-references that reach into an EARLIER block of
+the same DEFLATE stream ("the distance can refer to a string in a previous
+block", §3.2). The inflater kept a fresh output buffer per block, so such a
+reference was rejected and the whole stream returned nil -- every
+multi-block PNG (google.com's logo, the wikipedia.org globe) failed with
+"DEFLATE stream is invalid".
+Audience: maintainers of the gzip/zlib/PNG decoders.
+## Operator workflow
+Run with the test runner; streams are hand-built bytes, checked against
+zlib (Python `zlib.decompress(..., -15)` gives the same output).
+## Compatibility and limitations
+In-memory only. Bug record:
+doc/08_tracking/bug/tls_binary_body_utf8_lossy_2026-10-05.md
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.compression.gzip.inflate.{inflate, inflate_bounded}
+
+describe "DEFLATE back-references across blocks":
+    it "copies from the previous block's output":
+        step("block 1: stored, non-final, 'abc'; block 2: fixed Huffman, final, match len 3 dist 3")
+        val stream: [u8] = [0x00u8, 0x03u8, 0x00u8, 0xfcu8, 0xffu8, 0x61u8, 0x62u8, 0x63u8, 0x03u8, 0x22u8, 0x00u8]
+        expect(inflate(stream) ?? []).to_equal([0x61u8, 0x62u8, 0x63u8, 0x61u8, 0x62u8, 0x63u8])
+
+    it "applies the output bound to the whole stream, not per block":
+        val stream: [u8] = [0x00u8, 0x03u8, 0x00u8, 0xfcu8, 0xffu8, 0x61u8, 0x62u8, 0x63u8, 0x03u8, 0x22u8, 0x00u8]
+        expect((inflate_bounded(stream, 6) ?? []).len()).to_equal(6)
+        step("one byte under the total: the second block must be refused")
+        expect(inflate_bounded(stream, 5) == nil).to_equal(true)
+
+    it "still rejects a distance reaching before the start of the stream":
+        step("same fixed block alone: distance 3 with no earlier output")
+        val stream: [u8] = [0x03u8, 0x22u8, 0x00u8]
+        expect(inflate(stream) == nil).to_equal(true)

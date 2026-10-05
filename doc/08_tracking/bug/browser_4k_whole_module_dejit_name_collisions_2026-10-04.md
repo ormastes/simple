@@ -177,3 +177,44 @@ Consider `for x in c: seen.push(x); c[2] = 99` over `[10, 20, 30]`:
 - Under `simple test`, it is not seen: `[10, 20, 30]`.
 
 Not pinned by any spec until the language decides which is correct.
+
+## Follow-up 2026-10-05 (branch work/jit-compile-time)
+
+Root-caused and fixed the full-program JIT blockers:
+
+- **Compile time: one global.** `__module_init_dynamic`'s 151k instructions
+  were almost all ONE initializer, `var _kern_ascii_vals: [i32] =
+  [_KERN_EMPTY; 72200]` (font_renderer). `lower_array_repeat` unrolled every
+  integer-literal count into an explicit literal (72,200 x GlobalLoad +
+  BoxInt). A repeat of >= 256 of a pure scalar (int/float/bool, not u8/u64)
+  is now a runtime `rt_array_repeat` fill. Dynamic init is ALSO chunked
+  (64 initializers per `__dyninit_part_<i>`, called in order by the
+  unchanged root), which bounds every future init function. With both, a
+  whole-program browser JIT compile went from ~25 min to ~3.5 min.
+- **The 4 stub-compiled functions:**
+  - `ScriptHost.fetch` / `SimpleScriptExecutor.fetch`: the bare `dispatch`
+    was ambiguous with `VulkanFfi.dispatch` (4 params). Codegen now drops
+    candidates whose declared param count cannot take the call. The two
+    FetchDispatch classes now declare `impl FetchDispatch for ...`, so the
+    runtime vtable switch picks between them.
+  - `browser_renderer_command_capability_new`: a module-alias call
+    `crypto_sffi.random_hex(16)` is unsupported in the flattened run lane.
+    It now uses an aliased function import. Seed gap: module-alias calls are
+    still unsupported in the JIT lane.
+  - `BrowserDomEventExecutor.listener_indices_for_target_event`:
+    `expr_uses_self` had no `Coalesce` arm (or ~20 other wrapper variants),
+    so a `fn` whose body was `self.x.get(k) ?? []` was lowered as static.
+- Result with the JS result-type patch: `compile functions done failed=0`.
+
+**Still blocking a JIT'd browser (being verified):** `finalize_definitions`
+panicked: an AArch64 `bl` was 182-320 MB away with no far-call veneer. The
+cause was a stale build, not missing code. Cargo does not fingerprint the
+contents of a vendored (`directory` source) crate, so a target dir that built
+cranelift-jit before #2501 kept the pre-arena object code after the patched
+`vendor/cranelift-jit` landed (the seed binary had none of the arena's
+strings). Fix: `cargo clean -p cranelift-jit --profile bootstrap` once
+after pulling a vendor patch.
+
+Pre-existing divergence found: `[u64::MAX; 300][0] == u64::MAX` is false
+through `rt_array_repeat` in both the JIT and the interpreter, but true for
+an unrolled literal. u64 repeats therefore stay unrolled.

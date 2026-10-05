@@ -1403,6 +1403,73 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_time_with_animations_wit
         return []
     execution.render.pixels
 
+# Presentable frame + honest skip provenance, for the browser's page lane.
+#
+# The strict `simple_web_layout_render_html_pixels_engine2d*` entries above
+# return NO pixels when any Draw IR command was skipped. That is the right
+# contract for callers that compare frames (oracles, receipts, SSR evidence),
+# and they keep it. A browser page is different: wikipedia.org rendered 146 of
+# 148 commands (2 Arabic runs could not be shaped) and the strict rule turned
+# that into a blank 0-pixel page. This entry returns every pixel the engine
+# rendered whenever the framebuffer is complete, and reports what it could not
+# draw instead of hiding the frame.
+class SimpleWebLayoutEngine2DPresentableFrame:
+    pixels: [u32]
+    skipped_command_count: i32
+    occluded_command_count: i32
+    skip_reason: text
+
+# Presentable twin of `simple_web_layout_render_html_pixels_engine2d` (the
+# plain page path): same document cache, same GPU route, same execution; only
+# the skip policy differs.
+pub fn simple_web_layout_render_html_presentable_engine2d(html: text, width: i32, height: i32, backend_name: text) -> SimpleWebLayoutEngine2DPresentableFrame:
+    if width <= 0 or height <= 0:
+        return SimpleWebLayoutEngine2DPresentableFrame(pixels: [], skipped_command_count: 0, occluded_command_count: 0, skip_reason: "empty-viewport")
+    val layout_result = _simple_web_layout_draw_ir_cached(
+        html, width, height, -1, [], [], true)
+    if (
+        web_gpu_paint_enabled() and
+        web_gpu_paint_backend_verdict(backend_name) == "gpu-paint-candidate"
+    ):
+        return SimpleWebLayoutEngine2DPresentableFrame(
+            pixels: _web_draw_ir_choose_route(layout_result.composition, width, height, backend_name),
+            skipped_command_count: 0, occluded_command_count: 0, skip_reason: "")
+    val execution = _simple_web_layout_execute_draw_ir_composition(
+        layout_result.composition, layout_result.material_witness,
+        width, height, backend_name, [])
+    _web_presentable_frame(execution.render, width, height)
+
+fn _web_presentable_frame(render: Engine2dDrawIrAdvResult, width: i32, height: i32) -> SimpleWebLayoutEngine2DPresentableFrame:
+    val expected = (width as i64) * (height as i64)
+    val complete = render.pixels.len() == expected
+    val skipped = render.skipped_command_count
+    val occluded = render.occluded_command_count
+    if skipped != occluded and complete:
+        # Ungated, once per render, like `budget-break`: the page painted
+        # without these commands and must say so.
+        print "[web-render] presentable-with-skips skipped={skipped} occluded={occluded} reason={render.fallback_reason}"
+    # A clean render (no skips) returns exactly what the strict entry returns.
+    SimpleWebLayoutEngine2DPresentableFrame(
+        pixels: if skipped == 0 or complete: render.pixels else: [],
+        skipped_command_count: skipped,
+        occluded_command_count: occluded,
+        skip_reason: if skipped != occluded: render.fallback_reason else: ""
+    )
+
+pub fn simple_web_layout_render_html_presentable_engine2d_at_time_with_animations_with_images(
+    html: text, width: i32, height: i32, backend_name: text,
+    animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutEngine2DPresentableFrame:
+    if width <= 0 or height <= 0:
+        return SimpleWebLayoutEngine2DPresentableFrame(pixels: [], skipped_command_count: 0, occluded_command_count: 0, skip_reason: "empty-viewport")
+    val execution = _simple_web_layout_render_html_engine2d_execution(
+        html, width, height, backend_name, animation_time_ms,
+        animation_instances, images, false
+    )
+    _web_presentable_frame(execution.render, width, height)
+
 fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, width: i32, height: i32, backend_name: text, animation_time_ms: i64) -> SimpleWebLayoutEngine2DReadbackResult:
     if width <= 0 or height <= 0:
         return SimpleWebLayoutEngine2DReadbackResult(
@@ -1484,6 +1551,7 @@ export simple_web_layout_render_html_pixels_engine2d
 export simple_web_layout_render_html_readback_engine2d
 export simple_web_layout_render_html_readback_engine2d_result
 export simple_web_layout_render_html_engine2d_result
+export simple_web_layout_render_html_presentable_engine2d, simple_web_layout_render_html_presentable_engine2d_at_time_with_animations_with_images, SimpleWebLayoutEngine2DPresentableFrame
 export SimpleWebLayoutEngine2DReadbackResult
 export engine2d_fast_metal_available
 export web_draw_ir_gpu_route_policy_reset

@@ -157,6 +157,17 @@ thread_local! {
     static INTERP_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
+/// The innermost `n` interpreted function names, innermost first (empty
+/// unless the big-alloc guard maintains the stack).
+pub fn interp_stack_tail(n: usize) -> String {
+    INTERP_STACK
+        .try_with(|s| {
+            let s = s.borrow();
+            s.iter().rev().take(n).map(|f| f.as_str()).collect::<Vec<_>>().join(" <- ")
+        })
+        .unwrap_or_default()
+}
+
 /// True when the big-alloc guard is on (so the interp name stack is worth
 /// maintaining).
 pub fn big_alloc_guard_on() -> bool {
@@ -491,6 +502,11 @@ fn report_inner(label: &str) {
         return;
     }
     snapshot(label);
+    eprintln!(
+        "[mem] packed arrays materialized/boxed: count={} elements={}",
+        crate::value::ARRAY_MATERIALIZE_COUNT.load(Ordering::Relaxed),
+        crate::value::ARRAY_MATERIALIZE_ELEMS.load(Ordering::Relaxed),
+    );
     let (parse, eval, modules, src, items, envs, exports) = PHASES.with(|p| {
         let p = p.borrow();
         (

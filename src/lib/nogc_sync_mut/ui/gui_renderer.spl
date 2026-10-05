@@ -44,12 +44,18 @@ extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
 extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
 use std.io_runtime.{env_get}
 
+# Names that failed to resolve in the current create() attempt, so a stale
+# provider is reported by symbol instead of a bare "incomplete ABI".
+var _gui_missing_symbols: [text] = []
+
 fn _gui_renderer_resolve(lib: DynLib, name: text) -> i64:
     val result = unsafe(capabilities: [ffi, raw_ptr]):
         lib.sym_checked(name)
     match result:
         case Ok(symbol): symbol
-        case Err(_): 0
+        case Err(_):
+            _gui_missing_symbols.push(name)
+            0
 
 @always_inline
 fn _gui_frame_extent_valid(w: i64, h: i64, pixel_count: i64) -> bool:
@@ -107,6 +113,8 @@ class GuiRenderer:
     fp_wheel_y: i64
     fp_inner_width: i64
     fp_inner_height: i64
+    # Optional: backing scale factor * 1000 (0 when the provider predates it).
+    fp_scale_milli: i64
     fp_staging: i64
     fp_stage_clear: i64
     fp_stage_fill_rect: i64
@@ -193,7 +201,7 @@ impl GuiRenderer:
             fp_key_scancode: 0, fp_key_keycode: 0, fp_key_pressed: 0,
             fp_mouse_button: 0, fp_mouse_pressed: 0,
             fp_mouse_x: 0, fp_mouse_y: 0, fp_wheel_x: 0, fp_wheel_y: 0,
-            fp_inner_width: 0, fp_inner_height: 0,
+            fp_inner_width: 0, fp_inner_height: 0, fp_scale_milli: 0,
             fp_staging: 0, fp_stage_clear: 0, fp_stage_fill_rect: 0, fp_present: 0,
             fp_event_free: 0, fp_window_free: 0,
             fp_loop_window_count: 0, fp_loop_free: 0
@@ -215,17 +223,26 @@ impl GuiRenderer:
         dbg_stage("gui", "winit_dylib_open_start")
         val candidates = gui_renderer_lib_candidates()
         var loaded: DynLib? = nil
+        var errors: [text] = []
         var i = 0
         while i < candidates.len() and loaded == nil:
-            loaded = unsafe(capabilities: [ffi]):
-                DynLib.load(candidates[i])
+            val attempt = unsafe(capabilities: [ffi]):
+                DynLib.load_checked(candidates[i])
+            match attempt:
+                case Ok(lib):
+                    loaded = Some(lib)
+                case Err(error):
+                    errors.push(error)
             i = i + 1
         if loaded == nil:
-            print "GuiRenderer: cannot load build/sffi/libspl_winit.<dylib|so|dll> — build it with: sh scripts/build/build_spl_winit.shs (or set SIMPLE_SPL_WINIT_PATH)"
+            print "GuiRenderer: cannot load the winit provider — build it with: sh scripts/build/build_spl_winit.shs (or set SIMPLE_SPL_WINIT_PATH)"
+            for error in errors:
+                print "GuiRenderer:   {error}"
             dbg_stage("gui", "winit_dylib_open_failed")
             return nil
         var l = loaded.unwrap()
         dbg_stage("gui", "winit_dylib_open_done")
+        _gui_missing_symbols = []
 
         val fp_loop_new = _gui_renderer_resolve(l, "rt_winit_event_loop_new")
         val fp_window_new = _gui_renderer_resolve(l, "rt_winit_window_new")
@@ -263,11 +280,14 @@ impl GuiRenderer:
             fp_present == 0 or fp_event_free == 0 or fp_window_free == 0 or
             fp_loop_window_count == 0 or
             fp_loop_free == 0:
-            print "GuiRenderer: '{l.path}' has an incomplete mandatory rt_winit_* ABI"
+            print "GuiRenderer: '{l.path}' has an incomplete mandatory rt_winit_* ABI (missing: {_gui_missing_symbols.join(", ")}) — rebuild with scripts/build/build_spl_winit.shs"
             dbg_stage("gui", "winit_symbols_incomplete")
             unsafe(capabilities: [ffi]):
                 l.close()
             return nil
+        # Optional accessor, resolved after the mandatory-ABI check so an old
+        # provider without it is not reported as missing a mandatory symbol.
+        val fp_scale_milli = _gui_renderer_resolve(l, "rt_winit_window_scale_factor_milli")
         dbg_stage("gui", "winit_event_loop_create_start")
         # One retained mapping use keeps both native objects' destructors
         # callable even if a copied DynLib alias retires the mapping.
@@ -331,6 +351,7 @@ impl GuiRenderer:
             fp_wheel_y: fp_wheel_y,
             fp_inner_width: fp_inner_width,
             fp_inner_height: fp_inner_height,
+            fp_scale_milli: fp_scale_milli,
             fp_staging: fp_staging,
             fp_stage_clear: fp_stage_clear,
             fp_stage_fill_rect: fp_stage_fill_rect,
@@ -361,6 +382,19 @@ impl GuiRenderer:
         val h = spl_wffi_call_i64(self.fp_inner_height, [self.win], 1)
         _gui_end_call(lease.?)
         [w, h]
+
+    # Backing scale factor * 1000 (2000 on a 2x Retina display), or -1 when
+    # the window is gone or the provider predates the accessor.
+    @unsafe(reason: "invokes a cached foreign scale accessor with a raw window handle", capabilities: [ffi, raw_ptr])
+    fn scale_factor_milli() -> i64:
+        if self.win == 0 or self.fp_scale_milli == 0:
+            return -1
+        val lease = _gui_begin_call(self)
+        if lease == nil:
+            return -1
+        val s = spl_wffi_call_i64(self.fp_scale_milli, [self.win], 1)
+        _gui_end_call(lease.?)
+        s
 
     fn is_open() -> bool:
         if self.win == 0:

@@ -204,3 +204,55 @@ fn main() -> i64:
 "#;
     assert_eq!(run(src), 307_200);
 }
+
+/// 5. A NULLABLE trait receiver (`Provider?`, bound by `if val p = opt:`) is
+///    `Pointer { inner: ANY }`, not ANY, so it skipped the trait signature.
+///    With no implementor of the trait in the unit, the only `.resolve` in
+///    the suffix search was an unrelated struct's, and `outcome.ok` failed
+///    HIR lowering ("struct 'Node' field 'ok'"): whole-module JIT fallback.
+///    doc/08_tracking/bug/jit_nullable_trait_receiver_method_typed_by_unrelated_struct_2026-10-05.md
+const NULLABLE_TRAIT: &str = r#"
+struct Node:
+    id: i64
+
+struct Outcome:
+    ok: bool
+    code: i64
+
+struct ProfileSet:
+    root: Node
+
+impl ProfileSet:
+    fn resolve(n: i64) -> Node:
+        self.root
+
+trait Provider:
+    fn resolve(source: i64, w: i32) -> Outcome
+
+fn probe(opt: Provider?) -> i64:
+    if val p = opt:
+        val outcome = p.resolve(7, 4)
+        if outcome.ok:
+            return outcome.code
+        return 2
+    0
+"#;
+
+#[test]
+fn nullable_trait_receiver_without_implementor_uses_trait_signature() {
+    let src = format!(
+        "{NULLABLE_TRAIT}\nfn main() -> i64:\n    val ps = ProfileSet(root: Node(id: 40))\n    ps.resolve(0).id + probe(nil)\n"
+    );
+    assert_eq!(run(&src), 40);
+}
+
+/// Generalization: with an implementor present, the nullable receiver must
+/// still produce the trait's struct, and the unrelated struct method must
+/// keep its own return type.
+#[test]
+fn nullable_trait_receiver_with_implementor_reads_trait_result_fields() {
+    let src = format!(
+        "{NULLABLE_TRAIT}\nstruct Fixed:\n    base: i64\n\nimpl Provider for Fixed:\n    fn resolve(source: i64, w: i32) -> Outcome:\n        Outcome(ok: true, code: self.base + source + w.to_i64())\n\nfn main() -> i64:\n    val ps = ProfileSet(root: Node(id: 1000))\n    ps.resolve(0).id + probe(Fixed(base: 100))\n"
+    );
+    assert_eq!(run(&src), 1000 + 111);
+}

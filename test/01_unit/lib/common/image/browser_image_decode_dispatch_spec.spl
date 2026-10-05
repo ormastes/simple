@@ -1,0 +1,127 @@
+"""
+## Purpose and audience
+Purpose: Pin the media-type -> decoder dispatch that BrowserSession uses to
+store image responses: `image/jpeg` and `image/webp` decode through the
+pure-Simple JPEG and WebP decoders, `image/png` keeps the identical PNG path and error strings, and the
+session's pixel budget (BROWSER_MAX_IMAGE_PIXELS = 131072) reaches the JPEG
+decoder so an oversized frame is refused from its header.
+Audience: maintainers of gc_async_mut/web and the image decoders.
+## Operator workflow
+Run with the test runner from the repo root; offline (data: URLs, no
+transport request).
+## Compatibility and limitations
+Dispatch is by declared media type (as before); the format's magic bytes
+must then match. Unknown image types still yield "unsupported content type".
+"""
+# @req: REQ-WEB-BROWSER-015
+# @cover src/lib/common/image/image_decode.spl 90%
+
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_loading.*
+use std.common.image.image_decode.{image_decoder_format, image_signature_valid, image_format_label, decode_image_to_argb_bounded}
+use std.common.image.jpeg_decode.{decode_jpeg_to_argb}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes}
+
+val JPEG_444 = "test/fixtures/image/jpeg/baseline_444/input.jpg"
+val PNG_1X1_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg=="
+# SOI + SOF0 declaring 400x400 (160000 px > 131072) + EOI.
+val JPEG_400X400_B64 = "/9j/wAALCAGQAZABAREA/9k="
+
+fn hex_body(bytes: [u8]) -> text:
+    """Canonical lowercase-hex image body, as the transport hands it over."""
+    val digits = "0123456789abcdef"
+    var pieces: [text] = []
+    for byte in bytes:
+        val v = byte.to_i64()
+        pieces.push(digits.slice(v / 16, v / 16 + 1) + digits.slice(v % 16, v % 16 + 1))
+    pieces.join("")
+
+fn open_image(src: text) -> BrowserSession:
+    var s = BrowserSession.new()
+    val _ = s.open_html("https://example.com/", "<html><body><img src=\"{src}\"></body></html>")
+    s
+
+fn fetch_image(content_type: text, body: [u8]) -> BrowserSession:
+    """Load a page with one <img>, answer its image request over the
+    network path with `body` declared as `content_type`."""
+    var s = BrowserSession.new()
+    val _ = s.open_html("https://example.com/page.html", "<html><body><img src='/pic'></body></html>")
+    val request = s.take_pending_request().unwrap()
+    val _ = s.commit_network_response(BrowserResponse.create(
+        request.id, "image", request.url, 200,
+        "Content-Type: " + content_type, hex_body(body), ""
+    ))
+    s
+
+describe "image decoder dispatch":
+    it "maps media types to decoder formats":
+        expect(image_decoder_format("image/png")).to_equal("png")
+        expect(image_decoder_format("image/jpeg")).to_equal("jpeg")
+        expect(image_decoder_format("image/pjpeg")).to_equal("jpeg")
+        expect(image_decoder_format("image/jpg")).to_equal("jpeg")
+        expect(image_decoder_format("image/webp")).to_equal("webp")
+        expect(image_decoder_format("image/gif")).to_equal("")
+        expect(image_decoder_format("text/html")).to_equal("")
+        expect(image_format_label("png")).to_equal("PNG")
+        expect(image_format_label("jpeg")).to_equal("JPEG")
+        expect(image_format_label("webp")).to_equal("WebP")
+
+    it "checks each format's magic bytes and never crosses formats":
+        val jpeg = file_read_bytes(JPEG_444)
+        assert_true(image_signature_valid("jpeg", jpeg))
+        assert_false(image_signature_valid("png", jpeg))
+        assert_false(image_signature_valid("", jpeg))
+        assert_true(image_signature_valid("png", [137u8, 80u8, 78u8, 71u8, 13u8, 10u8, 26u8, 10u8]))
+
+    it "decodes JPEG through the shared entry point and refuses unknown formats":
+        val jpeg = file_read_bytes(JPEG_444)
+        val image = decode_image_to_argb_bounded("jpeg", jpeg, 131072).unwrap()
+        expect(image.width).to_equal(33)
+        expect(image.height).to_equal(17)
+        expect(decode_image_to_argb_bounded("gif", jpeg, 131072).unwrap_err()).to_equal("image format is unsupported")
+
+describe "BrowserSession stores decoded images by media type":
+    it "stores a fetched JPEG image with the decoder's pixels":
+        step("answer an <img> request with a 33x17 baseline JPEG body")
+        val jpeg = file_read_bytes(JPEG_444)
+        val s = fetch_image("image/jpeg", jpeg)
+        assert_false(s.has_pending_requests())
+        expect(s.image_resources.len()).to_equal(1)
+        expect(s.image_resources[0].width).to_equal(33)
+        expect(s.image_resources[0].height).to_equal(17)
+        val direct = decode_jpeg_to_argb(jpeg).unwrap()
+        expect(s.image_resources[0].pixels[100]).to_equal(direct.pixels[100])
+
+    it "stores a fetched lossless WebP image":
+        step("answer an <img> request with a 33x13 palette WebP body")
+        val s = fetch_image("image/webp", file_read_bytes("test/fixtures/image/webp_lossless/palette_16/input.webp"))
+        expect(s.image_resources.len()).to_equal(1)
+        expect(s.image_resources[0].width).to_equal(33)
+        expect(s.image_resources[0].height).to_equal(13)
+
+    it "keeps the PNG path unchanged":
+        val s = open_image("data:image/png;base64,{PNG_1X1_B64}")
+        expect(s.image_resources.len()).to_equal(1)
+        expect(s.image_resources[0].width).to_equal(1)
+
+    it "refuses an oversized JPEG from its header with the session budget":
+        step("a data: JPEG whose SOF declares 400x400 = 160000 px > 131072")
+        val s = open_image("data:image/jpeg;base64,{JPEG_400X400_B64}")
+        expect(s.image_resources.len()).to_equal(0)
+        expect(s.warnings.join("|")).to_contain("image load error: JPEG dimensions exceed decoder limits")
+
+    it "names the format whose signature is wrong":
+        step("PNG bytes declared as image/jpeg, and JPEG bytes declared as image/png")
+        val as_jpeg = open_image("data:image/jpeg;base64,{PNG_1X1_B64}")
+        expect(as_jpeg.warnings.join("|")).to_contain("image load error: invalid JPEG signature")
+        val as_png = fetch_image("image/png", file_read_bytes(JPEG_444))
+        expect(as_png.image_resources.len()).to_equal(0)
+        expect(as_png.warnings.join("|")).to_contain("image load error: invalid PNG signature")
+
+    it "still rejects image types without a decoder":
+        val s = open_image("data:image/gif;base64,R0lGODlhAQABAAAAACw=")
+        expect(s.image_resources.len()).to_equal(0)
+        expect(s.warnings.join("|")).to_contain("image load error: unsupported content type")

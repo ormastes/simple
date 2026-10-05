@@ -1,0 +1,1507 @@
+# WebP lossy (VP8 key frame) decode — bounded RFC 6386 intra-frame decoder
+# producing YUV 4:2:0 planes; `webp_decode.spl` converts them to ARGB.
+#
+# Input is untrusted network bytes: the frame size is checked against the
+# caller's pixel budget before any plane is allocated, partition sizes are
+# checked against the chunk, every boolean-decoder read past a partition's
+# end feeds zeros and is counted, and decoding past the end by more than a
+# few bytes is an error. Work is bounded by the macroblock count.
+#
+# The reconstruction mirrors libwebp: same bit reader semantics, coefficient
+# token tree, quantizer tables, 4x4 / 16x16 / chroma intra predictors, inverse
+# DCT and WHT, simple and normal loop filters — so decoded planes are
+# bit-identical to libwebp's.
+
+struct Vp8Planes:
+    """Decoded VP8 frame: Y at y_stride, U/V at uv_stride (MB-padded)."""
+    y: [i64]
+    u: [i64]
+    v: [i64]
+    width: i64
+    height: i64
+    y_stride: i64
+    uv_stride: i64
+
+val _VP8_ZIGZAG: [i64] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15]
+val _VP8_BANDS: [i64] = [0, 1, 2, 3, 6, 4, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 0]
+val _VP8_CAT3: [i64] = [173, 148, 140]
+val _VP8_CAT4: [i64] = [176, 155, 140, 135]
+val _VP8_CAT5: [i64] = [180, 157, 141, 134, 130]
+val _VP8_CAT6: [i64] = [254, 254, 243, 230, 196, 177, 153, 140, 133, 130, 129]
+# 4x4 intra mode tree (libwebp kYModesIntra4); leaves are -mode.
+val _VP8_YMODES_INTRA4: [i64] = [0, 1, -1, 2, -2, 3, 4, 6, -3, 5, -4, -5, -6, 7, -7, 8, -8, -9]
+
+# Intra modes (libwebp numbering). 16x16 / chroma use DC, TM, V(=VE), H(=HE).
+val _B_DC: i64 = 0
+val _B_TM: i64 = 1
+val _B_VE: i64 = 2
+val _B_HE: i64 = 3
+val _B_RD: i64 = 4
+val _B_VR: i64 = 5
+val _B_LD: i64 = 6
+val _B_VL: i64 = 7
+val _B_HD: i64 = 8
+val _B_HU: i64 = 9
+
+# A partition may be read a little past its end by the boolean decoder's
+# lookahead; more than this is a truncated stream.
+val _VP8_MAX_OVERRUN: i64 = 4
+
+fn decode_vp8_bounded(data: [u8], start: i64, length: i64, pixel_limit: i64) -> Result<Vp8Planes, text>:
+    """Decode one VP8 key frame occupying data[start, start + length)."""
+    if length < 10:
+        return Err("WebP VP8 header is truncated")
+    val bits = data[start].to_i64() | (data[start + 1].to_i64() << 8) | (data[start + 2].to_i64() << 16)
+    if (bits & 1) != 0:
+        return Err("WebP VP8 frame is not a key frame")
+    if ((bits >> 1) & 7) > 3:
+        return Err("WebP VP8 profile is unsupported")
+    if ((bits >> 4) & 1) == 0:
+        return Err("WebP VP8 frame is not displayable")
+    val part0_len = bits >> 5
+    if data[start + 3] != 157u8 or data[start + 4] != 1u8 or data[start + 5] != 42u8:
+        return Err("WebP VP8 start code is invalid")
+    val w = (data[start + 6].to_i64() | (data[start + 7].to_i64() << 8)) & 0x3FFF
+    val h = (data[start + 8].to_i64() | (data[start + 9].to_i64() << 8)) & 0x3FFF
+    if w == 0 or h == 0:
+        return Err("WebP VP8 dimensions are invalid")
+    if w * h > pixel_limit:
+        return Err("WebP dimensions exceed decoder limits")
+    val p0 = start + 10
+    if part0_len > start + length - p0:
+        return Err("WebP VP8 partition 0 exceeds the chunk")
+    var dec = _vp8_decoder_new(data, w, h)
+    val err = dec.run(p0, part0_len, start + length)
+    if err != "":
+        return Err(err)
+    Ok(Vp8Planes(y: dec.ybuf, u: dec.ubuf, v: dec.vbuf, width: w, height: h, y_stride: dec.y_stride, uv_stride: dec.uv_stride))
+
+fn _vp8_clip8(v: i64) -> i64:
+    if v < 0:
+        return 0
+    if v > 255:
+        return 255
+    v
+
+fn _vp8_clip(v: i64, m: i64) -> i64:
+    if v < 0:
+        return 0
+    if v > m:
+        return m
+    v
+
+fn _vp8_sclip1(v: i64) -> i64:
+    if v < -128:
+        return -128
+    if v > 127:
+        return 127
+    v
+
+fn _vp8_sclip2(v: i64) -> i64:
+    if v < -16:
+        return -16
+    if v > 15:
+        return 15
+    v
+
+fn _vp8_abs(v: i64) -> i64:
+    if v < 0: 0 - v else: v
+
+fn _vp8_avg3(a: i64, b: i64, c: i64) -> i64:
+    (a + 2 * b + c + 2) >> 2
+
+fn _vp8_avg2(a: i64, b: i64) -> i64:
+    (a + b + 1) >> 1
+
+fn _vp8_mul1(a: i64) -> i64:
+    ((a * 20091) >> 16) + a
+
+fn _vp8_mul2(a: i64) -> i64:
+    (a * 35468) >> 16
+
+fn _vp8_decoder_new(data: [u8], w: i64, h: i64) -> _Vp8Decoder:
+    val mbw = (w + 15) / 16
+    val mbh = (h + 15) / 16
+    _Vp8Decoder(
+        data: data,
+        width: w,
+        height: h,
+        mbw: mbw,
+        mbh: mbh,
+        br_pos: 0,
+        br_end: 0,
+        br_value: 0,
+        br_range: 255,
+        br_bits: 0,
+        br_overrun: 0,
+        part_pos: [0; 8],
+        part_end: [0; 8],
+        part_value: [0; 8],
+        part_range: [0; 8],
+        part_bits: [0; 8],
+        part_overrun: [0; 8],
+        num_parts: 1,
+        use_segment: false,
+        update_map: false,
+        absolute_delta: false,
+        seg_quant: [0; 4],
+        seg_filter: [0; 4],
+        seg_proba: [255; 3],
+        filter_simple: false,
+        filter_level: 0,
+        sharpness: 0,
+        use_lf_delta: false,
+        ref_lf_delta: [0; 4],
+        mode_lf_delta: [0; 4],
+        dq: [0; 24],
+        proba: [0; 1056],
+        use_skip: false,
+        skip_p: 0,
+        mb_segment: [0; mbw * mbh],
+        mb_skip: [0; mbw * mbh],
+        mb_i4: [0; mbw * mbh],
+        mb_ymodes: [0; mbw * mbh * 16],
+        mb_uvmode: [0; mbw * mbh],
+        coef: [0; 384],
+        top_nz: [0; mbw * 9],
+        left_nz: [0; 9],
+        y_stride: mbw * 16,
+        uv_stride: mbw * 8,
+        ybuf: [0; mbw * 16 * mbh * 16],
+        ubuf: [0; mbw * 8 * mbh * 8],
+        vbuf: [0; mbw * 8 * mbh * 8],
+        f_limit: [0; mbw * mbh],
+        f_ilevel: [0; mbw * mbh],
+        f_hev: [0; mbw * mbh],
+        f_inner: [0; mbw * mbh],
+        pred: [0; 256],
+        ctx_top: [0; 20],
+        ctx_left: [0; 16]
+    )
+
+class _Vp8Decoder:
+    """VP8 key-frame decoder. The active boolean decoder lives in the br_*
+    scalars; token partitions park their state in part_* between rows."""
+    data: [u8]
+    width: i64
+    height: i64
+    mbw: i64
+    mbh: i64
+    br_pos: i64
+    br_end: i64
+    br_value: i64
+    br_range: i64
+    br_bits: i64
+    br_overrun: i64
+    part_pos: [i64]
+    part_end: [i64]
+    part_value: [i64]
+    part_range: [i64]
+    part_bits: [i64]
+    part_overrun: [i64]
+    num_parts: i64
+    use_segment: bool
+    update_map: bool
+    absolute_delta: bool
+    seg_quant: [i64]
+    seg_filter: [i64]
+    seg_proba: [i64]
+    filter_simple: bool
+    filter_level: i64
+    sharpness: i64
+    use_lf_delta: bool
+    ref_lf_delta: [i64]
+    mode_lf_delta: [i64]
+    # Per segment s: dq[s*6 + 0..5] = y1 dc, y1 ac, y2 dc, y2 ac, uv dc, uv ac.
+    dq: [i64]
+    proba: [i64]
+    use_skip: bool
+    skip_p: i64
+    mb_segment: [i64]
+    mb_skip: [i64]
+    mb_i4: [i64]
+    mb_ymodes: [i64]
+    mb_uvmode: [i64]
+    coef: [i64]
+    # Non-zero contexts: 0..3 Y columns/rows, 4..5 U, 6..7 V, 8 Y2 (DC).
+    top_nz: [i64]
+    left_nz: [i64]
+    y_stride: i64
+    uv_stride: i64
+    ybuf: [i64]
+    ubuf: [i64]
+    vbuf: [i64]
+    f_limit: [i64]
+    f_ilevel: [i64]
+    f_hev: [i64]
+    f_inner: [i64]
+    pred: [i64]
+    ctx_top: [i64]
+    ctx_left: [i64]
+
+    # ------------------------------------------------------------------
+    # Boolean decoder (RFC 6386 section 7)
+    # ------------------------------------------------------------------
+
+    me br_init(pos: i64, end: i64):
+        self.br_pos = pos
+        self.br_end = end
+        self.br_value = (self.next_byte() << 8) | self.next_byte()
+        self.br_range = 255
+        self.br_bits = 0
+
+    me next_byte() -> i64:
+        if self.br_pos < self.br_end:
+            val b = self.data[self.br_pos].to_i64()
+            self.br_pos = self.br_pos + 1
+            return b
+        self.br_overrun = self.br_overrun + 1
+        0
+
+    me bit(prob: i64) -> i64:
+        val split = 1 + (((self.br_range - 1) * prob) >> 8)
+        val bigsplit = split << 8
+        var result: i64 = 0
+        if self.br_value >= bigsplit:
+            result = 1
+            self.br_range = self.br_range - split
+            self.br_value = self.br_value - bigsplit
+        else:
+            self.br_range = split
+        while self.br_range < 128:
+            self.br_value = self.br_value << 1
+            self.br_range = self.br_range << 1
+            self.br_bits = self.br_bits + 1
+            if self.br_bits == 8:
+                self.br_bits = 0
+                self.br_value = self.br_value | self.next_byte()
+        result
+
+    me literal(n: i64) -> i64:
+        var v: i64 = 0
+        var i: i64 = 0
+        while i < n:
+            v = (v << 1) | self.bit(128)
+            i = i + 1
+        v
+
+    me signed_literal(n: i64) -> i64:
+        val v = self.literal(n)
+        if self.bit(128) == 1: 0 - v else: v
+
+    me park(p: i64):
+        self.part_pos[p] = self.br_pos
+        self.part_end[p] = self.br_end
+        self.part_value[p] = self.br_value
+        self.part_range[p] = self.br_range
+        self.part_bits[p] = self.br_bits
+        self.part_overrun[p] = self.br_overrun
+
+    me resume(p: i64):
+        self.br_pos = self.part_pos[p]
+        self.br_end = self.part_end[p]
+        self.br_value = self.part_value[p]
+        self.br_range = self.part_range[p]
+        self.br_bits = self.part_bits[p]
+        self.br_overrun = self.part_overrun[p]
+
+    # ------------------------------------------------------------------
+    # Frame header (RFC 6386 section 9)
+    # ------------------------------------------------------------------
+
+    me run(p0: i64, p0_len: i64, chunk_end: i64) -> text:
+        self.br_overrun = 0
+        self.br_init(p0, p0 + p0_len)
+        val _color_space = self.bit(128)
+        val _clamp_type = self.bit(128)
+        self.parse_segment_header()
+        self.parse_filter_header()
+        val perr = self.parse_partitions(p0 + p0_len, chunk_end)
+        if perr != "":
+            return perr
+        self.parse_quant()
+        val _refresh_probs = self.bit(128)
+        self.parse_proba()
+        # Phase 1: every macroblock's modes come from partition 0.
+        val merr = self.parse_all_modes()
+        if merr != "":
+            return merr
+        # Phase 2: residual tokens, row partitions round-robin.
+        var p: i64 = 0
+        while p < self.num_parts:
+            self.resume(p)
+            self.br_init(self.part_pos[p], self.part_end[p])
+            self.br_overrun = 0
+            self.park(p)
+            p = p + 1
+        var mb_y: i64 = 0
+        while mb_y < self.mbh:
+            val part = mb_y & (self.num_parts - 1)
+            self.resume(part)
+            var l: i64 = 0
+            while l < 9:
+                self.left_nz[l] = 0
+                l = l + 1
+            var mb_x: i64 = 0
+            while mb_x < self.mbw:
+                self.decode_mb(mb_x, mb_y)
+                mb_x = mb_x + 1
+            if self.br_overrun > _VP8_MAX_OVERRUN:
+                return "WebP VP8 data is truncated"
+            self.park(part)
+            mb_y = mb_y + 1
+        if self.filter_level > 0:
+            self.loop_filter()
+        ""
+
+    me parse_segment_header():
+        self.use_segment = self.bit(128) == 1
+        if not self.use_segment:
+            self.update_map = false
+            return
+        self.update_map = self.bit(128) == 1
+        if self.bit(128) == 1:
+            self.absolute_delta = self.bit(128) == 1
+            var s: i64 = 0
+            while s < 4:
+                self.seg_quant[s] = if self.bit(128) == 1: self.signed_literal(7) else: 0
+                s = s + 1
+            s = 0
+            while s < 4:
+                self.seg_filter[s] = if self.bit(128) == 1: self.signed_literal(6) else: 0
+                s = s + 1
+        if self.update_map:
+            var s: i64 = 0
+            while s < 3:
+                self.seg_proba[s] = if self.bit(128) == 1: self.literal(8) else: 255
+                s = s + 1
+
+    me parse_filter_header():
+        self.filter_simple = self.bit(128) == 1
+        self.filter_level = self.literal(6)
+        self.sharpness = self.literal(3)
+        self.use_lf_delta = self.bit(128) == 1
+        if self.use_lf_delta and self.bit(128) == 1:
+            var i: i64 = 0
+            while i < 4:
+                if self.bit(128) == 1:
+                    self.ref_lf_delta[i] = self.signed_literal(6)
+                i = i + 1
+            i = 0
+            while i < 4:
+                if self.bit(128) == 1:
+                    self.mode_lf_delta[i] = self.signed_literal(6)
+                i = i + 1
+
+    me parse_partitions(start: i64, end: i64) -> text:
+        self.num_parts = 1 << self.literal(2)
+        val sizes = start
+        var part_start = sizes + 3 * (self.num_parts - 1)
+        if part_start > end:
+            return "WebP VP8 partition table is truncated"
+        var p: i64 = 0
+        while p < self.num_parts - 1:
+            val q = sizes + 3 * p
+            val psize = self.data[q].to_i64() | (self.data[q + 1].to_i64() << 8) | (self.data[q + 2].to_i64() << 16)
+            if psize > end - part_start:
+                return "WebP VP8 partition exceeds the chunk"
+            self.part_pos[p] = part_start
+            self.part_end[p] = part_start + psize
+            part_start = part_start + psize
+            p = p + 1
+        self.part_pos[self.num_parts - 1] = part_start
+        self.part_end[self.num_parts - 1] = end
+        if part_start > end:
+            return "WebP VP8 partition exceeds the chunk"
+        ""
+
+    me parse_quant():
+        val base_q0 = self.literal(7)
+        val dqy1_dc = if self.bit(128) == 1: self.signed_literal(4) else: 0
+        val dqy2_dc = if self.bit(128) == 1: self.signed_literal(4) else: 0
+        val dqy2_ac = if self.bit(128) == 1: self.signed_literal(4) else: 0
+        val dquv_dc = if self.bit(128) == 1: self.signed_literal(4) else: 0
+        val dquv_ac = if self.bit(128) == 1: self.signed_literal(4) else: 0
+        var s: i64 = 0
+        while s < 4:
+            var q = base_q0
+            if self.use_segment:
+                q = self.seg_quant[s]
+                if not self.absolute_delta:
+                    q = q + base_q0
+            val o = s * 6
+            self.dq[o] = _VP8_DC_TABLE[_vp8_clip(q + dqy1_dc, 127)]
+            self.dq[o + 1] = _VP8_AC_TABLE[_vp8_clip(q, 127)]
+            self.dq[o + 2] = _VP8_DC_TABLE[_vp8_clip(q + dqy2_dc, 127)] * 2
+            var y2ac = (_VP8_AC_TABLE[_vp8_clip(q + dqy2_ac, 127)] * 101581) >> 16
+            if y2ac < 8:
+                y2ac = 8
+            self.dq[o + 3] = y2ac
+            self.dq[o + 4] = _VP8_DC_TABLE[_vp8_clip(q + dquv_dc, 117)]
+            self.dq[o + 5] = _VP8_AC_TABLE[_vp8_clip(q + dquv_ac, 127)]
+            s = s + 1
+
+    me parse_proba():
+        var i: i64 = 0
+        while i < 1056:
+            self.proba[i] = if self.bit(_VP8_COEFFS_UPDATE_PROBA[i]) == 1: self.literal(8) else: _VP8_COEFFS_PROBA0[i]
+            i = i + 1
+        self.use_skip = self.bit(128) == 1
+        if self.use_skip:
+            self.skip_p = self.literal(8)
+
+    fn mb_filter(segment: i64, i4: i64) -> (i64, i64, i64):
+        """(limit, interior limit, hev threshold) for a segment and mode."""
+        var base = self.filter_level
+        if self.use_segment:
+            base = self.seg_filter[segment]
+            if not self.absolute_delta:
+                base = base + self.filter_level
+        var level = base
+        if self.use_lf_delta:
+            level = level + self.ref_lf_delta[0]
+            if i4 == 1:
+                level = level + self.mode_lf_delta[0]
+        level = _vp8_clip(level, 63)
+        if level == 0:
+            return (0, 0, 0)
+        var ilevel = level
+        if self.sharpness > 0:
+            ilevel = if self.sharpness > 4: ilevel >> 2 else: ilevel >> 1
+            if ilevel > 9 - self.sharpness:
+                ilevel = 9 - self.sharpness
+        if ilevel < 1:
+            ilevel = 1
+        val hev = if level >= 40: 2 elif level >= 15: 1 else: 0
+        (2 * level + ilevel, ilevel, hev)
+
+    # ------------------------------------------------------------------
+    # Modes (RFC 6386 sections 11, 16)
+    # ------------------------------------------------------------------
+
+    me parse_all_modes() -> text:
+        var intra_t: [i64] = [0; self.mbw * 4]
+        var mb_y: i64 = 0
+        while mb_y < self.mbh:
+            var intra_l: [i64] = [0; 4]
+            var mb_x: i64 = 0
+            while mb_x < self.mbw:
+                val m = mb_y * self.mbw + mb_x
+                if self.update_map:
+                    self.mb_segment[m] = if self.bit(self.seg_proba[0]) == 0: self.bit(self.seg_proba[1]) else: self.bit(self.seg_proba[2]) + 2
+                if self.use_skip:
+                    self.mb_skip[m] = self.bit(self.skip_p)
+                val i4 = self.bit(145) == 0
+                if not i4:
+                    val ymode = if self.bit(156) == 1: (if self.bit(128) == 1: _B_TM else: _B_HE) else: (if self.bit(163) == 1: _B_VE else: _B_DC)
+                    var k: i64 = 0
+                    while k < 16:
+                        self.mb_ymodes[m * 16 + k] = ymode
+                        k = k + 1
+                    k = 0
+                    while k < 4:
+                        intra_t[mb_x * 4 + k] = ymode
+                        intra_l[k] = ymode
+                        k = k + 1
+                else:
+                    self.mb_i4[m] = 1
+                    var sy: i64 = 0
+                    while sy < 4:
+                        var sx: i64 = 0
+                        while sx < 4:
+                            val pbase = (intra_t[mb_x * 4 + sx] * 10 + intra_l[sy]) * 9
+                            var i = _VP8_YMODES_INTRA4[self.bit(_VP8_BMODES_PROBA[pbase])]
+                            while i > 0:
+                                i = _VP8_YMODES_INTRA4[2 * i + self.bit(_VP8_BMODES_PROBA[pbase + i])]
+                            val mode = 0 - i
+                            self.mb_ymodes[m * 16 + sy * 4 + sx] = mode
+                            intra_t[mb_x * 4 + sx] = mode
+                            intra_l[sy] = mode
+                            sx = sx + 1
+                        sy = sy + 1
+                self.mb_uvmode[m] = if self.bit(142) == 0: _B_DC elif self.bit(114) == 0: _B_VE elif self.bit(183) == 1: _B_TM else: _B_HE
+                mb_x = mb_x + 1
+            if self.br_overrun > _VP8_MAX_OVERRUN:
+                return "WebP VP8 partition 0 is truncated"
+            mb_y = mb_y + 1
+        ""
+
+    # ------------------------------------------------------------------
+    # Residuals (RFC 6386 section 13)
+    # ------------------------------------------------------------------
+
+    me large_value(p: i64) -> i64:
+        if self.bit(self.proba[p + 3]) == 0:
+            if self.bit(self.proba[p + 4]) == 0:
+                return 2
+            return 3 + self.bit(self.proba[p + 5])
+        if self.bit(self.proba[p + 6]) == 0:
+            if self.bit(self.proba[p + 7]) == 0:
+                return 5 + self.bit(159)
+            var v = 7 + 2 * self.bit(165)
+            return v + self.bit(145)
+        val bit1 = self.bit(self.proba[p + 8])
+        val bit0 = self.bit(self.proba[p + 9 + bit1])
+        val cat = 2 * bit1 + bit0
+        var v: i64 = 0
+        val tab = if cat == 0: _VP8_CAT3 elif cat == 1: _VP8_CAT4 elif cat == 2: _VP8_CAT5 else: _VP8_CAT6
+        for prob in tab:
+            v = v + v + self.bit(prob)
+        v + 3 + (8 << cat)
+
+    me get_coeffs(t: i64, ctx: i64, dq_dc: i64, dq_ac: i64, first: i64, out: i64) -> i64:
+        """Decode one 4x4 block's tokens into coef[out..out+16); returns the
+        index after the last non-zero coefficient (libwebp GetCoeffs)."""
+        var n = first
+        var p = ((t * 8 + _VP8_BANDS[n]) * 3 + ctx) * 11
+        while n < 16:
+            if self.bit(self.proba[p]) == 0:
+                return n
+            while self.bit(self.proba[p + 1]) == 0:
+                n = n + 1
+                if n == 16:
+                    return 16
+                p = (t * 8 + _VP8_BANDS[n]) * 33
+            var v: i64 = 1
+            var next_ctx: i64 = 1
+            if self.bit(self.proba[p + 2]) == 1:
+                v = self.large_value(p)
+                next_ctx = 2
+            val dq = if n > 0: dq_ac else: dq_dc
+            self.coef[out + _VP8_ZIGZAG[n]] = (if self.bit(128) == 1: 0 - v else: v) * dq
+            n = n + 1
+            p = ((t * 8 + _VP8_BANDS[n]) * 3 + next_ctx) * 11
+        16
+
+    me decode_mb(mb_x: i64, mb_y: i64):
+        val m = mb_y * self.mbw + mb_x
+        val i4 = self.mb_i4[m]
+        val s6 = self.mb_segment[m] * 6
+        val tn = mb_x * 9
+        var c: i64 = 0
+        while c < 384:
+            self.coef[c] = 0
+            c = c + 1
+        var has_coeffs = false
+        if self.use_skip and self.mb_skip[m] == 1:
+            var k: i64 = 0
+            while k < 8:
+                self.top_nz[tn + k] = 0
+                self.left_nz[k] = 0
+                k = k + 1
+            if i4 == 0:
+                self.top_nz[tn + 8] = 0
+                self.left_nz[8] = 0
+        else:
+            var first: i64 = 0
+            var ytype: i64 = 3
+            if i4 == 0:
+                var dc: [i64] = [0; 16]
+                val ctx = self.top_nz[tn + 8] + self.left_nz[8]
+                # Y2 coefficients go to coef[0..16) temporarily, then spread.
+                val nz = self.get_coeffs(1, ctx, self.dq[s6 + 2], self.dq[s6 + 3], 0, 0)
+                val flag = if nz > 0: 1 else: 0
+                self.top_nz[tn + 8] = flag
+                self.left_nz[8] = flag
+                var k: i64 = 0
+                while k < 16:
+                    dc[k] = self.coef[k]
+                    self.coef[k] = 0
+                    k = k + 1
+                if nz > 1:
+                    self.inverse_wht(dc)
+                else:
+                    val dc0 = (dc[0] + 3) >> 3
+                    k = 0
+                    while k < 16:
+                        self.coef[k * 16] = dc0
+                        k = k + 1
+                first = 1
+                ytype = 0
+            var by: i64 = 0
+            while by < 4:
+                var bx: i64 = 0
+                while bx < 4:
+                    val ctx = self.left_nz[by] + self.top_nz[tn + bx]
+                    val nz = self.get_coeffs(ytype, ctx, self.dq[s6], self.dq[s6 + 1], first, (by * 4 + bx) * 16)
+                    val flag = if nz > first: 1 else: 0
+                    self.left_nz[by] = flag
+                    self.top_nz[tn + bx] = flag
+                    # libwebp NzCodeBits: a block counts when it has AC
+                    # tokens or a non-zero DC (for i16, the WHT output).
+                    if nz > 1 or self.coef[(by * 4 + bx) * 16] != 0:
+                        has_coeffs = true
+                    bx = bx + 1
+                by = by + 1
+            var ch: i64 = 0
+            while ch < 2:
+                val base = 256 + ch * 64
+                var uy: i64 = 0
+                while uy < 2:
+                    var ux: i64 = 0
+                    while ux < 2:
+                        val ctx = self.left_nz[4 + ch * 2 + uy] + self.top_nz[tn + 4 + ch * 2 + ux]
+                        val nz = self.get_coeffs(2, ctx, self.dq[s6 + 4], self.dq[s6 + 5], 0, base + (uy * 2 + ux) * 16)
+                        val flag = if nz > 0: 1 else: 0
+                        self.left_nz[4 + ch * 2 + uy] = flag
+                        self.top_nz[tn + 4 + ch * 2 + ux] = flag
+                        if nz > 1 or self.coef[base + (uy * 2 + ux) * 16] != 0:
+                            has_coeffs = true
+                        ux = ux + 1
+                    uy = uy + 1
+                ch = ch + 1
+        if self.filter_level > 0:
+            val f = self.mb_filter(self.mb_segment[m], i4)
+            self.f_limit[m] = f.0
+            self.f_ilevel[m] = f.1
+            self.f_hev[m] = f.2
+            self.f_inner[m] = if i4 == 1 or has_coeffs: 1 else: 0
+        self.reconstruct(mb_x, mb_y, m)
+
+    me inverse_wht(input: [i64]):
+        """Inverse Walsh-Hadamard transform of the Y2 block; writes each Y
+        block's DC (libwebp TransformWHT)."""
+        var tmp: [i64] = [0; 16]
+        var i: i64 = 0
+        while i < 4:
+            val a0 = input[i] + input[12 + i]
+            val a1 = input[4 + i] + input[8 + i]
+            val a2 = input[4 + i] - input[8 + i]
+            val a3 = input[i] - input[12 + i]
+            tmp[i] = a0 + a1
+            tmp[8 + i] = a0 - a1
+            tmp[4 + i] = a3 + a2
+            tmp[12 + i] = a3 - a2
+            i = i + 1
+        i = 0
+        while i < 4:
+            val dc = tmp[i * 4] + 3
+            val a0 = dc + tmp[3 + i * 4]
+            val a1 = tmp[1 + i * 4] + tmp[2 + i * 4]
+            val a2 = tmp[1 + i * 4] - tmp[2 + i * 4]
+            val a3 = dc - tmp[3 + i * 4]
+            self.coef[(i * 4) * 16] = (a0 + a1) >> 3
+            self.coef[(i * 4 + 1) * 16] = (a3 + a2) >> 3
+            self.coef[(i * 4 + 2) * 16] = (a0 - a1) >> 3
+            self.coef[(i * 4 + 3) * 16] = (a3 - a2) >> 3
+            i = i + 1
+
+    # ------------------------------------------------------------------
+    # Reconstruction: prediction + inverse DCT
+    # ------------------------------------------------------------------
+
+    fn ypix(x: i64, y: i64) -> i64:
+        """Luma sample with VP8 frame borders: 127 above, 129 to the left."""
+        if y < 0:
+            return 127
+        if x < 0:
+            return 129
+        self.ybuf[y * self.y_stride + x]
+
+    fn cpix(plane: i64, x: i64, y: i64) -> i64:
+        if y < 0:
+            return 127
+        if x < 0:
+            return 129
+        if plane == 0: self.ubuf[y * self.uv_stride + x] else: self.vbuf[y * self.uv_stride + x]
+
+    me add_block(plane: i64, coef_base: i64, x0: i64, y0: i64):
+        """dst = clip(pred + idct(coef)) for one 4x4 block (libwebp
+        TransformOne); pred is already in the plane."""
+        var nonzero = false
+        var k: i64 = 0
+        while k < 16:
+            if self.coef[coef_base + k] != 0:
+                nonzero = true
+            k = k + 1
+        if not nonzero:
+            return
+        var tmp: [i64] = [0; 16]
+        var i: i64 = 0
+        while i < 4:
+            val i0 = self.coef[coef_base + i]
+            val i4v = self.coef[coef_base + 4 + i]
+            val i8 = self.coef[coef_base + 8 + i]
+            val i12 = self.coef[coef_base + 12 + i]
+            val a = i0 + i8
+            val b = i0 - i8
+            val c = _vp8_mul2(i4v) - _vp8_mul1(i12)
+            val d = _vp8_mul1(i4v) + _vp8_mul2(i12)
+            tmp[i * 4] = a + d
+            tmp[i * 4 + 1] = b + c
+            tmp[i * 4 + 2] = b - c
+            tmp[i * 4 + 3] = a - d
+            i = i + 1
+        val stride = if plane < 0: self.y_stride else: self.uv_stride
+        i = 0
+        while i < 4:
+            val dc = tmp[i] + 4
+            val a = dc + tmp[8 + i]
+            val b = dc - tmp[8 + i]
+            val c = _vp8_mul2(tmp[4 + i]) - _vp8_mul1(tmp[12 + i])
+            val d = _vp8_mul1(tmp[4 + i]) + _vp8_mul2(tmp[12 + i])
+            val row = (y0 + i) * stride + x0
+            self.add_px(plane, row, (a + d) >> 3)
+            self.add_px(plane, row + 1, (b + c) >> 3)
+            self.add_px(plane, row + 2, (b - c) >> 3)
+            self.add_px(plane, row + 3, (a - d) >> 3)
+            i = i + 1
+
+    me add_px(plane: i64, idx: i64, delta: i64):
+        if plane < 0:
+            self.ybuf[idx] = _vp8_clip8(self.ybuf[idx] + delta)
+        elif plane == 0:
+            self.ubuf[idx] = _vp8_clip8(self.ubuf[idx] + delta)
+        else:
+            self.vbuf[idx] = _vp8_clip8(self.vbuf[idx] + delta)
+
+    me put_px(plane: i64, idx: i64, v: i64):
+        if plane < 0:
+            self.ybuf[idx] = v
+        elif plane == 0:
+            self.ubuf[idx] = v
+        else:
+            self.vbuf[idx] = v
+
+    me reconstruct(mb_x: i64, mb_y: i64, m: i64):
+        val x0 = mb_x * 16
+        val y0 = mb_y * 16
+        if self.mb_i4[m] == 0:
+            self.predict_block(-1, x0, y0, 16, self.mb_ymodes[m * 16], mb_x, mb_y)
+            var b: i64 = 0
+            while b < 16:
+                self.add_block(-1, b * 16, x0 + (b % 4) * 4, y0 + (b / 4) * 4)
+                b = b + 1
+        else:
+            # Macroblock top-right, shared by every right-column subblock.
+            var tr: [i64] = [127; 4]
+            if mb_y > 0:
+                var k: i64 = 0
+                while k < 4:
+                    tr[k] = if mb_x >= self.mbw - 1: self.ypix(x0 + 15, y0 - 1) else: self.ypix(x0 + 16 + k, y0 - 1)
+                    k = k + 1
+            var b: i64 = 0
+            while b < 16:
+                val sx = b % 4
+                val sy = b / 4
+                self.predict_sub4(x0 + sx * 4, y0 + sy * 4, sx, sy, mb_y, tr, self.mb_ymodes[m * 16 + b])
+                self.add_block(-1, b * 16, x0 + sx * 4, y0 + sy * 4)
+                b = b + 1
+        val cx = mb_x * 8
+        val cy = mb_y * 8
+        val uvmode = self.mb_uvmode[m]
+        self.predict_block(0, cx, cy, 8, uvmode, mb_x, mb_y)
+        self.predict_block(1, cx, cy, 8, uvmode, mb_x, mb_y)
+        var b: i64 = 0
+        while b < 4:
+            self.add_block(0, 256 + b * 16, cx + (b % 2) * 4, cy + (b / 2) * 4)
+            self.add_block(1, 320 + b * 16, cx + (b % 2) * 4, cy + (b / 2) * 4)
+            b = b + 1
+
+    fn ctx_pix(plane: i64, x: i64, y: i64) -> i64:
+        if plane < 0: self.ypix(x, y) else: self.cpix(plane, x, y)
+
+    me predict_block(plane: i64, x0: i64, y0: i64, size: i64, mode: i64, mb_x: i64, mb_y: i64):
+        """16x16 luma or 8x8 chroma prediction (DC / TM / V / H)."""
+        val stride = if plane < 0: self.y_stride else: self.uv_stride
+        if mode == _B_DC:
+            var sum: i64 = 0
+            var count: i64 = 0
+            if mb_y > 0:
+                var i: i64 = 0
+                while i < size:
+                    sum = sum + self.ctx_pix(plane, x0 + i, y0 - 1)
+                    i = i + 1
+                count = count + size
+            if mb_x > 0:
+                var i: i64 = 0
+                while i < size:
+                    sum = sum + self.ctx_pix(plane, x0 - 1, y0 + i)
+                    i = i + 1
+                count = count + size
+            val shift = if size == 16: 3 else: 2
+            val dc = if count == 0: 128 elif count == size * 2: (sum + size) >> (shift + 2) else: (sum + (size >> 1)) >> (shift + 1)
+            var y: i64 = 0
+            while y < size:
+                var x: i64 = 0
+                while x < size:
+                    self.put_px(plane, (y0 + y) * stride + x0 + x, dc)
+                    x = x + 1
+                y = y + 1
+            return
+        val tl = self.ctx_pix(plane, x0 - 1, y0 - 1)
+        var top: [i64] = [0; size]
+        var left: [i64] = [0; size]
+        var i: i64 = 0
+        while i < size:
+            top[i] = self.ctx_pix(plane, x0 + i, y0 - 1)
+            left[i] = self.ctx_pix(plane, x0 - 1, y0 + i)
+            i = i + 1
+        var y: i64 = 0
+        while y < size:
+            var x: i64 = 0
+            while x < size:
+                val v = if mode == _B_TM: _vp8_clip8(left[y] + top[x] - tl) elif mode == _B_VE: top[x] else: left[y]
+                self.put_px(plane, (y0 + y) * stride + x0 + x, v)
+                x = x + 1
+            y = y + 1
+
+    me predict_sub4(x0: i64, y0: i64, sx: i64, sy: i64, mb_y: i64, tr: [i64], mode: i64):
+        """One 4x4 luma subblock prediction (libwebp DC4..HU4)."""
+        # top[0] is the top-left sample, top[1..8] the 8 samples above.
+        var top: [i64] = [0; 9]
+        top[0] = self.ypix(x0 - 1, y0 - 1)
+        var i: i64 = 0
+        while i < 4:
+            top[1 + i] = self.ypix(x0 + i, y0 - 1)
+            top[5 + i] = if sx == 3: tr[i] else: self.ypix(x0 + 4 + i, y0 - 1)
+            i = i + 1
+        var left: [i64] = [0; 4]
+        i = 0
+        while i < 4:
+            left[i] = self.ypix(x0 - 1, y0 + i)
+            i = i + 1
+        val x_ = top[0]
+        val a = top[1]
+        val b = top[2]
+        val c = top[3]
+        val d = top[4]
+        val e = top[5]
+        val f = top[6]
+        val g = top[7]
+        val hh = top[8]
+        val ii = left[0]
+        val jj = left[1]
+        val kk = left[2]
+        val ll = left[3]
+        var out: [i64] = [0; 16]
+        if mode == _B_DC:
+            val dc = (a + b + c + d + ii + jj + kk + ll + 4) >> 3
+            var k: i64 = 0
+            while k < 16:
+                out[k] = dc
+                k = k + 1
+        elif mode == _B_TM:
+            var yy: i64 = 0
+            while yy < 4:
+                var xx: i64 = 0
+                while xx < 4:
+                    out[yy * 4 + xx] = _vp8_clip8(left[yy] + top[1 + xx] - x_)
+                    xx = xx + 1
+                yy = yy + 1
+        elif mode == _B_VE:
+            val v0 = _vp8_avg3(x_, a, b)
+            val v1 = _vp8_avg3(a, b, c)
+            val v2 = _vp8_avg3(b, c, d)
+            val v3 = _vp8_avg3(c, d, e)
+            var yy: i64 = 0
+            while yy < 4:
+                out[yy * 4] = v0
+                out[yy * 4 + 1] = v1
+                out[yy * 4 + 2] = v2
+                out[yy * 4 + 3] = v3
+                yy = yy + 1
+        elif mode == _B_HE:
+            val r0 = _vp8_avg3(x_, ii, jj)
+            val r1 = _vp8_avg3(ii, jj, kk)
+            val r2 = _vp8_avg3(jj, kk, ll)
+            val r3 = _vp8_avg3(kk, ll, ll)
+            var xx: i64 = 0
+            while xx < 4:
+                out[xx] = r0
+                out[4 + xx] = r1
+                out[8 + xx] = r2
+                out[12 + xx] = r3
+                xx = xx + 1
+        elif mode == _B_RD:
+            out[12] = _vp8_avg3(jj, kk, ll)
+            out[13] = _vp8_avg3(ii, jj, kk)
+            out[8] = out[13]
+            out[14] = _vp8_avg3(x_, ii, jj)
+            out[9] = out[14]
+            out[4] = out[14]
+            out[15] = _vp8_avg3(a, x_, ii)
+            out[10] = out[15]
+            out[5] = out[15]
+            out[0] = out[15]
+            out[11] = _vp8_avg3(b, a, x_)
+            out[6] = out[11]
+            out[1] = out[11]
+            out[7] = _vp8_avg3(c, b, a)
+            out[2] = out[7]
+            out[3] = _vp8_avg3(d, c, b)
+        elif mode == _B_LD:
+            out[0] = _vp8_avg3(a, b, c)
+            out[1] = _vp8_avg3(b, c, d)
+            out[4] = out[1]
+            out[2] = _vp8_avg3(c, d, e)
+            out[5] = out[2]
+            out[8] = out[2]
+            out[3] = _vp8_avg3(d, e, f)
+            out[6] = out[3]
+            out[9] = out[3]
+            out[12] = out[3]
+            out[7] = _vp8_avg3(e, f, g)
+            out[10] = out[7]
+            out[13] = out[7]
+            out[11] = _vp8_avg3(f, g, hh)
+            out[14] = out[11]
+            out[15] = _vp8_avg3(g, hh, hh)
+        elif mode == _B_VR:
+            out[0] = _vp8_avg2(x_, a)
+            out[9] = out[0]
+            out[1] = _vp8_avg2(a, b)
+            out[10] = out[1]
+            out[2] = _vp8_avg2(b, c)
+            out[11] = out[2]
+            out[3] = _vp8_avg2(c, d)
+            out[12] = _vp8_avg3(kk, jj, ii)
+            out[8] = _vp8_avg3(jj, ii, x_)
+            out[4] = _vp8_avg3(ii, x_, a)
+            out[13] = out[4]
+            out[5] = _vp8_avg3(x_, a, b)
+            out[14] = out[5]
+            out[6] = _vp8_avg3(a, b, c)
+            out[15] = out[6]
+            out[7] = _vp8_avg3(b, c, d)
+        elif mode == _B_VL:
+            out[0] = _vp8_avg2(a, b)
+            out[1] = _vp8_avg2(b, c)
+            out[8] = out[1]
+            out[2] = _vp8_avg2(c, d)
+            out[9] = out[2]
+            out[3] = _vp8_avg2(d, e)
+            out[10] = out[3]
+            out[4] = _vp8_avg3(a, b, c)
+            out[5] = _vp8_avg3(b, c, d)
+            out[12] = out[5]
+            out[6] = _vp8_avg3(c, d, e)
+            out[13] = out[6]
+            out[7] = _vp8_avg3(d, e, f)
+            out[14] = out[7]
+            out[11] = _vp8_avg3(e, f, g)
+            out[15] = _vp8_avg3(f, g, hh)
+        elif mode == _B_HD:
+            out[0] = _vp8_avg2(ii, x_)
+            out[6] = out[0]
+            out[4] = _vp8_avg2(jj, ii)
+            out[10] = out[4]
+            out[8] = _vp8_avg2(kk, jj)
+            out[14] = out[8]
+            out[12] = _vp8_avg2(ll, kk)
+            out[3] = _vp8_avg3(a, b, c)
+            out[2] = _vp8_avg3(x_, a, b)
+            out[1] = _vp8_avg3(ii, x_, a)
+            out[7] = out[1]
+            out[5] = _vp8_avg3(jj, ii, x_)
+            out[11] = out[5]
+            out[9] = _vp8_avg3(kk, jj, ii)
+            out[15] = out[9]
+            out[13] = _vp8_avg3(ll, kk, jj)
+        else:
+            # HU (Horizontal-Up)
+            out[0] = _vp8_avg2(ii, jj)
+            out[2] = _vp8_avg2(jj, kk)
+            out[4] = out[2]
+            out[6] = _vp8_avg2(kk, ll)
+            out[8] = out[6]
+            out[1] = _vp8_avg3(ii, jj, kk)
+            out[3] = _vp8_avg3(jj, kk, ll)
+            out[5] = out[3]
+            out[7] = _vp8_avg3(kk, ll, ll)
+            out[9] = out[7]
+            out[10] = ll
+            out[11] = ll
+            out[12] = ll
+            out[13] = ll
+            out[14] = ll
+            out[15] = ll
+        var yy: i64 = 0
+        while yy < 4:
+            var xx: i64 = 0
+            while xx < 4:
+                self.ybuf[(y0 + yy) * self.y_stride + x0 + xx] = out[yy * 4 + xx]
+                xx = xx + 1
+            yy = yy + 1
+
+    # ------------------------------------------------------------------
+    # Loop filter (RFC 6386 section 15; libwebp dsp/dec.c)
+    # ------------------------------------------------------------------
+
+    fn get(plane: i64, idx: i64) -> i64:
+        if plane < 0: self.ybuf[idx] elif plane == 0: self.ubuf[idx] else: self.vbuf[idx]
+
+    fn needs_filter(plane: i64, p: i64, step: i64, t: i64) -> bool:
+        val p1 = self.get(plane, p - 2 * step)
+        val p0 = self.get(plane, p - step)
+        val q0 = self.get(plane, p)
+        val q1 = self.get(plane, p + step)
+        4 * _vp8_abs(p0 - q0) + _vp8_abs(p1 - q1) <= t
+
+    fn needs_filter2(plane: i64, p: i64, step: i64, t: i64, it: i64) -> bool:
+        val p3 = self.get(plane, p - 4 * step)
+        val p2 = self.get(plane, p - 3 * step)
+        val p1 = self.get(plane, p - 2 * step)
+        val p0 = self.get(plane, p - step)
+        val q0 = self.get(plane, p)
+        val q1 = self.get(plane, p + step)
+        val q2 = self.get(plane, p + 2 * step)
+        val q3 = self.get(plane, p + 3 * step)
+        if 4 * _vp8_abs(p0 - q0) + _vp8_abs(p1 - q1) > t:
+            return false
+        _vp8_abs(p3 - p2) <= it and _vp8_abs(p2 - p1) <= it and
+            _vp8_abs(p1 - p0) <= it and _vp8_abs(q3 - q2) <= it and
+            _vp8_abs(q2 - q1) <= it and _vp8_abs(q1 - q0) <= it
+
+    fn hev(plane: i64, p: i64, step: i64, thresh: i64) -> bool:
+        val p1 = self.get(plane, p - 2 * step)
+        val p0 = self.get(plane, p - step)
+        val q0 = self.get(plane, p)
+        val q1 = self.get(plane, p + step)
+        _vp8_abs(p1 - p0) > thresh or _vp8_abs(q1 - q0) > thresh
+
+    me do_filter2(plane: i64, p: i64, step: i64):
+        val p1 = self.get(plane, p - 2 * step)
+        val p0 = self.get(plane, p - step)
+        val q0 = self.get(plane, p)
+        val q1 = self.get(plane, p + step)
+        val a = 3 * (q0 - p0) + _vp8_sclip1(p1 - q1)
+        val a1 = _vp8_sclip2((a + 4) >> 3)
+        val a2 = _vp8_sclip2((a + 3) >> 3)
+        self.put_px(plane, p - step, _vp8_clip8(p0 + a2))
+        self.put_px(plane, p, _vp8_clip8(q0 - a1))
+
+    me do_filter4(plane: i64, p: i64, step: i64):
+        val p1 = self.get(plane, p - 2 * step)
+        val p0 = self.get(plane, p - step)
+        val q0 = self.get(plane, p)
+        val q1 = self.get(plane, p + step)
+        val a = 3 * (q0 - p0)
+        val a1 = _vp8_sclip2((a + 4) >> 3)
+        val a2 = _vp8_sclip2((a + 3) >> 3)
+        val a3 = (a1 + 1) >> 1
+        self.put_px(plane, p - 2 * step, _vp8_clip8(p1 + a3))
+        self.put_px(plane, p - step, _vp8_clip8(p0 + a2))
+        self.put_px(plane, p, _vp8_clip8(q0 - a1))
+        self.put_px(plane, p + step, _vp8_clip8(q1 - a3))
+
+    me do_filter6(plane: i64, p: i64, step: i64):
+        val p2 = self.get(plane, p - 3 * step)
+        val p1 = self.get(plane, p - 2 * step)
+        val p0 = self.get(plane, p - step)
+        val q0 = self.get(plane, p)
+        val q1 = self.get(plane, p + step)
+        val q2 = self.get(plane, p + 2 * step)
+        val a = _vp8_sclip1(3 * (q0 - p0) + _vp8_sclip1(p1 - q1))
+        val a1 = (27 * a + 63) >> 7
+        val a2 = (18 * a + 63) >> 7
+        val a3 = (9 * a + 63) >> 7
+        self.put_px(plane, p - 3 * step, _vp8_clip8(p2 + a3))
+        self.put_px(plane, p - 2 * step, _vp8_clip8(p1 + a2))
+        self.put_px(plane, p - step, _vp8_clip8(p0 + a1))
+        self.put_px(plane, p, _vp8_clip8(q0 - a1))
+        self.put_px(plane, p + step, _vp8_clip8(q1 - a2))
+        self.put_px(plane, p + 2 * step, _vp8_clip8(q2 - a3))
+
+    me simple_edge(p: i64, step: i64, along: i64, thresh: i64):
+        """16 positions of the simple filter across one luma edge."""
+        val thresh2 = 2 * thresh + 1
+        var i: i64 = 0
+        while i < 16:
+            val q = p + i * along
+            if self.needs_filter(-1, q, step, thresh2):
+                self.do_filter2(-1, q, step)
+            i = i + 1
+
+    me normal_edge(plane: i64, p: i64, step: i64, along: i64, size: i64, thresh: i64, ithresh: i64, hev_t: i64, mb_edge: bool):
+        """libwebp FilterLoop26 (macroblock edge) / FilterLoop24 (inner)."""
+        val thresh2 = 2 * thresh + 1
+        var i: i64 = 0
+        while i < size:
+            val q = p + i * along
+            if self.needs_filter2(plane, q, step, thresh2, ithresh):
+                if self.hev(plane, q, step, hev_t):
+                    self.do_filter2(plane, q, step)
+                elif mb_edge:
+                    self.do_filter6(plane, q, step)
+                else:
+                    self.do_filter4(plane, q, step)
+            i = i + 1
+
+    me loop_filter():
+        val ys = self.y_stride
+        val cs = self.uv_stride
+        var mb_y: i64 = 0
+        while mb_y < self.mbh:
+            var mb_x: i64 = 0
+            while mb_x < self.mbw:
+                val m = mb_y * self.mbw + mb_x
+                val limit = self.f_limit[m]
+                if limit > 0:
+                    val yp = mb_y * 16 * ys + mb_x * 16
+                    val inner = self.f_inner[m] == 1
+                    if self.filter_simple:
+                        if mb_x > 0:
+                            self.simple_edge(yp, 1, ys, limit + 4)
+                        if inner:
+                            var k: i64 = 1
+                            while k < 4:
+                                self.simple_edge(yp + 4 * k, 1, ys, limit)
+                                k = k + 1
+                        if mb_y > 0:
+                            self.simple_edge(yp, ys, 1, limit + 4)
+                        if inner:
+                            var k: i64 = 1
+                            while k < 4:
+                                self.simple_edge(yp + 4 * k * ys, ys, 1, limit)
+                                k = k + 1
+                    else:
+                        val il = self.f_ilevel[m]
+                        val hv = self.f_hev[m]
+                        val cp = mb_y * 8 * cs + mb_x * 8
+                        if mb_x > 0:
+                            self.normal_edge(-1, yp, 1, ys, 16, limit + 4, il, hv, true)
+                            self.normal_edge(0, cp, 1, cs, 8, limit + 4, il, hv, true)
+                            self.normal_edge(1, cp, 1, cs, 8, limit + 4, il, hv, true)
+                        if inner:
+                            var k: i64 = 1
+                            while k < 4:
+                                self.normal_edge(-1, yp + 4 * k, 1, ys, 16, limit, il, hv, false)
+                                k = k + 1
+                            self.normal_edge(0, cp + 4, 1, cs, 8, limit, il, hv, false)
+                            self.normal_edge(1, cp + 4, 1, cs, 8, limit, il, hv, false)
+                        if mb_y > 0:
+                            self.normal_edge(-1, yp, ys, 1, 16, limit + 4, il, hv, true)
+                            self.normal_edge(0, cp, cs, 1, 8, limit + 4, il, hv, true)
+                            self.normal_edge(1, cp, cs, 1, 8, limit + 4, il, hv, true)
+                        if inner:
+                            var k: i64 = 1
+                            while k < 4:
+                                self.normal_edge(-1, yp + 4 * k * ys, ys, 1, 16, limit, il, hv, false)
+                                k = k + 1
+                            self.normal_edge(0, cp + 4 * cs, cs, 1, 8, limit, il, hv, false)
+                            self.normal_edge(1, cp + 4 * cs, cs, 1, 8, limit, il, hv, false)
+                mb_x = mb_x + 1
+            mb_y = mb_y + 1
+
+# Tables below are byte-identical to libwebp (RFC 6386 section 13/14/11):
+# kDcTable, kAcTable, CoeffsUpdateProba[4][8][3][11], CoeffsProba0[4][8][3][11],
+# kBModesProba[10][10][9] — flattened row-major.
+val _VP8_DC_TABLE: [i64] = [
+    4, 5, 6, 7, 8, 9, 10, 10, 11, 12, 13, 14, 15, 16, 17, 17,
+    18, 19, 20, 20, 21, 21, 22, 22, 23, 23, 24, 25, 25, 26, 27, 28,
+    29, 30, 31, 32, 33, 34, 35, 36, 37, 37, 38, 39, 40, 41, 42, 43,
+    44, 45, 46, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58,
+    59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74,
+    75, 76, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89,
+    91, 93, 95, 96, 98, 100, 101, 102, 104, 106, 108, 110, 112, 114, 116, 118,
+    122, 124, 126, 128, 130, 132, 134, 136, 138, 140, 143, 145, 148, 151, 154, 157
+]
+val _VP8_AC_TABLE: [i64] = [
+    4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
+    36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51,
+    52, 53, 54, 55, 56, 57, 58, 60, 62, 64, 66, 68, 70, 72, 74, 76,
+    78, 80, 82, 84, 86, 88, 90, 92, 94, 96, 98, 100, 102, 104, 106, 108,
+    110, 112, 114, 116, 119, 122, 125, 128, 131, 134, 137, 140, 143, 146, 149, 152,
+    155, 158, 161, 164, 167, 170, 173, 177, 181, 185, 189, 193, 197, 201, 205, 209,
+    213, 217, 221, 225, 229, 234, 239, 245, 249, 254, 259, 264, 269, 274, 279, 284
+]
+val _VP8_COEFFS_UPDATE_PROBA: [i64] = [
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    176, 246, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    223, 241, 252, 255, 255, 255, 255, 255, 255, 255, 255,
+    249, 253, 253, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 244, 252, 255, 255, 255, 255, 255, 255, 255, 255,
+    234, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    253, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 246, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    239, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    254, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 248, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    251, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    251, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    254, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 254, 253, 255, 254, 255, 255, 255, 255, 255, 255,
+    250, 255, 254, 255, 254, 255, 255, 255, 255, 255, 255,
+    254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    217, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    225, 252, 241, 253, 255, 255, 254, 255, 255, 255, 255,
+    234, 250, 241, 250, 253, 255, 253, 254, 255, 255, 255,
+    255, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    223, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    238, 253, 254, 254, 255, 255, 255, 255, 255, 255, 255,
+    255, 248, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    249, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 253, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    247, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    252, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    253, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 254, 253, 255, 255, 255, 255, 255, 255, 255, 255,
+    250, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    186, 251, 250, 255, 255, 255, 255, 255, 255, 255, 255,
+    234, 251, 244, 254, 255, 255, 255, 255, 255, 255, 255,
+    251, 251, 243, 253, 254, 255, 254, 255, 255, 255, 255,
+    255, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    236, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    251, 253, 253, 254, 254, 255, 255, 255, 255, 255, 255,
+    255, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    254, 254, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    254, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    248, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    250, 254, 252, 254, 255, 255, 255, 255, 255, 255, 255,
+    248, 254, 249, 253, 255, 255, 255, 255, 255, 255, 255,
+    255, 253, 253, 255, 255, 255, 255, 255, 255, 255, 255,
+    246, 253, 253, 255, 255, 255, 255, 255, 255, 255, 255,
+    252, 254, 251, 254, 254, 255, 255, 255, 255, 255, 255,
+    255, 254, 252, 255, 255, 255, 255, 255, 255, 255, 255,
+    248, 254, 253, 255, 255, 255, 255, 255, 255, 255, 255,
+    253, 255, 254, 254, 255, 255, 255, 255, 255, 255, 255,
+    255, 251, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    245, 251, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    253, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 251, 253, 255, 255, 255, 255, 255, 255, 255, 255,
+    252, 253, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 254, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 252, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    249, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 254, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 253, 255, 255, 255, 255, 255, 255, 255, 255,
+    250, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255
+]
+val _VP8_COEFFS_PROBA0: [i64] = [
+    128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
+    128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
+    128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
+    253, 136, 254, 255, 228, 219, 128, 128, 128, 128, 128,
+    189, 129, 242, 255, 227, 213, 255, 219, 128, 128, 128,
+    106, 126, 227, 252, 214, 209, 255, 255, 128, 128, 128,
+    1, 98, 248, 255, 236, 226, 255, 255, 128, 128, 128,
+    181, 133, 238, 254, 221, 234, 255, 154, 128, 128, 128,
+    78, 134, 202, 247, 198, 180, 255, 219, 128, 128, 128,
+    1, 185, 249, 255, 243, 255, 128, 128, 128, 128, 128,
+    184, 150, 247, 255, 236, 224, 128, 128, 128, 128, 128,
+    77, 110, 216, 255, 236, 230, 128, 128, 128, 128, 128,
+    1, 101, 251, 255, 241, 255, 128, 128, 128, 128, 128,
+    170, 139, 241, 252, 236, 209, 255, 255, 128, 128, 128,
+    37, 116, 196, 243, 228, 255, 255, 255, 128, 128, 128,
+    1, 204, 254, 255, 245, 255, 128, 128, 128, 128, 128,
+    207, 160, 250, 255, 238, 128, 128, 128, 128, 128, 128,
+    102, 103, 231, 255, 211, 171, 128, 128, 128, 128, 128,
+    1, 152, 252, 255, 240, 255, 128, 128, 128, 128, 128,
+    177, 135, 243, 255, 234, 225, 128, 128, 128, 128, 128,
+    80, 129, 211, 255, 194, 224, 128, 128, 128, 128, 128,
+    1, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128,
+    246, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128,
+    255, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
+    198, 35, 237, 223, 193, 187, 162, 160, 145, 155, 62,
+    131, 45, 198, 221, 172, 176, 220, 157, 252, 221, 1,
+    68, 47, 146, 208, 149, 167, 221, 162, 255, 223, 128,
+    1, 149, 241, 255, 221, 224, 255, 255, 128, 128, 128,
+    184, 141, 234, 253, 222, 220, 255, 199, 128, 128, 128,
+    81, 99, 181, 242, 176, 190, 249, 202, 255, 255, 128,
+    1, 129, 232, 253, 214, 197, 242, 196, 255, 255, 128,
+    99, 121, 210, 250, 201, 198, 255, 202, 128, 128, 128,
+    23, 91, 163, 242, 170, 187, 247, 210, 255, 255, 128,
+    1, 200, 246, 255, 234, 255, 128, 128, 128, 128, 128,
+    109, 178, 241, 255, 231, 245, 255, 255, 128, 128, 128,
+    44, 130, 201, 253, 205, 192, 255, 255, 128, 128, 128,
+    1, 132, 239, 251, 219, 209, 255, 165, 128, 128, 128,
+    94, 136, 225, 251, 218, 190, 255, 255, 128, 128, 128,
+    22, 100, 174, 245, 186, 161, 255, 199, 128, 128, 128,
+    1, 182, 249, 255, 232, 235, 128, 128, 128, 128, 128,
+    124, 143, 241, 255, 227, 234, 128, 128, 128, 128, 128,
+    35, 77, 181, 251, 193, 211, 255, 205, 128, 128, 128,
+    1, 157, 247, 255, 236, 231, 255, 255, 128, 128, 128,
+    121, 141, 235, 255, 225, 227, 255, 255, 128, 128, 128,
+    45, 99, 188, 251, 195, 217, 255, 224, 128, 128, 128,
+    1, 1, 251, 255, 213, 255, 128, 128, 128, 128, 128,
+    203, 1, 248, 255, 255, 128, 128, 128, 128, 128, 128,
+    137, 1, 177, 255, 224, 255, 128, 128, 128, 128, 128,
+    253, 9, 248, 251, 207, 208, 255, 192, 128, 128, 128,
+    175, 13, 224, 243, 193, 185, 249, 198, 255, 255, 128,
+    73, 17, 171, 221, 161, 179, 236, 167, 255, 234, 128,
+    1, 95, 247, 253, 212, 183, 255, 255, 128, 128, 128,
+    239, 90, 244, 250, 211, 209, 255, 255, 128, 128, 128,
+    155, 77, 195, 248, 188, 195, 255, 255, 128, 128, 128,
+    1, 24, 239, 251, 218, 219, 255, 205, 128, 128, 128,
+    201, 51, 219, 255, 196, 186, 128, 128, 128, 128, 128,
+    69, 46, 190, 239, 201, 218, 255, 228, 128, 128, 128,
+    1, 191, 251, 255, 255, 128, 128, 128, 128, 128, 128,
+    223, 165, 249, 255, 213, 255, 128, 128, 128, 128, 128,
+    141, 124, 248, 255, 255, 128, 128, 128, 128, 128, 128,
+    1, 16, 248, 255, 255, 128, 128, 128, 128, 128, 128,
+    190, 36, 230, 255, 236, 255, 128, 128, 128, 128, 128,
+    149, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128,
+    1, 226, 255, 128, 128, 128, 128, 128, 128, 128, 128,
+    247, 192, 255, 128, 128, 128, 128, 128, 128, 128, 128,
+    240, 128, 255, 128, 128, 128, 128, 128, 128, 128, 128,
+    1, 134, 252, 255, 255, 128, 128, 128, 128, 128, 128,
+    213, 62, 250, 255, 255, 128, 128, 128, 128, 128, 128,
+    55, 93, 255, 128, 128, 128, 128, 128, 128, 128, 128,
+    128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
+    128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
+    128, 128, 128, 128, 128, 128, 128, 128, 128, 128, 128,
+    202, 24, 213, 235, 186, 191, 220, 160, 240, 175, 255,
+    126, 38, 182, 232, 169, 184, 228, 174, 255, 187, 128,
+    61, 46, 138, 219, 151, 178, 240, 170, 255, 216, 128,
+    1, 112, 230, 250, 199, 191, 247, 159, 255, 255, 128,
+    166, 109, 228, 252, 211, 215, 255, 174, 128, 128, 128,
+    39, 77, 162, 232, 172, 180, 245, 178, 255, 255, 128,
+    1, 52, 220, 246, 198, 199, 249, 220, 255, 255, 128,
+    124, 74, 191, 243, 183, 193, 250, 221, 255, 255, 128,
+    24, 71, 130, 219, 154, 170, 243, 182, 255, 255, 128,
+    1, 182, 225, 249, 219, 240, 255, 224, 128, 128, 128,
+    149, 150, 226, 252, 216, 205, 255, 171, 128, 128, 128,
+    28, 108, 170, 242, 183, 194, 254, 223, 255, 255, 128,
+    1, 81, 230, 252, 204, 203, 255, 192, 128, 128, 128,
+    123, 102, 209, 247, 188, 196, 255, 233, 128, 128, 128,
+    20, 95, 153, 243, 164, 173, 255, 203, 128, 128, 128,
+    1, 222, 248, 255, 216, 213, 128, 128, 128, 128, 128,
+    168, 175, 246, 252, 235, 205, 255, 255, 128, 128, 128,
+    47, 116, 215, 255, 211, 212, 255, 255, 128, 128, 128,
+    1, 121, 236, 253, 212, 214, 255, 255, 128, 128, 128,
+    141, 84, 213, 252, 201, 202, 255, 219, 128, 128, 128,
+    42, 80, 160, 240, 162, 185, 255, 205, 128, 128, 128,
+    1, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128,
+    244, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128,
+    238, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128
+]
+val _VP8_BMODES_PROBA: [i64] = [
+    231, 120, 48, 89, 115, 113, 120, 152, 112,
+    152, 179, 64, 126, 170, 118, 46, 70, 95,
+    175, 69, 143, 80, 85, 82, 72, 155, 103,
+    56, 58, 10, 171, 218, 189, 17, 13, 152,
+    114, 26, 17, 163, 44, 195, 21, 10, 173,
+    121, 24, 80, 195, 26, 62, 44, 64, 85,
+    144, 71, 10, 38, 171, 213, 144, 34, 26,
+    170, 46, 55, 19, 136, 160, 33, 206, 71,
+    63, 20, 8, 114, 114, 208, 12, 9, 226,
+    81, 40, 11, 96, 182, 84, 29, 16, 36,
+    134, 183, 89, 137, 98, 101, 106, 165, 148,
+    72, 187, 100, 130, 157, 111, 32, 75, 80,
+    66, 102, 167, 99, 74, 62, 40, 234, 128,
+    41, 53, 9, 178, 241, 141, 26, 8, 107,
+    74, 43, 26, 146, 73, 166, 49, 23, 157,
+    65, 38, 105, 160, 51, 52, 31, 115, 128,
+    104, 79, 12, 27, 217, 255, 87, 17, 7,
+    87, 68, 71, 44, 114, 51, 15, 186, 23,
+    47, 41, 14, 110, 182, 183, 21, 17, 194,
+    66, 45, 25, 102, 197, 189, 23, 18, 22,
+    88, 88, 147, 150, 42, 46, 45, 196, 205,
+    43, 97, 183, 117, 85, 38, 35, 179, 61,
+    39, 53, 200, 87, 26, 21, 43, 232, 171,
+    56, 34, 51, 104, 114, 102, 29, 93, 77,
+    39, 28, 85, 171, 58, 165, 90, 98, 64,
+    34, 22, 116, 206, 23, 34, 43, 166, 73,
+    107, 54, 32, 26, 51, 1, 81, 43, 31,
+    68, 25, 106, 22, 64, 171, 36, 225, 114,
+    34, 19, 21, 102, 132, 188, 16, 76, 124,
+    62, 18, 78, 95, 85, 57, 50, 48, 51,
+    193, 101, 35, 159, 215, 111, 89, 46, 111,
+    60, 148, 31, 172, 219, 228, 21, 18, 111,
+    112, 113, 77, 85, 179, 255, 38, 120, 114,
+    40, 42, 1, 196, 245, 209, 10, 25, 109,
+    88, 43, 29, 140, 166, 213, 37, 43, 154,
+    61, 63, 30, 155, 67, 45, 68, 1, 209,
+    100, 80, 8, 43, 154, 1, 51, 26, 71,
+    142, 78, 78, 16, 255, 128, 34, 197, 171,
+    41, 40, 5, 102, 211, 183, 4, 1, 221,
+    51, 50, 17, 168, 209, 192, 23, 25, 82,
+    138, 31, 36, 171, 27, 166, 38, 44, 229,
+    67, 87, 58, 169, 82, 115, 26, 59, 179,
+    63, 59, 90, 180, 59, 166, 93, 73, 154,
+    40, 40, 21, 116, 143, 209, 34, 39, 175,
+    47, 15, 16, 183, 34, 223, 49, 45, 183,
+    46, 17, 33, 183, 6, 98, 15, 32, 183,
+    57, 46, 22, 24, 128, 1, 54, 17, 37,
+    65, 32, 73, 115, 28, 128, 23, 128, 205,
+    40, 3, 9, 115, 51, 192, 18, 6, 223,
+    87, 37, 9, 115, 59, 77, 64, 21, 47,
+    104, 55, 44, 218, 9, 54, 53, 130, 226,
+    64, 90, 70, 205, 40, 41, 23, 26, 57,
+    54, 57, 112, 184, 5, 41, 38, 166, 213,
+    30, 34, 26, 133, 152, 116, 10, 32, 134,
+    39, 19, 53, 221, 26, 114, 32, 73, 255,
+    31, 9, 65, 234, 2, 15, 1, 118, 73,
+    75, 32, 12, 51, 192, 255, 160, 43, 51,
+    88, 31, 35, 67, 102, 85, 55, 186, 85,
+    56, 21, 23, 111, 59, 205, 45, 37, 192,
+    55, 38, 70, 124, 73, 102, 1, 34, 98,
+    125, 98, 42, 88, 104, 85, 117, 175, 82,
+    95, 84, 53, 89, 128, 100, 113, 101, 45,
+    75, 79, 123, 47, 51, 128, 81, 171, 1,
+    57, 17, 5, 71, 102, 57, 53, 41, 49,
+    38, 33, 13, 121, 57, 73, 26, 1, 85,
+    41, 10, 67, 138, 77, 110, 90, 47, 114,
+    115, 21, 2, 10, 102, 255, 166, 23, 6,
+    101, 29, 16, 10, 85, 128, 101, 196, 26,
+    57, 18, 10, 102, 102, 213, 34, 20, 43,
+    117, 20, 15, 36, 163, 128, 68, 1, 26,
+    102, 61, 71, 37, 34, 53, 31, 243, 192,
+    69, 60, 71, 38, 73, 119, 28, 222, 37,
+    68, 45, 128, 34, 1, 47, 11, 245, 171,
+    62, 17, 19, 70, 146, 85, 55, 62, 70,
+    37, 43, 37, 154, 100, 163, 85, 160, 1,
+    63, 9, 92, 136, 28, 64, 32, 201, 85,
+    75, 15, 9, 9, 64, 255, 184, 119, 16,
+    86, 6, 28, 5, 64, 255, 25, 248, 1,
+    56, 8, 17, 132, 137, 255, 55, 116, 128,
+    58, 15, 20, 82, 135, 57, 26, 121, 40,
+    164, 50, 31, 137, 154, 133, 25, 35, 218,
+    51, 103, 44, 131, 131, 123, 31, 6, 158,
+    86, 40, 64, 135, 148, 224, 45, 183, 128,
+    22, 26, 17, 131, 240, 154, 14, 1, 209,
+    45, 16, 21, 91, 64, 222, 7, 1, 197,
+    56, 21, 39, 155, 60, 138, 23, 102, 213,
+    83, 12, 13, 54, 192, 255, 68, 47, 28,
+    85, 26, 85, 85, 128, 128, 32, 146, 171,
+    18, 11, 7, 63, 144, 171, 4, 4, 246,
+    35, 27, 10, 146, 174, 171, 12, 26, 128,
+    190, 80, 35, 99, 180, 80, 126, 54, 45,
+    85, 126, 47, 87, 176, 51, 41, 20, 32,
+    101, 75, 128, 139, 118, 146, 116, 128, 85,
+    56, 41, 15, 176, 236, 85, 37, 9, 62,
+    71, 30, 17, 119, 118, 255, 17, 18, 138,
+    101, 38, 60, 138, 55, 70, 43, 26, 142,
+    146, 36, 19, 30, 171, 255, 97, 27, 20,
+    138, 45, 61, 62, 219, 1, 81, 188, 64,
+    32, 41, 20, 117, 151, 142, 20, 21, 163,
+    112, 19, 12, 61, 195, 128, 48, 4, 24
+]

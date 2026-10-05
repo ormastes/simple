@@ -301,6 +301,50 @@ fn test_array_concat_byte_packed_keeps_bytes() {
     assert_eq!(rt_bytes_u8_at(d, 2), 255);
 }
 
+/// `raw.slice(a, b)` on a byte-packed `[u8]` (h1_client header/body split):
+/// the result keeps the bytes and the layout; it used to read the byte buffer
+/// as 8-byte tagged slots (garbage, out of bounds).
+#[test]
+fn test_slice_packed_arrays_keep_elements() {
+    let a = rt_byte_array_new(1);
+    for b in [72, 84, 84, 80, 47, 49, 46, 49, 255] {
+        assert!(rt_typed_bytes_u8_push(a, b));
+    }
+    let s = super::rt_slice(a, 1, 5, 1);
+    assert_eq!(rt_array_len(s), 4);
+    let got: Vec<i64> = (0..4).map(|i| rt_bytes_u8_at(s, i)).collect();
+    assert_eq!(got, vec![84, 84, 80, 47]);
+    let stepped = super::rt_slice(a, 0, 9, 4);
+    let got: Vec<i64> = (0..rt_array_len(stepped)).map(|i| rt_bytes_u8_at(stepped, i)).collect();
+    assert_eq!(got, vec![72, 47, 255]);
+    assert_eq!(rt_array_len(super::rt_slice(a, 5, 2, 1)), 0);
+
+    let w = rt_array_new_with_cap_u64(1);
+    for x in [u64::MAX as i64, 5, 7] {
+        assert!(rt_typed_words_u64_push(w, x));
+    }
+    let ws = super::rt_slice(w, -2, 3, 1);
+    assert_eq!(rt_array_len(ws), 2);
+    assert_eq!(rt_typed_words_u64_at(ws, 0), 5);
+    assert_eq!(rt_typed_words_u64_at(ws, 1), 7);
+}
+
+/// `x.to_i64()` on an erased receiver decodes the TAGGED value; the old
+/// `rt_to_int_dynamic` route returned `n << 3` for every int (JIT inflate).
+#[test]
+fn test_any_to_int_decodes_tagged_values() {
+    assert_eq!(super::rt_any_to_int(RuntimeValue::from_int(203)), 203);
+    assert_eq!(super::rt_any_to_int(RuntimeValue::from_int(-7)), -7);
+    assert_eq!(super::rt_any_to_int(RuntimeValue::from_bool(true)), 1);
+    assert_eq!(super::rt_any_to_int(RuntimeValue::from_float(2.9)), 2);
+    let text = unsafe { super::rt_string_new(b"42".as_ptr(), 2) };
+    assert_eq!(super::rt_any_to_int(text), 42);
+    // the element shape from the incident: a byte read out of a packed [u8]
+    let bytes = rt_byte_array_new(1);
+    assert!(rt_typed_bytes_u8_push(bytes, 0xCB));
+    assert_eq!(super::rt_any_to_int(rt_array_get(bytes, 0)), 203);
+}
+
 #[test]
 fn test_array_concat_u64_packed_and_mixed_layouts() {
     let a = rt_array_new_with_cap_u64(1);

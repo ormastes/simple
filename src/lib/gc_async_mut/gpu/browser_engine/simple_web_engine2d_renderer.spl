@@ -1,8 +1,10 @@
 #![allow(large_file)]  # Intentional: legacy heuristic parser is retained only for pixel compatibility.
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{simple_web_layout_render_html_pixels, simple_web_layout_render_html_readback, present_layout_pixels_with_engine2d_readback}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    SimpleWebLayoutEngine2DPresentableFrame,
     SimpleWebLayoutEngine2DReadbackResult,
     simple_web_layout_render_html_pixels_engine2d,
+    simple_web_layout_render_html_presentable_engine2d,
     simple_web_layout_render_html_pixels_engine2d_at_time,
     simple_web_layout_render_html_pixels_engine2d_at_time_with_animations,
     simple_web_layout_render_html_readback_engine2d_result
@@ -1160,12 +1162,25 @@ fn _first_px_dimension(html: text, prop: text, fallback: i32) -> i32:
 # real box layout routes straight to the real renderer. No fixture marker is
 # handled here: the class-name-keyed toolbar-modal-grid painter that used to
 # sit at the top of this function was a canned pixel grid, not a rendering.
+fn _simple_web_engine2d_text_document(lower: text) -> bool:
+    lower.contains("<p") or lower.contains("<h1") or lower.contains("<h2") or lower.contains("<h3") or lower.contains("<button") or lower.contains("<span") or lower.contains("<small") or lower.contains("<code") or lower.contains("<label") or lower.contains("<a ")
+
+# Page-lane twin of `simple_web_engine2d_render_html_pixels`: identical pixels
+# whenever that strict entry produces a frame. Only when the text-document
+# lane discards a frame because some Draw IR commands were skipped does this
+# present the rendered pixels and report the skips (see
+# simple_web_layout_render_html_presentable_engine2d).
+pub fn simple_web_engine2d_render_html_presentable(html: text, width: i32, height: i32, backend_name: text) -> SimpleWebLayoutEngine2DPresentableFrame:
+    val pixels = simple_web_engine2d_render_html_pixels(html, width, height, backend_name)
+    if pixels.len() > 0 or width <= 0 or height <= 0 or not _simple_web_engine2d_text_document(html.lower()):
+        return SimpleWebLayoutEngine2DPresentableFrame(pixels: pixels, skipped_command_count: 0, occluded_command_count: 0, skip_reason: "")
+    simple_web_layout_render_html_presentable_engine2d(html, width, height, _resolved_render_backend(width, height, backend_name))
+
 pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     if width <= 0 or height <= 0:
         return []
     val resolved_backend = _resolved_render_backend(width, height, backend_name)
-    val lower = html.lower()
-    if lower.contains("<p") or lower.contains("<h1") or lower.contains("<h2") or lower.contains("<h3") or lower.contains("<button") or lower.contains("<span") or lower.contains("<small") or lower.contains("<code") or lower.contains("<label") or lower.contains("<a "):
+    if _simple_web_engine2d_text_document(html.lower()):
         return simple_web_layout_render_html_pixels_engine2d(html, width, height, resolved_backend)
     # display:contents collapses the wrapper box — the heuristic would paint its
     # background-color when block_color != 0. Route to layout renderer instead.

@@ -638,8 +638,8 @@ fn strict_owned_bytes(args: &[Value], index: usize, name: &str, expected: usize)
         return Ok(bytes.to_vec().into_boxed_slice());
     }
     let items = match value {
-        Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
-        Value::FixedSizeArray { data, .. } => data.as_ref(),
+        Value::Array(items) | Value::FrozenArray(items) => items.as_slice(),
+        Value::FixedSizeArray { data, .. } => data.as_slice(),
         other => {
             return Err(CompileError::semantic(format!(
                 "{name} argument {index} must be [u8], got {}",
@@ -681,8 +681,8 @@ fn strict_i64_values(args: &[Value], index: usize, name: &str, expected: usize) 
         .get(index)
         .ok_or_else(|| CompileError::semantic(format!("{name} expects {expected} arguments")))?;
     let items = match value {
-        Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
-        Value::FixedSizeArray { data, .. } => data.as_ref(),
+        Value::Array(items) | Value::FrozenArray(items) => items.as_slice(),
+        Value::FixedSizeArray { data, .. } => data.as_slice(),
         other => {
             return Err(CompileError::semantic(format!(
                 "{name} argument {index} must be [i64], got {}",
