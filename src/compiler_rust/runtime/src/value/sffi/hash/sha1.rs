@@ -62,27 +62,30 @@ pub extern "C" fn rt_sha1_new() -> i64 {
 /// # Safety
 /// data_ptr must be valid for data_len bytes or null
 #[no_mangle]
-pub unsafe extern "C" fn rt_sha1_write(handle: i64, data_ptr: *const u8, data_len: u64) {
+pub extern "C" fn rt_sha1_write(handle: i64, data: RuntimeValue, len: i64) {
+    // `data` is a tagged `text | [u8]` value, like the interpreter's
+    // rt_sha1_write; see rt_sha256_write for the raw-pointer defect this
+    // replaced. An unusable payload drops the handle (finish -> fail closed).
     #[cfg(not(feature = "runtime-sha"))]
     {
         let _ = handle;
-        let _ = data_ptr;
-        let _ = data_len;
+        let _ = data;
+        let _ = len;
         runtime_sha_unavailable("rt_sha1_write");
     }
 
     #[cfg(feature = "runtime-sha")]
     {
-        if data_ptr.is_null() {
-            return;
-        }
-        let Ok(data_len) = usize::try_from(data_len) else {
-            return;
-        };
         let mut map = SHA1_MAP.lock().unwrap();
-        if let Some(hasher) = map.get_mut(&handle) {
-            let data = std::slice::from_raw_parts(data_ptr, data_len);
-            hasher.update(data);
+        match super::sha256::runtime_hash_payload(data, len) {
+            Some(bytes) => {
+                if let Some(hasher) = map.get_mut(&handle) {
+                    hasher.update(&bytes);
+                }
+            }
+            None => {
+                map.remove(&handle);
+            }
         }
     }
 }
@@ -196,6 +199,10 @@ pub fn clear_sha1_registry() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_text(bytes: &[u8]) -> RuntimeValue {
+        unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+    }
     use crate::value::collections::rt_string_data;
 
     #[cfg(feature = "runtime-sha")]
@@ -205,9 +212,7 @@ mod tests {
         assert!(handle > 0);
 
         let data = b"hello";
-        unsafe {
-            rt_sha1_write(handle, data.as_ptr(), data.len() as u64);
-        }
+            rt_sha1_write(handle, test_text(&data[..]), data.len() as i64);
 
         let result = rt_sha1_finish(handle);
         assert!(!result.is_nil());
@@ -242,10 +247,8 @@ mod tests {
     #[test]
     fn test_sha1_multiple_writes() {
         let handle = rt_sha1_new();
-        unsafe {
-            rt_sha1_write(handle, b"hel".as_ptr(), 3);
-            rt_sha1_write(handle, b"lo".as_ptr(), 2);
-        }
+            rt_sha1_write(handle, test_text(b"hel"), (3) as i64);
+            rt_sha1_write(handle, test_text(b"lo"), (2) as i64);
 
         let result = rt_sha1_finish(handle);
         let hash_str = unsafe {
@@ -261,13 +264,9 @@ mod tests {
     #[test]
     fn test_sha1_reset() {
         let handle = rt_sha1_new();
-        unsafe {
-            rt_sha1_write(handle, b"wrong".as_ptr(), 5);
-        }
+            rt_sha1_write(handle, test_text(b"wrong"), (5) as i64);
         rt_sha1_reset(handle);
-        unsafe {
-            rt_sha1_write(handle, b"hello".as_ptr(), 5);
-        }
+            rt_sha1_write(handle, test_text(b"hello"), (5) as i64);
 
         let result = rt_sha1_finish(handle);
         let hash_str = unsafe {
@@ -283,9 +282,7 @@ mod tests {
     #[test]
     fn test_sha1_finish_bytes() {
         let handle = rt_sha1_new();
-        unsafe {
-            rt_sha1_write(handle, b"hello".as_ptr(), 5);
-        }
+            rt_sha1_write(handle, test_text(b"hello"), (5) as i64);
 
         let result = rt_sha1_finish_bytes(handle);
         assert!(!result.is_nil());
@@ -300,20 +297,13 @@ mod tests {
 
     #[cfg(feature = "runtime-sha")]
     #[test]
-    fn test_sha1_null_data() {
+    fn test_sha1_nil_data_fails_closed() {
         let handle = rt_sha1_new();
-        unsafe {
-            rt_sha1_write(handle, std::ptr::null(), 100);
-        }
+            rt_sha1_write(handle, RuntimeValue::NIL, 100);
 
-        let result = rt_sha1_finish(handle);
-        let hash_str = unsafe {
-            let ptr = rt_string_data(result);
-            let len = crate::value::collections::rt_string_len(result);
-            std::str::from_utf8(std::slice::from_raw_parts(ptr, len as usize)).unwrap()
-        };
-
-        assert_eq!(hash_str, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+        // A payload that is neither text nor [u8] drops the hasher: no digest
+        // of the wrong bytes.
+        assert!(rt_sha1_finish(handle).is_nil());
     }
 
     #[cfg(feature = "runtime-sha")]
@@ -339,9 +329,7 @@ mod tests {
     fn test_sha1_long_input() {
         let handle = rt_sha1_new();
         let data = vec![b'a'; 1_000_000];
-        unsafe {
-            rt_sha1_write(handle, data.as_ptr(), data.len() as u64);
-        }
+            rt_sha1_write(handle, test_text(&data[..]), data.len() as i64);
 
         let result = rt_sha1_finish(handle);
         let hash_str = unsafe {
