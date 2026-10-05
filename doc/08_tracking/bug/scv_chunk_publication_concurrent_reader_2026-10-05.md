@@ -46,3 +46,41 @@ chunk case, and failure cleanup coverage. Measure warm and cold latency plus
 peak memory: avoid introducing one extra temporary directory or unbounded retry
 loop per source file. Native verification remains pending. This bug is separate
 from the typed probe's unsupported Result payload lowering failure.
+
+## Isolated repair prepared
+
+`scv_compile_snapshot_acquire_v1` now creates its existing per-snapshot staging
+directory through `secure_temp_dir_raw`, retaining the PID recovery field. There
+is no per-chunk directory, time-only name, shared mutable nonce, or retry loop.
+The chunk writer exclusively creates a file inside that private directory,
+verifies its bounded content digest, and calls `file_publish_noreplace_raw`.
+The commit helper validates an existing winner on a lost race and never replaces
+or deletes that winner. Private stages are removed after commit/failure; failed
+exclusive writes remain owned by the enclosing snapshot cleanup, which also
+handles partial writes. An existing private-path collision is not deleted by
+the chunk helper. The final-path alias guard protects against an invalid helper
+call deleting an existing object.
+
+Successful cold publication moves the existing digest verification from the
+final path to the completed private file: one bounded source read/hash remains.
+A losing publisher additionally validates the winning object. Warm hits keep
+the existing final read/hash path and do not allocate a staging directory. The
+extra operations on a cold chunk are atomic publication and private-path
+cleanup, not another full-content buffer or directory creation. Actual latency
+and RSS savings or regressions have **not** been measured.
+
+`test/04_smoke/native_scv_chunk_publication.spl` exercises deterministic
+interleavings at the real commit boundary (private prefix, second writer commit,
+reader check, first writer completion), corrupt private and existing content,
+missing-parent publication failure, collision preservation, warm reuse, UTF-8
+and CRLF bytes, and cleanup. It also reports cold/warm timing for sixteen chunks;
+the external native owner must record peak process-tree RSS. This is a controlled
+interleaving, not a claim that the original concurrent incident was reproduced.
+All new native assertions and timing/RSS measurements remain **UNRUN**.
+
+Verification must compile this fixture with a pinned current producer against
+an authenticated derived source, then execute it under the existing owned
+collector on both backends. Retain exact stdout checks/failure counts, wall time,
+RSS and closure receipts. The prior compile-snapshot reclamation regression
+remains relevant because per-file transient scope still owns staged hash buffers.
+No running source snapshot, build request, or cache was modified by this repair.
