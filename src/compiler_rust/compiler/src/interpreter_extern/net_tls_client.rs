@@ -171,6 +171,31 @@ pub fn rt_tls_client_read_timeout_checked(args: &[Value]) -> Result<Value, Compi
     )
 }
 
+/// Byte-array result for the binary-safe read: `None` (failure) is nil, an
+/// empty vector (clean EOF) is an empty array, and every byte is carried as
+/// its own integer exactly like `rt_io_tcp_read` -- no UTF-8 decoding, so a
+/// PNG or wasm body survives unchanged.
+fn optional_bytes_out(bytes: Option<Vec<u8>>) -> Value {
+    match bytes {
+        None => Value::Nil,
+        Some(bytes) => Value::array(bytes.into_iter().map(|b| Value::Int(b as i64)).collect::<Vec<Value>>()),
+    }
+}
+
+/// `rt_tls_client_read_bytes_timeout_checked(conn, max_bytes, timeout_ms) -> [u8]?`
+///
+/// Calls the runtime's shared read core directly instead of the text
+/// extern: the text path below must decode to a `Value::text` (UTF-8), which
+/// replaced every non-UTF-8 byte with U+FFFD.
+pub fn rt_tls_client_read_bytes_timeout_checked(args: &[Value]) -> Result<Value, CompileError> {
+    let symbol = "rt_tls_client_read_bytes_timeout_checked";
+    Ok(optional_bytes_out(net::tls_client_read_bytes_timeout(
+        int_arg(args, 0, symbol)?,
+        int_arg(args, 1, symbol)?,
+        int_arg(args, 2, symbol)?,
+    )))
+}
+
 /// `rt_tls_client_close(conn) -> bool`
 pub fn rt_tls_client_close(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(net::rt_tls_client_close(int_arg(
@@ -219,6 +244,37 @@ mod tests {
         assert!(rt_tls_client_read_checked(&[Value::Int(1)]).is_err());
         assert!(rt_tls_client_read_timeout_checked(&[Value::Int(1), Value::Int(2)]).is_err());
         assert!(rt_tls_client_close(&[Value::text("1")]).is_err());
+    }
+
+    #[test]
+    fn byte_read_result_is_lossless_for_every_byte_value() {
+        // The exact site that was lossy: 0x80..=0xFF are not valid UTF-8 on
+        // their own and used to come back as EF BF BD.
+        let all: Vec<u8> = (0u8..=255u8).collect();
+        let round: Vec<u8> = match optional_bytes_out(Some(all.clone())) {
+            Value::Array(items) => items.iter().map(|v| v.as_int().expect("byte") as u8).collect(),
+            other => panic!("byte read must produce an array, got {other:?}"),
+        };
+        assert_eq!(round, all);
+        let png_head = [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+        match optional_bytes_out(Some(png_head.to_vec())) {
+            Value::Array(items) => assert_eq!(items.as_slice()[0], Value::Int(0x89)),
+            other => panic!("array expected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn byte_read_keeps_nil_failure_distinct_from_eof() {
+        assert!(matches!(optional_bytes_out(None), Value::Nil));
+        match optional_bytes_out(Some(Vec::new())) {
+            Value::Array(items) => assert_eq!(items.len(), 0),
+            other => panic!("EOF is an empty array, not nil: {other:?}"),
+        }
+        assert!(matches!(
+            rt_tls_client_read_bytes_timeout_checked(&[Value::Int(-1), Value::Int(1024), Value::Int(100)]),
+            Ok(Value::Nil)
+        ));
+        assert!(rt_tls_client_read_bytes_timeout_checked(&[Value::Int(1), Value::Int(2)]).is_err());
     }
 
     #[test]

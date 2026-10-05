@@ -497,8 +497,18 @@ int64_t rt_tls_client_write_timeout(
     return simple_tls_write(handle, data, timeout_ms);
 }
 
-static int64_t simple_tls_read(
-    int64_t handle, int64_t max_bytes, int64_t timeout_ms
+/* One TLS client read shared by the text and byte entry points.
+ * Returns the byte count (> 0) with the bytes in *out_buffer (caller frees),
+ * SIMPLE_TLS_READ_EOF (0) on a clean close_notify, or SIMPLE_TLS_READ_FAILED
+ * (-1) on a contract error, unknown/broken handle, timeout, or I/O error.
+ * Parity with the Rust lane (`tls_client_read_bytes_timeout`, net_tls.rs):
+ * same 65536-byte and 5000 ms clamps and the same failure-vs-EOF split; the
+ * Rust lane drops a failed connection from its table where this lane marks it
+ * broken, so on both every later read on that handle fails. */
+#define SIMPLE_TLS_READ_EOF 0
+#define SIMPLE_TLS_READ_FAILED (-1)
+static int64_t simple_tls_read_core(
+    int64_t handle, int64_t max_bytes, int64_t timeout_ms, uint8_t **out_buffer
 ) {
     SimpleTlsConnection *connection;
     uint8_t *buffer;
@@ -507,23 +517,24 @@ static int64_t simple_tls_read(
     int64_t result;
     int64_t deadline_ms;
     int64_t started_ms;
-    if (max_bytes <= 0 || timeout_ms <= 0) return rt_string_new(NULL, 0);
+    *out_buffer = NULL;
+    if (max_bytes <= 0 || timeout_ms <= 0) return SIMPLE_TLS_READ_FAILED;
     if (max_bytes > SIMPLE_TLS_READ_MAX) max_bytes = SIMPLE_TLS_READ_MAX;
     if (timeout_ms > SIMPLE_TLS_TIMEOUT_MS) timeout_ms = SIMPLE_TLS_TIMEOUT_MS;
     started_ms = simple_tls_now_ms();
-    if (started_ms < 0) return rt_string_new(NULL, 0);
+    if (started_ms < 0) return SIMPLE_TLS_READ_FAILED;
     deadline_ms = started_ms + timeout_ms;
     connection = simple_tls_acquire(handle);
-    if (!connection) return rt_string_new(NULL, 0);
+    if (!connection) return SIMPLE_TLS_READ_FAILED;
     if (connection->broken) {
         simple_tls_release(connection);
-        return rt_string_new(NULL, 0);
+        return SIMPLE_TLS_READ_FAILED;
     }
     buffer = (uint8_t *)malloc((size_t)max_bytes);
     if (!buffer) {
         connection->broken = 1;
         simple_tls_release(connection);
-        return rt_string_new(NULL, 0);
+        return SIMPLE_TLS_READ_FAILED;
     }
     {
         SimpleTlsSigpipeMask sigpipe;
@@ -531,7 +542,7 @@ static int64_t simple_tls_read(
             free(buffer);
             connection->broken = 1;
             simple_tls_release(connection);
-            return rt_string_new(NULL, 0);
+            return SIMPLE_TLS_READ_FAILED;
         }
         while (1) {
             int64_t now_ms = simple_tls_now_ms();
@@ -546,13 +557,44 @@ static int64_t simple_tls_read(
         simple_tls_sigpipe_end(&sigpipe);
     }
     if (read_count > 0) {
-        result = rt_string_new(buffer, (uint64_t)read_count);
+        *out_buffer = buffer;
+        result = (int64_t)read_count;
     } else {
         if (ssl_error != SSL_ERROR_ZERO_RETURN) connection->broken = 1;
-        result = rt_string_new(NULL, 0);
+        free(buffer);
+        result = ssl_error == SSL_ERROR_ZERO_RETURN
+            ? SIMPLE_TLS_READ_EOF : SIMPLE_TLS_READ_FAILED;
     }
-    free(buffer);
     simple_tls_release(connection);
+    return result;
+}
+
+/* Text read (legacy contract, unchanged): failure and EOF are both empty
+ * text; the bytes are copied into the runtime string as received. */
+static int64_t simple_tls_read(
+    int64_t handle, int64_t max_bytes, int64_t timeout_ms
+) {
+    uint8_t *buffer = NULL;
+    int64_t count = simple_tls_read_core(handle, max_bytes, timeout_ms, &buffer);
+    int64_t result;
+    if (count <= 0) return rt_string_new(NULL, 0);
+    result = rt_string_new(buffer, (uint64_t)count);
+    free(buffer);
+    return result;
+}
+
+/* Binary-safe checked read: nil on failure, empty [u8] on clean EOF,
+ * otherwise the bytes exactly as received. */
+int64_t rt_tls_client_read_bytes_timeout_checked(
+    int64_t handle, int64_t max_bytes, int64_t timeout_ms
+) {
+    uint8_t *buffer = NULL;
+    int64_t count = simple_tls_read_core(handle, max_bytes, timeout_ms, &buffer);
+    int64_t result;
+    if (count == SIMPLE_TLS_READ_FAILED) return rt_value_nil();
+    if (count == SIMPLE_TLS_READ_EOF) return rt_bytes_from_raw(0, 0);
+    result = rt_bytes_from_raw((int64_t)(uintptr_t)buffer, count);
+    free(buffer);
     return result;
 }
 
@@ -635,6 +677,9 @@ int64_t rt_tls_client_read(int64_t handle, int64_t max_bytes) {
 }
 int64_t rt_tls_client_read_timeout(int64_t handle, int64_t max_bytes, int64_t timeout_ms) {
     (void)handle; (void)max_bytes; (void)timeout_ms; return rt_string_new(NULL, 0);
+}
+int64_t rt_tls_client_read_bytes_timeout_checked(int64_t handle, int64_t max_bytes, int64_t timeout_ms) {
+    (void)handle; (void)max_bytes; (void)timeout_ms; return rt_value_nil();
 }
 int64_t rt_tls_get_protocol_version(int64_t handle) {
     (void)handle; return rt_string_new(NULL, 0);

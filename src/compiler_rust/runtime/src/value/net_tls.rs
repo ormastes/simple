@@ -361,6 +361,26 @@ pub extern "C" fn rt_tls_client_read_timeout_checked(
     tls_client_read_timeout_impl(conn, max_bytes, timeout_ms, true)
 }
 
+/// Checked timeout read returning the raw bytes: NIL is failure, an empty
+/// array is clean EOF. Same read as `rt_tls_client_read_timeout_checked`
+/// (both wrap `tls_client_read_bytes_timeout`); use this one for binary
+/// bodies, since a text value cannot carry arbitrary bytes through every
+/// consumer (the interpreter decodes text as UTF-8).
+#[no_mangle]
+pub extern "C" fn rt_tls_client_read_bytes_timeout_checked(
+    conn: i64,
+    max_bytes: i64,
+    timeout_ms: i64,
+) -> crate::value::RuntimeValue {
+    match tls_client_read_bytes_timeout(conn, max_bytes, timeout_ms) {
+        None => crate::value::RuntimeValue::NIL,
+        Some(bytes) if bytes.is_empty() => crate::value::collections::rt_array_new(0),
+        Some(bytes) => unsafe {
+            crate::value::sffi::file_io::rt_bytes_from_raw(bytes.as_ptr() as i64, bytes.len() as i64)
+        },
+    }
+}
+
 #[inline]
 fn tls_client_read_timeout_impl(
     conn: i64,
@@ -368,19 +388,25 @@ fn tls_client_read_timeout_impl(
     timeout_ms: i64,
     checked: bool,
 ) -> crate::value::RuntimeValue {
-    if max_bytes <= 0 {
-        return tls_client_read_failure(checked);
+    match tls_client_read_bytes_timeout(conn, max_bytes, timeout_ms) {
+        None => tls_client_read_failure(checked),
+        Some(bytes) if bytes.is_empty() => empty_text(),
+        Some(bytes) => unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) },
     }
-    let timeout = match tls_client_timeout_from_ms(timeout_ms) {
-        Some(t) => t.min(TLS_CLIENT_IO_TIMEOUT),
-        None => return tls_client_read_failure(checked),
-    };
+}
+
+/// The one TLS client read every `rt_tls_client_read*` entry point wraps.
+/// `None` = contract, timeout, or I/O failure (the connection is dropped from
+/// the table on an I/O error); `Some(empty)` = clean EOF; otherwise the bytes
+/// exactly as received.
+pub fn tls_client_read_bytes_timeout(conn: i64, max_bytes: i64, timeout_ms: i64) -> Option<Vec<u8>> {
+    if max_bytes <= 0 {
+        return None;
+    }
+    let timeout = tls_client_timeout_from_ms(timeout_ms)?.min(TLS_CLIENT_IO_TIMEOUT);
     let entry_arc = {
         let guard = TLS_CLIENT_CONNS.lock().unwrap();
-        match guard.get(&conn) {
-            Some(entry) => entry.clone(),
-            None => return tls_client_read_failure(checked),
-        }
+        guard.get(&conn)?.clone()
     };
     let size = max_bytes.min(65_536) as usize;
     let mut buf = vec![0u8; size];
@@ -388,22 +414,21 @@ fn tls_client_read_timeout_impl(
         let mut entry_guard = entry_arc.lock().unwrap();
         let entry = &mut *entry_guard;
         if apply_socket_timeout(&entry.stream, timeout).is_err() {
-            return tls_client_read_failure(checked);
+            return None;
         }
         let mut tls_stream = rustls::Stream::new(&mut entry.conn, &mut entry.stream);
         tls_stream.read(&mut buf)
     };
-    let n = match read_result {
-        Ok(n) => n,
+    match read_result {
+        Ok(n) => {
+            buf.truncate(n);
+            Some(buf)
+        }
         Err(_) => {
             TLS_CLIENT_CONNS.lock().unwrap().remove(&conn);
-            return tls_client_read_failure(checked);
+            None
         }
-    };
-    if n == 0 {
-        return empty_text();
     }
-    unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), n as u64) }
 }
 
 #[inline]
@@ -826,7 +851,8 @@ fn tls_cipher_suite_name(suite: rustls::CipherSuite) -> Option<&'static str> {
 #[cfg(test)]
 mod platform_trust_tests {
     use super::{
-        rt_tls_client_read_checked, rt_tls_client_read_timeout_checked,
+        rt_tls_client_read_bytes_timeout_checked, rt_tls_client_read_checked,
+        rt_tls_client_read_timeout_checked, tls_client_read_bytes_timeout,
         rt_tls_server_read_checked, rt_tls_get_cipher_suite,
         rt_tls_get_negotiated_alpn, rt_tls_get_protocol_version,
         rt_tls_is_handshake_complete, TLS_CLIENT_CONFIG,
@@ -842,6 +868,18 @@ mod platform_trust_tests {
         assert!(rt_tls_client_read_checked(-1, 1024).is_nil());
         assert!(rt_tls_client_read_timeout_checked(-1, 1024, 100).is_nil());
         assert!(rt_tls_server_read_checked(-1, 1024).is_nil());
+    }
+
+    #[test]
+    fn bytes_read_fails_closed_exactly_like_the_text_read() {
+        // Same contract as the text `_checked` read: every invalid input is a
+        // failure (NIL / None), never an empty array that would read as EOF.
+        assert!(rt_tls_client_read_bytes_timeout_checked(-1, 1024, 100).is_nil());
+        assert!(rt_tls_client_read_bytes_timeout_checked(-1, 0, 100).is_nil());
+        assert!(rt_tls_client_read_bytes_timeout_checked(-1, 1024, 0).is_nil());
+        assert!(tls_client_read_bytes_timeout(-1, 1024, 100).is_none());
+        assert!(tls_client_read_bytes_timeout(-1, -5, 100).is_none());
+        assert!(tls_client_read_bytes_timeout(-1, 1024, -1).is_none());
     }
 
     #[test]
