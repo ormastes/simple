@@ -41,3 +41,14 @@ context adds one short string only on failure and stops encoding after the first
 invalid declaration. Valid encoding traversal/payload remains unchanged. Runtime
 RSS and latency are unmeasured. Full closure verification and the other three
 root causes remain outstanding.
+
+## Separate generic-default contract repair
+
+`lower_type_param` read the plain desugared `ParserTypeParam.default` using
+optional presence syntax and omitted `HirTypeParam.has_default`. It now uses and
+preserves the explicit presence bit and supplies an inert Unit payload when
+absent. Tests distinguish a present i64 default from an absent Infer sentinel
+and a subsequent absent text payload. Native execution is UNRUN. This is a
+source-proven contract repair, not proof of the three remaining packet failures.
+It performs no new traversal/allocation and avoids lowering absent payloads;
+runtime performance and memory measurements are still pending.
