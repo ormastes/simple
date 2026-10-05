@@ -1,6 +1,6 @@
 # Phase3 vertical diagnostic accidentally requests executable linking
 
-Status: command construction repaired; native requalification pending.
+Status: command construction repaired; two Cranelift native object probes PASS.
 
 The Phase3 vertical collector exports `SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1`
 but its Phase2/3 command builder omitted `--emit-object`. The native-build
@@ -30,6 +30,12 @@ Native probe: `windows-restart-20261004/p3-explicit-object-probe20-2`, two
 completed entries above, isolated outputs and their closed existing caches.
 Request SHA256: `a54290f427efcbeeb8015745aaebb372721d3b600c156d1425099c5bf8ba13c2`.
 No cache stamp rewriting; no success is inferred from a cache directory.
+
+The corrected probe completed with 2 PASS, 0 FAIL, no skipped/blocked entries,
+scheduler/supervisor exit 0 and natural collector closure. Both outputs passed
+the independent COFF object-container check: 14,593 bytes for the arguments
+module and 590 bytes for the identity module. This qualifies these two entries
+and the Cranelift object route only, not all Phase3 modules or LLVM execution.
 
 The first probe ended before valid compilation: its generated inventory had
 CRLF endings, leaving a carriage return in shell-read entry paths. Its failures
