@@ -52,3 +52,13 @@ case and substring behavior remain unchanged. The `helper_optional_text` native
 fixture checks seven such cases against the actual library owner. Both source
 workarounds and the fixture remain native-unverified. They do not claim to repair
 the independent enum or lexer receiver failures.
+
+One lexer cause is now source-proven: the MIR provider method-registration loop
+admits only modules containing a class or enum. `CoreLexer` lives in a module
+whose only nominal declaration is a struct, so the loop skips its methods.
+The candidate includes struct-bearing modules in that same registration path;
+it does not alter receiver ownership, ambiguity checks, or lookup fallback.
+`native_struct_only_provider` is a separate four-check native regression with
+an imported struct, reads, mutation, a computed result, and two instances.
+The fixture intentionally declares no class or enum in its provider. Native
+execution with a rebuilt producer is still required before claiming repair.
