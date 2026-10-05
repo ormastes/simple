@@ -125,7 +125,7 @@ def main():
     elif not output.is_dir() or output.is_symlink():
         parser.error('prepared physical output root unavailable')
     command = [str(seed), 'test', '--whole', '--parallel', '--max-workers=20',
-               '--unstable', '--mode=interpreter', '--format=json']
+               '--unstable', '--mode=interpreter', '--json']
     environment = os.environ.copy()
     environment.pop('SIMPLE_TEST_RUNNER_RUST', None)
     environment.update(SIMPLE_BINARY=str(seed), SIMPLE_RUNTIME=str(seed),
