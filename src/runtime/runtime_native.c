@@ -6346,6 +6346,17 @@ int64_t rt_to_int_dynamic(int64_t value) {
     return value;
 }
 
+/* `x.to_i64()` on an ERASED (tagged) receiver: text parses like
+ * rt_to_int_dynamic; a float truncates; every other value is decoded tag-aware
+ * (rt_value_unbox_int). rt_to_int_dynamic returns a non-text value VERBATIM,
+ * which for a tagged int is `n << 3` -- the JIT inflate decoder read every
+ * byte 8x too large. Twin: Rust runtime value/collections.rs. */
+int64_t rt_any_to_int(int64_t value) {
+    if (rt_core_as_string(value)) return rt_string_to_int(value);
+    if (rt_value_is_float(value)) return (int64_t)rt_value_as_float(value);
+    return rt_value_unbox_int(value);
+}
+
 /* Task #178 (text3 lane): backs the `int("42")` global builtin's native MIR
  * lowering (switch_operators_calls.spl). rt_string_to_int above requires an
  * ALREADY-tagged receiver (rt_core_as_string-checked, 0 otherwise) -- the

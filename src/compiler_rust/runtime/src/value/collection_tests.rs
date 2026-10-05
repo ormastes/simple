@@ -329,6 +329,22 @@ fn test_slice_packed_arrays_keep_elements() {
     assert_eq!(rt_typed_words_u64_at(ws, 1), 7);
 }
 
+/// `x.to_i64()` on an erased receiver decodes the TAGGED value; the old
+/// `rt_to_int_dynamic` route returned `n << 3` for every int (JIT inflate).
+#[test]
+fn test_any_to_int_decodes_tagged_values() {
+    assert_eq!(super::rt_any_to_int(RuntimeValue::from_int(203)), 203);
+    assert_eq!(super::rt_any_to_int(RuntimeValue::from_int(-7)), -7);
+    assert_eq!(super::rt_any_to_int(RuntimeValue::from_bool(true)), 1);
+    assert_eq!(super::rt_any_to_int(RuntimeValue::from_float(2.9)), 2);
+    let text = unsafe { super::rt_string_new(b"42".as_ptr(), 2) };
+    assert_eq!(super::rt_any_to_int(text), 42);
+    // the element shape from the incident: a byte read out of a packed [u8]
+    let bytes = rt_byte_array_new(1);
+    assert!(rt_typed_bytes_u8_push(bytes, 0xCB));
+    assert_eq!(super::rt_any_to_int(rt_array_get(bytes, 0)), 203);
+}
+
 #[test]
 fn test_array_concat_u64_packed_and_mixed_layouts() {
     let a = rt_array_new_with_cap_u64(1);

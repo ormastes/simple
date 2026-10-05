@@ -500,6 +500,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_contains",
     "rt_len",
     "rt_to_int_dynamic",
+    "rt_any_to_int",
     // ANY+ANY dynamic add (tag-dispatched string-concat vs. integer add).
     // Emitted by MIR lowering (lowering_expr_ops.rs) whenever both operands are
     // ANY-typed (untyped params / erased receivers, e.g. inside the Simple Web

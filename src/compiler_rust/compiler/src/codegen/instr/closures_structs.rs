@@ -1941,6 +1941,9 @@ fn try_compile_builtin_method_call<M: Module>(
 ) -> InstrResult<Option<cranelift_codegen::ir::Value>> {
     let receiver_val = get_vreg_or_default(ctx, builder, &receiver);
 
+    // A BARE (unqualified) name is only emitted for an erased receiver, whose
+    // value is a tagged RuntimeValue (see compile_method_call_static).
+    let erased_receiver = !method.contains('.');
     // Extract plain method name from qualified name (e.g., "text.len" -> "len")
     let method = method.rsplit('.').next().unwrap_or(method);
 
@@ -2047,6 +2050,21 @@ fn try_compile_builtin_method_call<M: Module>(
                 _ => parsed,
             };
             return Ok(Some(converted));
+        }
+
+        // Erased receiver (`list` element, `[Any]` slot): the value is TAGGED,
+        // and HIR types `to_i64`/`to_int` on an ANY receiver as a RAW I64
+        // (hir/lower/expr/mod.rs), so `rt_to_int_dynamic`'s verbatim non-text
+        // answer (`n << 3`) was wrong. Decode it; text still parses. Under the
+        // JIT the inflate decoder's `data[byte_pos].to_i64()` read every byte
+        // 8x too large. The narrower casts (`to_u8`...) on ANY are typed ANY
+        // (tagged result) in HIR and keep their pass-through path.
+        let recv_ty_known = ctx.vreg_types.get(&receiver).copied();
+        if erased_receiver
+            && matches!(method, "to_i64" | "to_int")
+            && matches!(recv_ty_known, None | Some(TypeId::ANY))
+        {
+            return Ok(Some(call_runtime_1(ctx, builder, "rt_any_to_int", receiver_val)));
         }
 
         // `??` can leave a text handle typed as Pointer<text> in MIR.
