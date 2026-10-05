@@ -324,6 +324,7 @@ int64_t  rt_call_ptr_0(int64_t addr);
 int64_t  rt_call_ptr_1(int64_t addr, int64_t a1);
 int64_t  rt_call_ptr_2(int64_t addr, int64_t a1, int64_t a2);
 int64_t  rt_call_ptr_3(int64_t addr, int64_t a1, int64_t a2, int64_t a3);
+int64_t  rt_dyncall_3(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2);
 int64_t  rt_volatile_read_u16(int64_t addr);
 int64_t  rt_volatile_read_u32(int64_t addr);
 int64_t  rt_volatile_read_u64(int64_t addr);
