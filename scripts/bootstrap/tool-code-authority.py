@@ -37,6 +37,19 @@ def validate(root, manifest, expected, entry=None):
         raise ValueError('nonempty tool closure required')
     # Pin complete script directories, including transitive shell/Perl imports.
     prefixes = ('scripts/bootstrap/', 'scripts/check/lib/')
+    catalog = subprocess.check_output(['git', '-C', str(root), 'ls-tree', '-rz',
+        '--full-tree', head, '--', *prefixes])
+    committed = {}
+    for row in catalog.split(b'\0'):
+        if not row:
+            continue
+        metadata, name = row.split(b'\t', 1)
+        mode, kind, oid = metadata.decode('ascii').split()
+        if mode not in ('100644', '100755') or kind != 'blob':
+            raise ValueError('nonregular committed tool member')
+        committed[name.decode('utf-8')] = oid
+    if set(files) != set(committed):
+        raise ValueError('tool manifest differs from committed closure')
     physical = set()
     for prefix in prefixes:
         directory = root / prefix
@@ -58,6 +71,13 @@ def validate(root, manifest, expected, entry=None):
             raise ValueError('unsafe tool manifest member')
         if sha(root / name) != expected_sha:
             raise ValueError('tool bytes differ: ' + name)
+        path = root / name
+        git_hash = hashlib.sha1(b'blob ' + str(path.stat().st_size).encode('ascii') + b'\0')
+        with path.open('rb') as stream:
+            while chunk := stream.read(1024 * 1024):
+                git_hash.update(chunk)
+        if git_hash.hexdigest() != committed[name]:
+            raise ValueError('tool bytes are not from pinned commit: ' + name)
     if entry is not None:
         relative = Path(entry).resolve().relative_to(root).as_posix()
         if relative not in files:
