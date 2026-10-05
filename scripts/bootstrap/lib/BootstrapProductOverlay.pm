@@ -16,7 +16,7 @@ our @EXPORT_OK = qw(materialize_product_overlay verify_product_overlay verify_pr
 my @roots = qw(src/compiler src/lib src/app src/plugins src/compositions src/os
     src/package_ownership src/runtime src/generated src/hardware src/i18n src/tool
     src/tooling src/type src/unit src/verification test variants var config
-    scripts/bootstrap scripts/setup examples/10_tooling/trace32_tools
+    scripts/bootstrap scripts/setup tools/counterpart/sdk/c examples/10_tooling/trace32_tools
     examples/05_stdlib/spipe doc/04_architecture doc/08_tracking/bug);
 sub selected {
     my ($p) = @_;
