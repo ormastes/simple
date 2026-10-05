@@ -11,6 +11,7 @@ use std.string_core.{char_code}
 use compiler.frontend.trace_policy.{frontend_trace_suppressed}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, env_remove_process}
+use std.nogc_sync_mut.io_runtime.{exit}
 use compiler.core.types.{int_to_str}
 use compiler.frontend.core.flat_pool_codec.*
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}  # explicit: a glob is not an import-origin for surface projection
@@ -606,6 +607,25 @@ fn expr_unary(op: i64, operand: i64, span_id: i64) -> i64:
 
 fn expr_call(callee: i64, call_args: [i64], span_id: i64) -> i64:
     expr_call_named(callee, call_args, [], span_id)
+
+fn expr_ident_type_args_set(idx: i64, type_args: [i64]):
+    # IDENT does not use the float-text slot. Encode type ids there rather
+    # than in child-expression slots: visitors must never walk a type id as
+    # an expression. The existing flat snapshot and clone preserve this slot.
+    if expr_owner_tag(idx) != EXPR_IDENT: return
+    expr_owner_float_set(idx, flat_pool_enc_i64(type_args))
+
+fn expr_ident_type_args(idx: i64) -> [i64]:
+    if expr_owner_tag(idx) != EXPR_IDENT: return []
+    val encoded = expr_owner_float(idx)
+    if encoded == "": return []
+    val reader = FlatPoolReader.new_bounded(encoded, encoded.len(),
+        encoded.len() * 8, encoded.len(), 8, encoded.len() * 8)
+    val type_args = flat_pool_dec_i64(reader)
+    if not reader.finish_canonical_frame():
+        eprint("E-AST-TYPE-ARGS: malformed explicit call type arguments")
+        exit(1)
+    type_args
 
 fn expr_call_named(callee: i64, call_args: [i64], arg_names: [text], span_id: i64) -> i64:
     # One policy/env decision per call allocation. The former six identical

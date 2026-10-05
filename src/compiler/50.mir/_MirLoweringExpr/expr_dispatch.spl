@@ -2627,6 +2627,26 @@ impl MirLowering:
                 return narrowed
             self.error("enum-to-integer cast could not read runtime discriminant", Some(span))
             return operand_local
+        # Any is a tagged RuntimeValue, even when its MIR carrier is I64.
+        # A numeric cast of that carrier converts the tag/pointer, not the
+        # payload. Require semantic Any provenance; ordinary integers and
+        # nominal enum discriminant casts retain their existing routes.
+        if val source_type = self.enum_match_expr_type(operand):
+            match source_type.kind:
+                case HirTypeKind.Any:
+                    match target.kind:
+                        case HirTypeKind.Int(_, _):
+                            # Decode before narrowing: a wide boxed integer
+                            # cannot be read with the inline-only >>3 path.
+                            val wide = self.decode_runtime_value(operand_local, MirType.i64())
+                            var narrow_builder = self.builder
+                            val narrowed = narrow_builder.emit_cast(mir_operand_copy(wide), mir_target)
+                            self.builder = narrow_builder
+                            return narrowed
+                        case HirTypeKind.Float(_) | HirTypeKind.Bool:
+                            return self.decode_runtime_value(operand_local, mir_target)
+                        case _: ()
+                case _: ()
         var cast_builder = self.builder
         val result = cast_builder.emit_cast(mir_operand_copy(operand_local), mir_target)
         self.builder = cast_builder
@@ -3419,16 +3439,25 @@ impl MirLowering:
                     match right_hir_type.kind:
                         case HirTypeKind.Any: right_is_any_value = true
                         case _: ()
+                # Typed arrays also carry runtime array handles. Comparing two
+                # separately allocated arrays as MIR words tests identity and
+                # makes equal contents unequal. The runtime equality owner
+                # accepts both tagged and raw REGISTERED array handles; do not
+                # box a raw array pointer as an integer. Is/IsNot deliberately
+                # stay on the identity path below.
+                val left_is_array_value = self.local_is_runtime_array(left_local)
+                val right_is_array_value = self.local_is_runtime_array(right_local)
                 var bin_is_runtime_value_eq = false
                 match op:
                     case Eq | NotEq:
-                        bin_is_runtime_value_eq = left_is_any_value or right_is_any_value
+                        bin_is_runtime_value_eq = left_is_any_value or right_is_any_value or
+                            (left_is_array_value and right_is_array_value)
                     case _: ()
                 if bin_is_runtime_value_eq:
                     var runtime_eq_left = left_local
                     var runtime_eq_right = right_local
-                    val runtime_left_tagged = left_is_any_value or self.is_runtime_value_local(runtime_eq_left.id)
-                    val runtime_right_tagged = right_is_any_value or self.is_runtime_value_local(runtime_eq_right.id)
+                    val runtime_left_tagged = left_is_any_value or left_is_array_value or self.is_runtime_value_local(runtime_eq_left.id)
+                    val runtime_right_tagged = right_is_any_value or right_is_array_value or self.is_runtime_value_local(runtime_eq_right.id)
                     if runtime_left_tagged and not runtime_right_tagged:
                         runtime_eq_right = self.box_runtime_value(runtime_eq_right)
                     elif runtime_right_tagged and not runtime_left_tagged:

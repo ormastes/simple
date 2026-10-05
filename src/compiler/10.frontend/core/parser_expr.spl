@@ -49,6 +49,8 @@ use compiler.core.ast.{EXPR_NULL_COALESCE, EXPR_SLICE, EXPR_INTERPOLATED_STRING}
 use compiler.core.ast.{EXPR_AWAIT, EXPR_YIELD, EXPR_SPAWN, EXPR_DO_BLOCK, EXPR_ATOM}
 use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_string_lit}
 use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident}
+use compiler.core.ast.{expr_ident_type_args_set}
+use compiler.frontend.core.lexer.{lex_mark_current_token_as_generic_close}
 use compiler.core.ast.{expr_binary, expr_unary, expr_call, expr_call_named, expr_index}
 use compiler.core.ast.{expr_field_access, expr_method_call, expr_method_call_named, expr_array_lit}
 use compiler.core.ast.{expr_struct_lit}
@@ -765,11 +767,11 @@ fn extract_dotted_path(eid: i64) -> text:
 # Uses lex_snapshot_save / lex_snapshot_restore for full state save/restore.
 # Parity target: Rust src/compiler_rust/parser/src/expressions/postfix.rs
 #                try_skip_ident_generic_args()
-fn try_skip_ident_generic_args():
+fn try_skip_ident_generic_args() -> [i64]:
     # Only trigger on < or <-in-generic-context
     val cur = par_kind_get()
     if cur != 82 and cur != 86:
-        return
+        return []
 
     # Save full lexer + current-token state
     val snap = lex_snapshot_save()
@@ -903,12 +905,31 @@ fn try_skip_ident_generic_args():
         # Backtrack: restore full lexer state and current parser token
         lex_snapshot_rollback(snap)
         parser_tok_restore(saved_tok_nums, saved_tok_text)
+        return []
     else:
-        lex_snapshot_commit(snap)
         if saw_const_arg:
+            lex_snapshot_commit(snap)
             parser_error("const generic arguments are not supported: a numeric literal such as " +
                 "`Tensor<i64, 2>` is not a type, and Simple has no const generic parameters. " +
                 "Drop the explicit generic arguments and let them be inferred, e.g. `Tensor(...)`")
+            return []
+        if par_kind_get() != TOK_LPAREN:
+            # Generic receiver specialization is a separate existing route.
+            lex_snapshot_commit(snap)
+            return []
+        # Lookahead proved this is a call. Rewind and let the canonical type
+        # parser retain its nested type registry instead of discarding tokens.
+        lex_snapshot_rollback(snap)
+        parser_tok_restore(saved_tok_nums, saved_tok_text)
+        parser_advance()
+        var type_args: [i64] = []
+        type_args.push(parser_parse_type())
+        while par_kind_get() == TOK_COMMA:
+            parser_advance()
+            type_args.push(parser_parse_type())
+        lex_mark_current_token_as_generic_close()
+        parser_expect(TOK_GT)
+        return type_args
 
 # Nested tuple-index re-split: `pair.0.1`.
 #
@@ -1037,7 +1058,8 @@ fn parse_postfix_on(base_expr: i64) -> i64:
     # Disambiguate Ident<TypeArgs>.method() vs Ident < expr (binary less-than).
     if (expr_get_tag(base_expr) == EXPR_IDENT and
         (par_kind_get() == 82 or par_kind_get() == 86)):
-        try_skip_ident_generic_args()
+        val explicit_types = try_skip_ident_generic_args()
+        if explicit_types.len() > 0: expr_ident_type_args_set(base_expr, explicit_types)
     var base = base_expr
     while true:
         val kind = par_kind_get()
@@ -1246,7 +1268,8 @@ fn parse_postfix() -> i64:
     # Disambiguate Ident<TypeArgs>.method() vs Ident < expr (binary less-than).
     if (expr_get_tag(base) == EXPR_IDENT and
         (par_kind_get() == 82 or par_kind_get() == 86)):
-        try_skip_ident_generic_args()
+        val explicit_types = try_skip_ident_generic_args()
+        if explicit_types.len() > 0: expr_ident_type_args_set(base, explicit_types)
     while true:
         val kind = par_kind_get()
         if kind == 164 or kind == 162:

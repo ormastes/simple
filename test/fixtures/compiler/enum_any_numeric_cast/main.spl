@@ -1,0 +1,43 @@
+# Isolate Any extraction from the independently failing decimal literal lane.
+# Keep native_enum_numeric_payload_widths.spl unchanged as the full oracle.
+enum Carrier:
+    One(value: any)
+    Pair(value: any, marker: i64)
+    Nested(values: [Carrier])
+
+fn unpack(value: Carrier) -> any:
+    match value:
+        case Carrier.One(payload): payload
+        case Carrier.Pair(payload, marker):
+            if marker != 73: return 0
+            payload
+        case Carrier.Nested(values):
+            if values.len() != 1: return 0
+            unpack(values[0])
+
+fn floating(value: i64) -> f64:
+    value as f64
+
+fn main() -> i32:
+    var failed = 0
+    val signed = Carrier.One(-7)
+    if (unpack(signed) as i8) != -7: failed = failed + 1
+    if (unpack(signed) as i16) != -7: failed = failed + 1
+    if (unpack(signed) as i32) != -7: failed = failed + 1
+    val unsigned = Carrier.One(200)
+    if (unpack(unsigned) as u8) != 200: failed = failed + 1
+    if (unpack(unsigned) as u16) != 200: failed = failed + 1
+    if (unpack(unsigned) as u32) != 200: failed = failed + 1
+    val wide = Carrier.One(9007199254740993u64)
+    if (unpack(wide) as u64) != 9007199254740993u64: failed = failed + 1
+    val large = Carrier.Pair(floating(9), 73)
+    if (unpack(large) as f64) != floating(9): failed = failed + 1
+    if (unpack(large) as f32) != floating(9): failed = failed + 1
+    val items: [Carrier] = [signed]
+    val nested = Carrier.Nested(items)
+    if (unpack(nested) as i64) != -7: failed = failed + 1
+    if (unpack(signed) as i64) != -7: failed = failed + 1
+    val heap = Carrier.One(4611686018427387905)
+    if (unpack(heap) as i8) != 1: failed = failed + 1
+    print "enum Any numeric cast: 12 checks, {failed} failures"
+    failed

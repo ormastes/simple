@@ -1,0 +1,135 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types_expr.*
+use compiler.core.parser.{parser_init, parser_has_errors}
+use compiler.core.parser_expr.{parse_expr}
+use compiler.core.ast.{expr_get_left, expr_reset, expr_ident_type_args}
+use compiler.frontend.core._AstExpr.nodes.{flat_expr_pools_dump, flat_expr_pools_restore}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.frontend.generated.ast_semantic_value.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.hir_types.{HirTypeKind, SymbolKind}
+use compiler.hir.hir_definitions.{HirExprKind}
+
+fn explicit_transport_return(source: text, expected_next: text = "") -> Expr:
+    val parsed = parse_and_build_module(source, "explicit_transport.spl")
+    expect(parser_has_errors()).to_be(false)
+    expect(parsed.functions.has("probe")).to_be(true)
+    if expected_next != "": expect(parsed.functions.has(expected_next)).to_be(true)
+    val body = parsed.functions["probe"].body
+    for statement in body.stmts:
+        match statement.kind:
+            case StmtKind.Return(value):
+                if val expression = value: return expression
+            case _: ()
+    expect(false).to_be(true)  # Missing return is a failure, never a fallback PASS.
+    Expr(kind: ExprKind.NilLit, span: Span.empty())
+
+fn explicit_transport_types(expression: Expr) -> [Type]:
+    match expression.kind:
+        case ExprKind.Call(callee, _): return callee.explicit_type_args
+        case _: ()
+    expect(false).to_be(true)
+    []
+
+describe "explicit free-call type argument transport":
+    it "preserves ordered primitive and array arguments through the flat bridge":
+        val expression = explicit_transport_return("fn probe():\n    return choose<i64, [text]>()\n")
+        val types = explicit_transport_types(expression)
+        expect(types.len()).to_equal(2)
+        match types[0].kind:
+            case TypeKind.Named(name, _): expect(name).to_equal("i64")
+            case _: expect(false).to_be(true)
+        match types[1].kind:
+            case TypeKind.Array(element, _):
+                match element.kind:
+                    case TypeKind.Named(name, _): expect(name).to_equal("text")
+                    case _: expect(false).to_be(true)
+            case _: expect(false).to_be(true)
+
+    it "preserves type ids across expression pool snapshot reset and restore":
+        parser_init("choose<i64, bool>()")
+        val expression = parse_expr()
+        expect(parser_has_errors()).to_be(false)
+        val callee = expr_get_left(expression)
+        val before = expr_ident_type_args(callee)
+        expect(before.len()).to_equal(2)
+        val snapshot = flat_expr_pools_dump()
+        expr_reset()
+        val reader = FlatPoolReader.new_canonical(snapshot)
+        expect(flat_expr_pools_restore(reader)).to_be(true)
+        expect(reader.finish_canonical_frame()).to_be(true)
+        expect(expr_ident_type_args(callee)).to_equal(before)
+
+    it "retains nested dictionary types without swallowing the call or next statement":
+        val expression = explicit_transport_return("fn probe():\n    return choose<Dict<text, i64>>()\nfn after() -> i64:\n    return 9\n", "after")
+        val types = explicit_transport_types(expression)
+        expect(types.len()).to_equal(1)
+        match types[0].kind:
+            case TypeKind.Named(name, args):
+                expect(name).to_equal("Dict")
+                expect(args.len()).to_equal(2)
+                match args[0].kind:
+                    case TypeKind.Named(key, _): expect(key).to_equal("text")
+                    case _: expect(false).to_be(true)
+                match args[1].kind:
+                    case TypeKind.Named(value, _): expect(value).to_equal("i64")
+                    case _: expect(false).to_be(true)
+            case _: expect(false).to_be(true)
+
+    it "delivers explicit types to the real HIR Call lowering":
+        val expression = explicit_transport_return("fn probe():\n    return choose<i64, bool>()\n")
+        var lowering = HirLowering.new()
+        lowering.symbols.define("choose", SymbolKind.Function, nil,
+            Span.empty(), Visibility.Private, false, nil)
+        val hir = lowering.lower_hir_expr(expression)
+        match hir.kind:
+            case HirExprKind.Call(_, _, types):
+                expect(types.len()).to_equal(2)
+                match types[0].kind:
+                    case HirTypeKind.Int(bits, signed):
+                        expect(bits).to_equal(64)
+                        expect(signed).to_be(true)
+                    case _: expect(false).to_be(true)
+                match types[1].kind:
+                    case HirTypeKind.Bool: ()
+                    case _: expect(false).to_be(true)
+            case _: expect(false).to_be(true)
+
+    it "makes explicit argument changes alter the semantic hash":
+        val first = explicit_transport_return("fn probe():\n    return choose<i64>()\n")
+        val second = explicit_transport_return("fn probe():\n    return choose<bool>()\n")
+        val first_hash = ast_semantic_hash_finish(ast_semantic_encode_expr(first, ast_semantic_hash_seed()))
+        val second_hash = ast_semantic_hash_finish(ast_semantic_encode_expr(second, ast_semantic_hash_seed()))
+        expect(first_hash.len()).to_equal(64)
+        expect(second_hash.len()).to_equal(64)
+        expect(first_hash == second_hash).to_be(false)
+
+    it "resolves an explicit nominal argument in the active HIR symbol table":
+        val expression = explicit_transport_return("fn probe():\n    return choose<Scan>()\n")
+        var lowering = HirLowering.new()
+        lowering.symbols.define("choose", SymbolKind.Function, nil,
+            Span.empty(), Visibility.Private, false, nil)
+        val owner = lowering.symbols.define("Scan", SymbolKind.Struct, nil,
+            Span.empty(), Visibility.Private, false, nil)
+        val hir = lowering.lower_hir_expr(expression)
+        match hir.kind:
+            case HirExprKind.Call(_, _, types):
+                expect(types.len()).to_equal(1)
+                match types[0].kind:
+                    case HirTypeKind.Named(symbol, args):
+                        expect(symbol.id).to_equal(owner.id)
+                        expect(args.len()).to_equal(0)
+                    case _: expect(false).to_be(true)
+            case _: expect(false).to_be(true)
+
+    it "keeps implicit calls empty and comparison backtracking unchanged":
+        val implicit = explicit_transport_return("fn probe():\n    return choose()\n")
+        expect(explicit_transport_types(implicit).len()).to_equal(0)
+        val comparison = explicit_transport_return("fn probe(a: i64, b: i64, c: i64):\n    return a < b or a > (c)\n")
+        match comparison.kind:
+            case ExprKind.Binary(_, _, _): ()
+            case _: expect(false).to_be(true)

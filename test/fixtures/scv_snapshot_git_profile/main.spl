@@ -1,0 +1,79 @@
+# Native end-to-end admission benchmark. Fixture files and Git comparison are
+# prepared by the owner outside timed execution, identically for each binary.
+use app.compiler_entrypoint.inventory_events.{compiler_inventory_refresh_v1}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_validate_v1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_acquire_v1,
+    scv_compile_snapshot_source_unchanged_v1}
+use std.scv.store.{scv_content_id_for_u8}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.scv.compile_source_inventory_core.{compile_source_inventory_plain_checkout_v1}
+use app.io.file_ops.{path_absolute}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_heap_registry_count() -> i64
+
+fn snapshot_profile_comparison_check() -> bool:
+    val originals = ["", "fn main(): 0\n", "# 한글 —\r\n", "a\0b", "\0ab", "ab\0"]
+    val changes = ["x", "fn main(): 1\n", "# 한글 –\r\n", "a\0c", "\0ac", "ac\0"]
+    var index = 0
+    for original in originals:
+        val digest = scv_content_id_for_u8(text_to_utf8_bytes(original))
+        if not scv_compile_snapshot_source_unchanged_v1(original, original, digest): return false
+        val current = changes[index]
+        val current_digest = scv_content_id_for_u8(text_to_utf8_bytes(current))
+        if digest == current_digest: return false
+        if scv_compile_snapshot_source_unchanged_v1(original, current, digest): return false
+        # Different buffers still use the historical digest fallback.
+        if not scv_compile_snapshot_source_unchanged_v1(original, current, current_digest): return false
+        index = index + 1
+    true
+
+fn main() -> i64:
+    val args = rt_cli_get_args()
+    if args.contains("--comparison-only"):
+        if not snapshot_profile_comparison_check(): return 21
+        print "comparison_vectors=18"
+        print "SCV_SNAPSHOT_COMPARISON_DONE"
+        return 0
+    var requested_root = ""
+    var index = 0
+    while index < args.len():
+        if args[index] == "--root" and index + 1 < args.len():
+            index = index + 1
+            requested_root = args[index]
+        index = index + 1
+    if requested_root == "": return 22
+    val root = compile_source_inventory_plain_checkout_v1(path_absolute(requested_root))
+    if root == "": return 23
+    val cache = root + "/build/scv"
+    val started = rt_time_now_unix_micros()
+    val allocations_before = rt_heap_registry_count()
+    val refreshed = compiler_inventory_refresh_v1(root, cache, ["src", "test"], args.contains("--cold"))
+    val inventory_done = rt_time_now_unix_micros()
+    if not refreshed.valid:
+        print "refusal={refreshed.reason}"
+        return 24
+    val snapshot = scv_compile_snapshot_acquire_v1(root, cache, ["src", "test"])
+    val snapshot_done = rt_time_now_unix_micros()
+    if not snapshot.valid:
+        print "refusal={snapshot.reason}"
+        return 25
+    val authority = compiler_source_authority_validate_v1(root, cache, snapshot,
+        refreshed.inventory_digest, refreshed.inventory_generation, false)
+    val finished = rt_time_now_unix_micros()
+    if not authority.valid or snapshot.source_drifted:
+        print "refusal={authority.reason}"
+        return 26
+    print "inventory_us={inventory_done - started}"
+    print "snapshot_us={snapshot_done - inventory_done}"
+    print "validation_us={finished - snapshot_done}"
+    print "total_us={finished - started}"
+    print "retained_allocations={rt_heap_registry_count() - allocations_before}"
+    print "revision={snapshot.revision_id}"
+    print "generation={authority.inventory_generation}"
+    print "inventory_digest={authority.source_inventory_digest}"
+    print "count={snapshot.inventory_count}"
+    print "snapshot_root={snapshot.snapshot_root}"
+    print "SCV_SNAPSHOT_GIT_PROFILE_DONE"
+    0

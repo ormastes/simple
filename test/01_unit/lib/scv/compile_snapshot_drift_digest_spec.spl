@@ -1,0 +1,31 @@
+use std.scv.compile_snapshot.{scv_compile_snapshot_source_unchanged_v1}
+use std.scv.store.{scv_content_id_for_u8}
+use std.common.text_bytes.{text_to_utf8_bytes}
+
+fn snapshot_drift_matches_reference(original: text, current: text):
+    val admitted = scv_content_id_for_u8(text_to_utf8_bytes(original))
+    val current_digest = scv_content_id_for_u8(text_to_utf8_bytes(current))
+    expect(scv_compile_snapshot_source_unchanged_v1(original, current, admitted)).to_equal(
+        current_digest == admitted)
+
+describe "SCV source drift digest reuse":
+    it "preserves empty ASCII Unicode and CRLF observations":
+        for content in ["", "fn main(): 0\n", "# 한글 —\r\n", "a\0b", "\0"]:
+            snapshot_drift_matches_reference(content, content)
+            snapshot_drift_matches_reference(content, content + "x")
+            snapshot_drift_matches_reference(content + "x", content)
+
+    it "detects equal-length changes after embedded NUL":
+        val original = "a\0b"
+        val current = "a\0c"
+        val admitted = scv_content_id_for_u8(text_to_utf8_bytes(original))
+        expect(scv_compile_snapshot_source_unchanged_v1(original, current, admitted)).to_equal(false)
+        snapshot_drift_matches_reference(original, current)
+        snapshot_drift_matches_reference("\0ab", "\0ac")
+        snapshot_drift_matches_reference("ab\0", "ac\0")
+        snapshot_drift_matches_reference("same-size-1", "same-size-2")
+
+    it "preserves the digest fallback for differing bytes":
+        val current = "changed\0bytes"
+        val matching_digest = scv_content_id_for_u8(text_to_utf8_bytes(current))
+        expect(scv_compile_snapshot_source_unchanged_v1("different", current, matching_digest)).to_equal(true)

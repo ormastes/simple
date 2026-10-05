@@ -344,6 +344,19 @@ struct ScvCompileMaterializedSourceV1:
     row: text
     source_drifted: bool
 
+fn scv_compile_snapshot_source_unchanged_v1(
+    original: text, current: text, digest: text
+) -> bool:
+    # Both hosted native providers implement starts_with with explicit byte
+    # lengths and memcmp. Equal lengths make this a whole-buffer comparison,
+    # including embedded NUL; ordinary text == can stop at NUL in native code.
+    # Only identical bytes reuse the digest already admitted for original.
+    if original.len() == current.len() and current.starts_with(original):
+        return true
+    # Retain the existing digest comparison for different bytes (including
+    # its collision semantics). The caller still performs the integrity read.
+    scv_content_id_for_u8(text_to_utf8_bytes(current)) == digest
+
 fn scv_compile_snapshot_materialize_source_unscoped_v1(
     canonical_root: text, cache_root: text, staging: text,
     entry: CompileSourceInventoryEntryV1
@@ -377,7 +390,7 @@ fn scv_compile_snapshot_materialize_source_unscoped_v1(
         drifted = true
     else:
         val current_text = current!
-        if scv_content_id_for_u8(text_to_utf8_bytes(current_text)) != digest:
+        if not scv_compile_snapshot_source_unchanged_v1(content!, current_text, digest):
             drifted = true
     ScvCompileMaterializedSourceV1("ok", "{rel}|{digest}|{bytes.len()}", drifted)
 
