@@ -2053,18 +2053,22 @@ fn try_compile_builtin_method_call<M: Module>(
         }
 
         // Erased receiver (`list` element, `[Any]` slot): the value is TAGGED,
-        // and HIR types `to_i64`/`to_int` on an ANY receiver as a RAW I64
-        // (hir/lower/expr/mod.rs), so `rt_to_int_dynamic`'s verbatim non-text
-        // answer (`n << 3`) was wrong. Decode it; text still parses. Under the
-        // JIT the inflate decoder's `data[byte_pos].to_i64()` read every byte
-        // 8x too large. The narrower casts (`to_u8`...) on ANY are typed ANY
-        // (tagged result) in HIR and keep their pass-through path.
+        // and HIR types every integer cast on an ANY receiver as its RAW
+        // target type (hir/lower/expr/mod.rs). `rt_to_int_dynamic`'s verbatim
+        // non-text answer is `n << 3`, and the narrow casts reduced that tagged
+        // word. Decode it (text still parses), then narrow. Under the JIT the
+        // inflate decoder's `data[byte_pos].to_i64()` read every byte 8x too
+        // large and `symbol.to_u8()` pushed the low byte of the tag word.
         let recv_ty_known = ctx.vreg_types.get(&receiver).copied();
-        if erased_receiver
-            && matches!(method, "to_i64" | "to_int")
-            && matches!(recv_ty_known, None | Some(TypeId::ANY))
-        {
-            return Ok(Some(call_runtime_1(ctx, builder, "rt_any_to_int", receiver_val)));
+        if erased_receiver && to_is_int && matches!(recv_ty_known, None | Some(TypeId::ANY)) {
+            let decoded = call_runtime_1(ctx, builder, "rt_any_to_int", receiver_val);
+            let converted = match to_ty {
+                TypeId::U8 | TypeId::I8 => builder.ins().ireduce(types::I8, decoded),
+                TypeId::U16 | TypeId::I16 => builder.ins().ireduce(types::I16, decoded),
+                TypeId::U32 | TypeId::I32 => builder.ins().ireduce(types::I32, decoded),
+                _ => decoded,
+            };
+            return Ok(Some(converted));
         }
 
         // `??` can leave a text handle typed as Pointer<text> in MIR.
