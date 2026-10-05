@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,6 +26,38 @@ PHASE1 = load('phase1-whole-tests')
 
 
 class WaveTests(unittest.TestCase):
+    def test_waiting_product_gate_is_released_after_phase1_callback_crash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'request.json').write_text('{}')
+            request = GATE.digest(root / 'request.json')
+            command = [sys.executable, str(SCRIPTS / 'phase1-terminal-gate.py'),
+                       '--receipt', str(root / 'result.json'), '--request-sha256', request]
+            child = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                # Actual callback process termination supplies the fallback code.
+                callback = subprocess.run([sys.executable, '-c', 'raise SystemExit(125)'])
+                WAVE.ensure_phase1_terminal(root, callback.returncode, request)
+                stdout, stderr = child.communicate(timeout=10)
+                self.assertEqual(child.returncode, 0, stderr)
+                observed = json.loads(stdout)
+                self.assertEqual(observed['phase1_status'], 'INFRASTRUCTURE_FAILED')
+                self.assertTrue(observed['full_run_permitted'])
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.communicate()
+
+    def test_malformed_existing_terminal_fails_instead_of_waiting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'result.json').write_text('{broken')
+            result = subprocess.run([sys.executable, str(SCRIPTS / 'phase1-terminal-gate.py'),
+                '--receipt', str(root / 'result.json'), '--request-sha256', 'a' * 64],
+                capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('full_run_permitted', result.stdout)
+
     def test_terminal_failure_unblocks_but_never_becomes_pass(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
