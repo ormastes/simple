@@ -16,6 +16,22 @@ trap cleanup EXIT HUP INT TERM
 
 cat >"$TMP/provider.c" <<'EOF'
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+/* An external marker observes mapping without invoking a demanding getter. */
+static void provider_lifetime_marker(char event) {
+    const char *path = getenv("SIMPLE_TEST_PROVIDER_LIFETIME_MARKER");
+    FILE *marker;
+    if (!path || !*path) return;
+    marker = fopen(path, "ab");
+    if (!marker || fputc(event, marker) == EOF || fclose(marker) != 0) abort();
+}
+__attribute__((constructor)) static void provider_loaded_marker(void) {
+    provider_lifetime_marker('C');
+}
+__attribute__((destructor)) static void provider_unloaded_marker(void) {
+    provider_lifetime_marker('D');
+}
 #ifndef PROVIDER_ABI
 #define PROVIDER_ABI 1
 #endif
@@ -205,6 +221,55 @@ int main(int argc, char **argv) {
 }
 EOF
 
+cat >"$TMP/demand_harness.c" <<'EOF'
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+int64_t rt_vulkan_device_count(void);
+int64_t rt_vulkan_alloc_buffer(int64_t, int64_t);
+int64_t rt_gpu_provider_unload(int64_t);
+static int marker_is(const char *path, const char *expected) {
+    char bytes[8];
+    size_t count;
+    int failed;
+    FILE *marker = fopen(path, "rb");
+    if (!marker) return errno == ENOENT && expected[0] == '\0';
+    count = fread(bytes, 1, sizeof(bytes), marker);
+    failed = ferror(marker);
+    if (fclose(marker) != 0) failed = 1;
+    return !failed && count == strlen(expected) &&
+        memcmp(bytes, expected, count) == 0;
+}
+int main(int argc, char **argv) {
+    int i;
+    if (argc != 3) return 2;
+    /* The marker environment is set before process startup, so even a
+     * constructor loaded before main is visible to this first assertion. */
+    if (!marker_is(argv[2], "")) return 10;
+    if (setenv("SIMPLE_VULKAN_PROVIDER_PATH", argv[1], 1) != 0) return 11;
+    if (!marker_is(argv[2], "")) return 12;
+    /* This operation is the first actual capability demand. */
+    if (rt_vulkan_device_count() != 7) return 13;
+    if (!marker_is(argv[2], "C")) return 14;
+    for (i = 0; i < 128; i++) {
+        if (rt_vulkan_device_count() != 7 ||
+                rt_vulkan_alloc_buffer(4096, 3) != 73) return 15;
+    }
+    if (!marker_is(argv[2], "C")) return 16;
+    /* A leaked dlopen reference per repeated call would prevent D here. */
+    if (rt_gpu_provider_unload(2) != 1) return 17;
+    if (!marker_is(argv[2], "CD")) return 18;
+    if (rt_vulkan_device_count() != 7) return 19;
+    if (!marker_is(argv[2], "CDC")) return 20;
+    if (rt_gpu_provider_unload(2) != 1) return 21;
+    if (!marker_is(argv[2], "CDCD")) return 22;
+    puts("gpu_provider_demand_lifetime=CDCD repeated_demands=128");
+    return 0;
+}
+EOF
+
 cc -shared -fPIC "$TMP/provider.c" -o "$TMP/provider.so"
 cc -shared -fPIC -DPROVIDER_DEVICE_COUNT=9 -DPROVIDER_BUFFER_HANDLE=88 \
     "$TMP/provider.c" -o "$TMP/replacement.so"
@@ -223,6 +288,20 @@ cc -Wl,--gc-sections "$TMP/harness.c" "$TMP/runtime_native.o" \
     "$TMP/runtime_dynload.o" -ldl -lm -pthread -o "$TMP/harness"
 cc -Wl,--gc-sections "$TMP/cuda_harness.c" "$TMP/runtime_native.o" \
     "$TMP/runtime_dynload.o" -ldl -lm -o "$TMP/cuda_harness"
+cc -Wl,--gc-sections "$TMP/demand_harness.c" "$TMP/runtime_native.o" \
+    "$TMP/runtime_dynload.o" -ldl -lm -o "$TMP/demand_harness"
+
+demand="$(SIMPLE_TEST_PROVIDER_LIFETIME_MARKER="$TMP/demand.marker" \
+    "$TMP/demand_harness" "$TMP/provider.so" "$TMP/demand.marker")"
+[ "$demand" = "gpu_provider_demand_lifetime=CDCD repeated_demands=128" ]
+# Mutation control: a real pre-main mapping must trip the zero-demand check.
+set +e
+SIMPLE_TEST_PROVIDER_LIFETIME_MARKER="$TMP/premature.marker" \
+    LD_PRELOAD="$TMP/provider.so" \
+    "$TMP/demand_harness" "$TMP/provider.so" "$TMP/premature.marker"
+premature_status=$?
+set -e
+[ "$premature_status" -eq 10 ]
 
 good="$($TMP/harness "$TMP/provider.so" "$TMP/replacement.so")"
 bad="$($TMP/harness "$TMP/wrong.so" "$TMP/wrong.so")"
@@ -249,6 +328,10 @@ if command -v readelf >/dev/null 2>&1; then
 fi
 
 printf '%s\n' \
+    "gpu_provider_zero_load_before_demand=true" \
+    "gpu_provider_constructor_once_per_lifetime=true" \
+    "gpu_provider_repeated_demand_reuses_mapping=true" \
+    "gpu_provider_early_load_mutation_rejected=true" \
     "gpu_provider_dynamic_load=true" \
     "gpu_provider_handle_local_resolution=true" \
     "gpu_provider_scalar_operation_dispatch=true" \

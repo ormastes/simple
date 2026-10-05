@@ -1,0 +1,30 @@
+#!/bin/sh
+# Bootstrap-only seed integration: no implicit normal-tool or seed fallback.
+set -eu
+[ "$#" -eq 3 ] || { echo "usage: $0 COMPILER SPEC OUTPUT" >&2; exit 64; }
+compiler=$1
+spec=$2
+output=$3
+[ -x "$compiler" ] && [ -f "$spec" ] || exit 65
+case "$compiler" in /*) ;; *) exit 65 ;; esac
+repo=$(CDPATH= cd -- "${0%/*}/../../.." && pwd)
+mkdir -p "$output"
+export SIMPLE_BOOTSTRAP=1 SIMPLE_TEST_RUNNER_RUST=1
+SIMPLE_BINARY="$compiler"; export SIMPLE_BINARY
+perl "$repo/scripts/resource/process-tree-rss-watchdog.pl" \
+  --max-rss-kib=5859375 --interval-ms=100 --timeout-seconds=60 \
+  --receipt="$output/discovery.rss.env" -- \
+  "$compiler" test "$spec" --list --format json --no-db --no-cache \
+  >"$output/discovery.stdout" 2>"$output/discovery.stderr"
+python3 - "$output/discovery.stdout" <<'PYJSON'
+import json,sys
+text=open(sys.argv[1]).read(); decoder=json.JSONDecoder(); objects=[]
+for i,c in enumerate(text):
+    if c != '{': continue
+    try: obj,_=decoder.raw_decode(text[i:])
+    except json.JSONDecodeError: continue
+    if isinstance(obj,dict) and 'total_listed' in obj: objects.append(obj)
+assert objects and objects[-1]['total_listed'] > 0, 'missing positive enumeration'
+PYJSON
+grep -q '^status=complete$' "$output/discovery.rss.env"
+echo "PASS: admitted managed session retained positive seed test enumeration"

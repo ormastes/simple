@@ -1,0 +1,15 @@
+# Rust packed write_span layout parity
+
+Status: focused runtime qualification passed. Based on release49328379949; integrated with the later release test deduplication and default AVX512 removal. Simple compiler/app execution remains unqualified.
+
+The old Rust owner treated packed bytes as eight-byte RuntimeValue slots. Copying four logical bytes changed28 bytes beyond the requested span. Matching layouts now use overlap-safe copies at their actual element width. Mixed layouts decode raw u64, including boxed signed/unsigned words, and use C-twin compact encoding for tagged destinations. Raw-i64 count, nonpositive-count no-op, checked fatal bounds, and existing allocation-failure behavior remain unchanged.
+
+Three new owner tests cover safe allocation sentinels, byte overlap both directions, all nine layout combinations with offsets/high bits/untouched endpoints, zero/negative counts, tagged text/float identity, boxed signed-to-word conversion, and overlapping raw words. The combined runtime binary passed79 focused tests, including all six span tests (three existing bounds tests and three new layout tests), with0failed/ignored. Log: /var/tmp/item5-rust-wide-integration-20261006/cycle2/focused-tests.log.
+
+Independent public-ABI evidence: an immutable cdfbe1e-source archive failed the sentinel harness with logical_count=4, physical_capacity=64, changed_tail_bytes=28. Both buffers had real64-byte allocations, so the erroneous32-byte copy stayed physically in bounds. The old raw return32 reflects its earlier tagged-count ABI and was not the corruption oracle. Baseline logs: /var/tmp/item5-packed-span-baseline-20261006/{link.log,run.log}.
+
+The same harness linked to the repaired combined archive exited0 with logical_count=4 physical_capacity=64 returned_raw=4 changed_tail_bytes=0. Archive SHA256:0bdc952b39af71e77b4e5e49423240348338211626aa8fb89f8cc5ed7f5656f7. Evidence: /var/tmp/item5-rust-wide-integration-20261006/cycle2/span-public/{probe,run.log,probe.sha256}. Combined qualification also passed TLS compilation, full archive AVX512 absence, and native/Nehalem public probes; those are integration checks, not extra span-only tests.
+
+Retained failures: the first combined compile exited101 with six E0594 diagnostics from read-only test pointers. Five fixture bindings were corrected to get_typed_ptr_mut; production code was unchanged. Original log: /var/tmp/item5-rust-wide-integration-20261006/build-tests.log. After the successful public probe, a wrapper display command failed on a CRLF filename suffix; execution/hash evidence was already captured and the probe was not rerun.
+
+Separate existing issue: rt_typed_words_u64_at checks inline-only is_int, then returns raw pointer bits for boxed wide integers in tagged arrays. No accessor API changed here. These regressions use actual storage or explicit integer decoding rather than that accessor as their oracle. That follow-up needs independent qualification.

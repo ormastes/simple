@@ -6,9 +6,9 @@ use std.skia.feature.glyph.ot_parser_layout.{LayoutLookupPlan,
     parse_gsub_skeleton, parse_gpos_skeleton, select_gsub_lookup_plan, select_gpos_lookup_plan}
 use std.skia.feature.shaper.selected_complex.{selected_bounded_hmtx, selected_units_per_em}
 use std.skia.feature.shaper.ot_layout_context.{LayoutGlyphRecord, LayoutApplyResult}
-use std.skia.feature.shaper.ot_layout_apply.{layout_validate_gsub_with_catalog,
-    layout_apply_gsub_with_catalog}
-use std.skia.feature.shaper.ot_layout_gpos.{gpos_validate, gpos_apply}
+use std.skia.feature.shaper.ot_layout_apply.{layout_validate_gsub_activations,
+    layout_apply_gsub_activations}
+use std.skia.feature.shaper.ot_layout_gpos.{gpos_validate, gpos_apply_directed}
 
 class CanonicalLayoutRun:
     glyphs: [LayoutGlyphRecord]
@@ -31,24 +31,45 @@ fn _selected_defaults(script: u32, language: text) -> ([u32], [u32], u32):
         return (_tags(["locl", "ccmp", "nukt", "akhn", "rphf", "rkrf", "pref", "blwf",
             "half", "abvf", "pstf", "vatu", "cjct", "init", "pres", "abvs", "blws",
             "psts", "haln", "calt"]), _tags(["abvm", "blwm", "dist", "kern"]), layout_tag("HIN "))
-    if script == layout_tag("arab") and (language == "ar" or language == "ur"):
+    if script == layout_tag("arab"):
         return (_tags(["rtlm", "ccmp", "locl", "isol", "fina", "fin2", "fin3", "medi",
             "med2", "init", "rlig", "calt", "rclt", "liga", "clig", "mset", "stch"]),
             _tags(["curs", "kern", "mark", "mkmk"]),
-            if language == "ur": layout_tag("URD ") else: 0u32)
+            _arabic_language_tag(language))
     ([], [], 0u32)
+
+# OpenType language-system tag for an Arabic-script run (0 = default LangSys).
+fn _arabic_language_tag(language: text) -> u32:
+    if language == "ur": return layout_tag("URD ")
+    if language == "fa": return layout_tag("FAR ")
+    0u32
+
+# Any run of the Arabic block (U+0600-U+06FF) and Arabic Supplement
+# (U+0750-U+077F), plus the spaces script itemization folds into it, goes
+# through the canonical GSUB/GPOS lane; it used to admit only the literal
+# strings "العربية" (ar) and "اردو" (ur).
+fn _arabic_run_supported(codepoints: [u32], start: i64, end_idx: i64) -> bool:
+    if start < 0 or end_idx > codepoints.len() or start >= end_idx: return false
+    var index = start
+    var letters: i64 = 0
+    while index < end_idx:
+        val cp = codepoints[index]
+        if (cp >= 1536u32 and cp <= 1791u32) or (cp >= 1872u32 and cp <= 1919u32):
+            letters = letters + 1
+        else if cp != 32u32 and cp != 160u32:
+            return false
+        index = index + 1
+    letters > 0
 
 fn _selected_text(script: u32, language: text, codepoints: [u32], start: i64, end_idx: i64) -> bool:
     if script == layout_tag("latn") or script == layout_tag("hani") or script == layout_tag("cyrl"):
         return true
     if script == layout_tag("DFLT"):
         return language == "und" and end_idx - start == 1 and codepoints[start] == 128512u32
+    if script == layout_tag("arab"):
+        return _arabic_run_supported(codepoints, start, end_idx)
     val expected = if script == layout_tag("dev2") and language == "hi":
         [2361u32, 2367u32, 2344u32, 2381u32, 2342u32, 2368u32]
-    else if script == layout_tag("arab") and language == "ar":
-        [1575u32, 1604u32, 1593u32, 1585u32, 1576u32, 1610u32, 1577u32]
-    else if script == layout_tag("arab") and language == "ur":
-        [1575u32, 1585u32, 1583u32, 1608u32]
     else:
         []
     if expected.len() == 0 or end_idx - start != expected.len(): return false
@@ -83,25 +104,58 @@ fn _arabic_mask(plan: LayoutLookupPlan, form: i64) -> u64:
         mask = mask | _feature_mask(plan, "fina") | _feature_mask(plan, "fin2") | _feature_mask(plan, "fin3")
     mask
 
+# Unicode Arabic joining type (ArabicShaping.txt) for the Arabic block and
+# Arabic Supplement: 0 U (non-joining), 1 R (right-joining), 2 D (dual),
+# 3 C (join-causing, tatweel), 4 T (transparent: harakat and other marks).
+fn _arabic_joining_type(cp: u32) -> i64:
+    if (cp >= 1552u32 and cp <= 1562u32) or (cp >= 1611u32 and cp <= 1631u32) or cp == 1648u32 or
+        (cp >= 1750u32 and cp <= 1756u32) or (cp >= 1759u32 and cp <= 1764u32) or
+        (cp >= 1767u32 and cp <= 1768u32) or (cp >= 1770u32 and cp <= 1773u32):
+        return 4
+    if cp == 1600u32: return 3
+    if (cp >= 1570u32 and cp <= 1573u32) or cp == 1575u32 or cp == 1577u32 or
+        (cp >= 1583u32 and cp <= 1586u32) or cp == 1608u32 or
+        (cp >= 1649u32 and cp <= 1651u32) or (cp >= 1653u32 and cp <= 1655u32) or
+        (cp >= 1672u32 and cp <= 1689u32) or cp == 1728u32 or
+        (cp >= 1731u32 and cp <= 1739u32) or cp == 1741u32 or cp == 1743u32 or
+        (cp >= 1746u32 and cp <= 1747u32) or cp == 1749u32 or (cp >= 1774u32 and cp <= 1775u32) or
+        (cp >= 1881u32 and cp <= 1883u32) or (cp >= 1899u32 and cp <= 1900u32) or cp == 1905u32 or
+        (cp >= 1907u32 and cp <= 1908u32) or (cp >= 1912u32 and cp <= 1913u32):
+        return 1
+    if cp == 1574u32 or cp == 1576u32 or (cp >= 1578u32 and cp <= 1582u32) or
+        (cp >= 1587u32 and cp <= 1599u32) or (cp >= 1601u32 and cp <= 1607u32) or
+        (cp >= 1609u32 and cp <= 1610u32) or (cp >= 1646u32 and cp <= 1647u32) or
+        (cp >= 1656u32 and cp <= 1671u32) or (cp >= 1690u32 and cp <= 1727u32) or
+        (cp >= 1729u32 and cp <= 1730u32) or cp == 1740u32 or cp == 1742u32 or
+        (cp >= 1744u32 and cp <= 1745u32) or (cp >= 1786u32 and cp <= 1788u32) or cp == 1791u32 or
+        (cp >= 1872u32 and cp <= 1919u32):
+        return 2
+    0
+
+fn _joins_to_next(joining_type: i64) -> bool:
+    joining_type == 2 or joining_type == 3
+
+fn _joins_to_previous(joining_type: i64) -> bool:
+    joining_type == 1 or joining_type == 2 or joining_type == 3
+
+# Positional form of codepoints[index]: 0 isol, 1 init, 2 medi, 3 fina.
+# Transparent marks are skipped when looking for the neighbouring letter,
+# so "بِسم" still joins across the kasra.
 fn _joining_form(codepoints: [u32], index: i64) -> i64:
-    val current = codepoints[index]
-    val joins_previous = index > 0 and _joins_left(codepoints[index - 1]) and _joins_right(current)
-    val joins_next = index + 1 < codepoints.len() and _joins_left(current) and _joins_right(codepoints[index + 1])
+    val current = _arabic_joining_type(codepoints[index])
+    if current == 4 or current == 0: return 0
+    var previous = index - 1
+    while previous >= 0 and _arabic_joining_type(codepoints[previous]) == 4: previous = previous - 1
+    var next = index + 1
+    while next < codepoints.len() and _arabic_joining_type(codepoints[next]) == 4: next = next + 1
+    val joins_previous = previous >= 0 and _joins_to_next(_arabic_joining_type(codepoints[previous])) and
+        _joins_to_previous(current)
+    val joins_next = next < codepoints.len() and _joins_to_next(current) and
+        _joins_to_previous(_arabic_joining_type(codepoints[next]))
     if joins_previous and joins_next: 2
     else if joins_previous: 3
     else if joins_next: 1
     else: 0
-
-fn _joins_right(cp: u32) -> bool:
-    (cp >= 1576u32 and cp <= 1594u32) or (cp >= 1601u32 and cp <= 1610u32) or
-        cp == 1574u32 or cp == 1577u32 or cp == 1578u32
-
-fn _joins_left(cp: u32) -> bool:
-    if cp == 1575u32 or cp == 1570u32 or cp == 1571u32 or cp == 1573u32 or cp == 1577u32:
-        return false
-    if cp == 1608u32 or cp == 1585u32 or cp == 1586u32 or cp == 1584u32 or cp == 1583u32:
-        return false
-    (cp >= 1576u32 and cp <= 1594u32) or (cp >= 1601u32 and cp <= 1610u32)
 
 fn _record(font: OtFont, codepoints: [u32], source: i64, cluster: i64, mask: u64) -> Option<LayoutGlyphRecord>:
     val glyph = cmap_glyph_id(font, codepoints[source])
@@ -139,13 +193,16 @@ fn _nominal(font: OtFont, plan: LayoutLookupPlan, script: u32, codepoints: [u32]
     Some(result)
 
 fn _gpos_mask(plan: LayoutLookupPlan, script: u32, codepoint: u32) -> u64:
+    # Arabic GPOS features (curs, kern, mark, mkmk) are global: the lookups
+    # select by coverage. Gating mark/mkmk by source codepoint missed every
+    # mark glyph produced by GSUB decomposition (Noto's separate dot glyphs
+    # carry their base letter's source), so no mark was ever positioned.
+    if script == layout_tag("arab"): return _plan_mask(plan)
     val positional = (_feature_mask(plan, "abvm") | _feature_mask(plan, "blwm") |
         _feature_mask(plan, "mark") | _feature_mask(plan, "mkmk"))
     var mask = _plan_mask(plan) & ~positional
     if script == layout_tag("dev2") and codepoint >= 2366u32 and codepoint <= 2381u32:
         mask = mask | _feature_mask(plan, "abvm") | _feature_mask(plan, "blwm")
-    if script == layout_tag("arab") and codepoint >= 1611u32 and codepoint <= 1631u32:
-        mask = mask | _feature_mask(plan, "mark") | _feature_mask(plan, "mkmk")
     mask
 
 fn _recompute(font: OtFont, records: [LayoutGlyphRecord], plan: LayoutLookupPlan,
@@ -180,24 +237,27 @@ fn resolve_canonical_layout_run(font: OtFont, script: u32, language: text, codep
     val units = match selected_units_per_em(font):
         Some(value): value
         None: return None
-    val gsub_catalog = parse_gsub_skeleton(font)
-    val gpos_catalog = parse_gpos_skeleton(font)
+    # Catalogs are parsed only when a plan activates lookups: now that real
+    # fonts validate, Latin/CJK runs (no default features) would otherwise
+    # parse every lookup of the face per run for nothing.
+    val gsub_catalog = if gsub_plan.activations.len() == 0: [] else: parse_gsub_skeleton(font)
+    val gpos_catalog = if gpos_plan.activations.len() == 0: [] else: parse_gpos_skeleton(font)
     val gsub_valid = (gsub_plan.valid and
-        layout_validate_gsub_with_catalog(font, gsub_plan.activations, gsub_catalog))
+        layout_validate_gsub_activations(font, gsub_plan.activations, gsub_catalog))
     val gpos_nominal = match _recompute(font, nominal, gpos_plan, script, codepoints):
         Some(value): value
         None: return None
     val gpos_valid = (gpos_plan.valid and
         gpos_validate(font, gpos_plan.activations, gpos_catalog, gpos_nominal))
     val substituted = if gsub_valid:
-        layout_apply_gsub_with_catalog(font, gsub_plan.activations, gsub_catalog, nominal)
+        layout_apply_gsub_activations(font, gsub_plan.activations, gsub_catalog, nominal)
     else:
         LayoutApplyResult(glyphs: nominal, complete: false)
     val advanced = match _recompute(font, substituted.glyphs, gpos_plan, script, codepoints):
         Some(value): value
         None: return None
     val positioned = if gpos_valid:
-        gpos_apply(font, gpos_plan.activations, gpos_catalog, advanced)
+        gpos_apply_directed(font, gpos_plan.activations, gpos_catalog, advanced, script == layout_tag("arab"))
     else:
         LayoutApplyResult(glyphs: advanced, complete: false)
     val committed = if substituted.complete and positioned.complete: positioned.glyphs else: nominal

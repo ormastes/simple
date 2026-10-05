@@ -1,0 +1,66 @@
+# Compile with Phase 2 and execute the resulting binary. This checks word
+# semantics, not SIMD emission; ISA attestation is a separate requirement.
+
+fn bitmap_and_words(left: [u32], right: [u32]) -> [u32]:
+    var out: [u32] = []
+    var i = 0
+    while i < left.len():
+        out.push(left[i] & right[i])
+        i = i + 1
+    out
+
+fn bitmap_or_words(left: [u32], right: [u32]) -> [u32]:
+    var out: [u32] = []
+    var i = 0
+    while i < left.len():
+        out.push(left[i] | right[i])
+        i = i + 1
+    out
+
+# Independent arithmetic oracle: do not repeat the tested bitwise expression.
+fn bitmap_expected_word(left: u32, right: u32, union: bool) -> u32:
+    var lhs = left as i64
+    var rhs = right as i64
+    var place: i64 = 1
+    var expected: i64 = 0
+    var bit = 0
+    while bit < 32:
+        val lset = lhs % 2 == 1
+        val rset = rhs % 2 == 1
+        val selected = if union: lset or rset else: lset and rset
+        if selected: expected = expected + place
+        lhs = lhs / 2
+        rhs = rhs / 2
+        place = place * 2
+        bit = bit + 1
+    expected as u32
+
+fn main():
+    val values: [u32] = [0u32, 1u32, 2147483648u32, 4294967295u32, 2863311530u32, 1431655765u32]
+    val lengths = [0, 1, 15, 16, 17, 31, 32, 33, 63, 64, 65]
+    var checked = 0
+    for n in lengths:
+        for shift in 0..values.len():
+            var left: [u32] = []
+            var right: [u32] = []
+            var i = 0
+            while i < n:
+                left.push(values[i % values.len()])
+                right.push(values[(i + shift) % values.len()])
+                i = i + 1
+            val intersection = bitmap_and_words(left, right)
+            val union = bitmap_or_words(left, right)
+            if intersection.len() != n or union.len() != n:
+                panic("word32 output length mismatch n={n} shift={shift}")
+            i = 0
+            while i < n:
+                if intersection[i] != bitmap_expected_word(left[i], right[i], false):
+                    panic("word32 AND mismatch n={n} shift={shift} index={i}")
+                if union[i] != bitmap_expected_word(left[i], right[i], true):
+                    panic("word32 OR mismatch n={n} shift={shift} index={i}")
+                checked = checked + 2
+                i = i + 1
+    # 337 words across lengths, six rotations, two operations.
+    if checked != 4044: panic("word32 test count mismatch: {checked}")
+    print "WORD32_NATIVE_PASS checks={checked}"
+    print "avx512_execution_attestation=unproved"

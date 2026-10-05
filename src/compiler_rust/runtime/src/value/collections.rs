@@ -186,22 +186,8 @@ fn providers_for_tier(tier: SimdTier) -> CollectionProviders {
             byte_split: avx2_byte_split_ranges,
             simd_tier: SimdTier::X86_64Avx2,
         },
-        // byte_find/byte_rfind/byte_split are all straight linear scans
-        // (find-first / find-last / delimiter-split built on find), so
-        // widening them to 64-byte AVX-512 lanes is a clear, contained win —
-        // see `byte_kernels.rs` for the actual kernels and their
-        // scalar-equivalence tests. `array_sort` stays on `scalar_array_sort`
-        // for every tier here: this generic comparator sorts heterogeneous
-        // tagged `RuntimeValue`s (see `rt_sorted_value_cmp`), not a
-        // homogeneous primitive buffer, so it was never SIMD-accelerated to
-        // begin with — nothing to widen.
-        SimdTier::X86_64Avx512 => CollectionProviders {
-            array_sort: scalar_array_sort,
-            byte_find: avx512_byte_find,
-            byte_rfind: avx512_byte_rfind,
-            byte_split: avx512_byte_split_ranges,
-            simd_tier: SimdTier::X86_64Avx512,
-        },
+        // Default core contains AVX2/scalar only; host AVX512 capability is unchanged.
+        SimdTier::X86_64Avx512 => providers_for_tier(super::byte_kernels::default_runtime_simd_tier(tier)),
         SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => CollectionProviders {
             array_sort: scalar_array_sort,
             byte_find: neon_byte_find,
@@ -657,7 +643,9 @@ pub(crate) fn checked_byte_array_bytes(value: RuntimeValue) -> Option<Option<Vec
         return None;
     }
     if array.is_byte_packed() {
-        return Some(Some(unsafe { std::slice::from_raw_parts(array.data.cast::<u8>(), len) }.to_vec()));
+        return Some(Some(
+            unsafe { std::slice::from_raw_parts(array.data.cast::<u8>(), len) }.to_vec(),
+        ));
     }
     let mut out = Vec::with_capacity(len);
     for value in unsafe { array.as_slice() } {
@@ -2066,7 +2054,9 @@ mod collection_set_tests {
     fn assert_rejected_child(kind: &str) {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
-            .arg(format!("value::collections::collection_set_tests::{kind}_set_rejection_child"))
+            .arg(format!(
+                "value::collections::collection_set_tests::{kind}_set_rejection_child"
+            ))
             .arg("--nocapture")
             .env("SIMPLE_COLLECTION_SET_REJECTION_CHILD", "1")
             .output()
@@ -2074,7 +2064,10 @@ mod collection_set_tests {
         assert_eq!(output.status.code(), Some(70), "{kind}.set must fail loudly");
         let stderr = String::from_utf8_lossy(&output.stderr);
         let type_name = if kind == "array" { "Array" } else { "Tuple" };
-        assert!(stderr.contains(type_name), "missing receiver type in diagnostic: {stderr}");
+        assert!(
+            stderr.contains(type_name),
+            "missing receiver type in diagnostic: {stderr}"
+        );
         assert!(stderr.contains("set"), "missing method in diagnostic: {stderr}");
     }
 
@@ -4502,10 +4495,7 @@ pub extern "C" fn rt_string_join(array: RuntimeValue, separator: RuntimeValue) -
             if elem_len > 0 {
                 let elem_data = rt_string_data(elem);
                 unsafe {
-                    let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                        elem_data,
-                        elem_len as usize,
-                    ));
+                    let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(elem_data, elem_len as usize));
                     result.push_str(s);
                 }
             }
@@ -5240,7 +5230,9 @@ pub extern "C" fn rt_array_sort(array: RuntimeValue) -> bool {
         }
         if (*arr).is_u64_packed() {
             let len = (*arr).len as usize;
-            let mut words: Vec<u64> = (0..len).map(|i| rt_array_get(array, i as i64).as_int() as u64).collect();
+            let mut words: Vec<u64> = (0..len)
+                .map(|i| rt_array_get(array, i as i64).as_int() as u64)
+                .collect();
             words.sort_by(rt_sorted_u64_cmp);
             for (i, w) in words.into_iter().enumerate() {
                 rt_array_set(array, i as i64, RuntimeValue::from_int(w as i64));
@@ -6313,13 +6305,51 @@ pub extern "C" fn rt_array_write_span(
         if let Err(message) = write_span_range_check(dst_off, src_off, count, dst_len, src_len) {
             write_span_fail(&message);
         }
-        if std::ptr::eq(dst_arr as *const RuntimeArray, src_arr as *const RuntimeArray) {
-            (*dst_arr)
-                .as_mut_slice()
-                .copy_within(src_off as usize..(src_off + count) as usize, dst_off as usize);
+        let dst_bytes = (*dst_arr).is_byte_packed();
+        let src_bytes = (*src_arr).is_byte_packed();
+        let dst_words = (*dst_arr).is_u64_packed();
+        let src_words = (*src_arr).is_u64_packed();
+        if dst_bytes == src_bytes && dst_words == src_words {
+            // ptr::copy is memmove: preserve overlap and the actual element width.
+            if dst_bytes {
+                std::ptr::copy(
+                    (*src_arr).data.cast::<u8>().add(src_off as usize),
+                    (*dst_arr).data.cast::<u8>().add(dst_off as usize),
+                    count as usize,
+                );
+            } else {
+                std::ptr::copy(
+                    (*src_arr).data.add(src_off as usize),
+                    (*dst_arr).data.add(dst_off as usize),
+                    count as usize,
+                );
+            }
         } else {
-            let src_slice = &(*src_arr).as_slice()[src_off as usize..(src_off + count) as usize];
-            (*dst_arr).as_mut_slice()[dst_off as usize..(dst_off + count) as usize].copy_from_slice(src_slice);
+            // Different layouts imply different arrays. Match the C twin's
+            // raw-u64 conversion, retaining high bits through the boxed owner.
+            for i in 0..count as usize {
+                let source = src_off as usize + i;
+                let target = dst_off as usize + i;
+                let raw = if src_bytes {
+                    *(*src_arr).data.cast::<u8>().add(source) as u64
+                } else if src_words {
+                    *(*src_arr).data.cast::<u64>().add(source)
+                } else {
+                    let value = *(*src_arr).data.add(source);
+                    value.as_heap_u64().unwrap_or_else(|| value.as_int() as u64)
+                };
+                if dst_bytes {
+                    *(*dst_arr).data.cast::<u8>().add(target) = raw as u8;
+                } else if dst_words {
+                    *(*dst_arr).data.cast::<u64>().add(target) = raw;
+                } else {
+                    *(*dst_arr).data.add(target) = if raw <= (i64::MAX as u64 >> 3) {
+                        RuntimeValue::from_int(raw as i64)
+                    } else {
+                        RuntimeValue::from_u64(raw)
+                    };
+                }
+            }
         }
     }
     count
@@ -6355,6 +6385,109 @@ fn write_span_fail(message: &str) -> ! {
 #[cfg(test)]
 mod write_span_range_tests {
     use super::write_span_range_check;
+
+    // Oversized real allocations make the old eight-byte copy observable
+    // through sentinels without allowing an out-of-allocation write.
+    #[test]
+    fn packed_write_span_byte_sentinels_and_overlap() {
+        use super::*;
+        unsafe {
+            let source = rt_byte_array_new(64);
+            let target = rt_byte_array_new(64);
+            let s = crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(source, HeapObjectType::Array).unwrap();
+            let d = crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(target, HeapObjectType::Array).unwrap();
+            std::ptr::write_bytes((*s).data.cast::<u8>(), 0x5a, 64);
+            std::ptr::write_bytes((*d).data.cast::<u8>(), 0xa5, 64);
+            (*s).len = 4;
+            (*d).len = 4;
+            assert_eq!(rt_array_write_span(target, source, 0, 0, 4), 4);
+            assert_eq!(std::slice::from_raw_parts((*d).data.cast::<u8>(), 4), &[0x5a; 4]);
+            assert_eq!(std::slice::from_raw_parts((*d).data.cast::<u8>().add(4), 60), &[0xa5; 60]);
+            (*d).len = 8;
+            for i in 0..8 { *(*d).data.cast::<u8>().add(i) = i as u8; }
+            assert_eq!(rt_array_write_span(target, target, 2, 0, 6), 6);
+            assert_eq!(std::slice::from_raw_parts((*d).data.cast::<u8>(), 8), &[0, 1, 0, 1, 2, 3, 4, 5]);
+            assert_eq!(rt_array_write_span(target, target, 0, 2, 6), 6);
+            assert_eq!(std::slice::from_raw_parts((*d).data.cast::<u8>(), 8), &[0, 1, 2, 3, 4, 5, 4, 5]);
+            rt_array_free(source);
+            rt_array_free(target);
+        }
+    }
+
+    #[test]
+    fn packed_write_span_layout_matrix_preserves_words() {
+        use super::*;
+        unsafe {
+            for src_layout in 0..3 {
+                for dst_layout in 0..3 {
+                    let make = |layout| match layout {
+                        0 => rt_byte_array_new(64),
+                        1 => rt_array_new_uninit_u64(8),
+                        _ => rt_array_new(8),
+                    };
+                    let source = make(src_layout);
+                    let target = make(dst_layout);
+                    let s = crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(source, HeapObjectType::Array).unwrap();
+                    let d = crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(target, HeapObjectType::Array).unwrap();
+                    (*s).len = 4;
+                    (*d).len = 4;
+                    let words = if src_layout == 0 { [0, 255, 128, 7] } else { [0, u64::MAX, 1 << 63, 7] };
+                    for i in 0..4 {
+                        match src_layout {
+                            0 => *(*s).data.cast::<u8>().add(i) = words[i] as u8,
+                            1 => *(*s).data.cast::<u64>().add(i) = words[i],
+                            _ => *(*s).data.add(i) = RuntimeValue::from_u64(words[i]),
+                        }
+                        match dst_layout {
+                            0 => *(*d).data.cast::<u8>().add(i) = 42,
+                            1 => *(*d).data.cast::<u64>().add(i) = 42,
+                            _ => *(*d).data.add(i) = RuntimeValue::from_int(42),
+                        }
+                    }
+                    assert_eq!(rt_array_write_span(target, source, 1, 1, 2), 2);
+                    for i in 0..4 {
+                        let actual = match dst_layout {
+                            0 => *(*d).data.cast::<u8>().add(i) as u64,
+                            1 => *(*d).data.cast::<u64>().add(i),
+                            _ => { let v = *(*d).data.add(i); v.as_heap_u64().unwrap_or_else(|| v.as_int() as u64) },
+                        };
+                        let expected = if i == 1 || i == 2 { words[i] } else { 42 };
+                        assert_eq!(actual, if dst_layout == 0 { expected & 255 } else { expected });
+                    }
+                    assert_eq!(rt_array_write_span(target, source, i64::MAX, i64::MAX, 0), 0);
+                    assert_eq!(rt_array_write_span(target, source, -1, -1, -3), 0);
+                    rt_array_free(source);
+                    rt_array_free(target);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_write_span_tagged_objects_and_signed_words() {
+        use super::*;
+        let text = unsafe { rt_string_new(b"preserved".as_ptr(), 9) };
+        let source = rt_array_new(3);
+        let target = rt_array_new(3);
+        let values = [text, RuntimeValue::from_float(1.5), RuntimeValue::from_int(i64::MIN)];
+        for value in values { assert!(rt_array_push(source, value)); assert!(rt_array_push(target, RuntimeValue::NIL)); }
+        assert_eq!(rt_array_write_span(target, source, 0, 0, 3), 3);
+        for (i, value) in values.into_iter().enumerate() { assert_eq!(rt_array_get(target, i as i64).to_raw(), value.to_raw()); }
+        let words = rt_array_new_uninit_u64(3);
+        unsafe {
+            let w = crate::value::heap::get_typed_ptr_mut::<RuntimeArray>(words, HeapObjectType::Array).unwrap();
+            (*w).len = 3;
+            assert_eq!(rt_array_write_span(words, source, 0, 2, 1), 1);
+            assert_eq!(*(*w).data.cast::<u64>(), i64::MIN as u64);
+            *(*w).data.cast::<u64>().add(1) = u64::MAX;
+            *(*w).data.cast::<u64>().add(2) = 7;
+            assert_eq!(rt_array_write_span(words, words, 1, 0, 2), 2);
+            assert_eq!(std::slice::from_raw_parts((*w).data.cast::<u64>(), 3), &[1 << 63, 1 << 63, u64::MAX]);
+        }
+        rt_array_free(source);
+        rt_array_free(target);
+        rt_array_free(words);
+    }
 
     #[test]
     fn in_range_spans_pass() {
@@ -6524,43 +6657,26 @@ pub extern "C" fn __simple_intrinsic_bounds_check(index: i64, len: i64) -> i64 {
     0
 }
 
-// AVX-512 provider dispatch tests. Kept as a dedicated module in this file
-// (rather than in `collection_tests.rs`) so the AVX-512 `byte_find`/
-// `byte_rfind`/`byte_split` provider wiring added to `providers_for_tier`
-// above has direct, close-by coverage. Modelled on the AVX-512 tests in
-// `byte_kernels.rs`: compare the AVX-512 provider's answer against the
-// SCALAR provider's answer (never a hardcoded expected value) across sizes
-// straddling the 64-byte lane boundary, and stay correct on a host without
-// AVX-512 because every kernel here falls back through AVX2 to scalar.
+// Optional-wide requests use the embedded provider and preserve scalar results.
 #[cfg(test)]
 mod avx512_provider_dispatch_tests {
     use super::{
-        avx512_byte_split_ranges, byte_split_ranges_for_tier, providers_for_tier, scalar_byte_find,
-        scalar_byte_rfind, scalar_byte_split_ranges,
+        avx512_byte_split_ranges, byte_split_ranges_for_tier, providers_for_tier, scalar_byte_find, scalar_byte_rfind,
+        scalar_byte_split_ranges,
     };
     use simple_simd::SimdTier;
 
-    #[cfg(target_arch = "x86_64")]
-    fn avx512_available() -> bool {
-        std::arch::is_x86_feature_detected!("avx512f") && std::arch::is_x86_feature_detected!("avx512bw")
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    fn avx512_available() -> bool {
-        false
-    }
-
     #[test]
-    fn avx512_provider_reports_its_own_tier() {
+    fn avx512_request_reports_embedded_execution_tier() {
         let providers = providers_for_tier(SimdTier::X86_64Avx512);
-        assert_eq!(providers.simd_tier, SimdTier::X86_64Avx512);
+        assert_eq!(
+            providers.simd_tier,
+            crate::value::byte_kernels::default_runtime_simd_tier(SimdTier::X86_64Avx512)
+        );
     }
 
     #[test]
     fn avx512_provider_find_and_rfind_match_scalar_across_lane_boundaries() {
-        if !avx512_available() {
-            return;
-        }
         let providers = providers_for_tier(SimdTier::X86_64Avx512);
 
         for filler in [0usize, 1, 63, 64, 65, 127, 128, 200] {
@@ -6609,9 +6725,6 @@ mod avx512_provider_dispatch_tests {
 
     #[test]
     fn avx512_provider_split_matches_scalar_across_lane_boundaries() {
-        if !avx512_available() {
-            return;
-        }
         let providers = providers_for_tier(SimdTier::X86_64Avx512);
 
         for filler in [0usize, 1, 63, 64, 65, 127, 128, 200] {
@@ -6661,10 +6774,9 @@ mod tests;
 mod string_free_contract_tests {
     use super::{
         byte_array_write, rt_array_bytes_copy_checked, rt_array_bytes_validate, rt_array_free, rt_array_new,
-        rt_array_push, rt_byte_array_new_len, rt_string_concat, rt_string_data, rt_string_free,
-        rt_string_len, rt_string_new, rt_string_new_literal,
-        rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
-        rt_transient_heap_promote,
+        rt_array_push, rt_byte_array_new_len, rt_string_concat, rt_string_data, rt_string_free, rt_string_len,
+        rt_string_new, rt_string_new_literal, rt_transient_array_scope_begin, rt_transient_array_scope_end,
+        rt_transient_array_scope_pause, rt_transient_heap_promote,
     };
     use crate::value::dict::{rt_dict_get, rt_dict_new, rt_dict_set};
     use crate::value::objects::{
@@ -6815,10 +6927,17 @@ mod string_free_contract_tests {
         let intermediate = rt_string_concat(left, right);
         let result = rt_string_concat(intermediate, right);
         assert_eq!(rt_heap_registry_count(), before + 2);
-        assert_eq!(rt_string_len(result), b"transient concat left and right and right".len() as i64);
+        assert_eq!(
+            rt_string_len(result),
+            b"transient concat left and right and right".len() as i64
+        );
         assert!(rt_transient_array_scope_end());
 
-        assert_eq!(rt_heap_registry_count(), before, "both concat results must leave the scope");
+        assert_eq!(
+            rt_heap_registry_count(),
+            before,
+            "both concat results must leave the scope"
+        );
         assert_eq!(rt_string_len(intermediate), -1);
         assert_eq!(rt_string_len(result), -1);
         assert_eq!(rt_string_free(left), 1);
@@ -6844,7 +6963,11 @@ mod string_free_contract_tests {
         assert_eq!(rt_string_len(promoted), expected.len() as i64);
         let actual = unsafe { std::slice::from_raw_parts(rt_string_data(promoted), expected.len()) };
         assert_eq!(actual, expected);
-        assert_eq!(rt_heap_registry_count(), before + 2, "outside and promoted results stay live");
+        assert_eq!(
+            rt_heap_registry_count(),
+            before + 2,
+            "outside and promoted results stay live"
+        );
         assert_eq!(rt_string_free(promoted), 1);
         assert_eq!(rt_string_free(outside), 1);
         assert_eq!(rt_string_free(left), 1);

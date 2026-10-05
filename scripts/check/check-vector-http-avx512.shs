@@ -1,0 +1,53 @@
+#!/bin/sh
+# Hardware/provider boundary only; no Simple application qualification.
+set -eu
+case $(uname -sm) in 'Linux x86_64') ;; *) echo 'UNSUPPORTED Linux x86_64'; exit 77;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:?fresh absolute evidence directory required}
+case "$out" in /*) ;; *) exit 2;; esac
+[ ! -e "$out" ] || { echo 'fresh output required' >&2; exit 2; }
+mkdir -p "$out/id" "$out/forced-id"
+cc=${CLANG:-clang}
+src=$root/src/runtime/providers/vector
+"$cc" --version > "$out/toolchain.txt"
+grep -m1 '^flags' /proc/cpuinfo > "$out/cpu-flags.txt" || true
+sha256sum "$src/bitmap_provider.c" "$src/bitmap_kernel_private.h" "$src/bitmap_avx512.c" \
+    "$src/http_avx512.c" "$root/src/runtime/simple_vector_kernel_abi_v1.h" \
+    "$root/src/runtime/test/vector_http_avx512_selfcheck.c" > "$out/source.sha256"
+provider=$(printf %s simple-vector-http-bitmap-v1:x86_64-avx512bw | sha256sum | cut -c1-16)
+implementation=$(cat "$src/bitmap_provider.c" "$src/bitmap_kernel_private.h" \
+    "$src/bitmap_avx512.c" "$src/http_avx512.c" "$root/src/runtime/simple_vector_kernel_abi_v1.h" | sha256sum | cut -c1-16)
+for mode in native forced; do
+    id=$out/id
+    impl=$implementation
+    if [ "$mode" = forced ]; then
+        id=$out/forced-id
+        impl=$(printf '%s:force-no-bw' "$implementation" | sha256sum | cut -c1-16)
+    fi
+    printf '#define SIMPLE_VECTOR_PROVIDER_ID UINT64_C(0x%s)\n#define SIMPLE_VECTOR_IMPLEMENTATION_ID UINT64_C(0x%s)\n' "$provider" "$impl" > "$id/provider_identity.h"
+done
+common='-std=c11 -O2 -Wall -Wextra -Werror -march=x86-64 -fno-vectorize -fno-slp-vectorize'
+base="$common -fPIC -fvisibility=hidden -DSIMPLE_VECTOR_ENABLE_HTTP_AVX512"
+timeout 60 "$cc" $base -I"$out/id" -c "$src/bitmap_provider.c" -o "$out/provider.o" > "$out/build.log" 2>&1
+timeout 60 "$cc" $base -I"$out/forced-id" -DSIMPLE_VECTOR_FORCE_NO_AVX512BW -c "$src/bitmap_provider.c" -o "$out/forced.o" >> "$out/build.log" 2>&1
+timeout 60 "$cc" $base -c "$src/bitmap_avx512.c" -o "$out/bitmap.o" >> "$out/build.log" 2>&1
+timeout 60 "$cc" $base -c "$src/http_avx512.c" -o "$out/http.o" >> "$out/build.log" 2>&1
+timeout 60 "$cc" -shared "$out/provider.o" "$out/bitmap.o" "$out/http.o" -o "$out/provider.so" >> "$out/build.log" 2>&1
+timeout 60 "$cc" -shared "$out/forced.o" "$out/bitmap.o" "$out/http.o" -o "$out/forced.so" >> "$out/build.log" 2>&1
+timeout 60 "$cc" $common "$root/src/runtime/test/vector_http_avx512_selfcheck.c" -ldl -o "$out/check" >> "$out/build.log" 2>&1
+objdump -d "$out/provider.o" > "$out/provider.disasm"
+objdump -d "$out/http.o" > "$out/http.disasm"
+if grep -Eiq 'zmm[0-9]+|\bkmov[a-z0-9]*\b' "$out/provider.disasm"; then echo 'FAIL baseline ISA'; exit 1; fi
+grep -Eq 'vpcmpeq[bw]|vpcmp.*b' "$out/http.disasm" || { echo 'FAIL no byte vector comparisons'; exit 1; }
+sha256sum "$out/provider.so" "$out/forced.so" "$out/check" > "$out/artifacts.sha256"
+for mode in native forced; do
+    library=$out/provider.so; force=0
+    if [ "$mode" = forced ]; then library=$out/forced.so; force=1; fi
+    result=0
+    perl "$root/scripts/resource/process-tree-rss-watchdog.pl" --max-rss-kib=524288 \
+        --rss-cap-mode=enforce --timeout-seconds=60 --receipt="$out/$mode.rss.env" \
+        -- "$out/check" "$library" "$force" > "$out/$mode.log" 2>&1 || result=$?
+    printf '%s_exit=%s\n' "$mode" "$result" >> "$out/status.txt"
+    cat "$out/$mode.log"
+    [ "$result" = 0 ] || exit "$result"
+done

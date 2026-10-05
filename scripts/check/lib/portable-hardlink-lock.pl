@@ -88,7 +88,7 @@ sub ps_value {
     return length($lines[0]) ? $lines[0] : undef;
 }
 
-# Fallback identity source for hosts whose `ps` has no -o (MSYS / Git Bash).
+# Stable identity source on Linux, and fallback for MSYS / Git Bash.
 # /proc/<pid>/stat field 22 is starttime and field 5 is pgrp; MSYS provides
 # both. starttime is a strictly stronger PID-reuse discriminator than lstart
 # (clock ticks since boot, not whole seconds). comm (field 2) may contain
@@ -125,6 +125,18 @@ sub process_snapshot {
         my ($birth_two) = darwin_identity($pid);
         return unless defined($birth_two) && $birth_one eq $birth_two;
         return (unpack('H*', $start), $pgid);
+    }
+    # Linux ps derives lstart from a wall-clock boot estimate, which can move
+    # after clock corrections (observed during WSL bootstrap). Kernel start
+    # ticks remain stable and still distinguish PID reuse. Fail closed if a
+    # Linux snapshot cannot be read consistently.
+    if ($^O eq 'linux') {
+        my ($start_one, $pgid_one) = proc_stat_snapshot($pid);
+        return unless defined($start_one) && defined($pgid_one) && $pgid_one > 0;
+        my ($start_two, $pgid_two) = proc_stat_snapshot($pid);
+        return unless defined($start_two) && defined($pgid_two) &&
+            $start_one eq $start_two && $pgid_one eq $pgid_two;
+        return (unpack('H*', $start_one), $pgid_one);
     }
     my $start_one = ps_value('lstart', $pid);
     if (defined($start_one)) {

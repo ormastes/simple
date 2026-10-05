@@ -4,7 +4,6 @@ use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Signature};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::{Linkage, Module};
 
-use super::super::shared::platform_call_conv;
 use super::helpers::{
     adapted_call, call_runtime_1, call_runtime_2, call_runtime_2_void, call_runtime_3, declare_named_bytes,
     get_vreg_or_default, inline_runtime_array_len_value, inline_runtime_len_value,
@@ -41,7 +40,7 @@ pub(super) fn wrap_value<M: Module>(
             // WHOLE MODULE to the interpreter (exit 0), so every `.contains()`
             // on an int-typed collection has been running interpreted. The
             // real tagging helper is `rt_value_int`.
-            let mut sig = Signature::new(platform_call_conv());
+            let mut sig = Signature::new(ctx.module.isa().default_call_conv());
             sig.params.push(AbiParam::new(types::I64));
             sig.returns.push(AbiParam::new(types::I64));
             let func_id = ctx
@@ -53,7 +52,7 @@ pub(super) fn wrap_value<M: Module>(
             builder.inst_results(call)[0]
         }
         Some(TypeId::F32 | TypeId::F64) => {
-            let mut sig = Signature::new(platform_call_conv());
+            let mut sig = Signature::new(ctx.module.isa().default_call_conv());
             sig.params.push(AbiParam::new(types::F64));
             sig.returns.push(AbiParam::new(types::I64));
             // `rt_box_float` never existed either — see the rt_value_int note
@@ -561,7 +560,7 @@ pub(crate) fn compile_builtin_method<M: Module>(
                 let func_id = if let Some(&existing) = ctx.func_ids.get(resolved.as_ref()) {
                     Ok(existing)
                 } else {
-                    let call_conv = platform_call_conv();
+                    let call_conv = ctx.module.isa().default_call_conv();
                     let mut sig = Signature::new(call_conv);
                     // receiver + args: all i64
                     for _ in 0..args.len() + 1 {

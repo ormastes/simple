@@ -1,0 +1,64 @@
+#!/bin/sh
+# ISA/provider-only diagnostic; not Simple compiler or app qualification.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:?usage: check-vector-bitmap-targets.shs ABS_FRESH_OUTPUT}
+case "$out" in /*) ;; *) exit 2;; esac
+[ ! -e "$out" ] || { echo 'fresh output required' >&2; exit 2; }
+mkdir -p "$out"
+exec 3>&1
+exec >"$out/build.log" 2>&1
+cc=${CLANG:-/usr/lib/llvm-23/bin/clang}
+objdump=${LLVM_OBJDUMP:-/usr/lib/llvm-23/bin/llvm-objdump}
+src=$root/src/runtime/providers/vector
+"$cc" --version >"$out/toolchain.txt"
+qemu-aarch64 --version >>"$out/toolchain.txt"
+qemu-riscv64 --version >>"$out/toolchain.txt"
+dpkg-query -W libc6-arm64-cross libc6-riscv64-cross libc6-dev-arm64-cross libc6-dev-riscv64-cross >"$out/sysroot-packages.txt"
+compile() { timeout 60 "$@"; }
+sha256sum "$src"/*.c "$src"/*.h "$root/src/runtime/simple_vector_kernel_abi_v1.h" \
+    "$root/src/runtime/test/vector_bitmap_target_selfcheck.c" >"$out/source.sha256"
+for arch in aarch64 riscv64; do
+    dir=$out/$arch; mkdir "$dir"
+    triple=$arch-linux-gnu
+    case "$arch" in
+        aarch64) base='-march=armv8-a -mgeneral-regs-only'; vector='-march=armv8-a+simd'; kernel=neon ;;
+        riscv64) base='-march=rv64gc -mabi=lp64d'; vector='-march=rv64gcv -mabi=lp64d'; kernel=rvv ;;
+    esac
+    # Stable provider identity and full implementation-source identity retained.
+    provider_sha=$(printf 'simple-vector-bitmap-v1:%s' "$arch" | sha256sum | cut -d ' ' -f 1)
+    implementation_sha=$(cat "$src/bitmap_provider.c" "$src/bitmap_$kernel.c" \
+        "$src/bitmap_kernel_private.h" "$root/src/runtime/simple_vector_kernel_abi_v1.h" | sha256sum | cut -d ' ' -f 1)
+    printf '%s\n' "$provider_sha" >"$dir/provider.sha256"
+    printf '%s\n' "$implementation_sha" >"$dir/implementation.sha256"
+    printf '#define SIMPLE_VECTOR_PROVIDER_ID UINT64_C(0x%s)\n#define SIMPLE_VECTOR_IMPLEMENTATION_ID UINT64_C(0x%s)\n' \
+        "$(printf %s "$provider_sha" | cut -c1-16)" "$(printf %s "$implementation_sha" | cut -c1-16)" >"$dir/provider_identity.h"
+    # Clang only; GNU target installations supply sysroot libc/linker dependencies.
+    common="--target=$triple --gcc-toolchain=/usr -std=c11 -O2 -Wall -Wextra -Werror -fno-vectorize -fno-slp-vectorize"
+    set -x
+    compile "$cc" $common $base -fPIC -fvisibility=hidden -DSIMPLE_VECTOR_TEST_OBSERVER=1 -I"$dir" -c "$src/bitmap_provider.c" -o "$dir/provider.o"
+    compile "$cc" $common $vector -fPIC -fvisibility=hidden -c "$src/bitmap_$kernel.c" -o "$dir/kernel.o"
+    compile "$cc" --target="$triple" --gcc-toolchain=/usr -shared "$dir/provider.o" "$dir/kernel.o" -o "$dir/provider.so"
+    compile "$cc" $common $base -rdynamic "$root/src/runtime/test/vector_bitmap_target_selfcheck.c" -ldl -o "$dir/selfcheck"
+    set +x
+    "$objdump" -d "$dir/kernel.o" >"$dir/kernel.disasm"
+    "$objdump" -d "$dir/provider.o" >"$dir/guard.disasm"
+    sha256sum "$dir/provider.so" "$dir/selfcheck" "$dir/provider.o" "$dir/kernel.o" >"$dir/artifacts.sha256"
+done
+status=0
+run() {
+    name=$1; shift
+    code=0
+    perl "$root/scripts/resource/process-tree-rss-watchdog.pl" --max-rss-kib=524288 \
+        --rss-cap-mode=enforce --timeout-seconds=60 --receipt="$out/$name.rss.env" -- "$@" \
+        >"$out/$name.log" 2>&1 || code=$?
+    printf '%s\t%s\n' "$name" "$code" >>"$out/results.tsv"
+    [ "$code" = 0 ] || status=1
+}
+printf 'row\texit\n' >"$out/results.tsv"
+run neon qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu max "$out/aarch64/selfcheck" "$out/aarch64/provider.so" 1
+run rvv128 qemu-riscv64 -L /usr/riscv64-linux-gnu -cpu rva23u64,vlen=128,elen=64 "$out/riscv64/selfcheck" "$out/riscv64/provider.so" 1
+run rvv256 qemu-riscv64 -L /usr/riscv64-linux-gnu -cpu rva23u64,vlen=256,elen=64 "$out/riscv64/selfcheck" "$out/riscv64/provider.so" 1
+run no_v qemu-riscv64 -L /usr/riscv64-linux-gnu -cpu max,v=false "$out/riscv64/selfcheck" "$out/riscv64/provider.so" 0
+cat "$out/results.tsv" >&3
+exit "$status"

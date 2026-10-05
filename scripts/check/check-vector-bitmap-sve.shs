@@ -1,0 +1,76 @@
+#!/bin/sh
+# Native SVE bitmap correctness and SVE/SVE2 admission, not Simple app proof.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+[ -f "$root/scripts/bootstrap/bootstrap-session-exec.c" ] || { echo 'watchdog session-helper source required' >&2; exit 2; }
+out=${1:?usage: check-vector-bitmap-sve.shs ABS_FRESH_OUTPUT}
+case "$out" in /*) ;; *) exit 2;; esac
+[ ! -e "$out" ] || { echo 'fresh output required' >&2; exit 2; }
+mkdir -p "$out"
+exec 3>&1
+exec >"$out/build.log" 2>&1
+cc=${CLANG:-/usr/lib/llvm-23/bin/clang}
+objdump=${LLVM_OBJDUMP:-/usr/lib/llvm-23/bin/llvm-objdump}
+src=$root/src/runtime/providers/vector
+abi=$root/src/runtime/simple_vector_kernel_abi_v1.h
+harness=$root/src/runtime/test/vector_bitmap_target_selfcheck.c
+"$cc" --version >"$out/toolchain.txt"
+qemu-aarch64 --version >>"$out/toolchain.txt"
+dpkg-query -W libc6-arm64-cross libc6-dev-arm64-cross >"$out/sysroot-packages.txt"
+sha256sum "$src/bitmap_provider.c" "$src/bitmap_sve.c" \
+    "$src/bitmap_kernel_private.h" "$abi" "$harness" >"$out/source.sha256"
+common='--target=aarch64-linux-gnu --gcc-toolchain=/usr -std=c11 -O2 -Wall -Wextra -Werror -fno-vectorize -fno-slp-vectorize'
+base='-march=armv8-a -mgeneral-regs-only'
+compile() { timeout 60 "$@"; }
+set -x
+compile "$cc" $common $base -rdynamic "$harness" -ldl -o "$out/selfcheck"
+set +x
+for family in sve sve2; do
+    dir=$out/$family; mkdir "$dir"
+    case "$family" in
+        sve) macro=SIMPLE_VECTOR_REQUIRE_SVE ;;
+        sve2) macro=SIMPLE_VECTOR_REQUIRE_SVE2 ;;
+    esac
+    provider_sha=$(printf 'simple-vector-bitmap-v1:aarch64-%s' "$family" | sha256sum | cut -d ' ' -f 1)
+    implementation_sha=$({ printf 'requirement=%s\n' "$macro"; cat "$src/bitmap_provider.c" "$src/bitmap_sve.c" "$src/bitmap_kernel_private.h" "$abi"; } | sha256sum | cut -d ' ' -f 1)
+    printf '%s\n' "$provider_sha" >"$dir/provider.sha256"
+    printf '%s\n' "$implementation_sha" >"$dir/implementation.sha256"
+    printf '#define SIMPLE_VECTOR_PROVIDER_ID UINT64_C(0x%s)\n#define SIMPLE_VECTOR_IMPLEMENTATION_ID UINT64_C(0x%s)\n' \
+        "$(printf %s "$provider_sha" | cut -c1-16)" "$(printf %s "$implementation_sha" | cut -c1-16)" >"$dir/provider_identity.h"
+    set -x
+    compile "$cc" $common $base -fPIC -fvisibility=hidden -D"$macro" -DSIMPLE_VECTOR_TEST_OBSERVER=1 -I"$dir" -c "$src/bitmap_provider.c" -o "$dir/provider.o"
+    compile "$cc" $common -march="armv8-a+$family" -fPIC -fvisibility=hidden -c "$src/bitmap_sve.c" -o "$dir/kernel.o"
+    compile "$cc" --target=aarch64-linux-gnu --gcc-toolchain=/usr -shared "$dir/provider.o" "$dir/kernel.o" -o "$dir/provider.so"
+    set +x
+    "$objdump" -d "$dir/provider.o" >"$dir/guard.disasm"
+    "$objdump" -d "$dir/kernel.o" >"$dir/kernel.disasm"
+    if grep -Eq '\bz[0-9]+\.|\bp[0-9]+[./]' "$dir/guard.disasm"; then echo 'FAIL scalable ISA in baseline guard'; exit 1; fi
+    grep -Eq '\bld1w\b' "$dir/kernel.disasm"
+    grep -Eq '\bst1w\b' "$dir/kernel.disasm"
+    grep -Eq '\bz[0-9]+\.' "$dir/kernel.disasm"
+    sha256sum "$dir/provider.so" "$dir/provider.o" "$dir/kernel.o" >"$dir/artifacts.sha256"
+done
+sha256sum "$out/selfcheck" >"$out/harness.sha256"
+status=0
+run() {
+    name=$1 family=$2 cpu=$3 supported=$4 expected=$5
+    code=0
+    perl "$root/scripts/resource/process-tree-rss-watchdog.pl" --max-rss-kib=524288 \
+        --rss-cap-mode=enforce --timeout-seconds=60 --receipt="$out/$name.rss.env" -- \
+        qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu "$cpu" "$out/selfcheck" "$out/$family/provider.so" "$supported" \
+        >"$out/$name.log" 2>&1 || code=$?
+    if [ "$code" = 0 ] && ! grep -q "vector_iterations=$expected supported=$supported" "$out/$name.log"; then code=1; fi
+    printf '%s\t%s\t%s\n' "$name" "$code" "$cpu" >>"$out/results.tsv"
+    [ "$code" = 0 ] || status=1
+}
+for family in sve sve2; do
+    run "$family-128" "$family" max,sve-max-vq=1 1 3636
+    run "$family-256" "$family" max,sve-max-vq=2 1 1832
+    run "$family-512" "$family" max,sve-max-vq=4 1 932
+    run "$family-no-sve" "$family" cortex-a53 0 0
+done
+# Same CPU profile distinguishes the two artifacts' required feature levels.
+run sve-only-admitted sve neoverse-v1 1 1832
+run sve2-refused sve2 neoverse-v1 0 0
+cat "$out/results.tsv" >&3
+exit "$status"

@@ -664,7 +664,7 @@ pub fn declare_uniform_i64_import<M: Module>(
     if let Some(&existing) = ctx.func_ids.get(name) {
         return Ok(existing);
     }
-    let mut sig = Signature::new(crate::codegen::shared::platform_call_conv());
+    let mut sig = Signature::new(ctx.module.isa().default_call_conv());
     for _ in 0..n_params {
         sig.params.push(AbiParam::new(types::I64));
     }

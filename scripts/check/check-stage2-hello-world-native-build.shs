@@ -60,7 +60,9 @@ HW_EXPECT=hello
 # 2026-08-25: an out-of-tree fixture is rejected outright by a HEALTHY compiler
 # ("missing importing module surface", rc=1) -- so an out-of-tree fixture would
 # have made this gate false-reject every good binary.
-HW_FIXTURE=${HW_FIXTURE:-scripts/check/cert/redeploy_gate/fixtures/hello_world.spl}
+# Source inventory admits src/test families. The older cert fixture under
+# scripts/ is still used by legacy callers, but is outside those families.
+HW_FIXTURE=${HW_FIXTURE:-test/04_smoke/bootstrap_hello_world.spl}
 HW_ROOT=${HW_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}
 
 gate_error() {
@@ -218,8 +220,20 @@ hw_probe() {
 hw_check_candidate() {
     hwc_candidate=$1
     hwc_name=$(basename "$hwc_candidate")
-    hwc_work=$(mktemp -d "${TMPDIR:-/tmp}/hw-native-build.XXXXXX") || return 1
-    hw_register_cleanup_dir "$hwc_work"
+    hwc_retain=0
+    if [ -n "${HW_ARTIFACT_DIR:-}" ] && [ "${HW_SELFTEST_ACTIVE:-0}" = 0 ]; then
+        # Explicitly owned evidence is never registered for trap cleanup. Logs
+        # are written here directly, so TERM/KILL need no last-minute copy.
+        case "$HW_ARTIFACT_DIR" in /*) ;; *) gate_error "HW_ARTIFACT_DIR must be absolute" ;; esac
+        [ -d "$HW_ARTIFACT_DIR" ] || gate_error "HW_ARTIFACT_DIR must already exist"
+        hwc_work=$(mktemp -d "$HW_ARTIFACT_DIR/hw-native-build.XXXXXX") ||
+            gate_error "cannot create retained artifact directory"
+        hwc_retain=1
+        printf 'ARTIFACTS %s\n' "$hwc_work"
+    else
+        hwc_work=$(mktemp -d "${TMPDIR:-/tmp}/hw-native-build.XXXXXX") || return 1
+        hw_register_cleanup_dir "$hwc_work"
+    fi
 
     hw_probe "$hwc_candidate" "$hwc_work" entry
     HW_CHECKED=$((HW_CHECKED + 1))
@@ -233,7 +247,7 @@ hw_check_candidate() {
         HW_FAILURES="$HW_FAILURES ${hwc_name}:positional-form:${HW_CLASS}(${HW_DETAIL})"
     fi
 
-    rm -rf "$hwc_work"
+    if [ "$hwc_retain" = 0 ]; then rm -rf "$hwc_work"; fi
 }
 
 # ---------------------------------------------------------------- selftest --
@@ -242,6 +256,7 @@ hw_check_candidate() {
 # seen on a real artifact, and the must-PASS fixtures pin the behaviours this
 # gate must never reject.
 hw_selftest() {
+    HW_SELFTEST_ACTIVE=1
     st_work=$(mktemp -d "${TMPDIR:-/tmp}/hw-native-build-selftest.XXXXXX") ||
         gate_error "selftest could not create a work dir"
     hw_register_cleanup_dir "$st_work"
@@ -326,6 +341,26 @@ EOF
     st_expect hang "entry-form:hang"
     st_expect wrong-output "entry-form:fail"
     st_expect silent-success "entry-form:fail"
+    [ ! -e "$hwc_work" ] || st_fail="$st_fail default:artifacts-not-cleaned"
+
+    # Retention is evidence only: preserve a real clean-error diagnostic while
+    # retaining exactly the existing two-arm verdict. Selftest evidence itself
+    # lives under the selftest owner, never in the caller's artifact directory.
+    st_n=$((st_n + 1))
+    st_saved_artifacts=${HW_ARTIFACT_DIR:-}
+    mkdir "$st_work/retained" || gate_error "selftest artifact directory"
+    HW_ARTIFACT_DIR=$st_work/retained
+    HW_SELFTEST_ACTIVE=0
+    HW_CHECKED=0
+    HW_FAILURES=""
+    hw_check_candidate "$st_work/positional-clean-error"
+    if [ "$HW_CHECKED" -ne 2 ] || [ -n "$HW_FAILURES" ] ||
+       ! grep -q 'missing importing module surface' "$hwc_work/build-positional.log" ||
+       [ ! -x "$hwc_work/out-entry.bin" ]; then
+        st_fail="$st_fail retained:missing-artifacts-or-changed-verdict"
+    fi
+    HW_ARTIFACT_DIR=$st_saved_artifacts
+    HW_SELFTEST_ACTIVE=1
 
     # An empty candidate list must leave 0 arms run, forcing the caller to ERROR.
     st_n=$((st_n + 1))
@@ -340,6 +375,7 @@ EOF
         exit 1
     fi
     HW_SELFTEST_CASES=$st_n
+    HW_SELFTEST_ACTIVE=0
 }
 
 # -------------------------------------------------------------------- main --

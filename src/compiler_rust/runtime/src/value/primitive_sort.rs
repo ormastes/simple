@@ -92,7 +92,6 @@ enum TestKernelPath {
     Avx2I64Radix,
     Avx2F64Radix,
     Avx2U8Histogram,
-    Avx512U8Histogram,
     NeonU8Histogram,
 }
 
@@ -122,13 +121,19 @@ pub const fn dispatch_for_tier(tier: SimdTier) -> PrimitiveSortDispatch {
     }
 }
 
+// Preserve the public const request descriptor while reporting the kernel
+// family actually admitted for execution by the default runtime.
+fn effective_dispatch_for_tier(tier: SimdTier) -> PrimitiveSortDispatch {
+    dispatch_for_tier(super::byte_kernels::default_runtime_simd_tier(tier))
+}
+
 #[inline]
 pub fn sort_runtime_values_auto(values: &mut [RuntimeValue]) -> PrimitiveSortReport {
     sort_runtime_values(values, active_simd_tier())
 }
 
 pub fn sort_runtime_values(values: &mut [RuntimeValue], tier: SimdTier) -> PrimitiveSortReport {
-    let dispatch = dispatch_for_tier(tier);
+    let dispatch = effective_dispatch_for_tier(tier);
     if values.len() < 2 {
         return PrimitiveSortReport::sorted(None, dispatch, values.len());
     }
@@ -235,11 +240,7 @@ fn sort_u8(values: &mut [u8], dispatch: PrimitiveSortDispatch) {
     match dispatch {
         PrimitiveSortDispatch::Scalar => scalar_sort_u8(values),
         PrimitiveSortDispatch::Avx2 => avx2_sort_u8(values),
-        // Unlike the i64/f64 paths, the byte sort is a counting sort: it
-        // never reorders elements via SIMD comparisons, it only tallies byte
-        // occurrences with vector loads and then refills the buffer
-        // sequentially. That is straightforward to widen to 64-byte lanes
-        // without touching the reasoning that makes it correct.
+        // Compatibility enum value is narrowed before execution.
         PrimitiveSortDispatch::Avx512 => avx512_sort_u8(values),
         PrimitiveSortDispatch::Neon => neon_sort_u8(values),
     }
@@ -492,67 +493,12 @@ fn avx2_sort_u8(values: &mut [u8]) {
     scalar_sort_u8(values);
 }
 
-// AVX-512 counting sort for bytes. This scans 64 bytes per step instead of
-// AVX2's 32; the widening is safe because the kernel only ever *tallies*
-// byte occurrences (a linear reduction) and then refills the buffer
-// sequentially from the histogram — there is no in-register reordering of
-// elements that a wider lane could get wrong, unlike a real sorting network.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f,avx512bw")]
-unsafe fn avx512_sort_u8_impl(values: &mut [u8]) {
-    use core::arch::x86_64::__m512i;
-
-    if values.len() < SIMD_BYTE_HISTOGRAM_MIN_LEN {
-        scalar_sort_u8(values);
-        return;
-    }
-
-    #[cfg(test)]
-    record_test_kernel(TestKernelPath::Avx512U8Histogram);
-
-    let mut counts = [0_usize; RADIX_BUCKETS];
-    let mut block = [0_u8; 64];
-    let mut chunk_index = 0_usize;
-    while chunk_index + 64 <= values.len() {
-        // `read_unaligned`/`write_unaligned` deliberately, not
-        // `_mm512_loadu_si512`/`_mm512_storeu_si512`: those intrinsics'
-        // pointer types have shifted across Rust releases, and this compiles
-        // to the same `vmovdqu64` under `#[target_feature]` regardless.
-        let input = values.as_ptr().add(chunk_index) as *const __m512i;
-        let lanes = std::ptr::read_unaligned(input);
-        std::ptr::write_unaligned(block.as_mut_ptr() as *mut __m512i, lanes);
-        for &value in &block {
-            counts[value as usize] += 1;
-        }
-        chunk_index += 64;
-    }
-    for &value in &values[chunk_index..] {
-        counts[value as usize] += 1;
-    }
-
-    let mut index = 0_usize;
-    for (byte, count) in counts.into_iter().enumerate() {
-        if count == 0 {
-            continue;
-        }
-        values[index..index + count].fill(byte as u8);
-        index += count;
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
+// Retained dispatch enum compatibility, with no embedded wide implementation.
 fn avx512_sort_u8(values: &mut [u8]) {
-    unsafe {
-        if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512bw") {
-            return avx512_sort_u8_impl(values);
-        }
+    match super::byte_kernels::default_runtime_simd_tier(SimdTier::X86_64Avx512) {
+        SimdTier::X86_64Avx2 => avx2_sort_u8(values),
+        _ => scalar_sort_u8(values),
     }
-    avx2_sort_u8(values);
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn avx512_sort_u8(values: &mut [u8]) {
-    avx2_sort_u8(values);
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -752,7 +698,15 @@ mod tests {
         assert_eq!(dispatch_for_tier(SimdTier::Scalar), PrimitiveSortDispatch::Scalar);
         assert_eq!(dispatch_for_tier(SimdTier::X86_64Sse2), PrimitiveSortDispatch::Scalar);
         assert_eq!(dispatch_for_tier(SimdTier::X86_64Avx2), PrimitiveSortDispatch::Avx2);
-        assert_eq!(dispatch_for_tier(SimdTier::X86_64Avx512), PrimitiveSortDispatch::Avx512);
+        const WIDE_REQUEST: PrimitiveSortDispatch = dispatch_for_tier(SimdTier::X86_64Avx512);
+        assert_eq!(WIDE_REQUEST, PrimitiveSortDispatch::Avx512);
+        let report = sort_runtime_values(&mut [], SimdTier::X86_64Avx512);
+        assert_eq!(
+            report.dispatch,
+            dispatch_for_tier(crate::value::byte_kernels::default_runtime_simd_tier(
+                SimdTier::X86_64Avx512
+            ))
+        );
         assert_eq!(dispatch_for_tier(SimdTier::Aarch64Neon), PrimitiveSortDispatch::Neon);
         assert_eq!(dispatch_for_tier(SimdTier::Riscv64Rvv), PrimitiveSortDispatch::Scalar);
     }
@@ -853,20 +807,10 @@ mod tests {
         assert_eq!(take_test_kernel(), Some(TestKernelPath::ScalarI64));
     }
 
-    // AVX-512 keeps i64/f64 correctness identical to AVX2 (both are scalar in
-    // practice today, see the comments on `sort_i64`/`sort_f64`), and gets a
-    // real widened byte-histogram kernel. This compares the AVX-512 tier
-    // against the SCALAR tier's answer across sizes straddling the 64-byte
-    // lane boundary, never a hardcoded expected value, and stays correct on
-    // a host without AVX-512 because the dispatcher falls back to AVX2, which
-    // falls back to scalar.
+    // An optional-wide request must preserve scalar results using embedded kernels.
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn avx512_paths_match_scalar_results_for_all_primitive_kinds() {
-        if !(std::arch::is_x86_feature_detected!("avx512f") && std::arch::is_x86_feature_detected!("avx512bw")) {
-            return;
-        }
-
         let mut scalar_ints = build_int_values(SIMD_RADIX_MIN_LEN + 65);
         let mut simd_ints = scalar_ints.clone();
         sort_runtime_values(&mut scalar_ints, SimdTier::Scalar);
@@ -905,20 +849,22 @@ mod tests {
             assert_eq!(simd_bytes, scalar_bytes, "len={len}");
         }
 
-        // Confirm the widened kernel actually ran (not silently scalar) once
-        // comfortably past the activation threshold.
+        // Confirm the actual embedded kernel selected on this CPU.
         let mut simd_bytes = build_byte_values(SIMD_BYTE_HISTOGRAM_MIN_LEN + 47);
         sort_runtime_values(&mut simd_bytes, SimdTier::X86_64Avx512);
-        assert_eq!(take_test_kernel(), Some(TestKernelPath::Avx512U8Histogram));
+        assert_eq!(
+            take_test_kernel(),
+            Some(if std::is_x86_feature_detected!("avx2") {
+                TestKernelPath::Avx2U8Histogram
+            } else {
+                TestKernelPath::ScalarU8
+            })
+        );
     }
 
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn avx512_small_byte_inputs_still_fall_back_to_scalar_kernel() {
-        if !(std::arch::is_x86_feature_detected!("avx512f") && std::arch::is_x86_feature_detected!("avx512bw")) {
-            return;
-        }
-
         let mut values = build_byte_values(16);
         sort_runtime_values(&mut values, SimdTier::X86_64Avx512);
         assert_eq!(take_test_kernel(), Some(TestKernelPath::ScalarU8));

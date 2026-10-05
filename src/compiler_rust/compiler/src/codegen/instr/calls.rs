@@ -563,7 +563,8 @@ fn compile_inline_bytes_u8_at<M: Module>(
         return Ok(false);
     }
     let Some(dest) = dest else {
-        return Ok(false);
+        // Pure read with an unused result: nothing to emit.
+        return Ok(true);
     };
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
@@ -667,6 +668,64 @@ fn compile_inline_bytes_u8_at<M: Module>(
     Ok(true)
 }
 
+/// Little-endian `width`-byte read at `index` from a hosted `[u8]`, for
+/// either element layout: a byte-packed array (gc_flags bit 3, the packed
+/// RT_CORE_ARRAY_FLAG_BYTES layout) is read directly; a slot array (8-byte
+/// tagged elements — what e.g. `[0u8; n]` with a runtime `n` builds) is
+/// composed from per-slot byte decodes. Reading packed bytes out of a slot
+/// array returned the slot words' low bytes (a 16-byte sum of 2040 read 105).
+fn hosted_bytes_le_load(builder: &mut FunctionBuilder, ptr_bits: Value, index: Value, width: i64) -> Value {
+    let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
+    let packed_block = builder.create_block();
+    let slot_block = builder.create_block();
+    let join_block = builder.create_block();
+    builder.append_block_param(join_block, types::I64);
+    let gc_flags = builder.ins().load(types::I8, MemFlags::new(), ptr_bits, 1);
+    let byte_packed = builder.ins().band_imm(gc_flags, 8);
+    let is_byte_packed = builder.ins().icmp_imm(IntCC::NotEqual, byte_packed, 0);
+    builder.ins().brif(is_byte_packed, packed_block, &[], slot_block, &[]);
+
+    builder.switch_to_block(packed_block);
+    let byte_ptr = builder.ins().iadd(data_ptr, index);
+    let packed = if width == 8 {
+        builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
+    } else if width == 1 {
+        let value = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
+        builder.ins().uextend(types::I64, value)
+    } else {
+        let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
+        builder.ins().uextend(types::I64, value)
+    };
+    builder.ins().jump(join_block, &[packed]);
+    builder.seal_block(packed_block);
+
+    builder.switch_to_block(slot_block);
+    let mut acc: Option<Value> = None;
+    for i in 0..width {
+        let off = builder.ins().iadd_imm(index, i);
+        let slot_off = builder.ins().imul_imm(off, 8);
+        let slot_ptr = builder.ins().iadd(data_ptr, slot_off);
+        let slot = builder.ins().load(types::I64, MemFlags::new(), slot_ptr, 0);
+        let byte = decode_byte_from_slot(builder, slot);
+        let piece = if i == 0 {
+            byte
+        } else {
+            builder.ins().ishl_imm(byte, (i * 8) as i64)
+        };
+        acc = Some(match acc {
+            None => piece,
+            Some(a) => builder.ins().bor(a, piece),
+        });
+    }
+    let composed = acc.expect("at least one byte composed");
+    builder.ins().jump(join_block, &[composed]);
+    builder.seal_block(slot_block);
+
+    builder.switch_to_block(join_block);
+    builder.seal_block(join_block);
+    builder.block_params(join_block)[0]
+}
+
 fn compile_inline_bytes_le_at<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -722,17 +781,7 @@ fn compile_inline_bytes_le_at<M: Module>(
         }
         acc.expect("at least one byte composed")
     } else {
-        let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-        let byte_ptr = builder.ins().iadd(data_ptr, index);
-        if width == 8 {
-            builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
-        } else if width == 1 {
-            let value = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
-            builder.ins().uextend(types::I64, value)
-        } else {
-            let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
-            builder.ins().uextend(types::I64, value)
-        }
+        hosted_bytes_le_load(builder, ptr_bits, index, width)
     };
     builder.ins().jump(done_block, &[loaded]);
     builder.seal_block(load_block);
@@ -755,7 +804,8 @@ fn compile_inline_typed_bytes_le_unchecked<M: Module>(
         return Ok(false);
     }
     let Some(dest) = dest else {
-        return Ok(false);
+        // Pure read with an unused result: nothing to emit.
+        return Ok(true);
     };
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
@@ -793,17 +843,7 @@ fn compile_inline_typed_bytes_le_unchecked<M: Module>(
         }
         acc.expect("at least one byte composed")
     } else {
-        let data_ptr = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 24);
-        let byte_ptr = builder.ins().iadd(data_ptr, index);
-        if width == 8 {
-            builder.ins().load(types::I64, MemFlags::new(), byte_ptr, 0)
-        } else if width == 1 {
-            let value = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
-            builder.ins().uextend(types::I64, value)
-        } else {
-            let value = builder.ins().load(types::I32, MemFlags::new(), byte_ptr, 0);
-            builder.ins().uextend(types::I64, value)
-        }
+        hosted_bytes_le_load(builder, ptr_bits, index, width)
     };
     ctx.vreg_values.insert(*dest, loaded);
     Ok(true)
@@ -934,7 +974,13 @@ fn compile_inline_array_get<M: Module>(
         let byte_ptr = builder.ins().iadd(data_ptr, normalized_index);
         let byte = builder.ins().load(types::I8, MemFlags::new(), byte_ptr, 0);
         let byte_value = builder.ins().uextend(types::I64, byte);
-        builder.ins().jump(done_block, &[byte_value]);
+        // Tag it (`from_int`: `v << 3`), exactly what the runtime
+        // `rt_array_get` returns for a byte-packed array and what every MIR
+        // consumer decodes (UnboxInt). The raw byte used to escape here, so a
+        // byte that is a multiple of 8 was shifted on decode: `for b in bytes`
+        // read 104 as 13 under the JIT, while 101 passed through untouched.
+        let tagged_byte = builder.ins().ishl_imm(byte_value, 3);
+        builder.ins().jump(done_block, &[tagged_byte]);
         builder.seal_block(byte_block);
     }
 
@@ -1739,7 +1785,8 @@ fn compile_inline_typed_bytes_data_at<M: Module>(
         return Ok(false);
     }
     let Some(dest) = dest else {
-        return Ok(false);
+        // Pure read with an unused result: nothing to emit.
+        return Ok(true);
     };
     let data_ptr = coerce_vreg_to_i64(ctx, builder, args[0]);
     let index = coerce_vreg_to_i64(ctx, builder, args[1]);
@@ -1771,7 +1818,8 @@ fn compile_inline_typed_words_at<M: Module>(
         return Ok(false);
     }
     let Some(dest) = dest else {
-        return Ok(false);
+        // Pure read with an unused result: nothing to emit.
+        return Ok(true);
     };
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
@@ -1872,7 +1920,8 @@ fn compile_inline_typed_words_unchecked<M: Module>(
         return Ok(false);
     }
     let Some(dest) = dest else {
-        return Ok(false);
+        // Pure read with an unused result: nothing to emit.
+        return Ok(true);
     };
 
     let array = coerce_vreg_to_i64(ctx, builder, args[0]);
@@ -3378,6 +3427,33 @@ pub fn sffi_alias_target_shadowed(name: &str, user_defined: bool) -> Option<&'st
 /// 1. Built-in I/O functions (print, println, etc.) - handled via compile_builtin_io_call
 /// 2. User-defined functions - looked up in func_ids
 /// 3. Runtime SFFI functions - looked up in runtime_funcs
+/// Runtime byte/word accessors that this Cranelift backend always lowers
+/// inline (see the `compile_inline_bytes_u8_at` /
+/// `compile_inline_typed_bytes_le_unchecked` / `compile_inline_typed_bytes_data_at`
+/// / `compile_inline_typed_words_*` dispatch in `compile_call`). The JIT
+/// runtime does not export symbols for most of them, so a source-level
+/// `extern fn` declaration of one must NOT be treated as an unresolvable
+/// extern: doing so splices every call through the interpreter bridge
+/// instead of the inline load (wrong values and an O(n) array conversion per
+/// call — see doc/08_tracking/bug/jit_typed_bytes_extern_spliced_to_interpreter_2026-10-05.md).
+pub fn is_inline_lowered_byte_accessor(name: &str) -> bool {
+    matches!(
+        name,
+        "rt_typed_bytes_u8_at"
+            | "rt_bytes_u8_at"
+            | "rt_typed_bytes_u8_unchecked"
+            | "rt_typed_bytes_u8_data_at"
+            | "rt_typed_bytes_u32_le_at"
+            | "rt_typed_bytes_u64_le_at"
+            | "rt_typed_bytes_u32_le_unchecked"
+            | "rt_typed_bytes_u64_le_unchecked"
+            | "rt_typed_words_u32_at"
+            | "rt_typed_words_u64_at"
+            | "rt_typed_words_u32_unchecked"
+            | "rt_typed_words_u64_unchecked"
+    )
+}
+
 pub fn compile_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -4057,7 +4133,7 @@ pub fn compile_call<M: Module>(
                 } else {
                     // On-demand declaration: MIR referenced "str.starts_with" etc.
                     // but referenced_names only had the dotted form, not the rt_ name.
-                    let call_conv = crate::codegen::shared::platform_call_conv();
+                    let call_conv = ctx.module.isa().default_call_conv();
                     let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
                     let param_count = args.len();
                     for _ in 0..param_count {
@@ -4261,7 +4337,7 @@ pub fn compile_call<M: Module>(
                     func_name, resolved_name
                 ));
             }
-            let call_conv = crate::codegen::shared::platform_call_conv();
+            let call_conv = ctx.module.isa().default_call_conv();
             let mut sig = cranelift_codegen::ir::Signature::new(call_conv);
             // Same single-source-of-truth arity as the receiver-strip above:
             // never re-key this lookup independently of `callee_arity`.

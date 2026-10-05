@@ -17,20 +17,16 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn tagged_bool_from_i1(
+    fn scalar_bool_from_i1(
         &self,
         cond: inkwell::values::IntValue<'static>,
         builder: &Builder<'static>,
     ) -> Result<inkwell::values::IntValue<'static>, CompileError> {
-        let selected = builder
-            .build_select(
-                cond,
-                self.tagged_bool_const(true),
-                self.tagged_bool_const(false),
-                "tagged_bool",
-            )
-            .map_err(|e| crate::error::factory::llvm_build_failed("build_select", &e))?;
-        Ok(selected.into_int_value())
+        // Native MIR booleans use raw 0/1. Tag only at explicit runtime
+        // boxing boundaries, consistently with constants and payload unboxing.
+        builder
+            .build_int_z_extend(cond, self.runtime_int_type(), "scalar_bool")
+            .map_err(|e| crate::error::factory::llvm_build_failed("bool zero extend", &e))
     }
 
     #[cfg(feature = "llvm")]
@@ -77,13 +73,13 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
-    fn tagged_bool_from_runtime_truthiness(
+    fn scalar_bool_from_runtime_truthiness(
         &self,
         value: inkwell::values::IntValue<'static>,
         builder: &Builder<'static>,
     ) -> Result<inkwell::values::IntValue<'static>, CompileError> {
         let truthy = self.runtime_int_truthy_i1(value, builder)?;
-        self.tagged_bool_from_i1(truthy, builder)
+        self.scalar_bool_from_i1(truthy, builder)
     }
 
     #[cfg(feature = "llvm")]
@@ -250,7 +246,7 @@ impl LlvmBackend {
                                 .build_int_compare(IntPredicate::NE, raw, i64_type.const_zero(), "eq_bool")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?
                         };
-                        self.tagged_bool_from_i1(cmp, builder)?
+                        self.scalar_bool_from_i1(cmp, builder)?
                     }
                     BinOp::NotEq => {
                         let cmp = if native_scalar_eq {
@@ -275,13 +271,13 @@ impl LlvmBackend {
                                 .build_int_compare(IntPredicate::NE, raw, i64_type.const_zero(), "neq_bool")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?
                         };
-                        self.tagged_bool_from_i1(cmp, builder)?
+                        self.scalar_bool_from_i1(cmp, builder)?
                     }
                     BinOp::Is => {
                         let cmp = builder
                             .build_int_compare(IntPredicate::EQ, l, r, "is")
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                        self.tagged_bool_from_i1(cmp, builder)?
+                        self.scalar_bool_from_i1(cmp, builder)?
                     }
                     BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
                         // P0 fix (2026-09-25, Package B): mirror the cranelift
@@ -374,7 +370,7 @@ impl LlvmBackend {
                                 .build_int_compare(pred, l, r, "cmp")
                                 .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?
                         };
-                        self.tagged_bool_from_i1(cmp, builder)?
+                        self.scalar_bool_from_i1(cmp, builder)?
                     }
                     BinOp::Mod => builder
                         .build_int_signed_rem(l, r, "mod")
@@ -385,7 +381,7 @@ impl LlvmBackend {
                         let both = builder
                             .build_and(l_truth, r_truth, "and")
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_and", &e))?;
-                        self.tagged_bool_from_i1(both, builder)?
+                        self.scalar_bool_from_i1(both, builder)?
                     }
                     BinOp::Or => {
                         let l_truth = self.runtime_int_truthy_i1(l, builder)?;
@@ -393,7 +389,7 @@ impl LlvmBackend {
                         let either = builder
                             .build_or(l_truth, r_truth, "or")
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_or", &e))?;
-                        self.tagged_bool_from_i1(either, builder)?
+                        self.scalar_bool_from_i1(either, builder)?
                     }
                     BinOp::BitAnd => builder
                         .build_and(l, r, "bitand")
@@ -517,7 +513,7 @@ impl LlvmBackend {
                         let cmp = builder
                             .build_float_compare(pred, l, r, "fcmp")
                             .map_err(|e| crate::error::factory::llvm_build_failed("fcmp", &e))?;
-                        Ok(self.tagged_bool_from_i1(cmp, builder)?.into())
+                        Ok(self.scalar_bool_from_i1(cmp, builder)?.into())
                     }
                     BinOp::Pow => {
                         // Class 2 fix (2026-09-07): float Pow was never
@@ -606,7 +602,7 @@ impl LlvmBackend {
                                 "ptr_eq_bool",
                             )
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                        self.tagged_bool_from_i1(cmp, builder)?
+                        self.scalar_bool_from_i1(cmp, builder)?
                     }
                     BinOp::NotEq => {
                         let rt_func = module.get_function("rt_native_neq").unwrap_or_else(|| {
@@ -632,7 +628,7 @@ impl LlvmBackend {
                                 "ptr_neq_bool",
                             )
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                        self.tagged_bool_from_i1(cmp, builder)?
+                        self.scalar_bool_from_i1(cmp, builder)?
                     }
                     BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
                         // Arithmetic on pointers (runtime representation): operate on integer form
@@ -679,7 +675,7 @@ impl LlvmBackend {
                     let cmp = builder
                         .build_int_compare(IntPredicate::NE, eq_val, i64_type.const_zero(), "mixed_eq_bool")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                    return Ok(self.tagged_bool_from_i1(cmp, builder)?.into());
+                    return Ok(self.scalar_bool_from_i1(cmp, builder)?.into());
                 }
                 if matches!(op, BinOp::NotEq) {
                     let rt_func = module.get_function("rt_native_neq").unwrap_or_else(|| {
@@ -697,7 +693,7 @@ impl LlvmBackend {
                     let cmp = builder
                         .build_int_compare(IntPredicate::NE, neq_val, i64_type.const_zero(), "mixed_neq_bool")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                    return Ok(self.tagged_bool_from_i1(cmp, builder)?.into());
+                    return Ok(self.scalar_bool_from_i1(cmp, builder)?.into());
                 }
 
                 // P0 fix (2026-09-25, Package B): the mixed-representation
@@ -738,7 +734,7 @@ impl LlvmBackend {
                     let cmp = builder
                         .build_int_compare(pred, raw, zero, "mixed_cmp_bool")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                    return Ok(self.tagged_bool_from_i1(cmp, builder)?.into());
+                    return Ok(self.scalar_bool_from_i1(cmp, builder)?.into());
                     }
                     let pred = match op {
                         BinOp::Lt => IntPredicate::SLT,
@@ -750,7 +746,7 @@ impl LlvmBackend {
                     let cmp = builder
                         .build_int_compare(pred, l_int, r_int, "mixed_ord")
                         .map_err(|e| crate::error::factory::llvm_build_failed("build_int_compare", &e))?;
-                    return Ok(self.tagged_bool_from_i1(cmp, builder)?.into());
+                    return Ok(self.scalar_bool_from_i1(cmp, builder)?.into());
                 }
 
                 let result = match op {
@@ -765,7 +761,7 @@ impl LlvmBackend {
                         let both = builder
                             .build_and(l_truth, r_truth, "mixed_and")
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_and", &e))?;
-                        return Ok(self.tagged_bool_from_i1(both, builder)?.into());
+                        return Ok(self.scalar_bool_from_i1(both, builder)?.into());
                     }
                     BinOp::Or => {
                         let l_truth = self.runtime_int_truthy_i1(l_int, builder)?;
@@ -773,7 +769,7 @@ impl LlvmBackend {
                         let either = builder
                             .build_or(l_truth, r_truth, "mixed_or")
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_or", &e))?;
-                        return Ok(self.tagged_bool_from_i1(either, builder)?.into());
+                        return Ok(self.scalar_bool_from_i1(either, builder)?.into());
                     }
                     BinOp::BitAnd => builder.build_and(l_int, r_int, "mixed_bitand"),
                     BinOp::BitOr => builder.build_or(l_int, r_int, "mixed_bitor"),
@@ -848,7 +844,7 @@ impl LlvmBackend {
                         let negated = builder
                             .build_not(truthy, "not_bool")
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_not", &e))?;
-                        self.tagged_bool_from_i1(negated, builder)?
+                        self.scalar_bool_from_i1(negated, builder)?
                     }
                     UnaryOp::BitNot => builder
                         .build_not(val, "bitnot")
@@ -875,14 +871,14 @@ impl LlvmBackend {
                         // true exactly when `x == 0.0`. Use an ordered
                         // float-equal compare against the operand's own zero
                         // (handles both f32 and f64 without a cross-width
-                        // promote) and box the i1 into the tagged bool ABI,
+                        // promote) and widen the i1 into the native scalar ABI,
                         // matching every other comparison in this file.
                         use inkwell::FloatPredicate;
                         let zero = val.get_type().const_zero();
                         let cmp = builder
                             .build_float_compare(FloatPredicate::OEQ, val, zero, "fnot_eq_zero")
                             .map_err(|e| crate::error::factory::llvm_build_failed("build_float_compare", &e))?;
-                        self.tagged_bool_from_i1(cmp, builder)?.into()
+                        self.scalar_bool_from_i1(cmp, builder)?.into()
                     }
                     _ => return Err(crate::error::factory::unsupported_operation("float unary op", &op)),
                 };
@@ -921,7 +917,7 @@ impl LlvmBackend {
                         let int_val = self
                             .coerce_value_to_type(*val, Some(i64_type.into()), builder)?
                             .into_int_value();
-                        self.tagged_bool_from_runtime_truthiness(int_val, builder)?.into()
+                        self.scalar_bool_from_runtime_truthiness(int_val, builder)?.into()
                     } else {
                         self.coerce_value_to_type(*val, Some(i64_type.into()), builder)?
                     };
@@ -1132,12 +1128,12 @@ impl LlvmBackend {
                     .map_err(|e| crate::error::factory::llvm_build_failed("int_to_ptr", &e))?;
                 Ok(cast.into())
             }
-            // i1 -> RuntimeValue bool (TRUE/FALSE tag) when widening into the ABI int type
+            // i1 -> raw native scalar boolean when widening into the ABI int type
             (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(it))
                 if iv.get_type().get_bit_width() == 1
                     && it.get_bit_width() == self.runtime_int_type().get_bit_width() =>
             {
-                Ok(self.tagged_bool_from_i1(iv, builder)?.into())
+                Ok(self.scalar_bool_from_i1(iv, builder)?.into())
             }
             // narrow int -> wider int
             (BasicValueEnum::IntValue(iv), BasicTypeEnum::IntType(it))
@@ -1231,6 +1227,45 @@ mod tests {
     use crate::mir::{BlockId, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
+
+    #[test]
+    fn native_boolean_returns_and_not_use_raw_scalar_bits() {
+        let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Linux)).unwrap();
+        backend.create_module("scalar_boolean_contract").unwrap();
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let ty = backend.runtime_int_type();
+            for (name, input, expected) in [
+                ("raw_false", 0, 0), ("raw_true", 1, 1),
+                ("runtime_false", 19, 0), ("runtime_true", 11, 1),
+            ] {
+                let function = module.add_function(name, ty.fn_type(&[], false), None);
+                builder.position_at_end(backend.context_ref().append_basic_block(function, "entry"));
+                let value = ty.const_int(input, false);
+                let scalar = backend.scalar_bool_from_runtime_truthiness(value, builder).unwrap();
+                assert_eq!(scalar.get_zero_extended_constant(), Some(expected));
+                let negated = backend.compile_unaryop(
+                    crate::hir::UnaryOp::Not, value.into(), builder,
+                ).unwrap().into_int_value();
+                assert_eq!(negated.get_zero_extended_constant(), Some(1 - expected));
+                let mut values = HashMap::new();
+                values.insert(VReg(0), value.into());
+                backend.compile_terminator(
+                    &Terminator::Return(Some(VReg(0))), crate::hir::TypeId::BOOL,
+                    &HashMap::new(), &values, builder,
+                ).unwrap();
+            }
+        }
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("ret i64 0"), "{ir}");
+        assert!(ir.contains("ret i64 1"), "{ir}");
+        assert!(!ir.contains("ret i64 19"), "{ir}");
+        assert!(!ir.contains("ret i64 11"), "{ir}");
+        backend.verify().unwrap();
+    }
 
     #[test]
     fn compile_switch_terminator_emits_llvm_switch() {

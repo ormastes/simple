@@ -16,6 +16,95 @@ use super::tools::find_hosted_runtime_rlib;
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn native_cross_module_text_call_result_parses_float() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("provider.spl"),
+        concat!(
+            "fn returned_text() -> text:\n    return \"1.25\"\n",
+            "fn returned_float() -> f64:\n    return 1.25\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        src.join("consumer.spl"),
+        concat!(
+            "use provider.{returned_text as remote_text, returned_float}\n",
+            "fn cross_result() -> f64:\n    return remote_text().to_float()\n",
+            "fn local_result() -> f64:\n    val value: text = \"1.25\"\n    return value.to_float()\n",
+            "fn cross_float() -> f64:\n    return returned_float() + 1.0\n",
+            "fn returned_text() -> i64:\n    return 7\n",
+            "fn local_override() -> f64:\n    return returned_text().to_float()\n",
+        ),
+    )
+    .unwrap();
+    let archive = temp.path().join("probe.a");
+    let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive.clone())
+        .source_dir(src)
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            backend: "cranelift".to_string(),
+            num_threads: Some(1),
+            ..Default::default()
+        })
+        .build()
+        .expect("two-module production native-project compilation");
+    assert_eq!(result.failed, 0);
+    let runtime = build_core_c_runtime_library(temp.path()).expect("real core-C runtime");
+    let runner = temp.path().join("runner.c");
+    fs::write(
+        &runner,
+        r#"
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include "runtime.h"
+extern int64_t consumer__cross_result(void);
+extern int64_t consumer__local_result(void);
+extern int64_t consumer__cross_float(void);
+extern int64_t consumer__local_override(void);
+static double decoded(int64_t bits) { double value; memcpy(&value, &bits, 8); return value; }
+int main(void) {
+    double expected = rt_value_as_float(rt_string_to_float(rt_string_new((const uint8_t*)"1.25", 4)));
+    double local = decoded(consumer__local_result());
+    double cross = decoded(consumer__cross_result());
+    double cross_float = decoded(consumer__cross_float());
+    double local_override = decoded(consumer__local_override());
+    printf("oracle=%.17g local=%.17g cross=%.17g float=%.17g override=%.17g\n",
+        expected, local, cross, cross_float, local_override);
+    return expected != 1.25 || local != expected || cross != expected
+        || cross_float != expected + 1.0 || local_override != 7.0;
+}
+"#,
+    )
+    .unwrap();
+    let executable = temp.path().join("probe");
+    let link = std::process::Command::new(find_c_compiler())
+        .arg("-I")
+        .arg(repo_root_for_native_project_tests().join("src/runtime"))
+        .arg(runner)
+        .arg(archive)
+        .arg(runtime)
+        .args(["-Wl,--gc-sections", "-lpthread", "-ldl", "-lm", "-o"])
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(link.status.success(), "{}", String::from_utf8_lossy(&link.stderr));
+    let output = std::process::Command::new(executable).output().unwrap();
+    eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "native float conversion failed: {}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn bootstrap_native_all_rejects_provider_only_authority() {
     use super::config::bootstrap_native_all_has_runtime_owners;

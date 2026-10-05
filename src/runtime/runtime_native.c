@@ -3488,15 +3488,11 @@ int64_t rt_string_bytes(int64_t string) {
     if (!bytes) return rt_core_nil();
     if (s) {
         for (uint64_t i = 0; i < s->len; i++) {
-            /* BUGFIX (byte_span_cross_module_misread_2026-07-19): store the RAW
-             * byte, NOT rt_value_int(byte). `.bytes()` is declared `[u8]`; a
-             * `[u8]` array (literal `[73u8,..]` / `push(u8)`) stores raw untagged
-             * bytes and the `[u8]` element read truncates with `& 0xFF` without
-             * untagging. rt_value_int tagged the slot as `byte << 3`, so `[u8]`
-             * reads at param/struct-field/typed-var sites returned the tag's low
-             * byte (73<<3=0x248 -> 0x48=72) instead of 73. Mirrors the pure-Simple
-             * fix in simple_core/core_string.spl rt_string_bytes. */
-            rt_array_push(bytes, (uint8_t)s->data[i]);
+            /* rt_array_new creates word slots. Both generic integer reads and
+             * typed byte accessors decode tagged word values; packed byte
+             * arrays are distinguished by RT_CORE_ARRAY_FLAG_BYTES. Keep this
+             * producer aligned with the Rust runtime and core_string.spl. */
+            rt_array_push(bytes, rt_value_int((uint8_t)s->data[i]));
         }
     }
     return (int64_t)(uintptr_t)bytes;
@@ -4532,9 +4528,16 @@ int64_t rt_native_cmp(int64_t left, int64_t right) {
     if (left_string || right_string) {
         return rt_text_cmp_any(left, right);
     }
-    if (rt_core_is_float(left) || rt_core_is_float(right)) {
-        double a = rt_core_is_float(left) ? rt_core_as_float(left) : (double)left;
-        double b = rt_core_is_float(right) ? rt_core_as_float(right) : (double)right;
+    /* This boundary also accepts RAW signed integers from erased native
+     * operators. Low tag bits cannot identify a float here: raw 2 is the
+     * legacy inline encoding of 0.0, and raw 98 decodes as a tiny subnormal.
+     * Only registered heap floats carry unambiguous float provenance. Keep
+     * legacy decoding in the explicitly tagged-value APIs, not this boundary. */
+    RtCoreFloat* left_float = rt_core_as_heap_float(left);
+    RtCoreFloat* right_float = rt_core_as_heap_float(right);
+    if (left_float || right_float) {
+        double a = left_float ? left_float->value : (double)left;
+        double b = right_float ? right_float->value : (double)right;
         if (a < b) return -1;
         if (a > b) return 1;
         return 0;
@@ -9585,6 +9588,8 @@ int64_t rt_array_reduce(SplArray* array, int64_t init, int64_t closure_value) {
  * arms are subsumed by the one test. */
 static inline int rt_core_value_truthy(int64_t value) {
     if (rt_core_is_float(value)) return rt_core_as_float(value) != 0.0;
+    RtCoreUInt* unsigned_value = rt_core_as_heap_uint(value);
+    if (unsigned_value) return unsigned_value->value != 0;
     switch (((uint64_t)value) & RT_VALUE_TAG_MASK) {
     case RT_VALUE_TAG_INT:
         return rt_core_as_int(value) != 0;
@@ -9595,6 +9600,11 @@ static inline int rt_core_value_truthy(int64_t value) {
     default:
         return 0;
     }
+}
+
+/* Compiler condition ABI: boolean results use an eight-bit return. */
+int8_t rt_value_truthy(int64_t value) {
+    return (int8_t)rt_core_value_truthy(value);
 }
 
 /* Predicate-driven collection ops.
@@ -15537,6 +15547,15 @@ int64_t rt_call_ptr_3(int64_t addr, int64_t a1, int64_t a2, int64_t a3) {
     return ((rt_call_ptr_3_fn)(uintptr_t)addr)(a1, a2, a3);
 }
 
+/* Rust dynlib_sffi exposes this exact integer-only ABI. Keep the C runtime
+ * twin aligned so native Simple executables can use the same checked loader
+ * wrapper. Unlike rt_call_ptr_3, a bad dynamic address is a recoverable error. */
+int64_t rt_dyncall_3(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2) {
+    typedef int64_t (*rt_dyncall_3_fn)(int64_t, int64_t, int64_t);
+    if (fn_ptr <= 0) return -1;
+    return ((rt_dyncall_3_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2);
+}
+
 /* Exact SimpleProviderQueryV1 discovery call.  Keep this separate from the
  * generic i64 dynamic-call family: the provider ABI returns int32_t. */
 int32_t rt_provider_query_v1_call(int64_t fn_ptr, int64_t request_ptr, int64_t result_ptr) {
@@ -17400,3 +17419,6 @@ int64_t rt_hosted_safe_artifact_bundle_identity_v1(int64_t a,int64_t b){(void)a;
 int64_t rt_hosted_safe_artifact_bundle_stage_scr1_v1(int64_t a,const uint8_t*b,uint64_t c,int64_t d){(void)a;(void)b;(void)c;(void)d;return 0;}
 int64_t rt_hosted_safe_artifact_bundle_finish_v1(int64_t a,int64_t b){(void)a;(void)b;return 0;}
 #endif
+
+/* Same bounded provider as the narrow native-all owner, without its duplicate ABI exports. */
+#include "runtime_shared_parse_cell_private.h"

@@ -22,46 +22,6 @@ use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 val SIMPLE_WEB_PIXEL_CACHE_MODE_UNTIMED_STATIC: text = "untimed-static"
 val SIMPLE_WEB_PIXEL_CACHE_MODE_TERMINAL: text = "terminal"
 
-class SimpleWebHeuristicSurface:
-    width: i32
-    height: i32
-    pixels: [u32]
-
-impl SimpleWebHeuristicSurface:
-    static fn create(width: i32, height: i32) -> SimpleWebHeuristicSurface:
-        # Allocate the buffer with the O(n) array-repeat form instead of an
-        # element-by-element push loop. `pixels = pixels.push(x)` reassigns the
-        # array each iteration; without unique-ownership the push copies, making
-        # buffer creation O((W*H)^2) and the whole heuristic render O(n^2) in
-        # canvas size. Array-repeat fills in one pass.
-        SimpleWebHeuristicSurface(width: width, height: height, pixels: [0u32; width * height])
-
-    me clear(color: u32):
-        var i = 0
-        val pixel_count = self.pixels.len()
-        while i < pixel_count:
-            self.pixels[i] = color
-            i = i + 1
-
-    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
-        val x0 = if x < 0: 0 else: x
-        val y0 = if y < 0: 0 else: y
-        val x1 = if x + w > self.width: self.width else: x + w
-        val y1 = if y + h > self.height: self.height else: y + h
-        var yy = y0
-        while yy < y1:
-            var xx = x0
-            while xx < x1:
-                self.pixels[yy * self.width + xx] = color
-                xx = xx + 1
-            yy = yy + 1
-
-    me read_pixels() -> [u32]:
-        self.pixels
-
-    me shutdown():
-        pass
-
 class SimpleWebEngine2DStaticPixelCache:
     width: i32
     height: i32
@@ -616,15 +576,6 @@ fn _first_var_color_after_from(html: text, marker: text, search_start: i64, fall
     val property_name = raw_property.trim()
     _custom_property_color(html, property_name, fallback)
 
-fn _html_accent_color(html: text) -> u32:
-    if html.contains("simple-web-success"):
-        return 0xFF22C55Eu32
-    if html.contains("simple-web-warning"):
-        return 0xFFF59E0Bu32
-    if html.contains("simple-web-accent"):
-        return 0xFF2563EBu32
-    0xFF2563EBu32
-
 fn _html_background_color(html: text) -> u32:
     val body_start = html.index_of("<body")
     if body_start < 0:
@@ -932,102 +883,6 @@ fn _first_block_color(html: text, fallback: u32) -> u32:
             return inline_color
     _style_rule_block_color(html, fallback)
 
-# True when `sel` is a simple selector the `_style_rule_block_color` heuristic
-# can faithfully resolve against the first visual block: a bare tag, `.class`,
-# `#id`, or `tag.class` naming that block's own tag / id / first class. Any
-# combinator, pseudo-class, attribute or functional form is unresolvable.
-fn _selector_token_is_resolvable(sel: text, tag_name: text, id_value: text, class_name: text) -> bool:
-    val s = sel.trim()
-    if s == "":
-        return false
-    if s.contains(" ") or s.contains("\t") or s.contains("\n") or s.contains("\r") or
-       s.contains(">") or s.contains("+") or s.contains("~") or s.contains(":") or
-       s.contains("[") or s.contains("*") or s.contains("("):
-        return false
-    var rest = s
-    if not (rest.starts_with(".") or rest.starts_with("#")):
-        val dot = rest.index_of(".")
-        val hash = rest.index_of("#")
-        var cut = rest.len()
-        if dot >= 0 and dot < cut:
-            cut = dot
-        if hash >= 0 and hash < cut:
-            cut = hash
-        if rest.substring(0, cut).lower() != tag_name.lower():
-            return false
-        rest = rest.substring(cut, rest.len())
-    if rest == "":
-        return true
-    if rest.starts_with("#"):
-        return id_value != "" and rest.substring(1, rest.len()) == id_value
-    if rest.starts_with("."):
-        val cls = rest.substring(1, rest.len())
-        return class_name != "" and cls == class_name
-    false
-
-fn _selector_group_is_resolvable(sel: text, tag_name: text, id_value: text, class_name: text) -> bool:
-    if tag_name == "":
-        return false
-    val parts = sel.split(",")
-    var i = 0
-    val n = parts.len()
-    while i < n:
-        val p = parts[i].trim()
-        if p != "" and (p.contains(".") or p.contains("#")) and
-           not _selector_token_is_resolvable(p, tag_name, id_value, class_name):
-            return false
-        i = i + 1
-    true
-
-# A class/id selector no longer forces the (much slower) full layout path by
-# itself — the heuristic above already resolves `.class` / `#id` / `tag.class`
-# rules for the first visual block. Only selectors it CANNOT resolve route to
-# the real renderer.
-fn _style_block_has_class_or_id_selector(html: text) -> bool:
-    val first_tag = _first_block_tag(html)
-    val tag_name = if first_tag != "": _tag_name_from_tag(first_tag) else: ""
-    val id_value = if first_tag != "": _attr_value(first_tag, "id") else: ""
-    val class_name = if first_tag != "": _first_class_name(_attr_value(first_tag, "class")) else: ""
-    # The paint path below draws a phantom SECOND block from the second
-    # `background-color` it finds in source order (see
-    # `_second_hex_color_after_from`). That heuristic assumes the two colours
-    # belong to two sibling elements, so a style block carrying more than one
-    # background-setting rule is NOT faithfully reproducible here even when
-    # every selector is individually resolvable — route it to the real engine.
-    var background_rules = 0
-    var pos = 0
-    var guard = 0
-    while guard < 1000:
-        guard = guard + 1
-        val style_start = _find_text_from(html, "<style", pos)
-        if style_start < 0:
-            return false
-        val open = _find_char_from(html, ">", style_start)
-        if open < 0:
-            return false
-        val css_start = open + 1
-        val close = _find_text_from(html, "</style", css_start)
-        if close < 0:
-            return false
-        var cp = css_start
-        while cp < close:
-            val brace = _find_char_from(html, "{", cp)
-            if brace < 0 or brace >= close:
-                break
-            if _range_contains_char(html, cp, brace, ".") or _range_contains_char(html, cp, brace, "#"):
-                if not _selector_group_is_resolvable(html.substring(cp, brace), tag_name, id_value, class_name):
-                    return true
-            val end = _find_char_from(html, "}", brace)
-            if end < 0 or end >= close:
-                break
-            if html.substring(brace + 1, end).contains("background"):
-                background_rules = background_rules + 1
-                if background_rules > 1:
-                    return true
-            cp = end + 1
-        pos = close + 8
-    false
-
 fn _selector_boundary_before(html: text, pos: i64) -> bool:
     if pos == 0:
         return true
@@ -1105,13 +960,6 @@ fn _style_body_rule_color(html: text, fallback: u32) -> u32:
         return body_color
     html_color
 
-# Routing seam: true when `<style>` carries a selector the fast heuristic
-# cannot resolve, so the page must go through the full layout/paint engine.
-# Exposed so specs can assert the routing decision directly instead of
-# inferring it from wall-clock time.
-pub fn simple_web_html_needs_selector_layout(html: text) -> bool:
-    _style_block_has_class_or_id_selector(html)
-
 pub fn simple_web_html_background_color(html: text) -> u32:
     val bg = _html_background_color(html)
     if bg != 0xFFFFFFFFu32:
@@ -1121,47 +969,14 @@ pub fn simple_web_html_background_color(html: text) -> u32:
         return style_bg
     _first_block_color(html, bg)
 
-fn _solid_fill_pixels(width: i32, height: i32, color: u32) -> [u32]:
-    [color; width * height]
-
-fn _first_px_dimension(html: text, prop: text, fallback: i32) -> i32:
-    val lo = html.lower()
-    val key = prop + ":"
-    val idx = lo.index_of(key)
-    if idx < 0:
-        return fallback
-    if idx > 0 and lo.char_code_at(idx - 1) == 45:
-        return fallback
-    var pos = idx + key.len()
-    val n = lo.len()
-    while pos < n and lo.char_code_at(pos) == 32:
-        pos = pos + 1
-    var value: i64 = 0
-    var digits = 0
-    while pos < n:
-        val c = lo.char_code_at(pos)
-        if c >= 48 and c <= 57:
-            value = value * 10 + (c - 48)
-            digits = digits + 1
-            pos = pos + 1
-        else:
-            break
-    if digits == 0:
-        return fallback
-    if pos + 2 <= n and lo.substring(pos, pos + 2) == "px":
-        return value.to_i32()
-    fallback
-
-# Generic HTML goes through the real layout/paint engine
+# Every document goes through the real layout/paint engine
 # (simple_web_html_layout_renderer): parse -> CSS cascade -> block layout ->
-# paint text+boxes. The substring-heuristic branches below are only a fast
-# path for a narrow set of trivially-resolvable shapes (a solid resolved
-# background color, a single first-block color, or the wm-app
-# titlebar/content chrome and the "Simple Web"/about:network mark drawn by
-# this module's own callers) — anything requiring CSS selector matching or
-# real box layout routes straight to the real renderer. No fixture marker is
-# handled here: the class-name-keyed toolbar-modal-grid painter that used to
-# sit at the top of this function was a canned pixel grid, not a rendering.
+# paint text+boxes. Until 2026-10-05 a document without one of the "text
+# document" tags below was routed to a substring heuristic that filled the
+# frame with a guessed background color (plus accent stripes / a guessed
+# first-block rect) and never painted text, so a plain `<div>` page with a
+# background rendered blank -- a fake output path (see
+# doc/08_tracking/bug/browser_static_lane_heuristic_fake_2026-10-05.md).
 fn _simple_web_engine2d_text_document(lower: text) -> bool:
     lower.contains("<p") or lower.contains("<h1") or lower.contains("<h2") or lower.contains("<h3") or lower.contains("<button") or lower.contains("<span") or lower.contains("<small") or lower.contains("<code") or lower.contains("<label") or lower.contains("<a ")
 
@@ -1182,65 +997,7 @@ pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i3
     val resolved_backend = _resolved_render_backend(width, height, backend_name)
     if _simple_web_engine2d_text_document(html.lower()):
         return simple_web_layout_render_html_pixels_engine2d(html, width, height, resolved_backend)
-    # display:contents collapses the wrapper box — the heuristic would paint its
-    # background-color when block_color != 0. Route to layout renderer instead.
-    if html.contains("display:contents") or html.contains("display: contents"):
-        return simple_web_layout_render_html_pixels(html, width, height, resolved_backend)
-
-    val bg = _html_background_color(html)
-    val block_color = _first_block_color(html, 0u32)
-    val has_wm_titlebar = html.contains("wm-app-titlebar")
-    val has_wm_content = html.contains("wm-app-content")
-    val has_simple_web_mark = html.contains("Simple Web") or html.contains("about:network")
-    # WM class names can appear in package/adapter CSS even when no matching
-    # titlebar element exists. The former substring heuristic painted a fixed
-    # blue/slate demo palette over the fully resolved Aetheric document. WM
-    # content always needs real selector matching and CSS layout.
-    if has_wm_titlebar or has_wm_content:
-        return simple_web_layout_render_html_pixels(html, width, height, resolved_backend)
-    val needs_selector_layout = _style_block_has_class_or_id_selector(html)
-    # Result-based discriminator: route to the heuristic only when it
-    # recognizes structure it can faithfully reproduce (a resolved background
-    # color, a first-block color, or the wm-app titlebar/content/mark
-    # elements handled below); otherwise lay out for real through the core
-    # HTML/CSS parse -> layout -> paint engine.
-    val heuristic_recognized = not needs_selector_layout and (bg != 0xFFFFFFFFu32 or block_color != 0u32 or has_wm_titlebar or has_wm_content or has_simple_web_mark)
-    if not heuristic_recognized:
-        return simple_web_layout_render_html_pixels(html, width, height, resolved_backend)
-
-    val has_accent_stripes = bg == 0xFFFFFFFFu32 and block_color == 0u32
-    if block_color == 0u32 and not has_accent_stripes and not has_wm_titlebar and not has_wm_content and not has_simple_web_mark:
-        return _solid_fill_pixels(width, height, bg)
-
-    var engine = SimpleWebHeuristicSurface.create(width, height)
-
-    engine.clear(bg)
-
-    if block_color != 0u32 and block_color != bg:
-        val has_margin_zero = html.contains("margin:0") or html.contains("margin: 0")
-        val margin = if has_margin_zero: 0 else: 8
-        val block_w = _first_px_dimension(html, "width", 24)
-        val block_h = _first_px_dimension(html, "height", 16)
-        engine.draw_rect_filled(margin, margin, block_w, block_h, block_color)
-        val block = _find_next_visual_tag(html, 0)
-        val second_color = if block >= 0: _second_hex_color_after_from(html, "background-color", block, 0u32) else: 0u32
-        if second_color != 0u32 and second_color != block_color:
-            engine.draw_rect_filled(margin, margin + block_h, block_w, block_h, second_color)
-
-    val accent = _html_accent_color(html)
-    if has_accent_stripes:
-        var stripe_x = 0
-        while stripe_x < width:
-            engine.draw_rect_filled(stripe_x, 0, 1, height, accent)
-            stripe_x = stripe_x + 17
-
-    val header_h = if height < 24: height else: 24
-    if has_simple_web_mark:
-        engine.draw_rect_filled(6, 6, 24, 3, 0xFFFFFFFFu32)
-
-    val pixels = engine.read_pixels()
-    engine.shutdown()
-    pixels
+    simple_web_layout_render_html_pixels(html, width, height, resolved_backend)
 
 pub fn simple_web_engine2d_render_html_pixels_at_time(html: text, width: i32, height: i32, backend_name: text, animation_time_ms: i64) -> [u32]:
     val resolved_backend = _resolved_render_backend(width, height, backend_name)

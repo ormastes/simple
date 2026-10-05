@@ -1,6 +1,6 @@
 # Bounded generic OpenType layout sequence application in font units.
 use std.skia.feature.glyph.ot_parser.{OtFont, read_i16_be, read_u16_be}
-use std.skia.feature.glyph.ot_parser_layout.GsubLookup
+use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, LayoutLookupActivation}
 use std.skia.feature.shaper.ot_layout_context.{LayoutGlyphRecord, LayoutApplyResult, _LayoutBudget, _take,
     _ContextMatch, _coverage,
     _gdef_limit, _class_def, _gdef_glyph_class, _mark_filter_contains,
@@ -382,10 +382,18 @@ fn _records_changed(left: [LayoutGlyphRecord], right: [LayoutGlyphRecord]) -> bo
         index = index + 1
     false
 
+# Top-level feature gating (see GsubLookup.active_mask). Only the start
+# position is gated; skip/ignore logic and nested contextual lookups are not.
+fn _mask_admits(lookup: GsubLookup, record: LayoutGlyphRecord) -> bool:
+    lookup.active_mask == 0u64 or (record.feature_mask & lookup.active_mask) != 0u64
+
 fn _apply_single(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRecord], budget: _LayoutBudget) -> Option<[LayoutGlyphRecord]>:
     var result = _copy_records(records)
     var record_index: i64 = 0
     while record_index < result.len():
+        if not _mask_admits(lookup, result[record_index]):
+            record_index = record_index + 1
+            continue
         val accepted = match _lookup_accepts(font, lookup, result[record_index], budget):
             Some(value): value
             None: return None
@@ -409,6 +417,9 @@ fn _apply_single(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRecord],
 fn _gsub_apply_multiple(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRecord], budget: _LayoutBudget) -> Option<[LayoutGlyphRecord]>:
     var result: [LayoutGlyphRecord] = []
     for record in records:
+        if not _mask_admits(lookup, record):
+            result.push(record)
+            continue
         val accepted = match _lookup_accepts(font, lookup, record, budget):
             Some(value): value
             None: return None
@@ -567,6 +578,9 @@ fn _apply_ligature(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRecord
     var result = _copy_records(records)
     var index: i64 = 0
     while index < result.len():
+        if not _mask_admits(lookup, result[index]):
+            index = index + 1
+            continue
         val applied = match _apply_ligature_at(font, lookup, result, index, budget):
             Some(value): value
             None: return None
@@ -747,6 +761,9 @@ fn _apply_context3(font: OtFont, lookup: GsubLookup, catalog: [GsubLookup],
     var result = _copy_records(records)
     var start: i64 = 0
     while start < result.len():
+        if not _mask_admits(lookup, result[start]):
+            start = start + 1
+            continue
         val applied = match _apply_context_at(font, lookup, catalog, result, start, budget, false):
             Some(value): value
             None: return None
@@ -759,6 +776,9 @@ fn _chain3_apply(font: OtFont, lookup: GsubLookup, catalog: [GsubLookup],
     var result = _copy_records(records)
     var start: i64 = 0
     while start < result.len():
+        if not _mask_admits(lookup, result[start]):
+            start = start + 1
+            continue
         val applied = match _apply_context_at(font, lookup, catalog, result, start, budget, true):
             Some(value): value
             None: return None
@@ -796,5 +816,35 @@ fn layout_apply_gsub_with_catalog(font: OtFont, lookups: [GsubLookup], catalog: 
             case None: return LayoutApplyResult(glyphs: _copy_records(records), complete: false)
     LayoutApplyResult(glyphs: current, complete: true)
 
+# Activation-driven GSUB, the twin of gpos_validate/gpos_apply: each
+# LayoutLookupActivation names a catalog lookup by index and the feature mask
+# it runs under. The selected catalog entry is copied with that mask as its
+# active_mask so per-glyph features (Arabic joining forms) gate start
+# positions. Before this, callers passed activations where [GsubLookup] was
+# expected, which failed the first time a plan validated.
+fn _gsub_lookups_for_activations(active: [LayoutLookupActivation], catalog: [GsubLookup]) -> Option<[GsubLookup]>:
+    var result: [GsubLookup] = []
+    for activation in active:
+        if activation.feature_mask == 0u64: return None
+        if activation.lookup_index < 0 or activation.lookup_index >= catalog.len(): return None
+        val c = catalog[activation.lookup_index]
+        result.push(GsubLookup(lookup_index: c.lookup_index, lookup_type: c.lookup_type, flag: c.flag,
+            lookup_offset: c.lookup_offset, table_start: c.table_start, table_end: c.table_end,
+            subtable_offsets: c.subtable_offsets, subtable_ends: c.subtable_ends,
+            mark_filtering_set: c.mark_filtering_set, active_mask: activation.feature_mask))
+    Some(result)
+
+fn layout_validate_gsub_activations(font: OtFont, active: [LayoutLookupActivation], catalog: [GsubLookup]) -> bool:
+    match _gsub_lookups_for_activations(active, catalog):
+        case Some(lookups): layout_validate_gsub_with_catalog(font, lookups, catalog)
+        case None: false
+
+fn layout_apply_gsub_activations(font: OtFont, active: [LayoutLookupActivation], catalog: [GsubLookup],
+                                 records: [LayoutGlyphRecord]) -> LayoutApplyResult:
+    match _gsub_lookups_for_activations(active, catalog):
+        case Some(lookups): layout_apply_gsub_with_catalog(font, lookups, catalog, records)
+        case None: LayoutApplyResult(glyphs: _copy_records(records), complete: false)
+
+export layout_validate_gsub_activations, layout_apply_gsub_activations
 export LayoutGlyphRecord, LayoutApplyResult
 export layout_validate_gsub, layout_validate_gsub_with_catalog, layout_apply_gsub, layout_apply_gsub_with_catalog

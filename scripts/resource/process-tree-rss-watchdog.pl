@@ -14,6 +14,7 @@ use Config;
 use Fcntl qw(O_RDONLY O_NOFOLLOW);
 use Digest::SHA;
 use IPC::Open2 qw(open2);
+use Errno qw(ESRCH ENOENT);
 
 # EPIPE must be a caught observation failure even during pre-workload admission.
 my $workload_sigpipe = $SIG{PIPE} // 'DEFAULT';
@@ -59,10 +60,18 @@ my $sample_started_at;
 # observation. Keep slow but valid samples bounded separately from that target.
 # Up to 30s for emulated hosts: a riscv64 TCG guest with 20 compile threads
 # stalled one /proc sample past 5s after 3729 good ones (peak 894 MiB).
-my $observation_budget_ms = $ENV{SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS} // 1000;
-$observation_budget_ms =~ /^\d+$/ && $observation_budget_ms >= 1000 &&
-    $observation_budget_ms <= 30000
-    or die "rss-guard: observation budget must be between 1000 and 30000 ms\n";
+# FreeBSD's host-wide ps observer can exceed one second under bootstrap load.
+# Match the existing product-builder budget without changing sample cadence,
+# RSS ceilings, or an explicit caller-selected observation budget.
+sub resolve_observation_budget_ms {
+    my ($platform, $override) = @_;
+    my $budget = $override // ($platform eq 'freebsd' ? 5000 : 1000);
+    $budget =~ /^\d+$/ && $budget >= 1000 && $budget <= 30000
+        or die "rss-guard: observation budget must be between 1000 and 30000 ms\n";
+    return $budget;
+}
+my $observation_budget_ms = resolve_observation_budget_ms(
+    $^O, $ENV{SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS});
 my ($sample_duration_max_ms, $sample_overruns) = (0, 0);
 my ($observer_path, $observer_fd, $observer_sha, $observer_source_sha);
 my ($observer_read, $observer_write, $observer_pid);
@@ -404,6 +413,18 @@ sub windows_compile_flags {
     die "Windows session helper requires clang-cl or clang (CC=$compiler; cl/gcc are not permitted)";
 }
 
+sub windows_target_compile_flags {
+    my ($style, $identity) = @_;
+    return () if $style eq 'cl';
+    my ($target) = $identity =~ /^Target:\s*(\S+)/m;
+    defined($target) or die "compiler identity has no target";
+    # The clang driver also supports MSVC targets. Only the MinGW CRT needs
+    # -municode to select wmain; driver spelling alone does not identify it.
+    return ('-municode') if $target =~ /(?:-windows-gnu|-mingw32)(?:\z|-)/i;
+    return () if $target =~ /-windows-msvc(?:\z|[0-9.-])/i;
+    die "unsupported Windows session helper compiler target: $target";
+}
+
 # Build once, reuse on every guard start. The cache key covers everything that
 # determines the binary: source sha, compiler identity (--version, which also
 # names the target), compiler path, flags (including the baked-in shell path)
@@ -445,6 +466,7 @@ sub install_cached_windows_helper {
         print {$memo} $identity;
         close($memo) && rename("$identity_file.new.$$", $identity_file) or die "cannot record compiler identity";
     }
+    push @flags, windows_target_compile_flags($style, $identity);
     my $key = Digest::SHA::sha256_hex(join("\0", 'simple-session-helper-cache-v1', $helper_source_sha,
         $identity, $compiler, $style, @flags, $^O, $Config{archname}));
     my $entry = "$cache/$key";
@@ -566,6 +588,26 @@ sub publish_session_admission {
         or die "cannot publish session admission";
 }
 
+# comm in Linux /proc/PID/stat can contain newlines. Read the complete record,
+# retaining a hard allocation bound and the caller's strict field validation.
+sub read_proc_stat_record {
+    my ($fh) = @_;
+    my $record = '';
+    while (1) {
+        my $count = read($fh, my $chunk, 65537 - length($record));
+        if (!defined($count)) {
+            # A task may exit after /proc/PID/stat was opened. Discard even
+            # a partial record; every other read error remains fatal.
+            return undef if $! == ESRCH || $! == ENOENT;
+            die "cannot read /proc stat record: $!";
+        }
+        last unless $count;
+        $record .= $chunk;
+        length($record) <= 65536 or die "oversized /proc stat record";
+    }
+    return $record;
+}
+
 sub snapshot {
     my ($metadata_only) = @_;
     $sample_started_at = time;
@@ -593,11 +635,13 @@ sub snapshot {
         opendir(my $proc, '/proc') or die "cannot open /proc";
         for my $pid (grep { /\A[0-9]+\z/ } readdir($proc)) {
             open(my $stat, '<', "/proc/$pid/stat") or next;  # exited since readdir
-            my $line = <$stat>;
+            my $line = read_proc_stat_record($stat);
             close($stat);
-            next unless defined($line);
+            next unless defined($line);  # exited after open, before read
+            next unless length($line);
             $line =~ /\A\Q$pid\E \(.*\) (\S) (\d+) (\d+) (\d+) (?:\S+ ){15}(\d+) \S+ (-?\d+) /s
-                or die "malformed /proc/$pid/stat";
+                or die "malformed /proc/$pid/stat (bytes=" . length($line) .
+                    " prefix_hex=" . unpack('H*', substr($line, 0, 256)) . ")\n";
             $all{$pid} = { parent => 0+$2, group => 0+$3, session => 0+$4,
                            rss => $6 * $proc_page_kib,
                            zombie => ($1 eq 'Z' ? 1 : 0), identity => "t$5" };
