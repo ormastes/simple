@@ -3422,6 +3422,7 @@ impl MirLowering:
         # For a genuine `[i64]` both sources agree on i64, so this is a no-op
         # there -- which is why `[i64]` for-in was the one case that worked.
         var element_type_from_hir = false
+        var collection_hir_is_text = false
         if val collection_hir_type = self.find_local_hir_type(collection_local.id):
             match collection_hir_type.kind:
                 case HirTypeKind.Array(elem_t, _) | HirTypeKind.Slice(elem_t):
@@ -3431,6 +3432,8 @@ impl MirLowering:
                         case _:
                             element_type = self.lower_type(elem_t)
                     element_type_from_hir = true
+                case HirTypeKind.Str:
+                    collection_hir_is_text = true
                 case _: ()
         if not element_type_from_hir:
             if val coll_mir_type = self.local_mir_type_of(collection_local):
@@ -3442,10 +3445,20 @@ impl MirLowering:
                     case _:
                         ()
 
+        # A declared collection can retain its HIR type while its ABI local
+        # is only an i64 handle (field/index/Result projections). Use that
+        # existing provenance for dispatch as well as element decoding. Never
+        # reinterpret an untyped integer, a dictionary, or a non-word local.
+        var collection_is_erased_word = false
+        if val collection_mir_type = self.local_mir_type_of(collection_local):
+            match collection_mir_type.kind:
+                case MirTypeKind.I64: collection_is_erased_word = true
+                case _: ()
+
         # Text iteration reuses the canonical Unicode splitter, then the same
         # counted array loop used by `text.chars()`. Do not index bytes here:
         # one loop element is one UTF-8 codepoint-sized text value.
-        if self.local_is_str(collection_local):
+        if self.local_is_str(collection_local) or (collection_is_erased_word and collection_hir_is_text):
             val tagged_text = self.ensure_tagged_str(collection_local)
             val chars_func = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_string_chars"),
@@ -3469,7 +3482,7 @@ impl MirLowering:
         # Runtime-array fast path: lower `for x in arr` to an index-based
         # counted loop over rt_array_len / rt_array_get (mirrors the array
         # index-read call shape in _MirLoweringExpr/expr_dispatch.spl).
-        if self.local_is_runtime_array(collection_local):
+        if self.local_is_runtime_array(collection_local) or (collection_is_erased_word and element_type_from_hir):
             return self.lower_for_array_indexed(var_, collection_local, element_type, body, source_span)
 
         # Non-array iterable: no supported lowering (#143). Fail loudly.
