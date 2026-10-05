@@ -186,22 +186,8 @@ fn providers_for_tier(tier: SimdTier) -> CollectionProviders {
             byte_split: avx2_byte_split_ranges,
             simd_tier: SimdTier::X86_64Avx2,
         },
-        // byte_find/byte_rfind/byte_split are all straight linear scans
-        // (find-first / find-last / delimiter-split built on find), so
-        // widening them to 64-byte AVX-512 lanes is a clear, contained win —
-        // see `byte_kernels.rs` for the actual kernels and their
-        // scalar-equivalence tests. `array_sort` stays on `scalar_array_sort`
-        // for every tier here: this generic comparator sorts heterogeneous
-        // tagged `RuntimeValue`s (see `rt_sorted_value_cmp`), not a
-        // homogeneous primitive buffer, so it was never SIMD-accelerated to
-        // begin with — nothing to widen.
-        SimdTier::X86_64Avx512 => CollectionProviders {
-            array_sort: scalar_array_sort,
-            byte_find: avx512_byte_find,
-            byte_rfind: avx512_byte_rfind,
-            byte_split: avx512_byte_split_ranges,
-            simd_tier: SimdTier::X86_64Avx512,
-        },
+        // Default core contains AVX2/scalar only; host AVX512 capability is unchanged.
+        SimdTier::X86_64Avx512 => providers_for_tier(super::byte_kernels::default_runtime_simd_tier(tier)),
         SimdTier::Aarch64Neon | SimdTier::Aarch64Sve | SimdTier::Aarch64Sve2 => CollectionProviders {
             array_sort: scalar_array_sort,
             byte_find: neon_byte_find,
@@ -657,7 +643,9 @@ pub(crate) fn checked_byte_array_bytes(value: RuntimeValue) -> Option<Option<Vec
         return None;
     }
     if array.is_byte_packed() {
-        return Some(Some(unsafe { std::slice::from_raw_parts(array.data.cast::<u8>(), len) }.to_vec()));
+        return Some(Some(
+            unsafe { std::slice::from_raw_parts(array.data.cast::<u8>(), len) }.to_vec(),
+        ));
     }
     let mut out = Vec::with_capacity(len);
     for value in unsafe { array.as_slice() } {
@@ -2066,7 +2054,9 @@ mod collection_set_tests {
     fn assert_rejected_child(kind: &str) {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
-            .arg(format!("value::collections::collection_set_tests::{kind}_set_rejection_child"))
+            .arg(format!(
+                "value::collections::collection_set_tests::{kind}_set_rejection_child"
+            ))
             .arg("--nocapture")
             .env("SIMPLE_COLLECTION_SET_REJECTION_CHILD", "1")
             .output()
@@ -2074,7 +2064,10 @@ mod collection_set_tests {
         assert_eq!(output.status.code(), Some(70), "{kind}.set must fail loudly");
         let stderr = String::from_utf8_lossy(&output.stderr);
         let type_name = if kind == "array" { "Array" } else { "Tuple" };
-        assert!(stderr.contains(type_name), "missing receiver type in diagnostic: {stderr}");
+        assert!(
+            stderr.contains(type_name),
+            "missing receiver type in diagnostic: {stderr}"
+        );
         assert!(stderr.contains("set"), "missing method in diagnostic: {stderr}");
     }
 
@@ -4502,10 +4495,7 @@ pub extern "C" fn rt_string_join(array: RuntimeValue, separator: RuntimeValue) -
             if elem_len > 0 {
                 let elem_data = rt_string_data(elem);
                 unsafe {
-                    let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                        elem_data,
-                        elem_len as usize,
-                    ));
+                    let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(elem_data, elem_len as usize));
                     result.push_str(s);
                 }
             }
@@ -5209,7 +5199,9 @@ pub extern "C" fn rt_array_sort(array: RuntimeValue) -> bool {
         }
         if (*arr).is_u64_packed() {
             let len = (*arr).len as usize;
-            let mut words: Vec<u64> = (0..len).map(|i| rt_array_get(array, i as i64).as_int() as u64).collect();
+            let mut words: Vec<u64> = (0..len)
+                .map(|i| rt_array_get(array, i as i64).as_int() as u64)
+                .collect();
             words.sort_by(rt_sorted_u64_cmp);
             for (i, w) in words.into_iter().enumerate() {
                 rt_array_set(array, i as i64, RuntimeValue::from_int(w as i64));
@@ -6359,43 +6351,26 @@ pub extern "C" fn __simple_intrinsic_bounds_check(index: i64, len: i64) -> i64 {
     0
 }
 
-// AVX-512 provider dispatch tests. Kept as a dedicated module in this file
-// (rather than in `collection_tests.rs`) so the AVX-512 `byte_find`/
-// `byte_rfind`/`byte_split` provider wiring added to `providers_for_tier`
-// above has direct, close-by coverage. Modelled on the AVX-512 tests in
-// `byte_kernels.rs`: compare the AVX-512 provider's answer against the
-// SCALAR provider's answer (never a hardcoded expected value) across sizes
-// straddling the 64-byte lane boundary, and stay correct on a host without
-// AVX-512 because every kernel here falls back through AVX2 to scalar.
+// Optional-wide requests use the embedded provider and preserve scalar results.
 #[cfg(test)]
 mod avx512_provider_dispatch_tests {
     use super::{
-        avx512_byte_split_ranges, byte_split_ranges_for_tier, providers_for_tier, scalar_byte_find,
-        scalar_byte_rfind, scalar_byte_split_ranges,
+        avx512_byte_split_ranges, byte_split_ranges_for_tier, providers_for_tier, scalar_byte_find, scalar_byte_rfind,
+        scalar_byte_split_ranges,
     };
     use simple_simd::SimdTier;
 
-    #[cfg(target_arch = "x86_64")]
-    fn avx512_available() -> bool {
-        std::arch::is_x86_feature_detected!("avx512f") && std::arch::is_x86_feature_detected!("avx512bw")
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    fn avx512_available() -> bool {
-        false
-    }
-
     #[test]
-    fn avx512_provider_reports_its_own_tier() {
+    fn avx512_request_reports_embedded_execution_tier() {
         let providers = providers_for_tier(SimdTier::X86_64Avx512);
-        assert_eq!(providers.simd_tier, SimdTier::X86_64Avx512);
+        assert_eq!(
+            providers.simd_tier,
+            crate::value::byte_kernels::default_runtime_simd_tier(SimdTier::X86_64Avx512)
+        );
     }
 
     #[test]
     fn avx512_provider_find_and_rfind_match_scalar_across_lane_boundaries() {
-        if !avx512_available() {
-            return;
-        }
         let providers = providers_for_tier(SimdTier::X86_64Avx512);
 
         for filler in [0usize, 1, 63, 64, 65, 127, 128, 200] {
@@ -6444,9 +6419,6 @@ mod avx512_provider_dispatch_tests {
 
     #[test]
     fn avx512_provider_split_matches_scalar_across_lane_boundaries() {
-        if !avx512_available() {
-            return;
-        }
         let providers = providers_for_tier(SimdTier::X86_64Avx512);
 
         for filler in [0usize, 1, 63, 64, 65, 127, 128, 200] {
@@ -6496,10 +6468,9 @@ mod tests;
 mod string_free_contract_tests {
     use super::{
         byte_array_write, rt_array_bytes_copy_checked, rt_array_bytes_validate, rt_array_free, rt_array_new,
-        rt_array_push, rt_byte_array_new_len, rt_string_concat, rt_string_data, rt_string_free,
-        rt_string_len, rt_string_new, rt_string_new_literal,
-        rt_transient_array_scope_begin, rt_transient_array_scope_end, rt_transient_array_scope_pause,
-        rt_transient_heap_promote,
+        rt_array_push, rt_byte_array_new_len, rt_string_concat, rt_string_data, rt_string_free, rt_string_len,
+        rt_string_new, rt_string_new_literal, rt_transient_array_scope_begin, rt_transient_array_scope_end,
+        rt_transient_array_scope_pause, rt_transient_heap_promote,
     };
     use crate::value::dict::{rt_dict_get, rt_dict_new, rt_dict_set};
     use crate::value::objects::{
@@ -6650,10 +6621,17 @@ mod string_free_contract_tests {
         let intermediate = rt_string_concat(left, right);
         let result = rt_string_concat(intermediate, right);
         assert_eq!(rt_heap_registry_count(), before + 2);
-        assert_eq!(rt_string_len(result), b"transient concat left and right and right".len() as i64);
+        assert_eq!(
+            rt_string_len(result),
+            b"transient concat left and right and right".len() as i64
+        );
         assert!(rt_transient_array_scope_end());
 
-        assert_eq!(rt_heap_registry_count(), before, "both concat results must leave the scope");
+        assert_eq!(
+            rt_heap_registry_count(),
+            before,
+            "both concat results must leave the scope"
+        );
         assert_eq!(rt_string_len(intermediate), -1);
         assert_eq!(rt_string_len(result), -1);
         assert_eq!(rt_string_free(left), 1);
@@ -6679,7 +6657,11 @@ mod string_free_contract_tests {
         assert_eq!(rt_string_len(promoted), expected.len() as i64);
         let actual = unsafe { std::slice::from_raw_parts(rt_string_data(promoted), expected.len()) };
         assert_eq!(actual, expected);
-        assert_eq!(rt_heap_registry_count(), before + 2, "outside and promoted results stay live");
+        assert_eq!(
+            rt_heap_registry_count(),
+            before + 2,
+            "outside and promoted results stay live"
+        );
         assert_eq!(rt_string_free(promoted), 1);
         assert_eq!(rt_string_free(outside), 1);
         assert_eq!(rt_string_free(left), 1);
