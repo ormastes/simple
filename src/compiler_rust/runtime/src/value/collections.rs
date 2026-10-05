@@ -4575,6 +4575,24 @@ pub extern "C" fn rt_to_int_dynamic(value: RuntimeValue) -> i64 {
     }
 }
 
+/// `x.to_i64()` / `x.to_int()` on an ERASED (tagged) receiver: text parses like
+/// `rt_to_int_dynamic`, a float truncates, every other value is decoded
+/// tag-aware (`rt_value_unbox_int`). `rt_to_int_dynamic` returns a non-text
+/// value VERBATIM, which for a tagged int is `n << 3`: under the JIT the
+/// pure-Simple inflate decoder read every byte 8x too large and failed on every
+/// PNG. Only valid for a value KNOWN to be tagged (a raw i64 with low bits 0
+/// would be shifted). Twin: `src/runtime/runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_any_to_int(value: RuntimeValue) -> i64 {
+    if value.heap_type() == Some(HeapObjectType::String) {
+        return rt_string_to_int(value);
+    }
+    if value.is_float() {
+        return value.as_float() as i64;
+    }
+    crate::value::sffi::value_ops::rt_value_unbox_int(value)
+}
+
 /// Task #118 canonical `int(text)` semantics: a TOTAL, non-erroring,
 /// leading-numeric-prefix parse — never fails. Skips leading whitespace, an
 /// optional `+`/`-` sign, then reads the longest run of leading ASCII
