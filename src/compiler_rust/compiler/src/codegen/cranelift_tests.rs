@@ -15,6 +15,23 @@ fn compile_to_object(source: &str) -> CodegenResult<Vec<u8>> {
     Codegen::new()?.compile_module(&mir_module)
 }
 
+fn object_relocation_names(bytes: &[u8]) -> Vec<String> {
+    use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
+
+    let file = object::File::parse(bytes).expect("parse codegen object");
+    file.sections()
+        .flat_map(|section| section.relocations())
+        .filter_map(|(_, relocation)| match relocation.target() {
+            RelocationTarget::Symbol(index) => file
+                .symbol_by_index(index)
+                .ok()
+                .and_then(|symbol| symbol.name().ok())
+                .map(str::to_string),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn test_typed_dict_alias_field_membership_object_references_runtime_not_custom_method() {
     use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget};
@@ -184,6 +201,52 @@ fn test_aot_function_sections_allow_strict_dead_reference_gc() {
 fn test_compile_comparison() {
     let obj = compile_to_object("fn is_positive(x: i64) -> bool:\n    return x > 0\n").unwrap();
     assert!(!obj.is_empty());
+}
+
+#[test]
+fn partially_typed_i64_call_ordering_keeps_raw_compare() {
+    let obj = compile_to_object(
+        "extern fn item5_decl_count() -> i64\nfn item5_index_guard(index: i64) -> bool:\n    return index >= item5_decl_count()\n",
+    )
+    .expect("compile partially typed call-result ordering");
+    let relocations = object_relocation_names(&obj);
+    assert!(
+        !relocations.iter().any(|name| name.contains("rt_native_cmp")),
+        "raw i64 comparison with an untyped call-result VReg must avoid the tagged-value comparator: {relocations:?}"
+    );
+}
+
+#[test]
+fn any_ordering_keeps_dynamic_runtime_dispatch() {
+    let obj = compile_to_object("fn item5_any_guard(left: Any, right: Any) -> bool:\n    return left >= right\n")
+        .expect("compile Any ordering");
+    let relocations = object_relocation_names(&obj);
+    assert!(
+        relocations.iter().any(|name| name.contains("rt_any_ge")),
+        "Any ordering must retain its dynamic runtime dispatch: {relocations:?}"
+    );
+}
+
+#[test]
+fn text_ordering_keeps_content_comparator() {
+    let obj = compile_to_object("fn item5_text_before(left: text, right: text) -> bool:\n    return left < right\n")
+        .expect("compile text ordering");
+    let relocations = object_relocation_names(&obj);
+    assert!(
+        relocations.iter().any(|name| name.contains("rt_text_cmp_any")),
+        "text ordering must retain content comparison: {relocations:?}"
+    );
+}
+
+#[test]
+fn float_ordering_uses_native_float_path() {
+    let obj = compile_to_object("fn item5_float_before(left: f64, right: f64) -> bool:\n    return left < right\n")
+        .expect("compile float ordering");
+    let relocations = object_relocation_names(&obj);
+    assert!(
+        !relocations.iter().any(|name| name.contains("rt_native_cmp")),
+        "f64 ordering must not use tagged-value comparison: {relocations:?}"
+    );
 }
 
 #[test]
