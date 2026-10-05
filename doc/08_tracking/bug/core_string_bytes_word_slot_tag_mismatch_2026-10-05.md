@@ -1,6 +1,6 @@
 # Text bytes used raw values in tagged word slots
 
-Status: FIXED in source; LLVM and Cranelift core-C native regressions PASS. Rebuilt bootstrap admission pending. Pure-Simple twin has source-equivalence review; its execution is not proved by the core-C probe.
+Status: FIXED in source; LLVM and Cranelift core-C native regressions PASS. Actual pure-Simple twin execution also passed the paired 256-octet check (1,024 assertions). Rebuilt full-bootstrap admission remains pending.
 
 ## Failure and producer
 
