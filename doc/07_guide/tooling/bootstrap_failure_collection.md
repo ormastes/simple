@@ -3,11 +3,12 @@
 During bootstrap diagnosis, reach the end of all independently runnable build
 and test work instead of ending the investigation at the first failure. This
 is the shared agent policy for SPipe, bootstrap, builds, tests, and bug repair.
-Native-build and the bootstrap phase matrix collect independent failures by
-default on a host. CI (`CI=true` or `CI=1`) defaults to fail fast. Select the
+Full bootstrap and its phase matrix collect independent failures by default on
+hosts and CI (`CI=true` or `CI=1`). Compatible caches are reused by default.
+Select the
 policy with `--keep-going` or `--fail-fast`; the last explicit flag wins.
-`SIMPLE_COMPILE_FAIL_FAST=0` or `1` overrides the CI/host default and is inherited
-by worker processes. An empty or other environment value uses the CI/host
+`SIMPLE_COMPILE_FAIL_FAST=0` or `1` overrides that default and is inherited
+by worker processes. An empty or other environment value uses the go-to-end
 default. This policy does not change inventory scope (`normal` versus `full`).
 
 The phase matrix retains its first failure and exits nonzero even if later rows
@@ -32,6 +33,12 @@ group them by cause and delegate independent repairs to parallel agents with
 separate writable source/cache ownership. A repair already understood may run
 while collection continues. Distinguish logic defects, performance defects,
 resource-policy exits and unavailable prerequisites.
+
+For every performance fix, check memory behavior as well as elapsed time. For
+every memory fix, check performance as well as lifetime and peak usage. Run
+relevant correctness regressions in both cases. Record comparable inputs and
+producer identities; measurements without a comparable baseline are evidence,
+not a claimed improvement. Preserve valid caches while making these comparisons.
 
 When the user authorizes continuation past a time, memory or other policy
 failure, record that authorization and the exact disabled check in a separate
