@@ -1,0 +1,136 @@
+# clang-cl cache adapter. Preprocessed bytes, not a guessed include list, are
+# the compilation input. Unsupported tool/configuration shapes remain uncached.
+use compiler.backend.backend.runtime_object_cache.{runtime_object_cache_digest_valid_v1, runtime_object_cache_material_v1, runtime_object_cache_key_v1, runtime_object_cache_lookup_v1, runtime_object_cache_publish_v1}
+use std.io_runtime.{process_run, env_get_nullable, file_delete, file_hash_sha256_or_empty, dir_list_optional}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+
+pub struct RuntimeWindowsCacheCompileResultV1:
+    stdout: text
+    stderr: text
+    exit_code: i64
+    pending_key: text
+
+fn runtime_windows_uncached_compile_v1(compiler: text, arguments: [text]) -> RuntimeWindowsCacheCompileResultV1:
+    val (stdout, stderr, code) = process_run(compiler, arguments)
+    RuntimeWindowsCacheCompileResultV1(stdout: stdout, stderr: stderr, exit_code: code, pending_key: "")
+
+pub fn runtime_windows_cache_toolchain_v1(root: text, compiler: text) -> text:
+    """Content identity for the selected clang-cl executable and adjacent DLLs.
+
+    The caller rechecks this identity after the complete runtime build. System
+    headers are covered by each actual preprocessed TU, including SDK headers.
+    """
+    val spelling = compiler.replace("\\", "/")
+    val separator = spelling.rfind("/")
+    if separator < 0 or not spelling.lower().ends_with("/clang-cl.exe"):
+        return ""
+    val compiler_digest = file_hash_sha256_or_empty(compiler)
+    if not runtime_object_cache_digest_valid_v1(compiler_digest): return ""
+    val directory = spelling[0:separator]
+    val observed = dir_list_optional(directory)
+    if observed == nil: return ""
+    var names = observed ?? []
+    names.sort()
+    var options: [text] = [spelling, compiler_digest]
+    for name in names:
+        if name.lower().ends_with(".dll"):
+            val digest = file_hash_sha256_or_empty(directory + "/" + name)
+            if not runtime_object_cache_digest_valid_v1(digest): return ""
+            options.push(name)
+            options.push(digest)
+    val material = runtime_object_cache_material_v1(compiler_digest, compiler_digest, compiler_digest, options)
+    if material.is_err(): return ""
+    val key = runtime_object_cache_key_v1(root, material.unwrap())
+    if key.is_err(): return ""
+    key.unwrap()
+
+fn runtime_windows_cache_plan_v1(compiler: text, arguments: [text], stage: text, output: text) -> Result<text, text>:
+    var plan_args: [text] = ["-###"]
+    for argument in arguments: plan_args.push(argument)
+    val (stdout, stderr, code) = process_run(compiler, plan_args)
+    if code != 0: return Err("compiler driver plan unavailable")
+    val plan = stdout + stderr
+    # These consume additional code-generation input files not represented by
+    # a preprocessed C TU. Do not invent identities for those owners.
+    for unsupported in ["-load", "-fplugin", "-include-pch", "-ivfsoverlay", "-fmodule-file", "-fprofile", "-fembed-offload", "-mlink-builtin-bitcode", "-fpass-plugin"]:
+        if plan.contains(unsupported): return Err("compiler driver has external code-generation inputs")
+    if not plan.contains("cpp-output"): return Err("compiler did not select preprocessed C input")
+    Ok(plan.replace(output, "<runtime-object>").replace(stage, "<runtime-stage>"))
+
+pub fn runtime_windows_cached_compile_v1(root: text, compiler: text, toolchain: text, arguments: [text], source: text, output: text, context: [text], trace: bool) -> RuntimeWindowsCacheCompileResultV1:
+    """A cache miss compiles the same immutable preprocessed input it hashed.
+
+    Cache IO is optional. Real compilation failure remains a real failure.
+    The existing caller retains process ownership, cancellation and cleanup.
+    """
+    if root == "" or not runtime_object_cache_digest_valid_v1(toolchain):
+        return runtime_windows_uncached_compile_v1(compiler, arguments)
+    # CL/_CL_ can inject response files and additional source/output switches.
+    # Preserve their existing semantics by using the original uncached path.
+    for variable in ["CL", "_CL_", "CCC_OVERRIDE_OPTIONS"]:
+        if (env_get_nullable(variable) ?? "") != "": return runtime_windows_uncached_compile_v1(compiler, arguments)
+    val staged = secure_temp_dir(root, "runtime-tu-")
+    if staged.is_err(): return runtime_windows_uncached_compile_v1(compiler, arguments)
+    val stage = staged.unwrap()
+    val preprocessed = stage + "/input.i"
+    var preprocess_args: [text] = []
+    var compile_args: [text] = []
+    var options: [text] = []
+    for value in context: options.push(value)
+    for argument in arguments:
+        if argument != "/c" and not argument.starts_with("/Fo"):
+            preprocess_args.push(argument)
+        compile_args.push(if argument == source: preprocessed else: argument)
+        options.push(if argument == "/Fo" + output: "/Fo<runtime-object>" else: argument)
+    preprocess_args.push("/P")
+    preprocess_args.push("/Fi" + preprocessed)
+    val (pre_out, pre_err, pre_code) = process_run(compiler, preprocess_args)
+    val tu_digest = file_hash_sha256_or_empty(preprocessed)
+    if pre_code != 0 or not runtime_object_cache_digest_valid_v1(tu_digest):
+        file_delete(preprocessed)
+        dir_remove(stage, false)
+        return runtime_windows_uncached_compile_v1(compiler, arguments)
+    val plan = runtime_windows_cache_plan_v1(compiler, compile_args, stage, output)
+    if plan.is_err():
+        file_delete(preprocessed)
+        dir_remove(stage, false)
+        return runtime_windows_uncached_compile_v1(compiler, arguments)
+    options.push(plan.unwrap())
+    for variable in ["INCLUDE", "LIB", "LIBPATH", "PATH", "SDKROOT", "WindowsSdkDir", "WindowsSDKVersion", "VCToolsInstallDir", "VCINSTALLDIR", "SOURCE_DATE_EPOCH", "CPATH", "C_INCLUDE_PATH", "CLANG_CONFIG_FILE_SYSTEM_DIR", "CLANG_CONFIG_FILE_USER_DIR"]:
+        options.push(variable)
+        options.push(env_get_nullable(variable) ?? "")
+    val compiler_digest = file_hash_sha256_or_empty(compiler)
+    val material = runtime_object_cache_material_v1(compiler_digest, toolchain, tu_digest, options)
+    var key = ""
+    if material.is_ok():
+        val keyed = runtime_object_cache_key_v1(root, material.unwrap())
+        if keyed.is_ok(): key = keyed.unwrap()
+    if key != "" and runtime_object_cache_lookup_v1(root, key, output):
+        if trace: print "[RT-COMPILE] Windows content cache hit: {source}"
+        file_delete(preprocessed)
+        dir_remove(stage, false)
+        return RuntimeWindowsCacheCompileResultV1(stdout: pre_out, stderr: pre_err, exit_code: 0, pending_key: "")
+    val (stdout, stderr, code) = process_run(compiler, compile_args)
+    # This is an owned private file, but validate consumption before admitting
+    # an object. Changed compiler configuration also suppresses publication.
+    val unchanged = file_hash_sha256_or_empty(preprocessed) == tu_digest
+    val final_plan = runtime_windows_cache_plan_v1(compiler, compile_args, stage, output)
+    var pending_key = ""
+    if code == 0 and unchanged and final_plan.is_ok() and final_plan.unwrap() == plan.unwrap() and file_hash_sha256_or_empty(compiler) == compiler_digest:
+        pending_key = key
+    file_delete(preprocessed)
+    dir_remove(stage, false)
+    if not unchanged:
+        file_delete(output)
+        return RuntimeWindowsCacheCompileResultV1(stdout: pre_out + stdout, stderr: pre_err + stderr + "runtime preprocessed input changed during compilation", exit_code: 1, pending_key: "")
+    RuntimeWindowsCacheCompileResultV1(stdout: pre_out + stdout, stderr: pre_err + stderr, exit_code: code, pending_key: pending_key)
+
+pub fn runtime_windows_cache_publish_batch_v1(root: text, compiler: text, toolchain: text, keys: [text], objects: [text]) -> bool:
+    # No object is published before this batch-wide check. Hash the compiler's
+    # adjacent DLLs twice per batch, not once per translation unit.
+    if keys.len() > objects.len(): return false
+    if runtime_windows_cache_toolchain_v1(root, compiler) != toolchain: return false
+    for index in 0..keys.len():
+        if keys[index] != "": runtime_object_cache_publish_v1(root, keys[index], objects[index])
+    true

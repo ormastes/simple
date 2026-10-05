@@ -1,0 +1,130 @@
+# Content-addressed runtime objects. Every cache failure is a miss; compilation
+# remains authoritative. Published object bytes are never handed to a mutator.
+use std.io_runtime.{file_read, file_write, file_copy, file_delete, file_hash_sha256_or_empty, dir_create_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_publish_noreplace, file_atomic_write, file_size}
+use std.nogc_sync_mut.io.dir_ops.{dir_is_real_no_follow, dir_remove}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing, path_identity_contains}
+
+pub fn runtime_object_cache_digest_valid_v1(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    for ch in value:
+        if not "0123456789abcdef".contains(ch):
+            return false
+    true
+
+pub fn runtime_object_cache_material_v1(compiler_digest: text, toolchain_digest: text, preprocessed_digest: text, options: [text]) -> Result<text, text>:
+    """Frame actual compiler/TU identities and ordered semantic arguments.
+
+    The TU digest is from the real compiler's preprocessed file, not an
+    approximation of includes. Options include selected ABI/profile/target and
+    relevant environment. Output/temp paths must be normalized by the caller.
+    """
+    if not runtime_object_cache_digest_valid_v1(compiler_digest) or not runtime_object_cache_digest_valid_v1(toolchain_digest) or not runtime_object_cache_digest_valid_v1(preprocessed_digest):
+        return Err("runtime object cache requires complete SHA-256 identities")
+    var out = "simple-runtime-object-material-v1\n{compiler_digest}\n{toolchain_digest}\n{preprocessed_digest}\n{options.len()}\n"
+    for option in options:
+        if option.len() < 0:
+            return Err("runtime object cache argument is invalid")
+        out = out + "{option.len()}:" + option
+    Ok(out)
+
+fn runtime_object_cache_root_v1(root: text) -> bool:
+    if root.len() <= 0:
+        return false
+    if not dir_create_all(root) or not dir_is_real_no_follow(root):
+        return false
+    for leaf in ["objects", "keys"]:
+        val path = root + "/" + leaf
+        if not dir_create_all(path) or not dir_is_real_no_follow(path):
+            return false
+    true
+
+pub fn runtime_object_cache_key_v1(root: text, material: text) -> Result<text, text>:
+    """Hash framed metadata through the bounded file-digest owner."""
+    if material.len() <= 0 or not runtime_object_cache_root_v1(root):
+        return Err("runtime object cache metadata root is unavailable")
+    val stage = secure_temp_dir(root, "runtime-key-")?
+    val path = stage + "/material"
+    var digest = ""
+    if file_write(path, material):
+        digest = file_hash_sha256_or_empty(path)
+    file_delete(path)
+    dir_remove(stage, false)
+    if not runtime_object_cache_digest_valid_v1(digest):
+        return Err("runtime object cache metadata hash failed")
+    Ok(digest)
+
+pub fn runtime_object_cache_lookup_v1(root: text, key: text, destination: text) -> bool:
+    """Only complete, authenticated objects become private writable copies."""
+    if not runtime_object_cache_digest_valid_v1(key) or destination.len() <= 0:
+        return false
+    if not dir_is_real_no_follow(root) or not dir_is_real_no_follow(root + "/objects") or not dir_is_real_no_follow(root + "/keys"):
+        return false
+    val spelling = destination.replace("\\", "/")
+    val separator = spelling.rfind("/")
+    if separator < 0 or spelling.ends_with("/"):
+        return false
+    var parent = spelling[0:separator]
+    if separator == 0: parent = "/"
+    if separator == 2 and spelling[1:3] == ":/": parent = spelling[0:3]
+    val cache_identity = path_final_existing(root)
+    val parent_identity = path_final_existing(parent)
+    if cache_identity.is_err() or parent_identity.is_err():
+        return false
+    if path_identity_contains(cache_identity.unwrap(), parent_identity.unwrap()):
+        return false
+    val rows = file_read(root + "/keys/" + key).split("\n")
+    if rows.len() != 4 or rows[0] != "simple-runtime-object-index-v1" or rows[1] != key or rows[3] != "":
+        return false
+    val digest = rows[2]
+    if not runtime_object_cache_digest_valid_v1(digest):
+        return false
+    val cache_object = root + "/objects/" + digest
+    if file_size(cache_object) <= 0 or file_hash_sha256_or_empty(cache_object) != digest:
+        return false
+    val staged = secure_temp_dir(parent, "runtime-cache-hit-")
+    if staged.is_err():
+        return false
+    val stage = staged.unwrap()
+    val copy = stage + "/object"
+    var complete = false
+    if file_copy(cache_object, copy) and file_hash_sha256_or_empty(copy) == digest:
+        # Never open an existing destination for overwrite: it may be a hard
+        # link or symlink to immutable cached bytes. A collision is a miss.
+        val published = file_publish_noreplace(copy, destination)
+        if published.is_ok(): complete = published.unwrap()
+    file_delete(copy)
+    dir_remove(stage, false)
+    complete
+
+pub fn runtime_object_cache_publish_v1(root: text, key: text, object_path: text) -> bool:
+    """Publish immutable bytes first and an atomic index last.
+
+    Concurrent writers may choose different valid object digests for the same
+    input key. Readers see one complete index and verify its referenced bytes;
+    a failed publish never invalidates the caller's compiled object.
+    """
+    if not runtime_object_cache_digest_valid_v1(key) or not runtime_object_cache_root_v1(root):
+        return false
+    if file_size(object_path) <= 0:
+        return false
+    val digest = file_hash_sha256_or_empty(object_path)
+    if not runtime_object_cache_digest_valid_v1(digest):
+        return false
+    val staged = secure_temp_dir(root, "runtime-object-")
+    if staged.is_err():
+        return false
+    val stage = staged.unwrap()
+    val path = stage + "/object"
+    var complete = false
+    if file_copy(object_path, path) and file_hash_sha256_or_empty(path) == digest:
+        val destination = root + "/objects/" + digest
+        val published = file_publish_noreplace(path, destination)
+        if published.is_ok() and file_hash_sha256_or_empty(destination) == digest:
+            complete = true
+    file_delete(path)
+    dir_remove(stage, false)
+    if not complete:
+        return false
+    file_atomic_write(root + "/keys/" + key, "simple-runtime-object-index-v1\n{key}\n{digest}\n")

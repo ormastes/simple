@@ -1,0 +1,70 @@
+use std.spec.*
+use std.io_runtime.{file_write, file_read, file_delete, file_exists, file_hash_sha256_or_empty}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use compiler.backend.backend.runtime_object_cache.{runtime_object_cache_lookup_v1, runtime_object_cache_publish_v1}
+
+fn object_cache_test_key() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn object_cache_test_root() -> text:
+    secure_temp_dir(".", "object-cache-spec-").unwrap()
+
+describe "Runtime object cache actual filesystem isolation":
+    it "copies verified bytes and retains immutable bytes after caller mutation":
+        val root = object_cache_test_root()
+        val cache = root + "/cache with spaces & apostrophe'"
+        val source = root + "/compiled.o"
+        val output = root + "/private.o"
+        val key = object_cache_test_key()
+        expect(file_write(source, "real-object-bytes-a")).to_be(true)
+        expect(runtime_object_cache_publish_v1(cache, key, source)).to_be(true)
+        expect(runtime_object_cache_lookup_v1(cache, key, cache + "/caller-owned.o")).to_be(false)
+        expect(file_exists(cache + "/caller-owned.o")).to_be(false)
+        expect(runtime_object_cache_lookup_v1(cache, key, output)).to_be(true)
+        expect(file_read(output)).to_equal("real-object-bytes-a")
+        expect(file_write(output, "caller-mutation")).to_be(true)
+        expect(file_write(source, "source-mutation")).to_be(true)
+        expect(runtime_object_cache_lookup_v1(cache, key, output)).to_be(false)
+        expect(file_read(output)).to_equal("caller-mutation")
+        expect(file_delete(output)).to_be(true)
+        expect(runtime_object_cache_lookup_v1(cache, key, output)).to_be(true)
+        expect(file_read(output)).to_equal("real-object-bytes-a")
+        expect(dir_remove(root, true)).to_be(true)
+
+    it "rejects incomplete index missing object and corrupt bytes without creating output":
+        val root = object_cache_test_root()
+        val cache = root + "/cache"
+        val source = root + "/compiled.o"
+        val output = root + "/private.o"
+        val key = object_cache_test_key()
+        expect(file_write(source, "authentic-object")).to_be(true)
+        val digest = file_hash_sha256_or_empty(source)
+        expect(runtime_object_cache_publish_v1(cache, key, source)).to_be(true)
+        expect(file_write(cache + "/keys/" + key, "simple-runtime-object-index-v1\n{key}\n")).to_be(true)
+        expect(runtime_object_cache_lookup_v1(cache, key, output)).to_be(false)
+        expect(file_exists(output)).to_be(false)
+        expect(file_write(cache + "/keys/" + key, "simple-runtime-object-index-v1\n{key}\n{key}\n")).to_be(true)
+        expect(runtime_object_cache_lookup_v1(cache, key, output)).to_be(false)
+        expect(file_exists(output)).to_be(false)
+        expect(file_write(cache + "/keys/" + key, "simple-runtime-object-index-v1\n{key}\n{digest}\n")).to_be(true)
+        expect(file_write(cache + "/objects/" + digest, "corrupt-object")).to_be(true)
+        expect(runtime_object_cache_lookup_v1(cache, key, output)).to_be(false)
+        expect(file_exists(output)).to_be(false)
+        expect(dir_remove(root, true)).to_be(true)
+
+    it "keeps a complete entry and compiled input when a later publication fails":
+        val root = object_cache_test_root()
+        val cache = root + "/cache"
+        val source = root + "/compiled.o"
+        val key = object_cache_test_key()
+        expect(file_write(source, "retained-object")).to_be(true)
+        expect(runtime_object_cache_publish_v1(cache, key, source)).to_be(true)
+        expect(runtime_object_cache_publish_v1(cache, key, root + "/missing.o")).to_be(false)
+        expect(file_read(source)).to_equal("retained-object")
+        expect(runtime_object_cache_lookup_v1(cache, key, root + "/private.o")).to_be(true)
+        expect(file_read(root + "/private.o")).to_equal("retained-object")
+        expect(file_write(root + "/blocked-cache", "regular-file")).to_be(true)
+        expect(runtime_object_cache_publish_v1(root + "/blocked-cache", key, source)).to_be(false)
+        expect(file_read(source)).to_equal("retained-object")
+        expect(dir_remove(root, true)).to_be(true)

@@ -1,0 +1,37 @@
+use std.spec.*
+use compiler.backend.backend.runtime_object_cache.{runtime_object_cache_material_v1}
+
+fn cache_test_digest_a() -> text:
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn cache_test_digest_b() -> text:
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+describe "Runtime object cache material identity":
+    it "is deterministic for identical complete inputs":
+        val digest = cache_test_digest_a()
+        val first = runtime_object_cache_material_v1(digest, digest, digest, ["-O2", "target=windows"])
+        expect(first.is_ok()).to_be(true)
+        expect(first.unwrap()).to_equal(runtime_object_cache_material_v1(digest, digest, digest, ["-O2", "target=windows"]).unwrap())
+
+    it "invalidates each compiler toolchain and preprocessed input identity":
+        val a = cache_test_digest_a()
+        val b = cache_test_digest_b()
+        val original = runtime_object_cache_material_v1(a, a, a, []).unwrap()
+        expect(runtime_object_cache_material_v1(b, a, a, []).unwrap() == original).to_be(false)
+        expect(runtime_object_cache_material_v1(a, b, a, []).unwrap() == original).to_be(false)
+        expect(runtime_object_cache_material_v1(a, a, b, []).unwrap() == original).to_be(false)
+
+    it "preserves argument boundaries order and empty arguments":
+        val a = cache_test_digest_a()
+        val first = runtime_object_cache_material_v1(a, a, a, ["ab", "c"]).unwrap()
+        expect(first == runtime_object_cache_material_v1(a, a, a, ["a", "bc"]).unwrap()).to_be(false)
+        expect(first == runtime_object_cache_material_v1(a, a, a, ["c", "ab"]).unwrap()).to_be(false)
+        expect(runtime_object_cache_material_v1(a, a, a, []).unwrap() == runtime_object_cache_material_v1(a, a, a, [""]).unwrap()).to_be(false)
+
+    it "rejects missing truncated uppercase and nonhex identities in every position":
+        val a = cache_test_digest_a()
+        for invalid in ["", "abc", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"]:
+            expect(runtime_object_cache_material_v1(invalid, a, a, []).is_err()).to_be(true)
+            expect(runtime_object_cache_material_v1(a, invalid, a, []).is_err()).to_be(true)
+            expect(runtime_object_cache_material_v1(a, a, invalid, []).is_err()).to_be(true)
