@@ -357,6 +357,13 @@ fn step_ref<'a>(slot: &'a Value, projection: &Projection) -> Option<&'a Value> {
     match (slot, projection) {
         (Value::Object { fields, .. }, Projection::Field(name)) => fields.get(name),
         (Value::Dict(entries), Projection::Field(name)) => entries.get(name),
+        // A packed array's elements are scalars (`Int` / `u32`) with no `Value`
+        // to borrow; answering "no slot" instead of building the boxed view is
+        // equivalent for every caller: a scalar leaf is never a mutation target
+        // (`try_place_mutation_in_place` declines it either way) and no
+        // projection continues past a scalar. Leaf EXISTENCE is answered by
+        // `step_exists`, which does not need a reference.
+        (Value::Array(items), Projection::Index(_)) if items.is_packed() => None,
         (Value::Array(items), Projection::Index(index)) => items.get(normalize_index(items.len(), index)?),
         (Value::FixedSizeArray { data, .. }, Projection::Index(index)) => data.get(normalize_index(data.len(), index)?),
         (Value::Tuple(items), Projection::Index(index)) => items.get(normalize_index(items.len(), index)?),
@@ -392,7 +399,18 @@ pub(crate) fn place_is_live(env: &Env, place: &Place) -> bool {
         }
     }
     // The leaf must exist for a receiver read to make sense.
-    step_ref(slot, place.projections.last().expect("checked non-empty")).is_some()
+    step_exists(slot, place.projections.last().expect("checked non-empty"))
+}
+
+/// Whether `projection` names an existing slot of `slot` -- `step_ref(..).is_some()`
+/// without needing a reference (a packed array element has none).
+fn step_exists(slot: &Value, projection: &Projection) -> bool {
+    match (slot, projection) {
+        (Value::Array(items), Projection::Index(index)) if items.is_packed() => {
+            normalize_index(items.len(), index).is_some()
+        }
+        _ => step_ref(slot, projection).is_some(),
+    }
 }
 
 #[cfg(test)]
@@ -468,7 +486,7 @@ mod tests {
     #[test]
     fn write_through_array_element_field() {
         let elem = object("Elem", vec![("n", Value::Int(1))]);
-        let holder = object("Holder", vec![("items", Value::Array(Arc::new(vec![elem])))]);
+        let holder = object("Holder", vec![("items", Value::array(vec![elem]))]);
 
         let mut env = Env::new();
         env.insert("h".into(), holder);
@@ -512,7 +530,7 @@ mod tests {
 
     #[test]
     fn out_of_bounds_index_is_not_a_live_place() {
-        let holder = object("Holder", vec![("items", Value::Array(Arc::new(vec![Value::Int(1)])))]);
+        let holder = object("Holder", vec![("items", Value::array(vec![Value::Int(1)]))]);
         let mut env = Env::new();
         env.insert("h".into(), holder);
 

@@ -91,7 +91,7 @@ mod tests {
     use super::*;
 
     fn arr_of_bytes(bytes: &[u8]) -> Value {
-        Value::Array(Arc::new(bytes.iter().map(|b| Value::Int(*b as i64)).collect()))
+        Value::array(bytes.iter().map(|b| Value::Int(*b as i64)).collect::<Vec<Value>>())
     }
 
     fn value_to_hex(v: &Value) -> String {

@@ -1,0 +1,114 @@
+"""Packed `[u8]` write_span parity with boxed `[u8]`
+
+@tag: interpreter, array, bytes
+
+A `[u8]` exists in two interpreter representations: boxed (`[0u8; n]`, one
+value per element) and packed (`rt_bytes_alloc(n)`, one byte per element).
+`write_span(src, dst_off, src_off, count)` used to be a silent no-op on a
+packed destination: it returned the unchanged array and wrote nothing,
+whether the receiver was a local, a field, or a nested place.
+
+Reproducer: "writes into a packed local" and "writes into a packed field".
+Generalization: every other example runs the same operation on both
+representations and requires the same elements, length and count: self
+overlap, a packed source into a boxed destination, a nested place, a zero
+count, a non-`u8` source element, and aliasing.
+
+Bug record: doc/08_tracking/bug/packed_byte_array_write_span_noop_2026-10-05.md
+"""
+
+use std.spec.{describe, it, expect}
+
+extern fn rt_bytes_alloc(n: i64) -> [u8]
+
+class ByteHolder:
+    data: [u8]
+
+    me span(src: [u8], off: i64, n: i64) -> i64:
+        self.data.write_span(src, off, 0, n)
+
+    me shift(dst: i64, src: i64, n: i64) -> i64:
+        self.data.write_span(self.data, dst, src, n)
+
+class ByteRows:
+    rows: [[u8]]
+
+    me fill_row(r: i64, src: [u8]) -> i64:
+        self.rows[r].write_span(src, 1, 0, 2)
+
+fn _packed(xs: [u8]) -> [u8]:
+    var out = rt_bytes_alloc(xs.len())
+    var i: i64 = 0
+    while i < xs.len():
+        out[i] = xs[i]
+        i = i + 1
+    out
+
+fn _show(xs: [u8]) -> text:
+    "{xs}"
+
+describe "packed [u8] write_span":
+    it "writes into a packed local":
+        """A packed local receives the span exactly like a boxed one."""
+        var boxed: [u8] = [0u8, 0u8, 0u8, 0u8]
+        var packed = rt_bytes_alloc(4)
+        val nb = boxed.write_span([1u8, 2u8], 1, 0, 2)
+        val np = packed.write_span([1u8, 2u8], 1, 0, 2)
+        expect(np).to_equal(nb)
+        expect(_show(packed)).to_equal(_show(boxed))
+        expect(_show(packed)).to_equal("[0, 1, 2, 0]")
+
+    it "writes into a packed field":
+        """`self.data.write_span(...)` on a packed field mutates the field."""
+        var hb = ByteHolder(data: [5u8, 5u8, 5u8, 5u8])
+        var hp = ByteHolder(data: _packed([5u8, 5u8, 5u8, 5u8]))
+        expect(hp.span([7u8, 8u8], 2, 2)).to_equal(hb.span([7u8, 8u8], 2, 2))
+        expect(_show(hp.data)).to_equal(_show(hb.data))
+        expect(_show(hp.data)).to_equal("[5, 5, 7, 8]")
+
+    it "self overlap reads the pre-copy contents in both representations":
+        var hb = ByteHolder(data: [1u8, 2u8, 3u8, 4u8, 5u8])
+        var hp = ByteHolder(data: _packed([1u8, 2u8, 3u8, 4u8, 5u8]))
+        hb.shift(1, 0, 4)
+        hp.shift(1, 0, 4)
+        expect(_show(hp.data)).to_equal(_show(hb.data))
+        expect(_show(hp.data)).to_equal("[1, 1, 2, 3, 4]")
+
+    it "accepts a packed source into a boxed destination":
+        var boxed: [u8] = [0u8, 0u8, 0u8]
+        var packed_dst = rt_bytes_alloc(3)
+        val src = _packed([9u8, 8u8, 7u8])
+        boxed.write_span(src, 0, 0, 3)
+        packed_dst.write_span(src, 0, 0, 3)
+        expect(_show(boxed)).to_equal("[9, 8, 7]")
+        expect(_show(packed_dst)).to_equal(_show(boxed))
+        expect(boxed == packed_dst).to_equal(true)
+
+    it "writes through a nested place":
+        var rb = ByteRows(rows: [[0u8, 0u8, 0u8, 0u8], [0u8, 0u8, 0u8, 0u8]])
+        var rp = ByteRows(rows: [_packed([0u8, 0u8, 0u8, 0u8]), _packed([0u8, 0u8, 0u8, 0u8])])
+        expect(rp.fill_row(1, [6u8, 6u8])).to_equal(rb.fill_row(1, [6u8, 6u8]))
+        expect(_show(rp.rows[1])).to_equal(_show(rb.rows[1]))
+        expect(_show(rp.rows[0])).to_equal(_show(rb.rows[0]))
+
+    it "treats a zero count as a no-op returning 0":
+        var boxed: [u8] = [3u8, 3u8]
+        var packed = _packed([3u8, 3u8])
+        expect(packed.write_span([1u8], 0, 0, 0)).to_equal(boxed.write_span([1u8], 0, 0, 0))
+        expect(_show(packed)).to_equal(_show(boxed))
+
+    it "a non-u8 source element is stored as that value, like a boxed destination":
+        var boxed: [u8] = [0u8, 0u8, 0u8]
+        var packed = rt_bytes_alloc(3)
+        val src = [300, 7]
+        boxed.write_span(src, 1, 0, 2)
+        packed.write_span(src, 1, 0, 2)
+        expect(_show(packed)).to_equal(_show(boxed))
+        expect(_show(packed)).to_equal("[0, 300, 7]")
+
+    it "leaves an alias of the destination unchanged":
+        var packed = _packed([1u8, 1u8, 1u8])
+        val alias = packed
+        packed.write_span([4u8], 0, 0, 1)
+        expect(_show(packed)).to_equal("[4, 1, 1]")
+        expect(_show(alias)).to_equal("[1, 1, 1]")

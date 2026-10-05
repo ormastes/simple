@@ -1,0 +1,69 @@
+use std.spec
+use std.spec.step
+use app.ui_showcase.hosts.scene_raster.{RasterSurface}
+use app.ui_showcase.hosts.host_gui.{gui_device_scale, gui_event_to_logical}
+use nogc_sync_mut.ui.gui_renderer.{GuiEvent, GUI_EVT_MOUSE_MOVED, GUI_EVT_MOUSE_WHEEL}
+
+"""
+## Purpose and audience
+
+The GUI showcase window lays out in LOGICAL units and rasterizes at the
+window's backing scale. On a 2x display, a 3840x2160 backing is 1920x1080
+logical: every logical pixel covers 2x2 device pixels. Pointer events arrive
+in device pixels and must be divided down before hit-testing. Before this,
+the UI was drawn 1:1 into the backing store, so it showed at half size and
+its 1-px glyph strokes vanished from any 1x screenshot.
+Audience: UI host maintainers.
+
+Bug: doc/08_tracking/bug/gui_showcase_no_hidpi_scale_half_size_glyphs_2026-10-05.md
+"""
+
+fn _px(s: RasterSurface, x: i32, y: i32) -> u32:
+    s.pixels[y.to_i64() * s.width.to_i64() + x.to_i64()]
+
+describe "GUI device scale":
+    # @req REQ-SSPEC-LOCAL-001
+    it "a logical rect and glyph at 2x cover exact 2x2 device blocks":
+        step("Paint the same rect and glyph at scale 1 and scale 2")
+        val one = RasterSurface.new(20, 12, 0xFF000000u32)
+        val two = RasterSurface.new_scaled(40, 24, 0xFF000000u32, 2)
+        one.fill_rect(1, 1, 3, 2, 0xFFFF0000u32)
+        two.fill_rect(1, 1, 3, 2, 0xFFFF0000u32)
+        one.draw_glyph(33, 8, 2, 0xFFFFFFFFu32)
+        two.draw_glyph(33, 8, 2, 0xFFFFFFFFu32)
+        var mismatches = 0
+        var lit = 0
+        var y = 0
+        while y < 24:
+            var x = 0
+            while x < 40:
+                val want = _px(one, x / 2, y / 2)
+                if _px(two, x, y) != want:
+                    mismatches = mismatches + 1
+                if want == 0xFFFFFFFFu32:
+                    lit = lit + 1
+                x = x + 1
+            y = y + 1
+        expect(mismatches).to_equal(0)
+        expect(lit).to_be_greater_than(0)
+
+    it "scale 1 keeps the default constructor's behaviour":
+        step("new() is new_scaled(.., 1)")
+        expect(RasterSurface.new(4, 4, 0u32).scale).to_equal(1)
+
+    it "derives the integer scale from the window, with an env override":
+        step("Resolve the scale from milli factors and overrides")
+        expect(gui_device_scale("", 2000)).to_equal(2)
+        expect(gui_device_scale("", 1000)).to_equal(1)
+        expect(gui_device_scale("", -1)).to_equal(1)
+        expect(gui_device_scale("3", 2000)).to_equal(3)
+        expect(gui_device_scale("junk", 2000)).to_equal(2)
+
+    it "divides pointer positions to logical units but not wheel notches":
+        step("Convert device-pixel events at scale 2")
+        val moved = GuiEvent(native_id: 0, kind: GUI_EVT_MOUSE_MOVED, scancode: 0, keycode: 0, btn: 0, pressed: false, x: 300.0, y: 120.0)
+        val wheel = GuiEvent(native_id: 0, kind: GUI_EVT_MOUSE_WHEEL, scancode: 0, keycode: 0, btn: 0, pressed: false, x: 0.0, y: 3.0)
+        val m = gui_event_to_logical(moved, 2)
+        expect(m.x.to_i64()).to_equal(150)
+        expect(m.y.to_i64()).to_equal(60)
+        expect(gui_event_to_logical(wheel, 2).y.to_i64()).to_equal(3)

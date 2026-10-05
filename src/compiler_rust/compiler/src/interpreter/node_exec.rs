@@ -209,7 +209,7 @@ pub(crate) fn exec_node(
                                         arc_data.len()
                                     )));
                                 }
-                                let data = Arc::unwrap_or_clone(arc_data);
+                                let data = Arc::unwrap_or_clone(arc_data).into_vec();
                                 Value::FixedSizeArray { size, data }
                             }
                             _ => {
@@ -730,14 +730,7 @@ fn try_assign_module_global_index(
             Value::Array(arc) => {
                 let idx = index_val.as_int()? as usize;
                 let arr = Arc::make_mut(arc);
-                if idx < arr.len() {
-                    arr[idx] = value;
-                } else {
-                    while arr.len() < idx {
-                        arr.push(Value::Nil);
-                    }
-                    arr.push(value);
-                }
+                arr.assign_index(idx, value);
                 Ok(None)
             }
             Value::Dict(dict) => {
@@ -1429,14 +1422,7 @@ pub(crate) fn exec_assignment(
                         Value::Array(arc) => {
                             if let Some(arr) = Arc::get_mut(arc) {
                                 let idx = index_val.as_int()? as usize;
-                                if idx < arr.len() {
-                                    arr[idx] = value;
-                                } else {
-                                    while arr.len() < idx {
-                                        arr.push(Value::Nil);
-                                    }
-                                    arr.push(value);
-                                }
+                                arr.assign_index(idx, value);
                                 return Ok(Control::Next);
                             }
                         }
@@ -1462,15 +1448,7 @@ pub(crate) fn exec_assignment(
                     Value::Array(mut arc) => {
                         let arr = Arc::make_mut(&mut arc);
                         let idx = index_val.as_int()? as usize;
-                        if idx < arr.len() {
-                            arr[idx] = value;
-                        } else {
-                            // Extend array if index is at the end
-                            while arr.len() < idx {
-                                arr.push(Value::Nil);
-                            }
-                            arr.push(value);
-                        }
+                        arr.assign_index(idx, value);
                         Value::Array(arc)
                     }
                     // `rt_bytes_alloc` / `rt_byte_array_new` hand back a packed
@@ -1627,14 +1605,7 @@ pub(crate) fn exec_assignment(
                                     Value::Array(arc) => {
                                         if let Some(arr) = Arc::get_mut(arc) {
                                             let idx = index_val.as_int()? as usize;
-                                            if idx < arr.len() {
-                                                arr[idx] = value;
-                                            } else {
-                                                while arr.len() < idx {
-                                                    arr.push(Value::Nil);
-                                                }
-                                                arr.push(value);
-                                            }
+                                            arr.assign_index(idx, value);
                                             return Ok(Control::Next);
                                         }
                                     }
@@ -1691,14 +1662,7 @@ pub(crate) fn exec_assignment(
                                             CompileError::semantic("array index must be an integer".to_string())
                                         })?;
                                         let arr = Arc::make_mut(arc);
-                                        if idx < arr.len() {
-                                            arr[idx] = value.clone();
-                                        } else {
-                                            while arr.len() < idx {
-                                                arr.push(Value::Nil);
-                                            }
-                                            arr.push(value.clone());
-                                        }
+                                        arr.assign_index(idx, value.clone());
                                         Ok(())
                                     }
                                     // A buffer handed back by a runtime allocator
@@ -1819,14 +1783,7 @@ pub(crate) fn exec_assignment(
                                     Value::Array(mut arc) => {
                                         let arr = Arc::make_mut(&mut arc);
                                         let idx = index_val.as_int()? as usize;
-                                        if idx < arr.len() {
-                                            arr[idx] = value;
-                                        } else {
-                                            while arr.len() < idx {
-                                                arr.push(Value::Nil);
-                                            }
-                                            arr.push(value);
-                                        }
+                                        arr.assign_index(idx, value);
                                         Value::Array(arc)
                                     }
                                     // Same runtime-allocator buffer case as the
@@ -1979,14 +1936,7 @@ pub(crate) fn exec_assignment(
                             Value::Array(arc) => {
                                 let arr = Arc::make_mut(arc);
                                 let idx = index_val.as_int()? as usize;
-                                if idx < arr.len() {
-                                    arr[idx] = value;
-                                } else {
-                                    while arr.len() < idx {
-                                        arr.push(Value::Nil);
-                                    }
-                                    arr.push(value);
-                                }
+                                arr.assign_index(idx, value);
                             }
                             // Same runtime-allocator buffer case as the
                             // ClassInstance path above (`rt_byte_array_new` /
@@ -2144,7 +2094,7 @@ pub(crate) fn exec_assignment(
         let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
         let values: Vec<Value> = match value {
             Value::Tuple(v) => v,
-            Value::Array(arc) => Arc::unwrap_or_clone(arc),
+            Value::Array(arc) => Arc::unwrap_or_clone(arc).into_vec(),
             _ => {
                 let ctx = ErrorContext::new()
                     .with_code(codes::TYPE_MISMATCH)
@@ -3238,13 +3188,13 @@ mod indexed_augmented_assignment_tests {
         let mut env = Env::new();
         env.insert(
             "xs".to_string(),
-            Value::Array(Arc::new(vec![
+            Value::array(vec![
                 Value::Int(10),
                 Value::Int(20),
                 Value::Int(30),
                 Value::Int(40),
                 Value::Int(50),
-            ])),
+            ]),
         );
 
         run_indexed_aug("xs", Expr::Integer(0), AssignOp::AddAssign, 5, &mut env);
@@ -3265,7 +3215,7 @@ mod indexed_augmented_assignment_tests {
         let mut env = Env::new();
         env.insert(
             "xs".to_string(),
-            Value::Array(Arc::new(vec![Value::Int(1), Value::Int(2)])),
+            Value::array(vec![Value::Int(1), Value::Int(2)]),
         );
         // A non-literal subscript: the desugaring must bind it to a temp,
         // then restore the environment so no `__aug_*_temp__` name leaks.

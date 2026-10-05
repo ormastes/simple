@@ -3317,6 +3317,26 @@ int64_t rt_function_not_found(const uint8_t* name, uint64_t len) {
     return rt_core_nil();
 }
 
+/* Twin of the seed runtime's rt_method_not_found (sffi/error_handling.rs):
+ * the code generator's vtable type switch falls back to it, so a native binary
+ * built against this runtime could not link without it. Same diagnostic and
+ * exit status (70) as the seed: it never substitutes a placeholder value. */
+int64_t rt_method_not_found(const uint8_t* type_name, uint64_t type_len,
+                            const uint8_t* method_name, uint64_t method_len) {
+    fputs("Runtime error: Method '", stderr);
+    if (method_name && method_len > 0) fwrite(method_name, 1, (size_t)method_len, stderr);
+    else fputs("<unknown method>", stderr);
+    fputs("' not found on type '", stderr);
+    if (type_name && type_len > 0) fwrite(type_name, 1, (size_t)type_len, stderr);
+    else fputs("<unknown type>", stderr);
+    fputs("'\nRuntime error: unresolved symbol -- this is a code-generation dispatch gap, "
+          "not a program error. Refusing to substitute a placeholder value (it would "
+          "render as the text 'error' and silently corrupt output).\n", stderr);
+    fflush(stderr);
+    fflush(stdout);
+    exit(70);
+}
+
 int64_t rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv) {
     (void)argc;
     (void)argv;

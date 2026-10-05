@@ -1506,6 +1506,155 @@ impl Lowerer {
         Some(module)
     }
 
+    /// Number of dynamic global initializers lowered into one init function.
+    ///
+    /// A large flattened program (the browser: ~10k globals) used to get ONE
+    /// `__module_init_dynamic` of 151k MIR instructions in 17 blocks; Cranelift
+    /// spent 674 s on that single function. Bounded chunks keep every init
+    /// function small. Small modules (one chunk) are emitted exactly as before.
+    pub(crate) const DYNAMIC_INIT_CHUNK: usize = 64;
+
+    /// Synthesize the module-init dynamic pass: for every module-level
+    /// val/var/const global whose initializer needs genuine runtime evaluation
+    /// (a function call, or an expression referencing another global) rather
+    /// than one of the five const-foldable shapes (global_init_values/
+    /// strings/arrays/functions/structs), assign the global from its lowered
+    /// initializer expression, in source declaration order. This reuses the
+    /// ordinary expression-lowering path instead of adding a sixth hardcoded
+    /// literal shape -- see doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md.
+    ///
+    /// Declaration order is sufficient, not a topological sort: a
+    /// const-foldable global is already resident in static .data before any
+    /// code runs, and a dynamic initializer that reads ANOTHER dynamic
+    /// initializer's global is correct when the source declares the producer
+    /// first -- the bounded case this pass covers.
+    ///
+    /// Initializers are split into chunks of [`Self::DYNAMIC_INIT_CHUNK`]. With
+    /// one chunk the result is the historical single `__module_init_dynamic`.
+    /// With more, each chunk becomes `__dyninit_part_<i>` (its own locals) and
+    /// `__module_init_dynamic` calls the parts in order, one after another, so
+    /// global initialization order is exactly the source declaration order.
+    /// The part names deliberately do NOT start with `__module_init_`: every
+    /// init-root scan (codegen `find_dynamic_init_func_ids`, the native linker's
+    /// constructor scan) must still see only the root, or a part would run twice.
+    fn lower_dynamic_module_init(&mut self, ast_module: &Module) -> LowerResult<()> {
+        let mut chunks: Vec<(FunctionContext, Vec<HirStmt>)> = Vec::new();
+        let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
+        let mut dyn_body: Vec<HirStmt> = Vec::new();
+        for item in &ast_module.items {
+            let (name, value): (String, &Expr) = match item {
+                Node::Let(l) => match (extract_pattern_name(&l.pattern), l.value.as_ref()) {
+                    (Some(n), Some(v)) => (n, v),
+                    _ => continue,
+                },
+                Node::Static(s) => (s.name.clone(), &s.value),
+                Node::Const(c) => (c.name.clone(), &c.value),
+                _ => continue,
+            };
+            // Design A.5 raw data items are placed byte images, never
+            // runtime-initialized Simple globals.
+            if self.module.raw_data_items.iter().any(|raw| raw.name == name) {
+                continue;
+            }
+            let has_static_init = self.global_init_values.contains_key(&name)
+                || self.global_init_strings.contains_key(&name)
+                || self.global_init_arrays.contains_key(&name)
+                || self.global_init_functions.contains_key(&name)
+                || self.global_init_structs.contains_key(&name);
+            if has_static_init {
+                continue;
+            }
+            let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
+            // Resolve the initializer's own references through the owner
+            // of the global it initializes (flattened same-name globals).
+            let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
+            let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
+            let hir_val = self.lower_expr(value, &mut dyn_ctx);
+            self.current_function_owner = previous_owner;
+            let hir_val = hir_val?;
+            // Codegen decides whether a global's backing data is writable
+            // by consulting `dynamic_init_globals` (mirrors the same
+            // check for global_init_strings/arrays/functions/structs) --
+            // a `val`-declared global with no other recognized init shape
+            // otherwise gets emitted as read-only data, and the store
+            // below would fault at runtime.
+            self.module.dynamic_init_globals.insert(name.clone());
+            dyn_body.push(HirStmt::Assign {
+                target: HirExpr {
+                    kind: HirExprKind::Global(name),
+                    ty: global_ty,
+                },
+                value: hir_val,
+            });
+            if dyn_body.len() >= Self::DYNAMIC_INIT_CHUNK {
+                let full_ctx = std::mem::replace(&mut dyn_ctx, FunctionContext::new(TypeId::VOID));
+                chunks.push((full_ctx, std::mem::take(&mut dyn_body)));
+            }
+        }
+        if !dyn_body.is_empty() {
+            chunks.push((dyn_ctx, dyn_body));
+        }
+        if std::env::var("SIMPLE_WRITEFIX_DEBUG").is_ok() {
+            let total: usize = chunks.iter().map(|(_, body)| body.len()).sum();
+            eprintln!("[writefix] dyn_body.len()={} chunks={}", total, chunks.len());
+        }
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        if chunks.len() == 1 {
+            let (ctx, mut body) = chunks.pop().expect("one chunk");
+            body.push(HirStmt::Return(None));
+            let init = self.dynamic_init_function("__module_init_dynamic".to_string(), ctx.locals, body);
+            self.module.functions.push(init);
+            return Ok(());
+        }
+        let mut root_body: Vec<HirStmt> = Vec::with_capacity(chunks.len() + 1);
+        for (index, (ctx, mut body)) in chunks.into_iter().enumerate() {
+            let part_name = format!("__dyninit_part_{index}");
+            body.push(HirStmt::Return(None));
+            let part = self.dynamic_init_function(part_name.clone(), ctx.locals, body);
+            self.module.functions.push(part);
+            root_body.push(HirStmt::Expr(HirExpr {
+                kind: HirExprKind::Call {
+                    func: Box::new(HirExpr {
+                        kind: HirExprKind::Global(part_name),
+                        ty: TypeId::ANY,
+                    }),
+                    args: Vec::new(),
+                },
+                ty: TypeId::VOID,
+            }));
+        }
+        root_body.push(HirStmt::Return(None));
+        let root = self.dynamic_init_function("__module_init_dynamic".to_string(), Vec::new(), root_body);
+        self.module.functions.push(root);
+        Ok(())
+    }
+
+    fn dynamic_init_function(&self, name: String, locals: Vec<crate::hir::LocalVar>, body: Vec<HirStmt>) -> HirFunction {
+        HirFunction {
+            name,
+            span: None,
+            params: Vec::new(),
+            locals,
+            return_type: TypeId::VOID,
+            body,
+            visibility: ast::Visibility::Internal,
+            contract: None,
+            is_pure: false,
+            inject: false,
+            concurrency_mode: ConcurrencyMode::Actor,
+            module_path: self.module.name.clone().unwrap_or_default(),
+            attributes: Vec::new(),
+            effects: Vec::new(),
+            layout_hint: None,
+            verification_mode: VerificationMode::Unverified,
+            is_ghost: false,
+            is_sync: true,
+            has_suspension: false,
+        }
+    }
+
     pub fn lower_module(self, ast_module: &Module) -> LowerResult<HirModule> {
         self.lower_module_with_return_types(ast_module)
             .map(|(module, _)| module)
@@ -1816,7 +1965,13 @@ impl Lowerer {
                         // return type instead of falling back to ANY.
                         if let Some(ref trait_name) = impl_block.trait_name {
                             if let Some(trait_def) =
-                                select_impl_trait(&ast_module.items, trait_name, &impl_method_names)
+                                select_impl_trait(
+                                    &ast_module.items,
+                                    trait_name,
+                                    &impl_method_names,
+                                    methods_owner(&impl_block.methods).as_deref(),
+                                    &self.flatten_owner_import_bindings,
+                                )
                             {
                                 for default_method in &trait_def.methods {
                                     if default_method.is_abstract
@@ -1894,7 +2049,13 @@ impl Lowerer {
                         for method in &s.methods {
                             methods_map.insert(method.name.clone(), format!("{}.{}", s.name, method.name));
                         }
-                        if let Some(trait_def) = select_impl_trait(&ast_module.items, &trait_name, &own) {
+                        if let Some(trait_def) = select_impl_trait(
+                            &ast_module.items,
+                            &trait_name,
+                            &own,
+                            methods_owner(&s.methods).as_deref(),
+                            &self.flatten_owner_import_bindings,
+                        ) {
                             for default_method in &trait_def.methods {
                                 if default_method.is_abstract || own.contains(default_method.name.as_str()) {
                                     continue;
@@ -1967,7 +2128,13 @@ impl Lowerer {
                             // the default body. Each default is lowered fresh per-impl so
                             // `self` resolves against this impl's concrete type.
                             if let Some(trait_def) =
-                                select_impl_trait(&ast_module.items, trait_name, &impl_method_names)
+                                select_impl_trait(
+                                    &ast_module.items,
+                                    trait_name,
+                                    &impl_method_names,
+                                    methods_owner(&impl_block.methods).as_deref(),
+                                    &self.flatten_owner_import_bindings,
+                                )
                             {
                                 for default_method in &trait_def.methods {
                                     if default_method.is_abstract
@@ -2022,103 +2189,8 @@ impl Lowerer {
         self.module.extern_fn_names = self.extern_fn_names.clone();
         self.module.imported_function_names = self.imported_function_names.clone();
 
-        // Module-init dynamic pass: for every module-level val/var/const global
-        // whose initializer needs genuine runtime evaluation (a function call,
-        // or an expression referencing another global) rather than one of the
-        // five const-foldable shapes handled above (global_init_values/
-        // strings/arrays/functions/structs), synthesize a
-        // `__module_init_dynamic` function whose body assigns each such
-        // global from its lowered initializer expression, in source
-        // declaration order. This reuses the ordinary expression-lowering
-        // path (the same `lower_expr` every real function body uses) instead
-        // of adding a sixth hardcoded literal shape -- see
-        // doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md.
-        //
-        // Declaration order is sufficient here, not a topological sort: a
-        // const-foldable global (BASE in `val BASE = 10; val DERIVED = BASE +
-        // 5`) is already resident in static .data before any code runs, so a
-        // dynamic initializer that reads it needs no ordering help. A
-        // dynamic initializer that reads ANOTHER dynamic initializer's global
-        // is only correct if the source declares the producer first -- that
-        // is the bounded case this pass covers, not general dependency
-        // analysis.
-        {
-            let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
-            let mut dyn_body: Vec<HirStmt> = Vec::new();
-            for item in &ast_module.items {
-                let (name, value): (String, &Expr) = match item {
-                    Node::Let(l) => match (extract_pattern_name(&l.pattern), l.value.as_ref()) {
-                        (Some(n), Some(v)) => (n, v),
-                        _ => continue,
-                    },
-                    Node::Static(s) => (s.name.clone(), &s.value),
-                    Node::Const(c) => (c.name.clone(), &c.value),
-                    _ => continue,
-                };
-                // Design A.5 raw data items are placed byte images, never
-                // runtime-initialized Simple globals.
-                if self.module.raw_data_items.iter().any(|raw| raw.name == name) {
-                    continue;
-                }
-                let has_static_init = self.global_init_values.contains_key(&name)
-                    || self.global_init_strings.contains_key(&name)
-                    || self.global_init_arrays.contains_key(&name)
-                    || self.global_init_functions.contains_key(&name)
-                    || self.global_init_structs.contains_key(&name);
-                if has_static_init {
-                    continue;
-                }
-                let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
-                // Resolve the initializer's own references through the owner
-                // of the global it initializes (flattened same-name globals).
-                let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
-                let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
-                let hir_val = self.lower_expr(value, &mut dyn_ctx);
-                self.current_function_owner = previous_owner;
-                let hir_val = hir_val?;
-                // Codegen decides whether a global's backing data is writable
-                // by consulting `dynamic_init_globals` (mirrors the same
-                // check for global_init_strings/arrays/functions/structs) --
-                // a `val`-declared global with no other recognized init shape
-                // otherwise gets emitted as read-only data, and the store
-                // below would fault at runtime.
-                self.module.dynamic_init_globals.insert(name.clone());
-                dyn_body.push(HirStmt::Assign {
-                    target: HirExpr {
-                        kind: HirExprKind::Global(name),
-                        ty: global_ty,
-                    },
-                    value: hir_val,
-                });
-            }
-            if std::env::var("SIMPLE_WRITEFIX_DEBUG").is_ok() {
-                eprintln!("[writefix] dyn_body.len()={}", dyn_body.len());
-            }
-            if !dyn_body.is_empty() {
-                dyn_body.push(HirStmt::Return(None));
-                self.module.functions.push(HirFunction {
-                    name: "__module_init_dynamic".to_string(),
-                    span: None,
-                    params: Vec::new(),
-                    locals: dyn_ctx.locals,
-                    return_type: TypeId::VOID,
-                    body: dyn_body,
-                    visibility: ast::Visibility::Internal,
-                    contract: None,
-                    is_pure: false,
-                    inject: false,
-                    concurrency_mode: ConcurrencyMode::Actor,
-                    module_path: self.module.name.clone().unwrap_or_default(),
-                    attributes: Vec::new(),
-                    effects: Vec::new(),
-                    layout_hint: None,
-                    verification_mode: VerificationMode::Unverified,
-                    is_ghost: false,
-                    is_sync: true,
-                    has_suspension: false,
-                });
-            }
-        }
+        // Module-init dynamic pass (chunked; see lower_dynamic_module_init).
+        self.lower_dynamic_module_init(ast_module)?;
 
         // Third pass: lower AOP constructs (#1000-1050)
         self.lower_aop_constructs(ast_module)?;
@@ -2390,103 +2462,8 @@ impl Lowerer {
             }
         }
 
-        // Module-init dynamic pass: for every module-level val/var/const global
-        // whose initializer needs genuine runtime evaluation (a function call,
-        // or an expression referencing another global) rather than one of the
-        // five const-foldable shapes handled above (global_init_values/
-        // strings/arrays/functions/structs), synthesize a
-        // `__module_init_dynamic` function whose body assigns each such
-        // global from its lowered initializer expression, in source
-        // declaration order. This reuses the ordinary expression-lowering
-        // path (the same `lower_expr` every real function body uses) instead
-        // of adding a sixth hardcoded literal shape -- see
-        // doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md.
-        //
-        // Declaration order is sufficient here, not a topological sort: a
-        // const-foldable global (BASE in `val BASE = 10; val DERIVED = BASE +
-        // 5`) is already resident in static .data before any code runs, so a
-        // dynamic initializer that reads it needs no ordering help. A
-        // dynamic initializer that reads ANOTHER dynamic initializer's global
-        // is only correct if the source declares the producer first -- that
-        // is the bounded case this pass covers, not general dependency
-        // analysis.
-        {
-            let mut dyn_ctx = FunctionContext::new(TypeId::VOID);
-            let mut dyn_body: Vec<HirStmt> = Vec::new();
-            for item in &ast_module.items {
-                let (name, value): (String, &Expr) = match item {
-                    Node::Let(l) => match (extract_pattern_name(&l.pattern), l.value.as_ref()) {
-                        (Some(n), Some(v)) => (n, v),
-                        _ => continue,
-                    },
-                    Node::Static(s) => (s.name.clone(), &s.value),
-                    Node::Const(c) => (c.name.clone(), &c.value),
-                    _ => continue,
-                };
-                // Design A.5 raw data items are placed byte images, never
-                // runtime-initialized Simple globals.
-                if self.module.raw_data_items.iter().any(|raw| raw.name == name) {
-                    continue;
-                }
-                let has_static_init = self.global_init_values.contains_key(&name)
-                    || self.global_init_strings.contains_key(&name)
-                    || self.global_init_arrays.contains_key(&name)
-                    || self.global_init_functions.contains_key(&name)
-                    || self.global_init_structs.contains_key(&name);
-                if has_static_init {
-                    continue;
-                }
-                let global_ty = *self.globals.get(&name).unwrap_or(&TypeId::ANY);
-                // Resolve the initializer's own references through the owner
-                // of the global it initializes (flattened same-name globals).
-                let initializer_owner = self.flatten_global_symbol_owners.get(&name).cloned().flatten();
-                let previous_owner = std::mem::replace(&mut self.current_function_owner, initializer_owner);
-                let hir_val = self.lower_expr(value, &mut dyn_ctx);
-                self.current_function_owner = previous_owner;
-                let hir_val = hir_val?;
-                // Codegen decides whether a global's backing data is writable
-                // by consulting `dynamic_init_globals` (mirrors the same
-                // check for global_init_strings/arrays/functions/structs) --
-                // a `val`-declared global with no other recognized init shape
-                // otherwise gets emitted as read-only data, and the store
-                // below would fault at runtime.
-                self.module.dynamic_init_globals.insert(name.clone());
-                dyn_body.push(HirStmt::Assign {
-                    target: HirExpr {
-                        kind: HirExprKind::Global(name),
-                        ty: global_ty,
-                    },
-                    value: hir_val,
-                });
-            }
-            if std::env::var("SIMPLE_WRITEFIX_DEBUG").is_ok() {
-                eprintln!("[writefix] dyn_body.len()={}", dyn_body.len());
-            }
-            if !dyn_body.is_empty() {
-                dyn_body.push(HirStmt::Return(None));
-                self.module.functions.push(HirFunction {
-                    name: "__module_init_dynamic".to_string(),
-                    span: None,
-                    params: Vec::new(),
-                    locals: dyn_ctx.locals,
-                    return_type: TypeId::VOID,
-                    body: dyn_body,
-                    visibility: ast::Visibility::Internal,
-                    contract: None,
-                    is_pure: false,
-                    inject: false,
-                    concurrency_mode: ConcurrencyMode::Actor,
-                    module_path: self.module.name.clone().unwrap_or_default(),
-                    attributes: Vec::new(),
-                    effects: Vec::new(),
-                    layout_hint: None,
-                    verification_mode: VerificationMode::Unverified,
-                    is_ghost: false,
-                    is_sync: true,
-                    has_suspension: false,
-                });
-            }
-        }
+        // Module-init dynamic pass (chunked; see lower_dynamic_module_init).
+        self.lower_dynamic_module_init(ast_module)?;
 
         // Third pass: lower AOP constructs
         self.lower_aop_constructs(ast_module)?;
@@ -2649,24 +2626,76 @@ mod scalar_const_eval_tests {
 /// `invalidate_damage_mirror`, so those defaults were never materialised for
 /// the impl and the call `VulkanBackend.invalidate_damage_mirror` panicked in
 /// codegen (whole module dropped to the interpreter) or crashed with SIGBUS.
-/// Among same-named candidates, pick the one declaring the most of the
-/// impl's own method names. On a tie, a candidate whose method set strictly
-/// contains the current pick's wins (the two stdlib engine2d `RenderBackend`s
-/// differ only by three added defaults, and VulkanBackend overrides 25 of
-/// both); any other tie keeps the first, i.e. the previous behaviour.
+/// Resolution follows the module system first, using the owner tags the
+/// flattener puts on every method (`FLATTEN_MODULE_OWNER_ATTR_PREFIX`) and its
+/// import-binding markers:
+///   1. a single candidate is the trait;
+///   2. a trait declared in the impl's own module;
+///   3. the trait the impl's module imports under that name
+///      (`flatten_owner_import_bindings[owner][name]` -> source owner).
+/// Only when none of these resolves (no owner tags, a re-export facade, an
+/// aliased import) does the overlap heuristic below decide: the candidate
+/// declaring the most of the impl's own method names, and on a tie one whose
+/// method set strictly contains the current pick's (the two engine2d
+/// `RenderBackend`s differ only by three added defaults); any other tie keeps
+/// the first, i.e. the pre-2026-10-04 behaviour.
 fn select_impl_trait<'a>(
     items: &'a [Node],
     trait_name: &str,
     impl_method_names: &std::collections::HashSet<&str>,
+    impl_owner: Option<&str>,
+    import_bindings: &HashMap<String, HashMap<String, (String, String)>>,
+) -> Option<&'a simple_parser::ast::TraitDef> {
+    let candidates: Vec<&'a simple_parser::ast::TraitDef> = items
+        .iter()
+        .filter_map(|item| match item {
+            Node::Trait(t) if t.name == trait_name => Some(t),
+            _ => None,
+        })
+        .collect();
+    if candidates.len() <= 1 {
+        return candidates.first().copied();
+    }
+    let trait_owner = |t: &simple_parser::ast::TraitDef| -> Option<String> {
+        Lowerer::flatten_owner_of(
+            t.methods
+                .iter()
+                .flat_map(|m| m.attributes.iter().map(|a| a.name.as_str())),
+        )
+    };
+    let unique_owned_by = |owner: &str| -> Option<&'a simple_parser::ast::TraitDef> {
+        let mut found = candidates.iter().copied().filter(|t| trait_owner(t).as_deref() == Some(owner));
+        let first = found.next()?;
+        if found.next().is_some() {
+            return None;
+        }
+        Some(first)
+    };
+    if let Some(owner) = impl_owner {
+        if let Some(own) = unique_owned_by(owner) {
+            return Some(own);
+        }
+        if let Some((source_owner, _source_name)) = import_bindings.get(owner).and_then(|b| b.get(trait_name)) {
+            if let Some(imported) = unique_owned_by(source_owner) {
+                return Some(imported);
+            }
+        }
+    }
+    select_impl_trait_by_overlap(&candidates, impl_method_names)
+}
+
+/// Owning module of a flattened impl/struct/trait, read from the owner tag the
+/// flattener puts on each of its methods. None outside the flattened lane.
+fn methods_owner(methods: &[simple_parser::ast::FunctionDef]) -> Option<String> {
+    Lowerer::flatten_owner_of(methods.iter().flat_map(|m| m.attributes.iter().map(|a| a.name.as_str())))
+}
+
+fn select_impl_trait_by_overlap<'a>(
+    candidates: &[&'a simple_parser::ast::TraitDef],
+    impl_method_names: &std::collections::HashSet<&str>,
 ) -> Option<&'a simple_parser::ast::TraitDef> {
     let mut best: Option<(&'a simple_parser::ast::TraitDef, usize)> = None;
-    for item in items {
-        let Node::Trait(t) = item else {
-            continue;
-        };
-        if t.name != trait_name {
-            continue;
-        }
+    for t in candidates.iter().copied() {
         let overlap = t
             .methods
             .iter()

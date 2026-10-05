@@ -74,9 +74,13 @@ pub fn value_to_runtime(v: &Value) -> RuntimeValue {
         Value::Symbol(s) => simple_runtime::value::rt_string_new(s.as_ptr(), s.len() as u64),
         Value::Array(items) | Value::FrozenArray(items) => values_to_runtime_array(items.iter()),
         Value::FixedSizeArray { data, .. } => values_to_runtime_array(data.iter()),
-        // Packed byte arrays must use the same marshalling as boxed [u8].
-        // The NIL fallback made a JIT interpreter-splice result appear empty,
-        // then an indexed store crashed. Backport of main 64b8da0dc0f.
+        // Packed `[u8]` (`rt_bytes_alloc` and the other runtime byte
+        // allocators) is the same `[u8]` as a boxed array of `u8` values and
+        // must cross the bridge as one. It used to fall through to the `NIL`
+        // wildcard below, so a JIT'd `var a = rt_bytes_alloc(4)` read
+        // `a.len() == 0` and the next `a[i] = b` stored through NIL and
+        // crashed with SIGSEGV
+        // (doc/08_tracking/bug/packed_byte_array_write_span_noop_2026-10-05.md).
         Value::ByteArray(bytes) | Value::FrozenByteArray(bytes) => {
             values_to_runtime_array(Value::byte_array_values(bytes).iter())
         }
@@ -522,6 +526,7 @@ mod tests {
             let runtime = value_to_runtime(&value);
             assert_ne!(runtime, RuntimeValue::NIL, "packed [u8] must not collapse to NIL");
             assert_eq!(simple_runtime::value::rt_array_len(runtime), 3);
+            // Same marshalling as a boxed [u8] of u8 values.
             let boxed = value_to_runtime(&Value::array(Value::byte_array_values(&[1, 2, 255])));
             for i in 0..3 {
                 assert_eq!(

@@ -549,6 +549,7 @@ int64_t  rt_tls_client_write(int64_t handle, int64_t data);
 int64_t  rt_tls_client_write_timeout(int64_t handle, int64_t data, int64_t timeout_ms);
 int64_t  rt_tls_client_read(int64_t handle, int64_t max_bytes);
 int64_t  rt_tls_client_read_timeout(int64_t handle, int64_t max_bytes, int64_t timeout_ms);
+int64_t  rt_tls_client_read_bytes_timeout_checked(int64_t handle, int64_t max_bytes, int64_t timeout_ms);
 int64_t  rt_tls_get_protocol_version(int64_t handle);
 int8_t   rt_tls_client_close(int64_t handle);
 int64_t  rt_strcat_tagged(int64_t left, int64_t right);
@@ -565,6 +566,8 @@ int64_t  rt_opt_bool_to_string(int64_t raw);
 int64_t  rt_opt_f64_to_string(int64_t raw);
 int64_t  rt_value_to_string(int64_t value);
 int64_t  rt_function_not_found(const uint8_t* name, uint64_t len);
+int64_t  rt_method_not_found(const uint8_t* type_name, uint64_t type_len,
+                             const uint8_t* method_name, uint64_t method_len);
 int64_t  rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv);
 SplArray* rt_array_new(int64_t cap);
 SplArray* rt_f64_array_alloc(int64_t len);

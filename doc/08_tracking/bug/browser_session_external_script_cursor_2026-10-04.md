@@ -64,3 +64,23 @@ applied by layout (gaps A, B, C in the parent record).
   (`https://example.com/data:text/css,...`) and fetched from the document's
   origin instead of being decoded inline. Same-origin http only, so not a
   data leak, but data: stylesheets never apply.
+
+## data: URLs and image bodies (2026-10-05, work/browser-data-urls)
+
+- FIXED: `resolve_relative_url` treats `data:` as absolute; `<link>`
+  stylesheets and `<img>` images with data: URLs are decoded in the session
+  (`browser_data_url_decode`, RFC 2397: media type, `;base64`, percent
+  decoding) and never queued for a transport. CSP (`style-src`/`img-src`)
+  still runs first; the 50 MiB resource limit applies to the decoded body.
+  CSS `background-image: url(data:...)` is still excluded on purpose by
+  `browser_session_html.spl` (unchanged).
+- FIXED: image response bodies must cross into BrowserSession as lowercase
+  hex (`_image_hex_bytes`); the sandboxed renderer process did that, but
+  `hosted_web_content_session.spl` and the app subresource pump sent the raw
+  bytes as text, so every network image failed with "invalid image payload".
+  The shared helper is now `hosted_browser_binary_hex` and both hosts use it
+  for `image` as well as `wasm`.
+- Found, not fixed: inside `browser_session_loading.spl`, `byte.to_i64()
+  .to_hex()` dispatched to a free `to_hex` colour helper (error "undefined
+  field 'r' ... type 'i64'") instead of the integer method; the new
+  `_image_bytes_hex` spells the hex out.

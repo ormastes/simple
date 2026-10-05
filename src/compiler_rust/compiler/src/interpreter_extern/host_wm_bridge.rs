@@ -203,7 +203,7 @@ pub fn rt_host_wm_server_poll(args: &[Value]) -> Result<Value, CompileError> {
         }
         let _ = fs::remove_file(path);
     }
-    Ok(Value::Array(std::sync::Arc::new(out)))
+    Ok(Value::array(out))
 }
 
 pub fn rt_host_wm_server_reply_create(args: &[Value]) -> Result<Value, CompileError> {

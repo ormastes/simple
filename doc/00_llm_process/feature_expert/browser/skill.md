@@ -429,3 +429,20 @@ does not collapse out of `<body>` (Chrome y=0, Simple y=16 — neutralise it wit
 `style="margin:0;padding:0"` when asserting absolute y), and `Style.font_size`
 is `i32` so Chrome's fractional `13.3333px` form-control size is lost, which is
 the real cause of the `tab-bar` flex-item width cluster.
+
+## Image decoders behind the image store (2026-10-05)
+
+`BrowserSession._store_image_response` (`gc_async_mut/web/browser_session_loading.spl`)
+dispatches on the declared media type through
+`src/lib/common/image/image_decode.spl` (`image_decoder_format` ->
+`image_signature_valid` -> `decode_image_to_argb_bounded`). `image/png` is the
+unchanged PNG path; `image/jpeg` (also `image/jpg`, `image/pjpeg`) goes to
+`src/lib/common/image/jpeg_decode.spl` — baseline + progressive Huffman,
+any sampling, restart markers, bit-exact with `djpeg -dct int`. The session
+pixel budget (`BROWSER_MAX_IMAGE_PIXELS`) is passed in and enforced from the
+JPEG SOF before allocation. EXIF orientation is recorded
+(`JpegImage.exif_orientation`), not applied. Note `img src` data: URLs are
+capped at 256 bytes (`SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES`), so real image
+bodies only arrive over the network path. Specs:
+`test/01_unit/lib/common/image/{jpeg_decode,browser_image_decode_dispatch}_spec.spl`;
+fixtures `test/fixtures/image/jpeg/` (`regenerate.shs`).

@@ -372,8 +372,9 @@ pub(super) fn eval_collection_expr(
             }
             // Evaluate the value once and clone it
             let val = evaluate_expr(value, env, functions, classes, enums, impl_methods)?;
-            let arr: Vec<Value> = std::iter::repeat_n(val, count_int as usize).collect();
-            Ok(Some(Value::array(arr)))
+            // Large in-domain repeats (`[0u32; w * h]` framebuffers) are stored
+            // packed; reads give back exactly the repeated value either way.
+            Ok(Some(Value::array(crate::value::ArrayData::repeat(val, count_int as usize))))
         }
         Expr::Tuple(items) => {
             let mut tup = Vec::new();
@@ -533,7 +534,7 @@ pub(super) fn eval_collection_expr(
                     } else {
                         raw_idx as usize
                     };
-                    arr.get(idx).cloned().ok_or_else(|| {
+                    arr.get_value(idx).ok_or_else(|| {
                         // E3002 - Index Out Of Bounds
                         if std::env::var("SIMPLE_INTERP_OOB_DEBUG").is_ok() {
                             let recv_dbg = format!("{:?}", receiver);

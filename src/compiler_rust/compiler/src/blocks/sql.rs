@@ -86,11 +86,11 @@ fn parse_sql_query(payload: &str) -> Result<Value, CompileError> {
     result.insert("raw_query".to_string(), Value::text(payload.to_string()));
     result.insert(
         "positional_params".to_string(),
-        Value::array(positional_params.into_iter().map(Value::text).collect()),
+        Value::array(positional_params.into_iter().map(Value::text).collect::<Vec<Value>>()),
     );
     result.insert(
         "named_params".to_string(),
-        Value::array(named_params.into_iter().map(Value::text).collect()),
+        Value::array(named_params.into_iter().map(Value::text).collect::<Vec<Value>>()),
     );
 
     Ok(Value::dict(result))

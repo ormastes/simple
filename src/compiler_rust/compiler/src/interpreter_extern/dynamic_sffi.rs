@@ -759,8 +759,8 @@ fn validate_dynamic_i64_contract(name: &str, arity: usize) -> Result<(), Compile
 
 fn strict_i64_array(value: &Value, name: &str) -> Result<Vec<i64>, CompileError> {
     let items = match value {
-        Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
-        Value::FixedSizeArray { data, .. } => data.as_ref(),
+        Value::Array(items) | Value::FrozenArray(items) => items.as_slice(),
+        Value::FixedSizeArray { data, .. } => data.as_slice(),
         other => {
             return Err(CompileError::semantic(format!(
                 "{name} requires an [i64] argument, got {}",
@@ -776,8 +776,8 @@ fn strict_owned_bytes(value: &Value, name: &str) -> Result<Box<[u8]>, CompileErr
         return Ok(bytes.to_vec().into_boxed_slice());
     }
     let items = match value {
-        Value::Array(items) | Value::FrozenArray(items) => items.as_ref(),
-        Value::FixedSizeArray { data, .. } => data.as_ref(),
+        Value::Array(items) | Value::FrozenArray(items) => items.as_slice(),
+        Value::FixedSizeArray { data, .. } => data.as_slice(),
         other => {
             return Err(CompileError::semantic(format!(
                 "{name} requires a packed-byte array, got {}",
@@ -1302,7 +1302,7 @@ mod tests {
     }
 
     fn ints(values: &[i64]) -> Value {
-        Value::array(values.iter().copied().map(Value::Int).collect())
+        Value::array(values.iter().copied().map(Value::Int).collect::<Vec<Value>>())
     }
 
     #[test]

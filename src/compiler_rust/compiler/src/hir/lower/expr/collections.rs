@@ -126,9 +126,36 @@ impl Lowerer {
 
         let arr_ty = self.module.types.register(HirType::Array { element: elem_ty, size });
 
+        // A large repeat of a pure scalar stays a runtime `rt_array_repeat`
+        // fill instead of being unrolled: `[_KERN_EMPTY; 72200]` (a module
+        // global in font_renderer) became a 72,200-element literal -- 144k MIR
+        // instructions that Cranelift spent ~20 minutes compiling (2026-10-05).
+        // Restricted to scalar element types (a fill shares ONE value, so a
+        // heap value would alias) and to side-effect-free value expressions
+        // (unrolling evaluates the value per element). `u8` keeps its existing
+        // literal path (byte-packed arrays are owned by a separate change), and
+        // so does `u64`: a full-width u64 fill reads back wrong through
+        // `rt_array_repeat` (`[u64::MAX; 300][0] == u64::MAX` was false while
+        // the unrolled literal is true -- the interpreter also answers false,
+        // a pre-existing divergence recorded in the bug doc).
+        let large_scalar_fill = size.is_some_and(|n| n >= Self::ARRAY_REPEAT_UNROLL_LIMIT)
+            && matches!(
+                elem_ty,
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::F32
+                    | TypeId::F64
+                    | TypeId::BOOL
+            )
+            && Self::is_pure_scalar_repeat_value(&hir_value);
+
         // Generate array elements by repeating the value
         // For compile-time known sizes, expand to explicit array
-        if let Some(n) = size {
+        if let Some(n) = size.filter(|_| !large_scalar_fill) {
             let hir_exprs: Vec<_> = std::iter::repeat_n(hir_value, n).collect();
             Ok(HirExpr {
                 kind: HirExprKind::Array(hir_exprs),
@@ -144,6 +171,18 @@ impl Lowerer {
                 },
                 ty: arr_ty,
             })
+        }
+    }
+
+    /// Repeat counts at or above this stay a runtime fill (see lower_array_repeat).
+    pub(crate) const ARRAY_REPEAT_UNROLL_LIMIT: usize = 256;
+
+    fn is_pure_scalar_repeat_value(value: &HirExpr) -> bool {
+        match &value.kind {
+            HirExprKind::Integer(_) | HirExprKind::Float(_) | HirExprKind::Bool(_) | HirExprKind::Global(_) => true,
+            HirExprKind::Unary { operand, .. } => Self::is_pure_scalar_repeat_value(operand),
+            HirExprKind::Cast { expr, .. } => Self::is_pure_scalar_repeat_value(expr),
+            _ => false,
         }
     }
 

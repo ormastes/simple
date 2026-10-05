@@ -1191,6 +1191,14 @@ impl<'a> MirLowerer<'a> {
                         if let Some(target) = typed_push_target {
                             let receiver_reg = self.lower_expr(receiver)?;
                             let value_reg = self.lower_expr(&args[0])?;
+                            // An `ANY` element is a TAGGED word; the typed byte
+                            // push stores its low byte (JIT inflate:
+                            // `out.push(block_out[k])` stored 104 as 0x40).
+                            let value_reg = if target == "rt_typed_bytes_u8_push" && args[0].ty == TypeId::ANY {
+                                self.unbox_scalar_for_raw_slot(TypeId::U8, TypeId::ANY, value_reg)?
+                            } else {
+                                value_reg
+                            };
                             let append_ptrs = self.active_array_append_ptrs(receiver);
                             let append_index = append_ptrs
                                 .map(|ptrs| ptrs.index_local_index)
@@ -1245,7 +1253,7 @@ impl<'a> MirLowerer<'a> {
                                     pushed
                                 })?;
                                 self.store_array_push_receiver_back(receiver, pushed)?;
-                                let ret_ty = self.with_func(|func, _| func.return_type)?;
+                                let ret_ty = self.expr_stmt_tail_ty()?;
                                 let result = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, pushed)?;
                                 let result = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, result)?;
                                 self.last_expr_value = Some(result);
@@ -1271,7 +1279,7 @@ impl<'a> MirLowerer<'a> {
                             // Keep that receiver just like lower_method_call;
                             // dropping it leaves value-returning helpers with
                             // an Unreachable terminator instead of a return.
-                            let ret_ty = self.with_func(|func, _| func.return_type)?;
+                            let ret_ty = self.expr_stmt_tail_ty()?;
                             let result = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, receiver_reg)?;
                             let result = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, result)?;
                             self.last_expr_value = Some(result);
@@ -1294,7 +1302,7 @@ impl<'a> MirLowerer<'a> {
                 // rescue it. `return 42` was already correct, which is what
                 // pinned the defect to this path.
                 // See doc/08_tracking/bug/jit_optional_i64_payload_reinterpreted_2026-08-17.md
-                let ret_ty = self.with_func(|func, _| func.return_type)?;
+                let ret_ty = self.expr_stmt_tail_ty()?;
                 let vreg = self.box_scalar_for_tagged_slot(ret_ty, expr.ty, vreg)?;
                 let vreg = self.unbox_scalar_for_raw_slot(ret_ty, expr.ty, vreg)?;
                 self.last_expr_value = Some(vreg);
@@ -1309,7 +1317,7 @@ impl<'a> MirLowerer<'a> {
             } => {
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_expr(condition)?;
+                let cond_reg = self.lower_condition_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for coverage (before branch)
@@ -1537,7 +1545,7 @@ impl<'a> MirLowerer<'a> {
                 self.set_current_block(cond_id)?;
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_expr(condition)?;
+                let cond_reg = self.lower_condition_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for while condition coverage
@@ -1696,7 +1704,7 @@ impl<'a> MirLowerer<'a> {
                 // Lower the assertion condition
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_expr(condition)?;
+                let cond_reg = self.lower_condition_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for assert condition coverage (#674)
@@ -2171,7 +2179,7 @@ impl<'a> MirLowerer<'a> {
                 // At runtime, we treat it as an assertion
                 let saved_decision_span = self.current_decision_span;
                 self.current_decision_span = *span;
-                let cond_reg = self.lower_expr(condition)?;
+                let cond_reg = self.lower_condition_expr(condition)?;
                 self.current_decision_span = saved_decision_span;
 
                 // Emit decision probe for assume condition coverage (#674)

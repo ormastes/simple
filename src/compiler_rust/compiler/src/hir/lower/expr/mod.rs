@@ -1293,7 +1293,15 @@ impl Lowerer {
         // signatures agree.  This is especially important for `T?` returns:
         // losing `MouseEvent?` here makes `if val event = backend.poll_mouse()`
         // bind `event` as ANY and rejects every subsequent field access.
-        if recv_ty == TypeId::ANY {
+        // A nullable trait receiver (`Provider?`, i.e. `Pointer { inner: ANY }`,
+        // as bound by `if val p = optional_provider:`) is the same erased
+        // trait value: without this, a trait with no implementor in the unit
+        // left exactly one unrelated `Other.resolve` in the suffix search
+        // below, and its return type (`WidgetNode`) won.
+        // doc/08_tracking/bug/jit_nullable_trait_receiver_method_typed_by_unrelated_struct_2026-10-05.md
+        let trait_like_receiver = recv_ty == TypeId::ANY
+            || matches!(self.module.types.get(recv_ty), Some(HirType::Pointer { inner, .. }) if *inner == TypeId::ANY);
+        if trait_like_receiver {
             if let Some(return_type) = self.agreed_trait_method_return_type(method) {
                 return return_type;
             }
@@ -2149,6 +2157,17 @@ impl Lowerer {
                 // Type conversion
                 "to_string" | "to_text" => Some(TypeId::STRING),
                 "to_int" | "to_i64" => Some(TypeId::I64),
+                // The narrower integer casts produce the same RAW native result
+                // as `to_i64` (codegen rt_any_to_int + narrow). Leaving them ANY
+                // made consumers disagree: a `[u8]` push took the word raw while
+                // `as i64` decoded it as tagged (`x.to_u8()` -> 64 / 8 for 104).
+                "to_i8" => Some(TypeId::I8),
+                "to_i16" => Some(TypeId::I16),
+                "to_i32" => Some(TypeId::I32),
+                "to_u8" => Some(TypeId::U8),
+                "to_u16" => Some(TypeId::U16),
+                "to_u32" => Some(TypeId::U32),
+                "to_u64" => Some(TypeId::U64),
                 "to_float" | "to_f64" => Some(TypeId::F64),
                 "parse_f64" | "parse_float" | "parse_f64_safe" => Some(TypeId::ANY),
                 "to_bool" => Some(TypeId::BOOL),

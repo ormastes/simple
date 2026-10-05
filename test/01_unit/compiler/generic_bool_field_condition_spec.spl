@@ -1,0 +1,67 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler_rust/compiler/src/mir/lower/lowering_core.rs 0%
+"""
+# Conditions on a generic `bool` field
+
+**Category:** Language / Control flow
+**Status:** Regression guard
+
+## Purpose and Audience
+
+A field whose declared type is a type parameter (`Pair<K, V>.second` with
+`V = bool`) is lowered as `ANY`, i.e. a tagged runtime value. Under the JIT a
+branch, `and`/`or` or `not` used to test that tagged word directly, where
+`false` and `nil` are non-zero, so `if pair.second:` was always taken. The
+interpreter read it as false. The visible symptom was every https fetch in the
+browser failing with "h1: TLS read failed or timed out" (h1_client's
+`read.second or closed.is_err()` was always true).
+
+The audience is anyone touching condition lowering in the Rust seed.
+"""
+
+use std.spec.step
+
+use std.spec.*
+use std.js.types.pair.{Pair}
+
+fn spec_flag_pair(flag: bool) -> Pair<i64, bool>:
+    Pair(1, flag)
+
+fn spec_taken_count(p: Pair<i64, bool>) -> i64:
+    var n = 0
+    if p.second:
+        n = n + 1
+    if p.second or false:
+        n = n + 10
+    if p.second and true:
+        n = n + 100
+    if not p.second:
+        n = n + 1000
+    var loops = 0
+    while p.second and loops < 3:
+        loops = loops + 1
+    n + loops * 10000
+
+describe "conditions on a generic bool field":
+    # @manual scenario evidence
+
+    it "treats a false field as false in if, or, and, not, while":
+        # @req REQ-SSPEC-COMPILER
+        step("treats a false field as false in if, or, and, not, while")
+        expect(spec_taken_count(spec_flag_pair(false))).to_equal(1000)
+
+    it "treats a true field as true in if, or, and, not, while":
+        # @req REQ-SSPEC-COMPILER
+        step("treats a true field as true in if, or, and, not, while")
+        expect(spec_taken_count(spec_flag_pair(true))).to_equal(30111)
+
+    it "reads a generic bool field through a Result unwrap":
+        # @req REQ-SSPEC-COMPILER
+        step("reads a generic bool field through a Result unwrap")
+        val r: Result<Pair<i64, bool>, text> = Ok(spec_flag_pair(false))
+        var taken = 0
+        if val p = r.ok:
+            if p.second or false:
+                taken = 1
+        expect(taken).to_equal(0)

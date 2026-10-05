@@ -713,14 +713,14 @@ pub fn rt_torch_torchtensor_shape(args: &[Value]) -> Result<Value, CompileError>
     let handle = args[0].as_int()?;
     let ndim = unsafe { torch_call_i64_i64("rt_torch_torchtensor_ndim", handle) };
     if ndim <= 0 {
-        return Ok(Value::Array(Arc::new(Vec::new())));
+        return Ok(Value::array(Vec::new()));
     }
     let mut dims = Vec::with_capacity(ndim as usize);
     for dim in 0..ndim {
         let value = unsafe { torch_call_i64_i64_i64_arg("rt_torch_torchtensor_shape_dim", handle, dim) };
         dims.push(Value::Int(value));
     }
-    Ok(Value::Array(Arc::new(dims)))
+    Ok(Value::array(dims))
 }
 
 pub fn rt_torch_torchtensor_cuda(args: &[Value]) -> Result<Value, CompileError> {

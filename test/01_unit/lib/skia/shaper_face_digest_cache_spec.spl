@@ -1,0 +1,46 @@
+"""
+## Purpose and audience
+Purpose: Pin the shaped-face digest cache. The font renderer re-verifies a
+selected face against its native identity on every complex-script run; hashing
+an 845 KB Arabic face in pure Simple cost ~45 s per run, so the digest is
+memoised per key (font path + byte length + the face's native identity).
+Audience: maintainers of the shaper and of font resolution.
+## Operator workflow
+Run with the test runner; each scenario names the behavior it pins.
+## Compatibility and limitations
+The cache key the renderer builds includes the loaded face's native identity,
+which is itself a SHA-256 of the file's bytes, so a font file edited in place
+at the same path produces a different key and is never served a stale digest.
+That is pinned here by using two keys for two blobs. Bug record:
+doc/08_tracking/bug/wikipedia_static_lane_zero_pixels_shaping_2026-10-05.md
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+use std.skia.feature.shaper.shaper.{shaper_face_blob_sha256_hex_cached, shaper_face_blob_hex_cache_hits}
+use std.common.crypto.sha256.{sha256_u8_hex}
+
+describe "Shaped-face digest cache":
+    it "answers the same digest sha256_u8_hex computes":
+        val blob: [u8] = [1u8, 2u8, 3u8, 4u8]
+        assert_equal(shaper_face_blob_sha256_hex_cached("spec-a\n4\nsha256=x", blob), sha256_u8_hex(blob))
+
+    it "serves a repeat of the same key from the cache":
+        val blob: [u8] = [9u8, 8u8, 7u8]
+        step("first call computes and stores")
+        val first = shaper_face_blob_sha256_hex_cached("spec-b\n3\nsha256=y", blob)
+        val hits_before = shaper_face_blob_hex_cache_hits()
+        step("second call with the same key is a hit and returns the same digest")
+        val second = shaper_face_blob_sha256_hex_cached("spec-b\n3\nsha256=y", blob)
+        assert_equal(second, first)
+        assert_equal(shaper_face_blob_hex_cache_hits(), hits_before + 1)
+
+    it "an edited font at the same path is a different key and gets its own digest":
+        step("same path and length, but the face identity changed with the content")
+        val old_blob: [u8] = [5u8, 5u8, 5u8]
+        val new_blob: [u8] = [6u8, 6u8, 6u8]
+        val old_hex = shaper_face_blob_sha256_hex_cached("fonts/f.ttf\n3\nsha256=old", old_blob)
+        val new_hex = shaper_face_blob_sha256_hex_cached("fonts/f.ttf\n3\nsha256=new", new_blob)
+        assert_equal(new_hex, sha256_u8_hex(new_blob))
+        assert_not_equal(new_hex, old_hex)

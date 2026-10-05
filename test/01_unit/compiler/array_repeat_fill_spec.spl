@@ -1,0 +1,76 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler_rust/compiler/src/hir/lower/expr/collections.rs 0%
+"""
+# Large `[value; count]` repeats of a scalar
+
+**Category:** Language / Arrays
+**Status:** Regression guard
+
+## Purpose and Audience
+
+Since 2026-10-05 the seed keeps a large (256+) repeat of a pure scalar as one
+runtime fill instead of unrolling it into a literal with one element per slot.
+A single module global, `[_KERN_EMPTY; 72200]` in the font renderer, had
+produced 144k MIR instructions and ~20 minutes of JIT compile time.
+
+A fill shares ONE value across every slot, so the change is only made where
+that cannot be observed: integer / float / bool element types (not `u8`,
+whose packed literal path is separate, and not `u64`), and value expressions
+with no side effects. This spec pins what a program can observe: length,
+every element's value at the boundaries, independence of writes, and that
+nested arrays are still distinct objects.
+
+The audience is anyone touching array-repeat lowering in the Rust seed.
+"""
+
+use std.spec.step
+
+use std.spec.*
+
+val BIG_I32: i32 = 2147483647
+var spec_kern_table: [i32] = [BIG_I32; 1000]
+
+describe "large scalar array repeats":
+    # @manual scenario evidence
+
+    it "fills every slot with the value and keeps writes independent":
+        # @req REQ-SSPEC-COMPILER
+        step("fills every slot with the value and keeps writes independent")
+        var a: [i32] = [BIG_I32; 300]
+        expect(a.len()).to_equal(300)
+        expect(a[0]).to_equal(2147483647)
+        expect(a[299]).to_equal(2147483647)
+        a[3] = 1
+        expect(a[3]).to_equal(1)
+        expect(a[4]).to_equal(2147483647)
+
+    it "keeps every scalar width and sign":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps every scalar width and sign")
+        val negs: [i64] = [-5; 300]
+        val wide: [u32] = [0xFFFFFFFFu32; 300]
+        val shorts: [i16] = [-7i16; 300]
+        val halves: [u16] = [65535u16; 300]
+        val floats: [f64] = [1.5; 300]
+        val flags: [bool] = [true; 300]
+        expect(negs[299]).to_equal(-5)
+        expect(wide[10]).to_equal(4294967295u32)
+        expect(shorts[5]).to_equal(-7i16)
+        expect(halves[5]).to_equal(65535u16)
+        expect(floats[7]).to_equal(1.5)
+        expect(flags[8]).to_equal(true)
+
+    it "initializes a module-global table":
+        # @req REQ-SSPEC-COMPILER
+        step("initializes a module-global table")
+        expect(spec_kern_table.len()).to_equal(1000)
+        expect(spec_kern_table[999]).to_equal(2147483647)
+
+    it "still gives nested arrays their own storage":
+        # @req REQ-SSPEC-COMPILER
+        step("still gives nested arrays their own storage")
+        var rows: [[i64]] = [[0, 0]; 300]
+        rows[0][0] = 9
+        expect(rows[0][0]).to_equal(9)
+        expect(rows[1][0]).to_equal(0)

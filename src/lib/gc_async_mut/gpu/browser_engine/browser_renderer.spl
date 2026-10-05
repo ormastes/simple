@@ -1,7 +1,7 @@
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
-    simple_web_engine2d_render_html_pixels,
+    simple_web_engine2d_render_html_presentable,
     simple_web_engine2d_render_html_pixels_at_time,
     simple_web_engine2d_render_html_pixels_at_time_with_animations,
     simple_web_html_background_color
@@ -12,7 +12,7 @@ use std.gc_async_mut.gpu.browser_engine.style.animation.{
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     simple_web_layout_render_html_pixels_engine2d_with_images,
     simple_web_layout_render_html_pixels_engine2d_at_time_with_images,
-    simple_web_layout_render_html_pixels_engine2d_at_time_with_animations_with_images
+    simple_web_layout_render_html_presentable_engine2d_at_time_with_animations_with_images
 }
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 use std.gc_async_mut.gpu.browser_engine.layout.{BeLayoutBox, layout_tree, layout_get_x, layout_get_y, layout_get_width, layout_get_height, layout_get_children}
@@ -38,6 +38,10 @@ class BeRenderResult:
     error: text
     scene: BrowserRenderScene
     node_count: i32
+    # Draw IR commands the engine could not draw in this frame (not counting
+    # proven occlusion culls) and why. 0/"" for a complete frame.
+    skipped_command_count: i32 = 0
+    skip_reason: text = ""
 
 impl BeRenderResult:
     static fn success_argb(pixels: [u32], width: i32, height: i32, title: text, scene: BrowserRenderScene) -> BeRenderResult:
@@ -102,9 +106,14 @@ impl BrowserRenderer:
         self.render_html_to_pixels(html)
 
     fn render_html_to_pixels(html: text) -> BeRenderResult:
-        val pixels = simple_web_engine2d_render_html_pixels(html, self.width, self.height, self.backend_value)
+        # Page lane: present every rendered pixel, report skipped commands.
+        val frame = simple_web_engine2d_render_html_presentable(html, self.width, self.height, self.backend_value)
+        val pixels = frame.pixels
         val scene = BrowserRenderScene(width: self.width, height: self.height, commands: [BrowserSceneCommand(kind: "fill_rect", color: _browser_scene_color(html, pixels))])
-        BeRenderResult.success_html(pixels, self.width, self.height, _browser_title(html), html, scene)
+        var result = BeRenderResult.success_html(pixels, self.width, self.height, _browser_title(html), html, scene)
+        result.skipped_command_count = frame.skipped_command_count - frame.occluded_command_count
+        result.skip_reason = frame.skip_reason
+        result
 
     fn render_html_with_images(
         html: text, images: [SimpleOsHostGpuImageResource]
@@ -180,21 +189,28 @@ impl BrowserRenderer:
         animation_instances: [BrowserCssAnimationInstance],
         images: [SimpleOsHostGpuImageResource]
     ) -> BeRenderResult:
-        val pixels = (
-            simple_web_layout_render_html_pixels_engine2d_at_time_with_animations_with_images(
+        # The page lane presents every rendered pixel and reports skipped
+        # commands (see simple_web_layout_render_html_presentable_engine2d_*);
+        # strict frame consumers keep the 0-pixel-on-skip entry points.
+        val frame = (
+            simple_web_layout_render_html_presentable_engine2d_at_time_with_animations_with_images(
                 html, self.width, self.height, self.backend_value,
                 animation_time_ms, animation_instances, images
             )
         )
+        val pixels = frame.pixels
         val scene = BrowserRenderScene(
             width: self.width, height: self.height,
             commands: [BrowserSceneCommand(
                 kind: "fill_rect", color: _browser_scene_color(html, pixels)
             )]
         )
-        BeRenderResult.success_html(
+        var result = BeRenderResult.success_html(
             pixels, self.width, self.height, _browser_title(html), html, scene
         )
+        result.skipped_command_count = frame.skipped_command_count - frame.occluded_command_count
+        result.skip_reason = frame.skip_reason
+        result
 
     # Render a decorated DOM tree into a canonical RenderScene by running the
     # real block-layout pass and emitting a fill_rect paint command per box.

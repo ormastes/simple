@@ -175,7 +175,7 @@ pub fn rt_aes_encrypt_block_with_expanded(args: &[Value]) -> Result<Value, Compi
     };
     let output = encrypt_block_with_expanded_bytes(&block, &expanded, rounds).unwrap_or([0; 16]);
     Ok(Value::array(
-        output.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
+        output.into_iter().map(|byte| Value::Int(byte as i64)).collect::<Vec<Value>>(),
     ))
 }
 
@@ -198,7 +198,7 @@ pub fn rt_aes_decrypt_block_with_expanded(args: &[Value]) -> Result<Value, Compi
     };
     let output = decrypt_block_with_expanded_bytes(&block, &expanded, rounds).unwrap_or([0; 16]);
     Ok(Value::array(
-        output.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
+        output.into_iter().map(|byte| Value::Int(byte as i64)).collect::<Vec<Value>>(),
     ))
 }
 
@@ -310,7 +310,7 @@ pub fn rt_tls13_aes128_gcm_encrypt(args: &[Value]) -> Result<Value, CompileError
     let result = aes128_gcm_encrypt_bytes(&key, &nonce, &plaintext, &aad)
         .ok_or_else(|| CompileError::runtime("rt_tls13_aes128_gcm_encrypt rejected its inputs".to_string()))?;
     Ok(Value::array(
-        result.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
+        result.into_iter().map(|byte| Value::Int(byte as i64)).collect::<Vec<Value>>(),
     ))
 }
 
@@ -371,7 +371,7 @@ pub fn rt_tls13_aes256_gcm_encrypt(args: &[Value]) -> Result<Value, CompileError
     let result = aes256_gcm_encrypt_bytes(&key, &nonce, &plaintext, &aad)
         .ok_or_else(|| CompileError::runtime("rt_tls13_aes256_gcm_encrypt rejected its inputs".to_string()))?;
     Ok(Value::array(
-        result.into_iter().map(|byte| Value::Int(byte as i64)).collect(),
+        result.into_iter().map(|byte| Value::Int(byte as i64)).collect::<Vec<Value>>(),
     ))
 }
 
@@ -1371,7 +1371,7 @@ fn pack_u64_array(words: Vec<u64>) -> Value {
         words
             .into_iter()
             .map(|word| Value::UInt { value: word, width: 64 })
-            .collect(),
+            .collect::<Vec<Value>>(),
     )
 }
 
@@ -1413,7 +1413,7 @@ fn pack_u32_array(pixels: Vec<u32>) -> Value {
                 value: p as u64,
                 width: 32,
             })
-            .collect(),
+            .collect::<Vec<Value>>(),
     )
 }
 

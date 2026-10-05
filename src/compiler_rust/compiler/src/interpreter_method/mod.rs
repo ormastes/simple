@@ -904,6 +904,18 @@ pub(crate) fn evaluate_method_call(
             }
         }
         Value::Array(arr) => {
+            if let Some(result) = collections::handle_packed_array_methods(
+                arr,
+                method,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
+                return Ok(result);
+            }
             if let Some(result) =
                 collections::handle_array_methods(arr, method, args, env, functions, classes, enums, impl_methods)?
             {
@@ -1496,7 +1508,7 @@ pub(crate) fn evaluate_method_call(
                 return Ok(Value::Bool(gen.is_done()));
             }
             "collect" => {
-                return Ok(Value::Array(Arc::new(gen.collect_remaining())));
+                return Ok(Value::array(gen.collect_remaining()));
             }
             _ => {
                 return Err(CompileError::semantic(format!(
@@ -2169,6 +2181,35 @@ pub(crate) fn evaluate_method_call_with_self_update(
             let mut updated = arr.as_ref().clone();
             collections::array_write_span(&mut updated, &src, dst_off, src_off, count)?;
             return Ok((result, Some(Value::array(updated))));
+        }
+        // Packed `[u8]` receiver: same write-back, or the mutation is silently
+        // dropped for every field/index/deep place exactly as described above.
+        if let Value::ByteArray(bytes) = &recv_val {
+            let src = match args.first() {
+                Some(a) => evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)?,
+                None => Value::Nil,
+            };
+            let mut ints = [-1i64, -1, 0];
+            for (slot, (arg_i, dflt)) in ints.iter_mut().zip([(1usize, -1i64), (2, -1), (3, 0)]) {
+                if let Some(a) = args.get(arg_i) {
+                    *slot = evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)?
+                        .as_int()
+                        .unwrap_or(dflt);
+                } else {
+                    *slot = dflt;
+                }
+            }
+            let (dst_off, src_off, count) = (ints[0], ints[1], ints[2]);
+            if count <= 0 {
+                return Ok((result, None));
+            }
+            let mut updated = bytes.as_ref().clone();
+            let written = collections::byte_array_write_span(&mut updated, &src, dst_off, src_off, count)?;
+            let new_value = match written {
+                collections::ByteSpanWrite::InPlace(_) => Value::byte_array(updated),
+                collections::ByteSpanWrite::Widened(values, _) => Value::array(values),
+            };
+            return Ok((result, Some(new_value)));
         }
     }
 

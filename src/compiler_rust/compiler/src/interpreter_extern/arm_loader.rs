@@ -99,7 +99,7 @@ fn uint(value: u64) -> Value {
 fn byte_result(source: &Value, bytes: Vec<u8>) -> Value {
     match source {
         Value::ByteArray(_) | Value::FrozenByteArray(_) => Value::byte_array(bytes),
-        _ => Value::array(bytes.into_iter().map(|b| Value::Int(i64::from(b))).collect()),
+        _ => Value::array(bytes.into_iter().map(|b| Value::Int(i64::from(b))).collect::<Vec<Value>>()),
     }
 }
 
