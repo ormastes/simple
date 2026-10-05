@@ -39,3 +39,14 @@ Specs:
 - generalization: same file — shared lookup/subtable offsets accepted, a
   subtable past the table end rejected, a mutual ContextPos cycle rejected,
   and two further Arabic runs (Persian, harakat).
+
+## Open: per-run validation cost (perf todo)
+
+Each Arabic run re-selects plans, re-parses both catalogs and re-validates
+every active lookup (`resolve_canonical_layout_run`, `ot_layout_shaper.spl`);
+GPOS validation also runs twice (resolver, then inside `gpos_apply_directed`).
+Measured ~15 s per run under the interpreter on a loaded host (load 25),
+identical for the 1st and 3rd call — nothing is cached. Before this change the
+same runs were rejected cheaply. Unblock: cache plan + catalogs + structural
+validity per face content identity (the shaper's face digest), script,
+language and feature list; keep the record-dependent dry run per call.
