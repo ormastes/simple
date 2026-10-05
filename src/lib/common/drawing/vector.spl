@@ -268,3 +268,36 @@ impl Matrix3x3:
 
     fn scale_y(self) -> f64:
         _matrix3x3_sqrt_newton(self.m01 * self.m01 + self.m11 * self.m11)
+
+    # ---- Point mapping and inverse ----
+    # WHY: rasterization needs to move geometry into device space (map_point)
+    # and to walk device pixels back into source space (invert). Both assume
+    # the affine bottom row (0, 0, 1), which every constructor here produces
+    # and mul preserves.
+
+    fn map_point(self, x: f64, y: f64) -> SkPoint:
+        """Affine map of (x, y) into device space."""
+        SkPoint(
+            x: self.m00 * x + self.m01 * y + self.m02,
+            y: self.m10 * x + self.m11 * y + self.m12
+        )
+
+    fn invert(self) -> Option[Matrix3x3]:
+        """Affine inverse, or None when the 2x2 part is singular (or the
+        matrix carries a perspective bottom row, which this tier never
+        produces). Consumers must skip the draw on None rather than
+        fabricating an identity."""
+        if self.m20 != 0.0 or self.m21 != 0.0:
+            return None
+        val det = self.m00 * self.m11 - self.m01 * self.m10
+        if det == 0.0:
+            return None
+        val a = self.m11 / det
+        val b = 0.0 - self.m01 / det
+        val c = 0.0 - self.m10 / det
+        val d = self.m00 / det
+        Some(Matrix3x3(
+            m00: a, m01: b, m02: -(a * self.m02 + b * self.m12),
+            m10: c, m11: d, m12: -(c * self.m02 + d * self.m12),
+            m20: 0.0, m21: 0.0, m22: 1.0
+        ))
