@@ -126,6 +126,7 @@ managed_attempt_product() {
     printf '%s\tBLOCKED\t1\n' "${managed_product_key}_run" >>"$statuses" || return 2
     return 0
   fi
+  [ "${product_defer_full:-0}" != 1 ] || return 0
   if managed_product_attempt "${managed_product_key}_run" \
       run_test_product "$managed_product_backend" "$managed_product_suite"; then :; else
     managed_product_result=$?
@@ -179,6 +180,21 @@ managed_dispatch_products() {
       managed_attempt_product "$managed_backend" "$managed_product" || return 2
     done
   done
+  if [ "${product_defer_full:-0}" = 1 ]; then
+    product_wait_phase1_terminal || return 2
+    for managed_backend in llvm cranelift; do
+      if command -v product_reuse_ready >/dev/null 2>&1 && product_reuse_ready "$managed_backend"; then continue; fi
+      for managed_product in compiler interpreter loader; do
+        managed_product_key="${product_phase:-phase4}_${managed_backend}_product_${managed_product}"
+        if awk -F '\t' -v key="${managed_product_key}_enumerate" '$1==key && $2=="SUCCEEDED" {found++} END {exit(found!=1)}' "$statuses"; then
+          if managed_product_attempt "${managed_product_key}_run" run_test_product "$managed_backend" "$managed_product"; then :; else
+            managed_product_result=$?
+            [ "$managed_product_result" -eq 1 ] || return 2
+          fi
+        fi
+      done
+    done
+  fi
   [ "$managed_failed" -eq 0 ]
 }
 

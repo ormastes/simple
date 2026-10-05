@@ -1,0 +1,49 @@
+use std.spec
+use std.common.build_manager.contracts.{BuildRunV1, BuildHostV1, BuildTaskV1, BuildInputV1}
+use app.bootstrap_builder.managed_inventory_join.{managed_inventory_join_v1}
+
+fn join_task(id: text, dependencies: [text]) -> BuildTaskV1:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    BuildTaskV1(id: id, attempt: 1, phase: "phase2", producer_digest: digest,
+        source_digest: digest, toolchain_digest: digest, dependencies: dependencies,
+        program: "callback", args: ["--threads=20"],
+        inputs: [BuildInputV1("callback.spl", digest)], outputs: ["result.env"],
+        cache_key: digest, timeout_ms: 0, memory_limit_bytes: 6000000000, links: [])
+
+fn join_run(tasks: [BuildTaskV1]) -> BuildRunV1:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    BuildRunV1(tasks: tasks, hosts: [BuildHostV1("local", "local", "", ".", "builder", digest, 4)],
+        keep_going: true, max_attempts: 1)
+
+describe "Canonical managed inventory composition":
+    it "preserves tasks and cross-wave terminal dependencies in one ordered graph":
+        val phase1 = join_task("phase1_tests_completed", [])
+        val prepare = join_task("phase2_llvm_product_compiler_prepare", [])
+        val full = join_task("phase2_llvm_product_compiler_remaining", [phase1.id, prepare.id])
+        val graph = managed_inventory_join_v1([join_run([phase1]), join_run([prepare, full])]).unwrap()
+        expect(graph.tasks.len()).to_equal(3)
+        expect(graph.tasks[1].dependencies).to_equal([])
+        expect(graph.tasks[2].dependencies).to_equal([phase1.id, prepare.id])
+        expect(graph.tasks[2].cache_key).to_equal(full.cache_key)
+        expect(graph.tasks[2].inputs).to_equal(full.inputs)
+        expect(graph.hosts.len()).to_equal(1)
+
+    it "rejects duplicate task identity and forward or missing dependencies":
+        val task = join_task("prepare", [])
+        expect(managed_inventory_join_v1([join_run([task]), join_run([task])]).is_err()).to_equal(true)
+        expect(managed_inventory_join_v1([join_run([join_task("run", ["missing"])])]).is_err()).to_equal(true)
+        expect(managed_inventory_join_v1([join_run([join_task("run", ["prepare"]), task])]).is_err()).to_equal(true)
+
+    it "rejects host changes, retries, fail-fast and empty inventories":
+        val first = join_run([join_task("first", [])])
+        var other = join_run([join_task("other", [])])
+        other.hosts = [BuildHostV1("other", "local", "", ".", "builder", first.hosts[0].worker_digest, 4)]
+        expect(managed_inventory_join_v1([first, other]).is_err()).to_equal(true)
+        other = join_run([join_task("other", [])])
+        other.max_attempts = 2
+        expect(managed_inventory_join_v1([first, other]).is_err()).to_equal(true)
+        other.max_attempts = 1
+        other.keep_going = false
+        expect(managed_inventory_join_v1([first, other]).is_err()).to_equal(true)
+        expect(managed_inventory_join_v1([]).is_err()).to_equal(true)
+        expect(managed_inventory_join_v1([join_run([])]).is_err()).to_equal(true)
