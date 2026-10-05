@@ -26,6 +26,21 @@ process observation PID24932 had32734.421875CPU seconds and1066954752RSS bytes.
 No final incremental receipt was present. Exact hit/miss totals and the new
 manifest comparison remain PENDING; do not report zero hits from inference.
 
+### Completed build evidence
+
+The later terminal receipt confirms exit 0 and explicitly reports
+`compiled=1180 reused=0 failed=0`, with the reason
+`full rebuild: cross-module type layout / signatures changed`.
+Compilation took 1795.5 seconds and linking 51.6 seconds (1847.2 total).
+The existing scope remained `scope-f7f1c2ce9c436bcf`. This supersedes the
+pending hit/miss totals above: this invocation reused zero compiled objects.
+Collector log SHA256:
+`1baff3d1dfd737bc80c2abfef85bc38561f91ffdf870810ee2949529436ddb21`.
+The produced compiler SHA256 is
+`3bd458857152a0c1be96b08f21c87ebd686c3f155a87f0f0eb7633d1bd2b07cb`.
+Its separate Hello World qualification compiled and ran successfully with
+exact output; that does not qualify dependency-cache correctness or latency.
+
 No frontend or hir directory exists directly beneath this cache root. A bounded
 search of the Rust driver/compiler source found no SIMPLE_FRONTEND_CACHE or
 SIMPLE_HIR_CACHE readers. The packet explicitly selects SIMPLE_NATIVE_BUILD_RUST=1;
