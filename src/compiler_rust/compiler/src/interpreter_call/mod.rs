@@ -470,7 +470,14 @@ pub(crate) fn call_value_as_callable(
                     },
                 );
             }
-            Ok(Some(core::exec_function_with_captured_env(
+            // Named closures are execution join points too. Lexical function
+            // bindings take precedence over the flat table, so interception
+            // only at flat-function dispatch misses nested functions entirely.
+            let intercept = core::aop_runtime::has_advice();
+            if intercept {
+                core::aop_runtime::run_before(&def, env, functions, classes, enums, impl_methods)?;
+            }
+            let result = core::exec_function_with_captured_env(
                 &def,
                 args,
                 env,
@@ -479,7 +486,11 @@ pub(crate) fn call_value_as_callable(
                 classes,
                 enums,
                 impl_methods,
-            )?))
+            )?;
+            if intercept {
+                core::aop_runtime::run_after(&def, &result, env, functions, classes, enums, impl_methods)?;
+            }
+            Ok(Some(result))
         }
         Value::Lambda {
             params,
