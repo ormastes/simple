@@ -129,3 +129,33 @@ truncates, everything else decodes tag-aware (`rt_value_unbox_int`). Codegen
 emitted for erased receivers) whose codegen type is ANY or unrecorded. An
 explicitly raw `I64` receiver keeps the old path, because decoding a raw word
 would shift it. Cargo: `value::collection_tests::test_any_to_int_decodes_tagged_values`.
+
+Two more defects on the same inflate path, found after `to_i64` was fixed
+(the decoder then produced `8 5 12 12 15` for `hello`, i.e. `(v << 3) & 0xFF >> 3`):
+
+- The narrower integer casts on an erased receiver (`symbol.to_u8()`) were
+  typed `ANY` in HIR while `to_i64` was typed `I64`, so consumers disagreed:
+  a `[u8]` push took the result raw and `as i64` decoded it as tagged
+  (`104.to_u8()` -> pushed 64, read back 8). HIR now types every integer cast
+  on an ANY receiver as its raw target type (`hir/lower/expr/mod.rs`), and
+  codegen produces `rt_any_to_int` + narrow for all of them.
+- `out.push(x)` into a typed `[u8]` with an `ANY` argument
+  (`out.push(block_out[k])`, `block_out` from an `[Any]` slot) passed the
+  tagged word to `rt_typed_bytes_u8_push`, which stores its low byte. MIR now
+  decodes an `ANY` argument first (`lowering_expr_method.rs`). Cargo:
+  `mir::lower::tests::branch_coverage::types::any_push_into_u8_array_is_decoded`.
+
+Open (not fixed here): the same "tagged ANY into a typed raw slot" shape
+likely exists for `[u8]` index-set and the other typed push helpers (u32,
+u64); not reproduced yet.
+
+After these fixes `deflate_inflate_zlib_bounded` on the "hello" stream returns
+Ok under the JIT. The Adler-32 trailer check runs over the decoded bytes, so
+the output is byte-exact.
+
+**Open, pre-existing (separate follow-up):** `for b in (f() ?? [])` over a
+`[u8]` reads the FIRST element double-decoded under the JIT (`104 101` ->
+`13 101`; index reads and the `f()!` path are correct). Reproduces on a seed
+built before any of this work. Repro: `build/probe/forin_probe.spl` shape:
+`fn mk() -> [u8]?` returning `[104u8, 101u8]`, `val a = mk() ?? []`, then
+`for b in a: print b`.

@@ -320,6 +320,20 @@ fn any_condition_decodes_truthiness() {
     assert!(!has_inst(&typed, is_truthy_call));
 }
 
+/// Pushing an `ANY` element into a `[u8]` must decode it before the typed
+/// byte push (JIT inflate: `out.push(block_out[k])` stored the tag word's byte).
+#[test]
+fn any_push_into_u8_array_is_decoded() {
+    let mir = compile_to_mir(
+        "fn test(xs: [Any]) -> [u8]:\n    var out: [u8] = []\n    out.push(xs[0])\n    out\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::UnboxInt { .. })));
+    assert!(has_inst(&mir, |i| {
+        matches!(i, MirInst::Call { target, .. } if target == &CallTarget::from_name("rt_typed_bytes_u8_push"))
+    }));
+}
+
 #[test]
 fn index_float_unboxing() {
     let mir = compile_to_mir("fn test() -> f64:\n    val arr = [1.5, 2.5]\n    return arr[0]\n").unwrap();

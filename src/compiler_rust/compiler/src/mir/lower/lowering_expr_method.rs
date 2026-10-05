@@ -1743,6 +1743,15 @@ impl<'a> MirLowerer<'a> {
                 .and_then(|tr| tr.get(receiver.ty))
                 .is_some_and(|ty| matches!(ty, crate::hir::HirType::Array { element, .. } if *element == TypeId::U8))
         {
+            // The typed push stores the argument's low byte. An `ANY` element
+            // (`out.push(block_out[k])` with `block_out` from an `[Any]` slot)
+            // is a TAGGED word, so the byte stored was the tag word's (104 ->
+            // 0x40) and the JIT inflate decoder produced garbage. Decode first.
+            let arg_regs = if args[0].ty == TypeId::ANY {
+                vec![self.unbox_scalar_for_raw_slot(TypeId::U8, TypeId::ANY, arg_regs[0])?]
+            } else {
+                arg_regs
+            };
             // FAM freestanding push ABI: capture the possibly relocated
             // header and rebind it (see the general rt_array_push site below).
             if self.array_push_returns_header {

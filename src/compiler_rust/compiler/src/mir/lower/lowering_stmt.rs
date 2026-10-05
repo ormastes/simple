@@ -1191,6 +1191,14 @@ impl<'a> MirLowerer<'a> {
                         if let Some(target) = typed_push_target {
                             let receiver_reg = self.lower_expr(receiver)?;
                             let value_reg = self.lower_expr(&args[0])?;
+                            // An `ANY` element is a TAGGED word; the typed byte
+                            // push stores its low byte (JIT inflate:
+                            // `out.push(block_out[k])` stored 104 as 0x40).
+                            let value_reg = if target == "rt_typed_bytes_u8_push" && args[0].ty == TypeId::ANY {
+                                self.unbox_scalar_for_raw_slot(TypeId::U8, TypeId::ANY, value_reg)?
+                            } else {
+                                value_reg
+                            };
                             let append_ptrs = self.active_array_append_ptrs(receiver);
                             let append_index = append_ptrs
                                 .map(|ptrs| ptrs.index_local_index)
