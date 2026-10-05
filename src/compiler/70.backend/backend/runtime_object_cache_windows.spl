@@ -58,13 +58,13 @@ fn runtime_windows_cache_plan_v1(compiler: text, arguments: [text], stage: text,
     if not plan.contains("cpp-output"): return Err("compiler did not select preprocessed C input")
     Ok(plan.replace(output, "<runtime-object>").replace(stage, "<runtime-stage>"))
 
-pub fn runtime_windows_cached_compile_v1(root: text, compiler: text, toolchain: text, arguments: [text], source: text, output: text, context: [text], trace: bool) -> RuntimeWindowsCacheCompileResultV1:
+pub fn runtime_windows_cached_compile_v1(root: text, compiler: text, compiler_digest: text, toolchain: text, arguments: [text], source: text, output: text, context: [text], trace: bool) -> RuntimeWindowsCacheCompileResultV1:
     """A cache miss compiles the same immutable preprocessed input it hashed.
 
     Cache IO is optional. Real compilation failure remains a real failure.
     The existing caller retains process ownership, cancellation and cleanup.
     """
-    if root == "" or not runtime_object_cache_digest_valid_v1(toolchain):
+    if root == "" or not runtime_object_cache_digest_valid_v1(toolchain) or not runtime_object_cache_digest_valid_v1(compiler_digest):
         return runtime_windows_uncached_compile_v1(compiler, arguments)
     # CL/_CL_ can inject response files and additional source/output switches.
     # Preserve their existing semantics by using the original uncached path.
@@ -100,7 +100,6 @@ pub fn runtime_windows_cached_compile_v1(root: text, compiler: text, toolchain: 
     for variable in ["INCLUDE", "LIB", "LIBPATH", "PATH", "SDKROOT", "WindowsSdkDir", "WindowsSDKVersion", "VCToolsInstallDir", "VCINSTALLDIR", "SOURCE_DATE_EPOCH", "CPATH", "C_INCLUDE_PATH", "CLANG_CONFIG_FILE_SYSTEM_DIR", "CLANG_CONFIG_FILE_USER_DIR"]:
         options.push(variable)
         options.push(env_get_nullable(variable) ?? "")
-    val compiler_digest = file_hash_sha256_or_empty(compiler)
     val material = runtime_object_cache_material_v1(compiler_digest, toolchain, tu_digest, options)
     var key = ""
     if material.is_ok():
@@ -117,7 +116,7 @@ pub fn runtime_windows_cached_compile_v1(root: text, compiler: text, toolchain: 
     val unchanged = file_hash_sha256_or_empty(preprocessed) == tu_digest
     val final_plan = runtime_windows_cache_plan_v1(compiler, compile_args, stage, output)
     var pending_key = ""
-    if code == 0 and unchanged and final_plan.is_ok() and final_plan.unwrap() == plan.unwrap() and file_hash_sha256_or_empty(compiler) == compiler_digest:
+    if code == 0 and unchanged and final_plan.is_ok() and final_plan.unwrap() == plan.unwrap():
         pending_key = key
     file_delete(preprocessed)
     dir_remove(stage, false)
