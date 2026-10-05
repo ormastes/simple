@@ -1,6 +1,6 @@
 # Ordinary C runtime enum checker ownership
 
-Status: focused Linux ELF native mixed-link regression PASS. Windows/MSVC, other object formats, Simple application rerun and broader compiler matrices are not qualified here.
+Status: focused Linux ELF native mixed-link regression PASS and actual Phase2 ordinary-runtime optional-enum application regression PASS. Windows/MSVC, other object formats and broader compiler matrices are not qualified here.
 
 The ordinary bundle includes runtime.c and runtime_native.c under allow-multiple-definition. Legacy enum construction/getters were weak while two legacy checkers were strong. Consequently a legacy-first link selected tagged registered-heap constructors but raw-pointer checkers. Actual afaa Phase2 optional fixture built successfully and failed native matching; a separate diagnostic failed all five enum cases, including ordinary integer payload. Evidence: WSL build/item5-optional-nil-diagnostic/diagnosis.md and original build/item5-owner-nil-tests/optional/probe. Matching constructor/callsite enum IDs excluded optional-nil lowering as this runtime cause.
 
@@ -21,3 +21,10 @@ The exact executed setup scripts remain at build/review/run-enum-owner.sh and fi
 Reproducible checked-in checker: `CC=/usr/lib/llvm-23/bin/clang NM=/usr/lib/llvm-23/bin/llvm-nm bash src/runtime/test/check_enum_mixed_owner.sh /var/tmp/enum-owner-new-attempt`. Each compilation/link/run has a finite timeout. It compiles the same production owners with the successful per-TU flags, links both orders and legacy-only, executes actual outputs and retains hashes/symbol census. The consolidated wrapper was syntax checked; its component commands produced the actual results above. No redundant native matrix rerun is claimed.
 
 This is runtime ownership evidence, not a full native compiler, vector, DB or live HTTP PASS. The separate positional CLI runtime selection defect remains separately owned.
+## Actual Phase2 application boundary closed
+
+Parent retained the same afaa53e061807d11b0e36b79088c3af3a4e51c5dc3d224f6b5683f181af49f4c compiler and unchanged three-case optional fixture, applied only this runtime.c ownership repair to its C source authority, explicitly unset SIMPLE_NATIVE_RUNTIME_BUNDLE and SIMPLE_RUNTIME_PATH and omitted runtime flags. This validates the previously failing ordinary runtime, not a core-C substitution. Build exit0, native run exit0, `checks=3 failures=0`.
+
+Evidence directory `/var/tmp/simple-item5-phase2-20261005/build/item5-enum-owner-ordinary-runtime/optional/` contains logs, source/binary hashes, status and both watchdog receipts. Native binary SHA256 `7d51ad58b17222064fc1d901ab2f08a8d48d6c0b8497de2d39f6e5ecb1b8d9b1`. Build peak552088 KiB, run peak8128 KiB; both exit0 and quiescent1. Root's source checkout is4bba plus separately reviewed compiler overlays, but the executed compiler remained the same immutable afaa artifact; no new compiler qualification is inferred from this C-owner repair.
+
+Static validation: direct-env working/staged PASS, spec layout0, checker bash syntax PASS and diff-check PASS. Canonical mandatory local tier passed14/0failed on implementation commit468515f332209af787182e3c2932caa5b16bd941, explicit release base4bba; logs/results build/review/enum-owner-local.*. The subsequent documentation-only update records the newly completed Phase2 result; no green native checks were repeated.
