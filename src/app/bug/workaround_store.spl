@@ -4,11 +4,15 @@ use app.bug.workaround_index.{WorkaroundIndex, WorkaroundLink, empty_workaround_
     replace_workaround_paths, workaround_path_valid, workaround_recovery_valid}
 use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read,
     workaround_host_exists, workaround_host_publish, workaround_host_lock,
-    workaround_host_unlock, workaround_host_mkdir, workaround_host_cwd, workaround_host_process}
+    workaround_host_unlock, workaround_host_mkdir, workaround_host_cwd, workaround_host_process,
+    workaround_host_env_get}
 use std.nogc_async_mut.database.bug.{BugDatabase}
 use std.nogc_async_mut.database.core.{SdnDatabase, parse_sdn_table, interner_from_sdn}
 use std.nogc_sync_mut.compression.gzip.crc.{crc32_text}
 use std.convert.{try_parse_int}
+
+fn workaround_source_suffixes() -> [text]:
+    [".spl", ".c", ".h", ".rs", ".sh", ".shs", ".ps1", ".py", ".js", ".ts", ".cpp", ".hpp"]
 
 fn workaround_source_candidate(path: text) -> bool:
     if not workaround_path_valid(path): return false
@@ -16,9 +20,32 @@ fn workaround_source_candidate(path: text) -> bool:
         return false
     if path == "src/runtime/miniaudio.h" or path == "src/runtime/stb_image.h" or path == "src/runtime/stb_truetype.h":
         return false
-    for suffix in [".spl", ".c", ".h", ".rs", ".sh", ".shs", ".ps1", ".py", ".js", ".ts", ".cpp", ".hpp"]:
+    for suffix in workaround_source_suffixes():
         if path.ends_with(suffix): return true
     false
+
+fn workaround_git_source_pathspecs() -> [text]:
+    # Apply the reader's existing selection before Git traverses untracked
+    # directories. Keep the reader-side validation as a separate boundary.
+    # Explicit magic makes these independent of shell expansion and Git's
+    # default wildcard matching; **/ also admits repository-root sources.
+    var paths: [text] = []
+    for suffix in workaround_source_suffixes():
+        paths = paths.push(":(glob)**/*" + suffix)
+    paths = paths.push(":(exclude,glob)src/compiler_rust/vendor/**")
+    paths = paths.push(":(exclude,glob)src/runtime/vendor/**")
+    paths = paths.push(":(exclude,literal)src/runtime/miniaudio.h")
+    paths = paths.push(":(exclude,literal)src/runtime/stb_image.h")
+    paths = paths.push(":(exclude,literal)src/runtime/stb_truetype.h")
+    paths
+
+fn workaround_git_source_filter(pathspec_environment: [text]) -> [text]:
+    # Global Git pathspec modes can reinterpret explicit magic (including
+    # case-insensitive exclusions). Retain the original unscoped query in
+    # those environments rather than silently omitting eligible sources.
+    for value in pathspec_environment:
+        if value != "": return []
+    ["--"] + workaround_git_source_pathspecs()
 
 fn workaround_status_paths(output: text) -> Result<[text], text>:
     # Porcelain -z uses destination NUL source NUL for renames/copies; both
@@ -66,7 +93,9 @@ fn workaround_tracked_paths(output: text) -> Result<[text], text>:
     Ok(paths)
 
 fn workaround_git(root: text, args: [text]) -> Result<text, text>:
-    var invocation = ["-C", root]
+    # Status discovery is read-only; optional index refresh writes are neither
+    # needed for source reads nor allowed to contend with other coordinators.
+    var invocation = ["--no-optional-locks", "-C", root]
     for arg in args: invocation.push(arg)
     val (out, err, code) = workaround_host_process("git", invocation, 30000, 16777216)
     if code != 0: return Err("workaround Git failed ({code}): {err}")
@@ -178,10 +207,17 @@ fn workaround_refresh_discover_locked(root: text, fullscan: bool, known_paths: [
     val revision = head.trim()
     if not workaround_recovery_valid(revision): return Err("invalid workaround Git HEAD")
     var discovered = known_paths
+    var source_filter: [text] = []
+    if fullscan or known_paths.len() == 0:
+        source_filter = workaround_git_source_filter([
+            workaround_host_env_get("GIT_LITERAL_PATHSPECS"),
+            workaround_host_env_get("GIT_GLOB_PATHSPECS"),
+            workaround_host_env_get("GIT_NOGLOB_PATHSPECS"),
+            workaround_host_env_get("GIT_ICASE_PATHSPECS")])
     if fullscan:
-        discovered = workaround_tracked_paths(workaround_git(root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"] )?)?
+        discovered = workaround_tracked_paths(workaround_git(root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"] + source_filter)?)?
     elif known_paths.len() == 0:
-        discovered = workaround_status_paths(workaround_git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"] )?)?
+        discovered = workaround_status_paths(workaround_git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"] + source_filter)?)?
     workaround_refresh_locked(root, revision, fullscan, discovered)
 
 fn refresh_workarounds_at(root: text, fullscan: bool, known_paths: [text]) -> Result<WorkaroundIndex, text>:

@@ -1,7 +1,8 @@
 # REQ-003 REQ-005 NFR-002 NFR-003 NFR-004
 use std.spec.{describe, it, expect, step}
 use app.bug.workaround_store.{workaround_status_paths, workaround_tracked_paths,
-    workaround_source_candidate, refresh_workarounds_at, load_workarounds_at}
+    workaround_source_candidate, refresh_workarounds_at, load_workarounds_at,
+    workaround_git, workaround_git_source_pathspecs, workaround_git_source_filter}
 use std.nogc_async_mut.sosix.workaround_host.{workaround_host_read,
     workaround_host_publish, workaround_host_mkdir, workaround_host_process,
     workaround_host_temp_dir, workaround_host_remove,
@@ -14,6 +15,53 @@ fn workaround_test_git(root: text, args: [text]):
     expect(code).to_equal(0)
 
 describe "workaround store maintenance":
+    it "retains unscoped discovery for inherited Git pathspec modes":
+        expect(workaround_git_source_filter(["", "", "", ""]).len()).to_equal(18)
+        for mode in [["1", "", "", ""], ["", "1", "", ""],
+                ["", "", "1", ""], ["", "", "", "1"], ["0", "", "", ""]]:
+            expect(workaround_git_source_filter(mode).len()).to_equal(0)
+
+    it "scopes real Git discovery without losing root files renames deletions or untracked sources":
+        expect(workaround_host_mkdir("build/test-artifacts")).to_equal(true)
+        val root = workaround_host_temp_dir("build/test-artifacts", "workaround-selection-").unwrap()
+        for directory in ["src", "doc", "src/compiler_rust/vendor", "src/runtime/vendor", "ignored"]:
+            expect(workaround_host_mkdir(root + "/" + directory)).to_equal(true)
+        expect(workaround_host_publish(root + "/.gitignore", "ignored/\n")).to_equal(true)
+        for path in ["root.shs", "src/delete.spl", "src/leaving.spl", "doc/entering.txt",
+                "src/compiler_rust/vendor/external.rs", "src/runtime/vendor/external.c",
+                "src/runtime/miniaudio.h", "src/runtime/stb_image.h", "src/runtime/stb_truetype.h"]:
+            expect(workaround_host_publish(root + "/" + path, "original\n")).to_equal(true)
+        workaround_test_git(root, ["init", "-q"])
+        workaround_test_git(root, ["add", "."])
+        workaround_test_git(root, ["-c", "user.name=Simple Test", "-c", "user.email=test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-qm", "selection fixture"])
+        workaround_test_git(root, ["mv", "src/leaving.spl", "doc/leaving.txt"])
+        workaround_test_git(root, ["mv", "doc/entering.txt", "src/entering.spl"])
+        expect(workaround_host_remove(root + "/src/delete.spl")).to_equal(true)
+        for path in ["root.shs", "src/new space.spl", "src/bracket[1].spl", "src/untracked.py",
+                "ignored/hidden.spl", "doc/notes.txt", "src/compiler_rust/vendor/external.rs",
+                "src/runtime/vendor/external.c", "src/runtime/miniaudio.h"]:
+            expect(workaround_host_publish(root + "/" + path, "changed\n")).to_equal(true)
+        step("Compare eligible paths from unscoped and scoped real Git status")
+        val args = ["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+        val baseline = workaround_status_paths(workaround_git(root, args).unwrap()).unwrap()
+        val selected = workaround_status_paths(workaround_git(root,
+            args + ["--"] + workaround_git_source_pathspecs()).unwrap()).unwrap()
+        expect(selected.len()).to_equal(baseline.len())
+        for path in baseline: expect(selected.contains(path)).to_equal(true)
+        for path in ["root.shs", "src/delete.spl", "src/leaving.spl", "src/entering.spl",
+                "src/new space.spl", "src/bracket[1].spl", "src/untracked.py"]:
+            expect(selected.contains(path)).to_equal(true)
+        expect(selected.contains("ignored/hidden.spl")).to_equal(false)
+        expect(selected.contains("src/runtime/miniaudio.h")).to_equal(false)
+        step("Full reconciliation keeps the same tracked and untracked membership")
+        val full_args = ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]
+        val full = workaround_tracked_paths(workaround_git(root, full_args).unwrap()).unwrap()
+        val scoped_full = workaround_tracked_paths(workaround_git(root,
+            full_args + ["--"] + workaround_git_source_pathspecs()).unwrap()).unwrap()
+        expect(scoped_full.len()).to_equal(full.len())
+        for path in full: expect(scoped_full.contains(path)).to_equal(true)
+
     it "retains both rename paths and ignores documentation and vendored code":
         step("Decode NUL separated status without trimming path spaces")
         val paths = workaround_status_paths("R  src/new name.spl\0src/old name.spl\0?? doc/example.md\0?? src/runtime/vendor/x.c\0").unwrap()

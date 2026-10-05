@@ -1,0 +1,38 @@
+# Run the same compiled workload in alternating fresh baseline/scoped processes.
+# The external owner must pin the binary, Git, fixture state and capture tree RSS.
+# This program measures discovery, not source snapshot admission or compilation.
+use app.bug.workaround_store.{workaround_git_source_pathspecs, workaround_status_paths}
+use std.nogc_async_mut.sosix.workaround_host.{workaround_host_process, workaround_host_publish}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.time_ops.{time_sample_monotonic_nanos_or_failure}
+
+fn main() -> i64:
+    val root = env_get("SIMPLE_WORKAROUND_PROFILE_ROOT")
+    val output = env_get("SIMPLE_WORKAROUND_PROFILE_PATHS")
+    val mode = env_get("SIMPLE_WORKAROUND_PROFILE_MODE")
+    if root == "" or output == "": return 2
+    if mode != "baseline" and mode != "scoped": return 3
+    for key in ["GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"]:
+        if env_get(key) != "": return 4
+    var args = ["--no-optional-locks", "-C", root,
+        "status", "--porcelain=v1", "-z", "--untracked-files=all"]
+    if mode == "scoped": args = args + ["--"] + workaround_git_source_pathspecs()
+    val started = time_sample_monotonic_nanos_or_failure()
+    if started <= 0: return 5
+    # Equal diagnostic budgets allow observing the known >30-second baseline.
+    # Production refresh retains its existing 30-second bound.
+    val (out, err, code) = workaround_host_process("git", args, 300000, 16777216)
+    val elapsed = time_sample_monotonic_nanos_or_failure() - started
+    if code != 0 or elapsed <= 0 or out.len() >= 16777216:
+        print "FAIL discovery code={code} stderr={err}"
+        return 6
+    val paths = match workaround_status_paths(out):
+        case Ok(value): value
+        case Err(reason):
+            print "FAIL paths={reason}"
+            return 7
+    # Persist actual membership for the external exact-set oracle; counts alone
+    # cannot establish equivalence. Every sample needs its own private path.
+    if not workaround_host_publish(output, paths.join("\n") + "\n"): return 8
+    print "mode={mode} elapsed_ns={elapsed} raw_bytes={out.len()} eligible_paths={paths.len()}"
+    0
