@@ -8,6 +8,7 @@
 use std.common.image.png_decode.{decode_png_to_argb_bounded}
 use std.common.image.jpeg_decode.{decode_jpeg_to_argb_bounded, jpeg_signature_valid}
 use std.common.image.webp_decode.{decode_webp_to_argb_bounded, webp_signature_valid}
+use std.skia.feature.codec.svg_render.{decode_svg_to_argb_bounded, svg_signature_valid}
 
 struct DecodedImage:
     """Decoded image as a row-major ARGB pixel buffer."""
@@ -16,7 +17,7 @@ struct DecodedImage:
     height: i32
 
 fn image_decoder_format(media_type: text) -> text:
-    """Format key ("png", "jpeg", "webp") for a lowercase media type with a decoder,
+    """Format key ("png", "jpeg", "webp", "svg") for a lowercase media type with a decoder,
     or "" when no decoder handles it."""
     if media_type == "image/png":
         return "png"
@@ -24,6 +25,8 @@ fn image_decoder_format(media_type: text) -> text:
         return "jpeg"
     if media_type == "image/webp":
         return "webp"
+    if media_type == "image/svg+xml":
+        return "svg"
     ""
 
 fn image_format_label(format: text) -> text:
@@ -33,6 +36,8 @@ fn image_format_label(format: text) -> text:
         return "JPEG"
     if format == "webp":
         return "WebP"
+    if format == "svg":
+        return "SVG"
     "image"
 
 fn _png_signature_valid(bytes: [u8]) -> bool:
@@ -50,6 +55,8 @@ fn image_signature_valid(format: text, bytes: [u8]) -> bool:
         return jpeg_signature_valid(bytes)
     if format == "webp":
         return webp_signature_valid(bytes)
+    if format == "svg":
+        return svg_signature_valid(bytes)
     false
 
 fn decode_image_to_argb_bounded(format: text, bytes: [u8], max_pixels: i64) -> Result<DecodedImage, text>:
@@ -71,5 +78,13 @@ fn decode_image_to_argb_bounded(format: text, bytes: [u8], max_pixels: i64) -> R
         if val Err(reason) = webp:
             return Err(reason)
         val image = webp.unwrap()
+        return Ok(DecodedImage(pixels: image.pixels, width: image.width, height: image.height))
+    if format == "svg":
+        # SVG has no fixed pixel size: it is rasterized at its document size
+        # scaled down (aspect kept) to fit max_pixels.
+        val svg = decode_svg_to_argb_bounded(bytes, max_pixels)
+        if val Err(reason) = svg:
+            return Err(reason)
+        val image = svg.unwrap()
         return Ok(DecodedImage(pixels: image.pixels, width: image.width, height: image.height))
     Err("image format is unsupported")
