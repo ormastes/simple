@@ -13,7 +13,50 @@ fn transport_request() -> BackendPluginRequestV1:
         "mir-v1", [BackendCapability.ObjectEmit, BackendCapability.Optimization],
         "/tmp/provider.so", true)
 
+fn transport_request_backend_bytes(bytes: [u8]) -> [u8]:
+    # Keep the rest of a valid request and its field lengths intact so each
+    # negative case reaches text validation rather than failing packet bounds.
+    val valid = backend_plugin_request_encode_v1(transport_request())
+    var wire: [u8] = []
+    for index in 0..BACKEND_PLUGIN_REQUEST_SIZE_V1: wire.push(valid[index])
+    wire[24] = bytes.len().to_u8()
+    wire[25] = 0
+    wire[26] = 0
+    wire[27] = 0
+    for byte in bytes: wire.push(byte)
+    for index in (BACKEND_PLUGIN_REQUEST_SIZE_V1 + 7)..valid.len(): wire.push(valid[index])
+    wire
+
 describe "backend plugin packed transport":
+    it "rejects malformed UTF8 rather than accepting raw byte roundtrips":
+        val malformed: [[u8]] = [
+            [128], [192, 175], [224, 128, 175], [240, 128, 128, 175],
+            [237, 160, 128], [244, 144, 128, 128], [245, 128, 128, 128],
+            [194], [226, 130], [240, 159, 146], [226, 65, 130]]
+        for bytes in malformed:
+            match backend_plugin_request_decode_v1(transport_request_backend_bytes(bytes)):
+                case Err(reason): expect(reason).to_equal("request-text-utf8")
+                case Ok(_): expect(false).to_equal(true)
+        match backend_plugin_request_decode_v1(transport_request_backend_bytes([0])):
+            case Err(reason): expect(reason).to_equal("request-text-nul")
+            case Ok(_): expect(false).to_equal(true)
+
+    it "preserves valid multibyte text and byte lengths across provider fields":
+        var request = transport_request()
+        request.backend_name = "백엔드"
+        request.cpu = "cpu-é"
+        request.features = ["+기능", "-😀"]
+        val wire = backend_plugin_request_encode_v1(request)
+        val decoded = backend_plugin_request_decode_v1(wire).unwrap()
+        expect(decoded.backend_name).to_equal(request.backend_name)
+        expect(decoded.cpu).to_equal(request.cpu)
+        expect(decoded.features).to_equal(request.features)
+        expect(backend_plugin_request_encode_v1(decoded)).to_equal(wire)
+        # U+10FFFF is the highest accepted scalar; the next value is rejected
+        # in the malformed table above, matching the native bridge boundary.
+        expect(backend_plugin_request_decode_v1(
+            transport_request_backend_bytes([244, 143, 191, 191])).is_ok()).to_equal(true)
+
     it "round trips every provider configuration field without provider path leakage":
         val wire = backend_plugin_request_encode_v1(transport_request())
         expect(wire.len()).to_be_greater_than(BACKEND_PLUGIN_REQUEST_SIZE_V1)

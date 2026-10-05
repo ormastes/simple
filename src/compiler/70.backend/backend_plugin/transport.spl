@@ -1,6 +1,7 @@
 # Pure-Simple packed transport for the versioned backend plugin runtime bridge.
 
 use std.common.string_core.{text_to_bytes, bytes_to_text}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use compiler.common.backend_plugin.model.{BackendRole, BackendCapability,
     BackendPluginRequestV1}
 use compiler.mir.mir_data.{MirModule}
@@ -163,14 +164,12 @@ fn backend_plugin_request_encode_v1(request: BackendPluginRequestV1) -> [u8]:
 
 fn backend_plugin_request_text_v1(data: [u8], offset: i64, length: i64) -> Result<text, text>:
     val bytes = backend_plugin_copy_range_v1(data, offset, length)
-    val value = bytes_to_text(bytes)
+    # Raw string conversion can preserve malformed bytes verbatim. A byte/text
+    # roundtrip is therefore not validation and disagrees with the C bridge.
+    val value = match validated_utf8_bytes_to_text_linear(bytes):
+        case Ok(decoded): decoded
+        case Err(_): return Err("request-text-utf8")
     if value.contains("\0"): return Err("request-text-nul")
-    val roundtrip = text_to_bytes(value)
-    if roundtrip.len() != length: return Err("request-text-utf8")
-    var index = 0
-    while index < length:
-        if roundtrip[index] != bytes[index]: return Err("request-text-utf8")
-        index = index + 1
     Ok(value)
 
 fn backend_plugin_request_decode_v1(data: [u8]) -> Result<BackendPluginRequestV1, text>:

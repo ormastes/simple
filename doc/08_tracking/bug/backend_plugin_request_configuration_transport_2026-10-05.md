@@ -31,3 +31,15 @@ stack storage and no decoder heap allocation. Lifecycle checks cover buffer
 release and handle retention. No measured request latency/RSS target is claimed;
 those require the eventual production provider qualification. This repair does
 not close production provider, MIR fidelity or dynamic admission gaps.
+
+Peer review follow-up: the Simple decoder originally used a raw byte/text
+roundtrip as its UTF-8 check. Those conversions may preserve malformed bytes,
+so that check could accept requests rejected by the C bridge. It now uses
+`validated_utf8_bytes_to_text_linear`, the canonical strict validator, then
+applies the existing NUL rejection. Added Simple cases cover eleven malformed
+encodings (overlong forms, surrogate, above U+10FFFF, invalid lead/continuation
+and truncated sequences), NUL, multibyte fields/features and the upper scalar
+boundary. These Simple cases remain UNRUN. The prior 37 native C cases are
+unchanged and were not rerun; their PASS does not qualify the Simple decoder.
+This removes one roundtrip byte allocation while retaining linear validation;
+no measured performance or memory improvement is claimed.
