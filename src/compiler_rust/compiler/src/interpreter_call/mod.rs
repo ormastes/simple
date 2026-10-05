@@ -255,7 +255,12 @@ fn import_bound_candidate(
     functions: &HashMap<String, Arc<FunctionDef>>,
     values: &[Value],
 ) -> Option<Arc<FunctionDef>> {
-    let current = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone())?;
+    // The loader records root imports under the same <entry> owner used
+    // for root function declarations. Top-level execution has no active
+    // function owner, but its explicit import bindings still apply.
+    let current = CURRENT_EXEC_MODULE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| Arc::from("<entry>"));
     if candidate_declared_by(&current, name, functions).is_some() {
         return None;
     }
