@@ -1047,6 +1047,23 @@ pub(crate) fn compile_method_call_static<M: Module>(
                         && !ks.ends_with(&current_fn_tail_sanitized)
                 })
                 .collect();
+            // A same-named method whose declared parameter count cannot accept
+            // this call (receiver + args) can never be the target, so it must
+            // not make an otherwise-decidable call ambiguous: `d.dispatch(req)`
+            // on a FetchDispatch was refused because VulkanFfi also has a
+            // 4-argument `dispatch` (2026-10-05). Only applied when at least one
+            // candidate DOES fit, so a call no candidate fits keeps today's path.
+            let candidates: Vec<_> = if candidates.len() > 1 {
+                let wanted = args.len() + 1;
+                let fits = |id: &FuncId| ctx.module.declarations().get_function_decl(*id).signature.params.len() == wanted;
+                if candidates.iter().any(|(_, id)| fits(id)) {
+                    candidates.into_iter().filter(|(_, id)| fits(id)).collect()
+                } else {
+                    candidates
+                }
+            } else {
+                candidates
+            };
 
             if let Some(tq) = type_qualifier {
                 // A trait name is not proof that an arbitrary implementation
