@@ -76,6 +76,9 @@ static GLOBAL: simple_compiler::mem_trace::TrackingAlloc<mimalloc::MiMalloc> =
 static GLOBAL: simple_compiler::mem_trace::TrackingAlloc<std::alloc::System> =
     simple_compiler::mem_trace::TrackingAlloc::new(std::alloc::System);
 
+#[cfg(unix)]
+mod bootstrap_session;
+
 use std::path::{Path, PathBuf};
 
 use simple_common::target::Target;
@@ -1640,6 +1643,11 @@ fn app_receives_user_args_only(app_relative_path: &str) -> bool {
 /// detached (setsid) so a parent hangup doesn't take it down.
 #[cfg(unix)]
 fn arm_kill_monitor() {
+    // The managed process-tree guard owns this session. A detached global
+    // monitor would escape its containment and invalidate the test receipt.
+    if bootstrap_session::managed_session_active() {
+        return;
+    }
     use std::path::Path;
     // Already running?
     if let Ok(pid) = std::fs::read_to_string("/tmp/kill_simple_monitor.pid") {

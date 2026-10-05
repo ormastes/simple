@@ -199,3 +199,9 @@ tampering, timeout/grace, slow/hung observer and protocol checks are recorded in
 `doc/08_tracking/bugs/macos_watchdog_hostwide_ps_timeout_20260922.md`. No bootstrap
 retry was run after its three-cycle limit. Source-matched bootstrap verification
 remains required before claiming the original build failure resolved end to end.
+
+The bootstrap Rust seed test runner suppresses its detached global kill monitor only
+when the inherited managed session authority is valid: current/live-root SID,
+same-owner regular no-symlink read-only admission, and pinned helper digest.
+The process-tree guard remains enforcing; malformed or missing authority retains
+ordinary monitor behavior. This applies only to bootstrap seed test dispatch.
