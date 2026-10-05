@@ -582,3 +582,26 @@ fn parse_match_arm_fat_arrow_indented_block_body_url_utils_shape() {
         "fn f(hex: text) -> i64:\n    match from_hex(hex):\n        Some(code) =>\n            r = r + code\n            i = i + 3\n        None =>\n            r = r + 1\n    return r",
     );
 }
+
+#[test]
+fn parse_inline_index_assignment_with_block_elif_keeps_else_and_sibling() {
+    let items = parse("if a: values[0] = 1\nelif b:\n    values[0] = if c: 2 else: 3\nelse:\n    values[0] = 4\nafter = 5\n");
+    assert_eq!(items.len(), 2);
+    let Node::If(first) = &items[0] else { panic!("expected if") };
+    assert!(matches!(first.then_block.statements[0], Node::Assignment(_)));
+    let Node::If(second) = &first.else_block.as_ref().unwrap().statements[0] else { panic!("expected elif") };
+    assert!(matches!(second.then_block.statements[0], Node::Assignment(_)));
+    assert_eq!(second.else_block.as_ref().unwrap().statements.len(), 1);
+    assert!(matches!(items[1], Node::Assignment(_)));
+}
+
+#[test]
+fn parse_inline_index_assignment_with_multiple_block_elifs_keeps_final_else() {
+    let items = parse("if a: values[0] = 1\nelif b:\n    values[0] = 2\nelif c:\n    values[0] = 3\nelse:\n    values[0] = 4\nafter = 5\n");
+    assert_eq!(items.len(), 2);
+    let Node::If(first) = &items[0] else { panic!("expected if") };
+    let Node::If(second) = &first.else_block.as_ref().unwrap().statements[0] else { panic!("expected first elif") };
+    let Node::If(third) = &second.else_block.as_ref().unwrap().statements[0] else { panic!("expected second elif") };
+    assert_eq!(third.else_block.as_ref().unwrap().statements.len(), 1);
+    assert!(matches!(items[1], Node::Assignment(_)));
+}
