@@ -4107,6 +4107,33 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn boolean_constants_match_unboxed_payloads_in_both_dispatch_paths() {
+        let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Linux)).unwrap();
+        backend.create_module("raw_boolean_constants").unwrap();
+        let module_ref = backend.module.borrow();
+        let module = module_ref.as_ref().unwrap();
+        let builder_ref = backend.builder.borrow();
+        let builder = builder_ref.as_ref().unwrap();
+        let ty = backend.runtime_int_type();
+        let function = module.add_function("constants", ty.fn_type(&[], false), None);
+        builder.position_at_end(backend.context_ref().append_basic_block(function, "entry"));
+        for value in [false, true] {
+            let mut legacy = HashMap::new();
+            backend.compile_const_bool(VReg(0), value, &mut legacy).unwrap();
+            let mut shared = HashMap::new();
+            backend.compile_emitter_simd_instruction(
+                &MirInst::ConstBool { dest: VReg(0), value },
+                &mut shared, &HashMap::new(), builder, module,
+            ).unwrap();
+            let expected = Some(u64::from(value));
+            assert_eq!(legacy[&VReg(0)].into_int_value().get_zero_extended_constant(), expected);
+            assert_eq!(shared[&VReg(0)].into_int_value().get_zero_extended_constant(), expected);
+        }
+        builder.build_return(Some(&ty.const_zero())).unwrap();
+        backend.verify().unwrap();
+    }
+
+    #[test]
     fn shared_emitter_unbox_preserves_non_integer_values() {
         let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Windows)).unwrap();
         backend.create_module("unbox_non_integer_passthrough").unwrap();
