@@ -13,6 +13,7 @@ use compiler.driver.driver_phase_gates.{
     driver_source_entry_closure_enabled, driver_source_matches_entry
 }
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.driver.driver_source_loading.{_driver_unique_physical_sources}
 use compiler.common.mir_target_context.{MirTargetContext}
 use std.common.convert.{try_parse_int}
 use compiler.driver.demand_mir_integration.{demand_mir_integrate_measured_v1}
@@ -215,7 +216,11 @@ impl CompilerDriver:
         force_all_sources: bool,
         allow_bootstrap_shortcuts: bool
     ) -> bool:
-        compiler_work_mir_schedule_v1(self.ctx.sources.len())
+        # Streaming parse retains logical aliases to preserve surface/SoA source
+        # indices. MIR work has one owner per physical source, matching HIR and
+        # its cold typed receipts; aliases remain available in the context.
+        val mir_sources = _driver_unique_physical_sources(self.ctx.sources)
+        compiler_work_mir_schedule_v1(mir_sources.len())
         self.ctx.runtime_std_mir_emissions = {}
         if self.ctx.runtime_std_full_inventory_selection != nil and
                 (self.ctx.sources.len() == 0 or
@@ -392,14 +397,14 @@ impl CompilerDriver:
             # (SEGV on `state.driver.width` across modules). Register every
             # module's name-keyed struct layout before lowering any module.
             var direct_prescan_idx = 0
-            while direct_prescan_idx < self.ctx.sources.len():
-                val src_prescan = self.ctx.sources[direct_prescan_idx]
+            while direct_prescan_idx < mir_sources.len():
+                val src_prescan = mir_sources[direct_prescan_idx]
                 val prescan_hir = self.ctx.hir_modules[src_prescan.module_name]
                 if prescan_hir != nil:
                     direct_lowering.prescan_module_struct_names(prescan_hir)
                 direct_prescan_idx = direct_prescan_idx + 1
-            while direct_idx < self.ctx.sources.len():
-                val src_direct = self.ctx.sources[direct_idx]
+            while direct_idx < mir_sources.len():
+                val src_direct = mir_sources[direct_idx]
                 val name_direct = src_direct.module_name
                 var mir_direct = if native_entry_closure_mir or driver_source_matches_entry(self.ctx, src_direct.path, name_direct) or (sosix_env_get_nullable("SIMPLE_UNSTUB_HIR") ?? "") == "1":
                     log_phase("aot:lower_to_mir:module:start idx={direct_idx} module={name_direct} path={src_direct.path}")
@@ -439,9 +444,9 @@ impl CompilerDriver:
                 if name_direct == "app.cli.bootstrap_main":
                     self.ctx.set_bootstrap_entry_mir(name_direct, mir_direct)
                 direct_idx = direct_idx + 1
-                if direct_idx % 64 == 0 or direct_idx == self.ctx.sources.len():
+                if direct_idx % 64 == 0 or direct_idx == mir_sources.len():
                     log_build_progress("mir", "modules", direct_idx,
-                        self.ctx.sources.len(), name_direct,
+                        mir_sources.len(), name_direct,
                         4, 6, 0, 0, "running")
             _driver_collect_mir_errors(self.ctx, direct_lowering.errors)
             if self.ctx.error_count_value != 0:

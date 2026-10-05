@@ -1,0 +1,36 @@
+# Run separately from main.spl. Writes generated candidates ONLY to the
+# externally supplied private absolute output directory, never the checkout.
+use std.fs.{read_file}
+use std.io_runtime.{env_get, file_write, dir_create_all}
+use app.compiler_schema.fold_gen.{dialect_ast, load_dialect, emit_fold_file,
+    load_ast_semantic_universe, emit_ast_semantic_file}
+
+fn main() -> i64:
+    val output = env_get("SIMPLE_GENERIC_GENERATED_OUTPUT")
+    if not output.starts_with("/") and not (output.len() > 3 and output.substring(1, 3) == ":/"):
+        print "FAIL: private absolute SIMPLE_GENERIC_GENERATED_OUTPUT required"
+        return 1
+    val dialect = dialect_ast()
+    val visitor = emit_fold_file(load_dialect(".", dialect), dialect)
+    val semantic = emit_ast_semantic_file(load_ast_semantic_universe("."))
+    dir_create_all(output)
+    file_write(output + "/ast_visitor.spl", visitor)
+    file_write(output + "/ast_semantic_value.spl", semantic)
+    if read_file(output + "/ast_visitor.spl") != visitor or read_file(output + "/ast_semantic_value.spl") != semantic:
+        print "FAIL private generated artifact write/readback"
+        return 1
+    var failed = 0
+    if not visitor.contains("node.explicit_type_args"):
+        print "FAIL generator lost explicit type visitor field"
+        failed = failed + 1
+    if not semantic.contains("node.explicit_type_args"):
+        print "FAIL generator lost explicit type semantic field"
+        failed = failed + 1
+    if visitor != read_file("src/compiler/10.frontend/generated/ast_visitor.spl"):
+        print "FAIL visitor regeneration parity; candidate written to private output"
+        failed = failed + 1
+    if semantic != read_file("src/compiler/10.frontend/generated/ast_semantic_value.spl"):
+        print "FAIL semantic regeneration parity; candidate written to private output"
+        failed = failed + 1
+    print "generic schema parity: 4 checks, {failed} failures"
+    failed

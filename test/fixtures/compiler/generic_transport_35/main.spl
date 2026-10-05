@@ -1,0 +1,323 @@
+# Candidate compiler code is linked into this executable. The bootstrap driver
+# only builds it; each assertion below executes the candidate parser/HIR/mono.
+# Original values/branches are parsed verbatim. The isolated HIR call omits
+# runtime arguments intentionally: explicit types must work WITHOUT inference.
+# This does not execute CAS filesystem faults or replace the original P3 build.
+use std.fs.{read_file}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.config.{Logger}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module, flat_pool_capture_arm,
+    flat_pool_capture_take, build_module_from_flat_pool_blob, flat_parse_module_body_calls}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types_expr.*
+use compiler.frontend.generated.ast_visitor.{AstWalkNode, walk_ast_block}
+use compiler.frontend.generated.ast_semantic_value.{ast_semantic_hash_seed,
+    ast_semantic_encode_expr, ast_semantic_hash_finish}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.expressions.*
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+use compiler.mono.monomorphize_integration.{MonomorphizationPass, hir_type_key}
+use compiler.semantics.enum_contract.hir_match_coverage.{hir_enum_match_sites}
+
+struct OriginalCalls:
+    expressions: [Expr]
+
+fn collect_original_call(node: AstWalkNode, state: OriginalCalls) -> OriginalCalls:
+    match node:
+        case AstWalkNode.Expr(expression):
+            match expression.kind:
+                case ExprKind.Call(callee, _):
+                    match callee.kind:
+                        case ExprKind.Ident(name):
+                            if name == "cas_batch_error_v1" or name == "walk_hir_expr":
+                                return OriginalCalls(expressions: state.expressions.push(expression))
+                        case _: ()
+                case _: ()
+        case _: ()
+    state
+
+fn original_site_check(expression: Expr, site: OriginalGenericSite) -> bool:
+    var lowering = HirLowering.new()
+    val generic_symbol = lowering.symbols.define(site.callee, SymbolKind.Function,
+        nil, Span.empty(), Visibility.Private, false, nil)
+    val nominal_symbol = lowering.symbols.define(site.type_name, SymbolKind.Struct,
+        nil, Span.empty(), Visibility.Private, false, nil)
+    var expected = mk_type(HirTypeKind.Named(nominal_symbol, []))
+    if site.type_name == "()": expected = mk_type(HirTypeKind.Unit)
+    if site.type_name == "text": expected = mk_type(HirTypeKind.Str)
+    if site.type_name == "i64": expected = mk_type(HirTypeKind.Int(64, true))
+    var callee = Expr(kind: ExprKind.NilLit, span: Span.empty())
+    match expression.kind:
+        case ExprKind.Call(original, _): callee = original
+        case _: return false
+    if callee.explicit_type_args.len() != 1: return false
+    # Preserve the original callee and its type syntax. Drop value arguments
+    # only at this boundary so contextual/value inference cannot conceal loss.
+    val isolated = Expr(kind: ExprKind.Call(callee, []), span: expression.span)
+    val hir = lowering.lower_hir_expr(isolated)
+    var target = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: Span.empty())
+    var types: [HirType] = []
+    match hir.kind:
+        case HirExprKind.Call(value, args, explicit):
+            if args.len() != 0: return false
+            target = value
+            types = explicit
+        case _: return false
+    if types.len() != 1: return false
+    if hir_type_key(types[0]) != hir_type_key(expected): return false
+    val parameter = HirTypeParam(symbol: SymbolId(id: 900), name: "T", bounds: [],
+        has_default: false, default: nil, span: Span.empty())
+    val template = mk_fn(generic_symbol.id, site.callee, [parameter], [],
+        mk_type(HirTypeKind.TypeParam("T", [])), mk_block([]))
+    val pass_ = MonomorphizationPass.create()
+    pass_.current_module = "original_sites"
+    pass_.generic_functions[site.callee] = template
+    pass_.template_module[site.callee] = "original_sites"
+    pass_.sym_names["original_sites#{generic_symbol.id}"] = site.callee
+    pass_.next_symbol = 1000
+    val rewritten = pass_.rewrite_call(target, [], types)
+    if pass_.stats.call_sites_found != 1: return false
+    if pass_.stats.unresolved_generic_calls != 0: return false
+    if pass_.stats.specializations_created != 1: return false
+    if pass_.diagnostics.len() != 0: return false
+    val name = pass_.mangled_name(site.callee, types)
+    if not pass_.specialized_functions.has(name): return false
+    val concrete: HirFunction = pass_.specialized_functions[name]
+    if concrete.type_params.len() != 0: return false
+    if hir_type_key(concrete.return_type) != hir_type_key(expected): return false
+    match rewritten:
+        case HirExprKind.Call(new_target, _, remaining):
+            if remaining.len() != 0: return false
+            match new_target.kind:
+                case HirExprKind.NamedVar(symbol, _): return symbol.id == concrete.symbol.id
+                case _: return false
+        case _: return false
+
+fn actual_callback_check() -> bool:
+    val source = "enum Choice:\n    Left\n    Right\nfn select(value: Choice) -> i64:\n    match value:\n        case Choice.Left: return 1\n        case Choice.Right: return 2\n"
+    val parsed = parse_full_frontend(source, "callback.spl", "callback", Logger(level: 0))
+    if parser_has_errors(): return false
+    var lowering = HirLowering.with_filename("callback.spl")
+    val module = lowering.lower_module(parsed)
+    # Executes the production walk_hir_expr + collect_match_site callback.
+    val sites = hir_enum_match_sites(module)
+    if sites.len() != 1: return false
+    if sites[0].function_name != "select": return false
+    if sites[0].coverage.enum_name != "Choice": return false
+    if sites[0].coverage.covered_variant_ids.len() != 2: return false
+    not sites[0].coverage.has_wildcard
+
+fn neighbor_expression(source: text) -> Expr:
+    val parsed = parse_and_build_module("fn probe(a: i64, b: i64):\n    return " + source + "\n", "neighbor.spl")
+    if parser_has_errors() or not parsed.functions.has("probe"):
+        return Expr(kind: ExprKind.NilLit, span: Span.empty())
+    val function = parsed.functions["probe"]
+    for statement in function.body.stmts:
+        match statement.kind:
+            case StmtKind.Return(value):
+                if val expression = value: return expression
+            case _: ()
+    Expr(kind: ExprKind.NilLit, span: Span.empty())
+
+fn neighbor_check(index: i64) -> bool:
+    if index == 0:
+        match neighbor_expression("a >> b").kind:
+            case ExprKind.Binary(_, op, _): return op == BinaryOp.Shr
+            case _: return false
+    if index == 1:
+        match neighbor_expression("choose<Array<Dict<text, i64>>>()").kind:
+            case ExprKind.Call(callee, _):
+                if callee.explicit_type_args.len() != 1: return false
+                match callee.explicit_type_args[0].kind:
+                    case TypeKind.Named(name, args):
+                        if name != "Array" or args.len() != 1: return false
+                        match args[0].kind:
+                            case TypeKind.Named(inner, nested): return inner == "Dict" and nested.len() == 2
+                            case _: return false
+                    case _: return false
+            case _: return false
+    if index == 2:
+        match neighbor_expression("a < b or a > (b)").kind:
+            case ExprKind.Binary(_, op, _): return op == BinaryOp.Or
+            case _: return false
+    if index == 3:
+        match neighbor_expression("choose()").kind:
+            case ExprKind.Call(callee, _): return callee.explicit_type_args.len() == 0
+            case _: return false
+    if index == 4:
+        match neighbor_expression("choose<i64, [text]>()").kind:
+            case ExprKind.Call(callee, _):
+                if callee.explicit_type_args.len() != 2: return false
+                match callee.explicit_type_args[1].kind:
+                    case TypeKind.Array(element, _):
+                        match element.kind:
+                            case TypeKind.Named(name, _): return name == "text"
+                            case _: return false
+                    case _: return false
+            case _: return false
+    val first = neighbor_expression("choose<i64>()")
+    val second = neighbor_expression("choose<bool>()")
+    val first_hash = ast_semantic_hash_finish(ast_semantic_encode_expr(first, ast_semantic_hash_seed()))
+    val second_hash = ast_semantic_hash_finish(ast_semantic_encode_expr(second, ast_semantic_hash_seed()))
+    first_hash.len() == 64 and second_hash.len() == 64 and first_hash != second_hash
+
+fn main() -> i64:
+    var failures = 0
+    var executed = 0
+    var source_index = 0
+    while source_index < 2:
+        val source = read_file("test/fixtures/compiler/generic_transport_35/original-{source_index}.txt")
+        flat_pool_capture_arm()
+        var parsed = parse_and_build_module(source, "original-{source_index}.spl")
+        val snapshot = flat_pool_capture_take()
+        if snapshot == "": failures = failures + 1
+        val expected = original_generic_sites(source_index)
+        var phase = 0
+        while phase < 2:
+            val parse_ok = not parser_has_errors()
+            var found = OriginalCalls(expressions: [])
+            for function in parsed.functions.values():
+                found = walk_ast_block(function.body, found, collect_original_call)
+            if not parse_ok or found.expressions.len() != expected.len():
+                print "FAIL inventory source={source_index} phase={phase} actual={found.expressions.len()} expected={expected.len()} parsed={parse_ok}"
+                failures = failures + 1
+            for site in expected:
+                var matches = 0
+                var passed = false
+                for expression in found.expressions:
+                    if expression.span.line == site.line:
+                        matches = matches + 1
+                        passed = original_site_check(expression, site)
+                executed = executed + 1
+                if matches != 1 or not passed:
+                    print "FAIL site={executed} phase={phase} line={site.line} expected={site.type_name} matches={matches}"
+                    failures = failures + 1
+                else:
+                    print "PASS site={executed} phase={phase} line={site.line} type={site.type_name}"
+            if phase == 0:
+                # Deliberately invalidate the process-global parse/type pools.
+                val noise = parse_and_build_module("fn noise():\n    return choose<Array<bool>>()\n", "noise.spl")
+                val calls_before_restore = flat_parse_module_body_calls()
+                val warm = build_module_from_flat_pool_blob(snapshot, source, "original-{source_index}.spl")
+                if warm == nil:
+                    print "FAIL warm snapshot source={source_index}"
+                    return failures + 1
+                parsed = warm
+                if flat_parse_module_body_calls() != calls_before_restore:
+                    print "FAIL warm snapshot reparsed source={source_index}"
+                    failures = failures + 1
+            phase = phase + 1
+        source_index = source_index + 1
+    executed = executed + 1
+    if actual_callback_check():
+        print "PASS actual enum-contract callback"
+    else:
+        print "FAIL actual enum-contract callback"
+        failures = failures + 1
+    var neighbor = 0
+    while neighbor < 6:
+        executed = executed + 1
+        if neighbor_check(neighbor):
+            print "PASS parser neighbor={neighbor}"
+        else:
+            print "FAIL parser neighbor={neighbor}"
+            failures = failures + 1
+        neighbor = neighbor + 1
+    if executed != 77: failures = failures + 1
+    print "generic transport: {executed} checks, {failures} failures"
+    failures
+
+fn mk_span() -> Span:
+    Span.empty()
+
+fn mk_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: mk_span())
+
+fn mk_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: mk_span())
+
+fn mk_block(stmts: [HirStmt]) -> HirBlock:
+    HirBlock(stmts: stmts, has: false, value: mk_expr(HirExprKind.NilLit), span: mk_span())
+
+fn mk_fn(id: i64, name: text, type_params: [HirTypeParam], params: [HirParam], ret: HirType, body: HirBlock) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: id),
+        name: name,
+        type_params: type_params,
+        params: params,
+        return_type: ret,
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(),
+        is_gpu_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: ""
+    )
+
+
+# Exact source positions from original revision 96eaa4da8783f56a3a7954399fbb83573e36afa4
+struct OriginalGenericSite:
+    line: i64
+    type_name: text
+    callee: text
+
+fn original_generic_sites(source_index: i64) -> [OriginalGenericSite]:
+    if source_index == 0:
+        return [
+            OriginalGenericSite(line: 185, type_name: "CasBatchTransactionV1", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 190, type_name: "CasBatchTransactionV1", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 192, type_name: "CasBatchTransactionV1", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 195, type_name: "CasBatchTransactionV1", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 198, type_name: "CasBatchTransactionV1", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 206, type_name: "CasBatchTransactionV1", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 209, type_name: "CasBatchTransactionV1", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 220, type_name: "()", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 222, type_name: "()", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 226, type_name: "()", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 228, type_name: "()", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 232, type_name: "()", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 234, type_name: "()", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 244, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 249, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 255, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 258, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 261, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 267, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 271, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 278, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 291, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 301, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 304, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 307, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 314, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 318, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 320, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 323, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 326, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 331, type_name: "text", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 341, type_name: "()", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 351, type_name: "i64", callee: "cas_batch_error_v1"),
+            OriginalGenericSite(line: 368, type_name: "i64", callee: "cas_batch_error_v1"),
+        ]
+    [OriginalGenericSite(line: 236, type_name: "MatchSiteScan", callee: "walk_hir_expr")]

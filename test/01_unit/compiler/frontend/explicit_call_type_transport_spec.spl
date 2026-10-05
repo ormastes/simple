@@ -8,6 +8,8 @@ use compiler.core.parser_expr.{parse_expr}
 use compiler.core.ast.{expr_get_left, expr_reset, expr_ident_type_args}
 use compiler.frontend.core._AstExpr.nodes.{flat_expr_pools_dump, flat_expr_pools_restore}
 use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.core.types.{flat_type_pools_dump, flat_type_pools_restore}
+use compiler.frontend._FlatAstBridge.convert_nodes.{convert_flat_expr}
 use compiler.frontend.generated.ast_semantic_value.*
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.expressions.*
@@ -50,19 +52,37 @@ describe "explicit free-call type argument transport":
                     case _: expect(false).to_be(true)
             case _: expect(false).to_be(true)
 
-    it "preserves type ids across expression pool snapshot reset and restore":
-        parser_init("choose<i64, bool>()")
+    it "restores type registry contents as well as expression ids after another parse":
+        parser_init("choose<Dict<text, [i64]>, bool>()")
         val expression = parse_expr()
         expect(parser_has_errors()).to_be(false)
         val callee = expr_get_left(expression)
         val before = expr_ident_type_args(callee)
         expect(before.len()).to_equal(2)
         val snapshot = flat_expr_pools_dump()
-        expr_reset()
+        val type_snapshot = flat_type_pools_dump()
+        parser_init("unrelated<Array<text>>()")
+        val unrelated = parse_expr()
+        val type_reader = FlatPoolReader.new_canonical(type_snapshot)
+        expect(flat_type_pools_restore(type_reader)).to_be(true)
+        expect(type_reader.finish_canonical_frame()).to_be(true)
         val reader = FlatPoolReader.new_canonical(snapshot)
         expect(flat_expr_pools_restore(reader)).to_be(true)
         expect(reader.finish_canonical_frame()).to_be(true)
         expect(expr_ident_type_args(callee)).to_equal(before)
+        val restored = explicit_transport_types(convert_flat_expr(expression))
+        expect(restored.len()).to_equal(2)
+        match restored[0].kind:
+            case TypeKind.Named(name, args):
+                expect(name).to_equal("Dict")
+                expect(args.len()).to_equal(2)
+                match args[1].kind:
+                    case TypeKind.Array(element, _):
+                        match element.kind:
+                            case TypeKind.Named(inner, _): expect(inner).to_equal("i64")
+                            case _: expect(false).to_be(true)
+                    case _: expect(false).to_be(true)
+            case _: expect(false).to_be(true)
 
     it "retains nested dictionary types without swallowing the call or next statement":
         val expression = explicit_transport_return("fn probe():\n    return choose<Dict<text, i64>>()\nfn after() -> i64:\n    return 9\n", "after")
@@ -132,4 +152,23 @@ describe "explicit free-call type argument transport":
         val comparison = explicit_transport_return("fn probe(a: i64, b: i64, c: i64):\n    return a < b or a > (c)\n")
         match comparison.kind:
             case ExprKind.Binary(_, _, _): ()
+            case _: expect(false).to_be(true)
+
+    it "preserves ordinary right shift and three adjacent generic closing tokens":
+        val shifted = explicit_transport_return("fn probe(a: i64, b: i64):\n    return a >> b\n")
+        match shifted.kind:
+            case ExprKind.Binary(_, op, _): expect(op).to_equal(BinaryOp.Shr)
+            case _: expect(false).to_be(true)
+        val nested = explicit_transport_return("fn probe():\n    return choose<Array<Dict<text, i64>>>()\nfn after():\n    return 1\n", "after")
+        val types = explicit_transport_types(nested)
+        expect(types.len()).to_equal(1)
+        match types[0].kind:
+            case TypeKind.Named(name, args):
+                expect(name).to_equal("Array")
+                expect(args.len()).to_equal(1)
+                match args[0].kind:
+                    case TypeKind.Named(inner, nested_args):
+                        expect(inner).to_equal("Dict")
+                        expect(nested_args.len()).to_equal(2)
+                    case _: expect(false).to_be(true)
             case _: expect(false).to_be(true)
