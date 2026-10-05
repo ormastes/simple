@@ -17,12 +17,12 @@ downstream graph. Its producer and source digests must remain separate identitie
 | `managed-phase3` | admitted Phase2 + Hello | existing Phase3 completion |
 | `managed-phase4` | admitted Phase2 + Hello | existing early-P4 completion, explicitly distinguished from P3→P4 |
 | `phase2_{backend}_product_{suite}_prepare` ×6 | admitted Phase2 + Hello | native build, authenticated generated source, enumeration, one real first-case smoke |
-| `phase2_{backend}_product_{suite}_remaining` ×6 | corresponding prepare and Phase1 terminal | remaining-case execution with authentic registry partition |
+| `phase2_{backend}_product_{suite}_full` ×6 | corresponding prepare and Phase1 terminal | canonical full-suite execution in a fresh process |
 | `phase2_product_matrix` | all six terminal product receipts | canonical six-product verifier and full inventory coverage |
 
 Backends are LLVM and Cranelift; suites are compiler, interpreter and loader.
 Preparation, native build, enumeration and first-case smoke do not depend on
-Phase1 tests. Only remaining full execution waits for Phase1 terminal completion.
+Phase1 tests. Only full-suite execution waits for Phase1 terminal completion.
 Phase1 assertion failure does not block authorized later execution. This needs
 an explicitly named *completion* task: its control success means its child tree
 was collected and its actual failed/PASS/infra verdict was retained, never that
@@ -42,11 +42,12 @@ Required implementation gaps before automatic wiring:
    manager's artifact/producer factory, including binary, source, compiler,
    runtime, options, build/enumeration and smoke receipt hashes. A path alone
    is insufficient. Reuse only idle compatible cache directories under leases.
-3. Reuse the renderer's `--case-id` selector for the first registered executable
-   case. Verify the selector actually changes execution. Keep the first-case
-   ledger separate. Execute remaining cases without silently rerunning the first.
-   The verifier must check the union against the authentic enumerated registry;
-   concatenating two runtime ledgers is not an authority-preserving substitute.
+3. Reuse the renderer's --case-id selector for the first registered executable
+   case. Keep smoke counts separate. After Phase1 terminal, start a fresh full
+   suite process using the existing canonical verifier. The first case is
+   intentionally repeated to preserve fixture/global state; its smoke result
+   contributes zero to full-suite counts. No complement-ID or synthetic union
+   transport is required for this policy.
 4. Compose phase tasks and product tasks into one N-task inventory and resource
    policy, with all task contexts admitted. The current two-task `managed-phases`
    entrypoint cannot enforce this whole graph by adding shell background jobs.
