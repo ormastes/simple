@@ -18,6 +18,17 @@ fn _lookup(kind: u32, offset: i64, end: i64, index: i64, flag: u32) -> GposLooku
 fn _active(lookup: GposLookup) -> [LayoutLookupActivation]:
     [LayoutLookupActivation(lookup_index: lookup.lookup_index, feature_mask: 1u64)]
 
+# The shared budget is linear in the table size, so one pass over a large
+# subtable fits; a hostile font that re-walks the same (shared) subtable from
+# many activations must still run out.
+fn _active_repeated(lookup: GposLookup, count: i64) -> [LayoutLookupActivation]:
+    var active: [LayoutLookupActivation] = []
+    var i: i64 = 0
+    while i < count:
+        active.push(LayoutLookupActivation(lookup_index: lookup.lookup_index, feature_mask: 1u64))
+        i = i + 1
+    active
+
 fn _record(glyph: u32) -> LayoutGlyphRecord:
     LayoutGlyphRecord(glyph_id: glyph, source_index: 0, cluster: 0,
         feature_mask: 18446744073709551615u64,
@@ -28,7 +39,7 @@ fn _gdef_pair_font() -> OtFont:
     # PairPos then GDEF: glyph 2 is a Mark and MarkGlyphSet 0 contains it.
     val blob: [u8] = [0,1,0,18,0,4,0,0,0,1,0,12,0,1,0,2,0,5,0,1,0,1,0,1,
         0,1,0,2,0,14,0,0,0,0,0,0,0,22, 0,1,0,2,0,1,0,3, 0,1,0,1,0,0,0,8, 0,1,0,1,0,2]
-    OtFont(blob: blob, tables: [OtTable(tag: 1195656006u32, offset: 24u32, length: 36u32)])
+    OtFont(blob: blob, tables: [OtTable(tag: 1195656518u32, offset: 24u32, length: 36u32)])
 
 describe "bounded GPOS":
     it "applies PairPos format 1 placement and advance":
@@ -132,7 +143,7 @@ describe "bounded GPOS":
             0,1,0,4, 0,2,0,6,0,12, 0,1,0,5,0,9, 0,1,0,15,0,19,
             0,1,0,1,0,2, 0,1,0,1,0,1,
             0,1,0,0,0,12,0,0,0,0,0,0, 0,1,0,2,0,2,0,3,0,3]
-        val font = OtFont(blob: blob, tables: [OtTable(tag: 1195656006u32, offset: 58u32, length: 22u32)])
+        val font = OtFont(blob: blob, tables: [OtTable(tag: 1195656518u32, offset: 58u32, length: 22u32)])
         val lookup = _lookup(5u32, 0, 58, 0, 8u32)
         val ligature = _record(1u32)
         ligature.component_clusters = [0, 2]
@@ -190,7 +201,7 @@ describe "bounded GPOS":
         val filtered_blob: [u8] = [0,1,0,20,0,4,0,1,0,1,0,12,0,1,0,2,0,5,0,3,0,1,0,1,0,1,
             0,1,0,2,0,14,0,0,0,0,0,0,0,22, 0,1,0,2,0,1,0,3, 0,1,0,1,0,0,0,8, 0,1,0,1,0,2]
         val filtered_font = OtFont(blob: filtered_blob,
-            tables: [OtTable(tag: 1195656006u32, offset: 26u32, length: 36u32)])
+            tables: [OtTable(tag: 1195656518u32, offset: 26u32, length: 36u32)])
         val skip_lookup = _lookup(2u32, 0, 26, 0, 8u32)
         val skipped = gpos_apply(filtered_font, _active(skip_lookup), [skip_lookup], [_record(1u32), _record(2u32)])
         expect(skipped.glyphs[0].x_advance_units).to_equal(0)
@@ -330,7 +341,7 @@ describe "bounded GPOS":
             0,1,0,18,0,4,0,0,0,1,0,12,0,1,0,2,0,5,0,1,0,1,0,1,
             0,1,0,2,0,14,0,0,0,0,0,0,0,22, 0,1,0,2,0,1,0,3,
             0,1,0,1,0,0,0,8, 0,1,0,1,0,2]
-        val font = OtFont(blob: blob, tables: [OtTable(tag: 1195656006u32, offset: 32u32, length: 36u32)])
+        val font = OtFont(blob: blob, tables: [OtTable(tag: 1195656518u32, offset: 32u32, length: 36u32)])
         val plain = _lookup(9u32, 0, 32, 0, 0u32)
         val ignored = _lookup(9u32, 0, 32, 0, 8u32)
         val records = [_record(1u32), _record(2u32)]
@@ -398,7 +409,7 @@ describe "bounded GPOS":
         pair_blob.push(1u8)
         val pair_font = _font(pair_blob)
         val pair_lookup = _lookup(2u32, 0, pair_blob.len(), 0, 0u32)
-        expect(gpos_validate(pair_font, _active(pair_lookup), [pair_lookup],
+        expect(gpos_validate(pair_font, _active_repeated(pair_lookup, 8), [pair_lookup],
             [_record(1u32), _record(2u32)])).to_equal(false)
 
         var class_blob: [u8] = [0,2,3,54,0,0,0,0,0,16,0,16,0,2,0,2,
@@ -416,7 +427,7 @@ describe "bounded GPOS":
         class_blob.push(1u8)
         val class_font = _font(class_blob)
         val class_lookup = _lookup(2u32, 0, class_blob.len(), 0, 0u32)
-        expect(gpos_validate(class_font, _active(class_lookup), [class_lookup],
+        expect(gpos_validate(class_font, _active_repeated(class_lookup, 8), [class_lookup],
             [_record(1u32), _record(2u32)])).to_equal(false)
 
     it "fails closed when mark arrays and anchors exhaust the shared budget":
@@ -440,13 +451,13 @@ describe "bounded GPOS":
         val font = _font(blob)
         val lookup = _lookup(4u32, 0, blob.len(), 0, 0u32)
         val records = [_record(1u32), _record(2u32)]
-        expect(gpos_validate(font, _active(lookup), [lookup], records)).to_equal(false)
+        expect(gpos_validate(font, _active_repeated(lookup, 8), [lookup], records)).to_equal(false)
         var wrapped: [u8] = [0,1,0,4,0,0,0,8]
         for byte in blob:
             wrapped.push(byte)
         val extension_font = _font(wrapped)
         val extension = _lookup(9u32, 0, wrapped.len(), 0, 0u32)
-        expect(gpos_validate(extension_font, _active(extension), [extension], records)).to_equal(false)
+        expect(gpos_validate(extension_font, _active_repeated(extension, 8), [extension], records)).to_equal(false)
 
     it "fails closed when chained-context coverage loops exhaust the shared budget":
         var blob: [u8] = [0,3,0,0,1,144]
@@ -459,7 +470,7 @@ describe "bounded GPOS":
             blob.push(byte)
         val font = _font(blob)
         val lookup = _lookup(8u32, 0, blob.len(), 0, 0u32)
-        expect(gpos_validate(font, _active(lookup), [lookup],
+        expect(gpos_validate(font, _active_repeated(lookup, 8), [lookup],
             [_record(1u32), _record(2u32)])).to_equal(false)
 
     it "validates all three Noto Serif Devanagari lookup 36 ExtensionPos wrappers":

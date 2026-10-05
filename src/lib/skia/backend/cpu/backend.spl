@@ -4,13 +4,14 @@
 
 use std.skia.entity.canvas.{SkCanvas, sk_canvas_make}
 use std.skia.entity.image.{SkImage, SkImageInfo, sk_image_info_n32_premul}
-use std.skia.entity.geometry.{SkIRect, SkRect}
+use std.skia.entity.geometry.{SkIRect, SkRect, SkPoint, sk_rrect_make}
 use std.skia.entity.matrix.{Matrix3x3}
 use std.skia.capability.{SkCapability, sk_capability_cpu}
 use std.skia.entity.picture.{SkPicture, SkPictureOp, SkPictureOpKind}
 use std.skia.entity.paint.{SkPaint}
-use std.skia.entity.enums.{SkPaintStyle}
+use std.skia.entity.enums.{SkPaintStyle, SkBlendMode, SkPathDirection}
 use std.skia.entity.color.{SkColor4f, sk_color_alpha, sk_color_red, sk_color_green, sk_color_blue}
+use std.skia.entity.path.{sk_path_new, sk_path_mapped}
 use std.skia.backend.cpu.raster_prims.{Bitmap, fill_rect, fill_rrect, fill_path_aa, stroke_path}
 use std.skia.backend.cpu.shaders.{sample_image_bilinear, apply_blend}
 use std.viz.feature.damage.{intersect_rect}
@@ -229,15 +230,22 @@ impl CpuBackend:
                                     None:
                                         i = i + 1
                                         continue
-                                # rect slots: left=tx, top=ty, right=sx, bottom=sy
+                                # rect slots: left=tx, top=ty, right=sx, bottom=sy;
+                                # rx carries rotation degrees (canvas.rotate packs
+                                # it; concat/set_matrix leave it 0.0 until the op
+                                # encoding grows a full matrix).
                                 val tx = op.rect.left
                                 val ty = op.rect.top
                                 val sx = op.rect.right
                                 val sy = op.rect.bottom
-                                val new_xform = if (sx == 0.0) or (sy == 0.0):
+                                val base_xform = if (sx == 0.0) or (sy == 0.0):
                                     Matrix3x3.identity()
                                 else:
                                     Matrix3x3.translate(tx, ty).mul(Matrix3x3.scale(sx, sy))
+                                val new_xform = if op.rx != 0.0:
+                                    base_xform.mul(Matrix3x3.rotate_degrees(op.rx))
+                                else:
+                                    base_xform
                                 val replaced = CanvasState(
                                     alpha: cur.alpha,
                                     clip: cur.clip,
@@ -258,7 +266,10 @@ impl CpuBackend:
                                         pass_do_nothing
                                     else:
                                         val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
-                                        fill_rect(bitmap, op.rect, color)
+                                        if cur.transform.is_identity():
+                                            fill_rect(bitmap, op.rect, color)
+                                        else:
+                                            _fill_transformed_rect(bitmap, op.rect, cur.transform, cur.clip, color)
                                 else:
                                     if op.kind == SkPictureOpKind.DrawRRect:
                                         val visible = intersect_rect(cur.clip, op.rect)
@@ -266,33 +277,56 @@ impl CpuBackend:
                                             pass_do_nothing
                                         else:
                                             val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
-                                            fill_rrect(bitmap, op.rect, op.rx, op.ry, color)
+                                            if cur.transform.is_identity():
+                                                fill_rrect(bitmap, op.rect, op.rx, op.ry, color)
+                                            else:
+                                                # Transformed rounded rect goes through the path
+                                                # pipeline so rotation/shear rasterize exactly.
+                                                val rrect_path = sk_path_mapped(sk_path_new().add_rrect(
+                                                    sk_rrect_make(op.rect, op.rx, op.ry),
+                                                    SkPathDirection.Cw
+                                                ), cur.transform)
+                                                if op.paint.style == SkPaintStyle.Fill:
+                                                    fill_path_aa(bitmap, rrect_path, color)
+                                                else:
+                                                    stroke_path(bitmap, rrect_path, color, op.paint.stroke_width)
                                     else:
                                         if op.kind == SkPictureOpKind.DrawPath:
                                             if val p = op.path:
                                                 val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
-                                                if op.paint.style == SkPaintStyle.Fill:
-                                                    fill_path_aa(bitmap, p, color)
+                                                val draw_path = if cur.transform.is_identity():
+                                                    p
                                                 else:
-                                                    stroke_path(bitmap, p, color, op.paint.stroke_width)
+                                                    sk_path_mapped(p, cur.transform)
+                                                if op.paint.style == SkPaintStyle.Fill:
+                                                    fill_path_aa(bitmap, draw_path, color)
+                                                else:
+                                                    stroke_path(bitmap, draw_path, color, op.paint.stroke_width)
                                         else:
                                             if op.kind == SkPictureOpKind.DrawImage:
                                                 if val img = op.image:
                                                     val img_w = img.info.width
                                                     val img_h = img.info.height
-                                                    var py = 0 as i64
-                                                    while py < img_h:
-                                                        var px = 0 as i64
-                                                        while px < img_w:
-                                                            val u = px.to_f64()
-                                                            val v = py.to_f64()
-                                                            val sampled = sample_image_bilinear(img, u, v)
-                                                            val dst_x = (op.x.to_i64()) + px
-                                                            val dst_y = (op.y.to_i64()) + py
-                                                            val blended = apply_blend(sampled, SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0), op.paint.blend_mode)
-                                                            bitmap.blend_pixel(dst_x, dst_y, blended, cur.alpha)
-                                                            px = px + 1
-                                                        py = py + 1
+                                                    if cur.transform.is_identity():
+                                                        var py = 0 as i64
+                                                        while py < img_h:
+                                                            var px = 0 as i64
+                                                            while px < img_w:
+                                                                val u = px.to_f64()
+                                                                val v = py.to_f64()
+                                                                val sampled = sample_image_bilinear(img, u, v)
+                                                                val dst_x = (op.x.to_i64()) + px
+                                                                val dst_y = (op.y.to_i64()) + py
+                                                                val blended = apply_blend(sampled, SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0), op.paint.blend_mode)
+                                                                bitmap.blend_pixel(dst_x, dst_y, blended, cur.alpha)
+                                                                px = px + 1
+                                                            py = py + 1
+                                                    else:
+                                                        # Skia semantics: drawImage(x, y) places the image
+                                                        # corner at (x, y) in LOCAL space, so the local
+                                                        # offset composes under the current transform.
+                                                        val img_xform = cur.transform.mul(Matrix3x3.translate(op.x, op.y))
+                                                        _draw_image_transformed(bitmap, img, img_xform, cur.clip, op.paint.blend_mode, cur.alpha)
                                             else:
                                                 if op.kind == SkPictureOpKind.DrawPaint:
                                                     val color = _scale_alpha(_paint_color4f(op.paint), cur.alpha)
@@ -312,3 +346,130 @@ impl CpuBackend:
                                                     pass_do_nothing
             i = i + 1
         bitmap
+
+# ============================================================================
+# Transformed-draw helpers — device-space rasterization for non-identity
+# CanvasState transforms (see doc/08_tracking/bug/skia_cpu_backend_transforms_
+# recorded_not_applied_2026-10-05.md)
+# ============================================================================
+
+fn _min_f64(a: f64, b: f64) -> f64:
+    if a < b: a else: b
+
+fn _max_f64(a: f64, b: f64) -> f64:
+    if a > b: a else: b
+
+fn _floor_i64(v: f64) -> i64:
+    val iv = v as i64
+    if (iv as f64) > v: iv - 1 else: iv
+
+fn _ceil_i64(v: f64) -> i64:
+    val iv = v as i64
+    if (iv as f64) < v: iv + 1 else: iv
+
+fn _edge_x_at_y(a: SkPoint, b: SkPoint, yc: f64) -> Option[f64]:
+    """X coordinate where segment a->b crosses the horizontal line y=yc."""
+    if a.y == b.y:
+        return None
+    if (yc < _min_f64(a.y, b.y)) or (yc > _max_f64(a.y, b.y)):
+        return None
+    val t = (yc - a.y) / (b.y - a.y)
+    Some(a.x + t * (b.x - a.x))
+
+fn _fill_transformed_rect(bitmap: Bitmap, rect: SkRect, xform: Matrix3x3, clip: SkRect, color: SkColor4f):
+    """Scanline fill of an affine-transformed rectangle (a parallelogram).
+
+    Analytic x-coverage per scanline (center y), clipped to the device-space
+    clip rect and bitmap bounds; mirrors fill_rect's analytic-AA style."""
+    val p0 = xform.map_point(rect.left, rect.top)
+    val p1 = xform.map_point(rect.right, rect.top)
+    val p2 = xform.map_point(rect.right, rect.bottom)
+    val p3 = xform.map_point(rect.left, rect.bottom)
+    val x_min = _min_f64(_min_f64(p0.x, p1.x), _min_f64(p2.x, p3.x))
+    val x_max = _max_f64(_max_f64(p0.x, p1.x), _max_f64(p2.x, p3.x))
+    val y_min = _min_f64(_min_f64(p0.y, p1.y), _min_f64(p2.y, p3.y))
+    val y_max = _max_f64(_max_f64(p0.y, p1.y), _max_f64(p2.y, p3.y))
+    if x_max <= x_min or y_max <= y_min:
+        pass_do_nothing
+    else:
+        var y0 = _ceil_i64(_max_f64(y_min, clip.top))
+        var y1 = _ceil_i64(_min_f64(y_max, clip.bottom))
+        if y0 < 0:
+            y0 = 0
+        if y1 > bitmap.height:
+            y1 = bitmap.height
+        var py = y0
+        while py < y1:
+            val yc = py.to_f64() + 0.5
+            var crossings: [f64] = []
+            match _edge_x_at_y(p0, p1, yc):
+                Some(v): crossings.append(v)
+                None: pass_do_nothing
+            match _edge_x_at_y(p1, p2, yc):
+                Some(v): crossings.append(v)
+                None: pass_do_nothing
+            match _edge_x_at_y(p2, p3, yc):
+                Some(v): crossings.append(v)
+                None: pass_do_nothing
+            match _edge_x_at_y(p3, p0, yc):
+                Some(v): crossings.append(v)
+                None: pass_do_nothing
+            if crossings.len() >= 2:
+                # Convex quad: span is [min, max] of the crossings (vertex
+                # hits dedupe naturally through the min/max).
+                var x_lo = crossings[0]
+                var x_hi = crossings[0]
+                var ci = 1
+                while ci < crossings.len():
+                    if crossings[ci] < x_lo:
+                        x_lo = crossings[ci]
+                    if crossings[ci] > x_hi:
+                        x_hi = crossings[ci]
+                    ci = ci + 1
+                var px = _floor_i64(_max_f64(x_lo, clip.left))
+                val px_end = _ceil_i64(_min_f64(x_hi, clip.right))
+                while px < px_end:
+                    if px >= 0 and px < bitmap.width:
+                        val cov = _min_f64(px.to_f64() + 1.0, x_hi) - _max_f64(px.to_f64(), x_lo)
+                        if cov > 0.0:
+                            bitmap.blend_pixel(px, py, color, cov)
+                    px = px + 1
+            py = py + 1
+
+fn _draw_image_transformed(bitmap: Bitmap, img: SkImage, xform: Matrix3x3, clip: SkRect, blend_mode: SkBlendMode, alpha: f64):
+    """Draw an image through a non-identity transform by inverse-mapping
+    device pixel centers into source UV space (bilinear, same sampler as the
+    untransformed path). A singular transform draws nothing (fail closed)."""
+    match xform.invert():
+        None:
+            pass_do_nothing
+        Some(inv):
+            val img_w = img.info.width
+            val img_h = img.info.height
+            val p0 = xform.map_point(0.0, 0.0)
+            val p1 = xform.map_point(img_w.to_f64(), 0.0)
+            val p2 = xform.map_point(img_w.to_f64(), img_h.to_f64())
+            val p3 = xform.map_point(0.0, img_h.to_f64())
+            val x_min = _min_f64(_min_f64(p0.x, p1.x), _min_f64(p2.x, p3.x))
+            val x_max = _max_f64(_max_f64(p0.x, p1.x), _max_f64(p2.x, p3.x))
+            val y_min = _min_f64(_min_f64(p0.y, p1.y), _min_f64(p2.y, p3.y))
+            val y_max = _max_f64(_max_f64(p0.y, p1.y), _max_f64(p2.y, p3.y))
+            var x0 = _floor_i64(_max_f64(x_min, clip.left))
+            var x1 = _ceil_i64(_min_f64(x_max, clip.right))
+            var y0 = _floor_i64(_max_f64(y_min, clip.top))
+            var y1 = _ceil_i64(_min_f64(y_max, clip.bottom))
+            if x0 < 0: x0 = 0
+            if y0 < 0: y0 = 0
+            if x1 > bitmap.width: x1 = bitmap.width
+            if y1 > bitmap.height: y1 = bitmap.height
+            var py = y0
+            while py < y1:
+                var px = x0
+                while px < x1:
+                    val src = inv.map_point(px.to_f64() + 0.5, py.to_f64() + 0.5)
+                    if src.x >= 0.0 and src.x < img_w.to_f64() and src.y >= 0.0 and src.y < img_h.to_f64():
+                        val sampled = sample_image_bilinear(img, src.x, src.y)
+                        val blended = apply_blend(sampled, SkColor4f(r: 0.0, g: 0.0, b: 0.0, a: 0.0), blend_mode)
+                        bitmap.blend_pixel(px, py, blended, alpha)
+                    px = px + 1
+                py = py + 1

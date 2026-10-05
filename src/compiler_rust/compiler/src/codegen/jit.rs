@@ -474,6 +474,11 @@ impl JitCompiler {
                 continue;
             }
             if let Some(name) = decl.name.as_deref() {
+                // A declared byte/word accessor is always lowered inline by
+                // compile_call, so its import slot is never jumped through.
+                if super::instr::calls::is_inline_lowered_byte_accessor(name) {
+                    continue;
+                }
                 if directly_called.contains(name) && !jit_import_resolves(self.provider.as_ref(), name) {
                     return Some(name.to_string());
                 }

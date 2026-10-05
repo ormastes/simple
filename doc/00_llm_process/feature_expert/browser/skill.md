@@ -442,11 +442,17 @@ any sampling, restart markers, bit-exact with `djpeg -dct int`.
 `image/webp` goes to `src/lib/common/image/webp_decode.spl` (RIFF + VP8X
 container; VP8L lossless with all transforms, color cache, meta codes; lossy
 VP8 key frames via `webp_vp8_decode.spl` plus ALPH alpha — all bit-identical
-to libwebp; animation rejected by name). The session
+to libwebp; animation rejected by name).
+`image/svg+xml` goes to `src/lib/skia/feature/codec/svg_render.spl`: a
+static-SVG subset (shapes, all path commands incl. arcs, transforms,
+fill/stroke/opacity, viewBox) rasterized with skia's CPU `fill_path_aa` +
+`expand_stroke`, at the document size scaled down to the pixel budget;
+nothing is fetched (`<image>`, `<use>`, `url()` paints are inert). The session
 pixel budget (`BROWSER_MAX_IMAGE_PIXELS`) is passed in and enforced from the
 JPEG SOF before allocation. EXIF orientation is recorded
 (`JpegImage.exif_orientation`), not applied. Note `img src` data: URLs are
 capped at 256 bytes (`SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES`), so real image
 bodies only arrive over the network path. Specs:
-`test/01_unit/lib/common/image/{jpeg_decode,webp_lossless_decode,webp_lossy_decode,browser_image_decode_dispatch}_spec.spl`;
-fixtures `test/fixtures/image/{jpeg,webp_lossless,webp_lossy}/` (kept out of LFS by a local `.gitattributes`).
+`test/01_unit/lib/common/image/{jpeg_decode,webp_lossless_decode,webp_lossy_decode,browser_image_decode_dispatch}_spec.spl`,
+`test/01_unit/lib/skia/svg_render_spec.spl`;
+fixtures `test/fixtures/image/{jpeg,webp_lossless,webp_lossy,svg}/` (kept out of LFS by a local `.gitattributes`).

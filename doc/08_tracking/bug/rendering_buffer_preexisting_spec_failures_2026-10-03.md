@@ -40,3 +40,22 @@ additionally tracks unrelated lanes' items 1–3.
 - Commit: the tip of work/rendering-buffer-perfmem-20261003
   ("fix(engine2d,skia): rendering buffer perf/mem hardening + regression
   specs"; `git log -1 --format=%H origin/work/rendering-buffer-perfmem-20261003`).
+
+## 2026-10-05 continuation-lane addendum (work/rendering-skia-harden-20261005)
+
+Item 1 re-diagnosed: the two `backend_software_damage_spec` failures were NOT
+a `read_damage_pixels_packed` buffer-transport divergence. The failing
+examples are the "packed region readback" block, which calls
+`SoftwareBackend.read_pixels_regions_packed` — a transport API the spec was
+written against but which was never implemented (`semantic: method
+'read_pixels_regions_packed' not found on type 'SoftwareBackend'`).
+
+Fix: commit `87631a85045` implements `read_damage_pixels_packed`'s
+caller-supplied-rect twin on `SoftwareBackend` (supplied-order row packing;
+fail-closed on malformed/out-of-bounds/overlapping rects with no partial
+payload; i64 sizing with the 2^31-1 cap; read-only, no damage clear).
+Seed-run verified: spec now 22/22 (was 20/22). Items 2–3
+(embedded_surface 4 fails, draw_ir_adv 3 fails) confirmed still failing at
+seed-parseable state `664c80efda5` and not touched on main since
+`373c8d850c3`; pending verification with the phase-2 compiler on current
+main.

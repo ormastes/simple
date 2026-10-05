@@ -299,6 +299,53 @@ impl<'a> MirLowerer<'a> {
         Ok(())
     }
 
+    /// `&mut scalar_local` passed to an `extern fn` is an out slot: the foreign
+    /// side writes through the pointer. Mark its `PointerRef` RawMut so codegen
+    /// passes a real stack address and writes the slot back into the local
+    /// after the call. A plain Borrow is passed through as the VALUE, so
+    /// `spl_dlopen_checked(path, &mut handle)` received a null out pointer
+    /// under the JIT. Only scalar locals: a `&mut [u8]` argument is a
+    /// collection handle that the foreign side already reaches by value.
+    /// doc/08_tracking/bug/jit_refmut_extern_out_param_passes_value_not_address_2026-10-05.md
+    fn mark_extern_scalar_out_slots(&mut self, args: &[HirExpr], arg_regs: &[VReg]) -> MirLowerResult<()> {
+        let mut out_regs: Vec<VReg> = Vec::new();
+        for (arg, reg) in args.iter().zip(arg_regs.iter()) {
+            let HirExprKind::Ref(inner) = &arg.kind else {
+                continue;
+            };
+            let scalar = matches!(
+                inner.ty,
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
+                    | TypeId::F32
+                    | TypeId::F64
+                    | TypeId::BOOL
+            );
+            if scalar && matches!(inner.kind, HirExprKind::Local(_)) {
+                out_regs.push(*reg);
+            }
+        }
+        if out_regs.is_empty() {
+            return Ok(());
+        }
+        self.with_func(|func, current_block| {
+            let block = func.block_mut(current_block).unwrap();
+            for inst in block.instructions.iter_mut() {
+                if let MirInst::PointerRef { dest, kind, .. } = inst {
+                    if out_regs.contains(dest) {
+                        *kind = crate::hir::PointerKind::RawMut;
+                    }
+                }
+            }
+        })
+    }
+
     /// Apply the interpreter's authored bool-parameter boundary before MIR
     /// optimizations or a native ABI can narrow the argument to an i8.
     ///
@@ -788,6 +835,9 @@ impl<'a> MirLowerer<'a> {
 
             self.coerce_args_for_bool_params(callee, args, &mut arg_regs)?;
             self.box_args_for_any_params(callee, args, &mut arg_regs)?;
+            if self.extern_fn_name_set.contains(name.as_str()) {
+                self.mark_extern_scalar_out_slots(args, &arg_regs)?;
+            }
 
             // Colliding private helpers were emitted under mangled names (see
             // `private_dup_overloads`): resolve this call site to the variant

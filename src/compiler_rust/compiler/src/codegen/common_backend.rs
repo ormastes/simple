@@ -1981,6 +1981,12 @@ impl<M: Module> CodegenBackend<M> {
             );
         }
 
+        // SIMPLE_DUMP_CLIF=<function name> prints that function's Cranelift IR
+        // (the codegen-level twin of SIMPLE_DUMP_MIR).
+        if std::env::var("SIMPLE_DUMP_CLIF").is_ok_and(|want| want == func.name) {
+            eprintln!("[CLIF-DUMP] function: {}\n{}", func.name, self.ctx.func.display());
+        }
+
         if std::env::var("SIMPLE_DUMP_STACK_SLOTS").is_ok() {
             let slot_count = self.ctx.func.sized_stack_slots.len();
             let dynamic_slot_count = self.ctx.func.dynamic_stack_slots.len();

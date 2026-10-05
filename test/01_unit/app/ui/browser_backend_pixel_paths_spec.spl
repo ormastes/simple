@@ -49,51 +49,26 @@ describe "browser backend pixel hot paths":
 
         expect(backend.layout_cache.len()).to_be_greater_than(8)
 
-    it "keeps a page on the fast path when its class and id selectors are resolvable":
-        # Pre-fix, ANY `.` or `#` in <style> forced the slow layout path. This
-        # selector names the first block's own first class, so the substring
-        # heuristic resolves it directly.
-        val resolvable = "<html><body><div id='hero' class='card'>" +
-            "<style>.card { background-color: #303030; }</style>" +
-            "</div></body></html>"
-        assert_false(simple_web_html_needs_selector_layout(resolvable))
-
-        val by_id = "<html><body><div id='hero' class='card'>" +
-            "<style>#hero { background-color: #303030; }</style>" +
-            "</div></body></html>"
-        assert_false(simple_web_html_needs_selector_layout(by_id))
-
-        val tag_qualified = "<html><body><div id='hero' class='card'>" +
-            "<style>div.card { background-color: #303030; }</style>" +
-            "</div></body></html>"
-        assert_false(simple_web_html_needs_selector_layout(tag_qualified))
-
-    it "routes to the real layout engine when several rules set a background":
-        # The heuristic paints a phantom SECOND block from the second
-        # background-color in source order, so it cannot faithfully reproduce a
-        # style block with more than one background-setting rule even when every
-        # selector is individually resolvable.
-        val two_rules = "<html><body><div id='hero' class='card'>" +
-            "<style>#hero { background-color: #202020; } " +
-            ".card { background-color: #303030; }</style>" +
-            "</div></body></html>"
-        assert_true(simple_web_html_needs_selector_layout(two_rules))
-
-    it "routes to the real layout engine when a selector is not resolvable":
-        val descendant = "<html><body><div id='hero' class='card'>" +
-            "<style>body .card { background-color: #303030; }</style>" +
-            "</div></body></html>"
-        assert_true(simple_web_html_needs_selector_layout(descendant))
-
-        val foreign_class = "<html><body><div id='hero' class='card'>" +
-            "<style>.sidebar { background-color: #303030; }</style>" +
-            "</div></body></html>"
-        assert_true(simple_web_html_needs_selector_layout(foreign_class))
-
-        val pseudo = "<html><body><div id='hero' class='card'>" +
-            "<style>.card:hover { background-color: #303030; }</style>" +
-            "</div></body></html>"
-        assert_true(simple_web_html_needs_selector_layout(pseudo))
+    it "lays out a styled page without text-document tags for real":
+        # The static lane used to send any page without <p>/<span>/<h1>...
+        # through a substring heuristic that filled the frame with a guessed
+        # background and never painted text (a plain `<div>` page with a
+        # background came out blank). Every page is now laid out for real.
+        val html = '<html><head><style>body{margin:0;background:#ffffff;color:#000000;font:20px sans-serif}' +
+            '.card{background-color:#303030;height:10px}</style></head>' +
+            '<body><div class="t">text here</div><div class="card"></div></body></html>'
+        val pixels = simple_web_engine2d_render_html_pixels(html, 120, 60, "software")
+        expect(pixels.len()).to_equal(7200)
+        var dark_text = 0
+        var card = 0
+        for p in pixels:
+            if p == 0xFF303030u32:
+                card = card + 1
+            elif (p & 0xFFu32) < 0x60u32 and ((p >> 8) & 0xFFu32) < 0x60u32:
+                dark_text = dark_text + 1
+        step("the div's text is painted and the .card block is laid out below it")
+        expect(dark_text).to_be_greater_than(20)
+        expect(card).to_be_greater_than(100)
 
     it "renders a class styled page to a full pixel buffer":
         val html = "<html><body style='background-color: #204060'>" +
@@ -108,18 +83,15 @@ describe "browser backend pixel hot paths":
         # Three rules target the SAME element. The CSS-correct winner is
         # `#hero` (id specificity 1-0-0) — NOT the last `.card` rule, since
         # specificity outranks source order. Only that colour may reach the
-        # framebuffer. The substring heuristic gets this wrong twice: it takes
-        # the last `.card` rule as the block colour AND paints the second
-        # background-color as a phantom sibling block. So if a future widening
-        # of `_selector_token_is_resolvable` (or removal of the multi-background
-        # guard) lets this page onto the fast path, this example goes red.
+        # framebuffer. (The removed substring heuristic got this wrong twice:
+        # it took the last `.card` rule as the block colour AND painted the
+        # second background-color as a phantom sibling block.)
         val html = "<html><body style='background-color: #204060'>" +
             "<div id='hero' class='card'></div>" +
             "<style>.card { background-color: #ff0000; } " +
             "#hero { background-color: #00ff00; } " +
             ".card { background-color: #0000ff; }</style>" +
             "</body></html>"
-        assert_true(simple_web_html_needs_selector_layout(html))
 
         val pixels = simple_web_engine2d_render_html_pixels(html, 48, 40, "software")
         expect(pixels.len()).to_equal(1920)
