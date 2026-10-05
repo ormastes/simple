@@ -1,6 +1,7 @@
 # Repeated materialization root resolution
 
-Status: focused optimization verified; production materializer adoption pending.
+Status: focused optimization and successor caller verified on a tiny Git fixture;
+next full candidate materialization pending.
 
 The Windows efc724 materializer authenticated 141,525 tracked blobs in 513.7 s.
 Its archive-member, omission, transform-repair and alias containment checks each
@@ -31,16 +32,35 @@ Unicode/normalization, prefix and parent escapes, child junction escapes and
 root replacement. A separate 10,000-path streaming check bounds retained and
 peak Python allocations; this is distinct from process peak working set.
 
-## Next materializer integration
+## Successor materializer integration
 
-Copy and pin this helper in a new, unlaunched materialization packet. Construct
-`MaterializationBoundary(root)` after validating the exclusively owned root.
-Replace `path.resolve().is_relative_to(root.resolve())` with
-`boundary.contains(path)`, and likewise use `boundary.contains(destination)`
-for alias containment. Call `boundary.verify_root()` immediately before writing
-`source-ready.json`. Retain all existing `.git`, Git blob, alias, inventory,
-case-collision, archive and physical-input checks. Bind the helper's SHA-256 in
-the preparation request. Never modify an already frozen materializer.
+`scripts/bootstrap/materialize-source-packet.py` is the parameterized successor
+of the efc packet's actual materializer. All four containment sites use the
+boundary helper. It retains the `.git`, Git blob, alias, inventory,
+case-collision, archive and physical-input checks, including preservation of
+transformed archive originals. It verifies root identity immediately before
+writing `source-ready.json`; failure prevents publication.
+
+Copy the caller and helper together into a new packet. Prepare `request.json`
+with schema `bootstrap-materialization-request-v1` and fields `source_root`,
+`repository`, `source_head`, `archive_source_head`, `archive_path`,
+`archive_sha256`, and `boundary_helper_sha256`. Use absolute filesystem paths
+and full Git commit IDs. The candidate must already be an exclusively owned
+worktree with its index initialized to its pinned HEAD and no extracted files.
+Invoke the pinned caller with `--config request.json --config-sha256 SHA256`.
+The outer launcher must pin the caller itself. The caller checks configuration,
+archive and helper hashes, executes exactly the verified helper bytes, and
+records all three code/request pins in its final receipt. Running Python with
+assertions disabled is rejected. Never modify an already frozen materializer.
+
+Five caller checks passed: real archive authentication and receipt pins;
+helper tampering rejected before execution; archive hash mismatch rejected;
+root replacement at the final publication boundary rejected without a ready
+record; and archive reuse restoring a new blob while preserving and repairing
+changed/CRLF-transformed originals. These are tiny authenticated Git fixtures,
+not another full source extraction or compiler build. The 10,000-path memory
+test measured 964,183 traced peak bytes; its 2 MiB budget applies to that fixture
+only, since CPython pathlib's process-wide interning is included.
 
 Qualification of that integrated successor, including its existing physical
 blob proof and final receipt, remains required. No full compiler rebuild is
