@@ -35,8 +35,7 @@ single-lane symbols and zero new symbols. The frozen-baseline drift (216 new,
 Log: `build/review/dual-lexer/committed-scan.log` in the isolated worktree.
 
 The selftest-only summary's old hardcoded count was replaced with its measured
-fixture count. No compiler, Hello, or runtime build was performed. The paired
-provider candidate's exact-head gate is separate qualification still pending.
+fixture count. No compiler, Hello, or runtime build was performed. Broader paired compiler and application qualification remains pending.
 
 Focused compatibility correction: all 59 existing Unicode verdict/comment lines were compared with the base and preserved byte-for-byte (apart from the intentional measured selftest count). The existing cache key already hashes the complete extractor script as well as both source tree IDs, so old line-scanner entries cannot be reused.
 
