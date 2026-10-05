@@ -292,10 +292,18 @@ pub(crate) fn collection_provider_resolution_count_for_tests() -> usize {
 /// (`src/runtime/runtime_native.c`): identical precedence — unsigned-boxed
 /// values compare as u64 (including against tagged ints, with a negative int
 /// always losing to any unsigned box), tagged ints precede floats, and every
-/// other mixed-type pair compares Equal. Used by `scalar_array_sort` below,
-/// exactly as the C static helper is used by `rt_array_sort`/`rt_array_sorted`.
+/// other mixed-type pair compares Equal. Two TEXT values compare
+/// byte-lexicographically over their UTF-8 bytes (= codepoint order), the
+/// interpreter's `(Value::Str(a), Value::Str(b)) => a.cmp(b)` arm in
+/// `interpreter_method/collections.rs`; before this arm every text pair
+/// compared Equal, so `sort`/`sorted` on `[text]` were silent no-ops under
+/// the JIT. Used by `scalar_array_sort` below, exactly as the C static helper
+/// is used by `rt_array_sort`/`rt_array_sorted`.
 #[inline]
 fn rt_sorted_value_cmp(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
+    if let (Some(left), Some(right)) = (sorted_text_bytes(*a), sorted_text_bytes(*b)) {
+        return left.cmp(right);
+    }
     match (a.as_heap_u64(), b.as_heap_u64()) {
         (Some(left), Some(right)) => return left.cmp(&right),
         (Some(_), None) if b.is_int() && b.as_int() < 0 => return Ordering::Greater,
@@ -311,6 +319,19 @@ fn rt_sorted_value_cmp(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
         (false, true, true, _) => Ordering::Greater,
         _ => Ordering::Equal,
     }
+}
+
+/// The UTF-8 bytes of a text value, or `None` for any other value.
+fn sorted_text_bytes<'a>(value: RuntimeValue) -> Option<&'a [u8]> {
+    let len = rt_string_len(value);
+    if len < 0 {
+        return None;
+    }
+    let data = rt_string_data(value);
+    if len == 0 || data.is_null() {
+        return Some(&[]);
+    }
+    Some(unsafe { std::slice::from_raw_parts(data, len as usize) })
 }
 
 fn scalar_array_sort(values: &mut [RuntimeValue]) {

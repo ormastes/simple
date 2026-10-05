@@ -983,6 +983,76 @@ fn test_array_sorted() {
     assert_eq!(rt_array_get(result, 2).as_int(), 3);
 }
 
+fn text_at(array: RuntimeValue, index: i64) -> String {
+    let value = rt_array_get(array, index);
+    let len = rt_string_len(value);
+    assert!(len >= 0, "element {index} is not text");
+    let bytes = unsafe { std::slice::from_raw_parts(rt_string_data(value), len as usize) };
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+/// Reproduces the JIT `[text].sorted()` no-op: every text pair compared Equal,
+/// so the result kept input order (pear,apple,zeta,mango).
+#[test]
+fn test_array_sorted_orders_text_like_the_interpreter() {
+    let array = rt_array_new(4);
+    for s in ["pear", "apple", "zeta", "mango"] {
+        rt_array_push(array, text_value(s));
+    }
+    let result = rt_array_sorted(array);
+    let got: Vec<String> = (0..4).map(|i| text_at(result, i)).collect();
+    assert_eq!(got, ["apple", "mango", "pear", "zeta"]);
+    // Non-mutating: the receiver keeps its order.
+    assert_eq!(text_at(array, 0), "pear");
+}
+
+/// Generalization: in-place `sort` and `sort_desc` share the comparator; byte
+/// order puts a prefix first, uppercase before lowercase, and multi-byte UTF-8
+/// after ASCII -- exactly Rust `String` ordering, which the interpreter uses.
+#[test]
+fn test_array_sort_and_sort_desc_order_text_bytewise() {
+    let input = ["b", "ab", "a", "B", "\u{e9}", "", "a\0z", "\u{1f600}"];
+    let mut expected: Vec<String> = input.iter().map(|s| s.to_string()).collect();
+    expected.sort();
+
+    let array = rt_array_new(input.len() as u64);
+    for s in input {
+        rt_array_push(array, text_value(s));
+    }
+    assert!(rt_array_sort(array));
+    let got: Vec<String> = (0..input.len() as i64).map(|i| text_at(array, i)).collect();
+    assert_eq!(got, expected);
+
+    let desc = rt_array_new(input.len() as u64);
+    for s in input {
+        rt_array_push(desc, text_value(s));
+    }
+    assert!(rt_array_sort_desc(desc));
+    let got_desc: Vec<String> = (0..input.len() as i64).map(|i| text_at(desc, i)).collect();
+    let mut expected_desc = expected.clone();
+    expected_desc.reverse();
+    assert_eq!(got_desc, expected_desc);
+}
+
+#[test]
+fn test_array_sorted_text_mixed_pairs_preserve_existing_ordering() {
+    let text = text_value("pear");
+    for other in [RuntimeValue::from_int(7), RuntimeValue::from_float(2.5), RuntimeValue::from_bool(true), RuntimeValue::NIL] {
+        for pair in [[text, other], [other, text]] {
+            let input = rt_array_new(2);
+            for value in pair { assert!(rt_array_push(input, value)); }
+            let output = rt_array_sorted(input);
+            assert_eq!(rt_array_get(output, 0).to_raw(), pair[0].to_raw());
+            assert_eq!(rt_array_get(output, 1).to_raw(), pair[1].to_raw());
+        }
+    }
+    let input = rt_array_new(2);
+    assert!(rt_array_push(input, RuntimeValue::from_float(-100.0)));
+    assert!(rt_array_push(input, RuntimeValue::from_int(100)));
+    let output = rt_array_sorted(input);
+    assert_eq!(rt_array_get(output, 0).as_int(), 100);
+    assert_eq!(rt_array_get(output, 1).as_float(), -100.0);
+}
 #[test]
 fn test_array_first_last() {
     let array = rt_array_new(3);
