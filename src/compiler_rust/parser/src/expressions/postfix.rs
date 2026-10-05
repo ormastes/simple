@@ -708,9 +708,9 @@ impl<'a> Parser<'a> {
                                 default: Box::new(default),
                             };
                         }
-                        // Inside an inline-if THEN arm the `else` closes the
-                        // `if`, not the cast (`if c: x as i64 else: 7`).
-                        TokenKind::Else if !self.no_cast_else => {
+                        // Inside an inline `if` then-branch the `else:` is the
+                        // `if`'s (see `inline_if_then_call_depth`).
+                        TokenKind::Else if self.inline_if_then_call_depth != Some(self.call_arg_depth) => {
                             // Check for else: (Else followed by Colon)
                             self.advance();
                             self.expect(&TokenKind::Colon)?;

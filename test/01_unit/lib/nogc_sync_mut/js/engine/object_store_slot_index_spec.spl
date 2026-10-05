@@ -1,0 +1,137 @@
+"""
+## Purpose and audience
+Purpose: Prove the ObjectStore (obj_id, key) -> slot index answers exactly
+what the former backward linear scan answered, across appends, in-place
+updates, duplicate slots, removals, out-of-band appends and compaction.
+Audience: maintainers of the JS engine object heap and the browser DOM bridge.
+## Operator workflow
+Run this spec with the test runner; each scenario names the invariant it pins.
+## Compatibility and limitations
+Pure in-memory; no DOM or network. Background: binding a DOM element did ~10
+property writes, each scanning every stored property, so large pages
+(wikipedia.org, github.com) never finished their script pass.
+Bug record: doc/08_tracking/bug/browser_real_site_rendering_gaps_2026-10-04.md
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+use std.js.engine.vm_object_store.{ObjectStore}
+use std.js.types.js_types.{JsValue}
+
+fn scan_slot(store: ObjectStore, obj_id: i64, key: text) -> i64:
+    var i = store.prop_obj_ids.len() - 1
+    while i >= 0:
+        if store.prop_obj_ids[i] == obj_id and store.prop_keys[i] == key:
+            return i
+        i = i - 1
+    -1
+
+fn push_slot(store: ObjectStore, obj_id: i64, key: text, value: JsValue) -> ObjectStore:
+    var s = store
+    s.prop_obj_ids.push(obj_id)
+    s.prop_ref_ids.push(obj_id)
+    s.prop_ref_tags.push(0)
+    s.prop_keys.push(key)
+    s.prop_values.push(value)
+    s.prop_enumerables.push(true)
+    s.prop_configurables.push(true)
+    s
+
+fn object_keys(store: ObjectStore, obj_id: i64) -> text:
+    var s = store
+    var keys: [text] = []
+    for prop in s.get_object(obj_id).properties:
+        keys.push(prop.key)
+    keys.join(",")
+
+fn agrees(store: ObjectStore, ids: [i64], keys: [text]) -> bool:
+    for id in ids:
+        for key in keys:
+            if store.find_prop_slot(id, key) != scan_slot(store, id, key):
+                return false
+    true
+
+describe "ObjectStore property slot index":
+    it "matches the backward scan after appends and duplicate slots":
+        step("append slots, including a duplicate (obj 1, a) and a key with ':'")
+        var store = ObjectStore.create()
+        store = push_slot(store, 1, "a", JsValue.Number(v: 1.0))
+        store = push_slot(store, 2, "a", JsValue.Number(v: 2.0))
+        store = push_slot(store, 1, "b:c", JsValue.Number(v: 3.0))
+        store = push_slot(store, 1, "a", JsValue.Number(v: 4.0))
+        store.sync_prop_slots()
+        assert_equal(store.find_prop_slot(1, "a"), 3)
+        assert_true(agrees(store, [1, 2, 3, 11], ["a", "b:c", "b", "1:a", "missing"]))
+
+    it "falls back to the scan for slots appended without a sync":
+        var store = ObjectStore.create()
+        store = push_slot(store, 1, "a", JsValue.Number(v: 1.0))
+        store.sync_prop_slots()
+        step("append out of band (no sync) and look the new slot up")
+        store = push_slot(store, 5, "x", JsValue.Number(v: 9.0))
+        store = push_slot(store, 1, "a", JsValue.Number(v: 2.0))
+        assert_equal(store.find_prop_slot(5, "x"), 1)
+        assert_equal(store.find_prop_slot(1, "a"), 2)
+        assert_true(agrees(store, [1, 5], ["a", "x"]))
+
+    it "stays exact after remove_property shifts slots":
+        var store = ObjectStore.create()
+        store.set_property(1, "a", JsValue.Number(v: 1.0))
+        store.set_property(2, "b", JsValue.Number(v: 2.0))
+        store.set_property(3, "c", JsValue.Number(v: 3.0))
+        store.sync_prop_slots()
+        step("remove a middle slot; later slots move down by one")
+        store.remove_property(2, "b")
+        assert_equal(store.find_prop_slot(2, "b"), -1)
+        assert_equal(store.find_prop_slot(3, "c"), 1)
+        assert_true(agrees(store, [1, 2, 3], ["a", "b", "c"]))
+
+    it "stays exact after a compaction that is followed by equal-length appends":
+        var store = ObjectStore.create()
+        store = push_slot(store, 1, "a", JsValue.Number(v: 1.0))
+        store = push_slot(store, 2, "b", JsValue.Number(v: 2.0))
+        store.sync_prop_slots()
+        step("compact away obj 1, reindex, then append a different slot")
+        store.prop_obj_ids = [2]
+        store.prop_ref_ids = [2]
+        store.prop_ref_tags = [0]
+        store.prop_keys = ["b"]
+        store.prop_values = [JsValue.Number(v: 2.0)]
+        store.prop_enumerables = [true]
+        store.prop_configurables = [true]
+        store.reindex_prop_slots()
+        store = push_slot(store, 7, "z", JsValue.Number(v: 7.0))
+        assert_equal(store.find_prop_slot(1, "a"), -1)
+        assert_equal(store.find_prop_slot(7, "z"), 1)
+        assert_true(agrees(store, [1, 2, 7], ["a", "b", "z"]))
+
+    it "keeps get_property last-write-wins":
+        var store = ObjectStore.create()
+        store = push_slot(store, 1, "a", JsValue.Number(v: 1.0))
+        store = push_slot(store, 1, "a", JsValue.Number(v: 2.0))
+        store.sync_prop_slots()
+        match store.get_property(1, "a"):
+            JsValue.Number(v): assert_equal(v, 2.0)
+            _: assert_true(false)
+        match store.get_property(1, "nope"):
+            JsValue.Undefined: assert_true(true)
+            _: assert_true(false)
+
+    it "keeps get_object's per-object slot order identical to a forward scan":
+        var store = ObjectStore.create()
+        store = push_slot(store, 1, "a", JsValue.Number(v: 1.0))
+        store = push_slot(store, 2, "x", JsValue.Number(v: 2.0))
+        store = push_slot(store, 1, "b", JsValue.Number(v: 3.0))
+        store = push_slot(store, 1, "a", JsValue.Number(v: 4.0))
+        store.sync_prop_slots()
+        step("indexed path, then out-of-band append, then removal")
+        assert_equal(object_keys(store, 1), "a,b,a")
+        store = push_slot(store, 1, "c", JsValue.Number(v: 5.0))
+        assert_equal(object_keys(store, 1), "a,b,a,c")
+        store.sync_prop_slots()
+        assert_equal(object_keys(store, 1), "a,b,a,c")
+        store.remove_property(1, "a")
+        assert_equal(object_keys(store, 1), "b,c")
+        assert_equal(object_keys(store, 2), "x")
+        assert_equal(object_keys(store, 9), "")

@@ -218,14 +218,25 @@ impl Lowerer {
                     type_bindings: std::collections::HashMap::from([("T".to_string(), inner)]),
                 })))
             }
-            ("Result", 2) => {
+            ("Result", 1) | ("Result", 2) => {
                 let ok_ty = match self.resolve_type(&args[0]) {
                     Ok(ok_ty) => ok_ty,
                     Err(err) => return Some(Err(err)),
                 };
-                let err_ty = match self.resolve_type(&args[1]) {
-                    Ok(err_ty) => err_ty,
-                    Err(err) => return Some(Err(err)),
+                // Single-argument `Result<T>` (27 owned signatures, e.g.
+                // h1_client's `parse_status_line`) leaves the error type
+                // unstated: it is dynamic, exactly like the bare `Result`
+                // family below. It used to fall through to `_ => ANY`, which
+                // erased the Ok payload too, so `val s = f()?; s.field` had an
+                // ANY receiver and de-JITted the whole flattened program
+                // whenever `field` was spelled by more than one struct.
+                let err_ty = if args.len() == 2 {
+                    match self.resolve_type(&args[1]) {
+                        Ok(err_ty) => err_ty,
+                        Err(err) => return Some(Err(err)),
+                    }
+                } else {
+                    TypeId::ANY
                 };
                 Some(Ok(self.module.types.register(HirType::Enum {
                     name: "Result".to_string(),
@@ -645,7 +656,7 @@ impl Lowerer {
                         .expect("Option arity checked above"),
                     // Result<T, E> - preserve enum identity so `expr?` and
                     // result helpers do not fall through to unrelated unwrap families.
-                    "Result" if args.len() == 2 => self
+                    "Result" if args.len() == 1 || args.len() == 2 => self
                         .instantiate_builtin_generic_enum("Result", args)
                         .expect("Result arity checked above"),
                     // List<T> - same as array

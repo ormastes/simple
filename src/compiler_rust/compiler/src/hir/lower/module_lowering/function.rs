@@ -1077,7 +1077,18 @@ impl Lowerer {
         };
         let effective_body: &ast::Block = driver_synthesized.as_ref().unwrap_or(&f.body);
 
-        let mut body = self.lower_block(effective_body, &mut ctx)?;
+        let mut body = match self.lower_block(effective_body, &mut ctx) {
+            Ok(body) => body,
+            Err(error) => {
+                // A whole-module de-JIT names only the entry file; this names
+                // the function whose body failed (explicit `return` mismatches
+                // and field-inference failures surface here).
+                if std::env::var_os("SIMPLE_SEED_RETURN_TYPE_DEBUG").is_some() {
+                    eprintln!("lowering error in function {}: {error:?}", func_name);
+                }
+                return Err(error);
+            }
+        };
         let return_type = match declared_return_type {
             Some(ty) => ty,
             None if f.name == "main" => TypeId::VOID,

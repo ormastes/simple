@@ -15,8 +15,8 @@ use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_exec.{JsInterpreter}
 use std.common.js.builtins.json.{json_parse}
 use std.common.string_core.{char_code}
-# Load common engine modules LAST so their Logger/js_nan/etc. win over nogc versions
-use lib.common.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
+# Load common engine modules LAST so their JsLogger/js_nan/etc. win over nogc versions
+use lib.common.js.engine.js_error.{JsError, js_script_error, JsLogger, LogLevel, JsBrowserResult, JsBrowserError}
 use std.nogc_sync_mut.js.engine.parser.{js_parse_program_subset}
 
 # Safe NaN/Infinity sentinels — immune to _RT_NAN function registry ordering
@@ -127,7 +127,7 @@ fn format_value(value: JsValue) -> text:
         JsValue.Function(id): "[Function]"
         JsValue.Symbol(id): "Symbol()"
 
-fn console_log(args: [JsValue], logger: Logger):
+fn console_log(args: [JsValue], logger: JsLogger):
     var parts: [text] = []
     var i = 0
     val len = args.len()
@@ -137,7 +137,7 @@ fn console_log(args: [JsValue], logger: Logger):
     val msg = parts.join(" ")
     eprint(msg)
 
-fn console_error(args: [JsValue], logger: Logger):
+fn console_error(args: [JsValue], logger: JsLogger):
     var parts: [text] = []
     var i = 0
     val len = args.len()
@@ -147,7 +147,7 @@ fn console_error(args: [JsValue], logger: Logger):
     val msg = parts.join(" ")
     logger.error(msg)
 
-fn console_warn(args: [JsValue], logger: Logger):
+fn console_warn(args: [JsValue], logger: JsLogger):
     var parts: [text] = []
     var i = 0
     val len = args.len()
@@ -195,7 +195,7 @@ fn _js_floor(n: f64) -> f64:
         return fv - 1.0
     fv
 
-fn dispatch_native(fn_id: i64, args: [JsValue], logger: Logger) -> JsValue:
+fn dispatch_native(fn_id: i64, args: [JsValue], logger: JsLogger) -> JsValue:
     if fn_id == NATIVE_CONSOLE_LOG:
         console_log(args, logger)
         return JsValue.Undefined
@@ -411,10 +411,10 @@ class JsRuntime:
     interpreter: JsInterpreter
     global_object: i64
     prototypes: PrototypeChain
-    logger: Logger
+    logger: JsLogger
     native_functions: [Pair<text, i64>]
 
-    static fn new(logger: Logger) -> JsRuntime:
+    static fn new(logger: JsLogger) -> JsRuntime:
         var interp = JsInterpreter.create(logger)
         val global_obj = interp.create_object()
         var rt = JsRuntime(
@@ -630,7 +630,7 @@ class JsRuntime:
         )
 
     # Evaluate a string of JavaScript source code
-    me eval(source: text) -> BrowserResult<JsValue>:
+    me eval(source: text) -> JsBrowserResult<JsValue>:
         self.logger.debug("Evaluating JS source ({source.len()} chars)")
 
         # Parse using the nogc parser (avoids struct collision with common JsParser)
@@ -657,7 +657,7 @@ class JsRuntime:
         ran
 
     # Call a function by its internal ID with given arguments
-    me call(function_id: i64, args: [JsValue]) -> BrowserResult<JsValue>:
+    me call(function_id: i64, args: [JsValue]) -> JsBrowserResult<JsValue>:
         var call_result = JsValue.Undefined
         var call_ok = false
         val interpreter = self.interpreter
@@ -712,7 +712,7 @@ class JsRuntime:
 
         if call_ok:
             return Ok(call_result)
-        Err(script_error("Invalid function id: {function_id}"))
+        Err(js_script_error("Invalid function id: {function_id}"))
 
     # Register a host-provided native function by name and callback ID
     me define_native_function(name: text, callback_id: i64):
@@ -720,6 +720,6 @@ class JsRuntime:
 
 # Convenience factory for hosts outside this module: import aliasing does not
 # register constructors/enums (interpreter gap), so embedders that have their
-# own Logger type in scope construct the engine through this named function.
+# own JsLogger type in scope construct the engine through this named function.
 pub fn js_runtime_with_default_logger(name: text) -> JsRuntime:
-    JsRuntime.new(Logger(name: name, level: LogLevel.Info))
+    JsRuntime.new(JsLogger(name: name, level: LogLevel.Info))

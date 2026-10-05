@@ -1815,17 +1815,9 @@ impl Lowerer {
                         // trait default methods, so calls to them resolve their real
                         // return type instead of falling back to ANY.
                         if let Some(ref trait_name) = impl_block.trait_name {
-                            if let Some(trait_def) = ast_module.items.iter().find_map(|item| {
-                                if let Node::Trait(t) = item {
-                                    if &t.name == trait_name {
-                                        Some(t)
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            }) {
+                            if let Some(trait_def) =
+                                select_impl_trait(&ast_module.items, trait_name, &impl_method_names)
+                            {
                                 for default_method in &trait_def.methods {
                                     if default_method.is_abstract
                                         || impl_method_names.contains(default_method.name.as_str())
@@ -1902,10 +1894,7 @@ impl Lowerer {
                         for method in &s.methods {
                             methods_map.insert(method.name.clone(), format!("{}.{}", s.name, method.name));
                         }
-                        if let Some(trait_def) = ast_module.items.iter().find_map(|item| match item {
-                            Node::Trait(t) if t.name == trait_name => Some(t),
-                            _ => None,
-                        }) {
+                        if let Some(trait_def) = select_impl_trait(&ast_module.items, &trait_name, &own) {
                             for default_method in &trait_def.methods {
                                 if default_method.is_abstract || own.contains(default_method.name.as_str()) {
                                     continue;
@@ -1977,17 +1966,9 @@ impl Lowerer {
                             // memory as a function pointer (crash) instead of dispatching to
                             // the default body. Each default is lowered fresh per-impl so
                             // `self` resolves against this impl's concrete type.
-                            if let Some(trait_def) = ast_module.items.iter().find_map(|item| {
-                                if let Node::Trait(t) = item {
-                                    if &t.name == trait_name {
-                                        Some(t)
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            }) {
+                            if let Some(trait_def) =
+                                select_impl_trait(&ast_module.items, trait_name, &impl_method_names)
+                            {
                                 for default_method in &trait_def.methods {
                                     if default_method.is_abstract
                                         || impl_method_names.contains(default_method.name.as_str())
@@ -2657,6 +2638,57 @@ mod scalar_const_eval_tests {
     fn nil_global_scalar_uses_tagged_nil_sentinel() {
         assert_eq!(try_const_eval(&Expr::Nil), Some(3));
     }
+}
+
+/// The trait definition an impl (or `struct Name(Trait):`) refers to.
+///
+/// The JIT flattens every import into one bare-name namespace, so several
+/// unrelated traits can share a name (`RenderBackend` is declared in three
+/// stdlib modules). Taking the first match bound `impl RenderBackend for
+/// VulkanBackend` to a trait that lacks `read_pixels_damaged` /
+/// `invalidate_damage_mirror`, so those defaults were never materialised for
+/// the impl and the call `VulkanBackend.invalidate_damage_mirror` panicked in
+/// codegen (whole module dropped to the interpreter) or crashed with SIGBUS.
+/// Among same-named candidates, pick the one declaring the most of the
+/// impl's own method names. On a tie, a candidate whose method set strictly
+/// contains the current pick's wins (the two stdlib engine2d `RenderBackend`s
+/// differ only by three added defaults, and VulkanBackend overrides 25 of
+/// both); any other tie keeps the first, i.e. the previous behaviour.
+fn select_impl_trait<'a>(
+    items: &'a [Node],
+    trait_name: &str,
+    impl_method_names: &std::collections::HashSet<&str>,
+) -> Option<&'a simple_parser::ast::TraitDef> {
+    let mut best: Option<(&'a simple_parser::ast::TraitDef, usize)> = None;
+    for item in items {
+        let Node::Trait(t) = item else {
+            continue;
+        };
+        if t.name != trait_name {
+            continue;
+        }
+        let overlap = t
+            .methods
+            .iter()
+            .filter(|m| impl_method_names.contains(m.name.as_str()))
+            .count();
+        let replace = match best {
+            None => true,
+            Some((_, best_overlap)) if overlap > best_overlap => true,
+            Some((current, best_overlap)) if overlap == best_overlap => {
+                current.methods.len() < t.methods.len()
+                    && current
+                        .methods
+                        .iter()
+                        .all(|m| t.methods.iter().any(|n| n.name == m.name))
+            }
+            _ => false,
+        };
+        if replace {
+            best = Some((t, overlap));
+        }
+    }
+    best.map(|(t, _)| t)
 }
 
 /// The trait named by `struct Name(Trait):`, carried by the parser as a

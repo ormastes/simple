@@ -114,7 +114,7 @@ pub(crate) use block_exec::{
 
 // Public API
 mod public_api;
-pub use public_api::{evaluate_module, evaluate_module_with_di, evaluate_module_with_di_and_aop};
+pub use public_api::{evaluate_module, evaluate_module_owned, evaluate_module_with_di, evaluate_module_with_di_and_aop};
 pub(crate) use public_api::exec_method_function;
 
 // Pattern matching functions for match expressions
@@ -177,6 +177,7 @@ mod module_cache;
 pub use module_cache::clear_module_cache;
 pub use module_cache::{clear_probe_source_cache, probe_source_cached};
 pub use module_cache::{clear_parsed_source_cache, parsed_source_cache_len, shared_source, shared_source_lookup, SharedSource};
+pub(crate) use module_cache::take_shared_ast;
 pub use module_cache::{parsed_source_cache_compile_max, parsed_source_cache_set_limit};
 pub use module_cache::clear_module_cache_selective;
 pub(crate) use module_cache::normalize_path_key;

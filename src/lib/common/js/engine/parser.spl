@@ -6,7 +6,7 @@
 #   parser_statements.spl  — all statement parsing (var/if/for/while/try/switch/class etc.)
 #   parser_expressions.spl — full expression precedence chain (assignment down to primary)
 
-use std.common.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
+use std.common.js.engine.js_error.{JsError, js_script_error, JsLogger, LogLevel, JsBrowserResult, JsBrowserError}
 use std.common.js.types.pair.{Pair}
 use std.common.js.types.js_types.JsValue
 use std.common.js.types.ast_types.{JsExpression, JsStatement, SwitchCase, FnParam, DestructProp, ImportSpec, ExportSpec, JsAstFactory}
@@ -28,12 +28,12 @@ class JsParser:
     previous_value: text
     previous_line: i64
     previous_col: i64
-    logger: Logger
+    logger: JsLogger
 
-    static fn new(input: text, logger: Logger) -> JsParser:
+    static fn new(input: text, logger: JsLogger) -> JsParser:
         JsParser.create(input, logger)
 
-    static fn create(input: text, logger: Logger) -> JsParser:
+    static fn create(input: text, logger: JsLogger) -> JsParser:
         var lex = JsLexer.create(input, logger)
         val _ = lex.next_token()
         JsParser(
@@ -80,16 +80,16 @@ class JsParser:
         false
 
     # Expect the current token to be a given kind; consume and return it, or error
-    me expect(kind: text) -> BrowserResult<text>:
+    me expect(kind: text) -> JsBrowserResult<text>:
         if self.current_kind == kind:
             val value = self.current_value.substring(0, self.current_value.len())
             self.advance()
             return Ok(value)
         val msg = "Expected token kind {kind} but got {self.current_kind} ('{self.current_value}') at line {self.current_line}:{self.current_col}"
         self.logger.error(msg)
-        Err(script_error(msg))
+        Err(js_script_error(msg))
 
-    me expect_member_property_name() -> BrowserResult<text>:
+    me expect_member_property_name() -> JsBrowserResult<text>:
         val kind = self.current_kind
         if kind == "Identifier" or
            kind == "Catch" or
@@ -130,7 +130,7 @@ class JsParser:
             return Ok(value)
         val msg = "Expected member property name but got {self.current_kind} ('{self.current_value}') at line {self.current_line}:{self.current_col}"
         self.logger.error(msg)
-        Err(script_error(msg))
+        Err(js_script_error(msg))
 
     # Check if we've reached end-of-file
     fn is_at_end() -> bool:
@@ -138,7 +138,7 @@ class JsParser:
 
     # ── Program ──────────────────────────────────────────────────────────
 
-    me parse_program() -> BrowserResult<[JsStatement]>:
+    me parse_program() -> JsBrowserResult<[JsStatement]>:
         var stmts: [JsStatement] = []
         while not self.is_at_end():
             val stmt = self.parse_statement()?
@@ -147,7 +147,7 @@ class JsParser:
 
     # ── Statements ───────────────────────────────────────────────────────
 
-    me parse_statement() -> BrowserResult<JsStatement>:
+    me parse_statement() -> JsBrowserResult<JsStatement>:
         val kind = self.current_kind
 
         if kind == "Var" or kind == "Let" or kind == "Const":
@@ -200,7 +200,7 @@ class JsParser:
         self.parse_expression_statement()
 
     # Block { ... }
-    me parse_block() -> BrowserResult<[JsStatement]>:
+    me parse_block() -> JsBrowserResult<[JsStatement]>:
         self.expect("OpenBrace")?
         var stmts: [JsStatement] = []
         while not self.check("CloseBrace") and not self.is_at_end():

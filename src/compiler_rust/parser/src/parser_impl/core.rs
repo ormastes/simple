@@ -87,11 +87,6 @@ pub struct Parser<'a> {
     /// When true, postfix parsing won't consume `{ ... }` after field access.
     /// Used to prevent ambiguity in `if cond { body }` syntax.
     pub(crate) no_brace_postfix: bool,
-    /// When true, postfix `as T` does not take an `else:` fallback suffix.
-    /// Set while parsing the THEN arm of an inline `if c: X as T else: Y`
-    /// (and a ternary condition), where that `else` belongs to the `if`.
-    /// See doc/08_tracking/bug/inline_if_then_arm_as_cast_drops_else_2026-10-05.md.
-    pub(crate) no_cast_else: bool,
     /// Buffer for statements produced by multi-node desugaring (e.g., structured_export)
     pub(crate) pending_statements: Vec<Node>,
     /// Count of INDENT tokens consumed during binary expression line continuation
@@ -103,6 +98,12 @@ pub struct Parser<'a> {
     /// this counter tracks how many should be consumed at a later point (e.g., after
     /// an if-block before checking for elif/else).
     pub(crate) deferred_dedent_count: usize,
+    /// `Some(call_arg_depth)` while parsing the INLINE then-branch of an `if`
+    /// expression. At that depth an `else:` after `expr as Type` belongs to the
+    /// `if`, not to the `CastElse` form: `if c: x as i64 else: 0` is an if/else
+    /// (as the pure-Simple parser reads it), never a fallback cast inside an
+    /// `if` that silently lost its else branch.
+    pub(crate) inline_if_then_call_depth: Option<usize>,
     /// Nesting depth while parsing call arguments. Placeholder short grammar is
     /// transformed for the direct argument expression and deferred for nested
     /// ordinary call arguments so outer callbacks can own the placeholder scope.
@@ -144,10 +145,10 @@ impl<'a> Parser<'a> {
             pattern_indent_count: 0,
             match_arm_depth: 0,
             no_brace_postfix: false,
-            no_cast_else: false,
             pending_statements: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,
+            inline_if_then_call_depth: None,
             call_arg_depth: 0,
             parse_recursion_depth: 0,
             grid_row_depth: 0,
@@ -225,10 +226,10 @@ impl<'a> Parser<'a> {
             pattern_indent_count: 0,
             match_arm_depth: 0,
             no_brace_postfix: false,
-            no_cast_else: false,
             pending_statements: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,
+            inline_if_then_call_depth: None,
             call_arg_depth: 0,
             parse_recursion_depth: 0,
             grid_row_depth: 0,

@@ -527,3 +527,20 @@ is guarded out (`inline_x > inline_start_x`) and therefore diverges from Chrome,
 which answers 48 there — recorded, not tuned for.
 
 Records: `doc/10_metrics/ui/web_chrome_parity_round25_2026-09-14.md`.
+
+## Style-stage selector prefilter (2026-10-04)
+
+`compute_styles_with_material` (`…_core.spl`) keeps an exact ancestor-feature
+multiset (`t:<tag>`, `i:<id>`, `c:<class>` of the current `.parent` chain) and
+skips any candidate selector group whose ancestor compounds need a feature the
+chain lacks (`selector_group_ancestor_keys` in `…_core_selectors.spl`; dead or
+non-compound ancestor parts key on `!`, which never matches). It is a NECESSARY
+condition of `_selector_group_matches_node_parsed_inner`, so it can only skip
+calls that already return false. Unmatched candidates are dropped before
+`_sort_candidates_by_specificity` (total order on (specificity, rule id), so
+the matched order is unchanged). Any edit to the matcher's ancestor semantics
+(new combinators, ctx pseudos on ancestors) MUST update the key derivation too.
+Measure with `SIMPLE_WEB_PHASE_TRACE=1 SIMPLE_WEB_STYLE_COUNTERS=1`
+(`selector_calls`, `sel_sort_ms`). Before PR #2481 the whole engine ran in the
+interpreter (`TextMetrics.char_count` HIR name collision dropped the entry
+module); re-baseline any timing taken before that merge.

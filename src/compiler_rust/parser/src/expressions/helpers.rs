@@ -177,10 +177,10 @@ impl<'a> Parser<'a> {
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, ParseError>,
     ) -> Result<T, ParseError> {
-        let old = self.no_cast_else;
-        self.no_cast_else = true;
+        let old = self.inline_if_then_call_depth;
+        self.inline_if_then_call_depth = Some(self.call_arg_depth);
         let result = f(self);
-        self.no_cast_else = old;
+        self.inline_if_then_call_depth = old;
         result
     }
 

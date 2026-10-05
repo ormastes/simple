@@ -1152,6 +1152,33 @@ impl Lowerer {
         ret
     }
 
+    /// The declared return type of `method` when every trait that declares it
+    /// (with a non-ANY, non-VOID return) agrees on that type. Trait-typed
+    /// receivers are ANY in HIR, so this is the only authoritative source for
+    /// their result type.
+    fn agreed_trait_method_return_type(&self, method: &str) -> Option<TypeId> {
+        let mut trait_return: Option<TypeId> = None;
+        for (lookup_name, trait_info) in &self.module.trait_infos {
+            // Alias keys remain available for direct MIR dispatch, but a
+            // stale alias snapshot is not another trait declaration.
+            if lookup_name != &trait_info.name {
+                continue;
+            }
+            let Some(sig) = trait_info.methods.get(method) else {
+                continue;
+            };
+            if sig.return_type == TypeId::ANY || sig.return_type == TypeId::VOID {
+                continue;
+            }
+            match trait_return {
+                None => trait_return = Some(sig.return_type),
+                Some(previous) if previous != sig.return_type => return None,
+                _ => {}
+            }
+        }
+        trait_return
+    }
+
     /// Return one metadata record per declared trait, ordered by its canonical
     /// name. Selective-import aliases are additional lookup keys for MIR
     /// dispatch, but must not alter whole-module inference ordering.
@@ -1267,33 +1294,8 @@ impl Lowerer {
         // losing `MouseEvent?` here makes `if val event = backend.poll_mouse()`
         // bind `event` as ANY and rejects every subsequent field access.
         if recv_ty == TypeId::ANY {
-            let mut trait_return: Option<TypeId> = None;
-            let mut traits_disagree = false;
-            for (lookup_name, trait_info) in &self.module.trait_infos {
-                // Alias keys remain available for direct MIR dispatch, but a
-                // stale alias snapshot is not another trait declaration.
-                if lookup_name != &trait_info.name {
-                    continue;
-                }
-                let Some(sig) = trait_info.methods.get(method) else {
-                    continue;
-                };
-                if sig.return_type == TypeId::ANY || sig.return_type == TypeId::VOID {
-                    continue;
-                }
-                match trait_return {
-                    None => trait_return = Some(sig.return_type),
-                    Some(previous) if previous != sig.return_type => {
-                        traits_disagree = true;
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            if !traits_disagree {
-                if let Some(return_type) = trait_return {
-                    return return_type;
-                }
+            if let Some(return_type) = self.agreed_trait_method_return_type(method) {
+                return return_type;
             }
         }
         // When the impl matches DISAGREE on the return type, the shortest-name
@@ -2151,6 +2153,20 @@ impl Lowerer {
                 "parse_f64" | "parse_float" | "parse_f64_safe" => Some(TypeId::ANY),
                 "to_bool" => Some(TypeId::BOOL),
                 _ => None,
+            };
+            // A trait-typed receiver is ANY in HIR, and MIR lowers the call
+            // as a vtable dispatch whose result has the trait method's
+            // declared type. A trait method that merely shares a builtin
+            // collection name (`me size() -> (i32, i32)` on `ScreenHost`)
+            // must keep that type: typing it I64 here made
+            // `val (w, h) = host.size()` destructure tagged RuntimeValues
+            // as raw integers under the JIT (1280 read as 10240). A typed
+            // Dict receiver is never a trait object.
+            let result_ty = match result_ty {
+                Some(builtin_ty) if dict_kv.is_none() => {
+                    Some(self.agreed_trait_method_return_type(method).unwrap_or(builtin_ty))
+                }
+                other => other,
             };
 
             if let Some(ty) = result_ty {

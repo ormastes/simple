@@ -72,6 +72,9 @@ counters!(
     SHARED_SRC_PARSES,
     SHARED_SRC_HITS,
     INTERP_MODULE_AST_REUSE,
+    // AST_REUSEs that took the cache's AST by ownership instead of cloning it
+    // (module_cache::take_shared_ast).
+    INTERP_MODULE_AST_TAKEN,
     INTERP_MODULE_PARSES,
     // place-receiver mutation (`self.inner.xs.push(x)`, `rows[i].push(x)`,
     // `self.d.insert(k, v)`, `arr[i].inc()`) — the in-place kernel in

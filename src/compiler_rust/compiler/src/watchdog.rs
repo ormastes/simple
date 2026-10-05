@@ -58,17 +58,35 @@ pub fn read_rss_bytes() -> u64 {
         .unwrap_or(0)
 }
 
+/// Read current RSS on macOS via libproc `proc_pidinfo(PROC_PIDTASKINFO)`.
+/// Returns 0 on failure.
+///
+/// This used to fork/exec `ps -o rss= -p <pid>` on EVERY call. The module
+/// loader reads RSS twice per loaded module (`ModuleLoadGuard`) and the
+/// watchdog thread reads it every 100ms, so a single `simple test <spec>`
+/// spawned hundreds of `ps` processes; `sample` showed ~60% of the single
+/// runner's main thread in `__posix_spawn`/`poll` under this function.
+/// `ps` itself reads the same `pti_resident_size`, reported in KB, so the
+/// value is floored to whole KB to stay byte-identical with the old result.
 #[cfg(target_os = "macos")]
 pub fn read_rss_bytes() -> u64 {
-    // Use `ps` to read RSS on macOS (returns KB)
-    let pid = std::process::id();
-    std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid.to_string()])
-        .output()
-        .ok()
-        .and_then(|out| String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().ok())
-        .map(|kb| kb * 1024)
-        .unwrap_or(0)
+    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+    // SAFETY: `info` is a properly sized, writable `proc_taskinfo`, and
+    // `size` is exactly its size, as PROC_PIDTASKINFO requires.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            std::process::id() as libc::c_int,
+            libc::PROC_PIDTASKINFO,
+            0,
+            &mut info as *mut libc::proc_taskinfo as *mut libc::c_void,
+            size,
+        )
+    };
+    if written != size {
+        return 0;
+    }
+    (info.pti_resident_size / 1024) * 1024
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -189,6 +207,43 @@ mod tests {
         WATCHDOG_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The in-process macOS reader must agree with `ps -o rss=` (the reader it
+    /// replaced), which reports the same kernel counter in KB.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_read_rss_bytes_matches_ps_on_macos() {
+        let ours = read_rss_bytes();
+        assert!(ours > 0, "proc_pidinfo RSS read failed");
+        assert_eq!(ours % 1024, 0, "RSS must be KB-granular like ps");
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .expect("ps runs");
+        let ps_kb: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().expect("ps rss parses");
+        let ours_kb = ours / 1024;
+        let diff = ours_kb.abs_diff(ps_kb);
+        // Both readings are of a live process taken moments apart; allow
+        // drift of 25% (test threads allocate concurrently).
+        assert!(diff * 4 <= ps_kb.max(ours_kb), "ours={ours_kb}KB ps={ps_kb}KB");
+    }
+
+    /// Generalization: RSS is read on hot paths (twice per loaded module, every
+    /// 100ms in the watchdog), so the reader must stay in-process on every
+    /// platform. A per-call subprocess costs milliseconds; 1000 in-process
+    /// reads take well under a second even on a loaded host.
+    #[test]
+    fn test_read_rss_bytes_is_cheap_enough_for_hot_paths() {
+        let start = Instant::now();
+        for _ in 0..1000 {
+            std::hint::black_box(read_rss_bytes());
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "1000 read_rss_bytes() calls took {elapsed:?}; a per-call subprocess spawn has crept back in"
+        );
     }
 
     #[test]

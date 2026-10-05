@@ -620,14 +620,25 @@ fn _html_draw_ir_command(
             # the string the command draws, and the resolver is cached per
             # (family, content, size, identity, language) so the per-line calls
             # collapse onto repeated text.
+            val first_x = _html_draw_ir_aligned_line_x(
+                st, visual_text_rtl, wrap_line_starts[0], wrap_line_ends[0],
+                content_x, content_w, 0, wrap_line_starts.len()
+            )
             return _html_draw_ir_resolved_text_command(
                 nodes, i, node, st, _html_draw_ir_component_id(node, i),
-                content_x, content_y, visual_text, computed_style, clip_rect,
+                first_x, content_y, visual_text, computed_style, clip_rect,
                 vector_fonts
+            )
+        val single_x = if st.text_overflow_ellipsis:
+            content_x
+        else:
+            _html_draw_ir_aligned_line_x(
+                st, visual_text, 0, visual_text.len(), content_x, content_w,
+                0, 1
             )
         return _html_draw_ir_resolved_text_command(
             nodes, i, node, st, _html_draw_ir_component_id(node, i),
-            content_x, content_y, visual_text, computed_style, clip_rect,
+            single_x, content_y, visual_text, computed_style, clip_rect,
             vector_fonts
         )
     val command = draw_ir_box_with_style(
@@ -644,6 +655,25 @@ fn _html_draw_ir_command(
         computed_style
     )
     command
+
+# text-align for a Draw IR text line (gap A, 2026-10-05). The CPU raster
+# path has always placed each wrapped line with `text_line_aligned_x`; the
+# Draw IR emitters drew every line at the content-box left edge, so
+# `text-align: center|right` (inherited or not) was ignored whenever the page
+# went through Draw IR. Same width model as the raster loop
+# (`style_run_byte_advances` + `style_text_line_advance_width_with`), and a
+# left-aligned line returns `base_x` untouched, so left text is unchanged.
+fn _html_draw_ir_aligned_line_x(
+    st: Style, txt: text, start: i32, endv: i32, base_x: i32, box_w: i32,
+    line_i: i32, line_count: i32
+) -> i32:
+    if not text_line_needs_paint_width(st, line_i, line_count):
+        return base_x
+    val line_w = style_text_line_advance_width_with(
+        style_run_byte_advances(st, txt), txt, start, endv,
+        style_text_advance(st), style_space_advance(st)
+    )
+    text_line_aligned_x(base_x, box_w, line_w, st, line_i, line_count)
 
 # Companion to `_html_draw_ir_command`'s `wrap_active` branch: that function
 # returns only the first wrapped line (to keep its single-`DrawIrCommand`
@@ -670,6 +700,9 @@ fn _html_draw_ir_wrap_extra_line_commands(
     val y = boxes.by[i]
     val content_x = x + st.border_l + st.pad_l
     val content_y = y + st.border_t + st.pad_t
+    val content_w = _html_draw_ir_non_negative(
+        boxes.bw[i] - st.border_l - st.border_r - st.pad_l - st.pad_r
+    )
     val transformed_text = apply_text_transform_for_paint(
         node.text_trimmed, st.text_transform
     )
@@ -692,10 +725,14 @@ fn _html_draw_ir_wrap_extra_line_commands(
             wrap_line_starts[line_i], wrap_line_ends[line_i]
         )
         val line_y = content_y + line_i * lh
+        val line_x = _html_draw_ir_aligned_line_x(
+            st, visual_text_rtl, wrap_line_starts[line_i], wrap_line_ends[line_i],
+            content_x, content_w, line_i, wrap_line_count
+        )
         out.push(_html_draw_ir_resolved_text_command(
             nodes, i, node, st,
             _html_draw_ir_component_id(node, i) + "_line{line_i}",
-            content_x, line_y, line_text, computed_style, clip_rect,
+            line_x, line_y, line_text, computed_style, clip_rect,
             vector_fonts
         ))
         line_i = line_i + 1

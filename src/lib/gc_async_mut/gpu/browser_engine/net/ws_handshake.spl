@@ -43,7 +43,7 @@ class HandshakeResult:
 
 fn ws_write_transport_fd(tls_conn: TlsConnection?, tcp_fd: i64, data: text) -> i64:
     if val tls_conn = tls_conn:
-        return tls_conn.write_text(data)
+        return tls_conn.write_text(data).unwrap_or(-1)
     if tcp_fd < 0:
         return -1
     val written = unsafe(capabilities: [ffi]):
@@ -55,7 +55,7 @@ fn ws_write_transport_fd(tls_conn: TlsConnection?, tcp_fd: i64, data: text) -> i
 
 fn ws_read_transport_fd(tls_conn: TlsConnection?, tcp_fd: i64, max_bytes: i64) -> text:
     if val tls_conn = tls_conn:
-        return tls_conn.read_text(max_bytes)
+        return tls_conn.read_text(max_bytes).unwrap_or("")
     if tcp_fd < 0:
         return ""
     val bytes = unsafe(capabilities: [ffi]):
@@ -120,7 +120,11 @@ fn validate_handshake_response(raw: text, key: text, requested_protocols: [text]
 
     val status_line = lines.get(0)
 
-    if not status_line.contains("101"):
+    # RFC 6455 4.2.2: the status line is `HTTP/1.1 101 ...`; a bare "101"
+    # substring anywhere (e.g. "NOTHTTP 101") is not a valid upgrade.
+    val status_parts = status_line.trim().split(" ")
+    if status_parts.len() < 2 or not status_parts[0].starts_with("HTTP/1.") or
+        status_parts[1] != "101":
         return Err(network_error("ws: expected 101 Switching Protocols, got: {status_line}"))
 
     var headers: [Pair<text, text>] = []

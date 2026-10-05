@@ -292,10 +292,18 @@ pub(crate) fn collection_provider_resolution_count_for_tests() -> usize {
 /// (`src/runtime/runtime_native.c`): identical precedence — unsigned-boxed
 /// values compare as u64 (including against tagged ints, with a negative int
 /// always losing to any unsigned box), tagged ints precede floats, and every
-/// other mixed-type pair compares Equal. Used by `scalar_array_sort` below,
-/// exactly as the C static helper is used by `rt_array_sort`/`rt_array_sorted`.
+/// other mixed-type pair compares Equal. Two TEXT values compare
+/// byte-lexicographically over their UTF-8 bytes (= codepoint order), the
+/// interpreter's `(Value::Str(a), Value::Str(b)) => a.cmp(b)` arm in
+/// `interpreter_method/collections.rs`; before this arm every text pair
+/// compared Equal, so `sort`/`sorted` on `[text]` were silent no-ops under
+/// the JIT. Used by `scalar_array_sort` below, exactly as the C static helper
+/// is used by `rt_array_sort`/`rt_array_sorted`.
 #[inline]
 fn rt_sorted_value_cmp(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
+    if let (Some(left), Some(right)) = (sorted_text_bytes(*a), sorted_text_bytes(*b)) {
+        return left.cmp(right);
+    }
     match (a.as_heap_u64(), b.as_heap_u64()) {
         (Some(left), Some(right)) => return left.cmp(&right),
         (Some(_), None) if b.is_int() && b.as_int() < 0 => return Ordering::Greater,
@@ -311,6 +319,19 @@ fn rt_sorted_value_cmp(a: &RuntimeValue, b: &RuntimeValue) -> Ordering {
         (false, true, true, _) => Ordering::Greater,
         _ => Ordering::Equal,
     }
+}
+
+/// The UTF-8 bytes of a text value, or `None` for any other value.
+fn sorted_text_bytes<'a>(value: RuntimeValue) -> Option<&'a [u8]> {
+    let len = rt_string_len(value);
+    if len < 0 {
+        return None;
+    }
+    let data = rt_string_data(value);
+    if len == 0 || data.is_null() {
+        return Some(&[]);
+    }
+    Some(unsafe { std::slice::from_raw_parts(data, len as usize) })
 }
 
 fn scalar_array_sort(values: &mut [RuntimeValue]) {
@@ -5582,8 +5603,70 @@ pub extern "C" fn rt_array_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeVa
     unsafe {
         let len_a = (*arr_a).len;
         let len_b = (*arr_b).len;
+
+        // PACKED arrays store raw element words/bytes, not tagged RuntimeValues
+        // (see rt_array_copy below). The generic loop read a byte-packed
+        // `[u8]` as tagged words, so `head + tail` of a SPIR-V blob came back
+        // as garbage under the JIT ([3 2 35 7 ...] -> [3 45 43 160 ...]) and
+        // the Vulkan font pipeline rejected it as invalid SPIR-V. Same-layout
+        // operands keep their layout; mixed layouts decode each element the
+        // way rt_array_get does into a generic (tagged) result.
+        let a_bytes = (*arr_a).is_byte_packed();
+        let b_bytes = (*arr_b).is_byte_packed();
+        let a_words = (*arr_a).is_u64_packed();
+        let b_words = (*arr_b).is_u64_packed();
+        if a_bytes && b_bytes {
+            let total = len_a + len_b;
+            let result = rt_byte_array_new(total.max(1));
+            if result.is_nil() {
+                return result;
+            }
+            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            if len_a > 0 {
+                std::ptr::copy_nonoverlapping((*arr_a).data as *const u8, (*dst).data as *mut u8, len_a as usize);
+            }
+            if len_b > 0 {
+                std::ptr::copy_nonoverlapping(
+                    (*arr_b).data as *const u8,
+                    ((*dst).data as *mut u8).add(len_a as usize),
+                    len_b as usize,
+                );
+            }
+            (*dst).len = total;
+            return result;
+        }
+        if a_words && b_words {
+            let total = len_a + len_b;
+            let result = rt_array_new_uninit_u64(total.max(1));
+            if result.is_nil() {
+                return result;
+            }
+            let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+            if len_a > 0 {
+                std::ptr::copy_nonoverlapping((*arr_a).data as *const u64, (*dst).data as *mut u64, len_a as usize);
+            }
+            if len_b > 0 {
+                std::ptr::copy_nonoverlapping(
+                    (*arr_b).data as *const u64,
+                    ((*dst).data as *mut u64).add(len_a as usize),
+                    len_b as usize,
+                );
+            }
+            (*dst).len = total;
+            return result;
+        }
+
         let result = rt_array_new(len_a + len_b);
         if result.is_nil() {
+            return result;
+        }
+        if a_bytes || b_bytes || a_words || b_words {
+            for i in 0..len_a as i64 {
+                rt_array_push(result, rt_array_get(a, i));
+            }
+            for i in 0..len_b as i64 {
+                rt_array_push(result, rt_array_get(b, i));
+            }
             return result;
         }
 
@@ -6158,10 +6241,17 @@ pub extern "C" fn rt_array_fill(array: RuntimeValue, value: RuntimeValue) -> boo
 /// `array_write_span`), added for
 /// doc/08_tracking/bug/engine2d_interpreter_span_kernel_marshalling_perf_gap_2026-08-14.md.
 /// Semantics mirror the interpreter kernel: count <= 0 is a no-op returning 0;
-/// out-of-range NEVER writes and never grows the destination (returns tagged -1
-/// here, where the interpreter raises a loud error — a C ABI cannot); overlap is
+/// out-of-range NEVER writes and never grows the destination; overlap is
 /// memmove-style (`copy_within` when dst and src are the same heap object).
 /// Returns the count written.
+///
+/// An out-of-range span, or a non-array source, is a program error that the
+/// interpreter raises (`write_span out of range: ...`, exit 1). This lane used
+/// to return a tagged -1 that no call site checks, so the same program ran
+/// SILENTLY to completion under the JIT. It now fails with the interpreter's
+/// exact diagnostic and exit status. An invalid DESTINATION handle (not an
+/// array) keeps the -1 answer: the compiler only emits this call for an array
+/// receiver, so that case is an ABI misuse rather than a program error.
 #[no_mangle]
 pub extern "C" fn rt_array_write_span(
     dst: RuntimeValue,
@@ -6175,12 +6265,14 @@ pub extern "C" fn rt_array_write_span(
     }
     let err = RuntimeValue::from_int(-1);
     let dst_arr = as_typed_ptr!(mut dst, HeapObjectType::Array, RuntimeArray, err);
-    let src_arr = as_typed_ptr!(src, HeapObjectType::Array, RuntimeArray, err);
+    let Some(src_arr) = crate::value::heap::get_typed_ptr::<RuntimeArray>(src, HeapObjectType::Array) else {
+        write_span_fail("write_span expects array source argument");
+    };
     unsafe {
         let dst_len = (*dst_arr).len as i64;
         let src_len = (*src_arr).len as i64;
-        if dst_off < 0 || src_off < 0 || dst_off + count > dst_len || src_off + count > src_len {
-            return err;
+        if let Err(message) = write_span_range_check(dst_off, src_off, count, dst_len, src_len) {
+            write_span_fail(&message);
         }
         if std::ptr::eq(dst_arr as *const RuntimeArray, src_arr as *const RuntimeArray) {
             (*dst_arr)
@@ -6192,6 +6284,61 @@ pub extern "C" fn rt_array_write_span(
         }
     }
     RuntimeValue::from_int(count)
+}
+
+/// Bounds rule shared with the interpreter kernel
+/// (`interpreter_method/collections.rs::array_write_span`), with its exact
+/// message text. `count > 0` is the caller's precondition.
+fn write_span_range_check(dst_off: i64, src_off: i64, count: i64, dst_len: i64, src_len: i64) -> Result<(), String> {
+    // `checked_add`: a pathological offset must be reported, never wrap into range.
+    let dst_end = dst_off.checked_add(count);
+    let src_end = src_off.checked_add(count);
+    let in_range = dst_off >= 0
+        && src_off >= 0
+        && dst_end.is_some_and(|end| end <= dst_len)
+        && src_end.is_some_and(|end| end <= src_len);
+    if in_range {
+        Ok(())
+    } else {
+        Err(format!(
+            "write_span out of range: dst_off={dst_off} src_off={src_off} count={count} dst_len={dst_len} src_len={src_len}"
+        ))
+    }
+}
+
+/// Fail a `write_span` call the way the interpreter does for the same program:
+/// `error: semantic: <message>` on stderr, exit status 1.
+fn write_span_fail(message: &str) -> ! {
+    eprintln!("error: semantic: {message}");
+    std::process::exit(1);
+}
+
+#[cfg(test)]
+mod write_span_range_tests {
+    use super::write_span_range_check;
+
+    #[test]
+    fn in_range_spans_pass() {
+        assert!(write_span_range_check(0, 0, 3, 3, 3).is_ok());
+        assert!(write_span_range_check(2, 1, 1, 3, 2).is_ok());
+    }
+
+    #[test]
+    fn out_of_range_matches_the_interpreter_message() {
+        assert_eq!(
+            write_span_range_check(2, 0, 5, 3, 5).unwrap_err(),
+            "write_span out of range: dst_off=2 src_off=0 count=5 dst_len=3 src_len=5"
+        );
+        assert!(write_span_range_check(-1, 0, 1, 3, 3).is_err());
+        assert!(write_span_range_check(0, -1, 1, 3, 3).is_err());
+        assert!(write_span_range_check(0, 3, 1, 3, 3).is_err());
+    }
+
+    #[test]
+    fn overflowing_offsets_are_reported_not_wrapped() {
+        assert!(write_span_range_check(i64::MAX, 0, 2, 3, 3).is_err());
+        assert!(write_span_range_check(0, i64::MAX, 2, 3, 3).is_err());
+    }
 }
 
 /// Create a new array filled with a value

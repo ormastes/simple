@@ -1,9 +1,13 @@
 //! Collection expression lowering: Tuple, Array, VecLiteral, Dict, ArrayRepeat.
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
-use crate::hir::{HirExpr, HirExprKind, HirType, TypeId};
+use crate::hir::{HirExpr, HirExprKind, HirType, TypeId, UnaryOp};
 use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
+
+/// Above this many identical scalar elements an array literal is built by one
+/// `rt_array_repeat` call instead of one operand per element.
+const ARRAY_LITERAL_REPEAT_MIN: usize = 256;
 
 impl<'a> MirLowerer<'a> {
     pub(super) fn lower_tuple_expr(&mut self, elements: &[HirExpr]) -> MirLowerResult<VReg> {
@@ -312,6 +316,61 @@ impl<'a> MirLowerer<'a> {
             return Ok(array_reg);
         }
 
+        // A large literal of one repeated side-effect-free scalar -- what HIR
+        // produces for `[NAME; 72200]` -- becomes a single rt_array_repeat.
+        // Lowering it element by element put ~144K instructions into one
+        // function (font_renderer.spl `_kern_ascii_vals`), and Cranelift
+        // regalloc spent ~344 s on that one `__module_init_dynamic` per run.
+        // The array is identical: every slot holds the same boxed scalar the
+        // per-element path would have produced, and loading a literal, local
+        // or global once instead of N times is unobservable. Only this
+        // generic branch is affected; byte, u64-word and function arrays
+        // returned above.
+        if elements.len() > ARRAY_LITERAL_REPEAT_MIN {
+            let first = &elements[0];
+            if Self::repeat_scalar_element(first) && elements.iter().all(|elem| elem == first) {
+                // Same boxing per type as the per-element loop below.
+                let reg = self.lower_expr(first)?;
+                let boxed = if matches!(first.ty, TypeId::F32 | TypeId::F64) {
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::BoxFloat { dest, value: reg });
+                        dest
+                    })?
+                } else if first.ty == TypeId::BOOL {
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(dest),
+                            target: CallTarget::from_name("rt_value_bool"),
+                            args: vec![reg],
+                        });
+                        dest
+                    })?
+                } else {
+                    self.box_int_operand(reg, first.ty)?
+                };
+                let count = elements.len() as i64;
+                return self.with_func(|func, current_block| {
+                    let count_reg = func.new_vreg();
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstInt {
+                        dest: count_reg,
+                        value: count,
+                    });
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: CallTarget::from_name("rt_array_repeat"),
+                        args: vec![boxed, count_reg],
+                    });
+                    dest
+                });
+            }
+        }
+
         let mut elem_regs = Vec::new();
         for elem in elements {
             let reg = self.lower_expr(elem)?;
@@ -379,6 +438,41 @@ impl<'a> MirLowerer<'a> {
             });
             dest
         })
+    }
+
+    /// Scalar element whose single evaluation is indistinguishable from N
+    /// evaluations: a numeric/bool literal, a negated numeric literal, or a
+    /// plain local/global read of a numeric/bool type.
+    fn repeat_scalar_element(elem: &HirExpr) -> bool {
+        let scalar_ty = matches!(
+            elem.ty,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::F32
+                | TypeId::F64
+                | TypeId::BOOL
+        );
+        if !scalar_ty {
+            return false;
+        }
+        match &elem.kind {
+            HirExprKind::Integer(_)
+            | HirExprKind::Float(_)
+            | HirExprKind::Bool(_)
+            | HirExprKind::Local(_)
+            | HirExprKind::Global(_) => true,
+            HirExprKind::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } => matches!(operand.kind, HirExprKind::Integer(_) | HirExprKind::Float(_)),
+            _ => false,
+        }
     }
 
     pub(super) fn lower_vec_literal_expr(&mut self, elements: &[HirExpr]) -> MirLowerResult<VReg> {
