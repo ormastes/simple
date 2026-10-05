@@ -1,0 +1,66 @@
+"""
+## Purpose and audience
+Purpose: Pin the "image replacement" idioms real sites use to hide text that
+sits behind a sprite (gap L, wikipedia.org's wordmark): `color: transparent`
+paints no glyphs, and a large negative `text-indent` moves the first line
+off the box -- on both the static CPU lane and the BrowserSession (Draw IR)
+lane. Visible text in the same documents must still paint.
+Audience: maintainers of Simple Web paint.
+## Operator workflow
+Run with the test runner; renders small documents offline.
+## Compatibility and limitations
+Alpha between 0 and 1 is still painted opaque (the glyph painters ignore
+color alpha); only fully transparent text is skipped. Transparent text with a
+text-shadow keeps painting. Bug record:
+doc/08_tracking/bug/browser_real_site_rendering_gaps_2026-10-04.md (L)
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{render_html_to_pixel_array}
+
+val W: i32 = 200
+val H: i32 = 40
+
+fn dark_pixels(pixels: [u32]) -> i64:
+    var n: i64 = 0
+    for p in pixels:
+        val r = (p >> 16) & 255u32
+        val g = (p >> 8) & 255u32
+        val b = p & 255u32
+        if r < 128u32 and g < 128u32 and b < 128u32:
+            n = n + 1
+    n
+
+fn doc(rule: text) -> text:
+    '<html><head><style>body{margin:0;color:#000;font:20px sans-serif}' + rule + '</style></head><body><div class="t">HIDDEN TEXT</div></body></html>'
+
+fn session_dark(rule: text) -> i64:
+    var session = BrowserSession.new()
+    val html = doc(rule).replace("</head>", "<script>var z = 1;</script></head>")
+    match session.open_html("https://example.test/hidden.html", html):
+        Ok(_): dark_pixels(session.render_to_pixels(W, H).pixel_data)
+        Err(_): -1
+
+describe "text hidden by the image-replacement idioms":
+    it "paints visible text on both lanes (control)":
+        expect(dark_pixels(render_html_to_pixel_array(doc(""), W, H))).to_be_greater_than(20)
+        expect(session_dark("")).to_be_greater_than(20)
+
+    it "does not paint color:transparent text":
+        step("static CPU lane")
+        expect(dark_pixels(render_html_to_pixel_array(doc('.t{color:transparent}'), W, H))).to_equal(0)
+        step("BrowserSession Draw IR lane")
+        expect(session_dark('.t{color:transparent}')).to_equal(0)
+
+    it "moves the first line off the box with a large negative text-indent":
+        expect(dark_pixels(render_html_to_pixel_array(doc('.t{text-indent:-10000px;overflow:hidden}'), W, H))).to_equal(0)
+        expect(session_dark('.t{text-indent:-10000px;overflow:hidden}')).to_equal(0)
+
+    it "still paints text whose color merely fails to parse":
+        step("an unknown color keeps the inherited black, as before")
+        expect(session_dark('.t{color:notacolor}')).to_be_greater_than(20)
