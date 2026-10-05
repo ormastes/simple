@@ -1,0 +1,276 @@
+#!/bin/sh
+# Native-only observer check for the test-build vector apply boundary.
+# It does not build or qualify a Simple DB/HTTP application.
+# A later app runner can reuse observer.so with `exec 3>receipt; env
+# SIMPLE_VECTOR_TEST_RECEIPT_OWNER=1 LD_PRELOAD=observer.so app args...` after
+# independently pinning its provider DSO path and SHA-256. It must bind the
+# receipt to the launched child PID from its process API, not app-printed text.
+set -eu
+case $(uname -sm) in 'Linux x86_64') ;; *) echo 'UNSUPPORTED Linux x86_64'; exit 77;; esac
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:?fresh absolute output directory required}
+case "$out" in /*) ;; *) echo 'absolute output directory required' >&2; exit 2;; esac
+[ ! -e "$out" ] || { echo 'fresh output directory required' >&2; exit 2; }
+mkdir -p "$out/id-native" "$out/id-noavx" "$out/id-nobw"
+cc=${CLANG:-clang}
+objdump=${OBJDUMP:-objdump}
+src=$root/src/runtime/providers/vector
+abi=$root/src/runtime/simple_vector_kernel_abi_v1.h
+observer=$root/src/runtime/test/vector_provider_test_events.c
+selfcheck=$root/src/runtime/test/vector_provider_event_selfcheck.c
+watchdog=$root/scripts/resource/process-tree-rss-watchdog.pl
+common='-std=c11 -O2 -Wall -Wextra -Werror -fno-vectorize -fno-slp-vectorize'
+base="$common -march=x86-64 -fPIC -fvisibility=hidden"
+test_defines='-DSIMPLE_VECTOR_ENABLE_HTTP -DSIMPLE_VECTOR_ENABLE_HTTP_AVX512 -DSIMPLE_VECTOR_TEST_OBSERVER=1 -DSIMPLE_VECTOR_TEST_EVENTS=1'
+
+"$cc" --version >"$out/toolchain.txt"
+"$objdump" --version >>"$out/toolchain.txt"
+grep -m1 '^flags' /proc/cpuinfo >"$out/host-cpu-flags.txt" || true
+host_flags=$(sed -n 's/^flags[[:space:]]*:[[:space:]]*//p' "$out/host-cpu-flags.txt")
+case " $host_flags " in *' avx512f '*) ;; *) echo 'UNSUPPORTED host lacks AVX512F'; exit 77;; esac
+case " $host_flags " in *' avx512bw '*) ;; *) echo 'UNSUPPORTED host lacks AVX512BW'; exit 77;; esac
+sha256sum "$src/bitmap_provider.c" "$src/bitmap_avx512.c" "$src/http_avx512.c" \
+    "$src/bitmap_kernel_private.h" "$abi" "$observer" "$selfcheck" "$0" "$watchdog" \
+    >"$out/source.sha256"
+baseline_ref=62e10c94cb9a2749911a64419cf8064e064e50ba
+mkdir -p "$out/prior"
+git -C "$root" show "$baseline_ref:src/runtime/providers/vector/bitmap_provider.c" \
+    >"$out/prior/bitmap_provider.c"
+sha256sum "$out/prior/bitmap_provider.c" >"$out/prior-source.sha256"
+
+provider_sha=$(printf '%s' 'simple-vector-test-events:x86_64-avx512bw' | sha256sum | cut -c1-16)
+implementation_sha=$(cat "$src/bitmap_provider.c" "$src/bitmap_avx512.c" \
+    "$src/http_avx512.c" "$src/bitmap_kernel_private.h" "$abi" | sha256sum | cut -c1-16)
+write_identity() {
+    dir=$1
+    impl=$2
+    printf '#define SIMPLE_VECTOR_PROVIDER_ID UINT64_C(0x%s)\n#define SIMPLE_VECTOR_IMPLEMENTATION_ID UINT64_C(0x%s)\n' \
+        "$provider_sha" "$impl" >"$dir/provider_identity.h"
+}
+write_identity "$out/id-native" "$implementation_sha"
+write_identity "$out/id-noavx" "$(printf '%s:no-avx' "$implementation_sha" | sha256sum | cut -c1-16)"
+write_identity "$out/id-nobw" "$(printf '%s:no-bw' "$implementation_sha" | sha256sum | cut -c1-16)"
+
+compile() { timeout 60 "$@"; }
+{
+    set -x
+    compile "$cc" $base -shared -fPIC -fvisibility=hidden \
+        "$observer" -o "$out/observer.so"
+    for mode in native noavx nobw; do
+        id="$out/id-$mode"
+        extra=''
+        if [ "$mode" = noavx ]; then extra='-DSIMPLE_VECTOR_FORCE_NO_AVX512'; fi
+        if [ "$mode" = nobw ]; then extra='-DSIMPLE_VECTOR_FORCE_NO_AVX512BW'; fi
+        # shellcheck disable=SC2086
+        compile "$cc" $base $test_defines $extra -I"$id" -c "$src/bitmap_provider.c" -o "$out/provider-$mode.o"
+        compile "$cc" $base $test_defines -c "$src/bitmap_avx512.c" -o "$out/bitmap-$mode.o"
+        compile "$cc" $base $test_defines -c "$src/http_avx512.c" -o "$out/http-$mode.o"
+        compile "$cc" -shared "$out/provider-$mode.o" "$out/bitmap-$mode.o" \
+            "$out/http-$mode.o" -o "$out/provider-$mode.so"
+    done
+    # Same-flags, same-identity objects must be byte-identical when both test
+    # observer flags are off.
+    compile "$cc" $base -DSIMPLE_VECTOR_ENABLE_HTTP -DSIMPLE_VECTOR_ENABLE_HTTP_AVX512 -I"$out/id-native" \
+        -c "$src/bitmap_provider.c" -o "$out/provider-production-off.o"
+    compile "$cc" $base -DSIMPLE_VECTOR_ENABLE_HTTP -DSIMPLE_VECTOR_ENABLE_HTTP_AVX512 -I"$src" -I"$out/id-native" \
+        -c "$out/prior/bitmap_provider.c" -o "$out/provider-prior-off.o"
+    compile "$cc" $common -march=x86-64 "$selfcheck" -ldl -o "$out/selfcheck"
+    set +x
+} >"$out/build.log" 2>&1
+cmp -s "$out/provider-production-off.o" "$out/provider-prior-off.o" || {
+    echo 'FAIL production flag-off provider object differs from release baseline' >&2; exit 1;
+}
+
+"$objdump" -d "$out/provider-native.o" >"$out/provider-baseline.disasm"
+"$objdump" -d "$out/bitmap-native.o" >"$out/bitmap-kernel.disasm"
+"$objdump" -d "$out/http-native.o" >"$out/http-kernel.disasm"
+if grep -Eiq 'zmm[0-9]+|\bkmov[a-z0-9]*\b|vpcmpeq[bw]|vpcmp.*b' "$out/provider-baseline.disasm"; then
+    echo 'FAIL baseline provider object contains target-vector instruction families' >&2; exit 1
+fi
+grep -Eiq 'zmm[0-9]+' "$out/bitmap-kernel.disasm" || { echo 'FAIL no ZMM bitmap code' >&2; exit 1; }
+grep -Eiq 'zmm[0-9]+' "$out/http-kernel.disasm" || { echo 'FAIL no ZMM HTTP code' >&2; exit 1; }
+
+field() { awk -F= -v key="$2" '$1==key { print substr($0, index($0,"=")+1); found=1 } END { if (!found) exit 1 }' "$1"; }
+validate_receipt() {
+    perl - "$1" "$2" <<'PERL'
+use strict;
+use warnings;
+use Math::BigInt;
+my ($path, $expected_pid) = @ARGV;
+my $max = Math::BigInt->new('18446744073709551615');
+open my $fh, '<', $path or die "receipt open failed\n";
+my $bytes = '';
+while (length($bytes) <= 4096) {
+    my $chunk = '';
+    my $read = read($fh, $chunk, 4097 - length($bytes));
+    defined $read or die "receipt read failed\n";
+    last if $read == 0;
+    $bytes .= $chunk;
+}
+close $fh or die "receipt close failed\n";
+length($bytes) <= 4096 or die "receipt exceeds bound\n";
+$bytes =~ /\n\z/ or die "receipt missing final newline\n";
+my @lines = split /\n/, $bytes, -1;
+pop @lines if @lines && $lines[-1] eq '';
+@lines == 38 or die "receipt field count mismatch\n";
+shift(@lines) eq 'SIMPLE_VECTOR_TEST_EVENTS_V1' or die "receipt header mismatch\n";
+my %values;
+for my $line (@lines) {
+    $line =~ /^([a-z0-9_]+)=([0-9]+)$/ or die "malformed receipt field\n";
+    exists $values{$1} and die "duplicate receipt key\n";
+    length($2) <= 20 or die "receipt integer width exceeds u64\n";
+    my $number = Math::BigInt->new($2);
+    $number <= $max or die "receipt integer exceeds u64\n";
+    $values{$1} = $number;
+}
+my @expected = qw(pid loads events malformed overflow);
+for my $op (1..4) {
+    push @expected, "op${op}_loops";
+    push @expected, map { "op${op}_status$_" } 0..6;
+}
+keys(%values) == @expected or die "receipt contains missing/extra fields\n";
+for my $key (@expected) { exists $values{$key} or die "missing receipt key $key\n"; }
+$values{pid}->bstr eq $expected_pid or die "receipt PID mismatch\n";
+$values{loads} <= Math::BigInt->new(1) or die "multiple provider loads\n";
+$values{malformed}->is_zero or die "malformed callback event\n";
+$values{overflow}->is_zero or die "observer counter overflow\n";
+my $event_sum = Math::BigInt->new(0);
+for my $op (1..4) {
+    my $successes = $values{"op${op}_status0"};
+    my $op_sum = Math::BigInt->new(0);
+    for my $status (0..6) { $op_sum->badd($values{"op${op}_status$status"}); }
+    $event_sum->badd($op_sum);
+    $values{"op${op}_loops"}->is_zero || !$successes->is_zero
+        or die "loop count without a successful event for op $op\n";
+}
+$event_sum->bstr eq $values{events}->bstr or die "status counts do not sum to event count\n";
+exit 0;
+PERL
+}
+write_zero_receipt() {
+    destination=$1 pid=$2
+    {
+        echo SIMPLE_VECTOR_TEST_EVENTS_V1
+        echo "pid=$pid"
+        echo loads=0
+        echo events=0
+        echo malformed=0
+        echo overflow=0
+        for opcode in 1 2 3 4; do
+            echo "op${opcode}_loops=0"
+            for status in 0 1 2 3 4 5 6; do echo "op${opcode}_status${status}=0"; done
+        done
+    } >"$destination"
+}
+expect_invalid_receipt() {
+    expected_pid=${2:-4242}
+    if validate_receipt "$1" "$expected_pid" >/dev/null 2>&1; then
+        echo "FAIL strict receipt parser accepted invalid fixture: $1" >&2
+        exit 1
+    fi
+}
+write_zero_receipt "$out/receipt-validator-valid.fixture" 4242
+validate_receipt "$out/receipt-validator-valid.fixture" 4242
+cp "$out/receipt-validator-valid.fixture" "$out/receipt-validator-duplicate.fixture"
+echo op1_status0=0 >>"$out/receipt-validator-duplicate.fixture"
+expect_invalid_receipt "$out/receipt-validator-duplicate.fixture"
+sed 's/^op1_status0=0$/pid=4242/' "$out/receipt-validator-valid.fixture" \
+    >"$out/receipt-validator-duplicate-same-count.fixture"
+expect_invalid_receipt "$out/receipt-validator-duplicate-same-count.fixture"
+sed '$d' "$out/receipt-validator-valid.fixture" >"$out/receipt-validator-truncated.fixture"
+expect_invalid_receipt "$out/receipt-validator-truncated.fixture"
+sed 's/^op4_status6=0$/unexpected=0/' "$out/receipt-validator-valid.fixture" \
+    >"$out/receipt-validator-extra.fixture"
+expect_invalid_receipt "$out/receipt-validator-extra.fixture"
+expect_invalid_receipt "$out/receipt-validator-valid.fixture" 4243
+sed 's/^events=0$/events=1/' "$out/receipt-validator-valid.fixture" \
+    >"$out/receipt-validator-sum.fixture"
+expect_invalid_receipt "$out/receipt-validator-sum.fixture"
+sed 's/^op1_loops=0$/op1_loops=1/' "$out/receipt-validator-valid.fixture" \
+    >"$out/receipt-validator-loop-status.fixture"
+expect_invalid_receipt "$out/receipt-validator-loop-status.fixture"
+sed 's/^op1_status0=0$/op1_status0=x/' "$out/receipt-validator-valid.fixture" \
+    >"$out/receipt-validator-malformed.fixture"
+expect_invalid_receipt "$out/receipt-validator-malformed.fixture"
+sed 's/^pid=4242$/pid=18446744073709551616/' "$out/receipt-validator-valid.fixture" \
+    >"$out/receipt-validator-u64-overflow.fixture"
+expect_invalid_receipt "$out/receipt-validator-u64-overflow.fixture"
+head -c 4097 /dev/zero >"$out/receipt-validator-oversize.fixture"
+expect_invalid_receipt "$out/receipt-validator-oversize.fixture"
+cp "$out/receipt-validator-valid.fixture" "$out/receipt-validator-no-final-newline.fixture"
+truncate -s -1 "$out/receipt-validator-no-final-newline.fixture"
+expect_invalid_receipt "$out/receipt-validator-no-final-newline.fixture"
+expect_field() {
+    actual=$(field "$1" "$2") || { echo "FAIL missing $2 in $1" >&2; exit 1; }
+    [ "$actual" = "$3" ] || { echo "FAIL $1: expected $2=$3, got $actual" >&2; exit 1; }
+}
+expect_positive() {
+    actual=$(field "$1" "$2") || { echo "FAIL missing $2 in $1" >&2; exit 1; }
+    [ "$actual" -gt 0 ] || { echo "FAIL $1: expected positive $2, got $actual" >&2; exit 1; }
+}
+run_case() {
+    name=$1 library=$2 scenario=$3 expected_loads=$4 expected_events=$5
+    receipt="$out/$name.receipt"
+    log="$out/$name.log"
+    : >"$receipt"
+    result=0
+    (
+        exec 3>"$receipt"
+        perl "$watchdog" --max-rss-kib=524288 --rss-cap-mode=enforce \
+            --timeout-seconds=60 --receipt="$out/$name.rss.env" -- \
+            env SIMPLE_VECTOR_TEST_RECEIPT_OWNER=1 LD_PRELOAD="$out/observer.so" \
+                "$out/selfcheck" "$library" "$scenario"
+    ) >"$log" 2>&1 || result=$?
+    if [ "$result" != 0 ]; then cat "$log" >&2; exit "$result"; fi
+    [ "$(grep -xc 'SIMPLE_VECTOR_TEST_EVENTS_V1' "$receipt")" = 1 ] || {
+        echo "FAIL expected exactly one complete receipt: $name" >&2; exit 1;
+    }
+    expect_field "$receipt" loads "$expected_loads"
+    expect_field "$receipt" events "$expected_events"
+    expect_field "$receipt" malformed 0
+    expect_field "$receipt" overflow 0
+    self_pid_lines=$(grep -c '^SELF_PID=' "$log" || true)
+    [ "$self_pid_lines" = 1 ] || { echo "FAIL expected exactly one SELF_PID: $name" >&2; exit 1; }
+    runner_pid=$(sed -n 's/^SELF_PID=//p' "$log")
+    receipt_pid=$(field "$receipt" pid)
+    [ -n "$runner_pid" ] && [ "$receipt_pid" = "$runner_pid" ] || {
+        echo "FAIL receipt PID is not this app process: $name" >&2; exit 1;
+    }
+    validate_receipt "$receipt" "$runner_pid"
+    printf '%s\t%s\t%s\n' "$name" "$receipt_pid" "$receipt" >>"$out/receipts.tsv"
+}
+
+check_event() {
+    receipt=$1 opcode=$2 status=$3 count=$4 min_loops=$5
+    expect_field "$receipt" "op${opcode}_status${status}" "$count"
+    if [ "$min_loops" = positive ]; then expect_positive "$receipt" "op${opcode}_loops"; fi
+    if [ "$min_loops" = zero ]; then expect_field "$receipt" "op${opcode}_loops" 0; fi
+}
+
+printf 'case\tpid\treceipt\n' >"$out/receipts.tsv"
+run_case no-load "$out/provider-native.so" no-load 0 0
+run_case load-no-call "$out/provider-native.so" load-no-call 1 0
+run_case bitmap-tail "$out/provider-native.so" bitmap-tail 1 1
+check_event "$out/bitmap-tail.receipt" 1 0 1 zero
+run_case bitmap-33-and "$out/provider-native.so" bitmap-33-and 1 1
+check_event "$out/bitmap-33-and.receipt" 1 0 1 positive
+[ "$(field "$out/bitmap-33-and.receipt" op1_loops)" -ge 2 ] || { echo 'FAIL bitmap 33-word vector loops < 2' >&2; exit 1; }
+run_case bitmap-33-or "$out/provider-native.so" bitmap-33-or 1 1
+check_event "$out/bitmap-33-or.receipt" 2 0 1 positive
+[ "$(field "$out/bitmap-33-or.receipt" op2_loops)" -ge 2 ] || { echo 'FAIL bitmap OR 33-word vector loops < 2' >&2; exit 1; }
+run_case http-byte "$out/provider-native.so" http-byte 1 1
+check_event "$out/http-byte.receipt" 3 0 1 positive
+run_case http-crlf "$out/provider-native.so" http-crlf 1 1
+check_event "$out/http-crlf.receipt" 4 0 1 positive
+run_case invalid-request "$out/provider-native.so" invalid-request 1 1
+check_event "$out/invalid-request.receipt" 1 1 1 zero
+run_case forced-no-avx-bitmap "$out/provider-noavx.so" forced-no-avx-bitmap 1 1
+check_event "$out/forced-no-avx-bitmap.receipt" 1 5 1 zero
+run_case forced-no-avx-http "$out/provider-noavx.so" forced-no-avx-http 1 1
+check_event "$out/forced-no-avx-http.receipt" 3 5 1 zero
+run_case forced-no-bw-http "$out/provider-nobw.so" forced-no-bw-http 1 1
+check_event "$out/forced-no-bw-http.receipt" 3 5 1 zero
+
+sha256sum "$out/observer.so" "$out/provider-native.so" "$out/provider-noavx.so" \
+    "$out/provider-nobw.so" "$out/selfcheck" >"$out/artifacts.sha256"
+echo 'PASS test-only apply event receipt: load/refusal/tail/bitmap/HTTP events and actual vector loop counts verified'
