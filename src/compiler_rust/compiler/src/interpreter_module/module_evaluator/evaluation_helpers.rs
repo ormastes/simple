@@ -19,7 +19,7 @@ use crate::interpreter::{
 };
 
 use crate::interpreter::interpreter_module::export_handler::load_export_source;
-use crate::interpreter::module_cache::{filter_functions_from_value, module_exports_owner, normalize_path_key};
+use crate::interpreter::module_cache::{filter_functions_from_value, module_exports_owner, module_owner_key};
 
 type Enums = HashMap<String, Arc<simple_parser::ast::EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;
@@ -42,7 +42,7 @@ fn tag_methods_owner(methods: &mut [FunctionDef], owner: Option<&Arc<str>>) {
 }
 
 fn module_owner(module_path: Option<&Path>) -> Option<Arc<str>> {
-    module_path.map(|path| Arc::from(normalize_path_key(path).to_string_lossy().as_ref()))
+    module_path.map(module_owner_key)
 }
 
 fn record_owned_global(module_path: Option<&Path>, name: &str, value: &Value) {
@@ -459,7 +459,7 @@ pub(super) fn process_imports_and_assignments(
     global_classes: &mut HashMap<String, Arc<ClassDef>>,
     global_enums: &mut Enums,
     exports: &mut HashMap<String, Value>,
-    bare_exports: &mut Vec<Vec<String>>,
+    bare_exports: &mut Vec<Vec<(String, String)>>,
 ) -> Result<(), CompileError> {
     for item in items.iter() {
         match item {
@@ -698,23 +698,22 @@ fn process_export_stmt(
     global_classes: &mut HashMap<String, Arc<ClassDef>>,
     global_enums: &mut Enums,
     exports: &mut HashMap<String, Value>,
-    bare_exports: &mut Vec<Vec<String>>,
+    bare_exports: &mut Vec<Vec<(String, String)>>,
 ) -> Result<(), CompileError> {
     // Check if this is a bare export (export X, Y) or re-export (export X from Y)
     if export_stmt.path.segments.is_empty() {
-        // Bare export: export X, Y, Z
+        // Bare export: export X, Y, Z  /  export impl_name as public_name.
+        // Each entry is (local source name, exported public name).
+        fn bare_pair(item: &ImportTarget) -> Option<(String, String)> {
+            match item {
+                ImportTarget::Single(name) => Some((name.clone(), name.clone())),
+                ImportTarget::Aliased { name, alias } => Some((name.clone(), alias.clone())),
+                _ => None,
+            }
+        }
         let names_to_export = match &export_stmt.target {
-            ImportTarget::Single(name) => vec![name.clone()],
-            ImportTarget::Aliased { name, .. } => vec![name.clone()],
-            ImportTarget::Group(items) => items
-                .iter()
-                .filter_map(|item| match item {
-                    ImportTarget::Single(name) => Some(name.clone()),
-                    ImportTarget::Aliased { name, .. } => Some(name.clone()),
-                    _ => None,
-                })
-                .collect(),
-            _ => vec![],
+            ImportTarget::Group(items) => items.iter().filter_map(bare_pair).collect(),
+            other => bare_pair(other).into_iter().collect(),
         };
         bare_exports.push(names_to_export);
     } else {
@@ -851,7 +850,7 @@ pub(super) fn export_functions(
 
 /// Process bare export statements
 pub(super) fn process_bare_exports(
-    bare_exports: &[Vec<String>],
+    bare_exports: &[Vec<(String, String)>],
     env: &Env,
     exports: &mut HashMap<String, Value>,
     module_path: Option<&Path>,
@@ -861,12 +860,25 @@ pub(super) fn process_bare_exports(
         normalized.ends_with("/src/compiler_rust/lib/std/src/spec/__init__.spl")
     });
     for export_names in bare_exports {
-        for name in export_names {
+        for (name, public_name) in export_names {
             if let Some(value) = env.get(name) {
                 // Don't override if already exported
-                if !exports.contains_key(name) {
-                    trace!(name = %name, "Adding bare export");
-                    exports.insert(name.clone(), value.clone());
+                if !exports.contains_key(public_name) {
+                    trace!(name = %name, public_name = %public_name, "Adding bare export");
+                    exports.insert(public_name.clone(), value.clone());
+                }
+            } else if name != public_name {
+                // An aliased export needs the LOCAL name; a value already
+                // exported under the public name is not the aliased symbol.
+                if let Some(value) = exports.get(name).cloned() {
+                    if !exports.contains_key(public_name) {
+                        exports.insert(public_name.clone(), value);
+                    }
+                    trace!(name = %name, public_name = %public_name, "Aliased bare export of auto-exported symbol");
+                } else if suppress_undefined_export_warning {
+                    trace!(name = %name, "Suppressing undefined bare export for std.spec fast shim");
+                } else {
+                    warn!(name = %name, "Export statement references undefined symbol");
                 }
             } else {
                 // Check if it's already in exports (e.g., enums are auto-exported)

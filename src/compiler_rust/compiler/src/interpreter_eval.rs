@@ -433,6 +433,36 @@ pub(crate) fn initialize_extern_functions() {
 /// Main module evaluation implementation.
 /// Processes all top-level items and executes the main function if present.
 pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
+    evaluate_module_items(ModuleItems::Borrowed(items))
+}
+
+/// Like [`evaluate_module_impl`], but owns the items and frees them once both
+/// registration passes are done -- before `main` runs. Every definition the
+/// program can reach afterwards was already copied into `functions`,
+/// `classes`, `env`, ... (the borrow checker proves nothing borrowed from
+/// `items` outlives the drop), so a long `main` no longer pins the whole
+/// flattened entry module (~325 MB for `src/app/browser/main.spl`).
+pub(super) fn evaluate_module_impl_owned(items: Vec<Node>) -> Result<i32, CompileError> {
+    evaluate_module_items(ModuleItems::Owned(items))
+}
+
+/// Items for one module evaluation, borrowed from the caller or owned.
+enum ModuleItems<'a> {
+    Borrowed(&'a [Node]),
+    Owned(Vec<Node>),
+}
+
+impl ModuleItems<'_> {
+    fn as_slice(&self) -> &[Node] {
+        match self {
+            ModuleItems::Borrowed(items) => items,
+            ModuleItems::Owned(items) => items,
+        }
+    }
+}
+
+fn evaluate_module_items(module_items: ModuleItems<'_>) -> Result<i32, CompileError> {
+    let items = module_items.as_slice();
     if std::env::var_os("SIMPLE_TRY_PROBE").is_some() {
         let dump = format!("{:?}", items);
         eprintln!(
@@ -1918,6 +1948,10 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             }
         }
     }
+
+    // Both passes are done: free owned items before `main` runs (a no-op for
+    // borrowed items). Nothing below reads `items`.
+    drop(module_items);
 
     // Check if main is defined as a function and call it. Prefer the entry module's
     // `main` captured after the first pass (see above) so a lazily-imported module's

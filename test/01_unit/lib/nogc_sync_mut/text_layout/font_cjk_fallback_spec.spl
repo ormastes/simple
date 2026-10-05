@@ -1,0 +1,45 @@
+"""
+## Purpose and audience
+Purpose: Pin the CJK coverage fallback in font resolution (gap F). A host
+Latin face (Helvetica on macOS) has no CJK glyphs, so CJK text - even with
+lang="zh" - drew .notdef boxes. A run whose CJK codepoints the bound face
+cannot draw is now re-resolved on a face that covers it.
+Audience: maintainers of nogc_sync_mut/text_layout.
+## Operator workflow
+Run with the test runner (interpreter lane).
+## Compatibility and limitations
+Hangul needs a platform Korean face (macOS AppleGothic); the bundled catalog
+has none, so on hosts without one Hangul stays on the Han/kana fallback.
+Bug record: doc/08_tracking/bug/browser_real_site_rendering_gaps_2026-10-04.md (F)
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_platform_hangul_faces}
+
+describe "CJK coverage fallback":
+    it "resolves Han text on the bundled Noto Sans SC face whatever the language":
+        for lang in ["und", "en", "zh", "ja"]:
+            val m = resolve_font_metrics_with_language("sans-serif", "中文", 16, lang)
+            assert_true(m.valid)
+            expect(m.family).to_equal("Noto Sans SC")
+
+    it "keeps the serif category on the serif CJK face (Noto Serif SC)":
+        val m = resolve_font_metrics_with_language("serif", "日本語", 16, "und")
+        expect(m.identity).to_contain("050080d9255a86808f2945bffac582b31ef32bc36411ce29563b4961670c66f9")
+
+    it "leaves Latin text on the family's own face":
+        step("no CJK codepoint means no coverage check and no change")
+        val latin = resolve_font_metrics_with_language("sans-serif", "hello", 16, "und")
+        assert_true(latin.valid)
+        expect(latin.family).to_equal("sans-serif")
+
+    it "sends Hangul to the platform Korean face when the host has one":
+        val m = resolve_font_metrics_with_language("sans-serif", "한국어", 16, "ko")
+        assert_true(m.valid)
+        if browser_platform_hangul_faces().len() > 0:
+            expect(m.identity).to_contain("AppleGothic")
+        else:
+            expect(m.family).to_equal("Noto Sans SC")

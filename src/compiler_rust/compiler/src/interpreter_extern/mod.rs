@@ -77,6 +77,7 @@ pub mod concurrency;
 pub mod tui;
 pub mod repl;
 pub mod gpu;
+pub mod font;
 pub mod gpu_rocm;
 pub mod simd;
 pub mod diagram;
@@ -1154,6 +1155,19 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_metal_compile_shader", gpu::rt_metal_compile_shader_fn);
     insert_simple!("rt_metal_load_library_array", gpu::rt_metal_load_library_array_fn);
     insert_simple!("rt_font_load_array", gpu::rt_font_load_array_fn);
+    // Font SFFI behind a generation-checked handle table (font.rs): Simple
+    // never sees a raw FontData*/BitmapData* pointer.
+    insert_simple!("rt_font_load", font::rt_font_load_fn);
+    insert_simple!("rt_font_free", font::rt_font_free_fn);
+    insert_simple!("rt_font_glyph_index", font::rt_font_glyph_index_fn);
+    insert_simple!("rt_font_glyph_bitmap", font::rt_font_glyph_bitmap_fn);
+    insert_simple!("rt_font_glyph_advance", font::rt_font_glyph_advance_fn);
+    insert_simple!("rt_font_line_height", font::rt_font_line_height_fn);
+    insert_simple!("rt_font_ascent", font::rt_font_ascent_fn);
+    insert_simple!("rt_font_bitmap_width", font::rt_font_bitmap_width_fn);
+    insert_simple!("rt_font_bitmap_height", font::rt_font_bitmap_height_fn);
+    insert_simple!("rt_font_bitmap_get_pixel", font::rt_font_bitmap_get_pixel_fn);
+    insert_simple!("rt_font_bitmap_free", font::rt_font_bitmap_free_fn);
     insert_simple!("rt_metal_create_command_buffer", gpu::rt_metal_create_command_buffer_fn);
     insert_simple!(
         "rt_metal_destroy_command_buffer",
@@ -2980,8 +2994,16 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_tls_client_write", net_tls_client::rt_tls_client_write);
     insert_simple!(
+        "rt_tls_client_read_checked",
+        net_tls_client::rt_tls_client_read_checked
+    );
+    insert_simple!(
         "rt_tls_client_write_timeout",
         net_tls_client::rt_tls_client_write_timeout
+    );
+    insert_simple!(
+        "rt_tls_client_read_timeout_checked",
+        net_tls_client::rt_tls_client_read_timeout_checked
     );
     insert_simple!("rt_tls_client_close", net_tls_client::rt_tls_client_close);
     insert_simple!(

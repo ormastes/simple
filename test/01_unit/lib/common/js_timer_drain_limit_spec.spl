@@ -19,7 +19,7 @@ doc/05_design/REQ-LIB-COMMON-001.md
 use std.spec.*
 
 use std.js.engine.runtime.{JsRuntime}
-use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.engine.js_error.{JsLogger, LogLevel}
 use std.js.types.js_types.{JsValue}
 
 extern fn rt_file_read_text(path: text) -> text
@@ -58,7 +58,7 @@ describe "JavaScript timer drain limit":
         # @req: REQ-LIB-COMMON-001
         step("Verify: does not allocate Node timer handles in browser mode")
         var runtime = JsRuntime.new_browser(
-            Logger.new("browser-timer-heap", LogLevel.Error)
+            JsLogger.new("browser-timer-heap", LogLevel.Error)
         )
         expect(runtime.eval("function noop() {}").is_ok()).to_equal(true)
         val baseline = runtime.interpreter.object_store.next_id
@@ -77,7 +77,7 @@ describe "JavaScript timer drain limit":
     it "coalesces an overdue interval to one callback per clock advance":
         # @req: REQ-LIB-COMMON-001
         step("Verify: coalesces an overdue interval to one callback per clock advance")
-        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        var runtime = JsRuntime.new(JsLogger.new("timer-limit", LogLevel.Error))
         val scheduled = runtime.eval(
             "var ticks = 0; setInterval(function() { ticks = ticks + 1; }, 1);"
         )
@@ -88,7 +88,7 @@ describe "JavaScript timer drain limit":
     it "yields after one thousand nested zero-delay callbacks":
         # @req: REQ-LIB-COMMON-001
         step("Verify: yields after one thousand nested zero-delay callbacks")
-        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        var runtime = JsRuntime.new(JsLogger.new("timer-limit", LogLevel.Error))
         val scheduled = runtime.eval(
             "var ticks = 0; function again() { ticks = ticks + 1; setTimeout(again, 0); } setTimeout(again, 0);"
         )
@@ -100,7 +100,7 @@ describe "JavaScript timer drain limit":
         # @req: REQ-LIB-COMMON-001
         step("Verify: drains a full due queue in deadline and creation order")
         var runtime = JsRuntime.new_browser(
-            Logger.new("timer-bulk-order", LogLevel.Error)
+            JsLogger.new("timer-bulk-order", LogLevel.Error)
         )
         val scheduled = runtime.eval(
             "var fired = 0; var mismatches = 0; function record(expected) { if (expected !== 4095 - fired) { mismatches = mismatches + 1; } fired = fired + 1; } for (var i = 0; i < 4096; i = i + 1) { setTimeout(record, 4095 - i, i); }"
@@ -123,7 +123,7 @@ describe "JavaScript timer drain limit":
     it "lets an interval cancel its queued continuation":
         # @req: REQ-LIB-COMMON-001
         step("Verify: lets an interval cancel its queued continuation")
-        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        var runtime = JsRuntime.new(JsLogger.new("timer-limit", LogLevel.Error))
         val scheduled = runtime.eval(
             "var ticks = 0; var timer = setInterval(function() { ticks = ticks + 1; clearInterval(timer); }, 1);"
         )
@@ -149,7 +149,7 @@ describe "JavaScript timer drain limit":
     it "keeps an interval in its original same-deadline queue slot":
         # @req: REQ-LIB-COMMON-001
         step("Verify: keeps an interval in its original same-deadline queue slot")
-        var runtime = JsRuntime.new(Logger.new("timer-order", LogLevel.Error))
+        var runtime = JsRuntime.new(JsLogger.new("timer-order", LogLevel.Error))
         expect(runtime.eval(
             "var order = ''; var interval = setInterval(function() { order = order + 'A'; if (order === 'AA') { clearInterval(interval); } }, 10); setTimeout(function() { order = order + 'B'; }, 20);"
         ).is_ok()).to_equal(true)
@@ -165,7 +165,7 @@ describe "JavaScript timer drain limit":
         # @req: REQ-LIB-COMMON-001
         step("Verify: runs due timers by deadline instead of insertion order")
         var runtime = JsRuntime.new_browser(
-            Logger.new("timer-deadline-order", LogLevel.Error)
+            JsLogger.new("timer-deadline-order", LogLevel.Error)
         )
         expect(runtime.eval(
             "var order = ''; setTimeout(function() { order = order + 'L'; }, 20); setTimeout(function() { order = order + 'E'; }, 10);"
@@ -182,7 +182,7 @@ describe "JavaScript timer drain limit":
         # @req: REQ-LIB-COMMON-001
         step("Verify: runs a Promise microtask checkpoint between timer callbacks")
         var runtime = JsRuntime.new_browser(
-            Logger.new("timer-microtask-order", LogLevel.Error)
+            JsLogger.new("timer-microtask-order", LogLevel.Error)
         )
         expect(runtime.eval(
             "var order = ''; setTimeout(function() { order = order + 'A'; Promise.resolve(1).then(function() { order = order + 'M'; }); }, 0); setTimeout(function() { order = order + 'B'; }, 0);"
@@ -199,7 +199,7 @@ describe "JavaScript timer drain limit":
         # @req: REQ-LIB-COMMON-001
         step("Verify: runs Node nextTick FIFO before Promise microtasks and the next timer")
         var runtime = JsRuntime.new(
-            Logger.new("timer-next-tick-order", LogLevel.Error)
+            JsLogger.new("timer-next-tick-order", LogLevel.Error)
         )
         expect(runtime.eval(
             "var order = ''; setTimeout(function() { order = order + 'A'; Promise.resolve(1).then(function() { order = order + 'M'; }); process.nextTick(function() { order = order + 'N'; }); }, 0); setTimeout(function() { order = order + 'B'; }, 0);"
@@ -216,7 +216,7 @@ describe "JavaScript timer drain limit":
         # @req: REQ-LIB-COMMON-001
         step("Verify: yields before the next timer when a microtask checkpoint hits its cap")
         var runtime = JsRuntime.new_browser(
-            Logger.new("timer-microtask-cap", LogLevel.Error)
+            JsLogger.new("timer-microtask-cap", LogLevel.Error)
         )
         expect(runtime.eval(
             "var hits = 0; var second = false; setTimeout(function() { for (var i = 0; i < 1001; i = i + 1) { Promise.resolve(i).then(function() { hits = hits + 1; }); } }, 0); setTimeout(function() { second = true; }, 0);"
@@ -239,7 +239,7 @@ describe "JavaScript timer drain limit":
     it "bounds pending timer tasks per document":
         # @req: REQ-LIB-COMMON-001
         step("Verify: bounds pending timer tasks per document")
-        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        var runtime = JsRuntime.new(JsLogger.new("timer-limit", LogLevel.Error))
         val result = runtime.eval(
             "var denied = 0; for (var i = 0; i < 4100; i = i + 1) { if (setTimeout(function() {}, 1000) === undefined) { denied = denied + 1; } } denied"
         )
@@ -252,7 +252,7 @@ describe "JavaScript timer drain limit":
     it "keeps a single requestAnimationFrame chain alive past handle history":
         # @req: REQ-LIB-COMMON-001
         step("Verify: keeps a single requestAnimationFrame chain alive past handle history")
-        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        var runtime = JsRuntime.new(JsLogger.new("timer-limit", LogLevel.Error))
         val scheduled = runtime.eval(
             "var frames = 0; function frame() { frames = frames + 1; requestAnimationFrame(frame); } requestAnimationFrame(frame);"
         )
@@ -271,7 +271,7 @@ describe "JavaScript timer drain limit":
     it "fires chained animation frames once and retires completed lookups":
         # @req: REQ-LIB-COMMON-001
         step("Verify: fires chained animation frames once and retires completed lookups")
-        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        var runtime = JsRuntime.new(JsLogger.new("timer-limit", LogLevel.Error))
         val scheduled = runtime.eval(
             "var frames = 0; function frame() { frames = frames + 1; if (frames < 3) { requestAnimationFrame(frame); } } requestAnimationFrame(frame);"
         )
@@ -298,7 +298,7 @@ describe "JavaScript timer drain limit":
     it "preserves actual frame time when animation handles are refreshed":
         # @req: REQ-LIB-COMMON-001
         step("Verify: preserves actual frame time when animation handles are refreshed")
-        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        var runtime = JsRuntime.new(JsLogger.new("timer-limit", LogLevel.Error))
         expect(runtime.eval(
             "var frameTimes = ''; var refreshedFrame = requestAnimationFrame(function(frameTime) { frameTimes = frameTimes + frameTime + ':'; }); refreshedFrame.refresh();"
         ).is_ok()).to_equal(true)
@@ -315,7 +315,7 @@ describe "JavaScript timer drain limit":
     it "refreshes a completed timeout from the current clock":
         # @req: REQ-LIB-COMMON-001
         step("Verify: refreshes a completed timeout from the current clock")
-        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        var runtime = JsRuntime.new(JsLogger.new("timer-limit", LogLevel.Error))
         expect(runtime.eval(
             "var refreshTicks = 0; var refreshed = setTimeout(function() { refreshTicks = refreshTicks + 1; }, 10); var numericId = refreshed.valueOf(); var refBefore = refreshed.hasRef(); refreshed.unref(); var unrefed = refreshed.hasRef(); refreshed.ref(); var rerefed = refreshed.hasRef();"
         ).is_ok()).to_equal(true)

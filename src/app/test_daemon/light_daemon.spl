@@ -1,6 +1,7 @@
 # Lightweight test daemon for explicit single-file test requests.
 
 use std.sffi.cli.{cli_get_args}
+use app.io.cli_ops.{cli_current_exe_path}
 use app.io.process_ops.{process_run_bounded}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
 use app.test_daemon.light_protocol.{LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE, LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER, light_request_deadline, light_request_parse_v2, light_request_matches_daemon_v2, timeout_verdict_line, has_verdict_line, exit_code_reason, light_request_inflight_path, light_request_is_pollable}
@@ -49,10 +50,22 @@ fn invoking_binary() -> text:
     `<binary> run light_daemon.spl`, so this is exactly the compiler the client
     chose — inheriting it is what keeps a daemon-served spec honest. See
     doc/08_tracking/bug/
-    simple_test_child_binary_ignores_invoking_binary_recurrence_2026-08-08.md."""
+    simple_test_child_binary_ignores_invoking_binary_recurrence_2026-08-08.md.
+
+    Hosts without /proc (macOS, BSD) fall back to the CLI's in-process
+    current-executable resolver, canonicalized exactly as the client's
+    invoking_binary() does. Without it the daemon recorded `./bin/simple`, the
+    client saw a mismatched identity on every request and bypassed the lane,
+    and each cold `simple test <spec>` spawned a daemon it could never use. See
+    doc/08_tracking/bug/macos_test_runner_startup_ps_spawn_and_dead_daemon_2026-10-04.md."""
     val self_path = path_absolute("/proc/self/exe") ?? ""
     if self_path.len() > 0 and self_path != "/proc/self/exe" and file_exists(self_path):
         return self_path
+    val current = cli_current_exe_path()
+    if current != "" and file_exists(current):
+        val current_path = path_absolute(current) ?? ""
+        if current_path.len() > 0 and file_exists(current_path):
+            return current_path
     ""
 
 fn simple_binary() -> text:

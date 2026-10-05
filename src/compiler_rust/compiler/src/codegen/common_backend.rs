@@ -135,7 +135,7 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         // fires (with proper text-arg expansion) instead of
                         // falling through to the cross-module path.
                         // e.g., "rt_file_delete" → also insert "rt_file_remove"
-                        let base = raw.rsplit_once("__").map(|(_, t)| t).unwrap_or(raw);
+                        let base = super::instr::calls::strip_call_module_prefix(raw);
                         if let Some(alias) = super::instr::calls::sffi_alias_target(base) {
                             names.insert(alias.to_string());
                         }
@@ -456,6 +456,9 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                     // suffix so this family is only pulled in for programs
                     // that actually use one of these methods.
                     MirInst::MethodCallStatic { func_name, .. } => {
+                        // try_emit_vtable_type_switch (closures_structs.rs)
+                        // falls back to rt_method_not_found on a vtable miss.
+                        names.insert("rt_method_not_found".to_string());
                         let method_suffix = func_name.rsplit('.').next().unwrap_or(func_name.as_str());
                         const MATH_METHODS: &[&str] = &[
                             "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "exp", "ln", "log2",
@@ -2288,7 +2291,22 @@ impl<M: Module> CodegenBackend<M> {
                     }
                 }
             }
-            match self.compile_function(func) {
+            let fn_compile_start = if native_trace { Some(std::time::Instant::now()) } else { None };
+            let compiled = self.compile_function(func);
+            if let Some(start) = fn_compile_start {
+                let elapsed = start.elapsed();
+                if elapsed.as_millis() >= 500 {
+                    let insts: usize = func.blocks.iter().map(|b| b.instructions.len()).sum();
+                    eprintln!(
+                        "[rust-jit] slow function {} took {} ms (blocks={} insts={})",
+                        func.name,
+                        elapsed.as_millis(),
+                        func.blocks.len(),
+                        insts
+                    );
+                }
+            }
+            match compiled {
                 Ok(()) => {}
                 Err(_e) => {
                     // Loud, distinctive marker so missing-body bugs cannot hide

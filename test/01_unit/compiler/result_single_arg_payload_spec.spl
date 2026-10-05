@@ -1,0 +1,91 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler_rust/compiler/src/hir/lower/type_resolver.rs 0%
+"""
+# Single-argument `Result<T>` keeps its Ok payload type
+
+**Category:** Language / Type resolution
+**Status:** Regression guard
+
+## Purpose and Audience
+
+`Result<T>` with the error type left unstated is used by 27 owned signatures
+(for example the browser's HTTP/1.1 status-line parser). Until 2026-10-04 the
+seed resolved only the two-argument form to the `Result` enum; the
+one-argument form fell through to ANY. Two things followed under the JIT:
+
+- `val s = f()?; s.first` had an ANY receiver. Whenever `first` was spelled by
+  more than one struct layout in the program, HIR lowering refused the field and
+  the WHOLE program dropped to the tree-walk interpreter (the 4K browser render
+  went from JIT to over 900 s).
+- `f()!` handed the Result WRAPPER through as the value: `ok1(41)! + 1`
+  answered a garbage word instead of 42.
+
+The audience is anyone touching generic type resolution in the Rust seed.
+
+## Scope and Preconditions
+
+Every scenario declares a second struct that also has a `first` field, so the
+receiver cannot be resolved by field name alone. Requires a seed built at or
+after 2026-10-04.
+
+See doc/08_tracking/bug/browser_4k_whole_module_dejit_name_collisions_2026-10-04.md
+"""
+
+use std.spec.step
+
+use std.spec.*
+
+class SpecPair:
+    first: i64
+    second: text
+
+class SpecOther:
+    zero: i64
+    first: text
+
+fn spec_make(v: i64) -> Result<SpecPair>:
+    Ok(SpecPair(first: v, second: "s"))
+
+fn spec_fail() -> Result<SpecPair>:
+    Err("bad")
+
+fn spec_ok1(v: i64) -> Result<i64>:
+    Ok(v)
+
+fn spec_through_try(v: i64) -> Result<i64>:
+    val p = spec_make(v)?
+    Ok(p.first + 1)
+
+fn spec_propagates() -> Result<i64>:
+    val p = spec_fail()?
+    Ok(p.first)
+
+describe "single-argument Result<T>":
+    # @manual scenario evidence
+
+    it "unwraps the Ok payload through the question-mark operator":
+        # @req REQ-SSPEC-COMPILER
+        step("unwraps the Ok payload through the question-mark operator")
+        step("Declare a second struct with a `first` field so the name alone is ambiguous")
+        val other = SpecOther(zero: 0, first: "z")
+        expect(other.first).to_equal("z")
+
+        step("Read `.first` off a value produced by `?` on Result<SpecPair>")
+        expect(spec_through_try(4).unwrap()).to_equal(5)
+
+    it "still propagates the error through the question-mark operator":
+        # @req REQ-SSPEC-COMPILER
+        step("still propagates the error through the question-mark operator")
+        step("An Err from the callee returns early instead of reading a field")
+        expect(spec_propagates().is_err()).to_equal(true)
+
+    it "force-unwraps to the payload, not the Result wrapper":
+        # @req REQ-SSPEC-COMPILER
+        step("force-unwraps to the payload, not the Result wrapper")
+        step("`!` on Result<i64> yields the integer the interpreter yields")
+        val forced = spec_ok1(41)!
+        expect(forced + 1).to_equal(42)
+
+        step("`!` on Result<SpecPair> yields a struct whose field reads back")
+        expect(spec_make(7)!.first).to_equal(7)

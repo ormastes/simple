@@ -317,7 +317,9 @@ use std.nogc_sync_mut.text_layout.font_provider.{
     browser_font_dylib_candidates,
     browser_serif_font_candidates,
     browser_font_candidates_for_family,
-    browser_family_has_host_face
+    browser_family_has_host_face,
+    browser_platform_hangul_faces,
+    browser_bundled_font_path_for_family
 }
 use std.nogc_sync_mut.text_layout.font_rasterizer.{
     _sffi_glyph_to_cached,
@@ -2730,6 +2732,32 @@ class FontRenderer:
         self.text_phase_layout_nonempty = layout.len() > 0
         if layout.len() == 0:
             return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
+        # Baseline for the fallback layout. The fallback entries carry only a
+        # pen x (y = 0), so placing every glyph bitmap at y = 0 TOP-aligned
+        # each glyph: "o" hung from the cap line and "," / "." rose to
+        # apostrophe height (measured: every glyph's top ink row identical).
+        # Place them exactly like the shaped path
+        # (_font_shaped_glyph_destination): top = baseline - bearing_y -
+        # height, left = pen + bearing_x, where bearing_y is the bitmap's
+        # bottom offset from the baseline. The baseline is the face ascender
+        # when the selected outline face reports one; otherwise the run's
+        # tallest ink top, which keeps uniform-cell bitmap fonts (bearing 0,
+        # equal heights) at y = 0 exactly as before.
+        var fallback_baseline: i32 = 0
+        if fallback_cps.len() > 0:
+            var fi = 0
+            while fi < fallback_cps.len():
+                val fg = self.get_glyph(fallback_cps[fi], font_size)
+                val ink_top = fg.bearing_y + fg.height
+                if ink_top > fallback_baseline:
+                    fallback_baseline = ink_top
+                fi = fi + 1
+            if self.selected_outline_blob.len() > 0:
+                var ascent_meta: [i64] = [0; 20]
+                sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT,
+                    fallback_cps[0].to_i64(), font_size.to_i64(), ascent_meta)
+                if ascent_meta[7] == 310031 and ascent_meta[17] > 0:
+                    fallback_baseline = ascent_meta[17].to_i32()
         var attempt = 0
         while attempt < 2:
             var quads: [FontRenderQuad] = []
@@ -2753,6 +2781,9 @@ class FontRenderer:
                     quad_dst_y = 0
                     quad_byte_offset = i.to_i64()
                 val glyph = self.get_glyph(requad_cp, font_size)
+                if i < fallback_cps.len():
+                    quad_dst_x = quad_dst_x + glyph.bearing_x.to_i64()
+                    quad_dst_y = fallback_baseline.to_i64() - glyph.bearing_y.to_i64() - glyph.height.to_i64()
                 if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
                     _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                     print("[vec-glyph-probe] quadloop-after-reget i={i} cp={positioned.codepoint} w={glyph.width} h={glyph.height} face_id={glyph.face_id} face_gen={glyph.face_generation} glyph_index={glyph.glyph_index}")
@@ -3556,6 +3587,34 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
     _fr_probe_add_wpush(_fr_probe_now() - _fr_wp0)
     resolved
 
+# First CJK-range codepoint the bound face cannot draw decides the fallback:
+# Hangul -> the platform Korean face when present; otherwise the bundled
+# Noto Sans/Serif SC (Han + kana coverage). Returns "" when the face covers
+# the run, or when `family` is already a bundled/explicit face (so the
+# re-resolve in the caller cannot recurse).
+fn _resolved_font_cjk_fallback_family(renderer: FontRenderer, family: text, codepoints: [i64]) -> text:
+    if family.starts_with("__simple_font_face__|") or browser_bundled_font_path_for_family(family) != "":
+        return ""
+    var missing = false
+    var hangul = false
+    for codepoint in codepoints:
+        if codepoint >= 0x2E80 and codepoint != 0x3000:
+            if ((codepoint >= 0xAC00 and codepoint <= 0xD7AF) or
+                (codepoint >= 0x1100 and codepoint <= 0x11FF) or
+                (codepoint >= 0x3130 and codepoint <= 0x318F)):
+                hangul = true
+            if not missing and not renderer.selected_face_has_glyph(codepoint as i32):
+                missing = true
+    if not missing:
+        return ""
+    if hangul:
+        val faces = browser_platform_hangul_faces()
+        if faces.len() > 0:
+            return "__simple_font_face__|" + faces[0] + "|" + family
+    if _resolved_font_category(family) == "serif":
+        return "Noto Serif SC"
+    "Noto Sans SC"
+
 fn _resolve_font_metrics_with_language_config_uncached(family: text, content: text, font_size: i32,
                                               language: text, render_config_identity: text) -> ResolvedFontMetrics:
     if family.trim() == "" or font_size <= 0 or font_size > 512:
@@ -3623,6 +3682,16 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
     if _WM_TRACE: print("[rfm] at=renderer-bound from_cache={renderer_from_cache} has_ttf={dbg_has_ttf}")
     if not dbg_has_ttf:
         return ResolvedFontMetrics(valid: false, family: resolved_family, identity: "", advances: [], width: 0, line_height: 0, reason: "font-runtime-unavailable", glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: complex_script != 0)
+    # Coverage fallback (gap F): a host Latin face (Helvetica) has no CJK
+    # glyphs, so CJK runs drew .notdef boxes even with lang="zh". When the
+    # chosen face lacks a glyph for any CJK-range codepoint, re-resolve the
+    # run on a face that covers it. Latin-only runs never enter the check.
+    val cjk_fallback = _resolved_font_cjk_fallback_family(renderer, resolved_family, codepoints)
+    if cjk_fallback != "":
+        if not renderer_from_cache:
+            renderer.clear_ttf()
+        return _resolve_font_metrics_with_language_config_uncached(
+            cjk_fallback, content, font_size, language, render_config_identity)
     val _fr_i0 = _fr_probe_now()
     val identity = renderer.current_font_identity()
     _fr_probe_add_faceid(_fr_probe_now() - _fr_i0)

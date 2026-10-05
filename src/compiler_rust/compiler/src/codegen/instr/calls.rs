@@ -161,8 +161,37 @@ mod tests {
 
     use super::{
         boxed_text_arg_indices, linkage_is_defined_local, sffi_alias_target, sffi_alias_target_shadowed,
-        text_arg_indices,
+        strip_call_module_prefix, text_arg_indices,
     };
+
+    /// A flattened private helper named `_i64` must not decay to the `i64`
+    /// builtin (every engine2d `_i64(width)` returned 0 under the JIT).
+    #[test]
+    fn module_prefix_strip_keeps_leading_underscores_of_the_bare_name() {
+        assert_eq!(strip_call_module_prefix("__spl_flat_a_spl_2f38f839801620b5___i64"), "_i64");
+        assert_eq!(strip_call_module_prefix("__spl_flat_a_spl_2f38f839801620b5____priv"), "__priv");
+        assert_eq!(strip_call_module_prefix("compiler__driver__driver_types__rt_file_read_text"), "rt_file_read_text");
+        assert_eq!(strip_call_module_prefix("mod___x"), "_x");
+    }
+
+    /// Everything without a mid-string underscore run of 3+ keeps the old
+    /// `rsplit_once("__")` result.
+    #[test]
+    fn module_prefix_strip_matches_rsplit_once_elsewhere() {
+        for name in [
+            "rt_len",
+            "_i64",
+            "widen",
+            "__module_init",
+            "__module_init_dynamic",
+            "a__b__c",
+            "compiler__x__rt_value_int",
+            "__simple_runtime_init",
+        ] {
+            let old = name.rsplit_once("__").map(|(_, t)| t).unwrap_or(name);
+            assert_eq!(strip_call_module_prefix(name), old, "{name}");
+        }
+    }
 
     /// doc/08_tracking/bug/module_fn_shadowed_by_builtin_name_2026-08-21.md:
     /// a module-level `fn len(xs)` must not be replaced by `rt_len` in the JIT.
@@ -3265,6 +3294,32 @@ pub(crate) fn adapt_args_to_signature_with_signedness(
     adapted
 }
 
+/// Strip a `prefix__` module qualifier from a call name, keeping any leading
+/// underscores of the bare name.
+///
+/// `rsplit_once("__")` splits inside an underscore run, so a qualified name
+/// whose bare part starts with `_` lost it: the flattened private helper
+/// `__spl_flat_<stem>_<hash>__` + `_i64` = `..._<hash>___i64` came back as
+/// `i64`, which `compile_call` then routed to the lenient `i64(text)` builtin
+/// and every `_i64(width)` in engine2d returned 0 under the JIT. The separator
+/// is the FIRST two underscores of the last underscore run; the rest belongs
+/// to the name. When the run starts the string (`__module_init`) there is no
+/// qualifier to strip, and the previous `rsplit_once` result is kept exactly.
+pub(crate) fn strip_call_module_prefix(raw: &str) -> &str {
+    let Some(last) = raw.rfind("__") else {
+        return raw;
+    };
+    let bytes = raw.as_bytes();
+    let mut run_start = last;
+    while run_start > 0 && bytes[run_start - 1] == b'_' {
+        run_start -= 1;
+    }
+    if run_start == 0 {
+        return &raw[last + 2..];
+    }
+    &raw[run_start + 2..]
+}
+
 /// Map a Simple-facing call name to its canonical runtime SFFI name.
 ///
 /// Returns `Some(canonical)` when the name is an alias that should be
@@ -3333,10 +3388,7 @@ pub fn compile_call<M: Module>(
     let func_name_raw = target.name();
     // For runtime SFFI matching only, strip module prefix to find the base function name.
     // e.g., "compiler__driver__driver_types__rt_file_read_text" → "rt_file_read_text"
-    let func_name_for_sffi = func_name_raw
-        .rsplit_once("__")
-        .map(|(_, tail)| tail)
-        .unwrap_or(func_name_raw);
+    let func_name_for_sffi = strip_call_module_prefix(func_name_raw);
     // Map Simple builtin names to runtime SFFI function names (for SFFI lookup only)
     // Note: "str", "int", "input" are handled in compile_builtin_io_call, not here
     // The alias table is shared with referenced_call_names via sffi_alias_target().

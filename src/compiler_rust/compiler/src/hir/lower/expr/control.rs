@@ -53,6 +53,19 @@ fn is_placeholder_lambda_param_name(name: &str) -> bool {
 }
 
 impl Lowerer {
+    /// The struct/class payload type of a `T?` (represented in HIR as a shared
+    /// pointer to `T`), or None for every other type.
+    pub(super) fn optional_struct_inner_type(&self, ty: TypeId) -> Option<TypeId> {
+        match self.module.types.get(ty) {
+            Some(HirType::Pointer {
+                kind: PointerKind::Shared,
+                inner,
+                ..
+            }) if matches!(self.module.types.get(*inner), Some(HirType::Struct { .. })) => Some(*inner),
+            _ => None,
+        }
+    }
+
     pub(super) fn result_like_payload_type(&self, ty: TypeId) -> Option<TypeId> {
         match self.module.types.get(ty) {
             Some(HirType::Enum { name, variants, .. }) if name == "Result" => {

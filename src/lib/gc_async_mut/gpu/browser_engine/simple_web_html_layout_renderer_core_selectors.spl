@@ -1170,6 +1170,69 @@ fn _selector_group_matches_node_parsed_inner(
             want = want - 1
     not require_direct
 
+# ---------------------------------------------------------------------------
+# Ancestor-feature prefilter (2026-10-04).
+#
+# A candidate such as `.c5x > a:hover` is bucketed under its RIGHTMOST compound
+# (`a`), so every <a> in the document is offered every such rule and runs the
+# full right-to-left walk above just to discover that no ancestor carries
+# `.c5x`. Measured on a google-shaped page: 106,381 group matches, 38 s of a
+# 74 s style stage. This is the interpreter-lane equivalent of Blink's
+# ancestor bloom filter, but EXACT (a counted multiset, no false positives).
+#
+# Soundness, from `_selector_group_matches_node_parsed_inner` above: every
+# part left of the rightmost compound is either skipped (kind 1), a `>` marker
+# (kind 2), or must be satisfied by `simple_match_parsed` on SOME node of the
+# `.parent` chain. `simple_match_parsed` requires `tag == want_tag` when
+# `check_tag`, `id == want_id` when `check_id`, and every `want_classes` entry
+# to be present in `class_words`; it rejects dead and non-zero-kind parts
+# outright. So whenever the matcher returns true, each of those features is on
+# some ancestor. The keys below are exactly those features, and the node keys
+# are built from the same `tag`/`id_attr`/`class_words` fields the matcher
+# reads, so a missing key proves the matcher would return false. A group with
+# a part that can never match gets the key `!`, which no node ever carries.
+# The filter only skips calls whose answer is already false.
+fn selector_group_ancestor_keys(parsed: [ParsedSel]) -> [text]:
+    var keys: [text] = []
+    var right = parsed.len() - 1
+    while right >= 0 and parsed[right].kind == 1:  # cpu-lane-loop-ok: mirrors the matcher's trailing-empty-part skip for ONE selector group; bound is that group's part count
+        right = right - 1
+    var want = right - 1
+    while want >= 0:  # cpu-lane-loop-ok: walks ONE selector group's ancestor parts once per rule per style pass (cached by the caller); bound is that group's part count
+        val part = parsed[want]
+        if part.kind != 1 and part.kind != 2:
+            if part.dead or part.kind != 0:
+                return ["!"]
+            if part.check_tag:
+                keys.push("t:" + part.want_tag)
+            if part.check_id:
+                keys.push("i:" + part.want_id)
+            var ci = 0
+            while ci < part.want_classes.len():  # cpu-lane-loop-ok: the wanted classes of ONE ancestor compound; bound is that compound's class count
+                keys.push("c:" + part.want_classes[ci])
+                ci = ci + 1
+        want = want - 1
+    keys
+
+fn selector_node_feature_keys(nd: HNode) -> [text]:
+    var keys: [text] = ["t:" + nd.tag, "i:" + nd.id_attr]
+    var ci = 0
+    while ci < nd.class_words.len():  # cpu-lane-loop-ok: ONE node's class words; bound is that node's class count
+        keys.push("c:" + nd.class_words[ci])
+        ci = ci + 1
+    keys
+
+fn selector_ancestor_keys_present(counts: Dict<text, i32>, keys: [text]) -> bool:
+    var ki = 0
+    while ki < keys.len():  # cpu-lane-loop-ok: required ancestor features of ONE selector group; bound is that group's feature count
+        val key = keys[ki]
+        if not counts.has(key):
+            return false
+        if counts[key] <= 0:
+            return false
+        ki = ki + 1
+    true
+
 fn split_selector_groups(sel: text) -> [text]:
     var depth = 0
     var i = 0

@@ -1,0 +1,93 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs 0%
+"""
+# `for x in array` iteration semantics
+
+**Category:** Language / Loops
+**Status:** Regression guard
+
+## Purpose and Audience
+
+On 2026-10-04 the seed's lowering of `for x in <array>` switched from the
+generic `rt_index_get` dispatcher to a direct `rt_array_get` element read when
+the iterable is statically an array: a 3840x2160 `[u32]` scan went from
+2507 ms to 222 ms. The element read is the same call `rt_index_get` makes for
+an array, so nothing a program can observe may change. This spec pins what a
+program CAN observe: the length is snapshotted when the loop starts, a body
+that grows the array does not extend the loop, and text / dict / nested
+iteration keep their own paths. (Whether a write AHEAD of the cursor is
+visible differs between `simple run` and `simple test` on every seed, old or
+new -- recorded in the bug doc below, deliberately not pinned here.)
+
+The audience is anyone touching for-loop lowering in the Rust seed.
+
+## Scope and Preconditions
+
+The expected values were recorded from the tree-walk interpreter (the
+reference) and from the pre-change and post-change JIT; all three agree.
+
+See doc/08_tracking/bug/browser_4k_whole_module_dejit_name_collisions_2026-10-04.md
+"""
+
+use std.spec.step
+
+use std.spec.*
+
+describe "for x in array":
+    # @manual scenario evidence
+
+    it "visits every element of an unmodified array in order":
+        # @req REQ-SSPEC-COMPILER
+        step("visits every element of an unmodified array in order")
+        val values: [i64] = [3, 1, 4, 1, 5]
+        var seen: [i64] = []
+        for v in values:
+            seen.push(v)
+        expect(seen).to_equal([3, 1, 4, 1, 5])
+
+    it "snapshots the length when the body grows the array":
+        # @req REQ-SSPEC-COMPILER
+        step("snapshots the length when the body grows the array")
+        var b: [i64] = [1, 2, 3]
+        var seen: [i64] = []
+        for x in b:
+            seen.push(x)
+            if x == 1:
+                b.push(9)
+        expect(seen).to_equal([1, 2, 3])
+        expect(b).to_equal([1, 2, 3, 9])
+
+    it "reads unsigned 32-bit elements without sign or width loss":
+        # @req REQ-SSPEC-COMPILER
+        step("reads unsigned 32-bit elements without sign or width loss")
+        val u: [u32] = [0xFFFFFFFFu32, 7u32]
+        var total: i64 = 0
+        for w in u:
+            total = total + (w as i64)
+        expect(total).to_equal(4294967302)
+
+    it "keeps text, dict, and nested iteration on their own paths":
+        # @req REQ-SSPEC-COMPILER
+        step("keeps text, dict, and nested iteration on their own paths")
+        step("Text yields one codepoint per step")
+        var chars = ""
+        for ch in "héllo":
+            chars = chars + ch + "."
+        expect(chars).to_equal("h.é.l.l.o.")
+
+        step("A dict yields its entries")
+        var d: Dict<text, i64> = {}
+        d["k"] = 3
+        var entries = 0
+        for e in d:
+            entries = entries + 1
+        expect(entries).to_equal(1)
+
+        step("Nested arrays iterate row by row")
+        val nested: [[i64]] = [[1, 2], [3]]
+        var sum = 0
+        for row in nested:
+            for v in row:
+                sum = sum + v
+        expect(sum).to_equal(6)

@@ -1208,6 +1208,17 @@ fn browser_shared_wm_needs_main_thread() -> bool {
         return true;
     }
     let args: Vec<String> = std::env::args().collect();
+    // `browser --open` (src/app/browser) opens a winit window, and Cocoa
+    // panics when the EventLoop is built off the main thread. Route it to the
+    // main thread exactly like SIMPLE_GUI=1 does, so `--open` works without
+    // the env var.
+    let browser_open = args.iter().any(|arg| arg == "--open")
+        && args
+            .iter()
+            .any(|arg| arg == "browser" || arg.ends_with("src/app/browser/main.spl"));
+    if browser_open {
+        return true;
+    }
     let shared = args.iter().any(|arg| arg == "--shared-wm");
     if !shared {
         return false;

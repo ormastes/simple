@@ -295,6 +295,58 @@ fn test_any_to_int_decodes_tagged_values() {
     assert_eq!(super::rt_any_to_int(rt_array_get(bytes, 0)), 203);
 }
 
+/// `[u8] + [u8]` under the JIT (SPIR-V head+tail blob): byte-packed operands
+/// must stay byte-packed and keep their bytes.
+#[test]
+fn test_array_concat_byte_packed_keeps_bytes() {
+    let a = rt_byte_array_new(1);
+    for b in [0x03, 0x02, 0x23, 0x07] {
+        assert!(rt_typed_bytes_u8_push(a, b));
+    }
+    let b = rt_byte_array_new(1);
+    for x in [0x01, 0x00, 0xFF] {
+        assert!(rt_typed_bytes_u8_push(b, x));
+    }
+    let c = super::rt_array_concat(a, b);
+    assert_eq!(rt_array_len(c), 7);
+    let got: Vec<i64> = (0..7).map(|i| rt_bytes_u8_at(c, i)).collect();
+    assert_eq!(got, vec![3, 2, 35, 7, 1, 0, 255]);
+    let empty = rt_byte_array_new(1);
+    let d = super::rt_array_concat(empty, b);
+    assert_eq!(rt_array_len(d), 3);
+    assert_eq!(rt_bytes_u8_at(d, 2), 255);
+}
+
+#[test]
+fn test_array_concat_u64_packed_and_mixed_layouts() {
+    let a = rt_array_new_with_cap_u64(1);
+    assert!(rt_typed_words_u64_push(a, u64::MAX as i64));
+    assert!(rt_typed_words_u64_push(a, 5));
+    let b = rt_array_new_with_cap_u64(1);
+    assert!(rt_typed_words_u64_push(b, 7));
+    let c = super::rt_array_concat(a, b);
+    assert_eq!(rt_array_len(c), 3);
+    assert_eq!(rt_typed_words_u64_at(c, 0), u64::MAX as i64);
+    assert_eq!(rt_typed_words_u64_at(c, 2), 7);
+
+    // generic + byte-packed: decoded element-wise into a tagged array.
+    let g = rt_array_new(2);
+    rt_array_push(g, RuntimeValue::from_int(40));
+    let bytes = rt_byte_array_new(1);
+    assert!(rt_typed_bytes_u8_push(bytes, 200));
+    let m = super::rt_array_concat(g, bytes);
+    assert_eq!(rt_array_len(m), 2);
+    assert_eq!(rt_array_get(m, 0).as_int(), 40);
+    assert_eq!(rt_array_get(m, 1).as_int(), 200);
+
+    // generic + generic: unchanged behaviour.
+    let g2 = rt_array_new(1);
+    rt_array_push(g2, RuntimeValue::from_int(-3));
+    let gg = super::rt_array_concat(g, g2);
+    assert_eq!(rt_array_len(gg), 2);
+    assert_eq!(rt_array_get(gg, 1).as_int(), -3);
+}
+
 #[test]
 fn test_typed_words_u32_push_fast_path() {
     let array = rt_array_new(1);

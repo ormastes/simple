@@ -156,18 +156,25 @@ impl Drop for PtrLen {
 //   warning and, in compiled_blob.rs, a descriptive panic instead of a bare
 //   assert. `SIMPLE_JIT_ARENA_STATS=1` prints the high-water mark.
 //
+//   Enabled on macOS as well as Linux (2026-10-04): on Apple Silicon the heap
+//   path scattered one module's code ~171 MB apart, so every large `simple
+//   run` (e.g. src/app/ui_showcase/hosts/main_2d_gpu.spl) panicked at
+//   finalize and silently re-ran in the interpreter. The process is not
+//   hardened-runtime signed, so mprotect RW->RX on this anonymous mapping is
+//   the same W^X sequence the heap path already performs.
+//
 //   This is a local patch: upstream cranelift-jit's allocator has no notion of
 //   branch reach. The right upstream change is the same one (a contiguous
 //   per-module code region) plus the compiled_blob.rs range-check fix, and both
 //   should be proposed there rather than carried here forever.
 // ---------------------------------------------------------------------------
 
-#[cfg(all(target_arch = "aarch64", target_os = "linux", not(feature = "selinux-fix")))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"), not(feature = "selinux-fix")))]
 pub(crate) const CODE_ARENA_ENABLED: bool = true;
-#[cfg(not(all(target_arch = "aarch64", target_os = "linux", not(feature = "selinux-fix"))))]
+#[cfg(not(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"), not(feature = "selinux-fix"))))]
 pub(crate) const CODE_ARENA_ENABLED: bool = false;
 
-#[cfg(all(target_arch = "aarch64", target_os = "linux", not(feature = "selinux-fix")))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"), not(feature = "selinux-fix")))]
 pub(crate) mod aarch64_arena {
     use std::ffi::c_void;
     use std::io;
@@ -380,16 +387,16 @@ pub(crate) mod aarch64_arena {
     }
 }
 
-#[cfg(all(target_arch = "aarch64", target_os = "linux", not(feature = "selinux-fix")))]
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"), not(feature = "selinux-fix")))]
 pub(crate) use aarch64_arena::{force_veneers, install_far_call_veneer};
 
 /// No-op stubs on targets whose direct-call relocation has enough reach (or that
 /// do not use `Reloc::Arm64Call` at all).
-#[cfg(not(all(target_arch = "aarch64", target_os = "linux", not(feature = "selinux-fix"))))]
+#[cfg(not(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"), not(feature = "selinux-fix"))))]
 pub(crate) fn install_far_call_veneer(_at: *const u8, _target: *const u8) -> Option<*const u8> {
     None
 }
-#[cfg(not(all(target_arch = "aarch64", target_os = "linux", not(feature = "selinux-fix"))))]
+#[cfg(not(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"), not(feature = "selinux-fix"))))]
 pub(crate) fn force_veneers() -> bool {
     false
 }
@@ -451,7 +458,7 @@ impl Memory {
     fn new_chunk(&mut self, size: usize) -> io::Result<PtrLen> {
         #[cfg(all(
             target_arch = "aarch64",
-            target_os = "linux",
+            any(target_os = "linux", target_os = "macos"),
             not(feature = "selinux-fix")
         ))]
         {
@@ -564,7 +571,7 @@ impl Memory {
         // during relocation, i.e. just before this call; publish them too.
         #[cfg(all(
             target_arch = "aarch64",
-            target_os = "linux",
+            any(target_os = "linux", target_os = "macos"),
             not(feature = "selinux-fix")
         ))]
         if let Some(idx) = self.arena {

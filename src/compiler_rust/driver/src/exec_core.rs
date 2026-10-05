@@ -1351,7 +1351,7 @@ impl ExecCore {
     ///
     /// The args are made available to the Simple program via `sys_get_args()`.
     pub fn run_file_interpreted_with_args(&self, path: &Path, args: Vec<String>) -> Result<i32, String> {
-        use simple_compiler::interpreter::{evaluate_module, set_current_file};
+        use simple_compiler::interpreter::{evaluate_module_owned, set_current_file};
         use simple_compiler::pipeline::module_loader::load_module_with_imports;
         use simple_compiler::set_interpreter_args;
         use std::collections::HashSet;
@@ -1381,7 +1381,9 @@ impl ExecCore {
         // reaches the user as "no output, exit 0".
         Self::reject_silent_no_op_module(&module.items)?;
 
-        let exit_code = evaluate_module(&module.items).map_err(|e| format!("{}", e))?;
+        // Owned: the flattened entry module is freed once registration is
+        // done instead of staying alive for the whole of `main`.
+        let exit_code = evaluate_module_owned(module.items).map_err(|e| format!("{}", e))?;
 
         // Clear current file after evaluation
         set_current_file(None);

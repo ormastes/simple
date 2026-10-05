@@ -1,0 +1,49 @@
+"""
+## Purpose and audience
+Purpose: Pin the real-site compatibility fixes found by loading example.com,
+google.com, wikipedia.org, news.ycombinator.com and github.com: CSS
+`light-dark()` colors, and which TLS responses may end without close_notify.
+Audience: maintainers of the browser engine CSS and HTTP/1 transport.
+## Operator workflow
+Run this spec with the test runner; each scenario names the behavior it pins.
+## Compatibility and limitations
+Pure functions only; no network. Bug record:
+doc/08_tracking/bug/browser_real_site_rendering_gaps_2026-10-04.md
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_color, argb}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{h1_response_is_self_delimited}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+describe "CSS light-dark() color resolution":
+    it "resolves light-dark() to its light argument (example.com background)":
+        step("parse the exact value example.com serves")
+        assert_equal(parse_color("light-dark(#eee,#222)"), argb(238, 238, 238))
+
+    it "splits light-dark() only at a top-level comma":
+        step("a nested rgb() comma must not end the light argument")
+        assert_equal(parse_color("light-dark(rgb(1,2,3), #000)"), argb(1, 2, 3))
+
+    it "rejects a light-dark() with a single argument":
+        assert_equal(parse_color("light-dark(#eee)"), 0u32)
+
+describe "TLS response framing without close_notify":
+    it "accepts a Content-Length framed response as self-delimited":
+        val raw = rt_text_to_bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        assert_true(h1_response_is_self_delimited(raw))
+
+    it "accepts a chunked response as self-delimited":
+        val raw = rt_text_to_bytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n")
+        assert_true(h1_response_is_self_delimited(raw))
+
+    it "refuses a close-delimited response, which could be silently truncated":
+        val raw = rt_text_to_bytes("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<p>partial")
+        assert_false(h1_response_is_self_delimited(raw))
+
+    it "refuses a non-chunked Transfer-Encoding":
+        val raw = rt_text_to_bytes("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nxx")
+        assert_false(h1_response_is_self_delimited(raw))

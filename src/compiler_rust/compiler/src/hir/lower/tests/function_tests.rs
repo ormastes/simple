@@ -172,3 +172,33 @@ fn unannotated_procedure_remains_void() {
     let module = parse_and_lower("fn procedure():\n    val value = 1\n").expect("procedure must lower");
     assert_eq!(module.functions[0].return_type, TypeId::VOID);
 }
+
+// Single-argument `Result<T>` used to resolve to ANY (only the 2-argument form
+// was instantiated), erasing the Ok payload: `val s = f()?; s.first` then had
+// an ANY receiver and, with `first` spelled by two layouts, failed to lower --
+// a whole-program de-JIT (h1_client.parse_http_response_bytes, 2026-10-04).
+#[test]
+fn single_arg_result_try_keeps_ok_payload_type() {
+    let source = "class P:\n    first: i64\n    second: text\n\nclass Q:\n    zero: i64\n    first: text\n\nfn make(v: i64) -> Result<P>:\n    Ok(P(first: v, second: \"s\"))\n\nfn use_it() -> Result<i64, text>:\n    val p = make(3)?\n    Ok(p.first)\n";
+    let module = parse_and_lower(source).expect("`?` on Result<T> must keep T so `.first` resolves");
+    let make = module.functions.iter().find(|f| f.name == "make").unwrap();
+    match module.types.get(make.return_type) {
+        Some(crate::hir::HirType::Enum { name, variants, .. }) => {
+            assert_eq!(name, "Result");
+            let ok = variants.iter().find(|(v, _)| v == "Ok").and_then(|(_, p)| p.as_ref());
+            let ok_ty = ok.and_then(|fields| fields.first()).copied().unwrap();
+            assert!(matches!(module.types.get(ok_ty), Some(crate::hir::HirType::Struct { name, .. }) if name == "P"));
+            let err = variants.iter().find(|(v, _)| v == "Err").and_then(|(_, p)| p.as_ref());
+            assert_eq!(err.and_then(|fields| fields.first()).copied(), Some(TypeId::ANY));
+        }
+        other => panic!("Result<P> must resolve to the Result enum, got {other:?}"),
+    }
+}
+
+// Generalization: `!` on Result<T> (the JIT used to hand the Result wrapper
+// through as the value) and on Option<T>, in the same ambiguous-field setting.
+#[test]
+fn single_arg_result_force_unwrap_keeps_ok_payload_type() {
+    let source = "class P:\n    first: i64\n    second: text\n\nclass Q:\n    zero: i64\n    first: text\n\nfn make(v: i64) -> Result<P>:\n    Ok(P(first: v, second: \"s\"))\n\nfn maybe(v: i64) -> Option<P>:\n    Some(P(first: v, second: \"s\"))\n\nfn use_it() -> i64:\n    make(1)!.first + maybe(2)!.first\n";
+    parse_and_lower(source).expect("`!` on Result<T>/Option<T> must keep T so `.first` resolves");
+}

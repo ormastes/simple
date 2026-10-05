@@ -13,6 +13,21 @@ class ObjectStore:
     prop_enumerables: [bool]
     prop_configurables: [bool]
     obj_proto_ids: [i64]
+    # Lookup index over the flat property arrays: "{obj_id}:{key}" -> the
+    # LAST slot holding that (obj_id, key), i.e. exactly what the backward
+    # scans return. Entries [0, prop_slot_indexed) are indexed; appends are
+    # folded in by sync_prop_slots(), and any shrink of the arrays (removal,
+    # compaction) forces a full rebuild. find_prop_slot() only trusts the
+    # index when it covers every slot, otherwise it falls back to the scan.
+    prop_slot_index: Dict<text, i64>
+    prop_slot_indexed: i64
+    # "{obj_id}" -> every slot of that object, ascending (same order a
+    # forward scan visits them). Maintained together with prop_slot_index.
+    obj_slot_index: Dict<text, [i64]>
+
+fn _prop_slot_key(obj_id: i64, key: text) -> text:
+    # obj_id is an integer, so the first ':' always ends it: unambiguous.
+    "{obj_id}:{key}"
 
 impl ObjectStore:
     static fn create() -> ObjectStore:
@@ -25,8 +40,69 @@ impl ObjectStore:
             prop_values: [],
             prop_enumerables: [],
             prop_configurables: [],
-            obj_proto_ids: []
+            obj_proto_ids: [],
+            prop_slot_index: {},
+            prop_slot_indexed: 0,
+            obj_slot_index: {}
         )
+
+    me reindex_prop_slots():
+        """Rebuild the slot index from scratch. Call after any operation that
+        removes or reorders property slots (remove_property, compaction)."""
+        self.prop_slot_index = {}
+        self.obj_slot_index = {}
+        self.prop_slot_indexed = 0
+        self.sync_prop_slots()
+
+    me sync_prop_slots():
+        """Fold appended slots into the index; rebuild if slots were removed."""
+        val n = self.prop_obj_ids.len()
+        if n != self.prop_keys.len():
+            return
+        if n < self.prop_slot_indexed:
+            self.prop_slot_index = {}
+            self.obj_slot_index = {}
+            self.prop_slot_indexed = 0
+        var i = self.prop_slot_indexed
+        while i < n:
+            val obj_id = self.prop_obj_ids[i]
+            self.prop_slot_index[_prop_slot_key(obj_id, self.prop_keys[i])] = i
+            val obj_key = "{obj_id}"
+            var slots: [i64] = self.obj_slot_index.get(obj_key) ?? []
+            slots.push(i)
+            self.obj_slot_index[obj_key] = slots
+            i = i + 1
+        self.prop_slot_indexed = n
+
+    fn object_slots(obj_id: i64) -> [i64]:
+        """Every slot of obj_id in ascending order (what a forward scan visits)."""
+        val n = self.prop_obj_ids.len()
+        if n == self.prop_slot_indexed and n == self.prop_keys.len():
+            return self.obj_slot_index.get("{obj_id}") ?? []
+        var slots: [i64] = []
+        var i = 0
+        while i < n:
+            if self.prop_obj_ids[i] == obj_id:
+                slots.push(i)
+            i = i + 1
+        slots
+
+    fn find_prop_slot(obj_id: i64, key: text) -> i64:
+        """Latest slot holding (obj_id, key), or -1. Same answer as a backward
+        linear scan; O(1) when the index is in sync, the scan otherwise."""
+        val n = self.prop_obj_ids.len()
+        if n == self.prop_slot_indexed and n == self.prop_keys.len():
+            val slot = self.prop_slot_index.get(_prop_slot_key(obj_id, key)) ?? -1
+            if slot < 0:
+                return -1
+            if slot < n and self.prop_obj_ids[slot] == obj_id and self.prop_keys[slot] == key:
+                return slot
+        var i = n - 1
+        while i >= 0:
+            if self.prop_obj_ids[i] == obj_id and self.prop_keys[i] == key:
+                return i
+            i = i - 1
+        -1
 
     me alloc_object() -> i64:
         val id = self.next_id
@@ -39,15 +115,12 @@ impl ObjectStore:
 
     me get_object(id: i64) -> JsObject:
         var props: [JsProperty] = []
-        var i = 0
-        while i < self.prop_obj_ids.len():
-            if self.prop_obj_ids[i] == id:
-                props.push(JsProperty(
-                    key: self.prop_keys[i],
-                    value: self.prop_values[i],
-                    enumerable: self.prop_enumerables[i]
-                ))
-            i = i + 1
+        for i in self.object_slots(id):
+            props.push(JsProperty(
+                key: self.prop_keys[i],
+                value: self.prop_values[i],
+                enumerable: self.prop_enumerables[i]
+            ))
         JsObject(properties: props)
 
     me set_property(obj_id: i64, key: text, value: JsValue):
@@ -70,11 +143,9 @@ impl ObjectStore:
         # so a property can have multiple entries with the latest appended last. Scan from
         # the end so host-side reads observe the most recent write — matching the
         # interpreter's own get_object_property (last-match-wins) semantics.
-        var i = self.prop_obj_ids.len() - 1
-        while i >= 0:
-            if self.prop_obj_ids[i] == obj_id and self.prop_keys[i] == key:
-                return self.prop_values[i]
-            i = i - 1
+        val slot = self.find_prop_slot(obj_id, key)
+        if slot >= 0:
+            return self.prop_values[slot]
         JsValue.Undefined
 
     me remove_property(obj_id: i64, key: text):
@@ -89,6 +160,7 @@ impl ObjectStore:
                 self.prop_enumerables.remove(i)
                 self.prop_configurables.remove(i)
             i = i - 1
+        self.reindex_prop_slots()
 
     me array_length(arr_id: i64) -> i64:
         var max_idx = -1
