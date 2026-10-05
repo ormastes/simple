@@ -68,6 +68,7 @@ with tempfile.TemporaryDirectory(prefix='subsystem-resume-unit.') as td:
     # Paths originate from tempfile (no quotes/newlines).
     script = f'''set -eu
 source_root='{source}'
+tool_root='{source}'
 output_root='{output}'
 owner_lock='{lock}'
 inventory='{inventory}'
