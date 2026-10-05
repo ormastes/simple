@@ -62,15 +62,18 @@ fn imported_container_dictionary_preserves_declaration_layout() {
 
 #[test]
 fn imported_container_optional_payload_completes_nested_array() {
-    let model = format!("{ENTRY}struct Object:\n    selected: [Entry]?\n");
+    let model = format!("{ENTRY}struct Object:\n    selected: [Entry]?\n    encoded: Option<[Entry]>\n");
     let lowered = lower_selective_with_body(&model, "\"unused optional payload\"", false).unwrap();
     let object = lowered.types.lookup("Object").unwrap();
     let HirType::Struct { fields, .. } = lowered.types.get(object).unwrap() else { panic!("Object") };
-    let HirType::Enum { variants, .. } = lowered.types.get(fields[0].1).unwrap() else { panic!("Option") };
-    let array = variants.iter().find(|(name, _)| name == "Some").unwrap().1.as_ref().unwrap()[0];
-    let HirType::Array { element, .. } = lowered.types.get(array).unwrap() else { panic!("array") };
-    let HirType::Struct { fields, .. } = lowered.types.get(*element).unwrap() else { panic!("Entry") };
-    assert_eq!(fields[1], ("name".into(), TypeId::STRING));
+    let HirType::Pointer { inner, .. } = lowered.types.get(fields[0].1).unwrap() else { panic!("optional shared pointer") };
+    let HirType::Enum { variants, .. } = lowered.types.get(fields[1].1).unwrap() else { panic!("explicit Option enum") };
+    let payload = variants.iter().find(|(name, _)| name == "Some").unwrap().1.as_ref().unwrap()[0];
+    for array in [*inner, payload] {
+        let HirType::Array { element, .. } = lowered.types.get(array).unwrap() else { panic!("array") };
+        let HirType::Struct { fields, .. } = lowered.types.get(*element).unwrap() else { panic!("Entry") };
+        assert_eq!(fields[1], ("name".into(), TypeId::STRING));
+    }
 }
 
 #[test]
