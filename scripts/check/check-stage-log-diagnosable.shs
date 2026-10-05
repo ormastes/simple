@@ -84,6 +84,38 @@ usage() {
     echo "       $0 --selftest"
 }
 
+# A resource receipt explains a policy termination, not a compiler success.
+# Require the matching stage exit and a measured enforced overrun; a bare
+# status line, counters, or a monitor-only observation is not enough evidence.
+resource_policy_diagnosis() {
+    [ "$2" -eq 88 ] || return 1
+    awk -F= '
+        /^status=/ { delete value; delete seen; active = 1; invalid = 0 }
+        active && /^(status|exit_status|root_pid|max_rss_kib|peak_rss_kib|samples|rss_cap_mode|rss_cap_enforced|rss_limit_kib)=/ {
+            if (++seen[$1] != 1 || NF != 2) invalid = 1
+            value[$1] = $2
+        }
+        END {
+            if (!active || invalid || value["status"] != "rss-cap-exceeded" ||
+                value["exit_status"] != "88" || value["rss_cap_mode"] != "enforce" ||
+                value["rss_cap_enforced"] != "1") exit 1
+            split("root_pid max_rss_kib peak_rss_kib samples rss_limit_kib", required, " ")
+            for (i in required) {
+                v = value[required[i]]
+                if (v !~ /^[0-9]+$/ || v + 0 <= 0) exit 1
+            }
+            if (value["peak_rss_kib"] + 0 <= value["max_rss_kib"] + 0 ||
+                value["rss_limit_kib"] + 0 != value["max_rss_kib"] + 0) exit 1
+            printf "  diagnosis: RSS resource policy terminated the workload (exit 88).\n"
+            printf "             peak=%s KiB exceeded cap=%s KiB; samples=%s, root_pid=%s.\n",
+                value["peak_rss_kib"], value["max_rss_kib"], value["samples"], value["root_pid"]
+            print "             The stage remains failed; this is an enforced resource limit."
+        }
+    ' "$1" || return 1
+    echo "  real log:  $1"
+    return 0
+}
+
 # scan_secondary_logs PRIMARY
 # Scans every candidate log EXCEPT the primary for diagnostic text, printing a
 # named excerpt for the first one that carries any. Returns 0 when a secondary
@@ -99,6 +131,9 @@ scan_secondary_logs() {
         [ -n "${_cand}" ] || continue
         [ "${_cand}" != "${_primary}" ] || continue
         [ -s "${_cand}" ] || continue
+        if [ "${_found}" -eq 0 ] && resource_policy_diagnosis "${_cand}" "${EV_STATUS}"; then
+            return 0
+        fi
         _chits=$(grep -c -i -E "${diag_pattern}" "${_cand}" 2>/dev/null)
         [ -n "${_chits}" ] || _chits=0
         if [ "${_chits}" -gt 0 ] && [ "${_found}" -eq 0 ]; then
@@ -159,6 +194,10 @@ classify_failure() {
         echo "             this: a real failure with zero evidence."
         echo "  UNDIAGNOSABLE: replay the command from the transcript on a tty."
         return 1
+    fi
+
+    if resource_policy_diagnosis "${_log}" "${_status}"; then
+        return 0
     fi
 
     # `grep -c` already prints 0 on no match AND exits 1. Appending
@@ -293,6 +332,41 @@ selftest() {
     # misreporting a non-empty OOM log as silent/undiagnosable.
     printf 'memory allocation of 59904 bytes failed\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n' > "${_dir}/allocator-oom.log"
     _assert "allocator-oom-must-pass" 0 --log "${_dir}/allocator-oom.log" --status 127 --stage t5c
+
+    # A real Stage-2 Windows Job Object receipt explained exit 88, but the
+    # text-only classifier called it silent. Preserve both the reason and the
+    # failed stage status, including when the receipt is a sibling log.
+    cat > "${_dir}/rss.env" <<EOF
+status=rss-cap-exceeded
+exit_status=88
+root_pid=8104
+max_rss_kib=5859375
+peak_rss_kib=5869912
+samples=1578
+rss_cap_mode=enforce
+rss_cap_enforced=1
+rss_limit_kib=5859375
+EOF
+    _assert "rss-policy-receipt-must-pass" 0 --log "${_dir}/rss.env" --status 88 --stage t5d
+    case "${_out}" in
+        *"RSS resource policy"*"peak=5869912 KiB exceeded cap=5859375 KiB"*"failed (exit 88)"*) ;;
+        *) echo "  selftest FAIL rss-policy-reason-and-failure-missing"; _fails=$((_fails + 1)) ;;
+    esac
+    _assert "rss-policy-sibling-must-pass" 0 --log "${_dir}/empty.log" --log "${_dir}/rss.env" --status 88 --stage t5e
+    _assert "rss-policy-wrong-stage-status-must-fail" 1 --log "${_dir}/rss.env" --status 1 --stage t5f
+    printf 'status=rss-cap-exceeded\nexit_status=88\n' > "${_dir}/rss-bare.env"
+    _assert "rss-bare-status-must-fail" 1 --log "${_dir}/rss-bare.env" --status 88 --stage t5g
+    for _bad in monitor below-cap duplicate missing-samples malformed-limit wrong-receipt-exit; do
+        case "${_bad}" in
+            monitor) sed 's/rss_cap_mode=enforce/rss_cap_mode=monitor/' "${_dir}/rss.env" ;;
+            below-cap) sed 's/peak_rss_kib=5869912/peak_rss_kib=5859375/' "${_dir}/rss.env" ;;
+            duplicate) cat "${_dir}/rss.env"; echo peak_rss_kib=5869912 ;;
+            missing-samples) sed '/^samples=/d' "${_dir}/rss.env" ;;
+            malformed-limit) sed 's/rss_limit_kib=5859375/rss_limit_kib=unknown/' "${_dir}/rss.env" ;;
+            wrong-receipt-exit) sed 's/exit_status=88/exit_status=0/' "${_dir}/rss.env" ;;
+        esac > "${_dir}/rss-bad.env"
+        _assert "rss-${_bad}-must-fail" 1 --log "${_dir}/rss-bad.env" --status 88 --stage t5h
+    done
 
     # 6. the driver's own mid-phase fatal line must count as diagnostic text
     printf '[hir-fatal] source_idx=2 path=a.spl error_idx=0 text=HIR lowering error in m (a.spl:9:1): unresolved type X\n' > "${_dir}/hirfatal.log"
