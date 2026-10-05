@@ -1,0 +1,78 @@
+#!/bin/sh
+# Linux native runtime evidence only; does not qualify Simple apps or dynload.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cc=${CC:-clang}
+
+if [ "${1:-}" != --worker ]; then
+    [ "$#" -eq 0 ] || { echo "usage: $0" >&2; exit 2; }
+    case "$(uname -s):$(uname -m)" in
+        Linux:x86_64|Linux:amd64) ;;
+        *) echo 'UNSUPPORTED: requires Linux x86-64'; exit 77 ;;
+    esac
+    for tool in "$cc" gdb perl sha256sum mktemp; do
+        command -v "$tool" >/dev/null 2>&1 || {
+            echo "ERROR: missing required tool: $tool" >&2; exit 2;
+        }
+    done
+    build=$(mktemp -d "${TMPDIR:-/tmp}/simple-bitmap-avx512.XXXXXX")
+    echo "artifacts=$build"
+    exec perl "$root/scripts/resource/process-tree-rss-watchdog.pl" \
+        --timeout-seconds=180 --max-rss-kib=5859375 --rss-cap-mode=enforce \
+        --receipt="$build/watchdog.env" -- \
+        sh "$root/scripts/check/check-runtime-bitmap-avx512-native.shs" --worker "$build"
+fi
+
+[ "$#" -eq 2 ] && [ -d "$2" ] || { echo 'ERROR: invalid worker directory' >&2; exit 2; }
+build=$2
+"$cc" --version > "$build/compiler.txt"
+sha256sum "$root/src/runtime/runtime_native.c" \
+    "$root/src/runtime/runtime_simd_dispatch.c" \
+    "$root/src/runtime/runtime_simd_dispatch.h" "$root/src/runtime/runtime.h" \
+    "$root/src/runtime/runtime_value.h" \
+    "$root/src/runtime/test/rt_db_bitmap_avx512_selfcheck.c" \
+    "$root/src/runtime/test/rt_db_bitmap_dispatch_selfcheck.c" \
+    "$root/src/runtime/test/rt_db_bitmap_dispatch_selfcheck.gdb" > "$build/sources.sha256"
+
+if ! "$cc" -std=gnu11 -O2 -ffunction-sections -fdata-sections \
+    -I"$root/src/runtime" "$root/src/runtime/test/rt_db_bitmap_avx512_selfcheck.c" \
+    -Wl,--gc-sections -lpthread -ldl -lm -o "$build/forced" > "$build/forced-compile.log" 2>&1; then
+    echo "ERROR: forced-kernel harness compilation failed; see $build/forced-compile.log" >&2
+    exit 1
+fi
+set +e
+"$build/forced" > "$build/forced.log" 2>&1
+forced_status=$?
+set -e
+if [ "$forced_status" -eq 77 ]; then
+    cat "$build/forced.log"
+    exit 77
+fi
+if [ "$forced_status" -ne 0 ]; then
+    cat "$build/forced.log" >&2
+    echo "FAIL: forced-kernel harness exited $forced_status" >&2
+    exit 1
+fi
+grep -q '^PASS forced_production_kernel=db_bitmap_and_avx512 cpu_avx512f=1 os_xstate=1 cases=816 words=35760 canary_slots=130560$' "$build/forced.log"
+
+if ! "$cc" -std=gnu11 -O2 -g1 -ffunction-sections -fdata-sections \
+    -DSIMPLE_CORE_C_STANDALONE=1 -I"$root/src/runtime" \
+    "$root/src/runtime/test/rt_db_bitmap_dispatch_selfcheck.c" \
+    "$root/src/runtime/runtime_native.c" "$root/src/runtime/runtime_simd_dispatch.c" \
+    -Wl,--gc-sections -lpthread -ldl -lm -o "$build/public" > "$build/public-compile.log" 2>&1; then
+    echo "ERROR: public-dispatch harness compilation failed; see $build/public-compile.log" >&2
+    exit 1
+fi
+if ! gdb -q -batch -iex 'set debuginfod enabled off' \
+    -x "$root/src/runtime/test/rt_db_bitmap_dispatch_selfcheck.gdb" \
+    "$build/public" > "$build/public.log" 2>&1; then
+    cat "$build/public.log" >&2
+    echo 'FAIL: public dispatch or AVX512 breakpoint evidence failed' >&2
+    exit 1
+fi
+grep -q '^PASS public_rt_db_bitmap_and_u32 arrays=6 cases=3 word_checks=34 input_preservation=1 fresh_output=1$' "$build/public.log"
+grep -q '^AVX512_KERNEL_ENTRIES=3$' "$build/public.log"
+sha256sum "$build/forced" "$build/public" > "$build/binaries.sha256"
+cat "$build/forced.log"
+grep '^PASS\|^AVX512_KERNEL_ENTRIES=' "$build/public.log"
+echo 'PASS: production runtime AVX512 AND kernel and public dispatch (not Simple application qualification)'
