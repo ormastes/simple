@@ -1,7 +1,7 @@
 """Run only below the canonical20-job owner and Windows CFEC collector."""
 import argparse,datetime,hashlib,json,os,pathlib,subprocess,sys,time
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parent/"lib"))
-from executable_batch_policy import available_commit_bytes,may_start,closed_rss,outcome,identity,reusable_success
+from executable_batch_policy import available_commit_bytes,may_start,closed_rss,outcome,identity,reusable_success,preflight_invocation,request_environment,validate_owned_ancestry
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--packet',required=True,type=pathlib.Path)
 parser.add_argument('--preflight',action='store_true')
@@ -24,22 +24,25 @@ def check_request(t):
  return r
 
 def preflight():
+ assert TARGETS, 'Empty target manifest is not executable'
  assert CONFIG['aggregate_jobs']==20 and 1<=CONFIG['max_executables']<=20
  assert len({t['packet'] for t in TARGETS})==len(TARGETS)
  assert all(t['options']==dict(threads=1,hir_sharding=0,parse_sharding=0,streaming_surfaces=1) for t in TARGETS)
  for t in TARGETS:check_request(t)
  # The first target's shared producer/source/Hello authority preflight covers common pins.
  # Each child repeats its own full authority check immediately before execution.
- first=check_request(TARGETS[0]);subprocess.run(first.get('preflight_command',first['command']+['--preflight']),check=True)
+ first=check_request(TARGETS[0]);command,cwd,environment=preflight_invocation(first,os.environ)
+ subprocess.run(command,cwd=cwd,env=environment,check=True)
 if args.preflight:
  preflight();print('batch preflight passed');raise SystemExit(0)
 preflight()
 launch=load(CONFIG['owner_launch_receipt'])
 reservation=load(launch['reservation'])
-assert launch['threads']==reservation['threads']==20
-assert launch['owner_pid']==reservation['owner_pid']
-assert sha(launch['request'])==launch['request_sha256']
-assert pathlib.Path(reservation['receipt_path']).resolve()==pathlib.Path(CONFIG['parent_collector_receipt']).resolve()
+observer=CONFIG['process_observer']
+assert sha(observer['path'])==observer['sha256'], 'Process observer changed'
+observed=subprocess.check_output([CONFIG['powershell'], '-NoProfile', '-NonInteractive', '-File', observer['path'], '-BatchProcessId', str(os.getpid()), '-OwnerProcessId', str(launch['owner_pid'])],text=True)
+rows=json.loads(observed)
+validate_owned_ancestry(CONFIG,launch,reservation,load(launch['request']),rows,os.getpid(),pathlib.Path(__file__).resolve(),D,sha)
 assert not (D/'batch-state.json').exists(),'Fresh parent run required; explicit closed-receipt resume only'
 state=dict(state='RUNNING',aggregate_jobs=20,max_executables=CONFIG['max_executables'],rows=[],current=[],observed_task_peak_bytes=[],scope='compile+link tasks; not isolated linker measurements',no_kill_on_memory_pressure=True)
 pending=list(TARGETS);running={};observations=[];blocked=False
@@ -84,7 +87,7 @@ while pending or running:
   assert not (packet/'artifact').exists(),'Fresh output required; cache lives separately'
   out=(packet/'task.stdout.log').open('xb');err=(packet/'task.stderr.log').open('xb')
   # One parent CFEC Job contains these children and all nested native/RSS helpers.
-  process=subprocess.Popen(request['command'],cwd=request['cwd'],env={**os.environ,**request.get('environment',{})},stdout=out,stderr=err,creationflags=subprocess.CREATE_NO_WINDOW)
+  process=subprocess.Popen(request['command'],cwd=request['cwd'],env=request_environment(request,os.environ),stdout=out,stderr=err,creationflags=subprocess.CREATE_NO_WINDOW)
   running[process.pid]=dict(process=process,target=t,stdout=out,stderr=err)
   write(packet/'child-start.json',dict(pid=process.pid,parent_batch_pid=__import__('os').getpid(),utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),requested_jobs=1,aggregate_reservation_jobs=20))
   state['state']='RUNNING';publish();free=available_commit_bytes()

@@ -49,6 +49,11 @@ external immutable diagnostic packets, never this source file.
 ```json
 {
   "aggregate_jobs": 20,
+  "global_job_budget": 80,
+  "admission_root": "CANONICAL_ADMISSION_DIRECTORY",
+  "powershell": "POWERSHELL_EXECUTABLE",
+  "collector": {"path": "ABSOLUTE_COLLECTOR_PATH", "sha256": "COLLECTOR_SHA256"},
+  "process_observer": {"path": "PROCESS_OBSERVER_SCRIPT", "sha256": "OBSERVER_SHA256"},
   "max_executables": 20,
   "headroom_bytes": 17179869184,
   "minimum_estimate_bytes": 1073741824,
@@ -59,7 +64,13 @@ external immutable diagnostic packets, never this source file.
 ```
 
 The launch receipt must identify a matching parent reservation with matching owner,
-20 jobs, collector receipt path, and exact parent request hash. The outer owner
+20 jobs, collector receipt path, and exact parent request hash. The pinned
+`lib/executable-batch-processes.ps1` observer obtains live process start times and
+ancestry. The owner PID/start must match the reservation exactly; the current
+runner must descend through the recorded collector before reaching that owner.
+Ancestor creation times reject recycled parent PIDs. The collector command must
+name the pinned absolute helper path, no work timeout, and terminate-job policy.
+The request must bind this runner, packet path and config hash. The outer owner
 must validate request file hashes and shared admission under its lock. Standalone
 execution without this owner/collector contract is unsupported.
 
@@ -68,7 +79,8 @@ execution without this owner/collector contract is unsupported.
 `options` (`threads:1`, `hir_sharding:0`, `parse_sharding:0`,
 `streaming_surfaces:1`). A child request binds `threads:1`, `command`, `cwd`, and
 file-leaf SHA-256 hashes in `files`. Its optional `preflight_command` overrides
-`command + ["--preflight"]`. Each qualification command must independently verify
+`command + ["--preflight"]`. Preflight uses the same `cwd` and inherited-plus-request
+environment as actual execution. Empty manifests are rejected explicitly. Each qualification command must independently verify
 its exact producer, frozen source authority and Hello proof before launching work.
 Alternate Cranelift and LLVM targets in the manifest to exercise both backends as
 memory admission expands. Manifest ordering is not proof of actual concurrency;
@@ -108,6 +120,7 @@ ABI or duplicate-definition bug is established until a linker was actually reach
 ```text
 python scripts/bootstrap/tests/executable-batch-test.py
 python scripts/bootstrap/tests/executable-batch-lease-test.py
+python scripts/bootstrap/tests/executable-batch-owner-test.py
 ```
 
 On Windows set `SIMPLE_BOOTSTRAP_BASH` to the installed Git Bash executable if PATH
@@ -117,3 +130,7 @@ child crash blocking, contradictory success, exact resume identity, and lease
 quiescence. Shell tests exercise real cleanup with ownership/quiescence/error
 combinations. Canonical collector tests remain the authority for Windows Job tree
 reaping; these focused tests do not claim end-to-end product qualification.
+
+Ownership tests reject missing owners, reused owner/collector PIDs, unrelated
+ancestry and unbound commands, and execute a real preflight cwd/environment probe.
+Set `SIMPLE_BOOTSTRAP_POWERSHELL` to enable the Windows live-observer test.
