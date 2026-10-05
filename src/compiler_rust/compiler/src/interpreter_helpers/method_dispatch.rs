@@ -50,7 +50,7 @@ pub(crate) fn call_method_on_value(
             "len" | "length" => return Ok(Value::Int(s.chars().count() as i64)),
             "is_empty" => return Ok(Value::Bool(s.is_empty())),
             "to_string" => return Ok(Value::shared_text(s.clone())),
-            "chars" => return Ok(Value::array(s.chars().map(|c| Value::text(c.to_string())).collect())),
+            "chars" => return Ok(Value::array(s.chars().map(|c| Value::text(c.to_string())).collect::<Vec<Value>>())),
             "trim" | "strip" => return Ok(Value::text(s.trim().to_string())),
             "to_upper" | "upper" | "uppercase" => return Ok(Value::text(s.to_uppercase())),
             "to_lower" | "lower" | "lowercase" => return Ok(Value::text(s.to_lowercase())),
@@ -106,7 +106,7 @@ pub(crate) fn call_method_on_value(
                 } else {
                     s.split(&sep).map(str::to_string).collect()
                 };
-                return Ok(Value::array(raw_parts.into_iter().map(Value::text).collect()));
+                return Ok(Value::array(raw_parts.into_iter().map(Value::text).collect::<Vec<Value>>()));
             }
             "find_str" | "find" | "index_of" => {
                 // Keep nested temporary-text dispatch aligned with the ordinary

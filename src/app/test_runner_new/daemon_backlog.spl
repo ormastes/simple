@@ -66,11 +66,29 @@ fn daemon_backlog_bypass(pending: i64) -> bool:
 fn count_pending_requests(entries: [text]) -> i64:
     """Pending-request count from a raw directory listing.
 
-    Only `.req` names count. The directory also holds `.req.tmp` files from the
-    atomic tmp+rename write, and counting those would make a client bypass on
-    an in-flight write that is about to become its OWN request."""
+    `.req` names count, and so do `.req.inflight` names: the single worker
+    renames a request to `.req.inflight` while it runs it, and a request
+    queued behind that run waits out the running spec's whole budget. Not
+    counting it is how parallel `simple test` clients saw spurious
+    `daemon-worker-timeout` verdicts (measured 2026-10-05: a spec that passes
+    187/187 alone was served with 730 ms of its budget left).
+
+    The directory also holds `.req.tmp` files from the atomic tmp+rename write,
+    and counting those would make a client bypass on an in-flight write that
+    is about to become its OWN request."""
     var pending = 0
     for name in entries:
-        if name.ends_with(".req"):
+        if name.ends_with(".req") or name.ends_with(".req.inflight"):
             pending = pending + 1
     pending
+
+# How long a client waits for the worker to CLAIM its request (rename to
+# `.req.inflight`) before withdrawing it and running directly. An idle worker
+# polls every 250 ms, so a claim inside this window means the worker was free;
+# no claim means it is busy (or slow to start), and waiting longer would spend
+# the spec's own budget in the queue. Withdrawal is a rename of the client's own
+# `.req`, so exactly one of claim and withdraw can win.
+val LIGHT_DAEMON_CLAIM_WAIT_MS: i64 = 2000
+
+fn daemon_claim_wait_expired(waited_ms: i64) -> bool:
+    waited_ms >= LIGHT_DAEMON_CLAIM_WAIT_MS

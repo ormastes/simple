@@ -5083,6 +5083,37 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
                     ((start - end - step - 1) / (-step)) as u64
                 };
 
+                // PACKED arrays store raw bytes/words, not tagged slots (see
+                // rt_array_concat). `as_slice()` read a byte-packed `[u8]` as
+                // `len` 8-byte slots — garbage elements AND an 8x out-of-bounds
+                // read; under the JIT h1_client's header/body split of a fetched
+                // response came back scrambled. Keep the source layout.
+                if (*arr).is_byte_packed() || (*arr).is_u64_packed() {
+                    let bytes = (*arr).is_byte_packed();
+                    let result = if bytes {
+                        rt_byte_array_new(result_len.max(1))
+                    } else {
+                        rt_array_new_uninit_u64(result_len.max(1))
+                    };
+                    if result.is_nil() {
+                        return result;
+                    }
+                    let dst = as_typed_ptr!(mut result, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+                    let mut idx = start;
+                    let mut out = 0usize;
+                    while idx < end {
+                        if bytes {
+                            *((*dst).data as *mut u8).add(out) = *((*arr).data as *const u8).add(idx as usize);
+                        } else {
+                            *((*dst).data as *mut u64).add(out) = *((*arr).data as *const u64).add(idx as usize);
+                        }
+                        out += 1;
+                        idx += step;
+                    }
+                    (*dst).len = out as u64;
+                    return result;
+                }
+
                 let result = rt_array_new(result_len);
                 if result.is_nil() {
                     return result;
@@ -6252,6 +6283,14 @@ pub extern "C" fn rt_array_fill(array: RuntimeValue, value: RuntimeValue) -> boo
 /// exact diagnostic and exit status. An invalid DESTINATION handle (not an
 /// array) keeps the -1 answer: the compiler only emits this call for an array
 /// receiver, so that case is an ABI misuse rather than a program error.
+///
+/// The count is a RAW `i64`, the contract the C twin (`runtime_native.c`), the
+/// pure-Simple MIR lowering (`lower_unresolved_array_write_span`, `-> i64`) and
+/// `RuntimeFuncSpec` all declare. This twin used to return a TAGGED count, so a
+/// seed-compiled native binary linked against the C twin read `count / 8`
+/// (doc/08_tracking/bug/native_write_span_return_count_decoded_as_tagged_2026-10-05.md);
+/// the seed HIR now types `write_span` as `i64` so the raw count is boxed like
+/// every other raw-`i64` builtin (`len`, `index_of`).
 #[no_mangle]
 pub extern "C" fn rt_array_write_span(
     dst: RuntimeValue,
@@ -6259,11 +6298,11 @@ pub extern "C" fn rt_array_write_span(
     dst_off: i64,
     src_off: i64,
     count: i64,
-) -> RuntimeValue {
+) -> i64 {
     if count <= 0 {
-        return RuntimeValue::from_int(0);
+        return 0;
     }
-    let err = RuntimeValue::from_int(-1);
+    let err = -1;
     let dst_arr = as_typed_ptr!(mut dst, HeapObjectType::Array, RuntimeArray, err);
     let Some(src_arr) = crate::value::heap::get_typed_ptr::<RuntimeArray>(src, HeapObjectType::Array) else {
         write_span_fail("write_span expects array source argument");
@@ -6283,7 +6322,7 @@ pub extern "C" fn rt_array_write_span(
             (*dst_arr).as_mut_slice()[dst_off as usize..(dst_off + count) as usize].copy_from_slice(src_slice);
         }
     }
-    RuntimeValue::from_int(count)
+    count
 }
 
 /// Bounds rule shared with the interpreter kernel

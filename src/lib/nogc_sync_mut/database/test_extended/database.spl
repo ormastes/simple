@@ -13,7 +13,8 @@ use std.database.test_extended.types.{
 }
 use std.database.test_extended.database_queries.{
     run_record_from_row, counter_record_from_row, timing_summary_from_row,
-    db_get_file_path, db_get_suite_info, db_get_test_timing, db_get_test_counts
+    db_get_file_path, db_get_suite_info, db_get_test_timing, db_get_test_counts,
+    db_test_info_lookup
 }
 
 # Most timing runs any single test needs: collect_timing_runs' widest caller
@@ -1084,6 +1085,8 @@ class TestDatabaseExtended:
             case None:
                 return result
 
+        # One pass per side table instead of three table scans per test.
+        val lookup = db_test_info_lookup(self.db, self.interner)
         for test_row in tests_table.valid_rows():
             val test_id = test_row.get_i64("test_id") ?? -1
             val suite_id = test_row.get_i64("suite_id") ?? -1
@@ -1095,15 +1098,22 @@ class TestDatabaseExtended:
                 continue
 
             val test_name = self.interner.get(name_str) ?? ""
-            val (file_path, suite_name) = self.get_suite_info(suite_id) ?? ("", "")
+            val has_suite = lookup.suite_file.has(suite_id)
+            val file_path = if has_suite: lookup.suite_file[suite_id] else: ""
+            val suite_name = if has_suite: lookup.suite_name[suite_id] else: ""
             val category = self.interner.get(category_str) ?? "uncategorized"
             val status = self.interner.get(status_str) ?? "unknown"
 
             val valid_str = test_row.get("valid") ?? "false"
             val valid = valid_str == "true"
 
-            val (mean, p50) = self.get_test_timing(test_id) ?? (0.0, 0.0)
-            val (total_runs, passed, failed) = self.get_test_counts(test_id) ?? (0, 0, 0)
+            val has_timing = lookup.timing_mean.has(test_id)
+            val mean = if has_timing: lookup.timing_mean[test_id] else: 0.0
+            val p50 = if has_timing: lookup.timing_p50[test_id] else: 0.0
+            val has_counts = lookup.count_total.has(test_id)
+            val total_runs = if has_counts: lookup.count_total[test_id] else: 0
+            val passed = if has_counts: lookup.count_passed[test_id] else: 0
+            val failed = if has_counts: lookup.count_failed[test_id] else: 0
             val is_flaky = self.is_flaky_test(test_id)
 
             result.push(TestInfo(

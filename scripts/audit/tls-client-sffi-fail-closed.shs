@@ -39,7 +39,7 @@ if ! grep -q '^export use std\.nogc_sync_mut\.io\.tls_sffi\.\*$' "$app_facade"; 
     echo "application TLS facade must re-export the canonical owner" >&2
     failed=1
 fi
-if [ "$(grep -c '^[[:space:]]*extern fn rt_tls_' "$canonical_facade")" -ne 19 ]; then
+if [ "$(grep -c '^[[:space:]]*extern fn rt_tls_' "$canonical_facade")" -ne 20 ]; then
     echo "canonical TLS declaration inventory changed without contract review" >&2
     failed=1
 fi
@@ -79,7 +79,7 @@ do
         failed=1
     fi
 done
-if [ "$(grep -c '^@unsafe(.*capabilities: \[ffi\])' "$canonical_facade")" -ne 19 ]; then
+if [ "$(grep -c '^@unsafe(.*capabilities: \[ffi\])' "$canonical_facade")" -ne 20 ]; then
     echo "canonical TLS raw declarations lost minimal FFI authority tags" >&2
     failed=1
 fi
@@ -112,6 +112,17 @@ fi
 if ! grep -q '^fn rt_tls_client_read_checked(conn: i64, max_bytes: i64) -> text?:' "$simpleos_tls" ||
    ! grep -q '^fn rt_tls_client_read_timeout_checked(conn: i64, max_bytes: i64, timeout_ms: i64) -> text?:' "$simpleos_tls"; then
     echo "SimpleOS TLS shim must fail closed for checked client reads" >&2
+    failed=1
+fi
+# Binary-safe client read (2026-10-05): the text read decodes to text in the
+# interpreter, which replaced every non-UTF-8 byte with U+FFFD and corrupted
+# every PNG/wasm body over https. The byte read must exist on every lane and
+# fail closed (nil, never an empty array) on the SimpleOS shim.
+if ! grep -q '^extern fn rt_tls_client_read_bytes_timeout_checked(conn: i64, max_bytes: i64, timeout_ms: i64) -> \[u8\]?' "$canonical_facade" ||
+   ! grep -q '^fn rt_tls_client_read_bytes_timeout_checked(conn: i64, max_bytes: i64, timeout_ms: i64) -> \[u8\]?:' "$simpleos_tls" ||
+   ! grep -q 'pub extern "C" fn rt_tls_client_read_bytes_timeout_checked' "$runtime_tls" ||
+   ! grep -q 'rt_tls_client_read_bytes_timeout_checked' "$root/src/lib/nogc_sync_mut/io/browser_net_runtime.spl"; then
+    echo "binary-safe TLS client read must be declared, shimmed, provided, and used by the browser" >&2
     failed=1
 fi
 if ! grep -q 'extern fn rt_tls_client_read_checked(conn: i64, max_bytes: i64) -> text?' "$canonical_facade" ||

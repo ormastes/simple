@@ -332,7 +332,7 @@ mod contract_tests {
         assert!(rt_diagram_trace_method_with_args(&[
             Value::text("Class"),
             Value::text("method"),
-            Value::Array(std::sync::Arc::new(Vec::new())),
+            Value::array(Vec::new()),
         ])
         .is_err());
         assert!(rt_diagram_trace_return(&[Value::Nil]).is_err());

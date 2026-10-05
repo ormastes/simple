@@ -173,7 +173,7 @@ pub fn rt_dict_keys_fn(args: &[Value]) -> Result<Value, CompileError> {
     if let Value::Dict(map) | Value::FrozenDict(map) = dict_value {
         let mut keys: Vec<_> = map.keys().cloned().collect();
         keys.sort();
-        return Ok(Value::array(keys.into_iter().map(Value::text).collect()));
+        return Ok(Value::array(keys.into_iter().map(Value::text).collect::<Vec<Value>>()));
     }
 
     let dict = RuntimeValue::from_raw(dict_value.as_int()? as u64);
@@ -193,7 +193,7 @@ pub fn rt_dict_values_fn(args: &[Value]) -> Result<Value, CompileError> {
         let mut entries: Vec<_> = map.iter().collect();
         entries.sort_by(|(left, _), (right, _)| left.cmp(right));
         return Ok(Value::array(
-            entries.into_iter().map(|(_, value)| value.clone()).collect(),
+            entries.into_iter().map(|(_, value)| value.clone()).collect::<Vec<Value>>(),
         ));
     }
 

@@ -151,7 +151,7 @@ fn inject_mixins(class_def: &ClassDef) -> ClassDef {
 fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
     match iterable {
         Value::Array(arr) => Ok(arr.to_vec()),
-        Value::FrozenArray(arr) => Ok(arr.as_ref().clone()),
+        Value::FrozenArray(arr) => Ok(arr.to_vec()),
         Value::FixedSizeArray { data, .. } => Ok(data.clone()),
         Value::Tuple(t) => Ok(t.clone()),
         Value::Str(s) => Ok(s.chars().map(|c| Value::text(c.to_string())).collect()),

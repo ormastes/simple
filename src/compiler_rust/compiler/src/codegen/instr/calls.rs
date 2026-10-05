@@ -4080,7 +4080,17 @@ pub fn compile_call<M: Module>(
                     if let Some(d) = dest {
                         let results = builder.inst_results(call);
                         if !results.is_empty() {
-                            ctx.vreg_values.insert(*d, results[0]);
+                            let mut value = results[0];
+                            if rt_name == "rt_array_write_span" {
+                                // The runtimes return the RAW i64 count (C twin,
+                                // pure-Simple lowering and this seed's runtime all
+                                // agree). This erased-receiver path hands results on
+                                // as tagged values, so tag it here: the int tag is
+                                // `(v << 3) | 0`, exactly `rt_value_int(v)`.
+                                // doc/08_tracking/bug/native_write_span_return_count_decoded_as_tagged_2026-10-05.md
+                                value = builder.ins().ishl_imm(value, 3);
+                            }
+                            ctx.vreg_values.insert(*d, value);
                         }
                     }
                     return Ok(());

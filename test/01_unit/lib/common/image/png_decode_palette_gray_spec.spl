@@ -1,0 +1,132 @@
+"""
+## Purpose and audience
+Purpose: Pin decoding of palette (color type 3), grayscale (0) and
+gray+alpha (4) PNGs, including packed 1/2/4-bit samples and tRNS
+transparency. Real sites serve these: google.com's logo and the
+wikipedia.org globe were both rejected with "PNG bit depth or color type is
+unsupported", so neither image ever painted.
+Audience: maintainers of the image decoders used by the browser engine.
+## Operator workflow
+Run with the test runner; fixtures are built in-spec (stored deflate block,
+real CRC and Adler-32), no files or network.
+## Compatibility and limitations
+16-bit samples and Adam7 interlacing stay unsupported and must still be
+rejected. Bug record: doc/08_tracking/bug/tls_binary_body_utf8_lossy_2026-10-05.md
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+use std.common.image.png_decode.{decode_png_to_argb}
+use std.common.compress.gzip.{gzip_crc32}
+
+fn be32(v: i64) -> [u8]:
+    [((v >> 24) & 255).to_u8(), ((v >> 16) & 255).to_u8(), ((v >> 8) & 255).to_u8(), (v & 255).to_u8()]
+
+fn chunk(kind: [u8], body: [u8]) -> [u8]:
+    var typed: [u8] = []
+    for b in kind: typed.push(b)
+    for b in body: typed.push(b)
+    var out = be32(body.len())
+    for b in typed: out.push(b)
+    for b in be32(gzip_crc32(typed).to_i64()): out.push(b)
+    out
+
+fn adler32(data: [u8]) -> i64:
+    var a: i64 = 1
+    var b: i64 = 0
+    for byte in data:
+        a = (a + byte.to_i64()) % 65521
+        b = (b + a) % 65521
+    (b << 16) | a
+
+fn zlib_stored(raw: [u8]) -> [u8]:
+    """zlib stream holding `raw` in one stored (uncompressed) deflate block."""
+    val n = raw.len()
+    var out: [u8] = [0x78u8, 0x01u8, 0x01u8, (n & 255).to_u8(), ((n >> 8) & 255).to_u8(),
+        ((n & 255) ^ 255).to_u8(), (((n >> 8) & 255) ^ 255).to_u8()]
+    for b in raw: out.push(b)
+    for b in be32(adler32(raw)): out.push(b)
+    out
+
+fn png(width: i64, height: i64, depth: i64, color: i64, extra: [[u8]], scanlines: [u8]) -> [u8]:
+    """`extra` = ready-made chunks placed between IHDR and IDAT."""
+    var out: [u8] = [137u8, 80u8, 78u8, 71u8, 13u8, 10u8, 26u8, 10u8]
+    var ihdr = be32(width)
+    for b in be32(height): ihdr.push(b)
+    ihdr.push(depth.to_u8())
+    ihdr.push(color.to_u8())
+    ihdr.push(0u8)
+    ihdr.push(0u8)
+    ihdr.push(0u8)
+    for b in chunk([73u8, 72u8, 68u8, 82u8], ihdr): out.push(b)
+    for c in extra:
+        for b in c: out.push(b)
+    for b in chunk([73u8, 68u8, 65u8, 84u8], zlib_stored(scanlines)): out.push(b)
+    for b in chunk([73u8, 69u8, 78u8, 68u8], []): out.push(b)
+    out
+
+fn plte(colors: [u8]) -> [u8]:
+    chunk([80u8, 76u8, 84u8, 69u8], colors)
+
+fn trns(values: [u8]) -> [u8]:
+    chunk([116u8, 82u8, 78u8, 83u8], values)
+
+fn pixels_of(data: [u8]) -> [u32]:
+    match decode_png_to_argb(data):
+        Ok(image): image.pixels
+        Err(message):
+            print "decode error: {message}"
+            []
+
+fn error_of(data: [u8]) -> text:
+    match decode_png_to_argb(data):
+        Ok(_): ""
+        Err(message): message
+
+describe "palette PNG (color type 3)":
+    it "maps 8-bit indices through PLTE":
+        step("2x1 image, palette red + blue, row = [filter 0, idx 1, idx 0]")
+        val data = png(2, 1, 8, 3, [plte([255u8, 0u8, 0u8, 0u8, 0u8, 255u8])], [0u8, 1u8, 0u8])
+        expect(pixels_of(data)).to_equal([0xFF0000FFu32, 0xFFFF0000u32])
+
+    it "unpacks 1-bit indices MSB first":
+        step("3x1 image, bits 101 -> palette[1], palette[0], palette[1]")
+        val data = png(3, 1, 1, 3, [plte([0u8, 0u8, 0u8, 255u8, 255u8, 255u8])], [0u8, 0b10100000u8])
+        expect(pixels_of(data)).to_equal([0xFFFFFFFFu32, 0xFF000000u32, 0xFFFFFFFFu32])
+
+    it "applies tRNS alpha per palette entry":
+        val data = png(2, 1, 8, 3,
+            [plte([255u8, 0u8, 0u8, 0u8, 255u8, 0u8]), trns([0u8])], [0u8, 0u8, 1u8])
+        step("entry 0 gets alpha 0; entry 1 has no tRNS value and stays opaque")
+        expect(pixels_of(data)).to_equal([0x00FF0000u32, 0xFF00FF00u32])
+
+    it "rejects a palette image without PLTE and an out-of-range index":
+        expect(error_of(png(1, 1, 8, 3, [], [0u8, 0u8]))).to_contain("PLTE")
+        expect(error_of(png(1, 1, 8, 3, [plte([1u8, 2u8, 3u8])], [0u8, 5u8]))).to_contain("out of range")
+
+describe "grayscale PNG (color types 0 and 4)":
+    it "scales 4-bit gray samples to 0..255":
+        step("2x1, samples 0xF and 0x0 packed in one byte")
+        val data = png(2, 1, 4, 0, [], [0u8, 0xF0u8])
+        expect(pixels_of(data)).to_equal([0xFFFFFFFFu32, 0xFF000000u32])
+
+    it "makes the tRNS gray value transparent":
+        val data = png(2, 1, 8, 0, [trns([0u8, 128u8])], [0u8, 128u8, 64u8])
+        expect(pixels_of(data)).to_equal([0x00808080u32, 0xFF404040u32])
+
+    it "decodes 8-bit gray+alpha":
+        val data = png(1, 1, 8, 4, [], [0u8, 200u8, 50u8])
+        expect(pixels_of(data)).to_equal([0x32C8C8C8u32])
+
+describe "formats that stay unsupported":
+    it "still rejects 16-bit samples and interlaced images":
+        expect(error_of(png(1, 1, 16, 2, [], [0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]))).to_contain("unsupported")
+        var interlaced = png(1, 1, 8, 2, [], [0u8, 1u8, 2u8, 3u8])
+        step("flip the IHDR interlace byte (offset 28) and fix nothing else: CRC must fail first")
+        interlaced[28] = 1u8
+        expect(error_of(interlaced)).to_contain("CRC")
+
+    it "keeps decoding 8-bit RGB exactly as before":
+        val data = png(1, 1, 8, 2, [], [0u8, 1u8, 2u8, 3u8])
+        expect(pixels_of(data)).to_equal([0xFF010203u32])

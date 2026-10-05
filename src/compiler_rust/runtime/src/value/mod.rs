@@ -943,7 +943,8 @@ pub use net::{
 #[cfg(feature = "runtime-tls")]
 pub use net::{
     rt_tls_client_close, rt_tls_client_connect, rt_tls_client_connect_address_with_sni_timeout,
-    rt_tls_client_connect_with_sni, rt_tls_client_read_checked, rt_tls_client_read_timeout_checked,
+    rt_tls_client_connect_with_sni, rt_tls_client_read_bytes_timeout_checked, rt_tls_client_read_checked,
+    rt_tls_client_read_timeout_checked, tls_client_read_bytes_timeout,
     rt_tls_client_write, rt_tls_client_write_timeout, rt_tls_get_cipher_suite, rt_tls_get_negotiated_alpn,
     rt_tls_get_protocol_version, rt_tls_is_handshake_complete, rt_tls_server_accept, rt_tls_server_close_connection,
     rt_tls_server_create, rt_tls_server_create_from_der, rt_tls_server_create_on, rt_tls_server_read_checked,

@@ -1,0 +1,51 @@
+"""
+## Purpose and audience
+Purpose: Pin the browser-engine renames that keep the seed JIT from binding a
+call to a same-named function in another module ("public function X has N
+co-compiled definitions with differing signatures": an untyped call site binds
+the LAST definition, which is how `argb` produced fg=3). The old names must not
+come back as definitions in these files.
+Audience: maintainers of the browser engine.
+## Operator workflow
+Run with the test runner. Source-contract spec: it reads the engine sources.
+## Compatibility and limitations
+Source text only; it does not run the JIT. Bug record:
+doc/08_tracking/bug/browser_jit_render_flat_colour_2026-10-05.md
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{file_read}
+
+val BE: text = "src/lib/gc_async_mut/gpu/browser_engine/"
+
+fn src(name: text) -> text:
+    file_read(BE + name)
+
+describe "Browser engine keeps JIT-unique function names":
+    it "the 3-argument color packer is web_argb, not argb":
+        val s = src("simple_web_html_layout_renderer_foundation.spl")
+        assert_true(s.contains("fn web_argb(r: i32, g: i32, b: i32) -> u32:"))
+        assert_false(s.contains("\nfn argb("))
+
+    it "the bitmap glyph scale is web_glyph_scale":
+        val s = src("simple_web_html_layout_renderer_paint_primitives.spl")
+        assert_true(s.contains("fn web_glyph_scale(fs: i32) -> i32:"))
+        assert_false(s.contains("\nfn glyph_scale("))
+
+    it "the character-budget line end is web_wrap_line_end":
+        val s = src("simple_web_html_layout_renderer_layout_foundation.spl")
+        assert_true(s.contains("pub fn web_wrap_line_end("))
+        assert_false(s.contains("\npub fn wrap_line_end("))
+
+    it "the node-id DOM lookup is be_dom_find_by_node_id":
+        val s = src("dom_accessors.spl")
+        assert_true(s.contains("fn be_dom_find_by_node_id(root: BeDomNode, node_id: i64)"))
+        assert_false(s.contains("\nfn be_dom_find_by_id("))
+
+    it "dom_color and css.spl keep their prefixed names":
+        assert_true(src("dom_color.spl").contains("pub fn dom_parse_hex_color(s: text) -> u32:"))
+        assert_false(src("dom_color.spl").contains("\npub fn parse_hex_color("))
+        assert_true(src("css.spl").contains("fn css_resolve_style(style: StyleProps) -> StyleProps:"))
+        assert_false(src("css.spl").contains("\nfn resolve_style("))

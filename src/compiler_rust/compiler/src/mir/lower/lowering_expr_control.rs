@@ -51,12 +51,26 @@ fn try_collect_int_match<'a>(body: &'a HirExpr, local_idx: usize) -> Option<(Vec
 }
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn lower_block_expr(&mut self, stmts: &[HirStmt]) -> MirLowerResult<VReg> {
+    pub(super) fn lower_block_expr(&mut self, stmts: &[HirStmt], block_ty: TypeId) -> MirLowerResult<VReg> {
         let saved_last_expr = self.last_expr_value;
         self.last_expr_value = None;
+        // The block's tail statement yields the BLOCK's value, so its
+        // tagged/raw coercion must target `block_ty`, not the function's
+        // return type. Coercing to the return type unboxed the ANY result of
+        // `val a = s.parse_int() ?? 8` (lowered as a block) into an ANY local
+        // inside an `-> i64` function, and the later read unboxed it again:
+        // the fallback 8 came back as 1 under the JIT.
+        let func_name = self.with_func(|func, _| func.name.clone())?;
+        let saved_tail = self.block_expr_tail.replace((func_name, block_ty));
+        let mut lowered: MirLowerResult<()> = Ok(());
         for stmt in stmts {
-            self.lower_stmt(stmt, None)?;
+            lowered = self.lower_stmt(stmt, None);
+            if lowered.is_err() {
+                break;
+            }
         }
+        self.block_expr_tail = saved_tail;
+        lowered?;
         let result = if let Some(result) = self.last_expr_value {
             result
         } else {
@@ -78,7 +92,7 @@ impl<'a> MirLowerer<'a> {
         use crate::mir::function::MirLocal;
 
         // Lower condition
-        let cond_reg = self.lower_expr(condition)?;
+        let cond_reg = self.lower_condition_expr(condition)?;
 
         // Create temporary local for result BEFORE branching
         let temp_local_index = self.with_func(|func, _| {

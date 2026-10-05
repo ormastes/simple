@@ -1,0 +1,52 @@
+"""
+## Purpose and audience
+Purpose: Pin the two defects that made the browser engine render a real page
+as one flat colour once it ran under the JIT instead of the interpreter.
+1. `renderer_default_style()` returned one memoised Style; compiled code
+   treats a `class` as an identity type, so every node shared one object.
+2. The engine's 3-argument color packer collided by name with the 4-argument
+   `argb` in common/render_scene/scene.spl and JIT call sites with untyped
+   literals bound to the wrong one. It is now `web_argb`.
+Audience: maintainers of the browser engine style stage and of the JIT lane.
+## Operator workflow
+Run with `simple run <this spec>`; it JITs like any other module.
+## Compatibility and limitations
+Pure functions only. Bug record:
+doc/08_tracking/bug/browser_jit_render_flat_colour_2026-10-05.md
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, renderer_default_style}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{web_argb, parse_color}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{parse_html, extract_css_vw, build_child_index, compute_styles}
+
+describe "UA default style is a fresh object per call":
+    it "mutating one default style does not change the next one":
+        step("take a default style and change it in place")
+        var first = renderer_default_style()
+        first.font_size = 99
+        first.display = "inline"
+        step("a second default style still has the UA values")
+        val second = renderer_default_style()
+        assert_equal(second.font_size, 16)
+        assert_equal(second.display, "block")
+
+    it "earlier nodes keep their own computed style after later nodes resolve":
+        step("cascade a document whose later element changes size and alignment")
+        val html = "<html><body><p>a</p><div style=\"font-size:10pt;text-align:right\">b</div></body></html>"
+        val nodes = parse_html(html)
+        val styles = compute_styles(nodes, extract_css_vw(html, 800, false), build_child_index(nodes), false, false)
+        step("the root still carries the UA defaults")
+        assert_equal(styles[0].display, "block")
+        assert_equal(styles[0].font_size, 16)
+        assert_equal(styles[0].text_align, "left")
+
+describe "web_argb packs opaque colors":
+    it "packs black with a full alpha byte":
+        assert_equal(web_argb(0, 0, 0), 0xFF000000u32)
+
+    it "agrees with the named-color parser":
+        assert_equal(parse_color("white"), web_argb(255, 255, 255))
+        assert_equal(parse_color("#102030"), web_argb(16, 32, 48))

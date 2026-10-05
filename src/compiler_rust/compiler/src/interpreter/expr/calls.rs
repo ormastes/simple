@@ -420,7 +420,7 @@ pub(super) fn eval_call_expr(
                         let len = arr.len() as i64;
                         let real_idx = if idx < 0 { len + idx } else { idx };
                         if real_idx >= 0 && real_idx < len {
-                            let elem = arr[real_idx as usize].clone();
+                            let elem = arr.get_value(real_idx as usize).expect("index checked against len");
                             if let Value::Object { class, fields } = elem {
                                 if let Some((result, updated_elem)) = super::super::find_and_exec_method_with_self(
                                     method,
@@ -435,7 +435,7 @@ pub(super) fn eval_call_expr(
                                 )? {
                                     let mut new_arr = (*arr).clone();
                                     new_arr[real_idx as usize] = updated_elem;
-                                    let new_arr_val = Value::Array(std::sync::Arc::new(new_arr));
+                                    let new_arr_val = Value::array(new_arr);
                                     env.insert(arr_name.clone(), new_arr_val.clone());
                                     if !env.is_local(arr_name)
                                         && super::super::MODULE_GLOBALS

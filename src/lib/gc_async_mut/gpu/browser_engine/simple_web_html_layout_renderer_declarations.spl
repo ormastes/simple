@@ -99,13 +99,89 @@ fn _padding_integer_px(token: text) -> i32:
         index = index + 1
     number
 
-fn _padding_integer_px_values(raw: text, maximum: i32) -> [i32]:
+# Viewport for vw/vh lengths (gap D, 2026-10-05). Set by
+# compute_styles_with_material for exactly one cascade pass (and part of the
+# cascade memo key); -1 outside a pass, where vw/vh stay unsupported.
+var _css_cascade_viewport_w: i32 = -1
+var _css_cascade_viewport_h: i32 = -1
+
+fn css_cascade_viewport_set(viewport_w: i32, viewport_h: i32):
+    _css_cascade_viewport_w = viewport_w
+    _css_cascade_viewport_h = viewport_h
+
+# Non-negative decimal "12", "1.5", ".25" -> thousandths; -1 when malformed.
+fn _padding_decimal_milli(digits: text) -> i64:
+    if digits == "" or digits == ".":
+        return -1
+    var whole: i64 = 0
+    var frac: i64 = 0
+    var frac_digits = 0
+    var seen_dot = false
+    var index = 0
+    while index < digits.len():
+        val ch = digits.char_at(index)
+        if ch == ".":
+            if seen_dot:
+                return -1
+            seen_dot = true
+        else:
+            val digit = dec_val(ch)
+            if digit >= 10:
+                return -1
+            if seen_dot:
+                if frac_digits < 3:
+                    frac = frac * 10 + digit
+                    frac_digits = frac_digits + 1
+            else:
+                if whole > 1000000:
+                    return -1
+                whole = whole * 10 + digit
+        index = index + 1
+    while frac_digits < 3:
+        frac = frac * 10
+        frac_digits = frac_digits + 1
+    whole * 1000 + frac
+
+# One padding token -> px. px (integer, as before), 0, em (element font
+# size), rem (16px root), vw/vh (cascade viewport). -1 rejects the token,
+# which drops the whole declaration, as before.
+fn _padding_length_px(token: text, font_px: i32) -> i32:
+    val value = token.trim().lower()
+    if value.ends_with("px"):
+        return _padding_integer_px(value)
+    var unit_suffix = ""
+    var basis: i64 = 0
+    if value.ends_with("rem"):
+        unit_suffix = "rem"
+        basis = 16
+    elif value.ends_with("em"):
+        unit_suffix = "em"
+        basis = font_px as i64
+    elif value.ends_with("vh"):
+        unit_suffix = "vh"
+        basis = _css_cascade_viewport_h as i64
+    elif value.ends_with("vw"):
+        unit_suffix = "vw"
+        basis = _css_cascade_viewport_w as i64
+    if unit_suffix == "":
+        return _padding_integer_px(value)
+    if basis <= 0:
+        return -1
+    val milli = _padding_decimal_milli(value.substring(0, value.len() - unit_suffix.len()))
+    if milli < 0:
+        return -1
+    val scaled = if unit_suffix == "vh" or unit_suffix == "vw": basis * milli / 100000 else: basis * milli / 1000
+    if scaled > 1000000:
+        return -1
+    scaled as i32
+
+fn _padding_integer_px_values(raw: text, maximum: i32, font_px: i32 = 16) -> [i32]:
     val tokens = ws_tokens(raw.trim().lower())
     var values: [i32] = []
     if tokens.len() == 0 or tokens.len() > maximum:
         return values
     for token in tokens:
-        val value = _padding_integer_px(token)
+        val value = _padding_length_px(token, font_px)
         if value < 0:
             return []
         values.push(value)
@@ -113,7 +189,7 @@ fn _padding_integer_px_values(raw: text, maximum: i32) -> [i32]:
 
 fn _resolve_authored_padding(
     decl_tbl: [text], initial_top: i32, initial_right: i32,
-    initial_bottom: i32, initial_left: i32
+    initial_bottom: i32, initial_left: i32, font_px: i32 = 16
 ) -> (i32, i32, i32, i32):
     var top = initial_top
     var right = initial_right
@@ -124,7 +200,7 @@ fn _resolve_authored_padding(
         val name = decl_tbl[index]
         val raw = decl_tbl[index + 1]
         if name == "padding":
-            val values = _padding_integer_px_values(raw, 4)
+            val values = _padding_integer_px_values(raw, 4, font_px)
             if values.len() > 0:
                 top = values[0]
                 right = values[0]
@@ -142,45 +218,45 @@ fn _resolve_authored_padding(
                     bottom = values[2]
                     left = values[3]
         elif name == "padding-top":
-            val values = _padding_integer_px_values(raw, 1)
+            val values = _padding_integer_px_values(raw, 1, font_px)
             if values.len() == 1:
                 top = values[0]
         elif name == "padding-right":
-            val values = _padding_integer_px_values(raw, 1)
+            val values = _padding_integer_px_values(raw, 1, font_px)
             if values.len() == 1:
                 right = values[0]
         elif name == "padding-bottom":
-            val values = _padding_integer_px_values(raw, 1)
+            val values = _padding_integer_px_values(raw, 1, font_px)
             if values.len() == 1:
                 bottom = values[0]
         elif name == "padding-left":
-            val values = _padding_integer_px_values(raw, 1)
+            val values = _padding_integer_px_values(raw, 1, font_px)
             if values.len() == 1:
                 left = values[0]
         elif name == "padding-block":
-            val values = _padding_integer_px_values(raw, 2)
+            val values = _padding_integer_px_values(raw, 2, font_px)
             if values.len() > 0:
                 top = values[0]
                 bottom = if values.len() == 2: values[1] else: values[0]
         elif name == "padding-block-start":
-            val values = _padding_integer_px_values(raw, 1)
+            val values = _padding_integer_px_values(raw, 1, font_px)
             if values.len() == 1:
                 top = values[0]
         elif name == "padding-block-end":
-            val values = _padding_integer_px_values(raw, 1)
+            val values = _padding_integer_px_values(raw, 1, font_px)
             if values.len() == 1:
                 bottom = values[0]
         elif name == "padding-inline":
-            val values = _padding_integer_px_values(raw, 2)
+            val values = _padding_integer_px_values(raw, 2, font_px)
             if values.len() > 0:
                 left = values[0]
                 right = if values.len() == 2: values[1] else: values[0]
         elif name == "padding-inline-start":
-            val values = _padding_integer_px_values(raw, 1)
+            val values = _padding_integer_px_values(raw, 1, font_px)
             if values.len() == 1:
                 left = values[0]
         elif name == "padding-inline-end":
-            val values = _padding_integer_px_values(raw, 1)
+            val values = _padding_integer_px_values(raw, 1, font_px)
             if values.len() == 1:
                 right = values[0]
         index = index + 2
@@ -760,7 +836,7 @@ fn _apply_decls_dispatch(
     if css_prop_mask_has(mask, CSS_PROP_PADDING):
         css_probe_note()
         val (resolved_pad_t, resolved_pad_r, resolved_pad_b, resolved_pad_l) = _resolve_authored_padding(
-            decl_tbl, st.pad_t, st.pad_r, st.pad_b, st.pad_l
+            decl_tbl, st.pad_t, st.pad_r, st.pad_b, st.pad_l, st.font_size
         )
         st.pad_t = resolved_pad_t
         st.pad_r = resolved_pad_r
@@ -1310,8 +1386,8 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         st.font_style_italic = true
     elif tag == "mark":
         display_v = "inline"
-        st.bg = argb(255, 255, 0)
-        fg_v = argb(0, 0, 0)
+        st.bg = web_argb(255, 255, 0)
+        fg_v = web_argb(0, 0, 0)
     elif tag == "sub" or tag == "sup":
         # Selected medium-UA profile: `smaller` is 5/6 of the inherited size,
         # rounded half up. The inherited zero line-height sentinel stays normal.
@@ -1320,7 +1396,7 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         vertical_align_v = if tag == "sub": "sub" else: "super"
     elif tag == "hr":
         var rule = st
-        val rule_color = argb(128, 128, 128)
+        val rule_color = web_argb(128, 128, 128)
         rule.display = if st.display == "none": "none" else: "block"
         rule.margin_t = 8
         rule.margin_b = 8
@@ -1376,7 +1452,7 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         st.border_t = 2
         st.border_r = 2
         st.border_b = 2
-        st.border_color = argb(118, 118, 118)
+        st.border_color = web_argb(118, 118, 118)
         st.border_color_l = st.border_color
         st.border_color_t = st.border_color
         st.border_color_r = st.border_color
@@ -1421,7 +1497,7 @@ fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
         font_size_v = FORM_CONTROL_UA_FONT_SIZE_PX
         line_height_v = FORM_CONTROL_UA_LINE_HEIGHT_RATIO
     elif tag == "a":
-        fg_v = argb(0, 0, 238)
+        fg_v = web_argb(0, 0, 238)
         underline_v = true
     elif tag == "ul" or tag == "ol" or tag == "menu":
         display_v = "block"

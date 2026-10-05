@@ -51,7 +51,9 @@ use std.spec.*
 use app.test_runner_new.daemon_backlog.{
     LIGHT_DAEMON_BACKLOG_BYPASS_THRESHOLD,
     daemon_backlog_bypass,
-    count_pending_requests
+    count_pending_requests,
+    daemon_claim_wait_expired,
+    LIGHT_DAEMON_CLAIM_WAIT_MS
 }
 
 use std.spec.step
@@ -141,3 +143,26 @@ describe "light-daemon backlog bypass", :
             # @req: REQ-SSPEC-APP
             step("Verify: ignores unrelated entries left in the lane directory")
             expect(count_pending_requests(["daemon.lock", "daemon.binary", "x.resp"])).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+        it "counts a request the worker is running (.req.inflight) as backlog", :
+            # @req: REQ-APP-TESTRUNNERNE-001
+            # Reproducer: with the worker busy on `a.req.inflight` and nothing
+            # else queued, the old count was 0, so a parallel client queued
+            # behind the running spec and was served with 730 ms of budget
+            # left (spurious daemon-worker-timeout, 2026-10-05).
+            step("Verify: a busy worker alone makes the client bypass")
+            expect(count_pending_requests(["a.req.inflight"])).to_equal(1)  # oracle: 1 — the running request
+            expect(daemon_backlog_bypass(count_pending_requests(["a.req.inflight"]))).to_equal(true)
+            expect(count_pending_requests(["a.req.inflight", "b.req", "c.req.tmp"])).to_equal(2)  # oracle: 2 — running + queued, staging ignored
+
+        it "withdraws an unclaimed request only after the claim window", :
+            # @req: REQ-APP-TESTRUNNERNE-001
+            # Generalization: a client that raced past the backlog check (two
+            # clients enqueue at once) must not wait out the other spec's
+            # budget either; it withdraws once the claim window has passed.
+            step("Verify: inside the window the client keeps waiting for a claim")
+            expect(daemon_claim_wait_expired(0)).to_equal(false)
+            expect(daemon_claim_wait_expired(LIGHT_DAEMON_CLAIM_WAIT_MS - 1)).to_equal(false)
+            step("Verify: at and after the window the client withdraws")
+            expect(daemon_claim_wait_expired(LIGHT_DAEMON_CLAIM_WAIT_MS)).to_equal(true)
+            expect(daemon_claim_wait_expired(600000)).to_equal(true)

@@ -372,7 +372,7 @@ pub fn rt_gui_get_glyph_8x16_fn(args: &[Value]) -> Result<Value, CompileError> {
 
     let glyph = glyph_8x16(codepoint);
     let rows: Vec<Value> = glyph.into_iter().map(|b| Value::Int(b as i64)).collect();
-    Ok(Value::Array(Arc::new(rows)))
+    Ok(Value::array(rows))
 }
 
 pub(crate) fn glyph_8x16(codepoint: i32) -> [u8; 16] {

@@ -2335,6 +2335,7 @@ fn load_module_with_imports_internal(
     flatten_imports: bool,
     target_arch: simple_common::target::TargetArch,
 ) -> Result<Module, CompileError> {
+    let _resolve_scope = ResolveUseCacheScope::enter();
     let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if flatten_imports && !visited.insert(path.clone()) {
         return Ok(Module {
@@ -2632,7 +2633,70 @@ fn load_module_with_imports_internal(
 
 /// Resolve a simple `use` path to a sibling `.spl` file.
 /// Also checks stdlib location if sibling resolution fails.
+// Per-load memo for `resolve_use_to_path`.
+//
+// One `load_module_with_imports*` call resolves the same `use` from the same
+// directory many times: once while flattening, again in
+// `strip_flattened_import_nodes` for the binding markers, and again for every
+// importer in that directory. Each resolution walks search roots, numbered
+// layer dirs and stdlib fallbacks (~9% of an interpreted `simple test` startup
+// in `sample`). The memo lives only while the OUTERMOST load call runs: no
+// Simple code executes during flattening, so cwd, env and the filesystem the
+// resolver reads cannot change under it, and the answer is the one the
+// uncached resolver would give. `use std.ffi...` is never memoized, so its
+// deprecation warning still prints on every resolution.
+type ResolveUseKey = (PathBuf, Vec<String>, String);
+
+thread_local! {
+    static RESOLVE_USE_CACHE: RefCell<Option<HashMap<ResolveUseKey, Option<PathBuf>>>> = const { RefCell::new(None) };
+    static RESOLVE_USE_CACHE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+struct ResolveUseCacheScope;
+
+impl ResolveUseCacheScope {
+    fn enter() -> Self {
+        RESOLVE_USE_CACHE_DEPTH.with(|depth| {
+            if depth.get() == 0 {
+                RESOLVE_USE_CACHE.with(|cache| *cache.borrow_mut() = Some(HashMap::new()));
+            }
+            depth.set(depth.get() + 1);
+        });
+        ResolveUseCacheScope
+    }
+}
+
+impl Drop for ResolveUseCacheScope {
+    fn drop(&mut self) {
+        RESOLVE_USE_CACHE_DEPTH.with(|depth| {
+            depth.set(depth.get() - 1);
+            if depth.get() == 0 {
+                RESOLVE_USE_CACHE.with(|cache| *cache.borrow_mut() = None);
+            }
+        });
+    }
+}
+
 fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
+    let segments = &use_stmt.path.segments;
+    let deprecated_ffi = segments.iter().filter(|s| s.as_str() != "crate" && s.as_str() != "self" && s.as_str() != ".").take(2).map(|s| s.as_str()).eq(["std", "ffi"]);
+    if deprecated_ffi {
+        return resolve_use_to_path_uncached(use_stmt, base);
+    }
+    let key: ResolveUseKey = (base.to_path_buf(), segments.clone(), format!("{:?}", use_stmt.target));
+    if let Some(hit) = RESOLVE_USE_CACHE.with(|cache| cache.borrow().as_ref().and_then(|map| map.get(&key).cloned())) {
+        return hit;
+    }
+    let resolved = resolve_use_to_path_uncached(use_stmt, base);
+    RESOLVE_USE_CACHE.with(|cache| {
+        if let Some(map) = cache.borrow_mut().as_mut() {
+            map.insert(key, resolved.clone());
+        }
+    });
+    resolved
+}
+
+fn resolve_use_to_path_uncached(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
     let mut parts: Vec<String> = use_stmt
         .path
         .segments
@@ -3359,6 +3423,57 @@ mod tests {
             .any(|item| matches!(item, Node::Function(func) if func.name == "probe_text"));
 
         assert!(has_probe_text);
+    }
+
+    fn resolve_cache_len() -> Option<usize> {
+        RESOLVE_USE_CACHE.with(|cache| cache.borrow().as_ref().map(|map| map.len()))
+    }
+
+    /// Inside a load scope, repeated resolutions agree with the uncached
+    /// resolver (hits and misses alike), and the memo is gone when the
+    /// outermost scope ends.
+    #[test]
+    fn resolve_use_cache_matches_uncached_and_is_scoped_to_one_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        let nested = src.join("app");
+        let type_dir = src.join("type").join("simple_lang");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&type_dir).unwrap();
+        fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
+        let hit = use_stmt(&["I64"], ImportTarget::Glob);
+        let miss = use_stmt(&["NoSuchModule"], ImportTarget::Glob);
+
+        assert_eq!(resolve_cache_len(), None);
+        {
+            let _outer = ResolveUseCacheScope::enter();
+            {
+                let _inner = ResolveUseCacheScope::enter();
+                for _ in 0..3 {
+                    assert_eq!(resolve_use_to_path(&hit, &nested), resolve_use_to_path_uncached(&hit, &nested));
+                    assert_eq!(resolve_use_to_path(&miss, &nested), resolve_use_to_path_uncached(&miss, &nested));
+                }
+                assert_eq!(resolve_use_to_path(&hit, &nested), Some(type_dir.join("I64.spl")));
+                assert_eq!(resolve_use_to_path(&miss, &nested), None);
+            }
+            // Nested scope exit keeps the outer load's memo.
+            assert_eq!(resolve_cache_len(), Some(2));
+        }
+        assert_eq!(resolve_cache_len(), None);
+    }
+
+    /// `use std.ffi...` is never memoized, so its deprecation warning is
+    /// emitted on every resolution exactly as before.
+    #[test]
+    fn resolve_use_cache_never_memoizes_deprecated_std_ffi() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("src").join("app");
+        fs::create_dir_all(&base).unwrap();
+        let _scope = ResolveUseCacheScope::enter();
+        let ffi = use_stmt(&["std", "ffi", "io"], ImportTarget::Glob);
+        let _ = resolve_use_to_path(&ffi, &base);
+        let _ = resolve_use_to_path(&ffi, &base);
+        assert_eq!(resolve_cache_len(), Some(0));
     }
 
     #[test]

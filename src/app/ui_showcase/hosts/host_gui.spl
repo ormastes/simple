@@ -29,7 +29,41 @@ use common.ui.host_input_event.{
     host_pointer_down, host_pointer_up, host_pointer_move, host_pointer_wheel,
     host_key_down, host_key_up, host_resize
 }
-use app.ui_showcase.hosts.scene_raster.{raster_scene_argb}
+use app.ui_showcase.hosts.scene_raster.{raster_scene_argb_scaled}
+use std.io_runtime.{env_get}
+
+# Integer device pixels per logical unit. SIMPLE_GUI_SCALE (a positive
+# integer) overrides; otherwise the window's backing scale factor, rounded
+# to the nearest integer (2000 milli on Retina -> 2); 1 when unknown.
+# ponytail: fractional scales (1.25, 1.5) round to an integer; upgrade by
+# giving RasterSurface a fixed-point scale if a fractional display needs it.
+fn gui_device_scale(env_value: text, scale_milli: i64) -> i32:
+    val raw = env_value.trim()
+    if raw != "":
+        val parsed: i64? = raw.to_int()
+        if val v = parsed:
+            if v >= 1 and v <= 8:
+                return v as i32
+    if scale_milli <= 0:
+        return 1
+    val rounded = (scale_milli + 500) / 1000
+    if rounded < 1:
+        return 1
+    if rounded > 8:
+        return 8
+    rounded as i32
+
+# Pointer positions and resize extents arrive in DEVICE pixels; the scene is
+# laid out in LOGICAL units. Wheel deltas are notches, not positions.
+fn gui_event_to_logical(ev: GuiEvent, scale: i32) -> GuiEvent:
+    if scale <= 1:
+        return ev
+    if ev.kind != GUI_EVT_MOUSE_MOVED and ev.kind != GUI_EVT_MOUSE_BUTTON and ev.kind != GUI_EVT_RESIZED:
+        return ev
+    val s = scale as f64
+    GuiEvent(native_id: ev.native_id, kind: ev.kind, scancode: ev.scancode,
+        keycode: ev.keycode, btn: ev.btn, pressed: ev.pressed,
+        x: ev.x / s, y: ev.y / s)
 
 fn gui_button_to_host(btn: i64) -> i64:
     """GuiRenderer button code -> HOST_BTN_*. winit/SDL both report
@@ -113,8 +147,13 @@ fn gui_event_to_host(ev: GuiEvent) -> HostInputEvent?:
 
 class ScreenGuiHost:
     var g: GuiRenderer
+    # LOGICAL size (what size() reports and the scene is laid out in).
     var w: i32
     var h: i32
+    # DEVICE (backing) frame size and device pixels per logical unit.
+    var dev_w: i32
+    var dev_h: i32
+    var scale: i32
     var closed: bool
     # Last known cursor position. winit wheel (and button) records carry no
     # pointer coordinates, so wheel events are re-issued at this position --
@@ -136,8 +175,16 @@ class ScreenGuiHost:
             case None:
                 nil
             case Some(gui):
+                val scale = gui_device_scale(env_get("SIMPLE_GUI_SCALE") ?? "", gui.scale_factor_milli())
+                # The window was requested in device pixels; the OS may clamp
+                # it, so size the frame from what it actually got.
+                val inner = gui.inner_size()
+                val dev_w = if inner[0] > 0: inner[0] as i32 else: w
+                val dev_h = if inner[1] > 0: inner[1] as i32 else: h
+                print "showcase gui: device={dev_w}x{dev_h} scale={scale} (window scale_factor_milli={gui.scale_factor_milli()}) logical={dev_w / scale}x{dev_h / scale}"
                 ScreenGuiHost(
-                    g: gui, w: w, h: h, closed: false, mouse_x: 0, mouse_y: 0,
+                    g: gui, w: dev_w / scale, h: dev_h / scale,
+                    dev_w: dev_w, dev_h: dev_h, scale: scale, closed: false, mouse_x: 0, mouse_y: 0,
                     last_scene_generation: 0u32, last_scene_id: 0u32,
                     has_retained_scene: false,
                     retained_pixels: [], raster_count: 0)
@@ -156,10 +203,10 @@ impl ScreenHost for ScreenGuiHost:
             scene.scene_id == self.last_scene_id and
             scene.generation == self.last_scene_generation):
             return self.g.present_argb_u32(
-                self.w.to_i64(), self.h.to_i64(), self.retained_pixels)
-        val px = raster_scene_argb(scene, self.w, self.h)
+                self.dev_w.to_i64(), self.dev_h.to_i64(), self.retained_pixels)
+        val px = raster_scene_argb_scaled(scene, self.dev_w, self.dev_h, self.scale)
         self.raster_count = self.raster_count + 1
-        if not self.g.present_argb_u32(self.w.to_i64(), self.h.to_i64(), px):
+        if not self.g.present_argb_u32(self.dev_w.to_i64(), self.dev_h.to_i64(), px):
             return false
         if scene.generation > 0u32:
             self.last_scene_generation = scene.generation
@@ -171,7 +218,7 @@ impl ScreenHost for ScreenGuiHost:
     me poll_input() -> HostInputEvent?:
         if self.closed:
             return nil
-        val ev = self.g.poll_event()
+        val ev = gui_event_to_logical(self.g.poll_event(), self.scale)
         if ev.kind == GUI_EVT_CLOSE:
             self.closed = true
             return nil
@@ -199,6 +246,8 @@ impl ScreenHost for ScreenGuiHost:
                     if resize_w > 0 and resize_h > 0:
                         self.w = resize_w
                         self.h = resize_h
+                        self.dev_w = resize_w * self.scale
+                        self.dev_h = resize_h * self.scale
                         self.has_retained_scene = false
                         self.retained_pixels = []
                 _:
@@ -211,3 +260,4 @@ impl ScreenHost for ScreenGuiHost:
             self.g.close()
 
 export ScreenGuiHost, gui_event_to_host, gui_button_to_host, gui_canon_to_ch
+export gui_device_scale, gui_event_to_logical

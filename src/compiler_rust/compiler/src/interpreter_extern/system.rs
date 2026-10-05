@@ -1013,15 +1013,15 @@ unsafe extern "C" {
 /// interpreter therefore returns the exact unavailable receipt instead of
 /// throwing while all lease-bearing V3 operations continue to fail closed.
 pub fn rt_process_owned_v3_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Array(std::sync::Arc::new(vec![
+    Ok(Value::array(vec![
         Value::Int(1),
         Value::Int(0),
         Value::Int(0),
-    ])))
+    ]))
 }
 
 pub fn rt_process_observation_v4_capabilities_unavailable(_args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Array(std::sync::Arc::new(vec![
+    Ok(Value::array(vec![
         Value::Int(4),
         Value::Int(8),
         Value::Int(0),
@@ -1030,7 +1030,7 @@ pub fn rt_process_observation_v4_capabilities_unavailable(_args: &[Value]) -> Re
         Value::Int(0),
         Value::Int(0),
         Value::Int(95),
-    ])))
+    ]))
 }
 
 /// Process Observation V4 never falls back to the V1/V3 process providers.
@@ -1164,7 +1164,7 @@ pub fn rt_process_run_owned_observed_bounded_value(args: &[Value]) -> Result<Val
     Ok(Value::Tuple(vec![
         Value::text(String::from_utf8_lossy(&out[..stdout_kept]).into_owned()),
         Value::text(String::from_utf8_lossy(&err[..stderr_kept]).into_owned()),
-        Value::array(fields.into_iter().map(Value::Int).collect()),
+        Value::array(fields.into_iter().map(Value::Int).collect::<Vec<Value>>()),
     ]))
 }
 
@@ -1987,7 +1987,7 @@ mod tests {
     fn async_spawn_rejects_non_text_arguments() {
         let result = rt_process_spawn_async(&[
             Value::text(if cfg!(windows) { "cmd.exe" } else { "/bin/true" }.to_string()),
-            Value::Array(Arc::new(vec![Value::Int(7)])),
+            Value::array(vec![Value::Int(7)]),
         ]);
         assert!(result.is_err());
     }
@@ -1997,10 +1997,10 @@ mod tests {
     fn process_wait_timeout_keeps_child_tracked_until_killed() {
         let pid = rt_process_spawn_async(&[
             Value::text("/bin/sh".to_string()),
-            Value::Array(Arc::new(vec![
+            Value::array(vec![
                 Value::text("-c".to_string()),
                 Value::text("sleep 30".to_string()),
-            ])),
+            ]),
         ])
         .expect("spawn")
         .as_int()
@@ -2090,13 +2090,13 @@ mod tests {
         }
         let result = rt_process_run(&[
             Value::text("/bin/sh".to_string()),
-            Value::Array(Arc::new(vec![
+            Value::array(vec![
                 Value::text("-c".to_string()),
                 Value::text(
                     "if env | grep '^_SIMPLE_STACK_SET=' >/dev/null; then printf present; else printf unset; fi"
                         .to_string(),
                 ),
-            ])),
+            ]),
         ])
         .expect("rt_process_run should succeed");
 
@@ -2129,9 +2129,9 @@ mod tests {
         };
         let result = rt_process_run_bounded(&[
             Value::text(cmd.to_string()),
-            Value::Array(Arc::new(
-                script.into_iter().map(|s| Value::text(s.to_string())).collect(),
-            )),
+            Value::array(
+                script.into_iter().map(|s| Value::text(s.to_string())).collect::<Vec<Value>>(),
+            ),
             Value::Int(0),
             Value::Int(-1),
         ])
@@ -2146,7 +2146,7 @@ mod tests {
         assert!(stdout.contains("bounded-ok"), "stdout: {}", stdout);
         assert!(rt_process_run_bounded(&[
             Value::text(cmd.to_string()),
-            Value::Array(Arc::new(vec![])),
+            Value::array(vec![]),
             Value::Int(0),
             Value::Int(-2),
         ])
@@ -2158,13 +2158,13 @@ mod tests {
     fn process_run_bounded_drains_flooding_streams_with_head_and_tail() {
         let result = rt_process_run_bounded(&[
             Value::text("/bin/sh".to_string()),
-            Value::Array(Arc::new(vec![
+            Value::array(vec![
                 Value::text("-c".to_string()),
                 Value::text(
                     "printf HEAD; head -c 10000 /dev/zero | tr '\\0' x; printf TAIL; printf HEAD >&2; head -c 10000 /dev/zero | tr '\\0' y >&2; printf TAIL >&2"
                         .to_string(),
                 ),
-            ])),
+            ]),
             Value::Int(5_000),
             Value::Int(64),
         ])
@@ -2188,7 +2188,7 @@ mod tests {
     fn process_run_bounded_accepts_unsigned_nonnegative_output_limit() {
         let result = rt_process_run_bounded(&[
             Value::text("/bin/true".to_string()),
-            Value::Array(Arc::new(vec![])),
+            Value::array(vec![]),
             Value::Int(5_000),
             Value::UInt { value: 64, width: 64 },
         ])
@@ -2212,10 +2212,10 @@ mod tests {
     fn process_run_bounded_timeout_kills_descendant_process_group() {
         let result = rt_process_run_bounded(&[
             Value::text("/bin/sh".to_string()),
-            Value::Array(Arc::new(vec![
+            Value::array(vec![
                 Value::text("-c".to_string()),
                 Value::text("sleep 30 & child=$!; printf '%s' \"$child\"".to_string()),
-            ])),
+            ]),
             Value::Int(100),
             Value::Int(128),
         ])
@@ -2289,7 +2289,7 @@ mod tests {
     fn owned_process_v3_capability_query_reports_unavailable_in_interpreter() {
         assert_eq!(
             rt_process_owned_v3_capabilities_unavailable(&[]).unwrap(),
-            Value::Array(Arc::new(vec![Value::Int(1), Value::Int(0), Value::Int(0),]))
+            Value::array(vec![Value::Int(1), Value::Int(0), Value::Int(0),])
         );
     }
 

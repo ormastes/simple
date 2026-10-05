@@ -1,0 +1,79 @@
+"""
+## Purpose and audience
+Purpose: Pin padding lengths in em/rem/vh/vw and their multi-value shorthand
+(gap D). example.com's `padding: 25vh 2em 2em` used to be dropped whole
+because the parser accepted only integer px.
+Audience: maintainers of the Simple Web cascade and layout.
+## Operator workflow
+Run with the test runner; offline, layout only.
+## Compatibility and limitations
+vw/vh resolve at computed-value time from the viewport of the cascade pass
+(compute_styles' viewport, also part of the cascade memo key); outside a
+pass they stay unsupported and the declaration is dropped as before.
+Percent padding is not supported yet (recorded in the bug file).
+Bug record: doc/08_tracking/bug/browser_real_site_rendering_gaps_2026-10-04.md (D)
+"""
+# @req: REQ-LIB-GC-ASYNC-MUT-001
+
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    apply_decls, renderer_default_style, simple_web_layout_debug_layout_by_id,
+    web_style_cascade_memo_reset, web_style_cascade_memo_hits, web_style_cascade_memo_misses
+}
+
+fn y_of(html: text, width: i32, height: i32, id: text) -> i32:
+    simple_web_layout_debug_layout_by_id(html, width, height, id, "y").to_i64() as i32
+
+fn x_of(html: text, width: i32, height: i32, id: text) -> i32:
+    simple_web_layout_debug_layout_by_id(html, width, height, id, "x").to_i64() as i32
+
+val VH_DOC: text = "<html><head><style>body{margin:0;padding:25vh 2em 2em}</style></head><body><div id=\"c\">x</div></body></html>"
+
+describe "padding in font-relative units":
+    it "resolves em against the element font size and rem against 16px":
+        val st = apply_decls(renderer_default_style(), "font-size:20px;padding:1em 2rem 0.5em 1.5em;letter-spacing:0px", 16)
+        expect(st.pad_t).to_equal(20)
+        expect(st.pad_r).to_equal(32)
+        expect(st.pad_b).to_equal(10)
+        expect(st.pad_l).to_equal(30)
+
+    it "keeps integer px and 0, and still drops unsupported units":
+        val px = apply_decls(renderer_default_style(), "padding:3px 0;letter-spacing:0px", 16)
+        expect(px.pad_t).to_equal(3)
+        expect(px.pad_r).to_equal(0)
+        val pct = apply_decls(renderer_default_style(), "padding:10%;letter-spacing:0px", 16)
+        expect(pct.pad_t).to_equal(0)
+
+    it "drops vh padding outside a cascade pass (no viewport known)":
+        val st = apply_decls(renderer_default_style(), "padding:25vh 2em;letter-spacing:0px", 16)
+        expect(st.pad_t).to_equal(0)
+        expect(st.pad_l).to_equal(0)
+
+describe "padding in viewport units":
+    it "applies example.com's 25vh 2em 2em shorthand":
+        step("600px tall viewport: 25vh = 150px top, 2em = 32px left")
+        expect(y_of(VH_DOC, 800, 600, "c")).to_equal(150)
+        expect(x_of(VH_DOC, 800, 600, "c")).to_equal(32)
+
+    it "re-resolves the same document at another viewport height":
+        step("same document, 800px tall viewport: 25vh = 200px")
+        expect(y_of(VH_DOC, 800, 800, "c")).to_equal(200)
+        step("and back to 600px: no style is reused across viewports")
+        expect(y_of(VH_DOC, 800, 600, "c")).to_equal(150)
+
+    it "never serves a cascade memo entry across viewports":
+        step("cascade at 600px and record the memo counters of that pass")
+        web_style_cascade_memo_reset()
+        expect(y_of(VH_DOC, 800, 600, "c")).to_equal(150)
+        val hits_600 = web_style_cascade_memo_hits()
+        val misses_600 = web_style_cascade_memo_misses()
+        expect(misses_600).to_be_greater_than(0)
+        step("cascade at 800px: no memo hit, so no 600px entry was served (the key carries the viewport)")
+        expect(y_of(VH_DOC, 800, 800, "c")).to_equal(200)
+        expect(web_style_cascade_memo_hits()).to_equal(hits_600)
+
+    it "resolves vw against the viewport width":
+        val doc = "<html><head><style>body{margin:0;padding:0 0 0 10vw}</style></head><body><div id=\"c\">x</div></body></html>"
+        expect(x_of(doc, 800, 600, "c")).to_equal(80)
+        expect(x_of(doc, 400, 600, "c")).to_equal(40)

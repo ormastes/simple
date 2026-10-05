@@ -333,7 +333,7 @@ fn has_list_container_ancestor(nodes: [HNode], i: i32) -> bool:
         cur = nodes[cur].parent as i32
     false
 
-fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool = false, vector_fonts: bool = true) -> [Style]:
+fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool = false, vector_fonts: bool = true, viewport_w: i32 = -1, viewport_h: i32 = -1) -> [Style]:
     var material_entries_unused: [text] = ["", ""]
     var material_counts_unused: [i64] = [0, 0]
     var cpu_material_nodes_unused: [i32] = []
@@ -341,7 +341,8 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
     compute_styles_with_material(
         nodes, rules, child_index, trace_stages, vector_fonts,
         material_entries_unused, material_counts_unused,
-        cpu_material_nodes_unused, solid_material_nodes_unused)
+        cpu_material_nodes_unused, solid_material_nodes_unused,
+        viewport_w, viewport_h)
 
 # Freestanding-safe material provenance channel: the realized solid-material
 # entries are built HERE from the loop-local style (before any aggregate
@@ -349,7 +350,12 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
 # Style field contents on the freestanding lane) and handed out through a
 # mutable text/count slots (the apply_advances idiom). Consumers derive the
 # material digest from these canonical entries instead of re-reading [Style].
-fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool, vector_fonts: bool, mut material_entries: [text], mut material_counts: [i64], mut cpu_material_nodes: [i32], mut solid_material_nodes: [i32]) -> [Style]:
+fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool, vector_fonts: bool, mut material_entries: [text], mut material_counts: [i64], mut cpu_material_nodes: [i32], mut solid_material_nodes: [i32], viewport_w: i32 = -1, viewport_h: i32 = -1) -> [Style]:
+    # Viewport for vw/vh lengths resolved at computed-value time (gap D).
+    # Set for exactly this pass and cleared below, so an apply_decls call
+    # outside a cascade never sees a stale viewport; unset (-1) drops a
+    # vw/vh declaration exactly as before.
+    css_cascade_viewport_set(viewport_w, viewport_h)
     var cpu_material_entry_count: i64 = 0
     var solid_material_entry_count: i64 = 0
     val material_channel_ready = (
@@ -794,6 +800,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             val memo_key = if memo_usable:
                 "{memo_parent}\n{nd.tag}\n{nested_list_ua}\n{em_base}\n" +
                     "{logical_writing_mode}\n" +
+                    "{viewport_w}x{viewport_h}\n" +
                     "{pres_decls.len()}:{pres_decls}\n{combined_decls}"
             else:
                 ""
@@ -1154,6 +1161,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         print "[web-style-producer] cpu-entries-ready count={cpu_material_entry_count} len={material_entries[0].len()}"
     if solid_material_entry_count > 0:
         print "[web-style-producer] solid-entries-ready count={solid_material_entry_count} len={material_entries[1].len()}"
+    css_cascade_viewport_set(-1, -1)
     styles
 
 # Debug-only equivalence oracle for the pre-parsed selector path (round 9).
