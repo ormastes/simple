@@ -1,0 +1,38 @@
+#!/bin/sh
+# Complete bounded no-link inventory of actual Hello runtime inputs.
+provisional_hello_runtime_inputs() (
+  [ "$#" -eq 2 ] || exit 1
+  perl -MDigest::SHA -MFile::Spec -e '
+    use strict; use warnings;
+    my ($root,$output)=@ARGV; my @rows;
+    sub walk {
+      my ($relative,$depth)=@_; die "depth limit\n" if $depth>32;
+      my $path=$relative eq "" ? $root : "$root/$relative";
+      -l $path and die "linked directory\n";
+      opendir(my $dir,$path) or die "directory unavailable\n";
+      my @names=readdir($dir); closedir($dir);
+      for my $name (@names) {
+        next if $name eq "." || $name eq "..";
+        $name =~ /[\\\r\n\0\/]/ and die "unsafe name\n";
+        my $child=$relative eq "" ? $name : "$relative/$name";
+        my $physical="$root/$child";
+        -l $physical and die "linked input\n";
+        if (-d $physical) {
+          @rows<4096 or die "entry limit\n";
+          push @rows,"directory $child";
+          walk($child,$depth+1); next;
+        }
+        -f $physical or die "nonregular input\n";
+        @rows<4096 or die "file limit\n";
+        open(my $file,"<:raw",$physical) or die "input unavailable\n";
+        my $sha=Digest::SHA->new(256)->addfile($file)->hexdigest;
+        close($file); push @rows,"$sha $child";
+      }
+    }
+    walk("",0); @rows or die "empty runtime\n";
+    my $payload=join("\n",sort @rows)."\n";
+    length($payload)<=1048576 or die "manifest limit\n";
+    open(my $out,">:raw",$output) or die "output unavailable\n";
+    print $out $payload; close($out) or die "output failed\n";
+  ' "$1" "$2"
+)

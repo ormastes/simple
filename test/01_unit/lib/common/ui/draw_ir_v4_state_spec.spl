@@ -1,0 +1,115 @@
+use std.spec.{describe, it, expect}
+use common.ui.draw_ir.*
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn, sdn_to_draw_ir, sdn_to_draw_ir_checked}
+use common.ui.draw_ir_diff.{draw_ir_diff_compositions}
+use common.ui.draw_ir_patch.{draw_ir_patch_between, draw_ir_patch_apply, draw_ir_patch_commands_equal}
+use common.ui.draw_ir_v4_codec.{draw_ir_f64_hex, draw_ir_f64_from_hex, draw_ir_f64_from_hex_checked}
+use common.ui.draw_ir_v4_bounds.{draw_ir_v4_damage_bounds}
+
+fn v4_state_scene(command: DrawIrCommand, revision: text) -> DrawIrComposition:
+    val embedding = draw_ir_embedding_config("surface", "", 0, 0, 32, 32, 0, 1000, false)
+    draw_ir_composition(revision, "scene", DRAW_IR_BACKEND_CPU,
+        [draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, embedding, [command])])
+
+fn v4_state_rect() -> DrawIrCommand:
+    var command = draw_ir_rect("rect", 1, 2, 4, 3, 0xffffffffu32)
+    command.fractional_geometry = DrawIrFractionalGeometry(x: 1.25, y: -2.5, width: 4.75, height: 3.125)
+    command.affine_transform = DrawIrAffine2D(a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: 0.125, ty: 0.25)
+    command.raster_policy = DRAW_IR_RASTER_COVERAGE_AA
+    command
+
+describe "DrawIR v4 state preservation":
+    it "keeps the legacy constructor defaults and schema":
+        val command = draw_ir_rect("rect", 1, 2, 4, 3, 0xffffffffu32)
+        expect(command.fractional_geometry).to_be_nil()
+        expect(command.affine_transform).to_be_nil()
+        expect(command.raster_policy).to_equal(DRAW_IR_RASTER_ALIASED_PIXEL_CENTER)
+        expect(draw_ir_command_has_unsupported_v4_state(command)).to_equal(false)
+        expect(v4_state_scene(command, "legacy").schema).to_equal(DRAW_IR_SCHEMA_VERSION)
+
+    it "round-trips fractional, affine and raster state through SDN":
+        val original = v4_state_scene(v4_state_rect(), "v4")
+        val decoded = sdn_to_draw_ir(draw_ir_to_sdn(original))
+        expect(original.schema).to_equal(DRAW_IR_SCHEMA_VERSION_V4)
+        expect(decoded.schema).to_equal(DRAW_IR_SCHEMA_VERSION_V4)
+        expect(decoded.batches[0].schema).to_equal(DRAW_IR_SCHEMA_VERSION_V4)
+        expect(draw_ir_patch_commands_equal(original, decoded)).to_equal(true)
+        val command = decoded.batches[0].commands[0]
+        match command.fractional_geometry:
+            Some(geometry):
+                expect(geometry.x).to_equal(1.25)
+                expect(geometry.y).to_equal(-2.5)
+                expect(geometry.width).to_equal(4.75)
+                expect(geometry.height).to_equal(3.125)
+            None: fail("fractional geometry was lost")
+        expect(command.raster_policy).to_equal(DRAW_IR_RASTER_COVERAGE_AA)
+
+    it "preserves binary64 low bits, signed zero and the smallest subnormal":
+        for bits in ["3ff0000000000001", "8000000000000000", "0000000000000001"]:
+            expect(draw_ir_f64_hex(draw_ir_f64_from_hex(bits))).to_equal(bits)
+
+    it "rejects truncated, invalid and non-finite scalar payloads":
+        for invalid in ["", "0", "3ff000000000000g", "7ff0000000000000", "7ff8000000000001"]:
+            expect(draw_ir_f64_from_hex_checked(invalid).is_err()).to_equal(true)
+
+    it "keeps legacy SDN without v4 fields compatible":
+        val original = v4_state_scene(draw_ir_rect("rect", 1, 2, 4, 3, 0xffffffffu32), "legacy")
+        val legacy = draw_ir_to_sdn(original).replace(
+            " v4_geometry=false v4_affine=false v4_raster=aliased-pixel-center", "")
+        val decoded = sdn_to_draw_ir(legacy)
+        expect(decoded.schema).to_equal(DRAW_IR_SCHEMA_VERSION)
+        expect(draw_ir_patch_commands_equal(original, decoded)).to_equal(true)
+
+    it "rejects contradictory and incomplete v4 records through the full checked decoder":
+        val valid = draw_ir_to_sdn(v4_state_scene(v4_state_rect(), "v4"))
+        for invalid in [
+            valid.replace("v4_geometry=true", "v4_geometry=false"),
+            valid.replace("v4_geometry=true", ""),
+            valid.replace("v4_affine=true", "v4_affine=false"),
+            valid.replace("v4_affine=true", ""),
+            valid.replace("v4_raster=coverage-aa", "v4_raster="),
+            valid.replace("v4_raster=coverage-aa", ""),
+            valid.replace("v4_geometry=true", "v4_geometry=maybe"),
+            valid.replace("v4_x=3ff4000000000000", "v4_x=oops"),
+            valid.replace("v4_tx=3fc0000000000000", ""),
+            valid.replace("v4_geometry=true", "v4_geometry=true v4_geometry=false")
+        ]:
+            expect(sdn_to_draw_ir_checked(invalid).is_err()).to_equal(true)
+        expect(sdn_to_draw_ir_checked(valid).is_ok()).to_equal(true)
+
+    it "detects and applies state-only changes that leave integer bounds unchanged":
+        val base_command = draw_ir_rect("rect", 1, 2, 4, 3, 0xffffffffu32)
+        val baseline = v4_state_scene(base_command, "before")
+        var fractional = base_command
+        fractional.fractional_geometry = DrawIrFractionalGeometry(x: 1.25, y: 2.5, width: 4.75, height: 3.125)
+        var affine = base_command
+        affine.affine_transform = DrawIrAffine2D(a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: 0.5, ty: 0.0)
+        var raster = base_command
+        raster.raster_policy = DRAW_IR_RASTER_COVERAGE_AA
+        for changed in [fractional, affine, raster]:
+            val current = v4_state_scene(changed, "after")
+            expect(draw_ir_diff_compositions(baseline, current).changed_count).to_equal(1)
+            val patch = draw_ir_patch_between(baseline, "before", current, "after")
+            expect(patch.operations.len()).to_be_greater_than(0)
+            val applied = draw_ir_patch_apply(baseline, patch)
+            expect(applied.ok).to_equal(true)
+            expect(applied.composition.schema).to_equal(DRAW_IR_SCHEMA_VERSION_V4)
+            expect(draw_ir_patch_commands_equal(current, applied.composition)).to_equal(true)
+
+    it "retains state while embedding and prefixes only ownership identities":
+        val command = v4_state_rect()
+        val original = v4_state_scene(command, "child")
+        val batches = draw_ir_embed_composition(original, 8, 9, draw_ir_rect_bounds(0, 0, 32, 32), "parent", "child-slot", 3)
+        val embedded = batches[0].commands[0]
+        expect(draw_ir_command_v4_equal(command, embedded)).to_equal(true)
+        expect(embedded.component_id).to_equal("parent:rect")
+        expect(batches[0].embedding.x).to_equal(8)
+        expect(batches[0].embedding.y).to_equal(9)
+        expect(batches[0].schema).to_equal(DRAW_IR_SCHEMA_VERSION_V4)
+
+    it "rounds transformed fractional damage outward instead of using stale integer bounds":
+        val bounds = draw_ir_v4_damage_bounds(v4_state_rect(), draw_ir_rect_bounds(1, 2, 4, 3))
+        expect(bounds.x).to_equal(1)
+        expect(bounds.y).to_equal(-3)
+        expect(bounds.width).to_equal(6)
+        expect(bounds.height).to_equal(4)

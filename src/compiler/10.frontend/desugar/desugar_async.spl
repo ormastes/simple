@@ -31,6 +31,9 @@ use compiler.frontend.desugar.poll_generator.{
 # ================================================================
 
 fn desugar_async_function(func: ParserFunction) -> (ParserFunction, [ParserEnum], [ParserFunction]):
+    desugar_async_function_with_body_name(func, "__async_ready_body_{func.name}")
+
+fn desugar_async_function_with_body_name(func: ParserFunction, body_name: text) -> (ParserFunction, [ParserEnum], [ParserFunction]):
     """Transform async fn to fn returning Future<T> with state machine.
 
     Generates:
@@ -72,7 +75,7 @@ fn desugar_async_function(func: ParserFunction) -> (ParserFunction, [ParserEnum]
     )
 
     # Transform body using state machine generation
-    val _destruct_0 = desugar_async_body(func.body, func)
+    val _destruct_0 = desugar_async_body_with_name(func.body, func, body_name)
     val desugared_body = _destruct_0[0]
     val generated_enums = _destruct_0[1]
     val generated_functions = _destruct_0[2]
@@ -96,18 +99,22 @@ fn desugar_async_function(func: ParserFunction) -> (ParserFunction, [ParserEnum]
         attributes: func.attributes,
         has_doc_comment: func.has_doc_comment,
         doc_comment: func.doc_comment,
-        contract: func.contract,
+        # The synchronous helper owns contracts over the original result T.
+        contract: if generated_functions.len() == 1 and generated_enums.len() == 0: contract_block_empty() else: func.contract,
         span: func.span
     )
 
     [transformed_func, generated_enums, generated_functions]
 
 fn desugar_async_body(body: Block, func: ParserFunction) -> (Block, [ParserEnum], [ParserFunction]):
+    desugar_async_body_with_name(body, func, "__async_ready_body_{func.name}")
+
+fn desugar_async_body_with_name(body: Block, func: ParserFunction, body_name: text) -> (Block, [ParserEnum], [ParserFunction]):
     """Transform async function body using state machine generation.
 
     Analyzes the function for suspension points (await expressions) and
     generates a state machine if any are found. Otherwise, uses simple
-    future_ready() wrapper.
+    Future.from_value wrapper around a separate synchronous body function.
 
     Args:
         body: ParserFunction body to transform
@@ -123,9 +130,16 @@ fn desugar_async_body(body: Block, func: ParserFunction) -> (Block, [ParserEnum]
     val analysis = analyze_suspensions(func)
 
     if analysis.suspension_points.len() == 0:
-        # No await expressions - use simple Future.ready() wrapper
-        val simple_body = desugar_async_body_simple(body)
-        return [simple_body, [], []]
+        # No suspension: use the selected Future owner's real value constructor.
+        # A bare AST Call cannot forward body-only generic type arguments.
+        # Keep generic bodies in their existing scope until that transport is
+        # implemented; explicit returns in this legacy path remain unsupported.
+        if func.type_params.len() > 0:
+            val body_value = Expr(kind: ExprKind.Block(body), span: body.span)
+            return [make_async_ready_value_body(body, body_value), [], []]
+        val helper = make_async_ready_body_function(func, body_name)
+        val simple_body = desugar_async_body_simple(body, func.params, body_name)
+        return [simple_body, [], [helper]]
 
     # Generate state machine components
     val state_enum = generate_state_enum(func.name, analysis)
@@ -140,18 +154,55 @@ fn desugar_async_body(body: Block, func: ParserFunction) -> (Block, [ParserEnum]
 
     [generator_body, [enum_ast], [poll_fn_ast]]
 
-fn desugar_async_body_simple(body: Block) -> Block:
+fn make_async_ready_body_function(func: ParserFunction, body_name: text) -> ParserFunction:
+    # A real function gives both HIR inference and MIR explicit returns their
+    # own T-valued return scope. MIR currently inlines IIFEs into the caller.
+    ParserFunction(
+        name: body_name,
+        type_params: func.type_params,
+        params: func.params,
+        has_return_type: func.has_return_type,
+        return_type: func.return_type,
+        body: desugar_block(func.body),
+        visibility: Visibility.Private,
+        is_async: false,
+        is_static: false,
+        is_public: false,
+        is_method: false,
+        is_mutable: false,
+        is_const: func.is_const,
+        is_kernel: func.is_kernel,
+        is_extern: false,
+        attributes: [],
+        has_doc_comment: false,
+        doc_comment: "",
+        contract: func.contract,
+        span: func.span
+    )
+
+fn desugar_async_body_simple(body: Block, params: [Param], body_name: text) -> Block:
     """Simple transformation for async functions with no awaits.
 
-    Just wraps the body in future_ready().
+    Call the synchronous body once, then construct Future.from_value.
+    Pass every parameter explicitly so argument defaults are not reevaluated.
     """
+    var body_args: [CallArg] = []
+    for param in params:
+        body_args.push(CallArg(has_name: false, name: "", value: Expr(kind: ExprKind.Ident(param.name), span: param.span), span: param.span))
+    val body_value = Expr(
+        kind: ExprKind.Call(Expr(kind: ExprKind.Ident(body_name), span: body.span), body_args),
+        span: body.span
+    )
+    make_async_ready_value_body(body, body_value)
+
+fn make_async_ready_value_body(body: Block, body_value: Expr) -> Block:
     val wrapper_call = Expr(
         kind: ExprKind.Call(
             Expr(kind: ExprKind.Field(
                 Expr(kind: ExprKind.Ident("Future"), span: body.span),
-                "ready"
+                "from_value"
             ), span: body.span),
-            [CallArg(value: Expr(kind: ExprKind.Block(body), span: body.span), name: nil)]
+            [CallArg(has_name: false, name: "", value: body_value, span: body.span)]
         ),
         span: body.span
     )
@@ -293,6 +344,38 @@ fn desugar_actor(act_def: ActorDef) -> ParserClass:
 # Full ParserModule Desugaring
 # ================================================================
 
+fn async_ready_body_name_taken(module: ParserModule, helpers: Dict<text, ParserFunction>, name: text) -> bool:
+    if module.functions.contains(name) or helpers.contains(name) or module.classes.contains(name) or module.actors.contains(name):
+        return true
+    if module.structs.contains(name) or module.enums.contains(name) or module.bitfields.contains(name) or module.traits.contains(name):
+        return true
+    if module.type_aliases.contains(name) or module.constants.contains(name):
+        return true
+    for import_ in module.imports:
+        for item in import_.items:
+            val bound_name = if item.has_alias: item.alias else: item.name
+            if bound_name == name:
+                return true
+    false
+
+fn async_ready_body_name_shadowed(func: ParserFunction, name: text) -> bool:
+    for param in func.params:
+        if param.name == name:
+            return true
+    for param in func.type_params:
+        if param.name == name:
+            return true
+    false
+
+fn allocate_async_ready_body_name(module: ParserModule, helpers: Dict<text, ParserFunction>, func: ParserFunction) -> text:
+    val stem = "__async_ready_body_{func.name}"
+    var name = stem
+    var suffix = 0
+    while async_ready_body_name_taken(module, helpers, name) or async_ready_body_name_shadowed(func, name):
+        suffix = suffix + 1
+        name = "{stem}_{suffix}"
+    name
+
 fn desugar_module(module: ParserModule) -> ParserModule:
     """Desugar entire module.
 
@@ -315,7 +398,8 @@ fn desugar_module(module: ParserModule) -> ParserModule:
     while function_index < function_names.len():
         val name = function_names[function_index]
         val func: ParserFunction = module.functions[name]
-        val _destruct_2 = desugar_async_function(func)
+        val body_name = if func.is_async and func.type_params.len() == 0: allocate_async_ready_body_name(module, generated_helper_functions, func) else: ""
+        val _destruct_2 = desugar_async_function_with_body_name(func, body_name)
         val desugared = _destruct_2[0]
         val gen_enums = _destruct_2[1]
         val gen_funcs = _destruct_2[2]

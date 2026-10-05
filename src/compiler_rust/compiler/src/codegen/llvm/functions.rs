@@ -453,6 +453,87 @@ impl LlvmBackend {
     }
 
     #[cfg(feature = "llvm")]
+    /// Shared tag-aware integer extraction for legacy and trait dispatch.
+    pub(in crate::codegen::llvm) fn build_unbox_int_value(
+        &self,
+        val: inkwell::values::BasicValueEnum<'static>,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        let i64_type = self.runtime_int_type();
+        let int_val = self
+            .coerce_value_to_type(val, Some(i64_type.into()), builder)?
+            .into_int_value();
+        if i64_type.get_bit_width() == 64 {
+            // Required, not optional, once BoxInt can produce a
+            // wide heap box: such a value carries TAG_HEAP and the
+            // select chain below would take the passthrough arm and
+            // return a raw POINTER as if it were the integer.
+            // `rt_value_unbox_int` is a total, tag-aware decode (wide
+            // box -> value, TAG_INT -> >>3, tagged bools -> 1/0,
+            // anything else verbatim), so it subsumes the whole chain.
+            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+            let func = module
+                .get_function("rt_value_unbox_int")
+                .unwrap_or_else(|| module.add_function("rt_value_unbox_int", fn_type, None));
+            let call = builder
+                .build_call(func, &[int_val.into()], "unbox_int")
+                .map_err(|e| crate::error::factory::llvm_build_failed("unbox_int call", &e))?;
+            let unboxed = call.try_as_basic_value().basic().ok_or_else(|| {
+                crate::error::factory::llvm_build_failed(
+                    "unbox_int call",
+                    &"rt_value_unbox_int returned void",
+                )
+            })?;
+            return Ok(unboxed);
+        }
+        let shifted = builder
+            .build_right_shift(int_val, i64_type.const_int(3, false), true, "unbox_int")
+            .map_err(|e| crate::error::factory::llvm_build_failed("unbox_int shift", &e))?;
+        let tag = builder
+            .build_and(int_val, i64_type.const_int(7, false), "unbox_tag")
+            .map_err(|e| crate::error::factory::llvm_build_failed("unbox tag", &e))?;
+        let is_int = builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                i64_type.const_zero(),
+                "unbox_is_int",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("unbox int test", &e))?;
+        let is_true = builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                int_val,
+                i64_type.const_int(11, false),
+                "unbox_is_true",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("unbox true test", &e))?;
+        let is_false = builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                int_val,
+                i64_type.const_int(19, false),
+                "unbox_is_false",
+            )
+            .map_err(|e| crate::error::factory::llvm_build_failed("unbox false test", &e))?;
+        let is_bool = builder
+            .build_or(is_true, is_false, "unbox_is_bool")
+            .map_err(|e| crate::error::factory::llvm_build_failed("unbox bool test", &e))?;
+        let raw_bool = builder
+            .build_int_z_extend(is_true, i64_type, "unbox_bool")
+            .map_err(|e| crate::error::factory::llvm_build_failed("unbox bool", &e))?;
+        let int_or_value = builder
+            .build_select(is_int, shifted, int_val, "unbox_int_or_value")
+            .map_err(|e| crate::error::factory::llvm_build_failed("unbox integer", &e))?
+            .into_int_value();
+        let unboxed = builder
+            .build_select(is_bool, raw_bool, int_or_value, "unbox_scalar")
+            .map_err(|e| crate::error::factory::llvm_build_failed("unbox scalar", &e))?;
+        Ok(unboxed)
+    }
+
+    #[cfg(feature = "llvm")]
     pub(in crate::codegen::llvm) fn build_unbox_float_value(
         &self,
         val: inkwell::values::BasicValueEnum<'static>,
@@ -2210,69 +2291,7 @@ impl LlvmBackend {
             }
             MirInst::UnboxInt { dest, value } => {
                 let val = self.get_vreg(value, vreg_map)?;
-                let i64_type = self.runtime_int_type();
-                let int_val = self
-                    .coerce_value_to_type(val, Some(i64_type.into()), builder)?
-                    .into_int_value();
-                if i64_type.get_bit_width() == 64 {
-                    // Required, not optional, once BoxInt above can produce a
-                    // wide heap box: such a value carries TAG_HEAP and the
-                    // select chain below would take the passthrough arm and
-                    // return a raw POINTER as if it were the integer.
-                    // `rt_value_unbox_int` is a total, tag-aware decode (wide
-                    // box -> value, TAG_INT -> >>3, tagged bools -> 1/0,
-                    // anything else verbatim), so it subsumes the whole chain.
-                    let fn_type = i64_type.fn_type(&[i64_type.into()], false);
-                    let func = module
-                        .get_function("rt_value_unbox_int")
-                        .unwrap_or_else(|| module.add_function("rt_value_unbox_int", fn_type, None));
-                    let call = builder
-                        .build_call(func, &[int_val.into()], "unbox_int")
-                        .map_err(|e| crate::error::factory::llvm_build_failed("unbox_int call", &e))?;
-                    let unboxed = call.try_as_basic_value().basic().ok_or_else(|| {
-                        crate::error::factory::llvm_build_failed("unbox_int call", &"rt_value_unbox_int returned void")
-                    })?;
-                    vreg_map.insert(*dest, unboxed.into_int_value().into());
-                    return Ok(());
-                }
-                let shifted = builder
-                    .build_right_shift(int_val, i64_type.const_int(3, false), true, "unbox_int")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox_int shift", &e))?;
-                let tag = builder
-                    .build_and(int_val, i64_type.const_int(7, false), "unbox_tag")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox tag", &e))?;
-                let is_int = builder
-                    .build_int_compare(inkwell::IntPredicate::EQ, tag, i64_type.const_zero(), "unbox_is_int")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox int test", &e))?;
-                let is_true = builder
-                    .build_int_compare(
-                        inkwell::IntPredicate::EQ,
-                        int_val,
-                        i64_type.const_int(11, false),
-                        "unbox_is_true",
-                    )
-                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox true test", &e))?;
-                let is_false = builder
-                    .build_int_compare(
-                        inkwell::IntPredicate::EQ,
-                        int_val,
-                        i64_type.const_int(19, false),
-                        "unbox_is_false",
-                    )
-                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox false test", &e))?;
-                let is_bool = builder
-                    .build_or(is_true, is_false, "unbox_is_bool")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox bool test", &e))?;
-                let raw_bool = builder
-                    .build_int_z_extend(is_true, i64_type, "unbox_bool")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox bool", &e))?;
-                let int_or_value = builder
-                    .build_select(is_int, shifted, int_val, "unbox_int_or_value")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox integer", &e))?
-                    .into_int_value();
-                let unboxed = builder
-                    .build_select(is_bool, raw_bool, int_or_value, "unbox_scalar")
-                    .map_err(|e| crate::error::factory::llvm_build_failed("unbox scalar", &e))?;
+                let unboxed = self.build_unbox_int_value(val, builder, module)?;
                 vreg_map.insert(*dest, unboxed);
             }
             MirInst::BoxFloat { dest, value } => {
@@ -4078,6 +4097,68 @@ mod tests {
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
 
+    #[test]
+    fn shared_emitter_unbox_preserves_non_integer_values() {
+        let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Windows)).unwrap();
+        backend.create_module("unbox_non_integer_passthrough").unwrap();
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let ty = backend.context_ref().f64_type();
+            let function = module.add_function("extract", ty.fn_type(&[ty.into()], false), None);
+            builder.position_at_end(backend.context_ref().append_basic_block(function, "entry"));
+            let original = function.get_first_param().unwrap();
+            let mut values = HashMap::new();
+            values.insert(VReg(0), original);
+            backend.compile_emitter_simd_instruction(
+                &MirInst::UnboxInt { dest: VReg(1), value: VReg(0) },
+                &mut values, &HashMap::new(), builder, module,
+            ).unwrap();
+            assert_eq!(values[&VReg(1)], original);
+            builder.build_return(Some(&values[&VReg(1)])).unwrap();
+        }
+        let ir = backend.get_ir().unwrap();
+        assert!(!ir.contains("rt_value_unbox_int"), "non-integer values must bypass runtime decode: {ir}");
+        backend.verify().unwrap();
+    }
+    #[test]
+    fn shared_emitter_integer_extraction_uses_tag_aware_runtime() {
+        let backend = LlvmBackend::new(Target::new(TargetArch::X86_64, TargetOS::Windows)).unwrap();
+        backend.create_module("tag_aware_unbox").unwrap();
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let ty = backend.runtime_int_type();
+            let function = module.add_function("extract", ty.fn_type(&[ty.into()], false), None);
+            builder.position_at_end(backend.context_ref().append_basic_block(function, "entry"));
+            let mut values = HashMap::new();
+            values.insert(VReg(0), function.get_first_param().unwrap());
+            backend
+                .compile_emitter_simd_instruction(
+                    &MirInst::UnboxInt {
+                        dest: VReg(1),
+                        value: VReg(0),
+                    },
+                    &mut values,
+                    &HashMap::new(),
+                    builder,
+                    module,
+                )
+                .unwrap();
+            builder.build_return(Some(&values[&VReg(1)])).unwrap();
+        }
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("call i64 @rt_value_unbox_int(i64"), "{ir}");
+        assert!(
+            !ir.contains("ashr"),
+            "shared dispatch must not shift tagged bools or heap handles: {ir}"
+        );
+        backend.verify().unwrap();
+    }
     #[test]
     fn text_float_cast_parses_and_unboxes_instead_of_converting_handle() {
         for (method, result_ty) in [

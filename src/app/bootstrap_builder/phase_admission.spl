@@ -1,11 +1,12 @@
 use app.buildrunner.database_session.{BuildRunnerDatabaseSessionV1, build_runner_database_session_open_v1}
+use app.buildrunner.task_database.{build_runner_task_identity_v1}
 use std.common.task_runner.scheduler.{task_runner_start}
 # One compiled parent owns both phase reservations and real worker transports.
 # This is not a second host policy: all physical/commit/disk/CPU arithmetic is
 # delegated to the existing grouped-process policy. The shell bridge does not
 # make authority decisions. Callers must bind these tasks/policy to the admitted
 # producer/source/image receipts before opening this owner.
-use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildResultV1, BuildInputV1,
+use app.bootstrap_builder.contracts.{BuildTaskV1, BuildHostV1, BuildResultV1, BuildInputV1, BuildRunV1,
     builder_validate_task_v1, builder_validate_host_v1, builder_task_identity_v1,
     builder_validate_result_v1, builder_digest_valid_v1}
 use app.bootstrap_builder.transport.{BuilderAttemptV1, builder_transport_start_v1,
@@ -17,7 +18,9 @@ use app.bootstrap_builder.grouped_native_run.{NativeGroupedCapacityV1,
 use std.common.build_manager.grouped_native_process_policy.{NativeGroupActiveChargeV1,
     native_group_process_budget_v1, native_group_disk_budget_v1,
     native_group_disk_required_v1}
-use app.io.file_ops.{file_lock, file_unlock, file_exists, file_atomic_write, path_absolute}
+use app.io.file_ops.{file_lock, file_unlock, file_exists, file_atomic_write, path_absolute, file_create_exclusive}
+use app.bootstrap_builder.managed_producer_factory.{managed_producer_bind_task_v1,
+    managed_producer_bind_hello_callback_v1}
 use app.io.dir_ops.{dir_create_all}
 use app.bootstrap_builder.codec.{builder_read_run_v1, builder_encode_run_v1, builder_encode_result_v1,
     builder_read_result_v1}
@@ -524,28 +527,55 @@ fn managed_phase_stop_requested_v1(root: text) -> bool:
 fn managed_phase_completion_result_error_v1(task: BuildTaskV1,
         result: BuildResultV1, published: BuildResultV1,
         observed: [BuildInputV1]) -> text:
+    managed_phase_barrier_result_error_v1(task, result, published, observed, false)
+
+fn managed_phase_barrier_result_error_v1(task: BuildTaskV1,
+        result: BuildResultV1, published: BuildResultV1,
+        observed: [BuildInputV1], allow_test_failure: bool) -> text:
     val invalid = builder_validate_result_v1(task, result)
     if invalid != "": return invalid
-    if builder_failure_class_v1(result.status, result.exit_code, true) != "complete":
+    val classification = builder_failure_class_v1(result.status, result.exit_code, true)
+    if classification != "complete" and not (allow_test_failure and classification == "compile-failure"):
         return "aggregate completion requires successful task results"
     if builder_encode_result_v1(published) != builder_encode_result_v1(result):
         return "retained parent and transport phase results differ"
+    # ERROR/1 can be a test assertion failure OR a setup/build failure with
+    # zero executed cases. Consume only its exact terminal result; this is
+    # never test qualification or evidence that cases executed. It has no
+    # admitted output by the BuildResult contract and remains failed.
+    if allow_test_failure and classification == "compile-failure":
+        if observed.len() != 0: return "failed tests cannot admit output artifacts"
+        return ""
     builder_manager_output_error(task, result, observed)
 
 # No recovery challenge, process poll, capacity probe or journal rewrite is
 # permitted in this path. Construct an exact local receipt reader only after
 # the retained journal proves both phases have reached REAPED.
-fn managed_phase_verify_retained_v1(owner: ManagedPhaseAdmissionV1) -> Result<bool, text>:
+fn managed_phase1_barrier_graph_error_v1(tasks: [BuildTaskV1]) -> text:
+    if tasks.len() != 3: return "Phase1 barrier requires exactly build, sanity and whole tests"
+    if tasks[0].id != "phase1_build" or tasks[1].id != "phase1_sanity" or
+            tasks[2].id != "phase1_tests": return "Phase1 barrier task identities differ"
+    if tasks[0].dependencies.len() != 0 or tasks[1].dependencies != ["phase1_build"] or
+            tasks[2].dependencies != ["phase1_sanity"]:
+        return "Phase1 barrier producer/sanity dependencies differ"
+    ""
+
+fn managed_phase_verify_retained_v1(owner: ManagedPhaseAdmissionV1,
+        phase1_barrier: bool = false) -> Result<bool, text>:
     val payload = file_read_regular_no_follow_bounded(owner.root + "/phase-reservations.sdn", 262144)?
     val _restored = managed_phase_restore_journal_v1(owner, payload)?
     for state in owner.states:
         if state != "REAPED": return Err("aggregate phase is not durably reaped")
     if managed_phase_stop_requested_v1(owner.root): return Err("managed phase stop remains requested")
+    if phase1_barrier:
+        val graph_error = managed_phase1_barrier_graph_error_v1(owner.tasks)
+        if graph_error != "": return Err(graph_error)
     for i in 0..owner.tasks.len():
-        val _verified = managed_phase_verify_task_v2(owner, i)?
+        val _verified = managed_phase_verify_task_v2(owner, i, phase1_barrier and i == 2)?
     Ok(true)
 
-fn managed_phase_verify_task_v2(owner: ManagedPhaseAdmissionV1, i: i64) -> Result<bool, text>:
+fn managed_phase_verify_task_v2(owner: ManagedPhaseAdmissionV1, i: i64,
+        allow_test_failure: bool = false) -> Result<bool, text>:
     if i < 0 or i >= owner.tasks.len() or owner.states[i] != "REAPED":
         return Err("dependency task is not durably reaped")
     val task = owner.tasks[i]
@@ -572,6 +602,10 @@ fn managed_phase_verify_task_v2(owner: ManagedPhaseAdmissionV1, i: i64) -> Resul
     val result = builder_transport_collect_v1(attempt)?
     val published = builder_read_result_v1(phase_root + "/result.sdn")?
     var observed: [BuildInputV1] = []
+    if allow_test_failure and builder_failure_class_v1(result.status, result.exit_code, true) == "compile-failure":
+        val failed_test = managed_phase_barrier_result_error_v1(task, result, published, [], true)
+        if failed_test != "": return Err(failed_test)
+        return Ok(true)
     for output in task.outputs:
         var parent = root + "/work"
         if not dir_is_real_no_follow(parent): return Err("phase output root is unsafe")
@@ -582,7 +616,7 @@ fn managed_phase_verify_task_v2(owner: ManagedPhaseAdmissionV1, i: i64) -> Resul
         val path = root + "/work/" + output
         if not file_is_regular_no_follow(path): return Err("phase expected output is missing")
         observed = observed.push(BuildInputV1(output, file_hash_sha256(path)))
-    val outputs = managed_phase_completion_result_error_v1(task, result, published, observed)
+    val outputs = managed_phase_barrier_result_error_v1(task, result, published, observed, allow_test_failure)
     if outputs != "": return Err(outputs)
     Ok(true)
 
@@ -591,6 +625,14 @@ fn managed_phase_verify_v1(root: text, source_root: text,
         resources: [ManagedPhaseResourceV1], host: BuildHostV1,
         process: BuilderProcessPortV1, capacity: NativeGroupedCapacityV1,
         authority_digest: text) -> Result<bool, text>:
+    managed_phase_verify_mode_v1(root, source_root, policy, tasks, resources,
+        host, process, capacity, authority_digest, false)
+
+fn managed_phase_verify_mode_v1(root: text, source_root: text,
+        policy: ManagedPhasePolicyV1, tasks: [BuildTaskV1],
+        resources: [ManagedPhaseResourceV1], host: BuildHostV1,
+        process: BuilderProcessPortV1, capacity: NativeGroupedCapacityV1,
+        authority_digest: text, phase1_barrier: bool) -> Result<bool, text>:
     val _authority = managed_phase_authority_valid_v1(root, source_root,
         policy, tasks, resources, host, authority_digest)?
     # Acquire only the existing ownership lock; never establish a fresh run.
@@ -604,15 +646,150 @@ fn managed_phase_verify_v1(root: text, source_root: text,
         owner.states = owner.states.push("PENDING")
         owner.attempts = owner.attempts.push(nil)
         owner.samples = owner.samples.push(NativeGroupedCapacitySampleV1(0, 0, 0, false))
-    val result = managed_phase_verify_retained_v1(owner)
+    val result = managed_phase_verify_retained_v1(owner, phase1_barrier)
     if not file_unlock(lock): return Err("phase verification lock release failed")
+    result
+
+# Materialize only after the old inventory has terminated. Unlike a static
+# whole-bootstrap manifest, the child producer path/SHA comes from an actual
+# successful, reaped output. This does not admit that compiler for release.
+fn managed_phase_factory_publish_v1(owner: ManagedPhaseAdmissionV1,
+        values: Dict<text, text>) -> Result<bool, text>:
+    val producer_id = values["--producer-task"]
+    val hello_callback = values.contains_key("factory-kind") and values["factory-kind"] == "hello"
+    if not producer_id.ends_with("_build"): return Err("producer task must be a build node")
+    val sanity_id = producer_id[0:producer_id.len() - 6] + "_sanity"
+    var producer_index: i64 = -1
+    var sanity_found = false
+    for index in 0..owner.tasks.len():
+        if owner.tasks[index].id == producer_id: producer_index = index
+        if owner.tasks[index].id == sanity_id:
+            if owner.tasks[index].dependencies != [producer_id]:
+                return Err("producer sanity dependency differs")
+            sanity_found = true
+    if producer_index < 0: return Err("producer build task is required")
+    if hello_callback:
+        # Fresh build output opens ONLY its diagnostic Hello callback. It
+        # cannot claim the absent sanity result or pass the promotion barrier.
+        if owner.tasks.len() != 1 or owner.tasks[0].dependencies.len() != 0:
+            return Err("fresh Hello factory requires one independent producer build")
+    elif not sanity_found:
+        return Err("producer and its sanity task are required")
+    val _verified = managed_phase_verify_retained_v1(owner,
+        not hello_callback and producer_id == "phase1_build")?
+    val task = owner.tasks[producer_index]
+    val phase_root = managed_phase_task_root_v2(owner.root, owner.tasks, producer_index)
+    val attempt_root = phase_root + "/attempts/" + task.id + "/" + str(task.attempt) + "/" + owner.host.id
+    val attempt = BuilderAttemptV1(task.id, task.attempt, owner.host, 0,
+        attempt_root, "", "", builder_task_identity_v1(task), owner.process)
+    val result = builder_transport_collect_v1(attempt)?
+    val published = builder_read_result_v1(phase_root + "/result.sdn")?
+    var observed: [BuildInputV1] = []
+    for output in task.outputs:
+        val path = attempt_root + "/work/" + output
+        if not file_is_regular_no_follow(path): return Err("producer output disappeared")
+        observed = observed.push(BuildInputV1(output, file_hash_sha256(path)))
+    val template_path = values["--next-template"]
+    val template_digest = values["--next-template-sha256"]
+    val template = builder_read_run_v1(template_path)?
+    if sha256_text(builder_encode_run_v1(template)) != template_digest or
+            template.tasks.len() != 1 or template.hosts.len() != 1 or
+            not template.keep_going or template.max_attempts != 1:
+        return Err("next template is not one canonical independent attempt")
+    val child_host = template.hosts[0]
+    if child_host.id != owner.host.id or child_host.transport != owner.host.transport or
+            child_host.endpoint != owner.host.endpoint or child_host.workspace != owner.host.workspace or
+            child_host.worker_program != owner.host.worker_program or child_host.worker_digest != owner.host.worker_digest or
+            child_host.slots != owner.host.slots: return Err("next template changes host authority")
+    val output = values["--producer-output"]
+    val child = if hello_callback:
+        managed_producer_bind_hello_callback_v1(task, result, published, observed,
+            output, attempt_root + "/work/" + output, template.tasks[0])?
+    else:
+        managed_producer_bind_task_v1(task, result, published, observed,
+            output, attempt_root + "/work/" + output, template.tasks[0])?
+    if hello_callback:
+        val callback_program = if child.program.starts_with("/") or child.program.contains(":"):
+            child.program
+        else: owner.source_root + "/" + child.program
+        if not file_is_regular_no_follow(callback_program) or
+                file_hash_sha256(callback_program) != child.producer_digest:
+            return Err("Hello callback executable changed")
+    # Context/source members are already source-generation bound. Validate
+    # only new declarations. The retained owner just authenticated the parent
+    # generation; do not hash all of those same bytes again for this child.
+    # The transport still performs its canonical pre-execution checks.
+    var verified_inputs: Dict<text, text> = {}
+    for parent_task in owner.tasks:
+        for input in parent_task.inputs:
+            if verified_inputs.contains_key(input.path) and verified_inputs[input.path] != input.digest:
+                return Err("parent generation contains conflicting input bindings")
+            verified_inputs[input.path] = input.digest
+    if not builder_regular_input_parents_safe_v1(child, owner.source_root): return Err("next input parent is unsafe")
+    for input in child.inputs:
+        if verified_inputs.contains_key(input.path):
+            if verified_inputs[input.path] != input.digest: return Err("next input changes the source generation")
+        else:
+            val path = owner.source_root + "/" + input.path
+            if not file_is_regular_no_follow(path) or file_hash_sha256(path) != input.digest:
+                return Err("next input changed: " + input.path)
+    val links = builder_link_inputs_match_v1(child, owner.source_root)
+    if links != "": return Err(links)
+    val context = file_read_regular_no_follow_bounded(owner.source_root + "/task-context/" + child.id + ".sdn", 2048)?
+    val _identity = build_runner_task_identity_v1(child, context)?
+    val destination = values["--next-manifest"]
+    if destination.contains("\\") or destination.contains("//") or destination.contains("\r"):
+        return Err("next manifest requires a plain absolute path")
+    val parts = destination.split("/")
+    var prefix = parts[0] + "/"
+    if not dir_is_real_no_follow(prefix): return Err("next manifest root is unsafe")
+    for index in 1..parts.len() - 1:
+        if parts[index] == "" or parts[index] == "." or parts[index] == "..":
+            return Err("next manifest contains traversal")
+        prefix = prefix + parts[index]
+        if not dir_is_real_no_follow(prefix): return Err("next manifest parent is unsafe")
+        prefix = prefix + "/"
+    if parts[parts.len() - 1] == "" or parts[parts.len() - 1] == "." or parts[parts.len() - 1] == "..":
+        return Err("next manifest filename is invalid")
+    val source = path_absolute(owner.source_root).replace("\\", "/").lower()
+    if destination.lower() == source or destination.lower().starts_with(source + "/"):
+        return Err("next manifest cannot mutate the source generation")
+    val run = BuildRunV1(tasks: [child], hosts: template.hosts, keep_going: true, max_attempts: 1)
+    val encoded = builder_encode_run_v1(run)
+    if encoded == "" or not file_create_exclusive(destination, encoded):
+        return Err("next manifest already exists or exclusive publication failed")
+    if not file_is_regular_no_follow(destination) or file_hash_sha256(destination) != sha256_text(encoded):
+        return Err("next manifest publication differs")
+    Ok(true)
+
+fn managed_phase_factory_v1(root: text, source_root: text,
+        policy: ManagedPhasePolicyV1, tasks: [BuildTaskV1],
+        resources: [ManagedPhaseResourceV1], host: BuildHostV1,
+        process: BuilderProcessPortV1, capacity: NativeGroupedCapacityV1,
+        authority_digest: text, values: Dict<text, text>) -> Result<bool, text>:
+    val _authority = managed_phase_authority_valid_v1(root, source_root,
+        policy, tasks, resources, host, authority_digest)?
+    if not dir_is_real_no_follow(root) or not file_is_regular_no_follow(root + "/phase-owner.lock"):
+        return Err("retained phase owner is absent")
+    val lock = file_lock(root + "/phase-owner.lock", 1)
+    if lock < 0: return Err("phase owner is still active")
+    var owner = ManagedPhaseAdmissionV1(root, source_root, lock, policy, tasks,
+        resources, host, process, capacity, [], [], [], authority_digest)
+    for task in tasks:
+        owner.states = owner.states.push("PENDING")
+        owner.attempts = owner.attempts.push(nil)
+        owner.samples = owner.samples.push(NativeGroupedCapacitySampleV1(0, 0, 0, false))
+    val result = managed_phase_factory_publish_v1(owner, values)
+    if not file_unlock(lock): return Err("phase factory lock release failed")
     result
 
 # args starts with managed-phases; common CLI owns dispatch and each platform
 # passes its existing authoritative capacity probe, not a shell snapshot.
 fn managed_phase_cli_v1(args: [text], process: BuilderProcessPortV1,
         capacity: NativeGroupedCapacityV1) -> i64:
-    if args.len() > 0 and (args[0] == "managed-tasks" or args[0] == "managed-tasks-verify"):
+    if args.len() > 0 and (args[0] == "managed-tasks" or args[0] == "managed-tasks-verify" or
+            args[0] == "managed-tasks-phase1-barrier" or args[0] == "managed-tasks-next-producer" or
+            args[0] == "managed-tasks-next-hello"):
         return managed_phase_inventory_cli_v2(args, process, capacity)
     if args.len() != 21 or (args[0] != "managed-phases" and args[0] != "managed-phases-verify"): return 2
     var values: {text: text} = {}
@@ -693,12 +870,16 @@ export managed_phase_policy_encode_v1, managed_phase_policy_decode_v1, managed_p
 export managed_phase_restore_journal_v1
 export managed_phase_verify_v1
 export managed_phase_completion_result_error_v1
+export managed_phase_barrier_result_error_v1
+export managed_phase1_barrier_graph_error_v1
 
 # The canonical BuildRun codec is the immutable ordered manifest inventory.
 # Its digest pins dependencies, source/producer identities and per-task inputs.
 fn managed_phase_inventory_cli_v2(args: [text], process: BuilderProcessPortV1,
         capacity: NativeGroupedCapacityV1) -> i64:
-    if args.len() != 17: return 2
+    val factory = args.len() > 0 and (args[0] == "managed-tasks-next-producer" or
+        args[0] == "managed-tasks-next-hello")
+    if args.len() != (if factory: 27 else: 17): return 2
     var values: Dict<text, text> = {}
     var index = 1
     while index < args.len():
@@ -707,9 +888,20 @@ fn managed_phase_inventory_cli_v2(args: [text], process: BuilderProcessPortV1,
         match key:
             case "--manifest" | "--manifest-sha256" | "--policy" | "--policy-sha256" | "--source-root" | "--state" | "--poll-ms" | "--lifetime-ms":
                 values[key] = args[index + 1]
+            case "--producer-task" | "--producer-output" | "--next-template" | "--next-template-sha256" | "--next-manifest":
+                if not factory: return 2
+                values[key] = args[index + 1]
             case _: return 2
         index = index + 2
-    for key in ["--manifest", "--policy", "--source-root", "--state"]:
+    val required = ["--manifest", "--manifest-sha256", "--policy", "--policy-sha256", "--source-root", "--state", "--poll-ms", "--lifetime-ms"]
+    for key in required:
+        if not values.contains_key(key): return 2
+    if factory:
+        for key in ["--producer-task", "--producer-output", "--next-template", "--next-template-sha256", "--next-manifest"]:
+            if not values.contains_key(key): return 2
+    var absolute_keys = ["--manifest", "--policy", "--source-root", "--state"]
+    if factory: absolute_keys = absolute_keys + ["--next-template", "--next-manifest"]
+    for key in absolute_keys:
         val path = values[key]
         if path == "" or path.contains("\n") or path.contains("\0") or
                 not (path.starts_with("/") or (path.len() > 2 and path[1:2] == ":")): return 2
@@ -735,9 +927,21 @@ fn managed_phase_inventory_cli_v2(args: [text], process: BuilderProcessPortV1,
     if timing.reason != "" or poll_ms < 1 or (lifetime_ms != 0 and lifetime_ms < poll_ms): return 2
     val authority = sha256_text("SIMPLE-MANAGED-TASK-INVENTORY-2\n" + values["--manifest-sha256"] +
         "\n" + values["--policy-sha256"] + "\n" + path_absolute(values["--source-root"]))
-    if args[0] == "managed-tasks-verify":
-        match managed_phase_verify_v1(values["--state"], values["--source-root"], decoded.0,
-                run.tasks, decoded.1, run.hosts[0], process, capacity, authority):
+    if factory:
+        values["factory-kind"] = if args[0] == "managed-tasks-next-hello": "hello" else: "producer"
+        if not builder_digest_valid_v1(values["--next-template-sha256"]) or
+                not file_is_regular_no_follow(values["--next-template"]) or
+                file_hash_sha256(values["--next-template"]) != values["--next-template-sha256"]: return 2
+        match managed_phase_factory_v1(values["--state"], values["--source-root"], decoded.0,
+                run.tasks, decoded.1, run.hosts[0], process, capacity, authority, values):
+            Ok(_): return 0
+            Err(reason):
+                print "managed next producer: {reason}"
+                return 2
+    if args[0] == "managed-tasks-verify" or args[0] == "managed-tasks-phase1-barrier":
+        match managed_phase_verify_mode_v1(values["--state"], values["--source-root"], decoded.0,
+                run.tasks, decoded.1, run.hosts[0], process, capacity, authority,
+                args[0] == "managed-tasks-phase1-barrier"):
             Ok(_): return 0
             Err(reason):
                 print "managed tasks verify: {reason}"

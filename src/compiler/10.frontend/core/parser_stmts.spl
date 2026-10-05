@@ -1716,20 +1716,22 @@ fn parse_while_stmt() -> i64:
         val bind_stmt = stmt_if_val_decl(bind_name, init_expr, 0)
         val name_expr = expr_ident(bind_name, 0)
         val nil_expr2 = expr_nil_lit(0)
-        # == is kind 80; break if NAME == nil
-        val nil_cond_eq = expr_binary(80, name_expr, nil_expr2, 0)
-        val nil_check_span = flat_span_new(decision_start + 1, decision_start + 2, decision_line, decision_col + 1)
-        expr_set_span(nil_cond_eq, nil_check_span)
+        # Use the same present-arm contract as `if val`: the raw optional
+        # word is tested first, then MIR binds its typed scalar payload only
+        # while lowering this body. A detached `if NAME == nil: break` left
+        # the body outside that boundary, so a tagged false remained truthy.
+        # The initializer stays in the loop and runs once per condition test;
+        # break/continue in body still target this surrounding while.
+        val present_cond = expr_binary(TOK_NEQ, name_expr, nil_expr2, 0)
+        val present_span = flat_span_new(decision_start + 1, decision_start + 2, decision_line, decision_col + 1)
+        expr_set_span(present_cond, present_span)
         var break_body: [i64] = []
-        val break_s = stmt_break_stmt(0)
-        break_body.push(break_s)
-        val nil_check_if_idx = elif_new(nil_cond_eq, break_body, [])
-        val nil_check_stmt = stmt_if_stmt(nil_cond_eq, break_body, nil_check_if_idx, nil_check_span)
+        break_body.push(stmt_break_stmt(0))
+        val present_if_idx = elif_new(present_cond, body, break_body)
+        val present_stmt = stmt_if_stmt(present_cond, body, present_if_idx, present_span)
         var loop_body: [i64] = []
         loop_body.push(bind_stmt)
-        loop_body.push(nil_check_stmt)
-        for i in 0..body.len():
-            loop_body.push(body[i])
+        loop_body.push(present_stmt)
         val true_expr = expr_ident("true", 0)
         expr_set_span(true_expr, flat_span_new(decision_start, decision_start + 1, decision_line, decision_col))
         return stmt_while_stmt(true_expr, loop_body, flat_span_new(decision_start, lex_token_start_get(), decision_line, decision_col))

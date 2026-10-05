@@ -1,0 +1,74 @@
+use std.spec
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1}
+use app.bootstrap_builder.managed_product_wave.{managed_product_wave_v1}
+
+fn product_template(backend: text) -> BuildTaskV1:
+    val digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    var inputs = [BuildInputV1("scripts/bootstrap/run-compiler-subsystem-test-products.shs", digest)]
+    for suite in ["compiler", "interpreter", "loader"]:
+        inputs = inputs.push(BuildInputV1("task-context/phase2_" + backend + "_product_" + suite + ".sdn", digest))
+    BuildTaskV1(id: "phase2_" + backend + "_product_compiler", attempt: 1, phase: "phase2",
+        producer_digest: digest, source_digest: digest, toolchain_digest: digest,
+        dependencies: [], program: "/tools/sh", args: ["/source/scripts/bootstrap/run-compiler-subsystem-test-products.shs",
+            "--product=" + backend + ":compiler", "--qualification-mode=diagnostic",
+            "--compiler-" + backend + "=/producer/simple.exe",
+            "--producer-receipt-" + backend + "=/proof/producer.env",
+            "--output-root=@WORK@/product-output", "--threads=80", "--rss-mode=monitor",
+            "--build-timeout-seconds=0", "--test-timeout-seconds=0", "--source-root=/source", "--manager-work",
+            "--producer-phase=phase2"],
+        inputs: inputs, outputs: ["product-output/" + backend + "/compiler/result.env"],
+        cache_key: digest, timeout_ms: 0, memory_limit_bytes: 6000000000, links: [], memory_policy: "monitor")
+
+describe "Phase2 fixed native product manifest factory":
+    it "emits six real selected callback tasks across the two backend producer waves":
+        var total = 0
+        for backend in ["llvm", "cranelift"]:
+            val original = product_template(backend)
+            val tasks = managed_product_wave_v1(original).unwrap()
+            expect(tasks.len()).to_equal(3)
+            for index in 0..3:
+                val suite = ["compiler", "interpreter", "loader"][index]
+                val task = tasks[index]
+                expect(task.id).to_equal("phase2_" + backend + "_product_" + suite)
+                expect(task.args[1]).to_equal("--product=" + backend + ":" + suite)
+                expect(task.outputs).to_equal(["product-output/" + backend + "/" + suite + "/result.env"])
+                expect(task.inputs).to_equal(original.inputs)
+                expect(task.source_digest).to_equal(original.source_digest)
+                expect(task.producer_digest).to_equal(original.producer_digest)
+                expect(task.timeout_ms).to_equal(0)
+                expect(task.memory_limit_bytes).to_equal(6000000000)
+                expect(task.memory_policy).to_equal("monitor")
+                expect(task.args[6:10]).to_equal(original.args[6:10])
+                total = total + 1
+            expect(tasks[0].cache_key == tasks[1].cache_key).to_equal(false)
+            expect(tasks[1].cache_key == tasks[2].cache_key).to_equal(false)
+        expect(total).to_equal(6)
+
+    it "rejects duplicate selectors wrong backend and admission masking":
+        for argument in ["--product=llvm:compiler", "--product=cranelift:compiler",
+                "--qualification-mode=qualified", "--output-root=/shared/output",
+                "--compiler-cranelift=/other.exe", "--producer-receipt-cranelift=/other.env", "--resume"]:
+            var task = product_template("llvm")
+            task.args = task.args.push(argument)
+            expect(managed_product_wave_v1(task).is_err()).to_equal(true)
+
+    it "rejects missing task contexts and outputs that cannot verify the selected binary":
+        var missing = product_template("llvm")
+        missing.inputs = missing.inputs[0:3]
+        expect(managed_product_wave_v1(missing).is_err()).to_equal(true)
+        var output = product_template("llvm")
+        output.outputs = ["product-output/llvm/compiler/source-file-count.env"]
+        expect(managed_product_wave_v1(output).is_err()).to_equal(true)
+
+    it "preserves immutable templates and refuses other phase or retry identities":
+        val original = product_template("cranelift")
+        val tasks = managed_product_wave_v1(original).unwrap()
+        expect(original.args[1]).to_equal("--product=cranelift:compiler")
+        expect(original.outputs).to_equal(["product-output/cranelift/compiler/result.env"])
+        expect(tasks[2].args[1]).to_equal("--product=cranelift:loader")
+        var later = original
+        later.phase = "phase4"
+        expect(managed_product_wave_v1(later).is_err()).to_equal(true)
+        var retry = original
+        retry.attempt = 2
+        expect(managed_product_wave_v1(retry).is_err()).to_equal(true)

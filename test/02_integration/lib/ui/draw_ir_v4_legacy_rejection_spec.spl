@@ -1,0 +1,76 @@
+use std.spec.{describe, it, expect}
+use common.ui.draw_ir.*
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_adv_composition,
+    engine2d_draw_ir_prepare_damage_plan,
+    engine2d_draw_ir_render_prepared_damage_plan_with_images,
+    engine2d_draw_ir_render_composition_damaged_with_images
+}
+
+describe "legacy Engine2D v4 rejection":
+    it "skips fractional geometry and reports the unsupported contract":
+        var command = draw_ir_rect("fractional", 0, 0, 4, 4, 0xffffffffu32)
+        command.fractional_geometry = DrawIrFractionalGeometry(x: 0.25, y: 0.5, width: 3.75, height: 3.125)
+        val batch = draw_ir_batch("batch", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("", "", 0, 0, 8, 8, 0, 1000, false), [command])
+        val scene = draw_ir_composition("fractional", "scene", DRAW_IR_BACKEND_CPU, [batch])
+        var engine = Engine2D.create_with_backend(8, 8, "cpu")
+        val result = engine2d_draw_ir_adv_composition(engine, scene, false)
+        engine.shutdown()
+        expect(result.fallback_required).to_equal(true)
+        expect(result.rendered_command_count).to_equal(0)
+        expect(result.skipped_command_count).to_equal(1)
+        expect(result.fallback_reason).to_contain("fractional-geometry-unsupported")
+
+    it "skips affine and coverage-AA state instead of silently drawing integer geometry":
+        var affine = draw_ir_rect("affine", 0, 0, 4, 4, 0xffffffffu32)
+        affine.affine_transform = DrawIrAffine2D(a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: 0.5, ty: 0.25)
+        var raster = draw_ir_rect("raster", 4, 4, 2, 2, 0xffffffffu32)
+        raster.raster_policy = DRAW_IR_RASTER_COVERAGE_AA
+        val batch = draw_ir_batch("batch", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("", "", 0, 0, 8, 8, 0, 1000, false), [affine, raster])
+        val scene = draw_ir_composition("affine", "scene", DRAW_IR_BACKEND_CPU, [batch])
+        var engine = Engine2D.create_with_backend(8, 8, "cpu")
+        val result = engine2d_draw_ir_adv_composition(engine, scene, false)
+        engine.shutdown()
+        expect(result.fallback_required).to_equal(true)
+        expect(result.rendered_command_count).to_equal(0)
+        expect(result.skipped_command_count).to_equal(2)
+        expect(result.fallback_reason).to_contain("affine-or-raster-policy-unsupported")
+
+    it "keeps unsupported state in indexed damage selections despite stale integer bounds":
+        var fractional = draw_ir_rect("fractional", 4096, 4096, 2, 2, 0xffffffffu32)
+        fractional.fractional_geometry = DrawIrFractionalGeometry(x: 1.25, y: 1.5, width: 2.5, height: 2.5)
+        var affine = draw_ir_rect("affine", 4096, 4096, 2, 2, 0xffffffffu32)
+        affine.affine_transform = DrawIrAffine2D(a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: -4095.0, ty: -4095.0)
+        val batch = draw_ir_batch("batch", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("", "", 0, 0, 8, 8, 0, 1000, false), [fractional, affine])
+        val scene = draw_ir_composition("stale-integers", "scene", DRAW_IR_BACKEND_CPU, [batch])
+        val damage: [i64] = [0, 0, 8, 8]
+        val prepared = engine2d_draw_ir_prepare_damage_plan(scene, damage, 8, 8, "v4-stale-bounds")
+        expect(prepared.valid).to_equal(true)
+        expect(prepared.commands_considered).to_equal(2)
+        expect(prepared.commands_culled_by_damage).to_equal(0)
+        var engine = Engine2D.create_with_backend(8, 8, "cpu")
+        val result = engine2d_draw_ir_render_prepared_damage_plan_with_images(engine, prepared, [], "v4-stale-bounds", false)
+        engine.shutdown()
+        expect(result.ops_rendered).to_equal(0)
+        expect(result.ops_skipped).to_equal(2)
+        expect(result.unsupported_kinds).to_contain("fractional-geometry-unsupported")
+        expect(result.unsupported_kinds).to_contain("affine-or-raster-policy-unsupported")
+
+    it "reports unsupported geometry in direct damaged composition replay before integer culling":
+        var fractional = draw_ir_rect("fractional", 4096, 4096, 2, 2, 0xffffffffu32)
+        fractional.fractional_geometry = DrawIrFractionalGeometry(x: 1.25, y: 1.5, width: 2.5, height: 2.5)
+        val batch = draw_ir_batch("batch", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("", "", 0, 0, 8, 8, 0, 1000, false), [fractional])
+        val scene = draw_ir_composition("damaged", "scene", DRAW_IR_BACKEND_CPU, [batch])
+        val damage: [i64] = [0, 0, 8, 8]
+        var engine = Engine2D.create_with_backend(8, 8, "cpu")
+        val result = engine2d_draw_ir_render_composition_damaged_with_images(engine, scene, [], damage, false)
+        engine.shutdown()
+        expect(result.ops_rendered).to_equal(0)
+        expect(result.ops_skipped).to_equal(1)
+        expect(result.commands_culled_by_damage).to_equal(0)
+        expect(result.unsupported_kinds).to_contain("fractional-geometry-unsupported")

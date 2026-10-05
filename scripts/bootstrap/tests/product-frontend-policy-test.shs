@@ -1,0 +1,48 @@
+#!/bin/sh
+# Real child environment transport, no compiler or native PASS simulated.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$repo/scripts/bootstrap/lib/product-frontend-policy.shs"
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+unset SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB SIMPLE_SHARD_MEM_CLAMP \
+  SIMPLE_PARSE_SHARD_MAX SIMPLE_PARSE_SHARD_WORKER_KB SIMPLE_HIR_SHARD_WORKER_KB \
+  SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB
+if bootstrap_product_frontend_policy diagnostic 5859375 monitor >"$scratch/absent" 2>/dev/null; then exit 1; fi
+[ ! -s "$scratch/absent" ]
+count=1
+for mode in enforce monitor; do
+  SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB=3000000
+  rows=$(bootstrap_product_frontend_policy diagnostic 5859375 "$mode")
+  (
+    while IFS= read -r row; do export "$row"; done <<EOF
+$rows
+EOF
+    export SIMPLE_NATIVE_BUILD_THREADS=80
+    sh -c 'printf "%s\n" "$SIMPLE_NATIVE_BUILD_THREADS" "$SIMPLE_SHARD_MEM_CLAMP" "$SIMPLE_PARSE_SHARD_MAX" "$SIMPLE_PARSE_SHARD_WORKER_KB" "$SIMPLE_HIR_SHARD_WORKER_KB" "$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB"'
+  ) >"$scratch/child"
+  printf '%s\n' 80 1 1 1650000 3000000 3000000 >"$scratch/expected"
+  cmp "$scratch/expected" "$scratch/child"
+  count=$((count + 1))
+done
+for share in 0 -1 3000001 broken; do
+  SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB=$share
+  if bootstrap_product_frontend_policy diagnostic 5859375 monitor >"$scratch/rejected" 2>/dev/null; then exit 1; fi
+  [ ! -s "$scratch/rejected" ]
+  count=$((count + 1))
+done
+SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB=3000000
+for bad in SIMPLE_SHARD_MEM_CLAMP=0 SIMPLE_PARSE_SHARD_MAX=80 \
+  SIMPLE_PARSE_SHARD_WORKER_KB=1 SIMPLE_HIR_SHARD_WORKER_KB=1 SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=0; do
+  (
+    export "$bad"
+    if bootstrap_product_frontend_policy diagnostic 5859375 monitor >"$scratch/rejected" 2>/dev/null; then exit 1; fi
+    [ ! -s "$scratch/rejected" ]
+  )
+  count=$((count + 1))
+done
+rows=$(bootstrap_product_frontend_policy qualified 2000000 enforce)
+printf '%s\n' "$rows" | grep -qx SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=2000000
+count=$((count + 1))
+printf 'PASS product frontend policy: %s cases, real child transport; no native build\n' "$count"

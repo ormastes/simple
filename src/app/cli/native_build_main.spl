@@ -6,14 +6,8 @@ use app.io.cli_ops.{_cli_self_exe_via_pid_query, cli_kernel_executable_path}
 use app.cli.native_build_producer_binding.{bootstrap_native_build_producer_binding}
 use app.io.file_ops.{path_absolute, file_size_raw}
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
-    compiler_source_authority_publish_v1, compiler_source_authority_open_published_v1,
-    compiler_source_authority_clear_v1}
-use app.compiler_entrypoint.entry_closure_selection.{compiler_entry_closure_publish_v1}
-use app.io._CliCompile.native_build_closure.{_native_build_entry_closure}
-use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureBindingV1}
-use compiler.driver.driver_build.native_entry_closure_owner.{NativeEntryClosureRequestV1,
-    native_entry_closure_request_publish_v1}
-use std.nogc_sync_mut.io.file_ops.{file_hash_sha256}
+    compiler_source_authority_publish_v1, compiler_source_authority_clear_v1}
+use app.cli.native_build_parse_closure_owner.{native_build_publish_parse_closure_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
     compile_source_inventory_checkout_cache_root_v1}
 use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
@@ -39,6 +33,7 @@ use std.io_runtime.{file_write}
 use std.io_runtime.{getpid}
 use std.io_runtime.{dir_create_all, dir_remove_all, dir_exists}
 use app.cli.parse_shard_queue.{parse_shard_release_claims, parse_shard_exit_label}
+use app.cli.native_build_exit_status.{native_build_windows_status_label, native_build_posix_signal}
 use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_worker_budget_kb}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.compile_failure_policy.{compile_fail_fast_requested}
@@ -1068,10 +1063,6 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
             if roots.len() == 0:
                 eprint "error: parse-shard closure request has no authority roots"
                 return 1
-            val authority = compiler_source_authority_open_published_v1(source_root)
-            if not authority.valid:
-                eprint "error: parse-shard closure authority rejected: " + authority.reason
-                return 1
             var selected_entry = ""
             var entry_arg_index = 0
             while entry_arg_index < args.len():
@@ -1091,34 +1082,9 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
                 eprint "error: parse-shard closure entry outside source authority"
                 return 1
             val entry_identity = absolute_entry.substring(source_root.len() + 1)
-            val paths = _native_build_entry_closure(source_root + "/" + entry_identity, roots)
-            val binding = NativeEntryClosureBindingV1(authority.snapshot.revision_id,
-                authority.snapshot.commit_id, authority.snapshot.tree_id,
-                authority.snapshot.inventory_digest, entry_identity, roots,
-                policy.handoff.policy_digest, file_hash_sha256(simple_bin))
-            val request_root = frontend_cache_dir + "/closure-request-" + getpid().to_text()
-            if frontend_cache_dir == "" or not dir_create_all(request_root):
-                eprint "error: parse-shard closure request requires private frontend cache"
+            if not native_build_publish_parse_closure_v1(source_root, roots,
+                    entry_identity, policy.handoff.policy_digest, simple_bin, frontend_cache_dir):
                 return 1
-            val selection_path = request_root + "/selection.v1"
-            val published = compiler_entry_closure_publish_v1(source_root, authority,
-                binding, paths, selection_path)
-            if published.is_err():
-                eprint "error: parse-shard closure publication rejected: " + published.unwrap_err()
-                return 1
-            val request = NativeEntryClosureRequestV1(source_root, authority.snapshot,
-                authority.source_inventory_digest, authority.inventory_generation,
-                binding, selection_path, published.unwrap())
-            val request_path = request_root + "/request.v1"
-            val request_digest = native_entry_closure_request_publish_v1(request_path, request)
-            if request_digest.is_err():
-                eprint "error: parse-shard closure request publication failed"
-                return 1
-            if not env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", request_digest.unwrap()) or
-                    not env_set("SIMPLE_PARSE_CLOSURE_REQUEST", request_path):
-                eprint "error: parse-shard closure request publication failed"
-                return 1
-            print "[parse-closure] parent_walks=1 selected={paths.len()} request={request_digest.unwrap()}"
         run_parse_shards(forwarded_args, shard_count, simple_bin, native_build_timeout_ms(args))
         env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
         env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
@@ -1191,6 +1157,7 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
             eprint_bounded(stdout)
         native_build_print_failure_hints(stdout, stderr)
         # Keep the real cause visible after stderr truncation.
+        val windows_status = native_build_windows_status_label(code)
         if code == -1 and (stderr.contains("dumped core") or stderr.contains("core dumped")):
             # A crash, not a kill and not a wait failure. `timeout` reports
             # WCOREDUMP on the monitored command, and that single line is the
@@ -1208,12 +1175,11 @@ pub fn run_native_build_worker(raw_args: [text]) -> i64:
             # and the PC's mapping are what identify the fault.
             stderr_write("    gdb <worker-binary> /tmp/u/CoreDump -batch -ex bt -ex 'info registers pc lr x0 x8' -ex 'x/4xg $pc'\n")
             stderr_write("    # then locate the PC in /tmp/u/ProcMaps: a rw-p [anon:mimalloc] hit means a branch to data, not a code bug at that address\n")
-        elif code < -128:
-            # -(128+signo) from rt_process_wait: the wrapper really was killed,
-            # and the signal number survived. 139 = SIGSEGV, 137 = SIGKILL
-            # (an out-of-memory reaper), 143 = SIGTERM.
-            val signo = 0 - code - 128
-            stderr_write("error: native-build worker was KILLED by signal {signo} before producing a binary; NOT a compile failure.\n")
+        elif windows_status != "":
+            stderr_write("error: native-build worker terminated with Windows native status {windows_status} before producing a binary.\n")
+        elif native_build_posix_signal(code) > 0:
+            val signo = native_build_posix_signal(code)
+            stderr_write("error: native-build worker terminated with signal {signo} before producing a binary; NOT a compile failure.\n")
             if signo == 11 or signo == 6:
                 stderr_write("  A SIGSEGV/SIGABRT is a crash in the compiler itself; take a backtrace from the core (see /var/crash).\n")
             elif signo == 9 or signo == 15:

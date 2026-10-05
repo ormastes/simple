@@ -1,0 +1,40 @@
+#!/bin/sh
+# Tests handoff binding/publication, not Cargo or canonical generation admission.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+. "$repo/scripts/bootstrap/bootstrap-seed-handoff.shs"
+source="$scratch/source"
+authority="$source/src/compiler_rust/target/bootstrap.generations/fixture"
+mkdir -p "$authority"
+printf 'seed bytes\n' >"$authority/simple.exe"
+printf 'current generation\n' >"$source/src/compiler_rust/target/bootstrap.current.env"
+bootstrap_stage3_hash_file() { value=$(sha256sum "$1") || return 2; printf '%s\n' "${value%% *}"; }
+bootstrap_stage3_manifest_value() { awk -F= -v key="$1" '$1==key {print $2}' "$2"; }
+bootstrap_stage3_resolve_committed_seed() {
+    [ "${reject_generation:-0}" = 0 ] || return 1
+    BOOTSTRAP_STAGE3_COMMITTED_AUTHORITY="$authority"
+}
+producer_sha=$(bootstrap_stage3_hash_file "$authority/simple.exe")
+printf 'schema=simple-bootstrap-preflight-v1\nstatus=pass\ncargo_mode=checked\nseed_sha256=%s\n' "$producer_sha" >"$scratch/preflight.env"
+printf 'schema=simple-bootstrap-seed-artifact-stamp-v2\nseed_sha256=%s\n' "$producer_sha" >"$authority/simple.exe.inputs.sha256"
+bootstrap_seed_handoff_publish "$source" "$authority/simple.exe" "$scratch/preflight.env" "$scratch/handoff.env"
+grep -qx "producer_sha256=$producer_sha" "$scratch/handoff.env"
+grep -qx 'stage2_admitted=0' "$scratch/handoff.env"
+grep -qx 'whole_tests=NOT_RUN' "$scratch/handoff.env"
+grep -qx 'dynload_provider=NOT_QUALIFIED' "$scratch/handoff.env"
+before=$(bootstrap_stage3_hash_file "$scratch/handoff.env")
+if bootstrap_seed_handoff_publish "$source" "$authority/simple.exe" "$scratch/preflight.env" "$scratch/handoff.env"; then exit 1; fi
+[ "$(bootstrap_stage3_hash_file "$scratch/handoff.env")" = "$before" ]
+reject_generation=1
+if bootstrap_seed_handoff_publish "$source" "$authority/simple.exe" "$scratch/preflight.env" "$scratch/rejected.env"; then exit 1; fi
+[ ! -e "$scratch/rejected.env" ]
+reject_generation=0
+printf 'different producer\n' >"$scratch/other.exe"
+if bootstrap_seed_handoff_publish "$source" "$scratch/other.exe" "$scratch/preflight.env" "$scratch/mismatch.env"; then exit 1; fi
+[ ! -e "$scratch/mismatch.env" ]
+printf 'schema=simple-bootstrap-preflight-v1\nstatus=pass\ncargo_mode=skipped\nseed_sha256=%s\n' "$producer_sha" >"$scratch/preflight.env"
+if bootstrap_seed_handoff_publish "$source" "$authority/simple.exe" "$scratch/preflight.env" "$scratch/unchecked.env"; then exit 1; fi
+[ ! -e "$scratch/unchecked.env" ]
+printf 'PASS seed handoff: 5 binding/publication cases; Cargo/generation authority not simulated as native PASS\n'

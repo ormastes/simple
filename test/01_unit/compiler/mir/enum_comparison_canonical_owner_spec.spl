@@ -1,0 +1,69 @@
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, HirSymbol, SymbolId, SymbolKind, SymbolTable, ScopeId}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_types.{LocalId}
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+fn enum_comparison_symbol(id: i64, owner: text?) -> HirSymbol:
+    HirSymbol(id: SymbolId(id: id), name: "PacketKind", kind: SymbolKind.Enum,
+        type_: nil, scope: ScopeId(id: 0), span: Span.empty(),
+        visibility: Visibility.Public, is_public: true, is_mutable: false,
+        defining_module: owner, builtin_method_tag: 0)
+
+fn enum_comparison_type(id: i64) -> HirType:
+    HirType(kind: HirTypeKind.Named(SymbolId(id: id), []), span: Span.empty())
+
+describe "Enum comparisons use canonical declaration ownership":
+    it "recognizes an imported dotted owner and its physical declaration as one enum":
+        var symbols = SymbolTable.new()
+        symbols.symbols[41] = enum_comparison_symbol(41, Some("src/packet/owner.spl"))
+        symbols.symbols[82] = enum_comparison_symbol(82, Some("packet.owner"))
+        var lowering = MirLowering.new(symbols)
+        lowering.enum_variant_index["PacketKind"] = ["Unknown", "Frozen"]
+        lowering.remember_local_hir_type(10, enum_comparison_type(41), 0, 0)
+        lowering.remember_local_hir_type(11, enum_comparison_type(82), 0, 0)
+        val declaration = lowering.local_enum_type_id(LocalId(id: 10))
+        val imported = lowering.local_enum_type_id(LocalId(id: 11))
+        expect(declaration >= 0).to_equal(true)
+        expect(imported).to_equal(declaration)
+
+    it "keeps equal bare names from different modules distinct":
+        var symbols = SymbolTable.new()
+        symbols.symbols[41] = enum_comparison_symbol(41, Some("src/left/owner.spl"))
+        symbols.symbols[82] = enum_comparison_symbol(82, Some("right.owner"))
+        var lowering = MirLowering.new(symbols)
+        lowering.enum_variant_index["PacketKind"] = ["Unknown", "Frozen"]
+        lowering.remember_local_hir_type(10, enum_comparison_type(41), 0, 0)
+        lowering.remember_local_hir_type(11, enum_comparison_type(82), 0, 0)
+        val left = lowering.local_enum_type_id(LocalId(id: 10))
+        val right = lowering.local_enum_type_id(LocalId(id: 11))
+        expect(left >= 0).to_equal(true)
+        expect(right >= 0).to_equal(true)
+        expect(left != right).to_equal(true)
+
+    it "does not invent a common owner for separate ownerless declarations":
+        var symbols = SymbolTable.new()
+        symbols.symbols[41] = enum_comparison_symbol(41, nil)
+        symbols.symbols[82] = enum_comparison_symbol(82, nil)
+        var lowering = MirLowering.new(symbols)
+        lowering.enum_variant_index["PacketKind"] = ["Unknown", "Frozen"]
+        lowering.remember_local_hir_type(10, enum_comparison_type(41), 0, 0)
+        lowering.remember_local_hir_type(11, enum_comparison_type(82), 0, 0)
+        expect(lowering.local_enum_type_id(LocalId(id: 10))).to_equal(41)
+        expect(lowering.local_enum_type_id(LocalId(id: 11))).to_equal(82)
+
+    it "keeps missing metadata and non-enum scalar locals outside enum equality":
+        var lowering = MirLowering.new(SymbolTable.new())
+        lowering.remember_local_hir_type(10,
+            HirType(kind: HirTypeKind.Int(64, true), span: Span.empty()), 0, 0)
+        expect(lowering.local_enum_type_id(LocalId(id: 10))).to_equal(-1)
+        expect(lowering.local_enum_type_id(LocalId(id: 11))).to_equal(-1)
+
+    it "does not promote an unregistered named type to an enum":
+        var symbols = SymbolTable.new()
+        symbols.symbols[41] = enum_comparison_symbol(41, Some("packet.owner"))
+        var lowering = MirLowering.new(symbols)
+        lowering.remember_local_hir_type(10, enum_comparison_type(41), 0, 0)
+        expect(lowering.local_enum_type_id(LocalId(id: 10))).to_equal(-1)

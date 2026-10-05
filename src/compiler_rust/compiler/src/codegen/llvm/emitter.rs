@@ -2042,20 +2042,16 @@ impl CodegenEmitter for LlvmEmitter<'_> {
 
     fn emit_unbox_int(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
         let val = self.get(value)?;
-        if let BasicValueEnum::IntValue(int_val) = val {
-            let i64_type = self.backend.runtime_int_type();
-            let three = i64_type.const_int(3, false);
-            let unboxed = self
-                .builder
-                .build_right_shift(int_val, three, true, "unbox_sshr")
-                .map_err(|e| format!("sshr failed: {}", e))?;
-            self.set(dest, unboxed.into());
+        let unboxed = if matches!(val, BasicValueEnum::IntValue(_)) {
+            self.backend
+                .build_unbox_int_value(val, self.builder, self.module)
+                .map_err(|e| e.to_string())?
         } else {
-            self.set(dest, val);
-        }
+            val
+        };
+        self.set(dest, unboxed);
         Ok(())
     }
-
     fn emit_unbox_float(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
         let val = self.get(value)?;
         let unboxed = self
