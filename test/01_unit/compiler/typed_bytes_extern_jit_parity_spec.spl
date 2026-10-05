@@ -1,0 +1,60 @@
+"""
+## Purpose and audience
+Purpose: pin JIT/interpreter parity for source-level `extern fn`
+declarations of the typed-bytes accessors (`rt_typed_bytes_u8_unchecked`,
+`rt_typed_bytes_u8_at`, `rt_typed_bytes_u32_le_at`, `rt_typed_bytes_u32_le_unchecked`,
+`rt_typed_bytes_u64_le_unchecked`) and for the stdlib checksums built on
+them (adler32, crc32). Codegen lowers these accessors inline, but the JIT
+runtime exports no symbol for most of them, so `run_file_jit` classified
+the declarations as unresolvable externs and spliced every call through
+the interpreter bridge: each call converted the whole array (O(n) per
+call, 247 s for a 64 KiB sum) and returned 0 instead of the byte.
+Audience: maintainers of the Rust seed's JIT extern routing.
+## Operator workflow
+Runs `bin/simple run` (or $SIMPLE_BIN) on
+test/fixtures/jit_typed_bytes/typed_bytes_extern_probe.spl under
+SIMPLE_EXECUTION_MODE=jit and =interpret, each inside `timeout 120`.
+## Compatibility and limitations
+Expected values were computed independently with Python (zlib.adler32 /
+zlib.crc32 over the same 256 KiB pattern). The timeout is the O(n)-total
+guard: the pre-fix JIT needs hours for 256 KiB.
+The interpreter had no handler for `rt_typed_bytes_u8_at` /
+`rt_typed_bytes_u32_le_unchecked` ("unknown extern function"); both are
+mapped now so the two lanes accept the same declarations.
+Bug record: doc/08_tracking/bug/jit_typed_bytes_extern_spliced_to_interpreter_2026-10-05.md
+"""
+# @req: REQ-SSPEC-COMPILER
+
+use std.spec.*
+use std.spec.step
+use std.io.{process_run, env_get}
+
+val EXPECTED = "u8=33423360 u8_at=33423360 u32=140737488322560 u32u=140737488322560 u64hi=274877890560 adler=2413174243 crc=2586267904"
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn run_probe(mode: text) -> text:
+    val cmd = "SIMPLE_EXECUTION_MODE=" + mode + " SIMPLE_ENGINE_RECEIPT=1 timeout 120 " + simple_binary() + " run test/fixtures/jit_typed_bytes/typed_bytes_extern_probe.spl 2>&1"
+    val (stdout, _stderr, _code) = process_run("sh", ["-c", cmd])
+    stdout
+
+describe "typed-bytes extern accessors under the JIT":
+    it "compute the same values as the interpreter and as zlib":
+        step("run the probe under the interpreter and under the JIT")
+        val interp = run_probe("interpret")
+        val jit = run_probe("jit")
+        expect(interp).to_contain(EXPECTED)
+        expect(jit).to_contain(EXPECTED)
+
+    it "finish 256 KiB in linear time under the JIT":
+        step("the probe must print DONE inside the 120 s timeout")
+        expect(run_probe("jit")).to_contain("DONE")
+
+    it "are compiled inline, not spliced through the interpreter":
+        val out = run_probe("jit")
+        expect(out).to_contain("engine=cranelift-jit")
+        expect(out.contains("rt_typed_bytes")).to_equal(false)
