@@ -1,4 +1,5 @@
 use std.spec.*
+use app.cli.native_build_shard_admission.{native_build_shard_worker_limit}
 use app.io.env_ops.{env_get, env_set}
 use app.io.file_ops.{path_absolute}
 use app.io.process_ops.{process_run}
@@ -20,7 +21,7 @@ fn hir_boundary_env_keys() -> [text]:
      "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "SIMPLE_NATIVE_BUILD_WORKER",
      "SIMPLE_NATIVE_BUILD_WARM_CLOSURE_CANDIDATE", "SIMPLE_STAGE3_STREAMING_SURFACES",
      "SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING", "SIMPLE_NATIVE_GROUP_RESULT",
-     "SIMPLE_EXECUTION_MODE", "SIMPLE_BINARY", "SIMPLE_BIN", "SIMPLE_COMPILE_FAIL_FAST"]
+     "SIMPLE_NATIVE_BUILD_THREADS", "SIMPLE_PARSE_SHARD_MAX", "SIMPLE_EXECUTION_MODE", "SIMPLE_BINARY", "SIMPLE_BIN", "SIMPLE_COMPILE_FAIL_FAST"]
 
 fn hir_boundary_candidate() -> text:
     # No implicit wrapper or earlier compiler: the native qualification owner
@@ -224,3 +225,32 @@ describe "explicit HIR-only native admission boundary":
         expect(hir_child).to_equal(0)
         expect(parse_child).to_equal(0)
         expect(explicit_disable).to_equal(0)
+
+    it "keeps requested HIR capacity configurable through 128 without launching workers":
+        val keys = hir_boundary_env_keys()
+        val saved = hir_boundary_save(keys)
+        env_set("SIMPLE_PARSE_SHARDING", "0")
+        env_set("SIMPLE_HIR_SHARDING", "1")
+        env_set("SIMPLE_HIR_SHARD", "")
+        env_set("SIMPLE_PARSE_SHARD", "")
+        env_set("SIMPLE_HIR_CACHE", "1")
+        env_set("SIMPLE_FRONTEND_CACHE", "1")
+        env_set("SIMPLE_SHARD_MEM_CLAMP", "0")
+        env_set("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "0")
+        env_set("SIMPLE_PARSE_SHARD_MAX", "")
+        env_set("SIMPLE_NATIVE_BUILD_THREADS", "128")
+        val from_environment = native_build_hir_shard_count([])
+        var actual: [i64] = []
+        for count in [1, 20, 80, 128]:
+            actual.push(native_build_hir_shard_count(["--threads", "{count}"]))
+        val jobs_override = native_build_hir_shard_count(["--jobs=80"])
+        val short_override = native_build_hir_shard_count(["-j", "20"])
+        val last_override = native_build_hir_shard_count(["--jobs=80", "--threads=128"])
+        hir_boundary_restore(keys, saved)
+        expect(from_environment).to_equal(128)
+        expect(actual).to_equal([1, 20, 80, 128])
+        expect(jobs_override).to_equal(80)
+        expect(short_override).to_equal(20)
+        expect(last_override).to_equal(128)
+        expect(native_build_shard_worker_limit(128, 0, 0, 80)).to_equal(80)
+        expect(native_build_shard_worker_limit(128, 0, 0, 0)).to_equal(128)

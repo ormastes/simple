@@ -30,3 +30,5 @@ runner must serialize these environment-mutating cases. Preserve source,
 producer, queue, cache, output, and process receipts. RSS/performance,
 simultaneous claims, crash recovery, and cross-owner cache corruption have
 separate coverage and must not be inferred from these assertions.
+
+Capacity prevention checks call the real HIR count selector for 1, 20, 80 and 128, check CLI-over-environment and last-option precedence, and check explicit pure admission limits. They spawn no workers. Twenty is the current live allocation, not a compiler maximum; 128-worker native concurrency remains UNRUN.
