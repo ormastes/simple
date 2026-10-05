@@ -9,10 +9,11 @@ hash_file() {
   sum=$(sha256sum "$1") || die "hash input unreadable: $1"
   printf '%s\n' "${sum%% *}"
 }
-absolute() { case "$1" in /*) return 0 ;; *) return 1 ;; esac; }
+absolute() { case "$1" in /*|[A-Za-z]:/*) return 0 ;; *) return 1 ;; esac; }
 resume=0 resume_reused= selected_product= qualification_mode=qualified rss_mode=enforce manager_work=0
 product_phase=phase4
 product_operation=all phase1_terminal= phase1_terminal_sha=
+product_defer_full=0 phase1_request_sha= phase1_python=
 source_root= output_root= compiler_llvm= compiler_cranelift=
 producer_receipt_llvm= producer_receipt_cranelift=
 threads=80 rss_cap_kib=6835937 build_timeout=1800 test_timeout=7200
@@ -23,6 +24,9 @@ for arg in "$@"; do
     --resume-prepared) [ "$product_operation" = all ] || die 'duplicate product operation'; product_operation=execute ;;
     --phase1-terminal-receipt=*) phase1_terminal=${arg#*=} ;;
     --phase1-terminal-sha256=*) phase1_terminal_sha=${arg#*=} ;;
+    --await-phase1-receipt=*) product_defer_full=1; phase1_terminal=${arg#*=} ;;
+    --phase1-request-sha256=*) phase1_request_sha=${arg#*=} ;;
+    --phase1-python=*) phase1_python=${arg#*=} ;;
     --manager-work) [ "$manager_work" = 0 ] || die 'duplicate manager work option'; manager_work=1 ;;
     --product=*) selected_product=${arg#*=} ;;
     --producer-phase=*) product_phase=${arg#*=} ;;
@@ -46,6 +50,12 @@ case "$selected_product" in
   *) die 'invalid product selector' ;;
 esac
 case "$product_phase" in phase2|phase3|phase4) ;; *) die 'invalid product producer phase' ;; esac
+if [ "$product_defer_full" = 1 ]; then
+  [ "$product_phase" = phase2 ] && [ "$product_operation" = all ] && [ -z "$selected_product" ] &&
+    [ "$resume" = 0 ] || die 'Phase1 overlap requires one retained fresh Phase2 matrix owner'
+  absolute "$phase1_terminal" && absolute "$phase1_python" && regular "$phase1_python" || die 'Phase1 gate paths unavailable'
+  printf '%s\n' "$phase1_request_sha" | grep -Eq '^[0-9a-f]{64}$' || die 'Phase1 request identity required'
+fi
 if [ "$product_operation" != all ]; then
   [ "$resume" = 0 ] && [ -n "$selected_product" ] && [ "$product_phase" = phase2 ] ||
     die 'split operations require one explicit Phase2 product'
@@ -344,6 +354,12 @@ else
 fi
 
 . "$schedule"
+product_wait_phase1_terminal() {
+  regular "$script_root/phase1-terminal-gate.py" || return 2
+  "$phase1_python" "$script_root/phase1-terminal-gate.py" \
+    "--receipt=$phase1_terminal" "--request-sha256=$phase1_request_sha" \
+    >"$output_root/phase1-terminal-binding.json"
+}
 if [ -n "$selected_product" ]; then
   # One outer managed task owns all three real callbacks. It produces no
   # six-product matrix PASS; callers aggregate the independently verified

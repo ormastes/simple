@@ -106,6 +106,9 @@ def main():
     parser.add_argument('--source-root', required=True, type=Path)
     parser.add_argument('--output-root', required=True, type=Path)
     parser.add_argument('--jobs', type=int, default=20)
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument('--prepare-only', action='store_true')
+    operation.add_argument('--resume-prepared', action='store_true')
     args = parser.parse_args()
     if args.jobs != 20:
         parser.error('this callback requires one admitted 20-job lane')
@@ -117,7 +120,10 @@ def main():
               'src/app/test_runner_new/test_runner_main.spl',
               'src/lib/nogc_sync_mut/test_runner/test_runner_files.spl']
     pins = {name: digest(source / name) for name in inputs}
-    output.mkdir(parents=True, exist_ok=False)
+    if not args.resume_prepared:
+        output.mkdir(parents=True, exist_ok=False)
+    elif not output.is_dir() or output.is_symlink():
+        parser.error('prepared physical output root unavailable')
     command = [str(seed), 'test', '--whole', '--parallel', '--max-workers=20',
                '--unstable', '--mode=interpreter', '--format=json']
     environment = os.environ.copy()
@@ -130,7 +136,18 @@ def main():
                    input_hashes=pins, command=command, jobs=20,
                    cache_policy='runner-owned compatible cache; no clean/force-rebuild',
                    admission='caller-owned; this callback creates no background owners')
-    (output / 'request.json').write_text(json.dumps(request, indent=2) + '\n', encoding='utf-8')
+    request_path = output / 'request.json'
+    if args.resume_prepared:
+        if request_path.is_symlink() or request_path.stat().st_size > 1048576:
+            parser.error('prepared request is not a bounded regular file')
+        if json.loads(request_path.read_text(encoding='utf-8')) != request:
+            parser.error('prepared request identity differs')
+        if any((output / name).exists() for name in ('stdout.log', 'stderr.log', 'result.json')):
+            parser.error('prepared request has already executed')
+    else:
+        request_path.write_text(json.dumps(request, indent=2) + '\n', encoding='utf-8')
+    if args.prepare_only:
+        return 0
     started = time.monotonic()
     with (output / 'stdout.log').open('wb') as stdout, (output / 'stderr.log').open('wb') as stderr:
         child = subprocess.run(command, cwd=source, env=environment, stdout=stdout, stderr=stderr)
@@ -150,7 +167,9 @@ def main():
                   stdout_sha256=digest(output / 'stdout.log'), stderr_sha256=digest(output / 'stderr.log'),
                   coverage_status='NOT_PROVEN: runner JSON has no discovered/excluded/aborted inventory totals',
                   phase='phase1', qualification='seed-only; not pure-Simple Phase2/product qualification')
-    (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
+    temporary = output / 'result.json.tmp'
+    temporary.write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
+    os.replace(temporary, output / 'result.json')
     return 0 if status == 'PASS' else 1 if status == 'FAIL' else 2
 
 
