@@ -25,6 +25,12 @@ static atomic_uint_fast64_t vector_iterations;
 extern void simple_vector_test_loaded(void);
 __attribute__((constructor)) static void observed_load(void) { simple_vector_test_loaded(); }
 #endif
+#ifdef SIMPLE_VECTOR_TEST_EVENTS
+/* Test-only response-completed apply receipt; transport errors return before
+ * reading the request and deliberately do not emit an event. */
+extern void simple_vector_test_apply_event_v1(uint32_t opcode,
+    uint32_t status, uint64_t executed_loops);
+#endif
 static int available(void) {
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 #ifdef SIMPLE_VECTOR_FORCE_NO_AVX512
@@ -121,6 +127,9 @@ EXPORT int64_t simple_vector_apply_v1(int64_t handle,int64_t req,int64_t res) {
     uint64_t a=simple_vector_rd64(q+8),n=simple_vector_rd64(q+16),
         b=simple_vector_rd64(q+24),bn=simple_vector_rd64(q+32),
         out=simple_vector_rd64(q+40),cap=simple_vector_rd64(q+48),written=0;
+#ifdef SIMPLE_VECTOR_TEST_EVENTS
+    uint64_t executed_loops=0;
+#endif
     int64_t found=-1;
     if(simple_vector_rd32(q)!=64) status=SIMPLE_VECTOR_INVALID_REQUEST;
     else if(op<1||op>4||!(SUPPORTED_CAPS&(UINT64_C(1)<<(op-1)))) status=SIMPLE_VECTOR_UNSUPPORTED_OPERATION;
@@ -135,7 +144,12 @@ EXPORT int64_t simple_vector_apply_v1(int64_t handle,int64_t req,int64_t res) {
         else {
             uint64_t ran=simple_http_kernel(op,(const uint8_t *)(uintptr_t)a,(size_t)n,(uint8_t)argument,&found);
             if(ran==UINT64_MAX) { status=SIMPLE_VECTOR_EXECUTION_FAILED; found=-1; }
-            else atomic_fetch_add_explicit(&vector_iterations,ran,memory_order_relaxed);
+            else {
+#ifdef SIMPLE_VECTOR_TEST_EVENTS
+                executed_loops=ran;
+#endif
+                atomic_fetch_add_explicit(&vector_iterations,ran,memory_order_relaxed);
+            }
         }
     }
 #endif
@@ -147,9 +161,18 @@ EXPORT int64_t simple_vector_apply_v1(int64_t handle,int64_t req,int64_t res) {
         uint64_t ran=simple_bitmap_kernel(op,(const uint32_t *)(uintptr_t)a,
             (const uint32_t *)(uintptr_t)b,(uint32_t *)(uintptr_t)out,(size_t)(n/4));
         if(ran==UINT64_MAX) status=SIMPLE_VECTOR_EXECUTION_FAILED;
-        else { written=n; atomic_fetch_add_explicit(&vector_iterations,ran,memory_order_relaxed); }
+        else {
+            written=n;
+#ifdef SIMPLE_VECTOR_TEST_EVENTS
+            executed_loops=ran;
+#endif
+            atomic_fetch_add_explicit(&vector_iterations,ran,memory_order_relaxed);
+        }
     }
     memset(r,0,24); simple_vector_wr32(r,24); simple_vector_wr32(r+4,status);
     simple_vector_wr64(r+8,written); simple_vector_wr64(r+16,(uint64_t)found);
+#ifdef SIMPLE_VECTOR_TEST_EVENTS
+    simple_vector_test_apply_event_v1(op,status,executed_loops);
+#endif
     return 0;
 }
