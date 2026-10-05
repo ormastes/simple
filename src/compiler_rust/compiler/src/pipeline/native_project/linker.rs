@@ -2,8 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use object::{Object, ObjectSymbol};
 use simple_common::target::{LinkerFlavor, Target, TargetOS};
 
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
@@ -36,6 +38,39 @@ fn hosted_elf_link_args(target: Target, exact_stage4: bool) -> &'static [&'stati
 
 fn is_linux_link_target(target: Target) -> bool {
     target.os == TargetOS::Linux
+}
+
+/// Read relocatable ELF globals without spawning `nm` from the large native
+/// compiler process. The object reader is already a compiler dependency. Keep
+/// archive and non-ELF inputs on their existing tool path.
+fn read_elf_relocatable_globals(obj: &Path) -> Result<Option<Vec<(String, bool)>>, String> {
+    if !cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        return Ok(None);
+    }
+    let mut file = match std::fs::File::open(obj) {
+        Ok(file) => file,
+        Err(_) => return Ok(None), // Retain the existing nm error policy.
+    };
+    let mut magic = [0u8; 4];
+    if file.read_exact(&mut magic).is_err() || magic != *b"\x7fELF" {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(obj).map_err(|e| format!("read ELF object {}: {e}", obj.display()))?;
+    let parsed = object::File::parse(bytes.as_slice())
+        .map_err(|e| format!("parse ELF object {}: {e}", obj.display()))?;
+    if parsed.kind() != object::ObjectKind::Relocatable {
+        return Ok(None);
+    }
+    let mut globals = Vec::new();
+    for symbol in parsed.symbols().filter(|symbol| symbol.is_global()) {
+        let name = symbol
+            .name()
+            .map_err(|e| format!("read ELF symbol in {}: {e}", obj.display()))?;
+        if !name.is_empty() {
+            globals.push((name.to_string(), symbol.is_undefined()));
+        }
+    }
+    Ok(Some(globals))
 }
 
 // CreateProcessW rejects command lines over 32,767 UTF-16 code units. The
@@ -731,6 +766,13 @@ impl NativeProjectBuilder {
     }
 
     fn read_global_symbols(obj: &Path) -> Result<Vec<String>, String> {
+        if let Some(globals) = read_elf_relocatable_globals(obj)? {
+            let mut names: Vec<String> = globals.into_iter().map(|(name, _)| name).collect();
+            // `nm -g` sorts by name by default; preserve the selection order
+            // used by freestanding main discovery as well as hosted init scans.
+            names.sort_unstable();
+            return Ok(names);
+        }
         let output = nm_command()?
             .arg("-g")
             .arg(external_tool_path(obj))
@@ -775,6 +817,12 @@ impl NativeProjectBuilder {
     }
 
     fn read_undefined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
+        if let Some(globals) = read_elf_relocatable_globals(obj)? {
+            return Ok(globals
+                .into_iter()
+                .filter_map(|(name, undefined)| undefined.then_some(name))
+                .collect());
+        }
         let output = nm_command()?
             .arg("-g")
             .arg("-p")
@@ -3342,6 +3390,61 @@ mod linker_tests {
 
     use crate::pipeline::native_project::tools::hosted_linux_cross_compiler;
     use simple_common::target::{Target, TargetArch, TargetOS};
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn in_process_elf_globals_match_nm_including_weak_undefined() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("symbols.c");
+        let object = dir.path().join("symbols.o");
+        std::fs::write(
+            &source,
+            "extern int required_missing(void);\n\
+             extern int weak_missing(void) __attribute__((weak));\n\
+             static int local_hidden(void) { return 3; }\n\
+             int __module_init_fixture(void) { return local_hidden() + required_missing() +\n\
+                 (weak_missing ? weak_missing() : 0); }\n",
+        )
+        .unwrap();
+        assert!(std::process::Command::new("cc")
+            .arg("-c")
+            .arg(&source)
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .unwrap()
+            .success());
+
+        let output = nm_command().unwrap().arg("-g").arg(&object).output().unwrap();
+        assert!(output.status.success());
+        let nm_names: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_whitespace().last().map(str::to_string))
+            .collect();
+        let actual = NativeProjectBuilder::read_global_symbols(&object).unwrap();
+        assert_eq!(actual, nm_names);
+        assert!(actual.contains(&"__module_init_fixture".to_string()));
+        assert!(!actual.contains(&"local_hidden".to_string()));
+
+        let undefined = NativeProjectBuilder::read_undefined_symbol_set(&object).unwrap();
+        assert!(undefined.contains("required_missing"));
+        assert!(undefined.contains("weak_missing"));
+        assert!(!undefined.contains("__module_init_fixture"));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[test]
+    fn in_process_elf_reader_rejects_corruption_and_skips_archives() {
+        let dir = tempfile::tempdir().unwrap();
+        let corrupt = dir.path().join("corrupt.o");
+        std::fs::write(&corrupt, b"\x7fELF\x02bad").unwrap();
+        assert!(NativeProjectBuilder::read_global_symbols(&corrupt).is_err());
+        assert!(NativeProjectBuilder::read_undefined_symbol_set(&corrupt).is_err());
+
+        let archive = dir.path().join("runtime.a");
+        std::fs::write(&archive, b"!<arch>\n").unwrap();
+        assert!(read_elf_relocatable_globals(&archive).unwrap().is_none());
+    }
 
     #[cfg(unix)]
     #[test]
