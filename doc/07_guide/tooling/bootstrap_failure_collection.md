@@ -45,6 +45,15 @@ permit. After that collection run ends, rebuild the full chain with accumulated
 fixes and required checks restored. A workaround is not proof that the underlying
 bug is fixed, and cannot turn a failed assertion or missing output into a pass.
 
+Every temporary workaround must identify its open underlying bug, background
+repair owner, original failing form and removal check. Keep the root-cause fix
+separate from the workaround. The later full rebuild must exercise the original
+form with the corrected producer before retiring the workaround, then run the
+affected regression cases without it. Do not leave a workaround permanently in
+place merely because the altered form passes, and do not remove it before the
+replacement is verified. Record explicitly which diagnostic policy exceptions
+are restored for qualification.
+
 For every performance fix, check memory behavior as well as elapsed time. For
 every memory fix, check performance as well as lifetime and peak usage. Run
 relevant correctness regressions in both cases. Record comparable inputs and
