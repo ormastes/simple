@@ -1,0 +1,41 @@
+#!/bin/sh
+# Regenerate the JPEG conformance fixtures from src_33x17.ppm.
+#
+# Encoders: libjpeg-turbo `cjpeg` (baseline/progressive, every chroma
+# subsampling, restart markers, grayscale) and macOS `sips` (Apple ImageIO
+# encoder). References: `djpeg -dct int` (libjpeg integer IDCT and default
+# "fancy" chroma upsampling — the tight reference) and `sips -s format bmp` (ImageIO
+# decode — the loose cross-decoder reference). Run on macOS with
+# libjpeg-turbo installed (Homebrew `jpeg-turbo`).
+set -eu
+cd "$(dirname "$0")"
+SRC=src_33x17.ppm
+
+# One directory per case (fanout limit: <=10 files per directory):
+#   <case>/input.jpg, <case>/djpeg_ref.ppm, <case>/sips_ref.bmp
+enc() {
+    name=$1; shift
+    mkdir -p "$name"
+    cjpeg "$@" -outfile "$name/input.jpg" "$SRC"
+}
+
+enc baseline_444 -quality 90 -sample 1x1
+enc baseline_422 -quality 90 -sample 2x1
+enc baseline_420 -quality 90 -sample 2x2
+enc baseline_440 -quality 90 -sample 1x2
+enc progressive_420 -quality 85 -sample 2x2 -progressive
+enc progressive_444 -quality 85 -sample 1x1 -progressive
+enc restart_420 -quality 80 -sample 2x2 -restart 1B
+enc restart_progressive -quality 80 -sample 2x1 -progressive -restart 1B
+enc gray -quality 90 -grayscale
+enc gray_progressive -quality 90 -grayscale -progressive
+enc optimized_420 -quality 75 -sample 2x2 -optimize
+enc rgb_444 -quality 90 -rgb
+mkdir -p sips_encoded
+sips -s format jpeg -s formatOptions 80 "$SRC" --out sips_encoded/input.jpg >/dev/null
+
+for f in */input.jpg; do
+    dir=${f%/input.jpg}
+    djpeg -dct int -rgb -outfile "$dir/djpeg_ref.ppm" "$f"
+    sips -s format bmp "$f" --out "$dir/sips_ref.bmp" >/dev/null
+done
