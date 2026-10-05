@@ -566,6 +566,21 @@ sub publish_session_admission {
         or die "cannot publish session admission";
 }
 
+# comm in Linux /proc/PID/stat can contain newlines. Read the complete record,
+# retaining a hard allocation bound and the caller's strict field validation.
+sub read_proc_stat_record {
+    my ($fh) = @_;
+    my $record = '';
+    while (1) {
+        my $count = read($fh, my $chunk, 65537 - length($record));
+        defined($count) or die "cannot read /proc stat record: $!";
+        last unless $count;
+        $record .= $chunk;
+        length($record) <= 65536 or die "oversized /proc stat record";
+    }
+    return $record;
+}
+
 sub snapshot {
     my ($metadata_only) = @_;
     $sample_started_at = time;
@@ -593,9 +608,9 @@ sub snapshot {
         opendir(my $proc, '/proc') or die "cannot open /proc";
         for my $pid (grep { /\A[0-9]+\z/ } readdir($proc)) {
             open(my $stat, '<', "/proc/$pid/stat") or next;  # exited since readdir
-            my $line = <$stat>;
+            my $line = read_proc_stat_record($stat);
             close($stat);
-            next unless defined($line);
+            next unless length($line);
             $line =~ /\A\Q$pid\E \(.*\) (\S) (\d+) (\d+) (\d+) (?:\S+ ){15}(\d+) \S+ (-?\d+) /s
                 or die "malformed /proc/$pid/stat";
             $all{$pid} = { parent => 0+$2, group => 0+$3, session => 0+$4,
