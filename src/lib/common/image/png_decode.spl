@@ -1,4 +1,4 @@
-# PNG Decode — bounded non-interlaced PNG (8-bit RGB/RGBA/gray+alpha; 1-8 bit palette and grayscale, tRNS) to ARGB [u32]
+# PNG Decode — bounded PNG (every color type and bit depth, Adam7 interlacing, tRNS) to ARGB [u32]
 
 use std.common.image.deflate_inflate.{deflate_inflate_zlib_bounded}
 use std.common.compress.gzip.{gzip_crc32}
@@ -45,9 +45,9 @@ fn decode_png_to_argb(data: [u8]) -> Result<PngImage, text>:
     decode_png_to_argb_bounded(data, PNG_MAX_PIXELS)
 
 fn decode_png_to_argb_bounded(data: [u8], max_pixels: i64) -> Result<PngImage, text>:
-    """Strictly decode a bounded non-interlaced PNG: 8-bit RGB/RGBA/gray+alpha,
-    1/2/4/8-bit palette and grayscale, with tRNS transparency. 16-bit samples
-    and Adam7 interlacing are rejected."""
+    """Strictly decode a bounded PNG: every color type / bit depth the spec
+    allows (16-bit samples keep their high byte), Adam7 interlacing, and tRNS
+    transparency."""
     if max_pixels <= 0:
         return Err("PNG pixel limit is invalid")
     val pixel_limit = if max_pixels < PNG_MAX_PIXELS: max_pixels else: PNG_MAX_PIXELS
@@ -66,6 +66,7 @@ fn decode_png_to_argb_bounded(data: [u8], max_pixels: i64) -> Result<PngImage, t
     var palette: [u32] = []
     var trns: [u8] = []
     var seen_trns = false
+    var interlaced = false
     var seen_ihdr = false
     var seen_plte = false
     var seen_idat = false
@@ -118,8 +119,9 @@ fn decode_png_to_argb_bounded(data: [u8], max_pixels: i64) -> Result<PngImage, t
             if not _png_format_supported(color_type, bit_depth):
                 return Err("PNG bit depth or color type is unsupported")
             if (data[chunk_data + 10] != 0 or data[chunk_data + 11] != 0 or
-                data[chunk_data + 12] != 0):
+                data[chunk_data + 12] > 1):
                 return Err("PNG compression, filter, or interlace method is unsupported")
+            interlaced = data[chunk_data + 12] == 1
             img_width = width64.to_i32()
             img_height = height64.to_i32()
             seen_ihdr = true
@@ -187,29 +189,29 @@ fn decode_png_to_argb_bounded(data: [u8], max_pixels: i64) -> Result<PngImage, t
 
     val channels: i64 = _png_channels(color_type)
     val depth = bit_depth.to_i64()
-    # Bytes per scanline (packed sub-byte samples round up) and the filter
-    # unit `bpp` (bytes per complete pixel, at least 1).
-    val stride64 = (img_width.to_i64() * channels * depth + 7) / 8
+    val w64 = img_width.to_i64()
+    val h64 = img_height.to_i64()
+    # Filter unit `bpp`: bytes per complete pixel, at least 1.
     val filter_bpp64 = if channels * depth >= 8: channels * depth / 8 else: 1
-    val expected64 = (stride64 + 1) * img_height.to_i64()
-    val inflate_result = deflate_inflate_zlib_bounded(idat_data, expected64)
-    var inflated: [u8] = []
-    match inflate_result:
-        Ok(bytes): inflated = bytes
-        Err(message): return Err("PNG IDAT: {message}")
-    if inflated.len() != expected64:
-        return Err("PNG scanline data length does not match IHDR")
 
-    val reconstructed = _png_unfilter(
-        inflated, img_height, filter_bpp64.to_i32(), stride64.to_i32())
-    if reconstructed.len() != stride64 * img_height.to_i64():
-        return Err("PNG scanline filter is invalid")
-
-    var pixels: [u32] = []
-    val total_pixels = img_width.to_i64() * img_height.to_i64()
-    if color_type == 2 or color_type == 6:
-        # 8-bit truecolor: the original path, unchanged except for the
-        # optional tRNS transparent color on RGB.
+    if not interlaced and depth == 8 and (color_type == 2 or color_type == 6):
+        # 8-bit truecolor, non-interlaced: the original fast path, unchanged
+        # except for the optional tRNS transparent color on RGB.
+        val stride64 = w64 * channels
+        val expected64 = (stride64 + 1) * h64
+        val inflate_result = deflate_inflate_zlib_bounded(idat_data, expected64)
+        var inflated: [u8] = []
+        match inflate_result:
+            Ok(bytes): inflated = bytes
+            Err(message): return Err("PNG IDAT: {message}")
+        if inflated.len() != expected64:
+            return Err("PNG scanline data length does not match IHDR")
+        val reconstructed = _png_unfilter(
+            inflated, img_height, filter_bpp64.to_i32(), stride64.to_i32())
+        if reconstructed.len() != stride64 * h64:
+            return Err("PNG scanline filter is invalid")
+        var pixels: [u32] = []
+        val total_pixels = w64 * h64
         var i: i64 = 0
         while i < total_pixels:
             val px_start = i * channels
@@ -225,37 +227,118 @@ fn decode_png_to_argb_bounded(data: [u8], max_pixels: i64) -> Result<PngImage, t
             i = i + 1
         return Ok(PngImage(pixels: pixels, width: img_width, height: img_height))
 
-    var row: i64 = 0
-    while row < img_height.to_i64():
-        val row_start = row * stride64
-        var col: i64 = 0
-        while col < img_width.to_i64():
-            if color_type == 4:
-                val gray = reconstructed[row_start + col * 2].to_u32()
-                val alpha = reconstructed[row_start + col * 2 + 1].to_u32()
-                pixels.push((alpha << 24) | (gray << 16) | (gray << 8) | gray)
-            else:
-                val sample = _png_packed_sample(reconstructed, row_start, col, depth)
-                if color_type == 3:
-                    if sample >= palette.len():
-                        return Err("PNG palette index out of range")
-                    var px = palette[sample]
-                    if sample < trns.len():
-                        px = (px & 0x00FFFFFFu32) | (trns[sample].to_u32() << 24)
-                    pixels.push(px)
-                else:
-                    # Grayscale: scale 1/2/4-bit samples to 0..255.
-                    val gray = (sample * 255 / ((1 << depth) - 1)).to_u32()
-                    var a: u32 = 255
-                    if seen_trns:
-                        val key = (trns[0].to_i64() << 8) | trns[1].to_i64()
-                        if key == sample:
-                            a = 0
-                    pixels.push((a << 24) | (gray << 16) | (gray << 8) | gray)
-            col = col + 1
-        row = row + 1
+    # General path: any supported depth (1/2/4/8/16) and Adam7 interlacing.
+    # A non-interlaced image is the single pass (0, 0, 1, 1).
+    val passes: [[i64]] = if interlaced:
+        [[0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4],
+         [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2]]
+    else:
+        [[0, 0, 1, 1]]
+    var expected64: i64 = 0
+    for ps in passes:
+        val pw = _png_pass_extent(w64, ps[0], ps[2])
+        val ph = _png_pass_extent(h64, ps[1], ps[3])
+        if pw > 0 and ph > 0:
+            expected64 = expected64 + ((pw * channels * depth + 7) / 8 + 1) * ph
+    val inflate_result = deflate_inflate_zlib_bounded(idat_data, expected64)
+    var inflated: [u8] = []
+    match inflate_result:
+        Ok(bytes): inflated = bytes
+        Err(message): return Err("PNG IDAT: {message}")
+    if inflated.len() != expected64:
+        return Err("PNG scanline data length does not match IHDR")
+
+    var pixels: [u32] = [0u32; w64 * h64]
+    var offset: i64 = 0
+    for ps in passes:
+        val pw = _png_pass_extent(w64, ps[0], ps[2])
+        val ph = _png_pass_extent(h64, ps[1], ps[3])
+        if pw == 0 or ph == 0:
+            continue
+        val stride64 = (pw * channels * depth + 7) / 8
+        val pass_len = (stride64 + 1) * ph
+        val reconstructed = _png_unfilter(
+            inflated.slice(offset, offset + pass_len), ph.to_i32(),
+            filter_bpp64.to_i32(), stride64.to_i32())
+        if reconstructed.len() != stride64 * ph:
+            return Err("PNG scanline filter is invalid")
+        offset = offset + pass_len
+        var row: i64 = 0
+        while row < ph:
+            val row_start = row * stride64
+            val y = ps[1] + row * ps[3]
+            var col: i64 = 0
+            while col < pw:
+                val x = ps[0] + col * ps[2]
+                match _png_pixel_argb(
+                    reconstructed, row_start, col, color_type, depth, channels,
+                    palette, trns, seen_trns
+                ):
+                    Ok(px): pixels[y * w64 + x] = px
+                    Err(message): return Err(message)
+                col = col + 1
+            row = row + 1
 
     Ok(PngImage(pixels: pixels, width: img_width, height: img_height))
+
+fn _png_pass_extent(full: i64, start: i64, step: i64) -> i64:
+    """Pixels of one Adam7 pass along an axis of length `full`."""
+    if full <= start:
+        return 0
+    (full - start + step - 1) / step
+
+fn _png_sample(row_bytes: [u8], row_start: i64, index: i64, depth: i64) -> i64:
+    """Sample number `index` (pixel * channels + channel) of a scanline at
+    `depth` bits: packed MSB first below 8 bits, big-endian at 16."""
+    if depth == 16:
+        val at = row_start + index * 2
+        return (row_bytes[at].to_i64() << 8) | row_bytes[at + 1].to_i64()
+    _png_packed_sample(row_bytes, row_start, index, depth)
+
+fn _png_sample_8bit(sample: i64, depth: i64) -> u32:
+    """Scale a sample of `depth` bits to 0..255 (16-bit keeps its high byte)."""
+    if depth == 16:
+        return (sample >> 8).to_u32()
+    if depth == 8:
+        return sample.to_u32()
+    (sample * 255 / ((1 << depth) - 1)).to_u32()
+
+fn _png_trns_key(trns: [u8], k: i64) -> i64:
+    (trns[k * 2].to_i64() << 8) | trns[k * 2 + 1].to_i64()
+
+fn _png_pixel_argb(
+    row_bytes: [u8], row_start: i64, col: i64, color_type: u8, depth: i64,
+    channels: i64, palette: [u32], trns: [u8], seen_trns: bool
+) -> Result<u32, text>:
+    val base = col * channels
+    if color_type == 3:
+        val index = _png_sample(row_bytes, row_start, base, depth)
+        if index >= palette.len():
+            return Err("PNG palette index out of range")
+        var px = palette[index]
+        if index < trns.len():
+            px = (px & 0x00FFFFFFu32) | (trns[index].to_u32() << 24)
+        return Ok(px)
+    if color_type == 0 or color_type == 4:
+        val raw = _png_sample(row_bytes, row_start, base, depth)
+        val gray = _png_sample_8bit(raw, depth)
+        var a: u32 = 255
+        if color_type == 4:
+            a = _png_sample_8bit(_png_sample(row_bytes, row_start, base + 1, depth), depth)
+        elif seen_trns and _png_trns_key(trns, 0) == raw:
+            a = 0
+        return Ok((a << 24) | (gray << 16) | (gray << 8) | gray)
+    val rr = _png_sample(row_bytes, row_start, base, depth)
+    val rg = _png_sample(row_bytes, row_start, base + 1, depth)
+    val rb = _png_sample(row_bytes, row_start, base + 2, depth)
+    var a: u32 = 255
+    if color_type == 6:
+        a = _png_sample_8bit(_png_sample(row_bytes, row_start, base + 3, depth), depth)
+    elif seen_trns and _png_trns_key(trns, 0) == rr and
+         _png_trns_key(trns, 1) == rg and _png_trns_key(trns, 2) == rb:
+        a = 0
+    Ok((a << 24) | (_png_sample_8bit(rr, depth) << 16) |
+        (_png_sample_8bit(rg, depth) << 8) | _png_sample_8bit(rb, depth))
 
 fn _png_channels(color_type: u8) -> i64:
     if color_type == 2: return 3
@@ -264,11 +347,14 @@ fn _png_channels(color_type: u8) -> i64:
     1
 
 fn _png_format_supported(color_type: u8, bit_depth: u8) -> bool:
-    """8-bit truecolor (2, 6) and gray+alpha (4); palette (3) and grayscale
-    (0) at 1/2/4/8 bits. 16-bit samples are still rejected."""
+    """Every PNG color type / bit depth combination the spec allows:
+    truecolor (2, 6) and gray+alpha (4) at 8/16 bits, grayscale (0) at
+    1/2/4/8/16, palette (3) at 1/2/4/8."""
     if color_type == 2 or color_type == 4 or color_type == 6:
-        return bit_depth == 8
-    if color_type == 0 or color_type == 3:
+        return bit_depth == 8 or bit_depth == 16
+    if color_type == 0:
+        return bit_depth == 1 or bit_depth == 2 or bit_depth == 4 or bit_depth == 8 or bit_depth == 16
+    if color_type == 3:
         return bit_depth == 1 or bit_depth == 2 or bit_depth == 4 or bit_depth == 8
     false
 

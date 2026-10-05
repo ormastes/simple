@@ -14,6 +14,11 @@ class GsubLookup:
     subtable_offsets: [u32]
     subtable_ends: [u32]
     mark_filtering_set: i64
+    # Feature mask of the activation that runs this lookup at the top level
+    # (0 = ungated: catalog entries and nested contextual lookups). A start
+    # position is admitted only when its record carries one of these bits, so
+    # Arabic isol/init/medi/fina lookups touch only glyphs in that form.
+    active_mask: u64 = 0u64
 
 class GsubSingleResult:
     glyph_id: u32
@@ -162,7 +167,7 @@ fn _layout_feature_variations_valid(blob: [u8], base: i64, limit: i64, offset: i
         val condition_offset = read_u32_be(blob, record) as i64
         if condition_offset != 0:
             val condition_set = variations + condition_offset
-            val condition_end = _nearest_sibling_end(variations, child_offsets, condition_offset, limit)
+            val condition_end = _subtable_reach_end(limit)
             if condition_set + 2 > condition_end: return false
             val condition_count = read_u16_be(blob, condition_set) as i64
             if condition_set + 2 + condition_count * 4 > condition_end: return false
@@ -176,13 +181,13 @@ fn _layout_feature_variations_valid(blob: [u8], base: i64, limit: i64, offset: i
             val condition_records_end = condition_set + 2 + condition_count * 4
             for condition in condition_offsets:
                 val condition_table = condition_set + condition
-                val condition_table_end = _nearest_sibling_end(condition_set, condition_offsets, condition, condition_end)
+                val condition_table_end = _subtable_reach_end(condition_end)
                 if condition_table < condition_records_end or condition_table + 8 > condition_table_end or read_u16_be(blob, condition_table) != 1u32:
                     return false
         val substitution_offset = read_u32_be(blob, record + 4) as i64
         if substitution_offset != 0:
             val substitution = variations + substitution_offset
-            val substitution_end = _nearest_sibling_end(variations, child_offsets, substitution_offset, limit)
+            val substitution_end = _subtable_reach_end(limit)
             if (substitution + 6 > substitution_end or read_u16_be(blob, substitution) != 1u32 or
                 read_u16_be(blob, substitution + 2) != 0u32): return false
             val substitution_count = read_u16_be(blob, substitution + 4) as i64
@@ -203,7 +208,7 @@ fn _layout_feature_variations_valid(blob: [u8], base: i64, limit: i64, offset: i
                 substitution_index = substitution_index + 1
             for alternate in alternate_offsets:
                 val alternate_table = substitution + alternate
-                val alternate_end = _nearest_sibling_end(substitution, alternate_offsets, alternate, substitution_end)
+                val alternate_end = _subtable_reach_end(substitution_end)
                 if alternate_table + 4 > alternate_end: return false
                 val params_offset = read_u16_be(blob, alternate_table) as i64
                 val alternate_lookup_count = read_u16_be(blob, alternate_table + 2) as i64
@@ -230,12 +235,20 @@ fn _layout_header_size(blob: [u8], base: i64, limit: i64) -> i64:
         return 14
     -1
 
-fn _nearest_sibling_end(parent: i64, offsets: [i64], current: i64, parent_end: i64) -> i64:
-    var result = parent_end
-    for offset in offsets:
-        if offset > current and parent + offset < result:
-            result = parent + offset
-    result
+# Upper bound for reading a subtable reached through an offset.
+#
+# This used to be the "nearest sibling end": the next sibling's offset, on the
+# assumption that a list's subtables lie between it and the next list. The
+# OpenType spec makes no such promise -- offsets may point anywhere after
+# their parent, in any order, and subtables may be SHARED (two ScriptRecords
+# naming one Script table is common: DFLT and dev2 in the bundled Arabic face).
+# That assumption rejected valid fonts (the Arabic face's Script tables sit
+# past the LookupList), so every Arabic run was skipped. The bound is now the
+# parent's own bound, which is ultimately the table's end, and every read
+# stays inside the table. Every structure parsed here has a fixed depth (no
+# recursion, so no cycles), and every loop is bounded by a u16 count.
+fn _subtable_reach_end(parent_end: i64) -> i64:
+    parent_end
 
 fn read_lookup_list(blob: [u8], lookup_list_abs: i64) -> [u32]:
     if lookup_list_abs + 1 >= blob.len() as i64:
@@ -281,7 +294,7 @@ fn parse_gsub_skeleton(font: OtFont) -> [GsubLookup]:
     if variations_offset != 0:
         if top_offsets.contains(variations_offset): return []
         top_offsets.push(variations_offset)
-    val lookup_list_end = _nearest_sibling_end(base, top_offsets, lookup_list_off, end)
+    val lookup_list_end = _subtable_reach_end(end)
     if lookup_list_abs + 2 > lookup_list_end: return []
     val count = read_u16_be(blob, lookup_list_abs) as i64
     if lookup_list_abs + 2 + count * 2 > lookup_list_end:
@@ -291,7 +304,7 @@ fn parse_gsub_skeleton(font: OtFont) -> [GsubLookup]:
     var i: i64 = 0
     while i < count:
         val off = read_u16_be(blob, lookup_list_abs + 2 + i * 2) as i64
-        if off == 0 or lookup_offsets.contains(off):
+        if off == 0:
             return []
         lookup_offsets.push(off)
         i = i + 1
@@ -300,7 +313,7 @@ fn parse_gsub_skeleton(font: OtFont) -> [GsubLookup]:
     while i < count:
         val off = lookup_offsets[i]
         val lkp_abs = lookup_list_abs + off
-        val lookup_end = _nearest_sibling_end(lookup_list_abs, lookup_offsets, off, lookup_list_end)
+        val lookup_end = _subtable_reach_end(lookup_list_end)
         if lkp_abs < lookup_list_metadata_end or lkp_abs + 6 > lookup_end:
             return []
         val ltype = read_u16_be(blob, lkp_abs)
@@ -315,14 +328,14 @@ fn parse_gsub_skeleton(font: OtFont) -> [GsubLookup]:
         var j: i64 = 0
         while j < sub_count:
             val soff = read_u16_be(blob, lkp_abs + 6 + j * 2) as i64
-            if soff == 0 or subtable_offsets.contains(soff):
+            if soff == 0:
                 return []
             subtable_offsets.push(soff)
             j = j + 1
         var subtable_ends: [u32] = []
         for soff in subtable_offsets:
             val sub_abs = lkp_abs + soff
-            val sub_end = _nearest_sibling_end(lkp_abs, subtable_offsets, soff, lookup_end)
+            val sub_end = _subtable_reach_end(lookup_end)
             if sub_abs < lookup_metadata_end or sub_abs + 2 > sub_end: return []
             subs.push(sub_abs as u32)
             subtable_ends.push(sub_end as u32)
@@ -371,7 +384,7 @@ fn parse_gpos_skeleton(font: OtFont) -> [GposLookup]:
     if variations_offset != 0:
         if top_offsets.contains(variations_offset): return []
         top_offsets.push(variations_offset)
-    val lookup_list_end = _nearest_sibling_end(base, top_offsets, lookup_list_off, end)
+    val lookup_list_end = _subtable_reach_end(end)
     if lookup_list_abs + 2 > lookup_list_end: return []
     val count = read_u16_be(blob, lookup_list_abs) as i64
     if lookup_list_abs + 2 + count * 2 > lookup_list_end: return []
@@ -380,7 +393,7 @@ fn parse_gpos_skeleton(font: OtFont) -> [GposLookup]:
     var i: i64 = 0
     while i < count:
         val off = read_u16_be(blob, lookup_list_abs + 2 + i * 2) as i64
-        if off == 0 or lookup_offsets.contains(off): return []
+        if off == 0: return []
         lookup_offsets.push(off)
         i = i + 1
     var results: [GposLookup] = []
@@ -388,7 +401,7 @@ fn parse_gpos_skeleton(font: OtFont) -> [GposLookup]:
     while i < count:
         val off = lookup_offsets[i]
         val lkp_abs = lookup_list_abs + off
-        val lookup_end = _nearest_sibling_end(lookup_list_abs, lookup_offsets, off, lookup_list_end)
+        val lookup_end = _subtable_reach_end(lookup_list_end)
         if lkp_abs < list_metadata_end or lkp_abs + 6 > lookup_end: return []
         val ltype = read_u16_be(blob, lkp_abs)
         val flag = read_u16_be(blob, lkp_abs + 2)
@@ -401,13 +414,13 @@ fn parse_gpos_skeleton(font: OtFont) -> [GposLookup]:
         var j: i64 = 0
         while j < sub_count:
             val soff = read_u16_be(blob, lkp_abs + 6 + j * 2) as i64
-            if soff == 0 or subtable_offsets.contains(soff): return []
+            if soff == 0: return []
             subtable_offsets.push(soff)
             j = j + 1
         var subtable_ends: [u32] = []
         for soff in subtable_offsets:
             val sub_abs = lkp_abs + soff
-            val sub_end = _nearest_sibling_end(lkp_abs, subtable_offsets, soff, lookup_end)
+            val sub_end = _subtable_reach_end(lookup_end)
             if sub_abs < lookup_metadata_end or sub_abs + 2 > sub_end: return []
             subs.push(sub_abs as u32)
             subtable_ends.push(sub_end as u32)
@@ -445,9 +458,9 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
     if variations_offset != 0:
         if top_offsets.contains(variations_offset): return invalid
         top_offsets.push(variations_offset)
-    val script_limit = _nearest_sibling_end(base, top_offsets, script_offset, limit)
-    val feature_limit = _nearest_sibling_end(base, top_offsets, feature_offset, limit)
-    val lookup_limit = _nearest_sibling_end(base, top_offsets, lookup_offset, limit)
+    val script_limit = _subtable_reach_end(limit)
+    val feature_limit = _subtable_reach_end(limit)
+    val lookup_limit = _subtable_reach_end(limit)
     if script_list + 2 > script_limit or feature_list + 2 > feature_limit or lookup_list + 2 > lookup_limit: return invalid
     val feature_count = read_u16_be(blob, feature_list) as i64
     val feature_records_end = feature_list + 2 + feature_count * 6
@@ -456,7 +469,7 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
     val lookup_records_end = lookup_list + 2 + lookup_count * 2
     if lookup_records_end > lookup_limit: return invalid
     if variations_offset != 0:
-        val variations_limit = _nearest_sibling_end(base, top_offsets, variations_offset, limit)
+        val variations_limit = _subtable_reach_end(limit)
         if not _layout_feature_variations_valid(blob, base, variations_limit, variations_offset, feature_count, lookup_count):
             return invalid
     val script_count = read_u16_be(blob, script_list) as i64
@@ -471,7 +484,7 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
         val record = script_list + 2 + index * 6
         val tag = read_u32_be(blob, record)
         val offset = read_u16_be(blob, record + 4) as i64
-        if (offset == 0 or tag as i64 <= previous_tag or script_offsets.contains(offset) or
+        if (offset == 0 or tag as i64 <= previous_tag or
             script_list + offset < script_records_end or script_list + offset + 4 > script_limit): return invalid
         previous_tag = tag as i64
         script_offsets.push(offset)
@@ -481,7 +494,7 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
     if script_offset_selected < 0: script_offset_selected = default_script_offset
     if script_offset_selected < 0: return LayoutLookupPlan(valid: true, lookup_indices: [], activations: [], features: [])
     val script = script_list + script_offset_selected
-    val script_end = _nearest_sibling_end(script_list, script_offsets, script_offset_selected, script_limit)
+    val script_end = _subtable_reach_end(script_limit)
     val default_offset = read_u16_be(blob, script) as i64
     val language_count = read_u16_be(blob, script + 2) as i64
     val language_records_end = script + 4 + language_count * 6
@@ -497,7 +510,7 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
         val record = script + 4 + index * 6
         val tag = read_u32_be(blob, record)
         val offset = read_u16_be(blob, record + 4) as i64
-        if (offset == 0 or tag as i64 <= previous_tag or language_offsets.contains(offset) or
+        if (offset == 0 or tag as i64 <= previous_tag or
             script + offset < language_records_end or script + offset + 6 > script_end): return invalid
         previous_tag = tag as i64
         language_offsets.push(offset)
@@ -506,7 +519,7 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
     if language_offset_selected < 0: language_offset_selected = default_offset
     if language_offset_selected <= 0: return LayoutLookupPlan(valid: true, lookup_indices: [], activations: [], features: [])
     val language_system = script + language_offset_selected
-    val language_end = _nearest_sibling_end(script, language_offsets, language_offset_selected, script_end)
+    val language_end = _subtable_reach_end(script_end)
     if language_system + 6 > language_end or read_u16_be(blob, language_system) != 0u32: return invalid
     val required = read_u16_be(blob, language_system + 2)
     val listed_count = read_u16_be(blob, language_system + 4) as i64
@@ -519,7 +532,7 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
         val record = feature_list + 2 + index * 6
         val tag = read_u32_be(blob, record)
         val offset = read_u16_be(blob, record + 4) as i64
-        if (offset == 0 or tag as i64 < previous_tag or feature_offsets.contains(offset) or
+        if (offset == 0 or tag as i64 < previous_tag or
             feature_list + offset < feature_records_end or feature_list + offset + 4 > feature_limit): return invalid
         previous_tag = tag as i64
         feature_tags.push(tag)
@@ -572,7 +585,7 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
         val record = feature_list + 2 + feature_index as i64 * 6
         val offset = read_u16_be(blob, record + 4) as i64
         val feature = feature_list + offset
-        val feature_end = _nearest_sibling_end(feature_list, feature_offsets, offset, feature_limit)
+        val feature_end = _subtable_reach_end(feature_limit)
         val params_offset = read_u16_be(blob, feature) as i64
         val lookup_count = read_u16_be(blob, feature + 2) as i64
         val feature_lookup_end = feature + 4 + lookup_count * 2
@@ -596,7 +609,7 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
     index = 0
     while index < lookup_count:
         val offset = read_u16_be(blob, lookup_list + 2 + index * 2) as i64
-        if offset == 0 or lookup_offsets.contains(offset) or lookup_list + offset < lookup_records_end:
+        if offset == 0 or lookup_list + offset < lookup_records_end:
             return invalid
         lookup_offsets.push(offset)
         index = index + 1
@@ -604,7 +617,7 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
         if selected < 0 or selected >= lookup_count: return invalid
         val offset = lookup_offsets[selected]
         val lookup = lookup_list + offset
-        val lookup_end = _nearest_sibling_end(lookup_list, lookup_offsets, offset, lookup_limit)
+        val lookup_end = _subtable_reach_end(lookup_limit)
         if lookup + 6 > lookup_end: return invalid
         val flag = read_u16_be(blob, lookup + 2)
         val subtable_count = read_u16_be(blob, lookup + 4) as i64
@@ -614,12 +627,12 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
         index = 0
         while index < subtable_count:
             val subtable_offset = read_u16_be(blob, lookup + 6 + index * 2) as i64
-            if subtable_offset == 0 or subtable_offsets.contains(subtable_offset): return invalid
+            if subtable_offset == 0: return invalid
             subtable_offsets.push(subtable_offset)
             index = index + 1
         for subtable_offset in subtable_offsets:
             val subtable = lookup + subtable_offset
-            val subtable_end = _nearest_sibling_end(lookup, subtable_offsets, subtable_offset, lookup_end)
+            val subtable_end = _subtable_reach_end(lookup_end)
             if subtable < lookup + lookup_bytes or subtable + 2 > subtable_end: return invalid
     # OpenType executes the active lookup union in ascending LookupList order.
     var ordered: [i64] = []
@@ -668,7 +681,7 @@ enum GlyphClass:
 
 fn parse_gdef_glyph_class(font: OtFont, glyph_id: u32) -> GlyphClass:
     # Tag 'GDEF' = 0x47444546
-    val gdef_tag: u32 = 1195656006
+    val gdef_tag: u32 = 1195656518
     val maybe_tbl = find_table(font, gdef_tag)
     val tbl = match maybe_tbl:
         Some(value):

@@ -1,0 +1,67 @@
+use std.spec
+use std.spec.step
+use examples.ui.rendering_web_core.{rendering_web_frame_verdict}
+
+"""
+## Purpose and audience
+
+The rendering_web showcases must not print `status=pass` for a frame that
+shows no laid-out page. The old gate only checked `checksum != 0`, so two
+broken 4K frames passed:
+- a near-blank frame with a single 190x94 box;
+- a frame whose section cards shrank to 392-px columns.
+
+Both captures are now rejected, and the current 4K and 960x640 frames pass.
+Audience: rendering showcase maintainers.
+
+Bug: doc/08_tracking/bug/rendering_web_showcase_4k_layout_collapses_and_rss_12gb_2026-10-05.md
+"""
+
+val BG: u32 = 0xFFEEF2FFu32
+val CARD: u32 = 0xFFFFFFFFu32
+
+fn _frame(w: i64, h: i64) -> [u32]:
+    var px: [u32] = []
+    var i: i64 = 0
+    while i < w * h:
+        px.push(BG)
+        i = i + 1
+    px
+
+fn _fill(px: [u32], w: i64, x: i64, y: i64, rw: i64, rh: i64, color: u32) -> [u32]:
+    var out = px
+    var yy = y
+    while yy < y + rh:
+        var xx = x
+        while xx < x + rw:
+            out[yy * w + xx] = color
+            xx = xx + 1
+        yy = yy + 1
+    out
+
+describe "rendering_web_frame_verdict":
+    # @req REQ-SSPEC-LOCAL-001
+    it "rejects a blank frame":
+        step("All background")
+        expect(rendering_web_frame_verdict(_frame(400, 300), 400, 300)).to_equal("blank-frame")
+
+    it "rejects a near-blank frame with one small box":
+        step("One box far smaller than the content column")
+        val px = _fill(_frame(1200, 800), 1200, 0, 0, 60, 30, CARD)
+        expect(rendering_web_frame_verdict(px, 1200, 800)).to_start_with("collapsed-layout content=")
+
+    it "rejects narrow cards under a full-width header":
+        step("Header spans the viewport, cards are narrow columns")
+        var px = _fill(_frame(1200, 800), 1200, 0, 0, 1200, 40, 0xFF173B7Au32)
+        px = _fill(px, 1200, 10, 60, 300, 700, CARD)
+        expect(rendering_web_frame_verdict(px, 1200, 800)).to_start_with("collapsed-layout card-width=")
+
+    it "accepts a laid-out page":
+        step("Header plus a wide card column")
+        var px = _fill(_frame(1200, 800), 1200, 0, 0, 1200, 40, 0xFF173B7Au32)
+        px = _fill(px, 1200, 20, 60, 1000, 700, CARD)
+        expect(rendering_web_frame_verdict(px, 1200, 800)).to_equal("")
+
+    it "rejects a size mismatch":
+        step("Pixel count does not match w*h")
+        expect(rendering_web_frame_verdict(_frame(10, 10), 20, 10)).to_equal("frame-size-mismatch")

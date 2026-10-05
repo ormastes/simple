@@ -96,3 +96,66 @@ pub fn rendering_web_core_page() -> text:
     parts.push("</body>")
     parts.push("</html>")
     parts.join("\n")
+
+# The page body is `main { width: min(1100px, 100%) }`, so a correctly laid
+# out frame has content spanning most of min(w, 1100) across and at least half
+# of min(h, 1000) down. A checksum != 0 test alone passed a near-blank 4K frame
+# (one ~570x270 box) as `status=pass`.
+# doc/08_tracking/bug/rendering_web_showcase_4k_layout_collapses_and_rss_12gb_2026-10-05.md
+val RENDERING_WEB_CONTENT_W: i64 = 1100
+val RENDERING_WEB_CONTENT_H: i64 = 1000
+
+pub fn rendering_web_frame_verdict(pixels: [u32], w: i64, h: i64) -> text:
+    """"" when the frame shows a laid-out page, else the failure reason."""
+    if w <= 0 or h <= 0 or pixels.len() != w * h:
+        return "frame-size-mismatch"
+    # The page background is what the bottom-right corner shows.
+    val bg = pixels[w * h - 1]
+    var x0 = w
+    var y0 = h
+    var x1: i64 = -1
+    var y1: i64 = -1
+    var y: i64 = 0
+    while y < h:
+        val row = y * w
+        var x: i64 = 0
+        while x < w:
+            if pixels[row + x] != bg:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+                if y < y0: y0 = y
+                if y > y1: y1 = y
+            x = x + 1
+        y = y + 1
+    if x1 < 0:
+        return "blank-frame"
+    val span_w = x1 - x0 + 1
+    val span_h = y1 - y0 + 1
+    val want_w = (if w < RENDERING_WEB_CONTENT_W: w else: RENDERING_WEB_CONTENT_W) * 8 / 10
+    val want_h = (if h < RENDERING_WEB_CONTENT_H: h else: RENDERING_WEB_CONTENT_H) / 2
+    if span_w < want_w or span_h < want_h:
+        return "collapsed-layout content={span_w}x{span_h} want>={want_w}x{want_h}"
+    # The white section cards span the content column. A frame whose header
+    # still spans the viewport but whose cards shrank to narrow columns
+    # (observed on rendering_web_extended at 4K) fails here.
+    val card_run = _rendering_web_longest_run(pixels, w, h, 0xFFFFFFFFu32)
+    if card_run < want_w * 3 / 4:
+        return "collapsed-layout card-width={card_run} want>={want_w * 3 / 4}"
+    ""
+
+fn _rendering_web_longest_run(pixels: [u32], w: i64, h: i64, color: u32) -> i64:
+    var best: i64 = 0
+    var y: i64 = 0
+    while y < h:
+        val row = y * w
+        var run: i64 = 0
+        var x: i64 = 0
+        while x < w:
+            if pixels[row + x] == color:
+                run = run + 1
+                if run > best: best = run
+            else:
+                run = 0
+            x = x + 1
+        y = y + 4
+    best

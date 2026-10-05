@@ -4,7 +4,8 @@
 - **Area:** `src/compiler_rust/compiler/src/codegen/instr/pointers.rs`
   (`compile_pointer_ref`) × `src/lib/nogc_sync_mut/sffi/dynamic.spl`
   (`_sffi_dlopen_checked`) × `src/lib/nogc_sync_mut/ui/gui_renderer.spl`
-- **Status:** main_gui unblocked 2026-10-05; the seed root cause is OPEN
+- **Status:** main_gui unblocked 2026-10-05; seed root cause FIXED 2026-10-05
+  (see "Seed fix")
 
 ## Symptom
 
@@ -44,12 +45,25 @@ real error.
   - The incomplete-ABI message names the missing `rt_winit_*` symbols.
 - `main_gui`: the "no window" line points to the `GuiRenderer:` cause line instead of guessing.
 
-## Still open (seed)
+## Seed fix (2026-10-05)
 
-`compile_pointer_ref` must take the address of a `&mut local` passed to an
-extern pointer parameter. That means spilling the local to a stack slot,
-passing the slot address, and reloading the local after the call. Until that
-lands, each checked out-param API needs a direct-return fallback.
+- MIR (`mark_extern_scalar_out_slots`, `lowering_expr_call.rs`): for a call
+  to an `extern fn`, a `&mut <scalar local>` argument's `PointerRef` is marked
+  `RawMut`. Before this, MIR never emitted RawMut. A `&mut [u8]` argument is a
+  collection handle and stays by-value.
+- Codegen (`pointers.rs`): a RawMut `PointerRef` of a loaded local stores the
+  current value in an 8-byte stack slot and passes the slot's address.
+  `writeback_extern_out_slots` runs after the call; it loads the slot back
+  into the local's Variable.
+- Tests: `src/compiler_rust/compiler/tests/extern_out_slot_jit.rs` (2/2).
+  - The repro `spl_wffi_try_call_i64_out(0, [], 0, &mut probe)` must zero
+    `probe` and answer status 2.
+  - The generalization covers two out locals written inside a loop and branch.
+  - With the MIR marking disabled, the repro test fails: its process dies
+    instead of reporting status 2.
+
+The Simple-side direct-return fallback in `_sffi_dlopen_checked` stays as a
+belt-and-braces path for the interpreter's historical writeback loss.
 
 ## Evidence
 

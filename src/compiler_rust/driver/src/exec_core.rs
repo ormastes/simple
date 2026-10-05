@@ -1188,6 +1188,10 @@ impl ExecCore {
             .extern_fn_names
             .iter()
             .filter(|name| self.symbol_provider.get_symbol(name.as_str()).is_none())
+            // Byte/word accessors are lowered inline by codegen; they never
+            // need a runtime symbol, so they must not be spliced through the
+            // interpreter bridge.
+            .filter(|name| !simple_compiler::codegen::instr::calls::is_inline_lowered_byte_accessor(name.as_str()))
             .cloned()
             .collect();
         if std::env::var("SIMPLE_DEBUG_EXTERNS").is_ok() {

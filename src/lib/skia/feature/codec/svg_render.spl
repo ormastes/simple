@@ -1,0 +1,1223 @@
+# SVG Render — bounded static-SVG subset rasterized to ARGB [u32].
+#
+# Input is untrusted network bytes. Nothing is ever fetched: <image>, <use>,
+# <style>, <script>, <foreignObject>, <text>, gradients/patterns (`url(#..)`
+# paints render as none), filters, clip paths and masks are ignored. The
+# document size, element count, nesting depth and flattened-point count are
+# capped before or while rendering (SVG_MAX_*), and the raster size is
+# derived from the document then scaled DOWN to fit the caller's pixel
+# budget and SVG_MAX_DIMENSION (aspect ratio kept), so a huge declared size
+# never allocates a huge canvas.
+#
+# Supported: <svg> (width/height in px/pt/pc/in/cm/mm, viewBox,
+# preserveAspectRatio), <g>/<a>, <path> (every command incl. elliptical arcs,
+# compact number syntax), <rect> (rx/ry), <circle>, <ellipse>, <line>,
+# <polyline>, <polygon>; transform (matrix/translate/scale/rotate/skewX/
+# skewY); fill, fill-rule, fill-opacity, stroke, stroke-width,
+# stroke-opacity, stroke-linecap, stroke-linejoin, stroke-miterlimit,
+# opacity, color/currentColor, display:none, visibility; presentation
+# attributes and `style="..."` declarations; #rgb/#rgba/#rrggbb/#rrggbbaa,
+# rgb()/rgba() and the 148 CSS named colors.
+#
+# Raster size rule: width/height attributes (percentages fall back to the
+# viewBox size), else the viewBox size, else 300x150; then scaled to fit the
+# pixel budget. Group `opacity` is approximated by multiplying the alpha of
+# each descendant (exact for non-overlapping children).
+#
+# Rendering runs on the skia CPU backend: shapes are flattened and
+# transformed to device space here, filled with
+# `raster_prims.fill_path_aa` (nonzero / even-odd, anti-aliased), and strokes
+# are outlined by `stroke.expand.expand_stroke` (caps, joins, miter limit) in
+# user space before transforming, so non-uniform transforms scale the stroke
+# correctly.
+
+use std.common.math.special.{sqrt_f64, sin_f64, cos_f64, atan2_f64}
+use std.skia.backend.cpu.raster_prims.{Bitmap, fill_path_aa}
+use std.skia.entity.path.{SkPath, SkPathVerb, SkPathSegment}
+use std.skia.entity.geometry.{SkPoint}
+use std.skia.entity.color.{SkColor4f}
+use std.skia.entity.enums.{SkPathFillType}
+use std.skia.feature.stroke.expand.{expand_stroke, stroke_params_new, StrokeCap, StrokeJoin}
+
+struct SvgImage:
+    """Rasterized SVG as straight-alpha ARGB pixels (row-major)."""
+    pixels: [u32]
+    width: i32
+    height: i32
+
+val SVG_MAX_BYTES: i64 = 1048576
+val SVG_MAX_DIMENSION: i64 = 4096
+val SVG_MAX_ELEMENTS: i64 = 20000
+val SVG_MAX_DEPTH: i64 = 64
+val SVG_MAX_POINTS: i64 = 400000
+# Upper bound on sum(edges x covered rows) over every fill in a document:
+# the scanline filler visits each edge once per row of the shape's bounds.
+val SVG_MAX_SCAN_WORK: i64 = 40000000
+
+val _PI: f64 = 3.141592653589793
+
+fn svg_signature_valid(data: [u8]) -> bool:
+    """An XML document whose first element (within 4 KiB) is <svg>."""
+    var i: i64 = 0
+    val n = data.len()
+    if n >= 3 and data[0] == 239u8 and data[1] == 187u8 and data[2] == 191u8:
+        i = 3
+    val limit = if n < 4096: n else: 4096
+    while i < limit:
+        val c = data[i].to_i64()
+        if c == 60:
+            if i + 4 <= n and data[i + 1].to_i64() == 115 and data[i + 2].to_i64() == 118 and data[i + 3].to_i64() == 103:
+                return true
+            if i + 1 < n and (data[i + 1].to_i64() == 63 or data[i + 1].to_i64() == 33):
+                # <?xml ...?>, <!-- -->, <!DOCTYPE ...>: skip to the next '>'.
+                while i < limit and data[i].to_i64() != 62:
+                    i = i + 1
+            else:
+                return false
+        elif not _svg_is_space(c):
+            return false
+        i = i + 1
+    false
+
+fn decode_svg_to_argb_bounded(data: [u8], max_pixels: i64) -> Result<SvgImage, text>:
+    """Parse and rasterize an SVG document within `max_pixels`."""
+    if max_pixels <= 0:
+        return Err("SVG pixel limit is invalid")
+    if data.len() > SVG_MAX_BYTES:
+        return Err("SVG document exceeds the size limit")
+    if not svg_signature_valid(data):
+        return Err("Invalid SVG signature")
+    var r = _svg_renderer_new(data, max_pixels)
+    val err = r.run()
+    if err != "":
+        return Err(err)
+    Ok(SvgImage(pixels: r.output(), width: r.width.to_i32(), height: r.height.to_i32()))
+
+# ----------------------------------------------------------------------
+# Small helpers
+# ----------------------------------------------------------------------
+
+fn _svg_is_space(c: i64) -> bool:
+    c == 32 or c == 9 or c == 10 or c == 13
+
+fn _svg_floor(v: f64) -> i64:
+    val t = v.to_i64()
+    if t.to_f64() > v: t - 1 else: t
+
+fn _svg_clamp01(v: f64) -> f64:
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    v
+
+fn _svg_abs(v: f64) -> f64:
+    if v < 0.0: 0.0 - v else: v
+
+fn _svg_text(data: [u8], start: i64, end: i64) -> text:
+    var parts: [text] = []
+    var i = start
+    while i < end:
+        parts.push(_svg_char(data[i].to_i64()))
+        i = i + 1
+    parts.join("")
+
+fn _svg_char(c: i64) -> text:
+    val table = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    if c >= 32 and c <= 126:
+        return table.slice(c - 32, c - 31)
+    " "
+
+fn _svg_lower(s: text) -> text:
+    s.lower()
+
+# Number scanner over a text value: returns (value, next index, ok).
+fn _svg_scan_number(s: text, start: i64) -> (f64, i64, bool):
+    val n = s.len()
+    var i = start
+    while i < n and (s.slice(i, i + 1) == " " or s.slice(i, i + 1) == "," or s.slice(i, i + 1) == "\t" or s.slice(i, i + 1) == "\n" or s.slice(i, i + 1) == "\r"):
+        i = i + 1
+    var neg = false
+    if i < n and (s.slice(i, i + 1) == "-" or s.slice(i, i + 1) == "+"):
+        neg = s.slice(i, i + 1) == "-"
+        i = i + 1
+    var mant: f64 = 0.0
+    var digits: i64 = 0
+    while i < n and _svg_digit(s, i) >= 0:
+        mant = mant * 10.0 + _svg_digit(s, i).to_f64()
+        digits = digits + 1
+        i = i + 1
+    if i < n and s.slice(i, i + 1) == ".":
+        i = i + 1
+        var scale: f64 = 0.1
+        while i < n and _svg_digit(s, i) >= 0:
+            mant = mant + _svg_digit(s, i).to_f64() * scale
+            scale = scale * 0.1
+            digits = digits + 1
+            i = i + 1
+    if digits == 0:
+        return (0.0, start, false)
+    if i < n and (s.slice(i, i + 1) == "e" or s.slice(i, i + 1) == "E"):
+        var j = i + 1
+        var eneg = false
+        if j < n and (s.slice(j, j + 1) == "-" or s.slice(j, j + 1) == "+"):
+            eneg = s.slice(j, j + 1) == "-"
+            j = j + 1
+        if j < n and _svg_digit(s, j) >= 0:
+            var e: i64 = 0
+            while j < n and _svg_digit(s, j) >= 0:
+                if e < 400:
+                    e = e * 10 + _svg_digit(s, j)
+                j = j + 1
+            var k: i64 = 0
+            while k < e:
+                mant = if eneg: mant / 10.0 else: mant * 10.0
+                k = k + 1
+            i = j
+    (if neg: 0.0 - mant else: mant, i, true)
+
+fn _svg_digit(s: text, i: i64) -> i64:
+    val c = s.slice(i, i + 1)
+    val digits = "0123456789"
+    var d: i64 = 0
+    while d < 10:
+        if digits.slice(d, d + 1) == c:
+            return d
+        d = d + 1
+    -1
+
+fn _svg_numbers(s: text) -> [f64]:
+    """Every number in a list value ("1,2 3.5-4e1")."""
+    var out: [f64] = []
+    var i: i64 = 0
+    loop:
+        val r = _svg_scan_number(s, i)
+        if not r.2:
+            break
+        out.push(r.0)
+        i = r.1
+    out
+
+fn _svg_length(s: text, fallback: f64) -> f64:
+    """A length in user units; absolute units convert at 96 dpi."""
+    val t = s.trim()
+    val r = _svg_scan_number(t, 0)
+    if not r.2:
+        return fallback
+    val unit = _svg_lower(t.slice(r.1, t.len()).trim())
+    if unit == "" or unit == "px":
+        return r.0
+    if unit == "pt":
+        return r.0 * 96.0 / 72.0
+    if unit == "pc":
+        return r.0 * 16.0
+    if unit == "in":
+        return r.0 * 96.0
+    if unit == "cm":
+        return r.0 * 96.0 / 2.54
+    if unit == "mm":
+        return r.0 * 96.0 / 25.4
+    if unit == "em":
+        return r.0 * 16.0
+    fallback
+
+fn _svg_hex(s: text, i: i64) -> i64:
+    val c = _svg_lower(s.slice(i, i + 1))
+    val digits = "0123456789abcdef"
+    var d: i64 = 0
+    while d < 16:
+        if digits.slice(d, d + 1) == c:
+            return d
+        d = d + 1
+    -1
+
+# Color value: -1 = none, -2 = currentColor, otherwise 0xAARRGGBB.
+fn _svg_parse_color(value: text) -> i64:
+    val v = _svg_lower(value.trim())
+    if v == "" or v == "none" or v == "transparent" or v.starts_with("url("):
+        return -1
+    if v == "currentcolor":
+        return -2
+    if v.starts_with("#"):
+        val h = v.slice(1, v.len())
+        var nums: [i64] = []
+        var i: i64 = 0
+        while i < h.len():
+            val d = _svg_hex(h, i)
+            if d < 0:
+                return -1
+            nums.push(d)
+            i = i + 1
+        if nums.len() == 3 or nums.len() == 4:
+            val a = if nums.len() == 4: nums[3] * 17 else: 255
+            return (a << 24) | (nums[0] * 17 << 16) | (nums[1] * 17 << 8) | (nums[2] * 17)
+        if nums.len() == 6 or nums.len() == 8:
+            val a = if nums.len() == 8: nums[6] * 16 + nums[7] else: 255
+            return (a << 24) | ((nums[0] * 16 + nums[1]) << 16) | ((nums[2] * 16 + nums[3]) << 8) | (nums[4] * 16 + nums[5])
+        return -1
+    if v.starts_with("rgb"):
+        val open = v.index_of("(")
+        if open < 0:
+            return -1
+        val inner = v.slice(open + 1, v.len())
+        val nums = _svg_numbers(inner.replace("%", " ").replace(")", " "))
+        if nums.len() < 3:
+            return -1
+        val pct = inner.contains("%")
+        var ch: [i64] = [0; 3]
+        var k: i64 = 0
+        while k < 3:
+            val f = if pct: nums[k] * 255.0 / 100.0 else: nums[k]
+            ch[k] = _svg_floor(_svg_clamp01(f / 255.0) * 255.0 + 0.5)
+            k = k + 1
+        var a: i64 = 255
+        if nums.len() >= 4:
+            a = _svg_floor(_svg_clamp01(nums[3]) * 255.0 + 0.5)
+        return (a << 24) | (ch[0] << 16) | (ch[1] << 8) | ch[2]
+    _svg_named_color(v)
+
+# CSS Color Module Level 4 named colors (148, alphabetical).
+val _SVG_COLOR_NAMES: [text] = [
+    "aliceblue", "antiquewhite", "aqua", "aquamarine", "azure", "beige", "bisque", "black",
+    "blanchedalmond", "blue", "blueviolet", "brown", "burlywood", "cadetblue", "chartreuse", "chocolate",
+    "coral", "cornflowerblue", "cornsilk", "crimson", "cyan", "darkblue", "darkcyan", "darkgoldenrod",
+    "darkgray", "darkgreen", "darkgrey", "darkkhaki", "darkmagenta", "darkolivegreen", "darkorange", "darkorchid",
+    "darkred", "darksalmon", "darkseagreen", "darkslateblue", "darkslategray", "darkslategrey", "darkturquoise", "darkviolet",
+    "deeppink", "deepskyblue", "dimgray", "dimgrey", "dodgerblue", "firebrick", "floralwhite", "forestgreen",
+    "fuchsia", "gainsboro", "ghostwhite", "gold", "goldenrod", "gray", "green", "greenyellow",
+    "grey", "honeydew", "hotpink", "indianred", "indigo", "ivory", "khaki", "lavender",
+    "lavenderblush", "lawngreen", "lemonchiffon", "lightblue", "lightcoral", "lightcyan", "lightgoldenrodyellow", "lightgray",
+    "lightgreen", "lightgrey", "lightpink", "lightsalmon", "lightseagreen", "lightskyblue", "lightslategray", "lightslategrey",
+    "lightsteelblue", "lightyellow", "lime", "limegreen", "linen", "magenta", "maroon", "mediumaquamarine",
+    "mediumblue", "mediumorchid", "mediumpurple", "mediumseagreen", "mediumslateblue", "mediumspringgreen", "mediumturquoise", "mediumvioletred",
+    "midnightblue", "mintcream", "mistyrose", "moccasin", "navajowhite", "navy", "oldlace", "olive",
+    "olivedrab", "orange", "orangered", "orchid", "palegoldenrod", "palegreen", "paleturquoise", "palevioletred",
+    "papayawhip", "peachpuff", "peru", "pink", "plum", "powderblue", "purple", "rebeccapurple",
+    "red", "rosybrown", "royalblue", "saddlebrown", "salmon", "sandybrown", "seagreen", "seashell",
+    "sienna", "silver", "skyblue", "slateblue", "slategray", "slategrey", "snow", "springgreen",
+    "steelblue", "tan", "teal", "thistle", "tomato", "turquoise", "violet", "wheat",
+    "white", "whitesmoke", "yellow", "yellowgreen"
+]
+val _SVG_COLOR_VALUES: [i64] = [
+    0xF0F8FF, 0xFAEBD7, 0x00FFFF, 0x7FFFD4, 0xF0FFFF, 0xF5F5DC, 0xFFE4C4, 0x000000,
+    0xFFEBCD, 0x0000FF, 0x8A2BE2, 0xA52A2A, 0xDEB887, 0x5F9EA0, 0x7FFF00, 0xD2691E,
+    0xFF7F50, 0x6495ED, 0xFFF8DC, 0xDC143C, 0x00FFFF, 0x00008B, 0x008B8B, 0xB8860B,
+    0xA9A9A9, 0x006400, 0xA9A9A9, 0xBDB76B, 0x8B008B, 0x556B2F, 0xFF8C00, 0x9932CC,
+    0x8B0000, 0xE9967A, 0x8FBC8F, 0x483D8B, 0x2F4F4F, 0x2F4F4F, 0x00CED1, 0x9400D3,
+    0xFF1493, 0x00BFFF, 0x696969, 0x696969, 0x1E90FF, 0xB22222, 0xFFFAF0, 0x228B22,
+    0xFF00FF, 0xDCDCDC, 0xF8F8FF, 0xFFD700, 0xDAA520, 0x808080, 0x008000, 0xADFF2F,
+    0x808080, 0xF0FFF0, 0xFF69B4, 0xCD5C5C, 0x4B0082, 0xFFFFF0, 0xF0E68C, 0xE6E6FA,
+    0xFFF0F5, 0x7CFC00, 0xFFFACD, 0xADD8E6, 0xF08080, 0xE0FFFF, 0xFAFAD2, 0xD3D3D3,
+    0x90EE90, 0xD3D3D3, 0xFFB6C1, 0xFFA07A, 0x20B2AA, 0x87CEFA, 0x778899, 0x778899,
+    0xB0C4DE, 0xFFFFE0, 0x00FF00, 0x32CD32, 0xFAF0E6, 0xFF00FF, 0x800000, 0x66CDAA,
+    0x0000CD, 0xBA55D3, 0x9370DB, 0x3CB371, 0x7B68EE, 0x00FA9A, 0x48D1CC, 0xC71585,
+    0x191970, 0xF5FFFA, 0xFFE4E1, 0xFFE4B5, 0xFFDEAD, 0x000080, 0xFDF5E6, 0x808000,
+    0x6B8E23, 0xFFA500, 0xFF4500, 0xDA70D6, 0xEEE8AA, 0x98FB98, 0xAFEEEE, 0xDB7093,
+    0xFFEFD5, 0xFFDAB9, 0xCD853F, 0xFFC0CB, 0xDDA0DD, 0xB0E0E6, 0x800080, 0x663399,
+    0xFF0000, 0xBC8F8F, 0x4169E1, 0x8B4513, 0xFA8072, 0xF4A460, 0x2E8B57, 0xFFF5EE,
+    0xA0522D, 0xC0C0C0, 0x87CEEB, 0x6A5ACD, 0x708090, 0x708090, 0xFFFAFA, 0x00FF7F,
+    0x4682B4, 0xD2B48C, 0x008080, 0xD8BFD8, 0xFF6347, 0x40E0D0, 0xEE82EE, 0xF5DEB3,
+    0xFFFFFF, 0xF5F5F5, 0xFFFF00, 0x9ACD32
+]
+
+fn _svg_named_color(v: text) -> i64:
+    var i: i64 = 0
+    while i < _SVG_COLOR_NAMES.len():
+        if _SVG_COLOR_NAMES[i] == v:
+            return 0xFF000000 | _SVG_COLOR_VALUES[i]
+        i = i + 1
+    -1
+
+# ----------------------------------------------------------------------
+# Inherited paint state
+# ----------------------------------------------------------------------
+
+struct _SvgState:
+    fill: i64
+    fill_opacity: f64
+    evenodd: bool
+    stroke: i64
+    stroke_width: f64
+    stroke_opacity: f64
+    cap: i64
+    join: i64
+    miter: f64
+    color: i64
+    opacity: f64
+    visible: bool
+    # Current transformation matrix (user -> device): x' = a x + c y + e.
+    a: f64
+    b: f64
+    c: f64
+    d: f64
+    e: f64
+    f: f64
+
+fn _svg_state_root() -> _SvgState:
+    _SvgState(fill: 0xFF000000, fill_opacity: 1.0, evenodd: false, stroke: -1, stroke_width: 1.0,
+        stroke_opacity: 1.0, cap: 0, join: 0, miter: 4.0, color: 0xFF000000, opacity: 1.0, visible: true,
+        a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0)
+
+fn _svg_mul(s: _SvgState, a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> _SvgState:
+    """s.ctm * [a b c d e f] (the new matrix applies first)."""
+    var t = s
+    t.a = s.a * a + s.c * b
+    t.b = s.b * a + s.d * b
+    t.c = s.a * c + s.c * d
+    t.d = s.b * c + s.d * d
+    t.e = s.a * e + s.c * f + s.e
+    t.f = s.b * e + s.d * f + s.f
+    t
+
+fn _svg_apply_transform(s: _SvgState, value: text) -> _SvgState:
+    var st = s
+    var rest = value
+    loop:
+        val open = rest.index_of("(")
+        if open < 0:
+            break
+        val close = rest.index_of(")")
+        if close < open:
+            break
+        val name = _svg_lower(rest.slice(0, open).trim().replace(",", "").trim())
+        val n = _svg_numbers(rest.slice(open + 1, close))
+        if name == "matrix" and n.len() == 6:
+            st = _svg_mul(st, n[0], n[1], n[2], n[3], n[4], n[5])
+        elif name == "translate" and n.len() >= 1:
+            st = _svg_mul(st, 1.0, 0.0, 0.0, 1.0, n[0], if n.len() >= 2: n[1] else: 0.0)
+        elif name == "scale" and n.len() >= 1:
+            st = _svg_mul(st, n[0], 0.0, 0.0, if n.len() >= 2: n[1] else: n[0], 0.0, 0.0)
+        elif name == "rotate" and n.len() >= 1:
+            val r = n[0] * _PI / 180.0
+            val cs = cos_f64(r)
+            val sn = sin_f64(r)
+            if n.len() >= 3:
+                st = _svg_mul(st, 1.0, 0.0, 0.0, 1.0, n[1], n[2])
+                st = _svg_mul(st, cs, sn, 0.0 - sn, cs, 0.0, 0.0)
+                st = _svg_mul(st, 1.0, 0.0, 0.0, 1.0, 0.0 - n[1], 0.0 - n[2])
+            else:
+                st = _svg_mul(st, cs, sn, 0.0 - sn, cs, 0.0, 0.0)
+        elif name == "skewx" and n.len() >= 1:
+            val r = n[0] * _PI / 180.0
+            st = _svg_mul(st, 1.0, 0.0, sin_f64(r) / cos_f64(r), 1.0, 0.0, 0.0)
+        elif name == "skewy" and n.len() >= 1:
+            val r = n[0] * _PI / 180.0
+            st = _svg_mul(st, 1.0, sin_f64(r) / cos_f64(r), 0.0, 1.0, 0.0, 0.0)
+        rest = rest.slice(close + 1, rest.len())
+    st
+
+fn _svg_apply_property(s: _SvgState, name: text, value: text) -> _SvgState:
+    var st = s
+    val v = value.trim()
+    if name == "fill":
+        st.fill = if _svg_lower(v) == "inherit": s.fill else: _svg_parse_color(v)
+    elif name == "stroke":
+        st.stroke = if _svg_lower(v) == "inherit": s.stroke else: _svg_parse_color(v)
+    elif name == "color":
+        val c = _svg_parse_color(v)
+        if c >= 0:
+            st.color = c
+    elif name == "fill-opacity":
+        st.fill_opacity = _svg_opacity(v, s.fill_opacity)
+    elif name == "stroke-opacity":
+        st.stroke_opacity = _svg_opacity(v, s.stroke_opacity)
+    elif name == "opacity":
+        st.opacity = s.opacity * _svg_opacity(v, 1.0)
+    elif name == "fill-rule":
+        st.evenodd = _svg_lower(v) == "evenodd"
+    elif name == "stroke-width":
+        val w = _svg_length(v, s.stroke_width)
+        if w >= 0.0:
+            st.stroke_width = w
+    elif name == "stroke-linecap":
+        val lv = _svg_lower(v)
+        st.cap = if lv == "round": 1 elif lv == "square": 2 else: 0
+    elif name == "stroke-linejoin":
+        val lv = _svg_lower(v)
+        st.join = if lv == "round": 1 elif lv == "bevel": 2 else: 0
+    elif name == "stroke-miterlimit":
+        val m = _svg_scan_number(v, 0)
+        if m.2 and m.0 >= 1.0:
+            st.miter = m.0
+    elif name == "display":
+        if _svg_lower(v) == "none":
+            st.visible = false
+    elif name == "visibility":
+        val lv = _svg_lower(v)
+        st.visible = s.visible and lv != "hidden" and lv != "collapse"
+    st
+
+fn _svg_opacity(v: text, fallback: f64) -> f64:
+    val r = _svg_scan_number(v, 0)
+    if not r.2:
+        return fallback
+    val pct = v.contains("%")
+    _svg_clamp01(if pct: r.0 / 100.0 else: r.0)
+
+# ----------------------------------------------------------------------
+# Renderer
+# ----------------------------------------------------------------------
+
+fn _svg_renderer_new(data: [u8], max_pixels: i64) -> _SvgRenderer:
+    _SvgRenderer(data: data, pos: 0, max_pixels: max_pixels, width: 0, height: 0,
+        canvas: Bitmap.zeros(0, 0),
+        px: [], py: [], starts: [], closed: [], scan_work: 0,
+        points_total: 0, elements: 0, error: "",
+        attr_names: [], attr_values: [], stack: [], skip_depth: 0, depth: 0)
+
+class _SvgRenderer:
+    """Streaming SVG walker. Geometry for the current element is built as
+    flattened contours in USER space (px/py with contour `starts`/`closed`),
+    then stroked/transformed and filled on the skia CPU canvas."""
+    data: [u8]
+    pos: i64
+    max_pixels: i64
+    width: i64
+    height: i64
+    canvas: Bitmap
+    px: [f64]
+    py: [f64]
+    starts: [i64]
+    closed: [bool]
+    scan_work: i64
+    points_total: i64
+    elements: i64
+    error: text
+    attr_names: [text]
+    attr_values: [text]
+    stack: [_SvgState]
+    skip_depth: i64
+    depth: i64
+
+    fn output() -> [u32]:
+        """Canvas (premultiplied RGBA8) -> straight-alpha ARGB."""
+        val n = self.width * self.height
+        var out: [u32] = [0u32; n]
+        val px = self.canvas.pixels
+        var i: i64 = 0
+        while i < n:
+            val a = px[i * 4 + 3].to_i64()
+            if a > 0:
+                val r = (px[i * 4].to_i64() * 255 + a / 2) / a
+                val g = (px[i * 4 + 1].to_i64() * 255 + a / 2) / a
+                val b = (px[i * 4 + 2].to_i64() * 255 + a / 2) / a
+                out[i] = ((a << 24) | ((if r > 255: 255 else: r) << 16) | ((if g > 255: 255 else: g) << 8) | (if b > 255: 255 else: b)).to_u32()
+            i = i + 1
+        out
+
+    # -------------------------- XML walking ---------------------------
+
+    me run() -> text:
+        var saw_root = false
+        val n = self.data.len()
+        while self.pos < n:
+            if self.data[self.pos].to_i64() != 60:
+                self.pos = self.pos + 1
+                continue
+            if self.starts_with_at(self.pos, "<!--"):
+                self.skip_past("-->")
+                continue
+            if self.starts_with_at(self.pos, "<![CDATA["):
+                self.skip_past("]]>")
+                continue
+            if self.starts_with_at(self.pos, "<?") or self.starts_with_at(self.pos, "<!"):
+                self.skip_past(">")
+                continue
+            if self.starts_with_at(self.pos, "</"):
+                self.skip_past(">")
+                if self.skip_depth > 0:
+                    self.skip_depth = self.skip_depth - 1
+                else:
+                    if self.stack.len() > 0:
+                        self.stack = self.stack.slice(0, self.stack.len() - 1)
+                    self.depth = self.depth - 1
+                continue
+            val name = self.parse_tag()
+            if self.error != "":
+                return self.error
+            val self_closing = self.data[self.pos - 2].to_i64() == 47
+            self.elements = self.elements + 1
+            if self.elements > SVG_MAX_ELEMENTS:
+                return "SVG has too many elements"
+            if self.skip_depth > 0:
+                if not self_closing:
+                    self.skip_depth = self.skip_depth + 1
+                continue
+            if not saw_root:
+                if name != "svg":
+                    return "SVG root element is not <svg>"
+                val rerr = self.setup_root()
+                if rerr != "":
+                    return rerr
+                saw_root = true
+                if self_closing:
+                    break
+                self.depth = 1
+                continue
+            if _svg_skip_subtree(name):
+                if not self_closing:
+                    self.skip_depth = 1
+                continue
+            val parent = self.stack[self.stack.len() - 1]
+            val st = self.element_state(parent)
+            if name == "g" or name == "a" or name == "svg":
+                if not self_closing:
+                    self.stack.push(st)
+                    self.depth = self.depth + 1
+                    if self.depth > SVG_MAX_DEPTH:
+                        return "SVG nesting is too deep"
+                continue
+            if st.visible:
+                self.draw_shape(name, st)
+                if self.error != "":
+                    return self.error
+            if not self_closing:
+                # A shape with children (e.g. <title>): ignore its content.
+                self.skip_depth = 1
+        if not saw_root:
+            return "SVG root element is not <svg>"
+        ""
+
+    fn starts_with_at(at: i64, lit: text) -> bool:
+        val b = lit.bytes()
+        if at + b.len() > self.data.len():
+            return false
+        var i: i64 = 0
+        while i < b.len():
+            if self.data[at + i] != b[i]:
+                return false
+            i = i + 1
+        true
+
+    me skip_past(lit: text):
+        while self.pos < self.data.len() and not self.starts_with_at(self.pos, lit):
+            self.pos = self.pos + 1
+        self.pos = if self.pos < self.data.len(): self.pos + lit.bytes().len() else: self.data.len()
+
+    me parse_tag() -> text:
+        """Parse `<name attr="v" ...>` at pos; leaves pos after '>' and the
+        attributes in attr_names/attr_values. Returns the lowercase local
+        name (namespace prefix dropped)."""
+        val n = self.data.len()
+        self.pos = self.pos + 1
+        val name_start = self.pos
+        while self.pos < n and not _svg_is_space(self.data[self.pos].to_i64()) and self.data[self.pos].to_i64() != 62 and self.data[self.pos].to_i64() != 47:
+            self.pos = self.pos + 1
+        var name = _svg_lower(_svg_text(self.data, name_start, self.pos))
+        val colon = name.index_of(":")
+        if colon >= 0:
+            name = name.slice(colon + 1, name.len())
+        self.attr_names = []
+        self.attr_values = []
+        loop:
+            while self.pos < n and _svg_is_space(self.data[self.pos].to_i64()):
+                self.pos = self.pos + 1
+            if self.pos >= n:
+                self.error = "SVG tag is not closed"
+                return name
+            val c = self.data[self.pos].to_i64()
+            if c == 62:
+                self.pos = self.pos + 1
+                return name
+            if c == 47:
+                self.pos = self.pos + 1
+                continue
+            val an_start = self.pos
+            while self.pos < n and not _svg_is_space(self.data[self.pos].to_i64()) and self.data[self.pos].to_i64() != 61 and self.data[self.pos].to_i64() != 62 and self.data[self.pos].to_i64() != 47:
+                self.pos = self.pos + 1
+            val aname = _svg_lower(_svg_text(self.data, an_start, self.pos))
+            while self.pos < n and _svg_is_space(self.data[self.pos].to_i64()):
+                self.pos = self.pos + 1
+            if self.pos < n and self.data[self.pos].to_i64() == 61:
+                self.pos = self.pos + 1
+                while self.pos < n and _svg_is_space(self.data[self.pos].to_i64()):
+                    self.pos = self.pos + 1
+                if self.pos >= n:
+                    self.error = "SVG tag is not closed"
+                    return name
+                val q = self.data[self.pos].to_i64()
+                if q != 34 and q != 39:
+                    self.error = "SVG attribute value is not quoted"
+                    return name
+                self.pos = self.pos + 1
+                val v_start = self.pos
+                while self.pos < n and self.data[self.pos].to_i64() != q:
+                    self.pos = self.pos + 1
+                if self.pos >= n:
+                    self.error = "SVG attribute value is not closed"
+                    return name
+                self.attr_names.push(aname)
+                self.attr_values.push(_svg_unescape(_svg_text(self.data, v_start, self.pos)))
+                self.pos = self.pos + 1
+            elif aname == "":
+                self.pos = self.pos + 1
+        name
+
+    fn attr(name: text) -> text:
+        var i: i64 = 0
+        while i < self.attr_names.len():
+            if self.attr_names[i] == name:
+                return self.attr_values[i]
+            i = i + 1
+        ""
+
+    fn has_attr(name: text) -> bool:
+        var i: i64 = 0
+        while i < self.attr_names.len():
+            if self.attr_names[i] == name:
+                return true
+            i = i + 1
+        false
+
+    fn num_attr(name: text, fallback: f64) -> f64:
+        if not self.has_attr(name):
+            return fallback
+        _svg_length(self.attr(name), fallback)
+
+    fn element_state(parent: _SvgState) -> _SvgState:
+        """Inherited state + presentation attributes + style declarations +
+        the element's transform. Opacity starts from the parent's product."""
+        var st = parent
+        var i: i64 = 0
+        while i < self.attr_names.len():
+            val name = self.attr_names[i]
+            if name != "style" and name != "transform":
+                st = _svg_apply_property(st, name, self.attr_values[i])
+            i = i + 1
+        val style = self.attr("style")
+        if style != "":
+            for decl in style.split(";"):
+                val colon = decl.index_of(":")
+                if colon > 0:
+                    st = _svg_apply_property(st, _svg_lower(decl.slice(0, colon).trim()), decl.slice(colon + 1, decl.len()))
+        if self.has_attr("transform"):
+            st = _svg_apply_transform(st, self.attr("transform"))
+        st
+
+    me setup_root() -> text:
+        """Raster size + viewBox mapping into the root state."""
+        val vb = _svg_numbers(self.attr("viewbox"))
+        val has_vb = vb.len() == 4 and vb[2] > 0.0 and vb[3] > 0.0
+        val w_attr = self.attr("width")
+        val h_attr = self.attr("height")
+        var w: f64 = if has_vb: vb[2] else: 300.0
+        var h: f64 = if has_vb: vb[3] else: 150.0
+        if w_attr != "" and not w_attr.contains("%"):
+            w = _svg_length(w_attr, w)
+        if h_attr != "" and not h_attr.contains("%"):
+            h = _svg_length(h_attr, h)
+        if not (w > 0.0) or not (h > 0.0):
+            return "SVG has no drawable size"
+        # Fit the raster into the pixel budget and the dimension cap.
+        var scale: f64 = 1.0
+        if w * h > self.max_pixels.to_f64():
+            scale = sqrt_f64(self.max_pixels.to_f64() / (w * h))
+        if w * scale > SVG_MAX_DIMENSION.to_f64():
+            scale = SVG_MAX_DIMENSION.to_f64() / w
+        if h * scale > SVG_MAX_DIMENSION.to_f64():
+            scale = SVG_MAX_DIMENSION.to_f64() / h
+        var iw = _svg_floor(w * scale + 0.5)
+        var ih = _svg_floor(h * scale + 0.5)
+        if iw < 1:
+            iw = 1
+        if ih < 1:
+            ih = 1
+        while iw * ih > self.max_pixels and (iw > 1 or ih > 1):
+            if iw >= ih: iw = iw - 1 else: ih = ih - 1
+        self.width = iw
+        self.height = ih
+        self.canvas = Bitmap.zeros(iw, ih)
+        var root = _svg_state_root()
+        val sx = iw.to_f64() / w
+        val sy = ih.to_f64() / h
+        root = _svg_mul(root, sx, 0.0, 0.0, sy, 0.0, 0.0)
+        if has_vb:
+            root = _svg_mul(root, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            val par = _svg_lower(self.attr("preserveaspectratio").trim())
+            val kx = w / vb[2]
+            val ky = h / vb[3]
+            if par.starts_with("none"):
+                root = _svg_mul(root, kx, 0.0, 0.0, ky, 0.0 - vb[0] * kx, 0.0 - vb[1] * ky)
+            else:
+                val slice = par.contains("slice")
+                val k = if slice: (if kx > ky: kx else: ky) else: (if kx < ky: kx else: ky)
+                var tx = 0.0 - vb[0] * k
+                var ty = 0.0 - vb[1] * k
+                val extra_x = w - vb[2] * k
+                val extra_y = h - vb[3] * k
+                val align = if par == "": "xmidymid" else: par
+                if align.contains("xmid"):
+                    tx = tx + extra_x / 2.0
+                elif align.contains("xmax"):
+                    tx = tx + extra_x
+                if align.contains("ymid"):
+                    ty = ty + extra_y / 2.0
+                elif align.contains("ymax"):
+                    ty = ty + extra_y
+                root = _svg_mul(root, k, 0.0, 0.0, k, tx, ty)
+        val st = self.element_state(root)
+        # The root's own transform attribute is not part of SVG 1.1; keep it
+        # (SVG 2 allows it) since element_state already applied it.
+        self.stack = [st]
+        ""
+
+    # -------------------------- Geometry ------------------------------
+
+    fn tolerance(st: _SvgState) -> f64:
+        """Flattening tolerance in user units for ~0.2 device px."""
+        val det = _svg_abs(st.a * st.d - st.b * st.c)
+        val s = sqrt_f64(if det > 0.000000000001: det else: 0.000000000001)
+        0.2 / s
+
+    me begin_geometry():
+        self.px = []
+        self.py = []
+        self.starts = []
+        self.closed = []
+
+    me move_to(x: f64, y: f64):
+        self.starts.push(self.px.len())
+        self.closed.push(false)
+        self.add_point(x, y)
+
+    me add_point(x: f64, y: f64):
+        self.px.push(x)
+        self.py.push(y)
+        self.points_total = self.points_total + 1
+        if self.points_total > SVG_MAX_POINTS:
+            self.error = "SVG is too complex"
+
+    me close_contour():
+        if self.closed.len() > 0:
+            self.closed[self.closed.len() - 1] = true
+
+    me cubic_to(x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64, tol: f64):
+        val dd = _svg_abs(x1 - x0) + _svg_abs(y1 - y0) + _svg_abs(x2 - x1) + _svg_abs(y2 - y1) + _svg_abs(x3 - x2) + _svg_abs(y3 - y2)
+        var steps = _svg_floor(sqrt_f64(dd / tol) * 0.75) + 1
+        if steps > 256:
+            steps = 256
+        var i: i64 = 1
+        while i <= steps:
+            val t = i.to_f64() / steps.to_f64()
+            val mt = 1.0 - t
+            val x = mt * mt * mt * x0 + 3.0 * mt * mt * t * x1 + 3.0 * mt * t * t * x2 + t * t * t * x3
+            val y = mt * mt * mt * y0 + 3.0 * mt * mt * t * y1 + 3.0 * mt * t * t * y2 + t * t * t * y3
+            self.add_point(x, y)
+            i = i + 1
+
+    me quad_to(x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64, tol: f64):
+        self.cubic_to(x0, y0, x0 + 2.0 / 3.0 * (x1 - x0), y0 + 2.0 / 3.0 * (y1 - y0),
+            x2 + 2.0 / 3.0 * (x1 - x2), y2 + 2.0 / 3.0 * (y1 - y2), x2, y2, tol)
+
+    me arc_to(x1: f64, y1: f64, rx_in: f64, ry_in: f64, phi_deg: f64, large: bool, sweep: bool, x2: f64, y2: f64, tol: f64):
+        """SVG endpoint arc (implementation notes F.6.5/F.6.6) as cubics."""
+        if x1 == x2 and y1 == y2:
+            return
+        var rx = _svg_abs(rx_in)
+        var ry = _svg_abs(ry_in)
+        if rx == 0.0 or ry == 0.0:
+            self.add_point(x2, y2)
+            return
+        val phi = phi_deg * _PI / 180.0
+        val cp = cos_f64(phi)
+        val sp = sin_f64(phi)
+        val dx2 = (x1 - x2) / 2.0
+        val dy2 = (y1 - y2) / 2.0
+        val x1p = cp * dx2 + sp * dy2
+        val y1p = 0.0 - sp * dx2 + cp * dy2
+        val lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry)
+        if lambda > 1.0:
+            val sl = sqrt_f64(lambda)
+            rx = rx * sl
+            ry = ry * sl
+        val num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p
+        val den = rx * rx * y1p * y1p + ry * ry * x1p * x1p
+        var coef = if den > 0.0 and num > 0.0: sqrt_f64(num / den) else: 0.0
+        if large == sweep:
+            coef = 0.0 - coef
+        val cxp = coef * rx * y1p / ry
+        val cyp = 0.0 - coef * ry * x1p / rx
+        val cx = cp * cxp - sp * cyp + (x1 + x2) / 2.0
+        val cy = sp * cxp + cp * cyp + (y1 + y2) / 2.0
+        val ux = (x1p - cxp) / rx
+        val uy = (y1p - cyp) / ry
+        val vx = (0.0 - x1p - cxp) / rx
+        val vy = (0.0 - y1p - cyp) / ry
+        val theta1 = atan2_f64(uy, ux)
+        var dtheta = atan2_f64(ux * vy - uy * vx, ux * vx + uy * vy)
+        if not sweep and dtheta > 0.0:
+            dtheta = dtheta - 2.0 * _PI
+        elif sweep and dtheta < 0.0:
+            dtheta = dtheta + 2.0 * _PI
+        var segs = _svg_floor(_svg_abs(dtheta) / (_PI / 2.0) - 0.000001) + 1
+        if segs < 1:
+            segs = 1
+        val delta = dtheta / segs.to_f64()
+        val kappa = 4.0 / 3.0 * sin_f64(delta / 4.0) / cos_f64(delta / 4.0)
+        var t = theta1
+        var sx = x1
+        var sy = y1
+        var i: i64 = 0
+        while i < segs:
+            val t2 = t + delta
+            val c1 = cos_f64(t)
+            val s1 = sin_f64(t)
+            val c2 = cos_f64(t2)
+            val s2 = sin_f64(t2)
+            # Unit-circle control points, then scale/rotate/translate.
+            val ax = c1 - kappa * s1
+            val ay = s1 + kappa * c1
+            val bx = c2 + kappa * s2
+            val by = s2 - kappa * c2
+            val p1x = cx + rx * ax * cp - ry * ay * sp
+            val p1y = cy + rx * ax * sp + ry * ay * cp
+            val p2x = cx + rx * bx * cp - ry * by * sp
+            val p2y = cy + rx * bx * sp + ry * by * cp
+            val ex = if i == segs - 1: x2 else: cx + rx * c2 * cp - ry * s2 * sp
+            val ey = if i == segs - 1: y2 else: cy + rx * c2 * sp + ry * s2 * cp
+            self.cubic_to(sx, sy, p1x, p1y, p2x, p2y, ex, ey, tol)
+            sx = ex
+            sy = ey
+            t = t2
+            i = i + 1
+
+    me ellipse_contour(cx: f64, cy: f64, rx: f64, ry: f64, tol: f64):
+        self.move_to(cx + rx, cy)
+        self.arc_to(cx + rx, cy, rx, ry, 0.0, false, true, cx - rx, cy, tol)
+        self.arc_to(cx - rx, cy, rx, ry, 0.0, false, true, cx + rx, cy, tol)
+        self.close_contour()
+
+    me build_path(d: text, tol: f64):
+        """Path data grammar (SVG 1.1 section 8.3) with implicit repeats."""
+        var i: i64 = 0
+        val n = d.len()
+        var cmd = ""
+        var cx = 0.0
+        var cy = 0.0
+        var sx = 0.0
+        var sy = 0.0
+        var lcx = 0.0
+        var lcy = 0.0
+        var last = ""
+        var started = false
+        loop:
+            while i < n and (d.slice(i, i + 1) == " " or d.slice(i, i + 1) == "," or d.slice(i, i + 1) == "\n" or d.slice(i, i + 1) == "\t" or d.slice(i, i + 1) == "\r"):
+                i = i + 1
+            if i >= n or self.error != "":
+                break
+            val ch = d.slice(i, i + 1)
+            if "MmLlHhVvCcSsQqTtAaZz".contains(ch):
+                cmd = ch
+                i = i + 1
+                if cmd == "Z" or cmd == "z":
+                    if started:
+                        self.close_contour()
+                        cx = sx
+                        cy = sy
+                    last = "Z"
+                    continue
+            elif cmd == "" or cmd == "Z" or cmd == "z":
+                break
+            val rel = cmd == cmd.lower()
+            val up = cmd.upper()
+            val ox = if rel: cx else: 0.0
+            val oy = if rel: cy else: 0.0
+            if up == "M" or up == "L" or up == "T":
+                val a = _svg_scan_number(d, i)
+                if not a.2:
+                    break
+                val b = _svg_scan_number(d, a.1)
+                if not b.2:
+                    break
+                i = b.1
+                val x = a.0 + ox
+                val y = b.0 + oy
+                if up == "M":
+                    self.move_to(x, y)
+                    started = true
+                    sx = x
+                    sy = y
+                    cmd = if rel: "l" else: "L"
+                    last = "M"
+                elif up == "L":
+                    if not started:
+                        self.move_to(cx, cy)
+                        started = true
+                    self.add_point(x, y)
+                    last = "L"
+                else:
+                    if not started:
+                        self.move_to(cx, cy)
+                        started = true
+                    val qx = if last == "Q" or last == "T": 2.0 * cx - lcx else: cx
+                    val qy = if last == "Q" or last == "T": 2.0 * cy - lcy else: cy
+                    self.quad_to(cx, cy, qx, qy, x, y, tol)
+                    lcx = qx
+                    lcy = qy
+                    last = "T"
+                cx = x
+                cy = y
+            elif up == "H" or up == "V":
+                val a = _svg_scan_number(d, i)
+                if not a.2:
+                    break
+                i = a.1
+                if not started:
+                    self.move_to(cx, cy)
+                    started = true
+                if up == "H":
+                    cx = a.0 + ox
+                else:
+                    cy = a.0 + oy
+                self.add_point(cx, cy)
+                last = "L"
+            elif up == "C" or up == "S" or up == "Q":
+                val count = if up == "C": 6 else: 4
+                var v: [f64] = []
+                var ok = true
+                var j = i
+                var k: i64 = 0
+                while k < count and ok:
+                    val r = _svg_scan_number(d, j)
+                    ok = r.2
+                    v.push(r.0)
+                    j = r.1
+                    k = k + 1
+                if not ok:
+                    break
+                i = j
+                if not started:
+                    self.move_to(cx, cy)
+                    started = true
+                if up == "C":
+                    self.cubic_to(cx, cy, v[0] + ox, v[1] + oy, v[2] + ox, v[3] + oy, v[4] + ox, v[5] + oy, tol)
+                    lcx = v[2] + ox
+                    lcy = v[3] + oy
+                    cx = v[4] + ox
+                    cy = v[5] + oy
+                    last = "C"
+                elif up == "S":
+                    val c1x = if last == "C" or last == "S": 2.0 * cx - lcx else: cx
+                    val c1y = if last == "C" or last == "S": 2.0 * cy - lcy else: cy
+                    self.cubic_to(cx, cy, c1x, c1y, v[0] + ox, v[1] + oy, v[2] + ox, v[3] + oy, tol)
+                    lcx = v[0] + ox
+                    lcy = v[1] + oy
+                    cx = v[2] + ox
+                    cy = v[3] + oy
+                    last = "S"
+                else:
+                    self.quad_to(cx, cy, v[0] + ox, v[1] + oy, v[2] + ox, v[3] + oy, tol)
+                    lcx = v[0] + ox
+                    lcy = v[1] + oy
+                    cx = v[2] + ox
+                    cy = v[3] + oy
+                    last = "Q"
+            elif up == "A":
+                val r1 = _svg_scan_number(d, i)
+                val r2 = _svg_scan_number(d, r1.1)
+                val r3 = _svg_scan_number(d, r2.1)
+                if not (r1.2 and r2.2 and r3.2):
+                    break
+                # Flags are single '0'/'1' characters, possibly unseparated.
+                val f1 = _svg_flag(d, r3.1)
+                if f1.0 < 0:
+                    break
+                val f2 = _svg_flag(d, f1.1)
+                if f2.0 < 0:
+                    break
+                val ex = _svg_scan_number(d, f2.1)
+                val ey = _svg_scan_number(d, ex.1)
+                if not (ex.2 and ey.2):
+                    break
+                i = ey.1
+                if not started:
+                    self.move_to(cx, cy)
+                    started = true
+                val x2 = ex.0 + ox
+                val y2 = ey.0 + oy
+                self.arc_to(cx, cy, r1.0, r2.0, r3.0, f1.0 == 1, f2.0 == 1, x2, y2, tol)
+                cx = x2
+                cy = y2
+                last = "A"
+            else:
+                break
+
+    # -------------------------- Shapes --------------------------------
+
+    me draw_shape(name: text, st: _SvgState):
+        val tol = self.tolerance(st)
+        self.begin_geometry()
+        if name == "path":
+            self.build_path(self.attr("d"), tol)
+        elif name == "rect":
+            val x = self.num_attr("x", 0.0)
+            val y = self.num_attr("y", 0.0)
+            val w = self.num_attr("width", 0.0)
+            val h = self.num_attr("height", 0.0)
+            if w <= 0.0 or h <= 0.0:
+                return
+            var rx = self.num_attr("rx", -1.0)
+            var ry = self.num_attr("ry", -1.0)
+            if rx < 0.0 and ry >= 0.0:
+                rx = ry
+            if ry < 0.0 and rx >= 0.0:
+                ry = rx
+            if rx < 0.0:
+                rx = 0.0
+            if ry < 0.0:
+                ry = 0.0
+            if rx > w / 2.0:
+                rx = w / 2.0
+            if ry > h / 2.0:
+                ry = h / 2.0
+            if rx > 0.0 and ry > 0.0:
+                self.move_to(x + rx, y)
+                self.add_point(x + w - rx, y)
+                self.arc_to(x + w - rx, y, rx, ry, 0.0, false, true, x + w, y + ry, tol)
+                self.add_point(x + w, y + h - ry)
+                self.arc_to(x + w, y + h - ry, rx, ry, 0.0, false, true, x + w - rx, y + h, tol)
+                self.add_point(x + rx, y + h)
+                self.arc_to(x + rx, y + h, rx, ry, 0.0, false, true, x, y + h - ry, tol)
+                self.add_point(x, y + ry)
+                self.arc_to(x, y + ry, rx, ry, 0.0, false, true, x + rx, y, tol)
+            else:
+                self.move_to(x, y)
+                self.add_point(x + w, y)
+                self.add_point(x + w, y + h)
+                self.add_point(x, y + h)
+            self.close_contour()
+        elif name == "circle":
+            val r = self.num_attr("r", 0.0)
+            if r <= 0.0:
+                return
+            self.ellipse_contour(self.num_attr("cx", 0.0), self.num_attr("cy", 0.0), r, r, tol)
+        elif name == "ellipse":
+            val rx = self.num_attr("rx", 0.0)
+            val ry = self.num_attr("ry", 0.0)
+            if rx <= 0.0 or ry <= 0.0:
+                return
+            self.ellipse_contour(self.num_attr("cx", 0.0), self.num_attr("cy", 0.0), rx, ry, tol)
+        elif name == "line":
+            self.move_to(self.num_attr("x1", 0.0), self.num_attr("y1", 0.0))
+            self.add_point(self.num_attr("x2", 0.0), self.num_attr("y2", 0.0))
+        elif name == "polyline" or name == "polygon":
+            val pts = _svg_numbers(self.attr("points"))
+            if pts.len() < 4:
+                return
+            self.move_to(pts[0], pts[1])
+            var k: i64 = 2
+            while k + 1 < pts.len():
+                self.add_point(pts[k], pts[k + 1])
+                k = k + 2
+            if name == "polygon":
+                self.close_contour()
+        else:
+            return
+        if self.error != "" or self.px.len() == 0:
+            return
+        # Fill (lines never fill).
+        val fill = if st.fill == -2: st.color else: st.fill
+        if fill >= 0 and name != "line":
+            val alpha = ((fill >> 24) & 255).to_f64() / 255.0 * st.fill_opacity * st.opacity
+            if alpha > 0.0:
+                self.fill_device(st, st.evenodd, fill, alpha)
+        val stroke = if st.stroke == -2: st.color else: st.stroke
+        if stroke >= 0 and st.stroke_width > 0.0:
+            val alpha = ((stroke >> 24) & 255).to_f64() / 255.0 * st.stroke_opacity * st.opacity
+            if alpha > 0.0:
+                self.stroke_geometry(st, stroke, alpha, tol)
+
+
+    # -------------------------- Painting (skia) ---------------------
+
+    fn user_path(close_all: bool) -> SkPath:
+        """Current contours as a line-only SkPath in user space."""
+        var segs: [SkPathSegment] = []
+        var c: i64 = 0
+        while c < self.starts.len():
+            val s = self.starts[c]
+            val e = if c + 1 < self.starts.len(): self.starts[c + 1] else: self.px.len()
+            segs.push(SkPathSegment(verb: SkPathVerb.Move, pts: [SkPoint(x: self.px[s], y: self.py[s])], weight: 0.0))
+            var k = s + 1
+            while k < e:
+                segs.push(SkPathSegment(verb: SkPathVerb.Line, pts: [SkPoint(x: self.px[k], y: self.py[k])], weight: 0.0))
+                k = k + 1
+            if close_all or self.closed[c]:
+                segs.push(SkPathSegment(verb: SkPathVerb.Close, pts: [], weight: 0.0))
+            c = c + 1
+        SkPath(fill_type: SkPathFillType.Winding, segments: segs)
+
+    me paint_device(path: SkPath, st: _SvgState, evenodd: bool, color: i64, alpha: f64):
+        """Transform `path` by the CTM (affine maps every control point,
+        conic weights unchanged) and fill it on the canvas."""
+        var segs: [SkPathSegment] = []
+        var edges: i64 = 0
+        var y_lo: f64 = 0.0
+        var y_hi: f64 = 0.0
+        var first = true
+        for seg in path.segments:
+            var pts: [SkPoint] = []
+            for p in seg.pts:
+                val x = st.a * p.x + st.c * p.y + st.e
+                val y = st.b * p.x + st.d * p.y + st.f
+                pts.push(SkPoint(x: x, y: y))
+                if first or y < y_lo:
+                    y_lo = y
+                if first or y > y_hi:
+                    y_hi = y
+                first = false
+            edges = edges + (if seg.verb == SkPathVerb.Cubic: 16 elif seg.verb == SkPathVerb.Quad or seg.verb == SkPathVerb.Conic: 8 else: 1)
+            segs.push(SkPathSegment(verb: seg.verb, pts: pts, weight: seg.weight))
+        if first:
+            return
+        var rows = _svg_floor(y_hi) - _svg_floor(y_lo) + 1
+        if rows > self.height:
+            rows = self.height
+        if rows < 1:
+            rows = 1
+        self.scan_work = self.scan_work + rows * edges
+        if self.scan_work > SVG_MAX_SCAN_WORK:
+            self.error = "SVG is too complex"
+            return
+        val fill_type = if evenodd: SkPathFillType.EvenOdd else: SkPathFillType.Winding
+        val r = ((color >> 16) & 255).to_f64() / 255.0
+        val g = ((color >> 8) & 255).to_f64() / 255.0
+        val b = (color & 255).to_f64() / 255.0
+        fill_path_aa(self.canvas, SkPath(fill_type: fill_type, segments: segs), SkColor4f(r: r, g: g, b: b, a: alpha))
+
+    me fill_device(st: _SvgState, evenodd: bool, color: i64, alpha: f64):
+        self.paint_device(self.user_path(true), st, evenodd, color, alpha)
+
+    me stroke_geometry(st: _SvgState, color: i64, alpha: f64, tol: f64):
+        """Outline the stroke in user space with skia's stroker, then
+        transform and fill it (nonzero)."""
+        val cap = if st.cap == 1: StrokeCap.Round elif st.cap == 2: StrokeCap.Square else: StrokeCap.Butt
+        val join = if st.join == 1: StrokeJoin.Round elif st.join == 2: StrokeJoin.Bevel else: StrokeJoin.Miter
+        val outline = expand_stroke(self.user_path(false), stroke_params_new(st.stroke_width, cap, join, st.miter))
+        self.paint_device(outline, st, false, color, alpha)
+
+fn _svg_skip_subtree(name: text) -> bool:
+    """Elements whose content never renders directly (or that would need
+    external resources / scripting)."""
+    name == "defs" or name == "symbol" or name == "clippath" or name == "mask" or
+        name == "pattern" or name == "marker" or name == "lineargradient" or
+        name == "radialgradient" or name == "style" or name == "script" or
+        name == "foreignobject" or name == "title" or name == "desc" or
+        name == "metadata" or name == "text" or name == "image" or name == "use" or
+        name == "filter" or name == "switch"
+
+fn _svg_flag(d: text, start: i64) -> (i64, i64):
+    """Arc flag: a single '0' or '1' after optional separators."""
+    var i = start
+    while i < d.len() and (d.slice(i, i + 1) == " " or d.slice(i, i + 1) == "," or d.slice(i, i + 1) == "\n" or d.slice(i, i + 1) == "\t" or d.slice(i, i + 1) == "\r"):
+        i = i + 1
+    if i < d.len() and d.slice(i, i + 1) == "0":
+        return (0, i + 1)
+    if i < d.len() and d.slice(i, i + 1) == "1":
+        return (1, i + 1)
+    (-1, i)
+
+fn _svg_unescape(v: text) -> text:
+    if not v.contains("&"):
+        return v
+    v.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&#39;", "'").replace("&amp;", "&")

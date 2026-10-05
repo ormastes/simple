@@ -1,157 +1,187 @@
-# @cover src/app/ui.chromium.acid2/reftest_runner.spl 0%
-# reftest_spec — Chromium parity reftest suite, Phase 8 drawing-stack
+"""
+## Purpose and audience
+Purpose: the Phase 8 drawing-parity reftest suite. Every scene in
+`scenes/` is recorded as an SkPicture, rendered by the skia CPU backend, and
+checked against its golden in `goldens/`: probe pixels whose expected
+premultiplied RGBA values were derived ANALYTICALLY from the scene (exact
+coverage for axis-aligned edges, half coverage for a 1 px stroke on an
+integer line, Porter-Duff / separable blend formulas over the scene's
+colours) — not captured from the renderer — and every scene was rendered and
+inspected visually on 2026-10-05.
+Audience: maintainers of std.skia's CPU backend.
+## Operator workflow
+`bin/simple test test/system/reftest/parity/reftest_spec.spl` (the same file
+is mirrored at test/03_system/gui/reftest/parity/). Tolerance: +-2 per
+channel (8-bit rounding of the blend arithmetic).
+## What each check proves
+- harness: scenes register, are found by name, and record op counts.
+- signatures: the 11 scenes are distinct and deterministic.
+- compare_pictures: a scene against itself is pixel-identical; the winding
+  and even-odd stars differ (exactly in the inner pentagon).
+- cull rects: scene canvas sizes match the Chromium scene list.
+- goldens, per scene: path_winding (nonzero fills the inner pentagon),
+  path_evenodd (even-odd leaves it empty), dashed_strokes (1 px stroke is
+  anti-aliased to two half rows; 2/4 px strokes cover exact rows),
+  gradient_linear (abutting rects split exactly at x = 101), text_arabic
+  (cubic outline filled), porter_duff (SrcOver / Multiply / Screen / DstIn
+  over an opaque background), mix_blend_mode (Darken on overlap),
+  backdrop_filter (white in a Multiply layer leaves the background),
+  scroll_damage (alpha-180 source-over), transform_tree (identity SetMatrix
+  then a tile), opacity_layer (layer alpha applied once).
+## Compatibility and limitations
+Known RED until the CPU backend composites blend modes and SaveLayer
+offscreen layers (it currently source-overs every DrawRect and folds a
+layer into an alpha multiply): porter_duff Multiply/Screen/DstIn probes,
+mix_blend_mode overlap, backdrop_filter inner probe. Bug record:
+doc/08_tracking/bug/skia_cpu_backend_ignores_blend_modes_and_layers_2026-10-05.md
+"""
+# @req REQ-SSPEC-SYSTEM
 
-use std.spipe.*
-use std.skia.entity.picture.{SkPicture, SkPictureRecorder}
+use std.spec.*
+use std.spec.step
+use std.skia.entity.picture.{SkPicture}
 use std.skia.entity.geometry.{SkRect}
+use std.skia.backend.cpu.backend.{cpu_backend_new}
 use test.system.reftest.parity.harness.{ReftestHarness, SceneManifest, scene_signature, reftest_harness_new}
 use test.system.reftest.parity.pixel_diff.{compare_pictures, PixelDiffResult}
-use test.system.reftest.parity.scenes.path_winding.{make_scene as winding_scene}
-use test.system.reftest.parity.scenes.path_evenodd.{make_scene as evenodd_scene}
-use test.system.reftest.parity.scenes.dashed_strokes.{make_scene as dashed_scene}
-use test.system.reftest.parity.scenes.gradient_linear.{make_scene as gradient_scene}
-use test.system.reftest.parity.scenes.text_arabic.{make_scene as arabic_scene}
-use test.system.reftest.parity.scenes.porter_duff.{make_scene as porterduff_scene}
-use test.system.reftest.parity.scenes.mix_blend_mode.{make_scene as mixblend_scene}
-use test.system.reftest.parity.scenes.backdrop_filter.{make_scene as backdrop_scene}
-use test.system.reftest.parity.scenes.scroll_damage.{make_scene as scroll_scene}
-use test.system.reftest.parity.scenes.transform_tree.{make_scene as transform_scene}
-use test.system.reftest.parity.scenes.opacity_layer.{make_scene as opacity_scene}
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+use test.system.reftest.parity.scenes.path_winding.{scene as winding_scene}
+use test.system.reftest.parity.scenes.path_evenodd.{scene as evenodd_scene}
+use test.system.reftest.parity.scenes.dashed_strokes.{scene as dashed_scene}
+use test.system.reftest.parity.scenes.gradient_linear.{scene as gradient_scene}
+use test.system.reftest.parity.scenes.text_arabic.{scene as arabic_scene}
+use test.system.reftest.parity.scenes.porter_duff.{scene as porterduff_scene}
+use test.system.reftest.parity.scenes.mix_blend_mode.{scene as mixblend_scene}
+use test.system.reftest.parity.scenes.backdrop_filter.{scene as backdrop_scene}
+use test.system.reftest.parity.scenes.scroll_damage.{scene as scroll_scene}
+use test.system.reftest.parity.scenes.transform_tree.{scene as transform_scene}
+use test.system.reftest.parity.scenes.opacity_layer.{scene as opacity_scene}
+use test.system.reftest.parity.goldens.path_winding_golden.{probes as winding_probes}
+use test.system.reftest.parity.goldens.path_evenodd_golden.{probes as evenodd_probes}
+use test.system.reftest.parity.goldens.dashed_strokes_golden.{probes as dashed_probes}
+use test.system.reftest.parity.goldens.gradient_linear_golden.{probes as gradient_probes}
+use test.system.reftest.parity.goldens.text_arabic_golden.{probes as arabic_probes}
+use test.system.reftest.parity.goldens.porter_duff_golden.{probes as porterduff_probes}
+use test.system.reftest.parity.goldens.mix_blend_mode_golden.{probes as mixblend_probes}
+use test.system.reftest.parity.goldens.backdrop_filter_golden.{probes as backdrop_probes}
+use test.system.reftest.parity.goldens.scroll_damage_golden.{probes as scroll_probes}
+use test.system.reftest.parity.goldens.transform_tree_golden.{probes as transform_probes}
+use test.system.reftest.parity.goldens.opacity_layer_golden.{probes as opacity_probes}
 
 fn _manifest(name: text, desc: text) -> SceneManifest:
     SceneManifest(name: name, description: desc, chromium_ref_file: "")
 
-fn _mk_rect(r: f64, b: f64) -> SkRect:
-    SkRect(left: 0.0, top: 0.0, right: r, bottom: b)
+fn probe_mismatches(pic: SkPicture, probes: [[i64]]) -> text:
+    """Every probe pixel outside +-2 per channel, as "(x,y) want [...] got
+    [...]" lines; "" when all match."""
+    val bm = cpu_backend_new().render_picture(pic, pic.cull_rect)
+    var bad: [text] = []
+    for p in probes:
+        val base = (p[1] * bm.width + p[0]) * 4
+        var ok = true
+        var got: [i64] = []
+        var c: i64 = 0
+        while c < 4:
+            val v = bm.pixels[base + c] as i64
+            got.push(v)
+            val d = if v > p[2 + c]: v - p[2 + c] else: p[2 + c] - v
+            if d > 2:
+                ok = false
+            c = c + 1
+        if not ok:
+            bad.push("({p[0]},{p[1]}) want [{p[2]}, {p[3]}, {p[4]}, {p[5]}] got {got}")
+    bad.join("; ")
 
-fn _mk_pic(r: f64, b: f64) -> SkPicture:
-    val bounds = _mk_rect(r, b)
-    val rec = SkPictureRecorder(recording: false, cull_rect: bounds, ops: 0)
-    val started = rec.begin_recording(bounds)
-    started.finish_recording()
-
-# ---------------------------------------------------------------------------
-# Harness lifecycle
-# ---------------------------------------------------------------------------
-
-describe "Drawing parity reftest suite":
-    it "harness starts empty":
+describe "Drawing parity reftest harness":
+    it "starts empty":
         val h = reftest_harness_new()
         expect(h.result_count()).to_equal(0)
 
-    it "runs one scene and records result":
+    it "runs one scene and records its op count":
         var h = reftest_harness_new()
-        val pic = winding_scene()
-        val m = _manifest("path_winding", "winding fill rule")
-        val r = h.run(m, pic)
-        expect(r.op_count >= 0).to_equal(true)
+        val r = h.run(_manifest("path_winding", "winding fill rule"), winding_scene())
+        expect(r.op_count).to_equal(1)
 
-    it "result_count increases after each scene":
+    it "counts every scene it runs":
         var h = reftest_harness_new()
-        val m1 = _manifest("path_winding", "winding fill")
-        val m2 = _manifest("path_evenodd", "even-odd fill")
-        h.run(m1, winding_scene())
-        h.run(m2, evenodd_scene())
+        h.run(_manifest("path_winding", "winding fill"), winding_scene())
+        h.run(_manifest("path_evenodd", "even-odd fill"), evenodd_scene())
         expect(h.result_count()).to_equal(2)
 
-    it "find returns Some for registered scene":
+    it "finds a registered scene and only that one":
         var h = reftest_harness_new()
-        val m = _manifest("dashed_strokes", "dashed path effect")
-        h.run(m, dashed_scene())
-        val found = h.find("dashed_strokes")
-        expect(found.is_some()).to_equal(true)
+        h.run(_manifest("dashed_strokes", "stroke widths"), dashed_scene())
+        expect(h.find("dashed_strokes").is_some()).to_equal(true)
+        expect(h.find("nonexistent").is_none()).to_equal(true)
 
-    it "find returns None for unknown scene":
-        val h = reftest_harness_new()
-        val found = h.find("nonexistent")
-        expect(found.is_none()).to_equal(true)
+describe "Scene signatures":
+    it "are distinct for all 11 scenes":
+        val sigs = [scene_signature(winding_scene()), scene_signature(evenodd_scene()), scene_signature(dashed_scene()),
+            scene_signature(gradient_scene()), scene_signature(arabic_scene()), scene_signature(porterduff_scene()),
+            scene_signature(mixblend_scene()), scene_signature(backdrop_scene()), scene_signature(scroll_scene()),
+            scene_signature(transform_scene()), scene_signature(opacity_scene())]
+        var dup: i64 = 0
+        var i: i64 = 0
+        while i < sigs.len():
+            var j = i + 1
+            while j < sigs.len():
+                if sigs[i] == sigs[j]:
+                    dup = dup + 1
+                j = j + 1
+            i = i + 1
+        expect(dup).to_equal(0)
 
-# ---------------------------------------------------------------------------
-# Signature distinctness
-# ---------------------------------------------------------------------------
+    it "are deterministic":
+        expect(scene_signature(winding_scene())).to_equal(scene_signature(winding_scene()))
 
-describe "10 scenes produce distinct signatures":
-    it "all 10 scene signatures are unique":
-        val s0 = scene_signature(winding_scene())
-        val s1 = scene_signature(evenodd_scene())
-        val s2 = scene_signature(dashed_scene())
-        val s3 = scene_signature(gradient_scene())
-        val s4 = scene_signature(arabic_scene())
-        val s5 = scene_signature(porterduff_scene())
-        val s6 = scene_signature(mixblend_scene())
-        val s7 = scene_signature(backdrop_scene())
-        val s8 = scene_signature(scroll_scene())
-        val s9 = scene_signature(transform_scene())
-        val s10 = scene_signature(opacity_scene())
-        # Each cull_rect differs, so coord_sum differs, so signature differs.
-        expect(s0 == s1).to_equal(false)
-        expect(s1 == s2).to_equal(false)
-        expect(s2 == s3).to_equal(false)
-        expect(s3 == s4).to_equal(false)
-        expect(s4 == s5).to_equal(false)
-        expect(s5 == s6).to_equal(false)
-        expect(s6 == s7).to_equal(false)
-        expect(s7 == s8).to_equal(false)
-        expect(s8 == s9).to_equal(false)
-        expect(s9 == s10).to_equal(false)
-
-    it "same scene produces same signature when called twice":
-        val a = scene_signature(winding_scene())
-        val b = scene_signature(winding_scene())
-        expect(a).to_equal(b)
-
-# ---------------------------------------------------------------------------
-# PixelDiffResult contract
-# ---------------------------------------------------------------------------
-
-describe "compare_pictures stub":
-    it "identical signatures return ratio 0":
-        val pic = winding_scene()
-        val sig = scene_signature(pic)
-        val diff = compare_pictures(sig, sig)
+describe "compare_pictures":
+    it "finds no difference between a scene and itself":
+        val cull = SkRect(left: 0.0, top: 0.0, right: 200.0, bottom: 200.0)
+        val diff = compare_pictures(winding_scene(), winding_scene(), cull, 0)
         expect(diff.ratio).to_equal(0.0)
+        expect(diff.max_delta).to_equal(0)
 
-    it "identical signatures return max_channel_delta 0":
-        val pic = evenodd_scene()
-        val sig = scene_signature(pic)
-        val diff = compare_pictures(sig, sig)
-        expect(diff.max_channel_delta).to_equal(0)
+    it "sees the winding and even-odd stars differ":
+        val cull = SkRect(left: 0.0, top: 0.0, right: 200.0, bottom: 200.0)
+        val diff = compare_pictures(winding_scene(), evenodd_scene(), cull, 2)
+        expect(diff.ratio > 0.0).to_equal(true)
+        expect(diff.max_delta).to_be_greater_than(100)
 
-    it "different signatures return ratio 1":
-        val sig_a = scene_signature(winding_scene())
-        val sig_b = scene_signature(evenodd_scene())
-        val diff = compare_pictures(sig_a, sig_b)
-        expect(diff.ratio).to_equal(1.0)
+describe "Scene cull rects match the Chromium scene list":
+    it "sizes path_winding, porter_duff and scroll_damage":
+        expect(winding_scene().cull_rect.right).to_equal(200.0)
+        expect(porterduff_scene().cull_rect.right).to_equal(300.0)
+        expect(scroll_scene().cull_rect.bottom).to_equal(400.0)
 
-    it "different signatures return max_channel_delta 255":
-        val sig_a = scene_signature(porterduff_scene())
-        val sig_b = scene_signature(mixblend_scene())
-        val diff = compare_pictures(sig_a, sig_b)
-        expect(diff.max_channel_delta).to_equal(255)
+describe "Scenes render to their goldens":
+    it "path_winding fills the inner pentagon":
+        expect(probe_mismatches(winding_scene(), winding_probes())).to_equal("")
 
-# ---------------------------------------------------------------------------
-# Chromium name spot-checks
-# ---------------------------------------------------------------------------
+    it "path_evenodd leaves the inner pentagon empty":
+        expect(probe_mismatches(evenodd_scene(), evenodd_probes())).to_equal("")
 
-describe "Scene cull rects match Chromium spec":
-    it "path_winding cull is 200x200":
-        val pic = winding_scene()
-        val r = pic.cull_rect
-        expect(r.right).to_equal(200.0)
-        expect(r.bottom).to_equal(200.0)
+    it "dashed_strokes anti-aliases the 1 px stroke and covers exact rows for 2 and 4 px":
+        expect(probe_mismatches(dashed_scene(), dashed_probes())).to_equal("")
 
-    it "porter_duff cull is 300x300":
-        val pic = porterduff_scene()
-        val r = pic.cull_rect
-        expect(r.right).to_equal(300.0)
-        expect(r.bottom).to_equal(300.0)
+    it "gradient_linear splits exactly at x = 101":
+        expect(probe_mismatches(gradient_scene(), gradient_probes())).to_equal("")
 
-    it "scroll_damage cull is 400x400":
-        val pic = scroll_scene()
-        val r = pic.cull_rect
-        expect(r.right).to_equal(400.0)
-        expect(r.bottom).to_equal(400.0)
+    it "text_arabic fills the cubic outline":
+        expect(probe_mismatches(arabic_scene(), arabic_probes())).to_equal("")
+
+    it "porter_duff composites SrcOver, Multiply, Screen and DstIn":
+        expect(probe_mismatches(porterduff_scene(), porterduff_probes())).to_equal("")
+
+    it "mix_blend_mode darkens the overlap":
+        expect(probe_mismatches(mixblend_scene(), mixblend_probes())).to_equal("")
+
+    it "backdrop_filter multiplies the layer into the background":
+        expect(probe_mismatches(backdrop_scene(), backdrop_probes())).to_equal("")
+
+    it "scroll_damage source-overs the translucent rect":
+        expect(probe_mismatches(scroll_scene(), scroll_probes())).to_equal("")
+
+    it "transform_tree draws the tile under an identity matrix":
+        expect(probe_mismatches(transform_scene(), transform_probes())).to_equal("")
+
+    it "opacity_layer applies the layer alpha once":
+        expect(probe_mismatches(opacity_scene(), opacity_probes())).to_equal("")

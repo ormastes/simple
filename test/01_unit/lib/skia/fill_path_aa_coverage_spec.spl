@@ -1,0 +1,167 @@
+"""
+## Purpose and audience
+Purpose: Pin real anti-aliasing in the skia CPU path filler and full-
+precision square roots in the stroker/dasher/shaders. Before this fix
+`fill_path_aa` quantized every edge to integer rows (a shape spanning
+y 10.25..10.75 drew nothing), "supersampled" by calling the same integer
+scanline 4 times (a half-covered pixel was blended 4x and came out ~94%
+opaque), overwrote translucent colors instead of blending, and left open
+subpaths unclosed; the 8-step Newton `_sqrt` in expand/dash/shaders had not
+converged for inputs above ~1e4 (a 1000 px segment measured ~2000 px).
+Audience: maintainers of std.skia's CPU backend and its consumers.
+## Operator workflow
+Run with the test runner; offline, no fixtures.
+`fill_rect` / `fill_rrect` had the same full-coverage `set_pixel` overwrite
+(found by the repaired parity reftest suite): a translucent rect replaced the
+pixels underneath and was stored un-premultiplied on the N32-premul canvas.
+## Compatibility and limitations
+Coverage is sampled on 4 sub-scanlines per row (vertical resolution 1/4
+pixel) with exact horizontal span overlap, so vertical-edge coverage is
+exact and horizontal-edge coverage is quantized to quarters.
+Bug record: doc/08_tracking/bug/skia_fill_path_aa_fake_vertical_aa_2026-10-05.md
+"""
+# @req: REQ-LIB-SKIA_RASTER_PRIMS-001
+
+use std.spec.*
+use std.spec.step
+use std.skia.entity.color.{SkColor4f}
+use std.skia.entity.enums.{SkPathFillType}
+use std.skia.entity.path.{SkPath, SkPathVerb, sk_path_new}
+use std.skia.backend.cpu.raster_prims.{Bitmap, fill_path_aa, fill_rect, fill_rrect}
+use std.skia.entity.geometry.{SkRect}
+use std.skia.feature.stroke.expand.{expand_stroke, stroke_params_new, StrokeCap, StrokeJoin}
+use std.skia.feature.stroke.dash.{dash_path, dash_pattern_new}
+
+fn red(a: f64) -> SkColor4f:
+    SkColor4f(r: 1.0, g: 0.0, b: 0.0, a: a)
+
+fn alpha_at(bm: Bitmap, x: i64, y: i64) -> i64:
+    bm.pixels[(y * bm.width + x) * 4 + 3] as i64
+
+fn channel_at(bm: Bitmap, x: i64, y: i64, c: i64) -> i64:
+    bm.pixels[(y * bm.width + x) * 4 + c] as i64
+
+fn rect_path(x0: f64, y0: f64, x1: f64, y1: f64) -> SkPath:
+    sk_path_new().move_to(x0, y0).line_to(x1, y0).line_to(x1, y1).line_to(x0, y1).close()
+
+describe "fill_path_aa anti-aliasing":
+    it "covers a sub-pixel-tall shape by its real height":
+        step("a 4 px wide strip from y 10.25 to 10.75 covers row 10 by one half")
+        var bm = Bitmap.zeros(8, 16)
+        fill_path_aa(bm, rect_path(2.0, 10.25, 6.0, 10.75), red(1.0))
+        val a = alpha_at(bm, 3, 10)
+        expect(a).to_be_greater_than(120)
+        expect(a).to_be_less_than(136)
+        expect(alpha_at(bm, 3, 9)).to_equal(0)
+        expect(alpha_at(bm, 3, 11)).to_equal(0)
+
+    it "blends a half-covered pixel once, not once per sub-scanline":
+        step("a left edge at x = 2.5 covers column 2 by one half on every row")
+        var bm = Bitmap.zeros(8, 8)
+        fill_path_aa(bm, rect_path(2.5, 0.0, 6.0, 4.0), red(1.0))
+        val a = alpha_at(bm, 2, 1)
+        expect(a).to_be_greater_than(124)
+        expect(a).to_be_less_than(132)
+        expect(alpha_at(bm, 3, 1)).to_equal(255)
+
+    it "keeps the hole of an even-odd shape with fractional edges":
+        var bm = Bitmap.zeros(12, 12)
+        val p = SkPath(fill_type: SkPathFillType.EvenOdd, segments: [])
+        val outer = p.move_to(0.0, 0.0).line_to(10.0, 0.0).line_to(10.0, 10.0).line_to(0.0, 10.0).close()
+        val both = outer.move_to(2.5, 2.5).line_to(7.5, 2.5).line_to(7.5, 7.5).line_to(2.5, 7.5).close()
+        fill_path_aa(bm, both, red(1.0))
+        expect(alpha_at(bm, 5, 5)).to_equal(0)
+        expect(alpha_at(bm, 1, 5)).to_equal(255)
+        val half = alpha_at(bm, 2, 5)
+        expect(half).to_be_greater_than(124)
+        expect(half).to_be_less_than(132)
+
+    it "conserves area on a diagonal edge":
+        step("triangle (0,0) (8,0) (0,8) has area 32 px")
+        var bm = Bitmap.zeros(10, 10)
+        fill_path_aa(bm, sk_path_new().move_to(0.0, 0.0).line_to(8.0, 0.0).line_to(0.0, 8.0).close(), red(1.0))
+        var total: i64 = 0
+        var y: i64 = 0
+        while y < 10:
+            var x: i64 = 0
+            while x < 10:
+                total = total + alpha_at(bm, x, y)
+                x = x + 1
+            y = y + 1
+        # 32 * 255 = 8160; sub-scanline sampling stays within 2 %.
+        expect(total).to_be_greater_than(7996)
+        expect(total).to_be_less_than(8324)
+
+    it "closes an open subpath like a closed one":
+        var open_bm = Bitmap.zeros(10, 10)
+        var closed_bm = Bitmap.zeros(10, 10)
+        fill_path_aa(open_bm, sk_path_new().move_to(1.0, 1.0).line_to(9.0, 1.0).line_to(5.0, 9.0), red(1.0))
+        fill_path_aa(closed_bm, sk_path_new().move_to(1.0, 1.0).line_to(9.0, 1.0).line_to(5.0, 9.0).close(), red(1.0))
+        expect(alpha_at(open_bm, 5, 4)).to_equal(255)
+        expect(open_bm.pixels).to_equal(closed_bm.pixels)
+
+    it "blends a translucent color over what is already there":
+        var bm = Bitmap.zeros(4, 4)
+        fill_path_aa(bm, rect_path(0.0, 0.0, 4.0, 4.0), SkColor4f(r: 0.0, g: 0.0, b: 1.0, a: 1.0))
+        fill_path_aa(bm, rect_path(0.0, 0.0, 4.0, 4.0), red(0.5))
+        val r = channel_at(bm, 1, 1, 0)
+        val b = channel_at(bm, 1, 1, 2)
+        expect(r).to_be_greater_than(124)
+        expect(r).to_be_less_than(132)
+        expect(b).to_be_greater_than(124)
+        expect(b).to_be_less_than(132)
+        expect(alpha_at(bm, 1, 1)).to_equal(255)
+
+describe "fill_rect and fill_rrect compositing":
+    it "fill_rect blends a translucent colour instead of overwriting":
+        step("opaque blue, then red at alpha 0.5 over it: the result mixes both")
+        var bm = Bitmap.zeros(4, 4)
+        fill_rect(bm, SkRect(left: 0.0, top: 0.0, right: 4.0, bottom: 4.0), SkColor4f(r: 0.0, g: 0.0, b: 1.0, a: 1.0))
+        fill_rect(bm, SkRect(left: 0.0, top: 0.0, right: 4.0, bottom: 4.0), red(0.5))
+        expect(channel_at(bm, 1, 1, 0)).to_be_greater_than(124)
+        expect(channel_at(bm, 1, 1, 2)).to_be_greater_than(124)
+        expect(alpha_at(bm, 1, 1)).to_equal(255)
+
+    it "fill_rect stores a translucent colour premultiplied on an empty canvas":
+        var bm = Bitmap.zeros(4, 4)
+        fill_rect(bm, SkRect(left: 0.0, top: 0.0, right: 4.0, bottom: 4.0), red(0.5))
+        expect(alpha_at(bm, 2, 2)).to_be_greater_than(124)
+        expect(alpha_at(bm, 2, 2)).to_be_less_than(132)
+        expect(channel_at(bm, 2, 2, 0)).to_be_less_than(132)
+
+    it "fill_rrect blends a translucent colour instead of overwriting":
+        var bm = Bitmap.zeros(12, 12)
+        fill_rect(bm, SkRect(left: 0.0, top: 0.0, right: 12.0, bottom: 12.0), SkColor4f(r: 0.0, g: 0.0, b: 1.0, a: 1.0))
+        fill_rrect(bm, SkRect(left: 0.0, top: 0.0, right: 12.0, bottom: 12.0), 3.0, 3.0, red(0.5))
+        expect(channel_at(bm, 6, 6, 2)).to_be_greater_than(124)
+        expect(channel_at(bm, 6, 6, 0)).to_be_greater_than(124)
+
+describe "skia square roots on long geometry":
+    it "offsets a 1000 px stroke by half its width":
+        step("expand a horizontal 1000 px line with width 10: the outline spans y -5..5")
+        val line = sk_path_new().move_to(0.0, 0.0).line_to(1000.0, 0.0)
+        val outline = expand_stroke(line, stroke_params_new(10.0, StrokeCap.Butt, StrokeJoin.Miter, 4.0))
+        var lo: f64 = 0.0
+        var hi: f64 = 0.0
+        for seg in outline.segments:
+            for p in seg.pts:
+                if p.y < lo:
+                    lo = p.y
+                if p.y > hi:
+                    hi = p.y
+        expect(lo > -5.01 and lo < -4.99).to_equal(true)
+        expect(hi > 4.99 and hi < 5.01).to_equal(true)
+
+    it "dashes a 1000 px segment by its true length":
+        step("dash [100 on, 100 off] over 1000 px yields exactly 5 dashes")
+        val line = sk_path_new().move_to(0.0, 0.0).line_to(1000.0, 0.0)
+        val dashed = dash_path(line, dash_pattern_new([100.0, 100.0], 0.0))
+        var moves: i64 = 0
+        var max_x: f64 = 0.0
+        for seg in dashed.segments:
+            if seg.pts.len() > 0 and seg.pts[0].x > max_x:
+                max_x = seg.pts[0].x
+            if seg.verb == SkPathVerb.Move:
+                moves = moves + 1
+        expect(moves).to_equal(5)
+        expect(max_x < 1000.01).to_equal(true)

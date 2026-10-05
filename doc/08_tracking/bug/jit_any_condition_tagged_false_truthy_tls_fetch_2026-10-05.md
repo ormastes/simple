@@ -153,9 +153,34 @@ After these fixes `deflate_inflate_zlib_bounded` on the "hello" stream returns
 Ok under the JIT. The Adler-32 trailer check runs over the decoded bytes, so
 the output is byte-exact.
 
-**Open, pre-existing (separate follow-up):** `for b in (f() ?? [])` over a
+**Resolved below (follow-up section):** `for b in (f() ?? [])` over a
 `[u8]` reads the FIRST element double-decoded under the JIT (`104 101` ->
 `13 101`; index reads and the `f()!` path are correct). Reproduces on a seed
 built before any of this work. Repro: `build/probe/forin_probe.spl` shape:
 `fn mk() -> [u8]?` returning `[104u8, 101u8]`, `val a = mk() ?? []`, then
 `for b in a: print b`.
+
+## Follow-up 2026-10-05: the for-in first-element misread was a byte-packed read, plus `text * int`
+
+**for-in over a byte-packed `[u8]`** (was recorded above as "first element of
+`f() ?? []`"). The `??` was incidental. The codegen inline fast path for
+`rt_array_get` (`codegen/instr/calls.rs::compile_inline_array_get`) returned
+the RAW byte for a byte-packed array, while the runtime `rt_array_get`
+returns a tagged int (`from_int`) and every MIR consumer decodes the result
+(UnboxInt). The decode is tag-aware, so a byte whose low 3 bits are zero was
+shifted (104 -> 13, 8 -> 1, 0 stays 0) and every other byte passed through.
+That is why only "the first element" of `hello` looked wrong. This most
+likely surfaced when #2495 moved for-in over arrays from `rt_index_get` (no
+inline path) to `rt_array_get`, so every `for b in bytes` under the JIT could
+corrupt multiples of 8 since then. Fix: the inline byte path tags its result
+(`byte << 3`), matching the runtime function.
+
+**`text * int`** fell through MIR to a native `imul` on the string pointer,
+so `"x" * 4000` was not a string (len -1, and it blanked any interpolation it
+appeared in). MIR now lowers `text * int` and `int * text` to the existing
+`rt_string_repeat` (both runtime lanes), which matches the interpreter
+(count <= 0 -> "").
+
+Evidence: JIT-executed `compiler/tests/jit_value_lane_parity.rs`
+(`for_in_over_packed_bytes_reads_every_byte`, `text_times_int_repeats`), and
+MIR test `text_times_int_lowers_to_string_repeat`.
