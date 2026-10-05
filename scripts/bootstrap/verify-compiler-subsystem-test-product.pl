@@ -282,6 +282,27 @@ no_link_components($overlay);
 $generated_manifest eq "$overlay/src/app/generated-manifest.tsv" &&
   $generated_dir eq "$overlay/src/app"
   or die "generated source manifest outside admitted overlay\n";
+my $generated_snapshot_proof = $build{generated_snapshot_proof_path} // '';
+$generated_snapshot_proof eq "$binary_dir/logs/generated-source-snapshot.env" &&
+  ($build{generated_snapshot_proof_sha256} // '') =~ /\A[0-9a-f]{64}\z/ &&
+  sha_file($generated_snapshot_proof) eq $build{generated_snapshot_proof_sha256}
+  or die "generated source snapshot proof absent or changed\n";
+no_link_components($generated_snapshot_proof);
+open my $snapshot_checker, '-|', $^X, "$FindBin::Bin/verify-product-generated-snapshot.pl",
+  $overlay, $generated_dir, $generated_manifest, '-'
+  or die "cannot verify generated snapshot membership: $!\n";
+my $observed_snapshot_proof = '';
+while (1) {
+  my $chunk;
+  my $read = read($snapshot_checker, $chunk, 4096);
+  defined($read) or die "cannot read generated snapshot proof: $!\n";
+  last unless $read;
+  $observed_snapshot_proof .= $chunk;
+  length($observed_snapshot_proof) <= 65536 or die "generated snapshot proof exceeds bound\n";
+}
+close $snapshot_checker or die "generated snapshot membership verification failed\n";
+$observed_snapshot_proof eq regular_bytes($generated_snapshot_proof)
+  or die "generated snapshot proof no longer matches actual sources\n";
 my %populated_generated;
 find({ no_chdir => 1, wanted => sub {
   my $path = $File::Find::name;

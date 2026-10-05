@@ -44,7 +44,8 @@ closedir $directories;
 for my $directory (@directories) {
     my $snapshot = "$snapshots/$directory/SCV_COMPILE_SNAPSHOT";
     next unless -f $snapshot;
-    my $raw = bytes($snapshot); my @lines = split /\n/, $raw;
+    my $raw = bytes($snapshot); my @lines = split /\n/, $raw, -1;
+    @lines == 6 or die "SCV provenance field count differs\n";
     shift(@lines) eq 'simple-scv-compile-snapshot-v1' or die "SCV manifest schema differs\n";
     my %fields;
     for my $line (@lines) {
@@ -55,8 +56,16 @@ for my $directory (@directories) {
     ($fields{revision} // '') =~ /\Ascv-revision-v1-[0-9a-f]{64}\z/ &&
         ($fields{inventory} // '') =~ /\A[0-9a-f]{64}\z/ &&
         ($fields{count} // '') =~ /\A[1-9][0-9]*\z/ or die "invalid SCV identity\n";
+    my $tree = "scv-tree-v1-$fields{inventory}";
+    my $revision = 'scv-revision-v1-' . sha256_hex("simple/scv-compile-revision/v1|$tree|$fields{inventory}");
+    my $commit = 'scv-compile-v1-' . sha256_hex("simple/scv-compile-commit/v1|$tree|$fields{count}");
+    my $provenance = join("\n", 'simple-scv-compile-snapshot-v1',
+        "revision=$revision", "commit=$commit", "tree=$tree",
+        "inventory=$fields{inventory}", "count=$fields{count}");
+    $raw eq $provenance && $directory eq $revision or die "SCV content identity differs\n";
     my $receipt = "$overlay/build/scv/receipts/$fields{revision}.receipt";
-    index(bytes($receipt), $raw) == 0 or die "SCV snapshot has no completed receipt\n";
+    bytes($receipt) eq "$raw\nsnapshot=snapshots/$revision"
+        or die "SCV snapshot has no completed receipt\n";
     (my $root = $snapshot) =~ s{/SCV_COMPILE_SNAPSHOT\z}{};
     my $inventory = bytes("$root/SCV_COMPILE_INVENTORY");
     sha256_hex($inventory) eq $fields{inventory} or die "SCV inventory hash differs\n";
@@ -80,8 +89,14 @@ for my $directory (@directories) {
     push @matches, [$snapshot, $receipt] if $complete;
 }
 @matches == 1 or die "expected exactly one completed generated-product snapshot\n";
-!-e $output or die "fresh proof output required\n";
-open my $out, '>:raw', $output or die $!;
+my $out;
+if ($output eq '-') {
+    open $out, '>&', \*STDOUT or die $!;
+    binmode $out;
+} else {
+    !-e $output or die "fresh proof output required\n";
+    open $out, '>:raw', $output or die $!;
+}
 print {$out} "schema=simple-product-generated-snapshot-v1\nstatus=generated-membership-verified\n";
 print {$out} "generated_manifest_path=$manifest\ngenerated_manifest_sha256=" . digest($manifest) . "\n";
 print {$out} "generated_files=" . scalar(keys %expected) . "\n";
