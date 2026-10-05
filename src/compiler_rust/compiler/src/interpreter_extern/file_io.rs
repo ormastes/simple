@@ -887,6 +887,16 @@ fn process_status_kib(key: &str) -> i64 {
         .unwrap_or(-1)
 }
 
+/// Return current resident memory in KiB, or -1 when host status is unavailable.
+pub fn rt_process_rss_kib(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(process_status_kib("VmRSS:")))
+}
+
+/// Return peak resident memory in KiB, or -1 when host status is unavailable.
+pub fn rt_process_hwm_kib(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(process_status_kib("VmHWM:")))
+}
+
 fn snapshot_monotonic_ms() -> i64 {
     #[cfg(unix)]
     unsafe {
