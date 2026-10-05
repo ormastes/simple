@@ -1,0 +1,222 @@
+"""
+## Purpose and audience
+Purpose: Pin the static-SVG subset renderer the browser uses for
+`image/svg+xml` (site logos and icons): parsing, shapes, every path command
+incl. elliptical arcs, transforms, fill rules, strokes with caps / joins,
+opacity, viewBox / preserveAspectRatio, style declarations and colors —
+rendered on the skia CPU backend — and prove hostile documents are refused
+or bounded, never crash, never fetch, never allocate past the budget.
+Audience: maintainers of std.skia and the browser image pipeline.
+## Operator workflow
+Run with the test runner from the repo root. Fixtures live in
+test/fixtures/image/svg/<case>/: `input.svg` (hand-written) and
+`coresvg_ref.rgba` (u32le width, u32le height, straight RGBA bytes) — the
+same document rendered by macOS CoreSVG (`NSImage` drawn into an
+NSBitmapImageRep at the document size by a small Swift probe, then
+un-premultiplied), an independent renderer.
+## Compatibility and limitations
+Tolerance (premultiplied channels, so invisible colour noise does not
+count): every pixel within 48 and mean difference below 1/255. Measured
+2026-10-05: max 40 (path_commands, an anti-aliased arc edge), mean <= 0.93,
+styles 0. CoreSVG ignores `display` / `visibility` and `#rgba` colors, so
+those are asserted directly here instead of through the oracle.
+Not rendered by design: gradients/patterns (`url(#..)` paints as none),
+<text>, <image>, <use>, <style>, <script>, filters, clip paths, masks.
+Group opacity is applied per descendant (exact for non-overlapping shapes).
+"""
+# @req: REQ-LIB-SKIA_RASTER_PRIMS-001
+# @cover src/lib/skia/feature/codec/svg_render.spl 85%
+
+use std.spec.*
+use std.spec.step
+use std.skia.feature.codec.svg_render.{decode_svg_to_argb_bounded, svg_signature_valid}
+use std.nogc_sync_mut.io_runtime.{file_read_bytes}
+
+val FIXTURES = "test/fixtures/image/svg/"
+
+fn svg(src: text) -> [u8]:
+    src.bytes()
+
+fn render(src: text) -> [u32]:
+    decode_svg_to_argb_bounded(svg(src), 1000000).unwrap().pixels
+
+fn compare(case_name: text) -> (i64, i64):
+    """(max premultiplied channel difference, mean x1000) vs CoreSVG; (-1, -1)
+    when the decode fails or the size differs."""
+    val r = decode_svg_to_argb_bounded(file_read_bytes(FIXTURES + case_name + "/input.svg"), 1000000)
+    if r.is_err():
+        return (-1, -1)
+    val img = r.unwrap()
+    val ref = file_read_bytes(FIXTURES + case_name + "/coresvg_ref.rgba")
+    val w = ref[0].to_i64() | (ref[1].to_i64() << 8)
+    val h = ref[4].to_i64() | (ref[5].to_i64() << 8)
+    if img.width.to_i64() != w or img.height.to_i64() != h:
+        return (-1, -1)
+    var mx: i64 = 0
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < w * h:
+        val p = 8 + i * 4
+        val got = img.pixels[i]
+        val ga = ((got >> 24u32) & 255u32).to_i64()
+        val ra = ref[p + 3].to_i64()
+        var d = if ga > ra: ga - ra else: ra - ga
+        var c: i64 = 0
+        while c < 3:
+            val gv = ((got >> (16 - c * 8).to_u32()) & 255u32).to_i64() * ga / 255
+            val rv = ref[p + c].to_i64() * ra / 255
+            val dc = if gv > rv: gv - rv else: rv - gv
+            if dc > d:
+                d = dc
+            c = c + 1
+        if d > mx:
+            mx = d
+        sum = sum + d
+        i = i + 1
+    (mx, sum * 1000 / (w * h))
+
+fn within_tolerance(case_name: text) -> bool:
+    val d = compare(case_name)
+    d.0 >= 0 and d.0 <= 48 and d.1 < 1000
+
+fn px(pixels: [u32], w: i64, x: i64, y: i64) -> u32:
+    pixels[y * w + x]
+
+describe "SVG rendering agrees with CoreSVG":
+    it "renders basic shapes":
+        step("rect, rounded rect, circle, ellipse, polygon, polyline, line")
+        assert_true(within_tolerance("shapes"))
+
+    it "renders every path command including arcs and compact numbers":
+        assert_true(within_tolerance("path_commands"))
+
+    it "applies nested transforms":
+        step("translate, rotate (about a point), scale, skewX, matrix")
+        assert_true(within_tolerance("transforms"))
+
+    it "honors nonzero and even-odd fill rules":
+        assert_true(within_tolerance("fill_rules"))
+
+    it "strokes with miter, round and bevel joins and every cap":
+        assert_true(within_tolerance("strokes"))
+
+    it "applies opacity, fill-opacity, stroke-opacity and group opacity":
+        assert_true(within_tolerance("opacity"))
+
+    it "maps a viewBox with the default xMidYMid meet":
+        assert_true(within_tolerance("viewbox_meet"))
+
+    it "resolves style declarations, inheritance and currentColor":
+        assert_true(within_tolerance("styles"))
+        expect(compare("styles").0).to_equal(0)
+
+    it "renders a stroked icon":
+        assert_true(within_tolerance("icon"))
+
+describe "SVG painting semantics":
+    it "paints exact interior colors":
+        val p = render("<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><rect width='8' height='8' fill='#123456'/></svg>")
+        expect(p[27]).to_equal(0xFF123456u32)
+
+    it "supports #rgba and #rrggbbaa colors":
+        val p = render("<svg width='4' height='2'><rect width='2' height='2' fill='#f008'/><rect x='2' width='2' height='2' fill='#00ff0080'/></svg>")
+        expect(p[0] >> 24u32).to_equal(0x88u32)
+        expect(p[2] >> 24u32).to_equal(0x80u32)
+
+    it "hides display:none and visibility:hidden elements":
+        val p = render("<svg width='4' height='4'><rect width='4' height='4' fill='red' display='none'/><rect width='4' height='4' fill='red' style='visibility:hidden'/><g style='display:none'><rect width='4' height='4' fill='red'/></g></svg>")
+        expect(p[5]).to_equal(0u32)
+
+    it "paints url() references as none and never renders scripts, images or text":
+        val p = render("<svg width='4' height='4'><defs><linearGradient id='g'/></defs><rect width='4' height='4' fill='url(#g)'/><image href='http://example.invalid/x.png' width='4' height='4'/><script>alert(1)</script><text x='0' y='3'>hi</text></svg>")
+        expect(p[5]).to_equal(0u32)
+
+    it "derives the size from width/height, then viewBox, then 300x150":
+        expect(decode_svg_to_argb_bounded(svg("<svg width='40' height='20'/>"), 100000).unwrap().width).to_equal(40)
+        val vb = decode_svg_to_argb_bounded(svg("<svg viewBox='0 0 30 10'/>"), 100000).unwrap()
+        expect(vb.width).to_equal(30)
+        expect(vb.height).to_equal(10)
+        val pct = decode_svg_to_argb_bounded(svg("<svg width='100%' viewBox='0 0 30 10'/>"), 100000).unwrap()
+        expect(pct.width).to_equal(30)
+        val none = decode_svg_to_argb_bounded(svg("<svg/>"), 100000).unwrap()
+        expect(none.width).to_equal(300)
+        expect(none.height).to_equal(150)
+        expect(decode_svg_to_argb_bounded(svg("<svg width='1in' height='12pt'/>"), 100000).unwrap().height).to_equal(16)
+
+    it "scales a huge declared size down to the pixel budget, keeping aspect":
+        step("40000 x 20000 declared, 131072 px budget -> 512 x 256")
+        val img = decode_svg_to_argb_bounded(svg("<svg width='40000' height='20000' viewBox='0 0 4 2'><rect width='4' height='2' fill='blue'/></svg>"), 131072).unwrap()
+        expect(img.width).to_equal(512)
+        expect(img.height).to_equal(256)
+        expect(img.pixels[1000]).to_equal(0xFF0000FFu32)
+
+describe "SVG rejects hostile documents":
+    it "rejects non-SVG input":
+        assert_false(svg_signature_valid(svg("<html><svg/></html>")))
+        assert_true(svg_signature_valid(svg("<?xml version='1.0'?><!-- c --><svg/>")))
+        assert_true(decode_svg_to_argb_bounded(svg("not xml"), 1000).is_err())
+        assert_true(decode_svg_to_argb_bounded(svg("<svg/>"), 0).is_err())
+
+    it "rejects malformed markup with a named reason":
+        expect(decode_svg_to_argb_bounded(svg("<svg width='4' height='4'><rect width='4"), 1000).unwrap_err()).to_equal("SVG attribute value is not closed")
+        expect(decode_svg_to_argb_bounded(svg("<svg width=4>"), 1000).unwrap_err()).to_equal("SVG attribute value is not quoted")
+        expect(decode_svg_to_argb_bounded(svg("<svg width='0' height='4'/>"), 1000).unwrap_err()).to_equal("SVG has no drawable size")
+
+    it "caps element count and nesting depth":
+        var many = "<svg width='4' height='4'>"
+        var i: i64 = 0
+        while i < 20001:
+            many = many + "<g/>"
+            i = i + 1
+        expect(decode_svg_to_argb_bounded(svg(many + "</svg>"), 1000).unwrap_err()).to_equal("SVG has too many elements")
+        var deep = "<svg width='4' height='4'>"
+        i = 0
+        while i < 70:
+            deep = deep + "<g>"
+            i = i + 1
+        expect(decode_svg_to_argb_bounded(svg(deep), 1000).unwrap_err()).to_equal("SVG nesting is too deep")
+
+    it "refuses geometry that would exceed the work budget":
+        step("one path of 400 full-circle arcs at 2048 px flattens past the point cap")
+        var d = "M0 0"
+        var i: i64 = 0
+        while i < 400:
+            d = d + " a1000 1000 0 1 1 1 0"
+            i = i + 1
+        val r = decode_svg_to_argb_bounded(svg("<svg width='2048' height='2048'><path d='" + d + "'/></svg>"), 4194304)
+        expect(r.unwrap_err()).to_equal("SVG is too complex")
+
+    it "survives every truncation and byte corruption of a real document":
+        val full = file_read_bytes(FIXTURES + "path_commands/input.svg")
+        var n: i64 = 0
+        var tried: i64 = 0
+        var returned: i64 = 0
+        while n < full.len():
+            var cut: [u8] = []
+            var k: i64 = 0
+            while k < n:
+                cut.push(full[k])
+                k = k + 1
+            val r = decode_svg_to_argb_bounded(cut, 10000)
+            tried = tried + 1
+            if r.is_ok():
+                val img = r.unwrap()
+                expect(img.pixels.len()).to_equal(img.width.to_i64() * img.height.to_i64())
+            returned = returned + 1
+            n = n + 37
+        var pos: i64 = 0
+        while pos < full.len():
+            var mutated: [u8] = []
+            var k: i64 = 0
+            while k < full.len():
+                mutated.push(full[k])
+                k = k + 1
+            mutated[pos] = (mutated[pos].to_i64() ^ 0x15).to_u8()
+            val r = decode_svg_to_argb_bounded(mutated, 10000)
+            tried = tried + 1
+            if r.is_ok():
+                val img = r.unwrap()
+                expect(img.pixels.len()).to_equal(img.width.to_i64() * img.height.to_i64())
+            returned = returned + 1
+            pos = pos + 29
+        expect(returned).to_equal(tried)
