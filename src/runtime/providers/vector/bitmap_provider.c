@@ -14,7 +14,7 @@
 #endif
 #endif
 #define EXPORT __attribute__((visibility("default")))
-#ifdef SIMPLE_VECTOR_ENABLE_HTTP_AVX512
+#ifdef SIMPLE_VECTOR_ENABLE_HTTP
 #define SUPPORTED_CAPS UINT64_C(15)
 #else
 #define SUPPORTED_CAPS UINT64_C(3)
@@ -56,13 +56,19 @@ static int available(void) {
     return 0;
 #endif
 }
-#ifdef SIMPLE_VECTOR_ENABLE_HTTP_AVX512
+#ifdef SIMPLE_VECTOR_ENABLE_HTTP
 static int http_available(void) {
-#if defined(__x86_64__) && !defined(SIMPLE_VECTOR_FORCE_NO_AVX512BW)
+#if defined(SIMPLE_VECTOR_FORCE_NO_HTTP)
+    return 0;
+#elif defined(__x86_64__) && !defined(SIMPLE_VECTOR_FORCE_NO_AVX512BW)
     if(!available()) return 0;
     unsigned int a,b,c,d;
     __cpuid_count(7,0,a,b,c,d);
     return (b&(1u<<30))!=0; /* AVX512BW, in addition to F + OS XSTATE. */
+#elif defined(__aarch64__) || defined(__riscv)
+    /* HTTP byte compares need no stronger ISA than the selected bitmap TU:
+     * ASIMD, SVE (or the image's SVE2 requirement), or RVV respectively. */
+    return available();
 #else
     return 0;
 #endif
@@ -101,7 +107,7 @@ static int span(uint64_t p,uint64_t n) {
 static int overlap(uint64_t a,uint64_t b,uint64_t n) {
     return n && a<b+n && b<a+n;
 }
-#ifdef SIMPLE_VECTOR_ENABLE_HTTP_AVX512
+#ifdef SIMPLE_VECTOR_ENABLE_HTTP
 static int byte_span(uint64_t p,uint64_t n) {
     if(!n) return p==0;
     return p && n<=SIMPLE_VECTOR_MAX_SPAN_BYTES && p<=SIMPLE_VECTOR_MAX_ADDRESS-n;
@@ -120,7 +126,7 @@ EXPORT int64_t simple_vector_apply_v1(int64_t handle,int64_t req,int64_t res) {
     else if(op<1||op>4||!(SUPPORTED_CAPS&(UINT64_C(1)<<(op-1)))) status=SIMPLE_VECTOR_UNSUPPORTED_OPERATION;
     else if(((uint64_t)handle&~SUPPORTED_CAPS)!=UINT64_C(0x53494d4400000000)||
             !((uint64_t)handle&(UINT64_C(1)<<(op-1)))) status=SIMPLE_VECTOR_CAPABILITY_DENIED;
-#ifdef SIMPLE_VECTOR_ENABLE_HTTP_AVX512
+#ifdef SIMPLE_VECTOR_ENABLE_HTTP
     else if(op==3||op==4) {
         uint64_t argument=simple_vector_rd64(q+56);
         if(b||bn||out||cap||!byte_span(a,n)||(op==3?argument>255:argument!=0))

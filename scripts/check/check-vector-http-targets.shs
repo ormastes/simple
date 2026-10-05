@@ -1,0 +1,79 @@
+#!/bin/sh
+# Cross-target HTTP provider correctness/refusal. QEMU is not native perf proof.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:?fresh absolute evidence directory required}
+case "$out" in /*) ;; *) exit 2;; esac
+[ ! -e "$out" ] || { echo 'fresh output required' >&2; exit 2; }
+mkdir -p "$out"
+exec 3>&1
+exec > "$out/build.log" 2>&1
+cc=${CLANG:-/usr/lib/llvm-23/bin/clang}
+objdump=${LLVM_OBJDUMP:-/usr/lib/llvm-23/bin/llvm-objdump}
+src=$root/src/runtime/providers/vector
+abi=$root/src/runtime/simple_vector_kernel_abi_v1.h
+harness=$root/src/runtime/test/vector_http_avx512_selfcheck.c
+"$cc" --version > "$out/toolchain.txt"
+qemu-aarch64 --version >> "$out/toolchain.txt"
+qemu-riscv64 --version >> "$out/toolchain.txt"
+dpkg-query -W libc6-dev-arm64-cross libc6-dev-riscv64-cross > "$out/sysroots.txt"
+sha256sum "$src/bitmap_provider.c" "$src/bitmap_kernel_private.h" "$abi" \
+    "$src/http_neon.c" "$src/http_sve.c" "$src/http_rvv.c" "$harness" > "$out/source.sha256"
+compile() { timeout 60 "$@"; }
+for family in neon sve rvv; do
+    dir=$out/$family; mkdir "$dir"
+    requirement=
+    case "$family" in
+        neon) arch=aarch64; base='-march=armv8-a -mgeneral-regs-only'; vector='-march=armv8-a+simd';;
+        sve) arch=aarch64; base='-march=armv8-a -mgeneral-regs-only'; vector='-march=armv8-a+sve'; requirement=-DSIMPLE_VECTOR_REQUIRE_SVE;;
+        rvv) arch=riscv64; base='-march=rv64gc -mabi=lp64d'; vector='-march=rv64gcv -mabi=lp64d';;
+    esac
+    provider=$(printf 'simple-vector-http-bitmap-v1:%s' "$family" | sha256sum | cut -c1-16)
+    implementation=$({ printf '%s\n' "$requirement"; cat "$src/bitmap_provider.c" "$src/bitmap_kernel_private.h" "$src/bitmap_$family.c" "$src/http_$family.c" "$abi"; } | sha256sum | cut -c1-16)
+    printf '#define SIMPLE_VECTOR_PROVIDER_ID UINT64_C(0x%s)\n#define SIMPLE_VECTOR_IMPLEMENTATION_ID UINT64_C(0x%s)\n' "$provider" "$implementation" > "$dir/provider_identity.h"
+    common="--target=$arch-linux-gnu --gcc-toolchain=/usr -std=c11 -O2 -Wall -Wextra -Werror -fno-vectorize -fno-slp-vectorize"
+    compile "$cc" $common $base -fPIC -fvisibility=hidden -DSIMPLE_VECTOR_ENABLE_HTTP $requirement -I"$dir" -c "$src/bitmap_provider.c" -o "$dir/provider.o"
+    compile "$cc" $common $vector -fPIC -fvisibility=hidden -DSIMPLE_VECTOR_ENABLE_HTTP -c "$src/bitmap_$family.c" -o "$dir/bitmap.o"
+    compile "$cc" $common $vector -fPIC -fvisibility=hidden -DSIMPLE_VECTOR_ENABLE_HTTP -c "$src/http_$family.c" -o "$dir/http.o"
+    compile "$cc" --target="$arch-linux-gnu" --gcc-toolchain=/usr -shared "$dir/provider.o" "$dir/bitmap.o" "$dir/http.o" -o "$dir/provider.so"
+    compile "$cc" $common $base "$harness" -ldl -o "$dir/check"
+    "$objdump" -d "$dir/provider.o" > "$dir/guard.disasm"
+    "$objdump" -d "$dir/http.o" > "$dir/http.disasm"
+    case "$family" in
+        neon) grep -Eq '\bcmeq\b' "$dir/http.disasm";;
+        sve) grep -Eq '\bld1b\b' "$dir/http.disasm"; grep -Eq '\bbrkb\b' "$dir/http.disasm";
+             if grep -Eq '\bz[0-9]+\.|\bp[0-9]+[./]' "$dir/guard.disasm"; then exit 1; fi;;
+        rvv) grep -Eq '\bvle8\.v\b' "$dir/http.disasm"; grep -Eq '\bvfirst\.m\b' "$dir/http.disasm";
+             if grep -Eq '\bvset(vli|ivli)\b|\bvle[0-9]+\.v\b' "$dir/guard.disasm"; then exit 1; fi;;
+    esac
+    if [ "$family" = neon ]; then
+        mkdir "$dir/forced-id"
+        forced=$(printf '%s:force-no-http' "$implementation" | sha256sum | cut -c1-16)
+        printf '#define SIMPLE_VECTOR_PROVIDER_ID UINT64_C(0x%s)\n#define SIMPLE_VECTOR_IMPLEMENTATION_ID UINT64_C(0x%s)\n' "$provider" "$forced" > "$dir/forced-id/provider_identity.h"
+        compile "$cc" $common $base -fPIC -fvisibility=hidden -DSIMPLE_VECTOR_ENABLE_HTTP -DSIMPLE_VECTOR_FORCE_NO_HTTP -I"$dir/forced-id" -c "$src/bitmap_provider.c" -o "$dir/forced.o"
+        compile "$cc" --target="$arch-linux-gnu" --gcc-toolchain=/usr -shared "$dir/forced.o" "$dir/bitmap.o" "$dir/http.o" -o "$dir/forced.so"
+    fi
+    sha256sum "$dir"/*.so "$dir/check" "$dir/http.o" "$dir/provider.o" > "$dir/artifacts.sha256"
+done
+status=0
+run() {
+    name=$1; shift
+    result=0
+    perl "$root/scripts/resource/process-tree-rss-watchdog.pl" --max-rss-kib=524288 \
+        --rss-cap-mode=enforce --timeout-seconds=60 --receipt="$out/$name.rss.env" -- "$@" \
+        > "$out/$name.log" 2>&1 || result=$?
+    printf '%s\t%s\n' "$name" "$result" >> "$out/results.tsv"
+    cat "$out/$name.log" >&3
+    [ "$result" = 0 ] || status=1
+}
+run neon qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu max "$out/neon/check" "$out/neon/provider.so" 1 1
+run neon-no-http qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu max "$out/neon/check" "$out/neon/forced.so" 0 1
+for vq in 1 2 4; do
+    run "sve-$vq" qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu "max,sve-max-vq=$vq" "$out/sve/check" "$out/sve/provider.so" 1 1
+done
+run no-sve qemu-aarch64 -L /usr/aarch64-linux-gnu -cpu cortex-a53 "$out/sve/check" "$out/sve/provider.so" 0 0
+run rvv128 qemu-riscv64 -L /usr/riscv64-linux-gnu -cpu rva23u64,vlen=128,elen=64 "$out/rvv/check" "$out/rvv/provider.so" 1 1
+run rvv256 qemu-riscv64 -L /usr/riscv64-linux-gnu -cpu rva23u64,vlen=256,elen=64 "$out/rvv/check" "$out/rvv/provider.so" 1 1
+run no-v qemu-riscv64 -L /usr/riscv64-linux-gnu -cpu max,v=false "$out/rvv/check" "$out/rvv/provider.so" 0 0
+cat "$out/results.tsv" >&3
+exit "$status"

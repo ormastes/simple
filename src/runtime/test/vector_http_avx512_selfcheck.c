@@ -20,11 +20,16 @@ static void request(uint8_t *q,unsigned op,const uint8_t *p,size_t n,uint64_t ar
     simple_vector_wr64(q+56,arg);
 }
 int main(int argc,char **argv) {
-    CHECK(argc==3);
-    int forced=atoi(argv[2]);
+    CHECK(argc==3 || argc==4);
+    int forced=argc==3?atoi(argv[2]):0;
+    int bitmap_supported=0,byte_supported=0;
+#if defined(__x86_64__)
     __builtin_cpu_init();
-    int bitmap_supported=__builtin_cpu_supports("avx512f")!=0;
-    int byte_supported=bitmap_supported && __builtin_cpu_supports("avx512bw") && !forced;
+    bitmap_supported=__builtin_cpu_supports("avx512f")!=0;
+    byte_supported=bitmap_supported && __builtin_cpu_supports("avx512bw") && !forced;
+#endif
+    /* Cross-target rows supply independently selected QEMU CPU expectations. */
+    if(argc==4) { byte_supported=atoi(argv[2]); bitmap_supported=atoi(argv[3]); }
     void *lib=dlopen(argv[1],RTLD_NOW|RTLD_LOCAL); CHECK(lib);
     simple_vector_query_fn_v1 query=(simple_vector_query_fn_v1)dlsym(lib,"simple_provider_query_v1");
     simple_vector_apply_fn_v1 apply=(simple_vector_apply_fn_v1)dlsym(lib,"simple_vector_apply_v1");
@@ -96,7 +101,7 @@ int main(int argc,char **argv) {
     request(q,3,area,64,255);
     CHECK(apply((int64_t)simple_vector_rd64(pr+16),(uintptr_t)q,(uintptr_t)r)==0 && simple_vector_rd32(r+4)==3);
     CHECK(!munmap(mapping,(size_t)page*3)); CHECK(!dlclose(lib));
-    if(!forced&&!byte_supported) { puts("UNSUPPORTED AVX512F+BW host required; refusal checks completed"); return 77; }
-    printf("vector_http_avx512=pass mode=%s cases=%u http_vector_iterations=%llu bitmap_f=%d guard_pages=true input_preserved=true\n",forced?"forced-no-bw":"native",cases,(unsigned long long)http_iterations,bitmap_supported);
+    if(argc==3&&!forced&&!byte_supported) { puts("UNSUPPORTED AVX512F+BW host required; refusal checks completed"); return 77; }
+    printf("vector_http_provider=pass mode=%s cases=%u http_vector_iterations=%llu bitmap_supported=%d guard_pages=true input_preserved=true\n",argc==4?"cross-target":forced?"forced-no-bw":"native",cases,(unsigned long long)http_iterations,bitmap_supported);
     return 0;
 }
