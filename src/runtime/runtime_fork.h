@@ -81,6 +81,11 @@ const char* rt_fork_parent_stdout(void);
  */
 const char* rt_fork_parent_stderr(void);
 
+/* Private C capture bridge: byte lengths include embedded/trailing NULs and
+ * diagnostic markers, but exclude the extra C terminator. Same lifetime as
+ * the data getters above. This is not a Simple runtime FFI entrypoint. */
+void simple_fork_parent_capture_lengths(uint64_t* stdout_bytes, uint64_t* stderr_bytes);
+
 /*
  * Child: exit immediately without atexit handlers or stdio flush.
  * Uses _exit() to avoid double-flushing stdio buffers inherited from parent.

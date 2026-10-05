@@ -28,7 +28,8 @@ impl LlvmBackend {
         value: bool,
         vreg_map: &mut VRegMap,
     ) -> Result<(), CompileError> {
-        let bits = if value { 11u64 } else { 19u64 };
+        // Match the shared emitter and unboxed Result<bool> payloads.
+        let bits = u64::from(value);
         let const_val = self.runtime_int_type().const_int(bits, false);
         vreg_map.insert(dest, const_val.into());
         Ok(())

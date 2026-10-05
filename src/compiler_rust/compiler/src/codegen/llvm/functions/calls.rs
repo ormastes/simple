@@ -1788,8 +1788,8 @@ impl LlvmBackend {
 
         builder.position_at_end(done_block);
         if let Some(dest) = dest {
-            let false_value = i64_type.const_int(19, false);
-            let true_value = i64_type.const_int(11, false);
+            let false_value = i64_type.const_zero();
+            let true_value = i64_type.const_int(1, false);
             let phi = builder
                 .build_phi(i64_type, "bytes_u8_set")
                 .map_err(|e| crate::error::factory::llvm_build_failed("bytes set phi", &e))?;
@@ -2794,10 +2794,10 @@ impl LlvmBackend {
             raw_arg_vals.push(casted.into_int_value());
         }
 
-        // LLVM represents Simple booleans as tagged RuntimeValues (true = 11,
-        // false = 19), while rt_value_bool accepts an unboxed C boolean. Keep
-        // raw 0/1 inputs intact, but untag values produced by ConstBool before
-        // crossing that SFFI boundary.
+        // Native scalar booleans are raw 0/1, while values obtained from a
+        // runtime container may still carry RuntimeValue tags (true = 11,
+        // false = 19). rt_value_bool accepts an unboxed C boolean: preserve
+        // raw inputs and decode tagged inputs at this explicit boxing boundary.
         if sffi_name == "rt_value_bool" {
             if let Some(value) = raw_arg_vals.first_mut() {
                 let is_tagged_false = builder

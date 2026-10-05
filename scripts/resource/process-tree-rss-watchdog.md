@@ -21,6 +21,22 @@ have a separate one-second deadline. The configured sampling interval (at most
 100 ms) is the target cadence, not a guaranteed observation completion time.
 The helper and source SHA-256 values are included in the receipt.
 
+On Windows, the guard runs under MSYS/Git-for-Windows Perl and compiles its
+Job Object helper with Clang and LLD. The `clang` driver may target either GNU
+or MSVC: the memoized `--version` target selects `-municode` only for GNU/MinGW
+targets, whose CRT otherwise cannot resolve the helper's `wmain` entry point.
+`clang-cl` and MSVC-targeting `clang` keep their existing startup flags. The
+selected flags participate in the helper cache key, so GNU helpers built with
+the corrected startup option cannot reuse an older cache entry. For the `clang`
+driver, unsupported or missing targets fail before helper compilation. Run the portable selection
+regression with `perl scripts/bootstrap/tests/windows-session-helper-target-test.pl`.
+For a native GNU launch check, run the guard command above under MSYS with
+`CC=clang` and a fresh POSIX-absolute `SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE`;
+require a nonzero root PID, verified helper integrity, and quiescent completion
+in the receipt. A second workload that checks `SIMPLE_BOOTSTRAP_SESSION_ID`
+and `SIMPLE_BOOTSTRAP_SESSION_EXEC` and exits nonzero verifies contract delivery,
+cache reuse, and exit propagation.
+
 The canonical outer guard uses `--session-mode=new` and rejects any inbound
 session pair. Nested timeout wrappers explicitly choose `--session-mode=inherit`,
 which requires a live root, matching SID, helper SHA/source SHA, and a helper-
@@ -86,8 +102,12 @@ identities, and the selected snapshot's ancestry (cycle checked, at most 32
 rows). These are failure diagnostics, not a change to ownership selection or
 permission handling. A failed `getsid` in the diagnostic is recorded as -1.
 
-Sampling failure, malformed output, or a sample exceeding its one-second
-observation budget causes exit 89. Scheduling uses the remaining
+Sampling failure, malformed output, or a sample exceeding its observation
+budget causes exit 89. The default is five seconds on FreeBSD and one second
+elsewhere. `SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS` explicitly selects a
+budget from 1000 through 30000 milliseconds on every platform; invalid values
+fail closed. This changes the allowed observation duration, not the RSS cap
+or 100 ms target cadence. Scheduling uses the remaining
 interval budget, rather than adding a full sleep after measurement. Scheduler
 delays are reported as `sample_gap_max_ms`; this is not a real-time guarantee.
 Receipts also report `observation_budget_ms`, `sample_duration_max_ms` for
