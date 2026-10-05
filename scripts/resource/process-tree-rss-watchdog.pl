@@ -404,6 +404,18 @@ sub windows_compile_flags {
     die "Windows session helper requires clang-cl or clang (CC=$compiler; cl/gcc are not permitted)";
 }
 
+sub windows_target_compile_flags {
+    my ($style, $identity) = @_;
+    return () if $style eq 'cl';
+    my ($target) = $identity =~ /^Target:\s*(\S+)/m;
+    defined($target) or die "compiler identity has no target";
+    # The clang driver also supports MSVC targets. Only the MinGW CRT needs
+    # -municode to select wmain; driver spelling alone does not identify it.
+    return ('-municode') if $target =~ /(?:-windows-gnu|-mingw32)(?:\z|-)/i;
+    return () if $target =~ /-windows-msvc(?:\z|[0-9.-])/i;
+    die "unsupported Windows session helper compiler target: $target";
+}
+
 # Build once, reuse on every guard start. The cache key covers everything that
 # determines the binary: source sha, compiler identity (--version, which also
 # names the target), compiler path, flags (including the baked-in shell path)
@@ -445,6 +457,7 @@ sub install_cached_windows_helper {
         print {$memo} $identity;
         close($memo) && rename("$identity_file.new.$$", $identity_file) or die "cannot record compiler identity";
     }
+    push @flags, windows_target_compile_flags($style, $identity);
     my $key = Digest::SHA::sha256_hex(join("\0", 'simple-session-helper-cache-v1', $helper_source_sha,
         $identity, $compiler, $style, @flags, $^O, $Config{archname}));
     my $entry = "$cache/$key";
