@@ -1,18 +1,18 @@
 set pagination off
 set confirm off
-set $avx512_hits = 0
-break db_bitmap_and_avx512
+set $avx2_hits = 0
+break db_bitmap_and_avx2
 commands
 silent
-set $avx512_hits = $avx512_hits + 1
+set $avx2_hits = $avx2_hits + 1
 continue
 end
 run
-printf "AVX512_KERNEL_ENTRIES=%d\n", $avx512_hits
+printf "AVX2_KERNEL_ENTRIES=%d\n", $avx2_hits
 if $_exitcode != 0
 quit 2
 end
-if $avx512_hits != 3
+if $avx2_hits != 3
 quit 3
 end
 quit 0
