@@ -91,3 +91,61 @@ this does not change production policy. The external owner must pin Git and the
 compiled binary, alternate order, check each complete membership set and stable
 fixture identity, and collect process-tree peak/retained RSS plus p50/p95 times.
 No benchmark is accepted from timing/count output without these checks.
+
+## Remaining full-source materialization cost (2026-10-05)
+
+The source materializer is a separate orchestration cost from the Simple
+workaround Git query. The root-owned `61e26` repair candidate required 496.7 s
+to extract/authenticate 141,505 regular Git blobs despite only 18 selected
+repair commits. The observation near alias creation was about 487 s elapsed
+and 465 CPU seconds. The generic regression source `c6378ac0581` required
+541.7 s on its successful preparation attempt for 141,913 regular blobs and
+65 aliases; archive normalization restored 534 omitted paths and repaired
+734 transformed files. These are preparation receipts, not compiler timings
+or matched before/after benchmarks. The failed first c637 preparation and its
+rename-related diagnosis are retained separately; none of its partial output
+was admitted without subsequent full target authentication.
+
+Evidence owners: `source-materialization-p2-repairs61e26` and
+`source-materialization-generic-c637` beneath the Windows restart packet root.
+The c637 ready receipt and `physical-git-blobs-final.tsv` identify its actual
+accepted source. The scoped Git-query repair does not address this cost and
+does not close TODO347.
+
+### Incremental preparation proposal — not selected or implemented
+
+An incremental materializer could consume an already authenticated immutable
+base plus an exact `git diff-tree --no-renames` change set. Its target manifest
+must still come from the complete target Git tree, including file mode and
+alias semantics. Deleted and renamed-away base paths must be absent; changed
+and added paths must be read from exact target blobs. Comparing final manifest
+membership must reject missing, extra, case-colliding or escaping paths.
+
+Skipping byte revalidation of unchanged paths requires a separately proven
+immutable backing-store contract. A previous hash, unchanged mtime, unchanged
+HEAD, or a content-addressed filename is insufficient. Shared mutable
+hardlinks between running sources and a new candidate are prohibited.
+An implementation may use independently writable copy-on-write files only
+after proving isolation for the actual host/filesystem. Without that
+capability it must retain copy-and-hash authentication, even if slower.
+Authority publication occurs only after the complete target passes; no input
+to a running compiler is patched and no existing authority is relabeled.
+
+Required acceptance experiments before adoption:
+
+- Exact target parity for additions, deletions, both sides of renames,
+  executable-mode changes, aliases, case collisions and formerly omitted
+  archive paths. An injected stale/extra base file must fail admission.
+- Mutating either candidate must leave the base and other admitted candidates
+  unchanged. Tampered base bytes/receipts, interrupted copying and crashed
+  publishers must never produce an accepted partial authority.
+- Concurrent consumers retain their original immutable generation. A second
+  publisher cannot replace an admitted generation or reuse a stale lease.
+- Alternate full and incremental preparations on identical target manifests;
+  record elapsed/CPU time, bytes read/written, peak/retained process-tree RSS
+  and integrity parity. Cold and warm results remain separate. A speedup
+  without memory and correctness evidence is not acceptance.
+
+This proposal requires a reviewed host capability and ownership design before
+implementation. Existing full authentication remains the fallback and all
+currently running source generations remain unchanged.
