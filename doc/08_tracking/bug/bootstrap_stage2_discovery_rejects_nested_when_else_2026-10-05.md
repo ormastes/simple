@@ -30,6 +30,18 @@ which raw-parses `@when` chains the incremental path strips differently.
 Same class as
 doc/08_tracking/bug/rust_seed_full_scan_os_when_raw_parse_2026-10-02.md.
 
+## Update 1 (same day, incremental mode)
+
+The failure is NOT specific to `--clean-rebuild`: the plain incremental
+invocation fails identically on `50f656a675c`. The same file content was
+present at `817fef0f97c`, where stage 2 built 1198 modules successfully
+on this host on 2026-10-05 — so the regression is in the 76-commit window
+`817fef0f97c..50f656a675c` (compiler/HIR/driver changes) or in how the
+discovery path evaluates os-guard chains. Likely macOS-specific: on Linux
+the `@when(os="linux")` branch matches and the `@else` chain is discarded
+before evaluation; on macOS the chain must be walked to the (unsupported)
+nested form. Linux CI can therefore be green while macOS stage 2 is broken.
+
 ## Suggested directions
 
 - Teach the discovery preprocessor the `@else:` + nested `@when` form, or
