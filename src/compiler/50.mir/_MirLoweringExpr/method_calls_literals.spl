@@ -512,7 +512,18 @@ impl MirLowering:
         var is_text = false
         var supported = false
         var result_struct_name = ""
+        var result_is_array = false
         match payload_type.kind:
+            case HirTypeKind.Bool:
+                if default_expr == nil:
+                    result_type = MirType.bool()
+                    supported = true
+            case HirTypeKind.Array(_, _):
+                if default_expr == nil:
+                    # The payload is already a runtime array handle. Keep its
+                    # word intact; element decoding happens on indexing.
+                    result_is_array = true
+                    supported = true
             case HirTypeKind.Int(bits, signed):
                 if bits == 64 and signed:
                     supported = true
@@ -622,6 +633,13 @@ impl MirLowering:
         b_merge.switch_to_block(merge_block)
         self.builder = b_merge
         self.remember_local_hir_type(result_local.id, payload_type, 0, 0)
+        if result_is_array:
+            self.runtime_array_locals[result_local.id] = true
+            self.mark_runtime_value_local(result_local.id)
+            match payload_type.kind:
+                case HirTypeKind.Array(element, _):
+                    self.runtime_elem_value_type[result_local.id] = self.lower_type(element)
+                case _: ()
         if result_struct_name != "":
             self.struct_value_syms[result_local.id] = result_struct_name
         result_local
