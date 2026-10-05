@@ -640,7 +640,8 @@ sub snapshot {
             next unless defined($line);  # exited after open, before read
             next unless length($line);
             $line =~ /\A\Q$pid\E \(.*\) (\S) (\d+) (\d+) (\d+) (?:\S+ ){15}(\d+) \S+ (-?\d+) /s
-                or die "malformed /proc/$pid/stat";
+                or die "malformed /proc/$pid/stat (bytes=" . length($line) .
+                    " prefix_hex=" . unpack('H*', substr($line, 0, 256)) . ")\n";
             $all{$pid} = { parent => 0+$2, group => 0+$3, session => 0+$4,
                            rss => $6 * $proc_page_kib,
                            zombie => ($1 eq 'Z' ? 1 : 0), identity => "t$5" };
