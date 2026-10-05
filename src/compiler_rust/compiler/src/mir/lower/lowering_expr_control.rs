@@ -92,7 +92,7 @@ impl<'a> MirLowerer<'a> {
         use crate::mir::function::MirLocal;
 
         // Lower condition
-        let cond_reg = self.lower_expr(condition)?;
+        let cond_reg = self.lower_condition_expr(condition)?;
 
         // Create temporary local for result BEFORE branching
         let temp_local_index = self.with_func(|func, _| {

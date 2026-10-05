@@ -59,18 +59,46 @@ pub extern "C" fn rt_sha256_new() -> i64 {
     handle
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rt_sha256_write(handle: i64, data_ptr: *const u8, data_len: u64) {
-    if data_ptr.is_null() {
-        return;
-    }
-    let Ok(data_len) = usize::try_from(data_len) else {
-        return;
+/// Bytes of a `text` or `[u8]` (byte-packed or slot) runtime value, bounded by
+/// `len`. This is the payload contract the interpreter's `rt_sha256_write` /
+/// `rt_sha1_write` already implement (`interpreter_extern/sha256.rs`). `None`
+/// when the payload is neither, or `len` is negative or exceeds it.
+pub(crate) fn runtime_hash_payload(data: RuntimeValue, len: i64) -> Option<Vec<u8>> {
+    let limit = usize::try_from(len).ok()?;
+    let ptr = crate::value::collections::rt_string_data(data);
+    let mut bytes = if ptr.is_null() {
+        runtime_byte_array_to_vec(data)?
+    } else {
+        let text_len = usize::try_from(crate::value::collections::rt_string_len(data)).ok()?;
+        unsafe { std::slice::from_raw_parts(ptr, text_len) }.to_vec()
     };
+    if limit > bytes.len() {
+        return None;
+    }
+    bytes.truncate(limit);
+    Some(bytes)
+}
+
+/// `rt_sha256_write(hasher, data: text | [u8], len)`.
+///
+/// Compiled code passes `data` as a tagged `RuntimeValue`. This used to be
+/// declared `(*const u8, u64)`, so the JIT handed the TAGGED word in as a raw
+/// byte pointer and the digest hashed whatever memory it pointed at
+/// (`"abc"` -> `faee9357...` instead of `ba7816bf...`, an out-of-bounds read).
+/// An unusable payload drops the handle so `finish` fails closed (NIL) rather
+/// than returning a digest of the wrong bytes.
+#[no_mangle]
+pub extern "C" fn rt_sha256_write(handle: i64, data: RuntimeValue, len: i64) {
     let mut map = SHA256_MAP.lock().unwrap();
-    if let Some(hasher) = map.get_mut(&handle) {
-        let data = std::slice::from_raw_parts(data_ptr, data_len);
-        hasher.update(data);
+    match runtime_hash_payload(data, len) {
+        Some(bytes) => {
+            if let Some(hasher) = map.get_mut(&handle) {
+                hasher.update(&bytes);
+            }
+        }
+        None => {
+            map.remove(&handle);
+        }
     }
 }
 
@@ -178,6 +206,51 @@ pub unsafe extern "C" fn rt_sha256_file_raw_v1(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_text(bytes: &[u8]) -> RuntimeValue {
+        unsafe { crate::value::collections::rt_string_new(bytes.as_ptr(), bytes.len() as u64) }
+    }
+
+    fn finish_hex(handle: i64) -> String {
+        let result = rt_sha256_finish(handle);
+        assert!(!result.is_nil());
+        let ptr = crate::value::collections::rt_string_data(result);
+        let len = crate::value::collections::rt_string_len(result);
+        unsafe { std::str::from_utf8(std::slice::from_raw_parts(ptr, len as usize)).unwrap().to_string() }
+    }
+
+    /// Compiled code passes a tagged text / [u8] value (JIT "abc" used to hash
+    /// the pointed-at memory: faee9357... instead of ba7816bf...).
+    #[test]
+    fn test_sha256_write_takes_runtime_payload() {
+        const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let h = rt_sha256_new();
+        rt_sha256_write(h, test_text(b"abc"), 3);
+        assert_eq!(finish_hex(h), ABC);
+
+        let packed = crate::value::collections::rt_byte_array_new(1);
+        for b in [97, 98, 99, 100] {
+            assert!(crate::value::collections::rt_typed_bytes_u8_push(packed, b));
+        }
+        let h = rt_sha256_new();
+        rt_sha256_write(h, packed, 3);
+        assert_eq!(finish_hex(h), ABC);
+
+        let slots = crate::value::collections::rt_array_new(3);
+        for b in [97, 98, 99] {
+            crate::value::collections::rt_array_push(slots, RuntimeValue::from_int(b));
+        }
+        let h = rt_sha256_new();
+        rt_sha256_write(h, slots, 3);
+        assert_eq!(finish_hex(h), ABC);
+
+        // len past the payload, a negative len, or a non-payload value: no digest.
+        for (data, len) in [(test_text(b"abc"), 4), (test_text(b"abc"), -1), (RuntimeValue::from_int(7), 1)] {
+            let h = rt_sha256_new();
+            rt_sha256_write(h, data, len);
+            assert!(rt_sha256_finish(h).is_nil());
+        }
+    }
     use crate::value::collections::rt_string_data;
 
     #[test]
@@ -185,9 +258,7 @@ mod tests {
         let handle = rt_sha256_new();
         assert!(handle > 0);
 
-        unsafe {
-            rt_sha256_write(handle, b"hello".as_ptr(), 5);
-        }
+            rt_sha256_write(handle, test_text(b"hello"), (5) as i64);
 
         let result = rt_sha256_finish(handle);
         let hash_str = unsafe {
@@ -205,9 +276,7 @@ mod tests {
     #[test]
     fn test_sha256_finish_bytes_is_typed_array() {
         let handle = rt_sha256_new();
-        unsafe {
-            rt_sha256_write(handle, b"hello".as_ptr(), 5);
-        }
+            rt_sha256_write(handle, test_text(b"hello"), (5) as i64);
         let result = rt_sha256_finish_bytes(handle);
         let bytes = crate::value::byte_array_bytes(result).unwrap();
         assert_eq!(

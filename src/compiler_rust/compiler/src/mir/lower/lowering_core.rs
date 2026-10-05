@@ -1612,6 +1612,22 @@ impl<'a> MirLowerer<'a> {
         })
     }
 
+    /// Lower a branch/logical condition to a RAW truth word (zero = false).
+    ///
+    /// `Branch`, `and`/`or` and `not` test the machine word directly. An
+    /// `ANY`-typed condition — e.g. a generic field `Pair<_, bool>.second` —
+    /// holds a TAGGED value, where `false` and `nil` are non-zero words, so
+    /// `if pair.second:` was always taken under the JIT while the interpreter
+    /// read it as false (h1_client's `read.second or ...` broke every https
+    /// fetch). Decode through `rt_value_truthy`, the interpreter's semantics.
+    pub(super) fn lower_condition_expr(&mut self, condition: &HirExpr) -> MirLowerResult<VReg> {
+        let reg = self.lower_expr(condition)?;
+        if condition.ty != TypeId::ANY {
+            return Ok(reg);
+        }
+        self.unbox_scalar_for_raw_slot(TypeId::BOOL, TypeId::ANY, reg)
+    }
+
     pub(super) fn unbox_scalar_for_raw_slot(
         &mut self,
         declared_ty: TypeId,
