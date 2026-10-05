@@ -1,0 +1,68 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+# SimpleOS x86_64 user link through the internal ELF engine
+# (doc/03_plan/compiler/linker/mold_mdsocpp_linker_plan_2026-09-18.md,
+# doc/03_plan/os/simpleos/simpleos_selfhost_seed_linker_plan_2026-10-04.md G4).
+#
+# Regression (measured 2026-10-05): `SIMPLE_LINKER=internal native-build
+# --target x86_64-unknown-simpleos` failed with "internal engine: entry symbol
+# not defined: _start" although crt0.o defines `T _start`. Root cause: the ELF
+# symbol parser read st_info/st_other with the inline form
+# `if c: bytes[i] as i64 else: bytes[j] as i64`, which the compiler
+# miscompiles (the else arm is lost), so every ELF64 symbol came back with
+# binding LOCAL and no global ever entered the resolver's defined table.
+#
+# @cover src/compiler/70.backend/linker/elf_parser.spl
+# @cover src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl
+
+use std.spec.*
+
+use compiler.backend.linker.linker_wrapper.{link_simpleos_internal, NativeLinkConfig}
+use compiler.backend.linker.elf_parser.{elf_parse_object, elf_symbol_binding, STB_GLOBAL}
+use std.io_runtime.{file_read_bytes}
+
+val FIX: text = "test/fixtures/linker/simpleos"
+
+fn _u64_le(bytes: [u8], at: i64) -> i64:
+    var v: i64 = 0
+    var i: i64 = 7
+    while i >= 0:
+        v = (v << 8) | (bytes[at + i] as i64)
+        i = i - 1
+    v
+
+fn _binding_of(path: text, name: text) -> i64:
+    val obj = elf_parse_object(file_read_bytes(path)).unwrap()
+    var binding: i64 = -1
+    for sym in obj.symbols:
+        if sym.name == name:
+            binding = elf_symbol_binding(sym)
+    binding
+
+describe "SimpleOS x86_64 user link - internal ELF engine":
+    it "parses a crt0 GLOBAL _start as STB_GLOBAL":
+        expect(_binding_of("{FIX}/crt0_x64.o", "_start")).to_equal(STB_GLOBAL)
+        expect(_binding_of("{FIX}/main_x64.o", "main")).to_equal(STB_GLOBAL)
+
+    it "links crt0 + main with the sysroot script and enters at _start":
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.pie = false
+        cfg.allow_duplicate_definitions = false
+        cfg.allow_cc_fallback = false
+        cfg.extra_flags = [
+            "-T", "{FIX}/simpleos_user.ld", "-nostdlib", "-static",
+            "--gc-sections", "--start-group", "--end-group"]
+        val out = "/tmp/simpleos_internal_entry_spec.elf"
+        val result = link_simpleos_internal(
+            ["{FIX}/crt0_x64.o", "{FIX}/main_x64.o"], out, "simpleos-x86_64", cfg)
+        if result.is_err():
+            print "link error: {result.unwrap_err()}"
+        expect(result.is_ok()).to_equal(true)
+        val image = file_read_bytes(out)
+        # ELF64 x86_64 executable; ld.lld puts e_entry at 0x10000000 (_start
+        # is the first .text input under the script's `. = 0x10000000`).
+        expect(image[16] as i64).to_equal(2)
+        expect(image[18] as i64).to_equal(62)
+        expect(_u64_le(image, 24)).to_equal(0x10000000)

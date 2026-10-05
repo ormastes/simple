@@ -1,0 +1,48 @@
+# Compile this fixture, then use scripts/check/scv-directory-alias-snapshot-test.ps1.
+# The harness creates a real directory junction; no mocked symlink API is used.
+use app.io.mod.{env_get, dir_create}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{file_read}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.scv.compile_source_inventory.{compile_source_inventory_git_event_v1,
+    compile_source_inventory_apply_cold_events_v1,
+    compile_source_inventory_publish_reasoned_v1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_acquire_v1,
+    scv_compile_snapshot_plain_path_v1,
+    scv_compile_snapshot_materialize_source_unscoped_v1}
+
+fn main() -> i64:
+    val requested = env_get("SIMPLE_SCV_ALIAS_FIXTURE_ROOT")
+    if requested == "": return 2
+    val root = scv_compile_snapshot_plain_path_v1(path_absolute(requested))
+    val alias = "src/app/tool/mod.spl"
+    val owner = "examples/tool/mod.spl"
+    val content = "pub fn fixture_value() -> i64: 73\n"
+    if file_read(root + "/" + alias) != content: return 3
+    val changed = compile_source_inventory_apply_cold_events_v1(0, [
+        compile_source_inventory_git_event_v1("create", alias, content),
+        compile_source_inventory_git_event_v1("create", owner, content)])
+    if not changed.valid: return 4
+    val (digest, reason) = compile_source_inventory_publish_reasoned_v1(
+        root + "/build/scv", changed.inventory!)
+    if digest == "" or reason != "ok": return 5
+    val snapshot = scv_compile_snapshot_acquire_v1(root, root + "/build/scv", ["src/app"])
+    if not snapshot.valid: return 6
+    if snapshot.inventory_count != 1: return 7
+    if file_read(snapshot.snapshot_root + "/" + alias) != content: return 8
+    val manifest = file_read(snapshot.snapshot_root + "/SCV_COMPILE_INVENTORY")
+    if not manifest.starts_with(alias + "|sha256_"): return 9
+    # The immutable snapshot survives later physical-owner changes.
+    if not file_write_bytes(root + "/" + owner, text_to_utf8_bytes("changed\n")): return 10
+    if file_read(snapshot.snapshot_root + "/" + alias) != content: return 11
+    # A fresh materialization with the old admission rejects those changed bytes.
+    if not dir_create(root + "/rejected", true): return 12
+    for entry in changed.inventory!.entries:
+        if entry.source_identity == alias:
+            val rejected = scv_compile_snapshot_materialize_source_unscoped_v1(
+                root, root + "/build/scv", root + "/rejected", entry)
+            if rejected.reason != "snapshot-index-drift:{alias}": return 13
+            if rejected.row != "": return 14
+    print "SCV_DIRECTORY_ALIAS_SNAPSHOT_PASS"
+    0

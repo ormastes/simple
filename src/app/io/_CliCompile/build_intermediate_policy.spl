@@ -1,26 +1,42 @@
 use app.io.file_ops.{file_exists, file_modified_time, file_remove}
 use app.io.time_ops.{current_time_unix}
+use std.io_runtime.{platform_name}
 
 extern fn rt_dir_list(path: text) -> [text]
 
 const NATIVE_BUILD_STALE_INTERMEDIATE_AGE_SECONDS: i64 = 86400
 
 pub fn native_build_output_parent(path: text) -> text:
-    val slash = path.rfind("/")
+    native_build_output_parent_for_platform(path, platform_name() == "windows")
+
+pub fn native_build_output_parent_for_platform(path: text, windows: bool) -> text:
+    val normalized = if windows: path.replace("\\", "/") else: path
+    val slash = normalized.rfind("/")
+    if slash == 0:
+        return "/"
+    if windows and slash == 2 and normalized.substring(1, 2) == ":":
+        return normalized.substring(0, 3)
     if slash > 0:
-        path.substring(0, slash)
+        normalized.substring(0, slash)
     else:
         "."
 
 pub fn native_build_output_name(path: text) -> text:
-    val slash = path.rfind("/")
+    native_build_output_name_for_platform(path, platform_name() == "windows")
+
+pub fn native_build_output_name_for_platform(path: text, windows: bool) -> text:
+    val normalized = if windows: path.replace("\\", "/") else: path
+    val slash = normalized.rfind("/")
     if slash >= 0:
-        path.substring(slash + 1)
+        normalized.substring(slash + 1)
     else:
-        path
+        normalized
 
 pub fn native_build_intermediate_name(output_name: text, pid: i64, micros: i64) -> text:
     "{output_name}.simple-native-build-{pid}-{micros}.tmp"
+
+pub fn native_build_join_output_parent(parent: text, name: text) -> text:
+    if parent.ends_with("/"): parent + name else: parent + "/" + name
 
 pub fn native_build_is_managed_intermediate(entry: text, output_name: text) -> bool:
     entry.starts_with(output_name + ".simple-native-build-") and entry.ends_with(".tmp")
@@ -37,7 +53,7 @@ pub fn native_build_stale_intermediate_paths(output: text, now_seconds: i64) -> 
     var paths: [text] = []
     for entry in rt_dir_list(parent):
         if native_build_is_managed_intermediate(entry, output_name):
-            val path = if parent == ".": entry else: parent + "/" + entry
+            val path = if parent == ".": entry else: native_build_join_output_parent(parent, entry)
             val modified = file_modified_time(path)
             if native_build_intermediate_is_stale(
                 entry, output_name, modified, now_seconds):

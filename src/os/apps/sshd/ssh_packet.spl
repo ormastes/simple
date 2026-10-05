@@ -220,6 +220,11 @@ fn ssh_packet_read(data: [u8], offset: u64) -> Result<SshPacketResult, text>:
     corrupt in arithmetic, (2) multiplication of byte values fails for
     larger payloads. The ssh_get_u32 approach is proven correct by B7 test.
     """
+    # Validate the caller-supplied cursor before subtracting it.  An offset
+    # beyond the retained buffer must not wrap `avail` and make the fixed
+    # header reads below appear in-bounds.
+    if offset > data.len():
+        return Err("ssh_packet_read: offset exceeds input")
     var avail: u64 = data.len() - offset
 
     if avail < 5:
@@ -239,6 +244,13 @@ fn ssh_packet_read(data: [u8], offset: u64) -> Result<SshPacketResult, text>:
         return Err("ssh_packet_read: packet_length too small")
     if packet_length > 35000:
         return Err("ssh_packet_read: packet_length exceeds max")
+
+    # RFC 4253 section 6 requires the complete unencrypted packet to be a
+    # multiple of the cipher block size, or eight bytes before negotiation.
+    # This reader is the plaintext/eight-byte entrypoint; encrypted readers
+    # validate their negotiated block size separately.
+    if (packet_length + 4u64) % 8u64 != 0u64:
+        return Err("ssh_packet_read: invalid packet alignment")
 
     var total: u64 = 4 + packet_length
     if avail < total:
@@ -298,16 +310,19 @@ fn ssh_packet_build_with_block_size(payload: [u8], sequence: u32, block_size: u6
     buf
 
 fn ssh_packet_parse_payload(data: [u8], offset: u64, packet_length: u64) -> Result<[u8], text>:
-    if offset + 5 > data.len():
+    # Use subtraction-based bounds checks so an untrusted/corrupt cursor can
+    # never wrap an addition into the retained range.
+    if offset > data.len() or data.len() - offset < 5u64:
         return Err("ssh_packet_read: incomplete packet")
 
     var padding_length: u64 = _u8_at(data, offset + 4).to_u64()
+    if padding_length < SSH_MIN_PADDING.to_u64():
+        return Err("ssh_packet_read: padding below minimum")
     if padding_length + 1 > packet_length:
         return Err("ssh_packet_read: padding exceeds packet")
 
     var payload_length: u64 = packet_length - padding_length - 1
-    var packet_end: u64 = offset + 4 + packet_length
-    if packet_end > data.len():
+    if packet_length > data.len() - offset - 4u64:
         return Err("ssh_packet_read: incomplete packet")
 
     var payload: [u8] = []

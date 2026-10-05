@@ -73,7 +73,7 @@ impl<'a> Parser<'a> {
             )
         {
             self.advance(); // consume 'if'
-            let condition = self.parse_pipe()?;
+            let condition = self.parse_without_cast_else(|p| p.parse_pipe())?;
             self.expect(&TokenKind::Else)?;
             // Optional colon after else (Simple style: `else:`)
             if self.check(&TokenKind::Colon) {

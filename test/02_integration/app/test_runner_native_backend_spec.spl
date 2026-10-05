@@ -2,20 +2,50 @@ use std.spec.{describe, it, expect}
 use std.spec.step
 use app.test_runner_new.test_runner_args.{parse_test_args}
 use std.test_runner.test_runner_execute.{run_test_file_native}
-use std.nogc_sync_mut.io.file_ops.{file_write, file_delete}
-use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
 
+fn item4_native_authority_parent_bindings() -> [Option<text>]:
+    var values: [Option<text>] = []
+    for name in ["SIMPLE_SCV_SNAPSHOT_ROOT", "SIMPLE_SCV_REVISION_ID",
+            "SIMPLE_SCV_COMMIT_ID", "SIMPLE_SCV_TREE_ID", "SIMPLE_SCV_INVENTORY_DIGEST",
+            "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", "SIMPLE_SCV_INVENTORY_GENERATION",
+            "SIMPLE_SCV_SOURCE_DRIFTED"]:
+        values.push(env_get(name))
+    values
+
 fn check_native_backend_assertions(backend: text):
-    val fixture = _tp_get_temp_dir() + "/native-contract-{backend}-{time_now_unix_micros()}.spl"
+    val owned = secure_temp_dir(_tp_get_temp_dir(), "native-contract-" + backend + "-")
+    expect(owned.is_ok()).to_equal(true)
+    if owned.is_err(): return
+    val directory = owned.unwrap().replace("\\", "/")
+    val fixture = directory + "/assertions_spec.spl"
+    val plain = directory + "/empty.spl"
     val options = parse_test_args(["--native-backend=" + backend, "--no-cache", "--sequential"])
-    file_write(fixture, "use std.spec\ndescribe \"native fixture\":\n    it \"passes a real assertion\":\n        expect(6 * 7).to_equal(42)\n")
+    val before = item4_native_authority_parent_bindings()
+    # This actual app import requires default checkout source roots beyond std.
+    val positive = "use std.spec\nuse app.test_runner_new.test_runner_args.*\ndescribe \"native fixture\":\n    it \"passes a real assertion through an app import\":\n        expect(parse_test_args([\"--native-backend=llvm\"]).native_backend).to_equal(\"llvm\")\n        expect(6 * 7).to_equal(42)\n"
+    val wrote_positive = file_write(fixture, positive)
+    expect(wrote_positive).to_equal(true)
+    if not wrote_positive: return
     val passing = run_test_file_native(fixture, options)
-    file_write(fixture, "use std.spec\ndescribe \"native fixture\":\n    it \"reports a failing assertion\":\n        expect(6 * 7).to_equal(43)\n")
+    expect(item4_native_authority_parent_bindings()).to_equal(before)
+    val wrote_negative = file_write(fixture, "use std.spec\ndescribe \"native fixture\":\n    it \"reports a failing assertion\":\n        expect(6 * 7).to_equal(43)\n")
+    expect(wrote_negative).to_equal(true)
+    if not wrote_negative: return
     val failing = run_test_file_native(fixture, options)
-    file_write(fixture, "fn main():\n    print \"no assertions\"\n")
-    val empty = run_test_file_native(fixture, options)
-    file_delete(fixture)
+    expect(item4_native_authority_parent_bindings()).to_equal(before)
+    # Deliberately plain source: executes successfully but reports zero examples.
+    val wrote_empty = file_write(plain, "fn main():\n    print \"no assertions\"\n")
+    expect(wrote_empty).to_equal(true)
+    if not wrote_empty: return
+    val empty = run_test_file_native(plain, options)
+    expect(item4_native_authority_parent_bindings()).to_equal(before)
+    expect(file_delete(fixture)).to_equal(true)
+    expect(file_delete(plain)).to_equal(true)
+    expect(dir_remove(directory, false)).to_equal(true)
     expect(passing.passed).to_equal(1)
     expect(passing.failed).to_equal(0)
     expect(passing.error).to_equal("")

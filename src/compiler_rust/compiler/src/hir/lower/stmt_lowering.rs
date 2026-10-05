@@ -1669,7 +1669,15 @@ impl Lowerer {
                 // the JIT lane, silently). The local's declared type must
                 // agree, or the raw value would be stored into a tagged slot.
                 // Bug: doc/08_tracking/bug/optional_i64_return_payload_corruption_2026-08-31.md
-                let binding_ty = self.optional_boxint_scalar_inner(subject_ty).unwrap_or(subject_ty);
+                let binding_ty = self.optional_boxint_scalar_inner(subject_ty).unwrap_or_else(|| {
+                    match self.module.types.get(subject_ty) {
+                        // Presence guards the optional subject; a bound bool is
+                        // its value, not another optional-presence condition.
+                        Some(HirType::Pointer { kind: PointerKind::Shared, inner, .. })
+                            if *inner == TypeId::BOOL => TypeId::BOOL,
+                        _ => subject_ty,
+                    }
+                });
                 if binding_ty != subject_ty {
                     if let Some(local) = ctx.locals.get_mut(local_index) {
                         local.ty = binding_ty;
@@ -3880,5 +3888,24 @@ mod nested_struct_pattern_in_enum_payload_tests {
             }
             other => panic!("expected FieldAccess for x, got {:?}", other),
         }
+    }
+}
+
+#[cfg(test)]
+mod optional_bool_binding_tests {
+    use super::super::lower;
+    use crate::hir::types::TypeId;
+    use simple_parser::Parser;
+
+    #[test]
+    fn if_val_binds_bool_payload_as_bool_not_optional_presence() {
+        let source = "fn inspect(value: bool?) -> i64:\n    if val opened = value:\n        return if opened: 19 else: 23\n    -17\n";
+        let ast = Parser::new(source).parse().expect("optional bool fixture parses");
+        let module = lower(&ast).expect("optional bool fixture lowers");
+        let function = module.functions.iter().find(|function| function.name == "inspect")
+            .expect("inspect function exists");
+        let binding = function.locals.iter().find(|local| local.name == "opened")
+            .expect("if-val binding exists");
+        assert_eq!(binding.ty, TypeId::BOOL, "payload condition must inspect bool value, not presence");
     }
 }

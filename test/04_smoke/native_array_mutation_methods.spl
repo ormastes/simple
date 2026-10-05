@@ -1,0 +1,79 @@
+# Compile with the repaired pure-Simple producer, then execute the binary.
+# A seed-built copy does not exercise the MIR dispatch repaired by this test.
+struct ArrayBox:
+    values: [i64]
+
+fn check(label: text, condition: bool) -> i64:
+    if condition:
+        print("PASS " + label)
+        return 0
+    print("FAIL " + label)
+    1
+
+fn select_index(counter: [i64]) -> i64:
+    counter[0] = counter[0] + 1
+    0
+
+fn main() -> i64:
+    var failures = 0
+    var signed: [i64] = [7, -3, 0, -8, 7]
+    val sorted = signed.sort()
+    failures = failures + check("signed sort mutates receiver", signed == [-8, -3, 0, 7, 7])
+    failures = failures + check("sort returns array value", sorted == [-8, -3, 0, 7, 7])
+    var words: [text] = ["z", "aa", "a", ""]
+    words.sort()
+    failures = failures + check("text sort", words == ["", "a", "aa", "z"])
+
+    var numbers: [i64] = [0, -9]
+    val negative = numbers.pop()
+    failures = failures + check("pop negative and mutation", (negative ?? 99) == -9 and numbers == [0])
+    val zero = numbers.pop()
+    failures = failures + check("pop Some zero", (zero ?? 99) == 0 and numbers.len() == 0)
+    val absent = numbers.pop()
+    failures = failures + check("empty pop is None", (absent ?? 99) == 99 and numbers.len() == 0)
+    val word = words.pop()
+    failures = failures + check("pop text decode", (word ?? "missing") == "z" and words == ["", "a", "aa"])
+    var flags: [bool] = [true, false]
+    val false_value = flags.pop()
+    failures = failures + check("pop Some false", not (false_value ?? true) and flags == [true])
+
+    val cleared = words.clear()
+    failures = failures + check("clear mutates and returns array", words.len() == 0 and cleared.len() == 0)
+    words.push("after")
+    failures = failures + check("clear preserves usable array", words == ["after"])
+    var empty: [i64] = []
+    val empty_sorted = empty.sort()
+    failures = failures + check("empty sort", empty_sorted.len() == 0 and empty.len() == 0)
+
+    var box = ArrayBox(values: [8, 2])
+    box.values.sort()
+    val field_value = box.values.pop()
+    failures = failures + check("field sort and pop writeback", box.values == [2] and (field_value ?? -1) == 8)
+    box.values.clear()
+    failures = failures + check("field clear writeback", box.values.len() == 0)
+    var nested: [[i64]] = [[3, 1]]
+    var counter: [i64] = [0]
+    nested[select_index(counter)].sort()
+    failures = failures + check("indexed receiver evaluated once", counter[0] == 1 and nested[0] == [1, 3])
+    val nested_value = nested[0].pop()
+    nested[0].clear()
+    failures = failures + check("indexed pop and clear writeback", (nested_value ?? -1) == 3 and nested[0].len() == 0)
+
+    var original: [i64] = [9, 2]
+    var copied = original
+    copied.sort()
+    copied.pop()
+    copied.clear()
+    failures = failures + check("value copy mutations preserve original", original == [9, 2] and copied.len() == 0)
+    var wide: [i64] = [1152921504606846976]
+    val wide_value = wide.pop()
+    failures = failures + check("pop boxed wide i64", (wide_value ?? -1) == 1152921504606846976 and wide.len() == 0)
+    var bytes: [u8] = [255, 0, 128]
+    val byte_value = bytes.pop()
+    failures = failures + check("pop byte value", (byte_value ?? 1) == 128 and bytes.len() == 2)
+    bytes.sort()
+    failures = failures + check("sort byte array", bytes[0] == 0 and bytes[1] == 255)
+    bytes.clear()
+    failures = failures + check("clear byte array", bytes.len() == 0)
+    print("20 checks, {failures} failures")
+    failures

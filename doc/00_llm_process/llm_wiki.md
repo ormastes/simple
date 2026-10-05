@@ -2,6 +2,23 @@
 
 ## Bootstrap failure collection
 
+Full bootstrap has parallel branches after each usable compiler: Phase 1 whole
+tests precede Phase 2 construction; Phase 2 sanity opens its six subsystem
+test binaries, Phase 3 build and early Phase 4 from Phase 2. Phase 3 sanity
+opens whole tools/library tests and Phase 4 from Phase 3. Run whole tests on
+both Phase 4 cohorts and preserve their distinct producer identities. See the
+[execution graph](../07_guide/tooling/bootstrap_failure_collection.md#full-bootstrap-execution-graph).
+This specifies the required workflow, not a claim of completed script wiring
+or passing builds. After three unresolved repair cycles, update the bug
+database and use a scoped linked workaround where valid; continue independent
+cached work and revisit the original bug on the later rebuild.
+
+Current RC1 scope: one fully successful host is sufficient, with Windows as
+the qualifying host. Complete Windows bootstrap, required tests and local
+deployment before remote synchronization and release publication. Linux,
+macOS and BSD remain explicitly unverified until RC2. See the
+[RC1 completion scope](../07_guide/tooling/bootstrap_failure_collection.md#windows-rc1-completion-scope).
+
 Bootstrap failure collection means finishing all independently runnable modules,
 builds and tests after errors, then assigning independent root causes to parallel
 repair agents. The exact compiler must compile Hello World and execute its output

@@ -1,0 +1,27 @@
+#!/bin/sh
+# Only real argv/refusal transport; native factory semantics require its specs.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+sha() { value=$(sha256sum "$1") || return 2; printf '%s\n' "${value%% *}"; }
+for name in manifest policy template; do printf '%s\n' "$name" >"$scratch/$name"; done
+cat >"$scratch/builder" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" >"$FACTORY_ARGS"
+exit 139
+EOF
+chmod +x "$scratch/builder"
+FACTORY_ARGS="$scratch/args"; export FACTORY_ARGS
+code=0
+sh "$repo/scripts/bootstrap/lib/managed-next-producer-launch.shs" --hello \
+  "$scratch/builder" "$scratch/manifest" "$(sha "$scratch/manifest")" \
+  "$scratch/policy" "$(sha "$scratch/policy")" "$scratch" "$scratch/state" 10 0 \
+  phase2_llvm_build bin/simple.exe "$scratch/template" "$(sha "$scratch/template")" \
+  "$scratch/next.sdn" || code=$?
+[ "$code" = 139 ]
+[ "$(wc -l <"$FACTORY_ARGS" | tr -d ' ')" = 27 ]
+[ "$(head -n 1 "$FACTORY_ARGS")" = managed-tasks-next-hello ]
+grep -Fx -- phase2_llvm_build "$FACTORY_ARGS" >/dev/null
+[ ! -e "$scratch/next.sdn" ]
+printf 'PASS next-Hello transport: exact27argv, actual raw139 retained, no publication claimed\n'

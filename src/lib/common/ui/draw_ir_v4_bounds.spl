@@ -1,0 +1,55 @@
+# Conservative retained damage bounds. Unsupported non-finite/out-of-range
+# geometry is rejected, never rounded into a smaller accepted damage rectangle.
+use common.ui.draw_ir.{DrawIrCommand, DrawIrRect, draw_ir_rect_bounds}
+
+fn draw_ir_v4_damage_bounds(command: DrawIrCommand, legacy: DrawIrRect) -> DrawIrRect:
+    var x = legacy.x.to_f64()
+    var y = legacy.y.to_f64()
+    var width = legacy.width.to_f64()
+    var height = legacy.height.to_f64()
+    if val geometry = command.fractional_geometry:
+        x = geometry.x
+        y = geometry.y
+        width = geometry.width
+        height = geometry.height
+    elif not legacy.present:
+        return legacy
+    var xs: [f64] = [x, x + width, x, x + width]
+    var ys: [f64] = [y, y, y + height, y + height]
+    if val matrix = command.affine_transform:
+        var i = 0
+        while i < 4:
+            val old_x = xs[i]
+            val old_y = ys[i]
+            xs[i] = matrix.a * old_x + matrix.c * old_y + matrix.tx
+            ys[i] = matrix.b * old_x + matrix.d * old_y + matrix.ty
+            i = i + 1
+    var left = xs[0]
+    var right = xs[0]
+    var top = ys[0]
+    var bottom = ys[0]
+    var i = 0
+    while i < 4:
+        # Reject NaN as well as infinities and coordinates outside the legacy
+        # signed rectangle representation before any float-to-int conversion.
+        if not (xs[i] >= -2147483648.0 and xs[i] <= 2147483647.0 and
+                ys[i] >= -2147483648.0 and ys[i] <= 2147483647.0):
+            panic("DrawIR v4 damage requires finite representable bounds")
+        if xs[i] < left: left = xs[i]
+        if xs[i] > right: right = xs[i]
+        if ys[i] < top: top = ys[i]
+        if ys[i] > bottom: bottom = ys[i]
+        i = i + 1
+    var l = left.to_i64()
+    var t = top.to_i64()
+    var r = right.to_i64()
+    var b = bottom.to_i64()
+    if l.to_f64() > left: l = l - 1
+    if t.to_f64() > top: t = t - 1
+    if r.to_f64() < right: r = r + 1
+    if b.to_f64() < bottom: b = b + 1
+    if r - l > 2147483647 or b - t > 2147483647:
+        panic("DrawIR v4 damage exceeds the legacy rectangle extent")
+    draw_ir_rect_bounds(l.to_i32(), t.to_i32(), (r - l).to_i32(), (b - t).to_i32())
+
+export draw_ir_v4_damage_bounds

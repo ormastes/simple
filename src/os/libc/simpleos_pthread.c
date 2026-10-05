@@ -59,34 +59,17 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex)  { return mutex ? ENOSYS : EINV
 int pthread_mutex_destroy(pthread_mutex_t *mutex) { return mutex ? ENOSYS : EINVAL; }
 
 /* ====================================================================
- * 3. Condition variables — no-ops
+ * 3. Condition variables and condattr — owned by simpleos_pthread_cond.c
+ *    (fail-closed ENOSYS, matching the mutexes above). The former
+ *    "success" no-ops here duplicated every symbol in libsimpleos_c.a.
  * ==================================================================== */
 
-int pthread_cond_init(pthread_cond_t *cond,
-                      const pthread_condattr_t *attr) {
-    (void)attr;
-    if (cond) memset(cond, 0, sizeof(*cond));
-    return 0;
-}
-
-int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex) {
-    (void)cond; (void)mutex;
-    return 0;
-}
-
-int pthread_cond_signal(pthread_cond_t *cond)    { (void)cond; return 0; }
-int pthread_cond_broadcast(pthread_cond_t *cond) { (void)cond; return 0; }
-int pthread_cond_destroy(pthread_cond_t *cond)   { (void)cond; return 0; }
-
 /* ====================================================================
- * 4. Mutex and condition attributes — stubs
+ * 4. Mutex attributes — stubs
  * ==================================================================== */
 
 int pthread_mutexattr_init(pthread_mutexattr_t *attr)    { (void)attr; return 0; }
 int pthread_mutexattr_destroy(pthread_mutexattr_t *attr) { (void)attr; return 0; }
-
-int pthread_condattr_init(pthread_condattr_t *attr)    { (void)attr; return 0; }
-int pthread_condattr_destroy(pthread_condattr_t *attr) { (void)attr; return 0; }
 
 /* ====================================================================
  * 5. Once — simple flag-based implementation

@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+temp_parent=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+tmp=$(mktemp -d "$temp_parent/simple-bootstrap-hash.XXXXXX")
+case "$tmp" in "$temp_parent"/simple-bootstrap-hash.*) ;; *) exit 2 ;; esac
+trap 'rm -rf -- "$tmp"' EXIT HUP INT TERM
+printf abc >"$tmp/file with spaces"
+expected=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+mkdir "$tmp/failing-provider"
+cat >"$tmp/failing-provider/sha256sum" <<'SH'
+#!/bin/sh
+printf '%s  -\n' ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+exit 7
+SH
+chmod +x "$tmp/failing-provider/sha256sum"
+if command -v cygpath >/dev/null 2>&1; then
+  escaped_path=$(cygpath -w "$tmp/file with spaces")
+else
+  escaped_path="$tmp/file\\with-backslash"
+  cp "$tmp/file with spaces" "$escaped_path"
+fi
+# Exercise real providers through each production definition. The second
+# filename makes GNU sha256sum emit an escaped record when passed as argv.
+for owner in bootstrap-phase-verification prepare-provisional-hello bootstrap-managed-phases; do
+  (
+    file="$repo/scripts/bootstrap/$owner.shs"
+    if [ "$owner" = bootstrap-managed-phases ]; then
+      eval "$(sed -n '/^sha()/,/^)/p' "$file")"
+      hash_file() { sha "$1"; }
+    else
+      eval "$(sed -n '/^digest()/p; /^hash_file()/,/^)/p' "$file")"
+    fi
+    test "$(hash_file "$tmp/file with spaces")" = "$expected"
+    test "$(hash_file "$escaped_path")" = "$expected"
+    if hash_file "$tmp/absent" >"$tmp/missing-output" 2>/dev/null; then
+      echo "FAIL: $owner accepted a missing file" >&2
+      exit 1
+    fi
+    test ! -s "$tmp/missing-output"
+    PATH="$tmp/failing-provider:$PATH"; export PATH
+    if hash_file "$tmp/file with spaces" >"$tmp/failed-provider-output"; then
+      echo "FAIL: $owner accepted a failing hash provider" >&2
+      exit 1
+    fi
+    test ! -s "$tmp/failed-provider-output"
+    echo "PASS: $owner hashes content independently of filename spelling"
+  )
+done

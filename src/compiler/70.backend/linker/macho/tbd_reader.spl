@@ -1,0 +1,120 @@
+use std.common.string_core.{char_from_code}
+use std.common.json.parser.{json_parse_strict_with_error}
+use compiler.backend.linker.macho.tbd_types.{MachOTbdTargetV1, MachOTbdLimitsV1, MachOTbdDocumentV1, MachOTbdLibraryV1, macho_tbd_default_limits_v1}
+use compiler.backend.linker.macho.tbd_values.{tbd_object, tbd_array, tbd_keys, tbd_required, tbd_integer, tbd_target_name}
+use compiler.backend.linker.macho.tbd_yaml.{tbd_yaml_documents}
+use compiler.backend.linker.macho.tbd_schema.{TbdSchemaState}
+
+fn tbd_source(bytes: [u8], limits: MachOTbdLimitsV1) -> Result<text, text>:
+    val maximum = macho_tbd_default_limits_v1()
+    if limits.max_bytes < 1 or limits.max_bytes > maximum.max_bytes or limits.max_tokens < 1 or limits.max_tokens > maximum.max_tokens or
+            limits.max_depth < 1 or limits.max_depth > maximum.max_depth or limits.max_libraries < 1 or limits.max_libraries > maximum.max_libraries or
+            limits.max_symbols < 1 or limits.max_symbols > maximum.max_symbols or limits.max_name_bytes < 1 or limits.max_name_bytes > maximum.max_name_bytes:
+        return Err("TBD invalid parser limits")
+    if bytes.len() == 0 or bytes.len() > limits.max_bytes: return Err("TBD byte quota exceeded")
+    var first: i64 = 0
+    while first < bytes.len() and (bytes[first] == 32 or bytes[first] == 9 or bytes[first] == 10 or bytes[first] == 13): first = first + 1
+    val json = first < bytes.len() and bytes[first] == 123
+    var quote: i64 = 0
+    var escaped = false
+    var comment = false
+    var atom = false
+    var depth: i64 = 0
+    var tokens: i64 = 0
+    var quote_start: i64 = 0
+    # Quotas precede token arrays, recursive parser entry, and decoded strings.
+    for index in 0..bytes.len():
+        val byte = bytes[index] as i64
+        if byte == 0 or byte > 127 or (byte < 32 and byte != 9 and byte != 10 and byte != 13):
+            return Err("TBD unsupported source character")
+        if quote != 0 and index - quote_start > limits.max_name_bytes * 6 + 1:
+            return Err("TBD quoted name quota exceeded")
+        if comment:
+            if byte == 10: comment = false
+            continue
+        if escaped:
+            escaped = false
+            continue
+        if quote != 0:
+            if quote == 34 and byte == 92: escaped = true
+            elif byte == quote: quote = 0
+            continue
+        if not json and byte == 35 and (index == 0 or bytes[index - 1] == 32):
+            comment = true
+            atom = false
+            continue
+        if byte == 34 or (not json and byte == 39):
+            quote = byte
+            quote_start = index
+            tokens = tokens + 1
+            atom = false
+        elif byte == 91 or byte == 123:
+            depth = depth + 1
+            if depth > limits.max_depth: return Err("TBD depth quota exceeded")
+            tokens = tokens + 1
+            atom = false
+        elif byte == 93 or byte == 125:
+            depth = depth - 1
+            if depth < 0: return Err("TBD unbalanced source collection")
+            tokens = tokens + 1
+            atom = false
+        elif byte == 44 or byte == 58:
+            tokens = tokens + 1
+            atom = false
+        elif byte == 32 or byte == 9 or byte == 10 or byte == 13:
+            atom = false
+        elif not atom:
+            tokens = tokens + 1
+            atom = true
+        if tokens > limits.max_tokens: return Err("TBD token quota exceeded")
+    if quote != 0 or depth != 0: return Err("TBD unterminated source collection/string")
+    # Bounded chunks avoid quadratic concatenation over the complete document.
+    var parts: [text] = []
+    var chunk = ""
+    for byte in bytes:
+        chunk = chunk + char_from_code(byte as i64)
+        if chunk.len() == 1024:
+            parts = parts.push(chunk)
+            chunk = ""
+    if chunk != "": parts = parts.push(chunk)
+    Ok(parts.join(""))
+
+fn macho_read_tbd_v1(bytes: [u8], target: MachOTbdTargetV1, limits: MachOTbdLimitsV1) -> Result<MachOTbdDocumentV1, text>:
+    """Parse target-qualified TAPI v4/v5; no provider closure or trust is inferred."""
+    val wanted = tbd_target_name(target)?
+    val source = tbd_source(bytes, limits)?
+    var state = TbdSchemaState(limits: limits, symbol_count: 0)
+    var libraries: [MachOTbdLibraryV1] = []
+    var version: i64 = 4
+    if source.trim().starts_with("{"):
+        version = 5
+        val parsed = json_parse_strict_with_error(source)
+        if parsed.1 != "": return Err("TBD invalid JSON: {parsed.1}")
+        val root = tbd_object(parsed.0)?
+        tbd_keys(root, ["tapi_tbd_version", "main_library", "libraries"])?
+        if tbd_integer(tbd_required(root, "tapi_tbd_version")?, 5, false, limits)? != 5: return Err("TBD unsupported JSON version")
+        libraries = libraries.push(state.library(tbd_required(root, "main_library")?, false, wanted)?)
+        if root.has("libraries"):
+            val inline = tbd_array(root["libraries"])?
+            if inline.len() > limits.max_libraries - 1: return Err("TBD library quota exceeded")
+            for item in inline: libraries = libraries.push(state.library(item, false, wanted)?)
+    else:
+        val documents = tbd_yaml_documents(source, limits)?
+        for item in documents: libraries = libraries.push(state.library(item, true, wanted)?)
+    if libraries.len() == 0 or libraries.len() > limits.max_libraries: return Err("TBD library quota exceeded")
+    val main = libraries[0]
+    if not main.selected or main.install_name.is_none(): return Err("TBD main library has no matching target")
+    var inline: [MachOTbdLibraryV1] = []
+    var identities: {text: bool} = {}
+    for index in 0..libraries.len():
+        val library = libraries[index]
+        for identity in library.install_names:
+            for declared in identity.targets:
+                val key = "{declared.len()}:{declared}{identity.name}"
+                if identities.has(key): return Err("TBD duplicate library target/install identity")
+                identities[key] = true
+        if index > 0: inline = inline.push(library)
+    Ok(MachOTbdDocumentV1(format_version: version, target: target, main: main, libraries: inline,
+        parsed_symbol_count: state.symbol_count))
+
+export macho_read_tbd_v1

@@ -281,6 +281,51 @@ bootstrap_stage3_verify_command_transcript() (
     return "$bootstrap_stage3_transcript_status"
 )
 
+# Frontend subprocesses each reconstruct a substantial source closure. Windows
+# bootstrap owners must not translate an 80-codegen request into 80 frontends.
+# Keep this policy in the transcribed environment; the RSS watchdog still owns
+# enforcement. A separate positive scheduling budget admits one frontend;
+# monitoring the RSS does not remove that scheduling budget.
+bootstrap_stage3_windows_frontend_policy() {
+    for bootstrap_stage3_policy_env in "$@"; do
+        [ "$bootstrap_stage3_policy_env" != -- ] || break
+        bootstrap_stage3_policy_name=${bootstrap_stage3_policy_env%%=*}
+        bootstrap_stage3_policy_name=$(printf '%s' "$bootstrap_stage3_policy_name" | tr '[:lower:]' '[:upper:]')
+        case "$bootstrap_stage3_policy_name" in
+            SIMPLE_SHARD_MEM_CLAMP|SIMPLE_PARSE_SHARD_MAX|SIMPLE_PARSE_SHARD_WORKER_KB|SIMPLE_HIR_SHARD_WORKER_KB)
+                echo 'bootstrap-transcript-error: reserved Windows frontend policy' >&2
+                return 1 ;;
+        esac
+    done
+    printf '%s\n' SIMPLE_SHARD_MEM_CLAMP=1 SIMPLE_PARSE_SHARD_MAX=1 \
+        SIMPLE_PARSE_SHARD_WORKER_KB=1650000 SIMPLE_HIR_SHARD_WORKER_KB=3000000
+}
+
+# Emit the same Windows scheduling share for every compiler process owner.
+# This is not a host reservation or an RSS limit: callers still own those.
+bootstrap_stage3_windows_frontend_environment() {
+    bootstrap_stage3_policy_cap=$1
+    bootstrap_stage3_policy_mode=$2
+    bootstrap_stage3_policy_budget=$3
+    case "$bootstrap_stage3_policy_cap:$bootstrap_stage3_policy_budget" in
+        *[!0-9:]*|:*|*:) return 1 ;;
+    esac
+    [ "$bootstrap_stage3_policy_cap" -gt 0 ] &&
+        [ "$bootstrap_stage3_policy_cap" -le 6835937 ] &&
+        [ "$bootstrap_stage3_policy_budget" -gt 0 ] &&
+        [ "$bootstrap_stage3_policy_budget" -le 3000000 ] || return 1
+    case "$bootstrap_stage3_policy_mode" in
+        enforce)
+            if [ "$bootstrap_stage3_policy_cap" -lt "$bootstrap_stage3_policy_budget" ]; then
+                bootstrap_stage3_policy_budget=$bootstrap_stage3_policy_cap
+            fi ;;
+        monitor) ;;
+        *) return 1 ;;
+    esac
+    bootstrap_stage3_windows_frontend_policy || return 1
+    printf '%s\n' "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=$bootstrap_stage3_policy_budget"
+}
+
 bootstrap_stage3_run_transcribed() {
     bootstrap_stage3_run_transcript=$1
     bootstrap_stage3_run_cwd=$2
@@ -310,6 +355,30 @@ bootstrap_stage3_run_transcribed() {
     if [ "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" = enforce ]; then
         bootstrap_stage3_run_shard_budget=$bootstrap_stage3_run_rss_cap
     fi
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        MSYS*|MINGW*|CYGWIN*)
+            bootstrap_stage3_windows_frontend_policy "$@" >/dev/null || return 1
+            # This frontend share is distinct from the enclosing reservation
+            # and from RSS enforcement: leave room for the parent and tools.
+            # Owners may allocate a smaller share, never enlarge this default
+            # into CPU-count fanout. Record the effective share in explicit-env.
+            # The compiler has a one-worker floor: a smaller share is NOT an
+            # RSS limit. The enclosing owner must still admit one whole worker
+            # plus its parent, and the watchdog retains memory enforcement.
+            bootstrap_stage3_run_frontend_rows=$(bootstrap_stage3_windows_frontend_environment \
+                "$bootstrap_stage3_run_rss_cap" "${SIMPLE_BOOTSTRAP_RSS_CAP_MODE:-enforce}" \
+                "${SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB:-3000000}") || return 1
+            while IFS= read -r bootstrap_stage3_run_frontend_row; do
+                case "$bootstrap_stage3_run_frontend_row" in
+                    SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=*)
+                        bootstrap_stage3_run_shard_budget=${bootstrap_stage3_run_frontend_row#*=} ;;
+                    *) set -- "$bootstrap_stage3_run_frontend_row" "$@" ;;
+                esac
+            done <<EOF
+$bootstrap_stage3_run_frontend_rows
+EOF
+            ;;
+    esac
     set -- "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=$bootstrap_stage3_run_shard_budget" "$@"
     for bootstrap_stage3_run_directory in "$bootstrap_stage3_run_home" \
         "$bootstrap_stage3_run_tmpdir"; do

@@ -1,0 +1,27 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+perl -0777 -ne 's/\r\n/\n/g; for my $name (qw(field verify_profile_workers)) { /^(\Q$name\E\(\) \{.*?^\})/sm or die "count owner absent"; print "$1\n"; }' \
+  "$repo/scripts/bootstrap/verify-compiler-subsystem-test-matrix.shs" >"$scratch/owner.sh"
+. "$scratch/owner.sh"
+verify() {
+  expected=$(perl -I "$repo/scripts/bootstrap/lib" -MBootstrapProductProducer=product_resource_profile \
+    -e 'print product_resource_profile(@ARGV)' qualified "$1" 3000000 1800 enforce) || return 1
+  verify_profile_workers "$expected" "$1" "$scratch/receipt"
+}
+printf 'resource_profile=qualified-80-v1\n' >"$scratch/receipt"
+for count in 80 080 +80; do
+  if verify "$count" 2>/dev/null; then exit 1; fi
+done
+printf 'threads=80\n' >"$scratch/receipt"
+verify 80
+for count in 080 +80; do
+  if verify "$count" 2>/dev/null; then exit 1; fi
+done
+printf 'threads=080\n' >"$scratch/receipt"
+if verify 80 2>/dev/null; then exit 1; fi
+printf 'status=PASS\n' >"$scratch/receipt"
+verify 20
+printf 'PASS profile-derived worker binding: 8 boundary cases; no native execution\n'

@@ -68,7 +68,7 @@ fn _cold_hir_receipt_from_entry_v1(
         return Err("cold-hir-source-content-mismatch")
     val abi = hir_abi_interface_encoded_v1(module)
     if abi.is_err():
-        return Err("cold-hir-abi-unresolved:{abi.unwrap_err()}")
+        return Err("cold-hir-abi-unresolved:{abi.unwrap_err()}:module={module_identity}:source={source_identity}")
     var imports: [text] = []
     for imported in module.imports:
         val module_path = imported.module_path
@@ -254,6 +254,7 @@ fn cold_hir_typed_receipts_from_lowered_sources_v1(
             return Err("cold-hir-snapshot-source-content-mismatch")
         snapshot_sources[identity] = true
     var receipts: [ColdHirTypedReceiptV1] = []
+    var receipt_errors: [text] = []
     var produced: Dict<text, bool> = {}
     var source_index = 0
     while source_index < source_paths.len():
@@ -278,11 +279,18 @@ fn cold_hir_typed_receipts_from_lowered_sources_v1(
             match cold_hir_typed_receipt_from_admitted_digest_v1(
                     hir_modules[module_name], module_name, normalized_root, identity,
                     source_digest, source_byte_count, expected_snapshot_inventory_digest, entry):
-                case Err(reason): return Err(reason)
+                case Err(reason):
+                    if not reason.starts_with("cold-hir-abi-unresolved:"):
+                        return Err(reason)
+                    receipt_errors.push(reason)
                 case Ok(receipt):
                     receipts.push(receipt)
-                    produced[identity] = true
+            # Each admitted source is visited once, including failed sources.
+            # Collect independent ABI failures without publishing partial receipts.
+            produced[identity] = true
         source_index = source_index + 1
+    if receipt_errors.len() > 0:
+        return Err(receipt_errors.join("\n"))
     Ok(receipts)
 
 export ColdHirSemanticSeedV1, ColdHirSemanticInputV1

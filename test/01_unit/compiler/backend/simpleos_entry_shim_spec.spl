@@ -1,0 +1,56 @@
+"""
+## Purpose and audience
+Pins how a pure-Simple SimpleOS x86_64 link compiles its C entry shim.
+Audience: compiler backend maintainers touching SimpleOS link paths.
+## Operator workflow
+bin/simple test test/01_unit/compiler/backend/simpleos_entry_shim_spec.spl
+## Compatibility and limitations
+Needs clang on PATH (or SIMPLE_CC naming clang); it really compiles the shim.
+## Verification guidance and troubleshooting
+If the hosted-probe scenario starts passing, the hosted C-compiler plan began
+admitting SimpleOS targets; keep the SimpleOS path on its explicit Clang anyway.
+"""
+# Lifecycle: doc/03_plan/os/simpleos/simpleos_selfhost_seed_linker_plan_2026-10-04.md
+# @manual_section: simpleos-link
+
+use std.spec.*
+use std.io_runtime.{env_get, file_exists, file_read_bytes}
+use compiler.backend.backend.llvm_native_link_hosted_support.{compile_entry_point_c}
+use compiler.backend.backend.simpleos_native_symbols.{simpleos_x86_64_clang}
+
+extern fn rt_env_set(key: text, value: text)
+
+describe "SimpleOS x86_64 entry shim":
+
+    it "rejects a SimpleOS target through the hosted C-compiler probe":
+        # @req REQ-SOS-SELFHOST-LINK-005
+        step("Select the SimpleOS x86_64 target the way native-build does")
+        val previous = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+        rt_env_set("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-unknown-simpleos")
+        step("Compile the entry shim with the hosted compiler probe")
+        val probed = compile_entry_point_c([], 41001, false, 0)
+        rt_env_set("SIMPLE_NATIVE_BUILD_TARGET", previous)
+        # @capture(text): probe result
+        step("Verify the hosted probe finds no compiler for a SimpleOS target")
+        match probed:
+            case Ok(path): fail("hosted probe unexpectedly compiled {path}")
+            case Err(e): expect(e).to_contain("No C compiler found")
+
+    it "compiles the shim as a freestanding x86-64 ELF with the SimpleOS Clang":
+        # @req REQ-SOS-SELFHOST-LINK-006
+        step("Pick the SimpleOS Clang")
+        val cc = match simpleos_x86_64_clang():
+            case Ok(c): c
+            case Err(e): fail("no SimpleOS clang: {e}")
+        step("Compile the entry shim for the SimpleOS target")
+        val object = match compile_entry_point_c([], 41002, false, 0, cc, "x86_64-unknown-none-elf"):
+            case Ok(path): path
+            case Err(e): fail("entry shim compile failed: {e}")
+        # @capture(binary_layout): ELF header bytes of the shim object
+        step("Verify the object is a 64-bit little-endian x86-64 ELF relocatable")
+        expect(file_exists(object)).to_be(true)
+        val bytes = file_read_bytes(object)
+        expect(bytes[0]).to_equal(127u8)  # oracle: ELF magic 0x7f
+        expect(bytes[4]).to_equal(2u8)  # oracle: EI_CLASS ELFCLASS64
+        expect(bytes[16]).to_equal(1u8)  # oracle: e_type ET_REL (low byte)
+        expect(bytes[18]).to_equal(62u8)  # oracle: e_machine EM_X86_64

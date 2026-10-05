@@ -1,0 +1,40 @@
+#!/bin/sh
+# Exercise the actual selected-product owner in its attempt working directory.
+# Missing compiler authority must stay BLOCKED; this is not a native result.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+source="$scratch/source"
+mkdir -p "$source/scripts/bootstrap/lib" "$scratch/attempt"
+for tool in run-compiler-subsystem-test-products.shs build-compiler-subsystem-test-product.shs \
+  verify-compiler-subsystem-test-product.pl run-process-group-timeout.shs; do
+  cp "$repo/scripts/bootstrap/$tool" "$source/scripts/bootstrap/$tool"
+done
+cp "$repo/scripts/bootstrap/lib/managed-task-schedule.shs" "$source/scripts/bootstrap/lib/"
+cp "$repo/scripts/bootstrap/lib/BootstrapProductProducer.pm" "$source/scripts/bootstrap/lib/"
+printf '#!/bin/sh\nprintf "suite\\tpath\\tsha256\\n"\n' >"$source/scripts/bootstrap/compiler-subsystem-test-inventory.shs"
+code=0
+(
+  cd "$scratch/attempt"
+  sh "$source/scripts/bootstrap/run-compiler-subsystem-test-products.shs" \
+    --manager-work --product=llvm:compiler --qualification-mode=diagnostic --producer-phase=phase2 \
+    --threads=80 --rss-mode=monitor --build-timeout-seconds=0 --test-timeout-seconds=0 \
+    --source-root="$source" '--output-root=@WORK@/product-output'
+) >"$scratch/run.log" 2>&1 || code=$?
+[ "$code" = 1 ]
+output="$scratch/attempt/product-output"
+[ -f "$output/product-status.tsv" ]
+[ "$(wc -l <"$output/product-status.tsv" | tr -d ' ')" = 3 ]
+grep -q 'BLOCKED' "$output/product-status.tsv"
+grep -q '^phase2_llvm_product_compiler_build' "$output/product-status.tsv"
+grep -qx 'producer_phase=phase2' "$output/matrix.env"
+[ ! -e "$output/llvm/compiler/result.env" ]
+[ ! -e "$scratch/attempt/@WORK@" ]
+code=0
+sh "$source/scripts/bootstrap/run-compiler-subsystem-test-products.shs" \
+  --manager-work --product=llvm:compiler --output-root=/unowned-output \
+  >"$scratch/rejected.log" 2>&1 || code=$?
+[ "$code" = 2 ]
+grep -q 'attempt-owned product output' "$scratch/rejected.log"
+printf 'PASS product manager work: actual cwd binding and foreign output rejection; native BLOCKED\n'

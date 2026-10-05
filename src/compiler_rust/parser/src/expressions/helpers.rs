@@ -168,6 +168,22 @@ impl<'a> Parser<'a> {
         Ok(expr)
     }
 
+    /// Run `f` with the `as T else:` cast-fallback suffix disabled, restoring
+    /// the previous setting afterwards (also on error). Used for the THEN arm
+    /// of an inline `if`, whose `else` belongs to the `if`: without this,
+    /// `if c: x as i64 else: 7` parsed as `if c: (x as i64 else: 7)` and the
+    /// else arm was silently lost.
+    pub(crate) fn parse_without_cast_else<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, ParseError>,
+    ) -> Result<T, ParseError> {
+        let old = self.inline_if_then_call_depth;
+        self.inline_if_then_call_depth = Some(self.call_arg_depth);
+        let result = f(self);
+        self.inline_if_then_call_depth = old;
+        result
+    }
+
     /// Parse an if/elif expression (shared logic)
     pub(crate) fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
         // Temporarily disable brace postfix to prevent { body } from being consumed as method call
@@ -273,15 +289,12 @@ impl<'a> Parser<'a> {
             } // close else for empty-then-branch check
         } else if self.check(&TokenKind::Return) || self.check(&TokenKind::Break) || self.check(&TokenKind::Continue) {
             // Diverging statement in then branch: `if cond: return val`
-            let stmt = self.parse_item()?;
+            let stmt = self.parse_without_cast_else(|p| p.parse_item())?;
             Expr::DoBlock(vec![stmt])
         } else {
-            // Inline form: parse as expression. Mark the then-branch so a
-            // trailing `as Type else:` leaves the `else:` to this `if`.
-            let saved_inline_if_then = self.inline_if_then_call_depth.replace(self.call_arg_depth);
-            let parsed = self.parse_expression();
-            self.inline_if_then_call_depth = saved_inline_if_then;
-            let expr = parsed?;
+            // Inline form: parse as expression. A trailing `as T` must not
+            // claim this if's `else:` as its cast-fallback suffix.
+            let expr = self.parse_without_cast_else(|p| p.parse_expression())?;
             // A multi-line CONDITION's trailing-operator continuation
             // (`if a == x and\n    b == y: ...`) can leave a compensating
             // pseudo-DEDENT queued in `deferred_dedent_count` (see

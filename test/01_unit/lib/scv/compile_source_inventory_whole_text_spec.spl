@@ -1,0 +1,84 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.text_bytes.{bytes_to_text}
+use std.scv.compile_source_inventory_core.{compile_source_inventory_event_from_content_v1, compile_source_inventory_strip_comments_v1, compile_source_inventory_facet_rows_from_canonical_v1, compile_source_inventory_whole_text_eligible_v1, compile_source_inventory_whole_text_canonical_v1, compile_source_inventory_whole_text_rows_v1, compile_source_inventory_digest_valid_v1}
+
+# The whole-text canonicalizer must produce exactly the per-line reference
+# texts (strip_comments + facet_rows_from_canonical) for every eligible file.
+fn whole_text_samples() -> [text]:
+    [
+        "",
+        "\n",
+        "   \n  \n",
+        "# only a comment",
+        "#a\n#b\n#c\n",
+        "abc",
+        "  abc  ",
+        "a  b   c    d",
+        "x = \"two  spaces\"   # trailing hash stays",
+        "fn f():\n    val x = 1\n\n\n    # inner comment\n    var   y  =  2\n    return x\n",
+        "#lead\nuse a.b\n   #c1\n  #c2\nimpl  T\nprovider P\n#tail",
+        "export a\npub fn b(): 1\nexported c\npublic d\npub\nexport\n pub  x\n",
+        "val a = 1\nval b = 2\nvar c = 3\ninit d\nvalue e\nvariable f\ninitial g\n",
+        "use x\nuse y\nimpl Z\nuser u\nimplement v\nproviders w\n",
+        "use x",
+        "pub fn last(): 1",
+        "line one\n#\n# \nline two  \n   line three",
+        "  #not first\nfirst # hash later\n  \n#\n",
+        "fn t(): \"\u{e9}\u{2014}\u{2192}\"\nval z = \"\u{4e2d}\u{6587}\"\n",
+        "\n\n\nval x = 1\n\n\n"
+    ]
+
+describe "whole-text source inventory canonicalization":
+    it "matches the per-line reference on eligible content":
+        for content in whole_text_samples():
+            expect(compile_source_inventory_whole_text_eligible_v1(content)).to_equal(true)
+            val reference = compile_source_inventory_strip_comments_v1(content)
+            val canonical = compile_source_inventory_whole_text_canonical_v1(content)
+            expect(canonical).to_equal(reference)
+            expect(compile_source_inventory_whole_text_rows_v1(canonical, ["export ", "pub "])).to_equal(compile_source_inventory_facet_rows_from_canonical_v1(reference, "export"))
+            expect(compile_source_inventory_whole_text_rows_v1(canonical, ["val ", "var ", "init "])).to_equal(compile_source_inventory_facet_rows_from_canonical_v1(reference, "initializer"))
+            expect(compile_source_inventory_whole_text_rows_v1(canonical, ["use ", "impl ", "provider "])).to_equal(compile_source_inventory_facet_rows_from_canonical_v1(reference, "provider"))
+
+    it "keeps every event digest identical to the reference texts":
+        for content in whole_text_samples():
+            val event = compile_source_inventory_event_from_content_v1(
+                "git", "create", "src/fixture.spl", content)
+            val canonical = compile_source_inventory_strip_comments_v1(content)
+            expect(event.byte_count).to_equal(content.len())
+            expect(event.content_digest).to_equal(sha256_text(content))
+            expect(event.semantic_digest).to_equal(sha256_text(canonical))
+            expect(event.export_digest).to_equal(sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "export")))
+            expect(event.initializer_digest).to_equal(sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "initializer")))
+            expect(event.provider_digest).to_equal(sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "provider")))
+
+    it "validates digests by bytes exactly as before":
+        val good = sha256_text("abc")
+        expect(good).to_equal("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        expect(sha256_text("")).to_equal("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        expect(compile_source_inventory_digest_valid_v1(good)).to_equal(true)
+        expect(compile_source_inventory_digest_valid_v1(good.to_upper())).to_equal(false)
+        expect(compile_source_inventory_digest_valid_v1(good + "0")).to_equal(false)
+        expect(compile_source_inventory_digest_valid_v1("g" + good.substring(1))).to_equal(false)
+        expect(compile_source_inventory_digest_valid_v1("\u{e9}" + good.substring(2))).to_equal(false)
+        expect(compile_source_inventory_digest_valid_v1("")).to_equal(false)
+
+    it "sends any other trim-visible whitespace to the reference path":
+        # Built from bytes so a lexer escape regression cannot hide here.
+        val others = [
+            "\t", "\r", bytes_to_text([11u8]), bytes_to_text([12u8]),
+            bytes_to_text([194u8, 133u8]), bytes_to_text([194u8, 160u8]),
+            bytes_to_text([225u8, 154u8, 128u8]), bytes_to_text([226u8, 128u8, 128u8]),
+            bytes_to_text([226u8, 128u8, 138u8]), bytes_to_text([226u8, 128u8, 168u8]),
+            bytes_to_text([226u8, 128u8, 169u8]), bytes_to_text([226u8, 128u8, 175u8]),
+            bytes_to_text([226u8, 129u8, 159u8]), bytes_to_text([227u8, 128u8, 128u8])
+        ]
+        for ws in others:
+            val content = "val a =" + ws + " 1\n" + ws + "# c\npub  x" + ws + "\n"
+            expect(compile_source_inventory_whole_text_eligible_v1(content)).to_equal(false)
+            val event = compile_source_inventory_event_from_content_v1(
+                "git", "create", "src/fixture.spl", content)
+            val canonical = compile_source_inventory_strip_comments_v1(content)
+            expect(event.semantic_digest).to_equal(sha256_text(canonical))
+            expect(event.export_digest).to_equal(sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "export")))
+            expect(event.initializer_digest).to_equal(sha256_text(compile_source_inventory_facet_rows_from_canonical_v1(canonical, "initializer")))

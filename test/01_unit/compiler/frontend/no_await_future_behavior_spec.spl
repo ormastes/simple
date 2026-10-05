@@ -1,0 +1,83 @@
+use std.spec
+use std.async.future.{Future}
+use std.async.poll.{Poll}
+
+var no_await_body_count: i64 = 0
+
+async fn no_await_capture(value: i64) -> i64:
+    val local = value * 2
+    local + 3
+
+async fn no_await_early(value: i64) -> i64:
+    if value < 0:
+        return 17
+    no_await_body_count = no_await_body_count + 1
+    value + 1
+
+async fn no_await_unit():
+    no_await_body_count = no_await_body_count + 1
+
+async fn no_await_once() -> i64:
+    no_await_body_count = no_await_body_count + 1
+    no_await_body_count
+
+async fn no_await_generic_tail<T>(value: T) -> T:
+    value
+
+fn no_await_sync_control(value: i64) -> i64:
+    if value < 0:
+        return 23
+    value + 2
+
+describe "no-await async functions construct real ready futures":
+    it "captures parameters and preserves a local tail value":
+        val future: Future<i64> = no_await_capture(4)
+        match future.poll():
+            case Poll.Ready(value): expect(value).to_equal(11)
+            case Poll.Pending: fail("no-await future unexpectedly pending")
+
+    it "keeps an early return inside the body value scope":
+        no_await_body_count = 0
+        val future: Future<i64> = no_await_early(-1)
+        match future.poll():
+            case Poll.Ready(value): expect(value).to_equal(17)
+            case Poll.Pending: fail("early return did not construct a ready future")
+        expect(no_await_body_count).to_equal(0)
+
+    it "evaluates the non-returning branch and wraps its tail":
+        no_await_body_count = 0
+        val future: Future<i64> = no_await_early(5)
+        match future.poll():
+            case Poll.Ready(value): expect(value).to_equal(6)
+            case Poll.Pending: fail("tail value did not construct a ready future")
+        expect(no_await_body_count).to_equal(1)
+
+    it "preserves an inferred unit return":
+        no_await_body_count = 0
+        val future: Future<()> = no_await_unit()
+        expect(future.is_ready()).to_be(true)
+        expect(no_await_body_count).to_equal(1)
+
+    it "evaluates the body once even when the future is polled twice":
+        no_await_body_count = 0
+        val future: Future<i64> = no_await_once()
+        expect(no_await_body_count).to_equal(1)
+        match future.poll():
+            case Poll.Ready(value): expect(value).to_equal(1)
+            case Poll.Pending: fail("first poll unexpectedly pending")
+        match future.poll():
+            case Poll.Ready(value): expect(value).to_equal(1)
+            case Poll.Pending: fail("second poll unexpectedly pending")
+        expect(no_await_body_count).to_equal(1)
+
+    it "leaves ordinary synchronous function returns unchanged":
+        val early: i64 = no_await_sync_control(-1)
+        val tail: i64 = no_await_sync_control(5)
+        expect(early).to_equal(23)
+        expect(tail).to_equal(7)
+
+    it "retains the generic tail-only value path":
+        val future: Future<i64> = no_await_generic_tail(19)
+        match future.poll():
+            case Poll.Ready(value): expect(value).to_equal(19)
+            case Poll.Pending: fail("generic tail did not construct a ready future")

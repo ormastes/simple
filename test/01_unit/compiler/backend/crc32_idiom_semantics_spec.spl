@@ -1,0 +1,62 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+# CRC32 idiom semantics: the cipher pattern rules rewrite the SHARED IEEE
+# CRC-32 per-element updates (std.common.crypto.crc32.update_byte/_u32/_u64,
+# poly 0xEDB88320) to the Crc32U8/U32/U64 idioms. The idiom may only be
+# lowered where the target instruction computes that same polynomial:
+#   - AArch64 / ARMv8 AArch32 CRC32B/W/X: IEEE 0x04C11DB7 -> supported.
+#   - x86 SSE4.2 `crc32`: Castagnoli 0x1EDC6F41 (CRC-32C) -> NOT supported;
+#     lowering there silently produced CRC-32C for a CRC-32 call site.
+
+use std.spec.step
+
+use compiler.backend.feature_caps.{
+    TargetIdiom,
+    x86_caps_from_target, x86_32_caps_from_target, aarch64_caps_from_target
+}
+use compiler.mir_opt.mir_opt.pattern.rules_crypto.{lookup_rule_for_callee}
+use compiler.mir.intrinsics.{CRC32_U8}
+use std.common.crypto.crc32.{crc32, crc32c, update_byte}
+
+describe "CRC32 idiom is IEEE CRC-32":
+
+    it "the shared IEEE update_byte maps to the crc32_u8 idiom":
+        # @req REQ-SSPEC-UNIT
+        step("lookup_rule_for_callee(std.common.crypto.crc32.update_byte) -> crc32_u8")
+        val rule = lookup_rule_for_callee("std.common.crypto.crc32.update_byte")
+        expect(rule.?).to_equal(true)
+        expect(rule.unwrap().intrinsic).to_equal(CRC32_U8)
+
+    it "update_byte is the IEEE step, not the Castagnoli step":
+        # @req REQ-SSPEC-UNIT
+        step("finalize(update_byte(init, 'a')) == crc32('a') != crc32c('a')")
+        val step_ieee = (update_byte(0xFFFFFFFFu32, 0x61u8) ^ 0xFFFFFFFFu32).to_i64()
+        expect(step_ieee).to_equal(crc32([0x61u8]).to_i64())
+        expect(step_ieee == crc32c([0x61u8]).to_i64()).to_equal(false)
+
+describe "CRC32 idiom target support":
+
+    it "x86_64 SSE4.2 does not claim the IEEE CRC32 idioms (its crc32 is CRC-32C)":
+        # @req REQ-SSPEC-UNIT
+        step("x86_64-v4 caps: Crc32U8/U32/U64 unsupported")
+        val caps = x86_caps_from_target("x86_64-v4")
+        expect(caps.has_sse42).to_equal(true)
+        expect(caps.supports(TargetIdiom.Crc32U8)).to_equal(false)
+        expect(caps.supports(TargetIdiom.Crc32U32)).to_equal(false)
+        expect(caps.supports(TargetIdiom.Crc32U64)).to_equal(false)
+
+    it "x86-32 SSE4.2 does not claim the IEEE CRC32 idioms":
+        # @req REQ-SSPEC-UNIT
+        step("i686-v3 caps: Crc32U8/U32 unsupported")
+        val caps = x86_32_caps_from_target("i686-v3")
+        expect(caps.supports(TargetIdiom.Crc32U8)).to_equal(false)
+        expect(caps.supports(TargetIdiom.Crc32U32)).to_equal(false)
+
+    it "AArch64 CRC extension keeps the IEEE CRC32 idioms (CRC32B/W/X)":
+        # @req REQ-SSPEC-UNIT
+        step("armv8.2-A+crypto caps: Crc32U8/U32/U64 supported")
+        val caps = aarch64_caps_from_target("armv8.2-A+crypto")
+        expect(caps.supports(TargetIdiom.Crc32U8)).to_equal(true)
+        expect(caps.supports(TargetIdiom.Crc32U32)).to_equal(true)
+        expect(caps.supports(TargetIdiom.Crc32U64)).to_equal(true)

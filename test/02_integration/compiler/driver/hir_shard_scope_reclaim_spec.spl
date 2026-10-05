@@ -1,0 +1,87 @@
+# Exclusive process environment: run this suite serially inside an admitted
+# build/test owner. SIMPLE_BINARY must name the rebuilt pure-Simple producer.
+use std.spec.*
+use std.io.{file_exists}
+use std.io_runtime.{dir_create_all}
+use std.nogc_sync_mut.io.dir_ops.{dir_list}
+use app.io.sysinfo_ops.{getpid}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_set(key: text, value: text)
+extern fn rt_env_get(key: text) -> text
+extern fn rt_file_delete(path: text) -> bool
+
+val SCOPE_FIXTURE = "test/fixtures/compiler/hir_shard_scope_reclaim"
+
+fn scope_fixture_build(root: text, object_lane: text, output: text) -> (text, i64):
+    val names = ["SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_HIR_CACHE_DIR",
+        "SIMPLE_HIR_SHARDING", "SIMPLE_PARSE_SHARD_MAX", "SIMPLE_HIR_CACHE",
+        "SIMPLE_FRONTEND_CACHE", "SIMPLE_STAGE3_STREAMING_SURFACES",
+        "SIMPLE_NO_STUB_FALLBACK", "SIMPLE_SHARD_MEM_CLAMP",
+        "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "SIMPLE_HIR_SHARD_WORKER_KB",
+        "SIMPLE_NATIVE_BUILD_RUST", "SIMPLE_BOOTSTRAP"]
+    val values = [root + "/frontend", root + "/hir", "1", "1", "1", "1",
+        "1", "1", "1", "3000000", "3000000", "0", "0"]
+    var saved: [text] = []
+    for name in names: saved.push(rt_env_get(name) ?? "")
+    var index = 0
+    while index < names.len():
+        rt_env_set(names[index], values[index])
+        index = index + 1
+    val producer = rt_env_get("SIMPLE_BINARY") ?? ""
+    val (out, err, code) = rt_process_run(producer, ["native-build",
+        "--backend", "cranelift", "--threads", "80", "--source", SCOPE_FIXTURE,
+        "--entry-closure", "--entry", SCOPE_FIXTURE + "/main.spl",
+        "--cache-dir", root + "/" + object_lane, "--output", output])
+    index = 0
+    while index < names.len():
+        rt_env_set(names[index], saved[index])
+        index = index + 1
+    (out + "\n" + err, code)
+
+describe "HIR shard transient lifetime":
+    slow_it "executes reclaimed cold/warm cache bodies and rejects an atomic entry publication failure":
+        val producer = rt_env_get("SIMPLE_BINARY") ?? ""
+        expect(producer != "").to_equal(true)
+        expect(file_exists(producer)).to_equal(true)
+        val root = "build/tmp/hir_scope_reclaim_" + getpid().to_string()
+        expect(dir_create_all(root)).to_equal(true)
+        val cold_output = root + "/cold.exe"
+        val (cold_log, cold_code) = scope_fixture_build(root, "cold-objects", cold_output)
+        expect(cold_code).to_equal(0)
+        expect(cold_log).to_contain("[hir-shard] completed_workers=1 failed_workers=0 failed_modules=0 unfinished=0")
+        expect(cold_log).to_contain("[hir-cache] hits=3 misses=0 stores=0")
+        val (cold_stdout, cold_stderr, cold_run) = rt_process_run(cold_output, [])
+        expect(cold_run).to_equal(0)
+        expect(cold_stdout.trim()).to_equal("hir-scope-body=37 sibling-return=42 checks=2 failures=0")
+        expect(cold_stderr).to_equal("")
+        # A separate object cache forces a new executable from the same HIR
+        # entries, exercising cache-hit decode inside the reclaimed shard scope.
+        val warm_output = root + "/warm.exe"
+        val (warm_log, warm_code) = scope_fixture_build(root, "warm-objects", warm_output)
+        expect(warm_code).to_equal(0)
+        expect(warm_log).to_contain("[hir-shard] completed_workers=1 failed_workers=0 failed_modules=0 unfinished=0")
+        expect(warm_log).to_contain("[hir-cache] hits=3 misses=0 stores=0")
+        val (warm_stdout, warm_stderr, warm_run) = rt_process_run(warm_output, [])
+        expect(warm_run).to_equal(0)
+        expect(warm_stdout).to_equal(cold_stdout)
+        expect(warm_stderr).to_equal("")
+
+        # Leave the cache/queue directory writable. Replace exactly one owned
+        # module entry with a directory so decode misses and the later atomic
+        # entry rename fails. Blocking the cache ROOT would fail queue setup
+        # before the transaction and would not test its cleanup/publication.
+        var victim = ""
+        for entry in dir_list(root + "/hir"):
+            if (victim == "" and entry.ends_with(".hir") and entry.len() == 68 and
+                    not entry.contains("/") and not entry.contains("\\")):
+                victim = entry
+        expect(victim != "").to_equal(true)
+        val blocked_entry = root + "/hir/" + victim
+        expect(rt_file_delete(blocked_entry)).to_equal(true)
+        expect(dir_create_all(blocked_entry)).to_equal(true)
+        val rejected_output = root + "/must-not-exist.exe"
+        val (failure_log, failure_code) = scope_fixture_build(root, "fault-objects", rejected_output)
+        expect(failure_code != 0).to_equal(true)
+        expect(failure_log).to_contain("HIR shard cache publication failed")
+        expect(file_exists(rejected_output)).to_equal(false)

@@ -74,6 +74,23 @@ pub(crate) struct ImportMapResult {
     /// to receive nil in its first register instead of the real argument.
     pub fn_arities: std::collections::HashMap<String, usize>,
     pub fn_return_types: std::collections::HashMap<String, simple_parser::Type>,
+    /// Defaults for uniquely resolved Owner.method symbols, excluding self.
+    pub method_param_defaults: std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>>,
+}
+
+fn record_method_defaults(
+    defaults: &mut std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>>,
+    mangled: &str,
+    method: &simple_parser::ast::FunctionDef,
+) {
+    let params = if method.params.first().is_some_and(|p| p.name == "self") {
+        &method.params[1..]
+    } else {
+        &method.params[..]
+    };
+    if params.iter().any(|p| p.default.is_some()) {
+        defaults.insert(mangled.to_string(), params.iter().map(|p| p.default.clone()).collect());
+    }
 }
 
 /// Sanitize a mangled symbol name for the host platform.
@@ -346,6 +363,7 @@ pub(crate) fn build_import_map(
     // returns: losing `u64` here turns native comparisons into mixed ANY/scalar
     // operations whose tagged ABI differs from raw machine integers.
     let mut fn_return_types: HashMap<String, simple_parser::Type> = HashMap::new();
+    let mut mangled_method_defaults: std::collections::HashMap<String, Vec<Option<simple_parser::ast::Expr>>> = HashMap::new();
 
     // Parse each physical module once, in parallel. Both collection passes
     // below walk `parsed` in `file_sources` order, so every first-wins /
@@ -448,6 +466,7 @@ pub(crate) fn build_import_map(
                                 let raw = format!("{}.{}", c.name, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, c.name, m.name));
                                 fn_arities.insert(mangled.clone(), method_arity(m));
+                                record_method_defaults(&mut mangled_method_defaults, &mangled, m);
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
                                 record_method_return_type(&mut fn_return_types, raw, m);
@@ -515,6 +534,7 @@ pub(crate) fn build_import_map(
                                 let raw = format!("{}.{}", s.name, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, s.name, m.name));
                                 fn_arities.insert(mangled.clone(), method_arity(m));
+                                record_method_defaults(&mut mangled_method_defaults, &mangled, m);
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
                                 record_method_return_type(&mut fn_return_types, raw, m);
@@ -602,6 +622,7 @@ pub(crate) fn build_import_map(
                                 let raw = format!("{}.{}", e.name, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, e.name, m.name));
                                 fn_arities.insert(mangled.clone(), method_arity(m));
+                                record_method_defaults(&mut mangled_method_defaults, &mangled, m);
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw).or_default().push(mangled);
                             }
@@ -632,6 +653,7 @@ pub(crate) fn build_import_map(
                                 let raw = format!("{}.{}", t.name, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, t.name, m.name));
                                 fn_arities.insert(mangled.clone(), method_arity(m));
+                                record_method_defaults(&mut mangled_method_defaults, &mangled, m);
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw).or_default().push(mangled);
                             }
@@ -656,6 +678,7 @@ pub(crate) fn build_import_map(
                                     let raw = format!("{}.{}", type_name, m.name);
                                     let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, type_name, m.name));
                                     fn_arities.insert(mangled.clone(), method_arity(m));
+                                record_method_defaults(&mut mangled_method_defaults, &mangled, m);
                                     raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                     raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
                                     record_method_return_type(&mut fn_return_types, raw, m);
@@ -669,6 +692,7 @@ pub(crate) fn build_import_map(
                                 let raw = format!("{}.{}", ext.target_type, m.name);
                                 let mangled = sanitize_mangled(format!("{}__{}.{}", prefix, ext.target_type, m.name));
                                 fn_arities.insert(mangled.clone(), method_arity(m));
+                                record_method_defaults(&mut mangled_method_defaults, &mangled, m);
                                 raw_to_mangled.entry(m.name.clone()).or_default().push(mangled.clone());
                                 raw_to_mangled.entry(raw.clone()).or_default().push(mangled);
                                 record_method_return_type(&mut fn_return_types, raw, m);
@@ -1020,7 +1044,14 @@ pub(crate) fn build_import_map(
 
     // Drop ambiguous (empty-name sentinel) entries before returning.
     fn_return_types.retain(|_, ty| !matches!(ty, simple_parser::Type::Simple(s) if s.is_empty()));
+    // Match the same unique symbol selected for native linkage. Never borrow
+    // defaults from another type with the same bare owner/method name.
+    let method_param_defaults = raw_to_mangled.iter().filter_map(|(raw, owners)| {
+        if !raw.contains('.') || owners.len() != 1 { return None; }
+        mangled_method_defaults.get(&owners[0]).map(|defaults| (raw.clone(), defaults.clone()))
+    }).collect();
     ImportMapResult {
+        method_param_defaults,
         map,
         ambiguous,
         all_mangled: raw_to_mangled,

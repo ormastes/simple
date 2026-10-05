@@ -1,0 +1,44 @@
+#!/bin/sh
+# A read-only reference to the canonical committed seed generation. This is
+# preparation evidence, never a replacement seed stamp or Stage2 admission.
+bootstrap_seed_handoff_publish() (
+    [ "$#" -eq 4 ] || return 2
+    source_root=$1 producer=$2 preflight=$3 destination=$4
+    marker="$source_root/src/compiler_rust/target/bootstrap.current.env"
+    generations="$source_root/src/compiler_rust/target/bootstrap.generations"
+    for path in "$producer" "$preflight" "$marker"; do
+        [ -f "$path" ] && [ ! -L "$path" ] || return 2
+    done
+    [ ! -e "$destination" ] && [ ! -L "$destination" ] || return 2
+    parent=${destination%/*}
+    [ -d "$parent" ] && [ ! -L "$parent" ] || return 2
+    marker_sha=$(bootstrap_stage3_hash_file "$marker") || return 2
+    bootstrap_stage3_resolve_committed_seed "$generations" "$marker" || return 2
+    authority=$BOOTSTRAP_STAGE3_COMMITTED_AUTHORITY
+    set -- "$authority"/*.inputs.sha256
+    [ "$#" -eq 1 ] && [ -f "$1" ] && [ ! -L "$1" ] || return 2
+    stamp=$1
+    seed=${stamp%.inputs.sha256}
+    [ "$(bootstrap_stage3_manifest_value schema "$stamp")" = simple-bootstrap-seed-artifact-stamp-v2 ] || return 2
+    producer_sha=$(bootstrap_stage3_hash_file "$producer") || return 2
+    [ "$(bootstrap_stage3_manifest_value seed_sha256 "$stamp")" = "$producer_sha" ] &&
+        [ "$(bootstrap_stage3_hash_file "$seed")" = "$producer_sha" ] || return 2
+    [ "$(bootstrap_stage3_manifest_value schema "$preflight")" = simple-bootstrap-preflight-v1 ] &&
+        [ "$(bootstrap_stage3_manifest_value status "$preflight")" = pass ] &&
+        [ "$(bootstrap_stage3_manifest_value cargo_mode "$preflight")" = checked ] &&
+        [ "$(bootstrap_stage3_manifest_value seed_sha256 "$preflight")" = "$producer_sha" ] || return 2
+    stamp_sha=$(bootstrap_stage3_hash_file "$stamp") || return 2
+    preflight_sha=$(bootstrap_stage3_hash_file "$preflight") || return 2
+    [ "$(bootstrap_stage3_hash_file "$marker")" = "$marker_sha" ] || return 2
+    # Preserve an earlier handoff even if another invocation races this path.
+    set -C
+    {
+        printf '%s\n' 'schema=simple-bootstrap-seed-handoff-v1' 'status=prepared' \
+            'stage2_admitted=0' 'whole_tests=NOT_RUN' 'dynload_provider=NOT_QUALIFIED' \
+            "producer_path=$seed" "producer_sha256=$producer_sha" \
+            "generation_authority=$authority" "generation_marker=$marker" \
+            "generation_marker_sha256=$marker_sha" "seed_stamp=$stamp" \
+            "seed_stamp_sha256=$stamp_sha" "preflight_receipt=$preflight" \
+            "preflight_receipt_sha256=$preflight_sha"
+    } >"$destination" || return 2
+)

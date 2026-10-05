@@ -3297,6 +3297,12 @@ int64_t rt_value_bool(int64_t value) {
     return rt_core_from_special(value ? RT_VALUE_SPECIAL_TRUE : RT_VALUE_SPECIAL_FALSE);
 }
 
+/* Match RuntimeValue::as_bool: decode the tagged true value, not truthiness.
+ * The native compiler declares this provider as I64 -> I8. */
+int8_t rt_value_as_bool(int64_t value) {
+    return value == rt_core_from_special(RT_VALUE_SPECIAL_TRUE) ? 1 : 0;
+}
+
 int64_t rt_value_nil(void) {
     return rt_core_nil();
 }
@@ -15283,6 +15289,19 @@ int64_t rt_time_now_unix(void) {
     return (int64_t)time(NULL);
 }
 
+/* A composition that also links runtime_time.c (the SimpleOS sysroot runtime
+ * archive) selects it as the clock owner explicitly with
+ * SIMPLE_RUNTIME_TIME_OWNER, the same ownership model as
+ * SIMPLE_RUNTIME_TIMESTAMP_OWNER / SIMPLE_RUNTIME_MEMORY_OWNER: the five
+ * clock symbols runtime_time.c defines are compiled out here so exactly one
+ * definition ships. Compositions without runtime_time.c keep these. */
+#if defined(SIMPLE_RUNTIME_TIME_OWNER)
+int64_t rt_time_now_unix_micros(void);
+int64_t rt_time_now_nanos(void);
+int64_t rt_time_monotonic_ns(void);
+int64_t rt_time_now_micros(void);
+int64_t rt_time_now_monotonic_ms(void);
+#else
 int64_t rt_time_now_unix_micros(void) {
 #if defined(_WIN32)
     /* Same cause as rt_time_now_ns: `clock_gettime` becomes the unresolved
@@ -15306,6 +15325,7 @@ int64_t rt_time_now_unix_micros(void) {
     return (int64_t)ts.tv_sec * 1000000LL + (int64_t)ts.tv_nsec / 1000LL;
 #endif
 }
+#endif /* !SIMPLE_RUNTIME_TIME_OWNER */
 
 int64_t rt_time_ms(void) {
     int64_t micros = rt_time_now_unix_micros();
@@ -15346,6 +15366,7 @@ int64_t rt_time_now_ns(void) {
 #endif
 }
 
+#if !defined(SIMPLE_RUNTIME_TIME_OWNER)
 int64_t rt_time_now_nanos(void) {
     return rt_time_now_ns();
 }
@@ -15369,6 +15390,7 @@ int64_t rt_time_now_micros(void) {
     int64_t nanos = rt_time_now_ns();
     return nanos < 0 ? -1 : nanos / 1000LL;
 }
+#endif /* !SIMPLE_RUNTIME_TIME_OWNER */
 
 void rt_sleep_nanos(int64_t ns) {
     if (ns <= 0) return;
@@ -15417,10 +15439,12 @@ void rt_sleep_nanos(int64_t ns) {
  * first-call-baseline form returned 0 on the first call, so a caller could
  * not tell "clock works, t=0" from a dead clock, and the two C definitions of
  * one ABI name disagreed. Callers (std diag deadlines) only take differences. */
+#if !defined(SIMPLE_RUNTIME_TIME_OWNER)
 int64_t rt_time_now_monotonic_ms(void) {
     int64_t now_ns = rt_time_now_ns();
     return now_ns < 0 ? -1 : now_ns / 1000000LL;
 }
+#endif /* !SIMPLE_RUNTIME_TIME_OWNER */
 
 void rt_sleep_ms(int64_t ms) {
     rt_sleep_ms_native(ms);

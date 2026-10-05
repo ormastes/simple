@@ -6,6 +6,7 @@
 
 use std.gc_async_mut.io.mod_stub.{env_get}
 use std.common.ui.draw_ir.{
+    draw_ir_command_has_unsupported_v4_state,
     DRAW_IR_COMMAND_IMAGE,
     DRAW_IR_COMMAND_EDGE,
     DRAW_IR_COMMAND_PATH,
@@ -1187,6 +1188,8 @@ fn _engine2d_draw_ir_fresh_device_rect_style_supported(style: [DrawIrStyleProp])
     true
 
 fn _engine2d_draw_ir_fresh_device_command_supported(command: DrawIrCommand, images: [Engine2dResolvedDrawIrImage], width: i32, height: i32, allow_clipped: bool, allow_translucent_initializer: bool) -> bool:
+    if command.fractional_geometry != nil or draw_ir_command_has_unsupported_v4_state(command):
+        return false
     val right = command.x.to_i64() + command.width.to_i64()
     val bottom = command.y.to_i64() + command.height.to_i64()
     if (command.width <= 0 or command.height <= 0 or right <= 0 or bottom <= 0 or
@@ -1366,6 +1369,8 @@ fn _engine2d_draw_ir_prepare_fresh_device_text(engine: Engine2D, composition: Dr
 # executor to turn images, effects, clipped child surfaces, or a CPU result
 # into a device receipt.
 fn _engine2d_draw_ir_strict_vulkan_box_bounded(command: DrawIrCommand, width: i32, height: i32) -> bool:
+    if command.fractional_geometry != nil or draw_ir_command_has_unsupported_v4_state(command):
+        return false
     val right = command.x.to_i64() + command.width.to_i64()
     val bottom = command.y.to_i64() + command.height.to_i64()
     command.width > 0 and command.height > 0 and
@@ -1387,6 +1392,10 @@ fn _engine2d_draw_ir_strict_vulkan_primitive_reason(engine: Engine2D, compositio
         for command in batch.commands:
             if command.? == false or command.clip_rect.present:
                 return "strict-vulkan-command-preflight-required"
+            if command.fractional_geometry != nil:
+                return "fractional-geometry-unsupported"
+            if draw_ir_command_has_unsupported_v4_state(command):
+                return "affine-or-raster-policy-unsupported"
             if first and command.kind != DRAW_IR_COMMAND_RECT:
                 return "strict-vulkan-clear-first-required"
             if command.kind == DRAW_IR_COMMAND_RECT:
@@ -1667,10 +1676,8 @@ fn _engine2d_draw_ir_materialize_image_damage(
 fn _engine2d_draw_ir_plain_fill(command: DrawIrCommand) -> bool:
     if command.? == false:
         return false
-    # The v4 preflight (`draw_ir_command_has_unsupported_v4_state`) arrived
-    # here via forward-port d9fcfc6f01e without its definition: main's
-    # DrawIrCommand has no affine/raster-policy (v4) state, so there is
-    # nothing to reject. Restore the guard together with the v4 fields.
+    if command.fractional_geometry != nil or draw_ir_command_has_unsupported_v4_state(command):
+        return false
     (command.kind == DRAW_IR_COMMAND_RECT and command.width > 0 and
      command.height > 0 and command.computed_style.len() == 0 and
      not command.clip_rect.present and
@@ -1778,7 +1785,10 @@ fn _engine2d_draw_ir_command_geometry(command: DrawIrCommand,
         hit_rect: command.hit_rect, clip_rect: command.clip_rect,
         computed_style: command.computed_style, edge: command.edge,
         parent_id: command.parent_id, image_uri: command.image_uri,
-        points: command.points, glyph_run: command.glyph_run)
+        points: command.points, glyph_run: command.glyph_run,
+        fractional_geometry: command.fractional_geometry,
+        affine_transform: command.affine_transform,
+        raster_policy: command.raster_policy)
 
 fn engine2d_draw_ir_coalesce_plain_fills(commands: [DrawIrCommand]) -> Engine2dDrawIrCommandPlan:
     var merge_present = false
@@ -2116,6 +2126,14 @@ fn _engine2d_draw_ir_render_command_plan(engine: Engine2D, command_plan: Engine2
         # `not` in this condition position.
         if command.? == false:
             skipped = skipped + 1
+            continue
+        if command.fractional_geometry != nil:
+            skipped = skipped + command_weight
+            unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, "fractional-geometry-unsupported")
+            continue
+        if draw_ir_command_has_unsupported_v4_state(command):
+            skipped = skipped + command_weight
+            unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, "affine-or-raster-policy-unsupported")
             continue
         val exact_bounds = _engine2d_draw_ir_exact_plain_bounds(
             command, offset_x, offset_y, active_clip,
