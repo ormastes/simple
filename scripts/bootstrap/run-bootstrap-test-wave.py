@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import time
@@ -51,6 +52,9 @@ def main():
                  'compiler-cranelift', 'producer-receipt-llvm', 'producer-receipt-cranelift'):
         parser.add_argument('--' + name, required=True, type=Path)
     parser.add_argument('--seed-sha256', required=True)
+    parser.add_argument('--tool-root', type=Path)
+    parser.add_argument('--tool-manifest', type=Path)
+    parser.add_argument('--tool-manifest-sha256')
     parser.add_argument('--admitted-jobs', required=True, type=int)
     parser.add_argument('--rss-cap-kib', required=True, type=int)
     # Full bootstrap preserves the existing qualified-product resource policy.
@@ -67,13 +71,36 @@ def main():
         parser.error('separate physical source/output roots required')
     if digest(args.seed) != args.seed_sha256:
         parser.error('Phase1 seed bytes differ')
-    scripts = source / 'scripts/bootstrap'
+    source_head = subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'],
+                                          text=True).strip()
+    tool_root = (args.tool_root or source).resolve()
+    scripts = tool_root / 'scripts/bootstrap'
+    tool_authority = None
+    environment = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+    if tool_root != source:
+        if not args.tool_manifest or not args.tool_manifest_sha256:
+            parser.error('separate tool root requires a pinned complete tool manifest')
+        authority_spec = importlib.util.spec_from_file_location(
+            'tool_code_authority', scripts / 'tool-code-authority.py')
+        tool_authority = importlib.util.module_from_spec(authority_spec)
+        authority_spec.loader.exec_module(tool_authority)
+        tool_authority.validate(tool_root, args.tool_manifest,
+                                args.tool_manifest_sha256, Path(__file__))
+        environment.update(SIMPLE_BOOTSTRAP_TOOL_ROOT=str(tool_root),
+            SIMPLE_BOOTSTRAP_TOOL_MANIFEST=str(args.tool_manifest.resolve()),
+            SIMPLE_BOOTSTRAP_TOOL_MANIFEST_SHA256=args.tool_manifest_sha256,
+            SIMPLE_BOOTSTRAP_TOOL_PYTHON=sys.executable)
+    elif any(os.environ.get(key) for key in ('SIMPLE_BOOTSTRAP_TOOL_ROOT',
+             'SIMPLE_BOOTSTRAP_TOOL_MANIFEST', 'SIMPLE_BOOTSTRAP_TOOL_MANIFEST_SHA256')):
+        parser.error('inherited tool authority requires explicit separate tool arguments')
     callback = scripts / 'phase1-whole-tests.py'
     product = scripts / 'run-compiler-subsystem-test-products.shs'
     gate_path = scripts / 'phase1-terminal-gate.py'
     pins = {str(p): digest(p) for p in (callback, product, gate_path, args.seed, args.shell,
         args.compiler_llvm, args.compiler_cranelift, args.producer_receipt_llvm,
         args.producer_receipt_cranelift)}
+    if tool_authority:
+        pins[str(args.tool_manifest.resolve())] = args.tool_manifest_sha256
     output.mkdir(parents=True, exist_ok=False)
     phase1 = output / 'phase1'
     products = output / 'products'
@@ -82,7 +109,7 @@ def main():
         '--output-root', str(phase1), '--jobs', '20']
     # Request preparation executes no seed/test process. Its immutable digest
     # is available before either child starts and is the product gate identity.
-    subprocess.run(common + ['--prepare-only'], cwd=source, check=True)
+    subprocess.run(common + ['--prepare-only'], cwd=source, env=environment, check=True)
     phase1_sha = digest(phase1 / 'request.json')
     product_command = [str(args.shell.resolve()), str(product), '--producer-phase=phase2',
         '--source-root=' + str(source), '--output-root=' + str(products), '--threads=20',
@@ -99,6 +126,12 @@ def main():
     publish(output / 'request.json', dict(schema='simple-bootstrap-test-wave-v1',
         admitted_jobs=40, child_jobs={'phase1': 20, 'products': 20}, commands=commands,
         input_hashes=pins, phase1_request_sha256=phase1_sha,
+        source_root=str(source), source_head=source_head, tool_root=str(tool_root),
+        tool_manifest_sha256=args.tool_manifest_sha256,
+        tool_head=tool_authority.validate(tool_root, args.tool_manifest,
+            args.tool_manifest_sha256, Path(__file__))['tool_head'] if tool_authority else None,
+        tool_environment={key: value for key, value in environment.items()
+                          if key.startswith('SIMPLE_BOOTSTRAP_TOOL_')},
         full_product_dependency='exact Phase1 terminal; PASS not required',
         early_smoke='authentic one-case result, separate from fresh full-suite counts'))
     handles = []
@@ -108,7 +141,8 @@ def main():
             stdout = (output / (name + '-callback.stdout.log')).open('xb')
             stderr = (output / (name + '-callback.stderr.log')).open('xb')
             handles.extend((stdout, stderr))
-            children[name] = subprocess.Popen(command, cwd=source, stdout=stdout, stderr=stderr)
+            children[name] = subprocess.Popen(command, cwd=source, env=environment,
+                                               stdout=stdout, stderr=stderr)
         publish(output / 'children.json', {name: child.pid for name, child in children.items()})
         phase1_closed = False
         while any(child.poll() is None for child in children.values()):
@@ -134,6 +168,11 @@ def main():
                     if line.startswith('status=')]
         matrix_pass = statuses == ['PASS']
     unchanged = all(digest(Path(path)) == sha for path, sha in pins.items())
+    unchanged = unchanged and source_head == subprocess.check_output(
+        ['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip()
+    if tool_authority:
+        tool_authority.validate(tool_root, args.tool_manifest,
+                                args.tool_manifest_sha256, Path(__file__))
     passed = (unchanged and terminal['status'] == 'PASS' and matrix_pass
               and all(child.returncode == 0 for child in children.values()))
     publish(output / 'result.json', dict(schema='simple-bootstrap-test-wave-result-v1',

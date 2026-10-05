@@ -45,6 +45,8 @@ for arg in "$@"; do
     *) die "unknown option: $arg" ;;
   esac
 done
+script_root=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd -P) || exit 2
+. "$script_root/lib/product-tool-authority.shs"
 case "$selected_product" in
   ''|llvm:compiler|llvm:interpreter|llvm:loader|cranelift:compiler|cranelift:interpreter|cranelift:loader) ;;
   *) die 'invalid product selector' ;;
@@ -113,13 +115,13 @@ case "$threads:$rss_cap_kib:$build_timeout:$test_timeout" in
   *[!0-9:]*|:*|*::*) die "invalid resource policy" ;;
 esac
 for timeout in "$build_timeout" "$test_timeout"; do
-  resource_profile=$(perl -I "$source_root/scripts/bootstrap/lib" -MBootstrapProductProducer=product_resource_profile \
+  resource_profile=$(perl -I "$tool_root/scripts/bootstrap/lib" -MBootstrapProductProducer=product_resource_profile \
     -e 'print product_resource_profile(@ARGV)' "$qualification_mode" "$threads" "$rss_cap_kib" "$timeout" "$rss_mode") \
     || die 'product resource policy rejected'
 done
 [ "${SIMPLE_SHARD_MEM_CLAMP:-1}" = 1 ] || die 'unbounded frontend fanout forbidden'
 script_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || die "script root unavailable"
-case "$script_root" in "$source_root/scripts/bootstrap") ;; *) die "manager must run from pinned source root" ;; esac
+case "$script_root" in "$tool_root/scripts/bootstrap") ;; *) die "manager must run from pinned source root" ;; esac
 inventory_program="$script_root/compiler-subsystem-test-inventory.shs"
 builder="$script_root/build-compiler-subsystem-test-product.shs"
 verifier="$script_root/verify-compiler-subsystem-test-product.pl"
@@ -150,7 +152,7 @@ case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     if [ "$resume" -eq 0 ] && [ "$product_operation" != execute ] &&
         { regular "$compiler_llvm" || regular "$compiler_cranelift"; }; then
-      BOOTSTRAP_STAGE3_FACADE_PATH="$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+      BOOTSTRAP_STAGE3_FACADE_PATH="$tool_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
       . "$BOOTSTRAP_STAGE3_FACADE_PATH"
       bootstrap_stage3_source_snapshot "$output_root/source-snapshot.txt" "$source_root" \
         || die 'canonical product allocation source snapshot failed'
@@ -350,7 +352,7 @@ else
   regular "$inventory" || die "source inventory absent"
   : >"$statuses" || die "status journal unavailable"
   printf '%s\n' 'format=SIMPLE-SUBSYSTEM-TEST-MATRIX-1' 'status=INCOMPLETE' \
-    "source_root=$source_root" "producer_phase=$product_phase" >"$matrix" || die "initial matrix receipt unavailable"
+    "source_root=$source_root" "tool_root=$tool_root" "tool_manifest_sha256=${SIMPLE_BOOTSTRAP_TOOL_MANIFEST_SHA256:-}" "producer_phase=$product_phase" >"$matrix" || die "initial matrix receipt unavailable"
 fi
 
 . "$schedule"
@@ -385,6 +387,7 @@ if [ -n "$selected_product" ]; then
       "first_case_sha256=$(hash_file "$selected_job/first-case.env")" \
       'full_suite=NOT_RUN' >"$selected_job/prepared.env" || die 'prepared receipt publication failed'
     printf '%s\n' "$selected_job/prepared.env"
+    bootstrap_product_tool_verify || exit 2
     exit 0
   elif [ "$product_operation" = execute ]; then
     selected_job=$(job_for "$selected_backend" "$selected_suite")
@@ -431,6 +434,7 @@ if [ -n "$selected_product" ]; then
     perl "$script_root/product-root.pl" mirror "$logical_output_root" "$source_root" \
       "$selected_backend" "$selected_suite" >/dev/null || die 'product receipt publication failed'
   fi
+  bootstrap_product_tool_verify || exit 2
   exit 0
 fi
 schedule_code=0
@@ -466,10 +470,11 @@ if regular "$compiler_llvm"; then compiler_llvm_sha=$(hash_file "$compiler_llvm"
 if regular "$compiler_cranelift"; then compiler_cranelift_sha=$(hash_file "$compiler_cranelift") || die "Cranelift compiler changed"; fi
 if regular "$producer_receipt_llvm"; then producer_receipt_llvm_sha=$(hash_file "$producer_receipt_llvm") || die "LLVM producer receipt changed"; fi
 if regular "$producer_receipt_cranelift"; then producer_receipt_cranelift_sha=$(hash_file "$producer_receipt_cranelift") || die "Cranelift producer receipt changed"; fi
+bootstrap_product_tool_verify || exit 2
 matrix_tmp="$matrix.tmp.$$"
 {
   printf '%s\n' 'format=SIMPLE-SUBSYSTEM-TEST-MATRIX-1' "status=$matrix_status" \
-    "source_root=$source_root" "producer_phase=$product_phase" "inventory_sha256=$inventory_sha" \
+    "source_root=$source_root" "tool_root=$tool_root" "tool_manifest_sha256=${SIMPLE_BOOTSTRAP_TOOL_MANIFEST_SHA256:-}" "producer_phase=$product_phase" "inventory_sha256=$inventory_sha" \
     "compiler_llvm_sha256=$compiler_llvm_sha" \
     "compiler_cranelift_sha256=$compiler_cranelift_sha" \
     "producer_receipt_llvm_path=$producer_receipt_llvm" \
@@ -521,3 +526,5 @@ fi
 mv "$matrix_tmp" "$matrix" || die "matrix receipt publication failed"
 printf '%s\n' "$matrix"
 [ "$matrix_status" = PASS ] || exit 1
+
+bootstrap_product_tool_verify || exit 2

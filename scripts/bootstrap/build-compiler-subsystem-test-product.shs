@@ -26,6 +26,8 @@ for arg do
     *) echo "unknown product-builder argument: $arg" >&2; exit 2 ;;
   esac
 done
+script_root=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd -P) || exit 2
+. "$script_root/lib/product-tool-authority.shs"
 case "$qualification_mode" in qualified|diagnostic) ;; *) echo 'invalid product qualification mode' >&2; exit 2 ;; esac
 case "$backend:$subsystem" in
   llvm:compiler|llvm:interpreter|llvm:loader|cranelift:compiler|cranelift:interpreter|cranelift:loader) ;;
@@ -34,7 +36,7 @@ esac
 case "$threads:$rss_cap_kib:$build_timeout_seconds" in
   *[!0-9:]*|:*|*:) echo 'invalid product resource bounds' >&2; exit 2 ;;
 esac
-resource_profile=$(perl -I "$source_root/scripts/bootstrap/lib" -MBootstrapProductProducer=product_resource_profile \
+resource_profile=$(perl -I "$tool_root/scripts/bootstrap/lib" -MBootstrapProductProducer=product_resource_profile \
   -e 'print product_resource_profile(@ARGV)' "$qualification_mode" "$threads" "$rss_cap_kib" "$build_timeout_seconds" "$rss_mode") || exit 2
 [ "${SIMPLE_SHARD_MEM_CLAMP:-1}" = 1 ] || { echo 'unbounded frontend fanout forbidden' >&2; exit 2; }
 rss_enforced=1
@@ -82,7 +84,7 @@ physical_file "$inventory" || fail 'inventory missing or linked'
 # The diagnostic binding is produced by the actual provisional authority
 # owner after Hello and capsule verification. It never pretends to be the
 # formal Stage2 admission schema, and the final product retains that mode.
-perl "$source_root/scripts/bootstrap/product-producer-fields.pl" \
+perl "$tool_root/scripts/bootstrap/product-producer-fields.pl" \
   "$compiler_producer_receipt" "$qualification_mode" "$compiler" "$compiler_sha256" "$source_root" \
   >/dev/null || fail 'compiler producer authority differs'
 if [ "$qualification_mode" = qualified ]; then
@@ -91,15 +93,15 @@ fi
 source_root=$(CDPATH= cd -P -- "$source_root" && pwd -P) || fail 'source root missing'
 [ -d "$source_root/src/compiler" ] && [ -d "$source_root/src/lib" ] && [ -d "$source_root/test" ] || fail 'incomplete source root'
 source_head=$(git -C "$source_root" rev-parse HEAD) || fail 'source commit unavailable'
-perl "$source_root/scripts/bootstrap/product-overlay.pl" source-check "$source_root" \
+perl "$tool_root/scripts/bootstrap/product-overlay.pl" source-check "$source_root" \
   || fail 'source checkout differs beyond verified declared aliases'
 producer_source_snapshot=$(field source_snapshot_path "$compiler_producer_receipt") || fail 'admitted source snapshot absent'
 physical_file "$producer_source_snapshot" || fail 'admitted source snapshot missing'
 producer_source_snapshot_sha256=$(field source_snapshot_sha256 "$compiler_producer_receipt") || fail 'admitted source snapshot SHA absent'
 [ "$(hash_file "$producer_source_snapshot")" = "$producer_source_snapshot_sha256" ] || fail 'admitted source snapshot SHA differs'
-BOOTSTRAP_STAGE3_FACADE_PATH="$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+BOOTSTRAP_STAGE3_FACADE_PATH="$tool_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
 . "$BOOTSTRAP_STAGE3_FACADE_PATH"
-. "$source_root/scripts/bootstrap/lib/product-frontend-policy.shs"
+. "$tool_root/scripts/bootstrap/lib/product-frontend-policy.shs"
 product_frontend_environment=$(bootstrap_product_frontend_policy \
   "$qualification_mode" "$rss_cap_kib" "$rss_mode") || fail 'frontend lane policy rejected'
 
@@ -121,7 +123,7 @@ physical_file "$capsule_receipt" || fail 'frozen runtime capsule missing'
 [ "$(field status "$capsule_receipt")" = frozen ] || fail 'runtime capsule not frozen'
 [ "$(field compiler_sha256 "$capsule_receipt")" = "$compiler_sha256" ] || fail 'runtime capsule compiler differs'
 [ "$(field source_authority_path "$capsule_receipt")" = "$runtime_authority" ] || fail 'runtime authority differs'
-sh "$source_root/scripts/bootstrap/phase2-runtime-capsule.shs" verify "$capsule" >/dev/null || fail 'runtime capsule verification failed'
+sh "$tool_root/scripts/bootstrap/phase2-runtime-capsule.shs" verify "$capsule" >/dev/null || fail 'runtime capsule verification failed'
 runtime_receipt="$runtime_authority/hosted-runtime.env"
 physical_file "$runtime_receipt" || fail 'hosted runtime receipt missing'
 
@@ -153,10 +155,10 @@ product_source_snapshot="$job_root/logs/product-source-snapshot.txt"
 bootstrap_stage3_source_snapshot "$product_source_snapshot" "$source_root" || fail 'canonical product source snapshot failed'
 product_source_snapshot_sha256=$(hash_file "$product_source_snapshot")
 inventory_current="$job_root/inventory-current.tsv"
-sh "$source_root/scripts/bootstrap/compiler-subsystem-test-inventory.shs" "$source_root" >"$inventory_current" || fail 'inventory regeneration failed'
+sh "$tool_root/scripts/bootstrap/compiler-subsystem-test-inventory.shs" "$source_root" >"$inventory_current" || fail 'inventory regeneration failed'
 cmp -s "$inventory" "$inventory_current" || fail 'inventory differs from current source'
 inventory_sha256=$(hash_file "$inventory")
-watchdog="$source_root/scripts/bootstrap/run-process-group-timeout.shs"
+watchdog="$tool_root/scripts/bootstrap/run-process-group-timeout.shs"
 physical_file "$watchdog" || fail 'process watchdog missing'
 
 # The admitted Stage 2 SCV accepts native-build entries only below src/ or test/.
@@ -170,7 +172,7 @@ git -C "$overlay" -c core.hooksPath=NUL -c core.longpaths=true read-tree HEAD \
   >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'overlay index initialization failed'
 [ "$(git -C "$overlay" rev-parse HEAD)" = "$source_head" ] || fail 'overlay source HEAD differs'
 overlay_input_manifest="$job_root/logs/source-overlay-inputs.tsv"
-perl "$source_root/scripts/bootstrap/product-overlay.pl" materialize \
+perl "$tool_root/scripts/bootstrap/product-overlay.pl" materialize \
   "$source_root" "$overlay" "$overlay_input_manifest" \
   >>"$job_root/logs/source-overlay.log" 2>&1 || fail 'physical product overlay materialization failed'
 [ -f "$overlay/src/app/compiler_subsystem_product_generator/main.spl" ] && \
@@ -193,7 +195,7 @@ run_native_build() {
     --output "$produced"
   {
     printf '%s\n' 'schema=simple-native-product-command-v1'
-    printf '%s\n' "source_root=$source_root" "source_overlay=$overlay" "compiler_sha256=$compiler_sha256"
+    printf '%s\n' "source_root=$source_root" "tool_root=$tool_root" "tool_manifest_sha256=${SIMPLE_BOOTSTRAP_TOOL_MANIFEST_SHA256:-}" "source_overlay=$overlay" "compiler_sha256=$compiler_sha256"
     printf '%s\n' "runtime_authority=$runtime_authority" "rss_cap_kib=$rss_cap_kib"
     printf '%s\n' "timeout_seconds=$build_timeout_seconds" "task=$task"
     printf '%s\n' "simple_native_file_timeout=$build_timeout_seconds"
@@ -240,7 +242,7 @@ run_native_tool() {
   shift
   {
     printf '%s\n' 'schema=simple-native-product-command-v1'
-    printf '%s\n' "source_root=$source_root" "compiler_sha256=$compiler_sha256"
+    printf '%s\n' "source_root=$source_root" "tool_root=$tool_root" "tool_manifest_sha256=${SIMPLE_BOOTSTRAP_TOOL_MANIFEST_SHA256:-}" "compiler_sha256=$compiler_sha256"
     printf '%s\n' "rss_cap_kib=$rss_cap_kib" "timeout_seconds=$build_timeout_seconds" "task=$task"
     printf '%s\n' "rss_mode=$rss_mode" "resource_profile=$resource_profile"
     perl -e 'for my $arg (@ARGV) { print "argv-hex=", unpack("H*", $arg), "\n" }' "$@"
@@ -285,7 +287,7 @@ spans_sha256=$(hash_file "$spans")
 main_verdicts_sha256=$(hash_file "$main_verdicts")
 
 generated="$overlay/src/app"
-perl "$source_root/scripts/bootstrap/render-compiler-subsystem-product.pl" \
+perl "$tool_root/scripts/bootstrap/render-compiler-subsystem-product.pl" \
   "$source_root" "$inventory" "$spans" "$main_verdicts" "$generated" "$subsystem" "$backend" \
   >"$job_root/logs/render.log" 2>&1 || fail 'aggregate source rendering failed'
 manifest="$generated/generated-manifest.tsv"
@@ -309,11 +311,12 @@ case "$provider_identity" in *[!0-9a-f]*) fail 'invalid builtin provider receipt
 # hash of BackendProviderReceipt.canonical_text(), not a filesystem hash;
 # this builder passes no --backend-plugin and binds the exact compiler argv.
 
+bootstrap_product_tool_verify || fail 'tool authority changed during build'
 {
   printf '%s\n' 'schema=simple-subsystem-product-v1' 'status=produced'
   printf '%s\n' "qualification_mode=$qualification_mode"
   printf '%s\n' "rss_mode=$rss_mode" "resource_profile=$resource_profile"
-  printf '%s\n' "source_root=$source_root" "source_head=$source_head"
+  printf '%s\n' "source_root=$source_root" "tool_root=$tool_root" "tool_manifest_sha256=${SIMPLE_BOOTSTRAP_TOOL_MANIFEST_SHA256:-}" "source_head=$source_head"
   printf '%s\n' "producer_source_snapshot_path=$producer_source_snapshot"
   printf '%s\n' "producer_source_snapshot_sha256=$producer_source_snapshot_sha256"
   printf '%s\n' "product_source_snapshot_path=$product_source_snapshot"
@@ -348,3 +351,5 @@ case "$provider_identity" in *[!0-9a-f]*) fail 'invalid builtin provider receipt
     printf '%s\n' "${task}_watchdog_receipt_sha256=$(hash_file "$job_root/logs/$task.watchdog.env")"
   done
 } >"$receipt"
+
+bootstrap_product_tool_verify || exit 2
