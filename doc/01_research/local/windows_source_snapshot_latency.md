@@ -138,3 +138,31 @@ single-file edit, dependency edit, and cold population separately; retain p50/p9
 peak/steady RSS, bytes hashed/copied, manifest decodes, process launches, and
 actual reuse counts. The <0.1 s target cannot be claimed from these observations;
 startup/protocol and final runtime/link overhead must also fit its scope.
+
+## Six-product generator preparation observation (2026-10-05)
+
+The active diagnostic packet `six-products-current-proven-transport1` prepares
+six private tool roots before producing the six requested subsystem test binaries.
+All six generator commands select the same
+`src/app/compiler_subsystem_product_generator/main.spl` entry, frozen Phase 2
+producer `2b83155910336e56ec8b663c3d3e7d3ceb9c61b60fa98182163f9670ff044c33`,
+and source revision 916be6. Three use LLVM and three use Cranelift; output paths,
+private source roots and private caches differ. Backend-specific product coverage
+must remain six distinct products even if helper preparation is later shared.
+
+A bounded process/log audit found six live generator compiler processes, each
+adding approximately 21-23 CPU seconds during observation and initially retaining
+about 1.44 GiB RSS. They were materializing SCV snapshots in their private roots;
+no subsystem enumeration had started. All six source-inventory steps had already
+completed with exit zero and closed process trees. These observations show
+replicated helper preparation, not an exclusive timing attribution or a proven
+cache defect. The current frozen commands and caches were left untouched.
+
+A future optimization can investigate one immutable generator/verdict helper
+artifact per complete producer/source/backend/target/runtime/options key, with
+separate per-product requests and results. Cross-root equivalence must be proved:
+source authority, generated inputs, root-sensitive paths and dependency policy
+cannot be omitted from the key merely because entry text matches. Single-writer
+publication, validated readers, corruption/drift rejection and bounded memory
+must be tested alongside cold/warm latency. This is supporting evidence for
+TODO 347; no new sharing implementation or design option is selected here.
