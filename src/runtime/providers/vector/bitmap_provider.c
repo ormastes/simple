@@ -9,6 +9,9 @@
 #endif
 #ifdef __aarch64__
 #include <asm/hwcap.h>
+#if defined(SIMPLE_VECTOR_REQUIRE_SVE) && defined(SIMPLE_VECTOR_REQUIRE_SVE2)
+#error "select exactly one scalable-vector provider requirement"
+#endif
 #endif
 #define EXPORT __attribute__((visibility("default")))
 static atomic_uint_fast64_t vector_iterations;
@@ -34,7 +37,14 @@ static int available(void) {
     return (ebx&(1u<<16))!=0;
 #endif
 #elif defined(__aarch64__)
+#if defined(SIMPLE_VECTOR_REQUIRE_SVE2)
+    return (getauxval(AT_HWCAP)&HWCAP_SVE)!=0 &&
+        (getauxval(AT_HWCAP2)&HWCAP2_SVE2)!=0;
+#elif defined(SIMPLE_VECTOR_REQUIRE_SVE)
+    return (getauxval(AT_HWCAP)&HWCAP_SVE)!=0;
+#else
     return (getauxval(AT_HWCAP)&HWCAP_ASIMD)!=0;
+#endif
 #elif defined(__riscv)
     return (getauxval(AT_HWCAP)&(1UL<<('V'-'A')))!=0;
 #else
