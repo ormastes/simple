@@ -1606,10 +1606,16 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     incrementally. Where `stdbuf` is installed, `stdbuf -oL -eL` also disables
     the child's full buffering. Other hosts retain the child's buffering policy.
     """
+    # This live worker owner reserves zero for an explicit unlimited deadline.
+    # Negative values retain the legacy 120-second fallback.
     if _is_windows_platform():
+        if timeout_ms == 0:
+            # The bounded native owner defines 0 as no deadline on Windows.
+            val (out, err, code) = process_run_bounded(cmd, args, 0, 67108864)
+            return (out, err, code as i32)
         return process_run_timeout_windows(cmd, args, timeout_ms)
 
-    val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
+    val effective_timeout = if timeout_ms < 0: 120000 else: timeout_ms
 
     var temp_dir = env_get("TMPDIR")
     if temp_dir == nil or temp_dir == "":
@@ -1678,9 +1684,11 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     var stderr_relayed = 0
     var exit_code: i64 = -2
     var relay_error = ""
-    while exit_code == -2 and elapsed_ms < effective_timeout:
+    while exit_code == -2 and (effective_timeout == 0 or elapsed_ms < effective_timeout):
         val remaining = effective_timeout - elapsed_ms
-        val quantum = if remaining < poll_quantum_ms: remaining else: poll_quantum_ms
+        var quantum = poll_quantum_ms
+        if effective_timeout > 0 and remaining < quantum:
+            quantum = remaining
         exit_code = _process_wait_raw(pid, quantum)
         # Real elapsed time, including the relay work below. Never a sum of
         # requested quanta -- see the note above the loop.
@@ -1712,8 +1720,13 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
                     exit_code = _process_wait_raw(pid, 5000)
                     break
 
-    val timed_out = exit_code == -2 or (exit_code == -1 and _process_is_running_raw(pid))
+    var timed_out = false
+    if effective_timeout > 0:
+        timed_out = exit_code == -2 or (exit_code == -1 and _process_is_running_raw(pid))
     if timed_out:
+        _process_kill_raw(pid)
+    elif exit_code == -1 and _process_is_running_raw(pid):
+        # A wait failure in unlimited mode is still a failed process owner.
         _process_kill_raw(pid)
     proc_slot_release()
     if exit_code != 0:

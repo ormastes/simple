@@ -1,0 +1,33 @@
+"""Live process timeout semantics for native-build worker supervision."""
+
+use std.spec
+use std.spec.step
+use app.io.process_ops.{process_run_timeout_live}
+
+describe "live native-build process deadline":
+    it "allows a child to complete with explicit zero timeout":
+        # @req REQ-SSPEC-UNIT
+        step("Run a real child with timeout zero beyond one polling quantum")
+        val (out, err, code) = process_run_timeout_live(
+            "/bin/sh", ["-c", "sleep 1; printf zero-complete"], 0)
+        expect(code).to_equal(0)
+        expect(out).to_contain("zero-complete")
+        expect(err.contains("[TIMEOUT:")).to_equal(false)
+
+    it "kills a child that exceeds a positive deadline":
+        # @req REQ-SSPEC-UNIT
+        step("Run a real child beyond a positive process deadline")
+        val (out, err, code) = process_run_timeout_live(
+            "/bin/sh", ["-c", "sleep 2; printf should-not-complete"], 100)
+        expect(code).to_equal(-1)
+        expect(err).to_contain("[TIMEOUT:")
+        expect(out.contains("should-not-complete")).to_equal(false)
+
+    it "retains the negative-input fallback for a fast child":
+        # @req REQ-SSPEC-UNIT
+        step("Run a fast child through the legacy negative-input branch")
+        val (out, err, code) = process_run_timeout_live(
+            "/bin/sh", ["-c", "printf fallback-complete"], -1)
+        expect(code).to_equal(0)
+        expect(out).to_contain("fallback-complete")
+        expect(err.contains("[TIMEOUT:")).to_equal(false)
