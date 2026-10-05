@@ -59,10 +59,18 @@ my $sample_started_at;
 # observation. Keep slow but valid samples bounded separately from that target.
 # Up to 30s for emulated hosts: a riscv64 TCG guest with 20 compile threads
 # stalled one /proc sample past 5s after 3729 good ones (peak 894 MiB).
-my $observation_budget_ms = $ENV{SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS} // 1000;
-$observation_budget_ms =~ /^\d+$/ && $observation_budget_ms >= 1000 &&
-    $observation_budget_ms <= 30000
-    or die "rss-guard: observation budget must be between 1000 and 30000 ms\n";
+# FreeBSD's host-wide ps observer can exceed one second under bootstrap load.
+# Match the existing product-builder budget without changing sample cadence,
+# RSS ceilings, or an explicit caller-selected observation budget.
+sub resolve_observation_budget_ms {
+    my ($platform, $override) = @_;
+    my $budget = $override // ($platform eq 'freebsd' ? 5000 : 1000);
+    $budget =~ /^\d+$/ && $budget >= 1000 && $budget <= 30000
+        or die "rss-guard: observation budget must be between 1000 and 30000 ms\n";
+    return $budget;
+}
+my $observation_budget_ms = resolve_observation_budget_ms(
+    $^O, $ENV{SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS});
 my ($sample_duration_max_ms, $sample_overruns) = (0, 0);
 my ($observer_path, $observer_fd, $observer_sha, $observer_source_sha);
 my ($observer_read, $observer_write, $observer_pid);

@@ -102,8 +102,12 @@ identities, and the selected snapshot's ancestry (cycle checked, at most 32
 rows). These are failure diagnostics, not a change to ownership selection or
 permission handling. A failed `getsid` in the diagnostic is recorded as -1.
 
-Sampling failure, malformed output, or a sample exceeding its one-second
-observation budget causes exit 89. Scheduling uses the remaining
+Sampling failure, malformed output, or a sample exceeding its observation
+budget causes exit 89. The default is five seconds on FreeBSD and one second
+elsewhere. `SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS` explicitly selects a
+budget from 1000 through 30000 milliseconds on every platform; invalid values
+fail closed. This changes the allowed observation duration, not the RSS cap
+or 100 ms target cadence. Scheduling uses the remaining
 interval budget, rather than adding a full sleep after measurement. Scheduler
 delays are reported as `sample_gap_max_ms`; this is not a real-time guarantee.
 Receipts also report `observation_budget_ms`, `sample_duration_max_ms` for
