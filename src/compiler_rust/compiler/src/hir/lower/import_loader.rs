@@ -11,10 +11,6 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 use crate::CompileError;
 
-#[cfg(test)]
-#[path = "tests/imported_container_layout_tests.rs"]
-mod imported_container_layout_tests;
-
 /// Read + parse an imported module, memoized per process.
 ///
 /// The memo itself is `module_cache::PARSED_SOURCE_CACHE`, which the

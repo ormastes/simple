@@ -1,12 +1,16 @@
-use super::*;
-use crate::hir::types::{HirExprKind, HirStmt, HirModule};
-use crate::module_resolver::ModuleResolver;
-use crate::test_helpers::create_test_project;
+use simple_compiler::hir::{Lowerer, LowerError, HirType, TypeId};
+use simple_compiler::hir::{HirExprKind, HirStmt, HirModule};
+use simple_compiler::module_resolver::ModuleResolver;
+use tempfile::tempdir as create_test_project;
 use simple_parser::{Parser, Type};
 use std::{collections::HashMap, fs, sync::Arc};
 
 fn lower_selective(model: &str, expression: &str) -> Result<HirModule, LowerError> {
-    let dir = create_test_project();
+    lower_selective_with_body(model, expression, true)
+}
+
+fn lower_selective_with_body(model: &str, expression: &str, expect_field: bool) -> Result<HirModule, LowerError> {
+    let dir = create_test_project().unwrap();
     let src = dir.path().join("src");
     fs::create_dir_all(&src).unwrap();
     let declaration = src.join("model.spl");
@@ -32,7 +36,9 @@ fn lower_selective(model: &str, expression: &str) -> Result<HirModule, LowerErro
     let function = lowered.functions.iter().find(|f| f.name == "read_name").unwrap();
     let Some(HirStmt::Expr(value)) = function.body.last() else { panic!("expected real field-access body") };
     assert_eq!(value.ty, TypeId::STRING);
-    assert!(matches!(value.kind, HirExprKind::FieldAccess { field_index: 1, .. }), "must use declaration slot 1: {value:?}");
+    if expect_field {
+        assert!(matches!(value.kind, HirExprKind::FieldAccess { field_index: 1, .. }), "must use declaration slot 1: {value:?}");
+    }
     assert!(lowered.types.lookup("model__Entry").is_some(), "declaring-module identity must be retained");
     Ok(lowered)
 }
@@ -57,15 +63,13 @@ fn imported_container_dictionary_preserves_declaration_layout() {
 #[test]
 fn imported_container_optional_payload_completes_nested_array() {
     let model = format!("{ENTRY}struct Object:\n    selected: [Entry]?\n");
-    let ast = Parser::new(&model).parse().unwrap();
-    let mut lowerer = Lowerer::new();
-    lowerer.register_imported_symbols_from_items(&ast.items, &ImportTarget::Single("Object".into())).unwrap();
-    let object = lowerer.module.types.lookup("Object").unwrap();
-    let HirType::Struct { fields, .. } = lowerer.module.types.get(object).unwrap() else { panic!("Object") };
-    let HirType::Enum { variants, .. } = lowerer.module.types.get(fields[0].1).unwrap() else { panic!("Option") };
+    let lowered = lower_selective_with_body(&model, "\"unused optional payload\"", false).unwrap();
+    let object = lowered.types.lookup("Object").unwrap();
+    let HirType::Struct { fields, .. } = lowered.types.get(object).unwrap() else { panic!("Object") };
+    let HirType::Enum { variants, .. } = lowered.types.get(fields[0].1).unwrap() else { panic!("Option") };
     let array = variants.iter().find(|(name, _)| name == "Some").unwrap().1.as_ref().unwrap()[0];
-    let HirType::Array { element, .. } = lowerer.module.types.get(array).unwrap() else { panic!("array") };
-    let HirType::Struct { fields, .. } = lowerer.module.types.get(*element).unwrap() else { panic!("Entry") };
+    let HirType::Array { element, .. } = lowered.types.get(array).unwrap() else { panic!("array") };
+    let HirType::Struct { fields, .. } = lowered.types.get(*element).unwrap() else { panic!("Entry") };
     assert_eq!(fields[1], ("name".into(), TypeId::STRING));
 }
 
