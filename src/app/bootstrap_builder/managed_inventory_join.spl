@@ -1,0 +1,35 @@
+# Compose existing immutable task inventories for ONE compiled managed owner.
+# This does not start processes, invent receipts, or relax input admission.
+use std.common.build_manager.contracts.{BuildRunV1, BuildTaskV1, BuildHostV1,
+    builder_validate_task_v1, builder_validate_host_v1}
+
+fn same_managed_host(left: BuildHostV1, right: BuildHostV1) -> bool:
+    left.id == right.id and left.transport == right.transport and
+        left.endpoint == right.endpoint and left.workspace == right.workspace and
+        left.worker_program == right.worker_program and
+        left.worker_digest == right.worker_digest and left.slots == right.slots
+
+pub fn managed_inventory_join_v1(runs: [BuildRunV1]) -> Result<BuildRunV1, text>:
+    if runs.len() == 0: return Err("empty managed inventory join")
+    if runs[0].hosts.len() != 1: return Err("one exact managed host required")
+    val host = runs[0].hosts[0]
+    val host_error = builder_validate_host_v1(host)
+    if host_error != "": return Err(host_error)
+    var tasks: [BuildTaskV1] = []
+    var identifiers: [text] = []
+    for run in runs:
+        if not run.keep_going or run.max_attempts != 1 or run.tasks.len() == 0:
+            return Err("joined waves require keep-going, one attempt and real tasks")
+        if run.hosts.len() != 1 or not same_managed_host(host, run.hosts[0]):
+            return Err("joined waves differ in host ownership")
+        for task in run.tasks:
+            val invalid = builder_validate_task_v1(task)
+            if invalid != "": return Err(invalid)
+            if identifiers.contains(task.id): return Err("duplicate managed task identity")
+            for dependency in task.dependencies:
+                if not identifiers.contains(dependency):
+                    return Err("managed dependency is missing or not topologically ordered")
+            tasks = tasks.push(task)
+            identifiers = identifiers.push(task.id)
+            if tasks.len() > 256: return Err("managed policy supports at most 256 tasks")
+    Ok(BuildRunV1(tasks: tasks, hosts: [host], keep_going: true, max_attempts: 1))
