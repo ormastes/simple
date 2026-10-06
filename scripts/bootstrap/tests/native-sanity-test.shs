@@ -1,0 +1,54 @@
+#!/bin/sh
+# Exercises the actual process owner, not a mocked timeout or receipt writer.
+set -eu
+repo=${1:?read-only repository root}; work=${2:?fresh evidence root}
+wrapper=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)/run-native-sanity.shs
+mkdir "$work"
+work=$(CDPATH= cd -- "$work" && pwd -P)
+mkdir "$work/tmp" "$work/helpers"
+export TMPDIR="$work/tmp"
+export SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE="$work/helpers"
+export SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+printf 'sanity-ok\n' >"$work/expected.stdout"
+: >"$work/expected.stderr"
+cat >"$work/fixture.shs" <<'FIXTURE'
+#!/bin/sh
+case "$1" in
+  pass) printf 'sanity-ok\n' ;;
+  extra) printf 'sanity-ok\nextra\n' ;;
+  stderr) printf 'sanity-ok\n'; printf 'unexpected\n' >&2 ;;
+  wrong-exit) printf 'sanity-ok\n'; exit 1 ;;
+  timeout) sleep 20 ;;
+  crash) kill -SEGV "$$" ;;
+  *) exit 2 ;;
+esac
+FIXTURE
+passed=0
+failed=0
+for name in pass extra stderr wrong-exit timeout crash; do
+  code=0
+  sh "$wrapper" "$repo" "$work/$name" "$work/expected.stdout" "$work/expected.stderr" 0 sh "$work/fixture.shs" "$name" || code=$?
+  expected=1
+  [ "$name" != pass ] || expected=0
+  if [ "$code" = "$expected" ] && [ -f "$work/$name/sanity.env" ]; then
+    case "$name" in
+      pass) needle='status=PASS' ;;
+      extra) needle='reason=stdout_mismatch' ;;
+      stderr) needle='reason=stderr_mismatch' ;;
+      wrong-exit) needle='reason=exit_mismatch' ;;
+      timeout) needle='status=FAIL' ;;
+      crash) needle='status=FAIL' ;;
+    esac
+    if grep -qx "$needle" "$work/$name/sanity.env"; then
+      passed=$((passed+1)); printf 'PASS %s\n' "$name"
+    else
+      failed=$((failed+1)); printf 'FAIL %s receipt\n' "$name"
+    fi
+  else
+    failed=$((failed+1)); printf 'FAIL %s wrapper-exit=%s\n' "$name" "$code"
+  fi
+  # Deliberately continue all controls after an ordinary failure.
+done
+printf 'checks=6 passed=%s failed=%s\n' "$passed" "$failed" >"$work/result.env"
+cat "$work/result.env"
+[ "$failed" = 0 ]

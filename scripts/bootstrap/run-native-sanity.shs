@@ -1,0 +1,55 @@
+#!/bin/sh
+# Exact, bounded post-link behavior evidence. Does not qualify a link alone.
+set -eu
+[ "$#" -ge 6 ] || { echo 'usage: run-native-sanity.shs REPO OUTPUT EXPECTED_STDOUT EXPECTED_STDERR EXPECTED_EXIT COMMAND [ARG ...]' >&2; exit 2; }
+repo=$1; out=$2; expected_out=$3; expected_err=$4; expected_exit=$5
+shift 5
+case "$expected_exit" in ''|*[!0-9]*) exit 2 ;; esac
+[ "$expected_exit" -lt 124 ] || { echo 'reserved/crash exit cannot be a sanity expectation' >&2; exit 2; }
+[ -f "$expected_out" ] && [ -f "$expected_err" ] || { echo 'reviewed exact output files required' >&2; exit 2; }
+owner="$repo/scripts/bootstrap/run-process-group-timeout.shs"
+[ -f "$owner" ] || { echo 'canonical process owner missing' >&2; exit 2; }
+# Fresh evidence directory: no overwrites of an earlier attempt or its receipt.
+mkdir "$out" || exit 2
+out=$(CDPATH= cd -- "$out" && pwd -P)
+export SIMPLE_PROCESS_TREE_RSS_RECEIPT="$out/process.env"
+unset SIMPLE_BOOTSTRAP_SESSION_ID SIMPLE_BOOTSTRAP_SESSION_EXEC
+started=$(date +%s)
+code=0
+sh "$owner" 5 0 "$@" >"$out/stdout.log" 2>"$out/stderr.log" || code=$?
+finished=$(date +%s)
+status=FAIL
+reason=process_receipt_invalid
+# Never source a receipt. Reject duplicate/missing security-relevant fields.
+field() { awk -F= -v key="$1" '$1==key {n++;v=substr($0,length(key)+2)} END {if(n!=1) exit 1; print v}' "$out/process.env"; }
+if [ -f "$out/process.env" ]; then
+    process_status=$(field status) || process_status=invalid
+    process_exit=$(field exit_status) || process_exit=invalid
+    quiescent=$(field quiescent) || quiescent=invalid
+    observer_errors=$(field observer_errors) || observer_errors=invalid
+    if [ "$process_status" != complete ]; then
+        reason=process_not_complete
+    elif [ "$quiescent" != 1 ] || [ "$observer_errors" != 0 ] || [ "$process_exit" != "$code" ]; then
+        reason=process_receipt_invalid
+    elif [ "$code" -ge 124 ]; then
+        reason=timeout_crash_or_infrastructure
+    elif [ "$code" != "$expected_exit" ]; then
+        reason=exit_mismatch
+    elif ! cmp -s "$expected_out" "$out/stdout.log"; then
+        reason=stdout_mismatch
+    elif ! cmp -s "$expected_err" "$out/stderr.log"; then
+        reason=stderr_mismatch
+    else
+        status=PASS
+        reason=exact_exit_stdout_stderr
+    fi
+fi
+{
+    printf 'schema=simple-native-sanity-v1\nstatus=%s\nreason=%s\n' "$status" "$reason"
+    printf 'timeout_seconds=5\nterm_grace_seconds=0\nexit_status=%s\nexpected_exit=%s\n' "$code" "$expected_exit"
+    printf 'elapsed_seconds=%s\nlink_only_pass=0\nadmitted=0\n' "$((finished-started))"
+    printf 'stdout_sha256=%s\n' "$(sha256sum "$out/stdout.log" | awk '{print $1}')"
+    printf 'stderr_sha256=%s\n' "$(sha256sum "$out/stderr.log" | awk '{print $1}')"
+} >"$out/sanity.env.tmp"
+mv "$out/sanity.env.tmp" "$out/sanity.env"
+[ "$status" = PASS ]

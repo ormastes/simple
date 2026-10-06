@@ -6,6 +6,7 @@
 # A successful diagnostic matrix records DIAGNOSTIC_PASS, never admission PASS.
 
 set -u
+native_sanity_helper=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/run-reviewed-native-sanity.shs
 
 . "$(dirname -- "$0")/bootstrap-windows-cl-mode.shs"
 . "$(dirname -- "$0")/bootstrap-phase-toolchain.shs"
@@ -717,6 +718,33 @@ run_task() {
       *) break ;;
     esac
   done
+  # Inspect the actual compiler entry argument; never choose a probe by output name.
+  sanity_entry=$task
+  sanity_entry_count=0
+  sanity_entry_next=0
+  for sanity_arg in "$@"; do
+    if [ "$sanity_entry_next" = 1 ]; then
+      sanity_entry=$sanity_arg
+      sanity_entry_count=$((sanity_entry_count + 1))
+      sanity_entry_next=0
+    else
+      case "$sanity_arg" in
+        --entry) sanity_entry_next=1 ;;
+        --entry=*) sanity_entry=${sanity_arg#*=}; sanity_entry_count=$((sanity_entry_count + 1)) ;;
+      esac
+    fi
+  done
+  if [ "$sanity_entry_count" -gt 1 ] || [ "$sanity_entry_next" = 1 ]; then
+    sanity_entry=ambiguous-entry
+  fi
+  # Unknown products may remain compile-only, but a reviewed entry (or the
+  # required LSP build row) cannot become ready without its reviewed probe.
+  sanity_review_required=0
+  case "$sanity_entry" in
+    lsp_build|src/app/simple_lsp_mcp/main.spl|src/app/lsp/main.spl|src/app/sfm_samples/vcs/main.spl|src/app/buildrunner/main.spl)
+      sanity_review_required=1 ;;
+  esac
+  [ "$task" != lsp_build ] || sanity_review_required=1
   log="$logs/$task.log"
   active_rss_file="$logs/$task.max-rss-kib"
   rm -f "$active_rss_file"
@@ -957,6 +985,36 @@ run_task() {
       }
     fi
   fi
+  # A linked LSP binary is not ready until its reviewed CLI behavior passes.
+  # Keep ordinary probe failures inside this row so the matrix continues.
+  sanity_status=not-reviewed
+  behavior_qualified=0
+  if [ "$status" -eq 0 ] && [ "$artifact_status" = present ]; then
+    sanity_root=$(mktemp -d "$logs/$task.sanity.XXXXXX") || sanity_root=
+    sanity_code=125
+    if [ -n "$sanity_root" ]; then
+      sanity_code=0
+      (
+      cd "$source_root" || exit 125
+      TMPDIR="$tmp" sh "$native_sanity_helper" \
+        "$source_root" "$sanity_root/probe" "$sanity_entry" "$expected_executable"
+      ) >>"$log" 2>&1 || sanity_code=$?
+    fi
+    if [ "$sanity_code" = 0 ]; then
+      sanity_status=PASS
+      behavior_qualified=1
+    elif [ "$sanity_code" = 2 ] && [ "$sanity_review_required" = 0 ]; then
+      sanity_status=UNQUALIFIED
+      printf 'native sanity unqualified: entry=%s; no reviewed source contract\n' "$sanity_entry" >>"$log"
+    else
+      sanity_status=FAIL
+      artifact_status=present-sanity-failed
+      status=86
+      if [ "$sanity_code" = 2 ]; then
+        printf 'native sanity failed: entry=%s; required reviewed contract unavailable or invalid\n' "$sanity_entry" >>"$log"
+      fi
+    fi
+  fi
   ended=$(date +%s)
   max_rss_kib=$(read_max_rss_kib "$active_rss_file")
   if [ "$phase" = stage1 ] && [ "$status" -eq 0 ] && [ "$artifact_status" = present ]; then
@@ -970,9 +1028,9 @@ run_task() {
     *) result=FAIL ;;
   esac
   if [ -n "$expected_executable" ]; then
-    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|artifact=%s|artifact_status=%s|artifact_sha256=%s|stage4_snapshot_before=%s|stage4_snapshot_after=%s|executed=%s|passed=%s|failed=%s|skipped=%s\n' \
+    printf 'task=%s|result=%s|status=%s|elapsed_seconds=%s|max_rss_kib=%s|log=%s|artifact=%s|artifact_status=%s|artifact_sha256=%s|sanity_status=%s|behavior_qualified=%s|stage4_snapshot_before=%s|stage4_snapshot_after=%s|executed=%s|passed=%s|failed=%s|skipped=%s\n' \
       "$task" "$result" "$status" "$((ended - started))" "$max_rss_kib" "$log" \
-      "$expected_executable" "$artifact_status" "$artifact_sha256" \
+      "$expected_executable" "$artifact_status" "$artifact_sha256" "$sanity_status" "$behavior_qualified" \
       "$stage4_snapshot_before" "$stage4_snapshot_after" "$executed" "$test_passed" \
       "$test_failed" "$test_skipped" >>"$summary" ||
       die "cannot append verification summary"
