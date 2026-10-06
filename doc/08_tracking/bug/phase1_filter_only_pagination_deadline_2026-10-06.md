@@ -1,0 +1,7 @@
+# Phase1 filter-only pagination exceeds query deadline
+
+The unchanged 1,001-document pagination scenario in provider_wire_dispatch_spec.spl fails on prepared seed source 65e92537efe. The first response is a valid deadline_exceeded error (search rejected), followed by unwrap on the absent result. The request deadline is 30,000 ms; the public page limit is 1,000.
+
+Retained baseline: /tmp/simple-pagination-diagnostic; compiler binding: /tmp/simple-chained-array-products/binding.json. Baseline RSS peak 484,644 KiB. This is a failing correctness/performance gate, not accepted performance evidence.
+
+Inspection finds _score_document rescans all corpus fields and tokens for every matching document even when there are zero query terms and the score is necessarily zero. A candidate empty-term stop-check and zero-score path did not make the selected original case pass. Two bounded diagnostic variants also produced deadline errors but no internal phase markers. Therefore execution of the edited search body has not been established and no optimization is accepted. The candidate source edits were restored after the three-check cap; all candidate and diagnostic sources and raw artifacts remain under /tmp/simple-pagination-zero-terms-repair, /tmp/simple-pagination-phase-diagnostic and /tmp/simple-pagination-loader-diagnostic. Next investigation must establish loaded provider/function identity before changing the algorithm. Keep the 1,001-document corpus, 1,000-hit page and 30,000-ms deadline unchanged.
