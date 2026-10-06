@@ -1,0 +1,22 @@
+#!/bin/sh
+# Diagnostic classification only; no compiler or bootstrap transaction.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+checker=$root/scripts/check/check-stage-log-diagnosable.shs
+fixture=$root/scripts/check/fixtures/rss_guard_session_install_failed.log
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-rss-diagnostic-regression.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+sh "$checker" --log "$fixture" --status 89 --stage stage2 > "$work/actual.out" 2>&1
+grep -F 'unsafe inherited session admission' "$work/actual.out" >/dev/null
+if grep -F 'UNDIAGNOSABLE' "$work/actual.out" >/dev/null; then exit 1; fi
+printf 'rss-guard: WARNING observation delayed\nstatus=session-helper-install-failed\nexit_status=89\n' > "$work/warning.log"
+status=0
+sh "$checker" --log "$work/warning.log" --status 89 --stage stage2 > "$work/warning.out" 2>&1 || status=$?
+[ "$status" = 1 ]
+grep -F 'UNDIAGNOSABLE' "$work/warning.out" >/dev/null
+printf 'rss-guard: session installation failed:\nstatus=session-helper-install-failed\n' > "$work/no-reason.log"
+status=0
+sh "$checker" --log "$work/no-reason.log" --status 89 --stage stage2 > "$work/no-reason.out" 2>&1 || status=$?
+[ "$status" = 1 ]
+grep -F 'UNDIAGNOSABLE' "$work/no-reason.out" >/dev/null
+printf 'PASS — 3 RSS-session diagnostic classification cases, no compiler execution\n'
