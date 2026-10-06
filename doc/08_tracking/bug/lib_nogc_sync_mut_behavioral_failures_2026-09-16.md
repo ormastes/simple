@@ -93,3 +93,49 @@ Per-item owner implements the missing behavior/renames receiver correctly; re-ru
 spec with `SIMPLE_TIMEOUT_SECONDS=600 bin/simple test <spec>`. The two env-limited
 families need a host with hosted C headers and a Vulkan-capable device (or a recorded
 skip decision).
+
+## 2026-10-07 follow-up: legacy join fixture drift (row 23358)
+
+The historical join observation above is preserved. Current release base
+`4d1a233499a5d1fc66b144d9893ed9caa6b2ce95` and frozen Phase1 source
+`e59027c353e9ed6ea8ddf572424da70e188fe511` declare
+`ThreadHandle.join() -> i64?`; a consumed handle returns nil before calling
+the provider again. The canonical `test/01_unit` fixture already asserts nil.
+The legacy `test/unit` fixture instead claimed a nonoptional i64 contract and
+asserted 0. Actual row 23358 executed 2 cases, passed 1, and recorded
+`expected Option::None to equal 0`. This is stale fixture/API synchronization,
+not a newly established production thread defect.
+
+Only that legacy assertion and its incorrect comment change. All other
+assertions, including first payload 29 and free-before-join payload 41,
+remain unchanged. No additional redundant assertion, production implementation
+edit, canonical-copy edit, or canonical green replay was introduced.
+
+- Original result: `/tmp/simple-phase1-per-row-attempt-20261006/23358/result.json`, SHA256 `586e890f4f4aac825712a192c1563fc8e9651fce8028f85a0912c88795871e5f`.
+- Actual original failure text: `/tmp/simple-phase1-parallel-source-0/build/test-artifacts/unit/lib/nogc_sync_mut/concurrent_thread_lifecycle/output.log`.
+- Changed source SHA256: `55c74d7c191d17f08f4972882d0ea94baf69b4c7ab70eeccacc1fe335fdec33d`.
+- Changed result: `/tmp/simple-thread-join-fixture-fix-20261006/build/test-artifacts/unit/lib/nogc_sync_mut/concurrent_thread_lifecycle/result.json`, 2/2, zero failures/skips; root aggregate observation 495ms at `/tmp/simple-thread-join-fixture-fix-result-20261006`.
+- Kernel: `/tmp/simple-thread-join-fixture-fix-kernel-20261006`, exit 0/quiescent 1.
+- API, canonical-copy bytes and patch proof: `/tmp/simple-thread-join-fixture-fix-20261006/evidence`.
+
+The seed SHA256 is `0f9bfc1f7a9f6aca254755a543687d6b3d60f18b254da9441cb60e1cd3d4a2c7`.
+This is scoped Phase1 diagnostic evidence, not self-hosted compiler, native
+threading or whole-bootstrap qualification. Other historical items, including
+the newly observed shader entry-point failures, remain independently open;
+this follow-up does not resolve the document's overall OPEN status.
+Provider token/cache usage and comparable cohort ratios are unavailable;
+none are guessed. Sidecar review is N/A for this one-assertion synchronization.
+
+Legacy-only canonical SPL docgen completed once: one complete manual, zero
+stubs. Both generated scenario statement bodies match current source. Receipt:
+`/tmp/simple-thread-join-docgen-20261007`, kernel exit 0/quiescent 1.
+The single scoped scan reports manual CURRENT, score 86, release_ready true,
+blockers 0; dimensions narrative 80, structure 100, oracle 80, traceability
+100, evidence 65, coverage 100, maintainability 90. Receipt:
+`/tmp/simple-thread-join-sspec-scan-20261007`, kernel exit 0/quiescent 1.
+Reviewed nonblocking findings concern existing folded step/capture metadata,
+source-authored purpose metadata, numeric payload documentation, and
+heading-based recovery recognition. The factual reviewed header explains the
+29/41 closure payloads, purpose and recovery; generated body is retained.
+No passing test or manual scan was replayed. Working/staged environment,
+layout-zero and staged diff checks pass for the three-file test-only scope.

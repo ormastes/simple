@@ -1,3 +1,42 @@
+# Thread-handle cleanup unit manual: scope and evidence
+
+## Purpose and audience
+
+Library/runtime maintainers use these scenarios to verify observable terminal
+handle behavior: first join returns its payload, repeated join returns nil,
+and repeated free remains safe. The second scenario preserves the existing
+free-before-join behavior asserted by this runtime lineage.
+
+## Assumptions and workflow
+
+Spawn the first closure returning 29; join once and retain that value. Verify
+the handle is done, join again and assert nil as the optional consumed-handle
+contract requires. Free twice and verify terminal status. The independent
+second scenario uses payload 41 and preserves its existing assertions.
+
+## Traceability and recovery
+
+Source: `test/unit/lib/nogc_sync_mut/concurrent_thread_lifecycle_spec.spl`.
+Owner: `src/lib/nogc_sync_mut/concurrent/thread.spl`, whose `join() -> i64?`
+returns nil when `joined` is already true. The canonical `test/01_unit` copy
+already asserts nil; it was neither changed nor replayed. Existing
+`REQ-SSPEC-UNIT` metadata does not create a new feature requirement.
+If cleanup fails, retain the first payload, joined flag, returned optional
+value and runtime identity before diagnosing provider behavior. Do not change
+the oracle to an unverified backend value.
+
+## Evidence and limitations
+
+Current source SHA256:
+`55c74d7c191d17f08f4972882d0ea94baf69b4c7ab70eeccacc1fe335fdec33d`.
+Original row 23358 passed 1/2 and recorded `expected Option::None to equal 0`.
+The changed legacy file passed 2/2, zero failures/skips, under pinned Phase1
+seed `0f9bfc1` and frozen dependency source `e59027c`; kernel exit 0/quiescent 1.
+The existing bug's dated follow-up records exact receipts. This is diagnostic
+seed evidence for fixture/API synchronization, not native threading or whole
+bootstrap qualification. No concurrency scheduling guarantee is inferred from
+an interpreter run. The generated executable body is retained below.
+
 # Concurrent Thread Lifecycle Specification
 
 > Tests covering nogc sync thread lifecycle.
@@ -25,13 +64,12 @@
 - Spawn and join a public OS thread
    - Expected: handle.join() equals `29`
 - Verify the consumed handle stays terminal
-   - Expected: handle.join() equals `0`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -43,9 +81,8 @@ expect(handle.join()).to_equal(29)
 
 step("Verify the consumed handle stays terminal")
 expect(handle.is_done()).to_be(true)
-# `ThreadHandle.join()` is declared `-> i64`, so a consumed handle can
-# never answer nil; the terminal no-op value is 0.
-expect(handle.join()).to_equal(0)
+# The optional join result is nil after the handle was consumed.
+expect(handle.join()).to_be_nil()
 handle.free()
 handle.free()
 expect(handle.is_done()).to_be(true)
@@ -91,7 +128,7 @@ expect(handle.is_done()).to_be(true)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/unit/lib/nogc_sync_mut/concurrent_thread_lifecycle_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-10-06 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -111,51 +148,3 @@ Tests covering nogc sync thread lifecycle.
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `487371269e320414393c7a1e92c38d21047ae378de3de63c343faeba879035c9`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `487371269e320414393c7a1e92c38d21047ae378de3de63c343faeba879035c9`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `487371269e320414393c7a1e92c38d21047ae378de3de63c343faeba879035c9`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **88/100**; effective score: **88/100**; blockers: **0**.
-
-SSpec documentization score: 88/100
-source: test/unit/lib/nogc_sync_mut/concurrent_thread_lifecycle_spec.spl
-mirror: doc/06_spec/unit/lib/nogc_sync_mut/concurrent_thread_lifecycle_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=80 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/unit/lib/nogc_sync_mut/concurrent_thread_lifecycle_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/unit/lib/nogc_sync_mut/concurrent_thread_lifecycle_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/lib/nogc_sync_mut/concurrent_thread_lifecycle_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/unit/lib/nogc_sync_mut/concurrent_thread_lifecycle_spec.spl:12:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'treats repeated terminal cleanup as safe no-ops' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/lib/nogc_sync_mut/concurrent_thread_lifecycle_spec.spl:28:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'treats free-before-join terminal cleanup as a safe no-op' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->
