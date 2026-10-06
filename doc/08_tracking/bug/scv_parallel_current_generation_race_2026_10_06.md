@@ -1,0 +1,11 @@
+# Parallel builds read a moving inventory generation
+
+Windows packet `phase4-cfc-bea-j40` exited 1 after 216.069 seconds with `SCV-E-ADMISSION: source-inventory-digest-mismatch`. Phase3 was acquiring a snapshot concurrently from the same immutable checkout. The log separately reported a workaround-writer lock conflict; that warning is not established as the digest mismatch's root cause.
+
+Source review found two moving-pointer reads after a digest had already been admitted: fresh `compiler_source_authority_validate_v1` and cold HIR validation both read CURRENT. Another invocation publishing generation B between admission and validation can make lane A compare its digest against B despite A's immutable inventory remaining valid. This is a reproducible source-level race consistent with the observed failure; the live log does not capture the exact winning publication.
+
+The candidate reads the admitted digest through `compile_source_inventory_read_at_pointer_v1` at both points. Ownership, generation, snapshot hashes, row membership and corruption rejection stay enabled. Regression scenarios explicitly advance CURRENT between fresh acquisition and validation, and reject wrong generations and unpublished digests. Further snapshot-acquisition races and workaround-writer lock handling remain separate work.
+
+Focused verification exposed a second selector bug: inventory-family selection accepted `./src/app`, but snapshot selection passed its dot components into the strict absolute-path owner check, producing `snapshot-inventory-unavailable`. Snapshot selectors now remove current-directory components after rejecting parent traversal. Empty components are preserved so UNC prefixes and absolute paths retain their meaning. The tests cover Windows, POSIX, UNC, dot-only selectors, and traversal rejection. Authority fixtures clear published environment before and after each case, including early failure returns.
+
+Verification: packet `qualification-scv-generation-b1b-unit40` ran both actual Simple test files with the bootstrap seed, 40 workers: 10 passed, 0 failed, 0 skipped; native exit 0, no remaining job processes. This is focused bootstrap-interpreter evidence, not self-hosted native or release qualification. The updated Phase 2 compiler build is pending; active older build snapshots remain unchanged.
