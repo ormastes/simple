@@ -24,6 +24,14 @@ fn authority_fixture_git(root: text, args: [text]) -> bool:
     result.exit_code == 0
 
 fn authority_fixture(root_path: text, roots: [text]) -> text:
+    # Published authority is process environment: clear it on every return path,
+    # including an early fixture failure, before the next case can acquire.
+    if not compiler_source_authority_clear_v1(): return "fixture-env-clear"
+    val reason = authority_fixture_body(root_path, roots)
+    if not compiler_source_authority_clear_v1(): return "fixture-env-cleanup:" + reason
+    reason
+
+fn authority_fixture_body(root_path: text, roots: [text]) -> text:
     val root = compile_source_inventory_plain_checkout_v1(path_absolute(root_path))
     if not dir_create_all(root + "/src/app/cli"): return "mkdir"
     val code = "fn main() -> i64:\n    print \"phase2-hello-ok\"\n    0\n"
@@ -79,9 +87,11 @@ fn authority_fixture(root_path: text, roots: [text]) -> text:
     val inherited = compiler_source_authority_validate_v1(root, cache, admitted.snapshot,
         admitted.source_inventory_digest, admitted.inventory_generation, true)
     if not inherited.valid: return "inherited:" + inherited.reason
-    val stale_fresh = compiler_source_authority_validate_v1(root, cache, admitted.snapshot,
+    val pinned_fresh = compiler_source_authority_validate_v1(root, cache, admitted.snapshot,
         admitted.source_inventory_digest, admitted.inventory_generation, false)
-    if stale_fresh.valid: return "fresh-accepted-moved-current"
+    if not pinned_fresh.valid: return "fresh-rejected-pinned-generation:" + pinned_fresh.reason
+    if pinned_fresh.source_inventory_digest != admitted.source_inventory_digest:
+        return "fresh-rebound-pinned-generation"
     val bad_generation = compiler_source_authority_validate_v1(root, cache, admitted.snapshot,
         admitted.source_inventory_digest, admitted.inventory_generation + 1, true)
     if bad_generation.valid: return "generation-accepted"
