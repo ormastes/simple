@@ -16,6 +16,9 @@ use compiler.driver.bootstrap_k1_selected.{install_selected_k1_backend_table_v1,
 use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native, driver_output_format_smf, compile_result_is_success, compile_result_errors)
 use compiler.common.driver_compile_options.{CompileOptions}
 use app.cli.bootstrap_identity.{bootstrap_version}
+use app.cli.parse_shard_main.{run_parse_shard}
+use app.cli.bootstrap_internal_worker_routing.{bootstrap_internal_worker_entry_v1,
+    bootstrap_internal_worker_run_v1, bootstrap_internal_worker_is_parse_v1}
 use app.cli.bootstrap_focused_native_build.{run_exact_stage3_focused_capsule, run_exact_stage4_focused_capsule}
 use app.cli.bootstrap_focused_native_build_args.{focused_native_build_cache_dir}
 use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_bind, native_build_cache_restore}
@@ -130,14 +133,17 @@ fn bootstrap_internal_native_build_args(args: [text], entry_index: i64) -> [text
     result
 
 pub fn bootstrap_internal_native_build_entry(path: text) -> bool:
-    path.ends_with("src/app/cli/parse_shard_main.spl") or
-        path.ends_with("src/app/cli/native_build_worker.spl")
+    bootstrap_internal_worker_entry_v1(path)
 
 pub fn bootstrap_internal_native_build_run_requested(
     args: [text], worker_marker: text
 ) -> bool:
-    worker_marker == "1" and args.len() >= 3 and args[1] == "run" and
-        bootstrap_internal_native_build_entry(args[2])
+    bootstrap_internal_worker_run_v1(args, worker_marker)
+
+pub fn bootstrap_internal_parse_shard_run_requested(
+    args: [text], worker_marker: text
+) -> bool:
+    bootstrap_internal_worker_is_parse_v1(args, worker_marker)
 
 fn run_bootstrap_stage3_process_route(args: [text]) -> i64:
     val worker_args = bootstrap_native_build_worker_args(args)
@@ -582,6 +588,8 @@ fn main() -> i64:
         # Deliberately not a general bootstrap `run` command. Only children
         # spawned by native_build_main's admitted coordinator may enter, and
         # only its two fixed internal entrypoints are accepted.
+        if bootstrap_internal_parse_shard_run_requested(all_args, native_worker_marker):
+            return run_parse_shard(bootstrap_internal_native_build_args(all_args, 2))
         # Same preamble as native_build_worker.spl's main: without the backend
         # table, codegen entry answers PLUG-E-NOTFOUND as a ud2/SIGILL.
         if not install_selected_k1_backend_table_v1() or
