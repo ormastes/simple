@@ -3231,6 +3231,7 @@ if [ "${stop_after_seed}" -eq 1 ]; then
     "$(absolute_path "${bootstrap_preflight_receipt}")" \
     "$(absolute_path "${output_dir}")/phase1-seed.env" || exit 1
   echo 'Rust seed/runtime prerequisite prepared; Phase 1 whole tests and pure-Simple phases remain pending.'
+  bootstrap_verdict 'PREPARED: stage=seed exit=0 signal=none reason=stop-after-seed; tests-and-pure-stages-pending'
   exit 0
 fi
 
