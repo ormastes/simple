@@ -5554,6 +5554,54 @@ bootstrap_stage3_write_seed_fingerprint_details() (
     rm -f $bootstrap_stage3_detail_files
 )
 
+# Stream manifest contents through one parser. Only the current line and
+# origin are retained; output order/duplicates match the per-file awk recipe.
+# Complete this stage before consuming pairs so a read error fails closed.
+bootstrap_stage3_cargo_path_pairs() {
+    [ "$#" -eq 1 ] && [ -f "$1" ] || return 1
+    awk '
+        {
+            manifest = $0
+            manifest_dir = manifest
+            sub(/\/+[^\/]+$/, "", manifest_dir)
+            if (manifest_dir == manifest) manifest_dir = "."
+            if (manifest_dir == "") manifest_dir = "/"
+            dependency_section = 0
+            while ((read_status = (getline line < manifest)) > 0) {
+                $0 = line
+                if ($0 ~ /^\[/) {
+                dependency_section = 0
+                if ($0 ~ /^\[(dependencies|build-dependencies)([.][^]]+)?\]$/)
+                dependency_section = 1
+                if ($0 ~ /^\[target[.][^]]+[.](dependencies|build-dependencies)([.][^]]+)?\]$/)
+                dependency_section = 1
+                if ($0 ~ /^\[workspace[.]dependencies([.][^]]+)?\]$/)
+                dependency_section = 1
+                if ($0 ~ /^\[patch[.][^]]+([.][^]]+)?\]$/)
+                dependency_section = 1
+                if ($0 ~ /^\[replace\]$/)
+                dependency_section = 1
+                }
+                if (dependency_section && match($0, /path[[:space:]]*=[[:space:]]*"[^"]+"/)) {
+                value = substr($0, RSTART, RLENGTH)
+                sub(/^[^"]*"/, "", value)
+                sub(/"$/, "", value)
+                print manifest_dir; print value
+                continue
+                }
+                if (dependency_section && match($0, /\{[^}]*path[[:space:]]*=[[:space:]]*"[^"]+"/)) {
+                value = substr($0, RSTART, RLENGTH)
+                sub(/^.*path[[:space:]]*=[[:space:]]*"/, "", value)
+                sub(/"$/, "", value)
+                print manifest_dir; print value
+                }
+            }
+            if (read_status < 0) { close(manifest); exit 1 }
+            if (close(manifest) != 0) exit 1
+        }
+    ' "$1"
+}
+
 # Re-derive the Rust seed input fingerprint using the same complete authority
 # as bootstrap-from-scratch.sh.  The caller supplies the selected backend and
 # LLVM feature set and the exact canonical tool PATH used by the build. Tool
@@ -5648,39 +5696,11 @@ bootstrap_stage3_seed_inputs_fingerprint() (
             \( -name Cargo.toml -type f -print \) \
             >"$bootstrap_stage3_seed_tmp/cargo-manifests" || exit 1
         : >"$bootstrap_stage3_seed_tmp/path-deps.unsorted" || exit 1
-        while IFS= read -r bootstrap_stage3_seed_manifest; do
-            bootstrap_stage3_seed_manifest_dir=$(
-                dirname -- "$bootstrap_stage3_seed_manifest"
-            ) || exit 1
-            awk '
-                /^\[/ {
-                    dependency_section = 0
-                    if ($0 ~ /^\[(dependencies|build-dependencies)([.][^]]+)?\]$/)
-                        dependency_section = 1
-                    if ($0 ~ /^\[target[.][^]]+[.](dependencies|build-dependencies)([.][^]]+)?\]$/)
-                        dependency_section = 1
-                    if ($0 ~ /^\[workspace[.]dependencies([.][^]]+)?\]$/)
-                        dependency_section = 1
-                    if ($0 ~ /^\[patch[.][^]]+([.][^]]+)?\]$/)
-                        dependency_section = 1
-                    if ($0 ~ /^\[replace\]$/)
-                        dependency_section = 1
-                }
-                dependency_section && match($0, /path[[:space:]]*=[[:space:]]*"[^"]+"/) {
-                    value = substr($0, RSTART, RLENGTH)
-                    sub(/^[^"]*"/, "", value)
-                    sub(/"$/, "", value)
-                    print value
-                    next
-                }
-                dependency_section && match($0, /\{[^}]*path[[:space:]]*=[[:space:]]*"[^"]+"/) {
-                    value = substr($0, RSTART, RLENGTH)
-                    sub(/^.*path[[:space:]]*=[[:space:]]*"/, "", value)
-                    sub(/"$/, "", value)
-                    print value
-                }
-            ' "$bootstrap_stage3_seed_manifest" |
-                while IFS= read -r bootstrap_stage3_seed_dep; do
+        bootstrap_stage3_cargo_path_pairs \
+            "$bootstrap_stage3_seed_tmp/cargo-manifests" \
+            >"$bootstrap_stage3_seed_tmp/path-dep-pairs" || exit 1
+        while IFS= read -r bootstrap_stage3_seed_manifest_dir; do
+            IFS= read -r bootstrap_stage3_seed_dep || exit 1
                     [ -n "$bootstrap_stage3_seed_dep" ] || exit 1
                     bootstrap_stage3_seed_dep_absolute=$(
                         CDPATH= cd -- \
@@ -5701,8 +5721,7 @@ bootstrap_stage3_seed_inputs_fingerprint() (
                             ;;
                         *) exit 1 ;;
                     esac
-                done || exit 1
-        done <"$bootstrap_stage3_seed_tmp/cargo-manifests"
+        done <"$bootstrap_stage3_seed_tmp/path-dep-pairs"
         LC_ALL=C "$bootstrap_stage3_seed_sort" -u "$bootstrap_stage3_seed_tmp/path-deps.unsorted" \
             >"$bootstrap_stage3_seed_tmp/path-deps" || exit 1
         bootstrap_stage3_seed_trace hash-cargo-path-dependencies
