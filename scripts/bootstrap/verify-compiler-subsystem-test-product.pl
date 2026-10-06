@@ -52,6 +52,7 @@ $arg{subsystem} =~ /\A(?:compiler|interpreter|loader)\z/ or die "invalid subsyst
 my @resource_policy = @arg{qw(qualification_mode threads rss_cap_kib build_timeout_seconds rss_mode)};
 my $resource_profile = product_resource_profile(@resource_policy);
 my $rss_enforced = $arg{rss_mode} eq 'enforce' ? '1' : '0';
+my $rss_limit_expected = $arg{rss_mode} eq 'monitor' ? 'unlimited' : $arg{rss_cap_kib};
 for my $key (grep { defined $arg{$_} } qw(enumeration_exit execution_exit)) {
   $arg{$key} =~ /\A\d+\z/ && $arg{$key} <= 255 or die "invalid $key\n";
 }
@@ -281,6 +282,27 @@ no_link_components($overlay);
 $generated_manifest eq "$overlay/src/app/generated-manifest.tsv" &&
   $generated_dir eq "$overlay/src/app"
   or die "generated source manifest outside admitted overlay\n";
+my $generated_snapshot_proof = $build{generated_snapshot_proof_path} // '';
+$generated_snapshot_proof eq "$binary_dir/logs/generated-source-snapshot.env" &&
+  ($build{generated_snapshot_proof_sha256} // '') =~ /\A[0-9a-f]{64}\z/ &&
+  sha_file($generated_snapshot_proof) eq $build{generated_snapshot_proof_sha256}
+  or die "generated source snapshot proof absent or changed\n";
+no_link_components($generated_snapshot_proof);
+open my $snapshot_checker, '-|', $^X, "$FindBin::Bin/verify-product-generated-snapshot.pl",
+  $overlay, $generated_dir, $generated_manifest, '-'
+  or die "cannot verify generated snapshot membership: $!\n";
+my $observed_snapshot_proof = '';
+while (1) {
+  my $chunk;
+  my $read = read($snapshot_checker, $chunk, 4096);
+  defined($read) or die "cannot read generated snapshot proof: $!\n";
+  last unless $read;
+  $observed_snapshot_proof .= $chunk;
+  length($observed_snapshot_proof) <= 65536 or die "generated snapshot proof exceeds bound\n";
+}
+close $snapshot_checker or die "generated snapshot membership verification failed\n";
+$observed_snapshot_proof eq regular_bytes($generated_snapshot_proof)
+  or die "generated snapshot proof no longer matches actual sources\n";
 my %populated_generated;
 find({ no_chdir => 1, wanted => sub {
   my $path = $File::Find::name;
@@ -470,7 +492,7 @@ for my $task (@tasks) {
   $watch{status} && $watch{status} eq 'complete' &&
   defined($watch{rss_cap_enforced}) && $watch{rss_cap_enforced} eq $rss_enforced &&
     ($watch{rss_cap_mode} // 'enforce') eq $arg{rss_mode} &&
-    $watch{rss_limit_kib} && $watch{rss_limit_kib} eq $arg{rss_cap_kib} &&
+    $watch{rss_limit_kib} && $watch{rss_limit_kib} eq $rss_limit_expected &&
     defined($watch{exit_status}) && $watch{exit_status} eq '0'
     or die "$task watchdog did not enforce legal cap\n";
 }
@@ -482,7 +504,7 @@ for my $kind ($arg{phase} eq 'complete' ? qw(enumeration execution) : ('enumerat
   my %watch = build_fields(regular_bytes($arg{"${kind}_watchdog"}));
   defined($watch{rss_cap_enforced}) && $watch{rss_cap_enforced} eq $rss_enforced &&
     ($watch{rss_cap_mode} // 'enforce') eq $arg{rss_mode} &&
-    $watch{rss_limit_kib} && $watch{rss_limit_kib} eq $arg{rss_cap_kib} &&
+    $watch{rss_limit_kib} && $watch{rss_limit_kib} eq $rss_limit_expected &&
     defined($watch{exit_status}) && $watch{exit_status} eq $arg{"${kind}_exit"}
     or die "$kind watchdog did not enforce legal cap or exit differs\n";
 }
