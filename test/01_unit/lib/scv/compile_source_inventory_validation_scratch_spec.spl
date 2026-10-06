@@ -1,0 +1,44 @@
+use std.spec.*
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1, CompileSourceInventoryV1, compile_source_inventory_entry_valid_v1, compile_source_inventory_encode_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+
+val VALIDATION_DIGEST = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+fn validation_entry() -> CompileSourceInventoryEntryV1:
+    val d = VALIDATION_DIGEST
+    CompileSourceInventoryEntryV1("src/a.spl", d, d, d, d, d, 7)
+
+describe "inventory entry validation scratch ownership":
+    it "preserves all valid digest fields and original entry bytes":
+        val entry = validation_entry()
+        expect(compile_source_inventory_entry_valid_v1(entry)).to_equal(true)
+        expect(entry.source_identity).to_equal("src/a.spl")
+        expect(entry.content_digest).to_equal(VALIDATION_DIGEST)
+        expect(entry.byte_count).to_equal(7)
+
+    it "rejects malformed digests in every facet and invalid paths":
+        val d = VALIDATION_DIGEST
+        val bad = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        for entry in [
+                CompileSourceInventoryEntryV1("src/a.spl", bad, d, d, d, d, 7),
+                CompileSourceInventoryEntryV1("src/a.spl", d, bad, d, d, d, 7),
+                CompileSourceInventoryEntryV1("src/a.spl", d, d, bad, d, d, 7),
+                CompileSourceInventoryEntryV1("src/a.spl", d, d, d, bad, d, 7),
+                CompileSourceInventoryEntryV1("src/a.spl", d, d, d, d, bad, 7),
+                CompileSourceInventoryEntryV1("src/../a.spl", d, d, d, d, d, 7),
+                CompileSourceInventoryEntryV1("src/a.spl", d, d, d, d, d, -1)]:
+            expect(compile_source_inventory_entry_valid_v1(entry)).to_equal(false)
+        expect(compile_source_inventory_entry_valid_v1(validation_entry())).to_equal(true)
+
+    it "leaves a caller-owned scratch scope open after validation":
+        val entry = validation_entry()
+        expect(transient_scope_begin()).to_equal(true)
+        expect(compile_source_inventory_entry_valid_v1(entry)).to_equal(true)
+        expect(transient_scope_pause()).to_equal(true)
+        expect(transient_scope_end()).to_equal(true)
+        expect(compile_source_inventory_entry_valid_v1(entry)).to_equal(true)
+
+    it "preserves the complete canonical inventory record":
+        val d = VALIDATION_DIGEST
+        val encoded = compile_source_inventory_encode_v1(CompileSourceInventoryV1(1, 3, [validation_entry()]))
+        expect(encoded).to_equal("simple-compile-source-inventory-v1\ngeneration=3\ncount=1\nsrc/a.spl|{d}|{d}|{d}|{d}|{d}|7")

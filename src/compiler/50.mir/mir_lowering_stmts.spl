@@ -3240,16 +3240,11 @@ impl MirLowering:
             self.builder = b
             start_local = temp
 
-        # Lower end value (default to typed 0; open-ended ranges need the iterator path)
+        # An absent end is unbounded. It must not synthesize an endpoint:
+        # break/return in the body controls exit from the counted loop.
         var end_local: LocalId = 0
         if val end_expr = end:
             end_local = self.lower_expr(end_expr)
-        else:
-            var b = self.builder
-            val temp = b.new_temp(loop_ty)
-            b.emit_const(temp, MirConstValue.Int(0), loop_ty)
-            self.builder = b
-            end_local = temp
 
         # Lower step value (default to typed 1)
         var step_local: LocalId = 0
@@ -3299,17 +3294,18 @@ impl MirLowering:
         self.builder = b_goto
 
         # Condition: counter < end (or counter <= end for inclusive)
-        val cmp_op = if inclusive: MirBinOp.Le else: MirBinOp.Lt
         var b_cond = self.builder
-        val cond_result = b_cond.emit_binop(
-            cmp_op,
-            mir_operand_copy(counter),
-            mir_operand_copy(end_local),
-            MirType.bool()
-        )
-        self.builder = b_cond
-        b_cond = self.builder
-        b_cond.terminate_if(mir_operand_copy(cond_result), body_block, exit_block)
+        if end != nil:
+            val cmp_op = if inclusive: MirBinOp.Le else: MirBinOp.Lt
+            val cond_result = b_cond.emit_binop(
+                cmp_op,
+                mir_operand_copy(counter),
+                mir_operand_copy(end_local),
+                MirType.bool()
+            )
+            b_cond.terminate_if(mir_operand_copy(cond_result), body_block, exit_block)
+        else:
+            b_cond.terminate_goto(body_block)
         b_cond.switch_to_block(body_block)
         self.builder = b_cond
 

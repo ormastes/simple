@@ -1,0 +1,35 @@
+use std.spec.*
+use compiler.core.parser.{parser_init_with_path, parser_has_errors}
+use compiler.core.parser_expr.{parse_expr}
+use compiler.core.ast.{expr_get_tag, expr_get_right, EXPR_INDEX, EXPR_RANGE}
+use compiler.frontend.flat_ast_bridge.{convert_flat_expr}
+use compiler.frontend.parser_types_expr.{ExprKind}
+
+describe "Range index endpoint ownership":
+    it "keeps an array tail index endpoint absent":
+        parser_init_with_path("arr[1..]", "slice_endpoint.spl")
+        val flat = parse_expr()
+        expect(parser_has_errors()).to_equal(false)
+        expect(expr_get_tag(flat)).to_equal(EXPR_INDEX)
+        val range = expr_get_right(flat)
+        expect(expr_get_tag(range)).to_equal(EXPR_RANGE)
+        expect(expr_get_right(range)).to_equal(-1)
+        match convert_flat_expr(flat).kind:
+            case ExprKind.Index(_, index):
+                match index.kind:
+                    case ExprKind.Range(start, end, _, _):
+                        expect(start != nil).to_equal(true)
+                        expect(end == nil).to_equal(true)
+                    case _: fail("expected range index")
+            case _: fail("expected index")
+    it "keeps an authored negative array endpoint present":
+        parser_init_with_path("arr[1..(-1)]", "slice_endpoint.spl")
+        val flat = parse_expr()
+        expect(parser_has_errors()).to_equal(false)
+        expect(expr_get_right(expr_get_right(flat)) >= 0).to_equal(true)
+        match convert_flat_expr(flat).kind:
+            case ExprKind.Index(_, index):
+                match index.kind:
+                    case ExprKind.Range(_, end, _, _): expect(end != nil).to_equal(true)
+                    case _: fail("expected range index")
+            case _: fail("expected index")
