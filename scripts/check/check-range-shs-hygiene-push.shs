@@ -26,7 +26,8 @@
 #   PASS  — <n> file(s) in <range> examined, <s> .shs parsed, <g> new guard(s) wired   exit 0
 #   FAIL  — ... naming each unparsable file / unwired guard                           exit 1
 #   ERROR — nothing was checked (<reason>)                                            exit 2
-# Non-vacuous: n > 0 always; a range that changes no file is ERROR.
+# No file scan is claimed for verified distinct, nonempty tree-equivalent history.
+# Empty history, invalid endpoints and deletion-only unequal trees are ERROR.
 # --selftest runs before every scan and is fatal.
 #
 # Usage:
@@ -72,17 +73,32 @@ scan() {
     _root=$1; _range=$2
     case "$_range" in *..*) ;; *) echo "ERROR — nothing was checked (need <base>..<tip>, got '$_range')"; return 2 ;; esac
     _base=${_range%%..*}; _tip=${_range#*..}
-    git -C "$_root" rev-parse --verify --quiet "$_base^{commit}" >/dev/null 2>&1 ||
+    _base_oid=$(git -C "$_root" rev-parse --verify --quiet --end-of-options "$_base^{commit}" 2>/dev/null) ||
         { echo "ERROR — nothing was checked (base $_base is not a commit)"; return 2; }
-    git -C "$_root" rev-parse --verify --quiet "$_tip^{commit}" >/dev/null 2>&1 ||
+    _tip_oid=$(git -C "$_root" rev-parse --verify --quiet --end-of-options "$_tip^{commit}" 2>/dev/null) ||
         { echo "ERROR — nothing was checked (tip $_tip is not a commit)"; return 2; }
     _work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
-    git -C "$_root" diff --name-status --diff-filter=AMRC "$_base" "$_tip" > "$_work/status.txt" 2>/dev/null ||
+    git -C "$_root" diff --name-status --diff-filter=AMRC "$_base_oid" "$_tip_oid" > "$_work/status.txt" 2>/dev/null ||
         { rm -rf "$_work"; echo "ERROR — nothing was checked (git diff failed for $_range)"; return 2; }
     _n=$(grep -c . "$_work/status.txt")
     if [ "$_n" -eq 0 ]; then
         rm -rf "$_work"
-        echo "ERROR — nothing was checked (no file changed in $_range)"
+        # An empty AMRC set also occurs for deletion-only changes. Only exact
+        # tree equality plus positive directed history proves no file delta.
+        _base_tree=$(git -C "$_root" rev-parse --verify "$_base_oid^{tree}" 2>/dev/null) ||
+            { echo "ERROR — nothing was checked (base tree unavailable)"; return 2; }
+        _tip_tree=$(git -C "$_root" rev-parse --verify "$_tip_oid^{tree}" 2>/dev/null) ||
+            { echo "ERROR — nothing was checked (tip tree unavailable)"; return 2; }
+        _history=$(git -C "$_root" rev-list --count "$_base_oid..$_tip_oid" 2>/dev/null) ||
+            { echo "ERROR — nothing was checked (history enumeration failed)"; return 2; }
+        case "$_history" in ''|*[!0-9]*)
+            echo "ERROR — nothing was checked (invalid history count)"; return 2 ;;
+        esac
+        if [ "$_base_oid" != "$_tip_oid" ] && [ "$_base_tree" = "$_tip_tree" ] && [ "$_history" -gt 0 ]; then
+            echo "PASS — verified tree-equivalent history: $_history commit(s), tree $_tip_tree; no file scan"
+            return 0
+        fi
+        echo "ERROR — nothing was checked (empty AMRC range lacks distinct tree-equivalent history: $_range)"
         return 2
     fi
     _parsed=0; _bad=""; _new=0; _unwired=""
@@ -247,14 +263,49 @@ selftest() {
     parse_script "$_t/cr-header.shs" 2>"$_t/cr-header.err"; _rc=$?
     [ "$_rc" -eq 0 ] || { echo "selftest FAIL 12: CR-terminated Bash header rejected (rc=$_rc)"; _fails=$((_fails + 1)); }
 
+    # New history-only controls: no revision/working-tree scan is claimed.
+    _mk "$_t/history"
+    printf 'history fixture\n' > "$_t/history/README.md"
+    _commit "$_t/history" history-base
+    git -C "$_t/history" commit -q --allow-empty -m history-only
+    _out=$(scan "$_t/history" HEAD~1..HEAD); _rc=$?
+    case "$_rc:$_out" in
+        0:"PASS — verified tree-equivalent history: 1 commit(s), tree "*"; no file scan") ;;
+        *) echo "selftest FAIL history-equivalent: rc=$_rc $_out"; _fails=$((_fails + 1)) ;;
+    esac
+
+    # Both endpoints must resolve commits, even when no file would be scanned.
+    for _invalid_range in absent-base..HEAD HEAD..absent-tip; do
+        _out=$(scan "$_t/history" "$_invalid_range"); _rc=$?
+        [ "$_rc" -eq 2 ] || { echo "selftest FAIL invalid endpoint: $_invalid_range rc=$_rc"; _fails=$((_fails + 1)); }
+    done
+
+    git -C "$_t/history" rm -q README.md
+    git -C "$_t/history" commit -q -m deletion-only
+    _out=$(scan "$_t/history" HEAD~1..HEAD); _rc=$?
+    [ "$_rc" -eq 2 ] || { echo "selftest FAIL deletion-only: rc=$_rc $_out"; _fails=$((_fails + 1)); }
+
+    # A provider diff error must not enter the tree-equivalence success path.
+    _real_git=$(command -v git)
+    git() {
+        case "${3:-}" in diff) return 73 ;; esac
+        "$_real_git" "$@"
+    }
+    _out=$(scan "$_t/history" HEAD~2..HEAD~1); _rc=$?
+    unset -f git
+    case "$_rc:$_out" in
+        2:*"git diff failed"*) ;;
+        *) echo "selftest FAIL diff-error: rc=$_rc $_out"; _fails=$((_fails + 1)) ;;
+    esac
+
     rm -rf "$_t"
     [ "$_fails" -eq 0 ] || { echo "selftest: $_fails fixture(s) failed"; return 1; }
-    echo "selftest: 12 fixtures passed"
+    echo "selftest: 16 fixtures passed"
 }
 
 selftest || { echo "ERROR — nothing was checked (selftest failed; the guard itself is not trustworthy)"; exit 2; }
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — 12 fixture(s) checked, selftest only"
+    echo "PASS — 16 fixture(s) checked, selftest only"
     exit 0
 fi
 [ -n "$RANGE" ] || { echo "ERROR — nothing was checked (<base>..<tip> is required)"; exit 2; }
