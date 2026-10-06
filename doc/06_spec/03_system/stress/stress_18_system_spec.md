@@ -1,49 +1,15 @@
-# System Test - Full Integration
+# Stress 18 System Specification
 
-> <details>
-
-<!-- sdn-diagram:id=stress_18_system_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=stress_18_system_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-stress_18_system_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=stress_18_system_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
+> Tests covering System Level Test.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 18 | 18 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
-# System Test - Full Integration
-
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Feature IDs | #SYSTEM |
-| Category | Testing |
-| Status | Implemented |
-| Source | `test/03_system/stress/stress_18_system_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+# Stress 18 System Specification
 
 ## Scenarios
 
@@ -53,10 +19,6 @@ stress_18_system_spec -> std
 <summary>Advanced: end-to-end workflow</summary>
 
 #### end-to-end workflow _(slow)_
-
-1. check
-2. check
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -84,10 +46,6 @@ check(processed.contains("step"))
 <summary>Advanced: integration point 1</summary>
 
 #### integration point 1 _(slow)_
-
-1. data = data append
-2. check
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -117,9 +75,6 @@ check(sum == 435)
 
 #### integration point 2 _(slow)_
 
-1. check
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -145,10 +100,6 @@ check(total == 6)
 <summary>Advanced: full stack test</summary>
 
 #### full stack test _(slow)_
-
-1. processed = processed append
-2. check
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -183,9 +134,6 @@ check(sum == 12)
 
 #### boundary condition test _(slow)_
 
-1. check
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -212,10 +160,6 @@ for item in cases:
 
 #### error handling test _(slow)_
 
-1. errors = errors append
-2. check
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -241,9 +185,6 @@ check(errors.len() == 1)
 <summary>Advanced: recovery test</summary>
 
 #### recovery test _(slow)_
-
-1. check
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -274,10 +215,6 @@ check(state == "recovered")
 
 #### complex scenario _(slow)_
 
-1. results = results append
-2. check
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -306,9 +243,6 @@ check(results.len() == 5)
 
 #### data flow test _(slow)_
 
-1. check
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -334,9 +268,6 @@ check(final == "data_1_2_3_final")
 <summary>Advanced: state transition</summary>
 
 #### state transition _(slow)_
-
-1. check
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -368,9 +299,6 @@ check(state >= 0)
 
 #### validation chain _(slow)_
 
-1. check
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -395,11 +323,6 @@ check(all_valid)
 <summary>Advanced: pipeline test</summary>
 
 #### pipeline test _(slow)_
-
-1. filtered = filtered append
-2. transformed = transformed append
-3. check
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -434,9 +357,6 @@ check(transformed.len() == 2)
 
 #### comprehensive check _(slow)_
 
-1. check
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -464,11 +384,6 @@ check(checks == 5)
 <summary>Advanced: resource lifecycle</summary>
 
 #### resource lifecycle _(slow)_
-
-1. check
-2. check
-3. check
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -499,12 +414,6 @@ check(resource.len() == 0)
 
 #### complex condition _(slow)_
 
-1. check
-2. check
-3. check
-4. check
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -512,20 +421,20 @@ Runnable source: 14 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val a = 10
-val b = 20
-val c = 30
-
-if a < b:
-    if b < c:
-        if a + b <= c:
-            check(true)
-        else:
-            check(false)
-    else:
-        check(false)
-else:
-    check(false)
+val left = [10, 10, 10, 20]
+val middle = [20, 20, 20, 10]
+val bound = [30, 25, 15, 30]
+val expected = [true, false, false, false]
+for index in 0..4:
+    val a = left[index]
+    val b = middle[index]
+    val c = bound[index]
+    var accepted = false
+    if a < b:
+        if b < c:
+            if a + b <= c:
+                accepted = true
+    expect(accepted).to_equal(expected[index])
 ```
 
 </details>
@@ -533,12 +442,105 @@ else:
 
 </details>
 
+#### split reports every separator occurrence
+
+- Verify: split reports every separator occurrence
+   - Expected: parts.len() equals `3) # oracle: 2 separators split into 3 fields`
+   - Expected: parts[0] equals `alpha`
+   - Expected: parts[2] equals `gamma`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: split reports every separator occurrence")
+# @req: REQ-SYS-SYSTEM-003
+val parts = "alpha,beta,gamma".split(",")
+expect(parts.len()).to_equal(3) # oracle: 2 separators split into 3 fields
+expect(parts[0]).to_equal("alpha")
+expect(parts[2]).to_equal("gamma")
+```
+
+</details>
+
+<details>
+<summary>Advanced: loop accumulation sums the inclusive range 0..4</summary>
+
+#### loop accumulation sums the inclusive range 0..4
+
+- Verify: loop accumulation sums the inclusive range 0..4
+   - Expected: total equals `10) # oracle: 0+1+2+3+4 = 10`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: loop accumulation sums the inclusive range 0..4")
+# @req: REQ-SYS-SYSTEM-004
+var total = 0
+for i in 0..5:
+    total = total + i
+expect(total).to_equal(10) # oracle: 0+1+2+3+4 = 10
+```
+
+</details>
+
+
+</details>
+
+#### boolean operators short-circuit to the pinned result
+
+- Verify: boolean operators short-circuit to the pinned result
+   - Expected: true and false is false
+   - Expected: true or false is true
+   - Expected: not false is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Verify: boolean operators short-circuit to the pinned result")
+# @req: REQ-SYS-SYSTEM-005
+expect(true and false).to_equal(false)
+expect(true or false).to_equal(true)
+expect(not false).to_equal(true)
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/stress/stress_18_system_spec.spl` |
+| Updated | 2026-10-06 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering System Level Test.
+- System Level Test
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 18 |
+| Active scenarios | 18 |
 | Slow scenarios | 15 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
