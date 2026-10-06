@@ -1269,6 +1269,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_rocm_unload_module", gpu_rocm::rt_rocm_unload_module_fn);
     insert_simple!("rt_current_dir", file_io::rt_current_dir);
     insert_simple!("rt_current_time_ms", time::rt_current_time_ms);
+    insert_simple!("rt_time_now_unix_millis", time::rt_time_now_unix_millis);
     insert_simple!("rt_db_accel_bitmap_and_words", simd::rt_db_accel_bitmap_and_words);
     insert_simple!("rt_db_accel_bitmap_or_words", simd::rt_db_accel_bitmap_or_words);
     insert_simple!("rt_db_col_count", sffi_db::rt_db_col_count_fn);
