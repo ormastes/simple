@@ -1,0 +1,47 @@
+#!/bin/sh
+# Reviewed CLI probes. Expectations come from the same pinned source root.
+set -eu
+[ "$#" = 4 ] || exit 2
+repo=$1; out=$2; task=$3; binary=$4
+case "$task" in
+ compiler_cli_build|src/app/cli/main.spl|src/app/cli/_CliMain/main_and_help.spl)
+   exec sh "$(dirname -- "$0")/run-reviewed-full-cli-sanity.shs" "$@" ;;
+ lsp_build|src/app/simple_lsp_mcp/main.spl) ;;
+ src/app/lsp/main.spl|src/app/sfm_samples/vcs/main.spl|src/app/buildrunner/main.spl)
+   exec sh "$(dirname -- "$0")/run-reviewed-entry-sanity.shs" "$@" ;;
+ *) echo 'sanity_status=UNQUALIFIED reason=no-reviewed-native-sanity-contract' >&2; exit 2 ;;
+esac
+source="$repo/src/app/simple_lsp_mcp/main.spl"
+[ -f "$source" ] && [ -f "$binary" ] || exit 2
+# Accept one literal declaration only. Do not infer expected values from output.
+constant() {
+    awk -v key="$1" '
+      {sub(/\r$/, "")}
+      $1=="val" && $2==key {
+        n++
+        if ($0 !~ /^val [A-Z_]+ = "[A-Za-z0-9._-]+"$/) bad=1
+        value=$4; gsub(/"/,"",value)
+      }
+      END {if(n!=1 || bad) exit 1; print value}' "$source"
+}
+name=$(constant SERVER_NAME) || exit 2
+version=$(constant SERVER_VERSION) || exit 2
+source_sha=$(sha256sum "$source" | awk '{print $1}')
+binary_sha=$(sha256sum "$binary" | awk '{print $1}')
+mkdir "$out" || exit 2
+out=$(CDPATH= cd -- "$out" && pwd -P)
+# The native Windows CRT writes text newlines as CRLF; match that contract
+# exactly instead of normalizing observed output after the fact.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) printf '%s %s\r\n' "$name" "$version" >"$out/expected.stdout" ;;
+    *) printf '%s %s\n' "$name" "$version" >"$out/expected.stdout" ;;
+esac
+: >"$out/expected.stderr"
+printf 'source_sha256=%s\nbinary_sha256=%s\nexpected_version=%s\n' "$source_sha" "$binary_sha" "$version" >"$out/oracle.env"
+wrapper=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/run-native-sanity.shs
+code=0
+sh "$wrapper" "$repo" "$out/run" "$out/expected.stdout" "$out/expected.stderr" 0 "$binary" simple_lsp_mcp_server --version || code=$?
+[ "$(sha256sum "$source" | awk '{print $1}')" = "$source_sha" ] || code=1
+[ "$(sha256sum "$binary" | awk '{print $1}')" = "$binary_sha" ] || code=1
+cat "$out/run/sanity.env" 2>/dev/null || code=1
+exit "$code"

@@ -1,0 +1,53 @@
+# Static @when / TLDR build pruning: implementation gap audit
+
+2026-10-06. Author: Codex compiler implementation lane. Selected plan: [simple_static_when_tldr_build_pruning_plan.md](simple_static_when_tldr_build_pruning_plan.md). This is a source audit, not a verification PASS. No compiler code or live build input changed.
+
+## Revision and ownership
+
+Two distinct source roots were inspected with targeted symbol/path searches:
+
+* Main checkout C:/dev/simple, HEAD e10963a3b065dde1643c777512c3988526973957; current working files may include unrelated session changes. This audit owns only this new Markdown file.
+* Immutable prepared build source C:/dev/simple-p2-repairs-20261005, bc9ef92984418433fe39c4b32f572dd8f60c6cad. This is read-only and is NOT the same source revision as main.
+
+Astra owns architecture, detail contracts, requirements and test matrix. Root owns selected-plan relocation and principle/knowledge integration. Implementation must use an owned sparse candidate, never either live source root. Lower-model sidecars: N/A. Root is integration owner; Astra/root review the implementation before admission.
+
+## Existing behavior versus proposed behavior
+
+| Area | Existing evidence | Gap relative to selected plan |
+|---|---|---|
+| Conditional preprocessing | Main src/compiler/10.frontend/core/parser_preprocessor.spl:15 evaluates legacy text atoms, host OS/architecture and equality spellings; unknown atom falls through false. Mutable token/parser globals own state. | No typed extensible sealed domain universe, member-ID resolution or static Boolable classification. Unknown-member-as-false is incompatible with the selected fail-closed rule. |
+| Explicit target handling | Prepared bc9 parser_preprocessor.spl:53 target atom evaluator rejects unsupported atoms; :672 exposes _pp_preprocess_conditionals_target_receipted_v1 with explicit OS/architecture and decision receipts. | Stronger than main legacy behavior, but target-specific erasure and string decisions are not portable GuardId DAGs. Global evaluator state also prevents concurrent independent scans without isolation. |
+| Parser integration | Main src/compiler/10.frontend/core/parser.spl:1116 and :1164 preprocess source before ordinary parsing. | Once erased, inactive semantic branches cannot generate a portable symbolic TLDR. Retain symbolic scan results separately from the target-active source view. |
+| Import scan | Main src/compiler/80.driver/driver_source_loading.spl:623 text fallback scans use/import/from/reexport forms and docstrings; :735 public content-only wrapper. It has no @when guard evaluation. | Inactive imports can enter resolution before frontend preprocessing. Lexical import extraction is not proof that every required semantic reference has been discovered. |
+| Closure traversal | Main driver_source_pipeline_loading.spl:693 reads cached_closure_imports, then :728 loops imports before resolving/loading modules. Synthetic runtime/MC/DC dependencies are added separately. | Add the static guard gate before resolver invocation, while retaining required synthetic edges. False imports must produce zero resolver/file-open calls, not just disappear after parse. |
+| Scan cache | Main driver_source_loading.spl:772 checks physical-path dictionary before reading, :792 computes raw imports. Prepared bc9 :805 instead validates admitted epoch bytes before accepting a cache hit. | Do not describe main as already possessing bc9 read authority. Active guarded imports need config/universe identity; path-only caching can return a previous target's closure. Preserve the prepared source witness checks during integration. |
+| Public summary | src/compiler/00.common/cache_contract/public_summary_v1.spl:17 PublicSummaryEntryV1 contains stable_symbol_id, canonical_bytes and unguarded dependency_symbol_ids. Summary includes ABI/layouts, traits, AOP, macros and body_refs. | No typed guard table or guard ID per entry/reference. Do not hide guard semantics in opaque canonical_bytes while claiming complete portable references. |
+| Typed summary activation | Same public_summary_v1.spl:343 in main returns false from public_summary_typed_cch1_activation_available_v2 until canonical codec dispatch admits it. Prepared source has corresponding staged typed-reference model. | A declared model is not live CCH1 producer/consumer coverage. Guard schema needs registry/codec/hash/closure updates and rejection of incompatible old records. |
+| Semantic projection | Prepared src/compiler/10.frontend/cache_artifact/public_summary_projector.spl:245+ projects public entries, body_refs and semantic categories. | Public declarations alone cannot prove private body dependency completeness. Generic, inline, const-eval, macro, trait/coherence and AOP requirements must remain explicit semantic payload dependencies. |
+| Package/cache metadata | src/compiler/80.driver/cache/package_tldr_metadata.spl already binds target, producer, source witness, SMF, export and ABI digests. Existing canonical_cache_codec_v1.spl supplies cache wire encoding. | Reuse owners instead of a second prose-TLDR protocol. Existing target-sensitive metadata does not automatically provide portable guarded source summaries. |
+| Boolable | Targeted searches of frontend/interpreter, type and semantic owners did not locate a shared Boolable/static classifier. Existing preprocessor directly evaluates booleans from text. | Audit runtime condition coercion/trait ownership before claiming if and @when share semantics. Absence from these searched owners is not proof of absence repository-wide. Never introduce arbitrary enum truthiness as an expedient. |
+
+Previously staged cooperative-cache successor APIs are not equivalent to main integration. Their initial diagnostic successes must not be cited as verification of static guards, target pruning, portable AST reuse, or full semantic body closure.
+
+## Correctness and portability constraints
+
+1. Interned guard IDs are arena-local handles. Portable serialization must bind a canonical guard algebra/domain schema and stable member identity, with deterministic child ordering independent of discovery and host process.
+2. Separate source-symbolic summary identity from target-active closure identity. The latter includes the complete sealed universe, target/config and guard evaluator version. Host OS, host paths, arena addresses and iteration order cannot silently enter the portable representation.
+3. Unknown member, invalid Boolable, unclosed directive, malformed nesting and budget exhaustion must return an error. An empty import array cannot encode both valid no-dependencies and failed discovery.
+4. Scan strings/comments/docstrings safely. A false region can contain unavailable modules and arbitrary ordinary-language text, but structural delimiter errors still need defined diagnostics. Preserve source positions and sibling declarations.
+5. One-of domains can reject incompatible conjunctions; feature/set domains cannot use the same exclusivity shortcut. Domain extension completeness must be sealed before resolving a user member.
+6. Guard changes invalidate affected closure evaluations; private body changes should only avoid dependent rebuilds when public summary, guarded dependency edges and required semantic body references are all unchanged and validated. Unknown legacy coverage cannot authorize pruning.
+7. Ordinary runtime if is not a structural import gate. Only classified static conditions on semantically relevant reference paths may contribute guards; no runtime value or untracked capture may masquerade as a static cache key.
+8. Avoid hidden mutable scan globals when compiling modules concurrently. Guard ownership and result transfer need owner-scoped immutable publication. Memoization must be bounded, and read/scan/resolve counters must count actual operations.
+
+## Proposed first safe slice
+
+Astra proposes canonical modules common/static_condition/{static_domain_v1,static_guard_v1}, types StaticDomainIdV1, StaticMemberIdV1, StaticGuardIdV1, StaticUniverseV1, StaticConfigV1, StaticGuardTableV1, StaticScanResultV1. Provisional APIs resolve_static_member_v1, classify_static_boolable_v1, scan_static_regions_v1, evaluate_static_guard_v1. Exact signatures and module ownership must be frozen by Astra before code edits.
+
+Use the selected plan's Phase0/1 boundary for the first verification cycle: typed builtin domain registry, one-of/set distinction, stable deterministic identity, explicit unknown-member errors and pure config validation, preserving legacy spelling normalization. Add bounded guard construction/evaluation only with agreed representation. Do not claim structural pruning until a subsequent real driver integration test proves zero resolution of inactive imports. This smaller boundary avoids combining four language/cache phases into one unqualified patch.
+
+Next slice: lexical structural scanner plus typed Result-returning driver owner wrapper before the current import resolver. Keep the content-only legacy scanner available for callers/tests that require it; do not silently change its error contract. Preserve raw source/sibling scan outputs, add explicit config/universe identity to guarded-cache admission, and propagate malformed-static errors. Integrate parser active-source view from the same guard result rather than independently evaluating a second truth system.
+
+Required controls before enabling that gate: false unavailable import never resolves; corresponding true import reports missing module; unknown domain/member errors; nested when/elif/else uses parent AND NOT(previous siblings); quoted/comment delimiters ignored; duplicate references OR guards; target switch cannot reuse stale active imports; no-condition source preserves current imports/lazy named/reexport behavior; malformed nesting fails rather than pruning all imports. Existing seeds for compatibility include test/01_unit/compiler/semantics/preprocessor_when_cfg_spec.spl, conditional_compilation_spec.spl, bootstrap/entry_closure_physical_source_dedup_spec.spl, and driver/native_entry_closure_gate_source_spec.spl. Source-text checks alone are insufficient for zero-resolver-call proof.
+
+TLDR guard serialization, complete reference projection, selective full-SPL body avoidance, GPU parity and persistent portable-cache activation remain later slices. No full-tree scan, suite rerun, native build, source edit, new worktree or publication was performed for this audit.

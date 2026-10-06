@@ -1,0 +1,13 @@
+# Lean workflow fixture builder mutability
+
+Status: focused bootstrap-Phase1 changed-fixture verification passed. Whole Phase1/current native compiler and release qualification are separate.
+
+Original collector ordinal13301 ran2 examples:1 passed,1 failed. The failed assembles Lean codegen state scenario initialized opts,gen,func,thm with bare assignments, then reassigned each returned builder value. Its first opts reassignment correctly failed with cannot reassign to immutable variable opts. Related actual unit/formal specs already declare these builder variables with var; the production builder contract does not require a compiler/library repair.
+
+The patch adds var only to those4 initial declarations in the canonical test/03_system/compiler/lean_verification_workflow_spec.spl. Every builder call and all17 existing assertions (6 assembly,11 summary) are preserved. The unexecuted legacy test/system duplicate was not changed or tested. No production source, compiler, library, runtime, frozen producer, collector queue or unrelated dirty files were changed.
+
+One changed previously-failed file execution passed2/2,0 skipped,381ms,peak195248KiB,actual exit0/RSSquiescent1. Producer SHA2560f9bfc1f7a9f6aca254755a543687d6b3d60f18b254da9441cb60e1cd3d4a2c7; isolated source parent60f86c1975f4d4ed27980188c70278655393f627. Scope is explicit bootstrap-Phase1 seed diagnostics. No adjacent green file or acceptance criterion was replayed, and no external Lean proof execution is claimed by these in-memory codegen/summary scenarios.
+
+Canonical no-test docgen regenerated only the corresponding manual:1 complete,0 stubs,exit0/RSSquiescent1,peak345520KiB. Manual review confirmed2 current executable scenarios,all17 value assertions and all4 mutable declarations, with canonical source path. Root kernel `/tmp/simple-lean-builder-fixture-kernel-20261006` supervisor1738123 closed0/quiescent1,1GiB memory.max,swap0,oom.group1,whole180s bound. Both tasks used scoped hash-pinned safe-kill PATH,stdin/devnull,30s observer and bounded per-row watchdog. Kernel charge differs from process RSS.
+
+Evidence directory `/tmp/simple-lean-builder-fixture-evidence-20261006`: original baseline/result.json preserves1/2 outcome; changed/result.json,invocation.env,terminal.env,rss.env bind actual2/2 outcome to source; spec.sha256 pins the tested file; docgen/{stdout,stderr,terminal.env,rss.env} preserves the sole manual generation; run_changed_lean_fixture_once.shs records the exact finite invocation. Local origin was a stale mirror; exact announced release bytes were obtained through root-authorized canonical HTTPS branch fetch, without mutating an active source lane.

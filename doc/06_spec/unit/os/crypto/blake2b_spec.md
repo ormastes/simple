@@ -1,3 +1,40 @@
+# BLAKE2b known-answer unit manual: scope and evidence
+
+## Purpose and audience
+
+Crypto/library maintainers use these six scenarios to check one-shot BLAKE2b
+against independent digest answers: empty and short input, full-block and
+block-plus-one boundaries, shorter output, and keyed empty input.
+
+## Assumptions and primary workflow
+
+The corrected boundary cases use an empty key, a 64-byte output and exactly
+128 or 129 ASCII `a` bytes (0x61). Compare each complete hexadecimal digest
+with the independent OpenSSL BLAKE2B-512 answer retained in the dated bug.
+No streaming API exists on this owner, and no streaming behavior is implied.
+
+## Traceability and recovery
+
+Source: `test/unit/os/crypto/blake2b_spec.spl`; owner: `src/os/crypto/blake2b.spl`.
+Existing `REQ-SSPEC-UNIT` metadata is retained without inventing a feature
+requirement. If a digest differs, retain exact input bytes, size, key, output
+length and provider identity before diagnosing compression/final-block logic.
+Do not replace an oracle solely with the implementation's returned digest.
+
+## Evidence and limitations
+
+Current source SHA256: `72e00373f5f1ee2d6ff53b6f7dbe322298203b38b41d1050179b73901f88a701`.
+The original legacy row 23664 executed six examples with four passing and
+two failing. Independent installed OpenSSL ran once per retained boundary
+input; its digests match both actual SPL failure outputs byte-for-byte.
+This changed legacy copy independently passed 6/6, zero failures/skips,
+under pinned Phase1 seed `0f9bfc1` and frozen dependency source `e59027c`,
+with kernel exit 0/quiescent 1. Exact receipts and oracle identities are in
+`doc/08_tracking/bug/blake2b_boundary_fixture_oracles_2026-10-07.md`.
+This diagnostic seed evidence does not qualify native crypto, security,
+constant-time behavior or the whole bootstrap. The generated executable
+body is retained below; no passing test is replayed for documentation.
+
 # Blake2b Specification
 
 > Tests covering BLAKE2b RFC 7693 unkeyed test vectors, BLAKE2b keyed-mode test vectors (blake2-kat.json).
@@ -70,7 +107,7 @@ expect(_bytes_to_hex(digest)).to_equal("ba80a53f981c4d0d6a2797b69f12f6e94c212f14
 #### 128-byte input (one full block boundary) 64-byte digest
 
 - 128-byte input (one full block boundary) 64-byte digest
-   - Expected: _bytes_to_hex(digest) equals `fc328bf04ed0ec3a0ee77e16ef6d87c34f86b6cae8fb2f7ce9e43a570b0a224e5d22eca4e82e5... (full value in folded executable source)`
+   - Expected: _bytes_to_hex(digest) equals `fc6c71f688f43ea7d60817478808f3cac753e61571865c95adbc2d9122c943a76b92c2cb1047e... (full value in folded executable source)`
 
 
 <details>
@@ -82,12 +119,12 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("128-byte input (one full block boundary) 64-byte digest")
-# Python: hashlib.blake2b(b'a'*128).hexdigest()
-#   fc328bf04ed0ec3a0ee77e16ef6d87c34f86b6cae8fb2f7ce9e43a570b0a224
-#   e5d22eca4e82e5261c4b4fd4a94c44de0f0cce82e08dc0f91b6d6d0f55b1d92e3
+# Independent OpenSSL BLAKE2B-512 oracle for exactly 128 ASCII 'a' bytes:
+#   fc6c71f688f43ea7d60817478808f3cac753e61571865c95adbc2d9122c943a76
+#   b92c2cb1047ef3fe7bf6e436ec1d0a99a9e5b216780bf7fed9d7ca91d3a8f3b
 val msg = _repeat_bytes(0x61u8, 128)
 val digest = blake2b(_empty_bytes(), msg, 64)
-expect(_bytes_to_hex(digest)).to_equal("fc328bf04ed0ec3a0ee77e16ef6d87c34f86b6cae8fb2f7ce9e43a570b0a224e5d22eca4e82e5261c4b4fd4a94c44de0f0cce82e08dc0f91b6d6d0f55b1d92e3")
+expect(_bytes_to_hex(digest)).to_equal("fc6c71f688f43ea7d60817478808f3cac753e61571865c95adbc2d9122c943a76b92c2cb1047ef3fe7bf6e436ec1d0a99a9e5b216780bf7fed9d7ca91d3a8f3b")
 ```
 
 </details>
@@ -95,7 +132,7 @@ expect(_bytes_to_hex(digest)).to_equal("fc328bf04ed0ec3a0ee77e16ef6d87c34f86b6ca
 #### 129-byte input (block boundary + 1) 64-byte digest
 
 - 129-byte input (block boundary + 1) 64-byte digest
-   - Expected: _bytes_to_hex(digest) equals `2319e3789c47e2daa5fe807f61bec2a1a6537fa03f19ff32e87eecbfd64b7e0e8ccff439ac8c3... (full value in folded executable source)`
+   - Expected: _bytes_to_hex(digest) equals `55e6e0eb418149a8af92fd9ddc99254781b2f522a131b4f4d984404b71a00e1167b8124d5dcdd... (full value in folded executable source)`
 
 
 <details>
@@ -107,12 +144,12 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-SSPEC-UNIT
 step("129-byte input (block boundary + 1) 64-byte digest")
-# Python: hashlib.blake2b(b'a'*129).hexdigest()
-#   2319e3789c47e2daa5fe807f61bec2a1a6537fa03f19ff32e87eecbfd64b7e0
-#   e8ccff439ac8c3bf8fb3d9b2a2f4f0ef94cf72e2c45d33ff5fb61aef4e97c4daf
+# Independent OpenSSL BLAKE2B-512 oracle for exactly 129 ASCII 'a' bytes:
+#   55e6e0eb418149a8af92fd9ddc99254781b2f522a131b4f4d984404b71a00e11
+#   67b8124d5dcddd4c6977b299392335d6edd303da6d344d74bbef2d38101b232b
 val msg = _repeat_bytes(0x61u8, 129)
 val digest = blake2b(_empty_bytes(), msg, 64)
-expect(_bytes_to_hex(digest)).to_equal("2319e3789c47e2daa5fe807f61bec2a1a6537fa03f19ff32e87eecbfd64b7e0e8ccff439ac8c3bf8fb3d9b2a2f4f0ef94cf72e2c45d33ff5fb61aef4e97c4daf")
+expect(_bytes_to_hex(digest)).to_equal("55e6e0eb418149a8af92fd9ddc99254781b2f522a131b4f4d984404b71a00e1167b8124d5dcddd4c6977b299392335d6edd303da6d344d74bbef2d38101b232b")
 ```
 
 </details>
@@ -174,7 +211,7 @@ expect(_bytes_to_hex(digest)).to_equal("10ebb67700b1868efb4417987acf4690ae9d972f
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/unit/os/crypto/blake2b_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-10-06 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -195,51 +232,3 @@ Tests covering BLAKE2b RFC 7693 unkeyed test vectors, BLAKE2b keyed-mode test ve
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `622206a746574b5f49d4246486bad500cbc738c79750584259b86e73c1133f86`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `622206a746574b5f49d4246486bad500cbc738c79750584259b86e73c1133f86`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `622206a746574b5f49d4246486bad500cbc738c79750584259b86e73c1133f86`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/unit/os/crypto/blake2b_spec.spl
-mirror: doc/06_spec/unit/os/crypto/blake2b_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/unit/os/crypto/blake2b_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/unit/os/crypto/blake2b_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/unit/os/crypto/blake2b_spec.spl:88:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'empty input unkeyed 64-byte digest' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/os/crypto/blake2b_spec.spl:97:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'Appendix B 'abc' unkeyed 64-byte digest' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/unit/os/crypto/blake2b_spec.spl:106:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario '128-byte input (one full block boundary) 64-byte digest' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->

@@ -1,0 +1,47 @@
+# @req REQ-TDMN-REGISTRY-OPTIONAL
+# Registry misses are nullable; matching adapters retain their real metadata.
+use std.spec.{describe, it, expect}
+use app.test_daemon.session_adapter.{adapter_registry_new, session_adapter_new}
+use app.test_daemon.session_types.{test_session_meta_default, SESSION_KIND_LOCAL, SESSION_KIND_CONTAINER}
+
+describe "Adapter registry nullable lookup contract":
+    it "returns nil when no adapter kind is registered":
+        val registry = adapter_registry_new()
+        expect(registry.find_by_kind(SESSION_KIND_LOCAL)).to_be_nil()
+
+    it "returns nil when no adapter handles the requested metadata":
+        val registry = adapter_registry_new()
+        val meta = test_session_meta_default("test/missing_adapter_spec.spl")
+        expect(registry.find_for_meta(meta)).to_be_nil()
+
+    it "preserves the selected adapter kind and name":
+        var registry = adapter_registry_new()
+        registry.register(session_adapter_new(SESSION_KIND_LOCAL, "local"))
+        registry.register(session_adapter_new(SESSION_KIND_CONTAINER, "container"))
+        val adapter = registry.find_by_kind(SESSION_KIND_CONTAINER)
+        expect(adapter.?).to_equal(true)
+        if adapter.?:
+            expect(adapter.kind).to_equal(SESSION_KIND_CONTAINER)
+            expect(adapter.name).to_equal("container")
+
+    it "returns nil for a missing kind in a populated registry":
+        var registry = adapter_registry_new()
+        registry.register(session_adapter_new(SESSION_KIND_CONTAINER, "container"))
+        expect(registry.find_by_kind(SESSION_KIND_LOCAL)).to_be_nil()
+
+    it "selects an adapter through the existing metadata predicate":
+        var registry = adapter_registry_new()
+        registry.register(session_adapter_new(SESSION_KIND_CONTAINER, "container"))
+        registry.register(session_adapter_new(SESSION_KIND_LOCAL, "local"))
+        val meta = test_session_meta_default("test/local_adapter_spec.spl")
+        val adapter = registry.find_for_meta(meta)
+        expect(adapter.?).to_equal(true)
+        if adapter.?:
+            expect(adapter.kind).to_equal(SESSION_KIND_LOCAL)
+            expect(adapter.name).to_equal("local")
+
+    it "rejects unsupported metadata in a populated registry":
+        var registry = adapter_registry_new()
+        registry.register(session_adapter_new(SESSION_KIND_CONTAINER, "container"))
+        val meta = test_session_meta_default("test/local_adapter_spec.spl")
+        expect(registry.find_for_meta(meta)).to_be_nil()

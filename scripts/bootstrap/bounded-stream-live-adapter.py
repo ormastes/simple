@@ -18,9 +18,18 @@ def diagnostic_evidence(output):
     counts={}
     for row in summary['records']:
         marker=row['marker'].lower();counts[marker]=counts.get(marker,0)+1
+    exact_counts=summary.get('marker_counts')
+    if exact_counts is not None:
+        assert sum(exact_counts.values())==summary['events_observed']
+        samples=summary['representative_samples']
+        assert len(samples)<=summary['sample_capacity']<=256
+        assert sum(r['occurrences'] for r in samples)+summary['sample_overflow_events']==summary['events_observed']
     return dict(path=str(path),sha256=receipt['diagnostic_summary_sha256'],
                 events_observed=summary['events_observed'],events_dropped=summary['events_dropped'],
                 truncated_events=summary['truncated_events'],retained_markers=counts,
+                observed_markers=exact_counts,marker_count_scope='full received stream' if exact_counts is not None else 'UNAVAILABLE_IN_LEGACY_SUMMARY',
+                representative_samples=summary.get('representative_samples',[]),
+                sample_overflow_events=summary.get('sample_overflow_events'),cause_inventory_complete=False,
                 excerpts=[dict(offset=r['offset'],text=r['text'][:512],truncated=r['truncated'] or len(r['text'])>512) for r in summary['records'][-4:]],
                 qualification='OBSERVATION_ONLY_NOT_A_VERDICT')
 

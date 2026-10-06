@@ -2,30 +2,6 @@
 
 > @cover src/app/test_daemon/session_broker.spl 80%
 
-<!-- sdn-diagram:id=test_daemon_session_sharing_system_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=test_daemon_session_sharing_system_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-test_daemon_session_sharing_system_spec -> std
-test_daemon_session_sharing_system_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=test_daemon_session_sharing_system_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 21 | 21 | 0 | 0 |
@@ -45,7 +21,7 @@ test_daemon_session_sharing_system_spec -> app
 | Category | Infrastructure / System Test |
 | Status | Active |
 | Source | `test/03_system/tools/test_daemon/test_daemon_session_sharing_system_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-10-06 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 @cover src/app/test_daemon/session_broker.spl 80%
@@ -65,10 +41,6 @@ verification, and session lifecycle through the SessionBroker API.
 
 #### creates a session when acquiring
 
-1. var broker = session broker new
-   - Expected: broker.total_count() equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -87,11 +59,6 @@ expect(lease.session_id.len()).to_be_greater_than(0)
 
 #### registers session with correct kind
 
-1. var broker = session broker new
-   - Expected: lease.key.kind equals `SESSION_KIND_QEMU_VM`
-   - Expected: lease.key.target equals `arm64`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -109,13 +76,6 @@ expect(lease.key.target).to_equal("arm64")
 </details>
 
 #### tracks multiple sessions in registry
-
-1. var broker = session broker new
-2. broker acquire
-3. broker acquire
-4. broker acquire
-   - Expected: broker.total_count() equals `3`
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -137,11 +97,6 @@ expect(broker.total_count()).to_equal(3)
 </details>
 
 #### reports status with all session kinds
-
-1. var broker = session broker new
-2. broker acquire
-3. broker acquire
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -165,10 +120,6 @@ expect(report).to_contain("Total sessions: 2")
 
 #### lease starts as active after acquire
 
-1. var broker = session broker new
-   - Expected: broker.total_count() equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -188,12 +139,6 @@ expect(broker.total_count()).to_equal(1)
 
 #### release sets session back to idle
 
-1. var broker = session broker new
-2. broker release
-   - Expected: broker.idle_count() equals `1`
-   - Expected: broker.active_count() equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -212,12 +157,6 @@ expect(broker.active_count()).to_equal(0)
 </details>
 
 #### released session can be reacquired
-
-1. var broker = session broker new
-2. broker release
-   - Expected: broker.total_count() equals `1`
-   - Expected: lease2.session_id equals `lease1.session_id`
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -241,24 +180,21 @@ expect(lease2.session_id).to_equal(lease1.session_id)
 
 #### test_count increments on reuse
 
-1. var broker = session broker new
-2. broker release
-   - Expected: lease2.test_count equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 var broker = session_broker_new()
 val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
 val lease1 = broker.acquire(meta)
+expect(lease1.test_count).to_equal(1)
 broker.release(lease1.session_id)
 val lease2 = broker.acquire(meta)
-expect(lease2.test_count).to_equal(1)
+expect(lease2.session_id).to_equal(lease1.session_id)
+expect(lease2.test_count).to_equal(2)
 ```
 
 </details>
@@ -266,10 +202,6 @@ expect(lease2.test_count).to_equal(1)
 ### concurrent session requests
 
 #### different targets get separate sessions
-
-1. var broker = session broker new
-   - Expected: broker.total_count() equals `2`
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -291,11 +223,6 @@ expect(l1.session_id).to_not_equal(l2.session_id)
 
 #### same target same artifact reuses when idle
 
-1. var broker = session broker new
-2. broker release
-   - Expected: broker.total_count() equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -315,10 +242,6 @@ expect(broker.total_count()).to_equal(1)
 
 #### fresh_per_test always creates new session
 
-1. var broker = session broker new
-   - Expected: broker.total_count() equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -336,11 +259,6 @@ expect(broker.total_count()).to_equal(2)
 </details>
 
 #### multiple qemu sessions up to limit
-
-1. var broker = session broker new
-   - Expected: broker.total_count() equals `4`
-   - Expected: broker.count_by_kind(SESSION_KIND_QEMU_VM) equals `4`
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -362,12 +280,6 @@ expect(broker.count_by_kind(SESSION_KIND_QEMU_VM)).to_equal(4)
 
 #### shared_read_only sessions are reused
 
-1. var broker = session broker new
-2. broker release
-   - Expected: l2.session_id equals `l1.session_id`
-   - Expected: broker.total_count() equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -387,12 +299,6 @@ expect(broker.total_count()).to_equal(1)
 </details>
 
 #### shared_with_reset sessions are reused
-
-1. var broker = session broker new
-2. broker release
-   - Expected: l2.session_id equals `l1.session_id`
-   - Expected: broker.total_count() equals `1`
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -414,11 +320,6 @@ expect(broker.total_count()).to_equal(1)
 
 #### fresh_per_test sessions are never reused
 
-1. var broker = session broker new
-2. broker release
-   - Expected: broker.total_count() equals `2`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -438,11 +339,6 @@ expect(broker.total_count()).to_equal(2)
 </details>
 
 #### different artifacts do not share sessions
-
-1. var broker = session broker new
-2. broker release
-   - Expected: broker.total_count() equals `2`
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -466,11 +362,6 @@ expect(broker.total_count()).to_equal(2)
 
 #### stop_session removes from broker
 
-1. var broker = session broker new
-   - Expected: stopped is true
-   - Expected: broker.total_count() equals `0`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -489,14 +380,6 @@ expect(broker.total_count()).to_equal(0)
 </details>
 
 #### shutdown_all removes all sessions
-
-1. var broker = session broker new
-2. broker acquire
-3. broker acquire
-   - Expected: broker.total_count() equals `2`
-4. broker shutdown all
-   - Expected: broker.total_count() equals `0`
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -519,10 +402,6 @@ expect(broker.total_count()).to_equal(0)
 
 #### stop nonexistent session returns false
 
-1. var broker = session broker new
-   - Expected: stopped is false
-
-
 <details>
 <summary>Executable SSpec</summary>
 
@@ -541,20 +420,10 @@ expect(stopped).to_equal(false)
 
 #### acquire, use, release, reacquire cycle
 
-1. var broker = session broker new
-   - Expected: broker.total_count() equals `1`
-2. broker release
-   - Expected: broker.idle_count() equals `1`
-   - Expected: broker.total_count() equals `1`
-   - Expected: l2.test_count equals `1`
-3. broker release
-   - Expected: broker.idle_count() equals `1`
-
-
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -563,13 +432,15 @@ val meta = make_qemu_meta("arm64", "fw.bin", REUSE_SHARED_READ_ONLY)
 # Step 1: Acquire
 val l1 = broker.acquire(meta)
 expect(broker.total_count()).to_equal(1)
+expect(l1.test_count).to_equal(1)
 # Step 2: Release back to idle
 broker.release(l1.session_id)
 expect(broker.idle_count()).to_equal(1)
 # Step 3: Reacquire same session
 val l2 = broker.acquire(meta)
 expect(broker.total_count()).to_equal(1)
-expect(l2.test_count).to_equal(1)
+expect(l2.session_id).to_equal(l1.session_id)
+expect(l2.test_count).to_equal(2)
 # Step 4: Release again
 broker.release(l2.session_id)
 expect(broker.idle_count()).to_equal(1)
@@ -578,16 +449,6 @@ expect(broker.idle_count()).to_equal(1)
 </details>
 
 #### multi-session acquire, release, shutdown
-
-1. var broker = session broker new
-   - Expected: broker.total_count() equals `2`
-2. broker release
-3. broker release
-   - Expected: broker.idle_count() equals `2`
-   - Expected: broker.active_count() equals `0`
-4. broker shutdown all
-   - Expected: broker.total_count() equals `0`
-
 
 <details>
 <summary>Executable SSpec</summary>

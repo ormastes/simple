@@ -1,0 +1,44 @@
+#!/bin/sh
+# Two source-bound probes. Each uses the canonical five-second process owner.
+set -eu
+[ "$#" = 4 ] || exit 2
+repo=$1; out=$2; role=$3; binary=$4
+case "$role" in compiler_cli_build|src/app/cli/main.spl|src/app/cli/_CliMain/main_and_help.spl) ;; *) exit 2 ;; esac
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+[ -f "$binary" ] && [ ! -L "$binary" ] || exit 2
+registry="$here/sanity-oracles/reviewed-sources.tsv"
+verify_sources() {
+ count=0
+ while IFS=' ' read -r key expected relative; do
+  [ "$key" = full-cli ] || continue
+  [ -f "$repo/$relative" ] || return 1
+  actual=$(sed 's/\r$//' "$repo/$relative" | sha256sum | awk '{print $1}')
+  [ "$actual" = "$expected" ] || return 1
+  count=$((count + 1))
+ done <"$registry"
+ [ "$count" -eq 5 ]
+}
+verify_sources || { echo 'sanity_status=UNQUALIFIED reason=full-cli-source-drift' >&2; exit 2; }
+mkdir "$out" || exit 2
+out=$(CDPATH= cd -- "$out" && pwd -P)
+binary_sha=$(sha256sum "$binary" | awk '{print $1}')
+for probe in version eval; do
+ oracle="$here/sanity-oracles/full-cli-$probe.stdout"
+ [ -s "$oracle" ] || exit 2
+ case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) sed 's/$/\r/' "$oracle" >"$out/$probe.expected.stdout" ;;
+  *) cp "$oracle" "$out/$probe.expected.stdout" ;;
+ esac
+done
+: >"$out/expected.stderr"
+# The source owner explicitly suppresses bootstrap overrides when this is set.
+export SIMPLE_NO_BOOTSTRAP_DELEGATE=1
+unset SIMPLE_BOOTSTRAP_DRIVER SIMPLE_EXECUTION_MODE_RECEIPT
+status=PASS
+sh "$here/run-native-sanity.shs" "$repo" "$out/version" "$out/version.expected.stdout" "$out/expected.stderr" 0 "$binary" --version || status=FAIL
+sh "$here/run-native-sanity.shs" "$repo" "$out/run" "$out/eval.expected.stdout" "$out/expected.stderr" 0 "$binary" --interpret --no-jit -c 'print 2 + 4' || status=FAIL
+verify_sources || status=FAIL
+[ "$(sha256sum "$binary" | awk '{print $1}')" = "$binary_sha" ] || status=FAIL
+printf 'schema=simple-full-cli-sanity-v1\nstatus=%s\nprobes=2\nper_probe_timeout_seconds=5\nwhole_tests_qualified=0\nbinary_sha256=%s\n' "$status" "$binary_sha" >"$out/sanity.env"
+cat "$out/sanity.env"
+[ "$status" = PASS ]

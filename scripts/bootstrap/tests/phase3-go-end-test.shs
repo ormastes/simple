@@ -1,0 +1,42 @@
+#!/bin/sh
+# Scheduling controls only: these fixtures are not compiler qualification.
+set -eu
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/simple-phase3-go-end.XXXXXX")
+# Retain evidence; caller owns cleanup of this printed absolute directory.
+printf 'evidence=%s\n' "$tmp"
+statuses="$tmp/statuses" hashes="$tmp/hashes"
+: >"$statuses"; : >"$hashes"
+module_inventory="$tmp/modules"
+printf '%s\n' src/fail.spl src/crash.spl src/blocked.spl src/good.spl >"$module_inventory"
+exe_suffix=
+llvm_index_config=llvm4 cranelift_index_config=cl4
+phase3_llvm_index_config=llvm3 phase3_cranelift_index_config=cl3
+build_binary() {
+  [ "${6:-}" = object ] || return 0
+  [ "$3:$4" = bin/module.o:phase3 ] || exit 2
+  case "$2" in
+    src/fail.spl) exit 1 ;;
+    src/crash.spl) exit 139 ;;
+    src/blocked.spl) exit 20 ;;
+    src/good.spl) return 0 ;;
+    *) exit 2 ;;
+  esac
+}
+build_index() { [ "$1:$2" != phase3:llvm ]; }
+prepare_backend() { return 0; }
+run_module_backend() { [ "$1:$2" != phase3:cranelift ]; }
+run_native_subsystem() { return 0; }
+. "$script_root/lib/provisional-task-schedule.shs"
+provisional_dispatch_tasks
+for backend in llvm cranelift; do
+  grep -qx "phase3_${backend}_diagnostic-module-1_status=FAILED" "$statuses"
+  grep -qx "phase3_${backend}_diagnostic-module-2_exit=139" "$statuses"
+  grep -qx "phase3_${backend}_diagnostic-module-3_status=BLOCKED" "$statuses"
+  grep -qx "phase3_${backend}_diagnostic-module-4_status=OBJECT_EMITTED_UNQUALIFIED" "$statuses"
+  grep -qx "phase4_${backend}_group_status=SUCCEEDED" "$statuses"
+done
+grep -qx 'phase3_llvm_group_status=BLOCKED' "$statuses"
+grep -qx 'phase3_cranelift_group_status=FAILED' "$statuses"
+[ "$(grep -c '_entry=' "$statuses")" -eq 8 ]
+echo 'PASS: failed index and group both collect every module, retain failure and continue Phase 4'
