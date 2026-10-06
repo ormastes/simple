@@ -1,0 +1,43 @@
+#!/bin/sh
+# Exact reviewed entry contracts. Source drift requires review before execution.
+set -eu
+[ "$#" = 4 ] || exit 2
+repo=$1; out=$2; entry=$3; binary=$4
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+case "$entry" in
+ src/app/lsp/main.spl) oracle=lsp-native; set -- "$binary" --version ;;
+ src/app/sfm_samples/vcs/main.spl) oracle=sfm-vcs; set -- "$binary" ;;
+ src/app/buildrunner/main.spl) oracle=buildrunner; set -- "$binary" --help ;;
+ *) echo 'unqualified: no reviewed entry contract' >&2; exit 2 ;;
+esac
+[ -f "$binary" ] && [ ! -L "$binary" ] || exit 2
+registry="$here/sanity-oracles/reviewed-sources.tsv"
+[ -f "$registry" ] || exit 2
+count=0
+while IFS=' ' read -r key expected relative; do
+ [ "$key" = "$oracle" ] || continue
+ [ -f "$repo/$relative" ] || exit 2
+ actual=$(sed 's/\r$//' "$repo/$relative" | sha256sum | awk '{print $1}')
+ [ "$actual" = "$expected" ] || { echo "unqualified: reviewed source changed: $relative" >&2; exit 2; }
+ count=$((count + 1))
+done <"$registry"
+[ "$count" -gt 0 ] || exit 2
+mkdir "$out" || exit 2
+out=$(CDPATH= cd -- "$out" && pwd -P)
+case "$(uname -s)" in
+ MINGW*|MSYS*|CYGWIN*) sed 's/$/\r/' "$here/sanity-oracles/$oracle.stdout" >"$out/expected.stdout" ;;
+ *) cp "$here/sanity-oracles/$oracle.stdout" "$out/expected.stdout" ;;
+esac
+: >"$out/expected.stderr"
+binary_sha=$(sha256sum "$binary" | awk '{print $1}')
+printf 'entry=%s\nbinary_sha256=%s\nreviewed_source_count=%s\n' "$entry" "$binary_sha" "$count" >"$out/oracle.env"
+code=0
+sh "$here/run-native-sanity.shs" "$repo" "$out/run" "$out/expected.stdout" "$out/expected.stderr" 0 "$@" || code=$?
+[ "$(sha256sum "$binary" | awk '{print $1}')" = "$binary_sha" ] || code=1
+while IFS=' ' read -r key expected relative; do
+ [ "$key" = "$oracle" ] || continue
+ actual=$(sed 's/\r$//' "$repo/$relative" | sha256sum | awk '{print $1}')
+ [ "$actual" = "$expected" ] || code=1
+done <"$registry"
+cat "$out/run/sanity.env" 2>/dev/null || code=1
+exit "$code"
