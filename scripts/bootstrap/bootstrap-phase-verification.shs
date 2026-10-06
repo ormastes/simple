@@ -182,6 +182,11 @@ timeout_seconds=${BOOTSTRAP_VERIFY_TIMEOUT_SECONDS:-1800}
 spec_timeout_seconds=${BOOTSTRAP_VERIFY_SPEC_TIMEOUT_SECONDS:-120}
 native_internal_timeout=${BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:-600}
 build_threads=${BOOTSTRAP_VERIFY_BUILD_THREADS:-4}
+tool_build_concurrency=${BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY:-2}
+case "$tool_build_concurrency" in
+  1|2) ;;
+  *) die "BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY must be 1 or 2" ;;
+esac
 module_workers=${BOOTSTRAP_VERIFY_MODULE_WORKERS:-2}
 test_workers=${BOOTSTRAP_VERIFY_TEST_WORKERS:-1}
 verification_diagnostic=${BOOTSTRAP_VERIFY_DIAGNOSTIC:-0}
@@ -2076,7 +2081,7 @@ else
     mkdir -p "$tool_outputs"
     rm -f "$compiler_cli" "$test_runner"
      if [ "$phase" = stage2 ] || [ "$phase" = stage3 ]; then
-       if [ "$build_threads" -gt 1 ] && [ "${SIMPLE_COMPILE_FAIL_FAST:-0}" != 1 ]; then
+       if [ "$tool_build_concurrency" -eq 2 ] && [ "$build_threads" -gt 1 ] && [ "${SIMPLE_COMPILE_FAIL_FAST:-0}" != 1 ]; then
          phase_worker_threads=$((build_threads / 2))
          phase_workers="$work_root/$phase-tool-workers"
          mkdir -p "$phase_workers/cli" "$phase_workers/runner" || die "cannot isolate phase C builders"
@@ -2100,9 +2105,13 @@ else
            printf 'task=%s_tool_workers|result=FAIL|status=worker-failed|elapsed_seconds=0|log=-\n' "$phase" >>"$summary"
          fi
        else
-         run_phase_c_tool_build compiler_cli_build src/app/cli/_CliMain/main_and_help.spl "$compiler_cli" "$tool_cache_cli" 1
+         phase_serial_threads=1
+         if [ "$tool_build_concurrency" -eq 1 ]; then
+           phase_serial_threads=$build_threads
+         fi
+         run_phase_c_tool_build compiler_cli_build src/app/cli/_CliMain/main_and_help.spl "$compiler_cli" "$tool_cache_cli" "$phase_serial_threads"
         compiler_cli_ready=$matrix_task_passed
-         run_phase_c_tool_build test_runner_build src/app/test_runner_new/main.spl "$test_runner" "$tool_cache_runner" 1
+         run_phase_c_tool_build test_runner_build src/app/test_runner_new/main.spl "$test_runner" "$tool_cache_runner" "$phase_serial_threads"
         test_runner_ready=$matrix_task_passed
       fi
     else
