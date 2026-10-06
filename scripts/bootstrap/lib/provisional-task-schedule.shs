@@ -35,6 +35,37 @@ provisional_dispatch_tasks() {
     fi
     printf '%s=%s\n' "${task_phase}_${backend}_group_status" "$group_outcome" >>"$statuses"
     printf '%s=unproven\n' "${task_phase}_${backend}_group_tool_evidence" >>"$statuses"
+    # A failed whole-program index/group is not evidence that every module
+    # fails. Re-enter the normal compiler through the manager for each entry;
+    # never consume a partial index or manufacture a qualified group receipt.
+    if [ "$task_phase" = phase3 ] && [ "$group_outcome" != SUCCEEDED ]; then
+      # Validate before constructing task paths; the grouped preparer may not
+      # have run when its index failed. Source membership is checked by manager.
+      [ -f "$module_inventory" ] && [ ! -L "$module_inventory" ] &&
+        [ -s "$module_inventory" ] || return 1
+      awk 'length($0)==0 || index($0,"\r") || $0 !~ /\.spl$/ ||
+        $0 ~ /^\// || $0 ~ /[:\\]/ || $0 ~ /(^|\/)\.\.?(\/|$)/ { bad=1 }
+        END { exit bad }' "$module_inventory" || return 1
+      diagnostic_number=0
+      while IFS= read -r diagnostic_entry || [ -n "$diagnostic_entry" ]; do
+        diagnostic_number=$((diagnostic_number + 1))
+        diagnostic_id="diagnostic-module-$diagnostic_number"
+        diagnostic_exit=0
+        if (build_binary "$diagnostic_id" "$diagnostic_entry" bin/module.o phase3 "$backend" object); then
+          diagnostic_outcome=OBJECT_EMITTED_UNQUALIFIED
+        else
+          diagnostic_exit=$?
+          if [ "$diagnostic_exit" -eq 20 ]; then
+            diagnostic_outcome=BLOCKED
+          else
+            diagnostic_outcome=FAILED
+          fi
+        fi
+        printf '%s=%s\n' "phase3_${backend}_${diagnostic_id}_entry" "$diagnostic_entry" \
+          "phase3_${backend}_${diagnostic_id}_status" "$diagnostic_outcome" \
+          "phase3_${backend}_${diagnostic_id}_exit" "$diagnostic_exit" >>"$statuses"
+      done <"$module_inventory"
+    fi
   }
   # Each backend owns its writable caches and evidence journals. Only the
   # parent combines the journals, in deterministic backend order.

@@ -1,0 +1,63 @@
+#!/bin/sh
+# Real canonical phase row + scheduler, with a copy-only producer fixture.
+# Native child behavior runs through the real five-second process owner.
+set -eu
+source_root=${1:?read-only bound source root}; work=${2:?fresh work directory}
+script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+runner="$script_root/bootstrap-phase-verification.shs"
+native_sanity_helper="$script_root/run-reviewed-native-sanity.shs"
+mkdir "$work"
+work=$(CDPATH= cd -- "$work" && pwd -P)
+mkdir "$work/home" "$work/tmp" "$work/cache" "$work/logs" "$work/helpers"
+for fn in run_task matrix_should_skip record_skipped_task run_matrix_task; do
+  sed -n "/^$fn() {$/,/^}$/p" "$runner" >>"$work/functions.shs"
+done
+. "$work/functions.shs"
+cat >"$work/fixture.c" <<'FIXTURE'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+int main(int argc,char **argv) {
+    if(argc!=3 || strcmp(argv[1],"simple_lsp_mcp_server") || strcmp(argv[2],"--version")) return 2;
+    const char *v=getenv("SANITY_FIXTURE_VERSION");
+    if(!v) return 3;
+    printf("simple-lsp-mcp %s\n",v);
+    return 0;
+}
+FIXTURE
+${CC:-cc} "$work/fixture.c" -o "$work/fixture.exe"
+cat >"$work/producer.shs" <<'PRODUCER'
+#!/bin/sh
+cp "$1" "$2"
+PRODUCER
+hash_file() { sha256sum "$1" | awk '{print $1}'; }
+read_max_rss_kib() { printf '0\n'; }
+stage2_row_delegation_env() { row_no_delegate=1; }
+bootstrap_phase_run_command() { "$@"; }
+run_with_timeout() { "$@"; }
+die() { echo "FAIL: $*" >&2; exit 1; }
+phase=stage2
+compiler_snapshot=unused-compiler
+home="$work/home"; tmp="$work/tmp"; cache="$work/cache"; logs="$work/logs"
+summary="$work/summary.env"
+: >"$summary"
+matrix_failed=0
+SIMPLE_COMPILE_FAIL_FAST=0
+TMPDIR="$tmp"
+SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE="$work/helpers"
+SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+export TMPDIR SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE SIMPLE_BOOTSTRAP_RSS_CAP_MODE SIMPLE_COMPILE_FAIL_FAST
+# The production hook must supply its own isolated temporary directory.
+unset TMPDIR
+version=$(awk '$1=="val" && $2=="SERVER_VERSION" {gsub(/"/,"",$4); print $4}' "$source_root/src/app/simple_lsp_mcp/main.spl")
+SANITY_FIXTURE_VERSION=wrong-version
+export SANITY_FIXTURE_VERSION
+run_matrix_task lsp_build --verification-expect-executable="$work/bad.exe" sh "$work/producer.shs" "$work/fixture.exe" "$work/bad.exe"
+[ "$matrix_task_passed" = 0 ] && [ "$matrix_failed" = 1 ] || die 'bad post-link behavior marked ready'
+grep -q '|sanity_status=FAIL|behavior_qualified=0|' "$summary" || die 'missing failed behavior row'
+SANITY_FIXTURE_VERSION=$version
+export SANITY_FIXTURE_VERSION
+run_matrix_task lsp_build --verification-expect-executable="$work/good.exe" sh "$work/producer.shs" "$work/fixture.exe" "$work/good.exe"
+[ "$matrix_task_passed" = 1 ] && [ "$matrix_failed" = 1 ] || die 'independent good row suppressed or prior failure erased'
+grep -q '|sanity_status=PASS|behavior_qualified=1|' "$summary" || die 'missing qualified behavior row'
+printf 'PASS: linked wrong-output binary fails, next good binary runs, failure latch survives\n'
