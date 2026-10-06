@@ -7,6 +7,7 @@ use compiler.hir.hir_lowering._Items.lowering_helpers.{bootstrap_hir_symbol_for_
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
 
 use compiler.hir.hir_types.*
+use compiler.hir.hir_owner_name.{hir_symbol_owner_module}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
@@ -111,7 +112,15 @@ impl HirLowering:
         idx = 0
         while idx < enum_keys.len():
             val name = enum_keys[idx]
-            self.symbols.define(name, SymbolKind.Enum, nil, decl_span, decl_visibility, false, mod_name)
+            val enum_symbol = self.symbols.define(name, SymbolKind.Enum, nil, decl_span, decl_visibility, false, mod_name)
+            # Local enum fields restore HIR identity through the same qualified
+            # index as imported fields. Publish only this exact declaration:
+            # define retains an existing lexical binding on a name collision.
+            # Do not publish a foreign owner, alias, or non-enum under this key.
+            if self.module_filename != "" and self.symbols.symbol_is_enum_declaration_scalar_raw(enum_symbol.id) and
+                    self.symbols.symbol_name_scalar_raw(enum_symbol.id) == name and
+                    hir_symbol_owner_module(self.symbols.symbol_defining_module_scalar_raw(enum_symbol.id)) == hir_symbol_owner_module(self.module_filename):
+                self.symbols.bind_qualified_type(self.module_filename, name, enum_symbol)
             idx = idx + 1
 
         val module_bitfields = module.bitfields
