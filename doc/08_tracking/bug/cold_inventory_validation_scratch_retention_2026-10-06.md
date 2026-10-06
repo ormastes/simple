@@ -30,3 +30,9 @@ Whole batched process peaks were 116,648 KiB baseline and 6,484 KiB candidate. T
 Profiling attempts using runtime argv failed before work, and `host.current_time_ms` was absent from the actual core archive. Failed artifacts remain in the evidence directory. The successful workload uses the existing `sffi.time.time_monotonic_ns` provider; no clock/argv production change was made.
 
 Full cold publication with a producer containing the candidate, the checked-in SSpec and native fixture, broader runtime checks and Phase 3/4 admission remain pending.
+
+## Checked-in regressions
+
+The immutable candidate commit `79c27b881a7a2863d99c3023ffa683f73e3548f2` was tested directly. Phase1 bootstrap-seed interpretation executed all four checked-in SSpec cases: four passed, zero failed/skipped/dropped, exit 0, peak 645,536 KiB. Receipt and test output: `/tmp/simple-inventory-memory-fix-evidence/phase1-spec/`.
+
+The checked-in native fixture was separately compiled by exact pure Cranelift producer `33517e08dc520f7016ccc228a973f0b65de069b12aead83885168d6afb18a69d` and executed with guarded compile/run receipts. Exact stdout asserted `validations=50000`, `objects_delta=0`, and `negative_and_nested_and_canonical=pass`; stderr was empty and both processes exited 0. Evidence: `/tmp/simple-inventory-memory-fix-evidence/checked-native-fixture/`. This proves the checked-in retention and semantic regression assertions, not complete cold publication or Phase3/4 admission.
