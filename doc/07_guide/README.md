@@ -17,6 +17,7 @@ User-facing guides for the Simple programming language. For specifications see `
 | Guide | Description |
 |-------|-------------|
 | [language/syntax.md](language/syntax.md) | Core syntax, constructors, lambdas, collections, blocks |
+| [Language principles](../02_requirements/language/principles.md) | Selected typed-condition, symbolic-TLDR and build-pruning principles; migration and implementation status |
 | [language/type_system.md](language/type_system.md) | Types, advanced types, newtypes, type checking |
 | [language/module_system.md](language/module_system.md) | Imports, exports, `__init__.spl` |
 | [language/error_handling.md](language/error_handling.md) | `Result<T,E>`, `?` operator, error recovery |

@@ -9,7 +9,7 @@
 # (< 20 s, 2026-09-23). It stays the authority — it runs in the non-required
 # "(extended)" CI job and on main — but the two things a PUSH can newly break
 # are diff-scoped and sub-second:
-#   1. a .shs it touched no longer parses (`sh -n` on the COMMITTED blob), and
+#   1. a .shs it touched no longer parses (declared shell on the COMMITTED blob), and
 #   2. a guard script it ADDED under scripts/check/ is mentioned by no root, so
 #      it would enforce nothing (the "NEW unwired" verdict of the census).
 # Unchanged files are not re-examined here: their verdict is unchanged by this
@@ -48,6 +48,25 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Parse only: never execute a script or interpolate its shebang as a command.
+parse_script() {
+    IFS= read -r _shebang <"$1" || _shebang=""
+    _cr=$(printf '\r')
+    _shebang=${_shebang%"$_cr"}
+    case "$_shebang" in
+        '#!/usr/bin/env bash'|'#!/bin/bash'|'#!/usr/bin/bash') _shell=bash ;;
+        '#!/usr/bin/env sh'|'#!/bin/sh'|'#!/usr/bin/sh') _shell=sh ;;
+        '#!'*) echo "unsupported shell shebang" >&2; return 2 ;;
+        # Legacy scripts without a shebang retain the existing sh parser.
+        *) _shell=sh ;;
+    esac
+    if ! command -v "$_shell" >/dev/null 2>&1; then
+        echo "required interpreter $_shell unavailable" >&2
+        return 2
+    fi
+    "$_shell" -n "$1" || return 1
+}
+
 # scan <root> <base>..<tip> -> verdict on stdout, returns 0/1/2
 scan() {
     _root=$1; _range=$2
@@ -73,7 +92,20 @@ scan() {
         case "$_path" in
             *.shs)
                 _parsed=$((_parsed + 1))
-                if ! git -C "$_root" show "$_tip:$_path" 2>/dev/null | sh -n 2>"$_work/err.txt"; then
+                if ! git -C "$_root" show "$_tip:$_path" >"$_work/script.shs" 2>"$_work/err.txt"; then
+                    rm -rf "$_work"
+                    echo "ERROR — nothing was checked (cannot read committed script $_path)"
+                    return 2
+                fi
+                parse_script "$_work/script.shs" 2>"$_work/err.txt"
+                _syntax_rc=$?
+                if [ "$_syntax_rc" -eq 2 ]; then
+                    cat "$_work/err.txt" >&2
+                    rm -rf "$_work"
+                    echo "ERROR — nothing was checked (shell parser unavailable or unsupported for $_path)"
+                    return 2
+                fi
+                if [ "$_syntax_rc" -ne 0 ]; then
                     _bad="$_bad $_path"
                     sed "s|^|  $_path: |" "$_work/err.txt" | head -3 >> "$_work/parse_errors.txt"
                 fi
@@ -96,7 +128,7 @@ scan() {
     done < "$_work/status.txt"
     if [ -n "$_bad" ] || [ -n "$_unwired" ]; then
         if [ -n "$_bad" ]; then
-            echo "touched .shs that no longer parse (sh -n on the committed blob):"
+            echo "touched .shs that no longer parse (declared shell -n on the committed blob):"
             cat "$_work/parse_errors.txt" 2>/dev/null
         fi
         if [ -n "$_unwired" ]; then
@@ -170,14 +202,59 @@ selftest() {
     _out=$(scan "$_t/r" HEAD~1..HEAD); _rc=$?
     [ "$_rc" -eq 0 ] || { echo "selftest FAIL 6: uncommitted working-copy edit changed the verdict (rc=$_rc)"; _fails=$((_fails + 1)); }
 
+    # 7 legitimate Bash coprocess syntax must use Bash, not POSIX sh.
+    printf '#!/usr/bin/env bash\ncoproc worker { printf ok; }\n' > "$_t/r/scripts/check/x/helper.shs"
+    _commit "$_t/r" valid-bash
+    _out=$(scan "$_t/r" HEAD~1..HEAD); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 7: valid Bash rejected (rc=$_rc)"; _fails=$((_fails + 1)); }
+
+    # 8 selecting Bash must still reject malformed Bash syntax.
+    printf '#!/usr/bin/env bash\ncoproc worker { if; }\n' > "$_t/r/scripts/check/x/helper.shs"
+    _commit "$_t/r" invalid-bash
+    _out=$(scan "$_t/r" HEAD~1..HEAD); _rc=$?
+    case "$_rc:$_out" in
+        1:*unparsable:*scripts/check/x/helper.shs*) ;;
+        *) echo "selftest FAIL 8: malformed Bash not rejected (rc=$_rc)"; _fails=$((_fails + 1)) ;;
+    esac
+
+    # 9 POSIX-shell parse errors remain failures after a Bash revision.
+    printf '#!/bin/sh\nif\n' > "$_t/r/scripts/check/x/helper.shs"
+    _commit "$_t/r" invalid-posix
+    _out=$(scan "$_t/r" HEAD~1..HEAD); _rc=$?
+    case "$_rc:$_out" in
+        1:*unparsable:*scripts/check/x/helper.shs*) ;;
+        *) echo "selftest FAIL 9: malformed POSIX shell not rejected (rc=$_rc)"; _fails=$((_fails + 1)) ;;
+    esac
+
+    # 10 missing selected interpreter is infrastructure ERROR, never a pass.
+    printf '#!/usr/bin/env bash\necho should-not-execute\n' > "$_t/missing.shs"
+    _out=$(PATH= parse_script "$_t/missing.shs" 2>&1); _rc=$?
+    case "$_rc:$_out" in
+        '2:required interpreter bash unavailable') ;;
+        *) echo "selftest FAIL 10: missing Bash not rejected (rc=$_rc)"; _fails=$((_fails + 1)) ;;
+    esac
+
+    # 11 an unrecognized interpreter cannot suppress syntax validation.
+    printf '#!/bin/false\necho should-not-execute\n' > "$_t/unknown.shs"
+    _out=$(parse_script "$_t/unknown.shs" 2>&1); _rc=$?
+    case "$_rc:$_out" in
+        '2:unsupported shell shebang') ;;
+        *) echo "selftest FAIL 11: unsupported interpreter not rejected (rc=$_rc)"; _fails=$((_fails + 1)) ;;
+    esac
+
+    # 12 a terminal CR in the shebang must not misclassify Bash as unknown.
+    printf '#!/usr/bin/env bash\r\ncoproc worker { printf ok; }\n' > "$_t/cr-header.shs"
+    parse_script "$_t/cr-header.shs" 2>"$_t/cr-header.err"; _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 12: CR-terminated Bash header rejected (rc=$_rc)"; _fails=$((_fails + 1)); }
+
     rm -rf "$_t"
     [ "$_fails" -eq 0 ] || { echo "selftest: $_fails fixture(s) failed"; return 1; }
-    echo "selftest: 6 fixtures passed"
+    echo "selftest: 12 fixtures passed"
 }
 
 selftest || { echo "ERROR — nothing was checked (selftest failed; the guard itself is not trustworthy)"; exit 2; }
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — 6 fixture(s) checked, selftest only"
+    echo "PASS — 12 fixture(s) checked, selftest only"
     exit 0
 fi
 [ -n "$RANGE" ] || { echo "ERROR — nothing was checked (<base>..<tip> is required)"; exit 2; }
