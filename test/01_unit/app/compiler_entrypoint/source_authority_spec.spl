@@ -47,6 +47,20 @@ fn authority_fixture(root_path: text, roots: [text]) -> text:
         [compile_source_inventory_git_event_v1("create", "src/app/next.spl", "fn next() -> i64: 1\n")])
     if not advanced.valid: return "advance"
     if compile_source_inventory_read_current_v1(cache).digest == current.digest: return "current-did-not-advance"
+    # Deterministic interleaving: lane B published after lane A acquired its
+    # snapshot, but before A's fresh (not inherited) validation. The same
+    # original inventory must remain authoritative in both paths.
+    val fresh_revalidated = compiler_source_authority_validate_v1(root, cache,
+        admitted.snapshot, current.digest, admitted.inventory_generation, false)
+    if not fresh_revalidated.valid: return "fresh-rebound-current:" + fresh_revalidated.reason
+    if fresh_revalidated.source_inventory_digest != current.digest: return "fresh-digest-changed"
+    if fresh_revalidated.inventory_generation != admitted.inventory_generation: return "fresh-generation-changed"
+    val wrong_generation = compiler_source_authority_validate_v1(root, cache,
+        admitted.snapshot, current.digest, admitted.inventory_generation + 1, false)
+    if wrong_generation.valid: return "fresh-accepted-wrong-generation"
+    val missing_pointer = compiler_source_authority_validate_v1(root, cache,
+        admitted.snapshot, sha256_text("unpublished inventory"), admitted.inventory_generation, false)
+    if missing_pointer.valid: return "fresh-accepted-missing-inventory"
     # Exercise the actual warm-preparation branch with explicit entry/source:
     # CURRENT has moved, but the parent binding must stay pinned and complete.
     val warm_args = ["--entry", "src/app/cli/bootstrap_main.spl", "--source", "src/app"]
