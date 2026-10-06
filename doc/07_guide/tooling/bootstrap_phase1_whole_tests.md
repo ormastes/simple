@@ -2,16 +2,19 @@
 
 The candidate callback scripts/bootstrap/phase1-whole-tests.py runs the configured
 whole tests using an explicitly pinned Phase 1 seed. It must be invoked as an
-owned task in the shared 80-job manager, with 20 jobs allocated. It creates no
+owned task in the shared 80-job manager, with an explicitly admitted job count (1..128; default 20). The current
+Windows restart allocates 40 jobs and passes `--jobs 40`. It creates no
 detached owner or second resource scheduler. Automatic from-scratch graph wiring
 is not yet implemented. Phase 2 product preparation and compilation may proceed
 concurrently; only product test execution waits for Phase 1 terminal completion.
 A Phase 1 failure remains failure but does not cancel later authorized test runs.
 
 The pinned seed executes the repository's default Simple test runner with
-`test --whole --parallel --max-workers=20 --unstable --mode=interpreter --format=json`.
+`test --whole --parallel --max-workers=<jobs> --unstable --mode=interpreter --json`.
 The legacy `SIMPLE_TEST_RUNNER_RUST` override is removed from the child environment:
 that runner reads legacy TOML and does not consume the current SDN configuration.
+The worker argv, `SIMPLE_TEST_JOBS` environment and request receipt all use the
+same admitted count. Prepared requests reject a changed count on resume.
 `SIMPLE_BINARY` and `SIMPLE_RUNTIME` bind test and doctest children to the same seed.
 
 Existing policy remains authoritative:
