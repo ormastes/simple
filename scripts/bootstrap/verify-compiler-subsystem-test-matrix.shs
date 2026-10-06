@@ -29,17 +29,24 @@ for arg in "$@"; do
     *) die "unknown option: $arg" ;;
   esac
 done
+script_root=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd -P) || exit 2
+. "$script_root/lib/product-tool-authority.shs"
 [ -d "$source_root" ] && [ ! -L "$source_root" ] &&
   [ -d "$output_root" ] && [ ! -L "$output_root" ] || die "source or output root missing"
 source_root=$(CDPATH= cd -- "$source_root" && pwd -P) || die "source root unavailable"
 output_root=$(CDPATH= cd -- "$output_root" && pwd -P) || die "output root unavailable"
-output_root=$(perl "$source_root/scripts/bootstrap/product-root.pl" resolve "$output_root" "$source_root") \
+output_root=$(perl "$tool_root/scripts/bootstrap/product-root.pl" resolve "$output_root" "$source_root") \
   || die 'product generation reference rejected'
 if [ -n "$matrix_candidate" ]; then
   case "$matrix_candidate" in "$output_root"/matrix.env.tmp.*) ;; *) die "matrix candidate outside fresh output" ;; esac
   matrix=$matrix_candidate
 else
-  matrix="$output_root/matrix.env"
+matrix="$output_root/matrix.env"
+fi
+if [ "$tool_root" != "$source_root" ]; then
+  [ "$(field "$matrix" tool_root)" = "$tool_root" ] &&
+    [ "$(field "$matrix" tool_manifest_sha256)" = "$SIMPLE_BOOTSTRAP_TOOL_MANIFEST_SHA256" ] ||
+    die 'matrix tool authority differs'
 fi
 inventory="$output_root/source-specs.tsv"
 statuses="$output_root/product-status.tsv"
@@ -57,14 +64,14 @@ build_timeout=$(field "$matrix" build_timeout_seconds) || die "build timeout abs
 test_timeout=$(field "$matrix" test_timeout_seconds) || die "test timeout absent"
 resource_profile=$(profile_field "$matrix") || die "duplicate matrix resource profile"
 for timeout in "$build_timeout" "$test_timeout"; do
-  expected_profile=$(perl -I "$source_root/scripts/bootstrap/lib" -MBootstrapProductProducer=validate_product_resource_profile \
+  expected_profile=$(perl -I "$tool_root/scripts/bootstrap/lib" -MBootstrapProductProducer=validate_product_resource_profile \
     -e 'my $record=shift; my $profile=$record eq "0" ? undef : substr($record,1); print validate_product_resource_profile($profile,@ARGV)' \
     "$resource_profile" qualified "$threads" "$rss_cap_kib" "$timeout" enforce) \
     || die "resource policy differs"
 done
 [ "$(wc -l <"$statuses" | tr -d ' ')" -eq 18 ] || die "six product chains incomplete"
 script_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || die "verifier path unavailable"
-[ "$script_root" = "$source_root/scripts/bootstrap" ] || die "verifier outside pinned source"
+[ "$script_root" = "$tool_root/scripts/bootstrap" ] || die "verifier outside pinned source"
 . "$script_root/lib/subsystem-product-phase.shs"
 product_phase=$(product_matrix_phase "$matrix") || die "invalid matrix producer phase"
 verifier="$script_root/verify-compiler-subsystem-test-product.pl"
@@ -104,7 +111,7 @@ for backend in llvm cranelift; do
       [ "$(field "$receipt" skipped)" = 0 ] &&
       [ "$(field "$receipt" pending)" = 0 ] || die "$backend/$suite product lacks full pass"
     product_profile=$(profile_field "$receipt") || die "duplicate product resource profile"
-    perl -I "$source_root/scripts/bootstrap/lib" -MBootstrapProductProducer=validate_product_resource_profile \
+    perl -I "$tool_root/scripts/bootstrap/lib" -MBootstrapProductProducer=validate_product_resource_profile \
       -e 'my $record=shift; my $profile=$record eq "0" ? undef : substr($record,1); validate_product_resource_profile($profile,@ARGV)' \
       "$product_profile" qualified "$threads" "$rss_cap_kib" "$build_timeout" enforce \
       || die "$backend/$suite product resource profile differs"
@@ -152,3 +159,5 @@ for backend in llvm cranelift; do
   done
 done
 printf '%s\n' "$matrix"
+
+bootstrap_product_tool_verify || exit 2
