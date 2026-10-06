@@ -1,0 +1,32 @@
+#!/bin/sh
+# Reuse the same entry and behavior oracle across explicitly requested engines.
+# Determinism is checked within each engine, never across different linkers.
+# Unsupported/missing engines remain failures; the matrix continues to its end.
+set -u
+if [ "$#" -lt 2 ]; then
+    echo 'Usage: check-link-parity-matrix.shs ENTRY LINKER [LINKER ...]'
+    echo 'Linker names: internal lld lld-link mold ld gnu bfd (subject to target support)'
+    exit 2
+fi
+entry=$1
+shift
+for engine in "$@"; do
+    case "$engine" in internal|lld|ld.lld|lld-link|mold|ld|gnu|bfd) ;; *) echo "ERROR: unknown linker $engine"; exit 2 ;; esac
+done
+root=$(cd "$(dirname "$0")/../.." && pwd) || exit 2
+failed=0
+checked=0
+for engine in "$@"; do
+    echo "BEGIN linker=$engine entry=$entry"
+    SIMPLE_LINKER="$engine" sh "$root/scripts/check/check-link-native-build-parity.shs" "$entry"
+    result=$?
+    checked=$((checked + 1))
+    if [ "$result" -ne 0 ]; then
+        failed=$((failed + 1))
+        echo "FAIL linker=$engine exit=$result"
+    else
+        echo "PASS linker=$engine"
+    fi
+done
+echo "Matrix: $checked requested, $failed failed"
+[ "$failed" -eq 0 ]
