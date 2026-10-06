@@ -1,0 +1,11 @@
+# Full CLI native role sanity contract
+
+Status: isolated host oracle controls PASS; actual Phase4 integration pending.
+
+Base5f74ae4e4bb95042bf36c38f9c62c20b63c71a28. Existing reviewed-native helper previously classified fullCLI as UNQUALIFIED. The new fullCLI role admits compiler_cli_build, src/app/cli/main.spl and its main_and_help implementation entry only. Five source-owner hashes bind the dispatch, version literal, delegation policy and -c execution owner. Unknown roles and source drift remain unqualified.
+
+Version contract comes from args_and_os_commands.get_version and print_version: Simple v1.0.0-rc.1 followed by platform text newline. main_and_help admits --version static startup and --interpret --no-jit -c. cli_run_code stages a private snippet and invokes interpret_file when SIMPLE_NO_BOOTSTRAP_DELEGATE=1; cli_ops._cli_driver_binary explicitly rejects delegation under that flag. The second probe therefore requests print2+4 and expects exactly6 followed by newline. No bootstrap driver override can provide substitute interpreter output. Version-only success cannot qualify the role.
+
+Each probe uses the existing run-native-sanity canonical process owner with5seconds timeout, exact exit0, exact stdout and empty stderr, complete/quiescent receipt and no observer errors. Both probes run independently and aggregate failure stays latched; total suite can use up to two5second process budgets plus owner setup overhead. Source hashes and binary hash are checked before/after. This is a small CLI startup/interpreter check, not whole-tests or native compiler qualification.
+
+Eight native hostfixture controls passed using real process-owner receipts at C:/snp/fullcli-sanity-cycle2: positive, wrongversion despite good evaluation, empty placeholder evaluation with exit0, extra stdout, stderr, wrong exit, timeout, and source drift before invocation. Cycle1 failed owner setup because fixture CC overrode the canonical helper compiler; fixture compiler setting was separated as FIXTURE_CC. Cycle2 passed. Hostfixture only emulates reviewed output to test the oracle; it is not a Simple interpreter or Phase4binary. No real Phase4 binary exists in this task; full native role invocation and wholePhase4tests remain required. No live source, packet or shared cache was changed.
