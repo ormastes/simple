@@ -110,8 +110,8 @@ def main():
     operation.add_argument('--prepare-only', action='store_true')
     operation.add_argument('--resume-prepared', action='store_true')
     args = parser.parse_args()
-    if args.jobs != 20:
-        parser.error('this callback requires one admitted 20-job lane')
+    if not 1 <= args.jobs <= 128:
+        parser.error('jobs must be 1..128 and match the caller-admitted lane')
     seed, source, output = args.seed.resolve(), args.source_root.resolve(), args.output_root.resolve()
     if digest(seed) != args.seed_sha256:
         parser.error('seed byte identity differs')
@@ -124,16 +124,16 @@ def main():
         output.mkdir(parents=True, exist_ok=False)
     elif not output.is_dir() or output.is_symlink():
         parser.error('prepared physical output root unavailable')
-    command = [str(seed), 'test', '--whole', '--parallel', '--max-workers=20',
+    command = [str(seed), 'test', '--whole', '--parallel', f'--max-workers={args.jobs}',
                '--unstable', '--mode=interpreter', '--json']
     environment = os.environ.copy()
     environment.pop('SIMPLE_TEST_RUNNER_RUST', None)
     environment.update(SIMPLE_BINARY=str(seed), SIMPLE_RUNTIME=str(seed),
                        SIMPLE_PROJECT_ROOT=str(source), SIMPLE_LIB=str(source / 'src'),
-                       SIMPLE_TEST_JOBS='20')
+                       SIMPLE_TEST_JOBS=str(args.jobs))
     request = dict(schema='simple-phase1-whole-tests-v1', seed=str(seed),
                    seed_sha256=args.seed_sha256, source_root=str(source),
-                   input_hashes=pins, command=command, jobs=20,
+                   input_hashes=pins, command=command, jobs=args.jobs,
                    cache_policy='runner-owned compatible cache; no clean/force-rebuild',
                    admission='caller-owned; this callback creates no background owners')
     request_path = output / 'request.json'
