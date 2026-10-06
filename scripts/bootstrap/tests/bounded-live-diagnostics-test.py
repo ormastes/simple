@@ -29,6 +29,7 @@ class DiagnosticsTests(unittest.TestCase):
             (t/'stream.json').write_text(json.dumps(receipt))
             row=A.diagnostic_evidence(t)
             self.assertEqual(row['retained_markers'],{'[hir-fatal]':1})
+            self.assertEqual(row['observed_markers'],{'[hir-fatal]':2})
             self.assertEqual(row['events_dropped'],1);self.assertEqual(row['truncated_events'],1)
             self.assertTrue(row['excerpts'][0]['truncated'])
             p.write_bytes(data+b' ')
@@ -145,5 +146,53 @@ class LiveLogObserver:
             self.assertEqual(receipt['exit_code'],7)
             self.assertEqual(receipt['stream_sha256'],r['stream_sha256'])
             self.assertTrue(receipt['output_complete'])
+
+
+    def test_exact_full_stream_marker_counts_survive_tail_eviction(self):
+        s=M.DiagnosticStreamSummary(max_events=2,event_bytes=64)
+        for _ in range(1000):s.feed(b'error: writer lock busy\n')
+        s.feed(b'[hir-fatal] different failure\n[FAIL] final\n')
+        r=s.finish()
+        self.assertEqual(r['marker_counts'],{'error:':1000,'[hir-fatal]':1,'[fail]':1})
+        self.assertEqual(r['events_observed'],1002)
+        self.assertEqual(r['representative_samples'][0]['occurrences'],1000)
+        self.assertEqual(r['sample_overflow_events'],1)
+        self.assertFalse(r['cause_inventory_complete'])
+
+    def test_bracketed_error_marker_at_every_chunk_split(self):
+        data=b'prefix error[E1002]: real error\n[ERROR] native failure'
+        for split in range(len(data)+1):
+            s=M.DiagnosticStreamSummary();s.feed(data[:split]);s.feed(data[split:]);r=s.finish()
+            self.assertEqual(r['marker_counts'],{'error[code]:':1,'[error]':1})
+            self.assertEqual(r['events_observed'],2)
+
+    def test_full_event_fingerprint_distinguishes_identical_clipped_prefix(self):
+        s=M.DiagnosticStreamSummary(max_events=2,event_bytes=64)
+        prefix=b'error: '+b'x'*10000
+        s.feed(prefix+b'A\n'+prefix+b'B\n'+prefix+b'A\n')
+        r=s.finish();samples=r['representative_samples']
+        self.assertEqual([x['occurrences'] for x in samples],[2,1])
+        self.assertEqual(samples[0]['text'],samples[1]['text'])
+        self.assertNotEqual(samples[0]['event_sha256'],samples[1]['event_sha256'])
+        self.assertEqual(r['sample_overflow_events'],0)
+
+    def test_many_unique_events_have_bounded_samples_and_exact_overflow(self):
+        tracemalloc.start();s=M.DiagnosticStreamSummary()
+        for i in range(20000):s.feed(('error: unique failure '+str(i)+'\n').encode())
+        # Revisit a retained fingerprint after saturation: its count stays exact.
+        s.feed(b'error: unique failure 0\n');r=s.finish()
+        _,peak=tracemalloc.get_traced_memory();tracemalloc.stop()
+        self.assertLess(peak,2*1024*1024)
+        self.assertEqual(r['marker_counts'],{'error:':20001})
+        self.assertEqual(len(r['representative_samples']),16)
+        self.assertEqual(r['representative_samples'][0]['occurrences'],2)
+        self.assertEqual(r['sample_overflow_events'],20000-16)
+        self.assertEqual(sum(x['occurrences'] for x in r['representative_samples'])+r['sample_overflow_events'],20001)
+        self.assertEqual(r['events_dropped'],20001-64)
+
+    def test_default_summary_stays_within_reader_limit_for_escaped_text(self):
+        s=M.DiagnosticStreamSummary()
+        for i in range(100):s.feed(b'error: '+str(i).encode()+b'\0'*1024+b'\n')
+        self.assertLessEqual(len(json.dumps(s.finish()).encode()),512*1024)
 
 if __name__=='__main__':unittest.main()

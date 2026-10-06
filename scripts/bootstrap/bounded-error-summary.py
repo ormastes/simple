@@ -18,7 +18,7 @@ LINK = re.compile(rb'linker command failed|lld-link[^\r\n]{0,128}error|undefined
 
 # Capture compiler diagnostic events before head/tail retention drops the middle.
 # The compiler may concatenate phase and fatal messages without a newline.
-EVENT = re.compile(rb'\[hir-fatal\]|\[hir-owner-fatal\]|\[hir-fatal-count\]|error:|\[FAIL\]|failed:|access violation|\[BOOTSTRAP-PHASE\]|\[build\]|\[hir-shard\]|\r?\n', re.I)
+EVENT = re.compile(rb'error\[[a-z0-9_-]{1,32}\]:|\[ERROR\]|\[hir-fatal\]|\[hir-owner-fatal\]|\[hir-fatal-count\]|error:|\[FAIL\]|failed:|access violation|\[BOOTSTRAP-PHASE\]|\[build\]|\[hir-shard\]|\r?\n', re.I)
 BOUNDARIES = {b'[bootstrap-phase]', b'[build]', b'[hir-shard]', b'\n', b'\r\n'}
 
 
@@ -33,6 +33,11 @@ class DiagnosticStreamSummary:
             raise ValueError('Diagnostic summary limits outside bounded range')
         self.max_events, self.event_bytes = max_events, event_bytes
         self.records = deque(maxlen=max_events)
+        # Fixed marker taxonomy; no map keyed by unbounded error codes.
+        self.marker_counts = {}
+        self.samples = {}
+        self.sample_capacity = min(max_events, 16)
+        self.sample_overflow_events = 0
         self.digest = hashlib.sha256()
         self.seen = self.offset = self.events = self.truncated = 0
         self.carry = b''
@@ -42,6 +47,7 @@ class DiagnosticStreamSummary:
     def _append(self, data):
         if self.active is not None:
             self.active['bytes'] += len(data)
+            self.active['digest'].update(data)
             room = self.event_bytes - len(self.active['excerpt'])
             if room > 0:
                 self.active['excerpt'] += data[:room]
@@ -53,6 +59,16 @@ class DiagnosticStreamSummary:
         row['truncated'] = row['bytes'] > len(row['excerpt'])
         self.truncated += int(row['truncated'])
         row['text'] = row.pop('excerpt').decode('utf-8', errors='replace')
+        row['event_sha256'] = row.pop('digest').hexdigest()
+        key = row['event_sha256']
+        if key in self.samples:
+            self.samples[key]['occurrences'] += 1
+        elif len(self.samples) < self.sample_capacity:
+            self.samples[key] = dict(row, occurrences=1, text=row['text'][:256],
+                                     truncated=row['truncated'] or len(row['text']) > 256)
+        else:
+            # Count events, not distinct fingerprints or distinct causes.
+            self.sample_overflow_events += 1
         self.records.append(row)
         self.active = None
 
@@ -71,7 +87,9 @@ class DiagnosticStreamSummary:
             token = match.group()
             if token.lower() not in BOUNDARIES:
                 self.events += 1
-                self.active = dict(offset=self.offset + match.start(), marker=token.decode('ascii'), bytes=0, excerpt=b'')
+                category = 'error[code]:' if token.lower().startswith(b'error[') else token.decode('ascii').lower()
+                self.marker_counts[category] = self.marker_counts.get(category, 0) + 1
+                self.active = dict(offset=self.offset + match.start(), marker=token.decode('ascii'), bytes=0, excerpt=b'', digest=hashlib.sha256())
                 self._append(token)
             cursor = match.end()
         self._append(data[cursor:])
@@ -98,6 +116,12 @@ class DiagnosticStreamSummary:
                     events_retained=len(self.records), events_dropped=self.events-len(self.records),
                     truncated_events=self.truncated, max_events=self.max_events,
                     event_bytes=self.event_bytes, records=list(self.records),
+                    marker_counts=dict(self.marker_counts),
+                    count_scope='exact recognized markers in received stream; not distinct failures',
+                    sample_policy='first full-event SHA256 fingerprints, bounded; occurrences exact for retained fingerprints',
+                    sample_capacity=self.sample_capacity, representative_samples=list(self.samples.values()),
+                    sample_overflow_events=self.sample_overflow_events,
+                    cause_inventory_complete=False,
                     qualification='OBSERVATION_ONLY_NOT_A_VERDICT')
 
 
