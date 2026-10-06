@@ -87,8 +87,8 @@ At release base `e96ac7b22a5cacf15f2467185dd335ed1221c5f7`, both
 constant. The earlier FIXED history above is preserved; it does not describe
 these current bytes. The existing generated legacy manual already contained
 the correct `045f8a...` answer, exposing source/manual drift. This follow-up
-repairs only the actually executed legacy fixture. The canonical `test/01_unit`
-copy remains unresolved and is not claimed tested or repaired by this change.
+repairs both fixture copies, each independently executed once. The canonical `test/01_unit`
+copy passed its changed-source diagnostic criterion; the legacy PASS was preserved without replay.
 
 
 Phase1 row 22519 executed nine examples in
@@ -146,3 +146,27 @@ receipts remain explicit. The legacy `@manual scenario evidence` visibility
 warning predates this change; it is not a dummy pass or altered test oracle.
 No scan or passing test was replayed. This is scoped test-only verification,
 not full compiler/library release qualification.
+
+### Canonical-copy changed-source evidence
+
+The canonical `test/01_unit/lib/crypto/blake2s_spec.spl` retains its original
+formatting and eight other cases, applies the independently established oracle,
+and adds the same 64+1 partition. Exact tested SHA256:
+`4d4518d24ff6e403a7011cee629614d437a46a1b2794db5e477acb6227d5d2ea`.
+It executed 10/10, zero failures/skips, 373ms file duration (377ms aggregate),
+using the same pinned Phase1 diagnostic seed and frozen dependency source.
+Result: `/tmp/simple-blake2s-canonical-fixture-fix-20261006/build/test-artifacts/01_unit/lib/crypto/blake2s/result.json`.
+Root observation: `/tmp/simple-blake2s-canonical-fixture-fix-result-20261006`.
+Kernel: `/tmp/simple-blake2s-canonical-fixture-fix-kernel-20261006`, exit 0,
+quiescent 1. Neither passing fixture was replayed.
+
+Canonical-only docgen completed once with one complete manual and zero stubs;
+all ten executable scenario statements match current source. Receipt:
+`/tmp/simple-blake2s-canonical-docgen-20261006`, kernel exit 0/quiescent 1.
+Its single scoped SSpec scan reports CURRENT, score 88, release_ready true,
+blockers 0, with the same seven dimension scores and reviewed nonblocking
+metadata/heading warnings described for the legacy copy above. Receipt:
+`/tmp/simple-blake2s-canonical-sspec-scan-20261006`, kernel exit 0/quiescent 1.
+Both generated bodies are preserved beneath truthful source/evidence headers.
+Changed-scope environment guards, zero executable specs under doc/06_spec,
+and exact staged diff checks pass; unrelated live collector inputs are intact.
