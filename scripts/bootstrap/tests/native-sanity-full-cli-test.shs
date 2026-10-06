@@ -1,0 +1,66 @@
+#!/bin/sh
+# Real subprocess receipts and native host fixture; never a Phase4 product PASS.
+set -eu
+repo=${1:?pinned source root}; work=${2:?fresh evidence root}
+base=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+mkdir "$work"; work=$(CDPATH= cd -- "$work" && pwd -P)
+mkdir "$work/helper" "$work/helper/sanity-oracles" "$work/tmp" "$work/owner-cache"
+cp "$base/run-reviewed-full-cli-sanity.shs" "$base/run-reviewed-native-sanity.shs" "$work/helper/"
+cp "$repo/scripts/bootstrap/run-native-sanity.shs" "$work/helper/"
+cp "$base/sanity-oracles/reviewed-sources.tsv" "$base/sanity-oracles/full-cli-version.stdout" "$base/sanity-oracles/full-cli-eval.stdout" "$work/helper/sanity-oracles/"
+cat >"$work/fixture.c" <<'C'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+int main(int argc,char **argv){
+ const char *mode=getenv("FIXTURE_MODE"); if(!mode) mode="good";
+ const char *marker=getenv("FIXTURE_MARKER");if(marker){FILE *f=fopen(marker,"w");if(f){fputs("executed",f);fclose(f);}}
+ if(argc==2 && !strcmp(argv[1],"--version")){
+  if(!strcmp(mode,"wrong-version")) puts("placeholder");else puts("Simple v1.0.0-rc.1");return 0;
+ }
+ if(argc!=5 || strcmp(argv[1],"--interpret") || strcmp(argv[2],"--no-jit") || strcmp(argv[3],"-c") || strcmp(argv[4],"print 2 + 4"))return 3;
+ if(!getenv("SIMPLE_NO_BOOTSTRAP_DELEGATE") || strcmp(getenv("SIMPLE_NO_BOOTSTRAP_DELEGATE"),"1"))return 4;
+ if(!strcmp(mode,"timeout")){
+#ifdef _WIN32
+ Sleep(20000);
+#else
+ sleep(20);
+#endif
+ }
+ if(!strcmp(mode,"placeholder"))return 0;
+ puts("6");
+ if(!strcmp(mode,"extra"))puts("unexpected");
+ if(!strcmp(mode,"stderr"))fputs("unexpected\n",stderr);
+ if(!strcmp(mode,"wrong-exit"))return 1;
+ return 0;
+}
+C
+${FIXTURE_CC:-cc} "$work/fixture.c" -o "$work/fixture.exe"
+export TMPDIR="$work/tmp" SIMPLE_BOOTSTRAP_SESSION_HELPER_CACHE="$work/owner-cache" SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor
+: >"$work/results.tsv"
+for mode in good wrong-version placeholder extra stderr wrong-exit timeout; do
+ export FIXTURE_MODE="$mode"
+ code=0
+ sh "$work/helper/run-reviewed-native-sanity.shs" "$repo" "$work/$mode" src/app/cli/main.spl "$work/fixture.exe" >"$work/$mode.log" 2>&1 || code=$?
+ if [ "$mode" = good ];then [ "$code" = 0 ] || { cat "$work/$mode.log";exit 1; };else [ "$code" != 0 ] || { echo "false PASS $mode";exit 1; };fi
+ printf '%s\tPASS\t%s\n' "$mode" "$code" >>"$work/results.tsv"
+done
+# Registry-bound source drift must prevent both invocations.
+mkdir "$work/drift"
+while IFS=' ' read -r key hash relative;do
+ [ "$key" = full-cli ] || continue
+ mkdir -p "$work/drift/$(dirname -- "$relative")"
+ cp "$repo/$relative" "$work/drift/$relative"
+done <"$base/sanity-oracles/reviewed-sources.tsv"
+printf '\n# drift\n' >>"$work/drift/src/app/cli/main.spl"
+export FIXTURE_MARKER="$work/drift-executed"
+code=0
+sh "$work/helper/run-reviewed-native-sanity.shs" "$work/drift" "$work/drift-output" src/app/cli/main.spl "$work/fixture.exe" >"$work/drift.log" 2>&1 || code=$?
+[ "$code" = 2 ] && [ ! -e "$FIXTURE_MARKER" ] || exit 1
+printf 'source-drift\tPASS\t%s\n' "$code" >>"$work/results.tsv"
+printf 'PASS:8 fullCLI oracle controls; actual Phase4 integration pending\n'
