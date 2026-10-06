@@ -18,9 +18,11 @@ Evidence: `/tmp/simple-database-export-repair/range-endpoints-baseline.log`,
 `range-endpoints-fixed.log`, and `any-escape-existing-fixed.log`.
 Original native stack: `gdb.log`; register/core capture: `gdb-core.log`.
 
-The HIR Range declaration still describes its start/end as required expressions,
-although lowering, resolution, inference and MIR range-loop lowering treat them
-as optional. Other visitors/substitution passes also assume required bounds.
-Correcting this declaration requires schema regeneration and verification of
-all consumers. This mismatch remains tracked; this traversal repair does not
-claim to resolve every consumer or qualify the native compiler.
+The follow-up declares both HIR Range bounds optional, repairs substitution,
+criticality and post-monomorphization consumers, and regenerates schema-owned
+visitors/codecs. Regular and canonical codec versions change because the wire
+format gains an optional-presence bit. Generated walkers/hash functions already
+guard nil at entry; they were not additional independently proven crashes.
+Focused schema and codec regressions pass in Phase 1. Native compiler
+qualification remains pending. The separate open-ended MIR-loop finding is
+tracked in `mir_open_ended_range_zero_endpoint_2026-10-06.md`.
