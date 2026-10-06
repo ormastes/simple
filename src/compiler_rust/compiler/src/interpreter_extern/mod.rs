@@ -295,6 +295,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // as an alias for the existing, already-implemented converter rather than
     // duplicating logic.
     insert_simple!("rt_string_from_byte_array", conversion::rt_bytes_to_text_fn);
+    // Hosted C runtime names this same UTF-8 text-to-byte conversion
+    // rt_string_to_byte_array. Keep both facade names on one converter.
+    insert_simple!("rt_string_to_byte_array", conversion::rt_text_to_bytes_fn);
     insert_simple!("rt_screenshot_enable", screenshot_sffi::rt_screenshot_enable);
     insert_simple!("rt_screenshot_disable", screenshot_sffi::rt_screenshot_disable);
     insert_simple!("rt_screenshot_is_enabled", screenshot_sffi::rt_screenshot_is_enabled);
