@@ -146,6 +146,16 @@ facade-hop bug: the recorded origin path drops a package segment
   preprocessor strips active-guard declarations in phase-2 (fix in
   parser_preprocessor.spl / its driver plumbing).
 
+- Update on the narrowing experiment (fresh snapshot, build-threads=8
+  matrix in flight): an UNGUARDED same-module caller of a `@cfg(arm64)`
+  function compiles with zero errors — so active guarded declarations
+  PARSE and resolve locally; they are only missing from the frozen module
+  SURFACE that cross-module import probes. Suspect: the full-inventory
+  surface index path (the `runtime_std_full_inventory_selection` authority
+  in driver_source_pipeline_parsing.spl) records guarded declarations
+  under a variant tag the active-variant probe does not match. Fix belongs
+  in the surface registration/index path, not the preprocessor.
+
 ## Suggested directions
 
 1. De-duplicate the `99.loader` compat-vs-real surfaces: one definition per
