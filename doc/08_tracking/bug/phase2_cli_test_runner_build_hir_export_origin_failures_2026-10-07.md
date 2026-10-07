@@ -169,16 +169,18 @@ facade-hop bug: the recorded origin path drops a package segment
   guards; `@when` blocks were fixed by 85c2bcc828c (2026-10-06) but the
   `@cfg` form was routed around (`@workaround` directives in
   path_identity_abi.spl) rather than fixed.
-- The preprocessor's active-@cfg branch (parser_preprocessor.spl:615-617)
-  was read in full: decorators blanked, `i = declaration_index`, proper
-  `continue` — the preprocessed OUTPUT is correct (blank + declaration),
-  identical in shape to active @when output. `decl_fn` (decl_nodes.spl:486)
-  unconditionally allocates tag 1. So the drop is inside the
-  parse-module-body / flat-bridge recording of a declaration that FOLLOWED
-  a blanked decorator line — the next probe is decl-tag logging in
-  `_FlatAstBridge/module_assembly.spl` (log every (tag, name) seen for the
-  repro module) to see whether the guarded fn's decl is absent from the
-  arena or arrives with an unexpected tag.
+- Position experiments (no rebuild needed): in a 3-fn module (unguarded,
+  @cfg-guarded, unguarded) only the GUARDED fn is missing from
+  module.functions (functions=2); the declaration after it registers fine.
+  A pure blank-line-before-fn control compiles and imports CLEAN. Combined
+  with the verified-correct preprocessor output (blank + declaration,
+  identical to the passing control) and the parser having NO native @cfg
+  handling, this localises the drop to the parse-module-body /
+  flat-bridge recording of exactly the declaration that had a (blanked)
+  @cfg decorator above it. The blank-line control contradicts a
+  preprocessing-output theory, so the next probe remains the decl-tag log
+  in module_assembly.spl (is the guarded decl absent from the arena, or
+  present with an unexpected tag/state?).
 
 ## Suggested directions
 
