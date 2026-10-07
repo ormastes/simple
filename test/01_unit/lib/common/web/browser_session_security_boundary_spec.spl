@@ -196,6 +196,57 @@ describe "BrowserSession production security boundary":
             "cross-origin history URL blocked: https://evil.test/planted"
         )
 
+    it "publishes module loading progress before policy rejection resumes the queue":
+        # @req REQ-SSPEC-LIB
+        step("Publish the module cursor and pending evaluation before handing off a request")
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://safe.test/app",
+            "<html><body><script type='module' src='https://other.test/module.js'></script></body></html>"
+        ).is_ok()).to_be(true)
+        match session.active_load:
+            Some(load):
+                expect(load.next_script_idx).to_equal(1)
+                match load.pending_module:
+                    Some(module_state):
+                        expect(module_state.root_url).to_equal("https://other.test/module.js")
+                    nil:
+                        fail("Expected pending module state before request admission")
+            nil:
+                fail("Expected an active module request")
+        expect(session.take_pending_request().is_none()).to_be(true)
+        expect(session.has_pending_requests()).to_be(false)
+        expect(session.active_load.is_none()).to_be(true)
+        expect(session.warnings.join("|")).to_contain("module load error: cross-origin:")
+
+    it "finishes a same-origin module rejected by its response MIME type":
+        # @req REQ-SSPEC-LIB
+        step("Reject a real pending module response and finish the finite request queue")
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://safe.test/app",
+            "<html><body><script type='module' src='https://safe.test/bad-mime.js'></script></body></html>"
+        ).is_ok()).to_be(true)
+        match session.take_pending_request():
+            Some(module_request):
+                expect(module_request.kind).to_equal("module")
+                expect(module_request.url).to_equal("https://safe.test/bad-mime.js")
+                expect(session.commit_network_response(BrowserResponse.create(
+                    request_id: module_request.id,
+                    kind: module_request.kind,
+                    url: module_request.url,
+                    status: 200,
+                    headers: "Content-Type: text/plain",
+                    body: "export const value = 1;",
+                    error: ""
+                )).is_ok()).to_be(true)
+            nil:
+                fail("Expected the same-origin module request")
+        expect(session.take_pending_request().is_none()).to_be(true)
+        expect(session.has_pending_requests()).to_be(false)
+        expect(session.active_load.is_none()).to_be(true)
+        expect(session.warnings.join("|")).to_contain("module load error: blocked response MIME type")
+
     it "blocks mixed-content and unvalidated cross-origin executable resources":
         # @req REQ-SSPEC-LIB
         step("blocks mixed-content and unvalidated cross-origin executable resources")
