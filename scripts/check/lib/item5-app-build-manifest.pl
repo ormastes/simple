@@ -24,18 +24,21 @@ sub load_json {
 my ($hello_path, $manifest_path, @roles) = @ARGV;
 my $hello = load_json($hello_path);
 my $manifest = load_json($manifest_path);
-($hello->{status} // '') eq 'pass' && ($hello->{gate_exit_status} // -1) == 0
+my $gate_exit = $hello->{gate_exit_status};
+defined($gate_exit) && !ref($gate_exit) && "$gate_exit" eq '0' &&
+    ($hello->{status} // '') eq 'pass'
     or fail("Phase2 Hello receipt is not PASS");
 
 my $compiler = $hello->{compiler_sha256} // '';
 my $producer_source = $hello->{source_commit} // '';
-$compiler =~ /\A[0-9a-f]{64}\z/ && $producer_source =~ /\A[0-9a-f]{40,64}\z/
+$compiler =~ /\A[0-9a-f]{64}\z/ && $producer_source =~ /\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/
     or fail("Hello receipt lacks compiler/source provenance");
 ($manifest->{schema} // '') eq 'item5-simple-app-build-v2'
     or fail("app build manifest schema mismatch");
 my $app_source = $manifest->{app_source_commit} // '';
 my $app_tree = $manifest->{app_source_tree_oid} // '';
-$app_source =~ /\A[0-9a-f]{40,64}\z/ && $app_tree =~ /\A[0-9a-f]{40,64}\z/
+$app_source =~ /\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/ &&
+    $app_tree =~ /\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/
     or fail("app build manifest lacks app source commit/tree provenance");
 ($manifest->{compiler_sha256} // '') eq $compiler &&
     ($manifest->{producer_source_commit} // '') eq $producer_source
