@@ -112,6 +112,40 @@ facade-hop bug: the recorded origin path drops a package segment
 (`compiler.loader.runtime.<basename>` phantom for real origins under
 `compiler.loader.loader.<basename>`).
 
+## Update 2 — code-path analysis
+
+- The diagnostic originates at
+  `src/compiler/20.hir/hir_lowering/_Items/module_import_resolution.spl:610`
+  (`surface_declares_item_indexed` probe against the frozen module surface).
+- The surface is built in
+  `src/compiler/20.hir/hir_lowering/module_surface_declarations.spl`
+  (`module_surface_from_owner`): callables come from
+  `owner.value.functions.keys()` — the PARSER module's function table. So a
+  guarded declaration either never reaches the parser table in phase-2, or
+  reaches it under a name/visibility the surface skips.
+- Two preprocessing paths exist in
+  `src/compiler/10.frontend/core/parser_preprocessor.spl`: the legacy
+  `_pp_preprocess_conditionals` (host-detected) and
+  `_pp_preprocess_conditionals_target_receipted_v1(os, arch)` which REQUIRES
+  explicit non-empty target cfg (returns Err otherwise). The driver
+  (`src/compiler/80.driver/driver_source_pipeline_parsing.spl:396+`) uses a
+  "full inventory target cfg" authority (`runtime_std_cfg_source_identity_
+  by_path`, receipted parse bound to `self.ctx.native_target`) only when the
+  runtime publishes a std full-inventory selection; otherwise it falls back
+  to the legacy path.
+- Repro still fails WITH explicit `--target aarch64-apple-darwin`, so host
+  arch detection / target naming is NOT the (only) cause: either the compile
+  path does not thread `--target` into preprocessing, or the guarded
+  declaration survives preprocessing but is dropped from the parser function
+  table / surface in the phase-2 frontend.
+- Next narrowing step (needs a fresh admitted snapshot): extend the 2-file
+  repro with an UNGUARDED local caller inside provider.spl that calls the
+  guarded fn. If the caller exports and the pair compiles, parsing keeps
+  guarded defs and only surface export skips them (fix in
+  module_surface_declarations.spl). If the caller also fails, the
+  preprocessor strips active-guard declarations in phase-2 (fix in
+  parser_preprocessor.spl / its driver plumbing).
+
 ## Suggested directions
 
 1. De-duplicate the `99.loader` compat-vs-real surfaces: one definition per
