@@ -1,0 +1,47 @@
+# @req REQ-SDOCTEST-OUTPUT-INTEGRITY
+use std.test_runner.sdoctest.transcript.{parse_sdoctest_transcript, sdoctest_output_matches, sdoctest_has_assignment}
+use std.test_runner.sdoctest.extractor.{extract_blocks_from_content}
+
+describe "prompted doctest output integrity":
+    it "retains expectations alongside extracted source":
+        val blocks = extract_blocks_from_content("```sdoctest\n>>> print(\"ACTUAL\")\nEXPECTED\n```\n", "control.md")
+        expect(blocks.len()).to_equal(1)
+        val parsed = parse_sdoctest_transcript(blocks[0].transcript)
+        expect(parsed.expected).to_equal("EXPECTED")
+        expect(sdoctest_output_matches("ACTUAL\n", parsed.expected)).to_equal(false)
+
+    it "distinguishes a correct expectation from an incorrect one":
+        expect(sdoctest_output_matches("ACTUAL\n", "ACTUAL")).to_equal(true)
+        expect(sdoctest_output_matches("ACTUAL\n", "EXPECTED")).to_equal(false)
+
+    it "checks absence of output too":
+        expect(sdoctest_output_matches("", "")).to_equal(true)
+        expect(sdoctest_output_matches("2\n", "")).to_equal(false)
+
+    it "preserves significant output spaces while normalizing line endings":
+        expect(sdoctest_output_matches(" leading \r\n", " leading ")).to_equal(true)
+        expect(sdoctest_output_matches(" leading \n", "leading")).to_equal(false)
+
+    it "removes only the prompt margin from indented expected output":
+        val parsed = parse_sdoctest_transcript("    >>> \" value \"\n     value ")
+        expect(parsed.expected).to_equal(" value ")
+
+    it "does not confuse quoted equals signs and comparisons with assignment":
+        expect(sdoctest_has_assignment("\"a = b\"")).to_equal(false)
+        expect(sdoctest_has_assignment("a == b")).to_equal(false)
+        expect(sdoctest_has_assignment("a = b")).to_equal(true)
+
+    it "keeps raw assertion fences executable":
+        val parsed = parse_sdoctest_transcript("assert(false)")
+        expect(parsed.prompted).to_equal(false)
+        expect(parsed.code).to_equal("assert(false)")
+
+    it "prints returning calls with nested keyword arguments":
+        expect(sdoctest_has_assignment("identity(value=2)")).to_equal(false)
+        expect(sdoctest_has_assignment("outer(inner(value=2))")).to_equal(false)
+        expect(sdoctest_has_assignment("values[index(offset=1)] = 4")).to_equal(true)
+
+    it "ignores comment and quoted assignment tokens":
+        expect(sdoctest_has_assignment("value # example = ignored")).to_equal(false)
+        expect(sdoctest_has_assignment("identity(value=\"a=b\")")).to_equal(false)
+        expect(sdoctest_has_assignment("x => x + 1")).to_equal(false)

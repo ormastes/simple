@@ -1489,9 +1489,19 @@ for bootstrap_path_entry in ${PATH}; do
     IFS=:
     continue
   }
-  bootstrap_path_entry=$(
+  # An inherited directory may exist but deny traversal (for example a
+  # protected WindowsApps package). It is not an admitted tool authority.
+  # Skip that incidental entry; required tool discovery/pins below still fail
+  # closed if no usable compiler/tool remains.
+  if bootstrap_canonical_entry=$(
     CDPATH= cd -- "${bootstrap_path_entry}" && pwd -P
-  ) || exit 1
+  ); then
+    bootstrap_path_entry=${bootstrap_canonical_entry}
+  else
+    printf 'warning: skipping inaccessible bootstrap PATH directory: %s\n' "${bootstrap_path_entry}" >&2
+    IFS=:
+    continue
+  fi
   case ":${bootstrap_canonical_path}:" in
     *":${bootstrap_path_entry}:"*) ;;
     *)
@@ -3221,6 +3231,7 @@ if [ "${stop_after_seed}" -eq 1 ]; then
     "$(absolute_path "${bootstrap_preflight_receipt}")" \
     "$(absolute_path "${output_dir}")/phase1-seed.env" || exit 1
   echo 'Rust seed/runtime prerequisite prepared; Phase 1 whole tests and pure-Simple phases remain pending.'
+  bootstrap_verdict 'PREPARED: stage=seed exit=0 signal=none reason=stop-after-seed; tests-and-pure-stages-pending'
   exit 0
 fi
 

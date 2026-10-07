@@ -16,7 +16,7 @@ extern fn rt_dir_exists(path: text) -> bool
 @unsafe(reason: "directory-entry no-follow ABI; false rejects non-directory or reparse entries", capabilities: [ffi])
 extern fn rt_dir_is_real_no_follow(path: text) -> bool
 use std.io_runtime.{process_run}
-use std.nogc_sync_mut.fs.host_path.{host_path_native}
+use std.nogc_sync_mut.fs.host_path.{host_path_native, host_path_canonical}
 
 @always_inline
 fn _dir_create_raw(path: text, recursive: bool) -> bool:
@@ -66,12 +66,16 @@ fn dir_create_all(path: text) -> bool:
     dir_create(path, true)
 
 fn dir_walk(path: text) -> [text]:
-    val (out, err, code) = _dir_shell("find '{path}' -type f 2>/dev/null | sort")
-    if code == 0:
-        var trimmed = out.trim()
-        if trimmed != "":
-            return trimmed.split("\n")
-    []
+    # Use the same native provider as io_runtime. The seed can resolve this
+    # facade while loading io_runtime; /bin/sh silently hid every Windows
+    # test and source doctest. Paths are data, never shell command fragments.
+    # See seed_directory_discovery_shell_provider_2026_10_05.md.
+    val entries = _dir_walk_raw(host_path_native(path))
+    var paths: [text] = []
+    for entry in entries:
+        paths.push(host_path_canonical(entry))
+    paths.sort()
+    paths
 
 @unsafe(reason: "legacy native walk collapses provider failure to an empty array", capabilities: [ffi])
 fn dir_walk_native(path: text) -> [text]:
