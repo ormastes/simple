@@ -64,6 +64,16 @@ HW_EXPECT=hello
 # scripts/ is still used by legacy callers, but is outside those families.
 HW_FIXTURE=${HW_FIXTURE:-test/04_smoke/bootstrap_hello_world.spl}
 HW_ROOT=${HW_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}
+HW_GATE_SCRIPT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/$(basename -- "$0")
+HW_RECEIPT_HELPER=$(dirname -- "$HW_GATE_SCRIPT")/lib/item5-hello-receipt.py
+HW_RECEIPT_MODE=0
+
+hw_receipt() {
+    python3 "$HW_RECEIPT_HELPER" "$1" "$hwc_work" "$hwc_candidate" \
+        "$HW_PRODUCER_IDENTITY_JSON" "$HW_PRODUCER_SOURCE_ROOT" \
+        "$HW_RUNTIME_ARCHIVE" "$HW_BACKEND" "$HW_TARGET" \
+        "$HW_ROOT/$HW_FIXTURE" "$HW_RECEIPT_JSON" "$HW_GATE_SCRIPT"
+}
 
 gate_error() {
     printf 'ERROR — nothing was checked (%s)\n' "$1"
@@ -122,21 +132,23 @@ hw_probe() {
     # measured 2026-08-25, without it the candidate scans the DEFAULT source
     # roots (whole project) and runs unbounded -- >20min on a two-line fixture.
     # That shape must never enter this gate.
-    if [ "$hw_form" = entry ]; then
-        "$timeout_bin" -k "${HW_KILL_GRACE_SECONDS}s" "${HW_BUILD_TIMEOUT_SECONDS}s" \
-            "$hw_candidate" native-build --backend "$HW_BACKEND" \
-            --runtime-bundle core-c-bootstrap --entry-closure --mode one-binary \
-            --threads "$HW_THREADS" --cache-dir "$hw_cache" --entry "$hw_fixture" \
-            --output "$hw_out" >"$hw_log" 2>&1
-        HW_RC=$?
-    else
-        "$timeout_bin" -k "${HW_KILL_GRACE_SECONDS}s" "${HW_BUILD_TIMEOUT_SECONDS}s" \
-            "$hw_candidate" native-build --backend "$HW_BACKEND" \
-            --runtime-bundle core-c-bootstrap --entry-closure --mode one-binary \
-            --threads "$HW_THREADS" --cache-dir "$hw_cache" "$hw_fixture" \
-            --output "$hw_out" >"$hw_log" 2>&1
-        HW_RC=$?
+    set -- "$hw_candidate" native-build --backend "$HW_BACKEND" \
+        --runtime-bundle core-c-bootstrap --entry-closure --mode one-binary \
+        --threads "$HW_THREADS" --cache-dir "$hw_cache"
+    if [ "$HW_RECEIPT_MODE" = 1 ] && [ "${HW_SELFTEST_ACTIVE:-0}" = 0 ]; then
+        hw_receipt_runtime_dir=$(CDPATH= cd -- "$(dirname -- "$HW_RUNTIME_ARCHIVE")" && pwd) || return 1
+        SIMPLE_RUNTIME_PATH=$hw_receipt_runtime_dir
+        export SIMPLE_RUNTIME_PATH
+        set -- "$@" --target "$HW_TARGET" --runtime-path "$hw_receipt_runtime_dir"
     fi
+    if [ "$hw_form" = entry ]; then set -- "$@" --entry "$hw_fixture"
+    else set -- "$@" "$hw_fixture"; fi
+    set -- "$@" --output "$hw_out"
+    printf '%s\000' "$@" > "$hw_work/command-$hw_form.argv"
+    "$timeout_bin" -k "${HW_KILL_GRACE_SECONDS}s" "${HW_BUILD_TIMEOUT_SECONDS}s" \
+        "$@" >"$hw_log" 2>&1
+    HW_RC=$?
+    printf '%s\n' "$HW_RC" > "$hw_work/build-$hw_form.status"
 
     # rc=124 is a TIMEOUT: not a pass and not a crash. Distinct class, because a
     # compiler that hangs and one that dies need different investigations.
@@ -183,14 +195,20 @@ hw_probe() {
         HW_DETAIL="build reported success but produced no executable"
         return 0
     fi
+    if [ "$HW_RECEIPT_MODE" = 1 ] && [ "${HW_SELFTEST_ACTIVE:-0}" = 0 ]; then
+        python3 "$HW_RECEIPT_HELPER" native-hash "$hw_out" "$HW_TARGET" > "$hw_work/entry-before.sha256" ||
+            gate_error "cannot bind entry executable before execution"
+    fi
 
     # The produced binary must RUN and print the expected output. A build that
     # exits 0 proves nothing about the artifact -- this repo has already been
     # burned by a stage binary whose --version answered cleanly while every
     # real command SEGV'd (.claude/rules/vcs.md, check-stage-binaries-runnable.shs).
-    hw_stdout=$("$timeout_bin" -k "${HW_KILL_GRACE_SECONDS}s" \
-        "${HW_EXEC_TIMEOUT_SECONDS}s" "$hw_out" 2>/dev/null)
+    "$timeout_bin" -k "${HW_KILL_GRACE_SECONDS}s" \
+        "${HW_EXEC_TIMEOUT_SECONDS}s" "$hw_out" > "$hw_work/run-$hw_form.stdout" 2> "$hw_work/run-$hw_form.stderr"
     hw_run_rc=$?
+    printf '%s\n' "$hw_run_rc" > "$hw_work/run-$hw_form.status"
+    hw_stdout=$(cat "$hw_work/run-$hw_form.stdout")
     if [ "$hw_run_rc" -eq 124 ]; then
         HW_CLASS=hang
         HW_DETAIL="produced binary hung"
@@ -235,6 +253,9 @@ hw_check_candidate() {
         hw_register_cleanup_dir "$hwc_work"
     fi
 
+    if [ "$HW_RECEIPT_MODE" = 1 ] && [ "${HW_SELFTEST_ACTIVE:-0}" = 0 ]; then
+        hw_receipt begin || gate_error "producer identity preflight rejected"
+    fi
     hw_probe "$hwc_candidate" "$hwc_work" entry
     HW_CHECKED=$((HW_CHECKED + 1))
     if [ "$HW_CLASS" != ok ]; then
@@ -247,6 +268,10 @@ hw_check_candidate() {
         HW_FAILURES="$HW_FAILURES ${hwc_name}:positional-form:${HW_CLASS}(${HW_DETAIL})"
     fi
 
+    if [ "$HW_RECEIPT_MODE" = 1 ] && [ "${HW_SELFTEST_ACTIVE:-0}" = 0 ] && [ -z "$HW_FAILURES" ]; then
+        hw_receipt finish || gate_error "producer receipt publication rejected"
+    fi
+
     if [ "$hwc_retain" = 0 ]; then rm -rf "$hwc_work"; fi
 }
 
@@ -256,6 +281,8 @@ hw_check_candidate() {
 # seen on a real artifact, and the must-PASS fixtures pin the behaviours this
 # gate must never reject.
 hw_selftest() {
+    hw_selftest_saved_receipt_mode=$HW_RECEIPT_MODE
+    HW_RECEIPT_MODE=0
     HW_SELFTEST_ACTIVE=1
     st_work=$(mktemp -d "${TMPDIR:-/tmp}/hw-native-build-selftest.XXXXXX") ||
         gate_error "selftest could not create a work dir"
@@ -376,6 +403,7 @@ EOF
     fi
     HW_SELFTEST_CASES=$st_n
     HW_SELFTEST_ACTIVE=0
+    HW_RECEIPT_MODE=$hw_selftest_saved_receipt_mode
 }
 
 # -------------------------------------------------------------------- main --
@@ -394,6 +422,19 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# Receipt mode is prospective, single-candidate and requires retained evidence.
+# A plain gate PASS or selftest can never be converted into a producer receipt.
+if [ -n "${HW_RECEIPT_JSON:-}" ]; then
+    [ "$HW_SELFTEST_ONLY" = 0 ] || gate_error "selftest cannot publish a producer receipt"
+    set -- $HW_CANDIDATES
+    [ "$#" = 1 ] || gate_error "receipt mode requires exactly one candidate"
+    [ -n "${HW_PRODUCER_IDENTITY_JSON:-}" ] && [ -n "${HW_PRODUCER_SOURCE_ROOT:-}" ] &&
+        [ -n "${HW_RUNTIME_ARCHIVE:-}" ] && [ -n "${HW_TARGET:-}" ] &&
+        [ -n "${HW_ARTIFACT_DIR:-}" ] || gate_error "receipt identity/source/runtime/target/artifacts required"
+    command -v python3 >/dev/null 2>&1 || gate_error "receipt mode requires python3"
+    HW_RECEIPT_MODE=1
+fi
 
 # Selftest runs first, unconditionally, and is fatal.
 hw_selftest
