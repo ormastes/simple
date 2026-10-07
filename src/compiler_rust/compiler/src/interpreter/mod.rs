@@ -176,7 +176,10 @@ use interpreter_call::{
 mod module_cache;
 pub use module_cache::clear_module_cache;
 pub use module_cache::{clear_probe_source_cache, probe_source_cached};
-pub use module_cache::{clear_parsed_source_cache, parsed_source_cache_len, shared_source, shared_source_lookup, SharedSource};
+pub use module_cache::{
+    clear_parsed_source_cache, parsed_source_cache_len, shared_source, shared_source_for_target,
+    shared_source_lookup, shared_source_lookup_for_target, SharedSource,
+};
 pub(crate) use module_cache::take_shared_ast;
 pub use module_cache::{parsed_source_cache_compile_max, parsed_source_cache_set_limit};
 pub use module_cache::clear_module_cache_selective;

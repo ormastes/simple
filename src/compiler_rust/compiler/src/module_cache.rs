@@ -208,7 +208,7 @@ pub fn probe_source_cache_len() -> usize {
 }
 
 thread_local! {
-    /// Cross-lane source+AST cache: one read and one parse per PHYSICAL file.
+    /// Cross-lane source+AST cache: one read and parse per physical file and OS.
     ///
     /// The HIR lowerer and the interpreter each walked the same import graph
     /// with a private cache that the other could not see, so every file both
@@ -217,7 +217,7 @@ thread_local! {
     /// lowerer 117 physical files, interpreter 128, intersection 117 --
     /// 1,265,979 bytes parsed a second time for nothing.
     ///
-    /// Keyed by `normalize_path_key`, the same canonical key the exports cache
+    /// Keyed by OS plus `normalize_path_key`, the canonical key the exports cache
     /// uses, so alias spellings of one file (`src/std` -> `lib`,
     /// relative vs absolute) share one entry.
     ///
@@ -231,7 +231,7 @@ thread_local! {
     /// cache -- every entry holds a whole source string AND its parsed AST --
     /// so it is the one an unbounded process grows on. An entry still borrowed
     /// by either lane is never evicted; see `shared_source_pinned`.
-    static PARSED_SOURCE_CACHE: RefCell<BoundedCache<PathBuf, SharedSource>> =
+    static PARSED_SOURCE_CACHE: RefCell<BoundedCache<(PathBuf, simple_common::target::TargetOS), SharedSource>> =
         RefCell::new(BoundedCache::new(parsed_source_cache_max(), shared_source_pinned));
 
     /// Source text of entries whose AST was handed to the interpreter BY
@@ -240,7 +240,7 @@ thread_local! {
     /// never a fresh disk read -- so the result is identical to a cache hit
     /// (the parser is deterministic), only slower. Source text is ~1/17 of
     /// the AST it produced, which is the whole point of releasing the AST.
-    static RELEASED_SOURCE_TEXT: RefCell<HashMap<PathBuf, Arc<String>>> = RefCell::new(HashMap::new());
+    static RELEASED_SOURCE_TEXT: RefCell<HashMap<(PathBuf, simple_common::target::TargetOS), Arc<String>>> = RefCell::new(HashMap::new());
 }
 
 /// Hand the interpreter an owned AST for `path`, releasing the cache's copy
@@ -258,7 +258,7 @@ thread_local! {
 /// Arc) this falls back to the old deep clone, so a live borrow is never
 /// disturbed. Both paths yield a tree equal to the parse of the cached bytes.
 pub fn take_shared_ast(path: &Path, ast: Arc<simple_parser::ast::Module>) -> simple_parser::ast::Module {
-    let key = normalize_path_key(path);
+    let key = (normalize_path_key(path), simple_common::target::TargetOS::host());
     let released = PARSED_SOURCE_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let source = match cache.get(&key) {
@@ -335,14 +335,25 @@ impl SharedSource {
 /// Split from `shared_source` so a caller can attribute a miss to its own lane
 /// (the lowerer's `IMPORT_AST_PARSES` counts the parses that lane caused).
 pub fn shared_source_lookup(path: &Path) -> Option<SharedSource> {
-    let key = normalize_path_key(path);
+    shared_source_lookup_for_target(path, simple_common::target::TargetOS::host())
+}
+
+/// Look up only the AST selected for this compilation target OS.
+pub fn shared_source_lookup_for_target(path: &Path, os: simple_common::target::TargetOS) -> Option<SharedSource> {
+    let key = (normalize_path_key(path), os);
     PARSED_SOURCE_CACHE.with(|cache| cache.borrow().get(&key))
 }
 
 /// Read + parse `path` once per process, shared by every lane. See
 /// `PARSED_SOURCE_CACHE`.
 pub fn shared_source(path: &Path) -> SharedSource {
-    let key = normalize_path_key(path);
+    shared_source_for_target(path, simple_common::target::TargetOS::host())
+}
+
+/// Preserve original source bytes while selecting OS branches before parsing.
+/// Native import callers provide their compilation target; interpreters use host.
+pub fn shared_source_for_target(path: &Path, os: simple_common::target::TargetOS) -> SharedSource {
+    let key = (normalize_path_key(path), os);
     if let Some(hit) = PARSED_SOURCE_CACHE.with(|cache| cache.borrow().get(&key)) {
         crate::perf_counters::bump(&crate::perf_counters::SHARED_SRC_HITS, 1);
         return hit;
@@ -355,10 +366,7 @@ pub fn shared_source(path: &Path) -> SharedSource {
     // SAME bytes it was first read as, so it can never observe a later edit
     // that a still-cached entry would not have observed either.
     if let Some(source) = RELEASED_SOURCE_TEXT.with(|r| r.borrow_mut().remove(&key)) {
-        let ast = simple_parser::Parser::new(&source)
-            .parse()
-            .map(Arc::new)
-            .map_err(|e| Arc::from(e.to_string().as_str()));
+        let ast = parse_shared_source(&source, os);
         let entry = SharedSource::Parsed { source, ast };
         let delta = PARSED_SOURCE_CACHE.with(|cache| cache.borrow_mut().insert(key, entry.clone()));
         mirror_stats(
@@ -376,10 +384,7 @@ pub fn shared_source(path: &Path) -> SharedSource {
             if source.contains('\r') {
                 source = source.replace('\r', "");
             }
-            let ast = simple_parser::Parser::new(&source)
-                .parse()
-                .map(Arc::new)
-                .map_err(|e| Arc::from(e.to_string().as_str()));
+            let ast = parse_shared_source(&source, os);
             SharedSource::Parsed {
                 source: Arc::new(source),
                 ast,
@@ -397,6 +402,18 @@ pub fn shared_source(path: &Path) -> SharedSource {
         &crate::perf_counters::PARSED_SOURCE_RETAINED_MAX,
     );
     entry
+}
+
+fn parse_shared_source(
+    source: &str,
+    os: simple_common::target::TargetOS,
+) -> Result<Arc<simple_parser::ast::Module>, Arc<str>> {
+    let selected = crate::pipeline::cfg_strip::strip_os_when_blocks(source, os)
+        .map_err(|error| Arc::<str>::from(error))?;
+    simple_parser::Parser::new(&selected)
+        .parse()
+        .map(Arc::new)
+        .map_err(|error| Arc::from(error.to_string()))
 }
 
 /// Drop the cross-lane source+AST cache.
