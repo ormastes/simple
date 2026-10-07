@@ -58,6 +58,7 @@ pub mod dl_compat;
 pub mod process;
 pub mod pty;
 pub mod time;
+pub mod win32_clock;
 pub mod math;
 pub mod random;
 pub mod serial;
@@ -345,6 +346,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("coverage_scan", coverage::coverage_scan);
     insert_simple!("coverage_summary", coverage::coverage_summary);
     insert_simple!("_current_time_unix", time::_current_time_unix);
+    insert_simple!("GetTickCount64", win32_clock::get_tick_count64);
     insert_simple!("default_memory_limit", memory::default_memory_limit);
     // rt_enum_* — registered for codegen but were missing here entirely, so
     // interpreting .spl source that uses the disc-dispatch idiom (the compiler
