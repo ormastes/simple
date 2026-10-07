@@ -23,6 +23,33 @@ val PURE_DATABASE_CUDA_MAX_WORDS_V1: i64 = 16384
 val PURE_DATABASE_CUDA_TIMEOUT_NS_V1: i64 = 5000000000
 val PURE_DATABASE_CUDA_RESOURCE_USAGE_V1: i64 = 1
 
+fn _pure_database_cuda_scalar_and_v1(lhs: [u32], rhs: [u32],
+        word_count: i64) -> [u32]:
+    if word_count < 0 or word_count > PURE_DATABASE_CUDA_MAX_WORDS_V1:
+        return []
+    var words: [u32] = [0u32; word_count]
+    var i = 0
+    while i < word_count:
+        val left = if i < lhs.len(): lhs[i as i32] else: 0u32
+        val right = if i < rhs.len(): rhs[i as i32] else: 0u32
+        words[i as i32] = left & right
+        i = i + 1
+    words
+
+fn _pure_database_cuda_fnv_checksum_v1(words: [u32]) -> i64:
+    var hash: i64 = -3750763034362895579
+    var wi = 0
+    while wi < words.len():
+        val word = words[wi as i32]
+        var bi = 0
+        while bi < 4:
+            val byte = ((word >> ((bi * 8) as u32)) & 255u32) as i64
+            val mixed = hash xor byte
+            hash = (((mixed as u64) * 1099511628211u64) as i64)
+            bi = bi + 1
+        wi = wi + 1
+    hash
+
 class PureDatabaseCudaBitmapReducerOpenOwnedV1:
     reducer: PureDatabaseBitmapReducerV1
     status: i32
@@ -54,20 +81,10 @@ class PureDatabaseCudaBitmapReducerV1 with PureDatabaseBitmapReducerV1:
         # successful result is separately proven by the receipt and readback.
         self.attempts
 
-fn _pure_database_cuda_scalar_and_v1(lhs: [u32], rhs: [u32],
-        word_count: i64) -> [u32]:
-    var words: [u32] = [0u32; word_count]
-    var i = 0
-    while i < word_count:
-        val left = if i < lhs.len(): lhs[i as i32] else: 0u32
-        val right = if i < rhs.len(): rhs[i as i32] else: 0u32
-        words[i as i32] = left & right
-        i = i + 1
-    words
-
     fn reduce_and_owned_v1(lhs: [u32], rhs: [u32],
         row_count: i64) -> PureDatabaseBitmapReduceOwnedV1:
-        val word_count = if row_count <= 0: 0 else: (row_count + 31) / 32
+        val word_count = if row_count <= 0 or row_count > PURE_DATABASE_CUDA_MAX_WORDS_V1 * 32:
+            0 else: (row_count + 31) / 32
         if not self.session.is_open() or word_count <= 0 or
                 word_count > PURE_DATABASE_CUDA_MAX_WORDS_V1 or
                 lhs.len() != word_count or rhs.len() != word_count or
@@ -87,7 +104,7 @@ fn _pure_database_cuda_scalar_and_v1(lhs: [u32], rhs: [u32],
         var payload: [u32] = [0u32; payload_word_count]
         payload[0] = word_count as u32
         payload[1] = 0u32
-        i = 0
+        var i = 0
         while i < word_count:
             val left_index = (2 + i) as i32
             val right_index = (2 + word_count + i) as i32
@@ -159,10 +176,13 @@ fn _pure_database_cuda_scalar_and_v1(lhs: [u32], rhs: [u32],
                                 readback_words[wi as i32] =
                                     raw_read_i32(output_ptr, wi * 4) as u32
                                 wi = wi + 1
-                            output_words = readback_words
-                            success = true
-                            status = 0
-                            reason = "cuda-device-receipt-and-readback-validated"
+                            if _pure_database_cuda_fnv_checksum_v1(readback_words) == receipt.checksum:
+                                output_words = readback_words
+                                success = true
+                                status = 0
+                                reason = "cuda-device-receipt-checksum-and-readback-validated"
+                            else:
+                                reason = "cuda-bitmap-readback-checksum-mismatch"
                         else:
                             reason = "cuda-bitmap-readback-invalid"
                         raw_free(output_ptr, output_bytes)
@@ -194,8 +214,6 @@ fn _pure_database_cuda_scalar_and_v1(lhs: [u32], rhs: [u32],
                 GpuProviderCompletion(backend: GPU_PROVIDER_BACKEND_CUDA,
                     session: self.session.handle, handle: 0, correlation_id: 0)
                 else: completion)
-        if success:
-            println("ITEM5_CUDA_DB_DEVICE_V1 op=bitmap_and correlation={receipt.correlation_id} provider={receipt.provider_identity} device={receipt.device_identity} resource={receipt.resource} checksum={receipt.checksum} elapsed_ns={receipt.device_elapsed_ns} words={word_count}")
         PureDatabaseBitmapReduceOwnedV1(
             reducer: next, words: output_words, status: status,
             attempted: attempts > self.attempts, provider_used: success,
@@ -208,7 +226,8 @@ fn _pure_database_cuda_scalar_and_v1(lhs: [u32], rhs: [u32],
         if completion.is_live():
             retired = completion.release()
         if resource.is_live():
-            retired = resource.release() and retired
+            val resource_released = resource.release()
+            retired = retired and resource_released
         var session = self.session
         if retired and session.is_open():
             retired = session.close()
