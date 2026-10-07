@@ -244,3 +244,20 @@ facade-hop bug: the recorded origin path drops a package segment
 - matrix logs:
   .simple/storage/build/bootstrap/stage2-compiler-tests/aarch64-apple-darwin/verification/logs/{compiler_cli_build,test_runner_build}.log
 - 20 distinct errors total (16 class A + 4 class B).
+- UPDATE 2026-10-08 (guards landed, crash unchanged): has()-probe guards
+  added at all get_symbol_raw sites in provider_metadata.spl
+  (relocate_provider_type_symbol, relocate_provider_callable,
+  register_provider_class; commit 60a18472878) plus the Var/NamedVar arm
+  in relocate_provider_default. The SIGSEGV backtrace is BYTE-IDENTICAL
+  after the guards (compiler.snapshot-2026-10-08-050036.ips, same three
+  frames, KERN_INVALID_ADDRESS at 0x0, innermost frame
+  relocate_provider_type itself). Conclusion: the deref is NOT the
+  symbol-table lookup — the HirType/HirClass values transported across
+  the provider boundary are corrupted, so `match type_.kind` faults
+  regardless of symbol guards. This is the stage-native struct-transport
+  miscompile family (bootstrap_stage4_optional_arg_and_mixed_tail_
+  miscompile_2026-07-23 and relatives); owned by the compiler codegen
+  lane. The guards remain useful absent-id hardening. Also observed with
+  the guards: compiler_cli_build flipped from FAIL to TIMEOUT (3600s
+  task budget) — error-free but slower; consider raising the task
+  timeout / thread budget for macOS hosts.
