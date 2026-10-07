@@ -184,6 +184,7 @@ EXCLUDE_RE='(^|/)vendor/|^src/runtime/(miniaudio|stb_image|stb_truetype)\.h$'
 RANGE=
 EXPECT=
 SELFTEST=0
+LINE_ENDING_SELFTEST=0
 VERBOSE=0
 
 usage() {
@@ -207,6 +208,7 @@ while [ $# -gt 0 ]; do
         --scope) SCOPE_RE=${2:-}; shift 2 || exit 2 ;;
         --expect-rewinds) EXPECT=${2:-}; shift 2 || exit 2 ;;
         --selftest) SELFTEST=1; shift ;;
+        --selftest-line-endings) LINE_ENDING_SELFTEST=1; shift ;;
         --verbose) VERBOSE=1; shift ;;
         --from-pre-push-hook) shift ;;
         -h|--help) usage; exit 0 ;;
@@ -286,6 +288,32 @@ blob_lines() {
             | sed 's/[ 	]*$//' | grep -v '^$' | sort -u > "$_work/blob/$_sha" 2>/dev/null
     fi
     printf '%s\n' "$_work/blob/$_sha"
+}
+
+# Only exact textual CRLF -> LF conversion is non-semantic. Never use a
+# whitespace-insensitive diff: removed code, bare CR, NUL and final-newline
+# changes must retain ordinary contributor scoring. Cache by both blob IDs.
+exact_crlf_to_lf_only() {
+    _crlf_repo=$1; _crlf_parent=$2; _crlf_before=$3
+    _crlf_commit=$4; _crlf_after=$5; _crlf_work=$6
+    _crlf_old=$(cd "$_crlf_repo" && git rev-parse --verify "$_crlf_parent:$_crlf_before" 2>/dev/null) || return 1
+    _crlf_new=$(cd "$_crlf_repo" && git rev-parse --verify "$_crlf_commit:$_crlf_after" 2>/dev/null) || return 1
+    _crlf_key="$_crlf_work/blob/crlf-$_crlf_old-$_crlf_new"
+    [ ! -f "$_crlf_key.yes" ] || return 0
+    [ ! -f "$_crlf_key.no" ] || return 1
+    (cd "$_crlf_repo" && git cat-file blob "$_crlf_old") >"$_crlf_key.old" || return 1
+    (cd "$_crlf_repo" && git cat-file blob "$_crlf_new") >"$_crlf_key.new" || return 1
+    # Binary mode is explicit on Windows; streaming does not slurp a blob.
+    if perl -e 'binmode STDIN; binmode STDOUT; while (defined(my $line = <STDIN>)) { exit 2 if index($line, "\0") >= 0; $line =~ s/\r\n/\n/g; print $line or exit 2; } close STDOUT or exit 2;' \
+        <"$_crlf_key.old" >"$_crlf_key.normalized" &&
+        cmp -s "$_crlf_key.normalized" "$_crlf_key.new"; then
+        : >"$_crlf_key.yes"
+        rm -f "$_crlf_key.old" "$_crlf_key.new" "$_crlf_key.normalized"
+        return 0
+    fi
+    : >"$_crlf_key.no"
+    rm -f "$_crlf_key.old" "$_crlf_key.new" "$_crlf_key.normalized"
+    return 1
 }
 
 scan_commit() {
@@ -392,6 +420,8 @@ scan_commit() {
 
             DST=$(awk -F'\t' -v f="$F" '$1 == f { print $2; exit }' "$_c/scoped")
             [ -n "$DST" ] || DST=$F
+
+            exact_crlf_to_lf_only "$_repo" "$P" "$F" "$C" "$DST" "$_work" && continue
 
             PL=$(blob_lines "$_repo" "$P" "$F" "$_work")
             CL=$(blob_lines "$_repo" "$C" "$DST" "$_work")
@@ -584,8 +614,56 @@ Rewind-Allowed: 6 reviewed rollback, see doc/08_tracking/bug/x.md" ) >/dev/null 
         echo "  [selftest FAIL] no fixture ran"
         return 1
     fi
+    run_line_ending_selftest || return 1
     printf '  selftest: %s fixture(s) run, %s failure(s)\n' "$_ran" "$_fail"
     [ "$_fail" -eq 0 ]
+}
+
+# Real Git parent/contributor/child edges, not a mirrored string predicate.
+run_line_ending_selftest() {
+    lf_test_root="$TMPROOT/line-endings"
+    mkdir -p "$lf_test_root"
+    for lf_test_kind in exact removed lone-cr binary; do
+        lf_test_repo="$lf_test_root/$lf_test_kind"
+        mkfixture "$lf_test_repo" || return 1
+        git -C "$lf_test_repo" config core.autocrlf false || return 1
+        mkdir -p "$lf_test_repo/src"
+        for lf_test_n in 1 2 3 4 5 6; do
+            gen_lines 50 base | sed 's/$/\r/' >"$lf_test_repo/src/f$lf_test_n.spl"
+        done
+        fx_commit "$lf_test_repo" base || return 1
+        for lf_test_n in 1 2 3 4 5 6; do
+            gen_lines 40 preserved-feature | sed 's/$/\r/' >>"$lf_test_repo/src/f$lf_test_n.spl"
+            [ "$lf_test_kind" != lone-cr ] || printf 'tail\r' >>"$lf_test_repo/src/f$lf_test_n.spl"
+            [ "$lf_test_kind" != binary ] || printf '\000binary\r\n' >>"$lf_test_repo/src/f$lf_test_n.spl"
+        done
+        fx_commit "$lf_test_repo" contribution || return 1
+        for lf_test_n in 1 2 3 4 5 6; do
+            lf_test_file="$lf_test_repo/src/f$lf_test_n.spl"
+            if [ "$lf_test_kind" = removed ]; then
+                gen_lines 50 base >"$lf_test_file"
+            elif [ "$lf_test_kind" = lone-cr ]; then
+                tr -d '\r' <"$lf_test_file" >"$lf_test_file.tmp" && mv "$lf_test_file.tmp" "$lf_test_file"
+            else
+                perl -pe 's/\r\n/\n/g' <"$lf_test_file" >"$lf_test_file.tmp" && mv "$lf_test_file.tmp" "$lf_test_file"
+            fi
+        done
+        fx_commit "$lf_test_repo" conversion || return 1
+        if [ "$lf_test_kind" = binary ] || [ "$lf_test_kind" = lone-cr ]; then
+            mkdir -p "$TMPROOT/binary-work/blob"
+            if exact_crlf_to_lf_only "$lf_test_repo" HEAD~1 src/f1.spl HEAD src/f1.spl "$TMPROOT/binary-work"; then
+                echo "FAIL $lf_test_kind blob received text exemption"; return 1
+            fi
+        else
+            scan "$lf_test_repo" 'HEAD~1..HEAD' || return 1
+            lf_test_expected=6
+            [ "$lf_test_kind" != exact ] || lf_test_expected=0
+            grep -qx "EV_REWINDS=$lf_test_expected" "$TMPROOT/result" || {
+                echo "FAIL $lf_test_kind contributor verdict"; return 1;
+            }
+        fi
+        printf 'PASS line-ending Git criterion %s\n' "$lf_test_kind"
+    done
 }
 
 # Helper used by fixture 3: re-run a scan and emit only the flagged file names.
@@ -598,6 +676,12 @@ scan_names() {
 # MAIN
 # ---------------------------------------------------------------------------
 TMPROOT=$(mktemp -d 2>/dev/null) || die_error "cannot create a temp directory"
+
+if [ "$LINE_ENDING_SELFTEST" -eq 1 ]; then
+    run_line_ending_selftest || exit 1
+    echo "PASS four exact-line-ending Git criteria"
+    exit 0
+fi
 
 if [ "$SELFTEST" -eq 1 ]; then
     echo "--- selftest ---"
