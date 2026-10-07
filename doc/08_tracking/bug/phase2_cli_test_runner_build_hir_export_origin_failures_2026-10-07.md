@@ -169,18 +169,23 @@ facade-hop bug: the recorded origin path drops a package segment
   guards; `@when` blocks were fixed by 85c2bcc828c (2026-10-06) but the
   `@cfg` form was routed around (`@workaround` directives in
   path_identity_abi.spl) rather than fixed.
-- Position experiments (no rebuild needed): in a 3-fn module (unguarded,
-  @cfg-guarded, unguarded) only the GUARDED fn is missing from
-  module.functions (functions=2); the declaration after it registers fine.
-  A pure blank-line-before-fn control compiles and imports CLEAN. Combined
-  with the verified-correct preprocessor output (blank + declaration,
-  identical to the passing control) and the parser having NO native @cfg
-  handling, this localises the drop to the parse-module-body /
-  flat-bridge recording of exactly the declaration that had a (blanked)
-  @cfg decorator above it. The blank-line control contradicts a
-  preprocessing-output theory, so the next probe remains the decl-tag log
-  in module_assembly.spl (is the guarded decl absent from the arena, or
-  present with an unexpected tag/state?).
+- Update 3 (the decisive clue): with THREE modules — provider `@cfg(arm64)`
+  fn + two unguarded neighbors, imported by user.spl (unguarded only) vs
+  user2.spl (imports the guarded name) — THE PROVIDER'S PARSE RESULT
+  DIFFERS BY IMPORTER: the unguarded import compiles clean with NO
+  diagnostic (guarded fn present in the module table), the guarded import
+  prints `functions=1` (guarded fn missing). Same provider file, same
+  snapshot, same command — so the parse/preprocessing CONTEXT differs by
+  import demand (ambient host-detected path vs the target-receipted path
+  with a different `native_target`). A parse-error body inside the guarded
+  fn DOES produce errors in the guarded-import context, proving the body
+  reaches a parser there while the decl enumeration (parser-module trace)
+  shows the declaration itself never emits. Conclusion: the
+  receipted/target-cfg path evaluates `@cfg(arm64)` against a wrong or
+  empty target in the in-process compile context. Next probe: log
+  (target_os, target_arch, arm64-result, path-taken) at both
+  `_pp_preprocess_conditionals_target_receipted_v1` and the ambient
+  `_pp_preprocess_conditionals` entries, rebuild, rerun the A/B pair.
 
 ## Suggested directions
 
