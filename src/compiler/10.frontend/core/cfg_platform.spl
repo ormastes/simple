@@ -4,10 +4,14 @@
 # variables. Used by both the parser (compile-time @cfg) and the interpreter
 # (runtime @when) conditional compilation systems.
 
-use std.nogc_sync_mut.io_runtime.{env_get, file_read, platform_name}
+use std.nogc_sync_mut.io_runtime.{env_get, file_read, platform_name, host_arch}
 
 fn cfg_env(key: text) -> text:
     env_get(key)
+
+# Process-lifetime cache for the host-arch probe (host_arch() shells out to
+# uname -m; the ambient @cfg evaluator runs per guarded declaration).
+var _cfg_host_arch_cache: text = ""
 
 fn cfg_strip_quotes(value: text) -> text:
     val trimmed = value.trim()
@@ -177,6 +181,20 @@ fn cfg_detect_arch() -> text:
         val proc_arch = cfg_normalize_arch(proc_arch_raw.trim())
         if proc_arch != "":
             return proc_arch
+
+    # macOS/BSD hosts: the env-var probes above are unexported there and the
+    # /proc path is Linux-only, so without this cfg_detect_arch() returned
+    # "unknown" on Apple Silicon and EVERY @cfg(arch) guard evaluated false
+    # in the ambient preprocessing path — stripping active guarded
+    # declarations before parse and surfacing as phase-2 HIR "no exported
+    # item" failures (root-caused 2026-10-08; see doc/08_tracking/bug/
+    # phase2_cli_test_runner_build_hir_export_origin_failures_2026-10-07.md).
+    # host_arch() shells out to uname -m, so resolve it once per process.
+    if _cfg_host_arch_cache == "":
+        _cfg_host_arch_cache = host_arch()
+    val from_host = cfg_normalize_arch(_cfg_host_arch_cache)
+    if from_host != "":
+        return from_host
 
     "unknown"
 
