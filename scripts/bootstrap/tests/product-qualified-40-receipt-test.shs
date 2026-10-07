@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+# Extract the actual verifier owners, not a mirrored predicate.
+perl -0777 -ne 's/\r\n/\n/g; for my $n(qw(field profile_field verify_profile_workers)){ /^(\Q$n\E\(\) \{.*?^\})/sm or die "owner absent"; print "$1\n"; }' \
+  "$repo/scripts/bootstrap/verify-compiler-subsystem-test-matrix.shs" >"$scratch/owner.sh"
+. "$scratch/owner.sh"
+validate() {
+  record=$(profile_field "$scratch/receipt") || return 1
+  profile=$(perl -I "$repo/scripts/bootstrap/lib" -MBootstrapProductProducer=validate_product_resource_profile \
+    -e 'my $r=shift;print validate_product_resource_profile($r eq "0"?undef:substr($r,1),@ARGV)' \
+    "$record" qualified 40 3000000 1800 enforce) || return 1
+  verify_profile_workers "$profile" 40 "$scratch/receipt"
+}
+printf 'resource_profile=qualified-40-v1\nthreads=40\n' >"$scratch/receipt"
+validate
+for workers in 20 80 040 +40; do
+  printf 'resource_profile=qualified-40-v1\nthreads=%s\n' "$workers" >"$scratch/receipt"
+  if validate 2>/dev/null; then exit 1; fi
+done
+printf 'threads=40\n' >"$scratch/receipt"
+if validate 2>/dev/null; then exit 1; fi
+printf 'resource_profile=qualified-40-v1\n' >"$scratch/receipt"
+if validate 2>/dev/null; then exit 1; fi
+printf 'resource_profile=qualified-40-v1\nthreads=40\nthreads=40\n' >"$scratch/receipt"
+if validate 2>/dev/null; then exit 1; fi
+printf 'resource_profile=qualified-40-v1\nresource_profile=qualified-40-v1\nthreads=40\n' >"$scratch/receipt"
+if validate 2>/dev/null; then exit 1; fi
+printf 'PASS qualified40 receipt binding:9 controls; no product qualification\n'

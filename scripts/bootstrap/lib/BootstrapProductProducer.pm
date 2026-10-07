@@ -14,7 +14,7 @@ sub validate_product_resources {
     }
     $rss > 0 && $rss <= 6835937 or die "invalid product RSS observation limit\n";
     if ($mode eq 'qualified') {
-        (($threads >= 10 && $threads <= 20) || $threads == 80) && $timeout > 0 && $rss_mode eq 'enforce'
+        (($threads >= 10 && $threads <= 20) || $threads == 40 || $threads == 80) && $timeout > 0 && $rss_mode eq 'enforce'
             or die "qualified product policy differs\n";
     } else {
         $threads >= 1 && $threads <= 80 or die "diagnostic product workers exceed allocation\n";
@@ -28,6 +28,7 @@ sub product_resource_profile {
     validate_product_resources(@_);
     my ($mode, $threads) = @_;
     return 'diagnostic-v1' if $mode eq 'diagnostic';
+    return 'qualified-40-v1' if $threads == 40;
     return $threads == 80 ? 'qualified-80-v1' : 'qualified-10-20-v1';
 }
 
@@ -35,8 +36,8 @@ sub validate_product_resource_profile {
     my ($recorded, @resources) = @_;
     my $expected = product_resource_profile(@resources);
     # Old receipts are compatible only with the previously supported profiles.
-    # New qualified80 evidence must explicitly bind every recorded layer.
-    return $expected if !defined($recorded) && $expected ne 'qualified-80-v1';
+    # New qualified40/80 evidence must explicitly bind every recorded layer.
+    return $expected if !defined($recorded) && ($expected eq 'qualified-10-20-v1' || $expected eq 'diagnostic-v1');
     defined($recorded) && $recorded eq $expected
         or die "product resource profile differs\n";
     return $expected;
