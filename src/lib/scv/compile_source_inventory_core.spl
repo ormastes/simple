@@ -4,6 +4,7 @@
 use std.common.crypto.sha256.{sha256_text}
 use std.common.text_whitespace.{split_whitespace}
 use std.common.text_bytes.{text_to_utf8_bytes}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
 
 val COMPILE_SOURCE_INVENTORY_SCHEMA_V1: i64 = 1
 val COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
@@ -437,6 +438,21 @@ fn compile_source_inventory_initial_events_v1(
     Some(CompileSourceInventoryV1(1, events.len(), compile_source_inventory_sort_v1(entries)))
 
 fn compile_source_inventory_entry_valid_v1(
+    entry: CompileSourceInventoryEntryV1
+) -> bool:
+    # Digest validation allocates one 64-byte conversion per facet. Cold
+    # publication validates the complete inventory several times, after the
+    # per-file hashing scopes have ended. None of these temporary buffers
+    # belongs to the entry or to the returned scalar.
+    # A caller may already own scratch: a refused nested begin leaves that
+    # scope intact, and only the owner of a successful begin may end it.
+    val owns_scratch = transient_scope_begin()
+    val valid = compile_source_inventory_entry_valid_unscoped_v1(entry)
+    if owns_scratch and not transient_scope_end():
+        return false
+    valid
+
+fn compile_source_inventory_entry_valid_unscoped_v1(
     entry: CompileSourceInventoryEntryV1
 ) -> bool:
     compile_source_inventory_path_valid_v1(entry.source_identity) and
