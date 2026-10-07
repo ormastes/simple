@@ -186,16 +186,12 @@ facade-hop bug: the recorded origin path drops a package segment
   (`succeeded=2`, no surface-diag, no "no exported item").
   Diagnostics (pp-diag / surface-diag) are still in the tree pending the
   matrix verification run; remove them before landing.
-- Matrix verification (same day): the cfg fix took compiler_cli_build
-  from 20 distinct HIR errors to ONE (`HIR aggregate failure; final worker
-  and artifact publication blocked`) and test_runner_build now dies with
-  a native-build worker SIGSEGV (exit -139). The remaining failure is the
-  class-A export-origin family (reexport-chase-unresolved for text/i64/
-  bool/Option at test_runner_types) plus a worker crash. NOTE: the
-  segfault may be an artifact of the temporary diagnostics themselves —
-  pp-diag prints from parallel HIR workers can corrupt the worker
-  protocol stream. Next run: strip the diagnostics, rebuild, re-verify;
-  then continue with the class-A export-origin bug.
+- Clean verification (diagnostics stripped, 0b9fabb3c21): the repro import
+  still resolves clean on the rebuilt snapshot (the remaining repro errors
+  are the known SMF-packaging Mach-O/ELF host limitation, unrelated to
+  HIR). Matrix rerun in progress to determine whether the
+  test_runner_build SIGSEGV was diagnostic-induced or a real class-A
+  symptom.
 
 ## Suggested directions
 
