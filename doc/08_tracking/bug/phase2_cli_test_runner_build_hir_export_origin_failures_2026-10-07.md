@@ -156,6 +156,30 @@ facade-hop bug: the recorded origin path drops a package segment
   under a variant tag the active-variant probe does not match. Fix belongs
   in the surface registration/index path, not the preprocessor.
 
+- Update 2 (same day, deeper): the diagnostic prints
+  `MISSING from parser functions table (functions=1 callables=1)` for the
+  repro's provider module — so the drop is at PARSE-TO-MODULE-TABLE
+  registration, before surface construction. Local resolution still works
+  because it hits the compile-wide flat global registry (package-sibling
+  semantics), which records declarations the module table misses.
+- Discriminator experiments against the instrumented snapshot:
+  `@when(os="macos")` (active) guard: compiles CLEAN, import works.
+  `@cfg(arm64)` (active): fails. `@cfg(x86_64)` (inactive): declaration
+  truly absent. So the bug is specific to ACTIVE `@cfg` per-declaration
+  guards; `@when` blocks were fixed by 85c2bcc828c (2026-10-06) but the
+  `@cfg` form was routed around (`@workaround` directives in
+  path_identity_abi.spl) rather than fixed.
+- The preprocessor's active-@cfg branch (parser_preprocessor.spl:615-617)
+  was read in full: decorators blanked, `i = declaration_index`, proper
+  `continue` — the preprocessed OUTPUT is correct (blank + declaration),
+  identical in shape to active @when output. `decl_fn` (decl_nodes.spl:486)
+  unconditionally allocates tag 1. So the drop is inside the
+  parse-module-body / flat-bridge recording of a declaration that FOLLOWED
+  a blanked decorator line — the next probe is decl-tag logging in
+  `_FlatAstBridge/module_assembly.spl` (log every (tag, name) seen for the
+  repro module) to see whether the guarded fn's decl is absent from the
+  arena or arrives with an unexpected tag.
+
 ## Suggested directions
 
 1. De-duplicate the `99.loader` compat-vs-real surfaces: one definition per
