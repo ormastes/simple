@@ -5,6 +5,7 @@ use compiler.hir.hir_definitions.*
 use compiler.hir.hir_symbol_table_methods.{_hir_symbol_owner_module}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
+use std.io_runtime.{env_get_opt}
 
 fn mir_class_identity(symbol: HirSymbol) -> text:
     val owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
@@ -263,7 +264,7 @@ impl MirLowering:
             case Unresolved: MethodResolution.Unresolved
             case BuiltinCollection(operation): MethodResolution.BuiltinCollection(operation)
 
-    me relocate_provider_default(expr: HirExpr, provider: SymbolTable, links: Dict<i64, text>) -> HirExpr:
+    me relocate_provider_default(expr: HirExpr, provider: SymbolTable, links: Dict<i64, text]) -> HirExpr:
         var result = expr
         if expr.has_type_:
             result.type_ = self.relocate_provider_type(expr.type_, provider)
@@ -282,14 +283,25 @@ impl MirLowering:
                         relocated_interpolations = relocated_interpolations.push(relocated)
                     HirExprKind.StringLit(value, Some(relocated_interpolations))
             case Var(id) | NamedVar(id, _):
-                val source = provider.get_symbol_raw(id.id)
-                if source != nil and source.kind == SymbolKind.Class:
-                    val target = self.relocate_provider_type_symbol(id, provider)
-                    HirExprKind.NamedVar(target, mir_class_identity(source))
+                # TEMP DIAG (segv-investigation): the stage-native lane can
+                # miscompile a struct-valued Option returned across a function
+                # boundary (Some tag, null payload — see symbol_name_scalar_raw
+                # docstring). A null payload passes `source != nil` and then
+                # derefs address 0 in `source.kind`. Log before the deref and
+                # route through the has()-probe path.
+                if (env_get_opt("SIMPLE_PROVIDER_RELOC_DIAG") ?? "") == "1":
+                    print("[provider-reloc-diag] Var/NamedVar id={id.id} has={provider.symbols.has(id.id)}")
+                if not provider.symbols.has(id.id):
+                    HirExprKind.Error
                 else:
-                    val target = self.relocate_provider_callable(id, provider, links)
-                    if target.id < 0: HirExprKind.Error
-                    else: HirExprKind.NamedVar(target, self.symbols.symbol_display_name(target, source.name))
+                    val source = provider.get_symbol_raw(id.id)
+                    if source != nil and source.kind == SymbolKind.Class:
+                        val target = self.relocate_provider_type_symbol(id, provider)
+                        HirExprKind.NamedVar(target, mir_class_identity(source))
+                    else:
+                        val target = self.relocate_provider_callable(id, provider, links)
+                        if target.id < 0: HirExprKind.Error
+                        else: HirExprKind.NamedVar(target, self.symbols.symbol_display_name(target, source.name))
             case Field(base, field, _):
                 HirExprKind.Field(self.relocate_provider_default(base, provider, links), field, nil)
             case Index(base, index):
