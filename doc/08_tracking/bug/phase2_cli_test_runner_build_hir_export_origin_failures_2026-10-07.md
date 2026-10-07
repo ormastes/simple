@@ -201,10 +201,27 @@ facade-hop bug: the recorded origin path drops a package segment
   (TestExecutionMode, TestFileResult, ...) contain NO primitive — so the
   `item=text/i64/bool/Option` chase entries imply a GLOB import or a
   mis-attributed importer. Primitives should short-circuit the chase
-  entirely (they need no origin module). Next probe: identify the exact
-  import row that pulls a primitive through a facade (glob vs selective),
-  then either fix the chase to treat builtins as self-resolving or repair
-  the offending import site.
+  entirely (they need no origin module).
+- UPDATE 2026-10-08: the chase receipts are NOISE (their own docstring
+  calls them 98.4% noise; lower_named_kind resolves builtins regardless).
+  The REAL failure is a compiler SIGSEGV in MIR lowering. macOS crash
+  report backtrace (~/Library/Logs/DiagnosticReports/
+  compiler.snapshot-2026-10-08-025629.ips, EXC_BAD_ACCESS, null deref):
+    MirLowering.relocate_provider_type
+    MirLowering.relocate_provider_default
+    MirLowering.register_provider_class
+    MirLowering.lower_module
+    CompilerDriver.lower_to_mir
+  Source: src/compiler/40.mir/mir_lowering/provider_metadata.spl — the
+  provider-relocation machinery (item5-era "struct declaration owners for
+  provider methods" work). Fix target: relocate_provider_type /
+  relocate_provider_default null-deref for a provider class in the
+  test-runner closure. A SEPARATE crash (014635.ips, SIGABRT/rt_panic)
+  fires in cranelift_codegen cl_translate_instruction — different bug.
+  Standalone repro of the segv needs the SCV inventory plumbing (a plain
+  native-build with the same sources fails earlier at
+  plugins.backend_cuda import resolution), so iterate via the matrix's
+  test_runner_build row or add a provider-metadata unit probe.
 
 ## Suggested directions
 
