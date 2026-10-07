@@ -1,0 +1,53 @@
+# Real generated Range codec preserves optional endpoint topology.
+# @req REQ-SSPEC-COMPILER
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_codec_support.{HirCodecWriter}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.hir.generated.hir_codec.{hc_enc_hir_expr, hc_dec_hir_expr}
+use compiler.hir.generated.hir_hash.{hir_hash_expr}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode, hir_canonical_codec_header, hir_codec_header}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.statements.*
+
+fn codec_range_endpoint() -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(4, nil), has_type_: false, type_: nil, span: Span.empty())
+
+fn range_codec_roundtrip(start: HirExpr?, end: HirExpr?) -> bool:
+    val original = HirExpr(kind: HirExprKind.Range(start, end, false, nil), has_type_: false, type_: nil, span: Span.empty())
+    var writer = HirCodecWriter.create()
+    hc_enc_hir_expr(writer, original)
+    if not writer.ok: return false
+    val encoded = writer.finish()
+    var reader = FlatPoolReader.new(encoded)
+    val decoded = hc_dec_hir_expr(reader)
+    if not reader.ok: return false
+    var again = HirCodecWriter.create()
+    hc_enc_hir_expr(again, decoded)
+    again.ok and again.finish() == encoded and hir_hash_expr(decoded) == hir_hash_expr(original)
+
+describe "Optional Range generated codec":
+    it "round trips both absent endpoints":
+        expect(range_codec_roundtrip(nil, nil)).to_equal(true)
+    it "round trips absent start":
+        expect(range_codec_roundtrip(nil, codec_range_endpoint())).to_equal(true)
+    it "round trips absent end":
+        expect(range_codec_roundtrip(codec_range_endpoint(), nil)).to_equal(true)
+    it "round trips both present endpoints":
+        expect(range_codec_roundtrip(codec_range_endpoint(), codec_range_endpoint())).to_equal(true)
+    it "rejects the prior regular codec header":
+        val parsed = parse_full_frontend("fn main() -> i64:\n    0\n", "range_codec_version.spl", "range_codec_version", Logger(level: 0))
+        var lowering = HirLowering.with_filename("range_codec_version.spl")
+        val module = lowering.lower_module(parsed)
+        val encoded = hir_module_encode(module)
+        expect(encoded.len() > 0).to_equal(true)
+        expect(hir_module_decode(encoded) != nil).to_equal(true)
+        val previous_header = hir_codec_header().replace("spl-hircodec-v4", "spl-hircodec-v3")
+        expect(hir_module_decode(encoded.replace(hir_codec_header(), previous_header)) == nil).to_equal(true)
+        expect(hir_codec_header()).to_start_with("spl-hircodec-v4 ")
+        expect(hir_canonical_codec_header()).to_start_with("spl-hircodec-canonical-v3 ")

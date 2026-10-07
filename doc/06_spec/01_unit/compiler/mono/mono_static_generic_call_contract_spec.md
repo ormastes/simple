@@ -1,0 +1,151 @@
+# Static generic caller symbol contract
+
+> A resolved static generic call must reference its concrete specialized function's actual symbol. A created function alone is insufficient: leaving the caller pointed at the template still produces an undefined native symbol.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 3 | 3 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Static generic caller symbol contract
+
+A resolved static generic call must reference its concrete specialized function's actual symbol. A created function alone is insufficient: leaving the caller pointed at the template still produces an undefined native symbol.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Compiler |
+| Status | Active |
+| Requirements | N/A |
+| Plan | N/A |
+| Design | doc/08_tracking/bug/static_generic_factory_specialization_missing_2026-10-06.md |
+| Research | doc/08_tracking/bug/static_generic_factory_specialization_missing_2026-10-06.md |
+| Source | `test/01_unit/compiler/mono/mono_static_generic_call_contract_spec.spl` |
+| Updated | 2026-10-06 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+A resolved static generic call must reference its concrete specialized function's actual symbol. A created function alone is insufficient: leaving the caller pointed at the template still produces an undefined native symbol.
+
+## Examples
+The positive case compares the caller's NamedVar symbol with the generated function and requires empty type arguments. Negative and ordinary-method controls reject conflicting inference and preserve the two real concrete functions.
+
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** doc/08_tracking/bug/static_generic_factory_specialization_missing_2026-10-06.md
+**Research:** doc/08_tracking/bug/static_generic_factory_specialization_missing_2026-10-06.md
+
+Bootstrap harness: set SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 when SIMPLE_BOOTSTRAP=1. These source-lowering assertions establish HIR symbol integrity; native emission and execution remain a separate admission gate.
+
+## Scenarios
+
+### static generic call symbol contract
+
+#### points the caller at the actual specialized factory symbol
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 27 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src = "class Factory:\n    static fn injected<T>(value: T) -> T:\n        value\n\nfn main() -> i64:\n    Factory.injected(7)\n"
+val parsed = parse_full_frontend(src, "testdata/static_symbol.spl", "static_symbol", Logger(level: 0))
+var hl = HirLowering.with_filename("testdata/static_symbol.spl")
+val hir = hl.lower_module(parsed)
+var mods: Dict<text, HirModule> = {}
+mods["m"] = hir
+val (out, stats) = run_monomorphization(mods)
+val om: HirModule = out["m"]
+var target = -1
+var called = -2
+for key in om.functions.keys():
+    val f: HirFunction = om.functions[key]
+    if f.name.contains("$i64"):
+        target = f.symbol.id
+    if f.name == "main":
+        val body: HirBlock = f.body
+        val tail: HirExpr = body.value
+        match tail.kind:
+            case HirExprKind.Call(callee, _, type_args):
+                expect(type_args.len()).to_equal(0)
+                val c: HirExpr = callee
+                match c.kind:
+                    case HirExprKind.NamedVar(symbol, _): called = symbol.id
+                    case _: fail("specialized call must carry a resolved NamedVar")
+            case _: fail("static generic call must become a direct concrete call")
+expect(target).to_be_greater_than(-1)
+expect(called).to_equal(target)
+```
+
+</details>
+
+#### rejects conflicting method type inference
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src = "class Factory:\n    static fn pair<T>(a: T, b: T) -> T:\n        a\n\nfn main():\n    Factory.pair(1, \"x\")\n"
+val parsed = parse_full_frontend(src, "testdata/static_conflict.spl", "static_conflict", Logger(level: 0))
+var hl = HirLowering.with_filename("testdata/static_conflict.spl")
+val hir = hl.lower_module(parsed)
+var mods: Dict<text, HirModule> = {}
+mods["m"] = hir
+val (out, stats) = run_monomorphization(mods)
+expect(stats.specializations_created).to_equal(0)
+expect(stats.unresolved_generic_calls).to_equal(1)
+```
+
+</details>
+
+#### keeps an ordinary static method without allocating a specialization
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val src = "class Factory:\n    static fn plain(value: i64) -> i64:\n        value\n\nfn main() -> i64:\n    Factory.plain(7)\n"
+val parsed = parse_full_frontend(src, "testdata/static_plain_real.spl", "static_plain_real", Logger(level: 0))
+var hl = HirLowering.with_filename("testdata/static_plain_real.spl")
+val hir = hl.lower_module(parsed)
+expect(hir.functions.len()).to_equal(2)
+var mods: Dict<text, HirModule> = {}
+mods["m"] = hir
+val (out, stats) = run_monomorphization(mods)
+expect(stats.specializations_created).to_equal(0)
+expect(stats.unresolved_generic_calls).to_equal(0)
+val om: HirModule = out["m"]
+expect(om.functions.len()).to_equal(2)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 3 |
+| Active scenarios | 3 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Design:** `doc/08_tracking/bug/static_generic_factory_specialization_missing_2026-10-06.md`
+- **Research:** `doc/08_tracking/bug/static_generic_factory_specialization_missing_2026-10-06.md`
+
+
+</details>

@@ -1,0 +1,17 @@
+# Ordinary private Git metadata; borrowed objects stay owned by source_root.
+# The source repository must be retained until every product consumer closes.
+bootstrap_product_private_repository() {
+  private_source=$1 private_destination=$2 private_head=$3
+  [ ! -e "$private_destination" ] && [ ! -L "$private_destination" ] || return 1
+  [ "$(git -C "$private_source" rev-parse HEAD)" = "$private_head" ] || return 1
+  git -C "$private_source" cat-file -e "$private_head^{commit}" || return 1
+  git -c core.hooksPath=NUL -c core.longpaths=true clone --shared --no-hardlinks --no-checkout \
+    "$private_source" "$private_destination" || return 1
+  [ -d "$private_destination/.git" ] && [ ! -L "$private_destination/.git" ] || return 1
+  git -C "$private_destination" -c core.hooksPath=NUL update-ref --no-deref HEAD "$private_head" || return 1
+  git -C "$private_destination" -c core.hooksPath=NUL read-tree "$private_head" || return 1
+  [ "$(git -C "$private_source" rev-parse HEAD)" = "$private_head" ] || return 1
+  [ "$(git -C "$private_destination" rev-parse HEAD)" = "$private_head" ] || return 1
+  [ "$(git -C "$private_destination" write-tree)" = "$(git -C "$private_source" rev-parse "$private_head^{tree}")" ] || return 1
+  git -C "$private_destination" cat-file -e "$private_head^{commit}"
+}

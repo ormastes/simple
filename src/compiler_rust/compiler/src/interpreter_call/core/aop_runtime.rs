@@ -292,6 +292,9 @@ fn exec_advice_in_join_point_scope(
         impl_methods,
         false,
     )?;
+    // Publish advice writes before another named call refreshes its globals.
+    // Advice executes the body directly and otherwise misses call-exit sync.
+    super::function_exec::sync_owned_captured_globals(advice_fn, &advice_env, env);
     let names: Vec<String> = env.keys().cloned().collect();
     for name in names {
         if advice_fn.params.iter().any(|p| p.name == name) {

@@ -887,6 +887,16 @@ fn process_status_kib(key: &str) -> i64 {
         .unwrap_or(-1)
 }
 
+/// Return current resident memory in KiB, or -1 when host status is unavailable.
+pub fn rt_process_rss_kib(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(process_status_kib("VmRSS:")))
+}
+
+/// Return peak resident memory in KiB, or -1 when host status is unavailable.
+pub fn rt_process_hwm_kib(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(process_status_kib("VmHWM:")))
+}
+
 fn snapshot_monotonic_ms() -> i64 {
     #[cfg(unix)]
     unsafe {
@@ -2683,6 +2693,22 @@ pub fn rt_dir_exists(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Bool(std::path::Path::new(&path).is_dir()))
 }
 
+/// Accept a directory only when its final component is not a symlink/reparse point.
+pub fn rt_dir_is_real_no_follow(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return Ok(Value::Bool(false));
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & 0x400 != 0 {
+            return Ok(Value::Bool(false));
+        }
+    }
+    Ok(Value::Bool(metadata.is_dir() && !metadata.file_type().is_symlink()))
+}
+
 /// Create directory
 pub fn rt_dir_create(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
@@ -3506,7 +3532,7 @@ pub fn rt_file_is_regular_no_follow(args: &[Value]) -> Result<Value, CompileErro
 }
 
 #[cfg(unix)]
-fn safe_artifact_open_root(root: &str) -> Option<i32> {
+pub(super) fn safe_artifact_open_root(root: &str) -> Option<i32> {
     if !root.starts_with('/') || root.len() > 4095 || root.contains("//") || (root != "/" && root.ends_with('/')) {
         return None;
     }

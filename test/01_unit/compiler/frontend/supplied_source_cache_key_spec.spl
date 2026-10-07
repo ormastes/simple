@@ -1,0 +1,83 @@
+# Requires a fresh private frontend cache scope/root; see matching manual.
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.{parse_full_frontend, parse_full_frontend_target_receipted_v1}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_load, frontend_parse_cache_hits, frontend_parse_cache_misses}
+use std.common.crypto.sha256.sha256_text
+use std.io_runtime.file_exists
+use std.io_runtime.file_write_exact
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_scope, frontend_parse_cache_dir}
+use compiler.frontend.core.flat_pool_codec.FLAT_POOL_CODEC_VERSION
+
+val supplied_key_path = "test/fixtures/compiler/frontend/supplied_source_key.spl"
+
+describe "supplied source owns private parse cache identity":
+    it "rejects a real legacy entry and accepts the same pool under the corrected version":
+        expect(frontend_parse_cache_enabled()).to_equal(true)
+        val source = "fn migration_member() -> i64:\n    77\n"
+        val parsed = parse_full_frontend(source, supplied_key_path, "migration", Logger(level: 0))
+        expect(parsed.functions.contains_key("migration_member")).to_equal(true)
+        val key = sha256_text(source)
+        val blob = frontend_parse_cache_load(key)
+        expect(blob.len() > 0).to_equal(true)
+        val path = frontend_parse_cache_dir() + "/" + key + ".fpc"
+        val suffix = " " + FLAT_POOL_CODEC_VERSION + " " + frontend_parse_cache_scope() + "\n" + blob
+        expect(file_write_exact(path, "spl-fecache-v1" + suffix)).to_equal(true)
+        expect(frontend_parse_cache_load(key)).to_equal("")
+        expect(file_write_exact(path, "spl-fecache-v2" + suffix)).to_equal(true)
+        expect(frontend_parse_cache_load(key)).to_equal(blob)
+
+    it "stores changed supplied bytes under their own keys while disk and mtime stay unchanged":
+        expect(file_exists(supplied_key_path)).to_equal(true)
+        expect(frontend_parse_cache_enabled()).to_equal(true)
+        val first = "fn supplied_first() -> i64:\n    11\n"
+        val second = "fn supplied_second() -> i64:\n    22\n"
+        val a = parse_full_frontend(first, supplied_key_path, "supplied", Logger(level: 0))
+        expect(a.functions.contains_key("supplied_first")).to_equal(true)
+        expect(frontend_parse_cache_load(sha256_text(first)).len() > 0).to_equal(true)
+        val b = parse_full_frontend(second, supplied_key_path, "supplied", Logger(level: 0))
+        expect(b.functions.contains_key("supplied_second")).to_equal(true)
+        expect(b.functions.contains_key("supplied_first")).to_equal(false)
+        expect(frontend_parse_cache_load(sha256_text(second)).len() > 0).to_equal(true)
+
+    it "restores equal source through the existing bridge for an alias":
+        val source = "fn alias_member() -> i64:\n    33\n"
+        val first = parse_full_frontend(source, supplied_key_path, "original", Logger(level: 0))
+        expect(first.functions.contains_key("alias_member")).to_equal(true)
+        val hits = frontend_parse_cache_hits()
+        val alias = parse_full_frontend(source, supplied_key_path, "alias", Logger(level: 0))
+        expect(alias.functions.contains_key("alias_member")).to_equal(true)
+        expect(frontend_parse_cache_hits()).to_equal(hits + 1)
+
+    it "does not admit a missing source path into the private cache":
+        val path = "test/fixtures/compiler/frontend/absent_supplied_key_control.spl"
+        expect(file_exists(path)).to_equal(false)
+        val hits = frontend_parse_cache_hits()
+        val misses = frontend_parse_cache_misses()
+        val source = "fn absent_control() -> i64:\n    44\n"
+        val parsed = parse_full_frontend(source, path, "absent", Logger(level: 0))
+        expect(parsed.functions.contains_key("absent_control")).to_equal(true)
+        expect(frontend_parse_cache_hits()).to_equal(hits)
+        expect(frontend_parse_cache_misses()).to_equal(misses)
+
+    it "rejects a caller-supplied stale digest before cache access":
+        val source = "fn current_control() -> i64:\n    55\n"
+        val hits = frontend_parse_cache_hits()
+        val result = parse_full_frontend_target_receipted_v1(source, supplied_key_path,
+            "current", Logger(level: 0), "source:current", sha256_text("stale"),
+            "x86_64-pc-windows-msvc")
+        expect(result.is_err()).to_equal(true)
+        expect(frontend_parse_cache_hits()).to_equal(hits)
+
+    it "keeps different target projections separate for equal raw source":
+        val source = "@cfg(windows)\nfn windows_only() -> i64:\n    66\n"
+        val win = parse_full_frontend_target_receipted_v1(source, supplied_key_path,
+            "target", Logger(level: 0), "source:target", sha256_text(source),
+            "x86_64-pc-windows-msvc")
+        expect(win.is_ok()).to_equal(true)
+        expect(win.unwrap()[0].functions.contains_key("windows_only")).to_equal(true)
+        val linux = parse_full_frontend_target_receipted_v1(source, supplied_key_path,
+            "target", Logger(level: 0), "source:target", sha256_text(source),
+            "x86_64-unknown-linux-gnu")
+        expect(linux.is_ok()).to_equal(true)
+        expect(linux.unwrap()[0].functions.contains_key("windows_only")).to_equal(false)
