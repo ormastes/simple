@@ -1,0 +1,50 @@
+use std.spec.*
+use compiler.core.parser.{parser_init_with_path, parser_has_errors}
+use compiler.core.parser_expr.{parse_expr}
+use compiler.core.ast.{expr_get_tag, expr_get_left, expr_get_right, expr_get_int, expr_get_args, EXPR_RANGE, EXPR_INT_LIT}
+use compiler.frontend.flat_ast_bridge.{convert_flat_expr}
+use compiler.frontend.parser_types_expr.{ExprKind}
+
+fn parsed_range(source: text) -> i64:
+    parser_init_with_path(source, "open_range_endpoint.spl")
+    parse_expr()
+
+describe "Flat parser preserves absent range endpoints":
+    it "keeps a parenthesized open end absent in flat and tree AST":
+        val flat = parsed_range("(1..)")
+        expect(parser_has_errors()).to_equal(false)
+        expect(expr_get_tag(flat)).to_equal(EXPR_RANGE)
+        expect(expr_get_right(flat)).to_equal(-1)
+        val tree = convert_flat_expr(flat)
+        match tree.kind:
+            case ExprKind.Range(start, end, _, _):
+                expect(start != nil).to_equal(true)
+                expect(end == nil).to_equal(true)
+            case _: fail("expected tree Range")
+    it "preserves an authored negative endpoint":
+        val flat = parsed_range("1..(-1)")
+        expect(parser_has_errors()).to_equal(false)
+        expect(expr_get_right(flat) >= 0).to_equal(true)
+        val tree = convert_flat_expr(flat)
+        match tree.kind:
+            case ExprKind.Range(_, end, _, _): expect(end != nil).to_equal(true)
+            case _: fail("expected bounded tree Range")
+    it "retains a bounded positive endpoint":
+        val flat = parsed_range("1..4")
+        expect(parser_has_errors()).to_equal(false)
+        expect(expr_get_tag(expr_get_right(flat))).to_equal(EXPR_INT_LIT)
+        expect(expr_get_int(expr_get_right(flat))).to_equal(4)
+
+    it "leaves the for-body colon outside an open range":
+        val flat = parsed_range("1..:")
+        expect(parser_has_errors()).to_equal(false)
+        expect(expr_get_tag(flat)).to_equal(EXPR_RANGE)
+        expect(expr_get_right(flat)).to_equal(-1)
+
+    it "preserves absence through the named call-argument continuation":
+        val call = parsed_range("f(start..)")
+        expect(parser_has_errors()).to_equal(false)
+        val args = expr_get_args(call)
+        expect(args.len()).to_equal(1)
+        expect(expr_get_tag(args[0])).to_equal(EXPR_RANGE)
+        expect(expr_get_right(args[0])).to_equal(-1)

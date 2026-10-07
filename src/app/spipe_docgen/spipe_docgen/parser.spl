@@ -1076,6 +1076,14 @@ fn _spipe_pending_marker_line(trimmed: text) -> bool:
     lower.starts_with("skip(") or lower.starts_with("fail(\"todo:")
 
 fn scenario_at_is_unconditional_pending(lines: [text], scenario_index: i64) -> bool:
+    if scenario_index < 0 or scenario_index >= lines.len():
+        return false
+    if not is_scenario_line(lines[scenario_index].trim()):
+        return false
+    val continuation = simple_string_continuation_lines(lines.join("\n"))
+    scenario_at_is_unconditional_pending_with_facts(lines, continuation, scenario_index)
+
+fn scenario_at_is_unconditional_pending_with_facts(lines: [text], continuation: [bool], scenario_index: i64) -> bool:
     """True when the scenario opened at `scenario_index` pends unconditionally.
 
     "Unconditional" is decided by INDENTATION, not by searching the body for
@@ -1094,29 +1102,18 @@ fn scenario_at_is_unconditional_pending(lines: [text], scenario_index: i64) -> b
     if not is_scenario_line(scenario_line.trim()):
         return false
     val scenario_indent = count_leading_indent(scenario_line)
-    # `find_scenario_body_end` gained a `continuation` parameter in #373 (so a
-    # fixture's column-0 string body no longer ends the scenario early); this
-    # call site was missed and passed three arguments to a four-parameter
-    # function, which is a STATIC semantic error — it broke `spipe-docgen` for
-    # every spec on every backend. The public 2-argument shape of this function
-    # is kept (three call sites in generator.spl plus a unit spec depend on it),
-    # so the lexical facts are derived here from the lines we were handed.
-    # Bug: doc/08_tracking/bug/spipe_docgen_missing_scenario_indent_argument_2026-09-13.md
-    val continuation = simple_string_continuation_lines(lines.join("\n"))
+    # Batch callers supply CoreLexer facts once for the whole source. The
+    # compatibility wrapper retains the public two-argument entry point.
     val end_index = find_scenario_body_end(lines, continuation, scenario_index + 1, scenario_indent)
     var body_indent = -1
-    var in_docstring = false
     var index = scenario_index + 1
     while index < end_index:
         val line = lines[index]
         val trimmed = line.trim()
-        if trimmed.starts_with("\"\"\""):
-            # A one-line `"""..."""` opens and closes on the same line.
-            if not (trimmed.len() > 5 and trimmed.ends_with("\"\"\"")):
-                in_docstring = not in_docstring
+        if continuation[index] or trimmed.starts_with("\"\"\""):
             index = index + 1
             continue
-        if in_docstring or trimmed == "" or trimmed.starts_with("#"):
+        if trimmed == "" or trimmed.starts_with("#"):
             index = index + 1
             continue
         val indent = count_leading_indent(line)

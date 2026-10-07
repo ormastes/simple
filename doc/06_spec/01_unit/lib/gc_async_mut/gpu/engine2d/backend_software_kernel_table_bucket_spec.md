@@ -17,10 +17,6 @@
 
 #### classifies 8, 32, 128, 4096 into TINY, SMALL, MEDIUM, LARGE respectively
 
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
-
 - classifies 8, 32, 128, 4096 into TINY, SMALL, MEDIUM, LARGE respectively
 
 
@@ -767,8 +763,21 @@ print("full 4-op x 4-bucket kernel table build (first clear, interpreter): " +
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_software_kernel_table_bucket_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-10-06 |
 | Generator | `simple spipe-docgen` (Simple) |
+
+<!-- sspec-maintain:traceability:start -->
+## Traceability
+
+Requirements covered by the scenarios in this manual: `REQ-SSPEC-UNIT`.
+<!-- sspec-maintain:traceability:end -->
+
+<!-- sspec-maintain:provenance:start -->
+## Generation history
+
+- Previous generation source: `676e691f6c32ea56b5d664fe453b4c2bc2df888c664fbd956277d3daead6cba0`, maintenance tool `1`, rules `ssdoc-rules/1`. Its scorecard described that earlier source and is superseded.
+- Current generation source: `06a0952368461ad29deae31134366b80f129e8e0a7945528577b82097818764b`. Repaired docgen completed within the unchanged 90-second guard, reporting one complete manual, zero stubs and twenty active scenarios. Evidence: `/tmp/simple-docgen-stall-review/`. Qualification is Phase1 bootstrap-seed only; no current maintenance score or pure-runtime qualification is claimed.
+<!-- sspec-maintain:provenance:end -->
 
 ## Overview
 
@@ -797,51 +806,3 @@ Tests covering kernel_size_bucket — bucket boundaries used by the honest gate,
 
 
 </details>
-
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-SSPEC-UNIT`
-<!-- sspec-maintain:traceability:end -->
-
-<!-- sspec-maintain:provenance:start -->
-## Generation history
-
-- Canonical SPipe generation for source `676e691f6c32ea56b5d664fe453b4c2bc2df888c664fbd956277d3daead6cba0`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `676e691f6c32ea56b5d664fe453b4c2bc2df888c664fbd956277d3daead6cba0`.
-<!-- sspec-maintain:provenance:end -->
-
-<!-- sspec-maintain:scorecard:start -->
-## SSpec documentization scorecard
-
-Source SHA-256: `676e691f6c32ea56b5d664fe453b4c2bc2df888c664fbd956277d3daead6cba0`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
-
-SSpec documentization score: 92/100
-source: test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_software_kernel_table_bucket_spec.spl
-mirror: doc/06_spec/01_unit/lib/gc_async_mut/gpu/engine2d/backend_software_kernel_table_bucket_spec.md (current)
-findings: 5 blockers: 0
-  narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/gc_async_mut/gpu/engine2d/backend_software_kernel_table_bucket_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/gc_async_mut/gpu/engine2d/backend_software_kernel_table_bucket_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_software_kernel_table_bucket_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'classifies 8, 32, 128, 4096 into TINY, SMALL, MEDIUM, LARGE respectively' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_software_kernel_table_bucket_spec.spl:91:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'keeps TINY on scalar when faster=false, even though bit_exact=true' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_software_kernel_table_bucket_spec.spl:108:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'registers TINY when faster=true and bit_exact=true — same gate, opposite real outcome' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-<!-- sspec-maintain:scorecard:end -->
