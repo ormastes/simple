@@ -1,0 +1,82 @@
+# Aggregate worker RSS admission. This is a dispatch throttle; the enclosing
+# watchdog enforces a separate sampled process-tree RSS limit. Values named MB mean MiB.
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.env_ops.{host_os}
+use std.common.convert.{try_parse_in_range}
+
+val WORKER_MEMORY_SAMPLE_INTERVAL_US = 500000
+val WORKER_MEMORY_PS_LIMIT = 1048576
+
+# ps columns are unsigned decimal tokens. Conversion methods may return zero
+# for malformed text; reject lexical errors and overflow before accounting.
+fn worker_memory_decimal(value: text, maximum: i64) -> i64:
+    if value == "": return -1
+    for ch in value:
+        if ch < "0" or ch > "9": return -1
+    try_parse_in_range(value, 0, maximum) ?? -1
+
+# Parse one bounded ps snapshot. Missing owned roots remain reserved: they may
+# have exited since sampling; only the scheduler can reap their owned handles.
+# Unrelated PIDs and detached processes are not charged to a different worker.
+# Detached descendants remain covered by the enclosing sampled tree watchdog.
+fn worker_memory_charges(snapshot: text, roots: [i64], reservation_kib: i64) -> [i64]:
+    if snapshot == "" or snapshot.len() >= WORKER_MEMORY_PS_LIMIT or roots.len() > 128 or reservation_kib <= 0:
+        return []
+    var parents: {text: i64} = {}
+    var rss: {text: i64} = {}
+    var owners: {text: i64} = {}
+    var charges: [i64] = []
+    var index = 0
+    for root in roots:
+        if root <= 0 or owners.contains_key(root.to_text()): return []
+        owners[root.to_text()] = index
+        charges.push(0)
+        index = index + 1
+    var rows = 0
+    for line in snapshot.split("\n"):
+        if line.trim() == "": continue
+        var fields: [text] = []
+        for field in line.trim().replace("\t", " ").split(" "):
+            if field != "": fields.push(field)
+        if fields.len() != 3: return []
+        val pid = worker_memory_decimal(fields[0], 2147483647)
+        val parent = worker_memory_decimal(fields[1], 2147483647)
+        val kib = worker_memory_decimal(fields[2], 1099511627776)
+        if pid < 0 or parent < 0 or kib < 0 or kib > 1099511627776 or parents.contains_key(pid.to_text()): return []
+        rows = rows + 1
+        if rows > 16384: return []
+        parents[pid.to_text()] = parent
+        rss[pid.to_text()] = kib
+    if rows == 0: return []
+    # Memoize ancestry ownership so broad/deep trees do not rescan every chain.
+    for (pid_text, kib) in rss:
+        var cursor = pid_text.to_int() ?? -1
+        var chain: [i64] = []
+        while cursor > 0 and not owners.contains_key(cursor.to_text()) and parents.contains_key(cursor.to_text()):
+            if chain.len() >= 256 or chain.contains(cursor): return []
+            chain.push(cursor)
+            cursor = parents[cursor.to_text()]
+        val owner = if owners.contains_key(cursor.to_text()): owners[cursor.to_text()] else: -1
+        for member in chain: owners[member.to_text()] = owner
+        if owner >= 0: charges[owner] = charges[owner] + kib
+    index = 0
+    while index < charges.len():
+        if charges[index] < reservation_kib: charges[index] = reservation_kib
+        index = index + 1
+    charges
+
+fn worker_memory_supported(os: text) -> bool:
+    os == "linux" or os == "freebsd" or os == "macos" or os == "darwin"
+
+fn sample_worker_memory(roots: [i64], reservation_kib: i64) -> [i64]:
+    if roots.len() == 0: return []
+    val os = host_os()
+    if not worker_memory_supported(os): return []
+    # Absolute path avoids the facade's PATH-resolution subprocess. One probe
+    # per >=500ms admission window, never once per worker. Bound time + output.
+    val (output, error, code) = process_run_bounded("/bin/ps", ["-ax", "-o", "pid=", "-o", "ppid=", "-o", "rss="], 2000, WORKER_MEMORY_PS_LIMIT)
+    if code != 0 or error.trim() != "": return []
+    worker_memory_charges(output, roots, reservation_kib)
+
+fn worker_memory_can_spawn(budget_kib: i64, charged_kib: i64, reserve_kib: i64) -> bool:
+    budget_kib > 0 and charged_kib >= 0 and reserve_kib > 0 and reserve_kib <= budget_kib and charged_kib <= budget_kib - reserve_kib
