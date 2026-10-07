@@ -1,0 +1,330 @@
+#!/bin/sh
+# Runs externally built Simple item5 app probes under the test-only provider
+# event observer. This records execution evidence; producer provenance and
+# production performance qualification remain separate gates.
+set -eu
+umask 077
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+watchdog=$root/scripts/resource/process-tree-rss-watchdog.pl
+receipt_validator=$root/scripts/check/lib/vector-provider-receipt.pl
+stage_helper=$root/scripts/check/lib/stage-verified-file.shs
+usage() {
+    cat <<'USAGE'
+Usage: run-item5-app-vector-receipts.shs --output ABS_DIR \
+  --producer-receipt HELLO_JSON --producer-receipt-sha256 HEX \
+  --app-build-manifest JSON --app-build-manifest-sha256 HEX \
+  --provider-dso PATH --provider-sha256 HEX --observer PATH --observer-sha256 HEX \
+  --provider-id ID --implementation-id ID \
+  --db-scalar PATH --db-scalar-sha256 HEX --db-vector PATH --db-vector-sha256 HEX \
+  --http-scalar PATH --http-scalar-sha256 HEX --http-vector PATH --http-vector-sha256 HEX
+
+Optional: --max-rss-kib N (default 1048576), --timeout-seconds N (default 60).
+The JSON build manifest schema is item5-simple-app-build-v1, with fields
+compiler_sha256, source_commit, and apps.{db-scalar,db-vector,http-scalar,http-vector}.sha256.
+Each app entry must also name compiler_sha256 and source_commit. The manifest
+is caller-supplied provenance and is recorded by hash; this runner does not
+independently prove how the binary was produced.
+USAGE
+}
+fail() { echo "FAIL item5 app receipt runner: $*" >&2; exit 1; }
+need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || fail "missing value for $1"; }
+
+output=''
+producer_receipt=''
+producer_receipt_sha=''
+app_manifest=''
+app_manifest_sha=''
+provider_dso=''
+provider_sha=''
+observer_so=''
+observer_sha=''
+provider_id=''
+implementation_id=''
+db_scalar=''; db_scalar_sha=''
+db_vector=''; db_vector_sha=''
+http_scalar=''; http_scalar_sha=''
+http_vector=''; http_vector_sha=''
+max_rss_kib=1048576
+timeout_seconds=60
+while [ "$#" -gt 0 ]; do
+    key=$1; shift
+    case "$key" in
+        --help) usage; exit 0 ;;
+        --output) need_value "$key" "${1-}"; output=$1; shift ;;
+        --producer-receipt) need_value "$key" "${1-}"; producer_receipt=$1; shift ;;
+        --producer-receipt-sha256) need_value "$key" "${1-}"; producer_receipt_sha=$1; shift ;;
+        --app-build-manifest) need_value "$key" "${1-}"; app_manifest=$1; shift ;;
+        --app-build-manifest-sha256) need_value "$key" "${1-}"; app_manifest_sha=$1; shift ;;
+        --provider-dso) need_value "$key" "${1-}"; provider_dso=$1; shift ;;
+        --provider-sha256) need_value "$key" "${1-}"; provider_sha=$1; shift ;;
+        --observer) need_value "$key" "${1-}"; observer_so=$1; shift ;;
+        --observer-sha256) need_value "$key" "${1-}"; observer_sha=$1; shift ;;
+        --provider-id) need_value "$key" "${1-}"; provider_id=$1; shift ;;
+        --implementation-id) need_value "$key" "${1-}"; implementation_id=$1; shift ;;
+        --db-scalar) need_value "$key" "${1-}"; db_scalar=$1; shift ;;
+        --db-scalar-sha256) need_value "$key" "${1-}"; db_scalar_sha=$1; shift ;;
+        --db-vector) need_value "$key" "${1-}"; db_vector=$1; shift ;;
+        --db-vector-sha256) need_value "$key" "${1-}"; db_vector_sha=$1; shift ;;
+        --http-scalar) need_value "$key" "${1-}"; http_scalar=$1; shift ;;
+        --http-scalar-sha256) need_value "$key" "${1-}"; http_scalar_sha=$1; shift ;;
+        --http-vector) need_value "$key" "${1-}"; http_vector=$1; shift ;;
+        --http-vector-sha256) need_value "$key" "${1-}"; http_vector_sha=$1; shift ;;
+        --max-rss-kib) need_value "$key" "${1-}"; max_rss_kib=$1; shift ;;
+        --timeout-seconds) need_value "$key" "${1-}"; timeout_seconds=$1; shift ;;
+        *) fail "unknown option $key" ;;
+    esac
+done
+[ -n "$output" ] && [ -n "$producer_receipt" ] && [ -n "$producer_receipt_sha" ] &&
+    [ -n "$app_manifest" ] && [ -n "$app_manifest_sha" ] &&
+    [ -n "$provider_dso" ] && [ -n "$provider_sha" ] && [ -n "$observer_so" ] &&
+    [ -n "$observer_sha" ] && [ -n "$provider_id" ] && [ -n "$implementation_id" ] &&
+    [ -n "$db_scalar" ] && [ -n "$db_scalar_sha" ] && [ -n "$db_vector" ] &&
+    [ -n "$db_vector_sha" ] && [ -n "$http_scalar" ] && [ -n "$http_scalar_sha" ] &&
+    [ -n "$http_vector" ] && [ -n "$http_vector_sha" ] || { usage >&2; exit 2; }
+case "$output" in /*) ;; *) fail 'output directory must be absolute' ;; esac
+[ ! -e "$output" ] || fail 'output directory must be fresh'
+case "$max_rss_kib" in ''|*[!0-9]*) fail 'RSS cap must be a positive integer' ;; esac
+case "$timeout_seconds" in ''|*[!0-9]*) fail 'timeout must be a positive integer' ;; esac
+[ "$max_rss_kib" -gt 0 ] && [ "$max_rss_kib" -le 2097152 ] || fail 'RSS cap must be between 1 KiB and 2 GiB'
+[ "$timeout_seconds" -gt 0 ] && [ "$timeout_seconds" -le 600 ] || fail 'timeout must be 1..600 seconds'
+for digest in "$provider_sha" "$observer_sha" "$db_scalar_sha" "$db_vector_sha" "$http_scalar_sha" "$http_vector_sha" "$producer_receipt_sha" "$app_manifest_sha"; do
+    printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$' || fail 'all supplied SHA-256 values must be lowercase hex'
+done
+perl -MMath::BigInt -e '
+my $max = Math::BigInt->new("18446744073709551615");
+for my $value (@ARGV) {
+    $value =~ /\A[1-9][0-9]*\z/ or die "identity must be positive decimal u64\n";
+    Math::BigInt->new($value) <= $max or die "identity exceeds u64\n";
+}
+' "$provider_id" "$implementation_id" || fail 'provider identities must be positive decimal u64'
+[ -f "$db_scalar" ] && [ -x "$db_scalar" ] && [ -f "$db_vector" ] && [ -x "$db_vector" ] &&
+    [ -f "$http_scalar" ] && [ -x "$http_scalar" ] && [ -f "$http_vector" ] && [ -x "$http_vector" ] || fail 'all four app binaries must exist and be executable regular files'
+[ -r "$provider_dso" ] && [ -r "$observer_so" ] && [ -r "$producer_receipt" ] && [ -r "$app_manifest" ] || fail 'provider, observer, and provenance files must be readable'
+[ -x "$watchdog" ] && [ -r "$receipt_validator" ] && [ -r "$stage_helper" ] || fail 'watchdog or shared runner helper is missing'
+command -v sha256sum >/dev/null 2>&1 || fail 'sha256sum is required'
+command -v perl >/dev/null 2>&1 || fail 'perl is required'
+command -v /usr/bin/time >/dev/null 2>&1 || fail '/usr/bin/time is required'
+for json in "$producer_receipt" "$app_manifest"; do
+    size=$(stat -c %s -- "$json") || fail "cannot stat provenance JSON $json"
+    [ "$size" -le 65536 ] || fail 'provenance JSON exceeds 64 KiB bound'
+done
+mkdir -p "$output/staged" "$output/logs" "$output/receipts"
+stage_file() {
+    source=$1 name=$2 mode=$3 expected=$4
+    sh "$stage_helper" "$source" "$output/staged/$name" "$mode" "$expected" || fail "cannot stage $name"
+}
+stage_app() {
+    source=$1 role=$2 expected=$3
+    file_name=${source##*/}
+    [ -n "$file_name" ] && [ "$file_name" != . ] && [ "$file_name" != .. ] || fail "invalid executable basename for $role"
+    mkdir -m 0700 "$output/staged/$role" || fail "cannot create staged role directory $role"
+    sh "$stage_helper" "$source" "$output/staged/$role/$file_name" 0555 "$expected" || fail "cannot stage $role"
+}
+stage_app "$db_scalar" db-scalar "$db_scalar_sha"
+stage_app "$db_vector" db-vector "$db_vector_sha"
+stage_app "$http_scalar" http-scalar "$http_scalar_sha"
+stage_app "$http_vector" http-vector "$http_vector_sha"
+stage_file "$provider_dso" vector-provider.so 0444 "$provider_sha"
+stage_file "$observer_so" vector-observer.so 0444 "$observer_sha"
+stage_file "$producer_receipt" producer-hello.json 0444 "$producer_receipt_sha"
+stage_file "$app_manifest" app-build-manifest.json 0444 "$app_manifest_sha"
+find "$output/staged" -type d -exec chmod 0555 {} + || fail 'cannot freeze staged artifact directories'
+staged_db_scalar=$output/staged/db-scalar/${db_scalar##*/}
+staged_db_vector=$output/staged/db-vector/${db_vector##*/}
+staged_http_scalar=$output/staged/http-scalar/${http_scalar##*/}
+staged_http_vector=$output/staged/http-vector/${http_vector##*/}
+staged_provider=$output/staged/vector-provider.so
+staged_observer=$output/staged/vector-observer.so
+staged_producer_receipt=$output/staged/producer-hello.json
+staged_app_manifest=$output/staged/app-build-manifest.json
+sha_file() { sha256sum -- "$1" | awk '{print $1}'; }
+
+# Validate the immutable Phase2 Hello receipt and caller-supplied app-build
+# manifest. The manifest binds each staged app hash to the producer hash.
+provenance=$(perl -MJSON::PP -e '
+use strict; use warnings;
+my ($hello_path, $manifest_path, @roles) = @ARGV;
+sub load_json {
+    my ($path) = @_;
+    -f $path && -s $path <= 65536 or die "provenance JSON missing/oversize\n";
+    open my $fh, "<:raw", $path or die "provenance JSON open failed\n";
+    local $/; my $bytes = <$fh>; close $fh or die "provenance JSON close failed\n";
+    return decode_json($bytes);
+}
+my $hello = load_json($hello_path);
+my $manifest = load_json($manifest_path);
+($hello->{status} // "") eq "pass" && ($hello->{gate_exit_status} // -1) == 0
+    or die "Phase2 Hello receipt is not PASS\n";
+my $compiler = $hello->{compiler_sha256} // "";
+my $source = $hello->{source_commit} // "";
+$compiler =~ /\A[0-9a-f]{64}\z/ && $source =~ /\A[0-9a-f]{40,64}\z/
+    or die "Hello receipt lacks compiler/source provenance\n";
+($manifest->{schema} // "") eq "item5-simple-app-build-v1"
+    or die "app build manifest schema mismatch\n";
+($manifest->{compiler_sha256} // "") eq $compiler &&
+    ($manifest->{source_commit} // "") eq $source
+    or die "app build manifest is not bound to the Hello producer\n";
+for my $entry (@roles) {
+    my ($role, $sha) = split /=/, $entry, 2;
+    my $app = $manifest->{apps}{$role} // {};
+    ($app->{status} // "") eq "pass" && ($app->{sha256} // "") eq $sha &&
+        ($app->{compiler_sha256} // "") eq $compiler &&
+        ($app->{source_commit} // "") eq $source
+        or die "app build manifest mismatch for $role\n";
+}
+print "$compiler\t$source\n";
+' "$staged_producer_receipt" "$staged_app_manifest" \
+    "db-scalar=$db_scalar_sha" "db-vector=$db_vector_sha" \
+    "http-scalar=$http_scalar_sha" "http-vector=$http_vector_sha") || fail 'producer/app provenance validation failed'
+IFS="$(printf '\t')" read -r producer_compiler_sha producer_source_commit <<EOF
+$provenance
+EOF
+
+field() {
+    awk -F= -v key="$2" '$1==key { count++; value=substr($0,index($0,"=")+1) } END { if (count != 1) exit 1; print value }' "$1"
+}
+validate_watchdog_receipt() {
+    rss=$1 expected_max=$2
+    [ "$(field "$rss" status)" = complete ] || fail "watchdog status is not complete: $rss"
+    [ "$(field "$rss" exit_status)" = 0 ] || fail "watchdog child exit was not zero: $rss"
+    [ "$(field "$rss" root_pid)" -gt 0 ] || fail "watchdog root_pid is invalid: $rss"
+    [ "$(field "$rss" quiescent)" = 1 ] || fail "watchdog did not observe quiescence: $rss"
+    [ "$(field "$rss" rss_cap_mode)" = enforce ] || fail "RSS cap was not enforced: $rss"
+    [ "$(field "$rss" rss_cap_enforced)" = 1 ] || fail "RSS enforcement is not recorded: $rss"
+    [ "$(field "$rss" max_rss_kib)" = "$expected_max" ] || fail "RSS limit differs from requested cap: $rss"
+    peak=$(field "$rss" peak_rss_kib)
+    case "$peak" in ''|*[!0-9]*) fail "invalid peak RSS: $rss" ;; esac
+    [ "$peak" -lt "$expected_max" ] || fail "RSS cap was reached: $rss"
+}
+run_app() {
+    role=$1 binary=$2 mode=$3 expected_marker=$4
+    shift 4
+    event_receipt=$output/receipts/$role.events
+    rss_receipt=$output/receipts/$role.rss.env
+    stdout=$output/logs/$role.stdout
+    stderr=$output/logs/$role.stderr
+    watchdog_log=$output/logs/$role.watchdog.log
+    elapsed=$output/logs/$role.elapsed_seconds
+    [ ! -e "$event_receipt" ] && [ ! -e "$rss_receipt" ] || fail "duplicate role run $role"
+    result=0
+    (
+        exec 3>"$event_receipt"
+        ulimit -f 2048 || fail 'cannot set app output-file limit'
+        /usr/bin/time -f '%e' -o "$elapsed" perl "$watchdog" \
+            --max-rss-kib="$max_rss_kib" --rss-cap-mode=enforce \
+            --timeout-seconds="$timeout_seconds" --receipt="$rss_receipt" -- \
+        env -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD \
+                -u SIMPLE_VECTOR_TEST_RECEIPT_OWNER \
+                SIMPLE_VECTOR_TEST_RECEIPT_OWNER=1 LD_PRELOAD="$staged_observer" \
+                "$binary" "$@" >"$stdout" 2>"$stderr"
+    ) >"$watchdog_log" 2>&1 || result=$?
+    [ "$result" = 0 ] || fail "$role execution failed with status $result (see logs/$role.*)"
+    for log_file in "$stdout" "$stderr" "$watchdog_log"; do
+        log_size=$(stat -c %s -- "$log_file") || fail "cannot stat $role output"
+        [ "$log_size" -le 1048576 ] || fail "$role output exceeded 1 MiB bound"
+    done
+    validate_watchdog_receipt "$rss_receipt" "$max_rss_kib"
+    root_pid=$(field "$rss_receipt" root_pid)
+    case "$mode" in
+        no-load) perl "$receipt_validator" "$event_receipt" "$root_pid" --no-load || fail "$role event receipt rejected" ;;
+        db-vector) perl "$receipt_validator" "$event_receipt" "$root_pid" --require-load --exact-op=1:10:11 --forbid-op=2 --forbid-op=3 --forbid-op=4 || fail "$role event receipt did not prove only the expected bitmap work" ;;
+        http-vector) perl "$receipt_validator" "$event_receipt" "$root_pid" --require-load --require-op=3:1:1 --success-only-op=3 --require-op=4:1:1 --success-only-op=4 --forbid-op=1 --forbid-op=2 || fail "$role event receipt did not prove only successful HTTP vector loops" ;;
+        *) fail "unknown app run mode $mode" ;;
+    esac
+    [ "$(grep -Fxc "$expected_marker" "$stdout" || true)" = 1 ] || fail "$role success oracle missing or repeated (see logs/$role.stdout)"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$role" "$root_pid" "$mode" "$(sha_file "$binary")" \
+        "$(field "$rss_receipt" peak_rss_kib)" "$(cat "$elapsed")" >>"$output/runs.tsv"
+}
+
+printf 'role\troot_pid\tmode\tbinary_sha256\tpeak_rss_kib\twall_seconds_diagnostic\n' >"$output/runs.tsv"
+run_app db-scalar "$staged_db_scalar" no-load \
+    'PURE_DATABASE_SCALAR_QUERY_PASS queries=10 boundaries=31,32,33,511,512,513,1023,1024,1025 no_match=checked'
+run_app db-vector "$staged_db_vector" db-vector \
+    'PURE_DATABASE_BITMAP_PROVIDER_PASS queries=10 owner_reported_calls=10 boundaries=31,32,33,511,512,513,1023,1024,1025 no_match=checked native_call_counter=unavailable isa=unproved' \
+    "$staged_provider" "$provider_sha" "$provider_id" "$implementation_id"
+run_app http-scalar "$staged_http_scalar" no-load \
+    'HTTP_SCALAR_LIVE_SOCKET_PROBE_COMPLETE valid=true security_rejection=true provider_used=false'
+run_app http-vector "$staged_http_vector" http-vector \
+    'HTTP_VECTOR_LIVE_SOCKET_PROBE_COMPLETE provider_used=true retained_session_reused=true scalar_fallback=true security_rejection=true' \
+    "$staged_provider" "$provider_sha"
+
+compare_db_records() {
+    perl - "$output/logs/db-scalar.stdout" "$output/logs/db-vector.stdout" <<'PERL'
+use strict; use warnings;
+my @cases = (31,32,33,511,512,513,1023,1024,1025,'empty');
+sub records {
+    my ($path) = @_;
+    open my $fh, '<', $path or die "cannot read DB app output\n";
+    my @records = grep { /^ITEM5_DB_ROWS_V1 / } <$fh>;
+    close $fh;
+    return @records;
+}
+my @scalar = records($ARGV[0]);
+my @vector = records($ARGV[1]);
+@scalar == 10 && @vector == 10 or die "expected exactly ten DB row-oracle records per app\n";
+for my $i (0..$#cases) {
+    my $case = $cases[$i];
+    my $expected = 'ITEM5_DB_ROWS_V1 case=' . $case . ' rows=';
+    my @rows;
+    if ($case eq 'empty') { $expected .= '0 data=-'; }
+    else {
+        my $threshold = int($case / 2);
+        for my $seq (1..$case) { push @rows, "$seq:$seq" if $seq > $threshold && ($seq - 1) % 4 == 0; }
+        $expected .= scalar(@rows) . ' data=' . (@rows ? join(',', @rows) : '-');
+    }
+    chomp $scalar[$i]; chomp $vector[$i];
+    $scalar[$i] eq $expected or die "DB scalar independent oracle mismatch at case $case\n";
+    $vector[$i] eq $expected or die "DB vector independent oracle mismatch at case $case\n";
+}
+exit 0;
+PERL
+}
+compare_db_records || fail 'DB row records differ from the independent oracle'
+perl - "$output/logs/http-scalar.stdout" "$output/logs/http-vector.stdout" <<'PERL'
+use strict; use warnings;
+sub records {
+    my ($path) = @_;
+    open my $fh, '<', $path or die "cannot read HTTP app output\n";
+    my @records = grep { /^ITEM5_HTTP_WIRE_V1 / } <$fh>;
+    close $fh;
+    return @records;
+}
+my @scalar = records($ARGV[0]); my @vector = records($ARGV[1]);
+@scalar == 2 && @vector == 2 or die "expected two HTTP wire oracle records per app\n";
+my @case = qw(valid duplicate-host);
+for my $i (0..1) {
+    chomp $scalar[$i]; chomp $vector[$i];
+    for my $line ($scalar[$i], $vector[$i]) {
+        $line =~ /\AITEM5_HTTP_WIRE_V1 case=([a-z-]+) bytes=([1-9][0-9]*) hex=([0-9a-f]+)\z/
+            or die "malformed HTTP wire record\n";
+        $1 eq $case[$i] or die "HTTP wire case order mismatch\n";
+        $2 <= 8192 && length($3) == 2 * $2 or die "HTTP wire record length mismatch\n";
+    }
+    $scalar[$i] eq $vector[$i] or die "scalar/vector HTTP response bytes differ for $case[$i]\n";
+}
+exit 0;
+PERL
+
+producer_receipt_sha=$(sha_file "$staged_producer_receipt")
+manifest_sha=$(sha_file "$staged_app_manifest")
+provider_staged_sha=$(sha_file "$staged_provider")
+observer_staged_sha=$(sha_file "$staged_observer")
+{
+    echo 'schema=item5-app-vector-runner-v1'
+    echo 'qualification=execution-evidence-only'
+    echo 'performance=diagnostic-only-instrumented-and-unequal-workloads'
+    echo "producer_hello_receipt_sha256=$producer_receipt_sha"
+    echo "app_build_manifest_sha256=$manifest_sha"
+    echo "producer_compiler_sha256=$producer_compiler_sha"
+    echo "producer_source_commit=$producer_source_commit"
+    echo "provider_identity=$provider_id"
+    echo "implementation_identity=$implementation_id"
+    echo "provider_sha256=$provider_staged_sha"
+    echo "observer_sha256=$observer_staged_sha"
+    echo "max_rss_kib=$max_rss_kib"
+    echo "timeout_seconds=$timeout_seconds"
+} >"$output/evidence.env"
+    chmod -R a-w "$output/staged"
+echo "APP_VECTOR_EXECUTION_EVIDENCE_COMPLETE output=$output db_provider_events=10 db_bitmap_loops=11 http_op3_op4=observed"
