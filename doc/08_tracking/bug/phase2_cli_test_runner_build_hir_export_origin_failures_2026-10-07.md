@@ -189,9 +189,22 @@ facade-hop bug: the recorded origin path drops a package segment
 - Clean verification (diagnostics stripped, 0b9fabb3c21): the repro import
   still resolves clean on the rebuilt snapshot (the remaining repro errors
   are the known SMF-packaging Mach-O/ELF host limitation, unrelated to
-  HIR). Matrix rerun in progress to determine whether the
-  test_runner_build SIGSEGV was diagnostic-induced or a real class-A
-  symptom.
+  HIR). Matrix rerun confirmed: compiler_cli_build still fails with a
+  single REAL `HIR aggregate failure` (not diagnostic-induced), and
+  test_runner_build fails with the class-A family — reexport-chase
+  receipts for PRIMITIVES (text/i64/bool/Option) through the
+  `test_runner_types` facade from test_runner_main.spl.
+- Class-A analysis so far: the chase-miss eprint
+  (module_import_registration.spl:828) is only a RECEIPT; the fatal is a
+  later `unresolved type/name` at a victim module. Notably
+  test_runner_main.spl's explicit imports from test_runner_types
+  (TestExecutionMode, TestFileResult, ...) contain NO primitive — so the
+  `item=text/i64/bool/Option` chase entries imply a GLOB import or a
+  mis-attributed importer. Primitives should short-circuit the chase
+  entirely (they need no origin module). Next probe: identify the exact
+  import row that pulls a primitive through a facade (glob vs selective),
+  then either fix the chase to treat builtins as self-resolving or repair
+  the offending import site.
 
 ## Suggested directions
 
