@@ -1,0 +1,138 @@
+# Independent default-server live TCP fixture. No vector or provider imports.
+# Full response bytes are compared externally without normalization/exclusions.
+
+use std.nogc_sync_mut.http_server.router.{Router}
+use std.nogc_sync_mut.http_server.server.{SimpleHttpServer, HttpConnectionOwnedResultV1}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse}
+use std.nogc_sync_mut.io.tcp.{TcpListener, TcpStream}
+use std.common.base_encoding.{text_to_bytes}
+
+val LIVE_MARKER_V1: text = "ITEM5_HTTP_APP_LIVE"
+val LONG_QUERY_V1: text = "pad=" + "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+val LONG_HEADER_V1: text = "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+
+fn _valid_request() -> text:
+    "POST /vector?{LONG_QUERY_V1} HTTP/1.1\r\nHost: loopback\r\nX-Item5-Pad: {LONG_HEADER_V1}\r\nContent-Length: 4\r\nConnection: close\r\n\r\nWiki"
+
+fn _duplicate_host_request() -> text:
+    "GET /vector?{LONG_QUERY_V1} HTTP/1.1\r\nHost: first\r\nHost: second\r\nConnection: close\r\n\r\n"
+
+fn _emit_http_wire(case_key: text, wire: text) -> bool:
+    val bytes = text_to_bytes(wire)
+    if bytes.len() == 0 or bytes.len() > 8192: return false
+    val digits = "0123456789abcdef"
+    var encoded = ""
+    var index = 0
+    while index < bytes.len():
+        val octet = bytes[index] as i64
+        val high = octet / 16
+        val low = octet % 16
+        encoded = encoded + digits.slice(high, high + 1) + digits.slice(low, low + 1)
+        index = index + 1
+    println("ITEM5_HTTP_WIRE_V1 case={case_key} bytes={bytes.len()} hex={encoded}")
+    true
+
+class HttpScalarLiveSocketResultV1:
+    wire: text
+    connection: HttpConnectionOwnedResultV1
+    ok: bool
+    reason: text
+
+fn _fail(message: text) -> i32:
+    println("FAIL HTTP scalar live socket probe: " + message)
+    1
+
+fn _handler(request: HttpRequest) -> HttpResponse:
+    val remote_prefix = "127.0.0.1:"
+    val remote_valid = request.remote_addr.starts_with(remote_prefix) and
+        request.remote_addr.len() > remote_prefix.len()
+    val query_valid = request.query == LONG_QUERY_V1
+    val padding_valid = request.header("X-Item5-Pad") == LONG_HEADER_V1
+    HttpResponse.ok("{LIVE_MARKER_V1} path={request.path};body={request.body};query_valid={query_valid};padding_valid={padding_valid};remote_valid={remote_valid}")
+
+fn _server() -> SimpleHttpServer:
+    var router = Router.new()
+    router.post("/vector", _handler)
+    SimpleHttpServer.new("127.0.0.1", 0, router)
+
+fn _drive_one(server: SimpleHttpServer, bytes: text) -> HttpScalarLiveSocketResultV1:
+    match TcpListener.bind("127.0.0.1:0"):
+        Err(_):
+            return HttpScalarLiveSocketResultV1(
+                wire: "", connection: HttpConnectionOwnedResultV1(
+                    handled: false, provider_used: false, provider_attempts: 0,
+                    provider_successes: 0, buffered_remainder: [],
+                    parser: nil, reason: "listener-bind-failed"),
+                ok: false, reason: "listener-bind-failed")
+        Ok(listener):
+            match listener.local_addr():
+                Err(_):
+                    val _ = listener.close()
+                    return HttpScalarLiveSocketResultV1(
+                        wire: "", connection: HttpConnectionOwnedResultV1(
+                            handled: false, provider_used: false, provider_attempts: 0,
+                            provider_successes: 0, buffered_remainder: [],
+                            parser: nil, reason: "listener-address-failed"),
+                        ok: false, reason: "listener-address-failed")
+                Ok(address):
+                    match TcpStream.connect(address):
+                        Err(_):
+                            val _ = listener.close()
+                            return HttpScalarLiveSocketResultV1(
+                                wire: "", connection: HttpConnectionOwnedResultV1(
+                                    handled: false, provider_used: false, provider_attempts: 0,
+                                    provider_successes: 0, buffered_remainder: [],
+                                    parser: nil, reason: "client-connect-failed"),
+                                ok: false, reason: "client-connect-failed")
+                        Ok(client):
+                            var wire = ""
+                            var outcome = HttpConnectionOwnedResultV1(
+                                handled: false, provider_used: false, provider_attempts: 0,
+                                provider_successes: 0, buffered_remainder: [],
+                                parser: nil, reason: "request-not-served")
+                            if client.write_text_status(bytes):
+                                match listener.accept():
+                                    Err(_): pass
+                                    Ok(connection):
+                                        if server.admission.try_acquire():
+                                            outcome = SimpleHttpServer.handle_connection_admitted_owned_v1(
+                                                server, connection)
+                                        else:
+                                            val _ = connection.close()
+                                match client.read_text():
+                                    Err(_): pass
+                                    Ok(response): wire = response
+                            val _ = client.close()
+                            val _ = listener.close()
+                            HttpScalarLiveSocketResultV1(
+                                wire: wire, connection: outcome,
+                                ok: wire != "", reason: outcome.reason)
+
+fn _is_scalar(result: HttpScalarLiveSocketResultV1) -> bool:
+    not result.connection.provider_used and
+        result.connection.provider_attempts == 0 and
+        result.connection.provider_successes == 0 and
+        result.connection.parser == nil
+
+fn main() -> i32:
+    val server = _server()
+    if server.request_parser != nil:
+        return _fail("default server unexpectedly installed a parser strategy")
+    val valid = _drive_one(server, _valid_request())
+    if not valid.ok or not valid.connection.handled or not _is_scalar(valid):
+        return _fail("default scalar request failed or used a provider: " + valid.reason)
+    if not valid.wire.contains("HTTP/1.1 200") or
+            not valid.wire.contains("{LIVE_MARKER_V1} path=/vector;body=Wiki;query_valid=true;padding_valid=true;remote_valid=true") or
+            not valid.wire.contains("X-Content-Type-Options: nosniff"):
+        return _fail("scalar route/query/body/security response or peer address was invalid")
+    val rejected = _drive_one(server, _duplicate_host_request())
+    if not rejected.ok or rejected.connection.handled or not _is_scalar(rejected) or
+            not rejected.wire.contains("HTTP/1.1 400") or
+            not rejected.wire.contains("X-Content-Type-Options: nosniff") or
+            rejected.wire.contains(LIVE_MARKER_V1):
+        return _fail("default scalar duplicate Host rejection changed")
+    if not _emit_http_wire("valid", valid.wire) or
+            not _emit_http_wire("duplicate-host", rejected.wire):
+        return _fail("bounded full-wire parity record failed")
+    println("HTTP_SCALAR_LIVE_SOCKET_PROBE_COMPLETE valid=true security_rejection=true provider_used=false")
+    0
