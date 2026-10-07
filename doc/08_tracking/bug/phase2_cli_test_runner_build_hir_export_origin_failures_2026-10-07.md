@@ -169,23 +169,23 @@ facade-hop bug: the recorded origin path drops a package segment
   guards; `@when` blocks were fixed by 85c2bcc828c (2026-10-06) but the
   `@cfg` form was routed around (`@workaround` directives in
   path_identity_abi.spl) rather than fixed.
-- Update 3 (the decisive clue): with THREE modules — provider `@cfg(arm64)`
-  fn + two unguarded neighbors, imported by user.spl (unguarded only) vs
-  user2.spl (imports the guarded name) — THE PROVIDER'S PARSE RESULT
-  DIFFERS BY IMPORTER: the unguarded import compiles clean with NO
-  diagnostic (guarded fn present in the module table), the guarded import
-  prints `functions=1` (guarded fn missing). Same provider file, same
-  snapshot, same command — so the parse/preprocessing CONTEXT differs by
-  import demand (ambient host-detected path vs the target-receipted path
-  with a different `native_target`). A parse-error body inside the guarded
-  fn DOES produce errors in the guarded-import context, proving the body
-  reaches a parser there while the decl enumeration (parser-module trace)
-  shows the declaration itself never emits. Conclusion: the
-  receipted/target-cfg path evaluates `@cfg(arm64)` against a wrong or
-  empty target in the in-process compile context. Next probe: log
-  (target_os, target_arch, arm64-result, path-taken) at both
-  `_pp_preprocess_conditionals_target_receipted_v1` and the ambient
-  `_pp_preprocess_conditionals` entries, rebuild, rerun the A/B pair.
+- ROOT CAUSE FOUND AND FIXED (2026-10-08): `cfg_detect_arch()` in
+  `src/compiler/10.frontend/core/cfg_platform.spl` returned "unknown" on
+  macOS — the env-var probes are unexported there and the /proc fallback
+  is Linux-only. Every `@cfg(arch)` guard therefore evaluated FALSE in
+  the ambient preprocessing path, so ACTIVE guarded declarations were
+  stripped before parse (pp-diag: `arm64_eval=false` on an aarch64 host).
+  The parser module table — and therefore the HIR module surface — lost
+  those declarations, while the compile-wide flat global registry still
+  resolved same-module uses (why local callers compiled clean). The seed's
+  Rust arch detection is host-correct, which is why only the self-hosted
+  compiler failed.
+  Fix: host_arch() fallback (uname -m via the runtime, cached once per
+  process) after the /proc probe. Verified with the instrumented rebuild:
+  pp-diag now prints `arm64_eval=true` and the 2-file repro compiles clean
+  (`succeeded=2`, no surface-diag, no "no exported item").
+  Diagnostics (pp-diag / surface-diag) are still in the tree pending the
+  matrix verification run; remove them before landing.
 
 ## Suggested directions
 
