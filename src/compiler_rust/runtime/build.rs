@@ -20,6 +20,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_backend_plugin.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_process_owned.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_file_view.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_dynload.c");
+    println!("cargo:rerun-if-changed=../../runtime/simple_gpu_provider_abi_v1.h");
+    println!("cargo:rerun-if-changed=../../runtime/runtime.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_fd_stat_rust_bridge.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_secure_staging.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_shared_parse_cell_private.h");
@@ -508,6 +511,12 @@ fn compile_c_runtime_sources() {
         build.flag_if_supported("/std:c11");
         build.flag_if_supported("/experimental:c11atomics");
     }
+    if native_all_provider {
+        // One registry owns authentication and every session/resource lease.
+        // Keep the Rust legacy GPU/dynlib APIs; do not create duplicate owners.
+        c_sources.push("runtime_dynload.c");
+        build.define("SIMPLE_GPU_PROVIDER_REGISTRY_ONLY", None);
+    }
     for source in &c_sources {
         let src_path = runtime_c_dir.join(source);
         if src_path.exists() {
@@ -635,6 +644,12 @@ fn collect_defined_runtime_symbols(
 }
 
 fn collect_c_runtime_exports(root: &Path, target_os: &str, native_all_provider: bool, exported: &mut HashSet<String>) {
+    if native_all_provider {
+        let source = fs::read_to_string(root.join("runtime_dynload.c"))
+            .expect("read native-all GPU registry owner");
+        exported.extend(runtime_export_scan::c_function_definitions(&source)
+            .into_iter().filter(|symbol| symbol.starts_with("rt_gpu_provider_")));
+    }
     const LINKED_C_SOURCES: &[&str] = &[
         "runtime_memory.c",
         "runtime_time.c",
