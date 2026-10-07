@@ -5,7 +5,6 @@ use compiler.hir.hir_definitions.*
 use compiler.hir.hir_symbol_table_methods.{_hir_symbol_owner_module}
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
-use std.io_runtime.{env_get_opt}
 
 fn mir_class_identity(symbol: HirSymbol) -> text:
     val owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
@@ -283,14 +282,12 @@ impl MirLowering:
                         relocated_interpolations = relocated_interpolations.push(relocated)
                     HirExprKind.StringLit(value, Some(relocated_interpolations))
             case Var(id) | NamedVar(id, _):
-                # TEMP DIAG (segv-investigation): the stage-native lane can
-                # miscompile a struct-valued Option returned across a function
-                # boundary (Some tag, null payload — see symbol_name_scalar_raw
-                # docstring). A null payload passes `source != nil` and then
-                # derefs address 0 in `source.kind`. Log before the deref and
-                # route through the has()-probe path.
-                if (env_get_opt("SIMPLE_PROVIDER_RELOC_DIAG") ?? "") == "1":
-                    print("[provider-reloc-diag] Var/NamedVar id={id.id} has={provider.symbols.has(id.id)}")
+                # Nil-payload guard: when the id is absent from the provider
+                # table, get_symbol_raw returns nil and the fallback branch
+                # would evaluate source.name on the nil payload
+                # (EXC_BAD_ACCESS address 0x0; the miscompiled-Option class is
+                # documented in symbol_name_scalar_raw's docstring). Probe
+                # has() first and lower Error when absent.
                 if not provider.symbols.has(id.id):
                     HirExprKind.Error
                 else:
