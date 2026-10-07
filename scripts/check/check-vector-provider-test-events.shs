@@ -92,60 +92,7 @@ grep -Eiq 'zmm[0-9]+' "$out/http-kernel.disasm" || { echo 'FAIL no ZMM HTTP code
 
 field() { awk -F= -v key="$2" '$1==key { print substr($0, index($0,"=")+1); found=1 } END { if (!found) exit 1 }' "$1"; }
 validate_receipt() {
-    perl - "$1" "$2" <<'PERL'
-use strict;
-use warnings;
-use Math::BigInt;
-my ($path, $expected_pid) = @ARGV;
-my $max = Math::BigInt->new('18446744073709551615');
-open my $fh, '<', $path or die "receipt open failed\n";
-my $bytes = '';
-while (length($bytes) <= 4096) {
-    my $chunk = '';
-    my $read = read($fh, $chunk, 4097 - length($bytes));
-    defined $read or die "receipt read failed\n";
-    last if $read == 0;
-    $bytes .= $chunk;
-}
-close $fh or die "receipt close failed\n";
-length($bytes) <= 4096 or die "receipt exceeds bound\n";
-$bytes =~ /\n\z/ or die "receipt missing final newline\n";
-my @lines = split /\n/, $bytes, -1;
-pop @lines if @lines && $lines[-1] eq '';
-@lines == 38 or die "receipt field count mismatch\n";
-shift(@lines) eq 'SIMPLE_VECTOR_TEST_EVENTS_V1' or die "receipt header mismatch\n";
-my %values;
-for my $line (@lines) {
-    $line =~ /^([a-z0-9_]+)=([0-9]+)$/ or die "malformed receipt field\n";
-    exists $values{$1} and die "duplicate receipt key\n";
-    length($2) <= 20 or die "receipt integer width exceeds u64\n";
-    my $number = Math::BigInt->new($2);
-    $number <= $max or die "receipt integer exceeds u64\n";
-    $values{$1} = $number;
-}
-my @expected = qw(pid loads events malformed overflow);
-for my $op (1..4) {
-    push @expected, "op${op}_loops";
-    push @expected, map { "op${op}_status$_" } 0..6;
-}
-keys(%values) == @expected or die "receipt contains missing/extra fields\n";
-for my $key (@expected) { exists $values{$key} or die "missing receipt key $key\n"; }
-$values{pid}->bstr eq $expected_pid or die "receipt PID mismatch\n";
-$values{loads} <= Math::BigInt->new(1) or die "multiple provider loads\n";
-$values{malformed}->is_zero or die "malformed callback event\n";
-$values{overflow}->is_zero or die "observer counter overflow\n";
-my $event_sum = Math::BigInt->new(0);
-for my $op (1..4) {
-    my $successes = $values{"op${op}_status0"};
-    my $op_sum = Math::BigInt->new(0);
-    for my $status (0..6) { $op_sum->badd($values{"op${op}_status$status"}); }
-    $event_sum->badd($op_sum);
-    $values{"op${op}_loops"}->is_zero || !$successes->is_zero
-        or die "loop count without a successful event for op $op\n";
-}
-$event_sum->bstr eq $values{events}->bstr or die "status counts do not sum to event count\n";
-exit 0;
-PERL
+    perl "$root/scripts/check/lib/vector-provider-receipt.pl" "$1" "$2"
 }
 write_zero_receipt() {
     destination=$1 pid=$2
