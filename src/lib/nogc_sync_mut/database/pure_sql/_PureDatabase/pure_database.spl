@@ -28,6 +28,158 @@ use nogc_sync_mut.db.db_query.{query_fts_match, query_page_summary_scan}
 use nogc_sync_mut.db.page_summary.{PageSummaryIndex}
 use std.common.crypto.sha256.{sha256_text}
 
+# Optional row-bitmap reducer contract. This owner-facing trait is deliberately
+# provider-neutral: the default PureDatabase query path does not import the
+# dynamic loader or any vector-provider adapter. Implementations return their
+# updated value in every transition, following the owned provider-session
+# result convention.
+trait PureDatabaseBitmapReducerV1:
+    fn provider_identity() -> text
+    fn implementation_identity() -> text
+    fn interface_identity() -> text
+    fn abi_digest() -> text
+    fn capability_bits() -> u64
+    # Monotonic owner-reported attempt count. Implementations may infer an
+    # attempt from the checked call result; this is not a native-boundary trace.
+    fn and_call_count() -> i64
+    fn reduce_and_owned_v1(lhs: [u32], rhs: [u32], row_count: i64) -> PureDatabaseBitmapReduceOwnedV1
+    fn close_owned_v1() -> PureDatabaseBitmapReducerCloseOwnedV1
+
+class PureDatabaseBitmapReduceOwnedV1:
+    reducer: PureDatabaseBitmapReducerV1
+    words: [u32]
+    status: i32
+    attempted: bool
+    provider_used: bool
+    reason: text
+
+class PureDatabaseBitmapReducerCloseOwnedV1:
+    reducer: PureDatabaseBitmapReducerV1
+    status: i32
+    reason: text
+
+class PureDatabaseBitmapQueryOwnedV1:
+    query: Result<[DbRow], DbError>
+    reducer: PureDatabaseBitmapReducerV1
+    provider_used: bool
+    provider_and_calls: i64
+    provider_identity: text
+    implementation_identity: text
+    interface_identity: text
+    abi_digest: text
+    capability_bits: u64
+    reason: text
+
+class _PureDatabaseSelectOwnedV1:
+    query: Result<[DbRow], DbError>
+    reducer: PureDatabaseBitmapReducerV1?
+    provider_used: bool
+    provider_and_calls: i64
+    provider_identity: text
+    implementation_identity: text
+    interface_identity: text
+    abi_digest: text
+    capability_bits: u64
+    reason: text
+
+fn _pure_database_select_owned_v1(query: Result<[DbRow], DbError],
+        reducer: PureDatabaseBitmapReducerV1?, provider_used: bool,
+        provider_and_calls: i64, reason: text) -> _PureDatabaseSelectOwnedV1:
+    if val Some(strategy) = reducer:
+        return _PureDatabaseSelectOwnedV1(
+            query: query, reducer: Some(strategy), provider_used: provider_used,
+            provider_and_calls: provider_and_calls,
+            provider_identity: strategy.provider_identity(),
+            implementation_identity: strategy.implementation_identity(),
+            interface_identity: strategy.interface_identity(), abi_digest: strategy.abi_digest(),
+            capability_bits: strategy.capability_bits(), reason: reason)
+    _PureDatabaseSelectOwnedV1(
+        query: query, reducer: nil, provider_used: false, provider_and_calls: 0,
+        provider_identity: "", implementation_identity: "", interface_identity: "",
+        abi_digest: "", capability_bits: 0u64, reason: reason)
+
+fn _pure_database_bitmap_value_kind_matches_v1(value: DbValue, literal: DbValue) -> bool:
+    match value:
+        DbValue.Integer(_):
+            match literal:
+                DbValue.Integer(_): true
+                _: false
+        DbValue.Text(_):
+            match literal:
+                DbValue.Text(_): true
+                _: false
+        _: false
+
+fn _pure_database_bitmap_comparison_supported_v1(expr: SqlExpr,
+        col_map: Dict<text, i32>, typed: [[DbValue]], row_count: i32) -> bool:
+    if expr.kind != SqlExprKind.BinaryOp or
+            not (expr.value == "=" or expr.value == "!=" or expr.value == "<" or
+                expr.value == "<=" or expr.value == ">" or expr.value == ">="):
+        return false
+    if not expr.left.? or not expr.right.?:
+        return false
+    val column = expr.left!
+    val literal = expr.right!
+    if column.kind != SqlExprKind.Column or literal.kind != SqlExprKind.Literal:
+        return false
+    if not col_map.has(column.value):
+        return false
+    val column_idx = col_map[column.value]
+    val literal_value = _parse_literal(literal.value)
+    if literal_value == DbValue.Null:
+        return false
+    var ri = 0
+    while ri < row_count:
+        if column_idx < 0 or column_idx >= typed[ri].len() as i32:
+            return false
+        val value = typed[ri][column_idx]
+        if value == DbValue.Null or
+                not _pure_database_bitmap_value_kind_matches_v1(value, literal_value):
+            return false
+        ri = ri + 1
+    true
+
+fn _pure_database_bitmap_terms_v1(sel: SqlSelect, params: [DbValue],
+        col_map: Dict<text, i32>, typed: [[DbValue]], row_count: i32) -> [SqlExpr]:
+    if params.len() != 0 or sel.distinct or sel.joins.len() != 0 or
+            sel.group_by.len() != 0 or sel.having.?:
+        return []
+    if not sel.where_expr.?:
+        return []
+    val condition = sel.where_expr!
+    if condition.kind != SqlExprKind.BinaryOp or condition.value != "AND" or
+            not condition.left.? or not condition.right.?:
+        return []
+    val left = condition.left!
+    val right = condition.right!
+    if not _pure_database_bitmap_comparison_supported_v1(left, col_map, typed, row_count) or
+            not _pure_database_bitmap_comparison_supported_v1(right, col_map, typed, row_count):
+        return []
+    [left, right]
+
+fn _pure_database_bitmap_scalar_and_v1(lhs: [u32], rhs: [u32], row_count: i32) -> [u32]:
+    val word_count = if row_count <= 0: 0 else: (row_count + 31) / 32
+    var words: [u32] = [0u32; word_count]
+    var wi = 0
+    while wi < word_count:
+        val left_word = if wi < lhs.len() as i32: lhs[wi] else: 0u32
+        val right_word = if wi < rhs.len() as i32: rhs[wi] else: 0u32
+        words[wi] = left_word & right_word
+        wi = wi + 1
+    words
+
+fn _pure_database_bitmap_select_indices_v1(words: [u32], row_count: i32) -> [i64]:
+    var result: [i64] = []
+    var row = 0
+    while row < row_count:
+        val word_idx = row / 32
+        val bit_idx = row % 32
+        if word_idx < words.len() as i32 and
+                ((words[word_idx] >> (bit_idx as u32)) & 1u32) != 0u32:
+            result.push(row as i64)
+        row = row + 1
+    result
+
 class PureDatabase:
     _path: text
     _tbl_names: [text]
@@ -1661,15 +1813,10 @@ class PureDatabase:
                 var cti: i32 = -1
                 if self._tbl_name_idx.has(ctable):
                     cti = self._tbl_name_idx[ctable]
-                if cti >= 0 and cti < self._sel_cache_key.len() as i32:
-                    if self._sel_cache_key[cti] == sql and sql != "":
-                        return Ok(self._sel_cache_res[cti])
+                if self._select_cache_hit_v1(cti, sql):
+                    return Ok(self._sel_cache_res[cti])
                 val result = self._do_select(cstmt.select, params)
-                if result.is_ok() and cti >= 0 and cti < self._sel_cache_key.len() as i32:
-                    self._sel_cache_key[cti] = sql
-                    match result:
-                        case Ok(rows): self._sel_cache_res[cti] = rows
-                        case Err(_): pass
+                self._select_cache_store_v1(cti, sql, result)
                 return result
         _reset_param_idx()
         val stmt = match sql_parse(sql):
@@ -1678,6 +1825,78 @@ class PureDatabase:
         if stmt.kind == SqlStmtKind.Select:
             return self._do_select(stmt.select, params)
         Err(DbError.QueryFailed(sql: sql, message: "query() requires SELECT"))
+
+    # Explicit opt-in query path. The normal `query()` method above remains
+    # unchanged and never asks for or imports a bitmap reducer. Unsupported SQL
+    # uses that ordinary path and returns the reducer unchanged with zero calls.
+    me query_with_bitmap_reducer_owned_v1(sql: text, params: [DbValue],
+            reducer: PureDatabaseBitmapReducerV1) -> PureDatabaseBitmapQueryOwnedV1:
+        val identity = reducer.provider_identity()
+        val implementation = reducer.implementation_identity()
+        val interface_id = reducer.interface_identity()
+        val digest = reducer.abi_digest()
+        val caps = reducer.capability_bits()
+        if not self.is_open:
+            return PureDatabaseBitmapQueryOwnedV1(
+                query: Err(DbError.Closed), reducer: reducer, provider_used: false,
+                provider_and_calls: 0, provider_identity: identity,
+                implementation_identity: implementation, interface_identity: interface_id,
+                abi_digest: digest, capability_bits: caps, reason: "database-closed")
+        _reset_param_idx()
+        val parsed = sql_parse(sql)
+        if parsed.is_err():
+            val ordinary = self.query(sql, params)
+            return PureDatabaseBitmapQueryOwnedV1(
+                query: ordinary, reducer: reducer, provider_used: false,
+                provider_and_calls: 0, provider_identity: identity,
+                implementation_identity: implementation, interface_identity: interface_id,
+                abi_digest: digest, capability_bits: caps, reason: "ordinary-query-parse-fallback")
+        val stmt = parsed.unwrap()
+        if stmt.kind != SqlStmtKind.Select or params.len() != 0:
+            val ordinary = self.query(sql, params)
+            return PureDatabaseBitmapQueryOwnedV1(
+                query: ordinary, reducer: reducer, provider_used: false,
+                provider_and_calls: 0, provider_identity: identity,
+                implementation_identity: implementation, interface_identity: interface_id,
+                abi_digest: digest, capability_bits: caps, reason: "unsupported-query-shape")
+        val table = stmt.select.from_table
+        var table_idx = -1
+        if self._tbl_name_idx.has(table):
+            table_idx = self._tbl_name_idx[table]
+        if self._select_cache_hit_v1(table_idx, sql):
+            return PureDatabaseBitmapQueryOwnedV1(
+                query: Ok(self._sel_cache_res[table_idx]), reducer: reducer, provider_used: false,
+                provider_and_calls: 0, provider_identity: identity,
+                implementation_identity: implementation, interface_identity: interface_id,
+                abi_digest: digest, capability_bits: caps, reason: "select-result-cache-hit")
+        val selected = self._do_select_bitmap_owned_v1(stmt.select, params, Some(reducer))
+        self._select_cache_store_v1(table_idx, sql, selected.query)
+        val next_reducer = match selected.reducer:
+            Some(value): value
+            nil: reducer
+        PureDatabaseBitmapQueryOwnedV1(
+            query: selected.query, reducer: next_reducer,
+            provider_used: selected.provider_used,
+            provider_and_calls: selected.provider_and_calls,
+            provider_identity: if selected.provider_identity != "": selected.provider_identity else: identity,
+            implementation_identity: if selected.implementation_identity != "": selected.implementation_identity else: implementation,
+            interface_identity: if selected.interface_identity != "": selected.interface_identity else: interface_id,
+            abi_digest: if selected.abi_digest != "": selected.abi_digest else: digest,
+            capability_bits: if selected.capability_bits != 0u64: selected.capability_bits else: caps,
+            reason: selected.reason)
+
+    me _select_cache_hit_v1(table_idx: i32, sql: text) -> bool:
+        table_idx >= 0 and table_idx < self._sel_cache_key.len() as i32 and
+            self._sel_cache_key[table_idx] == sql and sql != ""
+
+    me _select_cache_store_v1(table_idx: i32, sql: text,
+            result: Result<[DbRow], DbError]) -> nil:
+        if result.is_ok() and table_idx >= 0 and
+                table_idx < self._sel_cache_key.len() as i32:
+            self._sel_cache_key[table_idx] = sql
+            match result:
+                case Ok(rows): self._sel_cache_res[table_idx] = rows
+                case Err(_): pass
 
     me query_one(sql: text, params: [DbValue]) -> Result<DbRow?, DbError>:
         val rows = self.query(sql, params)?
@@ -2936,16 +3155,24 @@ class PureDatabase:
     # ── Internal: SELECT ─────────────────────────────────────────────────
 
     me _do_select(sel: SqlSelect, params: [DbValue]) -> Result<[DbRow], DbError>:
+        self._do_select_bitmap_owned_v1(sel, params, nil).query
+
+    me _do_select_bitmap_owned_v1(sel: SqlSelect, params: [DbValue],
+            reducer: PureDatabaseBitmapReducerV1?) -> _PureDatabaseSelectOwnedV1:
+        var active_reducer = reducer
+        var provider_used = false
+        var provider_and_calls: i64 = 0
+        var reason = ""
         var ti: i32 = -1
         if self._tbl_name_idx.has(sel.from_table):
             ti = self._tbl_name_idx[sel.from_table]
         else:
             ti = _find_idx(self._tbl_names, sel.from_table)
         if ti < 0:
-            return Err(DbError.QueryFailed(
+            return _pure_database_select_owned_v1(Err(DbError.QueryFailed(
                 sql: "SELECT",
                 message: "no such table: {sel.from_table}"
-            ))
+            )), active_reducer, false, 0, "select-table-missing")
         var col_names = self._tbl_cols[ti]
         val snap = self._txn.snapshot()
         var tbl = self._tbl_data[ti]
@@ -3090,13 +3317,74 @@ class PureDatabase:
         # ── Full scan path (typed or fallback) ───────────────────────
         if not used_pk_path and not used_range_path and not used_single_bound and not used_like_prefix and not used_like_typed:
             if use_typed:
-                var ti2: i32 = 0
-                while ti2 < n_tuples:
-                    if vis[ti2]:
-                        val row_vals = typed[ti2]
-                        if has_join or _check_where_fast(sel.where_expr, col_map, row_vals, params):
-                            base_rows.push(row_vals)
-                    ti2 = ti2 + 1
+                var used_bitmap_reduction = false
+                if val Some(strategy) = active_reducer:
+                    val terms = _pure_database_bitmap_terms_v1(
+                        sel, params, col_map, typed, n_tuples)
+                    if terms.len() == 2 and not has_join:
+                        val word_count = if n_tuples <= 0: 0 else: (n_tuples + 31) / 32
+                        var left_words: [u32] = [0u32; word_count]
+                        var right_words: [u32] = [0u32; word_count]
+                        var mi = 0
+                        while mi < n_tuples:
+                            if vis[mi]:
+                                val row_values = typed[mi]
+                                if _check_where_fast(Some(terms[0]), col_map, row_values, params):
+                                    val word = mi / 32
+                                    left_words[word] = left_words[word] | (1u32 << ((mi % 32) as u32))
+                                if _check_where_fast(Some(terms[1]), col_map, row_values, params):
+                                    val word2 = mi / 32
+                                    right_words[word2] = right_words[word2] | (1u32 << ((mi % 32) as u32))
+                            mi = mi + 1
+                        val calls_before = strategy.and_call_count()
+                        val reduced = strategy.reduce_and_owned_v1(
+                            left_words, right_words, n_tuples as i64)
+                        active_reducer = Some(reduced.reducer)
+                        reason = reduced.reason
+                        val calls_after = reduced.reducer.and_call_count()
+                        val call_delta = if calls_after >= calls_before:
+                            calls_after - calls_before
+                        else: -1
+                        provider_and_calls = if call_delta > 0: call_delta else: 0
+                        var combined: [u32] = []
+                        if reduced.provider_used and reduced.status == 0 and
+                                call_delta == 1 and reduced.attempted and
+                                reduced.words.len() == word_count:
+                            var output_valid = true
+                            val tail_bits = n_tuples % 32
+                            if tail_bits > 0 and word_count > 0:
+                                val tail_mask = (1u32 << (tail_bits as u32)) - 1u32
+                                if (reduced.words[word_count - 1] & (~tail_mask)) != 0u32:
+                                    output_valid = false
+                            if output_valid:
+                                combined = reduced.words
+                                provider_used = true
+                                reason = "provider-and-invoked"
+                            else:
+                                reason = "provider-bitmap-tail-invalid"
+                        elif reduced.provider_used:
+                            reason = "provider-bitmap-output-invalid"
+                        elif call_delta < 0 or call_delta > 1 or
+                                reduced.attempted != (call_delta == 1):
+                            reason = "provider-and-call-count-inconsistent"
+                        if not provider_used:
+                            combined = _pure_database_bitmap_scalar_and_v1(
+                                left_words, right_words, n_tuples)
+                        val selected_rows = _pure_database_bitmap_select_indices_v1(
+                            combined, n_tuples)
+                        for selected_row in selected_rows:
+                            base_rows.push(typed[selected_row as i32])
+                        used_bitmap_reduction = true
+                    else:
+                        reason = "unsupported-two-term-typed-scan"
+                if not used_bitmap_reduction:
+                    var ti2: i32 = 0
+                    while ti2 < n_tuples:
+                        if vis[ti2]:
+                            val row_vals = typed[ti2]
+                            if has_join or _check_where_fast(sel.where_expr, col_map, row_vals, params):
+                                base_rows.push(row_vals)
+                        ti2 = ti2 + 1
             else:
                 val visible = tbl.scan(snap)
                 var ri: i32 = 0
@@ -3114,10 +3402,10 @@ class PureDatabase:
                 val jn = joins_arr[ji]
                 val jti = _find_idx(self._tbl_names, jn.table)
                 if jti < 0:
-                    return Err(DbError.QueryFailed(
+                    return _pure_database_select_owned_v1(Err(DbError.QueryFailed(
                         sql: "SELECT",
                         message: "no such table: {jn.table}"
-                    ))
+                    )), active_reducer, provider_used, provider_and_calls, "join-table-missing")
                 val jcols = self._tbl_cols[jti]
                 val jsnap = self._txn.snapshot()
                 var jtbl = self._tbl_data[jti]
@@ -3360,7 +3648,8 @@ class PureDatabase:
                 lli = lli + 1
             rows = limited
         self._last_changes = 0
-        Ok(rows)
+        _pure_database_select_owned_v1(
+            Ok(rows), active_reducer, provider_used, provider_and_calls, reason)
 
     # ── Internal: UPDATE ─────────────────────────────────────────────────
 

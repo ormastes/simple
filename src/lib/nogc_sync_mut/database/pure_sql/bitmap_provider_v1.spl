@@ -1,0 +1,84 @@
+# Opt-in PureDatabase row-bitmap reducer backed by the admitted vector owner.
+# Importing this module is explicit; the default SQL engine does not depend on
+# provider loading or vector runtime modules.
+
+use nogc_sync_mut.database.pure_sql.database.{
+    PureDatabaseBitmapReducerV1, PureDatabaseBitmapReduceOwnedV1,
+    PureDatabaseBitmapReducerCloseOwnedV1
+}
+use nogc_sync_mut.db.vector_provider.{
+    RowBitmapVectorSessionV1, row_bitmap_vector_session_open_owned_v1,
+    row_bitmap_and_with_vector_provider_owned_v1,
+    row_bitmap_vector_session_close_owned_v1,
+    ROW_BITMAP_VECTOR_ABI_DIGEST_V1
+}
+use nogc_sync_mut.db.accel.{RowBitmap}
+use os.smf.provider_loader.{
+    PROVIDER_SESSION_OK, PROVIDER_SESSION_VECTOR_CALL_FAILED,
+    ProviderAdmissionRequestV1
+}
+
+class PureDatabaseBitmapReducerOpenOwnedV1:
+    reducer: PureDatabaseBitmapReducerV1
+    status: i32
+    reason: text
+
+class PureDatabaseVectorBitmapReducerV1 with PureDatabaseBitmapReducerV1:
+    session: RowBitmapVectorSessionV1
+    attempts: i64
+
+    fn provider_identity() -> text:
+        self.session.and_query.call.result.provider_identity_digest.to_text()
+
+    fn implementation_identity() -> text:
+        self.session.and_query.call.result.implementation_digest.to_text()
+
+    fn interface_identity() -> text:
+        self.session.and_query.interface_id.to_text()
+
+    fn abi_digest() -> text:
+        ROW_BITMAP_VECTOR_ABI_DIGEST_V1
+
+    fn capability_bits() -> u64:
+        self.session.capability_bits
+
+    fn and_call_count() -> i64:
+        # Inferred from the adapter's accepted-success / vector-call-failed
+        # statuses. The canonical provider ABI has no independent call counter.
+        self.attempts
+
+    fn reduce_and_owned_v1(lhs: [u32], rhs: [u32],
+            row_count: i64) -> PureDatabaseBitmapReduceOwnedV1:
+        val left = RowBitmap(row_count: row_count, words: lhs)
+        val right = RowBitmap(row_count: row_count, words: rhs)
+        val called = row_bitmap_and_with_vector_provider_owned_v1(
+            self.session, left, right)
+        val attempted = called.provider_used or
+            called.status == PROVIDER_SESSION_VECTOR_CALL_FAILED
+        val next = PureDatabaseVectorBitmapReducerV1(
+            session: called.session,
+            attempts: self.attempts + (if attempted: 1 else: 0))
+        PureDatabaseBitmapReduceOwnedV1(
+            reducer: next, words: called.bitmap.words,
+            status: if called.status == PROVIDER_SESSION_OK and called.provider_used:
+                0 else: called.status,
+            attempted: attempted, provider_used: called.provider_used,
+            reason: called.reason)
+
+    fn close_owned_v1() -> PureDatabaseBitmapReducerCloseOwnedV1:
+        val closed = row_bitmap_vector_session_close_owned_v1(self.session)
+        val next = PureDatabaseVectorBitmapReducerV1(
+            session: closed.session, attempts: self.attempts)
+        PureDatabaseBitmapReducerCloseOwnedV1(
+            reducer: next, status: closed.status, reason: closed.reason)
+
+fn pure_database_vector_bitmap_reducer_open_owned_v1(
+        request: ProviderAdmissionRequestV1) -> PureDatabaseBitmapReducerOpenOwnedV1:
+    val opened = row_bitmap_vector_session_open_owned_v1(request)
+    val reducer = PureDatabaseVectorBitmapReducerV1(
+        session: opened.session, attempts: 0)
+    PureDatabaseBitmapReducerOpenOwnedV1(
+        reducer: reducer, status: opened.status, reason: opened.reason)
+
+export PureDatabaseBitmapReducerOpenOwnedV1, PureDatabaseVectorBitmapReducerV1
+export pure_database_vector_bitmap_reducer_open_owned_v1

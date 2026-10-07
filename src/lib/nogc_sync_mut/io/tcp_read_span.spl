@@ -1,0 +1,33 @@
+# Optional raw-span adapter for callers that synchronously lend TCP bytes to
+# a native provider. Importing this module is explicit so the default TCP and
+# HTTP server dependency closure has no new raw-pointer foreign reference.
+
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.io.types.{IoError, IoErrorKind}
+
+val TCP_READ_CHUNK_SPAN_MAX_V1: i64 = 8192
+
+@unsafe(reason: "returns a borrowed address into a retained byte array; callers must hold the span through synchronous use", capabilities: [ffi, raw_ptr])
+extern fn rt_array_data_ptr_text(collection: [u8]) -> i64
+
+class TcpReadChunkSpanV1:
+    bytes: [u8]
+
+    @unsafe(reason: "returns an address borrowed from this retained span", capabilities: [ffi, raw_ptr])
+    fn retained_address_v1() -> i64:
+        if self.bytes.len() == 0: return 0
+        unsafe(capabilities: [ffi, raw_ptr]):
+            rt_array_data_ptr_text(self.bytes)
+
+fn _tcp_read_span_error(message: text) -> IoError:
+    IoError(kind: IoErrorKind.Other, message: message, source: nil)
+
+fn tcp_read_chunk_span_v1(stream: TcpStream, size: i64) -> Result<TcpReadChunkSpanV1, IoError>:
+    if size <= 0 or size > TCP_READ_CHUNK_SPAN_MAX_V1:
+        return Err(_tcp_read_span_error("tcp read span size is outside 1..8192"))
+    match stream.read(size):
+        Err(error): Err(error)
+        Ok(bytes): Ok(TcpReadChunkSpanV1(bytes: bytes))
+
+export TcpReadChunkSpanV1, TCP_READ_CHUNK_SPAN_MAX_V1
+export tcp_read_chunk_span_v1

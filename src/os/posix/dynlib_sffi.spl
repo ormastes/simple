@@ -22,7 +22,7 @@
 # canonical packed buffers. Loader-session pinning remains a separate owner
 # rule: a successful result must not outlive the DynLibKind generation.
 
-use os.posix.dynlib.{DynLibKind, dynlib_symbol}
+use os.posix.dynlib.{DynLibKind, dynlib_symbol, dynlib_symbol_is_process_callable}
 use os.smf.provider_query_wire.{
     encode_provider_query_request_v1, decode_provider_query_result_v1
 }
@@ -34,6 +34,15 @@ use std.nogc_sync_mut.composition.provider_contract.{
 use std.nogc_sync_mut.composition.cli_command_wire.{
     CliCommandResultViewV1, encode_cli_command_request_v1,
     decode_cli_command_result_v1, cli_command_result_used_length_v1
+}
+use std.nogc_sync_mut.composition.vector_kernel_contract.{
+    SIMPLE_VECTOR_KERNELS_V1_APPLY_SYMBOL,
+    SIMPLE_VECTOR_RESPONSE_V1_SIZE,
+    SIMPLE_VECTOR_STATUS_EXECUTION_FAILED,
+    SimpleVectorKernelRequestV1, SimpleVectorKernelResponseV1
+}
+use std.nogc_sync_mut.composition.vector_kernel_wire.{
+    encode_simple_vector_request_v1, decode_simple_vector_response_v1
 }
 
 # --- Scalar runtime externs ---
@@ -52,6 +61,24 @@ extern fn rt_dyncall_4(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3: i64) 
 extern fn rt_dyncall_5(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3: i64, arg4: i64) -> i64
 @unsafe(reason: "generic integer-only dynamic call has no typed ABI proof", capabilities: [ffi, raw_ptr])
 extern fn rt_dyncall_6(fn_ptr: i64, arg0: i64, arg1: i64, arg2: i64, arg3: i64, arg4: i64, arg5: i64) -> i64
+@unsafe(reason: "provider runtime owner atomically reserves a session query lease", capabilities: [ffi])
+extern fn rt_provider_session_query_begin(session_id: i64) -> i64
+@unsafe(reason: "provider runtime owner atomically ends its query lease", capabilities: [ffi])
+extern fn rt_provider_session_query_end(session_id: i64, lease_id: i64) -> i64
+@unsafe(reason: "provider runtime owner creates a pin under a live query lease", capabilities: [ffi])
+extern fn rt_provider_session_pin_new(session_id: i64, query_lease_id: i64) -> i64
+@unsafe(reason: "provider runtime owner atomically reserves an in-flight foreign call", capabilities: [ffi])
+extern fn rt_provider_session_call_begin(session_id: i64, pin_id: i64) -> i64
+@unsafe(reason: "provider runtime owner atomically ends an in-flight foreign call", capabilities: [ffi])
+extern fn rt_provider_session_call_end(session_id: i64, pin_id: i64, lease_id: i64) -> i64
+@unsafe(reason: "provider runtime owner atomically retires a provider pin", capabilities: [ffi])
+extern fn rt_provider_session_pin_retire(session_id: i64, pin_id: i64) -> i64
+@unsafe(reason: "provider runtime owner atomically begins a close ticket", capabilities: [ffi])
+extern fn rt_provider_session_close_begin(session_id: i64) -> i64
+@unsafe(reason: "provider runtime owner completes or restores a close ticket", capabilities: [ffi])
+extern fn rt_provider_session_close_finish(session_id: i64, ticket_id: i64,
+    close_succeeded: i64) -> i64
+extern fn rt_provider_session_token_new() -> i64
 @unsafe(reason: "exact provider-query ABI still consumes raw pointers and an unverified function address", capabilities: [ffi, raw_ptr])
 extern fn rt_provider_query_v1_call(fn_ptr: i64, request_ptr: i64, result_ptr: i64) -> i32
 @unsafe(reason: "exact CLI-command ABI still consumes raw pointers and unverified handles", capabilities: [ffi, raw_ptr])
@@ -81,6 +108,12 @@ class CliCommandCallV1:
     result: CliCommandResultViewV1
     diagnostic: text
 
+class VectorKernelCallV1:
+    ok: bool
+    transport_status: i64
+    response: SimpleVectorKernelResponseV1
+    diagnostic: text
+
 fn _provider_query_call_error(status: i32, diagnostic: text) -> ProviderQueryCallV1:
     ProviderQueryCallV1(
         ok: false,
@@ -88,6 +121,109 @@ fn _provider_query_call_error(status: i32, diagnostic: text) -> ProviderQueryCal
         result: simple_provider_query_error_v1(status),
         diagnostic: diagnostic
     )
+
+fn _vector_kernel_call_error(status: i64, diagnostic: text) -> VectorKernelCallV1:
+    VectorKernelCallV1(
+        ok: false, transport_status: status,
+        response: SimpleVectorKernelResponseV1(
+            struct_size: SIMPLE_VECTOR_RESPONSE_V1_SIZE,
+            status: SIMPLE_VECTOR_STATUS_EXECUTION_FAILED,
+            bytes_written: 0, scalar_result: -1),
+        diagnostic: diagnostic)
+
+fn dynlib_provider_session_token_new_v1() -> u64:
+    val token = rt_provider_session_token_new()
+    if token <= 0: 0 else: token as u64
+
+fn dynlib_provider_session_query_begin_v1(session: u64) -> u64:
+    if session == 0 or session > 9223372036854775807: return 0
+    val lease = rt_provider_session_query_begin(session as i64)
+    if lease <= 0: 0 else: lease as u64
+
+fn dynlib_provider_session_query_end_v1(session: u64, lease: u64) -> bool:
+    if session == 0 or lease == 0 or session > 9223372036854775807 or
+            lease > 9223372036854775807: return false
+    rt_provider_session_query_end(session as i64, lease as i64) == 1
+
+fn dynlib_provider_session_pin_new_v1(session: u64, lease: u64) -> u64:
+    if session == 0 or lease == 0 or session > 9223372036854775807 or
+            lease > 9223372036854775807: return 0
+    val pin = rt_provider_session_pin_new(session as i64, lease as i64)
+    if pin <= 0: 0 else: pin as u64
+
+fn dynlib_provider_session_call_begin_v1(session: u64, pin: u64) -> u64:
+    if session == 0 or pin == 0 or session > 9223372036854775807 or
+            pin > 9223372036854775807: return 0
+    val lease = rt_provider_session_call_begin(session as i64, pin as i64)
+    if lease <= 0: 0 else: lease as u64
+
+fn dynlib_provider_session_call_end_v1(session: u64, pin: u64,
+        lease: u64) -> bool:
+    if session == 0 or pin == 0 or lease == 0 or
+            session > 9223372036854775807 or pin > 9223372036854775807 or
+            lease > 9223372036854775807: return false
+    rt_provider_session_call_end(session as i64, pin as i64,
+        lease as i64) == 1
+
+fn dynlib_provider_session_pin_retire_v1(session: u64, pin: u64) -> bool:
+    if session == 0 or pin == 0 or session > 9223372036854775807 or
+            pin > 9223372036854775807: return false
+    rt_provider_session_pin_retire(session as i64, pin as i64) == 1
+
+fn dynlib_provider_session_close_begin_v1(session: u64) -> u64:
+    if session == 0 or session > 9223372036854775807: return 0
+    val ticket = rt_provider_session_close_begin(session as i64)
+    if ticket <= 0: 0 else: ticket as u64
+
+fn dynlib_provider_session_close_finish_v1(session: u64, ticket: u64,
+        close_succeeded: bool) -> bool:
+    if session == 0 or ticket == 0 or session > 9223372036854775807 or
+            ticket > 9223372036854775807: return false
+    rt_provider_session_close_finish(session as i64, ticket as i64,
+        if close_succeeded: 1 else: 0) == 1
+
+@unsafe(reason: "invokes the checked integer-only vector provider ABI over borrowed spans", capabilities: [ffi, raw_ptr])
+fn call_vector_kernel_v1(lib: DynLibKind, interface_handle: u64,
+        request: SimpleVectorKernelRequestV1) -> VectorKernelCallV1:
+    val encoded = encode_simple_vector_request_v1(request)
+    if not encoded.ok:
+        return _vector_kernel_call_error(-1, encoded.diagnostic)
+    if interface_handle == 0 or interface_handle > 9223372036854775807:
+        return _vector_kernel_call_error(-1, "vector-interface-handle-invalid")
+    if not dynlib_symbol_is_process_callable(lib, SIMPLE_VECTOR_KERNELS_V1_APPLY_SYMBOL):
+        return _vector_kernel_call_error(-1, "vector-apply-symbol-not-process-callable")
+
+    val request_ptr = rt_alloc(encoded.bytes.len())
+    if request_ptr <= 0:
+        return _vector_kernel_call_error(-1, "vector-request-allocation-failed")
+    val response_ptr = rt_alloc(SIMPLE_VECTOR_RESPONSE_V1_SIZE as i64)
+    if response_ptr <= 0:
+        rt_free(request_ptr)
+        return _vector_kernel_call_error(-1, "vector-response-allocation-failed")
+
+    var i = 0
+    while i < encoded.bytes.len():
+        rt_ptr_write_u8(request_ptr, i, encoded.bytes[i] as i64)
+        i = i + 1
+    rt_memset(response_ptr, 165, SIMPLE_VECTOR_RESPONSE_V1_SIZE as i64)
+    val transport_status = dynlib_call_3(
+        lib, SIMPLE_VECTOR_KERNELS_V1_APPLY_SYMBOL,
+        interface_handle as i64, request_ptr, response_ptr)
+    if transport_status != 0:
+        rt_free(response_ptr)
+        rt_free(request_ptr)
+        return _vector_kernel_call_error(
+            transport_status, "vector-provider-transport-failed")
+
+    val response_bytes = rt_bytes_from_raw(
+        response_ptr, SIMPLE_VECTOR_RESPONSE_V1_SIZE as i64)
+    rt_free(response_ptr)
+    rt_free(request_ptr)
+    val decoded = decode_simple_vector_response_v1(response_bytes, request)
+    if not decoded.ok:
+        return _vector_kernel_call_error(-1, decoded.diagnostic)
+    VectorKernelCallV1(
+        ok: true, transport_status: 0, response: decoded.value, diagnostic: "")
 
 @unsafe(reason: "invokes an unverified provider address over owned raw buffers", capabilities: [ffi, raw_ptr])
 fn call_provider_query_v1(fn_ptr: i64, request: SimpleProviderQueryV1) -> ProviderQueryCallV1:
@@ -235,3 +371,9 @@ fn dynlib_call_6(lib: DynLibKind, name: text, arg0: i64, arg1: i64, arg2: i64, a
 
 export ProviderQueryCallV1, call_provider_query_v1
 export CliCommandCallV1, call_cli_command_v1
+export VectorKernelCallV1, call_vector_kernel_v1
+export dynlib_provider_session_token_new_v1
+export dynlib_provider_session_query_begin_v1, dynlib_provider_session_query_end_v1
+export dynlib_provider_session_pin_new_v1, dynlib_provider_session_call_begin_v1
+export dynlib_provider_session_call_end_v1, dynlib_provider_session_pin_retire_v1
+export dynlib_provider_session_close_begin_v1, dynlib_provider_session_close_finish_v1
