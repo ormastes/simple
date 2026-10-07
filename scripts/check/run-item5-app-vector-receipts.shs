@@ -9,6 +9,7 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 watchdog=$root/scripts/resource/process-tree-rss-watchdog.pl
 receipt_validator=$root/scripts/check/lib/vector-provider-receipt.pl
 stage_helper=$root/scripts/check/lib/stage-verified-file.shs
+manifest_validator=$root/scripts/check/lib/item5-app-build-manifest.pl
 usage() {
     cat <<'USAGE'
 Usage: run-item5-app-vector-receipts.shs --output ABS_DIR \
@@ -20,10 +21,14 @@ Usage: run-item5-app-vector-receipts.shs --output ABS_DIR \
   --http-scalar PATH --http-scalar-sha256 HEX --http-vector PATH --http-vector-sha256 HEX
 
 Optional: --max-rss-kib N (default 1048576), --timeout-seconds N (default 60).
-The JSON build manifest schema is item5-simple-app-build-v1, with fields
-compiler_sha256, source_commit, and apps.{db-scalar,db-vector,http-scalar,http-vector}.sha256.
-Each app entry must also name compiler_sha256 and source_commit. The manifest
-is caller-supplied provenance and is recorded by hash; this runner does not
+The JSON build manifest schema is item5-simple-app-build-v2. It names the
+Phase2 producer with compiler_sha256 and producer_source_commit, and names the
+app source snapshot separately with app_source_commit and
+app_source_tree_oid (the deterministic result of `git rev-parse
+<app_source_commit>^{tree}`). Each app
+entry carries its binary sha256, the same compiler_sha256, and the same app
+source commit/tree ID. The manifest is
+caller-supplied provenance and is recorded by hash; this runner does not
 independently prove how the binary was produced.
 USAGE
 }
@@ -101,7 +106,8 @@ for my $value (@ARGV) {
 [ -f "$db_scalar" ] && [ -x "$db_scalar" ] && [ -f "$db_vector" ] && [ -x "$db_vector" ] &&
     [ -f "$http_scalar" ] && [ -x "$http_scalar" ] && [ -f "$http_vector" ] && [ -x "$http_vector" ] || fail 'all four app binaries must exist and be executable regular files'
 [ -r "$provider_dso" ] && [ -r "$observer_so" ] && [ -r "$producer_receipt" ] && [ -r "$app_manifest" ] || fail 'provider, observer, and provenance files must be readable'
-[ -x "$watchdog" ] && [ -r "$receipt_validator" ] && [ -r "$stage_helper" ] || fail 'watchdog or shared runner helper is missing'
+[ -x "$watchdog" ] && [ -r "$receipt_validator" ] && [ -r "$stage_helper" ] &&
+    [ -r "$manifest_validator" ] || fail 'watchdog or shared runner helper is missing'
 command -v sha256sum >/dev/null 2>&1 || fail 'sha256sum is required'
 command -v perl >/dev/null 2>&1 || fail 'perl is required'
 command -v /usr/bin/time >/dev/null 2>&1 || fail '/usr/bin/time is required'
@@ -142,42 +148,10 @@ sha_file() { sha256sum -- "$1" | awk '{print $1}'; }
 
 # Validate the immutable Phase2 Hello receipt and caller-supplied app-build
 # manifest. The manifest binds each staged app hash to the producer hash.
-provenance=$(perl -MJSON::PP -e '
-use strict; use warnings;
-my ($hello_path, $manifest_path, @roles) = @ARGV;
-sub load_json {
-    my ($path) = @_;
-    -f $path && -s $path <= 65536 or die "provenance JSON missing/oversize\n";
-    open my $fh, "<:raw", $path or die "provenance JSON open failed\n";
-    local $/; my $bytes = <$fh>; close $fh or die "provenance JSON close failed\n";
-    return decode_json($bytes);
-}
-my $hello = load_json($hello_path);
-my $manifest = load_json($manifest_path);
-($hello->{status} // "") eq "pass" && ($hello->{gate_exit_status} // -1) == 0
-    or die "Phase2 Hello receipt is not PASS\n";
-my $compiler = $hello->{compiler_sha256} // "";
-my $source = $hello->{source_commit} // "";
-$compiler =~ /\A[0-9a-f]{64}\z/ && $source =~ /\A[0-9a-f]{40,64}\z/
-    or die "Hello receipt lacks compiler/source provenance\n";
-($manifest->{schema} // "") eq "item5-simple-app-build-v1"
-    or die "app build manifest schema mismatch\n";
-($manifest->{compiler_sha256} // "") eq $compiler &&
-    ($manifest->{source_commit} // "") eq $source
-    or die "app build manifest is not bound to the Hello producer\n";
-for my $entry (@roles) {
-    my ($role, $sha) = split /=/, $entry, 2;
-    my $app = $manifest->{apps}{$role} // {};
-    ($app->{status} // "") eq "pass" && ($app->{sha256} // "") eq $sha &&
-        ($app->{compiler_sha256} // "") eq $compiler &&
-        ($app->{source_commit} // "") eq $source
-        or die "app build manifest mismatch for $role\n";
-}
-print "$compiler\t$source\n";
-' "$staged_producer_receipt" "$staged_app_manifest" \
+provenance=$(perl "$manifest_validator" "$staged_producer_receipt" "$staged_app_manifest" \
     "db-scalar=$db_scalar_sha" "db-vector=$db_vector_sha" \
     "http-scalar=$http_scalar_sha" "http-vector=$http_vector_sha") || fail 'producer/app provenance validation failed'
-IFS="$(printf '\t')" read -r producer_compiler_sha producer_source_commit <<EOF
+IFS="$(printf '\t')" read -r producer_compiler_sha producer_source_commit app_source_commit app_source_tree_oid <<EOF
 $provenance
 EOF
 
@@ -319,6 +293,8 @@ observer_staged_sha=$(sha_file "$staged_observer")
     echo "app_build_manifest_sha256=$manifest_sha"
     echo "producer_compiler_sha256=$producer_compiler_sha"
     echo "producer_source_commit=$producer_source_commit"
+    echo "app_source_commit=$app_source_commit"
+    echo "app_source_tree_oid=$app_source_tree_oid"
     echo "provider_identity=$provider_id"
     echo "implementation_identity=$implementation_id"
     echo "provider_sha256=$provider_staged_sha"
