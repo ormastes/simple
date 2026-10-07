@@ -1,0 +1,61 @@
+#!/bin/sh
+# Exercise the exact interpreter/runtime group helper without a full seed build.
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-spawn-group.XXXXXX")
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+python3 - "$root" "$work/probe.rs" <<'PY'
+from pathlib import Path
+import sys
+root, output = map(Path, sys.argv[1:])
+helpers=[]
+for name, path in [('interpreter', 'compiler/src/interpreter_extern/system.rs'), ('runtime', 'runtime/src/value/sffi/env_process.rs')]:
+    text=(root/'src/compiler_rust'/path).read_text()
+    start=text.index('fn configure_timeout_child_process_group(')
+    end=text.index('\n}', start)+2
+    helpers.append('mod '+name+' {\npub '+text[start:end]+'\n}')
+output.write_text('\n'.join(helpers)+r'''
+use std::process::{Command, Stdio};
+use std::io::{BufRead, BufReader};
+unsafe extern "C" { fn getpgid(pid: i32) -> i32; fn kill(pid: i32, sig: i32) -> i32; }
+fn main() {
+    let mib: usize = std::env::var("SPAWN_PROBE_PARENT_MIB").unwrap_or("0".into()).parse().unwrap();
+    let mut resident = vec![0u8; mib * 1024 * 1024];
+    for page in resident.chunks_mut(4096) { page[0] = 1; }
+    println!("parent_pid={} touched_mib={mib}", std::process::id());
+    for (name, configure) in [
+        ("interpreter", interpreter::configure_timeout_child_process_group as fn(&mut Command)),
+        ("runtime", runtime::configure_timeout_child_process_group as fn(&mut Command)),
+    ] {
+        for _ in 0..50 {
+            let mut command=Command::new("/bin/sh");
+            configure(&mut command);
+            let result=command.args(["-c", "printf '%s' \"$1\"; printf error >&2", "probe", "a b;$x"]).output().unwrap();
+            assert!(result.status.success());
+            assert_eq!(result.stdout, b"a b;$x");
+            assert_eq!(result.stderr, b"error");
+        }
+        let mut command=Command::new("/bin/sh");
+        configure(&mut command);
+        // TERM reaches shell and sleep together; shell reaps the child before exit.
+        let mut child=command.args(["-c", "sleep 30 & descendant=$!; trap 'kill \"$descendant\" 2>/dev/null; wait; exit 0' TERM; printf '%s\\n' \"$descendant\"; wait"])
+            .stdout(Stdio::piped()).spawn().unwrap();
+        let pid=child.id() as i32;
+        let mut line=String::new();
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        let descendant: i32=line.trim().parse().unwrap();
+        assert_eq!(unsafe { getpgid(pid) }, pid);
+        assert_eq!(unsafe { getpgid(descendant) }, pid);
+        let cleanup_started=std::time::Instant::now();
+        assert_eq!(unsafe { kill(-pid, 15) }, 0);
+        child.wait().unwrap();
+        assert!(cleanup_started.elapsed().as_secs() < 5, "cleanup waited for natural exit");
+        assert_eq!(unsafe { kill(descendant, 0) }, -1, "descendant survived group termination");
+        println!("PASS {name}: 50 launches, arguments/output, group identity, descendant cleanup");
+    }
+    std::hint::black_box(resident);
+}
+''')
+PY
+rustc --edition=2021 "$work/probe.rs" -o "$work/probe"
+"$work/probe"

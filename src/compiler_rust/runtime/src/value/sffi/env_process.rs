@@ -87,14 +87,11 @@ fn configure_timeout_child_process_group(command: &mut std::process::Command) {
 
     // Timeout cleanup kills the whole child process group. Make that
     // invariant true for /bin/sh -> sshpass -> ssh style pipelines.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    // Express the group through spawn attributes rather than a pre_exec hook.
+    // The hook forces fork on FreeBSD, transiently duplicating a large
+    // interpreter's RSS in the process-tree budget before exec. This keeps
+    // the same group-leader/timeout cleanup contract and permits posix_spawn.
+    command.process_group(0);
 }
 
 #[cfg(not(unix))]
