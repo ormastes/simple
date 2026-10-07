@@ -56,12 +56,11 @@ TMP="${TMPDIR:-/tmp}/link_parity_$$"
 # ------------------------------------------------------------------ selftest
 selftest() {
     st="${TMPDIR:-/tmp}/link_parity_selftest_$$"
-    rm -rf "$st"; mkdir -p "$st" || return 2
+    mkdir "$st" || return 2
 
     # hash half: different content MUST hash differently
     printf 'a' > "$st/a"; printf 'b' > "$st/b"
     if [ "$(sha256sum "$st/a" | cut -d' ' -f1)" = "$(sha256sum "$st/b" | cut -d' ' -f1)" ]; then
-        rm -rf "$st"
         echo "ERROR — SELFTEST FAILED: the hash comparison reported two DIFFERENT"
         echo "        files identical. The determinism half is not running."
         return 2
@@ -69,7 +68,6 @@ selftest() {
     # ...and identical content MUST hash identically (no false RED)
     printf 'a' > "$st/c"
     if [ "$(sha256sum "$st/a" | cut -d' ' -f1)" != "$(sha256sum "$st/c" | cut -d' ' -f1)" ]; then
-        rm -rf "$st"
         echo "ERROR — SELFTEST FAILED: the hash comparison reported two IDENTICAL"
         echo "        files different; it cannot distinguish drift from no drift."
         return 2
@@ -77,23 +75,24 @@ selftest() {
 
     # stdout half: a wrong expectation MUST be reported as a mismatch
     if [ "SOME-OUTPUT" = "THIS-IS-NOT-WHAT-THE-PROGRAM-PRINTS" ]; then
-        rm -rf "$st"
         echo "ERROR — SELFTEST FAILED: the stdout comparison MATCHED a deliberately"
         echo "        wrong expectation, so a green output verdict proves nothing."
         return 2
     fi
 
-    rm -rf "$st"
+    rm "$st/a" "$st/b" "$st/c" && rmdir "$st" || return 2
     return 0
 }
 
 selftest || exit 2
+[ "$ENTRY" != "--selftest" ] || { echo "PASS — selftest: 3 comparison fixtures"; exit 0; }
 
 [ -x "$SIMPLE" ] || { echo "ERROR — nothing was checked (no simple binary at $SIMPLE)"; exit 2; }
 [ -f "$ROOT/$ENTRY" ] || { echo "ERROR — nothing was checked (entry $ENTRY does not exist)"; exit 2; }
 
-mkdir -p "$TMP" || { echo "ERROR — nothing was checked (cannot create $TMP)"; exit 2; }
-trap 'rm -rf "$TMP"' EXIT
+mkdir "$TMP" || { echo "ERROR — nothing was checked (cannot create fresh $TMP)"; exit 2; }
+# Preserve logs and artifacts on failure, including negative-control evidence.
+echo "Evidence: $TMP"
 
 strip_seed_banner() {
     grep -v '^WARNING: this Rust-built Simple binary is a bootstrap seed only' \
@@ -106,9 +105,9 @@ failed=0
 # ---------------------------------------------------- property 1: determinism
 for i in 1 2; do
     "$SIMPLE" native-build --entry "$ROOT/$ENTRY" -o "$TMP/out$i" \
-        --entry-closure --runtime-bundle auto >"$TMP/build$i.log" 2>&1
+        --entry-closure --runtime-bundle auto --threads "${SIMPLE_NATIVE_BUILD_THREADS:-40}" >"$TMP/build$i.log" 2>&1
     rc=$?
-    if [ ! -s "$TMP/out$i" ]; then
+    if [ "$rc" -ne 0 ] || [ ! -s "$TMP/out$i" ]; then
         echo "FAIL — native-build run $i produced no binary (rc=$rc); log: $TMP/build$i.log"
         tail -5 "$TMP/build$i.log"
         echo "FAIL — 0 of 2 properties checked: the build did not produce an artifact to compare"
@@ -129,8 +128,10 @@ fi
 # ------------------------------------------------- property 2: it actually runs
 # A hash-only gate passes two identical binaries that print nothing. This is the
 # half that catches that.
-oracle=$(SIMPLE_EXECUTION_MODE=interpret "$SIMPLE" run "$ROOT/$ENTRY" 2>/dev/null | strip_seed_banner)
-if [ -z "$oracle" ]; then
+SIMPLE_EXECUTION_MODE=interpret "$SIMPLE" run "$ROOT/$ENTRY" >"$TMP/oracle.stdout" 2>"$TMP/oracle.stderr"
+oracle_rc=$?
+oracle=$(strip_seed_banner <"$TMP/oracle.stdout")
+if [ "$oracle_rc" -ne 0 ] || [ -z "$oracle" ]; then
     echo "ERROR — nothing was checked (the interpreter produced no stdout for"
     echo "        $ENTRY, so there is no oracle to compare the linked binary"
     echo "        against; a hash-only verdict here would be fail-open)"
@@ -138,11 +139,11 @@ if [ -z "$oracle" ]; then
 fi
 
 chmod +x "$TMP/out1" 2>/dev/null
-actual=$(timeout 120 "$TMP/out1" 2>/dev/null)
+actual=$(timeout 120 "$TMP/out1" 2>"$TMP/run.stderr")
 run_rc=$?
 checked=$((checked + 1))
 
-if [ "$actual" = "$oracle" ]; then
+if [ "$run_rc" -eq 0 ] && [ "$actual" = "$oracle" ]; then
     echo "ok — linked binary stdout matches the interpreter oracle [$actual]"
 else
     echo "FAIL — the deterministically-linked binary's stdout DIVERGES from the"

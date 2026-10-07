@@ -1,0 +1,34 @@
+#!/bin/sh
+# Actual Git/physical-copy controls; no compiler, seed or production snapshot.
+set -eu
+root=$(CDPATH= cd -P -- "$(dirname "$0")/../.." && pwd -P)
+. "$root/scripts/bootstrap/lib/product-private-repository.shs"
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/product-private-repository.XXXXXXXX")
+printf 'fixture=%s\n' "$fixture"
+source_repo="$fixture/source"
+git init -q "$source_repo"
+git -C "$source_repo" config user.name fixture
+git -C "$source_repo" config user.email fixture@example.invalid
+mkdir -p "$source_repo/src/lib"
+printf 'fn fixture_value() -> i64: 23\n' >"$source_repo/src/lib/value.spl"
+git -C "$source_repo" add src/lib/value.spl
+git -C "$source_repo" commit -qm fixture
+head=$(git -C "$source_repo" rev-parse HEAD)
+index_before=$(git -C "$source_repo" write-tree)
+bootstrap_product_private_repository "$source_repo" "$fixture/valid" "$head"
+[ -d "$fixture/valid/.git" ] && [ ! -f "$fixture/valid/.git" ]
+[ "$(git -C "$source_repo" write-tree)" = "$index_before" ]
+[ "$(git -C "$source_repo" rev-parse HEAD)" = "$head" ]
+[ "$(git -C "$source_repo" worktree list --porcelain | sed -n '/^worktree /p' | wc -l | tr -d ' ')" = 1 ]
+printf 'PASS ordinary-private-index-no-source-mutation\n'
+if bootstrap_product_private_repository "$source_repo" "$fixture/valid" "$head"; then exit 1; fi
+printf 'PASS existing-destination-rejected\n'
+if bootstrap_product_private_repository "$source_repo" "$fixture/wrong" 0000000000000000000000000000000000000000; then exit 1; fi
+[ ! -e "$fixture/wrong" ]
+printf 'PASS wrong-source-head-rejected-before-copy\n'
+# Break only this disposable clone's borrowed-object binding; source stays intact.
+printf '%s\n' "$fixture/absent-objects" >"$fixture/valid/.git/objects/info/alternates"
+if git -C "$fixture/valid" cat-file -e "$head^{commit}" 2>/dev/null; then exit 1; fi
+[ "$(git -C "$source_repo" rev-parse HEAD)" = "$head" ]
+printf 'PASS lost-borrowed-objects-fail-closed\n'
+printf 'controls=4 status=PASS retained_fixture=%s\n' "$fixture"

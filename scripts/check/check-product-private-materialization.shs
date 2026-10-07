@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -P -- "$(dirname "$0")/../.." && pwd -P)
+. "$root/scripts/bootstrap/lib/product-private-repository.shs"
+canonical=$1
+fixture=$(mktemp -d "${TMPDIR:?}/product-overlay.XXXXXXXX")
+source_repo="$fixture/source"
+git init -q "$source_repo"
+git -C "$source_repo" config user.name fixture
+git -C "$source_repo" config user.email fixture@example.invalid
+git -C "$source_repo" config core.autocrlf false
+mkdir -p "$source_repo/src/lib" "$source_repo/src/app"
+printf 'fn fixture_value() -> i64: 23\n' >"$source_repo/src/lib/value.spl"
+printf '../lib' >"$source_repo/src/app/alias"
+git -C "$source_repo" add src/lib/value.spl
+alias_oid=$(git -C "$source_repo" hash-object -w src/app/alias)
+git -C "$source_repo" update-index --add --cacheinfo "120000,$alias_oid,src/app/alias"
+git -C "$source_repo" commit -qm fixture
+head=$(git -C "$source_repo" rev-parse HEAD)
+index=$(git -C "$source_repo" write-tree)
+git -C "$source_repo" worktree list --porcelain >"$fixture/worktrees-before"
+bootstrap_product_private_repository "$source_repo" "$fixture/overlay" "$head"
+perl "$canonical" source-check "$source_repo"
+perl "$canonical" materialize "$source_repo" "$fixture/overlay" "$fixture/manifest.tsv"
+cmp "$fixture/overlay/src/app/alias/value.spl" "$source_repo/src/lib/value.spl"
+[ "$(git -C "$source_repo" rev-parse HEAD)" = "$head" ]
+[ "$(git -C "$source_repo" write-tree)" = "$index" ]
+git -C "$source_repo" worktree list --porcelain >"$fixture/worktrees-after"
+cmp "$fixture/worktrees-before" "$fixture/worktrees-after"
+printf 'PASS canonical-materialization-including-declared-alias\n'
+printf 'tampered\n' >"$fixture/overlay/src/lib/value.spl"
+if perl "$canonical" verify "$source_repo" "$fixture/overlay" "$fixture/manifest.tsv"; then exit 1; fi
+printf 'PASS changed-overlay-bytes-rejected\n'
+printf 'dirty\n' >>"$source_repo/src/lib/value.spl"
+if perl "$canonical" source-check "$source_repo"; then exit 1; fi
+printf 'PASS changed-source-rejected\n'
+printf 'controls=3 status=PASS retained_fixture=%s\n' "$fixture"

@@ -67,6 +67,8 @@ pub mod io;
 pub mod network;
 pub mod filesystem;
 pub mod file_io;
+#[cfg(unix)]
+mod snapshot_links;
 pub mod bootstrap_runtime;
 pub mod io_file;
 pub mod terminal;
@@ -293,6 +295,9 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // as an alias for the existing, already-implemented converter rather than
     // duplicating logic.
     insert_simple!("rt_string_from_byte_array", conversion::rt_bytes_to_text_fn);
+    // Hosted C runtime names this same UTF-8 text-to-byte conversion
+    // rt_string_to_byte_array. Keep both facade names on one converter.
+    insert_simple!("rt_string_to_byte_array", conversion::rt_text_to_bytes_fn);
     insert_simple!("rt_screenshot_enable", screenshot_sffi::rt_screenshot_enable);
     insert_simple!("rt_screenshot_disable", screenshot_sffi::rt_screenshot_disable);
     insert_simple!("rt_screenshot_is_enabled", screenshot_sffi::rt_screenshot_is_enabled);
@@ -1002,6 +1007,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         cranelift::rt_cranelift_declare_global_data
     );
     insert_simple!(
+        "rt_cranelift_declare_global_data_v2",
+        cranelift::rt_cranelift_declare_global_data_v2
+    );
+    insert_simple!(
         "rt_cranelift_data_addr_in_func",
         cranelift::rt_cranelift_data_addr_in_func
     );
@@ -1267,6 +1276,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_rocm_unload_module", gpu_rocm::rt_rocm_unload_module_fn);
     insert_simple!("rt_current_dir", file_io::rt_current_dir);
     insert_simple!("rt_current_time_ms", time::rt_current_time_ms);
+    insert_simple!("rt_time_now_unix_millis", time::rt_time_now_unix_millis);
     insert_simple!("rt_db_accel_bitmap_and_words", simd::rt_db_accel_bitmap_and_words);
     insert_simple!("rt_db_accel_bitmap_or_words", simd::rt_db_accel_bitmap_or_words);
     insert_simple!("rt_db_col_count", sffi_db::rt_db_col_count_fn);
@@ -1343,6 +1353,13 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_dir_create_all", file_io::rt_dir_create_all);
     insert_simple!("rt_dir_create", file_io::rt_dir_create);
     insert_simple!("rt_dir_exists", file_io::rt_dir_exists);
+    insert_simple!("rt_dir_is_real_no_follow", file_io::rt_dir_is_real_no_follow);
+    #[cfg(unix)]
+    {
+        insert_simple!("rt_snapshot_symlink_create_nofollow_v1", snapshot_links::create);
+        insert_simple!("rt_snapshot_symlink_match_nofollow_v1", snapshot_links::matches);
+        insert_simple!("rt_snapshot_readonly_nofollow_v1", snapshot_links::readonly);
+    }
     insert_simple!("rt_dir_glob", file_io::rt_dir_glob);
     insert_simple!("rt_dir_list", file_io::rt_dir_list);
     insert_simple!("rt_dir_remove_all", file_io::rt_dir_remove_all);
@@ -1495,6 +1512,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_crc32_text", file_io::rt_crc32_text);
     insert_simple!("rt_file_create_excl", file_io::rt_file_create_excl);
     insert_simple!("rt_file_publish_noreplace", file_io::rt_file_publish_noreplace);
+    insert_simple!("rt_process_rss_kib", file_io::rt_process_rss_kib);
+    insert_simple!("rt_process_hwm_kib", file_io::rt_process_hwm_kib);
     insert_simple!("rt_mem_snapshot_open", file_io::rt_mem_snapshot_open);
     insert_simple!("rt_mem_snapshot_record", file_io::rt_mem_snapshot_record);
     insert_simple!("rt_mem_snapshot_close", file_io::rt_mem_snapshot_close);

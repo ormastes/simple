@@ -178,6 +178,16 @@ among workers. Each bounded batch finishes before the next starts. Host policy
 collects remaining independent modules; fail-fast records unlaunched modules as
 SKIPPED, including the whole sweep after a prior binary failure.
 
+For Phase2/3 CLI and test-runner builds,
+`BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY` accepts 1 or 2 (default 2).
+Set it to 1 to build the two large closures sequentially while allowing each
+closure to use `BOOTSTRAP_VERIFY_BUILD_THREADS` threads. This keeps process-tree
+memory caps effective without forcing the individual builds to one thread.
+The default retains concurrent builds and divides the thread budget between
+them. The existing fail-fast behavior is unchanged unless sequential closure
+concurrency is explicitly selected. This setting does not skip tests or alter
+the profile's qualification requirements.
+
 Caches live under `module-diagnostics/<phase>/<producer-sha>/<input-identity>/`
 with a stable hash of each relative module path. Attempts have separate logs,
 object outputs, HOME and temporary directories; retries preserve module caches.

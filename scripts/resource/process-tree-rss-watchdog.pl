@@ -608,6 +608,28 @@ sub read_proc_stat_record {
     return $record;
 }
 
+# Linux can expose a fully dead task after stat was opened: its process
+# group and session are -1. Such a task owns no RSS and has no live identity.
+# Keep malformed records and negative identifiers on live tasks fail-closed.
+sub parse_proc_stat_record {
+    my ($pid, $line, $page_kib) = @_;
+    my ($state, $parent, $group, $session, $start, $rss) =
+        $line =~ /\A\Q$pid\E \(.*\) (\S) (\d+) (-?\d+) (-?\d+) (?:\S+ ){15}(\d+) \S+ (-?\d+) /s;
+    my $malformed = sub {
+        die "malformed /proc/$pid/stat (bytes=" . length($line) .
+            " prefix_hex=" . unpack('H*', substr($line, 0, 256)) . ")\n";
+    };
+    $malformed->() unless defined($state);
+    if ($state eq 'X' || $state eq 'x') {
+        $malformed->() unless $rss == 0;
+        return undef;
+    }
+    $malformed->() if $group < 0 || $session < 0;
+    return { parent => 0+$parent, group => 0+$group, session => 0+$session,
+             rss => $rss * $page_kib, zombie => ($state eq 'Z' ? 1 : 0),
+             identity => "t$start" };
+}
+
 sub snapshot {
     my ($metadata_only) = @_;
     $sample_started_at = time;
@@ -639,12 +661,9 @@ sub snapshot {
             close($stat);
             next unless defined($line);  # exited after open, before read
             next unless length($line);
-            $line =~ /\A\Q$pid\E \(.*\) (\S) (\d+) (\d+) (\d+) (?:\S+ ){15}(\d+) \S+ (-?\d+) /s
-                or die "malformed /proc/$pid/stat (bytes=" . length($line) .
-                    " prefix_hex=" . unpack('H*', substr($line, 0, 256)) . ")\n";
-            $all{$pid} = { parent => 0+$2, group => 0+$3, session => 0+$4,
-                           rss => $6 * $proc_page_kib,
-                           zombie => ($1 eq 'Z' ? 1 : 0), identity => "t$5" };
+            my $record = parse_proc_stat_record($pid, $line, $proc_page_kib);
+            next unless defined($record);  # fully dead task after stat was opened
+            $all{$pid} = $record;
         }
         closedir($proc);
         %all or die "empty /proc listing";

@@ -1213,13 +1213,29 @@ impl MonomorphizationPass:
                 val o1: HirExpr = operand
                 out.kind = HirExprKind.Unary(op, self.rewrite_expr(o1))
 
-            # Other calls (generic methods / static calls are not specialized
-            # by this pass yet; their ARGUMENTS still are)
+            # Resolve static generic factories by their exact method symbol.
+            # Ordinary instance/trait dispatch must retain its receiver.
             case HirExprKind.MethodCall(receiver, method, args, resolution):
                 val rc: HirExpr = receiver
-                out.kind = HirExprKind.MethodCall(self.rewrite_expr(rc), method, self.rewrite_call_args(args), resolution)
+                match resolution:
+                    case MethodResolution.StaticMethod(_, method_id):
+                        val callee = HirExpr(kind: HirExprKind.Var(method_id), has_type_: false, type_: nil, span: expr.span)
+                        if self.callee_generic_name(callee) != "":
+                            out.kind = self.rewrite_call(callee, args, [], if expr.has_type_: expr.type_ else: nil)
+                        else:
+                            out.kind = HirExprKind.MethodCall(self.rewrite_expr(rc), method, self.rewrite_call_args(args), resolution)
+                    case _:
+                        out.kind = HirExprKind.MethodCall(self.rewrite_expr(rc), method, self.rewrite_call_args(args), resolution)
             case HirExprKind.StaticCall(ty, method, args, resolution):
-                out.kind = HirExprKind.StaticCall(ty, method, self.rewrite_call_args(args), resolution)
+                match resolution:
+                    case MethodResolution.StaticMethod(_, method_id):
+                        val callee = HirExpr(kind: HirExprKind.Var(method_id), has_type_: false, type_: nil, span: expr.span)
+                        if self.callee_generic_name(callee) != "":
+                            out.kind = self.rewrite_call(callee, args, [], if expr.has_type_: expr.type_ else: nil)
+                        else:
+                            out.kind = HirExprKind.StaticCall(ty, method, self.rewrite_call_args(args), resolution)
+                    case _:
+                        out.kind = HirExprKind.StaticCall(ty, method, self.rewrite_call_args(args), resolution)
 
             # Control flow
             case HirExprKind.If(cond, then_, else_):

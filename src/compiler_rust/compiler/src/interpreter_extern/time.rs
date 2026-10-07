@@ -56,6 +56,12 @@ pub fn rt_current_time_ms(_args: &[Value]) -> Result<Value, CompileError> {
     )))
 }
 
+/// Get Unix epoch milliseconds with the native clock's -1 failure sentinel.
+pub fn rt_time_now_unix_millis(_args: &[Value]) -> Result<Value, CompileError> {
+    let micros = simple_runtime::value::sffi::rt_time_now_unix_micros();
+    Ok(Value::Int(if micros < 0 { -1 } else { micros / 1000 }))
+}
+
 /// Get current time in milliseconds since Unix epoch (alias for web stack)
 ///
 /// Callable from Simple as: `rt_time_now_ms()`

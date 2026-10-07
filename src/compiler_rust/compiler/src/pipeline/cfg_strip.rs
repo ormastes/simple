@@ -54,6 +54,9 @@ pub(crate) fn strip_os_when_blocks(source: &str, target_os: TargetOS) -> Result<
         if directive.starts_with("@when(") {
             let selected = match directive {
                 "@when(os=\"windows\"):" => target_os == TargetOS::Windows,
+                "@when(os=\"linux\"):" => target_os == TargetOS::Linux,
+                "@when(os=\"freebsd\"):" => target_os == TargetOS::FreeBSD,
+                "@when(os=\"macos\"):" => target_os == TargetOS::MacOS,
                 _ => return Err(format!("unsupported @when condition at line {}", index + 1)),
             };
             stack.push((active, selected, false));
@@ -503,6 +506,24 @@ mod tests {
         // Malformed blocks are left untouched so the parser still rejects them.
         let malformed = "@when(os=\"unknown\"):\nval A = 1\n@end\n";
         assert_eq!(strip_inactive_cfg_arch_globals(malformed, TargetArch::host()), malformed);
+    }
+
+    #[test]
+    fn os_when_path_identity_selects_nested_platform_owner() {
+        let source = include_str!("../../../../lib/nogc_sync_mut/io/path_identity_abi.spl");
+        for (os, expected, excluded) in [
+            (TargetOS::Linux, "extern fn __errno_location()", "extern fn __error()"),
+            (TargetOS::FreeBSD, "extern fn __error()", "extern fn __errno_location()"),
+            (TargetOS::MacOS, "extern fn __error()", "extern fn __errno_location()"),
+            (TargetOS::Windows, "fn path_errno_address() -> i64: 0", "extern fn __error()"),
+        ] {
+            let filtered = super::strip_os_when_blocks(source, os).expect("platform owner branch");
+            assert_eq!(filtered.lines().count(), source.lines().count());
+            assert!(filtered.contains(expected), "{os:?}");
+            assert!(!filtered.contains(excluded), "{os:?}");
+            assert_eq!(filtered.matches("fn path_errno_address()").count(), 1);
+            assert!(simple_parser::Parser::new(&filtered).parse().is_ok(), "{os:?}");
+        }
     }
 
     #[test]

@@ -26,7 +26,7 @@ use std.nogc_sync_mut.io_runtime.{
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 use std.scv.core.{scv_rel_path, scv_worktree_path_safe}
 use std.scv.store.{
-    scv_content_id_for_u8, scv_create_parent_dir, scv_write_text
+    scv_content_id_for_u8, scv_write_text
 }
 use std.scv.compile_source_inventory.{
     CompileSourceInventoryEntryV1, compile_source_inventory_read_current_v1,
@@ -374,7 +374,13 @@ fn scv_compile_snapshot_materialize_source_unscoped_v1(
     if not scv_compile_snapshot_write_chunk_v1(cache_root, staging, digest, content!):
         return ScvCompileMaterializedSourceV1("snapshot-chunk-publish-failed:{rel}", "", false)
     val destination = "{staging}/{rel}"
-    scv_create_parent_dir(destination)
+    # Both staging and rel are owned canonical paths. The runtime's recursive
+    # directory creation already walks the ancestors: calling it once per
+    # prefix makes a depth-D destination perform O(D^2) directory operations.
+    # Keep the existing file-write failure below authoritative if creation
+    # fails; do not change the caller's error or publish a partial snapshot.
+    val parent_end = destination.rfind("/")
+    dir_create(destination[0:parent_end], true)
     if not file_write_bytes(destination, bytes):
         return ScvCompileMaterializedSourceV1("snapshot-materialize-failed:{rel}", "", false)
     if scv_compile_snapshot_source_digest_v1(destination) != digest:

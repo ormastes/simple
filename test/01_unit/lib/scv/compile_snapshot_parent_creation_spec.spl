@@ -1,0 +1,56 @@
+# Native qualification pending; these test the real snapshot materializer.
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.common.text_bytes.{text_to_utf8_bytes}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1}
+use std.scv.compile_snapshot.{scv_compile_snapshot_materialize_source_v1}
+use app.io.mod.{dir_create}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{file_read, file_hash_sha256}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+
+extern fn rt_getpid() -> i64
+
+fn snapshot_parent_root(label: text) -> text:
+    path_absolute("build/test-artifacts/snapshot-parent-{rt_getpid()}-{label}").replace("\\", "/")
+
+fn snapshot_parent_entry(path: text, content: text) -> CompileSourceInventoryEntryV1:
+    val digest = sha256_text(content)
+    CompileSourceInventoryEntryV1(path, digest, digest, digest, digest, digest,
+        text_to_utf8_bytes(content).len())
+
+describe "SCV snapshot creates an owned destination parent once":
+    it "creates missing deep parents and preserves Unicode and CRLF source bytes":
+        val root = snapshot_parent_root("deep")
+        val relative = "src/deep/한글 space/level/file.spl"
+        val content = "# bytes retained — 한글\r\nfn main():\r\n    print 7\r\n"
+        expect(dir_create(root + "/src/deep/한글 space/level", true)).to_equal(true)
+        expect(dir_create(root + "/build/scv", true)).to_equal(true)
+        expect(dir_create(root + "/staging", true)).to_equal(true)
+        expect(file_write_bytes(root + "/" + relative, text_to_utf8_bytes(content))).to_equal(true)
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_parent_entry(relative, content))
+        expect(result.reason).to_equal("ok")
+        expect(result.source_drifted).to_equal(false)
+        expect(file_hash_sha256(root + "/staging/" + relative)).to_equal(sha256_text(content))
+        val sibling = "src/deep/한글 space/level/sibling.spl"
+        expect(file_write_bytes(root + "/" + sibling, text_to_utf8_bytes(content))).to_equal(true)
+        val repeated = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_parent_entry(sibling, content))
+        expect(repeated.reason).to_equal("ok")
+        expect(file_hash_sha256(root + "/staging/" + sibling)).to_equal(sha256_text(content))
+
+    it "keeps a file-blocked parent as the existing materialization failure":
+        val root = snapshot_parent_root("blocked")
+        val relative = "src/blocked/file.spl"
+        val content = "# blocked parent fixture\n"
+        expect(dir_create(root + "/src/blocked", true)).to_equal(true)
+        expect(dir_create(root + "/build/scv", true)).to_equal(true)
+        expect(dir_create(root + "/staging/src", true)).to_equal(true)
+        expect(file_write_bytes(root + "/" + relative, text_to_utf8_bytes(content))).to_equal(true)
+        expect(file_write_bytes(root + "/staging/src/blocked", text_to_utf8_bytes("sentinel"))).to_equal(true)
+        val result = scv_compile_snapshot_materialize_source_v1(
+            root, root + "/build/scv", root + "/staging", snapshot_parent_entry(relative, content))
+        expect(result.reason).to_equal("snapshot-materialize-failed:{relative}")
+        expect(result.row).to_equal("")
+        expect(file_read(root + "/staging/src/blocked")).to_equal("sentinel")

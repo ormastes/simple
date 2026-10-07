@@ -255,7 +255,12 @@ fn import_bound_candidate(
     functions: &HashMap<String, Arc<FunctionDef>>,
     values: &[Value],
 ) -> Option<Arc<FunctionDef>> {
-    let current = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone())?;
+    // The loader records root imports under the same <entry> owner used
+    // for root function declarations. Top-level execution has no active
+    // function owner, but its explicit import bindings still apply.
+    let current = CURRENT_EXEC_MODULE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| Arc::from("<entry>"));
     if candidate_declared_by(&current, name, functions).is_some() {
         return None;
     }
@@ -470,7 +475,14 @@ pub(crate) fn call_value_as_callable(
                     },
                 );
             }
-            Ok(Some(core::exec_function_with_captured_env(
+            // Named closures are execution join points too. Lexical function
+            // bindings take precedence over the flat table, so interception
+            // only at flat-function dispatch misses nested functions entirely.
+            let intercept = core::aop_runtime::has_advice();
+            if intercept {
+                core::aop_runtime::run_before(&def, env, functions, classes, enums, impl_methods)?;
+            }
+            let result = core::exec_function_with_captured_env(
                 &def,
                 args,
                 env,
@@ -479,7 +491,11 @@ pub(crate) fn call_value_as_callable(
                 classes,
                 enums,
                 impl_methods,
-            )?))
+            )?;
+            if intercept {
+                core::aop_runtime::run_after(&def, &result, env, functions, classes, enums, impl_methods)?;
+            }
+            Ok(Some(result))
         }
         Value::Lambda {
             params,

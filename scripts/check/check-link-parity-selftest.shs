@@ -1,0 +1,32 @@
+#!/bin/sh
+# Controls verify the gate rejects planted failures; they do not qualify a linker.
+set -u
+root=$(cd "$(dirname "$0")/../.." && pwd) || exit 2
+evidence=$(mktemp -d "${TMPDIR:-/tmp}/link-parity-controls.XXXXXX") || exit 2
+export TMPDIR="$evidence"
+export SIMPLE_BIN="$root/scripts/check/fixtures/link-parity-driver.shs"
+entry=test/fixtures/linker/parity_sanity/main.spl
+gate="$root/scripts/check/check-link-native-build-parity.shs"
+matrix="$root/scripts/check/check-link-parity-matrix.shs"
+failures=0
+for mode in success build-fail run-fail oracle-fail; do
+    PARITY_TEST_MODE="$mode" sh "$gate" "$entry" >"$evidence/$mode.log" 2>&1
+    rc=$?
+    case "$mode" in success) expected=0 ;; oracle-fail) expected=2 ;; *) expected=1 ;; esac
+    if [ "$rc" -ne "$expected" ]; then
+        echo "FAIL control=$mode expected=$expected actual=$rc"
+        failures=$((failures + 1))
+    fi
+done
+PARITY_TEST_MODE=matrix-fail sh "$matrix" "$entry" internal mold lld >"$evidence/matrix.log" 2>&1
+rc=$?
+if [ "$rc" -ne 1 ] || ! grep -q '^PASS linker=internal$' "$evidence/matrix.log" ||
+        ! grep -q '^FAIL linker=mold exit=1$' "$evidence/matrix.log" ||
+        ! grep -q '^PASS linker=lld$' "$evidence/matrix.log"; then
+    echo 'FAIL matrix must reach lld after mold fails and keep nonzero aggregate'
+    failures=$((failures + 1))
+fi
+sh "$matrix" "$entry" invalid >"$evidence/invalid.log" 2>&1
+[ "$?" -eq 2 ] || failures=$((failures + 1))
+echo "Controls: 6 cases, $failures failed; evidence=$evidence"
+[ "$failures" -eq 0 ]
