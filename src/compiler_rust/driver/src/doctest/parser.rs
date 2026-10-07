@@ -31,21 +31,7 @@ pub fn is_definition_like(line: &str) -> bool {
         }
     }
 
-    let mut chars = trimmed.char_indices().peekable();
-    while let Some((idx, ch)) = chars.next() {
-        if ch != '=' {
-            continue;
-        }
-        let prev = trimmed[..idx].chars().rev().find(|c| !c.is_whitespace());
-        let next = chars.clone().map(|(_, c)| c).find(|c| !c.is_whitespace());
-
-        let is_comparison = matches!(prev, Some('=') | Some('!') | Some('<') | Some('>')) || matches!(next, Some('='));
-        if !is_comparison {
-            return true;
-        }
-    }
-
-    false
+    contains_assignment(trimmed)
 }
 
 /// Parse doctest examples from a plain `.sdt`/docstring style string.
@@ -134,16 +120,38 @@ pub fn parse_doctest_text(content: &str, source: impl AsRef<Path>) -> Vec<Doctes
 
 /// Check if a snippet contains an assignment expression
 pub(crate) fn contains_assignment(snippet: &str) -> bool {
-    // Simple heuristic: look for '=' that's not part of '==', '!=', '<=', '>='
+    // Only a top-level assignment makes a returning expression a statement.
+    // Quoted/commented '=' and keyword arguments must not suppress its value.
     let chars: Vec<char> = snippet.chars().collect();
-    for i in 0..chars.len() {
-        if chars[i] == '=' {
-            // Check if it's part of a comparison operator
-            let before = if i > 0 { chars[i - 1] } else { ' ' };
-            let after = if i + 1 < chars.len() { chars[i + 1] } else { ' ' };
-            if before != '=' && before != '!' && before != '<' && before != '>' && after != '=' {
-                return true;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for (i, &ch) in chars.iter().enumerate() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == delimiter {
+                quote = None;
             }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '#' => break,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            '=' if depth == 0 => {
+                let before = i.checked_sub(1).map(|j| chars[j]);
+                let after = chars.get(i + 1).copied();
+                if !matches!(before, Some('=' | '!' | '<' | '>'))
+                    && !matches!(after, Some('=' | '>'))
+                {
+                    return true;
+                }
+            }
+            _ => {}
         }
     }
     false
@@ -184,6 +192,17 @@ mod tests {
         assert!(!is_definition_like("x == 5"));
         assert!(!is_definition_like("x != 5"));
         assert!(!is_definition_like("print x"));
+    }
+
+    #[test]
+    fn assignment_tokens_respect_quotes_comments_and_call_depth() {
+        for expression in [r#""a=b""#, "identity(value=2)",
+            "outer(inner(value=2))", "value # ignored = comment", "x => x + 1"] {
+            assert!(!contains_assignment(expression), "{expression}");
+            assert!(!is_definition_like(expression), "{expression}");
+            assert!(!is_prelude_definition(expression), "{expression}");
+        }
+        assert!(contains_assignment("values[index(offset=1)] = 4"));
     }
 
     #[test]

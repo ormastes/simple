@@ -1,0 +1,103 @@
+# Prompt transcript source wrapping and exact output verification.
+# Mirrors src/app/repl/main.spl source wrappers; suppresses nil as the Rust
+# doctest runner does. Expressions execute exactly once in the real runtime.
+
+struct SdoctestTranscript:
+    code: text
+    expected: text
+    prompted: bool
+
+fn sdoctest_has_assignment(code: text) -> bool:
+    var quote = ""
+    var escaped = false
+    var depth = 0
+    var index = 0
+    while index < code.len():
+        val ch = code[index:index + 1]
+        if quote != "":
+            if escaped:
+                escaped = false
+            elif ch == "\\":
+                escaped = true
+            elif ch == quote:
+                quote = ""
+        elif ch == "\"" or ch == "'":
+            quote = ch
+        elif ch == "#":
+            break
+        elif ch == "(" or ch == "[" or ch == "{":
+            depth = depth + 1
+        elif ch == ")" or ch == "]" or ch == "}":
+            if depth > 0: depth = depth - 1
+        elif ch == "=" and depth == 0:
+            val before = if index > 0: code[index - 1:index] else: ""
+            val after = if index + 1 < code.len(): code[index + 1:index + 2] else: ""
+            if before != "=" and before != "!" and before != "<" and before != ">" and after != "=" and after != ">":
+                return true
+        index = index + 1
+    false
+
+fn sdoctest_is_statement(code: text) -> bool:
+    val t = code.trim_start()
+    for keyword in ["val ", "var ", "let ", "mut ", "fn ", "class ", "struct ", "enum ", "trait ", "impl ", "use ", "import ", "extern ", "type ", "alias ", "actor ", "if ", "while ", "for ", "match ", "print ", "return "]:
+        if t.starts_with(keyword):
+            return true
+    if t == "" or t.starts_with("#"):
+        return true
+    sdoctest_has_assignment(t)
+
+fn sdoctest_render_command(code: text, index: i64) -> text:
+    if sdoctest_is_statement(code):
+        return code
+    val name = "__sdoctest_expr_{index}"
+    # Use the REPL's function wrapper so temporary value names are local.
+    # Calls are expressions too: their own stdout is captured, and nil adds none.
+    val expression = code.replace("\n", "\n        ")
+    "fn {name}():\n    val __r = (\n        {expression}\n    )\n    if __r != nil:\n        print __r\n{name}()"
+
+fn parse_sdoctest_transcript(transcript: text) -> SdoctestTranscript:
+    var commands: [text] = []
+    var expected: [text] = []
+    var command = ""
+    var prompted = false
+    var prompt_indent = 0
+    for line in transcript.split("\n"):
+        val trimmed = line.trim_start()
+        if trimmed == ">>>" or trimmed.starts_with(">>> "):
+            if prompted:
+                commands.push(command)
+            else:
+                prompt_indent = line.len() - trimmed.len()
+            prompted = true
+            command = if trimmed == ">>>": "" else: trimmed[4:]
+        elif prompted and (trimmed == "..." or trimmed.starts_with("... ")):
+            val continuation = if trimmed == "...": "" else: trimmed[4:]
+            command = command + "\n" + continuation
+        elif prompted:
+            # Remove the fence's common prompt margin, not significant output spaces.
+            val indent = line.len() - trimmed.len()
+            if indent >= prompt_indent:
+                expected.push(line[prompt_indent:])
+            else:
+                expected.push(line)
+    if prompted:
+        commands.push(command)
+    else:
+        return SdoctestTranscript(code: transcript, expected: "", prompted: false)
+    var rendered: [text] = []
+    var index = 0
+    for cmd in commands:
+        rendered.push(sdoctest_render_command(cmd, index))
+        index = index + 1
+    SdoctestTranscript(code: rendered.join("\n\n"), expected: expected.join("\n"), prompted: true)
+
+fn sdoctest_output_matches(actual: text, expected: text) -> bool:
+    # Exact content after newline normalization and trailing line terminators.
+    # Preserve significant spaces, unlike the historical Rust wildcard matcher.
+    var actual_normal = actual.replace("\r\n", "\n")
+    var expected_normal = expected.replace("\r\n", "\n")
+    while actual_normal.ends_with("\n"):
+        actual_normal = actual_normal[0:actual_normal.len() - 1]
+    while expected_normal.ends_with("\n"):
+        expected_normal = expected_normal[0:expected_normal.len() - 1]
+    actual_normal == expected_normal
