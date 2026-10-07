@@ -42,13 +42,25 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.hir.sffi_identity.{sffi_raw_callable_effects}
 
 impl HirLowering:
-    me prescan_composite_field_types(name: text, fields: [ParserField]):
+    me prescan_composite_field_types(name: text, fields: [ParserField], type_params: [ParserTypeParam]):
         """Register parser struct/class fields before function lowering."""
+        # Field annotations use the declaration's generic scope even during
+        # this early pass. Do not leak its binders into sibling declarations.
+        val saved_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
+        self.symbols.push_scope(ScopeKind.Class)
+        for tp in type_params:
+            val parameter = self.lower_type_param(tp)
+            self.prescan_type_parameters[parameter.symbol.id] = HirType(
+                kind: HirTypeKind.TypeParam(parameter.name, parameter.bounds),
+                span: parameter.span)
         var field_types: Dict<text, HirType> = {}
         var field_order: [text] = []
         for field in fields:
             field_types[field.name] = self.lower_type(field.type_)
             field_order = field_order.push(field.name)
+        self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_parameters
         self.struct_field_types_by_name[name] = field_types
         self.struct_field_order_by_name[name] = field_order
         # MODULE-QUALIFIED KEY (2026-08-24). The bare name is NOT a unique key:
