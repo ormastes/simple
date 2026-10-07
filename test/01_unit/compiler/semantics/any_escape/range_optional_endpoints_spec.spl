@@ -1,0 +1,37 @@
+# @req REQ-MC-ANY-001
+# Open range endpoints must not enter the expression walker as absent values.
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.semantics.any_escape.types.{AnyEscapeProfile}
+use compiler.semantics.any_escape.checker.{any_escape_state_new, any_check_expr}
+
+fn range_endpoint(erased: bool) -> HirExpr:
+    val type_ = HirType(kind: if erased: HirTypeKind.Any else: HirTypeKind.Int(64, true), span: Span.empty())
+    HirExpr(kind: HirExprKind.IntLit(2, nil), has_type_: true, type_: type_, span: Span.empty())
+
+fn check_range_endpoints(start: HirExpr?, end: HirExpr?) -> [text]:
+    var state = any_escape_state_new(SymbolTable.new(), "range_endpoints")
+    val range_ = HirExpr(kind: HirExprKind.Range(start, end, false, nil), has_type_: false, type_: nil, span: Span.empty())
+    any_check_expr(state, AnyEscapeProfile.census([]), range_)
+    var codes: [text] = []
+    for diag in state.diags:
+        codes = codes.push(diag.code)
+    codes
+
+describe "Any escape analysis of optional range endpoints":
+    it "accepts an absent start":
+        expect(check_range_endpoints(nil, range_endpoint(false)).len()).to_equal(0)
+
+    it "accepts an absent end":
+        expect(check_range_endpoints(range_endpoint(false), nil).len()).to_equal(0)
+
+    it "accepts both absent endpoints":
+        expect(check_range_endpoints(nil, nil).len()).to_equal(0)
+
+    it "retains Any diagnostics for a present start":
+        expect(check_range_endpoints(range_endpoint(true), nil)).to_contain("E-MC-ANY-001")
+
+    it "retains Any diagnostics for a present end":
+        expect(check_range_endpoints(nil, range_endpoint(true))).to_contain("E-MC-ANY-001")

@@ -1,0 +1,7 @@
+# Mutable-global fixture drift and remaining frontend gate
+
+The frozen original owner reports zero passing and four failing examples. Its setup supplies nonexistent MirStatic.is_rt_struct_alloc_registered and imports MirLowering from the types module without the coordinator contributing MirLowering.new. Current MirStatic has no such field; the constructor is defined by _MirLowering/module_lowering.spl and exported by mir_lowering.spl.
+
+Correct only those two setups: omit the nonexistent field and load the real constructor owner. Preserve all four cases, their tags and every original LLVM IR assertion. Prepared seed source 65e92537efe through a default Pure-Simple runner with an explicitly pinned child now reports three passing examples and one failing example. Global declaration, LoadGlobal and StoreGlobal behavior all pass. Raw output, source binding and watchdog receipts are retained under /tmp/simple-mutable-global-fixture-repair. No producer result.json was fabricated.
+
+The frontend primitive-literal-global case still fails its expected IR definitions; the reported failing expectation is @g_name = internal global ptr getelementptr inbounds. This case is tagged only-compiled, yet the requested interpreter-mode invocation executed it. Establish the effective mode/tag contract and run the native criterion with a real qualified compiler before deciding whether this is a runner or frontend/backend failure. Do not weaken the assertions or count the owner as passed. Whole sweep and later bootstrap gates remain incomplete.

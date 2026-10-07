@@ -255,6 +255,12 @@ pub(crate) fn call_method_on_value(
 
         // Array methods
         Value::Array(arr) => match method {
+            "push" | "append" => {
+                return Ok(crate::interpreter::interpreter_method::collections::array_push_value(
+                    arr,
+                    _args.first().cloned().unwrap_or(Value::Nil),
+                ));
+            }
             "len" | "length" => return Ok(Value::Int(arr.len() as i64)),
             "is_empty" => return Ok(Value::Bool(arr.is_empty())),
             "first" => {

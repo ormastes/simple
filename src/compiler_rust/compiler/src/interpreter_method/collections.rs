@@ -322,6 +322,13 @@ pub fn handle_packed_array_methods(
     }))
 }
 
+/// Value-level array append used by direct and chained dispatch.
+pub(crate) fn array_push_value(arr: &[Value], item: Value) -> Value {
+    let mut result = arr.to_vec();
+    result.push(item);
+    Value::array(result)
+}
+
 /// Handle Array methods
 #[allow(clippy::too_many_arguments)] // reason: ABI-locked or codegen entry signature; refactoring would break caller contract
 pub fn handle_array_methods(
@@ -380,9 +387,7 @@ pub fn handle_array_methods(
         }
         "push" | "append" => {
             let item = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let mut new_arr = arr.to_vec();
-            new_arr.push(item);
-            Value::array(new_arr)
+            array_push_value(arr, item)
         }
         "pop" => {
             // `pop` REMOVES AND RETURNS THE LAST ELEMENT. That is the language's own

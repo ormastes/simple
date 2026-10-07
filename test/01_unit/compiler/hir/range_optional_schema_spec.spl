@@ -1,0 +1,42 @@
+# Range endpoints stay optional through schema consumers and substitutions.
+# @req REQ-SSPEC-COMPILER
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.hir.generated.hir_hash.{hir_hash_expr}
+use compiler.hir.generated.hir_children.{hir_children_of_expr}
+use compiler.monomorphize.type_subst.{typesubstitution_empty, substitute_expr}
+use compiler.semantics.effect_validation.{effect_for_bound}
+use compiler.semantics.rt_criticality_validation.{rt_expr_dispatches, rt_expr_allocates}
+
+fn schema_endpoint(value: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: false, type_: nil, span: Span.empty())
+
+fn schema_range(start: HirExpr?, end: HirExpr?) -> HirExpr:
+    HirExpr(kind: HirExprKind.Range(start, end, false, nil), has_type_: false, type_: nil, span: Span.empty())
+
+describe "Optional Range schema consumers":
+    it "enumerates only present endpoints":
+        expect(hir_children_of_expr(schema_range(nil, nil)).len()).to_equal(0)
+        expect(hir_children_of_expr(schema_range(nil, schema_endpoint(4))).len()).to_equal(1)
+        expect(hir_children_of_expr(schema_range(schema_endpoint(1), nil)).len()).to_equal(1)
+        expect(hir_children_of_expr(schema_range(schema_endpoint(1), schema_endpoint(4))).len()).to_equal(2)
+
+    it "hashes distinct open bounds":
+        val empty_hash = hir_hash_expr(schema_range(nil, nil))
+        expect(hir_hash_expr(schema_range(nil, schema_endpoint(4))) == empty_hash).to_equal(false)
+        expect(hir_hash_expr(schema_range(schema_endpoint(4), nil)) == hir_hash_expr(schema_range(nil, schema_endpoint(4)))).to_equal(false)
+
+    it "preserves absent bounds during type substitution":
+        val original = schema_range(nil, schema_endpoint(4))
+        val rewritten = substitute_expr(original, typesubstitution_empty())
+        expect(hir_children_of_expr(rewritten).len()).to_equal(1)
+        expect(hir_hash_expr(rewritten)).to_equal(hir_hash_expr(original))
+
+    it "does not dispatch or allocate for absent bounds":
+        expect(rt_expr_dispatches(schema_range(nil, nil), {})).to_equal(false)
+        expect(rt_expr_allocates(schema_range(nil, nil))).to_equal(false)
+
+    it "does not classify an open end as bounded":
+        expect(effect_for_bound(schema_range(schema_endpoint(1), nil))).to_equal(0)

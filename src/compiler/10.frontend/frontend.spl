@@ -9,7 +9,7 @@
 use compiler.frontend.parser_types.{ParserModule, DomainBlock}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module_scoped, parse_and_build_module_in_borrowed_scope}
 use compiler.frontend.flat_ast_bridge.{build_module_from_flat_pool_blob, flat_pool_capture_arm, flat_pool_capture_take}
-use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_key}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_load, frontend_parse_cache_store}
 use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_store_phase3_immutable_v1}
 use compiler.frontend.frontend_shared_parse_cas_v1.{frontend_shared_parse_load_v1, frontend_shared_parse_store_v1}
@@ -33,7 +33,7 @@ use compiler.frontend.frontend_target_cfg_receipt_v1.{
 fn preprocess_conditionals(source: text) -> text:
     _pp_preprocess_conditionals(source)
 use compiler.common.config.{Logger}
-use std.io_runtime.{env_get_opt}
+use std.io_runtime.{env_get_opt, file_exists}
 use compiler.frontend.frontend_advisory_preprocess_port_v1.{
     FrontendAdvisoryPreprocessPolicyV1,
     FrontendAdvisoryPreprocessDispatchErrorV1,
@@ -117,9 +117,12 @@ fn frontend_parse_or_restore(parse_source: text, file_path: text, streaming_scop
     # A profile-enriched initializer differs from a source-only flat AST.
     # Keep ordinary parse-cache entries untouched until profile identity is
     # included in that cache's key.
+    # Key the supplied source observation, not a second read of its path.
+    # Ordinary callers hash source; target-receipted callers validate it first.
+    # Source admission remains the driver owner, and missing files stay uncached.
     val source_key = if frontend_parse_cache_enabled() and
-            not parser_collection_feedback_active():
-        frontend_parse_cache_key(file_path)
+            not parser_collection_feedback_active() and file_exists(file_path):
+        raw_source_sha
     else:
         ""
     val key = if source_key != "" and advisory_cache_identity != "":
