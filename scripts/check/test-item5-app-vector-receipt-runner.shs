@@ -92,7 +92,9 @@ if [ "$#" -gt 0 ]; then
 "http-scalar":{"status":"pass","sha256":"$app_sha","compiler_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
 "http-vector":{"status":"pass","sha256":"$app_sha","compiler_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_commit":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}
 JSON
-    if sh "$runner" --output "$tmp/staging-run" \
+    mkdir -p "$evidence_dir"
+    runner_status=0
+    sh "$runner" --output "$tmp/staging-run" \
         --producer-receipt "$tmp/hello.json" --producer-receipt-sha256 "$(sha256sum "$tmp/hello.json" | awk '{print $1}')" \
         --app-build-manifest "$tmp/apps-full.json" --app-build-manifest-sha256 "$(sha256sum "$tmp/apps-full.json" | awk '{print $1}')" \
         --provider-dso "$provider" --provider-sha256 "$provider_sha" \
@@ -101,9 +103,19 @@ JSON
         --db-scalar "$tmp/db-scalar" --db-scalar-sha256 "$app_sha" \
         --db-vector "$tmp/db-vector" --db-vector-sha256 "$app_sha" \
         --http-scalar "$tmp/http-scalar" --http-scalar-sha256 "$app_sha" \
-        --http-vector "$tmp/http-vector" --http-vector-sha256 "$app_sha" >"$tmp/staging-run.log" 2>&1; then
-        echo 'FAIL negative /bin/false runner fixture unexpectedly completed' >&2; exit 1
-    fi
+        --http-vector "$tmp/http-vector" --http-vector-sha256 "$app_sha" >"$tmp/staging-run.log" 2>&1 || runner_status=$?
+    [ ! -e "$tmp/staging-run" ] || cp -R "$tmp/staging-run/." "$evidence_dir/"
+    cp "$tmp/staging-run.log" "$evidence_dir/runner.log"
+    {
+        echo 'case=synthetic-negative-harness-only'
+        echo 'app=native-C-return-one-test-helper'
+        echo "app_sha256=$app_sha"
+        echo "provider_sha256=$provider_sha"
+        echo "observer_sha256=$observer_sha"
+        echo "runner_exit_status=$runner_status"
+        echo 'app_qualification=none'
+    } >"$evidence_dir/harness-note.env"
+    [ "$runner_status" -ne 0 ] || { echo 'FAIL negative native C helper unexpectedly completed' >&2; exit 1; }
     grep -F 'db-scalar execution failed with status 1' "$tmp/staging-run.log" >/dev/null || {
         cat "$tmp/staging-run.log" >&2; echo 'FAIL runner did not reject the negative app as expected' >&2; exit 1;
     }
@@ -118,16 +130,6 @@ JSON
         [ "$(rss_field "$rss" rss_cap_enforced)" = 1 ] || {
         echo 'FAIL negative watchdog receipt lacks completed bounded supervision' >&2; exit 1;
     }
-    mkdir -p "$evidence_dir"
-    cp -R "$tmp/staging-run/." "$evidence_dir/"
-    {
-        echo 'case=synthetic-negative-harness-only'
-        echo 'app=native-C-return-one-test-helper'
-        echo "app_sha256=$app_sha"
-        echo "provider_sha256=$provider_sha"
-        echo "observer_sha256=$observer_sha"
-        echo 'app_qualification=none'
-    } >"$evidence_dir/harness-note.env"
     pid=$(awk -F= '$1=="root_pid" { n++; v=$2 } END { if (n==1) print v; else exit 1 }' "$rss")
     perl "$validator" "$events" "$pid" --no-load
     [ ! -e "$tmp/staging-run/evidence.env" ] || { echo 'FAIL negative run published completion evidence' >&2; exit 1; }
