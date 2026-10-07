@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+& (Join-Path $PSScriptRoot 'check-materializer-receipt-path-windows.ps1')
 $producer = Join-Path $PSScriptRoot '../setup/materialize-symlinks-windows.shs'
 $source = [IO.File]::ReadAllText((Resolve-Path $producer))
 $match = [regex]::Match($source, "(?s)<<'POWERSHELL'\r?\n(.*?)\r?\nPOWERSHELL")

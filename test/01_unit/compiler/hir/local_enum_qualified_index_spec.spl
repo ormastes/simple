@@ -1,0 +1,48 @@
+use std.spec.{describe, it, expect}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+fn enum_index_lowering() -> HirLowering:
+    val lowering = HirLowering.with_filename("pkg/owner.spl")
+    lowering.use_explicit_semantic_policy()
+    lowering
+
+describe "local enum qualified declaration index":
+    it "publishes a local enum and preserves its id on repeated declaration":
+        val lowering = enum_index_lowering()
+        val module = parse_and_build_module("enum State:\n    Ready\n    Closed\n", "pkg/owner.spl")
+        lowering.declare_module_symbols(module)
+        val local = lowering.symbols.lookup_or_invalid("State")
+        expect(local.is_valid()).to_equal(true)
+        expect(lowering.symbols.lookup_qualified_type_raw("pkg.owner", "State")).to_equal(local.id)
+        lowering.declare_module_symbols(module)
+        expect(lowering.symbols.lookup_qualified_type_raw("pkg.owner", "State")).to_equal(local.id)
+        expect(lowering.symbols.lookup_qualified_type_raw("pkg.other", "State")).to_equal(-1)
+
+    it "does not publish a foreign enum retained by lexical first-write":
+        val lowering = enum_index_lowering()
+        val foreign = lowering.symbols.define("State", SymbolKind.Enum, nil, Span.empty(), Visibility.Public, false, Some("pkg/other.spl"))
+        lowering.symbols.bind_qualified_type("pkg.other", "State", foreign)
+        lowering.declare_module_symbols(parse_and_build_module("enum State:\n    Ready\n", "pkg/owner.spl"))
+        expect(lowering.symbols.lookup_qualified_type_raw("pkg.owner", "State")).to_equal(-1)
+        expect(lowering.symbols.lookup_qualified_type_raw("pkg.other", "State")).to_equal(foreign.id)
+
+    it "never publishes a genuine struct as an enum":
+        val lowering = enum_index_lowering()
+        val record = lowering.symbols.define("State", SymbolKind.Struct, nil, Span.empty(), Visibility.Public, false, Some("pkg/owner.spl"))
+        lowering.declare_module_symbols(parse_and_build_module("enum State:\n    Ready\n", "pkg/owner.spl"))
+        expect(lowering.symbols.lookup_qualified_type_raw("pkg.owner", "State")).to_equal(-1)
+        expect(lowering.symbols.symbol_is_enum_declaration_scalar_raw(record.id)).to_equal(false)
+
+    it "retains a preexisting qualified binding and indexes generic declarations":
+        val lowering = enum_index_lowering()
+        lowering.symbols.bind_qualified_type("pkg.owner", "State", SymbolId(id: 12345))
+        lowering.declare_module_symbols(parse_and_build_module("enum State:\n    Ready\nenum Payload<T>:\n    Value(T)\n", "pkg/owner.spl"))
+        expect(lowering.symbols.lookup_qualified_type_raw("pkg.owner", "State")).to_equal(12345)
+        val generic = lowering.symbols.lookup_or_invalid("Payload")
+        expect(generic.is_valid()).to_equal(true)
+        expect(lowering.symbols.lookup_qualified_type_raw("pkg.owner", "Payload")).to_equal(generic.id)

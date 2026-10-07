@@ -3352,6 +3352,13 @@ impl MirLowering:
         self.builder = b_exit
         for_result
 
+    me for_collection_declared_type(collection_local: LocalId, iter: HirExpr) -> HirType?:
+        # Function-local provenance wins. Expression metadata is a fallback
+        # only; the caller still admits Array/Slice/Str, never arbitrary I64.
+        if val local_type = self.find_local_hir_type(collection_local.id):
+            return Some(local_type)
+        iter.type_
+
     me lower_for_iterator(var_: SymbolId, iter: HirExpr, body: HirBlock, source_span: Span) -> LocalId:
         """Lower `for x in collection` for non-range iterables.
 
@@ -3421,7 +3428,7 @@ impl MirLowering:
         # there -- which is why `[i64]` for-in was the one case that worked.
         var element_type_from_hir = false
         var collection_hir_is_text = false
-        if val collection_hir_type = self.find_local_hir_type(collection_local.id):
+        if val collection_hir_type = self.for_collection_declared_type(collection_local, iter):
             match collection_hir_type.kind:
                 case HirTypeKind.Array(elem_t, _) | HirTypeKind.Slice(elem_t):
                     match elem_t.kind:
@@ -3490,8 +3497,16 @@ impl MirLowering:
         # collection's MIR type additionally separates "genuinely a dict" from
         # "i64/unknown = cascade of an upstream lowering failure" per site.
         val iter_coll_type_text = mir_type_probe_text(self.local_mir_type_of(collection_local))
-        val iter_unsupported_msg = "for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while (collection mir type: {iter_coll_type_text})"
-        self.error(iter_unsupported_msg, Some(source_span))
+        val iter_unsupported_msg = "for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while (collection mir type: {iter_coll_type_text}; module: {self.current_module_id})"
+        # Preserve the authored for-span, falling back to the iterable only
+        # when the statement carries no location. The driver formats it using
+        # its canonical MIR diagnostic formatter, including an explicit
+        # missing-span marker when neither location survived transport.
+        val iter_diagnostic_span = if source_span.file != "" or source_span.line > 0:
+            source_span
+        else:
+            iter.span
+        self.error(iter_unsupported_msg, Some(iter_diagnostic_span))
 
         # Belt-and-braces for pipelines that never read MirLowering.errors:
         # emit `rt_panic(msg)` where the loop would have been. A MIR Str
