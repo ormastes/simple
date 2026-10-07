@@ -12,8 +12,10 @@ extern fn rt_gpu_provider_abi_version(backend: i64) -> i64
 extern fn rt_gpu_provider_capability_bits(backend: i64) -> i64
 @unsafe(reason: "native GPU provider identity projection", capabilities: [ffi])
 extern fn rt_gpu_provider_identity(backend: i64) -> i64
-@unsafe(reason: "runtime-owned bounded provider path projection", capabilities: [ffi])
-extern fn rt_gpu_provider_path(backend: i64) -> text
+@unsafe(reason: "borrowed C provider path pointer; copied before further owner calls", capabilities: [ffi, raw_ptr])
+extern fn rt_gpu_provider_path(backend: i64) -> i64
+@unsafe(reason: "copies a borrowed NUL-terminated provider path into managed text", capabilities: [ffi, raw_ptr])
+extern fn rt_cstring_to_text(cstr: i64) -> text
 @unsafe(reason: "native GPU provider retirement", capabilities: [ffi])
 extern fn rt_gpu_provider_unload(backend: i64) -> i64
 @unsafe(reason: "native GPU rejected-handle quarantine drain", capabilities: [ffi])
@@ -56,6 +58,11 @@ val GPU_PROVIDER_STATUS_REJECTED: i64 = -7
 val GPU_PROVIDER_STATUS_UNCERTAIN: i64 = -8
 val GPU_PROVIDER_RECEIPT_BYTES: i64 = 56
 val GPU_PROVIDER_BYTES_BYTES: i64 = 24
+
+@unsafe(reason: "copies the runtime owner's borrowed path buffer before another lookup can replace it", capabilities: [ffi, raw_ptr])
+fn _gpu_provider_path_owned_v1(backend: i64) -> text:
+    val borrowed = rt_gpu_provider_path(backend)
+    rt_cstring_to_text(borrowed)
 
 struct GpuProviderInfo:
     loaded: bool
@@ -157,7 +164,7 @@ fn gpu_provider_info(backend: i64) -> GpuProviderInfo:
             unsafe(capabilities: [ffi]): rt_gpu_provider_identity(backend)
         else: 0,
         provider_path: if loaded:
-            unsafe(capabilities: [ffi]): rt_gpu_provider_path(backend)
+            unsafe(capabilities: [ffi, raw_ptr]): _gpu_provider_path_owned_v1(backend)
         else: "")
 
 fn gpu_provider_unload(backend: i64) -> bool:

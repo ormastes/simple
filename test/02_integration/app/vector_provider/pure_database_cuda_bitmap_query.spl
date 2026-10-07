@@ -1,0 +1,185 @@
+# Actual PureDatabase full-scan query path through the existing demand-loaded
+# CUDA GPU provider owner. The provider DSO, runtime digest pin, and CUDA driver
+# are supplied by the runner. Each success event is emitted only after the
+# admitted device completion receipt and readback validate.
+
+use nogc_sync_mut.database.pure_sql.database.{PureDatabase}
+use nogc_sync_mut.database.pure_sql.cuda_bitmap_provider_v1.{
+    PURE_DATABASE_CUDA_BITMAP_IMPLEMENTATION_V1,
+    PURE_DATABASE_CUDA_BITMAP_ABI_V1,
+    pure_database_cuda_bitmap_reducer_open_owned_v1
+}
+use nogc_sync_mut.database.sql.types.{DbRow}
+use std.nogc_sync_mut.sffi.system.{args}
+
+fn _fail(message: text) -> i32:
+    println("FAIL PureDatabase bitmap query: " + message)
+    1
+
+fn _insert_rows(db: PureDatabase, table: text, count: i64) -> PureDatabase:
+    db.exec_sql("CREATE TABLE {table} (message_id INTEGER, room_id TEXT, room_seq INTEGER)").unwrap()
+    var row = 0
+    while row < count:
+        val room = if row % 4 == 0: "room-a" else: "room-b"
+        db.exec_sql("INSERT INTO {table} (message_id, room_id, room_seq) VALUES ({row + 1}, '{room}', {row + 1})").unwrap()
+        row = row + 1
+    db
+
+fn _sql(table: text, count: i64) -> text:
+    val threshold = count / 2
+    "SELECT message_id, room_seq FROM {table} WHERE room_id = 'room-a' AND room_seq > {threshold} ORDER BY room_seq"
+
+fn _expected_id(row: i64) -> bool:
+    (row - 1) % 4 == 0
+
+fn _check_rows(rows: [DbRow], count: i64) -> bool:
+    var expected_len = 0
+    var row = 0
+    val threshold = count / 2
+    while row < count:
+        if _expected_id(row + 1) and row + 1 > threshold:
+            expected_len = expected_len + 1
+        row = row + 1
+    if rows.len() != expected_len:
+        return false
+    var result_idx = 0
+    row = 0
+    while row < count:
+        val seq = row + 1
+        if _expected_id(seq) and seq > threshold:
+            if rows[result_idx].values.len() != 2 or
+                    rows[result_idx].values[0].to_text() != seq.to_text() or
+                    rows[result_idx].values[1].to_text() != seq.to_text():
+                return false
+            result_idx = result_idx + 1
+        row = row + 1
+    true
+
+fn _emit_rows(case_key: text, rows: [DbRow]) -> bool:
+    if rows.len() > 129: return false
+    var data = ""
+    var index = 0
+    while index < rows.len():
+        if rows[index].values.len() != 2: return false
+        if index > 0: data = data + ","
+        data = data + rows[index].values[0].to_text() + ":" + rows[index].values[1].to_text()
+        index = index + 1
+    if data == "": data = "-"
+    println("ITEM5_DB_ROWS_V1 case={case_key} rows={rows.len()} data={data}")
+    true
+
+fn main() -> i32:
+    val argv = args()
+    if argv.len() < 2:
+        return _fail("usage: <expected-provider-id-decimal> <expected-provider-path>")
+    val expected_provider = argv[argv.len() - 2]
+    val expected_path = argv[argv.len() - 1]
+    val opened = pure_database_cuda_bitmap_reducer_open_owned_v1(
+        expected_provider, expected_path)
+    if opened.status != 0:
+        return _fail("CUDA provider admission failed: " + opened.reason)
+    var reducer = opened.reducer
+    if reducer.provider_identity() != expected_provider or
+            reducer.implementation_identity() != PURE_DATABASE_CUDA_BITMAP_IMPLEMENTATION_V1 or
+            reducer.interface_identity() != "simple-gpu-provider-abi-v1" or
+            reducer.abi_digest() != PURE_DATABASE_CUDA_BITMAP_ABI_V1 or
+            reducer.capability_bits() != 3u64:
+        val closed = reducer.close_owned_v1()
+        return _fail("admitted CUDA provider identity, ABI, or capabilities did not match expectations")
+
+    val counts: [i64] = [31, 32, 33, 511, 512, 513, 1023, 1024, 1025]
+    var case_idx = 0
+    while case_idx < counts.len():
+        val count = counts[case_idx]
+        val provider_table = "provider_messages_{count}"
+        val scalar_table = "scalar_messages_{count}"
+        var db = PureDatabase.memory().unwrap()
+        db = _insert_rows(db, provider_table, count)
+        db = _insert_rows(db, scalar_table, count)
+        val sql = _sql(provider_table, count)
+        val before = reducer.and_call_count()
+        val accelerated = db.query_with_bitmap_reducer_owned_v1(sql, [], reducer)
+        reducer = accelerated.reducer
+        if not accelerated.provider_used or accelerated.provider_and_calls != 1 or
+                reducer.and_call_count() - before != 1 or
+                accelerated.provider_identity != expected_provider or
+                accelerated.implementation_identity != PURE_DATABASE_CUDA_BITMAP_IMPLEMENTATION_V1:
+            val closed = reducer.close_owned_v1()
+            return _fail("owner result did not report one successful admitted AND for row-count {count}: {accelerated.reason}")
+        if accelerated.query.is_err() or
+                not _check_rows(accelerated.query.unwrap(), count):
+            val closed = reducer.close_owned_v1()
+            return _fail("CUDA result disagreed with the complete independent row oracle at {count}")
+        val scalar = db.query(_sql(scalar_table, count), []).unwrap()
+        if scalar.len() != accelerated.query.unwrap().len():
+            val closed = reducer.close_owned_v1()
+            return _fail("ordinary PureDatabase query row count differed at {count}")
+        var ri = 0
+        while ri < scalar.len():
+            if scalar[ri].values[0].to_text() != accelerated.query.unwrap()[ri].values[0].to_text() or
+                    scalar[ri].values[1].to_text() != accelerated.query.unwrap()[ri].values[1].to_text():
+                val closed = reducer.close_owned_v1()
+                return _fail("ordinary PureDatabase row ordering/content differed at {count}")
+            ri = ri + 1
+        val cached = db.query_with_bitmap_reducer_owned_v1(sql, [], reducer)
+        reducer = cached.reducer
+        if cached.provider_used or cached.provider_and_calls != 0 or
+                cached.reason != "select-result-cache-hit" or
+                reducer.and_call_count() != before + 1:
+            val closed = reducer.close_owned_v1()
+            return _fail("cached opt-in query did not preserve ordinary result-cache behavior")
+        val unsupported = db.query_with_bitmap_reducer_owned_v1(
+            "SELECT message_id FROM {provider_table} WHERE room_id = 'room-a' AND (room_seq > 0 OR room_seq < 0)",
+            [], reducer)
+        reducer = unsupported.reducer
+        if unsupported.provider_used or unsupported.provider_and_calls != 0 or
+                reducer.and_call_count() != before + 1:
+            val closed = reducer.close_owned_v1()
+            return _fail("unsupported OR predicate reached the vector provider")
+        if unsupported.query.is_err():
+            val closed = reducer.close_owned_v1()
+            return _fail("ordinary fallback failed for unsupported predicate")
+        val unsupported_scalar = db.query(
+            "SELECT message_id FROM {scalar_table} WHERE room_id = 'room-a' AND (room_seq > 0 OR room_seq < 0)",
+            []).unwrap()
+        val unsupported_rows = unsupported.query.unwrap()
+        if unsupported_rows.len() != unsupported_scalar.len():
+            val closed = reducer.close_owned_v1()
+            return _fail("unsupported-predicate fallback row count differed from ordinary query")
+        var ui = 0
+        while ui < unsupported_rows.len():
+            if unsupported_rows[ui].values[0].to_text() != unsupported_scalar[ui].values[0].to_text():
+                val closed = reducer.close_owned_v1()
+                return _fail("unsupported-predicate fallback rows differed from ordinary query")
+            ui = ui + 1
+        if not _emit_rows(count.to_text(), accelerated.query.unwrap()):
+            val closed = reducer.close_owned_v1()
+            return _fail("bounded row parity record failed at {count}")
+        val _ = db.close()
+        case_idx = case_idx + 1
+
+    var empty_db = PureDatabase.memory().unwrap()
+    empty_db = _insert_rows(empty_db, "empty_provider", 1025)
+    empty_db = _insert_rows(empty_db, "empty_scalar", 1025)
+    val empty_sql = "SELECT message_id, room_seq FROM empty_provider WHERE room_id = 'no-room' AND room_seq > 0 ORDER BY room_seq"
+    val empty_result = empty_db.query_with_bitmap_reducer_owned_v1(empty_sql, [], reducer)
+    reducer = empty_result.reducer
+    if not empty_result.provider_used or empty_result.provider_and_calls != 1 or
+            empty_result.query.unwrap().len() != 0:
+        val closed = reducer.close_owned_v1()
+        return _fail("CUDA no-match bitmap did not return an empty result")
+    val empty_scalar = empty_db.query(
+        "SELECT message_id, room_seq FROM empty_scalar WHERE room_id = 'no-room' AND room_seq > 0 ORDER BY room_seq", []).unwrap()
+    if empty_scalar.len() != 0 or reducer.and_call_count() != 10:
+        val closed = reducer.close_owned_v1()
+        return _fail("no-match scalar oracle or cumulative provider-call count differed")
+    if not _emit_rows("empty", empty_result.query.unwrap()):
+        val closed = reducer.close_owned_v1()
+        return _fail("bounded no-match parity record failed")
+    val _ = empty_db.close()
+
+    val final_closed = reducer.close_owned_v1()
+    if final_closed.status != 0:
+        return _fail("CUDA provider session did not close cleanly")
+    println("PURE_DATABASE_CUDA_BITMAP_PROVIDER_PASS queries=10 device_receipts=10 boundaries=31,32,33,511,512,513,1023,1024,1025 no_match=checked scalar_row_oracle=checked")
+    0
