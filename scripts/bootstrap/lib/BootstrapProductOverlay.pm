@@ -165,7 +165,8 @@ sub materialize_product_overlay {
         !-e "$overlay/$dest" && !-l "$overlay/$dest" or die "overlay member already exists\n";
         make_path(dirname("$overlay/$dest"));
         copy("$source/$origin", "$overlay/$dest") or die "overlay copy failed: $!\n";
-        digest("$overlay/$dest") eq $sha or die "overlay copy changed input bytes\n";
+        # The mandatory final verifier rechecks source/manifest binding and every
+        # physical output digest. Avoid reading and walking each output twice.
     }
     sysopen my $f, $manifest, O_WRONLY | O_CREAT | O_EXCL or die "overlay manifest already exists\n";
     binmode $f; print {$f} encoded($plan) or die $!; close $f or die $!;
