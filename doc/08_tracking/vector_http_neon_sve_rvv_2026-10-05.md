@@ -83,8 +83,9 @@ registered as an explicit toolchain/emulator lane, not a generic CI pass.
 Base fa808ddd63acba540dd01e1819ef3df9e713fb51. The new optional
 `--sve2-only` runner mode compiles the unchanged SVE HTTP/bitmap owners with
 `-march=armv8-a+sve2` and the baseline provider with
-`SIMPLE_VECTOR_REQUIRE_SVE2`. Default mode preserves the existing nine rows.
+`SIMPLE_VECTOR_REQUIRE_SVE2`. Default mode preserves the existing nine rows and adds these two new rows.
 The new mode needs only the installed AArch64 toolchain/sysroot/QEMU.
+Selected bitmap kernel sources are included in source.sha256 alongside HTTP.
 
 Actual same-artifact execution:
 
