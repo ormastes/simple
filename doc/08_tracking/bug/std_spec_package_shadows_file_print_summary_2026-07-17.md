@@ -272,3 +272,42 @@ wrapped harness through the interpreter):
 timeout 240 src/compiler_rust/target/release/simple test test/01_unit/lib/test_runner_result_wrapper_spec.spl        # exit 0
 timeout 240 src/compiler_rust/target/release/simple test test/01_unit/lib/test_runner/result_wrapper_unit_spec.spl   # exit 0
 ```
+
+
+## 2026-10-09 bounded probe recurrence (Phase 1 FreeBSD)
+
+The admitted e934 seed (`daadf4c854c0ef8d5a0d9cf33379c3dd28a1f7ba7c93a6b915c77973943fb721`)
+misrouted an explicit group import from the 63,397-byte canonical
+`src/lib/nogc_sync_mut/spec.spl` to `spec/__init__.spl`. A targeted skip
+fixture printed the package's placeholder skip line and then failed with
+`E1002: function print_summary not found`; its canonical-owner change was
+not exercised. Raw evidence: sibling worktree
+`simple-spec-skip-accounting-20261009/build/skip-validation/cycle1/default/log`.
+
+The bounded `probe_source_cached` correctly returns `None` for files exceeding
+`SIMPLE_SIBLING_MAX_CHECK_KB` (default 50 KiB). However,
+`file_plausibly_provides_names` converted that unknown result into an empty
+set, so member-import redirection treated an uninspected file as known not to
+provide the requested names. The responsible loader and limit code are
+identical in e934 and release source e23da7a417f. Later module-cache changes
+concern target-aware AST parsing, not this probe.
+
+The proposed narrow repair preserves `None` versus `Some(empty)` through the
+member decision. An explicit group import keeps the file already selected by
+path/configured-family resolution if either bounded source probe is unknown.
+When both probes complete, the existing per-name preference remains. Glob
+and single imports retain their existing behavior. This does not increase
+the read limit, change retention, add retries, or bypass configured families.
+
+Four new Rust regressions cover unknown versus known absence, an oversized
+file with a unique aliased member beyond the cap, an oversized package, and
+known mixed/shared-name behavior. Existing package-preference and source-probe
+memoization tests remain required. Repeated over-cap visits must remain
+ineligible for full-source probing. The regression fixture allocation is
+bounded to a 1 MiB probe budget; execute with the default cap.
+
+Status: source repair prepared for independent review; no Cargo build or
+runtime verification has occurred. Existing admitted seeds and failed source
+projections are immutable. Qualification requires targeted Rust checks plus
+a separately built, exactly identified Phase 1 producer and the original
+canonical skip fixture; an old producer cannot validate the source repair.

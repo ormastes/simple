@@ -538,19 +538,20 @@ fn warn_unprovided_use_names(
 /// Tokenizes on non-identifier characters so a name must appear as a whole
 /// token, not merely as a substring of a longer identifier. Reads the file
 /// once regardless of how many names are probed. Deliberately loose/
-/// best-effort: a false positive here just falls back to the existing
-/// "package wins" default below, not a wrong resolution.
-fn file_plausibly_provides_names(path: &Path, names: &[String]) -> std::collections::HashSet<String> {
+/// best-effort. `None` means the bounded probe could not inspect the source,
+/// not that the requested names are absent. Only `Some(empty)` proves that
+/// no requested token was found in a completely read source.
+fn file_plausibly_provides_names(path: &Path, names: &[String]) -> Option<std::collections::HashSet<String>> {
     let max_check_bytes = crate::memory_guard::sibling_max_check_bytes();
-    let Some(source) = super::module_cache::probe_source_cached(path, max_check_bytes) else {
-        return std::collections::HashSet::new();
-    };
+    let source = super::module_cache::probe_source_cached(path, max_check_bytes)?;
     let tokens: std::collections::HashSet<&str> = source.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
-    names
-        .iter()
-        .filter(|name| tokens.contains(name.as_str()))
-        .cloned()
-        .collect()
+    Some(
+        names
+            .iter()
+            .filter(|name| tokens.contains(name.as_str()))
+            .cloned()
+            .collect(),
+    )
 }
 
 fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt) -> std::path::PathBuf {
@@ -580,15 +581,20 @@ fn prefer_package_init_for_member_import(module_path: &Path, use_stmt: &UseStmt)
                     // case and re-lost `print_summary`. So: withhold the
                     // (otherwise unconditional) package-init preference as soon as
                     // ANY single requested name is positively confirmed on the
-                    // file but NOT on the package; an empty/ambiguous probe on
-                    // both sides for a given name doesn't count either way and
-                    // falls back to the existing "package wins" default (see
+                    // file but NOT on the package. An unavailable bounded probe
+                    // cannot justify redirecting the already-resolved file. When
+                    // both sources were inspected, a name absent from both keeps
+                    // the existing "package wins" default (see
                     // `prefers_package_init_for_group_imports_when_both_exist`).
                     if let ImportTarget::Group(_) = &use_stmt.target {
                         if let Some(requested) = requested_group_import_names(use_stmt) {
                             if !requested.is_empty() {
-                                let file_names = file_plausibly_provides_names(module_path, &requested);
-                                let package_names = file_plausibly_provides_names(&package_init, &requested);
+                                let Some(file_names) = file_plausibly_provides_names(module_path, &requested) else {
+                                    return module_path.to_path_buf();
+                                };
+                                let Some(package_names) = file_plausibly_provides_names(&package_init, &requested) else {
+                                    return module_path.to_path_buf();
+                                };
                                 let file_has_unique_name = file_names.iter().any(|name| !package_names.contains(name));
                                 if file_has_unique_name {
                                     return module_path.to_path_buf();
@@ -1354,7 +1360,7 @@ pub fn load_and_merge_module(
 mod tests {
     use super::{
         bare_export_source_names, enforce_gc_boundary_policy, export_target_names, gc_boundary_warning_message,
-        load_and_merge_module, loader_trace_enabled,
+        file_plausibly_provides_names, load_and_merge_module, loader_trace_enabled,
         mark_module_loading, prefer_package_init_for_member_import, resolve_member_import_target,
         should_keep_selective_export, unmark_module_loading,
     };
@@ -1529,6 +1535,81 @@ mod tests {
         );
 
         assert_eq!(resolved, init_path);
+    }
+
+    // Build only slightly beyond the production probe budget. Do not relax the
+    // budget or read the oversized file through an uncapped fallback in tests.
+    fn oversized_member_probe_source(definition: &str) -> String {
+        let limit = crate::memory_guard::sibling_max_check_bytes();
+        assert!(limit <= 1024 * 1024, "member-import fixtures require a probe budget <= 1 MiB");
+        format!("#{}\n{}", " ".repeat(limit as usize), definition)
+    }
+
+    #[test]
+    fn member_probe_distinguishes_uninspected_source_from_known_absence() {
+        let temp = tempfile::tempdir().unwrap();
+        let small = temp.path().join("small.spl");
+        let large = temp.path().join("large.spl");
+        let names = vec!["file_only".to_string()];
+        fs::write(&small, "# no matching identifier\n").unwrap();
+        fs::write(&large, oversized_member_probe_source("fn file_only(): 41\n")).unwrap();
+        assert_eq!(file_plausibly_provides_names(&small, &names), Some(Default::default()));
+        assert_eq!(file_plausibly_provides_names(&large, &names), None);
+        assert_eq!(file_plausibly_provides_names(&temp.path().join("missing.spl"), &names), None);
+    }
+
+    #[test]
+    fn oversized_file_keeps_group_import_owner_and_aliased_member() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("spec.spl");
+        let package = temp.path().join("spec/__init__.spl");
+        fs::create_dir_all(package.parent().unwrap()).unwrap();
+        // Unique name lies after the probe budget, not in an inspectable prefix.
+        fs::write(&file, oversized_member_probe_source("fn shared(): 1\nfn file_only(): 41\n")).unwrap();
+        fs::write(&package, "fn shared(): 2\n").unwrap();
+        let requested = use_stmt_with_target(ImportTarget::Group(vec![
+            ImportTarget::Single("shared".into()),
+            ImportTarget::Aliased { name: "file_only".into(), alias: "selected".into() },
+        ]));
+        assert_eq!(resolve_member_import_target(&file, &requested), file);
+        // The same unknown result is memoized; repeated visits must not switch
+        // owners or make the file eligible for a full-source probe.
+        for _ in 0..8 {
+            assert_eq!(resolve_member_import_target(&file, &requested), file);
+            assert!(super::super::module_cache::probe_source_cached(
+                &file, crate::memory_guard::sibling_max_check_bytes()
+            ).is_none());
+        }
+    }
+
+    #[test]
+    fn oversized_package_does_not_supply_known_absence_for_group_redirect() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("spec.spl");
+        let package = temp.path().join("spec/__init__.spl");
+        fs::create_dir_all(package.parent().unwrap()).unwrap();
+        fs::write(&file, "fn shared(): 1\n").unwrap();
+        fs::write(&package, oversized_member_probe_source("fn shared(): 2\n")).unwrap();
+        let requested = use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single("shared".into())]));
+        assert_eq!(resolve_member_import_target(&file, &requested), file);
+        // Glob imports retain their existing package preference.
+        assert_eq!(resolve_member_import_target(&file, &use_stmt_with_target(ImportTarget::Glob)), package);
+    }
+
+    #[test]
+    fn inspected_file_unique_name_preserves_mixed_group_but_shared_names_prefer_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("spec.spl");
+        let package = temp.path().join("spec/__init__.spl");
+        fs::create_dir_all(package.parent().unwrap()).unwrap();
+        fs::write(&file, "fn shared(): 1\nfn file_only(): 41\n").unwrap();
+        fs::write(&package, "fn shared(): 2\n").unwrap();
+        let mixed = use_stmt_with_target(ImportTarget::Group(vec![
+            ImportTarget::Single("shared".into()), ImportTarget::Single("file_only".into()),
+        ]));
+        assert_eq!(resolve_member_import_target(&file, &mixed), file);
+        let shared = use_stmt_with_target(ImportTarget::Group(vec![ImportTarget::Single("shared".into())]));
+        assert_eq!(resolve_member_import_target(&file, &shared), package);
     }
 
     #[test]
