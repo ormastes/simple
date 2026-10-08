@@ -68,28 +68,50 @@ impl MirLowering:
 
     fn native_trait_implementation_admitted(layout: NativeTraitLayout,
             implementation: NativeTraitImplementation) -> bool:
-        if not layout.object_safe or implementation.methods.len() != layout.methods.len() or implementation.signatures.len() != layout.methods.len(): return false
-        if self.mir_hir_type_is_resource_direct(implementation.concrete_type): return false
+        self.native_trait_implementation_rejection(layout, implementation) == ""
+
+    fn native_trait_implementation_rejection(layout: NativeTraitLayout,
+            implementation: NativeTraitImplementation) -> text:
+        # Same fail-closed admission predicates, with the first exact boundary
+        # retained for bounded native diagnosis instead of an opaque false.
+        if not layout.object_safe: return "trait declaration is not object-safe"
+        if implementation.methods.len() != layout.methods.len(): return "implementation method count mismatch"
+        if implementation.signatures.len() != layout.methods.len(): return "implementation signature count mismatch"
+        if self.mir_hir_type_is_resource_direct(implementation.concrete_type): return "concrete resource requires a drop slot"
         var index = 0
         while index < layout.methods.len():
             val slot = layout.methods[index]
             val concrete = implementation.signatures[index]
-            if implementation.methods[index] == "" or slot.params.len() == 0 or slot.params.len() != concrete.params.len() or slot.mutable_receiver != concrete.mutable_receiver: return false
-            if slot.parameter_mutability.len() != slot.params.len() or concrete.parameter_mutability.len() != concrete.params.len(): return false
-            if self.mir_hir_type_is_resource_direct(slot.result) or self.mir_hir_type_is_resource_direct(concrete.result): return false
-            if self.native_trait_owner_for_type(slot.params[0]) != layout.owner: return false
-            if self.native_trait_signature_type_key(concrete.params[0]) != self.native_trait_signature_type_key(implementation.concrete_type): return false
+            val method = slot.name
+            if implementation.methods[index] == "": return "method {method}: missing implementation callable"
+            if slot.params.len() == 0: return "method {method}: missing declared receiver"
+            if slot.params.len() != concrete.params.len(): return "method {method}: parameter count expected={slot.params.len()} actual={concrete.params.len()}"
+            if slot.mutable_receiver != concrete.mutable_receiver: return "method {method}: receiver mutability expected={slot.mutable_receiver} actual={concrete.mutable_receiver}"
+            if slot.parameter_mutability.len() != slot.params.len(): return "method {method}: incomplete declaration parameter mutability"
+            if concrete.parameter_mutability.len() != concrete.params.len(): return "method {method}: incomplete implementation parameter mutability"
+            if self.mir_hir_type_is_resource_direct(slot.result): return "method {method}: declaration resource return requires a drop slot"
+            if self.mir_hir_type_is_resource_direct(concrete.result): return "method {method}: implementation resource return requires a drop slot"
+            val receiver_owner = self.native_trait_owner_for_type(slot.params[0])
+            if receiver_owner != layout.owner: return "method {method}: trait receiver expected={layout.owner} actual={receiver_owner}"
+            val concrete_receiver = self.native_trait_signature_type_key(concrete.params[0])
+            val expected_receiver = self.native_trait_signature_type_key(implementation.concrete_type)
+            if concrete_receiver != expected_receiver: return "method {method}: concrete receiver expected={expected_receiver} actual={concrete_receiver}"
             val result_key = self.native_trait_signature_type_key(slot.result)
-            if result_key == "" or result_key != self.native_trait_signature_type_key(concrete.result): return false
+            val concrete_result = self.native_trait_signature_type_key(concrete.result)
+            if result_key == "": return "method {method}: unsupported declaration return type"
+            if result_key != concrete_result: return "method {method}: return type expected={result_key} actual={concrete_result}"
             var argument = 1
             while argument < slot.params.len():
-                if self.mir_hir_type_is_resource_direct(slot.params[argument]) or self.mir_hir_type_is_resource_direct(concrete.params[argument]): return false
-                if slot.parameter_mutability[argument] != concrete.parameter_mutability[argument]: return false
+                if self.mir_hir_type_is_resource_direct(slot.params[argument]): return "method {method} parameter {argument}: declaration resource requires a drop slot"
+                if self.mir_hir_type_is_resource_direct(concrete.params[argument]): return "method {method} parameter {argument}: implementation resource requires a drop slot"
+                if slot.parameter_mutability[argument] != concrete.parameter_mutability[argument]: return "method {method} parameter {argument}: mutability mismatch"
                 val key = self.native_trait_signature_type_key(slot.params[argument])
-                if key == "" or key != self.native_trait_signature_type_key(concrete.params[argument]): return false
+                val concrete_key = self.native_trait_signature_type_key(concrete.params[argument])
+                if key == "": return "method {method} parameter {argument}: unsupported declaration type"
+                if key != concrete_key: return "method {method} parameter {argument}: type expected={key} actual={concrete_key}"
                 argument = argument + 1
             index = index + 1
-        true
+        ""
 
     fn native_trait_layout_index(owner: text) -> i64:
         var index = 0
