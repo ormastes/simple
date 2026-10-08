@@ -10,11 +10,26 @@ concurrently; only product test execution waits for Phase 1 terminal completion.
 A Phase 1 failure remains failure but does not cancel later authorized test runs.
 
 The pinned seed executes the repository's default Simple test runner with
-`test --whole --parallel --max-workers=<jobs> --unstable --mode=interpreter --json`.
+`test --whole --parallel --max-workers=<jobs> --worker-memory-mb=<MiB> --unstable --mode=interpreter --json`.
 The legacy `SIMPLE_TEST_RUNNER_RUST` override is removed from the child environment:
 that runner reads legacy TOML and does not consume the current SDN configuration.
 The worker argv, `SIMPLE_TEST_JOBS` environment and request receipt all use the
-same admitted count. Prepared requests reject a changed count on resume.
+same admitted count. Prepared requests reject a changed count or memory budget on resume.
+The independent `--worker-memory-mb` budget defaults to 0 (disabled) in the callback;
+the FreeBSD 20-worker lane must explicitly request `--worker-memory-mb 20480`
+and does not change CPU concurrency. The parallel owner samples owned worker
+process trees at most once per 500 ms refill window; missing roots retain their
+reservation, malformed or unavailable samples block new admission, and active
+children continue to be collected. Live RSS sampling supports Linux, FreeBSD,
+and macOS. On unsupported hosts, including Windows, an explicitly positive budget
+is rejected before spawning any workers. Leaving it disabled preserves the
+existing platform behavior. This is not Windows RSS qualification.
+This is an admission throttle, not an OS
+memory limit: the outer sampled RSS watchdog must include worker budget plus
+parent and observer headroom. Child spec processes use `run` and do not receive
+the aggregate budget; only their owning parallel runner applies it.
+The request pins the parser, options, scheduler, accounting helper and numeric
+parser sources as well as the configured discovery inputs.
 `SIMPLE_BINARY` and `SIMPLE_RUNTIME` bind test and doctest children to the same seed.
 
 Existing policy remains authoritative:

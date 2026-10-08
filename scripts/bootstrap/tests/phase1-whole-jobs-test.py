@@ -26,7 +26,12 @@ class JobsTests(unittest.TestCase):
         for name in ('config/simple.test.sdn', 'config/sdoctest.sdn',
                      'src/app/test_runner_new/main.spl',
                      'src/app/test_runner_new/test_runner_main.spl',
-                     'src/lib/nogc_sync_mut/test_runner/test_runner_files.spl'):
+                     'src/lib/nogc_sync_mut/test_runner/test_runner_files.spl',
+              'src/lib/nogc_sync_mut/test_runner/test_runner_args.spl',
+              'src/lib/nogc_sync_mut/test_runner/test_runner_types.spl',
+              'src/lib/nogc_sync_mut/test_runner/test_runner_async.spl',
+              'src/lib/nogc_sync_mut/test_runner/worker_memory.spl',
+              'src/lib/common/convert.spl'):
             target = self.source / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b'fixture input\n')
@@ -48,6 +53,8 @@ class JobsTests(unittest.TestCase):
                     self.assertEqual(module.main(), 2)
                 request = json.loads((output / 'request.json').read_text())
                 self.assertEqual(request['jobs'], jobs)
+                self.assertEqual(request['worker_memory_mb'], 0)
+                self.assertFalse(any(arg.startswith('--worker-memory-mb=') for arg in child.call_args.args[0]))
                 self.assertIn(f'--max-workers={jobs}', child.call_args.args[0])
                 self.assertEqual(child.call_args.kwargs['env']['SIMPLE_TEST_JOBS'], str(jobs))
                 self.assertEqual(request['command'], child.call_args.args[0])
@@ -79,6 +86,34 @@ class JobsTests(unittest.TestCase):
             self.assertEqual(error.exception.code, 2)
             child.assert_not_called()
         self.assertFalse((output / 'stdout.log').exists())
+
+    def test_prepared_memory_budget_change_cannot_launch(self):
+        output = self.root / 'prepared-memory'
+        with patch('sys.argv', self.args(output, 20, '--prepare-only')):
+            self.assertEqual(module.main(), 0)
+        args = self.args(output, 20, '--resume-prepared') + ['--worker-memory-mb', '10240']
+        with patch('sys.argv', args), patch.object(module.subprocess, 'run') as child, contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit): module.main()
+            child.assert_not_called()
+
+    def test_explicit_memory_budget_reaches_child_and_receipt(self):
+        output = self.root / 'explicit-memory'
+        args = self.args(output, 20, '--prepare-only') + ['--worker-memory-mb', '20480']
+        with patch('sys.argv', args):
+            self.assertEqual(module.main(), 0)
+        request = json.loads((output / 'request.json').read_text())
+        self.assertEqual(request['worker_memory_mb'], 20480)
+        self.assertIn('--worker-memory-mb=20480', request['command'])
+        self.assertEqual(request['jobs'], 20)
+
+    def test_invalid_memory_budget_rejects(self):
+        for value in ('-1', '1048577', 'bad'):
+            output = self.root / ('memory-' + value)
+            args = self.args(output, 20) + ['--worker-memory-mb', value]
+            with patch('sys.argv', args), patch.object(module.subprocess, 'run') as child, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit): module.main()
+                child.assert_not_called()
+            self.assertFalse(output.exists())
 
 
 if __name__ == '__main__': unittest.main()

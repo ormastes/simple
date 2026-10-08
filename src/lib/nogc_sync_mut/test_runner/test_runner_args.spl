@@ -26,6 +26,7 @@ use std.test_runner.test_runner_types.{TestExecutionMode, TestLevel, TestOptions
 use compiler.common.assurance.policy_names.{normalize_profile_name, valid_profile_names_help}
 
 use std.io_runtime.{file_exists}
+use std.common.convert.{try_parse_in_range}
 use std.nogc_sync_mut.test_runner.resource_policy.{test_default_max_procs, test_max_procs_value_valid}
 
 # =========================================================================
@@ -76,7 +77,7 @@ fn parse_mode_str(m: text) -> TestExecutionMode:
 
 fn _test_arg_is_numeric_option(arg: text) -> bool:
     (
-        arg == "--max-mem" or arg == "--max-procs" or arg == "--cpu-threshold" or arg == "--mem-threshold" or
+        arg == "--max-mem" or arg == "--worker-memory-mb" or arg == "--max-procs" or arg == "--cpu-threshold" or arg == "--mem-threshold" or
         arg == "--resource-limit" or arg == "--max-workers" or
         arg == "--parallel-timeout" or arg == "--fuzz-time" or
         arg == "--chaos-trials" or arg == "--chaos-fault-rate" or
@@ -89,7 +90,7 @@ fn _test_arg_is_signed_number(value: text) -> bool:
 
 fn _test_arg_has_empty_equals_value(arg: text) -> bool:
     (
-        arg == "--max-mem=" or arg == "--max-procs=" or arg == "--execution-mode=" or
+        arg == "--max-mem=" or arg == "--worker-memory-mb=" or arg == "--max-procs=" or arg == "--execution-mode=" or
         arg == "--cpu-threshold=" or arg == "--mem-threshold=" or
         arg == "--resource-limit=" or arg == "--max-workers=" or
         arg == "--parallel-timeout=" or arg == "--fuzz-time=" or
@@ -108,7 +109,7 @@ fn test_args_validation_error(args: [text]) -> text:
     while i < args.len():
         val arg = args[i]
         val needs_value = (
-            arg == "--max-mem" or arg == "--max-procs" or arg == "--execution-mode" or
+            arg == "--max-mem" or arg == "--worker-memory-mb" or arg == "--max-procs" or arg == "--execution-mode" or
             arg == "--cpu-threshold" or arg == "--mem-threshold" or
             arg == "--resource-limit" or arg == "--max-workers" or
             arg == "--parallel-timeout" or arg == "--fuzz-time" or
@@ -130,6 +131,8 @@ fn test_args_validation_error(args: [text]) -> text:
                 return "missing value for {arg}"
             if arg == "--format" and value != "text" and value != "json" and value != "doc":
                 return "invalid value for --format: {value}"
+            if arg == "--worker-memory-mb" and (try_parse_in_range(value, 1, 1048576) == nil):
+                return "invalid value for --worker-memory-mb: {value} (expected 1..1048576 MiB)"
             if arg == "--max-procs" and not test_max_procs_value_valid(value):
                 return "invalid value for --max-procs: {value} (expected a nonnegative integer)"
             if arg == "--profile" and normalize_profile_name(value) == "":
@@ -137,6 +140,13 @@ fn test_args_validation_error(args: [text]) -> text:
             if arg == "--native-backend" and value != "llvm" and value != "cranelift":
                 return "invalid value for --native-backend: {value} (expected llvm or cranelift)"
             i = i + 2
+            continue
+
+        if arg.starts_with("--worker-memory-mb="):
+            val value = arg.substring(19)
+            if try_parse_in_range(value, 1, 1048576) == nil:
+                return "invalid value for --worker-memory-mb: {value} (expected 1..1048576 MiB)"
+            i = i + 1
             continue
 
         if arg.starts_with("--max-procs="):
@@ -292,6 +302,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
     var mem_check = false
     var fork_mode = false
     var resource_limit_pct = 75
+    var worker_memory_mb = 0
     var no_cache = false
     var refresh_manifest = false
     var manifest_status = false
@@ -362,6 +373,12 @@ fn parse_test_args(args: [text]) -> TestOptions:
             planned_only = true
         elif arg == "--no-limits":
             no_limits = true
+        elif arg == "--worker-memory-mb":
+            i = i + 1
+            if i < args.len(): worker_memory_mb = try_parse_in_range(args[i], 1, 1048576) ?? 0
+        elif arg.starts_with("--worker-memory-mb="):
+            val memory_value = arg.substring(19)
+            worker_memory_mb = try_parse_in_range(memory_value, 1, 1048576) ?? 0
         elif arg == "--max-mem":
             i = i + 1
             if i < args.len():
@@ -711,6 +728,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
         mem_check: mem_check,
         fork_mode: fork_mode,
         resource_limit_pct: resource_limit_pct,
+        worker_memory_mb: worker_memory_mb,
         no_cache: no_cache,
         refresh_manifest: refresh_manifest,
         manifest_status: manifest_status,
