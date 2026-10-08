@@ -26,3 +26,21 @@ The next bounded qualified generation must run the existing positive struct
 fixture and signature/mutability negatives. A negative pass requires the expected
 method/property reason, not merely an arbitrary compiler failure. No parser,
 constructor, vtable layout or callable ABI change is made by this diagnostic patch.
+
+Read-only retained-HIR follow-up: cache file `8d9e73b2d1f4ba51865c675a010014298d5709d56d90911d63e0aeab3d0a3130.hir`
+has SHA256 `02a5df935c51c9ec9d83902dd3de6c318a95d14d1585c397456014d8788ae391`
+and names actual frontend `ec7f0118a19e2703e3b092ac775237cd93491271cca26ca4724259a8aa082019`.
+The bounded read copy and codec-derived decoder live under `build/review/` as
+`item5-trait-struct-retained.hir`, `item5-trait-cache-signatures-20261008.py`, and
+`item5-trait-retained-signatures-20261008.json`.
+
+Actual method headers agree: trait receiver Named(4), concrete Named(2), both
+with empty generic arguments; `current_probe_v1` has one parameter and immutable
+receiver, `increment_probe_v1` has receiver plus signed-i64 amount and mutable
+receiver. All return signed i64, all nonreceiver parameter mutability is false,
+all four are nonstatic instance methods. Symbol 4 is the trait, symbol 2 the
+concrete struct, both with the same nonempty module owner. Impl callable IDs
+11/12 match the retained functions. This rules out guessing an authored fn/me,
+parameter-count or integer-type mismatch from the opaque error. It does not prove
+subsequent MIR registration/transport preserved these fields. No unproven ABI
+relaxation or speculative registration rewrite is included.
