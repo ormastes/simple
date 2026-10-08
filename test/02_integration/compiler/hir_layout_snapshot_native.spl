@@ -1,0 +1,161 @@
+# Standalone native regression for compact value-layout validation inputs.
+# This intentionally avoids std.spec so the semantic helper can be compiled
+# and run as an ordinary app entrypoint with the Phase 2 compiler.
+
+use std.io_runtime.{exit}
+use compiler.common.attributes.{FunctionAttr}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_definitions.{
+    HirBlock, HirExpr, HirExprKind, HirField, HirFunction, HirClass, HirStruct
+}
+use compiler.hir.hir_types.{
+    HirModule, HirType, HirTypeKind, SymbolId, SymbolTable, SymbolKind
+}
+use compiler.semantics.value_struct_layout.{
+    validate_value_struct_layouts, value_struct_layout_snapshot_v1
+}
+use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind}
+
+fn check(condition: bool):
+    if not condition:
+        exit(1)
+
+fn span() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1, file: "native-fixture", length: 0)
+
+fn i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: span())
+
+fn named_type(symbol: SymbolId) -> HirType:
+    HirType(kind: HirTypeKind.Named(symbol, []), span: span())
+
+fn nil_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: i64_type(), span: span())
+
+fn field(name: text, type_: HirType) -> HirField:
+    HirField(
+        symbol: SymbolId(id: 0), name: name, type_: type_,
+        has_default: false, default: nil_expr(), visibility: Visibility.Public,
+        is_public: true, is_volatile: false, has_bits_attr: false, bits_width: 0,
+        has_fixed_address: false, fixed_address: 0, span: span())
+
+fn structure(symbol: SymbolId, name: text, fields: [HirField]) -> HirStruct:
+    HirStruct(
+        symbol: symbol, name: name, type_params: [], fields: fields,
+        visibility: Visibility.Public, is_public: true, has_doc_comment: false,
+        doc_comment: "", span: span(), has_layout_attr: false,
+        layout_attr: LayoutAttr(layout_kind: TypeLayoutKind.Simple, is_packed: false),
+        has_platform_attr: false, platform_has_error: false,
+        platform_has_warning: false, platform_diagnostic_message: "",
+        platform_diagnostic_line: 0, is_generic_template: false,
+        has_specialization_of: false, specialization_of: "", type_bindings: {})
+
+fn class_def(symbol: SymbolId) -> HirClass:
+    HirClass(
+        symbol: symbol, name: "NativeFixtureClass", type_params: [], fields: [],
+        methods: {}, visibility: Visibility.Public, is_public: true,
+        has_doc_comment: false, doc_comment: "", span: span(),
+        has_layout_attr: false,
+        layout_attr: LayoutAttr(layout_kind: TypeLayoutKind.Simple, is_packed: false),
+        has_export_attr: false, export_attr: nil, has_platform_attr: false,
+        platform_has_error: false, platform_has_warning: false,
+        platform_diagnostic_message: "", platform_diagnostic_line: 0,
+        is_generic_template: false, has_specialization_of: false,
+        specialization_of: "", type_bindings: {})
+
+fn module(name: text, table: SymbolTable, structs: [HirStruct]) -> HirModule:
+    var struct_map: Dict<SymbolId, HirStruct> = {}
+    for item in structs:
+        struct_map[item.symbol] = item
+    HirModule(
+        name: name, path: "synthetic/" + name + ".spl", imports: [], exports: [],
+        domain_blocks: [], symbols: table, functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: struct_map, enums: {}, bitfields: {}, traits: {}, impls: [],
+        constants: {}, static_asserts: [], aop_advices: [], di_bindings: [],
+        arch_rules: [], mock_decls: [], types: [])
+
+fn add_function_payload(hir: HirModule, symbol: SymbolId): HirModule:
+    hir.functions[symbol] = HirFunction(
+        symbol: symbol, name: "NativeFixtureFunction", type_params: [], params: [],
+        return_type: i64_type(),
+        body: HirBlock(stmts: [], has: true, value: nil_expr(), span: span()),
+        effects: [], visibility: Visibility.Public, is_async: false,
+        is_static: false, is_public: true, is_method: false, is_mutable: false,
+        is_const: false, is_extern: false, func_attr: FunctionAttr.default(),
+        has_export_attr: false, export_attr: nil, has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_suspension: false, has_vhdl_metadata: false,
+        vhdl_metadata: nil, has_doc_comment: false, doc_comment: "", span: span())
+    hir
+
+fn check_snapshot_payload():
+    var table = SymbolTable.new()
+    val struct_symbol = table.define(
+        "NativeFixtureNode", SymbolKind.Struct, nil, span(),
+        Visibility.Public, false, "fixture.layout")
+    val class_symbol = table.define(
+        "NativeFixtureClass", SymbolKind.Class, nil, span(), Visibility.Public, false, nil)
+    val function_symbol = table.define(
+        "NativeFixtureFunction", SymbolKind.Function, nil, span(), Visibility.Public, false, nil)
+    val node = structure(struct_symbol, "NativeFixtureNode", [
+        field("self", named_type(struct_symbol))])
+    var full = module("fixture.layout", table, [node])
+    full.classes[class_symbol] = class_def(class_symbol)
+    full = add_function_payload(full, function_symbol)
+    val compact = value_struct_layout_snapshot_v1(
+        full.name, full.path, full.structs, full.symbols)
+
+    check(full.functions.len() == 1)
+    check(full.classes.len() == 1)
+    check(compact.functions.len() == 0)
+    check(compact.classes.len() == 0)
+    check(compact.structs.len() == 1)
+    check(compact.symbols.symbols.has(struct_symbol.id))
+    check(not compact.symbols.symbols.has(class_symbol.id))
+    check(not compact.symbols.symbols.has(function_symbol.id))
+    val retained_struct_symbol = compact.symbols.symbols[struct_symbol.id]
+    if val owner = retained_struct_symbol.defining_module:
+        check(owner == "fixture.layout")
+    else:
+        exit(1)
+    val full_errors = validate_value_struct_layouts(["fixture.layout"], [full])
+    val compact_errors = validate_value_struct_layouts(["fixture.layout"], [compact])
+    check(compact_errors == full_errors)
+    check(compact_errors.len() == 1)
+
+fn check_cross_module_cycle():
+    var left_symbols = SymbolTable.new()
+    val left_id = left_symbols.define(
+        "NativeLeft", SymbolKind.Struct, nil, span(), Visibility.Public, false, "physical.left")
+    val right_import = left_symbols.define(
+        "NativeRight", SymbolKind.Struct, nil, span(), Visibility.Public, false, "physical.right")
+    val left = module("left_alias", left_symbols, [
+        structure(left_id, "NativeLeft", [field("right", named_type(right_import))])])
+
+    var right_symbols = SymbolTable.new()
+    val right_id = right_symbols.define(
+        "NativeRight", SymbolKind.Struct, nil, span(), Visibility.Public, false, "physical.right")
+    val left_import = right_symbols.define(
+        "NativeLeft", SymbolKind.Struct, nil, span(), Visibility.Public, false, "physical.left")
+    val right = module("right_alias", right_symbols, [
+        structure(right_id, "NativeRight", [field("left", named_type(left_import))])])
+
+    val full_errors = validate_value_struct_layouts(
+        ["physical.left", "physical.right"], [left, right])
+    val compact_left = value_struct_layout_snapshot_v1(
+        "physical.left", left.path, left.structs, left.symbols)
+    val compact_right = value_struct_layout_snapshot_v1(
+        "physical.right", right.path, right.structs, right.symbols)
+    val compact_errors = validate_value_struct_layouts(
+        ["physical.left", "physical.right"], [compact_left, compact_right])
+    check(full_errors.len() == 1)
+    check(compact_errors == full_errors)
+    check(compact_errors[0].contains("NativeLeft"))
+    check(compact_errors[0].contains("NativeRight"))
+
+fn main():
+    check_snapshot_payload()
+    check_cross_module_cycle()
+    print("HIR_LAYOUT_SNAPSHOT_NATIVE_PASS full_payload_dropped=true struct_owner_preserved=true cross_module_cycle_equal=true")
+    0
