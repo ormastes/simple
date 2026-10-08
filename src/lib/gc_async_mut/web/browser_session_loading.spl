@@ -631,6 +631,7 @@ impl BrowserSession:
         if val Some(load) = self.active_load:
             if response.error != "":
                 load.append_warning("external script error: {response.error}")
+                self.active_load = Some(load)
             else:
                 val current_idx = load.next_script_idx - 1
                 val simple_script = (
@@ -644,6 +645,7 @@ impl BrowserSession:
                     load.append_warning(
                         "external script error: blocked response MIME type"
                     )
+                    self.active_load = Some(load)
                 elif simple_script:
                     self._apply_response_headers(response.headers, response.url)
                     self._execute_simple_script(response.body, Some(load))
@@ -663,6 +665,7 @@ impl BrowserSession:
                 "module load error: blocked response MIME type"
             )
             load.pending_module = nil
+            self.active_load = Some(load)
             return self._advance_script_loading()
         Err("no active module load")
 
@@ -671,6 +674,7 @@ impl BrowserSession:
             if response.error != "":
                 load.append_warning("module load error: {response.error}")
                 load.pending_module = nil
+                self.active_load = Some(load)
                 return self._advance_script_loading()
             self._apply_response_headers(response.headers, response.url)
             self.module_source_cache = upsert_pair(self.module_source_cache, response.url, response.body)
@@ -1188,6 +1192,9 @@ impl BrowserSession:
         load.pending_module = Some(BrowserPendingModuleEval.create(
             module_url, "", csp_policy
         ))
+        # Publish the advanced script cursor before the request pump can
+        # reject this module and resume script loading from active_load.
+        self.active_load = Some(load)
         var request = self._build_request(
             "module", module_url, "GET", "", "", ""
         )
