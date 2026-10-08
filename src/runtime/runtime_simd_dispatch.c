@@ -72,12 +72,29 @@ static bool rt_msvc_x86_os_avx_enabled(void) {
 }
 #endif
 
+#if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+/* One atomic word contains both validity and all usable features. No constructor,
+ * lock or in-progress state: racing first callers may probe, but only the first
+ * publication wins. Relaxed ordering suffices because there is no other payload.
+ * Keep the raw header detector stateless for kernel policy and synthetic tests. */
+static atomic_uint g_gnu_cpu_features = ATOMIC_VAR_INIT(0);
+static unsigned rt_gnu_cpu_features(void) {
+    unsigned cached = atomic_load_explicit(&g_gnu_cpu_features, memory_order_relaxed);
+    if (cached) return cached & 7U;
+    const unsigned detected = simd_gnu_x86_usable_features() | 8U;
+    if (atomic_compare_exchange_strong_explicit(&g_gnu_cpu_features, &cached,
+            detected, memory_order_relaxed, memory_order_relaxed))
+        return detected & 7U;
+    return cached & 7U;
+}
+#endif
+
 /* Public CPU support is independent of compiled kernel/force-off policy.
  * Keep _MSC_VER exclusion: clang-cl must retain its existing intrinsics path.
- * GNU queries use direct CPUID/XGETBV and never root libgcc CPU constructors. */
+ * GNU queries lazily cache CPUID/XGETBV without rooting libgcc constructors. */
 bool rt_simd_has_sse(void) {
 #if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
-    return (simd_gnu_x86_usable_features() & 1U) != 0;
+    return (rt_gnu_cpu_features() & 1U) != 0;
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
     int regs[4];
     __cpuid(regs, 1);
@@ -89,7 +106,7 @@ bool rt_simd_has_sse(void) {
 
 bool rt_simd_has_avx(void) {
 #if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
-    return (simd_gnu_x86_usable_features() & 2U) != 0;
+    return (rt_gnu_cpu_features() & 2U) != 0;
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
     return rt_msvc_x86_os_avx_enabled();
 #else
@@ -99,7 +116,7 @@ bool rt_simd_has_avx(void) {
 
 bool rt_simd_has_avx2(void) {
 #if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
-    return (simd_gnu_x86_usable_features() & 4U) != 0;
+    return (rt_gnu_cpu_features() & 4U) != 0;
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
     int regs[4];
     if (!rt_msvc_x86_os_avx_enabled()) return false;
