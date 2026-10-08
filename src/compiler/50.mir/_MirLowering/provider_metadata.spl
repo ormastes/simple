@@ -152,6 +152,14 @@ impl MirLowering:
             case _: ()
 
     me relocate_provider_type_symbol(id: SymbolId, provider: SymbolTable) -> SymbolId:
+        # Absent-id guard: a SymbolId from a provider-closure expression may
+        # name a symbol this provider table does not own. get_symbol_raw then
+        # returns nil; the Option nil-check passes on a miscompiled Some-tag/
+        # null-payload return (stage-native lane; see symbol_name_scalar_raw)
+        # and the defining_module deref below faults at address 0
+        # (2026-10-08 test_runner_build SIGSEGV backtrace). Probe has() first.
+        if not provider.symbols.has(id.id):
+            return SymbolId(id: -1)
         val source = provider.get_symbol_raw(id.id)
         if source == nil:
             return SymbolId(id: -1)
@@ -210,6 +218,9 @@ impl MirLowering:
         result
 
     me relocate_provider_callable(id: SymbolId, provider: SymbolTable, links: Dict<i64, text>) -> SymbolId:
+        # Same absent-id guard as relocate_provider_type_symbol.
+        if not provider.symbols.has(id.id):
+            return SymbolId(id: -1)
         val source = provider.get_symbol_raw(id.id)
         if source == nil:
             return SymbolId(id: -1)
@@ -282,14 +293,23 @@ impl MirLowering:
                         relocated_interpolations = relocated_interpolations.push(relocated)
                     HirExprKind.StringLit(value, Some(relocated_interpolations))
             case Var(id) | NamedVar(id, _):
-                val source = provider.get_symbol_raw(id.id)
-                if source != nil and source.kind == SymbolKind.Class:
-                    val target = self.relocate_provider_type_symbol(id, provider)
-                    HirExprKind.NamedVar(target, mir_class_identity(source))
+                # Nil-payload guard: when the id is absent from the provider
+                # table, get_symbol_raw returns nil and the fallback branch
+                # would evaluate source.name on the nil payload
+                # (EXC_BAD_ACCESS address 0x0; the miscompiled-Option class is
+                # documented in symbol_name_scalar_raw's docstring). Probe
+                # has() first and lower Error when absent.
+                if not provider.symbols.has(id.id):
+                    HirExprKind.Error
                 else:
-                    val target = self.relocate_provider_callable(id, provider, links)
-                    if target.id < 0: HirExprKind.Error
-                    else: HirExprKind.NamedVar(target, self.symbols.symbol_display_name(target, source.name))
+                    val source = provider.get_symbol_raw(id.id)
+                    if source != nil and source.kind == SymbolKind.Class:
+                        val target = self.relocate_provider_type_symbol(id, provider)
+                        HirExprKind.NamedVar(target, mir_class_identity(source))
+                    else:
+                        val target = self.relocate_provider_callable(id, provider, links)
+                        if target.id < 0: HirExprKind.Error
+                        else: HirExprKind.NamedVar(target, self.symbols.symbol_display_name(target, source.name))
             case Field(base, field, _):
                 HirExprKind.Field(self.relocate_provider_default(base, provider, links), field, nil)
             case Index(base, index):
@@ -350,6 +370,9 @@ impl MirLowering:
         result
 
     me register_provider_class(class_def: HirClass, provider: SymbolTable, links: Dict<i64, text>, local: bool):
+        if not provider.symbols.has(class_def.symbol.id):
+            self.error_fatal("class provider symbol is absent from the provider table: {class_def.name}", Some(class_def.span))
+            return
         val source = provider.get_symbol_raw(class_def.symbol.id)
         if source == nil:
             self.error_fatal("class provider is missing its declaration symbol: {class_def.name}", Some(class_def.span))
