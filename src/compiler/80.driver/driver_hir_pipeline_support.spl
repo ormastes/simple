@@ -27,7 +27,8 @@ use compiler.semantics.aspect_validation.{validate_aspect_contracts}
 use compiler.semantics.aspect_weave.{weave_forward_advice}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_log_helpers.{log_phase}
-use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection
+use compiler.hir.hir_types.{HirModule, SymbolId, SymbolKind, SymbolTable}  # explicit: a glob is not an import-origin for surface projection
+use compiler.hir.hir_definitions.{HirStruct}
 use compiler.hir.hir_lowering.module_surface.{module_surface_canonical_path}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_module_abort_v1, reverse_reference_module_seal_v1,
@@ -196,6 +197,46 @@ pub fn driver_hir_mem_snapshot(
         bootstrap_hir_module_enums_outer_len(),
         bootstrap_hir_module_structs_outer_len(),
         bootstrap_hir_module_classes_outer_len())
+
+# Retain only the HIR needed by value-layout validation. The normal driver
+# already owns each complete HirModule in `ctx.hir_modules`; retaining another
+# complete module value for validation keeps functions, classes, traits, and
+# bodies reachable for a pass that reads only structs and struct symbols.
+pub fn driver_hir_layout_validation_snapshot_v1(
+    module_name: text,
+    module_path: text,
+    structs: Dict<SymbolId, HirStruct>,
+    source_symbols: SymbolTable
+) -> HirModule:
+    var layout_symbols = SymbolTable.new()
+    for symbol_id in source_symbols.symbols.keys():
+        val symbol = source_symbols.symbols[symbol_id]
+        if symbol.kind == SymbolKind.Struct:
+            layout_symbols.symbols[symbol_id] = symbol
+    HirModule(
+        name: module_name,
+        path: module_path,
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: layout_symbols,
+        functions: {},
+        gpu_function_targets: {},
+        gpu_function_backend_orders: {},
+        classes: {},
+        structs: structs,
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
 
 pub fn driver_hir_promotion_snapshot(
     phase: text, source_index: i64, source_path: text,
