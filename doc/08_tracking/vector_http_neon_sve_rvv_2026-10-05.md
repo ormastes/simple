@@ -77,3 +77,48 @@ No Simple application, loader-session integration, end-to-end HTTP request,
 speedup, host-registry authentication or device-image attestation is claimed.
 No root Simple job, compiler freeze or shared cache was modified. The check is
 registered as an explicit toolchain/emulator lane, not a generic CI pass.
+
+## SVE2-required HTTP admission, 2026-10-08
+
+Base fa808ddd63acba540dd01e1819ef3df9e713fb51. The new optional
+`--sve2-only` runner mode compiles the unchanged SVE HTTP/bitmap owners with
+`-march=armv8-a+sve2` and the baseline provider with
+`SIMPLE_VECTOR_REQUIRE_SVE2`. Default mode preserves the existing nine rows.
+The new mode needs only the installed AArch64 toolchain/sysroot/QEMU.
+
+Actual same-artifact execution:
+
+| CPU | Cases | HTTP vector loops | Bitmap supported | Peak RSS KiB | Exit |
+|---|---:|---:|---:|---:|---:|
+| max,sve-max-vq=2 |576|1371|1|8380|0|
+| neoverse-v1 (SVE without SVE2) |576|0|0|8244|0|
+
+Both receipts report quiescent1 and enforced524288KiB/60s bounds. Execution
+was pinned to one allowed host CPU. The existing real dlopen harness checks
+byte/CRLF scalar parity, guarded pages, input preservation, capability/error
+responses and bitmap admission. ISA inspection found scalable HTTP loads and
+first-hit predicate logic; baseline guard disassembly has no scalable vector
+instructions. These results prove SVE2-required admission and pre-kernel
+refusal on SVE-only, not SVE2-exclusive instructions, Simple cross-app calls,
+physical ARM performance or production package authentication.
+
+Artifacts and compile commands: `/var/tmp/item5-http-sve2-admission-20261008/`.
+Provider SHA256 afcf321ca1ffe20ecc567acda7f18aa90de159f5abfb477a502fc32c24151eb8;
+harness257dc9ca83921e16a72f2d7d34561294d05139a09c0e03fa8a2363d8be540f24.
+Final logs/receipts: `/var/tmp/item5-http-sve2-admission-20261008-cycle2/`.
+Initial compilation succeeded, but the outer build watchdog caused both inner
+new-session guards to reject inherited session contracts (exit89, root_pid0).
+Those failures remain retained. A standalone per-row guarded continuation
+verified source/artifact hashes and ran only the two previously unexecuted
+rows; no recompilation or existing green matrix was repeated. Continuation:
+`build/review/item5-http-sve2-execute-20261008.sh`; metrics retained in
+`build/review/item5-http-sve2-metrics-20261008.json`.
+
+Reproduction for a fresh output, directly under a normal shell (the runner
+owns per-row watchdogs):
+`sh scripts/check/check-vector-http-targets.shs /var/tmp/FRESH --sve2-only`.
+No provider/kernel implementation or wire ABI changed.
+The refused row does load the DSO and query its capability descriptor. Harness
+lines33-44 require dlopen/dlsym/query success; lines67-80 call both HTTP opcodes,
+assert typed status5 (FEATURE_UNAVAILABLE), zero writes/result -1 and zero
+executed kernel iterations. It is a tested provider refusal, not a skipped row.
