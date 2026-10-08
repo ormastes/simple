@@ -1,0 +1,202 @@
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_lowering_stmts.{mir_expr_kind_is_place}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instructions.*
+use compiler.mir.native_trait_metadata.*
+use compiler.mir._MirLowering.native_trait_registration.*
+use compiler.mir._MirLowering.native_trait_dispatch.*
+use compiler.mir._MirLowering.native_trait_thunks.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.diagnostics.span.{Span}
+
+impl MirLowering:
+    me coerce_native_trait_assignment(local: LocalId, kind: HirExprKind,
+            expected: HirType, span: Span) -> LocalId:
+        val source_type = self.find_local_hir_type(local.id)
+        val value = HirExpr(kind: kind, has_type_: source_type != nil,
+            type_: source_type ?? HirType(kind: HirTypeKind.Unit, span: span), span: span)
+        var converted = self.coerce_native_trait_object(local, value, expected)
+        if self.native_trait_value_type(expected) and mir_expr_kind_is_place(kind):
+            converted = self.copy_native_trait_value(converted, expected)
+        converted
+
+    me coerce_native_trait_object(local: LocalId, value: HirExpr, expected: HirType) -> LocalId:
+        match expected.kind:
+            case HirTypeKind.Isolated(inner):
+                if self.native_trait_owner_for_type(inner) != "":
+                    self.error_fatal("native isolated trait conversion requires an owned transfer slot", Some(value.span))
+                    return local
+            case HirTypeKind.Optional(inner):
+                if self.native_trait_owner_for_type(inner) != "":
+                    match value.kind:
+                        case HirExprKind.NilLit: return self.ensure_option_handle(local, expected)
+                        case _: ()
+                    if val existing = self.find_local_hir_type(local.id):
+                        match existing.kind:
+                            case HirTypeKind.Optional(existing_inner):
+                                if self.native_trait_owner_for_type(existing_inner) == self.native_trait_owner_for_type(inner):
+                                    self.option_value_locals[local.id] = true
+                                    self.mark_runtime_value_local(local.id)
+                                    return local
+                                self.error_fatal("native optional trait conversion requires a matching declared payload", Some(value.span))
+                                return local
+                            case _: ()
+                    # Use the same Option owner as ordinary call/field
+                    # lowering, after the payload has the real trait ABI.
+                    val payload = self.coerce_native_trait_object(local, value, inner)
+                    return self.ensure_option_handle(payload, expected)
+            case _: ()
+        val owner = self.native_trait_owner_for_type(expected)
+        if owner == "": return local
+        # A resource drop must target its concrete runtime owner, never the
+        # two-word envelope. Do not publish an unsupported destructor ABI.
+        if self.local_hir_type_resource_state(local.id) != 0:
+            self.error_fatal("native trait resource conversion requires a concrete drop slot", Some(value.span))
+            return local
+        if val existing = self.find_local_hir_type(local.id):
+            if self.native_trait_owner_for_type(existing) == owner: return local
+        val layout_index = self.native_trait_layout_index(owner)
+        if layout_index < 0:
+            self.error_fatal("native trait conversion lacks canonical declaration: {owner}", Some(value.span))
+            return local
+        var concrete_owner = ""
+        val local_type = self.find_local_hir_type(local.id)
+        val source_type: HirType? = if local_type != nil: local_type else: if value.has_type_: value.type_ else: nil
+        if val source = source_type:
+            match source.kind:
+                case HirTypeKind.Isolated(_):
+                    self.error_fatal("native trait conversion cannot erase isolated ownership", Some(value.span))
+                    return local
+                case HirTypeKind.Named(symbol_id, _):
+                    val symbol = self.symbols.get_symbol_raw(symbol_id.id)
+                    if symbol != nil and (symbol.kind == SymbolKind.Class or symbol.kind == SymbolKind.Struct):
+                        concrete_owner = native_trait_qualified_owner(symbol)
+                case _: ()
+        # Construction provenance names a concrete type, never a trait or a
+        # candidate inferred from the number of implementations.
+        if concrete_owner == "":
+            val provenance = self.struct_value_syms.get(local.id) ?? ""
+            if provenance != "":
+                val symbol_id = self.symbols.lookup_or_invalid(provenance)
+                val symbol = self.symbols.get_symbol_raw(symbol_id.id)
+                if symbol != nil and (symbol.kind == SymbolKind.Class or symbol.kind == SymbolKind.Struct):
+                    concrete_owner = native_trait_qualified_owner(symbol)
+        var selected = -1
+        var index = 0
+        while index < self.native_trait_implementations.len():
+            val candidate = self.native_trait_implementations[index]
+            if candidate.trait_owner == owner and candidate.concrete_owner == concrete_owner:
+                if selected >= 0:
+                    self.error_fatal("ambiguous native trait implementation: {owner} for {concrete_owner}", Some(value.span))
+                    return local
+                selected = index
+            index = index + 1
+        if selected < 0:
+            self.error_fatal("missing native trait implementation: {owner} for {concrete_owner}", Some(value.span))
+            return local
+        val implementation = self.native_trait_implementations[selected]
+        val layout = self.native_trait_layouts[layout_index]
+        if not self.native_trait_implementation_admitted(layout, implementation):
+            self.error_fatal("incompatible native trait object signature: {owner} for {concrete_owner}", Some(value.span))
+            return local
+        val copy_name = self.native_trait_copy_thunk(implementation)
+        val copy_signature = MirSignature(params: [native_trait_data_pointer_type()],
+            return_type: native_trait_data_pointer_type(), is_variadic: false, params_known: true)
+        var table_types: [MirType] = [MirType(kind: MirTypeKind.FuncPtr(copy_signature)), MirType.bool()]
+        var table_values: [MirOperand] = [MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(copy_name), table_types[0])),
+            MirOperand(kind: MirOperandKind.Const(MirConstValue.Bool(implementation.reference_semantics), MirType.bool()))]
+        index = 0
+        while index < layout.methods.len():
+            val signature = self.native_trait_slot_signature(layout.methods[index])
+            val name = self.native_trait_method_thunk(implementation, layout.methods[index], index)
+            val type_ = MirType(kind: MirTypeKind.FuncPtr(signature))
+            table_types.push(type_)
+            table_values.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), type_)))
+            index = index + 1
+        var builder = self.builder
+        val table = builder.emit_aggregate(AggregateKind.Tuple, table_values,
+            MirType(kind: MirTypeKind.Tuple(table_types)))
+        val data = builder.emit_bitcast(mir_operand_copy(local), native_trait_data_pointer_type())
+        val object = builder.emit_aggregate(AggregateKind.Tuple,
+            [mir_operand_copy(data), mir_operand_copy(table)], native_trait_object_type())
+        self.builder = builder
+        val isolation_state = self.local_hir_type_isolation_state(local.id)
+        val resource_state = self.local_hir_type_resource_state(local.id)
+        self.remember_local_hir_type(object.id, expected, isolation_state, resource_state)
+        object
+
+    me copy_native_trait_value(local: LocalId, type_: HirType) -> LocalId:
+        if self.native_trait_owner_for_type(type_) != "":
+            return self.copy_native_trait_object(local)
+        match type_.kind:
+            case HirTypeKind.Optional(inner):
+                if self.native_trait_owner_for_type(inner) == "": return local
+                # The declared Optional ABI is an enum handle. Branch before
+                # reading its payload: None has no data or vtable to copy.
+                self.option_value_locals[local.id] = true
+                self.mark_runtime_value_local(local.id)
+                var builder = self.builder
+                val storage = builder.emit_entry_alloc(MirType.i64())
+                builder.emit_store(mir_operand_copy(storage), mir_operand_copy(local))
+                val enum_signature = MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false, params_known: true)
+                val discriminant_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_enum_discriminant"), MirType(kind: MirTypeKind.FuncPtr(enum_signature))))
+                val discriminant_result = builder.emit_call(discriminant_fn, [mir_operand_copy(local)], MirType.i64())
+                if discriminant_result == nil:
+                    self.builder = builder
+                    self.error_fatal("native optional trait copy lacks discriminant", nil)
+                    return local
+                val discriminant = discriminant_result ?? LocalId(id: -1)
+                val some_tag = builder.emit_const_int(0)
+                val present = builder.emit_binop(MirBinOp.Eq, mir_operand_copy(discriminant), mir_operand_copy(some_tag), MirType.bool())
+                val copy_block = builder.new_block(Some("trait_option_copy_some"))
+                val merge_block = builder.new_block(Some("trait_option_copy_merge"))
+                builder.terminate_if(mir_operand_copy(present), copy_block, merge_block)
+                builder.switch_to_block(copy_block)
+                val payload_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_enum_payload"), MirType(kind: MirTypeKind.FuncPtr(enum_signature))))
+                val payload_result = builder.emit_call(payload_fn, [mir_operand_copy(local)], MirType.i64())
+                self.builder = builder
+                if payload_result == nil:
+                    self.error_fatal("native optional trait copy lacks payload", nil)
+                    return local
+                val raw_payload = payload_result ?? LocalId(id: -1)
+                builder = self.builder
+                val payload = builder.emit_bitcast(mir_operand_copy(raw_payload), native_trait_object_type())
+                self.builder = builder
+                self.remember_local_hir_type(payload.id, inner, 2, 0)
+                val copied = self.copy_native_trait_object(payload)
+                val wrapped = self.ensure_option_handle(copied, type_)
+                builder = self.builder
+                builder.emit_store(mir_operand_copy(storage), mir_operand_copy(wrapped))
+                builder.terminate_goto(merge_block)
+                builder.switch_to_block(merge_block)
+                val loaded = builder.emit_load(mir_operand_copy(storage), MirType.i64())
+                self.builder = builder
+                val result = self.tag_enum_construct_result(loaded)
+                self.option_value_locals[result.id] = true
+                self.mark_runtime_value_local(result.id)
+                self.remember_local_hir_type(result.id, type_, 2, 0)
+                return result
+            case _: return local
+
+    me copy_native_trait_object(local: LocalId) -> LocalId:
+        var builder = self.builder
+        val data = builder.emit_get_field(mir_operand_copy(local), 0, native_trait_data_pointer_type())
+        val table = builder.emit_get_field(mir_operand_copy(local), 1, native_trait_data_pointer_type())
+        val signature = MirSignature(params: [native_trait_data_pointer_type()],
+            return_type: native_trait_data_pointer_type(), is_variadic: false, params_known: true)
+        val copy = builder.emit_get_field(mir_operand_copy(table), 0, MirType(kind: MirTypeKind.FuncPtr(signature)))
+        val copied = builder.emit_call_indirect(mir_operand_copy(copy), [mir_operand_copy(data)], signature, signature.return_type)
+        if val copied_data = copied:
+            val object = builder.emit_aggregate(AggregateKind.Tuple,
+                [mir_operand_copy(copied_data), mir_operand_copy(table)], native_trait_object_type())
+            self.builder = builder
+            self.copy_local_hir_type_metadata(local.id, object.id)
+            return object
+        self.builder = builder
+        self.error_fatal("native trait copy thunk lacks its required result", nil)
+        local

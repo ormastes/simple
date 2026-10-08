@@ -1,0 +1,215 @@
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_lowering_stmts.*
+use compiler.mir.native_trait_metadata.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+
+fn native_trait_qualified_owner(symbol: HirSymbol) -> text:
+    val module_name = mir_layout_canonical_module_name(symbol.defining_module ?? "")
+    if module_name == "": return ""
+    "{module_name}::{symbol.name}"
+
+impl MirLowering:
+    fn native_trait_signature_type_key(type_: HirType) -> text:
+        match type_.kind:
+            case HirTypeKind.Int(bits, signed): "int:{bits}:{signed}"
+            case HirTypeKind.Float(bits): "float:{bits}"
+            case HirTypeKind.Bool: "bool"
+            case HirTypeKind.Char: "char"
+            case HirTypeKind.Str: "text"
+            case HirTypeKind.Unit: "unit"
+            case HirTypeKind.Tuple(elements):
+                var key = "tuple"
+                for element in elements:
+                    val child = self.native_trait_signature_type_key(element)
+                    if child == "": return ""
+                    key = key + "[" + child + "]"
+                key
+            case HirTypeKind.Slice(inner):
+                val child = self.native_trait_signature_type_key(inner)
+                if child == "": "" else: "slice[" + child + "]"
+            case HirTypeKind.Dict(key_type, value_type):
+                val key = self.native_trait_signature_type_key(key_type)
+                val value = self.native_trait_signature_type_key(value_type)
+                if key == "" or value == "": "" else: "dict[" + key + "][" + value + "]"
+            case HirTypeKind.DynTrait(id):
+                val owner = self.native_trait_owner_for_type(type_)
+                if owner == "": "" else: "named:" + owner
+            case HirTypeKind.Named(id, args):
+                val symbol = self.symbols.get_symbol_raw(id.id)
+                if symbol == nil: return ""
+                val owner = native_trait_qualified_owner(symbol)
+                if owner == "": return ""
+                var key = "named:" + owner
+                for arg in args:
+                    val child = self.native_trait_signature_type_key(arg)
+                    if child == "": return ""
+                    key = key + "[" + child + "]"
+                key
+            case HirTypeKind.Optional(inner):
+                val child = self.native_trait_signature_type_key(inner)
+                if child == "": "" else: "optional[" + child + "]"
+            case HirTypeKind.Result(ok, err):
+                val left = self.native_trait_signature_type_key(ok)
+                val right = self.native_trait_signature_type_key(err)
+                if left == "" or right == "": "" else: "result[" + left + "][" + right + "]"
+            case HirTypeKind.Array(inner, size):
+                val child = self.native_trait_signature_type_key(inner)
+                if child == "": "" else: "array[{size}][" + child + "]"
+            case HirTypeKind.Ptr(inner, mutable):
+                val child = self.native_trait_signature_type_key(inner)
+                if child == "": "" else: "pointer:{mutable}[" + child + "]"
+            case HirTypeKind.Ref(inner, mutable):
+                val child = self.native_trait_signature_type_key(inner)
+                if child == "": "" else: "reference:{mutable}[" + child + "]"
+            case _: ""
+
+    fn native_trait_implementation_admitted(layout: NativeTraitLayout,
+            implementation: NativeTraitImplementation) -> bool:
+        if not layout.object_safe or implementation.methods.len() != layout.methods.len() or implementation.signatures.len() != layout.methods.len(): return false
+        if self.mir_hir_type_is_resource_direct(implementation.concrete_type): return false
+        var index = 0
+        while index < layout.methods.len():
+            val slot = layout.methods[index]
+            val concrete = implementation.signatures[index]
+            if implementation.methods[index] == "" or slot.params.len() == 0 or slot.params.len() != concrete.params.len() or slot.mutable_receiver != concrete.mutable_receiver: return false
+            if slot.parameter_mutability.len() != slot.params.len() or concrete.parameter_mutability.len() != concrete.params.len(): return false
+            if self.mir_hir_type_is_resource_direct(slot.result) or self.mir_hir_type_is_resource_direct(concrete.result): return false
+            if self.native_trait_owner_for_type(slot.params[0]) != layout.owner: return false
+            if self.native_trait_signature_type_key(concrete.params[0]) != self.native_trait_signature_type_key(implementation.concrete_type): return false
+            val result_key = self.native_trait_signature_type_key(slot.result)
+            if result_key == "" or result_key != self.native_trait_signature_type_key(concrete.result): return false
+            var argument = 1
+            while argument < slot.params.len():
+                if self.mir_hir_type_is_resource_direct(slot.params[argument]) or self.mir_hir_type_is_resource_direct(concrete.params[argument]): return false
+                if slot.parameter_mutability[argument] != concrete.parameter_mutability[argument]: return false
+                val key = self.native_trait_signature_type_key(slot.params[argument])
+                if key == "" or key != self.native_trait_signature_type_key(concrete.params[argument]): return false
+                argument = argument + 1
+            index = index + 1
+        true
+
+    fn native_trait_layout_index(owner: text) -> i64:
+        var index = 0
+        while index < self.native_trait_layouts.len():
+            if self.native_trait_layouts[index].owner == owner: return index
+            index = index + 1
+        -1
+
+    fn native_trait_layout_matches(left: NativeTraitLayout, right: NativeTraitLayout) -> bool:
+        if left.owner != right.owner or left.object_safe != right.object_safe or left.methods.len() != right.methods.len(): return false
+        var index = 0
+        while index < left.methods.len():
+            val a = left.methods[index]
+            val b = right.methods[index]
+            if a.name != b.name or a.mutable_receiver != b.mutable_receiver or a.params.len() != b.params.len(): return false
+            if self.native_trait_signature_type_key(a.result) != self.native_trait_signature_type_key(b.result): return false
+            var param = 0
+            while param < a.params.len():
+                if a.parameter_names[param] != b.parameter_names[param]: return false
+                if a.parameter_mutability[param] != b.parameter_mutability[param]: return false
+                if self.native_trait_signature_type_key(a.params[param]) != self.native_trait_signature_type_key(b.params[param]): return false
+                param = param + 1
+            index = index + 1
+        true
+
+    fn native_trait_owner_for_type(type_: HirType) -> text:
+        val symbol_id = match type_.kind:
+            case HirTypeKind.Named(id, _) | HirTypeKind.DynTrait(id): id
+            case _: return ""
+        val symbol = self.symbols.get_symbol_raw(symbol_id.id)
+        if symbol == nil or symbol.kind != SymbolKind.Trait: return ""
+        native_trait_qualified_owner(symbol)
+
+    fn native_trait_value_type(type_: HirType) -> bool:
+        if self.native_trait_owner_for_type(type_) != "": return true
+        match type_.kind:
+            case HirTypeKind.Optional(inner): self.native_trait_owner_for_type(inner) != ""
+            case _: false
+
+    me register_native_trait_declarations(module: HirModule):
+        for declaration in module.traits.values():
+            val symbol = module.symbols.get_symbol_raw(declaration.symbol.id)
+            if symbol == nil: continue
+            val owner = native_trait_qualified_owner(symbol)
+            # A missing declaration identity is not a usable object layout.
+            # Diagnose at conversion, not for an unused generic declaration.
+            if owner == "": continue
+            var slots: [NativeTraitMethodSlot] = []
+            var safe = declaration.type_params.len() == 0 and declaration.assoc_types.len() == 0 and declaration.supertraits.len() == 0
+            val method_names = native_trait_sorted_method_names(declaration)
+            if method_names.len() != declaration.methods.len() + declaration.defaults.len(): safe = false
+            for method_name in method_names:
+                var selected: HirFunction? = nil
+                for method in declaration.methods:
+                    if method.name == method_name: selected = method
+                if selected == nil:
+                    for method in declaration.defaults:
+                        if method.name == method_name: selected = method
+                if val method = selected:
+                    if method.is_static or method.type_params.len() != 0: safe = false
+                    var params: [HirType] = []
+                    var parameter_names: [text] = []
+                    var parameter_mutability: [bool] = []
+                    for param in method.params:
+                        params.push(self.relocate_provider_type(param.type_, module.symbols))
+                        parameter_names.push(param.name)
+                        parameter_mutability.push(param.is_mutable)
+                    slots.push(NativeTraitMethodSlot(name: method_name, params: params,
+                        parameter_names: parameter_names,
+                        parameter_mutability: parameter_mutability,
+                        result: self.relocate_provider_type(method.return_type, module.symbols),
+                        mutable_receiver: method.is_mutable))
+            val layout = NativeTraitLayout(owner: owner, methods: slots, object_safe: safe)
+            val existing = self.native_trait_layout_index(owner)
+            if existing >= 0:
+                if not self.native_trait_layout_matches(self.native_trait_layouts[existing], layout):
+                    self.error_fatal("conflicting native trait declaration ABI: {owner}", Some(declaration.span))
+            else:
+                self.native_trait_layouts.push(layout)
+
+    me register_native_trait_implementations(module: HirModule):
+        for implementation in module.impls:
+            if not implementation.has_trait_: continue
+            val trait_type = self.relocate_provider_type(implementation.trait_, module.symbols)
+            val owner = self.native_trait_owner_for_type(trait_type)
+            val index = self.native_trait_layout_index(owner)
+            if index < 0: continue
+            val concrete_id = match implementation.type_.kind:
+                case HirTypeKind.Named(id, _): id
+                case _: continue
+            val concrete = module.symbols.get_symbol_raw(concrete_id.id)
+            if concrete == nil: continue
+            val concrete_owner = native_trait_qualified_owner(concrete)
+            if concrete_owner == "": continue
+            var methods: [text] = []
+            var signatures: [NativeTraitMethodSlot] = []
+            for slot in self.native_trait_layouts[index].methods:
+                val method_id = implementation.methods.get(slot.name)
+                if val target = method_id:
+                    val function = module.functions.get(target)
+                    if val declaration = function:
+                        methods.push(mir_provider_function_name(module.name, module.symbols, declaration))
+                        var params: [HirType] = []
+                        var parameter_names: [text] = []
+                        var parameter_mutability: [bool] = []
+                        for param in declaration.params:
+                            params.push(self.relocate_provider_type(param.type_, module.symbols))
+                            parameter_names.push(param.name)
+                            parameter_mutability.push(param.is_mutable)
+                        signatures.push(NativeTraitMethodSlot(name: slot.name, params: params,
+                            parameter_names: parameter_names,
+                            parameter_mutability: parameter_mutability,
+                            result: self.relocate_provider_type(declaration.return_type, module.symbols),
+                            mutable_receiver: declaration.is_mutable))
+                    else:
+                        methods.push("")
+                else:
+                    methods.push("")
+            self.native_trait_implementations.push(NativeTraitImplementation(
+                trait_owner: owner, concrete_owner: concrete_owner, methods: methods,
+                concrete_type: self.relocate_provider_type(implementation.type_, module.symbols),
+                concrete_name: concrete.name, reference_semantics: concrete.kind == SymbolKind.Class,
+                signatures: signatures))

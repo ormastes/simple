@@ -2,6 +2,9 @@
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.bootstrap_globals.*
 use compiler.mir._MirLowering.asm_and_targets.*
+use compiler.mir._MirLowering.native_trait_registration.*
+use compiler.mir._MirLowering.native_trait_dispatch.*
+use compiler.mir._MirLowering.native_trait_conversion.*
 use compiler.mir._MirLowering.provider_metadata.{mir_class_identity, mir_provider_function_name}
 use std.nogc_sync_mut.sffi.system.{env_get}
 # MIR Lowering - HIR to MIR Transformation
@@ -499,6 +502,12 @@ impl MirLowering:
             # the caller's memory.
             val is_me_receiver = fn_.is_mutable and pli == 0 and (param.name == "self" or param.name == "me")
             val is_mut_param = param.is_mutable
+            if self.native_trait_value_type(param.type_):
+                if not is_me_receiver and not is_mut_param:
+                    val copied_trait = self.copy_native_trait_value(local, param.type_)
+                    self.bind_local(param_symbol_id, copied_trait)
+                pli = pli + 1
+                continue
             match param.type_.kind:
                 case Array(element_type, _):
                     # Preserve the same runtime-array and element-struct
@@ -703,6 +712,8 @@ impl MirLowering:
                 # Stage4 can enter that arm without copying its LocalId payload.
                 val tail_local = result ?? LocalId(id: 0)
                 var returned_tail_local = tail_local
+                if fn_.body.has:
+                    returned_tail_local = self.coerce_native_trait_object(tail_local, fn_.body.value, fn_.return_type)
                 match fn_.return_type.kind:
                     case HirTypeKind.Any:
                         # `-> Any` is a tagged ABI boundary. A raw scalar tail
@@ -1161,6 +1172,9 @@ impl MirLowering:
                     mir_members = mir_members.push(self.lower_type(m))
                 MirType(kind: MirTypeKind.Union(mir_members))
             case HirTypeKind.Named(symbol, _):
+                val named_symbol = self.symbols.get_symbol_raw(symbol.id)
+                if named_symbol != nil and named_symbol.kind == SymbolKind.Trait:
+                    return native_trait_object_type()
                 self.record_external_layout_reference(symbol)
                 val underlying = custom_primitive_underlying_type_tag_by_symbol(self.symbol_id_value(symbol))
                 if underlying == TYPE_BOOL:
@@ -1224,10 +1238,7 @@ impl MirLowering:
                 # Normalized to MirTypeKind.Tuple([Ptr(U8), Ptr(U8)]) — a trait
                 # object is a fat pointer (data pointer, vtable pointer); MIR
                 # has no distinct dyn-trait type.
-                MirType(kind: MirTypeKind.Tuple([
-                    MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
-                    MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false))
-                ]))
+                native_trait_object_type()
             case HirTypeKind.Any:
                 # Profile-dependent (hardening plan §8 / §9.5: "Any introduced
                 # as generic erasure count = 0"). Erasing `Any` to a tagged
