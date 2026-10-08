@@ -173,29 +173,35 @@ impl MirLowering:
         scan reported "exactly one owner" for something genuinely ambiguous,
         then silently borrowed the survivor's discriminant.
 
-        Entries that would give the SAME answer -- same bare name AND same
-        discriminant for `variant` -- are collapsed to one. Without that, the
+        Entries that would give the SAME answer -- same bare name, same
+        discriminant, and same unit/payload category for `variant` -- are
+        collapsed to one. Without that, the
         192 benign identical re-registrations (and the built-in Option/Result
         seeds sitting alongside their real stdlib declarations) would each
         report a spurious ambiguity and turn ordinary `case Some(x)` into a
-        compile error. Only genuine divergence survives the dedup."""
+        compile error. A unit-vs-payload difference remains distinct because
+        it changes whether a bare name can be a pattern or a binding. Only
+        equivalent registrations are deduplicated."""
         var keys: [text] = []
         var bares: [text] = []
         var discs: [i64] = []
+        var units: [bool] = []
         for qname in self.enum_variant_index_q.keys():
             val d = self.enum_variant_discriminant(qname, variant)
             if d >= 0:
                 val bare = self.enum_bare_of(qname)
+                val is_unit = self.enum_variant_is_unit(qname, variant)
                 var seen = false
                 var i = 0
                 while i < bares.len():
-                    if bares[i] == bare and discs[i] == d:
+                    if bares[i] == bare and discs[i] == d and units[i] == is_unit:
                         seen = true
                     i = i + 1
                 if not seen:
                     keys = keys.push(qname)
                     bares = bares.push(bare)
                     discs = discs.push(d)
+                    units = units.push(is_unit)
         keys
 
     me enum_has_variants(enum_key: text) -> bool:
@@ -2383,6 +2389,51 @@ impl MirLowering:
                 self.emit_deep_subpattern(slot_local, sub_pat, next_block)
             slot_i = slot_i + 1
 
+    me enum_match_type_owner_key(enum_type: HirType) -> text:
+        """Return the registered enum key carried by a match subject type.
+
+        Named enum symbols retain declaration identity; Result and Optional
+        are the compiler's canonical generic enum shapes and use their seeded
+        registry names. Unknown/non-enum types intentionally return empty.
+        """
+        match enum_type.kind:
+            case Named(symbol, _):
+                val qualified = self.enum_qualified_key(symbol)
+                if qualified != "" and self.enum_has_variants(qualified):
+                    return qualified
+                # A missing qualified registration is not proof that the bare
+                # last-wins registry entry denotes this declaration. Only
+                # symbols with no defining-module identity may use that map.
+                if qualified == "":
+                    val bare = self.symbols.symbol_name_scalar_raw(symbol.id)
+                    if self.enum_has_variants(bare):
+                        return bare
+            case Result(_, _):
+                if self.enum_has_variants("Result"):
+                    return "Result"
+            case Optional(_):
+                if self.enum_has_variants("Option"):
+                    return "Option"
+            case _: ()
+        ""
+
+    me enum_variant_is_unit(owner_key: text, variant: text) -> bool:
+        """True only when the declaration registry proves this is a unit arm."""
+        val qualified_payload = "{owner_key}::{variant}"
+        if self.enum_variant_payload_kind.has(qualified_payload):
+            return self.enum_variant_payload_kind[qualified_payload] == "unit"
+        val bare = self.enum_bare_of(owner_key)
+        val bare_payload = "{bare}::{variant}"
+        if owner_key == bare and self.enum_variant_payload_kind.has(bare_payload):
+            return self.enum_variant_payload_kind[bare_payload] == "unit"
+        # The compiler-seeded generic enums are not ordinary HirEnum
+        # declarations, so their payload-kind table is intentionally absent.
+        # Keep the one payloadless built-in spelling recognizable; Result
+        # variants and Option.Some are payload-bearing.
+        if owner_key == "Option" and variant == "None":
+            return true
+        false
+
     me lower_enum_match(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
         """Lower `match e: case Variant(x): ...` for enum patterns. Dispatches on
         _sffi_enum_discriminant(e) compared to each variant's index; binds a single
@@ -2435,6 +2486,20 @@ impl MirLowering:
         # construction site writes under the bare name -- qualifying it here
         # would turn every payload-struct lookup into a miss.
         var enum_key = ""
+        # Bare payload patterns can have an error/empty pattern type even when
+        # the subject is typed (notably `Result`/`Optional` returned from a
+        # cross-module call). Seed the owner from the actual subject before
+        # resolving any bare variant leaf; global owner-count alone is
+        # ambiguous for common names such as Ok/Err.
+        var scrutinee_enum_type: HirType? = self.enum_match_expr_type(scrutinee)
+        if val subject_type = scrutinee_enum_type:
+            enum_key = self.enum_match_type_owner_key(subject_type)
+            if enum_key != "":
+                enum_name = self.enum_bare_of(enum_key)
+                match subject_type.kind:
+                    case Named(subject_symbol, _):
+                        enum_symbol_id = subject_symbol.id
+                    case _: ()
         var ai = 0
         while ai < arms.len():
             # Stage-2 stores array elements through ANY. The explicit type is
@@ -2442,6 +2507,12 @@ impl MirLowering:
             val arm: HirMatchArm = arms[ai]
             match arm.pattern.kind:
                 case Enum(etype, variant, epayload):
+                    val pattern_owner = self.enum_match_type_owner_key(etype)
+                    if enum_key != "" and pattern_owner != "" and pattern_owner != enum_key:
+                        self.error(
+                            "enum match: pattern owner '{pattern_owner}' does not match subject owner '{enum_key}'",
+                            Some(arm.pattern.span)
+                        )
                     if enum_name == "":
                         enum_name = match etype.kind:
                             case Named(esym, _):
