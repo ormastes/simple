@@ -1,0 +1,61 @@
+#!/bin/sh
+# Manual GNU/Linux native check; bounded by the resource watchdog at invocation.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+git_repo=${CPU_QUERY_GIT_REPO:-$root}
+out=${1:?usage: check-cpu-query-lazy.shs ABSOLUTE_NEW_OUTPUT_DIRECTORY}
+case "$out" in /*) ;; *) echo 'output must be absolute' >&2; exit 2;; esac
+if [ -e "$out" ]; then echo 'output must be fresh' >&2; exit 2; fi
+mkdir -p "$out/before" "$out/after"
+cc=${CC:-cc}
+baseline=${CPU_QUERY_BASELINE_REF:-af44ec6da108fe06325d902780e3a7a74c21acaa}
+git -C "$git_repo" rev-parse "$baseline" > "$out/baseline.commit"
+git -C "$git_repo" show "$baseline:src/runtime/runtime_simd_dispatch.c" > "$out/before/runtime_simd_dispatch.c"
+git -C "$git_repo" show "$baseline:src/runtime/runtime_simd_dispatch.h" > "$out/before/runtime_simd_dispatch.h"
+"$cc" --version > "$out/compiler.version"
+for side in before after; do
+    source="$root/src/runtime/runtime_simd_dispatch.c"
+    if [ "$side" = before ]; then source="$out/before/runtime_simd_dispatch.c"; fi
+    "$cc" -O2 -std=gnu11 -ffunction-sections -fdata-sections -I"$root/src/runtime" \
+        -c "$source" -o "$out/$side/dispatch.o"
+    "$cc" -O2 -ffunction-sections -fdata-sections "$root/src/runtime/test/cpu_query_nodemand.c" \
+        "$out/$side/dispatch.o" -Wl,--gc-sections -Wl,-Map,"$out/$side/nodemand.map" \
+        -lgcc -lm -pthread -ldl -o "$out/$side/nodemand"
+    timeout 10 "$out/$side/nodemand"
+    nm -a "$out/$side/nodemand" > "$out/$side/symbols.txt"
+    readelf -W -x .init_array "$out/$side/nodemand" > "$out/$side/init-array.txt"
+    size "$out/$side/nodemand" > "$out/$side/size.txt"
+done
+nm -u "$out/after/dispatch.o" > "$out/after/undefined.txt"
+if grep -E '__cpu_(indicator_init|model)' "$out/after/undefined.txt" "$out/after/symbols.txt"; then exit 3; fi
+grep '__cpu_indicator_init' "$out/before/symbols.txt" > "$out/before/cpu-constructor.txt"
+"$cc" -O2 "$root/src/runtime/test/cpu_query_builtin_oracle.c" -o "$out/oracle"
+timeout 10 "$out/oracle" > "$out/oracle.log"
+for mode in normal forced; do
+    define=
+    object="$out/after/dispatch.o"
+    if [ "$mode" = forced ]; then
+        define=-DSIMPLE_RUNTIME_FORCE_NO_AVX2
+        "$cc" -O2 -std=gnu11 -ffunction-sections -fdata-sections $define -I"$root/src/runtime" \
+            -c "$root/src/runtime/runtime_simd_dispatch.c" -o "$out/after/dispatch-forced.o"
+        object="$out/after/dispatch-forced.o"
+    fi
+    "$cc" -O2 -std=gnu11 -ffunction-sections -fdata-sections $define -I"$root/src/runtime" \
+        "$root/src/runtime/test/cpu_query_selfcheck.c" "$object" \
+        -Wl,--gc-sections -lm -pthread -ldl -o "$out/$mode"
+    timeout 30 "$out/$mode" > "$out/$mode.log"
+    actual=$(sed -n 's/^features=\([0-9]*\).*/\1/p' "$out/$mode.log")
+    expected=$(sed -n 's/^features=\([0-9]*\).*/\1/p' "$out/oracle.log")
+    test "$actual" = "$expected"
+done
+command -v qemu-x86_64 >/dev/null
+timeout 30 qemu-x86_64 -cpu Nehalem "$out/oracle" > "$out/nehalem-oracle.log"
+timeout 30 qemu-x86_64 -cpu Nehalem "$out/normal" > "$out/nehalem.log"
+actual=$(sed -n 's/^features=\([0-9]*\).*/\1/p' "$out/nehalem.log")
+expected=$(sed -n 's/^features=\([0-9]*\).*/\1/p' "$out/nehalem-oracle.log")
+test "$actual" = "$expected"
+test "$actual" = 1
+sha256sum "$root/src/runtime/runtime_simd_dispatch.c" "$root/src/runtime/runtime_simd_dispatch.h" \
+    "$root/src/runtime/test/cpu_query_selfcheck.c" "$out/after/dispatch.o" "$out/before/nodemand" \
+    "$out/after/nodemand" "$out/normal" "$out/forced" "$out/oracle" > "$out/sha256.txt"
+printf '%s\n' 'PASS cpu query truth table, native/forced/Nehalem parity and no-demand ELF'
