@@ -1,0 +1,100 @@
+#!/bin/sh
+# Target-manifest/profile validation only; this does not run QEMU or a Simple app.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+validator=$root/scripts/check/lib/item5-app-build-manifest.pl
+profiles=$root/scripts/check/lib/Item5QemuProfile.pm
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/item5-qemu-manifest.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+perl -I "$root/scripts/check/lib" -MItem5QemuProfile -e '
+my %want = (
+  "aarch64-neon"=>44, "aarch64-sve-vq1"=>50, "aarch64-sve-vq2"=>28,
+  "aarch64-sve-vq4"=>17, "aarch64-sve2-vq1"=>50,
+  "aarch64-sve2-vq2"=>28, "aarch64-sve2-vq4"=>17,
+  "riscv64-rvv128"=>50, "riscv64-rvv256"=>28,
+);
+for my $name (sort keys %want) {
+  my $p = Item5QemuProfile::profile($name) or die "missing profile $name\n";
+  $p->{db_loops} == $want{$name} or die "wrong derived loops for $name\n";
+  $p->{db_queries} == 10 or die "profile $name does not bind all ten DB operations\n";
+}
+!Item5QemuProfile::profile("qemu-aarch64 -cpu max") or die "accepted arbitrary QEMU prefix\n";
+' || exit 1
+
+make_json() {
+  perl -MJSON::PP -e '
+my ($hello_path,$manifest_path,$variant)=@ARGV;
+my $producer="b"x40; my $app_source="c"x40; my $tree="d"x40;
+my $compiler="a"x64; my $runtime="5"x64; my $sysroot_manifest="6"x64;
+my $provider="7"x64; my $observer="8"x64; my $qemu="9"x64; my $cc="f"x64;
+my %hash=("db-scalar"=>"1"x64,"db-vector"=>"2"x64,"http-scalar"=>"3"x64,"http-vector"=>"4"x64);
+my $hello={status=>"pass",gate_exit_status=>0,source_commit=>$producer,compiler_sha256=>$compiler};
+my $target={profile=>"aarch64-neon",triple=>"aarch64-linux-gnu",runtime_archive_sha256=>$runtime,
+  toolchain_id=>"clang-23-aarch64",sysroot_path=>"/usr/aarch64-linux-gnu",sysroot_id=>"ubuntu-cross-aarch64",
+  sysroot_manifest_sha256=>$sysroot_manifest,provider_sha256=>$provider,observer_sha256=>$observer,
+  qemu_sha256=>$qemu,qemu_version=>"qemu-aarch64 version 9.0.0",pid_probe_compiler_sha256=>$cc,
+  pid_probe_compiler_version=>"clang version 23.1.3"};
+my $m={schema=>"item5-simple-app-build-v3",compiler_sha256=>$compiler,producer_source_commit=>$producer,
+  app_source_commit=>$app_source,app_source_tree_oid=>$tree,target=>$target,apps=>{}};
+for my $role (keys %hash) {$m->{apps}{$role}={status=>"pass",sha256=>$hash{$role},compiler_sha256=>$compiler,
+  app_source_commit=>$app_source,app_source_tree_oid=>$tree,target_profile=>$target->{profile},
+  target_triple=>$target->{triple},runtime_archive_sha256=>$runtime};}
+if ($variant eq "wrong-profile") {$target->{profile}="riscv64-rvv128";}
+elsif ($variant eq "wrong-triple") {$target->{triple}="riscv64-linux-gnu";}
+elsif ($variant eq "wrong-runtime") {$target->{runtime_archive_sha256}="e"x64;}
+elsif ($variant eq "wrong-provider") {$target->{provider_sha256}="e"x64;}
+elsif ($variant eq "wrong-observer") {$target->{observer_sha256}="e"x64;}
+elsif ($variant eq "wrong-qemu") {$target->{qemu_sha256}="e"x64;}
+elsif ($variant eq "wrong-qemu-version") {$target->{qemu_version}="different";}
+elsif ($variant eq "wrong-sysroot") {$target->{sysroot_id}="other";}
+elsif ($variant eq "wrong-sysroot-manifest") {$target->{sysroot_manifest_sha256}="e"x64;}
+elsif ($variant eq "wrong-toolchain") {$target->{toolchain_id}="other";}
+elsif ($variant eq "wrong-app-profile") {$m->{apps}{"db-vector"}{target_profile}="riscv64-rvv128";}
+elsif ($variant eq "wrong-app-triple") {$m->{apps}{"http-vector"}{target_triple}="riscv64-linux-gnu";}
+elsif ($variant eq "wrong-app-runtime") {$m->{apps}{"http-scalar"}{runtime_archive_sha256}="e"x64;}
+elsif ($variant eq "missing-target") {delete $m->{target};}
+elsif ($variant eq "wrong-schema") {$m->{schema}="item5-simple-app-build-v2";}
+open my $h,">:raw",$hello_path or die $!; print {$h} JSON::PP->new->canonical->encode($hello); close $h or die $!;
+open my $f,">:raw",$manifest_path or die $!; print {$f} JSON::PP->new->canonical->encode($m); close $f or die $!;
+' "$tmp/hello.json" "$tmp/manifest.json" "${1:-valid}"
+}
+
+validate_target() {
+  perl "$validator" "$tmp/hello.json" "$tmp/manifest.json" \
+    --target-profile aarch64-neon \
+    --runtime-archive-sha256 "$(printf '5%.0s' $(seq 1 64))" \
+    --toolchain-id clang-23-aarch64 --sysroot-id ubuntu-cross-aarch64 \
+    --sysroot-manifest-sha256 "$(printf '6%.0s' $(seq 1 64))" \
+    --provider-sha256 "$(printf '7%.0s' $(seq 1 64))" \
+    --observer-sha256 "$(printf '8%.0s' $(seq 1 64))" \
+    --qemu-sha256 "$(printf '9%.0s' $(seq 1 64))" \
+    --qemu-version 'qemu-aarch64 version 9.0.0' \
+    --probe-compiler-sha256 "$(printf 'f%.0s' $(seq 1 64))" \
+    --probe-compiler-version 'clang version 23.1.3' \
+    "db-scalar=$(printf '1%.0s' $(seq 1 64))" \
+    "db-vector=$(printf '2%.0s' $(seq 1 64))" \
+    "http-scalar=$(printf '3%.0s' $(seq 1 64))" \
+    "http-vector=$(printf '4%.0s' $(seq 1 64))"
+}
+
+make_json valid
+valid=$(validate_target) || exit 1
+printf '%s\n' "$valid" | grep -Eq '^[a-f0-9]{64}[[:space:]]b{40}[[:space:]]c{40}[[:space:]]d{40}$'
+IFS="$(printf '\t')" read -r got_compiler got_producer got_app_source got_app_tree <<EOF
+$valid
+EOF
+[ "$got_app_tree" = "$(printf 'd%.0s' $(seq 1 40))" ] || {
+  echo 'FAIL app_source_tree_oid was not preserved in the runner four-column capture' >&2
+  exit 1
+}
+for variant in wrong-profile wrong-triple wrong-runtime wrong-provider wrong-observer wrong-qemu \
+  wrong-qemu-version wrong-sysroot wrong-sysroot-manifest wrong-toolchain \
+  wrong-app-profile wrong-app-triple wrong-app-runtime missing-target wrong-schema; do
+  make_json "$variant"
+  if validate_target >/dev/null 2>&1; then
+    echo "FAIL target manifest accepted $variant" >&2
+    exit 1
+  fi
+done
+echo 'ITEM5_QEMU_TARGET_MANIFEST_TEST_PASS profiles=9 derived_loops=9 rejected=15 qemu_execution=not_run'

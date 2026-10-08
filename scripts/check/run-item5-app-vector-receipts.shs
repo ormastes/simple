@@ -10,6 +10,8 @@ watchdog=$root/scripts/resource/process-tree-rss-watchdog.pl
 receipt_validator=$root/scripts/check/lib/vector-provider-receipt.pl
 stage_helper=$root/scripts/check/lib/stage-verified-file.shs
 manifest_validator=$root/scripts/check/lib/item5-app-build-manifest.pl
+qemu_guest_exec=$root/scripts/check/lib/item5-qemu-guest-exec.shs
+target_pid_probe=$root/scripts/check/fixtures/item5-qemu-pid-probe.c
 usage() {
     cat <<'USAGE'
 Usage: run-item5-app-vector-receipts.shs --output ABS_DIR \
@@ -21,15 +23,27 @@ Usage: run-item5-app-vector-receipts.shs --output ABS_DIR \
   --http-scalar PATH --http-scalar-sha256 HEX --http-vector PATH --http-vector-sha256 HEX
 
 Optional: --max-rss-kib N (default 1048576), --timeout-seconds N (default 60).
-The JSON build manifest schema is item5-simple-app-build-v2. It names the
+Native execution uses item5-simple-app-build-v2. Optional --target-profile
+selects one of aarch64-neon, aarch64-sve-vq1/vq2/vq4,
+aarch64-sve2-vq1/vq2/vq4, or riscv64-rvv128/rvv256; target mode additionally requires
+--target-runtime-archive PATH --target-runtime-sha256 HEX --toolchain-id ID
+--sysroot-id ID --sysroot-manifest PATH --sysroot-manifest-sha256 HEX.
+Target mode accepts only item5-simple-app-build-v3. The JSON build manifest names the
 Phase2 producer with compiler_sha256 and producer_source_commit, and names the
 app source snapshot separately with app_source_commit and
 app_source_tree_oid (the deterministic result of `git rev-parse
 <app_source_commit>^{tree}`). Each app
 entry carries its binary sha256, the same compiler_sha256, and the same app
-source commit/tree ID. The manifest is
-caller-supplied provenance and is recorded by hash; this runner does not
-independently prove how the binary was produced.
+source commit/tree ID. Target manifests also bind target profile/triple,
+runtime archive, provider, observer, QEMU binary/version, toolchain identity,
+sysroot identity, and the target-app hashes. Those build identities are
+caller-supplied provenance; this runner does not prove how the app was built.
+The target observer is passed to QEMU's guest environment only. A bounded
+target C probe must first prove that the guest receipt PID matches the QEMU
+process PID recorded by the watchdog. This runner does not qualify Simple app
+execution until target binaries are supplied and pass the receipt/oracle checks.
+SVE2 profiles run under a QEMU CPU exposing SVE2; receipts prove provider calls
+and loop counts, not execution of an SVE2-only opcode.
 USAGE
 }
 fail() { echo "FAIL item5 app receipt runner: $*" >&2; exit 1; }
@@ -46,6 +60,10 @@ observer_so=''
 observer_sha=''
 provider_id=''
 implementation_id=''
+target_profile=native
+target_runtime_archive=''; target_runtime_sha=''
+toolchain_id=''; sysroot_id=''
+sysroot_manifest=''; sysroot_manifest_sha=''
 db_scalar=''; db_scalar_sha=''
 db_vector=''; db_vector_sha=''
 http_scalar=''; http_scalar_sha=''
@@ -67,6 +85,13 @@ while [ "$#" -gt 0 ]; do
         --observer-sha256) need_value "$key" "${1-}"; observer_sha=$1; shift ;;
         --provider-id) need_value "$key" "${1-}"; provider_id=$1; shift ;;
         --implementation-id) need_value "$key" "${1-}"; implementation_id=$1; shift ;;
+        --target-profile) need_value "$key" "${1-}"; target_profile=$1; shift ;;
+        --target-runtime-archive) need_value "$key" "${1-}"; target_runtime_archive=$1; shift ;;
+        --target-runtime-sha256) need_value "$key" "${1-}"; target_runtime_sha=$1; shift ;;
+        --toolchain-id) need_value "$key" "${1-}"; toolchain_id=$1; shift ;;
+        --sysroot-id) need_value "$key" "${1-}"; sysroot_id=$1; shift ;;
+        --sysroot-manifest) need_value "$key" "${1-}"; sysroot_manifest=$1; shift ;;
+        --sysroot-manifest-sha256) need_value "$key" "${1-}"; sysroot_manifest_sha=$1; shift ;;
         --db-scalar) need_value "$key" "${1-}"; db_scalar=$1; shift ;;
         --db-scalar-sha256) need_value "$key" "${1-}"; db_scalar_sha=$1; shift ;;
         --db-vector) need_value "$key" "${1-}"; db_vector=$1; shift ;;
@@ -88,6 +113,37 @@ done
     [ -n "$db_vector_sha" ] && [ -n "$http_scalar" ] && [ -n "$http_scalar_sha" ] &&
     [ -n "$http_vector" ] && [ -n "$http_vector_sha" ] || { usage >&2; exit 2; }
 case "$output" in /*) ;; *) fail 'output directory must be absolute' ;; esac
+target_triple=''; target_qemu_name=''; target_sysroot=''; target_cpu=''
+target_db_loops=''; target_loop_model=''; target_qemu=''; target_qemu_sha=''
+target_qemu_version=''; target_cc=''; target_cc_sha=''; target_cc_version=''
+if [ "$target_profile" = native ]; then
+    [ -z "$target_runtime_archive" ] && [ -z "$target_runtime_sha" ] &&
+        [ -z "$toolchain_id" ] && [ -z "$sysroot_id" ] &&
+        [ -z "$sysroot_manifest" ] && [ -z "$sysroot_manifest_sha" ] ||
+        fail 'target provenance options require a non-native --target-profile'
+else
+    [ -n "$target_runtime_archive" ] && [ -n "$target_runtime_sha" ] &&
+        [ -n "$toolchain_id" ] && [ -n "$sysroot_id" ] &&
+        [ -n "$sysroot_manifest" ] && [ -n "$sysroot_manifest_sha" ] ||
+        fail 'target mode requires runtime archive, toolchain, and sysroot provenance'
+    profile_fields=$(perl -I "$root/scripts/check/lib" -MItem5QemuProfile -e '
+my $p = Item5QemuProfile::profile($ARGV[0]) or exit 2;
+print join("\t", @$p{qw(triple qemu sysroot cpu db_loops loop_model)}), "\n";
+' "$target_profile") || fail 'unknown fixed QEMU target profile'
+    IFS="$(printf '\t')" read -r target_triple target_qemu_name target_sysroot target_cpu target_db_loops target_loop_model <<EOF
+$profile_fields
+EOF
+    case "$target_runtime_sha:$sysroot_manifest_sha" in
+        *[!0-9a-f:]*) fail 'target SHA-256 values must be lowercase hex' ;;
+    esac
+    [ "${#target_runtime_sha}" = 64 ] && [ "${#sysroot_manifest_sha}" = 64 ] ||
+        fail 'target SHA-256 values must contain 64 hex characters'
+    printf '%s\n' "$toolchain_id" "$sysroot_id" |
+        grep -Ev '^[A-Za-z0-9._:+/-]+$' >/dev/null && fail 'toolchain and sysroot identities contain unsupported characters'
+    [ -f "$target_runtime_archive" ] && [ -r "$target_runtime_archive" ] || fail 'target runtime archive is not readable'
+    [ -f "$sysroot_manifest" ] && [ -r "$sysroot_manifest" ] || fail 'target sysroot manifest is not readable'
+    [ -d "$target_sysroot" ] || fail "fixed profile sysroot is missing: $target_sysroot"
+fi
 [ ! -e "$output" ] || fail 'output directory must be fresh'
 case "$max_rss_kib" in ''|*[!0-9]*) fail 'RSS cap must be a positive integer' ;; esac
 case "$timeout_seconds" in ''|*[!0-9]*) fail 'timeout must be a positive integer' ;; esac
@@ -96,6 +152,15 @@ case "$timeout_seconds" in ''|*[!0-9]*) fail 'timeout must be a positive integer
 for digest in "$provider_sha" "$observer_sha" "$db_scalar_sha" "$db_vector_sha" "$http_scalar_sha" "$http_vector_sha" "$producer_receipt_sha" "$app_manifest_sha"; do
     printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$' || fail 'all supplied SHA-256 values must be lowercase hex'
 done
+if [ "$target_profile" != native ]; then
+    printf '%s\n' "$target_runtime_sha" "$sysroot_manifest_sha" | grep -Ev '^[0-9a-f]{64}$' >/dev/null && fail 'target SHA-256 values must be lowercase hex'
+    target_qemu=$(command -v "$target_qemu_name") || fail "fixed QEMU executable is unavailable: $target_qemu_name"
+    [ -x "$target_qemu" ] || fail 'fixed QEMU executable is not executable'
+    target_cc=${CLANG:-/usr/lib/llvm-23/bin/clang}
+    case "$target_cc" in */*) ;; *) target_cc=$(command -v "$target_cc") || fail 'target PID probe compiler is unavailable' ;; esac
+    [ -x "$target_cc" ] || fail 'target PID probe requires clang at /usr/lib/llvm-23/bin/clang (CLANG may select the executable)'
+    [ -r "$target_pid_probe" ] || fail 'target PID probe source is missing'
+fi
 perl -MMath::BigInt -e '
 my $max = Math::BigInt->new("18446744073709551615");
 for my $value (@ARGV) {
@@ -107,7 +172,7 @@ for my $value (@ARGV) {
     [ -f "$http_scalar" ] && [ -x "$http_scalar" ] && [ -f "$http_vector" ] && [ -x "$http_vector" ] || fail 'all four app binaries must exist and be executable regular files'
 [ -r "$provider_dso" ] && [ -r "$observer_so" ] && [ -r "$producer_receipt" ] && [ -r "$app_manifest" ] || fail 'provider, observer, and provenance files must be readable'
 [ -x "$watchdog" ] && [ -r "$receipt_validator" ] && [ -r "$stage_helper" ] &&
-    [ -r "$manifest_validator" ] || fail 'watchdog or shared runner helper is missing'
+    [ -r "$manifest_validator" ] && [ -r "$qemu_guest_exec" ] || fail 'watchdog or shared runner helper is missing'
 command -v sha256sum >/dev/null 2>&1 || fail 'sha256sum is required'
 command -v perl >/dev/null 2>&1 || fail 'perl is required'
 command -v /usr/bin/time >/dev/null 2>&1 || fail '/usr/bin/time is required'
@@ -116,6 +181,7 @@ for json in "$producer_receipt" "$app_manifest"; do
     [ "$size" -le 65536 ] || fail 'provenance JSON exceeds 64 KiB bound'
 done
 mkdir -p "$output/staged" "$output/logs" "$output/receipts"
+sha_file() { sha256sum -- "$1" | awk '{print $1}'; }
 stage_file() {
     source=$1 name=$2 mode=$3 expected=$4
     sh "$stage_helper" "$source" "$output/staged/$name" "$mode" "$expected" || fail "cannot stage $name"
@@ -135,6 +201,24 @@ stage_file "$provider_dso" vector-provider.so 0444 "$provider_sha"
 stage_file "$observer_so" vector-observer.so 0444 "$observer_sha"
 stage_file "$producer_receipt" producer-hello.json 0444 "$producer_receipt_sha"
 stage_file "$app_manifest" app-build-manifest.json 0444 "$app_manifest_sha"
+if [ "$target_profile" != native ]; then
+    stage_file "$target_runtime_archive" target-runtime.a 0444 "$target_runtime_sha"
+    stage_file "$sysroot_manifest" target-sysroot-manifest.json 0444 "$sysroot_manifest_sha"
+    target_qemu_sha=$(sha_file "$target_qemu")
+    stage_file "$target_qemu" qemu-user 0555 "$target_qemu_sha"
+    target_qemu=$output/staged/qemu-user
+    env -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD -u SIMPLE_VECTOR_TEST_RECEIPT_OWNER \
+        timeout 10 "$target_qemu" --version >"$output/qemu-version.txt" 2>&1 || fail 'cannot read fixed QEMU version'
+    [ "$(stat -c %s -- "$output/qemu-version.txt")" -le 4096 ] || fail 'QEMU version output exceeded 4 KiB'
+    target_qemu_version=$(sed -n '1p' "$output/qemu-version.txt")
+    [ -n "$target_qemu_version" ] && [ "${#target_qemu_version}" -le 256 ] || fail 'invalid fixed QEMU version string'
+    target_cc_sha=$(sha_file "$target_cc")
+    env -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD -u SIMPLE_VECTOR_TEST_RECEIPT_OWNER \
+        timeout 10 "$target_cc" --version >"$output/target-pid-probe-compiler-version.txt" 2>&1 || fail 'cannot read target PID probe compiler version'
+    [ "$(stat -c %s -- "$output/target-pid-probe-compiler-version.txt")" -le 4096 ] || fail 'target compiler version output exceeded 4 KiB'
+    target_cc_version=$(sed -n '1p' "$output/target-pid-probe-compiler-version.txt")
+    [ -n "$target_cc_version" ] && [ "${#target_cc_version}" -le 256 ] || fail 'invalid target compiler version string'
+fi
 find "$output/staged" -type d -exec chmod 0555 {} + || fail 'cannot freeze staged artifact directories'
 staged_db_scalar=$output/staged/db-scalar/${db_scalar##*/}
 staged_db_vector=$output/staged/db-vector/${db_vector##*/}
@@ -144,16 +228,37 @@ staged_provider=$output/staged/vector-provider.so
 staged_observer=$output/staged/vector-observer.so
 staged_producer_receipt=$output/staged/producer-hello.json
 staged_app_manifest=$output/staged/app-build-manifest.json
-sha_file() { sha256sum -- "$1" | awk '{print $1}'; }
+if [ "$target_profile" != native ]; then
+    staged_target_runtime=$output/staged/target-runtime.a
+    staged_sysroot_manifest=$output/staged/target-sysroot-manifest.json
+    printf '%s\n' "$target_profile" "$target_triple" "$target_cpu" \
+        "$target_loop_model" "$target_db_loops" "$target_sysroot" \
+        "$target_qemu_sha" "$target_qemu_version" "$target_cc_sha" \
+        "$target_cc_version" >"$output/target-profile.txt"
+fi
 
 # Validate the immutable Phase2 Hello receipt and caller-supplied app-build
 # manifest. The manifest binds each staged app hash to the producer hash.
-provenance=$(perl "$manifest_validator" "$staged_producer_receipt" "$staged_app_manifest" \
-    "db-scalar=$db_scalar_sha" "db-vector=$db_vector_sha" \
-    "http-scalar=$http_scalar_sha" "http-vector=$http_vector_sha") || fail 'producer/app provenance validation failed'
+if [ "$target_profile" = native ]; then
+    provenance=$(perl "$manifest_validator" "$staged_producer_receipt" "$staged_app_manifest" \
+        "db-scalar=$db_scalar_sha" "db-vector=$db_vector_sha" \
+        "http-scalar=$http_scalar_sha" "http-vector=$http_vector_sha") || fail 'producer/app provenance validation failed'
+else
+    provenance=$(perl "$manifest_validator" "$staged_producer_receipt" "$staged_app_manifest" \
+        --target-profile "$target_profile" --runtime-archive-sha256 "$target_runtime_sha" \
+        --toolchain-id "$toolchain_id" --sysroot-id "$sysroot_id" \
+        --sysroot-manifest-sha256 "$sysroot_manifest_sha" --provider-sha256 "$provider_sha" \
+        --observer-sha256 "$observer_sha" --qemu-sha256 "$target_qemu_sha" \
+        --qemu-version "$target_qemu_version" --probe-compiler-sha256 "$target_cc_sha" \
+        --probe-compiler-version "$target_cc_version" \
+        "db-scalar=$db_scalar_sha" "db-vector=$db_vector_sha" \
+        "http-scalar=$http_scalar_sha" "http-vector=$http_vector_sha") || fail 'producer/target app provenance validation failed'
+fi
 IFS="$(printf '\t')" read -r producer_compiler_sha producer_source_commit app_source_commit app_source_tree_oid <<EOF
 $provenance
 EOF
+printf '%s\n' "$provenance" | awk -F '\t' 'NF == 4 && $1 ~ /^[0-9a-f]{64}$/ && $2 ~ /^([0-9a-f]{40}|[0-9a-f]{64})$/ && $3 ~ /^([0-9a-f]{40}|[0-9a-f]{64})$/ && $4 ~ /^([0-9a-f]{40}|[0-9a-f]{64})$/ { ok=1 } END { exit !ok }' ||
+    fail 'manifest validator did not return exactly four valid provenance identifiers'
 
 field() {
     awk -F= -v key="$2" '$1==key { count++; value=substr($0,index($0,"=")+1) } END { if (count != 1) exit 1; print value }' "$1"
@@ -171,6 +276,63 @@ validate_watchdog_receipt() {
     case "$peak" in ''|*[!0-9]*) fail "invalid peak RSS: $rss" ;; esac
     [ "$peak" -lt "$expected_max" ] || fail "RSS cap was reached: $rss"
 }
+run_target_pid_probe() {
+    probe_dir=$output/target-probe
+    mkdir -m 0700 "$probe_dir" || fail 'cannot create target PID probe directory'
+    probe_binary=$probe_dir/pid-probe
+    probe_build_log=$output/logs/target-pid-probe.build.log
+    probe_events=$output/receipts/target-pid-probe.events
+    probe_rss=$output/receipts/target-pid-probe.rss.env
+    target_cc_current=$(sha_file "$target_cc")
+    [ "$target_cc_current" = "$target_cc_sha" ] || fail 'target probe compiler changed after provenance capture'
+    case "$target_triple" in
+        aarch64-linux-gnu)
+            probe_compile_flags="--target=$target_triple --gcc-toolchain=/usr -march=armv8-a -mgeneral-regs-only -std=c11 -O2 -Wall -Wextra -Werror"
+            ;;
+        riscv64-linux-gnu)
+            probe_compile_flags="--target=$target_triple --gcc-toolchain=/usr -march=rv64gc -mabi=lp64d -std=c11 -O2 -Wall -Wextra -Werror"
+            ;;
+        *) fail 'target PID probe has no baseline compiler profile' ;;
+    esac
+    probe_build_rss=$output/receipts/target-pid-probe-build.rss.env
+    result=0
+    (
+        ulimit -f 2048 || fail 'cannot set target compiler output-file limit'
+        env -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD -u SIMPLE_VECTOR_TEST_RECEIPT_OWNER \
+            perl "$watchdog" --max-rss-kib=1048576 --rss-cap-mode=enforce \
+            --timeout-seconds=60 --receipt="$probe_build_rss" -- \
+            timeout 60 "$target_cc" $probe_compile_flags "$target_pid_probe" -o "$probe_binary" \
+            >"$probe_build_log" 2>&1
+    ) >"$output/logs/target-pid-probe-build.watchdog.log" 2>&1 || result=$?
+    [ "$result" = 0 ] || fail "target PID probe cross-compilation failed with status $result"
+    validate_watchdog_receipt "$probe_build_rss" 1048576
+    probe_build_log_size=$(stat -c %s -- "$probe_build_log") || fail 'cannot stat target PID probe build log'
+    [ "$probe_build_log_size" -le 1048576 ] || fail 'target PID probe build log exceeded 1 MiB'
+    [ "$(sha_file "$target_cc")" = "$target_cc_sha" ] || fail 'target probe compiler changed during compilation'
+    [ -f "$probe_binary" ] && [ -x "$probe_binary" ] || fail 'target PID probe binary was not produced'
+    result=0
+    (
+        exec 3>"$probe_events"
+        ulimit -f 2048 || fail 'cannot set target PID probe output-file limit'
+        env -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD -u SIMPLE_VECTOR_TEST_RECEIPT_OWNER \
+            /usr/bin/time -f '%e' -o "$output/logs/target-pid-probe.elapsed_seconds" perl "$watchdog" \
+                --max-rss-kib="$max_rss_kib" --rss-cap-mode=enforce \
+                --timeout-seconds="$timeout_seconds" --receipt="$probe_rss" -- \
+            env -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD -u SIMPLE_VECTOR_TEST_RECEIPT_OWNER \
+                sh "$qemu_guest_exec" "$target_profile" "$target_qemu" "$staged_observer" "$probe_binary" \
+                >"$output/logs/target-pid-probe.stdout" 2>"$output/logs/target-pid-probe.stderr"
+    ) >"$output/logs/target-pid-probe.watchdog.log" 2>&1 || result=$?
+    [ "$result" = 0 ] || fail "target QEMU PID probe failed with status $result"
+    validate_watchdog_receipt "$probe_rss" "$max_rss_kib"
+    probe_root_pid=$(field "$probe_rss" root_pid)
+    perl "$receipt_validator" "$probe_events" "$probe_root_pid" --no-load ||
+        fail 'guest observer PID did not match the watchdog QEMU root PID'
+    probe_log_size=$(stat -c %s -- "$probe_build_log") || fail 'cannot stat target PID probe build log'
+    [ "$probe_log_size" -le 1048576 ] || fail 'target PID probe build log exceeded 1 MiB'
+    printf 'pid_probe_root_pid=%s\npid_probe_binary_sha256=%s\npid_probe_source_sha256=%s\n' \
+        "$probe_root_pid" "$(sha_file "$probe_binary")" "$(sha_file "$target_pid_probe")" \
+        >"$output/target-pid-probe.txt"
+}
 run_app() {
     role=$1 binary=$2 mode=$3 expected_marker=$4
     shift 4
@@ -185,13 +347,23 @@ run_app() {
     (
         exec 3>"$event_receipt"
         ulimit -f 2048 || fail 'cannot set app output-file limit'
-        /usr/bin/time -f '%e' -o "$elapsed" perl "$watchdog" \
-            --max-rss-kib="$max_rss_kib" --rss-cap-mode=enforce \
-            --timeout-seconds="$timeout_seconds" --receipt="$rss_receipt" -- \
-        env -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD \
-                -u SIMPLE_VECTOR_TEST_RECEIPT_OWNER \
-                SIMPLE_VECTOR_TEST_RECEIPT_OWNER=1 LD_PRELOAD="$staged_observer" \
-                "$binary" "$@" >"$stdout" 2>"$stderr"
+        if [ "$target_profile" = native ]; then
+            /usr/bin/time -f '%e' -o "$elapsed" perl "$watchdog" \
+                --max-rss-kib="$max_rss_kib" --rss-cap-mode=enforce \
+                --timeout-seconds="$timeout_seconds" --receipt="$rss_receipt" -- \
+            env -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD \
+                    -u SIMPLE_VECTOR_TEST_RECEIPT_OWNER \
+                    SIMPLE_VECTOR_TEST_RECEIPT_OWNER=1 LD_PRELOAD="$staged_observer" \
+                    "$binary" "$@" >"$stdout" 2>"$stderr"
+        else
+            env -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD -u SIMPLE_VECTOR_TEST_RECEIPT_OWNER \
+                /usr/bin/time -f '%e' -o "$elapsed" perl "$watchdog" \
+                    --max-rss-kib="$max_rss_kib" --rss-cap-mode=enforce \
+                    --timeout-seconds="$timeout_seconds" --receipt="$rss_receipt" -- \
+                env -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD -u SIMPLE_VECTOR_TEST_RECEIPT_OWNER \
+                    sh "$qemu_guest_exec" "$target_profile" "$target_qemu" "$staged_observer" "$binary" "$@" \
+                    >"$stdout" 2>"$stderr"
+        fi
     ) >"$watchdog_log" 2>&1 || result=$?
     [ "$result" = 0 ] || fail "$role execution failed with status $result (see logs/$role.*)"
     for log_file in "$stdout" "$stderr" "$watchdog_log"; do
@@ -202,17 +374,33 @@ run_app() {
     root_pid=$(field "$rss_receipt" root_pid)
     case "$mode" in
         no-load) perl "$receipt_validator" "$event_receipt" "$root_pid" --no-load || fail "$role event receipt rejected" ;;
-        db-vector) perl "$receipt_validator" "$event_receipt" "$root_pid" --require-load --exact-op=1:10:11 --forbid-op=2 --forbid-op=3 --forbid-op=4 || fail "$role event receipt did not prove only the expected bitmap work" ;;
+        db-vector)
+            if [ "$target_profile" = native ]; then expected_db_loops=11; else expected_db_loops=$target_db_loops; fi
+            perl "$receipt_validator" "$event_receipt" "$root_pid" --require-load \
+                --exact-op="1:10:$expected_db_loops" --forbid-op=2 --forbid-op=3 --forbid-op=4 ||
+                fail "$role event receipt did not prove the exact profile bitmap work"
+            ;;
         http-vector) perl "$receipt_validator" "$event_receipt" "$root_pid" --require-load --require-op=3:1:1 --success-only-op=3 --require-op=4:1:1 --success-only-op=4 --forbid-op=1 --forbid-op=2 || fail "$role event receipt did not prove only successful HTTP vector loops" ;;
         *) fail "unknown app run mode $mode" ;;
     esac
     [ "$(grep -Fxc "$expected_marker" "$stdout" || true)" = 1 ] || fail "$role success oracle missing or repeated (see logs/$role.stdout)"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$role" "$root_pid" "$mode" "$(sha_file "$binary")" \
-        "$(field "$rss_receipt" peak_rss_kib)" "$(cat "$elapsed")" >>"$output/runs.tsv"
+    if [ "$target_profile" = native ]; then
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$role" "$root_pid" "$mode" "$(sha_file "$binary")" \
+            "$(field "$rss_receipt" peak_rss_kib)" "$(cat "$elapsed")" >>"$output/runs.tsv"
+    else
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$role" "$root_pid" "$mode" "$target_profile" "$(sha_file "$binary")" \
+            "$(field "$rss_receipt" peak_rss_kib)" "$(cat "$elapsed")" >>"$output/runs.tsv"
+    fi
 }
 
-printf 'role\troot_pid\tmode\tbinary_sha256\tpeak_rss_kib\twall_seconds_diagnostic\n' >"$output/runs.tsv"
+if [ "$target_profile" != native ]; then run_target_pid_probe; fi
+if [ "$target_profile" = native ]; then
+    printf 'role\troot_pid\tmode\tbinary_sha256\tpeak_rss_kib\twall_seconds_diagnostic\n' >"$output/runs.tsv"
+else
+    printf 'role\troot_pid\tmode\ttarget_profile\tbinary_sha256\tpeak_rss_kib\twall_seconds_diagnostic\n' >"$output/runs.tsv"
+fi
 run_app db-scalar "$staged_db_scalar" no-load \
     'PURE_DATABASE_SCALAR_QUERY_PASS queries=10 boundaries=31,32,33,511,512,513,1023,1024,1025 no_match=checked'
 run_app db-vector "$staged_db_vector" db-vector \
@@ -299,8 +487,28 @@ observer_staged_sha=$(sha_file "$staged_observer")
     echo "implementation_identity=$implementation_id"
     echo "provider_sha256=$provider_staged_sha"
     echo "observer_sha256=$observer_staged_sha"
+    if [ "$target_profile" != native ]; then
+        echo "target_profile=$target_profile"
+        echo "target_triple=$target_triple"
+        echo "target_runtime_archive_sha256=$(sha_file "$staged_target_runtime")"
+        echo "target_toolchain_id=$toolchain_id"
+        echo "target_sysroot_id=$sysroot_id"
+        echo "target_sysroot_manifest_sha256=$(sha_file "$staged_sysroot_manifest")"
+        echo "target_qemu_sha256=$target_qemu_sha"
+        echo "target_qemu_version=$target_qemu_version"
+        echo "target_pid_probe_compiler_sha256=$target_cc_sha"
+        echo "target_pid_probe_compiler_version=$target_cc_version"
+        echo "target_db_loop_model=$target_loop_model"
+        echo "target_db_exact_loops=$target_db_loops"
+        echo "target_pid_probe_receipt_sha256=$(sha_file "$output/receipts/target-pid-probe.events")"
+        echo "target_pid_probe_watchdog_root_pid=$(field "$output/receipts/target-pid-probe.rss.env" root_pid)"
+    fi
     echo "max_rss_kib=$max_rss_kib"
     echo "timeout_seconds=$timeout_seconds"
 } >"$output/evidence.env"
     chmod -R a-w "$output/staged"
-echo "APP_VECTOR_EXECUTION_EVIDENCE_COMPLETE output=$output db_provider_events=10 db_bitmap_loops=11 http_op3_op4=observed"
+if [ "$target_profile" = native ]; then
+    echo "APP_VECTOR_EXECUTION_EVIDENCE_COMPLETE output=$output db_provider_events=10 db_bitmap_loops=11 http_op3_op4=observed"
+else
+    echo "APP_VECTOR_EXECUTION_EVIDENCE_COMPLETE output=$output db_provider_events=10 db_bitmap_loops=$target_db_loops http_op3_op4=observed target=$target_profile isa=not-attested provenance=caller-supplied"
+fi
