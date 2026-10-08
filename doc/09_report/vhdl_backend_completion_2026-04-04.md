@@ -29,9 +29,18 @@ The VHDL backend generates synthesizable VHDL-2008 code from Simple MIR, coverin
 | `test/01_unit/compiler/backend/vhdl_sim_runner_spec.spl` | Unit | Sim runner |
 | `test/01_unit/compiler/backend/vhdl_testbench_spec.spl` | Unit | Testbench gen |
 | `test/02_integration/compiler/vhdl_backend_e2e_spec.spl` | Integration | E2E path |
-| `test/03_system/vhdl_emulation_spec.spl` | System | GHDL (graceful skip) |
+| `test/03_system/hardware/vhdl_emulation_spec.spl` | System | Four real GHDL scenarios PASS 4/4 on FreeBSD ARM64 (2026-10-08); focused Phase1 only |
 | `test/03_system/feature/usage/vhdl_spec.spl` | Feature | Usage patterns |
 | `test/03_system/feature/usage/vhdl_golden_spec.spl` | Feature | Golden outputs |
+
+### 2026-10-08 focused simulation evidence
+
+The canonical VHDL emulation replacement passed four real GHDL 6.0.0 scenarios
+on FreeBSD ARM64 through the immutable e934 Phase1 seed. See its
+[manual](../06_spec/03_system/hardware/vhdl_emulation_spec.md) for exact source,
+producer, package and runtime identities. The retained mixed-closure warnings,
+pre-existing SFFI audit failure, and unmeasured coverage remain limitations;
+this result does not establish production readiness or release qualification.
 
 ## Scope Decisions
 

@@ -1,68 +1,74 @@
 """
-## Purpose and audience
-Portable smoke contract for the VHDL emulation tooling, written for the
-hardware-emulation owners. It pins the GHDL-driven simulator phase flow
-(analyze, elaborate, run, synth) and the recorded tool-result shape that
-`src/app/io/vhdl_ffi.spl` ships, so the emulation lane cannot silently drop a
-phase or change its backend contract.
-## Operator workflow
-Run `./src/compiler_rust/target/bootstrap/simple run test/03_system/hardware/vhdl_emulation_spec.spl`
-from the repository root; the scenarios are source contracts and need no GHDL
-installation.
-## Compatibility and limitations
-Live GHDL simulation is environment-gated and intentionally not exercised
-here: this spec asserts the shipped tooling surface only, so it runs on hosts
-without GHDL. A token drift in `vhdl_ffi.spl` shows up RED.
-## Verification guidance and troubleshooting
-A red scenario means a pinned phase, result shape, or backend token disappeared
-from the FFI module; grep `src/app/io/vhdl_ffi.spl` for the failing token and
-re-read the emulation requirement before renaming either side.
+Real GHDL analysis, elaboration and simulation through the owned VHDL wrapper.
+Requires GHDL on PATH on a POSIX host. A missing tool fails this explicit lane;
+no constant-result or source-token check substitutes for simulator execution.
+Each context is a private workspace shared across its three phases, including
+native backend outputs. Source paths below stay relative to the caller's cwd.
 """
-# Lifecycle: doc/01_research/domain/sspec_documentization_maintenance.md ;
-# doc/03_plan/sspec_modernization_plan.md ;
-# doc/04_architecture/sspec_documentization_maintenance.md ;
-# doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
-# @manual_section: vhdl emulation smoke
 # @tag:system
-
+# @cover src/lib/nogc_sync_mut/io/vhdl_sffi.spl 80%
 use std.spec.*
 use std.spec.step
-use std.io.{file_read}
+use app.io.vhdl_ffi.{ghdl_available, ghdl_create_workspace,
+    ghdl_analyze_in, ghdl_elaborate_in, ghdl_run_in,
+    ghdl_analyze, ghdl_elaborate, ghdl_run, ghdl_close_default_workspace}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
 
-describe "VHDL emulation portable smoke":
-    it "records simulator phases":
-        # @req REQ-SSPEC-SYSTEM
-        # @capture(bit_table): simulator phase contract verdicts
-        step("Pin the shipped GHDL phase functions in the VHDL FFI module")
-        val source = file_read("src/app/io/vhdl_ffi.spl")
-        val pins_analyze_phase = source.contains("fn ghdl_analyze(vhdl_file: text)")
-        val pins_elaborate_phase = source.contains("fn ghdl_elaborate(entity_name: text)")
-        val pins_simulate_phase = source.contains("fn ghdl_run(entity_name: text")
-        val phases = ["elaborate", "simulate", "compare"]
-        expect(phases.len()).to_equal(3)  # oracle: the flow under contract is exactly elaborate, simulate, compare
-        expect(phases[1]).to_equal("simulate")  # oracle: simulate is the middle phase of the pinned flow
-        expect(pins_analyze_phase).to_equal(true)
-        expect(pins_elaborate_phase).to_equal(true)
-        expect(pins_simulate_phase).to_equal(true)
+fn vhdl_test_workspace() -> text:
+    val created = ghdl_create_workspace("/tmp")
+    expect(created.is_ok()).to_equal(true)
+    created.unwrap()
 
-    it "records signal value shape":
-        # @req REQ-SSPEC-SYSTEM
-        # @capture(bit_table): recorded tool-result shape verdicts
-        step("Pin the recorded simulator result shape in the FFI module")
-        val source = file_read("src/app/io/vhdl_ffi.spl")
-        val pins_result_record_shape = source.contains("fn vhdl_tool_result(code: i64, stdout: text, stderr: text)")
-        val pins_entity_under_test = source.contains("entity_name: text")
-        val signal_name = "clk"
-        val value = "1"
-        expect(signal_name).to_start_with("clk")
-        expect(value).to_contain("1")
-        expect(pins_result_record_shape).to_equal(true)
-        expect(pins_entity_under_test).to_equal(true)
+describe "VHDL emulation with owned GHDL workspaces":
+    it "isolates the same entity in two work libraries and native output directories":
+        step("Analyze, elaborate and simulate an inverter and a buffer in separate workspaces")
+        expect(ghdl_available()).to_equal(true)
+        val first = vhdl_test_workspace()
+        val second = vhdl_test_workspace()
+        expect(first == second).to_equal(false)
+        expect(ghdl_analyze_in(first, "test/fixtures/vhdl/owned_workspace/inverter.vhd").success).to_equal(true)
+        expect(ghdl_analyze_in(second, "test/fixtures/vhdl/owned_workspace/buffer.vhd").success).to_equal(true)
+        expect(ghdl_elaborate_in(first, "simple_vhdl_probe").success).to_equal(true)
+        expect(ghdl_elaborate_in(second, "simple_vhdl_probe").success).to_equal(true)
+        val first_run = ghdl_run_in(first, "simple_vhdl_probe", Some("10ns"))
+        expect(first_run.exit_code).to_equal(0)
+        expect(first_run.stdout + first_run.stderr).to_contain("SIMPLE_GHDL_INVERTER_DONE")
+        val second_run = ghdl_run_in(second, "simple_vhdl_probe", Some("10ns"))
+        expect(second_run.exit_code).to_equal(0)
+        expect(second_run.stdout + second_run.stderr).to_contain("SIMPLE_GHDL_BUFFER_DONE")
+        expect(dir_remove_all(first)).to_equal(true)
+        expect(dir_remove_all(second)).to_equal(true)
 
-    it "records backend name":
-        # @req REQ-SSPEC-SYSTEM
-        # @capture(bit_table): backend identity contract verdicts
-        step("Pin GHDL as the emulation backend of the FFI module")
-        val source = file_read("src/app/io/vhdl_ffi.spl")
-        val drives_ghdl_backend = source.contains("ghdl")
-        expect(drives_ghdl_backend).to_equal(true)
+    it "propagates a real VHDL syntax rejection":
+        step("Reject malformed source during analysis")
+        expect(ghdl_available()).to_equal(true)
+        val work = vhdl_test_workspace()
+        val analysis = ghdl_analyze_in(work, "test/fixtures/vhdl/owned_workspace/syntax_error.vhd")
+        expect(analysis.success).to_equal(false)
+        expect(analysis.exit_code > 0).to_equal(true)
+        expect((analysis.stdout + analysis.stderr).len() > 0).to_equal(true)
+        expect(dir_remove_all(work)).to_equal(true)
+
+    it "propagates a failed simulated signal assertion":
+        step("Compile valid VHDL whose second signal expectation is deliberately wrong")
+        expect(ghdl_available()).to_equal(true)
+        val work = vhdl_test_workspace()
+        expect(ghdl_analyze_in(work, "test/fixtures/vhdl/owned_workspace/wrong_expectation.vhd").success).to_equal(true)
+        expect(ghdl_elaborate_in(work, "simple_vhdl_probe").success).to_equal(true)
+        val simulation = ghdl_run_in(work, "simple_vhdl_probe", Some("10ns"))
+        expect(simulation.success).to_equal(false)
+        expect(simulation.exit_code > 0).to_equal(true)
+        expect(simulation.stdout + simulation.stderr).to_contain("transition signal mismatch")
+        expect((simulation.stdout + simulation.stderr).contains("UNREACHABLE_WRONG_EXPECTATION_DONE")).to_equal(false)
+        expect(dir_remove_all(work)).to_equal(true)
+
+    it "preserves the sequential compatibility workflow until explicit cleanup":
+        step("The old analyze/elaborate/run API shares one private process-owned workspace")
+        expect(ghdl_available()).to_equal(true)
+        expect(ghdl_close_default_workspace()).to_equal(true)
+        expect(ghdl_analyze("test/fixtures/vhdl/owned_workspace/inverter.vhd").success).to_equal(true)
+        expect(ghdl_elaborate("simple_vhdl_probe").success).to_equal(true)
+        val simulation = ghdl_run("simple_vhdl_probe", Some("10ns"))
+        expect(simulation.exit_code).to_equal(0)
+        expect(simulation.stdout + simulation.stderr).to_contain("SIMPLE_GHDL_INVERTER_DONE")
+        expect(ghdl_close_default_workspace()).to_equal(true)
