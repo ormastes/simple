@@ -306,8 +306,26 @@ memoization tests remain required. Repeated over-cap visits must remain
 ineligible for full-source probing. The regression fixture allocation is
 bounded to a 1 MiB probe budget; execute with the default cap.
 
-Status: source repair prepared for independent review; no Cargo build or
-runtime verification has occurred. Existing admitted seeds and failed source
-projections are immutable. Qualification requires targeted Rust checks plus
-a separately built, exactly identified Phase 1 producer and the original
-canonical skip fixture; an old producer cannot validate the source repair.
+Status: independent static review PASS, zero P0/P1, for patch
+`b7842937dfeff367476a60eef955aa991370b8d2a3088aa286a6bd903512d103`.
+Targeted Rust regressions and runtime verification remain UNRUN. Candidate seed
+build preparation first exited 1; the following two compiler builds were stopped
+by enforced RSS limits, both with exit 88 and quiescent process trees:
+
+| Build | Peak RSS KiB | Enforced cap KiB | Result |
+|---|---:|---:|---|
+| Operation 2 | 5,873,920 | 5,859,375 | RSS cap exceeded; quiescent=1 |
+| Operation 3 | 6,864,504 | 6,835,937 | RSS cap exceeded; quiescent=1 |
+
+The source identity for these attempts is
+`3c042473684961f27dd3b7dc0b0d742bb428e9d3`. Raw receipts are retained in the
+owning `simple-phase1-import-probe-20261009` worktree under
+`build/import-probe/guest-evidence/seed-watchdog-2.env` and
+`seed-watchdog-3.env`. No qualified candidate seed was produced. The separate
+CGU16 memory proposal is unapplied and is not included in this repair.
+
+Existing admitted seeds and failed source projections remain immutable.
+Qualification requires targeted Rust checks plus a separately built, exactly
+identified Phase 1 producer and the original canonical skip fixture; an old
+producer cannot validate the source repair. No runtime or production PASS is
+claimed by this draft.
