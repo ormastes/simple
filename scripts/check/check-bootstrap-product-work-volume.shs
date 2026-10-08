@@ -1,0 +1,92 @@
+#!/bin/sh
+# Falsifiable policy-unit controls: df outputs are explicit test doubles,
+# never bootstrap/disk/runtime receipts or production PASS evidence.
+# BUG: product bulk guard probed unrelated / despite job-owned outputs.
+# Original real / free360828KiB versus owned work volume free35717100KiB;
+# old real4/6GiB checks failed, fixed real4/6GiB checks passed.
+# Provider input/output/cache usage and comparable cohort ratio: unavailable.
+# Full product generation is a separate criterion; controls qualify disk policy.
+set -eu
+case "$#" in
+ 1) ;;
+ 2) case "$2" in --only-symlink|--only-storage) ;; *) exit 2;; esac;;
+ *) echo 'usage: check-bootstrap-product-work-volume.shs OWNED_TMP_PARENT [--only-symlink|--only-storage]' >&2; exit 2;;
+esac
+[ -d "$1" ] && [ ! -L "$1" ] || exit 2
+only_symlink=0
+[ "${2:-}" != --only-symlink ] || only_symlink=1
+work=$(mktemp -d "$1/product-work-volume-controls.XXXXXX")
+owner=$(CDPATH= cd -- "$(dirname -- "$0")/../bootstrap" && pwd -P)/build-compiler-subsystem-test-product.shs
+mkdir "$work/job"
+if [ "${2:-}" = --only-storage ]; then
+  # Extract the exact normal owner's freshness boundary, not a reimplementation.
+  awk '/^\[ ! -e "\$output"/{active=1} active{print} active&&/fail .product job root contains an earlier attempt./{exit}' "$owner" > "$work/actual-storage-freshness.shs"
+  [ -s "$work/actual-storage-freshness.shs" ] || exit 2
+  checks=0
+  for child in user-storage worktree-storage; do
+    for kind in directory symlink dangling; do
+      case_root="$work/$child-$kind"
+      mkdir "$case_root"
+      case "$kind" in
+        directory) mkdir "$case_root/$child";;
+        symlink) ln -s "$work/job" "$case_root/$child";;
+        dangling) ln -s "$work/absent" "$case_root/$child";;
+      esac
+      if job_root="$case_root" output="$case_root/product" receipt="$case_root/build.env" \
+        sh -c 'fail(){ exit 1; }; . "$1"' probe "$work/actual-storage-freshness.shs"; then exit 1; fi
+      checks=$((checks+1))
+    done
+  done
+  mkdir "$work/fresh"
+  job_root="$work/fresh" output="$work/fresh/product" receipt="$work/fresh/build.env" \
+    sh -c 'fail(){ exit 1; }; . "$1"' probe "$work/actual-storage-freshness.shs"
+  [ "$checks" = 6 ] || exit 1
+  printf 'PRODUCT_STORAGE_FRESHNESS_PASS negatives=6 positive=1 retained=%s\n' "$work"
+  exit 0
+fi
+awk '/^check_disk_space\(\) \{/{active=1}active{print}active&&/^\}/{exit}' "$owner" > "$work/actual-owner-function.shs"
+[ -s "$work/actual-owner-function.shs" ] || exit 2
+ln -s "$work/job" "$work/symlink-job"
+cat > "$work/case.shs" <<'CASE'
+set -eu
+fixture=$1 work=$2 threshold=$3
+job_root="$work/job"
+fail() { printf '%s\n' "$*" >&2; exit 1; }
+df() {
+ [ "$#" = 2 ] && [ "$1" = -Pk ] && [ "$2" = "$job_root" ] || exit 99
+ printf '%s\t%s\n' "$fixture" "$2" >> "$work/df.paths"
+ case "$fixture" in
+ df-error) return 9;;
+ missing-data) printf 'Filesystem 1024-blocks Used Available Capacity Mounted\n'; return 0;;
+ invalid-number) free=invalid;;
+ below4) free=4194303;;
+ below6|same-filesystem-low) free=6291455;;
+ boundary4) free=4194304;;
+ boundary6) free=6291456;;
+ root-low-job-ample) free=9000000;;
+ *) exit 98;; esac
+ printf 'Filesystem 1024-blocks Used Available Capacity Mounted\n'
+ printf '/dev/test 20000000 1000000 %s 5%% %s\n' "$free" "$job_root"
+}
+. "$work/actual-owner-function.shs"
+if [ "$fixture" = missing-path ]; then job_root="$work/absent"; fi
+if [ "$fixture" = same-filesystem-low ]; then job_root=/; fi
+if [ "$fixture" = symlink-path ]; then job_root="$work/symlink-job"; fi
+check_disk_space "$threshold"
+CASE
+checks=0
+for row in root-low-job-ample:4194304:0 root-low-job-ample:6291456:0 boundary4:4194304:0 boundary6:6291456:0 below4:4194304:1 below6:6291456:1 same-filesystem-low:6291456:1 df-error:4194304:1 invalid-number:4194304:1 missing-data:4194304:1 missing-path:4194304:1 symlink-path:4194304:1; do
+ fixture=${row%%:*}
+ [ "$only_symlink" = 0 ] || [ "$fixture" = symlink-path ] || continue
+ rest=${row#*:}; threshold=${rest%%:*}; expected=${rest#*:}
+ code=0
+ sh "$work/case.shs" "$fixture" "$work" "$threshold" > "$work/$fixture-$threshold.stdout" 2> "$work/$fixture-$threshold.stderr" || code=$?
+ [ "$code" = "$expected" ] || { printf 'FAIL %s threshold=%s expected=%s actual=%s\n' "$fixture" "$threshold" "$expected" "$code" >&2; exit 1; }
+ checks=$((checks+1))
+done
+expected_checks=12
+[ "$only_symlink" = 0 ] || expected_checks=1
+[ "$checks" = "$expected_checks" ]
+# All bulk-capacity probes must target the job volume, never the unrelated /.
+[ ! -e "$work/df.paths" ] || awk -F '\t' -v job="$work/job" '$1=="same-filesystem-low"{if($2!="/")bad=1;next}$2!=job{bad=1}END{exit bad}' "$work/df.paths"
+printf 'PRODUCT_WORK_VOLUME_POLICY_PASS controls=%s retained=%s\n' "$checks" "$work"
