@@ -1,0 +1,29 @@
+# Calls the production manifest owner; no local copy of its parser/policy.
+use compiler.backend.backend.stage4_symbol_closure.{stage4_derive_compiler_backfill_manifest, stage4_validate_compiler_backfill_symbol_envelope, stage4_compiler_backfill_localization_symbols, stage4_validate_compiler_backfill_provider_disjoint}
+
+fn main() -> i64:
+    val legacy = "00000000 T rt_cranelift_new_module\n"
+    val names = ["spl_cranelift_new_aot_module_config_v2", "spl_cranelift_aot_isa_feature_v2", "spl_cranelift_aot_opt_level_v2"]
+    var elf = legacy
+    var macho = "00000000 T _rt_cranelift_new_module\n"
+    for name in names:
+        elf = elf + "00000010 T " + name + "\n"
+        macho = macho + "00000010 T _" + name + "\n"
+    val manifest = stage4_derive_compiler_backfill_manifest(elf, "elf").unwrap()
+    if manifest.len() != 4: return 1
+    for name in names:
+        if not manifest.contains(name): return 2
+    if not stage4_validate_compiler_backfill_symbol_envelope(elf, "elf").is_ok(): return 3
+    if stage4_derive_compiler_backfill_manifest(macho, "macho").unwrap().join(",") != manifest.join(","): return 4
+    for name in names:
+        if not stage4_derive_compiler_backfill_manifest(elf + "00000020 T " + name + "\n", "elf").is_err(): return 5
+    if not stage4_derive_compiler_backfill_manifest(elf + "00000020 T spl_foreign_provider\n", "elf").is_err(): return 6
+    if not stage4_derive_compiler_backfill_manifest(elf + "00000020 T spl_cranelift_unreviewed_v2\n", "elf").is_err(): return 7
+    if not stage4_derive_compiler_backfill_manifest("00000000 T spl_cranelift_aot_opt_level_v2\n", "elf").is_err(): return 8
+    if not stage4_compiler_backfill_localization_symbols(elf + "                 U rt_alloc\n", "elf", manifest).is_err(): return 9
+    if not stage4_validate_compiler_backfill_symbol_envelope(elf + "00000020 T rt_cranelift_module_new\n", "elf").is_err(): return 10
+    if not stage4_validate_compiler_backfill_provider_disjoint(elf, ["provider"], ["00000000 T spl_cranelift_aot_opt_level_v2\n"], "elf").is_err(): return 11
+    if not stage4_validate_compiler_backfill_provider_disjoint(elf, ["provider"], ["00000000 T rt_alloc\n"], "elf").is_ok(): return 12
+    if not stage4_derive_compiler_backfill_manifest(elf + legacy, "elf").is_err(): return 13
+    print "PASS Stage4 backfill v2 manifest checks=17"
+    0
