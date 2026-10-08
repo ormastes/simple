@@ -118,7 +118,7 @@ static inline bool simd_x86_avx512_os_state_usable_from_raw(
            (xcr0 & xmm_ymm_opmask_zmm) == xmm_ymm_opmask_zmm;
 }
 
-#if SIMD_HAS_X86
+#if SIMD_HAS_X86 || defined(__i386__)
 /* _MSC_VER FIRST: clang-cl defines __clang__ *and* _MSC_VER, so testing the
  * GNU branch first pulled in GCC's <cpuid.h>, whose 5-argument `__cpuid` macro
  * then collided with the 2-argument `__cpuid` function that MSVC's <intrin.h>
@@ -140,22 +140,49 @@ static inline bool simd_x86_avx512_os_state_usable_from_raw(
 #  endif
 #endif
 
+/* Stateless usable-feature bits, independent of compiled kernel policy.
+ * Leaf availability and OS-owned state are part of the public query ABI. */
+static inline unsigned simd_x86_features_from_raw(uint32_t max_leaf,
+        uint32_t leaf1_ecx, uint32_t leaf1_edx, uint32_t leaf7_ebx,
+        uint64_t xcr0) {
+    if (max_leaf < 1) return 0;
+    unsigned features = (leaf1_edx & (1U << 25)) ? 1U : 0U;
+    const uint32_t avx_state = (1U << 26) | (1U << 27) | (1U << 28);
+    if ((leaf1_ecx & avx_state) == avx_state && (xcr0 & 6U) == 6U) {
+        features |= 2U;
+        if (max_leaf >= 7 && (leaf7_ebx & (1U << 5))) features |= 4U;
+    }
+    return features;
+}
+
+#if (defined(__x86_64__) || defined(__i386__)) && \
+        (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
+static inline unsigned simd_gnu_x86_usable_features(void) {
+    const unsigned max_leaf = __get_cpuid_max(0, NULL);
+    unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
+    if (max_leaf < 1 || !__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return 0;
+    const unsigned leaf1_ecx = ecx, leaf1_edx = edx;
+    const unsigned avx_state = (1U << 26) | (1U << 27) | (1U << 28);
+    uint64_t xcr0 = 0;
+    /* Never execute XGETBV until hardware and OSXSAVE admit the instruction. */
+    if ((leaf1_ecx & avx_state) == avx_state) {
+        unsigned lo = 0, hi = 0;
+        __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+        xcr0 = ((uint64_t)hi << 32) | lo;
+    }
+    unsigned leaf7_ebx = 0;
+    if (max_leaf >= 7 && __get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx))
+        leaf7_ebx = ebx;
+    return simd_x86_features_from_raw(max_leaf, leaf1_ecx, leaf1_edx, leaf7_ebx, xcr0);
+}
+#endif
+
 static inline int simd_detect_avx2(void) {
 #if defined(SIMPLE_RUNTIME_FORCE_NO_AVX2)
     return 0;
 #elif SIMD_CAN_AVX2
 #  if (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
-    unsigned int eax, ebx, ecx, edx;
-    /* AVX2 requires AVX plus OS-managed XMM/YMM state. */
-    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return 0;
-    if (!(ecx & (1U << 27)) || !(ecx & (1U << 28))) return 0;
-    unsigned int xcr0_eax, xcr0_edx;
-    __asm__ volatile("xgetbv" : "=a"(xcr0_eax), "=d"(xcr0_edx) : "c"(0));
-    uint64_t xcr0 = ((uint64_t)xcr0_edx << 32) | xcr0_eax;
-    if ((xcr0 & 0x6U) != 0x6U) return 0;
-    /* Check AVX2 (cpuid leaf 7, sub-leaf 0, ebx bit 5) */
-    if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) return 0;
-    return (ebx & (1U << 5)) ? 1 : 0;
+    return (simd_gnu_x86_usable_features() & 4U) != 0;
 #  elif defined(_MSC_VER)
     int info[4];
     __cpuid(info, 1);

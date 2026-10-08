@@ -1,0 +1,44 @@
+#!/bin/sh
+# Focused successor to the raw truth-table check: publication and warm-query cost.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+out=${1:?usage: check-cpu-query-publication.shs ABSOLUTE_NEW_OUTPUT CPU}
+cpu=${2:?fixed allowed CPU required}
+case "$out" in /*) ;; *) exit 2;; esac
+test ! -e "$out"
+mkdir -p "$out"
+cc=${CC:-cc}
+"$cc" --version > "$out/compiler.version"
+for mode in normal forced; do
+    define=
+    if [ "$mode" = forced ]; then define=-DSIMPLE_RUNTIME_FORCE_NO_AVX2; fi
+    "$cc" -O2 -std=gnu11 -ffunction-sections -fdata-sections $define -I"$root/src/runtime" \
+        -c "$root/src/runtime/runtime_simd_dispatch.c" -o "$out/$mode.o"
+    "$cc" -O2 -std=gnu11 -ffunction-sections -fdata-sections \
+        "$root/src/runtime/test/cpu_query_warm_cost.c" "$out/$mode.o" \
+        -Wl,--gc-sections -lm -pthread -ldl -o "$out/$mode"
+    timeout 45 "$out/$mode" "$cpu" > "$out/$mode.log"
+done
+"$cc" -O2 "$root/src/runtime/test/cpu_query_builtin_oracle.c" -o "$out/oracle"
+timeout 10 "$out/oracle" > "$out/oracle.log"
+expected=$(sed -n 's/^features=\([0-9]*\).*/\1/p' "$out/oracle.log")
+for mode in normal forced; do
+    actual=$(sed -n 's/^features=\([0-9]*\).*/\1/p' "$out/$mode.log")
+    test "$actual" = "$expected"
+done
+timeout 45 qemu-x86_64 -cpu Nehalem "$out/normal" "$cpu" > "$out/nehalem.log"
+test "$(sed -n 's/^features=\([0-9]*\).*/\1/p' "$out/nehalem.log")" = 1
+"$cc" -O2 -ffunction-sections -fdata-sections "$root/src/runtime/test/cpu_query_nodemand.c" \
+    "$out/normal.o" -Wl,--gc-sections -Wl,-Map,"$out/nodemand.map" \
+    -lgcc -lm -pthread -ldl -o "$out/nodemand"
+timeout 10 "$out/nodemand"
+nm -u "$out/normal.o" > "$out/undefined.txt"
+nm -a "$out/nodemand" > "$out/symbols.txt"
+readelf -W -x .init_array "$out/nodemand" > "$out/init-array.txt"
+size "$out/nodemand" > "$out/size.txt"
+if grep -E '__cpu_(indicator_init|model)|g_gnu_cpu_features' "$out/symbols.txt"; then exit 3; fi
+if grep -E '__cpu_(indicator_init|model)|__atomic_' "$out/undefined.txt"; then exit 4; fi
+sha256sum "$root/src/runtime/runtime_simd_dispatch.c" "$root/src/runtime/runtime_simd_dispatch.h" \
+    "$root/src/runtime/test/cpu_query_warm_cost.c" "$out/normal.o" "$out/normal" \
+    "$out/forced" "$out/nodemand" "$out/oracle" > "$out/sha256.txt"
+printf '%s\n' 'PASS first-use publication, public-feature parity and no-demand ELF; timings retained'
