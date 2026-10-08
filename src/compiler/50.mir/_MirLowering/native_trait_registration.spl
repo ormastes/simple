@@ -193,6 +193,18 @@ impl MirLowering:
                 self.native_trait_layouts.push(layout)
 
     me register_native_trait_implementations(module: HirModule):
+        # SymbolId is a value struct. A copied key is not the allocation used
+        # by the native HIR dictionary; index the declaration's scalar ID.
+        val function_values: [HirFunction] = module.functions.values()
+        var function_index: Dict<i64, i64> = {}
+        var function_position = 0
+        for declaration in function_values:
+            val function_id = declaration.symbol.id
+            if function_index.has(function_id):
+                self.error_fatal("duplicate native trait function symbol: {function_id}", Some(declaration.span))
+                return
+            function_index[function_id] = function_position
+            function_position = function_position + 1
         for implementation in module.impls:
             if not implementation.has_trait_: continue
             val trait_type = self.relocate_provider_type(implementation.trait_, module.symbols)
@@ -211,8 +223,8 @@ impl MirLowering:
             for slot in self.native_trait_layouts[index].methods:
                 val method_id = implementation.methods.get(slot.name)
                 if val target = method_id:
-                    val function = module.functions.get(target)
-                    if val declaration = function:
+                    if function_index.has(target.id):
+                        val declaration: HirFunction = function_values[function_index[target.id]]
                         methods.push(mir_provider_function_name(module.name, module.symbols, declaration))
                         var params: [HirType] = []
                         var parameter_names: [text] = []
