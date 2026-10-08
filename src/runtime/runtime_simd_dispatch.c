@@ -78,7 +78,7 @@ static bool rt_msvc_x86_os_avx_enabled(void) {
  * publication wins. Relaxed ordering suffices because there is no other payload.
  * Keep the raw header detector stateless for kernel policy and synthetic tests. */
 static atomic_uint g_gnu_cpu_features = ATOMIC_VAR_INIT(0);
-static unsigned rt_gnu_cpu_features(void) {
+static unsigned gnu_cpu_features_cached(void) {
     unsigned cached = atomic_load_explicit(&g_gnu_cpu_features, memory_order_relaxed);
     if (cached) return cached & 7U;
     const unsigned detected = simd_gnu_x86_usable_features() | 8U;
@@ -94,7 +94,7 @@ static unsigned rt_gnu_cpu_features(void) {
  * GNU queries lazily cache CPUID/XGETBV without rooting libgcc constructors. */
 bool rt_simd_has_sse(void) {
 #if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
-    return (rt_gnu_cpu_features() & 1U) != 0;
+    return (gnu_cpu_features_cached() & 1U) != 0;
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
     int regs[4];
     __cpuid(regs, 1);
@@ -106,7 +106,7 @@ bool rt_simd_has_sse(void) {
 
 bool rt_simd_has_avx(void) {
 #if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
-    return (rt_gnu_cpu_features() & 2U) != 0;
+    return (gnu_cpu_features_cached() & 2U) != 0;
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
     return rt_msvc_x86_os_avx_enabled();
 #else
@@ -116,7 +116,7 @@ bool rt_simd_has_avx(void) {
 
 bool rt_simd_has_avx2(void) {
 #if (defined(__x86_64__) || defined(__i386__)) && (defined(__GNUC__) || defined(__clang__)) && !defined(_MSC_VER)
-    return (rt_gnu_cpu_features() & 4U) != 0;
+    return (gnu_cpu_features_cached() & 4U) != 0;
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
     int regs[4];
     if (!rt_msvc_x86_os_avx_enabled()) return false;

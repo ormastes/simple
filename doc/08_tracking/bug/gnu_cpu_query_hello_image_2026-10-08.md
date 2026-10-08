@@ -25,3 +25,12 @@ a narrow Linux x86_64 Hello result: it makes no claim about Windows/i386,
 full-bootstrap admission, DB/HTTP execution, or application performance.
 The warm-ASCII timing regression recorded in the lazy-SIMD report remains
 relevant and is not erased by the smaller image.
+
+Release transplant note: the CPU-query implementation was cherry-picked from
+commits `bd607a4` and `9306590` onto the merged lazy-SIMD release. To satisfy
+the runtime dual-implementation ratchet, its file-static helper was renamed
+from `rt_gnu_cpu_features` to `gnu_cpu_features_cached`; it is not an exported
+runtime API and its body/call semantics are unchanged. This spelling-only
+candidate adjustment postdates the retained 13,704-byte image, so that exact
+size is evidence for the original `9306590` overlay, not a rebuild of the final
+release candidate.
