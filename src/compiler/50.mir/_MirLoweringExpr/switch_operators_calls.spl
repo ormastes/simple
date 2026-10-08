@@ -1968,6 +1968,34 @@ impl MirLowering:
                 val receiver_type = self.receiver_declared_type(receiver)
                 if receiver_type != nil:
                     val found_receiver_type = receiver_type ?? HirType(kind: HirTypeKind.Error, span: expr.span)
+                    # `lookup_method_in_type` takes the receiver TYPE symbol,
+                    # not the local symbol holding the receiver value. The
+                    # latter is the common shape for imported instance calls
+                    # such as `stream.write_all(...)`; passing its local id
+                    # cannot resolve the owner-qualified method signature.
+                    # Use only the declared receiver type and the exact
+                    # method's own return metadata. The name-only bootstrap
+                    # fallback is intentionally excluded because a same-named
+                    # method on another owner is not authoritative.
+                    match found_receiver_type.kind:
+                        case Named(receiver_type_symbol, _):
+                            if val instance_method_id = self.symbols.lookup_method_in_type(receiver_type_symbol, method):
+                                if self.fn_return_types.contains(instance_method_id.id):
+                                    val declared_return = self.fn_return_types[instance_method_id.id]
+                                    match declared_return.kind:
+                                        case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.TypeParam(_, _): ()
+                                        case _: return Some(declared_return)
+                                val instance_method_symbol = self.symbols.get_symbol_raw(instance_method_id.id)
+                                if val method_symbol = instance_method_symbol:
+                                    if method_symbol.type_ != nil:
+                                        val method_type = method_symbol.type_ ?? HirType(kind: HirTypeKind.Error, span: expr.span)
+                                        match method_type.kind:
+                                            case HirTypeKind.Function(_, declared_return, _):
+                                                match declared_return.kind:
+                                                    case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.TypeParam(_, _): ()
+                                                    case _: return Some(declared_return)
+                                            case _: ()
+                        case _: ()
                     val struct_name = match found_receiver_type.kind:
                         case Named(symbol, _):
                             val s = self.symbols.get_symbol_raw(symbol.id)
@@ -1996,8 +2024,9 @@ impl MirLowering:
                 # holds the owner-qualified method symbol
                 # ("{module}.{Type}::{method}", registered at HIR-lowering
                 # time) for imported types too -- resolve through it directly.
-                # For an instance receiver the Var symbol is a local, not a
-                # type, so lookup_method_in_type misses harmlessly.
+                # Instance receivers have already been checked above using
+                # their declared type symbol; this fallback keeps static
+                # class-qualified calls working when no receiver value exists.
                 val static_recv_sym: SymbolId? = match receiver.kind:
                     case Var(recv_sym): Some(recv_sym)
                     case NamedVar(recv_sym, _): Some(recv_sym)
@@ -2061,6 +2090,36 @@ impl MirLowering:
                         return found_rs.type_
             case _: ()
         nil
+
+    me enum_match_ambiguity_subject_hint(scrutinee: HirExpr, subject_type: HirType?) -> text:
+        """Describe unavailable enum ownership without guessing a variant owner."""
+        var type_hint = "unresolved"
+        if val found_subject_type = subject_type:
+            match found_subject_type.kind:
+                case HirTypeKind.Result(_, _): type_hint = "Result"
+                case HirTypeKind.Optional(_): type_hint = "Optional"
+                case HirTypeKind.Named(type_symbol, _):
+                    if val owner = self.symbols.get_symbol_raw(type_symbol.id):
+                        type_hint = mir_class_identity(owner)
+                    else:
+                        type_hint = "named type with unavailable owner"
+                case HirTypeKind.Infer(_, _): type_hint = "inference variable"
+                case HirTypeKind.Error: type_hint = "error type"
+                case _: type_hint = "known non-enum type"
+        var expression_hint = "expression"
+        match scrutinee.kind:
+            case MethodCall(receiver, method, _, _):
+                var receiver_hint = "unknown receiver"
+                if val receiver_type = self.receiver_declared_type(receiver):
+                    match receiver_type.kind:
+                        case Named(receiver_symbol, _):
+                            if val receiver_owner = self.symbols.get_symbol_raw(receiver_symbol.id):
+                                receiver_hint = mir_class_identity(receiver_owner)
+                        case _: ()
+                expression_hint = "method call {receiver_hint}.{method}()"
+            case Call(_, _, _): expression_hint = "call expression"
+            case _: ()
+        "subject {expression_hint} at {scrutinee.span.file}:{scrutinee.span.line}:{scrutinee.span.col} has type {type_hint}"
 
     me result_variant_payload_type(scrutinee: HirExpr, variant: text) -> HirType?:
         """Recover the selected payload from an instantiated Result/Optional type."""
@@ -2599,7 +2658,8 @@ impl MirLowering:
                                 val owner_collision = self.enum_bare_name_collisions[owner]
                                 self.error_fatal("enum variant lookup miss: bare pattern '{variant}' resolved to sole owner '{owner}', but that bare enum name is CONTESTED so the resolved owner may be the wrong enum: {owner_collision}", Some(arm.pattern.span))
                         elif owner_count > 1:
-                            self.error("enum match: bare variant '{variant}' is ambiguous (declared in multiple enums); qualify it as EnumName.{variant}", Some(arm.pattern.span))
+                            val subject_hint = self.enum_match_ambiguity_subject_hint(scrutinee, scrutinee_enum_type)
+                            self.error("enum match: bare variant '{variant}' is ambiguous (declared in multiple enums); qualify it as EnumName.{variant}; {subject_hint}", Some(arm.pattern.span))
                         else:
                             self.error("enum match: unknown variant '{variant}' (no registered enum declares it)", Some(arm.pattern.span))
                     enum_discs = enum_discs.push(d)
