@@ -205,6 +205,9 @@ fn runtime_symbol_declaration(
     let signature = match symbol {
         "rt_alloc" => "(size: i64) -> *mut u8",
         "rt_free" => "(ptr: *mut u8)",
+        // The SFFI machine lane is I64, but the C owner returns a borrowed
+        // pointer. Keep this linker declaration identical to linked_registry.
+        "rt_gpu_provider_path" => "(backend_bit: i64) -> *const std::ffi::c_char",
         "rt_ptr_read_i64" => "(addr: i64, offset: i64) -> i64",
         "rt_ptr_read_u8" => "(addr: i64, offset: i64) -> i64",
         "rt_ptr_read_i32" => "(addr: i64, offset: i64) -> i32",
