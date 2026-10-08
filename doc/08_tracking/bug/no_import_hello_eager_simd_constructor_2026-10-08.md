@@ -29,3 +29,18 @@ Compile flags: `-std=c11 -O2 -Wall -Wextra -Werror -pthread -ffunction-sections 
 Source SHA256s: case1634f4af00a08100b1e34732fa414667efbf328d0d846e027cb9b34a8d91a52a; UTF8eb8166ef2c4f0e5acc4255b651ec35b6214bfd894eae20c8148d4bc702b6c495; fixture4f15ac79a0886385cb68b1a2712b0ca9d4bc318a1d089a74764c96eee0160d1f. Binary hashes and all receipts are retained in cycle2/binaries.sha256 and neon.sha256. Default07e1af3d..., case1529d684..., noAVX2723f27ee..., NEONdbcad37f.... No-demand before72a551abb9303285368a89bb4cae75d3d2809eb5ea9719749f100d70538cbc6b; after57f518ca580629efffc47ec3f3e36e091cc6c6bad09dbc80225ab581a2cb455e.
 
 Distinct warm public-ABI experiment:30 alternating before/after pairs, identical1MiB ASCII corpus,3 warmups,256 validations/sample. p50 13.863→15.720ms (+13.4%); p95 19.551→17.740ms (-9.3%). Kernel high-water RSS2556→2552KiB is coarse noise, not an established memory improvement. p95 ratio0.9074 plus peak-RSS ratio0.9984≈1.9058; this bounded metric meets the joint comparison rule but does not establish overall optimize/NFR PASS. The +13.4% median regression remains an explicit performance follow-up; no universal speedup is claimed. Raw samples, identical probe source/binary hashes and commands are in cycle2/warm-perf.json. No unmeasured startup gain or performance equivalence is asserted. No Cargo, qualified archive or Simple compiler was modified/rebuilt.
+
+## Actual Simple LLVM image qualification (2026-10-08)
+
+The corrected, bounded image comparison passed its strict Hello gate. Both builds use compiler `e134ee9afbc3a32e0d9c66a5a4bab5dc4541eea3e0bc8e9e4f4f420f141c768c` from producer source `af5e62fb4a37defcda5dc744c3049d812ecaddbf`. The candidate uses the exact producer runtime source tree plus only this change's two C blobs, with the two transitive external ABI headers copied unchanged. The complete before/after source census is retained in `build/item5-enum-subject-repair-20261008/hello-llvm-lazy-simd-cycle2/runtime-source-overlay.json`.
+
+| Actual entry ELF | File bytes | SHA256 |
+| --- | ---: | --- |
+| Baseline | 27000 | `b0cdafdb7f7c49abb460b683afd3fce5b6463b099558cf91ec4d9a427b88fa6d` |
+| Lazy SIMD | 19720 | `fa031a752105e3a205bfbf2e8597ed0db865c369f5296195ff1693a0a526e918` |
+
+Both entry binaries built and executed with exit 0 and exact `hello` output; both positional builds also exited 0. The candidate saves 7280 bytes (26.96%). Its symbol census no longer contains `simd_case_init`, `simd_text_init`, or `g_simd_text`. The profiler constructor and the separate 4978-byte libgcc `__cpu_indicator_init` remain. Final linker traces show standalone runtime C objects; the supplied, hashed native-all archive is not present as a pathname in this tiny application's final linker invocation.
+
+Retained evidence: `build/review/item5-af5-hello-baseline-image-20261008/` and `build/item5-enum-subject-repair-20261008/hello-llvm-lazy-simd-cycle2/` contain exact C/link argv, strict receipts, image hashes, ELF/symbol records, source census, and resource results (candidate peak 3987900 KiB; quiescent). The first overlay attempt failed because it omitted external ABI headers; it is preserved under `hello-llvm-lazy-simd/`. Cycle2 checked all 40 selected runtime translation units with bounded dependency preprocessing before building.
+
+This qualifies the changed-runtime Hello image and its observed size reduction. The previously recorded warm ASCII median regression remains unresolved. Full compiler/core/MCP checks, full bootstrap, real DB/webserver vector performance, and release admission remain pending.
