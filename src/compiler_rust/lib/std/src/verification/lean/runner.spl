@@ -6,9 +6,10 @@
 # - Parsing Lean output for errors
 # - Tracking proof status
 
-use io.fs.{create_dir_all, write_text}
-use host.process.{monotonic_ms, ProcessResult, run}
-use verification.toolchain.{ToolchainInfo, ToolchainError}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, file_write_exact, time_now_monotonic_ms}
+use std.process.{ProcessResult, run}
+use std.nogc_sync_mut.io.env_ops.{host_os}
+use verification.toolchain.{ToolchainError}
 
 # Result of running Lean on a file
 class LeanCheckResult:
@@ -149,14 +150,17 @@ class LeanRunner:
         self
 
     # Ensure the output directory exists
-    fn ensure_output_dir():
-        create_dir_all(self.output_dir)
+    fn ensure_output_dir() -> bool:
+        dir_create_all(self.output_dir)
 
-    # Write a Lean file to the output directory
+    # Write a Lean file to the output directory. Empty path reports an I/O
+    # failure; never return a usable-looking path when no file was written.
     fn write_lean_file(name: text, content: text) -> text:
-        self.ensure_output_dir()
+        if not self.ensure_output_dir():
+            return ""
         val file_path = "{self.output_dir}/{name}.lean"
-        write_text(file_path, content)
+        if not file_write_exact(file_path, content):
+            return ""
         if self.verbose:
             print("[lean] Wrote {file_path}")
         file_path
@@ -164,12 +168,12 @@ class LeanRunner:
     # Check if Lean is available
     fn is_lean_available() -> bool:
         val result = run(self.lean_path, ["--version"])
-        result.success
+        result.exit_code == 0 and not result.limit_exceeded
 
     # Get Lean version
     fn lean_version() -> Option<text>:
         val result = run(self.lean_path, ["--version"])
-        if result.success:
+        if result.exit_code == 0 and not result.limit_exceeded:
             Some(result.stdout.trim())
         else:
             nil
@@ -185,6 +189,10 @@ class LeanRunner:
     # Run Lean on generated content
     fn check_content(name: text, content: text) -> LeanCheckResult:
         val file_path = self.write_lean_file(name, content)
+        if file_path == "":
+            val expected_path = "{self.output_dir}/{name}.lean"
+            return LeanCheckResult(expected_path, false, "",
+                "Unable to create output directory or write Lean file: {expected_path}", 0, 0, nil)
         self.check_file(file_path)
 
     # Parse Lean output
@@ -198,7 +206,8 @@ class LeanRunner:
         # Count solved goals from Lean output
         val goals_solved = count_solved_goals(stdout, stderr)
 
-        LeanCheckResult(file, result.success, stdout, stderr, goals_solved, goals_remaining, Some(result.exit_code))
+        LeanCheckResult(file, result.exit_code == 0 and not result.limit_exceeded,
+            stdout, stderr, goals_solved, goals_remaining, Some(result.exit_code as i32))
 
     # Check multiple files
     fn check_files(files: List<text>) -> List<LeanCheckResult>:
@@ -212,31 +221,39 @@ class LeanRunner:
         if self.verbose:
             print("[lean] Running lake build in {project_dir}")
 
-        val result = run("lake", ["build"], project_dir)
-        if not result.success and self.verbose:
+        # Lake's -d selects a project but does not change elan's cwd-based
+        # toolchain selection. Keep directory changes inside the owned child;
+        # the project path is an argv value, never interpolated shell code.
+        val os = host_os()
+        if os != "linux" and os != "freebsd" and os != "macos" and os != "darwin":
+            print("[lean] Lake build with a project working directory is unsupported on host: {os}")
+            return false
+        val result = run("/bin/sh", ["-c", "CDPATH= cd -- \"$1\" && exec lake build", "lean-lake-build", project_dir])
+        if (result.exit_code != 0 or result.limit_exceeded) and self.verbose:
             print("[lean] Lake build failed:")
             print(result.stderr)
-        result.success
+        result.exit_code == 0 and not result.limit_exceeded
 
     # Check a file with full toolchain validation first.
     # Environment failures are returned as StructuredProofResult with
     # environment_error set (distinct from proof-level failures).
     fn check_with_toolchain(file: text) -> StructuredProofResult:
-        val start_ms = monotonic_ms()
+        val start_ms = time_now_monotonic_ms()
 
-        # Validate toolchain
-        val tc_info = ToolchainInfo.detect()
-        if not tc_info.lean_available:
-            val elapsed = monotonic_ms() - start_ms
+        # Validate this runner's configured Lean executable, not an unrelated
+        # PATH default. Proof checking does not require Lake or a project file.
+        val detected_version = self.lean_version()
+        if detected_version == nil:
+            val elapsed = time_now_monotonic_ms() - start_ms
             return StructuredProofResult.env_error(
                 ToolchainError.LeanNotFound.to_string(), elapsed)
 
         # Run the proof check
         val check_result = self.check_file(file)
-        val elapsed = monotonic_ms() - start_ms
+        val elapsed = time_now_monotonic_ms() - start_ms
 
         # Parse into structured result
-        val lean_ver = tc_info.lean_version ?? "unknown"
+        val lean_ver = detected_version ?? "unknown"
         self.to_structured(check_result, lean_ver, elapsed)
 
     # Convert a LeanCheckResult into a StructuredProofResult by parsing
