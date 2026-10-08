@@ -536,6 +536,46 @@ fn compile_source_inventory_read_current_v1(
     val pointer_content = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
     compile_source_inventory_read_at_pointer_v1(cache_root, pointer_content)
 
+fn compile_source_inventory_revalidate_verified_pointer_v1(
+    cache_root: text, expected_pointer_content: text, verified_digest: text
+) -> text:
+    """Revalidate bytes of a generation fully decoded earlier in this refresh.
+
+    Trusted caller contract: verified_digest came from successful read_at_pointer
+    of expected_pointer_content in this same refresh, and fresh Git, journal and
+    membership checks passed. This is not standalone inventory admission.
+    Retain the fresh bounded blob read/hash under publication.lock; identical
+    authenticated bytes need no second parse or entry-validation allocation.
+    Empty result means success; other results preserve the rejection reason.
+    """
+    if not compile_source_inventory_cache_root_valid_v1(cache_root):
+        return "publish-cache-root-invalid"
+    val separator = expected_pointer_content.index_of("\n")
+    val pointer = if separator < 0:
+        expected_pointer_content
+    else:
+        expected_pointer_content[:separator]
+    if not compile_source_inventory_digest_valid_v1(verified_digest) or
+            not compile_source_inventory_digest_valid_v1(pointer) or
+            pointer != verified_digest:
+        return "inventory-pointer-invalid"
+    val root = compile_source_inventory_storage_v1(cache_root)
+    val publication_lock = file_lock("{root}/publication.lock", 5)
+    if publication_lock < 0:
+        return "publish-lock-unavailable"
+    val current_pointer = compile_source_inventory_read_pointer_content_v1(cache_root) ?? ""
+    if sha256_text(current_pointer) != sha256_text(expected_pointer_content):
+        val _unlocked = file_unlock(publication_lock)
+        return "publish-cursor-superseded"
+    var reason = ""
+    val content = compile_source_inventory_read_text_v1(
+        "{root}/generations/{verified_digest}.inventory") ?? ""
+    if content == "" or sha256_text(content) != verified_digest:
+        reason = "inventory-generation-invalid"
+    if not file_unlock(publication_lock):
+        return "publish-unlock-failed"
+    reason
+
 fn compile_source_inventory_revalidate_pointer_v1(
     cache_root: text, expected_pointer_content: text
 ) -> CompileSourceInventoryReadV1:
@@ -644,3 +684,5 @@ export compile_source_inventory_revalidate_pointer_v1
 export compile_source_inventory_publication_readback_v1
 export compile_source_inventory_recover_v1
 export compile_source_inventory_snapshot_rows_v1
+
+export compile_source_inventory_revalidate_verified_pointer_v1
