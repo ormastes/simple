@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <ctype.h>
 #include <string.h>
+#include <stdatomic.h>
 
 /* MSVC portability for the GCC/Clang attributes this file uses.
  *
@@ -310,16 +311,12 @@ static int64_t scalar_utf8_find_invalid(const uint8_t* data, uint64_t len) {
 
 #if SIMD_CAN_AVX2
 
-/* Scalar validate a sub-range, handling multibyte sequences that
- * might start before 'start' by backing up to the nearest lead byte. */
+/* Validate complete sequences starting at a proven boundary, returning the
+ * next boundary even when the final sequence extends beyond this block. */
 static int avx2_validate_chunk_scalar(const uint8_t* data, uint64_t full_len,
-                                      uint64_t start, uint64_t end) {
-    /* Back up to the nearest lead byte before 'start' to avoid
-     * splitting a multibyte sequence at the chunk boundary. */
+                                      uint64_t start, uint64_t end,
+                                      uint64_t *next) {
     uint64_t pos = start;
-    while (pos > 0 && (data[pos] & 0xC0) == 0x80) {
-        pos--;
-    }
     /* Validate from pos to end */
     while (pos < end && pos < full_len) {
         uint8_t b = data[pos];
@@ -343,38 +340,25 @@ static int avx2_validate_chunk_scalar(const uint8_t* data, uint64_t full_len,
         if (cp > 0x10FFFF) return 0;
         pos += need;
     }
+    *next = pos;
     return 1;
 }
 
 RT_SIMD_TARGET("avx2")
 static int avx2_utf8_validate(const uint8_t* data, uint64_t len) {
     uint64_t i = 0;
-
-    /* Process 32-byte chunks — fast-skip all-ASCII chunks */
-    for (; i + 32 <= len; i += 32) {
+    /* i is always the start of a complete sequence. Keep vector skipping
+     * ASCII blocks; scalar validation advances across an entire boundary
+     * sequence instead of restarting on its trailing continuation bytes. */
+    while (len - i >= 32) {
         __m256i chunk = _mm256_loadu_si256((const __m256i*)(data + i));
-        /* Check if any byte has the high bit set (non-ASCII) */
-        int mask = _mm256_movemask_epi8(chunk);
-        if (mask != 0) {
-            /* Non-ASCII chunk — validate with scalar.
-             * Extend to cover any multibyte sequence that spans
-             * into the next chunk (up to 3 extra bytes). */
-            uint64_t end = i + 32;
-            if (end + 3 <= len) end += 3;
-            else end = len;
-            if (!avx2_validate_chunk_scalar(data, len, i, end)) return 0;
-            /* Advance past the validated region. We need to find
-             * where the scalar validator left off. Re-scan from
-             * end of the validated region, but we can skip to the
-             * next 32-byte boundary minus 3 (to handle overlap). */
+        if (_mm256_movemask_epi8(chunk) == 0) {
+            i += 32;
+        } else if (!avx2_validate_chunk_scalar(data, len, i, i + 32, &i)) {
+            return 0;
         }
     }
-
-    /* Scalar tail: validate everything from the last aligned position */
-    /* We re-validate from the last chunk boundary to handle any
-     * multibyte sequences that might span chunk boundaries. */
-    uint64_t tail_start = (i > 3) ? i - 3 : 0;
-    return scalar_utf8_validate(data + tail_start, len - tail_start);
+    return scalar_utf8_validate(data + i, len - i);
 }
 
 RT_SIMD_TARGET("avx2")
@@ -387,14 +371,13 @@ static int64_t avx2_utf8_find_invalid(const uint8_t* data, uint64_t len) {
         int mask = _mm256_movemask_epi8(chunk);
         if (mask != 0) {
             /* Non-ASCII chunk — fall back to scalar for this region */
-            uint64_t back = i;
-            while (back > 0 && (data[back] & 0xC0) == 0x80) back--;
-            return scalar_utf8_find_invalid(data + back, len - back);
+            int64_t result = scalar_utf8_find_invalid(data + i, len - i);
+            return result < 0 ? -1 : result + (int64_t)i;
         }
     }
 
     /* Scalar tail */
-    uint64_t tail_start = (i > 3) ? i - 3 : 0;
+    uint64_t tail_start = i; /* preceding blocks were entirely ASCII */
     int64_t result = scalar_utf8_find_invalid(data + tail_start, len - tail_start);
     if (result >= 0) return result + (int64_t)tail_start;
     return -1;
@@ -422,14 +405,12 @@ static int sse2_utf8_validate(const uint8_t* data, uint64_t len) {
         int mask = _mm_movemask_epi8(chunk);
         if (mask != 0) {
             /* Non-ASCII — fall back to scalar for remainder */
-            uint64_t back = i;
-            while (back > 0 && (data[back] & 0xC0) == 0x80) back--;
-            return scalar_utf8_validate(data + back, len - back);
+            return scalar_utf8_validate(data + i, len - i);
         }
     }
 
     /* Scalar tail */
-    uint64_t tail_start = (i > 3) ? i - 3 : 0;
+    uint64_t tail_start = i; /* preceding blocks were entirely ASCII */
     return scalar_utf8_validate(data + tail_start, len - tail_start);
 }
 
@@ -443,16 +424,13 @@ static int64_t sse2_utf8_find_invalid(const uint8_t* data, uint64_t len) {
         int mask = _mm_movemask_epi8(chunk);
         if (mask != 0) {
             /* Non-ASCII — fall back to scalar */
-            uint64_t back = i;
-            while (back > 0 && (data[back] & 0xC0) == 0x80) back--;
-            int64_t result = scalar_utf8_find_invalid(data + back, len - back);
-            if (result >= 0) return result + (int64_t)back;
-            return -1;
+            int64_t result = scalar_utf8_find_invalid(data + i, len - i);
+            return result < 0 ? -1 : result + (int64_t)i;
         }
     }
 
     /* Scalar tail */
-    uint64_t tail_start = (i > 3) ? i - 3 : 0;
+    uint64_t tail_start = i; /* preceding blocks were entirely ASCII */
     int64_t result = scalar_utf8_find_invalid(data + tail_start, len - tail_start);
     if (result >= 0) return result + (int64_t)tail_start;
     return -1;
@@ -478,14 +456,12 @@ static int neon_utf8_validate(const uint8_t* data, uint64_t len) {
         uint8_t max_val = vmaxvq_u8(chunk);
         if (max_val >= 0x80) {
             /* Non-ASCII — fall back to scalar for remainder */
-            uint64_t back = i;
-            while (back > 0 && (data[back] & 0xC0) == 0x80) back--;
-            return scalar_utf8_validate(data + back, len - back);
+            return scalar_utf8_validate(data + i, len - i);
         }
     }
 
     /* Scalar tail */
-    uint64_t tail_start = (i > 3) ? i - 3 : 0;
+    uint64_t tail_start = i; /* preceding blocks were entirely ASCII */
     return scalar_utf8_validate(data + tail_start, len - tail_start);
 }
 
@@ -497,16 +473,13 @@ static int64_t neon_utf8_find_invalid(const uint8_t* data, uint64_t len) {
         uint8x16_t chunk = vld1q_u8(data + i);
         uint8_t max_val = vmaxvq_u8(chunk);
         if (max_val >= 0x80) {
-            uint64_t back = i;
-            while (back > 0 && (data[back] & 0xC0) == 0x80) back--;
-            int64_t result = scalar_utf8_find_invalid(data + back, len - back);
-            if (result >= 0) return result + (int64_t)back;
-            return -1;
+            int64_t result = scalar_utf8_find_invalid(data + i, len - i);
+            return result < 0 ? -1 : result + (int64_t)i;
         }
     }
 
     /* Scalar tail */
-    uint64_t tail_start = (i > 3) ? i - 3 : 0;
+    uint64_t tail_start = i; /* preceding blocks were entirely ASCII */
     int64_t result = scalar_utf8_find_invalid(data + tail_start, len - tail_start);
     if (result >= 0) return result + (int64_t)tail_start;
     return -1;
@@ -576,9 +549,16 @@ static int scalar_str_equal_default(const uint8_t* a, uint64_t alen,
 static void simd_utf8_init_slots(void);
 
 void simd_text_init(void) {
-    static int initialized = 0;
-    if (initialized) return;
-    initialized = 1;
+    /* Publish every slot together; concurrent first users must not observe
+     * the partially initialized table. No constructor calls this owner. */
+    static atomic_int state = ATOMIC_VAR_INIT(0);
+    if (atomic_load_explicit(&state, memory_order_acquire) == 2) return;
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(&state, &expected, 1,
+            memory_order_acquire, memory_order_acquire)) {
+        while (atomic_load_explicit(&state, memory_order_acquire) != 2) {}
+        return;
+    }
 
     /* Start with scalar defaults for all slots */
     g_simd_text.utf8_count_codepoints = scalar_utf8_count_codepoints;
@@ -593,13 +573,13 @@ void simd_text_init(void) {
     /* Upgrade UTF-8 slots to best available SIMD */
     simd_utf8_init_slots();
 
-    /* Note: search and case TUs upgrade their own slots lazily */
+    /* Search has its own table. Opt-in case APIs upgrade only case slots
+     * after this publication; UTF-8 readers never access those fields. */
+    atomic_store_explicit(&state, 2, memory_order_release);
 }
 
 static inline void simd_text_ensure_init(void) {
-    if (!g_simd_text.utf8_count_codepoints) {
-        simd_text_init();
-    }
+    simd_text_init();
 }
 
 /* ================================================================
