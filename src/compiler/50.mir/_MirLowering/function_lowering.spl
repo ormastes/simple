@@ -154,6 +154,7 @@ impl MirLowering:
         match expr.kind:
             case IntLit(_, _): Some(MirType.i64())
             case FloatLit(_, _): Some(MirType.f64())
+            case FloatLexeme(_, _): Some(MirType.f64())
             case BoolLit(_): Some(MirType(kind: MirTypeKind.Bool))
             case StringLit(_, _): Some(MirType(kind: MirTypeKind.Opaque("str")))
             # `lower_const_expr` only folds integer binary expressions.
@@ -162,6 +163,7 @@ impl MirLowering:
                 # Defensive compatibility for future folded scalar forms.
                 match value:
                     case Int(_): Some(MirType.i64())
+                    case FloatLexeme(_): Some(MirType.f64())
                     case Float(_): Some(MirType.f64())
                     case Bool(_): Some(MirType(kind: MirTypeKind.Bool))
                     case Str(_): Some(MirType(kind: MirTypeKind.Opaque("str")))
@@ -395,7 +397,12 @@ impl MirLowering:
         # positional lane) fell back to `<module>.main`, so the object never
         # defined `__simple_main` and the entry shim failed to link (LNK2019).
         val fallback_name = mir_provider_function_name(function_owner, self.symbols, fn_, self.lowering_entry_module)
-        val mir_fn_name = self.provider_callable_symbol_name(fn_.symbol, fallback_name) + ""
+        # A definition's explicit C export is authoritative over imported or
+        # relocated callable sidecars. HIR retains this declaration contract;
+        # routing its definition through a stored module-qualified symbol
+        # leaves an extern caller's unmangled C ABI unresolved.
+        val mir_fn_name = (if fn_.has_export_attr: fallback_name
+            else: self.provider_callable_symbol_name(fn_.symbol, fallback_name)) + ""
         var bldr = self.builder
         bldr.begin_function(fn_.symbol, mir_fn_name, signature, fn_.span)
         if trace_enabled:

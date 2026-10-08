@@ -460,6 +460,7 @@ impl MirLowering:
             var is_scalar = false
             match mir_const.value:
                 case Int(_): is_scalar = true
+                case FloatLexeme(_): is_scalar = true
                 case Float(_): is_scalar = true
                 case Bool(_): is_scalar = true
                 case Str(_): is_scalar = true
@@ -4154,6 +4155,21 @@ impl MirLowering:
                 self.builder = b
                 result
 
+            case FloatLexeme(value, _):
+
+                var b = self.builder
+                var float_type = MirType.f64()
+                val inferred_type = expr_value.type_
+                if inferred_type != nil:
+                    val lowered_type = self.lower_type(inferred_type)
+                    match lowered_type.kind:
+                        case MirTypeKind.F32: float_type = lowered_type
+                        case _: ()
+                val result = b.new_temp(float_type)
+                b.emit_const(result, MirConstValue.FloatLexeme(value), float_type)
+                self.builder = b
+                result
+
             case BoolLit(value):
 
                 var b = self.builder
@@ -4181,6 +4197,31 @@ impl MirLowering:
                     val dest = b.new_temp(MirType(kind: MirTypeKind.Opaque("str")))
                     b.emit_const(dest, MirConstValue.Str(value), MirType(kind: MirTypeKind.Opaque("str")))
                     self.builder = b
+                    # A C-string pointer cannot retain an embedded NUL byte.
+                    # Materialize those literals with the authored byte count
+                    # before any text operation or parameter transport.
+                    var literal_has_nul = false
+                    var literal_byte = 0
+                    val literal_byte_length = value.len()
+                    while literal_byte < literal_byte_length:
+                        if value.byte_at(literal_byte) == 0:
+                            literal_has_nul = true
+                            break
+                        literal_byte = literal_byte + 1
+                    if literal_has_nul:
+                        var b_nul = self.builder
+                        val literal_length = b_nul.new_temp(MirType.i64())
+                        b_nul.emit_const(literal_length, MirConstValue.Int(literal_byte_length), MirType.i64())
+                        val literal_new = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_string_new"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                        ))
+                        val literal_tagged = b_nul.emit_call(literal_new, [mir_operand_copy(dest), mir_operand_copy(literal_length)], MirType.i64())
+                        self.builder = b_nul
+                        if val tagged_literal = literal_tagged:
+                            self.mark_tagged_text_local(tagged_literal.id)
+                            return tagged_literal
+                        self.error_fatal("could not preserve embedded-NUL text literal length", Some(expr.span))
                     dest
 
             case NilLit:

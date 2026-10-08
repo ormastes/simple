@@ -4518,6 +4518,7 @@ impl MirLowering:
         match body.kind:
             case IntLit(_, _): false
             case FloatLit(_, _): false
+            case FloatLexeme(_, _): false
             case BoolLit(_): false
             case CharLit(_): false
             case UnitLit: false
@@ -4664,7 +4665,7 @@ impl MirLowering:
     me lambda_capture_scan_supported(body: HirExpr) -> bool:
         """True when collect_free_var_syms traverses the whole expression."""
         match body.kind:
-            case IntLit(_, _) | FloatLit(_, _) | BoolLit(_) | CharLit(_) | UnitLit | NilLit | Var(_) | NamedVar(_, _): true
+            case IntLit(_, _) | FloatLit(_, _) | FloatLexeme(_, _) | BoolLit(_) | CharLit(_) | UnitLit | NilLit | Var(_) | NamedVar(_, _): true
             case StringLit(_, interps):
                 if val its = interps:
                     self.string_interps_capture_scan_supported(its)
@@ -4820,6 +4821,7 @@ impl MirLowering:
                 lw.current_function_names = self.current_function_names
                 lw.current_function_symbols = self.current_function_symbols
                 lw.exact_extern_signatures = self.exact_extern_signatures
+                lw.callable_text_value_abi = self.callable_text_value_abi
                 lw.field_map = self.field_map
                 lw.bitfield_map = self.bitfield_map
                 lw.struct_field_order = self.struct_field_order
@@ -4980,29 +4982,25 @@ impl MirLowering:
                 nil
 
     me bridge_tagged_text_direct_arg(arg_local: LocalId, declared_param_type: HirType) -> LocalId:
-        """Adapt a tagged scalar-renderer result at a user `text` parameter.
+        """Adapt a tagged text value only at an external pointer/text boundary.
 
-        `rt_raw_*_to_string` deliberately returns an I64 MIR local so LLVM
-        retains the tagged runtime-string ABI.  A normal user text parameter,
-        however, is emitted through the pointer/text ABI.  Letting generic
-        call coercion see that I64 asks LLVM for an integer-to-pointer cast,
-        which passes the tagged handle instead of its character buffer. Bridge marked locals
-        through rt_interp_cstr here; unmarked text already is the established
-        raw pointer form and must remain untouched.  This is direct-call-only:
-        indirect closures still use their independent all-I64 ABI below.
+        Internal Simple text functions accept complete runtime text values;
+        their stored lengths must survive calls. The caller applies this
+        bridge only when the callee lacks a declaration-owned Simple ABI
+        receipt or a registered length-aware extern adaptation. rt_interp_cstr
+        accepts tagged and raw text, including unmarked parameter locals.
         """
         match declared_param_type.kind:
             case HirTypeKind.Str:
-                if self.is_tagged_text_local(arg_local.id):
-                    val cstr_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_interp_cstr"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: self.bootstrap_text_type(), is_variadic: false)))
-                    ))
-                    var b_cstr = self.builder
-                    val cstr_res = b_cstr.emit_call(cstr_op, [mir_operand_copy(arg_local)], self.bootstrap_text_type())
-                    self.builder = b_cstr
-                    if val cstr_local = cstr_res:
-                        return cstr_local
+                val cstr_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_interp_cstr"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: self.bootstrap_text_type(), is_variadic: false)))
+                ))
+                var b_cstr = self.builder
+                val cstr_res = b_cstr.emit_call(cstr_op, [mir_operand_copy(arg_local)], self.bootstrap_text_type())
+                self.builder = b_cstr
+                if val cstr_local = cstr_res:
+                    return cstr_local
             case _:
                 ()
         arg_local
@@ -5264,6 +5262,25 @@ impl MirLowering:
                         call_param_types = params
                     case _:
                         ()
+        var direct_text_pointer_bridge = false
+        var direct_pair_text_indices: [i64] = []
+        var direct_boxed_text_indices: [i64] = []
+        if is_direct and not self.provider_callable_accepts_text_value(direct_symbol):
+            val text_boundary_name = self.provider_callable_symbol_name(direct_symbol, direct_name)
+            # These registered externs already derive ptr+len or box the whole
+            # text value at emit_resolved_direct_call. Do not strip it first.
+            direct_pair_text_indices = text_arg_indices(text_boundary_name) ?? []
+            direct_boxed_text_indices = boxed_text_arg_indices(text_boundary_name) ?? []
+            # Match the pair expander's applicability guards, including raw
+            # machine-word overloads with a different semantic arity.
+            if val pair_arity = text_extern_semantic_arity(text_boundary_name):
+                if args.len() != pair_arity:
+                    direct_pair_text_indices = []
+            var pair_indices_valid = true
+            for pair_index in direct_pair_text_indices:
+                if pair_index >= args.len(): pair_indices_valid = false
+            if not pair_indices_valid: direct_pair_text_indices = []
+            direct_text_pointer_bridge = true
         var direct_arg_index = 0
         for arg in args:
             val current_arg_index = direct_arg_index
@@ -5299,7 +5316,11 @@ impl MirLowering:
             var boundary_runtime_classify = true
             if current_arg_index < call_param_types.len():
                 val declared_param_type = call_param_types[current_arg_index]
-                if is_direct:
+                # Internal Simple text parameters accept the complete text
+                # value. Unwrapping a tagged handle here discards its length.
+                # Keep the existing pointer bridge at extern/unknown owners;
+                # dedicated extern pair/boxed argument expansion stays intact.
+                if direct_text_pointer_bridge and not int_list_contains(direct_pair_text_indices, current_arg_index) and not int_list_contains(direct_boxed_text_indices, current_arg_index):
                     arg_local = self.bridge_tagged_text_direct_arg(arg_local, declared_param_type)
                 match declared_param_type.kind:
                     case HirTypeKind.Float(_):

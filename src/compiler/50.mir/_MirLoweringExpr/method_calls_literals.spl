@@ -108,7 +108,9 @@ impl MirLowering:
         tagged-or-raw check first via rt_interp_cstr (bug #136's
         autodetection: unwraps an already-tagged handle to its real data
         buffer, or passes an already-raw char* through unchanged), THEN
-        (re)tags that guaranteed-raw buffer via rt_strlen + rt_string_new.
+        (re)tags that buffer via rt_string_new using rt_string_len on the
+        ORIGINAL value. Tagged text can contain NUL bytes, so strlen of
+        the unwrapped buffer would discard its length and truncate it.
         Safe for both representations. Used to fix `.starts_with()`/
         `.ends_with()`'s RECEIVER (their existing code below only tagged the
         prefix/suffix ARGUMENT, silently assuming the receiver is always an
@@ -129,11 +131,11 @@ impl MirLowering:
         if val ets_cstr_local = ets_cstr_res:
             ets_raw = ets_cstr_local
         val ets_len_op = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_strlen"),
+            MirConstValue.Str("rt_string_len"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
         ))
         var b_ets_len = self.builder
-        val ets_len_res = b_ets_len.emit_call(ets_len_op, [mir_operand_copy(ets_raw)], MirType.i64())
+        val ets_len_res = b_ets_len.emit_call(ets_len_op, [mir_operand_copy(value_local)], MirType.i64())
         self.builder = b_ets_len
         if val ets_len_local = ets_len_res:
             val ets_new_op = MirOperand(kind: MirOperandKind.Const(
@@ -1728,6 +1730,9 @@ impl MirLowering:
                     prelowered_method_receiver
                 else:
                     self.lower_expr(receiver)
+                # rt_string_bytes requires canonical tagged text. Normalize
+                # raw literals/parameters and retain stored tagged lengths.
+                val bytes_tagged_receiver = self.ensure_tagged_str(bytes_receiver_local)
                 val bytes_func = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_string_bytes"),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(
@@ -1739,12 +1744,24 @@ impl MirLowering:
                 var bytes_builder = self.builder
                 val bytes_result = bytes_builder.emit_call(
                     bytes_func,
-                    [mir_operand_copy(bytes_receiver_local)],
+                    [mir_operand_copy(bytes_tagged_receiver)],
                     MirType.i64()
                 )
                 self.builder = bytes_builder
                 if val bytes_result_local = bytes_result:
-                    return bytes_result_local
+                    # rt_string_bytes returns a tagged runtime array of u8,
+                    # not text. Retain its element/layout owner for len/index.
+                    val bytes_element_type = MirType(kind: MirTypeKind.U8)
+                    val bytes_array_type = MirType(kind: MirTypeKind.Array(bytes_element_type, 0))
+                    var bytes_typed_builder = self.builder
+                    val bytes_array = bytes_typed_builder.new_temp(bytes_array_type)
+                    bytes_typed_builder.emit_copy(bytes_array, bytes_result_local)
+                    self.builder = bytes_typed_builder
+                    self.runtime_array_locals[bytes_array.id] = true
+                    self.mark_runtime_value_local(bytes_array.id)
+                    val bytes_hir_element = HirType(kind: HirTypeKind.Int(8, false), span: receiver.span)
+                    self.remember_local_hir_type(bytes_array.id, HirType(kind: HirTypeKind.Array(bytes_hir_element, nil), span: receiver.span), 2, 0)
+                    return bytes_array
                 return bytes_receiver_local
 
         # Bug #138: `resolution == Unresolved` (no method-resolution info for
@@ -5202,6 +5219,8 @@ impl MirLowering:
                 Some(MirConstValue.Int(value))
             case FloatLit(value, _):
                 Some(MirConstValue.Float(value))
+            case FloatLexeme(value, _):
+                Some(MirConstValue.FloatLexeme(value))
             case BoolLit(value):
                 Some(MirConstValue.Bool(value))
             case StringLit(value, interps):
