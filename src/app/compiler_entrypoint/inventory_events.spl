@@ -5,7 +5,7 @@ use app.io.mod.{dir_create, file_exists, file_read, process_run_bounded}
 use std.common.crypto.sha256.{sha256_text}
 use std.scv.compile_source_inventory.{CompileSourceEventV1, compile_source_inventory_apply_observed_events_v1, compile_source_inventory_digest_valid_v1, compile_source_inventory_git_event_v1, compile_source_inventory_path_valid_v1, compile_source_inventory_read_at_pointer_v1, compile_source_inventory_read_pointer_content_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_cache_root_valid_v1,
-    compile_source_inventory_revalidate_pointer_v1}
+    compile_source_inventory_revalidate_verified_pointer_v1}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
 use std.nogc_sync_mut.io.file_ops.{
     file_atomic_write, file_delete, file_is_regular_no_follow, file_size,
@@ -743,14 +743,15 @@ fn _compiler_inventory_refresh_locked_v1(
             "untracked_membership_digest={membership_digest}"
         ].join("\n")
         if unchanged_pointer == pointer_content:
-            # Retain all fresh event checks above and revalidate the generation
-            # under publication.lock; avoid apply/encode/publish/readback only.
-            val current = compile_source_inventory_revalidate_pointer_v1(
-                cache_root, pointer_content)
-            if not current.valid:
-                return compiler_inventory_invalid_v1("observed-event-apply:" + current.reason)
+            # The initial warm read authenticated cursor digest and generation.
+            # Keep every fresh event check and the final locked pointer/blob hash,
+            # but do not decode the same authenticated generation a second time.
+            val reason = compile_source_inventory_revalidate_verified_pointer_v1(
+                cache_root, pointer_content, cursor.inventory_digest)
+            if reason != "":
+                return compiler_inventory_invalid_v1("observed-event-apply:" + reason)
             return CompilerInventoryRefreshV1(
-                true, "ok", current.digest, current.inventory!.generation)
+                true, "ok", cursor.inventory_digest, cursor.inventory_generation)
     # Publish only after all journal checks pass. The immutable blob must
     # exist before inventory CURRENT may name it, but a failed apply must not
     # leave this refresh's newly created blob behind.
