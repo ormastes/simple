@@ -89,6 +89,14 @@ class ProviderCallableEvidenceV1:
     query_symbol_address: i64
     query_symbol_process_callable: bool
 
+# Request-policy facts before a dynamic loader has been consulted. This type
+# deliberately has no symbol address or callable flag: preflight is not loader
+# evidence and cannot construct an admitted session.
+class ProviderAdmissionPolicyV1:
+    status: i32
+    artifact_digest: text
+    reason: text
+
 class ProviderAdmissionResultV1:
     status: i32
     outcome: ProviderAdmissionOutcomeV1
@@ -197,34 +205,51 @@ fn provider_artifact_path_allowed_v1(path: text, kind: text) -> bool:
         return path.ends_with(".so") or path.ends_with(".dylib") or path.ends_with(".dll")
     false
 
-fn provider_admit_evidence_v1(request: ProviderAdmissionRequestV1, evidence: ProviderCallableEvidenceV1) -> ProviderAdmissionResultV1:
+fn _provider_admission_policy_v1(request: ProviderAdmissionRequestV1,
+        artifact_exists: bool, artifact_digest: text) -> ProviderAdmissionPolicyV1:
     if not provider_artifact_path_allowed_v1(request.artifact_path, request.artifact_kind):
-        return _provider_admission_result(PROVIDER_ADMISSION_PATH_DENIED, 0, evidence.artifact_digest, false, "path-denied")
-    if not evidence.artifact_exists:
-        return _provider_admission_result(PROVIDER_ADMISSION_ARTIFACT_MISSING, 0, "", false, "artifact-missing")
-    if request.expected_artifact_digest.len() != 64 or evidence.artifact_digest != request.expected_artifact_digest:
-        return _provider_admission_result(PROVIDER_ADMISSION_DIGEST_MISMATCH, 0, evidence.artifact_digest, false, "artifact-digest-mismatch")
+        return ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_PATH_DENIED, artifact_digest: artifact_digest, reason: "path-denied")
+    if not artifact_exists:
+        return ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_ARTIFACT_MISSING, artifact_digest: "", reason: "artifact-missing")
+    if request.expected_artifact_digest.len() != 64 or artifact_digest != request.expected_artifact_digest:
+        return ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_DIGEST_MISMATCH, artifact_digest: artifact_digest, reason: "artifact-digest-mismatch")
     if (request.granted_capability_bits & request.required_capability_bits) != request.required_capability_bits:
-        return _provider_admission_result(PROVIDER_ADMISSION_CAPABILITY_DENIED, 0, evidence.artifact_digest, false, "capability-denied")
+        return ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_CAPABILITY_DENIED, artifact_digest: artifact_digest, reason: "capability-denied")
     if request.host_abi < request.minimum_host_abi or request.host_abi > request.maximum_host_abi:
-        return _provider_admission_result(PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED, 0, evidence.artifact_digest, false, "host-abi-unsupported")
+        return ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED, artifact_digest: artifact_digest, reason: "host-abi-unsupported")
     if request.requested_interface_major != request.provided_interface_major or request.requested_interface_minor > request.provided_interface_minor:
-        return _provider_admission_result(PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED, 0, evidence.artifact_digest, false, "interface-version-unsupported")
+        return ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED, artifact_digest: artifact_digest, reason: "interface-version-unsupported")
+    ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_OK, artifact_digest: artifact_digest, reason: "request-policy-passed")
+
+fn _provider_policy_refusal_v1(policy: ProviderAdmissionPolicyV1) -> ProviderAdmissionResultV1:
+    _provider_admission_result(policy.status, 0, policy.artifact_digest, false, policy.reason)
+
+fn provider_admit_evidence_v1(request: ProviderAdmissionRequestV1, evidence: ProviderCallableEvidenceV1) -> ProviderAdmissionResultV1:
+    val policy = _provider_admission_policy_v1(request, evidence.artifact_exists, evidence.artifact_digest)
+    if policy.status != PROVIDER_ADMISSION_OK:
+        return _provider_policy_refusal_v1(policy)
     if not evidence.loader_valid:
-        return _provider_admission_result(PROVIDER_ADMISSION_LOAD_FAILED, 0, evidence.artifact_digest, false, "loader-failed")
+        return _provider_admission_result(PROVIDER_ADMISSION_LOAD_FAILED, 0, policy.artifact_digest, false, "loader-failed")
     if evidence.query_symbol_address <= 0:
-        return _provider_admission_result(PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING, 0, evidence.artifact_digest, false, "query-symbol-missing")
+        return _provider_admission_result(PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING, 0, policy.artifact_digest, false, "query-symbol-missing")
     if not evidence.query_symbol_process_callable:
-        return _provider_admission_result(PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE, 0, evidence.artifact_digest, false, "query-symbol-not-process-callable")
-    _provider_admission_result(PROVIDER_ADMISSION_OK, evidence.query_symbol_address, evidence.artifact_digest, true, "admitted")
+        return _provider_admission_result(PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE, 0, policy.artifact_digest, false, "query-symbol-not-process-callable")
+    _provider_admission_result(PROVIDER_ADMISSION_OK, evidence.query_symbol_address, policy.artifact_digest, true, "admitted")
 
 fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDynamicAdmissionV1:
+    # Refuse path policy before filesystem reads, hashing, or dlopen. All
+    # remaining request-policy checks share the pure evidence helper below.
+    if not provider_artifact_path_allowed_v1(request.artifact_path, request.artifact_kind):
+        val path_policy = _provider_admission_policy_v1(request, false, "")
+        val path_denied = _provider_policy_refusal_v1(path_policy)
+        return ProviderDynamicAdmissionV1(admission: path_denied, session: _closed_provider_session(path_denied))
     val exists = rt_file_exists(request.artifact_path)
     val bytes = if exists: rt_file_read_bytes(request.artifact_path) ?? [] else: []
     val digest = provider_artifact_digest_v1(bytes)
-    if not exists:
-        val missing = provider_admit_evidence_v1(request, ProviderCallableEvidenceV1(artifact_exists: false, artifact_digest: "", loader_valid: false, query_symbol_address: 0, query_symbol_process_callable: false))
-        return ProviderDynamicAdmissionV1(admission: missing, session: _closed_provider_session(missing))
+    val policy = _provider_admission_policy_v1(request, exists, if exists: digest else: "")
+    if policy.status != PROVIDER_ADMISSION_OK:
+        val refused = _provider_policy_refusal_v1(policy)
+        return ProviderDynamicAdmissionV1(admission: refused, session: _closed_provider_session(refused))
     val library = dynlib_open(request.artifact_path, 2)
     # This is cold admission work. Re-read after open and fail closed if the
     # path changed. The library generation stays retained by the session.
