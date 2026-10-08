@@ -3,11 +3,40 @@
 `perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=5859375
 --interval-ms=100 --timeout-seconds=660 --receipt=/absolute/run.rss.env
 -- COMMAND ARGS...` supervises one command on macOS/Linux. The production
-default and absolute configuration ceiling are decimal 6 GB (5,859,375 KiB).
-Overrides may lower it, and all larger CLI/environment values are rejected
-before installation or workload launch. The ordinary compilation
-acceptance target remains **less than 1,000,000,000 bytes** (at most 976,562
-whole KiB), assessed separately from the emergency guard threshold.
+default is decimal 6 GB (5,859,375 KiB); the compiler-scope ceiling is
+6,835,937 KiB (decimal 7 GB) for the existing macOS Stage 3 policy.
+The ordinary compilation acceptance target remains **less than 1,000,000,000
+bytes** (at most 976,562 whole KiB), assessed separately from this emergency guard.
+
+## Explicit parallel-test aggregate budget
+
+A parallel test coordinator and its workers need a distinct aggregate allowance:
+
+```sh
+perl scripts/resource/process-tree-rss-watchdog.pl \
+  --budget-scope=aggregate-tests --aggregate-workers=20 \
+  --max-rss-kib=26367177 --rss-cap-mode=enforce \
+  --receipt=/absolute/tests.rss.env -- COMMAND ARGS...
+```
+
+This scope requires an explicit cap, 1–128 declared workers, and enforced mode.
+Its maximum is the existing parent ceiling (6,835,937 KiB) plus 976,562 KiB
+per worker: 26,367,177 KiB for 20 workers. This is a resource allocation, **not
+measured worker usage or permission for any individual compiler to exceed its
+ordinary target**. The caller must select a cap within available host capacity,
+align the test runner's admission budget with it, and preserve parent/headroom
+reserve. It is not inferred from the machine's total memory. For a 72 GiB VM,
+the 20-worker maximum leaves about 46.8 GiB outside this tree allocation.
+
+The receipt records `budget_scope`, `budget_ceiling_kib`, and `aggregate_workers`.
+No aggregate setting is exported to nested compiler guards. Default compiler
+caps, observation cadence, enforced termination and quiescence checks remain
+unchanged. This remains sampled RSS protection (`hard_memory_limit=0`), not an
+OS hard memory reservation. Process-tree RSS sums the resident pages reported
+for each process, including shared pages in each process that maps them; it is
+not unique physical memory usage. The explicit aggregate bound applies to that
+sum. Duplicate options, missing workers/cap, unsupported
+scope, monitor mode and out-of-range aggregate caps fail before workload launch.
 
 Before workload launch the guard compiles `bootstrap-session-exec.c` into a
 private retained directory beside its receipt (or in TMPDIR). Compilation is

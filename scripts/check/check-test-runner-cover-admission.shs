@@ -1,0 +1,47 @@
+#!/bin/sh
+# Execute the actual runner against rejected and admitted files; never bypass cover validation.
+set -eu
+SIMPLE_BIN=${SIMPLE_BIN:-bin/simple}
+ROOT="build/cover-admission-contract.$$"
+mkdir -p "$ROOT/system/mixed" "$ROOT/system/rejected"
+cat > "$ROOT/system/mixed/admitted_spec.spl" <<'SPL'
+# @cover src/app/test_runner_new/cover_admission.spl 1%
+use std.spec.*
+use app.test_runner_new.cover_admission.{cover_admitted_files}
+describe "admitted coverage contract":
+    it "executes the real admission helper":
+        print "COVER_CONTRACT_ADMITTED_BODY"
+        expect(cover_admitted_files(["good", "bad"], ["bad"])).to_equal(["good"])
+SPL
+cat > "$ROOT/system/mixed/rejected_spec.spl" <<'SPL'
+use std.spec.*
+describe "missing annotation contract":
+    it "must never execute before admission":
+        print "COVER_CONTRACT_REJECTED_BODY"
+        expect(false).to_equal(true)
+SPL
+cp "$ROOT/system/mixed/rejected_spec.spl" "$ROOT/system/rejected/rejected_spec.spl"
+run_case() {
+    label=$1
+    directory=$2
+    shift 2
+    status=0
+    env SIMPLE_TEST_DEPTH=0 "$SIMPLE_BIN" run src/app/test_runner_new/main.spl "$directory" --no-cache --no-db --no-session-daemon "$@" > "$ROOT/$label.log" 2>&1 || status=$?
+    test "$status" -eq 1
+    grep -q 'COVER ADMISSION FAILED' "$ROOT/$label.log"
+    grep -q 'executed=0 passed=0 failed=1 dropped=1 unrun=1 reason=cover-admission-failed' "$ROOT/$label.log"
+    if grep -q 'COVER_CONTRACT_REJECTED_BODY' "$ROOT/$label.log"; then
+        echo "Rejected test body ran: $ROOT/$label.log" >&2
+        exit 1
+    fi
+}
+run_case sequential "$ROOT/system/mixed" --unstable --sequential
+grep -q 'Results: 2 total, 1 passed, 1 failed' "$ROOT/sequential.log"
+run_case parallel "$ROOT/system/mixed" --unstable --parallel --max-workers=2
+grep -q 'Results: 2 total, 1 passed, 1 failed' "$ROOT/parallel.log"
+run_case stable "$ROOT/system/mixed" --no-unstable --sequential
+if grep -q 'COVER_CONTRACT_ADMITTED_BODY' "$ROOT/stable.log"; then exit 1; fi
+grep -q 'Results: 1 total, 0 passed, 1 failed' "$ROOT/stable.log"
+run_case rejected "$ROOT/system/rejected" --unstable --sequential
+grep -q 'Results: 1 total, 0 passed, 1 failed' "$ROOT/rejected.log"
+printf 'PASS: cover admission continues independent files and retains rejected failures; logs %s\n' "$ROOT"

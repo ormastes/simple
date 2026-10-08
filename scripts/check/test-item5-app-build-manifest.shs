@@ -1,0 +1,103 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+validator=$root/scripts/check/lib/item5-app-build-manifest.pl
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/item5-app-manifest.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+perl -MJSON::PP -e '
+my ($hello_path, $manifest_path, $variant) = @ARGV;
+my $producer = "b" x 40;
+my $app_source = "c" x 40;
+my $tree = "d" x 40;
+my $compiler = "a" x 64;
+my %hash = (
+  "db-scalar" => "1" x 64, "db-vector" => "2" x 64,
+  "http-scalar" => "3" x 64, "http-vector" => "4" x 64,
+);
+my $hello = {
+  status => "pass", gate_exit_status => 0,
+  source_commit => $producer, compiler_sha256 => $compiler,
+};
+my $manifest = {
+  schema => "item5-simple-app-build-v2",
+  compiler_sha256 => $compiler,
+  producer_source_commit => $producer,
+  app_source_commit => $app_source,
+  app_source_tree_oid => $tree,
+  apps => {},
+};
+for my $role (keys %hash) {
+  $manifest->{apps}{$role} = {
+    status => "pass", sha256 => $hash{$role},
+    compiler_sha256 => $compiler,
+    app_source_commit => $app_source,
+    app_source_tree_oid => $tree,
+  };
+}
+if ($variant eq "wrong-compiler") {
+  $manifest->{compiler_sha256} = "e" x 64;
+} elsif ($variant eq "wrong-entry-commit") {
+  $manifest->{apps}{"db-scalar"}{app_source_commit} = "f" x 40;
+} elsif ($variant eq "wrong-entry-tree") {
+  $manifest->{apps}{"db-scalar"}{app_source_tree_oid} = "e" x 40;
+} elsif ($variant eq "wrong-producer") {
+  $manifest->{producer_source_commit} = "f" x 40;
+} elsif ($variant eq "bad-app-source-length") {
+  $manifest->{app_source_commit} = "c" x 41;
+} elsif ($variant eq "bad-tree-length") {
+  $manifest->{app_source_tree_oid} = "d" x 41;
+} elsif ($variant eq "bad-producer-length") {
+  $manifest->{producer_source_commit} = "b" x 41;
+} elsif ($variant eq "nonnumeric-gate-status") {
+  $hello->{gate_exit_status} = "garbage";
+}
+open my $h, ">:raw", $hello_path or die $!;
+print {$h} JSON::PP->new->canonical->encode($hello);
+close $h or die $!;
+open my $m, ">:raw", $manifest_path or die $!;
+print {$m} JSON::PP->new->canonical->encode($manifest);
+close $m or die $!;
+' "$tmp/hello.json" "$tmp/manifest.json" valid
+
+valid=$(perl "$validator" "$tmp/hello.json" "$tmp/manifest.json" \
+  "db-scalar=$(printf '1%.0s' $(seq 1 64))" \
+  "db-vector=$(printf '2%.0s' $(seq 1 64))" \
+  "http-scalar=$(printf '3%.0s' $(seq 1 64))" \
+  "http-vector=$(printf '4%.0s' $(seq 1 64))") || exit 1
+printf '%s\n' "$valid" | grep -Eq '^[a-f0-9]{64}[[:space:]]b{40}[[:space:]]c{40}[[:space:]]d{40}$'
+
+for variant in wrong-compiler wrong-entry-commit wrong-entry-tree wrong-producer \
+  bad-app-source-length bad-tree-length bad-producer-length nonnumeric-gate-status; do
+  perl -MJSON::PP -e '
+    my ($hello_path, $manifest_path, $variant) = @ARGV;
+    my $producer = "b" x 40;
+    my $app_source = "c" x 40;
+    my $tree = "d" x 40;
+    my $compiler = "a" x 64;
+    my %hash = ("db-scalar"=>"1"x64,"db-vector"=>"2"x64,"http-scalar"=>"3"x64,"http-vector"=>"4"x64);
+    my $hello = {status=>"pass",gate_exit_status=>0,source_commit=>$producer,compiler_sha256=>$compiler};
+    my $manifest = {schema=>"item5-simple-app-build-v2",compiler_sha256=>$compiler,producer_source_commit=>$producer,app_source_commit=>$app_source,app_source_tree_oid=>$tree,apps=>{}};
+    for my $role (keys %hash) { $manifest->{apps}{$role}={status=>"pass",sha256=>$hash{$role},compiler_sha256=>$compiler,app_source_commit=>$app_source,app_source_tree_oid=>$tree}; }
+    if ($variant eq "wrong-compiler") { $manifest->{compiler_sha256}="e"x64; }
+    elsif ($variant eq "wrong-entry-commit") { $manifest->{apps}{"db-scalar"}{app_source_commit}="f"x40; }
+    elsif ($variant eq "wrong-entry-tree") { $manifest->{apps}{"db-scalar"}{app_source_tree_oid}="e"x40; }
+    elsif ($variant eq "wrong-producer") { $manifest->{producer_source_commit}="f"x40; }
+    elsif ($variant eq "bad-app-source-length") { $manifest->{app_source_commit}="c"x41; }
+    elsif ($variant eq "bad-tree-length") { $manifest->{app_source_tree_oid}="d"x41; }
+    elsif ($variant eq "bad-producer-length") { $manifest->{producer_source_commit}="b"x41; }
+    elsif ($variant eq "nonnumeric-gate-status") { $hello->{gate_exit_status}="garbage"; }
+    open my $h, ">:raw", $hello_path or die $!; print {$h} JSON::PP->new->canonical->encode($hello); close $h or die $!;
+    open my $m, ">:raw", $manifest_path or die $!; print {$m} JSON::PP->new->canonical->encode($manifest); close $m or die $!;
+  ' "$tmp/hello.json" "$tmp/manifest.json" "$variant"
+  if perl "$validator" "$tmp/hello.json" "$tmp/manifest.json" \
+      "db-scalar=$(printf '1%.0s' $(seq 1 64))" \
+      "db-vector=$(printf '2%.0s' $(seq 1 64))" \
+      "http-scalar=$(printf '3%.0s' $(seq 1 64))" \
+      "http-vector=$(printf '4%.0s' $(seq 1 64))" >/dev/null 2>&1; then
+    echo "FAIL app manifest accepted $variant" >&2
+    exit 1
+  fi
+done
+echo 'ITEM5_APP_BUILD_MANIFEST_TEST_PASS positive=1 rejected=8'

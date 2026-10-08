@@ -27,6 +27,7 @@ use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_fil
 use std.test_runner.test_executor_lanes.{run_test_file_composite}
 use std.test_runner.test_runner_output.{combined_test_run_json, print_result, print_summary}
 use std.test_runner.test_runner_config.{report_free_mem, mode_to_str, propagate_env_vars, get_cli_args, get_flag_value, handle_run_management, has_run_management_flag}
+use app.test_runner_new.cover_admission.{cover_admitted_files, cover_append_failures}
 use app.test_daemon.session_scheduler.{schedule_session_tests, schedule_summary, schedule_flatten, schedule_session_file_paths, schedule_local_file_paths}
 # MEMORY DEBUG: groups 3-9 commented out to isolate memory usage
 # GROUP 3: Container
@@ -271,27 +272,30 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         print_discovery_summary(all_files, options)
         return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
 
+    var missing_covers: [text] = []
     # Validate # @cover annotations for system tests
     if not updated_options.no_cover_check:
         val _t_cover_start = time_now_unix_micros()
-        val missing_covers = validate_system_test_covers(all_files)
+        missing_covers = validate_system_test_covers(all_files)
         val _t_cover_ms = (time_now_unix_micros() - _t_cover_start) / 1000
         print "  [setup] cover-check: {_t_cover_ms}ms"
         if missing_covers.len() > 0:
             print ""
             print "ERROR: System test(s) missing required # @cover annotation:"
             for mc in missing_covers:
-                print "  {mc}"
+                print "  COVER ADMISSION FAILED: {mc} (missing header # @cover; test not executed)"
             print ""
             print "Add at the top of each file:"
             print "  # @cover src/path/to/component.spl 80%"
             print ""
             print "Bypass: --no-cover-check"
             print "Found {missing_covers.len()} system test(s) without # @cover."
-            return TestRunResult(files: [], total_passed: 0, total_failed: missing_covers.len(), total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
+            if not updated_options.unstable_mode:
+                return cover_append_failures(summarize_test_results([]), missing_covers)
+            print "Continuing admitted files (--unstable); coverage admission failures remain failed."
 
     # MEMORY DEBUG: checkpoint filtering disabled (GROUP 6)
-    var files = all_files
+    var files = cover_admitted_files(all_files, missing_covers)
     # if options.resume and checkpoint_exists():
     #     val ckpt = checkpoint_load()
     #     ckpt_loaded = true
@@ -304,6 +308,8 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     #     print ""
 
     if files.len() == 0:
+        if missing_covers.len() > 0:
+            return cover_append_failures(summarize_test_results([]), missing_covers)
         print "No test files found in {options.path}"
         return TestRunResult(files: [], total_passed: 0, total_failed: 0, total_skipped: 0, total_pending: 0, total_timed_out: 0, total_duration_ms: 0, total_setup_ms: 0, total_cached: 0)
 
@@ -336,7 +342,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
             val daemon_results = run_tests_via_daemon(files, updated_options, daemon_config)
             for dr in daemon_results:
                 print_result(dr, updated_options.format)
-            return reconcile_discovered_vs_executed(files, summarize_test_results(daemon_results), false)
+            return cover_append_failures(reconcile_discovered_vs_executed(files, summarize_test_results(daemon_results), false), missing_covers)
         else:
             # Daemon could not start/respond (e.g. stale pidfile, light_daemon
             # IPC mismatch). Fall back to direct execution instead of failing the
@@ -363,7 +369,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
             ckpt_failed: ckpt_failed,
             ckpt_skipped: ckpt_skipped
         )
-        return reconcile_discovered_vs_executed(files, parallel_result, false)
+        return cover_append_failures(reconcile_discovered_vs_executed(files, parallel_result, false), missing_covers)
 
     report_free_mem("BEFORE_TEST_LOOP")
     val mode_name = mode_to_str(updated_options.mode)
@@ -516,7 +522,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         total_setup_ms: total_setup_ms,
         total_cached: total_cached
     )
-    reconcile_discovered_vs_executed(files, sequential_result, stopped_early)
+    cover_append_failures(reconcile_discovered_vs_executed(files, sequential_result, stopped_early), missing_covers)
 
 fn run_tests_parallel_mode(
     files: [text],

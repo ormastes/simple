@@ -22,12 +22,16 @@ $SIG{PIPE} = 'IGNORE';
 
 my %opt = ( 'max-rss-kib' => 5859375, 'interval-ms' => 100,
             'timeout-seconds' => 0, 'term-grace-seconds' => 1, 'session-mode' => 'new',
-            'rss-cap-mode' => ($ENV{SIMPLE_BOOTSTRAP_RSS_CAP_MODE} // 'enforce') );
+            'rss-cap-mode' => ($ENV{SIMPLE_BOOTSTRAP_RSS_CAP_MODE} // 'enforce'),
+            'budget-scope' => 'compiler' );
+my %explicit;
 while (@ARGV && $ARGV[0] ne '--') {
     my $arg = shift @ARGV;
-    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode)=(.+)$/
+    $arg =~ /^--(max-rss-kib|interval-ms|timeout-seconds|term-grace-seconds|receipt|session-mode|rss-cap-mode|budget-scope|aggregate-workers)=(.+)$/
         or die "rss-guard: invalid option\n";
-    $opt{$1} = $2;
+    my ($key, $value) = ($1, $2);
+    $explicit{$key}++ and die "rss-guard: duplicate $key\n";
+    $opt{$key} = $value;
 }
 @ARGV > 1 && shift(@ARGV) eq '--' or die "rss-guard: missing command\n";
 $opt{'session-mode'} =~ /\A(?:new|inherit)\z/ or die "rss-guard: invalid session mode\n";
@@ -35,9 +39,28 @@ $opt{'rss-cap-mode'} =~ /\A(?:enforce|monitor)\z/ or die "rss-guard: invalid RSS
 for my $key (qw(max-rss-kib interval-ms timeout-seconds term-grace-seconds)) {
     $opt{$key} =~ /^\d+$/ or die "rss-guard: invalid $key\n";
 }
-# Default stays 6 GB; the ceiling admits the 7 GB macOS Stage 3 cap.
-$opt{'max-rss-kib'} > 0 && $opt{'max-rss-kib'} <= 6835937
-    or die "rss-guard: cap must be between 1 and 6835937 KiB (7000000000 bytes)\n";
+# Compiler policy is unchanged. An explicitly admitted parallel test tree has
+# a separate aggregate budget: one parent reserve plus the ordinary compile
+# target per worker. This does not raise any nested compiler guard's limit.
+my $compiler_ceiling_kib = 6835937;
+my $worker_target_kib = 976562;
+my $budget_ceiling_kib = $compiler_ceiling_kib;
+$opt{'budget-scope'} =~ /\A(?:compiler|aggregate-tests)\z/
+    or die "rss-guard: invalid budget scope\n";
+if ($opt{'budget-scope'} eq 'aggregate-tests') {
+    $explicit{'max-rss-kib'} && $explicit{'aggregate-workers'}
+        or die "rss-guard: aggregate tests require explicit cap and worker count\n";
+    $opt{'rss-cap-mode'} eq 'enforce'
+        or die "rss-guard: aggregate tests require enforced RSS cap\n";
+    $opt{'aggregate-workers'} =~ /\A[0-9]{1,3}\z/
+        && $opt{'aggregate-workers'} >= 1 && $opt{'aggregate-workers'} <= 128
+        or die "rss-guard: aggregate workers must be between 1 and 128\n";
+    $budget_ceiling_kib += $opt{'aggregate-workers'} * $worker_target_kib;
+} elsif ($explicit{'aggregate-workers'}) {
+    die "rss-guard: aggregate worker count requires aggregate-tests scope\n";
+}
+$opt{'max-rss-kib'} > 0 && $opt{'max-rss-kib'} <= $budget_ceiling_kib
+    or die "rss-guard: cap must be between 1 and $budget_ceiling_kib KiB for $opt{'budget-scope'}\n";
 $opt{'interval-ms'} > 0 && $opt{'interval-ms'} <= 100
     or die "rss-guard: sample interval must be between 1 and 100 ms\n";
 my $leader = 0;
@@ -818,6 +841,8 @@ sub receipt {
     my ($status, $code, $quiet) = @_;
     my $body = "status=$status\nexit_status=$code\nroot_pid=$leader\n" .
         "max_rss_kib=$opt{'max-rss-kib'}\npeak_rss_kib=$peak\nsamples=$samples\n" .
+        "budget_scope=$opt{'budget-scope'}\nbudget_ceiling_kib=$budget_ceiling_kib\n" .
+        "aggregate_workers=" . ($opt{'aggregate-workers'} // 0) . "\n" .
         "interval_ms=$opt{'interval-ms'}\nsample_gap_max_ms=$sample_gap_max_ms\n" .
         "observation_budget_ms=$observation_budget_ms\n" .
         "sample_duration_max_ms=$sample_duration_max_ms\nsample_overruns=$sample_overruns\n" .

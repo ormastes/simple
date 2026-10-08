@@ -1061,13 +1061,23 @@ pub unsafe extern "C" fn rt_file_hash_sha256(path_ptr: *const u8, path_len: u64)
         Err(_) => return RuntimeValue::NIL,
     };
 
-    let content = match std::fs::read(path_str) {
-        Ok(content) => content,
+    let mut file = match std::fs::File::open(path_str) {
+        Ok(file) => file,
         Err(_) => return RuntimeValue::NIL,
     };
 
     let mut hasher = Sha256::new();
-    hasher.update(&content);
+    // Compiler and runtime identities hash large native artifacts. Keep this
+    // scratch bounded rather than retaining an entire executable in memory.
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(length) => hasher.update(&buffer[..length]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return RuntimeValue::NIL,
+        }
+    }
     let digest = hasher.finalize();
     let hex = format!("{:x}", digest);
     rt_string_new(hex.as_ptr(), hex.len() as u64)
@@ -2323,6 +2333,48 @@ mod tests {
     // Helper to create string pointer for SFFI
     fn str_to_ptr(s: &str) -> (*const u8, u64) {
         (s.as_ptr(), s.len() as u64)
+    }
+
+    fn assert_file_sha256(path: &Path, expected: &str) {
+        let name = path.to_str().unwrap();
+        let actual = unsafe { rt_file_hash_sha256(name.as_ptr(), name.len() as u64) };
+        assert!(!actual.is_nil());
+        let bytes = unsafe {
+            std::slice::from_raw_parts(rt_string_data(actual), rt_string_len(actual) as usize)
+        };
+        assert_eq!(bytes, expected.as_bytes());
+        crate::value::collections::rt_string_free(actual);
+    }
+
+    #[test]
+    fn file_sha256_streaming_preserves_binary_and_chunk_boundaries() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("artifact.bin");
+        for length in [0, 3, 65535, 65536, 65537, 131089] {
+            let bytes: Vec<u8> = (0..length).map(|index| (index % 251) as u8).collect();
+            fs::write(&path, &bytes).unwrap();
+            assert_file_sha256(&path, &format!("{:x}", Sha256::digest(&bytes)));
+        }
+    }
+
+    #[test]
+    fn file_sha256_streaming_large_sparse_artifact() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("large-artifact.bin");
+        // No file-sized allocation in fixture setup. Also run this case under
+        // a 64 MiB process RSS cap to reject the former whole-file read.
+        fs::File::create(&path).unwrap().set_len(128 * 1024 * 1024).unwrap();
+        assert_file_sha256(&path, "254bcc3fc4f27172636df4bf32de9f107f620d559b20d760197e452b97453917");
+    }
+
+    #[test]
+    fn file_sha256_streaming_preserves_read_failures() {
+        let directory = TempDir::new().unwrap();
+        for path in [directory.path().to_path_buf(), directory.path().join("missing")] {
+            let name = path.to_str().unwrap();
+            assert!(unsafe { rt_file_hash_sha256(name.as_ptr(), name.len() as u64) }.is_nil());
+        }
+        assert!(unsafe { rt_file_hash_sha256(std::ptr::null(), 0) }.is_nil());
     }
 
     /// Runnable proof for `rt_file_copy_create_excl_no_follow`'s exclusive

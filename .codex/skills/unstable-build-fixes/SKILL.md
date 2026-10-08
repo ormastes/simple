@@ -23,8 +23,11 @@ retain its cache/evidence, and record a resource-aborted result before applying
 a scoped concurrency workaround. Never release its reservation before reaping
 the tree or label resource termination as a successful compile.
 
-After three unresolved repair cycles, update the canonical bug database and
+After five unresolved repair cycles, update the canonical bug database and
 record a scoped bug-linked workaround or an explicit blocked dependency.
+Continue beyond five when the user authorizes further attempts and each cycle
+changes the implementation or produces new evidence; do not repeat unchanged
+failures or already-passing checks.
 Continue independent work using valid caches; do not restart from Phase 1
 or reset the cycle count by changing attempt names. Later rebuilds must revisit
 the bug and verify the intended path before removing its workaround.
