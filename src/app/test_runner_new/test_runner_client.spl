@@ -2,10 +2,10 @@
 
 use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_bounded}
-use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
 use app.io.cli_ops.{cli_current_exe_path}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs, resolve_timeout_secs, timeout_value_is_well_formed}
-use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests, daemon_claim_wait_expired}
+use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests, daemon_claim_wait_expired, daemon_platform_bypass}
 use app.test_runner_new.no_examples_gate.{no_examples_is_silent_green, no_examples_exit_code}
 use std.test_runner.test_runner_args.{parse_test_args}
 use std.test_runner.test_config.{load_test_config}
@@ -812,8 +812,10 @@ fn main() -> i64:
     # daemon predating this record has unavailable identity and must not serve
     # qualification work.
     val invoker = candidate_binary
-    val daemon_binary = daemon_recorded_binary()
-    val daemon_was_alive = daemon_lock_alive()
+    val daemon_host = host_os()
+    val daemon_host_bypass = daemon_platform_bypass(daemon_host)
+    val daemon_binary = if daemon_host_bypass: "" else: daemon_recorded_binary()
+    val daemon_was_alive = not daemon_host_bypass and daemon_lock_alive()
     val invoker_bypass = daemon_was_alive and daemon_binary != invoker
     val environment_bypass = daemon_was_alive and not test_daemon_environment_can_reuse_v1(
         caller_environment, lock_environment_digest())
@@ -838,7 +840,7 @@ fn main() -> i64:
     # zero production call sites. This is that wiring.
     val backlog_pending = if file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list(LIGHT_REQ_DIR)) else: 0
     val backlog_bypass = daemon_backlog_bypass(backlog_pending)
-    var daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass or environment_bypass or not caller_environment.valid: false else: ensure_daemon()
+    var daemon_ok = if daemon_host_bypass or cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass or environment_bypass or not caller_environment.valid: false else: ensure_daemon()
     if daemon_ok:
         val active_daemon_binary = daemon_recorded_binary()
         if active_daemon_binary == "" or active_daemon_binary != candidate_binary:
@@ -850,7 +852,9 @@ fn main() -> i64:
             daemon_ok = false
     var binary = ""
     if not daemon_ok:
-        if cov_bypass:
+        if daemon_host_bypass:
+            print "test-daemon: light daemon requires Linux /proc; running directly on {daemon_host}"
+        elif cov_bypass:
             print "coverage: SIMPLE_COVERAGE set; bypassing test daemon"
         elif require_gpu_bypass:
             print "require-gpu: SIMPLE_REQUIRE_GPU set; bypassing test daemon so the requirement reaches the spec"
