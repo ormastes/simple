@@ -228,4 +228,50 @@ if write_receipt "$work/rejected-stub.env" >/dev/null 2>&1; then
 fi
 [ ! -e "$work/rejected-stub.env" ]
 
-echo 'PASS — selected K1, ABI, manifest, and atomic APK-only policies are receipt-bound; 9/9 mutations rejected'
+# Alternate K1 policy `llvm` (src/compositions/kernel_llvm): the receipt binds
+# the LLVM-only composition, records cranelift_adapter_present=0, and refuses
+# a closure that still links any Cranelift owner (adapter, SFFI, JIT lane).
+llvm_only_source="$root/src/compositions/kernel_llvm"
+llvm_only_size=$(wc -c <"$llvm_only_source/compiler/driver/bootstrap_k1_selected.spl" | tr -d ' ')
+SIMPLE_KERNEL_K1_POLICY=llvm
+SIMPLE_K1_COMPOSITION_SHA256_BEFORE=$(shasum -a 256 \
+  "$llvm_only_source/compiler/driver/bootstrap_k1_selected.spl" | awk '{print $1}')
+export SIMPLE_KERNEL_K1_POLICY SIMPLE_K1_COMPOSITION_SHA256_BEFORE
+composition_source=$llvm_only_source
+write_transcript "$work/stage2-llvm.transcript" llvm v1 simple-sdn llvm
+write_transcript "$work/stage3-llvm.transcript" llvm v1 simple-sdn llvm
+printf '%s\n' "$combined_root" "$interpreter" "$llvm" >"$work/stage2-llvm.log"
+cp "$work/stage2-llvm.log" "$work/stage3-llvm.log"
+sh "$root/scripts/bootstrap/write-k1-composition-receipt.shs" \
+  llvm one-binary llvm "$work/stage2-llvm.log" "$work/stage3-llvm.log" \
+  "$work/stage2-llvm.transcript" "$work/stage3-llvm.transcript" "$work/llvm.env"
+for row in \
+    'policy=llvm' \
+    'backend=llvm' \
+    'selected_composition_suffix=src/compositions/kernel_llvm/compiler/driver/bootstrap_k1_selected.spl' \
+    'llvm_adapter_present=1' \
+    'cranelift_adapter_present=0' \
+    'status=pass'; do
+  grep -Fxq "$row" "$work/llvm.env"
+done
+# A Cranelift owner in the llvm-policy closure is refused.
+printf '%s\n' "$combined_root" "$cranelift" "$interpreter" "$llvm" >"$work/stage3-llvm-cl.log"
+if sh "$root/scripts/bootstrap/write-k1-composition-receipt.shs" \
+    llvm one-binary llvm "$work/stage2-llvm.log" "$work/stage3-llvm-cl.log" \
+    "$work/stage2-llvm.transcript" "$work/stage3-llvm.transcript" \
+    "$work/llvm-cl.env" >/dev/null 2>&1; then
+  echo 'FAIL — llvm K1 policy admitted a closure that links Cranelift' >&2
+  exit 1
+fi
+[ ! -e "$work/llvm-cl.env" ]
+# A policy outside the manifest (canonical or alternate) is refused.
+if SIMPLE_KERNEL_K1_POLICY=cranelift-only sh "$root/scripts/bootstrap/write-k1-composition-receipt.shs" \
+    cranelift-only one-binary llvm "$work/stage2-llvm.log" "$work/stage3-llvm.log" \
+    "$work/stage2-llvm.transcript" "$work/stage3-llvm.transcript" \
+    "$work/unpinned.env" >/dev/null 2>&1; then
+  echo 'FAIL — unpinned K1 policy was admitted' >&2
+  exit 1
+fi
+[ ! -e "$work/unpinned.env" ]
+
+echo 'PASS — selected K1, ABI, manifest, and atomic APK-only policies are receipt-bound; 9/9 mutations rejected; llvm alternate bound, 2/2 llvm mutations rejected'

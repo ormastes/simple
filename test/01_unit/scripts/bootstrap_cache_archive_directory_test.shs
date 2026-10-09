@@ -158,6 +158,48 @@ if bootstrap_cache_archive_prior "$root/finalized" "$root/attempts/attempt-final
 fi
 [ -d "$root/finalized" ] || fail 'finalized attempt refusal moved source'
 
+# A downstream planner failure must not leave the completed Stage 2 admission
+# writable. Exercise the production finalization block, then its real archiver.
+bootstrap="$repo/scripts/bootstrap/bootstrap-from-scratch.sh"
+seal_line=$(grep -nF 'chmod 500 "${stage2_admitted_dir}"' "$bootstrap" | cut -d: -f1)
+parent_line=$(grep -nF 'sh "${repo_root}/scripts/bootstrap/publish-stage2-parent-receipts.shs"' "$bootstrap" | cut -d: -f1)
+planner_line=$(grep -nF 'sh "${repo_root}/scripts/bootstrap/produce-bootstrap-planner-admission-v2.shs"' "$bootstrap" | head -1 | cut -d: -f1)
+[ "$seal_line" -lt "$parent_line" ] && [ "$seal_line" -lt "$planner_line" ] ||
+  fail 'Stage 2 sealing occurs after a fallible downstream publisher'
+sed -n '/# Publish the platform.s runtime names/,/chmod 500 "${stage2_admitted_dir}"/p' \
+  "$bootstrap" > "$work/finalize-stage2.sh"
+fixture_repo="$work/finalize-fixture"
+mkdir -p "$fixture_repo/scripts/bootstrap" "$root/stage2-admitted"
+cat > "$fixture_repo/scripts/bootstrap/phase2-runtime-binding.shs" <<'EOF'
+#!/bin/sh
+set -eu
+[ "$1" = publish ]
+printf 'fixture runtime binding\n' > "$(dirname -- "$2")/runtime-binding.env"
+chmod 400 "$(dirname -- "$2")/runtime-binding.env"
+EOF
+printf 'admitted compiler bytes\n' > "$root/stage2-admitted/simple"
+printf 'immutable admission evidence\n' > "$root/stage2-admitted/admission.env"
+chmod 500 "$root/stage2-admitted/simple"
+chmod 400 "$root/stage2-admitted/admission.env"
+planner_status=0
+(
+  repo_root="$fixture_repo"
+  stage2_admitted_dir="$root/stage2-admitted"
+  stage2_admitted_bin="$stage2_admitted_dir/simple"
+  stage2_admitted_absolute="$stage2_admitted_bin"
+  stage_runtime_absolute="$root"
+  output_dir="$work/output"
+  absolute_path() { printf '%s\n' "$1"; }
+  . "$work/finalize-stage2.sh"
+  # Simulate failure only after the completed admission's publication boundary.
+  exit 73
+) || planner_status=$?
+[ "$planner_status" -eq 73 ] || fail 'finalization did not reach downstream planner failure'
+bootstrap_cache_sealed_tree_validate "$root/stage2-admitted" || fail 'planner failure left writable Stage 2 evidence'
+bootstrap_cache_archive_prior "$root/stage2-admitted" "$attempt" || fail 'planner failure evidence could not be archived'
+[ "$(cat "$root/stage2-admitted.prior-attempt-archive-test/simple")" = 'admitted compiler bytes' ] ||
+  fail 'archiving planner failure changed the admitted compiler'
+
 # Freeze the real attempt and verify both direct and mapped evidence digests.
 bootstrap_cache_freeze_attempt "$attempt" || fail 'attempt freeze rejected valid archive'
 (
@@ -167,6 +209,7 @@ bootstrap_cache_freeze_attempt "$attempt" || fail 'attempt freeze rejected valid
 grep -q 'compiler.log: OK' "$work/manifest-check.log" || fail 'ordinary artifact missing from manifest'
 grep -q '../../runtime.prior-attempt-archive-test/runtime.bin: OK' "$work/manifest-check.log" || fail 'mapped runtime missing from manifest'
 grep -q '../../runtime-extra.prior-attempt-archive-test/runtime.bin: OK' "$work/manifest-check.log" || fail 'second mapped runtime missing from manifest'
+grep -q '../../stage2-admitted.prior-attempt-archive-test/admission.env: OK' "$work/manifest-check.log" || fail 'planner failure admission missing from manifest'
 grep -q 'attempt-directories.tsv: OK' "$work/manifest-check.log" || fail 'mapping missing from manifest'
 
 # A changed archived runtime must invalidate the frozen attempt receipt.

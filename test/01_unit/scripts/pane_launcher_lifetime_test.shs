@@ -1,0 +1,120 @@
+#!/bin/sh
+# Focused POSIX emitted-script contract; not Simple runtime/PTY qualification.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+python3 - "$root/src/app/llm_caret/pane_backend.spl" <<'PY'
+import errno, os, pathlib, re, stat, subprocess, sys, tempfile
+
+source = pathlib.Path(sys.argv[1]).read_text()
+if os.name != 'posix':
+    raise SystemExit('requires POSIX filesystem/process semantics')
+
+# Translate only these small, unchanged string-building helpers. Fail closed
+# if their source structure changes; execute the actual launcher expression.
+namespace = {}
+signatures = {
+    'posix_quote_arg': 'arg',
+    'posix_command_line': 'cmd, args',
+    'posix_exec_line': 'cmd, args, stderr_path',
+}
+for name, params in signatures.items():
+    match = re.search(r'^fn ' + name + r'\([^\n]+\) -> text:\n((?:    [^\n]*\n|\n)+)', source, re.M)
+    assert match, name
+    lines = match.group(1).rstrip().splitlines()
+    lines = [re.sub(r'^( +)(?:var|val) ', r'\1', line) for line in lines]
+    lines[-1] = '    return ' + lines[-1].strip()
+    exec('def ' + name + '(' + params + '):\n' + '\n'.join(lines), namespace)
+
+expression = re.search(r'    val script = (\(.*?\n.*?\))\n    if not file_write', source, re.S)
+assert expression, 'launcher expression missing'
+expression = expression.group(1)
+assert 'set_permissions(path, 0o700)' in source
+assert 'line = launcher_dir + "/launch"' in source
+assert 'smux_pane_spawn_pty(scope.session_id, scope.window_id, pane_id, line)' in source
+assert 'file_remove(directory + "/launch")' in source
+assert 'dir_remove(directory, false)' in source
+assert 'if not parent.starts_with("/"):' in source
+
+def cleanup(directory):
+    # Same two operations as _posix_launcher_remove; absent script is normal.
+    try:
+        (directory / 'launch').unlink()
+    except FileNotFoundError:
+        pass
+    directory.rmdir()
+
+def launch(parent, cmd, args, negative=False):
+    directory = pathlib.Path(tempfile.mkdtemp(prefix='cs-pane-', dir=parent))
+    path = directory / 'launch'
+    scope = dict(namespace, directory=str(directory), path=str(path),
+                 cmd=cmd, args=args, stderr_path='')
+    script = eval(expression, scope)
+    if negative:
+        marker = '\nexec '
+        assert marker in script
+        script = script.replace(marker, '\n/bin/rmdir -- ' + namespace['posix_quote_arg'](str(directory)) + ' || exit 126\nexec ', 1)
+    path.write_text(script)
+    path.chmod(0o700)
+    return directory, path, directory.stat()
+
+def reserved(directory, before):
+    after = directory.stat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert stat.S_IMODE(after.st_mode) == 0o700
+    assert list(directory.iterdir()) == []
+
+with tempfile.TemporaryDirectory(prefix="pane lifetime '") as temporary:
+    parent = pathlib.Path(temporary)
+    victim = parent / 'victim'
+    victim.mkdir()
+    sentinel = victim / 'launch'
+    sentinel.write_text('untouched')
+    payload = "spaces ' quotes $dollars ; $(printf wrong)"
+    command = 'IFS= read -r answer; printf "%s\\n" "$#" "$1" "$2" "$answer"'
+    directory, path, before = launch(parent, '/bin/sh', ['-c', command, 'probe', payload, ''])
+    result = subprocess.run([str(path)], input='immediate input\n', text=True,
+                            capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == '2\n' + payload + '\n\nimmediate input\n', repr(result.stdout)
+    reserved(directory, before)
+    try:
+        os.symlink(victim, directory)
+    except OSError as error:
+        assert error.errno == errno.EEXIST
+    else:
+        raise AssertionError('private directory name could be replaced')
+    cleanup(directory)
+    assert not directory.exists() and sentinel.read_text() == 'untouched'
+
+    directory, path, before = launch(parent, '/cs-pane-missing-program-9021', [])
+    result = subprocess.run([str(path)], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 127 and 'cs-pane-missing-program-9021' in result.stderr
+    reserved(directory, before)
+    cleanup(directory)
+    assert not directory.exists()
+
+    # Parent cleanup before the shell consumes the script covers immediate
+    # close/spawn failure's remaining-file case, without a timing-based race.
+    directory, path, before = launch(parent, '/bin/sh', [])
+    assert path.is_file()
+    cleanup(directory)
+    assert not directory.exists()
+    try:
+        launch(parent / 'absent-parent', '/bin/sh', [])
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError('missing temporary parent accepted')
+
+    directory, path, before = launch(parent, '/bin/true', [], negative=True)
+    result = subprocess.run([str(path)], capture_output=True, timeout=10)
+    assert result.returncode == 0
+    try:
+        reserved(directory, before)
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError('old child-rmdir negative control was not detected')
+    assert list(parent.iterdir()) == [victim]
+print('PASS: direct executable script, literal/empty argv, immediate stdin, retained inode/mode, replacement refusal, parent cleanup, missing executable/parent, old-rmdir negative control')
+PY

@@ -2057,6 +2057,12 @@ scripts/setup/host-env.shs --get <key>`. Gate an ISA-specific scenario on
 `host_config_cpu_features(...)` and record the skip reason when the extension
 is absent. Precedence spec: `test/01_unit/lib/common/config_core/host_config_spec.spl`.
 Guide: `doc/07_guide/infra/toolchain/host_config.md`.
+Cache settings live there too (`cache_root`, `cache_scope`, `frontend_cache`,
+`hir_cache`, `native_build_cache_dir`, `cache_max_bytes`, `cache_max_gb`) as
+defaults for the existing `SIMPLE_*CACHE*` vars; a spec that needs a specific
+cache state sets the consumer var explicitly (it always wins) and never relies
+on the host's user file. Use `host_config_cache_env(entries, env)` to test the
+mapping hermetically.
 
 ## Running specs on a loaded box (harness truths, 2026-07-29)
 

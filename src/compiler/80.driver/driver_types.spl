@@ -25,8 +25,11 @@ use compiler.common.config.*
 use compiler.common.config.{CompilerConfig}
 use compiler.backend.backend_port.{BackendPort}
 use lazy compiler.backend.backend_types.{BackendResult, BackendError, CompiledUnit, BackendSdnValue}
-use compiler.backend.codegen.{CodegenMode}
-use compiler.backend.backend.compiler.{CompilerBackendImpl}
+# JIT/AOT HIR modes go through the K1 JIT lane slot: the driver never imports
+# compiler.backend.backend.compiler (Cranelift CodegenPipeline), so an
+# LLVM-only kernel links with no rt_cranelift_* reference.
+use compiler.backend.backend.static_jit_lane.{
+    k1_jit_lane_process_hir_jit_v1, k1_jit_lane_process_hir_aot_v1}
 use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
 use compiler.backend.backend.sdn.{SdnBackendImpl}
 use compiler.common.attributes.{VhdlHardwareMetadataFlatRow}
@@ -706,19 +709,17 @@ class CompileContext:
                 target_triple_fn: fn(): interp_name
             )
         elif selected_mode_text == "jit":
-            val jit_impl = CompilerBackendImpl.jit()
             BackendPort(
                 name: "jit",
-                run_fn: fn(m): jit_impl.process_module(m),
+                run_fn: fn(m): k1_jit_lane_process_hir_jit_v1(m),
                 supports_jit_fn: fn(): true,
                 target_triple_fn: fn(): "native-jit"
             )
         elif selected_mode_text == "aot":
             val output = options.output_file ?? _driver_types_default_output(options.input_files)
-            val aot_impl = CompilerBackendImpl.aot(output)
             BackendPort(
                 name: "aot",
-                run_fn: fn(m): aot_impl.process_module(m),
+                run_fn: fn(m): k1_jit_lane_process_hir_aot_v1(m, output),
                 supports_jit_fn: fn(): false,
                 target_triple_fn: fn(): "native-aot"
             )

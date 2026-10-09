@@ -23,7 +23,14 @@ use compiler.backend.backend.llvm_codegen_adapter.{llvm_compile_module_direct,
 use compiler.backend.codegen_types.{CodegenOutput}
 use compiler.backend.codegen_factory.{CodegenFactory}
 use compiler.backend.backend.llvm_target.{LlvmTargetConfig}
-use compiler.backend.backend.cranelift_codegen_adapter.{CraneliftCodegenAdapter, cranelift_compile_module_direct}
+# No Cranelift adapter import here: the kernel reaches Cranelift only through
+# the K1 static backend table the selected composition installed
+# (static_backend_registry.spl), so a composition without Cranelift
+# (kernel_llvm, the core-c-bootstrap lane) links with no rt_cranelift_*
+# reference and answers k1_backend_unavailable_message_v1 instead.
+use compiler.backend.backend.static_backend_registry.{
+    active_static_backend_table_v1, select_static_backend_v1, k1_backend_unavailable_message_v1}
+use compiler.backend.backend.cranelift_retained_params_v2.{cranelift_retained_params_encode_v2}
 use compiler.backend.llvm_support_matrix.{lookup_support, is_combination_usable}
 use compiler.common.mir_target_context.{mir_target_context_normalize_arch}
 use compiler.mir_opt.mir_opt.storage_projection_lowering.{
@@ -302,6 +309,31 @@ fn codegen_output_to_compiled_module(output: CodegenOutput) -> CompiledModule:
         compile_time_ms: output.compile_time_ms
     )
 
+pub fn cranelift_compile_module_via_k1_v1(
+    options: BackendCompileOptions,
+    module: MirModule,
+    retained_target_triple: text? = nil,
+    retained_cpu_v2: text? = nil,
+    retained_features_v2: [text] = []
+) -> Result<CodegenOutput, CompileError>:
+    """Compile through the K1 table's Cranelift entry, or refuse by name.
+
+    The composition root decides whether Cranelift is linked at all; this is
+    the single kernel-side request site, so an LLVM-only kernel never carries
+    a static Cranelift reference and never answers with a nil stub.
+    """
+    # The bootstrap producer does not materialize computed argument defaults.
+    # Use the same explicit table boundary as CodegenFactory.create; see
+    # stage2_backend_selector_missing_table_argument_2026-09-09.md.
+    val table = active_static_backend_table_v1()
+    match select_static_backend_v1("cranelift", table):
+        case Err(_):
+            Err(compileerror_backend_error(BackendKind.Cranelift,
+                k1_backend_unavailable_message_v1("cranelift")))
+        case Ok(entry):
+            entry.plugin.run(cranelift_retained_params_encode_v2(options,
+                retained_target_triple, retained_cpu_v2, retained_features_v2), module)
+
 fn compile_module_with_backend(
     backend_name: text,
     module: MirModule,
@@ -497,7 +529,7 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
                 return Err(err)
 
     if kind == BackendKind.Cranelift:
-        val result = cranelift_compile_module_direct(
+        val result = cranelift_compile_module_via_k1_v1(
             options, backend_module, retained_cranelift_triple,
             retained_cranelift_cpu_v2, retained_cranelift_features_v2)
         match result:

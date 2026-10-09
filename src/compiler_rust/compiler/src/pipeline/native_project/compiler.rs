@@ -1111,6 +1111,8 @@ pub(crate) fn compile_file_safe(
                 // are pure recomputable memos, so eviction only costs a re-read
                 // and re-parse on a later miss within this worker.
                 crate::interpreter::parsed_source_cache_set_limit(crate::interpreter::parsed_source_cache_compile_max());
+                let timing_wall = std::time::Instant::now();
+                let timing_cpu = current_thread_cpu_time();
                 let source_root = source_root_for_file(&file_path, &source_dirs, &fallback_root);
                 let result = if std::env::var("SIMPLE_NO_CATCH").is_ok() {
                     compile_file_to_object(
@@ -1157,6 +1159,18 @@ pub(crate) fn compile_file_safe(
                         }
                     }
                 };
+                if std::env::var("SIMPLE_NATIVE_FILE_TIMING").as_deref() == Ok("1") {
+                    let cpu = match (timing_cpu, current_thread_cpu_time()) {
+                        (Some(a), Some(b)) => format!("{:.1}s", b.saturating_sub(a).as_secs_f64()),
+                        _ => "?".to_string(),
+                    };
+                    eprintln!(
+                        "[native-file-timing] wall={:.1}s cpu={} {}",
+                        timing_wall.elapsed().as_secs_f64(),
+                        cpu,
+                        file_path.display()
+                    );
+                }
                 let _ = tx.send(());
                 result
             })
@@ -1164,6 +1178,37 @@ pub(crate) fn compile_file_safe(
 
         wait_for_compiler_thread(rx, handle, timeout_secs)
     })
+}
+
+/// CPU time consumed so far by the calling thread.
+#[cfg(windows)]
+fn current_thread_cpu_time() -> Option<Duration> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut c, mut e, mut k, mut u) = (zero, zero, zero, zero);
+    // SAFETY: GetCurrentThread is a pseudo-handle; all out-pointers are valid.
+    if unsafe { GetThreadTimes(GetCurrentThread(), &mut c, &mut e, &mut k, &mut u) } == 0 {
+        return None;
+    }
+    let ticks = |t: FILETIME| ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64;
+    Some(Duration::from_nanos((ticks(k) + ticks(u)) * 100))
+}
+
+/// CPU time consumed so far by the calling thread.
+#[cfg(unix)]
+fn current_thread_cpu_time() -> Option<Duration> {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: valid out-pointer; CLOCK_THREAD_CPUTIME_ID is per-thread.
+    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } != 0 {
+        return None;
+    }
+    Some(Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn current_thread_cpu_time() -> Option<Duration> {
+    None
 }
 
 /// Wait for one native compilation worker.

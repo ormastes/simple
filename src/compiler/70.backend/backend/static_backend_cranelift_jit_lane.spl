@@ -1,0 +1,59 @@
+# Cranelift JIT lane: the only kernel-facing owner of CodegenPipeline.
+#
+# Imported solely by a composition root that links Cranelift
+# (src/compositions/kernel_llvm_cranelift). The kernel reaches these bodies
+# through the StaticJitLaneV1 slot (static_jit_lane.spl) and never names
+# compiler.backend.codegen or std.sffi.codegen itself, so a composition that
+# omits this module (kernel_llvm, the core-c-bootstrap lane) links with no
+# rt_cranelift_* / spl_cranelift_* reference at all.
+
+use compiler.backend.backend.static_jit_lane.{StaticJitLaneV1}
+use compiler.backend.codegen.{CodegenPipeline, CodegenError, CraneliftCompiledModule}
+use compiler.backend.backend.compiler.{CompilerBackendImpl}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.hir.hir_types.{HirModule}
+use compiler.backend.backend_types.{BackendResult, BackendError}
+use compiler.common.driver_core_types.{CompileResult}
+
+fn _cranelift_jit_run(modules: [MirModule]) -> CompileResult:
+    var pipeline = CodegenPipeline.jit()
+    var compiled_modules: [CraneliftCompiledModule] = []
+    for module in modules:
+        match pipeline.compile_module(module):
+            case Ok(compiled):
+                compiled_modules.push(compiled)
+            case Err(e):
+                val cg_err: CodegenError = e
+                return CompileResult.CodegenError(
+                    "JIT compile error in {module.name}: {cg_err.message}")
+
+    if compiled_modules.len() == 0:
+        return CompileResult.RuntimeError("No modules compiled")
+
+    val compiled = compiled_modules[compiled_modules.len() - 1]
+    match compiled.call("main", []):
+        case Ok(result):
+            compiled.release_codegen_module()
+            CompileResult.Success(result)
+        case Err(e):
+            compiled.release_codegen_module()
+            val cg_err: CodegenError = e
+            CompileResult.RuntimeError(cg_err.message)
+
+fn _cranelift_execute_smf(smf_path: text) -> CompileResult:
+    var pipeline = CodegenPipeline.jit()
+    match pipeline.load_smf_and_execute(smf_path):
+        case Ok(result):
+            CompileResult.Success(result)
+        case Err(e):
+            CompileResult.RuntimeError("SMF execution failed: {e}")
+
+fn _cranelift_hir_jit(module: HirModule) -> Result<BackendResult, BackendError>:
+    CompilerBackendImpl.jit().process_module(module)
+
+fn _cranelift_hir_aot(module: HirModule, output: text) -> Result<BackendResult, BackendError>:
+    CompilerBackendImpl.aot(output).process_module(module)
+
+pub fn cranelift_jit_lane_v1() -> StaticJitLaneV1:
+    StaticJitLaneV1("cranelift", _cranelift_jit_run, _cranelift_execute_smf,
+        _cranelift_hir_jit, _cranelift_hir_aot)

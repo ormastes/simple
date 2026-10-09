@@ -6,9 +6,9 @@
 bootstrap_entry_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
 bootstrap_early_repo_root=$(CDPATH= cd -- "${bootstrap_entry_dir}/../.." && pwd -P) || exit 70
 . "${bootstrap_entry_dir}/lib/centralized-storage.shs"
-simple_bootstrap_storage_init "${bootstrap_early_repo_root}" || exit 70
 case "${1:-}" in
   progress-watch)
+    simple_bootstrap_storage_init "${bootstrap_early_repo_root}" || exit 70
     shift
     exec sh "${bootstrap_entry_dir}/bootstrap-progress-watch.shs" "$@"
     ;;
@@ -52,6 +52,21 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
   esac
 done
 # -- argv-normalize end
+
+# Validate typed receipt reasons before storage setup, strategy dispatch, or builds.
+. "${bootstrap_early_repo_root}/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+for bootstrap_receipt_option in "$@"; do
+  case "${bootstrap_receipt_option}" in
+    --produce-stage3-receipt=*) bootstrap_receipt_target=//bootstrap:stage3 ;;
+    --produce-managed-receipt=*) bootstrap_receipt_target=//bootstrap:stage4 ;;
+    *) continue ;;
+  esac
+  bootstrap_planner_v2_reason_allowed "${bootstrap_receipt_target}" "${bootstrap_receipt_option#*=}" || {
+    echo "bootstrap-policy-error: typed-reason-not-allowed-for-target: ${bootstrap_receipt_option}" >&2
+    exit 64
+  }
+done
+simple_bootstrap_storage_init "${bootstrap_early_repo_root}" || exit 70
 
 . "${bootstrap_entry_dir}/bootstrap-seed-stop-policy.shs"
 bootstrap_seed_stop_policy_validate "$@" || exit 64
@@ -148,7 +163,15 @@ kernel_policy_value() {
   echo "error: canonical kernel policy authority is missing" >&2
   exit 1
 }
-selected_k1_policy=$(kernel_policy_value k1_policy) || exit 1
+canonical_k1_policy=$(kernel_policy_value k1_policy) || exit 1
+alternate_k1_policy=$(kernel_policy_value k1_policy_alternates) || exit 1
+# An explicit SIMPLE_KERNEL_K1_POLICY may select the manifest-pinned
+# alternate composition (LLVM-only kernel, no Cranelift link); unset means
+# canonical. Any value outside the manifest is drift and fails below.
+case "${SIMPLE_KERNEL_K1_POLICY:-}" in
+  "${alternate_k1_policy}") selected_k1_policy=${alternate_k1_policy} ;;
+  *) selected_k1_policy=${canonical_k1_policy} ;;
+esac
 selected_abi_policy=$(kernel_policy_value simple_abi_policy) || exit 1
 selected_manifest_policy=$(kernel_policy_value plugin_manifest_policy) || exit 1
 selected_coverage_policy=$(kernel_policy_value coverage_cutover_policy) || exit 1
@@ -159,7 +182,8 @@ selected_performance_baseline_scope=$(kernel_policy_value performance_baseline_s
 selected_performance_steady_percent=$(kernel_policy_value performance_steady_rss_percent) || exit 1
 selected_performance_growth_percent=$(kernel_policy_value performance_growth_percent) || exit 1
 selected_performance_warm_requests=$(kernel_policy_value performance_warm_request_count) || exit 1
-[ "${selected_k1_policy}" = llvm-cranelift ] &&
+[ "${canonical_k1_policy}" = llvm-cranelift ] &&
+  [ "${alternate_k1_policy}" = llvm ] &&
   [ "${selected_abi_policy}" = v1 ] &&
   [ "${selected_manifest_policy}" = simple-sdn ] &&
   [ "${selected_coverage_policy}" = atomic-apk-only ] &&
@@ -802,10 +826,16 @@ esac
 if [ -z "${backend}" ]; then
   backend=llvm
 fi
+# K1 policy `llvm` (src/compositions/kernel_llvm) links no Cranelift port and
+# no JIT lane, so the stage-3 closure never references rt_cranelift_* /
+# spl_cranelift_* (Rust-only symbols the core-c-bootstrap bundle cannot
+# provide). Its only admissible backends are the LLVM ones; `cranelift` needs
+# the combined policy.
 case "${SIMPLE_KERNEL_K1_POLICY:-unselected}:${backend}" in
   llvm-cranelift:llvm|llvm-cranelift:llvm-lib|llvm-cranelift:cranelift) ;;
+  llvm:llvm|llvm:llvm-lib) ;;
   *)
-    echo "error: bootstrap backend '${backend}' is incompatible with SIMPLE_KERNEL_K1_POLICY='${SIMPLE_KERNEL_K1_POLICY}'" >&2
+    echo "error: bootstrap backend '${backend}' is incompatible with SIMPLE_KERNEL_K1_POLICY='${SIMPLE_KERNEL_K1_POLICY}' (llvm-cranelift admits llvm|llvm-lib|cranelift; llvm admits llvm|llvm-lib)" >&2
     exit 1
     ;;
 esac
@@ -1579,8 +1609,11 @@ case "${SIMPLE_KERNEL_K1_POLICY:-unselected}" in
   llvm-cranelift)
     k1_composition_root="${repo_root}/src/compositions/kernel_llvm_cranelift"
     ;;
+  llvm)
+    k1_composition_root="${repo_root}/src/compositions/kernel_llvm"
+    ;;
   unselected|'')
-    echo "error: SIMPLE_KERNEL_K1_POLICY must match canonical llvm-cranelift" >&2
+    echo "error: SIMPLE_KERNEL_K1_POLICY must be set (llvm-cranelift = canonical combined kernel; llvm = LLVM-only kernel with no Cranelift link)" >&2
     exit 1
     ;;
   *)
@@ -1897,15 +1930,27 @@ bootstrap_stage2_single_timeout_cache_retry_eligible() {
   bsscre_log=$1
   [ -f "${bsscre_log}" ] && [ ! -L "${bsscre_log}" ] || return 1
   awk '
-    /^FAILED FILES \(1\):$/ { failed_headers++ }
+    /^FAILED FILES \([1-9][0-9]*\):$/ {
+      failed_headers++
+      declared_failures = $0
+      sub(/^FAILED FILES \(/, "", declared_failures)
+      sub(/\):$/, "", declared_failures)
+    }
     /^  - .* => .*: timeout \([0-9]+s\)$/ { timeout_rows++ }
+    /^  - .* => .*: NOT_ATTEMPTED: previous native worker timed out; refusing replacement admission$/ {
+      deferred_rows++
+    }
     /^  - .* => / { failure_rows++ }
-    /^Build failed: native-build aborted: 1 file\(s\) failed to compile$/ {
+    /^Build failed: native-build aborted: [1-9][0-9]* file\(s\) failed to compile$/ {
       failed_summaries++
+      summarized_failures = $0
+      sub(/^Build failed: native-build aborted: /, "", summarized_failures)
+      sub(/ file\(s\) failed to compile$/, "", summarized_failures)
     }
     END {
       exit !(failed_headers == 1 && timeout_rows == 1 &&
-             failure_rows == 1 && failed_summaries == 1)
+             failure_rows == 1 + deferred_rows && failed_summaries == 1 &&
+             declared_failures == failure_rows && summarized_failures == failure_rows)
     }
   ' "${bsscre_log}"
 }
@@ -4173,6 +4218,22 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         echo "error: could not publish immutable Stage 2 admission receipt" >&2
         stage2_status=4
       else
+        # Publish the platform's runtime names and bind the exact capsule to
+        # this admission before exposing a completed Stage 2 to verification.
+        sh "${repo_root}/scripts/bootstrap/phase2-runtime-binding.shs" publish \
+          "${stage2_admitted_absolute}" "${stage_runtime_absolute}" \
+          "$(absolute_path "${output_dir}")/phase2-runtime-capsules" || {
+          echo "error: could not publish the admitted Phase 2 runtime capsule" >&2
+          exit 1
+        }
+        # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
+        if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
+          sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage2_admitted_bin}" phase2 || \
+            echo "  warning: phase2 snapshot preservation failed (non-fatal)" >&2
+        fi
+        # Downstream parent/planner publication can fail. Seal this completed
+        # admission first so the next attempt can archive its exact evidence.
+        chmod 500 "${stage2_admitted_dir}"
         if [ "${bootstrap_stage2_trust_root}" -eq 1 ]; then
           stage2_parent_dir=$(dirname -- "${stage2_bin}")
           stage2_parent_sanity="${stage2_parent_dir}/stage2-sanity.receipt"
@@ -4261,20 +4322,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
             echo "bootstrap-policy: resume with: sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-managed-from-admitted=${output_dir} --bootstrap-receipt=${managed_stage4_planner_receipt}"
           fi
         fi
-        # Publish the platform's runtime names and bind the exact capsule to
-        # this admission before exposing a completed Stage 2 to verification.
-        sh "${repo_root}/scripts/bootstrap/phase2-runtime-binding.shs" publish \
-          "${stage2_admitted_absolute}" "${stage_runtime_absolute}" \
-          "$(absolute_path "${output_dir}")/phase2-runtime-capsules" || {
-          echo "error: could not publish the admitted Phase 2 runtime capsule" >&2
-          exit 1
-        }
-        # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
-        if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
-          sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage2_admitted_bin}" phase2 || \
-            echo "  warning: phase2 snapshot preservation failed (non-fatal)" >&2
-        fi
-        chmod 500 "${stage2_admitted_dir}"
       fi
     fi
   fi
@@ -4694,36 +4741,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "error: Stage 2 compiler tests exited 0 but wrote no verification summary" >&2
       stage2_tests_status=95
     fi
-    # Exit 0 alone is not evidence. The verifier records UNSUPPORTED tasks
-    # rather than failing them outright, so require the rows that prove a
-    # compiler test binary was BUILT and USED, each exactly once and PASS.
-    # A summary that names none of them checked nothing and is an ERROR.
-    if [ "${stage2_tests_status}" -eq 0 ] &&
-      ! awk -F'[=|]' -v sha="${stage2_tests_sha}" '
-        $1 == "phase" { phases++; if ($2 != "stage2") bad = 1 }
-        $1 == "hash_policy" { policies++; if ($2 != "canonical") bad = 1 }
-        $1 == "expected_compiler_sha256" { expected++; if ($2 != sha) bad = 1 }
-        $1 == "actual_compiler_sha256" { actual++; if ($2 != sha) bad = 1 }
-        $1 == "terminal_failures" { failures++; if ($2 != 0) bad = 1 }
-        $1 == "overall" { outcomes++; if ($2 != "PASS") bad = 1 }
-        $1 == "test_execution" { executions++; if ($2 != "delegated-seed" && $2 != "in-process") bad = 1 }
-        $1 == "task" {
-          if ($3 != "result" || $4 != "PASS") bad = 1
-          if ($2 == "compiler_cli_build") cli++
-          if ($2 == "test_runner_build") runner++
-          if ($2 == "compiler_bootstrap_tests") bootstrap_tests++
-          if ($2 == "interpreter_interpreter_tests") interpreter_tests++
-          if ($2 == "loader_interpreter_tests") loader_tests++
-        }
-        END {
-          exit (bad || phases != 1 || policies != 1 || expected != 1 ||
-            actual != 1 || failures != 1 || outcomes != 1 || executions != 1 ||
-            cli != 1 || runner != 1 || bootstrap_tests != 1 ||
-            interpreter_tests != 1 || loader_tests != 1)
-        }
-      ' "${stage2_tests_summary}"; then
-      echo "error: Stage 2 compiler-test summary is incomplete, not PASS, or names no executed compiler test suite" >&2
-      stage2_tests_status=95
+    # The canonical publisher replays source/tool ownership and real test evidence.
+    if [ "${stage2_tests_status}" -eq 0 ]; then
+      sh "${repo_root}/scripts/bootstrap/lib/verify-stage2-compiler-tests.shs" --publish \
+        "$(absolute_path "${output_dir}")" "${PLATFORM}" "${stage2_admitted_absolute}" \
+        "${stage2_tests_sha}" "${repo_root}" "$(absolute_path "${stage2_tests_summary}")" \
+        "$(absolute_path "${stage2_tests_log}")" || stage2_tests_status=95
     fi
     if [ "${stage2_tests_status}" -ne 0 ]; then
       {
@@ -4748,19 +4771,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "       failure above is understood." >&2
       exit 1
     fi
-    {
-      echo "schema=simple-bootstrap-stage2-compiler-tests-v1"
-      echo "status=pass"
-      echo "candidate=${stage2_admitted_absolute}"
-      echo "candidate_sha256=${stage2_tests_sha}"
-      echo "strategy=${stage2_tests_strategy}"
-      echo "verification_summary=${stage2_tests_summary}"
-      echo "verification_summary_sha256=$(bootstrap_stage3_hash_file "${stage2_tests_summary}")"
-      echo "verification_log=${stage2_tests_log}"
-      # Interim seed delegation must stay visible in the admitted receipt.
-      grep '^test_execution=' "${stage2_tests_summary}"
-    } >"${stage2_tests_evidence}"
-    chmod 400 "${stage2_tests_evidence}"
     echo "bootstrap-policy: stage2-compiler-tests=${stage2_tests_evidence}"
   fi
 
@@ -4958,7 +4968,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
 
   echo "  stage3-native-build log: ${log_dir}/stage3-native-build.log"
   bootstrap_cache_report_log "${log_dir}/stage3-native-build.log"
-  if [ "${SIMPLE_KERNEL_K1_POLICY:-}" = "llvm-cranelift" ]; then
+  # Every manifest-pinned K1 policy (canonical and alternate) produces the
+  # composition receipt; check-kernel-phase7-deployment-prerequisite.shs
+  # consumes it, so skipping it for the alternate would leave a provenance gap.
+  case "${SIMPLE_KERNEL_K1_POLICY:-}" in
+  "${canonical_k1_policy}"|"${alternate_k1_policy}")
     k1_composition_receipt="${log_dir}/stage2-stage3-k1-composition.env"
     sh scripts/bootstrap/write-k1-composition-receipt.shs \
       "${SIMPLE_KERNEL_K1_POLICY}" \
@@ -4970,7 +4984,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "${stage3_command_transcript}" \
       "${k1_composition_receipt}" || exit 1
     echo "  K1 composition receipt: ${k1_composition_receipt}"
-  fi
+    ;;
+  esac
   if [ "${stage3_status}" -eq 0 ] && [ -x "${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}" ]; then
     if bootstrap_stage_sanity "${stage3_bin}" \
       "$(absolute_path "${stage3_sanity_evidence}")" \

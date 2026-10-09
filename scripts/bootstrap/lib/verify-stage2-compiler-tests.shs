@@ -2,6 +2,169 @@
 # Re-admit the mandatory post-admission compiler-test matrix before manager work.
 set -eu
 die() { echo "stage2-tests-resume: $*" >&2; exit 1; }
+# Explicit controller publication can qualify an unchanged, separately frozen source.
+if [ "${1:-}" = --publish ]; then
+  shift
+  [ "$#" -eq 7 ] || die "publish requires output, platform, candidate, SHA, frozen source, summary and log"
+  output=$1 platform=$2 candidate=$3 expected_sha=$4 source_root=$5 summary=$6 verification_log=$7
+  case "$platform" in ''|*[!A-Za-z0-9_.-]*) die 'invalid platform' ;; esac
+  for publication_path in "$output" "$candidate" "$source_root" "$summary" "$verification_log"; do
+    case "$publication_path" in /*) ;; *) die 'publication paths must be absolute' ;; esac
+  done
+  canonical_path() {
+    perl -MCwd=abs_path -e 'my $p=shift; my $a=abs_path($p); defined($a) && $a eq $p or exit 1' "$1"
+  }
+  for publication_path in "$output" "$candidate" "$source_root" "$summary" "$verification_log"; do
+    canonical_path "$publication_path" || die 'noncanonical or symlinked publication path'
+  done
+  source_root=$(CDPATH= cd -- "$source_root" && pwd -P) || die 'frozen source unavailable'
+  tests_root="$output/stage2-compiler-tests/$platform"
+  receipt="$tests_root/stage2-compiler-tests.env"
+  [ "$candidate" = "$output/stage3/$platform/stage2-admitted/simple" ] ||
+    [ "$candidate" = "$output/stage3/$platform/stage2-admitted/simple.exe" ] || die 'candidate outside selected admission'
+  case "$summary" in "$tests_root"/*) ;; *) die 'summary outside selected test run' ;; esac
+  for publication_file in "$candidate" "$summary" "$verification_log"; do
+    [ -f "$publication_file" ] && [ ! -L "$publication_file" ] || die 'publication input missing or symlinked'
+  done
+  [ ! -e "$receipt" ] && [ ! -L "$receipt" ] && [ ! -e "$tests_root/rejection.env" ] || die 'retained verdict blocks publication'
+  BOOTSTRAP_STAGE3_FACADE_PATH="$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+  export BOOTSTRAP_STAGE3_FACADE_PATH
+  . "$BOOTSTRAP_STAGE3_FACADE_PATH" || die 'frozen source facade unavailable'
+  field() { bootstrap_stage3_manifest_value "$1" "$2"; }
+  hash_file() { bootstrap_stage3_hash_file "$1"; }
+  admission="$(dirname -- "$candidate")/admission.env"
+  [ -f "$admission" ] && [ ! -L "$admission" ] || die 'admission unavailable'
+  [ "$(field schema "$admission")" = simple-bootstrap-stage2-admission-v2 ] &&
+    [ "$(field status "$admission")" = admitted ] &&
+    [ "$(field candidate_path "$admission")" = "$candidate" ] &&
+    [ "$(field candidate_sha256 "$admission")" = "$expected_sha" ] &&
+    [ "$(hash_file "$candidate")" = "$expected_sha" ] || die 'candidate differs from admission'
+  [ -x "$candidate" ] || die 'admitted compiler is not executable'
+  admission_sha=$(hash_file "$admission") || die 'admission hash unavailable'
+  SIMPLE_ABI_POLICY=${SIMPLE_ABI_POLICY:-v1}
+  export SIMPLE_ABI_POLICY
+  [ "$SIMPLE_ABI_POLICY" = v1 ] || die 'unsupported ABI policy'
+  replay_admission() {
+    admission_source=$(field source_snapshot_path "$admission") || return 1
+    admission_runtime=$(field runtime_snapshot_path "$admission") || return 1
+    admission_runtime_root=$(field runtime_authority_path "$admission") || return 1
+    admission_tool=$(field tool_authority_path "$admission") || return 1
+    admission_args=$(field build_args_sha256 "$admission") || return 1
+    admission_sanity=$(field sanity_evidence_path "$admission") || return 1
+    admission_receiver=$(field receiver_evidence_path "$admission") || return 1
+    admission_receiver_log=$(field receiver_log_path "$admission") || return 1
+    for authority in "$admission_source" "$admission_runtime" "$admission_runtime_root" "$admission_tool" \
+      "$admission_sanity" "$admission_receiver" "$admission_receiver_log"; do canonical_path "$authority" || return 1; done
+    bootstrap_stage3_verify_stage2_admission_receipt \
+      "$admission" "$admission" "$candidate" "$candidate" "$admission_source" "$admission_source" \
+      "$admission_runtime" "$admission_runtime" "$admission_runtime_root" "$admission_runtime_root" \
+      "$admission_tool" "$admission_tool" "$admission_args" "$admission_sanity" "$admission_sanity" \
+      "$(dirname -- "$admission_sanity")" "$admission_receiver" "$admission_receiver" \
+      "$admission_receiver_log" "$admission_receiver_log" "$source_root"
+  }
+  replay_admission || die 'typed Stage2 admission replay failed'
+  summary_sha=$(hash_file "$summary") || die 'summary hash unavailable'
+  source_snapshot=$(field source_snapshot_path "$admission") || die 'source snapshot absent'
+  source_sha=$(field source_snapshot_sha256 "$admission") || die 'source digest absent'
+  [ -f "$source_snapshot" ] && [ ! -L "$source_snapshot" ] &&
+    [ "$(hash_file "$source_snapshot")" = "$source_sha" ] || die 'source snapshot changed'
+  publication_work=$(mktemp -d "$tests_root/.publish.XXXXXX") || die 'publication scratch unavailable'
+  trap 'rm -rf "$publication_work"' EXIT HUP INT TERM
+  bootstrap_stage3_source_snapshot "$publication_work/source-observed" "$source_root" || die 'source observation failed'
+  cmp -s "$publication_work/source-observed" "$source_snapshot" || die 'frozen source differs from admitted source'
+  execution=$(awk -F'[=|]' -v sha="$expected_sha" '
+    $1 == "schema" { schema++; if ($2 != "bootstrap-phase-verification-v1") bad=1 }
+    $1 == "phase" { phases++; if ($2 != "stage2") bad=1 }
+    $1 == "hash_policy" { policies++; if ($2 != "canonical") bad=1 }
+    $1 == "expected_compiler_sha256" { expected++; if ($2 != sha) bad=1 }
+    $1 == "actual_compiler_sha256" { actual++; if ($2 != sha) bad=1 }
+    $1 == "terminal_failures" { failures++; if ($2 != "0") bad=1 }
+    $1 == "overall" { outcomes++; if ($2 != "PASS") bad=1 }
+    $1 == "test_execution" { executions++; if ($2 != "delegated-seed" && $2 != "in-process") bad=1; execution=$2 }
+    $1 == "task" {
+      delete row; for(i=1;i<NF;i+=2) row[$i]=$(i+1)
+      if(row["result"] != "PASS" || row["status"] != "0") bad=1
+      task=row["task"]; count[task]++
+      if(task == "compiler_bootstrap_tests" && row["skipped"] != "0") bad=1
+      if(task == "compiler_bootstrap_tests" || task == "interpreter_interpreter_tests" || task == "loader_interpreter_tests") {
+        if(row["executed"] !~ /^[1-9][0-9]*$/ || row["failed"] != "0" ||
+           row["command_owner_before"] != "PASS" || row["command_owner_after"] != "PASS") bad=1
+      }
+    }
+    END {
+      if(bad || schema!=1 || phases!=1 || policies!=1 || expected!=1 || actual!=1 || failures!=1 || outcomes!=1 || executions!=1 ||
+         count["compiler_cli_build"]!=1 || count["test_runner_build"]!=1 || count["compiler_bootstrap_tests"]!=1 ||
+         count["interpreter_interpreter_tests"]!=1 || count["loader_interpreter_tests"]!=1) exit 1
+      print execution
+    }' "$summary") || die 'compiler-test matrix incomplete, empty, or not terminal PASS'
+  owner=$(field command_owner_receipt "$summary") || die 'command ownership absent'
+  owner_sha=$(field command_owner_receipt_sha256 "$summary") || die 'command ownership digest absent'
+  canonical_path "$owner" || die 'noncanonical command owner path'
+  [ -f "$owner" ] && [ ! -L "$owner" ] && [ "$(hash_file "$owner")" = "$owner_sha" ] || die 'command ownership changed'
+  [ "$(field schema "$owner")" = simple-bootstrap-command-owners-v3 ] &&
+    [ "$(field status "$owner")" = frozen ] && [ "$(field phase "$owner")" = stage2 ] &&
+    [ "$(field compiler_snapshot_sha256 "$owner")" = "$expected_sha" ] || die 'command ownership differs from candidate'
+  for owned_field in verification_backend tool_input_identity_sha256 target_source_snapshot_sha256; do
+    owner_value=$(field "$owned_field" "$owner") || die 'owner authority absent'
+    [ -n "$owner_value" ] && [ "$owner_value" = "$(field "$owned_field" "$summary")" ] || die 'owner authority differs from matrix'
+  done
+  [ "$(field target_source_snapshot_sha256 "$owner")" = "$source_sha" ] || die 'owner source differs from admission'
+  runtime=$(sh "$source_root/scripts/bootstrap/phase2-runtime-binding.shs" resolve "$candidate" "$source_root" "$publication_work/runtime-replay") || die 'runtime admission replay failed'
+  [ "$runtime" = "$(field runtime_path "$summary")" ] &&
+    [ "$(field runtime_identity_sha256 "$owner")" = "$(field capsule_identity_sha256 "$runtime/phase2-runtime-capsule.env")" ] || die 'owner runtime differs from admitted capsule'
+  for tool in compiler_cli test_runner mcp_server; do
+    tool_path=$(field "${tool}_path" "$owner") || die 'owned tool absent'
+    tool_sha=$(field "${tool}_sha256" "$owner") || die 'owned tool digest absent'
+    if [ "$tool" = mcp_server ] && [ "$tool_path" = - ]; then
+      [ "$tool_sha" = - ] || die 'unsupported MCP ownership sentinel'
+      continue
+    fi
+    canonical_path "$tool_path" || die 'noncanonical owned tool path'
+    [ -f "$tool_path" ] && [ ! -L "$tool_path" ] && [ -x "$tool_path" ] &&
+      [ "$(hash_file "$tool_path")" = "$tool_sha" ] || die 'owned tool changed'
+    [ "$tool" = mcp_server ] || [ "$tool_sha" = "$(field "${tool}_sha256" "$summary")" ] || die 'owned tool differs from matrix'
+    printf '%s %s\n' "$tool_sha" "$tool_path" >>"$publication_work/tool-hashes"
+  done
+  awk -F'[=|]' '$1=="task" && ($2=="compiler_bootstrap_tests" || $2=="interpreter_interpreter_tests" || $2=="loader_interpreter_tests") {
+    for(i=1;i<NF;i+=2) if($i=="log") print $(i+1)
+  }' "$summary" >"$publication_work/test-logs"
+  [ "$(wc -l <"$publication_work/test-logs")" -eq 3 ] || die 'required test logs absent'
+  while IFS= read -r test_log; do
+    [ -f "$test_log" ] && [ ! -L "$test_log" ] || die 'required test log missing'
+    canonical_path "$test_log" || die 'noncanonical test log path'
+    test_log_sha=$(hash_file "$test_log") || die 'test log hash unavailable'
+    counts=$(perl "$source_root/scripts/bootstrap/validate-test-runner-json.pl" "$test_log") || die 'test log has no valid executed test evidence'
+    set -- $counts
+    [ "$#" -eq 3 ] || die 'invalid JSON execution counters'
+    log_passed=$1 log_failed=$2 log_skipped=$3
+    awk -F'[=|]' -v expected_log="$test_log" -v passed="$log_passed" -v failed="$log_failed" -v skipped="$log_skipped" '
+      $1=="task" { delete row; for(i=1;i<NF;i+=2) row[$i]=$(i+1)
+        if(row["log"]==expected_log) { found++; if(row["passed"]!=passed || row["failed"]!=failed || row["skipped"]!=skipped || row["executed"]!=(passed+failed)) bad=1 }
+      }
+      END { exit(bad || found!=1) }' "$summary" || die 'JSON counters differ from matrix'
+    printf '%s %s\n' "$test_log_sha" "$test_log" >>"$publication_work/tool-hashes"
+  done <"$publication_work/test-logs"
+  bootstrap_stage3_source_snapshot "$publication_work/source-after" "$source_root" || die 'source final observation failed'
+  cmp -s "$publication_work/source-after" "$source_snapshot" || die 'source changed during publication'
+  while IFS=' ' read -r pinned_sha pinned_path; do
+    [ "$(hash_file "$pinned_path")" = "$pinned_sha" ] || die 'tool or test evidence changed during publication'
+  done <"$publication_work/tool-hashes"
+  replay_admission || die 'typed authority changed during publication'
+  sh "$source_root/scripts/bootstrap/phase2-runtime-capsule.shs" verify "$runtime" >/dev/null || die 'runtime changed during publication'
+  [ "$(hash_file "$candidate")" = "$expected_sha" ] && [ "$(hash_file "$summary")" = "$summary_sha" ] &&
+    [ "$(hash_file "$owner")" = "$owner_sha" ] && [ "$(hash_file "$admission")" = "$admission_sha" ] &&
+    [ "$(hash_file "$source_snapshot")" = "$source_sha" ] || die 'authority changed during publication'
+  {
+    printf 'schema=simple-bootstrap-stage2-compiler-tests-v1\nstatus=pass\ncandidate=%s\ncandidate_sha256=%s\n' "$candidate" "$expected_sha"
+    printf 'strategy=%s\nverification_summary=%s\nverification_summary_sha256=%s\nverification_log=%s\ntest_execution=%s\n' \
+      "$(field strategy "$summary")" "$summary" "$summary_sha" "$verification_log" "$execution"
+    printf 'source_root=%s\nsource_snapshot_sha256=%s\ncommand_owner_receipt_sha256=%s\n' "$source_root" "$source_sha" "$owner_sha"
+  } >"$publication_work/receipt"
+  chmod 400 "$publication_work/receipt"
+  ln "$publication_work/receipt" "$receipt" || die 'verdict appeared during publication'
+  printf '%s\n' "$execution"
+  exit 0
+fi
 [ "$#" -eq 4 ] || die "output, platform, candidate and expected SHA required"
 output=$1 platform=$2 candidate=$3 expected_sha=$4
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P) || die "repository root unavailable"

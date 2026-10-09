@@ -502,6 +502,37 @@ process_tree_metrics_windows() {
   case "$windows_root:$windows_exclude" in
     *[!0-9:]*|:*|*:) return 1 ;;
   esac
+  # MSYS fork+exec leaves an exec'd child's native ParentProcessId pointing at
+  # the exited fork intermediate, so a native-only walk stops at the first MSYS
+  # hop (measured: `sh -> perl` busy loop read tree_processes=1, cpu 0.0).
+  # Bridge each MSYS descendant of the root to its MSYS parent's winpid; the
+  # watcher's own MSYS subtree is never bridged. A failed MSYS table is
+  # unavailable evidence, not a smaller tree.
+  windows_msys_table=$(ps -l 2>/dev/null) || return 1
+  windows_bridge=$(printf '%s\n' "$windows_msys_table" | awk -v root="$1" -v exclude="$2" '
+    {
+      off = ($1 ~ /^[0-9]+$/) ? 0 : 1
+      pid = $(1 + off)
+      if (pid !~ /^[0-9]+$/) next
+      parent[pid] = $(2 + off); win[pid] = $(4 + off); pids[++n] = pid
+    }
+    END {
+      inc[root] = 1; changed = 1
+      while (changed) {
+        changed = 0
+        for (i = 1; i <= n; i++) {
+          p = pids[i]
+          if (p != exclude && !(p in inc) && (parent[p] in inc)) { inc[p] = 1; changed = 1 }
+        }
+      }
+      sep = ""
+      for (i = 1; i <= n; i++) {
+        p = pids[i]
+        if (p != root && (p in inc) && (parent[p] in win)) {
+          printf "%s%s:%s", sep, win[p], win[parent[p]]; sep = ","
+        }
+      }
+    }') || return 1
   process_tree_metrics_ps_table "$windows_root" "$windows_exclude" |
     awk '{ $7="unknown"; $8="unknown"; print $0 " windows" }'
 }
@@ -514,8 +545,13 @@ process_table_snapshot() {
   if [ "$watch_windows" -eq 1 ] && [ -z "${BOOTSTRAP_WATCH_PS_COMMAND:-}" ]; then
     windows_observer=$(cygpath -w "$(dirname -- "$0")/../resource/windows-process-observer.ps1") || return 1
     # Buffer until success: partial CIM results are unavailable evidence.
+    if [ -n "${windows_bridge:-}" ]; then
+      set -- -Bridge "$windows_bridge"
+    else
+      set --
+    fi
     windows_rows=$(powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
-      -File "$windows_observer" -RootPid "$metrics_root" -ExcludePid "$metrics_exclude") || return 1
+      -File "$windows_observer" -RootPid "$metrics_root" -ExcludePid "$metrics_exclude" "$@") || return 1
     printf '%s\n' "$windows_rows"
   elif [ "$watch_platform" = Darwin ] && [ -z "${BOOTSTRAP_WATCH_PS_COMMAND:-}" ]; then
     # Buffer until success: a failed/partial native scan must never look like

@@ -35,6 +35,40 @@ which uses the same env-over-user order.
 | `llvm_version` | `23` (major only) | `llvm-toolchain-env.shs` preferred major; `SIMPLE_LLVM_VERSION` still wins |
 | `gpu` | `on` / `off` | informational |
 
+`llvm_root` is a prefix only and selects no compiler driver: clang-cl is used
+solely by the Windows MSVC lane; Linux/macOS/FreeBSD/SimpleOS use clang/cc and
+MinGW a target-qualified clang.
+
+### Cache keys
+
+Each cache key is only a **default** for one existing consumer variable; when
+that variable is set it wins (the key is not applied). They choose dirs, the
+lane name, on/off and size caps — never keying: cache entries stay
+content+producer keyed and lane-partitioned
+(`doc/05_design/compiler/incremental_build/per_lane_private_caches.md`).
+
+| Key | Example | Consumer variable it defaults |
+|-----|---------|-------------------------------|
+| `cache_root` | `~/.cache/simple` | `SIMPLE_HOST_CACHE_ROOT` (host-shared CAS base; `SIMPLE_CACHE` / `SIMPLE_USER_STORAGE_ROOT` still win) |
+| `cache_scope` | `default` | `SIMPLE_CACHE_SCOPE` / `--cache-scope`; `[A-Za-z0-9._-]`, no leading `.` |
+| `frontend_cache` | `on` / `off` | `SIMPLE_FRONTEND_CACHE` (`off` = `0`) |
+| `hir_cache` | `on` / `off` | `SIMPLE_HIR_CACHE` (`off` = `0`) |
+| `native_build_cache_dir` | `~/.cache/simple/native-build/v1` | `SIMPLE_NATIVE_BUILD_CACHE_DIR` |
+| `cache_max_bytes` | `10737418240` | `SIMPLE_CACHE_MAX_BYTES` (L2 GC / cache-dir evictor) |
+| `cache_max_gb` | `20` | `SIMPLE_CACHE_MAX_GB` (`simple clean` auto mode) |
+
+Apply them to an interactive shell with
+`eval "$(sh scripts/setup/host-env.shs --cache-env)"` (or call
+`host_config_apply_cache_env` after sourcing). Sourcing host-env exports no
+cache key at all — not even `SIMPLE_HOST_CACHE_ROOT`, which `cache_root.spl`
+reads live — so `run-phase1-local.shs` and other sourcing entrypoints keep an
+unchanged `machine_cache_root()`. Bootstrap never applies them:
+`bootstrap-from-scratch.sh` sets `SIMPLE_CACHE` via centralized storage before
+the host-shared cache helper runs, and pins its own lane caches. A native
+binary started without the eval does not read the file.
+`--init` writes all cache keys commented with this host's defaults, so a fresh
+setup changes no cache env.
+
 ## Commands
 
 ```bash
@@ -44,8 +78,9 @@ sh scripts/setup/host-env.shs --init --all-cores  # opt in to all detected CPUs
 sh scripts/setup/setup-freebsd-host.shs   # FreeBSD-only all-core initializer
 sh scripts/setup/host-env.shs --print      # effective value + winning layer per key
 sh scripts/setup/host-env.shs --get llvm_root
+eval "$(sh scripts/setup/host-env.shs --cache-env)"   # cache defaults for unset vars
 sh scripts/setup/host-env.shs --selftest   # fixtures incl. env > user > host > default
-. scripts/setup/host-env.shs               # export SIMPLE_HOST_<KEY> into this shell
+. scripts/setup/host-env.shs               # export SIMPLE_HOST_<KEY> (non-cache keys) into this shell
 ```
 
 `--init` detects: CPU count (`getconf`/`nproc`/`sysctl`), family and features
