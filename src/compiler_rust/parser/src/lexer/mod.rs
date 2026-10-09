@@ -29,12 +29,15 @@ pub struct Lexer<'a> {
     /// Forced indentation only applies at or below the bracket depth when it was enabled.
     /// This ensures that inner parenthesized expressions still suppress indentation normally.
     force_indent_bracket_depths: Vec<usize>,
-    /// Lines (0-based) blanked/dedented by `@when`/`@elif`/`@else`/`@end`
-    /// conditional compilation (see `crate::cond_compile`). `None` when no
-    /// directive occurs.
+    /// Lines (0-based) blanked by `@when`/`@elif`/`@else`/`@end` conditional
+    /// compilation (see `crate::cond_compile`). Kept lines lex verbatim
+    /// (branch bodies are flat). `None` when no directive occurs.
     line_mask: Option<std::sync::Arc<crate::cond_compile::LineMask>>,
     /// Diagnostics from conditional-compilation evaluation (unsupported atoms etc.).
     pub cond_diagnostics: Vec<String>,
+    /// `false` when the directives are unbalanced (stray `@elif`/`@else`/
+    /// `@end`, unclosed `@when`): the parser fails closed on this.
+    pub cond_balanced: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -45,16 +48,19 @@ impl<'a> Lexer<'a> {
 
     /// Like `new`, but evaluates `@when(...)` conditions against an explicit target.
     pub fn new_for_target(source: &'a str, os: &str, arch: &str) -> Self {
-        let (line_mask, cond_diagnostics) = match crate::cond_compile::inactive_line_mask(source, os, arch) {
-            Some(mut mask) => {
-                let diags = std::mem::take(&mut mask.diagnostics);
-                (Some(std::sync::Arc::new(mask)), diags)
-            }
-            None => (None, Vec::new()),
-        };
+        let (line_mask, cond_diagnostics, cond_balanced) =
+            match crate::cond_compile::inactive_line_mask(source, os, arch) {
+                Some(mut mask) => {
+                    let diags = std::mem::take(&mut mask.diagnostics);
+                    let balanced = mask.balanced;
+                    (Some(std::sync::Arc::new(mask)), diags, balanced)
+                }
+                None => (None, Vec::new(), true),
+            };
         Self {
             line_mask,
             cond_diagnostics,
+            cond_balanced,
             source,
             chars: source.char_indices().peekable(),
             current_pos: 0,
@@ -82,6 +88,7 @@ impl<'a> Lexer<'a> {
             pending_tokens: Vec::new(),
             line_mask: None,
             cond_diagnostics: Vec::new(),
+            cond_balanced: true,
             at_line_start: false, // Don't treat leading whitespace as indentation
             bracket_depth: 0,
             force_indentation_depth: 0,
@@ -590,14 +597,6 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-    }
-
-    /// Indentation columns to remove on the current line (branch-body dedent).
-    pub(super) fn cond_dedent(&self) -> usize {
-        self.line_mask
-            .as_ref()
-            .and_then(|mask| mask.dedent.get(self.line - 1).copied())
-            .unwrap_or(0)
     }
 
     fn advance(&mut self) -> Option<(usize, char)> {

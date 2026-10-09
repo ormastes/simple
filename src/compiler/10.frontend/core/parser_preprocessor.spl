@@ -4,7 +4,7 @@
 # and @cfg per-declaration conditionals.
 # Extracted from parser.spl.
 
-use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_detect_os, cfg_detect_arch, cfg_os_is_unix, cfg_eval_key_value}
+use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_detect_os, cfg_detect_arch, cfg_os_is_unix}
 use compiler.frontend.frontend_target_cfg_receipt_v1.{
     FrontendCfgDecisionV1, FrontendTargetPreprocessV1}
 
@@ -33,27 +33,29 @@ fn _pp_unsupported(message: text) -> bool:
         _pp_target_error = message
     false
 
-fn _pp_os_name(value: text) -> text:
-    if value == "win": return "windows"
-    if value == "mac" or value == "darwin": return "macos"
-    if value == "baremetal": return "none"
-    if value == "windows" or value == "linux" or value == "macos" or
-            value == "freebsd" or value == "openbsd" or value == "netbsd" or
-            value == "android" or value == "simpleos" or value == "none" or
+# Canonical atom set shared with the Rust seed (`parser/src/cond_compile.rs`;
+# the module doc there is the normative table). Values are case-insensitive;
+# both sides are pinned to test/fixtures/conditional_compile/conformance/.
+fn _pp_os_name(raw: text) -> text:
+    val value = raw.to_lower()
+    if value == "windows" or value == "win": return "windows"
+    if value == "macos" or value == "mac" or value == "darwin": return "macos"
+    if value == "none" or value == "baremetal": return "none"
+    if value == "linux" or value == "freebsd" or value == "openbsd" or
+            value == "netbsd" or value == "android" or value == "simpleos" or
             value == "unix":
         return value
     ""
 
-fn _pp_arch_name(value: text) -> text:
-    if value == "amd64" or value == "x64": return "x86_64"
-    if value == "arm64": return "aarch64"
-    if value == "i386" or value == "i686": return "x86"
-    if value == "armv6" or value == "armv7" or value == "arm32": return "arm"
-    if value == "ppc64el" or value == "powerpc64le": return "ppc64le"
-    if value == "x86_64" or value == "x86" or value == "aarch64" or
-            value == "arm" or value == "riscv64" or value == "riscv32" or
-            value == "ppc64le" or value == "thumbv6m" or value == "thumbv7m" or
-            value == "thumbv7em":
+fn _pp_arch_name(raw: text) -> text:
+    val value = raw.to_lower()
+    if value == "x86_64" or value == "amd64" or value == "x64": return "x86_64"
+    if value == "x86" or value == "i386" or value == "i686": return "x86"
+    if value == "aarch64" or value == "arm64": return "aarch64"
+    if value == "arm" or value == "arm32" or value == "armv6" or value == "armv7": return "arm"
+    if value == "ppc64le" or value == "ppc64el" or value == "powerpc64le": return "ppc64le"
+    if value == "riscv64" or value == "riscv32" or value == "thumbv6m" or
+            value == "thumbv7m" or value == "thumbv7em":
         return value
     ""
 
@@ -66,10 +68,11 @@ fn _pp_os_match(value: text) -> bool:
         return cfg_os_is_unix(os)
     os == wanted
 
-fn _pp_family_match(value: text) -> bool:
+fn _pp_family_match(raw: text) -> bool:
+    val value = raw.to_lower()
     if value == "unix": return cfg_os_is_unix(_pp_current_os())
     if value == "windows": return _pp_current_os() == "windows"
-    _pp_unsupported("unsupported target cfg family: {value}")
+    _pp_unsupported("unsupported target cfg family: {raw}")
 
 fn _pp_arch_match(value: text) -> bool:
     val wanted = _pp_arch_name(value)
@@ -79,12 +82,10 @@ fn _pp_arch_match(value: text) -> bool:
 
 fn _pp_eval_atom(token: text) -> bool:
     val t = cfg_strip_quotes(token).trim()
-    if t == "true" or t == "compiled": return true
-    if t == "false" or t == "interpreter": return false
-    if not _pp_target_mode:
-        if t == "": return false
-        if t == "debug": return true
-        if t == "release": return false
+    val lowered = t.to_lower()
+    if lowered == "true" or lowered == "compiled" or lowered == "debug": return true
+    if lowered == "false" or lowered == "interpreter" or lowered == "release": return false
+    if not _pp_target_mode and t == "": return false
     if _pp_os_name(t) != "": return _pp_os_match(t)
     if _pp_arch_name(t) != "": return _pp_arch_match(t)
     val parts = if t.contains("=="): t.split("==") else: t.split("=")
@@ -95,10 +96,11 @@ fn _pp_eval_atom(token: text) -> bool:
             return _pp_os_match(value)
         if key == "family" or key == "target_family":
             return _pp_family_match(value)
-        if key == "arch" or key == "target_arch":
+        if key == "arch" or key == "target_arch" or key == "cpu":
             return _pp_arch_match(value)
-        if not _pp_target_mode and (key == "cpu" or key == "feature"):
-            return cfg_eval_key_value(key, value)
+        # No build features are defined: a feature gate is always false.
+        if key == "feature":
+            return false
     _pp_unsupported("unsupported target cfg condition atom: {t}")
 
 fn _pp_tokenize_condition(condition: text) -> [text]:
@@ -148,6 +150,20 @@ fn _pp_tokenize_condition(condition: text) -> [text]:
                 current = []
             tokens.push("!")
             i = i + 1
+            continue
+
+        # `=` / `==` are tokens of their own so `os ="x"`, `os= "x"` and
+        # `os = "x"` all re-join to one key/value atom (seed does the same).
+        if ch == "=":
+            if current.len() > 0:
+                tokens.push(current.join(""))
+                current = []
+            if i + 1 < condition.len() and condition[i + 1] == "=":
+                tokens.push("==")
+                i = i + 2
+            else:
+                tokens.push("=")
+                i = i + 1
             continue
 
         current.push(ch)
@@ -220,11 +236,12 @@ fn _pp_parse_primary() -> bool:
     # variant were silently dropped (or, depending on source order, an
     # inactive variant's declaration could survive the false-negative
     # filter untouched), producing wrong/ambiguous @cfg-arch dispatch.
-    # Reassemble one or more adjacent "=" tokens plus the following value
-    # token into a single `key=value`/`key==value` atom so the existing
-    # `cfg_eval_key_value` path in `_pp_eval_atom` (line 67-74) is reached.
+    # Reassemble one or more adjacent "="/"==" tokens plus the following
+    # value token into a single `key=value`/`key==value` atom so the
+    # key/value path in `_pp_eval_atom` is reached (same as the seed's
+    # cond_compile parse_primary).
     var eq_op: [text] = []
-    while _pp_peek() == "=":
+    while _pp_peek() == "=" or _pp_peek() == "==":
         eq_op.push(_pp_take())
     if eq_op.len() > 0:
         val value_tok = _pp_take()
@@ -458,6 +475,8 @@ fn _pp_preprocess_conditionals(source: text) -> text:
             continue
 
         if active:
+            # Branch bodies are flat: kept lines are emitted verbatim, never
+            # dedented (same contract as the seed's cond_compile pass).
             out_lines.push(line)
         else:
             # Keep line count stable for diagnostics.

@@ -1,6 +1,7 @@
 # std.config core — HOST CONFIG (schema simple-host-config-v1).
 #
-# Host facts (parallelism, cpu family/ISA features, os, LLVM toolchain, gpu)
+# Host facts (parallelism, cpu family/ISA features, os, LLVM toolchain, gpu,
+# and cache defaults for the existing SIMPLE_*CACHE* consumer variables)
 # resolved over the same layer engine every other config uses
 # (std.common.config_core.layers). Keys are documented in the versioned
 # defaults file config/host/host_config.sdn, whose values are commented out.
@@ -32,8 +33,55 @@ fn host_config_schema() -> [ConfigFieldDescriptor]:
         config_enum_field("os", "", ["windows", "linux", "macos", "freebsd", "simpleos"]),
         config_field("llvm_root", "text", ""),
         config_int_field("llvm_version", "", 1),
-        config_enum_field("gpu", "", ["on", "off"])
+        config_enum_field("gpu", "", ["on", "off"]),
+        # cache: each is only a DEFAULT for an existing consumer variable
+        # (host_config_cache_var); a set consumer variable always wins.
+        config_field("cache_root", "text", ""),
+        config_field("cache_scope", "text", ""),
+        config_enum_field("frontend_cache", "", ["on", "off"]),
+        config_enum_field("hir_cache", "", ["on", "off"]),
+        config_field("native_build_cache_dir", "text", ""),
+        config_int_field("cache_max_bytes", "", 1),
+        config_int_field("cache_max_gb", "", 1)
     ]
+
+# Cache keys, in the shell twin's HOST_CONFIG_CACHE_KEYS order.
+val HOST_CONFIG_CACHE_KEYS = ["cache_root", "cache_scope", "frontend_cache", "hir_cache", "native_build_cache_dir", "cache_max_bytes", "cache_max_gb"]
+
+# The EXISTING consumer variable a cache key is a default for ("" when `key`
+# is not a cache key). Same table as host_config_cache_var in host-env.shs.
+fn host_config_cache_var(key: text) -> text:
+    if key == "cache_root": return "SIMPLE_HOST_CACHE_ROOT"
+    if key == "cache_scope": return "SIMPLE_CACHE_SCOPE"
+    if key == "frontend_cache": return "SIMPLE_FRONTEND_CACHE"
+    if key == "hir_cache": return "SIMPLE_HIR_CACHE"
+    if key == "native_build_cache_dir": return "SIMPLE_NATIVE_BUILD_CACHE_DIR"
+    if key == "cache_max_bytes": return "SIMPLE_CACHE_MAX_BYTES"
+    if key == "cache_max_gb": return "SIMPLE_CACHE_MAX_GB"
+    ""
+
+# A lane name is a cache DIRECTORY segment: only [A-Za-z0-9._-], not starting
+# with '.', so a config value can never step out of its lane partition.
+fn host_config_scope_name_ok(name: text) -> bool:
+    if name.len() == 0:
+        return false
+    if name.char_code_at(0) == 46:
+        return false
+    var i = 0
+    while i < name.len():
+        val c = name.char_code_at(i)
+        val ok = (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or c == 46 or c == 45 or c == 95
+        if not ok:
+            return false
+        i = i + 1
+    true
+
+fn _hc_value_ok(desc: ConfigFieldDescriptor, value: text) -> bool:
+    if not config_validate_value(desc, value).ok:
+        return false
+    if desc.key == "cache_scope":
+        return host_config_scope_name_ok(value)
+    true
 
 # Environment variable that overrides `key`: SIMPLE_HOST_<KEY>.
 fn host_config_env_name(key: text) -> text:
@@ -101,7 +149,7 @@ fn host_config_warnings(defaults_text: text, host_text: text, user_text: text, e
     val schema = host_config_schema()
     for e in host_config_entries(defaults_text, host_text, user_text, env):
         val idx = config_schema_index(schema, e.key)
-        if idx >= 0 and not config_validate_value(schema[idx], e.value).ok:
+        if idx >= 0 and not _hc_value_ok(schema[idx], e.value):
             val origin = if e.layer == "session": "env" else: "{_hc_shell_layer(e.layer)} layer"
             result.push("host-config: warning: ignoring invalid {e.key}={e.value} from {origin}")
     result
@@ -113,10 +161,36 @@ fn host_config_resolve(entries: [ConfigEntry], key: text) -> ConfigResolution:
     val idx = config_schema_index(schema, key)
     if idx < 0:
         return ConfigResolution(key: key, value: "", layer: "compiled_default", rank: 0, locked: false)
-    config_resolve_valid(schema[idx], entries)
+    var kept: [ConfigEntry] = []
+    for e in entries:
+        if e.key != key or _hc_value_ok(schema[idx], e.value):
+            kept.push(e)
+    config_resolve_valid(schema[idx], kept)
 
 fn host_config_value(entries: [ConfigEntry], key: text) -> text:
     host_config_resolve(entries, key).value
+
+# (consumer variable, value) defaults for every cache key whose consumer
+# variable is unset/empty in `env` and whose host config value resolves
+# non-empty; on/off become "1"/"0". A set consumer variable always wins and is
+# omitted. Mirrors host_config_cache_env in scripts/setup/host-env.shs.
+fn host_config_cache_env(entries: [ConfigEntry], env: [(text, text)]) -> [(text, text)]:
+    var result: [(text, text)] = []
+    for key in HOST_CONFIG_CACHE_KEYS:
+        val name = host_config_cache_var(key)
+        var is_set = false
+        for pair in env:
+            if pair.0 == name and pair.1 != "":
+                is_set = true
+        if is_set:
+            continue
+        var value = host_config_value(entries, key)
+        if value == "":
+            continue
+        if key == "frontend_cache" or key == "hir_cache":
+            value = if value == "on": "1" else: "0"
+        result.push((name, value))
+    result
 
 # cpu_features as a list ("sse2,avx2" -> ["sse2", "avx2"]).
 fn host_config_cpu_features(entries: [ConfigEntry]) -> [text]:

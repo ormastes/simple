@@ -23,13 +23,13 @@ use crate::CompileError;
 /// `IMPORT_AST_PARSES` still counts the parses THIS lane caused, which is why
 /// the lookup and the fill are separate calls.
 pub(crate) fn parsed_imported_module(path: &std::path::Path) -> Option<std::sync::Arc<simple_parser::ast::Module>> {
-    let os = crate::pipeline::native_project::effective_target().os;
-    if let Some(hit) = crate::interpreter::shared_source_lookup_for_target(path, os) {
+    let target = crate::pipeline::native_project::effective_target();
+    if let Some(hit) = crate::interpreter::shared_source_lookup_for_target(path, target) {
         crate::perf_counters::bump(&crate::perf_counters::IMPORT_AST_HITS, 1);
         return hit.ast();
     }
     crate::perf_counters::bump(&crate::perf_counters::IMPORT_AST_PARSES, 1);
-    crate::interpreter::shared_source_for_target(path, os).ast()
+    crate::interpreter::shared_source_for_target(path, target).ast()
 }
 
 impl Lowerer {
@@ -764,7 +764,7 @@ impl Lowerer {
             // `Display` rather than the error itself, precisely so a borrowed
             // entry yields the same diagnostic a private read+parse did.
             let sibling_module = match crate::interpreter::shared_source_for_target(
-                &sibling_path, crate::pipeline::native_project::effective_target().os,
+                &sibling_path, crate::pipeline::native_project::effective_target(),
             ) {
                 crate::interpreter::SharedSource::Parsed { ast: Ok(ast), .. } => ast,
                 crate::interpreter::SharedSource::Parsed { ast: Err(e), .. } => {

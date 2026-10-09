@@ -24,6 +24,17 @@ Require ($rows.Count -eq 3) 'native child/grandchild count or watcher exclusion'
 Require ($rows[2] -match '^300 200 300 2048 .* 123\.7500000 rustc\.exe$') 'native CPU units/RSS/ancestry'
 Require (-not ($rows -match 'watcher|observer|unrelated')) 'unrelated/watcher process leaked'
 Require ($rows[0] -match '01:02:03\.1234567') 'subsecond creation identity lost'
+# MSYS exec: perl's native parent 650 is the exited fork intermediate.
+$execFixture = $fixture + @((Entry 600 650 'perl.exe' 50000000 4096))
+$unbridged = @(ConvertTo-BootstrapProgressRows $execFixture 100 400)
+Require ($unbridged.Count -eq 3) 'exec child reachable without bridge (fixture invalid)'
+$bridgedRows = @(ConvertTo-BootstrapProgressRows $execFixture 100 400 '600:100,500:400')
+Require ($bridgedRows.Count -eq 4) 'MSYS exec child not bridged into tree'
+Require (@($bridgedRows -match '^600 100 600 4 .* perl\.exe$').Count -eq 1) 'bridged child must report its MSYS parent'
+Require (-not ($bridgedRows -match 'observer|watcher')) 'bridge leaked excluded watcher subtree'
+$failed = $false
+try { ConvertTo-BootstrapProgressRows $execFixture 100 400 '600-100' | Out-Null } catch { $failed = $true }
+Require $failed 'malformed bridge edge accepted'
 $pageFixture = @(Entry 101 1 'page-units.exe' 0 (180 * 1024 * 1024))
 $pageRows = @(ConvertTo-BootstrapProgressRows $pageFixture 101 0)
 Require (($pageRows[0] -split ' ')[3] -eq '184320') '180 MiB bytes must remain 184320 KiB, not MSYS 16x page inflation'
@@ -47,4 +58,4 @@ Require ($failed -and $partial.Count -eq 0) 'partial native snapshot escaped as 
 $failed = $false
 try { ConvertTo-BootstrapProgressRows $fixture 777 400 | Out-Null } catch { $failed = $true }
 Require $failed 'missing root accepted as empty healthy tree'
-Write-Output 'PASS windows process observer: 9 checks'
+Write-Output 'PASS windows process observer: 14 checks'

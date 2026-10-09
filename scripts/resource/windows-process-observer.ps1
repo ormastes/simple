@@ -1,18 +1,33 @@
 param(
     [int]$RootPid = 0,
-    [int]$ExcludePid = 0
+    [int]$ExcludePid = 0,
+    [string]$Bridge = ''
 )
 
 # Native children of MSYS processes are absent from MSYS /proc. Emit the
 # existing progress watcher's portable process-table format from one native
 # snapshot. No process control or repository/cache writes occur here.
 function ConvertTo-BootstrapProgressRows {
-    param([object[]]$Processes, [int]$RootProcessId, [int]$ExcludedProcessId)
+    param([object[]]$Processes, [int]$RootProcessId, [int]$ExcludedProcessId,
+        [string]$BridgeParents = '')
+    # MSYS exec leaves a child's native ParentProcessId on the exited fork
+    # intermediate. The caller supplies "childWinPid:parentWinPid,..." from the
+    # MSYS process table; those edges replace the stale native parent.
+    $bridged = @{}
+    if ($BridgeParents -ne '') {
+        foreach ($pair in $BridgeParents.Split(',')) {
+            if ($pair -notmatch '^(\d+):(\d+)$') { throw "malformed bridge edge: $pair" }
+            $bridged[[int]$Matches[1]] = [int]$Matches[2]
+        }
+    }
     $byId = @{}
+    $parentOf = @{}
     $children = @{}
     foreach ($entry in $Processes) {
         $key = [int]$entry.ProcessId
         $parentKey = [int]$entry.ParentProcessId
+        if ($bridged.ContainsKey($key)) { $parentKey = $bridged[$key] }
+        $parentOf[$key] = $parentKey
         $byId[$key] = $entry
         if (-not $children.ContainsKey($parentKey)) {
             $children[$parentKey] = [Collections.Generic.List[int]]::new()
@@ -44,7 +59,7 @@ function ConvertTo-BootstrapProgressRows {
         if ($name -eq '') { $name = 'unknown' }
         # Windows has no POSIX pgid. The caller marks group metrics unknown.
         $rows.Add(('{0} {1} {0} {2} {3} {4} {5}' -f $current,
-            $entry.ParentProcessId, $rss.ToString('0', $culture), $identity,
+            $parentOf[$current], $rss.ToString('0', $culture), $identity,
             $seconds.ToString('0.0000000', $culture), $name))
         if ($children.ContainsKey($current)) {
             foreach ($child in $children[$current]) { $pending.Enqueue($child) }
@@ -60,7 +75,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     try {
         if ($RootPid -le 0) { throw 'positive RootPid required' }
         $snapshot = @(Get-CimInstance Win32_Process -OperationTimeoutSec 5)
-        ConvertTo-BootstrapProgressRows $snapshot $RootPid $ExcludePid
+        ConvertTo-BootstrapProgressRows $snapshot $RootPid $ExcludePid $Bridge
     } catch {
         [Console]::Error.WriteLine('windows-process-observer: ' + $_.Exception.Message)
         exit 1
