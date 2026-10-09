@@ -1,0 +1,49 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# `use std.fs.{file_read_text}` must compile on the pure-Simple resolver
+
+`src/lib/<family>/fs.spl` and `src/lib/<family>/fs/__init__.spl` both exist.
+The pure-Simple resolver (`_driver_resolve_entry_import_exact`, family loop)
+picks the FILE `fs.spl`; the seed interpreter's variant fast path
+(`path_resolution.rs` `try_variant_stdlib_root`) picks the PACKAGE.
+`file_read_text` / `file_write_text` / `dir_children` were defined only in the
+package, so stage2 failed on `use std.fs.{file_read_text}` (app/log,
+app/task_daemon, app/spipe/kb, ...). Both now re-export one body from
+`nogc_sync_mut/fs/text_io.spl`, so either winner exposes them.
+"""
+
+# @tag: unit, compiler, driver, resolver
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file}
+use std.fs.{file_read_text, dir_children, is_dir, file_exists}
+use compiler.driver.driver_source_loading.{_driver_resolve_entry_import}
+
+fn resolved_std_fs() -> text:
+    _driver_resolve_entry_import("std.fs", "src/app/log").replace("\\", "/")
+
+fn export_lines(path: text) -> text:
+    var out = ""
+    for line in read_file(path).split("\n"):
+        if line.starts_with("export "):
+            out = out + line + "\n"
+    out
+
+describe "std.fs resolves to the file module, which carries the package helpers":
+    it "resolves std.fs to fs.spl, not fs/__init__.spl":
+        val path = resolved_std_fs()
+        print "std.fs -> {path}"
+        expect(path.ends_with("/fs.spl")).to_equal(true)
+
+    it "exports file_read_text, file_write_text and dir_children from the resolved file":
+        val exports = export_lines(resolved_std_fs())
+        expect(exports.contains("file_read_text")).to_equal(true)
+        expect(exports.contains("file_write_text")).to_equal(true)
+        expect(exports.contains("dir_children")).to_equal(true)
+        expect(exports.contains("mkdir_p")).to_equal(true)
+
+    it "calls the helpers through the std.fs import":
+        expect(file_read_text("CLAUDE.md").len() > 0).to_equal(true)
+        expect(dir_children("src").len() > 0).to_equal(true)
+        expect(is_dir("src")).to_equal(true)
+        expect(file_exists("CLAUDE.md")).to_equal(true)
