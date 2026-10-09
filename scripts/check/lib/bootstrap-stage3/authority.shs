@@ -11,10 +11,15 @@ bootstrap_stage3_provenance_fail() {
 
 bootstrap_stage3_hash_file() {
     [ -f "$1" ] || return 1
+    # First field by parameter expansion, not `| awk`: one process fewer per
+    # hash (MSYS forks cost seconds under load), and the digest tool's own
+    # exit status is no longer masked by the pipeline.
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{print $1}'
+        bootstrap_stage3_hash_line=$(sha256sum "$1") || return 1
+        printf '%s\n' "${bootstrap_stage3_hash_line%% *}"
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | awk '{print $1}'
+        bootstrap_stage3_hash_line=$(shasum -a 256 "$1") || return 1
+        printf '%s\n' "${bootstrap_stage3_hash_line%% *}"
     elif command -v sha256 >/dev/null 2>&1; then
         sha256 -q "$1"
     else
@@ -2650,13 +2655,14 @@ bootstrap_stage3_tool_authority_snapshot() (
             "$bootstrap_stage3_tool_version_executable" --version \
             >"$bootstrap_stage3_tool_version_output" 2>&1 ||
             bootstrap_stage3_tool_version_status=$?
-        bootstrap_stage3_tool_version=$(
-            sed -n '1p' "$bootstrap_stage3_tool_version_output"
-        ) || {
-            rm -f "$bootstrap_stage3_tool_version_output"
-            return 1
-        }
-        rm -f "$bootstrap_stage3_tool_version_output"
+        # First line via the read builtin, not $(sed -n 1p): on MSYS every
+        # fork costs 1-8 s under load and this loop runs per tool. The EXIT
+        # trap removes both scratch files; each probe truncates its own.
+        # A missing/unreadable file still fails (redirection error); a first
+        # line without a trailing newline is still taken, as sed did.
+        bootstrap_stage3_tool_version=
+        { IFS= read -r bootstrap_stage3_tool_version || :; } \
+            <"$bootstrap_stage3_tool_version_output" || return 1
         [ -n "$bootstrap_stage3_tool_version" ] ||
             bootstrap_stage3_tool_version=absent
         # Darwin file(1) emits one summary plus per-architecture continuation
@@ -2664,23 +2670,19 @@ bootstrap_stage3_tool_authority_snapshot() (
         # deterministic summary record; the executable SHA binds all bytes.
         bootstrap_stage3_tool_arch_output="${bootstrap_stage3_tool_tmp}.arch"
         file -b "$bootstrap_stage3_tool_canonical" \
-            >"$bootstrap_stage3_tool_arch_output" 2>&1 || {
-            rm -f "$bootstrap_stage3_tool_arch_output"
-            return 1
-        }
-        bootstrap_stage3_tool_arch=$(
-            sed -n '1p' "$bootstrap_stage3_tool_arch_output"
-        ) || {
-            rm -f "$bootstrap_stage3_tool_arch_output"
-            return 1
-        }
-        rm -f "$bootstrap_stage3_tool_arch_output"
+            >"$bootstrap_stage3_tool_arch_output" 2>&1 || return 1
+        bootstrap_stage3_tool_arch=
+        { IFS= read -r bootstrap_stage3_tool_arch || :; } \
+            <"$bootstrap_stage3_tool_arch_output" || return 1
         [ -n "$bootstrap_stage3_tool_arch" ] || return 1
+        # One hash per tool; the managed-tool record below binds the same bytes.
+        bootstrap_stage3_tool_sha=$(bootstrap_stage3_hash_file \
+            "$bootstrap_stage3_tool_canonical") || return 1
+        [ -n "$bootstrap_stage3_tool_sha" ] || return 1
         printf 'tool=%s|requested=%s|canonical=%s|sha256=%s|version-status=%s|version=%s|arch=%s\n' \
             "$bootstrap_stage3_tool_name" "$bootstrap_stage3_tool_requested" \
             "$bootstrap_stage3_tool_canonical" \
-            "$(bootstrap_stage3_hash_file \
-                "$bootstrap_stage3_tool_canonical")" \
+            "$bootstrap_stage3_tool_sha" \
             "$bootstrap_stage3_tool_version_status" \
             "$bootstrap_stage3_tool_version" "$bootstrap_stage3_tool_arch" \
             >>"$bootstrap_stage3_tool_tmp" || return 1
@@ -2704,7 +2706,7 @@ bootstrap_stage3_tool_authority_snapshot() (
 '*) return 1;; esac
                 printf 'managed-tool=%s|path=%s|sha256=%s\n' \
                     "$bootstrap_stage3_managed_role" "$bootstrap_stage3_managed_native_path" \
-                    "$(bootstrap_stage3_hash_file "$bootstrap_stage3_tool_canonical")" \
+                    "$bootstrap_stage3_tool_sha" \
                     >>"$bootstrap_stage3_tool_tmp" || return 1
             fi
         fi
