@@ -1,0 +1,46 @@
+use std.spec.*
+use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
+use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_from_result, test_db_run_record_encode, test_db_run_record_decode}
+
+# The core runner hands a finished run to the test-db lane child
+# (src/app/test_runner_new/test_db_lane_main.spl) as an encoded record, so the
+# record must carry the row status and counts across the process boundary
+# unchanged, and a damaged record must be rejected with a named reason.
+
+fn _file(path: text, passed: i64, failed: i64, in_dev: i64) -> TestFileResult:
+    TestFileResult(path: path, passed: passed, failed: failed, skipped: 0, pending: 0,
+        duration_ms: 42, setup_ms: 0, error: "", timed_out: false, cached: false,
+        in_development: in_dev, cohort_id: "c\t1")
+
+fn _run() -> TestRunResult:
+    TestRunResult(files: [_file("a_spec.spl", 3, 0, 0), _file("b_spec.spl", 1, 2, 0), _file("c spec.spl", 2, 0, 1)],
+        total_passed: 6, total_failed: 2, total_skipped: 0, total_pending: 0, total_timed_out: 0,
+        total_duration_ms: 126, total_setup_ms: 0, total_cached: 0)
+
+describe "test-db run record":
+    it "classifies in-development before passed":
+        val record = test_db_run_record_from_result(_run(), 10, 20)
+        expect(record.files[0].status).to_equal("passed")
+        expect(record.files[1].status).to_equal("failed")
+        expect(record.files[2].status).to_equal("in_development")
+
+    it "round-trips counts, paths and escaped fields":
+        val encoded = test_db_run_record_encode(test_db_run_record_from_result(_run(), 10, 20))
+        match test_db_run_record_decode(encoded):
+            case Ok(record):
+                expect(record.files.len()).to_equal(3)
+                expect(record.test_count).to_equal(3)
+                expect(record.passed).to_equal(6)
+                expect(record.failed).to_equal(2)
+                expect(record.run_end).to_equal(20)
+                expect(record.files[2].path).to_equal("c spec.spl")
+                expect(record.files[0].cohort_id).to_equal("c\t1")
+                expect(record.files[1].duration_ms).to_equal(42)
+                expect(record.files[0].has_resource).to_equal(false)
+            case Err(reason):
+                fail("decode failed: {reason}")
+
+    it "rejects a record without the header":
+        match test_db_run_record_decode("run\t1\t1\t0\t0\t0\t0\n"):
+            case Ok(_): fail("headerless record was accepted")
+            case Err(reason): expect(reason).to_contain("not a test-db run record")

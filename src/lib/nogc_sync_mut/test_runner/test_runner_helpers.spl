@@ -11,6 +11,7 @@ use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
 use std.test_runner.test_runner_files.{strip_ansi}
 use std.test_runner.test_db_compat.{RunnerTestDb, load_test_db_compat, micros_to_rfc3339}
 use std.test_runner.test_db_types.{IndividualTestResult, TestStatus}
+use std.nogc_sync_mut.test_runner.test_db_record.{TestDbRunRecord, test_db_run_record_from_result}
 use std.database.feature.{FeatureDatabase, FeatureStatus, Feature}
 use std.common.perf.execution_metrics.{
     ApprovedBaseline, AnomalyPolicy, BaselineState, DecisionStatus,
@@ -231,6 +232,14 @@ fn display_call_graph_warnings():
 # =========================================================================
 
 fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64) -> Result<RunnerTestDb, text>:
+    update_test_database_from_record(test_db_run_record_from_result(result, run_start, run_end))
+
+fn update_test_database_from_record(record: TestDbRunRecord) -> Result<RunnerTestDb, text>:
+    """Record one run into the test database. The core runner reaches this
+    through src/app/test_runner_new/test_db_lane_main.spl (a child process) so
+    the database modules stay out of its static closure; the row status
+    (in_development / passed / failed) was classified from the full
+    TestFileResult by test_db_record.test_db_file_row_from_result."""
     val db_result = load_test_db_compat()
     var db = match db_result:
         case Ok(loaded): loaded
@@ -239,40 +248,26 @@ fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64) -> 
             return Err(reason)
     val run_id = db.start_run()
 
-    for file_result in result.files:
-        # In-development is checked FIRST, and that order is load-bearing.
-        # A neutralised file has failed == 0, so `is_ok()` returns TRUE and
-        # it was being written to the DB as a plain `passed` row -- which is
-        # why `tests_by_status("in_development")` could never match and the
-        # "In Development" row of test_result.md was structurally zero.
-        # Reporting cannot fix that from its side; the status has to be
-        # written here.
-        val status = if file_result.in_development > 0:
+    for row in record.files:
+        val status = if row.status == "in_development":
             TestStatus.InDevelopment
-        elif file_result.is_ok():
+        elif row.status == "passed":
             TestStatus.Passed
         else:
             TestStatus.Failed
         db.update_test_result(
-            test_name: file_result.path,
-            test_file: file_result.path,
+            test_name: row.path,
+            test_file: row.path,
             suite_name: "spec",
             category: "",
             status: status,
-            duration_ms: file_result.duration_ms.to_f64(),
-            cohort_id: file_result.cohort_id
+            duration_ms: row.duration_ms.to_f64(),
+            cohort_id: row.cohort_id
         )
-        match file_result.resource_usage:
-            case Some(usage):
-                db.record_resource_run(
-                    run_id, file_result.path, file_result.resource_class,
-                    file_result.cohort_id, file_result.compile_ms,
-                    file_result.execution_ms, usage,
-                    file_result.budget_status, file_result.anomaly_status
-                )
-            case nil: pass
+        if row.has_resource:
+            db.record_resource_row(run_id, row)
 
-    db.complete_run(run_id, result.files.len(), result.total_passed, result.total_failed, result.total_timed_out)
+    db.complete_run(run_id, record.test_count, record.passed, record.failed, record.timed_out)
     db.cleanup_stale_runs(48)
     val save_result = db.save()
     match save_result:
