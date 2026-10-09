@@ -122,7 +122,7 @@ expect(_pp_split_lines("A\0B\nC")).to_equal(["A\0B", "C"])
 |-------|-------|
 | Category | Other |
 | Status | Active |
-| Source | `C:\dev\simple\build\utf8-parser-boundary-20261010\repair\test\01_unit\compiler\parser\conditional_source_lines_spec.spl` |
+| Source | `test/01_unit/compiler/parser/conditional_source_lines_spec.spl` |
 | Updated | 2026-10-09 |
 | Generator | `simple spipe-docgen` (Simple) |
 
