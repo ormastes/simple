@@ -2255,8 +2255,8 @@ pub extern "C" fn rt_transient_heap_promote(value: RuntimeValue) -> bool {
         }
 
         let mut pending = vec![value];
-        let mut reachable_heap = HashSet::new();
-        let mut reachable_raw = HashSet::new();
+        let mut reachable_heap = super::heap::HeapPtrSet::<u64>::default();
+        let mut reachable_raw = super::heap::HeapPtrSet::<usize>::default();
         while let Some(current) = pending.pop() {
             let mut words = std::ptr::null();
             let mut canonical_ptr = 0usize;

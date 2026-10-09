@@ -73,6 +73,57 @@ fn read_elf_relocatable_globals(obj: &Path) -> Result<Option<Vec<(String, bool)>
     Ok(Some(globals))
 }
 
+/// Read relocatable COFF globals in-process on Windows hosts, mirroring
+/// `llvm-nm -g`: every EXTERNAL or WEAK_EXTERNAL symbol, with WEAK_EXTERNAL
+/// reported as undefined exactly as nm's `w` class is by
+/// `read_undefined_symbol_set`. Measured 2026-10-09 on the Stage 2 link: the
+/// hosted init-caller scan spawned `llvm-nm` once per object (1,210 objects,
+/// 0.27-0.86 s per spawn on a loaded host), which was the whole 329 s "link".
+/// Archives, import objects and every other format keep the nm path.
+fn read_coff_relocatable_globals(obj: &Path) -> Result<Option<Vec<(String, bool)>>, String> {
+    if !cfg!(target_os = "windows") {
+        return Ok(None);
+    }
+    let mut file = match std::fs::File::open(obj) {
+        Ok(file) => file,
+        Err(_) => return Ok(None), // Retain the existing nm error policy.
+    };
+    let mut magic = [0u8; 8];
+    if file.read_exact(&mut magic).is_err() || magic.starts_with(b"!<arch>") || magic.starts_with(b"!<thin>") {
+        return Ok(None);
+    }
+    drop(file);
+    let bytes = std::fs::read(obj).map_err(|e| format!("read COFF object {}: {e}", obj.display()))?;
+    if !matches!(
+        object::FileKind::parse(bytes.as_slice()),
+        Ok(object::FileKind::Coff) | Ok(object::FileKind::CoffBig)
+    ) {
+        return Ok(None);
+    }
+    let parsed = object::File::parse(bytes.as_slice())
+        .map_err(|e| format!("parse COFF object {}: {e}", obj.display()))?;
+    if parsed.kind() != object::ObjectKind::Relocatable {
+        return Ok(None);
+    }
+    let mut globals = Vec::new();
+    for symbol in parsed.symbols().filter(|symbol| symbol.is_global()) {
+        let name = symbol
+            .name()
+            .map_err(|e| format!("read COFF symbol in {}: {e}", obj.display()))?;
+        if !name.is_empty() {
+            globals.push((name.to_string(), symbol.is_undefined() || symbol.is_weak()));
+        }
+    }
+    Ok(Some(globals))
+}
+
+fn read_relocatable_globals_in_process(obj: &Path) -> Result<Option<Vec<(String, bool)>>, String> {
+    if let Some(globals) = read_elf_relocatable_globals(obj)? {
+        return Ok(Some(globals));
+    }
+    read_coff_relocatable_globals(obj)
+}
+
 // CreateProcessW rejects command lines over 32,767 UTF-16 code units. The
 // native object cache uses long absolute paths, so a fixed 200-object archive
 // batch can exceed that limit before the archiver is even started. Keep a
@@ -766,7 +817,7 @@ impl NativeProjectBuilder {
     }
 
     fn read_global_symbols(obj: &Path) -> Result<Vec<String>, String> {
-        if let Some(globals) = read_elf_relocatable_globals(obj)? {
+        if let Some(globals) = read_relocatable_globals_in_process(obj)? {
             let mut names: Vec<String> = globals.into_iter().map(|(name, _)| name).collect();
             // `nm -g` sorts by name by default; preserve the selection order
             // used by freestanding main discovery as well as hosted init scans.
@@ -817,7 +868,7 @@ impl NativeProjectBuilder {
     }
 
     fn read_undefined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
-        if let Some(globals) = read_elf_relocatable_globals(obj)? {
+        if let Some(globals) = read_relocatable_globals_in_process(obj)? {
             return Ok(globals
                 .into_iter()
                 .filter_map(|(name, undefined)| undefined.then_some(name))
@@ -3444,6 +3495,52 @@ mod linker_tests {
         let archive = dir.path().join("runtime.a");
         std::fs::write(&archive, b"!<arch>\n").unwrap();
         assert!(read_elf_relocatable_globals(&archive).unwrap().is_none());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn in_process_coff_globals_match_nm_including_weak_external() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("symbols.c");
+        let object = dir.path().join("symbols.o");
+        std::fs::write(
+            &source,
+            "extern int required_missing(void);\n\
+             extern int weak_missing(void) __attribute__((weak));\n\
+             static int local_hidden(void) { return 3; }\n\
+             int __module_init_fixture(void) { return local_hidden() + required_missing() +\n\
+                 (weak_missing ? weak_missing() : 0); }\n",
+        )
+        .unwrap();
+        let cc = std::env::var("CC").unwrap_or_else(|_| "clang-cl".to_string());
+        assert!(std::process::Command::new(&cc)
+            .arg("-c")
+            .arg(&source)
+            .arg(format!("-Fo{}", object.display()))
+            .status()
+            .unwrap()
+            .success());
+        assert!(read_coff_relocatable_globals(&object).unwrap().is_some());
+
+        let output = nm_command().unwrap().arg("-g").arg(&object).output().unwrap();
+        assert!(output.status.success());
+        let nm_names: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_whitespace().last().map(str::to_string))
+            .collect();
+        let actual = NativeProjectBuilder::read_global_symbols(&object).unwrap();
+        assert_eq!(actual, nm_names);
+        assert!(actual.contains(&"__module_init_fixture".to_string()));
+        assert!(!actual.contains(&"local_hidden".to_string()));
+
+        let undefined = NativeProjectBuilder::read_undefined_symbol_set(&object).unwrap();
+        assert!(undefined.contains("required_missing"));
+        assert!(undefined.contains("weak_missing"));
+        assert!(!undefined.contains("__module_init_fixture"));
+
+        let archive = dir.path().join("runtime.lib");
+        std::fs::write(&archive, b"!<arch>\n").unwrap();
+        assert!(read_coff_relocatable_globals(&archive).unwrap().is_none());
     }
 
     #[cfg(unix)]
