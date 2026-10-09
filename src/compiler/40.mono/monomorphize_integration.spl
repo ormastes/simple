@@ -76,6 +76,10 @@ class MonomorphizationPass:
     # specialization is mangled by the TYPE NAME, not a module-local symbol
     # id that two modules can both hand out.
     named_symbol_names: Dict<text, text>
+    # "<Type>::<field>" -> declared field type of every NON-generic struct or
+    # class, so a generic argument reached through a field chain
+    # (`eq(a.glyph_run.glyph_ids, ...)`, `without(self.globals, ...)`) types.
+    field_types: Dict<text, HirType>
     # "<EnumName>::<Variant>" -> declared payload types, tuple payloads in
     # positional order and struct payloads keyed "<Enum>::<Variant>::<field>".
     # Match-arm pattern bindings are the ONLY binding form that carries no
@@ -92,6 +96,9 @@ class MonomorphizationPass:
     # Module whose function bodies are being rewritten right now (scopes the
     # two maps above).
     current_module: text
+    # Module name -> source path, so an unrewritten call site is reported as
+    # `path:line:col` instead of an unlocatable message.
+    module_paths: Dict<text, text>
     # Function return context is scoped and suspended for nested lambdas.
     current_return_type: HirType?
     # Specializations whose bodies still have to be walked (FIFO worklist).
@@ -137,11 +144,13 @@ impl MonomorphizationPass:
             spec_module: {},
             sym_names: {},
             current_module: "",
+            module_paths: {},
             current_return_type: nil,
             fn_sigs: {},
             named_types: {},
             named_ambiguous: {},
             named_symbol_names: {},
+            field_types: {},
             enum_payload_types: {},
             match_enum_hint: "",
             fn_returns: {},
@@ -184,7 +193,8 @@ impl MonomorphizationPass:
 
         # Step 1: Collect generic definitions
         for name in mod_keys:
-            val module = modules[name]
+            val module: HirModule = modules[name]
+            self.module_paths[name] = module.path
             self.collect_generics(module, name)
 
         if self.stats.generic_functions_found == 0 and self.stats.generic_structs_found == 0 and self.stats.generic_classes_found == 0:
@@ -278,6 +288,8 @@ impl MonomorphizationPass:
         for sym_id in structs.keys():
             val s: HirStruct = structs[sym_id]
             self.record_named_type(module_name, s.symbol, s.name, s.type_params.len() == 0)
+            if s.type_params.len() == 0:
+                self.record_field_types(s.name, s.fields)
             if is_generic_struct(s):
                 self.generic_structs[s.name] = s
                 self.monomorphizer.register_generic_struct(s.name, s)
@@ -316,6 +328,8 @@ impl MonomorphizationPass:
         for sym_id in classes.keys():
             val c: HirClass = classes[sym_id]
             self.record_named_type(module_name, c.symbol, c.name, c.type_params.len() == 0)
+            if c.type_params.len() == 0:
+                self.record_field_types(c.name, c.fields)
             if is_generic_class(c):
                 self.generic_classes[c.name] = c
                 self.monomorphizer.register_generic_class(c.name, c)
@@ -411,6 +425,30 @@ impl MonomorphizationPass:
             self.named_ambiguous[name] = true
             return
         self.named_types[name] = HirType(kind: HirTypeKind.Named(sym, []), span: Span.empty())
+
+    me record_field_types(type_name: text, fields: [HirField]):
+        for f in fields:
+            val ft: HirField = f
+            self.field_types["{type_name}::{ft.name}"] = ft.type_
+
+    me field_type(base_ty: HirType, field: text) -> HirType?:
+        """Declared type of `field` on a non-generic struct/class `base_ty`.
+        A type name declared by two modules is ambiguous -> nil."""
+        match base_ty.kind:
+            case HirTypeKind.Named(sym, args):
+                if args.len() > 0:
+                    return nil
+                val n: text = self.named_type_name(sym, base_ty)
+                if self.named_ambiguous.has(n):
+                    return nil
+                val key = "{n}::{field}"
+                if self.field_types.has(key):
+                    val t: HirType = self.field_types[key]
+                    if hir_type_is_concrete(t):
+                        return t
+                nil
+            case _:
+                no_local_type_answer()
 
     me fn_sig_of(sym_id: SymbolId) -> HirType?:
         val s: SymbolId = sym_id
@@ -532,6 +570,19 @@ impl MonomorphizationPass:
             return self.sym_names[k]
         "sym_{s.id}"
 
+    fn call_site_location(sp: Span) -> text:
+        """`path:line:col` of a call site in the module being rewritten; the
+        span's own file wins when lowering recorded one."""
+        var file: text = self.current_module
+        if self.module_paths.has(self.current_module):
+            val p: text = self.module_paths[self.current_module] ?? ""
+            if p != "":
+                file = p
+        val sp_file: text = sp.file ?? ""
+        if sp_file != "":
+            file = sp_file
+        "{file}:{sp.line}:{sp.col}"
+
     me infer_call_type_args(template: HirFunction, args: [HirCallArg], expected_result: HirType? = nil) -> [HirType]:
         """Infer the template's type arguments from the call's argument types.
 
@@ -608,6 +659,13 @@ impl MonomorphizationPass:
                 if nt != nil:
                     return nt
                 self.fn_sig_of(sym_id)
+            case HirExprKind.Field(base, field, _):
+                val fb: HirExpr = base
+                val bt = self.infer_expr_type(fb)
+                if bt == nil:
+                    return nil
+                val btt: HirType = bt
+                self.field_type(btt, field)
             case HirExprKind.Cast(_, target):
                 val ct: HirType = target
                 ct
@@ -1128,8 +1186,9 @@ impl MonomorphizationPass:
         if targs.len() != expected.len():
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
             self.unresolved_templates[gname] = true
+            val site: text = self.call_site_location(callee.span)
             self.diagnostics = self.diagnostics.push(
-                "E-MONO-032: call to generic `{gname}` has no explicit type arguments and they could not be inferred from its argument types; call site not monomorphized")
+                "E-MONO-032: call to generic `{gname}` at {site} has no explicit type arguments and they could not be inferred from its argument types; call site not monomorphized")
             return HirExprKind.Call(new_callee, new_args, new_type_args)
         val target = self.request_specialization(gname, targs)
         if target < 0:
@@ -1661,6 +1720,11 @@ fn bind_type_params(param_ty: HirType, arg_ty: HirType, bindings: Dict<text, Hir
         return true
     match param_ty.kind:
         case TypeParam(name, _):
+            # A partially-known argument (`Err(e)` types as Result<?, E>)
+            # carries no evidence for this parameter: bind nothing rather
+            # than poison the binding and reject a later concrete witness.
+            if not hir_type_is_concrete(arg_ty):
+                return true
             if bindings.has(name):
                 val prev: HirType = bindings[name]
                 return hir_type_key(prev) == hir_type_key(arg_ty)
