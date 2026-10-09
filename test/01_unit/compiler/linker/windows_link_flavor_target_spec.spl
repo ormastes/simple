@@ -1,0 +1,146 @@
+"""Linker flavor/driver selection is decided by the TARGET triple, never by
+MSYSTEM alone, and the planned link flags for every cross target carry no
+Windows-isms.
+
+Incident 2026-10-09: `--target x86_64-pc-windows-msvc` from Git Bash
+(MSYSTEM always set) was routed through the MinGW arm and failed with
+"Windows GNU linking requires bootstrap-owned clang through CC"."""
+
+use compiler.backend.backend.runtime_compiler.{
+    windows_link_flavor_select,
+    windows_link_flavor_env_conflict,
+    hosted_c_compiler_plan
+}
+use compiler.backend.linker.linker_wrapper.{
+    native_effective_link_os,
+    native_linker_abi_for_target,
+    native_direct_platform_flags,
+    native_cc_platform_flags,
+    render_link_command,
+    link_command_quote,
+    link_command_record_path
+}
+use testing.{describe, it, expect}
+
+val MSYS = "MINGW64"
+
+fn has_windows_ism(flags: [text]) -> bool:
+    for flag in flags:
+        val lowered = flag.lower()
+        if lowered.starts_with("/subsystem") or lowered.starts_with("/entry") or
+                lowered.starts_with("/machine") or lowered.ends_with(".lib") or
+                lowered.contains("kernel32") or lowered.contains("--target=x86_64-w64") or
+                lowered.contains("mingw"):
+            return true
+    false
+
+describe "windows_link_flavor_select: target first":
+    it "x86_64-pc-windows-msvc is msvc even inside MSYS2/Git Bash":
+        expect(windows_link_flavor_select("x86_64-pc-windows-msvc", "", "", "", MSYS)).to_equal("msvc")
+        expect(windows_link_flavor_select("x86_64-pc-windows-msvc", "windows-msvc", "", "", MSYS)).to_equal("msvc")
+
+    it "aarch64-pc-windows-msvc is msvc":
+        expect(windows_link_flavor_select("aarch64-pc-windows-msvc", "windows-msvc", "", "", MSYS)).to_equal("msvc")
+
+    it "x86_64-pc-windows-gnu is gnu without any MSYSTEM":
+        expect(windows_link_flavor_select("x86_64-pc-windows-gnu", "", "", "", "")).to_equal("gnu")
+        expect(windows_link_flavor_select("x86_64-pc-windows-gnu", "windows-gnu", "", "", "")).to_equal("gnu")
+
+    it "x86_64-w64-mingw32 is gnu":
+        expect(windows_link_flavor_select("x86_64-w64-mingw32", "", "", "", "")).to_equal("gnu")
+
+    it "linker_abi alone decides when the triple is unqualified":
+        expect(windows_link_flavor_select("", "windows-msvc", "", "", MSYS)).to_equal("msvc")
+        expect(windows_link_flavor_select("", "windows-gnu", "", "", "")).to_equal("gnu")
+
+    it "an ABI-qualified target wins over SIMPLE_LINKER_FLAVOR (seed parity)":
+        expect(windows_link_flavor_select("x86_64-pc-windows-msvc", "", "gnu", "", MSYS)).to_equal("msvc")
+        expect(windows_link_flavor_select("x86_64-pc-windows-gnu", "", "msvc", "", "")).to_equal("gnu")
+
+describe "windows_link_flavor_select: overrides for an unqualified target":
+    it "SIMPLE_LINKER_FLAVOR=msvc beats MSYSTEM":
+        expect(windows_link_flavor_select("", "", "msvc", "", MSYS)).to_equal("msvc")
+        expect(windows_link_flavor_select("host", "", "MSVC", "", MSYS)).to_equal("msvc")
+
+    it "SIMPLE_LINKER_FLAVOR=gnu|mingw selects gnu":
+        expect(windows_link_flavor_select("", "", "gnu", "", "")).to_equal("gnu")
+        expect(windows_link_flavor_select("", "", "mingw", "", "")).to_equal("gnu")
+
+    it "SIMPLE_WINDOWS_ABI applies after SIMPLE_LINKER_FLAVOR":
+        expect(windows_link_flavor_select("", "", "", "msvc", MSYS)).to_equal("msvc")
+        expect(windows_link_flavor_select("", "", "", "gnu", "")).to_equal("gnu")
+        expect(windows_link_flavor_select("", "", "msvc", "gnu", MSYS)).to_equal("msvc")
+
+    it "MSYSTEM decides only when nothing else does":
+        expect(windows_link_flavor_select("", "", "", "", MSYS)).to_equal("gnu")
+        expect(windows_link_flavor_select("", "", "", "", "")).to_equal("msvc")
+        expect(windows_link_flavor_select("x86_64-windows", "", "", "", MSYS)).to_equal("gnu")
+
+    it "an unknown override value is ignored":
+        expect(windows_link_flavor_select("", "", "bogus", "bogus", "")).to_equal("msvc")
+
+describe "windows_link_flavor_env_conflict":
+    it "names an override the target overrides":
+        val message = windows_link_flavor_env_conflict("x86_64-pc-windows-msvc", "", "gnu")
+        expect(message.contains("SIMPLE_LINKER_FLAVOR=gnu")).to_equal(true)
+        expect(message.contains("msvc")).to_equal(true)
+
+    it "is silent when the override agrees or the target is unqualified":
+        expect(windows_link_flavor_env_conflict("x86_64-pc-windows-msvc", "", "msvc")).to_equal("")
+        expect(windows_link_flavor_env_conflict("x86_64-pc-windows-gnu", "", "mingw")).to_equal("")
+        expect(windows_link_flavor_env_conflict("", "", "gnu")).to_equal("")
+        expect(windows_link_flavor_env_conflict("x86_64-pc-windows-msvc", "", "")).to_equal("")
+
+describe "effective link OS per target triple":
+    it "Windows targets pick the ABI-qualified os regardless of host":
+        expect(native_effective_link_os("windows", "x86_64-pc-windows-msvc", native_linker_abi_for_target("x86_64-pc-windows-msvc"))).to_equal("windows-msvc")
+        expect(native_effective_link_os("linux", "x86_64-pc-windows-gnu", native_linker_abi_for_target("x86_64-pc-windows-gnu"))).to_equal("windows-mingw")
+        expect(native_effective_link_os("windows", "aarch64-pc-windows-msvc", "windows-msvc")).to_equal("windows-msvc")
+
+    it "ELF and Darwin targets carry no Windows ABI":
+        for target in ["aarch64-unknown-linux-gnu", "riscv64-unknown-linux-gnu", "x86_64-unknown-freebsd"]:
+            expect(native_linker_abi_for_target(target)).to_equal("elf")
+            # Never a Windows link os, whatever the host shell says.
+            expect(native_effective_link_os("linux", target, "elf")).to_equal("linux")
+            expect(native_effective_link_os("freebsd", target, "elf")).to_equal("freebsd")
+        expect(native_linker_abi_for_target("aarch64-apple-darwin")).to_equal("darwin")
+        expect(native_linker_abi_for_target("x86_64-unknown-simpleos")).to_equal("")
+
+    it "hosted cross compiler plan names GNU-prefixed drivers on Linux and no clang-cl":
+        val arm = hosted_c_compiler_plan("aarch64-unknown-linux-gnu", "linux", "x86_64")
+        expect(arm.requires_cross).to_equal(true)
+        expect(arm.supported).to_equal(true)
+        expect(arm.command).to_equal("aarch64-linux-gnu-gcc")
+        val riscv = hosted_c_compiler_plan("riscv64-unknown-linux-gnu", "linux", "x86_64")
+        expect(riscv.command).to_equal("riscv64-linux-gnu-gcc")
+        val mingw = hosted_c_compiler_plan("x86_64-pc-windows-gnu", "linux", "x86_64")
+        expect(mingw.supported).to_equal(true)
+        expect(mingw.command).to_equal("clang")
+        val bsd = hosted_c_compiler_plan("x86_64-unknown-freebsd", "freebsd", "x86_64")
+        expect(bsd.requires_cross).to_equal(false)
+        expect(bsd.supported).to_equal(true)
+        val mac = hosted_c_compiler_plan("aarch64-apple-darwin", "macos", "arm64")
+        expect(mac.requires_cross).to_equal(false)
+        expect(mac.supported).to_equal(true)
+
+describe "planned link flags for non-Windows targets carry no Windows-isms":
+    it "direct linker flags":
+        for os in ["linux", "freebsd", "macos"]:
+            expect(has_windows_ism(native_direct_platform_flags(os, "lld"))).to_equal(false)
+            expect(has_windows_ism(native_direct_platform_flags(os, "lld", true))).to_equal(false)
+
+    it "cc driver flags":
+        for os in ["linux", "freebsd", "macos", "darwin"]:
+            expect(has_windows_ism(native_cc_platform_flags(os, false))).to_equal(false)
+            expect(has_windows_ism(native_cc_platform_flags(os, true))).to_equal(false)
+
+    it "the MinGW arm is the only one that targets w64":
+        expect(has_windows_ism(native_cc_platform_flags("windows-mingw", false))).to_equal(false)
+
+describe "link command recording":
+    it "records next to the output and quotes only what needs it":
+        expect(link_command_record_path("C:/out/hello.exe")).to_equal("C:/out/hello.exe.link-command.txt")
+        expect(link_command_quote("plain")).to_equal("plain")
+        expect(link_command_quote("C:/Program Files/x.lib")).to_equal("\"C:/Program Files/x.lib\"")
+        expect(link_command_quote("")).to_equal("\"\"")
+        expect(render_link_command("lld-link", ["/OUT:a b.exe", "a.obj"])).to_equal("lld-link \"/OUT:a b.exe\" a.obj")
