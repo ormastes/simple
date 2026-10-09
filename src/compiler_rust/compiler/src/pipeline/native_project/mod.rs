@@ -455,12 +455,30 @@ pub fn set_target_override(target: simple_common::target::Target) {
     let _set_result = TARGET_OVERRIDE.set(target);
 }
 
-/// Get the effective compilation target (override or host).
+/// Get the effective compilation target: the `--target` override, else the
+/// environment-driven default the lexer's `@when` evaluation uses
+/// (`SIMPLE_TARGET_OS`/`SIMPLE_TARGET_ARCH` > `SIMPLE_NATIVE_BUILD_TARGET` >
+/// host, see `simple_parser::cond_compile::default_target`), so the text-level
+/// strip paths (discovery, import loader, parsed-source cache) select the same
+/// branches as the lexer.
 pub(crate) fn effective_target() -> simple_common::target::Target {
-    TARGET_OVERRIDE
-        .get()
-        .copied()
-        .unwrap_or_else(simple_common::target::Target::host)
+    TARGET_OVERRIDE.get().copied().unwrap_or_else(env_default_target)
+}
+
+fn env_default_target() -> simple_common::target::Target {
+    use simple_common::target::{Target, TargetOS};
+    let host = Target::host();
+    let (os, arch) = simple_parser::cond_compile::default_target();
+    let os = match os {
+        "windows" => TargetOS::Windows,
+        "linux" => TargetOS::Linux,
+        "macos" => TargetOS::MacOS,
+        "freebsd" => TargetOS::FreeBSD,
+        "simpleos" => TargetOS::SimpleOS,
+        "none" => TargetOS::None,
+        _ => host.os,
+    };
+    Target::new(arch.parse().unwrap_or(host.arch), os)
 }
 
 /// Grouped duplicate struct definitions: bare type name → list of field-lists.

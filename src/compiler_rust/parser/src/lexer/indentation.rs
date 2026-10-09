@@ -213,8 +213,6 @@ impl<'a> super::Lexer<'a> {
                 _ => break,
             }
         }
-        indent = indent.saturating_sub(self.cond_dedent());
-
         if let Some(token) = pending_token {
             let current_indent = *self.indent_stack.last().unwrap_or(&0);
             if indent > current_indent {

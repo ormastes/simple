@@ -1,0 +1,188 @@
+# Shared @when/@elif/@else/@end conformance corpus, run through the
+# pure-Simple preprocessor. The SAME fixtures and expectations
+# (test/fixtures/conditional_compile/conformance/) are run through the Rust
+# seed by src/compiler_rust/parser/tests/when_block_conformance.rs; the two
+# compilers must agree on every row.
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{file_read, env_get, env_set}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals,
+    _pp_preprocess_conditionals_target_receipted_v1}
+use compiler.core.cfg_platform.{cfg_detect_os, cfg_detect_arch}
+
+val CORPUS = "test/fixtures/conditional_compile/conformance/"
+val TAG_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+val TARGET_OS = ["windows", "linux", "macos", "freebsd", "simpleos", "none"]
+val TARGET_ARCH = ["x86_64", "aarch64", "riscv64"]
+
+# Every TAG_[A-Z0-9_]* token in `source` (exact tokens, not substrings), in
+# order of first appearance.
+fn tags_in(source: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i + 4 <= source.len():
+        if source.slice(i, i + 4) == "TAG_":
+            var j = i + 4
+            while j < source.len() and TAG_CHARS.contains(source[j]):
+                j = j + 1
+            val tag = source.slice(i, j)
+            if not has(out, tag):
+                out.push(tag)
+            i = j
+        else:
+            i = i + 1
+    out
+
+fn has(items: [text], wanted: text) -> bool:
+    for item in items:
+        if item == wanted:
+            return true
+    false
+
+# Non-comment rows of a tab-separated corpus table.
+fn table_rows(name: text, columns: i64) -> [[text]]:
+    var rows: [[text]] = []
+    for line in file_read(CORPUS + name).split("\n"):
+        val t = line.trim()
+        if t == "" or t.starts_with("#"):
+            continue
+        val raw = t.split("\t")
+        if raw.len() != columns:
+            continue
+        var cols: [text] = []
+        for cell in raw:
+            cols.push(cell.trim())
+        rows.push(cols)
+    rows
+
+# Rows with the wrong column count: a corpus bug that must fail the spec,
+# never be skipped (the seed asserts the same).
+fn malformed_rows(name: text, columns: i64) -> [text]:
+    var bad: [text] = []
+    for line in file_read(CORPUS + name).split("\n"):
+        val t = line.trim()
+        if t == "" or t.starts_with("#"):
+            continue
+        if t.split("\t").len() != columns:
+            bad.push("{name}: malformed row: {t}")
+    bad
+
+# "" when the row holds, else a failure description.
+fn check_row(mode: text, source: text, out: text, row: [text]) -> text:
+    val fixture = row[0]
+    val os = row[1]
+    val arch = row[2]
+    val label = "{mode} {fixture} {os}/{arch}"
+    val expected = if row[3] == "-": [] else: row[3].split(",")
+    val all_tags = tags_in(source)
+    for tag in expected:
+        if not has(all_tags, tag):
+            return "{label}: expected tag {tag} is not in the fixture"
+    if out.split("\n").len() != source.split("\n").len():
+        return "{label}: line count changed"
+    val got_tags = tags_in(out)
+    for tag in all_tags:
+        val want = has(expected, tag)
+        val got = has(got_tags, tag)
+        if want != got:
+            return "{label}: {tag} expected {want} got {got}"
+    ""
+
+# Ambient selection with the same SIMPLE_TARGET_OS / SIMPLE_TARGET_ARCH
+# override the seed honours; every variable is restored afterwards.
+fn with_env(os: text, arch: text, triple: text, source: text, run_pp: bool) -> [text]:
+    val old_triple = env_get("SIMPLE_NATIVE_BUILD_TARGET")
+    val old_os = env_get("SIMPLE_TARGET_OS")
+    val old_arch = env_get("SIMPLE_TARGET_ARCH")
+    env_set("SIMPLE_NATIVE_BUILD_TARGET", if triple == "-": "" else: triple)
+    env_set("SIMPLE_TARGET_OS", if os == "-": "" else: os)
+    env_set("SIMPLE_TARGET_ARCH", if arch == "-": "" else: arch)
+    val out = if run_pp: _pp_preprocess_conditionals(source) else: ""
+    val detected_os = cfg_detect_os()
+    val detected_arch = cfg_detect_arch()
+    env_set("SIMPLE_NATIVE_BUILD_TARGET", old_triple)
+    env_set("SIMPLE_TARGET_OS", old_os)
+    env_set("SIMPLE_TARGET_ARCH", old_arch)
+    [out, detected_os, detected_arch]
+
+describe "@when conformance corpus (pure-Simple preprocessor)":
+    it "selects the expected branch per (os, arch) through the target-receipted preprocessor":
+        step("receipted target mode over the shared corpus")
+        assert_equal(malformed_rows("expectations.tsv", 5).join("\n"), "")
+        var failures: [text] = []
+        val rows = table_rows("expectations.tsv", 5)
+        assert_true(rows.len() >= 50)
+        for row in rows:
+            val fixture = row[0]
+            val source = file_read(CORPUS + fixture)
+            val result = _pp_preprocess_conditionals_target_receipted_v1(source, row[1], row[2])
+            if row[4] == "warn":
+                # Receipted mode fails closed on an unsupported atom.
+                if not result.is_err():
+                    failures.push("receipted {fixture}: expected an error for an unsupported atom")
+                continue
+            if result.is_err():
+                failures.push("receipted {fixture}: " + result.unwrap_err())
+                continue
+            val problem = check_row("receipted", source, result.unwrap().source, row)
+            if problem != "":
+                failures.push(problem)
+        assert_equal(failures.join("\n"), "")
+
+    it "selects identically through the ambient preprocessor with SIMPLE_TARGET_OS/ARCH":
+        step("ambient env-override mode over the shared corpus")
+        assert_equal(malformed_rows("expectations.tsv", 5).join("\n"), "")
+        var failures: [text] = []
+        val rows = table_rows("expectations.tsv", 5)
+        assert_true(rows.len() >= 50)
+        for row in rows:
+            val fixture = row[0]
+            val source = file_read(CORPUS + fixture)
+            val out = with_env(row[1], row[2], "-", source, true)[0]
+            val problem = check_row("ambient", source, out, row)
+            if problem != "":
+                failures.push(problem)
+        assert_equal(failures.join("\n"), "")
+
+    it "resolves the environment-driven target like the seed":
+        step("env_targets.tsv through cfg_detect_os / cfg_detect_arch")
+        assert_equal(malformed_rows("env_targets.tsv", 5).join("\n"), "")
+        var failures: [text] = []
+        val rows = table_rows("env_targets.tsv", 5)
+        assert_true(rows.len() >= 9)
+        for row in rows:
+            val env_os = row[0]
+            val env_arch = row[1]
+            val env_triple = row[2]
+            val want_os = row[3]
+            val want_arch = row[4]
+            val detected = with_env(env_os, env_arch, env_triple, "", false)
+            val got_os = detected[1]
+            val got_arch = detected[2]
+            val label = "os={env_os} arch={env_arch} triple={env_triple}"
+            if got_os != want_os or got_arch != want_arch:
+                failures.push("{label}: expected {want_os}/{want_arch} got {got_os}/{got_arch}")
+        assert_equal(failures.join("\n"), "")
+
+    it "preprocesses every real @when owner file for every corpus target":
+        step("owner_files.txt x os x arch through the receipted preprocessor")
+        var failures: [text] = []
+        var files: [text] = []
+        for line in file_read(CORPUS + "owner_files.txt").split("\n"):
+            val t = line.trim()
+            if t != "" and not t.starts_with("#"):
+                files.push(t)
+        assert_equal(files.len(), 9)
+        for file in files:
+            val source = file_read(file)
+            if not source.contains("@when("):
+                failures.push("{file}: no longer carries @when; update owner_files.txt")
+                continue
+            for os in TARGET_OS:
+                for arch in TARGET_ARCH:
+                    val result = _pp_preprocess_conditionals_target_receipted_v1(source, os, arch)
+                    if result.is_err():
+                        failures.push("{file} {os}/{arch}: " + result.unwrap_err())
+                    elif result.unwrap().source.split("\n").len() != source.split("\n").len():
+                        failures.push("{file} {os}/{arch}: line count changed")
+        assert_equal(failures.join("\n"), "")

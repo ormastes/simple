@@ -71,6 +71,10 @@ pub struct Parser<'a> {
     pub(crate) current_scope: String,
     /// Collected error hints (helpful messages for common mistakes)
     pub(crate) error_hints: Vec<ErrorHint>,
+    /// Unbalanced `@when`/`@elif`/`@else`/`@end` directives: `parse()` fails
+    /// closed with this message instead of compiling both branches (the same
+    /// contract as the text-level strip path in the compiler crate).
+    pub(crate) cond_structural_error: Option<String>,
     /// Count of INDENT tokens consumed during pattern parsing that need matching DEDENTs
     /// consumed after the match arm body. Reset to 0 after consuming the dedents.
     pub(crate) pattern_indent_count: usize,
@@ -133,6 +137,12 @@ impl<'a> Parser<'a> {
 
     fn from_lexer(source: &'a str, mut lexer: Lexer<'a>) -> Self {
         let cond_diagnostics = std::mem::take(&mut lexer.cond_diagnostics);
+        let cond_structural_error = (!lexer.cond_balanced).then(|| {
+            format!(
+                "unbalanced conditional compilation directives: {}",
+                cond_diagnostics.join("; ")
+            )
+        });
         let current = lexer.next_token();
         let previous = Token::new(TokenKind::Eof, Span::new(0, 0, 1, 1), String::new());
 
@@ -152,6 +162,7 @@ impl<'a> Parser<'a> {
             macro_registry: MacroRegistry::new(),
             current_scope: "module".to_string(),
             error_hints: Vec::new(),
+            cond_structural_error: None,
             pattern_indent_count: 0,
             match_arm_depth: 0,
             no_brace_postfix: false,
@@ -164,6 +175,7 @@ impl<'a> Parser<'a> {
             grid_row_depth: 0,
         };
 
+        parser.cond_structural_error = cond_structural_error;
         for message in cond_diagnostics {
             parser.error_hints.push(ErrorHint {
                 level: crate::error_recovery::ErrorHintLevel::Warning,
@@ -243,6 +255,7 @@ impl<'a> Parser<'a> {
             macro_registry: MacroRegistry::new(),
             current_scope: "module".to_string(),
             error_hints: Vec::new(),
+            cond_structural_error: None,
             pattern_indent_count: 0,
             match_arm_depth: 0,
             no_brace_postfix: false,
@@ -366,6 +379,15 @@ impl<'a> Parser<'a> {
 
     pub fn parse(&mut self) -> Result<Module, ParseError> {
         self.debug_trace("Starting parse()");
+        if let Some(message) = self.cond_structural_error.take() {
+            return Err(ParseError::SyntaxError {
+                message,
+                line: 1,
+                column: 1,
+                span: None,
+                context: None,
+            });
+        }
         let mut items = Vec::new();
         let mut iterations = 0usize;
 
