@@ -122,7 +122,17 @@ pub struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     pub fn new(source: &'a str) -> Self {
-        let mut lexer = Lexer::new(source);
+        Self::from_lexer(source, Lexer::new(source))
+    }
+
+    /// Parse with `@when(...)` conditional-compilation blocks evaluated against
+    /// an explicit target (`os`, `arch`) instead of `SIMPLE_TARGET_*`/host.
+    pub fn new_for_target(source: &'a str, os: &str, arch: &str) -> Self {
+        Self::from_lexer(source, Lexer::new_for_target(source, os, arch))
+    }
+
+    fn from_lexer(source: &'a str, mut lexer: Lexer<'a>) -> Self {
+        let cond_diagnostics = std::mem::take(&mut lexer.cond_diagnostics);
         let current = lexer.next_token();
         let previous = Token::new(TokenKind::Eof, Span::new(0, 0, 1, 1), String::new());
 
@@ -153,6 +163,16 @@ impl<'a> Parser<'a> {
             parse_recursion_depth: 0,
             grid_row_depth: 0,
         };
+
+        for message in cond_diagnostics {
+            parser.error_hints.push(ErrorHint {
+                level: crate::error_recovery::ErrorHintLevel::Warning,
+                message: format!("conditional compilation: {message}"),
+                span: Span::new(0, 0, 1, 1),
+                suggestion: None,
+                help: None,
+            });
+        }
 
         // Check for common mistakes in the initial token
         // (since it was loaded via lexer.next_token() bypassing advance())
