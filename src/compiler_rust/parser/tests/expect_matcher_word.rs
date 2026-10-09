@@ -60,6 +60,17 @@ fn matcher_word_form_folds_into_a_single_matcher_call() {
 }
 
 #[test]
+fn parenthesized_subject_matcher_word_folds_into_a_single_matcher_call() {
+    // `expect(a) to_equal(b)`: the subject is already a paren Call, so it
+    // never reached the no-paren fold and `to_equal(b)` became an orphan.
+    for src in ["expect(cpop[0]) to_equal(first[0])\n", "expect(x) to_equal 1\n"] {
+        let items = parse(src);
+        assert_eq!(items.len(), 1, "{src:?} must be ONE statement, not a split pair");
+        assert_eq!(matcher_of(&items[0]), Some(("to_equal".to_string(), 1)), "{src:?}");
+    }
+}
+
+#[test]
 fn zero_argument_matcher_word_folds_without_an_argument() {
     let items = parse("expect value to_be_nil\n");
     assert_eq!(items.len(), 1);
