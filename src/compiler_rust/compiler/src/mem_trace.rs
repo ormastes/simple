@@ -85,7 +85,10 @@ fn publish(live_delta: isize, allocs: u64, bytes: u64) {
     let live = LIVE_BYTES
         .fetch_add(live_delta as usize, Ordering::Relaxed)
         .wrapping_add(live_delta as usize);
-    if live_delta > 0 {
+    // A cross-thread free can be flushed before the allocating thread's batch,
+    // briefly wrapping LIVE_BYTES below zero; never let that wrapped value
+    // become the permanent peak.
+    if live_delta > 0 && (live as isize) > 0 {
         PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
     }
 }
