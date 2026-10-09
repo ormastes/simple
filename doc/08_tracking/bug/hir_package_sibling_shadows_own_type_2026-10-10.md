@@ -70,3 +70,18 @@ The sibling stays reachable through its qualified binding. With no
 `test/01_unit/compiler/20.hir/package_sibling_same_name_enum_spec.spl`. It
 uses three modules with two `Status` enums. Before the fix 0/3 passed; after,
 3/3 pass (seed `C:/dev/simple-rel-seed-elif/src/compiler_rust/target_wt/debug/simple.exe`).
+
+## Explicit imports of the same name (review follow-up)
+
+The declare pass runs after Pass 0, so `define_own_module_type` also shadows
+an EXPLICIT `use x.{Status}` when the module declares its own `Status`. The
+seed was checked (`use app.zzprobe.provider.{Status}` plus a local
+`enum Status: Mine, Other`). It accepts the program silently and the local
+declaration wins outright: `Status.Mine` runs, and `Status.Ready` fails with
+`unknown variant or method 'Ready' on enum Status`. Making this a compile
+error would diverge from the seed, so the HIR matches the seed instead. A
+materialized import of the shadowed name is no longer lowered
+(`lower_module_enum_definitions`), and it no longer re-registers its unit
+patterns over the module's own (`module_build.spl`). Before that change, the
+module's HIR held `Status@lib.other` and lost its own enum (spec case
+"explicit import of a name the module also declares": 5/6 before, 6/6 after).
