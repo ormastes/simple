@@ -1,3 +1,5 @@
+use compiler.borrow.gc_analysis.escape.{EscapeState, AllocationSite, PointsToSet, EscapeAnalysis, allocationsite_create}
+
 # GC Safety Analysis Tests
 #
 # Tests for the GC safety analysis system including
@@ -156,13 +158,13 @@ describe "EscapeAnalysis pipeline":
         expect(b).to_equal(1)
         expect(ea.total_allocations).to_equal(2)
 
-    it "leaves an untouched allocation Unknown until finalize demotes it":
+    it "retains an untouched allocation as Unknown after finalize":
         var ea = EscapeAnalysis.create()
         val a = ea.record_allocation(1, 100, 10)
         expect(ea.get_escape_state(a) == EscapeState.Unknown).to_equal(true)
         ea.finalize()
-        expect(ea.get_escape_state(a) == EscapeState.NoEscape).to_equal(true)
-        expect(ea.can_stack_allocate(a)).to_equal(true)
+        expect(ea.get_escape_state(a) == EscapeState.Unknown).to_equal(true)
+        expect(ea.can_stack_allocate(a)).to_equal(false)
 
     it "marks a returned local as ReturnEscape":
         var ea = EscapeAnalysis.create()
@@ -227,26 +229,32 @@ describe "EscapeAnalysis pipeline":
         val ea = EscapeAnalysis.create()
         expect(ea.get_escape_state(999) == EscapeState.Unknown).to_equal(true)
 
-    it "partitions allocations into escaping and non-escaping":
+    it "keeps unknown and returned allocations in the escaping partition":
         var ea = EscapeAnalysis.create()
         val a = ea.record_allocation(1, 100, 70)
         val b = ea.record_allocation(2, 101, 71)
         ea.record_return(71)
         ea.finalize()
-        expect(ea.get_non_escaping().len()).to_equal(1)
-        expect(ea.get_escaping().len()).to_equal(1)
-        expect(ea.get_non_escaping()[0].id).to_equal(a)
-        expect(ea.get_escaping()[0].id).to_equal(b)
+        expect(ea.get_non_escaping().len()).to_equal(0)
+        val escaping = ea.get_escaping()
+        expect(escaping.len()).to_equal(2)
+        var found_unknown = false
+        var found_returned = false
+        for site in escaping:
+            if site.id == a: found_unknown = true
+            if site.id == b: found_returned = true
+        expect(found_unknown).to_equal(true)
+        expect(found_returned).to_equal(true)
 
-    it "counts stack-eligible sites and reports their ratio":
+    it "does not count unproven locality as stack eligible":
         var ea = EscapeAnalysis.create()
         val a = ea.record_allocation(1, 100, 80)
         val b = ea.record_allocation(2, 101, 81)
         ea.record_return(81)
         ea.finalize()
-        expect(ea.stack_eligible).to_equal(1)
+        expect(ea.stack_eligible).to_equal(0)
         expect(ea.total_allocations).to_equal(2)
-        expect(ea.stack_allocation_ratio()).to_equal(0.5)
+        expect(ea.stack_allocation_ratio()).to_equal(0.0)
 
     it "reports a zero ratio when nothing was allocated":
         var ea = EscapeAnalysis.create()
