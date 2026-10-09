@@ -32,14 +32,27 @@ fn picked(module: &simple_parser::ast::Module) -> String {
 
 #[test]
 fn explicit_cross_target_selects_target_branches_on_the_lexer_path() {
+    // Start from a clean environment: the explicit --target must win on its
+    // own, not through an inherited override.
+    for key in ["SIMPLE_TARGET_OS", "SIMPLE_TARGET_ARCH", "SIMPLE_NATIVE_BUILD_TARGET"] {
+        std::env::remove_var(key);
+    }
     let host_os = Target::host().os.name();
     set_target_override(Target::parse("aarch64-unknown-linux-gnu").expect("triple"));
+    // A later, different --target is ignored (first wins) and does not
+    // move the lexer's target either.
+    set_target_override(Target::parse("x86_64-pc-windows-msvc").expect("triple"));
 
     // The override is exported like the pure-Simple native-build CLI does,
     // so worker children and the lexer's env-driven default see it.
     assert_eq!(std::env::var("SIMPLE_NATIVE_BUILD_TARGET").as_deref(), Ok("aarch64-linux"));
     assert_eq!(default_target(), ("linux", "aarch64"));
     assert_eq!((cfg_target().os.as_str(), cfg_target().arch.as_str()), ("linux", "aarch64"));
+    // An ambient manual override never outranks the explicit build target.
+    std::env::set_var("SIMPLE_TARGET_OS", "windows");
+    assert_eq!(default_target(), ("linux", "aarch64"));
+    assert_eq!(cfg_target().os, "linux");
+    std::env::remove_var("SIMPLE_TARGET_OS");
 
     // Lexer path only: no text strip ran on this source.
     let module = Parser::new(SRC).parse().expect("lexer-path parse");

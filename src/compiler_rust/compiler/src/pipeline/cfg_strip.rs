@@ -36,17 +36,14 @@ use simple_common::target::TargetArch;
 pub use simple_parser::cond_compile::CfgTarget;
 use simple_parser::ast::{Attribute, Node};
 
-/// The conditional-compilation target of this process: the `--target`
-/// override when one was given, else the environment-driven default the
-/// lexer uses (`SIMPLE_TARGET_OS`/`SIMPLE_TARGET_ARCH` >
-/// `SIMPLE_NATIVE_BUILD_TARGET` > host). Every text-level strip caller
-/// (discovery, import loader, parsed-source cache, `simple run`) evaluates
-/// with these names, so it can never disagree with the lexer path.
+/// The conditional-compilation target of this process -- exactly what the
+/// lexer evaluates against (`simple_parser::cond_compile::default_target`:
+/// explicit `--target` > `SIMPLE_NATIVE_BUILD_TARGET` > `SIMPLE_TARGET_OS`/
+/// `SIMPLE_TARGET_ARCH` > host). Every text-level strip caller (discovery,
+/// import loader, parsed-source cache, `simple run`) uses these names, so it
+/// can never disagree with the lexer path.
 pub fn cfg_target() -> CfgTarget {
-    match crate::pipeline::native_project::target_override() {
-        Some(target) => CfgTarget::new(target.os.name(), target.arch.name()),
-        None => CfgTarget::from_env(),
-    }
+    CfgTarget::from_env()
 }
 
 /// Apply module-level `@when`/`@elif`/`@else`/`@end` selection for `target`
@@ -547,6 +544,14 @@ mod tests {
         assert!(super::strip_os_when_blocks("@end\n", &linux_host()).is_err());
         assert!(super::strip_os_when_blocks("@when(os=\"windows\"):\n", &linux_host()).is_err());
         assert!(super::strip_os_when_blocks("@elif(os=\"windows\"):\n", &linux_host()).is_err());
+        // A duplicate @else, an @elif after @else and an empty condition are
+        // structural errors too: never silently drop or double a branch.
+        let dup_else = "@when(os=\"windows\"):\nval A = 1\n@else:\nval A = 2\n@else:\nval A = 3\n@end\n";
+        assert!(super::strip_os_when_blocks(dup_else, &linux_host()).unwrap_err().contains("duplicate @else"));
+        let elif_after_else = "@when(os=\"windows\"):\nval A = 1\n@else:\nval A = 2\n@elif(os=\"linux\"):\nval A = 3\n@end\n";
+        assert!(super::strip_os_when_blocks(elif_after_else, &linux_host()).unwrap_err().contains("@elif after @else"));
+        assert!(super::strip_os_when_blocks("@when():\nval A = 1\n@end\n", &linux_host()).unwrap_err().contains("empty @when"));
+        assert!(simple_parser::Parser::new(dup_else).parse().is_err());
         let nested = "@when(os=\"windows\"):\n@when(os=\"windows\"):\nval SELECTED = 11\n@else:\nval SELECTED = 22\n@end\n@else:\nval SELECTED = 33\n@end\n";
         let windows = super::strip_os_when_blocks(nested, &CfgTarget::new("windows", TargetArch::host().name())).expect("nested Windows branch");
         let linux = super::strip_os_when_blocks(nested, &linux_host()).expect("nested Linux fallback");

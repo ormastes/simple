@@ -29,16 +29,26 @@
 //!   * Arch names: x86_64 (amd64, x64), x86 (i386, i686), aarch64 (arm64),
 //!     arm (arm32, armv6, armv7), riscv64, riscv32, ppc64le (ppc64el,
 //!     powerpc64le), thumbv6m, thumbv7m, thumbv7em.
-//!   * Structure: `@elif`/`@else`/`@end` without an open `@when`, or an
-//!     unclosed `@when`, leave the mask `balanced == false`. Every consumer
-//!     fails closed on that (the parser returns a syntax error, the text
-//!     strip path returns `Err`): both branches are never compiled.
+//!   * Structure: `@elif`/`@else`/`@end` without an open `@when`, an
+//!     unclosed `@when`, a second `@else` in one block, an `@elif` after
+//!     `@else`, or an empty `@when()`/`@elif()` condition leave the mask
+//!     `balanced == false`. Every consumer fails closed on that (the parser
+//!     returns a syntax error, the text strip path returns `Err`, the pure
+//!     receipted preprocessor returns `Err`): both branches are never
+//!     compiled. Pinned by `conformance/malformed/`.
 //!
-//! Target selection: `SIMPLE_TARGET_OS` / `SIMPLE_TARGET_ARCH`, else the
-//! `SIMPLE_NATIVE_BUILD_TARGET` triple, else the host -- the same order as
-//! `cfg_platform.spl` (`cfg_detect_os` / `cfg_detect_arch`). An explicit
-//! target (`Lexer::new_for_target`) overrides all of them. Environment and
-//! host spellings are normalised with the FUZZY rule shared with
+//! Target selection, ONE rule for the lexer and the compiler's text strip
+//! path (`cfg_strip::cfg_target`), mirrored by `cfg_platform.spl`
+//! (`cfg_detect_os` / `cfg_detect_arch`):
+//!   1. the explicit `--target` of this process ([`set_explicit_target`],
+//!      first call wins; the compiler also exports it as the triple below so
+//!      worker children agree),
+//!   2. the `SIMPLE_NATIVE_BUILD_TARGET` triple (what the pure-Simple
+//!      native-build CLI exports for its `--target`),
+//!   3. `SIMPLE_TARGET_OS` / `SIMPLE_TARGET_ARCH` (manual override),
+//!   4. the host.
+//! `Lexer::new_for_target` bypasses all of them. Environment and host
+//! spellings are normalised with the FUZZY rule shared with
 //! `cfg_normalize_os` / `cfg_normalize_arch` ([`normalize_host_os`],
 //! [`normalize_host_arch`]: lowercase, substring match in a fixed order, so
 //! `Windows_NT`, `darwin23`, `linux-gnu`, `AMD64`, `x86_64-pc-linux-gnu` all
@@ -201,14 +211,34 @@ fn env_value(key: &str) -> String {
     std::env::var(key).unwrap_or_default()
 }
 
+/// The explicit `--target` of this process, as cfg names. Set once.
+static EXPLICIT_TARGET: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+
+/// Register the process's explicit `--target` (cfg OS/arch names). The first
+/// call wins; a later call with the same names is a no-op and returns `true`,
+/// a later call with different names changes nothing and returns `false`.
+pub fn set_explicit_target(os: &str, arch: &str) -> bool {
+    let wanted = (os.to_string(), arch.to_string());
+    EXPLICIT_TARGET.set(wanted.clone()).is_ok() || EXPLICIT_TARGET.get() == Some(&wanted)
+}
+
+/// The explicit `--target` registered with [`set_explicit_target`], if any.
+pub fn explicit_target() -> Option<(&'static str, &'static str)> {
+    EXPLICIT_TARGET.get().map(|(os, arch)| (os.as_str(), arch.as_str()))
+}
+
 /// The (os, arch) conditions are evaluated against when no explicit target is
-/// given: `SIMPLE_TARGET_OS`/`SIMPLE_TARGET_ARCH` > `SIMPLE_NATIVE_BUILD_TARGET`
-/// triple > host.
+/// passed to the lexer: see the module docs for the single precedence rule
+/// (explicit `--target` > `SIMPLE_NATIVE_BUILD_TARGET` > `SIMPLE_TARGET_OS`/
+/// `SIMPLE_TARGET_ARCH` > host).
 pub fn default_target() -> (&'static str, &'static str) {
+    if let Some(explicit) = explicit_target() {
+        return explicit;
+    }
     let triple = env_value("SIMPLE_NATIVE_BUILD_TARGET");
-    let mut os = normalize_host_os(&env_value("SIMPLE_TARGET_OS"));
+    let mut os = triple_os(&triple);
     if os.is_empty() {
-        os = triple_os(&triple);
+        os = normalize_host_os(&env_value("SIMPLE_TARGET_OS"));
     }
     if os.is_empty() {
         os = match normalize_host_os(std::env::consts::OS) {
@@ -216,9 +246,9 @@ pub fn default_target() -> (&'static str, &'static str) {
             host => host,
         };
     }
-    let mut arch = normalize_host_arch(&env_value("SIMPLE_TARGET_ARCH"));
+    let mut arch = triple_arch(&triple);
     if arch.is_empty() {
-        arch = triple_arch(&triple);
+        arch = normalize_host_arch(&env_value("SIMPLE_TARGET_ARCH"));
     }
     if arch.is_empty() {
         arch = match normalize_host_arch(std::env::consts::ARCH) {
@@ -488,6 +518,7 @@ pub struct LineMask {
 struct Frame {
     parent: bool,
     taken: bool,
+    else_seen: bool,
 }
 
 /// Compute the [`LineMask`] for `source`. `None` when the source contains no
@@ -512,18 +543,33 @@ pub fn inactive_line_mask(source: &str, os: &str, arch: &str) -> Option<LineMask
             value
         };
         if t.starts_with("@when(") {
-            let cond_ok = eval(paren_condition(t), &mut diagnostics);
+            let cond = paren_condition(t);
+            if cond.is_empty() {
+                balanced = false;
+                diagnostics.push(format!("line {line_no}: empty @when condition"));
+            }
+            let cond_ok = eval(cond, &mut diagnostics);
             let current = active && cond_ok;
             stack.push(Frame {
                 parent: active,
                 taken: current,
+                else_seen: false,
             });
             active = current;
         } else if t.starts_with("@elif(") {
+            let cond = paren_condition(t);
+            if cond.is_empty() {
+                balanced = false;
+                diagnostics.push(format!("line {line_no}: empty @elif condition"));
+            }
             if let Some(frame) = stack.last_mut() {
+                if frame.else_seen {
+                    balanced = false;
+                    diagnostics.push(format!("line {line_no}: @elif after @else"));
+                }
                 let mut current = false;
                 if frame.parent && !frame.taken {
-                    current = eval(paren_condition(t), &mut diagnostics);
+                    current = eval(cond, &mut diagnostics);
                     frame.taken |= current;
                 }
                 active = current;
@@ -533,6 +579,11 @@ pub fn inactive_line_mask(source: &str, os: &str, arch: &str) -> Option<LineMask
             }
         } else if t == "@else" || t == "@else:" {
             if let Some(frame) = stack.last_mut() {
+                if frame.else_seen {
+                    balanced = false;
+                    diagnostics.push(format!("line {line_no}: duplicate @else"));
+                }
+                frame.else_seen = true;
                 let current = frame.parent && !frame.taken;
                 frame.taken |= current;
                 active = current;
@@ -687,7 +738,16 @@ mod tests {
 
     #[test]
     fn unbalanced_directives_are_flagged() {
-        for src in ["@else:\nX\n", "@end\n", "@elif(linux):\n", "@when(linux):\nX\n"] {
+        for src in [
+            "@else:\nX\n",
+            "@end\n",
+            "@elif(linux):\n",
+            "@when(linux):\nX\n",
+            "@when(linux):\nA\n@else:\nB\n@else:\nC\n@end\n",
+            "@when(linux):\nA\n@else:\nB\n@elif(windows):\nC\n@end\n",
+            "@when():\nA\n@end\n",
+            "@when(linux):\nA\n@elif():\nB\n@end\n",
+        ] {
             let sel = select_branches(src, "linux", "x86_64");
             assert!(!sel.balanced, "{src:?}");
             assert!(!sel.diagnostics.is_empty(), "{src:?}");

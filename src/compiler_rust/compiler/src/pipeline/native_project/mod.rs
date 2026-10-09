@@ -458,13 +458,22 @@ static TARGET_OVERRIDE: OnceLock<simple_common::target::Target> = OnceLock::new(
 /// (`simple_parser::cond_compile::default_target`) and every text-level strip
 /// path select the `--target` branches, never the host's.
 pub fn set_target_override(target: simple_common::target::Target) {
-    let _set_result = TARGET_OVERRIDE.set(target);
+    if TARGET_OVERRIDE.set(target).is_err() {
+        // First call wins (OnceLock). A long-lived host that asks for a
+        // different target later must not end up with one target in the
+        // backend and another in the lexer's environment.
+        if TARGET_OVERRIDE.get() != Some(&target) {
+            eprintln!(
+                "warning: --target `{target}` ignored: this process already compiles for `{}`",
+                TARGET_OVERRIDE.get().map(|t| t.to_string()).unwrap_or_default()
+            );
+        }
+        return;
+    }
+    // Same names on every parse path of this process (lexer, text strip)...
+    simple_parser::cond_compile::set_explicit_target(target.os.name(), target.arch.name());
+    // ...and the triple for worker children, which re-derive the names.
     std::env::set_var("SIMPLE_NATIVE_BUILD_TARGET", target.to_string());
-}
-
-/// The `--target` override, if one was given.
-pub fn target_override() -> Option<simple_common::target::Target> {
-    TARGET_OVERRIDE.get().copied()
 }
 
 /// Get the effective compilation target: the `--target` override, else the
