@@ -1,5 +1,7 @@
 use std.nogc_sync_mut.io.process_ops.{process_run}
-use std.io_runtime.{host_os}
+use std.io_runtime.{host_os, dir_exists}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
 
 # Was: read the `OS` env var directly and default to "not Windows" when unset
 # -- fail-open under a stripped bootstrap environment (its captured command
@@ -14,3 +16,109 @@ fn backend_shell_tuple(command: text) -> (text, text, i64):
     if host_os() == "windows":
         return process_run("cmd.exe", ["/c", command])
     process_run("/bin/sh", ["-c", command])
+
+# In-process answer to "which of these tool names would the host run by bare
+# name?" -- the question `where <name>` (Windows) and `command -v <name>`
+# (POSIX) answer, without a process spawn per candidate.
+#
+# Perf bug (2026-10-09): detect_llvm_capabilities() asked that question
+# through backend_shell_tuple once per candidate (28 `where` lookups plus
+# 20 `<tool>-NN --version` probes that mostly named absent tools). A cmd.exe
+# spawn costs ~1 s on a Windows host with a long PATH, and the report is
+# computed just to read MirTargetContext.version at the start of MIR lowering,
+# so a one-module hello world spent 66-99 s in the `mir` phase before
+# lower_module() ran (32 ms). Same host rules as the shells, applied here:
+#   Windows: the working directory first, then each PATH entry (`;`
+#            separated, surrounding quotes dropped); in each directory the
+#            exact name as written, then name + each PATHEXT extension in
+#            PATHEXT order (default .COM;.EXE;.BAT;.CMD when unset) -- the
+#            order `where` reports.
+#   POSIX:   each PATH entry (`:` separated, an empty entry meaning the
+#            working directory), plain name only. The executable bit is not
+#            re-checked: the runtime has no backed stat-mode probe in every
+#            lane, and a tool file on PATH without it is a broken install
+#            either way.
+# A candidate written with a directory component is checked as given, like
+# `command -v /abs/tool`. A host with no PATH (SimpleOS, scrubbed bootstrap
+# environment) yields no directories and therefore "" -- the same
+# "not detected" answer the shells gave, with no spawn attempted.
+fn backend_tool_on_path(candidates: [text]) -> text:
+    val windows = host_os() == "windows"
+    val dirs = _backend_tool_search_dirs(windows)
+    val exts = if windows: _backend_tool_path_exts() else: [""]
+    for candidate in candidates:
+        val found = _backend_tool_resolve(candidate: candidate, dirs: dirs, exts: exts, windows: windows)
+        if found != "":
+            return found
+    ""
+
+fn _backend_tool_search_dirs(windows: bool) -> [text]:
+    val raw = sosix_env_get_nullable("PATH") ?? ""
+    var dirs: [text] = []
+    if windows:
+        dirs.push(".")
+    for entry in raw.split(if windows: ";" else: ":"):
+        val dir = _backend_tool_strip_quotes(entry.trim())
+        if dir == "":
+            if not windows:
+                dirs.push(".")
+        else:
+            dirs.push(dir)
+    dirs
+
+fn _backend_tool_strip_quotes(entry: text) -> text:
+    var out = ""
+    var index = 0
+    val count = entry.len()
+    while index < count:
+        val ch = entry.char_at(index)
+        if ch != "\"":
+            out = out + ch
+        index = index + 1
+    out
+
+fn _backend_tool_path_exts() -> [text]:
+    val raw = sosix_env_get_nullable("PATHEXT") ?? ""
+    val source = if raw.trim() == "": ".COM;.EXE;.BAT;.CMD" else: raw
+    var exts: [text] = []
+    for entry in source.split(";"):
+        val ext = entry.trim().lower()
+        if ext != "":
+            exts.push(ext)
+    exts
+
+fn _backend_tool_file(path: text) -> bool:
+    file_exists(path) and not dir_exists(path)
+
+fn _backend_tool_join(dir: text, name: text, windows: bool) -> text:
+    if dir.ends_with("/") or dir.ends_with("\\"):
+        return dir + name
+    dir + (if windows: "\\" else: "/") + name
+
+fn _backend_tool_resolve(candidate: text, dirs: [text], exts: [text], windows: bool) -> text:
+    if candidate == "":
+        return ""
+    if candidate.contains("/") or candidate.contains("\\"):
+        if _backend_tool_file(candidate):
+            return candidate
+        if windows:
+            for ext in exts:
+                if _backend_tool_file(candidate + ext):
+                    return candidate + ext
+        return ""
+    for dir in dirs:
+        if windows:
+            # `where` lists an exact-name match (even extension-less) before
+            # the PATHEXT forms; pinned by llvm_tool_resolution_spec.spl.
+            val literal = _backend_tool_join(dir: dir, name: candidate, windows: true)
+            if _backend_tool_file(literal):
+                return literal
+            for ext in exts:
+                val with_ext = _backend_tool_join(dir: dir, name: candidate + ext, windows: true)
+                if _backend_tool_file(with_ext):
+                    return with_ext
+        else:
+            val full = _backend_tool_join(dir: dir, name: candidate, windows: false)
+            if _backend_tool_file(full):
+                return full
+    ""

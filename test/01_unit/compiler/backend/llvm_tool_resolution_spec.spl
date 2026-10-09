@@ -1,0 +1,98 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+#
+# Perf bug (2026-10-09): find_tool_portable spawned `where` / `command -v`
+# once per candidate name, ~1 s each on a Windows host, and
+# detect_llvm_capabilities() (28 lookups + 20 version probes) ran at the
+# start of MIR lowering just to read the llc major version -- 66-99 s of the
+# `mir` phase for a one-module hello world. The finder now walks PATH in
+# process. This spec pins that the in-process answer is the SHELL's answer
+# on a fixture PATH: versioned names preferred, PATHEXT honored on Windows
+# (and, like `where`, an extension-less exact match still listed), absent
+# tools stay absent, and a host without PATH degrades to "not found".
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{env_get, env_set, cwd, host_os, file_write,
+    dir_create_all, dir_remove_all, process_run}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use compiler.backend.backend.io_compat.{backend_tool_on_path, backend_shell_tuple}
+use compiler.backend.backend.llvm_capability.{find_tool_portable}
+
+fn _windows() -> bool:
+    host_os() == "windows"
+
+fn _legacy_lookup(name: text) -> text:
+    # The exact shell question the finder used to spawn per candidate.
+    if _windows():
+        val (out, err, code) = backend_shell_tuple("where {name}")
+        if code == 0:
+            for line in out.split("\n"):
+                val resolved = line.trim()
+                if resolved != "":
+                    return resolved
+        return ""
+    val (out, err, code) = backend_shell_tuple("command -v {name} 2>/dev/null")
+    if code == 0:
+        return out.trim()
+    ""
+
+fn _norm(path: text) -> text:
+    # Separator- and (on Windows) case-insensitive comparison: `where` prints
+    # the PATH entry as given plus `\name`, the walk joins the same way.
+    var parts: [text] = []
+    var index = 0
+    while index < path.len():
+        val ch = path.char_at(index)
+        parts.push(if ch == "\\": "/" else: ch)
+        index = index + 1
+    val joined = parts.join("")
+    if _windows(): joined.lower() else: joined
+
+fn _tool(dir: text, name: text) -> text:
+    val path = "{dir}/{name}"
+    expect(file_write(path, "#!/bin/sh\nexit 0\n")).to_equal(true)
+    if not _windows():
+        val (out, err, code) = process_run("/bin/sh", ["-c", "chmod +x '{path}'"])
+        expect(code).to_equal(0)
+    path
+
+fn _path_join(entries: [text]) -> text:
+    entries.join(if _windows(): ";" else: ":")
+
+describe "LLVM tool resolution without per-candidate spawns":
+    """backend_tool_on_path answers exactly what `where` / `command -v`
+    answered for the LLVM tool finders, without a process spawn per
+    candidate name."""
+    it "matches the shell lookup on a fixture PATH":
+        val root = "{cwd()}/build/test/llvm_tool_resolution_{getpid()}"
+        val bin1 = "{root}/bin1"
+        val bin2 = "{root}/bin2"
+        expect(dir_create_all(bin1)).to_equal(true)
+        expect(dir_create_all(bin2)).to_equal(true)
+        val exe = if _windows(): ".exe" else: ""
+        val llc19 = _tool(dir: bin1, name: "llc-19" + exe)
+        val llc = _tool(dir: bin2, name: "llc" + exe)
+        val opt = _tool(dir: bin2, name: if _windows(): "opt.cmd" else: "opt")
+        val bare = _tool(dir: bin1, name: "spltoolbare")
+        val saved_path = env_get("PATH")
+        # Fixture dirs first; the host PATH stays behind them so the shell
+        # itself (`where` lives in System32) keeps working for the comparison.
+        expect(env_set("PATH", _path_join([bin1, bin2, saved_path]))).to_equal(true)
+
+        expect(_norm(find_tool_portable(["llc-19", "llc"]))).to_equal(_norm(llc19))
+        expect(_norm(find_tool_portable(["llc-18", "llc"]))).to_equal(_norm(llc))
+        expect(_norm(backend_tool_on_path(["opt"]))).to_equal(_norm(opt))
+        expect(backend_tool_on_path(["spl-nonesuch-tool-19", "spl-nonesuch-tool"])).to_equal("")
+        expect(_norm(backend_tool_on_path(["spltoolbare"]))).to_equal(_norm(bare))
+        for name in ["llc-19", "llc", "opt", "spltoolbare", "spl-nonesuch-tool", "llvm-config-18"]:
+            expect(_norm(backend_tool_on_path([name]))).to_equal(_norm(_legacy_lookup(name)))
+
+        expect(env_set("PATH", saved_path)).to_equal(true)
+        expect(dir_remove_all(root)).to_equal(true)
+
+    it "answers not found on a host without PATH":
+        val saved_path = env_get("PATH")
+        expect(env_set("PATH", "")).to_equal(true)
+        expect(backend_tool_on_path(["llc", "clang", "opt"])).to_equal("")
+        expect(env_set("PATH", saved_path)).to_equal(true)
