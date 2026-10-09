@@ -1,0 +1,98 @@
+"""
+Purpose: Pin that an imported (provider) struct's field types are relocated
+into the consumer's SymbolTable before the consumer is lowered.
+Audience: compiler engineers maintaining entry-closure MIR lowering.
+
+prescan_module_struct_names registers every module's struct field metadata
+with the PROVIDER's per-module SymbolIds. Read through the consumer table those
+ids name unrelated symbols: on the stage2 test-runner build an imported
+`evidence_quality: ResourceEvidenceQuality` field resolved to the consumer's
+`Signal`, so `left.evidence_quality == ResourceEvidenceQuality.Unavailable`
+failed enum equality and reported "operator overload for struct" (19 of the
+remaining stage2 test-runner MIR errors, 2026-10-09).
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+val PROVIDER_SRC = """
+enum Quality:
+    Exact
+    Unavailable
+
+struct Usage:
+    tag: i64
+    quality: Quality
+"""
+
+val CONSUMER_SRC = """
+fn signal_a() -> i64:
+    1
+
+fn signal_b() -> i64:
+    2
+
+fn signal_c() -> i64:
+    3
+
+fn signal_d() -> i64:
+    4
+
+fn read_tag(value: i64) -> i64:
+    value + signal_a() + signal_b() + signal_c() + signal_d()
+"""
+
+fn hir_of(src: text, filename: text) -> HirModule:
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    hir_lowering.lower_module(module)
+
+fn usage_quality_field_name(lowering: MirLowering) -> text:
+    val field_types = lowering.struct_field_hir_type["Usage"]
+    val quality_type = field_types[1]
+    match quality_type.kind:
+        case HirTypeKind.Named(symbol, _):
+            val name = lowering.symbols.symbol_name_scalar_raw(symbol.id)
+            val is_enum = lowering.symbols.symbol_is_enum_declaration_scalar_raw(symbol.id)
+            "{name}:{is_enum}"
+        case _: "non-named"
+
+describe "provider struct field relocation":
+    it "reads an imported struct's enum field type through the consumer table":
+        val provider = hir_of(PROVIDER_SRC, "pkg/metrics.spl")
+        val consumer = hir_of(CONSUMER_SRC, "pkg/consumer.spl")
+        var lowering = MirLowering.new(consumer.symbols)
+        lowering.prescan_module_struct_names(provider)
+        lowering.prescan_module_struct_names(consumer)
+        val _mir = lowering.lower_module(consumer, [provider, consumer], true)
+        expect(usage_quality_field_name(lowering)).to_equal("Quality:true")
+
+    it "keeps a consumer's own same-named struct layout":
+        val provider = hir_of(PROVIDER_SRC, "pkg/metrics.spl")
+        val consumer = hir_of("struct Usage:\n    tag: i64\n    quality: i64\n", "pkg/consumer_owns.spl")
+        var lowering = MirLowering.new(consumer.symbols)
+        lowering.prescan_module_struct_names(provider)
+        lowering.prescan_module_struct_names(consumer)
+        val _mir = lowering.lower_module(consumer, [provider, consumer], true)
+        expect(usage_quality_field_name(lowering)).to_equal("non-named")
+
+    it "keeps the prescan owner of a bare name shared by two same-named providers":
+        # Both providers declare `Usage` with the SAME field names but different
+        # field types. Prescan keeps the first (`quality: Quality`); the second
+        # provider must not take the bare entry over just because its field
+        # list matches.
+        val provider = hir_of(PROVIDER_SRC, "pkg/metrics.spl")
+        val rival = hir_of("struct Usage:\n    tag: i64\n    quality: i64\n", "pkg/rival.spl")
+        val consumer = hir_of(CONSUMER_SRC, "pkg/consumer.spl")
+        var lowering = MirLowering.new(consumer.symbols)
+        lowering.prescan_module_struct_names(provider)
+        lowering.prescan_module_struct_names(rival)
+        lowering.prescan_module_struct_names(consumer)
+        val _mir = lowering.lower_module(consumer, [provider, rival, consumer], true)
+        expect(usage_quality_field_name(lowering)).to_equal("Quality:true")
