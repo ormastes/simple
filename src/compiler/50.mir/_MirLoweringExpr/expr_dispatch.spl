@@ -686,29 +686,56 @@ impl MirLowering:
         names an unrelated symbol (measured: `u.quality` with imported
         `Usage.quality: Quality` resolved to `Usage` itself, so enum `==`
         on the projection fell into struct operator dispatch). The prescan
-        also recorded the field type's NAME, which is table-independent: keep
-        the declared type when the id still names it, otherwise rebind by
-        that name, and degrade to `Error` (= unknown) rather than reuse a
-        foreign id."""
+        also recorded the field type's module-qualified ownership key
+        (`struct_field_type_ownership_key`), which is table-independent: keep
+        the declared type when the id still names that exact owner, otherwise
+        rebind to the importer's symbol of that exact owner, and degrade to
+        `Error` (= unknown) rather than reuse a foreign id or capture a
+        same-named type declared by a different module."""
         match declared.kind:
             case HirTypeKind.Named(declared_sym, declared_args):
-                var expected = ""
-                if self.struct_field_type_name.contains(owner):
-                    val names = self.struct_field_type_name[owner]
-                    if names != nil and field_idx >= 0 and field_idx < names.len():
-                        expected = names[field_idx]
-                if expected == "":
+                var owner_key = ""
+                if self.struct_field_type_ownership_key.contains(owner):
+                    val keys = self.struct_field_type_ownership_key[owner]
+                    if keys != nil and field_idx >= 0 and field_idx < keys.len():
+                        owner_key = keys[field_idx]
+                if owner_key == "":
                     return declared
-                # Class identities are recorded as "<owner>.<Name>".
-                val expected_parts = expected.split(".")
-                val bare_expected = expected_parts[expected_parts.len() - 1]
-                if self.symbols.symbol_name_scalar_raw(declared_sym.id) == bare_expected:
+                if self.symbol_matches_ownership_key(declared_sym.id, owner_key):
                     return declared
-                if val rebound = self.symbols.lookup_exact_type(bare_expected):
-                    return HirType(kind: HirTypeKind.Named(rebound, declared_args), span: declared.span)
+                # Rebind path only: derive the bare name from the key
+                # ("<module>::<Name>" for layout keys, "<module>.<Name>" for
+                # class identities) and accept the importer's symbol only if
+                # it is that exact owner.
+                var bare_start = 0
+                val colon_at = owner_key.last_index_of("::")
+                if colon_at >= 0:
+                    bare_start = colon_at + 2
+                else:
+                    val dot_at = owner_key.last_index_of(".")
+                    if dot_at >= 0:
+                        bare_start = dot_at + 1
+                if val rebound = self.symbols.lookup_exact_type(owner_key.substring(bare_start)):
+                    if self.symbol_matches_ownership_key(rebound.id, owner_key):
+                        return HirType(kind: HirTypeKind.Named(rebound, declared_args), span: declared.span)
                 HirType(kind: HirTypeKind.Error, span: declared.span)
             case _:
                 declared
+
+    fn symbol_matches_ownership_key(raw: i64, owner_key: text) -> bool:
+        """True when `raw` in `self.symbols` is exactly the type `owner_key`
+        names: `composite_layout_key` ("<defining_module>::<Name>", or the
+        bare name when ownerless) or `mir_class_identity` for classes."""
+        val name = self.symbols.symbol_name_scalar_raw(raw)
+        if name == "" or not owner_key.ends_with(name):
+            return false
+        val defining_module = self.symbols.symbol_defining_module_scalar_raw(raw)
+        val prefix_len = owner_key.len() - name.len()
+        if prefix_len == 0:
+            return defining_module == ""
+        if defining_module != "" and prefix_len == defining_module.len() + 2 and owner_key.starts_with(defining_module):
+            return true
+        self.symbols.record_owner_identity_scalar_raw(raw) == owner_key
 
     me remember_field_projection_provenance(base: HirExpr, base_local: LocalId, field_idx: i64, result: LocalId):
         """Carry nested aggregate/array identity through a field projection."""

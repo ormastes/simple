@@ -19,6 +19,7 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.hir.hir_lowering.types.{hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 
@@ -51,3 +52,52 @@ describe "enum equality on an imported struct field":
         val errs = consumer_mir_errors()
         print "mir errors: [{errs}]"
         expect(errs.contains("operator overload for struct")).to_equal(false)
+
+# Same-named types in different modules: the field type must be rebound by its
+# module-qualified ownership key (`<module>::<Name>`), never by bare name. An
+# owner the importer's table cannot name exactly degrades to unknown (Error)
+# instead of capturing whichever `Status` the importer happens to see.
+# (A full three-module fixture with two `Status` enums is blocked by a
+# separate HIR surface bug: the provider's own `Status` field already binds to
+# the other module's `Status` in its own SymbolTable.)
+val owner_dep_source = "pub enum Status:\n    Ready\n    Done\n\npub struct Job:\n    status: Status\n    n: i64\n"
+val owner_consumer_source = "use lib.dep.\{Job, Status\}\n\nfn probe(j: Job) -> bool:\n    j.status == Status.Done\n"
+
+fn field_binding_for_owner_key(owner_key_override: text) -> text:
+    val log = Logger(level: 0)
+    val dep_ast = parse_full_frontend(owner_dep_source, "lib/dep.spl", "lib.dep", log)
+    val consumer_ast = parse_full_frontend(owner_consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.dep"] = dep_ast
+    val sources = [SourceFile(path: "lib/dep.spl", content: owner_dep_source, module_name: "lib.dep")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var dep_lowering = hirlowering_for_module("lib.dep", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val dep_hir = dep_lowering.lower_module(dep_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    mir_lowering.prescan_module_struct_names(dep_hir)
+    mir_lowering.prescan_module_struct_names(consumer_hir)
+    mir_lowering.lower_module(consumer_hir)
+    if not mir_lowering.struct_field_hir_type.contains("Job"):
+        return "no-layout"
+    if owner_key_override != "":
+        mir_lowering.struct_field_type_ownership_key["Job"] = [owner_key_override, ""]
+    val declared = mir_lowering.struct_field_hir_type["Job"][0]
+    val rebound = mir_lowering.declared_field_type_in_current_table("Job", 0, declared)
+    match rebound.kind:
+        case HirTypeKind.Named(sym, _):
+            "named:{mir_lowering.symbols.symbol_name_scalar_raw(sym.id)}@{mir_lowering.symbols.symbol_defining_module_scalar_raw(sym.id)}"
+        case HirTypeKind.Error: "unknown"
+        case _: "other"
+
+describe "same-named enums in different modules":
+    it "binds an imported field type to its exact owning module":
+        val binding = field_binding_for_owner_key("")
+        print "owner binding: {binding}"
+        expect(binding).to_equal("named:Status@lib.dep")
+
+    it "does not capture a same-named enum when the owning module differs":
+        val binding = field_binding_for_owner_key("lib.elsewhere::Status")
+        print "foreign-owner binding: {binding}"
+        expect(binding).to_equal("unknown")
