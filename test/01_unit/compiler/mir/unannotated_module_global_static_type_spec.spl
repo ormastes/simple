@@ -21,6 +21,7 @@ use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.provider_globals.*
+use compiler.mir.mir_serialization.{serialize_mir_inst}
 
 val PROVIDER = """
 struct WmStatus:
@@ -94,6 +95,22 @@ fn unit_static_count(src: text) -> (i64, i64):
             expr_statics = expr_statics + 1
     (unit_statics, expr_statics)
 
+fn unit_fn_calls_by_function(src: text) -> Dict<text, i64>:
+    """Per MIR function: how many instructions call `unit_fn`."""
+    val hir = lower_hir(src)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var counts: Dict<text, i64> = {}
+    for function in mir.functions.values():
+        var calls = 0
+        for block in function.blocks:
+            for inst in block.instructions:
+                val rendered = serialize_mir_inst(inst)
+                if rendered.contains("\"Call\"") and rendered.contains("unit_fn"):
+                    calls = calls + 1
+        counts[function.name] = calls
+    counts
+
 describe "unannotated module global static storage":
     it "lowers the owner's statics without an unresolved-initializer fatal":
         expect(owner_errors(PROVIDER).len()).to_equal(0)
@@ -126,3 +143,18 @@ describe "unannotated module global static storage":
         val (unit_statics, expr_statics) = unit_static_count(src)
         expect(unit_statics).to_equal(0)
         expect(expr_statics).to_equal(0)
+
+    it "reads a Unit global as the unit value without re-running its initializer":
+        val src = "var count = 0\nfn unit_fn():\n    count = count + 1\nval r = unit_fn()\nfn read_twice():\n    r\n    r\n"
+        val counts = unit_fn_calls_by_function(src)
+        var init_calls = 0
+        var reader_calls = -1
+        for name in counts.keys():
+            if name.contains("__module_init"):
+                init_calls = init_calls + counts[name]
+            if name.contains("read_twice"):
+                reader_calls = counts[name]
+        # The initializer runs unit_fn exactly once (count == 1 after
+        # init); the two reads of `r` call nothing.
+        expect(init_calls).to_equal(1)
+        expect(reader_calls).to_equal(0)
