@@ -1,0 +1,123 @@
+"""
+Purpose: Pin how MIR declares the external storage of an IMPORTED module
+global whose HIR type is still `HirTypeKind.Infer` (an unannotated,
+non-literal initializer such as `pub val NAME = "a" + "b"` or a value the
+HIR shape rule could not settle). The storage type must be derived from the
+folded value exactly as the owner module derives its own MirConstant type,
+and `lower_type` must never be handed the `Infer` -- that was the fatal
+`unsupported MIR type kind [infer-arm]` raised on every importer. A value the
+folder cannot settle still fails closed, at the declaration's span.
+Audience: compiler engineers maintaining _MirLowering/provider_globals.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{SymbolTable, HirModule, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirConst}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_globals.*
+
+val IMPORTED_SYMBOL_ID = 777
+
+fn lower_provider(src: text) -> HirModule:
+    val filename = "provmod.spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    hir_lowering.lower_module(module)
+
+fn storage_type_name(lowering: MirLowering) -> text:
+    for declaration in lowering.builder.module.statics.values():
+        if declaration.symbol.id == IMPORTED_SYMBOL_ID:
+            match declaration.type_.kind:
+                case MirTypeKind.I64: return "i64"
+                case MirTypeKind.F64: return "f64"
+                case MirTypeKind.Bool: return "bool"
+                case MirTypeKind.Opaque(name): return "opaque:" + name
+                case _: return "other"
+    "missing"
+
+fn provider_constants(hir: HirModule, name: text, force_infer: bool) -> [HirConst]:
+    """The provider's constants; with `force_infer`, `name` is handed over
+    with an unresolved HIR type exactly as HIR leaves a shape it cannot
+    settle, so the MIR derivation path is exercised regardless of what the
+    HIR shape rule decides for this initializer."""
+    var constants: [HirConst] = []
+    for constant in hir.constants.values():
+        var handed: HirConst = constant
+        if force_infer and handed.name == name:
+            handed.type_ = HirType(kind: HirTypeKind.Infer(0, 0), span: handed.span)
+        constants = constants.push(handed)
+    constants
+
+fn bind_imported_with(src: text, name: text, force_infer: bool) -> (text, [text], bool):
+    """Register the one demanded global `name` from provider `provmod` and
+    report (storage type, error messages, every error carries a span)."""
+    val hir = lower_provider(src)
+    var lowering = MirLowering.new(SymbolTable.new())
+    var demanded: Dict<text, [i64]> = {}
+    demanded[mir_global_declaration_key("provmod", name)] = [IMPORTED_SYMBOL_ID]
+    val _found = lowering.register_provider_global_bindings(
+        "provmod", hir.symbols, provider_constants(hir, name, force_infer), demanded, {})
+    var messages: [text] = []
+    var all_spanned = true
+    for error in lowering.errors:
+        messages = messages.push(error.message)
+        if error.span == nil:
+            all_spanned = false
+    (storage_type_name(lowering), messages, all_spanned)
+
+fn bind_imported(src: text, name: text) -> (text, [text], bool):
+    bind_imported_with(src, name, false)
+
+fn bind_imported_as_infer(src: text, name: text) -> (text, [text], bool):
+    bind_imported_with(src, name, true)
+
+fn joined(messages: [text]) -> text:
+    var out = ""
+    for message in messages:
+        out = out + message + "\n"
+    out
+
+describe "imported module global with an Infer HIR type":
+    it "derives i64 storage for a negated integer literal":
+        val (storage, errors, _) = bind_imported("pub val NEG = -1\n", "NEG")
+        expect(joined(errors)).to_equal("")
+        expect(storage).to_equal("i64")
+
+    it "derives i64 storage for folded integer arithmetic":
+        val (storage, errors, _) = bind_imported("pub val LIMIT = 1 << 3\n", "LIMIT")
+        expect(joined(errors)).to_equal("")
+        expect(storage).to_equal("i64")
+
+    it "derives f64 storage for a negated float literal":
+        val (storage, errors, _) = bind_imported("pub val HALF = -2.5\n", "HALF")
+        expect(joined(errors)).to_equal("")
+        expect(storage).to_equal("f64")
+
+    it "keeps the annotated text storage convention for a string literal":
+        val (storage, errors, _) = bind_imported("pub val NAME = \"abc\"\n", "NAME")
+        expect(joined(errors)).to_equal("")
+        expect(storage).to_equal("opaque:str")
+
+    it "derives storage from the folded value when HIR handed over Infer":
+        val (int_storage, int_errors, _) = bind_imported_as_infer("pub val LIMIT = 1 << 3\n", "LIMIT")
+        expect(joined(int_errors)).to_equal("")
+        expect(int_storage).to_equal("i64")
+        val (neg_storage, neg_errors, _) = bind_imported_as_infer("pub val NEG = -1\n", "NEG")
+        expect(joined(neg_errors)).to_equal("")
+        expect(neg_storage).to_equal("i64")
+        val (str_storage, str_errors, _) = bind_imported_as_infer("pub val NAME = \"abc\"\n", "NAME")
+        expect(joined(str_errors)).to_equal("")
+        expect(str_storage).to_equal("opaque:str")
+
+    it "fails closed at the declaration span when the value cannot be folded":
+        val (storage, errors, all_spanned) = bind_imported("pub val WORDS = \"a\" + \"b\"\n", "WORDS")
+        expect(storage).to_equal("missing")
+        expect(errors.len()).to_equal(1)
+        expect(joined(errors)).to_contain("imported global 'provmod::WORDS' lacks a resolved storage type")
+        expect(joined(errors).contains("[infer-arm]")).to_be(false)
+        expect(all_spanned).to_be(true)
