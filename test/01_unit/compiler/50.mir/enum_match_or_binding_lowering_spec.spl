@@ -12,7 +12,7 @@ Now:
 - HIR `expand_enum_or_arms` splits a top-level enum or-arm into sibling arms
   (same guard and body), so it takes the tested enum-match path;
 - MIR checks that a shared binding has the same payload slot type in every
-  alternative (Named types compare by shape only).
+  alternative (user types compare by declared symbol identity).
 
 Guarded catch-alls (`case _ if c:` / `case x if c:`) now lower as
 default -> guard -> next catch-all, trapping when every guard is false and no
@@ -32,7 +32,7 @@ use compiler.driver.driver_mir_target.{driver_mir_target_context}
 
 extern fn rt_file_read_text(path: text) -> text
 
-val enum_src = "enum D:\n    A\n    B\n    C\n\nenum S:\n    P(v: i64)\n    Q(v: i64)\n    R\n\nenum T:\n    I(v: i64)\n    Tx(v: text)\n    U\n\n"
+val enum_src = "enum D:\n    A\n    B\n    C\n\nenum S:\n    P(v: i64)\n    Q(v: i64)\n    R\n\nenum T:\n    I(v: i64)\n    Tx(v: text)\n    U\n\nenum M:\n    Up(a: i64, b: i64, x: i64)\n    Lo(a: i64, x: i64)\n    No\n\nstruct Foo:\n    f: i64\n\nstruct Bar:\n    g: i64\n\nenum N:\n    Pf(v: Foo)\n    Qb(v: Bar)\n    Rf(v: Foo)\n\n"
 
 fn lower_full(src: text, file: text) -> (MirModule, [text]):
     val parsed = parse_full_frontend(src, file, "fixture_or_binding", Logger(level: 0))
@@ -112,6 +112,43 @@ describe "binding or-alternatives":
         val (mir, messages) = lower_src("fn bad2(t: T) -> i64:\n    match t:\n        case T.I(v) | T.Tx(v):\n            1\n        case _:\n            0\n")
         expect(joined(messages).contains("every alternative must bind it with the same type")).to_equal(true)
 
+    it "ignores `_` wildcards and compares name sets across different arities":
+        val (mir, messages) = lower_src("fn pick_x(m: M) -> i64:\n    match m:\n        case M.Up(_, _, x) | M.Lo(_, x):\n            x\n        case _:\n            0\n")
+        val all = joined(messages)
+        print "errors: [{all}]"
+        expect(all.contains("must bind the same variables")).to_equal(false)
+        expect(all.contains("unresolved")).to_equal(false)
+        val f = find_function(mir, "pick_x")
+        assert_true(f.?)
+        expect(label_count(f.unwrap(), "ematch_arm")).to_equal(2)
+
+    it "flattens a three-way or-arm (nested Or) into three enum arms":
+        val (mir, messages) = lower_src("fn three(d: D) -> i64:\n    match d:\n        case D.A | D.B | D.C:\n            1\n")
+        val all = joined(messages)
+        print "errors: [{all}]"
+        expect(all.contains("unsupported arm pattern")).to_equal(false)
+        val f = find_function(mir, "three")
+        assert_true(f.?)
+        expect(label_count(f.unwrap(), "ematch_arm")).to_equal(3)
+
+    it "rejects a shared binding whose user types differ":
+        val (mir, messages) = lower_src("fn bad3(n: N) -> i64:\n    match n:\n        case N.Pf(v) | N.Qb(v):\n            1\n        case _:\n            0\n")
+        expect(joined(messages).contains("every alternative must bind it with the same type")).to_equal(true)
+
+    it "accepts a shared binding with the same user type":
+        val (mir, messages) = lower_src("fn ok3(n: N) -> i64:\n    match n:\n        case N.Pf(v) | N.Rf(v):\n            v.f\n        case _:\n            0\n")
+        expect(joined(messages).contains("same type")).to_equal(false)
+
+    it "lowers the real 70.backend site (cranelift_gemm_fusion operand_uses)":
+        val path = "src/compiler/70.backend/backend/cranelift_gemm_fusion.spl"
+        val src = rt_file_read_text(path)
+        val (mir, messages) = lower_full(src, path)
+        val all = joined(messages)
+        print "real-site errors: [{all}]"
+        expect(all.contains("or-pattern")).to_equal(false)
+        expect(all.contains("must bind the same variables")).to_equal(false)
+        expect(all.contains("unsupported arm pattern")).to_equal(false)
+
     it "lowers the real 60.mir_opt site (result_abi_translation_validation payload_bits)":
         val path = "src/compiler/60.mir_opt/mir_opt/result_abi_translation_validation.spl"
         val src = rt_file_read_text(path)
@@ -154,6 +191,13 @@ describe "guarded catch-alls":
         val f = find_function(mir, "same")
         assert_true(f.?)
         expect(label_count(f.unwrap(), "ematch_default_guard_pass")).to_equal(1)
+
+    it "an unguarded catch-all makes later arms unreachable (first match wins)":
+        val (mir, messages) = lower_src("fn first(d: D) -> i64:\n    match d:\n        case _:\n            0\n        case D.A:\n            1\n")
+        expect(joined(messages).contains("unreachable match arm")).to_equal(true)
+        val f = find_function(mir, "first")
+        assert_true(f.?)
+        expect(label_count(f.unwrap(), "ematch_arm")).to_equal(0)
 
     it "rejects a guarded catch-all written before a variant arm":
         val (mir, messages) = lower_src("fn early(d: D, c: bool) -> i64:\n    match d:\n        case _ if c:\n            2\n        case D.A:\n            1\n        case _:\n            0\n")

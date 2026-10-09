@@ -340,11 +340,28 @@ fn enum_text_payload_marker() -> text:
     different lane this round)."""
     "$__enum_text_payload__$"
 
+fn flatten_hir_or_alternatives(alts: [HirPattern]) -> [HirPattern]:
+    var out: [HirPattern] = []
+    var i = 0
+    while i < alts.len():
+        val alt: HirPattern = alts[i]
+        match alt.kind:
+            case Or(inner):
+                for x in flatten_hir_or_alternatives(inner):
+                    out = out.push(x)
+            case _:
+                out = out.push(alt)
+        i = i + 1
+    out
+
 fn hir_type_shape_key(t: HirType) -> text:
-    """Table-independent shape of a payload slot type for the or-binding
-    type check. Named types compare as "named" only: their SymbolIds may come
-    from another module's table, so comparing ids/names could report a false
-    mismatch. "" = unknown (never reported)."""
+    """Shape of a payload slot type for the or-binding type check. Every
+    alternative of one or-arm is a variant of the SAME enum, so all slot types
+    compared here come from one enum declaration and therefore one defining
+    SymbolTable: a Named type's raw SymbolId is a sound identity within that
+    comparison even when the table is foreign to the module being lowered
+    (no name lookup, which would need the right table). "" = unknown (never
+    reported)."""
     match t.kind:
         case HirTypeKind.Int(bits, signed):
             if signed: "i{bits}" else: "u{bits}"
@@ -353,7 +370,17 @@ fn hir_type_shape_key(t: HirType) -> text:
         case HirTypeKind.Char: "char"
         case HirTypeKind.Str: "text"
         case HirTypeKind.Unit: "()"
-        case HirTypeKind.Named(_, _): "named"
+        case HirTypeKind.Named(nsym, nargs):
+            var nk = "named#{nsym.id}"
+            if nargs.len() > 0:
+                var parts: [text] = []
+                for na in nargs:
+                    val ak = hir_type_shape_key(na)
+                    if ak == "":
+                        return ""
+                    parts.push(ak)
+                nk = nk + "<" + parts.join(",") + ">"
+            nk
         case HirTypeKind.Optional(inner):
             val ik = hir_type_shape_key(inner)
             if ik == "": "" else: ik + "?"
@@ -2444,7 +2471,9 @@ impl MirLowering:
         while ei < arms.len():
             val src_arm: HirMatchArm = arms[ei]
             match src_arm.pattern.kind:
-                case Or(alts):
+                case Or(nested_alts):
+                    # `A | B | C` may arrive as Or([Or([A, B]), C]); flatten.
+                    val alts = flatten_hir_or_alternatives(nested_alts)
                     var alt_i = 0
                     while alt_i < alts.len():
                         val alt: HirPattern = alts[alt_i]
@@ -2538,6 +2567,14 @@ impl MirLowering:
             # Stage-2 stores array elements through ANY. The explicit type is
             # required before any composite field access.
             val arm: HirMatchArm = arms[ai]
+            if has_default:
+                # First matching arm wins (seed semantics): every arm after an
+                # unguarded catch-all is unreachable. Skip it rather than test
+                # its variant first, and say so (warn-only: the message must
+                # not start with "enum match:", the fatal-prefix allowlist).
+                self.error("unreachable match arm: it follows an unguarded catch-all (`case _:` / `case x:`), which already matches every value", Some(arm.span))
+                ai = ai + 1
+                continue
             match arm.pattern.kind:
                 case Enum(etype, variant, epayload):
                     if enum_name == "":
