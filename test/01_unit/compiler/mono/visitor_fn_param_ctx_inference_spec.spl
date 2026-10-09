@@ -1,0 +1,173 @@
+"""
+Purpose: Pin that a generic visitor shaped like `hir_visitor.spl`'s walkers --
+`fn walk<C>(node, ctx: C, f: fn(Node, C) -> C) -> C` with
+`var acc = f(node, ctx)` and recursive `walk(child, acc, f)` calls -- is fully
+monomorphized from one concrete caller. Before the fix the flat parser
+consumed the `fn(...) -> R` annotation and answered the bare TYPE_FN tag, the
+bridge produced `Named("fn")` and HIR lowered that to `Any`; inside the
+specialized body neither `acc` (result of an Any-typed call) nor `f` (not
+concrete) could bind `C`, so every nested call was refused with E-MONO-032
+and the driver raised E-MONO-033 (115 unresolved call sites in the phase-3
+build of 2026-10-09, 81 of them walk_hir_* nested calls).
+
+Also pins the three callable spellings (`fn(..) -> R`, keyword-less
+`(..) -> R`, nested `fn(fn(i64) -> i64, i64) -> i64`), that a bare `fn`
+stays the shapeless any-callable, that the shape survives a flat-pool
+parse-cache round trip, and that a genuinely uninferable call is still
+refused.
+Audience: compiler engineers maintaining the flat type bridge, the parse
+cache codec and the monomorphization pass's local inference.
+
+## Harness landmine
+The parse -> HIR pipeline is inlined in each `it` block on purpose (see
+mono_source_inference_fixed_point_spec.spl): the same code in a module-level
+helper loses recorded lowering state.
+"""
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.frontend.flat_ast_bridge.{
+    parse_and_build_module_scoped, flat_pool_capture_arm, flat_pool_capture_take,
+    build_module_from_flat_pool_blob}
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+use compiler.verify.post_mono_verify.*
+
+val VISITOR_SRC = "enum Node:\n    Leaf(v: i64)\n    Pair(a: Node, b: Node)\n\nfn walk<C>(node: Node, ctx: C, f: fn(Node, C) -> C) -> C:\n    var acc = f(node, ctx)\n    match node:\n        case Leaf(_):\n            acc = acc\n        case Pair(a, b):\n            acc = walk(a, acc, f)\n            acc = walk(b, acc, f)\n    acc\n\nfn count(n: Node, c: i64) -> i64:\n    c + 1\n\nfn main() -> i64:\n    val t = Node.Pair(Node.Leaf(1), Node.Leaf(2))\n    val done: i64 = walk<i64>(t, 0, count)\n    done\n"
+
+fn param_type_of(hir: HirModule, fn_name: text, param_name: text) -> HirType?:
+    for k in hir.functions.keys():
+        val f: HirFunction = hir.functions[k]
+        if f.name == fn_name:
+            for p in f.params:
+                val pp: HirParam = p
+                if pp.name == param_name:
+                    return Some(pp.type_)
+    nil
+
+fn function_shape(ty: HirType?) -> text:
+    """`fn/<param count>/<nested param shape of the first param>` or the kind
+    name when the type is not a Function."""
+    if ty == nil:
+        return "missing"
+    val t: HirType = ty.unwrap()
+    match t.kind:
+        case HirTypeKind.Function(params, _, _):
+            var first = "-"
+            if params.len() > 0:
+                val p0: HirType = params[0]
+                first = match p0.kind:
+                    case HirTypeKind.Function(inner, _, _): "fn/{inner.len()}"
+                    case HirTypeKind.Int(_, _): "int"
+                    case _: "other"
+            "fn/{params.len()}/{first}"
+        case HirTypeKind.Any: "any"
+        case _: "other"
+
+fn count_named(m: HirModule, name: text) -> i64:
+    var n = 0
+    for k in m.functions.keys():
+        val f: HirFunction = m.functions[k]
+        if f.name == name:
+            n = n + 1
+    n
+
+describe "generic visitor with a ctx: C and fn(Node, C) -> C parameter":
+    it "lowers the fn-typed parameter to a real Function type, not Any":
+        val parsed = parse_full_frontend(VISITOR_SRC, "testdata/mono_visitor_fn_param.spl", "mono_visitor_fn_param", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_visitor_fn_param.spl")
+        val hir = hl.lower_module(parsed)
+        expect(function_shape(param_type_of(hir, "walk", "f"))).to_equal("fn/2/other")
+
+    it "monomorphizes every nested self-call from one concrete caller":
+        val parsed = parse_full_frontend(VISITOR_SRC, "testdata/mono_visitor_walk.spl", "mono_visitor_walk", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_visitor_walk.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.call_sites_found).to_equal(3)
+        expect(stats.specializations_created).to_equal(1)
+        val om: HirModule = out["m"]
+        expect(count_named(om, "walk$i64")).to_equal(1)
+        expect(count_named(om, "walk")).to_equal(0)
+        # Section 9.5 verifier: nothing generic, type-parametric or Any-erased
+        # survives (before the fix: 2 unresolved TypeParam + 1 Any from `f`).
+        # `error_from_substitution` is deliberately NOT asserted: the enum
+        # payload pattern `Pair(a, b)` lowers its variant struct type to
+        # `Error` in HIR (expression_components.spl) on the baseline too,
+        # independent of this fix.
+        val report = post_mono_verify_modules(out)
+        expect(report.unresolved_type_param).to_equal(0)
+        expect(report.any_erasure).to_equal(0)
+        expect(report.generic_call).to_equal(0)
+        expect(report.generic_emitted_definition).to_equal(0)
+
+    it "types a local initialized by calling a fn-typed parameter":
+        # `var acc = f(ctx)` must take `f`'s return type, so a later generic
+        # call that only sees `acc` can still bind its type parameter.
+        val src = "fn apply<C>(ctx: C, f: fn(C) -> C) -> C:\n    var acc = f(ctx)\n    acc = again(acc)\n    acc\n\nfn again<T>(v: T) -> T:\n    v\n\nfn bump(x: i64) -> i64:\n    x + 1\n\nfn main() -> i64:\n    apply<i64>(1, bump)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_visitor_acc_type.spl", "mono_visitor_acc_type", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_visitor_acc_type.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        val om: HirModule = out["m"]
+        expect(count_named(om, "again$i64")).to_equal(1)
+
+    it "lowers the keyword-less `(T) -> U` and nested `fn(fn(..) -> ..)` spellings":
+        val src = "fn apply(g: (i64) -> i64, x: i64) -> i64:\n    g(x)\n\nfn twice(h: fn(fn(i64) -> i64, i64) -> i64, x: i64) -> i64:\n    h(apply_id, x)\n\nfn apply_id(v: i64) -> i64:\n    v\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_visitor_paren_fn.spl", "mono_visitor_paren_fn", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_visitor_paren_fn.spl")
+        val hir = hl.lower_module(parsed)
+        expect(function_shape(param_type_of(hir, "apply", "g"))).to_equal("fn/1/int")
+        expect(function_shape(param_type_of(hir, "twice", "h"))).to_equal("fn/2/fn/1")
+
+    it "keeps a bare `fn` annotation as the shapeless any-callable":
+        val src = "fn run(cb: fn, x: i64) -> i64:\n    x\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_visitor_bare_fn.spl", "mono_visitor_bare_fn", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_visitor_bare_fn.spl")
+        val hir = hl.lower_module(parsed)
+        expect(function_shape(param_type_of(hir, "run", "cb"))).to_equal("any")
+
+    it "keeps the fn-type shape across a flat-pool parse-cache round trip":
+        # A cache HIT restores the flat pools from the blob and rebuilds the
+        # module from them; the interned fn shapes must ride along or the
+        # restored annotation would silently become an empty `fn() -> Any`.
+        val src = "fn apply(f: fn(i64, bool) -> i64, x: i64) -> i64:\n    f(x, true)\n"
+        flat_pool_capture_arm()
+        val original = parse_and_build_module_scoped(src, "cache_fn_shape.spl", false)
+        val captured = flat_pool_capture_take()
+        expect(original.functions.len()).to_equal(1)
+        # Another parse in between resets every pool, exactly like a later
+        # module in a real build.
+        val _next = parse_and_build_module_scoped("fn beta() -> i64:\n    1\n", "cache_beta.spl", false)
+        val restored = build_module_from_flat_pool_blob(captured, src, "cache_fn_shape.spl")
+        expect(restored.is_some()).to_equal(true)
+        var hl = HirLowering.with_filename("cache_fn_shape.spl")
+        val hir = hl.lower_module(restored.unwrap())
+        expect(hl.errors.len()).to_equal(0)
+        expect(function_shape(param_type_of(hir, "apply", "f"))).to_equal("fn/2/int")
+
+    it "still refuses a call whose type argument is genuinely uninferable":
+        # `only_ret<T>() -> T` with no argument, no annotation and no result
+        # context: the fail-closed E-MONO-032 must stand.
+        val src = "fn only_ret<T>() -> T:\n    panic(\"never\")\n\nfn main() -> i64:\n    val r = only_ret()\n    0\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_visitor_uninferable.spl", "mono_visitor_uninferable", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_visitor_uninferable.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0]).to_contain("E-MONO-032")
