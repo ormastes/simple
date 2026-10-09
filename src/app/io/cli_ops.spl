@@ -15,9 +15,6 @@ extern fn sys_get_args() -> [text]
 # bootstrap_stage4_get_args_infinite_recursion_coredump_2026-06-21).
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_exit(code: i64)
-extern fn rt_cli_run_tests(args: [text], gc_log: bool, gc_off: bool) -> i64
-extern fn rt_cli_run_tests_process_args(gc_log: bool, gc_off: bool) -> i64
-extern fn rt_cli_handle_compile(args: [text]) -> i64
 use std.io_runtime.{env_get, file_read_result}
 extern fn rt_env_set(key: text, value: text) -> bool
 use std.io_runtime.{getpid}
@@ -32,7 +29,7 @@ extern fn print_raw(value: text) -> i64
 # --- Shell/file helpers (local copies to avoid circular imports) ---
 
 # CLI argv/exit/env/file-probe surface is owned by std.io_runtime and
-# std.nogc_sync_mut.sffi.cli; the local duplicate definitions were removed
+# std.nogc_sync_mut.sffi.cli_args; the local duplicate definitions were removed
 # 2026-09-19 (co-compiled Class B silent-win collisions; see
 # doc/08_tracking/bug/duplicate_public_symbols_differing_return_types_jit_misdispatch_2026-08-09.md).
 # Bodies are behaviourally identical on every engine: rt_cli_exit == rt_exit
@@ -40,15 +37,17 @@ extern fn print_raw(value: text) -> i64
 # and the _cli_file_*_impl helpers match the rt_cli_* provider contracts
 # (exists probe; "" on unreadable).
 export use std.io_runtime.{get_args, exit, env_set}
-export use std.nogc_sync_mut.sffi.cli.{
-    cli_get_args, cli_exit, cli_file_exists, cli_read_file, cli_handle_compile
+# Imported from the narrow cli_args owner, NOT std.sffi.cli: that module also
+# carries the Rust-seed-only rt_cli_run_*/handle_* dispatch externs, which the
+# core-C runtime does not define, so pulling it in made the stage3 compiler
+# (bootstrap_main) fail to link on 34 rt_cli_* symbols. cli_handle_compile is
+# exported by app.io from app.io.cli_commands.
+export use std.nogc_sync_mut.sffi.cli_args.{
+    cli_get_args, cli_exit, cli_file_exists, cli_read_file
 }
 
 fn cli_env_get(key: text) -> text:
     env_get(key)
-
-pub fn cli_run_tests_process_args(gc_log: bool, gc_off: bool) -> i64:
-    rt_cli_run_tests_process_args(gc_log, gc_off)
 
 fn _cli_is_windows_platform() -> bool:
     val os_env = cli_env_get("OS")
@@ -390,7 +389,7 @@ pub fn _cli_run_frontend_delegate(delegate: text, args: [text]) -> i64:
 # ============================================================================
 # get_args / exit / env_set / cli_get_args / cli_exit / cli_file_exists /
 # cli_read_file are re-exported above from std.io_runtime and
-# std.nogc_sync_mut.sffi.cli (single owner per name; see the note at the top).
+# std.nogc_sync_mut.sffi.cli_args (single owner per name; see the note at the top).
 
 # ============================================================================
 # Stubs & Utilities
@@ -442,4 +441,4 @@ fn fault_set_execution_limit(limit: i64):
 # doc/08_tracking/bug/stage4_test_runner_daemon_fallback_relint_nonmemoized_2026-07-20.md.
 # Callers that need the CLI-dispatch/compiler-heavy surface must import it
 # directly from `app.io.cli_commands` / `app.io.cli_compile` instead.
-export cli_handle_compile, cli_env_get, env_set
+export cli_env_get, env_set
