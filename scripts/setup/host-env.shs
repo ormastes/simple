@@ -194,29 +194,73 @@ host_config_user_path() {
     printf '%s/.config/simple/host.sdn' "${_hc_home}"
 }
 
+HOST_CONFIG_SCHEMA="simple-host-config-v1"
+
+# host_config_valid KEY VALUE -> 0 when VALUE is acceptable for KEY. Mirrors
+# host_config_schema() in std.common.config_core.host_config exactly: integer
+# keys are decimal digits >= 1, enum keys take only the listed options, text
+# keys take any non-empty value.
+host_config_valid() {
+    [ -n "$2" ] || return 1
+    case "$1" in
+        max_build_jobs|max_threads|worker_mem_mib|llvm_version)
+            case "$2" in
+                *[!0-9]*) return 1 ;;
+                *[1-9]*) return 0 ;;
+                *) return 1 ;;
+            esac ;;
+        cpu_family) case "$2" in x86_64|aarch64|riscv64) return 0 ;; *) return 1 ;; esac ;;
+        os) case "$2" in windows|linux|macos|freebsd|simpleos) return 0 ;; *) return 1 ;; esac ;;
+        gpu) case "$2" in on|off) return 0 ;; *) return 1 ;; esac ;;
+        *) return 0 ;;
+    esac
+}
+
+# host_config_file_schema_ok FILE -> 0 unless FILE declares a `schema:` other
+# than simple-host-config-v1 (a file with no schema line is accepted). Same
+# rule as host_config_schema_accepts() on the Simple side.
+host_config_file_schema_ok() {
+    _hcs_schema=$(host_env_sdn_get "$1" schema | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//')
+    [ -z "${_hcs_schema}" ] || [ "${_hcs_schema}" = "${HOST_CONFIG_SCHEMA}" ]
+}
+
 # host_config_get KEY ROOT -> prints the effective value (may be empty) and
-# sets host_config_source to env|user|host|default|unset.
+# sets host_config_source to env|user|host|default|unset. An invalid value is
+# rejected with a warning on stderr and resolution falls through to the next
+# lower layer; a host_config file with a foreign schema is skipped whole.
 host_config_get() {
     _hc_key="$1"
     _hc_root="$2"
     _hc_env=$(host_config_env_name "${_hc_key}")
     eval "_hc_val=\${${_hc_env}:-}"
     if [ -n "${_hc_val}" ]; then
-        host_config_source=env
-        printf '%s' "${_hc_val}"
-        return 0
+        if host_config_valid "${_hc_key}" "${_hc_val}"; then
+            host_config_source=env
+            printf '%s' "${_hc_val}"
+            return 0
+        fi
+        printf 'host-config: warning: ignoring invalid %s=%s from env\n' "${_hc_key}" "${_hc_val}" >&2
     fi
     _hc_user=$(host_config_user_path) || _hc_user=""
     for _hc_layer in "user|${_hc_user}" "host|${SIMPLE_HOST_ENV_FILE:-}" \
         "default|${_hc_root}/config/host/host_config.sdn"; do
         _hc_file="${_hc_layer#*|}"
+        _hc_name="${_hc_layer%%|*}"
         [ -n "${_hc_file}" ] && [ -f "${_hc_file}" ] || continue
+        # The legacy per-host file carries host_env's own schema, already
+        # validated by host_env_load; only host_config files are checked here.
+        if [ "${_hc_name}" != host ] && ! host_config_file_schema_ok "${_hc_file}"; then
+            printf 'host-config: warning: ignoring %s layer %s: schema is not %s\n' "${_hc_name}" "${_hc_file}" "${HOST_CONFIG_SCHEMA}" >&2
+            continue
+        fi
         _hc_val=$(host_env_sdn_get "${_hc_file}" "${_hc_key}" | sed -E 's/[[:space:]]+#.*$//; s/[[:space:]]+$//')
-        if [ -n "${_hc_val}" ]; then
-            host_config_source="${_hc_layer%%|*}"
+        [ -n "${_hc_val}" ] || continue
+        if host_config_valid "${_hc_key}" "${_hc_val}"; then
+            host_config_source="${_hc_name}"
             printf '%s' "${_hc_val}"
             return 0
         fi
+        printf 'host-config: warning: ignoring invalid %s=%s from %s layer\n' "${_hc_key}" "${_hc_val}" "${_hc_name}" >&2
     done
     host_config_source=unset
     return 0
@@ -276,7 +320,9 @@ host_config_detect_features() {
 
 # Prefers platform-detect.shs's own LLVM discovery (LLVM_PREFIX/LLVM_VERSION,
 # already resolved when --init sources it); falls back to llvm-config probes
-# that also cover the per-user Windows toolchain store.
+# that also cover the per-user Windows toolchain store. Only configured roots
+# (SIMPLE_LLVM_WIN_ROOT_23, the per-host SIMPLE_HOST_LLVM_WIN_ROOT_23) and
+# discovery are used -- no machine-specific absolute path is hard-coded here.
 host_config_detect_llvm() {
     if [ "${LLVM_FOUND:-0}" = 1 ] && [ -n "${LLVM_PREFIX:-}" ]; then
         _hcl_prefix="${LLVM_PREFIX}"
@@ -285,8 +331,8 @@ host_config_detect_llvm() {
         return 0
     fi
     for _hcl_cfg in "${SIMPLE_LLVM_WIN_ROOT_23:-/nonexistent}/bin/llvm-config.exe" \
+        "${SIMPLE_HOST_LLVM_WIN_ROOT_23:-/nonexistent}/bin/llvm-config.exe" \
         "${HOME:-/nonexistent}"/.simple/toolchains/llvm-msvc-*/*/bin/llvm-config.exe \
-        /c/dev/tool/clang+llvm-*/bin/llvm-config.exe \
         "$(command -v llvm-config-23 2>/dev/null)" "$(command -v llvm-config 2>/dev/null)"; do
         [ -n "${_hcl_cfg}" ] && [ -x "${_hcl_cfg}" ] || continue
         _hcl_ver=$("${_hcl_cfg}" --version 2>/dev/null) || continue
@@ -474,19 +520,19 @@ host_config:
   schema: simple-host-config-v1
   # max_build_jobs: 99
   max_threads: 2
-  os: default-os
-  gpu: default-gpu
+  os: linux
+  gpu: off
 EOF
     cat >"${_st_dir}/hostfile.sdn" <<'EOF'
 host_env:
   hostname: sthost
-  os: host-os
-  gpu: host-gpu
+  os: freebsd
+  gpu: on
 EOF
     cat >"${_st_dir}/user.sdn" <<'EOF'
 host_config:
   max_build_jobs: 12   # trailing comment is stripped
-  os: user-os
+  os: windows
 EOF
     _st_saved_hc="${SIMPLE_HOST_CONFIG-}"
     _st_saved_env_file="${SIMPLE_HOST_ENV_FILE-}"
@@ -496,11 +542,11 @@ EOF
     _st_e_ok=1
     _st_v=$(host_config_get max_build_jobs "${_st_dir}"); [ "${_st_v}" = 12 ] || _st_e_ok=0
     host_config_get os "${_st_dir}" >/dev/null; [ "${host_config_source}" = user ] || _st_e_ok=0
-    _st_v=$(host_config_get gpu "${_st_dir}"); [ "${_st_v}" = host-gpu ] || _st_e_ok=0
+    _st_v=$(host_config_get gpu "${_st_dir}"); [ "${_st_v}" = on ] || _st_e_ok=0
     _st_v=$(host_config_get max_threads "${_st_dir}"); [ "${_st_v}" = 2 ] || _st_e_ok=0
     _st_v=$(host_config_get cpu_family "${_st_dir}"); [ -z "${_st_v}" ] || _st_e_ok=0
     host_config_get cpu_family "${_st_dir}" >/dev/null; [ "${host_config_source}" = unset ] || _st_e_ok=0
-    _st_v=$(SIMPLE_HOST_OS=env-os host_config_get os "${_st_dir}"); [ "${_st_v}" = env-os ] || _st_e_ok=0
+    _st_v=$(SIMPLE_HOST_OS=macos host_config_get os "${_st_dir}"); [ "${_st_v}" = macos ] || _st_e_ok=0
     SIMPLE_HOST_CONFIG="${_st_dir}/absent.sdn"
     _st_v=$(host_config_get max_build_jobs "${_st_dir}"); [ -z "${_st_v}" ] || _st_e_ok=0
     if [ "${_st_e_ok}" -eq 1 ]; then
@@ -508,6 +554,31 @@ EOF
         _st_pass=$((_st_pass + 1))
     else
         printf 'not ok - (e) host_config precedence env > user > host > default\n'
+        _st_fail=$((_st_fail + 1))
+    fi
+
+    # (e2) invalid values and foreign schemas are rejected with a warning and
+    # fall through to the next layer -- identical to the Simple reader
+    # (test/01_unit/lib/common/config_core/host_config_spec.spl).
+    SIMPLE_HOST_CONFIG="${_st_dir}/user.sdn"
+    _st_g_ok=1
+    _st_v=$(SIMPLE_HOST_MAX_BUILD_JOBS=lots host_config_get max_build_jobs "${_st_dir}" 2>"${_st_dir}/warn.err"); [ "${_st_v}" = 12 ] || _st_g_ok=0
+    grep -q 'ignoring invalid max_build_jobs=lots from env' "${_st_dir}/warn.err" || _st_g_ok=0
+    _st_v=$(SIMPLE_HOST_OS=plan9 host_config_get os "${_st_dir}" 2>/dev/null); [ "${_st_v}" = windows ] || _st_g_ok=0
+    _st_v=$(SIMPLE_HOST_MAX_THREADS=0 host_config_get max_threads "${_st_dir}" 2>/dev/null); [ "${_st_v}" = 2 ] || _st_g_ok=0
+    printf 'host_config:\n  max_threads: 0\n  gpu: maybe\n' >"${_st_dir}/baduser.sdn"
+    SIMPLE_HOST_CONFIG="${_st_dir}/baduser.sdn"
+    _st_v=$(host_config_get max_threads "${_st_dir}" 2>/dev/null); [ "${_st_v}" = 2 ] || _st_g_ok=0
+    _st_v=$(host_config_get gpu "${_st_dir}" 2>/dev/null); [ "${_st_v}" = on ] || _st_g_ok=0
+    printf 'host_config:\n  schema: simple-host-config-v9\n  os: linux\n' >"${_st_dir}/v9user.sdn"
+    SIMPLE_HOST_CONFIG="${_st_dir}/v9user.sdn"
+    _st_v=$(host_config_get os "${_st_dir}" 2>"${_st_dir}/warn.err"); [ "${_st_v}" = freebsd ] || _st_g_ok=0
+    grep -q 'schema is not simple-host-config-v1' "${_st_dir}/warn.err" || _st_g_ok=0
+    if [ "${_st_g_ok}" -eq 1 ]; then
+        printf 'ok - (e2) invalid values / foreign schema are rejected and fall through with a warning\n'
+        _st_pass=$((_st_pass + 1))
+    else
+        printf 'not ok - (e2) invalid values / foreign schema are rejected and fall through with a warning\n'
         _st_fail=$((_st_fail + 1))
     fi
 
