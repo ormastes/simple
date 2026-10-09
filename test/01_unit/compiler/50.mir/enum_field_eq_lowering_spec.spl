@@ -1,0 +1,53 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Enum `==` on an imported struct-field projection lowers as an enum compare
+
+Stage2 failed building simple_test_runner with
+`unresolved method call: operator overload for struct ResourceEvidenceQuality`
+on `left.evidence_quality == ResourceEvidenceQuality.Unavailable`, where both
+the struct and the enum come from another module. The enum operand was routed
+to the struct `__eq__` dispatch instead of the enum compare (rt_native_eq).
+"""
+
+# @tag: unit, compiler, mir, enum
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val provider_source = "pub enum Quality:\n    Exact\n    Unavailable\n\npub struct Usage:\n    quality: Quality\n    n: i64\n"
+val consumer_source = "use lib.dep.\{Quality, Usage\}\n\nfn is_missing(u: Usage) -> bool:\n    u.quality == Quality.Unavailable\n\nfn is_present(u: Usage) -> bool:\n    u.quality != Quality.Unavailable\n\nfn both(a: Usage, b: Usage) -> bool:\n    a.quality == Quality.Exact and b.quality == Quality.Exact\n\nfn same(a: Usage, b: Usage) -> bool:\n    a.quality == b.quality\n"
+
+fn consumer_mir_errors() -> text:
+    val log = Logger(level: 0)
+    val provider_ast = parse_full_frontend(provider_source, "lib/dep.spl", "lib.dep", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.dep"] = provider_ast
+    val sources = [SourceFile(path: "lib/dep.spl", content: provider_source, module_name: "lib.dep")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var provider_lowering = hirlowering_for_module("lib.dep", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val provider_hir = provider_lowering.lower_module(provider_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    mir_lowering.prescan_module_struct_names(provider_hir)
+    mir_lowering.prescan_module_struct_names(consumer_hir)
+    val consumer_mir = mir_lowering.lower_module(consumer_hir)
+    var out = ""
+    for e in mir_lowering.errors:
+        out = out + e.message + "\n"
+    out
+
+describe "enum equality on an imported struct field":
+    it "lowers field == Enum.Variant without struct operator dispatch":
+        val errs = consumer_mir_errors()
+        print "mir errors: [{errs}]"
+        expect(errs.contains("operator overload for struct")).to_equal(false)

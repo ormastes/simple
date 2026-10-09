@@ -676,6 +676,40 @@ impl MirLowering:
             return nil
         Some(noted)
 
+    me declared_field_type_in_current_table(owner: text, field_idx: i64, declared: HirType) -> HirType:
+        """Rebind a declared field type's `Named` symbol into `self.symbols`.
+
+        `struct_field_hir_type` is filled by the prescan from the DEFINING
+        module's SymbolTable, so a `Named(sym)` field type carries a SymbolId
+        that is only meaningful in that table. When the struct is imported,
+        lowering reads it against the IMPORTER's table, where the same raw id
+        names an unrelated symbol (measured: `u.quality` with imported
+        `Usage.quality: Quality` resolved to `Usage` itself, so enum `==`
+        on the projection fell into struct operator dispatch). The prescan
+        also recorded the field type's NAME, which is table-independent: keep
+        the declared type when the id still names it, otherwise rebind by
+        that name, and degrade to `Error` (= unknown) rather than reuse a
+        foreign id."""
+        match declared.kind:
+            case HirTypeKind.Named(declared_sym, declared_args):
+                var expected = ""
+                if self.struct_field_type_name.contains(owner):
+                    val names = self.struct_field_type_name[owner]
+                    if names != nil and field_idx >= 0 and field_idx < names.len():
+                        expected = names[field_idx]
+                if expected == "":
+                    return declared
+                # Class identities are recorded as "<owner>.<Name>".
+                val expected_parts = expected.split(".")
+                val bare_expected = expected_parts[expected_parts.len() - 1]
+                if self.symbols.symbol_name_scalar_raw(declared_sym.id) == bare_expected:
+                    return declared
+                if val rebound = self.symbols.lookup_exact_type(bare_expected):
+                    return HirType(kind: HirTypeKind.Named(rebound, declared_args), span: declared.span)
+                HirType(kind: HirTypeKind.Error, span: declared.span)
+            case _:
+                declared
+
     me remember_field_projection_provenance(base: HirExpr, base_local: LocalId, field_idx: i64, result: LocalId):
         """Carry nested aggregate/array identity through a field projection."""
         val base_struct_name = self.resolve_base_struct_name(base, base_local)
@@ -739,7 +773,11 @@ impl MirLowering:
                             # with nominal aggregates. Preserve the declared
                             # owner so enum equality can distinguish them after
                             # projecting through a typed parameter.
-                            self.remember_local_hir_type(result.id, decl_field_types[field_idx], 0, 0)
+                            val rebound_field_type = self.declared_field_type_in_current_table(name, field_idx, decl_field_types[field_idx])
+                            match rebound_field_type.kind:
+                                case HirTypeKind.Named(_, _):
+                                    self.remember_local_hir_type(result.id, rebound_field_type, 0, 0)
+                                case _: ()
                         case HirTypeKind.Optional(_):
                             # Imported aggregate fields have an erased MIR
                             # word. Keep the declared Option owner on that
@@ -3908,7 +3946,7 @@ impl MirLowering:
                             if self.struct_field_hir_type.contains(owner_pre):
                                 val field_types_pre = self.struct_field_hir_type[owner_pre]
                                 if field_idx >= 0 and field_idx < field_types_pre.len():
-                                    val declared_field_type_pre = field_types_pre[field_idx]
+                                    val declared_field_type_pre = self.declared_field_type_in_current_table(owner_pre, field_idx, field_types_pre[field_idx])
                                     match declared_field_type_pre.kind:
                                         case HirTypeKind.Error: ()
                                         case _:
@@ -3939,7 +3977,7 @@ impl MirLowering:
                         if self.struct_field_hir_type.contains(field_owner):
                             val field_types = self.struct_field_hir_type[field_owner]
                             if field_idx >= 0 and field_idx < field_types.len():
-                                val declared_field_type = field_types[field_idx]
+                                val declared_field_type = self.declared_field_type_in_current_table(field_owner, field_idx, field_types[field_idx])
                                 self.remember_local_hir_type(field_result.id, declared_field_type, 0, 0)
                                 match declared_field_type.kind:
                                     case HirTypeKind.Optional(_):
@@ -5096,7 +5134,7 @@ impl MirLowering:
                         if self.struct_field_hir_type.contains(owner_name3):
                             val field_types3 = self.struct_field_hir_type[owner_name3]
                             if field_idx >= 0 and field_idx < field_types3.len():
-                                val declared_field_type3 = field_types3[field_idx]
+                                val declared_field_type3 = self.declared_field_type_in_current_table(owner_name3, field_idx, field_types3[field_idx])
                                 match declared_field_type3.kind:
                                     case HirTypeKind.Error: ()
                                     case _:
