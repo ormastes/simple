@@ -11,7 +11,7 @@ for items that are new or need pinning. It does NOT duplicate covered items.
 
 ## Existing Model Summary
 
-Simple's concurrency model (from design docs and `src/lib/nogc_async_mut/concurrent/mod.spl`):
+Simple's concurrency model (from design docs and `src/lib/nogc_async_mut/concurrent/__init__.spl`):
 
 - **Share-nothing green processes** — no shared mutable variables; sharing only via
   channels/messages or sealed sosix datasets.
