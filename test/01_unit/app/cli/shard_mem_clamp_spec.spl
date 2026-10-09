@@ -1,5 +1,5 @@
 use std.spec
-use app.cli.shard_mem_clamp.{shard_mem_available_kb, shard_mem_available_kb_from_field, shard_threads_cap_for, shard_threads_tree_cap_for, shard_worker_budget_kb}
+use app.cli.shard_mem_clamp.{shard_mem_available_kb, shard_mem_available_kb_from_field, shard_threads_cap_for, shard_threads_tree_cap_for, shard_worker_budget_kb, shard_host_threads_cap, shard_host_worker_budget_kb, shard_host_budget_floor_kb}
 
 # Mechanism pin for the MemAvailable-derived shard concurrency clamp.
 # Pre-fix the clamp did not exist: the thread count came from host_cpus/2 alone,
@@ -45,23 +45,43 @@ describe "shard memory clamp":
         expect(shard_threads_cap_for(16, 0, 16000000)).to_equal(1)
 
     it "reserves space for the parent when a large host has a small tree cap":
-        expect(shard_threads_tree_cap_for(40, 1650000, 68000000, 5859375, true, true)).to_equal(2)
-        expect(shard_threads_tree_cap_for(40, 3000000, 68000000, 5859375, true, true)).to_equal(1)
-        expect(shard_threads_tree_cap_for(40, 1650000, 2000000, 5859375, true, true)).to_equal(1)
+        expect(shard_threads_tree_cap_for(40, 1650000, 68000000, 5859375, true)).to_equal(2)
+        expect(shard_threads_tree_cap_for(40, 3000000, 68000000, 5859375, true)).to_equal(1)
+        expect(shard_threads_tree_cap_for(40, 1650000, 2000000, 5859375, true)).to_equal(1)
 
-    it "does not infer unlimited Windows admission from an absent tree budget":
-        expect(shard_threads_tree_cap_for(40, 1650000, 68000000, 0, true, true)).to_equal(1)
-        expect(shard_threads_tree_cap_for(40, 1650000, 68000000, -1, true, true)).to_equal(1)
-        expect(shard_threads_tree_cap_for(40, 1650000, 0, 5859375, true, true)).to_equal(1)
+    it "bounds an undeclared tree budget by measured host headroom, never unlimited":
+        # No enclosing cap declared: 0.6 * 68 GB / 1.65 GB = 24, not 40, not 1.
+        # Enforcing owners declare their cap through the RSS watchdog
+        # (scripts/bootstrap/tests/watchdog-shard-budget-export-test.shs).
+        expect(shard_threads_tree_cap_for(40, 1650000, 68000000, 0, true)).to_equal(24)
+        expect(shard_threads_tree_cap_for(40, 1650000, 68000000, -1, true)).to_equal(24)
+        # A low-memory host still drops to the sequential path.
+        expect(shard_threads_tree_cap_for(40, 1650000, 2000000, 0, true)).to_equal(1)
+        # Unknown host memory is still sequential, with or without a tree cap.
+        expect(shard_threads_tree_cap_for(40, 1650000, 0, 5859375, true)).to_equal(1)
+        expect(shard_threads_tree_cap_for(40, 1650000, 0, 0, true)).to_equal(1)
+
+    it "honours host max_threads and lets worker_mem_mib only raise a budget":
+        expect(shard_host_threads_cap(40, "8")).to_equal(8)
+        expect(shard_host_threads_cap(4, "8")).to_equal(4)
+        expect(shard_host_threads_cap(40, "")).to_equal(40)
+        expect(shard_host_threads_cap(40, "0")).to_equal(40)
+        expect(shard_host_worker_budget_kb("1000")).to_equal(1024000)
+        expect(shard_host_worker_budget_kb("")).to_equal(0)
+        expect(shard_host_worker_budget_kb("9223372036854775807")).to_equal(0)
+        # 1000 MiB must not replace the 3 GB HIR default; 4000 MiB may raise it.
+        expect(shard_host_budget_floor_kb(1024000, 3000000)).to_equal(3000000)
+        expect(shard_host_budget_floor_kb(4096000, 3000000)).to_equal(4096000)
+        expect(shard_host_budget_floor_kb(0, 3000000)).to_equal(3000000)
 
     it "keeps a known tree cap when the host estimate is explicitly disabled":
-        expect(shard_threads_tree_cap_for(40, 1650000, 0, 5859375, true, false)).to_equal(2)
-        expect(shard_threads_tree_cap_for(40, 1650000, 0, 0, true, false)).to_equal(40)
+        expect(shard_threads_tree_cap_for(40, 1650000, 0, 5859375, false)).to_equal(2)
+        expect(shard_threads_tree_cap_for(40, 1650000, 0, 0, false)).to_equal(40)
 
     it "does not overflow a positive i64 memory bound or raise a serial request":
         expect(shard_threads_cap_for(40, 1650000, 9223372036854775807)).to_equal(40)
-        expect(shard_threads_tree_cap_for(1, 1650000, 0, 0, true, true)).to_equal(1)
-        expect(shard_threads_tree_cap_for(0, 1650000, 0, 0, true, true)).to_equal(0)
+        expect(shard_threads_tree_cap_for(1, 1650000, 0, 0, true)).to_equal(1)
+        expect(shard_threads_tree_cap_for(0, 1650000, 0, 0, true)).to_equal(0)
 
     it "clamps HIR shards harder than parse shards at the same memory":
         # HIR children still spawn the full worker closure; parse children run
