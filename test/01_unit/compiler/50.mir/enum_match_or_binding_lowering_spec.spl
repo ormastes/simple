@@ -1,0 +1,160 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Or-pattern alternatives that bind (`case Copy(l) | Move(l):`) lower natively
+
+About 290 compiler sites (60.mir_opt, 70.backend, plugins/backend_vhdl,
+50.mir) use binding or-arms. HIR defined a separate symbol per alternative
+while the body resolved to only one of them, so stage2 could not lower them.
+Now:
+
+- HIR `unify_or_pattern_bindings` remaps every alternative onto ONE symbol per
+  name and rejects alternatives that bind different name sets;
+- HIR `expand_enum_or_arms` splits a top-level enum or-arm into sibling arms
+  (same guard and body), so it takes the tested enum-match path;
+- MIR checks that a shared binding has the same payload slot type in every
+  alternative (Named types compare by shape only).
+
+Guarded catch-alls (`case _ if c:` / `case x if c:`) now lower as
+default -> guard -> next catch-all, trapping when every guard is false and no
+unguarded default follows; `case x:` binds x to the scrutinee.
+"""
+
+# @tag: unit, compiler, mir, hir, enum
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+extern fn rt_file_read_text(path: text) -> text
+
+val enum_src = "enum D:\n    A\n    B\n    C\n\nenum S:\n    P(v: i64)\n    Q(v: i64)\n    R\n\nenum T:\n    I(v: i64)\n    Tx(v: text)\n    U\n\n"
+
+fn lower_full(src: text, file: text) -> (MirModule, [text]):
+    val parsed = parse_full_frontend(src, file, "fixture_or_binding", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push(e.message)
+    for e in lowering.errors:
+        messages = messages.push(e.message)
+    (mir, messages)
+
+fn lower_src(body: text) -> (MirModule, [text]):
+    lower_full(enum_src + body, "testdata/fixture_or_binding.spl")
+
+fn find_function(mir: MirModule, name: text) -> MirFunction?:
+    for function in mir.functions.values():
+        if function.name == name or function.name.ends_with("." + name):
+            return Some(function)
+    nil
+
+fn joined(messages: [text]) -> text:
+    var out = ""
+    for m in messages:
+        out = out + m + "\n"
+    out
+
+fn label_count(function: MirFunction, needle: text) -> i64:
+    var n = 0
+    for block in function.blocks:
+        val label = block.label ?? ""
+        if label.contains(needle):
+            n = n + 1
+    n
+
+fn abort_messages(function: MirFunction) -> [text]:
+    var msgs: [text] = []
+    for block in function.blocks:
+        match block.terminator:
+            case MirTerminator.Abort(m):
+                msgs = msgs.push(m)
+            case _:
+                pass
+    msgs
+
+describe "binding or-alternatives":
+    it "lowers case S.P(x) | S.Q(x) mixed with a variant arm":
+        val (mir, messages) = lower_src("fn val_of(s: S) -> i64:\n    match s:\n        case S.P(x) | S.Q(x):\n            x\n        case S.R:\n            0\n")
+        val all = joined(messages)
+        print "errors: [{all}]"
+        # Only the pre-existing warn-only non-exhaustive note (no default
+        # arm) may appear; nothing about the or-arm or `x`.
+        expect(all.contains("or-pattern")).to_equal(false)
+        expect(all.contains("unresolved")).to_equal(false)
+        expect(all.contains("undefined")).to_equal(false)
+        expect(all.contains("unsupported")).to_equal(false)
+        val f = find_function(mir, "val_of")
+        assert_true(f.?)
+        expect(label_count(f.unwrap(), "ematch_arm")).to_equal(3)
+
+    it "lowers an or-only binding match with a default":
+        val (mir, messages) = lower_src("fn val_of2(s: S) -> i64:\n    match s:\n        case S.P(x) | S.Q(x):\n            x\n        case _:\n            0\n")
+        print "errors: [{joined(messages)}]"
+        expect(joined(messages)).to_equal("")
+        val f = find_function(mir, "val_of2")
+        assert_true(f.?)
+        expect(label_count(f.unwrap(), "ematch_arm")).to_equal(2)
+
+    it "rejects alternatives that bind different names":
+        val (mir, messages) = lower_src("fn bad(s: S) -> i64:\n    match s:\n        case S.P(x) | S.Q(y):\n            1\n        case _:\n            0\n")
+        expect(joined(messages).contains("or-pattern alternatives must bind the same variables")).to_equal(true)
+
+    it "rejects a shared binding with different payload types":
+        val (mir, messages) = lower_src("fn bad2(t: T) -> i64:\n    match t:\n        case T.I(v) | T.Tx(v):\n            1\n        case _:\n            0\n")
+        expect(joined(messages).contains("every alternative must bind it with the same type")).to_equal(true)
+
+    it "lowers the real 60.mir_opt site (result_abi_translation_validation payload_bits)":
+        val path = "src/compiler/60.mir_opt/mir_opt/result_abi_translation_validation.spl"
+        val src = rt_file_read_text(path)
+        val (mir, messages) = lower_full(src, path)
+        val all = joined(messages)
+        print "real-site errors: [{all}]"
+        expect(all.contains("or-pattern")).to_equal(false)
+        expect(all.contains("unsupported arm pattern")).to_equal(false)
+        expect(all.contains("bits")).to_equal(false)
+        val f = find_function(mir, "payload_bits")
+        assert_true(f.?)
+        expect(label_count(f.unwrap(), "ematch_arm")).to_equal(2)
+
+describe "guarded catch-alls":
+    it "lowers case _ if c: as default -> guard -> trap":
+        val (mir, messages) = lower_src("fn g(d: D, c: bool) -> i64:\n    match d:\n        case D.A:\n            1\n        case _ if c:\n            2\n")
+        print "errors: [{joined(messages)}]"
+        val f = find_function(mir, "g")
+        assert_true(f.?)
+        val fn_ = f.unwrap()
+        expect(label_count(fn_, "ematch_default_guard_pass")).to_equal(1)
+        var guard_trap = false
+        for m in abort_messages(fn_):
+            if m.contains("every guarded catch-all guard was false"):
+                guard_trap = true
+        expect(guard_trap).to_equal(true)
+
+    it "a guarded catch-all followed by an unguarded default does not trap":
+        val (mir, messages) = lower_src("fn g2(d: D, c: bool) -> i64:\n    match d:\n        case D.A:\n            1\n        case _ if c:\n            2\n        case _:\n            0\n")
+        val f = find_function(mir, "g2")
+        assert_true(f.?)
+        val fn_ = f.unwrap()
+        expect(label_count(fn_, "ematch_default_guard_pass")).to_equal(1)
+        expect(abort_messages(fn_).len()).to_equal(0)
+
+    it "case x if ...: binds x to the scrutinee":
+        val (mir, messages) = lower_src("fn same(d: D, e: D) -> i64:\n    match d:\n        case D.A:\n            1\n        case x if x == e:\n            2\n        case _:\n            0\n")
+        print "errors: [{joined(messages)}]"
+        expect(joined(messages).contains("unresolved")).to_equal(false)
+        val f = find_function(mir, "same")
+        assert_true(f.?)
+        expect(label_count(f.unwrap(), "ematch_default_guard_pass")).to_equal(1)
+
+    it "rejects a guarded catch-all written before a variant arm":
+        val (mir, messages) = lower_src("fn early(d: D, c: bool) -> i64:\n    match d:\n        case _ if c:\n            2\n        case D.A:\n            1\n        case _:\n            0\n")
+        expect(joined(messages).contains("must come after every variant arm")).to_equal(true)
