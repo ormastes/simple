@@ -11,6 +11,8 @@ use std.test_runner.test_runner_types.{TestRunResult}
 use std.test_runner.test_runner_files.{strip_ansi}
 use std.test_runner.test_db_compat.{TestDatabase, load_test_db_compat, micros_to_rfc3339}
 use std.test_runner.test_db_types.{IndividualTestResult, TestStatus}
+use std.nogc_sync_mut.test_runner.test_runner_helpers.{update_test_database_from_record}
+use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_from_result}
 use std.database.feature.{FeatureDatabase, FeatureStatus}
 
 # =========================================================================
@@ -225,31 +227,13 @@ fn display_call_graph_warnings():
 # =========================================================================
 
 fn update_test_database(result: TestRunResult, run_start: i64, run_end: i64):
-    val db_result = load_test_db_compat()
-    var db = match db_result:
-        Ok(value): value
-        Err(message):
-            print "Warning: Could not load test database: {message}"
-            return
-    val run_id = db.start_run()
-
-    for file_result in result.files:
-        val status = if file_result.is_ok(): TestStatus.Passed else: TestStatus.Failed
-        db.update_test_result(
-            test_name: file_result.path,
-            test_file: file_result.path,
-            suite_name: "spec",
-            category: "",
-            status: status,
-            duration_ms: file_result.duration_ms.to_f64()
-        )
-
-    db.complete_run(run_id, result.files.len(), result.total_passed, result.total_failed, result.total_timed_out)
-    db.cleanup_stale_runs(48)
-    val save_result = db.save()
-    match save_result:
-        Ok(_): ()
-        Err(message): print "Warning: Could not save test database: {message}"
+    """Delegates to the canonical lib recorder, which classifies each row
+    from the full TestFileResult (in_development / feature_gated / passed /
+    failed). The previous body mapped is_ok() -> Passed and so recorded
+    neutralised and feature-gated files as passes."""
+    match update_test_database_from_record(test_db_run_record_from_result(result, run_start, run_end)):
+        case Ok(_): ()
+        case Err(message): print "Warning: test database not updated: {message}"
 
 # =========================================================================
 # M3/H6: Update feature status from test results
