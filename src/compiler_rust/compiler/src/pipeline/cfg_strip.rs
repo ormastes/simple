@@ -35,64 +35,37 @@ use std::collections::{HashMap, HashSet};
 use simple_common::target::{TargetArch, TargetOS};
 use simple_parser::ast::{Attribute, Node};
 
-/// Apply the module-level OS branch used by the pure-Simple preprocessor before
-/// the Rust seed parses imports. Preserve line numbers for parser diagnostics.
-/// Unsupported conditions fail closed instead of compiling both branches.
+/// Apply module-level `@when`/`@elif`/`@else`/`@end` selection before the Rust
+/// seed parses imports. Delegates to the parser's single owner
+/// (`simple_parser::cond_compile`) so this path accepts exactly what the lexer
+/// accepts (`@elif`, operators, arch keys). Inactive and directive lines are
+/// blanked and the kept body is dedented, preserving line numbers. Unknown
+/// atoms evaluate false (as in the lexer); unbalanced directives still fail
+/// closed instead of compiling both branches.
 pub(crate) fn strip_os_when_blocks(source: &str, target_os: TargetOS) -> Result<String, String> {
-    if !source.contains("@when")
-        && !source.contains("@elif")
-        && !source.contains("@else")
-        && !source.contains("@end")
-    {
+    let Some(mask) =
+        simple_parser::cond_compile::inactive_line_mask(source, target_os.name(), TargetArch::host().name())
+    else {
         return Ok(source.to_owned());
+    };
+    if let Some(error) = mask
+        .diagnostics
+        .iter()
+        .find(|d| d.contains("without @when") || d.contains("unclosed"))
+    {
+        return Err(error.clone());
     }
     let mut out = String::with_capacity(source.len());
-    let mut stack: Vec<(bool, bool, bool)> = Vec::new();
-    let mut active = true;
-    for (index, line) in source.split_inclusive('\n').enumerate() {
-        let directive = line.trim();
-        if directive.starts_with("@when(") {
-            let selected = match directive {
-                "@when(os=\"windows\"):" => target_os == TargetOS::Windows,
-                "@when(os=\"linux\"):" => target_os == TargetOS::Linux,
-                "@when(os=\"freebsd\"):" => target_os == TargetOS::FreeBSD,
-                "@when(os=\"macos\"):" => target_os == TargetOS::MacOS,
-                _ => return Err(format!("unsupported @when condition at line {}", index + 1)),
-            };
-            stack.push((active, selected, false));
-            active &= selected;
-        } else if directive.starts_with("@when") {
-            return Err(format!("malformed @when at line {}", index + 1));
-        } else if directive.starts_with("@elif") {
-            return Err(format!("unsupported @elif at line {}", index + 1));
-        } else if directive == "@else:" || directive == "@else" {
-            let Some((parent, selected, seen_else)) = stack.last_mut() else {
-                return Err(format!("@else without @when at line {}", index + 1));
-            };
-            if *seen_else {
-                return Err(format!("duplicate @else at line {}", index + 1));
-            }
-            *seen_else = true;
-            active = *parent && !*selected;
-        } else if directive.starts_with("@else") {
-            return Err(format!("malformed @else at line {}", index + 1));
-        } else if directive == "@end" {
-            let Some((parent, _, _)) = stack.pop() else {
-                return Err(format!("@end without @when at line {}", index + 1));
-            };
-            active = parent;
-        } else if directive.starts_with("@end") {
-            return Err(format!("malformed @end at line {}", index + 1));
-        } else if active {
-            out.push_str(line);
-            continue;
-        }
-        if line.ends_with('\n') {
+    for (index, line) in source.split('\n').enumerate() {
+        if index > 0 {
             out.push('\n');
         }
-    }
-    if !stack.is_empty() {
-        return Err("unterminated @when block".to_owned());
+        if mask.skip.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+        let dedent = mask.dedent.get(index).copied().unwrap_or(0);
+        let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+        out.push_str(&line[indent.min(dedent)..]);
     }
     Ok(out)
 }
@@ -539,15 +512,20 @@ mod tests {
             assert!(!filtered.contains(excluded));
             assert!(simple_parser::Parser::new(&filtered).parse().is_ok());
         }
-        assert!(super::strip_os_when_blocks("@when(os=\"unknown\"):\n@end\n", TargetOS::Linux).is_err());
+        // Unknown atoms evaluate false, like the lexer: the block is dropped.
+        let unknown = super::strip_os_when_blocks("@when(os=\"unknown\"):\nfn u() -> i64: 1\n@end\n", TargetOS::Linux)
+            .expect("unknown atom is false, not an error");
+        assert!(!unknown.contains("fn u"));
+        // @elif selects the first matching branch (previously rejected).
+        let elif = "@when(os=\"windows\"):\nfn e() -> i64: 1\n@elif(os=\"linux\"):\nfn e() -> i64: 2\n@else:\nfn e() -> i64: 3\n@end\n";
+        let linux = super::strip_os_when_blocks(elif, TargetOS::Linux).expect("elif block");
+        assert!(linux.contains("fn e() -> i64: 2") && !linux.contains(": 1") && !linux.contains(": 3"));
+        assert_eq!(linux.lines().count(), elif.lines().count());
+        // Unbalanced structure still fails closed.
         assert!(super::strip_os_when_blocks("@else:\n", TargetOS::Linux).is_err());
         assert!(super::strip_os_when_blocks("@end\n", TargetOS::Linux).is_err());
-        assert!(super::strip_os_when_blocks("@when(os=\"windows\"):\n@else:\n@else:\n@end\n", TargetOS::Linux).is_err());
         assert!(super::strip_os_when_blocks("@when(os=\"windows\"):\n", TargetOS::Linux).is_err());
         assert!(super::strip_os_when_blocks("@elif(os=\"windows\"):\n", TargetOS::Linux).is_err());
-        assert!(super::strip_os_when_blocks("@when typo\n", TargetOS::Linux).is_err());
-        assert!(super::strip_os_when_blocks("@when(os=\"windows\"):\n@else: typo\n@end\n", TargetOS::Linux).is_err());
-        assert!(super::strip_os_when_blocks("@when(os=\"windows\"):\n@end typo\n", TargetOS::Linux).is_err());
         assert!(super::strip_os_when_blocks(
             "@when(os=\"windows\"):\nval A = 1\n@elif(os=\"linux\"):\nval A = 2\n@else:\nval A = 3\n@end\n",
             TargetOS::Linux,
