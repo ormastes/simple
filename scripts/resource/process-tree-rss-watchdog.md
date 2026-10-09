@@ -131,6 +131,30 @@ identities, and the selected snapshot's ancestry (cycle checked, at most 32
 rows). These are failure diagnostics, not a change to ownership selection or
 permission handling. A failed `getsid` in the diagnostic is recorded as -1.
 
+### FreeBSD ownership across PTY sessions
+
+On FreeBSD, the pinned session helper has a persistent `--reaper-owner` mode.
+It acquires kernel reaper ownership before forking the blocked workload. The
+Perl guard retains RSS limits, timeout/grace policy and receipts; the native
+owner supplies bounded process metadata and kernel descendant cleanup. Its
+private control descriptors are closed in the payload before exec.
+
+`containment_scope=freebsd-reaper-descendants` identifies this boundary. A PTY
+child may create a new session while remaining owned. Session changes are
+counted in `cross_session_owned_peak`; the owner must retain its admitted
+session and birth identity. Sampling recursively includes nested reapers, uses
+native microsecond birth identities and rejects incomplete metadata. Cleanup
+uses `PROC_REAP_KILL` on the live owner, never cached descendant PIDs.
+
+Control EOF, parent death and caught signals request native cleanup. Owner exit
+alone does not prove cleanup. A killed/unresponsive owner produces unverified
+quiescence and a nonzero result. Kernel syscalls may themselves stall; userspace
+observation deadlines cannot turn that condition into verified cleanup. This
+is resource supervision, not a sandbox against malicious privileged processes.
+See [the bounded protocol](freebsd-reaper-protocol.md). The focused regression
+harness requires FreeBSD and a real original-pane test command; missing that
+test is reported `NOT_RUN`, never a complete qualification PASS.
+
 Sampling failure, malformed output, or a sample exceeding its observation
 budget causes exit 89. The default is five seconds on FreeBSD and one second
 elsewhere. `SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS` explicitly selects a
