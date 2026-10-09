@@ -10,6 +10,8 @@ method-call lowering.
 use std.spec.*
 use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.types.{flat_span_new, span_is_valid}
+use compiler.hir.hir_types.{HirTypeKind}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
@@ -17,6 +19,9 @@ use compiler.mir._MirLowering.module_lowering.*
 use std.nogc_sync_mut.io.file_ops.{file_read}
 
 fn lower_errors(src: text, tag: text) -> text:
+    lower_errors_with(src, tag, false)
+
+fn lower_errors_with(src: text, tag: text, allow_nonexhaustive_match: bool) -> text:
     val filename = "stage2_receiver_" + tag + ".spl"
     val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
     var hir_lowering = HirLowering.with_filename(filename)
@@ -28,8 +33,9 @@ fn lower_errors(src: text, tag: text) -> text:
         result = result + "HIR_ERROR:" + error.message + "\n"
     for error in mir_lowering.errors:
         # Advisory in a real build: 80.driver's `_mir_error_is_fatal` allowlist
-        # does not include it, so the driver downgrades it to a warning.
-        if error.message.starts_with("non-exhaustive enum match"):
+        # does not include it, so the driver downgrades it to a warning. Only
+        # the case that opts in may drop it.
+        if allow_nonexhaustive_match and error.message.starts_with("non-exhaustive enum match"):
             continue
         var where = "@nil"
         val sp = error.span
@@ -37,6 +43,19 @@ fn lower_errors(src: text, tag: text) -> text:
             where = "@" + sp.line.to_text() + ":" + sp.col.to_text()
         result = result + "MIR_ERROR:" + error.message + " " + where + "\n"
     result
+
+fn first_param_type_shape(src: text, tag: text) -> text:
+    val filename = "stage2_receiver_" + tag + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    for func in hir.functions.values():
+        if func.name == "probe" and func.params.len() > 0:
+            match func.params[0].type_.kind:
+                case HirTypeKind.Array(_, _): return "array"
+                case HirTypeKind.Named(_, _): return "named"
+                case _: return "other"
+    "missing"
 
 val LIST_PARAM_SRC = """
 fn compute_mean(samples: List<f64>) -> f64:
@@ -152,6 +171,25 @@ fn unresolved_method_lines(src: text, tag: text) -> text:
             hits = hits + line + "\n"
     hits
 
+val PLAIN_LIST_PROBE_SRC = """
+fn probe(samples: List<i64>) -> i64:
+    samples.len()
+"""
+
+val IMPORTED_LIST_CLASS_SRC = """
+use common.core.collections.{List}
+
+fn probe(regions: List<i64>) -> i64:
+    0
+"""
+
+val WILDCARD_IMPORT_LIST_SRC = """
+use common.core.collections.*
+
+fn probe(regions: List<i64>) -> i64:
+    0
+"""
+
 val WRONG_SPAN_SRC = """
 extern fn rt_file_read_text(path: text) -> text
 
@@ -201,7 +239,7 @@ describe "stage2 receiver type transport":
         expect(out).to_equal("")
 
     it "lowers for-in over an array field of a match-payload-bound local from a free fn":
-        val out = lower_errors(MATCH_PAYLOAD_FREE_FN_SRC, "match_payload_free_fn")
+        val out = lower_errors_with(MATCH_PAYLOAD_FREE_FN_SRC, "match_payload_free_fn", true)
         expect(out).to_equal("")
 
     it "resolves byte_at on a text parameter next to a global dict":
@@ -214,3 +252,14 @@ describe "stage2 receiver type transport":
         # locals carry no element type, so the Array `.get` arm fails closed.
         val src = file_read("src/lib/common/crypto/sha3.spl")
         expect(unresolved_method_lines(src, "sha3_module")).to_equal("")
+
+    it "rewrites List<T> to an array only when no List class can be imported":
+        expect(first_param_type_shape(PLAIN_LIST_PROBE_SRC, "plain_list_probe")).to_equal("array")
+        expect(first_param_type_shape(IMPORTED_LIST_CLASS_SRC, "imported_list_class") == "array").to_equal(false)
+        expect(first_param_type_shape(WILDCARD_IMPORT_LIST_SRC, "wildcard_list") == "array").to_equal(false)
+
+    it "treats the reserved span pool index 0 as no location":
+        val real = flat_span_new(1, 2, 3, 4)
+        expect(real > 0).to_equal(true)
+        expect(span_is_valid(real)).to_equal(true)
+        expect(span_is_valid(0)).to_equal(false)
