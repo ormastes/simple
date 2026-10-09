@@ -17137,6 +17137,65 @@ int64_t rt_array_take(int64_t array, int64_t n) {
     return (int64_t)(uintptr_t)out;
 }
 
+/* RuntimeValue::as_int (value/core.rs:303) applied to one element of a Simple
+ * array: heap-boxed wide ints yield their value, everything else sign-extends
+ * the 61-bit payload. Byte / packed-u64 arrays hand back raw untagged slots. */
+static inline int64_t spl_core_array_elem_as_int(const RtCoreArray* ca, int64_t slot) {
+    RtCoreWideInt* wide;
+    if (ca->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) return slot;
+    if ((wide = rt_core_as_heap_int(slot)) != NULL) return wide->value;
+    return rt_core_as_int(slot);
+}
+
+/* file_ops.rs:1929 -- copy a Simple [u32] into packed raw u32 storage at ptr.
+ * Returns the element count written; 0 for a null ptr or an empty/non-array
+ * value (Rust's rt_array_len gives 0 for nil and -1 for a non-array). */
+int64_t rt_write_u32s_to_raw(int64_t ptr, int64_t values) {
+    RtCoreArray* ca;
+    SplArray* a;
+    uint32_t* dst;
+    int64_t len, i;
+    if (ptr == 0) return 0;
+    ca = rt_core_as_array(values);
+    if (!ca) return 0;
+    a = (SplArray*)(uintptr_t)values;
+    len = rt_array_len(a);
+    if (len <= 0) return 0;
+    dst = (uint32_t*)(uintptr_t)ptr;
+    for (i = 0; i < len; i++) {
+        dst[i] = (uint32_t)spl_core_array_elem_as_int(ca, rt_array_get(a, i));
+    }
+    return len;
+}
+
+/* file_ops.rs:2040 -- copy an exact FillU32 result (count == len, every word
+ * equal to `expected`) and return its wire checksum: sum of (word & 0x7fffffff)
+ * mod 2147483647, 1 standing in for 0, -1 when any word differs from expected,
+ * 0 for invalid arguments. All words are written before the verdict, as in Rust. */
+int64_t rt_write_fill_u32s_to_raw_checksum(int64_t ptr, int64_t values, int64_t count, int64_t expected) {
+    RtCoreArray* ca;
+    SplArray* a;
+    uint32_t* dst;
+    uint32_t want;
+    int64_t checksum = 0, i;
+    int exact = 1;
+    if (ptr == 0 || count <= 0 || expected < 0 || expected > (int64_t)UINT32_MAX) return 0;
+    ca = rt_core_as_array(values);
+    if (!ca) return 0;
+    a = (SplArray*)(uintptr_t)values;
+    if (count != rt_array_len(a)) return 0;
+    dst = (uint32_t*)(uintptr_t)ptr;
+    want = (uint32_t)expected;
+    for (i = 0; i < count; i++) {
+        uint32_t value = (uint32_t)spl_core_array_elem_as_int(ca, rt_array_get(a, i));
+        dst[i] = value;
+        checksum = (checksum + (int64_t)(value & 0x7fffffffu)) % 2147483647;
+        exact &= (value == want);
+    }
+    if (!exact) return -1;
+    return checksum == 0 ? 1 : checksum;
+}
+
 /* collections.rs:1464 -- append `count` elements of src onto dst; true on ok. */
 int8_t rt_array_extend_i64(int64_t dst, int64_t src, int64_t count) {
     SplArray* d = (SplArray*)(intptr_t)dst;
