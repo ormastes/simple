@@ -11,6 +11,7 @@ use compiler.mir.mir_data.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError, marker_map_without, text_map_without}
 use compiler.frontend.resource_registry.{resource_is_declared}
@@ -2772,6 +2773,46 @@ impl MirLowering:
             self.runtime_dict_locals[dest.id] = true
             self.mark_runtime_value_local(dest.id)
 
+    me remember_merged_arm_identity(dest: LocalId, arm_locals: [LocalId]):
+        """Give an untyped value-position if/elif merge slot its arms' type.
+
+        `val s = if c: f() else: g()` has no HIR expression type (the HIR If
+        node is built with has_type_: false and there is no expected type), so
+        the merge temp carried no struct name and no HIR type: `s.field.m()`
+        and `s.is_err()` died as `unresolved method call` although each arm's
+        call result was fully typed. Adopt the arms' identity only when every
+        arm agrees: no arm may be a nil literal (that would need an Optional
+        wrapper), every arm must carry the same struct name (or none), and the
+        HIR type is adopted only when every arm has one and all are equal
+        (`hir_types_equal`); otherwise the slot stays unknown."""
+        if arm_locals.len() == 0:
+            return
+        var shared_struct = ""
+        var struct_known = true
+        var all_typed = true
+        var arm_i = 0
+        while arm_i < arm_locals.len():
+            val arm_local = arm_locals[arm_i]
+            if self.nil_locals.contains(arm_local.id):
+                return
+            val arm_struct = if self.struct_value_syms.contains(arm_local.id): self.struct_value_syms[arm_local.id] else: ""
+            if arm_i == 0:
+                shared_struct = arm_struct
+            elif arm_struct != shared_struct:
+                struct_known = false
+            if val arm_type = self.find_local_hir_type(arm_local.id):
+                if arm_i > 0 and all_typed:
+                    if val first_type = self.find_local_hir_type(arm_locals[0].id):
+                        if not hir_types_equal(first_type, arm_type):
+                            all_typed = false
+            else:
+                all_typed = false
+            arm_i = arm_i + 1
+        if struct_known and shared_struct != "" and not self.struct_value_syms.contains(dest.id):
+            self.struct_value_syms[dest.id] = shared_struct
+        if all_typed and self.find_local_hir_type(dest.id) == nil:
+            self.copy_local_hir_type_metadata(arm_locals[0].id, dest.id)
+
     me lower_if(cond: HirExpr, then_: HirBlock, else_: HirBlock?, expected_type: HirType?) -> LocalId:
         """Lower if expression."""
         # The If dispatcher decodes and validates its mandatory payloads, but
@@ -2838,6 +2879,7 @@ impl MirLowering:
         val result = b.new_temp(self.match_result_mir_type(expected_type))
         var inferred_known = false
         var inferred_ty = MirType.i64()
+        var merged_arm_locals: [LocalId] = []
         b.terminate_if(mir_operand_copy(cond_local), then_block, else_block)
         self.builder = b
 
@@ -2869,6 +2911,7 @@ impl MirLowering:
                 if not self.local_is_unit(then_local):
                     b3.emit_copy(result, then_local)
                     self.propagate_branch_collection_marks(then_local, result)
+                    merged_arm_locals = merged_arm_locals.push(then_local)
                     result_defined = true
                     if val then_ty_found = self.local_mir_type_of(then_local):
                         if inferred_known:
@@ -2893,6 +2936,7 @@ impl MirLowering:
                     if not self.local_is_unit(else_local):
                         b5.emit_copy(result, else_local)
                         self.propagate_branch_collection_marks(else_local, result)
+                        merged_arm_locals = merged_arm_locals.push(else_local)
                         result_defined = true
                         if val else_ty_found = self.local_mir_type_of(else_local):
                             if inferred_known:
@@ -2918,6 +2962,8 @@ impl MirLowering:
         if inferred_known:
             self.builder.set_local_type(result, inferred_ty)
 
+        if expected_type == nil and else_ != nil:
+            self.remember_merged_arm_identity(result, merged_arm_locals)
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)
             match found_expected.kind:
@@ -2953,6 +2999,7 @@ impl MirLowering:
         var result_defined = false
         var inferred_known = false
         var inferred_ty = MirType.i64()
+        var merged_arm_locals: [LocalId] = []
         var arm_index = 0
 
         while arm_index < arms.len():
@@ -3021,6 +3068,7 @@ impl MirLowering:
                     if chain_has_else and not self.local_is_unit(arm_local):
                         b_then.emit_copy(result, arm_local)
                         self.propagate_branch_collection_marks(arm_local, result)
+                        merged_arm_locals = merged_arm_locals.push(arm_local)
                         result_defined = true
                         if val arm_ty = self.local_mir_type_of(arm_local):
                             if inferred_known:
@@ -3045,6 +3093,7 @@ impl MirLowering:
                     if not self.local_is_unit(else_local):
                         b_else.emit_copy(result, else_local)
                         self.propagate_branch_collection_marks(else_local, result)
+                        merged_arm_locals = merged_arm_locals.push(else_local)
                         result_defined = true
                         if val else_ty = self.local_mir_type_of(else_local):
                             if inferred_known:
@@ -3068,6 +3117,8 @@ impl MirLowering:
         if inferred_known and chain_has_else:
             self.builder.set_local_type(result, inferred_ty)
 
+        if expected_type == nil:
+            self.remember_merged_arm_identity(result, merged_arm_locals)
         if val found_expected = expected_type:
             self.remember_local_hir_type(result.id, found_expected, 0, 0)
             match found_expected.kind:
@@ -3428,8 +3479,11 @@ impl MirLowering:
         # there -- which is why `[i64]` for-in was the one case that worked.
         var element_type_from_hir = false
         var collection_hir_is_text = false
+        var dict_entry_hir: HirType? = nil
         if val collection_hir_type = self.for_collection_declared_type(collection_local, iter):
             match collection_hir_type.kind:
+                case HirTypeKind.Dict(dict_key_t, dict_value_t):
+                    dict_entry_hir = Some(HirType(kind: HirTypeKind.Tuple([dict_key_t, dict_value_t]), span: collection_hir_type.span))
                 case HirTypeKind.Array(elem_t, _) | HirTypeKind.Slice(elem_t):
                     match elem_t.kind:
                         case HirTypeKind.Str:
@@ -3489,6 +3543,37 @@ impl MirLowering:
         # index-read call shape in _MirLoweringExpr/expr_dispatch.spl).
         if self.local_is_runtime_array(collection_local) or (collection_is_erased_word and element_type_from_hir):
             return self.lower_for_array_indexed(var_, collection_local, element_type, body, source_span)
+
+        # `for (k, v) in dict` / `for e in dict`: iterate the dict's
+        # (key, value) 2-tuples, exactly the form the interpreter yields and
+        # the one `rt_for_iterable` already produces in all three runtimes
+        # (rt_dict_entries: runtime_native.c, simple_core/core_array.spl,
+        # compiler_rust runtime dict.rs). The tuple element type comes from
+        # the declared Dict<K, V> (same lower_type path a `[(K, V)]` array
+        # element takes) or the dict's own MIR key/value types.
+        # NOTE: entry ORDER is the runtime's slot order, while the seed
+        # interpreter sorts entries by key (dict_entries_sorted); code that
+        # depends on iteration order already diverges via rt_for_iterable.
+        if self.local_is_runtime_dict(collection_local):
+            var entry_type = MirType.i64()
+            if val entry_hir = dict_entry_hir:
+                entry_type = self.lower_type(entry_hir)
+            elif val dict_mir_type = self.local_mir_type_of(collection_local):
+                match dict_mir_type.kind:
+                    case MirTypeKind.Dict(dict_key_mir, dict_value_mir):
+                        entry_type = MirType(kind: MirTypeKind.Tuple([dict_key_mir, dict_value_mir]))
+                    case _: ()
+            val entries_func = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_dict_entries"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_entries = self.builder
+            val entries_call = b_entries.emit_call(entries_func, [mir_operand_copy(collection_local)], MirType.i64())
+            self.builder = b_entries
+            if val entries_local = entries_call:
+                self.runtime_array_locals[entries_local.id] = true
+                self.mark_runtime_value_local(entries_local.id)
+                return self.lower_for_array_indexed(var_, entries_local, entry_type, body, source_span)
 
         # Non-array iterable: no supported lowering (#143). Fail loudly.
         # Diagnostics: `body.span` is frequently (0,0) on this pipeline, which
