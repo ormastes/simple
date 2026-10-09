@@ -456,8 +456,11 @@ pub fn rt_transient_heap_promote(args: &[Value]) -> Result<Value, CompileError> 
         }
         Value::Nil => false,
         // Interpreter composites are Arc/owned Rust values, not allocations in
-        // the runtime transient scope, so they are already retained.
-        _ => true,
+        // the runtime transient scope, so they are already retained. The
+        // protocol still matches the C and Rust runtimes: promotion succeeds
+        // only inside a paused scope, so a caller that promotes outside one
+        // fails here exactly as it would natively.
+        _ => simple_runtime::value::transient_heap_scope_paused(),
     };
     Ok(Value::Bool(promoted))
 }
@@ -2113,6 +2116,21 @@ mod tests {
     }
 
     #[test]
+    fn transient_promote_of_composite_requires_paused_scope() {
+        // Same protocol as the C/Rust runtimes: false outside a paused scope.
+        let composite = Value::array(vec![Value::Int(1)]);
+        let promote = |v: &Value| rt_transient_heap_promote(&[v.clone()]).unwrap();
+        assert_eq!(promote(&composite), Value::Bool(false), "no scope open");
+        assert_eq!(rt_transient_array_scope_begin(&[]).unwrap(), Value::Bool(true));
+        assert_eq!(promote(&composite), Value::Bool(false), "scope open but not paused");
+        assert_eq!(rt_transient_array_scope_pause(&[]).unwrap(), Value::Bool(true));
+        assert_eq!(promote(&composite), Value::Bool(true), "paused scope");
+        assert_eq!(promote(&Value::Nil), Value::Bool(false), "nil never promotes");
+        assert_eq!(rt_transient_array_scope_end(&[]).unwrap(), Value::Bool(true));
+        assert_eq!(promote(&composite), Value::Bool(false), "scope ended");
+    }
+
+    #[test]
     fn rt_alloc_records_size_metadata() {
         let ptr = alloc(64);
         assert_ne!(ptr, 0, "rt_alloc(64) must not fail");
@@ -2190,8 +2208,13 @@ mod tests {
 
     #[test]
     fn transient_heap_promote_accepts_interpreter_owned_graphs() {
+        // Interpreter-owned graphs are accepted inside a paused scope, the
+        // only state in which the runtimes allow promotion at all.
         let graph = Value::array(vec![Value::Int(1)]);
+        assert!(matches!(rt_transient_array_scope_begin(&[]), Ok(Value::Bool(true))));
+        assert!(matches!(rt_transient_array_scope_pause(&[]), Ok(Value::Bool(true))));
         assert!(matches!(rt_transient_heap_promote(&[graph]), Ok(Value::Bool(true))));
+        assert!(matches!(rt_transient_array_scope_end(&[]), Ok(Value::Bool(true))));
         assert!(matches!(
             rt_transient_heap_promote(&[Value::Int(0)]),
             Ok(Value::Bool(false))

@@ -222,8 +222,10 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_contain("_driver_collect_entry_import_source(input_path)")
         val walk_done_at = driver.find("phase1:load_sources:closure:done") ?? -1
         val env_set_at = driver.find("rt_env_set(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\", \"1\")") ?? -1
-        val gate_read_at = driver.find("val nb_entry_closure = explicit_entry_closure or (") ?? -1
-        val bulk_gate_at = driver.find("if (has_project_source and needs_bulk_project_sources and\n                not nb_entry_closure and not package_index_routed):") ?? -1
+        # 6f1269a70d5 widened the closure gate with admitted-preclosed and
+        # group inputs, and full-inventory mode also skips the bulk load.
+        val gate_read_at = driver.find("val nb_entry_closure = admitted_preclosed != nil or explicit_entry_closure or native_group_inputs.len() > 0 or (") ?? -1
+        val bulk_gate_at = driver.find("if (has_project_source and needs_bulk_project_sources and\n                not nb_entry_closure and not package_index_routed and\n                not full_inventory_mode):") ?? -1
         val bulk_load_at = driver.find("val bulk_loaded = _driver_collect_sources_via_find(paths)") ?? -1
         expect(walk_done_at).to_be_greater_than(-1)
         expect(env_set_at).to_be_greater_than(walk_done_at)
@@ -302,7 +304,9 @@ describe "entry-closure physical source deduplication":
         val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
         val helpers = rt_file_read_text("src/compiler/80.driver/driver_helpers.spl") ?? ""
 
-        expect(loading).to_contain("val loaded = _driver_load_bulk_source_file(path, native_entry_active)")
+        # 37237cdf1e4 admits the exact requested native entry through the
+        # explicit compiler-source loader; every other path stays bulk.
+        expect(loading).to_contain("val loaded = if explicit_entry: _driver_collect_explicit_compiler_source(path)\n                else: _driver_load_bulk_source_file(path, native_entry_active)")
         expect(loading).to_contain("for path in paths:\n        val loaded = _driver_collect_sources(path)")
         expect(loading).to_not_contain("find src/app src/lib src/compiler src/runtime")
         expect(helpers).to_not_contain("find src/app src/lib src/compiler src/runtime")
