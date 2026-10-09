@@ -1,0 +1,84 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Stage2 MIR: method call on a trait-typed receiver
+
+Bug: doc/08_tracking/bug/stage2_trait_typed_receiver_method_unresolved_2026-10-10.md
+
+A field or parameter whose static type IS a trait (`store: Store`) is a trait
+object. Before the fix stage2 MIR reported `unresolved method call: list` for
+`self.store.list(n)`. The seed emits a vtable call, or an aborting bare-name
+call when no impl exists in the unit.
+
+Stage2 objects carry no vtable word, so MIR devirtualizes:
+
+| implementors in closure | lowering |
+|-------------------------|----------|
+| 1 | direct call to that impl's method |
+| 0 | operands evaluated, then `rt_panic` naming the trait method |
+| 2+ | loud compile error (no runtime type identity to choose) |
+"""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+val TRAIT_SRC = "trait Store:\n    fn list(n: i64) -> i64\n\n"
+val CONSUMER_SRC = "struct Consumer:\n    store: Store\n\nimpl Consumer:\n    fn run(n: i64) -> i64:\n        self.store.list(n)\n\nfn via_param(s: Store) -> i64:\n    s.list(2)\n\nfn main() -> i64:\n    0\n"
+val MEM_IMPL_SRC = "struct Mem:\n    base: i64\n\nimpl Store for Mem:\n    fn list(n: i64) -> i64:\n        self.base + n\n\n"
+val DISK_IMPL_SRC = "struct Disk:\n    root: i64\n\nimpl Store for Disk:\n    fn list(n: i64) -> i64:\n        self.root * n\n\n"
+
+struct Lowered:
+    errors: [text]
+    callees: [text]
+
+fn lower_source(src: text) -> Lowered:
+    val parsed = parse_full_frontend(src, "trait_recv.spl", "trait_recv", Logger(level: 0))
+    var hl = HirLowering.with_filename("trait_recv.spl")
+    val hir = hl.lower_module(parsed)
+    expect(hl.errors.len()).to_equal(0)
+    var ml = MirLowering.new(hir.symbols)
+    val mir = ml.lower_module(hir)
+    var errors: [text] = []
+    for e in ml.errors:
+        errors = errors.push(e.message)
+    var callees: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+    Lowered(errors: errors, callees: callees)
+
+fn count_matching(names: [text], needle: text) -> i64:
+    var n = 0
+    for name in names:
+        if name.contains(needle):
+            n = n + 1
+    n
+
+describe "stage2 MIR trait-typed receiver dispatch":
+    it "devirtualizes a trait-typed field and parameter call to the single implementor":
+        val lowered = lower_source(TRAIT_SRC + MEM_IMPL_SRC + CONSUMER_SRC)
+        expect(lowered.errors.len()).to_equal(0)
+        # `self.store.list(n)` and `s.list(2)` both call Mem's impl method.
+        expect(count_matching(lowered.callees, "Mem.list")).to_equal(2)
+        expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)
+
+    it "traps with a named runtime message when no implementor is in the closure":
+        val lowered = lower_source(TRAIT_SRC + CONSUMER_SRC)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(count_matching(lowered.callees, "rt_panic")).to_equal(2)
+
+    it "refuses to guess between several implementors":
+        val lowered = lower_source(TRAIT_SRC + MEM_IMPL_SRC + DISK_IMPL_SRC + CONSUMER_SRC)
+        expect(lowered.errors.len()).to_equal(2)
+        expect(lowered.errors[0].contains("2 implementors")).to_equal(true)
