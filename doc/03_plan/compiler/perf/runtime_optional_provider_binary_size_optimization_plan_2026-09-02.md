@@ -1,5 +1,21 @@
 # Runtime Optional Provider and Binary-Size Optimization Plan
 
+## 2026-10-09 priority and release baseline
+
+First priority is the nonbreaking item-5 plan/design and shared-interface
+alignment against release `59499d74697`. Follow the
+[shared owner and compatibility handoff](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md).
+Land this documentation separately from compiler/app source changes. Historical
+size and bootstrap reports below retain their original source/host scope; they
+do not qualify the current release or draft PRs #2761/#2762. All selected
+requirements and the Phase 0..7 gates remain in force.
+
+Execution order: freeze shared owner/version contracts; qualify the matched
+compiler/runtime; exercise actual provider admission, app parity and target
+lifetimes; produce Phase-5 size/loading cohorts; then consider target promotion
+and default cutover. Metadata tests, native C kernels and QEMU PID probes are
+prerequisites with narrower scope, not substitutes for Simple application runs.
+
 ## Goal
 
 Preserve all Simple features and architectures while making optional libraries truly demand-loaded, preferring qualified pure-Simple implementations, matching Python's base interpreter loading footprint, and measuring release-small hello against C with the same required startup and link inputs.
@@ -190,6 +206,12 @@ size/startup/RSS result exists. See
 Gate: injected exception, unwind, RTTI, personality, or foreign-boundary requirement rejects release-small.
 
 ## Phase 5 — Size and Loading Gates
+
+Use the [release compatibility matrix](../../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#compatibility-with-phase-5-size-and-loading-gates)
+to join exact producer/consumer/runtime/provider identities. Keep image, startup,
+warm-request and application measurements separate, and retain the existing
+30/100-sample distinction. Unqualified draft source and historical receipts must
+not be relabeled as this release's evidence.
 
 - Unstripped NoGC hello below 2 MiB on all native targets.
 - Linux stripped release-small hello at most 15 KiB and at most 1.05x same-host, same-toolchain C with the same startup wrapper, required runtime archive, linker options, section GC, and strip policy.
