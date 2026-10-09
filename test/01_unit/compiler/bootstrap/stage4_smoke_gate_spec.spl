@@ -68,8 +68,12 @@ describe "bootstrap stage4 smoke gate":
         expect(script).to_contain("CANDIDATE_FRONTEND_ROOT=${{repo_root}}")
         expect(script).to_contain(". \"${{repo_root}}/scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs\"")
         expect(script).to_contain("if ! simple_binary_is_valid \"${{full_bin}}\"; then")
-        expect(admission).to_contain("candidate_frontend_smoke() (")
-        expect(admission).to_contain("fixtures/p2_add.spl")
+        # 216878ddeca split the smoke into a `{ }` dispatcher plus a subshell
+        # profile body; 83410269f08 moved the p2_add fixture to the tracked
+        # bootstrap admission owner.
+        expect(admission).to_contain("candidate_frontend_smoke() {{")
+        expect(admission).to_contain("candidate_frontend_smoke_profile() (")
+        expect(admission).to_contain("--entry src/compiler/bootstrap_admission/p2_add.spl")
         expect(admission).to_contain("--runtime-bundle core-c-bootstrap")
         expect(admission).to_contain("--mode one-binary")
         expect(admission).to_contain("--mode definitely-invalid-mode")
@@ -120,7 +124,10 @@ describe "bootstrap stage4 smoke gate":
         expect(script).to_contain("archive_prefix=\"lib\"\narchive_suffix=\".a\"\n")
         expect(policy).to_contain("case \"${{SIMPLE_LINKER_FLAVOR:-${{PLATFORM_ABI}}}}\" in\n    gnu|mingw) windows_linker_abi=\"gnu\" ;;\n    msvc) windows_linker_abi=\"msvc\" ;;")
         expect(policy).to_contain("if [ \"${{windows_linker_abi}}\" != \"${{PLATFORM_ABI}}\" ]; then")
-        expect(policy).to_contain("  if [ \"${{PLATFORM_ABI}}\" = \"msvc\" ]; then\n    archive_prefix=\"\"\n    archive_suffix=\".lib\"\n  else\n    archive_prefix=\"lib\"\n    archive_suffix=\".a\"\n  fi\nfi")
+        # 5f1adb169b7 resolves MSVC/SDK LIB and INCLUDE inside the msvc arm
+        # before the archive names are chosen.
+        expect(policy).to_contain("  if [ \"${{PLATFORM_ABI}}\" = \"msvc\" ]; then\n")
+        expect(policy).to_contain("    archive_prefix=\"\"\n    archive_suffix=\".lib\"\n  else\n    archive_prefix=\"lib\"\n    archive_suffix=\".a\"\n  fi\nfi")
         expect(script).to_contain("native_all_lib=\"src/compiler_rust/target/bootstrap/${{archive_prefix}}simple_native_all${{archive_suffix}}\"")
         expect(script).to_contain("compiler_backfill_lib=\"src/compiler_rust/target/bootstrap/${{archive_prefix}}simple_compiler_backfill${{archive_suffix}}\"")
 
@@ -172,14 +179,17 @@ describe "bootstrap stage4 smoke gate":
         val loading = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_loading.spl") ?? ""
         val native_build = rt_file_read_text("src/app/io/_CliCompile/native_build.spl") ?? ""
 
-        val walk_pos: i64 = loading.find("var closure_file = _driver_resolve_entry_import(closure_mp, closure_dir)") ?? -1
-        val gate_pos: i64 = loading.find("val nb_entry_closure = explicit_entry_closure or (") ?? -1
+        # bf1347d335f resolves the raw import input first (generated facade
+        # origins); 6f1269a70d5 widened the closure gate with preclosed/group
+        # inputs and excluded full-inventory mode from the bulk load.
+        val walk_pos: i64 = loading.find("var closure_file = _driver_resolve_entry_import(closure_mp_input, closure_dir)") ?? -1
+        val gate_pos: i64 = loading.find("val nb_entry_closure = admitted_preclosed != nil or explicit_entry_closure or native_group_inputs.len() > 0 or (") ?? -1
         val bulk_pos: i64 = loading.find("val paths = [\"src/app\", \"src/lib\", \"src/compiler\", \"src/runtime\"]") ?? -1
         expect(walk_pos).to_be_greater_than(-1)
         expect(gate_pos).to_be_greater_than(walk_pos)
         expect(bulk_pos).to_be_greater_than(gate_pos)
         expect(loading).to_contain("val explicit_entry_closure = explicit_entry_input != \"\"")
-        expect(loading).to_contain("if (has_project_source and needs_bulk_project_sources and\n                not nb_entry_closure and not package_index_routed):")
+        expect(loading).to_contain("if (has_project_source and needs_bulk_project_sources and\n                not nb_entry_closure and not package_index_routed and\n                not full_inventory_mode):")
         expect(loading).to_not_contain("nb_entry_env != \"\" and not has_project_source and not nb_entry_closure_pre")
         expect(native_build).to_contain("fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:")
         expect(native_build).to_contain("var discovered: Dict<text, bool> = {{}}")
@@ -203,7 +213,8 @@ describe "bootstrap stage4 smoke gate":
         expect(globals).to_not_contain("function: HirFunction")
         expect(globals).to_not_contain("symbol_display_name(function.symbol, function.name).replace")
         expect(lowering).to_contain("val fallback_name = mir_provider_function_name(function_owner, self.symbols, fn_, self.lowering_entry_module)")
-        expect(lowering).to_contain("val mir_fn_name = self.provider_callable_symbol_name(fn_.symbol, fallback_name) + \"\"")
+        # c9aa3c05a4d keeps an @export function on its unmangled fallback name.
+        expect(lowering).to_contain("val mir_fn_name = (if fn_.has_export_attr: fallback_name\n            else: self.provider_callable_symbol_name(fn_.symbol, fallback_name)) + \"\"")
         expect(module_lowering).to_contain("function_names.push(mir_provider_function_name(module.name, module.symbols, func, is_entry_module))")
         expect(module_lowering).to_not_contain("for function in module.functions.values():")
 
@@ -230,9 +241,11 @@ describe "bootstrap stage4 smoke gate":
         val parser = rt_file_read_text("src/compiler/10.frontend/core/parser_stmts.spl") ?? ""
         val html_widgets = rt_file_read_text("src/app/ui.render/html_widgets.spl") ?? ""
 
-        expect(parser).to_contain("if par_kind_get() == TOK_FAT_ARROW:")
-        expect(parser).to_contain("if par_kind_get() == TOK_NEWLINE:\n                    case_arm_body = parse_block()")
-        expect(parser).to_contain("case_arm_body.push(stmt_expr_stmt(arrow_expr, 0))")
+        # e15508ad064: `=>` always takes parse_block (inline statement or
+        # indented block) so `case _ => return value` keeps its Return; the
+        # old parse_expr inline branch is gone.
+        expect(parser).to_contain("if par_kind_get() == TOK_FAT_ARROW:\n                parser_advance()\n                case_arm_body = parse_block()")
+        expect(parser.contains("case_arm_body.push(stmt_expr_stmt(arrow_expr, 0))")).to_equal(false)
         expect(html_widgets).to_contain("\"vbox\" =>\n            return render_html_vbox")
 
     it "initializes the Engine2D offscreen optional before backend selection":
