@@ -17105,14 +17105,16 @@ int64_t rt_array_sum(int64_t array) {
  * nil for a non-array. Rust arrays hold one RuntimeValue per element, so its
  * take always yields the same element VALUES. The C lane also has BYTES and
  * packed-u64 arrays whose slots are raw (rt_array_get returns the raw byte /
- * word), so the result keeps the source's representation flags and copies the
- * raw slots: pushing raw slots into a plain tagged array would misdecode them. */
+ * word), so the result keeps the source's STORAGE-LAYOUT flags (BYTES,
+ * U64_PACKED) and copies the raw slots: pushing raw slots into a plain tagged
+ * array would misdecode them. Other flags (e.g. TUPLE) are not propagated: the
+ * result is a plain array, as the previous C push-based take produced. */
 int64_t rt_array_take(int64_t array, int64_t n) {
     RtCoreArray* ca = rt_core_as_array(array);
     if (!ca) return rt_core_nil();
     int64_t len = ca->len;
     int64_t take = n < 0 ? 0 : (n < len ? n : len);
-    SplArray* out = rt_core_array_new(take, ca->flags);
+    SplArray* out = rt_core_array_new(take, (uint8_t)(ca->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)));
     RtCoreArray* co = out ? rt_core_array_ptr(out) : NULL;
     if (!co) return rt_core_nil();
     size_t elem_size = (ca->flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t);

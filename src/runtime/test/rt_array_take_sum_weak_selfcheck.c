@@ -53,7 +53,9 @@ int main(void) {
     for (int64_t i = 0; i < 4; i++)
         CHECK(rt_array_get(t, i) == rt_array_get(bytes, i), "take(bytes) slot equals source slot");
     CHECK(rt_array_get(t, 0) == source_slot0, "take(bytes) slot 0 is the raw source byte");
-    /* A BYTES result truncates a pushed value to 8 bits; a tagged one would not. */
+    /* DISCRIMINATING assertion: the slot checks above also pass on the old
+     * flag-dropping take; only this one fails there. Do not simplify it away.
+     * A BYTES result truncates a pushed value to 8 bits; a tagged one would not. */
     rt_array_push(t, rt_value_int(0x1FF));
     CHECK(rt_array_get(t, 4) == 0xFF, "take(bytes) result is still a BYTES array");
 
