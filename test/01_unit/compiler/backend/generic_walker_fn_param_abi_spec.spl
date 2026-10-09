@@ -94,3 +94,26 @@ describe "generic walker with a fn-typed parameter: native ABI receipt":
         expect(llvm.contains("call i64 @rt_closure_func_ptr(i64")).to_be(true)
         expect(llvm.contains("call i64 %l3(i64 %l1, i64 %l2)")).to_be(true)
         expect(llvm.contains("undefined symbol")).to_be(false)
+
+    it "keeps the same pointer-width callback slot on riscv32 (Simple-to-Simple only)":
+        # Covers only calls between Simple functions. An `extern fn` whose C/Rust
+        # side takes the callback as a 64-bit integer (native_spawn_worker:
+        # `u64`) is NOT covered and is a known 32-bit gap, tracked in
+        # doc/08_tracking/bug/funcptr_param_32bit_extern_abi_unproven_2026-10-10.md.
+        val parsed = parse_full_frontend(WALKER_SRC, "walker_abi.spl", "walker_abi", Logger(level: 0))
+        var hl = HirLowering.with_filename("walker_abi.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["walker_abi"] = hir
+        val (out, _stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        val mono: HirModule = out["walker_abi"]
+        var mir_lowering = MirLowering.new(mono.symbols)
+        val mir = mir_lowering.lower_module(mono)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        val llvm = MirToLlvm.create("walker_abi", CodegenTarget.Riscv32, nil).translate_module(mir)
+        expect(llvm.contains("riscv32")).to_be(true)
+        expect(llvm.contains("-p:32:32")).to_be(true)
+        expect(llvm.contains("i64 %l2, ptr %l3)")).to_be(true)
+        expect(llvm.contains("ptr @walker_abi.add)")).to_be(true)
+        expect(llvm.contains("call i64 %l3(i64 %l1, i64 %l2)")).to_be(true)
