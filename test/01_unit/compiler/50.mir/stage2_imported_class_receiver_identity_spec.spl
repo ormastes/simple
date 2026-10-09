@@ -4,20 +4,24 @@
 
 Stage2 (the pure-Simple compiler) failed to build `simple_test_runner` with
 `unresolved method call` on ordinary methods of USER classes declared in
-another module. Each example lowers a small fixture (provider `lib.dep`, an
-impl-only extension module `lib.ext`, consumer `app.main`) through HIR and MIR
-in-process -- passing every module as a provider, exactly like the driver's
-entry-closure loop -- and asserts the receiver's class was resolved.
+another module. Each example lowers a small fixture (provider `lib.dep`,
+impl-only extension modules `lib.ext` / `lib.ext2`, consumer `app.main`)
+through HIR and MIR in-process -- passing every module as a provider, exactly
+like the driver's entry-closure loop -- and asserts the receiver's class was
+resolved.
 
 `lib.dep` also declares a decoy class whose methods share every leaf name, so
 a call can only resolve through the receiver's real class identity, never a
-unique-leaf fallback.
+unique-leaf fallback; the extension example additionally asserts the emitted
+direct call targets `Reg`'s method, not the decoy's.
 
 | Example | Former error | Root cause |
 |---------|--------------|------------|
 | `if val a = maybe_reg(1): a.activate(2)` | `unresolved method call: activate` | `optional_payload_struct_name` answered a class's BARE name; imported class layouts and `{identity}::{method}` rows are keyed by `mir_class_identity` |
 | `if val a = g.at(1)` on a typed global | same | same |
 | `r.ext_go(1)` where `impl Reg:` lives in another module | `unresolved method call: ext_go` | impl-only provider modules were skipped, and their methods' E-prefixed callable identity named no class |
+| `impl Box<T>:` in another module | (row key check) | HIR spells the owner `lib.dep.Box`, so the row is `lib.dep.Box::ext_peek` |
+| two modules both adding `Reg.dup` | (silent last-wins) | the second row is recorded ambiguous and the call is reported |
 
 Real sites: mcdc/dynamic_probe.spl (`if val aspect = ...aspect_at(slot)`),
 test_runner/qemu_test_runner.spl (`broker.acquire_with_snapshot` declared in
@@ -35,22 +39,31 @@ use compiler.hir.hir_lowering.types.{hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.hir.hir_types.*
+use compiler.mir.mir.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 
-val dep_source = "pub class Reg:\n    count: i64\n\nimpl Reg:\n    static fn create(n: i64) -> Reg:\n        Reg(count: n)\n    fn activate(x: i64) -> bool:\n        x > self.count\n    fn at(i: i64) -> Reg?:\n        if i < 0:\n            return nil\n        Reg(count: i)\n\npub class Decoy:\n    k: i64\n\nimpl Decoy:\n    fn activate(x: i64) -> bool:\n        x < self.k\n    fn at(i: i64) -> Decoy?:\n        nil\n    fn ext_go(x: i64) -> bool:\n        false\n\npub fn maybe_reg(n: i64) -> Reg?:\n    if n < 0:\n        return nil\n    Reg.create(n)\n"
+val dep_source = "pub class Reg:\n    count: i64\n\nimpl Reg:\n    static fn create(n: i64) -> Reg:\n        Reg(count: n)\n    fn activate(x: i64) -> bool:\n        x > self.count\n    fn at(i: i64) -> Reg?:\n        if i < 0:\n            return nil\n        Reg(count: i)\n\npub class Decoy:\n    k: i64\n\nimpl Decoy:\n    fn activate(x: i64) -> bool:\n        x < self.k\n    fn at(i: i64) -> Decoy?:\n        nil\n    fn ext_go(x: i64) -> bool:\n        false\n    fn ext_peek() -> bool:\n        false\n\npub class Box<T>:\n    v: T\n\nimpl Box<T>:\n    fn get() -> T:\n        self.v\n\npub fn maybe_reg(n: i64) -> Reg?:\n    if n < 0:\n        return nil\n    Reg.create(n)\n"
 
-val ext_source = "use lib.dep.\{Reg\}\n\nimpl Reg:\n    fn ext_go(x: i64) -> bool:\n        self.activate(x)\n"
+val ext_source = "use lib.dep.\{Reg, Box\}\n\nimpl Reg:\n    fn ext_go(x: i64) -> bool:\n        self.activate(x)\n    fn dup() -> i64:\n        1\n\nimpl Box<T>:\n    fn ext_peek() -> bool:\n        true\n"
 
-fn consumer_mir_errors(consumer_source: text) -> text:
+val ext2_source = "use lib.dep.\{Reg\}\n\nimpl Reg:\n    fn dup() -> i64:\n        2\n"
+
+var _last_mir: MirModule? = nil
+
+fn lower_consumer(consumer_source: text, with_ext2: bool) -> MirLowering:
     val log = Logger(level: 0)
     val dep_ast = parse_full_frontend(dep_source, "lib/dep.spl", "lib.dep", log)
     val ext_ast = parse_full_frontend(ext_source, "lib/ext.spl", "lib.ext", log)
+    val ext2_ast = parse_full_frontend(ext2_source, "lib/ext2.spl", "lib.ext2", log)
     val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
     var modules: Dict<text, Module> = {}
     modules["lib.dep"] = dep_ast
     modules["lib.ext"] = ext_ast
-    val sources = [SourceFile(path: "lib/dep.spl", content: dep_source, module_name: "lib.dep"), SourceFile(path: "lib/ext.spl", content: ext_source, module_name: "lib.ext")]
+    var sources = [SourceFile(path: "lib/dep.spl", content: dep_source, module_name: "lib.dep"), SourceFile(path: "lib/ext.spl", content: ext_source, module_name: "lib.ext")]
+    if with_ext2:
+        modules["lib.ext2"] = ext2_ast
+        sources.push(SourceFile(path: "lib/ext2.spl", content: ext2_source, module_name: "lib.ext2"))
     val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
     var dep_lowering = hirlowering_for_module("lib.dep", surfaces)
     var ext_lowering = hirlowering_for_module("lib.ext", surfaces)
@@ -58,20 +71,48 @@ fn consumer_mir_errors(consumer_source: text) -> text:
     val dep_hir = dep_lowering.lower_module(dep_ast)
     val ext_hir = ext_lowering.lower_module(ext_ast)
     val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var providers = [dep_hir, ext_hir]
     var mir_lowering = MirLowering.new(consumer_hir.symbols)
     mir_lowering.prescan_module_struct_names(dep_hir)
     mir_lowering.prescan_module_struct_names(ext_hir)
+    if with_ext2:
+        var ext2_lowering = hirlowering_for_module("lib.ext2", surfaces)
+        val ext2_hir = ext2_lowering.lower_module(ext2_ast)
+        mir_lowering.prescan_module_struct_names(ext2_hir)
+        providers.push(ext2_hir)
     mir_lowering.prescan_module_struct_names(consumer_hir)
-    mir_lowering.lower_module(consumer_hir, [dep_hir, ext_hir, consumer_hir])
+    providers.push(consumer_hir)
+    val mir = mir_lowering.lower_module(consumer_hir, providers)
+    _last_mir = Some(mir)
+    mir_lowering
+
+
+fn mir_errors(lowering: MirLowering) -> text:
     var out = ""
-    for e in mir_lowering.errors:
+    for e in lowering.errors:
         out = out + e.message + "\n"
     out
 
 fn errors_for(name: text, consumer_source: text) -> text:
-    val errs = consumer_mir_errors(consumer_source)
+    val errs = mir_errors(lower_consumer(consumer_source, false))
     print "{name} mir errors: [{errs}]"
     errs
+
+fn direct_callees(function_name: text) -> [text]:
+    var out: [text] = []
+    if val mir = _last_mir:
+        for function in mir.functions.values():
+            if function.name == function_name or function.name.ends_with(".{function_name}"):
+                for block in function.blocks:
+                    for instruction in block.instructions:
+                        match instruction.kind:
+                            case MirInstKind.Call(_, operand, _):
+                                match operand.kind:
+                                    case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                        out.push(name)
+                                    case _: ()
+                            case _: ()
+    out
 
 describe "optional payload of an imported class keeps its class identity":
     it "resolves methods on `if val` over a free function returning an imported class":
@@ -83,6 +124,26 @@ describe "optional payload of an imported class keeps its class identity":
         expect(errs.contains("unresolved method call")).to_equal(false)
 
 describe "extension impl declared in another module":
-    it "resolves a method an impl-only module adds to an imported class":
+    it "binds a method an impl-only module adds to an imported class to that class":
         val errs = errors_for("ext_method", "use lib.dep.\{Reg\}\nuse lib.ext\n\nfn f(r: Reg) -> bool:\n    r.ext_go(1)\n")
         expect(errs.contains("unresolved method call")).to_equal(false)
+        val callees = direct_callees("f")
+        print "ext_method callees: {callees}"
+        var to_reg = false
+        var to_decoy = false
+        for callee in callees:
+            if callee.ends_with("ext_go") and callee.contains("Reg"):
+                to_reg = true
+            if callee.contains("Decoy"):
+                to_decoy = true
+        expect(to_reg).to_equal(true)
+        expect(to_decoy).to_equal(false)
+
+    it "keys an extension of a generic class by the class identity, without type arguments":
+        val lowering = lower_consumer("use lib.dep.\{Box\}\nuse lib.ext\n\nfn f() -> i64:\n    1\n", false)
+        expect(lowering.struct_method_syms.has("lib.dep.Box::ext_peek")).to_equal(true)
+
+    it "reports a method two extension modules both add to one class":
+        val errs = mir_errors(lower_consumer("use lib.dep.\{Reg\}\nuse lib.ext\nuse lib.ext2\n\nfn f(r: Reg) -> i64:\n    r.dup()\n", true))
+        print "ext_ambiguous mir errors: [{errs}]"
+        expect(errs.contains("dup is ambiguous on")).to_equal(true)
