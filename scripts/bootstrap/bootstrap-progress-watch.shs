@@ -22,7 +22,8 @@ Options:
 
 CPU/RSS are aggregated over the observed process and ALL its descendants, not
 the observed process alone -- --pid is typically a wrapper shell that sleeps
-while its child builds. Linux uses /proc and FreeBSD/macOS use ps; CPU is
+while its child builds. Linux uses /proc, FreeBSD/macOS use ps, and MSYS uses
+a native Windows process snapshot (including cargo/rustc children). CPU is
 instantaneous cumulative-time delta between samples, never a lifetime average.
 
 status is `alive`, `alive-no-progress`, `unknown`, `exited`, or `stale`.
@@ -85,6 +86,8 @@ stall_samples=${BOOTSTRAP_WATCH_STALL_SAMPLES:-4}
 case "$stall_samples" in ''|*[!0-9]*|0) stall_samples=4 ;; esac
 
 watch_platform=$(uname -s)
+watch_windows=0
+case "$watch_platform" in MINGW*|MSYS*|CYGWIN*) watch_windows=1 ;; esac
 native_observer=
 if [ "$watch_platform" = Darwin ]; then
   native_observer=${SIMPLE_BOOTSTRAP_PROCESS_OBSERVER:-}
@@ -457,6 +460,14 @@ process_tree_metrics_ps() {
 process_tree_metrics() {
   metrics_root=$1
   metrics_exclude=$2
+  # MSYS procfs describes its compatibility processes, not the full Windows
+  # ancestry. Never infer an idle build from a sleeping Python/MSYS wrapper
+  # while its native cargo/rustc descendants are absent from that snapshot.
+  # Explicit injected snapshots retain precedence for portable regressions.
+  if [ "$watch_windows" -eq 1 ] && [ -z "${BOOTSTRAP_WATCH_PS_COMMAND:-}" ]; then
+    process_tree_metrics_windows "$metrics_root" "$metrics_exclude"
+    return
+  fi
   # Two portable backends survive the merge because they answer two different
   # process tables. `process_tree_metrics_ps_table` consumes the injected
   # `BOOTSTRAP_WATCH_PS_COMMAND` snapshot (and macOS `native_observe`);
@@ -485,12 +496,28 @@ process_tree_metrics() {
   esac
 }
 
+process_tree_metrics_windows() {
+  windows_root=$(cat "/proc/$1/winpid" 2>/dev/null) || return 1
+  windows_exclude=$(cat "/proc/$2/winpid" 2>/dev/null) || return 1
+  case "$windows_root:$windows_exclude" in
+    *[!0-9:]*|:*|*:) return 1 ;;
+  esac
+  process_tree_metrics_ps_table "$windows_root" "$windows_exclude" |
+    awk '{ $7="unknown"; $8="unknown"; print $0 " windows" }'
+}
+
 # Darwin and the BSDs have no procfs by default.  Keep the same output contract
 # using one process-table snapshot.  `time` is cumulative CPU time; differencing
 # it against the prior sample gives the same instantaneous tree CPU statistic as
 # the Linux tick backend.  RSS is already reported by ps in KiB on these hosts.
 process_table_snapshot() {
-  if [ "$watch_platform" = Darwin ] && [ -z "${BOOTSTRAP_WATCH_PS_COMMAND:-}" ]; then
+  if [ "$watch_windows" -eq 1 ] && [ -z "${BOOTSTRAP_WATCH_PS_COMMAND:-}" ]; then
+    windows_observer=$(cygpath -w "$(dirname -- "$0")/../resource/windows-process-observer.ps1") || return 1
+    # Buffer until success: partial CIM results are unavailable evidence.
+    windows_rows=$(powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+      -File "$windows_observer" -RootPid "$metrics_root" -ExcludePid "$metrics_exclude") || return 1
+    printf '%s\n' "$windows_rows"
+  elif [ "$watch_platform" = Darwin ] && [ -z "${BOOTSTRAP_WATCH_PS_COMMAND:-}" ]; then
     # Buffer until success: a failed/partial native scan must never look like
     # a healthy, smaller tree to the progress/stall classifier.
     native_rows=$(native_observe --progress "$metrics_root") || return 1
