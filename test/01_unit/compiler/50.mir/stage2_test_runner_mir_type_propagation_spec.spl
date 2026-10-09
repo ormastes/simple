@@ -1,0 +1,120 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Stage2 test-runner MIR lowering: type propagation gaps
+
+Stage2 (the pure-Simple compiler) failed to build `simple_test_runner` with
+MIR lowering errors whose receivers had perfectly ordinary types in source.
+Each example lowers a tiny two-module fixture (provider `lib.dep`, consumer
+`app.main`) through HIR and MIR in-process and asserts the specific error
+class no longer appears.
+
+| Example | Former error | Root cause |
+|---------|--------------|------------|
+| if-expression of struct calls | `unresolved method call: lower` | merge temp of an untyped value-position `if` kept no struct name |
+| if-expression of Result calls | `unresolved method call: is_err` | same merge temp kept no HIR type |
+| `val r = f(); r.is_err()` | `unresolved method call: is_err` | `enum_match_expr_type` read only match-arm `local_map`, not let bindings |
+| `var seen = {}` global | `unresolved method call: has` | untyped dict-literal global load was not marked as a dict |
+| `List<T>` parameter | `for-in over non-array iterables` | parser collapsed undeclared `List<T>` to Any (seed: array) |
+| `for (k, v) in dict` | `for-in over non-array iterables` | no dict iteration lowering; now iterates rt_dict_entries |
+| `text.parse_int()` | `unresolved method call: parse_int` | not wired to rt_string_parse_int |
+| tuple-typed `var` global assignment | `assignment target has no local binding` | TupleLit initializer got no static |
+| extension `impl Imported:` | `[infer-arm] unresolved inference variable` | parser left `self` untyped for a type declared in another file |
+| `var c = []; c.push("a"); c.first()` | `unresolved method call: first` | element type now inferred from the first store |
+| `val ch: text = l.chars[i]; ch.byte_at(0)` | `byte_at receiver is not text` | the read temp of `ch` lost the binding's declared text type |
+"""
+
+# @tag: unit, compiler, mir, stage2
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val dep_source = "pub struct Info:\n    status: text\n    n: i64\n\npub fn make_info(t: text) -> Info:\n    Info(status: t, n: 1)\n\npub fn try_info(t: text) -> Result<Info, text>:\n    if t == \"\": return Err(\"empty\")\n    Ok(Info(status: t, n: 2))\n\npub class Holder:\n    count: i64\n"
+
+fn consumer_mir_errors(consumer_source: text) -> text:
+    val log = Logger(level: 0)
+    val dep_ast = parse_full_frontend(dep_source, "lib/dep.spl", "lib.dep", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.dep"] = dep_ast
+    val sources = [SourceFile(path: "lib/dep.spl", content: dep_source, module_name: "lib.dep")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var dep_lowering = hirlowering_for_module("lib.dep", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val dep_hir = dep_lowering.lower_module(dep_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    mir_lowering.prescan_module_struct_names(dep_hir)
+    mir_lowering.prescan_module_struct_names(consumer_hir)
+    mir_lowering.lower_module(consumer_hir)
+    var out = ""
+    for e in mir_lowering.errors:
+        out = out + e.message + "\n"
+    out
+
+fn errors_for(name: text, consumer_source: text) -> text:
+    val errs = consumer_mir_errors(consumer_source)
+    print "{name} mir errors: [{errs}]"
+    errs
+
+describe "if-expression and binding type propagation":
+    it "keeps the struct identity of an if-expression over struct calls":
+        val errs = errors_for("if_struct", "use lib.dep.\{make_info, Info\}\n\nfn f(c: bool) -> bool:\n    val w = if c: make_info(\"a\") else: make_info(\"b\")\n    w.status.lower().contains(\"a\")\n")
+        expect(errs.contains("unresolved method call")).to_equal(false)
+
+    it "keeps the Result type of an if-expression over Result calls":
+        val errs = errors_for("if_result", "use lib.dep.\{try_info, Info\}\n\nfn f(c: bool) -> bool:\n    val r = if c: try_info(\"a\") else: try_info(\"\")\n    r.is_err()\n")
+        expect(errs.contains("unresolved method call")).to_equal(false)
+
+    it "sees a let-bound cross-module Result in is_err/unwrap_err/unwrap":
+        val errs = errors_for("val_result", "use lib.dep.\{try_info, Info\}\n\nfn f() -> text:\n    val r = try_info(\"a\")\n    if r.is_err():\n        return r.unwrap_err()\n    r.unwrap().status\n")
+        expect(errs.contains("unresolved method call")).to_equal(false)
+
+    it "sees a let-bound same-module Result":
+        val errs = errors_for("local_result", "fn g() -> Result<i64, text>:\n    Ok(1)\n\nfn f() -> bool:\n    val r = g()\n    r.is_err()\n")
+        expect(errs.contains("unresolved method call")).to_equal(false)
+
+describe "untyped dict literal globals":
+    it "dispatches .has on an unannotated `var seen = {}` global":
+        val errs = errors_for("dict_global", "var seen = \{\}\n\nfn f(k: text) -> bool:\n    seen.has(k)\n")
+        expect(errs.contains("unresolved method call")).to_equal(false)
+
+describe "for-in collections":
+    it "iterates a List<T> parameter as an array":
+        val errs = errors_for("list_param", "fn f(xs: List<f64>) -> f64:\n    var s = 0.0\n    for x in xs:\n        s = s + x\n    s\n")
+        expect(errs.contains("for-in over non-array")).to_equal(false)
+
+    it "iterates a dict as (key, value) tuples":
+        val errs = errors_for("dict_for", "fn f(d: Dict<text, i64>) -> i64:\n    var s = 0\n    for (k, v) in d:\n        s = s + v + k.len()\n    s\n")
+        expect(errs.contains("for-in over non-array")).to_equal(false)
+
+describe "smaller stage2 gaps":
+    it "lowers text.parse_int() as an optional integer":
+        val errs = errors_for("parse_int", "fn f(s: text) -> i64:\n    s.trim().parse_int() ?? -1\n")
+        expect(errs.contains("unresolved method call")).to_equal(false)
+
+    it "gives a tuple-typed var global storage so it can be assigned":
+        val errs = errors_for("tuple_global", "var g: (i64, i64) = (0, 0)\n\nfn f(a: i64) -> i64:\n    g = (a, a + 1)\n    a\n")
+        expect(errs.contains("assignment target has no local binding")).to_equal(false)
+
+    it "types self in an extension impl of an imported class":
+        val errs = errors_for("cross_impl", "use lib.dep.\{Holder\}\n\nimpl Holder:\n    fn twice() -> i64:\n        self.count * 2\n")
+        expect(errs.contains("infer-arm")).to_equal(false)
+
+describe "unannotated empty array literal":
+    it "infers the element type from the first push for .first()":
+        val errs = errors_for("arr_first", "fn f() -> text:\n    var c = []\n    c.push(\"a\")\n    c.first() ?? \"\"\n")
+        expect(errs.contains("unresolved method call")).to_equal(false)
+
+describe "declared text bindings":
+    it "accepts byte_at on a `val ch: text` bound from an array field read":
+        val errs = errors_for("byte_at", "struct Lx:\n    chars: [text]\n\nfn m(l: Lx, i: i64) -> i64:\n    val ch: text = l.chars[i]\n    ch.byte_at(0) as i64\n")
+        expect(errs.contains("byte_at receiver is not text")).to_equal(false)

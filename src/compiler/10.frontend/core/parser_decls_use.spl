@@ -23,7 +23,7 @@ use compiler.core.parser_decls.{file_generic_constraints, file_generic_constrain
 use compiler.frontend.core.parser_expr.{parse_expr}
 use compiler.core.tokens.{TOK_KW_GENERIC, TOK_KW_LIMITS, TOK_KW_CANDIDATES}
 use compiler.core.tokens.{TOK_KW_AS}
-use compiler.core.types.{TYPE_VOID, TYPE_NAMED_BASE, named_type_find, flat_span_new}
+use compiler.core.types.{TYPE_VOID, TYPE_NAMED_BASE, named_type_find, named_type_register, flat_span_new}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, parser_parse_type_with_union}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_parse_type}
 use compiler.core.parser.{par_prof_enabled}
@@ -515,7 +515,20 @@ fn parse_class_body_method_typed(struct_name: text, is_static: bool, is_me: bool
         static_flag = 2
     if not is_static:
         var self_type = 0
-        val self_type_id = named_type_find(struct_name)
+        var self_type_id = named_type_find(struct_name)
+        # An extension `impl Imported:` names a type declared in ANOTHER file,
+        # so this file's registry has no entry and the receiver stayed untyped
+        # (tag 0). HIR then took the parser-synthesized `self`/`me` as a param
+        # of type Infer, and MIR died with `[infer-arm] unresolved inference
+        # variable reached lower_type` for every such method (qemu_broker_snapshot,
+        # database/test_extended/*), cascading into `unresolved method call`
+        # on every `self.field.m()`. Register the name (idempotent; a later
+        # local declaration fills the placeholder), exactly as `T?` and
+        # forward type names already do. Only capitalized user type names:
+        # builtin extension impls (`impl text:`, `impl i64:`) are lowercase and
+        # must never become named-struct placeholders.
+        if self_type_id < 0 and struct_name.len() > 0 and struct_name[0:1] >= "A" and struct_name[0:1] <= "Z":
+            self_type_id = named_type_register(struct_name, [], [])
         if self_type_id >= 0:
             self_type = TYPE_NAMED_BASE + self_type_id
         if self_type_override >= 0:
