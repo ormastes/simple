@@ -3207,11 +3207,23 @@ impl MirLowering:
         # sites. See doc/08_tracking/bug/match_enum_fallthrough_silent_2026-08-01.md
         # for the enumeration and the promotion plan.
         if not has_default:
+            # Only UNGUARDED arms cover their variant: `case A if c:` does not
+            # fire when c is false, so A stays missing for the coverage
+            # warning, build_match_coverage and the fall-through traps below.
+            var covering_variants: [text] = []
+            var covering_discs: [i64] = []
+            var cov_i = 0
+            while cov_i < enum_variants.len():
+                val cov_arm: HirMatchArm = arms[enum_arm_srcidx[cov_i]]
+                if not cov_arm.has_guard:
+                    covering_variants = covering_variants.push(enum_variants[cov_i])
+                    covering_discs = covering_discs.push(enum_discs[cov_i])
+                cov_i = cov_i + 1
             var missing_v: [text] = []
             if self.enum_variant_index.has(enum_name):
                 for known_v in self.enum_variant_index[enum_name]:
                     var seen_v = false
-                    for arm_v in enum_variants:
+                    for arm_v in covering_variants:
                         if arm_v == known_v:
                             seen_v = true
                     if not seen_v:
@@ -3287,7 +3299,7 @@ impl MirLowering:
                         all_ids = all_ids.push(vid)
                         all_names = all_names.push(known_v2)
                 var covered_ids: [i64] = []
-                for cd in enum_discs:
+                for cd in covering_discs:
                     if cd >= 0:
                         covered_ids = covered_ids.push(cd)
                 val coverage = build_match_coverage(
@@ -3330,17 +3342,17 @@ impl MirLowering:
             #   * every arm discriminant RESOLVED (>= 0) -- an arm left at the
             #     -1 sentinel never matches a real value, so a name-exhaustive
             #     match containing one can fall through on a valid scrutinee.
-            #   * NO arm carries a guard -- `case V(x) if cond:` covers V
-            #     textually but does not fire when the guard is false, so its
-            #     fall-through is reachable and correct.
+            #   * guarded arms do not count toward coverage (`case V(x) if
+            #     cond:` does not fire when the guard is false).
             # Legality gates shared by BOTH runtime traps below, each removing
             # a way a legitimate execution could reach the fall-through block:
             #   * at least one arm discriminant, and every one RESOLVED (>= 0)
             #     -- a -1 sentinel arm never fires, so a value the programmer
             #     believed covered would hit a trap that blamed them wrongly;
-            #   * NO arm carries a guard -- `case V(x) if cond:` covers V
-            #     textually but not when the guard is false, and that
-            #     fall-through is reachable and correct (2026-08-24 decision);
+            #   * guarded arms are excluded from coverage (2026-10-10; this
+            #     replaces the 2026-08-24 "any guard disables the trap" gate):
+            #     a false guard on a non-exhaustive match is a no-arm-matched
+            #     fall-through and traps like any other;
             #   * the enum's variant set is actually known -- otherwise this
             #     may not be a module-enum match at all (e.g. Option patterns
             #     on an i64 scrutinee), which the warn-only path above
@@ -3363,11 +3375,12 @@ impl MirLowering:
             for dchk in enum_discs:
                 if dchk < 0:
                     all_discs_resolved = false
-            var any_guarded = false
-            for arm_g in arms:
-                if arm_g.has_guard:
-                    any_guarded = true
-            var fallthrough_trap_ok = enum_discs.len() > 0 and all_discs_resolved and not any_guarded
+            # Guarded arms no longer disable the traps: they are excluded from
+            # coverage above, so a variant covered only by a guarded arm is
+            # in `missing_v` and a false guard reaching here is a genuine
+            # no-arm-matched fall-through (partial trap). A TOTAL trap needs
+            # the unguarded arms alone to name every variant.
+            var fallthrough_trap_ok = enum_discs.len() > 0 and all_discs_resolved
             if not self.enum_variant_index.has(enum_name):
                 fallthrough_trap_ok = false
             var total_match_trap_ok = fallthrough_trap_ok and missing_v.len() == 0

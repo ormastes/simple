@@ -17,8 +17,8 @@
 #
 # Soundness gates (mirrored from the 2026-08-24 total trap and pinned here as
 # negative controls): the trap is NOT emitted when a default arm exists (the
-# explicit `case _:` opt-out) or when any arm carries a guard (a false guard
-# makes the fall-through reachable and correct). The compile-time warn
+# explicit `case _:` opt-out). Guarded arms do not count as covering their
+# variant (2026-10-10), so a false guard on a no-default match traps too. The compile-time warn
 # ("non-exhaustive enum match ...") must also keep firing: the runtime trap
 # replaces the silent VALUE, not the compile-time backstop.
 #
@@ -169,7 +169,7 @@ describe "enum match fall-through: legality gates keep legitimate matches untouc
         val f = find_function(mir, "describe").unwrap()
         expect(abort_trap_messages(f).len()).to_equal(0)
 
-    it "emits no trap when any arm carries a guard: a false guard's fall-through is reachable and correct":
+    it "a guarded arm does not cover its variant: a false guard on a no-default match traps":
         val src = "enum Mode:\n" +
             "    Fast(i64)\n" +
             "    Slow\n" +
@@ -188,7 +188,10 @@ describe "enum match fall-through: legality gates keep legitimate matches untouc
         var lowering = MirLowering.new_for_target(hir.symbols, target_context)
         val mir = lowering.lower_module(hir)
         val f = find_function(mir, "pick").unwrap()
-        expect(abort_trap_messages(f).len()).to_equal(0)
+        val gtraps = abort_trap_messages(f)
+        expect(gtraps.len()).to_equal(1)
+        expect(any_contains(gtraps, "Fast")).to_equal(true)
+        expect(any_contains(gtraps, "Idle")).to_equal(true)
 
     it "keeps the 2026-08-24 total-match trap intact through the restructured shared gates":
         val src = "enum Color:\n" +
