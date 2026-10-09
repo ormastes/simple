@@ -216,6 +216,11 @@ BASELINE_FILE="$ROOT/scripts/check/no_direct_rt_baseline.txt"
 RT_RE='^[^#]*\brt_[a-z0-9_]*\('
 # POSIX-ERE twin of RT_RE for the grep fallback: `\b` is not POSIX, so the
 # boundary is spelled out (start of line, or a preceding non-word non-# char).
+# Two KNOWN divergences from rg, both absent from today's tree (only reachable
+# on a host without rg): (1) word boundary is ASCII under LC_ALL=C, so a
+# preceding non-ASCII letter (`ért_u(`) counts here but not under rg's
+# Unicode `\b`; (2) a NUL-bearing file is skipped as binary by rg but counted
+# by grep -c. Both err toward counting MORE, never fewer.
 RT_ERE='^([^#]*[^#[:alnum:]_])?rt_[a-z0-9_]*\('
 # Declarations are boundary metadata, not runtime calls. They are measured
 # separately so neither class can disappear from the structured result.
@@ -282,8 +287,12 @@ rt_normalize_seps() {
 # returns non-zero only when a batch hit a real error.
 rt_grep_count() {
   xargs -0 sh -c 'LC_ALL=C grep -c -H -E -- "$0" "$@"; rc=$?; [ "$rc" -le 1 ]' "$1" < "$2" > "$3.all" || return 1
+  # Status checked, not assumed: an I/O error here would otherwise leave an
+  # empty match list and launder into forbidden=0. rc 1 = no non-zero rows.
   grep -v ':0$' "$3.all" > "$3"
+  rgc_rc=$?
   rm -f "$3.all"
+  [ "$rgc_rc" -le 1 ] || return 1
   return 0
 }
 
@@ -648,7 +657,10 @@ selftest() {
   if [ "${4:-x}" != "3" ]; then echo "ERROR — selftest failed: word-boundary/comment/CRLF classification wrong (got '$r', want forbidden=3)"; rm -rf "$st_dir"; exit 2; fi
   # fixture 22: the find+grep fallback (used when ripgrep is absent) must
   # agree exactly with the default scanner on every fixture tree above, so a
-  # host without rg gets the same verdict, not a different one.
+  # host without rg gets the same verdict, not a different one. Without rg
+  # both sides run the fallback, so the parity half is recorded as NOT
+  # EXERCISED in the PASS line rather than counted as passed.
+  if command -v rg >/dev/null 2>&1; then RT_ST_PARITY="rg-vs-grep parity exercised"; else RT_ST_PARITY="rg-vs-grep parity NOT EXERCISED (no rg on PATH)"; fi
   for st_t in a b b1 b2 d e f g m; do
     case "$st_t" in b) st_al="$st_dir/allow.txt" ;; b1) st_al="$st_dir/allow1.txt" ;; b2) st_al="$st_dir/allow2.txt" ;; *) st_al=/dev/null ;; esac
     st_def=$(scan_dir "$st_dir/$st_t" "$st_dir/$st_t/src" "$st_al")
@@ -686,7 +698,10 @@ selftest() {
 
 if [ "${NO_DIRECT_RT_SELFTEST_CHILD:-0}" = "0" ]; then selftest; fi
 if [ $SELFTEST_ONLY -eq 1 ]; then
-  echo "PASS — 23 selftest fixture(s) checked"
+  case "${RT_ST_PARITY:-}" in
+    *"NOT EXERCISED"*) echo "PASS — 22 selftest fixture(s) checked, 1 not exercised: $RT_ST_PARITY" ;;
+    *) echo "PASS — 23 selftest fixture(s) checked ($RT_ST_PARITY)" ;;
+  esac
   exit 0
 fi
 
