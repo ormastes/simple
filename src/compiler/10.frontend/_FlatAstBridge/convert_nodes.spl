@@ -518,7 +518,17 @@ fn convert_flat_type(type_expr_idx: i64) -> Type:
         var function_params: [Type] = []
         for param_tag in function_type_get_params(function_id):
             function_params = function_params.push(convert_flat_type(param_tag))
-        val function_ret = convert_flat_type(function_type_get_ret(function_id))
+        # The parser records an omitted `-> ret` (`fn()`, `fn(text)`) as
+        # TYPE_VOID (tag 0). convert_flat_type maps every tag <= 0 to Infer
+        # ("no annotation"), which inside a callable signature is wrong: the
+        # return is known to be unit. Infer here reached MIR lower_type as
+        # `[infer-arm]` for every `fn()`-typed param, local, or static
+        # (std signal_stubs `[(i64, fn())]`, text_advanced `f: fn(text)`).
+        val function_ret_tag = function_type_get_ret(function_id)
+        val function_ret = if function_ret_tag == 0:
+            Type(kind: TypeKind.Tuple([]), span: make_span())
+        else:
+            convert_flat_type(function_ret_tag)
         return Type(kind: TypeKind.Function(function_params, function_ret), span: make_span())
     if is_union_base_or_above(type_expr_idx):
         return Type(kind: TypeKind.Named(type_tag_name(type_expr_idx), []), span: make_span())
