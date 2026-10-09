@@ -1,0 +1,38 @@
+"""
+Purpose: Pin the `[infer-arm]` fatal diagnostic emitted when an unresolved
+`HirTypeKind.Infer` reaches MIR `lower_type`: it must name the inference
+variable, the enclosing function and the module, and must only carry a span
+that has a real location.
+Audience: compiler engineers triaging phase-3 MIR lowering failures.
+"""
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable}
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.function_lowering.*
+
+fn lower_infer(span: Span) -> (text, bool):
+    var lowering = MirLowering.new(SymbolTable.new())
+    lowering.current_module_id = "lib.probe.module"
+    lowering.current_function_names = ["probe_function"]
+    val _ = lowering.lower_type(HirType(kind: HirTypeKind.Infer(7, 2), span: span))
+    val error = lowering.errors[0]
+    (error.message, error.span != nil)
+
+describe "unresolved Infer reaching MIR lower_type":
+    it "names the inference variable, function and module without a span":
+        val (message, has_span) = lower_infer(Span.empty())
+        expect(message).to_contain("[infer-arm]")
+        expect(message).to_contain("Infer(id=7, generation=2)")
+        expect(message).to_contain("fn probe_function")
+        expect(message).to_contain("module lib.probe.module")
+        expect(message.contains("<enum@")).to_be(false)
+        expect(has_span).to_be(false)
+
+    it "keeps a real source span when the Infer type carries one":
+        var located = Span.new(10, 12, 42, 7)
+        located.file = "probe.spl"
+        val (message, has_span) = lower_infer(located)
+        expect(message).to_contain("Infer(id=7, generation=2)")
+        expect(has_span).to_be(true)
