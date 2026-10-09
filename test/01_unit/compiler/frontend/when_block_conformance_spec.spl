@@ -1,0 +1,110 @@
+# Shared @when/@elif/@else/@end conformance corpus, run through the
+# pure-Simple preprocessor. The SAME fixtures and expectations
+# (test/fixtures/conditional_compile/conformance/expectations.tsv) are run
+# through the Rust seed by src/compiler_rust/parser/tests/when_block_conformance.rs;
+# the two compilers must agree on every row.
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{file_read, env_get, env_set}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals,
+    _pp_preprocess_conditionals_target_receipted_v1}
+
+val CORPUS = "test/fixtures/conditional_compile/conformance/"
+val TAG_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+
+# Every TAG_[A-Z0-9_]* token in `source`, in order of first appearance.
+fn tags_in(source: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i + 4 <= source.len():
+        if source.slice(i, i + 4) == "TAG_":
+            var j = i + 4
+            while j < source.len() and TAG_CHARS.contains(source[j]):
+                j = j + 1
+            val tag = source.slice(i, j)
+            if not has(out, tag):
+                out.push(tag)
+            i = j
+        else:
+            i = i + 1
+    out
+
+fn has(items: [text], wanted: text) -> bool:
+    for item in items:
+        if item == wanted:
+            return true
+    false
+
+# Rows of [fixture, os, arch, tags]; "-" means no tag survives.
+fn corpus_rows() -> [[text]]:
+    var rows: [[text]] = []
+    for line in file_read(CORPUS + "expectations.tsv").split("\n"):
+        val t = line.trim()
+        if t == "" or t.starts_with("#"):
+            continue
+        val cols = t.split("\t")
+        if cols.len() == 4:
+            rows.push([cols[0].trim(), cols[1].trim(), cols[2].trim(), cols[3].trim()])
+    rows
+
+# "" when the row holds, else a failure description.
+fn check_row(mode: text, source: text, out: text, row: [text]) -> text:
+    val fixture = row[0]
+    val os = row[1]
+    val arch = row[2]
+    val label = "{mode} {fixture} {os}/{arch}"
+    val expected = if row[3] == "-": [] else: row[3].split(",")
+    if out.split("\n").len() != source.split("\n").len():
+        return "{label}: line count changed"
+    for tag in tags_in(source):
+        val want = has(expected, tag)
+        val got = out.contains(tag)
+        if want != got:
+            return "{label}: {tag} expected {want} got {got}"
+    ""
+
+# Ambient selection with the same SIMPLE_TARGET_OS / SIMPLE_TARGET_ARCH
+# override the seed honours; every variable is restored afterwards.
+fn ambient_pp(source: text, os: text, arch: text) -> text:
+    val old_triple = env_get("SIMPLE_NATIVE_BUILD_TARGET")
+    val old_os = env_get("SIMPLE_TARGET_OS")
+    val old_arch = env_get("SIMPLE_TARGET_ARCH")
+    env_set("SIMPLE_NATIVE_BUILD_TARGET", "")
+    env_set("SIMPLE_TARGET_OS", os)
+    env_set("SIMPLE_TARGET_ARCH", arch)
+    val out = _pp_preprocess_conditionals(source)
+    env_set("SIMPLE_NATIVE_BUILD_TARGET", old_triple)
+    env_set("SIMPLE_TARGET_OS", old_os)
+    env_set("SIMPLE_TARGET_ARCH", old_arch)
+    out
+
+describe "@when conformance corpus (pure-Simple preprocessor)":
+    it "selects the expected branch per (os, arch) through the target-receipted preprocessor":
+        step("receipted target mode over the shared corpus")
+        val rows = corpus_rows()
+        assert_true(rows.len() >= 40)
+        var failures: [text] = []
+        for row in rows:
+            val fixture = row[0]
+            val source = file_read(CORPUS + fixture)
+            val result = _pp_preprocess_conditionals_target_receipted_v1(source, row[1], row[2])
+            if result.is_err():
+                failures.push("receipted {fixture}: " + result.unwrap_err())
+                continue
+            val problem = check_row("receipted", source, result.unwrap().source, row)
+            if problem != "":
+                failures.push(problem)
+        assert_equal(failures.join("\n"), "")
+
+    it "selects identically through the ambient preprocessor with SIMPLE_TARGET_OS/ARCH":
+        step("ambient env-override mode over the shared corpus")
+        val rows = corpus_rows()
+        assert_true(rows.len() >= 40)
+        var failures: [text] = []
+        for row in rows:
+            val fixture = row[0]
+            val source = file_read(CORPUS + fixture)
+            val problem = check_row("ambient", source, ambient_pp(source, row[1], row[2]), row)
+            if problem != "":
+                failures.push(problem)
+        assert_equal(failures.join("\n"), "")
