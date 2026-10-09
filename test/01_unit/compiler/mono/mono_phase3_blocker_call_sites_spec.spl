@@ -1,0 +1,139 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+# Mono pass: the four call-site shapes that blocked phase 3 (E-MONO-033)
+
+Stage2 compiling `bootstrap_main` refused MIR with E-MONO-033 over 35
+E-MONO-032 call sites, and the OS/CLI ladder hit the same class:
+
+- `cas_batch_error_v1<T>(error) -> Result<T, E>`: `T` occurs ONLY in the
+  return type, so it can only come from the caller's declared result;
+- `_dbfs_finish_result<T>(result: Result<T, FsError>)` /
+  `_namespace_finish<T>(...)`: called with `Err(e)` (success type unknown at
+  the argument) and `Ok(true)`, so the argument is only PARTIALLY typed and
+  must not poison the binding the result context supplies;
+- `walk_hir_expr<C>`: a recursive call inside the generic body plus an
+  external call that passes a function reference.
+
+Every case lowers real SOURCE through `parse_full_frontend` -> `HirLowering`
+and runs `run_monomorphization_with_diagnostics`. An unrewritten call site is
+reported with its `path:line:col`.
+"""
+
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+
+describe "mono phase-3 blocker call sites":
+    it "binds a return-only type parameter from the caller's declared Result (cas_batch_error_v1 shape)":
+        # @req REQ-SSPEC-COMPILER
+        step("binds a return-only type parameter from the caller's declared Result")
+        val src = "enum Er:\n    A\n    B\n\nstruct Txn:\n    id: i64\n\nfn err_v1<T>(e: Er) -> Result<T, Er>:\n    Err(e)\n\nfn begin(b: bool) -> Result<Txn, Er>:\n    if b:\n        return err_v1<Txn>(Er.A)\n    Ok(Txn(id: 1))\n\nfn stage(b: bool) -> Result<(), Er>:\n    if b:\n        return err_v1(Er.B)\n    Ok(())\n\nfn publish(b: bool) -> Result<text, Er>:\n    if b:\n        return err_v1<text>(Er.A)\n    Ok(\"g\")\n\nfn recover(b: bool) -> Result<i64, Er>:\n    if b:\n        return err_v1(Er.B)\n    err_v1(Er.A)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_p3_cas.spl", "mono_p3_cas", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_p3_cas.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.call_sites_found).to_equal(5)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(4)
+
+    it "ignores a partially typed Err/Ok argument and takes T from the result context (_dbfs_finish_result shape)":
+        # @req REQ-SSPEC-COMPILER
+        step("ignores a partially typed Err/Ok argument and takes T from the result context")
+        val src = "enum FsError:\n    Busy\n    StaleHandle\n\nfn finish<T>(result: Result<T, FsError>) -> Result<T, FsError>:\n    result\n\nfn flush(stale: bool, busy: bool) -> Result<bool, FsError>:\n    if stale:\n        return finish(Err(FsError.StaleHandle))\n    if busy:\n        return finish(Err(FsError.Busy))\n    finish(Ok(true))\n\nfn size() -> Result<i64, FsError>:\n    val r: Result<i64, FsError> = finish(Err(FsError.Busy))\n    r\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_p3_dbfs.spl", "mono_p3_dbfs", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_p3_dbfs.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.call_sites_found).to_equal(4)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(2)
+
+    it "specializes a recursive generic visitor and its function-reference caller (walk_hir_expr shape)":
+        # @req REQ-SSPEC-COMPILER
+        step("specializes a recursive generic visitor and its function-reference caller")
+        val src = "struct Node:\n    kids: [Node]\n    v: i64\n\nstruct Scan:\n    n: i64\n\nfn walk<C>(node: Node, ctx: C, f: fn(Node, C) -> C) -> C:\n    var acc = f(node, ctx)\n    for it in node.kids:\n        acc = walk(it, acc, f)\n    acc\n\nfn collect(node: Node, s: Scan) -> Scan:\n    Scan(n: s.n + node.v)\n\nfn scan(root: Node) -> i64:\n    val start = Scan(n: 0)\n    val done: Scan = walk(root, start, collect)\n    done.n\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_p3_walk.spl", "mono_p3_walk", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_p3_walk.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)
+
+    it "reports an unrewritten call site with its source location":
+        # @req REQ-SSPEC-COMPILER
+        step("reports an unrewritten call site with its source location")
+        # `T` occurs only in the result and the call is a bare statement:
+        # no argument and no context can bind it.
+        val src = "fn empty<T>() -> [T]:\n    []\n\nfn root() -> i64:\n    empty()\n    0\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_p3_loc.spl", "mono_p3_loc", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_p3_loc.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0]).to_contain("E-MONO-032")
+        expect(diags[0]).to_contain("mono_p3_loc.spl:5:")
+
+    it "types a generic argument reached through a struct field chain (_draw_ir_array_equal shape)":
+        # @req REQ-SSPEC-COMPILER
+        step("types a generic argument reached through a struct field chain")
+        val src = "struct GlyphRun:\n    glyph_ids: [u32]\n    xs: [i32]\n\nstruct Cmd:\n    glyph_run: GlyphRun\n\nfn arr_eq<T>(a: [T], b: [T]) -> bool:\n    a.len() == b.len()\n\nfn same(a: Cmd, b: Cmd) -> bool:\n    arr_eq(a.glyph_run.glyph_ids, b.glyph_run.glyph_ids) and arr_eq(a.glyph_run.xs, b.glyph_run.xs)\n\nfn i32_eq(a: [i32], b: [i32]) -> bool:\n    arr_eq(a, b)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_p3_draw.spl", "mono_p3_draw", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_p3_draw.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.call_sites_found).to_equal(3)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(2)
+
+    it "types a generic argument read from a class field through self (global_symbols_without_names shape)":
+        # @req REQ-SSPEC-COMPILER
+        step("types a generic argument read from a class field through self")
+        val src = "fn without<T>(globals: Dict<text, (text, T)>, names: [text]) -> Dict<text, (text, T)>:\n    globals\n\nclass Loader:\n    globals: Dict<text, (text, i64)>\n\nimpl Loader:\n    me unload(names: [text]):\n        self.globals = without(self.globals, names)\n\nfn rebuild(g: Dict<text, (text, i64)>, names: [text]) -> i64:\n    var kept: Dict<text, (text, i64)> = without(g, names)\n    kept.len()\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_p3_unload.spl", "mono_p3_unload", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_p3_unload.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.call_sites_found).to_equal(2)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)
+
+    it "takes T from an impl method's declared Result when the argument is a method call (_namespace_finish shape)":
+        # @req REQ-SSPEC-COMPILER
+        step("takes T from an impl method's declared Result when the argument is a method call")
+        val src = "enum FsError:\n    Busy\n    StaleHandle\n\nfn ns_finish<T>(result: Result<T, FsError>) -> Result<T, FsError>:\n    result\n\nstruct Driver:\n    id: i64\n\nimpl Driver:\n    fn stat_locked(path: text) -> Result<i64, FsError>:\n        Ok(self.id)\n    fn stat(path: text) -> Result<i64, FsError>:\n        ns_finish(self.stat_locked(path))\n    fn close(id: i64) -> Result<bool, FsError>:\n        if id <= 0: return ns_finish(Err(FsError.StaleHandle))\n        ns_finish(Ok(false))\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_p3_ns.spl", "mono_p3_ns", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_p3_ns.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.call_sites_found).to_equal(3)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(2)
