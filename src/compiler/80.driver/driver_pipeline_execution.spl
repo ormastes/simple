@@ -1,8 +1,13 @@
 # CompilerDriver JIT and SMF execution methods.
+#
+# Both routes go through the K1 JIT lane slot (static_jit_lane.spl): the
+# driver never imports compiler.backend.codegen (Cranelift over
+# std.sffi.codegen), so a kernel composition without a JIT backend links with
+# no rt_cranelift_* reference and answers with a nameable refusal.
 
-use compiler.backend.backend.backend_types.{CompiledModule}
-use compiler.backend.codegen.{CodegenPipeline, CodegenError}
-use compiler.common.diagnostics.span.{Span}
+use compiler.backend.backend.static_jit_lane.{
+    k1_jit_lane_run_modules_v1, k1_jit_lane_execute_smf_v1}
+use compiler.mir.mir_instructions.{MirModule}
 use compiler.common.driver_core_types.{CompileResult}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.driver_log_helpers.{log_debug, log_warn}
@@ -28,38 +33,19 @@ impl CompilerDriver:
         self.weave_aop()
         self.apply_debug_trace()
 
-        var pipeline = CodegenPipeline.jit()
-        var compiled_modules: [CompiledModule] = []
+        var modules: [MirModule] = []
         for name in self.ctx.mir_modules.keys():
-            match pipeline.compile_module(self.ctx.mir_modules[name]):
-                case Ok(compiled):
-                    compiled_modules.push(compiled)
-                case Err(e):
-                    val cg_err: CodegenError = e
-                    return CompileResult.CodegenError(
-                        "JIT compile error in {name}: {cg_err.message}")
-
-        if compiled_modules.len() == 0:
-            return CompileResult.RuntimeError("No modules compiled")
-
-        val compiled = compiled_modules[compiled_modules.len() - 1]
-        match compiled.call("main", []):
-            case Ok(result):
-                compiled.release_codegen_module()
-                CompileResult.Success(result)
-            case Err(e):
-                compiled.release_codegen_module()
-                val cg_err: CodegenError = e
-                CompileResult.RuntimeError(cg_err.message)
+            modules.push(self.ctx.mir_modules[name])
+        k1_jit_lane_run_modules_v1(modules)
 
     me execute_smf() -> CompileResult:
         val smf_path = self.ctx.options.input_files[0]
         log_debug("execute_smf: loading {smf_path}")
 
-        var pipeline = CodegenPipeline.jit()
-        match pipeline.load_smf_and_execute(smf_path):
-            case Ok(result):
-                CompileResult.Success(result)
-            case Err(e):
-                log_warn("SMF exec failed: {e}, falling back")
-                CompileResult.RuntimeError("SMF execution failed: {e}")
+        val result = k1_jit_lane_execute_smf_v1(smf_path)
+        match result:
+            case RuntimeError(message):
+                log_warn("SMF exec failed: {message}")
+                result
+            case _:
+                result

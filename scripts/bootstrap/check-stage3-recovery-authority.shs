@@ -452,7 +452,15 @@ k1_policy=$(policy_value k1_policy "$policy_manifest" 2>/dev/null || true)
 abi_policy=$(policy_value simple_abi_policy "$policy_manifest" 2>/dev/null || true)
 manifest_policy=$(policy_value plugin_manifest_policy "$policy_manifest" 2>/dev/null || true)
 coverage_policy=$(policy_value coverage_cutover_policy "$policy_manifest" 2>/dev/null || true)
-[ "$k1_policy" = llvm-cranelift ] || finish refused k1-policy-drift 1
+k1_policy_alternate=$(policy_value k1_policy_alternates "$policy_manifest" 2>/dev/null || true)
+[ "$k1_policy" = llvm-cranelift ] && [ "$k1_policy_alternate" = llvm ] || finish refused k1-policy-drift 1
+# The transcript names the K1 policy the stage was composed from: canonical
+# or the manifest-pinned LLVM-only alternate (no Cranelift link).
+case "$(bootstrap_stage3_transcript_explicit_env_value "$transcript" SIMPLE_KERNEL_K1_POLICY 2>/dev/null || true)" in
+  "$k1_policy_alternate") k1_policy=$k1_policy_alternate ;;
+  "$k1_policy"|"") ;;
+  *) finish refused k1-policy-drift 1 ;;
+esac
 [ "$abi_policy" = v1 ] || finish refused abi-policy-drift 1
 [ "$manifest_policy" = simple-sdn ] || finish refused manifest-policy-drift 1
 [ "$coverage_policy" = atomic-apk-only ] || finish refused coverage-policy-drift 1
@@ -460,7 +468,7 @@ coverage_policy=$(policy_value coverage_cutover_policy "$policy_manifest" 2>/dev
   finish refused admission-abi-policy-mismatch 1
 
 backend=$(bootstrap_stage3_transcript_argv_value_after "$transcript" --backend 2>/dev/null || true)
-case "$backend" in llvm|llvm-lib) [ "$k1_policy" = llvm-cranelift ] || finish refused backend-policy-mismatch 1 ;; cranelift) ;; *) finish refused backend-invalid 1 ;; esac
+case "$backend" in llvm|llvm-lib) ;; cranelift) [ "$k1_policy" = llvm-cranelift ] || finish refused backend-policy-mismatch 1 ;; *) finish refused backend-invalid 1 ;; esac
 [ "$(bootstrap_stage3_transcript_argv_value_after "$transcript" --target 2>/dev/null || true)" = "$platform" ] || \
   finish refused stage2-target-binding-mismatch 1
 [ "$(bootstrap_stage3_transcript_argv_value_after "$transcript" --cache-dir 2>/dev/null || true)" = "$stage2_cache" ] || \
