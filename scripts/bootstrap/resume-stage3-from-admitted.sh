@@ -1164,7 +1164,8 @@ bootstrap_stage_sanity() (
     echo candidate_sha256_after="$after"; } >"$evidence_tmp"
   mv "$evidence_tmp" "$evidence"; [ "$sanity_status" = pass ]
 )
-bootstrap_stage_sanity "$candidate" "$stage3_sanity" "$home" "$tmp" "$path"
+SIMPLE_RT_OBJ_CACHE_DIR="$stage3_cache/rt-obj" \
+  bootstrap_stage_sanity "$candidate" "$stage3_sanity" "$home" "$tmp" "$path"
 bootstrap_stage3_source_snapshot "$source_after" "$root"
 bootstrap_stage3_git_state "$root" "$git_after"
 bootstrap_stage3_tool_authority_snapshot "$tool_after" "$path" "$root"
