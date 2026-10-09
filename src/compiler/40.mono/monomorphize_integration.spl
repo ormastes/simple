@@ -80,6 +80,8 @@ class MonomorphizationPass:
     # class, so a generic argument reached through a field chain
     # (`eq(a.glyph_run.glyph_ids, ...)`, `without(self.globals, ...)`) types.
     field_types: Dict<text, HirType>
+    # Same key -> module that declared the field (its SymbolIds' owner).
+    field_owner_modules: Dict<text, text>
     # "<EnumName>::<Variant>" -> declared payload types, tuple payloads in
     # positional order and struct payloads keyed "<Enum>::<Variant>::<field>".
     # Match-arm pattern bindings are the ONLY binding form that carries no
@@ -151,6 +153,7 @@ impl MonomorphizationPass:
             named_ambiguous: {},
             named_symbol_names: {},
             field_types: {},
+            field_owner_modules: {},
             enum_payload_types: {},
             match_enum_hint: "",
             fn_returns: {},
@@ -289,7 +292,7 @@ impl MonomorphizationPass:
             val s: HirStruct = structs[sym_id]
             self.record_named_type(module_name, s.symbol, s.name, s.type_params.len() == 0)
             if s.type_params.len() == 0:
-                self.record_field_types(s.name, s.fields)
+                self.record_field_types(module_name, s.name, s.fields)
             if is_generic_struct(s):
                 self.generic_structs[s.name] = s
                 self.monomorphizer.register_generic_struct(s.name, s)
@@ -329,7 +332,7 @@ impl MonomorphizationPass:
             val c: HirClass = classes[sym_id]
             self.record_named_type(module_name, c.symbol, c.name, c.type_params.len() == 0)
             if c.type_params.len() == 0:
-                self.record_field_types(c.name, c.fields)
+                self.record_field_types(module_name, c.name, c.fields)
             if is_generic_class(c):
                 self.generic_classes[c.name] = c
                 self.monomorphizer.register_generic_class(c.name, c)
@@ -426,29 +429,51 @@ impl MonomorphizationPass:
             return
         self.named_types[name] = HirType(kind: HirTypeKind.Named(sym, []), span: Span.empty())
 
-    me record_field_types(type_name: text, fields: [HirField]):
+    me record_field_types(module_name: text, type_name: text, fields: [HirField]):
         for f in fields:
             val ft: HirField = f
-            self.field_types["{type_name}::{ft.name}"] = ft.type_
+            val key = "{type_name}::{ft.name}"
+            self.field_types[key] = ft.type_
+            self.field_owner_modules[key] = module_name
 
-    me field_type(base_ty: HirType, field: text) -> HirType?:
-        """Declared type of `field` on a non-generic struct/class `base_ty`.
-        A type name declared by two modules is ambiguous -> nil."""
+    me field_type_in(owner_module: text, base_ty: HirType, field: text) -> (HirType?, text):
+        """Declared type of `field` on a non-generic struct/class `base_ty`,
+        plus the module that declared that field. `base_ty`'s SymbolId is
+        resolved in `owner_module` (the module whose table minted it), never
+        blindly in the module being rewritten: on a chain `a.b.c` the type
+        of `a.b` carries the DECLARING module's id, which can collide with an
+        unrelated id in the caller. A type name declared by two modules is
+        ambiguous -> nil."""
         match base_ty.kind:
             case HirTypeKind.Named(sym, args):
                 if args.len() > 0:
-                    return nil
-                val n: text = self.named_type_name(sym, base_ty)
+                    return (nil, owner_module)
+                val n: text = self.named_type_name_in(owner_module, sym, base_ty)
                 if self.named_ambiguous.has(n):
-                    return nil
+                    return (nil, owner_module)
                 val key = "{n}::{field}"
                 if self.field_types.has(key):
                     val t: HirType = self.field_types[key]
                     if hir_type_is_concrete(t):
-                        return t
-                nil
+                        val decl_mod: text = self.field_owner_modules[key] ?? owner_module
+                        return (t, decl_mod)
+                (nil, owner_module)
             case _:
-                no_local_type_answer()
+                (nil, owner_module)
+
+    me infer_field_chain(expr: HirExpr) -> (HirType?, text):
+        """Type of an expression together with the module whose symbol table
+        its Named ids belong to. Field hops switch to the declaring module."""
+        match expr.kind:
+            case HirExprKind.Field(base, field, _):
+                val fb: HirExpr = base
+                val (bt, bmod) = self.infer_field_chain(fb)
+                if bt == nil:
+                    return (nil, bmod)
+                val btt: HirType = bt
+                self.field_type_in(bmod, btt, field)
+            case _:
+                (self.infer_expr_type(expr), self.current_module)
 
     me fn_sig_of(sym_id: SymbolId) -> HirType?:
         val s: SymbolId = sym_id
@@ -477,11 +502,14 @@ impl MonomorphizationPass:
                 not_a_constructor_call()
 
     me named_type_name(sym: SymbolId, t: HirType) -> text:
-        """Declared name of a Named type: by the current module's symbol
-        first; a type inferred from a constructor of an IMPORTED struct
-        carries the declaring module's id, so fall back to the unique name
-        any module declares under that id. Ambiguous -> engine `T<id>`."""
-        val k = mono_sym_key(self.current_module, sym.id)
+        self.named_type_name_in(self.current_module, sym, t)
+
+    me named_type_name_in(module_name: text, sym: SymbolId, t: HirType) -> text:
+        """Declared name of a Named type: by `module_name`'s symbol first; a
+        type inferred from a constructor of an IMPORTED struct carries the
+        declaring module's id, so fall back to the unique name any module
+        declares under that id. Ambiguous -> engine `T<id>`."""
+        val k = mono_sym_key(module_name, sym.id)
         if self.named_symbol_names.has(k):
             return self.named_symbol_names[k]
         val suffix = "#{sym.id}"
@@ -659,13 +687,9 @@ impl MonomorphizationPass:
                 if nt != nil:
                     return nt
                 self.fn_sig_of(sym_id)
-            case HirExprKind.Field(base, field, _):
-                val fb: HirExpr = base
-                val bt = self.infer_expr_type(fb)
-                if bt == nil:
-                    return nil
-                val btt: HirType = bt
-                self.field_type(btt, field)
+            case HirExprKind.Field(_, _, _):
+                val (ft, _fmod) = self.infer_field_chain(expr)
+                ft
             case HirExprKind.Cast(_, target):
                 val ct: HirType = target
                 ct
@@ -1158,7 +1182,7 @@ impl MonomorphizationPass:
                 pass_do_nothing("no nested expression")
         out
 
-    me rewrite_call(callee: HirExpr, args: [HirCallArg], type_args: [HirType], expected_result: HirType? = nil) -> HirExprKind:
+    me rewrite_call(callee: HirExpr, args: [HirCallArg], type_args: [HirType], expected_result: HirType? = nil, call_span: Span? = nil) -> HirExprKind:
         """Rewrite one call site.
 
         A call to a generic function becomes a plain call to its
@@ -1186,7 +1210,14 @@ impl MonomorphizationPass:
         if targs.len() != expected.len():
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
             self.unresolved_templates[gname] = true
-            val site: text = self.call_site_location(callee.span)
+            # A callee nested as an argument can carry an empty span
+            # (line 0); the call expression's own span still locates it.
+            var site_span: Span = callee.span
+            if site_span.line <= 0 and call_span != nil:
+                val cs: Span = call_span
+                if cs.line > 0:
+                    site_span = cs
+            val site: text = self.call_site_location(site_span)
             self.diagnostics = self.diagnostics.push(
                 "E-MONO-032: call to generic `{gname}` at {site} has no explicit type arguments and they could not be inferred from its argument types; call site not monomorphized")
             return HirExprKind.Call(new_callee, new_args, new_type_args)
@@ -1218,7 +1249,7 @@ impl MonomorphizationPass:
                 val at: [HirCallArg] = args
                 var out = expr
                 val context: HirType? = if expected != nil: expected else: (if expr.has_type_: expr.type_ else: nil)
-                out.kind = self.rewrite_call(ct, at, type_args, context)
+                out.kind = self.rewrite_call(ct, at, type_args, context, expr.span)
                 out
             case _:
                 self.rewrite_expr(expr)
@@ -1240,7 +1271,7 @@ impl MonomorphizationPass:
                 val callee_t: HirExpr = callee
                 val args_t: [HirCallArg] = args
                 val expected: HirType? = if expr.has_type_: expr.type_ else: nil
-                out.kind = self.rewrite_call(callee_t, args_t, type_args, expected)
+                out.kind = self.rewrite_call(callee_t, args_t, type_args, expected, expr.span)
 
             # Collections
             case HirExprKind.ArrayLit(elements, elem_ty):
@@ -1304,7 +1335,7 @@ impl MonomorphizationPass:
                     case MethodResolution.StaticMethod(_, method_id):
                         val callee = HirExpr(kind: HirExprKind.Var(method_id), has_type_: false, type_: nil, span: expr.span)
                         if self.callee_generic_name(callee) != "":
-                            out.kind = self.rewrite_call(callee, args, [], if expr.has_type_: expr.type_ else: nil)
+                            out.kind = self.rewrite_call(callee, args, [], if expr.has_type_: expr.type_ else: nil, expr.span)
                         else:
                             out.kind = HirExprKind.MethodCall(self.rewrite_expr(rc), method, self.rewrite_call_args(args), resolution)
                     case _:
@@ -1314,7 +1345,7 @@ impl MonomorphizationPass:
                     case MethodResolution.StaticMethod(_, method_id):
                         val callee = HirExpr(kind: HirExprKind.Var(method_id), has_type_: false, type_: nil, span: expr.span)
                         if self.callee_generic_name(callee) != "":
-                            out.kind = self.rewrite_call(callee, args, [], if expr.has_type_: expr.type_ else: nil)
+                            out.kind = self.rewrite_call(callee, args, [], if expr.has_type_: expr.type_ else: nil, expr.span)
                         else:
                             out.kind = HirExprKind.StaticCall(ty, method, self.rewrite_call_args(args), resolution)
                     case _:
