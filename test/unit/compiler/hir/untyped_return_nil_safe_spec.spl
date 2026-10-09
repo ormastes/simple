@@ -30,3 +30,34 @@ describe "HIR untyped return inference":
                         expect(false).to_equal(true)
             nil:
                 expect(false).to_equal(true)
+
+extern fn rt_env_get(key: text) -> text?
+extern fn rt_env_set(key: text, value: text)
+
+describe "bootstrap helper return signatures":
+    it "keeps side-effect and bare-return helpers Unit while retaining value returns":
+        val source = "fn print_usage():\n    print(\"ok\")\n\nfn reset_location():\n    val unused = 1\n\nfn early_exit():\n    return\n\nfn inferred():\n    return 7\n"
+        val module = parse_full_frontend(source, "bootstrap_helper_returns.spl", "bootstrap_helper_returns.spl", Logger(level: 0))
+        val saved = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        var lowering = HirLowering.with_filename("bootstrap_helper_returns.spl")
+        val hir = lowering.lower_module(module)
+        rt_env_set("SIMPLE_BOOTSTRAP", saved)
+        for name in ["print_usage", "reset_location", "early_exit"]:
+            match hir.symbols.lookup(name):
+                Some(symbol):
+                    val fn_ = hir.functions[symbol]
+                    expect(fn_.return_type.kind).to_equal(HirTypeKind.Unit)
+                nil:
+                    expect(false).to_equal(true)
+        match hir.symbols.lookup("inferred"):
+            Some(symbol):
+                val fn_ = hir.functions[symbol]
+                match fn_.return_type.kind:
+                    HirTypeKind.Int(bits, signed):
+                        expect(bits).to_equal(64u8)
+                        expect(signed).to_equal(true)
+                    _:
+                        expect(false).to_equal(true)
+            nil:
+                expect(false).to_equal(true)
