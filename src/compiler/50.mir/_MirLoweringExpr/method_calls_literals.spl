@@ -2016,6 +2016,24 @@ impl MirLowering:
             if found_receiver_type != nil:
                 match found_receiver_type.kind:
                     case Dict(_, _): receiver_is_dict = true
+                    # `cache: mut Dict<K, V>` lowers to Ref(Dict, true); the
+                    # parameter still holds the caller's dict handle (calls
+                    # take an address only for class receivers), so the
+                    # builtin dict methods apply unchanged.
+                    case Ref(ref_inner, _):
+                        match ref_inner.kind:
+                            case Dict(_, _): receiver_is_dict = true
+                            case _: ()
+                    case _: ()
+        if not receiver_is_dict:
+            # The parameter reference itself may carry no expression type;
+            # its declared symbol type is still `mut Dict<K, V>`.
+            if val declared_dict_receiver = self.receiver_declared_type(receiver):
+                match declared_dict_receiver.kind:
+                    case Ref(declared_ref_inner, _):
+                        match declared_ref_inner.kind:
+                            case Dict(_, _): receiver_is_dict = true
+                            case _: ()
                     case _: ()
 
         # Dict method detection must not trust stale positive resolution
@@ -3574,6 +3592,26 @@ impl MirLowering:
                                                 unresolved_struct_name = Some(enum_owner_key)
                                         case _: ()
                             case _: ()
+                # A struct/class receiver whose layout name was never recorded
+                # in struct_value_syms still carries its HIR type: a local
+                # bound from a struct-returning call (`val r: Report = mk();
+                # r.verified()`, std sha256's SecureZeroReport) or the call
+                # result itself (`simd_add_i32x8(a, b).to_array()`). Name the
+                # owner from that type; the owner-qualified lookups below then
+                # resolve the method exactly as for a typed parameter.
+                if unresolved_struct_name == nil or unresolved_struct_name == "":
+                    var typed_receiver: HirType? = self.receiver_declared_type(receiver)
+                    if typed_receiver == nil:
+                        typed_receiver = self.find_local_hir_type(unresolved_receiver_local.id)
+                    if val typed_receiver_found = typed_receiver:
+                        match typed_receiver_found.kind:
+                            case Named(typed_owner_id, _):
+                                if val typed_owner = self.symbols.get_symbol_raw(typed_owner_id.id):
+                                    match typed_owner.kind:
+                                        case Struct: unresolved_struct_name = Some(typed_owner.name)
+                                        case Class: unresolved_struct_name = Some(mir_class_identity(typed_owner))
+                                        case _: ()
+                            case _: ()
                 if mir_mc_trace_state == 1:
                     eprint("[mir-method-call] unresolved-owner-get method={method}\n")
                 if unresolved_struct_name != nil and unresolved_struct_name != "":
@@ -3953,6 +3991,16 @@ impl MirLowering:
                         val filter_lambda_operand = self.lower_lambda_value(args[0].value)
                         if val filter_lam_op = filter_lambda_operand:
                             return self.lower_array_filter(unresolved_receiver_local, filter_lam_op)
+                        # A predicate held in a variable/param
+                        # (`self.entries.filter(predicate)`, std fs Walk.filter)
+                        # is a function VALUE: raw fn pointer or closure handle.
+                        var filter_arg_is_lambda = false
+                        match args[0].value.kind:
+                            case Lambda(_, _, _): filter_arg_is_lambda = true
+                            case _: ()
+                        if not filter_arg_is_lambda:
+                            val filter_pred_local = self.lower_expr(args[0].value)
+                            return self.lower_array_filter_core(unresolved_receiver_local, nil, filter_pred_local, true)
                     # `arr.any(pred)` / `arr.all(pred)` are builtin Array
                     # methods with no resolver symbol, exactly like filter.
                     # The 0-arg SIMD `Mask.any()` keeps its own dispatch: this
@@ -4941,7 +4989,15 @@ impl MirLowering:
         typed_result_arr
 
     me lower_array_filter(arr: LocalId, lam_op: MirOperand) -> LocalId:
+        self.lower_array_filter_core(arr, Some(lam_op), 0, false)
+
+    me lower_array_filter_core(arr: LocalId, lam_op_opt: MirOperand?, pred_value: LocalId, has_pred_value: bool) -> LocalId:
         """Lower `arr.filter(\\x: predicate)` for a runtime `[i64]` array.
+
+        With `has_pred_value` the predicate is a function VALUE local (a
+        variable or param, not a lambda literal) and each element is called
+        through `emit_function_value_call`, which dispatches raw function
+        pointers and closure handles alike.
 
         Same counted-loop shape as `lower_array_map`, but the lambda's raw i64
         result is treated as a boolean predicate (!= 0 -- the backend's `Ret`
@@ -4959,9 +5015,11 @@ impl MirLowering:
         # as live outer variables or invoke its handle as a raw function address.
         # Its two output forms are Const(FuncPtr) for noncapturing lambdas and
         # Copy(handle) for capturing lambdas; both producers use the word ABI.
+        val lam_op = lam_op_opt ?? MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64()))
         var filter_target = lam_op
         var filter_environment: MirOperand? = nil
-        match lam_op.kind:
+        val lam_kind_for_target = if has_pred_value: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64()) else: lam_op.kind
+        match lam_kind_for_target:
             case MirOperandKind.Copy(_):
                 var target_builder = self.builder
                 val target_fn = MirOperand(kind: MirOperandKind.Const(
@@ -5038,13 +5096,20 @@ impl MirLowering:
         self.builder = b_get
         val elem_raw = self.decode_runtime_value(elem_tagged, MirType.i64())
 
-        var b_call = self.builder
-        val call_result = if val environment = filter_environment:
-            b_call.emit_call_indirect(filter_target, [environment, mir_operand_copy(elem_raw)],
-                MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false), MirType.i64())
+        var pred_raw: LocalId = 0
+        if has_pred_value:
+            pred_raw = self.emit_function_value_call(pred_value, [mir_operand_copy(elem_raw)],
+                MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false), MirType.i64())
         else:
-            b_call.emit_call(filter_target, [mir_operand_copy(elem_raw)], MirType.i64())
-        val pred_raw = call_result ?? b_call.new_temp(MirType.i64())
+            var b_lam_call = self.builder
+            val call_result = if val environment = filter_environment:
+                b_lam_call.emit_call_indirect(filter_target, [environment, mir_operand_copy(elem_raw)],
+                    MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false), MirType.i64())
+            else:
+                b_lam_call.emit_call(filter_target, [mir_operand_copy(elem_raw)], MirType.i64())
+            pred_raw = call_result ?? b_lam_call.new_temp(MirType.i64())
+            self.builder = b_lam_call
+        var b_call = self.builder
         val zero_pred = b_call.emit_const_int(0)
         val keep = b_call.emit_binop(MirBinOp.Ne, mir_operand_copy(pred_raw), mir_operand_copy(zero_pred), MirType.bool())
         b_call.terminate_if(mir_operand_copy(keep), push_block, inc_block)
