@@ -3849,6 +3849,14 @@ impl MirLowering:
                         val filter_lambda_operand = self.lower_lambda_value(args[0].value)
                         if val filter_lam_op = filter_lambda_operand:
                             return self.lower_array_filter(unresolved_receiver_local, filter_lam_op)
+                    # `arr.any(pred)` / `arr.all(pred)` are builtin Array
+                    # methods with no resolver symbol, exactly like filter.
+                    # The 0-arg SIMD `Mask.any()` keeps its own dispatch: this
+                    # arm requires the one closure argument.
+                    if (method == "any" or method == "all") and args.len() == 1:
+                        val any_all_lambda_operand = self.lower_lambda_value(args[0].value)
+                        if val any_all_lam_op = any_all_lambda_operand:
+                            return self.lower_array_any_all(unresolved_receiver_local, any_all_lam_op, method == "any")
                     if method == "fold" and args.len() == 2:
                         val fold_lambda_operand = self.lower_lambda_value(args[1].value)
                         if val fold_lam_op = fold_lambda_operand:
@@ -4900,6 +4908,122 @@ impl MirLowering:
         b_exit.switch_to_block(exit_block)
         self.builder = b_exit
         result_arr
+
+    me lower_array_any_all(arr: LocalId, lam_op: MirOperand, want_any: bool) -> LocalId:
+        """Lower `arr.any(\\x: pred)` / `arr.all(\\x: pred)` for a runtime array.
+
+        Same counted-loop and closure-call shape as `lower_array_filter`
+        (closure target via rt_closure_func_ptr, element decoded from its
+        tagged word, lambda result read as `!= 0`), but instead of building
+        a result array it keeps a Bool Var: `any` starts false and becomes
+        true on the first truthy predicate; `all` starts true and becomes
+        false on the first falsy predicate. Both exit the loop as soon as
+        the answer is decided, matching the short-circuit semantics of the
+        interpreter's Array.any/Array.all.
+        """
+        val loop_ty = MirType.i64()
+
+        var pred_target = lam_op
+        var pred_environment: MirOperand? = nil
+        match lam_op.kind:
+            case MirOperandKind.Copy(_):
+                var target_builder = self.builder
+                val target_fn = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_closure_func_ptr"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                        params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                val target = target_builder.emit_call(target_fn, [lam_op], MirType.i64())
+                pred_target = mir_operand_copy(target.unwrap())
+                pred_environment = Some(lam_op)
+                val zero_target = target_builder.emit_const_int(0)
+                val valid_target = target_builder.emit_binop(MirBinOp.Ne,
+                    pred_target, mir_operand_copy(zero_target), MirType.bool())
+                val ready_block = target_builder.new_block(Some("any_all_target_ready"))
+                val failed_block = target_builder.new_block(Some("any_all_target_missing"))
+                target_builder.terminate_if(mir_operand_copy(valid_target), ready_block, failed_block)
+                target_builder.switch_to_block(failed_block)
+                target_builder.terminate_abort("array any/all closure target is unavailable")
+                target_builder.switch_to_block(ready_block)
+                self.builder = target_builder
+            case _: ()
+
+        var b_len = self.builder
+        val len_call = b_len.emit_call(self.rt_array_len_operand(), [mir_operand_copy(arr)], MirType.i64())
+        val len_local = len_call ?? b_len.new_temp(MirType.i64())
+        self.builder = b_len
+
+        var b_init = self.builder
+        val answer = b_init.new_local(nil, MirType.bool(), LocalKind.Var)
+        b_init.emit_const(answer, MirConstValue.Bool(not want_any), MirType.bool())
+        val decided_value = b_init.new_temp(MirType.bool())
+        b_init.emit_const(decided_value, MirConstValue.Bool(want_any), MirType.bool())
+        val counter = b_init.new_local(nil, loop_ty, LocalKind.Var)
+        val zero = b_init.new_temp(loop_ty)
+        b_init.emit_const(zero, MirConstValue.Int(0), loop_ty)
+        b_init.emit_copy(counter, zero)
+        val one = b_init.new_temp(loop_ty)
+        b_init.emit_const(one, MirConstValue.Int(1), loop_ty)
+        self.builder = b_init
+
+        var b_blocks = self.builder
+        val cond_block = b_blocks.new_block(Some("any_all_cond"))
+        val body_block = b_blocks.new_block(Some("any_all_body"))
+        val decided_block = b_blocks.new_block(Some("any_all_decided"))
+        val inc_block = b_blocks.new_block(Some("any_all_inc"))
+        val exit_block = b_blocks.new_block(Some("any_all_exit"))
+        self.builder = b_blocks
+
+        var b_goto = self.builder
+        b_goto.terminate_goto(cond_block)
+        b_goto.switch_to_block(cond_block)
+        self.builder = b_goto
+
+        var b_cond = self.builder
+        val cond_result = b_cond.emit_binop(MirBinOp.Lt, mir_operand_copy(counter), mir_operand_copy(len_local), MirType.bool())
+        b_cond.terminate_if(mir_operand_copy(cond_result), body_block, exit_block)
+        b_cond.switch_to_block(body_block)
+        self.builder = b_cond
+
+        var b_get = self.builder
+        val get_call = b_get.emit_call(self.rt_array_get_operand(), [mir_operand_copy(arr), mir_operand_copy(counter)], MirType.i64())
+        val elem_tagged = get_call ?? b_get.new_temp(MirType.i64())
+        self.builder = b_get
+        val elem_raw = self.decode_runtime_value(elem_tagged, MirType.i64())
+
+        var b_call = self.builder
+        val call_result = if val environment = pred_environment:
+            b_call.emit_call_indirect(pred_target, [environment, mir_operand_copy(elem_raw)],
+                MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false), MirType.i64())
+        else:
+            b_call.emit_call(pred_target, [mir_operand_copy(elem_raw)], MirType.i64())
+        val pred_raw = call_result ?? b_call.new_temp(MirType.i64())
+        val zero_pred = b_call.emit_const_int(0)
+        # `any` decides on a truthy predicate, `all` on a falsy one.
+        val decide_op = if want_any: MirBinOp.Ne else: MirBinOp.Eq
+        val decides = b_call.emit_binop(decide_op, mir_operand_copy(pred_raw), mir_operand_copy(zero_pred), MirType.bool())
+        b_call.terminate_if(mir_operand_copy(decides), decided_block, inc_block)
+        b_call.switch_to_block(decided_block)
+        self.builder = b_call
+
+        var b_decided = self.builder
+        b_decided.emit_copy(answer, decided_value)
+        b_decided.terminate_goto(exit_block)
+        self.builder = b_decided
+
+        var b_inc = self.builder
+        b_inc.switch_to_block(inc_block)
+        val incremented = b_inc.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(one), loop_ty)
+        b_inc.emit_copy(counter, incremented)
+        self.builder = b_inc
+        var b_back = self.builder
+        b_back.terminate_goto(cond_block)
+        self.builder = b_back
+
+        var b_exit = self.builder
+        b_exit.switch_to_block(exit_block)
+        self.builder = b_exit
+        answer
 
     me lower_array_fold(arr: LocalId, init: LocalId, lam_op: MirOperand) -> LocalId:
         """Lower `arr.fold(init, \\acc, x: expr)` for a runtime `[i64]` array.
