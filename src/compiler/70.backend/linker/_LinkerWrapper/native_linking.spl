@@ -61,7 +61,8 @@ use compiler.backend.linker.smf_getter.{SmfGetter}
 use compiler.backend.linker.smf_enums.{Platform, Arch}
 use compiler.backend.linker.obj_taker.{ObjTaker, ObjTakeResult, objtaker_with_defaults, objtaker_take_object}
 use compiler.backend.linker.platform_defaults.{elf_emulation}
-use compiler.backend.backend.runtime_compiler.{find_c_compiler, hosted_c_compiler_plan}
+use compiler.backend.linker._LinkerWrapper.link_command_record.{record_link_command, link_command_record_path}
+use compiler.backend.backend.runtime_compiler.{find_c_compiler, hosted_c_compiler_plan, windows_link_flavor_for_target}
 
 # Internal ELF engine (lane A7/B3): SIMPLE_LINKER=internal routes here instead
 # of an external linker. Same imports link_engine_external.spl uses for its
@@ -301,7 +302,7 @@ fn native_link_with_admitted_inputs_and_engine_v1(object_files: [text], output: 
     # Validate named runtime authority before SMF or platform dispatch. SMF
     # ultimately materializes native objects and re-enters this linker; doing
     # the check here also prevents Windows MinGW/MSVC from bypassing it.
-    val msvc_runtime = os == "windows-msvc" or (os == "windows" and not _is_mingw_env())
+    val msvc_runtime = os == "windows-msvc" or (os == "windows" and not _is_mingw_link(config))
     val provider_error = link_status_text(
         "native-runtime-provider-selection",
         native_runtime_provider_selection_error_for_config_platform(config, msvc_runtime))
@@ -568,6 +569,7 @@ fn link_native_unix_with_engine(object_files: [text], output: text, config: Nati
         var lld_args: [text] = ["ld.lld"]
         for a in args:
             lld_args.push(a)
+        record_link_command(output, "ld.lld", args, config.verbose)
         val lld_res = lld_elf_link(lld_args)
         if lld_res.exit_code != 0:
             return Err("in-process lld failed: {lld_res.stderr_text}")
@@ -577,6 +579,7 @@ fn link_native_unix_with_engine(object_files: [text], output: text, config: Nati
         return Ok(NativeLinkSuccessV1(output: output, engine_id: "ld.lld"))
 
     # Execute linker
+    record_link_command(output, execution_linker_path, args, config.verbose)
     val exec_result = execute_linker(execution_linker_path, args)
     if exec_result.is_err():
         if reproduce_path != "":
@@ -2306,6 +2309,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push(flag)
         for flag in ["-o", output]:
             args.push(flag)
+        record_link_command(output, cc, args, config.verbose)
         val (stdout, stderr, code) = process_run(cc, args)
         if code == 0:
             val tool_error = link_status_text(
@@ -2343,6 +2347,7 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push("-Wl,--strip-all")
         args.push("-o")
         args.push(output)
+        record_link_command(output, cc, args, config.verbose)
         val (stdout, stderr, code) = process_run(cc, args)
         if code == 0:
             return Ok(output)
@@ -2398,23 +2403,24 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push("-Wl,--icf=safe")
         args.push("-o")
         args.push(output)
+        record_link_command(output, cc, args, config.verbose)
         val (stdout, stderr, code) = process_run(cc, args)
         if code == 0:
             return Ok(output)
         val err_msg = if stderr != "": stderr else: "Unknown linking error"
         return Err("cc linking failed: {err_msg}")
 
-fn _is_mingw_env() -> bool:
-    """Check if running under MinGW/MSYS2.
-    SIMPLE_LINKER_FLAVOR=msvc overrides MSYSTEM detection so that
-    MSVC toolchain is used even inside MSYS2/Git Bash."""
-    val linker_flavor = env_get("SIMPLE_LINKER_FLAVOR")
-    if linker_flavor == "msvc":
-        return false
-    val msystem = env_get("MSYSTEM")
-    if msystem != "" and msystem != nil:
-        return true
-    linker_flavor == "gnu"
+pub fn windows_link_flavor_for_config(config: NativeLinkConfig) -> text:
+    """"msvc" or "gnu" for this link request, decided from the TARGET first
+    (config.target_triple / config.linker_abi, then the driver's --target),
+    then the SIMPLE_LINKER_FLAVOR / SIMPLE_WINDOWS_ABI overrides, and only
+    for an unqualified target from the host shell (MSYSTEM). Never from
+    MSYSTEM alone: Git Bash sets it for every shell, which used to route an
+    `x86_64-pc-windows-msvc` link through the MinGW arm."""
+    windows_link_flavor_for_target(config.target_triple, config.linker_abi)
+
+fn _is_mingw_link(config: NativeLinkConfig) -> bool:
+    windows_link_flavor_for_config(config) == "gnu"
 
 fn _windows_link_arch(config: NativeLinkConfig) -> text:
     val target = config.target_triple.lower()
@@ -2475,7 +2481,7 @@ fn link_native_windows_with_engine(object_files: [text], output: text, config: N
             if not library_files.contains(path): library_files = library_files.push(path)
         val runtime_msvc = internal_coff_runtime_is_msvc(
             native_effective_link_os(host_os(), config.target_triple, config.linker_abi),
-            _is_mingw_env())
+            _is_mingw_link(config))
         val runtime_archives = native_runtime_archive_inputs_for_platform(
             runtime_dir, config.runtime_bundle, runtime_msvc)
         for path in runtime_archives:
@@ -2558,8 +2564,9 @@ fn link_native_windows_with_engine(object_files: [text], output: text, config: N
         if not internal_link_publish_bytes(output, linked.unwrap()):
             return Err("internal engine: could not publish {output}")
         return Ok(NativeLinkSuccessV1(output: output, engine_id: "internal:coff"))
-    # MinGW: use gcc driver (Unix-style linking)
-    if _is_mingw_env():
+    # Windows GNU ABI (target-decided, see windows_link_flavor_for_config):
+    # clang driver + GNU-style lld.
+    if _is_mingw_link(config):
         return native_link_success_v1(_link_native_mingw(object_files, output, config), "cc")
 
     # MSVC: delegate to MsvcLinker with proper CRT paths
@@ -2654,6 +2661,7 @@ fn _link_native_msvc_with_engine(object_files: [text], output: text, config: Nat
     if config.verbose:
         print "[linker-wrapper] MSVC linking: {object_files.len()} objects -> {output}"
         print "[linker-wrapper] lib_paths: {msvc_config.lib_paths.join(', ')}"
+        print "[linker-wrapper] link command is recorded at {link_command_record_path(output)}"
 
     # Resolve exactly once and pass that executable explicitly. MsvcLinker
     # probes only when link_exe is empty; it has no hidden success fallback.
