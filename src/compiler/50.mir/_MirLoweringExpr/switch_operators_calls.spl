@@ -2569,6 +2569,50 @@ impl MirLowering:
                 case Binding(_, _):
                     has_default = true
                     default_body = arm.body
+                case HirPatternKind.Literal(nil_lit):
+                    # `case nil:` on an Option scrutinee is `case None:` (the
+                    # seed and the interpreter accept both spellings; the
+                    # stdlib writes `case Some(t): t / case nil: return`).
+                    # HIR keeps it as a nil LITERAL pattern, which used to hit
+                    # the unsupported-arm error below -- 52 "unsupported enum
+                    # arm pattern" errors in the 2026-10-09 stage2 runner
+                    # build. Resolve it exactly like a bare `None` variant:
+                    # through the enum this match already established, else
+                    # through the Option owner of `None`.
+                    var nil_arm = false
+                    match nil_lit.kind:
+                        case HirExprKind.NilLit: nil_arm = true
+                        case _: ()
+                    if not nil_arm:
+                        self.error("enum match: unsupported arm pattern", Some(arm.pattern.span))
+                    else:
+                        val nil_lookup_key = if enum_key != "": enum_key else: enum_name
+                        var nil_d: i64 = -1
+                        if enum_name != "" and self.enum_has_variants(nil_lookup_key):
+                            nil_d = self.enum_variant_discriminant(nil_lookup_key, "None")
+                        else:
+                            val none_owner_keys = self.variant_owner_keys("None")
+                            var none_owner = ""
+                            for none_owner_key in none_owner_keys:
+                                if self.enum_bare_of(none_owner_key) == "Option":
+                                    none_owner = none_owner_key
+                            if none_owner == "" and none_owner_keys.len() == 1:
+                                none_owner = none_owner_keys[0]
+                            if none_owner != "":
+                                nil_d = self.enum_variant_discriminant(none_owner, "None")
+                                if enum_name == "":
+                                    enum_name = self.enum_bare_of(none_owner)
+                        if nil_d < 0:
+                            self.error("enum match: `case nil` arm has no None variant on enum '{enum_name}'", Some(arm.pattern.span))
+                        val nil_binds: [SymbolId] = []
+                        val nil_bind_pos: [i64] = []
+                        enum_discs = enum_discs.push(nil_d)
+                        enum_binds = enum_binds.push(nil_binds)
+                        enum_bind_pos = enum_bind_pos.push(nil_bind_pos)
+                        enum_arities = enum_arities.push(0)
+                        enum_variants = enum_variants.push("None")
+                        enum_deep_flags = enum_deep_flags.push(0)
+                        enum_arm_srcidx = enum_arm_srcidx.push(ai)
                 case _:
                     self.error("enum match: unsupported arm pattern", Some(arm.pattern.span))
             ai = ai + 1
