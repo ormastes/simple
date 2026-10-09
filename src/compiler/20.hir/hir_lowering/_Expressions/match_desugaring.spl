@@ -747,12 +747,54 @@ impl HirLowering:
             case _:
                 arm
 
+    fn flatten_or_alternatives(alts: [HirPattern]) -> [HirPattern]:
+        var out: [HirPattern] = []
+        for alt in alts:
+            match alt.kind:
+                case Or(inner):
+                    for x in self.flatten_or_alternatives(inner):
+                        out = out.push(x)
+                case _:
+                    out = out.push(alt)
+        out
+
+    me expand_enum_or_arms(arms: [HirMatchArm]) -> [HirMatchArm]:
+        """Split each top-level Or arm that has at least one Enum alternative
+        into sibling arms, one per alternative, keeping guard/body/span."""
+        var out: [HirMatchArm] = []
+        for arm in arms:
+            var split = false
+            match arm.pattern.kind:
+                case Or(nested_alts):
+                    # `A | B | C` may arrive as Or([Or([A, B]), C]); flatten.
+                    val alts = self.flatten_or_alternatives(nested_alts)
+                    for alt in alts:
+                        match alt.kind:
+                            case Enum(_, _, _):
+                                split = true
+                            case _: ()
+                    if split:
+                        for alt2 in alts:
+                            out = out.push(HirMatchArm(pattern: alt2, has_guard: arm.has_guard, guard: arm.guard, body: arm.body, span: arm.span))
+                case _: ()
+            if not split:
+                out = out.push(arm)
+        out
+
     me build_match_expr(hir_scrutinee: HirExpr, hir_arms: [HirMatchArm], span: Span) -> HirExprKind:
         # `case i64 v:` narrowing arms become ordinary `__Union_...` enum arms
         # BEFORE the fast-path decision below, so a union match takes the
         # tested enum-match path instead of the general if-chain fallback
         # (which would erase the MatchCase node exhaustiveness reads).
-        val hir_arms = self.union_narrow_arms(hir_scrutinee, hir_arms, span)
+        val narrowed_arms = self.union_narrow_arms(hir_scrutinee, hir_arms, span)
+        # `case Copy(l) | Move(l):` -- a top-level or-arm with enum
+        # alternatives becomes one sibling arm per alternative (same guard,
+        # same body) so it takes the tested enum-match path below, including
+        # payload flattening, instead of the if-chain fallback (which cannot
+        # bind inside an Or). The alternatives already share one symbol per
+        # binding name (unify_or_pattern_bindings), so every sibling binds
+        # the symbol the body reads.
+        val hir_arms = self.expand_enum_or_arms(narrowed_arms)
         var has_enum = false
         var needs_general_fallback = false
         for a in hir_arms:
