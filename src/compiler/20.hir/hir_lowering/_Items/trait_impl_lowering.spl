@@ -487,18 +487,22 @@ impl HirLowering:
         """Type of an unannotated module global, settled from its LOWERED
         initializer when the shape alone (`unannotated_const_type`) cannot.
 
-        Only declared evidence is used, exactly what an explicit annotation
-        would have said:
-          - a call to a function/extern -> the callee's declared return type
-          - a struct constructor call or struct literal -> that struct
+        Only signature and declaration evidence is used -- what an explicit
+        annotation would have said:
+          - a call to a function/extern -> the callee signature's return
+            type (declared, or what `infer_untyped_return_type` recorded for
+            a callee without `->`: Unit or the scanned tail type)
+          - a constructor call or struct literal of a record declared in
+            this module without type parameters -> that record
           - an array literal -> `[E]`, when every element settles to the
             same `E`
           - any expression HIR already typed (`has_type_`, e.g. a cast)
         The HIR const type is the storage ABI for BOTH the owner's static
         (`lower_static`) and every importer's external declaration
         (`register_provider_global_bindings`), so settling it here keeps the
-        two sides on one type. Anything else -- a generic callee, an
-        untyped return, an empty array, mixed element types -- stays
+        two sides on one type. Anything else -- a generic callee or record,
+        a callee type without a settled return, an empty array, mixed
+        element types -- stays
         `Infer`, and MIR fails closed with the declaration span rather
         than guessing an i64 storage slot."""
         val infer = HirType(kind: HirTypeKind.Infer(0, 0), span: span)
@@ -530,7 +534,11 @@ impl HirLowering:
                             case _: infer
                     case _: infer
             case HirExprKind.StructLit(struct_type, _):
-                if hir_const_type_settled(struct_type): struct_type else: infer
+                val struct_lit_type: HirType = struct_type
+                match struct_lit_type.kind:
+                    case HirTypeKind.Named(struct_sym, _):
+                        if self.nongeneric_record_owners.has(struct_sym.id): struct_lit_type else: infer
+                    case _: infer
             case HirExprKind.Call(callee, _, type_args):
                 val call_callee: HirExpr = callee
                 val call_type_args: [HirType] = type_args
@@ -546,7 +554,14 @@ impl HirLowering:
                 val callee_symbol: HirSymbol = callee_info.unwrap()
                 match callee_symbol.kind:
                     case SymbolKind.Struct | SymbolKind.Class:
-                        HirType(kind: HirTypeKind.Named(callee_symbol.id, call_type_args), span: span)
+                        # Only a record declared here without type parameters:
+                        # `Box(value: 1)` on a generic `Box<T>` has no settled
+                        # type until inference, and an imported record's
+                        # genericity is not known at this point.
+                        if call_type_args.len() == 0 and self.nongeneric_record_owners.has(callee_symbol.id.id):
+                            HirType(kind: HirTypeKind.Named(callee_symbol.id, []), span: span)
+                        else:
+                            infer
                     case SymbolKind.Function:
                         # Explicit type arguments mean a generic callee whose
                         # return type is only known after monomorphization.
@@ -650,11 +665,32 @@ impl HirLowering:
 
 fn hir_const_type_settled(type_: HirType) -> bool:
     """True when `type_` is a concrete storage type for a module global:
-    no `Infer`/`Error`/`Any`/`Never`/type parameter at the top or inside an
-    array/optional/tuple/dict component."""
+    no `Infer`/`Error`/`Any`/`Never`/type parameter/unresolved projection
+    at the top or inside any component (generic arguments, elements,
+    pointees, result arms, callable signature, union members)."""
     match type_.kind:
         case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any | HirTypeKind.Never: false
-        case HirTypeKind.TypeParam(_, _): false
+        case HirTypeKind.TypeParam(_, _) | HirTypeKind.Projection(_, _): false
+        case HirTypeKind.Named(_, args):
+            val named_args: [HirType] = args
+            hir_const_types_settled(named_args)
+        case HirTypeKind.Union(members):
+            val union_members: [HirType] = members
+            hir_const_types_settled(union_members)
+        case HirTypeKind.Function(params, ret, _):
+            val fn_params: [HirType] = params
+            val fn_ret: HirType = ret
+            hir_const_types_settled(fn_params) and hir_const_type_settled(fn_ret)
+        case HirTypeKind.Result(ok, err):
+            val result_ok: HirType = ok
+            val result_err: HirType = err
+            hir_const_type_settled(result_ok) and hir_const_type_settled(result_err)
+        case HirTypeKind.Slice(elem):
+            val slice_elem: HirType = elem
+            hir_const_type_settled(slice_elem)
+        case HirTypeKind.Ref(inner, _) | HirTypeKind.Ptr(inner, _) | HirTypeKind.Isolated(inner):
+            val pointee: HirType = inner
+            hir_const_type_settled(pointee)
         case HirTypeKind.Array(elem, _):
             val array_elem: HirType = elem
             hir_const_type_settled(array_elem)
@@ -667,8 +703,11 @@ fn hir_const_type_settled(type_: HirType) -> bool:
             hir_const_type_settled(dict_key) and hir_const_type_settled(dict_value)
         case HirTypeKind.Tuple(elements):
             val tuple_elements: [HirType] = elements
-            for tuple_elem in tuple_elements:
-                if not hir_const_type_settled(tuple_elem):
-                    return false
-            true
+            hir_const_types_settled(tuple_elements)
         case _: true
+
+fn hir_const_types_settled(types: [HirType]) -> bool:
+    for component in types:
+        if not hir_const_type_settled(component):
+            return false
+    true
