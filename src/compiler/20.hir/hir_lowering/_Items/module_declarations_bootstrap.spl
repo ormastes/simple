@@ -40,6 +40,17 @@ use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
+fn unannotated_dict_global_type(value: Expr, span: Span) -> HirType?:
+    """`var D = {}` publishes the same dynamic `Dict<any, any>` a bare `Dict`
+    annotation lowers to (hir_lowering/types.spl). Without a published type
+    MIR's global read (try_lower_global_read) could not tell the i64 storage
+    handle is a dict, so `D.has(k)` died as "unresolved method call: has"
+    (std.nogc_sync_mut.log `SCOPE_LEVELS`)."""
+    match value.kind:
+        case ExprKind.DictLit(_):
+            Some(HirType(kind: HirTypeKind.Dict(HirType(kind: HirTypeKind.Any, span: span), HirType(kind: HirTypeKind.Any, span: span)), span: span))
+        case _: nil
+
 impl HirLowering:
     me bootstrap_flat_error_expr(kind_label: text, index: i64, span: Span) -> HirExpr:
         # Mirror flat_bridge_report_unhandled_node's fail-closed policy: record
@@ -244,6 +255,8 @@ impl HirLowering:
             var constant_type: HirType? = nil
             if constant.has_type_:
                 constant_type = Some(self.lower_type(constant.type_))
+            else:
+                constant_type = unannotated_dict_global_type(constant.value, decl_span)
             self.symbols.define(name, SymbolKind.Const, constant_type, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
