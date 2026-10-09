@@ -35,8 +35,9 @@ pub static TOTAL_ALLOCS: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// A `GlobalAlloc` that forwards to an inner allocator while maintaining the
-/// counters above. Overhead is a handful of relaxed atomic ops per allocation;
-/// it perturbs wall-clock timing slightly but not peak-RSS attribution.
+/// counters above. Each thread batches its deltas locally and publishes them to
+/// the shared atomics only every `FLUSH_ALLOCS` allocations or `FLUSH_BYTES`
+/// of live-byte drift (see `on_alloc`).
 ///
 /// Generic over the inner allocator on purpose: the driver's default allocator
 /// is mimalloc, and wrapping the *real* allocator keeps RSS behaviour faithful
@@ -50,12 +51,71 @@ impl<A> TrackingAlloc<A> {
     }
 }
 
+// Per-thread batching of the counters above.
+//
+// Updating four shared atomics on EVERY allocation and free made all native
+// compile workers fight over one cache line. Measured 2026-10-09 (Windows,
+// 64 logical CPUs, release/1.0): `src/app/io/mod.spl` compiles in 17s of CPU
+// alone but burned 408s of CPU (wall 449s, over the 300s per-file timeout)
+// in a 31-thread cold build, and 29 files recompiled together each took ~150s
+// of CPU regardless of their 6-20s serial cost. CPU time ~= wall time, so this
+// was contended atomics, not scheduler starvation.
+//
+// Each thread keeps its pending deltas in const-initialised `Cell`s. Those have
+// no destructor and never allocate, so they are safe to touch from inside the
+// global allocator. The shared counters are updated every `FLUSH_ALLOCS`
+// allocations or after `FLUSH_BYTES` of pending live-byte drift. `LIVE_BYTES`
+// therefore lags by less than `FLUSH_BYTES` per thread. `PEAK_BYTES` is sampled
+// at flush time. Both are diagnostics only (`SIMPLE_MEM_TRACE`).
+const FLUSH_ALLOCS: u32 = 64;
+const FLUSH_BYTES: isize = 1 << 20;
+
+thread_local! {
+    static PENDING_LIVE: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    static PENDING_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static PENDING_ALLOCS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn publish(live_delta: isize, allocs: u64, bytes: u64) {
+    if allocs != 0 {
+        TOTAL_ALLOCS.fetch_add(allocs, Ordering::Relaxed);
+        TOTAL_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    }
+    let live = LIVE_BYTES
+        .fetch_add(live_delta as usize, Ordering::Relaxed)
+        .wrapping_add(live_delta as usize);
+    if live_delta > 0 {
+        PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
+    }
+}
+
+#[inline]
+fn record(live_delta: isize, allocs: u32, bytes: u64) {
+    let batched = PENDING_LIVE.try_with(|pending_live| {
+        let live = pending_live.get().wrapping_add(live_delta);
+        let n = PENDING_ALLOCS.with(|c| c.get()) + allocs;
+        let b = PENDING_BYTES.with(|c| c.get()) + bytes;
+        if n >= FLUSH_ALLOCS || live >= FLUSH_BYTES || live <= -FLUSH_BYTES {
+            pending_live.set(0);
+            PENDING_ALLOCS.with(|c| c.set(0));
+            PENDING_BYTES.with(|c| c.set(0));
+            publish(live, n as u64, b);
+        } else {
+            pending_live.set(live);
+            PENDING_ALLOCS.with(|c| c.set(n));
+            PENDING_BYTES.with(|c| c.set(b));
+        }
+    });
+    if batched.is_err() {
+        // Thread-local storage is gone (thread teardown): publish directly.
+        publish(live_delta, allocs as u64, bytes);
+    }
+}
+
 #[inline]
 fn on_alloc(size: usize) {
-    TOTAL_ALLOCS.fetch_add(1, Ordering::Relaxed);
-    TOTAL_BYTES.fetch_add(size as u64, Ordering::Relaxed);
-    let live = LIVE_BYTES.fetch_add(size, Ordering::Relaxed) + size;
-    PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
+    record(size as isize, 1, size as u64);
 }
 
 // ---------------------------------------------------------------------------
@@ -212,7 +272,7 @@ fn check_big(size: usize, kind: &str) {
 
 #[inline]
 fn on_dealloc(size: usize) {
-    LIVE_BYTES.fetch_sub(size, Ordering::Relaxed);
+    record(-(size as isize), 0, 0);
 }
 
 unsafe impl<A: GlobalAlloc> GlobalAlloc for TrackingAlloc<A> {
@@ -250,9 +310,11 @@ unsafe impl<A: GlobalAlloc> GlobalAlloc for TrackingAlloc<A> {
     }
 }
 
-/// Currently-live heap bytes.
+/// Currently-live heap bytes. Includes this thread's unpublished delta, so a
+/// same-thread before/after difference stays exact.
 pub fn live() -> usize {
-    LIVE_BYTES.load(Ordering::Relaxed)
+    let pending = PENDING_LIVE.try_with(|c| c.get()).unwrap_or(0);
+    LIVE_BYTES.load(Ordering::Relaxed).wrapping_add(pending as usize)
 }
 
 /// High-water mark of live heap bytes.
