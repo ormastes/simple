@@ -1,0 +1,97 @@
+# Explicit POSIX integration probe for REQ-APP-LLM-CARET-PANE-006.
+# Run together with the unchanged pane_backend_spec.spl on a POSIX host.
+# This fixture is not a Windows test and has no platform skip or fake pass.
+# The admitted bootstrap producer predates the grouped-import correction in
+# #2718. Use the single-symbol import until that producer can be rebuilt.
+use std.spec.step
+use app.llm_caret.pane_backend.{pane_spawn_at, pane_spawn, pane_send, pane_capture, pane_kill}
+use app.io.mod.{env_get, env_set, file_read, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+use std.nogc_async_mut.sosix.{sosix_run}
+
+fn await_text(session: text, pane_id: text, needle: text) -> text:
+    var seen = ""
+    var attempt = 0
+    while attempt < 100 and not seen.contains(needle):
+        thread_sleep_ms(100)
+        seen = pane_capture(session, pane_id, 50).join("\n")
+        attempt = attempt + 1
+    seen
+
+describe "POSIX pane launcher keeps terminal input for the requested child":
+    it "preserves immediate input, literal argv, environment, stderr and normal cleanup":
+        val root = secure_temp_dir("/tmp", "pane-launch-probe-").unwrap()
+        val old_tmp = env_get("TMPDIR") ?? ""
+        val old_tmux = env_get("TMUX") ?? ""
+        val old_tmux_pane = env_get("TMUX_PANE") ?? ""
+        env_set("TMPDIR", root)
+        env_set("TMUX", "pane-launch-inherited-session")
+        env_set("TMUX_PANE", "%999")
+        val payload = "spaces ' quotes $dollars ; $(printf wrong)"
+        val err_path = root + "/stderr ' literal"
+        val command = ("printf '%s\\n' \"$1\"; printf '%s\\n' \"$TERM\"; " +
+            "printf '%s\\n' \"${{TMUX-unset}}:${{TMUX_PANE-unset}}\"; " +
+            "printf 'launch-stderr\\n' >&2; read answer; " +
+            "printf '%s\\n' \"$((answer*3))\"; exec /bin/sh")
+        step("Spawn with arguments and send before any capture or readiness wait")
+        val pane = pane_spawn_at("pane-launch-argv", "probe", "/bin/sh",
+            ["-c", command, "pane-probe", payload], 80, 24, err_path)
+        val sent = pane_send("pane-launch-argv", pane.pane_id, "4711")
+        env_set("TMPDIR", old_tmp)
+        env_set("TMUX", old_tmux)
+        env_set("TMUX_PANE", old_tmux_pane)
+        val seen = await_text("pane-launch-argv", pane.pane_id, "14133")
+        val stderr = file_read(err_path)
+        val before_close = sosix_run("ls", ["-A", root])
+        val killed = pane_kill("pane-launch-argv", pane.pane_id)
+        val after_close = sosix_run("ls", ["-A", root])
+        val cleaned = dir_remove_all(root)
+        expect(pane.pane_id).to_not_equal("")
+        assert_true(sent)
+        expect(seen).to_contain("14133")
+        expect(seen).to_contain(payload)
+        expect(seen).to_contain("xterm-256color")
+        expect(seen).to_contain("unset:unset")
+        expect(stderr).to_equal("launch-stderr\n")
+        expect(before_close.exit_code).to_equal(0)
+        expect(before_close.stdout.trim()).to_equal("stderr ' literal")
+        assert_true(killed)
+        expect(after_close.exit_code).to_equal(0)
+        expect(after_close.stdout.trim()).to_equal("stderr ' literal")
+        assert_true(cleaned)
+
+    it "removes launch files when the requested executable fails":
+        val root = secure_temp_dir("/tmp", "pane-launch-failure-").unwrap()
+        val old_tmp = env_get("TMPDIR") ?? ""
+        env_set("TMPDIR", root)
+        val pane = pane_spawn("pane-launch-failure", "missing",
+            "/cs-pane-missing-program-9021", [])
+        env_set("TMPDIR", old_tmp)
+        val seen = await_text("pane-launch-failure", pane.pane_id, "cs-pane-missing-program-9021")
+        val files = sosix_run("ls", ["-A", root])
+        val killed = pane_kill("pane-launch-failure", pane.pane_id)
+        val cleaned = dir_remove_all(root)
+        expect(seen).to_contain("cs-pane-missing-program-9021")
+        expect(files.exit_code).to_equal(0)
+        expect(files.stdout.trim()).to_equal("")
+        assert_true(killed)
+        assert_true(cleaned)
+
+    it "cleans up an immediately closed pane and rejects an unusable temporary parent":
+        val root = secure_temp_dir("/tmp", "pane-launch-close-").unwrap()
+        val old_tmp = env_get("TMPDIR") ?? ""
+        env_set("TMPDIR", root)
+        val pane = pane_spawn("pane-launch-close", "close", "/bin/sh", [])
+        val killed = pane_kill("pane-launch-close", pane.pane_id)
+        env_set("TMPDIR", root + "/absent-parent")
+        val refused = pane_spawn("pane-launch-close", "refused", "/bin/sh", [])
+        env_set("TMPDIR", old_tmp)
+        val files = sosix_run("ls", ["-A", root])
+        val cleaned = dir_remove_all(root)
+        expect(pane.pane_id).to_not_equal("")
+        assert_true(killed)
+        expect(refused.pane_id).to_equal("")
+        expect(files.exit_code).to_equal(0)
+        expect(files.stdout.trim()).to_equal("")
+        assert_true(cleaned)

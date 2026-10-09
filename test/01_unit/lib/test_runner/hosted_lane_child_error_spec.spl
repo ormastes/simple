@@ -1,0 +1,48 @@
+# A hosted-lane child (src/app/test_runner_new/hosted_lane_main.spl) exits 0
+# for a `skip:` probe failure (e.g. remote(cuda(...)) on a CUDA-less host). The
+# parent must keep that named error on TestFileResult.error -- failed: 0,
+# skipped: 1, error "skip: ..." -- exactly as the in-process lane returned it
+# before 7482ea3a128, so it classifies as error/skip-with-reason, not a pass.
+
+use std.test_runner.test_runner_types.{TestFileResult}
+use std.test_runner.test_executor_parsing.{make_result_from_output, hosted_lane_child_error, apply_hosted_lane_child_error}
+
+val SKIP_STDOUT = "Results: 0 total, 0 passed, 0 failed, 1 skipped, 0 pending\nhosted lane: skip: cuda lane unavailable: cuInit failed\n"
+
+fn _parent_result(stdout: text, exit_code: i32) -> TestFileResult:
+    val raw = make_result_from_output("spec.spl", stdout, "", exit_code, 5, 30)
+    apply_hosted_lane_child_error(raw, stdout, exit_code)
+
+describe "hosted lane child error propagation":
+    it "extracts the child's named lane error":
+        expect(hosted_lane_child_error(SKIP_STDOUT)).to_equal("skip: cuda lane unavailable: cuInit failed")
+        expect(hosted_lane_child_error("Results: 1 total, 1 passed, 0 failed, 0 skipped, 0 pending\n")).to_equal("")
+
+    it "reports a probe-failure skip with its reason, never a clean pass":
+        val result = _parent_result(SKIP_STDOUT, 0)
+        expect(result.error).to_equal("skip: cuda lane unavailable: cuInit failed")
+        expect(result.failed).to_equal(0)
+        expect(result.skipped).to_equal(1)
+        expect(result.passed).to_equal(0)
+
+    it "keeps a non-skip lane failure as a failure carrying the child's error":
+        val stdout = "Results: 1 total, 0 passed, 1 failed, 0 skipped, 0 pending\nhosted lane: cuda_jit lane failed: teardown-failed\n"
+        val result = _parent_result(stdout, 1)
+        expect(result.error).to_equal("cuda_jit lane failed: teardown-failed")
+        expect(result.failed).to_equal(1)
+
+    it "leaves a clean child pass untouched":
+        val stdout = "Results: 1 total, 1 passed, 0 failed, 0 skipped, 0 pending\n"
+        val result = _parent_result(stdout, 0)
+        expect(result.error).to_equal("")
+        expect(result.passed).to_equal(1)
+
+    it "never downgrades a truncated capture to a skip":
+        val stdout = "[output truncated: 4096 bytes omitted]\nhosted lane: skip: cuda lane unavailable: cuInit failed\n"
+        val result = _parent_result(stdout, 0)
+        expect(result.error.starts_with("child output was truncated")).to_equal(true)
+        expect(result.failed).to_equal(1)
+
+    it "does not override a crash classification":
+        val result = _parent_result(SKIP_STDOUT, 139)
+        expect(result.error.starts_with("CRASHED")).to_equal(true)

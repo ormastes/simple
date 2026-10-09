@@ -16,9 +16,11 @@
 # environment snapshot and pass them in.
 
 use std.common.config_core.schema.{ConfigFieldDescriptor, config_field, config_int_field, config_enum_field}
-use std.common.config_core.schema.{config_schema_index}
+use std.common.config_core.schema.{config_schema_index, config_validate_value}
 use std.common.config_core.layers.{ConfigEntry, ConfigResolution, config_parse_layer, config_resolve_valid}
 use std.common.config_core.layers.{config_strip_inline_comment}
+
+val HOST_CONFIG_SCHEMA = "simple-host-config-v1"
 
 fn host_config_schema() -> [ConfigFieldDescriptor]:
     [
@@ -40,23 +42,68 @@ fn host_config_env_name(key: text) -> text:
 fn _hc_parse(content: text, layer: text) -> [ConfigEntry]:
     var result: [ConfigEntry] = []
     for e in config_parse_layer(content, layer):
-        result.push(ConfigEntry(key: e.key, value: config_strip_inline_comment(e.value), layer: layer))
+        val value = config_strip_inline_comment(e.value).trim()
+        # An empty value pins nothing (same as the shell twin).
+        if value != "":
+            result.push(ConfigEntry(key: e.key, value: value, layer: layer))
     result
+
+# True unless the document's entries declare a `schema:` other than
+# simple-host-config-v1; a document with no schema line is accepted. Same rule
+# as host_config_file_schema_ok in scripts/setup/host-env.shs.
+fn host_config_schema_accepts(entries: [ConfigEntry]) -> bool:
+    for e in entries:
+        if e.key == "schema":
+            return e.value == HOST_CONFIG_SCHEMA
+    true
+
+# A host_config document's entries, or [] when it carries a foreign schema.
+# The machine layer is the legacy host_env: file, whose own schema
+# (simple-host-env-v1) is validated by its loader, so it is not checked here.
+fn _hc_layer_entries(content: text, layer: text) -> [ConfigEntry]:
+    val entries = _hc_parse(content, layer)
+    if layer != "machine" and not host_config_schema_accepts(entries):
+        return []
+    entries
 
 # All contributions, tagged with their layer. Any document may be "".
 fn host_config_entries(defaults_text: text, host_text: text, user_text: text, env: [(text, text)]) -> [ConfigEntry]:
     var result: [ConfigEntry] = []
-    for e in _hc_parse(defaults_text, "vendor"):
+    for e in _hc_layer_entries(defaults_text, "vendor"):
         result.push(e)
-    for e in _hc_parse(host_text, "machine"):
+    for e in _hc_layer_entries(host_text, "machine"):
         result.push(e)
-    for e in _hc_parse(user_text, "user"):
+    for e in _hc_layer_entries(user_text, "user"):
         result.push(e)
     for desc in host_config_schema():
         val name = host_config_env_name(desc.key)
         for pair in env:
             if pair.0 == name and pair.1 != "":
                 result.push(ConfigEntry(key: desc.key, value: pair.1, layer: "session"))
+    result
+
+# Shell-twin layer names, so both readers word their warnings identically.
+fn _hc_shell_layer(layer: text) -> text:
+    if layer == "session": return "env"
+    if layer == "machine": return "host"
+    if layer == "vendor": return "default"
+    layer
+
+# Warnings for every rejected contribution: a host_config document with a
+# foreign schema (skipped whole) and every schema-invalid value (which falls
+# through to the next lower layer). Pure; callers print them. Wording matches
+# the shell twin's stderr warnings.
+fn host_config_warnings(defaults_text: text, host_text: text, user_text: text, env: [(text, text)]) -> [text]:
+    var result: [text] = []
+    for doc in [(defaults_text, "vendor"), (user_text, "user")]:
+        if not host_config_schema_accepts(_hc_parse(doc.0, doc.1)):
+            result.push("host-config: warning: ignoring {_hc_shell_layer(doc.1)} layer: schema is not {HOST_CONFIG_SCHEMA}")
+    val schema = host_config_schema()
+    for e in host_config_entries(defaults_text, host_text, user_text, env):
+        val idx = config_schema_index(schema, e.key)
+        if idx >= 0 and not config_validate_value(schema[idx], e.value).ok:
+            val origin = if e.layer == "session": "env" else: "{_hc_shell_layer(e.layer)} layer"
+            result.push("host-config: warning: ignoring invalid {e.key}={e.value} from {origin}")
     result
 
 # Effective resolution for one key; invalid values fall through to the next

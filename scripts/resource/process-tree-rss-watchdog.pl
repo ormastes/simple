@@ -11,10 +11,10 @@ use File::Basename qw(dirname);
 use File::Temp qw(tempdir);
 use File::Path qw(make_path remove_tree);
 use Config;
-use Fcntl qw(O_RDONLY O_NOFOLLOW);
+use Fcntl qw(O_RDONLY O_NOFOLLOW F_SETFD);
 use Digest::SHA;
 use IPC::Open2 qw(open2);
-use Errno qw(ESRCH ENOENT);
+use Errno qw(ESRCH ENOENT EINTR);
 
 # EPIPE must be a caught observation failure even during pre-workload admission.
 my $workload_sigpipe = $SIG{PIPE} // 'DEFAULT';
@@ -107,17 +107,24 @@ my ($observer_starts, $observer_errors, $observer_last_pid) = (0, 0, 0);
 # the summed working set of the job's members, and kill-on-limit terminates the
 # whole job. Native MSWin32 perl has no MSYS path/fork layer and fails closed.
 my $windows = $^O =~ /\A(?:msys|cygwin|MSWin32)\z/ ? 1 : 0;
+my $freebsd = $^O eq 'freebsd';
+my ($reaper_read, $reaper_write, $reaper_buffer, $reaper_payload) = (undef, undef, '', 0);
+my ($reaper_identity, $reaper_cross_session) = ('', 0);
+my $reaper_retained = 0;
+my $reaper_owner_wait_status = -1;
 # The POSIX workload gets its own session, so controller death need not signal
 # it. Reparenting proves controller loss; PID reuse cannot restore that relation.
 # Windows uses Job Objects, and native MSWin32 Perl does not provide getppid.
 my $controller_pid = $windows ? 0 : getppid();
 my $observer_backend = $windows ? 'win32-job-object' :
+    $freebsd ? 'freebsd-reaper-sysctl' :
     $^O eq 'darwin' ? 'darwin-sysctl-libproc' :
     $^O eq 'linux' && -r '/proc/self/stat' &&
     ($ENV{SIMPLE_PROCESS_TREE_OBSERVER} // '') ne 'ps' ? 'linux-proc' : 'ps';
 my $proc_page_kib = $observer_backend eq 'linux-proc' ?
     POSIX::sysconf(POSIX::_SC_PAGESIZE()) / 1024 : 0;
 my $containment_scope = $windows ? 'win32-job-object-no-breakaway' :
+    $freebsd ? 'freebsd-reaper-descendants' :
     'observed-descendants-and-process-groups';
 my $extra_receipt = '';
 my $session_dir;
@@ -631,6 +638,129 @@ sub read_proc_stat_record {
     return $record;
 }
 
+# The private native owner proves kernel membership and supplies metadata. The
+# ordinary Perl loop below still owns budgets, timeout/grace and receipt policy.
+sub reaper_line {
+    my ($deadline) = @_;
+    while (1) {
+        if ($reaper_buffer =~ s/\A([^\n]*\n)//) {
+            my $line = $1;
+            length($line) <= 256 or die "oversized reaper line";
+            if ($line =~ /\AERROR /) {
+                $line =~ /\AERROR 1 ([1-9][0-9]*) (?:sample|stop) [a-z-]+ [0-9]+ [0-9]+ [0-9]+ [0-9]+ (?:-1|[01]) (?:-1|[0-9]+)\n\z/
+                    or die "malformed native reaper failure";
+                $1 == $leader or die "native reaper failure owner changed";
+                die "native reaper failure: $line";
+            }
+            return $line;
+        }
+        length($reaper_buffer) <= 256 or die "oversized reaper line";
+        my $remaining = $deadline - time;
+        $remaining > 0 or die "reaper protocol deadline exceeded";
+        my $ready = '';
+        vec($ready, fileno($reaper_read), 1) = 1;
+        my $count = select($ready, undef, undef, $remaining);
+        next if !defined($count) && $! == EINTR;
+        defined($count) && $count > 0 or die "reaper observation unavailable";
+        my $n = sysread($reaper_read, my $data, 4096);
+        next if !defined($n) && $! == EINTR;
+        defined($n) && $n > 0 or die "reaper channel closed";
+        $reaper_buffer .= $data;
+    }
+}
+
+sub reaper_command {
+    my ($command) = @_;
+    my $written = syswrite($reaper_write, $command, 1);
+    defined($written) && $written == 1 or die "reaper command failed: $!";
+}
+
+sub reaper_snapshot {
+    verify_session_helper();
+    my $deadline = time + $observation_budget_ms / 1000;
+    reaper_command('S');
+    my $header = reaper_line($deadline);
+    $header =~ /\ASAMPLE 1 ([1-9][0-9]*) ([1-9][0-9]*) (-1|[0-9]+) ([1-9][0-9]*)\n\z/
+        or die "malformed reaper sample";
+    my ($owner, $payload, $raw, $count) = ($1, $2, $3, $4);
+    $owner == $leader && $payload != $owner && $count <= 16385 && $raw <= 65535
+        or die "invalid reaper sample identity/count";
+    !$reaper_payload || $reaper_payload == $payload or die "reaper payload changed";
+    $reaper_payload = $payload;
+    my %all;
+    my $cross_session = 0;
+    for (1..$count) {
+        my $line = reaper_line($deadline);
+        $line =~ /\A([1-9][0-9]*) ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+) ([01]) ([0-9]+) ([0-9]+)\n\z/
+            or die "malformed reaper metadata";
+        my ($pid, $parent, $group, $sid, $rss, $zombie, $seconds, $micros) = ($1,$2,$3,$4,$5,$6,$7,$8);
+        !exists($all{$pid}) && $micros < 1000000 && $rss <= 1099511627776
+            or die "invalid/repeated reaper metadata";
+        $all{$pid} = { parent => 0+$parent, group => 0+$group, session => 0+$sid,
+            rss => 0+$rss, zombie => 0+$zombie, identity => "$seconds.$micros" };
+        ++$cross_session if $sid != $session_id;
+        ++$session_checks;
+    }
+    reaper_line($deadline) eq "END\n" or die "incomplete reaper sample";
+    exists($all{$leader}) && !$all{$leader}{zombie} && $all{$leader}{session} == $session_id &&
+        $all{$leader}{group} == $leader or die "reaper owner escaped";
+    !$reaper_identity || $reaper_identity eq $all{$leader}{identity} or die "reaper owner identity changed";
+    $reaper_identity = $all{$leader}{identity};
+    $session_root_confirmed = 1;
+    $reaper_cross_session = $cross_session if $cross_session > $reaper_cross_session;
+    if ($raw >= 0) {
+        !defined($child_status) || $child_status == $raw or die "reaper payload status changed";
+        $child_status = 0+$raw;
+    } elsif (defined $child_status) { die "reaper payload became live after completion" }
+    verify_session_helper();
+    ++$samples;
+    my $duration = (time - $sample_started_at) * 1000;
+    $duration <= $observation_budget_ms or die "reaper observation exceeded budget";
+    $sample_duration_max_ms = $duration if $duration > $sample_duration_max_ms;
+    ++$sample_overruns if $duration > $opt{'interval-ms'};
+    return \%all;
+}
+
+sub reaper_quiesce {
+    my $quiet = eval {
+        reaper_command('Q');
+        my $line = reaper_line(time + 3);
+        $line =~ /\AQUIET ([01]) (-1|[0-9]+) ([1-9][0-9]*) ([0-9]+) ([0-9]+)\n\z/
+            or die "invalid reaper cleanup response";
+        my ($clean, $raw, $owner, $seconds, $micros) = ($1, $2, $3, $4, $5);
+        $owner == $leader && $micros < 1000000 or die "invalid cleanup owner identity";
+        !$reaper_identity || $reaper_identity eq "$seconds.$micros" or die "cleanup owner identity changed";
+        $reaper_identity = "$seconds.$micros";
+        $raw <= 65535 or die "invalid reaper wait status";
+        !defined($child_status) || $child_status == $raw or die "inconsistent reaper wait status";
+        $child_status = 0+$raw if $raw >= 0;
+        $clean && $raw >= 0;
+    };
+    warn "rss-guard: reaper cleanup failed: $@\n" if $@;
+    close($reaper_write) if $reaper_write; # EOF also requests native cleanup
+    close($reaper_read) if $reaper_read;
+    my $until = time + 3;
+    my $reaped = 0;
+    while (time < $until) {
+        my $got = waitpid($leader, WNOHANG);
+        if ($got == $leader) {
+            $reaper_owner_wait_status = $?;
+            $reaped = 1;
+            $quiet = 0 if $reaper_owner_wait_status != 0;
+            last;
+        }
+        if ($got < 0) { $reaped = -1; $quiet = 0; last }
+        sleep 0.02;
+    }
+    my $verified = $quiet && $reaped == 1 ? 1 : 0;
+    $reaper_retained = $verified ? 0 : 1;
+    # Killing the owner would abandon its descendants. An unresponsive owner
+    # is an explicit containment failure, not a reason to assert quiescence.
+    # Owner exit also proves nothing without the matching QUIET 1 receipt:
+    # descendants can survive owner death. Retain their unresolved reservation.
+    return $verified;
+}
+
 # Linux can expose a fully dead task after stat was opened: its process
 # group and session are -1. Such a task owns no RSS and has no live identity.
 # Keep malformed records and negative identifiers on live tasks fail-closed.
@@ -656,6 +786,7 @@ sub parse_proc_stat_record {
 sub snapshot {
     my ($metadata_only) = @_;
     $sample_started_at = time;
+    return reaper_snapshot() if $freebsd;
     if ($^O eq 'darwin') {
         my $all = eval { native_snapshot($metadata_only) };
         if (!$all) {
@@ -745,6 +876,7 @@ sub finish_snapshot {
 
 sub members {
     my ($all) = @_;
+    return grep { !$all->{$_}{zombie} } keys %$all if $freebsd;
     for my $group (keys %groups) {
         my @current = grep { $all->{$_}{group} == $group } keys %$all;
         my $anchor = exists($all->{$group}) &&
@@ -783,6 +915,7 @@ sub members {
 }
 
 sub reap {
+    return if $freebsd; # native owner forwards payload status; quiesce waits owner
     return if defined $child_status;
     my $got = waitpid($leader, WNOHANG);
     $child_status = $? if $got == $leader;
@@ -790,6 +923,13 @@ sub reap {
 
 sub signal_verified {
     my ($signal, $all) = @_;
+    if ($freebsd) {
+        $signal eq 'TERM' or die "unsupported reaper signal operation";
+        reaper_command('T');
+        reaper_line(time + $observation_budget_ms / 1000) eq "TERM 1\n"
+            or die "reaper TERM failed";
+        return members($all);
+    }
     my @live = members($all);
     # A negative group signal requires a still-observed leader identity. When
     # a group leader is gone, signal only individually validated descendants.
@@ -803,6 +943,7 @@ sub signal_verified {
 }
 
 sub quiesce {
+    return reaper_quiesce() if $freebsd;
     my $empty = 0;
     for (1..100) {
         # Darwin sysctl birth identities suffice for cleanup. A denied RSS or
@@ -839,6 +980,12 @@ sub quiesce {
 
 sub receipt {
     my ($status, $code, $quiet) = @_;
+    if ($freebsd) {
+        $extra_receipt .= "reaper_pid=$leader\nreaper_birth=$reaper_identity\n" .
+            "payload_pid=$reaper_payload\ncross_session_owned_peak=$reaper_cross_session\n" .
+            "reaper_reservation_retained=$reaper_retained\n" .
+            "reaper_owner_wait_status=$reaper_owner_wait_status\n";
+    }
     my $body = "status=$status\nexit_status=$code\nroot_pid=$leader\n" .
         "max_rss_kib=$opt{'max-rss-kib'}\npeak_rss_kib=$peak\nsamples=$samples\n" .
         "budget_scope=$opt{'budget-scope'}\nbudget_ceiling_kib=$budget_ceiling_kib\n" .
@@ -900,6 +1047,11 @@ if (getppid() != $controller_pid) {
 }
 $started = time;
 pipe(my $gate_read, my $gate_write) or die "rss-guard: pipe failed\n";
+my $reaper_reply_write;
+if ($freebsd) {
+    pipe($reaper_read, $reaper_reply_write) or die "rss-guard: reaper pipe failed\n";
+    $reaper_write = $gate_write;
+}
 $leader = fork();
 defined($leader) or die "rss-guard: fork failed\n";
 if ($leader == 0) {
@@ -907,11 +1059,18 @@ if ($leader == 0) {
     close($observer_read) if $observer_read;
     close($observer_write) if $observer_write;
     close $gate_write;
+    close $reaper_read if $freebsd;
     if ($session_id) { setpgid(0, 0) == 0 or POSIX::_exit(89) }
     else { defined(setsid()) && getpgrp() == $$ or POSIX::_exit(89) }
     $ENV{SIMPLE_BOOTSTRAP_RSS_CAP_MODE} = $opt{'rss-cap-mode'};
     $ENV{SIMPLE_BOOTSTRAP_SESSION_ID} = $session_id || $$;
     $ENV{SIMPLE_BOOTSTRAP_SESSION_EXEC} = $session_helper;
+    if ($freebsd) {
+        fcntl($gate_read, F_SETFD, 0) && fcntl($reaper_reply_write, F_SETFD, 0)
+            or POSIX::_exit(89);
+        exec {$session_helper} $session_helper, '--reaper-owner', fileno($gate_read),
+            fileno($reaper_reply_write), $observation_budget_ms, '--', @ARGV or POSIX::_exit(127);
+    }
     if ($observer_path) {
         $ENV{SIMPLE_BOOTSTRAP_PROCESS_OBSERVER} = $observer_path;
         $ENV{SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256} = $observer_sha;
@@ -922,6 +1081,7 @@ if ($leader == 0) {
     exec { $ARGV[0] } @ARGV or POSIX::_exit(127);
 }
 close $gate_read;
+close $reaper_reply_write if $freebsd;
 $session_id ||= $leader;
 $SIG{TERM} = sub { $interrupted = 143 };
 $SIG{INT} = sub { $interrupted = 130 };
@@ -963,7 +1123,7 @@ while (1) {
             syswrite($gate_write, 'G', 1) == 1 or do {
                 ($status, $code) = ('rss-startup-failed', 89); last;
             };
-            close $gate_write;
+            close $gate_write unless $freebsd;
             $released = 1;
         } elsif (time - $started >= 2) {
             ($status, $code) = ('rss-startup-failed', 89); last;
@@ -975,7 +1135,7 @@ while (1) {
     }
     # Keep the direct child unreaped as the root PGID identity anchor. A
     # zombie is completion evidence; obtain its exact wait status after cleanup.
-    last if exists($all->{$leader}) && $all->{$leader}{zombie};
+    last if ($freebsd && defined($child_status)) || (exists($all->{$leader}) && $all->{$leader}{zombie});
     # Preserve an already completed workload's result above. Only an active
     # workload loses its authority when its controller exits; use the same
     # TERM/grace/quiescence path as explicit cancellation.
@@ -986,12 +1146,12 @@ while (1) {
     my $remaining = $opt{'interval-ms'} / 1000 - (time - $sample_started);
     sleep($remaining) if $remaining > 0;
 }
-close $gate_write unless $released;
+close $gate_write unless $released || $freebsd;
 if ($code == 124 || $interrupted) {
     # Preserve the timeout wrapper's TERM/grace contract for artifact flushing.
     # RSS breaches use immediate STOP/KILL because allocations must stop.
     my $term_snapshot = eval { snapshot() };
-    if ($term_snapshot) { signal_verified('TERM', $term_snapshot) }
+    if ($term_snapshot && eval { signal_verified('TERM', $term_snapshot); 1 }) { }
     else { alarm 0; ($status, $code) = ('rss-measurement-failed', 89) }
     my $grace_end = time + $opt{'term-grace-seconds'};
     while (time < $grace_end) {
