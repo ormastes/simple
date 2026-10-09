@@ -32,6 +32,12 @@ struct TransientHeapScope {
     objects: Vec<RuntimeValue>,
 }
 
+/// True when the calling thread holds a transient heap scope that is paused,
+/// the only state in which `rt_transient_heap_promote` may succeed.
+pub fn transient_heap_scope_paused() -> bool {
+    TRANSIENT_HEAP_SCOPE.with(|slot| slot.borrow().as_ref().is_some_and(|scope| scope.paused))
+}
+
 pub(crate) fn track_transient_heap(value: RuntimeValue) -> RuntimeValue {
     TRANSIENT_HEAP_SCOPE.with(|slot| {
         if let Some(scope) = slot.borrow_mut().as_mut() {
