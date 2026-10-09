@@ -74,6 +74,8 @@ setup changes no cache env.
 ```bash
 sh scripts/setup/setup.shs                 # first setup also writes your user file
 sh scripts/setup/host-env.shs --init       # write it now (never overwrites)
+sh scripts/setup/host-env.shs --init --all-cores  # opt in to all detected CPUs
+sh scripts/setup/setup-freebsd-host.shs   # FreeBSD-only all-core initializer
 sh scripts/setup/host-env.shs --print      # effective value + winning layer per key
 sh scripts/setup/host-env.shs --get llvm_root
 eval "$(sh scripts/setup/host-env.shs --cache-env)"   # cache defaults for unset vars
@@ -88,9 +90,29 @@ sh scripts/setup/host-env.shs --selftest   # fixtures incl. env > user > host > 
 probes (including `~/.simple/toolchains/llvm-msvc-*`), and GPU via
 `nvidia-smi` or `/dev/dri`.
 
+`--init --all-cores` also sets `max_build_jobs` to the detected positive CPU
+count. Plain `--init` keeps the consumer's default job ceiling. Both forms keep
+an existing user file unchanged; edit that file explicitly to change an existing
+configuration. The FreeBSD helper calls the same initializer and accepts no
+arguments. Linux (including ARM64 Spark hosts) uses `host-env.shs` directly.
+The canonical FreeBSD QEMU bootstrap wrapper initializes this file after source
+sync and toolchain setup, using its selected guest build user's HOME. Smoke mode
+does so only when the guest already contains the setup script. The full lane's
+Stage 2 build requests `--jobs=full`, bounded by guest CPU allocation and the
+user's job ceiling; existing memory limits still apply. Stage 3/4 resume keeps
+its required `--jobs=1` orchestration contract.
+
+The generated `worker_mem_mib` remains commented out, retaining the consumer's
+3300 MiB per-worker estimate and memory clamp. Selecting all cores raises the
+CPU ceiling; available memory still limits actual workers. LLVM and GPU values
+come from the existing local probes, not from the all-core option. `gpu: on`
+records detected host availability and does not enable an unsupported backend.
+
 Bootstrap reads `max_build_jobs` / `worker_mem_mib` with `--get` in a child
-shell. Nothing is exported into the bootstrap environment, so the `SIMPLE_*`
-native-build environment fingerprint is unchanged unless you set a value.
+shell. Before projecting its scratch HOME, centralized storage binds
+`SIMPLE_HOST_CONFIG` to the original user's config path, preserving an explicit
+`SIMPLE_HOST_CONFIG` override. Individual `SIMPLE_HOST_<KEY>` values are not
+exported; subprocess readers continue to resolve the configured layers.
 
 ## Simple-side reader
 

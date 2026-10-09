@@ -27,9 +27,10 @@
 # Independently of the legacy per-host file, every sourcing also resolves the
 # layered HOST CONFIG (schema simple-host-config-v1; keys in
 # config/host/host_config.sdn) and exports SIMPLE_HOST_<KEY> for each key that
-# resolves non-empty. Executed directly: --get KEY | --print | --init |
-# --cache-env (export lines for the cache keys' consumer vars, see
-# host_config_apply_cache_env; cache keys are never exported by sourcing).
+# resolves non-empty. Executed directly: --get KEY | --print |
+# --init [--all-cores] | --cache-env (export lines for the cache keys'
+# consumer vars, see host_config_apply_cache_env; cache keys are never
+# exported by sourcing).
 #
 # host_env_apply_path() prepends SIMPLE_HOST_PATH_PREPEND onto PATH,
 # idempotently — sourcing this file (or calling the function) more than once
@@ -420,9 +421,11 @@ host_config_detect_gpu() {
     fi
 }
 
-# host_config_init ROOT -> writes the user file with detected values. Never
+# host_config_init ROOT [--all-cores] -> writes detected values. Never
 # overwrites: an existing file is left untouched (exit 0, reported).
 host_config_init() {
+    case "${2:-}" in ''|--all-cores) ;; *) return 2 ;; esac
+    _hci_all_cores=${2:-}
     _hci_path=$(host_config_user_path) || { printf 'host-config: no HOME/USERPROFILE; cannot place user config\n' >&2; return 1; }
     if [ -e "${_hci_path}" ]; then
         printf 'host-config: keeping existing %s\n' "${_hci_path}"
@@ -430,6 +433,10 @@ host_config_init() {
     fi
     . "$1/scripts/setup/platform-detect.shs" || return 1
     _hci_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+    host_config_valid max_threads "${_hci_cpus}" || {
+        printf 'host-config: detected CPU count must be a positive integer\n' >&2
+        return 1
+    }
     _hci_llvm=$(host_config_detect_llvm) || _hci_llvm=""
     _hci_cache_base="${XDG_CACHE_HOME:-${HOME:-${USERPROFILE:-}}/.cache}/simple"
     command -v cygpath >/dev/null 2>&1 && _hci_cache_base=$(cygpath -m "${_hci_cache_base}")
@@ -442,7 +449,11 @@ host_config_init() {
         printf 'host_config:\n'
         printf '  schema: simple-host-config-v1\n'
         printf '  max_threads: %s\n' "${_hci_cpus}"
-        printf '  # max_build_jobs: 16\n'
+        if [ "${_hci_all_cores}" = --all-cores ]; then
+            printf '  max_build_jobs: %s\n' "${_hci_cpus}"
+        else
+            printf '  # max_build_jobs: 16\n'
+        fi
         printf '  # worker_mem_mib: 3300\n'
         printf '  cpu_family: %s\n' "${PLATFORM_ARCH}"
         printf '  cpu_features: %s\n' "$(host_config_detect_features "${PLATFORM_ARCH}")"
@@ -745,6 +756,40 @@ EOF
         printf 'not ok - (f) --init generates the user file once and never overwrites it\n'
         _st_fail=$((_st_fail + 1))
     fi
+    # All-core initialization is explicit, preserves memory defaults, and
+    # still refuses to overwrite the user's chosen values on a second run.
+    SIMPLE_HOST_CONFIG="${_st_dir}/home/.config/simple/all-cores.sdn"
+    _st_all_ok=1
+    host_config_init "${_st_dir}" --all-cores >/dev/null || _st_all_ok=0
+    _st_jobs=$(host_env_sdn_get "${SIMPLE_HOST_CONFIG}" max_build_jobs)
+    host_config_valid max_build_jobs "${_st_jobs}" || _st_all_ok=0
+    [ "${_st_jobs}" = "$(host_env_sdn_get "${SIMPLE_HOST_CONFIG}" max_threads)" ] || _st_all_ok=0
+    [ -z "$(host_env_sdn_get "${SIMPLE_HOST_CONFIG}" worker_mem_mib)" ] || _st_all_ok=0
+    printf 'host_config:\n  max_build_jobs: 3\n' >"${SIMPLE_HOST_CONFIG}"
+    host_config_init "${_st_dir}" --all-cores >/dev/null || _st_all_ok=0
+    [ "$(host_env_sdn_get "${SIMPLE_HOST_CONFIG}" max_build_jobs)" = 3 ] || _st_all_ok=0
+    if [ "${_st_all_ok}" -eq 1 ]; then
+        printf 'ok - all-cores opt-in uses detected CPUs and preserves existing config\n'
+        _st_pass=$((_st_pass + 1))
+    else
+        printf 'not ok - all-cores opt-in uses detected CPUs and preserves existing config\n'
+        _st_fail=$((_st_fail + 1))
+    fi
+    _st_cli_ok=1
+    for _st_bad_args in '--init --unknown' '--all-cores' '--print --all-cores' '--get max_threads extra'; do
+        # Intentional word splitting of these fixed, whitespace-only fixtures.
+        if SIMPLE_HOST_CONFIG="${_st_dir}/invalid-cli.sdn" sh "${_host_env_self}" ${_st_bad_args} >/dev/null 2>&1; then
+            _st_cli_ok=0
+        fi
+    done
+    [ ! -e "${_st_dir}/invalid-cli.sdn" ] || _st_cli_ok=0
+    if [ "${_st_cli_ok}" -eq 1 ]; then
+        printf 'ok - invalid CLI flags are rejected before configuration writes\n'
+        _st_pass=$((_st_pass + 1))
+    else
+        printf 'not ok - invalid CLI flags are rejected before configuration writes\n'
+        _st_fail=$((_st_fail + 1))
+    fi
     if [ -n "${_st_saved_hc}" ]; then SIMPLE_HOST_CONFIG="${_st_saved_hc}"; else unset SIMPLE_HOST_CONFIG; fi
     if [ -n "${_st_saved_env_file}" ]; then SIMPLE_HOST_ENV_FILE="${_st_saved_env_file}"; else unset SIMPLE_HOST_ENV_FILE; fi
 
@@ -754,20 +799,27 @@ EOF
     [ "${_st_fail}" -eq 0 ]
 }
 
-if [ "${_host_env_self}" = "$0" ]; then
+host_env_usage() {
+    printf 'usage: host-env.shs --init [--all-cores] | --get KEY | --print | --cache-env | --selftest\n' >&2
+}
+
+# POSIX sh has no BASH_SOURCE: a sourcing caller's arguments are not ours.
+if [ "${_host_env_self}" = "$0" ] && [ "$(basename -- "$0")" = host-env.shs ]; then
     case "${1:-}" in
         --selftest)
+            [ "$#" -eq 1 ] || { host_env_usage; exit 2; }
             host_env__selftest
             exit $? ;;
         --get)
             # Prints one effective value without exporting anything into the
             # caller (bootstrap uses this so its SIMPLE_* env fingerprint is
             # unchanged). Legacy per-host refusal is reported, not fatal.
-            [ -n "${2:-}" ] || { printf 'usage: host-env.shs --get KEY\n' >&2; exit 2; }
+            [ "$#" -eq 2 ] && [ -n "${2:-}" ] || { host_env_usage; exit 2; }
             host_env_load "$(host_env_resolve_hostname)" "${_host_env_repo_root}" || :
             host_config_get "$2" "${_host_env_repo_root}"
             exit 0 ;;
         --print)
+            [ "$#" -eq 1 ] || { host_env_usage; exit 2; }
             host_env_load "$(host_env_resolve_hostname)" "${_host_env_repo_root}" || :
             for _hp_k in ${HOST_CONFIG_KEYS}; do
                 _hp_v=$(host_config_get "${_hp_k}" "${_host_env_repo_root}")
@@ -777,7 +829,9 @@ if [ "${_host_env_self}" = "$0" ]; then
             printf 'user_file=%s\n' "$(host_config_user_path || :)"
             exit 0 ;;
         --init)
-            host_config_init "${_host_env_repo_root}"
+            [ "$#" -le 2 ] || { host_env_usage; exit 2; }
+            case "${2:-}" in ''|--all-cores) ;; *) host_env_usage; exit 2 ;; esac
+            host_config_init "${_host_env_repo_root}" "${2:-}"
             exit $? ;;
         --cache-env)
             # `eval "$(sh scripts/setup/host-env.shs --cache-env)"` applies the
@@ -788,6 +842,8 @@ if [ "${_host_env_self}" = "$0" ]; then
                 printf "export %s='%s'\n" "${_hce_line%%=*}" "$(printf '%s' "${_hce_line#*=}" | sed "s/'/'\\\\''/g")"
             done
             exit 0 ;;
+        '') ;;
+        *) host_env_usage; exit 2 ;;
     esac
 fi
 

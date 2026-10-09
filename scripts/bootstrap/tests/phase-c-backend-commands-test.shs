@@ -1,16 +1,33 @@
 #!/bin/sh
-# Verify production argv keeps both Phase C backends in low-memory mode.
+# Verify both Phase C backends preserve low-memory mode and timeout policy.
 set -eu
 script_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$script_root/phase-c-backend-commands.shs"
+. "$script_root/bootstrap-verification-resource-policy.shs"
+unset native_internal_timeout
 actual=""
 run_matrix_task() { actual="$*"; }
 bootstrap_phase_c_run_tool_build cranelift cli producer entry.spl output 8
 [ "$actual" = 'cli --verification-expect-executable=output producer native-build entry.spl --backend=cranelift --low-memory --threads 8 -o output' ]
 bootstrap_phase_c_run_tool_build llvm cli producer entry.spl output 8
 [ "$actual" = 'cli --verification-expect-executable=output producer native-build entry.spl --backend=llvm --low-memory --threads 8 -o output' ]
+for backend in llvm cranelift; do
+    native_internal_timeout=600
+    bootstrap_verification_resource_policy stage2 0 1800 120 "$native_internal_timeout" 20 1 1
+    bootstrap_phase_c_run_tool_build "$backend" cli producer entry.spl output 20
+    [ "$actual" = "cli --verification-expect-executable=output producer native-build entry.spl --backend=$backend --low-memory --timeout 600 --threads 20 -o output" ]
+    native_internal_timeout=0
+    if bootstrap_verification_resource_policy stage2 0 1800 120 "$native_internal_timeout" 20 1 1; then
+        echo 'FAIL canonical verification accepted zero native timeout'
+        exit 1
+    fi
+    bootstrap_verification_resource_policy stage2 1 1800 120 "$native_internal_timeout" 20 1 1
+    [ "$verification_success_result" = DIAGNOSTIC_PASS ]
+    bootstrap_phase_c_run_tool_build "$backend" cli producer entry.spl output 20
+    [ "$actual" = "cli --verification-expect-executable=output producer native-build entry.spl --backend=$backend --low-memory --timeout 0 --threads 20 -o output" ]
+done
 if bootstrap_phase_c_run_tool_build invalid cli producer entry.spl output 8; then
     echo 'FAIL invalid backend unexpectedly accepted'
     exit 1
 fi
-printf '%s\n' 'PASS 3 Phase C backend argv contracts'
+printf '%s\n' 'PASS 7 Phase C backend argv contracts; canonical zero rejected, diagnostic zero forwarded'
