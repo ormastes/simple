@@ -2,10 +2,11 @@ use simple_compiler::interpreter::{
     clear_parsed_source_cache, shared_source, shared_source_for_target,
     shared_source_lookup_for_target, SharedSource,
 };
-use simple_common::target::{Target, TargetArch, TargetOS};
+use simple_common::target::TargetArch;
+use simple_compiler::pipeline::cfg_strip::CfgTarget;
 
-fn host_arch(os: TargetOS) -> Target {
-    Target::new(TargetArch::host(), os)
+fn host_arch(os: &str) -> CfgTarget {
+    CfgTarget::new(os, TargetArch::host().name())
 }
 use simple_parser::ast::{Module, Node};
 use std::path::PathBuf;
@@ -45,14 +46,14 @@ fn names(module: &Module) -> Vec<&str> {
 fn cfg_import_same_path_keeps_linux_and_windows_separate() {
     clear_parsed_source_cache();
     let fixture = Fixture::new(CONDITIONAL);
-    let linux = shared_source_for_target(&fixture.0, host_arch(TargetOS::Linux)).ast().unwrap();
-    assert!(shared_source_lookup_for_target(&fixture.0, host_arch(TargetOS::Windows)).is_none());
-    let windows = shared_source_for_target(&fixture.0, host_arch(TargetOS::Windows)).ast().unwrap();
+    let linux = shared_source_for_target(&fixture.0, host_arch("linux")).ast().unwrap();
+    assert!(shared_source_lookup_for_target(&fixture.0, host_arch("windows")).is_none());
+    let windows = shared_source_for_target(&fixture.0, host_arch("windows")).ast().unwrap();
     assert_eq!(names(&linux), ["UnixOnly"]);
     assert_eq!(names(&windows), ["WindowsOnly"]);
     assert!(!Arc::ptr_eq(&linux, &windows));
-    assert!(Arc::ptr_eq(&linux, &shared_source_for_target(&fixture.0, host_arch(TargetOS::Linux)).ast().unwrap()));
-    assert!(Arc::ptr_eq(&windows, &shared_source_for_target(&fixture.0, host_arch(TargetOS::Windows)).ast().unwrap()));
+    assert!(Arc::ptr_eq(&linux, &shared_source_for_target(&fixture.0, host_arch("linux")).ast().unwrap()));
+    assert!(Arc::ptr_eq(&windows, &shared_source_for_target(&fixture.0, host_arch("windows")).ast().unwrap()));
 }
 
 #[test]
@@ -60,14 +61,14 @@ fn cfg_import_malformed_conditionals_fail_for_both_targets() {
     clear_parsed_source_cache();
     for source in ["@when(os=\"windows\"):\n", "@else:\n"] {
         let fixture = Fixture::new(source);
-        for os in [TargetOS::Linux, TargetOS::Windows] {
+        for os in ["linux", "windows"] {
             assert!(matches!(shared_source_for_target(&fixture.0, host_arch(os)), SharedSource::Parsed { ast: Err(_), .. }));
         }
     }
     // An unknown atom evaluates false (with a warning), the same as the lexer
     // and the pure-Simple preprocessor: the block is dropped, never an error.
     let unknown = Fixture::new("@when(os=\"unknown\"):\nval dropped = 1\n@end\n");
-    for os in [TargetOS::Linux, TargetOS::Windows] {
+    for os in ["linux", "windows"] {
         let ast = shared_source_for_target(&unknown.0, host_arch(os)).ast().expect("unknown atom selects nothing");
         assert!(ast.items.is_empty(), "{os:?}: {:?}", ast.items.len());
     }
@@ -84,7 +85,7 @@ fn cfg_import_actual_release_os_owners_parse_for_each_target() {
         "src/lib/nogc_sync_mut/io/path_identity_abi.spl",
         "src/lib/nogc_sync_mut/io/_PathIdentityPosix/errno_abi.spl",
     ] {
-        for os in [TargetOS::Linux, TargetOS::Windows, TargetOS::FreeBSD, TargetOS::MacOS] {
+        for os in ["linux", "windows", "freebsd", "macos"] {
             let parsed = shared_source_for_target(&root.join(name), host_arch(os));
             assert!(parsed.ast().is_some(), "{name} must parse for {os:?}");
         }

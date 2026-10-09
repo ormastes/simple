@@ -134,6 +134,32 @@ fn corpus_fixtures_parse_through_the_lexer_mask_for_every_row() {
     }
 }
 
+/// Every structurally malformed fixture is rejected for every target: the
+/// mask is unbalanced and the parser fails instead of compiling both branches.
+#[test]
+fn malformed_corpus_fails_closed_for_every_target() {
+    let files: Vec<String> = read("malformed_files.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(files.len(), 7, "malformed_files.txt must list every malformed fixture");
+    for file in &files {
+        let source = read(file);
+        for os in TARGET_OS {
+            for arch in TARGET_ARCH {
+                let sel = select_branches(&source, os, arch);
+                assert!(!sel.balanced, "{file} {os}/{arch}: must be unbalanced, got {:?}", sel.diagnostics);
+                let error = Parser::new_for_target(&source, os, arch)
+                    .parse()
+                    .expect_err(&format!("{file} {os}/{arch}: must be a parse error"));
+                assert!(error.to_string().contains("unbalanced conditional compilation"), "{file}: {error}");
+            }
+        }
+    }
+}
+
 #[test]
 fn unbalanced_directives_fail_closed_on_the_lexer_path() {
     for source in ["@when(os=\"windows\"):\nval a = 1\n", "@else:\nval a = 1\n", "@end\n", "@elif(linux):\nval a = 1\n"] {
