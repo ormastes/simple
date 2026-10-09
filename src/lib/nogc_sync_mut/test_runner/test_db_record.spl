@@ -1,0 +1,188 @@
+# Test DB run record — the flat, serializable slice of a TestRunResult that
+# the test-database writer needs.
+#
+# The core runner (src/app/test_runner_new/test_runner_main.spl) does not link
+# the test database (std.database.test_extended, std.database.feature,
+# test_db_compat, doc_generator). It converts its result into this record,
+# writes it to a file, and hands it to the child entry
+# src/app/test_runner_new/test_db_lane_main.spl, which loads the database,
+# records the run and regenerates doc/08_tracking/test/test_result.md.
+#
+# This module must stay light: test_runner_types and execution_metrics only.
+
+use std.test_runner.test_runner_types.{TestFileResult, TestRunResult}
+use std.common.perf.execution_metrics.{resource_evidence_quality_name, termination_cause_name}
+
+val TEST_DB_RECORD_MAGIC = "simple-test-db-record v1"
+
+struct TestDbFileRow:
+    path: text
+    # "passed" | "failed" | "in_development"
+    status: text
+    duration_ms: i64
+    cohort_id: text
+    has_resource: bool
+    resource_class: text
+    compile_ms: i64
+    execution_ms: i64
+    wall_ms: i64
+    user_cpu_ms: i64
+    system_cpu_ms: i64
+    peak_tree_charge_bytes: i64
+    peak_direct_child_rss_bytes: i64
+    io_read_bytes: i64
+    io_write_bytes: i64
+    pids_peak: i64
+    evidence_quality: text
+    termination: text
+    signal: i64
+    exit_code: i64
+    budget_status: text
+    anomaly_status: text
+
+struct TestDbRunRecord:
+    files: [TestDbFileRow]
+    test_count: i64
+    passed: i64
+    failed: i64
+    timed_out: i64
+    run_start: i64
+    run_end: i64
+
+fn _test_db_row_status(file_result: TestFileResult) -> text:
+    # In-development is checked FIRST: a neutralised file has failed == 0, so
+    # is_ok() is true and it would otherwise be recorded as a plain pass.
+    if file_result.in_development > 0:
+        return "in_development"
+    if file_result.is_ok():
+        return "passed"
+    "failed"
+
+fn test_db_file_row_from_result(file_result: TestFileResult) -> TestDbFileRow:
+    var row = TestDbFileRow(
+        path: file_result.path, status: _test_db_row_status(file_result),
+        duration_ms: file_result.duration_ms, cohort_id: file_result.cohort_id,
+        has_resource: false, resource_class: file_result.resource_class,
+        compile_ms: file_result.compile_ms, execution_ms: file_result.execution_ms,
+        wall_ms: 0, user_cpu_ms: 0, system_cpu_ms: 0, peak_tree_charge_bytes: 0,
+        peak_direct_child_rss_bytes: 0, io_read_bytes: 0, io_write_bytes: 0,
+        pids_peak: 0, evidence_quality: "", termination: "", signal: 0, exit_code: 0,
+        budget_status: file_result.budget_status, anomaly_status: file_result.anomaly_status
+    )
+    match file_result.resource_usage:
+        case Some(usage):
+            row.has_resource = true
+            row.wall_ms = usage.wall_ms
+            row.user_cpu_ms = usage.user_cpu_ms
+            row.system_cpu_ms = usage.system_cpu_ms
+            row.peak_tree_charge_bytes = usage.peak_tree_charge_bytes
+            row.peak_direct_child_rss_bytes = usage.peak_direct_child_rss_bytes
+            row.io_read_bytes = usage.io_read_bytes
+            row.io_write_bytes = usage.io_write_bytes
+            row.pids_peak = usage.pids_peak
+            row.evidence_quality = resource_evidence_quality_name(usage.evidence_quality)
+            row.termination = termination_cause_name(usage.termination)
+            row.signal = usage.signal
+            row.exit_code = usage.exit_code
+        case nil: pass
+    row
+
+fn test_db_run_record_from_result(result: TestRunResult, run_start: i64, run_end: i64) -> TestDbRunRecord:
+    var rows: [TestDbFileRow] = []
+    for file_result in result.files:
+        rows.push(test_db_file_row_from_result(file_result))
+    TestDbRunRecord(
+        files: rows, test_count: result.files.len(), passed: result.total_passed,
+        failed: result.total_failed, timed_out: result.total_timed_out,
+        run_start: run_start, run_end: run_end
+    )
+
+# Fields are tab-separated, records newline-separated; backslash, tab, CR and
+# LF inside a text field are escaped so a path can never split a record.
+fn _test_db_field_escape(s: text) -> text:
+    s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
+
+fn _test_db_field_unescape(s: text) -> text:
+    if not s.contains("\\"):
+        return s
+    val cs = s.chars()
+    var parts: [text] = []
+    var i = 0
+    while i < cs.len():
+        val ch = cs[i]
+        if ch == "\\" and i + 1 < cs.len():
+            val next = cs[i + 1]
+            if next == "t":
+                parts.push("\t")
+            elif next == "n":
+                parts.push("\n")
+            elif next == "r":
+                parts.push("\r")
+            else:
+                parts.push(next)
+            i = i + 2
+        else:
+            parts.push(ch)
+            i = i + 1
+    parts.join("")
+
+fn test_db_run_record_encode(record: TestDbRunRecord) -> text:
+    var lines: [text] = [TEST_DB_RECORD_MAGIC]
+    lines.push("run\t{record.test_count}\t{record.passed}\t{record.failed}\t{record.timed_out}\t{record.run_start}\t{record.run_end}")
+    for row in record.files:
+        val res = if row.has_resource: "1" else: "0"
+        lines.push("file\t" + _test_db_field_escape(row.path) + "\t" + _test_db_field_escape(row.status) + "\t{row.duration_ms}\t" + _test_db_field_escape(row.cohort_id) +
+            "\t{res}\t" + _test_db_field_escape(row.resource_class) + "\t{row.compile_ms}\t{row.execution_ms}\t{row.wall_ms}" +
+            "\t{row.user_cpu_ms}\t{row.system_cpu_ms}\t{row.peak_tree_charge_bytes}\t{row.peak_direct_child_rss_bytes}" +
+            "\t{row.io_read_bytes}\t{row.io_write_bytes}\t{row.pids_peak}\t" + _test_db_field_escape(row.evidence_quality) +
+            "\t" + _test_db_field_escape(row.termination) + "\t{row.signal}\t{row.exit_code}\t" + _test_db_field_escape(row.budget_status) +
+            "\t" + _test_db_field_escape(row.anomaly_status))
+    lines.join("\n") + "\n"
+
+fn _test_db_int(fields: [text], index: i64) -> i64:
+    fields[index].to_int() ?? 0
+
+fn test_db_run_record_decode(content: text) -> Result<TestDbRunRecord, text>:
+    val lines = content.replace("\r\n", "\n").split("\n")
+    if lines.len() == 0 or lines[0] != TEST_DB_RECORD_MAGIC:
+        return Err("not a test-db run record (missing '{TEST_DB_RECORD_MAGIC}' header)")
+    var record = TestDbRunRecord(files: [], test_count: 0, passed: 0, failed: 0, timed_out: 0, run_start: 0, run_end: 0)
+    var rows: [TestDbFileRow] = []
+    var saw_run = false
+    var line_no = 0
+    for line in lines:
+        line_no = line_no + 1
+        if line_no == 1 or line == "":
+            continue
+        val f = line.split("\t")
+        if f[0] == "run":
+            if f.len() != 7:
+                return Err("line {line_no}: run record has {f.len()} fields, expected 7")
+            record.test_count = _test_db_int(f, 1)
+            record.passed = _test_db_int(f, 2)
+            record.failed = _test_db_int(f, 3)
+            record.timed_out = _test_db_int(f, 4)
+            record.run_start = _test_db_int(f, 5)
+            record.run_end = _test_db_int(f, 6)
+            saw_run = true
+        elif f[0] == "file":
+            if f.len() != 23:
+                return Err("line {line_no}: file record has {f.len()} fields, expected 23")
+            rows.push(TestDbFileRow(
+                path: _test_db_field_unescape(f[1]), status: _test_db_field_unescape(f[2]), duration_ms: _test_db_int(f, 3), cohort_id: _test_db_field_unescape(f[4]),
+                has_resource: f[5] == "1", resource_class: _test_db_field_unescape(f[6]),
+                compile_ms: _test_db_int(f, 7), execution_ms: _test_db_int(f, 8),
+                wall_ms: _test_db_int(f, 9), user_cpu_ms: _test_db_int(f, 10),
+                system_cpu_ms: _test_db_int(f, 11), peak_tree_charge_bytes: _test_db_int(f, 12),
+                peak_direct_child_rss_bytes: _test_db_int(f, 13), io_read_bytes: _test_db_int(f, 14),
+                io_write_bytes: _test_db_int(f, 15), pids_peak: _test_db_int(f, 16),
+                evidence_quality: _test_db_field_unescape(f[17]), termination: _test_db_field_unescape(f[18]),
+                signal: _test_db_int(f, 19), exit_code: _test_db_int(f, 20),
+                budget_status: _test_db_field_unescape(f[21]), anomaly_status: _test_db_field_unescape(f[22])
+            ))
+        else:
+            return Err("line {line_no}: unknown record kind '{f[0]}'")
+    if not saw_run:
+        return Err("test-db run record has no run line")
+    record.files = rows
+    Ok(record)

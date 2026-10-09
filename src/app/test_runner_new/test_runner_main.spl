@@ -34,14 +34,14 @@ use app.test_daemon.session_scheduler.{schedule_session_tests, schedule_summary,
 # use sequential_container.{SequentialContainerConfig, sequential_container_run_all_tests}
 # use test_runner_container.container_detect_runtime
 use std.test_runner.test_runner_coverage.{setup_coverage, collect_coverage, print_coverage_summary, generate_coverage_reports, check_coverage_threshold, check_cover_annotation_thresholds, get_coverage_threshold, print_coverage_delta}
-# GROUP 4: Database & feature tracking
-use std.test_runner.test_db_compat.{RunnerTestDb, load_test_db_compat}
-use std.test_runner.test_runner_helpers.{update_test_database}
+# GROUP 4: Database & feature tracking -- recorded by the test-db lane child
+# (test_db_lane_main.spl) so the database modules stay out of this closure.
+use std.nogc_sync_mut.test_runner.test_db_record.{test_db_run_record_from_result, test_db_run_record_encode}
+use std.nogc_sync_mut.test_runner.test_executor_parsing.{find_simple_binary}
 # use test_db_types.*
 # use std.database.feature.{FeatureDatabase, load_feature_database, create_feature_database, FeatureStatus}
 # GROUP 5: Doc generation & sdoctest
-use std.test_runner.doc_generator.{generate_test_result_md}
-use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.nogc_sync_mut.io.file_ops.{file_remove}
 # use rust_test_runner.{run_rust_tests, RustTestResult}
 use std.test_runner.sdoctest.config.load_sdoctest_config
 use std.test_runner.sdoctest.runner.{run_sdoctest_mode, print_sdoctest_summary}
@@ -82,6 +82,27 @@ use app.test_daemon.session_types.{TestSessionMeta, meta_needs_session, meta_to_
 # =========================================================================
 # Runner
 # =========================================================================
+
+val TEST_DB_LANE_ENTRY = "src/app/test_runner_new/test_db_lane_main.spl"
+
+fn record_test_run_via_db_lane(result: TestRunResult, run_start: i64, run_end: i64):
+    """Record the run in the test database and regenerate test_result.md in a
+    child interpreter (test_db_lane_main.spl). A failure is reported with the
+    child's named reason; it never fails the test run itself."""
+    val record_dir = "build/test_runner"
+    dir_create_all(record_dir)
+    val record_path = "{record_dir}/test_db_record_{run_start}.txt"
+    if not file_write(record_path, test_db_run_record_encode(test_db_run_record_from_result(result, run_start, run_end))):
+        print "Warning: test database not updated: could not write {record_path}"
+        return
+    val (stdout, stderr, code) = process_run_bounded(find_simple_binary(), ["run", TEST_DB_LANE_ENTRY, "--record={record_path}"], 600000, TEST_OUTPUT_CAPTURE_BYTES)
+    file_remove(record_path)
+    if code != 0:
+        print "Warning: test database not updated (test-db lane exit {code})"
+        if stdout.trim() != "":
+            print stdout.trim()
+        if stderr.trim() != "":
+            print stderr.trim()
 
 pub fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestOptions, binary: text = "bin/simple") -> i64:
     if options.format != "doc" or options.list or options.list_ignored:
@@ -1267,7 +1288,6 @@ fn run_test_cli() -> i64:
     propagate_env_vars(options)
 
     var exit_code = 0
-    var db: Result<RunnerTestDb, text> = Err("not_run")
 
     # Run spec tests with self-protection enabled in run_tests()
     if run_spec:
@@ -1306,9 +1326,9 @@ fn run_test_cli() -> i64:
             if not options.no_cover_check and not check_cover_annotation_thresholds(coverage, coverage_test_files):
                 exit_code = 1
 
-        # Persist test results to database and regenerate reports
+        # Persist test results to database and regenerate test_result.md
         if result_files.len() > 0 and not options.list and not options.no_db:
-            db = update_test_database(spec_result, run_start, run_end)
+            record_test_run_via_db_lane(spec_result, run_start, run_end)
 
         # Name every spec that produced no verdict. Absence of a result must
         # never read as success, and an unnamed non-zero exit is nearly as hard
@@ -1351,14 +1371,6 @@ fn run_test_cli() -> i64:
         print_sdoctest_summary(sdoctest_result)
         if not sdoctest_result.is_ok():
             exit_code = 1
-
-    # Generate test_result.md from database
-    match db:
-        Ok(database):
-            if not options.list and not options.no_db:
-                val md_content = generate_test_result_md(database)
-                file_atomic_write("doc/08_tracking/test/test_result.md", md_content)
-        Err(_): ()  # Silent failure; database may not have been attempted
 
     if json_worker:
         print combined_test_run_json(
