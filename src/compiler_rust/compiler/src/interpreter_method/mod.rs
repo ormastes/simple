@@ -270,12 +270,15 @@ pub(crate) fn evaluate_negated_bdd_matcher(
     let saved_provisional = BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow());
     let saved_provisional_msg = BDD_PROVISIONAL_MSG.with(|cell| cell.borrow().clone());
     let saved_provisional_seq = BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow());
-    let positive = evaluate_method_call(expect_call, method, args, env, functions, classes, enums, impl_methods)?;
+    // No `?` here: the saved state is restored before an error propagates
+    // too, so a failing positive matcher never leaks its flags.
+    let positive = evaluate_method_call(expect_call, method, args, env, functions, classes, enums, impl_methods);
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = saved_failed);
     BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = saved_msg);
     BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = saved_provisional);
     BDD_PROVISIONAL_MSG.with(|cell| *cell.borrow_mut() = saved_provisional_msg);
     BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = saved_provisional_seq);
+    let positive = positive?;
     let Value::Bool(matched) = positive else {
         return Err(CompileError::semantic(format!(
             "`expect(..).not.{method}` is not a BDD matcher: the positive form returned {} instead of a match result",
