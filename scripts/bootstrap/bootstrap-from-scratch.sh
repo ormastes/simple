@@ -1912,15 +1912,27 @@ bootstrap_stage2_single_timeout_cache_retry_eligible() {
   bsscre_log=$1
   [ -f "${bsscre_log}" ] && [ ! -L "${bsscre_log}" ] || return 1
   awk '
-    /^FAILED FILES \(1\):$/ { failed_headers++ }
+    /^FAILED FILES \([1-9][0-9]*\):$/ {
+      failed_headers++
+      declared_failures = $0
+      sub(/^FAILED FILES \(/, "", declared_failures)
+      sub(/\):$/, "", declared_failures)
+    }
     /^  - .* => .*: timeout \([0-9]+s\)$/ { timeout_rows++ }
+    /^  - .* => .*: NOT_ATTEMPTED: previous native worker timed out; refusing replacement admission$/ {
+      deferred_rows++
+    }
     /^  - .* => / { failure_rows++ }
-    /^Build failed: native-build aborted: 1 file\(s\) failed to compile$/ {
+    /^Build failed: native-build aborted: [1-9][0-9]* file\(s\) failed to compile$/ {
       failed_summaries++
+      summarized_failures = $0
+      sub(/^Build failed: native-build aborted: /, "", summarized_failures)
+      sub(/ file\(s\) failed to compile$/, "", summarized_failures)
     }
     END {
       exit !(failed_headers == 1 && timeout_rows == 1 &&
-             failure_rows == 1 && failed_summaries == 1)
+             failure_rows == 1 + deferred_rows && failed_summaries == 1 &&
+             declared_failures == failure_rows && summarized_failures == failure_rows)
     }
   ' "${bsscre_log}"
 }
