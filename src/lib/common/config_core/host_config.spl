@@ -1,0 +1,81 @@
+# std.config core — HOST CONFIG (schema simple-host-config-v1).
+#
+# Host facts (parallelism, cpu family/ISA features, os, LLVM toolchain, gpu)
+# resolved over the same layer engine every other config uses
+# (std.common.config_core.layers). Keys are documented in the versioned
+# defaults file config/host/host_config.sdn, whose values are commented out.
+#
+# Layer mapping onto the config_core precedence ladder (lowest first):
+#   vendor   <- config/host/host_config.sdn          (tracked defaults)
+#   machine  <- config/host/<hostname>.sdn           (tracked legacy per-host)
+#   user     <- ~/.config/simple/host.sdn            (untracked, setup-generated)
+#   session  <- SIMPLE_HOST_<KEY> environment        (wins)
+# So: env > user > host > default, identical to scripts/setup/host-env.shs.
+#
+# Tier-neutral: pure functions only. Callers read the documents and the
+# environment snapshot and pass them in.
+
+use std.common.config_core.schema.{ConfigFieldDescriptor, config_field, config_int_field, config_enum_field}
+use std.common.config_core.schema.{config_schema_index}
+use std.common.config_core.layers.{ConfigEntry, ConfigResolution, config_parse_layer, config_resolve_valid}
+use std.common.config_core.layers.{config_strip_inline_comment}
+
+fn host_config_schema() -> [ConfigFieldDescriptor]:
+    [
+        config_int_field("max_build_jobs", "", 1),
+        config_int_field("max_threads", "", 1),
+        config_int_field("worker_mem_mib", "", 1),
+        config_enum_field("cpu_family", "", ["x86_64", "aarch64", "riscv64"]),
+        config_field("cpu_features", "text", ""),
+        config_enum_field("os", "", ["windows", "linux", "macos", "freebsd", "simpleos"]),
+        config_field("llvm_root", "text", ""),
+        config_int_field("llvm_version", "", 1),
+        config_enum_field("gpu", "", ["on", "off"])
+    ]
+
+# Environment variable that overrides `key`: SIMPLE_HOST_<KEY>.
+fn host_config_env_name(key: text) -> text:
+    "SIMPLE_HOST_" + key.upper()
+
+fn _hc_parse(content: text, layer: text) -> [ConfigEntry]:
+    var result: [ConfigEntry] = []
+    for e in config_parse_layer(content, layer):
+        result.push(ConfigEntry(key: e.key, value: config_strip_inline_comment(e.value), layer: layer))
+    result
+
+# All contributions, tagged with their layer. Any document may be "".
+fn host_config_entries(defaults_text: text, host_text: text, user_text: text, env: [(text, text)]) -> [ConfigEntry]:
+    var result: [ConfigEntry] = []
+    for e in _hc_parse(defaults_text, "vendor"):
+        result.push(e)
+    for e in _hc_parse(host_text, "machine"):
+        result.push(e)
+    for e in _hc_parse(user_text, "user"):
+        result.push(e)
+    for desc in host_config_schema():
+        val name = host_config_env_name(desc.key)
+        for pair in env:
+            if pair.0 == name and pair.1 != "":
+                result.push(ConfigEntry(key: desc.key, value: pair.1, layer: "session"))
+    result
+
+# Effective resolution for one key; invalid values fall through to the next
+# lower layer. layer == "compiled_default" and value == "" means unconfigured.
+fn host_config_resolve(entries: [ConfigEntry], key: text) -> ConfigResolution:
+    val schema = host_config_schema()
+    val idx = config_schema_index(schema, key)
+    if idx < 0:
+        return ConfigResolution(key: key, value: "", layer: "compiled_default", rank: 0, locked: false)
+    config_resolve_valid(schema[idx], entries)
+
+fn host_config_value(entries: [ConfigEntry], key: text) -> text:
+    host_config_resolve(entries, key).value
+
+# cpu_features as a list ("sse2,avx2" -> ["sse2", "avx2"]).
+fn host_config_cpu_features(entries: [ConfigEntry]) -> [text]:
+    var result: [text] = []
+    for part in host_config_value(entries, "cpu_features").split(","):
+        val f = part.trim()
+        if f != "":
+            result.push(f)
+    result

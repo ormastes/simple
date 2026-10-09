@@ -1,0 +1,65 @@
+# Host Config — one versioned schema, per-user values
+
+Host facts (worker counts, CPU family and ISA extensions, OS, LLVM location,
+GPU) live in one layered config. The tracked file documents the keys; your
+machine's values live in your own untracked file.
+
+## Files and precedence
+
+Highest wins:
+
+| # | Layer | Location | Tracked |
+|---|-------|----------|---------|
+| 1 | environment | `SIMPLE_HOST_<KEY>` (e.g. `SIMPLE_HOST_MAX_BUILD_JOBS=8`) | — |
+| 2 | user/host | `${SIMPLE_HOST_CONFIG:-$HOME/.config/simple/host.sdn}` (`USERPROFILE` when `HOME` is unset) | no |
+| 3 | legacy per-host | `config/host/<hostname>.sdn` (`host_env:` block, hostname-checked) | yes |
+| 4 | versioned defaults | `config/host/host_config.sdn` — every key present but **commented out** | yes |
+| 5 | consumer built-in | e.g. job ceiling 16, worker memory 3300 MiB | — |
+
+Do not edit `config/host/host_config.sdn` for your machine. Put values in your
+user file, or export the env var for one shell. The user file sits next to the
+existing per-user `~/.config/simple/config.sdn` (environment-variant policy),
+which uses the same env-over-user order.
+
+## Keys (`host_config:` block, two-space `key: value`)
+
+| Key | Example | Consumer |
+|-----|---------|----------|
+| `max_build_jobs` | `16` | bootstrap worker ceiling (`bootstrap-build-jobs-policy.shs`); `SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS` still wins |
+| `max_threads` | `32` | detected logical CPUs (informational) |
+| `worker_mem_mib` | `3300` | bootstrap memory clamp; `SIMPLE_BOOTSTRAP_WORKER_MEM_MIB` still wins |
+| `cpu_family` | `x86_64` / `aarch64` / `riscv64` | `CpuFeatureSet.from_host_config` |
+| `cpu_features` | `sse2,sse4.2,avx,avx2,fma,bmi2` / `neon,sve` / `rvv` | `CpuFeatureSet.from_host_config` |
+| `os` | `windows` / `linux` / `macos` / `freebsd` / `simpleos` | informational |
+| `llvm_root` | `/usr/lib/llvm-23`, `C:/…/clang+llvm-23.1.1-x86_64-pc-windows-msvc` | `platform-detect.shs` LLVM discovery (tried first), `llvm-toolchain-env.shs` (Windows root, Unix PATH) |
+| `llvm_version` | `23` (major only) | `llvm-toolchain-env.shs` preferred major; `SIMPLE_LLVM_VERSION` still wins |
+| `gpu` | `on` / `off` | informational |
+
+## Commands
+
+```bash
+sh scripts/setup/setup.shs                 # first setup also writes your user file
+sh scripts/setup/host-env.shs --init       # write it now (never overwrites)
+sh scripts/setup/host-env.shs --print      # effective value + winning layer per key
+sh scripts/setup/host-env.shs --get llvm_root
+sh scripts/setup/host-env.shs --selftest   # fixtures incl. env > user > host > default
+. scripts/setup/host-env.shs               # export SIMPLE_HOST_<KEY> into this shell
+```
+
+`--init` detects: CPU count (`getconf`/`nproc`/`sysctl`), family and features
+(`/proc/cpuinfo` on Linux and Git Bash/MSYS, `sysctl machdep.cpu.*` on macOS,
+`/var/run/dmesg.boot` on FreeBSD; SimpleOS gets the family baseline), OS via
+`platform-detect.shs`, LLVM via `platform-detect.shs` then `llvm-config`
+probes (including `~/.simple/toolchains/llvm-msvc-*`), and GPU via
+`nvidia-smi` or `/dev/dri`.
+
+Bootstrap reads `max_build_jobs` / `worker_mem_mib` with `--get` in a child
+shell. Nothing is exported into the bootstrap environment, so the `SIMPLE_*`
+native-build environment fingerprint is unchanged unless you set a value.
+
+## Simple-side reader
+
+`std.common.config_core.host_config` resolves the same layers on the shared
+`config_core` engine (`vendor` = defaults, `machine` = per-host, `user`,
+`session` = env). It is pure: callers pass the document texts and an env
+snapshot. Spec: `test/01_unit/lib/common/config_core/host_config_spec.spl`.

@@ -827,3 +827,11 @@ Phase-1 entrypoint traps (`1b66acd7379`, `6870c4a6039`):
 on `Err(_)` (var UNSET); `Ok("")` goes to `parse_str_checked`, which rejects
 the empty spelling and hard-exits 2. Use `env -u SIMPLE_EXECUTION_MODE ...` or
 a scoped `unset`. The same rule applies to every fail-closed selector variable.
+
+## Host config feeds the job ceiling (2026-10-09)
+
+`bootstrap_build_jobs_resolve` ceiling: explicit arg > `SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS`
+> host config `max_build_jobs` > 16; the memory clamp budget likewise reads
+`worker_mem_mib` (default 3300). Values come from `host-env.shs --get` in a
+child shell, so nothing new is exported into the `SIMPLE_*` native-build
+environment fingerprint. See `doc/00_llm_process/feature_expert/host_config/skill.md`.
