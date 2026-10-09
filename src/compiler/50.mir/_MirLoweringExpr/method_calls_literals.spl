@@ -5462,7 +5462,19 @@ impl MirLowering:
                         case HirUnaryOp.Neg:
                             match inner:
                                 case Int(iv): Some(MirConstValue.Int(0 - iv))
-                                case Float(fv): Some(MirConstValue.Float(0.0 - fv))
+                                # Real negation: `0.0 - fv` would turn -0.0
+                                # into +0.0.
+                                case Float(fv): Some(MirConstValue.Float(-fv))
+                                # The frontend emits every float literal as a
+                                # FloatLexeme (convert_nodes.spl), so `-2.5`
+                                # arrives here, never as `Float`. Negate the
+                                # lexeme textually; every backend turns the
+                                # lexeme into a scalar with `to_float()`
+                                # (float_literal_owner.spl), which reads a
+                                # leading sign, so the decimal text stays the
+                                # single source of the exact value.
+                                case FloatLexeme(lexeme):
+                                    Some(MirConstValue.FloatLexeme(negate_float_lexeme(lexeme)))
                                 case _: nil
                         case HirUnaryOp.BitNot:
                             match inner:
@@ -5473,6 +5485,14 @@ impl MirLowering:
                     nil
             case _:
                 nil
+
+fn negate_float_lexeme(lexeme: text) -> text:
+    """Textual negation of a float lexeme: toggle one leading sign."""
+    if lexeme.starts_with("-"):
+        return lexeme.substring(1)
+    if lexeme.starts_with("+"):
+        return "-" + lexeme.substring(1)
+    "-" + lexeme
 
 # ============================================================================
 # Exports
