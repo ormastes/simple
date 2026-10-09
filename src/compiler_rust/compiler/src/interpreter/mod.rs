@@ -215,6 +215,7 @@ pub(crate) use interpreter_method::{
     exec_resolved_method_with_self_owned_values, resolve_object_method, ResolvedMethod, shared_text_is_ascii,
 };
 pub(crate) use interpreter_method::{lookup_class_method_index, lookup_impl_method_index};
+use interpreter_method::{evaluate_negated_bdd_matcher, is_argless_bdd_matcher, peel_bdd_matcher_receiver};
 pub use interpreter_method::clear_pinned_strings;
 mod macros;
 pub use macros::{clear_macro_state, set_macro_trace};
