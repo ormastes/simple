@@ -1,0 +1,55 @@
+#!/bin/sh
+# Exercise the real entrypoint, stopping valid invocations at help rather than building.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+count=0
+reject() {
+    count=$((count + 1))
+    lane="$fixture/reject-$count"
+    code=0
+    SIMPLE_USER_STORAGE_ROOT="$lane/user" SIMPLE_WORKTREE_STORAGE_ROOT="$lane/worktree" \
+      sh "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" --full-bootstrap \
+      --stop-after-stage2 --output="$lane/output" "$@" >"$fixture/log" 2>&1 || code=$?
+    [ "$code" -eq 64 ]
+    grep -q 'typed-reason-not-allowed-for-target' "$fixture/log"
+    [ ! -e "$lane" ] # No storage initialization, output, or build side effects.
+}
+for reason in release unknown ''; do
+    reject "--produce-managed-receipt=$reason"
+    reject "--produce-stage3-receipt=$reason"
+done
+reject --produce-managed-receipt release
+reject --produce-stage3-receipt release
+reject --produce-managed-receipt=verify-landed-compiler-fix
+reject --produce-stage3-receipt=release-trust-verification
+reject --produce-managed-receipt=release --produce-managed-receipt=release-trust-verification
+accept() {
+    count=$((count + 1))
+    lane="$fixture/accept-$count"
+    SIMPLE_USER_STORAGE_ROOT="$lane/user" SIMPLE_WORKTREE_STORAGE_ROOT="$lane/worktree" \
+      sh "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" --help \
+      --output="$lane/output" "$@" >"$fixture/log" 2>&1
+    grep -q 'Usage:' "$fixture/log"
+    [ ! -e "$lane/output" ]
+}
+accept --produce-managed-receipt=release-trust-verification
+accept --produce-managed-receipt release-trust-verification
+accept --produce-stage3-receipt=verify-landed-compiler-fix
+accept --produce-stage3-receipt verify-landed-compiler-fix
+# Valid reasons in actual Stage 2 flags must reach the next startup boundary.
+# A nondirectory storage root refuses setup before any producer can run.
+for flag in --produce-managed-receipt=release-trust-verification \
+    --produce-stage3-receipt=verify-landed-compiler-fix; do
+    count=$((count + 1))
+    code=0
+    SIMPLE_USER_STORAGE_ROOT=/dev/null/receipt-reason-fixture \
+      SIMPLE_WORKTREE_STORAGE_ROOT="$fixture/uncreated-$count" \
+      sh "$repo/scripts/bootstrap/bootstrap-from-scratch.sh" --full-bootstrap \
+      --stop-after-stage2 "$flag" >"$fixture/log" 2>&1 || code=$?
+    [ "$code" -eq 70 ]
+    grep -q 'centralized storage roots unavailable' "$fixture/log"
+    ! grep -q 'typed-reason-not-allowed-for-target' "$fixture/log"
+done
+printf 'PASS receipt reason startup: %s cases; invalid reasons rejected before storage/build\n' "$count"
