@@ -1,0 +1,90 @@
+"""
+Purpose: Pin native MIR lowering of `for x in <field>` when the collection is
+a struct field declared `[T]` and the struct value itself has no local HIR
+type (parameter, global-array index, nested field).
+Audience: compiler engineers maintaining for-in lowering (mir_lowering_stmts).
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_function(src: text, target_name: text) -> text:
+    val filename = "field_array_for_in_" + target_name + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            result = result + serialize_mir_function(function)
+    result
+
+val PARAM_FIELD_SRC = """
+struct IntHolder:
+    values: [i64]
+
+fn sum_field_array(holder: IntHolder) -> i64:
+    var total = 0
+    for value in holder.values:
+        total = total + value
+    total
+"""
+
+val GLOBAL_SLOT_FIELD_SRC = """
+struct SlotState:
+    closed: bool
+    pins: [i64]
+
+var _slots: [SlotState] = []
+
+fn close_pins(slot: i64) -> i64:
+    var state = _slots[slot]
+    var released = 0
+    for pin in state.pins:
+        released = released + pin
+    released
+"""
+
+val TEXT_FIELD_SRC = """
+struct Names:
+    items: [text]
+
+fn join_names(names: Names) -> text:
+    var out = ""
+    for item in names.items:
+        out = out + item
+    out
+"""
+
+describe "for-in over a struct field declared as an array":
+    it "lowers a parameter-held [i64] field to the counted runtime-array loop":
+        val mir = lower_function(PARAM_FIELD_SRC, "sum_field_array")
+        expect(mir.contains("MIR_ERROR:")).to_be(false)
+        expect(mir.contains("non-array iterables")).to_be(false)
+        expect(mir).to_contain("rt_array_len")
+        expect(mir).to_contain("rt_array_get")
+        expect(mir.contains("rt_panic")).to_be(false)
+
+    it "lowers a field read through a global-array index to the counted loop":
+        val mir = lower_function(GLOBAL_SLOT_FIELD_SRC, "close_pins")
+        expect(mir.contains("non-array iterables")).to_be(false)
+        expect(mir).to_contain("rt_array_len")
+        expect(mir).to_contain("rt_array_get")
+        expect(mir.contains("rt_panic")).to_be(false)
+
+    it "keeps text elements of a [text] field on the text decode path":
+        val mir = lower_function(TEXT_FIELD_SRC, "join_names")
+        expect(mir.contains("non-array iterables")).to_be(false)
+        expect(mir).to_contain("rt_array_get")
+        expect(mir.contains("rt_panic")).to_be(false)
