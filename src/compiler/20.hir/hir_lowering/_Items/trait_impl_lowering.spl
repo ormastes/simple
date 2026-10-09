@@ -10,6 +10,7 @@ use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
@@ -482,13 +483,114 @@ impl HirLowering:
                     HirType(kind: HirTypeKind.Infer(0, 0), span: span)
             case _: HirType(kind: HirTypeKind.Infer(0, 0), span: span)
 
+    me lowered_const_value_type(value: HirExpr, span: Span) -> HirType:
+        """Type of an unannotated module global, settled from its LOWERED
+        initializer when the shape alone (`unannotated_const_type`) cannot.
+
+        Only declared evidence is used, exactly what an explicit annotation
+        would have said:
+          - a call to a function/extern -> the callee's declared return type
+          - a struct constructor call or struct literal -> that struct
+          - an array literal -> `[E]`, when every element settles to the
+            same `E`
+          - any expression HIR already typed (`has_type_`, e.g. a cast)
+        The HIR const type is the storage ABI for BOTH the owner's static
+        (`lower_static`) and every importer's external declaration
+        (`register_provider_global_bindings`), so settling it here keeps the
+        two sides on one type. Anything else -- a generic callee, an
+        untyped return, an empty array, mixed element types -- stays
+        `Infer`, and MIR fails closed with the declaration span rather
+        than guessing an i64 storage slot."""
+        val infer = HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+        if value.has_type_ and hir_const_type_settled(value.type_):
+            return value.type_
+        match value.kind:
+            case HirExprKind.IntLit(_, suffix):
+                if suffix.?: infer else: HirType(kind: HirTypeKind.Int(64, true), span: span)
+            case HirExprKind.FloatLit(_, suffix):
+                if suffix.?: infer else: HirType(kind: HirTypeKind.Float(64), span: span)
+            case HirExprKind.FloatLexeme(_, suffix):
+                if suffix.?: infer else: HirType(kind: HirTypeKind.Float(64), span: span)
+            case HirExprKind.StringLit(_, _): HirType(kind: HirTypeKind.Str, span: span)
+            case HirExprKind.BoolLit(_): HirType(kind: HirTypeKind.Bool, span: span)
+            case HirExprKind.CharLit(_): HirType(kind: HirTypeKind.Char, span: span)
+            case HirExprKind.Unary(un_op, un_operand):
+                # `[-1, 2]`: a signed numeric element keeps its scalar type.
+                val lowered_un_op: HirUnaryOp = un_op
+                val lowered_un_operand: HirExpr = un_operand
+                val operand_type = self.lowered_const_value_type(lowered_un_operand, span)
+                match lowered_un_op:
+                    case HirUnaryOp.Neg:
+                        match operand_type.kind:
+                            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_): operand_type
+                            case _: infer
+                    case HirUnaryOp.BitNot:
+                        match operand_type.kind:
+                            case HirTypeKind.Int(_, _): operand_type
+                            case _: infer
+                    case _: infer
+            case HirExprKind.StructLit(struct_type, _):
+                if hir_const_type_settled(struct_type): struct_type else: infer
+            case HirExprKind.Call(callee, _, type_args):
+                val call_callee: HirExpr = callee
+                val call_type_args: [HirType] = type_args
+                val callee_raw = match call_callee.kind:
+                    case HirExprKind.Var(callee_sym): callee_sym.id
+                    case HirExprKind.NamedVar(callee_sym, _): callee_sym.id
+                    case _: -1
+                if callee_raw < 0:
+                    return infer
+                val callee_info = self.symbols.get_symbol_raw(callee_raw)
+                if not callee_info.?:
+                    return infer
+                val callee_symbol: HirSymbol = callee_info.unwrap()
+                match callee_symbol.kind:
+                    case SymbolKind.Struct | SymbolKind.Class:
+                        HirType(kind: HirTypeKind.Named(callee_symbol.id, call_type_args), span: span)
+                    case SymbolKind.Function:
+                        # Explicit type arguments mean a generic callee whose
+                        # return type is only known after monomorphization.
+                        if call_type_args.len() > 0:
+                            return infer
+                        val callee_type_opt = callee_symbol.type_
+                        if not callee_type_opt.?:
+                            return infer
+                        val callee_type: HirType = callee_type_opt.unwrap()
+                        match callee_type.kind:
+                            case HirTypeKind.Function(_, ret, _):
+                                val ret_t: HirType = ret
+                                if hir_const_type_settled(ret_t): ret_t else: infer
+                            case _: infer
+                    case _: infer
+            case HirExprKind.ArrayLit(elements, _):
+                # An empty literal has no element evidence; the configured
+                # empty-array default is a guess, not a declaration.
+                val array_elements: [HirExpr] = elements
+                if array_elements.len() == 0:
+                    return infer
+                val first_elem = self.lowered_const_value_type(array_elements[0], span)
+                if not hir_const_type_settled(first_elem):
+                    return infer
+                var elem_idx = 1
+                while elem_idx < array_elements.len():
+                    val elem_type = self.lowered_const_value_type(array_elements[elem_idx], span)
+                    if not hir_types_equal(first_elem, elem_type):
+                        return infer
+                    elem_idx = elem_idx + 1
+                HirType(kind: HirTypeKind.Array(first_elem, nil), span: span)
+            case _: infer
+
     me lower_hir_const_decl(const_: ParserConst) -> HirConst:
         val symbol = self.symbols.lookup_or_invalid(const_.name)
-        val type_ = if const_.has_type_:
+        val shape_type = if const_.has_type_:
             self.lower_type(const_.type_)
         else:
             self.unannotated_const_type(const_.value, const_.span)
         val value = self.lower_hir_expr(const_.value)
+        val type_ = match shape_type.kind:
+            case HirTypeKind.Infer(_, _):
+                if const_.has_type_: shape_type else: self.lowered_const_value_type(value, const_.span)
+            case _: shape_type
 
         # Compute effective visibility using filename matching
         val effective_visibility = self.compute_visibility(const_.name, const_.visibility)
@@ -545,3 +647,28 @@ impl HirLowering:
             trait_name: mock_decl.trait_name,
             span: mock_decl.span
         )
+
+fn hir_const_type_settled(type_: HirType) -> bool:
+    """True when `type_` is a concrete storage type for a module global:
+    no `Infer`/`Error`/`Any`/`Never`/type parameter at the top or inside an
+    array/optional/tuple/dict component."""
+    match type_.kind:
+        case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any | HirTypeKind.Never: false
+        case HirTypeKind.TypeParam(_, _): false
+        case HirTypeKind.Array(elem, _):
+            val array_elem: HirType = elem
+            hir_const_type_settled(array_elem)
+        case HirTypeKind.Optional(inner):
+            val optional_inner: HirType = inner
+            hir_const_type_settled(optional_inner)
+        case HirTypeKind.Dict(key, value):
+            val dict_key: HirType = key
+            val dict_value: HirType = value
+            hir_const_type_settled(dict_key) and hir_const_type_settled(dict_value)
+        case HirTypeKind.Tuple(elements):
+            val tuple_elements: [HirType] = elements
+            for tuple_elem in tuple_elements:
+                if not hir_const_type_settled(tuple_elem):
+                    return false
+            true
+        case _: true

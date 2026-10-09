@@ -1,0 +1,107 @@
+"""
+Purpose: Pin that an unannotated module global initialized by a call, a
+struct constructor or an array literal gets static storage on BOTH sides of
+a module boundary from the same settled HIR type: the owner's `lower_static`
+no longer fails with "cannot derive module static type from unresolved
+initializer", and an importer's `register_provider_global_bindings`
+declares the identical storage type. A genuinely unconstrained initializer
+(mixed-type array literal) still fails closed with a span on both sides --
+never a silent i64 slot.
+Audience: compiler engineers maintaining _MirLowering module statics and
+provider globals.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{SymbolTable, HirModule}
+use compiler.hir.hir_definitions.{HirConst}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_globals.*
+
+val PROVIDER = """
+struct WmStatus:
+    value: i64
+extern fn rt_thread_local_new() -> i64
+fn make() -> text:
+    "x"
+pub val S = WmStatus(value: 0)
+pub val XS = ["a", "b"]
+pub var owner_tls = rt_thread_local_new()
+pub val M = make()
+"""
+
+val IMPORTED_SYMBOL_ID = 777
+
+fn lower_hir(src: text) -> HirModule:
+    val filename = "provmod.spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    hir_lowering.lower_module(module)
+
+fn mir_type_name(t: MirType) -> text:
+    match t.kind:
+        case MirTypeKind.I64: "i64"
+        case MirTypeKind.Opaque(name): "opaque:" + name
+        case MirTypeKind.Array(_, _): "array"
+        case _: "other"
+
+fn owner_errors(src: text) -> [text]:
+    val hir = lower_hir(src)
+    var lowering = MirLowering.new(hir.symbols)
+    val _mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for error in lowering.errors:
+        if error.message.contains("module static type"):
+            messages = messages.push(error.message)
+    messages
+
+fn imported_storage(src: text, name: text) -> (text, i64, bool):
+    """(storage type, error count, every error carries a span)."""
+    val hir = lower_hir(src)
+    var constants: [HirConst] = []
+    for constant in hir.constants.values():
+        constants = constants.push(constant)
+    var lowering = MirLowering.new(SymbolTable.new())
+    var demanded: Dict<text, [i64]> = {}
+    demanded[mir_global_declaration_key("provmod", name)] = [IMPORTED_SYMBOL_ID]
+    val _found = lowering.register_provider_global_bindings("provmod", hir.symbols, constants, demanded, {})
+    var storage = "missing"
+    for declaration in lowering.builder.module.statics.values():
+        if declaration.symbol.id == IMPORTED_SYMBOL_ID:
+            storage = mir_type_name(declaration.type_)
+    var all_spanned = true
+    for error in lowering.errors:
+        if error.span == nil:
+            all_spanned = false
+    (storage, lowering.errors.len(), all_spanned)
+
+describe "unannotated module global static storage":
+    it "lowers the owner's statics without an unresolved-initializer fatal":
+        expect(owner_errors(PROVIDER).len()).to_equal(0)
+
+    it "declares an imported extern-call global with the callee's return storage":
+        val (storage, error_count, _) = imported_storage(PROVIDER, "owner_tls")
+        expect(error_count).to_equal(0)
+        expect(storage).to_equal("i64")
+
+    it "declares an imported array-literal global as an array":
+        val (array_storage, array_errors, _) = imported_storage(PROVIDER, "XS")
+        expect(array_errors).to_equal(0)
+        expect(array_storage).to_equal("array")
+
+    it "declares an imported call global with the callee return storage":
+        val (text_storage, text_errors, _) = imported_storage(PROVIDER, "M")
+        expect(text_errors).to_equal(0)
+        expect(text_storage).to_equal("opaque:str")
+
+    it "still fails closed with a span for a mixed-type array literal":
+        val mixed = "pub val MIXED = [1, \"a\"]\n"
+        val owner = owner_errors(mixed)
+        expect(owner.len()).to_be_greater_than(0)
+        val (_, error_count, all_spanned) = imported_storage(mixed, "MIXED")
+        expect(error_count).to_be_greater_than(0)
+        expect(all_spanned).to_equal(true)
