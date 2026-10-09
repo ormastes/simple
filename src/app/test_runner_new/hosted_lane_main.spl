@@ -1,0 +1,51 @@
+# Hosted composite lane child entry.
+#
+# The core test runner spawns `simple run <this file> --hosted-lane=...` for
+# composite lanes that need host capabilities (GPU drivers, debug probes,
+# simulators). Running here, in a child interpreter, keeps those modules and
+# their hosted runtime symbols out of the core runner's static closure; a host
+# that lacks them fails this child with a named error.
+#
+# Output contract: one canonical `Results:` line parsed by
+# std.test_runner.test_executor_parsing.parse_test_output, plus the lane error
+# (if any) on stderr. Exit 0 only when no example failed and no error was set.
+
+use std.sffi.cli_args.{cli_get_args}
+use std.test_runner.test_runner_types.{TestFileResult}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.nogc_sync_mut.test_runner.test_executor_hosted_lanes.{run_hosted_gpu_lane, run_test_file_jit}
+
+fn _hosted_arg(args: [text], key: text) -> text:
+    val prefix = "--{key}="
+    for arg in args:
+        if arg.starts_with(prefix):
+            return arg[prefix.len():]
+    ""
+
+fn main() -> i64:
+    val args = cli_get_args()
+    val lane = _hosted_arg(args, "hosted-lane")
+    val file_path = _hosted_arg(args, "file")
+    if file_path == "":
+        eprint "hosted lane error: missing --file="
+        return 2
+    val timeout = _hosted_arg(args, "timeout")
+    val options = parse_test_args(if timeout != "": ["--timeout={timeout}"] else: [])
+    # to_int("") throws in the interpreter, so the unset case is split out.
+    val setup_text = _hosted_arg(args, "setup-ms")
+    val setup_ms = if setup_text == "": 0 else: setup_text.to_int() ?? 0
+    if lane != "gpu" and lane != "jit":
+        eprint "hosted lane error: unknown --hosted-lane={lane}"
+        return 2
+    val result: TestFileResult = if lane == "gpu":
+        run_hosted_gpu_lane(file_path, _hosted_arg(args, "gpu-lane"), setup_ms)
+    else:
+        run_test_file_jit(file_path, options, _hosted_arg(args, "arch"), _hosted_arg(args, "target"))
+    val total = result.passed + result.failed
+    print "Results: {total} total, {result.passed} passed, {result.failed} failed, {result.skipped} skipped, {result.pending} pending"
+    if result.error != "":
+        print "hosted lane: {result.error}"
+        eprint "hosted lane error: {result.error}"
+    if result.failed > 0 or (result.error != "" and result.skipped == 0):
+        return 1
+    0

@@ -3372,13 +3372,29 @@ pub extern "C" fn rt_string_substr_from(string: RuntimeValue, start: i64) -> Run
 /// started: it trades a loud failure for a silent wrong answer. These names had
 /// no compiled implementation at all before, so exiting here is exactly as loud
 /// as the behaviour it replaces, and never quieter.
-fn refuse_non_text_receiver(method: &str) -> ! {
-    eprintln!(
-        "Runtime error: str.{method} was called on a receiver that is not text. \
-         This method has no compiled implementation for that receiver type -- a \
-         code-generation dispatch gap, not a program error. Refusing to \
-         substitute a value."
-    );
+///
+/// A raw 0 receiver is NOT a dispatch gap: no tagged value (not even nil) is 0,
+/// so it is storage that was never written -- typically a module global whose
+/// `__module_init_*` never ran (doc/08_tracking/bug/
+/// windows_cranelift_weak_module_initializer_2026-10-04.md). Say so, and print
+/// the receiver like the C runtime's twin does, instead of blaming dispatch.
+fn refuse_non_text_receiver(method: &str, receiver: RuntimeValue) -> ! {
+    let raw = receiver.to_raw();
+    if raw == 0 {
+        eprintln!(
+            "Runtime error: str.{method} received a null receiver (0x0). That is \
+             uninitialized storage -- most likely a module global whose initializer \
+             never ran -- not a code-generation dispatch gap. Refusing to \
+             substitute a value. receiver=0x0"
+        );
+    } else {
+        eprintln!(
+            "Runtime error: str.{method} was called on a receiver that is not text. \
+             This method has no compiled implementation for that receiver type -- a \
+             code-generation dispatch gap, not a program error. Refusing to \
+             substitute a value. receiver={raw:#x}"
+        );
+    }
     std::process::exit(70);
 }
 
@@ -3406,7 +3422,7 @@ pub extern "C" fn rt_reverse(receiver: RuntimeValue) -> RuntimeValue {
     }
     match string_as_str(receiver) {
         Some(s) => new_string(&s.chars().rev().collect::<String>()),
-        None => refuse_non_text_receiver("rev"),
+        None => refuse_non_text_receiver("rev", receiver),
     }
 }
 
@@ -3447,7 +3463,7 @@ pub extern "C" fn rt_reverse_mut(receiver: RuntimeValue) -> RuntimeValue {
     }
     match string_as_str(receiver) {
         Some(s) => new_string(&s.chars().rev().collect::<String>()),
-        None => refuse_non_text_receiver("reverse"),
+        None => refuse_non_text_receiver("reverse", receiver),
     }
 }
 
@@ -3534,7 +3550,7 @@ pub extern "C" fn rt_push(receiver: RuntimeValue, value: RuntimeValue) -> Runtim
     if string_as_str(receiver).is_some() {
         return rt_string_concat(receiver, value);
     }
-    refuse_non_text_receiver("push")
+    refuse_non_text_receiver("push", receiver)
 }
 
 /// `pop`: remove and return the last ELEMENT of an array, or return the last
@@ -3564,7 +3580,7 @@ pub extern "C" fn rt_pop(receiver: RuntimeValue) -> RuntimeValue {
             Some(c) => new_string(&c.to_string()),
             None => new_string(""),
         },
-        None => refuse_non_text_receiver("pop"),
+        None => refuse_non_text_receiver("pop", receiver),
     }
 }
 
@@ -3612,7 +3628,7 @@ pub extern "C" fn rt_clear(receiver: RuntimeValue) -> RuntimeValue {
     if string_as_str(receiver).is_some() {
         return new_string("");
     }
-    refuse_non_text_receiver("clear")
+    refuse_non_text_receiver("clear", receiver)
 }
 
 /// `take` / `taken`: first `n` CHARACTERS of text, or first `n` ELEMENTS of an
@@ -3632,7 +3648,7 @@ pub extern "C" fn rt_take(receiver: RuntimeValue, n: i64) -> RuntimeValue {
     }
     match string_as_str(receiver) {
         Some(s) => new_string(&s.chars().take(n as usize).collect::<String>()),
-        None => refuse_non_text_receiver("take"),
+        None => refuse_non_text_receiver("take", receiver),
     }
 }
 
@@ -3652,7 +3668,7 @@ pub extern "C" fn rt_drop(receiver: RuntimeValue, n: i64) -> RuntimeValue {
     }
     match string_as_str(receiver) {
         Some(s) => new_string(&s.chars().skip(n as usize).collect::<String>()),
-        None => refuse_non_text_receiver("drop"),
+        None => refuse_non_text_receiver("drop", receiver),
     }
 }
 
@@ -3667,7 +3683,7 @@ pub extern "C" fn rt_drop(receiver: RuntimeValue, n: i64) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_string_sorted(string: RuntimeValue) -> RuntimeValue {
     let Some(s) = string_as_str(string) else {
-        refuse_non_text_receiver("sorted");
+        refuse_non_text_receiver("sorted", string);
     };
     let mut chars: Vec<char> = s.chars().collect();
     chars.sort_unstable();
@@ -3718,7 +3734,7 @@ fn string_partition_at(s: &str, sep: &str, from_end: bool) -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn rt_string_partition(string: RuntimeValue, sep: RuntimeValue) -> RuntimeValue {
     let Some(s) = string_as_str(string) else {
-        refuse_non_text_receiver("partition");
+        refuse_non_text_receiver("partition", string);
     };
     let sep = string_as_str(sep).unwrap_or("");
     string_partition_at(s, sep, false)
@@ -3728,7 +3744,7 @@ pub extern "C" fn rt_string_partition(string: RuntimeValue, sep: RuntimeValue) -
 #[no_mangle]
 pub extern "C" fn rt_string_rpartition(string: RuntimeValue, sep: RuntimeValue) -> RuntimeValue {
     let Some(s) = string_as_str(string) else {
-        refuse_non_text_receiver("rpartition");
+        refuse_non_text_receiver("rpartition", string);
     };
     let sep = string_as_str(sep).unwrap_or("");
     string_partition_at(s, sep, true)

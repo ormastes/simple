@@ -1,0 +1,66 @@
+# std.config core — HOST CONFIG precedence (env > user > host > default).
+#
+# Source: src/lib/common/config_core/host_config.spl; shell twin and its
+# fixtures: sh scripts/setup/host-env.shs --selftest (cases e, f).
+
+use std.spec.step
+
+use std.spec.{step}
+use std.common.config_core.host_config.{host_config_entries, host_config_resolve, host_config_value}
+use std.common.config_core.host_config.{host_config_cpu_features, host_config_env_name}
+use std.nogc_sync_mut.simd.host_cpu_config.{CpuFeatureSet}
+
+fn defaults_doc() -> text:
+    "host_config:\n  schema: simple-host-config-v1\n  # max_build_jobs: 99\n  max_threads: 2\n  os: linux\n  gpu: off\n"
+
+fn host_doc() -> text:
+    "host_env:\n  hostname: sthost\n  os: freebsd\n  gpu: on\n"
+
+fn user_doc() -> text:
+    "host_config:\n  max_build_jobs: 12   # trailing comment\n  os: macos\n  cpu_family: aarch64\n  cpu_features: neon, sve\n"
+
+describe "std.config core — host config":
+    # @manual scenario evidence
+
+    describe "layer precedence":
+        it "takes a user value over host and default":
+            step("resolve os with default, host and user layers present")
+            val entries = host_config_entries(defaults_doc(), host_doc(), user_doc(), [])
+            val r = host_config_resolve(entries, "os")
+            expect(r.value).to_equal("macos")
+            expect(r.layer).to_equal("user")
+
+        it "takes the environment over every file":
+            step("SIMPLE_HOST_OS overrides the user file")
+            val entries = host_config_entries(defaults_doc(), host_doc(), user_doc(), [("SIMPLE_HOST_OS", "windows")])
+            val r = host_config_resolve(entries, "os")
+            expect(r.value).to_equal("windows")
+            expect(r.layer).to_equal("session")
+
+        it "falls back to the per-host file, then the default":
+            val entries = host_config_entries(defaults_doc(), host_doc(), user_doc(), [])
+            expect(host_config_value(entries, "gpu")).to_equal("on")
+            expect(host_config_value(entries, "max_threads")).to_equal("2")
+
+        it "treats a commented default as unset":
+            val entries = host_config_entries(defaults_doc(), "", "", [])
+            val r = host_config_resolve(entries, "max_build_jobs")
+            expect(r.value).to_equal("")
+            expect(r.layer).to_equal("compiled_default")
+
+        it "strips trailing comments and skips invalid values":
+            val entries = host_config_entries(defaults_doc(), "", user_doc(), [("SIMPLE_HOST_MAX_BUILD_JOBS", "lots")])
+            expect(host_config_value(entries, "max_build_jobs")).to_equal("12")
+
+    describe "env names and cpu features":
+        it "maps keys to SIMPLE_HOST_<KEY>":
+            expect(host_config_env_name("max_build_jobs")).to_equal("SIMPLE_HOST_MAX_BUILD_JOBS")
+
+        it "feeds cpu_features into CpuFeatureSet":
+            val entries = host_config_entries(defaults_doc(), "", user_doc(), [])
+            val feats = host_config_cpu_features(entries)
+            expect(feats.len()).to_equal(2)
+            val set = CpuFeatureSet.from_host_config(host_config_value(entries, "cpu_family"), feats)
+            expect(set.arch).to_equal("aarch64")
+            expect(set.has_sve).to_equal(true)
+            expect(set.highest_tier().name).to_equal("sve")

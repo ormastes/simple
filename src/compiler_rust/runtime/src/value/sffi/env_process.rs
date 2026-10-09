@@ -1429,7 +1429,13 @@ pub unsafe extern "C" fn rt_process_run_bounded(
         .spawn()
     {
         Ok(child) => child,
-        Err(_) => return make_tuple(b"", b"", -1),
+        // Name the spawn failure like the C owner (runtime_process.c) does.
+        // An empty stderr made callers report "failed (-1): " with no cause,
+        // e.g. the workaround refresh's Git probe under a hermetic env.
+        Err(error) => {
+            let reason = format!("process spawn failed: {cmd_str}: {error}");
+            return make_tuple(b"", reason.as_bytes(), -1);
+        }
     };
 
     match finish_child_output_bounded(child, timeout_ms, max_output_bytes) {

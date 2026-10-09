@@ -2045,6 +2045,19 @@ Two judgement rules that go with it:
   line count was a legitimate split; a 294-byte file was a deliberate facade
   over a 123 KB core. Size opens an investigation; it never closes one.
 
+## Host-dependent specs read the host config (2026-10-09)
+
+A spec or scenario that depends on host facts (worker count, cpu family / ISA
+features, os, LLVM root, gpu) reads them from the layered host config, never
+from a hardcoded value: `SIMPLE_HOST_<KEY>` env > `~/.config/simple/host.sdn`
+> `config/host/<hostname>.sdn` > `config/host/host_config.sdn` (tracked, values
+commented). Pure resolver: `std.common.config_core.host_config` (pass document
+texts + env snapshot, so fixtures stay hermetic); shell: `sh
+scripts/setup/host-env.shs --get <key>`. Gate an ISA-specific scenario on
+`host_config_cpu_features(...)` and record the skip reason when the extension
+is absent. Precedence spec: `test/01_unit/lib/common/config_core/host_config_spec.spl`.
+Guide: `doc/07_guide/infra/toolchain/host_config.md`.
+
 ## Running specs on a loaded box (harness truths, 2026-07-29)
 
 Under parallel sessions these look like test failures but are not:
