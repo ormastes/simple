@@ -1360,6 +1360,29 @@ if [ "${os}" = "windows" ]; then
   # choice.
   bootstrap_windows_abi_env="SIMPLE_WINDOWS_ABI=${SIMPLE_WINDOWS_ABI} SIMPLE_LINKER_FLAVOR=${SIMPLE_LINKER_FLAVOR}"
   if [ "${PLATFORM_ABI}" = "msvc" ]; then
+    # Stage 2/3 forward INCLUDE/LIB/LIBPATH by NAME even when empty (the env
+    # name list is pinned), and a SET-but-empty LIB disables lld-link's own
+    # MSVC/SDK auto-detection: a stage2 link failed with "could not open
+    # 'ucrt.lib'" (and kernel32/msvcrt/...) while clang-cl, which tolerates an
+    # empty INCLUDE, compiled fine. Resolve the dirs here from the same
+    # vswhere/SDK discovery the lane setup script uses, without adopting the
+    # rest of that script (subshell, discovery-only mode).
+    if [ -z "${LIB:-}" ] || [ -z "${INCLUDE:-}" ]; then
+      msvc_dirs=$(SIMPLE_MSVC_ENV_DIRS_ONLY=1 SIMPLE_PROJECT_ROOT="${repo_root}" sh -c \
+        '. "$1/scripts/setup/windows-msvc-bootstrap-env.shs" >/dev/null || exit 1; printf "%s\n%s\n" "$LIB" "$INCLUDE"' \
+        sh "${repo_root}") || {
+        echo "error: LIB/INCLUDE are empty and MSVC/Windows SDK discovery failed (scripts/setup/windows-msvc-bootstrap-env.shs)" >&2
+        exit 1
+      }
+      [ -n "${LIB:-}" ] || LIB=$(printf '%s\n' "${msvc_dirs}" | sed -n 1p)
+      [ -n "${INCLUDE:-}" ] || INCLUDE=$(printf '%s\n' "${msvc_dirs}" | sed -n 2p)
+      [ -n "${LIB}" ] && [ -n "${INCLUDE}" ] || {
+        echo "error: MSVC/Windows SDK discovery returned an empty LIB or INCLUDE" >&2
+        exit 1
+      }
+      export LIB INCLUDE
+      unset msvc_dirs
+    fi
     archive_prefix=""
     archive_suffix=".lib"
   else
