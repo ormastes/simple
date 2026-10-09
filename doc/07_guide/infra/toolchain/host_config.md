@@ -71,8 +71,10 @@ come from the existing local probes, not from the all-core option. `gpu: on`
 records detected host availability and does not enable an unsupported backend.
 
 Bootstrap reads `max_build_jobs` / `worker_mem_mib` with `--get` in a child
-shell. Nothing is exported into the bootstrap environment, so the `SIMPLE_*`
-native-build environment fingerprint is unchanged unless you set a value.
+shell. Before projecting its scratch HOME, centralized storage binds
+`SIMPLE_HOST_CONFIG` to the original user's config path, preserving an explicit
+`SIMPLE_HOST_CONFIG` override. Individual `SIMPLE_HOST_<KEY>` values are not
+exported; subprocess readers continue to resolve the configured layers.
 
 ## Simple-side reader
 

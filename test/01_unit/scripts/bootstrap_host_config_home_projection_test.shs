@@ -1,0 +1,35 @@
+#!/bin/sh
+# Exercise the actual storage projection -> child config reader -> jobs policy.
+set -eu
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+fixture=$(mktemp -d)
+trap 'rm -rf -- "$fixture"' EXIT HUP INT TERM
+mkdir -p "$fixture/caller/.config/simple"
+printf 'host_config:\n  schema: simple-host-config-v1\n  max_build_jobs: 20\n' >"$fixture/caller/.config/simple/host.sdn"
+printf 'host_config:\n  schema: simple-host-config-v1\n  max_build_jobs: 12\n' >"$fixture/override.sdn"
+(
+    # HOME is the fixture user's real home for this subprocess only.
+    HOME="$fixture/caller"
+    export HOME
+    unset SIMPLE_HOST_CONFIG SIMPLE_HOST_MAX_BUILD_JOBS SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS
+    SIMPLE_USER_STORAGE_ROOT="$fixture/storage/user"
+    SIMPLE_WORKTREE_STORAGE_ROOT="$fixture/storage/worktree"
+    BOOTSTRAP_HOST_ENV_SCRIPT="$repo_root/scripts/setup/host-env.shs"
+    export SIMPLE_USER_STORAGE_ROOT SIMPLE_WORKTREE_STORAGE_ROOT
+    . "$repo_root/scripts/bootstrap/lib/centralized-storage.shs"
+    . "$repo_root/scripts/bootstrap/bootstrap-build-jobs-policy.shs"
+    simple_bootstrap_storage_init "$repo_root"
+    [ "$HOME" != "$fixture/caller" ]
+    [ "$SIMPLE_HOST_CONFIG" = "$fixture/caller/.config/simple/host.sdn" ]
+    [ "$(bootstrap_build_jobs_host_config max_build_jobs)" = 20 ]
+    bootstrap_build_jobs_resolve full cli 20
+    [ "$bootstrap_build_jobs_effective" = 20 ]
+    simple_bootstrap_storage_init "$repo_root"
+    [ "$(bootstrap_build_jobs_host_config max_build_jobs)" = 20 ]
+    SIMPLE_HOST_CONFIG="$fixture/override.sdn"
+    simple_bootstrap_storage_init "$repo_root"
+    [ "$SIMPLE_HOST_CONFIG" = "$fixture/override.sdn" ]
+    bootstrap_build_jobs_resolve full cli 20
+    [ "$bootstrap_build_jobs_effective" = 12 ]
+)
+echo 'PASS: projected HOME retains caller config, repeated init and explicit override'
