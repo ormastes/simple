@@ -29,9 +29,9 @@ pub struct Lexer<'a> {
     /// Forced indentation only applies at or below the bracket depth when it was enabled.
     /// This ensures that inner parenthesized expressions still suppress indentation normally.
     force_indent_bracket_depths: Vec<usize>,
-    /// Lines (0-based) blanked/dedented by `@when`/`@elif`/`@else`/`@end`
-    /// conditional compilation (see `crate::cond_compile`). `None` when no
-    /// directive occurs.
+    /// Lines (0-based) blanked by `@when`/`@elif`/`@else`/`@end` conditional
+    /// compilation (see `crate::cond_compile`). Kept lines lex verbatim
+    /// (branch bodies are flat). `None` when no directive occurs.
     line_mask: Option<std::sync::Arc<crate::cond_compile::LineMask>>,
     /// Diagnostics from conditional-compilation evaluation (unsupported atoms etc.).
     pub cond_diagnostics: Vec<String>,
@@ -590,14 +590,6 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-    }
-
-    /// Indentation columns to remove on the current line (branch-body dedent).
-    pub(super) fn cond_dedent(&self) -> usize {
-        self.line_mask
-            .as_ref()
-            .and_then(|mask| mask.dedent.get(self.line - 1).copied())
-            .unwrap_or(0)
     }
 
     fn advance(&mut self) -> Option<(usize, char)> {
