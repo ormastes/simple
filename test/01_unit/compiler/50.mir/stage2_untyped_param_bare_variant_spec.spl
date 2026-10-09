@@ -24,6 +24,7 @@ use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
+use compiler.hir.hir_types.*
 
 fn mir_errors_matching(src: text, needle: text) -> i64:
     val ast = parse_full_frontend(src, "probe.spl", "probe.spl", Logger(level: 0))
@@ -37,6 +38,18 @@ fn mir_errors_matching(src: text, needle: text) -> i64:
             n = n + 1
     n
 
+fn first_param_type_is_int(src: text) -> bool:
+    val ast = parse_full_frontend(src, "probe.spl", "probe.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("probe.spl")
+    val hir = hir_lowering.lower_module(ast)
+    for fn_ in hir.functions.values():
+        if fn_.name == "f" and fn_.params.len() > 0:
+            match fn_.params[0].type_.kind:
+                case HirTypeKind.Int(_, _): return true
+                case _: return false
+    false
+
+val defaulted_param_src = "fn f(x = 5) -> i64:\n    x + 1\n"
 val untyped_param_src = "fn row(cells, widths, sep: text) -> text:\n    if cells.len() != widths.len():\n        return \"\"\n    sep\n"
 
 val two_enums = "enum A:\n    Xs(v: i64)\n    Sm(v: i64)\n\nenum B:\n    Xs(v: i64)\n    Sm(v: i64)\n\n"
@@ -46,6 +59,9 @@ val bare_self_src = two_enums + "impl A:\n    fn w(self) -> i64:\n        match 
 describe "stage2 MIR untyped params and scrutinee-typed bare variants":
     it "lowers unannotated fn params without an infer-arm failure":
         expect(mir_errors_matching(untyped_param_src, "[infer-arm]")).to_equal(0)
+
+    it "keeps the default-derived type of an untyped param with a default":
+        expect(first_param_type_is_int(defaulted_param_src)).to_equal(true)
 
     it "resolves a bare arm through a typed param scrutinee":
         expect(mir_errors_matching(bare_param_src, "is ambiguous")).to_equal(0)

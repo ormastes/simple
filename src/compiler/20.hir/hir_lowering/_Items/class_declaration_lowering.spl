@@ -16,12 +16,6 @@ impl HirLowering:
         # std.common.format_utils) is dynamic in the seed/interpreter. Lowering
         # it to Infer left an inference variable nothing resolves, and MIR
         # failed closed on it ([infer-arm]). Publish `any`, the erased type.
-        # An explicit untyped `self`/`me` keeps its existing receiver typing.
-        val type_ = if p.has_type_ or p.name == "self" or p.name == "me":
-            self.lower_type(p.type_)
-        else:
-            HirType(kind: HirTypeKind.Any, span: p.span)
-        val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, Visibility.Private, false, nil)
         val default_ = if p.has_default:
             self.lower_hir_expr(p.default)
         else:
@@ -31,6 +25,18 @@ impl HirLowering:
                 type_: HirType(kind: HirTypeKind.Unit, span: p.span),
                 span: p.span
             )
+        # An explicit untyped `self`/`me` keeps its existing receiver typing.
+        # An untyped param WITH a default (`fn f(x = 5)`) takes the default's
+        # type, as in the seed; `any` only when that cannot be settled.
+        var type_ = HirType(kind: HirTypeKind.Any, span: p.span)
+        if p.has_type_ or p.name == "self" or p.name == "me":
+            type_ = self.lower_type(p.type_)
+        elif p.has_default:
+            val default_type = self.lowered_const_value_type(default_, p.span)
+            match default_type.kind:
+                case HirTypeKind.Infer(_, _): ()
+                case _: type_ = default_type
+        val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, Visibility.Private, false, nil)
 
         HirParam(
             symbol: symbol,
