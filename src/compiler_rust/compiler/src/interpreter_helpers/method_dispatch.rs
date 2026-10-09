@@ -133,6 +133,21 @@ pub(crate) fn call_method_on_value(
                 }
                 return Ok(Value::Int(-1));
             }
+            "slice" | "substring" => {
+                // Same BYTE-indexed contract as the ordinary string-method path
+                // (interpreter_method/string.rs) and the native `rt_slice`:
+                // `raw.trim().substring(n)` used to hit METHOD_NOT_FOUND here
+                // although binding the trimmed text first dispatched correctly.
+                let bytes = s.as_bytes();
+                let start_raw = _args.first().and_then(|v| v.as_int().ok()).unwrap_or(0);
+                let end_raw = _args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(bytes.len() as i64);
+                let end = (end_raw.max(0) as usize).min(bytes.len());
+                let start = (start_raw.max(0) as usize).min(end);
+                if start == 0 && end == bytes.len() {
+                    return Ok(Value::shared_text(s.clone()));
+                }
+                return Ok(Value::text_from_bytes(bytes[start..end].to_vec()));
+            }
             "to_i64" | "to_int" => {
                 return Ok(s.trim().parse::<i64>().map(Value::Int).unwrap_or(Value::Nil));
             }
@@ -1124,6 +1139,27 @@ mod tests {
         .expect("chained replace should dispatch");
 
         assert_eq!(chained, Value::text("HEllo".to_string()));
+    }
+
+    #[test]
+    fn nested_substring_dispatches_byte_indexed_on_temporary_text() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        let mut call = |recv: Value, method: &str, args: &[Value]| {
+            call_method_on_value(recv, method, args, &mut env, &mut functions, &mut classes, &enums, &impl_methods)
+                .expect("nested text slice should dispatch")
+        };
+
+        let trimmed = call(Value::text("  # Re-exported from a.spl ".to_string()), "trim", &[]);
+        assert_eq!(call(trimmed.clone(), "substring", &[Value::Int(19)]), Value::text("a.spl".to_string()));
+        assert_eq!(call(trimmed.clone(), "slice", &[Value::Int(2), Value::Int(4)]), Value::text("Re".to_string()));
+        assert_eq!(call(trimmed.clone(), "substring", &[Value::Int(50)]), Value::text(String::new()));
+        assert_eq!(call(trimmed.clone(), "substring", &[Value::Int(-3)]), trimmed);
+        // Byte offsets, matching `len`/`index_of` and native `rt_slice`.
+        assert_eq!(call(Value::text("caféZ".to_string()), "substring", &[Value::Int(5)]), Value::text("Z".to_string()));
     }
 
     #[test]
