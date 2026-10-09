@@ -1,6 +1,7 @@
 # FreeBSD reaper containment: partial evidence, unqualified correction
 
-STATUS: BLOCKED for release qualification. This is a draft source publication.
+STATUS: focused runtime criteria passed across the recorded runs; publication
+remains blocked by unavailable authenticated review admission. This is a draft.
 No whole-suite, production, or current-candidate runtime PASS is claimed.
 
 ## Immutable source provenance
@@ -101,4 +102,37 @@ Original spec SHA-256:
 The default nested all-cases harness is not a qualified entrypoint: use the
 separate guarded topology in the validation guide. Prior passing assertions
 were reused; this report does not claim one default full-harness PASS.
-Landing remains blocked pending the pane criterion and final review.
+At that point landing remained blocked pending the pane criterion and final review.
+The subsequent pane repair below satisfies that focused criterion.
+
+## Subsequent pane handoff repair: focused criterion passed
+
+The separate pane correction, [PR #2735](https://github.com/ormastes/simple/pull/2735)
+at `676ba1c40b7cae3404ec01a826b2dc6435c8ece8`, changes `src/app/llm_caret/pane_backend.spl` to
+launch a private one-shot executable script instead of sending an exec command
+to an interactive shell's terminal input. It is published separately from this
+containment change; it does not modify the original pane spec.
+
+Frozen production SHA-256:
+`f6e4c898f52199e679a8016cfc456329ceaf89a9ecf2e6cd14465a4056231f36`.
+POSIX fixture SHA-256:
+`ac56750ae53523a76497d335ed4008707d1b870b7926638cd1a672145a26c04f`.
+Both are based on release source `b05fbaa6a1b4f9d9918f62af297d18d25eb9f07b`.
+
+The final FreeBSD run executed the unchanged original spec with **15/15 passed**
+(1135 ms) and the new POSIX fixture with **3/3 passed** (1248 ms), no failures,
+skips or drops. Two jobs ran under the candidate containment guard; guard exit
+0, quiescent=1, peak RSS=1841472 KiB. Original spec and diagnostic seed hashes
+remain those recorded above. Evidence lives in the pane worktree under
+`build/pane-handoff-diagnostic/final-evidence/{request.json,verified-results.json}`.
+
+These separate focused results resolve the observed pane-input failure and
+satisfy the original-spec criterion with the corrected pane source. Historical
+14/15 failure evidence remains unchanged. No default all-cases harness PASS,
+whole Phase 1 PASS, stage2/native qualification, or cross-platform PASS follows.
+
+Landing still needs authenticated exact-head review admission. The current
+GitHub main-branch broker config says `configured=false` and signed receipts
+unimplemented; its legacy self-attestation workflow cannot satisfy the canonical
+v2 broker requirement. No legacy dispatch, fabricated approval, or bypass was
+used for publication.

@@ -214,3 +214,15 @@ Evidence is under `build/reaper-wait-drain-cycle/evidence` and
 and remaining-case commands are recorded in `launch-remaining.py` and
 `request-remaining.json` alongside them. This documentation correction executes
 no command and grants no further runtime cycle.
+
+## Subsequent original-pane repair
+
+The separately published [pane fix #2735](https://github.com/ormastes/simple/pull/2735)
+at `676ba1c40b7cae3404ec01a826b2dc6435c8ece8` subsequently passed the unchanged
+original pane spec (15/15,1135ms) and POSIX fixture (3/3,1248ms), zero skips or
+drops, under this unchanged native guard. Guard exit0/quiescent1, peak1841472KiB.
+See the tracked containment report for exact source, fixture and seed hashes.
+The earlier14/15 failure remains historical evidence; this is a separate focused
+run, not a default all-cases harness or whole-suite PASS. No further runtime was
+performed to publish these results. Landing still requires authenticated review
+admission; the current legacy self-attestation workflow is insufficient.
