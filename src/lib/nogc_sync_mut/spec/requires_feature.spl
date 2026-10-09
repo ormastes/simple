@@ -1,0 +1,141 @@
+"""
+# Build-feature switches — `# @tag:requires-<feature>`
+
+@tag:stdlib
+@tag:testing
+
+A spec whose header carries
+
+    # @tag:requires-<feature>
+
+exercises a compiler/library surface that only some builds ship. When the
+feature is OFF for this build the runner reports the spec as SKIPPED with the
+reason `<feature> feature disabled for this build`, COUNTS it in the summary
+(`Feature-gated:` row) and never reports it as a pass. When the feature is on
+the tag is inert and the spec runs normally.
+
+This is the approved, explicit mechanism for specs that were carried onto a
+release line without the source they test. It is not for regressions: a spec
+whose tested code existed on the line and was lost is a bug, never gated.
+
+## Known features (FEATURE_GATES)
+
+Each feature is a host-config key (`on` | `off`, schema
+simple-host-config-v1) resolved by the normal ladder:
+`SIMPLE_HOST_<KEY>` env > user host.sdn > config/host/host_config.sdn, and
+unconfigured falls back to the gate's build default.
+
+  - `hwir` (tag `requires-hwir`, default off on release/1.0): the HWIR /
+    RISC-V-hardware generator surface (`compiler.mir.hwir.riscv_scalar_*`,
+    `combinational_composition`, `typed_zero_owner`, `CoreConfig` scalar
+    profile constructors, `rv32/rv64_alu_module`, the HWIR PPA pipeline,
+    `compiler.backend.backend.riscv_scalar_runtime_*`). Those modules are
+    absent from release/1.0 (and from main; they live only on the unmerged
+    `chore/merge-share-history` line), so the llvm/cranelift bootstrap of
+    this release cannot provide them.
+  - `assurance` (key `assurance`, default off on release/1.0):
+    `compiler.common.assurance.{proof_performance_evidence, schema_migration}`
+    (src/compiler/00.common/assurance/, share-history only).
+  - `arm-baremetal` (key `arm_baremetal`, default off on release/1.0):
+    `llvm_arm_baremetal_config_for` in 70.backend/backend/llvm_target.spl
+    (share-history only).
+
+Admission rule for a new gate: the tested source must be verifiably absent
+from this line's tree and present on another line. Code that exists here and
+fails to resolve is a bug, not a gate.
+
+An unknown `requires-<x>` tag gates nothing (fail-open is impossible: the
+spec simply runs and reports its honest verdict).
+
+Shell twins: scripts/setup/host-env.shs (`--get <key>`) and
+scripts/bootstrap/phase3-test-skip-policy.shs.
+
+Pure: callers read the documents and environment and pass them in.
+"""
+
+use std.spec.in_development.{spec_tags}
+use std.common.config_core.host_config.{host_config_entries, host_config_value, host_config_env_name}
+
+val REQUIRES_TAG_PREFIX: text = "requires-"
+val FEATURE_SKIP_MARKER: text = "FEATURE SKIP"
+val FEATURE_SKIP_SUMMARY_MARKER: text = "Feature-gated:"
+
+struct FeatureGate:
+    feature: text        # tag suffix, e.g. "hwir"
+    key: text            # host-config key, e.g. "hwir"
+    build_default: text  # "on" | "off" when nothing is configured
+
+fn feature_gates() -> [FeatureGate]:
+    [
+        FeatureGate(feature: "hwir", key: "hwir", build_default: "off"),
+        FeatureGate(feature: "assurance", key: "assurance", build_default: "off"),
+        FeatureGate(feature: "arm-baremetal", key: "arm_baremetal", build_default: "off")
+    ]
+
+fn _gate_index(feature: text) -> i64:
+    """Index into feature_gates(), or -1 for an unknown feature."""
+    val gates = feature_gates()
+    var i = 0
+    while i < gates.len():
+        if gates[i].feature == feature:
+            return i
+        i = i + 1
+    -1
+
+fn spec_required_features(source: text) -> [text]:
+    """Known features named by `@tag:requires-<feature>` in `source`."""
+    var out: [text] = []
+    val plen = REQUIRES_TAG_PREFIX.len()
+    for t in spec_tags(source):
+        if t.starts_with(REQUIRES_TAG_PREFIX) and t.len() > plen:
+            val name = t.slice(plen, t.len())
+            if _gate_index(name) >= 0:
+                out.push(name)
+    out
+
+fn feature_value(feature: text, defaults_text: text, user_text: text, env: [(text, text)]) -> text:
+    """Effective value ("on"/"off") of a known feature; "on" for an unknown
+    one (an unknown tag never gates)."""
+    val idx = _gate_index(feature)
+    if idx < 0:
+        return "on"
+    val g = feature_gates()[idx]
+    val v = host_config_value(host_config_entries(defaults_text, "", user_text, env), g.key)
+    if v == "": g.build_default else: v
+
+fn feature_enabled(feature: text, defaults_text: text, user_text: text, env: [(text, text)]) -> bool:
+    feature_value(feature, defaults_text, user_text, env) == "on"
+
+fn feature_env_names() -> [text]:
+    """SIMPLE_HOST_<KEY> names of every gate, so callers snapshot exactly
+    the variables that matter."""
+    var out: [text] = []
+    for g in feature_gates():
+        out.push(host_config_env_name(g.key))
+    out
+
+fn disabled_required_features(source: text, defaults_text: text, user_text: text, env: [(text, text)]) -> [text]:
+    """Required features of `source` that are OFF for this build."""
+    var out: [text] = []
+    for f in spec_required_features(source):
+        if not feature_enabled(f, defaults_text, user_text, env):
+            out.push(f)
+    out
+
+fn feature_disabled_reason(features: [text]) -> text:
+    val names = features.join(", ")
+    "{names} feature disabled for this build"
+
+fn feature_skip_line(path: text, features: [text]) -> text:
+    """Per-file line for a spec skipped because a feature is off."""
+    val reason = feature_disabled_reason(features)
+    "{FEATURE_SKIP_MARKER} {path} (1 skipped; {reason})"
+
+fn feature_skip_summary_line(files: i64) -> text:
+    """Summary row; printed whenever the count is non-zero."""
+    "{FEATURE_SKIP_SUMMARY_MARKER} {files} file(s) skipped (build feature disabled; set SIMPLE_HOST_<FEATURE>=on to run)"
+
+export REQUIRES_TAG_PREFIX, FEATURE_SKIP_MARKER, FEATURE_SKIP_SUMMARY_MARKER
+export FeatureGate, feature_gates, spec_required_features
+export feature_value, feature_enabled, feature_env_names, disabled_required_features
+export feature_disabled_reason, feature_skip_line, feature_skip_summary_line

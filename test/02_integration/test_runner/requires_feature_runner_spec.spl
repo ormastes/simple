@@ -1,0 +1,66 @@
+"""
+## Purpose and audience
+End-to-end proof that the build-feature switch (`# @tag:requires-<feature>`)
+is wired into the pure-Simple test runner: with the `hwir` feature OFF a
+tagged spec is SKIPPED, printed with its reason and counted in the summary
+(never a pass); with the feature ON the same spec runs and passes.
+## Operator workflow
+Run `bin/simple test test/02_integration/test_runner/requires_feature_runner_spec.spl`.
+Each scenario spawns the REAL runner (`<binary> run
+src/app/test_runner_new/main.spl <fixture>`) with `SIMPLE_HOST_HWIR` set
+in the inherited environment, and asserts on the child's stdout.
+## Compatibility and limitations
+Set `SIMPLE_BINARY` to a binary that can `run` a `.spl`. The tag literal is
+assembled at runtime so this spec does not gate itself.
+"""
+# @manual: primary
+# @timeout_secs 900
+
+use std.spec.{step}
+use std.spec.requires_feature.{FEATURE_SKIP_MARKER, FEATURE_SKIP_SUMMARY_MARKER}
+use std.io.{file_write, dir_create_all, file_exists}
+use std.io.{env_get, env_set}
+use std.io_runtime.{getpid, time_now_unix_micros}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+
+val TAG_LINE: text = "# @" + "tag:requires-" + "hwir\n"
+val HWIR_FIXTURE: text = TAG_LINE + "use std.spec.*\n\ndescribe \"hwir fixture\":\n    it \"runs only with the hwir feature\":\n        expect(1).to_equal(1)\n"
+val RUNNER_ENTRY: text = "src/app/test_runner_new/main.spl"
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY") ?? ""
+    if configured != "" and file_exists(configured):
+        return configured
+    "bin/simple"
+
+fn fixture_path() -> text:
+    val d = "build/test_fixtures/requires_feature_{getpid()}_{time_now_unix_micros()}"
+    dir_create_all(d)
+    val p = d + "/hwir_gated_spec.spl"
+    file_write(p, HWIR_FIXTURE)
+    p
+
+fn run_with_hwir(value: text, target: text) -> text:
+    val previous = env_get("SIMPLE_HOST_HWIR") ?? ""
+    env_set("SIMPLE_HOST_HWIR", value)
+    val (out, err, code) = process_run_bounded(simple_binary(), ["run", RUNNER_ENTRY, target], 900000, 4000000)
+    env_set("SIMPLE_HOST_HWIR", previous)
+    out + "\n" + err
+
+describe "requires-hwir: feature off":
+    it "skips the spec with the reason and counts it, never as a pass":
+        step("Run a tagged passing spec with SIMPLE_HOST_HWIR=off")
+        val out = run_with_hwir("off", fixture_path())
+        step("Verify skip line, reason, summary row and no pass")
+        expect(out).to_contain(FEATURE_SKIP_MARKER)
+        expect(out).to_contain("hwir feature disabled for this build")
+        expect(out).to_contain(FEATURE_SKIP_SUMMARY_MARKER + " 1 file(s) skipped")
+        expect(out.contains("1 passed")).to_equal(false)
+
+describe "requires-hwir: feature on":
+    it "runs the spec normally":
+        step("Run the same spec with SIMPLE_HOST_HWIR=on")
+        val out = run_with_hwir("on", fixture_path())
+        step("Verify it executed and passed, with no feature skip")
+        expect(out.contains(FEATURE_SKIP_MARKER)).to_equal(false)
+        expect(out).to_contain("1 passed")

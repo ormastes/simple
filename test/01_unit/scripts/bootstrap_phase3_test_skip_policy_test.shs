@@ -104,4 +104,43 @@ legacy_any_tag_policy "$tmp/unknown_category_spec.spl" 1 ||
   fail 'false-pass mutation control did not survive'
 expect_reject exact-false-pass "$tmp/unknown_category_spec.spl" 1
 
-printf 'bootstrap_phase3_test_skip_policy_test: PASS (13 policy cases; exact false pass killed)\n'
+
+# Build-feature switch (`# @tag:requires-<feature>`). Isolate the host-config
+# user layer so only the env var and the shipped default decide.
+cat >"$tmp/hwir_spec.spl" <<'EOF2'
+# @tag:requires-hwir
+describe "hwir surface":
+    it "needs the hwir feature":
+        expect(1).to_equal(1)
+EOF2
+cat >"$tmp/unknown_feature_spec.spl" <<'EOF2'
+# @tag:requires-warp-drive
+describe "unknown feature":
+    it "must not be admitted":
+        expect(1).to_equal(1)
+EOF2
+cat >"$tmp/hwir_mixed_spec.spl" <<'EOF2'
+# @tag:requires-hwir
+# @tag:system
+describe "mixed feature":
+    it "must not inherit admission":
+        expect(1).to_equal(1)
+EOF2
+SIMPLE_HOST_CONFIG="$tmp/no-user-host.sdn"
+export SIMPLE_HOST_CONFIG
+unset SIMPLE_HOST_HWIR || :
+[ "$(classify "$tmp/hwir_spec.spl" 1)" = 'skip|requires-hwir' ] ||
+  fail 'hwir default (off) did not admit a counted feature skip'
+[ "$(SIMPLE_HOST_HWIR=off classify "$tmp/hwir_spec.spl" 1)" = 'skip|requires-hwir' ] ||
+  fail 'hwir=off did not admit a counted feature skip'
+[ "$(SIMPLE_HOST_HWIR=on classify "$tmp/hwir_spec.spl" 0)" = 'execute|-' ] ||
+  fail 'hwir=on spec with zero skips did not classify for execution'
+SIMPLE_HOST_HWIR=on
+export SIMPLE_HOST_HWIR
+expect_reject hwir-on-skip "$tmp/hwir_spec.spl" 1
+unset SIMPLE_HOST_HWIR
+expect_reject unknown-feature "$tmp/unknown_feature_spec.spl" 1
+expect_reject hwir-mixed "$tmp/hwir_mixed_spec.spl" 1
+expect_reject hwir-partial "$tmp/hwir_spec.spl" 1 1
+
+printf 'bootstrap_phase3_test_skip_policy_test: PASS (20 policy cases; exact false pass killed)\n'

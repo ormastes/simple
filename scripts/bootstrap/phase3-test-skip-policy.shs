@@ -5,6 +5,10 @@
 set -u
 
 self=phase3-test-skip-policy
+policy_self_dir=$(dirname -- "$0")
+# Known build-feature gates, feature=build_default. Must match
+# feature_gates() in src/lib/nogc_sync_mut/spec/requires_feature.spl.
+PHASE3_FEATURE_GATES="hwir=off assurance=off arm-baremetal=off"
 
 fail() {
   status=$1
@@ -44,7 +48,7 @@ phase3_test_skip_policy_classify() {
   fi
 
   policy_tag_shape=$(awk '
-    BEGIN { directives = 0; canonical = 0 }
+    BEGIN { directives = 0; canonical = 0; feature = "" }
     {
       line = $0
       sub(/\r$/, "", line)
@@ -53,18 +57,52 @@ phase3_test_skip_policy_classify() {
         if (line ~ /^[[:space:]]*#[[:space:]]*@tag[[:space:]]*:[[:space:]]*in-development[[:space:]]*$/) {
           canonical++
         }
+        if (line ~ /^[[:space:]]*#[[:space:]]*@tag[[:space:]]*:[[:space:]]*requires-[a-z0-9-]+[[:space:]]*$/) {
+          name = line
+          sub(/^[^:]*:[[:space:]]*requires-/, "", name)
+          sub(/[[:space:]]*$/, "", name)
+          feature = name
+        }
       }
     }
-    END { printf "%d|%d\n", directives, canonical }
+    END { printf "%d|%d|%s\n", directives, canonical, feature }
   ' "$policy_spec") || {
     fail 65 "cannot inspect spec tags: $policy_spec"
     return $?
   }
 
-  if [ "$policy_tag_shape" = '1|1' ]; then
+  policy_feature=${policy_tag_shape##*|}
+  policy_tag_shape=${policy_tag_shape%|*}
+
+  if [ "$policy_tag_shape" = '1|1' ] && [ -z "$policy_feature" ]; then
     printf '%s\n' 'skip|in-development'
     return 0
   fi
+
+  # Build-feature switch (std.spec.requires_feature twin): a sole canonical
+  # `# @tag:requires-<feature>` naming a KNOWN feature admits a wholly
+  # skipped spec only while that feature resolves OFF (host-config key, unset
+  # = the gate's build default). With the feature on, a skip is a real
+  # defect: the spec should have run. Unknown features admit nothing.
+  if [ "$policy_tag_shape" = '1|0' ] && [ -n "$policy_feature" ]; then
+    policy_default=""
+    for policy_gate in $PHASE3_FEATURE_GATES; do
+      [ "${policy_gate%%=*}" = "$policy_feature" ] && policy_default=${policy_gate#*=}
+    done
+    [ -n "$policy_default" ] || {
+      fail 67 "nonzero skipped count names unknown build feature: $policy_feature"
+      return $?
+    }
+    policy_key=$(printf '%s' "$policy_feature" | tr '-' '_')
+    policy_value=$(sh "$policy_self_dir/../setup/host-env.shs" --get "$policy_key" 2>/dev/null) || policy_value=""
+    if [ "${policy_value:-$policy_default}" = on ]; then
+      fail 70 "requires-$policy_feature spec skipped while the $policy_feature feature is on"
+      return $?
+    fi
+    printf 'skip|requires-%s\n' "$policy_feature"
+    return 0
+  fi
+
 
   case "$policy_tag_shape" in
     '0|0') fail 66 "nonzero skipped count has no explicit category" ;;
