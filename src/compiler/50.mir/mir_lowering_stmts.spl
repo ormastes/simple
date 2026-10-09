@@ -11,6 +11,7 @@ use compiler.mir.mir_data.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.common.diagnostics.span.{Span}
 use compiler.mir.mir_lowering_types.{MirLowering, MirError, marker_map_without, text_map_without}
 use compiler.frontend.resource_registry.{resource_is_declared}
@@ -2782,7 +2783,8 @@ impl MirLowering:
         call result was fully typed. Adopt the arms' identity only when every
         arm agrees: no arm may be a nil literal (that would need an Optional
         wrapper), every arm must carry the same struct name (or none), and the
-        HIR type is taken from the first arm only when every arm has one."""
+        HIR type is adopted only when every arm has one and all are equal
+        (`hir_types_equal`); otherwise the slot stays unknown."""
         if arm_locals.len() == 0:
             return
         var shared_struct = ""
@@ -2798,7 +2800,12 @@ impl MirLowering:
                 shared_struct = arm_struct
             elif arm_struct != shared_struct:
                 struct_known = false
-            if self.find_local_hir_type(arm_local.id) == nil:
+            if val arm_type = self.find_local_hir_type(arm_local.id):
+                if arm_i > 0 and all_typed:
+                    if val first_type = self.find_local_hir_type(arm_locals[0].id):
+                        if not hir_types_equal(first_type, arm_type):
+                            all_typed = false
+            else:
                 all_typed = false
             arm_i = arm_i + 1
         if struct_known and shared_struct != "" and not self.struct_value_syms.contains(dest.id):

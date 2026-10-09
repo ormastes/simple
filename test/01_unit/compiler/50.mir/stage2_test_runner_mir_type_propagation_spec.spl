@@ -13,7 +13,6 @@ class no longer appears.
 | if-expression of struct calls | `unresolved method call: lower` | merge temp of an untyped value-position `if` kept no struct name |
 | if-expression of Result calls | `unresolved method call: is_err` | same merge temp kept no HIR type |
 | `val r = f(); r.is_err()` | `unresolved method call: is_err` | `enum_match_expr_type` read only match-arm `local_map`, not let bindings |
-| `var seen = {}` global | `unresolved method call: has` | untyped dict-literal global load was not marked as a dict |
 | `List<T>` parameter | `for-in over non-array iterables` | parser collapsed undeclared `List<T>` to Any (seed: array) |
 | `for (k, v) in dict` | `for-in over non-array iterables` | no dict iteration lowering; now iterates rt_dict_entries |
 | `text.parse_int()` | `unresolved method call: parse_int` | not wired to rt_string_parse_int |
@@ -74,17 +73,16 @@ describe "if-expression and binding type propagation":
         val errs = errors_for("if_result", "use lib.dep.\{try_info, Info\}\n\nfn f(c: bool) -> bool:\n    val r = if c: try_info(\"a\") else: try_info(\"\")\n    r.is_err()\n")
         expect(errs.contains("unresolved method call")).to_equal(false)
 
+    it "keeps an if-expression unknown when its arms' HIR types differ":
+        val errs = errors_for("if_mixed", "fn g1() -> Result<i64, text>:\n    Ok(1)\n\nfn g2() -> Result<text, text>:\n    Ok(\"a\")\n\nfn f(c: bool) -> bool:\n    val r = if c: g1() else: g2()\n    r.is_err()\n")
+        expect(errs.contains("unresolved method call: is_err")).to_equal(true)
+
     it "sees a let-bound cross-module Result in is_err/unwrap_err/unwrap":
         val errs = errors_for("val_result", "use lib.dep.\{try_info, Info\}\n\nfn f() -> text:\n    val r = try_info(\"a\")\n    if r.is_err():\n        return r.unwrap_err()\n    r.unwrap().status\n")
         expect(errs.contains("unresolved method call")).to_equal(false)
 
     it "sees a let-bound same-module Result":
         val errs = errors_for("local_result", "fn g() -> Result<i64, text>:\n    Ok(1)\n\nfn f() -> bool:\n    val r = g()\n    r.is_err()\n")
-        expect(errs.contains("unresolved method call")).to_equal(false)
-
-describe "untyped dict literal globals":
-    it "dispatches .has on an unannotated `var seen = {}` global":
-        val errs = errors_for("dict_global", "var seen = \{\}\n\nfn f(k: text) -> bool:\n    seen.has(k)\n")
         expect(errs.contains("unresolved method call")).to_equal(false)
 
 describe "for-in collections":
@@ -118,3 +116,12 @@ describe "declared text bindings":
     it "accepts byte_at on a `val ch: text` bound from an array field read":
         val errs = errors_for("byte_at", "struct Lx:\n    chars: [text]\n\nfn m(l: Lx, i: i64) -> i64:\n    val ch: text = l.chars[i]\n    ch.byte_at(0) as i64\n")
         expect(errs.contains("byte_at receiver is not text")).to_equal(false)
+
+describe "unannotated empty array literal with mixed stores":
+    it "keeps inferring when every store agrees":
+        val errs = errors_for("arr_agree", "fn f() -> text:\n    var c = []\n    c.push(\"a\")\n    c.push(\"b\")\n    c.first() ?? \"\"\n")
+        expect(errs.contains("unresolved method call")).to_equal(false)
+
+    it "leaves the element type unknown after a disagreeing store":
+        val errs = errors_for("arr_mixed", "fn f() -> bool:\n    var c = []\n    c.push(\"a\")\n    c.push(1.5)\n    c.first() == nil\n")
+        expect(errs.contains("unresolved method call: first")).to_equal(true)

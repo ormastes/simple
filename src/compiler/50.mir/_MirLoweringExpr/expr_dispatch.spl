@@ -18,6 +18,7 @@ use compiler.mir._MirLoweringExpr.text_index_ranges.*
 use compiler.mir.mir_data.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.blocks.value.BlockValue
@@ -409,10 +410,8 @@ impl MirLowering:
             self.builder = b_glob
             # Storage may be an i64 handle while the declaration is a Dict or
             # array. Keep semantic provenance on the loaded receiver/iterable.
-            var global_declared_known = false
             if val global_symbol = self.symbols.get_symbol_raw(symbol_id):
                 if val declared_type = global_symbol.type_:
-                    global_declared_known = true
                     self.remember_local_hir_type(dest.id, declared_type, 0, 0)
                     match declared_type.kind:
                         case HirTypeKind.Dict(_, _):
@@ -435,18 +434,6 @@ impl MirLowering:
                                         self.array_element_struct_syms[dest.id] = global_elem.name
                                 case _: ()
                         case _: ()
-            # An unannotated `var seen = {}` global has no declared HIR type
-            # (its symbol type_ is nil), but its initializer is a dict literal,
-            # which the seed evaluates to a Dict. Without the dict marking,
-            # `seen.has(k)` / `seen[k] = v` on the loaded handle fell through
-            # to `unresolved method call: has`. Same marking a declared
-            # `Dict<K, V>` global gets above; only the literal kind is used.
-            if not global_declared_known and self.global_const_exprs.contains(symbol_id):
-                match self.global_const_exprs[symbol_id].kind:
-                    case HirExprKind.DictLit(_, _, _):
-                        self.runtime_dict_locals[dest.id] = true
-                        self.mark_runtime_value_local(dest.id)
-                    case _: ()
             # Register struct provenance for the loaded local, mirroring every
             # other struct-value-producing site (mir_lowering_stmts.spl:291,
             # method_calls_literals.spl:537, etc). Every other such site
@@ -1294,33 +1281,37 @@ impl MirLowering:
             self.mark_runtime_value_local(boxed.id)
         boxed
 
-    # Record the f64/f32 type of a value stored into a container whose
-    # declared element type may be the erased i64 default (empty `{}`/`[]`
-    # literal). Reads consult runtime_elem_value_type so decode takes the
-    # rt_value_as_float arm instead of shredding the heap-box ptr via `>>3`.
     me infer_empty_array_elem_hir_type(container: LocalId, value_local: LocalId):
-        """Adopt the first stored element's type for an unannotated array.
+        """Adopt the stored elements' type for an unannotated array.
 
         `var c = []` carries no element type, so `c.first()` / `c.get(i)`
         could not choose a decode and failed as `unresolved method call`.
-        The first observed store (push / index-assign) is the only evidence
-        the compiler has; record `[T]` for the container from it. Never
-        overrides a declared or already-inferred element type, and only
-        admits types that are positively known (the value's own HIR type,
-        or a text/f64/bool MIR local; an i64 MIR type is the erased default and is NOT evidence) -- anything else stays unknown and
-        `first`/`last`/`get` keep failing loudly."""
+        Observed stores (push / index-assign) are the only evidence the
+        compiler has. The first store's type is recorded as `[T]` only when it
+        is positively known (the value's own HIR type, or a text/f64/bool MIR
+        local; an i64 MIR type is the erased default and is NOT evidence).
+        Every later store must agree (`hir_types_equal`): an unknown or
+        different element type poisons the inference (state 2) and records
+        `[Error]`, so `first`/`last`/`get` fail loudly instead of decoding
+        with the wrong type, and other consumers see the same erased element
+        they saw before inference existed. A declared element type is never
+        touched (only containers this helper itself typed are revisited)."""
         if not self.local_is_runtime_array(container):
             return
-        if val existing = self.find_local_hir_type(container.id):
-            match existing.kind:
-                case HirTypeKind.Array(existing_elem, _):
-                    match existing_elem.kind:
-                        case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
-                        case _: return
-                # An unannotated `var c = []` binding records no element and
-                # may record an unresolved container type; neither is evidence.
-                case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
-                case _: return
+        val state = if self.inferred_array_elem_state.contains(container.id): self.inferred_array_elem_state[container.id] else: 0
+        if state == 2:
+            return
+        if state == 0:
+            if val existing = self.find_local_hir_type(container.id):
+                match existing.kind:
+                    case HirTypeKind.Array(existing_elem, _):
+                        match existing_elem.kind:
+                            case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
+                            case _: return
+                    # An unannotated `var c = []` binding records no element and
+                    # may record an unresolved container type; neither is evidence.
+                    case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
+                    case _: return
         var elem_kind_found = false
         var elem_type = HirType(kind: HirTypeKind.Error, span: Span.empty())
         if val value_hir = self.find_local_hir_type(value_local.id):
@@ -1342,9 +1333,27 @@ impl MirLowering:
                         elem_type = HirType(kind: HirTypeKind.Bool, span: Span.empty())
                         elem_kind_found = true
                     case _: ()
-        if elem_kind_found:
-            self.remember_local_hir_type(container.id, HirType(kind: HirTypeKind.Array(elem_type, nil), span: Span.empty()), 0, 0)
+        var agrees = elem_kind_found
+        if agrees and state == 1:
+            agrees = false
+            if val inferred = self.find_local_hir_type(container.id):
+                match inferred.kind:
+                    case HirTypeKind.Array(inferred_elem, _):
+                        agrees = hir_types_equal(inferred_elem, elem_type)
+                    case _: ()
+        if agrees:
+            if state == 0:
+                self.inferred_array_elem_state[container.id] = 1
+                self.remember_local_hir_type(container.id, HirType(kind: HirTypeKind.Array(elem_type, nil), span: Span.empty()), 0, 0)
+            return
+        self.inferred_array_elem_state[container.id] = 2
+        if state == 1:
+            self.remember_local_hir_type(container.id, HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Error, span: Span.empty()), nil), span: Span.empty()), 0, 0)
 
+    # Record the f64/f32 type of a value stored into a container whose
+    # declared element type may be the erased i64 default (empty `{}`/`[]`
+    # literal). Reads consult runtime_elem_value_type so decode takes the
+    # rt_value_as_float arm instead of shredding the heap-box ptr via `>>3`.
     me note_container_elem_type(container: LocalId, value_local: LocalId):
         self.infer_empty_array_elem_hir_type(container, value_local)
         val vt = self.local_mir_type_of(value_local)
