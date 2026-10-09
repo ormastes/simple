@@ -190,6 +190,23 @@ fn _mir_error_is_fatal(message: text) -> bool:
         message.starts_with("unsupported Result unwrap payload type") or
         message.starts_with("for-in over non-array iterables")
 
+fn driver_trait_devirtualization_allowed_v1(
+    whole_closure_lowered: bool, archive_producing: bool,
+    demand_routed: bool) -> bool:
+    """Trait-object devirtualization (MirLowering.trait_impl_closure_complete).
+
+    Sound only when the implementor set is the closure's AND the result can
+    never be reused against a different implementor set:
+    - whole_closure_lowered: every source is a real HIR module lowered here;
+    - not demand_routed: a demand/package-index route lowers dirty packages
+      only and reuses archived MIR for the rest;
+    - not archive_producing: the full-inventory cold lane publishes every
+      module's MIR into package archives, and an archived consumer is not
+      invalidated when another package later adds an implementor. Devirtualized
+      MIR is therefore produced only in lanes that never archive it.
+    (bug stage2_trait_typed_receiver_method_unresolved_2026-10-10)"""
+    whole_closure_lowered and not archive_producing and not demand_routed
+
 fn _driver_collect_mir_errors(ctx: CompileContext, errors: [MirError]):
     # `err.fatal` is the site's own explicit declaration and takes precedence.
     # `_mir_error_is_fatal(err.message)` is the deprecated message-text fallback
@@ -338,9 +355,10 @@ impl CompilerDriver:
             # devirtualize exactly as on the direct path; lower_module's own
             # provider registration stays empty as before.
             bootstrap_lowering.trait_impl_provider_modules = self.ctx.hir_modules.values()
-            bootstrap_lowering.trait_impl_closure_complete = driver_source_entry_closure_enabled(self.ctx) and
-                self.ctx.demand_mir_admission == nil and
-                self.ctx.demand_dirty_modules.len() == 0
+            bootstrap_lowering.trait_impl_closure_complete = driver_trait_devirtualization_allowed_v1(
+                driver_source_entry_closure_enabled(self.ctx),
+                self.ctx.runtime_std_full_inventory_selection != nil,
+                self.ctx.demand_mir_admission != nil or self.ctx.demand_dirty_modules.len() > 0)
             var bootstrap_mir = bootstrap_lowering.lower_module(bootstrap_hir)
             self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
             _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
@@ -401,11 +419,13 @@ impl CompilerDriver:
             # closure's when every source is a real HIR module lowered here:
             # an entry-closure/AOT build with no demand (package-index) route.
             # A demand route lowers dirty packages only and reuses archived MIR
-            # for the rest, so it stays false and trait-object calls fail
-            # closed (bug stage2_trait_typed_receiver_method_unresolved_2026-10-10).
-            direct_lowering.trait_impl_closure_complete = native_entry_closure_mir and
-                self.ctx.demand_mir_admission == nil and
-                self.ctx.demand_dirty_modules.len() == 0
+            # for the rest, and the full-inventory cold lane archives what it
+            # lowers; both stay false and trait-object calls fail closed
+            # (driver_trait_devirtualization_allowed_v1).
+            direct_lowering.trait_impl_closure_complete = driver_trait_devirtualization_allowed_v1(
+                native_entry_closure_mir,
+                self.ctx.runtime_std_full_inventory_selection != nil,
+                self.ctx.demand_mir_admission != nil or self.ctx.demand_dirty_modules.len() > 0)
             # Crossmodule field-index prepass: the entry module is lowered
             # BEFORE the dependency modules it imports, so without this an
             # imported struct's field order was unknown while lowering the

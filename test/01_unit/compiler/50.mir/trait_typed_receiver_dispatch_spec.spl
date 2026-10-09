@@ -31,6 +31,7 @@ use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.hir.hir_definitions.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
+use compiler.driver.driver_pipeline_lowering.{driver_trait_devirtualization_allowed_v1}
 
 val TRAIT_SRC = "trait Store:\n    fn list(n: i64) -> i64\n\n"
 val CONSUMER_SRC = "struct Consumer:\n    store: Store\n\nimpl Consumer:\n    fn run(n: i64) -> i64:\n        self.store.list(n)\n\nfn via_param(s: Store) -> i64:\n    s.list(2)\n\nfn main() -> i64:\n    0\n"
@@ -175,3 +176,16 @@ describe "stage2 MIR trait-typed receiver dispatch":
         expect(lowered.errors.len()).to_equal(0)
         expect(count_matching(lowered.callees, "Mem.list")).to_equal(1)
         expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)
+
+describe "driver gate for trait-object devirtualization":
+    it "devirtualizes only in whole-closure lanes that never archive MIR":
+        # entry-closure / AOT / stage3 / Stage 5 MCP cold-init lanes
+        expect(driver_trait_devirtualization_allowed_v1(true, false, false)).to_equal(true)
+        # full-inventory cold lane publishes package archives: a later demand
+        # build would reuse a consumer devirtualized against a stale
+        # implementor set, so it must never devirtualize
+        expect(driver_trait_devirtualization_allowed_v1(true, true, false)).to_equal(false)
+        # demand/package-index route: dirty packages only, archived MIR for the rest
+        expect(driver_trait_devirtualization_allowed_v1(true, false, true)).to_equal(false)
+        # sources not all lowered from HIR here
+        expect(driver_trait_devirtualization_allowed_v1(false, false, false)).to_equal(false)
