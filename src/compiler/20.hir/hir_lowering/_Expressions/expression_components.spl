@@ -307,7 +307,7 @@ impl HirLowering:
                 var hir_patterns: [HirPattern] = []
                 for pat in patterns:
                     hir_patterns = hir_patterns.push(self.lower_pattern(pat))
-                HirPatternKind.Or(hir_patterns)
+                HirPatternKind.Or(self.unify_or_pattern_bindings(hir_patterns, p.span))
 
             case Range(start, end, inclusive):
                 # if-val + bare-lift: value-if-nil and optional-in-arg are
@@ -407,6 +407,149 @@ impl HirLowering:
     # (this compiler does not check pattern exhaustiveness anywhere yet) and
     # is unchanged by this fix.
     # ========================================================================
+
+    fn or_binding_ids(p: HirPattern) -> [i64]:
+        """Symbol ids of every variable binding in `p` (any depth). Bare
+        names that are enum variants (`case Red | Green:`) are unit-variant
+        references, not bindings, and are skipped; so are `_` wildcards (a
+        payload `_` may arrive as a Binding named "_")."""
+        var out: [i64] = []
+        match p.kind:
+            case Binding(sym, _):
+                val bname = self.symbols.symbol_name_scalar_raw(sym.id)
+                if bname != "_" and bname != "" and not self.enum_variant_names.contains_key(bname):
+                    out.push(sym.id)
+            case Tuple(elems):
+                for e in elems:
+                    for id in self.or_binding_ids(e):
+                        out.push(id)
+            case Array(elems, rest):
+                for e in elems:
+                    for id in self.or_binding_ids(e):
+                        out.push(id)
+                if val rest_sym = rest:
+                    out.push(rest_sym.id)
+            case Struct(_, fields):
+                for (_, fp) in fields:
+                    for id in self.or_binding_ids(fp):
+                        out.push(id)
+            case Enum(_, _, payload):
+                if val pl = payload:
+                    match pl:
+                        case Tuple(pats):
+                            for e in pats:
+                                for id in self.or_binding_ids(e):
+                                    out.push(id)
+                        case Struct(sfields):
+                            for (_, sp) in sfields:
+                                for id in self.or_binding_ids(sp):
+                                    out.push(id)
+            case Or(alts):
+                # Nested Or was already unified; its first alternative
+                # carries the shared ids.
+                if alts.len() > 0:
+                    for id in self.or_binding_ids(alts[0]):
+                        out.push(id)
+            case _: ()
+        out
+
+    fn remap_or_bindings(p: HirPattern, names: [text], ids: [i64]) -> HirPattern:
+        """Rebuild `p` with every binding named names[k] using symbol ids[k]."""
+        val kind = match p.kind:
+            case Binding(sym, mutable):
+                val bname = self.symbols.symbol_name_scalar_raw(sym.id)
+                var mapped = sym.id
+                var k = 0
+                while k < names.len():
+                    if names[k] == bname:
+                        mapped = ids[k]
+                    k = k + 1
+                HirPatternKind.Binding(SymbolId(id: mapped), mutable)
+            case Tuple(elems):
+                var ne: [HirPattern] = []
+                for e in elems:
+                    ne.push(self.remap_or_bindings(e, names, ids))
+                HirPatternKind.Tuple(ne)
+            case Array(elems, rest):
+                var na: [HirPattern] = []
+                for e in elems:
+                    na.push(self.remap_or_bindings(e, names, ids))
+                var new_rest: SymbolId? = nil
+                if val rest_sym = rest:
+                    val rname = self.symbols.symbol_name_scalar_raw(rest_sym.id)
+                    var rmapped = rest_sym.id
+                    var rk = 0
+                    while rk < names.len():
+                        if names[rk] == rname:
+                            rmapped = ids[rk]
+                        rk = rk + 1
+                    new_rest = Some(SymbolId(id: rmapped))
+                HirPatternKind.Array(na, new_rest)
+            case Struct(stype, fields):
+                var nf: [(text, HirPattern)] = []
+                for (fname, fp) in fields:
+                    nf.push((fname, self.remap_or_bindings(fp, names, ids)))
+                HirPatternKind.Struct(stype, nf)
+            case Enum(etype, variant, payload):
+                var new_payload: HirPatternPayload? = nil
+                if val pl = payload:
+                    match pl:
+                        case Tuple(pats):
+                            var np: [HirPattern] = []
+                            for e in pats:
+                                np.push(self.remap_or_bindings(e, names, ids))
+                            new_payload = Some(HirPatternPayload.Tuple(np))
+                        case Struct(sfields):
+                            var nsf: [(text, HirPattern)] = []
+                            for (sname, sp) in sfields:
+                                nsf.push((sname, self.remap_or_bindings(sp, names, ids)))
+                            new_payload = Some(HirPatternPayload.Struct(nsf))
+                HirPatternKind.Enum(etype, variant, new_payload)
+            case Or(alts):
+                var no: [HirPattern] = []
+                for e in alts:
+                    no.push(self.remap_or_bindings(e, names, ids))
+                HirPatternKind.Or(no)
+            case _:
+                p.kind
+        HirPattern(kind: kind, has_type_: p.has_type_, type_: p.type_, span: p.span)
+
+    me unify_or_pattern_bindings(alts: [HirPattern], span: Span) -> [HirPattern]:
+        """`case S.A(x) | S.B(x):` -- every alternative must bind the same set
+        of names, and they must all bind the SAME symbol per name: the arm
+        body was resolved against one symbol, and native lowering binds each
+        alternative separately. Each alternative defined its own symbols, and
+        lexical lookup resolves the body to the LAST definition, so every
+        alternative is remapped to the last alternative's symbols. Slot-type
+        agreement is checked where payload types are known (MIR
+        lower_enum_match_flat)."""
+        if alts.len() < 2:
+            return alts
+        val last_ids = self.or_binding_ids(alts[alts.len() - 1])
+        var last_names: [text] = []
+        for lid in last_ids:
+            last_names.push(self.symbols.symbol_name_scalar_raw(lid))
+        var out: [HirPattern] = []
+        var ai = 0
+        while ai < alts.len():
+            val alt = alts[ai]
+            var alt_names: [text] = []
+            for aid in self.or_binding_ids(alt):
+                alt_names.push(self.symbols.symbol_name_scalar_raw(aid))
+            # Compare name SETS: the same name may legitimately occur at
+            # different positions/arity in each alternative.
+            var same = true
+            for an in alt_names:
+                if not last_names.contains(an):
+                    same = false
+            for ln in last_names:
+                if not alt_names.contains(ln):
+                    same = false
+            if not same:
+                self.error("or-pattern alternatives must bind the same variables: [" + alt_names.join(", ") + "] vs [" + last_names.join(", ") + "]", span)
+            out.push(self.remap_or_bindings(alt, last_names, last_ids))
+            ai = ai + 1
+        out
 
     me pattern_is_mir_native(kind: HirPatternKind) -> bool:
         """True iff the MIR B5b fast path already handles this pattern kind
