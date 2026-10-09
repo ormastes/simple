@@ -17081,6 +17081,62 @@ int64_t rt_array_enumerate(int64_t array) {
     return (int64_t)(intptr_t)out;
 }
 
+/* collections.rs:5793 -- sum of the numeric elements: int 0 for an empty
+ * array, nil for a non-array. Integer accumulation wraps (Rust release `+=`);
+ * any float element promotes the result to float(int_sum) + float_sum.
+ * Non-numeric elements are skipped, as in Rust. Byte / packed-u64 arrays store
+ * raw untagged slots, so every slot there is an integer. This is a SUPERSET of
+ * Rust: Rust's is_int() is tag-only (core.rs), while this also folds the C
+ * lane's heap-boxed wide ints (rt_core_as_heap_int), which Rust never makes. */
+int64_t rt_array_sum(int64_t array) {
+    RtCoreArray* ca = rt_core_as_array(array);
+    if (!ca) return rt_core_nil();
+    SplArray* a = (SplArray*)(uintptr_t)array;
+    int64_t n = rt_array_len(a);
+    int raw_slots = (ca->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) != 0;
+    uint64_t int_sum = 0;
+    double float_sum = 0.0;
+    int has_float = 0;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t v = rt_array_get(a, i);
+        RtCoreWideInt* wide;
+        if (raw_slots) {
+            int_sum += (uint64_t)v;
+        } else if (rt_core_is_int(v)) {
+            int_sum += (uint64_t)rt_core_as_int(v);
+        } else if ((wide = rt_core_as_heap_int(v)) != NULL) {
+            int_sum += (uint64_t)wide->value;
+        } else if (rt_core_is_float(v)) {
+            has_float = 1;
+            float_sum += rt_core_as_float(v);
+        }
+    }
+    if (has_float) return rt_value_float((double)(int64_t)int_sum + float_sum);
+    return rt_value_int((int64_t)int_sum);
+}
+
+/* collections.rs:6038 -- new array of the first clamp(n, 0, len) elements;
+ * nil for a non-array. Rust arrays hold one RuntimeValue per element, so its
+ * take always yields the same element VALUES. The C lane also has BYTES and
+ * packed-u64 arrays whose slots are raw (rt_array_get returns the raw byte /
+ * word), so the result keeps the source's STORAGE-LAYOUT flags (BYTES,
+ * U64_PACKED) and copies the raw slots: pushing raw slots into a plain tagged
+ * array would misdecode them. Other flags (e.g. TUPLE) are not propagated: the
+ * result is a plain array, as the previous C push-based take produced. */
+int64_t rt_array_take(int64_t array, int64_t n) {
+    RtCoreArray* ca = rt_core_as_array(array);
+    if (!ca) return rt_core_nil();
+    int64_t len = ca->len;
+    int64_t take = n < 0 ? 0 : (n < len ? n : len);
+    SplArray* out = rt_core_array_new(take, (uint8_t)(ca->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)));
+    RtCoreArray* co = out ? rt_core_array_ptr(out) : NULL;
+    if (!co) return rt_core_nil();
+    size_t elem_size = (ca->flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t);
+    if (take > 0) memcpy(co->data, ca->data, (size_t)take * elem_size);
+    co->len = take;
+    return (int64_t)(uintptr_t)out;
+}
+
 /* collections.rs:1464 -- append `count` elements of src onto dst; true on ok. */
 int8_t rt_array_extend_i64(int64_t dst, int64_t src, int64_t count) {
     SplArray* d = (SplArray*)(intptr_t)dst;
@@ -17128,13 +17184,27 @@ int64_t rt_string_parse_int(int64_t string) {
  * objects.rs boxes the value in a heap cell; the C runtime has no such cell
  * type, and the transparent identity box it would degrade to is exactly what
  * the Rust versions observably do for get(new(v)) == v. Ownership/refcount
- * tracking is NOT modelled -- recorded as a follow-up, not silently implied. */
+ * tracking is NOT modelled -- recorded as a follow-up, not silently implied.
+ * INVARIANT: nothing frees a shared value in this lane (no C
+ * rt_shared_release). rt_weak_upgrade below is identity ONLY while that
+ * holds; whoever adds a release path must give weak pointers a liveness check
+ * (Rust: refcount > 0) at the same time. */
 int64_t rt_unique_new(int64_t value) { return value; }
 int64_t rt_unique_get(int64_t unique) { return unique; }
 int64_t rt_shared_new(int64_t value) { return value; }
 int64_t rt_shared_get(int64_t shared) { return shared; }
 int64_t rt_handle_new(int64_t value) { return value; }
 int64_t rt_handle_get(int64_t handle) { return handle; }
+
+/* objects.rs:864/918 -- weak pointers over the shared cell above. Rust's weak
+ * upgrade answers nil only once the shared cell's refcount reached zero and it
+ * was freed. In this lane a shared value IS its own cell and no release path
+ * exists (there is no C rt_shared_release), so the referent is always live:
+ * downgrade keeps the referent and upgrade returns it, which is exactly the
+ * Rust result for a live cell. Codegen emits both for PointerKind::Weak
+ * (codegen/instr/pointers.rs). */
+int64_t rt_shared_downgrade(int64_t shared) { return shared; }
+int64_t rt_weak_upgrade(int64_t weak) { return weak; }
 
 /* ---- pointer (3): no Rust counterpart exists; emitter contract unknown -- */
 SPL_RT_TRAP1(rt_pointer_new)
