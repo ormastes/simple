@@ -6,6 +6,8 @@ use std.spec.{describe, it, expect}
 use compiler.common.config.Logger
 use compiler.frontend.frontend.parse_full_frontend
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir.{HirFunction}
+use compiler.mir._MirLowering.function_lowering.*
 use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 use compiler.common.driver_core_types.driver_core_compile_options_default
@@ -86,3 +88,45 @@ describe "enum catch-all arm ordering":
             if has_int(block, 1111):
                 default_bodies = default_bodies + 1
         expect(default_bodies).to_equal(1)
+
+# Fault injection at the runtime-identity metadata boundary: establish all
+# module registries normally, then remove only bare/qualified runtime IDs.
+# Re-lower the same parsed function with variant names/discriminants intact.
+fn missing_identity_messages(first_arm: text) -> text:
+    val src = "enum E:\n    A\n    B\n\nfn pick(e: E) -> i64:\n    match e:\n" + first_arm + "        case _:\n            1111\n"
+    val parsed = parse_full_frontend(src, "testdata/enum_missing_identity.spl", "enum_missing_identity", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/enum_missing_identity.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target)
+    val initial_mir = lowering.lower_module(hir)
+    for error in lowering.errors:
+        expect(error.message.starts_with("unreachable match arm:")).to_equal(true)
+    expect(lowering.enum_runtime_id_index.has("E")).to_equal(true)
+    expect(lowering.enum_variant_index.has("E")).to_equal(true)
+    lowering.enum_runtime_id_index = {}
+    lowering.enum_runtime_id_index_q = {}
+    lowering.errors = []
+    var lowered = false
+    for entry in hir.functions.values():
+        val function: HirFunction = entry
+        if function.name == "pick" or function.name.ends_with(".pick"):
+            val relowered = lowering.lower_function(function)
+            lowered = true
+    expect(lowered).to_equal(true)
+    var messages = ""
+    for error in lowering.errors:
+        messages = messages + error.message + "\n"
+    messages
+
+describe "enum match runtime identity metadata":
+    it "rejects a retained variant test when its runtime identity is missing":
+        val messages = missing_identity_messages("        case E.A:\n            7777\n")
+        expect(messages.contains("enum construction: missing runtime identity for '")).to_equal(true)
+
+    it "needs no runtime identity when a first catch-all removes every variant test":
+        val messages = missing_identity_messages("        case _ | E.A:\n            7777\n")
+        expect(messages.contains("missing runtime identity")).to_equal(false)
+        # Only the existing unreachable-arm warnings are permitted.
+        for message in messages.split("\n"):
+            expect(message == "" or message.starts_with("unreachable match arm:")).to_equal(true)
