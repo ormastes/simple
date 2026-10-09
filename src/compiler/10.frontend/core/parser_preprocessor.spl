@@ -4,7 +4,7 @@
 # and @cfg per-declaration conditionals.
 # Extracted from parser.spl.
 
-use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_detect_os, cfg_detect_arch, cfg_detect_cpu, cfg_eval_key_value}
+use compiler.core.cfg_platform.{cfg_strip_quotes, cfg_detect_os, cfg_detect_arch, cfg_os_is_unix, cfg_eval_key_value}
 use compiler.frontend.frontend_target_cfg_receipt_v1.{
     FrontendCfgDecisionV1, FrontendTargetPreprocessV1}
 
@@ -18,129 +18,88 @@ var _pp_target_arch: text = ""
 var _pp_target_error: text = ""
 var _pp_target_decisions: [FrontendCfgDecisionV1] = []
 
-fn _pp_target_os_match(value: text) -> bool:
-    val wanted = if value == "win": "windows"
-        elif value == "mac" or value == "darwin": "macos"
-        else: value
+# One condition evaluator for both modes. Target mode (receipted native
+# builds) evaluates against the explicit target and records an error for
+# anything it does not recognize; ambient mode evaluates against the build
+# target / host from cfg_platform and treats unknown atoms as false.
+fn _pp_current_os() -> text:
+    if _pp_target_mode: _pp_target_os else: cfg_detect_os()
+
+fn _pp_current_arch() -> text:
+    if _pp_target_mode: _pp_target_arch else: cfg_detect_arch()
+
+fn _pp_unsupported(message: text) -> bool:
+    if _pp_target_mode:
+        _pp_target_error = message
+    false
+
+fn _pp_os_name(value: text) -> text:
+    if value == "win": return "windows"
+    if value == "mac" or value == "darwin": return "macos"
+    if value == "baremetal": return "none"
+    if value == "windows" or value == "linux" or value == "macos" or
+            value == "freebsd" or value == "openbsd" or value == "netbsd" or
+            value == "android" or value == "simpleos" or value == "none" or
+            value == "unix":
+        return value
+    ""
+
+fn _pp_arch_name(value: text) -> text:
+    if value == "amd64" or value == "x64": return "x86_64"
+    if value == "arm64": return "aarch64"
+    if value == "i386" or value == "i686": return "x86"
+    if value == "armv6" or value == "armv7" or value == "arm32": return "arm"
+    if value == "ppc64el" or value == "powerpc64le": return "ppc64le"
+    if value == "x86_64" or value == "x86" or value == "aarch64" or
+            value == "arm" or value == "riscv64" or value == "riscv32" or
+            value == "ppc64le" or value == "thumbv6m" or value == "thumbv7m" or
+            value == "thumbv7em":
+        return value
+    ""
+
+fn _pp_os_match(value: text) -> bool:
+    val wanted = _pp_os_name(value)
+    if wanted == "":
+        return _pp_unsupported("unsupported target cfg OS: {value}")
+    val os = _pp_current_os()
     if wanted == "unix":
-        return _pp_target_os == "linux" or _pp_target_os == "macos" or
-            _pp_target_os == "freebsd" or _pp_target_os == "openbsd" or
-            _pp_target_os == "netbsd" or _pp_target_os == "android" or
-            _pp_target_os == "simpleos"
-    if wanted != "windows" and wanted != "linux" and wanted != "macos" and
-            wanted != "freebsd" and wanted != "openbsd" and
-            wanted != "netbsd" and wanted != "android" and
-            wanted != "simpleos" and wanted != "none":
-        _pp_target_error = "unsupported target cfg OS: {value}"
-        return false
-    _pp_target_os == wanted
+        return cfg_os_is_unix(os)
+    os == wanted
 
-fn _pp_target_arch_match(value: text) -> bool:
-    val wanted = if value == "amd64" or value == "x64": "x86_64"
-        elif value == "arm64": "aarch64"
-        elif value == "i386" or value == "i686": "x86"
-        elif value == "armv6" or value == "armv7": "arm"
-        elif value == "ppc64el" or value == "powerpc64le": "ppc64le"
-        else: value
-    if wanted != "x86_64" and wanted != "x86" and wanted != "aarch64" and
-            wanted != "arm" and wanted != "riscv64" and wanted != "riscv32" and
-            wanted != "ppc64le" and wanted != "thumbv6m" and
-            wanted != "thumbv7m" and wanted != "thumbv7em":
-        _pp_target_error = "unsupported target cfg architecture: {value}"
-        return false
-    _pp_target_arch == wanted
+fn _pp_family_match(value: text) -> bool:
+    if value == "unix": return cfg_os_is_unix(_pp_current_os())
+    if value == "windows": return _pp_current_os() == "windows"
+    _pp_unsupported("unsupported target cfg family: {value}")
 
-fn _pp_target_eval_atom(token: text) -> bool:
+fn _pp_arch_match(value: text) -> bool:
+    val wanted = _pp_arch_name(value)
+    if wanted == "":
+        return _pp_unsupported("unsupported target cfg architecture: {value}")
+    _pp_current_arch() == wanted
+
+fn _pp_eval_atom(token: text) -> bool:
     val t = cfg_strip_quotes(token).trim()
     if t == "true" or t == "compiled": return true
     if t == "false" or t == "interpreter": return false
-    if t == "unix" or t == "win" or t == "windows" or t == "linux" or
-            t == "mac" or t == "macos" or t == "darwin" or t == "freebsd" or
-            t == "openbsd" or t == "netbsd" or t == "android" or
-            t == "simpleos" or t == "none":
-        return _pp_target_os_match(t)
-    if t == "x86_64" or t == "amd64" or t == "x64" or t == "x86" or
-            t == "i386" or t == "i686" or t == "aarch64" or t == "arm64" or
-            t == "arm" or t == "armv6" or t == "armv7" or t == "riscv64" or
-            t == "riscv32" or t == "ppc64le" or t == "ppc64el" or
-            t == "powerpc64le" or t == "thumbv6m" or t == "thumbv7m" or
-            t == "thumbv7em":
-        return _pp_target_arch_match(t)
-    var parts = if t.contains("=="): t.split("==") else: t.split("=")
+    if not _pp_target_mode:
+        if t == "": return false
+        if t == "debug": return true
+        if t == "release": return false
+    if _pp_os_name(t) != "": return _pp_os_match(t)
+    if _pp_arch_name(t) != "": return _pp_arch_match(t)
+    val parts = if t.contains("=="): t.split("==") else: t.split("=")
     if parts.len() == 2:
         val key = cfg_strip_quotes(parts[0]).trim()
         val value = cfg_strip_quotes(parts[1]).trim()
-        if key == "os" or key == "platform": return _pp_target_os_match(value)
+        if key == "os" or key == "platform" or key == "target_os":
+            return _pp_os_match(value)
+        if key == "family" or key == "target_family":
+            return _pp_family_match(value)
         if key == "arch" or key == "target_arch":
-            return _pp_target_arch_match(value)
-    _pp_target_error = "unsupported target cfg condition atom: {t}"
-    false
-
-fn _pp_eval_atom(token: text) -> bool:
-    if _pp_target_mode:
-        return _pp_target_eval_atom(token)
-    val t = cfg_strip_quotes(token).trim()
-    if t == "":
-        return false
-    if t == "true":
-        return true
-    if t == "false":
-        return false
-    if t == "debug":
-        return true
-    if t == "release":
-        return false
-    if t == "compiled":
-        return true
-    if t == "interpreter":
-        return false
-
-    if t == "win" or t == "windows":
-        return cfg_detect_os() == "windows"
-    if t == "linux":
-        return cfg_detect_os() == "linux"
-    if t == "mac" or t == "macos" or t == "darwin":
-        return cfg_detect_os() == "macos"
-    if t == "freebsd":
-        return cfg_detect_os() == "freebsd"
-    if t == "openbsd":
-        return cfg_detect_os() == "openbsd"
-    if t == "netbsd":
-        return cfg_detect_os() == "netbsd"
-    if t == "android":
-        return cfg_detect_os() == "android"
-    if t == "unix":
-        val os = cfg_detect_os()
-        val is_unix = os == "linux" or os == "macos"
-        val is_unix2 = os == "freebsd" or os == "openbsd"
-        val is_unix3 = os == "netbsd" or os == "android"
-        return is_unix or is_unix2 or is_unix3 or os == "unix"
-
-    if t == "x86_64" or t == "amd64" or t == "x64":
-        return cfg_detect_arch() == "x86_64"
-    if t == "x86" or t == "i386" or t == "i686":
-        return cfg_detect_arch() == "x86"
-    if t == "aarch64" or t == "arm64":
-        return cfg_detect_arch() == "aarch64"
-    if t == "arm" or t == "armv7" or t == "armv6":
-        return cfg_detect_arch() == "arm"
-    if t == "riscv64":
-        return cfg_detect_arch() == "riscv64"
-    if t == "riscv32":
-        return cfg_detect_arch() == "riscv32"
-    if t == "ppc64le" or t == "ppc64el" or t == "powerpc64le":
-        return cfg_detect_arch() == "ppc64le"
-
-    if t.contains("=="):
-        val parts = t.split("==")
-        if parts.len() >= 2:
-            return cfg_eval_key_value(parts[0], parts[1])
-    if t.contains("="):
-        val parts = t.split("=")
-        if parts.len() >= 2:
-            return cfg_eval_key_value(parts[0], parts[1])
-
-    false
+            return _pp_arch_match(value)
+        if not _pp_target_mode and (key == "cpu" or key == "feature"):
+            return cfg_eval_key_value(key, value)
+    _pp_unsupported("unsupported target cfg condition atom: {t}")
 
 fn _pp_tokenize_condition(condition: text) -> [text]:
     var tokens: [text] = []

@@ -416,9 +416,22 @@ impl MirLowering:
                         case HirTypeKind.Dict(_, _):
                             self.runtime_dict_locals[dest.id] = true
                             self.mark_runtime_value_local(dest.id)
-                        case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                        case HirTypeKind.Array(global_elem_type, _) | HirTypeKind.Slice(global_elem_type):
                             self.runtime_array_locals[dest.id] = true
                             self.mark_runtime_value_local(dest.id)
+                            # A `[Struct]` global must carry its element struct
+                            # name exactly like a `[Struct]` parameter/let local
+                            # (function_lowering.spl param registration): without
+                            # it `var s = _slots[i]` decodes to a nameless word,
+                            # `s.field` cannot resolve the owner struct, and a
+                            # `for x in s.items` over a declared `[T]` field falls
+                            # into the #143 non-array fallback.
+                            match global_elem_type.kind:
+                                case HirTypeKind.Named(global_elem_symbol, _):
+                                    val global_elem = self.symbols.get_symbol_raw(global_elem_symbol.id)
+                                    if global_elem.?:
+                                        self.array_element_struct_syms[dest.id] = global_elem.name
+                                case _: ()
                         case _: ()
             # Register struct provenance for the loaded local, mirroring every
             # other struct-value-producing site (mir_lowering_stmts.spl:291,

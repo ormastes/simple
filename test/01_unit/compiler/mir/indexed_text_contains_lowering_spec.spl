@@ -1,0 +1,156 @@
+"""
+Purpose: Pin native MIR lowering of text `contains` when the receiver is a
+computed text value (indexed `[text]` element or a `text` struct field) rather
+than a local declared `text`.
+Audience: compiler engineers maintaining method-call dispatch
+(_MirLoweringExpr/method_calls_literals).
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_function(src: text, target_name: text) -> text:
+    val filename = "indexed_text_contains_" + target_name + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            result = result + serialize_mir_function(function)
+    result
+
+val INDEXED_FIELD_SRC = """
+struct TextHolder:
+    values: [text]
+
+fn indexed_text_contains(holder: TextHolder, needle: text) -> bool:
+    holder.values[0].contains(needle)
+"""
+
+val INDEXED_PARAM_SRC = """
+fn argv_has_nul(argv: [text], i: i64) -> bool:
+    argv[i].contains("x")
+"""
+
+val TEXT_FIELD_SRC = """
+struct Pair:
+    key: text
+    value: text
+
+fn pair_has_eq(item: Pair) -> bool:
+    item.key.contains("=") or item.value.contains("=")
+"""
+
+val CHAINED_OPTIONAL_SRC = """
+fn is_windows_platform(os_env: text?) -> bool:
+    if os_env == nil:
+        false
+    else:
+        os_env.lower().contains("windows")
+"""
+
+val CHAINED_TEXT_SRC = """
+fn lowered_has(s: text) -> bool:
+    s.lower().contains("w")
+"""
+
+val SUBSTRING_ARG_SRC = """
+fn digit_at(key: text, i: i64) -> bool:
+    val digits = "0123456789"
+    not digits.contains(key.substring(i, i + 1))
+"""
+
+val FOR_IN_FIELD_ITEM_SRC = """
+struct EnvItem:
+    key: text
+    value: text
+
+struct Request:
+    env: [EnvItem]
+
+fn env_has_eq(request: Request) -> bool:
+    for item in request.env:
+        if item.key == "" or item.key.contains("=") or item.value.contains("=") :
+            return true
+    false
+"""
+
+val INDEXED_STRUCT_ELEMENT_FIELD_SRC = """
+struct EnvItem:
+    key: text
+    value: text
+
+struct Request:
+    environment: [EnvItem]
+
+fn env_valid(request: Request) -> bool:
+    var i = 0
+    while i < request.environment.len():
+        val item = request.environment[i]
+        if item.key == "" or item.key.contains("=") or item.value.contains("="):
+            return false
+        i = i + 1
+    true
+"""
+
+val ARRAY_RECEIVER_SRC = """
+fn array_has(values: [i64], needle: i64) -> bool:
+    values.contains(needle)
+"""
+
+describe "text contains on computed receivers":
+    it "dispatches an indexed [text] struct field to the text runtime":
+        val mir = lower_function(INDEXED_FIELD_SRC, "indexed_text_contains")
+        expect(mir.contains("unresolved method call: contains")).to_be(false)
+        expect(mir).to_contain("rt_string_contains")
+
+    it "dispatches an indexed [text] parameter to the text runtime":
+        val mir = lower_function(INDEXED_PARAM_SRC, "argv_has_nul")
+        expect(mir.contains("unresolved method call: contains")).to_be(false)
+        expect(mir).to_contain("rt_string_contains")
+
+    it "dispatches text struct fields to the text runtime":
+        val mir = lower_function(TEXT_FIELD_SRC, "pair_has_eq")
+        expect(mir.contains("unresolved method call: contains")).to_be(false)
+        expect(mir).to_contain("rt_string_contains")
+
+    it "dispatches a lowered optional text receiver after a nil guard":
+        val mir = lower_function(CHAINED_OPTIONAL_SRC, "is_windows_platform")
+        expect(mir.contains("unresolved method call")).to_be(false)
+        expect(mir).to_contain("rt_string_contains")
+
+    it "dispatches a chained lower() result to the text runtime":
+        val mir = lower_function(CHAINED_TEXT_SRC, "lowered_has")
+        expect(mir.contains("unresolved method call")).to_be(false)
+        expect(mir).to_contain("rt_string_contains")
+
+    it "dispatches contains with a substring argument":
+        val mir = lower_function(SUBSTRING_ARG_SRC, "digit_at")
+        expect(mir.contains("unresolved method call")).to_be(false)
+        expect(mir).to_contain("rt_string_contains")
+
+    it "dispatches text fields of a for-in element from a struct array field":
+        val mir = lower_function(FOR_IN_FIELD_ITEM_SRC, "env_has_eq")
+        expect(mir.contains("unresolved method call")).to_be(false)
+        expect(mir).to_contain("rt_string_contains")
+
+    it "dispatches text fields of an indexed struct-array field element":
+        val mir = lower_function(INDEXED_STRUCT_ELEMENT_FIELD_SRC, "env_valid")
+        expect(mir.contains("unresolved method call")).to_be(false)
+        expect(mir).to_contain("rt_string_contains")
+
+    it "keeps array receivers off the text runtime":
+        val mir = lower_function(ARRAY_RECEIVER_SRC, "array_has")
+        expect(mir.contains("rt_string_contains")).to_be(false)
