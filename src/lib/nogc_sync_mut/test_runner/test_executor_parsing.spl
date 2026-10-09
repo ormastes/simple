@@ -846,6 +846,41 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
         combined
     )
 
+fn hosted_lane_child_error(stdout: text) -> text:
+    """The lane error a hosted-lane child (hosted_lane_main.spl) printed as
+    `hosted lane: <error>`, or "" when it printed none. The last such line wins."""
+    val prefix = "hosted lane: "
+    var found = ""
+    for line in stdout.split("\n"):
+        val clean = line.trim()
+        if clean.starts_with(prefix):
+            found = clean[prefix.len():]
+    found
+
+fn apply_hosted_lane_child_error(result: TestFileResult, stdout: text, exit_code: i32) -> TestFileResult:
+    """Carry a hosted-lane child's own error into the parent's result.
+
+    In-process (before the lanes moved to a child) a probe failure such as
+    `skip: cuda lane unavailable: ...` stayed on TestFileResult.error with
+    failed: 0, skipped: 1, which classifies as an error/skip-with-reason, never
+    a pass. The child exits 0 for that skip, and the generic exit-0 mapper
+    rebuilds the result with error "" -- a clean pass on a host without the
+    capability. Restore the in-process result: the child's named error wins,
+    and a `skip:` error keeps failed: 0. Only a child that completed normally
+    (exit 0 or 1) is trusted; crash/timeout/signal classifications stand."""
+    if exit_code != 0 and exit_code != 1:
+        return result
+    val child_error = hosted_lane_child_error(stdout)
+    if child_error == "":
+        return result
+    var out = result
+    out.error = child_error
+    if child_error.starts_with("skip:"):
+        out.failed = 0
+        if out.skipped == 0:
+            out.skipped = 1
+    out
+
 fn read_structured_test_evidence(path: text) -> (i64, i64, i64):
     if path == "" or not file_exists(path):
         return (0, 0, 0)
@@ -1097,6 +1132,7 @@ export find_simple_new_binary, find_runtime_lib_dir, find_simple_binary
 export extract_error_message, parse_test_output, parse_test_omission_evidence
 export extract_number_before, extract_number_after_colon
 export build_child_args, make_result_from_output, read_structured_test_evidence, make_result_from_structured_evidence
+export hosted_lane_child_error, apply_hosted_lane_child_error
 export coverage_wrapper_suffix, build_coverage_wrapper
 export extract_coverage_sdn, strip_coverage_blocks
 export list_tests_static, extract_static_test_name
