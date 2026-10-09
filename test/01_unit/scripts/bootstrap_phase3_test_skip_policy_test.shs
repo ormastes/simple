@@ -145,8 +145,22 @@ expect_reject hwir-partial "$tmp/hwir_spec.spl" 1 1
 
 # Shell twin parity: PHASE3_FEATURE_GATES must list exactly the gates (and
 # build defaults) of feature_gates() in std.spec.requires_feature.
-spl_gates=$(sed -n 's/^[[:space:]]*FeatureGate(feature: "\([a-z0-9-]*\)", key: "[a-z0-9_]*", build_default: "\([a-z]*\)").*/\1=\2/p' \
-  "$root/src/lib/nogc_sync_mut/spec/requires_feature.spl" | sort | tr '\n' ' ')
+# Fail closed: every `FeatureGate(` occurrence must parse as a one-line row,
+# and each row's key must be the feature with `-` -> `_` (the shell twin
+# derives the host-config key that way, it never reads `key:`).
+spl_src="$root/src/lib/nogc_sync_mut/spec/requires_feature.spl"
+spl_rows=$(sed -n 's/^[[:space:]]*FeatureGate(feature: "\([a-z0-9-]*\)", key: "\([a-z0-9_]*\)", build_default: "\([a-z]*\)").*/\1|\2|\3/p' "$spl_src")
+spl_row_total=$(grep -c 'FeatureGate(' "$spl_src")
+spl_row_parsed=$(printf '%s\n' "$spl_rows" | grep -c '|')
+[ "$spl_row_total" = "$spl_row_parsed" ] ||
+  fail "unparsed FeatureGate rows: $spl_row_total present, $spl_row_parsed parsed"
+for spl_row in $spl_rows; do
+  spl_feature=${spl_row%%|*}
+  spl_key=${spl_row#*|}; spl_key=${spl_key%%|*}
+  [ "$spl_key" = "$(printf '%s' "$spl_feature" | tr '-' '_')" ] ||
+    fail "FeatureGate key drift: feature=$spl_feature key=$spl_key (shell derives it by tr - _)"
+done
+spl_gates=$(printf '%s\n' "$spl_rows" | sed -n 's/^\([^|]*\)|[^|]*|\(.*\)$/\1=\2/p' | sort | tr '\n' ' ')
 sh_gates=$(sed -n 's/^PHASE3_FEATURE_GATES="\(.*\)"$/\1/p' "$policy" | tr ' ' '\n' | sort | tr '\n' ' ')
 [ -n "$spl_gates" ] || fail 'no FeatureGate rows parsed from requires_feature.spl'
 [ "$spl_gates" = "$sh_gates" ] ||
