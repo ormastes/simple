@@ -4200,6 +4200,22 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         echo "error: could not publish immutable Stage 2 admission receipt" >&2
         stage2_status=4
       else
+        # Publish the platform's runtime names and bind the exact capsule to
+        # this admission before exposing a completed Stage 2 to verification.
+        sh "${repo_root}/scripts/bootstrap/phase2-runtime-binding.shs" publish \
+          "${stage2_admitted_absolute}" "${stage_runtime_absolute}" \
+          "$(absolute_path "${output_dir}")/phase2-runtime-capsules" || {
+          echo "error: could not publish the admitted Phase 2 runtime capsule" >&2
+          exit 1
+        }
+        # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
+        if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
+          sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage2_admitted_bin}" phase2 || \
+            echo "  warning: phase2 snapshot preservation failed (non-fatal)" >&2
+        fi
+        # Downstream parent/planner publication can fail. Seal this completed
+        # admission first so the next attempt can archive its exact evidence.
+        chmod 500 "${stage2_admitted_dir}"
         if [ "${bootstrap_stage2_trust_root}" -eq 1 ]; then
           stage2_parent_dir=$(dirname -- "${stage2_bin}")
           stage2_parent_sanity="${stage2_parent_dir}/stage2-sanity.receipt"
@@ -4288,20 +4304,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
             echo "bootstrap-policy: resume with: sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-managed-from-admitted=${output_dir} --bootstrap-receipt=${managed_stage4_planner_receipt}"
           fi
         fi
-        # Publish the platform's runtime names and bind the exact capsule to
-        # this admission before exposing a completed Stage 2 to verification.
-        sh "${repo_root}/scripts/bootstrap/phase2-runtime-binding.shs" publish \
-          "${stage2_admitted_absolute}" "${stage_runtime_absolute}" \
-          "$(absolute_path "${output_dir}")/phase2-runtime-capsules" || {
-          echo "error: could not publish the admitted Phase 2 runtime capsule" >&2
-          exit 1
-        }
-        # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
-        if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
-          sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage2_admitted_bin}" phase2 || \
-            echo "  warning: phase2 snapshot preservation failed (non-fatal)" >&2
-        fi
-        chmod 500 "${stage2_admitted_dir}"
       fi
     fi
   fi
