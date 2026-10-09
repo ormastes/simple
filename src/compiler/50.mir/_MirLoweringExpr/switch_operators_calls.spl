@@ -1933,6 +1933,17 @@ impl MirLowering:
         self.builder = b_abort
         panic_temp
 
+    fn symbol_bound_local(symbol_id: i64) -> LocalId:
+        """The local currently bound to `symbol_id`, or LocalId(-1).
+
+        `local_map` is written only by match-arm bindings; ordinary `val` /
+        `var` bindings live in the bind_local/find_local index. Consulting
+        only `local_map` made `val r = f(); r.is_err()` lose the Result type
+        the call result carried, while `f().is_err()` lowered fine."""
+        if self.local_map.has(symbol_id):
+            return self.local_map[symbol_id]
+        self.find_local(symbol_id)
+
     me enum_match_expr_type(expr: HirExpr) -> HirType?:
         """Recover a match scrutinee type without depending on lowering order."""
         # Flat/cache transport retains a placeholder even when no expression
@@ -1947,8 +1958,9 @@ impl MirLowering:
             case Var(symbol):
                 # Function-local provenance belongs to this binding; a raw
                 # symbol entry can still carry a pre-inference owner/type.
-                if self.local_map.has(symbol.id):
-                    val local = self.local_map[symbol.id]
+                val bound_local = self.symbol_bound_local(symbol.id)
+                if bound_local.id >= 0:
+                    val local = bound_local
                     if val local_type = self.find_local_hir_type(local.id):
                         match local_type.kind:
                             case HirTypeKind.Infer(_, _): ()
@@ -1963,8 +1975,9 @@ impl MirLowering:
                             case HirTypeKind.Error: ()
                             case _: return Some(found_type)
             case NamedVar(symbol, _):
-                if self.local_map.has(symbol.id):
-                    val local = self.local_map[symbol.id]
+                val bound_local = self.symbol_bound_local(symbol.id)
+                if bound_local.id >= 0:
+                    val local = bound_local
                     if val local_type = self.find_local_hir_type(local.id):
                         match local_type.kind:
                             case HirTypeKind.Infer(_, _): ()

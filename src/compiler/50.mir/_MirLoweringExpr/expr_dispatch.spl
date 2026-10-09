@@ -18,6 +18,7 @@ use compiler.mir._MirLoweringExpr.text_index_ranges.*
 use compiler.mir.mir_data.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.blocks.value.BlockValue
@@ -1280,11 +1281,81 @@ impl MirLowering:
             self.mark_runtime_value_local(boxed.id)
         boxed
 
+    me infer_empty_array_elem_hir_type(container: LocalId, value_local: LocalId):
+        """Adopt the stored elements' type for an unannotated array.
+
+        `var c = []` carries no element type, so `c.first()` / `c.get(i)`
+        could not choose a decode and failed as `unresolved method call`.
+        Observed stores (push / index-assign) are the only evidence the
+        compiler has. The first store's type is recorded as `[T]` only when it
+        is positively known (the value's own HIR type, or a text/f64/bool MIR
+        local; an i64 MIR type is the erased default and is NOT evidence).
+        Every later store must agree (`hir_types_equal`): an unknown or
+        different element type poisons the inference (state 2) and records
+        `[Error]`, so `first`/`last`/`get` fail loudly instead of decoding
+        with the wrong type, and other consumers see the same erased element
+        they saw before inference existed. A declared element type is never
+        touched (only containers this helper itself typed are revisited)."""
+        if not self.local_is_runtime_array(container):
+            return
+        val state = if self.inferred_array_elem_state.contains(container.id): self.inferred_array_elem_state[container.id] else: 0
+        if state == 2:
+            return
+        if state == 0:
+            if val existing = self.find_local_hir_type(container.id):
+                match existing.kind:
+                    case HirTypeKind.Array(existing_elem, _):
+                        match existing_elem.kind:
+                            case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
+                            case _: return
+                    # An unannotated `var c = []` binding records no element and
+                    # may record an unresolved container type; neither is evidence.
+                    case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
+                    case _: return
+        var elem_kind_found = false
+        var elem_type = HirType(kind: HirTypeKind.Error, span: Span.empty())
+        if val value_hir = self.find_local_hir_type(value_local.id):
+            match value_hir.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
+                case _:
+                    elem_type = value_hir
+                    elem_kind_found = true
+        if not elem_kind_found:
+            if self.local_is_str(value_local):
+                elem_type = HirType(kind: HirTypeKind.Str, span: Span.empty())
+                elem_kind_found = true
+            elif val value_mir = self.local_mir_type_of(value_local):
+                match value_mir.kind:
+                    case MirTypeKind.F64:
+                        elem_type = HirType(kind: HirTypeKind.Float(64), span: Span.empty())
+                        elem_kind_found = true
+                    case MirTypeKind.Bool:
+                        elem_type = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+                        elem_kind_found = true
+                    case _: ()
+        var agrees = elem_kind_found
+        if agrees and state == 1:
+            agrees = false
+            if val inferred = self.find_local_hir_type(container.id):
+                match inferred.kind:
+                    case HirTypeKind.Array(inferred_elem, _):
+                        agrees = hir_types_equal(inferred_elem, elem_type)
+                    case _: ()
+        if agrees:
+            if state == 0:
+                self.inferred_array_elem_state[container.id] = 1
+                self.remember_local_hir_type(container.id, HirType(kind: HirTypeKind.Array(elem_type, nil), span: Span.empty()), 0, 0)
+            return
+        self.inferred_array_elem_state[container.id] = 2
+        if state == 1:
+            self.remember_local_hir_type(container.id, HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Error, span: Span.empty()), nil), span: Span.empty()), 0, 0)
+
     # Record the f64/f32 type of a value stored into a container whose
     # declared element type may be the erased i64 default (empty `{}`/`[]`
     # literal). Reads consult runtime_elem_value_type so decode takes the
     # rt_value_as_float arm instead of shredding the heap-box ptr via `>>3`.
     me note_container_elem_type(container: LocalId, value_local: LocalId):
+        self.infer_empty_array_elem_hir_type(container, value_local)
         val vt = self.local_mir_type_of(value_local)
         if vt != nil:
             val vt_disc = _sffi_enum_discriminant(vt.kind)
@@ -2051,6 +2122,20 @@ impl MirLowering:
                     # The callee's return boundary guarantees a tagged word;
                     # retain that fact after Any erases to MIR i64.
                     self.mark_runtime_value_local(local.id)
+                case HirTypeKind.Named(_, _):
+                    # The name-keyed shape registry above answers nothing for
+                    # a free-fn name defined in two closure modules (e.g.
+                    # `run_spl_doctests_same_file` / `extract_skip_feature_info`
+                    # exist in both src/lib and src/app/test_runner_new), so
+                    # the call result lost its struct identity and
+                    # `info.status.lower()` / `for b in r.blocks:` failed.
+                    # The callee's signature relocated into THIS module's
+                    # table still names the struct; recover it with the same
+                    # fail-closed Struct/Class + known-layout gate.
+                    if not self.struct_value_syms.contains(local.id):
+                        val named_return_struct = self.optional_payload_struct_name(found_type)
+                        if named_return_struct != "":
+                            self.struct_value_syms[local.id] = named_return_struct
                 case _:
                     ()
 
@@ -5695,8 +5780,17 @@ impl MirLowering:
                     # local symbol. Mutability flag is ignored at MIR
                     # level (it only matters for borrow-check).
                     if has_default_body:
+                        # Name the binding and its owner: arm spans are often
+                        # (0,0) here, so the bare message was location-blind.
+                        # A bare enum variant (`case Pass:`) whose enum the
+                        # pattern lowering could not see arrives as exactly
+                        # such a Binding, which the name makes obvious.
+                        val dup_binding_name = self.symbols.symbol_name_scalar_raw(symbol.id)
+                        var dup_fn_name = "?"
+                        if val dup_fn = self.builder.current_function:
+                            dup_fn_name = dup_fn.name
                         self.error(
-                            "B5b: match has multiple wildcard/binding default arms",
+                            "B5b: match has multiple wildcard/binding default arms (binding `{dup_binding_name}` in fn {dup_fn_name}, module {self.current_module_id})",
                             Some(arm.span)
                         )
                         var b_dup = self.builder
