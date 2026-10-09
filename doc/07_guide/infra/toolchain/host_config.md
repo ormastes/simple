@@ -62,7 +62,10 @@ configuration. The FreeBSD helper calls the same initializer and accepts no
 arguments. Linux (including ARM64 Spark hosts) uses `host-env.shs` directly.
 The canonical FreeBSD QEMU bootstrap wrapper initializes this file after source
 sync and toolchain setup, using its selected guest build user's HOME. Smoke mode
-does so only when the guest already contains the setup script.
+does so only when the guest already contains the setup script. The full lane's
+Stage 2 build requests `--jobs=full`, bounded by guest CPU allocation and the
+user's job ceiling; existing memory limits still apply. Stage 3/4 resume keeps
+its required `--jobs=1` orchestration contract.
 
 The generated `worker_mem_mib` remains commented out, retaining the consumer's
 3300 MiB per-worker estimate and memory clamp. Selecting all cores raises the
