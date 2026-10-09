@@ -2383,6 +2383,57 @@ impl MirLowering:
             slot_i = slot_i + 1
 
     me lower_enum_match(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
+        """Expand `case A | B(x):` or-arms into one arm per alternative (sharing
+        guard and body), then lower via lower_enum_match_flat. Without this an
+        Or arm in an enum match died as "enum match: unsupported arm pattern".
+        A bare alternative (`Green`) arrives as Binding and is reclassified to
+        a unit-variant Enum pattern exactly like lower_match_case's
+        normalization: only when its name has exactly one owning enum."""
+        var has_or = false
+        var oi = 0
+        while oi < arms.len():
+            val or_probe: HirMatchArm = arms[oi]
+            match or_probe.pattern.kind:
+                case Or(_):
+                    has_or = true
+                case _: ()
+            oi = oi + 1
+        if not has_or:
+            return self.lower_enum_match_flat(scrutinee, arms, expected_type)
+        var flat_arms: [HirMatchArm] = []
+        var ei = 0
+        while ei < arms.len():
+            val src_arm: HirMatchArm = arms[ei]
+            match src_arm.pattern.kind:
+                case Or(alts):
+                    var alt_i = 0
+                    while alt_i < alts.len():
+                        val alt: HirPattern = alts[alt_i]
+                        var alt_pat = alt
+                        match alt.kind:
+                            case Binding(alt_sym, _):
+                                val alt_name = self.symbols.symbol_name_scalar_raw(alt_sym.id)
+                                if alt_name != "" and self.variant_owner_keys(alt_name).len() == 1:
+                                    alt_pat = HirPattern(
+                                        kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: alt.span), alt_name, nil),
+                                        type_: nil,
+                                        span: alt.span
+                                    )
+                            case _: ()
+                        flat_arms = flat_arms.push(HirMatchArm(
+                            pattern: alt_pat,
+                            has_guard: src_arm.has_guard,
+                            guard: src_arm.guard,
+                            body: src_arm.body,
+                            span: src_arm.span
+                        ))
+                        alt_i = alt_i + 1
+                case _:
+                    flat_arms = flat_arms.push(src_arm)
+            ei = ei + 1
+        self.lower_enum_match_flat(scrutinee, flat_arms, expected_type)
+
+    me lower_enum_match_flat(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
         """Lower `match e: case Variant(x): ...` for enum patterns. Dispatches on
         _sffi_enum_discriminant(e) compared to each variant's index; binds a single
         i64 payload via rt_enum_payload(e). Mirrors emit_if_chain_dispatch."""
@@ -2570,7 +2621,24 @@ impl MirLowering:
                     has_default = true
                     default_body = arm.body
                 case _:
-                    self.error("enum match: unsupported arm pattern", Some(arm.pattern.span))
+                    val unsupported_kind = match arm.pattern.kind:
+                        case Literal(_): "Literal"
+                        case Tuple(_): "Tuple"
+                        case Array(_, _): "Array"
+                        case Struct(_, _): "Struct"
+                        case Or(_): "Or"
+                        case Range(_, _, _): "Range"
+                        case TypeTest(_, _): "TypeTest"
+                        case _: "other"
+                    # Synthesized patterns carry an empty span (no file,
+                    # line 0), which _format_mir_error prints location-less.
+                    # Fall back to the arm, then the scrutinee.
+                    var unsupported_span = arm.pattern.span
+                    if unsupported_span.file == "" and unsupported_span.line <= 0:
+                        unsupported_span = arm.span
+                    if unsupported_span.file == "" and unsupported_span.line <= 0:
+                        unsupported_span = scrutinee.span
+                    self.error("enum match: unsupported arm pattern ({unsupported_kind}; module {self.current_module_id})", Some(unsupported_span))
             ai = ai + 1
 
         # ---- Option dual-ABI normalization (bug: Dict.get / any raw-or-nil
