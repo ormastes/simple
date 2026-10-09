@@ -39,6 +39,16 @@ fn native_full_inventory_requires_cold_index_v1(
     if native_group_count > 0: return false
     explicit_cold_init or not compatibility_markers_present
 
+fn native_cold_entry_windows_absolute_v1(path: text) -> bool:
+    path.starts_with("\\\\") or (path.len() >= 2 and path.substring(1, 2) == ":")
+
+# Drive/UNC spellings become SCV's plain forward-slash form ("" if they carry
+# ./.. components); every other spelling is returned unchanged.
+fn native_cold_entry_plain_spelling_v1(path: text) -> text:
+    if native_cold_entry_windows_absolute_v1(path):
+        return compile_source_inventory_plain_checkout_v1(path)
+    path
+
 # Cold entry closure must open the same frozen source named by the SCV
 # inventory. Preserve the caller's logical entry separately for module lookup.
 fn native_cold_entry_snapshot_path_v1(
@@ -47,12 +57,17 @@ fn native_cold_entry_snapshot_path_v1(
     if snapshot_root == "" or snapshot_root.ends_with("/") or
             checkout_root == "" or checkout_root.ends_with("/"):
         return Err("cold-entry-source-identity-invalid")
-    var identity = requested_entry
+    # Windows: the cwd reads back as C:\... while argv carries C:/..., so
+    # compare both in the plain forward-slash spelling SCV already uses.
+    val checkout = native_cold_entry_plain_spelling_v1(checkout_root)
+    var identity = native_cold_entry_plain_spelling_v1(requested_entry)
+    if checkout == "" or identity == "":
+        return Err("cold-entry-source-identity-invalid")
     if identity.starts_with(snapshot_root + "/"):
         identity = identity.substring(snapshot_root.len() + 1, identity.len())
-    elif identity.starts_with(checkout_root + "/"):
-        identity = identity.substring(checkout_root.len() + 1, identity.len())
-    elif identity.starts_with("/"):
+    elif identity.starts_with(checkout + "/"):
+        identity = identity.substring(checkout.len() + 1, identity.len())
+    elif identity.starts_with("/") or native_cold_entry_windows_absolute_v1(identity):
         return Err("cold-entry-source-identity-invalid")
     while identity.starts_with("./"):
         identity = identity.substring(2, identity.len())
