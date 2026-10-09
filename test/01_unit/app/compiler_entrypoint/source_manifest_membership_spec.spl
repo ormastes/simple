@@ -1,0 +1,77 @@
+use std.spec.*
+use app.compiler_entrypoint.source_manifest_membership.{compiler_source_manifest_membership_v1}
+use std.scv.compile_source_inventory_core.{CompileSourceInventoryEntryV1}
+
+fn membership_require(condition: bool):
+    expect(condition).to_equal(true)
+
+fn membership_entry(path: text, digest: text, size: i64) -> CompileSourceInventoryEntryV1:
+    CompileSourceInventoryEntryV1(path, digest, digest, digest, digest, digest, size)
+
+fn source_manifest_membership_regressions_v1() -> i64:
+    val first = membership_entry("src/a.spl", "a", 3)
+    val last = membership_entry("src/z.spl", "z", 9)
+    val entries = [first, membership_entry("test/unselected.spl", "t", 2), last]
+    val first_row = "src/a.spl|sha256_a|3"
+    val last_row = "src/z.spl|sha256_z|9"
+    membership_require(compiler_source_manifest_membership_v1(entries, [first_row]))
+    membership_require(compiler_source_manifest_membership_v1(entries, [last_row]))
+    membership_require(compiler_source_manifest_membership_v1(entries, [last_row, first_row]))
+    membership_require(compiler_source_manifest_membership_v1(entries, [first_row, first_row]))
+    membership_require(not compiler_source_manifest_membership_v1(entries, ["src/a.spl|sha256_changed|3"]))
+    membership_require(not compiler_source_manifest_membership_v1(entries, ["src/a.spl|sha256_a|4"]))
+    membership_require(not compiler_source_manifest_membership_v1(entries, [first_row, "src/a.spl|sha256_changed|3"]))
+    membership_require(not compiler_source_manifest_membership_v1(entries, [first_row, "src/missing.spl|sha256_a|3"]))
+    membership_require(not compiler_source_manifest_membership_v1(entries, ["malformed"]))
+    membership_require(not compiler_source_manifest_membership_v1([], [first_row]))
+    membership_require(compiler_source_manifest_membership_v1(entries, []))
+    # Retain caller-owned inputs across repeated checks and conflicting requests.
+    membership_require(entries.len() == 3)
+    membership_require(entries[0].content_digest == "a")
+    membership_require(compiler_source_manifest_membership_v1(entries, [last_row]))
+    var ordered: [CompileSourceInventoryEntryV1] = []
+    var reversed: [CompileSourceInventoryEntryV1] = []
+    var i = 0
+    while i < 64:
+        ordered.push(membership_entry("src/p{1000 + i}.spl", "d", i))
+        reversed.push(membership_entry("src/p{1063 - i}.spl", "d", 63 - i))
+        i = i + 1
+    val low = "src/p1000.spl|sha256_d|0"
+    val high = "src/p1063.spl|sha256_d|63"
+    membership_require(compiler_source_manifest_membership_v1(ordered, [low]))
+    membership_require(compiler_source_manifest_membership_v1(ordered, [high]))
+    membership_require(compiler_source_manifest_membership_v1(ordered, [high, low]))
+    membership_require(compiler_source_manifest_membership_v1(ordered, [low, low]))
+    membership_require(not compiler_source_manifest_membership_v1(ordered, ["src/p0999.spl|sha256_d|0"]))
+    membership_require(not compiler_source_manifest_membership_v1(ordered, ["src/p1064.spl|sha256_d|64"]))
+    membership_require(not compiler_source_manifest_membership_v1(ordered, ["src/p1032.spl|sha256_d|31"]))
+    membership_require(not compiler_source_manifest_membership_v1(ordered, [low, "src/p1000.spl|sha256_changed|0"]))
+    membership_require(compiler_source_manifest_membership_v1(reversed, [low, high]))
+    reversed.push(membership_entry("src/p1000.spl", "changed", 0))
+    membership_require(compiler_source_manifest_membership_v1(reversed, [low, "src/p1000.spl|sha256_changed|0"]))
+    membership_require(ordered.len() == 64)
+    membership_require(ordered[0].source_identity == "src/p1000.spl")
+    var batch: [CompileSourceInventoryEntryV1] = []
+    var selected: [text] = []
+    i = 0
+    while i < 512:
+        batch.push(membership_entry("src/p{1000 + i}.spl", "d", i))
+        if i < 32:
+            selected.push("src/p{1000 + i}.spl|sha256_d|{i}")
+        i = i + 1
+    membership_require(compiler_source_manifest_membership_v1(batch, selected))
+    selected.push("src/p1032.spl|sha256_d|32")
+    membership_require(compiler_source_manifest_membership_v1(batch, selected))
+    selected[32] = "src/p1032.spl|sha256_changed|32"
+    membership_require(not compiler_source_manifest_membership_v1(batch, selected))
+    membership_require(batch[32].content_digest == "d")
+    # Synthetic records can contain a delimiter even though admitted
+    # inventories forbid it. Preserve the old exact-row helper semantics.
+    batch.push(membership_entry("src/a|b.spl", "pipe", 7))
+    membership_require(compiler_source_manifest_membership_v1(batch, ["src/a|b.spl|sha256_pipe|7"]))
+    membership_require(not compiler_source_manifest_membership_v1(batch, ["src/a|b.spl|sha256_changed|7"]))
+    32
+
+describe "selected source manifest membership":
+    it "preserves exact membership, ordering independence, duplicate semantics and caller ownership":
+        expect(source_manifest_membership_regressions_v1()).to_equal(32)

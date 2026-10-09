@@ -6,9 +6,9 @@
 bootstrap_entry_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P) || exit 70
 bootstrap_early_repo_root=$(CDPATH= cd -- "${bootstrap_entry_dir}/../.." && pwd -P) || exit 70
 . "${bootstrap_entry_dir}/lib/centralized-storage.shs"
-simple_bootstrap_storage_init "${bootstrap_early_repo_root}" || exit 70
 case "${1:-}" in
   progress-watch)
+    simple_bootstrap_storage_init "${bootstrap_early_repo_root}" || exit 70
     shift
     exec sh "${bootstrap_entry_dir}/bootstrap-progress-watch.shs" "$@"
     ;;
@@ -52,6 +52,21 @@ while [ "${bootstrap_argc}" -gt 0 ]; do
   esac
 done
 # -- argv-normalize end
+
+# Validate typed receipt reasons before storage setup, strategy dispatch, or builds.
+. "${bootstrap_early_repo_root}/scripts/check/lib/bootstrap-planner-admission-bound.shs"
+for bootstrap_receipt_option in "$@"; do
+  case "${bootstrap_receipt_option}" in
+    --produce-stage3-receipt=*) bootstrap_receipt_target=//bootstrap:stage3 ;;
+    --produce-managed-receipt=*) bootstrap_receipt_target=//bootstrap:stage4 ;;
+    *) continue ;;
+  esac
+  bootstrap_planner_v2_reason_allowed "${bootstrap_receipt_target}" "${bootstrap_receipt_option#*=}" || {
+    echo "bootstrap-policy-error: typed-reason-not-allowed-for-target: ${bootstrap_receipt_option}" >&2
+    exit 64
+  }
+done
+simple_bootstrap_storage_init "${bootstrap_early_repo_root}" || exit 70
 
 . "${bootstrap_entry_dir}/bootstrap-seed-stop-policy.shs"
 bootstrap_seed_stop_policy_validate "$@" || exit 64
