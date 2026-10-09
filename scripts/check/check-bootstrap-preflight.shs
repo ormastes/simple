@@ -126,6 +126,7 @@ NO_CARGO=0
 SELFTEST_ONLY=0
 DISK_ONLY=0
 RECEIPT_PATH=
+BINDINGS_OUT=
 VERIFY_RECEIPT=
 PREFLIGHT_CONFIG=unspecified
 EXPECTED_CONFIG=
@@ -136,13 +137,20 @@ for a in "$@"; do
     --selftest) SELFTEST_ONLY=1 ;;
     --disk-only) DISK_ONLY=1 ;;
     --receipt=*) RECEIPT_PATH=${a#*=} ;;
+    --bindings-out=*) BINDINGS_OUT=${a#*=} ;;
     --verify-receipt=*) VERIFY_RECEIPT=${a#*=} ;;
     --config=*) PREFLIGHT_CONFIG=${a#*=} ;;
     --expect-config=*) EXPECTED_CONFIG=${a#*=} ;;
     --seed=*) SEED_PATH=${a#*=} ;;
-    *) echo "usage: $0 [--no-cargo] [--selftest] [--disk-only] [--receipt=PATH] [--verify-receipt=PATH] [--config=TEXT] [--expect-config=TEXT] [--seed=PATH]"; echo "ERROR — nothing was checked (unknown arg: $a)"; exit 2 ;;
+    *) echo "usage: $0 [--no-cargo] [--selftest] [--disk-only] [--receipt=PATH [--bindings-out=DIR]] [--verify-receipt=PATH] [--config=TEXT] [--expect-config=TEXT] [--seed=PATH]"; echo "ERROR — nothing was checked (unknown arg: $a)"; exit 2 ;;
   esac
 done
+# --bindings-out exports the write capture that the receipt hashes, so the
+# caller can reuse it instead of re-walking the tree. It is meaningful only
+# alongside a receipt that binds it.
+if [ -n "$BINDINGS_OUT" ] && [ -z "$RECEIPT_PATH" ]; then
+  echo "ERROR — nothing was checked (--bindings-out requires --receipt)"; exit 2
+fi
 
 hash_file() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -635,6 +643,20 @@ if [ -n "$RECEIPT_PATH" ]; then
     [ "$START_CHECKER_SHA" = "$(hash_file "$ROOT/scripts/check/check-bootstrap-preflight.shs")" ] || {
     echo "ERROR — source, Git state, configuration, seed, or checker changed during preflight"; exit 2;
   }
+  # Export the agreeing capture before the receipt exists: a receipt is never
+  # published with a half-written export beside it. The consumer must still
+  # hash-compare these files against the receipt before trusting them.
+  if [ -n "$BINDINGS_OUT" ]; then
+    case "$BINDINGS_OUT" in /*) ;; *) BINDINGS_OUT="$ROOT/$BINDINGS_OUT" ;; esac
+    [ ! -e "$BINDINGS_OUT" ] && [ ! -L "$BINDINGS_OUT" ] || {
+      echo "ERROR — refusing preflight bindings collision: $BINDINGS_OUT"; exit 2;
+    }
+    mkdir -p "$(dirname "$BINDINGS_OUT")" && mkdir "$BINDINGS_OUT" &&
+      cp "$_bindings/source" "$BINDINGS_OUT/source-inputs.txt" &&
+      cp "$_bindings/git" "$BINDINGS_OUT/git-state.env" || {
+      echo "ERROR — could not export preflight bindings: $BINDINGS_OUT"; exit 2;
+    }
+  fi
   _receipt_tmp="${RECEIPT_PATH}.tmp.$$"
   {
     echo schema=simple-bootstrap-preflight-v1

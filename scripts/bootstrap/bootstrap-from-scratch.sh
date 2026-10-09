@@ -3275,14 +3275,18 @@ bootstrap_step_mark cargo-build-or-skip
 # preflight must run after that seed is rebuilt/published and before any
 # pure-Simple compiler stage starts. The cleanup traps and output lock are
 # already active here, making every refusal release ownership correctly.
+bootstrap_preflight_bindings=
 if [ "${full_bootstrap}" -eq 1 ]; then
   bootstrap_progress_mark bootstrap-preflight ""
   bootstrap_preflight_receipt="${output_dir}/bootstrap-preflight.env"
+  bootstrap_preflight_bindings="${output_dir}/bootstrap-preflight-bindings"
   rm -f "${bootstrap_preflight_receipt}"
+  rm -rf "${bootstrap_preflight_bindings}"
   bootstrap_preflight_config="platform=${PLATFORM};backend=${backend};mode=${bootstrap_mode};lane=full-bootstrap"
   sh "${repo_root}/scripts/check/check-bootstrap-preflight.shs" \
     --seed="${seed_bin}" --config="${bootstrap_preflight_config}" \
-    --receipt="${bootstrap_preflight_receipt}" || {
+    --receipt="${bootstrap_preflight_receipt}" \
+    --bindings-out="${bootstrap_preflight_bindings}" || {
     echo "error: authoritative bootstrap preflight failed; no pure-Simple stage was started" >&2
     exit 1
   }
@@ -3649,15 +3653,50 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     }
   }
   bootstrap_step_mark tool-authority-before
-  bootstrap_stage3_git_state "${repo_root}" "${stage3_git_before}" || {
-    echo "error: could not bind Stage 3 git HEAD/dirty state" >&2
-    exit 1
+  # Reuse the preflight's agreeing capture as the "before" snapshots instead
+  # of re-walking ~110k files. That capture is two independent walks that
+  # compared byte-identical (start + write capture), the same guarantee
+  # bootstrap_stage3_source_snapshot gives, taken by the same functions over
+  # the same root. It is admitted only when it hash-equals the passing
+  # receipt written in this run; the before/after equality checks after
+  # Stage 3 then cover a strictly wider window. Anything else recomputes.
+  bootstrap_preflight_reuse_capture() {
+    [ -n "${bootstrap_preflight_bindings}" ] &&
+      [ -f "${bootstrap_preflight_receipt:-}" ] &&
+      [ ! -L "${bootstrap_preflight_receipt}" ] &&
+      [ -f "${bootstrap_preflight_bindings}/$1" ] &&
+      [ ! -L "${bootstrap_preflight_bindings}/$1" ] || return 1
+    [ "$(bootstrap_stage3_manifest_value status "${bootstrap_preflight_receipt}")" = pass ] ||
+      return 1
+    bpr_expected=$(bootstrap_stage3_manifest_value "$2" \
+      "${bootstrap_preflight_receipt}") || return 1
+    [ -n "${bpr_expected}" ] || return 1
+    cp "${bootstrap_preflight_bindings}/$1" "$3.reuse.$$" || return 1
+    [ "$(bootstrap_stage3_hash_file "$3.reuse.$$")" = "${bpr_expected}" ] &&
+      mv -f "$3.reuse.$$" "$3" || {
+      rm -f "$3.reuse.$$"
+      return 1
+    }
   }
+  if bootstrap_preflight_reuse_capture git-state.env git_state_sha256 \
+      "${stage3_git_before}"; then
+    echo "  git-state-before: reused preflight capture"
+  else
+    bootstrap_stage3_git_state "${repo_root}" "${stage3_git_before}" || {
+      echo "error: could not bind Stage 3 git HEAD/dirty state" >&2
+      exit 1
+    }
+  fi
   bootstrap_step_mark git-state-before
-  bootstrap_stage3_source_snapshot "${stage3_source_before}" "${repo_root}" || {
-    echo "error: could not snapshot Stage 3 source authority" >&2
-    exit 1
-  }
+  if bootstrap_preflight_reuse_capture source-inputs.txt source_snapshot_sha256 \
+      "${stage3_source_before}"; then
+    echo "  source-inputs-before: reused preflight capture"
+  else
+    bootstrap_stage3_source_snapshot "${stage3_source_before}" "${repo_root}" || {
+      echo "error: could not snapshot Stage 3 source authority" >&2
+      exit 1
+    }
+  fi
   bootstrap_step_mark source-inputs-before
 
   # Stage 2: the admitted parent compiles bootstrap_main.spl.
