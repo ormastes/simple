@@ -45,11 +45,15 @@ val XM_C_SRC = "use pkg.xm_a.\{Store\}\n\nstruct Consumer:\n    store: Store\n\n
 
 struct Lowered:
     errors: [text]
+    fatal_count: i64
     callees: [text]
 
 fn collect(ml: MirLowering, mir: MirModule) -> Lowered:
     var errors: [text] = []
+    var fatal_count = 0
     for e in ml.errors:
+        if e.fatal:
+            fatal_count = fatal_count + 1
         errors = errors.push(e.message)
     var callees: [text] = []
     for function in mir.functions.values():
@@ -62,7 +66,7 @@ fn collect(ml: MirLowering, mir: MirModule) -> Lowered:
                                 callees = callees.push(name)
                             case _: pass
                     case _: pass
-    Lowered(errors: errors, callees: callees)
+    Lowered(errors: errors, fatal_count: fatal_count, callees: callees)
 
 fn lower_source(src: text, closure_complete: bool) -> Lowered:
     val parsed = parse_full_frontend(src, "trait_recv.spl", "trait_recv", Logger(level: 0))
@@ -74,7 +78,7 @@ fn lower_source(src: text, closure_complete: bool) -> Lowered:
     val mir = ml.lower_module(hir)
     collect(ml, mir)
 
-fn lower_cross_module(include_impl_module: bool) -> Lowered:
+fn lower_cross_module(include_impl_module: bool, via_trait_provider_modules: bool) -> Lowered:
     val a = parse_and_build_module(XM_A_SRC, "pkg/xm_a.spl")
     val b = parse_and_build_module(XM_B_SRC, "pkg/xm_b.spl")
     val c = parse_and_build_module(XM_C_SRC, "pkg/xm_c.spl")
@@ -100,7 +104,11 @@ fn lower_cross_module(include_impl_module: bool) -> Lowered:
     ml.trait_impl_closure_complete = true
     for provider in providers:
         ml.prescan_module_struct_names(provider)
-    val mir = ml.lower_module(c_hir, providers, false)
+    # Stage3 bootstrap-fixed shape: lower_module gets no providers; the
+    # closure reaches trait-implementor registration only.
+    if via_trait_provider_modules:
+        ml.trait_impl_provider_modules = providers
+    val mir = if via_trait_provider_modules: ml.lower_module(c_hir) else: ml.lower_module(c_hir, providers, false)
     collect(ml, mir)
 
 fn count_matching(names: [text], needle: text) -> i64:
@@ -126,11 +134,17 @@ describe "stage2 MIR trait-typed receiver dispatch":
     it "refuses to guess between several implementors":
         val lowered = lower_source(TRAIT_SRC + MEM_IMPL_SRC + DISK_IMPL_SRC + CONSUMER_SRC, true)
         expect(lowered.errors.len()).to_equal(2)
+        # Fatal: the driver must abort the build, not downgrade to a warning
+        # and ship the rt_panic placeholder as a runtime trap.
+        expect(lowered.fatal_count).to_equal(2)
         expect(lowered.errors[0].contains("2 implementors")).to_equal(true)
 
     it "rejects a generic implementor instead of guessing an instantiation":
         val lowered = lower_source(TRAIT_SRC + GENERIC_IMPL_SRC + CONSUMER_SRC, true)
         expect(lowered.errors.len()).to_equal(2)
+        # Fatal: the driver must abort the build, not downgrade to a warning
+        # and ship the rt_panic placeholder as a runtime trap.
+        expect(lowered.fatal_count).to_equal(2)
         expect(lowered.errors[0].contains("generic implementor")).to_equal(true)
 
     it "fails closed when the lowering does not cover the whole closure":
@@ -138,17 +152,26 @@ describe "stage2 MIR trait-typed receiver dispatch":
         # a single visible impl proves nothing about the closure.
         val lowered = lower_source(TRAIT_SRC + MEM_IMPL_SRC + CONSUMER_SRC, false)
         expect(lowered.errors.len()).to_equal(2)
+        # Fatal: the driver must abort the build, not downgrade to a warning
+        # and ship the rt_panic placeholder as a runtime trap.
+        expect(lowered.fatal_count).to_equal(2)
         expect(lowered.errors[0].contains("whole build closure")).to_equal(true)
         expect(count_matching(lowered.callees, "Mem.list")).to_equal(0)
 
     it "devirtualizes across modules: trait in A, implementor in B, consumer in C":
-        val lowered = lower_cross_module(true)
+        val lowered = lower_cross_module(true, false)
         expect(lowered.errors.len()).to_equal(0)
         expect(count_matching(lowered.callees, "Mem.list")).to_equal(1)
         expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)
 
     it "traps at runtime when the implementing module is outside the closure":
-        val lowered = lower_cross_module(false)
+        val lowered = lower_cross_module(false, false)
         expect(lowered.errors.len()).to_equal(0)
         expect(count_matching(lowered.callees, "Mem.list")).to_equal(0)
         expect(count_matching(lowered.callees, "rt_panic")).to_equal(1)
+
+    it "devirtualizes on the stage3 bootstrap-fixed shape (closure via trait_impl_provider_modules)":
+        val lowered = lower_cross_module(true, true)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(count_matching(lowered.callees, "Mem.list")).to_equal(1)
+        expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)

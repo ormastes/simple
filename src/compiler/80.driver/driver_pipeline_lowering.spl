@@ -332,6 +332,15 @@ impl CompilerDriver:
             log_phase("aot:bootstrap_fixed:start module=app.cli.bootstrap_main functions={bootstrap_hir.functions.len()}")
             var bootstrap_lowering = MirLowering.new_for_target(bootstrap_hir.symbols, target_context)
             bootstrap_lowering.configure_mcdc_mode(_driver_mcdc_mir_mode(self.ctx), _driver_mcdc_budget(self.ctx, "mcdc_owner_bytes", 1048576), _driver_mcdc_budget(self.ctx, "mcdc_global_bytes", 67108864), self.ctx.config["mcdc_include"] ?? "", self.ctx.config["mcdc_exclude"] ?? "")
+            # Stage3 (SIMPLE_BOOTSTRAP=1, entry closure, cold package index,
+            # never demand-routed) holds the whole closure's HIR here. Feed it
+            # to trait-implementor registration only, so trait-object calls
+            # devirtualize exactly as on the direct path; lower_module's own
+            # provider registration stays empty as before.
+            bootstrap_lowering.trait_impl_provider_modules = self.ctx.hir_modules.values()
+            bootstrap_lowering.trait_impl_closure_complete = driver_source_entry_closure_enabled(self.ctx) and
+                self.ctx.demand_mir_admission == nil and
+                self.ctx.demand_dirty_modules.len() == 0
             var bootstrap_mir = bootstrap_lowering.lower_module(bootstrap_hir)
             self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
             _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
