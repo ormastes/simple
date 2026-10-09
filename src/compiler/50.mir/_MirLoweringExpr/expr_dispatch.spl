@@ -3,6 +3,7 @@ use compiler.mir._MirLoweringExpr.switch_operators_calls.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.mir._MirLowering.provider_globals.mir_global_storage_name
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
 use compiler.mir._MirLoweringExpr.text_index_ranges.*
 # MIR Lowering - Expression Lowering
 #
@@ -2165,13 +2166,25 @@ impl MirLowering:
             case HirTypeKind.Named(optional_payload_sym, _):
                 val raw_symbol = self.symbols.get_symbol_raw(optional_payload_sym.id)
                 if val optional_payload_symbol = raw_symbol:
+                    # A class is keyed by its owner identity everywhere this
+                    # name is consumed (register_provider_class layouts and
+                    # `{identity}::{method}` dispatch rows, the opt/ok shape
+                    # prescan); its bare name exists only for a local class.
+                    # Answering the bare name failed the layout gate for every
+                    # IMPORTED class, so `if val a = maybe_reg(1): a.activate()`
+                    # lost the receiver class and died as `unresolved method
+                    # call`. Structs keep their bare-name convention.
+                    var payload_key = ""
                     match optional_payload_symbol.kind:
-                        case Class | Struct:
-                            if not self.struct_field_order.contains(optional_payload_symbol.name):
-                                return ""
-                            return optional_payload_symbol.name
+                        case Class:
+                            payload_key = mir_class_identity(optional_payload_symbol)
+                        case Struct:
+                            payload_key = optional_payload_symbol.name
                         case _:
                             return ""
+                    if not self.struct_field_order.contains(payload_key):
+                        return ""
+                    return payload_key
             case _:
                 ()
         ""
