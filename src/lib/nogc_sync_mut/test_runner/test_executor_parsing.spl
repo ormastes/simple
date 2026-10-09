@@ -505,6 +505,17 @@ fn output_has_zero_pass_summary(output: text) -> bool:
             saw_failed_zero = true
     saw_passed_zero and saw_failed_zero
 
+fn output_has_canonical_skip_summary(output: text) -> bool:
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean.starts_with("Results:") and clean.contains(" total") and clean.contains(" passed") and clean.contains(" failed"):
+            # Use the same total/count validation as the combined-output
+            # parser. Loose "1 skipped" lines are not a complete summary.
+            val (passed, failed, skipped, pending) = parse_test_output(clean)
+            if passed == 0 and failed == 0 and skipped > 0:
+                return true
+    false
+
 # find_raw: first index of keyword in s, or -1. Returns a RAW i64 (never i64?),
 # so a match at offset 3 is not lost to the seed-JIT flat-optional payload-3 == nil
 # collision. `text.index_of` returns i64?, whose flat seed-JIT representation uses
@@ -809,6 +820,20 @@ fn make_result_from_output(file_path: text, stdout: text, stderr: text, exit_cod
 
     if passed == 0 and failed == 0:
         if exit_code == 0:
+            # Combined stdout/stderr has passed truncation, omission and
+            # count checks. Accept a real skipped-only summary
+            # without allowing a hosted reason to rewrite failure counts.
+            if skipped > 0 and output_has_canonical_skip_summary(combined):
+                val lane_reason = hosted_lane_child_error(stdout)
+                for raw_line in combined.split("\n"):
+                    val clean = strip_ansi(raw_line).trim()
+                    # The child mirrors its omission reason to stderr; words
+                    # like "not found" there are not independent diagnostics.
+                    if lane_reason != "" and (clean == "hosted lane: {lane_reason}" or clean == "hosted lane error: {lane_reason}"):
+                        continue
+                    if _is_test_error_line(clean) or _is_crash_evidence_line(clean):
+                        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "ERROR: {clean}", timed_out: false, cached: false)
+                return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "", timed_out: false, cached: false)
             val filter = env_get("SIMPLE_TEST_FILTER")
             if filter != "" and filter != nil:
                 return TestFileResult(path: file_path, passed: 0, failed: 0, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "", timed_out: false, cached: false)
@@ -866,8 +891,9 @@ fn apply_hosted_lane_child_error(result: TestFileResult, stdout: text, exit_code
     a pass. The child exits 0 for that skip, and the generic exit-0 mapper
     rebuilds the result with error "" -- a clean pass on a host without the
     capability. Restore the in-process result: the child's named error wins,
-    and a `skip:` error keeps failed: 0. Only a child that completed normally
-    (exit 0 or 1) is trusted; crash/timeout/signal classifications stand."""
+    without changing the counts established from combined stdout/stderr.
+    Only a child that completed normally (exit 0 or 1) is trusted;
+    crash/timeout/signal classifications stand."""
     if exit_code != 0 and exit_code != 1:
         return result
     # Truncated-capture and omission evidence make the counts unverifiable; a
@@ -879,10 +905,6 @@ fn apply_hosted_lane_child_error(result: TestFileResult, stdout: text, exit_code
         return result
     var out = result
     out.error = child_error
-    if child_error.starts_with("skip:"):
-        out.failed = 0
-        if out.skipped == 0:
-            out.skipped = 1
     out
 
 fn read_structured_test_evidence(path: text) -> (i64, i64, i64):
