@@ -187,6 +187,19 @@ fn parse_fn_lambda_after_kw() -> i64:
         lex_disable_forced_indentation()
     expr_lambda(fn_param_names, fn_lam_stmts, 0)
 
+fn unsuffixed_decimal_needs_u64_word(int_text: text) -> bool:
+    if int_text.len() >= 2 and int_text.byte_at(0) == 48:
+        val prefix = int_text.byte_at(1)
+        if prefix == 120 or prefix == 88 or prefix == 98 or prefix == 66 or prefix == 111 or prefix == 79:
+            return false
+    var digits = 0
+    var i = 0
+    while i < int_text.len():
+        if int_text.byte_at(i) != 95:
+            digits = digits + 1
+        i = i + 1
+    digits >= 19
+
 # Integer literal token text -> value, supporting _ separators and
 # 0x/0b/0o prefixes. Shared by plain (kind 1) and suffixed (kind 7) ints
 # (suffixed hex like 0x10000000u64 previously hit the decimal-only path).
@@ -407,6 +420,13 @@ fn parse_primary_expr() -> i64:
     if par_kind_get() == 1:
         val int_text = par_text_get()
         parser_advance()
+        # Seed parity (lexer/numbers.rs parse_integer_digits): an unsuffixed
+        # decimal literal is admitted up to u64::MAX and carried as its exact
+        # 64-bit word (18446744073709551615 -> -1); only > u64::MAX errors.
+        # 19+ digits route through the overflow-free u64 limb parser, which
+        # yields the identical word for every value that also fits i64.
+        if unsuffixed_decimal_needs_u64_word(int_text):
+            return expr_int_lit(parse_unsigned_int_literal_text(int_text, "u64"), 0)
         return expr_int_lit(parse_int_literal_text(int_text), 0)
 
     if par_kind_get() == 2:
