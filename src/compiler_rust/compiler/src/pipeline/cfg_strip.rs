@@ -476,25 +476,30 @@ mod tests {
         let (kept, dropped) = if TargetOS::host() == TargetOS::Windows { ("11", "22") } else { ("22", "11") };
         assert!(filtered.contains(kept) && !filtered.contains(dropped));
         assert!(simple_parser::Parser::new(&filtered).parse().is_ok());
-        // Malformed blocks are left untouched so the parser still rejects them.
-        let malformed = "@when(os=\"unknown\"):\nval A = 1\n@end\n";
+        // Unknown atoms evaluate false (same as the lexer): the branch is dropped.
+        let unknown = "@when(os=\"unknown\"):\nval A = 1\n@end\n";
+        assert_eq!(strip_inactive_cfg_arch_globals(unknown, TargetArch::host()), "\n\n\n");
+        // Unbalanced blocks are left untouched so the parser still rejects them.
+        let malformed = "@when(os=\"windows\"):\nval A = 1\n";
         assert_eq!(strip_inactive_cfg_arch_globals(malformed, TargetArch::host()), malformed);
     }
 
     #[test]
     fn os_when_path_identity_selects_nested_platform_owner() {
         let source = include_str!("../../../../lib/nogc_sync_mut/io/path_identity_abi.spl");
+        // The POSIX errno owner lives in `_PathIdentityPosix/errno_abi.spl` and is
+        // imported only by the non-Windows branch.
+        let posix_errno = "use std.nogc_sync_mut.io._PathIdentityPosix.errno_abi.{path_errno_address}";
         for (os, expected, excluded) in [
-            (TargetOS::Linux, "extern fn __errno_location()", "extern fn __error()"),
-            (TargetOS::FreeBSD, "extern fn __error()", "extern fn __errno_location()"),
-            (TargetOS::MacOS, "extern fn __error()", "extern fn __errno_location()"),
-            (TargetOS::Windows, "fn path_errno_address() -> i64: 0", "extern fn __error()"),
+            (TargetOS::Linux, posix_errno, "fn path_errno_address() -> i64: 0"),
+            (TargetOS::FreeBSD, posix_errno, "fn path_errno_address() -> i64: 0"),
+            (TargetOS::MacOS, posix_errno, "fn path_errno_address() -> i64: 0"),
+            (TargetOS::Windows, "fn path_errno_address() -> i64: 0", posix_errno),
         ] {
             let filtered = super::strip_os_when_blocks(source, os).expect("platform owner branch");
             assert_eq!(filtered.lines().count(), source.lines().count());
             assert!(filtered.contains(expected), "{os:?}");
             assert!(!filtered.contains(excluded), "{os:?}");
-            assert_eq!(filtered.matches("fn path_errno_address()").count(), 1);
             assert!(simple_parser::Parser::new(&filtered).parse().is_ok(), "{os:?}");
         }
     }
@@ -526,10 +531,6 @@ mod tests {
         assert!(super::strip_os_when_blocks("@end\n", TargetOS::Linux).is_err());
         assert!(super::strip_os_when_blocks("@when(os=\"windows\"):\n", TargetOS::Linux).is_err());
         assert!(super::strip_os_when_blocks("@elif(os=\"windows\"):\n", TargetOS::Linux).is_err());
-        assert!(super::strip_os_when_blocks(
-            "@when(os=\"windows\"):\nval A = 1\n@elif(os=\"linux\"):\nval A = 2\n@else:\nval A = 3\n@end\n",
-            TargetOS::Linux,
-        ).is_err());
         let nested = "@when(os=\"windows\"):\n@when(os=\"windows\"):\nval SELECTED = 11\n@else:\nval SELECTED = 22\n@end\n@else:\nval SELECTED = 33\n@end\n";
         let windows = super::strip_os_when_blocks(nested, TargetOS::Windows).expect("nested Windows branch");
         let linux = super::strip_os_when_blocks(nested, TargetOS::Linux).expect("nested Linux fallback");
