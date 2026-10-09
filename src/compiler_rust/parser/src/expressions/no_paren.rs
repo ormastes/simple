@@ -246,7 +246,11 @@ impl<'a> Parser<'a> {
                 return self.parse_matcher_word_suffix(call);
             }
         }
-        Ok(expr)
+        // Parenthesized subject with a matcher word: `expect(a) to_equal(b)`.
+        // `expect(a)` is already a Call (not a no-paren callee), so without
+        // this the matcher word was left behind as an orphan `to_equal(b)`
+        // and the expect was never consumed by a matcher.
+        self.parse_matcher_word_suffix(expr)
     }
 
     /// Matcher words known to the BDD `.to_*()` matcher chain
