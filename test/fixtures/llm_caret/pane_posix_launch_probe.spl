@@ -19,6 +19,13 @@ fn await_text(session: text, pane_id: text, needle: text) -> text:
         attempt = attempt + 1
     seen
 
+fn launcher_directories(listing: text) -> [text]:
+    var found: [text] = []
+    for name in listing.split("\n"):
+        if name.starts_with("cs-pane-"):
+            found = found + [name]
+    found
+
 describe "POSIX pane launcher keeps terminal input for the requested child":
     it "preserves immediate input, literal argv, environment, stderr and normal cleanup":
         val root = secure_temp_dir("/tmp", "pane-launch-probe-").unwrap()
@@ -44,6 +51,13 @@ describe "POSIX pane launcher keeps terminal input for the requested child":
         val seen = await_text("pane-launch-argv", pane.pane_id, "14133")
         val stderr = file_read(err_path)
         val before_close = sosix_run("ls", ["-A", root])
+        val reserved = launcher_directories(before_close.stdout)
+        var launch_files = "missing private directory"
+        var launch_listing_status = -1
+        if reserved.len() == 1:
+            val listing = sosix_run("ls", ["-A", root + "/" + reserved[0]])
+            launch_files = listing.stdout
+            launch_listing_status = listing.exit_code
         val killed = pane_kill("pane-launch-argv", pane.pane_id)
         val after_close = sosix_run("ls", ["-A", root])
         val cleaned = dir_remove_all(root)
@@ -55,7 +69,9 @@ describe "POSIX pane launcher keeps terminal input for the requested child":
         expect(seen).to_contain("unset:unset")
         expect(stderr).to_equal("launch-stderr\n")
         expect(before_close.exit_code).to_equal(0)
-        expect(before_close.stdout.trim()).to_equal("stderr ' literal")
+        expect(reserved.len()).to_equal(1)
+        expect(launch_listing_status).to_equal(0)
+        expect(launch_files.trim()).to_equal("")
         assert_true(killed)
         expect(after_close.exit_code).to_equal(0)
         expect(after_close.stdout.trim()).to_equal("stderr ' literal")
@@ -71,11 +87,14 @@ describe "POSIX pane launcher keeps terminal input for the requested child":
         val seen = await_text("pane-launch-failure", pane.pane_id, "cs-pane-missing-program-9021")
         val files = sosix_run("ls", ["-A", root])
         val killed = pane_kill("pane-launch-failure", pane.pane_id)
+        val after_close = sosix_run("ls", ["-A", root])
         val cleaned = dir_remove_all(root)
         expect(seen).to_contain("cs-pane-missing-program-9021")
         expect(files.exit_code).to_equal(0)
-        expect(files.stdout.trim()).to_equal("")
+        expect(launcher_directories(files.stdout).len()).to_equal(1)
         assert_true(killed)
+        expect(after_close.exit_code).to_equal(0)
+        expect(after_close.stdout.trim()).to_equal("")
         assert_true(cleaned)
 
     it "cleans up an immediately closed pane and rejects an unusable temporary parent":
