@@ -1,0 +1,120 @@
+#!/bin/sh
+# Adversarial publisher fixtures use real source snapshot and JSON validators.
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+fixture=$(mktemp -d)
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+source_root="$fixture/frozen"
+output="$fixture/output"
+platform=x86_64-unknown-linux-gnu
+candidate="$output/stage3/$platform/stage2-admitted/simple"
+tests_root="$output/stage2-compiler-tests/$platform"
+summary="$tests_root/verification/summary.env"
+owner="$tests_root/verification/owner.env"
+mkdir -p "$source_root/scripts/check/lib" "$source_root/scripts/bootstrap" "$source_root/src" \
+  "$source_root/examples/10_tooling" "$source_root/test/03_system/app/bootstrap_builder/feature" \
+  "$source_root/test/fixtures/bootstrap_builder" "$source_root/runtime" "$(dirname "$candidate")" "$(dirname "$summary")"
+for authority in compiler app lib os runtime package_ownership plugins compositions; do mkdir -p "$source_root/src/$authority"; done
+cp "$repo/scripts/check/lib/bootstrap-stage3-provenance.shs" "$source_root/scripts/check/lib/"
+cp -R "$repo/scripts/check/lib/bootstrap-stage3" "$source_root/scripts/check/lib/"
+cp "$repo/scripts/bootstrap/validate-test-runner-json.pl" "$source_root/scripts/bootstrap/"
+# The full typed verifier has its own production adversarial regressions.
+# This fixture isolates publisher dispatch and after-checks with hash-bound inputs.
+cat >>"$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs" <<'STUB'
+bootstrap_stage3_verify_stage2_admission_receipt() {
+  for authority_key in runtime_snapshot tool_authority sanity_evidence receiver_evidence receiver_log; do
+    authority_file=$(bootstrap_stage3_manifest_value "${authority_key}_path" "$1") || return 1
+    authority_hash=$(bootstrap_stage3_manifest_value "${authority_key}_sha256" "$1") || return 1
+    [ "$(bootstrap_stage3_hash_file "$authority_file")" = "$authority_hash" ] || return 1
+  done
+}
+STUB
+# Runtime replay is separately regression-tested; fixtures isolate publisher policy.
+printf '#!/bin/sh\nprintf "%%s/runtime\\n" "$3"\n' >"$source_root/scripts/bootstrap/phase2-runtime-binding.shs"
+printf '#!/bin/sh\ntest -f "$2/phase2-runtime-capsule.env"\n' >"$source_root/scripts/bootstrap/phase2-runtime-capsule.shs"
+printf 'capsule_identity_sha256=fixture-runtime\n' >"$source_root/runtime/phase2-runtime-capsule.env"
+printf 'fn main():\n    0\n' >"$source_root/src/main.spl"
+printf '#!/bin/sh\nexit 0\n' >"$candidate"
+chmod +x "$candidate"
+candidate_sha=$(sha256sum "$candidate" | cut -d ' ' -f 1)
+BOOTSTRAP_STAGE3_FACADE_PATH="$source_root/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+source_snapshot="$fixture/source.txt"
+bootstrap_stage3_source_snapshot "$source_snapshot" "$source_root"
+source_sha=$(sha256sum "$source_snapshot" | cut -d ' ' -f 1)
+printf 'schema=simple-bootstrap-stage2-admission-v2\nstatus=admitted\ncandidate_path=%s\ncandidate_sha256=%s\nsource_snapshot_path=%s\nsource_snapshot_sha256=%s\n' \
+  "$candidate" "$candidate_sha" "$source_snapshot" "$source_sha" >"$(dirname "$candidate")/admission.env"
+for authority in runtime_snapshot tool_authority sanity_evidence receiver_evidence receiver_log; do
+  printf '%s\n' "$authority" >"$fixture/$authority"
+  printf '%s_path=%s/%s\n%s_sha256=%s\n' "$authority" "$fixture" "$authority" "$authority" "$(sha256sum "$fixture/$authority" | cut -d ' ' -f 1)" >>"$(dirname "$candidate")/admission.env"
+done
+printf 'runtime_authority_path=%s/runtime\nbuild_args_sha256=fixture-args\n' "$source_root" >>"$(dirname "$candidate")/admission.env"
+for tool in compiler_cli test_runner mcp_server; do
+  cp "$candidate" "$tests_root/verification/$tool"
+done
+{
+  printf 'schema=simple-bootstrap-command-owners-v3\nstatus=frozen\nphase=stage2\ncompiler_snapshot_sha256=%s\n' "$candidate_sha"
+  printf 'verification_backend=cranelift\nruntime_identity_sha256=fixture-runtime\ntool_input_identity_sha256=fixture-tool\ntarget_source_snapshot_sha256=%s\n' "$source_sha"
+  for tool in compiler_cli test_runner mcp_server; do
+    printf '%s_path=%s/verification/%s\n%s_sha256=%s\n' "$tool" "$tests_root" "$tool" "$tool" "$candidate_sha"
+  done
+} >"$owner"
+verification_log="$tests_root/verification.log"
+printf 'verifier transcript\n' >"$verification_log"
+for task in compiler_bootstrap_tests interpreter_interpreter_tests loader_interpreter_tests; do
+  printf '%s\n' '{"success":true,"spec":{"success":true,"total_passed":1,"total_failed":0,"total_skipped":0,"total_pending":0,"total_duration_ms":1,"groups":[],"files":[]},"spl_doctest":null,"sdoctest":null}' >"$tests_root/verification/$task.log"
+done
+{
+  printf 'schema=bootstrap-phase-verification-v1\nphase=stage2\nhash_policy=canonical\nstrategy=normal\nverification_backend=cranelift\n'
+  printf 'expected_compiler_sha256=%s\nactual_compiler_sha256=%s\nterminal_failures=0\noverall=PASS\ntest_execution=in-process\n' "$candidate_sha" "$candidate_sha"
+  printf 'runtime_path=%s/runtime\ntool_input_identity_sha256=fixture-tool\ntarget_source_snapshot_sha256=%s\n' "$source_root" "$source_sha"
+  printf 'command_owner_receipt=%s\ncommand_owner_receipt_sha256=%s\n' "$owner" "$(sha256sum "$owner" | cut -d ' ' -f 1)"
+  for tool in compiler_cli test_runner; do printf '%s_sha256=%s\n' "$tool" "$candidate_sha"; done
+  for task in compiler_cli_build test_runner_build; do printf 'task=%s|result=PASS|status=0\n' "$task"; done
+  for task in compiler_bootstrap_tests interpreter_interpreter_tests loader_interpreter_tests; do
+    printf 'task=%s|result=PASS|status=0|executed=1|passed=1|failed=0|skipped=0|command_owner_before=PASS|command_owner_after=PASS|log=%s/verification/%s.log\n' "$task" "$tests_root" "$task"
+  done
+} >"$summary"
+cp "$summary" "$fixture/summary.saved"
+publish() { sh "$repo/scripts/bootstrap/lib/verify-stage2-compiler-tests.shs" --publish "$output" "$platform" "$candidate" "$candidate_sha" "$source_root" "$summary" "$verification_log"; }
+reject() {
+  if publish >"$fixture/result.log" 2>&1; then echo 'FAIL: rejected fixture published PASS'; exit 1; fi
+  [ ! -e "$tests_root/stage2-compiler-tests.env" ]
+}
+for mutation in zero missing duplicate failed wrong-phase wrong-sha owner-before count-mismatch; do
+  cp "$fixture/summary.saved" "$summary"
+  case "$mutation" in
+    zero) sed -i 's/executed=1/executed=0/g' "$summary" ;;
+    missing) sed -i '/task=loader_interpreter_tests/d' "$summary" ;;
+    duplicate) printf 'phase=stage2\n' >>"$summary" ;;
+    failed) sed -i 's/terminal_failures=0/terminal_failures=1/' "$summary" ;;
+    wrong-phase) sed -i 's/phase=stage2/phase=stage4/' "$summary" ;;
+    wrong-sha) sed -i 's/actual_compiler_sha256=.*/actual_compiler_sha256=bad/' "$summary" ;;
+    count-mismatch) sed -i 's/passed=1/passed=2/' "$summary" ;;
+    owner-before) sed -i 's/command_owner_before=PASS/command_owner_before=mismatch/' "$summary" ;;
+  esac
+  reject
+done
+cp "$fixture/summary.saved" "$summary"
+for authority in runtime_snapshot tool_authority sanity_evidence receiver_evidence receiver_log; do
+  cp "$fixture/$authority" "$fixture/authority.saved"
+  printf 'changed\n' >>"$fixture/$authority"; reject
+  cp "$fixture/authority.saved" "$fixture/$authority"
+done
+ln -s "$source_root" "$fixture/source-alias"
+if sh "$repo/scripts/bootstrap/lib/verify-stage2-compiler-tests.shs" --publish "$output" "$platform" "$candidate" "$candidate_sha" "$fixture/source-alias" "$summary" "$verification_log" >/dev/null 2>&1; then exit 1; fi
+if sh "$repo/scripts/bootstrap/lib/verify-stage2-compiler-tests.shs" --publish "$output" "$platform" "$candidate" "$candidate_sha" "$source_root" "$tests_root/verification/../verification/summary.env" "$verification_log" >/dev/null 2>&1; then exit 1; fi
+printf 'changed\n' >>"$tests_root/verification/mcp_server"; reject
+cp "$candidate" "$tests_root/verification/mcp_server"
+printf 'changed\n' >>"$source_root/src/main.spl"; reject
+sed -i '$d' "$source_root/src/main.spl"
+printf 'changed\n' >>"$tests_root/verification/test_runner"; reject
+cp "$candidate" "$tests_root/verification/test_runner"
+cp "$tests_root/verification/compiler_bootstrap_tests.log" "$fixture/test-log.saved"
+printf 'empty log\n' >"$tests_root/verification/compiler_bootstrap_tests.log"; reject
+cp "$fixture/test-log.saved" "$tests_root/verification/compiler_bootstrap_tests.log"
+[ "$(publish)" = in-process ]
+[ "$(sh "$repo/scripts/bootstrap/lib/verify-stage2-compiler-tests.shs" "$output" "$platform" "$candidate" "$candidate_sha")" = in-process ]
+if publish >/dev/null 2>&1; then echo 'FAIL: existing immutable receipt replaced'; exit 1; fi
+printf 'PASS Stage2 publisher: real JSON/source checks; adversarial matrices/source/tools/logs rejected; frozen-source controller handoff admitted\n'
