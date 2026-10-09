@@ -340,6 +340,63 @@ fn enum_text_payload_marker() -> text:
     different lane this round)."""
     "$__enum_text_payload__$"
 
+fn hir_pattern_has_binding(p: HirPattern) -> bool:
+    """True when `p` binds any variable at any depth (Enum/Tuple/Struct/Array
+    payloads, or-alternatives, array rest). Used to fail closed on or-arm
+    alternatives that bind."""
+    match p.kind:
+        case Binding(_, _):
+            return true
+        case Tuple(elems):
+            var i = 0
+            while i < elems.len():
+                val e: HirPattern = elems[i]
+                if hir_pattern_has_binding(e):
+                    return true
+                i = i + 1
+        case Array(elems, rest):
+            if rest.?:
+                return true
+            var i = 0
+            while i < elems.len():
+                val e: HirPattern = elems[i]
+                if hir_pattern_has_binding(e):
+                    return true
+                i = i + 1
+        case Or(alts):
+            var i = 0
+            while i < alts.len():
+                val e: HirPattern = alts[i]
+                if hir_pattern_has_binding(e):
+                    return true
+                i = i + 1
+        case Struct(_, fields):
+            for (_, fp) in fields:
+                if hir_pattern_has_binding(fp):
+                    return true
+        case Enum(_, _, payload):
+            if val pl = payload:
+                match pl:
+                    case Tuple(pats):
+                        var i = 0
+                        while i < pats.len():
+                            val e: HirPattern = pats[i]
+                            if hir_pattern_has_binding(e):
+                                return true
+                            i = i + 1
+                    case Struct(sfields):
+                        for (_, sp) in sfields:
+                            if hir_pattern_has_binding(sp):
+                                return true
+        case CompleteRegion(_):
+            return true
+        case DynRegion(_):
+            return true
+        case TypeTest(_, binder):
+            return binder != ""
+        case _: ()
+    false
+
 fn enum_pat_binding_syms(payload: HirPatternPayload?) -> [SymbolId]:
     """#164: all payload-binding symbols of `case Pair(a, b, ...):`, in
     declared field order (empty for Unit variants; non-Binding sub-patterns
@@ -2383,6 +2440,69 @@ impl MirLowering:
             slot_i = slot_i + 1
 
     me lower_enum_match(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
+        """Expand `case A | B:` or-arms into one arm per alternative (sharing
+        guard and body), then lower via lower_enum_match_flat. Without this an
+        Or arm in an enum match died as "enum match: unsupported arm pattern".
+        A bare alternative (`Green`) arrives as Binding and is reclassified to
+        a unit-variant Enum pattern exactly like lower_match_case's
+        normalization: only when its name has exactly one owning enum.
+
+        Alternatives that BIND (`case S.A(x) | S.B(x):`) are rejected: HIR
+        defines a separate symbol per alternative and the shared body
+        resolves to only one of them, so a per-alternative copy would read an
+        unbound local in every other alternative. Fail closed with a clear
+        error instead of emitting wrong code."""
+        var has_or = false
+        var oi = 0
+        while oi < arms.len():
+            val or_probe: HirMatchArm = arms[oi]
+            match or_probe.pattern.kind:
+                case Or(_):
+                    has_or = true
+                case _: ()
+            oi = oi + 1
+        if not has_or:
+            return self.lower_enum_match_flat(scrutinee, arms, expected_type)
+        var flat_arms: [HirMatchArm] = []
+        var ei = 0
+        while ei < arms.len():
+            val src_arm: HirMatchArm = arms[ei]
+            match src_arm.pattern.kind:
+                case Or(alts):
+                    var alt_i = 0
+                    while alt_i < alts.len():
+                        val alt: HirPattern = alts[alt_i]
+                        var alt_pat = alt
+                        var alt_binds = false
+                        match alt.kind:
+                            case Binding(alt_sym, _):
+                                val alt_name = self.symbols.symbol_name_scalar_raw(alt_sym.id)
+                                if alt_name != "" and self.variant_owner_keys(alt_name).len() == 1:
+                                    alt_pat = HirPattern(
+                                        kind: HirPatternKind.Enum(HirType(kind: HirTypeKind.Error, span: alt.span), alt_name, nil),
+                                        type_: nil,
+                                        span: alt.span
+                                    )
+                                else:
+                                    alt_binds = true
+                            case _:
+                                alt_binds = hir_pattern_has_binding(alt)
+                        if alt_binds:
+                            self.error("enum match: or-pattern alternatives that bind variables are not supported by native codegen; split `case A(x) | B(x):` into separate arms", Some(alt.span))
+                        flat_arms = flat_arms.push(HirMatchArm(
+                            pattern: alt_pat,
+                            has_guard: src_arm.has_guard,
+                            guard: src_arm.guard,
+                            body: src_arm.body,
+                            span: src_arm.span
+                        ))
+                        alt_i = alt_i + 1
+                case _:
+                    flat_arms = flat_arms.push(src_arm)
+            ei = ei + 1
+        self.lower_enum_match_flat(scrutinee, flat_arms, expected_type)
+
+    me lower_enum_match_flat(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
         """Lower `match e: case Variant(x): ...` for enum patterns. Dispatches on
         _sffi_enum_discriminant(e) compared to each variant's index; binds a single
         i64 payload via rt_enum_payload(e). Mirrors emit_if_chain_dispatch."""
@@ -2564,9 +2684,16 @@ impl MirLowering:
                     enum_deep_flags = enum_deep_flags.push(deep_flag)
                     enum_arm_srcidx = enum_arm_srcidx.push(ai)
                 case HirPatternKind.Wildcard:
+                    if arm.has_guard:
+                        # The default arm is lowered unconditionally below;
+                        # a guarded catch-all would fire regardless of its
+                        # guard. Fail closed rather than emit wrong code.
+                        self.error("enum match: a guarded catch-all arm (`case _ if cond:`) is not supported by native codegen", Some(arm.span))
                     has_default = true
                     default_body = arm.body
                 case Binding(_, _):
+                    if arm.has_guard:
+                        self.error("enum match: a guarded catch-all arm (`case x if cond:`) is not supported by native codegen", Some(arm.span))
                     has_default = true
                     default_body = arm.body
                 case HirPatternKind.Literal(nil_lit):
@@ -2614,7 +2741,24 @@ impl MirLowering:
                         enum_deep_flags = enum_deep_flags.push(0)
                         enum_arm_srcidx = enum_arm_srcidx.push(ai)
                 case _:
-                    self.error("enum match: unsupported arm pattern", Some(arm.pattern.span))
+                    val unsupported_kind = match arm.pattern.kind:
+                        case Literal(_): "Literal"
+                        case Tuple(_): "Tuple"
+                        case Array(_, _): "Array"
+                        case Struct(_, _): "Struct"
+                        case Or(_): "Or"
+                        case Range(_, _, _): "Range"
+                        case TypeTest(_, _): "TypeTest"
+                        case _: "other"
+                    # Synthesized patterns carry an empty span (no file,
+                    # line 0), which _format_mir_error prints location-less.
+                    # Fall back to the arm, then the scrutinee.
+                    var unsupported_span = arm.pattern.span
+                    if unsupported_span.file == "" and unsupported_span.line <= 0:
+                        unsupported_span = arm.span
+                    if unsupported_span.file == "" and unsupported_span.line <= 0:
+                        unsupported_span = scrutinee.span
+                    self.error("enum match: unsupported arm pattern ({unsupported_kind}; module {self.current_module_id})", Some(unsupported_span))
             ai = ai + 1
 
         # ---- Option dual-ABI normalization (bug: Dict.get / any raw-or-nil
@@ -3036,6 +3180,17 @@ impl MirLowering:
             # matches eventually read a corrupted body carrier. Reuse the
             # primitive source index and restore the original typed arm.
             val body_arm: HirMatchArm = arms[enum_arm_srcidx[ci]]
+            if body_arm.has_guard:
+                # `case V(x) if cond:` -- the payload bindings above are in
+                # scope for the guard. A false guard falls to next_block, the
+                # same target a failed discriminant compare uses, so matching
+                # continues with the next arm (and finally the default).
+                val guard_local = self.lower_cond_operand(body_arm.guard)
+                var b_guard = self.builder
+                val guard_pass = b_guard.new_block(Some("ematch_guard_pass"))
+                b_guard.terminate_if(mir_operand_copy(guard_local), guard_pass, next_block)
+                b_guard.switch_to_block(guard_pass)
+                self.builder = b_guard
             val arm_result = self.lower_block_expected(body_arm.body, expected_type)
             var b_arm2 = self.builder
             # Guard: if the arm body already terminated (e.g. `return r`), emit
@@ -3096,11 +3251,23 @@ impl MirLowering:
         # sites. See doc/08_tracking/bug/match_enum_fallthrough_silent_2026-08-01.md
         # for the enumeration and the promotion plan.
         if not has_default:
+            # Only UNGUARDED arms cover their variant: `case A if c:` does not
+            # fire when c is false, so A stays missing for the coverage
+            # warning, build_match_coverage and the fall-through traps below.
+            var covering_variants: [text] = []
+            var covering_discs: [i64] = []
+            var cov_i = 0
+            while cov_i < enum_variants.len():
+                val cov_arm: HirMatchArm = arms[enum_arm_srcidx[cov_i]]
+                if not cov_arm.has_guard:
+                    covering_variants = covering_variants.push(enum_variants[cov_i])
+                    covering_discs = covering_discs.push(enum_discs[cov_i])
+                cov_i = cov_i + 1
             var missing_v: [text] = []
             if self.enum_variant_index.has(enum_name):
                 for known_v in self.enum_variant_index[enum_name]:
                     var seen_v = false
-                    for arm_v in enum_variants:
+                    for arm_v in covering_variants:
                         if arm_v == known_v:
                             seen_v = true
                     if not seen_v:
@@ -3176,7 +3343,7 @@ impl MirLowering:
                         all_ids = all_ids.push(vid)
                         all_names = all_names.push(known_v2)
                 var covered_ids: [i64] = []
-                for cd in enum_discs:
+                for cd in covering_discs:
                     if cd >= 0:
                         covered_ids = covered_ids.push(cd)
                 val coverage = build_match_coverage(
@@ -3219,17 +3386,17 @@ impl MirLowering:
             #   * every arm discriminant RESOLVED (>= 0) -- an arm left at the
             #     -1 sentinel never matches a real value, so a name-exhaustive
             #     match containing one can fall through on a valid scrutinee.
-            #   * NO arm carries a guard -- `case V(x) if cond:` covers V
-            #     textually but does not fire when the guard is false, so its
-            #     fall-through is reachable and correct.
+            #   * guarded arms do not count toward coverage (`case V(x) if
+            #     cond:` does not fire when the guard is false).
             # Legality gates shared by BOTH runtime traps below, each removing
             # a way a legitimate execution could reach the fall-through block:
             #   * at least one arm discriminant, and every one RESOLVED (>= 0)
             #     -- a -1 sentinel arm never fires, so a value the programmer
             #     believed covered would hit a trap that blamed them wrongly;
-            #   * NO arm carries a guard -- `case V(x) if cond:` covers V
-            #     textually but not when the guard is false, and that
-            #     fall-through is reachable and correct (2026-08-24 decision);
+            #   * guarded arms are excluded from coverage (2026-10-10; this
+            #     replaces the 2026-08-24 "any guard disables the trap" gate):
+            #     a false guard on a non-exhaustive match is a no-arm-matched
+            #     fall-through and traps like any other;
             #   * the enum's variant set is actually known -- otherwise this
             #     may not be a module-enum match at all (e.g. Option patterns
             #     on an i64 scrutinee), which the warn-only path above
@@ -3252,11 +3419,12 @@ impl MirLowering:
             for dchk in enum_discs:
                 if dchk < 0:
                     all_discs_resolved = false
-            var any_guarded = false
-            for arm_g in arms:
-                if arm_g.has_guard:
-                    any_guarded = true
-            var fallthrough_trap_ok = enum_discs.len() > 0 and all_discs_resolved and not any_guarded
+            # Guarded arms no longer disable the traps: they are excluded from
+            # coverage above, so a variant covered only by a guarded arm is
+            # in `missing_v` and a false guard reaching here is a genuine
+            # no-arm-matched fall-through (partial trap). A TOTAL trap needs
+            # the unguarded arms alone to name every variant.
+            var fallthrough_trap_ok = enum_discs.len() > 0 and all_discs_resolved
             if not self.enum_variant_index.has(enum_name):
                 fallthrough_trap_ok = false
             var total_match_trap_ok = fallthrough_trap_ok and missing_v.len() == 0

@@ -1,0 +1,69 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Enum `==` through NESTED imported struct / class field projections
+
+Stage2 failed building with `operator overload for struct
+ProcessObservationPacketKindV4` in src/lib/nogc_sync_mut/io/process_ops.spl:
+`receipt.packet.packet_kind == ProcessObservationPacketKindV4.Frozen`
+(imported struct -> imported struct -> imported enum) and
+`frozen_receipt.packet.packet_kind != ...Frozen` (imported CLASS -> struct
+-> enum, the exact process_ops.spl:1096/1119 sites). The enum operand must
+be lowered as an enum compare, never routed to struct `__eq__` dispatch.
+"""
+
+# @tag: unit, compiler, mir, enum
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val provider_source = "pub enum Kind:\n    Unknown\n    Frozen\n    Ack\n\npub struct Packet:\n    n: i64\n    packet_kind: Kind\n\npub struct Receipt:\n    digest: text\n    packet: Packet\n\npub class FrozenReceipt:\n    acknowledged: bool\n    packet: Packet\n\npub fn read_packet(n: i64) -> Packet:\n    Packet(n: n, packet_kind: Kind.Ack)\n"
+val call_result_source = "use lib.dep.\{Kind, Packet, read_packet\}\n\nfn handle(n: i64) -> i64:\n    val result = read_packet(n)\n    if result.packet_kind == Kind.Unknown:\n        return 1\n    if result.packet_kind != Kind.Ack:\n        return 2\n    0\n"
+val nested_source = "use lib.dep.\{Kind, Packet, Receipt\}\n\nfn nested(r: Receipt) -> bool:\n    r.packet.packet_kind == Kind.Frozen\n\nfn nested_ne(r: Receipt) -> bool:\n    r.packet.packet_kind != Kind.Ack\n"
+val class_source = "use lib.dep.\{Kind, Packet, FrozenReceipt\}\n\nfn is_unfrozen(fr: FrozenReceipt) -> bool:\n    fr.acknowledged or fr.packet.packet_kind != Kind.Frozen\n"
+
+fn consumer_mir_errors(consumer_source: text) -> text:
+    val log = Logger(level: 0)
+    val provider_ast = parse_full_frontend(provider_source, "lib/dep.spl", "lib.dep", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.dep"] = provider_ast
+    val sources = [SourceFile(path: "lib/dep.spl", content: provider_source, module_name: "lib.dep")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var provider_lowering = hirlowering_for_module("lib.dep", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    val provider_hir = provider_lowering.lower_module(provider_ast)
+    val consumer_hir = consumer_lowering.lower_module(consumer_ast)
+    var mir_lowering = MirLowering.new(consumer_hir.symbols)
+    mir_lowering.prescan_module_struct_names(provider_hir)
+    mir_lowering.prescan_module_struct_names(consumer_hir)
+    val consumer_mir = mir_lowering.lower_module(consumer_hir)
+    var out = ""
+    for e in mir_lowering.errors:
+        out = out + e.message + "\n"
+    out
+
+describe "enum equality through nested imported struct projections":
+    it "lowers receipt.packet.packet_kind == Kind.Variant as an enum compare":
+        val errs = consumer_mir_errors(nested_source)
+        print "mir errors: [{errs}]"
+        expect(errs.contains("operator overload for struct")).to_equal(false)
+
+    it "lowers an imported CLASS -> struct -> enum projection as an enum compare":
+        val errs = consumer_mir_errors(class_source)
+        print "mir errors: [{errs}]"
+        expect(errs.contains("operator overload for struct")).to_equal(false)
+
+    it "lowers an enum field of an imported fn's struct result as an enum compare":
+        # simple_lsp_mcp/tools.spl: `val result = lsp_virtual_source_read_registered_v1(...)`
+        # then `result.status == VirtualSourceRegistrationStatusV1.Unavailable`.
+        val errs = consumer_mir_errors(call_result_source)
+        print "mir errors: [{errs}]"
+        expect(errs.contains("operator overload for struct")).to_equal(false)
