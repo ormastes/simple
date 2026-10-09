@@ -113,3 +113,14 @@ defect in that owner.
 (lower-only). `SIMPLE_HOST_WORKER_MEM_MIB` may raise but never lower a
 phase's worker budget (ignored with a warning below the default); the
 per-phase `SIMPLE_{PARSE,HIR}_SHARD_WORKER_KB` stays the deliberate way down.
+
+Intentional performance consequence (recorded 2026-10-09): an aggregate test
+tree (`--budget-scope=aggregate-tests`) exports the per-worker target,
+976,562 KiB. The clamp keeps 60% of it, 585,937 KiB, below one 1,650,000 KiB
+parse worker, so any native-build run inside an aggregate test worker always
+shards sequentially, on POSIX too (it previously fanned out by host memory
+there). That is the intended trade: each test worker's compile is budgeted at
+the per-worker target, and the aggregate cap already accounts for the
+parallelism across workers. A product lane that inherits a watchdog cap larger
+than its own frontend share keeps its share (`product-frontend-policy.shs`
+takes the minimum instead of rejecting the larger value).
