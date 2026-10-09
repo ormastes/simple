@@ -219,10 +219,10 @@ impl MirLowering:
         val kind: HirTypeKind = type_.kind
         var result = type_
         result.kind = match kind:
-            case Named(id, args):
+            case Named(id, type_args):
                 val target = self.relocate_provider_type_symbol(id, provider)
                 if target.id < 0: HirTypeKind.Error
-                else: HirTypeKind.Named(target, self.relocate_provider_types(args, provider))
+                else: HirTypeKind.Named(target, self.relocate_provider_types(type_args, provider))
             case Tuple(items): HirTypeKind.Tuple(self.relocate_provider_types(items, provider))
             case Array(elem, size): HirTypeKind.Array(self.relocate_provider_type(elem, provider), size)
             case Slice(elem): HirTypeKind.Slice(self.relocate_provider_type(elem, provider))
@@ -445,3 +445,46 @@ impl MirLowering:
             val method = self.relocate_provider_callable(method_id, provider, links)
             if method.id >= 0:
                 self.struct_method_syms["{canonical}::{method_name}"] = method
+
+    me register_provider_struct(struct_def: HirStruct, provider: SymbolTable, consumer_owns_name: bool):
+        # prescan_module_struct_names registers every module's struct field
+        # metadata before any module is lowered, so an imported struct's
+        # struct_field_hir_type holds Named ids from the PROVIDER table. Read
+        # through the consumer table those ids name unrelated symbols (an
+        # imported `evidence_quality: ResourceEvidenceQuality` field resolved
+        # to the consumer's `Signal`), which defeated enum equality and fell
+        # into the struct operator-overload error. Relocate the field types
+        # into the active consumer table, exactly as register_provider_class
+        # does for classes.
+        if not provider.symbols.has(struct_def.symbol.id):
+            return
+        val source = provider.get_symbol_raw(struct_def.symbol.id)
+        if source == nil:
+            return
+        var fields: [HirField] = []
+        var field_names: [text] = []
+        for field in struct_def.fields:
+            # Annotated copies: nested struct transports lose their declared
+            # value type on the stage-native lane (module_build.spl pattern).
+            var relocated: HirField = field
+            val field_type: HirType = field.type_
+            relocated.type_ = self.relocate_provider_type(field_type, provider)
+            fields = fields.push(relocated)
+            field_names = field_names.push(field.name)
+        val key = self.composite_layout_key(source)
+        if key != struct_def.name:
+            self.register_composite_field_metadata(key, fields, self.symbols, true)
+        # The bare-name entry is shared by every same-named struct: replace it
+        # only when the consumer does not declare that name itself and the
+        # registered layout is this provider's (prescan keeps the first one).
+        if consumer_owns_name or not self.struct_field_order.has(struct_def.name):
+            return
+        val registered_names = self.struct_field_order[struct_def.name]
+        if registered_names.len() != field_names.len():
+            return
+        var i = 0
+        while i < field_names.len():
+            if registered_names[i] != field_names[i]:
+                return
+            i = i + 1
+        self.register_composite_field_metadata(struct_def.name, fields, self.symbols, true)
