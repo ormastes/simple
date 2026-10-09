@@ -17,10 +17,12 @@ use std.nogc_async_mut.sosix.{sosix_platform, sosix_run, sosix_which}
 use os.apps.smux.api.{smux_create_session, smux_list_sessions,
     smux_list_windows, smux_list_panes, smux_split_pane, smux_focus_pane,
     smux_focused_pane, smux_close_pane, smux_pane_close_pty, smux_pane_spawn_pty, smux_pane_alive, smux_resize,
-    smux_send_command, smux_send_text, smux_capture, smux_capture_styled,
+    smux_send_text, smux_capture, smux_capture_styled,
     smux_paste_text}
 use std.nogc_sync_mut.io.{thread_sleep_ms}
-use app.io.mod.{env_get}
+use app.io.mod.{env_get, file_write, file_remove, dir_remove}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.package_sffi.{set_permissions}
 
 # Gap between typing a message and pressing Enter, so the TUI sees two input
 # events. Measured enough for codex and kimi on ConPTY.
@@ -92,6 +94,37 @@ fn posix_exec_line(cmd: text, args: [text], stderr_path: text) -> text:
     if stderr_path != "":
         line = line + " 2>>" + posix_quote_arg(stderr_path)
     line
+
+# Launch from a file, never from the PTY's input stream. An interactive
+# bootstrap shell may read ahead or flush queued input when it execs the
+# requested child (observed with FreeBSD sh), losing the first pane command.
+# The private directory is 0700; TMPDIR must permit executable files.
+fn _posix_launcher_remove(directory: text):
+    if directory != "":
+        val _file = file_remove(directory + "/launch")
+        val _dir = dir_remove(directory, false)
+
+fn _posix_launcher_create(cmd: text, args: [text], stderr_path: text) -> text:
+    var parent = env_get("TMPDIR") ?? ""
+    if parent == "":
+        parent = "/tmp"
+    if not parent.starts_with("/"):
+        return ""
+    val made = secure_temp_dir(parent, "cs-pane-")
+    if made.is_err():
+        return ""
+    val directory = made.unwrap()
+    val path = directory + "/launch"
+    # The shell has the script open before unlinking it. Cleanup does not
+    # consume stdin, which belongs exclusively to the requested child.
+    val script = ("#!/bin/sh\n/bin/rm -f -- " + posix_quote_arg(path) + " || exit 126\n" +
+        "/bin/rmdir -- " + posix_quote_arg(directory) + " || exit 126\n" +
+        posix_exec_line("env", ["-u", "TMUX", "-u", "TMUX_PANE",
+            "TERM=xterm-256color", cmd] + args, stderr_path) + "\n")
+    if not file_write(path, script) or not set_permissions(path, 0o700):
+        _posix_launcher_remove(directory)
+        return ""
+    directory
 
 # tmux emits one line per pane. pane_title may contain spaces, so it is LAST and
 # the remaining columns are rejoined into it. `.split(sep, N)` ignores N on this
@@ -236,6 +269,7 @@ struct SmuxPaneInfo:
     pane_id: text
     title: text
     pid: i64
+    launcher_dir: text
 
 var _smux_info: [SmuxPaneInfo] = []
 var _smux_zoomed: text = ""
@@ -278,27 +312,24 @@ fn _smux_spawn(session: text, title: text, cmd: text, args: [text], cols: i64,
     val pane_id = _smux_free_pane(scope)
     if pane_id == "":
         return empty
-    # ponytail: a POSIX pty spawn execs ONE program with no argv, so a command
-    # with arguments runs through `/bin/sh` and an `exec` line. Upgrade: an
-    # argv-taking rt_pty_spawn.
+    # POSIX PTY spawn accepts one executable without argv. A private script
+    # preserves argv/env/redirection without reading launch text from stdin.
     var line = windows_spawn_command_line(cmd, args)
+    var launcher_dir = ""
     if not _is_windows():
-        line = "/bin/sh"
+        launcher_dir = _posix_launcher_create(cmd, args, stderr_path)
+        if launcher_dir == "":
+            return empty
+        line = launcher_dir + "/launch"
     # The PTY is opened at the slot's geometry, so size the slot first.
     if cols > 0 and rows > 0:
         val _r = smux_resize(scope.session_id, scope.window_id, pane_id, cols, rows)
     val spawned = smux_pane_spawn_pty(scope.session_id, scope.window_id, pane_id, line)
     if spawned.is_err():
+        _posix_launcher_remove(launcher_dir)
         return empty
-    if not _is_windows():
-        # The child is not inside tmux even when cs is; an inherited TMUX makes
-        # CLIs (kimi) warn and fall back on keys. smux emulates xterm-256color.
-        # The shell echoes the typed launch line; clear it first so a CLI that
-        # draws on the main screen (kimi) starts on a blank pane.
-        val _e = smux_send_command(scope.session_id, scope.window_id, pane_id,
-            "printf '\\033[H\\033[2J'; " + posix_exec_line("env", ["-u", "TMUX", "-u", "TMUX_PANE",
-                "TERM=xterm-256color", cmd] + args, stderr_path))
-    _smux_info = _smux_info + [SmuxPaneInfo(pane_id: pane_id, title: title, pid: spawned.unwrap())]
+    _smux_info = _smux_info + [SmuxPaneInfo(pane_id: pane_id, title: title,
+        pid: spawned.unwrap(), launcher_dir: launcher_dir)]
     val _f = smux_focus_pane(scope.session_id, scope.window_id, pane_id)
     Pane(pane_id: pane_id, title: title, pid: spawned.unwrap(), active: true, zoomed: false)
 
@@ -354,6 +385,8 @@ fn pane_kill(session: text, pane_id: text) -> bool:
         for info in _smux_info:
             if info.pane_id != pane_id:
                 kept = kept + [info]
+            else:
+                _posix_launcher_remove(info.launcher_dir)
         _smux_info = kept
         return true
     _tmux_ok(pane_kill_argv(pane_id))

@@ -486,7 +486,9 @@ int wmain(int argc, wchar_t **argv) {
     return run_in_session(argc - 2, argv + 2);
 }
 #else
+#ifndef __FreeBSD__
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -499,7 +501,434 @@ static int reject(const char *reason) {
     return 125;
 }
 
+#ifdef __FreeBSD__
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <sys/user.h>
+#include <sys/proc.h>
+#include <sys/procctl.h>
+#include <sys/wait.h>
+#include <poll.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <time.h>
+#include <stdint.h>
+
+/* Ownership mechanism only: RSS limits, workload deadlines, TERM grace and
+ * receipts remain in Perl. This owner never executes workload code itself. */
+#define REAP_ROWS 16384
+#define REAP_DEPTH 64
+#define REAP_FRAME (REAP_ROWS * 160 + 512)
+struct owned_row {
+    struct kinfo_proc info;
+    pid_t reaper;
+    unsigned depth;
+    int nested;
+};
+static volatile sig_atomic_t reap_stop;
+static pid_t reap_payload;
+static int reap_status_raw = -1;
+static double reap_deadline;
+static const char *reap_failure = "none";
+static pid_t reap_failure_pid;
+static int reap_failure_errno;
+
+/* Remember a fixed diagnostic stage without process names or argv. */
+static void reap_failed(const char *reason, pid_t pid, int error) {
+    reap_failure = reason;
+    reap_failure_pid = pid;
+    reap_failure_errno = error;
+}
+
+static double reap_clock(void) {
+    struct timespec t;
+    if (clock_gettime(CLOCK_MONOTONIC, &t)) return -1;
+    return (double)t.tv_sec + t.tv_nsec / 1000000000.0;
+}
+static void reap_interrupted(int sig) { reap_stop = sig; }
+static void reap_report(int output, const char *phase, const char *reason,
+    pid_t pid, int error, unsigned attempts, int quiet) {
+    char line[256];
+    int n = snprintf(line, sizeof(line), "ERROR 1 %d %s %s %d %d %u %d %d %d\n",
+        getpid(), phase, reason, pid, error, attempts, (int)reap_stop, quiet, reap_status_raw);
+    /* The private output pipe is O_NONBLOCK and 256 <= PIPE_BUF: one atomic,
+     * best-effort write, never a retry or a wait. A full/broken pipe may lose
+     * diagnostics, but must not stall cleanup. Inherited stderr may be full. */
+    if (n > 0 && n < (int)sizeof(line)) (void)write(output, line, (size_t)n);
+}
+static int reap_within(void) {
+    double now = reap_clock();
+    return now >= 0 && now < reap_deadline && !reap_stop;
+}
+static int reap_metadata(pid_t pid, struct kinfo_proc *p) {
+    int mib[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    size_t size = sizeof(*p);
+    memset(p, 0, sizeof(*p));
+    if (sysctl(mib, 4, p, &size, NULL, 0)) return errno == ESRCH ? 0 : -1;
+    if (!size) return 0;
+    if (size != sizeof(*p) || p->ki_structsize != sizeof(*p) || p->ki_pid != pid) {
+        errno = EPROTO;
+        return -1;
+    }
+    return 1;
+}
+static int reap_same(const struct kinfo_proc *a, const struct kinfo_proc *b) {
+    return a->ki_pid == b->ki_pid && a->ki_start.tv_sec == b->ki_start.tv_sec &&
+        a->ki_start.tv_usec == b->ki_start.tv_usec;
+}
+static int reap_owned(pid_t pid) {
+    struct procctl_reaper_status s = {0};
+    if (procctl(P_PID, pid, PROC_REAP_STATUS, &s)) {
+        reap_failed("owner-status-query", pid, errno);
+        return 0;
+    }
+    if (!(s.rs_flags & REAPER_STATUS_OWNED) || (s.rs_flags & REAPER_STATUS_REALINIT) ||
+        s.rs_reaper != pid) {
+        reap_failed("owner-status-changed", pid, 0);
+        return 0;
+    }
+    return 1;
+}
+/* Reserve one extra entry: a full list is ambiguous, never a complete sample. */
+static struct procctl_reaper_pidinfo *reap_list(pid_t pid, unsigned *count) {
+    if (!reap_within()) { reap_failed("list-budget-or-signal", pid, 0); return NULL; }
+    if (!reap_owned(pid)) return NULL;
+    struct procctl_reaper_pidinfo *rows = calloc(REAP_ROWS + 1, sizeof(*rows));
+    if (!rows) { reap_failed("list-allocation", pid, errno); return NULL; }
+    struct procctl_reaper_pids request = {0};
+    request.rp_count = REAP_ROWS + 1;
+    request.rp_pids = rows;
+    if (procctl(P_PID, pid, PROC_REAP_GETPIDS, &request)) {
+        reap_failed("list-query", pid, errno); free(rows); return NULL;
+    }
+    *count = 0;
+    while (*count <= REAP_ROWS && (rows[*count].pi_flags & REAPER_PIDINFO_VALID))
+        ++*count;
+    if (*count > REAP_ROWS) { reap_failed("list-saturated", pid, 0); free(rows); return NULL; }
+    if (!reap_owned(pid)) { free(rows); return NULL; }
+    if (!reap_within()) { reap_failed("list-budget-or-signal", pid, 0); free(rows); return NULL; }
+    return rows;
+}
+static void reap_wait(void) {
+    int status;
+    pid_t pid;
+    double until = reap_clock() + 0.002;
+    /* A fork/exit stream must not starve commands or cleanup deadlines. Partial
+     * draining is not quiescence: cleanup separately checks kernel ownership. */
+    for (unsigned i = 0; i < 256 && reap_clock() < until; ++i) {
+        pid = waitpid(-1, &status, WNOHANG);
+        if (pid <= 0) break;
+        if (pid == reap_payload) reap_status_raw = status;
+    }
+}
+static int reap_signal_all(int signal) {
+    struct procctl_reaper_kill k = {0};
+    k.rk_sig = signal;
+    int rc = procctl(P_PID, getpid(), PROC_REAP_KILL, &k);
+    /* ESRCH with no failed PID means an empty hierarchy, not a signal failure. */
+    return (rc == 0 || (errno == ESRCH && k.rk_killed == 0)) && k.rk_fpid == -1;
+}
+static int reap_cleanup(void) {
+    double now = reap_clock();
+    if (now < 0) return 0;
+    double until = now + 2.0;
+    if (!reap_owned(getpid())) return 0;
+    do {
+        int stopped = reap_signal_all(SIGSTOP);
+        int killed = reap_signal_all(SIGKILL);
+        if (!stopped || !killed) return 0;
+        reap_wait();
+        struct procctl_reaper_status s = {0};
+        if (procctl(P_PID, getpid(), PROC_REAP_STATUS, &s) ||
+            !(s.rs_flags & REAPER_STATUS_OWNED)) return 0;
+        if (s.rs_descendants == 0 && reap_status_raw >= 0) return 1;
+        struct timespec delay = {0, 10000000};
+        nanosleep(&delay, NULL);
+        now = reap_clock();
+    } while (now >= 0 && now < until);
+    return 0;
+}
+static int reap_write(int fd, const char *data, size_t size, double until) {
+    while (size) {
+        double now = reap_clock();
+        if (now < 0) return 0;
+        double left = until - now;
+        if (left <= 0) return 0;
+        struct pollfd p = {fd, POLLOUT, 0};
+        int rc = poll(&p, 1, (int)(left * 1000) + 1);
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc <= 0 || !(p.revents & POLLOUT)) return 0;
+        ssize_t n = write(fd, data, size);
+        if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        if (n <= 0) return 0;
+        data += n; size -= (size_t)n;
+    }
+    return 1;
+}
+static int reap_sample_once(int output) {
+    /* Bounded allocation; rows carry native birth identities, not ps lstart. */
+    struct owned_row *rows = calloc(REAP_ROWS + 1, sizeof(*rows));
+    /* Two bounded lists per reaper, not two parent scans per nested child. */
+    pid_t *membership = calloc(REAP_ROWS * 2, sizeof(*membership));
+    unsigned *generation = calloc(REAP_ROWS * 2, sizeof(*generation));
+    char *frame = malloc(REAP_FRAME);
+    int ok = 0;
+    unsigned used = 1;
+    if (!rows || !frame || !membership || !generation) {
+        reap_failed("sample-allocation", getpid(), ENOMEM); goto done;
+    }
+    int present = reap_metadata(getpid(), &rows[0].info);
+    if (present != 1) { reap_failed("self-metadata", getpid(), present < 0 ? errno : 0); goto done; }
+    rows[0].nested = 1;
+    for (unsigned at = 0; at < used; ++at) {
+        if (!rows[at].nested) continue;
+        pid_t owner = rows[at].info.ki_pid;
+        struct kinfo_proc before, after;
+        if (rows[at].depth >= REAP_DEPTH) { reap_failed("depth-limit", owner, 0); goto done; }
+        if (!reap_within()) { reap_failed("owner-budget-or-signal", owner, 0); goto done; }
+        present = reap_metadata(owner, &before);
+        if (present != 1 || !reap_same(&before, &rows[at].info)) {
+            reap_failed("owner-identity-before", owner, present < 0 ? errno : 0); goto done;
+        }
+        /* FreeBSD pfind() excludes zombies, but a zombie reaper retains its
+         * descendants until proc_reap(). Never skip that unobserved branch. */
+        if (before.ki_stat == SZOMB) {
+            reap_failed("owner-zombie-unreaped", owner, 0); goto done;
+        }
+        unsigned count;
+        struct procctl_reaper_pidinfo *children = reap_list(owner, &count);
+        if (!children) goto done;
+        int complete = 1;
+        unsigned first_child = used;
+        for (unsigned i = 0; i < count; ++i) {
+            if (used > REAP_ROWS || !reap_within()) {
+                reap_failed(used > REAP_ROWS ? "row-limit" : "member-budget-or-signal", owner, 0);
+                complete = 0; break;
+            }
+            struct owned_row *r = &rows[used];
+            int present = reap_metadata(children[i].pi_pid, &r->info);
+            if (!present) continue; /* completed between ownership and metadata */
+            if (present < 0) { reap_failed("member-metadata", children[i].pi_pid, errno); complete = 0; break; }
+            r->reaper = owner;
+            r->depth = rows[at].depth + 1;
+            r->nested = !!(children[i].pi_flags & REAPER_PIDINFO_REAPER);
+            if (!r->nested) {
+                struct procctl_reaper_status s = {0};
+                struct kinfo_proc check;
+                int result = procctl(P_PID, r->info.ki_pid, PROC_REAP_STATUS, &s);
+                if (result && errno == ESRCH) continue;
+                int status_error = result ? errno : 0;
+                int present_again = reap_metadata(r->info.ki_pid, &check);
+                if (!present_again) continue;
+                if (result || s.rs_reaper != owner || (s.rs_flags & REAPER_STATUS_OWNED) ||
+                    present_again < 0 || !reap_same(&check, &r->info)) {
+                    reap_failed("member-owner-or-identity", r->info.ki_pid,
+                        status_error ? status_error : present_again < 0 ? errno : 0);
+                    complete = 0; break;
+                }
+            }
+            ++used;
+        }
+        free(children);
+        if (!complete) goto done;
+        /* Fresh parent membership plus matching birth on both sides admits
+         * nested owners before they enter the queue. A later matching birth
+         * preserves that identity; setsid/reaping cannot move a live process
+         * into an unrelated reaper hierarchy. Stale/reused PIDs fail closed. */
+        children = reap_list(owner, &count);
+        if (!children) goto done;
+        unsigned epoch = at + 1;
+        for (unsigned i = 0; i < count; ++i) {
+            pid_t pid = children[i].pi_pid;
+            if (pid <= 0) { reap_failed("membership-pid", owner, 0); complete = 0; break; }
+            unsigned slot = (unsigned)pid & (REAP_ROWS * 2 - 1);
+            while (generation[slot] == epoch && membership[slot] != pid)
+                slot = (slot + 1) & (REAP_ROWS * 2 - 1);
+            membership[slot] = pid;
+            generation[slot] = epoch;
+        }
+        free(children);
+        if (!complete) goto done;
+        for (unsigned i = first_child; i < used; ++i) {
+            if (!rows[i].nested) continue;
+            pid_t pid = rows[i].info.ki_pid;
+            unsigned slot = (unsigned)pid & (REAP_ROWS * 2 - 1);
+            while (generation[slot] == epoch && membership[slot] != pid)
+                slot = (slot + 1) & (REAP_ROWS * 2 - 1);
+            struct kinfo_proc confirmed;
+            if (generation[slot] != epoch) { reap_failed("nested-membership-changed", pid, 0); goto done; }
+            if (!reap_within()) { reap_failed("nested-budget-or-signal", pid, 0); goto done; }
+            present = reap_metadata(pid, &confirmed);
+            if (present != 1 || !reap_same(&confirmed, &rows[i].info)) {
+                reap_failed("nested-identity", pid, present < 0 ? errno : 0); goto done;
+            }
+        }
+        present = reap_metadata(owner, &after);
+        if (present != 1 || !reap_same(&before, &after)) {
+            reap_failed("owner-identity-after", owner, present < 0 ? errno : 0); goto done;
+        }
+    }
+    size_t bytes = (size_t)snprintf(frame, REAP_FRAME, "SAMPLE 1 %d %d %d %u\n",
+        getpid(), reap_payload, reap_status_raw, used);
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0 || page % 1024) { reap_failed("page-size", getpid(), 0); goto done; }
+    for (unsigned i = 0; i < used; ++i) {
+        struct kinfo_proc *p = &rows[i].info;
+        if (p->ki_rssize < 0 || p->ki_start.tv_sec < 0 || p->ki_start.tv_usec < 0 ||
+            p->ki_start.tv_usec >= 1000000 || bytes >= REAP_FRAME - 160) {
+            reap_failed("sample-row-range", p->ki_pid, 0); goto done;
+        }
+        int n = snprintf(frame + bytes, REAP_FRAME - bytes,
+            "%d %d %d %d %llu %d %lld %ld\n", p->ki_pid, p->ki_ppid, p->ki_pgid,
+            p->ki_sid, (unsigned long long)p->ki_rssize * (unsigned long long)(page / 1024),
+            p->ki_stat == SZOMB, (long long)p->ki_start.tv_sec, (long)p->ki_start.tv_usec);
+        if (n <= 0 || n >= 160) { reap_failed("sample-row-size", p->ki_pid, 0); goto done; }
+        bytes += (size_t)n;
+    }
+    memcpy(frame + bytes, "END\n", 4); bytes += 4;
+    if (reap_within()) {
+        ok = reap_write(output, frame, bytes, reap_deadline) ? 1 : -1;
+        if (ok < 0) reap_failed("sample-write-incomplete", getpid(), 0);
+    } else reap_failed("sample-budget-or-signal", getpid(), 0);
+done:
+    free(rows); free(frame); free(membership); free(generation);
+    return ok;
+}
+static int reap_sample(int output, unsigned budget_ms) {
+    reap_deadline = reap_clock() + budget_ms / 1000.0;
+    reap_failed("sample-budget-or-signal", getpid(), 0);
+    /* A subordinate reaper can finish between two metadata reads. Drain
+     * waitable children before each complete observation: a zombie reaper can
+     * retain descendants while procctl rejects its PID. Reaping transfers
+     * those descendants; only the fresh traversal may admit them. A zombie
+     * owned by another parent still fails closed. Never reset the budget or
+     * accept a partial branch. Attempted reply bytes terminate on failure. */
+    unsigned attempts = 0;
+    for (; attempts < 3 && reap_within();) {
+        ++attempts;
+        reap_wait(); /* Existing 256-wait / 2-ms bound, inside this deadline. */
+        if (!reap_within()) {
+            reap_failed("sample-budget-or-signal", getpid(), 0); break;
+        }
+        int result = reap_sample_once(output);
+        if (result > 0) return 1;
+        if (result < 0) break;
+    }
+    reap_report(output, "sample", reap_failure, reap_failure_pid, reap_failure_errno, attempts, -1);
+    return 0;
+}
+static int reap_number(const char *s, unsigned max, unsigned *value) {
+    unsigned n = 0;
+    if (!s || !*s) return 0;
+    for (; *s; ++s) {
+        if (*s < '0' || *s > '9' || n > (max - (unsigned)(*s - '0')) / 10) return 0;
+        n = n * 10 + (unsigned)(*s - '0');
+    }
+    *value = n; return 1;
+}
+static int reaper_owner(int argc, char **argv) {
+    unsigned input, output, budget;
+    if (argc < 7 || strcmp(argv[5], "--") ||
+        !reap_number(argv[2], INT_MAX, &input) || input < 3 ||
+        !reap_number(argv[3], INT_MAX, &output) || output < 3 || input == output ||
+        !reap_number(argv[4], 30000, &budget) || budget < 1000) return reject("invalid reaper owner arguments");
+    pid_t parent = getppid();
+    struct sigaction sa = {0};
+    sa.sa_handler = reap_interrupted;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGTERM, &sa, NULL) || sigaction(SIGINT, &sa, NULL) ||
+        sigaction(SIGHUP, &sa, NULL)) return reject("reaper signal setup failed");
+    signal(SIGPIPE, SIG_IGN);
+    int parent_signal = SIGTERM;
+    if (procctl(P_PID, 0, PROC_PDEATHSIG_CTL, &parent_signal) || getppid() != parent ||
+        procctl(P_PID, 0, PROC_REAP_ACQUIRE, NULL) || !reap_owned(getpid()))
+        return reject("reaper acquisition failed");
+    struct kinfo_proc owner_identity;
+    if (reap_metadata(getpid(), &owner_identity) != 1) return reject("reaper identity unavailable");
+    int output_flags = fcntl((int)output, F_GETFL);
+    if (output_flags < 0 || fcntl((int)output, F_SETFL, output_flags | O_NONBLOCK))
+        return reject("reaper output setup failed");
+    int gate[2];
+    if (pipe(gate)) return reject("reaper gate failed");
+    reap_payload = fork();
+    if (reap_payload < 0) { close(gate[0]); close(gate[1]); return reject("reaper fork failed"); }
+    if (!reap_payload) {
+        close((int)input); close((int)output); close(gate[1]);
+        signal(SIGTERM, SIG_DFL); signal(SIGINT, SIG_DFL); signal(SIGHUP, SIG_DFL);
+        signal(SIGPIPE, SIG_DFL);
+        if (setpgid(0, 0)) _exit(89);
+        char start;
+        if (read(gate[0], &start, 1) != 1 || start != 'G') _exit(89);
+        close(gate[0]);
+        execvp(argv[6], argv + 6);
+        _exit(127);
+    }
+    close(gate[0]);
+    int released = 0, requested = 0, failed = 0, failure_errno = 0;
+    const char *exit_reason = "parent-or-signal";
+    while (!reap_stop && getppid() == parent) {
+        reap_wait();
+        struct pollfd p = {(int)input, POLLIN, 0};
+        int rc = poll(&p, 1, 20);
+        if (rc < 0 && errno == EINTR) continue;
+        if (rc < 0) { exit_reason = "command-poll"; failure_errno = errno; failed = 1; break; }
+        if (!rc) continue;
+        char command;
+        ssize_t received = read((int)input, &command, 1);
+        if (received != 1) {
+            exit_reason = received < 0 ? "command-read" : "command-eof";
+            failure_errno = received < 0 ? errno : 0; failed = 1; break;
+        }
+        if (command == 'G' && !released) {
+            if (write(gate[1], "G", 1) != 1) {
+                exit_reason = "payload-gate"; failure_errno = errno; failed = 1; break;
+            }
+            close(gate[1]); gate[1] = -1; released = 1;
+        } else if (command == 'S') {
+            if (!reap_sample((int)output, budget)) { exit_reason = "sample-failed"; failed = 1; break; }
+        } else if (command == 'T') {
+            if (!reap_signal_all(SIGTERM) ||
+                !reap_write((int)output, "TERM 1\n", 7, reap_clock() + budget / 1000.0)) {
+                exit_reason = "term-signal-or-reply"; failed = 1; break;
+            }
+        } else if (command == 'Q') { exit_reason = "cleanup-requested"; requested = 1; break; }
+        else { exit_reason = "invalid-command"; failed = 1; break; }
+    }
+    if (gate[1] >= 0) close(gate[1]);
+    int quiet = reap_cleanup();
+    if (requested) {
+        char reply[160];
+        int n = snprintf(reply, sizeof(reply), "QUIET %d %d %d %lld %ld\n", quiet, reap_status_raw,
+            getpid(), (long long)owner_identity.ki_start.tv_sec, (long)owner_identity.ki_start.tv_usec);
+        if (!reap_write((int)output, reply, (size_t)n, reap_clock() + 1.0)) {
+            exit_reason = "cleanup-reply"; failed = 1;
+        }
+    }
+    if (failed || !quiet || !requested)
+        reap_report((int)output, "stop", exit_reason, getppid(), failure_errno, 0, quiet);
+    close((int)input); close((int)output);
+    /* Losing the control peer or exhausting one cleanup attempt must not
+     * abandon live descendants. Retain the kernel owner and retry at low duty
+     * cycle; the parent already reports QUIET 0 and this exact owner's identity.
+     * Each attempt remains bounded. Signals cannot turn this into a busy loop. */
+    while (!quiet) {
+        double retry_at = reap_clock() + 5.0;
+        while (reap_clock() < retry_at) {
+            double left = retry_at - reap_clock();
+            if (left <= 0) break;
+            struct timespec pause = {(time_t)left, (long)((left - (time_t)left) * 1000000000.0)};
+            nanosleep(&pause, NULL);
+        }
+        quiet = reap_cleanup();
+    }
+    return quiet && !failed && requested ? 0 : 89;
+}
+#endif
+
 int main(int argc, char **argv) {
+#ifdef __FreeBSD__
+    if (argc >= 2 && !strcmp(argv[1], "--reaper-owner")) return reaper_owner(argc, argv);
+#endif
     /* Batch observer for the parent guard. 0 means the PID disappeared; other
      * errors fail sampling. getsid(), not Darwin ps's session-address column,
      * is the authoritative POSIX session identity. */
