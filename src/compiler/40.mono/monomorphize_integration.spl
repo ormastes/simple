@@ -92,6 +92,9 @@ class MonomorphizationPass:
     # Module whose function bodies are being rewritten right now (scopes the
     # two maps above).
     current_module: text
+    # Module name -> source path, so an unrewritten call site is reported as
+    # `path:line:col` instead of an unlocatable message.
+    module_paths: Dict<text, text>
     # Function return context is scoped and suspended for nested lambdas.
     current_return_type: HirType?
     # Specializations whose bodies still have to be walked (FIFO worklist).
@@ -137,6 +140,7 @@ impl MonomorphizationPass:
             spec_module: {},
             sym_names: {},
             current_module: "",
+            module_paths: {},
             current_return_type: nil,
             fn_sigs: {},
             named_types: {},
@@ -184,7 +188,8 @@ impl MonomorphizationPass:
 
         # Step 1: Collect generic definitions
         for name in mod_keys:
-            val module = modules[name]
+            val module: HirModule = modules[name]
+            self.module_paths[name] = module.path
             self.collect_generics(module, name)
 
         if self.stats.generic_functions_found == 0 and self.stats.generic_structs_found == 0 and self.stats.generic_classes_found == 0:
@@ -531,6 +536,19 @@ impl MonomorphizationPass:
         if self.sym_names.has(k):
             return self.sym_names[k]
         "sym_{s.id}"
+
+    fn call_site_location(sp: Span) -> text:
+        """`path:line:col` of a call site in the module being rewritten; the
+        span's own file wins when lowering recorded one."""
+        var file: text = self.current_module
+        if self.module_paths.has(self.current_module):
+            val p: text = self.module_paths[self.current_module] ?? ""
+            if p != "":
+                file = p
+        val sp_file: text = sp.file ?? ""
+        if sp_file != "":
+            file = sp_file
+        "{file}:{sp.line}:{sp.col}"
 
     me infer_call_type_args(template: HirFunction, args: [HirCallArg], expected_result: HirType? = nil) -> [HirType]:
         """Infer the template's type arguments from the call's argument types.
@@ -1128,8 +1146,9 @@ impl MonomorphizationPass:
         if targs.len() != expected.len():
             self.stats.unresolved_generic_calls = self.stats.unresolved_generic_calls + 1
             self.unresolved_templates[gname] = true
+            val site: text = self.call_site_location(callee.span)
             self.diagnostics = self.diagnostics.push(
-                "E-MONO-032: call to generic `{gname}` has no explicit type arguments and they could not be inferred from its argument types; call site not monomorphized")
+                "E-MONO-032: call to generic `{gname}` at {site} has no explicit type arguments and they could not be inferred from its argument types; call site not monomorphized")
             return HirExprKind.Call(new_callee, new_args, new_type_args)
         val target = self.request_specialization(gname, targs)
         if target < 0:
@@ -1661,6 +1680,11 @@ fn bind_type_params(param_ty: HirType, arg_ty: HirType, bindings: Dict<text, Hir
         return true
     match param_ty.kind:
         case TypeParam(name, _):
+            # A partially-known argument (`Err(e)` types as Result<?, E>)
+            # carries no evidence for this parameter: bind nothing rather
+            # than poison the binding and reject a later concrete witness.
+            if not hir_type_is_concrete(arg_ty):
+                return true
             if bindings.has(name):
                 val prev: HirType = bindings[name]
                 return hir_type_key(prev) == hir_type_key(arg_ty)
