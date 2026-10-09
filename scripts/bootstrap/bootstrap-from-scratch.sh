@@ -2057,6 +2057,12 @@ bootstrap_stage_sanity() (
   sanity_win_temp=${TEMP:-${TMP:-}}
   sanity_cc=${CC:-}
   sanity_cxx=${CXX:-}
+  # Lane-private runtime object cache (runtime_compiler.spl). The scrub below
+  # removes LOCALAPPDATA as well, so without this the candidate compiles all
+  # runtime C serially on every hello-world build (38.7s of a 63.5s stage2
+  # hello-world, measured 2026-10-10). The caller names the directory; entries
+  # are keyed by compiler digest, preprocessed TU and flags, so reuse is exact.
+  sanity_rt_obj_cache_dir=${SIMPLE_RT_OBJ_CACHE_DIR:-}
   # Darwin native-action admission fails closed without these two
   # (darwin-deployment-or-sdk-missing); the scrub below would drop them.
   sanity_sdkroot=${SDKROOT:-}
@@ -2170,6 +2176,10 @@ bootstrap_stage_sanity() (
     TEMP=${sanity_win_temp}
     TMP=${sanity_win_temp}
     export TEMP TMP
+  fi
+  if [ -n "${sanity_rt_obj_cache_dir}" ]; then
+    SIMPLE_RT_OBJ_CACHE_DIR=${sanity_rt_obj_cache_dir}
+    export SIMPLE_RT_OBJ_CACHE_DIR
   fi
   if [ -n "${sanity_cc}" ]; then
     CC=${sanity_cc}
@@ -4104,7 +4114,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     "${stage2_status}" "${stage2_native_log}" "${stage2_cache_absolute}"
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
     echo "  Stage 2: running bootstrap compiler sanity"
-    if ! bootstrap_stage_sanity "${stage2_bin}" \
+    if ! SIMPLE_RT_OBJ_CACHE_DIR="${stage2_cache_absolute}/rt-obj" \
+      bootstrap_stage_sanity "${stage2_bin}" \
       "$(absolute_path "${stage2_sanity_evidence}")" \
       "${stage2_home_absolute}" "${stage2_tmp_absolute}" \
       "${stage_build_path}"; then
@@ -5026,7 +5037,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
     ;;
   esac
   if [ "${stage3_status}" -eq 0 ] && [ -x "${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}" ]; then
-    if bootstrap_stage_sanity "${stage3_bin}" \
+    if SIMPLE_RT_OBJ_CACHE_DIR="${stage3_cache_absolute}/rt-obj" \
+      bootstrap_stage_sanity "${stage3_bin}" \
       "$(absolute_path "${stage3_sanity_evidence}")" \
       "${stage3_home_absolute}" "${stage3_tmp_absolute}" \
       "${stage_build_path}"; then
