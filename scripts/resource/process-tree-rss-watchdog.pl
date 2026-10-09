@@ -63,6 +63,22 @@ $opt{'max-rss-kib'} > 0 && $opt{'max-rss-kib'} <= $budget_ceiling_kib
     or die "rss-guard: cap must be between 1 and $budget_ceiling_kib KiB for $opt{'budget-scope'}\n";
 $opt{'interval-ms'} > 0 && $opt{'interval-ms'} <= 100
     or die "rss-guard: sample interval must be between 1 and 100 ms\n";
+# An ENFORCED cap is also the children's shard-admission hint
+# (src/app/cli/shard_mem_clamp.spl reads SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB
+# and keeps 40% of it for the parent). Exporting it here, at the one place
+# every enforcing owner goes through, means no wrapper can enforce a tree cap
+# that its native-build children cannot see. A smaller inherited hint (an
+# enclosing cap) is kept. An aggregate test tree hints the per-worker target,
+# not the aggregate. A transcribed lane's explicit-env value still wins in
+# its own child. Monitor mode enforces nothing and sets nothing.
+if ($opt{'rss-cap-mode'} eq 'enforce') {
+    my $hint = $opt{'budget-scope'} eq 'aggregate-tests'
+        ? $worker_target_kib : $opt{'max-rss-kib'};
+    my $inherited = $ENV{SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB} // '';
+    $hint = $inherited
+        if $inherited =~ /\A[1-9][0-9]{0,17}\z/ && $inherited < $hint;
+    $ENV{SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB} = $hint;
+}
 my $leader = 0;
 my %known;
 my %groups;
