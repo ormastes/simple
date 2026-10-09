@@ -266,6 +266,18 @@ impl MirLowering:
                 nil
             case _: nil
 
+fn hir_const_is_unit_typed(const_: HirConst) -> bool:
+    """A module binding whose settled HIR type is Unit (`_expr_N = main()`)
+    has no value to store; it gets no static on any backend."""
+    match const_.type_.kind:
+        case HirTypeKind.Unit: true
+        case _: false
+
+fn mir_type_is_unit(type_: MirType) -> bool:
+    match type_.kind:
+        case MirTypeKind.Unit: true
+        case _: false
+
 fn runtime_module_initializer_supported(const_: HirConst) -> bool:
     match const_.value.kind:
         case IntLit(_, _) | FloatLit(_, _) | FloatLexeme(_, _) | BoolLit(_): false
@@ -2091,6 +2103,11 @@ impl MirLowering:
         """Lower a module-level HIR binding that needs storage into a MIR
         static. Literal immutable bindings remain compile-time constants;
         non-folded bindings receive runtime initialization."""
+        # Unit has no storage; the runtime initializer evaluates such an
+        # initializer for its side effects only (see
+        # lower_runtime_module_initializers_named).
+        if hir_const_is_unit_typed(const_):
+            return
         val folded = self.lower_const_expr(const_.value)
         if folded.?:
             if not const_.is_mutable and const_.visibility.is_private():
@@ -2284,6 +2301,13 @@ impl MirLowering:
             match const_.value.kind:
                 case DictLit(_, _, _): value_type = MirType.i64()
                 case _: ()
+            # A Unit-valued initializer (a top-level `main()` statement,
+            # lowered as `_expr_N`) runs for its side effects only: the call
+            # was just emitted above. Unit has no storage -- LLVM would emit
+            # `global void` (rejected by llc) and Cranelift has no Unit
+            # static -- so no static and no StoreGlobal.
+            if mir_type_is_unit(value_type) or hir_const_is_unit_typed(const_):
+                continue
             var value_builder = self.builder
             var value_module = value_builder.module
             var statics = value_module.statics
