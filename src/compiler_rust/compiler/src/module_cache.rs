@@ -231,7 +231,7 @@ thread_local! {
     /// cache -- every entry holds a whole source string AND its parsed AST --
     /// so it is the one an unbounded process grows on. An entry still borrowed
     /// by either lane is never evicted; see `shared_source_pinned`.
-    static PARSED_SOURCE_CACHE: RefCell<BoundedCache<(PathBuf, simple_common::target::Target), SharedSource>> =
+    static PARSED_SOURCE_CACHE: RefCell<BoundedCache<(PathBuf, crate::pipeline::cfg_strip::CfgTarget), SharedSource>> =
         RefCell::new(BoundedCache::new(parsed_source_cache_max(), shared_source_pinned));
 
     /// Source text of entries whose AST was handed to the interpreter BY
@@ -240,7 +240,7 @@ thread_local! {
     /// never a fresh disk read -- so the result is identical to a cache hit
     /// (the parser is deterministic), only slower. Source text is ~1/17 of
     /// the AST it produced, which is the whole point of releasing the AST.
-    static RELEASED_SOURCE_TEXT: RefCell<HashMap<(PathBuf, simple_common::target::Target), Arc<String>>> = RefCell::new(HashMap::new());
+    static RELEASED_SOURCE_TEXT: RefCell<HashMap<(PathBuf, crate::pipeline::cfg_strip::CfgTarget), Arc<String>>> = RefCell::new(HashMap::new());
 }
 
 /// Hand the interpreter an owned AST for `path`, releasing the cache's copy
@@ -258,7 +258,7 @@ thread_local! {
 /// Arc) this falls back to the old deep clone, so a live borrow is never
 /// disturbed. Both paths yield a tree equal to the parse of the cached bytes.
 pub fn take_shared_ast(path: &Path, ast: Arc<simple_parser::ast::Module>) -> simple_parser::ast::Module {
-    let key = (normalize_path_key(path), simple_common::target::Target::host());
+    let key = (normalize_path_key(path), crate::pipeline::cfg_strip::cfg_target());
     let released = PARSED_SOURCE_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let source = match cache.get(&key) {
@@ -335,11 +335,11 @@ impl SharedSource {
 /// Split from `shared_source` so a caller can attribute a miss to its own lane
 /// (the lowerer's `IMPORT_AST_PARSES` counts the parses that lane caused).
 pub fn shared_source_lookup(path: &Path) -> Option<SharedSource> {
-    shared_source_lookup_for_target(path, simple_common::target::Target::host())
+    shared_source_lookup_for_target(path, crate::pipeline::cfg_strip::cfg_target())
 }
 
 /// Look up only the AST selected for this compilation target OS.
-pub fn shared_source_lookup_for_target(path: &Path, target: simple_common::target::Target) -> Option<SharedSource> {
+pub fn shared_source_lookup_for_target(path: &Path, target: crate::pipeline::cfg_strip::CfgTarget) -> Option<SharedSource> {
     let key = (normalize_path_key(path), target);
     PARSED_SOURCE_CACHE.with(|cache| cache.borrow().get(&key))
 }
@@ -347,13 +347,13 @@ pub fn shared_source_lookup_for_target(path: &Path, target: simple_common::targe
 /// Read + parse `path` once per process, shared by every lane. See
 /// `PARSED_SOURCE_CACHE`.
 pub fn shared_source(path: &Path) -> SharedSource {
-    shared_source_for_target(path, simple_common::target::Target::host())
+    shared_source_for_target(path, crate::pipeline::cfg_strip::cfg_target())
 }
 
 /// Preserve original source bytes while selecting OS branches before parsing.
-/// Native import callers provide their compilation target; interpreters use host.
-pub fn shared_source_for_target(path: &Path, target: simple_common::target::Target) -> SharedSource {
-    let key = (normalize_path_key(path), target);
+/// Callers provide the conditional-compilation target names (`cfg_target()`).
+pub fn shared_source_for_target(path: &Path, target: crate::pipeline::cfg_strip::CfgTarget) -> SharedSource {
+    let key = (normalize_path_key(path), target.clone());
     if let Some(hit) = PARSED_SOURCE_CACHE.with(|cache| cache.borrow().get(&key)) {
         crate::perf_counters::bump(&crate::perf_counters::SHARED_SRC_HITS, 1);
         return hit;
@@ -366,7 +366,7 @@ pub fn shared_source_for_target(path: &Path, target: simple_common::target::Targ
     // SAME bytes it was first read as, so it can never observe a later edit
     // that a still-cached entry would not have observed either.
     if let Some(source) = RELEASED_SOURCE_TEXT.with(|r| r.borrow_mut().remove(&key)) {
-        let ast = parse_shared_source(&source, target);
+        let ast = parse_shared_source(&source, &target);
         let entry = SharedSource::Parsed { source, ast };
         let delta = PARSED_SOURCE_CACHE.with(|cache| cache.borrow_mut().insert(key, entry.clone()));
         mirror_stats(
@@ -384,7 +384,7 @@ pub fn shared_source_for_target(path: &Path, target: simple_common::target::Targ
             if source.contains('\r') {
                 source = source.replace('\r', "");
             }
-            let ast = parse_shared_source(&source, target);
+            let ast = parse_shared_source(&source, &target);
             SharedSource::Parsed {
                 source: Arc::new(source),
                 ast,
@@ -406,7 +406,7 @@ pub fn shared_source_for_target(path: &Path, target: simple_common::target::Targ
 
 fn parse_shared_source(
     source: &str,
-    target: simple_common::target::Target,
+    target: &crate::pipeline::cfg_strip::CfgTarget,
 ) -> Result<Arc<simple_parser::ast::Module>, Arc<str>> {
     let selected = crate::pipeline::cfg_strip::strip_os_when_blocks(source, target)
         .map_err(|error| Arc::<str>::from(error))?;
