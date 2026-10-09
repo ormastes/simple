@@ -1517,6 +1517,15 @@ impl MirLowering:
         """
         if val text_static = self.try_lower_text_static_builtin(receiver, method, args):
             return text_static
+        var resolution_admits_trait_dispatch = false
+        match resolution:
+            case Unresolved: resolution_admits_trait_dispatch = true
+            case TraitMethod(_, _): resolution_admits_trait_dispatch = true
+            case _: ()
+        if resolution_admits_trait_dispatch:
+            val trait_key = self.trait_receiver_identity(receiver)
+            if trait_key != "":
+                return self.lower_trait_receiver_method_call(trait_key, receiver, method, args)
         # Consume canonical builtin identity before receiver evaluation. Reuse
         # the established loop emitter without evaluating the receiver twice.
         # Revalidate after cache/provider transport; a forged identity fails.
@@ -4422,6 +4431,63 @@ impl MirLowering:
         if id == 8:
             return "rt_native_build"
         "" 
+
+    me lower_trait_receiver_method_call(trait_key: text, receiver: HirExpr, method: text, args: [HirCallArg]) -> LocalId:
+        """Method call on a trait-object receiver (static type IS a trait).
+
+        The seed emits a vtable call (codegen/instr/closures_structs.rs
+        compile_method_call_virtual) and, with no impl in the unit, a bare-name
+        call that aborts via rt_function_not_found. Stage2 objects carry no
+        vtable word, so it devirtualizes instead: exactly one implementing
+        type in the closure -> a direct call to that impl's method, which is
+        what every vtable load would yield; none -> evaluate the operands and
+        trap with a named message (never a silent value); several, or a
+        generic implementor -> a compile error, because choosing one would
+        miscall the others. All of this requires trait_impl_closure_complete
+        (whole-closure lowering); partial demand/incremental lowering cannot
+        know the implementor set and is a compile error."""
+        val owners = self.trait_impl_owners.get(trait_key) ?? []
+        val arg_operands = self.lower_receiver_and_args(receiver, args)
+        var has_generic_owner = false
+        for owner in owners:
+            if owner.starts_with("generic:"):
+                has_generic_owner = true
+        if not self.trait_impl_closure_complete:
+            self.error_fatal("trait-object call {trait_key}.{method}: this lowering does not cover the whole build closure (demand/incremental lane lowers dirty packages only), so the implementor set is unknown; stage2 devirtualizes trait objects only under whole-closure lowering", Some(receiver.span))
+        elif has_generic_owner:
+            self.error_fatal("trait-object call {trait_key}.{method}: a generic implementor (`impl<T> {trait_key} for ...`) is in the build closure; stage2 cannot devirtualize it", Some(receiver.span))
+        elif owners.len() == 1:
+            val impl_key = "{trait_key}::{owners[0]}::{method}"
+            if self.trait_impl_methods.has(impl_key):
+                val method_id = self.trait_impl_methods[impl_key]
+                val method_operand = self.symbol_to_operand(method_id)
+                val return_type = self.resolved_call_return_type(method_id)
+                val final_args = self.pad_trailing_default_args(method_operand, arg_operands)
+                var b = self.builder
+                val result = b.emit_call(method_operand, final_args, return_type)
+                self.builder = b
+                if val result_local = result:
+                    self.remember_call_hir_return(result_local, method_id)
+                    return result_local
+                var bv = self.builder
+                val void_temp = bv.new_temp(MirType.i64())
+                bv.emit_const(void_temp, MirConstValue.Int(0), MirType.i64())
+                self.builder = bv
+                return void_temp
+            self.error_fatal("trait-object call {trait_key}.{method}: implementor {owners[0]} has no `{method}` (default trait methods on trait objects are not supported by stage2)", Some(receiver.span))
+        elif owners.len() > 1:
+            self.error_fatal("trait-object call {trait_key}.{method}: {owners.len()} implementors in the build closure and stage2 objects carry no runtime type identity; dynamic trait dispatch is unsupported (bug stage2_trait_typed_receiver_method_unresolved_2026-10-10)", Some(receiver.span))
+        var bp = self.builder
+        val panic_msg = bp.emit_const_str("trait method {trait_key}.{method} called, but no implementation of {trait_key} is in the build closure")
+        val panic_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_panic"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))
+        ))
+        bp.emit_call(panic_op, [mir_operand_copy(panic_msg)], MirType.unit())
+        val temp = bp.new_temp(MirType.i64())
+        bp.emit_const(temp, MirConstValue.Int(0), MirType.i64())
+        self.builder = bp
+        temp
 
     me symbol_to_operand(symbol: SymbolId) -> MirOperand:
         """Convert a symbol to a function pointer operand."""
