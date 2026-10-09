@@ -5,7 +5,8 @@ No whole-suite, production, or current-candidate runtime PASS is claimed.
 
 ## Immutable source provenance
 
-Publication base: `9dedaa74c154ae32080a53a78065446e57bbe9c5` (`release/1.0`).
+Initial publication base: `9dedaa74c154ae32080a53a78065446e57bbe9c5` (`release/1.0`).
+Updated publication rebased onto `b05fbaa6a1b4f9d9918f62af297d18d25eb9f07b`.
 Original source base: `e23da7a417f3c970467db463d40af20bc764110a`.
 Tested candidate patch SHA-256:
 `2704f2ae45f9afe7db6d854695f00071a5ebcd4ff1966455588f7810541adf33`.
@@ -18,9 +19,9 @@ The production/helper and test sources below are transferred byte-for-byte.
 | `scripts/bootstrap/bootstrap-session-exec.c` | `dfa0ed68d836bbf672ef7d5192cffd595dce49587e7125fd8fe38cff8d9f5885` |
 | `scripts/resource/process-tree-rss-watchdog.pl` | `76b1bacc94f4c1e483f4fe5d2dea4203947432bc33b17a4553015f7840f54499` |
 | `scripts/resource/freebsd-reaper-cleanup-test.pl` | `d333e4a34e182a25db7afd1ab3866071eb307b88c91d880184aa84c0910e42ef` |
-| `scripts/resource/freebsd-reaper-faults.c` | `c501907c91a78912a1b7bab565a7f2adca1bda48ac0b7edda8399c0e4e80b2b7` |
+| `scripts/resource/freebsd-reaper-faults.c` | `9b910faf34bc7d7dd9d90c162ab24f0d64776d341586a8205a1b510da46d464c` |
 | `scripts/resource/freebsd-reaper-protocol-test.pl` | `365f240bd2fa91272c36b27be4b825ef25df00819c757d6199e6d291ff3d9e9a` |
-| `scripts/resource/freebsd-reaper-regression.py` | `b0281f5767e3c8389f878cd0250fecc5a0abe30144d3855ef8654f05cdc0c6b6` |
+| `scripts/resource/freebsd-reaper-regression.py` | `fa3ef6625f43e5faff5637abcca8e0cfe0cc72ac18817b026d8cfcbe36929f0b` |
 
 Admitted original Phase 1 seed SHA-256:
 `daadf4c854c0ef8d5a0d9cf33379c3dd28a1f7ba7c93a6b915c77973943fb721`.
@@ -48,13 +49,56 @@ The latest correction moves the existing bounded wait drain to the beginning
 of each snapshot attempt and diagnoses identity-confirmed zombie owners.
 The snapshot attempt count, bounds, memory enforcement and cleanup policy are
 unchanged. Zombie ownership is a source-supported hypothesis for the prior
-failure, not a proven runtime diagnosis. The changed helper has **not been
-built or tested**. Earlier static reviews and historical fixture results do
+failure, not a proven runtime diagnosis. At initial draft publication the changed helper had **not been
+built or tested**; the separately authorized follow-up below supersedes that
+historical validation status. Earlier static reviews and historical fixture results do
 not qualify this candidate.
 
-Next verification requires the deterministic waitable and non-waitable zombie
+At initial publication, pending verification included deterministic waitable and non-waitable zombie
 reaper cases described in `scripts/resource/freebsd-reaper-validation.md`,
 remaining ownership/fault fixtures, original pane test, and compatibility gates.
 The user-provided three-cycle limit plus one explicit extra-cycle authorization
 is exhausted. No additional BSD run, seed build, or whole-suite retry was made
 for this publication. Do not merge until the required verification is complete.
+
+## Authorized wait-drain follow-up: containment advances, pane assertion fails
+
+The user subsequently authorized one focused cycle. Its initial frozen patch was
+`1143c7eccce9e44c6b800218c877644598cfa70cba626ca36c054ccbf3a2ca40`.
+The remaining-case selection-only addition produced tested patch
+`19af00276e6972a242c289a9338f82732817d77eb7a2d0336fe108c987758514`.
+Both used unchanged native source
+`dfa0ed68d836bbf672ef7d5192cffd595dce49587e7125fd8fe38cff8d9f5885`.
+
+The deterministic held-zombie case passed by rejecting an unobservable branch
+and proving cleanup. The waitable-zombie case passed, retaining the live
+leaf's identity and 55760 KiB RSS while preserving payload exit status 7.
+Fork-race now passed with expected timeout 124 and quiescent=1.
+
+Deliberate native-owner SIGKILL must run in its own top-level guarded job.
+The initially nested owner-loss case interrupted its enclosing guard; it is
+not a PASS receipt. The isolated case subsequently passed the failure-policy
+assertions: owner raw wait status 9, guard exit 89, quiescent=0 and retained
+reservation=1. That is verified fail-closed reporting, not successful cleanup.
+The split jobs retained the single original 300-second deadline and memory cap.
+
+Seven remaining fixtures passed: control EOF, malformed command, parent death,
+nested RSS membership (55740 KiB), denied cleanup, denied query and full query.
+Fault-library SHA-256:
+`c377e5dc49e5e6a9c51d91f210b0dfabb411168b154e50a62dcc996ee0071130`.
+
+The original pane test now ran every admitted example: **15 executed, 14 passed,
+1 failed, 0 skipped, 0 dropped**. Its assertion reported
+`expected # to contain 14133`. This is a functional pane-output failure, not a
+successful original-spec criterion. Original-spec guard exit=1, quiescent=1,
+peak RSS=1219384 KiB; outer continuation exit=1, quiescent=1.
+The whole harness remains FAIL and whole Phase 1 remains incomplete.
+
+Evidence is retained locally under `build/reaper-wait-drain-cycle/evidence/`
+and `build/reaper-wait-drain-cycle/evidence-remaining/` in the source worktree.
+Original spec SHA-256:
+`ed09604a3e52bcdb24057cff9c3f5ca8592b80e99df9885ff640451a86ac3ac6`.
+The default nested all-cases harness is not a qualified entrypoint: use the
+separate guarded topology in the validation guide. Prior passing assertions
+were reused; this report does not claim one default full-harness PASS.
+Landing remains blocked pending the pane criterion and final review.

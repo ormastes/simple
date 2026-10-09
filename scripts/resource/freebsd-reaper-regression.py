@@ -22,14 +22,15 @@ import time
 
 def fixture(kind, directory):
     directory = Path(directory)
-    signal.alarm(20 if kind == "nested-held" else 12)
+    held = kind == "nested-held" or kind.startswith("zombie-")
+    signal.alarm(20 if held else 12)
 
     def note():
         with (directory / "pids").open("a") as out:
             out.write(f"{os.getpid()}\n")
 
     def sleeper(detach=True, memory_mb=0):
-        signal.alarm(20 if kind == "nested-held" else 12)
+        signal.alarm(20 if held else 12)
         if detach:
             os.setsid()
         note()
@@ -40,10 +41,26 @@ def fixture(kind, directory):
             temporary = directory / "allocated.json.tmp"
             temporary.write_text(json.dumps({"pid": os.getpid(), "minimum_rss_kib": memory_mb * 1024}))
             temporary.replace(directory / "allocated.json")
-        time.sleep(18 if kind == "nested-held" else 10)
+        time.sleep(18 if held else 10)
         os._exit(0)
 
     note()
+    if kind in ("zombie-waitable", "zombie-held"):
+        if kind == "zombie-held" and os.fork() != 0:
+            # Deliberately retain the zombie under a live non-reaping parent.
+            # Only the tested native owner may terminate this fixture.
+            signal.pause()
+            raise AssertionError("held zombie parent unexpectedly resumed")
+        signal.alarm(20)
+        libc = ctypes.CDLL(None, use_errno=True)
+        assert libc.procctl(0, 0, 2, None) == 0, ctypes.get_errno()
+        if os.fork() == 0:
+            sleeper(memory_mb=32)
+        until = time.monotonic() + 10
+        while not (directory / "exit-reaper").exists():
+            assert time.monotonic() < until, "zombie fixture release deadline"
+            time.sleep(0.001)
+        os._exit(7)
     if kind == "pty":
         pid, fd = os.forkpty()
         if pid == 0:
@@ -306,6 +323,116 @@ def nested_rss_case(helper, root):
             "observed_rss_kib": row[4], "native_sample": str(directory / "native-sample.txt")}
 
 
+def zombie_reaper_case(helper, library, root, held, sentinel):
+    """Real zombie ownership; the interposer only schedules its observation."""
+    kind = "zombie-held" if held else "zombie-waitable"
+    directory = root / kind
+    directory.mkdir()
+    marker = directory / "barrier"
+    req_read, req_write = os.pipe()
+    reply_read, reply_write = os.pipe()
+    env = dict(os.environ, LD_PRELOAD=str(library.resolve()),
+               SIMPLE_REAPER_FAULT_MARKER=str(marker.resolve()), SIMPLE_REAPER_FAULT_MODE="zombie-barrier")
+    command = [str(helper), "--reaper-owner", str(req_read), str(reply_write), "5000", "--",
+               sys.executable, str(Path(__file__).resolve()), "--fixture", kind, "--output", str(directory)]
+
+    def wait_file(path):
+        until = time.monotonic() + 5
+        while not path.exists():
+            assert owner.poll() is None and time.monotonic() < until, "zombie barrier deadline"
+            time.sleep(0.001)
+
+    def line(deadline):
+        data = b""
+        while not data.endswith(b"\n"):
+            left = deadline - time.monotonic()
+            assert left > 0 and select.select([reply_read], [], [], left)[0], "zombie reply deadline"
+            part = os.read(reply_read, 1)
+            assert part and len(data) < 256, "zombie reply EOF/size"
+            data += part
+        return data.decode("ascii")
+
+    def sample():
+        deadline = time.monotonic() + 5
+        header = line(deadline)
+        fields = header.split()
+        assert len(fields) == 6 and fields[:2] == ["SAMPLE", "1"] and int(fields[2]) == owner.pid, header
+        count = int(fields[5])
+        assert 1 <= count <= 16385
+        body = [line(deadline) for _ in range(count)]
+        assert line(deadline) == "END\n"
+        rows = {}
+        for text in body:
+            row = [int(value) for value in text.split()]
+            assert len(row) == 8 and row[0] not in rows
+            rows[row[0]] = row
+        return fields, rows, header + "".join(body) + "END\n"
+
+    with (directory / "owner.log").open("wb") as log:
+        owner = subprocess.Popen(command, pass_fds=(req_read, reply_write), stdout=log, stderr=log, env=env)
+        os.close(req_read)
+        os.close(reply_write)
+        try:
+            os.write(req_write, b"G")
+            wait_file(directory / "allocated.json")
+            allocated = json.loads((directory / "allocated.json").read_text())
+            os.write(req_write, b"S")
+            initial_header, initial, initial_text = sample()
+            (directory / "before.txt").write_text(initial_text)
+            leaf = initial[allocated["pid"]]
+            target = initial[leaf[1]]
+            assert leaf[4] >= allocated["minimum_rss_kib"] and leaf[5] == target[5] == 0
+            assert (target[0] == int(initial_header[3])) != held
+            marker.write_text(f"{target[0]} {target[6]} {target[7]} {leaf[0]} {leaf[6]} {leaf[7]}\n")
+            os.write(req_write, b"S")
+            wait_file(directory / "barrier.entered")
+            (directory / "exit-reaper").touch()
+            if held:
+                deadline = time.monotonic() + 5
+                failure = line(deadline)
+                fields = failure.split()
+                assert fields == ["ERROR", "1", str(owner.pid), "sample", "owner-zombie-unreaped",
+                                  str(target[0]), "0", "3", "0", "-1", "-1"], failure
+                stopped = line(deadline)
+                stop = stopped.split()
+                assert len(stop) == 11 and stop[:5] == ["ERROR", "1", str(owner.pid), "stop", "sample-failed"]
+                assert stop[5:10] == [str(os.getpid()), "0", "0", "0", "1"] and int(stop[10]) >= 0
+                assert owner.wait(timeout=3) == 89
+                (directory / "terminal-errors.txt").write_text(failure + stopped)
+                result = {"expected_sample_failure": True, "cleanup_quiet": 1, "owner_exit": 89}
+            else:
+                header, rows, text = sample()
+                (directory / "after.txt").write_text(text)
+                retained = rows[leaf[0]]
+                assert retained[6:] == leaf[6:] and retained[5] == 0 and retained[4] >= allocated["minimum_rss_kib"]
+                assert retained[1] == owner.pid and target[0] not in rows
+                assert int(header[4]) == 7 << 8, "wait drain lost payload exit status"
+                os.write(req_write, b"Q")
+                quiet = line(time.monotonic() + 4)
+                fields = quiet.split()
+                assert fields == ["QUIET", "1", str(7 << 8), str(owner.pid),
+                                  str(initial[owner.pid][6]), str(initial[owner.pid][7])], quiet
+                assert owner.wait(timeout=3) == 0
+                (directory / "quiet.txt").write_text(quiet)
+                result = {"observed_rss_kib": retained[4], "cleanup_quiet": 1, "owner_exit": 0}
+            observed = [int(value) for value in (directory / "barrier.observed").read_text().split()]
+            assert observed[:6] == [target[0], target[6], target[7], leaf[0], leaf[6], leaf[7]]
+            assert len(observed) == 8 and observed[6] >= allocated["minimum_rss_kib"] and observed[7] == target[0]
+            # QUIET proves the entire hierarchy absent; PID checks only supplement it.
+            assert all(absent(pid) for pid in initial) and sentinel.poll() is None
+            result.update(case=kind, status="PASS", native_owner=owner.pid,
+                          nested_identity=target[6:], leaf_identity=leaf[6:])
+            (directory / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+            return result
+        finally:
+            marker.unlink(missing_ok=True)
+            os.close(req_write)
+            os.close(reply_read)
+            if owner.poll() is None:
+                owner.terminate()
+                owner.wait(timeout=8)
+
+
 def native_fault_case(helper, library, root, mode):
     directory = root / mode
     directory.mkdir()
@@ -408,6 +535,12 @@ def main():
     parser.add_argument("--original-seed-sha256")
     parser.add_argument("--original-expected-examples", type=int)
     parser.add_argument("--fault-library", type=Path)
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--continuation-helper", type=Path,
+                       help="run wait-drain regression and unfinished cases with this frozen helper")
+    modes.add_argument("--zombie-negative-helper", type=Path,
+                       help="only the deliberate unobservable-branch case; separate guarded job required")
+    modes.add_argument("--remaining-helper", type=Path, help="run only unfinished ownership/fault cases and original pane")
     args = parser.parse_args()
     if args.owner_parent:
         helper, read_fd, write_fd = args.owner_parent
@@ -422,17 +555,33 @@ def main():
         return 0
     if not sys.platform.startswith("freebsd"):
         parser.error("FreeBSD runtime gate; unsupported host is not a PASS")
+    if (args.continuation_helper or args.zombie_negative_helper or args.remaining_helper) and not args.fault_library:
+        parser.error("focused zombie cases require the frozen --fault-library")
     args.output.mkdir(parents=True, exist_ok=False)
     guard = Path(__file__).resolve().with_name("process-tree-rss-watchdog.pl")
     results = []
     sentinel = subprocess.Popen(["/bin/sleep", "300"])
     try:
-        for case, expected in (("pty", 0), ("double-fork", 0), ("root-exit", 7),
-                               ("nested", 0), ("twenty", 0), ("rss", 88),
-                               ("timeout", 124), ("term", 143), ("fork-race", 124),
-                               ("kill-owner", 89)):
+        if args.zombie_negative_helper:
+            results.append(zombie_reaper_case(args.zombie_negative_helper.resolve(),
+                args.fault_library, args.output, True, sentinel))
+            return 0
+        cases = (("pty", 0), ("double-fork", 0), ("root-exit", 7),
+                 ("nested", 0), ("twenty", 0), ("rss", 88),
+                 ("timeout", 124), ("term", 143), ("fork-race", 124), ("kill-owner", 89))
+        if args.continuation_helper:
+            helper = args.continuation_helper.resolve()
+            results.append(zombie_reaper_case(helper, args.fault_library, args.output, False, sentinel))
+            cases = (("fork-race", 124), ("kill-owner", 89))
+        if args.remaining_helper:
+            helper = args.remaining_helper.resolve()
+            cases = ()
+        for case, expected in cases:
             results.append(run_guard_case(guard, args.output, case, expected, sentinel))
-        helper = Path(receipt(args.output / "pty" / "receipt.env")["session_helper"])
+        if not (args.continuation_helper or args.remaining_helper):
+            helper = Path(receipt(args.output / "pty" / "receipt.env")["session_helper"])
+            if args.fault_library:
+                results.append(zombie_reaper_case(helper, args.fault_library, args.output, False, sentinel))
         for mode in ("control-eof", "malformed-command"):
             results.append(direct_owner_case(helper, args.output, mode))
         results.append(parent_death_case(helper, args.output))
