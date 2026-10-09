@@ -354,14 +354,20 @@ fn flatten_hir_or_alternatives(alts: [HirPattern]) -> [HirPattern]:
         i = i + 1
     out
 
-fn hir_type_shape_key(t: HirType) -> text:
+fn hir_type_shape_key(t: HirType, named_known: bool) -> text:
     """Shape of a payload slot type for the or-binding type check. Every
     alternative of one or-arm is a variant of the SAME enum, so all slot types
     compared here come from one enum declaration and therefore one defining
     SymbolTable: a Named type's raw SymbolId is a sound identity within that
     comparison even when the table is foreign to the module being lowered
     (no name lookup, which would need the right table). "" = unknown (never
-    reported)."""
+    reported).
+
+    `named_known` is false for a GENERIC enum: its type parameters lower as
+    Named(param_sym) (type_aliases.spl), so `L(v: A) | R(v: B)` on E<i64, i64>
+    would look like two different types. Named slots of a generic enum are
+    therefore unknown (not compared), matching the seed, which accepts such
+    or-bindings; primitive slots are still compared."""
     match t.kind:
         case HirTypeKind.Int(bits, signed):
             if signed: "i{bits}" else: "u{bits}"
@@ -371,21 +377,23 @@ fn hir_type_shape_key(t: HirType) -> text:
         case HirTypeKind.Str: "text"
         case HirTypeKind.Unit: "()"
         case HirTypeKind.Named(nsym, nargs):
+            if not named_known:
+                return ""
             var nk = "named#{nsym.id}"
             if nargs.len() > 0:
                 var parts: [text] = []
                 for na in nargs:
-                    val ak = hir_type_shape_key(na)
+                    val ak = hir_type_shape_key(na, named_known)
                     if ak == "":
                         return ""
                     parts.push(ak)
                 nk = nk + "<" + parts.join(",") + ">"
             nk
         case HirTypeKind.Optional(inner):
-            val ik = hir_type_shape_key(inner)
+            val ik = hir_type_shape_key(inner, named_known)
             if ik == "": "" else: ik + "?"
         case HirTypeKind.Array(elem, _):
-            val ek = hir_type_shape_key(elem)
+            val ek = hir_type_shape_key(elem, named_known)
             if ek == "": "" else: "[" + ek + "]"
         case HirTypeKind.Dict(_, _): "dict"
         case HirTypeKind.Tuple(_): "tuple"
@@ -2674,12 +2682,15 @@ impl MirLowering:
                     var tc_slot_types: [HirType] = []
                     if val tc_found_types = self.enum_variant_payload_types.get("{lookup_key}::{variant}"):
                         tc_slot_types = tc_found_types
+                    var tc_enum_generic = self.generic_enum_constructor_owners.get(lookup_key) ?? false
+                    if not tc_enum_generic:
+                        tc_enum_generic = self.generic_enum_constructor_owners.get(enum_name) ?? false
                     var tci = 0
                     while tci < tc_syms.len() and tci < tc_pos.len():
                         val tc_slot = tc_pos[tci]
                         var tc_shape = ""
                         if tc_slot >= 0 and tc_slot < tc_slot_types.len():
-                            tc_shape = hir_type_shape_key(tc_slot_types[tc_slot])
+                            tc_shape = hir_type_shape_key(tc_slot_types[tc_slot], not tc_enum_generic)
                         val tc_id = tc_syms[tci].id
                         if shared_bind_shape.contains(tc_id):
                             val prev_shape = shared_bind_shape[tc_id]
@@ -2726,22 +2737,21 @@ impl MirLowering:
                 case HirPatternKind.Wildcard:
                     # Catch-alls are tried in source order after the enum
                     # arms: guarded ones test their guard, the first
-                    # unguarded one is the real default (see below).
-                    if not has_default:
-                        if arm.has_guard:
-                            guarded_default_srcidx = guarded_default_srcidx.push(ai)
-                        else:
-                            has_default = true
-                            default_body = arm.body
-                            default_arm_srcidx = ai
+                    # unguarded one is the real default (see below; arms
+                    # after it are skipped at the loop top).
+                    if arm.has_guard:
+                        guarded_default_srcidx = guarded_default_srcidx.push(ai)
+                    else:
+                        has_default = true
+                        default_body = arm.body
+                        default_arm_srcidx = ai
                 case Binding(_, _):
-                    if not has_default:
-                        if arm.has_guard:
-                            guarded_default_srcidx = guarded_default_srcidx.push(ai)
-                        else:
-                            has_default = true
-                            default_body = arm.body
-                            default_arm_srcidx = ai
+                    if arm.has_guard:
+                        guarded_default_srcidx = guarded_default_srcidx.push(ai)
+                    else:
+                        has_default = true
+                        default_body = arm.body
+                        default_arm_srcidx = ai
                 case HirPatternKind.Literal(nil_lit):
                     # `case nil:` on an Option scrutinee is `case None:` (the
                     # seed and the interpreter accept both spellings; the
