@@ -41,6 +41,26 @@ fn mir_provider_declares_value_method_owner(provider: SymbolTable, module_name: 
             case _: ()
     false
 
+fn mir_provider_extension_owner_key(module_name: text, source_name: text) -> text:
+    # `impl Imported:` in module E extends a type declared in module D. HIR
+    # owner-qualifies such a method with D's declaration (`D.Imported::m`,
+    # defining module E), so the E-prefixed callable identity names no class:
+    # the method was dropped and `x.m()` on a D-typed receiver died as
+    # `unresolved method call`. Key it by the declaration's own identity --
+    # the key D's methods and every receiver's struct_value_syms use. Only an
+    # owner qualified by a DIFFERENT module qualifies; anything else is "".
+    val sep = source_name.rfind("::")
+    if sep <= 0:
+        return ""
+    val owner_name = source_name.substring(0, sep)
+    val type_sep = owner_name.rfind(".")
+    if type_sep <= 0:
+        return ""
+    val owner_module = _hir_symbol_owner_module(owner_name.substring(0, type_sep))
+    if owner_module == "" or owner_module == _hir_symbol_owner_module(module_name):
+        return ""
+    "{owner_module}.{owner_name.substring(type_sep + 1)}"
+
 fn mir_provider_function_name(owner: text, symbols: SymbolTable, func: HirFunction, is_entry_module: bool = false) -> text:
     # Linkage attributes are an ABI boundary, including runtime push helpers.
     if func.is_extern or func.has_export_attr or func.func_attr.is_global or func.func_attr.is_entry or (is_entry_module and func.name == "main"):
@@ -150,10 +170,13 @@ impl MirLowering:
         if parts.len() < 2:
             return
         val method_name = parts[parts.len() - 1]
-        val class_key = identity.substring(0, identity.len() - method_name.len() - 1)
+        var class_key = identity.substring(0, identity.len() - method_name.len() - 1)
         if not self.class_type_names.has(class_key):
             if not mir_provider_declares_value_method_owner(provider, source.defining_module ?? "", parts[parts.len() - 2], class_key):
-                return
+                val extension_owner = mir_provider_extension_owner_key(source.defining_module ?? "", source.name)
+                if extension_owner == "":
+                    return
+                class_key = extension_owner
         val method = self.relocate_provider_callable(func.symbol, provider, links)
         if method.id < 0:
             return
