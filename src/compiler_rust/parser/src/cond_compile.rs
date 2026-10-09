@@ -229,6 +229,31 @@ pub fn default_target() -> (&'static str, &'static str) {
     (os, arch)
 }
 
+/// The (os, arch) names a conditional-compilation pass evaluates against.
+/// Both the lexer path and the compiler's text-level strip path use these
+/// NAMES (never a `TargetOS` round-trip), so an OS the seed's target enum
+/// cannot represent (openbsd, netbsd, android) still selects consistently.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CfgTarget {
+    pub os: String,
+    pub arch: String,
+}
+
+impl CfgTarget {
+    pub fn new(os: &str, arch: &str) -> Self {
+        Self {
+            os: os.to_string(),
+            arch: arch.to_string(),
+        }
+    }
+
+    /// [`default_target`] as an owned pair.
+    pub fn from_env() -> Self {
+        let (os, arch) = default_target();
+        Self::new(os, arch)
+    }
+}
+
 fn strip_quotes(value: &str) -> &str {
     let t = value.trim();
     if t.len() >= 2 && ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\''))) {

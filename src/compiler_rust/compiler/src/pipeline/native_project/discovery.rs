@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 fn preprocess_discovery_os_branches(
     source: &str,
     path: &Path,
-    target: simple_common::target::Target,
+    target: &crate::pipeline::cfg_strip::CfgTarget,
 ) -> Result<String, String> {
     crate::pipeline::cfg_strip::strip_os_when_blocks(source, target)
         .map_err(|e| format!("failed to preprocess {} during discovery: {}", path.display(), e))
@@ -16,13 +16,13 @@ fn preprocess_discovery_os_branches(
 #[cfg(test)]
 mod os_when_discovery_tests {
     use super::preprocess_discovery_os_branches;
-    use simple_common::target::{Target, TargetArch, TargetOS};
+    use crate::pipeline::cfg_strip::CfgTarget;
     use std::path::Path;
 
     #[test]
     fn os_when_malformed_sibling_reports_its_path() {
         let sibling = Path::new("src/lib/package/malformed_sibling.spl");
-        let error = preprocess_discovery_os_branches("@when(os=\"windows\"):\n", sibling, Target::new(TargetArch::host(), TargetOS::Linux))
+        let error = preprocess_discovery_os_branches("@when(os=\"windows\"):\n", sibling, &CfgTarget::new("linux", "x86_64"))
             .expect_err("unterminated sibling branch must fail discovery");
         assert!(error.contains("malformed_sibling.spl"));
         assert!(error.contains("unclosed @when"));
@@ -921,7 +921,7 @@ impl NativeProjectBuilder {
                 source = source.replace('\r', "");
             }
             let target = super::effective_target();
-            source = preprocess_discovery_os_branches(&source, &canonical, target)?;
+            source = preprocess_discovery_os_branches(&source, &canonical, &crate::pipeline::cfg_strip::cfg_target())?;
             let target_arch = target.arch;
             source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, target_arch);
 
@@ -989,7 +989,7 @@ impl NativeProjectBuilder {
                             sibling_source = sibling_source.replace('\r', "");
                         }
                         let mut sibling_source = preprocess_discovery_os_branches(
-                            &sibling_source, &sibling, super::effective_target(),
+                            &sibling_source, &sibling, &crate::pipeline::cfg_strip::cfg_target(),
                         )?;
                         sibling_source =
                             crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&sibling_source, target_arch);
@@ -1095,7 +1095,7 @@ impl NativeProjectBuilder {
                                     continue;
                                 };
                                 let sibling_source = preprocess_discovery_os_branches(
-                                    &sibling_source, &sibling, super::effective_target(),
+                                    &sibling_source, &sibling, &crate::pipeline::cfg_strip::cfg_target(),
                                 )?;
                                 let mut sibling_parser = simple_parser::Parser::new(&sibling_source);
                                 let Ok(sibling_module) = sibling_parser.parse() else {

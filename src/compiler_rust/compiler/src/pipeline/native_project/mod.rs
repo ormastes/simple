@@ -451,8 +451,20 @@ pub fn set_runtime_path_override(path: PathBuf) {
 static TARGET_OVERRIDE: OnceLock<simple_common::target::Target> = OnceLock::new();
 
 /// Set the cross-compilation target override (called from CLI arg parsing).
+///
+/// Also exports `SIMPLE_NATIVE_BUILD_TARGET` for this process and every
+/// worker child it spawns -- the same contract the pure-Simple native-build
+/// CLI honours -- so the lexer's `@when` evaluation
+/// (`simple_parser::cond_compile::default_target`) and every text-level strip
+/// path select the `--target` branches, never the host's.
 pub fn set_target_override(target: simple_common::target::Target) {
     let _set_result = TARGET_OVERRIDE.set(target);
+    std::env::set_var("SIMPLE_NATIVE_BUILD_TARGET", target.to_string());
+}
+
+/// The `--target` override, if one was given.
+pub fn target_override() -> Option<simple_common::target::Target> {
+    TARGET_OVERRIDE.get().copied()
 }
 
 /// Get the effective compilation target: the `--target` override, else the
@@ -476,9 +488,33 @@ fn env_default_target() -> simple_common::target::Target {
         "freebsd" => TargetOS::FreeBSD,
         "simpleos" => TargetOS::SimpleOS,
         "none" => TargetOS::None,
-        _ => host.os,
+        other => {
+            // `@when` selection itself is unaffected: it evaluates the
+            // NAMES (`cfg_strip::cfg_target`). Only `Target`-typed consumers
+            // (backend, `@cfg(<arch>)` strip) have to fall back, and say so.
+            warn_unrepresentable("OS", other, host.os.name());
+            host.os
+        }
     };
-    Target::new(arch.parse().unwrap_or(host.arch), os)
+    let arch = arch.parse().unwrap_or_else(|_| {
+        warn_unrepresentable("architecture", arch, host.arch.name());
+        host.arch
+    });
+    Target::new(arch, os)
+}
+
+fn warn_unrepresentable(kind: &str, requested: &str, fallback: &str) {
+    static WARNED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let key = format!("{kind}:{requested}");
+    let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    if !warned.contains(&key) {
+        warned.push(key);
+        eprintln!(
+            "warning: target {kind} `{requested}` (from SIMPLE_TARGET_*/SIMPLE_NATIVE_BUILD_TARGET) has no seed \
+             backend target; `@when` still selects `{requested}` branches, but backend/`@cfg(arch)` \
+             selection falls back to the host `{fallback}`"
+        );
+    }
 }
 
 /// Grouped duplicate struct definitions: bare type name → list of field-lists.
