@@ -2554,6 +2554,27 @@ impl MirLowering:
         # construction site writes under the bare name -- qualifying it here
         # would turn every payload-struct lookup into a miss.
         var enum_key = ""
+        # The scrutinee's declared enum (a typed param/local or `self`), used
+        # to resolve a BARE arm (`case Xs(v)`) whose variant name several
+        # registered enums declare. Without it such an arm was reported as
+        # ambiguous although the scrutinee's type already names the owner.
+        var scrut_enum_name = ""
+        var scrut_enum_key = ""
+        var scrut_enum_symbol_id: i64 = -1
+        if val scrut_declared = self.receiver_declared_type(scrutinee):
+            match scrut_declared.kind:
+                case Named(scrut_sym, _):
+                    val scrut_bare = self.symbols.symbol_name_scalar_raw(scrut_sym.id)
+                    var scrut_q = self.enum_qualified_key(scrut_sym)
+                    if scrut_q != "" and not self.enum_variant_index_q.has(scrut_q):
+                        scrut_q = ""
+                    val scrut_lookup = if scrut_q != "": scrut_q else: scrut_bare
+                    if scrut_lookup != "" and self.enum_has_variants(scrut_lookup):
+                        scrut_enum_name = scrut_bare
+                        scrut_enum_key = scrut_q
+                        scrut_enum_symbol_id = scrut_sym.id
+                case _: ()
+        val scrut_enum_lookup = if scrut_enum_key != "": scrut_enum_key else: scrut_enum_name
         var ai = 0
         while ai < arms.len():
             # Stage-2 stores array elements through ANY. The explicit type is
@@ -2611,6 +2632,13 @@ impl MirLowering:
                         val known_variants = self.enum_variant_names(lookup_key)
                         val known_text = known_variants.join(", ")
                         self.error("enum match: '{enum_name}' has no variant '{variant}' (known variants: {known_text})", Some(arm.pattern.span))
+                    elif d < 0 and scrut_enum_lookup != "" and self.enum_variant_discriminant(scrut_enum_lookup, variant) >= 0:
+                        # Bare arm, scrutinee type known: its enum owns the
+                        # variant, whatever other enums also declare it.
+                        d = self.enum_variant_discriminant(scrut_enum_lookup, variant)
+                        enum_name = scrut_enum_name
+                        enum_key = scrut_enum_key
+                        enum_symbol_id = scrut_enum_symbol_id
                     elif d < 0:
                         # Bare pattern (`case Circle(r)` — no qualifier survived
                         # to HIR) with no enum established yet, so the

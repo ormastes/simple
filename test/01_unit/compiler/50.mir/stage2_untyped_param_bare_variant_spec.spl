@@ -1,0 +1,56 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# Stage2 MIR: untyped fn params and bare enum arms resolved by scrutinee type
+
+Two stage2 failures from the ui_shared_mdi link-ladder rung:
+
+- `fn format_table_row(cells, widths, separator: text)` (std.common.format_utils)
+  lowered its unannotated params to an unresolved `Infer`, and MIR failed
+  closed with `[infer-arm]`. Unannotated params are dynamic in the seed and
+  now publish `any`.
+- A bare payload arm (`case Xs(v)`) whose variant name several enums declare
+  was reported as "bare variant 'Xs' is ambiguous" -- cascading into
+  "missing runtime identity" -- even though the scrutinee's declared type
+  (a typed param or `self`) already names the owning enum.
+
+Lowering runs the pure-Simple frontend -> HIR -> MIR in process.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+fn mir_errors_matching(src: text, needle: text) -> i64:
+    val ast = parse_full_frontend(src, "probe.spl", "probe.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("probe.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val _mir = mir_lowering.lower_module(hir)
+    var n = 0
+    for e in mir_lowering.errors:
+        if e.message.contains(needle):
+            n = n + 1
+    n
+
+val untyped_param_src = "fn row(cells, widths, sep: text) -> text:\n    if cells.len() != widths.len():\n        return \"\"\n    sep\n"
+
+val two_enums = "enum A:\n    Xs(v: i64)\n    Sm(v: i64)\n\nenum B:\n    Xs(v: i64)\n    Sm(v: i64)\n\n"
+val bare_param_src = two_enums + "fn f(s: A) -> i64:\n    match s:\n        case Xs(v): v\n        case Sm(v): v + 1\n"
+val bare_self_src = two_enums + "impl A:\n    fn w(self) -> i64:\n        match self:\n            case Xs(v): v\n            case Sm(v): v + 1\n"
+
+describe "stage2 MIR untyped params and scrutinee-typed bare variants":
+    it "lowers unannotated fn params without an infer-arm failure":
+        expect(mir_errors_matching(untyped_param_src, "[infer-arm]")).to_equal(0)
+
+    it "resolves a bare arm through a typed param scrutinee":
+        expect(mir_errors_matching(bare_param_src, "is ambiguous")).to_equal(0)
+        expect(mir_errors_matching(bare_param_src, "missing runtime identity")).to_equal(0)
+
+    it "resolves a bare arm through a self scrutinee":
+        expect(mir_errors_matching(bare_self_src, "is ambiguous")).to_equal(0)
+        expect(mir_errors_matching(bare_self_src, "missing runtime identity")).to_equal(0)

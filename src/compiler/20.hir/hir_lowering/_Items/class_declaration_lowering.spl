@@ -12,7 +12,15 @@ use compiler.hir.hir_lowering._Items.lowering_helpers.{PlatformAttrFields, platf
 
 impl HirLowering:
     me lower_param(p: Param) -> HirParam:
-        val type_ = self.lower_type(p.type_)
+        # An unannotated fn parameter (`fn format_table_row(cells, widths, ...)`,
+        # std.common.format_utils) is dynamic in the seed/interpreter. Lowering
+        # it to Infer left an inference variable nothing resolves, and MIR
+        # failed closed on it ([infer-arm]). Publish `any`, the erased type.
+        # An explicit untyped `self`/`me` keeps its existing receiver typing.
+        val type_ = if p.has_type_ or p.name == "self" or p.name == "me":
+            self.lower_type(p.type_)
+        else:
+            HirType(kind: HirTypeKind.Any, span: p.span)
         val symbol = self.symbols.define(p.name, SymbolKind.Parameter, Some(type_), p.span, Visibility.Private, false, nil)
         val default_ = if p.has_default:
             self.lower_hir_expr(p.default)
