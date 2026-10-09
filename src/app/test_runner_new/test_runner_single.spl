@@ -59,11 +59,95 @@ extern fn sys_get_args() -> [text]
 # independent of std.test_runner.* so child runs stay lightweight). Mirrors
 # test_runner_execute.preprocess_infix_matchers_only. ---
 
-fn _single_rewrite_infix_expect_line(line: text) -> text:
-    val trimmed = line.trim()
-    if not trimmed.starts_with("expect ") or trimmed.starts_with("expect("):
+fn _single_infix_matchers() -> [text]:
+    ["to_equal", "to_be", "to_contain", "to_start_with", "to_end_with", "to_be_greater_than", "to_be_less_than", "to_be_at_least", "to_be_at_most", "to_be_nil", "to_be_truthy", "to_be_falsy", "to_be_true", "to_be_false", "to_have_length", "to_be_empty"]
+
+fn _single_expect_paren_end(trimmed: text) -> i64:
+    # Index of the `)` closing the `(` of a leading `expect(`, skipping nested
+    # parens and string literals; -1 when unbalanced.
+    var depth = 0
+    var in_string = false
+    var i = 6
+    while i < trimmed.len():
+        val ch = trimmed.substring(i, i + 1)
+        if in_string:
+            if ch == "\\":
+                i = i + 1
+            elif ch == "\"":
+                in_string = false
+        elif ch == "\"":
+            in_string = true
+        elif ch == "(":
+            depth = depth + 1
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+fn _single_rewrite_paren_subject_matcher(line: text, trimmed: text) -> text:
+    # `expect(a) to_equal(b)` / `expect(a) to_equal b` / `expect(a) to_be_nil`:
+    # the matcher word follows a parenthesized subject. Mirrors the seed parser
+    # fold (no_paren.rs parse_matcher_word_suffix on a paren subject, 5a3a5ce413f)
+    # so the expect is consumed by the matcher instead of left vacuous.
+    val close = _single_expect_paren_end(trimmed)
+    if close < 0:
         return line
-    val matchers: [text] = ["to_equal", "to_be", "to_contain", "to_start_with", "to_end_with", "to_be_greater_than", "to_be_less_than", "to_be_at_least", "to_be_at_most", "to_be_nil", "to_be_truthy", "to_be_falsy", "to_be_true", "to_be_false", "to_have_length", "to_be_empty"]
+    val rest = trimmed.substring(close + 1)
+    if not rest.starts_with(" "):
+        return line
+    val word = rest.trim()
+    val subject = trimmed.substring(0, close + 1)
+    val indent_len = line.len() - line.trim_start().len()
+    val indent = line.substring(0, indent_len)
+    for matcher in _single_infix_matchers():
+        if word == matcher:
+            return indent + subject + "." + matcher + "()"
+        if word.starts_with(matcher + "("):
+            return indent + subject + "." + word
+        if word.starts_with(matcher + " "):
+            val expected = word.substring(matcher.len() + 1).trim()
+            if expected.len() == 0:
+                return line
+            return indent + subject + "." + matcher + "(" + expected + ")"
+    line
+
+fn _single_trailing_comment_start(line: text) -> i64:
+    # Index of a `#` that starts a trailing comment (outside string literals),
+    # or -1. Kept out of the rewrite so it never lands inside a matcher arg.
+    var in_string = false
+    var i = 0
+    while i < line.len():
+        val ch = line.substring(i, i + 1)
+        if in_string:
+            if ch == "\\":
+                i = i + 1
+            elif ch == "\"":
+                in_string = false
+        elif ch == "\"":
+            in_string = true
+        elif ch == "#":
+            return i
+        i = i + 1
+    -1
+
+fn _single_rewrite_infix_expect_line(line: text) -> text:
+    val comment_at = _single_trailing_comment_start(line)
+    if comment_at > 0:
+        val code = line.substring(0, comment_at)
+        val code_end = code.trim_end().len()
+        val rewritten = _single_rewrite_infix_expect_code(code.substring(0, code_end))
+        return rewritten + line.substring(code_end)
+    _single_rewrite_infix_expect_code(line)
+
+fn _single_rewrite_infix_expect_code(line: text) -> text:
+    val trimmed = line.trim()
+    if trimmed.starts_with("expect("):
+        return _single_rewrite_paren_subject_matcher(line, trimmed)
+    if not trimmed.starts_with("expect "):
+        return line
+    val matchers = _single_infix_matchers()
     var i = 0
     while i < matchers.len():
         val matcher = matchers[i]
