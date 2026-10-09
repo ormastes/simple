@@ -493,3 +493,138 @@ impl MirLowering:
                 return
             i = i + 1
         self.register_composite_field_metadata(struct_def.name, fields, self.symbols, true)
+
+# Trait-typed receiver dispatch (bug
+# stage2_trait_typed_receiver_method_unresolved_2026-10-10). A declaration's
+# own table may leave defining_module nil; the owning module then supplies the
+# owner, so a trait reads the same identity from its defining module and from
+# every importer.
+fn mir_trait_dispatch_identity(symbol: HirSymbol, fallback_module: text) -> text:
+    var owner = _hir_symbol_owner_module(symbol.defining_module ?? "")
+    if owner == "":
+        owner = _hir_symbol_owner_module(fallback_module)
+    "{owner}.{symbol.name}"
+
+impl MirLowering:
+    me register_trait_receiver_impls(module: HirModule, providers: [HirModule]):
+        """Record every `impl Trait for Type` visible to this lowering.
+
+        Stage2 objects carry no runtime type identity (no vtable word), so a
+        trait-typed receiver can only be dispatched when the build closure
+        holds exactly one implementing type. Providers are the driver's whole
+        closure (driver_pipeline_lowering.spl), so the count is closure-wide."""
+        self.register_trait_impls_of(module.name, module.symbols, module.impls, {}, true)
+        val trait_providers = if providers.len() > 0: providers else: self.trait_impl_provider_modules
+        for provider_module in trait_providers:
+            if provider_module.name != module.name and provider_module.impls.len() > 0:
+                var provider_links: Dict<i64, text> = {}
+                for provider_func in provider_module.functions.values():
+                    provider_links[provider_func.symbol.id] = mir_provider_function_name(provider_module.name, provider_module.symbols, provider_func)
+                self.register_trait_impls_of(provider_module.name, provider_module.symbols, provider_module.impls, provider_links, false)
+
+    me register_trait_impls_of(module_name: text, symbols: SymbolTable, impls: [HirImpl], links: Dict<i64, text>, is_local: bool):
+        var ii = 0
+        while ii < impls.len():
+            val impl_def: HirImpl = impls[ii]
+            val impl_index = ii
+            ii = ii + 1
+            # Do not trust has_trait_: the HIR impl lowering
+            # (trait_impl_lowering.spl HirImpl(...)) passes the optional
+            # `trait_` but never sets the flag. Presence of `trait_` naming a
+            # Trait symbol is the authority (an inherent impl has nil).
+            val impl_trait: HirType? = impl_def.trait_
+            var trait_key = ""
+            if impl_trait != nil:
+                val trait_kind: HirTypeKind = (impl_trait ?? impl_def.type_).kind
+                match trait_kind:
+                    case Named(trait_sym, _):
+                        if symbols.symbols.has(trait_sym.id):
+                            val trait_symbol = symbols.get_symbol_raw(trait_sym.id)
+                            if trait_symbol != nil and trait_symbol.kind == SymbolKind.Trait:
+                                trait_key = mir_trait_dispatch_identity(trait_symbol, module_name)
+                    case _: ()
+            if trait_key != "":
+                # A generic or unnamed implementing type still counts as an
+                # implementor; the "generic:" prefix makes the call site reject
+                # devirtualization instead of guessing an instantiation.
+                var owner_key = "generic:{module_name}#impl{impl_index}"
+                val type_kind: HirTypeKind = impl_def.type_.kind
+                match type_kind:
+                    case Named(type_sym, type_args):
+                        if impl_def.type_params.len() == 0 and type_args.len() == 0 and symbols.symbols.has(type_sym.id):
+                            val type_symbol = symbols.get_symbol_raw(type_sym.id)
+                            if type_symbol != nil:
+                                owner_key = mir_trait_dispatch_identity(type_symbol, module_name)
+                    case _: ()
+                var owners = self.trait_impl_owners.get(trait_key) ?? []
+                if not owners.contains(owner_key):
+                    owners = owners.push(owner_key)
+                    self.trait_impl_owners[trait_key] = owners
+                for method_name in impl_def.methods.keys():
+                    val method_id: SymbolId = impl_def.methods[method_name]
+                    val target = if is_local: method_id else: self.relocate_provider_callable(method_id, symbols, links)
+                    if target.id >= 0:
+                        self.trait_impl_methods["{trait_key}::{owner_key}::{method_name}"] = target
+
+    me trait_receiver_identity(receiver: HirExpr) -> text:
+        """Canonical trait identity when the receiver's STATIC type is a
+        trait (a trait-object value), else "". Sources, in order: the
+        expression's inferred type, a typed local/param binding, and a field
+        access's resolved field symbol."""
+        var candidates: [HirType] = []
+        if receiver.has_type_:
+            candidates = candidates.push(receiver.type_)
+        val declared = self.receiver_declared_type(receiver)
+        if declared != nil:
+            candidates = candidates.push(declared ?? receiver.type_)
+        val receiver_kind: HirExprKind = receiver.kind
+        match receiver_kind:
+            case Field(base, field_name, resolved):
+                if resolved != nil:
+                    val field_id = resolved ?? SymbolId(id: -1)
+                    if field_id.id >= 0 and self.symbols.symbols.has(field_id.id):
+                        val field_symbol = self.symbols.get_symbol_raw(field_id.id)
+                        if field_symbol != nil and field_symbol.type_ != nil:
+                            candidates = candidates.push(field_symbol.type_ ?? receiver.type_)
+                val field_type = self.declared_field_hir_type(base, field_name)
+                if field_type != nil:
+                    candidates = candidates.push(field_type ?? receiver.type_)
+            case _: ()
+        for candidate in candidates:
+            var trait_id: i64 = -1
+            val candidate_kind: HirTypeKind = candidate.kind
+            match candidate_kind:
+                case Named(named_sym, _): trait_id = named_sym.id
+                case DynTrait(dyn_sym): trait_id = dyn_sym.id
+                case _: ()
+            if trait_id >= 0 and self.symbols.symbols.has(trait_id):
+                val trait_symbol = self.symbols.get_symbol_raw(trait_id)
+                if trait_symbol != nil and trait_symbol.kind == SymbolKind.Trait:
+                    return mir_trait_dispatch_identity(trait_symbol, self.current_module_id)
+        ""
+
+    me declared_field_hir_type(base: HirExpr, field_name: text) -> HirType?:
+        """Declared HirType of `base.field_name` when `base` is a typed binding
+        of a struct/class registered in this lowering (active-table ids)."""
+        val base_type = self.receiver_declared_type(base)
+        if base_type == nil:
+            return nil
+        val base_kind: HirTypeKind = (base_type ?? base.type_).kind
+        match base_kind:
+            case Named(owner_sym, _):
+                if not self.symbols.symbols.has(owner_sym.id):
+                    return nil
+                val owner_symbol = self.symbols.get_symbol_raw(owner_sym.id)
+                if owner_symbol == nil:
+                    return nil
+                for owner_key in [owner_symbol.name, mir_class_identity(owner_symbol)]:
+                    if self.struct_field_order.has(owner_key) and self.struct_field_hir_type.has(owner_key):
+                        val names = self.struct_field_order[owner_key]
+                        val types = self.struct_field_hir_type[owner_key]
+                        var fi = 0
+                        while fi < names.len() and fi < types.len():
+                            if names[fi] == field_name:
+                                return Some(types[fi])
+                            fi = fi + 1
+            case _: ()
+        nil

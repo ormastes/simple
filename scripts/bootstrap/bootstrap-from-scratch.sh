@@ -5501,10 +5501,14 @@ if [ "${build_mcp}" -eq 1 ]; then
     prepare_native_cache "stage5${mcp_stage}" "${stage_for_build}" "${mcp_name}"
     rm -f "${full_dir}/${mcp_name}${exe_suffix}"
     set +e
+    # SIMPLE_PACKAGE_INDEX_COLD_INIT=1 as in Stage 3: whole-closure lowering,
+    # never a demand/package-index route, so trait-object calls (e.g.
+    # virtual_source_consumer_v1.spl) devirtualize instead of failing closed.
     env RUST_LOG="${RUST_LOG:-error}" \
       SIMPLE_NO_DEPRECATED_WARNINGS=1 \
       LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
       SIMPLE_NO_STUB_FALLBACK=1 \
+      SIMPLE_PACKAGE_INDEX_COLD_INIT=1 \
       SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
       SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
       "${stage_for_build}" native-build \
