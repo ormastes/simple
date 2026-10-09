@@ -329,6 +329,25 @@ fn clang_cl_whole_archive_arg(path: &Path) -> String {
     format!("/WHOLEARCHIVE:{}", path.display())
 }
 
+/// lld-link options for the MSVC stub-fallback lane (SIMPLE_NO_STUB_FALLBACK
+/// unset), appended to the single trailing `/link` group.
+///
+/// Each element must be ONE lld-link option. The previous
+/// `/FORCE:MULTIPLE,UNRESOLVED` is not a spelling lld-link knows (its options
+/// are `/force`, `/force:multiple`, `/force:unresolved`); an unmatched
+/// `/`-prefixed argument is taken as an input path, so every link on this lane
+/// died with `lld-link: could not open '/FORCE:MULTIPLE,UNRESOLVED'` (measured
+/// with lld-link 23.1.1).
+///
+/// `/FORCE:UNRESOLVED` is deliberately NOT emitted: it would let the first link
+/// succeed with genuinely missing symbols bound to NULL (the rt_unwrap_or_trap
+/// SEGV class), pre-empting the stub-parity retry in `link_objects`, which
+/// replaces exactly the reported names with loud trap stubs and lists them.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn msvc_stub_fallback_link_args() -> &'static [&'static str] {
+    &["/FORCE:MULTIPLE"]
+}
+
 /// Linker stdout+stderr, with source attribution appended for any undefined
 /// symbol that HIR lowering produced via the `lenient_types` fallback.
 ///
@@ -2439,9 +2458,11 @@ int main(int argc, char** argv) {
             // (measured 4x in simple_native_all.lib). Nothing depends on it:
             // the runtime archive's retention roots are emitted unconditionally
             // on the non-force path above, and SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE=1
-            // remains the escape hatch. `/FORCE:MULTIPLE,UNRESOLVED` stays --
-            // that is what makes the stub-fallback path tolerant.
-            msvc_link_args.push("/FORCE:MULTIPLE,UNRESOLVED".to_string());
+            // remains the escape hatch. Duplicate definitions are tolerated
+            // here; unresolved symbols are NOT -- they fail this link and are
+            // handled by the trap-stub retry below (see
+            // msvc_stub_fallback_link_args).
+            msvc_link_args.extend(msvc_stub_fallback_link_args().iter().map(|s| s.to_string()));
         }
 
         if self.config.strip {
@@ -3529,6 +3550,34 @@ mod linker_tests {
         assert_eq!(
             clang_cl_whole_archive_arg(Path::new("simple_native_all.lib")),
             "/WHOLEARCHIVE:simple_native_all.lib"
+        );
+    }
+
+    #[test]
+    fn msvc_stub_fallback_link_args_are_single_lld_link_options() {
+        let args = msvc_stub_fallback_link_args();
+        assert_eq!(args, &["/FORCE:MULTIPLE"]);
+        for arg in args {
+            // lld-link reads a comma-joined /FORCE value as an input path.
+            assert!(!arg.contains(','), "{arg} is not a single lld-link option");
+            assert!(!arg.eq_ignore_ascii_case("/FORCE:UNRESOLVED"));
+            assert!(!arg.eq_ignore_ascii_case("/FORCE"));
+        }
+
+        // The MSVC platform config contributes nothing before `/link`; the
+        // GNU/MinGW/ELF/Mach-O spellings stay as they were.
+        let msvc = Target::parse("x86_64-pc-windows-msvc").unwrap();
+        let msvc_config = simple_common::platform::link_config::PlatformLinkConfig::for_target(&msvc);
+        assert!(msvc_config.unresolved_symbol_flags.is_empty());
+        let mingw_config = simple_common::platform::link_config::PlatformLinkConfig::windows_mingw();
+        assert!(mingw_config
+            .unresolved_symbol_flags
+            .iter()
+            .all(|flag| flag.starts_with("-Wl,")));
+        let linux = Target::parse("x86_64-unknown-linux-gnu").unwrap();
+        assert_eq!(
+            simple_common::platform::link_config::PlatformLinkConfig::for_target(&linux).unresolved_symbol_flags,
+            vec!["-Wl,--allow-multiple-definition", "-Wl,--unresolved-symbols=ignore-all"]
         );
     }
 
