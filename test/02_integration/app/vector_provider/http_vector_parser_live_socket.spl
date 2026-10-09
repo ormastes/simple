@@ -86,6 +86,7 @@ fn _server(parser: HttpVectorRequestParserV1) -> SimpleHttpServer:
     server.with_http_request_parser_v1(parser)
 
 fn _drive_one(server: SimpleHttpServer, bytes: text) -> HttpVectorLiveSocketResultV1:
+    var owner = server
     match TcpListener.bind("127.0.0.1:0"):
         Err(_):
             return HttpVectorLiveSocketResultV1(
@@ -124,9 +125,8 @@ fn _drive_one(server: SimpleHttpServer, bytes: text) -> HttpVectorLiveSocketResu
                                 match listener.accept():
                                     Err(_): pass
                                     Ok(connection):
-                                        if server.admission.try_acquire():
-                                            outcome = SimpleHttpServer.handle_connection_admitted_owned_v1(
-                                                server, connection)
+                                        if owner.admission.try_acquire():
+                                            outcome = owner.handle_connection_on_owner_v1(connection)
                                         else:
                                             val _ = connection.close()
                                 match client.read_text():
@@ -172,7 +172,7 @@ fn main() -> i32:
     if opened.status != PROVIDER_SESSION_OK:
         return _fail("HTTP provider admission failed: " + opened.reason)
     val parser = HttpVectorRequestParserV1.from_session(opened.session)
-    val vector_server = _server(parser)
+    var vector_server = _server(parser)
     val vector = _drive_one(vector_server, request)
     var failure = ""
     if not vector.ok or not vector.connection.handled or
@@ -184,6 +184,10 @@ fn main() -> i32:
             not vector.wire.contains("{LIVE_MARKER_V1} path=/vector;body=Wiki;query_valid=true;padding_valid=true;remote_valid=true") or
             not vector.wire.contains("X-Content-Type-Options: nosniff"):
         failure = "provider parser changed live route/body/security response or peer address was invalid"
+    if vector.connection.parser == nil:
+        failure = "first connection dropped the parser continuation"
+    else:
+        vector_server = vector_server.with_http_request_parser_v1(vector.connection.parser!)
 
     val denied = _run_with_session(
         artifact_path, artifact_digest,
