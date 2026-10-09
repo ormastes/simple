@@ -256,12 +256,26 @@ pub(crate) fn evaluate_negated_bdd_matcher(
     if let Some(negated) = direct {
         return evaluate_method_call(expect_call, negated, args, env, functions, classes, enums, impl_methods);
     }
-    use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
+    use crate::interpreter::interpreter_call::{
+        BDD_EXPECT_FAILED, BDD_EXPECT_PROVISIONAL, BDD_FAILURE_MSG, BDD_PROVISIONAL_MSG, BDD_PROVISIONAL_SEQ,
+    };
+    // The positive form's failure state is suppressed wholesale: the hard
+    // flag AND the provisional (hollow-expect) flag the re-evaluated
+    // `expect(x)` raises for a falsy subject. A positive matcher outside the
+    // provisional-clearing list would otherwise leave that provisional
+    // standing and false-fail the example at its end, even though the
+    // negation passed.
     let saved_failed = BDD_EXPECT_FAILED.with(|cell| *cell.borrow());
     let saved_msg = BDD_FAILURE_MSG.with(|cell| cell.borrow().clone());
+    let saved_provisional = BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow());
+    let saved_provisional_msg = BDD_PROVISIONAL_MSG.with(|cell| cell.borrow().clone());
+    let saved_provisional_seq = BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow());
     let positive = evaluate_method_call(expect_call, method, args, env, functions, classes, enums, impl_methods)?;
     BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = saved_failed);
     BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = saved_msg);
+    BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = saved_provisional);
+    BDD_PROVISIONAL_MSG.with(|cell| *cell.borrow_mut() = saved_provisional_msg);
+    BDD_PROVISIONAL_SEQ.with(|cell| *cell.borrow_mut() = saved_provisional_seq);
     let Value::Bool(matched) = positive else {
         return Err(CompileError::semantic(format!(
             "`expect(..).not.{method}` is not a BDD matcher: the positive form returned {} instead of a match result",
