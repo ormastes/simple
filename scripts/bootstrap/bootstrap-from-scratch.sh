@@ -1930,15 +1930,27 @@ bootstrap_stage2_single_timeout_cache_retry_eligible() {
   bsscre_log=$1
   [ -f "${bsscre_log}" ] && [ ! -L "${bsscre_log}" ] || return 1
   awk '
-    /^FAILED FILES \(1\):$/ { failed_headers++ }
+    /^FAILED FILES \([1-9][0-9]*\):$/ {
+      failed_headers++
+      declared_failures = $0
+      sub(/^FAILED FILES \(/, "", declared_failures)
+      sub(/\):$/, "", declared_failures)
+    }
     /^  - .* => .*: timeout \([0-9]+s\)$/ { timeout_rows++ }
+    /^  - .* => .*: NOT_ATTEMPTED: previous native worker timed out; refusing replacement admission$/ {
+      deferred_rows++
+    }
     /^  - .* => / { failure_rows++ }
-    /^Build failed: native-build aborted: 1 file\(s\) failed to compile$/ {
+    /^Build failed: native-build aborted: [1-9][0-9]* file\(s\) failed to compile$/ {
       failed_summaries++
+      summarized_failures = $0
+      sub(/^Build failed: native-build aborted: /, "", summarized_failures)
+      sub(/ file\(s\) failed to compile$/, "", summarized_failures)
     }
     END {
       exit !(failed_headers == 1 && timeout_rows == 1 &&
-             failure_rows == 1 && failed_summaries == 1)
+             failure_rows == 1 + deferred_rows && failed_summaries == 1 &&
+             declared_failures == failure_rows && summarized_failures == failure_rows)
     }
   ' "${bsscre_log}"
 }
@@ -4206,6 +4218,22 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
         echo "error: could not publish immutable Stage 2 admission receipt" >&2
         stage2_status=4
       else
+        # Publish the platform's runtime names and bind the exact capsule to
+        # this admission before exposing a completed Stage 2 to verification.
+        sh "${repo_root}/scripts/bootstrap/phase2-runtime-binding.shs" publish \
+          "${stage2_admitted_absolute}" "${stage_runtime_absolute}" \
+          "$(absolute_path "${output_dir}")/phase2-runtime-capsules" || {
+          echo "error: could not publish the admitted Phase 2 runtime capsule" >&2
+          exit 1
+        }
+        # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
+        if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
+          sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage2_admitted_bin}" phase2 || \
+            echo "  warning: phase2 snapshot preservation failed (non-fatal)" >&2
+        fi
+        # Downstream parent/planner publication can fail. Seal this completed
+        # admission first so the next attempt can archive its exact evidence.
+        chmod 500 "${stage2_admitted_dir}"
         if [ "${bootstrap_stage2_trust_root}" -eq 1 ]; then
           stage2_parent_dir=$(dirname -- "${stage2_bin}")
           stage2_parent_sanity="${stage2_parent_dir}/stage2-sanity.receipt"
@@ -4294,20 +4322,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
             echo "bootstrap-policy: resume with: sh scripts/bootstrap/bootstrap-from-scratch.sh --resume-managed-from-admitted=${output_dir} --bootstrap-receipt=${managed_stage4_planner_receipt}"
           fi
         fi
-        # Publish the platform's runtime names and bind the exact capsule to
-        # this admission before exposing a completed Stage 2 to verification.
-        sh "${repo_root}/scripts/bootstrap/phase2-runtime-binding.shs" publish \
-          "${stage2_admitted_absolute}" "${stage_runtime_absolute}" \
-          "$(absolute_path "${output_dir}")/phase2-runtime-capsules" || {
-          echo "error: could not publish the admitted Phase 2 runtime capsule" >&2
-          exit 1
-        }
-        # Preserve the admitted phase-2 compiler as an immutable lineage snapshot.
-        if [ -x "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" ]; then
-          sh "${repo_root}/scripts/bootstrap/preserve-phase-binary.shs" "${stage2_admitted_bin}" phase2 || \
-            echo "  warning: phase2 snapshot preservation failed (non-fatal)" >&2
-        fi
-        chmod 500 "${stage2_admitted_dir}"
       fi
     fi
   fi
@@ -4727,36 +4741,12 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "error: Stage 2 compiler tests exited 0 but wrote no verification summary" >&2
       stage2_tests_status=95
     fi
-    # Exit 0 alone is not evidence. The verifier records UNSUPPORTED tasks
-    # rather than failing them outright, so require the rows that prove a
-    # compiler test binary was BUILT and USED, each exactly once and PASS.
-    # A summary that names none of them checked nothing and is an ERROR.
-    if [ "${stage2_tests_status}" -eq 0 ] &&
-      ! awk -F'[=|]' -v sha="${stage2_tests_sha}" '
-        $1 == "phase" { phases++; if ($2 != "stage2") bad = 1 }
-        $1 == "hash_policy" { policies++; if ($2 != "canonical") bad = 1 }
-        $1 == "expected_compiler_sha256" { expected++; if ($2 != sha) bad = 1 }
-        $1 == "actual_compiler_sha256" { actual++; if ($2 != sha) bad = 1 }
-        $1 == "terminal_failures" { failures++; if ($2 != 0) bad = 1 }
-        $1 == "overall" { outcomes++; if ($2 != "PASS") bad = 1 }
-        $1 == "test_execution" { executions++; if ($2 != "delegated-seed" && $2 != "in-process") bad = 1 }
-        $1 == "task" {
-          if ($3 != "result" || $4 != "PASS") bad = 1
-          if ($2 == "compiler_cli_build") cli++
-          if ($2 == "test_runner_build") runner++
-          if ($2 == "compiler_bootstrap_tests") bootstrap_tests++
-          if ($2 == "interpreter_interpreter_tests") interpreter_tests++
-          if ($2 == "loader_interpreter_tests") loader_tests++
-        }
-        END {
-          exit (bad || phases != 1 || policies != 1 || expected != 1 ||
-            actual != 1 || failures != 1 || outcomes != 1 || executions != 1 ||
-            cli != 1 || runner != 1 || bootstrap_tests != 1 ||
-            interpreter_tests != 1 || loader_tests != 1)
-        }
-      ' "${stage2_tests_summary}"; then
-      echo "error: Stage 2 compiler-test summary is incomplete, not PASS, or names no executed compiler test suite" >&2
-      stage2_tests_status=95
+    # The canonical publisher replays source/tool ownership and real test evidence.
+    if [ "${stage2_tests_status}" -eq 0 ]; then
+      sh "${repo_root}/scripts/bootstrap/lib/verify-stage2-compiler-tests.shs" --publish \
+        "$(absolute_path "${output_dir}")" "${PLATFORM}" "${stage2_admitted_absolute}" \
+        "${stage2_tests_sha}" "${repo_root}" "$(absolute_path "${stage2_tests_summary}")" \
+        "$(absolute_path "${stage2_tests_log}")" || stage2_tests_status=95
     fi
     if [ "${stage2_tests_status}" -ne 0 ]; then
       {
@@ -4781,19 +4771,6 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       echo "       failure above is understood." >&2
       exit 1
     fi
-    {
-      echo "schema=simple-bootstrap-stage2-compiler-tests-v1"
-      echo "status=pass"
-      echo "candidate=${stage2_admitted_absolute}"
-      echo "candidate_sha256=${stage2_tests_sha}"
-      echo "strategy=${stage2_tests_strategy}"
-      echo "verification_summary=${stage2_tests_summary}"
-      echo "verification_summary_sha256=$(bootstrap_stage3_hash_file "${stage2_tests_summary}")"
-      echo "verification_log=${stage2_tests_log}"
-      # Interim seed delegation must stay visible in the admitted receipt.
-      grep '^test_execution=' "${stage2_tests_summary}"
-    } >"${stage2_tests_evidence}"
-    chmod 400 "${stage2_tests_evidence}"
     echo "bootstrap-policy: stage2-compiler-tests=${stage2_tests_evidence}"
   fi
 
