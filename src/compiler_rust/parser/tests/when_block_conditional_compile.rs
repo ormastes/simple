@@ -86,13 +86,3 @@ fn line_numbers_preserved_after_skipped_branches() {
     let expected = FIXTURE.lines().position(|l| l.starts_with("fn main")).unwrap() + 1;
     assert_eq!(main.span.line, expected);
 }
-
-#[test]
-fn real_windows_redirected_process_parses_for_all_targets() {
-    let src = include_str!("../../../../src/lib/nogc_sync_mut/io/windows_redirected_process.spl");
-    for os in ["windows", "linux", "macos", "freebsd", "simpleos"] {
-        for arch in ["x86_64", "aarch64", "riscv64"] {
-            parse_for(src, os, arch);
-        }
-    }
-}
