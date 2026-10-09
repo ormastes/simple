@@ -1,13 +1,13 @@
 # std.config core — HOST CONFIG precedence (env > user > host > default).
 #
 # Source: src/lib/common/config_core/host_config.spl; shell twin and its
-# fixtures: sh scripts/setup/host-env.shs --selftest (cases e, f).
+# fixtures: sh scripts/setup/host-env.shs --selftest (cases e, e2, f).
 
 use std.spec.step
 
 use std.spec.{step}
 use std.common.config_core.host_config.{host_config_entries, host_config_resolve, host_config_value}
-use std.common.config_core.host_config.{host_config_cpu_features, host_config_env_name}
+use std.common.config_core.host_config.{host_config_cpu_features, host_config_env_name, host_config_warnings}
 use std.nogc_sync_mut.simd.host_cpu_config.{CpuFeatureSet}
 
 fn defaults_doc() -> text:
@@ -64,3 +64,33 @@ describe "std.config core — host config":
             expect(set.arch).to_equal("aarch64")
             expect(set.has_sve).to_equal(true)
             expect(set.highest_tier().name).to_equal("sve")
+
+    describe "schema and value validation (same verdicts as host-env.shs case e2)":
+        it "rejects an invalid env value with a warning and falls through":
+            val env = [("SIMPLE_HOST_MAX_BUILD_JOBS", "lots"), ("SIMPLE_HOST_OS", "plan9")]
+            val entries = host_config_entries(defaults_doc(), host_doc(), user_doc(), env)
+            expect(host_config_value(entries, "max_build_jobs")).to_equal("12")
+            expect(host_config_value(entries, "os")).to_equal("macos")
+            val warnings = host_config_warnings(defaults_doc(), host_doc(), user_doc(), env)
+            expect(warnings).to_contain("host-config: warning: ignoring invalid max_build_jobs=lots from env")
+            expect(warnings).to_contain("host-config: warning: ignoring invalid os=plan9 from env")
+
+        it "rejects invalid file values and falls through to the next layer":
+            val bad_user = "host_config:\n  max_threads: 0\n  gpu: maybe\n"
+            val entries = host_config_entries(defaults_doc(), host_doc(), bad_user, [])
+            expect(host_config_value(entries, "max_threads")).to_equal("2")
+            expect(host_config_value(entries, "gpu")).to_equal("on")
+            val warnings = host_config_warnings(defaults_doc(), host_doc(), bad_user, [])
+            expect(warnings).to_contain("host-config: warning: ignoring invalid gpu=maybe from user layer")
+
+        it "skips a user file whose schema is not simple-host-config-v1":
+            val v9_user = "host_config:\n  schema: simple-host-config-v9\n  os: linux\n"
+            val entries = host_config_entries(defaults_doc(), host_doc(), v9_user, [])
+            val r = host_config_resolve(entries, "os")
+            expect(r.value).to_equal("freebsd")
+            expect(r.layer).to_equal("machine")
+            val warnings = host_config_warnings(defaults_doc(), host_doc(), v9_user, [])
+            expect(warnings).to_contain("host-config: warning: ignoring user layer: schema is not simple-host-config-v1")
+
+        it "emits no warnings for valid layers":
+            expect(host_config_warnings(defaults_doc(), host_doc(), user_doc(), []).len()).to_equal(0)

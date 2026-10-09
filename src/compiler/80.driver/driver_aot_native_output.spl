@@ -33,7 +33,8 @@ use compiler.backend.llvm_backend_tools.{llvm_bootstrap_last_object_path}
 use compiler.backend.backend.llvm_capability.{find_archive_portable}
 use std.platform.{get_host_os, get_host_arch}
 use std.nogc_async_mut.sosix.host_facade.{sosix_run}
-use compiler.driver.native_relocatable_link.{native_relocatable_link_plan}
+use compiler.driver.native_relocatable_link.{native_relocatable_link_plan,
+    native_relocatable_linker_version_admissible, NativeRelocatableLink}
 use compiler.driver.driver_log_helpers.{log_phase, log_error}
 use compiler.driver.native_aot_artifacts.{
     native_aot_object_path_v1, native_aot_finish_diagnostics_v1}
@@ -383,6 +384,26 @@ fn driver_native_shadow_sort(lines: [text]) -> [text]:
         if not inserted: next.push(line)
         sorted = next
     sorted
+
+# Admit the relocatable linker by probing `--version`, not by name: llvm-mingw
+# installs LLD's MinGW driver as `ld`, which rejects `-r` (measured: every
+# multi-object `--emit-object` in rc1-phase3-vertical20 failed this way with an
+# empty stderr). SIMPLE_RELOCATABLE_LD overrides the candidate list and is
+# still probed, so an LLD override fails here with a named reason.
+fn _native_relocatable_linker_resolve(plan: NativeRelocatableLink) -> Result<text, text>:
+    val configured = env_get_nullable("SIMPLE_RELOCATABLE_LD") ?? ""
+    val candidates = if configured != "": [configured] else: plan.candidates
+    if not plan.requires_bfd:
+        return Ok(candidates[0])
+    var rejected: [text] = []
+    for candidate in candidates:
+        val probe = sosix_run(candidate, ["--version"])
+        if probe.exit_code == 0 and native_relocatable_linker_version_admissible(true, probe.stdout):
+            return Ok(candidate)
+        val first_line = probe.stdout.split("\n")[0].trim()
+        rejected = rejected.push("{candidate} (exit {probe.exit_code}: {first_line})")
+    val rejected_text = rejected.join("; ")
+    Err("emit-object COFF relocatable link needs GNU BFD ld (LLD has no COFF -r); rejected: {rejected_text}; install binutils (e.g. MSYS2 mingw-w64 binutils) or set SIMPLE_RELOCATABLE_LD")
 
 # `file_write_text` / `file_read_text` are NOT usable here. `std.file_system`
 # exports argument-validating STUBS (`file_ops.spl:60` returns `true` without
@@ -2586,9 +2607,12 @@ impl CompilerDriver:
                     native_target, get_host_os(), get_host_arch(), object_files, output):
                     case Ok(value): value
                     case Err(reason): return CompileResult.CodegenError(reason)
-                val result = sosix_run(plan.program, plan.args)
+                val linker = match _native_relocatable_linker_resolve(plan):
+                    case Ok(value): value
+                    case Err(reason): return CompileResult.CodegenError(reason)
+                val result = sosix_run(linker, plan.args)
                 if result.exit_code != 0:
-                    return CompileResult.CodegenError("emit-object relocatable link failed ({plan.program}): {result.stderr}")
+                    return CompileResult.CodegenError("emit-object relocatable link failed ({linker}): {result.stderr}{result.stdout}")
             driver_log_info(log, "Native object written to {output}")
             return driver_native_success_with_launch_metadata(ctx, output)
 

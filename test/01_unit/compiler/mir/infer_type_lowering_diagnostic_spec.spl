@@ -12,13 +12,18 @@ use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolTable}
 use compiler.mir.mir_lowering.{MirLowering}
 use compiler.mir._MirLowering.function_lowering.*
 
-fn lower_infer(span: Span) -> (text, bool):
+fn lower_infer_in(span: Span, active_fn: text) -> (text, bool):
     var lowering = MirLowering.new(SymbolTable.new())
     lowering.current_module_id = "lib.probe.module"
-    lowering.current_function_names = ["probe_function"]
+    # The module has several functions; the enclosing one is NOT the last.
+    lowering.current_function_names = ["probe_function", "later_function"]
+    lowering.mir_tag_probe_active_function = active_fn
     val _ = lowering.lower_type(HirType(kind: HirTypeKind.Infer(7, 2), span: span))
     val error = lowering.errors[0]
     (error.message, error.span != nil)
+
+fn lower_infer(span: Span) -> (text, bool):
+    lower_infer_in(span, "probe_function")
 
 describe "unresolved Infer reaching MIR lower_type":
     it "names the inference variable, function and module without a span":
@@ -26,6 +31,7 @@ describe "unresolved Infer reaching MIR lower_type":
         expect(message).to_contain("[infer-arm]")
         expect(message).to_contain("Infer(id=7, generation=2)")
         expect(message).to_contain("fn probe_function")
+        expect(message.contains("later_function")).to_be(false)
         expect(message).to_contain("module lib.probe.module")
         expect(message.contains("<enum@")).to_be(false)
         expect(has_span).to_be(false)
@@ -36,3 +42,8 @@ describe "unresolved Infer reaching MIR lower_type":
         val (message, has_span) = lower_infer(located)
         expect(message).to_contain("Infer(id=7, generation=2)")
         expect(has_span).to_be(true)
+
+    it "reports module-level when no function is being lowered":
+        val (message, _) = lower_infer_in(Span.empty(), "")
+        expect(message).to_contain("fn <module-level>")
+        expect(message.contains("later_function")).to_be(false)

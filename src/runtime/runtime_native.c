@@ -5726,16 +5726,17 @@ int64_t rt_string_substr_from(int64_t value, int64_t start) {
  * bug started. These names had no compiled implementation at all before, so
  * exiting is exactly as loud as the behaviour it replaces, never quieter. */
 static void rt_refuse_non_text_receiver(const char* method, int64_t receiver) {
-    /* A raw 0 is no tagged value (not even nil): it is storage that was never
-     * written, typically a module global whose __module_init_* never ran
+    /* TAG_INT is 0, so a raw 0 is ambiguous: either the integer 0 or storage
+     * that was never written, typically a module global whose __module_init_*
+     * never ran
      * (doc/08_tracking/bug/windows_cranelift_weak_module_initializer_2026-10-04.md).
-     * Do not blame dispatch for it. */
+     * Name both possibilities rather than claiming either. */
     if (receiver == 0) {
         fprintf(stderr,
-                "Runtime error: str.%s received a null receiver (0x0). That is "
-                "uninitialized storage -- most likely a module global whose "
-                "initializer never ran -- not a code-generation dispatch gap. "
-                "Refusing to substitute a value. receiver=0x0\n",
+                "Runtime error: str.%s received a null receiver (0x0). Raw 0 is "
+                "either the integer 0 or storage that was never written (for "
+                "example a module global whose initializer never ran); neither "
+                "is text. Refusing to substitute a value. receiver=0x0\n",
                 method);
         exit(70);
     }
