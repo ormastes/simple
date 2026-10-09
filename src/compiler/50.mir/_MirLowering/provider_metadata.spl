@@ -41,6 +41,28 @@ fn mir_provider_declares_value_method_owner(provider: SymbolTable, module_name: 
             case _: ()
     false
 
+fn mir_provider_extension_owner_key(module_name: text, source_name: text) -> text:
+    # `impl Imported:` in module E extends a type declared in module D. HIR
+    # owner-qualifies such a method with D's declaration (`D.Imported::m`,
+    # defining module E), so the E-prefixed callable identity names no class:
+    # the method was dropped and `x.m()` on a D-typed receiver died as
+    # `unresolved method call`. Key it by the declaration's own identity --
+    # the key D's methods and every receiver's struct_value_syms use. Only an
+    # owner qualified by a DIFFERENT module qualifies; anything else is "".
+    val sep = source_name.rfind("::")
+    if sep <= 0:
+        return ""
+    # HIR spells a generic owner without its argument list (`impl Box<T>:`
+    # -> `D.Box::m`), so the owner already matches mir_class_identity.
+    val owner_name = source_name.substring(0, sep)
+    val type_sep = owner_name.rfind(".")
+    if type_sep <= 0:
+        return ""
+    val owner_module = _hir_symbol_owner_module(owner_name.substring(0, type_sep))
+    if owner_module == "" or owner_module == _hir_symbol_owner_module(module_name):
+        return ""
+    "{owner_module}.{owner_name.substring(type_sep + 1)}"
+
 fn mir_provider_function_name(owner: text, symbols: SymbolTable, func: HirFunction, is_entry_module: bool = false) -> text:
     # Linkage attributes are an ABI boundary, including runtime push helpers.
     if func.is_extern or func.has_export_attr or func.func_attr.is_global or func.func_attr.is_entry or (is_entry_module and func.name == "main"):
@@ -135,6 +157,40 @@ impl MirLowering:
         if owner == "": owner = self.current_module_id
         self.callable_link_names.has(mir_provider_callable_key(owner, info.name))
 
+    fn extension_owner_is_known(owner_key: text) -> bool:
+        """An extension owner must name a type this closure declares: a
+        registered class, an enum, or a struct/class layout from the
+        all-module prescan (order-independent of the provider loop)."""
+        if self.class_type_names.has(owner_key):
+            return true
+        if self.enum_variant_index_q.has(owner_key) or self.enum_variant_index.has(owner_key):
+            return true
+        val type_sep = owner_key.rfind(".")
+        if type_sep <= 0:
+            return false
+        val owner_module = mir_layout_canonical_module_name(owner_key.substring(0, type_sep))
+        self.composite_layout_digests.has("{owner_module}::{owner_key.substring(type_sep + 1)}")
+
+    me register_owner_method(key: text, method: SymbolId, owner_module: text):
+        """Publish one `{owner}::{method}` dispatch row. A second module's impl
+        block declaring the same method on the same owner (two extension
+        modules, or an extension shadowing the declaring module's method) is
+        ambiguous: it is recorded in struct_method_ambiguous, which the
+        unresolved-receiver dispatch reports, instead of silently letting the
+        last-registered module win."""
+        if self.struct_method_syms.has(key):
+            val prior = self.struct_method_syms[key]
+            if prior.id != method.id:
+                var prior_owner = ""
+                if val prior_symbol = self.symbols.get_symbol_raw(prior.id):
+                    prior_owner = prior_symbol.defining_module ?? ""
+                # An unknown owner on either side is never evidence of a
+                # second declaring module.
+                if prior_owner != "" and owner_module != "":
+                    if _hir_symbol_owner_module(prior_owner) != _hir_symbol_owner_module(owner_module):
+                        self.struct_method_ambiguous[key] = true
+        self.struct_method_syms[key] = method
+
     me register_provider_method(func: HirFunction, provider: SymbolTable, links: Dict<i64, text>):
         if not func.is_method and not func.is_static:
             return
@@ -150,17 +206,20 @@ impl MirLowering:
         if parts.len() < 2:
             return
         val method_name = parts[parts.len() - 1]
-        val class_key = identity.substring(0, identity.len() - method_name.len() - 1)
+        var class_key = identity.substring(0, identity.len() - method_name.len() - 1)
         if not self.class_type_names.has(class_key):
             if not mir_provider_declares_value_method_owner(provider, source.defining_module ?? "", parts[parts.len() - 2], class_key):
-                return
+                val extension_owner = mir_provider_extension_owner_key(source.defining_module ?? "", source.name)
+                if extension_owner == "" or not self.extension_owner_is_known(extension_owner):
+                    return
+                class_key = extension_owner
         val method = self.relocate_provider_callable(func.symbol, provider, links)
         if method.id < 0:
             return
         val key = "{class_key}::{method_name}"
-        self.struct_method_syms[key] = method
+        self.register_owner_method(key, method, source.defining_module ?? "")
         if func.is_static:
-            self.struct_method_syms["static::{key}"] = method
+            self.register_owner_method("static::{key}", method, source.defining_module ?? "")
         val ret = self.relocate_provider_type(func.return_type, provider)
         match ret.kind:
             case Named(id, _):
