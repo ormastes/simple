@@ -1,0 +1,57 @@
+use std.spec.*
+use compositions.kernel_llvm.compiler.driver.bootstrap_k1_selected.{
+    install_selected_k1_backend_table_v1, selected_k1_backend_policy_v1,
+    selected_k1_backend_table_v1}
+use compiler.backend.backend.static_backend_registry.{
+    installed_k1_static_backend_policy_v1, select_static_backend_v1,
+    k1_backend_unavailable_message_v1}
+use compiler.backend.backend.static_jit_lane.{
+    installed_k1_jit_lane_name_v1, k1_jit_lane_run_modules_v1}
+use compiler.backend.backend.backend_helpers.{cranelift_compile_module_via_k1_v1}
+use compiler.backend.backend.backend_types.{compileoptions_default_options}
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.common.driver_core_types.{CompileResult}
+
+fn _codegen_error_text(result: CompileResult) -> text:
+    match result:
+        case CodegenError(message): message
+        case _: ""
+
+fn _empty_module() -> MirModule:
+    MirModule(name: "k1_llvm_only_spec", functions: {}, statics: {}, constants: {}, types: {})
+
+# The LLVM-only kernel is the composition the core-c-bootstrap lane selects
+# (SIMPLE_KERNEL_K1_POLICY=llvm): no Cranelift port, no JIT lane, so every
+# Cranelift request is refused by name rather than linked or stubbed.
+describe "kernel_llvm composition (K1 policy llvm)":
+    it "admits an interpreter+llvm table and installs no JIT lane":
+        expect(selected_k1_backend_policy_v1()).to_equal("llvm")
+        expect(selected_k1_backend_table_v1().len()).to_equal(2)
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
+        expect(installed_k1_static_backend_policy_v1()).to_equal("llvm")
+        expect(installed_k1_jit_lane_name_v1()).to_equal("")
+
+    it "resolves llvm but not cranelift from the installed table":
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
+        expect(select_static_backend_v1("llvm").is_ok()).to_equal(true)
+        expect(select_static_backend_v1("cranelift").is_ok()).to_equal(false)
+
+    it "refuses a kernel-side cranelift compile by name":
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
+        val result = cranelift_compile_module_via_k1_v1(
+            compileoptions_default_options(), _empty_module(), nil, nil, [])
+        expect(result.is_ok()).to_equal(false)
+        match result:
+            case Err(err):
+                expect(err.to_text().contains(
+                    "cranelift backend not available in this build (K1 policy 'llvm')")).to_equal(true)
+            case Ok(_):
+                expect(false).to_equal(true)
+        expect(k1_backend_unavailable_message_v1("cranelift").contains(
+            "SIMPLE_KERNEL_K1_POLICY=llvm-cranelift")).to_equal(true)
+
+    it "refuses JIT execution by name":
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
+        val message = _codegen_error_text(k1_jit_lane_run_modules_v1([]))
+        expect(message.contains("K1 policy 'llvm'")).to_equal(true)
+        expect(message.contains("cranelift backend not available in this build")).to_equal(true)

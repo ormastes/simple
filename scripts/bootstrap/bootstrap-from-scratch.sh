@@ -802,10 +802,16 @@ esac
 if [ -z "${backend}" ]; then
   backend=llvm
 fi
+# K1 policy `llvm` (src/compositions/kernel_llvm) links no Cranelift port and
+# no JIT lane, so the stage-3 closure never references rt_cranelift_* /
+# spl_cranelift_* (Rust-only symbols the core-c-bootstrap bundle cannot
+# provide). Its only admissible backends are the LLVM ones; `cranelift` needs
+# the combined policy.
 case "${SIMPLE_KERNEL_K1_POLICY:-unselected}:${backend}" in
   llvm-cranelift:llvm|llvm-cranelift:llvm-lib|llvm-cranelift:cranelift) ;;
+  llvm:llvm|llvm:llvm-lib) ;;
   *)
-    echo "error: bootstrap backend '${backend}' is incompatible with SIMPLE_KERNEL_K1_POLICY='${SIMPLE_KERNEL_K1_POLICY}'" >&2
+    echo "error: bootstrap backend '${backend}' is incompatible with SIMPLE_KERNEL_K1_POLICY='${SIMPLE_KERNEL_K1_POLICY}' (llvm-cranelift admits llvm|llvm-lib|cranelift; llvm admits llvm|llvm-lib)" >&2
     exit 1
     ;;
 esac
@@ -1579,8 +1585,11 @@ case "${SIMPLE_KERNEL_K1_POLICY:-unselected}" in
   llvm-cranelift)
     k1_composition_root="${repo_root}/src/compositions/kernel_llvm_cranelift"
     ;;
+  llvm)
+    k1_composition_root="${repo_root}/src/compositions/kernel_llvm"
+    ;;
   unselected|'')
-    echo "error: SIMPLE_KERNEL_K1_POLICY must match canonical llvm-cranelift" >&2
+    echo "error: SIMPLE_KERNEL_K1_POLICY must be set (llvm-cranelift = canonical combined kernel; llvm = LLVM-only kernel with no Cranelift link)" >&2
     exit 1
     ;;
   *)

@@ -1,0 +1,72 @@
+# K1 JIT / SMF-execution lane slot.
+#
+# The kernel never imports a concrete JIT codegen. Cranelift's CodegenPipeline
+# (compiler.backend.codegen over std.sffi.codegen) references rt_cranelift_* /
+# spl_cranelift_* externs that exist only in the Rust-backed runtime lanes; a
+# kernel that imported it statically would carry 78 undefined symbols into
+# every core-c-bootstrap link. A composition root that links such a backend
+# installs this lane next to its K1 backend table (kernel_llvm_cranelift); a
+# composition without one (kernel_llvm) leaves it empty, and every JIT / SMF /
+# HIR-compile request fails closed with a nameable diagnostic instead of an
+# undefined symbol, a trap, or a silent nil.
+
+use compiler.mir.mir_instructions.{MirModule}
+use compiler.hir.hir_types.{HirModule}
+use compiler.backend.backend_types.{BackendResult, BackendError}
+use compiler.common.driver_core_types.{CompileResult}
+use compiler.backend.backend.static_backend_registry.{installed_k1_static_backend_policy_v1}
+
+pub struct StaticJitLaneV1:
+    name: text
+    jit_run_fn: fn([MirModule]) -> CompileResult
+    execute_smf_fn: fn(text) -> CompileResult
+    hir_jit_fn: fn(HirModule) -> Result<BackendResult, BackendError>
+    hir_aot_fn: fn(HirModule, text) -> Result<BackendResult, BackendError>
+
+var _k1_jit_lanes_v1: [StaticJitLaneV1] = []
+var _k1_jit_lane_policy_v1: text = ""
+
+pub fn install_k1_jit_lane_v1(policy: text, lane: StaticJitLaneV1) -> bool:
+    if policy == "" or lane.name == "":
+        return false
+    if _k1_jit_lanes_v1.len() > 0:
+        return _k1_jit_lane_policy_v1 == policy and _k1_jit_lanes_v1[0].name == lane.name
+    _k1_jit_lanes_v1 = [lane]
+    _k1_jit_lane_policy_v1 = policy
+    true
+
+pub fn installed_k1_jit_lane_name_v1() -> text:
+    if _k1_jit_lanes_v1.len() == 0:
+        return ""
+    _k1_jit_lanes_v1[0].name
+
+pub fn k1_jit_lane_unavailable_message_v1(request: text) -> text:
+    val policy = installed_k1_static_backend_policy_v1()
+    val shown = if policy == "": "unselected" else: policy
+    "cranelift backend not available in this build (K1 policy '{shown}', no JIT lane installed): " +
+        "{request} needs a kernel composition that links a JIT backend " +
+        "(SIMPLE_KERNEL_K1_POLICY=llvm-cranelift) or a --backend-plugin <path>"
+
+fn _k1_jit_lane_installed_v1() -> bool:
+    _k1_jit_lanes_v1.len() > 0
+
+pub fn k1_jit_lane_run_modules_v1(modules: [MirModule]) -> CompileResult:
+    if not _k1_jit_lane_installed_v1():
+        return CompileResult.CodegenError(k1_jit_lane_unavailable_message_v1("JIT execution"))
+    _k1_jit_lanes_v1[0].jit_run_fn(modules)
+
+pub fn k1_jit_lane_execute_smf_v1(smf_path: text) -> CompileResult:
+    if not _k1_jit_lane_installed_v1():
+        return CompileResult.CodegenError(k1_jit_lane_unavailable_message_v1("SMF execution"))
+    _k1_jit_lanes_v1[0].execute_smf_fn(smf_path)
+
+pub fn k1_jit_lane_process_hir_jit_v1(module: HirModule) -> Result<BackendResult, BackendError>:
+    if not _k1_jit_lane_installed_v1():
+        return Err(BackendError.compile_error(k1_jit_lane_unavailable_message_v1("JIT mode"), nil))
+    _k1_jit_lanes_v1[0].hir_jit_fn(module)
+
+pub fn k1_jit_lane_process_hir_aot_v1(module: HirModule,
+        output: text) -> Result<BackendResult, BackendError>:
+    if not _k1_jit_lane_installed_v1():
+        return Err(BackendError.compile_error(k1_jit_lane_unavailable_message_v1("AOT mode"), nil))
+    _k1_jit_lanes_v1[0].hir_aot_fn(module, output)
