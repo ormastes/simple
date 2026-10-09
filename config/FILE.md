@@ -14,6 +14,7 @@ Configuration files for build, test, packaging, and tooling.
 | `di.sdn` | Dependency injection configuration |
 | `dl.config.sdn` | Deep learning configuration |
 | `doc_coverage.sdn` | Documentation coverage configuration |
+| `host` | Host config: versioned key schema `host_config.sdn` (values commented; users override in `~/.config/simple/host.sdn`) + legacy per-host `<hostname>.sdn` |
 | `docker-compose.test.yml` | Docker test compose |
 | `docker-compose.yml` | Docker compose |
 | `log_opt` | Toolchain build-log optimizer plugin descriptors |

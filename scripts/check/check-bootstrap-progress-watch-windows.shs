@@ -1,0 +1,63 @@
+#!/bin/sh
+# Reproduce an MSYS-visible wrapper whose busy native grandchild is absent
+# from MSYS procfs. This observes only processes created by this fixture.
+set -eu
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) echo 'SKIP Windows native process-tree fixture'; exit 0 ;; esac
+watcher=${BOOTSTRAP_WATCH_SCRIPT:-scripts/bootstrap/bootstrap-progress-watch.shs}
+tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/simple-watch-native.XXXXXXXX")
+fixture_pid=
+cleanup() {
+  # The bounded fixture exits itself. Wait before deleting its owned files.
+  [ -z "$fixture_pid" ] || wait "$fixture_pid" 2>/dev/null || true
+  rm -f "$tmp_root/busy.ps1" "$tmp_root/wrapper.ps1" "$tmp_root/getconf" \
+    "$tmp_root/progress.4096" "$tmp_root/progress.4096.treestate" \
+    "$tmp_root/progress.65536" "$tmp_root/progress.65536.treestate"
+  rmdir "$tmp_root" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+cat >"$tmp_root/busy.ps1" <<'PS'
+$timer = [Diagnostics.Stopwatch]::StartNew()
+while ($timer.Elapsed.TotalSeconds -lt 18) { $unused = [Math]::Sqrt(12345) }
+PS
+cat >"$tmp_root/wrapper.ps1" <<'PS'
+$child = Start-Process powershell.exe -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',"$PSScriptRoot/busy.ps1") -WindowStyle Hidden -PassThru
+$child.WaitForExit()
+PS
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+  -File "$(cygpath -w "$tmp_root/wrapper.ps1")" &
+fixture_pid=$!
+sleep 2
+cat >"$tmp_root/getconf" <<'SH'
+#!/bin/sh
+case "$1" in PAGESIZE) echo "$WATCH_FIXTURE_PAGE_SIZE" ;; CLK_TCK) echo 100 ;; *) exit 1 ;; esac
+SH
+chmod +x "$tmp_root/getconf"
+for fixture_page_size in 4096 65536; do
+PATH="$tmp_root:$PATH" WATCH_FIXTURE_PAGE_SIZE=$fixture_page_size \
+  BOOTSTRAP_WATCH_STALL_SAMPLES=1 sh "$watcher" --pid="$fixture_pid" \
+  --progress-log="$tmp_root/progress.$fixture_page_size" --interval=1 --once
+awk '
+  /event=sample/ {
+    for(i=1;i<=NF;i++) { split($i,p,"="); v[p[1]]=p[2] }
+    if(v["status"] != "alive" || v["tree_cpu_basis"] != "windows" ||
+       v["tree_processes"] < 2 || v["tree_cpu_pct"] < 5 ||
+       v["tree_rss_pgroup_kb"] != "unknown") exit 1
+    found=1
+  }
+  END { if(!found) exit 1 }
+' "$tmp_root/progress.$fixture_page_size" || { cat "$tmp_root/progress.$fixture_page_size"; echo 'FAIL native descendant sampling'; exit 1; }
+done
+# Real RSS may grow between samples. A factor-of-two bound tolerates that
+# variation while decisively rejecting the historical factor-of-sixteen bug.
+awk '
+  /event=sample/ {
+    for(i=1;i<=NF;i++) { split($i,p,"="); v[p[1]]=p[2] }
+    n++; tree[n]=v["tree_rss_kb"]+0; root[n]=v["rss_kb"]+0
+  }
+  END {
+    if(n != 2 || tree[1] <= 0 || root[1] <= 0 ||
+       tree[2] < tree[1]/2 || tree[2] > tree[1]*2 ||
+       root[2] < root[1]/2 || root[2] > root[1]*2) exit 1
+    printf "PASS native child and page-unit regression: tree_kib_4k=%d tree_kib_64k=%d root_kib_4k=%d root_kib_64k=%d\n", tree[1],tree[2],root[1],root[2]
+  }
+' "$tmp_root/progress.4096" "$tmp_root/progress.65536"
