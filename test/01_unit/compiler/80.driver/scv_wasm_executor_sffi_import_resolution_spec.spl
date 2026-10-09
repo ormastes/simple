@@ -1,0 +1,41 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# scv wasm_executor's DynLib import must resolve on the pure-Simple resolver
+
+`src/lib/nogc_sync_mut/sffi/` holds BOTH `mod.spl` (comments only) and
+`__init__.spl` (the bare `export DynLib, ...` facade). The seed resolver
+(`module_resolver/resolution.rs`) prefers `__init__.spl`; the pure-Simple
+resolver (`_driver_resolve_entry_import_exact`) prefers `mod.spl`. So stage2
+resolved `use std.nogc_sync_mut.sffi.{DynLib, sffi_lib_path}` to the empty
+`mod.spl` and the scv link-ladder rung died with the HIR fatal
+"module std.nogc_sync_mut.sffi has no exported item DynLib".
+
+Flipping the resolver order is a ~200-directory semantic change, so the import
+names the declaring module directly (same shape as linalg_core's
+`use std.sffi.dynamic.{DynLoader, sffi_lib_path}`).
+"""
+
+# @tag: unit, compiler, driver, resolver
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file}
+use compiler.driver.driver_source_loading.{_driver_resolve_entry_import}
+
+fn wasm_executor_dynlib_module() -> text:
+    var module = ""
+    for line in read_file("src/lib/scv/wasm_executor.spl").split("\n"):
+        if line.starts_with("use ") and line.contains("DynLib"):
+            val brace = line.index_of(".{")
+            if brace > 4:
+                module = line.substring(4, brace)
+    module
+
+describe "scv wasm_executor DynLib import resolution":
+    it "resolves the DynLib import to a module that declares DynLib and sffi_lib_path":
+        val module = wasm_executor_dynlib_module()
+        expect(module != "").to_equal(true)
+        val path = _driver_resolve_entry_import(module, "src/lib/scv").replace("\\", "/")
+        print "{module} -> {path}"
+        val content = read_file(path)
+        expect(content.contains("class DynLib")).to_equal(true)
+        expect(content.contains("fn sffi_lib_path(")).to_equal(true)
