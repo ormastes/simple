@@ -582,6 +582,76 @@ fn eval_struct_constructor(name: text, decl_id: i64, arg_eids: [i64], arg_names:
 
     val_make_struct(name, field_names, field_values)
 
+# ===== BDD negation link =====
+
+# `expect(<subject>)` with exactly one positional argument — the only receiver
+# the negation link may rewrite, so a user value with a `not` field (or a
+# differently-shaped user `expect`) is never captured. Mirrors the seed's
+# is_bare_expect_call (interpreter_method/mod.rs).
+fn is_bare_expect_call(eid: i64) -> bool:
+    val node = expr_get(eid)
+    if node.tag != EXPR_CALL:
+        return false
+    val callee = expr_get(node.left)
+    if callee.tag != EXPR_IDENT or callee.s_val != "expect":
+        return false
+    if node.args.len() != 1:
+        return false
+    val names = expr_get_arg_names(eid)
+    names.len() == 0 or names[0] == ""
+
+# The bare `expect(..)` under `expect(x).not` / `expect(x).not_()`, or -1.
+# Mirrors the seed's peel_bdd_matcher_receiver negated shapes.
+fn peel_bdd_negation(receiver_eid: i64) -> i64:
+    val node = expr_get(receiver_eid)
+    val is_not = node.s_val == "not" or node.s_val == "not_"
+    if not is_not:
+        return -1
+    if node.tag == EXPR_FIELD_ACCESS and is_bare_expect_call(node.left):
+        return node.left
+    if node.tag == EXPR_METHOD_CALL and node.args.len() == 0 and is_bare_expect_call(node.left):
+        return node.left
+    -1
+
+# `expect(x).not.<matcher>(args)`. std.spec matchers do not return a match
+# result; each ExpectHelper matcher honours the helper's `negated` flag, so the
+# negation is the helper's own `not_()` applied before the matcher runs.
+# `.not.to_not_x` is a double negation and runs the positive `to_x`, as in the
+# seed. Fails closed: a method with no ExpectHelper matcher, a missing
+# `not_()`, or an expect() that recorded no subject is an error, never a pass.
+fn eval_negated_bdd_matcher(expect_eid: i64, method_name: text, arg_eids: [i64], arg_names: [text]) -> i64:
+    var matcher = method_name
+    var negate = true
+    if method_name.starts_with("to_not_"):
+        matcher = "to_" + method_name.substring(7)
+        negate = false
+    val matcher_decl = func_table_lookup("ExpectHelper__" + matcher)
+    if matcher_decl < 0:
+        eval_set_error("`expect(..).not." + method_name + "` is not a BDD matcher: no ExpectHelper." + matcher)
+        return -1
+    val _subject = eval_expr(expect_eid)
+    if eval_had_error: return -1
+    val slots = env_lookup("_expect_helper_slots")
+    if slots < 0 or not val_is_array(slots) or val_get_array(slots).len() == 0:
+        eval_set_error("`expect(..).not." + method_name + "`: expect() recorded no subject")
+        return -1
+    var helper = val_get_array(slots)[0]
+    if negate:
+        val not_decl = func_table_lookup("ExpectHelper__not_")
+        if not_decl < 0:
+            eval_set_error("`expect(..).not." + method_name + "`: ExpectHelper has no not_()")
+            return -1
+        val no_eids: [i64] = []
+        val no_names: [text] = []
+        helper = eval_method_with_args(not_decl, [helper], no_eids, no_names)
+        if eval_had_error: return -1
+    var matcher_values: [i64] = [helper]
+    for matcher_arg_eid in arg_eids:
+        val matcher_arg = eval_expr(matcher_arg_eid)
+        if eval_had_error: return -1
+        matcher_values.push(matcher_arg)
+    eval_method_with_args(matcher_decl, matcher_values, arg_eids, arg_names)
+
 # ===== Method Call =====
 
 fn eval_method_call(eid: i64) -> i64:
@@ -590,6 +660,14 @@ fn eval_method_call(eid: i64) -> i64:
     val method_name = e_node.s_val
     val arg_eids = e_node.args
     val arg_names = expr_get_arg_names(eid)
+
+    # BDD negation link: `expect(x).not.to_equal(y)`. Without this the `.not`
+    # is evaluated as a field of the expect() handle ("cannot access field on
+    # i64") and the matcher never runs.
+    if method_name.starts_with("to"):
+        val negated_expect = peel_bdd_negation(receiver_eid)
+        if negated_expect >= 0:
+            return eval_negated_bdd_matcher(negated_expect, method_name, arg_eids, arg_names)
 
     # Static class-method call: Type.method(args). The parser builds a
     # METHOD_CALL for this shape (parse_postfix_on), so the receiver is the
