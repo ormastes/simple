@@ -1,13 +1,14 @@
 # std.config core — HOST CONFIG precedence (env > user > host > default).
 #
 # Source: src/lib/common/config_core/host_config.spl; shell twin and its
-# fixtures: sh scripts/setup/host-env.shs --selftest (cases e, e2, f).
+# fixtures: sh scripts/setup/host-env.shs --selftest (cases e, e2, f, g).
 
 use std.spec.step
 
 use std.spec.{step}
 use std.common.config_core.host_config.{host_config_entries, host_config_resolve, host_config_value}
 use std.common.config_core.host_config.{host_config_cpu_features, host_config_env_name, host_config_warnings}
+use std.common.config_core.host_config.{host_config_cache_env, host_config_cache_var}
 use std.nogc_sync_mut.simd.host_cpu_config.{CpuFeatureSet}
 
 fn defaults_doc() -> text:
@@ -94,3 +95,36 @@ describe "std.config core — host config":
 
         it "emits no warnings for valid layers":
             expect(host_config_warnings(defaults_doc(), host_doc(), user_doc(), []).len()).to_equal(0)
+
+    describe "cache keys (same verdicts as host-env.shs case g)":
+        it "maps each cache key to its existing consumer variable":
+            expect(host_config_cache_var("cache_scope")).to_equal("SIMPLE_CACHE_SCOPE")
+            expect(host_config_cache_var("frontend_cache")).to_equal("SIMPLE_FRONTEND_CACHE")
+            expect(host_config_cache_var("native_build_cache_dir")).to_equal("SIMPLE_NATIVE_BUILD_CACHE_DIR")
+            expect(host_config_cache_var("gpu")).to_equal("")
+
+        it "supplies defaults for unset consumer variables, on/off as 1/0":
+            val cache_user = "host_config:\n  cache_scope: devlane\n  frontend_cache: off\n  hir_cache: on\n  cache_max_bytes: 4096\n"
+            val entries = host_config_entries(defaults_doc(), "", cache_user, [])
+            val defaults = host_config_cache_env(entries, [])
+            expect(defaults.len()).to_equal(4)
+            expect(defaults[0].0).to_equal("SIMPLE_CACHE_SCOPE")
+            expect(defaults[0].1).to_equal("devlane")
+            expect(defaults[1].1).to_equal("0")
+            expect(defaults[2].1).to_equal("1")
+            expect(defaults[3].0).to_equal("SIMPLE_CACHE_MAX_BYTES")
+
+        it "never overrides a consumer variable that is already set":
+            val cache_user = "host_config:\n  cache_scope: devlane\n"
+            val entries = host_config_entries(defaults_doc(), "", cache_user, [])
+            expect(host_config_cache_env(entries, [("SIMPLE_CACHE_SCOPE", "phase3")]).len()).to_equal(0)
+
+        it "rejects a lane name that could leave its partition, and bad on/off or sizes":
+            val bad = "host_config:\n  cache_scope: ../phase3\n  frontend_cache: maybe\n  cache_max_gb: 0\n"
+            val entries = host_config_entries(defaults_doc(), "", bad, [("SIMPLE_HOST_CACHE_ROOT", "")])
+            expect(host_config_value(entries, "cache_scope")).to_equal("")
+            expect(host_config_value(entries, "frontend_cache")).to_equal("")
+            expect(host_config_value(entries, "cache_max_gb")).to_equal("")
+            val warnings = host_config_warnings(defaults_doc(), "", bad, [])
+            expect(warnings).to_contain("host-config: warning: ignoring invalid cache_scope=../phase3 from user layer")
+            expect(warnings).to_contain("host-config: warning: ignoring invalid frontend_cache=maybe from user layer")

@@ -18,6 +18,7 @@ os, LLVM root/version, gpu) out of scripts and tracked files.
 - Shell reader/generator: `scripts/setup/host-env.shs` (`--get`, `--print`, `--init`, `--selftest`)
 - Simple reader: `src/lib/common/config_core/host_config.spl`
 - Consumers: `scripts/bootstrap/bootstrap-build-jobs-policy.shs`,
+  `scripts/bootstrap/lib/host-shared-cache.shs` (`cache_root`),
   `scripts/setup/platform-detect.shs`, `scripts/setup/llvm-toolchain-env.shs`,
   `CpuFeatureSet.from_host_config` in `src/lib/nogc_sync_mut/simd/host_cpu_config.spl`
 - Setup hook: `scripts/setup/setup.shs` runs `host-env.shs --init`
@@ -35,3 +36,17 @@ os, LLVM root/version, gpu) out of scripts and tracked files.
   folded into the native-build environment fingerprint, so exporting host
   values into bootstrap would churn caches.
 - `llvm_version` is a major only (`23`); the Unix selector looks for `clang-<v>`.
+  `llvm_root` picks no driver: clang-cl is Windows-MSVC-lane only, never a
+  shared default.
+- Cache keys (`cache_root`, `cache_scope`, `frontend_cache`, `hir_cache`,
+  `native_build_cache_dir`, `cache_max_bytes`, `cache_max_gb`) are DEFAULTS for
+  existing consumer vars (`SIMPLE_HOST_CACHE_ROOT`, `SIMPLE_CACHE_SCOPE`,
+  `SIMPLE_FRONTEND_CACHE`, `SIMPLE_HIR_CACHE`, `SIMPLE_NATIVE_BUILD_CACHE_DIR`,
+  `SIMPLE_CACHE_MAX_BYTES`, `SIMPLE_CACHE_MAX_GB`); a set consumer var wins.
+  Applied only by `eval "$(host-env.shs --cache-env)"` /
+  `host_config_apply_cache_env`, never by sourcing, never in bootstrap (except
+  `cache_root` via `--get` in `bootstrap/lib/host-shared-cache.shs`). They may
+  pick dirs/lane/on-off/caps, never disable producer keying or lane
+  partitioning; `cache_scope` is validated as a single dir segment.
+  Twin tables: `host_config_cache_var` in both readers (selftest case g, spec
+  "cache keys").

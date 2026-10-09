@@ -35,6 +35,38 @@ which uses the same env-over-user order.
 | `llvm_version` | `23` (major only) | `llvm-toolchain-env.shs` preferred major; `SIMPLE_LLVM_VERSION` still wins |
 | `gpu` | `on` / `off` | informational |
 
+`llvm_root` is a prefix only and selects no compiler driver: clang-cl is used
+solely by the Windows MSVC lane; Linux/macOS/FreeBSD/SimpleOS use clang/cc and
+MinGW a target-qualified clang.
+
+### Cache keys
+
+Each cache key is only a **default** for one existing consumer variable; when
+that variable is set it wins (the key is not applied). They choose dirs, the
+lane name, on/off and size caps — never keying: cache entries stay
+content+producer keyed and lane-partitioned
+(`doc/05_design/compiler/incremental_build/per_lane_private_caches.md`).
+
+| Key | Example | Consumer variable it defaults |
+|-----|---------|-------------------------------|
+| `cache_root` | `~/.cache/simple` | `SIMPLE_HOST_CACHE_ROOT` (host-shared CAS base; `SIMPLE_CACHE` / `SIMPLE_USER_STORAGE_ROOT` still win) |
+| `cache_scope` | `default` | `SIMPLE_CACHE_SCOPE` / `--cache-scope`; `[A-Za-z0-9._-]`, no leading `.` |
+| `frontend_cache` | `on` / `off` | `SIMPLE_FRONTEND_CACHE` (`off` = `0`) |
+| `hir_cache` | `on` / `off` | `SIMPLE_HIR_CACHE` (`off` = `0`) |
+| `native_build_cache_dir` | `~/.cache/simple/native-build/v1` | `SIMPLE_NATIVE_BUILD_CACHE_DIR` |
+| `cache_max_bytes` | `10737418240` | `SIMPLE_CACHE_MAX_BYTES` (L2 GC / cache-dir evictor) |
+| `cache_max_gb` | `20` | `SIMPLE_CACHE_MAX_GB` (`simple clean` auto mode) |
+
+Apply them to an interactive shell with
+`eval "$(sh scripts/setup/host-env.shs --cache-env)"` (or call
+`host_config_apply_cache_env` after sourcing). Merely sourcing host-env does
+not apply them, and bootstrap never does — it pins its own lane caches. The
+exception is `cache_root`, whose consumer variable is its own override name:
+`bootstrap/lib/host-shared-cache.shs` reads it with `--get cache_root` in a
+child shell. A native binary started without the eval does not read the file.
+`--init` writes all cache keys commented with this host's defaults, so a fresh
+setup changes no cache env.
+
 ## Commands
 
 ```bash
@@ -42,6 +74,7 @@ sh scripts/setup/setup.shs                 # first setup also writes your user f
 sh scripts/setup/host-env.shs --init       # write it now (never overwrites)
 sh scripts/setup/host-env.shs --print      # effective value + winning layer per key
 sh scripts/setup/host-env.shs --get llvm_root
+eval "$(sh scripts/setup/host-env.shs --cache-env)"   # cache defaults for unset vars
 sh scripts/setup/host-env.shs --selftest   # fixtures incl. env > user > host > default
 . scripts/setup/host-env.shs               # export SIMPLE_HOST_<KEY> into this shell
 ```

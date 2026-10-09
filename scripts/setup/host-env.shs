@@ -27,7 +27,9 @@
 # Independently of the legacy per-host file, every sourcing also resolves the
 # layered HOST CONFIG (schema simple-host-config-v1; keys in
 # config/host/host_config.sdn) and exports SIMPLE_HOST_<KEY> for each key that
-# resolves non-empty. Executed directly: --get KEY | --print | --init.
+# resolves non-empty. Executed directly: --get KEY | --print | --init |
+# --cache-env (export lines for the cache keys' consumer vars, see
+# host_config_apply_cache_env; never applied by merely sourcing).
 #
 # host_env_apply_path() prepends SIMPLE_HOST_PATH_PREPEND onto PATH,
 # idempotently — sourcing this file (or calling the function) more than once
@@ -178,7 +180,23 @@ host_env_load() {
 #   4. versioned defaults config/host/host_config.sdn (values commented out)
 # Every layer uses the same "  key: value" two-space shape as host_env:.
 # ---------------------------------------------------------------------------
-HOST_CONFIG_KEYS="max_build_jobs max_threads worker_mem_mib cpu_family cpu_features os llvm_root llvm_version gpu"
+HOST_CONFIG_KEYS="max_build_jobs max_threads worker_mem_mib cpu_family cpu_features os llvm_root llvm_version gpu cache_root cache_scope frontend_cache hir_cache native_build_cache_dir cache_max_bytes cache_max_gb"
+HOST_CONFIG_CACHE_KEYS="cache_root cache_scope frontend_cache hir_cache native_build_cache_dir cache_max_bytes cache_max_gb"
+
+# host_config_cache_var KEY -> the EXISTING consumer variable a cache key is a
+# default for. Same table as host_config_cache_var() on the Simple side.
+host_config_cache_var() {
+    case "$1" in
+        cache_root) printf 'SIMPLE_HOST_CACHE_ROOT' ;;
+        cache_scope) printf 'SIMPLE_CACHE_SCOPE' ;;
+        frontend_cache) printf 'SIMPLE_FRONTEND_CACHE' ;;
+        hir_cache) printf 'SIMPLE_HIR_CACHE' ;;
+        native_build_cache_dir) printf 'SIMPLE_NATIVE_BUILD_CACHE_DIR' ;;
+        cache_max_bytes) printf 'SIMPLE_CACHE_MAX_BYTES' ;;
+        cache_max_gb) printf 'SIMPLE_CACHE_MAX_GB' ;;
+        *) return 1 ;;
+    esac
+}
 
 host_config_env_name() {
     printf 'SIMPLE_HOST_%s' "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
@@ -198,12 +216,13 @@ HOST_CONFIG_SCHEMA="simple-host-config-v1"
 
 # host_config_valid KEY VALUE -> 0 when VALUE is acceptable for KEY. Mirrors
 # host_config_schema() in std.common.config_core.host_config exactly: integer
-# keys are decimal digits >= 1, enum keys take only the listed options, text
-# keys take any non-empty value.
+# keys are decimal digits >= 1, enum keys take only the listed options,
+# cache_scope is a lane-name segment [A-Za-z0-9._-] not starting with '.',
+# other text keys take any non-empty value.
 host_config_valid() {
     [ -n "$2" ] || return 1
     case "$1" in
-        max_build_jobs|max_threads|worker_mem_mib|llvm_version)
+        max_build_jobs|max_threads|worker_mem_mib|llvm_version|cache_max_bytes|cache_max_gb)
             case "$2" in
                 *[!0-9]*) return 1 ;;
                 *[1-9]*) return 0 ;;
@@ -211,7 +230,10 @@ host_config_valid() {
             esac ;;
         cpu_family) case "$2" in x86_64|aarch64|riscv64) return 0 ;; *) return 1 ;; esac ;;
         os) case "$2" in windows|linux|macos|freebsd|simpleos) return 0 ;; *) return 1 ;; esac ;;
-        gpu) case "$2" in on|off) return 0 ;; *) return 1 ;; esac ;;
+        gpu|frontend_cache|hir_cache) case "$2" in on|off) return 0 ;; *) return 1 ;; esac ;;
+        # A lane name is a cache DIRECTORY segment: a separator or a leading
+        # dot ("..") would let a config value step out of its lane partition.
+        cache_scope) case "$2" in .*|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac ;;
         *) return 0 ;;
     esac
 }
@@ -277,6 +299,49 @@ host_config_load() {
         eval "${_hc_n}=\${_hc_v}"
         export "${_hc_n}"
     done
+    return 0
+}
+
+# host_config_cache_env ROOT -> prints one VAR=value line per cache key whose
+# consumer variable is UNSET and whose host config value resolves non-empty
+# (on/off become 1/0). A consumer variable that is set always wins and is
+# never printed. Nothing is exported. Only dirs, the lane name, on/off and
+# size caps are configurable: producer keying and lane partitioning live in
+# the consumers and are untouched.
+host_config_cache_env() {
+    for _hcc_k in ${HOST_CONFIG_CACHE_KEYS}; do
+        _hcc_var=$(host_config_cache_var "${_hcc_k}")
+        eval "_hcc_cur=\${${_hcc_var}:-}"
+        [ -z "${_hcc_cur}" ] || continue
+        _hcc_v=$(host_config_get "${_hcc_k}" "$1")
+        [ -n "${_hcc_v}" ] || continue
+        case "${_hcc_k}:${_hcc_v}" in
+            frontend_cache:on|hir_cache:on) _hcc_v=1 ;;
+            frontend_cache:off|hir_cache:off) _hcc_v=0 ;;
+        esac
+        printf '%s=%s\n' "${_hcc_var}" "${_hcc_v}"
+    done
+}
+
+# host_config_apply_cache_env [ROOT] -> exports host_config_cache_env's
+# defaults into the current shell. Explicit, like host_env_apply_path: merely
+# sourcing this file does NOT apply them, so bootstrap entrypoints that source
+# it (run-phase1-local.shs) keep their pinned, lane-private cache env. The one
+# exception is cache_root: its consumer variable IS its own SIMPLE_HOST_CACHE_ROOT
+# override, so host_config_load exports it. That only relocates the host-shared
+# content-addressed CAS base, which bootstrap/lib/host-shared-cache.shs also
+# reads through `--get cache_root` — never a lane cache, never a key.
+host_config_apply_cache_env() {
+    _hca_lines=$(host_config_cache_env "${1:-${_host_env_repo_root}}")
+    [ -n "${_hca_lines}" ] || return 0
+    _hca_old_ifs="${IFS}"
+    IFS='
+'
+    for _hca_line in ${_hca_lines}; do
+        eval "${_hca_line%%=*}=\${_hca_line#*=}"
+        export "${_hca_line%%=*}"
+    done
+    IFS="${_hca_old_ifs}"
     return 0
 }
 
@@ -363,6 +428,8 @@ host_config_init() {
     . "$1/scripts/setup/platform-detect.shs" || return 1
     _hci_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
     _hci_llvm=$(host_config_detect_llvm) || _hci_llvm=""
+    _hci_cache_base="${XDG_CACHE_HOME:-${HOME:-${USERPROFILE:-}}/.cache}/simple"
+    command -v cygpath >/dev/null 2>&1 && _hci_cache_base=$(cygpath -m "${_hci_cache_base}")
     mkdir -p "$(dirname -- "${_hci_path}")" || return 1
     _hci_tmp="${_hci_path}.tmp.$$"
     {
@@ -385,6 +452,18 @@ host_config_init() {
             printf '  # llvm_version: 23\n'
         fi
         printf '  gpu: %s\n' "$(host_config_detect_gpu)"
+        # Cache keys are written COMMENTED: each shows the consumer's built-in
+        # default for this host, so uncommenting one is a deliberate choice and
+        # a fresh setup changes no cache env (or env-identity fingerprint).
+        printf '  # cache (defaults for the consumer env vars; apply with\n'
+        printf '  #   eval "$(sh scripts/setup/host-env.shs --cache-env)"):\n'
+        printf '  # cache_root: %s\n' "${_hci_cache_base}"
+        printf '  # cache_scope: default\n'
+        printf '  # frontend_cache: on\n'
+        printf '  # hir_cache: on\n'
+        printf '  # native_build_cache_dir: %s/native-build/v1   (example; unset = per-consumer default)\n' "${_hci_cache_base}"
+        printf '  # cache_max_bytes: 10737418240\n'
+        printf '  # cache_max_gb: 20\n'
     } >"${_hci_tmp}" || { rm -f "${_hci_tmp}"; return 1; }
     # mv onto a path that appeared meanwhile would clobber it; re-check.
     if [ -e "${_hci_path}" ]; then
@@ -582,6 +661,49 @@ EOF
         _st_fail=$((_st_fail + 1))
     fi
 
+    # (g) cache keys: validation, consumer-var mapping (on/off -> 1/0), and a
+    # SET consumer var always wins (it is never printed / never overridden).
+    cat >"${_st_dir}/cacheuser.sdn" <<'EOF'
+host_config:
+  schema: simple-host-config-v1
+  cache_root: /st/cache-base
+  cache_scope: devlane
+  frontend_cache: off
+  hir_cache: on
+  native_build_cache_dir: /st/native
+  cache_max_bytes: 4096
+  cache_max_gb: 7
+EOF
+    SIMPLE_HOST_CONFIG="${_st_dir}/cacheuser.sdn"
+    _st_h_ok=1
+    _st_v=$(unset SIMPLE_HOST_CACHE_ROOT SIMPLE_CACHE_SCOPE SIMPLE_FRONTEND_CACHE SIMPLE_HIR_CACHE \
+        SIMPLE_NATIVE_BUILD_CACHE_DIR SIMPLE_CACHE_MAX_BYTES SIMPLE_CACHE_MAX_GB
+        host_config_cache_env "${_st_dir}" | tr '\n' ' ')
+    [ "${_st_v}" = "SIMPLE_HOST_CACHE_ROOT=/st/cache-base SIMPLE_CACHE_SCOPE=devlane SIMPLE_FRONTEND_CACHE=0 SIMPLE_HIR_CACHE=1 SIMPLE_NATIVE_BUILD_CACHE_DIR=/st/native SIMPLE_CACHE_MAX_BYTES=4096 SIMPLE_CACHE_MAX_GB=7 " ] || _st_h_ok=0
+    _st_v=$(unset SIMPLE_HOST_CACHE_ROOT SIMPLE_FRONTEND_CACHE SIMPLE_HIR_CACHE SIMPLE_NATIVE_BUILD_CACHE_DIR \
+        SIMPLE_CACHE_MAX_BYTES SIMPLE_CACHE_MAX_GB
+        SIMPLE_CACHE_SCOPE=phase3 host_config_cache_env "${_st_dir}")
+    case "${_st_v}" in *SIMPLE_CACHE_SCOPE*) _st_h_ok=0 ;; esac
+    _st_v=$(unset SIMPLE_HOST_CACHE_ROOT SIMPLE_CACHE_SCOPE SIMPLE_FRONTEND_CACHE SIMPLE_HIR_CACHE \
+        SIMPLE_NATIVE_BUILD_CACHE_DIR SIMPLE_CACHE_MAX_BYTES SIMPLE_CACHE_MAX_GB
+        host_config_apply_cache_env "${_st_dir}"; printf '%s|%s' "${SIMPLE_FRONTEND_CACHE:-}" "${SIMPLE_CACHE_SCOPE:-}")
+    [ "${_st_v}" = "0|devlane" ] || _st_h_ok=0
+    printf 'host_config:\n  frontend_cache: maybe\n  cache_max_bytes: 0\n  cache_max_gb: big\n  cache_scope: ../phase3\n' >"${_st_dir}/badcache.sdn"
+    SIMPLE_HOST_CONFIG="${_st_dir}/badcache.sdn"
+    _st_v=$(host_config_get frontend_cache "${_st_dir}" 2>"${_st_dir}/warn.err"); [ -z "${_st_v}" ] || _st_h_ok=0
+    grep -q 'ignoring invalid frontend_cache=maybe' "${_st_dir}/warn.err" || _st_h_ok=0
+    _st_v=$(host_config_get cache_max_bytes "${_st_dir}" 2>/dev/null); [ -z "${_st_v}" ] || _st_h_ok=0
+    _st_v=$(host_config_get cache_max_gb "${_st_dir}" 2>/dev/null); [ -z "${_st_v}" ] || _st_h_ok=0
+    _st_v=$(host_config_get cache_scope "${_st_dir}" 2>/dev/null); [ -z "${_st_v}" ] || _st_h_ok=0
+    _st_v=$(SIMPLE_HOST_CACHE_SCOPE='a/b' host_config_get cache_scope "${_st_dir}" 2>/dev/null); [ -z "${_st_v}" ] || _st_h_ok=0
+    if [ "${_st_h_ok}" -eq 1 ]; then
+        printf 'ok - (g) cache keys map to their consumer vars, validate, and a set consumer var wins\n'
+        _st_pass=$((_st_pass + 1))
+    else
+        printf 'not ok - (g) cache keys map to their consumer vars, validate, and a set consumer var wins\n'
+        _st_fail=$((_st_fail + 1))
+    fi
+
     # (f) --init writes once and never overwrites an existing user file.
     mkdir -p "${_st_dir}/scripts/setup"
     cp "${_host_env_dir}/platform-detect.shs" "${_st_dir}/scripts/setup/" 2>/dev/null
@@ -590,6 +712,9 @@ EOF
     host_config_init "${_st_dir}" >/dev/null || _st_f_ok=0
     grep -q '^  cpu_family: ' "${SIMPLE_HOST_CONFIG}" 2>/dev/null || _st_f_ok=0
     grep -q '^  max_threads: [0-9]' "${SIMPLE_HOST_CONFIG}" 2>/dev/null || _st_f_ok=0
+    # Cache examples are written commented, so a fresh setup pins no cache env.
+    grep -q '^  # cache_scope: default' "${SIMPLE_HOST_CONFIG}" 2>/dev/null || _st_f_ok=0
+    if grep -q '^  cache_\|^  frontend_cache\|^  hir_cache\|^  native_build_cache_dir' "${SIMPLE_HOST_CONFIG}" 2>/dev/null; then _st_f_ok=0; fi
     printf 'host_config:\n  os: mine\n' >"${SIMPLE_HOST_CONFIG}"
     host_config_init "${_st_dir}" >/dev/null || _st_f_ok=0
     [ "$(host_env_sdn_get "${SIMPLE_HOST_CONFIG}" os)" = mine ] || _st_f_ok=0
@@ -634,6 +759,15 @@ if [ "${_host_env_self}" = "$0" ]; then
         --init)
             host_config_init "${_host_env_repo_root}"
             exit $? ;;
+        --cache-env)
+            # `eval "$(sh scripts/setup/host-env.shs --cache-env)"` applies the
+            # cache defaults to an interactive shell; consumer vars already set
+            # in the caller's env are never overridden (they are not printed).
+            host_env_load "$(host_env_resolve_hostname)" "${_host_env_repo_root}" || :
+            host_config_cache_env "${_host_env_repo_root}" | while IFS= read -r _hce_line; do
+                printf "export %s='%s'\n" "${_hce_line%%=*}" "$(printf '%s' "${_hce_line#*=}" | sed "s/'/'\\\\''/g")"
+            done
+            exit 0 ;;
     esac
 fi
 
