@@ -62,6 +62,7 @@ use compiler.core.types.{reference_type_register}
 use compiler.core.types.{pointer_type_register}
 use compiler.core.types.{atomic_type_register}
 use compiler.core.types.{weak_type_register}
+use compiler.core.types.{function_type_register, TYPE_FUNCTION_BASE, TYPE_FUNCTION_LIMIT}
 use std.string_core.{char_code}
 
 # Import from split modules
@@ -599,6 +600,17 @@ fn parser_absorb_optional_suffix(base: i64) -> i64:
 fn parser_parse_type() -> i64:
     parser_parse_type_impl(true)
 
+fn parser_function_type_tag(param_tags: [i64], ret_tag: i64) -> i64:
+    """Intern one `fn(params...) -> ret` annotation. The registry block holds
+    TYPE_FUNCTION_LIMIT - TYPE_FUNCTION_BASE distinct shapes per module;
+    exhausting it is a parse error. TYPE_FN is returned only as a recovery
+    placeholder so parsing can continue; the module fails to compile."""
+    val tag = function_type_register(param_tags, ret_tag)
+    if tag >= 0:
+        return tag
+    parser_error("function type registry exhausted (" + int_to_str(TYPE_FUNCTION_LIMIT - TYPE_FUNCTION_BASE) + " distinct `fn(..) -> R` shapes per module)")
+    TYPE_FN
+
 fn parser_parse_cast_type() -> i64:
     parser_parse_type_impl(false)
 
@@ -735,22 +747,36 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
     # fn" + phantom "untyped function returns a value" on ANNOTATED fns.
     # The bootstrap tag registry has no first-class fn-type, so consume the
     # full shape and answer TYPE_FN (callables are dynamically dispatched).
+    # The shape is interned as a TYPE_FUNCTION_BASE tag so the flat bridge
+    # can rebuild `TypeKind.Function(params, ret)` and HIR keeps the real
+    # callable signature (a generic visitor's `f: fn(Node, C) -> C` must
+    # bind `C` at its nested calls). Only when the block is exhausted does
+    # the bare TYPE_FN tag remain.
     if kind == 20:
         parser_advance()
+        var fnty_params: [i64] = []
+        var fnty_has_shape = false
         if par_kind_get() == 140:
+            fnty_has_shape = true
             parser_advance()
             for _fnty_i in 0..20:
                 if par_kind_get() == 141:
                     break
-                val _fnty_param = parser_parse_type()
+                fnty_params.push(parser_parse_type())
                 if par_kind_get() == 160:
                     parser_advance()
             if par_kind_get() == 141:
                 parser_advance()
+        var fnty_ret = TYPE_VOID
         if par_kind_get() == 167:
+            fnty_has_shape = true
             parser_advance()
-            val _fnty_ret = parser_parse_type()
-        return TYPE_FN
+            fnty_ret = parser_parse_type()
+        # A bare `fn` annotation (no parameter list, no arrow) means "any
+        # callable", not `fn() -> void`: keep it on the shapeless TYPE_FN tag.
+        if not fnty_has_shape:
+            return TYPE_FN
+        return parser_function_type_tag(fnty_params, fnty_ret)
     if kind == 199:
         parser_advance()
         # Parse the trait name
@@ -1023,24 +1049,26 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                 arr_type = arr_generic_tag
         # absorb optional suffix: [T]? -> Option
         return parser_absorb_optional_suffix(arr_type)
-    # Function type: fn(T, T) -> T
+    # Function type: fn(T, T) -> T (interned like the keyword branch above)
     if par_kind_get() == 20:
         parser_advance()
         parser_expect(140)
+        var fnty2_params: [i64] = []
         if par_kind_get() != 141:
-            parser_parse_type()
+            fnty2_params.push(parser_parse_type())
             while true:
                 if par_kind_get() != 160:
                     break
                 parser_advance()
                 if par_kind_get() == 141:
                     break
-                parser_parse_type()
+                fnty2_params.push(parser_parse_type())
         parser_expect(141)
+        var fnty2_ret = TYPE_VOID
         if par_kind_get() == 167:
             parser_advance()
-            parser_parse_type()
-        return parser_absorb_optional_suffix(TYPE_FN)
+            fnty2_ret = parser_parse_type()
+        return parser_absorb_optional_suffix(parser_function_type_tag(fnty2_params, fnty2_ret))
     # Tuple type: (T, T)
     if par_kind_get() == 140:
         parser_advance()
@@ -1072,8 +1100,8 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         # the `-> i64` tokens for the param parser to choke on.
         if par_kind_get() == 167:
             parser_advance()
-            parser_parse_type()
-            return parser_absorb_optional_suffix(TYPE_FN)
+            val paren_fn_ret = parser_parse_type()
+            return parser_absorb_optional_suffix(parser_function_type_tag(tuple_elem_tags, paren_fn_ret))
         # Unit `()` is the empty tuple and must retain an explicit type tag;
         # TYPE_ANY makes `-> ()` indistinguishable from a dynamic return.
         if tuple_elem_tags.len() == 0:
