@@ -148,7 +148,15 @@ kernel_policy_value() {
   echo "error: canonical kernel policy authority is missing" >&2
   exit 1
 }
-selected_k1_policy=$(kernel_policy_value k1_policy) || exit 1
+canonical_k1_policy=$(kernel_policy_value k1_policy) || exit 1
+alternate_k1_policy=$(kernel_policy_value k1_policy_alternates) || exit 1
+# An explicit SIMPLE_KERNEL_K1_POLICY may select the manifest-pinned
+# alternate composition (LLVM-only kernel, no Cranelift link); unset means
+# canonical. Any value outside the manifest is drift and fails below.
+case "${SIMPLE_KERNEL_K1_POLICY:-}" in
+  "${alternate_k1_policy}") selected_k1_policy=${alternate_k1_policy} ;;
+  *) selected_k1_policy=${canonical_k1_policy} ;;
+esac
 selected_abi_policy=$(kernel_policy_value simple_abi_policy) || exit 1
 selected_manifest_policy=$(kernel_policy_value plugin_manifest_policy) || exit 1
 selected_coverage_policy=$(kernel_policy_value coverage_cutover_policy) || exit 1
@@ -159,7 +167,8 @@ selected_performance_baseline_scope=$(kernel_policy_value performance_baseline_s
 selected_performance_steady_percent=$(kernel_policy_value performance_steady_rss_percent) || exit 1
 selected_performance_growth_percent=$(kernel_policy_value performance_growth_percent) || exit 1
 selected_performance_warm_requests=$(kernel_policy_value performance_warm_request_count) || exit 1
-[ "${selected_k1_policy}" = llvm-cranelift ] &&
+[ "${canonical_k1_policy}" = llvm-cranelift ] &&
+  [ "${alternate_k1_policy}" = llvm ] &&
   [ "${selected_abi_policy}" = v1 ] &&
   [ "${selected_manifest_policy}" = simple-sdn ] &&
   [ "${selected_coverage_policy}" = atomic-apk-only ] &&
@@ -4967,7 +4976,11 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
 
   echo "  stage3-native-build log: ${log_dir}/stage3-native-build.log"
   bootstrap_cache_report_log "${log_dir}/stage3-native-build.log"
-  if [ "${SIMPLE_KERNEL_K1_POLICY:-}" = "llvm-cranelift" ]; then
+  # Every manifest-pinned K1 policy (canonical and alternate) produces the
+  # composition receipt; check-kernel-phase7-deployment-prerequisite.shs
+  # consumes it, so skipping it for the alternate would leave a provenance gap.
+  case "${SIMPLE_KERNEL_K1_POLICY:-}" in
+  "${canonical_k1_policy}"|"${alternate_k1_policy}")
     k1_composition_receipt="${log_dir}/stage2-stage3-k1-composition.env"
     sh scripts/bootstrap/write-k1-composition-receipt.shs \
       "${SIMPLE_KERNEL_K1_POLICY}" \
@@ -4979,7 +4992,8 @@ ${BOOTSTRAP_STAGE3_HOSTED_RUNTIME_RELATIVE_PATH}
       "${stage3_command_transcript}" \
       "${k1_composition_receipt}" || exit 1
     echo "  K1 composition receipt: ${k1_composition_receipt}"
-  fi
+    ;;
+  esac
   if [ "${stage3_status}" -eq 0 ] && [ -x "${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}" ]; then
     if bootstrap_stage_sanity "${stage3_bin}" \
       "$(absolute_path "${stage3_sanity_evidence}")" \
