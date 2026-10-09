@@ -137,3 +137,78 @@ describe "mono phase-3 blocker call sites":
         expect(stats.call_sites_found).to_equal(3)
         expect(stats.unresolved_generic_calls).to_equal(0)
         expect(stats.specializations_created).to_equal(2)
+
+describe "mono result context applies only in return position":
+    # Each call below has no argument that binds `T` and is NOT in a position
+    # whose declared result type is known, so it must stay a loud E-MONO-032
+    # rather than borrow some unrelated enclosing type.
+    it "leaves a return-only generic in an unannotated let unresolved":
+        # @req REQ-SSPEC-COMPILER
+        step("leaves a return-only generic in an unannotated let unresolved")
+        val src = "enum Er:\n    A\n\nfn err_v1<T>(e: Er) -> Result<T, Er>:\n    Err(e)\n\nfn f() -> Result<i64, Er>:\n    val r = err_v1(Er.A)\n    Ok(1)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_neg_let.spl", "mono_neg_let", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_neg_let.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0]).to_contain("E-MONO-032")
+
+    it "leaves a return-only generic wrapped in Ok(..) unresolved":
+        # @req REQ-SSPEC-COMPILER
+        step("leaves a return-only generic wrapped in Ok(..) unresolved")
+        val src = "enum Er:\n    A\n\nfn err_v1<T>(e: Er) -> Result<T, Er>:\n    Err(e)\n\nfn f() -> Result<Result<i64, Er>, Er>:\n    Ok(err_v1(Er.A))\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_neg_ok.spl", "mono_neg_ok", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_neg_ok.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0]).to_contain("E-MONO-032")
+
+    it "leaves a return-only generic nested as an argument unresolved and still locates it":
+        # @req REQ-SSPEC-COMPILER
+        step("leaves a return-only generic nested as an argument unresolved and still locates it")
+        val src = "enum Er:\n    A\n\nfn err_v1<T>(e: Er) -> Result<T, Er>:\n    Err(e)\n\nfn take(r: Result<i64, Er>) -> i64:\n    0\n\nfn f() -> i64:\n    take(err_v1(Er.A))\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_neg_arg.spl", "mono_neg_arg", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_neg_arg.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0]).to_contain("E-MONO-032")
+        expect(diags[0]).to_contain("mono_neg_arg.spl:11:")
+
+    it "leaves a partial-argument generic used as a method receiver unresolved":
+        # @req REQ-SSPEC-COMPILER
+        step("leaves a partial-argument generic used as a method receiver unresolved")
+        val src = "enum FsError:\n    Busy\n\nfn finish<T>(result: Result<T, FsError>) -> Result<T, FsError>:\n    result\n\nfn f() -> bool:\n    finish(Err(FsError.Busy)).is_ok()\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_neg_recv.spl", "mono_neg_recv", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_neg_recv.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0]).to_contain("E-MONO-032")
+
+    it "leaves a partial-argument generic in an unannotated let unresolved":
+        # @req REQ-SSPEC-COMPILER
+        step("leaves a partial-argument generic in an unannotated let unresolved")
+        val src = "enum FsError:\n    Busy\n\nfn finish<T>(result: Result<T, FsError>) -> Result<T, FsError>:\n    result\n\nfn f() -> Result<bool, FsError>:\n    val r = finish(Err(FsError.Busy))\n    Ok(true)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_neg_plet.spl", "mono_neg_plet", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_neg_plet.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(stats.unresolved_generic_calls).to_equal(1)
+        expect(diags.len()).to_equal(1)
+        expect(diags[0]).to_contain("E-MONO-032")
