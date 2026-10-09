@@ -1,0 +1,15 @@
+# Scalar LLVM global-store parity
+
+Producer: `80030da7da3f15174dc26285389375b19c8f090c29eedb6bded089defaa28071`; source `1aff09312af1a48fba98634b6d59fcafe59b9602`.
+
+Actual native LLVM rejection occurs in module-0403 `rt_criticality_registry.reset_module`: a Dict runtime handle starts as i64, is converted to ptr for a local spill, then is loaded as ptr and emitted directly in `store i64`. LLVM rejects the complete function before execution. The same failure occurs in distinct owners 0620, 0643 and 0768. Runtime invalid-array warnings are separate observations, not the terminal cause of those LLVM failures.
+
+The scalar `translate_store_global_at` path bypasses `translate_store_global`, which already calls `value_as_type`. The candidate reuses that existing conversion for Copy/Move using `get_local_type`; `value_as_type` independently prioritizes the actual SSA `value_types` entry. Global representation, constants and runtime ABI remain unchanged.
+
+Ordering proof: `driver_bootstrap.spl` obtains the direct IR handle from `llvm_ir_builder_handle(translator.builder)`. `LlvmIRBuilder.emit` appends synchronously to that same `sb`. Conversion emission therefore precedes the direct-handle store, without a separate buffer or flush protocol.
+
+Focused qualification: PASS; broad gates remain pending. First source-hosted baseline stopped before examples on duplicate `TargetCaps`/`X86Caps` import closure. Narrowing the test import to the canonical owner allowed the real baseline to execute: 12 missing conversions, with LLVM rejecting 12 complete functions and accepting four unchanged numeric controls. The final candidate cycle passed all 18 complete LLVM functions, including both dispatch modes, Copy/Move and two independent SSA-type override controls. Each IR/object hash and verifier result is retained. The three-cycle repair cap is reached; no further repair retry was performed.
+
+The separate real-source Dict acceptance criterion also passed: frontend/HIR/MIR/LLVM emission, COFF assembly, canonical startup with positively discovered `__module_init_dict_readback_spl_dynamic`, and actual native execution. Text and Boolean keyed values survive return from the assigning local scope, clear to empty, and repopulate. Exact stdout is `DICT_GLOBAL_READBACK_PASS` plus LF; execution exit 0, quiescent 1, observer errors 0, peak RSS 2600 KiB. `result.json` and `native/inputs.json` pin the executable, runtime, original source and canonical entry generator. This does not admit a rebuilt compiler or establish broad compiler/lib/MCP/LSP verification.
+
+Independent build progress: first20 plus next19 original failed owners produced 16 valid COFF objects (262 defined functions), 23 raw failures, all closed with zero observer errors. One raw failure (0117 enum-only owner) is object-emission ineligible. Remaining failures are not all established semantic regressions: isolated source admission/implicit binding differences remain scoped caveats. No fourth aggregate Phase3 attempt occurred.
