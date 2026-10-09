@@ -1,0 +1,59 @@
+"""
+## Purpose and audience
+Pins that a spec skipped by the build-feature switch
+(`# @tag:requires-<feature>` with the feature OFF) is recorded in
+test_db.sdn and test_result.md as `feature_gated` — never as `passed`.
+## Operator workflow
+Run `bin/simple test test/01_unit/lib/test_runner/feature_gated_status_spec.spl`.
+## Compatibility and limitations
+Pre-fix RED: the runner returned passed=0 failed=0 skipped=1, which
+`is_ok()` reads as OK, so `_test_db_row_status` wrote "passed".
+"""
+# @manual: primary
+
+use std.spec.{step}
+use std.test_runner.test_runner_types.{TestFileResult}
+use std.nogc_sync_mut.test_runner.test_db_record.{test_db_file_row_from_result}
+use std.test_runner.test_db_types.{TestStatus, status_to_str, str_to_status}
+use std.test_runner.test_db_compat.{RunnerTestDb}
+use std.test_runner.doc_generator.{generate_test_result_md}
+use std.database.test_extended.{load_with_migration}
+use std.io.{dir_create_all}
+use std.io_runtime.{getpid, time_now_unix_micros}
+
+fn gated_result(path: text) -> TestFileResult:
+    TestFileResult(path: path, passed: 0, failed: 0, skipped: 1, pending: 0,
+        duration_ms: 0, setup_ms: 0, error: "", timed_out: false, cached: false,
+        feature_gated: "hwir feature disabled for this build")
+
+describe "feature-gated DB row status":
+    it "records a gated skip as feature_gated, not passed":
+        step("Classify the exact shape the runner returns for a gated spec")
+        expect(test_db_file_row_from_result(gated_result("test/x_spec.spl")).status).to_equal("feature_gated")
+
+    it "still records an ordinary pass as passed":
+        val ok = TestFileResult(path: "test/y_spec.spl", passed: 2, failed: 0, skipped: 0, pending: 0,
+            duration_ms: 1, setup_ms: 0, error: "", timed_out: false, cached: false)
+        expect(test_db_file_row_from_result(ok).status).to_equal("passed")
+
+    it "round-trips the DB spelling":
+        expect(status_to_str(TestStatus.FeatureGated)).to_equal("feature_gated")
+        expect(status_to_str(str_to_status("feature_gated"))).to_equal("feature_gated")
+
+describe "feature-gated test_result.md row":
+    it "counts gated specs on their own row and not as passed":
+        step("Record one gated and one passing spec into a private DB")
+        val dir = "build/test_fixtures/feature_gated_status_{getpid()}_{time_now_unix_micros()}"
+        dir_create_all(dir)
+        val opt = load_with_migration(dir + "/test_db")
+        expect(opt.?).to_equal(true)
+        var db = RunnerTestDb(db: opt.unwrap(), current_run_id: "")
+        db.start_run()
+        db.update_test_result(test_name: "test/x_spec.spl", test_file: "test/x_spec.spl",
+            suite_name: "spec", category: "", status: TestStatus.FeatureGated, duration_ms: 0.0)
+        db.update_test_result(test_name: "test/y_spec.spl", test_file: "test/y_spec.spl",
+            suite_name: "spec", category: "", status: TestStatus.Passed, duration_ms: 1.0)
+        step("Render test_result.md")
+        val md = generate_test_result_md(db)
+        expect(md).to_contain("| Feature-gated (build feature off) | 1 |")
+        expect(md).to_contain("| Passed | 1 |")
