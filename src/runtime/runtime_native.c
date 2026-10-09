@@ -17067,6 +17067,51 @@ int64_t rt_array_enumerate(int64_t array) {
     return (int64_t)(intptr_t)out;
 }
 
+/* collections.rs:5793 -- sum of the numeric elements: int 0 for an empty
+ * array, nil for a non-array. Integer accumulation wraps (Rust release `+=`);
+ * any float element promotes the result to float(int_sum) + float_sum.
+ * Non-numeric elements are skipped, as in Rust. Byte / packed-u64 arrays store
+ * raw untagged slots, so every slot there is an integer. */
+int64_t rt_array_sum(int64_t array) {
+    RtCoreArray* ca = rt_core_as_array(array);
+    if (!ca) return rt_core_nil();
+    SplArray* a = (SplArray*)(uintptr_t)array;
+    int64_t n = rt_array_len(a);
+    int raw_slots = (ca->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) != 0;
+    uint64_t int_sum = 0;
+    double float_sum = 0.0;
+    int has_float = 0;
+    for (int64_t i = 0; i < n; i++) {
+        int64_t v = rt_array_get(a, i);
+        RtCoreWideInt* wide;
+        if (raw_slots) {
+            int_sum += (uint64_t)v;
+        } else if (rt_core_is_int(v)) {
+            int_sum += (uint64_t)rt_core_as_int(v);
+        } else if ((wide = rt_core_as_heap_int(v)) != NULL) {
+            int_sum += (uint64_t)wide->value;
+        } else if (rt_core_is_float(v)) {
+            has_float = 1;
+            float_sum += rt_core_as_float(v);
+        }
+    }
+    if (has_float) return rt_value_float((double)(int64_t)int_sum + float_sum);
+    return rt_value_int((int64_t)int_sum);
+}
+
+/* collections.rs:6038 -- new array of the first clamp(n, 0, len) elements;
+ * nil for a non-array. */
+int64_t rt_array_take(int64_t array, int64_t n) {
+    if (!rt_core_as_array(array)) return rt_core_nil();
+    SplArray* a = (SplArray*)(uintptr_t)array;
+    int64_t len = rt_array_len(a);
+    int64_t take = n < 0 ? 0 : (n < len ? n : len);
+    SplArray* out = rt_array_new(take);
+    if (!out) return rt_core_nil();
+    for (int64_t i = 0; i < take; i++) rt_array_push(out, rt_array_get(a, i));
+    return (int64_t)(uintptr_t)out;
+}
+
 /* collections.rs:1464 -- append `count` elements of src onto dst; true on ok. */
 int8_t rt_array_extend_i64(int64_t dst, int64_t src, int64_t count) {
     SplArray* d = (SplArray*)(intptr_t)dst;
@@ -17121,6 +17166,16 @@ int64_t rt_shared_new(int64_t value) { return value; }
 int64_t rt_shared_get(int64_t shared) { return shared; }
 int64_t rt_handle_new(int64_t value) { return value; }
 int64_t rt_handle_get(int64_t handle) { return handle; }
+
+/* objects.rs:864/918 -- weak pointers over the shared cell above. Rust's weak
+ * upgrade answers nil only once the shared cell's refcount reached zero and it
+ * was freed. In this lane a shared value IS its own cell and no release path
+ * exists (there is no C rt_shared_release), so the referent is always live:
+ * downgrade keeps the referent and upgrade returns it, which is exactly the
+ * Rust result for a live cell. Codegen emits both for PointerKind::Weak
+ * (codegen/instr/pointers.rs). */
+int64_t rt_shared_downgrade(int64_t shared) { return shared; }
+int64_t rt_weak_upgrade(int64_t weak) { return weak; }
 
 /* ---- pointer (3): no Rust counterpart exists; emitter contract unknown -- */
 SPL_RT_TRAP1(rt_pointer_new)
