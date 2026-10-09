@@ -40,10 +40,13 @@ fn fixture_path() -> text:
     file_write(p, HWIR_FIXTURE)
     p
 
-fn run_with_hwir(value: text, target: text) -> text:
+fn run_with_hwir(value: text, target: text, extra: [text] = []) -> text:
     val previous = env_get("SIMPLE_HOST_HWIR") ?? ""
     env_set("SIMPLE_HOST_HWIR", value)
-    val (out, err, code) = process_run_bounded(simple_binary(), ["run", RUNNER_ENTRY, target], 900000, 4000000)
+    var args = ["run", RUNNER_ENTRY, target]
+    for a in extra:
+        args.push(a)
+    val (out, err, code) = process_run_bounded(simple_binary(), args, 900000, 4000000)
     env_set("SIMPLE_HOST_HWIR", previous)
     out + "\n" + err
 
@@ -62,5 +65,21 @@ describe "requires-hwir: feature on":
         step("Run the same spec with SIMPLE_HOST_HWIR=on")
         val out = run_with_hwir("on", fixture_path())
         step("Verify it executed and passed, with no feature skip")
+        expect(out.contains(FEATURE_SKIP_MARKER)).to_equal(false)
+        expect(out).to_contain("1 passed")
+
+describe "requires-hwir: --parallel":
+    it "gates in the parent too: counted skip with reason, never dispatched or passed":
+        step("Run the tagged spec with --parallel and SIMPLE_HOST_HWIR=off")
+        val out = run_with_hwir("off", fixture_path(), ["--parallel"])
+        step("Verify the parallel path ran, with the same skip line, reason and summary row")
+        expect(out).to_contain("in parallel")
+        expect(out).to_contain(FEATURE_SKIP_MARKER)
+        expect(out).to_contain("hwir feature disabled for this build")
+        expect(out).to_contain(FEATURE_SKIP_SUMMARY_MARKER + " 1 file(s) skipped")
+        expect(out.contains("1 passed")).to_equal(false)
+
+    it "runs the spec normally when the feature is on":
+        val out = run_with_hwir("on", fixture_path(), ["--parallel"])
         expect(out.contains(FEATURE_SKIP_MARKER)).to_equal(false)
         expect(out).to_contain("1 passed")
