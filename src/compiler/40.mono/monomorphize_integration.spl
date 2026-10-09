@@ -76,6 +76,10 @@ class MonomorphizationPass:
     # specialization is mangled by the TYPE NAME, not a module-local symbol
     # id that two modules can both hand out.
     named_symbol_names: Dict<text, text>
+    # "<Type>::<field>" -> declared field type of every NON-generic struct or
+    # class, so a generic argument reached through a field chain
+    # (`eq(a.glyph_run.glyph_ids, ...)`, `without(self.globals, ...)`) types.
+    field_types: Dict<text, HirType>
     # "<EnumName>::<Variant>" -> declared payload types, tuple payloads in
     # positional order and struct payloads keyed "<Enum>::<Variant>::<field>".
     # Match-arm pattern bindings are the ONLY binding form that carries no
@@ -146,6 +150,7 @@ impl MonomorphizationPass:
             named_types: {},
             named_ambiguous: {},
             named_symbol_names: {},
+            field_types: {},
             enum_payload_types: {},
             match_enum_hint: "",
             fn_returns: {},
@@ -283,6 +288,8 @@ impl MonomorphizationPass:
         for sym_id in structs.keys():
             val s: HirStruct = structs[sym_id]
             self.record_named_type(module_name, s.symbol, s.name, s.type_params.len() == 0)
+            if s.type_params.len() == 0:
+                self.record_field_types(s.name, s.fields)
             if is_generic_struct(s):
                 self.generic_structs[s.name] = s
                 self.monomorphizer.register_generic_struct(s.name, s)
@@ -321,6 +328,8 @@ impl MonomorphizationPass:
         for sym_id in classes.keys():
             val c: HirClass = classes[sym_id]
             self.record_named_type(module_name, c.symbol, c.name, c.type_params.len() == 0)
+            if c.type_params.len() == 0:
+                self.record_field_types(c.name, c.fields)
             if is_generic_class(c):
                 self.generic_classes[c.name] = c
                 self.monomorphizer.register_generic_class(c.name, c)
@@ -416,6 +425,30 @@ impl MonomorphizationPass:
             self.named_ambiguous[name] = true
             return
         self.named_types[name] = HirType(kind: HirTypeKind.Named(sym, []), span: Span.empty())
+
+    me record_field_types(type_name: text, fields: [HirField]):
+        for f in fields:
+            val ft: HirField = f
+            self.field_types["{type_name}::{ft.name}"] = ft.type_
+
+    me field_type(base_ty: HirType, field: text) -> HirType?:
+        """Declared type of `field` on a non-generic struct/class `base_ty`.
+        A type name declared by two modules is ambiguous -> nil."""
+        match base_ty.kind:
+            case HirTypeKind.Named(sym, args):
+                if args.len() > 0:
+                    return nil
+                val n: text = self.named_type_name(sym, base_ty)
+                if self.named_ambiguous.has(n):
+                    return nil
+                val key = "{n}::{field}"
+                if self.field_types.has(key):
+                    val t: HirType = self.field_types[key]
+                    if hir_type_is_concrete(t):
+                        return t
+                nil
+            case _:
+                no_local_type_answer()
 
     me fn_sig_of(sym_id: SymbolId) -> HirType?:
         val s: SymbolId = sym_id
@@ -626,6 +659,13 @@ impl MonomorphizationPass:
                 if nt != nil:
                     return nt
                 self.fn_sig_of(sym_id)
+            case HirExprKind.Field(base, field, _):
+                val fb: HirExpr = base
+                val bt = self.infer_expr_type(fb)
+                if bt == nil:
+                    return nil
+                val btt: HirType = bt
+                self.field_type(btt, field)
             case HirExprKind.Cast(_, target):
                 val ct: HirType = target
                 ct
