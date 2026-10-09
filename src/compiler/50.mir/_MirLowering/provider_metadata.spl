@@ -48,14 +48,16 @@ fn mir_provider_function_name(owner: text, symbols: SymbolTable, func: HirFuncti
     mir_provider_callable_identity(owner, symbols.symbol_display_name(func.symbol, func.name))
 
 fn mir_provider_default_is_error(expr: HirExpr) -> bool:
-    match expr.kind:
+    val expr_kind: HirExprKind = expr.kind
+    match expr_kind:
         case Error: true
         case _: false
 
 fn mir_provider_default_children_valid(expr: HirExpr) -> bool:
     # Recursive relocation has already validated each child. Inspect only its
     # root so an unsupported capture bubbles up in O(expression size).
-    match expr.kind:
+    val expr_kind: HirExprKind = expr.kind
+    match expr_kind:
         case Error: return false
         case Binary(_, left, right) | Index(left, right):
             return not mir_provider_default_is_error(left) and not mir_provider_default_is_error(right)
@@ -209,8 +211,14 @@ impl MirLowering:
         result
 
     me relocate_provider_type(type_: HirType, provider: SymbolTable) -> HirType:
+        # Explicit local annotation on the nested kind access: the stage-native
+        # lane loses the declared value type at indexed/nested struct access
+        # (same miscompile family as module_build.spl's lowered_impl_functions
+        # fix); without it `match type_.kind` can deref a corrupted value
+        # (test_runner_build SIGSEGV, 2026-10-08/09).
+        val kind: HirTypeKind = type_.kind
         var result = type_
-        result.kind = match type_.kind:
+        result.kind = match kind:
             case Named(id, args):
                 val target = self.relocate_provider_type_symbol(id, provider)
                 if target.id < 0: HirTypeKind.Error
@@ -232,7 +240,7 @@ impl MirLowering:
             case Projection(base, name): HirTypeKind.Projection(self.relocate_provider_type(base, provider), name)
             case Isolated(inner): HirTypeKind.Isolated(self.relocate_provider_type(inner, provider))
             case Tensor(elem, dims, device): HirTypeKind.Tensor(self.relocate_provider_type(elem, provider), dims, device)
-            case _: type_.kind
+            case _: kind
         result
 
     me relocate_provider_callable(id: SymbolId, provider: SymbolTable, links: Dict<i64, text>) -> SymbolId:
@@ -293,15 +301,17 @@ impl MirLowering:
             case BuiltinCollection(operation): MethodResolution.BuiltinCollection(operation)
 
     me relocate_provider_default(expr: HirExpr, provider: SymbolTable, links: Dict<i64, text>) -> HirExpr:
+        # Same nested-access annotation as relocate_provider_type.
+        val expr_kind: HirExprKind = expr.kind
         var result = expr
         if expr.has_type_:
             result.type_ = self.relocate_provider_type(expr.type_, provider)
-        result.kind = match expr.kind:
+        result.kind = match expr_kind:
             case IntLit(_, _) | FloatLit(_, _) | FloatLexeme(_, _) | BoolLit(_) | CharLit(_) | UnitLit | NilLit:
-                expr.kind
+                expr_kind
             case StringLit(value, interpolations):
                 if interpolations == nil:
-                    expr.kind
+                    expr_kind
                 else:
                     var relocated_interpolations: [HirInterpolation] = []
                     for interpolation in interpolations:
@@ -403,10 +413,14 @@ impl MirLowering:
         var flags: [bool] = []
         var defaults: [HirExpr] = []
         for field in class_def.fields:
-            var relocated = field
-            relocated.type_ = self.relocate_provider_type(field.type_, provider)
+            # Annotated copies: nested struct transports lose their declared
+            # value type on the stage-native lane (module_build.spl pattern).
+            var relocated: HirField = field
+            val field_type: HirType = field.type_
+            relocated.type_ = self.relocate_provider_type(field_type, provider)
             if field.has_default and not local:
-                relocated.default = self.relocate_provider_default(field.default, provider, links)
+                val field_default: HirExpr = field.default
+                relocated.default = self.relocate_provider_default(field_default, provider, links)
             fields = fields.push(relocated)
             flags = flags.push(field.has_default)
             defaults = defaults.push(relocated.default)
@@ -424,6 +438,10 @@ impl MirLowering:
             self.struct_field_default_expr[key] = defaults
             self.class_type_names[key] = true
         for method_name in class_def.methods.keys():
-            val method = self.relocate_provider_callable(class_def.methods[method_name], provider, links)
+            # Annotated dict extraction — the exact module_build.spl #2693
+            # pattern; unannotated it loses the declared value type on the
+            # stage-native lane.
+            val method_id: SymbolId = class_def.methods[method_name]
+            val method = self.relocate_provider_callable(method_id, provider, links)
             if method.id >= 0:
                 self.struct_method_syms["{canonical}::{method_name}"] = method
