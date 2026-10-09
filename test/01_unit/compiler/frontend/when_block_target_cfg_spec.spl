@@ -1,0 +1,161 @@
+# Top-level @when/@elif/@else/@end blocks and @cfg decorators select for the
+# TARGET being compiled, identically on every pure-Simple frontend path:
+# the receipted target preprocessor, the ambient preprocessor (driven by the
+# SIMPLE_NATIVE_BUILD_TARGET triple the native-build CLI exports), the shared
+# parser entry (parse_and_build_module, no caller-side preprocessing), and the
+# native entry-closure import scan.
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{env_get, env_set}
+use compiler.core.parser_preprocessor.{_pp_preprocess_conditionals,
+    _pp_preprocess_conditionals_target_receipted_v1}
+use compiler.core.cfg_platform.{cfg_triple_os, cfg_triple_arch}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.driver.driver_source_loading.{_driver_cached_entry_source_scan,
+    driver_entry_scan_cache_release}
+
+val WIN_ELSE = "@when(os=\"windows\"):\nfn pick() -> text:\n    \"WIN\"\n@else:\nfn pick() -> text:\n    \"OTHER\"\n@end\n"
+val OS_CHAIN = "@when(os=\"macos\"):\nval tag = \"MAC\"\n@elif(os=\"freebsd\"):\nval tag = \"BSD\"\n@elif(os=\"simpleos\"):\nval tag = \"SOS\"\n@elif(os=\"none\"):\nval tag = \"BARE\"\n@else:\nval tag = \"REST\"\n@end\n"
+val ARCH_CHAIN = "@when(arch=\"aarch64\"):\nval tag = \"A64\"\n@elif(arch = \"riscv64\"):\nval tag = \"RV64\"\n@else:\nval tag = \"X\"\n@end\n@cfg(arm32)\nval arm32_only = \"ARM32\"\n@cfg(not(x86_64))\nval not_x64 = \"NOTX64\"\n"
+val NESTED = "@when(family=\"unix\"):\n@when(not os=\"linux\" and (arch=\"aarch64\" or arch=\"riscv64\")):\nval tag = \"UNIX_NONLINUX_NONX86\"\n@elif(os=\"linux\"):\nval tag = \"LINUX\"\n@else:\nval tag = \"UNIX_OTHER\"\n@end\n@else:\nval tag = \"NOT_UNIX\"\n@end\n"
+
+fn target_pp(source: text, os: text, arch: text) -> text:
+    val result = _pp_preprocess_conditionals_target_receipted_v1(source, os, arch)
+    if result.is_err():
+        return "ERR:" + result.unwrap_err()
+    result.unwrap().source
+
+# Ambient selection with SIMPLE_NATIVE_BUILD_TARGET as the native-build CLI
+# exports it. SIMPLE_TARGET_OS/ARCH (explicit overrides) are cleared so the
+# triple is what decides; every variable is restored afterwards.
+fn ambient_pp(source: text, triple: text) -> text:
+    val old_triple = env_get("SIMPLE_NATIVE_BUILD_TARGET")
+    val old_os = env_get("SIMPLE_TARGET_OS")
+    val old_arch = env_get("SIMPLE_TARGET_ARCH")
+    env_set("SIMPLE_TARGET_OS", "")
+    env_set("SIMPLE_TARGET_ARCH", "")
+    env_set("SIMPLE_NATIVE_BUILD_TARGET", triple)
+    val out = _pp_preprocess_conditionals(source)
+    env_set("SIMPLE_NATIVE_BUILD_TARGET", old_triple)
+    env_set("SIMPLE_TARGET_OS", old_os)
+    env_set("SIMPLE_TARGET_ARCH", old_arch)
+    out
+
+describe "@when blocks select for the compile target":
+    it "keeps the windows branch and drops @else for a windows target":
+        step("windows-active")
+        val t = target_pp(WIN_ELSE, "windows", "x86_64")
+        assert_true(t.contains("\"WIN\""))
+        assert_false(t.contains("\"OTHER\""))
+        val a = ambient_pp(WIN_ELSE, "x86_64-pc-windows-msvc")
+        assert_equal(a, t)
+
+    it "keeps the @else branch for a non-windows target":
+        step("else-active")
+        val t = target_pp(WIN_ELSE, "linux", "x86_64")
+        assert_true(t.contains("\"OTHER\""))
+        assert_false(t.contains("\"WIN\""))
+        assert_equal(ambient_pp(WIN_ELSE, "x86_64-unknown-linux-gnu"), t)
+        # Directive lines become blank: line numbers stay stable.
+        assert_equal(t.split("\n").len(), WIN_ELSE.split("\n").len())
+
+    it "selects macos, freebsd, simpleos and bare-metal through an @elif chain":
+        step("non-windows os")
+        assert_true(target_pp(OS_CHAIN, "macos", "aarch64").contains("\"MAC\""))
+        assert_true(target_pp(OS_CHAIN, "freebsd", "x86_64").contains("\"BSD\""))
+        assert_true(target_pp(OS_CHAIN, "simpleos", "x86_64").contains("\"SOS\""))
+        assert_true(target_pp(OS_CHAIN, "none", "riscv64").contains("\"BARE\""))
+        assert_true(target_pp(OS_CHAIN, "linux", "x86_64").contains("\"REST\""))
+        assert_true(ambient_pp(OS_CHAIN, "aarch64-apple-darwin").contains("\"MAC\""))
+        assert_true(ambient_pp(OS_CHAIN, "x86_64-unknown-freebsd").contains("\"BSD\""))
+        assert_true(ambient_pp(OS_CHAIN, "x86_64-unknown-simpleos").contains("\"SOS\""))
+        assert_true(ambient_pp(OS_CHAIN, "riscv64gc-unknown-none-elf").contains("\"BARE\""))
+        val mac = ambient_pp(OS_CHAIN, "aarch64-apple-darwin")
+        assert_false(mac.contains("\"BSD\"") or mac.contains("\"REST\""))
+
+    it "selects non-x86 architectures and arm32/not() decorators":
+        step("non-x86 arch")
+        val a64 = target_pp(ARCH_CHAIN, "linux", "aarch64")
+        assert_true(a64.contains("\"A64\"") and a64.contains("\"NOTX64\""))
+        assert_false(a64.contains("\"X\"") or a64.contains("\"ARM32\""))
+        val rv = target_pp(ARCH_CHAIN, "linux", "riscv64")
+        assert_true(rv.contains("\"RV64\"") and not rv.contains("\"A64\""))
+        val x64 = target_pp(ARCH_CHAIN, "windows", "x86_64")
+        assert_true(x64.contains("\"X\""))
+        assert_false(x64.contains("\"NOTX64\"") or x64.contains("\"ARM32\""))
+        val arm = target_pp(ARCH_CHAIN, "none", "arm")
+        assert_true(arm.contains("\"ARM32\"") and arm.contains("\"NOTX64\""))
+        assert_equal(ambient_pp(ARCH_CHAIN, "aarch64-unknown-linux-gnu"), a64)
+        assert_equal(ambient_pp(ARCH_CHAIN, "riscv64gc-unknown-linux-gnu"), rv)
+        assert_equal(ambient_pp(ARCH_CHAIN, "x86_64-pc-windows-msvc"), x64)
+
+    it "evaluates nested blocks with family, not, and, or and @elif":
+        step("nesting and elif")
+        assert_true(target_pp(NESTED, "macos", "aarch64").contains("UNIX_NONLINUX_NONX86"))
+        assert_true(target_pp(NESTED, "linux", "riscv64").contains("\"LINUX\""))
+        assert_true(target_pp(NESTED, "freebsd", "x86_64").contains("UNIX_OTHER"))
+        val win = target_pp(NESTED, "windows", "aarch64")
+        assert_true(win.contains("NOT_UNIX"))
+        assert_false(win.contains("UNIX_NONLINUX_NONX86") or win.contains("\"LINUX\""))
+        assert_equal(ambient_pp(NESTED, "aarch64-apple-darwin"),
+            target_pp(NESTED, "macos", "aarch64"))
+        assert_equal(ambient_pp(NESTED, "aarch64-pc-windows-msvc"), win)
+
+    it "maps target triples to cfg os and arch":
+        step("triple mapping")
+        assert_equal(cfg_triple_os("x86_64-pc-windows-msvc"), "windows")
+        assert_equal(cfg_triple_os("aarch64-apple-darwin"), "macos")
+        assert_equal(cfg_triple_os("x86_64-unknown-linux-gnu"), "linux")
+        assert_equal(cfg_triple_os("x86_64-unknown-freebsd"), "freebsd")
+        assert_equal(cfg_triple_os("x86_64-unknown-simpleos"), "simpleos")
+        assert_equal(cfg_triple_os("aarch64-unknown-none"), "none")
+        assert_equal(cfg_triple_arch("riscv64gc-unknown-linux-gnu"), "riscv64")
+        assert_equal(cfg_triple_arch("aarch64-apple-darwin"), "aarch64")
+        assert_equal(cfg_triple_arch("thumbv7em-none-eabihf"), "thumbv7em")
+        assert_equal(cfg_triple_os(""), "")
+
+    it "applies the selection in the shared parser entry without caller preprocessing":
+        step("parser owner")
+        val source = "@when(os=\"windows\"):\nfn only_windows() -> i64:\n    1\n@else:\nfn only_posix() -> i64:\n    2\n@end\n"
+        val old_triple = env_get("SIMPLE_NATIVE_BUILD_TARGET")
+        env_set("SIMPLE_NATIVE_BUILD_TARGET", "aarch64-unknown-linux-gnu")
+        val linux_module = parse_and_build_module(source, "when_parser_owner.spl")
+        env_set("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-pc-windows-msvc")
+        val windows_module = parse_and_build_module(source, "when_parser_owner.spl")
+        env_set("SIMPLE_NATIVE_BUILD_TARGET", old_triple)
+        assert_true(linux_module.functions.contains_key("only_posix"))
+        assert_false(linux_module.functions.contains_key("only_windows"))
+        assert_true(windows_module.functions.contains_key("only_windows"))
+        assert_false(windows_module.functions.contains_key("only_posix"))
+
+    it "selects module exports defined inside @when blocks for the target":
+        step("export inside @when")
+        val path = "test/fixtures/compiler/when_block_exports.spl"
+        val old_triple = env_get("SIMPLE_NATIVE_BUILD_TARGET")
+        env_set("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-unknown-freebsd")
+        driver_entry_scan_cache_release()
+        val (content, _, _, _) = _driver_cached_entry_source_scan(path)
+        val module = parse_and_build_module(content, path)
+        val selected = _pp_preprocess_conditionals(content)
+        env_set("SIMPLE_NATIVE_BUILD_TARGET", old_triple)
+        driver_entry_scan_cache_release()
+        assert_true(module.functions.contains_key("when_fixture_os_label"))
+        assert_true(selected.contains("\"other\""))
+        assert_false(selected.contains("\"windows\"") or selected.contains("\"linux\""))
+
+    it "follows only the selected branch's imports in the entry-closure scan":
+        step("closure scan")
+        val path = "test/fixtures/compiler/when_block_imports.spl"
+        val old_triple = env_get("SIMPLE_NATIVE_BUILD_TARGET")
+        env_set("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-unknown-linux-gnu")
+        driver_entry_scan_cache_release()
+        val (_, linux_imports, _, _) = _driver_cached_entry_source_scan(path)
+        env_set("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-pc-windows-msvc")
+        driver_entry_scan_cache_release()
+        val (_, windows_imports, _, _) = _driver_cached_entry_source_scan(path)
+        env_set("SIMPLE_NATIVE_BUILD_TARGET", old_triple)
+        driver_entry_scan_cache_release()
+        assert_equal(linux_imports.len(), 1)
+        assert_true(linux_imports[0].contains("path_identity_abi"))
+        assert_equal(windows_imports.len(), 1)
+        assert_true(windows_imports[0].contains("windows_process_owner_abi"))
