@@ -14,6 +14,7 @@ use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 use compiler.mir._MirLowering.module_lowering.*
+use std.nogc_sync_mut.io.file_ops.{file_read}
 
 fn lower_errors(src: text, tag: text) -> text:
     val filename = "stage2_receiver_" + tag + ".spl"
@@ -144,6 +145,13 @@ fn sum_rows_free(tables: [SdnTable]) -> i64:
     total
 """
 
+fn unresolved_method_lines(src: text, tag: text) -> text:
+    var hits = ""
+    for line in lower_errors(src, tag).split("\n"):
+        if line.contains("unresolved method call"):
+            hits = hits + line + "\n"
+    hits
+
 val WRONG_SPAN_SRC = """
 extern fn rt_file_read_text(path: text) -> text
 
@@ -199,3 +207,10 @@ describe "stage2 receiver type transport":
     it "resolves byte_at on a text parameter next to a global dict":
         val out = lower_errors(GLOBAL_DICT_BYTE_AT_SRC, "global_dict_byte_at")
         expect(out).to_equal("")
+
+    it "lowers every array read in the sha3 module (typed lanes, indexed reads)":
+        # 16 of the 114 stage2 test-runner MIR errors (2026-10-09) were
+        # `unresolved method call: get` in this module: its untyped `var s = []`
+        # locals carry no element type, so the Array `.get` arm fails closed.
+        val src = file_read("src/lib/common/crypto/sha3.spl")
+        expect(unresolved_method_lines(src, "sha3_module")).to_equal("")
