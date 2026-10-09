@@ -453,6 +453,7 @@ impl MirLowering:
             struct_field_type_name: {},
             struct_field_repr_name: {},
             struct_field_hir_type: {},
+            struct_bare_layout_owner: {},
             struct_field_array_element_type_name: {},
             struct_field_array_elem_type: {},
             struct_value_syms: {},
@@ -1253,10 +1254,13 @@ impl MirLowering:
             # bool/text decode fix (native_class_array_field_mutation_segfault
             # / native_bool_array_element_interpolation_special_garbage,
             # 2026-07-17) -- no separate inline loop needed here.
+            val bare_layout_was_free = not self.struct_field_order.has(struct_def.name)
             self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, false)
             val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
             if struct_symbol != nil:
                 val struct_key = self.composite_layout_key(struct_symbol)
+                if bare_layout_was_free:
+                    self.struct_bare_layout_owner[struct_def.name] = struct_key
                 if struct_key != struct_def.name:
                     self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, false)
                 val struct_attr = if struct_def.has_layout_attr: struct_def.layout_attr else: layoutattr_default_()
@@ -1574,6 +1578,7 @@ impl MirLowering:
             val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
             if struct_symbol != nil:
                 val struct_key = self.composite_layout_key(struct_symbol)
+                self.struct_bare_layout_owner[struct_def.name] = struct_key
                 if struct_key != struct_def.name:
                     self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, true)
             local_meta_i = local_meta_i + 1
@@ -1585,6 +1590,7 @@ impl MirLowering:
             val class_symbol = module.symbols.get_symbol_raw(class_def.symbol.id)
             if class_symbol != nil:
                 val class_key = self.composite_layout_key(class_symbol)
+                self.struct_bare_layout_owner[class_def.name] = class_key
                 if class_key != class_def.name:
                     self.register_composite_field_metadata(class_key, class_def.fields, module.symbols, true)
                 val canonical_class_key = mir_class_identity(class_symbol)
@@ -1601,7 +1607,17 @@ impl MirLowering:
         self.struct_method_return_is_optional = {}
         # Provider arrays belong to the driver and are borrowed for this pass;
         # retain only relocated field/default metadata in the MIR owner roots.
+        var consumer_composite_names: Dict<text, bool> = {}
+        for local_struct_value in local_struct_values:
+            consumer_composite_names[local_struct_value.name] = true
+        for local_class_value in local_class_values:
+            consumer_composite_names[local_class_value.name] = true
         for provider_module in providers:
+            if provider_module.name != module.name:
+                for provider_struct in provider_module.structs.values():
+                    val provider_struct_def: HirStruct = provider_struct
+                    self.register_provider_struct(provider_struct_def, provider_module.symbols,
+                        consumer_composite_names.has(provider_struct_def.name))
             # Struct-only providers also own receiver methods (for example
             # CoreLexer); their absence of classes/enums must not hide them.
             if provider_module.name != module.name and (provider_module.classes.len() > 0 or provider_module.enums.len() > 0 or provider_module.structs.len() > 0):

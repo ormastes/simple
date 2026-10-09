@@ -3496,6 +3496,28 @@ impl MirLowering:
         # own span, already a parameter) carries the real location. Naming the
         # collection's MIR type additionally separates "genuinely a dict" from
         # "i64/unknown = cascade of an upstream lowering failure" per site.
+        # `for k in dict` iterates the KEYS (interpreter + seed semantics).
+        # Lower it as `for k in dict.keys()`: the shared keys/values helper
+        # emits rt_dict_keys and stamps `Array(key_type, 0)` on the result,
+        # so the indexed-array loop below decodes each key exactly as the
+        # explicit `.keys()` spelling already does. Dict-ness must come from
+        # the local's own MIR type: a declared Dict whose local was erased to
+        # a bare word stays rejected below (declared_iterator_provenance_spec
+        # pins that), exactly like an erased integer or Any.
+        var collection_is_dict = false
+        if val coll_dict_mir_type = self.local_mir_type_of(collection_local):
+            match coll_dict_mir_type.kind:
+                case MirTypeKind.Dict(_, _): collection_is_dict = true
+                case _: ()
+        if collection_is_dict:
+            if val dict_keys_local = self.lower_dict_keys_or_values_array(collection_local, "keys"):
+                var dict_key_elem_type = MirType.i64()
+                if val dict_keys_mir_type = self.local_mir_type_of(dict_keys_local):
+                    match dict_keys_mir_type.kind:
+                        case MirTypeKind.Array(key_elem_type, _): dict_key_elem_type = key_elem_type
+                        case _: ()
+                return self.lower_for_array_indexed(var_, dict_keys_local, dict_key_elem_type, body, source_span)
+
         val iter_coll_type_text = mir_type_probe_text(self.local_mir_type_of(collection_local))
         val iter_unsupported_msg = "for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while (collection mir type: {iter_coll_type_text}; module: {self.current_module_id})"
         # Preserve the authored for-span, falling back to the iterable only
