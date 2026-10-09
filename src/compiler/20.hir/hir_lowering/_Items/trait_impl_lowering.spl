@@ -424,18 +424,70 @@ impl HirLowering:
             span: at.span
         )
 
+    me unannotated_const_type(value: Expr, span: Span) -> HirType:
+        """Type of an unannotated module constant, settled from its
+        initializer shape alone.
+
+        A signed or bit-inverted numeric literal (`val NEG = -1`,
+        `val MASK = ~0`) and integer arithmetic over such literals
+        (`val CAP = 1024 * 1024`) are still constants of a known scalar type.
+        Leaving them as `HirTypeKind.Infer` is not harmless: the IMPORTING
+        module's MIR lowering reads a global's HIR type as its storage ABI
+        and fails closed on `Infer` (`[infer-arm]`), which is how 326
+        `= -N` and 47 arithmetic stdlib globals blocked every native target
+        that imported them. Anything the shape cannot settle stays `Infer`
+        for the folded-value path in MIR."""
+        match value.kind:
+            case ExprKind.IntLit(_): HirType(kind: HirTypeKind.Int(64, true), span: span)
+            case ExprKind.FloatLit(_): HirType(kind: HirTypeKind.Float(64), span: span)
+            case ExprKind.FloatLexeme(_): HirType(kind: HirTypeKind.Float(64), span: span)
+            case ExprKind.StringLit(_, _): HirType(kind: HirTypeKind.Str, span: span)
+            case ExprKind.BoolLit(_): HirType(kind: HirTypeKind.Bool, span: span)
+            case ExprKind.Unary(op, operand):
+                val un_op: UnaryOp = op
+                val un_operand: Expr = operand
+                val operand_type = self.unannotated_const_type(un_operand, span)
+                match un_op:
+                    case UnaryOp.Neg:
+                        match operand_type.kind:
+                            case HirTypeKind.Int(_, _): operand_type
+                            case HirTypeKind.Float(_): operand_type
+                            case _: HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+                    case UnaryOp.BitNot:
+                        match operand_type.kind:
+                            case HirTypeKind.Int(_, _): operand_type
+                            case _: HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+                    case _: HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+            case ExprKind.Binary(op, left, right):
+                # Exactly the integer operators `lower_const_expr` folds; a
+                # comparison or logical operator yields bool and stays Infer.
+                val bin_op: BinOp = op
+                val folds_to_int = match bin_op:
+                    case BinOp.Add | BinOp.Sub | BinOp.Mul | BinOp.Div | BinOp.Mod: true
+                    case BinOp.Shl | BinOp.Shr | BinOp.BitAnd | BinOp.BitOr | BinOp.BitXor: true
+                    case _: false
+                val bin_left: Expr = left
+                val bin_right: Expr = right
+                val left_type = self.unannotated_const_type(bin_left, span)
+                val right_type = self.unannotated_const_type(bin_right, span)
+                val left_is_int = match left_type.kind:
+                    case HirTypeKind.Int(_, _): true
+                    case _: false
+                val right_is_int = match right_type.kind:
+                    case HirTypeKind.Int(_, _): true
+                    case _: false
+                if folds_to_int and left_is_int and right_is_int:
+                    HirType(kind: HirTypeKind.Int(64, true), span: span)
+                else:
+                    HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+            case _: HirType(kind: HirTypeKind.Infer(0, 0), span: span)
+
     me lower_hir_const_decl(const_: ParserConst) -> HirConst:
         val symbol = self.symbols.lookup_or_invalid(const_.name)
         val type_ = if const_.has_type_:
             self.lower_type(const_.type_)
         else:
-            match const_.value.kind:
-                case ExprKind.IntLit(_): HirType(kind: HirTypeKind.Int(64, true), span: const_.span)
-                case ExprKind.FloatLit(_): HirType(kind: HirTypeKind.Float(64), span: const_.span)
-                case ExprKind.FloatLexeme(_): HirType(kind: HirTypeKind.Float(64), span: const_.span)
-                case ExprKind.StringLit(_, _): HirType(kind: HirTypeKind.Str, span: const_.span)
-                case ExprKind.BoolLit(_): HirType(kind: HirTypeKind.Bool, span: const_.span)
-                case _: HirType(kind: HirTypeKind.Infer(0, 0), span: const_.span)
+            self.unannotated_const_type(const_.value, const_.span)
         val value = self.lower_hir_expr(const_.value)
 
         # Compute effective visibility using filename matching

@@ -5449,8 +5449,50 @@ impl MirLowering:
                     case BitOr: Some(MirConstValue.Int(li | ri))
                     case BitXor: Some(MirConstValue.Int(li ^ ri))
                     case _: nil
+            case Unary(un_op, un_operand):
+                # A signed or bit-inverted numeric literal (`val NEG = -1`,
+                # `val MASK = ~0`) is a constant, not an expression to defer:
+                # without this arm the owner module registered no MirConstant
+                # for it and an importing module could not derive its storage
+                # type at all.
+                val un_operand_t: HirExpr = un_operand
+                val folded_operand = self.lower_const_expr(un_operand_t)
+                if val inner = folded_operand:
+                    match un_op:
+                        case HirUnaryOp.Neg:
+                            match inner:
+                                case Int(iv): Some(MirConstValue.Int(0 - iv))
+                                # Real negation: `0.0 - fv` would turn -0.0
+                                # into +0.0.
+                                case Float(fv): Some(MirConstValue.Float(-fv))
+                                # The frontend emits every float literal as a
+                                # FloatLexeme (convert_nodes.spl), so `-2.5`
+                                # arrives here, never as `Float`. Negate the
+                                # lexeme textually; every backend turns the
+                                # lexeme into a scalar with `to_float()`
+                                # (float_literal_owner.spl), which reads a
+                                # leading sign, so the decimal text stays the
+                                # single source of the exact value.
+                                case FloatLexeme(lexeme):
+                                    Some(MirConstValue.FloatLexeme(negate_float_lexeme(lexeme)))
+                                case _: nil
+                        case HirUnaryOp.BitNot:
+                            match inner:
+                                case Int(iv): Some(MirConstValue.Int(~iv))
+                                case _: nil
+                        case _: nil
+                else:
+                    nil
             case _:
                 nil
+
+fn negate_float_lexeme(lexeme: text) -> text:
+    """Textual negation of a float lexeme: toggle one leading sign."""
+    if lexeme.starts_with("-"):
+        return lexeme.substring(1)
+    if lexeme.starts_with("+"):
+        return "-" + lexeme.substring(1)
+    "-" + lexeme
 
 # ============================================================================
 # Exports

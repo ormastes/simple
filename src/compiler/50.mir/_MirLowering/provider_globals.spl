@@ -129,14 +129,31 @@ impl MirLowering:
                 continue
             found[key] = true
             val relocated_type = self.relocate_provider_type(constant.type_, provider_symbols)
-            var storage_type = self.lower_type(relocated_type)
+            var storage_type = MirType.i64()
             match relocated_type.kind:
                 case HirTypeKind.Dict(_, _): storage_type = MirType.i64()
                 case HirTypeKind.Str: storage_type = self.bootstrap_text_type()
                 case HirTypeKind.Infer(_, _) | HirTypeKind.Error:
-                    self.error_fatal("imported global '{key}' lacks a resolved storage type", Some(constant.span))
-                    continue
-                case _: ()
+                    # HIR leaves an unannotated, non-literal module global as
+                    # `Infer`. The OWNER module settles its MirConstant type
+                    # from the folded value (`lower_const` ->
+                    # `mir_folded_const_type`); the external declaration here
+                    # must carry the same storage type, so derive it the same
+                    # way. `lower_type` must never see the `Infer` -- it is
+                    # fatal there (`[infer-arm]`) and that fatal, raised on
+                    # every importer of such a global, blocked 120 of 202
+                    # failing native targets (rc1-small-large-next40). A value
+                    # the folder cannot settle still fails closed, at the
+                    # declaration's span.
+                    var derived_storage: MirType? = nil
+                    if val folded_value = self.lower_const_expr(constant.value):
+                        derived_storage = self.mir_folded_const_type(constant.value, folded_value)
+                    if val derived = derived_storage:
+                        storage_type = derived
+                    else:
+                        self.error_fatal("imported global '{key}' lacks a resolved storage type; annotate the declaration", Some(constant.span))
+                        continue
+                case _: storage_type = self.lower_type(relocated_type)
             var definition_owner = provider_name
             if val definition = provider_symbols.get_symbol_raw(constant.symbol.id):
                 definition_owner = definition.defining_module ?? provider_name
