@@ -28,11 +28,25 @@ bootstrap_build_jobs_detect_host_cpus() {
   printf '%s\n' "$bbj_host"
 }
 
+# Layered host config value (config/host/host_config.sdn: env SIMPLE_HOST_<KEY>
+# > user ~/.config/simple/host.sdn > per-host > commented defaults). Queried
+# through `host-env.shs --get` in a child shell so nothing is exported into the
+# bootstrap's SIMPLE_* environment fingerprint. Empty when unconfigured.
+bootstrap_build_jobs_host_config() {
+  bbj_hc_script=${BOOTSTRAP_HOST_ENV_SCRIPT:-${bootstrap_entry_dir:+${bootstrap_entry_dir}/../setup/host-env.shs}}
+  [ -n "$bbj_hc_script" ] && [ -f "$bbj_hc_script" ] || return 0
+  sh "$bbj_hc_script" --get "$1" 2>/dev/null || :
+}
+
 bootstrap_build_jobs_resolve() {
   bbj_requested=${1:-}
   bbj_source=${2:-default}
   bbj_host=${3:-}
-  bbj_ceiling=${4:-${SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS:-16}}
+  # Ceiling precedence: explicit arg > SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS >
+  # host config max_build_jobs > built-in 16.
+  bbj_ceiling=${4:-${SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS:-}}
+  [ -n "$bbj_ceiling" ] || bbj_ceiling=${SIMPLE_HOST_MAX_BUILD_JOBS:-$(bootstrap_build_jobs_host_config max_build_jobs)}
+  [ -n "$bbj_ceiling" ] || bbj_ceiling=16
 
   case "$bbj_source" in default|env|cli) ;; *)
     echo "error: build jobs source must be default, env, or cli" >&2
@@ -194,7 +208,8 @@ bootstrap_build_jobs_memory_clamp() {
 # Sampling is shared so both selected worker counts use the same observation.
 # This scheduling budget is independent of process RSS limits.
 bootstrap_build_jobs_memory_sample() {
-  bbj_budget=${SIMPLE_BOOTSTRAP_WORKER_MEM_MIB:-$BOOTSTRAP_WORKER_MEM_MIB_DEFAULT}
+  # SIMPLE_BOOTSTRAP_WORKER_MEM_MIB > host config worker_mem_mib > default.
+  bbj_budget=${SIMPLE_BOOTSTRAP_WORKER_MEM_MIB:-${SIMPLE_HOST_WORKER_MEM_MIB:-$(bootstrap_build_jobs_host_config worker_mem_mib)}}
   bbj_meminfo=${BOOTSTRAP_MEMINFO_PATH:-/proc/meminfo}
   # Length-bounded as well as digit-checked: an all-digits value wider than
   # the shell's arithmetic (e.g. 30 digits) passes a `*[!0-9]*` test and then
