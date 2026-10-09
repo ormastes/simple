@@ -4441,11 +4441,22 @@ impl MirLowering:
         vtable word, so it devirtualizes instead: exactly one implementing
         type in the closure -> a direct call to that impl's method, which is
         what every vtable load would yield; none -> evaluate the operands and
-        trap with a named message (never a silent value); several -> a
-        compile error, because choosing one would miscall the others."""
+        trap with a named message (never a silent value); several, or a
+        generic implementor -> a compile error, because choosing one would
+        miscall the others. All of this requires trait_impl_closure_complete
+        (whole-closure lowering); partial demand/incremental lowering cannot
+        know the implementor set and is a compile error."""
         val owners = self.trait_impl_owners.get(trait_key) ?? []
         val arg_operands = self.lower_receiver_and_args(receiver, args)
-        if owners.len() == 1:
+        var has_generic_owner = false
+        for owner in owners:
+            if owner.starts_with("generic:"):
+                has_generic_owner = true
+        if not self.trait_impl_closure_complete:
+            self.error("trait-object call {trait_key}.{method}: this lowering does not cover the whole build closure (demand/incremental lane lowers dirty packages only), so the implementor set is unknown; stage2 devirtualizes trait objects only under whole-closure lowering", Some(receiver.span))
+        elif has_generic_owner:
+            self.error("trait-object call {trait_key}.{method}: a generic implementor (`impl<T> {trait_key} for ...`) is in the build closure; stage2 cannot devirtualize it", Some(receiver.span))
+        elif owners.len() == 1:
             val impl_key = "{trait_key}::{owners[0]}::{method}"
             if self.trait_impl_methods.has(impl_key):
                 val method_id = self.trait_impl_methods[impl_key]

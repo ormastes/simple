@@ -9,19 +9,25 @@ object. Before the fix stage2 MIR reported `unresolved method call: list` for
 `self.store.list(n)`. The seed emits a vtable call, or an aborting bare-name
 call when no impl exists in the unit.
 
-Stage2 objects carry no vtable word, so MIR devirtualizes:
+Stage2 objects carry no vtable word, so MIR devirtualizes, and only when the
+lowering covers the whole build closure (`trait_impl_closure_complete`, set by
+the driver for entry-closure builds without a demand/package-index route):
 
-| implementors in closure | lowering |
-|-------------------------|----------|
-| 1 | direct call to that impl's method |
-| 0 | operands evaluated, then `rt_panic` naming the trait method |
-| 2+ | loud compile error (no runtime type identity to choose) |
+| situation | lowering |
+|-----------|----------|
+| 1 implementor in closure | direct call to that impl's method |
+| 0 implementors in closure | operands evaluated, then `rt_panic` naming the trait method |
+| 2+ implementors, or a generic implementor | loud compile error |
+| partial (demand/incremental) lowering | loud compile error |
 """
 use std.spec.*
 use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.frontend.{parse_full_frontend}
-use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
 use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
 use compiler.hir.hir_definitions.*
 use compiler.mir.mir.*
 use compiler.mir.mir_lowering.{MirLowering}
@@ -30,18 +36,18 @@ val TRAIT_SRC = "trait Store:\n    fn list(n: i64) -> i64\n\n"
 val CONSUMER_SRC = "struct Consumer:\n    store: Store\n\nimpl Consumer:\n    fn run(n: i64) -> i64:\n        self.store.list(n)\n\nfn via_param(s: Store) -> i64:\n    s.list(2)\n\nfn main() -> i64:\n    0\n"
 val MEM_IMPL_SRC = "struct Mem:\n    base: i64\n\nimpl Store for Mem:\n    fn list(n: i64) -> i64:\n        self.base + n\n\n"
 val DISK_IMPL_SRC = "struct Disk:\n    root: i64\n\nimpl Store for Disk:\n    fn list(n: i64) -> i64:\n        self.root * n\n\n"
+val GENERIC_IMPL_SRC = "struct Boxed<T>:\n    item: T\n\nimpl<T> Store for Boxed<T>:\n    fn list(n: i64) -> i64:\n        n\n\n"
+
+# Cross-module closure: trait in A, implementor in B, consumer in C.
+val XM_A_SRC = "pub trait Store:\n    fn list(n: i64) -> i64\n"
+val XM_B_SRC = "use pkg.xm_a.\{Store\}\n\npub struct Mem:\n    base: i64\n\nimpl Store for Mem:\n    fn list(n: i64) -> i64:\n        self.base + n\n"
+val XM_C_SRC = "use pkg.xm_a.\{Store\}\n\nstruct Consumer:\n    store: Store\n\nimpl Consumer:\n    fn run(n: i64) -> i64:\n        self.store.list(n)\n\nfn main() -> i64:\n    0\n"
 
 struct Lowered:
     errors: [text]
     callees: [text]
 
-fn lower_source(src: text) -> Lowered:
-    val parsed = parse_full_frontend(src, "trait_recv.spl", "trait_recv", Logger(level: 0))
-    var hl = HirLowering.with_filename("trait_recv.spl")
-    val hir = hl.lower_module(parsed)
-    expect(hl.errors.len()).to_equal(0)
-    var ml = MirLowering.new(hir.symbols)
-    val mir = ml.lower_module(hir)
+fn collect(ml: MirLowering, mir: MirModule) -> Lowered:
     var errors: [text] = []
     for e in ml.errors:
         errors = errors.push(e.message)
@@ -58,6 +64,45 @@ fn lower_source(src: text) -> Lowered:
                     case _: pass
     Lowered(errors: errors, callees: callees)
 
+fn lower_source(src: text, closure_complete: bool) -> Lowered:
+    val parsed = parse_full_frontend(src, "trait_recv.spl", "trait_recv", Logger(level: 0))
+    var hl = HirLowering.with_filename("trait_recv.spl")
+    val hir = hl.lower_module(parsed)
+    expect(hl.errors.len()).to_equal(0)
+    var ml = MirLowering.new(hir.symbols)
+    ml.trait_impl_closure_complete = closure_complete
+    val mir = ml.lower_module(hir)
+    collect(ml, mir)
+
+fn lower_cross_module(include_impl_module: bool) -> Lowered:
+    val a = parse_and_build_module(XM_A_SRC, "pkg/xm_a.spl")
+    val b = parse_and_build_module(XM_B_SRC, "pkg/xm_b.spl")
+    val c = parse_and_build_module(XM_C_SRC, "pkg/xm_c.spl")
+    val surfaces = module_surfaces_from_modules(
+        {"pkg.xm_a": a, "pkg.xm_b": b, "pkg.xm_c": c},
+        [SourceFile(path: "pkg/xm_a.spl", content: XM_A_SRC, module_name: "pkg.xm_a"),
+         SourceFile(path: "pkg/xm_b.spl", content: XM_B_SRC, module_name: "pkg.xm_b"),
+         SourceFile(path: "pkg/xm_c.spl", content: XM_C_SRC, module_name: "pkg.xm_c")])
+    expect(surfaces.is_ok()).to_equal(true)
+    var hl = hirlowering_for_module("", surfaces.unwrap())
+    hl.begin_module("pkg/xm_a.spl")
+    hl.module_filename = "pkg/xm_a.spl"
+    val a_hir = hl.lower_module(a)
+    hl.begin_module("pkg/xm_b.spl")
+    hl.module_filename = "pkg/xm_b.spl"
+    val b_hir = hl.lower_module(b)
+    hl.begin_module("pkg/xm_c.spl")
+    hl.module_filename = "pkg/xm_c.spl"
+    val c_hir = hl.lower_module(c)
+    expect(hl.errors.len()).to_equal(0)
+    val providers = if include_impl_module: [a_hir, b_hir, c_hir] else: [a_hir, c_hir]
+    var ml = MirLowering.new(c_hir.symbols)
+    ml.trait_impl_closure_complete = true
+    for provider in providers:
+        ml.prescan_module_struct_names(provider)
+    val mir = ml.lower_module(c_hir, providers, false)
+    collect(ml, mir)
+
 fn count_matching(names: [text], needle: text) -> i64:
     var n = 0
     for name in names:
@@ -67,18 +112,43 @@ fn count_matching(names: [text], needle: text) -> i64:
 
 describe "stage2 MIR trait-typed receiver dispatch":
     it "devirtualizes a trait-typed field and parameter call to the single implementor":
-        val lowered = lower_source(TRAIT_SRC + MEM_IMPL_SRC + CONSUMER_SRC)
+        val lowered = lower_source(TRAIT_SRC + MEM_IMPL_SRC + CONSUMER_SRC, true)
         expect(lowered.errors.len()).to_equal(0)
         # `self.store.list(n)` and `s.list(2)` both call Mem's impl method.
         expect(count_matching(lowered.callees, "Mem.list")).to_equal(2)
         expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)
 
     it "traps with a named runtime message when no implementor is in the closure":
-        val lowered = lower_source(TRAIT_SRC + CONSUMER_SRC)
+        val lowered = lower_source(TRAIT_SRC + CONSUMER_SRC, true)
         expect(lowered.errors.len()).to_equal(0)
         expect(count_matching(lowered.callees, "rt_panic")).to_equal(2)
 
     it "refuses to guess between several implementors":
-        val lowered = lower_source(TRAIT_SRC + MEM_IMPL_SRC + DISK_IMPL_SRC + CONSUMER_SRC)
+        val lowered = lower_source(TRAIT_SRC + MEM_IMPL_SRC + DISK_IMPL_SRC + CONSUMER_SRC, true)
         expect(lowered.errors.len()).to_equal(2)
         expect(lowered.errors[0].contains("2 implementors")).to_equal(true)
+
+    it "rejects a generic implementor instead of guessing an instantiation":
+        val lowered = lower_source(TRAIT_SRC + GENERIC_IMPL_SRC + CONSUMER_SRC, true)
+        expect(lowered.errors.len()).to_equal(2)
+        expect(lowered.errors[0].contains("generic implementor")).to_equal(true)
+
+    it "fails closed when the lowering does not cover the whole closure":
+        # Demand/incremental lanes reuse archived MIR for clean packages, so
+        # a single visible impl proves nothing about the closure.
+        val lowered = lower_source(TRAIT_SRC + MEM_IMPL_SRC + CONSUMER_SRC, false)
+        expect(lowered.errors.len()).to_equal(2)
+        expect(lowered.errors[0].contains("whole build closure")).to_equal(true)
+        expect(count_matching(lowered.callees, "Mem.list")).to_equal(0)
+
+    it "devirtualizes across modules: trait in A, implementor in B, consumer in C":
+        val lowered = lower_cross_module(true)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(count_matching(lowered.callees, "Mem.list")).to_equal(1)
+        expect(count_matching(lowered.callees, "rt_panic")).to_equal(0)
+
+    it "traps at runtime when the implementing module is outside the closure":
+        val lowered = lower_cross_module(false)
+        expect(lowered.errors.len()).to_equal(0)
+        expect(count_matching(lowered.callees, "Mem.list")).to_equal(0)
+        expect(count_matching(lowered.callees, "rt_panic")).to_equal(1)
