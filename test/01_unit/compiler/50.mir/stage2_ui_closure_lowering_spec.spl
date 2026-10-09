@@ -18,6 +18,9 @@ lowering through the pure-Simple frontend -> HIR -> MIR in process:
   `Spacing` (a class) under the bare name before the explicit
   `use common.ui.design_tokens.{Spacing}` (an enum), so `Spacing.Xs` lost its
   enum: "missing runtime identity for 'Spacing'" and ambiguous bare variants.
+  An explicit import now supersedes a transitive (field-dependency) bare
+  binding in either order, while a transitively reachable type alone keeps
+  the seed's bare usability (`use dep.{make_holder}` then `Gap(...)`).
 - Source: `char_frequency`/`multi_replace` (common.text_advanced) were
   unannotated, so their results iterated as erased words (#143), and
   ui.ipc/protocol.spl called the nonexistent `i64.to_text_char()`.
@@ -69,6 +72,9 @@ fn two_provider_errors(provider_names: [text], provider_sources: [text], consume
     mir_lowering.prescan_module_struct_names(consumer_hir)
     val _mir = mir_lowering.lower_module(consumer_hir)
     var n = 0
+    for he in consumer_lowering.errors:
+        if he.message.contains(needle):
+            n = n + 1
     for e in mir_lowering.errors:
         if e.message.contains(needle):
             n = n + 1
@@ -81,6 +87,9 @@ val enum_call_src = "enum Lk:\n    Row\n    Col\n\nimpl Lk:\n    static fn from_
 val style_src = "class Spacing:\n    xs: i64\n\nstruct UITheme:\n    spacing: Spacing\n"
 val tokens_src = "enum Spacing:\n    Xs\n    Sm\n"
 val spacing_consumer = "use lib.style.\{UITheme\}\nuse lib.toks.\{Spacing\}\n\nfn px(s: Spacing) -> i64:\n    match s:\n        case Spacing.Xs: return 4\n        case Spacing.Sm: return 8\n    0\n\nfn mk() -> Spacing:\n    Spacing.Sm\n"
+val spacing_consumer_explicit_first = "use lib.toks.\{Spacing\}\nuse lib.style.\{UITheme\}\n\nfn px(s: Spacing) -> i64:\n    match s:\n        case Spacing.Xs: return 4\n        case Spacing.Sm: return 8\n    0\n"
+val holder_src = "pub struct Gap:\n    n: i64\n\npub struct Holder:\n    gap: Gap\n\npub fn make_holder() -> Holder:\n    Holder(gap: Gap(n: 1))\n"
+val transitive_consumer = "use lib.dep.\{make_holder\}\n\nfn f() -> i64:\n    val g = Gap(n: 2)\n    make_holder().gap.n + g.n\n"
 
 describe "stage2 MIR ui_shared_mdi rung":
     it "types a loop variable over a method's [Record] result":
@@ -95,6 +104,10 @@ describe "stage2 MIR ui_shared_mdi rung":
         val srcs = [style_src, tokens_src]
         expect(two_provider_errors(names, srcs, spacing_consumer, "missing runtime identity")).to_equal(0)
         expect(two_provider_errors(names, srcs, spacing_consumer, "is ambiguous")).to_equal(0)
+        expect(two_provider_errors(names, srcs, spacing_consumer_explicit_first, "missing runtime identity")).to_equal(0)
+
+    it "keeps the seed's bare use of a transitively reachable type":
+        expect(two_provider_errors(["lib.dep"], [holder_src], transitive_consumer, "Gap")).to_equal(0)
 
     it "iterates text_advanced tuple results without #143":
         val path = "src/lib/common/text_advanced.spl"
