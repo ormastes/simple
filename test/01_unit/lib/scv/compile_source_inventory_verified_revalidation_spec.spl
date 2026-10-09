@@ -1,0 +1,109 @@
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_source_inventory.*
+use std.nogc_sync_mut.io_runtime.{dir_remove, file_write}
+
+extern fn rt_getpid() -> i64
+
+fn verified_revalidation_nonempty_inventory() -> CompileSourceInventoryV1:
+    val entry = CompileSourceInventoryEntryV1(
+        "src/revalidation_fixture.spl", sha256_text("fn main(): 42"),
+        sha256_text("semantic"), sha256_text("exports"),
+        sha256_text("initializer"), sha256_text("provider"), 13)
+    CompileSourceInventoryV1(1, 7, [entry])
+
+describe "SCV same-refresh verified generation revalidation":
+    it "REQ-SCV-REVALIDATE-001 matches full revalidation of a nonempty generation":
+        step("Publish and fully decode one valid inventory entry")
+        val root = "build/test-artifacts/scv-verified-equivalence-{rt_getpid()}/build/scv"
+        dir_remove(root, true)
+        val digest = compile_source_inventory_publish_v1(root, verified_revalidation_nonempty_inventory())
+        val pointer = compile_source_inventory_read_pointer_content_v1(root) ?? ""
+        val initial = compile_source_inventory_read_at_pointer_v1(root, pointer)
+        step("Compare full and verified revalidation against decoded fields")
+        val full = compile_source_inventory_revalidate_pointer_v1(root, pointer)
+        val reason = compile_source_inventory_revalidate_verified_pointer_v1(root, pointer, digest)
+        dir_remove(root, true)
+        expect(initial.valid).to_equal(true)
+        expect(full.valid).to_equal(true)
+        expect(initial.digest).to_equal(digest)
+        expect(full.digest).to_equal(initial.digest)
+        expect(initial.inventory!.generation).to_equal(7)
+        expect(initial.inventory!.entries.len()).to_equal(1)
+        expect(initial.inventory!.entries[0].source_identity).to_equal("src/revalidation_fixture.spl")
+        expect(initial.inventory!.entries[0].content_digest).to_equal(sha256_text("fn main(): 42"))
+        expect(full.inventory!.entries[0].provider_digest).to_equal(initial.inventory!.entries[0].provider_digest)
+        expect(reason).to_equal("")
+
+    it "REQ-SCV-REVALIDATE-002 rejects changed CURRENT after initial admission":
+        step("Publish and authenticate the initial pointer and generation")
+        val root = "build/test-artifacts/scv-verified-cursor-{rt_getpid()}/build/scv"
+        dir_remove(root, true)
+        val digest = compile_source_inventory_publish_v1(root, CompileSourceInventoryV1(1, 0, []))
+        val pointer = compile_source_inventory_read_pointer_content_v1(root) ?? ""
+        val initial = compile_source_inventory_read_at_pointer_v1(root, pointer)
+        step("Change CURRENT and require cursor supersession rejection")
+        val changed = file_write("{root}/source-inventory/CURRENT", pointer + "\nchanged-cursor")
+        val reason = compile_source_inventory_revalidate_verified_pointer_v1(root, pointer, digest)
+        dir_remove(root, true)
+        expect(initial.valid).to_equal(true)
+        expect(changed).to_equal(true)
+        expect(reason).to_equal("publish-cursor-superseded")
+
+    it "REQ-SCV-REVALIDATE-003 rejects changed generation bytes with the same CURRENT":
+        step("Publish and authenticate the original immutable generation")
+        val root = "build/test-artifacts/scv-verified-content-{rt_getpid()}/build/scv"
+        dir_remove(root, true)
+        val digest = compile_source_inventory_publish_v1(root, CompileSourceInventoryV1(1, 0, []))
+        val pointer = compile_source_inventory_read_pointer_content_v1(root) ?? ""
+        val initial = compile_source_inventory_read_at_pointer_v1(root, pointer)
+        step("Corrupt the generation and require a fresh hash rejection")
+        val changed = file_write("{root}/source-inventory/generations/{digest}.inventory", "corrupt")
+        val reason = compile_source_inventory_revalidate_verified_pointer_v1(root, pointer, digest)
+        dir_remove(root, true)
+        expect(initial.valid).to_equal(true)
+        expect(changed).to_equal(true)
+        expect(reason).to_equal("inventory-generation-invalid")
+
+    it "REQ-SCV-REVALIDATE-004 rejects malformed digest syntax":
+        step("Supply a malformed pointer and digest without a published generation")
+        val root = "build/test-artifacts/scv-verified-invalid-{rt_getpid()}/build/scv"
+        dir_remove(root, true)
+        val reason = compile_source_inventory_revalidate_verified_pointer_v1(root, "bad", "bad")
+        dir_remove(root, true)
+        expect(reason).to_equal("inventory-pointer-invalid")
+
+    it "REQ-SCV-REVALIDATE-005 unlocks after rejected validation":
+        step("Publish and authenticate a generation then supersede its cursor")
+        val root = "build/test-artifacts/scv-verified-unlock-{rt_getpid()}/build/scv"
+        dir_remove(root, true)
+        val digest = compile_source_inventory_publish_v1(root, CompileSourceInventoryV1(1, 0, []))
+        val pointer = compile_source_inventory_read_pointer_content_v1(root) ?? ""
+        val initial = compile_source_inventory_read_at_pointer_v1(root, pointer)
+        val changed = file_write("{root}/source-inventory/CURRENT", pointer + "\nchanged-cursor")
+        val rejected = compile_source_inventory_revalidate_verified_pointer_v1(root, pointer, digest)
+        step("Restore the pointer and require the next locked validation to succeed")
+        val restored = file_write("{root}/source-inventory/CURRENT", pointer)
+        val accepted = compile_source_inventory_revalidate_verified_pointer_v1(root, pointer, digest)
+        dir_remove(root, true)
+        expect(initial.valid).to_equal(true)
+        expect(changed).to_equal(true)
+        expect(rejected).to_equal("publish-cursor-superseded")
+        expect(restored).to_equal(true)
+        expect(accepted).to_equal("")
+
+    it "REQ-SCV-REVALIDATE-006 rejects a well-formed digest from another generation":
+        step("Authenticate a nonempty inventory and create a distinct valid digest")
+        val root = "build/test-artifacts/scv-verified-mismatched-{rt_getpid()}/build/scv"
+        dir_remove(root, true)
+        val digest = compile_source_inventory_publish_v1(root, verified_revalidation_nonempty_inventory())
+        val pointer = compile_source_inventory_read_pointer_content_v1(root) ?? ""
+        val initial = compile_source_inventory_read_at_pointer_v1(root, pointer)
+        val different_digest = sha256_text("a different inventory generation")
+        step("Reject the mismatched digest without accepting the current pointer")
+        val reason = compile_source_inventory_revalidate_verified_pointer_v1(root, pointer, different_digest)
+        dir_remove(root, true)
+        expect(initial.valid).to_equal(true)
+        expect(compile_source_inventory_digest_valid_v1(different_digest)).to_equal(true)
+        expect(different_digest == digest).to_equal(false)
+        expect(reason).to_equal("inventory-pointer-invalid")

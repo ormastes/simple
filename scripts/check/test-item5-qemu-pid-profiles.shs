@@ -1,0 +1,81 @@
+#!/bin/sh
+# Checks the fixed QEMU guest-launch path and binds guest observer PID to the
+# RSS watchdog root PID. This is runner plumbing evidence, not a Simple app test.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+[ "$#" = 1 ] || { echo 'usage: test-item5-qemu-pid-profiles.shs ABS_FRESH_OUTPUT' >&2; exit 2; }
+output=$1
+case "$output" in /*) ;; *) echo 'output must be absolute' >&2; exit 2 ;; esac
+[ ! -e "$output" ] || { echo 'output must be fresh' >&2; exit 2; }
+mkdir -m 0700 -p "$output"
+watchdog=$root/scripts/resource/process-tree-rss-watchdog.pl
+launcher=$root/scripts/check/lib/item5-qemu-guest-exec.shs
+validator=$root/scripts/check/lib/vector-provider-receipt.pl
+observer_source=$root/src/runtime/test/vector_provider_test_events.c
+probe_source=$root/scripts/check/fixtures/item5-qemu-pid-probe.c
+clang=${CLANG:-/usr/lib/llvm-23/bin/clang}
+[ -x "$clang" ] && [ -x "$watchdog" ] && [ -r "$observer_source" ] && [ -r "$probe_source" ] || {
+    echo 'missing clang, watchdog, observer, or probe source' >&2; exit 1;
+}
+
+run_bounded() {
+    receipt=$1 log=$2
+    shift 2
+    (ulimit -f 2048; env -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD \
+        -u SIMPLE_VECTOR_TEST_RECEIPT_OWNER perl "$watchdog" \
+        --max-rss-kib=1048576 --rss-cap-mode=enforce --timeout-seconds=60 \
+        --receipt="$receipt" -- "$@") >"$log" 2>&1
+    [ "$(field "$receipt" status)" = complete ] || { echo "incomplete watchdog receipt: $receipt" >&2; exit 1; }
+    [ "$(field "$receipt" exit_status)" = 0 ] && [ "$(field "$receipt" quiescent)" = 1 ] && \
+        [ "$(field "$receipt" rss_cap_enforced)" = 1 ] && [ "$(field "$receipt" peak_rss_kib)" -lt 1048576 ] || {
+        echo "bounded child did not complete: $receipt" >&2; exit 1;
+    }
+}
+field() {
+    awk -F= -v key="$2" '$1==key { n++; v=substr($0,index($0,"=")+1) } END { if (n != 1) exit 1; print v }' "$1"
+}
+
+printf 'profile\twatchdog_root_pid\tqemu_sha256\n' >"$output/profiles.tsv"
+for family in aarch64 riscv64; do
+    dir=$output/$family
+    mkdir -m 0700 "$dir"
+    case "$family" in
+        aarch64)
+            triple=aarch64-linux-gnu; arch_flags='--target=aarch64-linux-gnu --gcc-toolchain=/usr -march=armv8-a'
+            probe_flags='--target=aarch64-linux-gnu --gcc-toolchain=/usr -march=armv8-a -mgeneral-regs-only'
+            profile_names='aarch64-neon aarch64-sve-vq1 aarch64-sve-vq2 aarch64-sve-vq4 aarch64-sve2-vq1 aarch64-sve2-vq2 aarch64-sve2-vq4'
+            ;;
+        riscv64)
+            triple=riscv64-linux-gnu; arch_flags='--target=riscv64-linux-gnu --gcc-toolchain=/usr -march=rv64gc -mabi=lp64d'
+            probe_flags='--target=riscv64-linux-gnu --gcc-toolchain=/usr -march=rv64gc -mabi=lp64d'
+            profile_names='riscv64-rvv128 riscv64-rvv256'
+            ;;
+    esac
+    run_bounded "$dir/observer-build.rss.env" "$dir/observer-build.log" \
+        "$clang" $arch_flags -std=c11 -O2 -fPIC -shared -Wall -Wextra -Werror \
+        "$observer_source" -o "$dir/vector-observer.so"
+    run_bounded "$dir/probe-build.rss.env" "$dir/probe-build.log" \
+        "$clang" $probe_flags -std=c11 -O2 -Wall -Wextra -Werror \
+        "$probe_source" -o "$dir/pid-probe"
+    chmod 0555 "$dir/pid-probe"
+    family_qemu=$(if [ "$family" = aarch64 ]; then command -v qemu-aarch64; else command -v qemu-riscv64; fi)
+    [ -x "$family_qemu" ] || { echo "missing QEMU for $family" >&2; exit 1; }
+    cp "$family_qemu" "$dir/qemu-user"
+    chmod 0555 "$dir/qemu-user"
+    for profile in $profile_names; do
+        profile_dir=$dir/$profile
+        mkdir -m 0700 "$profile_dir"
+        events=$profile_dir/events.receipt
+        rss=$profile_dir/qemu.rss.env
+        (exec 3>"$events"; run_bounded "$rss" "$profile_dir/qemu.log" \
+            sh "$launcher" "$profile" "$dir/qemu-user" "$dir/vector-observer.so" "$dir/pid-probe") || {
+            echo "QEMU guest PID probe failed for $profile" >&2; exit 1;
+        }
+        guest_pid=$(field "$events" pid)
+        root_pid=$(field "$rss" root_pid)
+        [ "$guest_pid" = "$root_pid" ] || { echo "guest/watchdog PID mismatch for $profile" >&2; exit 1; }
+        perl "$validator" "$events" "$root_pid" --no-load || { echo "invalid no-load receipt for $profile" >&2; exit 1; }
+        printf '%s\t%s\t%s\n' "$profile" "$root_pid" "$(sha256sum "$dir/qemu-user" | awk '{print $1}')" >>"$output/profiles.tsv"
+    done
+done
+printf 'ITEM5_QEMU_GUEST_PID_PROFILES_PASS profiles=9 simple_apps=not_run\n'

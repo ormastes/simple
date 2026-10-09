@@ -1,0 +1,48 @@
+# @cover src/compiler_rust/lib/std/src/verification/lean/runner.spl 80%
+# Coverage percentage is a declared target, not measured coverage.
+# Actual filesystem/process failure checks; no substitute Lean executable.
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{getpid, file_exists, file_read, file_write_exact, dir_create_all, dir_remove_all}
+use verification.lean.runner.{LeanRunner}
+
+describe "Lean runner real host boundaries":
+    it "persists exactly the supplied Lean source":
+        val root = "build/lean-runner-io-{getpid()}-write"
+        expect(file_exists(root)).to_equal(false)
+        val runner = LeanRunner.new("lean", root)
+        val source = "theorem identity : 1 = 1 := by rfl\n"
+        val path = runner.write_lean_file("identity", source)
+        val content = file_read(path)
+        val cleaned = dir_remove_all(root)
+        expect(path).to_equal(root + "/identity.lean")
+        expect(content).to_equal(source)
+        expect(cleaned).to_equal(true)
+
+    it "reports write failure without claiming a prover exit":
+        val root = "build/lean-runner-io-{getpid()}-blocked"
+        expect(file_exists(root)).to_equal(false)
+        expect(dir_create_all(root)).to_equal(true)
+        expect(file_write_exact(root + "/blocked", "ordinary file")).to_equal(true)
+        val runner = LeanRunner.new(root + "/missing-lean", root + "/blocked/output")
+        val result = runner.check_content("proof", "theorem identity : 1 = 1 := by rfl\n")
+        val unchanged = file_read(root + "/blocked")
+        val cleaned = dir_remove_all(root)
+        expect(result.success).to_equal(false)
+        expect(result.exit_code).to_be_nil()
+        expect(result.stderr.len() > 0).to_equal(true)
+        expect(unchanged).to_equal("ordinary file")
+        expect(cleaned).to_equal(true)
+
+    it "reports an unavailable configured prover after creating the actual source":
+        val root = "build/lean-runner-io-{getpid()}-missing"
+        expect(file_exists(root)).to_equal(false)
+        val runner = LeanRunner.new(root + "/missing-lean", root)
+        expect(runner.is_lean_available()).to_equal(false)
+        val source = "theorem identity : 1 = 1 := by rfl\n"
+        val result = runner.check_content("proof", source)
+        val content = file_read(root + "/proof.lean")
+        val cleaned = dir_remove_all(root)
+        expect(result.success).to_equal(false)
+        expect(result.exit_code == Some(0)).to_equal(false)
+        expect(content).to_equal(source)
+        expect(cleaned).to_equal(true)

@@ -48,14 +48,16 @@ fn mir_provider_function_name(owner: text, symbols: SymbolTable, func: HirFuncti
     mir_provider_callable_identity(owner, symbols.symbol_display_name(func.symbol, func.name))
 
 fn mir_provider_default_is_error(expr: HirExpr) -> bool:
-    match expr.kind:
+    val expr_kind: HirExprKind = expr.kind
+    match expr_kind:
         case Error: true
         case _: false
 
 fn mir_provider_default_children_valid(expr: HirExpr) -> bool:
     # Recursive relocation has already validated each child. Inspect only its
     # root so an unsupported capture bubbles up in O(expression size).
-    match expr.kind:
+    val expr_kind: HirExprKind = expr.kind
+    match expr_kind:
         case Error: return false
         case Binary(_, left, right) | Index(left, right):
             return not mir_provider_default_is_error(left) and not mir_provider_default_is_error(right)
@@ -88,9 +90,27 @@ impl MirLowering:
         val link = mir_provider_function_name(owner, symbols, func, is_entry_module)
         val name = symbols.symbol_display_name(func.symbol, func.name)
         self.callable_link_names[mir_provider_callable_key(owner, name)] = link
+        var text_value_abi = self.callable_text_value_abi
+        text_value_abi[mir_provider_callable_key(owner, name)] = not func.is_extern
         # A free function's source name can differ from its imported alias.
         if not func.is_method and not func.is_static:
             self.callable_link_names[mir_provider_callable_key(owner, func.name)] = link
+            text_value_abi[mir_provider_callable_key(owner, func.name)] = not func.is_extern
+        self.callable_text_value_abi = text_value_abi
+
+    fn provider_callable_accepts_text_value(symbol: SymbolId) -> bool:
+        # Missing ownership keeps the established external pointer bridge.
+        # Use has + a typed bracket lookup, avoiding HirSymbol? transport.
+        if not self.symbols.symbols.has(symbol.id): return false
+        val declaration: HirSymbol = self.symbols.symbols[symbol.id]
+        match declaration.kind:
+            case Function | Method: ()
+            case _: return false
+        var owner = declaration.defining_module ?? ""
+        if owner == "": owner = self.current_module_id
+        val key = mir_provider_callable_key(owner, declaration.name)
+        if not self.callable_text_value_abi.has(key): return false
+        self.callable_text_value_abi[key]
 
     fn provider_callable_symbol_name(symbol: SymbolId, fallback: text) -> text:
         val info = self.symbols.get_symbol_raw(symbol.id)
@@ -152,6 +172,14 @@ impl MirLowering:
             case _: ()
 
     me relocate_provider_type_symbol(id: SymbolId, provider: SymbolTable) -> SymbolId:
+        # Absent-id guard: a SymbolId from a provider-closure expression may
+        # name a symbol this provider table does not own. get_symbol_raw then
+        # returns nil; the Option nil-check passes on a miscompiled Some-tag/
+        # null-payload return (stage-native lane; see symbol_name_scalar_raw)
+        # and the defining_module deref below faults at address 0
+        # (2026-10-08 test_runner_build SIGSEGV backtrace). Probe has() first.
+        if not provider.symbols.has(id.id):
+            return SymbolId(id: -1)
         val source = provider.get_symbol_raw(id.id)
         if source == nil:
             return SymbolId(id: -1)
@@ -183,8 +211,14 @@ impl MirLowering:
         result
 
     me relocate_provider_type(type_: HirType, provider: SymbolTable) -> HirType:
+        # Explicit local annotation on the nested kind access: the stage-native
+        # lane loses the declared value type at indexed/nested struct access
+        # (same miscompile family as module_build.spl's lowered_impl_functions
+        # fix); without it `match type_.kind` can deref a corrupted value
+        # (test_runner_build SIGSEGV, 2026-10-08/09).
+        val kind: HirTypeKind = type_.kind
         var result = type_
-        result.kind = match type_.kind:
+        result.kind = match kind:
             case Named(id, args):
                 val target = self.relocate_provider_type_symbol(id, provider)
                 if target.id < 0: HirTypeKind.Error
@@ -206,10 +240,13 @@ impl MirLowering:
             case Projection(base, name): HirTypeKind.Projection(self.relocate_provider_type(base, provider), name)
             case Isolated(inner): HirTypeKind.Isolated(self.relocate_provider_type(inner, provider))
             case Tensor(elem, dims, device): HirTypeKind.Tensor(self.relocate_provider_type(elem, provider), dims, device)
-            case _: type_.kind
+            case _: kind
         result
 
     me relocate_provider_callable(id: SymbolId, provider: SymbolTable, links: Dict<i64, text>) -> SymbolId:
+        # Same absent-id guard as relocate_provider_type_symbol.
+        if not provider.symbols.has(id.id):
+            return SymbolId(id: -1)
         val source = provider.get_symbol_raw(id.id)
         if source == nil:
             return SymbolId(id: -1)
@@ -264,15 +301,17 @@ impl MirLowering:
             case BuiltinCollection(operation): MethodResolution.BuiltinCollection(operation)
 
     me relocate_provider_default(expr: HirExpr, provider: SymbolTable, links: Dict<i64, text>) -> HirExpr:
+        # Same nested-access annotation as relocate_provider_type.
+        val expr_kind: HirExprKind = expr.kind
         var result = expr
         if expr.has_type_:
             result.type_ = self.relocate_provider_type(expr.type_, provider)
-        result.kind = match expr.kind:
-            case IntLit(_, _) | FloatLit(_, _) | BoolLit(_) | CharLit(_) | UnitLit | NilLit:
-                expr.kind
+        result.kind = match expr_kind:
+            case IntLit(_, _) | FloatLit(_, _) | FloatLexeme(_, _) | BoolLit(_) | CharLit(_) | UnitLit | NilLit:
+                expr_kind
             case StringLit(value, interpolations):
                 if interpolations == nil:
-                    expr.kind
+                    expr_kind
                 else:
                     var relocated_interpolations: [HirInterpolation] = []
                     for interpolation in interpolations:
@@ -282,14 +321,23 @@ impl MirLowering:
                         relocated_interpolations = relocated_interpolations.push(relocated)
                     HirExprKind.StringLit(value, Some(relocated_interpolations))
             case Var(id) | NamedVar(id, _):
-                val source = provider.get_symbol_raw(id.id)
-                if source != nil and source.kind == SymbolKind.Class:
-                    val target = self.relocate_provider_type_symbol(id, provider)
-                    HirExprKind.NamedVar(target, mir_class_identity(source))
+                # Nil-payload guard: when the id is absent from the provider
+                # table, get_symbol_raw returns nil and the fallback branch
+                # would evaluate source.name on the nil payload
+                # (EXC_BAD_ACCESS address 0x0; the miscompiled-Option class is
+                # documented in symbol_name_scalar_raw's docstring). Probe
+                # has() first and lower Error when absent.
+                if not provider.symbols.has(id.id):
+                    HirExprKind.Error
                 else:
-                    val target = self.relocate_provider_callable(id, provider, links)
-                    if target.id < 0: HirExprKind.Error
-                    else: HirExprKind.NamedVar(target, self.symbols.symbol_display_name(target, source.name))
+                    val source = provider.get_symbol_raw(id.id)
+                    if source != nil and source.kind == SymbolKind.Class:
+                        val target = self.relocate_provider_type_symbol(id, provider)
+                        HirExprKind.NamedVar(target, mir_class_identity(source))
+                    else:
+                        val target = self.relocate_provider_callable(id, provider, links)
+                        if target.id < 0: HirExprKind.Error
+                        else: HirExprKind.NamedVar(target, self.symbols.symbol_display_name(target, source.name))
             case Field(base, field, _):
                 HirExprKind.Field(self.relocate_provider_default(base, provider, links), field, nil)
             case Index(base, index):
@@ -350,6 +398,9 @@ impl MirLowering:
         result
 
     me register_provider_class(class_def: HirClass, provider: SymbolTable, links: Dict<i64, text>, local: bool):
+        if not provider.symbols.has(class_def.symbol.id):
+            self.error_fatal("class provider symbol is absent from the provider table: {class_def.name}", Some(class_def.span))
+            return
         val source = provider.get_symbol_raw(class_def.symbol.id)
         if source == nil:
             self.error_fatal("class provider is missing its declaration symbol: {class_def.name}", Some(class_def.span))
@@ -362,10 +413,14 @@ impl MirLowering:
         var flags: [bool] = []
         var defaults: [HirExpr] = []
         for field in class_def.fields:
-            var relocated = field
-            relocated.type_ = self.relocate_provider_type(field.type_, provider)
+            # Annotated copies: nested struct transports lose their declared
+            # value type on the stage-native lane (module_build.spl pattern).
+            var relocated: HirField = field
+            val field_type: HirType = field.type_
+            relocated.type_ = self.relocate_provider_type(field_type, provider)
             if field.has_default and not local:
-                relocated.default = self.relocate_provider_default(field.default, provider, links)
+                val field_default: HirExpr = field.default
+                relocated.default = self.relocate_provider_default(field_default, provider, links)
             fields = fields.push(relocated)
             flags = flags.push(field.has_default)
             defaults = defaults.push(relocated.default)
@@ -383,6 +438,10 @@ impl MirLowering:
             self.struct_field_default_expr[key] = defaults
             self.class_type_names[key] = true
         for method_name in class_def.methods.keys():
-            val method = self.relocate_provider_callable(class_def.methods[method_name], provider, links)
+            # Annotated dict extraction — the exact module_build.spl #2693
+            # pattern; unannotated it loses the declared value type on the
+            # stage-native lane.
+            val method_id: SymbolId = class_def.methods[method_name]
+            val method = self.relocate_provider_callable(method_id, provider, links)
             if method.id >= 0:
                 self.struct_method_syms["{canonical}::{method_name}"] = method

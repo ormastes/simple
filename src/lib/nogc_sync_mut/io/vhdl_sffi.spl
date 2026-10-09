@@ -3,7 +3,11 @@
 # SFFI pattern for VHDL synthesis/simulation tools.
 # Wraps GHDL and Yosys command-line invocations.
 
-use std.nogc_sync_mut.io.process_ops.{process_run}
+use std.nogc_sync_mut.io.process_ops.{process_run, process_run_bounded}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.io.dir_ops.{is_dir, dir_remove_all}
+use std.nogc_sync_mut.io.env_ops.{cwd}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 
 # ============================================================================
 # Tier 1: File Extern Declarations (Raw SFFI)
@@ -37,40 +41,103 @@ fn vhdl_process_run(command: text, args: [text]) -> VhdlToolResult:
     vhdl_tool_result(result.2, result.0, result.1)
 
 # === GHDL Analysis & Elaboration ===
+# Explicit workspaces are caller-owned and reused for analyze/elaborate/run.
+# The compatibility API owns one private workspace per process, for sequential
+# callers only. Call ghdl_close_default_workspace after the complete workflow.
+# Concurrent workflows must use distinct explicit workspaces. A forked child
+# cannot reuse or remove its parent's compatibility workspace.
+var _ghdl_default_dir: text = ""
+var _ghdl_default_pid: i64 = 0
+
+fn ghdl_create_workspace(parent: text) -> Result<text, text>:
+    secure_temp_dir(parent, "simple-ghdl-")
+
+fn _ghdl_default_workspace() -> Result<text, text>:
+    val pid = getpid()
+    if _ghdl_default_dir != "" and _ghdl_default_pid == pid:
+        return Ok(_ghdl_default_dir)
+    val directory = ghdl_create_workspace("/tmp")?
+    _ghdl_default_dir = directory
+    _ghdl_default_pid = pid
+    Ok(directory)
+
+fn ghdl_close_default_workspace() -> bool:
+    if _ghdl_default_dir == "" or _ghdl_default_pid != getpid():
+        return true
+    if not dir_remove_all(_ghdl_default_dir):
+        return false
+    _ghdl_default_dir = ""
+    _ghdl_default_pid = 0
+    true
+
+fn _ghdl_absolute(path: text) -> text:
+    if path.starts_with("/"): path else: cwd() + "/" + path
+
+fn _ghdl_in(work_dir: text, args: [text]) -> VhdlToolResult:
+    # GHDL's --workdir redirects its library, not LLVM/GCC backend outputs.
+    # Change cwd ONLY in the child. The fixed shell program receives every
+    # path/argument as positional data (including spaces/quotes/metacharacters).
+    # This is the POSIX GHDL lane; no parent-global chdir or raw runtime hook.
+    if work_dir == "" or not is_dir(work_dir):
+        return vhdl_tool_result(-1, "", "GHDL workspace must already exist")
+    var child_args = ["-c", "CDPATH= cd -- \"$1\" && shift && exec \"$@\"", "simple-ghdl", _ghdl_absolute(work_dir), "ghdl"]
+    for arg in args:
+        child_args.push(arg)
+    val result = process_run("/bin/sh", child_args)
+    vhdl_tool_result(result.2, result.0, result.1)
 
 fn ghdl_available() -> bool:
-    """Check if GHDL is installed."""
-    vhdl_process_run("ghdl", ["--version"]).success
+    val result = process_run_bounded("ghdl", ["--version"], 10000, 65536)
+    result.2 == 0
 
-fn ghdl_analyze(vhdl_file: text) -> VhdlToolResult:
-    """Analyze a VHDL file with GHDL (syntax + semantic check)."""
-    vhdl_process_run("ghdl", ["-a", "--std=08", "--workdir=/tmp/ghdl_work", vhdl_file])
+fn ghdl_analyze_in(work_dir: text, vhdl_file: text) -> VhdlToolResult:
+    _ghdl_in(work_dir, ["-a", "--std=08", "--workdir=.", _ghdl_absolute(vhdl_file)])
 
-fn ghdl_elaborate(entity_name: text) -> VhdlToolResult:
-    """Elaborate a VHDL entity with GHDL."""
-    vhdl_process_run("ghdl", ["-e", "--std=08", "--workdir=/tmp/ghdl_work", entity_name])
+fn ghdl_elaborate_in(work_dir: text, entity_name: text) -> VhdlToolResult:
+    _ghdl_in(work_dir, ["-e", "--std=08", "--workdir=.", entity_name])
 
-fn ghdl_run(entity_name: text, stop_time: text?) -> VhdlToolResult:
-    """Run a VHDL simulation with GHDL."""
-    var args = ["-r", "--std=08", "--workdir=/tmp/ghdl_work", entity_name]
+fn ghdl_run_in(work_dir: text, entity_name: text, stop_time: text?) -> VhdlToolResult:
+    var args = ["-r", "--std=08", "--workdir=.", entity_name]
     match stop_time:
         Some(value):
-            args = args.push("--stop-time={value}")
+            args.push("--stop-time={value}")
         nil:
             pass_do_nothing("GHDL run has no stop time")
-    vhdl_process_run("ghdl", args)
+    _ghdl_in(work_dir, args)
 
-fn ghdl_synth(entity_name: text) -> VhdlToolResult:
-    """Synthesize a VHDL entity with GHDL (produces netlists)."""
-    vhdl_process_run("ghdl", ["--synth", "--std=08", "--workdir=/tmp/ghdl_work", entity_name])
+fn ghdl_synth_in(work_dir: text, entity_name: text) -> VhdlToolResult:
+    _ghdl_in(work_dir, ["--synth", "--std=08", "--workdir=.", entity_name])
 
-# reason: positional io vhdl_sffi API
-fn ghdl_analyze_and_elaborate(vhdl_file: text, entity_name: text) -> VhdlToolResult:
-    """Analyze and elaborate in one step."""
-    val analyze = ghdl_analyze(vhdl_file)
+fn ghdl_analyze_and_elaborate_in(work_dir: text, vhdl_file: text, entity_name: text) -> VhdlToolResult:
+    val analyze = ghdl_analyze_in(work_dir, vhdl_file)
     if not analyze.success:
         return analyze
-    ghdl_elaborate(entity_name)
+    ghdl_elaborate_in(work_dir, entity_name)
+
+fn ghdl_analyze(vhdl_file: text) -> VhdlToolResult:
+    match _ghdl_default_workspace():
+        Ok(directory): ghdl_analyze_in(directory, vhdl_file)
+        Err(message): vhdl_tool_result(-1, "", message)
+
+fn ghdl_elaborate(entity_name: text) -> VhdlToolResult:
+    match _ghdl_default_workspace():
+        Ok(directory): ghdl_elaborate_in(directory, entity_name)
+        Err(message): vhdl_tool_result(-1, "", message)
+
+fn ghdl_run(entity_name: text, stop_time: text?) -> VhdlToolResult:
+    match _ghdl_default_workspace():
+        Ok(directory): ghdl_run_in(directory, entity_name, stop_time)
+        Err(message): vhdl_tool_result(-1, "", message)
+
+fn ghdl_synth(entity_name: text) -> VhdlToolResult:
+    match _ghdl_default_workspace():
+        Ok(directory): ghdl_synth_in(directory, entity_name)
+        Err(message): vhdl_tool_result(-1, "", message)
+
+fn ghdl_analyze_and_elaborate(vhdl_file: text, entity_name: text) -> VhdlToolResult:
+    match _ghdl_default_workspace():
+        Ok(directory): ghdl_analyze_and_elaborate_in(directory, vhdl_file, entity_name)
+        Err(message): vhdl_tool_result(-1, "", message)
 
 # === Yosys Synthesis ===
 

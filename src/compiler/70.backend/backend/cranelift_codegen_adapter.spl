@@ -1,3 +1,4 @@
+use compiler.backend.float_literal_owner.{float_literal_scalar}
 # Cranelift Codegen Adapter
 #
 # Implements the Codegen trait for the Cranelift backend.
@@ -1116,6 +1117,8 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
     match value:
         case Int(v):
             return cranelift_iconst(ctx, const_int_cl_type(type_), v)
+        case FloatLexeme(v):
+            return cranelift_fconst(ctx, mir_type_to_cl(type_), float_literal_scalar(v))
         case Float(v):
             return cranelift_fconst(ctx, mir_type_to_cl(type_), v)
         case Bool(v):
@@ -1229,8 +1232,17 @@ fn cl_translate_unaryop(ctx: i64, op: MirUnaryOp, a: i64, operand: MirOperand, f
     match op:
         case Neg:
             if operand_is_float(operand, func):
-                val zero = cranelift_fconst(ctx, mir_type_to_cl(operand_type(operand, func)), 0.0)
-                cranelift_fsub(ctx, zero, a)
+                # IEEE negation flips only the sign bit. Subtracting from a
+                # host f64 zero also loses -0 and transports a compiler-owned
+                # float constant through the bootstrap ABI unnecessarily.
+                val float_type = mir_type_to_cl(operand_type(operand, func))
+                val narrow = operand_size(operand, func) == 4
+                val integer_type = if narrow: CL_TYPE_I32 else: CL_TYPE_I64
+                val bits = cranelift_bitcast(ctx, integer_type, a)
+                val sign = if narrow: 2147483648 else: -9223372036854775807 - 1
+                val mask = cranelift_iconst(ctx, integer_type, sign)
+                val negated = cranelift_bxor(ctx, bits, mask)
+                cranelift_bitcast(ctx, float_type, negated)
             else:
                 val zero = cranelift_iconst(ctx, mir_type_to_cl(operand_type(operand, func)), 0)
                 cranelift_isub(ctx, zero, a)

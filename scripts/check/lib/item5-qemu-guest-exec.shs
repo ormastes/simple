@@ -1,0 +1,22 @@
+#!/bin/sh
+# Launch one guest executable with the fixed QEMU profile and guest-only observer.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+[ "$#" -ge 4 ] || { echo 'usage: item5-qemu-guest-exec.shs PROFILE QEMU OBSERVER GUEST [ARGS...]' >&2; exit 2; }
+profile_name=$1 qemu=$2 observer=$3 guest=$4
+shift 4
+fields=$(perl -I "$root/scripts/check/lib" -MItem5QemuProfile -e '
+my $p = Item5QemuProfile::profile($ARGV[0]) or exit 2;
+print join("\t", @$p{qw(qemu sysroot cpu)}), "\n";
+' "$profile_name") || { echo 'unsupported fixed QEMU profile' >&2; exit 2; }
+IFS="$(printf '\t')" read -r expected_qemu sysroot cpu <<EOF
+$fields
+EOF
+[ "${qemu##*/}" = qemu-user ] && [ -x "$qemu" ] || { echo 'QEMU must be the staged fixed executable' >&2; exit 2; }
+[ -r "$observer" ] && [ -x "$guest" ] && [ -d "$sysroot" ] || { echo 'guest inputs or fixed sysroot are unavailable' >&2; exit 2; }
+case "$expected_qemu" in qemu-aarch64|qemu-riscv64) ;; *) echo 'invalid fixed QEMU executable profile' >&2; exit 2 ;; esac
+exec env -u LD_AUDIT -u LD_LIBRARY_PATH -u LD_PRELOAD \
+    -u SIMPLE_VECTOR_TEST_RECEIPT_OWNER \
+    "$qemu" -L "$sysroot" -cpu "$cpu" \
+    -E "LD_PRELOAD=$observer" -E SIMPLE_VECTOR_TEST_RECEIPT_OWNER=1 \
+    "$guest" "$@"

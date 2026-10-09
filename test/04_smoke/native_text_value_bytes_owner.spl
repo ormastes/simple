@@ -1,0 +1,100 @@
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes}
+use std.nogc_sync_mut.io.path_identity.{path_final_existing}
+
+@unsafe(reason: "regression for the ordinary C pointer-only text ABI", capabilities: [ffi])
+extern fn strlen(value: text) -> u64
+
+fn param_length(value: text) -> i64: value.len()
+fn forward(value: text) -> text: value
+fn param_contains(value: text, needle: text) -> bool: value.contains(needle)
+
+fn c_prefix_length(value: text) -> u64:
+    unsafe(capabilities: [ffi]):
+        strlen(value)
+
+fn byte_sum(values: [u8]) -> i64:
+    var total: i64 = 0
+    for value in values:
+        total = total + (value as i64)
+    total
+
+fn report_path(label: text, path: text):
+    match path_final_existing(path):
+        case Ok(_): print("{label}=OK")
+        case Err(reason): print("{label}={reason}")
+
+fn main() -> i64:
+    val before = "\0abc"
+    val middle = "a\0b"
+    val after = "ab\0"
+    val unicode = "é\0x"
+    val nul = "\0"
+    val ascii_length = param_length("abc")
+    val before_length = param_length(before)
+    val middle_length = param_length(middle)
+    val after_length = param_length(after)
+    val unicode_length = param_length(unicode)
+    val returned = forward(unicode)
+    val returned_length = param_length(returned)
+    val runtime_nul = text.from_char_code(0)
+    val produced = "a" + runtime_nul + "é" + "b"
+    val produced_length = param_length(forward(produced))
+    val found_nul = param_contains(unicode, nul)
+    val absent_nul = param_contains("abc", nul)
+    print("ASCII_PARAM_LENGTH={ascii_length}")
+    print("NUL_BEFORE_LENGTH={before_length}")
+    print("NUL_MIDDLE_LENGTH={middle_length}")
+    print("NUL_AFTER_LENGTH={after_length}")
+    print("UNICODE_PARAM_LENGTH={unicode_length}")
+    print("RETURN_LENGTH={returned_length}")
+    print("CONCAT_FORWARD_LENGTH={produced_length}")
+    print("NUL_CONTENT={found_nul}")
+    print("ASCII_NUL_CONTENT={absent_nul}")
+    val c_ascii = unsafe(capabilities: [ffi]): strlen("abc")
+    val c_nul = unsafe(capabilities: [ffi]): strlen(unicode)
+    val c_wrapped = c_prefix_length(unicode)
+    print("C_DIRECT_ASCII={c_ascii}")
+    print("C_DIRECT_NUL_PREFIX={c_nul}")
+    print("C_WRAPPER_NUL_PREFIX={c_wrapped}")
+    val ascii_bytes = "ABC".bytes()
+    val ascii_bytes_length = ascii_bytes.len()
+    val ascii_first = ascii_bytes[0] as i64
+    val ascii_last = ascii_bytes[2] as i64
+    val ascii_sum = byte_sum(ascii_bytes)
+    print("BYTES_ASCII_LENGTH={ascii_bytes_length}")
+    print("BYTES_ASCII_FIRST={ascii_first}")
+    print("BYTES_ASCII_LAST={ascii_last}")
+    print("BYTES_ASCII_SUM={ascii_sum}")
+    val unicode_bytes = "é".bytes()
+    val unicode_bytes_length = unicode_bytes.len()
+    val unicode_first = unicode_bytes[0] as i64
+    val unicode_last = unicode_bytes[1] as i64
+    val unicode_sum = byte_sum(unicode_bytes)
+    print("BYTES_UNICODE_LENGTH={unicode_bytes_length}")
+    print("BYTES_UNICODE_FIRST={unicode_first}")
+    print("BYTES_UNICODE_LAST={unicode_last}")
+    print("BYTES_UNICODE_SUM={unicode_sum}")
+    val nul_bytes = unicode.bytes()
+    val nul_bytes_length = nul_bytes.len()
+    val nul_byte = nul_bytes[2] as i64
+    val nul_last = nul_bytes[3] as i64
+    val nul_sum = byte_sum(nul_bytes)
+    print("BYTES_NUL_LENGTH={nul_bytes_length}")
+    print("BYTES_NUL_ZERO={nul_byte}")
+    print("BYTES_NUL_LAST={nul_last}")
+    print("BYTES_NUL_SUM={nul_sum}")
+    val provider_bytes = base_encoding_text_to_bytes(forward(unicode))
+    val provider_length = provider_bytes.len()
+    val provider_zero = provider_bytes[2] as i64
+    val provider_sum = byte_sum(provider_bytes)
+    print("PROVIDER_LENGTH={provider_length}")
+    print("PROVIDER_ZERO={provider_zero}")
+    print("PROVIDER_SUM={provider_sum}")
+    report_path("NORMAL_ROOT", ".")
+    report_path("EMPTY_PATH", "")
+    report_path("NUL_BEFORE_PATH", before)
+    report_path("NUL_MIDDLE_PATH", middle)
+    report_path("NUL_AFTER_PATH", after)
+    report_path("UNICODE_NUL_PATH", unicode)
+    report_path("CONCAT_NUL_PATH", produced)
+    0

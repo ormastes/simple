@@ -106,19 +106,27 @@ def main():
     parser.add_argument('--source-root', required=True, type=Path)
     parser.add_argument('--output-root', required=True, type=Path)
     parser.add_argument('--jobs', type=int, default=20)
+    parser.add_argument('--worker-memory-mb', type=int, default=0)
     operation = parser.add_mutually_exclusive_group()
     operation.add_argument('--prepare-only', action='store_true')
     operation.add_argument('--resume-prepared', action='store_true')
     args = parser.parse_args()
     if not 1 <= args.jobs <= 128:
         parser.error('jobs must be 1..128 and match the caller-admitted lane')
+    if not 0 <= args.worker_memory_mb <= 1048576:
+        parser.error('worker-memory-mb must be 0 (disabled) or 1..1048576 MiB')
     seed, source, output = args.seed.resolve(), args.source_root.resolve(), args.output_root.resolve()
     if digest(seed) != args.seed_sha256:
         parser.error('seed byte identity differs')
     inputs = ['config/simple.test.sdn', 'config/sdoctest.sdn',
               'src/app/test_runner_new/main.spl',
               'src/app/test_runner_new/test_runner_main.spl',
-              'src/lib/nogc_sync_mut/test_runner/test_runner_files.spl']
+              'src/lib/nogc_sync_mut/test_runner/test_runner_files.spl',
+              'src/lib/nogc_sync_mut/test_runner/test_runner_args.spl',
+              'src/lib/nogc_sync_mut/test_runner/test_runner_types.spl',
+              'src/lib/nogc_sync_mut/test_runner/test_runner_async.spl',
+              'src/lib/nogc_sync_mut/test_runner/worker_memory.spl',
+              'src/lib/common/convert.spl']
     pins = {name: digest(source / name) for name in inputs}
     if not args.resume_prepared:
         output.mkdir(parents=True, exist_ok=False)
@@ -126,6 +134,8 @@ def main():
         parser.error('prepared physical output root unavailable')
     command = [str(seed), 'test', '--whole', '--parallel', f'--max-workers={args.jobs}',
                '--unstable', '--mode=interpreter', '--json']
+    if args.worker_memory_mb:
+        command.append(f'--worker-memory-mb={args.worker_memory_mb}')
     environment = os.environ.copy()
     environment.pop('SIMPLE_TEST_RUNNER_RUST', None)
     environment.update(SIMPLE_BINARY=str(seed), SIMPLE_RUNTIME=str(seed),
@@ -134,6 +144,7 @@ def main():
     request = dict(schema='simple-phase1-whole-tests-v1', seed=str(seed),
                    seed_sha256=args.seed_sha256, source_root=str(source),
                    input_hashes=pins, command=command, jobs=args.jobs,
+                   worker_memory_mb=args.worker_memory_mb,
                    cache_policy='runner-owned compatible cache; no clean/force-rebuild',
                    admission='caller-owned; this callback creates no background owners')
     request_path = output / 'request.json'
