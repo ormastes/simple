@@ -59,11 +59,13 @@ content+producer keyed and lane-partitioned
 
 Apply them to an interactive shell with
 `eval "$(sh scripts/setup/host-env.shs --cache-env)"` (or call
-`host_config_apply_cache_env` after sourcing). Merely sourcing host-env does
-not apply them, and bootstrap never does — it pins its own lane caches. The
-exception is `cache_root`, whose consumer variable is its own override name:
-`bootstrap/lib/host-shared-cache.shs` reads it with `--get cache_root` in a
-child shell. A native binary started without the eval does not read the file.
+`host_config_apply_cache_env` after sourcing). Sourcing host-env exports no
+cache key at all — not even `SIMPLE_HOST_CACHE_ROOT`, which `cache_root.spl`
+reads live — so `run-phase1-local.shs` and other sourcing entrypoints keep an
+unchanged `machine_cache_root()`. Bootstrap never applies them:
+`bootstrap-from-scratch.sh` sets `SIMPLE_CACHE` via centralized storage before
+the host-shared cache helper runs, and pins its own lane caches. A native
+binary started without the eval does not read the file.
 `--init` writes all cache keys commented with this host's defaults, so a fresh
 setup changes no cache env.
 
@@ -76,7 +78,7 @@ sh scripts/setup/host-env.shs --print      # effective value + winning layer per
 sh scripts/setup/host-env.shs --get llvm_root
 eval "$(sh scripts/setup/host-env.shs --cache-env)"   # cache defaults for unset vars
 sh scripts/setup/host-env.shs --selftest   # fixtures incl. env > user > host > default
-. scripts/setup/host-env.shs               # export SIMPLE_HOST_<KEY> into this shell
+. scripts/setup/host-env.shs               # export SIMPLE_HOST_<KEY> (non-cache keys) into this shell
 ```
 
 `--init` detects: CPU count (`getconf`/`nproc`/`sysctl`), family and features

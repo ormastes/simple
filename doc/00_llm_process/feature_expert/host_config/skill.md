@@ -17,9 +17,7 @@ os, LLVM root/version, gpu) out of scripts and tracked files.
 - Versioned defaults (values commented): `config/host/host_config.sdn`
 - Shell reader/generator: `scripts/setup/host-env.shs` (`--get`, `--print`, `--init`, `--selftest`)
 - Simple reader: `src/lib/common/config_core/host_config.spl`
-- Consumers: `scripts/bootstrap/bootstrap-build-jobs-policy.shs`,
-  `scripts/bootstrap/lib/host-shared-cache.shs` (`cache_root`),
-  `scripts/setup/platform-detect.shs`, `scripts/setup/llvm-toolchain-env.shs`,
+- Consumers: `scripts/bootstrap/bootstrap-build-jobs-policy.shs`,  `scripts/setup/platform-detect.shs`, `scripts/setup/llvm-toolchain-env.shs`,
   `CpuFeatureSet.from_host_config` in `src/lib/nogc_sync_mut/simd/host_cpu_config.spl`
 - Setup hook: `scripts/setup/setup.shs` runs `host-env.shs --init`
 - Spec: `test/01_unit/lib/common/config_core/host_config_spec.spl`
@@ -44,8 +42,9 @@ os, LLVM root/version, gpu) out of scripts and tracked files.
   `SIMPLE_FRONTEND_CACHE`, `SIMPLE_HIR_CACHE`, `SIMPLE_NATIVE_BUILD_CACHE_DIR`,
   `SIMPLE_CACHE_MAX_BYTES`, `SIMPLE_CACHE_MAX_GB`); a set consumer var wins.
   Applied only by `eval "$(host-env.shs --cache-env)"` /
-  `host_config_apply_cache_env`, never by sourcing, never in bootstrap (except
-  `cache_root` via `--get` in `bootstrap/lib/host-shared-cache.shs`). They may
+  `host_config_apply_cache_env`; `host_config_load` (sourcing) skips all cache
+  keys because `SIMPLE_HOST_CACHE_ROOT` is a live consumer; bootstrap never
+  applies them (centralized storage sets `SIMPLE_CACHE` first). They may
   pick dirs/lane/on-off/caps, never disable producer keying or lane
   partitioning; `cache_scope` is validated as a single dir segment.
   Twin tables: `host_config_cache_var` in both readers (selftest case g, spec

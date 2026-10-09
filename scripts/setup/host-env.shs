@@ -29,7 +29,7 @@
 # config/host/host_config.sdn) and exports SIMPLE_HOST_<KEY> for each key that
 # resolves non-empty. Executed directly: --get KEY | --print | --init |
 # --cache-env (export lines for the cache keys' consumer vars, see
-# host_config_apply_cache_env; never applied by merely sourcing).
+# host_config_apply_cache_env; cache keys are never exported by sourcing).
 #
 # host_env_apply_path() prepends SIMPLE_HOST_PATH_PREPEND onto PATH,
 # idempotently — sourcing this file (or calling the function) more than once
@@ -291,8 +291,13 @@ host_config_get() {
 # host_config_load ROOT -> exports SIMPLE_HOST_<KEY> for every key that
 # resolves to a non-empty value. Keys that resolve empty are left unset, so a
 # host with no user file exports nothing (the shipped defaults are comments).
+# Cache keys are skipped: SIMPLE_HOST_CACHE_ROOT is a live consumer
+# (cache_root.spl), so exporting it on every sourcing would relocate
+# machine_cache_root() for run-phase1-local.shs and friends. Cache keys are
+# applied only by --cache-env / host_config_apply_cache_env (or read by --get).
 host_config_load() {
     for _hc_k in ${HOST_CONFIG_KEYS}; do
+        case " ${HOST_CONFIG_CACHE_KEYS} " in *" ${_hc_k} "*) continue ;; esac
         _hc_v=$(host_config_get "${_hc_k}" "$1")
         [ -n "${_hc_v}" ] || continue
         _hc_n=$(host_config_env_name "${_hc_k}")
@@ -326,11 +331,9 @@ host_config_cache_env() {
 # host_config_apply_cache_env [ROOT] -> exports host_config_cache_env's
 # defaults into the current shell. Explicit, like host_env_apply_path: merely
 # sourcing this file does NOT apply them, so bootstrap entrypoints that source
-# it (run-phase1-local.shs) keep their pinned, lane-private cache env. The one
-# exception is cache_root: its consumer variable IS its own SIMPLE_HOST_CACHE_ROOT
-# override, so host_config_load exports it. That only relocates the host-shared
-# content-addressed CAS base, which bootstrap/lib/host-shared-cache.shs also
-# reads through `--get cache_root` — never a lane cache, never a key.
+# it (run-phase1-local.shs) keep their pinned, lane-private cache env and an
+# unchanged machine_cache_root() — host_config_load skips every cache key,
+# including cache_root (whose consumer var is SIMPLE_HOST_CACHE_ROOT itself).
 host_config_apply_cache_env() {
     _hca_lines=$(host_config_cache_env "${1:-${_host_env_repo_root}}")
     [ -n "${_hca_lines}" ] || return 0
@@ -696,6 +699,23 @@ EOF
     _st_v=$(host_config_get cache_max_gb "${_st_dir}" 2>/dev/null); [ -z "${_st_v}" ] || _st_h_ok=0
     _st_v=$(host_config_get cache_scope "${_st_dir}" 2>/dev/null); [ -z "${_st_v}" ] || _st_h_ok=0
     _st_v=$(SIMPLE_HOST_CACHE_SCOPE='a/b' host_config_get cache_scope "${_st_dir}" 2>/dev/null); [ -z "${_st_v}" ] || _st_h_ok=0
+    # Sourcing must export NO cache key (machine_cache_root() and the bootstrap
+    # lane env stay untouched) while still exporting ordinary keys.
+    printf 'host_config:\n  max_threads: 3\n  cache_root: /st/cache-base\n  cache_scope: devlane\n  frontend_cache: off\n' >"${_st_dir}/srcuser.sdn"
+    _st_v=$(unset SIMPLE_HOST_CACHE_ROOT SIMPLE_CACHE_SCOPE SIMPLE_FRONTEND_CACHE SIMPLE_HOST_CACHE_SCOPE \
+        SIMPLE_HOST_FRONTEND_CACHE SIMPLE_HOST_MAX_THREADS
+        SIMPLE_HOST_CONFIG="${_st_dir}/srcuser.sdn"
+        . "${_host_env_self}" >/dev/null 2>&1
+        printf '%s|%s|%s|%s|%s' "${SIMPLE_HOST_CACHE_ROOT:-}" "${SIMPLE_CACHE_SCOPE:-}" \
+            "${SIMPLE_FRONTEND_CACHE:-}" "${SIMPLE_HOST_CACHE_SCOPE:-}" "${SIMPLE_HOST_MAX_THREADS:-}")
+    [ "${_st_v}" = "||||3" ] || { printf '# sourcing leaked cache env: %s\n' "${_st_v}"; _st_h_ok=0; }
+    # --cache-env round-trips through eval with a quote and a backslash.
+    printf 'host_config:\n  cache_root: /st/it'"'"'s\\dir\n' >"${_st_dir}/quoteuser.sdn"
+    _st_v=$(unset SIMPLE_HOST_CACHE_ROOT
+        _st_out=$(SIMPLE_HOST_CONFIG="${_st_dir}/quoteuser.sdn" sh "${_host_env_self}" --cache-env)
+        eval "${_st_out}"
+        printf '%s' "${SIMPLE_HOST_CACHE_ROOT:-}")
+    [ "${_st_v}" = "/st/it's\\dir" ] || { printf '# --cache-env round trip got: %s\n' "${_st_v}"; _st_h_ok=0; }
     if [ "${_st_h_ok}" -eq 1 ]; then
         printf 'ok - (g) cache keys map to their consumer vars, validate, and a set consumer var wins\n'
         _st_pass=$((_st_pass + 1))
