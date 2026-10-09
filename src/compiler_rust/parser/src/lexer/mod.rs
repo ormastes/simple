@@ -35,6 +35,9 @@ pub struct Lexer<'a> {
     line_mask: Option<std::sync::Arc<crate::cond_compile::LineMask>>,
     /// Diagnostics from conditional-compilation evaluation (unsupported atoms etc.).
     pub cond_diagnostics: Vec<String>,
+    /// `false` when the directives are unbalanced (stray `@elif`/`@else`/
+    /// `@end`, unclosed `@when`): the parser fails closed on this.
+    pub cond_balanced: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -45,16 +48,19 @@ impl<'a> Lexer<'a> {
 
     /// Like `new`, but evaluates `@when(...)` conditions against an explicit target.
     pub fn new_for_target(source: &'a str, os: &str, arch: &str) -> Self {
-        let (line_mask, cond_diagnostics) = match crate::cond_compile::inactive_line_mask(source, os, arch) {
-            Some(mut mask) => {
-                let diags = std::mem::take(&mut mask.diagnostics);
-                (Some(std::sync::Arc::new(mask)), diags)
-            }
-            None => (None, Vec::new()),
-        };
+        let (line_mask, cond_diagnostics, cond_balanced) =
+            match crate::cond_compile::inactive_line_mask(source, os, arch) {
+                Some(mut mask) => {
+                    let diags = std::mem::take(&mut mask.diagnostics);
+                    let balanced = mask.balanced;
+                    (Some(std::sync::Arc::new(mask)), diags, balanced)
+                }
+                None => (None, Vec::new(), true),
+            };
         Self {
             line_mask,
             cond_diagnostics,
+            cond_balanced,
             source,
             chars: source.char_indices().peekable(),
             current_pos: 0,
@@ -82,6 +88,7 @@ impl<'a> Lexer<'a> {
             pending_tokens: Vec::new(),
             line_mask: None,
             cond_diagnostics: Vec::new(),
+            cond_balanced: true,
             at_line_start: false, // Don't treat leading whitespace as indentation
             bracket_depth: 0,
             force_indentation_depth: 0,

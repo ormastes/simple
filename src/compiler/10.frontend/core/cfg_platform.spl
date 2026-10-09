@@ -22,116 +22,68 @@ fn cfg_strip_quotes(value: text) -> text:
             return trimmed.slice(1, trimmed.len() - 1)
     trimmed
 
+# Environment / host spelling -> canonical cfg OS. This is the ONE fuzzy rule
+# shared with the seed (`cond_compile.rs` `normalize_host_os`): lowercase,
+# then the first matching substring in this order. `Windows_NT`, `darwin23`,
+# `linux-gnu`, `uname -s` output all resolve. Atom VALUES inside @when/@cfg
+# use the exact alias table in parser_preprocessor.spl instead.
 fn cfg_normalize_os(raw: text) -> text:
-    val value = cfg_strip_quotes(raw).trim()
+    val value = cfg_strip_quotes(raw).trim().to_lower()
     if value == "":
         return ""
-
-    val is_win = value == "win" or value == "WIN"
-    val is_win2 = value == "windows" or value == "Windows"
-    val is_win3 = value == "Windows_NT" or value.contains("Windows")
-    if is_win or is_win2 or is_win3:
+    if value == "win" or value.contains("windows"):
         return "windows"
-
-    val is_linux = value == "linux" or value == "Linux"
-    val is_linux2 = value.contains("linux") or value.contains("Linux")
-    if is_linux or is_linux2:
+    if value.contains("linux"):
         return "linux"
-
-    val is_macos = value == "mac" or value == "macos"
-    val is_macos2 = value == "MacOS" or value == "darwin" or value == "Darwin"
-    val is_macos3 = value.contains("darwin") or value.contains("Darwin")
-    val is_macos4 = value.contains("macOS") or value.contains("Mac")
-    if is_macos or is_macos2 or is_macos3 or is_macos4:
+    if value == "mac" or value.contains("macos") or value.contains("darwin") or value.contains("mac"):
         return "macos"
-
-    val is_freebsd = value == "freebsd" or value == "FreeBSD"
-    val is_freebsd2 = value.contains("freebsd") or value.contains("FreeBSD")
-    if is_freebsd or is_freebsd2:
+    if value.contains("freebsd"):
         return "freebsd"
-
-    val is_openbsd = value == "openbsd" or value == "OpenBSD"
-    val is_openbsd2 = value.contains("openbsd") or value.contains("OpenBSD")
-    if is_openbsd or is_openbsd2:
+    if value.contains("openbsd"):
         return "openbsd"
-
-    val is_simpleos = value == "simpleos" or value == "SimpleOS"
-    val is_simpleos2 = value.contains("simpleos") or value.contains("SimpleOS")
-    if is_simpleos or is_simpleos2:
+    if value.contains("simpleos"):
         return "simpleos"
-
-    val is_netbsd = value == "netbsd" or value == "NetBSD"
-    val is_netbsd2 = value.contains("netbsd") or value.contains("NetBSD")
-    if is_netbsd or is_netbsd2:
+    if value.contains("netbsd"):
         return "netbsd"
-
-    val is_android = value == "android" or value == "Android"
-    val is_android2 = value.contains("android") or value.contains("Android")
-    if is_android or is_android2:
+    if value.contains("android"):
         return "android"
-
-    val is_unix = value == "unix" or value == "Unix"
-    val is_unix2 = value.contains("unix") or value.contains("Unix")
-    if is_unix or is_unix2:
+    if value.contains("unix"):
         return "unix"
-
-    # Bare metal: SIMPLE_TARGET_OS=none must select the `none` target, not
-    # fall through to the host OS (the seed's normalize_os accepts the same).
+    # Bare metal: SIMPLE_TARGET_OS=none selects the `none` target, never the
+    # host OS.
     if value == "none" or value == "baremetal":
         return "none"
-
     ""
 
+# Environment / host spelling -> canonical cfg arch; same shared fuzzy rule
+# as the seed's `normalize_host_arch` (`AMD64`, `x86_64-pc-linux-gnu`,
+# `riscv64gc`, `uname -m` output).
 fn cfg_normalize_arch(raw: text) -> text:
-    val value = cfg_strip_quotes(raw).trim()
+    val value = cfg_strip_quotes(raw).trim().to_lower()
     if value == "":
         return ""
-
-    val is_x64 = value == "x86_64" or value == "amd64" or value == "AMD64"
-    val is_x64_2 = value == "x64" or value == "X64"
-    val is_x64_3 = value.contains("x86_64") or value.contains("amd64") or value.contains("AMD64")
-    if is_x64 or is_x64_2 or is_x64_3:
+    if value == "x64" or value.contains("x86_64") or value.contains("amd64"):
         return "x86_64"
-
-    val is_x86 = value == "x86" or value == "X86"
-    val is_x86_2 = value == "i386" or value == "i686"
-    val is_x86_3 = value.contains("i386") or value.contains("i686")
-    if is_x86 or is_x86_2 or is_x86_3:
+    if value == "x86" or value.contains("i386") or value.contains("i686"):
         return "x86"
-
-    val is_aarch64 = value == "aarch64" or value == "arm64" or value == "ARM64"
-    val is_aarch64_2 = value.contains("aarch64") or value.contains("arm64")
-    if is_aarch64 or is_aarch64_2:
+    if value.contains("aarch64") or value.contains("arm64"):
         return "aarch64"
-
     # Thumb-only Cortex-M targets keep their own cfg arch value (the strict
     # target evaluator and frontend_cfg_target_from_triple_v1 use these names).
-    if value.starts_with("thumbv6m") or value.starts_with("thumbv7m") or
-            value.starts_with("thumbv7em"):
-        return if value.starts_with("thumbv6m"): "thumbv6m"
-            elif value.starts_with("thumbv7em"): "thumbv7em"
-            else: "thumbv7m"
-
-    val is_arm = value == "arm" or value == "ARM" or value == "arm32"
-    val is_arm2 = value == "armv7" or value == "armv6"
-    val is_arm3 = value.contains("armv7") or value.contains("armv6")
-    if is_arm or is_arm2 or is_arm3:
+    if value.starts_with("thumbv6m"):
+        return "thumbv6m"
+    if value.starts_with("thumbv7em"):
+        return "thumbv7em"
+    if value.starts_with("thumbv7m"):
+        return "thumbv7m"
+    if value == "arm" or value == "arm32" or value.contains("armv7") or value.contains("armv6"):
         return "arm"
-
-    val is_riscv64 = value == "riscv64" or value.contains("riscv64")
-    if is_riscv64:
+    if value.contains("riscv64"):
         return "riscv64"
-
-    val is_riscv32 = value == "riscv32" or value.contains("riscv32")
-    if is_riscv32:
+    if value.contains("riscv32"):
         return "riscv32"
-
-    val is_ppc64le = value == "ppc64le" or value == "ppc64el"
-    val is_ppc64le2 = value == "powerpc64le"
-    val is_ppc64le3 = value.contains("ppc64le") or value.contains("powerpc64le")
-    if is_ppc64le or is_ppc64le2 or is_ppc64le3:
+    if value == "ppc64el" or value.contains("ppc64le") or value.contains("powerpc64le"):
         return "ppc64le"
-
     ""
 
 # OS set that the `unix` cfg predicate / `family = "unix"` key selects.

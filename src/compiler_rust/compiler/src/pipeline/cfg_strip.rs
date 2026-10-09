@@ -44,18 +44,25 @@ use simple_parser::ast::{Attribute, Node};
 /// lexer path); unbalanced directives fail closed instead of compiling both
 /// branches.
 pub(crate) fn strip_os_when_blocks(source: &str, target: Target) -> Result<String, String> {
-    let (selected, diagnostics) =
-        simple_parser::cond_compile::select_branches(source, target.os.name(), target.arch.name());
-    if let Some(error) = diagnostics
-        .iter()
-        .find(|d| d.contains("without @when") || d.contains("unclosed"))
-    {
-        return Err(error.clone());
+    let selection = simple_parser::cond_compile::select_branches(source, target.os.name(), target.arch.name());
+    if !selection.balanced {
+        return Err(selection.diagnostics.join("; "));
     }
-    for diagnostic in &diagnostics {
-        eprintln!("warning: conditional compilation ({}/{}): {diagnostic}", target.os.name(), target.arch.name());
+    for diagnostic in &selection.diagnostics {
+        let line = format!("warning: conditional compilation ({}/{}): {diagnostic}", target.os.name(), target.arch.name());
+        // One file is reached by several lanes (discovery, siblings, import
+        // loader, parsed-source cache): print each distinct warning once.
+        let first_time = WARNED.with(|cell| cell.borrow_mut().insert(line.clone()));
+        if first_time {
+            eprintln!("{line}");
+        }
     }
-    Ok(selected)
+    Ok(selection.source)
+}
+
+thread_local! {
+    /// Conditional-compilation warnings already printed on this thread.
+    static WARNED: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
 /// Resolve a `@cfg(...)` condition name to an architecture, if it names one.
@@ -471,9 +478,12 @@ mod tests {
         // Unknown atoms evaluate false (same as the lexer): the branch is dropped.
         let unknown = "@when(os=\"unknown\"):\nval A = 1\n@end\n";
         assert_eq!(strip_inactive_cfg_arch_globals(unknown, TargetArch::host()), "\n\n\n");
-        // Unbalanced blocks are left untouched so the parser still rejects them.
+        // Unbalanced blocks are left untouched; the parser's own lexer-side
+        // mask then fails closed on them (`cond_compile` `balanced == false`
+        // is a syntax error), so neither branch is ever compiled.
         let malformed = "@when(os=\"windows\"):\nval A = 1\n";
         assert_eq!(strip_inactive_cfg_arch_globals(malformed, TargetArch::host()), malformed);
+        assert!(simple_parser::Parser::new(malformed).parse().is_err());
     }
 
     #[test]

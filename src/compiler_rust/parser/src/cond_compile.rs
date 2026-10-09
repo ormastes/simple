@@ -4,8 +4,9 @@
 //! This is the seed half of ONE grammar shared with the pure-Simple
 //! preprocessor (`src/compiler/10.frontend/core/parser_preprocessor.spl`,
 //! pass 1). Both are pinned to the same corpus,
-//! `test/fixtures/conditional_compile/conformance/` (see `expectations.tsv`),
-//! by `parser/tests/when_block_conformance.rs` here and
+//! `test/fixtures/conditional_compile/conformance/` (see `expectations.tsv`,
+//! `env_targets.tsv`, `owner_files.txt`), by
+//! `parser/tests/when_block_conformance.rs` here and
 //! `test/01_unit/compiler/frontend/when_block_conformance_spec.spl` there.
 //!
 //! Grammar (identical on both sides):
@@ -15,7 +16,8 @@
 //!     own indentation), never dedented. Line numbers are preserved.
 //!   * Conditions: `or`/`||`, `and`/`&&`, `not`/`!`, parentheses, atoms.
 //!   * Atom values may be quoted (`"` or `'`) and are case-insensitive; a
-//!     key/value atom uses `=` or `==`, spaces allowed.
+//!     key/value atom uses `=` or `==`, with any spacing (`os="x"`, `os = "x"`,
+//!     `os ="x"`, `os= "x"` are all one atom: `=`/`==` are tokens of their own).
 //!   * Atoms: `true` `compiled` `debug` (true); `false` `interpreter`
 //!     `release` (false); a bare OS or arch name; `os=`/`platform=`/
 //!     `target_os=` (OS); `arch=`/`target_arch=`/`cpu=` (arch);
@@ -27,11 +29,20 @@
 //!   * Arch names: x86_64 (amd64, x64), x86 (i386, i686), aarch64 (arm64),
 //!     arm (arm32, armv6, armv7), riscv64, riscv32, ppc64le (ppc64el,
 //!     powerpc64le), thumbv6m, thumbv7m, thumbv7em.
+//!   * Structure: `@elif`/`@else`/`@end` without an open `@when`, or an
+//!     unclosed `@when`, leave the mask `balanced == false`. Every consumer
+//!     fails closed on that (the parser returns a syntax error, the text
+//!     strip path returns `Err`): both branches are never compiled.
 //!
 //! Target selection: `SIMPLE_TARGET_OS` / `SIMPLE_TARGET_ARCH`, else the
 //! `SIMPLE_NATIVE_BUILD_TARGET` triple, else the host -- the same order as
 //! `cfg_platform.spl` (`cfg_detect_os` / `cfg_detect_arch`). An explicit
-//! target (`Lexer::new_for_target`) overrides all of them.
+//! target (`Lexer::new_for_target`) overrides all of them. Environment and
+//! host spellings are normalised with the FUZZY rule shared with
+//! `cfg_normalize_os` / `cfg_normalize_arch` ([`normalize_host_os`],
+//! [`normalize_host_arch`]: lowercase, substring match in a fixed order, so
+//! `Windows_NT`, `darwin23`, `linux-gnu`, `AMD64`, `x86_64-pc-linux-gnu` all
+//! resolve); atom VALUES use the exact alias table above.
 
 /// Canonical OS name for an atom value, or `""` if unknown.
 pub fn normalize_os(raw: &str) -> &'static str {
@@ -67,6 +78,89 @@ pub fn normalize_arch(raw: &str) -> &'static str {
     }
 }
 
+/// Canonical OS for an environment / host spelling (`Windows_NT`,
+/// `darwin23.1`, `linux-gnu`, `uname -s` output...). Mirrors
+/// `cfg_platform.spl` `cfg_normalize_os` exactly: lowercase, then the first
+/// matching substring in this order.
+pub fn normalize_host_os(raw: &str) -> &'static str {
+    let v = strip_quotes(raw).to_ascii_lowercase();
+    if v.is_empty() {
+        return "";
+    }
+    if v == "win" || v.contains("windows") {
+        return "windows";
+    }
+    if v.contains("linux") {
+        return "linux";
+    }
+    if v == "mac" || v.contains("macos") || v.contains("darwin") || v.contains("mac") {
+        return "macos";
+    }
+    if v.contains("freebsd") {
+        return "freebsd";
+    }
+    if v.contains("openbsd") {
+        return "openbsd";
+    }
+    if v.contains("simpleos") {
+        return "simpleos";
+    }
+    if v.contains("netbsd") {
+        return "netbsd";
+    }
+    if v.contains("android") {
+        return "android";
+    }
+    if v.contains("unix") {
+        return "unix";
+    }
+    if v == "none" || v == "baremetal" {
+        return "none";
+    }
+    ""
+}
+
+/// Canonical arch for an environment / host spelling (`AMD64`,
+/// `x86_64-pc-linux-gnu`, `riscv64gc`, `uname -m` output...). Mirrors
+/// `cfg_platform.spl` `cfg_normalize_arch` exactly.
+pub fn normalize_host_arch(raw: &str) -> &'static str {
+    let v = strip_quotes(raw).to_ascii_lowercase();
+    if v.is_empty() {
+        return "";
+    }
+    if v == "x64" || v.contains("x86_64") || v.contains("amd64") {
+        return "x86_64";
+    }
+    if v == "x86" || v.contains("i386") || v.contains("i686") {
+        return "x86";
+    }
+    if v.contains("aarch64") || v.contains("arm64") {
+        return "aarch64";
+    }
+    if v.starts_with("thumbv6m") {
+        return "thumbv6m";
+    }
+    if v.starts_with("thumbv7em") {
+        return "thumbv7em";
+    }
+    if v.starts_with("thumbv7m") {
+        return "thumbv7m";
+    }
+    if v == "arm" || v == "arm32" || v.contains("armv7") || v.contains("armv6") {
+        return "arm";
+    }
+    if v.contains("riscv64") {
+        return "riscv64";
+    }
+    if v.contains("riscv32") {
+        return "riscv32";
+    }
+    if v == "ppc64el" || v.contains("ppc64le") || v.contains("powerpc64le") {
+        return "ppc64le";
+    }
+    ""
+}
+
 /// OS set selected by the `unix` predicate / `family=unix`.
 pub fn is_unix(os: &str) -> bool {
     matches!(
@@ -84,7 +178,7 @@ pub fn triple_os(triple: &str) -> &'static str {
         if lower == "none" || lower == "baremetal" {
             return "none";
         }
-        let os = if lower == "win32" { "windows" } else { normalize_os(&lower) };
+        let os = if lower == "win32" { "windows" } else { normalize_host_os(&lower) };
         if !os.is_empty() && os != "unix" {
             return os;
         }
@@ -92,31 +186,15 @@ pub fn triple_os(triple: &str) -> &'static str {
     ""
 }
 
-/// cfg arch of a target triple (`riscv64gc-unknown-linux-gnu` -> `riscv64`).
-/// Mirrors `cfg_platform.spl` `cfg_triple_arch`.
+/// cfg arch of a target triple (`riscv64gc-unknown-linux-gnu` -> `riscv64`);
+/// a single component is not a triple. Mirrors `cfg_platform.spl`
+/// `cfg_triple_arch`.
 pub fn triple_arch(triple: &str) -> &'static str {
-    let first = triple.trim().split('-').next().unwrap_or("").to_ascii_lowercase();
-    let exact = normalize_arch(&first);
-    if !exact.is_empty() {
-        return exact;
+    let parts: Vec<&str> = triple.trim().split('-').collect();
+    if parts.len() < 2 {
+        return "";
     }
-    const PREFIXES: [(&str, &str); 10] = [
-        ("riscv64", "riscv64"),
-        ("riscv32", "riscv32"),
-        ("thumbv7em", "thumbv7em"),
-        ("thumbv7m", "thumbv7m"),
-        ("thumbv6m", "thumbv6m"),
-        ("aarch64", "aarch64"),
-        ("x86_64", "x86_64"),
-        ("powerpc64le", "ppc64le"),
-        ("armv7", "arm"),
-        ("armv6", "arm"),
-    ];
-    PREFIXES
-        .iter()
-        .find(|(prefix, _)| first.starts_with(prefix))
-        .map(|(_, arch)| *arch)
-        .unwrap_or("")
+    normalize_host_arch(parts[0])
 }
 
 fn env_value(key: &str) -> String {
@@ -128,22 +206,22 @@ fn env_value(key: &str) -> String {
 /// triple > host.
 pub fn default_target() -> (&'static str, &'static str) {
     let triple = env_value("SIMPLE_NATIVE_BUILD_TARGET");
-    let mut os = normalize_os(&env_value("SIMPLE_TARGET_OS"));
+    let mut os = normalize_host_os(&env_value("SIMPLE_TARGET_OS"));
     if os.is_empty() {
         os = triple_os(&triple);
     }
     if os.is_empty() {
-        os = match normalize_os(std::env::consts::OS) {
+        os = match normalize_host_os(std::env::consts::OS) {
             "" => "unknown",
             host => host,
         };
     }
-    let mut arch = normalize_arch(&env_value("SIMPLE_TARGET_ARCH"));
+    let mut arch = normalize_host_arch(&env_value("SIMPLE_TARGET_ARCH"));
     if arch.is_empty() {
         arch = triple_arch(&triple);
     }
     if arch.is_empty() {
-        arch = match normalize_arch(std::env::consts::ARCH) {
+        arch = match normalize_host_arch(std::env::consts::ARCH) {
             "" => "unknown",
             host => host,
         };
@@ -281,7 +359,8 @@ impl CondEval<'_> {
             return value;
         }
         let atom = self.take();
-        // Re-join a spaced `key = value` / `key == value` atom.
+        // `=` / `==` are tokens of their own: re-join `key`, operator, value
+        // into one atom whatever the spacing was.
         let mut eq = String::new();
         while matches!(self.peek(), "=" | "==") {
             eq.push_str(&self.take());
@@ -312,10 +391,14 @@ fn tokenize_condition(condition: &str) -> Vec<String> {
                 flush(&mut current, &mut tokens);
                 tokens.push(ch.to_string());
             }
-            '&' | '|' if chars.get(i + 1) == Some(&ch) => {
+            '&' | '|' | '=' if chars.get(i + 1) == Some(&ch) => {
                 flush(&mut current, &mut tokens);
                 tokens.push(format!("{ch}{ch}"));
                 i += 1;
+            }
+            '=' => {
+                flush(&mut current, &mut tokens);
+                tokens.push("=".to_string());
             }
             _ => current.push(ch),
         }
@@ -370,6 +453,9 @@ fn paren_condition(line: &str) -> &str {
 pub struct LineMask {
     /// `true` for directive lines and lines of inactive branches.
     pub skip: Vec<bool>,
+    /// `false` when a directive had no open `@when` or a `@when` was never
+    /// closed. Consumers must fail closed on this (see module docs).
+    pub balanced: bool,
     /// Unsupported atoms / unbalanced directives (never parse errors).
     pub diagnostics: Vec<String>,
 }
@@ -390,6 +476,7 @@ pub fn inactive_line_mask(source: &str, os: &str, arch: &str) -> Option<LineMask
     let mut active = true;
     let mut skip = Vec::new();
     let mut diagnostics = Vec::new();
+    let mut balanced = true;
     let mut any = false;
     for (index, line) in source.split('\n').enumerate() {
         let t = line.trim();
@@ -416,7 +503,8 @@ pub fn inactive_line_mask(source: &str, os: &str, arch: &str) -> Option<LineMask
                 }
                 active = current;
             } else {
-                diagnostics.push(format!("line {line_no}: @elif without @when (ignored)"));
+                balanced = false;
+                diagnostics.push(format!("line {line_no}: @elif without @when"));
             }
         } else if t == "@else" || t == "@else:" {
             if let Some(frame) = stack.last_mut() {
@@ -424,12 +512,16 @@ pub fn inactive_line_mask(source: &str, os: &str, arch: &str) -> Option<LineMask
                 frame.taken |= current;
                 active = current;
             } else {
-                diagnostics.push(format!("line {line_no}: @else without @when (ignored)"));
+                balanced = false;
+                diagnostics.push(format!("line {line_no}: @else without @when"));
             }
         } else if t == "@end" {
             match stack.pop() {
                 Some(frame) => active = frame.parent,
-                None => diagnostics.push(format!("line {line_no}: @end without @when (ignored)")),
+                None => {
+                    balanced = false;
+                    diagnostics.push(format!("line {line_no}: @end without @when"));
+                }
             }
         } else {
             skip.push(!active);
@@ -440,23 +532,43 @@ pub fn inactive_line_mask(source: &str, os: &str, arch: &str) -> Option<LineMask
         any = true;
     }
     if !stack.is_empty() {
+        balanced = false;
         diagnostics.push("unclosed @when block".to_string());
     }
     if any || !diagnostics.is_empty() {
-        Some(LineMask { skip, diagnostics })
+        Some(LineMask {
+            skip,
+            balanced,
+            diagnostics,
+        })
     } else {
         None
     }
 }
 
+/// Text-level result of [`select_branches`].
+#[derive(Debug, Clone)]
+pub struct Selection {
+    /// Source with directive and inactive lines blanked (same line count).
+    pub source: String,
+    /// `false` on unbalanced directives; consumers fail closed.
+    pub balanced: bool,
+    /// Diagnostics (unsupported atoms, structural problems).
+    pub diagnostics: Vec<String>,
+}
+
 /// Apply conditional compilation as text: directive lines and inactive-branch
 /// lines become empty, kept lines are copied verbatim, so the result has the
 /// same line count as `source`. This is byte-for-byte what the pure-Simple
-/// preprocessor's first pass produces. Returns `source` unchanged (and no
-/// diagnostics) when it contains no directive.
-pub fn select_branches(source: &str, os: &str, arch: &str) -> (String, Vec<String>) {
+/// preprocessor's first pass produces. Returns `source` unchanged (balanced,
+/// no diagnostics) when it contains no directive.
+pub fn select_branches(source: &str, os: &str, arch: &str) -> Selection {
     let Some(mask) = inactive_line_mask(source, os, arch) else {
-        return (source.to_owned(), Vec::new());
+        return Selection {
+            source: source.to_owned(),
+            balanced: true,
+            diagnostics: Vec::new(),
+        };
     };
     let mut out = String::with_capacity(source.len());
     for (index, line) in source.split('\n').enumerate() {
@@ -467,7 +579,11 @@ pub fn select_branches(source: &str, os: &str, arch: &str) -> (String, Vec<Strin
             out.push_str(line);
         }
     }
-    (out, mask.diagnostics)
+    Selection {
+        source: out,
+        balanced: mask.balanced,
+        diagnostics: mask.diagnostics,
+    }
 }
 
 #[cfg(test)]
@@ -477,8 +593,8 @@ mod tests {
     const SRC: &str = "@when(os=\"windows\"):\nfn a() -> i64: 1\n@else:\nfn a() -> i64: 2\n@end\n";
 
     fn kept(source: &str, os: &str, arch: &str) -> Vec<String> {
-        let (selected, _) = select_branches(source, os, arch);
-        selected
+        select_branches(source, os, arch)
+            .source
             .split('\n')
             .filter(|l| !l.trim().is_empty())
             .map(|l| l.trim().to_string())
@@ -510,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn operators_and_aliases() {
+    fn operators_aliases_and_spacing() {
         assert!(eval_condition("!(win || darwin) && arm64", "linux", "aarch64").0);
         assert!(eval_condition("not os='mac'", "linux", "x86_64").0);
         assert!(eval_condition("target_arch == amd64", "linux", "x86_64").0);
@@ -518,6 +634,10 @@ mod tests {
         assert!(eval_condition("family=\"unix\" and not family=windows", "freebsd", "x86_64").0);
         assert!(eval_condition("platform='Darwin' or baremetal", "none", "riscv64").0);
         assert!(!eval_condition("os = \"windows\"", "linux", "x86_64").0);
+        for spaced in ["os =\"linux\"", "os= \"linux\"", "os  ==  \"linux\"", "os==\"linux\""] {
+            let (value, diags) = eval_condition(spaced, "linux", "x86_64");
+            assert!(value && diags.is_empty(), "{spaced}: {diags:?}");
+        }
         let (value, diags) = eval_condition("feature=\"gpu\"", "linux", "x86_64");
         assert!(!value && diags.is_empty(), "feature= is a recognised key that is always false");
     }
@@ -534,10 +654,37 @@ mod tests {
     #[test]
     fn kept_lines_are_verbatim_and_line_count_is_preserved() {
         let src = "fn f():\n    @when(windows):\n    val x = 1\n    @else:\n    val x = 2\n    @end\n    x\n";
-        let (selected, diags) = select_branches(src, "linux", "x86_64");
-        assert!(diags.is_empty());
-        assert_eq!(selected, "fn f():\n\n\n\n    val x = 2\n\n    x\n");
-        assert_eq!(selected.split('\n').count(), src.split('\n').count());
+        let sel = select_branches(src, "linux", "x86_64");
+        assert!(sel.balanced && sel.diagnostics.is_empty());
+        assert_eq!(sel.source, "fn f():\n\n\n\n    val x = 2\n\n    x\n");
+        assert_eq!(sel.source.split('\n').count(), src.split('\n').count());
+    }
+
+    #[test]
+    fn unbalanced_directives_are_flagged() {
+        for src in ["@else:\nX\n", "@end\n", "@elif(linux):\n", "@when(linux):\nX\n"] {
+            let sel = select_branches(src, "linux", "x86_64");
+            assert!(!sel.balanced, "{src:?}");
+            assert!(!sel.diagnostics.is_empty(), "{src:?}");
+        }
+        assert!(select_branches(SRC, "linux", "x86_64").balanced);
+    }
+
+    #[test]
+    fn host_spellings_use_the_shared_fuzzy_rule() {
+        assert_eq!(normalize_host_os("Windows_NT"), "windows");
+        assert_eq!(normalize_host_os("darwin23.1"), "macos");
+        assert_eq!(normalize_host_os("linux-gnu"), "linux");
+        assert_eq!(normalize_host_os("none"), "none");
+        assert_eq!(normalize_host_os("FreeBSD"), "freebsd");
+        assert_eq!(normalize_host_arch("AMD64"), "x86_64");
+        assert_eq!(normalize_host_arch("x86_64-pc-linux-gnu"), "x86_64");
+        assert_eq!(normalize_host_arch("riscv64gc"), "riscv64");
+        assert_eq!(normalize_host_arch("arm64"), "aarch64");
+        assert_eq!(normalize_host_arch("Intel64 Family 6"), "");
+        // Atom values stay exact: a host spelling is not an atom.
+        assert_eq!(normalize_os("Windows_NT"), "");
+        assert_eq!(normalize_arch("x86_64-pc-linux-gnu"), "");
     }
 
     #[test]
@@ -547,14 +694,14 @@ mod tests {
         assert_eq!((triple_os("riscv64gc-unknown-none-elf"), triple_arch("riscv64gc-unknown-none-elf")), ("none", "riscv64"));
         assert_eq!((triple_os("x86_64-unknown-simpleos"), triple_arch("x86_64-unknown-simpleos")), ("simpleos", "x86_64"));
         assert_eq!((triple_os("thumbv7em-none-eabihf"), triple_arch("thumbv7em-none-eabihf")), ("none", "thumbv7em"));
-        assert_eq!(triple_os("garbage"), "");
+        assert_eq!((triple_os("garbage"), triple_arch("x86_64")), ("", ""));
     }
 
     #[test]
     fn no_directives_is_none() {
         assert!(inactive_line_mask("fn main():\n    pass\n", "linux", "x86_64").is_none());
-        let (same, diags) = select_branches("fn main():\n    pass\n", "linux", "x86_64");
-        assert_eq!(same, "fn main():\n    pass\n");
-        assert!(diags.is_empty());
+        let sel = select_branches("fn main():\n    pass\n", "linux", "x86_64");
+        assert_eq!(sel.source, "fn main():\n    pass\n");
+        assert!(sel.balanced && sel.diagnostics.is_empty());
     }
 }
