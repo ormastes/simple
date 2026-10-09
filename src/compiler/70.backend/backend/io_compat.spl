@@ -1,7 +1,8 @@
 use std.nogc_sync_mut.io.process_ops.{process_run}
-use std.io_runtime.{host_os, dir_exists}
+use std.io_runtime.{host_os, dir_exists, dir_list}
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.sffi.fs.{file_mode}
 
 # Was: read the `OS` env var directly and default to "not Windows" when unset
 # -- fail-open under a stripped bootstrap environment (its captured command
@@ -29,19 +30,21 @@ fn backend_shell_tuple(command: text) -> (text, text, i64):
 # so a one-module hello world spent 66-99 s in the `mir` phase before
 # lower_module() ran (32 ms). Same host rules as the shells, applied here:
 #   Windows: the working directory first, then each PATH entry (`;`
-#            separated, surrounding quotes dropped); in each directory the
-#            exact name as written, then name + each PATHEXT extension in
-#            PATHEXT order (default .COM;.EXE;.BAT;.CMD when unset) -- the
-#            order `where` reports.
-#   POSIX:   each PATH entry (`:` separated, an empty entry meaning the
-#            working directory), plain name only. The executable bit is not
-#            re-checked: the runtime has no backed stat-mode probe in every
-#            lane, and a tool file on PATH without it is a broken install
-#            either way.
+#            separated, taken verbatim except for the quotes cmd strips);
+#            in each directory the exact name as written, then name + each
+#            PATHEXT extension in PATHEXT order (default .COM;.EXE;.BAT;.CMD
+#            when unset) -- the order `where` reports. A hit is reported
+#            with the file name's ON-DISK case (what `where` prints), read
+#            from one directory listing of the hit's directory.
+#   POSIX:   each PATH entry (`:` separated, verbatim, an empty entry
+#            meaning the working directory), plain name only, and only a
+#            regular file with an executable bit set -- `command -v` skips a
+#            non-executable file. PATH absent (not merely empty) searches
+#            the sh default `/usr/local/bin:/usr/bin:/bin`.
 # A candidate written with a directory component is checked as given, like
-# `command -v /abs/tool`. A host with no PATH (SimpleOS, scrubbed bootstrap
-# environment) yields no directories and therefore "" -- the same
-# "not detected" answer the shells gave, with no spawn attempted.
+# `command -v /abs/tool`. A host with no PATH and none of those directories
+# (SimpleOS, scrubbed bootstrap environment) yields "" -- the same "not
+# detected" answer the shells gave, with no spawn attempted.
 fn backend_tool_on_path(candidates: [text]) -> text:
     val windows = host_os() == "windows"
     val dirs = _backend_tool_search_dirs(windows)
@@ -53,12 +56,13 @@ fn backend_tool_on_path(candidates: [text]) -> text:
     ""
 
 fn _backend_tool_search_dirs(windows: bool) -> [text]:
-    val raw = sosix_env_get_nullable("PATH") ?? ""
+    val path_env = sosix_env_get_nullable("PATH")
+    val raw = if path_env != nil: path_env! elif windows: "" else: "/usr/local/bin:/usr/bin:/bin"
     var dirs: [text] = []
     if windows:
         dirs.push(".")
     for entry in raw.split(if windows: ";" else: ":"):
-        val dir = _backend_tool_strip_quotes(entry.trim())
+        val dir = if windows: _backend_tool_strip_quotes(entry) else: entry
         if dir == "":
             if not windows:
                 dirs.push(".")
@@ -82,13 +86,34 @@ fn _backend_tool_path_exts() -> [text]:
     val source = if raw.trim() == "": ".COM;.EXE;.BAT;.CMD" else: raw
     var exts: [text] = []
     for entry in source.split(";"):
-        val ext = entry.trim().lower()
-        if ext != "":
-            exts.push(ext)
+        if entry != "":
+            exts.push(entry)
     exts
 
-fn _backend_tool_file(path: text) -> bool:
-    file_exists(path) and not dir_exists(path)
+fn _backend_tool_file(path: text, windows: bool) -> bool:
+    if not file_exists(path) or dir_exists(path):
+        return false
+    if windows:
+        return true
+    # `command -v` only reports a file the caller may execute; mode -1 means
+    # the bits could not be read and is treated as not executable.
+    val mode = file_mode(path)
+    mode >= 0 and (mode & 73) != 0
+
+# Windows reports a hit as the directory entry's own spelling, the way
+# `where` prints it (its match is case-insensitive, its output is on-disk).
+# An exact-spelling entry wins over a case-insensitive one: a
+# case-sensitive NTFS directory can hold both llc.exe and LLC.exe.
+fn _backend_tool_disk_name(dir: text, name: text) -> text:
+    val entries = dir_list(dir)
+    for entry in entries:
+        if entry == name:
+            return entry
+    val wanted = name.lower()
+    for entry in entries:
+        if entry.lower() == wanted:
+            return entry
+    name
 
 fn _backend_tool_join(dir: text, name: text, windows: bool) -> text:
     if dir.ends_with("/") or dir.ends_with("\\"):
@@ -99,11 +124,11 @@ fn _backend_tool_resolve(candidate: text, dirs: [text], exts: [text], windows: b
     if candidate == "":
         return ""
     if candidate.contains("/") or candidate.contains("\\"):
-        if _backend_tool_file(candidate):
+        if _backend_tool_file(path: candidate, windows: windows):
             return candidate
         if windows:
             for ext in exts:
-                if _backend_tool_file(candidate + ext):
+                if _backend_tool_file(path: candidate + ext, windows: true):
                     return candidate + ext
         return ""
     for dir in dirs:
@@ -111,14 +136,14 @@ fn _backend_tool_resolve(candidate: text, dirs: [text], exts: [text], windows: b
             # `where` lists an exact-name match (even extension-less) before
             # the PATHEXT forms; pinned by llvm_tool_resolution_spec.spl.
             val literal = _backend_tool_join(dir: dir, name: candidate, windows: true)
-            if _backend_tool_file(literal):
-                return literal
+            if _backend_tool_file(path: literal, windows: true):
+                return _backend_tool_join(dir: dir, name: _backend_tool_disk_name(dir: dir, name: candidate), windows: true)
             for ext in exts:
                 val with_ext = _backend_tool_join(dir: dir, name: candidate + ext, windows: true)
-                if _backend_tool_file(with_ext):
-                    return with_ext
+                if _backend_tool_file(path: with_ext, windows: true):
+                    return _backend_tool_join(dir: dir, name: _backend_tool_disk_name(dir: dir, name: candidate + ext), windows: true)
         else:
             val full = _backend_tool_join(dir: dir, name: candidate, windows: false)
-            if _backend_tool_file(full):
+            if _backend_tool_file(path: full, windows: false):
                 return full
     ""
