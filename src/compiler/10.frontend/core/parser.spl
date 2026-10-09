@@ -624,6 +624,27 @@ fn parser_parse_tuple_element_type() -> i64:
         return parser_parse_type()
     candidate
 
+fn parser_array_tag_for_elem(elem_type: i64) -> i64:
+    """Array type tag for an element tag: `[T]` and `List<T>` share it."""
+    if elem_type == TYPE_TEXT:
+        return TYPE_ARRAY_TEXT
+    if elem_type == TYPE_BOOL:
+        return TYPE_ARRAY_BOOL
+    if elem_type == TYPE_I64 or elem_type == TYPE_VOID:
+        # TYPE_VOID here means parser_parse_type_impl's ident branch could
+        # not resolve the element name at all (e.g. bare `Any`, which has
+        # no dedicated primitive check and no matching named type) --
+        # keep this pre-existing fallback byte-identical to before.
+        return TYPE_ARRAY_I64
+    # Nested arrays use the same recursive specialization registry as
+    # named and fixed-width elements. Collapsing [[T]] to [Any] here
+    # loses the declared receiver type before HIR/MIR can project it.
+    # The registry already participates in flat-pool cache transport.
+    val arr_generic_tag = array_generic_type_register(elem_type)
+    if arr_generic_tag < 0:
+        return TYPE_ARRAY_I64
+    arr_generic_tag
+
 fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
     # dyn Trait -- dynamic dispatch type (parsed as named type)
     var kind = par_kind_get()
@@ -884,6 +905,19 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             val gid = named_type_find(type_name)
             if gid >= 0:
                 return parser_absorb_optional_suffix(TYPE_NAMED_BASE + gid)
+            # SEED-PARITY: `List<T>` is the array type `[T]` (the seed's
+            # type_resolver.rs maps "List" with one argument to
+            # HirType::Array). It fell through to TYPE_ANY here, so every
+            # `samples: List<f64>` parameter reached MIR as an erased I64 and
+            # `for s in samples` died as "#143 for-in over non-array
+            # iterables" -- 75 of the 93 for-in errors in the 2026-10-09
+            # stage2 test-runner build. A `List` declared in THIS file still
+            # wins via the named_type_find check above; one imported from
+            # another module (src/lib/common/pure/list.spl) is resolved by
+            # HIR only when the parser preserves the name, which a tag cannot
+            # -- that module is not in the bootstrap closure.
+            if type_name == "List" and not has_extra_type:
+                return parser_absorb_optional_suffix(parser_array_tag_for_elem(inner_type))
             # A written generic base can be declared in another module and
             # therefore absent from this file's named-type registry. Preserve
             # the annotation as ANY; TYPE_VOID means no return was written.
@@ -1026,29 +1060,8 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
                     break
                 parser_advance()
         parser_expect(145)
-        var arr_type = TYPE_ARRAY_I64
-        if elem_type == TYPE_TEXT:
-            arr_type = TYPE_ARRAY_TEXT
-        elif elem_type == TYPE_BOOL:
-            arr_type = TYPE_ARRAY_BOOL
-        elif elem_type == TYPE_I64 or elem_type == TYPE_VOID:
-            # TYPE_VOID here means parser_parse_type_impl's ident branch could
-            # not resolve the element name at all (e.g. bare `Any`, which has
-            # no dedicated primitive check and no matching named type) --
-            # keep this pre-existing fallback byte-identical to before.
-            arr_type = TYPE_ARRAY_I64
-        else:
-            # Nested arrays use the same recursive specialization registry as
-            # named and fixed-width elements. Collapsing [[T]] to [Any] here
-            # loses the declared receiver type before HIR/MIR can project it.
-            # The registry already participates in flat-pool cache transport.
-            val arr_generic_tag = array_generic_type_register(elem_type)
-            if arr_generic_tag < 0:
-                arr_type = TYPE_ARRAY_I64
-            else:
-                arr_type = arr_generic_tag
         # absorb optional suffix: [T]? -> Option
-        return parser_absorb_optional_suffix(arr_type)
+        return parser_absorb_optional_suffix(parser_array_tag_for_elem(elem_type))
     # Function type: fn(T, T) -> T (interned like the keyword branch above)
     if par_kind_get() == 20:
         parser_advance()

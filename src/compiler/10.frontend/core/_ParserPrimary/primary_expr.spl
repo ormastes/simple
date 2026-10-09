@@ -55,6 +55,7 @@ use compiler.frontend.core.lexer.{lex_cur_suffix_get}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice, lex_token_start_get, lex_token_end_get, lex_cur_no_interp_get}
 use compiler.frontend.core.lexer.{lex_enable_forced_indentation, lex_disable_forced_indentation, lex_pop_indent}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
+use compiler.core.types.{flat_span_new}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_skip_newlines}
 use compiler.core.parser.{parser_guarded_int_text}
 use compiler.frontend.core._ParserPrimary.unsigned_integer_literals.{parser_unsigned_integer_suffix, parse_unsigned_int_literal_text}
@@ -532,6 +533,16 @@ fn parse_primary_expr() -> i64:
             eprint("[parser-primary] ident:start name={id_name}")
         val custom_block_adjacent = parser_is_canonical_custom_block_kind(id_name) and
             lex_source_char_at(lex_token_end_get()) == "{"
+        # Capture the identifier's own token span BEFORE advancing. The node
+        # used to be allocated with span id 0, which is not "no span" but the
+        # FIRST span registered for the file (a module-level `extern fn` /
+        # `val` decl), so every MIR diagnostic keyed on a receiver -- e.g.
+        # "unresolved method call: to_int" -- was reported at that unrelated
+        # declaration (test_runner_main.spl:71 for a call on line 785).
+        val id_start = lex_token_start_get()
+        val id_end = lex_token_end_get()
+        val id_line = par_line_get()
+        val id_col = par_col_get()
         parser_advance()
         if custom_block_adjacent:
             if par_kind_get() != TOK_LBRACE:
@@ -541,7 +552,7 @@ fn parse_primary_expr() -> i64:
             return expr_custom_block(id_name, raw_payload, 0)
         if parser_primary_trace_line_enabled():
             eprint("[parser-primary] ident:advanced name={id_name}")
-        return expr_ident(id_name, 0)
+        return expr_ident(id_name, flat_span_new(id_start, id_end, id_line, id_col))
 
     # The core lexer deliberately maps textual `xor` onto TOK_CARET so infix
     # `a xor b` and `a ^ b` share one operator. In primary/callee position the
@@ -551,8 +562,12 @@ fn parse_primary_expr() -> i64:
         return expr_ident("xor", 0)
 
     if par_kind_get() == 38:
+        val self_start = lex_token_start_get()
+        val self_end = lex_token_end_get()
+        val self_line = par_line_get()
+        val self_col = par_col_get()
         parser_advance()
-        return expr_ident("self", 0)
+        return expr_ident("self", flat_span_new(self_start, self_end, self_line, self_col))
 
     if par_kind_get() == 54:
         parser_advance()

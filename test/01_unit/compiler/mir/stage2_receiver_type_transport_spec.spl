@@ -1,0 +1,170 @@
+"""
+Purpose: Pin native MIR lowering of receivers whose HIR type is spelled via a
+generic alias (`List<f64>`), a `text` parameter, or a Dict iterable — the
+classes that made the pure-Simple stage2 compiler fail on the test runner
+closure (812 errors, 2026-10-09) while the Rust seed compiled the same source.
+Audience: compiler engineers maintaining HIR type lowering and MIR for-in /
+method-call lowering.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_errors(src: text, tag: text) -> text:
+    val filename = "stage2_receiver_" + tag + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        var where = "@nil"
+        val sp = error.span
+        if sp != nil:
+            where = "@" + sp.line.to_text() + ":" + sp.col.to_text()
+        result = result + "MIR_ERROR:" + error.message + " " + where + "\n"
+    result
+
+val LIST_PARAM_SRC = """
+fn compute_mean(samples: List<f64>) -> f64:
+    if samples.len() == 0:
+        return 0.0
+    var sum = 0.0
+    for s in samples:
+        sum = sum + s
+    sum / (samples.len() as f64)
+"""
+
+val TEXT_PARAM_TO_INT_SRC = """
+extern fn rt_file_read_text(path: text) -> text
+
+fn parse_timeout(monitor_timeout: text, fallback: i64) -> i64:
+    val parsed = monitor_timeout.to_int() ?? fallback
+    val last_slash = monitor_timeout.last_index_of("/")
+    parsed + last_slash
+"""
+
+val TEXT_PARAM_PLAIN_SRC = """
+fn parse_plain(monitor_timeout: text) -> i64?:
+    monitor_timeout.to_int()
+"""
+
+val TEXT_PARAM_COALESCE_SRC = """
+fn parse_coalesce(monitor_timeout: text, fallback: i64) -> i64:
+    monitor_timeout.to_int() ?? fallback
+"""
+
+val TEXT_PARAM_AFTER_EXTERN_SRC = """
+extern fn rt_file_read_text(path: text) -> text
+
+fn parse_after_extern(monitor_timeout: text) -> i64?:
+    monitor_timeout.to_int()
+"""
+
+val TEXT_PARAM_LAST_INDEX_SRC = """
+fn tail_slash(path: text) -> i64:
+    path.last_index_of("/")
+"""
+
+val DICT_FOR_IN_SRC = """
+fn count_entries(table: {text: i64}) -> i64:
+    var total = 0
+    for key in table:
+        total = total + table[key]
+    total
+"""
+
+val DICT_KEYS_FOR_IN_SRC = """
+fn sum_keys(pairs: {text: i64}) -> i64:
+    var total = 0
+    for key in pairs.keys():
+        total = total + pairs[key]
+    total
+"""
+
+val TUPLE_ARRAY_FOR_IN_SRC = """
+fn char_frequency(s: text) -> [(text, i64)]:
+    var out: [(text, i64)] = []
+    out.push((s, 1))
+    out
+
+fn most_common(s: text) -> i64:
+    val freqs = char_frequency(s)
+    var max_count = freqs[0][1]
+    for (ch, count) in freqs:
+        if count > max_count:
+            max_count = count
+    max_count
+"""
+
+val GLOBAL_DICT_BYTE_AT_SRC = """
+var core_token_text_intern: {i64: text} = {}
+
+fn has_nul(value: text, n: i64) -> bool:
+    var i = 0
+    while i < n:
+        if (value.byte_at(i) as i64) == 0:
+            return true
+        i = i + 1
+    false
+"""
+
+val WRONG_SPAN_SRC = """
+extern fn rt_file_read_text(path: text) -> text
+
+fn probe(monitor_timeout: text) -> i64:
+    monitor_timeout.frobnicate()
+"""
+
+describe "stage2 receiver type transport":
+    it "reports an unresolved method at the receiver's own line, not the first module item":
+        val out = lower_errors(WRONG_SPAN_SRC, "wrong_span")
+        expect(out.contains("unresolved method call: frobnicate @5:5")).to_equal(true)
+
+    it "lowers for-in over a List<f64> parameter as an array iteration":
+        val out = lower_errors(LIST_PARAM_SRC, "list_param")
+        expect(out).to_equal("")
+
+    it "resolves text methods on a text parameter":
+        val out = lower_errors(TEXT_PARAM_TO_INT_SRC, "text_param")
+        expect(out).to_equal("")
+
+    it "resolves to_int on a bare text parameter":
+        val out = lower_errors(TEXT_PARAM_PLAIN_SRC, "text_plain")
+        expect(out).to_equal("")
+
+    it "resolves to_int on a text parameter under ??":
+        val out = lower_errors(TEXT_PARAM_COALESCE_SRC, "text_coalesce")
+        expect(out).to_equal("")
+
+    it "resolves to_int on a text parameter after an extern decl":
+        val out = lower_errors(TEXT_PARAM_AFTER_EXTERN_SRC, "text_after_extern")
+        expect(out).to_equal("")
+
+    it "resolves last_index_of on a text parameter":
+        val out = lower_errors(TEXT_PARAM_LAST_INDEX_SRC, "text_last_index")
+        expect(out).to_equal("")
+
+    it "lowers for-in over a Dict parameter":
+        val out = lower_errors(DICT_FOR_IN_SRC, "dict_param")
+        expect(out).to_equal("")
+
+    it "lowers for-in over Dict.keys()":
+        val out = lower_errors(DICT_KEYS_FOR_IN_SRC, "dict_keys")
+        expect(out).to_equal("")
+
+    it "lowers tuple-destructuring for-in over a call result array":
+        val out = lower_errors(TUPLE_ARRAY_FOR_IN_SRC, "tuple_array")
+        expect(out).to_equal("")
+
+    it "resolves byte_at on a text parameter next to a global dict":
+        val out = lower_errors(GLOBAL_DICT_BYTE_AT_SRC, "global_dict_byte_at")
+        expect(out).to_equal("")
