@@ -3373,19 +3373,20 @@ pub extern "C" fn rt_string_substr_from(string: RuntimeValue, start: i64) -> Run
 /// no compiled implementation at all before, so exiting here is exactly as loud
 /// as the behaviour it replaces, and never quieter.
 ///
-/// A raw 0 receiver is NOT a dispatch gap: no tagged value (not even nil) is 0,
-/// so it is storage that was never written -- typically a module global whose
-/// `__module_init_*` never ran (doc/08_tracking/bug/
-/// windows_cranelift_weak_module_initializer_2026-10-04.md). Say so, and print
-/// the receiver like the C runtime's twin does, instead of blaming dispatch.
+/// A raw 0 receiver is reported separately from a dispatch gap. TAG_INT is 0,
+/// so raw 0 is ambiguous: it is either the integer 0 or storage that was never
+/// written -- typically a module global whose `__module_init_*` never ran
+/// (doc/08_tracking/bug/windows_cranelift_weak_module_initializer_2026-10-04.md).
+/// Name both possibilities rather than claiming either, and print the receiver
+/// like the C runtime's twin does.
 fn refuse_non_text_receiver(method: &str, receiver: RuntimeValue) -> ! {
     let raw = receiver.to_raw();
     if raw == 0 {
         eprintln!(
-            "Runtime error: str.{method} received a null receiver (0x0). That is \
-             uninitialized storage -- most likely a module global whose initializer \
-             never ran -- not a code-generation dispatch gap. Refusing to \
-             substitute a value. receiver=0x0"
+            "Runtime error: str.{method} received a null receiver (0x0). Raw 0 is \
+             either the integer 0 or storage that was never written (for example a \
+             module global whose initializer never ran); neither is text. Refusing \
+             to substitute a value. receiver=0x0"
         );
     } else {
         eprintln!(
