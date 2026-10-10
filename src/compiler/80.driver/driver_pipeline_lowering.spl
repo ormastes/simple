@@ -5,6 +5,7 @@ use compiler.hir.hir.*
 use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule}
 use compiler.hir.hir_types.{SymbolTable}
+use compiler.mono.verify.post_mono_verify.{post_mono_archive_admission_v1}
 use driver_types.{CompileContext}
 use compiler.driver.driver_compiler_type.{CompilerDriver}
 use compiler.driver.perf.compiler_work_counters.{compiler_work_mir_schedule_v1}
@@ -362,6 +363,10 @@ impl CompilerDriver:
             var bootstrap_mir = bootstrap_lowering.lower_module(bootstrap_hir)
             self.ctx.bootstrap_entry_mir = Some(bootstrap_mir)
             _driver_collect_mir_errors(self.ctx, bootstrap_lowering.errors)
+            if val archived_devirt = post_mono_archive_admission_v1(
+                    "app.cli.bootstrap_main", bootstrap_lowering.devirtualized_calls,
+                    self.ctx.runtime_std_full_inventory_selection != nil):
+                self.ctx.add_error(archived_devirt)
             log_phase("aot:bootstrap_fixed:done module=app.cli.bootstrap_main functions={bootstrap_mir.functions.len()}")
             return self.ctx.error_count_value == 0
 
@@ -456,6 +461,7 @@ impl CompilerDriver:
                     # process (the compiler's own immortal heap). See
                     # lower_module_transient_scoped for the enumerated escape
                     # set and why ambient bootstrap is excluded.
+                    val devirt_before: i64 = direct_lowering.devirtualized_calls
                     val scoped_entry = direct_lowering.lower_module_transient_scoped(direct_hir, self.ctx.hir_modules.values(), direct_idx == 0)
                     if scoped_entry.is_err():
                         # Fail closed: the scope has already been ended, so the
@@ -466,6 +472,15 @@ impl CompilerDriver:
                         return false
                     var lowered_entry: MirModule = scoped_entry.unwrap()
                     lowered_entry.name = name_direct
+                    # Verifier-side twin of driver_trait_devirtualization_allowed_v1:
+                    # a module bound for a package archive must carry NO
+                    # devirtualized trait-object call (E-MONO-038).
+                    if val archived_devirt = post_mono_archive_admission_v1(
+                            name_direct, direct_lowering.devirtualized_calls - devirt_before,
+                            self.ctx.runtime_std_full_inventory_selection != nil):
+                        self.ctx.add_error(archived_devirt)
+                        log_phase("aot:lower_to_mir:archived_devirtualization idx={direct_idx} module={name_direct}")
+                        return false
                     log_phase("aot:lower_to_mir:module:done idx={direct_idx} module={name_direct} functions={lowered_entry.functions.len()}")
                     lowered_entry
                 else:
@@ -567,6 +582,7 @@ impl CompilerDriver:
                 # reclaim the arena while the flat `_bootstrap_mir_*` /
                 # `_bootstrap_fn_*` / `_bootstrap_hir_*` registries (whose
                 # reachability from this boundary is unproven) could be live.
+                val fallback_devirt_before: i64 = lowering.devirtualized_calls
                 val scoped_fallback = lowering.lower_module_transient_scoped(hir_module, self.ctx.hir_modules.values())
                 if scoped_fallback.is_err():
                     self.ctx.add_error(
@@ -575,6 +591,17 @@ impl CompilerDriver:
                     return false
                 var mir_module: MirModule = scoped_fallback.unwrap()
                 mir_module.name = name
+                # This instance never sets trait_impl_closure_complete, so it
+                # cannot devirtualize today; the admission check is still
+                # applied so every MirLowering the driver owns is covered by
+                # the same E-MONO-038 assertion (defense in depth, not a gate
+                # that is expected to fire).
+                if val fallback_archived_devirt = post_mono_archive_admission_v1(
+                        name, lowering.devirtualized_calls - fallback_devirt_before,
+                        self.ctx.runtime_std_full_inventory_selection != nil):
+                    self.ctx.add_error(fallback_archived_devirt)
+                    log_phase("aot:lower_to_mir:archived_devirtualization module={name}")
+                    return false
                 self.ctx.mir_modules[name] = mir_module
                 if name == "app.cli.bootstrap_main":
                     self.ctx.set_bootstrap_entry_mir(name, mir_module)
