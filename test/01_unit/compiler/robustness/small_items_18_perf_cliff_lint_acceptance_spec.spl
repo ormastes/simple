@@ -1,0 +1,128 @@
+"""
+Purpose: Acceptance spec for robustness item 18 (CURRENT_BUG_PREVENTION.md
+"New classes seen": stdlib perf cliffs on the native lane). The plan asks for
+the RB-24 low-scan rule "repeated materialization / linear search in loop" as
+a Warn lint. Linear search in a loop already existed as PERF-SCAN-001; the
+repeated-materialization half is PERF-SCAN-002, added with this spec.
+Audience: stdlib and compiler-tooling maintainers.
+Incident shape: str_index_of scanned `s[i:i + sublen] == sub` once per input
+byte, one substring allocation each -- 890 s of SCV cold init (fixed in
+3ccff56de67). The lint flags that shape at authoring time.
+Scope: detection, the must-not-fire cases, warn-first severity, the level
+switch (off | warning | error) and the lint config name. Out of scope:
+converting the existing population.
+Guide: doc/07_guide/compiler/robustness/small_items.md
+"""
+
+use std.spec.*
+use compiler.semantics.lint.linear_scan_in_loop.{check_linear_scan_in_loop, slice_compared_for_equality}
+use compiler.tools.lint.lint_rule_api.{LintParamsV1, LintUnit, StaticLintLevel, StaticLintFinding, LintRule, lint_rule_negotiate_v1}
+use compiler.tools.lint.rules.linear_scan_in_loop_rule.{linear_scan_lint_mode, linear_scan_findings_for_mode}
+use compiler.tools.lint.static_rules.{static_lint_rule_table, run_static_lint_rule_table}
+use compiler.tools.lint._LintMain.config_and_model.{
+    map_lint_code_to_config_name, should_keep_lint_result, apply_config_level,
+    LintConfig, LintLevel
+}
+
+# The pre-fix str_index_of body (string_core.spl before 3ccff56de67).
+val INCIDENT = "fn str_index_of(s: text, sub: text) -> i64:\n    val slen = s.len()\n    val sublen = sub.len()\n    var i = 0\n    while i <= slen - sublen:\n        if s[i:i + sublen] == sub:\n            return i\n        i = i + 1\n    -1\n"
+# The fixed body: one native search, no per-byte slice.
+val FIXED = "fn str_index_of(s: text, sub: text) -> i64:\n    if sub.len() == 0:\n        return 0\n    s.index_of(sub, 0)\n"
+
+fn codes(src: text) -> text:
+    var out = ""
+    for finding in check_linear_scan_in_loop(src, "fixture.spl"):
+        out = out + finding.code + "@" + finding.line_num.to_text() + ";"
+    out
+
+fn level_name(level: StaticLintLevel) -> text:
+    match level:
+        case Allow: "allow"
+        case Warn: "warn"
+        case Deny: "deny"
+
+fn config_level_name(level: LintLevel) -> text:
+    match level:
+        case Allow: "allow"
+        case Warn: "warn"
+        case Deny: "deny"
+
+describe "18 perf-cliff lint: repeated materialization / linear search in loop":
+    it "AC1 flags the incident shape: a slice materialised and compared per loop iteration":
+        expect(codes(INCIDENT)).to_equal("PERF-SCAN-002@6;")
+        val found = check_linear_scan_in_loop(INCIDENT, "fixture.spl")
+        expect(found[0].severity).to_equal("warning")
+        expect(found[0].hint).to_contain("index_of")
+
+    it "AC2 does not flag the fixed implementation":
+        expect(codes(FIXED)).to_equal("")
+
+    it "AC3 flags the while-condition, reversed-operand and != forms":
+        expect(codes("fn skip(s: text, sep: text, n: i64):\n    var i = 0\n    while s[i:i + n] != sep:\n        i = i + 1\n")).to_equal("PERF-SCAN-002@3;")
+        expect(codes("fn find(xs: [text], want: [text]):\n    for i in 0..xs.len():\n        if want == xs[i:i + 2]:\n            return i\n")).to_equal("PERF-SCAN-002@3;")
+        expect(codes("fn find(me):\n    for i in 0..10:\n        if self.buf[i:i + self.n] == self.key:\n            return i\n")).to_equal("PERF-SCAN-002@3;")
+
+    it "AC4 still flags a linear search inside a loop (PERF-SCAN-001)":
+        expect(codes("fn dedup(xs, seen):\n    for x in xs:\n        if seen.contains(x):\n            pass\n")).to_equal("PERF-SCAN-001@3;")
+
+    it "AC5 must-not-fire: outside a loop, literal bounds, no comparison, strings, comments, plain index":
+        # the same comparison with no enclosing loop
+        expect(codes("fn once(s: text, sub: text, i: i64, n: i64) -> bool:\n    s[i:i + n] == sub\n")).to_equal("")
+        # constant bounds: a fixed-size prefix check, not a scan
+        expect(codes("fn f(lines):\n    for line in lines:\n        if line[0:2] == \"ab\":\n            pass\n")).to_equal("")
+        # a slice that is kept, not compared and dropped
+        expect(codes("fn f(s: text, n: i64):\n    var i = 0\n    while i < n:\n        val part = s[i:i + 4]\n        i = i + 4\n")).to_equal("")
+        # the shape inside a string literal, and after a comment marker
+        expect(codes("fn f(xs):\n    for x in xs:\n        print \"s[i:i + n] == sub\"\n")).to_equal("")
+        expect(codes("fn f(xs):\n    for x in xs:\n        val y = x  # was: s[i:i + n] == sub\n")).to_equal("")
+        # element index, not a slice
+        expect(codes("fn f(a, b):\n    for i in 0..3:\n        if a[i] == b[i]:\n            pass\n")).to_equal("")
+        # after the loop is dedented out of
+        expect(codes("fn f(s, sub, xs):\n    for x in xs:\n        pass\n    val hit = s[k:k + 2] == sub\n")).to_equal("")
+        expect(slice_compared_for_equality("val table = [a, b]")).to_equal(false)
+        expect(slice_compared_for_equality("if s[i:i + n] == sub:")).to_equal(true)
+
+    it "AC6 is warn-first, and the level switch gives off | warning | error":
+        val unit = LintUnit("fixture.spl", INCIDENT)
+        expect(linear_scan_lint_mode(nil)).to_equal("warning")
+        expect(linear_scan_lint_mode("")).to_equal("warning")
+        expect(linear_scan_lint_mode("garbage")).to_equal("warning")
+        expect(linear_scan_lint_mode("off")).to_equal("off")
+        expect(linear_scan_lint_mode("OFF")).to_equal("off")
+        expect(linear_scan_lint_mode("error")).to_equal("error")
+        val warned = linear_scan_findings_for_mode("warning", unit)
+        expect(warned.len()).to_equal(1)
+        expect(level_name(warned[0].level)).to_equal("warn")
+        val denied = linear_scan_findings_for_mode("error", unit)
+        expect(denied.len()).to_equal(1)
+        expect(level_name(denied[0].level)).to_equal("deny")
+        expect(linear_scan_findings_for_mode("off", unit).len()).to_equal(0)
+
+    it "AC7 is registered once in the static rule table and negotiates cleanly":
+        # The table dispatches through a function value. The seed interpreter
+        # returns no findings for an imported rule's function value (same on
+        # the unmodified tree, PERF-SCAN-001 included), so dispatch output is
+        # asserted through the rule's public entry in AC6, and registration here.
+        var registered = 0
+        for rule in static_lint_rule_table():
+            if rule.id() == "linear_scan_in_loop":
+                registered = registered + 1
+                expect(lint_rule_negotiate_v1(rule).accepted()).to_equal(true)
+        expect(registered).to_equal(1)
+        val run = run_static_lint_rule_table(LintParamsV1.defaults(), LintUnit("fixture.spl", INCIDENT), static_lint_rule_table())
+        expect(run.errors.len()).to_equal(0)
+
+
+    it "AC8 is configurable by lint name: default warn, allow suppresses, deny promotes":
+        expect(map_lint_code_to_config_name("PERF-SCAN-001")).to_equal("linear_scan_in_loop")
+        expect(map_lint_code_to_config_name("PERF-SCAN-002")).to_equal("linear_scan_in_loop")
+        val defaults = LintConfig.new()
+        expect(config_level_name(defaults.get_level("linear_scan_in_loop"))).to_equal("warn")
+        expect(should_keep_lint_result(defaults, "PERF-SCAN-002")).to_equal(true)
+        expect(config_level_name(apply_config_level(defaults, "PERF-SCAN-002", LintLevel.Warn))).to_equal("warn")
+        val allowed = LintConfig.from_sdn_string("lints:\n  linear_scan_in_loop: allow\n")
+        expect(allowed.error).to_equal("")
+        expect(should_keep_lint_result(allowed, "PERF-SCAN-002")).to_equal(false)
+        expect(should_keep_lint_result(allowed, "PERF-SCAN-001")).to_equal(false)
+        val denied = LintConfig.from_sdn_string("lints:\n  linear_scan_in_loop: deny\n")
+        expect(config_level_name(apply_config_level(denied, "PERF-SCAN-002", LintLevel.Warn))).to_equal("deny")
