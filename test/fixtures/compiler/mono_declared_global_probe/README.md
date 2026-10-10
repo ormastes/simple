@@ -5,3 +5,9 @@ AUTHORED UNEXECUTED. Exact per-row stdout and source SHA256 are pinned in manife
 Provider runtime isolation alone does not prove equal numeric SymbolIds: observe actual provider pool IDs under qualified source/producer evidence before claiming that collision scenario; the structural spec independently asserts equality. No source qualification, seed fallback, SPipe execution, or repeated unchanged retry is allowed. Finite maximum three cause cycles includes prior parent-tracked attempts; no automatic retry.
 
 All generic extraction result declarations are inferred, not explicitly annotated: a known return context must not independently bind T and hide the missing global argument type.
+
+The `imported_consumer` row is an additional unexecuted control: the entry
+module imports same-leaf `pool` declarations from two providers under distinct
+aliases and passes each directly to a local generic. Its manifest pins both
+provider sources and expects their distinct `[text]` and `[i64]` element types
+to remain separate. No alias-name fallback is accepted.

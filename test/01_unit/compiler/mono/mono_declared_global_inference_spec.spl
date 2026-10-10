@@ -109,3 +109,27 @@ describe "mono uses module-owned declared globals":
         val (_, stats) = run_monomorphization(modules)
         expect(stats.specializations_created).to_equal(0)
         expect(stats.unresolved_generic_calls).to_equal(1)
+
+    it "uses imported Const alias SymbolId rather than its symbol table key":
+        val source = "var pool: [text] = []\nfn main() -> bool:\n    true\n"
+        val parsed = parse_full_frontend(source, "testdata/mono_imported_global.spl", "consumer", Logger(level: 0))
+        var lowering = HirLowering.with_filename("testdata/mono_imported_global.spl")
+        var module = lowering.lower_module(parsed)
+        expect(lowering.errors.len()).to_equal(0)
+        val pool = mono_global_symbol(module, "pool")
+        var imported_aliases: Dict<i64, HirSymbol> = {}
+        for table_key in module.symbols.symbols.keys():
+            var symbol: HirSymbol = module.symbols.symbols[table_key]
+            if symbol.id.id == pool.id:
+                symbol.kind = SymbolKind.Const
+                symbol.defining_module = Some("provider")
+                imported_aliases[999999] = symbol
+            else:
+                imported_aliases[table_key] = symbol
+        module.symbols.symbols = imported_aliases
+        module.constants = {}
+        var pass_ = MonomorphizationPass.create()
+        pass_.collect_declared_globals(module, "consumer")
+        pass_.current_module = "consumer"
+        val reference = HirExpr(kind: HirExprKind.NamedVar(pool, "pool"), has_type_: false, type_: nil, span: Span.empty())
+        expect(mono_global_array_element(pass_.infer_expr_type(reference)).kind == HirTypeKind.Str).to_be(true)

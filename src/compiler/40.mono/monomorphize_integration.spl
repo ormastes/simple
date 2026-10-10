@@ -356,6 +356,24 @@ impl MonomorphizationPass:
             val declaration: HirConst = module.constants[key]
             if declaration.symbol.is_valid() and hir_type_is_concrete(declaration.type_):
                 self.declared_global_types[mono_sym_key(module_name, declaration.symbol.id)] = declaration.type_
+        # Imported constants are registered as consumer-scope Const symbols,
+        # with their projected declaration type and provider in
+        # defining_module; they are not copied into module.constants. Index
+        # that exact alias identity under the consumer module so expressions
+        # referencing the import resolve without a global name/leaf fallback.
+        val symbol_ids = module.symbols.symbols.keys()
+        for raw_id in symbol_ids:
+            val symbol: HirSymbol = module.symbols.symbols[raw_id]
+            if symbol.kind != SymbolKind.Const or symbol.type_ == nil:
+                continue
+            if not symbol.defining_module.?:
+                continue
+            val defining_module: text = symbol.defining_module ?? ""
+            if defining_module == "" or defining_module == module.name or defining_module == module_name:
+                continue
+            val imported_type: HirType = symbol.type_ ?? HirType(kind: HirTypeKind.Error, span: Span.empty())
+            if symbol.id.is_valid() and hir_type_is_concrete(imported_type):
+                self.declared_global_types[mono_sym_key(module_name, symbol.id.id)] = imported_type
 
     me declared_global_type(symbol: SymbolId) -> HirType?:
         val key = mono_sym_key(self.current_module, symbol.id)
