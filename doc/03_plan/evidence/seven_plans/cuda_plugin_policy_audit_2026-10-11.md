@@ -124,3 +124,23 @@ failure is recorded in
 Three bounded attempts are exhausted; the source correction and executable
 regressions are reviewable, but filesystem specs, native owner admission and
 integrated disabled closure/symbol gates remain pending. No full rebuild ran.
+
+## Changed candidate: loader callback crash
+
+The changed integrated producer SHA256
+`fcdb2397a1a681c2b6fe32ada16585b4e24afc37f6397a34db55a183dffb73c2`
+attempted the unchanged tri-state native fixture once. It failed during source
+closure: the worker exited -139 with zero claimed/sealed modules, and the
+outer command exited 1. No fixture assertions ran. Log:
+`build/cuda-policy/source-root-fcdb-build.log`. The disabled full closure was
+not attempted after this central loader failure; no symbol receipt exists.
+
+A separate unchanged fixture backtrace identifies PC 0 in
+`source_root_resolution_with_fallback_v1`, called by the pipeline loader.
+The correction removes that callback API and matches the tri-state result
+directly in the pipeline. Only `Missing` directly invokes canonical checkout
+resolution; `Ambiguous` still adds an error and returns failure. Exact and
+relative resolution are unchanged. The four obsolete callback-API probe cases
+were removed; the eight numbered/enum assertions, including failing case 7,
+remain. Filesystem specs retain both ambiguous overlays with valid defaults.
+This source correction requires a new producer; it has no native PASS yet.
