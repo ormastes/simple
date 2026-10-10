@@ -3071,6 +3071,27 @@ impl MirLowering:
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
             ))
             val boxed_float = parse_builder.emit_call_value(float_parse, [mir_operand_copy(tagged_text)], MirType.i64())
+            # Malformed text must not silently unbox to 0.0: the seed's
+            # f64()/float() conversion is strict and errors on a failed
+            # parse. rt_string_to_float returns the nil tag (3) on failure,
+            # so branch to a non-returning panic before unboxing.
+            val nil_tag = parse_builder.emit_const_int(3)
+            val parse_ok = parse_builder.emit_binop(MirBinOp.Ne, mir_operand_copy(boxed_float), mir_operand_copy(nil_tag), MirType.bool())
+            val parsed_ok_block = parse_builder.new_block(Some("text_float_parsed"))
+            val parse_bad_block = parse_builder.new_block(Some("text_float_invalid"))
+            parse_builder.terminate_if(mir_operand_copy(parse_ok), parsed_ok_block, parse_bad_block)
+            parse_builder.switch_to_block(parse_bad_block)
+            val message_text = "cannot parse text as floating-point value"
+            val message = parse_builder.emit_const_str(message_text)
+            val length = parse_builder.emit_const_int(message_text.len())
+            val pointer_type = MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.I8), false))
+            val panic_fn = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_panic"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [pointer_type, MirType.i64()], return_type: MirType.unit(), is_variadic: false, params_known: true)))
+            ))
+            parse_builder.emit_call(panic_fn, [mir_operand_copy(message), mir_operand_copy(length)], MirType.unit())
+            parse_builder.terminate_unreachable()
+            parse_builder.switch_to_block(parsed_ok_block)
             val float_unbox = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str("rt_value_as_float"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.f64(), is_variadic: false)))
@@ -3221,6 +3242,17 @@ impl MirLowering:
             if conversion_call:
                 return self.lower_text_parse_to_numeric(tagged_text, mir_target, target_is_float)
             return self.lower_text_code_point_cast(tagged_text, mir_target, target_name)
+        # A float conversion's source must be numeric or text. A pointer or
+        # aggregate operand has no scalar floating-point meaning (the seed
+        # rejects it with "cannot convert value to f64"); fail loudly here
+        # at MIR instead of leaking a ptr-to-double cast to the backends.
+        if target_is_float:
+            if val source_type = self.builder.local_type(operand_local):
+                match source_type.kind:
+                    case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _) | MirTypeKind.FuncPtr(_) | MirTypeKind.Struct(_) | MirTypeKind.Array(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Dict(_, _) | MirTypeKind.Tuple(_):
+                        self.error_fatal("floating-point conversion requires a numeric value or text; pointer/aggregate conversion is unsupported", Some(span))
+                        return operand_local
+                    case _: ()
         var cast_builder = self.builder
         val result = cast_builder.emit_cast(mir_operand_copy(operand_local), mir_target)
         self.builder = cast_builder

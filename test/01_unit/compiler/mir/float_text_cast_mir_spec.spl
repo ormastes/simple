@@ -1,0 +1,48 @@
+# Execution pending the coordinated rebuilt pure-Simple toolchain.
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir.*
+
+fn float_cast_mir(source: text) -> text:
+    val parsed = parse_full_frontend(source, "float_cast.spl", "float_cast", Logger(level: 0))
+    var lowering = HirLowering.with_filename("float_cast.spl")
+    val hir = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:{error.message}:fatal={error.fatal}\n"
+    for function in mir.functions.values():
+        result = result + serialize_mir_function(function)
+    result
+
+describe "text floating-point casts parse and reject invalid input":
+    it "parses text before unboxing the f64 result":
+        val mir = float_cast_mir("fn convert(value: text) -> f64:\n    float(value)\n")
+        expect(mir).to_contain("rt_string_to_float")
+        expect(mir).to_contain("rt_value_as_float")
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+
+    it "guards malformed text with an explicit non-returning panic":
+        val mir = float_cast_mir("fn convert(value: text) -> f64:\n    f64(value)\n")
+        expect(mir).to_contain("text_float_invalid")
+        expect(mir).to_contain("cannot parse text as floating-point value")
+        expect(mir).to_contain("rt_panic")
+        expect(mir).to_contain("Unreachable")
+
+    it "preserves numeric conversions without entering the string parser":
+        val mir = float_cast_mir("fn convert(value: i64) -> f64:\n    float(value)\n")
+        expect(mir.len()).to_be_greater_than(0)
+        expect(mir.contains("MIR_ERROR:")).to_equal(false)
+        expect(mir.contains("rt_string_to_float")).to_equal(false)
+
+    it "rejects a class address as a floating-point number":
+        val mir = float_cast_mir("class NotNumeric:\n    value: i64\nfn convert(value: NotNumeric) -> f64:\n    value as f64\n")
+        expect(mir).to_contain("pointer/aggregate conversion is unsupported")
+        expect(mir).to_contain("fatal=true")
