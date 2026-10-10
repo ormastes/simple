@@ -8,6 +8,10 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.core.{int_to_str}
+# Level table only (no MIR data imports): one switch for both halves of the
+# guard-count invariant.
+use compiler.mir.mir_verify_levels.{mir_verify_rule_level_from_spec}
+use compiler.hir.hir_lowering.types.{hir_type_env_get}
 @unsafe(reason: "raw enum discriminant bridge for a level-gated trace", capabilities: [ffi])
 extern fn rt_enum_discriminant(value: HirPatternKind) -> i64
 extern fn rt_env_get(key: text) -> text?
@@ -398,14 +402,52 @@ impl HirLowering:
             arm_stmts = arm_stmts.push(arm.body.stmts[bi])
             bi = bi + 1
         val arm_block = HirBlock(stmts: arm_stmts, has: arm.body.has, value: arm.body.value, span: arm.body.span)
+        # `case P if g:` -- the arm is taken only when P matches AND g holds.
+        # The guard may read P's bindings, so it is evaluated inside a block
+        # that first runs the same destructure prelude; `and` short-circuits
+        # in MIR, so the prelude never runs on a value P rejected. Dropping
+        # the guard here made every guarded tuple / text / struct / array /
+        # range arm unconditional on its pattern (wrong code, no diagnostic).
+        var test: HirExpr? = cond
+        if arm.has_guard:
+            var guard_expr = arm.guard
+            if prelude.len() > 0:
+                guard_expr = HirExpr(kind: HirExprKind.Block(HirBlock(stmts: prelude, has: true, value: arm.guard, span: arm.guard.span)), has_type_: false, type_: nil, span: arm.guard.span)
+            if val pattern_cond = cond:
+                test = Some(HirExpr(kind: HirExprKind.Binary(HirBinOp.And, pattern_cond, guard_expr), has_type_: false, type_: nil, span: span))
+            else:
+                test = Some(guard_expr)
+            self.match_guards_desugared = self.match_guards_desugared + 1
         val is_last = idx == hir_arms.len() - 1
         if is_last:
+            if arm.has_guard:
+                # A guarded final arm still tests its guard; with no later
+                # arm there is nothing to fall to.
+                if val last_test = test:
+                    val no_else: HirBlock? = nil
+                    return HirExpr(kind: HirExprKind.If(last_test, arm_block, no_else), has_type_: false, type_: nil, span: span)
             return HirExpr(kind: HirExprKind.Block(arm_block), has_type_: false, type_: nil, span: span)
-        if val c = cond:
+        if val c = test:
             val rest = self.build_if_chain(scrut_var, hir_arms, idx + 1, span)
             val else_block = HirBlock(stmts: [], has: true, value: rest, span: span)
             val else_opt: HirBlock? = else_block
             return HirExpr(kind: HirExprKind.If(c, arm_block, else_opt), has_type_: false, type_: nil, span: span)
+        # Unguarded irrefutable arm: every later arm is unreachable, so a
+        # guard on one of them is legitimately never evaluated. Account for
+        # those here so the guard-count invariant does not call them dropped.
+        # They are still reported, once per match and never fatally: a guarded
+        # arm that cannot run is almost always a pattern that binds where a
+        # variant test was meant (`case (Bool, Bool):` with `Bool` unresolved).
+        var unreachable_guards = 0
+        var later = idx + 1
+        while later < hir_arms.len():
+            val later_arm: HirMatchArm = hir_arms[later]
+            if later_arm.has_guard:
+                unreachable_guards = unreachable_guards + 1
+            later = later + 1
+        if unreachable_guards > 0 and self.match_guard_level != "off":
+            self.match_guards_desugared = self.match_guards_desugared + unreachable_guards
+            self.recovered("W-HIR-MATCH-GUARD-UNREACHABLE: {unreachable_guards} guarded match arm(s) follow arm {idx + 1}, whose pattern is irrefutable (it only binds) and has no guard; they can never run and their guards are never evaluated [level: E-MIR-MATCH-GUARD]", arm.pattern.span)
         HirExpr(kind: HirExprKind.Block(arm_block), has_type_: false, type_: nil, span: span)
 
     me desugar_match_to_if_chain(hir_scrutinee: HirExpr, hir_arms: [HirMatchArm], span: Span) -> HirExprKind:
@@ -782,6 +824,58 @@ impl HirLowering:
         out
 
     me build_match_expr(hir_scrutinee: HirExpr, hir_arms: [HirMatchArm], span: Span) -> HirExprKind:
+        """Desugar one `match`, then check the guard-count invariant (3a, HIR
+        half): every guard the parser produced is still carried by the result
+        -- as a guarded `MatchCase` arm (whose evaluation the MIR half checks
+        in `lower_match_case`) or as a guard test of the if-chain. A guard
+        that vanishes here is wrong code: the arm runs whenever its pattern
+        matches. Level: SIMPLE_MIR_VERIFY_LEVELS id E-MIR-MATCH-GUARD, shared with
+        the MIR half (warning -> `recovered`, error -> `error`; `off` skips
+        the counting, not just the report)."""
+        if self.match_guard_level == "":
+            self.match_guard_level = mir_verify_rule_level_from_spec(
+                "E-MIR-MATCH-GUARD", hir_type_env_get("SIMPLE_MIR_VERIFY_LEVELS") ?? "")
+        if self.match_guard_level == "off":
+            return self.build_match_expr_unchecked(hir_scrutinee, hir_arms, span)
+        var parsed_guards = 0
+        for parsed_arm in hir_arms:
+            if parsed_arm.has_guard:
+                parsed_guards = parsed_guards + 1
+        if parsed_guards == 0:
+            return self.build_match_expr_unchecked(hir_scrutinee, hir_arms, span)
+        val outer_desugared = self.match_guards_desugared
+        self.match_guards_desugared = 0
+        val built = self.build_match_expr_unchecked(hir_scrutinee, hir_arms, span)
+        var carried_guards = self.match_guards_desugared + self.match_case_guard_count(built)
+        self.match_guards_desugared = outer_desugared
+        if carried_guards < parsed_guards:
+            var guard_fn = "<module-level>"
+            if val guard_fn_sym = self.current_function:
+                guard_fn = self.symbols.symbol_name_scalar_raw(guard_fn_sym.id)
+            val guard_msg = "E-HIR-MATCH-GUARD: match in fn {guard_fn} has {parsed_guards} guarded arm(s) but its lowering carries {carried_guards}; a guard was dropped and its arm would run unconditionally [level: E-MIR-MATCH-GUARD]"
+            if self.match_guard_level == "error":
+                self.error(guard_msg, span)
+            else:
+                self.recovered(guard_msg, span)
+        built
+
+    me match_case_guard_count(kind: HirExprKind) -> i64:
+        """Guarded arms of the `MatchCase` a desugared match produced (directly,
+        or as the value of the single-evaluation scrutinee block)."""
+        match kind:
+            case HirExprKind.MatchCase(_, out_arms):
+                var n = 0
+                for out_arm in out_arms:
+                    val typed_out_arm: HirMatchArm = out_arm
+                    if typed_out_arm.has_guard:
+                        n = n + 1
+                n
+            case HirExprKind.Block(block):
+                if block.has: self.match_case_guard_count(block.value.kind) else: 0
+            case _:
+                0
+
+    me build_match_expr_unchecked(hir_scrutinee: HirExpr, hir_arms: [HirMatchArm], span: Span) -> HirExprKind:
         # `case i64 v:` narrowing arms become ordinary `__Union_...` enum arms
         # BEFORE the fast-path decision below, so a union match takes the
         # tested enum-match path instead of the general if-chain fallback
