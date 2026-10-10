@@ -670,6 +670,76 @@ impl MirLowering:
             return nil
         Some(noted)
 
+    me generic_instance_field_type(owner: text, base_local: LocalId, field_idx: i64) -> (bool, MirType, text):
+        """MIR type (and nested struct name, "" if none) of field `field_idx`
+        of a GENERIC struct `owner` read off `base_local`, when that field is
+        declared as a bare type parameter (BUG-IT-6). Resolved from the
+        construct site's recorded argument types first, else from the base
+        local's own HIR type arguments. `(false, i64, "")` when the field is
+        not a type-param field or nothing records the instance."""
+        if not self.struct_field_type_param.has(owner):
+            return (false, MirType.i64(), "")
+        val markers = self.struct_field_type_param[owner]
+        if field_idx < 0 or field_idx >= markers.len():
+            return (false, MirType.i64(), "")
+        val tp_name: text = markers[field_idx]
+        if tp_name == "":
+            return (false, MirType.i64(), "")
+        if self.generic_instance_field_types.has(base_local.id):
+            val inst_types = self.generic_instance_field_types[base_local.id]
+            if field_idx < inst_types.len():
+                var nested = ""
+                if self.generic_instance_field_struct_names.has(base_local.id):
+                    val inst_names = self.generic_instance_field_struct_names[base_local.id]
+                    if field_idx < inst_names.len():
+                        nested = inst_names[field_idx]
+                return (true, inst_types[field_idx], nested)
+        val arg_hir = self.generic_instance_field_hir_arg(owner, base_local, field_idx)
+        if arg_hir != nil:
+            val arg_t: HirType = arg_hir
+            var mt = self.lower_type(arg_t)
+            var nested = ""
+            match arg_t.kind:
+                case HirTypeKind.Str:
+                    mt = MirType(kind: MirTypeKind.Opaque("str"))
+                case HirTypeKind.Named(arg_sym, _):
+                    val arg_symbol = self.symbols.get_symbol_raw(arg_sym.id)
+                    if arg_symbol != nil:
+                        nested = arg_symbol.name
+                case _:
+                    ()
+            return (true, mt, nested)
+        (false, MirType.i64(), "")
+
+    me generic_instance_field_hir_arg(owner: text, base_local: LocalId, field_idx: i64) -> HirType?:
+        """The HIR type argument that instantiates type-param field
+        `field_idx` of `owner`, taken from the base local's HIR type
+        (`Pair<text, i64>`); nil when the base carries no type arguments."""
+        if not self.struct_field_type_param.has(owner) or not self.struct_type_param_names.has(owner):
+            return nil
+        val markers = self.struct_field_type_param[owner]
+        if field_idx < 0 or field_idx >= markers.len():
+            return nil
+        val tp_name: text = markers[field_idx]
+        if tp_name == "":
+            return nil
+        val base_hir = self.find_local_hir_type(base_local.id)
+        if base_hir == nil:
+            return nil
+        val base_t: HirType = base_hir
+        match base_t.kind:
+            case HirTypeKind.Named(_, args):
+                val tps = self.struct_type_param_names[owner]
+                var i = 0
+                while i < tps.len():
+                    if tps[i] == tp_name and i < args.len():
+                        val arg_t: HirType = args[i]
+                        return arg_t
+                    i = i + 1
+                nil
+            case _:
+                nil
+
     me declared_field_type_in_current_table(owner: text, field_idx: i64, declared: HirType) -> HirType:
         """Rebind a declared field type's `Named` symbol into `self.symbols`.
 
@@ -4307,9 +4377,32 @@ impl MirLowering:
                             val field_reprs = self.struct_field_repr_name[psn]
                             if field_idx >= 0 and field_idx < field_reprs.len() and field_reprs[field_idx] == "str":
                                 field_type = MirType(kind: MirTypeKind.Opaque("str"))
+                    # Generic struct, type-param field (BUG-IT-6): the declared
+                    # type is the PARAMETER (`a: A`), which lowered above as a
+                    # struct named A. Substitute the INSTANCE's type -- from the
+                    # construct site when this base was built in this function,
+                    # else from the base's own HIR type arguments
+                    # (`p: Pair<text, i64>` parameter / annotated let).
+                    var generic_field_nested_name = ""
+                    var generic_field_resolved = false
+                    val generic_owner: text = projected_struct_name ?? ""
+                    if generic_owner != "":
+                        val (gf_resolved, gf_type, gf_nested) = self.generic_instance_field_type(generic_owner, base_local, field_idx)
+                        if gf_resolved:
+                            generic_field_resolved = true
+                            field_type = gf_type
+                            generic_field_nested_name = gf_nested
                     var field_builder = self.builder
                     val field_result = field_builder.emit_get_field(mir_operand_copy(base_local), field_idx, field_type)
                     self.builder = field_builder
+                    if generic_field_resolved:
+                        if generic_field_nested_name != "":
+                            self.struct_value_syms[field_result.id] = generic_field_nested_name
+                        val gf_hir = self.generic_instance_field_hir_arg(generic_owner, base_local, field_idx)
+                        if gf_hir != nil:
+                            val gf_hir_t: HirType = gf_hir
+                            self.remember_local_hir_type(field_result.id, gf_hir_t, 0, 0)
+                        return field_result
                     # Keep chained aggregate and array-field identity on the
                     # projected local for later field/index/method lowering.
                     # (The field_elem_type_override computed above already

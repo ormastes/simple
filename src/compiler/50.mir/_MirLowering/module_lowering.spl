@@ -465,6 +465,10 @@ impl MirLowering:
             class_type_names: {},
             struct_field_type_ownership_key: {},
             struct_field_type_name: {},
+            struct_field_type_param: {},
+            struct_type_param_names: {},
+            generic_instance_field_types: {},
+            generic_instance_field_struct_names: {},
             struct_field_repr_name: {},
             struct_field_hir_type: {},
             struct_bare_layout_owner: {},
@@ -1156,6 +1160,16 @@ impl MirLowering:
     fn asm_target_spec_backend(spec: AsmTargetSpec) -> text:
         spec.backend
 
+    me register_struct_type_param_names(name: text, type_params: [HirTypeParam]):
+        """Record a generic struct's type-parameter names in declaration
+        order (empty for a non-generic struct), keyed like the field maps."""
+        var names: [text] = []
+        for tp in type_params:
+            val tpt: HirTypeParam = tp
+            names.push(tpt.name)
+        if names.len() > 0 or not self.struct_type_param_names.has(name):
+            self.struct_type_param_names[name] = names
+
     me register_composite_field_metadata(name: text, fields: [HirField], symbols: SymbolTable, overwrite: bool):
         """Register name-keyed struct/class field metadata."""
         var field_names: [text] = []
@@ -1165,6 +1179,7 @@ impl MirLowering:
         var field_hir_types: [HirType] = []
         var field_array_element_type_names: [text] = []
         var field_elem_types: [HirType] = []
+        var field_type_params: [text] = []
         var fi = 0
         while fi < fields.len():
             val field = fields[fi]
@@ -1173,6 +1188,7 @@ impl MirLowering:
             var field_type_ownership_key = ""
             var field_repr_name = ""
             var field_array_element_type_name = ""
+            var field_type_param = ""
             var field_elem_type = HirType(kind: HirTypeKind.Error, span: field.span)
             var field_hir_type = HirType(kind: HirTypeKind.Error, span: field.span)
             if field.type_ != nil:
@@ -1180,14 +1196,21 @@ impl MirLowering:
                 match field.type_.kind:
                     case Str:
                         field_repr_name = "str"
+                    case TypeParam(tp_name, _):
+                        field_type_param = tp_name
                     case Named(field_type_sym, _):
                         val field_type_symbol = symbols.get_symbol_raw(field_type_sym.id)
                         if field_type_symbol.?:
-                            field_type_name = field_type_symbol.name
-                            field_type_ownership_key = self.composite_layout_key(field_type_symbol)
-                            if field_type_symbol.kind == SymbolKind.Class:
-                                field_type_name = mir_class_identity(field_type_symbol)
-                                field_type_ownership_key = field_type_name
+                            if field_type_symbol.kind == SymbolKind.TypeParam:
+                                # `a: A` of `struct Pair<A, B>`: not a struct
+                                # named A -- the instance decides (BUG-IT-6).
+                                field_type_param = field_type_symbol.name
+                            else:
+                                field_type_name = field_type_symbol.name
+                                field_type_ownership_key = self.composite_layout_key(field_type_symbol)
+                                if field_type_symbol.kind == SymbolKind.Class:
+                                    field_type_name = mir_class_identity(field_type_symbol)
+                                    field_type_ownership_key = field_type_name
                     case Array(field_element_type, _):
                         field_array_element_type_name = "__runtime_array__"
                         # Bug (native_class_array_field_mutation_segfault /
@@ -1231,7 +1254,10 @@ impl MirLowering:
             field_hir_types.push(field_hir_type)
             field_array_element_type_names.push(field_array_element_type_name)
             field_elem_types.push(field_elem_type)
+            field_type_params.push(field_type_param)
             fi = fi + 1
+        if overwrite or not self.struct_field_type_param.has(name):
+            self.struct_field_type_param[name] = field_type_params
         # Field-index-collision diagnostic (stage3 borrow-checker SIGSEGV,
         # 2026-08-07): ~1,500 struct/class names are duplicated across
         # src/{compiler,lib,app}. A bare-name re-registration with a
@@ -1325,6 +1351,7 @@ impl MirLowering:
             # 2026-07-17) -- no separate inline loop needed here.
             val bare_layout_was_free = not self.struct_field_order.has(struct_def.name)
             self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, false)
+            self.register_struct_type_param_names(struct_def.name, struct_def.type_params)
             val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
             if struct_symbol != nil:
                 val struct_key = self.composite_layout_key(struct_symbol)
@@ -1333,6 +1360,7 @@ impl MirLowering:
                 if struct_key != struct_def.name:
                     self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, false)
                     self.register_struct_identity_layout_key(struct_symbol, struct_key)
+                    self.register_struct_type_param_names(struct_key, struct_def.type_params)
                 val struct_attr = if struct_def.has_layout_attr: struct_def.layout_attr else: layoutattr_default_()
                 self.register_composite_layout_identity(struct_symbol, struct_def.fields, struct_attr)
             psi = psi + 1
@@ -1674,6 +1702,7 @@ impl MirLowering:
         while local_meta_i < local_struct_values.len():
             val struct_def = local_struct_values[local_meta_i]
             self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, true)
+            self.register_struct_type_param_names(struct_def.name, struct_def.type_params)
             val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
             if struct_symbol != nil:
                 val struct_key = self.composite_layout_key(struct_symbol)
@@ -1681,6 +1710,7 @@ impl MirLowering:
                 if struct_key != struct_def.name:
                     self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, true)
                     self.register_struct_identity_layout_key(struct_symbol, struct_key)
+                    self.register_struct_type_param_names(struct_key, struct_def.type_params)
             local_meta_i = local_meta_i + 1
         val local_class_values = module.classes.values()
         local_meta_i = 0

@@ -4643,6 +4643,18 @@ impl MirLowering:
         # (`r.origin.y`) resolve the inner field against the right struct
         # instead of silently defaulting to index 0.
         var field_type_names: [text] = []
+        # Generic struct (BUG-IT-6): remember, per CONSTRUCTED INSTANCE, the
+        # MIR type each type-param field actually holds, so `p.a` on a
+        # `Pair<text, i64>` reads a str and `p.b` an i64 instead of a
+        # struct named after the parameter. Indexed in lock-step with
+        # field_type_names below; every push site keeps them aligned.
+        var instance_is_generic = false
+        if self.struct_field_type_param.has(struct_name):
+            for marker in self.struct_field_type_param[struct_name]:
+                val mk: text = marker
+                if mk != "":
+                    instance_is_generic = true
+        var instance_field_types: [MirType] = []
         var fi = 0
         var pos_i = 0
         while fi < field_names.len():
@@ -4682,6 +4694,7 @@ impl MirLowering:
                     ops = ops.push(mir_operand_copy(spread_field_val))
                     val spread_nested_name = self.struct_value_syms.get(spread_field_val.id)
                     field_type_names.push(spread_nested_name ?? "")
+                    instance_field_types.push(spread_field_type)
                     fi = fi + 1
                     continue
                 # Declared field omitted at the call site (no named arg, no
@@ -4718,6 +4731,7 @@ impl MirLowering:
                                             ()
                                 ops = ops.push(mir_operand_copy(def_v))
                                 field_type_names.push(self.struct_value_syms.get(def_v.id) ?? "")
+                                instance_field_types.push(self.local_mir_type_of(def_v) ?? MirType.i64())
                                 filled_default = true
                             else:
                                 self.error_fatal("cannot lower declared default for {struct_name}", Some(def_exprs[fi].span))
@@ -4747,6 +4761,7 @@ impl MirLowering:
                     else:
                         ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
                     field_type_names.push("")
+                    instance_field_types.push(MirType.i64())
                 fi = fi + 1
                 continue
             val chosen = if has_named: named_args[want] else: positional_args[pos_i]
@@ -4773,6 +4788,7 @@ impl MirLowering:
                 self.error("unsupported struct field initializer (cannot lower to a value)", nil)
                 ops = ops.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
                 field_type_names.push("")
+                instance_field_types.push(MirType.i64())
             else:
                 if fi < field_hir_types.len():
                     v = self.coerce_native_trait_assignment(v, chosen.kind, field_hir_types[fi], chosen.span)
@@ -4797,6 +4813,7 @@ impl MirLowering:
                 ops = ops.push(mir_operand_copy(v))
                 val arg_struct = self.struct_value_syms.get(v.id)
                 field_type_names.push(arg_struct ?? "")
+                instance_field_types.push(self.local_mir_type_of(v) ?? MirType.i64())
             fi = fi + 1
         # Only record a non-trivial map (at least one nested struct field), and
         # only when a prior construction has not already recorded richer info.
@@ -4831,6 +4848,9 @@ impl MirLowering:
         if declaration != nil and (declaration.kind == SymbolKind.Class or declaration.kind == SymbolKind.Struct):
             val constructed_type = HirType(kind: HirTypeKind.Named(symbol, []), span: declaration.span)
             self.remember_local_hir_type(dest.id, constructed_type, 2, 0)
+        if instance_is_generic:
+            self.generic_instance_field_types[dest.id] = instance_field_types
+            self.generic_instance_field_struct_names[dest.id] = field_type_names
         dest
 
     me lookup_local_type(local: LocalId) -> MirType:
