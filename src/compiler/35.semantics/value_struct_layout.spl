@@ -73,10 +73,34 @@ fn value_layout_location(span_file: text, module_path: text, line: i64) -> text:
         return shown + ":" + "{line}"
     shown
 
+struct ValueStructLayoutReport:
+    errors: [text]
+    # By-value struct-typed fields whose target struct is in no validated
+    # module (distinct fields). Zero means every such edge was walked.
+    skipped_struct_edges: i64
+
+fn value_layout_internal_error(message: text) -> ValueStructLayoutReport:
+    ValueStructLayoutReport(errors: [message], skipped_struct_edges: 0)
+
+fn value_struct_layout_is_cycle_diagnostic(message: text) -> bool:
+    message.starts_with("recursive by-value struct layout: ")
+
+fn value_struct_layout_cycle_is_fatal_for(raw: text) -> bool:
+    """`SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE` policy: only the exact value
+    `warning` downgrades a cycle; unset, empty and anything else stay fatal."""
+    raw != "warning"
+
 fn validate_value_struct_layouts(
     module_keys: [text],
     module_values: [HirModule]
 ) -> [text]:
+    val report = value_struct_layout_report(module_keys, module_values)
+    report.errors
+
+fn value_struct_layout_report(
+    module_keys: [text],
+    module_values: [HirModule]
+) -> ValueStructLayoutReport:
     """Return every resolved direct by-value struct cycle, one diagnostic each.
 
     The validator accepts a deliberately aligned, physical-module view instead
@@ -91,7 +115,7 @@ fn validate_value_struct_layouts(
     is reported once, from its first root.
     """
     if module_keys.len() != module_values.len():
-        return ["internal error: value struct layout module keys and values are misaligned"]
+        return value_layout_internal_error("internal error: value struct layout module keys and values are misaligned")
     var structs: Dict<text, HirStruct> = {}
     var owner_module_indices: Dict<text, i64> = {}
     var roots: [text] = []
@@ -133,8 +157,8 @@ fn validate_value_struct_layouts(
             # projected from an aggregate Dict value under closure pressure.
             val canonical: text = value_layout_node_key(module_key, struct_.name)
             if not rt_heap_ref_wellformed(canonical):
-                return ["internal error: value struct layout module key at index "
-                    + "{module_index}" + " does not carry a usable text value"]
+                return value_layout_internal_error("internal error: value struct layout module key at index "
+                    + "{module_index}" + " does not carry a usable text value")
             structs[canonical] = struct_
             owner_module_indices[canonical] = module_index
             val own_symbol_id: i64 = struct_.symbol.id
@@ -146,6 +170,8 @@ fn validate_value_struct_layouts(
         module_index = module_index + 1
 
     var errors: [text] = []
+    var skipped_struct_edges: i64 = 0
+    var skipped_edges: Dict<text, bool> = {}
     # Membership-only: sorted node-key signatures of reported cycles. A mutual
     # cycle A <-> B is one defect, not one per root.
     var reported: Dict<text, bool> = {}
@@ -172,11 +198,11 @@ fn validate_value_struct_layouts(
             # Reading the miss and walking its fields is what turned that
             # broken invariant into a SIGSEGV with no message.
             if not structs.has(walk.node_key):
-                return ["internal error: value struct layout node key is absent from the struct index"]
+                return value_layout_internal_error("internal error: value struct layout node key is absent from the struct index")
             val struct_ = structs[walk.node_key]
             val owner_module_index = owner_module_indices[walk.node_key]
             if owner_module_index < 0 or owner_module_index >= module_values.len():
-                return ["internal error: value struct layout owner module index is invalid"]
+                return value_layout_internal_error("internal error: value struct layout owner module index is invalid")
             val owner_module_key = module_keys[owner_module_index]
             val owner: HirModule = module_values[owner_module_index]
             for field in struct_.fields:
@@ -229,9 +255,16 @@ fn validate_value_struct_layouts(
                         if module_keys_by_path.has(defining_module):
                             target = value_layout_node_key(module_keys_by_path[defining_module], resolved.name)
                 if not structs.has(target):
+                    # A by-value field of struct type that resolves to no
+                    # validated struct: not provably a cycle, not provably
+                    # safe. Counted once per field, never reported as an error.
+                    val skipped_edge: text = walk.node_key + "\t" + field.name
+                    if not skipped_edges.has(skipped_edge):
+                        skipped_edges[skipped_edge] = true
+                        skipped_struct_edges = skipped_struct_edges + 1
                     continue
 
-                val edge = struct_.name + "." + field.name
+                val edge =struct_.name + "." + field.name
                 val next_path = if walk.path == "": edge else: walk.path + " -> " + edge
                 val hop = walk.node_key + "\t" + field.name
                 val next_chain = if walk.chain == "": hop else: walk.chain + "\n" + hop
@@ -279,7 +312,9 @@ fn validate_value_struct_layouts(
                     continue
                 if not visited.has(target):
                     pending.push(ValueStructLayoutWalk(node_key: target, path: next_path, chain: next_chain))
-    errors
+    ValueStructLayoutReport(errors: errors, skipped_struct_edges: skipped_struct_edges)
 
 export validate_value_struct_layouts, value_struct_layout_snapshot_v1
+export ValueStructLayoutReport, value_struct_layout_report
+export value_struct_layout_is_cycle_diagnostic, value_struct_layout_cycle_is_fatal_for
 use compiler.hir.hir_types.{HirModule}  # explicit: a glob is not an import-origin for surface projection

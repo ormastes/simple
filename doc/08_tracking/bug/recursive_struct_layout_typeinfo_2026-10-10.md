@@ -125,3 +125,41 @@ doing, neither done here:
   recommending `T?` over `[T]` in this tree — every self-referential struct
   field in `src/compiler` uses `[T]`, and Option-of-aggregate was the fragile
   ABI shape the old rewrite was avoiding.
+
+## Follow-ups (2026-10-11)
+
+- **Skipped edges are counted.** A by-value struct-typed field whose struct is
+  in no validated module is still not an error, but it is no longer invisible:
+  `phase3:hir:validate:value_struct_layouts:done errors=N skipped_struct_edges=M`
+  (distinct fields; `value_struct_layout_report`). Non-zero means the walk was
+  incomplete for M fields.
+- **`SIMPLE_VALUE_STRUCT_LAYOUT_CYCLE=warning`** prints each cycle as
+  `[post-hir-validation-warning] ...` and keeps compiling, so out-of-tree code
+  can list every cycle without paying a full HIR pass per discovery. Only that
+  exact value downgrades; unset or anything else is fatal. Internal validator
+  errors are never downgraded. There is no off switch.
+- **All three HIR pipelines print the same marker.** `[post-hir-validation-fatal]`
+  (first 10) and `[post-hir-validation-fatal-count]` are now printed by
+  `driver_validate_value_struct_layouts` itself; the bootstrap-entry and
+  retained-owner callers used to add the errors to the context silently.
+
+### Local struct that reuses an imported symbol id
+
+`SymbolTable.define_with_binding` is first-write-wins for type names
+(`src/compiler/20.hir/hir_types.spl`, "Already registered — return the existing
+id"). A module that imports `Foo` and then declares its own `struct Foo` can
+therefore get the imported symbol id back: the local `HirStruct.symbol` and
+every unqualified `Foo` field in that module share one id whose
+`defining_module` names the OTHER module. (`define_own_module_type` repairs
+this on the closure declaration path; it returns the first-write id unchanged
+when `module_filename` is empty.)
+
+The validator used to resolve such a field by owner text, i.e. to the imported
+`Foo`. It now resolves by symbol id to the LOCAL `Foo`. The local binding is the
+right one: an unqualified type name in a module means that module's own
+declaration when it has one, which is exactly the shadowing
+`define_own_module_type` exists to enforce
+(`hir_package_sibling_shadows_own_type_2026-10-10.md`). Pinned by
+REQ-SEM-VSL-019. What the shared id cannot express is a field in that module
+that really meant the imported `Foo`; that is the id-reuse defect upstream of
+this check, not something the validator can recover.
