@@ -225,7 +225,9 @@ impl HirLowering:
         eprint("[hir-lower] WARNING: bare `{name}` {message} ({self.module_filename}; SIMPLE_BARE_VARIANT_WARN=0 silences)")
 
     me register_enum_payload_slot(outer_owner: i64, variant_name: text, slot: i64, slot_type: Type, path: text):
-        """Row `slot:{variant}:{slot}:{path}:{outer enum id}:{slot enum name}`.
+        """Row `{outer enum id}:{slot enum name}` under the index key
+        `{variant}:{slot}:{path}` (enum_payload_slot_rows), so a lookup reads
+        one list instead of walking every table key.
         `path` is the chain of Option/Result wrappers between the slot and the enum
         (`op: Op?` -> "/Some", `r: Result<i64, Op>` -> "/Err"), so
         `case W(Some(Eq))` resolves `Eq` through the generic instantiation.
@@ -246,7 +248,14 @@ impl HirLowering:
                 return
             val slot_owner = self.symbols.lookup_or_invalid(slot_type_name)
             if slot_owner.is_valid():
-                self.enum_unit_pattern_names["slot:{variant_name}:{slot}:{path}:{outer_owner}:{slot_type_name}"] = true
+                val row_key = "{variant_name}:{slot}:{path}"
+                val row = "{outer_owner}:{slot_type_name}"
+                var rows: [text] = []
+                if self.enum_payload_slot_rows.contains_key(row_key):
+                    rows = self.enum_payload_slot_rows[row_key]
+                if not rows.contains(row):
+                    rows = rows.push(row)
+                    self.enum_payload_slot_rows[row_key] = rows
             return
         if parser_type_kind_is_optional(slot_type.kind):
             val optional_inner: Type = parser_type_kind_optional_inner(slot_type.kind, slot_type)
@@ -258,18 +267,22 @@ impl HirLowering:
         `name`. `outer_owner` < 0 = outer enum unknown: every enum declaring
         `outer_variant` is considered. -1 = none, -2 = several.
 
-        Walks the table's TEXT keys and re-resolves the slot enum by name:
+        Reads the per-(variant, slot, path) row list and re-resolves the slot
+        enum by name:
         the keys of an `{i64: bool}` dict come back as text on the seed, so
         an id taken from such a key is not usable as a SymbolId there."""
-        var slot_prefix = "slot:{outer_variant}:{slot}:{path}:"
-        if outer_owner >= 0:
-            slot_prefix = "slot:{outer_variant}:{slot}:{path}:{outer_owner}:"
+        val row_key = "{outer_variant}:{slot}:{path}"
+        if not self.enum_payload_slot_rows.contains_key(row_key):
+            return -1
+        val rows: [text] = self.enum_payload_slot_rows[row_key]
+        val wanted_outer = "{outer_owner}"
         var found: i64 = -1
-        for row_key in self.enum_unit_pattern_names.keys():
-            val row: text = row_key
-            if row.starts_with(slot_prefix):
-                val row_parts = row.split(":")
-                val slot_type_name: text = row_parts[row_parts.len() - 1]
+        for untyped_row in rows:
+            val row: text = untyped_row
+            val row_parts = row.split(":")
+            val row_outer: text = row_parts[0]
+            if outer_owner < 0 or row_outer == wanted_outer:
+                val slot_type_name: text = row_parts[1]
                 val slot_owner = self.symbols.lookup_or_invalid(slot_type_name)
                 if slot_owner.is_valid() and self.enum_unit_pattern_names.contains_key("{slot_owner.id}:{name}"):
                     if found >= 0 and found != slot_owner.id:
@@ -288,7 +301,7 @@ impl HirLowering:
         binds when the slot's type is not an enum owning the name)."""
         match p.kind:
             case PatternKind.Binding(name, mutable):
-                if not mutable and self.enum_unit_pattern_names.contains_key("*:{name}"):
+                if not mutable and self.bare_name_may_be_unit_variant(name):
                     val slot_owner_id = self.payload_slot_enum_owner(outer_owner, outer_variant, slot, path, name)
                     if slot_owner_id >= 0:
                         val slot_enum_type = HirType(kind: HirTypeKind.Named(SymbolId(id: slot_owner_id), []), span: p.span)
@@ -324,7 +337,7 @@ impl HirLowering:
         inside a positional payload)."""
         match p.kind:
             case PatternKind.Binding(name, mutable):
-                return not mutable and self.enum_unit_pattern_names.contains_key("*:{name}")
+                return not mutable and self.bare_name_may_be_unit_variant(name)
             case PatternKind.Or(alternatives):
                 for alt in alternatives:
                     if self.pattern_names_unit_variant(alt):

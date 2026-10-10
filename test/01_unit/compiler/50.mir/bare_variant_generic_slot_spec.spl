@@ -35,9 +35,9 @@ use compiler.mir.mir.*
 use compiler.mir.mir_lowering_types.{MirLowering}
 use compiler.mir._MirLowering.module_lowering.*
 
-val data_source = "pub enum Op:\n    Eq\n    Ne\n    Lt\n\npub enum Cmp:\n    Eq\n    Gt\n\npub enum Kind:\n    Var\n    Temp\n    Return\n\npub enum Role:\n    PriorTld\n    InitTld\n\npub enum Wrap:\n    W(o: Op?)\n    G(o: Option<Op>)\n    R(r: Result<i64, Op>)\n    Z\n"
+val data_source = "pub enum Op:\n    Eq\n    Ne\n    Lt\n\npub enum Cmp:\n    Eq\n    Gt\n\npub enum Kind:\n    Var\n    Temp\n    Return\n\npub enum Role:\n    PriorTld\n    InitTld\n\npub enum Wrap:\n    W(o: Op?)\n    G(o: Option<Op>)\n    R(r: Result<i64, Op>)\n    Z\n\npub enum Demand:\n    body\n    mir\n\npub enum Hold:\n    H(d: Demand)\n    NoHold\n\npub enum Tk:\n    module\n    lib\n\npub enum Tk2:\n    module\n    other2\n"
 
-val facade_source = "use lib.data.*\n\nexport use lib.data.\{Op, Cmp, Kind, Role, Wrap\}\n"
+val facade_source = "use lib.data.*\n\nexport use lib.data.\{Op, Cmp, Kind, Role, Wrap, Demand, Hold, Tk, Tk2\}\n"
 
 fn lower_facade_consumer(body: text) -> text:
     val consumer_source = "use lib.facade.*\n\n" + body
@@ -111,3 +111,24 @@ describe "bare variant names through a generic instantiation":
 
     it "a payload slot declared Result<i64, Op>: R(Err(Eq)) | R(Err(Lt))":
         expect_variant_tests(lower_facade_consumer("fn e(w: Wrap) -> i64:\n    match w:\n        case R(Err(Eq)) | R(Err(Lt)):\n            1\n        case _:\n            0\n"))
+
+describe "wrapped names that must keep binding":
+    it "a lowercase name an enum declares, call-result subject: case Ok(body): body":
+        val all = lower_facade_consumer("fn mk2() -> Result<i64, text>:\n    Ok(1)\n\nfn b2() -> i64:\n    match mk2():\n        case Ok(body):\n            body\n        case Err(e):\n            0\n")
+        expect(all.contains("unresolved name")).to_equal(false)
+        expect(all.contains("ambiguous")).to_equal(false)
+
+    it "a lowercase name two enums declare, untyped subject: case Some(module): module":
+        val all = lower_facade_consumer("fn b5(x) -> i64:\n    match x:\n        case Some(module):\n            module\n        case _:\n            0\n")
+        expect(all.contains("unresolved name")).to_equal(false)
+        expect(all.contains("ambiguous")).to_equal(false)
+
+    it "a Capitalized name two enums share, untyped subject: case Some(Eq) binds":
+        val all = lower_facade_consumer("fn b8(x) -> i64:\n    match x:\n        case Some(Eq):\n            1\n        case _:\n            0\n")
+        expect(all.contains("ambiguous")).to_equal(false)
+
+    it "a lowercase name in a payload slot whose enum declares it, untyped subject, binds":
+        # Slot `d` of `Hold.H` is declared `Demand`, which has a unit variant
+        # `body`. The arm body reads `body`, so it must be a binding.
+        val all = lower_facade_consumer("fn b9(x) -> i64:\n    match x:\n        case H(body):\n            if body == Demand.mir: 1 else: 2\n        case _:\n            0\n")
+        expect(all.contains("unresolved name")).to_equal(false)
