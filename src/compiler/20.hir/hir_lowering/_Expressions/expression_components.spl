@@ -362,6 +362,21 @@ impl HirLowering:
                 return left_symbol.kind == SymbolKind.Enum and right_symbol.kind == SymbolKind.Enum and origin != "" and origin == (right_symbol.defining_module ?? "") and left_symbol.name == right_symbol.name
         false
 
+    me pattern_enum_owner_provably_differs(left: SymbolId, right: SymbolId) -> bool:
+        """True only for two ENUM symbols with different names.
+
+        `pattern_enum_same_owner` proves sameness (one id, or one defining
+        module and name). Its negation is not proof of a mismatch: an inferred
+        subject owner may be a non-enum carrier, or the same enum registered
+        under another module spelling. Both made Stage 3 reject
+        `case HirExprKind.Var(..)` in 35.semantics/perf/collection_plan.spl."""
+        if self.pattern_enum_same_owner(left, right):
+            return false
+        if val left_symbol = self.symbols.get_symbol_raw(left.id):
+            if val right_symbol = self.symbols.get_symbol_raw(right.id):
+                return left_symbol.kind == SymbolKind.Enum and right_symbol.kind == SymbolKind.Enum and left_symbol.name != right_symbol.name
+        false
+
     me register_declared_pattern_enum_slots(declaration: ParserEnum, owner: SymbolId, owner_module: text, project_imported_payloads: bool):
         if not owner.is_valid() or declaration.type_params.len() != 0:
             return
@@ -415,7 +430,7 @@ impl HirLowering:
         val key = "{owner.id}:{variant_name}"
         if not owner.is_valid() or not self.declared_pattern_enum_slots.contains_key(key):
             return nil
-        if enum_name != "" and subject_owner.is_valid() and not self.pattern_enum_same_owner(owner, subject_owner):
+        if enum_name != "" and subject_owner.is_valid() and self.pattern_enum_owner_provably_differs(owner, subject_owner):
             # Only a proven enum slot participates; struct patterns retain
             # their existing lowering and are not compared as enum owners.
             self.error("qualified enum pattern owner differs from subject owner", p.span)
