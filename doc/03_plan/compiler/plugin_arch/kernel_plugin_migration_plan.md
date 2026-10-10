@@ -199,3 +199,9 @@ Persistent package/module indexing, TLDR+SMF metadata, one-package
 invalidation, deterministic SCC scheduling, atomic publication, and removal of
 hidden full-scan fallback are planned in
 `doc/03_plan/compiler/perf/persistent_package_module_index_compile_optimization_plan_2026-09-02.md`.
+
+The 2026-10-11 VHDL product owner relocation moved the artifact renderer and
+Gen2 product runners from K0 into the VHDL plugin. The current structural
+audit has one K0-to-P import, zero K1-to-P, three kernel-to-app/OS imports,
+and zero unclassified compiler files. The remaining AOT VHDL extension and
+all executable size/startup gates remain open.

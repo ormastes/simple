@@ -355,3 +355,19 @@ from 8 to 3 kernel-to-app/OS imports, with 3 K0-to-P and 0 K1-to-P imports
 remaining; 2,237 compiler files are classified and none are unclassified.
 This is a source-ownership improvement only. Native parity, optional-provider
 loading, and the matched size/startup/RSS gates remain open.
+
+## 2026-10-11 VHDL product ownership cut
+
+The production artifact renderer and seven RISC-V Gen2 VHDL product runners
+now live under `plugins.backend_vhdl.driver`. The VHDL CLI and focused
+artifact specs import that owner explicitly; the K0 driver facade no longer
+re-exports those product runners. The structural census falls from 3 to 1
+K0-to-P imports, with 3 kernel-to-app/OS imports and zero unclassified
+compiler files. The remaining K0-to-P edge is the live AOT VHDL extension
+in `driver_aot_pipeline.spl`; it still requires a typed dispatch cutover.
+This move does not qualify native output, size, startup, or RSS. A bounded
+self-hosted Stage2 compile of the moved Gen2 product parsed and built surfaces
+for all 556 reached files, then timed out at HIR 36/556 without a moved-module
+diagnostic. The Phase 5 source checker now accepts the current typed table
+selector and exposes the remaining direct VHDL plugin import from
+`driver_aot_pipeline.spl`; its structural gate remains RED.
