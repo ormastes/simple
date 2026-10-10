@@ -158,3 +158,7 @@ The native CAS fixture exposed struct copy-then-mutate aliasing in its own negat
 ### 2026-10-11 CAS decode root
 
 The second V2 generation's readback fails at entry field 11 because a one-character native substring displaying `3` converts to nil through `to_i64()`. The exact failure and bounded byte-parser repair are recorded in `doc/08_tracking/bug/package_index_native_publication_blockers_2026-10-10.md`. Publication/readback acceptance and full entrypoint performance remain open.
+
+### 2026-10-11 native readback repair verified
+
+A bounded byte decimal parser replaces native substring `to_i64()` in frame, list, and generation count decoding. The focused no-stub 50-module native CAS probe now passes second-generation publish/read/pin and stale-CAS rejection; malformed one-digit frame cases also pass. See the package-index native publication bug note for receipts. Item 6 remains in progress until warm SCV recovery, full entrypoint graph publication, and matched time/RSS qualification pass.

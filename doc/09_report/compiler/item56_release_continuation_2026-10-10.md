@@ -56,3 +56,7 @@ This proves the narrow conversion and hash path. It does not prove the full CAS 
 ## 2026-10-10 bounded Item 5/6 continuation
 
 The imported enum-payload owner alias now clears the earlier 42 HIR errors across the 1009-module JIT probe. Its native build fails later at monomorphization with 63 unresolved generic calls after about 616 seconds; no JIT, size, startup, or RSS verdict follows. Item 6's second-generation CAS fixture advances CURRENT but fails native readback; the warm-revert recovery source passes HIR/mono in isolation and fails MIR before execution. The structural index bytes and exact receipts are in the Item 5 HIR and Item 6 native publication/warm inventory bug notes. These are bounded defect repairs, not release qualification. The paired normalized sum for time and memory cannot be evaluated without executable baseline and candidate cohorts; collect both once runtime gates pass.
+
+## 2026-10-11 native CAS readback
+
+The Item 6 second-generation native CAS scenario now passes using bounded byte decimal parsing. The parser also rejects padded, oversized, and nonnumeric frame lengths in the same no-stub native fixture. The repair reduces repeated substring copying, but no matched p95/RSS cohort is available; the joint normalized-sum verdict remains unclaimed. Full entrypoint and warm recovery gates are still open.

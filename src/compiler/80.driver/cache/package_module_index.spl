@@ -133,21 +133,42 @@ fn package_module_index_sorted_unique_v1(values: [text]) -> [text]:
 fn package_module_index_frame_v1(value: text) -> text:
     "{value.len()}:{value}"
 
+fn package_module_index_decimal_bounded_v1(
+    value: text, start: i64, end: i64, maximum: i64
+) -> i64?:
+    # Parse original bytes: native to_i64() can reject a one-byte substring
+    # and allocating a tail for each frame repeatedly copies unread bytes.
+    if start < 0 or end <= start or end > value.len() or maximum < 0:
+        return nil
+    if end - start > 1 and (value.byte_at(start) as i64) == 48:
+        return nil
+    var result: i64 = 0
+    var cursor = start
+    while cursor < end:
+        val code = value.byte_at(cursor) as i64
+        if code < 48 or code > 57:
+            return nil
+        val digit = code - 48
+        if digit > maximum or result > (maximum - digit) / 10:
+            return nil
+        result = result * 10 + digit
+        cursor = cursor + 1
+    Some(result)
+
 fn package_module_index_frame_read_v1(value: text, start: i64) -> (text, i64)?:
     if start < 0 or start >= value.len():
         return nil
-    val tail = value.substring(start, value.len())
-    val colon = tail.index_of(":")
-    if colon <= 0:
+    var colon = start
+    while colon < value.len() and (value.byte_at(colon) as i64) != 58:
+        colon = colon + 1
+    if colon <= start or colon >= value.len():
         return nil
-    val digits = tail.substring(0, colon)
-    val extent = digits.to_i64() ?? -1
-    if extent < 0 or "{extent}" != digits:
+    val body_start = colon + 1
+    val extent = package_module_index_decimal_bounded_v1(
+        value, start, colon, value.len() - body_start)
+    if extent == nil:
         return nil
-    val body_start = start + colon + 1
-    val body_end = body_start + extent
-    if body_end > value.len():
-        return nil
+    val body_end = body_start + extent!
     Some((value.substring(body_start, body_end), body_end))
 
 fn package_module_index_list_encode_v1(values: [text]) -> text:
@@ -160,12 +181,14 @@ fn package_module_index_list_encode_v1(values: [text]) -> text:
     body
 
 fn package_module_index_list_decode_v1(value: text) -> [text]?:
-    val semicolon = value.index_of(";")
-    if semicolon <= 0:
+    var semicolon = 0
+    while semicolon < value.len() and (value.byte_at(semicolon) as i64) != 59:
+        semicolon = semicolon + 1
+    if semicolon <= 0 or semicolon >= value.len():
         return nil
-    val count_text = value.substring(0, semicolon)
-    val count = count_text.to_i64() ?? -1
-    if count < 0 or "{count}" != count_text:
+    val count = package_module_index_decimal_bounded_v1(
+        value, 0, semicolon, value.len() - semicolon - 1) ?? -1
+    if count < 0:
         return nil
     var result: [text] = []
     var cursor = semicolon + 1
@@ -517,9 +540,11 @@ fn package_module_index_decode_v1(content: text) -> PackageModuleIndexReadV1:
     val scope_entry = if scoped: lines[9].substring(12, lines[9].len()) else: ""
     val count_row = if scoped: 10 else: if graph: 9 else: 8
     val entry_row = count_row + 1
-    if not lines[count_row].starts_with("count="):
+    val count_line = lines[count_row]
+    if not count_line.starts_with("count="):
         return PackageModuleIndexReadV1(false, "corrupt-count", "", nil)
-    val count = lines[count_row].substring(6, lines[count_row].len()).to_i64() ?? -1
+    val count = package_module_index_decimal_bounded_v1(
+        count_line, 6, count_line.len(), lines.len() - entry_row) ?? -1
     if count < 0 or lines.len() != count + entry_row:
         return PackageModuleIndexReadV1(false, "corrupt-count", "", nil)
     var entries: [PackageModuleIndexEntryV1] = []
