@@ -284,3 +284,109 @@ Retain the three-cycle limit, failed-only retries and no green replay. Every
 workaround requires a bug identifier, explicit tag, introducing commit and a
 removal condition tied to an applied, verified fix. Continue independent stages
 where inputs are usable; fail closed on identity, provenance or ownership gaps.
+
+
+## Current acceptance and remaining implementation — 2026-10-10
+
+This section supersedes the earlier follow-up status where it differs. All
+28 selected requirements and WP0–WP11 remain in scope. Component passes qualify
+only the executed owner and criteria; private candidates are not landed product
+implementation. This update changes planning documentation, not runtime code.
+
+### Evidence now available
+
+| Owner or product | Actual result | Qualification boundary |
+|---|---|---|
+| Windows retained-directory adapter | Thirteen distinct targeted Rust criteria pass, including repaired rename and unaligned-count cases | Pure-Simple retained-directory caller remains blocked; no full provider acceptance |
+| Windows file-view archive component | Three independent native controls pass: allocation, mapping and active-close. Actual link map identifies the private C owner and real runtime value constructors | Rust V2 aliases, pure consumers, concurrent GC/scope teardown and complete producer generation remain unqualified |
+| Synchronous native parse lease | Four native control groups pass. A separate stronger barrier criterion proves Busy while the parent owns the lease, then acquisition/release after the release signal: five distinct component criteria | Five frontend SSpecs are authored but UNRUN. Async scheduling, TestRunner integration, duplicate-parse prevention and exceptional worker cleanup remain unqualified |
+| Recovered bootstrap seed | Cached linked executable is privately recovered; version and interpreter Hello pass | Cargo publication failed at an in-use admitted junction. Recovery does not establish successful Cargo publication or complete source admission |
+| Native compiler Hello | Cranelift reaches a concrete link failure: GNU arguments sent to lld-link. LLVM is unavailable in this seed's build features | Neither backend has a successful native Hello in this diagnostic. Installed LLVM does not enable a seed feature automatically |
+| Phase 2 native test products | Zero of six products qualified | Compiler, interpreter and loader products for each of LLVM and Cranelift must still build, enumerate actual cases, execute and report failures |
+
+The pure-Simple NT caller diagnostic declared two cases but executed zero:
+the seed rejects the admitted source's `@when(os="windows"):` syntax.
+This is an infrastructure/seed-syntax blocker, not two passing or failing cases.
+The additional unaligned pure caller remains UNRUN.
+
+### Implementation order, ownership and acceptance
+
+1. **Platform/linker lane — Astra implementation, primary admission.** Run the
+   eight real Rust command/default-library owner regressions already authored,
+   covering target-selected LLD dialect and Windows default libraries. Review
+   the latest helper/SDK-library additions separately. Apply only verified,
+   session-owned source deltas, retaining other sessions' changes. Pin the
+   actual runtime library, tools and SDK search paths before a changed native
+   Hello attempt; preserve failed objects and link diagnostics. Focused argv
+   passes alone do not qualify the native compiler or full runtime.
+2. **Compiler-sharing lane — Astra implementation, independent formal review.**
+   Complete the parse-lease ABI and runtime-source compositions exactly once
+   per applicable producer. Require manifest membership and current digest for
+   every selected C source before both compilation and cached reuse. The
+   private assembly successor and composition/membership controls are authored
+   but UNRUN. Prove bounded exception-worker termination and explicit normal
+   release, then execute the five frontend cases without enabling managed
+   sharing before these boundaries pass.
+3. **Conditional-source lane — Astra implementation and review.** Nine Rust
+   regressions and six pure-Simple SSpecs are authored but UNRUN. Masking alone
+   cannot parse an active indented conditional body. Add parser/lexer-owned
+   indentation projection while preserving raw bytes, offsets, line and column;
+   account for the final effective line after blank/comment skipping. Exercise
+   the actual Parser on nested active declarations and excluded imports. Carry
+   explicit target OS/architecture/debug/execution configuration through every
+   loader and filtered-AST cache key; retain raw SCV source identity. Test
+   malformed conditions, inactive branches and cold/warm target separation.
+   Do not strip directives as a workaround that discards branch semantics.
+4. **TLDR/performance lane — compiler owner with primary measurement.** Reuse
+   the admitted parse/AST when producing a TLDR and later compiling its source.
+   Test standalone and BuildRunner/TestRunner access through the same interface,
+   source changes despite newer header timestamps, retained generation identity,
+   single producer with waiting consumers and invalidation across target/config
+   changes. Avoid duplicate whole-source lexing or full-tree scans. Measure
+   isolated SPL compilation first, then cache/service startup and cold/warm
+   end-to-end paths, including RSS and logic controls. The 0.1-second target is
+   an acceptance target, not a measured result or guarantee.
+5. **Bootstrap/test lanes — independent scheduling after usable admission.**
+   Continue supported Phase 1 failed/not-yet-run tests; build/enumerate/run all
+   six Phase 2 native products; attempt every Phase 3 module vertically through
+   object generation; attempt Phase 4 tools with Phase 2, including small-to-large
+   link and executable version/Hello sanity checks. Request forty jobs per lane
+   where resources permit, report actual active workers and any reduced
+   concurrency reason, and reuse only authority-valid artifacts. Continue
+   independent modules/stages after failures while recording unreachable steps
+   as blocked, never successful. Record seed-unsupported skips explicitly.
+
+Formal acceptance must refine real BuildRunner/compiler owners, cover cold and
+warm weighted cost, and show no duplicated build/publication under races and
+dead owners. Authored models or static review are not executed proofs. Edit
+hooks need crash-safe bounded queues, invalidation fallback and measured LLM/IDE
+overhead before activation. No complete hook implementation is claimed here.
+
+### Evidence locators and conflict policy
+
+- Archive component receipt:
+  `build/phase2-six-products-80030-20261010/independent-next-step-review/producer-admission-repair/windows-file-view-native-cases-cut1/stage-cycle3/ROOT_EXECUTION_DISPOSITION.json`.
+- Native lease receipts: `native-attempt1/result.json` in `native-controls-cut1`
+  and `native-attempt2/result.json` in `native-barrier-cut1`, under
+  `build/native_probe/phase3-enum-nil-arm-fix-20261010/tldr-local-file-validity/consumer-bridge/warm-candidate/synchronous-parse-lease-cut3/`.
+- Recovered-seed diagnostics and native Hello dispositions:
+  `build/windows-retained-interpreter-adapter-20261010/nt-rename-cut1/`.
+  Recovered executable SHA256:
+  `0b443ab26ff8ff26d62041fd9fb67b999f9d5f39ad81fcfc2fa62d66b224702e`.
+- Conditional design/regression candidate:
+  `build/native_probe/phase3-enum-nil-arm-fix-20261010/tldr-local-file-validity/formal/conditional-blocks-cut1/`.
+
+These local packets are evidence locators, not fresh-clone deliverables. The
+exact requested `simple_simd_gpu_sosix_variation_final_2026-10-10.md` is still
+absent from the checked Downloads path: implementation coverage and design
+conflicts remain **NOT_ASSESSED**. The supplied 2026-10-08 incremental-build
+design remains the retained input; do not substitute another SIMD/GPU document
+or invent a conflict recommendation without the requested text.
+
+Preserve at-most-three cycles per feature and failed-only retries; do not replay
+passing criteria or rename a closed feature to obtain another attempt. Archive
+native controls have consumed three cycles; lease native controls two. Every
+temporary workaround requires a bug record, explicit tag, introducing commit,
+and removal condition tied to an applied and verified fix. Keep unrelated dirty
+files and the shared index unchanged. Full Phase 3/4 success and measured
+compile/link/startup improvements remain unverified.
