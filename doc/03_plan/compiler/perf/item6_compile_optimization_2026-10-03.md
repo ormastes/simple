@@ -154,3 +154,7 @@ Two warm Item 5 probe launches stopped at `snapshot-index-drift` after a tracked
 ### 2026-10-10 second-generation and warm-revert isolation
 
 The native CAS fixture exposed struct copy-then-mutate aliasing in its own negative control and in the production snapshot-path route. Both now construct independent entries. The repaired fixture publishes a second V2 generation, but readback exits 4 with no emitted reason; the pointed-to index bytes hash to CURRENT and contain one complete framed entry. The warm-revert recovery candidate retries cold inventory once on snapshot-index drift; its 135-module native probe passes HIR and monomorphization but stops at unrelated MIR lowering, so runtime correctness is unverified. See the two linked bug notes. Full entrypoint cutover, persistent semantic-index acceptance, and paired time/RSS gates remain open.
+
+### 2026-10-11 CAS decode root
+
+The second V2 generation's readback fails at entry field 11 because a one-character native substring displaying `3` converts to nil through `to_i64()`. The exact failure and bounded byte-parser repair are recorded in `doc/08_tracking/bug/package_index_native_publication_blockers_2026-10-10.md`. Publication/readback acceptance and full entrypoint performance remain open.
