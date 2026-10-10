@@ -1,0 +1,40 @@
+#!/bin/sh
+# Exercise the Phase2/3 policy's real child environment; no compiler is admitted.
+set -eu
+source_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$source_root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$source_root/scripts/bootstrap/phase-c-backend-commands.shs"
+scratch=$(mktemp -d)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+unset SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB SIMPLE_SHARD_MEM_CLAMP \
+  SIMPLE_PARSE_SHARD_MAX SIMPLE_PARSE_SHARD_WORKER_KB SIMPLE_HIR_SHARD_WORKER_KB \
+  SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB
+for backend in llvm cranelift; do
+  (
+    pure_tool_threads=8
+    bootstrap_phase_c_apply_frontend_policy >"$scratch/policy"
+    run_matrix_task() {
+      shift 2
+      [ "$1" = producer ] && [ "$2" = native-build ]
+      [ "$5" = --low-memory ] && [ "$6" = --threads ] && [ "$7" = 8 ]
+      sh -c 'printf "%s\n" "$SIMPLE_SHARD_MEM_CLAMP" "$SIMPLE_PARSE_SHARD_MAX" "$SIMPLE_PARSE_SHARD_WORKER_KB" "$SIMPLE_HIR_SHARD_WORKER_KB" "$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB"'
+    }
+    bootstrap_phase_c_run_tool_build "$backend" cli producer entry.spl output 8
+  ) >"$scratch/child"
+  printf '%s\n' 1 1 1650000 3000000 3000000 >"$scratch/expected"
+  cmp "$scratch/expected" "$scratch/child"
+done
+(
+  pure_tool_threads=8
+  SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=2000000
+  bootstrap_phase_c_apply_frontend_policy >"$scratch/policy"
+  [ "$SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB" = 2000000 ]
+)
+(
+  pure_tool_threads=8
+  SIMPLE_PARSE_SHARD_MAX=8
+  if bootstrap_phase_c_apply_frontend_policy >"$scratch/rejected" 2>/dev/null; then exit 1; fi
+  [ ! -s "$scratch/rejected" ]
+)
+[ "${SIMPLE_PARSE_SHARD_MAX-unset}" = unset ]
+printf '%s\n' 'PASS Phase C frontend policy: both backends, unchanged codegen threads, narrower budget, rejected fanout, isolated environment'

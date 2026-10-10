@@ -3108,6 +3108,16 @@ run_rust_authority_env() {
 }
 
 run_rust_authority_cargo() {
+  rust_cargo_log=$1
+  rust_cargo_lto=$2
+  shift 2
+  if [ "${os}" = windows ]; then
+    set -- "$@" --target "${PLATFORM_RUST_TRIPLE}"
+  fi
+  run_rust_authority_command "$rust_cargo_log" "$rust_cargo_lto" "${cargo_abs}" "$@"
+}
+
+run_rust_authority_command() {
   # Cargo outputs are shared across output roots on Windows. Acquire the
   # existing authority lock before even preparing the workspace, and retain
   # it across every Cargo call, immutable snapshot, publication and runtime
@@ -3120,11 +3130,12 @@ run_rust_authority_cargo() {
   rust_authority_lto=$2
   shift 2
   if [ -n "${progress_log}" ]; then
-    bootstrap_progress_mark "rust-${rust_authority_log}" \
+    case "${rust_authority_log}" in
+      bootstrap-preflight) rust_authority_milestone=bootstrap-preflight ;;
+      *) rust_authority_milestone="rust-${rust_authority_log}" ;;
+    esac
+    bootstrap_progress_mark "${rust_authority_milestone}" \
       "$(absolute_path "${log_dir}/${rust_authority_log}.log")"
-  fi
-  if [ "${os}" = "windows" ]; then
-    set -- "$@" --target "${PLATFORM_RUST_TRIPLE}"
   fi
   prepare_rust_authority_workspace
   if [ "${rust_llvm_status:-disabled}" = enabled ]; then
@@ -3147,7 +3158,7 @@ run_rust_authority_cargo() {
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
         "SDKROOT=${rust_llvm_sdkroot}" CARGO_PROFILE_BOOTSTRAP_LTO=off \
-        "${cargo_abs}" "$@"
+        "$@"
     else
       run_rust_authority_env "${rust_authority_log}" \
         HOME="$(absolute_path "${rust_authority_home}")" \
@@ -3167,7 +3178,7 @@ run_rust_authority_cargo() {
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
         "SDKROOT=${rust_llvm_sdkroot}" \
-        "${cargo_abs}" "$@"
+        "$@"
     fi
   elif [ "${rust_authority_lto}" = off ]; then
     run_rust_authority_env "${rust_authority_log}" \
@@ -3185,7 +3196,7 @@ run_rust_authority_cargo() {
       LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
       SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
       TEMP="${windows_temp}" TMP="${windows_temp}" \
-      CARGO_PROFILE_BOOTSTRAP_LTO=off "${cargo_abs}" "$@"
+      CARGO_PROFILE_BOOTSTRAP_LTO=off "$@"
   else
     run_rust_authority_env "${rust_authority_log}" \
       HOME="$(absolute_path "${rust_authority_home}")" \
@@ -3202,7 +3213,7 @@ run_rust_authority_cargo() {
       LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
       SystemDrive="${windows_system_drive}" ProgramData="${windows_program_data}" \
       TEMP="${windows_temp}" TMP="${windows_temp}" \
-      "${cargo_abs}" "$@"
+      "$@"
   fi
 }
 
@@ -3360,8 +3371,11 @@ if [ "${full_bootstrap}" -eq 1 ]; then
   bootstrap_preflight_bindings="${output_dir}/bootstrap-preflight-bindings"
   rm -f "${bootstrap_preflight_receipt}"
   rm -rf "${bootstrap_preflight_bindings}"
-  bootstrap_preflight_config="platform=${PLATFORM};backend=${backend};mode=${bootstrap_mode};lane=full-bootstrap"
-  sh "${repo_root}/scripts/check/check-bootstrap-preflight.shs" \
+  bootstrap_preflight_config="platform=${PLATFORM};backend=${backend};mode=${bootstrap_mode};lane=full-bootstrap;cargo_profile=bootstrap;cargo_target=${PLATFORM_RUST_TRIPLE};cargo_features=${llvm_features}"
+  run_rust_authority_command bootstrap-preflight default \
+    sh "${repo_root}/scripts/check/check-bootstrap-preflight.shs" \
+    --cargo-bin="${cargo_abs}" --cargo-profile=bootstrap --cargo-target="${PLATFORM_RUST_TRIPLE}" \
+    --cargo-features="${llvm_features#--features }" \
     --seed="${seed_bin}" --config="${bootstrap_preflight_config}" \
     --receipt="${bootstrap_preflight_receipt}" \
     --bindings-out="${bootstrap_preflight_bindings}" || {
