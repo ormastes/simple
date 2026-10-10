@@ -56,8 +56,17 @@ Any new requirements or relaxed budgets require user selection.
    `root_generation`, forcing conservative invalidation after every source edit.
    A stable workspace-root identity is now wired as a candidate, with a focused
    no-stub native helper PASS. Full transition behavior, exact invalidation and
-   paired time/RSS remain unverified; see
+   paired time/RSS remain unverified. The warm driver also reads
+   `SIMPLE_PACKAGE_INDEX_CHANGED_MODULES` without an in-tree event producer,
+   so automatic edited-source invalidation still needs wiring; see
    `doc/09_report/compiler/item6_stable_workspace_root_generation_2026-10-10.md`.
+
+7. The legacy module action key also bound SCV revision/tree and the full
+   inventory, causing every unchanged module to miss after any source edit.
+   A semantic v2 key and migration reader are prepared, with a focused native
+   probe awaiting an admitted current-source compiler. Full cache hit and
+   time/RSS proof remain open; see
+   `doc/09_report/compiler/item6_semantic_action_reuse_2026-10-10.md`.
 
 ## Execution stages and acceptance evidence
 

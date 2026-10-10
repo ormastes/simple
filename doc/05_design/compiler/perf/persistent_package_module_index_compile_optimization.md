@@ -137,6 +137,15 @@ values. Unknown or omitted semantic configuration is an admission error.
 names and payload digests, normalized archive metadata, and producer identity.
 Cache indexes point to content; they do not supply package graph facts.
 
+The generation digest binds the frozen SCV revision, commit, tree and full
+inventory. A new module action digest uses a separate v2 domain and excludes
+those generation-wide fields; it retains producer, workspace root, variant,
+scope and the module's own semantic input digests. This permits an unchanged
+module action to survive another module's edit while the current generation
+still rejects stale snapshots. The reader accepts legacy v1 action digests
+for migration; the cold builder publishes v2. Archive admission separately
+checks dependency interface digests.
+
 ## Storage layout
 
 V2 generations retain the original all-`.spl` inventory coverage contract.

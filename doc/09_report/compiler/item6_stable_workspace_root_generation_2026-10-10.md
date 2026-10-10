@@ -54,3 +54,13 @@ The production route already has per-module comparison logic, but a compiled
 owner alone cannot satisfy this system scenario. It needs an actual edited
 source, new index publication, exact dirty-package execution, and observed
 time/RSS and file-read counters before this gate can pass.
+
+The warm driver reads `SIMPLE_PACKAGE_INDEX_CHANGED_MODULES` in
+`driver_source_pipeline_loading.spl`. A tracked source/script/test search
+found no in-tree producer for that environment key; the grouped runner
+explicitly excludes it from inherited environment. Thus the stable root
+identity only removes one conservative fallback. An automatic source edit
+still needs an admitted event-to-module mapping (or equivalent source-derived
+old/new generation comparison) before exact warm invalidation is reachable
+without an external caller supplying hints. Empty hints currently select
+the no-op route.

@@ -306,21 +306,31 @@ fn package_module_index_find_v1(
             return Some(entry)
     nil
 
-fn package_module_index_entry_action_digest_v1(
+# The generation binds the exact SCV snapshot. A module action key binds only
+# the semantic inputs required to reuse that module across snapshots.
+fn _package_module_index_entry_action_digest_v1(
     generation: PackageModuleIndexGenerationV1,
-    entry: PackageModuleIndexEntryV1
+    entry: PackageModuleIndexEntryV1, snapshot_bound: bool
 ) -> text:
     val imports = package_module_index_list_encode_v1(entry.direct_imports)
     if imports == "":
         return ""
+    val domain = if snapshot_bound:
+        "simple/package-module-action/v1"
+    else:
+        "simple/package-module-action/v2"
+    val revision = if snapshot_bound: generation.scv_revision_id else: ""
+    val commit = if snapshot_bound: generation.scv_commit_id else: ""
+    val tree = if snapshot_bound: generation.scv_tree_id else: ""
+    val inventory = if snapshot_bound: generation.inventory_digest else: ""
     val parts = [
-        "simple/package-module-action/v1",
+        domain,
         generation.producer_digest,
         generation.root_generation,
-        generation.scv_revision_id,
-        generation.scv_commit_id,
-        generation.scv_tree_id,
-        generation.inventory_digest,
+        revision,
+        commit,
+        tree,
+        inventory,
         entry.package_identity,
         entry.module_identity,
         entry.source_identity,
@@ -344,6 +354,27 @@ fn package_module_index_entry_action_digest_v1(
     for part in parts:
         encoded = encoded + package_module_index_frame_v1(part)
     sha256_text(encoded)
+
+fn package_module_index_entry_action_digest_v1(
+    generation: PackageModuleIndexGenerationV1,
+    entry: PackageModuleIndexEntryV1
+) -> text:
+    _package_module_index_entry_action_digest_v1(generation, entry, true)
+
+fn package_module_index_entry_action_digest_v2(
+    generation: PackageModuleIndexGenerationV1,
+    entry: PackageModuleIndexEntryV1
+) -> text:
+    _package_module_index_entry_action_digest_v1(generation, entry, false)
+
+fn package_module_index_entry_action_digest_admitted_v1(
+    generation: PackageModuleIndexGenerationV1,
+    entry: PackageModuleIndexEntryV1
+) -> bool:
+    entry.action_digest == package_module_index_entry_action_digest_v2(
+        generation, entry) or
+        entry.action_digest == package_module_index_entry_action_digest_v1(
+            generation, entry)
 
 fn package_module_index_validate_v1(generation: PackageModuleIndexGenerationV1) -> text:
     if generation.schema_version != PACKAGE_MODULE_INDEX_SCHEMA_V1 and
@@ -377,9 +408,9 @@ fn package_module_index_validate_v1(generation: PackageModuleIndexGenerationV1) 
     for entry in generation.entries:
         if not package_module_index_entry_valid_v1(entry):
             return "entry-invalid:{entry.module_identity}"
-        if entry.action_digest != package_module_index_entry_action_digest_v1(
+        if not package_module_index_entry_action_digest_admitted_v1(
                 generation, entry):
-            return "action-snapshot-binding-mismatch:{entry.module_identity}"
+            return "action-input-binding-mismatch:{entry.module_identity}"
         if previous != "" and compile_source_inventory_identity_cmp_v1(entry.module_identity, previous) <= 0:
             return "entry-order-or-duplicate"
         previous = entry.module_identity
@@ -825,6 +856,8 @@ export package_module_index_entry_encode_v1, package_module_index_entry_decode_v
 export package_module_index_validate_v1, package_module_index_encode_v1
 export package_module_index_decode_v1, package_module_index_digest_v1
 export package_module_index_entry_action_digest_v1
+export package_module_index_entry_action_digest_v2
+export package_module_index_entry_action_digest_admitted_v1
 export package_module_index_publish_v1, package_module_index_publish_if_current_v1
 export package_module_index_read_current_v1
 export package_module_index_gc_v1
