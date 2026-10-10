@@ -48,6 +48,26 @@ focused route spec covers an absent pin, a moved pin, and the matching graph.
 Execution remains pending on an admitted self-hosted runner; this guard does
 not remove the pre-route entry-closure source scan.
 
+
+The native entry-closure owner now has a pinned V2/V3 graph selection candidate
+before its per-file source scanner. It compares the CURRENT digest and SCV
+revision/commit/tree/inventory plus producer/root/variant markers, checks V3
+entry scope and every selected source root, and rejects a stale or corrupt graph
+instead of scanning. V1 binding and explicit rebuild-pending requests retain
+the cold scan. Focused pure selection cases cover reached-only paths, scope,
+missing imports, duplicate source ownership, and root escape. This source
+candidate is not a native or performance PASS: the warm artifact candidate
+still hashes selected files, ordinary CLI graph publication is not complete,
+and matched time/RSS and diagnostic parity remain unexecuted. A bounded
+self-hosted Stage2 compile of the new selector reached 54/54 HIR modules,
+monomorphization with zero unresolved calls, MIR, optimization, and AOP after
+replacing four unsupported `append` calls with assigned `push`. Its SMF
+package step failed without a diagnostic, so it is not an executable PASS.
+A third bounded compile of the production closure owner parsed all 405 reached
+files, then timed out at HIR 48/405 without a local diagnostic. The three-cycle
+limit is exhausted for this source slice; full runner and native parity remain
+unverified.
+
 ## SPipe TDD sequence
 
 The system test must use these five steps against one admitted compiler and

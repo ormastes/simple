@@ -13,6 +13,7 @@ use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1
     compile_source_inventory_checkout_cache_root_v1}
 use app.io.time_ops (time_now_unix_micros)
 use app.cli.native_build_warm_receipt.{native_build_warm_candidate_publish}
+use app.compiler_entrypoint.index_entry_closure.{index_entry_closure_pinned_v1}
 use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.process_ops.{eprint}
@@ -312,8 +313,10 @@ fn _nb_join_segments(segs: [text]) -> text:
     segs.join("/")
 
 pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
-    # BFS the entry's import closure so --entry-closure compiles only reachable
-    # modules (one `main`), not every file in the --source dirs. Over-approximates
+    # An admitted V2/V3 graph selects the exact entry closure before source
+    # scanning. This BFS remains the V1 binding and explicit cold-rebuild path.
+    # It compiles only reachable modules, not every file in --source dirs.
+    # The source scan over-approximates
     # safely: an unresolved `use` is skipped; a genuinely missing import still
     # errors in the compile phase.
     # SCV freeze is an optional consistency/caching layer (a frozen,
@@ -364,6 +367,15 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             "not guaranteed to be seen atomically)")
     val frozen_entry = if frozen.0: frozen.1 else: entry
     val frozen_source_dirs = if frozen.0: frozen.2 else: source_dirs
+    if frozen.0:
+        val indexed = index_entry_closure_pinned_v1(
+            _nb_scv_snapshot_root_v1, frozen_entry, frozen_source_dirs)
+        if indexed.available:
+            if not indexed.valid:
+                _cli_eprint("SCV-E-INDEX-CLOSURE: {indexed.reason}")
+                return []
+            val _candidate_written = native_build_warm_candidate_publish(indexed.paths)
+            return indexed.paths
     val trace_closure = (env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
     # Level-gated, default-off per-file timing probe. The 25-file checkpoint
     # above only shows aggregate progress; this prints a per-file elapsed-us

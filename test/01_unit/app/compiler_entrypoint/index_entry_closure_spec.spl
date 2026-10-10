@@ -1,0 +1,64 @@
+# @req PSI-REQ-001 PSI-REQ-002 PSI-REQ-008
+use std.spec.{describe, it, expect}
+use app.compiler_entrypoint.index_entry_closure.{index_entry_closure_select_v1}
+use compiler.driver.cache.package_module_index.{
+    PackageModuleIndexEntryV1, PackageModuleIndexGenerationV1,
+    PACKAGE_MODULE_INDEX_SCHEMA_V2, PACKAGE_MODULE_INDEX_SCHEMA_V3}
+
+fn closure_entry(name: text, source: text, imports: [text]) -> PackageModuleIndexEntryV1:
+    PackageModuleIndexEntryV1("pkg", name, source, "source", "smf", "export",
+        "abi", "init", "provider", "action", "manifest", "scc", imports, [])
+
+fn closure_graph(schema: i64, scope: text) -> PackageModuleIndexGenerationV1:
+    PackageModuleIndexGenerationV1(schema, "producer", "root", "revision",
+        "commit", "tree", "inventory", [
+            closure_entry("a", "src/app/main.spl", ["b", "c"]),
+            closure_entry("b", "src/lib/b.spl", []),
+            closure_entry("c", "src/lib/c.spl", []),
+            closure_entry("z", "src/app/unrelated.spl", [])
+        ], "variant", scope)
+
+describe "pinned package graph entry closure":
+    it "selects only the reached frozen source identities":
+        val selected = index_entry_closure_select_v1(
+            closure_graph(PACKAGE_MODULE_INDEX_SCHEMA_V2, ""),
+            "src/app/main.spl", ["src/app", "src/lib"])
+        expect(selected.valid).to_equal(true)
+        expect(selected.paths).to_equal([
+            "src/app/main.spl", "src/lib/b.spl", "src/lib/c.spl"])
+
+    it "rejects another entry against an entry-scoped graph":
+        val selected = index_entry_closure_select_v1(
+            closure_graph(PACKAGE_MODULE_INDEX_SCHEMA_V3, "src/app/main.spl"),
+            "src/app/unrelated.spl", ["src/app", "src/lib"])
+        expect(selected.reason).to_equal("index-scope-mismatch")
+
+    it "rejects imports outside admitted source roots":
+        val selected = index_entry_closure_select_v1(
+            closure_graph(PACKAGE_MODULE_INDEX_SCHEMA_V2, ""),
+            "src/app/main.spl", ["src/app"])
+        expect(selected.reason).to_equal("index-source-outside-roots")
+
+    it "rejects a source root with a parent traversal":
+        val selected = index_entry_closure_select_v1(
+            closure_graph(PACKAGE_MODULE_INDEX_SCHEMA_V2, ""),
+            "src/app/main.spl", ["src/app", "src/../lib"])
+        expect(selected.reason).to_equal("index-source-root-invalid")
+
+    it "rejects a graph with an absent imported module":
+        var graph = closure_graph(PACKAGE_MODULE_INDEX_SCHEMA_V2, "")
+        var entry = graph.entries[0]
+        entry.direct_imports = ["missing"]
+        graph.entries[0] = entry
+        val selected = index_entry_closure_select_v1(
+            graph, "src/app/main.spl", ["src/app", "src/lib"])
+        expect(selected.reason).to_equal("index-import-missing")
+
+    it "rejects two reached modules sharing a source identity":
+        var graph = closure_graph(PACKAGE_MODULE_INDEX_SCHEMA_V2, "")
+        var entry = graph.entries[2]
+        entry.source_identity = "src/lib/b.spl"
+        graph.entries[2] = entry
+        val selected = index_entry_closure_select_v1(
+            graph, "src/app/main.spl", ["src/app", "src/lib"])
+        expect(selected.reason).to_equal("index-source-duplicate")
