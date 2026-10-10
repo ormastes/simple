@@ -1,12 +1,14 @@
-# Seed interpreter ignores a guard on a wildcard arm (`case _ if c:`)
+# Seed `simple run` ignores a guard on a wildcard arm (`case _ if c:`); `simple test` does not
 
-Status: OPEN. Severity: P2 (wrong result in the oracle/test runner; the
-pure-Simple MIR lowering is correct). Found 2026-10-10 by the match guard
-parity spec (robustness item 3a).
+Status: OPEN. Severity: P3 (the seed `run` engine only; the seed spec
+interpreter used by `simple test` and the pure-Simple MIR lowering are both
+correct). Found 2026-10-10 (robustness item 3a); scope corrected 2026-10-11
+after review: an earlier version of this record blamed the seed interpreter
+as a whole, which was wrong.
 
 ## Reproduce
 
-Seed `C:/dev/simple-bootstrap-storage/seed-head/simple.exe run`:
+`C:/dev/simple-bootstrap-storage/seed-head/simple.exe run file.spl`:
 
 ```simple
 enum E:
@@ -46,25 +48,19 @@ fn main():
     print "d3 {d3(E.B, true)} {d3(E.B, false)}"
 ```
 
-Observed: `d1 3 3`, `d2 3 4`, `d3 3 3`. Expected: `d1 3 4`, `d2 3 4`, `d3 3 4`.
+Observed with `simple run`: `d1 3 3`, `d2 3 4`, `d3 3 3`. Expected: `d1 3 4`,
+`d2 3 4`, `d3 3 4` (re-measured 2026-10-11).
 
-The guard on `case _ if c:` is not evaluated: the arm is taken with
-`c == false`, for both an int and an enum scrutinee. The same guard on a
-binding arm (`case x if c:`) is evaluated correctly, so the defect is specific
-to the wildcard pattern. Not localized further (seed parser vs seed
-interpreter); the pure-Simple frontend parses the guard (`has_guard` is set and
-the MIR carries the branch).
+The same functions inside a spec executed with `simple test` return the
+expected values (`w(5, true) = 3`, `w(5, false) = 4`), and
+`test/01_unit/compiler/50.mir/match_guard/match_guard_parity_spec.spl` asserts
+the wildcard-guard shape against that oracle (134) like every other shape.
 
-## Consequences
-
-- The seed is not a valid oracle for this one arm shape.
-  `test/01_unit/compiler/50.mir/match_guard/match_guard_parity_spec.spl` asserts
-  that shape against the language rule (134) and does not compare it with the
-  seed (which returns 133).
-- Any spec or compiler module executed by the seed that relies on a guarded
-  `case _ if ...:` takes the arm unconditionally.
+So the defect is in the engine `simple run` selects (it logs
+`[engine-demotion] reason=hybrid-interp-splice`), not in the seed's spec
+interpreter. Not localized further. The guard on a binding arm (`case x if
+c:`) is evaluated correctly on both paths.
 
 ## Fix
 
-In the Rust seed (bootstrap-only). Not attempted here: the seed binary used by
-the lanes is a pinned artifact.
+In the Rust seed (bootstrap-only). Not attempted here.

@@ -38,5 +38,5 @@ pattern kind. Two lowerings carry guards and both are counted:
 The guard-count invariant (`E-HIR-MATCH-GUARD` / `E-MIR-MATCH-GUARD`, level via
 `SIMPLE_MIR_VERIFY_LEVELS=E-MIR-MATCH-GUARD=...`) reports a guard that was parsed but
 not lowered. Guide: `doc/07_guide/compiler/robustness/match-guard-invariant.md`.
-Specs: `test/01_unit/compiler/50.mir/match_guard/`. The seed interpreter
-ignores a guard on `case _ if c:`; do not use it as the oracle for that shape.
+Specs: `test/01_unit/compiler/50.mir/match_guard/`. The seed
+`run` engine ignores a guard on `case _ if c:`; `simple test` evaluates it.

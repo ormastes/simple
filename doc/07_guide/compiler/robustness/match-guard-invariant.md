@@ -101,11 +101,13 @@ Lowers each file on its own (parse -> HIR -> MIR, no import closure) and prints
 Without the variable it runs on `src/compiler/30.types/type_infer/core.spl`,
 whose `unify` has nine guarded tuple arms.
 
-Measured 2026-10-10 (38 of the 41 guard-containing files under `src/`, 108
-textual guarded arms; 3 files cannot be lowered by the harness): **0 hits**.
-With the if-chain fix reverted the same census reports 2 matches / 3 dropped
-guards (`type_infer/core.spl` `unify`, `app/interpreter/utils/collection_ops.spl`
-`bind_sequence_pattern`); see
+Measured 2026-10-11: `src/compiler`, `src/app` and `src/lib` contain **17 real
+guards in 6 files** (`case <pattern> if <expr>:`; `case X: if ...` one-liners
+and ` if ` inside a string are not guards). Census over those 6 files:
+**0 hits**. With the if-chain fix reverted it reports 2 matches / 3 dropped
+guards: `type_infer/core.spl` `unify` (2) and
+`app/interpreter/utils/collection_ops.spl` `bind_sequence_pattern` (1, a
+function with no callers); see
 `doc/08_tracking/bug/match_guard_dropped_by_if_chain_desugar_2026-10-10.md`.
 
 ## Adding a case
@@ -139,6 +141,11 @@ guards (`type_infer/core.spl` `unify`, `app/interpreter/utils/collection_ops.spl
   refutable **last** arm as unconditional, and a guarded last arm whose guard is
   false yields the placeholder value instead of trapping:
   `doc/08_tracking/bug/if_chain_match_no_arm_matched_is_silent_2026-10-10.md`.
-- The seed interpreter itself ignores a guard on a wildcard arm
-  (`case _ if c:`), so it is not a valid oracle for that one shape:
-  `doc/08_tracking/bug/seed_interp_wildcard_arm_guard_ignored_2026-10-10.md`.
+- Only unary minus over a numeric literal was added as a pattern (`case -1:`).
+  Any other expression the pattern converter does not recognise still becomes a
+  wildcard; with a guard that is an arm guarded only by its guard.
+- A scalar or if-chain match no arm accepts falls through; in value position it
+  yields a placeholder where the seed raises "match expression exhausted".
+- `simple run` on the seed ignores a guard on `case _ if c:`; `simple test`
+  (the oracle used by the specs) does not:
+  `doc/08_tracking/bug/seed_run_wildcard_arm_guard_ignored_2026-10-10.md`.

@@ -28,9 +28,11 @@ nested `if`. Two tails are fail-open:
    longer runs, but nothing traps: in value position the result is whatever
    the else-less `if` produces.
 
-The enum path (`lower_enum_match_flat`) and the guarded int path
-(`lower_guarded_scalar_match`) both trap in the equivalent situation
-(`rt_panic` + `Abort`).
+The guarded int path (`lower_guarded_scalar_match`) falls through the same way
+(deliberately: it matches the seed for a statement match, where nothing runs).
+In value position the seed raises "match expression exhausted without matching
+any pattern"; the lowered code yields a placeholder instead. Only the enum path
+traps, and only for guarded catch-alls with no unguarded default.
 
 Status of evidence: (1) is by construction of `build_if_chain`, read from the
 source, not executed. (2) lowers without diagnostics (statement position,
