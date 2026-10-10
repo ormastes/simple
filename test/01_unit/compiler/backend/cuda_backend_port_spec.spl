@@ -1,0 +1,35 @@
+use std.spec
+use std.spec.step
+use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
+use compiler.backend.backend_port.{backend_plugin_from_port_v1, codegen_params_v1}
+use compiler.backend.codegen_types.{CodegenOutputKind}
+use compiler.mir.mir_instructions.{MirModule}
+use plugins.backend_cuda.cuda_backend_port.{cuda_backend_port_v1}
+
+describe "CUDA static PTX port":
+    it "advertises PTX emission independently of host device availability":
+        step("inspect the selected emitter capability and exact output target")
+        val plugin = backend_plugin_from_port_v1(cuda_backend_port_v1())
+        expect(plugin.describe().targets).to_equal(["cuda-ptx"])
+        expect(plugin.supports("emit-gpu")).to_equal(true)
+        expect(plugin.supports("emit-object")).to_equal(false)
+        expect(plugin.supports("execute")).to_equal(false)
+
+    it "rejects incompatible targets before MIR emission":
+        step("request host object output from the PTX-only port")
+        val plugin = backend_plugin_from_port_v1(cuda_backend_port_v1())
+        val options = compileoptions_default_options()
+        val module = MirModule(name: "wrong_target", functions: {}, statics: {}, constants: {}, types: {})
+        val result = plugin.run(codegen_params_v1("host", "o0", "generic", options), module)
+        expect(result.is_err()).to_equal(true)
+
+    it "emits PTX through the static port without probing a CUDA device":
+        step("compile a MIR module using the explicit GPU artifact target")
+        val plugin = backend_plugin_from_port_v1(cuda_backend_port_v1())
+        var options = compileoptions_default_options()
+        options.target = CodegenTarget.CudaPtx
+        val module = MirModule(name: "ptx_port", functions: {}, statics: {}, constants: {}, types: {})
+        val output = plugin.run(codegen_params_v1("cuda-ptx", "o0", "generic", options), module).unwrap()
+        expect(output.kind).to_equal(CodegenOutputKind.GpuCode)
+        expect(output.text_output).to_contain(".target sm_86")
+        expect(output.has_object_code).to_equal(false)

@@ -66,3 +66,12 @@ quiescence contract; aspect admission cannot bypass backend admission.
 None of these execution gates has passed in this review. The narrow CUDA
 enum-pattern bootstrap workaround is independent and must retain static
 support while this placement gap remains open.
+
+## 2026-10-11 bounded correction
+
+Selected source overlays, truthful static PTX port metadata/options, and early
+disabled/dynamic/unselected request diagnostics are implemented in the CUDA
+policy branch. The focused native policy probe passes. Dynamic GPU artifact ABI,
+full disabled closure/symbol proof and broad compiler verification remain open.
+See [seven-plan evidence](../../03_plan/evidence/seven_plans/cuda_plugin_policy_audit_2026-10-11.md).
+This update does not change the OPEN status or certify host completion.
