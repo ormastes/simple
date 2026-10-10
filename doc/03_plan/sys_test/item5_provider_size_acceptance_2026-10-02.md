@@ -1,5 +1,29 @@
 # Item 5 concrete runtime acceptance and TDD plan
 
+## Variation acceptance extension — 2026-10-11
+
+Retain I5-01..I5-14 unchanged. The following rows extend their production scenarios for selected REQ-016..023; **new or extended executable coverage is pending**, not PASS. Add cases under the existing canonical test owners, with generated manuals under `doc/06_spec`; never place executable specs in that documentation tree.
+
+| Case | Requirement / existing cases | Required observable assertion |
+|---|---|---|
+| I5-V01 | REQ-016; I5-03/04/14 | Existing registry/schema owner admits compatible descriptors, rejects unknown required IDs/versions, and prevents stale-generation use without duplicate state owners. |
+| I5-V02 | REQ-017; I5-04/08/14 | Resolver selects one scoped overlay, rejects unrelated shadowing, gives legacy aliases the same decision, and invalidates only affected selected-source cache projections. |
+| I5-V03 | REQ-018; I5-03/07 | Cross-target emission does not inherit host CPUID; missing OS state, wrong ABI/width/endian, weaker worker domains and device-generation changes reject before unsafe execution. |
+| I5-V04 | REQ-019; I5-07 | Scalar versus AVX2/AVX512/NEON/SVE/SVE2/RVV compare tails, masks, aliasing, alignment and numerical edge cases; exact instruction evidence defeats width-only false positives. |
+| I5-V05 | REQ-020; I5-05/10 | Actual async submit/result/wake and sync adapter share operation identity; cancel/timeout retains buffers until native retirement; live pins prevent unload; duplicate completion is rejected. |
+| I5-V06 | REQ-021; I5-01/02/11/12 | No-demand remains zero-load; repeated prepared SIMD calls perform no probes/discovery/ring submissions; actual DB/HTTP matched cohorts retain equal workloads, results, raw samples and RSS. |
+| I5-V07 | REQ-022; I5-02/03/07 | Real compiled GPU artifact and actual device submit/readback have separate receipts; CUDA-off remains CPU-capable; incompatible/missing providers fail consistently; no duplicate device manager. |
+| I5-V08 | REQ-023; I5-07/13/14 | Real caller switches to the admitted provider, parity and rollback pass, old semantic body is removed or a bounded facade, and runtime claim matches its exact target/provider generation. |
+
+Emulation can establish functional target execution and ISA refusal, not physical-device performance. Host C CUDA device tests cannot certify the environment-variant GPU bridge, SOSIX-G or Simple applications. Retain 30 development / 100 release matched samples and all original size/startup targets; no new numerical budgets are inferred from the proposal. Record feature/target/OS/ABI/vector-state/backend axes on existing trace rows.
+
+Mandatory subcases within these eight rows:
+
+- V01/V03: frozen V1 versus exact V2 feature-word rejection; missing ARM32/x86-32/RV32 and non-Linux target registrations; codec round trips; checked 32-bit pointer conversion; SVE VL and RVV VLEN/SEW/LMUL/enablement changes across worker migration.
+- V04: overflow and trap behavior, write/effect ordering, guard-page masked tails, zero/merge/agnostic inactive lanes, duplicate scatter destinations, NaN/signed-zero/reduction order and unsupported hard requirements with failing driver exit.
+- V05/V07: device loss and uncertain partial effects forbid blind CPU replay; require-GPU/direct-required requests refuse unavailable execution. Scratch-output fallback is legal only when effects are isolated and prior native access has retired. Verify retained input/output leases and no premature publication.
+- V06/V08: final bootstrap/compiler/core/lib/MCP/LSP and real app gates bind the actual producer; no source-only marker, cross-link or C microbenchmark substitutes for application execution or physical-target performance.
+
 Status: planned, not executed. Requirements remain the user-selected 2026-09-02
 contract; no budgets or supported hosts are removed.
 

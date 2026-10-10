@@ -1,5 +1,20 @@
 # Runtime Optional Provider and Binary-Size Optimization Requirements
 
+## Selected variation extension — 2026-10-11
+
+The user's instruction to apply the integrated SIMD/GPU/SOSIX proposal selects the following compatibility constraints. Existing REQ-001..015 and NFR-001..007 remain in force with unchanged budgets. These are requirements, not implementation claims.
+
+- **REQ-016:** Reuse existing environment snapshots, target profiles, feature/target registries, catalog, admission, binding and generation owners; preserve negotiated ABI/schema compatibility.
+- **REQ-017:** Use the existing sparse `variants/` resolver and `config/var.sdn`; normalize legacy SIMD roots into one selection/cache decision. No copied generic 32/64-bit or OS algorithm families.
+- **REQ-018:** Distinguish output target, execution process, worker vector state and device generation. Admission requires exact ISA/OS/ABI/layout/policy legality; width or target flags cannot establish execution support.
+- **REQ-019:** Preserve one operation/numerical/effect contract and shared vectorizer/planner. Fixed/scalable SIMD and SIMT retain distinct legal lowering; unavailable hard requirements fail visibly without unsafe fallback.
+- **REQ-020:** Reuse common SOSIX/SimpleRing operation, result/wake, lease and retirement contracts. Sync/async and GC families share semantics; timeout/cancel cannot free live buffers and unload waits for pins/retirement.
+- **REQ-021:** Keep arithmetic dispatch prepared and direct, with no added ring hop, discovery, CPUID or filesystem work inside hot loops. Share only target-independent cached work; record valid cache projections.
+- **REQ-022:** Separate GPU compile artifacts from device execution; use existing emitters and native providers, not another runtime/resource manager. Qualcomm CPU, Adreno and Hexagon/HVX are independently admitted domains.
+- **REQ-023:** Migrate by redirecting/moving existing owners with parity and rollback, then retire duplicates. Record declared, accepted, compiled, linked/loaded, bound, executed, equivalent and measured stages independently.
+
+Acceptance extensions I5-V01..V08 are planned in the existing Item 5 acceptance document. Missing native tests remain open; no source-only check discharges these requirements.
+
 Status: selected by user on 2026-09-02.
 
 ## Functional Requirements

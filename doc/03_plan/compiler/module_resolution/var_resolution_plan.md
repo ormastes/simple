@@ -1,5 +1,11 @@
 # Plan: `var/` Variant Resolution Overlay
 
+## 2026-10-11 canonical root and pending policy correction
+
+The historical title uses `var/`; the current canonical root is `variants/`, with `config/var.sdn` and existing `module_resolver/var_resolution.spl`. Do not create a second resolver or root to implement the [selected migration](../perf/runtime_optional_provider_binary_size_optimization_plan_2026-09-02.md#2026-10-11-selected-variation-migration).
+
+Current selected roots precede defaults with manifest-order tie breaking. Scoped semantic slots, unrelated-shadow refusal, normalized legacy SIMD roots and selected-source cache projections remain implementation work: ignored `policy:` text does not enforce them. Generated indexes describe layer-owned implementations without moving/copying them. Preserve compatibility order until new policy is qualified with real resolver callers and cache tests.
+
 **Date:** 2026-06-29
 **Domain:** compiler / module_resolution
 **Lane:** `.spipe/var-resolution-overlay`

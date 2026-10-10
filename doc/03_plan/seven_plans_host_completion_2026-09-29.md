@@ -1,5 +1,13 @@
 # Completion plan for the seven requested items, by host
 
+## Item 5 continuation and variation direction — 2026-10-11
+
+The user resumed Item 5 on release and selected the integrated SIMD/GPU/SOSIX variation proposal for its plan/design. This supersedes the historical stop instruction below for Item 5 only; it does not change other items or certify any host cell.
+
+Use the [existing Item 5 implementation plan](compiler/perf/runtime_optional_provider_binary_size_optimization_plan_2026-09-02.md#2026-10-11-selected-variation-migration) for proposal P0–P9. Preserve the immediate goals: optional AVX512/CUDA loading and small default image, real DB/webserver on/off correctness/performance, full bootstrap and ARM/RISC-V provider/application qualification. Reuse environment-variant and SOSIX owners; add target/ABI/worker/device attributes and retirement evidence to existing rows.
+
+Current documentation baseline is release `02b150b385013d21bc408b45244431de85d391de`; the registry and cast repairs are merged there. Full Item 5 remains IN_PROGRESS/unqualified. For this expressly release-targeted lane, landing means a reviewed merged PR on `release/1.0`, not the historical main-only destination below. A live older candidate remains immutable and its results retain that older identity.
+
 Date: 2026-09-29
 Status: stopped at user request; implementation completion is not certified.
 ## 2026-10-02 stop checkpoint

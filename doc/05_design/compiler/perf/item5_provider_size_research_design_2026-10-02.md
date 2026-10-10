@@ -1,5 +1,11 @@
 # Item 5 current-source research and design update
 
+## 2026-10-11 current integration owner
+
+The user-selected [variation proposal](../simd_gpu_sosix_variation_final_2026-10-10.md) now extends Item 5 through the [shared-interface design](item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration) and existing implementation/acceptance plans. Those addenda reconcile release `02b150b385013d21bc408b45244431de85d391de`; dated findings below remain historical.
+
+Reuse existing environment variants, resolver, target profiles and SOSIX lifecycle. Do not create the proposal's illustrative peer types as production owners or relabel authored fixtures as execution. Existing requirements and numerical budgets remain binding; new variation requirements are pending implementation/qualification. No native feature or build default changes in this documentation update.
+
 This supplements existing optional-provider and executable-size designs.
 Status: researched design; implementation and host admission remain unproven.
 

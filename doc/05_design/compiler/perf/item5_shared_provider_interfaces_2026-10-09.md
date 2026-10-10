@@ -1,5 +1,28 @@
 # Item 5 shared provider interfaces and release compatibility
 
+## 2026-10-11 variation and SOSIX integration
+
+The user selected the [integrated variation proposal](../simd_gpu_sosix_variation_final_2026-10-10.md) for research, plan and design incorporation. Current comparison baseline: release `02b150b385013d21bc408b45244431de85d391de`. Earlier dated observations below remain historical. This addendum takes precedence where their ownership or PR status differs; it does not certify implementation or native support.
+
+### Canonical owners and compatibility
+
+- Reuse `composition/environment_variants/`: `EnvironmentSnapshotV1`, `VariantDescriptorV1`, `BindingPlanV1`, `TargetCodegenProfileV1`, catalog, admission, feature registry and binding runtime. Existing `feature_registry_v1.spl` already defines precise psABI V2 feature IDs/masks; extend registered rows rather than create another feature taxonomy.
+- Reuse `canonical_target_registry_owner_v2.spl` and environment-variant `provider_generation_v2.spl` for their existing target/generation responsibilities. Generic loader/generation V1 and environment generation V2 have distinct authority roles; an explicit adapter must bind their identities, pins and retirement without replacing public V1 callers or duplicating either state machine. That adapter's production qualification remains pending.
+- Keep one resolver-only `variants/` root with `config/var.sdn`; implementation code stays in its current layer. Scoped slots, legacy SIMD-root normalization and selected-source cache keys require real resolver work. A manifest policy field that the parser ignores is not enforcement.
+- Keep fixed/scalable CPU SIMD and GPU SIMT distinct. The shared vectorizer receives output-target intent; host, worker vector state, policy and device generations govern execution admission. Width alone cannot satisfy an ISA requirement. Qualcomm CPU, Adreno GPU and Hexagon/HVX are separate domains.
+- SOSIX/common operation contracts and SimpleRing own service completion, buffer leases and retirement. GPU providers retain API mechanics; existing compiler/ProcessingIR owners retain algorithms and planning. No second GPU runtime, Future family or scheduler is introduced.
+- Resolve/authenticate/bind outside arithmetic loops. Prepared CPU calls stay direct; no ring submission, CPUID, catalog walk, source scan or filesystem probe is added per SIMD operation. Timeout/cancel does not release an in-flight buffer; close waits for generation pins and operation retirement.
+
+### Current corrections and limits
+
+Release PR #2840 contains the canonical native-all C GPU registry repair; PR #2838 contains the LLVM pointer-cast repair. The reviewed five registry files match the replacement-archive C test that executed eight device launches, checked 1,506 words and 128 canaries, and rejected an invalid digest. That evidence covers the C registry/device boundary only. It does not qualify Simple DB, compiler plugins, SOSIX-G, image authority or full bootstrap.
+
+The GPU environment-variant task bridge still declares device-image authority and physical execution unavailable. Do not promote those flags from the independent C result. The current vectorizer's host-global fallback and width-based requirement receipts remain concrete integration gaps. Native ARM/RISC-V application execution and physical performance remain open.
+
+The inspected environment validators accept x86_64, AArch64, RV64 and wasm32; the canonical registry's native rows are Linux GNU/ELF, alongside wasm. Windows/macOS/FreeBSD/SimpleOS and ARM32/x86-32/RV32 registration, codec/validator parity and execution cannot be inferred from backend presets. Keep these migration rows open. The CPU vector byte wire is process-local and synchronous (64-byte request, 24-byte response); its borrowed pointers are not transferable GPU handles, and 32-bit conversion needs explicit checked parity.
+
+The proposal's P0–P9 are migration work packages in the [existing implementation plan](../../../03_plan/compiler/perf/runtime_optional_provider_binary_size_optimization_plan_2026-09-02.md). Its P5 means SIMD planning; Item 5 Phase 5 continues to mean Size and Loading Gates. Preserve REQ-001..015 and NFR-001..007; the selected variation requirements and pending acceptance rows extend them. No default, ABI, support flag or executable source changes in this documentation update.
+
 Status: documentation reconciliation against release `59499d746975ef06ada5e6769142bdb7d5403e86`, 2026-10-09. This defines the compatibility and verification handoff; it does not certify implementation completion, native application execution, or bootstrap admission.
 
 Item 5 is kernel/extension aspects and binary size in the [seven-item plan](../../../03_plan/seven_plans_host_completion_2026-09-29.md). Its own **Phase 5 is Size and Loading Gates** in the [implementation plan](../../../03_plan/compiler/perf/runtime_optional_provider_binary_size_optimization_plan_2026-09-02.md). Neither name is a compiler generation or permission to skip the other phases. The selected [requirements](../../../02_requirements/feature/runtime_optional_provider_binary_size_optimization.md) and their budgets remain unchanged.
