@@ -24,6 +24,8 @@ struct CompilerSourceAuthorityV1:
     inventory_generation: i64
     # Only a bounded warm-drift retry sets this; graph admission consumes it.
     recovered_cold: bool
+    # Fresh warm CURRENT publication, authenticated by the snapshot readback.
+    warm_refresh_advanced: bool
 
 # Return precisely the generation admitted by the inherited snapshot, not
 # CURRENT. Receiving selection owners still check their request and every row.
@@ -48,7 +50,7 @@ fn compiler_source_authority_invalid_v1(reason: text) -> CompilerSourceAuthority
         valid: false, reason: reason, revision_id: "", commit_id: "", tree_id: "",
         inventory_digest: "", inventory_count: 0, snapshot_root: "",
         provenance_path: "", receipt_path: "", source_drifted: false)
-    CompilerSourceAuthorityV1(false, reason, snapshot, "", -1, false)
+    CompilerSourceAuthorityV1(false, reason, snapshot, "", -1, false, false)
 
 fn compiler_source_authority_clear_v1() -> bool:
     var cleared = true
@@ -100,7 +102,7 @@ fn compiler_source_authority_validate_v1(
     val reason = compiler_source_authority_binding_reason_v1(
         snapshot, expected_digest, expected_generation, actual, manifest)
     if reason != "ok": return compiler_source_authority_invalid_v1(reason)
-    CompilerSourceAuthorityV1(true, "ok", snapshot, expected_digest, expected_generation, false)
+    CompilerSourceAuthorityV1(true, "ok", snapshot, expected_digest, expected_generation, false, false)
 
 fn compiler_source_authority_acquire_v1(
     root: text, cache_root: text, source_roots: [text], cold_init: bool
@@ -116,18 +118,23 @@ fn compiler_source_authority_acquire_v1(
     if not refresh.valid: return compiler_source_authority_invalid_v1(refresh.reason)
     val snapshot = scv_compile_snapshot_acquire_v1(root, cache_root, source_roots)
     if not snapshot.valid:
-        # The warm event cursor can miss a tracked file restored to HEAD. The
-        # snapshot read detects the stale row before admitting any bytes. Rebuild
-        # the complete inventory once; the cold call never retries itself.
+        # A race or an unobserved source drift can outpace the event cursor.
+        # The snapshot read rejects the stale row before admitting any bytes.
+        # Rebuild the complete inventory once; cold never retries itself.
         if not cold_init and snapshot.reason.starts_with("snapshot-index-drift:"):
             val recovered = compiler_source_authority_acquire_v1(
                 root, cache_root, source_roots, true)
             if not recovered.valid: return recovered
             return CompilerSourceAuthorityV1(true, "ok", recovered.snapshot,
-                recovered.source_inventory_digest, recovered.inventory_generation, true)
+                recovered.source_inventory_digest, recovered.inventory_generation,
+                true, false)
         return compiler_source_authority_invalid_v1(snapshot.reason)
-    compiler_source_authority_validate_v1(root, cache_root, snapshot,
+    val validated = compiler_source_authority_validate_v1(root, cache_root, snapshot,
         refresh.inventory_digest, refresh.inventory_generation, false)
+    if not validated.valid: return validated
+    CompilerSourceAuthorityV1(true, "ok", validated.snapshot,
+        validated.source_inventory_digest, validated.inventory_generation,
+        false, not cold_init and refresh.cursor_advanced)
 
 fn compiler_source_authority_inventory_roots_v1(root: text, source_roots: [text]) -> [text]:
     # The event protocol admits whole src/test families. Snapshot roots are

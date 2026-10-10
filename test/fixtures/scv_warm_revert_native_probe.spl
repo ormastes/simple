@@ -1,4 +1,4 @@
-"""Warm source authority recovers a tracked source restored to HEAD."""
+"""Warm source authority admits a tracked restore through Git events."""
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1}
 use app.io.mod.{dir_create_all, file_write, file_read}
 use app.io.file_ops.{path_absolute}
@@ -25,23 +25,30 @@ pub fn scv_warm_revert_fixture() -> text:
     val cache = root + "/build/scv"
     val initial = compiler_source_authority_acquire_v1(root, cache, ["src"], true)
     if not initial.valid: return "initial:" + initial.reason
-    if initial.recovered_cold: return "initial-recovery-flag"
+    if initial.recovered_cold or initial.warm_refresh_advanced:
+        return "initial-refresh-flag"
     if not file_write(path, modified): return "write-modified"
     val dirty = compiler_source_authority_acquire_v1(root, cache, ["src"], false)
     if not dirty.valid: return "dirty:" + dirty.reason
-    if dirty.recovered_cold: return "dirty-recovery-flag"
+    if dirty.recovered_cold or not dirty.warm_refresh_advanced:
+        return "dirty-refresh-flag"
     if file_read(dirty.snapshot.snapshot_root + "/src/main.spl") != modified:
         return "dirty-snapshot"
     if not file_write(path, committed): return "restore"
     val restored = compiler_source_authority_acquire_v1(root, cache, ["src"], false)
     if not restored.valid: return "restored:" + restored.reason
-    if not restored.recovered_cold: return "restored-recovery-flag"
+    if restored.recovered_cold or not restored.warm_refresh_advanced:
+        return "restored-used-cold-fallback"
     if restored.inventory_generation <= dirty.inventory_generation:
         return "stale-generation"
     if file_read(restored.snapshot.snapshot_root + "/src/main.spl") != committed:
         return "restored-bytes"
     if file_read(dirty.snapshot.snapshot_root + "/src/main.spl") != modified:
         return "changed-sealed-snapshot"
+    val unchanged = compiler_source_authority_acquire_v1(root, cache, ["src"], false)
+    if not unchanged.valid or unchanged.warm_refresh_advanced or
+            unchanged.recovered_cold:
+        return "unchanged-warm-republished"
     ""
 
 

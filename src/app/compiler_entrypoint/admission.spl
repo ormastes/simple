@@ -69,20 +69,21 @@ fn compiler_entrypoint_index_binds_snapshot_v1(
         generation.inventory_digest == expected_inventory
 
 # A stale graph is immutable evidence from the prior snapshot. A requested
-# cold rebuild or verified inventory recovery may compile against the new
-# snapshot without moving CURRENT; only a complete graph publisher replaces it.
+# cold rebuild, verified inventory recovery, or an authenticated warm cursor
+# publication may compile against the new snapshot without moving CURRENT.
+# Only a complete graph publisher replaces it.
 fn compiler_entrypoint_index_transition_v1(
     index: PackageModuleIndexReadV1,
     snapshot: ScvCompileSnapshotV1,
     source_inventory_digest: text,
-    explicit_cold_rebuild: bool
+    explicit_cold_rebuild: bool, verified_warm_refresh: bool = false
 ) -> text:
     if compiler_entrypoint_index_binds_snapshot_v1(
             index, snapshot, source_inventory_digest):
         return "bound"
     if index.valid and index.generation != nil:
         if index.generation!.entries.len() > 0:
-            if explicit_cold_rebuild:
+            if explicit_cold_rebuild or verified_warm_refresh:
                 return "cold-rebuild-pending"
             return "stale-graph-rebuild-required"
     "publish-binding"
@@ -109,7 +110,7 @@ fn compiler_entrypoint_admit_v1(source_roots: [text]) -> CompilerEntrypointAdmis
     val transition = compiler_entrypoint_index_transition_v1(
         index, snapshot, authority.source_inventory_digest,
         (env_get("SIMPLE_PACKAGE_INDEX_COLD_INIT") ?? "") == "1" or
-            authority.recovered_cold)
+            authority.recovered_cold, authority.warm_refresh_advanced)
     if transition == "stale-graph-rebuild-required":
         return compiler_entrypoint_invalid_v1(
             "package-index:stale-graph-rebuild-required")

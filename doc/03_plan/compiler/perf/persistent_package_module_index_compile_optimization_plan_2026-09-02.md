@@ -475,3 +475,7 @@ The focused six-module LLVM/core-C probe found nonempty text converting to an em
 ## 2026-10-11 native CAS readback update
 
 The focused second-generation native CAS scenario now passes publish, readback, stale-CAS rejection, and malformed-frame rejection using bounded byte decimal parsing. This updates the earlier native publication blocker; it does not qualify warm SCV recovery, production entrypoint cutover, or matched p95/RSS cohorts. See [the continuation report](../../../09_report/compiler/item56_release_continuation_2026-10-10.md).
+
+### 2026-10-11 warm tracked-restore handoff
+
+The event cursor v4 persists the dirty tracked src/test path set so a path restored to HEAD generates an exact warm modify event. A successful warm publication is now carried through source-authority snapshot readback into the stale-graph cold-rebuild-pending transition; the prior complete graph remains at CURRENT until a complete publisher replaces it. The focused source-authority fixture requires edit, restore, and unchanged warm acquisition without a cold inventory fallback. This is an unexecuted source candidate: the focused current-source native probe passed HIR and monomorphization but failed MIR in unrelated environment/SDN lowering. Ordinary CLI full-graph publication, removal of per-request untracked listing, cross-entrypoint SPipe, and matched time/RSS gates remain open.
