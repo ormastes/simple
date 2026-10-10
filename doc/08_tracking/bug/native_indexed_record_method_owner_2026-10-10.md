@@ -68,3 +68,7 @@ both without and with the projection change when isolating attribution. Until
 then, neither independent causality nor native execution of the candidate is
 qualified. Keep the scoped cache; do not rerun the unchanged full runner to
 investigate this receiver-owner failure.
+
+## Later scoped qualification
+
+See [combined-producer qualification](native_enum_projection_qualification_2026-10-11.md) for the two ARM execution and two RISC-V EM243 results with producer `44a540d5`. Those results apply only to the recorded combined lineage; standalone PR, broad suite, canonical admission, and real registry fixture gates remain pending. Earlier failure records above are retained.
