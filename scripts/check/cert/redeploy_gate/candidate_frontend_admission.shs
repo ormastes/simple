@@ -2,6 +2,11 @@
 
 COMPILER_PROBE_TIMEOUT_SECONDS=${COMPILER_PROBE_TIMEOUT_SECONDS:-5}
 COMPILER_BUILD_TIMEOUT_SECONDS=${COMPILER_BUILD_TIMEOUT_SECONDS:-180}
+# One-time SCV source-inventory prime of a fresh checkout. It lists, reads and
+# hashes every src/test source (45k files / 295 MB on this tree) and then
+# materializes the SCV snapshot, which is minutes of I/O even after the
+# per-file canonicalization fix, so it cannot share the 180 s probe bound.
+COMPILER_SCV_PRIME_TIMEOUT_SECONDS=${COMPILER_SCV_PRIME_TIMEOUT_SECONDS:-1800}
 COMPILER_EXEC_TIMEOUT_SECONDS=${COMPILER_EXEC_TIMEOUT_SECONDS:-5}
 COMPILER_CHECK_KILL_GRACE_SECONDS=${COMPILER_CHECK_KILL_GRACE_SECONDS:-1}
 
@@ -247,6 +252,7 @@ candidate_frontend_bounded_build() {
     fi
     case "$bounded_probe" in
       p2_add) bounded_leaf=$bounded_base ;;
+      scv_prime) bounded_leaf=$bounded_base.scv-prime ;;
       stage2_mir_retention) bounded_leaf=$bounded_base.stage2-mir-retention ;;
       stage2_module_path_naming) bounded_leaf=$bounded_base.stage2-module-path-naming ;;
       hello_world_positional) bounded_leaf=$bounded_base.hello-world-positional ;;
@@ -258,6 +264,8 @@ candidate_frontend_bounded_build() {
     if [ "$bounded_probe" = hello_world_positional_debugger ]; then
         bounded_timeout=90
         bounded_grace=5
+    elif [ "$bounded_probe" = scv_prime ]; then
+        bounded_timeout=$COMPILER_SCV_PRIME_TIMEOUT_SECONDS
     fi
     bounded_log=$bounded_parent/$bounded_leaf
     bounded_receipt=$bounded_parent/$bounded_leaf.bounded.env
@@ -376,14 +384,18 @@ candidate_frontend_smoke_profile() (
     trap 'exit 1' HUP INT TERM
     # Initialize once in the source owner, then reuse its real published
     # inventory across fixture builds and bootstrap modes. Existing invalid
-    # authority is left to the compiler's fail-closed validation.
+    # authority is left to the compiler's fail-closed validation. The cold
+    # init itself runs as the separate scv_prime step below (its own bound,
+    # log and receipt); every bounded probe then admits warm, exactly as a
+    # phase-2 spec child does. Until 2026-10-09 the p2_add probe carried the
+    # cold init inside its 180 s bound and timed out (exit 124) on every fresh
+    # Windows checkout before printing a line of compiler output.
+    candidate_scv_cold_init=0
     if [ ! -e "$CANDIDATE_FRONTEND_ROOT/build/scv/source-inventory/CURRENT" ] &&
        [ ! -L "$CANDIDATE_FRONTEND_ROOT/build/scv/source-inventory/CURRENT" ]; then
-        SIMPLE_SCV_INVENTORY_COLD_INIT=1
-        export SIMPLE_SCV_INVENTORY_COLD_INIT
-    else
-        unset SIMPLE_SCV_INVENTORY_COLD_INIT
+        candidate_scv_cold_init=1
     fi
+    unset SIMPLE_SCV_INVENTORY_COLD_INIT
     build_log=${CANDIDATE_FRONTEND_LOG_PATH:-$probe_dir/build.log}
     build_log_display=${CANDIDATE_FRONTEND_LOG_DISPLAY_PATH:-$build_log}
     status_path=${CANDIDATE_FRONTEND_STATUS_PATH:-}
@@ -397,14 +409,16 @@ candidate_frontend_smoke_profile() (
         export SIMPLE_NATIVE_BUILD_THREADS
     fi
     p2_add_log=$build_log
+    scv_prime_log=$build_log.scv-prime
     stage2_mir_retention_log=$build_log.stage2-mir-retention
     stage2_module_path_naming_log=$build_log.stage2-module-path-naming
     hello_world_positional_log=$build_log.hello-world-positional
     p2_add_receipt=$p2_add_log.bounded.env
+    scv_prime_receipt=$scv_prime_log.bounded.env
     stage2_mir_retention_receipt=$stage2_mir_retention_log.bounded.env
     stage2_module_path_naming_receipt=$stage2_module_path_naming_log.bounded.env
     hello_world_positional_receipt=$hello_world_positional_log.bounded.env
-    p2_add_raw_status=not-run stage2_mir_retention_raw_status=not-run
+    p2_add_raw_status=not-run scv_prime_raw_status=not-run stage2_mir_retention_raw_status=not-run
     stage2_module_path_naming_raw_status=not-run hello_world_positional_raw_status=not-run
     candidate_frontend_finish() {
         result=$1
@@ -433,12 +447,13 @@ candidate_frontend_smoke_profile() (
             echo bootstrap_mode="$candidate_bootstrap"
             echo backend="$candidate_backend"
             echo log_path="$build_log_display"
-            for status_probe in p2_add stage2_mir_retention stage2_module_path_naming hello_world_positional; do
+            for status_probe in p2_add scv_prime stage2_mir_retention stage2_module_path_naming hello_world_positional; do
                 eval "status_raw=\${${status_probe}_raw_status}"
                 eval "status_log=\${${status_probe}_log}"
                 eval "status_receipt=\${${status_probe}_receipt}"
                 case "$status_probe" in
                   p2_add) status_log_display=$build_log_display ;;
+                  scv_prime) status_log_display=$build_log_display.scv-prime ;;
                   stage2_mir_retention) status_log_display=$build_log_display.stage2-mir-retention ;;
                   stage2_module_path_naming) status_log_display=$build_log_display.stage2-module-path-naming ;;
                   hello_world_positional) status_log_display=$build_log_display.hello-world-positional ;;
@@ -468,6 +483,7 @@ candidate_frontend_smoke_profile() (
         failed_status=$2
         case "$failed_probe" in
           p2_add-*|p2-add-*) failed_log=$p2_add_log ;;
+          scv-prime-*) failed_log=$scv_prime_log ;;
           stage2-mir-retention-*) failed_log=$stage2_mir_retention_log ;;
           stage2-module-path-naming-*) failed_log=$stage2_module_path_naming_log ;;
           hello-world-positional-*) failed_log=$hello_world_positional_log ;;
@@ -485,6 +501,41 @@ candidate_frontend_smoke_profile() (
         exit 126
     fi
     if [ "$candidate_profile" = full ]; then
+    if [ "$candidate_scv_cold_init" = 1 ]; then
+        # scv_prime: the same p2_add native-build with the one-time cold-init
+        # opt-in, under COMPILER_SCV_PRIME_TIMEOUT_SECONDS and its own cache
+        # dir so the bounded p2_add probe below still builds from a cold
+        # native cache. The published inventory, not this build's verdict, is
+        # the evidence for the step (the inventory is published before any
+        # module compiles); the p2_add probe reports the build verdict.
+        prime_output=$(candidate_frontend_executable_path "$probe_dir/scv_prime")
+        prime_build_status=0
+        SIMPLE_SCV_INVENTORY_COLD_INIT=1 \
+        SIMPLE_BINARY="$candidate" \
+        SIMPLE_BIN="$candidate" \
+        SIMPLE_BOOTSTRAP_DRIVER="$candidate" \
+        SIMPLE_FRONTEND_DELEGATE="$candidate" \
+        SIMPLE_FRONTEND_DELEGATED=1 \
+        SIMPLE_NO_STUB_FALLBACK=1 \
+        SIMPLE_NATIVE_BUILD_FORCE_WORKER=0 \
+        SIMPLE_BOOTSTRAP="$candidate_bootstrap" \
+        SIMPLE_LIB="$CANDIDATE_FRONTEND_ROOT/src" \
+            candidate_frontend_bounded_build scv_prime "$candidate" native-build \
+            --backend "$candidate_backend" \
+            --runtime-bundle core-c-bootstrap \
+            --entry-closure \
+            --entry src/compiler/bootstrap_admission/p2_add.spl \
+            --cache-dir "$probe_dir/prime-cache" \
+            --mode one-binary \
+            --output "$prime_output" || prime_build_status=$?
+        scv_prime_raw_status=$prime_build_status
+        if [ ! -e "$CANDIDATE_FRONTEND_ROOT/build/scv/source-inventory/CURRENT" ] &&
+           [ ! -L "$CANDIDATE_FRONTEND_ROOT/build/scv/source-inventory/CURRENT" ]; then
+            tail -c 65536 "$scv_prime_log" >&2
+            echo "candidate_frontend_smoke: scv_prime left no source inventory in $CANDIDATE_FRONTEND_ROOT/build/scv (raw rc=$prime_build_status)" >&2
+            candidate_frontend_fail scv-prime-inventory "$([ "$prime_build_status" -ne 0 ] && echo "$prime_build_status" || echo 1)"
+        fi
+    fi
     probe_output=$(candidate_frontend_executable_path "$probe_dir/p2_add")
     probe_build_status=0
     SIMPLE_BINARY="$candidate" \

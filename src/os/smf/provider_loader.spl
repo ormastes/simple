@@ -11,7 +11,12 @@ use os.posix.dynlib.{
 }
 use os.posix.dynlib_sffi.{
     ProviderQueryCallV1, call_provider_query_v1,
-    CliCommandCallV1, call_cli_command_v1
+    CliCommandCallV1, call_cli_command_v1,
+    VectorKernelCallV1, call_vector_kernel_v1
+}
+use std.nogc_sync_mut.composition.vector_kernel_contract.{
+    SIMPLE_VECTOR_RESPONSE_V1_SIZE, SIMPLE_VECTOR_STATUS_EXECUTION_FAILED,
+    SimpleVectorKernelRequestV1, SimpleVectorKernelResponseV1
 }
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.nogc_sync_mut.composition.provider_contract.{
@@ -51,6 +56,7 @@ val PROVIDER_SESSION_CLOSE_FAILED: i32 = 5
 val PROVIDER_SESSION_CLI_SYMBOL_MISSING: i32 = 6
 val PROVIDER_SESSION_CLI_CALL_FAILED: i32 = 7
 val PROVIDER_SESSION_QUERY_INCOMPATIBLE: i32 = 8
+val PROVIDER_SESSION_VECTOR_CALL_FAILED: i32 = 9
 
 # Integer statuses remain stable for compatibility. Consumers use this closed
 # outcome instead of re-parsing reason text or treating any address as admitted.
@@ -89,6 +95,14 @@ class ProviderCallableEvidenceV1:
     query_symbol_address: i64
     query_symbol_process_callable: bool
 
+# Request-policy facts before a dynamic loader has been consulted. This type
+# deliberately has no symbol address or callable flag: preflight is not loader
+# evidence and cannot construct an admitted session.
+class ProviderAdmissionPolicyV1:
+    status: i32
+    artifact_digest: text
+    reason: text
+
 class ProviderAdmissionResultV1:
     status: i32
     outcome: ProviderAdmissionOutcomeV1
@@ -126,6 +140,17 @@ class ProviderSessionCliInvokeV1:
     pin_id: u64
     call: CliCommandCallV1
     reason: text
+
+class ProviderSessionVectorCallV1:
+    status: i32
+    pin_id: u64
+    call: VectorKernelCallV1
+    reason: text
+
+class ProviderSessionVectorCallOwnedResultV1:
+    """Vector-kernel call result paired with the caller-owned session transition."""
+    vector_call: ProviderSessionVectorCallV1
+    session: ProviderLoaderSessionV1
 
 class ProviderSessionQueryOwnedResultV1:
     """Query result paired with the caller-owned session transition."""
@@ -197,34 +222,51 @@ fn provider_artifact_path_allowed_v1(path: text, kind: text) -> bool:
         return path.ends_with(".so") or path.ends_with(".dylib") or path.ends_with(".dll")
     false
 
-fn provider_admit_evidence_v1(request: ProviderAdmissionRequestV1, evidence: ProviderCallableEvidenceV1) -> ProviderAdmissionResultV1:
+fn _provider_admission_policy_v1(request: ProviderAdmissionRequestV1,
+        artifact_exists: bool, artifact_digest: text) -> ProviderAdmissionPolicyV1:
     if not provider_artifact_path_allowed_v1(request.artifact_path, request.artifact_kind):
-        return _provider_admission_result(PROVIDER_ADMISSION_PATH_DENIED, 0, evidence.artifact_digest, false, "path-denied")
-    if not evidence.artifact_exists:
-        return _provider_admission_result(PROVIDER_ADMISSION_ARTIFACT_MISSING, 0, "", false, "artifact-missing")
-    if request.expected_artifact_digest.len() != 64 or evidence.artifact_digest != request.expected_artifact_digest:
-        return _provider_admission_result(PROVIDER_ADMISSION_DIGEST_MISMATCH, 0, evidence.artifact_digest, false, "artifact-digest-mismatch")
+        return ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_PATH_DENIED, artifact_digest: artifact_digest, reason: "path-denied")
+    if not artifact_exists:
+        return ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_ARTIFACT_MISSING, artifact_digest: "", reason: "artifact-missing")
+    if request.expected_artifact_digest.len() != 64 or artifact_digest != request.expected_artifact_digest:
+        return ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_DIGEST_MISMATCH, artifact_digest: artifact_digest, reason: "artifact-digest-mismatch")
     if (request.granted_capability_bits & request.required_capability_bits) != request.required_capability_bits:
-        return _provider_admission_result(PROVIDER_ADMISSION_CAPABILITY_DENIED, 0, evidence.artifact_digest, false, "capability-denied")
+        return ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_CAPABILITY_DENIED, artifact_digest: artifact_digest, reason: "capability-denied")
     if request.host_abi < request.minimum_host_abi or request.host_abi > request.maximum_host_abi:
-        return _provider_admission_result(PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED, 0, evidence.artifact_digest, false, "host-abi-unsupported")
+        return ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED, artifact_digest: artifact_digest, reason: "host-abi-unsupported")
     if request.requested_interface_major != request.provided_interface_major or request.requested_interface_minor > request.provided_interface_minor:
-        return _provider_admission_result(PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED, 0, evidence.artifact_digest, false, "interface-version-unsupported")
+        return ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED, artifact_digest: artifact_digest, reason: "interface-version-unsupported")
+    ProviderAdmissionPolicyV1(status: PROVIDER_ADMISSION_OK, artifact_digest: artifact_digest, reason: "request-policy-passed")
+
+fn _provider_policy_refusal_v1(policy: ProviderAdmissionPolicyV1) -> ProviderAdmissionResultV1:
+    _provider_admission_result(policy.status, 0, policy.artifact_digest, false, policy.reason)
+
+fn provider_admit_evidence_v1(request: ProviderAdmissionRequestV1, evidence: ProviderCallableEvidenceV1) -> ProviderAdmissionResultV1:
+    val policy = _provider_admission_policy_v1(request, evidence.artifact_exists, evidence.artifact_digest)
+    if policy.status != PROVIDER_ADMISSION_OK:
+        return _provider_policy_refusal_v1(policy)
     if not evidence.loader_valid:
-        return _provider_admission_result(PROVIDER_ADMISSION_LOAD_FAILED, 0, evidence.artifact_digest, false, "loader-failed")
+        return _provider_admission_result(PROVIDER_ADMISSION_LOAD_FAILED, 0, policy.artifact_digest, false, "loader-failed")
     if evidence.query_symbol_address <= 0:
-        return _provider_admission_result(PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING, 0, evidence.artifact_digest, false, "query-symbol-missing")
+        return _provider_admission_result(PROVIDER_ADMISSION_QUERY_SYMBOL_MISSING, 0, policy.artifact_digest, false, "query-symbol-missing")
     if not evidence.query_symbol_process_callable:
-        return _provider_admission_result(PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE, 0, evidence.artifact_digest, false, "query-symbol-not-process-callable")
-    _provider_admission_result(PROVIDER_ADMISSION_OK, evidence.query_symbol_address, evidence.artifact_digest, true, "admitted")
+        return _provider_admission_result(PROVIDER_ADMISSION_NOT_PROCESS_CALLABLE, 0, policy.artifact_digest, false, "query-symbol-not-process-callable")
+    _provider_admission_result(PROVIDER_ADMISSION_OK, evidence.query_symbol_address, policy.artifact_digest, true, "admitted")
 
 fn provider_admit_dynamic_v1(request: ProviderAdmissionRequestV1) -> ProviderDynamicAdmissionV1:
+    # Refuse path policy before filesystem reads, hashing, or dlopen. All
+    # remaining request-policy checks share the pure evidence helper below.
+    if not provider_artifact_path_allowed_v1(request.artifact_path, request.artifact_kind):
+        val path_policy = _provider_admission_policy_v1(request, false, "")
+        val path_denied = _provider_policy_refusal_v1(path_policy)
+        return ProviderDynamicAdmissionV1(admission: path_denied, session: _closed_provider_session(path_denied))
     val exists = rt_file_exists(request.artifact_path)
     val bytes = if exists: rt_file_read_bytes(request.artifact_path) ?? [] else: []
     val digest = provider_artifact_digest_v1(bytes)
-    if not exists:
-        val missing = provider_admit_evidence_v1(request, ProviderCallableEvidenceV1(artifact_exists: false, artifact_digest: "", loader_valid: false, query_symbol_address: 0, query_symbol_process_callable: false))
-        return ProviderDynamicAdmissionV1(admission: missing, session: _closed_provider_session(missing))
+    val policy = _provider_admission_policy_v1(request, exists, if exists: digest else: "")
+    if policy.status != PROVIDER_ADMISSION_OK:
+        val refused = _provider_policy_refusal_v1(policy)
+        return ProviderDynamicAdmissionV1(admission: refused, session: _closed_provider_session(refused))
     val library = dynlib_open(request.artifact_path, 2)
     # This is cold admission work. Re-read after open and fail closed if the
     # path changed. The library generation stays retained by the session.
@@ -453,6 +495,51 @@ fn provider_session_invoke_cli_v1(session: ProviderLoaderSessionV1,
         return ProviderSessionCliInvokeV1(PROVIDER_SESSION_CLI_CALL_FAILED, query.pin_id, call, call.diagnostic)
     ProviderSessionCliInvokeV1(PROVIDER_SESSION_OK, query.pin_id, call, "invoked")
 
+fn _provider_session_vector_error(status: i32, pin_id: u64,
+        reason: text) -> ProviderSessionVectorCallV1:
+    ProviderSessionVectorCallV1(
+        status: status,
+        pin_id: pin_id,
+        call: VectorKernelCallV1(
+            ok: false,
+            transport_status: -1,
+            response: SimpleVectorKernelResponseV1(
+                struct_size: SIMPLE_VECTOR_RESPONSE_V1_SIZE,
+                status: SIMPLE_VECTOR_STATUS_EXECUTION_FAILED,
+                bytes_written: 0, scalar_result: -1),
+            diagnostic: reason),
+        reason: reason)
+
+# Vector-kernel call under a live query pin. The session is returned unchanged
+# as the caller-owned value so this call composes with the owned query/release
+# transitions; the pin stays live until the caller releases it.
+fn provider_session_vector_call_owned_v1(session: ProviderLoaderSessionV1,
+        query: ProviderSessionQueryV1,
+        request: SimpleVectorKernelRequestV1) -> ProviderSessionVectorCallOwnedResultV1:
+    if not session.open or query.status != PROVIDER_SESSION_OK:
+        return ProviderSessionVectorCallOwnedResultV1(
+            _provider_session_vector_error(
+                PROVIDER_SESSION_NOT_OPEN, query.pin_id, "provider-session-not-open"),
+            session)
+    if query.pin_id == 0 or not _provider_session_has_pin_v1(session, query.pin_id):
+        return ProviderSessionVectorCallOwnedResultV1(
+            _provider_session_vector_error(
+                PROVIDER_SESSION_PIN_UNKNOWN, query.pin_id, "provider-session-pin-unknown"),
+            session)
+    val call = call_vector_kernel_v1(
+        session.library, query.call.result.interface_handle, request)
+    if not call.ok:
+        return ProviderSessionVectorCallOwnedResultV1(
+            ProviderSessionVectorCallV1(
+                status: PROVIDER_SESSION_VECTOR_CALL_FAILED, pin_id: query.pin_id,
+                call: call, reason: call.diagnostic),
+            session)
+    ProviderSessionVectorCallOwnedResultV1(
+        ProviderSessionVectorCallV1(
+            status: PROVIDER_SESSION_OK, pin_id: query.pin_id,
+            call: call, reason: "invoked"),
+        session)
+
 fn provider_session_close_owned_v1(
         session: ProviderLoaderSessionV1) -> ProviderSessionCloseResultV1:
     var out = session
@@ -505,14 +592,16 @@ export PROVIDER_ADMISSION_DIGEST_UNSTABLE
 export PROVIDER_SESSION_OK, PROVIDER_SESSION_NOT_OPEN, PROVIDER_SESSION_QUERY_FAILED
 export PROVIDER_SESSION_PIN_UNKNOWN, PROVIDER_SESSION_CLOSE_PINNED, PROVIDER_SESSION_CLOSE_FAILED
 export PROVIDER_SESSION_CLI_SYMBOL_MISSING, PROVIDER_SESSION_CLI_CALL_FAILED
-export PROVIDER_SESSION_QUERY_INCOMPATIBLE
+export PROVIDER_SESSION_QUERY_INCOMPATIBLE, PROVIDER_SESSION_VECTOR_CALL_FAILED
 export ProviderAdmissionOutcomeV1, ProviderAdmissionRequestV1, ProviderCallableEvidenceV1, ProviderAdmissionResultV1
 export ProviderLoaderSessionV1, ProviderDynamicAdmissionV1, ProviderSessionQueryV1, ProviderSessionCliInvokeV1
 export ProviderSessionQueryOwnedResultV1, ProviderSessionReleaseOwnedResultV1
 export ProviderSessionCloseResultV1
+export ProviderSessionVectorCallV1, ProviderSessionVectorCallOwnedResultV1
 export provider_admission_outcome_v1, provider_artifact_digest_v1, provider_artifact_path_allowed_v1, provider_admit_evidence_v1, provider_admit_dynamic_v1
 export provider_query_abi_validate_v1
 export provider_session_query_v1, provider_session_release_v1, provider_session_close_v1
 export provider_session_query_owned_v1, provider_session_release_owned_v1
 export provider_session_close_owned_v1
 export provider_session_invoke_cli_v1
+export provider_session_vector_call_owned_v1

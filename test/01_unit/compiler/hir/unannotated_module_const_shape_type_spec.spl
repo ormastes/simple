@@ -1,0 +1,72 @@
+"""
+Purpose: Pin the HIR type an UNANNOTATED module constant receives from its
+NON-LITERAL initializer shape (the bare-literal cases are pinned by
+unannotated_module_const_type_spec.spl beside this file). A signed/bit-inverted
+numeric literal (`val NEG = -1`,
+`val MASK = ~0`) and integer arithmetic over literals (`val CAP = 1024 * 1024`)
+must settle to a scalar type, not `HirTypeKind.Infer`: an importing module's
+MIR lowering reads this type as the global's storage ABI, and an `Infer` there
+was fatal (`[infer-arm]`) in 120 of 202 failing rc1 native targets.
+Audience: compiler engineers maintaining hir_lowering/_Items/trait_impl_lowering.
+"""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_types.{HirTypeKind, HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+fn lower_hir(src: text) -> HirModule:
+    val filename = "unannotated_const_probe.spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    hir_lowering.lower_module(module)
+
+fn const_type_name(hir: HirModule, name: text) -> text:
+    for constant in hir.constants.values():
+        if constant.name == name:
+            match constant.type_.kind:
+                case HirTypeKind.Int(_, _): return "int"
+                case HirTypeKind.Float(_): return "float"
+                case HirTypeKind.Str: return "str"
+                case HirTypeKind.Bool: return "bool"
+                case HirTypeKind.Infer(_, _): return "infer"
+                case _: return "other"
+    "missing"
+
+val PROBE_SOURCE = """
+pub val NEG = -1
+pub val MASK = ~0
+pub val HALF = -2.5
+pub val CAP = 1024 * 1024
+pub val SHIFTED = 1 << 3
+pub val NESTED = -(4 + 2) % 5
+pub val PLAIN = 7
+pub val FLAG = 1 < 2
+pub val MIXED = 1.5 * 2
+pub val WORDS = "a" + "b"
+"""
+
+describe "unannotated module constant HIR type":
+    it "types a negated or bit-inverted integer literal as int":
+        val hir = lower_hir(PROBE_SOURCE)
+        expect(const_type_name(hir, "NEG")).to_equal("int")
+        expect(const_type_name(hir, "MASK")).to_equal("int")
+        expect(const_type_name(hir, "PLAIN")).to_equal("int")
+
+    it "types a negated float literal as float":
+        val hir = lower_hir(PROBE_SOURCE)
+        expect(const_type_name(hir, "HALF")).to_equal("float")
+
+    it "types integer arithmetic over literals as int, nested too":
+        val hir = lower_hir(PROBE_SOURCE)
+        expect(const_type_name(hir, "CAP")).to_equal("int")
+        expect(const_type_name(hir, "SHIFTED")).to_equal("int")
+        expect(const_type_name(hir, "NESTED")).to_equal("int")
+
+    it "leaves shapes it cannot settle as Infer rather than guessing":
+        val hir = lower_hir(PROBE_SOURCE)
+        expect(const_type_name(hir, "FLAG")).to_equal("infer")
+        expect(const_type_name(hir, "MIXED")).to_equal("infer")
+        expect(const_type_name(hir, "WORDS")).to_equal("infer")

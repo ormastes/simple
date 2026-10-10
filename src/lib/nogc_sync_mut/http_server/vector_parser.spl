@@ -1,0 +1,584 @@
+# Explicit opt-in HTTP parser backed by an admitted SimpleVectorKernelsV1
+# provider. This module is not imported by the default HTTP server package.
+
+use std.nogc_sync_mut.io.tcp.{TcpStream}
+use std.nogc_sync_mut.io.tcp_read_span.{
+    TcpReadChunkSpanV1, TCP_READ_CHUNK_SPAN_MAX_V1,
+    tcp_read_chunk_span_v1
+}
+use std.nogc_sync_mut.http_server.types.{HttpRequest, http_method_from_text}
+use std.nogc_sync_mut.http_server.parser.{
+    parse_request_line, request_line_without_terminator, headers_decision,
+    request_host_error, RUNTIME_READ_LINE_CAP
+}
+use std.nogc_sync_mut.http_server.request_parser.{
+    HttpRequestParserV1, HttpRequestParseOwnedV1,
+    HttpRequestParserCloseOwnedV1
+}
+use std.nogc_sync_mut.composition.provider_contract.{
+    SIMPLE_PROVIDER_QUERY_V1_SIZE, SIMPLE_PROVIDER_OK,
+    SimpleProviderQueryV1, simple_provider_query_error_v1
+}
+use std.nogc_sync_mut.composition.vector_kernel_contract.{
+    SIMPLE_VECTOR_KERNELS_V1_INTERFACE,
+    SIMPLE_VECTOR_OP_HTTP_FIND_BYTE, SIMPLE_VECTOR_OP_HTTP_FIND_CRLF,
+    SIMPLE_VECTOR_CAP_HTTP_FIND_BYTE, SIMPLE_VECTOR_CAP_HTTP_FIND_CRLF,
+    SIMPLE_VECTOR_STATUS_OK, SIMPLE_VECTOR_MAX_ADDRESS,
+    SimpleVectorKernelRequestV1
+}
+use os.posix.dynlib_sffi.{ProviderQueryCallV1}
+use os.smf.provider_loader.{
+    PROVIDER_ADMISSION_OK, PROVIDER_SESSION_OK, PROVIDER_SESSION_NOT_OPEN,
+    PROVIDER_SESSION_QUERY_INCOMPATIBLE,
+    ProviderAdmissionRequestV1, ProviderLoaderSessionV1,
+    ProviderSessionQueryV1, provider_admit_dynamic_v1,
+    provider_session_query_owned_v1, provider_session_vector_call_owned_v1,
+    provider_session_release_owned_v1, provider_session_close_owned_v1
+}
+
+val HTTP_VECTOR_ABI_DIGEST_V1: text = "f16901349e16de8bb16f0769f492488fff27d0d0bd3b5f15c20b20b25f060600"
+val HTTP_VECTOR_LF_BYTE_V1: u64 = 10
+
+class HttpVectorParserSessionV1:
+    loader_session: ProviderLoaderSessionV1
+    find_byte_query: ProviderSessionQueryV1
+    find_crlf_query: ProviderSessionQueryV1
+    open: bool
+    status: i32
+    reason: text
+
+class HttpVectorParserSessionOpenOwnedV1:
+    session: HttpVectorParserSessionV1
+    status: i32
+    reason: text
+
+class HttpVectorParserSessionCloseOwnedV1:
+    session: HttpVectorParserSessionV1
+    status: i32
+    reason: text
+
+class HttpVectorScanOwnedV1:
+    reader: HttpVectorBufferedReaderV1
+    newline_index: i64
+    crlf_index: i64
+
+class HttpVectorLineReadOwnedV1:
+    reader: HttpVectorBufferedReaderV1
+    bytes: [u8]
+    complete: bool
+    line_ending_crlf: bool
+    error: text
+
+class HttpVectorLineChunkAdvanceOwnedV1:
+    bytes: [u8]
+    cursor: i64
+    complete: bool
+    line_ending_crlf: bool
+    error: text
+
+class HttpVectorBodyReadOwnedV1:
+    reader: HttpVectorBufferedReaderV1
+    bytes: [u8]
+    complete: bool
+    error: text
+
+class HttpVectorBufferedReaderV1:
+    stream: TcpStream
+    current: TcpReadChunkSpanV1
+    cursor: i64
+    eof: bool
+    session: HttpVectorParserSessionV1
+    provider_attempts: i64
+    provider_successes: i64
+
+class HttpVectorRequestParserV1 with HttpRequestParserV1:
+    session: HttpVectorParserSessionV1
+
+fn _http_vector_empty_query_v1() -> ProviderSessionQueryV1:
+    ProviderSessionQueryV1(
+        status: PROVIDER_SESSION_NOT_OPEN, pin_id: 0,
+        session_generation_id: 0, interface_id: 0,
+        requested_capability_bits: 0,
+        call: ProviderQueryCallV1(
+            ok: false, call_status: -1,
+            result: simple_provider_query_error_v1(-1),
+            diagnostic: "http-vector-session-not-open"),
+        reason: "http-vector-session-not-open")
+
+fn _http_vector_closed_session_v1(loader: ProviderLoaderSessionV1,
+        status: i32, reason: text) -> HttpVectorParserSessionV1:
+    HttpVectorParserSessionV1(
+        loader_session: loader,
+        find_byte_query: _http_vector_empty_query_v1(),
+        find_crlf_query: _http_vector_empty_query_v1(),
+        open: false, status: status, reason: reason)
+
+fn http_vector_parser_session_open_owned_v1(
+        request: ProviderAdmissionRequestV1) -> HttpVectorParserSessionOpenOwnedV1:
+    val admission = provider_admit_dynamic_v1(request)
+    if admission.admission.status != PROVIDER_ADMISSION_OK:
+        return HttpVectorParserSessionOpenOwnedV1(
+            session: _http_vector_closed_session_v1(
+                admission.session, admission.admission.status,
+                admission.admission.reason),
+            status: admission.admission.status, reason: admission.admission.reason)
+    val required = SIMPLE_VECTOR_CAP_HTTP_FIND_BYTE | SIMPLE_VECTOR_CAP_HTTP_FIND_CRLF
+    if (request.granted_capability_bits & required) != required:
+        val closed = provider_session_close_owned_v1(admission.session)
+        val closed_ok = closed.status == PROVIDER_SESSION_OK
+        val reason = if closed_ok: "http-vector-capabilities-not-granted" else: "http-vector-capability-refusal-cleanup-failed"
+        val status = if closed_ok: PROVIDER_SESSION_QUERY_INCOMPATIBLE else: closed.status
+        return HttpVectorParserSessionOpenOwnedV1(
+            session: _http_vector_closed_session_v1(closed.session, status, reason),
+            status: status, reason: reason)
+
+    val find_byte_request = SimpleProviderQueryV1(
+        descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+        interface_id: SIMPLE_VECTOR_KERNELS_V1_INTERFACE,
+        minimum_major: 1, minimum_minor: 0, host_abi: request.host_abi,
+        target_offset: 0, target_length: 0,
+        requested_capability_bits: SIMPLE_VECTOR_CAP_HTTP_FIND_BYTE)
+    val find_byte = provider_session_query_owned_v1(
+        admission.session, find_byte_request, HTTP_VECTOR_ABI_DIGEST_V1)
+    if find_byte.query.status != PROVIDER_SESSION_OK or
+            find_byte.query.call.result.status != SIMPLE_PROVIDER_OK:
+        val closed = provider_session_close_owned_v1(find_byte.session)
+        val closed_ok = closed.status == PROVIDER_SESSION_OK
+        val reason = if closed_ok: find_byte.query.reason else: "http-vector-byte-query-cleanup-failed"
+        val status = if closed_ok: PROVIDER_SESSION_QUERY_INCOMPATIBLE else: closed.status
+        return HttpVectorParserSessionOpenOwnedV1(
+            session: _http_vector_closed_session_v1(closed.session, status, reason),
+            status: status, reason: reason)
+
+    val find_crlf_request = SimpleProviderQueryV1(
+        descriptor_size: SIMPLE_PROVIDER_QUERY_V1_SIZE,
+        interface_id: SIMPLE_VECTOR_KERNELS_V1_INTERFACE,
+        minimum_major: 1, minimum_minor: 0, host_abi: request.host_abi,
+        target_offset: 0, target_length: 0,
+        requested_capability_bits: SIMPLE_VECTOR_CAP_HTTP_FIND_CRLF)
+    val find_crlf = provider_session_query_owned_v1(
+        find_byte.session, find_crlf_request, HTTP_VECTOR_ABI_DIGEST_V1)
+    if find_crlf.query.status != PROVIDER_SESSION_OK or
+            find_crlf.query.call.result.status != SIMPLE_PROVIDER_OK:
+        var loader = find_crlf.session
+        val released = provider_session_release_owned_v1(
+            loader, find_byte.query.pin_id)
+        loader = released.session
+        if released.status != PROVIDER_SESSION_OK:
+            val reason = "http-vector-byte-pin-release-failed"
+            return HttpVectorParserSessionOpenOwnedV1(
+                session: HttpVectorParserSessionV1(
+                    loader_session: loader,
+                    find_byte_query: find_byte.query,
+                    find_crlf_query: find_crlf.query,
+                    open: true, status: released.status, reason: reason),
+                status: released.status, reason: reason)
+        val closed = provider_session_close_owned_v1(loader)
+        val closed_ok = closed.status == PROVIDER_SESSION_OK
+        val reason = if closed_ok: find_crlf.query.reason else: "http-vector-close-after-query-failure-failed"
+        val status = if closed_ok: PROVIDER_SESSION_QUERY_INCOMPATIBLE else: closed.status
+        return HttpVectorParserSessionOpenOwnedV1(
+            session: _http_vector_closed_session_v1(closed.session, status, reason),
+            status: status, reason: reason)
+
+    val session = HttpVectorParserSessionV1(
+        loader_session: find_crlf.session,
+        find_byte_query: find_byte.query,
+        find_crlf_query: find_crlf.query,
+        open: true, status: PROVIDER_SESSION_OK,
+        reason: "http-vector-provider-admitted-and-pinned")
+    HttpVectorParserSessionOpenOwnedV1(
+        session: session, status: PROVIDER_SESSION_OK, reason: session.reason)
+
+# Explicit owner close. Provider runtime pin/call leases serialize this against
+# detached HTTP handlers: a handler that already entered the foreign call
+# makes retirement fail busy; a later handler sees the retired pin and uses
+# the scalar scanner. Never force-unload a DSO underneath a connection thread.
+fn http_vector_parser_session_close_owned_v1(
+        session: HttpVectorParserSessionV1) -> HttpVectorParserSessionCloseOwnedV1:
+    var out = session
+    if out.find_crlf_query.pin_id != 0:
+        val released = provider_session_release_owned_v1(
+            out.loader_session, out.find_crlf_query.pin_id)
+        out.loader_session = released.session
+        if released.status != PROVIDER_SESSION_OK:
+            return HttpVectorParserSessionCloseOwnedV1(
+                session: out, status: released.status,
+                reason: "http-vector-crlf-pin-release-failed")
+        var query = out.find_crlf_query
+        query.pin_id = 0
+        out.find_crlf_query = query
+    if out.find_byte_query.pin_id != 0:
+        val released = provider_session_release_owned_v1(
+            out.loader_session, out.find_byte_query.pin_id)
+        out.loader_session = released.session
+        if released.status != PROVIDER_SESSION_OK:
+            return HttpVectorParserSessionCloseOwnedV1(
+                session: out, status: released.status,
+                reason: "http-vector-byte-pin-release-failed")
+        var query = out.find_byte_query
+        query.pin_id = 0
+        out.find_byte_query = query
+    if out.loader_session.open:
+        val closed = provider_session_close_owned_v1(out.loader_session)
+        out.loader_session = closed.session
+        if closed.status != PROVIDER_SESSION_OK:
+            return HttpVectorParserSessionCloseOwnedV1(
+                session: out, status: closed.status,
+                reason: "http-vector-provider-close-failed")
+    out.open = false
+    out.status = PROVIDER_SESSION_NOT_OPEN
+    out.reason = "closed"
+    HttpVectorParserSessionCloseOwnedV1(
+        session: out, status: PROVIDER_SESSION_OK, reason: "closed")
+
+fn http_vector_request_parser_new_v1(
+        session: HttpVectorParserSessionV1) -> HttpVectorRequestParserV1:
+    HttpVectorRequestParserV1(session: session)
+
+fn _http_vector_reader_new_v1(stream: TcpStream,
+        session: HttpVectorParserSessionV1) -> HttpVectorBufferedReaderV1:
+    HttpVectorBufferedReaderV1(
+        stream: stream,
+        current: TcpReadChunkSpanV1(bytes: []),
+        cursor: 0, eof: false, session: session,
+        provider_attempts: 0, provider_successes: 0)
+
+fn _http_vector_request(opcode: u32, address: i64, length: i64,
+        argument: u64) -> SimpleVectorKernelRequestV1:
+    SimpleVectorKernelRequestV1(
+        opcode: opcode, left_address: address as u64,
+        left_bytes: length as u64, right_address: 0, right_bytes: 0,
+        output_address: 0, output_capacity_bytes: 0, argument: argument)
+
+fn _http_vector_scan_owned_v1(reader: HttpVectorBufferedReaderV1) -> HttpVectorScanOwnedV1:
+    var out = reader
+    val remaining = out.current.bytes.len() - out.cursor
+    if remaining <= 0:
+        return HttpVectorScanOwnedV1(
+            reader: out, newline_index: -1, crlf_index: -1)
+    if out.session.open:
+        val base_address = unsafe(capabilities: [ffi, raw_ptr]):
+            out.current.retained_address_v1()
+        if base_address > 0 and out.cursor >= 0 and
+                base_address <= SIMPLE_VECTOR_MAX_ADDRESS as i64 - out.cursor:
+            val address = base_address + out.cursor
+            out.provider_attempts = out.provider_attempts + 1
+            val newline_call = provider_session_vector_call_owned_v1(
+                out.session.loader_session, out.session.find_byte_query,
+                _http_vector_request(
+                    SIMPLE_VECTOR_OP_HTTP_FIND_BYTE, address, remaining,
+                HTTP_VECTOR_LF_BYTE_V1))
+            out.session.loader_session = newline_call.session
+            val newline_ok = newline_call.vector_call.status == PROVIDER_SESSION_OK and
+                newline_call.vector_call.call.response.status == SIMPLE_VECTOR_STATUS_OK
+            if newline_ok:
+                val newline_index = newline_call.vector_call.call.response.scalar_result
+                out.provider_successes = out.provider_successes + 1
+                if newline_index < 0:
+                    return HttpVectorScanOwnedV1(
+                        reader: out, newline_index: -1, crlf_index: -1)
+                out.provider_attempts = out.provider_attempts + 1
+                val crlf_call = provider_session_vector_call_owned_v1(
+                    out.session.loader_session, out.session.find_crlf_query,
+                    _http_vector_request(
+                        SIMPLE_VECTOR_OP_HTTP_FIND_CRLF, address, remaining, 0))
+                out.session.loader_session = crlf_call.session
+                val crlf_ok = crlf_call.vector_call.status == PROVIDER_SESSION_OK and
+                    crlf_call.vector_call.call.response.status == SIMPLE_VECTOR_STATUS_OK
+                if crlf_ok:
+                    out.provider_successes = out.provider_successes + 1
+                    val crlf_index = crlf_call.vector_call.call.response.scalar_result
+                    val newline_is_crlf = newline_index > 0 and
+                        out.current.bytes[(out.cursor + newline_index - 1) as i32] == 13u8
+                    var consistent = true
+                    if newline_is_crlf:
+                        if crlf_index != newline_index - 1:
+                            consistent = false
+                    else:
+                        if crlf_index >= 0 and crlf_index <= newline_index:
+                            consistent = false
+                    if consistent:
+                        return HttpVectorScanOwnedV1(
+                            reader: out, newline_index: newline_index,
+                            crlf_index: crlf_index)
+    var newline_index: i64 = -1
+    var i = out.cursor
+    while i < out.current.bytes.len():
+        if out.current.bytes[i as i32] == 10u8:
+            newline_index = i - out.cursor
+            break
+        i = i + 1
+    HttpVectorScanOwnedV1(
+        reader: out, newline_index: newline_index,
+        crlf_index: -1)
+
+fn _http_vector_append_range(dest: [u8], src: [u8], start: i64, count: i64) -> [u8]:
+    var out = dest
+    var i: i64 = 0
+    while i < count:
+        out.push(src[(start + i) as i32])
+        i = i + 1
+    out
+
+# Shared by the socket reader and deterministic chunk-boundary probes. A
+# caller supplies the provider's relative LF/CRLF results for this chunk;
+# missing LF appends the whole chunk and carries the partial line forward.
+fn http_vector_line_chunk_advance_v1(line: [u8], chunk: [u8], cursor: i64,
+        newline_index: i64, crlf_index: i64) -> HttpVectorLineChunkAdvanceOwnedV1:
+    if newline_index >= 0:
+        val count = newline_index + 1
+        val provider_crlf = crlf_index >= 0 and crlf_index + 1 == newline_index
+        val split_crlf = newline_index == 0 and line.len() > 0 and
+            line[line.len() - 1] == 13u8
+        val is_crlf = provider_crlf or split_crlf or
+            (newline_index > 0 and chunk[(cursor + newline_index - 1) as i32] == 13u8)
+        if line.len() + count > RUNTIME_READ_LINE_CAP - 1:
+            return HttpVectorLineChunkAdvanceOwnedV1(
+                bytes: line, cursor: cursor, complete: false,
+                line_ending_crlf: false,
+                error: "431 Request line too long: truncated at {RUNTIME_READ_LINE_CAP} bytes without a newline")
+        return HttpVectorLineChunkAdvanceOwnedV1(
+            bytes: _http_vector_append_range(line, chunk, cursor, count),
+            cursor: cursor + count, complete: true,
+            line_ending_crlf: is_crlf, error: "")
+    val remaining = chunk.len() - cursor
+    val appended = _http_vector_append_range(line, chunk, cursor, remaining)
+    if appended.len() >= RUNTIME_READ_LINE_CAP - 1:
+        return HttpVectorLineChunkAdvanceOwnedV1(
+            bytes: appended, cursor: chunk.len(), complete: false,
+            line_ending_crlf: false,
+            error: "431 Request line too long: truncated at {RUNTIME_READ_LINE_CAP} bytes without a newline")
+    HttpVectorLineChunkAdvanceOwnedV1(
+        bytes: appended, cursor: chunk.len(), complete: false,
+        line_ending_crlf: false, error: "")
+
+fn http_vector_chunk_remainder_v1(chunk: [u8], cursor: i64) -> [u8]:
+    if cursor < 0 or cursor >= chunk.len(): return []
+    _http_vector_append_range([], chunk, cursor, chunk.len() - cursor)
+
+fn http_vector_line_eof_error_v1(partial_line: [u8]) -> text:
+    if partial_line.len() == 0:
+        "Failed to read request line: end of stream"
+    else:
+        "400 Incomplete request line"
+
+fn http_vector_body_eof_error_v1() -> text:
+    "400 Failed to read request body"
+
+fn _http_vector_read_line_owned_v1(reader: HttpVectorBufferedReaderV1) -> HttpVectorLineReadOwnedV1:
+    var out = reader
+    var line: [u8] = []
+    loop:
+        if out.cursor >= out.current.bytes.len():
+            if out.eof:
+                return HttpVectorLineReadOwnedV1(
+                    reader: out, bytes: line, complete: false,
+                    line_ending_crlf: false,
+                    error: http_vector_line_eof_error_v1(line))
+            match tcp_read_chunk_span_v1(out.stream, TCP_READ_CHUNK_SPAN_MAX_V1):
+                Err(error):
+                    out.eof = true
+                    return HttpVectorLineReadOwnedV1(
+                        reader: out, bytes: line, complete: false,
+                        line_ending_crlf: false,
+                        error: "Failed to read request line: {error}")
+                Ok(chunk):
+                    if chunk.bytes.len() == 0:
+                        out.eof = true
+                        return HttpVectorLineReadOwnedV1(
+                            reader: out, bytes: line, complete: false,
+                            line_ending_crlf: false,
+                            error: http_vector_line_eof_error_v1(line))
+                    out.current = chunk
+                    out.cursor = 0
+        val scanned = _http_vector_scan_owned_v1(out)
+        out = scanned.reader
+        val advance = http_vector_line_chunk_advance_v1(
+            line, out.current.bytes, out.cursor,
+            scanned.newline_index, scanned.crlf_index)
+        line = advance.bytes
+        out.cursor = advance.cursor
+        if advance.error != "":
+            return HttpVectorLineReadOwnedV1(
+                reader: out, bytes: line, complete: false,
+                line_ending_crlf: false, error: advance.error)
+        if advance.complete:
+            return HttpVectorLineReadOwnedV1(
+                reader: out, bytes: line, complete: true,
+                line_ending_crlf: advance.line_ending_crlf, error: "")
+
+fn _http_vector_read_body_owned_v1(reader: HttpVectorBufferedReaderV1,
+        count: i64) -> HttpVectorBodyReadOwnedV1:
+    var out = reader
+    var body: [u8] = []
+    while body.len() < count:
+        if out.cursor >= out.current.bytes.len():
+            if out.eof:
+                return HttpVectorBodyReadOwnedV1(
+                    reader: out, bytes: body, complete: false,
+                    error: http_vector_body_eof_error_v1())
+            match tcp_read_chunk_span_v1(out.stream, TCP_READ_CHUNK_SPAN_MAX_V1):
+                Err(_):
+                    out.eof = true
+                    return HttpVectorBodyReadOwnedV1(
+                        reader: out, bytes: body, complete: false,
+                        error: http_vector_body_eof_error_v1())
+                Ok(chunk):
+                    if chunk.bytes.len() == 0:
+                        out.eof = true
+                        return HttpVectorBodyReadOwnedV1(
+                            reader: out, bytes: body, complete: false,
+                            error: http_vector_body_eof_error_v1())
+                    out.current = chunk
+                    out.cursor = 0
+        val available = out.current.bytes.len() - out.cursor
+        val needed = count - body.len()
+        val copied = if available < needed: available else: needed
+        body = _http_vector_append_range(
+            body, out.current.bytes, out.cursor, copied)
+        out.cursor = out.cursor + copied
+    HttpVectorBodyReadOwnedV1(
+        reader: out, bytes: body, complete: true, error: "")
+
+fn _http_vector_remainder_v1(reader: HttpVectorBufferedReaderV1) -> [u8]:
+    http_vector_chunk_remainder_v1(reader.current.bytes, reader.cursor)
+
+fn _http_vector_line_payload_v1(raw: text, line_ending_crlf: bool) -> text:
+    if line_ending_crlf and raw.len() >= 2:
+        return raw.slice(0, raw.len() - 2)
+    request_line_without_terminator(raw)
+
+fn _http_vector_failure(reader: HttpVectorBufferedReaderV1,
+        error: text) -> HttpRequestParseOwnedV1:
+    HttpRequestParseOwnedV1(
+        request: nil, error: error,
+        buffered_remainder: _http_vector_remainder_v1(reader),
+        provider_attempts: reader.provider_attempts,
+        provider_successes: reader.provider_successes,
+        provider_used: reader.provider_successes > 0,
+        parser: http_vector_request_parser_new_v1(reader.session))
+
+fn _http_vector_parse_request(reader: HttpVectorBufferedReaderV1,
+        max_request_line: i32, max_header_count: i32,
+        max_header_line: i32, max_body: i32,
+        max_read_iters: i32) -> HttpRequestParseOwnedV1:
+    var out = reader
+    val request_line = _http_vector_read_line_owned_v1(out)
+    out = request_line.reader
+    if request_line.error != "": return _http_vector_failure(out, request_line.error)
+    if not request_line.complete:
+        return _http_vector_failure(out, "400 Incomplete request line")
+    val raw_request_line = bytes_to_text(request_line.bytes)
+    val line = _http_vector_line_payload_v1(
+        raw_request_line, request_line.line_ending_crlf)
+    if line == "": return _http_vector_failure(out, "Empty request line")
+    if line.len() > max_request_line:
+        return _http_vector_failure(out, "431 Request line too long: {line.len()} bytes")
+    val parsed = parse_request_line(line)
+    val method_str = parsed.0
+    val raw_path = parsed.1
+    val version = parsed.2
+    if method_str == "" or raw_path == "" or
+            not (method_str == "GET" or method_str == "POST" or
+                method_str == "PUT" or method_str == "DELETE" or
+                method_str == "PATCH" or method_str == "HEAD" or
+                method_str == "OPTIONS"):
+        return _http_vector_failure(out, "Malformed request line: {line}")
+    if version != "HTTP/1.1" and version != "HTTP/1.0":
+        return _http_vector_failure(out, "Unsupported HTTP version: {version}")
+    val method = http_method_from_text(method_str)
+    var path = raw_path
+    var query = ""
+    val qmark = raw_path.index_of("?")
+    if qmark >= 0:
+        path = raw_path.slice(0, qmark)
+        query = raw_path.slice(qmark + 1, raw_path.len())
+
+    var headers: [(text, text)] = []
+    var header_count: i32 = 0
+    var read_iters: i32 = 0
+    loop:
+        read_iters = read_iters + 1
+        if read_iters > max_read_iters:
+            return _http_vector_failure(out, "408 Request header read iteration limit exceeded")
+        val header_read = _http_vector_read_line_owned_v1(out)
+        out = header_read.reader
+        if header_read.error.starts_with("431 Request line too long"):
+            return _http_vector_failure(out,
+                "431 Header line too long: truncated at {RUNTIME_READ_LINE_CAP} bytes without a newline")
+        if header_read.error != "":
+            return _http_vector_failure(out, "400 Incomplete request headers")
+        if not header_read.complete:
+            return _http_vector_failure(out, "400 Incomplete request headers")
+        val raw_header = bytes_to_text(header_read.bytes)
+        if not raw_header.ends_with("\n"):
+            return _http_vector_failure(out, "400 Incomplete request headers")
+        val payload = _http_vector_line_payload_v1(
+            raw_header, header_read.line_ending_crlf)
+        if payload.len() > max_header_line:
+            return _http_vector_failure(out, "431 Header line too long: {payload.len()} bytes")
+        if payload == "": break
+        if payload.starts_with(" ") or payload.starts_with("\t"):
+            return _http_vector_failure(out, "400 Obsolete folded header is not supported")
+        val header = payload.trim()
+        if header == "":
+            return _http_vector_failure(out, "400 Malformed whitespace-only header line")
+        header_count = header_count + 1
+        if header_count > max_header_count:
+            return _http_vector_failure(out, "431 Too many headers: {header_count}")
+        val colon = header.index_of(":")
+        if colon <= 0:
+            return _http_vector_failure(out, "400 Malformed header line")
+        val name = header.slice(0, colon).trim()
+        val value = header.slice(colon + 1, header.len()).trim()
+        if name == "" or name.contains(" ") or name.contains("\t"):
+            return _http_vector_failure(out, "400 Invalid header name")
+        headers.push((name, value))
+
+    val decision = headers_decision(headers, max_body)
+    if decision.0 != "": return _http_vector_failure(out, decision.0)
+    val host_error = request_host_error(headers, version)
+    if host_error != "": return _http_vector_failure(out, host_error)
+    var body = ""
+    if decision.1 > 0:
+        val body_read = _http_vector_read_body_owned_v1(out, decision.1 as i64)
+        out = body_read.reader
+        if not body_read.complete: return _http_vector_failure(out, body_read.error)
+        body = bytes_to_text(body_read.bytes)
+    val request = HttpRequest(
+        method: method, path: path, query: query, version: version,
+        headers: headers, body: body, remote_addr: "")
+    HttpRequestParseOwnedV1(
+        request: request, error: "",
+        buffered_remainder: _http_vector_remainder_v1(out),
+        provider_attempts: out.provider_attempts,
+        provider_successes: out.provider_successes,
+        provider_used: out.provider_successes > 0,
+        parser: http_vector_request_parser_new_v1(out.session))
+
+impl HttpVectorRequestParserV1:
+    static fn from_session(session: HttpVectorParserSessionV1) -> HttpVectorRequestParserV1:
+        HttpVectorRequestParserV1(session: session)
+
+    fn parse_request_owned_v1(stream: TcpStream, max_request_line: i32,
+            max_header_count: i32, max_header_line: i32, max_body: i32,
+            max_read_iters: i32) -> HttpRequestParseOwnedV1:
+        _http_vector_parse_request(
+            _http_vector_reader_new_v1(stream, self.session),
+            max_request_line, max_header_count, max_header_line,
+            max_body, max_read_iters)
+
+    fn close_owned_v1() -> HttpRequestParserCloseOwnedV1:
+        val closed = http_vector_parser_session_close_owned_v1(self.session)
+        var out = self
+        out.session = closed.session
+        var owner: HttpRequestParserV1? = out
+        HttpRequestParserCloseOwnedV1(
+            parser: owner, status: closed.status, reason: closed.reason)
+
+export HttpVectorParserSessionV1, HttpVectorParserSessionOpenOwnedV1
+export HttpVectorParserSessionCloseOwnedV1, HttpVectorRequestParserV1
+export http_vector_parser_session_open_owned_v1
+export http_vector_parser_session_close_owned_v1
+export http_vector_request_parser_new_v1

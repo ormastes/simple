@@ -163,6 +163,11 @@ struct MirLowering:
     # Struct/class NAME -> full declared field HIR types. Optional fields use
     # this owner to normalize constructor, projection, and assignment values.
     struct_field_hir_type: Dict<text, [HirType]>
+    # Bare struct/class NAME -> qualified layout key of the declaration whose
+    # field list currently occupies the bare-name entries (prescan first-wins,
+    # then the module being lowered). register_provider_struct relocates the
+    # bare entry only for that owner, never for another same-named provider.
+    struct_bare_layout_owner: Dict<text, text>
     # Struct NAME -> ordered array-element struct names for fields such as
     # `commands: [DrawIrCommand]`. Field loads use this to preserve both the
     # runtime-array identity and the decoded element layout.
@@ -202,9 +207,9 @@ struct MirLowering:
     # Static methods additionally use "static::{struct NAME}::{method name}" so
     # an unresolved type receiver is never lowered as an instance value.
     struct_method_syms: Dict<text, SymbolId>
-    # Unqualified method names that collide with a free function or a method
-    # on another struct in the same module and therefore cannot be dispatched
-    # through the unqualified fallback.
+    # "{owner}::{method}" rows declared by impl blocks in more than one module
+    # (register_owner_method); the unresolved-receiver dispatch reports them
+    # instead of silently calling whichever module registered last.
     struct_method_ambiguous: Dict<text, bool>
     # "{struct NAME}::{method name}" -> the method's declared return type's
     # struct NAME ("" when not a known Named struct). Methchain lane fix: a
@@ -228,6 +233,27 @@ struct MirLowering:
     # type is Optional(T), for unresolved native-call recovery in
     # method_calls_literals.spl. Sourced from HirImpl.method_return_is_optional.
     struct_method_return_is_optional: Dict<text, bool>
+    # Trait-typed receiver dispatch (bug
+    # stage2_trait_typed_receiver_method_unresolved_2026-10-10). Keyed by the
+    # trait's canonical "{owner module}.{Trait}" identity: the implementing
+    # type identities visible in this lowering (local module + providers).
+    trait_impl_owners: Dict<text, [text]>
+    # "{trait identity}::{owner identity}::{method}" -> the impl method's
+    # SymbolId in the ACTIVE module table (providers relocated). Module-local
+    # SymbolIds: reset per module exactly like struct_method_syms.
+    trait_impl_methods: Dict<text, SymbolId>
+    # True only when the driver lowers the WHOLE build closure from HIR in
+    # this process, so every implementor is visible. Demand/package-index
+    # lanes lower only dirty packages and reuse archived MIR for the rest; the
+    # implementor set is unknown there, so trait-object calls fail closed at
+    # compile time. Not reset per module.
+    trait_impl_closure_complete: bool
+    # Closure HIR modules consulted ONLY for trait-implementor registration
+    # when lower_module receives no providers (the stage3 bootstrap-fixed
+    # path lowers bootstrap_main alone; passing it full providers would also
+    # change provider class/method/global registration). Borrowed from the
+    # driver, never mutated.
+    trait_impl_provider_modules: [HirModule]
     # "{enum NAME}::{variant name}" -> the struct NAME held by that variant's
     # SINGLE-field payload, when it was constructed from a value already known
     # to be that struct (see struct_value_syms.get(payload_local.id) at the
@@ -283,6 +309,11 @@ struct MirLowering:
     # resolved element type is the erased i64 default. Reset wherever
     # runtime_dict_locals is reset (same local-id-collision lifecycle).
     runtime_elem_value_type: Dict<i64, MirType>
+    # Array local ID -> element-type inference state for an unannotated
+    # `var c = []`: 1 = element type adopted from the first store, 2 = later
+    # stores disagreed (element type unknown; first/last/get fail loudly).
+    # Same per-function reset lifecycle as runtime_elem_value_type.
+    inferred_array_elem_state: Dict<i64, i64>
     # MIR local ID of an ARRAY value -> the struct NAME of its elements, when
     # every element's struct name was known at literal-build time (see
     # lower_array_lit in method_calls_literals.spl). Bug (array-of-structs

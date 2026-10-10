@@ -43,13 +43,10 @@ use compiler.common.gpu_target_metadata.{normalize_gpu_backend_order_metadata, n
 use compiler.mir.mir_types.{MirConstant}
 
 @unsafe(reason: "raw tagged HIR type discriminant ABI", capabilities: [ffi])
-extern fn rt_enum_discriminant(value: Any) -> i64
-# Formation probe: true only for a well-formed heap object. Distinguishes a
-# ZEROED slot (raw 0) from the nil sentinel (raw 3), which `== nil` cannot.
-extern fn rt_heap_ref_wellformed(value: Any) -> bool
+extern fn rt_enum_discriminant<T>(value: T) -> i64
 
 @always_inline
-fn _sffi_hir_type_discriminant(value: Any) -> i64:
+fn _sffi_hir_type_discriminant<T>(value: T) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
@@ -201,6 +198,7 @@ impl MirLowering:
         self.runtime_array_locals = {}
         self.runtime_dict_locals = {}
         self.runtime_elem_value_type = {}
+        self.inferred_array_elem_state = {}
         self.array_element_struct_syms = {}
         self.runtime_value_local_ids = []
         self.tagged_text_locals = {}
@@ -929,7 +927,16 @@ impl MirLowering:
         val sym_id_always = const_.symbol.id
         if sym_id_always >= 0:
             self.global_symbol_ids[sym_id_always] = true
-            self.global_const_exprs[sym_id_always] = const_.value
+            # A Unit-typed global has no storage (lower_static), so a read
+            # falls back to this expression; recording the initializer would
+            # RE-RUN it (`val r = unit_fn()` then `r` calling unit_fn again).
+            # Its value is the unit constant: the initializer runs once, in
+            # the module initializer, for its side effects.
+            if hir_const_is_unit_typed(const_):
+                self.global_const_exprs[sym_id_always] = HirExpr(kind: HirExprKind.UnitLit,
+                    has_type_: true, type_: const_.type_, span: const_.value.span)
+            else:
+                self.global_const_exprs[sym_id_always] = const_.value
         if val const_value = value:
             # Binary/bitwise module constants can legitimately retain an
             # unresolved HIR inference variable. `const_value` is already

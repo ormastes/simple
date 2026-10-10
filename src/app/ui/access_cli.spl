@@ -49,10 +49,7 @@ use std.log.{error}
 use std.nogc_sync_mut.io_runtime.{file_exists, getpid, time_now_unix_micros}
 use nogc_sync_mut.ui.access_store.{UiAccessStore}
 use std.database.sql.types.{DbError}
-use std.common.json.parser.{json_parse}
-use std.common.json.object_ops.{json_object_get, json_object_keys}
-use std.common.json.array_ops.{json_array_get, json_array_length}
-use std.common.json.types.{json_get_type, json_to_boolean, json_to_number, json_to_string}
+use std.common.json.value.{JsonValue, json_parse_value, json_value_type}
 
 val UI_ACCESS_SOURCE = "simple_ui"
 val UI_ACCESS_DEFAULT_TIMEOUT_MS: i64 = 2000
@@ -367,23 +364,22 @@ fn ui_access_window_result_from_snapshot_json(body: text) -> Result<AccessResult
     Ok(access_result_from_snapshot(ACCESS_OPERATION_LIST, UI_ACCESS_SOURCE, "", snapshot, UI_ACCESS_MAX_LIMIT))
 
 fn _ui_access_list_snapshot_from_json(body: text) -> Result<UiAccessSnapshot, AccessError>:
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parse_result = json_parse_value(body)
+    if parse_result.is_err():
         return Err(AccessError.create("invalid_response", "UI service returned invalid snapshot JSON"))
+    val parsed = parse_result.unwrap()
     val protocol_version = _ui_access_json_i64(parsed, "protocol_version")
     if protocol_version != 1:
         return Err(AccessError.create("invalid_response", "UI snapshot has an unsupported protocol version"))
-    val surfaces = json_object_get(parsed, "surfaces")
-    val nodes = json_object_get(parsed, "nodes")
-    if json_get_type(surfaces) != "array":
+    val surfaces = _ui_access_member(parsed, "surfaces")
+    val nodes = _ui_access_member(parsed, "nodes")
+    if json_value_type(surfaces) != "array":
         return Err(AccessError.create("invalid_response", "UI snapshot is missing the surfaces array"))
-    if json_get_type(nodes) != "array":
+    if json_value_type(nodes) != "array":
         return Err(AccessError.create("invalid_response", "UI snapshot is missing the nodes array"))
 
     var decoded_surfaces: [UiAccessSurface] = []
-    var index = 0
-    while index < json_array_length(surfaces):
-        val surface = json_array_get(surfaces, index)
+    for surface in _ui_access_items(surfaces):
         val surface_id = _ui_access_json_text(surface, "surface_id")
         val root_canonical_id = _ui_access_json_text(surface, "root_canonical_id")
         if surface_id == "" or root_canonical_id == "":
@@ -396,12 +392,9 @@ fn _ui_access_list_snapshot_from_json(body: text) -> Result<UiAccessSnapshot, Ac
             app_id: _ui_access_json_text(surface, "app_id"),
             root_canonical_id: root_canonical_id
         ))
-        index = index + 1
 
     var decoded_nodes: [UiAccessNode] = []
-    index = 0
-    while index < json_array_length(nodes):
-        val node = json_array_get(nodes, index)
+    for node in _ui_access_items(nodes):
         val canonical_id = _ui_access_json_text(node, "canonical_id")
         val surface_id = _ui_access_json_text(node, "surface_id")
         val widget_id = _ui_access_json_text(node, "widget_id")
@@ -417,11 +410,10 @@ fn _ui_access_list_snapshot_from_json(body: text) -> Result<UiAccessSnapshot, Ac
             enabled: _ui_access_required_bool(node, "enabled")?,
             selected: _ui_access_required_bool(node, "selected")?,
             text_value: _ui_access_json_text(node, "text"),
-            props: _ui_access_decode_props(json_object_get(node, "props"))?,
-            child_ids: _ui_access_decode_text_array(json_object_get(node, "child_ids"), "child_ids")?,
-            action_names: _ui_access_decode_text_array(json_object_get(node, "action_names"), "action_names")?
+            props: _ui_access_decode_props(_ui_access_member(node, "props"))?,
+            child_ids: _ui_access_decode_text_array(_ui_access_member(node, "child_ids"), "child_ids")?,
+            action_names: _ui_access_decode_text_array(_ui_access_member(node, "action_names"), "action_names")?
         ))
-        index = index + 1
 
     Ok(UiAccessSnapshot(
         protocol_version: protocol_version.to_i32(),
@@ -433,65 +425,72 @@ fn _ui_access_list_snapshot_from_json(body: text) -> Result<UiAccessSnapshot, Ac
         recent_events: []
     ))
 
-fn _ui_access_required_bool(object: any, key: text) -> Result<bool, AccessError>:
-    val value = json_to_boolean(json_object_get(object, key))
-    if value == nil:
-        return Err(AccessError.create("invalid_response", "UI snapshot field '" + key + "' is not boolean"))
-    Ok(value)
+fn _ui_access_required_bool(object: JsonValue, key: text) -> Result<bool, AccessError>:
+    match _ui_access_member(object, key):
+        case Bool(value):
+            Ok(value)
+        case _:
+            Err(AccessError.create("invalid_response", "UI snapshot field '" + key + "' is not boolean"))
 
-fn _ui_access_decode_props(object: any) -> Result<[UiAccessProp], AccessError>:
-    if json_get_type(object) != "object":
-        return Err(AccessError.create("invalid_response", "UI snapshot node props are not an object"))
-    var props: [UiAccessProp] = []
-    for key in json_object_keys(object):
-        val value = json_to_string(json_object_get(object, key))
-        if value == nil:
-            return Err(AccessError.create("invalid_response", "UI snapshot node prop '" + key + "' is not text"))
-        props = props.push(UiAccessProp(key: key, value: value))
-    Ok(props)
+fn _ui_access_decode_props(object: JsonValue) -> Result<[UiAccessProp], AccessError>:
+    match object:
+        case Object(keys, values):
+            var props: [UiAccessProp] = []
+            var index = 0
+            while index < keys.len():
+                val key = keys[index]
+                match values[index]:
+                    case Str(value):
+                        props = props.push(UiAccessProp(key: key, value: value))
+                    case _:
+                        return Err(AccessError.create("invalid_response", "UI snapshot node prop '" + key + "' is not text"))
+                index = index + 1
+            Ok(props)
+        case _:
+            Err(AccessError.create("invalid_response", "UI snapshot node props are not an object"))
 
-fn _ui_access_decode_text_array(array: any, field: text) -> Result<[text], AccessError>:
-    if json_get_type(array) != "array":
+fn _ui_access_decode_text_array(array: JsonValue, field: text) -> Result<[text], AccessError>:
+    if json_value_type(array) != "array":
         return Err(AccessError.create("invalid_response", "UI snapshot field '" + field + "' is not an array"))
     var values: [text] = []
-    var index = 0
-    while index < json_array_length(array):
-        val value = json_to_string(json_array_get(array, index))
-        if value == nil:
-            return Err(AccessError.create("invalid_response", "UI snapshot field '" + field + "' contains a non-text value"))
-        values = values.push(value)
-        index = index + 1
+    for item in _ui_access_items(array):
+        match item:
+            case Str(value):
+                values = values.push(value)
+            case _:
+                return Err(AccessError.create("invalid_response", "UI snapshot field '" + field + "' contains a non-text value"))
     Ok(values)
 
 fn _ui_access_read_result(operation: text, body: text) -> Result<AccessResult, AccessError>:
-    val parsed = json_parse(body)
-    if parsed == nil:
+    val parse_result = json_parse_value(body)
+    if parse_result.is_err():
         return Err(AccessError.create("invalid_response", "UI service returned invalid JSON"))
+    val parsed = parse_result.unwrap()
     var revision: i64 = 0
     var returned: i64 = 0
     var truncated = false
     if operation == ACCESS_OPERATION_SNAPSHOT:
         revision = _ui_access_json_i64(parsed, "snapshot_revision")
-        val nodes = json_object_get(parsed, "nodes")
-        if json_get_type(nodes) != "array":
+        val nodes = _ui_access_member(parsed, "nodes")
+        if json_value_type(nodes) != "array":
             return Err(AccessError.create("invalid_response", "UI snapshot is missing the nodes array"))
-        returned = json_array_length(nodes)
+        returned = _ui_access_items(nodes).len()
     elif operation == ACCESS_OPERATION_FIND:
         returned = _ui_access_json_i64(parsed, "match_count")
         truncated = _ui_access_json_bool(parsed, "truncated") == "true"
-        val nested = json_object_get(parsed, "snapshot")
+        val nested = _ui_access_member(parsed, "snapshot")
         revision = _ui_access_json_i64(nested, "snapshot_revision")
     elif operation == ACCESS_OPERATION_SURFACE:
         revision = _ui_access_json_i64(parsed, "snapshot_revision")
-        val content = json_object_get(parsed, "content")
+        val content = _ui_access_member(parsed, "content")
         returned = _ui_access_json_i64(content, "count")
         truncated = _ui_access_json_bool(content, "truncated") == "true"
     elif operation == ACCESS_OPERATION_HISTORY:
-        if json_get_type(parsed) != "array":
+        if json_value_type(parsed) != "array":
             return Err(AccessError.create("invalid_response", "UI history response is not an array"))
-        returned = json_array_length(parsed)
+        returned = _ui_access_items(parsed).len()
     var result = if operation == ACCESS_OPERATION_SNAPSHOT:
-        AccessResult.kv("UI snapshot", [["revision", revision.to_text()], ["mode", _ui_access_json_text(parsed, "mode")], ["active surface", _ui_access_json_text(parsed, "active_surface")], ["surfaces", json_array_length(json_object_get(parsed, "surfaces")).to_text()], ["nodes", returned.to_text()]])
+        AccessResult.kv("UI snapshot", [["revision", revision.to_text()], ["mode", _ui_access_json_text(parsed, "mode")], ["active surface", _ui_access_json_text(parsed, "active_surface")], ["surfaces", _ui_access_items(_ui_access_member(parsed, "surfaces")).len().to_text()], ["nodes", returned.to_text()]])
     elif operation == ACCESS_OPERATION_SURFACE:
         AccessResult.kv("UI surface", [["id", _ui_access_json_text(parsed, "surface_id")], ["title", _ui_access_json_text(parsed, "title")], ["active", _ui_access_json_bool(parsed, "active")], ["app", _ui_access_json_text(parsed, "app_id")], ["root", _ui_access_json_text(parsed, "root_canonical_id")], ["nodes", returned.to_text()]])
     elif operation == ACCESS_OPERATION_FIND:
@@ -502,51 +501,62 @@ fn _ui_access_read_result(operation: text, body: text) -> Result<AccessResult, A
     result.returned_count = returned
     Ok(result)
 
-fn _ui_access_find_table(parsed: any) -> AccessResult:
-    val snapshot = json_object_get(parsed, "snapshot")
-    val nodes = json_object_get(snapshot, "nodes")
+fn _ui_access_find_table(parsed: JsonValue) -> AccessResult:
+    val snapshot = _ui_access_member(parsed, "snapshot")
+    val nodes = _ui_access_member(snapshot, "nodes")
     var rows: [[text]] = [["CANONICAL ID", "KIND", "TEXT", "FOCUSED", "ENABLED", "ACTIONS"]]
-    var index = 0
-    while index < json_array_length(nodes):
-        val node = json_array_get(nodes, index)
+    for node in _ui_access_items(nodes):
         rows = rows + [[_ui_access_json_text(node, "canonical_id"), _ui_access_json_text(node, "kind"), _ui_access_json_text(node, "text"), _ui_access_json_bool(node, "focused"), _ui_access_json_bool(node, "enabled"), _ui_access_json_text_array_join(node, "action_names")]]
-        index = index + 1
     AccessResult.table("UI find", rows)
 
-fn _ui_access_history_table(parsed: any) -> AccessResult:
+fn _ui_access_history_table(parsed: JsonValue) -> AccessResult:
     var rows: [[text]] = [["SEQUENCE", "SURFACE", "TARGET", "EVENT", "PAYLOAD"]]
-    var index = 0
-    while index < json_array_length(parsed):
-        val event = json_array_get(parsed, index)
+    for event in _ui_access_items(parsed):
         rows = rows + [[_ui_access_json_i64(event, "sequence").to_text(), _ui_access_json_text(event, "surface_id"), _ui_access_json_text(event, "canonical_id"), _ui_access_json_text(event, "event_kind"), _ui_access_json_text(event, "payload")]]
-        index = index + 1
     AccessResult.table("UI history", rows)
 
-fn _ui_access_json_text(object: any, key: text) -> text:
-    val value = json_to_string(json_object_get(object, key))
-    if value == nil: "" else: value
+fn _ui_access_member(object: JsonValue, key: text) -> JsonValue:
+    match object:
+        case Object(keys, values):
+            var index = 0
+            while index < keys.len():
+                if keys[index] == key:
+                    return values[index]
+                index = index + 1
+            JsonValue.Null
+        case _:
+            JsonValue.Null
 
-fn _ui_access_json_i64(object: any, key: text) -> i64:
-    val value = json_to_number(json_object_get(object, key))
-    if value == nil: 0 else: value as i64
+fn _ui_access_items(value: JsonValue) -> [JsonValue]:
+    match value:
+        case Array(items):
+            items
+        case _:
+            []
 
-fn _ui_access_json_bool(object: any, key: text) -> text:
-    if object == nil:
-        return "null"
-    val value = json_to_boolean(json_object_get(object, key))
-    if value == nil: "null" else: if value: "true" else: "false"
+fn _ui_access_json_text(object: JsonValue, key: text) -> text:
+    match _ui_access_member(object, key):
+        case Str(value): value
+        case _: ""
 
-fn _ui_access_json_text_array_join(object: any, key: text) -> text:
-    if object == nil:
-        return ""
-    val values = json_object_get(object, key)
+fn _ui_access_json_i64(object: JsonValue, key: text) -> i64:
+    match _ui_access_member(object, key):
+        case Int(value): (value as f64) as i64
+        case Float(value): value as i64
+        case _: 0
+
+fn _ui_access_json_bool(object: JsonValue, key: text) -> text:
+    match _ui_access_member(object, key):
+        case Bool(value): if value: "true" else: "false"
+        case _: "null"
+
+fn _ui_access_json_text_array_join(object: JsonValue, key: text) -> text:
     var items: [text] = []
-    var index = 0
-    while index < json_array_length(values):
-        val value = json_to_string(json_array_get(values, index))
-        if value != nil:
-            items = items + [value]
-        index = index + 1
+    for value in _ui_access_items(_ui_access_member(object, key)):
+        match value:
+            case Str(item):
+                items = items + [item]
+            case _: pass
     items.join(",")
 
 fn _ui_access_validate_command(request: AccessRequest) -> Result<(), AccessError>:

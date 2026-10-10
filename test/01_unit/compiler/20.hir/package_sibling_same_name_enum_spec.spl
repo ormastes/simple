@@ -1,0 +1,144 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# A module's own type declaration shadows a same-named package sibling
+
+`lib/dep.spl` and `lib/other.spl` are directory siblings and both declare
+`pub enum Status`. Directory-package semantics prebind every sibling's public
+types into the module's SymbolTable (`resolve_package_sibling_symbols`) BEFORE
+the module's own declare pass, and `SymbolTable.define` is first-write-wins
+for type symbols. So `lib.dep`'s own `enum Status` was never allocated:
+`define` returned `lib.other`'s `Status`, and `Job.status: Status` bound to
+the sibling's enum (and `lib.dep` lost its own enum entirely).
+
+See doc/08_tracking/bug/hir_package_sibling_shadows_own_type_2026-10-10.md.
+"""
+
+# @tag: unit, compiler, hir, enum, imports
+
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+
+val dep_source = "pub enum Status:\n    Ready\n    Done\n\npub struct Job:\n    status: Status\n    n: i64\n\npub struct Pair:\n    a: i64\n\npub class Box:\n    v: i64\n\npub trait Shape:\n    fn area() -> i64\n"
+val other_source = "pub enum Pad:\n    P\n\npub enum Kind:\n    K\n\npub enum Status:\n    Mine\n    Other\n\npub struct Pair:\n    b: text\n\npub class Box:\n    w: text\n\npub trait Shape:\n    fn edges() -> i64\n"
+val consumer_source = "use lib.other.\{Status\}\nuse lib.dep.\{Job\}\n\nfn probe(j: Job) -> i64:\n    j.n\n"
+
+fn lower_three() -> [HirModule]:
+    val log = Logger(level: 0)
+    val dep_ast = parse_full_frontend(dep_source, "lib/dep.spl", "lib.dep", log)
+    val other_ast = parse_full_frontend(other_source, "lib/other.spl", "lib.other", log)
+    val consumer_ast = parse_full_frontend(consumer_source, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.dep"] = dep_ast
+    modules["lib.other"] = other_ast
+    val sources = [
+        SourceFile(path: "lib/dep.spl", content: dep_source, module_name: "lib.dep"),
+        SourceFile(path: "lib/other.spl", content: other_source, module_name: "lib.other")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var dep_lowering = hirlowering_for_module("lib.dep", surfaces)
+    var other_lowering = hirlowering_for_module("lib.other", surfaces)
+    var consumer_lowering = hirlowering_for_module("app.main", surfaces)
+    [dep_lowering.lower_module(dep_ast), other_lowering.lower_module(other_ast), consumer_lowering.lower_module(consumer_ast)]
+
+fn field_owner(module: HirModule, field_name: text) -> text:
+    for s in module.structs.values():
+        for f in s.fields:
+            if f.name == field_name:
+                match f.type_.kind:
+                    case HirTypeKind.Named(sym, _):
+                        return "{module.symbols.symbol_name_scalar_raw(sym.id)}@{module.symbols.symbol_defining_module_scalar_raw(sym.id)}"
+                    case _: return "not-named"
+    "missing"
+
+fn own_enum_owners(module: HirModule) -> text:
+    var out = ""
+    for e in module.enums.values():
+        out = out + "{module.symbols.symbol_name_scalar_raw(e.symbol.id)}@{module.symbols.symbol_defining_module_scalar_raw(e.symbol.id)};"
+    out
+
+describe "package siblings declaring the same enum name":
+    it "binds the provider's own field to its own Status, not the sibling's":
+        val hirs = lower_three()
+        val owner = field_owner(hirs[0], "status")
+        print "dep Job.status -> {owner}"
+        expect(owner).to_equal("Status@lib.dep")
+
+    it "keeps the provider's own Status enum declaration":
+        val hirs = lower_three()
+        val owners = own_enum_owners(hirs[0])
+        print "dep enums -> {owners}"
+        expect(owners.contains("Status@lib.dep")).to_equal(true)
+
+    it "still binds the sibling's own Status to the sibling":
+        val hirs = lower_three()
+        val owners = own_enum_owners(hirs[1])
+        print "other enums -> {owners}"
+        expect(owners.contains("Status@lib.other")).to_equal(true)
+
+fn unqualified_owner(module: HirModule, name: text) -> text:
+    val raw = module.symbols.local_type_binding_raw(name)
+    if raw < 0:
+        return "unbound"
+    "{module.symbols.symbol_name_scalar_raw(raw)}@{module.symbols.symbol_defining_module_scalar_raw(raw)}"
+
+describe "package siblings declaring the same struct, class and trait names":
+    it "binds the provider's own struct, class and trait spellings to itself":
+        val hirs = lower_three()
+        val pair = unqualified_owner(hirs[0], "Pair")
+        val box = unqualified_owner(hirs[0], "Box")
+        val shape = unqualified_owner(hirs[0], "Shape")
+        print "dep Pair -> {pair}, Box -> {box}, Shape -> {shape}"
+        expect(pair).to_equal("Pair@lib.dep")
+        expect(box).to_equal("Box@lib.dep")
+        expect(shape).to_equal("Shape@lib.dep")
+
+    it "keeps the sibling's same-named types reachable by qualified name":
+        val hirs = lower_three()
+        for name in ["Status", "Pair", "Box", "Shape"]:
+            val raw = hirs[0].symbols.lookup_qualified_type_raw("lib.other", name)
+            val owner = if raw >= 0: hirs[0].symbols.symbol_defining_module_scalar_raw(raw) else: "missing"
+            print "dep lib.other::{name} -> {owner}"
+            expect(owner).to_equal("lib.other")
+
+# An explicit `use lib.other.{Status}` plus the module's own `enum Status`:
+# the seed lets the local declaration win outright (no diagnostic; the
+# imported variants become unreachable by bare name). The pure-Simple HIR
+# must match: own enum lowered, own unit patterns kept, no errors.
+val shadow_source = "use lib.other.\{Status\}\n\nenum Status:\n    Alpha\n    Beta\n\nfn first() -> Status:\n    Status.Alpha\n\nfn is_alpha(s: Status) -> i64:\n    match s:\n        case Alpha: 1\n        case _: 0\n"
+
+fn explicit_shadow_summary() -> text:
+    val log = Logger(level: 0)
+    val dep_ast = parse_full_frontend(dep_source, "lib/dep.spl", "lib.dep", log)
+    val other_ast = parse_full_frontend(other_source, "lib/other.spl", "lib.other", log)
+    val shadow_ast = parse_full_frontend(shadow_source, "app/shadow.spl", "app.shadow", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.dep"] = dep_ast
+    modules["lib.other"] = other_ast
+    val sources = [
+        SourceFile(path: "lib/dep.spl", content: dep_source, module_name: "lib.dep"),
+        SourceFile(path: "lib/other.spl", content: other_source, module_name: "lib.other")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var shadow_lowering = hirlowering_for_module("app.shadow", surfaces)
+    val shadow_hir = shadow_lowering.lower_module(shadow_ast)
+    var errors = ""
+    for e in shadow_lowering.errors:
+        errors = errors + e.message + ";"
+    val status_owner = unqualified_owner(shadow_hir, "Status")
+    val enum_owners = own_enum_owners(shadow_hir)
+    "enums={enum_owners} status={status_owner} errors={errors}"
+
+describe "explicit import of a name the module also declares":
+    it "lets the module's own enum win, as the seed does":
+        val summary = explicit_shadow_summary()
+        print "explicit shadow: {summary}"
+        expect(summary.contains("status=Status@app.shadow")).to_equal(true)
+        expect(summary.contains("Status@lib.other")).to_equal(false)
+        expect(summary.ends_with("errors=")).to_equal(true)

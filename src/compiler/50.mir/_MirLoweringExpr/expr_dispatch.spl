@@ -5,6 +5,7 @@ use compiler.mir._MirLowering.native_trait_registration.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.mir._MirLowering.provider_globals.mir_global_storage_name
+use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
 use compiler.mir._MirLoweringExpr.text_index_ranges.*
 # MIR Lowering - Expression Lowering
 #
@@ -20,6 +21,7 @@ use compiler.mir._MirLoweringExpr.text_index_ranges.*
 use compiler.mir.mir_data.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.blocks.value.BlockValue
@@ -33,19 +35,19 @@ use std.io_runtime.{env_get_opt}
 # std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
 # cannot resolve it — declare the runtime extern directly.
 @unsafe(reason: "raw tagged-enum discriminant projection ABI", capabilities: [ffi])
-extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_discriminant<T>(value: T) -> i64
 @unsafe(reason: "raw tagged-enum borrowed payload projection ABI", capabilities: [ffi])
-extern fn rt_enum_payload(value: Any) -> i64
+extern fn rt_enum_payload<T>(value: T) -> i64
 @unsafe(reason: "raw tagged-tuple indexed borrowed value projection ABI", capabilities: [ffi])
-extern fn rt_tuple_get(tuple: i64, index: i64) -> Any
+extern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T?
 
 @always_inline
-fn _sffi_enum_discriminant(value: Any) -> i64:
+fn _sffi_enum_discriminant<T>(value: T) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
 @always_inline
-fn _sffi_enum_payload(value: Any) -> i64:
+fn _sffi_enum_payload<T>(value: T) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_payload(value)
 
@@ -55,9 +57,9 @@ fn _sffi_enum_payload(value: Any) -> i64:
 # `-> Any` form made every such read a hard `nil is forbidden by the
 # non-optional return contract` semantic error, so ANY `if` without an
 # `else` failed native-build in the pure-Simple MIR lowerer.
-fn _sffi_tuple_get(tuple: i64, index: i64) -> Any?:
+fn _sffi_tuple_get<T>(tuple: i64, index: i64) -> T?:
     unsafe(capabilities: [ffi]):
-        rt_tuple_get(tuple, index)
+        rt_tuple_get<T>(tuple, index)
 
 # Unset and explicitly-empty environment values are both disabled through the
 # canonical nullable owner.
@@ -678,6 +680,67 @@ impl MirLowering:
             return nil
         Some(noted)
 
+    me declared_field_type_in_current_table(owner: text, field_idx: i64, declared: HirType) -> HirType:
+        """Rebind a declared field type's `Named` symbol into `self.symbols`.
+
+        `struct_field_hir_type` is filled by the prescan from the DEFINING
+        module's SymbolTable, so a `Named(sym)` field type carries a SymbolId
+        that is only meaningful in that table. When the struct is imported,
+        lowering reads it against the IMPORTER's table, where the same raw id
+        names an unrelated symbol (measured: `u.quality` with imported
+        `Usage.quality: Quality` resolved to `Usage` itself, so enum `==`
+        on the projection fell into struct operator dispatch). The prescan
+        also recorded the field type's module-qualified ownership key
+        (`struct_field_type_ownership_key`), which is table-independent: keep
+        the declared type when the id still names that exact owner, otherwise
+        rebind to the importer's symbol of that exact owner, and degrade to
+        `Error` (= unknown) rather than reuse a foreign id or capture a
+        same-named type declared by a different module."""
+        match declared.kind:
+            case HirTypeKind.Named(declared_sym, declared_args):
+                var owner_key = ""
+                if self.struct_field_type_ownership_key.contains(owner):
+                    val keys = self.struct_field_type_ownership_key[owner]
+                    if keys != nil and field_idx >= 0 and field_idx < keys.len():
+                        owner_key = keys[field_idx]
+                if owner_key == "":
+                    return declared
+                if self.symbol_matches_ownership_key(declared_sym.id, owner_key):
+                    return declared
+                # Rebind path only: derive the bare name from the key
+                # ("<module>::<Name>" for layout keys, "<module>.<Name>" for
+                # class identities) and accept the importer's symbol only if
+                # it is that exact owner.
+                var bare_start = 0
+                val colon_at = owner_key.last_index_of("::")
+                if colon_at >= 0:
+                    bare_start = colon_at + 2
+                else:
+                    val dot_at = owner_key.last_index_of(".")
+                    if dot_at >= 0:
+                        bare_start = dot_at + 1
+                if val rebound = self.symbols.lookup_exact_type(owner_key.substring(bare_start)):
+                    if self.symbol_matches_ownership_key(rebound.id, owner_key):
+                        return HirType(kind: HirTypeKind.Named(rebound, declared_args), span: declared.span)
+                HirType(kind: HirTypeKind.Error, span: declared.span)
+            case _:
+                declared
+
+    fn symbol_matches_ownership_key(raw: i64, owner_key: text) -> bool:
+        """True when `raw` in `self.symbols` is exactly the type `owner_key`
+        names: `composite_layout_key` ("<defining_module>::<Name>", or the
+        bare name when ownerless) or `mir_class_identity` for classes."""
+        val name = self.symbols.symbol_name_scalar_raw(raw)
+        if name == "" or not owner_key.ends_with(name):
+            return false
+        val defining_module = self.symbols.symbol_defining_module_scalar_raw(raw)
+        val prefix_len = owner_key.len() - name.len()
+        if prefix_len == 0:
+            return defining_module == ""
+        if defining_module != "" and prefix_len == defining_module.len() + 2 and owner_key.starts_with(defining_module):
+            return true
+        self.symbols.record_owner_identity_scalar_raw(raw) == owner_key
+
     me remember_field_projection_provenance(base: HirExpr, base_local: LocalId, field_idx: i64, result: LocalId):
         """Carry nested aggregate/array identity through a field projection."""
         val base_struct_name = self.resolve_base_struct_name(base, base_local)
@@ -741,7 +804,11 @@ impl MirLowering:
                             # with nominal aggregates. Preserve the declared
                             # owner so enum equality can distinguish them after
                             # projecting through a typed parameter.
-                            self.remember_local_hir_type(result.id, decl_field_types[field_idx], 0, 0)
+                            val rebound_field_type = self.declared_field_type_in_current_table(name, field_idx, decl_field_types[field_idx])
+                            match rebound_field_type.kind:
+                                case HirTypeKind.Named(_, _):
+                                    self.remember_local_hir_type(result.id, rebound_field_type, 0, 0)
+                                case _: ()
                         case HirTypeKind.Optional(_):
                             # Imported aggregate fields have an erased MIR
                             # word. Keep the declared Option owner on that
@@ -1217,11 +1284,81 @@ impl MirLowering:
             self.mark_runtime_value_local(boxed.id)
         boxed
 
+    me infer_empty_array_elem_hir_type(container: LocalId, value_local: LocalId):
+        """Adopt the stored elements' type for an unannotated array.
+
+        `var c = []` carries no element type, so `c.first()` / `c.get(i)`
+        could not choose a decode and failed as `unresolved method call`.
+        Observed stores (push / index-assign) are the only evidence the
+        compiler has. The first store's type is recorded as `[T]` only when it
+        is positively known (the value's own HIR type, or a text/f64/bool MIR
+        local; an i64 MIR type is the erased default and is NOT evidence).
+        Every later store must agree (`hir_types_equal`): an unknown or
+        different element type poisons the inference (state 2) and records
+        `[Error]`, so `first`/`last`/`get` fail loudly instead of decoding
+        with the wrong type, and other consumers see the same erased element
+        they saw before inference existed. A declared element type is never
+        touched (only containers this helper itself typed are revisited)."""
+        if not self.local_is_runtime_array(container):
+            return
+        val state = if self.inferred_array_elem_state.contains(container.id): self.inferred_array_elem_state[container.id] else: 0
+        if state == 2:
+            return
+        if state == 0:
+            if val existing = self.find_local_hir_type(container.id):
+                match existing.kind:
+                    case HirTypeKind.Array(existing_elem, _):
+                        match existing_elem.kind:
+                            case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
+                            case _: return
+                    # An unannotated `var c = []` binding records no element and
+                    # may record an unresolved container type; neither is evidence.
+                    case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
+                    case _: return
+        var elem_kind_found = false
+        var elem_type = HirType(kind: HirTypeKind.Error, span: Span.empty())
+        if val value_hir = self.find_local_hir_type(value_local.id):
+            match value_hir.kind:
+                case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any: ()
+                case _:
+                    elem_type = value_hir
+                    elem_kind_found = true
+        if not elem_kind_found:
+            if self.local_is_str(value_local):
+                elem_type = HirType(kind: HirTypeKind.Str, span: Span.empty())
+                elem_kind_found = true
+            elif val value_mir = self.local_mir_type_of(value_local):
+                match value_mir.kind:
+                    case MirTypeKind.F64:
+                        elem_type = HirType(kind: HirTypeKind.Float(64), span: Span.empty())
+                        elem_kind_found = true
+                    case MirTypeKind.Bool:
+                        elem_type = HirType(kind: HirTypeKind.Bool, span: Span.empty())
+                        elem_kind_found = true
+                    case _: ()
+        var agrees = elem_kind_found
+        if agrees and state == 1:
+            agrees = false
+            if val inferred = self.find_local_hir_type(container.id):
+                match inferred.kind:
+                    case HirTypeKind.Array(inferred_elem, _):
+                        agrees = hir_types_equal(inferred_elem, elem_type)
+                    case _: ()
+        if agrees:
+            if state == 0:
+                self.inferred_array_elem_state[container.id] = 1
+                self.remember_local_hir_type(container.id, HirType(kind: HirTypeKind.Array(elem_type, nil), span: Span.empty()), 0, 0)
+            return
+        self.inferred_array_elem_state[container.id] = 2
+        if state == 1:
+            self.remember_local_hir_type(container.id, HirType(kind: HirTypeKind.Array(HirType(kind: HirTypeKind.Error, span: Span.empty()), nil), span: Span.empty()), 0, 0)
+
     # Record the f64/f32 type of a value stored into a container whose
     # declared element type may be the erased i64 default (empty `{}`/`[]`
     # literal). Reads consult runtime_elem_value_type so decode takes the
     # rt_value_as_float arm instead of shredding the heap-box ptr via `>>3`.
     me note_container_elem_type(container: LocalId, value_local: LocalId):
+        self.infer_empty_array_elem_hir_type(container, value_local)
         val vt = self.local_mir_type_of(value_local)
         if vt != nil:
             val vt_disc = _sffi_enum_discriminant(vt.kind)
@@ -1988,6 +2125,20 @@ impl MirLowering:
                     # The callee's return boundary guarantees a tagged word;
                     # retain that fact after Any erases to MIR i64.
                     self.mark_runtime_value_local(local.id)
+                case HirTypeKind.Named(_, _):
+                    # The name-keyed shape registry above answers nothing for
+                    # a free-fn name defined in two closure modules (e.g.
+                    # `run_spl_doctests_same_file` / `extract_skip_feature_info`
+                    # exist in both src/lib and src/app/test_runner_new), so
+                    # the call result lost its struct identity and
+                    # `info.status.lower()` / `for b in r.blocks:` failed.
+                    # The callee's signature relocated into THIS module's
+                    # table still names the struct; recover it with the same
+                    # fail-closed Struct/Class + known-layout gate.
+                    if not self.struct_value_syms.contains(local.id):
+                        val named_return_struct = self.optional_payload_struct_name(found_type)
+                        if named_return_struct != "":
+                            self.struct_value_syms[local.id] = named_return_struct
                 case _:
                     ()
 
@@ -2017,13 +2168,25 @@ impl MirLowering:
             case HirTypeKind.Named(optional_payload_sym, _):
                 val raw_symbol = self.symbols.get_symbol_raw(optional_payload_sym.id)
                 if val optional_payload_symbol = raw_symbol:
+                    # A class is keyed by its owner identity everywhere this
+                    # name is consumed (register_provider_class layouts and
+                    # `{identity}::{method}` dispatch rows, the opt/ok shape
+                    # prescan); its bare name exists only for a local class.
+                    # Answering the bare name failed the layout gate for every
+                    # IMPORTED class, so `if val a = maybe_reg(1): a.activate()`
+                    # lost the receiver class and died as `unresolved method
+                    # call`. Structs keep their bare-name convention.
+                    var payload_key = ""
                     match optional_payload_symbol.kind:
-                        case Class | Struct:
-                            if not self.struct_field_order.contains(optional_payload_symbol.name):
-                                return ""
-                            return optional_payload_symbol.name
+                        case Class:
+                            payload_key = mir_class_identity(optional_payload_symbol)
+                        case Struct:
+                            payload_key = optional_payload_symbol.name
                         case _:
                             return ""
+                    if not self.struct_field_order.contains(payload_key):
+                        return ""
+                    return payload_key
             case _:
                 ()
         ""
@@ -2181,8 +2344,8 @@ impl MirLowering:
 
     me lower_index_expr_from_hir(expr_value: HirExpr) -> LocalId:
         val payload = _sffi_enum_payload(expr_value.kind)
-        val base: HirExpr = _sffi_tuple_get(payload, 0)
-        val index: HirExpr = _sffi_tuple_get(payload, 1)
+        val base: HirExpr = _sffi_tuple_get<HirExpr>(payload, 0)
+        val index: HirExpr = _sffi_tuple_get<HirExpr>(payload, 1)
         if base == nil or index == nil:
             self.error_fatal("empty HIR Index payload", Some(expr_value.span))
             return self.builder.emit_const_int(0)
@@ -3747,9 +3910,9 @@ impl MirLowering:
         val binary_disc = _sffi_enum_discriminant(HirExprKind.Binary(HirBinOp.Add, nil_expr, nil_expr))
         if expr_disc == binary_disc:
             val binary_payload = _sffi_enum_payload(expr_value.kind)
-            val binary_op: HirBinOp = _sffi_tuple_get(binary_payload, 0)
-            val binary_left: HirExpr = _sffi_tuple_get(binary_payload, 1)
-            val binary_right: HirExpr = _sffi_tuple_get(binary_payload, 2)
+            val binary_op: HirBinOp = _sffi_tuple_get<HirBinOp>(binary_payload, 0)
+            val binary_left: HirExpr = _sffi_tuple_get<HirExpr>(binary_payload, 1)
+            val binary_right: HirExpr = _sffi_tuple_get<HirExpr>(binary_payload, 2)
             if binary_left == nil or binary_right == nil or _sffi_enum_discriminant(binary_op) < 0:
                 self.error_fatal("empty HIR Binary payload", Some(expr_value.span))
                 return self.builder.emit_const_int(0)
@@ -3764,9 +3927,9 @@ impl MirLowering:
         val if_disc = _sffi_enum_discriminant(HirExprKind.If(nil_expr, HirBlock(stmts: [], has: false, value: nil, span: nil_span), nil))
         if expr_disc == if_disc:
             val if_payload = _sffi_enum_payload(expr_value.kind)
-            val if_cond: HirExpr = _sffi_tuple_get(if_payload, 0)
-            val if_then: HirBlock = _sffi_tuple_get(if_payload, 1)
-            val if_else: HirBlock? = _sffi_tuple_get(if_payload, 2)
+            val if_cond: HirExpr = _sffi_tuple_get<HirExpr>(if_payload, 0)
+            val if_then: HirBlock = _sffi_tuple_get<HirBlock>(if_payload, 1)
+            val if_else: HirBlock? = _sffi_tuple_get<HirBlock>(if_payload, 2)
             if if_cond == nil or if_then == nil:
                 self.error_fatal("empty HIR If payload", Some(expr_value.span))
                 var b_bad_if = self.builder
@@ -3781,8 +3944,8 @@ impl MirLowering:
         val if_chain_disc = _sffi_enum_discriminant(HirExprKind.IfChain([], nil))
         if expr_disc == if_chain_disc:
             val if_chain_payload = _sffi_enum_payload(expr_value.kind)
-            val if_chain_arms: [HirIfArm] = _sffi_tuple_get(if_chain_payload, 0)
-            val if_chain_else: HirBlock? = _sffi_tuple_get(if_chain_payload, 1)
+            val if_chain_arms: [HirIfArm] = _sffi_tuple_get<[HirIfArm]>(if_chain_payload, 0)
+            val if_chain_else: HirBlock? = _sffi_tuple_get<HirBlock>(if_chain_payload, 1)
             if if_chain_arms == nil or if_chain_arms.len() == 0:
                 self.error_fatal("empty HIR IfChain payload", Some(expr_value.span))
                 var b_bad_if_chain = self.builder
@@ -3911,7 +4074,7 @@ impl MirLowering:
                             if self.struct_field_hir_type.contains(owner_pre):
                                 val field_types_pre = self.struct_field_hir_type[owner_pre]
                                 if field_idx >= 0 and field_idx < field_types_pre.len():
-                                    val declared_field_type_pre = field_types_pre[field_idx]
+                                    val declared_field_type_pre = self.declared_field_type_in_current_table(owner_pre, field_idx, field_types_pre[field_idx])
                                     match declared_field_type_pre.kind:
                                         case HirTypeKind.Error: ()
                                         case _:
@@ -3942,7 +4105,7 @@ impl MirLowering:
                         if self.struct_field_hir_type.contains(field_owner):
                             val field_types = self.struct_field_hir_type[field_owner]
                             if field_idx >= 0 and field_idx < field_types.len():
-                                val declared_field_type = field_types[field_idx]
+                                val declared_field_type = self.declared_field_type_in_current_table(field_owner, field_idx, field_types[field_idx])
                                 self.remember_local_hir_type(field_result.id, declared_field_type, 0, 0)
                                 match declared_field_type.kind:
                                     case HirTypeKind.Optional(_):
@@ -3971,8 +4134,8 @@ impl MirLowering:
             # decode CORRECTION, not a guard: a genuinely absent payload still
             # reports through error_fatal rather than being silently defaulted.
             val cast_payload = _sffi_enum_payload(expr_value.kind)
-            val cast_operand: HirExpr = _sffi_tuple_get(cast_payload, 0)
-            val cast_target: HirType = _sffi_tuple_get(cast_payload, 1)
+            val cast_operand: HirExpr = _sffi_tuple_get<HirExpr>(cast_payload, 0)
+            val cast_target: HirType = _sffi_tuple_get<HirType>(cast_payload, 1)
             if cast_operand == nil or cast_target == nil:
                 self.error_fatal("empty HIR Cast payload", Some(expr_value.span))
                 return self.builder.emit_const_int(0)
@@ -4064,8 +4227,8 @@ impl MirLowering:
         val namedvar_pre_disc = _sffi_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
         if expr_disc == namedvar_pre_disc:
             val named_var_payload = _sffi_enum_payload(expr_value.kind)
-            val named_var_symbol: SymbolId = _sffi_tuple_get(named_var_payload, 0)
-            val named_var_name: text = _sffi_tuple_get(named_var_payload, 1)
+            val named_var_symbol: SymbolId = _sffi_tuple_get<SymbolId>(named_var_payload, 0)
+            val named_var_name: text = _sffi_tuple_get<text>(named_var_payload, 1)
             if named_var_symbol == nil or named_var_name == nil:
                 self.error_fatal("empty HIR NamedVar payload", Some(expr_value.span))
                 var b_bad_named_var = self.builder
@@ -5106,7 +5269,7 @@ impl MirLowering:
                         if self.struct_field_hir_type.contains(owner_name3):
                             val field_types3 = self.struct_field_hir_type[owner_name3]
                             if field_idx >= 0 and field_idx < field_types3.len():
-                                val declared_field_type3 = field_types3[field_idx]
+                                val declared_field_type3 = self.declared_field_type_in_current_table(owner_name3, field_idx, field_types3[field_idx])
                                 match declared_field_type3.kind:
                                     case HirTypeKind.Error: ()
                                     case _:
@@ -5651,8 +5814,17 @@ impl MirLowering:
                     # local symbol. Mutability flag is ignored at MIR
                     # level (it only matters for borrow-check).
                     if has_default_body:
+                        # Name the binding and its owner: arm spans are often
+                        # (0,0) here, so the bare message was location-blind.
+                        # A bare enum variant (`case Pass:`) whose enum the
+                        # pattern lowering could not see arrives as exactly
+                        # such a Binding, which the name makes obvious.
+                        val dup_binding_name = self.symbols.symbol_name_scalar_raw(symbol.id)
+                        var dup_fn_name = "?"
+                        if val dup_fn = self.builder.current_function:
+                            dup_fn_name = dup_fn.name
                         self.error(
-                            "B5b: match has multiple wildcard/binding default arms",
+                            "B5b: match has multiple wildcard/binding default arms (binding `{dup_binding_name}` in fn {dup_fn_name}, module {self.current_module_id})",
                             Some(arm.span)
                         )
                         var b_dup = self.builder

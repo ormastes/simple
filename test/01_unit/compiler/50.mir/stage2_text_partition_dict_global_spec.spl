@@ -1,0 +1,47 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+"""
+# Stage2 MIR: `text.partition(sep)` and `.has` on an unannotated dict global
+
+Two stage2-only "unresolved method call" link-ladder gaps:
+
+- `line.partition(" ")` (std.log syslog_parse) had no MIR lowering for a
+  proven text receiver. It now lowers to `rt_string_partition` and the result
+  is a runtime text array, like `split`.
+- `var SCOPE_LEVELS = {}` (std.nogc_sync_mut.log) published no symbol type,
+  so the global read was an untyped i64 handle and `SCOPE_LEVELS.has(k)` never
+  reached the Dict arms. An unannotated dict-literal global now publishes
+  `Dict<any, any>`, the same type a bare `Dict` annotation lowers to.
+
+Lowering runs the pure-Simple frontend -> HIR -> MIR in process.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+fn unresolved_method_errors(src: text) -> [text]:
+    val ast = parse_full_frontend(src, "probe.spl", "probe.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("probe.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val _mir = mir_lowering.lower_module(hir)
+    var out: [text] = []
+    for e in mir_lowering.errors:
+        if e.message.contains("unresolved method call"):
+            out = out.push(e.message)
+    out
+
+val partition_src = "fn f(line: text) -> text:\n    val p = line.partition(\" \")\n    p[2]\n"
+val dict_global_has_src = "var LV = {}\nfn f(k: text) -> bool:\n    LV.has(k)\n"
+
+describe "stage2 MIR text partition and dict-global has":
+    it "lowers text.partition on a text receiver":
+        expect(unresolved_method_errors(partition_src).len()).to_equal(0)
+
+    it "lowers .has on an unannotated dict-literal module global":
+        expect(unresolved_method_errors(dict_global_has_src).len()).to_equal(0)

@@ -38,7 +38,7 @@ use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
-extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_discriminant<T>(value: T) -> i64
 extern fn rt_enum_payload(value: StmtKind) -> Expr
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
@@ -219,6 +219,12 @@ impl HirLowering:
         var enum_idx = 0
         while enum_idx < imported_names.len():
             val local_name = imported_names[enum_idx]
+            # A module that declares its own enum with this name shadows the
+            # import (seed semantics: the local declaration wins outright), so
+            # the foreign enum is neither lowered nor allowed to claim the name.
+            if module.enums.contains_key(local_name):
+                enum_idx = enum_idx + 1
+                continue
             val owner_module = self.imported_enum_owner_module(local_name)
             if owner_module == "":
                 self.error("imported enum `{local_name}` has no declaration owner", Span.empty())
@@ -233,9 +239,8 @@ impl HirLowering:
         enum_idx = 0
         while enum_idx < local_names.len():
             val local_name = local_names[enum_idx]
-            if not self.imported_enums.contains_key(local_name):
-                val hir_enum = self.lower_enum(module.enums[local_name], hir_module_logical_name_from_path(module.name))
-                lowered[hir_enum.symbol] = hir_enum
+            val hir_enum = self.lower_enum(module.enums[local_name], hir_module_logical_name_from_path(module.name))
+            lowered[hir_enum.symbol] = hir_enum
             enum_idx = enum_idx + 1
         lowered
 
@@ -340,7 +345,10 @@ impl HirLowering:
         for pattern_enum_name in module.enums.keys():
             self.register_enum_unit_patterns(module.enums[pattern_enum_name], pattern_enum_name)
         for pattern_import_name in self.imported_enums.keys():
-            self.register_enum_unit_patterns(self.imported_enums[pattern_import_name], pattern_import_name)
+            # Own declarations shadow a same-named import; never let the
+            # foreign variants overwrite the module's own unit patterns.
+            if not module.enums.contains_key(pattern_import_name):
+                self.register_enum_unit_patterns(self.imported_enums[pattern_import_name], pattern_import_name)
 
         # Pass -1 (relocated): pre-scan struct/class field TYPES (name-keyed) before
         # ANY function body is lowered. Nested-field-access support (see

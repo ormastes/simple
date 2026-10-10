@@ -228,6 +228,10 @@ struct TestFileResult:
     # Examples neutralised by `# @tag:in-development` are distinct from
     # environment skips. Defaulted to keep existing producers compatible.
     in_development: i64 = 0
+    # Non-empty only when the file was NOT RUN because a build feature it
+    # requires (`# @tag:requires-<feature>`, std.spec.requires_feature) is
+    # off; holds the reason. Recorded as its own DB status, never "passed".
+    feature_gated: text = ""
     # Bounded child-to-parent MC/DC evidence carrier. Empty means unavailable.
     mcdc_evidence_v1: text = ""
     # Non-empty only when MC/DC instrumentation was skipped for this spec
@@ -291,12 +295,14 @@ impl TestRunResult:
     # NOT_RUN unit, or a unit whose error carries an unrecognised class token,
     # can leave total_failed and total_timed_out both at 0 -- which is exactly
     # how "All tests passed!" was printed over a run that never verified
-    # anything. Every file must classify OK.
+    # anything. Every file must classify OK, or SKIP (feature-gated: not run,
+    # not a failure; the summary refuses to call an all-SKIP run a pass).
     fn is_ok() -> bool:
         if self.total_failed != 0 or self.total_timed_out != 0:
             return false
         for file_result in self.files:
-            if test_file_result_outcome_class(file_result) != "OK":
+            val cls = test_file_result_outcome_class(file_result)
+            if cls != "OK" and cls != "SKIP":
                 return false
         true
 
@@ -356,7 +362,7 @@ fn test_outcome_class_token(err: text) -> text:
     head.trim().upper().replace("_", " ")
 
 # Total: every TestFileResult maps to exactly one of
-# OK / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN.
+# OK / SKIP / ERROR / CRASHED / TERMINATED / TIMEOUT / NOT_RUN.
 fn test_file_result_outcome_class(file_result: TestFileResult) -> text:
     val token = test_outcome_class_token(file_result.error)
     if token == "CRASHED":
@@ -375,6 +381,10 @@ fn test_file_result_outcome_class(file_result: TestFileResult) -> text:
         # A non-empty error with an unrecognised class token is a REAL failure.
         # It must never fall through to OK -- that is the silent-green shape.
         return "ERROR"
+    if file_result.feature_gated != "":
+        # Not run: a required build feature is off. Neither a pass (nothing
+        # was verified) nor a failure; every printer must say SKIP, not PASS.
+        return "SKIP"
     if file_result.timed_out:
         return "TIMEOUT"
     if file_result.failed > 0:

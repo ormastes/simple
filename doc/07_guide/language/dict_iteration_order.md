@@ -88,3 +88,15 @@ ordering-only change. See `doc/07_guide/language/dict_native_pitfalls.md`.
 Until then: **do not write specs that assert dict order and run them on both
 engines.** Order-independent assertions (`len()`, `has()`, sums) are safe
 everywhere.
+
+### Pure-Simple compiler (stage2) native lane, 2026-10-10
+
+`for x in d` / `for (k, v) in d` over a dict now lowers in the self-hosted MIR
+(`lower_for_iterator`, `src/compiler/50.mir/mir_lowering_stmts.spl`) by
+iterating `rt_dict_entries(d)` as `(key, value)` tuples. In the C runtime
+(`src/runtime/runtime_native.c`) and `simple_core/core_array.spl` that walks the
+open-addressing table in **slot order**, which is neither insertion order nor
+sorted, so it diverges from the interpreter's key-sorted order exactly like the
+JIT row above (and like the pre-existing `rt_for_iterable` path). Fixing it
+belongs with the `dict_collect` sorting change above: sort in `rt_dict_entries`
+/ `rt_dict_keys` / `rt_dict_values` in all three runtimes, not at each call site.

@@ -96,7 +96,7 @@ extern fn rt_transient_array_scope_pause() -> bool
 @unsafe(reason: "raw transient-array scope end ABI", capabilities: [ffi])
 extern fn rt_transient_array_scope_end() -> bool
 @unsafe(reason: "raw transient-heap graph promotion ABI", capabilities: [ffi])
-extern fn rt_transient_heap_promote(value: Any) -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
 
 @always_inline
 fn _sffi_env_get(key: text) -> text?:
@@ -125,11 +125,6 @@ fn _sffi_transient_array_scope_pause() -> bool:
 fn _sffi_transient_array_scope_end() -> bool:
     unsafe(capabilities: [ffi]):
         rt_transient_array_scope_end()
-
-@always_inline
-fn _sffi_transient_heap_promote(value: Any) -> bool:
-    unsafe(capabilities: [ffi]):
-        rt_transient_heap_promote(value)
 
 fn flat_module_env_get(key: text) -> text:
     _sffi_env_get(key) ?? ""
@@ -1239,7 +1234,9 @@ pub fn flat_pools_dump_for_cache() -> text:
     if not _sffi_transient_array_scope_pause():
         val _ended = _sffi_transient_array_scope_end()
         panic("transient cache serialization pause failed")
-    if not _sffi_transient_heap_promote(blob):
+    val blob_promoted = unsafe(capabilities: [ffi]):
+        rt_transient_heap_promote(blob)
+    if not blob_promoted:
         val _ended = _sffi_transient_array_scope_end()
         panic("transient cache blob promotion failed")
     if not _sffi_transient_array_scope_end():
@@ -1486,7 +1483,11 @@ fn parse_and_build_module_with_scope_owner(source: text, path: text,
         print("PARSEPHASE\tparse_module_body\t{_pp_t1 - _pp_t0}\tinterp\t{_pp_t2 - _pp_t1}\tph_transform\t{_pp_t2b - _pp_t2}\tph_expand\t{_pp_t3 - _pp_t2b}\tdesugar_coll\t{_pp_t4 - _pp_t3}\tcoverage_inv\t{_pp_t5 - _pp_t4}\tbridge\t{_pp_t6 - _pp_t5}\tpath\t{path}")
         si_stats_report(path)
     if transient_scope:
-        if not _sffi_transient_heap_promote(built_module):
+        # Direct extern call: a Simple wrapper would deep-clone this struct on
+        # entry and promote the clone instead of the parser graph.
+        val module_promoted = unsafe(capabilities: [ffi]):
+            rt_transient_heap_promote(built_module)
+        if not module_promoted:
             panic("transient parser graph promotion failed for {path}")
         # ORDER IS LOAD-BEARING: end the scope before replacing lexer or AST
         # owners. Both cleanup functions allocate fresh process-lifetime arrays;

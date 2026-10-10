@@ -1,0 +1,29 @@
+# Windows HIR worker diagnostics unavailable
+
+ID: BUG-WIN-HIR-WORKER-DIAGNOSTICS-20261010. Status: OPEN. Severity: P1. This record registers an observed diagnostic-transport failure; it does not assert the underlying compiler/source failure is fixed.
+
+Seven retained invocations returned HIR owner exit1, claimed0, finishedfalse and inventory rows-1. Complete parent streams lacked the child cause; cache records said BLOCKED: incomplete worker or ledger publication. Producer SHA256 `80030da7da3f15174dc26285389375b19c8f090c29eedb6bded089defaa28071` (80030), source origin `1aff09312af1a48fba98634b6d59fcafe59b9602`. Embedded compiler/runtime source binding for these failures is UNPROVEN. Runtime projection manifest SHA256 `0130e12c731a2263a6d118542df990a09bed88b9c3aede4ac1da3ae43467f14a`; runtime donor `3e4f404c9cd3498df5c7a27657176b2707f47e40`. Object production and full test-product qualification are not established by these facts.
+
+| Original owner | Original entry | Frozen closure commit | Entry SHA256 |
+|---|---|---|---|
+| module-0188 | `src/compiler/70.backend/linker/_LinkerWrapper/native_link_reproduce_v1.spl` | `fe805eea2ffcb81929790b375c0ed648ad39eaa5` | `b96522f782cf428c0674e23e13dd1a87308ee206a42e06f7d7b5d57f41b68498` |
+| module-0217 | `src/compiler/10.frontend/trace_policy.spl` | `d732f666a5bdc952d8aec6bf0b908cab9f5fee63` | `6a44478a7f44eb9a7c588c9ff8a603e65667d2b3bc42e7ebcf6fa31be717002c` |
+| module-0552 | `src/compiler/80.driver/shb/shb_types.spl` | `8103fdb2255cff225c5c5e8d7039523199914a29` | `351444ceccb86e0c6eb91ae8839af8296c9462bd703b39934fcb04cff0ba7834` |
+| module-0590 | `src/compiler/70.backend/linker/macho/native_provider_search.spl` | `9b3f4a5d55598f17502d1bc939945c15f7794d73` | `7839888ab56116bbb0d4340392c34ac73c289c6110189cc79a3c6802820a1822` |
+| module-0028 | `src/compiler/80.driver/bootstrap_api_low_memory.spl` | `3f30f1e024423693630253c6c5da07bd8a39d666` | `c9f3a3784f72574db4ccdf3197fc3fae93296b54a4eb66204354d3ef1326708a` |
+| module-0334 | `src/compiler/60.mir_opt/mir_opt/auto_vectorize_target.spl` | `7bc7a83406f1b866d2dc71e4c1506f6df9817cc1` | `dff0d3c6773d2a1fdc437d4f9b9b990f6a4b9e6223a02d0d31e8c9c15c78b134` |
+| module-0179 | `src/compiler/80.driver/cache/cache_root.spl` | `60829fa5762bebce614a8afe54a0bd31ac3d8bb1` | `1e2cda9a0a5582a8df2d4fd329a21b27dae848cc0ca3d65e462dcf4265b991a2` |
+
+Source-level candidate cause: native_build_main run_hir_shards starts asynchronous workers and waits for their ledger; the inspected Windows process provider uses CreateProcessA without standard-handle setup and without handle inheritance. This is not proof that the same provider is embedded in80030 or the cause of each child failure. A proper repair needs explicit handle allowlisting, bounded pipe draining, handle closure, job containment and complete child receipts; blindly enabling inheritance is unsafe.
+
+The opt-in helper in [scripts/bootstrap/workarounds/hir-worker-diagnostics.shs](../../../scripts/bootstrap/workarounds/hir-worker-diagnostics.shs) selects only SIMPLE_HIR_SHARDING=0. Source admission, real HIR lowering, persistence validation, object code generation, time/RSS guards and no-stub policy remain the caller's normal responsibilities. The flag disables optional async warmup; it does not suppress compiler errors or qualify outputs. Caller must check actual producer capability/path selection and retain failures.
+
+Original private experiment: workaround commit53b3259e042ea8ff2c04c1467eb6c8ddd3cd6568, intended-code recoveryab2d7590ec174d3fd3094a9acf85372cffee9bf5. Those commits are local evidence, not published GitHub links. This portable change has no private absolute paths. Public recovery baseline is [d6abe34243c4ea9365454eca4c7e8586b8d216bf](https://github.com/ormastes/simple/commit/d6abe34243c4ea9365454eca4c7e8586b8d216bf); recovery means remove the explicit opt-in call/temporary helper only, never restore whole files or unrelated work. Portable workaround introduced by actual commit [99c65b91e269e3c4c489a859d94a0e2c741bb645](https://github.com/ormastes/simple/commit/99c65b91e269e3c4c489a859d94a0e2c741bb645). This followup evidence commit binds that existing Git object; publication is established when this history lands.
+
+The canonical bug_db.sdn record is added in this change with open status. This is a textual DB update with CRC/schema validation, not a claim that qualified self-hosted check-dbs passed.
+
+Terminal followup from the original diagnostic owner: all seven final-cycle attempts closed with COMPILE_FAILED and zero objects; the ordinary route exposed the same missing projection dependency, `nogc_sync_mut.io_runtime`. Strict attribution audit reported no issues. This establishes an observed diagnostic outcome, not HIR semantic success, complete source closure, an underlying transport repair, or permission for a fourth attempt. The frozen private53b report remains historical evidence and is not rewritten by this publication.
+
+Background acceptance before removal: real failing child stdout/stderr before inventory; output beyond one pipe buffer; Unicode/quoted args; child/grandchild cleanup after timeout; explicit handle allowlist and parent closure; successful shard publication; applied-source-to-binary identity. None is newly executed by this documentation/configuration change. Original three-cycle diagnostic cap remains closed.
+
+Portable helper acceptance is limited to explicit activation, unchanged default environment, child inheritance, unchanged unrelated controls, subshell isolation and propagated child failure. See `test/00_unit/scripts/hir_worker_diagnostics_workaround_test.shs`. These are configuration tests, not original compiler/test cases. Background owner: canonical native process facade/runtime and HIR shard coordinator; root/Astra source review owns qualification.

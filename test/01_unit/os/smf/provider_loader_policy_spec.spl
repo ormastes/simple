@@ -1,0 +1,75 @@
+use os.smf.provider_loader.{
+    PROVIDER_ADMISSION_PATH_DENIED,
+    PROVIDER_ADMISSION_ARTIFACT_MISSING,
+    PROVIDER_ADMISSION_DIGEST_MISMATCH,
+    PROVIDER_ADMISSION_CAPABILITY_DENIED,
+    PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED,
+    PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED,
+    PROVIDER_ADMISSION_LOAD_FAILED,
+    ProviderAdmissionRequestV1,
+    ProviderCallableEvidenceV1,
+    provider_admit_evidence_v1,
+}
+
+fn _policy_request(path: text, digest: text, granted: u64,
+        host_abi: u64, requested_major: u32,
+        requested_minor: u32) -> ProviderAdmissionRequestV1:
+    ProviderAdmissionRequestV1(
+        artifact_path: path,
+        artifact_kind: "native",
+        expected_artifact_digest: digest,
+        granted_capability_bits: granted,
+        required_capability_bits: 1,
+        host_abi: host_abi,
+        minimum_host_abi: 1,
+        maximum_host_abi: 3,
+        requested_interface_major: requested_major,
+        requested_interface_minor: requested_minor,
+        provided_interface_major: 1,
+        provided_interface_minor: 1,
+    )
+
+fn _policy_evidence(digest: text, present: bool) -> ProviderCallableEvidenceV1:
+    ProviderCallableEvidenceV1(
+        artifact_exists: present,
+        artifact_digest: digest,
+        loader_valid: false,
+        query_symbol_address: 0,
+        query_symbol_process_callable: false,
+    )
+
+describe "provider admission applies shared request policy before loader evidence":
+    it "preserves path, missing, digest, capability, ABI, and interface refusal precedence":
+        val digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        expect(provider_admit_evidence_v1(
+            _policy_request("build/providers/../provider.so", digest, 1, 2, 1, 0),
+            _policy_evidence(digest, true),
+        ).status).to_equal(PROVIDER_ADMISSION_PATH_DENIED)
+        expect(provider_admit_evidence_v1(
+            _policy_request("build/providers/provider.so", digest, 1, 2, 1, 0),
+            _policy_evidence(digest, false),
+        ).status).to_equal(PROVIDER_ADMISSION_ARTIFACT_MISSING)
+        expect(provider_admit_evidence_v1(
+            _policy_request("build/providers/provider.so", "0000000000000000000000000000000000000000000000000000000000000000", 1, 2, 1, 0),
+            _policy_evidence(digest, true),
+        ).status).to_equal(PROVIDER_ADMISSION_DIGEST_MISMATCH)
+        expect(provider_admit_evidence_v1(
+            _policy_request("build/providers/provider.so", digest, 0, 2, 1, 0),
+            _policy_evidence(digest, true),
+        ).status).to_equal(PROVIDER_ADMISSION_CAPABILITY_DENIED)
+        expect(provider_admit_evidence_v1(
+            _policy_request("build/providers/provider.so", digest, 1, 4, 1, 0),
+            _policy_evidence(digest, true),
+        ).status).to_equal(PROVIDER_ADMISSION_HOST_ABI_UNSUPPORTED)
+        expect(provider_admit_evidence_v1(
+            _policy_request("build/providers/provider.so", digest, 1, 2, 2, 0),
+            _policy_evidence(digest, true),
+        ).status).to_equal(PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED)
+        expect(provider_admit_evidence_v1(
+            _policy_request("build/providers/provider.so", digest, 1, 2, 1, 2),
+            _policy_evidence(digest, true),
+        ).status).to_equal(PROVIDER_ADMISSION_INTERFACE_UNSUPPORTED)
+        expect(provider_admit_evidence_v1(
+            _policy_request("build/providers/provider.so", digest, 1, 2, 1, 0),
+            _policy_evidence(digest, true),
+        ).status).to_equal(PROVIDER_ADMISSION_LOAD_FAILED)

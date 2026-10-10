@@ -47,3 +47,36 @@ The first bounded source review found two P1s: slot metadata lost non-receiver p
 The final source repair also routes trait-bearing fields through that copy owner when an outer value struct is copied. Thunk generation saves, clears and restores per-function local type/Option/nil/runtime-value metadata so its temporary local IDs cannot contaminate the enclosing function. Resource-owner implementations and direct resource-bearing method signatures are rejected until an erased drop ABI exists. Native execution remains unrun; these are reviewed-source candidates, not qualified fixes.
 
 Final bounded source review found no remaining P0/P1 in the reviewed corrections. Its P2 outer-Optional fixture limitation is addressed in source by directly mutating an unwrapped payload through a mutable Optional parameter and checking both original and copied values before replacement. This assertion is unexecuted. Only diff whitespace validation has run; compiler checks, native fixtures, core/MCP smoke, broader gates and release qualification remain unrun. The commit is an integration candidate, not a verified landing.
+
+
+## Release integration audit, 2026-10-10
+
+Target: `02a5ade87c2584176241b87f9ca204c8b93f8087`; incoming PR #2761:
+`2388ee1959fd31756ef1118cff258b9dd0be0507`. This resolution preserves the
+release branch rather than replaying its superseded owner algorithm.
+
+- `lower_enum_match_flat` retains release's `scrut_enum_*` fallback, arm-owned
+  `enum_key`/`enum_name`, `symbol_bound_local` lookup, and `bind_catch_all_arm`.
+  The PR's competing pre-seeding of `enum_key`/`enum_name` is removed.
+- Typed Result/Option/method subjects enter that single fallback through
+  `enum_match_expr_type`. `enum_match_type_owner_key` maps a declared type to
+  its registered owner; it does not select an arm. Explicit wrong-owner
+  patterns compare against `scrut_enum_lookup`, independent of prior arms.
+- Release already resolves imported instance methods with
+  `lookup_method_in_type(owner_symbol, method)` followed by
+  `resolved_call_hir_return_type`; the PR's duplicate lookup block is dropped.
+- Release's per-field transient promotion remains; the three new native trait
+  inventories are included using that same promotion primitive.
+- Unique changes retained: typed trait dispatch/registration/conversion/copy
+  thunks, generic field-prescan scope, canonical imported enum names, compact
+  struct-layout snapshots, LLVM typed text boxing/byte metadata, base encoding
+  facade, and exact Stage4 Cranelift v2 export admission.
+
+Existing native fixtures cover two dispatch owners, constructors, Optional
+payloads, value copy versus mutable borrowing, wrong/missing signatures,
+inherent-only modules, colliding bare enum names, catch-all bindings, and
+instance/static Result method subjects. They require a compiler built from
+this integrated source. Prior-source self-hosted binaries and structural
+checks do not qualify the new behavior. Candidate producer build, LLVM and
+Cranelift Hello/execution, negative diagnostic matching, and core/MCP/LSP
+checks remain pending; this audit does not authorize bypassing them.

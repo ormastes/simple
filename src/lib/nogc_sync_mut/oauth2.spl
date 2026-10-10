@@ -15,7 +15,7 @@ use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_write_text, fil
 use std.nogc_sync_mut.file_system.permissions.{file_set_mode}
 use std.nogc_sync_mut.env.variables.{env_get}
 use std.nogc_sync_mut.io.time_ops.{current_time_unix}
-use std.json.{json_parse, json_object_get, json_serialize}
+use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_has, json_value_field, json_value_serialize}
 
 
 # Safety margin (seconds) subtracted from access-token expiry before we
@@ -55,9 +55,10 @@ fn oauth2_client_credentials_token(tenant_id: text, client_id: text, client_secr
     if status < 200 or status >= 300:
         return (false, "", 0)
 
-    val parsed = json_parse(resp_body)
-    if parsed == nil:
+    val parsed_opt = json_value_parse_opt(resp_body)
+    if parsed_opt == nil:
         return (false, "", 0)
+    val parsed = parsed_opt.unwrap()
 
     val tok = _json_text_field(parsed, "access_token")
     if tok == "":
@@ -199,13 +200,13 @@ fn oauth2_parse_retry_after(value: text) -> i64:
         return 0
     val trimmed = value.trim()
     var n: i64 = 0
-    var any = false
+    var seen_digit = false
     for ch in trimmed:
         if ch >= "0" and ch <= "9":
             n = n * 10 + (ch.to_i64() - "0".to_i64())
-            any = true
+            seen_digit = true
         else:
-            return if any: n else: 0
+            return if seen_digit: n else: 0
     n
 
 
@@ -251,32 +252,26 @@ fn _escape_sdn_value(s: text) -> text:
 fn _parse_i64(s: text) -> i64:
     val trimmed = s.trim()
     var n: i64 = 0
-    var any = false
+    var seen_digit = false
     for ch in trimmed:
         if ch >= "0" and ch <= "9":
             n = n * 10 + (ch.to_i64() - "0".to_i64())
-            any = true
-        else if any:
+            seen_digit = true
+        else if seen_digit:
             return n
-    if any: n else: 0
+    if seen_digit: n else: 0
 
 
-fn _json_text_field(obj: any, key: text) -> text:
-    if obj == nil:
+fn _json_text_field(obj: JsonValue, key: text) -> text:
+    if not json_value_has(obj, key):
         return ""
-    val value = json_object_get(obj, key)
-    if value == nil:
-        return ""
-    val s = json_serialize(value)
+    val s = json_value_serialize(json_value_field(obj, key))
     if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
         return s[1:s.len() - 1]
     s
 
 
-fn _json_int_field(obj: any, key: text) -> i64:
-    if obj == nil:
+fn _json_int_field(obj: JsonValue, key: text) -> i64:
+    if not json_value_has(obj, key):
         return 0
-    val value = json_object_get(obj, key)
-    if value == nil:
-        return 0
-    _parse_i64(json_serialize(value))
+    _parse_i64(json_value_serialize(json_value_field(obj, key)))

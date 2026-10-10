@@ -21,6 +21,7 @@ use std.test_runner.test_config.{TestConfig, load_test_config}
 use std.test_runner.test_runner_files.{discover_test_files, discover_test_files_fast, print_discovery_summary, strip_ansi, file_has_slow_test, file_has_di_test_tag, is_skip_marker_file, count_skip_marker_cases, save_manifest_from_discovery, order_tests_by_duration, validate_system_test_covers}
 use std.test_runner.mode_filter.{path_mode_matches}
 use std.spec.in_development.{source_is_in_development, in_development_explicitly_targeted, InDevelopmentOutcome, classify_in_development, in_development_skip_line, in_development_unexpected_pass_line, in_development_explicit_line, in_development_summary_line}
+use std.spec.requires_feature.{spec_required_features, feature_env_names, disabled_required_features, feature_skip_line, feature_skip_summary_line, feature_disabled_reason}
 use std.test_runner.test_manifest.{MANIFEST_PATH, manifest_load, manifest_save, manifest_is_fresh}
 use std.test_runner.test_manifest_scanner.{manifest_full_scan}
 use std.test_runner.test_runner_execute.{run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_compile, run_test_file_safe_mode}
@@ -468,7 +469,11 @@ fn run_tests(options: TestOptions) -> TestRunResult:
         # real regressions. Route system specs through the real execution
         # path instead. Mirrors the Rust seed `is_system_spec` bypass in
         # src/compiler_rust/driver/src/cli/test_runner/runner.rs.
-        if use_result_cache and not file_path.contains("test/03_system/"):
+        # Feature-gated specs bypass the change-detection cache in BOTH
+        # directions: its key is content/deps only, so a cached ON-pass would
+        # replay while OFF and a cached gated skip would replay while ON.
+        val gate = feature_gate_decision(file_path)
+        if use_result_cache and not gate.declared and not file_path.contains("test/03_system/"):
             val cached_entry = incremental_state.check_freshness(file_path)
             if cached_entry.result_status != -1:
                 val cached_result = TestFileResult(
@@ -494,13 +499,13 @@ fn run_tests(options: TestOptions) -> TestRunResult:
                 tests_run = tests_run + 1
                 continue
 
-        # Run test
-        val result = run_single_test(file_path, updated_options)
+        # Run test (or report it feature-gated without running it)
+        val result = if gate.off.len() > 0: feature_gated_result(file_path, gate.off) else: run_single_test(file_path, updated_options)
         print_result(result, updated_options.format)
 
         # Record result in cache (system specs skip the cache entirely so
         # a stale interpreter-mode load never replays as a silent 0ms pass)
-        if use_result_cache and not file_path.contains("test/03_system/"):
+        if use_result_cache and not gate.declared and not file_path.contains("test/03_system/"):
             incremental_state.record_runner_result(file_path, result.passed, result.failed, result.skipped, result.duration_ms)
 
         total_passed = total_passed + result.passed
@@ -564,12 +569,26 @@ fn run_tests_parallel_mode(
     var cached_results: [TestFileResult] = []
     var uncached_files: [text] = []
 
+    # Same pre-run decision as the sequential path: gated files are reported
+    # here, in the parent, and never dispatched to a worker or the cache.
+    var gated_results: [TestFileResult] = []
+    var gate_declared_files: [text] = []
+    var runnable_files: [text] = []
+    for file_path in files:
+        val gate = feature_gate_decision(file_path)
+        if gate.declared:
+            gate_declared_files.push(file_path)
+        if gate.off.len() > 0:
+            gated_results.push(feature_gated_result(file_path, gate.off))
+        else:
+            runnable_files.push(file_path)
+
     if use_result_cache:
-        for file_path in files:
+        for file_path in runnable_files:
             # System specs (test/03_system/*) bypass the change-detection cache
             # so they always go through real execution. See the sequential
             # mode comment above for the rationale.
-            if file_path.contains("test/03_system/"):
+            if file_path.contains("test/03_system/") or gate_declared_files.contains(file_path):
                 uncached_files.push(file_path)
                 continue
             val cached_entry = incremental_state.check_freshness(file_path)
@@ -590,7 +609,7 @@ fn run_tests_parallel_mode(
             else:
                 uncached_files.push(file_path)
     else:
-        uncached_files = files
+        uncached_files = runnable_files
 
     # Smart test ordering: sort longest-first to avoid tail blockers
     if use_result_cache:
@@ -675,6 +694,11 @@ fn run_tests_parallel_mode(
     var total_duration_ms = 0
     var all_results: [TestFileResult] = []
 
+    # Feature-gated (not run): counted as skips, carried as feature_gated.
+    for gated_r in gated_results:
+        total_skipped = total_skipped + gated_r.skipped
+        all_results.push(gated_r)
+
     # Add cached results
     for cached_r in cached_results:
         total_passed = total_passed + cached_r.passed
@@ -695,7 +719,7 @@ fn run_tests_parallel_mode(
         all_results.push(result)
 
         # Record result in cache (system specs skip caching — see sequential mode)
-        if use_result_cache and not result.path.contains("test/03_system/"):
+        if use_result_cache and not gate_declared_files.contains(result.path) and not result.path.contains("test/03_system/"):
             incremental_state.record_runner_result(result.path, result.passed, result.failed, result.skipped, result.duration_ms)
 
     for result in qemu_results:
@@ -720,7 +744,7 @@ fn run_tests_parallel_mode(
         total_duration_ms = total_duration_ms + result.duration_ms
         all_results.push(result)
 
-        if use_result_cache and not result.path.contains("test/03_system/"):
+        if use_result_cache and not gate_declared_files.contains(result.path) and not result.path.contains("test/03_system/"):
             incremental_state.record_runner_result(result.path, result.passed, result.failed, result.skipped, result.duration_ms)
 
     # Save cache
@@ -949,6 +973,61 @@ fn print_in_development_summary(results: [TestFileResult]):
     val (skipped, unexpected) = in_development_totals(results)
     if skipped > 0 or unexpected > 0:
         print in_development_summary_line(skipped, unexpected)
+
+# =========================================================================
+# Build-feature switches (`# @tag:requires-<feature>`)
+# =========================================================================
+#
+# Rule, known features and defaults live in
+# src/lib/nogc_sync_mut/spec/requires_feature.spl. Only the I/O (host-config
+# documents + env) is done here.
+
+struct FeatureGateDecision:
+    declared: bool   # names a known `requires-<feature>` gate (never cached)
+    off: [text]      # required features OFF for this build ([] = run it)
+
+fn feature_gate_decision(file_path: text) -> FeatureGateDecision:
+    """The ONE pre-run decision shared by the sequential and parallel paths.
+    Reads the spec source once. Gate-declaring specs bypass the
+    change-detection cache in both directions (its key is content/deps only,
+    so a cached ON-pass would replay while OFF and vice versa).
+
+    The session daemon path (`--session-daemon`, run_tests_via_daemon) does
+    not consult this gate: there a tagged spec simply runs and reports its
+    honest verdict, never a false pass. Bootstrap uses --no-session-daemon."""
+    val source = file_read(file_path) ?? ""
+    if spec_required_features(source).len() == 0:
+        return FeatureGateDecision(declared: false, off: [])
+    val home = env_get("HOME") ?? (env_get("USERPROFILE") ?? "")
+    var user_path = env_get("SIMPLE_HOST_CONFIG") ?? ""
+    if user_path == "" and home != "":
+        user_path = home + "/.config/simple/host.sdn"
+    val user_text = if user_path != "": file_read(user_path) ?? "" else: ""
+    # The tracked defaults file ships every value commented out (it pins
+    # nothing), so reading it relative to cwd cannot change a decision; an
+    # unreadable file just means "no default layer", same as an empty one.
+    val defaults_text = file_read("config/host/host_config.sdn") ?? ""
+    var env: [(text, text)] = []
+    for name in feature_env_names():
+        env.push((name, env_get(name) ?? ""))
+    FeatureGateDecision(declared: true, off: disabled_required_features(source, defaults_text, user_text, env))
+
+fn feature_gated_result(file_path: text, off_features: [text]) -> TestFileResult:
+    """Counted, reasoned skip for a spec whose required feature is off.
+    `feature_gated` carries the reason so the DB row is "feature_gated",
+    never "passed" (is_ok() alone would read this shape as a pass)."""
+    print feature_skip_line(file_path, off_features)
+    TestFileResult(path: file_path, passed: 0, failed: 0, skipped: 1, pending: 0, duration_ms: 0, setup_ms: 0, error: "", timed_out: false, cached: false, feature_gated: feature_disabled_reason(off_features))
+
+fn print_feature_gate_summary(results: [TestFileResult]):
+    """Count gated files (every gating path sets `feature_gated`; gated
+    files are never cached). Printed whenever non-zero, never behind --verbose."""
+    var files = 0
+    for r in results:
+        if r.feature_gated != "":
+            files = files + 1
+    if files > 0:
+        print feature_skip_summary_line(files)
 
 # =========================================================================
 # Session Config Propagation
@@ -1310,6 +1389,7 @@ fn run_test_cli() -> i64:
             # right after it, so they are in the block every session pastes
             # as evidence. Never hidden behind --verbose.
             print_in_development_summary(result_files)
+            print_feature_gate_summary(result_files)
 
         if options.coverage:
             val coverage = collect_coverage()

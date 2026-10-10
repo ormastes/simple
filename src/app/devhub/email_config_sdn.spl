@@ -2,9 +2,9 @@
 # Errors deliberately contain no input fragments, account names, or secrets.
 use std.common.sdn.parser.{parse_with_issues}
 use std.common.sdn.value.{SdnValue}
-use std.json.{json_object, json_string}
+use std.common.json.value.{JsonValue, json_value_object_empty, json_value_object_set}
 
-fn parse_email_sdn_json(content: text) -> Result<any, text>:
+fn parse_email_sdn_json(content: text) -> Result<JsonValue, text>:
     if content.len() > 1048576:
         return Err("MAIL_CONFIG_SIZE")
     # The generic SDN reader deliberately tolerates prose. Account files must
@@ -35,7 +35,7 @@ fn parse_email_sdn_json(content: text) -> Result<any, text>:
                 return Err("MAIL_CONFIG_DUPLICATE")
             return email_sdn_root_json(parsed.0, "standalone")
 
-fn email_sdn_root_json(root: SdnValue, scope: text) -> Result<any, text>:
+fn email_sdn_root_json(root: SdnValue, scope: text) -> Result<JsonValue, text>:
     if not root.is_dict():
         return Err("MAIL_CONFIG_ROOT")
     val entries = root.get("accounts") ?? SdnValue.Null
@@ -44,7 +44,7 @@ fn email_sdn_root_json(root: SdnValue, scope: text) -> Result<any, text>:
     val default_value = root.get("default_account") ?? SdnValue.String("")
     if not default_value.is_string():
         return Err("MAIL_CONFIG_DEFAULT")
-    var accounts: {text: any} = {}
+    var accounts = json_value_object_empty()
     val account_map = entries.as_dict() ?? {}
     for name in account_map.keys():
         if name == "":
@@ -52,7 +52,7 @@ fn email_sdn_root_json(root: SdnValue, scope: text) -> Result<any, text>:
         val entry = account_map[name]
         if not entry.is_dict():
             return Err("MAIL_CONFIG_ACCOUNT")
-        var fields: {text: any} = {}
+        var fields = json_value_object_empty()
         val field_map = entry.as_dict() ?? {}
         for key in field_map.keys():
             val value = field_map[key]
@@ -76,17 +76,20 @@ fn email_sdn_root_json(root: SdnValue, scope: text) -> Result<any, text>:
             if key == "imap_port" or key == "pop3_port" or key == "smtp_port":
                 if not email_sdn_valid_port(scalar):
                     return Err("MAIL_CONFIG_PORT")
-            fields[key] = json_string(scalar)
-        accounts[name] = json_object(fields)
-    var root_fields: {text: any} = {"default_account": json_string(default_value.as_str() ?? ""), "accounts": json_object(accounts), "_mail_config_scope": json_string(scope)}
+            fields = json_value_object_set(fields, key, JsonValue.Str(scalar))
+        accounts = json_value_object_set(accounts, name, fields)
+    var root_fields = json_value_object_empty()
+    root_fields = json_value_object_set(root_fields, "default_account", JsonValue.Str(default_value.as_str() ?? ""))
+    root_fields = json_value_object_set(root_fields, "accounts", accounts)
+    root_fields = json_value_object_set(root_fields, "_mail_config_scope", JsonValue.Str(scope))
     val root_map = root.as_dict() ?? {}
     for key in root_map.keys():
         if key != "accounts" and key != "default_account" and key != "_mail_config_scope":
             val value = root_map[key]
             if not value.is_string():
                 return Err("MAIL_CONFIG_FIELD_TYPE")
-            root_fields[key] = json_string(value.as_str() ?? "")
-    Ok(json_object(root_fields))
+            root_fields = json_value_object_set(root_fields, key, JsonValue.Str(value.as_str() ?? ""))
+    Ok(root_fields)
 
 fn email_sdn_valid_port(value: text) -> bool:
     if value == "" or value.len() > 5:

@@ -90,6 +90,16 @@ fn sync_module_global(target: ModuleGlobalTarget, local_name: &str, env: &mut En
         }
         ModuleGlobalTarget::Legacy => {
             if let Some(value) = env.remove(local_name) {
+                // No executing module owner means entry-script top-level code
+                // (e.g. a spec's `it` body). Entry-script functions are tagged
+                // `<entry>` and read their globals from that owned store, so a
+                // write landing only in the flat map was invisible to them:
+                // `COUNTER = 0` in an `it` body, then a helper fn doing
+                // `COUNTER = COUNTER + 1`, resumed from the stale owned value.
+                let entry: Arc<str> = Arc::from("<entry>");
+                if crate::interpreter::owned_global_present(&entry, local_name) {
+                    crate::interpreter::set_owned_global(&entry, local_name, value.clone(), false);
+                }
                 MODULE_GLOBALS.with(|cell| {
                     cell.borrow_mut().insert(local_name.to_owned(), value);
                 });

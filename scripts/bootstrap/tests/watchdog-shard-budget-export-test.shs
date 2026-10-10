@@ -1,0 +1,47 @@
+#!/bin/sh
+# Every ENFORCED process-tree RSS cap must reach native-build's shard
+# admission (SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB), or shard fanout sized by
+# host headroom could exceed a cap it cannot see. The export lives in
+# process-tree-rss-watchdog.pl, the single owner every enforcing wrapper
+# (run-process-group-timeout.shs, the prepare-provisional scripts, the
+# transcribed lanes) goes through. This test runs the real watchdog.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+watchdog="$root/scripts/resource/process-tree-rss-watchdog.pl"
+wrapper="$root/scripts/bootstrap/run-process-group-timeout.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/watchdog-shard-budget.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT INT TERM
+TMPDIR=$scratch
+export TMPDIR
+unset SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB SIMPLE_BOOTSTRAP_SESSION_ID \
+    SIMPLE_BOOTSTRAP_SESSION_EXEC SIMPLE_BOOTSTRAP_RSS_CAP_MODE \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB SIMPLE_PROCESS_TREE_RSS_CAP_KIB || :
+probe='printf "%s\n" "${SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB-unset}"'
+checks=0
+
+expect() {
+    [ "$1" = "$2" ] || { echo "FAIL: $3: got '$1', want '$2'" >&2; exit 1; }
+    checks=$((checks + 1))
+}
+
+run() {
+    perl "$watchdog" --receipt="$scratch/r.$checks.env" "$@" -- /bin/sh -c "$probe"
+}
+
+expect "$(run --rss-cap-mode=enforce --max-rss-kib=2000000)" 2000000 \
+    "enforced cap exported"
+expect "$(run --rss-cap-mode=monitor --max-rss-kib=2000000)" unset \
+    "monitor mode exports nothing"
+expect "$(SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=1000000 run --rss-cap-mode=enforce --max-rss-kib=2000000)" \
+    1000000 "smaller inherited cap kept"
+expect "$(SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=3000000 run --rss-cap-mode=enforce --max-rss-kib=2000000)" \
+    2000000 "larger inherited cap narrowed"
+expect "$(SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=junk run --rss-cap-mode=enforce --max-rss-kib=2000000)" \
+    2000000 "invalid inherited value replaced"
+# Phase-verification and prepare-provisional shape: the shared wrapper with
+# its default enforced cap and no caller-supplied budget.
+expect "$(SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=4000000 \
+    sh "$wrapper" 60 2 /bin/sh -c "$probe")" 4000000 "wrapper cap exported"
+expect "$(sh "$wrapper" 60 2 /bin/sh -c "$probe")" 5859375 "wrapper default cap exported"
+
+echo "PASS — $checks watchdog shard-budget export case(s) checked"

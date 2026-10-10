@@ -30,7 +30,7 @@ use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
-extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_discriminant<T>(value: T) -> i64
 extern fn rt_enum_payload(value: StmtKind) -> Expr
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
@@ -116,9 +116,27 @@ impl HirLowering:
             return
         if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) >= 0:
             return
+        # A field dependency is TRANSITIVE: the importer never named it. It
+        # keeps the seed's bare binding (`use dep.{make_holder}` then
+        # `Gap(...)` works) only while the bare name is free; when the bare
+        # name is already taken it is bound under its owner-qualified name,
+        # which every field-type projection resolves through. An explicit
+        # import of the same bare name later supersedes the transitive
+        # binding (register_imported_symbol), and a second, conflicting
+        # transitive owner makes the bare name ambiguous (unbound, so only an
+        # actual use reports it). Before this, `use common.ui.style.{UITheme}`
+        # (field `spacing: Spacing`, a class) kept `Spacing` bound to the class
+        # over the explicit `use common.ui.design_tokens.{Spacing}` enum in
+        # theme_registry.spl ("missing runtime identity for 'Spacing'").
+        val bare_bound_before = self.import_binding_or_invalid(dependency).is_valid()
+        val dependency_local = if bare_bound_before: "{imported_mod.module_name}::{dependency}" else: dependency
+        val saved_field_dependency = self.registering_field_dependency
+        self.registering_field_dependency = true
         self.register_imported_symbol(
-            imported_mod.physical_index, imported_mod_name, dependency, dependency,
+            imported_mod.physical_index, imported_mod_name, dependency, dependency_local,
             import_span, materialize_enum)
+        self.registering_field_dependency = saved_field_dependency
+        self.note_transitive_bare_type(dependency, imported_mod.module_name, bare_bound_before)
         if self.symbols.lookup_qualified_type_raw(imported_mod.module_name, dependency) >= 0:
             return
         self.materialize_imported_callable_explicit_dependency(
@@ -132,6 +150,107 @@ impl HirLowering:
         if self.registering_lexical_import:
             return self.symbols.lookup_local_or_invalid(local_name)
         self.symbols.lookup_or_invalid(local_name)
+
+    fn transitive_bare_row(name: text) -> i64:
+        var row = 0
+        while row < self.transitive_bare_names.len():
+            if self.transitive_bare_names[row] == name:
+                return row
+            row = row + 1
+        -1
+
+    me note_transitive_bare_type(name: text, owner_module: text, bare_bound_before: bool):
+        """Record (or invalidate) a bare name bound by a field dependency.
+
+        Module scope only: a nested (lexical) scope's binding is not the
+        module's, and `unbind_local_type` also drops the table-wide exact
+        index, so it must never run from a nested scope."""
+        if self.registering_lexical_import or self.symbols.current_scope.id != 0:
+            return
+        val row = self.transitive_bare_row(name)
+        val bound_id = self.symbols.local_type_binding_raw(name)
+        if not bare_bound_before:
+            if bound_id >= 0:
+                if row < 0:
+                    self.transitive_bare_names = self.transitive_bare_names.push(name)
+                    self.transitive_bare_owners = self.transitive_bare_owners.push(owner_module)
+                    self.transitive_bare_ids = self.transitive_bare_ids.push(bound_id)
+                else:
+                    self.transitive_bare_owners[row] = owner_module
+                    self.transitive_bare_ids[row] = bound_id
+            return
+        # Bare name already taken. Only a conflicting TRANSITIVE owner makes it
+        # ambiguous, and only while the bare binding is still that transitive
+        # symbol: an explicit import or the module's own declaration (which
+        # replaces imports in the declare pass) keeps it.
+        if row < 0:
+            return
+        val previous_owner = self.transitive_bare_owners[row]
+        if previous_owner == "" or previous_owner == "!" or previous_owner == owner_module:
+            return
+        if bound_id != self.transitive_bare_ids[row]:
+            self.transitive_bare_owners[row] = "!"
+            return
+        self.symbols.unbind_local_type(name)
+        self.transitive_bare_owners[row] = ""
+
+    me supersede_transitive_bare_type(local_name: text):
+        """An explicit import of `local_name` wins over a transitive binding:
+        drop the transitive bare binding and any enum state it materialized
+        under that short name, so the explicit registration starts clean."""
+        if self.registering_field_dependency or self.registering_lexical_import:
+            return
+        if self.symbols.current_scope.id != 0:
+            return
+        val row = self.transitive_bare_row(local_name)
+        if row < 0:
+            return
+        val owner = self.transitive_bare_owners[row]
+        if owner == "!":
+            return
+        self.transitive_bare_owners[row] = "!"
+        if owner == "":
+            return
+        # The binding may already belong to something else (own declaration).
+        if self.symbols.local_type_binding_raw(local_name) != self.transitive_bare_ids[row]:
+            return
+        self.symbols.unbind_local_type(local_name)
+        self.purge_imported_enum_state(local_name)
+
+    me purge_imported_enum_state(local_name: text):
+        """Forget enum materialization keyed by `local_name`. Rebuilt rather
+        than `remove`d: Dict.remove differs between the seed interpreter
+        (returns a new dict) and native codegen (in place)."""
+        var kept_rows: [text] = []
+        val row_prefix = "{local_name}\u001f"
+        for owner_row in self.imported_enum_owner_rows:
+            if not owner_row.starts_with(row_prefix):
+                kept_rows.push(owner_row)
+        self.imported_enum_owner_rows = kept_rows
+        if self.imported_enums.contains_key(local_name):
+            var kept_enums: {text: ParserEnum} = {}
+            for enum_key in self.imported_enums.keys():
+                if enum_key != local_name:
+                    kept_enums[enum_key] = self.imported_enums[enum_key]
+            self.imported_enums = kept_enums
+        if self.imported_enum_owners.contains_key(local_name):
+            var kept_owners: {text: text} = {}
+            for owner_key in self.imported_enum_owners.keys():
+                if owner_key != local_name:
+                    kept_owners[owner_key] = self.imported_enum_owners[owner_key]
+            self.imported_enum_owners = kept_owners
+        if self.imported_enum_symbol_ids.contains_key(local_name):
+            var kept_ids: {text: i64} = {}
+            for id_key in self.imported_enum_symbol_ids.keys():
+                if id_key != local_name:
+                    kept_ids[id_key] = self.imported_enum_symbol_ids[id_key]
+            self.imported_enum_symbol_ids = kept_ids
+        if self.materialized_payload_bindings.contains_key(local_name):
+            var kept_bindings: {text: text} = {}
+            for binding_key in self.materialized_payload_bindings.keys():
+                if binding_key != local_name:
+                    kept_bindings[binding_key] = self.materialized_payload_bindings[binding_key]
+            self.materialized_payload_bindings = kept_bindings
 
     me register_imported_symbol(imported_index: i64, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
         # Keep the recursive import/materialization boundary scalar. Passing a
@@ -178,6 +297,9 @@ impl HirLowering:
             self.registered_import_memo_hash_buckets = []
             self.registered_import_memo_hash_next = []
             self.registered_import_memo_hash_mask = 0
+            self.transitive_bare_names = []
+            self.transitive_bare_owners = []
+        self.supersede_transitive_bare_type(local_name)
         val registered_enum_tag = if materialize_enum: " E" else: " -"
         val registered_scope = if self.registering_lexical_import: " scope=" + self.symbols.current_scope.id.to_string() else: ""
         val registered_key = imported_mod.module_name + " " + imported_name + " " + local_name + registered_enum_tag + registered_scope

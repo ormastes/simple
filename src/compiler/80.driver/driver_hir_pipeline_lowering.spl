@@ -2,6 +2,8 @@ use compiler.driver.driver_compiler_type.{CompilerDriver}
 use std.io_runtime.{exit, hash_text}
 use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{CompileMode}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
 use compiler.driver.cache.cold_hir_semantic_seed_v1.{
     cold_hir_typed_receipts_from_lowered_sources_v1
@@ -78,8 +80,8 @@ use compiler.common.cache.reverse_reference_facts.{
 }
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
-extern fn rt_transient_heap_promote(value: Any) -> bool
-extern fn rt_heap_ref_wellformed(value: Any) -> bool
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_heap_ref_wellformed<T>(value: T) -> bool
 extern fn rt_stdout_flush()
 
 fn driver_log_typed_hir_abi_interface_v1(module: HirModule, path: text):
@@ -95,6 +97,11 @@ fn driver_log_typed_hir_abi_result_v1(module_name: text, result: Result<text, te
 
 fn driver_hir_explicit_semantic_policy(ctx: CompileContext) -> bool:
     (ctx.config["compiler_explicit_semantic_policy"] ?? "") == "1"
+
+fn driver_hir_forbids_written_any(ctx: CompileContext) -> bool:
+    """Robust/critical compiled code may write `Any` only inside `unsafe:`."""
+    ctx.options.mode != CompileMode.Interpret and
+        ctx.assurance_policy.strictness.at_least(AssuranceStrictness.Robust)
 
 fn driver_hir_ambient_bootstrap_enabled(ctx: CompileContext) -> bool:
     not driver_hir_explicit_semantic_policy(ctx) and
@@ -596,6 +603,7 @@ impl CompilerDriver:
         var lowering: HirLowering = hirlowering_for_module("", surfaces)
         if driver_hir_explicit_semantic_policy(self.ctx):
             lowering.use_explicit_semantic_policy()
+        lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
         var lowered_by_surface: Dict<i64, HirModule> = {}
         var shard_completed_surfaces: Dict<i64, bool> = {}
         var poisoned_by_surface: Dict<i64, bool> = {}
@@ -1161,6 +1169,7 @@ impl CompilerDriver:
                 bootstrap_lowering_messages, bootstrap_lowering_recovered)
             if driver_hir_explicit_semantic_policy(self.ctx):
                 bootstrap_lowering.use_explicit_semantic_policy()
+            bootstrap_lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
             for module in self.ctx.modules.values():
                 val name = module.name
                 log_trace("processing module")
@@ -1215,6 +1224,7 @@ impl CompilerDriver:
             module_lowering_diagnostic_recovered)
         if driver_hir_explicit_semantic_policy(self.ctx):
             lowering.use_explicit_semantic_policy()
+        lowering.forbid_written_any = driver_hir_forbids_written_any(self.ctx)
         val hir_bootstrap_mode_gate = driver_hir_ambient_bootstrap_enabled(self.ctx)
         if hir_bootstrap_mode_gate:
             bootstrap_hir_modules_reset()
@@ -1832,6 +1842,7 @@ impl CompilerDriver:
             "", retained_module_surfaces)
         if driver_hir_explicit_semantic_policy(ctx):
             compatibility_lowering.use_explicit_semantic_policy()
+        compatibility_lowering.forbid_written_any = driver_hir_forbids_written_any(ctx)
         for src2 in ctx.sources:
             val name = src2.module_name
             val module = ctx.modules[name]

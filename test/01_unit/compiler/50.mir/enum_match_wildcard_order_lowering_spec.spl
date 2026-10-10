@@ -1,0 +1,132 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# A wildcard inside an OR arm retains its source position. Later enum arms
+# must not run before it, and a later default must not replace its body.
+use std.spec.{describe, it, expect}
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir.{HirFunction}
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.driver_core_compile_options_default
+use compiler.driver.driver_mir_target.driver_mir_target_context
+
+fn lower_pick(src: text) -> MirFunction:
+    val parsed = parse_full_frontend(src, "testdata/enum_wildcard_order.spl", "enum_wildcard_order", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/enum_wildcard_order.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target)
+    val mir = lowering.lower_module(hir)
+    for error in lowering.errors:
+        # Upstream diagnoses the unreachable tail without making it fatal.
+        expect(error.message.starts_with("unreachable match arm:")).to_equal(true)
+    var found: MirFunction? = nil
+    for function in mir.functions.values():
+        if function.name == "pick" or function.name.ends_with(".pick"):
+            found = Some(function)
+    expect(found.?).to_equal(true)
+    found.unwrap()
+
+fn has_int(block: MirBlock, wanted: i64) -> bool:
+    for inst in block.instructions:
+        match inst.kind:
+            case Const(_, value, _):
+                match value:
+                    case Int(n):
+                        if n == wanted:
+                            return true
+                    case _: ()
+            case _: ()
+    false
+
+fn assert_first_default(function: MirFunction, expected_arms: i64):
+    var arms = 0
+    var default_paths = 0
+    for block in function.blocks:
+        val label = block.label ?? ""
+        if label == "ematch_arm":
+            arms = arms + 1
+        expect(has_int(block, 2222)).to_equal(false)
+        expect(has_int(block, 3333)).to_equal(false)
+        if label == "ematch_next" and has_int(block, 1111):
+            match block.terminator:
+                case Goto(target):
+                    for successor in function.blocks:
+                        if successor.id.id == target.id:
+                            expect(successor.label ?? "").to_equal("ematch_merge")
+                            default_paths = default_paths + 1
+                case _: ()
+    expect(arms).to_equal(expected_arms)
+    expect(default_paths).to_equal(1)
+
+describe "enum catch-all arm ordering":
+    it "retains the OR wildcard before later variant and default arms":
+        val src = "enum E:\n    A\n    B\n    C\n\nfn pick(e: E) -> i64:\n    match e:\n        case E.A | _:\n            1111\n        case E.B:\n            2222\n        case _:\n            3333\n"
+        assert_first_default(lower_pick(src), 1)
+
+    it "keeps preceding deep payload tests and the first plain wildcard":
+        val src = "enum E:\n    A(v: i64)\n    B\n\nfn pick(e: E) -> i64:\n    match e:\n        case E.A(7):\n            7777\n        case _:\n            1111\n        case E.B:\n            2222\n        case _:\n            3333\n"
+        val function = lower_pick(src)
+        assert_first_default(function, 1)
+        var deep_blocks = 0
+        for block in function.blocks:
+            if (block.label ?? "") == "ematch_deep":
+                deep_blocks = deep_blocks + 1
+        expect(deep_blocks).to_equal(1)
+
+    it "lowers a wildcard-first OR without requiring a variant identity":
+        val src = "enum E:\n    A\n    B\n\nfn pick(e: E) -> i64:\n    match e:\n        case _ | E.A:\n            1111\n        case E.B:\n            2222\n        case _:\n            3333\n"
+        val function = lower_pick(src)
+        var default_bodies = 0
+        for block in function.blocks:
+            expect((block.label ?? "") == "ematch_arm").to_equal(false)
+            expect(has_int(block, 2222)).to_equal(false)
+            expect(has_int(block, 3333)).to_equal(false)
+            if has_int(block, 1111):
+                default_bodies = default_bodies + 1
+        expect(default_bodies).to_equal(1)
+
+# Fault injection at the runtime-identity metadata boundary: establish all
+# module registries normally, then remove only bare/qualified runtime IDs.
+# Re-lower the same parsed function with variant names/discriminants intact.
+fn missing_identity_messages(first_arm: text) -> text:
+    val src = "enum E:\n    A\n    B\n\nfn pick(e: E) -> i64:\n    match e:\n" + first_arm + "        case _:\n            1111\n"
+    val parsed = parse_full_frontend(src, "testdata/enum_missing_identity.spl", "enum_missing_identity", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/enum_missing_identity.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    val target = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target)
+    val initial_mir = lowering.lower_module(hir)
+    for error in lowering.errors:
+        expect(error.message.starts_with("unreachable match arm:")).to_equal(true)
+    expect(lowering.enum_runtime_id_index.has("E")).to_equal(true)
+    expect(lowering.enum_variant_index.has("E")).to_equal(true)
+    lowering.enum_runtime_id_index = {}
+    lowering.enum_runtime_id_index_q = {}
+    lowering.errors = []
+    var lowered = false
+    for entry in hir.functions.values():
+        val function: HirFunction = entry
+        if function.name == "pick" or function.name.ends_with(".pick"):
+            val relowered = lowering.lower_function(function)
+            lowered = true
+    expect(lowered).to_equal(true)
+    var messages = ""
+    for error in lowering.errors:
+        messages = messages + error.message + "\n"
+    messages
+
+describe "enum match runtime identity metadata":
+    it "rejects a retained variant test when its runtime identity is missing":
+        val messages = missing_identity_messages("        case E.A:\n            7777\n")
+        expect(messages.contains("enum construction: missing runtime identity for '")).to_equal(true)
+
+    it "needs no runtime identity when a first catch-all removes every variant test":
+        val messages = missing_identity_messages("        case _ | E.A:\n            7777\n")
+        expect(messages.contains("missing runtime identity")).to_equal(false)
+        # Only the existing unreachable-arm warnings are permitted.
+        for message in messages.split("\n"):
+            expect(message == "" or message.starts_with("unreachable match arm:")).to_equal(true)

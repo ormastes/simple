@@ -2,6 +2,14 @@
 
 ## Bootstrap failure collection
 
+For cache-preserving failed-file retries, independent MIR/object collection,
+tagged workarounds and complete-object manual linking, use
+[cached object continuation](../07_guide/tooling/bootstrap_failure_collection.md#cached-object-continuation-and-early-linking).
+Successful compile observation reads only the final log line, result code and
+object size. Host access in product code uses SoSix aliases/facades; see the
+[POSIX/host interface index](../07_guide/app/llm/simpleos_posix_host_interface_index.md).
+These are workflow requirements, not evidence that a build or platform passed.
+
 Full bootstrap has parallel branches after each usable compiler: Phase 1 whole
 tests precede Phase 2 construction; Phase 2 sanity opens its six subsystem
 test binaries, Phase 3 build and early Phase 4 from Phase 2. Phase 3 sanity
@@ -63,6 +71,16 @@ values/counts. The authored robust-array/tuple plan remains unidentified;
 existing research options are not its approved scope.
 
 ## Bug-linked workarounds
+
+Required for every temporary build/test workaround: a source `@workaround`
+tag with canonical bug ID, an authoritative bug DB record, and the actual
+workaround commit SHA/link. Record intended-code recovery reference, original
+failure, producer/source, reproducing/prevention tests and background fix owner.
+Create the bug record first when unknown. If the qualified DB tool is unavailable,
+record a dated bug report and explicitly leave DB reconciliation pending. Keep
+the bug open until an applied underlying fix is verified; link its commit and
+the narrow workaround-removal commit. Fetching a fix alone is insufficient.
+
 
 The accepted workflow is
 [bug-linked workarounds](../07_guide/tooling/bug_linked_workarounds.md);
