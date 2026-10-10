@@ -33,7 +33,8 @@ The private packet is `build/native_probe/p4-runtime-export-origin-20261010/cycl
 | `result.json` | `5fd3d22dda85199137598e3b66b0496ece14a64494f5dce91326a9d8c5bb26fe` |
 | `source-manifest.json` | `73336886e5dd3687e059a33ac324b83422c033689c33df0f2d0e2fec2196379d` |
 | `ROOT_RETAINED_EVIDENCE_AUDIT.json` | `6e2ba599c5d3887db2879a58254da25985f5e1b34477ac74a0234fc57c9265e4` |
-| `receipt.env` | `39574edf3a10554d2c4f261cfb715e65f6629c2ad113293c3e1c82d93cf30d0b` |
+| `admission/receipt.env` | `a1c87cd7d03c933b9eb68ae53fb27e4a097f12f43e1d6f310ee8d08c7f9a6183` |
+| `spec/receipt.env` | `39574edf3a10554d2c4f261cfb715e65f6629c2ad113293c3e1c82d93cf30d0b` |
 
 Canonical feature/mode admission and the spec both exited0 with authentic logs, final Job active0, and no observer errors. All eight declared cases executed and passed without skipping/dropping. Admission elapsed0.992s with78,060KiB sampled aggregate peak; the spec elapsed9.492s with448,028KiB sampled aggregate peak. These are bounded diagnostic observations, not native performance or allocator qualification; sampling can miss instantaneous peaks. The child cap was768MiB with a256MiB observer forecast,60s admission/120s spec deadlines.
 
