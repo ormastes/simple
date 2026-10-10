@@ -210,6 +210,7 @@ impl MirLowering:
         self.option_value_locals = {}
         self.nil_locals = {}
         self.extern_result_locals = {}
+        self.static_scalar_locals = {}
         self.resource_owned_locals = []
         self.consumed_resource_locals = {}
 
@@ -689,7 +690,24 @@ impl MirLowering:
         # current_has_vhdl_metadata above, so nested lowering cannot leak it.
         val previous_fn_returns_bool = self.current_fn_returns_bool
         self.current_fn_returns_bool = fn_returns_bool
-        val result = if fn_returns_bool:
+        # ... and for a scalar-optional function whose TAIL is a conditional:
+        # each arm must box its own value (see lower_expr_for_slot), which the
+        # threaded expected type does. Any other tail of a `-> T?` function
+        # keeps the plain path and is boxed once, after the block.
+        var fn_tail_conditional_into_scalar_optional = false
+        match fn_.return_type.kind:
+            case HirTypeKind.Optional(tail_optional_inner):
+                if hir_type_is_plain_scalar(tail_optional_inner) and fn_.body.has and fn_.body.value != nil:
+                    match fn_.body.value.kind:
+                        case HirExprKind.If(_, _, tail_if_else):
+                            fn_tail_conditional_into_scalar_optional = tail_if_else != nil
+                        case HirExprKind.IfChain(_, tail_chain_else):
+                            fn_tail_conditional_into_scalar_optional = tail_chain_else != nil
+                        case HirExprKind.MatchCase(_, _):
+                            fn_tail_conditional_into_scalar_optional = true
+                        case _: ()
+            case _: ()
+        val result = if fn_returns_bool or fn_tail_conditional_into_scalar_optional:
             self.lower_block_expected(fn_.body, fn_.return_type)
         else:
             self.lower_block(fn_.body)
@@ -734,6 +752,14 @@ impl MirLowering:
                         # sentinel (3 -> None, nil -> ... whatever the word
                         # was). Already-boxed tails pass through unchanged.
                         returned_tail_local = self.ensure_option_handle(tail_local, fn_.return_type)
+                    case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                        # Scalar tail that is a scalar Optional local (`v`
+                        # after `if v == nil: return ..`): return the payload,
+                        # exactly as `return v` does. Bool included: a tail
+                        # already coerced to a presence predicate (`opt.?`)
+                        # is a fresh Bool temp, not an Optional local, and is
+                        # returned unchanged by the helper.
+                        returned_tail_local = self.option_scalar_payload_of(returned_tail_local)
                     case _:
                         ()
                 # WP-E: the function's own tail value moves the resource out
