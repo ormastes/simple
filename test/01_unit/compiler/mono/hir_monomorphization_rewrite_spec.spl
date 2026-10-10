@@ -177,6 +177,26 @@ fn make_modules() -> Dict<text, HirModule>:
     modules
 
 describe "HIR monomorphization pass (#158 Phase B)":
+    it "prefers imported generic display names over colliding local symbol IDs":
+        step("resolve imported template identity before a colliding caller SymbolId")
+        val pass_ = MonomorphizationPass.create()
+        pass_.current_module = "caller"
+        val dummy = mk_fn(1, "dummy", [], [], mk_type(HirTypeKind.Unit), mk_block([]))
+        for name in ["mutex_new", "mutex_unlock", "Mutex.lock", "Mutex.try_lock"]:
+            pass_.generic_functions[name] = dummy
+            pass_.template_module[name] = "lib.nogc_sync_mut.concurrent.mutex"
+        pass_.sym_names["caller#7"] = "Mutex.try_lock"
+        pass_.sym_names["caller#8"] = "Mutex.lock"
+        val owner = "lib.nogc_sync_mut.concurrent.mutex"
+        val create = mk_expr(HirExprKind.NamedVar(SymbolId(id: 7), "{owner}.mutex_new"))
+        val release = mk_expr(HirExprKind.NamedVar(SymbolId(id: 8), "{owner}.mutex_unlock"))
+        val method = mk_expr(HirExprKind.NamedVar(SymbolId(id: 8), "{owner}.Mutex.lock"))
+        val foreign = mk_expr(HirExprKind.NamedVar(SymbolId(id: 7), "other.mutex_new"))
+        expect(pass_.callee_generic_name(create)).to_equal("mutex_new")
+        expect(pass_.callee_generic_name(release)).to_equal("mutex_unlock")
+        expect(pass_.callee_generic_name(method)).to_equal("Mutex.lock")
+        expect(pass_.callee_generic_name(foreign)).to_equal("")
+
     # @manual scenario evidence
     it "emits a specialization for identity<i64> instead of returning the module unchanged":
         # @req REQ-SSPEC-COMPILER

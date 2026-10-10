@@ -630,23 +630,31 @@ impl MonomorphizationPass:
                     return name
                 ""
             case HirExprKind.NamedVar(sym_id, name):
+                val n: text = name
+                # Imported SymbolIds are module-local and can collide with a
+                # different generic in this caller. The display name retains
+                # the declaring module, so resolve it before local ID fallback.
+                if self.generic_functions.has(n):
+                    return n
+                val last = mono_last_segment(n)
+                if last != n:
+                    val qual = n.substring(0, n.len() - last.len() - 1)
+                    if self.generic_functions.has(last) and
+                            mono_module_matches(qual, self.template_module[last]):
+                        return last
+                    # Generic methods contain a dot themselves (Mutex.lock).
+                    # Admit the symbol hint only if the complete method name
+                    # and its declaration owner match the qualified display.
+                    val by_sym = self.sym_name(sym_id)
+                    if self.generic_functions.has(by_sym) and
+                            n.ends_with(".{by_sym}"):
+                        val owner = n.substring(0, n.len() - by_sym.len() - 1)
+                        if mono_module_matches(owner, self.template_module[by_sym]):
+                            return by_sym
+                    return ""
                 val by_sym = self.sym_name(sym_id)
                 if self.generic_functions.has(by_sym):
                     return by_sym
-                val n: text = name
-                if self.generic_functions.has(n):
-                    return n
-                # A cross-module import arrives as the qualified
-                # `<module>.<fn>` display name baked in by HIR lowering
-                # (expression_core.spl, `qualify_imported_function_symbol`).
-                # Resolve the last segment, but only when the qualifier and
-                # the template's module agree, so two modules with a
-                # same-named generic never alias.
-                val last = mono_last_segment(n)
-                if last != n and self.generic_functions.has(last):
-                    val qual = n.substring(0, n.len() - last.len() - 1)
-                    if mono_module_matches(qual, self.template_module[last]):
-                        return last
                 ""
             case _:
                 ""
