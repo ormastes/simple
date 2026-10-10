@@ -2817,13 +2817,17 @@ impl MirLowering:
         val mismatch = check.new_block(Some("text_cast_mismatch"))
         check.terminate_if(mir_operand_copy(is_single), single, mismatch)
         check.switch_to_block(mismatch)
+        # rt_panic consumes a raw byte pointer and its explicit length.
+        # A tagged text operand alone leaves the runtime length undefined.
+        val message_text = "type mismatch: cannot cast str to {target_name}"
+        val message = check.emit_const_str(message_text)
+        val length = check.emit_const_int(message_text.len())
+        val pointer_type = MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.I8), false))
         val panic_fn = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_panic"),
-            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [self.bootstrap_text_type()], return_type: MirType.unit(), is_variadic: false)))
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [pointer_type, MirType.i64()], return_type: MirType.unit(), is_variadic: false, params_known: true)))
         ))
-        val message = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("type mismatch: cannot cast str to {target_name}"), self.bootstrap_text_type()))
-        check.emit_call(panic_fn, [message], MirType.unit())
+        check.emit_call(panic_fn, [mir_operand_copy(message), mir_operand_copy(length)], MirType.unit())
         check.terminate_abort("text cast mismatch -- must not fall through")
         check.switch_to_block(single)
         val code_fn = MirOperand(kind: MirOperandKind.Const(
