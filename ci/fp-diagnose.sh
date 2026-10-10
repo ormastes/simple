@@ -38,6 +38,7 @@ PORTABLE_LOCK_ATOMIC_HELPER_PATH="${repo_root}/scripts/check/lib/portable-hardli
 export PORTABLE_LOCK_ATOMIC_HELPER_PATH
 . "${repo_root}/scripts/check/lib/portable-process-lock.shs"
 
+export repo_root
 sh -x -c '
   . "${repo_root}/scripts/bootstrap/bootstrap-cache-policy.shs"
   BOOTSTRAP_STAGE3_FACADE_PATH="${repo_root}/scripts/check/lib/bootstrap-stage3-provenance.shs"
