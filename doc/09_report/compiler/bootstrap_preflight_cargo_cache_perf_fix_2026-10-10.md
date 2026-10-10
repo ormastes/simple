@@ -36,7 +36,7 @@ Final real bootstrap outcome: watchdog exit 124 (`timeout`), wall 601 seconds, a
 
 The final patch also preserves the existing `bootstrap-preflight` progress milestone when running it through the shared authority helper. This reporting-only correction and the retained regression/reproducer were added after the timed run terminated. Its preflight receipt binds the tested source state, and cannot admit this later source state.
 
-The portable reproducer is `scripts/check/check-bootstrap-preflight-cargo-cache-perf.shs`. Use the same pinned Cargo/Rustc executables and a fresh output directory; it refuses to overwrite an existing cohort. Five samples are diagnostic evidence, not a release performance gate.
+The portable reproducer is `scripts/bootstrap/tests/preflight-cargo-cache-perf.shs`. Use the same pinned Cargo/Rustc executables and a fresh output directory; it refuses to overwrite an existing cohort. Five samples are diagnostic evidence, not a release performance gate.
 
 The remaining Stage 2 timeout is tracked in [the native compile budget bug](../../08_tracking/bug/bootstrap_stage2_native_compile_exceeds_perf_repair_budget_2026_10_10.md). The final milestone correction passed its focused regression; invalid explicit Cargo paths are rejected.
 
