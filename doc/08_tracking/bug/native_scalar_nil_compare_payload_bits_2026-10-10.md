@@ -1,15 +1,15 @@
 # Native: `v == nil` is true for the integer 3 (both backends) and for bool `true` (LLVM) on non-optional scalars; scalar optionals lose nil through unboxed producers
 
-**Status:** source fixes on `work/rel-native-nil-compare-20261010` (commit
-series on top of `7725bd9efb5`); they take effect only in a REBUILT stage 2
+**Status:** source fixes on `work/rel-native-nil-compare-rebased-20261010`
+(the series rebased onto `release/1.0` after PR #2882); they take effect only in a REBUILT stage 2
 and are NOT yet verified natively (see "Verification on the next rebuild").
 **Engines:** staged-native (stage 2 and later), `--backend llvm` and
 `--backend cranelift`; also the seed's default JIT `run` lane. The tree-walk
 interpreter (`SIMPLE_EXECUTION_MODE=interpret`) is the oracle.
 **Found via:** `HirCodecWriter.put_i64` / `put_bool` writing `N` for 3 / true
 so the stage-2 HIR cache never hit
-(`hir_codec_put_i64_three_encoded_as_nil_native_2026-10-10.md`, codec-only
-workaround on a sibling branch).
+(`hir_codec_put_i64_three_encoded_as_nil_native_2026-10-10.md`; its codec-only
+fix landed first as PR #2882, see "Codec mechanism after the rebase").
 
 ## Root cause
 
@@ -115,6 +115,31 @@ Tuple to PTR. NOT fixed here; re-measure on a stage 2 built from this source
 3. Retyped nil-aware scalar declarations to optionals: `HirCodecWriter.put_i64
    (v: i64?)` / `put_bool(v: bool?)`, `hc_i64_key_before_v1(left: i64?,
    right: i64?)`, `StateVariant.suspension_point_id: i64?`.
+
+   **Codec mechanism after the rebase.** PR #2882 had fixed the same three
+   functions on release with a rendered-text discriminator (`"{v}" ==
+   "nil"` on a non-optional `i64` / `bool` parameter). The rebase keeps ONE
+   mechanism per function: `put_i64`, `put_bool` and `hc_i64_key_before_v1`
+   take the typed form above (`T?` + `== nil` + `?? default`) and the
+   rendered-text lines are removed from them; `_hc_i64_index_before_v1`
+   keeps `_hc_i64_is_nil_v1` (rendered text), because it reads ELEMENTS of a
+   `[i64]`, which cannot become `i64?` without changing the array
+   representation. Why the typed form: (a) it is the representation rule of
+   fix 5 -- a nil that must be told apart from 3 has to travel as an
+   Optional; (b) measured under the interpreter on the rebased tree, the
+   rendered-text writers fail this series' `hir_codec_nil_scalar_optional_spec`
+   (2 of 4): `put_i64(<nil i64?>)` writes the line `Option::None`, and
+   `put_bool(nil)` writes `0` (a `bool` parameter coerces nil to false), while
+   the typed writers pass it 4/4 AND release's own
+   `hir_codec_scalar_nil_collision_spec` 11/11; (c) natively a non-optional
+   parameter is never boxed (lowering probe: `put(nil)` / `put(3)` / `put(o:
+   i64?)` into `put(v: i64)` emit no `rt_enum_new` / `rt_enum_id`), so with
+   the rendered-text form a nil is the raw word 3 and renders `3`, and an
+   Optional argument would reach the writer as its handle. The series' fold
+   itself does not touch the rendered-text form (`"{v}" == "nil"` stays a
+   text compare). Cost accepted and to be measured on the rebuild: every
+   scalar put now boxes its argument into an Option handle on the cache-store
+   path (one `rt_enum_new` per line written).
 4. Checker rule (`_subsume_fallback`, inference_expr.spl): a nil literal or
    an Optional-typed value flowing into a non-optional scalar parameter /
    annotated binding is diagnosed ("... cannot flow into the non-optional
@@ -158,7 +183,8 @@ unmodified base (measured by checking out the original files) -- pre-existing.
 ## W-nil-compare: sites that relied on a typed scalar carrying nil
 
 Direct scalar-typed param/local `== nil` in `src/compiler`: 5 sites, all HIR
-codec, all retyped in this series.
+codec; PR #2882 replaced them with the rendered-text test and this series
+retypes the three scalar-argument ones (fix 3).
 
 **The "38 call sites / 2088 functions" figures first recorded here were
 wrong** and are superseded by the audit below: that scan keyed on the callee
@@ -270,7 +296,7 @@ and src/app (two independent scans). Nothing relies on it.
 | site | test | field | decision |
 |---|---|---|---|
 | `src/compiler/70.backend/linker/mold.spl:518-520` | `config.pie ?? true`, `.debug ?? false`, `.verbose ?? false` | `LinkConfig.pie/debug/verbose: bool`, never built with nil | dead tests removed (3) |
-| `src/compiler/20.hir/portable_body_graph.spl:151` | `edge.caller_symbol_id == nil or edge.callee_symbol_id == nil` | `PortableBodyDependencyEdgeV1.*_symbol_id: i64`, built from symbol ids | dead tests removed (2); the `< 0` and membership checks stay |
+| `src/compiler/20.hir/portable_body_graph.spl:151` | `edge.caller_symbol_id == nil or edge.callee_symbol_id == nil` | `PortableBodyDependencyEdgeV1.*_symbol_id: i64` | tests removed (2): subsumed by the membership test at line 139 -- `node_set[node] = true` is only reached for nodes that passed `node == nil or node < 0` (line 137), so `not node_set.has(edge.*_symbol_id)` already rejects a nil id; the `< 0` and membership checks stay |
 | `20.hir/hir_lowering/_Items/declaration_lowering.spl:839`, `trait_impl_lowering.spl:56` | `if f.bits.?:` | `BitfieldField.bits: i64` (0 with `has_bits` false) | unchanged: `.?` on a scalar folds to the VALUE, and the seed's `.?` on an int also yields the value (`0.?` -> 0, falsy), so both engines take the same branch |
 
 Known consequence, not fixed: a desugared field that holds nil and is passed
@@ -470,6 +496,10 @@ SIMPLE_LINKER_FLAVOR=msvc CC=clang-cl.exe` and `tools/` present in the checkout.
 - LLVM width class: Eq/Ne with i8/i16/i32 left vs i64 right still truncates
   the right operand; Lt/Le/Gt/Ge always use the left width; compares `sext`
   narrow ints even when unsigned.
+- HIR codec: per-put Option boxing of `put_i64` / `put_bool` arguments
+  (fix 3) -- measure cache-store time and re-check `[hir-cache] hits` on BOTH
+  backends on the rebuild; if the cranelift Optional lead above reproduces
+  for parameters, the writers are the first place it will show.
 - Checker: Assign and struct-literal field flows of nil into a scalar slot;
   the seed's own checker rule.
 
@@ -479,7 +509,8 @@ SIMPLE_LINKER_FLAVOR=msvc CC=clang-cl.exe` and `tools/` present in the checkout.
 - `native_tagged_nil_prints_as_integer_3_in_i64_sink_2026-08-18.md`
 - `pure_simple_option_i64_ifval_always_some_eqnil_always_false_2026-08-08.md`
 - `option_none_promoted_to_some_by_static_nil_provenance_2026-09-14.md`
-- `hir_codec_put_i64_three_encoded_as_nil_native_2026-10-10.md` (sibling branch)
+- `hir_codec_put_i64_three_encoded_as_nil_native_2026-10-10.md` (PR #2882; its
+  "Fix" section describes the rendered-text writers this series replaced)
 - `optional_nil_arm_stale_producer_2026-10-10.md` (PR #2844, `src/lib/common/
   binary_io.spl` -- explicit `None` arms for an older retained producer; no
   overlap with this series)
