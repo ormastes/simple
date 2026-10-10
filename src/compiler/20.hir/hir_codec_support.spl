@@ -355,34 +355,31 @@ class HirCodecWriter:
     #
     # Scalars too can be nil in a lowered module (see put_text). `N` is not a
     # digit, so it cannot collide with any encoded number or bool.
-    me put_i64(v: i64?):
+    me put_i64(v: i64):
         if not self._can_append(22, 64, 22):
             return
-        # `v` is `i64?`, NOT `i64`: `v == nil` on an i64-typed slot compared
-        # the raw integer with nil's immediate (3) under staged-native codegen,
-        # so every integer 3 (a count of three, symbol id 3, the fourth variant
-        # tag of any enum) was written as `N`, the decoder desynchronised and
-        # the entry was rejected (Windows stage 2: 0 lines equal to `3` in a
-        # 261,898-line entry, `[hir-cache] hits=0` on every rerun).
+        # Do NOT test `v == nil` on this i64-typed slot. Staged-native codegen
+        # compares the raw integer with nil's immediate, which is 3, so every
+        # integer 3 (a count of three, symbol id 3, the fourth variant tag of
+        # any enum) was written as `N`. The decoder then desynchronised and
+        # rejected the entry: measured on the Windows stage-2 binary, 0 lines
+        # equal to `3` in a 261,898-line entry and `[hir-cache] hits=0` on
+        # every rerun, which also discarded all HIR shard work.
+        # The rendered text is the engine-independent discriminator: a real
+        # nil renders as `nil`, an integer never does.
         # doc/08_tracking/bug/hir_codec_put_i64_three_encoded_as_nil_native_2026-10-10.md
-        # With an Optional parameter the test is the Option handle predicate
-        # on every engine: a plain scalar argument arrives as Some(v), a nil
-        # literal or a nil optional as None. This replaces the rendered-text
-        # discriminator (`"{v}" == "nil"`) that first fixed it, which
-        # wrote `Option::None` for a nil optional argument.
-        # doc/08_tracking/bug/native_scalar_nil_compare_payload_bits_2026-10-10.md
-        val line = if v == nil: "N\n" else: "{v ?? 0}\n"
+        val rendered = "{v}"
+        val line = if rendered == "nil": "N\n" else: rendered + "\n"
         self._append_line(line)
 
-    me put_bool(v: bool?):
+    me put_bool(v: bool):
         if not self._can_append(2, 32, 2):
             return
-        # Same hazard and same fix as put_i64 (`bool?`, handle predicate): on
-        # a bool-typed slot staged-native `v == nil` was true for every `true`,
-        # so each true flag was written as `N` and decoded back as nil. A nil
-        # argument is now `N` on the interpreter too (a `bool` parameter
-        # coerced it to false there and wrote `0`).
-        val line = if v == nil: "N\n" else: (if (v ?? false): "1\n" else: "0\n")
+        # Same hazard as put_i64, and silent: staged-native `v == nil` is true
+        # for every `true`, so each true flag was written as `N` and decoded
+        # back as nil. One line either way, so nothing desynchronised.
+        val rendered = "{v}"
+        val line = if rendered == "true": "1\n" elif rendered == "false": "0\n" else: "N\n"
         self._append_line(line)
 
     # A declared `text` field can hold nil in a real lowered module (doc
