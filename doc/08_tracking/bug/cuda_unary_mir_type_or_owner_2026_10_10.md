@@ -13,3 +13,9 @@ Nearby fixture test/fixtures/compiler/cuda_unary_type_owner_probe/main.spl check
 Workaround source commit: b7402e324 (parent b9ccb2ab9c86017724f29e5a2985dfe9b25d60dd). This follow-up registers the OPEN primary and active BUGDB rows and canonical @workaround tags. Qualifying evidence and release PR linkage must be appended after actual execution; no PASS is inferred from source review.
 
 Targeted cycle1 d1da4f5e2 cleared unary I16 but exposed ten CUDA HIR records/six distinct messages in bitcast/bounds contexts. Receipt: /home/ormastes/simple-cuda-unary-owner-targeted-20261010/adaptive-epoch/row-0000/unique-fatal-diagnostics.json. This follow-up audits every OR arm and qualifies all remaining enum alternatives by the declared match-subject owner; string alternatives unchanged. Prefix stripping proves payloads/binders/arity unchanged. Native targeted cycle2 and nearby controls remain UNEXECUTED.
+
+## Actual HIR verification (2026-10-10)
+
+Targeted source a98662333215ca8a9446c44adb74a3ac66555c6f with pure producer aa404c21c4d2435e871ac0f57903da18610b452323fe09355f86b9cdddb0a41f passed all 154 HIR modules, including CUDA. The original b9 run passed 1,159 other modules; their source blobs are unchanged. The evidence union covers 1,160 modules, not a new aggregate run or dependency-cache admission stamp. Compilation subsequently rejected 24 E-MONO-032/033 callsites; no object or runtime PASS is claimed. Nearby native fixtures remain UNEXECUTED; underlying compiler bug stays OPEN.
+
+Durable receipt: `/mnt/c/Temp/simple-cuda-complete-owner-targeted-20261010/all-module-hir-evidence-union.json`. Target terminal, HIR artifact, SHA pins, and the 154-module ledger are retained alongside it.
