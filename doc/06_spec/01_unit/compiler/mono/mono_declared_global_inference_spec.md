@@ -1,3 +1,19 @@
+# Module-owned declared global type inference
+
+Authored companion to permanent fix7fccc15fb with the explicit HIR-clean negative assertion below. **UNEXECUTED**: no generated SPipe output, coverage completeness or qualification claim.
+
+Requirement trace: doc/08_tracking/bug/mono_declared_global_array_inference_2026-10-10.md. No accepted feature REQ ID is invented.
+
+| Structural scenario | Actual assertions |
+|---|---|
+| Mutable nested-array generic argument | Real source lowering has zero errors and one mutable pool; constants dictionary key deliberately differs from declaration.symbol; recorded element type is Str; actual mono call creates one specialization and zero unresolved calls. |
+| Equal numeric IDs in distinct modules | Two source-lowered pools assert equal symbol IDs; module-scoped lookup returns Str vs Int64; unregistered module has no type. |
+| Lexical precedence | Actual shadowed source lowers clean; explicit env type retains priority over a global fallback; source generic call specializes without unresolved calls. |
+| Uninferable empty argument | Real source lowering must have zero errors; no specialization and one unresolved generic call. Unrelated HIR errors cannot count as success. |
+
+Every fallback assert(false) fails on an unexpected shape; none is a placeholder pass. Exact current authored structural spec:
+
+```simple
 # UNEXECUTED: real source lowering and monomorphization assertions.
 use std.spec.*
 use compiler.common.diagnostics.span.{Span}
@@ -109,3 +125,8 @@ describe "mono uses module-owned declared globals":
         val (_, stats) = run_monomorphization(modules)
         expect(stats.specializations_created).to_equal(0)
         expect(stats.unresolved_generic_calls).to_equal(1)
+```
+
+Native controls are separate UNEXECUTED observers. mutable_nested expects stdout B,7,17; lexical_shadow expects23; module_identity expects owned-a,29 (one value per line, exit0, empty stderr). Equal numeric provider IDs still need observed identity evidence; runtime stdout alone cannot establish collision coverage. unknown_empty must fail with named take monomorphization diagnostic after all HIR modules pass and emit no object. Detailed source hashes and criteria: test/fixtures/compiler/mono_declared_global_probe/manifest.json.
+
+Maximum three parent-counted cause cycles; no unchanged retry. Required fresh producer Hello and exact source/runtime/tool hashes precede execution. No compiler/core/lib/MCP/LSP verification, full SPipe or lint PASS is claimed.
