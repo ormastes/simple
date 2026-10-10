@@ -181,3 +181,26 @@ all 44 package-index system scenarios, compiler/lib/MCP/LSP checks, MCP stdio
 integration, runtime and MCP native smokes, coverage and performance targets.
 Pending implementation: independently selected generated-plan authority and real
 producer execution. Do not merge or publish this follow-up as completed item six.
+
+## Continued review: fallback scope and generator ordering
+
+The next source audit found a regression in the schema candidate: absent or
+corrupt transition evidence invalidated every V4 module, contradicting the
+existing hinted reverse-closure tests. The fallback now preserves current-schema
+hint scope and unknown-hint rejection; legacy generations still migrate by
+invalidating all entries. This is a source-review finding and fix, not an
+executed red/green result.
+
+The sidecar then found a production bypass: the route wrapper only invoked
+invalidation for nonempty hints. It now invokes conservative legacy migration
+before archive lookup even with no events, through both routing entrypoints.
+Primary test review also corrected a missing-transition fixture that attempted
+to delete a nonexistent first-publication transition file.
+
+Separate-worktree research traced the production publication seam and the
+process-observation contracts. Primary review corrected the proposed ordering:
+generator execution must precede HIR in a derived immutable snapshot, and expected
+declaration authority must be separate from artifact receipts. The design now
+records this lifecycle and explicit success/refusal cases. No claim is made that
+existing process lifecycle evidence enforces filesystem access or that these
+planned generator stages are implemented.

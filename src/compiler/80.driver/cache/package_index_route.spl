@@ -136,13 +136,18 @@ fn package_index_route_admitted_invalidation_v1(
     var selected: [text] = []
     for entry in generation.entries:
         selected.push(entry.module_identity)
+    # Missing transition evidence makes a current-schema hint public; it does
+    # not imply unrelated roots changed. Only legacy witness migration needs
+    # the complete graph. Preserve unknown-hint rejection in the current path.
+    val fallback_modules = if generation.schema_version < PACKAGE_MODULE_INDEX_SCHEMA_V4:
+        selected else: changed_modules
     val transition = package_index_transition_read_v1(
         "{cache_root}/package-module-index-v1", package_module_index_digest_v1(generation))
     if transition.is_err():
-        return package_module_index_invalidate_v1(generation, selected, true)
+        return package_module_index_invalidate_v1(generation, fallback_modules, true)
     val previous = package_module_index_decode_v1(transition.unwrap().previous_encoded)
     if not previous.valid or previous.generation == nil:
-        return package_module_index_invalidate_v1(generation, selected, true)
+        return package_module_index_invalidate_v1(generation, fallback_modules, true)
     val old = previous.generation!
     # Topology/owner changes need cold or conservative migration. A same-name
     # module in another package or variant is not evidence for private reuse.
@@ -282,8 +287,11 @@ fn _package_index_route_current_v1(
 
     var schedule: [text] = []
     var dirty_packages: [text] = []
-    if changed_modules.len() > 0:
-        val invalidation = if admitted_semantic_changes:
+    # Legacy generated witnesses are unknown even when no edit event arrived.
+    # Both public routing entrypoints must migrate before archive lookup.
+    val legacy_generated_witness = generation.schema_version < PACKAGE_MODULE_INDEX_SCHEMA_V4
+    if changed_modules.len() > 0 or legacy_generated_witness:
+        val invalidation = if admitted_semantic_changes or legacy_generated_witness:
             package_index_route_admitted_invalidation_v1(cache_root, generation, changed_modules)
         else:
             package_module_index_invalidate_v1(generation, changed_modules, public_interface_changed)
