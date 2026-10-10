@@ -53,3 +53,19 @@ Follow-up plan (supersedes the earlier rename failure status):
   bootstrap/test scheduling requests forty jobs after exact compiler admission.
 - **0/6** qualified Phase 2 products; full Phase 3/4 and 0.1-second compile
   unverified. Missing SIMD/GPU/Sosix document remains NOT_ASSESSED.
+
+
+Current acceptance update (supersedes earlier follow-up status):
+
+- Archive component: three actual native passes; full provider/consumers pending.
+- Native parse lease: four groups plus one stronger waiter barrier pass; five
+  frontend SSpecs UNRUN, assembly/async/TestRunner integration pending.
+- Recovered seed: interpreter Hello passes; native Cranelift Hello fails at
+  GNU/MSVC dialect selection, and this seed has no LLVM backend feature.
+- Pure NT caller: zero cases executed, blocked by seed conditional syntax.
+- Next: real-owner linker tests, verified source integration, conditional lexer
+  indentation/target-cache correctness, TLDR parse reuse and measured performance.
+- Parallel supported test/object/tool lanes request forty jobs, retain valid
+  caches, continue independent failures and retry only changed failed work.
+- Still **0/6** qualified Phase 2 products; full Phase 3/4, hooks, formal proof
+  and 0.1-second SPL compile remain unverified. Exact SIMD/GPU/Sosix design missing.
