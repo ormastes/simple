@@ -1,0 +1,71 @@
+use std.spec
+use compiler.mir.mir_instructions.{BlockId, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirLocal, MirType}
+use compiler.mir.mir_instruction_support.{MirBorrowKind, MirPlace, MirProjection}
+use compiler.mir_opt.mir_opt.var_reassign_ssa.{ssa_alloca_transform_blocks, ssa_max_local_from_inst, ssa_collect_inst_operand_locals}
+
+fn borrow_inst(dest: i64, source: i64) -> MirInst:
+    MirInst(kind: MirInstKind.Ref(LocalId(id: dest), MirBorrowKind.Shared,
+        MirPlace(local: LocalId(id: source), projection: [])), span: nil)
+
+fn stored_borrow_is_loaded_value(instructions: [MirInst], index: i64) -> bool:
+    if index == 0 or index + 1 >= instructions.len():
+        return false
+    match instructions[index].kind:
+        case Ref(dest, kind, place):
+            if kind != MirBorrowKind.Shared or place.projection.len() != 0:
+                return false
+            match instructions[index - 1].kind:
+                case Load(loaded, _):
+                    if place.local.id != loaded.id:
+                        return false
+                case _: return false
+            match instructions[index + 1].kind:
+                case Store(_, value):
+                    match value.kind:
+                        case Copy(stored): stored.id == dest.id
+                        case _: false
+                case _: false
+        case _: false
+
+describe "SSA alloca unprojected borrow ownership":
+    it "loads a reassigned borrowed value and stores each reassigned borrow result":
+        val local = LocalId(id: 0)
+        val block = MirBlock(id: BlockId(id: 0), label: nil, instructions: [
+            MirInst(kind: MirInstKind.Const(local, MirConstValue.Int(40), MirType.i64()), span: nil),
+            MirInst(kind: MirInstKind.Const(local, MirConstValue.Int(42), MirType.i64()), span: nil),
+            borrow_inst(1, 0), borrow_inst(1, 0)
+        ], terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1))))))
+        val locals = [
+            MirLocal(id: local, name: nil, type_: MirType.i64(), kind: LocalKind.Var, is_ghost: false),
+            MirLocal(id: LocalId(id: 1), name: nil, type_: MirType.i64(), kind: LocalKind.Var, is_ghost: false)
+        ]
+        val result = ssa_alloca_transform_blocks([block], locals, BlockId(id: 0))
+        expect(result.applied).to_equal(true)
+        val instructions = result.blocks[0].instructions
+        var count = 0
+        var previous_dest = -1
+        var index = 0
+        while index < instructions.len():
+            match instructions[index].kind:
+                case Ref(dest, _, _):
+                    expect(stored_borrow_is_loaded_value(instructions, index)).to_equal(true)
+                    expect(dest.id == previous_dest).to_equal(false)
+                    previous_dest = dest.id
+                    count = count + 1
+                case _: ()
+            index = index + 1
+        expect(count).to_equal(2)
+
+    it "includes a borrowed source in fresh-id allocation and use analysis":
+        val inst = borrow_inst(1, 90)
+        expect(ssa_max_local_from_inst(0, inst)).to_equal(90)
+        expect(ssa_collect_inst_operand_locals([], inst)).to_equal([90])
+
+    it "rejects projected borrows until their address semantics are supported":
+        val inst = MirInst(kind: MirInstKind.Ref(LocalId(id: 1), MirBorrowKind.Shared,
+            MirPlace(local: LocalId(id: 0), projection: [MirProjection.Field(0)])), span: nil)
+        val block = MirBlock(id: BlockId(id: 0), label: nil, instructions: [inst], terminator: MirTerminator.Ret(nil))
+        val result = ssa_alloca_transform_blocks([block], [], BlockId(id: 0))
+        expect(result.applied).to_equal(false)
+        expect(result.reason).to_equal("unsupported instruction")

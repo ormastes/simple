@@ -7,6 +7,7 @@
 # compiler.mir.mir_instructions re-exports it (mir_instructions.spl:9-10).
 use compiler.mir.mir_instructions.{BlockId, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
 use compiler.mir.mir_types.{LocalId, LocalKind, MirConstValue, MirType, MirLocal}
+use compiler.mir.mir_instruction_support.{MirPlace}
 use compiler.interp.execution.tiered_jit.{JitHotspotSpecializationProvider, jit_hotspot_specialization_provider_from_analysis}
 use compiler.mir_opt.mir_opt.pattern.rule_engine.{OptimizerBackendKind, optimization_backend_kind_from_text, optimization_backend_kind_name}
 use compiler.mir_opt.mir_opt.var_reassign_analysis.{
@@ -226,6 +227,10 @@ fn ssa_max_local_from_inst(current: i64, inst: MirInst) -> i64:
     if max_written_id > max_id:
         max_id = max_written_id
     match inst.kind:
+        case Ref(_, _, place):
+            val place_id = ssa_local_id_value(place.local)
+            if place_id > max_id:
+                max_id = place_id
         case Copy(_, src):
             val src_id = ssa_local_id_value(src)
             if src_id > max_id:
@@ -919,6 +924,7 @@ fn ssa_operand_list_payloads_valid(operands: [MirOperand]) -> bool:
 
 fn ssa_inst_operand_payloads_valid(inst: MirInst) -> bool:
     match inst.kind:
+        case Ref(_, _, place): ssa_local_payload_valid(place.local)
         case Copy(_, src): src != nil
         case Move(_, src): src != nil
         case BinOp(_, _, left, right):
@@ -976,6 +982,13 @@ fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
                 return false
             if not ssa_var_transform_inst_supported(inst):
                 match inst.kind:
+                    case Ref(_, _, place):
+                        # LLVM's unprojected borrow is an identity on the
+                        # borrowed value, including object/reference handles.
+                        # A projected place needs its own address calculation;
+                        # do not admit it as a plain local read.
+                        if place.projection.len() != 0:
+                            return false
                     case CallIndirect(_, _, _, _):
                         pass_do_nothing
                     case Alloc(_, _):
@@ -1298,6 +1311,8 @@ fn ssa_collect_inst_operand_locals(locals: [i64], inst: MirInst) -> [i64]:
     """Locals READ by `inst` (its dest is deliberately excluded)."""
     var result = locals
     match inst.kind:
+        case Ref(_, _, place):
+            result = local_list_push_unique(result, ssa_local_id_value(place.local))
         case Copy(_, src):
             result = local_list_push_unique(result, ssa_local_id_value(src))
         case Move(_, src):
@@ -1506,6 +1521,18 @@ fn ssa_alloca_rewrite_operand_list(operands: [MirOperand], slot_keys: [i64], slo
 fn ssa_alloca_rewrite_inst_operands(inst: MirInst, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> SsaAllocaOperandRewriteResult:
     """Rewrite only the READ operands of `inst` (dest untouched)."""
     match inst.kind:
+        case Ref(dest, kind, place):
+            # Borrow the current VALUE held by the slot, not the slot address.
+            # Keeping the old local would reference a removed SSA definition;
+            # borrowing the slot would add an unintended level of indirection.
+            val r = ssa_alloca_rewrite_operand(MirOperand(kind: MirOperandKind.Copy(place.local)), slot_keys, slot_values, next_temp)
+            val operand = r[0]
+            match operand.kind:
+                case Copy(local):
+                    val rewritten_place = MirPlace(local: local, projection: place.projection)
+                    SsaAllocaOperandRewriteResult(MirInst(kind: MirInstKind.Ref(dest, kind, rewritten_place), span: inst.span), r[1], r[2])
+                case _:
+                    SsaAllocaOperandRewriteResult(inst, [], next_temp)
         case Copy(dest, src):
             val r = ssa_alloca_rewrite_operand(MirOperand(kind: MirOperandKind.Copy(src)), slot_keys, slot_values, next_temp)
             val r_op = r[0]
@@ -1607,6 +1634,8 @@ fn ssa_alloca_rename_dest(inst: MirInst, new_id: i64) -> MirInst:
     instruction writes a slotted local. Optional-destination instructions reach
     this helper only when their destination is present."""
     match inst.kind:
+        case Ref(_, kind, place):
+            MirInst(kind: MirInstKind.Ref(ssa_local(new_id), kind, place), span: inst.span)
         case Const(_, value, type_):
             MirInst(kind: MirInstKind.Const(ssa_local(new_id), value, type_), span: inst.span)
         case Copy(_, src):
