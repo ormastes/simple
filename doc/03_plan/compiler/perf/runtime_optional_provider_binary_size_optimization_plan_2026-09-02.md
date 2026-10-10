@@ -335,3 +335,7 @@ The canonical loader no longer imports `os.smf.smf_generation` for local-only ho
 ## 2026-10-10 JIT owner closure continuation
 
 The compiler interpreter JIT implementation was moved from the app facade to its compiler owner, leaving an app compatibility export. The structural closure count fell from 10 to 9 kernel→app/OS edges while 3 K0→P edges remain. Native execution and size/startup/RSS gates are still open; see `doc/09_report/compiler/target5_jit_owner_closure_2026-10-10.md`.
+
+### 2026-10-10 native JIT probe blocker
+
+The compiler-owned JIT compatibility probe remains unqualified: a current-source pure-Simple Stage 2 compiler reaches 1,009 HIR units but rejects 12 modules on unresolved type closure before linking. The exact failed types and declaration owners are recorded in `doc/08_tracking/bug/item5_jit_probe_hir_type_closure_2026-10-10.md`. Structural closure remains 3 K0→P and 9 kernel→app/OS, with demand-load and matched size/startup/RSS still open.

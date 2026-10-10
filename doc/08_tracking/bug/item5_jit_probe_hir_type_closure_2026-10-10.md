@@ -1,0 +1,11 @@
+# Item 5 JIT compatibility probe blocked by HIR type closure (2026-10-10)
+
+Status: OPEN. The no-stub native compatibility probe does not reach linking or execution.
+
+A rebuilt pure-Simple Stage 2 compiler (SHA-256 `4188084e40682302038ec51ebeb51181403320d71804ec383d5472890bee9a8d`) compiled 1,222 source units and passed parent sanity/provenance. The outer compiler-test matrix stopped before test execution because the delegated MC/DC-off rows lack the required explicit waiver. Evidence: `build/mini_builds/item56_stage2_hir_diag_20261010/bootstrap.log` and the Stage 2 admission receipts.
+
+With that compiler, `test/fixtures/compiler/jit_sffi_owner_native_probe.spl` parsed all 1,009 source files. HIR stored 997 modules and marked 12 failed; the edited compiler JIT owner, app compatibility export, and probe source each have PASS terminal receipts. The aggregate stopped before native linking. Receipt: `build/mini_builds/item5_jit_owner_native_probe_hir_diag_20261010/build.log` and its `cache/default/frontend/queue-2099872-0` ledger.
+
+The existing `[hir-fatal]` log lines contain 42 unresolved-type diagnostics: `ImplBlock` (18 across 9 failed modules), `MirType` (19 across 2), `SymbolId` (4 in interpreter AOP weave), and `MirSignature` (1 in transient owner). Several failed modules, including linker modules, do not mention `ImplBlock` in source. That suggests an imported or re-exported type-closure problem; it does not prove missing local imports in all nine files. The direct declaration owners are `src/compiler/25.traits/trait_impl.spl` (`ImplBlock`), `src/compiler/50.mir/mir_types.spl` (`MirType`, `MirSignature`), and `src/compiler/20.hir/hir_types.spl` (`SymbolId`).
+
+The pre-rebuild full-source probe also failed on the same 12 module paths. A temporary failure-only log addition was removed after finding the existing `[hir-fatal]` diagnostics, so no instrumentation remains in production source. This session reached the three-cycle verification cap. Next: isolate the first shared type-closure root in a fresh bounded cycle, fix it at its owner, then run the native compatibility probe and the required Item 5 size/startup/RSS cohorts.
