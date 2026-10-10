@@ -127,7 +127,13 @@ impl HirLowering:
         for method in trait_.methods:
             val method_kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
             val method_type = self.declared_callable_type(method, Some(symbol))
-            self.symbols.define(method.name, method_kind, method_type, method.span, method.visibility, false, self.module_filename)
+            val method_name = self.symbols.method_symbol_name(symbol, method.name)
+            self.symbols.define(method_name, method_kind, method_type, method.span, method.visibility, false, self.module_filename)
+        # Trait signatures carry the same explicit receiver slot as concrete
+        # methods. Retain its declared owner; dynamic lowering must not infer
+        # a receiver or its ABI from the first user argument.
+        val previous_method_self_type = self.current_method_self_type
+        self.current_method_self_type = Some(HirType(kind: HirTypeKind.Named(symbol, []), span: trait_.span))
         for m in trait_.methods:
             var hir_fn = self.lower_function(m)
             # #158 Phase B: a method of a GENERIC trait is an unmonomorphized
@@ -143,6 +149,7 @@ impl HirLowering:
             else:
                 defaults = defaults.push(hir_fn)
 
+        self.current_method_self_type = previous_method_self_type
         self.symbols.pop_scope()
 
         # Compute effective visibility using filename matching
@@ -382,6 +389,9 @@ impl HirLowering:
 
         HirImpl(
             type_: type_,
+            # This is an explicit desugared pair, not an optional field whose
+            # presence flag the constructor can infer from its payload.
+            has_trait_: impl_.has_trait_,
             trait_: trait_,
             type_params: type_params,
             where_clause: where_clause,

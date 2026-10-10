@@ -6,6 +6,8 @@ use compiler.mir._MirLowering.provider_metadata.*
 use compiler.mir._MirLowering.provider_globals.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLowering.native_trait_registration.*
+use compiler.mir._MirLowering.native_trait_thunks.*
 use compiler.mir._MirLowering.asm_and_targets.*
 use compiler.mir._MirLowering.transient_owner.*
 use compiler.mir._MirLowering.transient_owner_sffi.{
@@ -437,6 +439,9 @@ impl MirLowering:
             unsafe_depth: 0,
             errors: empty_errors,
             current_module_id: "",
+            native_trait_layouts: [],
+            native_trait_implementations: [],
+            native_trait_thunks: [],
             composite_layout_digests: {},
             composite_layout_owner_counts: {},
             external_layout_traces: [],
@@ -1570,6 +1575,19 @@ impl MirLowering:
         self.current_module_id = mir_layout_canonical_module_name(module.name)
         self.external_layout_traces = []
         self.symbols = module.symbols
+        # Provider SymbolIds are module-local: rebuild and relocate trait
+        # metadata whenever the active consumer symbol table changes.
+        self.native_trait_layouts = []
+        self.native_trait_implementations = []
+        self.native_trait_thunks = []
+        self.register_native_trait_declarations(module)
+        for trait_provider in providers:
+            if trait_provider.name != module.name:
+                self.register_native_trait_declarations(trait_provider)
+        self.register_native_trait_implementations(module)
+        for trait_provider in providers:
+            if trait_provider.name != module.name:
+                self.register_native_trait_implementations(trait_provider)
         self.exact_extern_signatures = {}
         for raw_declaration in module.functions.values():
             val declaration: HirFunction = raw_declaration
@@ -1798,6 +1816,7 @@ impl MirLowering:
             # accumulators after constants/statics have already lowered. Re-add
             # the now-complete module so its statics and module index are
             # available to the flat bootstrap LLVM emitter.
+            self.publish_native_trait_thunks(true)
             self.attach_external_layout_traces()
             bootstrap_mir_modules_add(self.builder.module)
             return self.builder.module
@@ -2122,6 +2141,7 @@ impl MirLowering:
 
         if bootstrap_trace:
             print "[mir-lower] lower_module:done"
+        self.publish_native_trait_thunks(false)
         self.attach_external_layout_traces()
         self.builder.module
 

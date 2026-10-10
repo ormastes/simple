@@ -1,0 +1,121 @@
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_data.*
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instructions.*
+use compiler.mir.native_trait_metadata.*
+use compiler.mir._MirLowering.native_trait_dispatch.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir.mir_lowering_stmts.*
+use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_functions_add}
+use compiler.hir.hir_types.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use std.common.crypto.sha256.{sha256_text}
+
+impl MirLowering:
+    me publish_native_trait_thunks(flat_bootstrap: bool):
+        var builder = self.builder
+        var module = builder.module
+        var functions = module.functions
+        for thunk in self.native_trait_thunks:
+            functions[thunk.symbol] = thunk
+            if flat_bootstrap: bootstrap_mir_functions_add(thunk.name, thunk, 0)
+        module.functions = functions
+        builder.module = module
+        self.builder = builder
+
+    me native_trait_copy_thunk(implementation: NativeTraitImplementation) -> text:
+        val name = "__simple_trait_copy_" + sha256_text(self.current_module_id + "\n" + implementation.trait_owner + "\n" + implementation.concrete_owner)
+        for existing in self.native_trait_thunks:
+            if existing.name == name: return name
+        val signature = MirSignature(params: [native_trait_data_pointer_type()],
+            return_type: native_trait_data_pointer_type(), is_variadic: false, params_known: true)
+        val symbol = self.symbols.define(name, SymbolKind.Function, nil,
+            Span.empty(), Visibility.Private, false, nil)
+        val outer_builder = self.builder
+        val outer_struct_values = self.struct_value_syms
+        val outer_type_ids = self.local_hir_type_ids
+        val outer_type_values = self.local_hir_type_values
+        val outer_isolation = self.local_hir_type_isolation_states
+        val outer_resources = self.local_hir_type_resource_states
+        val outer_runtime_values = self.runtime_value_local_ids
+        val outer_options = self.option_value_locals
+        val outer_nil = self.nil_locals
+        self.struct_value_syms = {}
+        self.local_hir_type_ids = []
+        self.local_hir_type_values = []
+        self.local_hir_type_isolation_states = []
+        self.local_hir_type_resource_states = []
+        self.runtime_value_local_ids = []
+        self.option_value_locals = {}
+        self.nil_locals = {}
+        var builder = MirBuilder.new()
+        builder.begin_function(symbol, name, signature, Span.empty())
+        var data = LocalId(id: -1)
+        for local in builder.locals:
+            match local.kind:
+                case LocalKind.Arg(0): data = local.id
+                case _: ()
+        if not implementation.reference_semantics:
+            val concrete_type = self.lower_type(implementation.concrete_type)
+            val concrete = builder.emit_bitcast(mir_operand_copy(data), concrete_type)
+            self.builder = builder
+            val concrete_id = match implementation.concrete_type.kind:
+                case HirTypeKind.Named(id, _): id
+                case _: SymbolId(id: -1)
+            val copied = self.copy_struct_value_recursive(concrete, implementation.concrete_name,
+                concrete_id, [implementation.concrete_name])
+            builder = self.builder
+            data = builder.emit_bitcast(mir_operand_copy(copied), native_trait_data_pointer_type())
+        builder.set_terminator(MirTerminator.Ret(Some(mir_operand_copy(data))))
+        self.native_trait_thunks.push(builder.end_function())
+        self.builder = outer_builder
+        self.struct_value_syms = outer_struct_values
+        self.local_hir_type_ids = outer_type_ids
+        self.local_hir_type_values = outer_type_values
+        self.local_hir_type_isolation_states = outer_isolation
+        self.local_hir_type_resource_states = outer_resources
+        self.runtime_value_local_ids = outer_runtime_values
+        self.option_value_locals = outer_options
+        self.nil_locals = outer_nil
+        name
+
+    me native_trait_method_thunk(implementation: NativeTraitImplementation,
+            slot: NativeTraitMethodSlot, index: i64) -> text:
+        val identity = self.current_module_id + "\n" + implementation.trait_owner + "\n" + implementation.concrete_owner + "\n" + slot.name
+        val name = "__simple_trait_method_" + sha256_text(identity)
+        for existing in self.native_trait_thunks:
+            if existing.name == name: return name
+        val signature = self.native_trait_slot_signature(slot)
+        val concrete_slot = implementation.signatures[index]
+        var concrete_params: [MirType] = []
+        for param in concrete_slot.params:
+            concrete_params.push(self.lower_type(param))
+        val concrete_signature = MirSignature(params: concrete_params,
+            return_type: self.lower_type(concrete_slot.result),
+            is_variadic: false, params_known: true)
+        val symbol = self.symbols.define(name, SymbolKind.Function, nil,
+            Span.empty(), Visibility.Private, false, nil)
+        var builder = MirBuilder.new()
+        builder.begin_function(symbol, name, signature, Span.empty())
+        var args: [MirOperand] = []
+        # begin_function's Arg locals are authoritative; bootstrap mode may
+        # omit the return local, so never assume argument local IDs.
+        for local in builder.locals:
+            match local.kind:
+                case LocalKind.Arg(argument_index):
+                    if argument_index == 0:
+                        val receiver = builder.emit_bitcast(mir_operand_copy(local.id), concrete_params[0])
+                        args.push(mir_operand_copy(receiver))
+                    else:
+                        args.push(mir_operand_copy(local.id))
+                case _: ()
+        val target = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(implementation.methods[index]),
+            MirType(kind: MirTypeKind.FuncPtr(concrete_signature))))
+        val result = builder.emit_call(target, args, concrete_signature.return_type)
+        var return_value: MirOperand? = nil
+        if val local = result: return_value = mir_operand_copy(local)
+        builder.set_terminator(MirTerminator.Ret(return_value))
+        self.native_trait_thunks.push(builder.end_function())
+        name

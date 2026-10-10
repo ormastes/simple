@@ -1,5 +1,7 @@
 # Part of src/compiler/50.mir/mir_lowering_expr.spl: expression dispatch, match-case, gpu lane, bitfield helpers
 use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir._MirLowering.native_trait_conversion.*
+use compiler.mir._MirLowering.native_trait_registration.*
 use compiler.mir._MirLoweringExpr.method_calls_literals.*
 use compiler.mir._MirLowering.global_initializer_guard.*
 use compiler.mir._MirLowering.provider_globals.mir_global_storage_name
@@ -2249,6 +2251,7 @@ impl MirLowering:
                 case Some(active_fn): self.resolved_call_hir_return_type(active_fn.symbol)
                 case None: nil
             if val found_return = declared_return:
+                result = self.coerce_native_trait_object(result, rv, found_return)
                 match found_return.kind:
                     case HirTypeKind.Optional(_):
                         result = self.ensure_option_handle(result, found_return)
@@ -4945,6 +4948,13 @@ impl MirLowering:
                     match exists_payload_type.kind:
                         case HirTypeKind.Float(_) | HirTypeKind.Bool:
                             self.remember_local_hir_type(result_local.id, exists_payload_type, 0, 0)
+                        case HirTypeKind.Named(_, _) | HirTypeKind.DynTrait(_):
+                            # The if-val binder carries a raw payload-or-nil
+                            # word. Preserve its exact declared trait owner so
+                            # calls in the present branch select its vtable,
+                            # without guessing from method names or impl count.
+                            if self.native_trait_owner_for_type(exists_payload_type) != "":
+                                self.remember_local_hir_type(result_local.id, exists_payload_type, 2, 0)
                         case _: ()
 
                 var b_merge = self.builder
@@ -5668,10 +5678,13 @@ impl MirLowering:
         # variable without the enum registry, which only exists here at
         # MIR-lowering time (self.enum_variant_index). Reclassify a Binding
         # arm into an Enum arm ONLY when its symbol's name is registered as a
-        # variant of EXACTLY ONE known enum -- a name matching zero enums (a
-        # real binding like `case x:`) or 2+ enums (genuinely ambiguous) is
-        # left as an ordinary Binding, unchanged, so plain bindings keep
-        # working exactly as before.
+        # unit variant of the subject's known enum. Only when the subject type
+        # is unavailable may a globally unique unit-variant owner be used.
+        # Payload variants, unknown names, and actual bindings remain bindings.
+        val match_subject_type = self.enum_match_expr_type(scrutinee)
+        var match_subject_owner = ""
+        if val typed_subject = match_subject_type:
+            match_subject_owner = self.enum_match_type_owner_key(typed_subject)
         var norm_arms: [HirMatchArm] = []
         var norm_i = 0
         while norm_i < arms.len():
@@ -5679,21 +5692,29 @@ impl MirLowering:
             match arm0.pattern.kind:
                 case Binding(bsym, _):
                     val bname = self.symbols.symbol_name_scalar_raw(bsym.id)
-                    # Step (c): owner search over the QUALIFIED keyspace, so two
-                    # distinct same-bare-named enums are counted as two owners
-                    # (the bare map keeps only the survivor) and a genuinely
-                    # ambiguous bare name stops being reclassified as a
-                    # unit-variant pattern against the wrong enum. Benign
-                    # identical registrations are deduped inside
-                    # `variant_owner_keys`, so the ordinary single-owner case is
-                    # unchanged.
-                    var owner_count = 0
-                    if bname != "":
-                        owner_count = self.variant_owner_keys(bname).len()
-                    if owner_count == 1:
+                    var selected_owner = ""
+                    var selected_type: HirType? = nil
+                    if match_subject_owner != "" and
+                            self.enum_variant_discriminant(match_subject_owner, bname) >= 0 and
+                            self.enum_variant_is_unit(match_subject_owner, bname):
+                        selected_owner = match_subject_owner
+                        selected_type = match_subject_type
+                    else if match_subject_owner == "" and bname != "":
+                        # Preserve the legacy unique-owner inference only when
+                        # the subject has no recoverable enum type, and still
+                        # require declaration metadata to prove a unit variant.
+                        val candidate_owners = self.variant_owner_keys(bname)
+                        if candidate_owners.len() == 1 and
+                                self.enum_variant_is_unit(candidate_owners[0], bname):
+                            selected_owner = candidate_owners[0]
+                    if selected_owner != "":
+                        val pattern_type = if val known_type = selected_type:
+                            known_type
+                        else:
+                            HirType(kind: HirTypeKind.Error, span: arm0.pattern.span)
                         val enum_pat = HirPattern(
                             kind: HirPatternKind.Enum(
-                                HirType(kind: HirTypeKind.Error, span: arm0.pattern.span),
+                                pattern_type,
                                 bname,
                                 nil
                             ),
