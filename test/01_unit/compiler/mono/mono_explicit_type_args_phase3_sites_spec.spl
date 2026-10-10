@@ -1,0 +1,95 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+# Explicit call type arguments at the two phase-3 E-MONO-032 site shapes
+
+BUG-mono_explicit_type_args_dropped_2026-10-10. Phase 3 (frozen stage2
+compiling the compiler) stopped with 35 x E-MONO-032 at call sites that DO
+spell their type arguments:
+
+- `return cas_batch_error_v1<CasBatchTransactionV1>(...)`
+  (`80.driver/cache/cas_batch_transaction.spl`): `T` occurs only in the
+  callee's return type;
+- `val done: MatchSiteScan = walk_hir_expr<MatchSiteScan>(e, start, f)`
+  (`35.semantics/enum_contract/hir_match_coverage.spl`): `C` also occurs
+  inside a fn-typed parameter.
+
+The frontend AST had no slot for call-site type arguments, so both reached
+the monomorphizer with empty `type_args` and depended on inference, which the
+natively compiled stage2 could not do for either shape. These cases pin that
+the written type arguments reach HIR and are used verbatim, including where
+no inference is possible at all.
+"""
+
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
+
+fn tail_call_type_arg_count(hir: HirModule, fn_name: text) -> i64:
+    var count = -1
+    for function_ in hir.functions.values():
+        if function_.name == fn_name:
+            if function_.body.has:
+                match function_.body.value.kind:
+                    case HirExprKind.Call(_, _, types):
+                        count = types.len()
+                    case _:
+                        count = -2
+    count
+
+describe "explicit call type arguments at the phase-3 site shapes":
+    it "carries <T> into HIR for a return-only generic (cas_batch_error_v1 shape)":
+        # @req REQ-SSPEC-COMPILER
+        step("return-only generic keeps its written type argument")
+        val src = "enum Er:\n    A\n    B\n\nstruct Txn:\n    id: i64\n\nfn err_v1<T>(e: Er) -> Result<T, Er>:\n    Err(e)\n\nfn begin() -> Result<Txn, Er>:\n    err_v1<Txn>(Er.A)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_xta_cas_hir.spl", "mono_xta_cas_hir", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_xta_cas_hir.spl")
+        val hir = hl.lower_module(parsed)
+        expect(tail_call_type_arg_count(hir, "begin")).to_equal(1)
+
+    it "carries <C> into HIR for a generic visitor with a fn-typed parameter (walk_hir_expr shape)":
+        # @req REQ-SSPEC-COMPILER
+        step("visitor call keeps its written type argument")
+        val src = "struct Node:\n    kids: [Node]\n    v: i64\n\nstruct Scan:\n    n: i64\n\nfn walk<C>(node: Node, ctx: C, f: fn(Node, C) -> C) -> C:\n    var acc: C = f(node, ctx)\n    for it in node.kids:\n        acc = walk(it, acc, f)\n    acc\n\nfn step_fn(node: Node, acc: Scan) -> Scan:\n    Scan(n: acc.n + node.v)\n\nfn root(n: Node, s: Scan) -> Scan:\n    walk<Scan>(n, s, step_fn)\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_xta_walk_hir.spl", "mono_xta_walk_hir", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_xta_walk_hir.spl")
+        val hir = hl.lower_module(parsed)
+        expect(tail_call_type_arg_count(hir, "root")).to_equal(1)
+
+    it "specializes the exact phase-3 statement forms with no diagnostic":
+        # @req REQ-SSPEC-COMPILER
+        step("return-position and annotated-let forms specialize")
+        val src = "enum Er:\n    A\n    B\n\nstruct Txn:\n    id: i64\n\nstruct Node:\n    kids: [Node]\n    v: i64\n\nstruct Scan:\n    n: i64\n\nfn err_v1<T>(e: Er) -> Result<T, Er>:\n    Err(e)\n\nfn walk<C>(node: Node, ctx: C, f: fn(Node, C) -> C) -> C:\n    var acc: C = f(node, ctx)\n    for it in node.kids:\n        acc = walk(it, acc, f)\n    acc\n\nfn step_fn(node: Node, acc: Scan) -> Scan:\n    Scan(n: acc.n + node.v)\n\nfn begin(b: bool) -> Result<Txn, Er>:\n    if b:\n        return err_v1<Txn>(Er.A)\n    Ok(Txn(id: 1))\n\nfn root(n: Node) -> i64:\n    val start = Scan(n: 0)\n    val done: Scan = walk<Scan>(n, start, step_fn)\n    done.n\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_xta_sites.spl", "mono_xta_sites", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_xta_sites.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(2)
+
+    it "uses the written type argument where nothing can be inferred":
+        # @req REQ-SSPEC-COMPILER
+        step("unannotated let of a return-only generic resolves from <T> alone")
+        # Without `<Txn>` this exact form is a loud E-MONO-032 (no argument
+        # and no declared context binds `T`), so a pass here can only come
+        # from the explicit type argument.
+        val src = "enum Er:\n    A\n\nstruct Txn:\n    id: i64\n\nfn err_v1<T>(e: Er) -> Result<T, Er>:\n    Err(e)\n\nfn f() -> i64:\n    val r = err_v1<Txn>(Er.A)\n    1\n"
+        val parsed = parse_full_frontend(src, "testdata/mono_xta_only.spl", "mono_xta_only", Logger(level: 0))
+        var hl = HirLowering.with_filename("testdata/mono_xta_only.spl")
+        val hir = hl.lower_module(parsed)
+        var mods: Dict<text, HirModule> = {}
+        mods["m"] = hir
+        val (_out, stats, diags) = run_monomorphization_with_diagnostics(mods)
+        expect(diags.len()).to_equal(0)
+        expect(stats.unresolved_generic_calls).to_equal(0)
+        expect(stats.specializations_created).to_equal(1)
