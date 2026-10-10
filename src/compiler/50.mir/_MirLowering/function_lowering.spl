@@ -1,3 +1,4 @@
+use compiler.mir._MirLoweringExpr.result_err_record_owner.*
 # Part of src/compiler/50.mir/mir_lowering.spl: function/const/type/block/range/inline-asm lowering, field resolution
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.bootstrap_globals.*
@@ -195,6 +196,7 @@ impl MirLowering:
         self.local_hir_type_resource_states = []
         self.bitfield_value_syms = {}
         self.struct_value_syms = {}
+        self.result_err_record_owners = {}
         # Keyed by LocalId like struct_value_syms, and LocalIds restart per
         # function: a `W(v: "s")` built in one function must not type the
         # fields of whatever local reuses its id in the next one.
@@ -1666,6 +1668,12 @@ impl MirLowering:
         Uses lowered value provenance before the base expression's type.
         Falls back to 0 if type cannot be determined.
         """
+        if self.result_err_record_owners.contains(base_local.id):
+            val owner = self.checked_result_err_record_owner(base_local.id, base.span)
+            if owner == "": return 0
+            if not self.struct_value_syms.contains(base_local.id) or self.struct_value_syms[base_local.id] != owner:
+                self.error_fatal("Result Err field has conflicting value provenance", Some(base.span))
+                return 0
         # Numeric SymbolIds are local to each module and can collide in an
         # entry-closure build. A lowered local's name-keyed provenance is
         # therefore authoritative when available.
@@ -1678,6 +1686,10 @@ impl MirLowering:
                     if value_fields[value_idx] == field_name:
                         return value_idx
                     value_idx = value_idx + 1
+
+        if self.result_err_record_owners.contains(base_local.id):
+            self.error_fatal("Result Err record field has no exact provider layout: {field_name}", Some(base.span))
+            return 0
 
         # Try to get the type symbol from the base expression's type
         val type_sym = self.expr_type_symbol(base)
