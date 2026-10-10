@@ -166,6 +166,7 @@ these (module-level statements).
 - `test/01_unit/compiler/50.mir/closure_capture_write_forms_spec.spl`: 32
   examples (14 declaration forms, 8 writes under binding constructs, 3
   stricter-than-seed, 1 position, 6 level switch / cache hit). 7 failed at
-  the first fix commit `e544d6c2d44`. Now 32/32.
+  the first fix commit (`33dd836c9fe` after rebase; reviewed as `e544d6c2d44`).
+  Now 32/32.
 - `test/01_unit/compiler/interpreter/nested_fn_enclosing_var_mutation_spec.spl`
   (shared checker, interpreter side): 7/7.
