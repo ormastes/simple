@@ -36,3 +36,21 @@ Required qualification: rebuild the producer, run the owner probe and normal
 missing-root closure, execute both ambiguous-overlay/default regressions, and
 prove disabled CUDA source closure and linked-symbol exclusion. No private
 compiler build or second attempt with the crashing producer was performed.
+
+## Changed producer qualification
+
+Producer `e9e8762c79e47d1c0db418d2a8ff5d5eda7b1ef8744ccff32227ae7463926491`
+includes the direct fallback correction. The native fixture
+`test/fixtures/compiler/source_root_missing_loader_probe.spl`, compiled with
+only `test/fixtures/compiler` as an explicit source root, imports an admitted
+relative sibling. This returns `Missing` from selected-root lookup and uses
+the direct importer-relative fallback. Build and execution passed, exit 0,
+printing `SOURCE_ROOT_MISSING_FALLBACK_PASS`. Logs:
+`build/cuda-policy/source-relative-e9e8-{build,run}.log`.
+
+A prior missing-module probe referenced a compiler module outside its admitted
+snapshot and returned the expected controlled unresolved-import error instead
+of SIGSEGV. Its log is `build/cuda-policy/source-missing-e9e8-build.log`.
+The general named-callback fixture remains unrun; only removal of callback
+dispatch from the loader is qualified. End-to-end source authority still fails
+as recorded in `source_root_worker_authority_gap_2026-10-11.md`.
