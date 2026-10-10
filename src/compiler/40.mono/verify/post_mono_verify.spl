@@ -38,6 +38,10 @@ struct MonoViolation:
     symbol: text
     detail: text
     chain: text
+    # Diagnostic code this violation renders under. The section 9.5 counters
+    # all render as E-MONO-031; the symbol-identity invariants below carry
+    # their own codes (E-MONO-035..038).
+    code: text
 
 struct PostMonoReport:
     """Section 9.5 post-monomorphization invariant counters.
@@ -54,6 +58,21 @@ struct PostMonoReport:
     unresolved_projection: i64
     # Fail-closed guard: a HIR variant this walker does not name explicitly.
     unreachable_variant: i64
+    # E-MONO-035: a specialization SymbolId that a module's symbol table
+    # already binds to another symbol (`walk$i64` named `walker_abi.C` after
+    # the caller's type parameter), or that was not allocated past the table.
+    # doc/08_tracking/bug/mono_specialization_symbol_id_collision_2026-10-10.md
+    symbol_id_collision: i64
+    # E-MONO-036: a call whose callee still binds a generic TEMPLATE that has
+    # no emitted definition in the callee's module (pruned, or owned by
+    # another module), so it would fail at link instead of here.
+    unemitted_template_call: i64
+    # E-MONO-037: the same specialization key (mangled name) emitted twice
+    # across the closure.
+    duplicate_specialization_key: i64
+    # E-MONO-038: devirtualized trait-object MIR in a module that gets
+    # archived (verifier-side twin of driver_trait_devirtualization_allowed_v1).
+    archived_devirtualization: i64
     violations: [MonoViolation]
 
 fn post_mono_report_empty() -> PostMonoReport:
@@ -68,6 +87,10 @@ fn post_mono_report_empty() -> PostMonoReport:
         unknown_mangling: 0,
         unresolved_projection: 0,
         unreachable_variant: 0,
+        symbol_id_collision: 0,
+        unemitted_template_call: 0,
+        duplicate_specialization_key: 0,
+        archived_devirtualization: 0,
         violations: []
     )
 
@@ -76,20 +99,71 @@ fn post_mono_report_total(r: PostMonoReport) -> i64:
     (r.unresolved_type_param + r.generic_call + r.generic_ctor
      + r.generic_method + r.generic_emitted_definition + r.any_erasure
      + r.error_from_substitution + r.unknown_mangling
-     + r.unresolved_projection + r.unreachable_variant)
+     + r.unresolved_projection + r.unreachable_variant
+     + r.symbol_id_collision + r.unemitted_template_call
+     + r.duplicate_specialization_key + r.archived_devirtualization)
 
 fn post_mono_report_is_clean(r: PostMonoReport) -> bool:
     post_mono_report_total(r) == 0
 
 fn post_mono_report_diagnostics(r: PostMonoReport) -> [text]:
-    """Render each violation as a section 17.5 `E-MONO-031` diagnostic."""
+    """Render each violation as a section 17.5 diagnostic under its own code
+    (`E-MONO-031` for the section 9.5 counters, `E-MONO-035..038` for the
+    symbol-identity invariants)."""
     var out: [text] = []
     for v in r.violations:
         val vt: MonoViolation = v
+        val code: text = vt.code ?? ""
+        val rendered_code = if code == "": "E-MONO-031" else: code
         out = out.push(
-            "E-MONO-031:\n{vt.counter}: {vt.detail}\n\ndefinition:\n  {vt.symbol}\n\ninstantiation chain:\n  {vt.chain}\n\nno MIR or object file was emitted."
+            "{rendered_code}:\n{vt.counter}: {vt.detail}\n\ndefinition:\n  {vt.symbol}\n\ninstantiation chain:\n  {vt.chain}\n\nno MIR or object file was emitted."
         )
     out
+
+fn post_mono_span_text(span: Span) -> text:
+    """`file:line:col` for a call-site diagnostic; empty parts are omitted."""
+    if span == nil:
+        return "<no span>"
+    val file: text = span.file ?? ""
+    if file == "":
+        return "{span.line}:{span.col}"
+    "{file}:{span.line}:{span.col}"
+
+fn post_mono_archive_admission_v1(module_name: text, devirtualized_calls: i64, archive_producing: bool) -> text?:
+    """E-MONO-038 when a module that will be ARCHIVED carries devirtualized
+    trait-object calls.
+
+    Verifier-side twin of `driver_trait_devirtualization_allowed_v1`
+    (80.driver/driver_pipeline_lowering.spl): the driver gate decides whether
+    MirLowering MAY devirtualize; this assertion checks, after lowering, that
+    no archive-bound MIR actually did. An archived consumer is never
+    invalidated when another package later adds an implementor, so a
+    devirtualized direct call baked into it would silently miscall.
+    Returns nil when admissible."""
+    if not archive_producing:
+        return nil
+    if devirtualized_calls <= 0:
+        return nil
+    Some("E-MONO-038:\narchived devirtualization: module `{module_name}` lowered {devirtualized_calls} devirtualized trait-object call(s) in an archive-producing lane\n\ndefinition:\n  {module_name}\n\ninstantiation chain:\n  driver_trait_devirtualization_allowed_v1 must be false for this lane\n\nno MIR or object file was emitted.")
+
+fn post_mono_specialization_manifest(modules: Dict<text, HirModule>) -> [text]:
+    """Sorted `module\\tmangled\\tsymbol_id` rows for every specialization in
+    the closure. Two runs of the mono pass over the same input must produce
+    byte-identical manifests (E-MONO-037 determinism half)."""
+    var rows: [text] = []
+    if modules == nil:
+        return rows
+    for key in modules.keys():
+        val m: HirModule = modules[key]
+        if m == nil:
+            continue
+        for fkey in m.functions.keys():
+            val f: HirFunction = m.functions[fkey]
+            val fname: text = f.name ?? ""
+            if fname.contains("$"):
+                val fs: SymbolId = f.symbol
+                rows = rows.push("{m.name}\t{fname}\t{fs.id}")
+    rows.sort()
 
 fn unreachable_variant(enum_name: text, where_: text) -> text:
     """A HIR variant reached the verifier that this walker does not name.
@@ -118,6 +192,21 @@ class PostMonoVerifier:
     # the mono pass failed to rewrite).
     template_syms: Dict<i64, text>
     transport_receipts: i64
+    # ---- closure-wide index (filled by index_closure before any module walk)
+    # Specialization SymbolId -> mangled name, over EVERY module. The mono
+    # pass hands out specialization ids from one process-wide counter, so an
+    # id is a specialization in every module it appears in.
+    spec_ids: Dict<i64, text>
+    # "<module>.<template name>" -> true for every generic template in the
+    # closure: those still emitted (type_params / is_generic_template) and
+    # those PRUNED after specialization (recovered from the `$` prefix of each
+    # specialization placed in the template's module).
+    template_keys: Dict<text, bool>
+    # ---- per-module state (set by verify_module)
+    cur_module: text
+    cur_symbols: SymbolTable
+    # Symbol ids that own a HirFunction in the module under verification.
+    cur_fn_ids: Dict<i64, bool>
 
     static fn create() -> PostMonoVerifier:
         PostMonoVerifier(
@@ -126,15 +215,153 @@ class PostMonoVerifier:
             chain: "",
             in_specialization: false,
             template_syms: {},
-            transport_receipts: 0
+            transport_receipts: 0,
+            spec_ids: {},
+            template_keys: {},
+            cur_module: "",
+            cur_symbols: nil,
+            cur_fn_ids: {}
         )
 
     me record(counter: text, detail: text):
+        self.record_coded("E-MONO-031", counter, detail)
+
+    me record_coded(code: text, counter: text, detail: text):
         var v = self.r.violations
         v = v.push(MonoViolation(
             counter: counter, symbol: self.symbol,
-            detail: detail, chain: self.chain))
+            detail: detail, chain: self.chain, code: code))
         self.r.violations = v
+
+    # ------------------------------------------------------------------
+    # Symbol-identity invariants (E-MONO-035..037)
+    # ------------------------------------------------------------------
+    me index_closure(modules: Dict<text, HirModule>):
+        """Collect every specialization id and every template key across the
+        closure. Also counts E-MONO-037 duplicate specialization keys: the
+        same mangled name emitted twice (in one module or across modules)."""
+        self.spec_ids = {}
+        self.template_keys = {}
+        var seen_keys: Dict<text, text> = {}
+        if modules == nil:
+            return
+        for key in modules.keys():
+            val m: HirModule = modules[key]
+            if m == nil:
+                continue
+            val mname: text = m.name ?? ""
+            for fkey in m.functions.keys():
+                val f: HirFunction = m.functions[fkey]
+                val fname: text = f.name ?? ""
+                val fs: SymbolId = f.symbol
+                if self.is_template(f.type_params, f.is_generic_template):
+                    self.template_keys["{mname}.{fname}"] = true
+                    continue
+                if not fname.contains("$"):
+                    continue
+                # A specialization lives in its template's module, so the
+                # `$` prefix names a template of THIS module (pruned or not).
+                self.template_keys["{mname}.{fname.split("$")[0]}"] = true
+                if seen_keys.has(fname):
+                    self.symbol = "{mname}.{fname}"
+                    self.chain = "first emitted in {seen_keys[fname]}"
+                    self.r.duplicate_specialization_key = self.r.duplicate_specialization_key + 1
+                    self.record_coded("E-MONO-037", "duplicate specialization key",
+                        "specialization key `{fname}` is emitted more than once (first in {seen_keys[fname]}, again in {mname})")
+                else:
+                    seen_keys[fname] = mname
+                self.spec_ids[fs.id] = fname
+
+    me table_symbol_name(sid: i64) -> text?:
+        """Name the module symbol table binds to `sid`, if any."""
+        if self.cur_symbols == nil:
+            return nil
+        val table: Dict<i64, HirSymbol> = self.cur_symbols.symbols
+        if table == nil:
+            return nil
+        if not table.has(sid):
+            return nil
+        val hs: HirSymbol = table[sid]
+        if hs == nil:
+            return nil
+        Some(hs.name ?? "")
+
+    me table_symbol_is_callable(sid: i64) -> bool:
+        if self.cur_symbols == nil:
+            return false
+        val table: Dict<i64, HirSymbol> = self.cur_symbols.symbols
+        if table == nil:
+            return false
+        if not table.has(sid):
+            return false
+        val hs: HirSymbol = table[sid]
+        if hs == nil:
+            return false
+        match hs.kind:
+            case SymbolKind.Function: true
+            case SymbolKind.Method: true
+            case _: false
+
+    me check_specialization_symbol(f: HirFunction):
+        """E-MONO-035 at the DEFINITION: a specialization's id must be unused
+        by the module table (allocated past its max id — true for both the
+        `next_symbol_id`-seeded allocator and a fixed high-range base) or, if
+        the table knows it, bound to a Function/Method of the same name."""
+        val fs: SymbolId = f.symbol
+        val sid: i64 = fs.id
+        val fname: text = f.name ?? ""
+        match self.table_symbol_name(sid):
+            Some(bound):
+                val bound_name: text = bound
+                if bound_name != fname or not self.table_symbol_is_callable(sid):
+                    self.r.symbol_id_collision = self.r.symbol_id_collision + 1
+                    self.record_coded("E-MONO-035", "specialization symbol id collision",
+                        "specialization `{fname}` was allocated SymbolId {sid}, which module `{self.cur_module}`'s symbol table already binds to `{bound_name}`; specialization ids must be allocated past the table's max id")
+            nil:
+                if self.cur_symbols != nil:
+                    if sid < self.cur_symbols.next_symbol_id:
+                        self.r.symbol_id_collision = self.r.symbol_id_collision + 1
+                        self.record_coded("E-MONO-035", "specialization symbol id not past table",
+                            "specialization `{fname}` was allocated SymbolId {sid} below module `{self.cur_module}`'s next free symbol id {self.cur_symbols.next_symbol_id}; a later definition in this module can alias it")
+
+    me check_callee_identity(sid: i64, site: Span):
+        """E-MONO-035 at a CALL SITE: the callee id is a specialization but the
+        CALLER's table binds that id to something else (the `walk$i64` ->
+        `walker_abi.C` shape, where the caller's type parameter `C` owned the
+        id). E-MONO-036: the callee id owns no function in this module and
+        the table says it is a generic template of the closure."""
+        if self.spec_ids.has(sid):
+            val spec_name: text = self.spec_ids[sid]
+            match self.table_symbol_name(sid):
+                Some(bound):
+                    val bound_name: text = bound
+                    if bound_name != spec_name:
+                        self.r.symbol_id_collision = self.r.symbol_id_collision + 1
+                        self.record_coded("E-MONO-035", "specialization symbol id collision",
+                            "call at {post_mono_span_text(site)} targets specialization `{spec_name}` through SymbolId {sid}, which module `{self.cur_module}`'s symbol table binds to `{bound_name}`; MIR would name the callee after that symbol")
+                nil:
+                    pass_do_nothing("id is free in the caller's table")
+            return
+        if self.cur_fn_ids.has(sid):
+            return
+        match self.table_symbol_name(sid):
+            Some(bound):
+                val callee_name: text = bound
+                if not self.table_symbol_is_callable(sid):
+                    return
+                var owner: text = self.cur_module
+                val table: Dict<i64, HirSymbol> = self.cur_symbols.symbols
+                val hs: HirSymbol = table[sid]
+                if val dm = hs.defining_module:
+                    val dmt: text = dm
+                    if dmt != "":
+                        owner = dmt
+                if self.template_keys.has("{owner}.{callee_name}"):
+                    self.r.unemitted_template_call = self.r.unemitted_template_call + 1
+                    self.record_coded("E-MONO-036", "call to un-emitted generic template",
+                        "call at {post_mono_span_text(site)} still binds generic template `{owner}.{callee_name}` (SymbolId {sid}), which has no emitted definition; type arguments were neither written nor inferred, and the link would fail on the template symbol")
+            nil:
+                pass_do_nothing("unknown callee id is not a template")
 
     me hit_type_param(name: text):
         self.r.unresolved_type_param = self.r.unresolved_type_param + 1
@@ -673,6 +900,8 @@ class PostMonoVerifier:
         if self.template_syms.has(sid):
             self.r.generic_call = self.r.generic_call + 1
             self.record("generic call", "call site still targets generic template `{self.template_syms[sid]}` (type arguments neither written nor inferred)")
+            return
+        self.check_callee_identity(sid, callee.span)
 
     me flag_template(kind: text, def_name: text):
         self.r.generic_emitted_definition = self.r.generic_emitted_definition + 1
@@ -683,11 +912,15 @@ class PostMonoVerifier:
             return self.r
         val mname: text = module.name
         self.template_syms = {}
+        self.cur_module = mname ?? ""
+        self.cur_symbols = module.symbols
+        self.cur_fn_ids = {}
         for key in module.functions.keys():
             val tf: HirFunction = module.functions[key]
+            val tsym: SymbolId = tf.symbol
+            self.cur_fn_ids[tsym.id] = true
             if self.is_template(tf.type_params, tf.is_generic_template):
-                val ts: SymbolId = tf.symbol
-                self.template_syms[ts.id] = tf.name
+                self.template_syms[tsym.id] = tf.name
         for key in module.functions.keys():
             val f: HirFunction = module.functions[key]
             self.enter(mname, f.name)
@@ -696,6 +929,7 @@ class PostMonoVerifier:
                 continue
             if self.in_specialization:
                 self.check_mangling(f.name)
+                self.check_specialization_symbol(f)
             self.walk_params(f.params)
             if f.return_type != nil:
                 self.walk_type_kind(f.return_type.kind)
@@ -741,6 +975,10 @@ class PostMonoVerifier:
 fn post_mono_verify(module: HirModule) -> PostMonoReport:
     """Verify the section 9.5 invariants over one post-mono HIR module."""
     var v = PostMonoVerifier.create()
+    if module != nil:
+        var one: Dict<text, HirModule> = {}
+        one[module.name ?? ""] = module
+        v.index_closure(one)
     v.verify_module(module)
 
 fn post_mono_verify_modules(modules: Dict<text, HirModule>) -> PostMonoReport:
@@ -748,6 +986,7 @@ fn post_mono_verify_modules(modules: Dict<text, HirModule>) -> PostMonoReport:
     var v = PostMonoVerifier.create()
     if modules == nil:
         return v.r
+    v.index_closure(modules)
     for key in modules.keys():
         val m: HirModule = modules[key]
         v.verify_module(m)

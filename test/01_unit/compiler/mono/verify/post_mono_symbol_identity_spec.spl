@@ -1,0 +1,403 @@
+"""
+# Post-mono verifier: specialization symbol-identity invariants (E-MONO-035..038)
+
+Bug class 13 (`mono_specialization_symbol_id_collision_2026-10-10.md`): the
+mono pass seeded specialization ids past the largest FUNCTION id, but a
+module's symbol table also holds type parameters and locals with higher ids,
+so `walk$i64` landed on the id of the type parameter `C` and MIR named it
+`walker_abi.C`. Nothing downstream noticed.
+
+This spec pins four verifier-side invariants, each with a constructed
+violation and a positive real-shape case:
+
+  * E-MONO-035 — a specialization's SymbolId is unused by the module table
+    (allocated past `next_symbol_id`, which both the table-seeded allocator
+    and a fixed high-range base satisfy), and a call site's callee id is
+    never bound by the CALLER's table to a different symbol;
+  * E-MONO-036 — no call still binds a generic template that has no emitted
+    definition (pruned after specialization);
+  * E-MONO-037 — every specialization key is emitted once, and the
+    specialization manifest is identical across two runs of the real pass;
+  * E-MONO-038 — an archive-producing lane refuses a module that lowered a
+    devirtualized trait-object call (`post_mono_archive_admission_v1`).
+
+It also runs the REAL mono pass over the walker shape with a populated symbol
+table: before the allocator fix the specialization took the type parameter's
+id (E-MONO-035); after it the report is clean.
+"""
+
+use std.spec
+use compiler.hir.hir.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.mono.monomorphize_integration.{run_monomorphization}
+use compiler.verify.post_mono_verify.*
+
+fn mk_span() -> Span:
+    Span.empty()
+
+fn site_span() -> Span:
+    Span(start: 0, end: 0, line: 12, col: 5, file: "walker_abi.spl", length: 0)
+
+fn mk_type(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: mk_span())
+
+fn mk_expr(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: mk_span())
+
+fn mk_expr_at(kind: HirExprKind, span: Span) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: nil, span: span)
+
+fn mk_typed_expr(kind: HirExprKind, ty: HirType) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: ty, span: mk_span())
+
+fn mk_block(stmts: [HirStmt], value: HirExpr) -> HirBlock:
+    HirBlock(stmts: stmts, has: true, value: value, span: mk_span())
+
+fn mk_fn(id: i64, name: text, type_params: [HirTypeParam], params: [HirParam], ret: HirType, body: HirBlock) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: id),
+        name: name,
+        type_params: type_params,
+        params: params,
+        return_type: ret,
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(),
+        is_gpu_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: ""
+    )
+
+fn mk_module_with_table(name: text, funcs: [HirFunction], table: SymbolTable) -> HirModule:
+    var functions: Dict<SymbolId, HirFunction> = {}
+    for f in funcs:
+        val ft: HirFunction = f
+        functions[ft.symbol] = ft
+    HirModule(
+        name: name,
+        path: "synthetic/{name}.spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: table,
+        functions: functions,
+        gpu_function_targets: {},
+        gpu_function_backend_orders: {},
+        classes: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+
+fn mk_module(name: text, funcs: [HirFunction]) -> HirModule:
+    mk_module_with_table(name, funcs, SymbolTable.new())
+
+fn i64_type() -> HirType:
+    mk_type(HirTypeKind.Int(64, true))
+
+fn c_type() -> HirType:
+    mk_type(HirTypeKind.TypeParam("C", []))
+
+fn c_param() -> HirTypeParam:
+    HirTypeParam(symbol: SymbolId(id: 90), name: "C", bounds: [],
+                 has_default: false, default: nil, span: mk_span())
+
+fn param(id: i64, name: text, ty: HirType) -> HirParam:
+    HirParam(symbol: SymbolId(id: id), name: name, type_: ty,
+             has_default: false, default: nil, span: mk_span(), is_mutable: false)
+
+fn define_n(table: SymbolTable, count: i64, kind: SymbolKind, prefix: text):
+    """Define `count` throwaway symbols so the table's next id moves past them."""
+    var i = 0
+    while i < count:
+        val _ = table.define("{prefix}{i}", kind, nil, mk_span(), Visibility.Private, false, nil)
+        i = i + 1
+
+fn call_stmt(callee_id: i64, span: Span) -> HirStmt:
+    val call = mk_expr_at(HirExprKind.Call(
+        mk_expr_at(HirExprKind.Var(SymbolId(id: callee_id)), span),
+        [HirCallArg(has_name: false, name: "", value: mk_expr(HirExprKind.IntLit(3, nil)), span: mk_span())],
+        []
+    ), span)
+    HirStmt(kind: HirStmtKind.Expr(call), span: mk_span())
+
+fn spec_fn(id: i64) -> HirFunction:
+    # `walk$i64`: a specialization (name carries `$`), monomorphic body.
+    mk_fn(id, "walk$i64", [], [param(id + 100, "ctx", i64_type())], i64_type(),
+          mk_block([], mk_typed_expr(HirExprKind.Var(SymbolId(id: id + 100)), i64_type())))
+
+fn caller_fn(id: i64, callee_id: i64) -> HirFunction:
+    mk_fn(id, "main", [], [], mk_type(HirTypeKind.Unit),
+          mk_block([call_stmt(callee_id, site_span())], mk_expr(HirExprKind.NilLit)))
+
+fn codes_of(report: PostMonoReport) -> [text]:
+    var out: [text] = []
+    for d in post_mono_report_diagnostics(report):
+        val dt: text = d
+        out = out.push(dt.split(":")[0])
+    out
+
+fn count_code(report: PostMonoReport, code: text) -> i64:
+    var n = 0
+    for c in codes_of(report):
+        if c == code:
+            n = n + 1
+    n
+
+# --- fixtures: E-MONO-035 at the definition --------------------------------
+
+fn table_binding_c_at(id_before_c: i64) -> SymbolTable:
+    """A table whose TypeParam `C` holds id `id_before_c` and whose next free
+    id is `id_before_c + 1`."""
+    var table = SymbolTable.new()
+    define_n(table, id_before_c, SymbolKind.Variable, "v")
+    val _ = table.define("C", SymbolKind.TypeParam, nil, mk_span(), Visibility.Private, false, nil)
+    table
+
+fn spec_on_type_param_id() -> HirModule:
+    # Table: v0..v4 (ids 0..4), C (id 5), next free = 6. Spec takes id 5.
+    mk_module_with_table("pm_collide_def", [spec_fn(5)], table_binding_c_at(5))
+
+fn spec_below_next_free_id() -> HirModule:
+    var table = SymbolTable.new()
+    define_n(table, 8, SymbolKind.Variable, "v")
+    # id 3 is a (freed) gap below next free = 8, bound to nothing.
+    var functions: [HirFunction] = [spec_fn(3)]
+    var tbl = table
+    tbl.symbols.remove(3)
+    mk_module_with_table("pm_below_next", functions, tbl)
+
+fn spec_past_table() -> HirModule:
+    mk_module_with_table("pm_past_table", [spec_fn(6)], table_binding_c_at(5))
+
+fn spec_high_range() -> HirModule:
+    # The parked allocator scheme: ids start at 2^50.
+    mk_module_with_table("pm_high_range", [spec_fn(1125899906842624)], table_binding_c_at(5))
+
+fn spec_registered_in_table() -> HirModule:
+    # The alternative fix direction: the specialization IS in the table, as a
+    # Function of the same name. Also admissible.
+    var table = SymbolTable.new()
+    define_n(table, 5, SymbolKind.Variable, "v")
+    val sid = table.define("walk$i64", SymbolKind.Function, nil, mk_span(), Visibility.Public, false, nil)
+    mk_module_with_table("pm_registered", [spec_fn(sid.id)], table)
+
+# --- fixtures: E-MONO-035 at the call site -----------------------------------
+
+fn caller_table_binds_spec_id() -> Dict<text, HirModule>:
+    # Template module owns `walk$i64` at id 5 (its own table is empty, so the
+    # definition is fine). The CALLER's table binds id 5 to its own `C`.
+    var modules: Dict<text, HirModule> = {}
+    modules["walker_tpl"] = mk_module("walker_tpl", [spec_fn(5)])
+    modules["walker_abi"] = mk_module_with_table("walker_abi", [caller_fn(0, 5)], table_binding_c_at(5))
+    modules
+
+fn caller_table_free_at_spec_id() -> Dict<text, HirModule>:
+    var modules: Dict<text, HirModule> = {}
+    modules["walker_tpl"] = mk_module("walker_tpl", [spec_fn(50)])
+    modules["walker_abi"] = mk_module_with_table("walker_abi", [caller_fn(0, 50)], table_binding_c_at(5))
+    modules
+
+# --- fixtures: E-MONO-036 -----------------------------------------------------
+
+fn call_binds_pruned_template() -> HirModule:
+    # Table: `walk` is Function id 0 (the template, pruned from `functions`
+    # after `walk$i64` was emitted); the call still targets id 0.
+    var table = SymbolTable.new()
+    val _ = table.define("walk", SymbolKind.Function, nil, mk_span(), Visibility.Public, false, nil)
+    mk_module_with_table("pm_pruned", [spec_fn(7), caller_fn(1, 0)], table)
+
+fn call_targets_specialization() -> HirModule:
+    var table = SymbolTable.new()
+    val _ = table.define("walk", SymbolKind.Function, nil, mk_span(), Visibility.Public, false, nil)
+    mk_module_with_table("pm_rewritten", [spec_fn(7), caller_fn(1, 7)], table)
+
+fn call_targets_plain_function_sharing_a_template_name() -> HirModule:
+    # A NON-generic `walk` that is still emitted (id 0 owns a HirFunction) is
+    # a normal call even though another module has a `walk` template.
+    var table = SymbolTable.new()
+    val _ = table.define("walk", SymbolKind.Function, nil, mk_span(), Visibility.Public, false, nil)
+    val plain = mk_fn(0, "walk", [], [param(100, "n", i64_type())], i64_type(),
+                      mk_block([], mk_typed_expr(HirExprKind.Var(SymbolId(id: 100)), i64_type())))
+    mk_module_with_table("pm_plain", [plain, caller_fn(1, 0)], table)
+
+# --- fixtures: E-MONO-037 -----------------------------------------------------
+
+fn duplicate_key_across_modules() -> Dict<text, HirModule>:
+    var modules: Dict<text, HirModule> = {}
+    modules["dup_a"] = mk_module("dup_a", [spec_fn(5)])
+    modules["dup_b"] = mk_module("dup_b", [spec_fn(6)])
+    modules
+
+# --- fixture: the real pass over the walker shape ----------------------------
+
+fn walker_modules() -> Dict<text, HirModule>:
+    """`fn walk<C>(n: i64, ctx: C) -> C` + `main` calling `walk<i64>(3, 0)`,
+    in a module whose symbol table numbers `C` ABOVE both functions (ids 7
+    and 8): v0..v8 (ids 0..8), C (id 9), next free 10."""
+    val walk = mk_fn(7, "walk", [c_param()], [param(71, "n", i64_type()), param(72, "ctx", c_type())],
+                     c_type(), mk_block([], mk_typed_expr(HirExprKind.Var(SymbolId(id: 72)), c_type())))
+    val call = mk_expr_at(HirExprKind.Call(
+        mk_expr_at(HirExprKind.Var(SymbolId(id: 7)), site_span()),
+        [HirCallArg(has_name: false, name: "", value: mk_expr(HirExprKind.IntLit(3, nil)), span: mk_span()),
+         HirCallArg(has_name: false, name: "", value: mk_expr(HirExprKind.IntLit(0, nil)), span: mk_span())],
+        [i64_type()]
+    ), site_span())
+    val main_fn = mk_fn(8, "main", [], [], mk_type(HirTypeKind.Unit),
+                        mk_block([HirStmt(kind: HirStmtKind.Expr(call), span: mk_span())],
+                                 mk_expr(HirExprKind.NilLit)))
+    var modules: Dict<text, HirModule> = {}
+    modules["walker_abi"] = mk_module_with_table("walker_abi", [walk, main_fn], table_binding_c_at(9))
+    modules
+
+# ---------------------------------------------------------------------------
+
+describe "E-MONO-035: specialization symbol id is unused and past the table":
+    it "flags a specialization allocated on a type parameter's id":
+        val r = post_mono_verify(spec_on_type_param_id())
+        expect r.symbol_id_collision == 1
+        expect count_code(r, "E-MONO-035") == 1
+        val d: text = post_mono_report_diagnostics(r)[0]
+        expect d.contains("`walk$i64`")
+        expect d.contains("binds to `C`")
+
+    it "flags a specialization allocated below the table's next free id":
+        val r = post_mono_verify(spec_below_next_free_id())
+        expect r.symbol_id_collision == 1
+        expect count_code(r, "E-MONO-035") == 1
+
+    it "accepts an id allocated exactly past the table (next_symbol_id scheme)":
+        val r = post_mono_verify(spec_past_table())
+        expect r.symbol_id_collision == 0
+        expect post_mono_report_is_clean(r)
+
+    it "accepts a high-range id (fixed-base scheme) against the same table":
+        val r = post_mono_verify(spec_high_range())
+        expect r.symbol_id_collision == 0
+        expect post_mono_report_is_clean(r)
+
+    it "accepts a specialization the table registers as a Function of the same name":
+        val r = post_mono_verify(spec_registered_in_table())
+        expect r.symbol_id_collision == 0
+        expect post_mono_report_is_clean(r)
+
+    it "flags a call whose caller table binds the specialization id to another symbol, with the call-site span":
+        val r = post_mono_verify_modules(caller_table_binds_spec_id())
+        expect r.symbol_id_collision == 1
+        val d: text = post_mono_report_diagnostics(r)[0]
+        expect d.starts_with("E-MONO-035")
+        expect d.contains("walker_abi.spl:12:5")
+        expect d.contains("binds to `C`")
+
+    it "accepts a cross-module call whose id is free in the caller's table":
+        val r = post_mono_verify_modules(caller_table_free_at_spec_id())
+        expect post_mono_report_is_clean(r)
+
+describe "E-MONO-036: no call binds an un-emitted generic template":
+    it "flags a call still bound to a pruned template, naming the template and the site":
+        val r = post_mono_verify(call_binds_pruned_template())
+        expect r.unemitted_template_call == 1
+        expect count_code(r, "E-MONO-036") == 1
+        val d: text = post_mono_report_diagnostics(r)[0]
+        expect d.contains("pm_pruned.walk")
+        expect d.contains("walker_abi.spl:12:5")
+
+    it "accepts the same module once the call targets the specialization":
+        val r = post_mono_verify(call_targets_specialization())
+        expect r.unemitted_template_call == 0
+        expect post_mono_report_is_clean(r)
+
+    it "does not confuse an emitted non-generic function with a template of the same name":
+        var modules: Dict<text, HirModule> = {}
+        modules["pm_plain"] = call_targets_plain_function_sharing_a_template_name()
+        modules["pm_other"] = mk_module("pm_other", [spec_fn(40)])
+        val r = post_mono_verify_modules(modules)
+        expect r.unemitted_template_call == 0
+        expect post_mono_report_is_clean(r)
+
+describe "E-MONO-037: specialization keys are unique and deterministic":
+    it "flags the same mangled key emitted in two modules":
+        val r = post_mono_verify_modules(duplicate_key_across_modules())
+        expect r.duplicate_specialization_key == 1
+        expect count_code(r, "E-MONO-037") == 1
+        val d: text = post_mono_report_diagnostics(r)[0]
+        expect d.contains("`walk$i64`")
+
+    it "produces a sorted manifest of module, key and id":
+        val m = post_mono_specialization_manifest(duplicate_key_across_modules())
+        expect m.len() == 2
+        expect m[0] == "dup_a\twalk$i64\t5"
+        expect m[1] == "dup_b\twalk$i64\t6"
+
+    it "yields an identical manifest across two runs of the real mono pass":
+        val (first, _) = run_monomorphization(walker_modules())
+        val (second, _) = run_monomorphization(walker_modules())
+        val m1 = post_mono_specialization_manifest(first)
+        val m2 = post_mono_specialization_manifest(second)
+        expect m1.len() == 1
+        expect m1.len() == m2.len()
+        expect m1[0] == m2[0]
+        expect m1[0].starts_with("walker_abi\twalk$i64\t")
+
+describe "E-MONO-038: devirtualized MIR is never archived":
+    it "refuses an archive-producing module that devirtualized a trait call":
+        val verdict = post_mono_archive_admission_v1("pkg.consumer", 2, true)
+        expect verdict != nil
+        val vt: text = verdict ?? ""
+        expect vt.starts_with("E-MONO-038")
+        expect vt.contains("pkg.consumer")
+        expect vt.contains("2 devirtualized")
+
+    it "admits a non-archiving lane regardless of devirtualization":
+        expect post_mono_archive_admission_v1("pkg.consumer", 2, false) == nil
+
+    it "admits an archive-producing module with zero devirtualized calls":
+        expect post_mono_archive_admission_v1("pkg.consumer", 0, true) == nil
+
+describe "real mono pass: the walker shape with a populated symbol table":
+    it "allocates the specialization past the table, so the verifier is clean and the spec id is not the type parameter's":
+        val (result, _) = run_monomorphization(walker_modules())
+        val r = post_mono_verify_modules(result)
+        expect r.symbol_id_collision == 0
+        expect r.unemitted_template_call == 0
+        expect r.duplicate_specialization_key == 0
+        expect post_mono_report_is_clean(r)
+        val m = post_mono_specialization_manifest(result)
+        expect m.len() == 1
+        # Table ids 0..9 are taken (C is 9); the specialization must be >= 10.
+        expect m[0].ends_with("\t9") == false
+        val id_text: text = m[0].split("\t")[2]
+        expect id_text.to_int() >= 10
+
+    it "renders a symbol-identity violation under its own code, not E-MONO-031":
+        val r = post_mono_verify(spec_on_type_param_id())
+        for d in post_mono_report_diagnostics(r):
+            val dt: text = d
+            expect dt.starts_with("E-MONO-031") == false
