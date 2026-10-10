@@ -29,6 +29,7 @@ use compiler.hir.hir_lowering.items.*
 use compiler.mir.mir.*
 use compiler.common.driver_core_types.{driver_core_compile_options_default}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.core.parser.{par_had_error_get}
 
 struct GuardLowered:
     messages: [text]
@@ -245,6 +246,49 @@ describe "builtin method extras: proven numeric receivers still lower":
         expect(guard_has(low.callees, "rt_math_round")).to_equal(true)
         expect(guard_has(low.callees, "rt_math_floor")).to_equal(true)
 
+    # Type-INFERRED numeric receivers: no declared type on the local, so the
+    # proof has to come from the initialiser / producer expression.
+    it "a local initialised from a numeric literal":
+        val low = guard_lower("fn f(es: [i64]) -> i64:\n" +
+            "    var best = 0\n" +
+            "    for e in es:\n" +
+            "        best = best.max(e)\n" +
+            "    val ratio = 1.5\n" +
+            "    best + ratio.round().to_i64()\n")
+        for m in low.messages:
+            print "diagnostic: {m}"
+        expect(low.messages.len()).to_equal(0)
+        expect(guard_has(low.labels, "max_pick")).to_equal(true)
+        expect(guard_has(low.callees, "rt_math_round")).to_equal(true)
+
+    it "a local initialised from len(), and len() used directly":
+        val low = guard_lower("fn f(xs: [i64], path: text, k: i64) -> i64:\n" +
+            "    val n = xs.len()\n" +
+            "    n.min(k) + xs.len().min(3) + path.len().min(63)\n")
+        for m in low.messages:
+            print "diagnostic: {m}"
+        expect(low.messages.len()).to_equal(0)
+        expect(guard_has(low.labels, "min_pick")).to_equal(true)
+
+    it "an element of a typed numeric array":
+        val low = guard_lower("fn f(xs: [i64], fs: [f64]) -> i64:\n" +
+            "    xs[0].max(1) + fs[0].floor().to_i64()\n")
+        for m in low.messages:
+            print "diagnostic: {m}"
+        expect(low.messages.len()).to_equal(0)
+        expect(guard_has(low.labels, "max_pick")).to_equal(true)
+        expect(guard_has(low.callees, "rt_math_floor")).to_equal(true)
+
+    it "an element of a user-struct array and a local initialised from a user value stay unhooked":
+        val elem = guard_builtin_fingerprints(guard_lower(guard_user_type + "fn g(vs: [V]) -> i64:\n    val r = vs[0].max(vs[1])\n    0\n"))
+        for f in elem:
+            print "struct element hijacked by builtin: {f}"
+        expect(elem.len()).to_equal(0)
+        val bound = guard_builtin_fingerprints(guard_lower(guard_user_type + "fn g() -> i64:\n    val (a, b) = pair()\n    val c = a\n    val r = c.max(b)\n    0\n"))
+        for f in bound:
+            print "rebound handle hijacked by builtin: {f}"
+        expect(bound.len()).to_equal(0)
+
 describe "builtin method extras: every rejection is fatal and leaves a panic placeholder":
     it "int.min(float)":
         val low = guard_lower("fn f(n: i64, g: f64) -> i64:\n    n.min(g)\n")
@@ -287,6 +331,21 @@ describe "builtin method extras: every rejection is fatal and leaves a panic pla
         expect(guard_fatal_with(low, "E-MIR-EXPR-Comprehension")).to_equal(true)
         expect(guard_has(low.callees, "rt_panic")).to_equal(true)
         expect(guard_has(low.labels, "comp_body")).to_equal(false)
+
+describe "builtin method extras: nested comprehension clauses":
+    # The spec harness lowers whatever the parser recovered; the DRIVER stops
+    # at par_had_error_get(). A second `for` clause (or a second `if`) is a
+    # parse error in the pure-Simple frontend exactly as in the seed
+    # ("expected ], got for"), so it never reaches MIR in a real build.
+    it "a second for clause is rejected by the parser":
+        val parsed = parse_full_frontend("fn f(xs: [i64]) -> i64:\n    val ys = [a for a in xs for b in xs]\n    ys.len()\n",
+            "testdata/fixture_builtin_guard.spl", "fixture_builtin_guard", Logger(level: 0))
+        expect(par_had_error_get()).to_equal(true)
+
+    it "a single-clause comprehension parses cleanly":
+        val parsed = parse_full_frontend("fn f(xs: [i64]) -> i64:\n    val ys = [a for a in xs if a > 0]\n    ys.len()\n",
+            "testdata/fixture_builtin_guard.spl", "fixture_builtin_guard", Logger(level: 0))
+        expect(par_had_error_get()).to_equal(false)
 
 describe "builtin method extras: reduce accumulator kind":
     it "f64 elements with an integer init are rejected, not folded through i64":
