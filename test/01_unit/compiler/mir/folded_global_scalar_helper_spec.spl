@@ -1,0 +1,174 @@
+"""Executable parser/HIR/MIR regressions for folded module scalar helper ownership."""
+# @req: REQ-COMPILER-MIR-GLOBAL-ADDR-001
+
+use std.spec
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use compiler.common.config.{Logger}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir._MirLowering.bootstrap_globals.{
+    bootstrap_mir_functions_reset, bootstrap_mir_modules_add,
+    bootstrap_mir_static_alignment_at, bootstrap_mir_static_visibility_at}
+use compiler.mir_opt.mir_opt.var_reassign_ssa.{ssa_var_transform_blocks}
+use compiler.interp.mir_interpreter.{MirInterpreter}
+
+fn lower_static_ref_source(src: text, name: text) -> MirModule:
+    val parsed = parse_full_frontend(src, "testdata/{name}.spl", name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/{name}.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    expect(hir_lowering.errors.len()).to_equal(0)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    expect(mir_lowering.errors.len()).to_equal(0)
+    mir
+
+fn global_addr_count(module: MirModule) -> i64:
+    var count = 0
+    for function in module.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case GlobalAddr(_, _, _): count = count + 1
+                    case _: ()
+    count
+
+fn load_global_count(module: MirModule) -> i64:
+    var count = 0
+    for function in module.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case LoadGlobal(_, _): count = count + 1
+                    case _: ()
+    count
+
+describe "folded module scalar helper ownership":
+    it "lowers shared and mutable static references without loading first":
+        step("Run source through parser, HIR, and MIR")
+        val mir = lower_static_ref_source(
+            "val IMM = 7\nvar MUT = 9\nfn refs():\n" +
+            "    unsafe:\n        val a = &IMM\n        val b = &IMM\n" +
+            "        val c = &mut MUT\n", "global_addr_refs")
+        expect(global_addr_count(mir)).to_equal(3)
+        expect(load_global_count(mir)).to_equal(0)
+        expect(mir.statics.values().len()).to_equal(2)
+        step("Verify the immutable address owns one typed initialized storage slot")
+        var immutable_slots = 0
+        var immutable_symbol = -1
+        for static_ in mir.statics.values():
+            if static_.name.ends_with("IMM"):
+                immutable_slots = immutable_slots + 1
+                immutable_symbol = static_.symbol.id
+                expect(static_.is_mutable).to_equal(false)
+                expect(static_.type_.kind).to_equal(MirTypeKind.I64)
+                match static_.init:
+                    case Some(constant):
+                        expect(constant.symbol.id).to_equal(static_.symbol.id)
+                        expect(constant.value).to_equal(MirConstValue.Int(7))
+                        expect(constant.type_.kind).to_equal(static_.type_.kind)
+                    case None:
+                        fail("Address-taken immutable scalar lacks its initializer")
+        expect(immutable_slots).to_equal(1)
+        var shared_count = 0
+        var mutable_count = 0
+        var canonical_immutable_addresses = 0
+        for function in mir.functions.values():
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case GlobalAddr(_, symbol, mutable):
+                            if mutable: mutable_count = mutable_count + 1
+                            else: shared_count = shared_count + 1
+                            if not mutable and symbol.id == immutable_symbol:
+                                canonical_immutable_addresses = canonical_immutable_addresses + 1
+                        case _: ()
+        expect(shared_count).to_equal(2)
+        expect(mutable_count).to_equal(1)
+        expect(canonical_immutable_addresses).to_equal(2)
+
+    it "preserves text and boolean values in address-taken immutable storage":
+        # @manual: show
+        step("Lower real text and boolean global addresses")
+        val mir = lower_static_ref_source(
+            "val LABEL = \"trace\"\nval ENABLED = true\nfn refs():\n" +
+            "    unsafe:\n        val label = &LABEL\n        val enabled = &ENABLED\n",
+            "global_addr_scalar_types")
+        expect(global_addr_count(mir)).to_equal(2)
+        expect(load_global_count(mir)).to_equal(0)
+        expect(mir.statics.values().len()).to_equal(2)
+        var label_slots = 0
+        var enabled_slots = 0
+        var label_symbol = -1
+        var enabled_symbol = -1
+        for static_ in mir.statics.values():
+            expect(static_.is_mutable).to_equal(false)
+            match static_.init:
+                case Some(constant):
+                    expect(constant.type_.kind).to_equal(static_.type_.kind)
+                    expect(constant.symbol.id).to_equal(static_.symbol.id)
+                    if static_.name.ends_with("LABEL"):
+                        label_slots = label_slots + 1
+                        label_symbol = static_.symbol.id
+                        expect(static_.type_.kind).to_equal(MirTypeKind.Opaque("str"))
+                        expect(constant.value).to_equal(MirConstValue.Str("trace"))
+                    if static_.name.ends_with("ENABLED"):
+                        enabled_slots = enabled_slots + 1
+                        enabled_symbol = static_.symbol.id
+                        expect(static_.type_.kind).to_equal(MirTypeKind.I64)
+                        expect(constant.value).to_equal(MirConstValue.Bool(true))
+                case None:
+                    fail("Address-taken scalar has no initializer")
+        expect(label_slots).to_equal(1)
+        expect(enabled_slots).to_equal(1)
+        var label_addresses = 0
+        var enabled_addresses = 0
+        for function in mir.functions.values():
+            for block in function.blocks:
+                for instruction in block.instructions:
+                    match instruction.kind:
+                        case GlobalAddr(_, symbol, mutable):
+                            expect(mutable).to_equal(false)
+                            if symbol.id == label_symbol: label_addresses = label_addresses + 1
+                            if symbol.id == enabled_symbol: enabled_addresses = enabled_addresses + 1
+                        case _: ()
+        expect(label_addresses).to_equal(1)
+        expect(enabled_addresses).to_equal(1)
+
+    it "inlines an ordinary immutable read without address storage":
+        # @manual: show
+        step("Lower a scalar read whose address is never requested")
+        val mir = lower_static_ref_source(
+            "val IMM = 7\nfn read() -> i64:\n    IMM\n", "global_scalar_read")
+        expect(global_addr_count(mir)).to_equal(0)
+        expect(load_global_count(mir)).to_equal(0)
+        expect(mir.statics.values().len()).to_equal(0)
+        var returned_scalar_reads = 0
+        var read_functions = 0
+        for function in mir.functions.values():
+            if function.name == "read" or function.name.ends_with("::read") or function.name.ends_with(".read"):
+                read_functions = read_functions + 1
+                var constant_locals: [i64] = []
+                for block in function.blocks:
+                    for instruction in block.instructions:
+                        match instruction.kind:
+                            case Const(dest, MirConstValue.Int(7), type_):
+                                expect(type_.kind).to_equal(MirTypeKind.I64)
+                                constant_locals = constant_locals.push(dest.id)
+                            case _: ()
+                for block in function.blocks:
+                    match block.terminator:
+                        case MirTerminator.Ret(Some(operand)):
+                            match operand.kind:
+                                case MirOperandKind.Copy(local) | MirOperandKind.Move(local):
+                                    if constant_locals.contains(local.id):
+                                        returned_scalar_reads = returned_scalar_reads + 1
+                                case _: ()
+                        case _: ()
+        expect(read_functions).to_equal(1)
+        expect(returned_scalar_reads).to_equal(1)
