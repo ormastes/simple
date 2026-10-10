@@ -1,3 +1,4 @@
+use app.bootstrap_builder.compiler_admission_diagnostic.{builder_compiler_admission_diagnostic_v1}
 use app.buildrunner.task_context.{build_runner_context_decode_v1, build_runner_environment_digest_v1}
 use app.buildrunner.process_evidence.{build_runner_process_evidence_freeze_v1}
 use std.common.task_runner.contracts.{task_runner_process_outcome_v1}
@@ -261,6 +262,13 @@ fn builder_worker_run_v1(task: BuildTaskV1, root: text, host_id: text) -> Result
                     receipt.packet.exit_code
                 return Ok(("CRASHED", crash_code))
             if receipt.packet.exit_code == 0: return Ok(("OK", 0))
+            # The compiler retains its public exit=1 contract for admission
+            # refusal. Reclassify its exact diagnostic at this owner boundary
+            # so collect-all never treats invalid source authority as a unit error.
+            for stream in ["stdout.log", "stderr.log"]:
+                val output = file_read_regular_no_follow_bounded(root + "/" + stream, 1048576)?
+                if builder_compiler_admission_diagnostic_v1(output):
+                    return Err("compiler source authority admission refused; see " + stream)
             return Ok(("ERROR", receipt.packet.exit_code))
         sleep_ms(10)
     Err("unreachable compiler observation state")

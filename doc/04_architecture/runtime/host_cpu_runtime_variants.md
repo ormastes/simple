@@ -1,8 +1,14 @@
 # Host CPU Runtime Variants Architecture
 
-## Decision
+## 2026-10-11 environment-binding reconciliation
 
-`simple-simd` remains the canonical host-capability authority because it already defines `SimdTier`, raw detection, fallback ordering, and best-implemented-tier collapse. The persisted `cpu_config.sdn` is layered on top of that crate instead of duplicating tier logic elsewhere.
+The [Item 5 variation integration](../../05_design/compiler/perf/item5_shared_provider_interfaces_2026-10-09.md#2026-10-11-variation-and-sosix-integration) supplies the current owner map. Reuse `composition/environment_variants` snapshots, catalog, admission, binding and generation state; keep existing public compatibility views without adding a peer resolver.
+
+Distinguish detected hardware, OS-authorized state, compiled implementation availability, policy permission and actual execution evidence. Output target is independent of the compiler's execution host. A worker's vector length/affinity domain and an accelerator's generation can invalidate eligibility without changing architecture names. Bind at controlled boundaries and retain immutable generations for active sessions; no CPUID, catalog search or filesystem access in SIMD loops. ARM/RISC-V functionality and physical performance require separate target evidence.
+
+## Historical V1 decision — superseded for shared ownership
+
+The earlier V1 design treated `simple-simd` as the authority for `SimdTier`, raw detection, fallback ordering and best-implemented-tier collapse, with `cpu_config.sdn` layered over it. The 2026-10-11 selected design supersedes the global-ownership claim: retain legitimate native probe/legacy projection responsibilities there, but normalize feature meaning, eligibility and binding through the existing environment-variant authority. Caller migration and parity are pending; this document does not claim the old implementation has already been removed.
 
 In v1, that authority is intentionally split between first-class runtime-detected tiers and conservatively modeled optional non-x86 tiers. X86_64 runtime detection remains first-class. AArch64 `sve`/`sve2` and riscv64 `rvv` are documented as deferred runtime-probing work unless a target-specific probe is implemented and verified.
 
