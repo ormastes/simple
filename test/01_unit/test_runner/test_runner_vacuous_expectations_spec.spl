@@ -22,7 +22,8 @@ use std.spec.step
 use std.nogc_sync_mut.io.file_ops.{file_write, file_delete, file_exists}
 use std.nogc_sync_mut.spec.{get_expectation_count, note_expectation}
 use std.test_runner.test_executor_parsing.{
-    read_structured_test_expectations, vacuous_result_error, vacuous_spec_baselined, _tp_get_temp_dir
+    read_structured_test_expectations, vacuous_result_error, vacuous_spec_baselined, _tp_get_temp_dir,
+    spec_source_has_raw_assert
 }
 use std.test_runner.test_runner_output.{test_file_outcome_class, test_file_outcome_tag}
 use std.test_runner.test_runner_types.{TestFileResult, test_file_result_outcome_class}
@@ -40,6 +41,23 @@ fn with_sidecar(tag: text, content: text) -> text:
 fn cleanup(path: text):
     if file_exists(path + ".expectations"):
         val _ = file_delete(path + ".expectations")
+
+# Shrink-only check for the baseline: an entry is STALE when its file is gone
+# or its source now carries an assertion (it must then be deleted from the
+# baseline, not kept as a standing exemption). "" = still a valid entry.
+fn baseline_entry_problem(source: text?) -> text:
+    if source == nil:
+        return "missing"
+    for line in (source ?? "").split("\n"):
+        val stmt = line.trim()
+        if stmt.starts_with("#"):
+            continue
+        if spec_source_has_raw_assert(stmt) or stmt.starts_with("assert_"):
+            return "has-assertion"
+        for token in ["expect(", "expect_not(", "check(", "check_msg(", "fail(", "fail_test(", "prevent"]:
+            if stmt.contains(token):
+                return "has-assertion"
+    ""
 
 describe "zero-expectation (VACUOUS) gate":
     it "reads an explicit tally from the sidecar and treats everything else as unknown":
@@ -132,3 +150,30 @@ describe "zero-expectation (VACUOUS) gate":
             duration_ms: 1, setup_ms: 0, error: "", timed_out: false, cached: false)
         gated.feature_gated = "hwir"
         expect(test_file_outcome_tag(gated)).to_equal("SKIP")
+
+    it "does not treat a raw-assert-only spec as vacuous":
+        expect(spec_source_has_raw_assert("it \"x\":\n    assert 1 + 1 == 2\n")).to_equal(true)
+        expect(spec_source_has_raw_assert("    assert(ok)\n")).to_equal(true)
+        expect(spec_source_has_raw_assert("it \"x\":\n    val assertion = 1\n    # assert nothing\n    print \"assert me\"\n")).to_equal(false)
+        expect(spec_source_has_raw_assert("")).to_equal(false)
+
+    it "keeps the baseline shrink-only: every entry exists and still has no assertion":
+        step("the classifier rejects a missing file and a file that gained an assertion")
+        expect(baseline_entry_problem(nil)).to_equal("missing")
+        expect(baseline_entry_problem("it \"x\":\n    expect(1).to_equal(1)\n")).to_equal("has-assertion")
+        expect(baseline_entry_problem("it \"x\":\n    assert true\n")).to_equal("has-assertion")
+        expect(baseline_entry_problem("# expect(1) in a comment\nit \"x\":\n    print \"ran\"\n")).to_equal("")
+        step("no stale entry in the real baseline")
+        val baseline = rt_file_read_text("scripts/check/vacuous_spec_zero_assertion_baseline.txt") ?? ""
+        var entries = 0
+        var stale: [text] = []
+        for line in baseline.split("\n"):
+            val entry = line.trim()
+            if entry == "" or entry.starts_with("#"):
+                continue
+            entries = entries + 1
+            val problem = baseline_entry_problem(rt_file_read_text(entry))
+            if problem != "":
+                stale.push(entry + " (" + problem + ")")
+        expect(entries > 0).to_equal(true)
+        expect(stale).to_equal([])
