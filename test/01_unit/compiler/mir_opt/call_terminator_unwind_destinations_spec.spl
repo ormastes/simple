@@ -1,0 +1,59 @@
+# @tag: unit, compiler, mir, cuda
+# Regression for CUDA's optimizer dependency closure after CallTerminator grew
+# explicit exception payload and type-tag destinations.
+use std.spec
+use compiler.mir.mir_types.{LocalId}
+use compiler.mir.mir_instruction_support.{BlockId, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_instruction_kinds.{MirInstKind}
+use compiler.mir.mir_instructions.{MirInst}
+use compiler.mir_opt.mir_opt.copy_prop.{copypropagation_new, copypropagation_propagate_terminator}
+use compiler.mir_opt.mir_opt.dce.{DeadCodeElimination}
+use compiler.mir_opt.mir_opt.outline.{get_terminator_successors, get_terminator_uses, _outline_get_inst_uses}
+
+fn unwind_destination_call() -> MirTerminator:
+    MirTerminator.CallTerminator(
+        Some(LocalId(id: 3)), MirOperand.copy(LocalId(id: 4)),
+        [MirOperand.copy(LocalId(id: 5))], BlockId(id: 6), Some(BlockId(id: 7)),
+        Some(LocalId(id: 8)), Some(LocalId(id: 9))
+    )
+
+describe "optimizer call terminator unwind destinations":
+    it "preserves both exception destinations while propagating call operands":
+        val rewritten = copypropagation_propagate_terminator(copypropagation_new(), unwind_destination_call())
+        match rewritten:
+            case MirTerminator.CallTerminator(dest, func, args, normal, unwind, payload, tag):
+                expect(dest.unwrap().id).to_equal(3)
+                expect(args.len()).to_equal(1)
+                expect(normal.id).to_equal(6)
+                expect(unwind.unwrap().id).to_equal(7)
+                expect(payload.unwrap().id).to_equal(8)
+                expect(tag.unwrap().id).to_equal(9)
+            case _:
+                expect(false).to_equal(true)
+
+    it "retains normal and unwind edges in both successor analyses":
+        val term = unwind_destination_call()
+        val dce = DeadCodeElimination.new()
+        val dce_edges = dce.get_successor_blocks(term)
+        val outline_edges = get_terminator_successors(term)
+        expect(dce_edges.len()).to_equal(2)
+        expect(dce_edges[0].id).to_equal(6)
+        expect(dce_edges[1].id).to_equal(7)
+        expect(outline_edges.len()).to_equal(2)
+        expect(outline_edges[0].id).to_equal(6)
+        expect(outline_edges[1].id).to_equal(7)
+
+    it "counts call operands as uses without treating exception destinations as reads":
+        val uses = get_terminator_uses(unwind_destination_call())
+        expect(uses.len()).to_equal(2)
+        expect(uses[0].id).to_equal(4)
+        expect(uses[1].id).to_equal(5)
+
+    it "counts send operands without treating its result destination as a read":
+        val inst = MirInst(kind: MirInstKind.Send(
+            LocalId(id: 10), MirOperand.copy(LocalId(id: 11)), MirOperand.copy(LocalId(id: 12))
+        ), span: nil)
+        val uses = _outline_get_inst_uses(inst)
+        expect(uses.len()).to_equal(2)
+        expect(uses[0].id).to_equal(11)
+        expect(uses[1].id).to_equal(12)
