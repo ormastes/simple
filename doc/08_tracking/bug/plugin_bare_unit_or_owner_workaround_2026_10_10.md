@@ -80,3 +80,9 @@ enum Mutability:
 
 
 The native bare/qualified fixtures exercise every listed alternative and nonmember on actual compiler enum declarations. The actual MirTypeKind.Opaque payload x/y mismatch must remain a named rejection/no object; unrelated errors cannot count as rejection PASS. All three are UNEXECUTED. Permanent diagnosis remains contextual unit-owner propagation/registration; these source-only proofs do not establish the precise runtime first loss.
+
+## Partial full-Phase3 follow-up (2026-10-10)
+
+The original d7 epoch still reports ten CUDA OR-binding fatals (five comparison alternatives and five primitive-type alternatives) and one VHDL `[] vs [Nop]` fatal. Frozen source and actual SCV snapshot hashes agree: CUDA `554ff50eb55b23ec40f4ab7530bc59c9445b928472cf04374000de51ac4f4b81`; VHDL `bedfd0f01e2e0b1569e2262adea332b19ddf3015df11d86ddd526e2882ad3d7b`. Exact receipts: `/dev/shm/simple-phase3-tagged-d7-20261010/partial-cuda-failure.json` and `partial-vhdl-failure.json`.
+
+Tagged follow-up commits: CUDA `d3549ae48e83aa94a32721a090d81d9874e41a11`; VHDL `75940e190b7dd2eea1d3cc0b08147ffa9918e979`. Only proven declared unit alternatives are qualified; body guards and genuine binder rejection stay unchanged. Both new source changes are UNEXECUTED; underlying bug remains OPEN. No object or native PASS is claimed. Qualified bug-DB tool reconciliation remains pending because a full pure-Simple CLI is not built.
