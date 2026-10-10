@@ -1,0 +1,341 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR lowering: builtin-method hooks must not hijack, and must fail closed
+
+Review findings on `_MirLoweringExpr/builtin_method_extras.spl`:
+
+- A builtin hook may fire only on a receiver that is POSITIVELY the builtin
+  type. A user type that defines `max` / `abs` / `find` / `map` / ... keeps its
+  own method even when its handle reaches MIR as an untracked i64 word (tuple
+  destructuring, tuple field reads). One must-not-hijack example per hooked
+  name, each on a typed receiver and on an untracked handle.
+- Every rejection is FATAL and leaves an `rt_panic` placeholder, so a lane
+  that never reads `MirLowering.errors` (the bootstrap lane) still cannot
+  return a value.
+- `reduce` rejects an accumulator whose numeric kind differs from the element
+  kind instead of folding f64 elements through an i64 accumulator.
+- Packed `[u8]` / `[u64]` arrays hold RAW slots: the decoding lowerings reject
+  them; `reversed` / `index_of` / `sorted` go to the runtime, which handles the
+  packed layouts itself.
+"""
+
+# @tag: unit, compiler, mir, builtins
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct GuardLowered:
+    messages: [text]
+    fatal: [text]
+    callees: [text]
+    labels: [text]
+
+fn guard_lower(src: text) -> GuardLowered:
+    val file = "testdata/fixture_builtin_guard.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_builtin_guard", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    var fatal: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push("hir: " + e.message)
+    for e in lowering.errors:
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        messages = messages.push("mir: " + e.message)
+        if e.fatal:
+            fatal = fatal.push(e.message)
+    var callees: [text] = []
+    var labels: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            labels = labels.push(block.label ?? "")
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+    GuardLowered(messages: messages, fatal: fatal, callees: callees, labels: labels)
+
+fn guard_has(items: [text], wanted: text) -> bool:
+    for item in items:
+        if item == wanted:
+            return true
+    false
+
+fn guard_has_suffix(items: [text], suffix: text) -> bool:
+    for item in items:
+        if item.ends_with(suffix):
+            return true
+    false
+
+fn guard_fatal_with(low: GuardLowered, fragment: text) -> bool:
+    for m in low.fatal:
+        if m.contains(fragment):
+            return true
+    for m in low.messages:
+        print "diagnostic (wanted FATAL `{fragment}`): {m}"
+    false
+
+# Every builtin hook's fingerprint: a runtime symbol or a block label that only
+# the builtin lowering emits.
+fn guard_builtin_fingerprints(low: GuardLowered) -> [text]:
+    var found: [text] = []
+    for c in low.callees:
+        if c.starts_with("rt_math_") or c == "rt_reverse" or c == "rt_array_sorted" or c == "rt_array_enumerate" or c == "rt_array_index_of":
+            found = found.push("call " + c)
+    for l in low.labels:
+        if l.ends_with("_pick") or l == "find_hit" or l == "reduce_body" or l.starts_with("result_") or l.starts_with("for_step_") or l == "comp_body":
+            found = found.push("block " + l)
+    found
+
+val guard_user_type = "struct V:\n" +
+    "    x: i64\n" +
+    "\n" +
+    "impl V:\n" +
+    "    fn abs() -> V:\n" +
+    "        V(x: 0 - self.x)\n" +
+    "    fn min(other: V) -> V:\n" +
+    "        if self.x < other.x: self else: other\n" +
+    "    fn max(other: V) -> V:\n" +
+    "        if self.x > other.x: self else: other\n" +
+    "    fn floor() -> V:\n" +
+    "        V(x: self.x)\n" +
+    "    fn ceil() -> V:\n" +
+    "        V(x: self.x)\n" +
+    "    fn round() -> V:\n" +
+    "        V(x: self.x)\n" +
+    "    fn reversed() -> V:\n" +
+    "        V(x: 0 - self.x)\n" +
+    "    fn sorted() -> V:\n" +
+    "        V(x: self.x)\n" +
+    "    fn enumerate() -> V:\n" +
+    "        V(x: self.x)\n" +
+    "    fn index_of(k: i64) -> i64:\n" +
+    "        self.x + k\n" +
+    "    fn find(k: i64) -> i64:\n" +
+    "        self.x + k\n" +
+    "    fn reduce(a: i64, b: i64) -> i64:\n" +
+    "        self.x + a + b\n" +
+    "    fn map(k: i64) -> V:\n" +
+    "        V(x: self.x + k)\n" +
+    "    fn map_err(k: i64) -> V:\n" +
+    "        V(x: self.x + k)\n" +
+    "    fn ok() -> V:\n" +
+    "        V(x: self.x)\n" +
+    "    fn step(k: i64) -> [i64]:\n" +
+    "        [self.x, k]\n" +
+    "\n" +
+    "fn pair() -> (V, V):\n" +
+    "    (V(x: 1), V(x: 2))\n" +
+    "\n"
+
+# `a` / `b` are declared `V` params.
+fn guard_typed(statement: text) -> text:
+    guard_user_type + "fn g(a: V, b: V) -> i64:\n    " + statement + "\n    0\n"
+
+# `a` / `b` come out of a tuple destructure: untracked i64 handles at MIR.
+fn guard_untracked(statement: text) -> text:
+    guard_user_type + "fn g() -> i64:\n    val (a, b) = pair()\n    " + statement + "\n    0\n"
+
+# `t.0` is a tuple field read: also an untracked i64 handle.
+fn guard_tuple_field(statement: text) -> text:
+    guard_user_type + "fn g(vs: [V]) -> i64:\n    val t = (vs[0], vs[0])\n    " + statement + "\n    0\n"
+
+fn guard_expect_not_hijacked(name: text, statement: text):
+    val typed = guard_lower(guard_typed(statement))
+    for m in typed.messages:
+        print "typed diagnostic: {m}"
+    val typed_prints = guard_builtin_fingerprints(typed)
+    for f in typed_prints:
+        print "typed receiver hijacked by builtin: {f}"
+    expect(typed_prints.len()).to_equal(0)
+    # A typed receiver must reach the user's own method.
+    expect(guard_has_suffix(typed.callees, "V." + name)).to_equal(true)
+    val untracked_prints = guard_builtin_fingerprints(guard_lower(guard_untracked(statement)))
+    for f in untracked_prints:
+        print "untracked handle hijacked by builtin: {f}"
+    expect(untracked_prints.len()).to_equal(0)
+    val field_statement = statement.replace("a.", "t.0.").replace("(b)", "(t.1)")
+    val field_prints = guard_builtin_fingerprints(guard_lower(guard_tuple_field(field_statement)))
+    for f in field_prints:
+        print "tuple-field handle hijacked by builtin: {f}"
+    expect(field_prints.len()).to_equal(0)
+
+describe "builtin method extras: a user method is never hijacked":
+    it "abs":
+        guard_expect_not_hijacked("abs", "val r = a.abs()")
+
+    it "min":
+        guard_expect_not_hijacked("min", "val r = a.min(b)")
+
+    it "max":
+        guard_expect_not_hijacked("max", "val r = a.max(b)")
+
+    it "floor":
+        guard_expect_not_hijacked("floor", "val r = a.floor()")
+
+    it "ceil":
+        guard_expect_not_hijacked("ceil", "val r = a.ceil()")
+
+    it "round":
+        guard_expect_not_hijacked("round", "val r = a.round()")
+
+    it "reversed":
+        guard_expect_not_hijacked("reversed", "val r = a.reversed()")
+
+    it "sorted":
+        guard_expect_not_hijacked("sorted", "val r = a.sorted()")
+
+    it "enumerate":
+        guard_expect_not_hijacked("enumerate", "val r = a.enumerate()")
+
+    it "index_of":
+        guard_expect_not_hijacked("index_of", "val r = a.index_of(1)")
+
+    it "find":
+        guard_expect_not_hijacked("find", "val r = a.find(1)")
+
+    it "reduce":
+        guard_expect_not_hijacked("reduce", "val r = a.reduce(1, 2)")
+
+    it "map":
+        guard_expect_not_hijacked("map", "val r = a.map(1)")
+
+    it "map_err":
+        guard_expect_not_hijacked("map_err", "val r = a.map_err(1)")
+
+    it "ok":
+        guard_expect_not_hijacked("ok", "val r = a.ok()")
+
+    it "step in a for-in":
+        guard_expect_not_hijacked("step", "for i in a.step(2):\n        pass")
+
+describe "builtin method extras: proven numeric receivers still lower":
+    it "min/max over len(), an element read and a field read":
+        val low = guard_lower("struct P:\n" +
+            "    lo: i64\n" +
+            "\n" +
+            "fn f(xs: [i64], x: i64, p: P) -> i64:\n" +
+            "    x.min(xs.len()).max(xs[0]) + x.min(p.lo) + (0 - x).abs()\n")
+        for m in low.messages:
+            print "diagnostic: {m}"
+        expect(low.messages.len()).to_equal(0)
+        expect(guard_has(low.labels, "min_pick")).to_equal(true)
+        expect(guard_has(low.labels, "max_pick")).to_equal(true)
+        expect(guard_has(low.labels, "abs_pick")).to_equal(true)
+
+    it "round() on an arithmetic expression over a conversion":
+        val low = guard_lower("fn f(x: i64, g: f64) -> i64:\n" +
+            "    (x.to_f64() * 1.5).round().to_i64() + (g + 0.5).floor().to_i64()\n")
+        for m in low.messages:
+            print "diagnostic: {m}"
+        expect(low.messages.len()).to_equal(0)
+        expect(guard_has(low.callees, "rt_math_round")).to_equal(true)
+        expect(guard_has(low.callees, "rt_math_floor")).to_equal(true)
+
+describe "builtin method extras: every rejection is fatal and leaves a panic placeholder":
+    it "int.min(float)":
+        val low = guard_lower("fn f(n: i64, g: f64) -> i64:\n    n.min(g)\n")
+        expect(guard_fatal_with(low, "int.min(x)")).to_equal(true)
+        expect(guard_has(low.callees, "rt_panic")).to_equal(true)
+
+    it "float.min(int)":
+        val low = guard_lower("fn f(g: f64) -> f64:\n    g.min(3)\n")
+        expect(guard_fatal_with(low, "float.min(x)")).to_equal(true)
+        expect(guard_has(low.callees, "rt_panic")).to_equal(true)
+
+    it "Result.map with a named mapper":
+        val low = guard_lower("fn dbl(x: i64) -> i64:\n    x * 2\n\nfn g(r: Result<i64, text>) -> i64:\n    val a = r.map(dbl)\n    0\n")
+        expect(guard_fatal_with(low, "Result.map(f)")).to_equal(true)
+        expect(guard_has(low.callees, "rt_panic")).to_equal(true)
+
+    it "Result.ok() over a struct payload":
+        val low = guard_lower("struct P:\n    lo: i64\n\nfn g(q: Result<P, text>) -> i64:\n    val b = q.ok()\n    0\n")
+        expect(guard_fatal_with(low, "Result.ok()")).to_equal(true)
+        expect(guard_has(low.callees, "rt_panic")).to_equal(true)
+
+    it "sorted(by: comparator)":
+        val low = guard_lower("fn f(xs: [i64]) -> i64:\n    val a = xs.sorted(by: \\p, q: q - p)\n    a.len()\n")
+        expect(guard_fatal_with(low, "array.sorted(by: comparator)")).to_equal(true)
+        expect(guard_has(low.callees, "rt_panic")).to_equal(true)
+        expect(guard_has(low.callees, "rt_array_sorted")).to_equal(false)
+
+    it "find() with an unknown element type":
+        val low = guard_lower("fn f(xs: [text]) -> i64:\n    val kept = xs.filter(\\t: t.len() > 0)\n    val a = kept.find(\\t: t == \"a\") ?? \"\"\n    a.len()\n")
+        expect(guard_fatal_with(low, "element type is not statically known")).to_equal(true)
+        expect(guard_has(low.callees, "rt_panic")).to_equal(true)
+
+    it "reduce() with a named combiner":
+        val low = guard_lower("fn add(a: i64, b: i64) -> i64:\n    a + b\n\nfn f(xs: [i64]) -> i64:\n    xs.reduce(0, add)\n")
+        expect(guard_fatal_with(low, "array.reduce(init, combiner)")).to_equal(true)
+        expect(guard_has(low.callees, "rt_panic")).to_equal(true)
+
+    it "a comprehension over a dict":
+        val low = guard_lower("fn f(d: Dict<text, i64>) -> i64:\n    val a = [k.len() for k in d]\n    a.len()\n")
+        expect(guard_fatal_with(low, "E-MIR-EXPR-Comprehension")).to_equal(true)
+        expect(guard_has(low.callees, "rt_panic")).to_equal(true)
+        expect(guard_has(low.labels, "comp_body")).to_equal(false)
+
+describe "builtin method extras: reduce accumulator kind":
+    it "f64 elements with an integer init are rejected, not folded through i64":
+        val low = guard_lower("fn f() -> f64:\n    val xs: [f64] = [1.5, 2.5]\n    xs.reduce(0, \\a, v: a + v)\n")
+        expect(guard_fatal_with(low, "array.reduce() accumulator")).to_equal(true)
+        expect(guard_has(low.callees, "rt_panic")).to_equal(true)
+        expect(guard_has(low.labels, "reduce_body")).to_equal(false)
+
+    it "i64 elements with a float init are rejected":
+        val low = guard_lower("fn f() -> f64:\n    val xs: [i64] = [1, 2]\n    xs.reduce(0.5, \\a, v: a + v)\n")
+        expect(guard_fatal_with(low, "array.reduce() accumulator")).to_equal(true)
+        expect(guard_has(low.labels, "reduce_body")).to_equal(false)
+
+    it "matching kinds and a text-length fold still lower":
+        val low = guard_lower("fn f(xs: [f64], ts: [text]) -> i64:\n" +
+            "    val a = xs.reduce(0.0, \\acc, v: acc + v)\n" +
+            "    val b = ts.reduce(0, \\acc, t: acc + t.len())\n" +
+            "    a.to_i64() + b\n")
+        for m in low.messages:
+            print "diagnostic: {m}"
+        expect(low.messages.len()).to_equal(0)
+        expect(guard_has(low.labels, "reduce_body")).to_equal(true)
+
+describe "builtin method extras: packed [u8] / [u64] arrays":
+    it "find / reduce / enumerate on [u8] are rejected (raw byte slots)":
+        val found = guard_lower("fn f(bs: [u8]) -> i64:\n    val a = bs.find(\\b: b == 1)\n    0\n")
+        expect(guard_fatal_with(found, "packed")).to_equal(true)
+        expect(guard_has(found.labels, "find_hit")).to_equal(false)
+        val folded = guard_lower("fn f(bs: [u8]) -> i64:\n    bs.reduce(0, \\acc, b: acc + 1)\n")
+        expect(guard_fatal_with(folded, "packed")).to_equal(true)
+        expect(guard_has(folded.labels, "reduce_body")).to_equal(false)
+        val listed = guard_lower("fn f(bs: [u8]) -> i64:\n    var s = 0\n    for (i, b) in bs.enumerate():\n        s = s + i\n    s\n")
+        expect(guard_fatal_with(listed, "packed")).to_equal(true)
+        expect(guard_has(listed.callees, "rt_array_enumerate")).to_equal(false)
+
+    it "find on [u64] is rejected (raw u64 slots)":
+        val low = guard_lower("fn f(ws: [u64]) -> i64:\n    val a = ws.find(\\w: w == 1)\n    0\n")
+        expect(guard_fatal_with(low, "packed")).to_equal(true)
+
+    it "a comprehension over [u8] is rejected":
+        val low = guard_lower("fn f(bs: [u8]) -> i64:\n    val a = [b for b in bs]\n    a.len()\n")
+        expect(guard_fatal_with(low, "packed")).to_equal(true)
+        expect(guard_has(low.labels, "comp_body")).to_equal(false)
+
+    it "reversed / sorted / index_of on [u8] go to the layout-aware runtime":
+        val low = guard_lower("fn f(bs: [u8]) -> i64:\n    bs.reversed().len() + bs.sorted().len() + bs.index_of(7)\n")
+        for m in low.messages:
+            print "diagnostic: {m}"
+        expect(low.messages.len()).to_equal(0)
+        expect(guard_has(low.callees, "rt_reverse")).to_equal(true)
+        expect(guard_has(low.callees, "rt_array_sorted")).to_equal(true)
+        expect(guard_has(low.callees, "rt_array_index_of")).to_equal(true)
