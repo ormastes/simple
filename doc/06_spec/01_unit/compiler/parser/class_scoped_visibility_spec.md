@@ -1,6 +1,6 @@
 # Class scoped visibility parser regression
 
-AUTHORED_UNEXECUTED. Five actual assertion scenarios cover package fn/me/static method visibility, field-name syntax, adjacent top-level/public declarations, malformed scope diagnostics, and prior public/private grammar. Field access-control metadata remains a separate unqualified gap. No PASS is claimed.
+AUTHORED_UNEXECUTED. Six scenarios cover package methods, field-name syntax, top-level/public neighbors, malformed scope errors, prior public/private grammar, and the ordinary pri field/private-marker distinction. Field access-control metadata remains separately unqualified. No PASS.
 
 ```simple
 # AUTHORED_UNEXECUTED: actual native WEB parser failure regression.
@@ -64,6 +64,19 @@ describe "class scoped visibility parser":
         if hidden >= 0 and shown >= 0:
             expect(decl_get_visibility_text(hidden)).to_equal("private")
             expect(decl_get_visibility_text(shown)).to_equal("public")
+        else:
+            assert(false)
+
+    it "keeps a field named pri distinct from private visibility":
+        parse_module("class KeywordField:\n    pri: i64\n    pri me hidden() -> i64:\n        1\n", "pri_field_visibility_boundary.spl")
+        expect(parser_get_errors().len()).to_equal(0)
+        val owner = find_class_visibility_decl("KeywordField")
+        val method = find_class_visibility_decl("KeywordField__hidden")
+        expect(owner).to_be_greater_than(-1)
+        expect(method).to_be_greater_than(-1)
+        if owner >= 0 and method >= 0:
+            expect(decl_get_fields(owner)).to_equal(["pri"])
+            expect(decl_get_visibility_text(method)).to_equal("private")
         else:
             assert(false)
 ```
