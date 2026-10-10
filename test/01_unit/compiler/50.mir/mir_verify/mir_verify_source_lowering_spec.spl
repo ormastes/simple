@@ -1,0 +1,84 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Mandatory MIR verification — source snippets that used to produce invalid MIR
+
+Runs real lowering (parse -> HIR -> MIR) on small sources and verifies the
+result with `mir_verify_module`:
+
+  * `buf.push(s[i] as u8)` — the exact `bytes_util.spl:16` shape that crashed
+    the LLVM backend ("unsupported LLVM value conversion from ptr to i8").
+    The verifier must now refuse it at MIR with MIRV-002 naming the function.
+  * a plain arithmetic / branching function verifies clean (no false positive).
+  * an enum match with guards: the 3a lowering self-check
+    (E-MIR-MATCH-GUARD) stays silent when every guard is lowered, and the
+    verifier reports no fatal finding on the resulting CFG.
+"""
+
+# @tag: unit, compiler, mir, verify
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_verify.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+fn lower_src(src: text) -> (MirModule, [text]):
+    val parsed = parse_full_frontend(src, "testdata/mv_source.spl", "mv_source", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/mv_source.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in lowering.errors:
+        messages = messages.push(e.message)
+    (mir, messages)
+
+fn findings_for(report: MirVerifyReport, rule: text) -> [MirVerifyFinding]:
+    var out: [MirVerifyFinding] = []
+    for f in report.findings:
+        if f.rule == rule:
+            out = out.push(f)
+    out
+
+fn any_message_contains(messages: [text], needle: text) -> bool:
+    for m in messages:
+        if m.contains(needle):
+            return true
+    false
+
+val TEXT_INDEX_CAST_SRC: text = "fn to_bytes(s: text) -> [u8]:\n    var buf: [u8] = []\n    var i = 0\n    while i < s.len():\n        buf = buf.push(s[i] as u8)\n        i = i + 1\n    buf\n"
+
+val CLEAN_SRC: text = "fn pick(d: i64, c: bool) -> i64:\n    if d > 3 and c:\n        d * 2\n    else:\n        d + 1\n\nfn sum_to(n: i64) -> i64:\n    var acc = 0\n    var i = 0\n    while i < n:\n        acc = acc + i\n        i = i + 1\n    acc\n"
+
+val GUARD_SRC: text = "enum D:\n    A\n    B\n    C\n\nfn pick(d: D, c: bool) -> i64:\n    match d:\n        case D.A if c:\n            1\n        case D.A | D.B if not c:\n            2\n        case _ if c:\n            3\n        case _:\n            4\n"
+
+describe "MIR verify on lowered source: the ptr->i8 cast class (bug A)":
+    it "refuses `s[i] as u8` with fatal MIRV-002 naming to_bytes, before any backend":
+        val (mir, messages) = lower_src(TEXT_INDEX_CAST_SRC)
+        val report = mir_verify_module(mir)
+        val hits = findings_for(report, "MIRV-002")
+        expect(hits.len()).to_equal(1)
+        expect(hits[0].function.ends_with("to_bytes")).to_equal(true)
+        expect(hits[0].is_fatal()).to_equal(true)
+        expect(hits[0].message.contains("-> u8")).to_equal(true)
+        expect(report.fatal_count()).to_equal(1)
+
+describe "MIR verify on lowered source: no false positives on plain code":
+    it "a branching arithmetic module verifies with zero fatal findings":
+        val (mir, messages) = lower_src(CLEAN_SRC)
+        val report = mir_verify_module(mir)
+        expect(report.functions_checked).to_equal(2)
+        expect(report.fatal_count()).to_equal(0)
+
+describe "MIR verify on lowered source: enum-match guards (3a)":
+    it "every guard is lowered: no E-MIR-MATCH-GUARD, no fatal verifier finding, no dropped-condition warning":
+        val (mir, messages) = lower_src(GUARD_SRC)
+        expect(any_message_contains(messages, "E-MIR-MATCH-GUARD")).to_equal(false)
+        val report = mir_verify_module(mir)
+        expect(report.fatal_count()).to_equal(0)
+        expect(findings_for(report, "MIRV-005c").len()).to_equal(0)

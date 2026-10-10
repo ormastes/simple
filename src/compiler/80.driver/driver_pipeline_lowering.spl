@@ -1,6 +1,9 @@
 # CompilerDriver MIR lowering and diagnostic methods.
 #
 use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable}
+use compiler.mir.mir_verify.{mir_verify_module}
+use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
+use compiler.common.assurance.warning_phase.{warning_phase_enabled_for_value, warning_phase_env_var_name}
 use compiler.hir.hir.*
 use compiler.mir.mir.*
 use compiler.mir.mir_instructions.{MirModule}
@@ -224,11 +227,75 @@ impl CompilerDriver:
     # --------------------------------------------------------------------------
 
     me lower_to_mir() -> bool:
-        self.lower_to_mir_with_target_context(
+        val lowered = self.lower_to_mir_with_target_context(
             driver_mir_target_context(self.ctx.options), false, true)
+        # Verification runs even when lowering already failed, so a
+        # `--keep-going` build reports every invalid module in one pass.
+        val verified = self.verify_lowered_mir_v1()
+        lowered and verified
 
     me lower_to_mir_for_explicit_target(target_context: MirTargetContext) -> bool:
-        self.lower_to_mir_with_target_context(target_context, true, false)
+        val lowered = self.lower_to_mir_with_target_context(target_context, true, false)
+        val verified = self.verify_lowered_mir_v1()
+        lowered and verified
+
+    me verify_lowered_mir_v1() -> bool:
+        """Mandatory MIR validity verification (RB-19A) over every lowered
+        module, before any optimizer, backend, or cache publication.
+
+        Both public lowering entry points route through here, so every lane
+        (interpreter-side AOT, native-build worker, bootstrap stages 2-4,
+        LLVM IR emission) gets the same gate. Fatal rules go through the same
+        channel as `MirError.fatal` (`ctx.add_error`); warn-first rules and
+        the one-level downgrade under SIMPLE_ASSURANCE_WARNING_PHASE go to
+        `ctx.add_warning`. Returns false when at least one fatal finding was
+        recorded, so nothing invalid reaches codegen."""
+        val warning_phase = warning_phase_enabled_for_value(
+            sosix_env_get_nullable(warning_phase_env_var_name()) ?? "")
+        var modules_checked = 0
+        var findings_total = 0
+        var fatal_total = 0
+        var functions_total = 0
+        var instructions_total = 0
+        var mir_module_names: [text] = []
+        for mir_name in self.ctx.mir_modules.keys():
+            mir_module_names = mir_module_names.push(mir_name)
+        var bootstrap_only: [MirModule] = []
+        if val entry_mir = self.ctx.bootstrap_entry_mir:
+            if self.ctx.mir_modules[entry_mir.name] == nil:
+                bootstrap_only = bootstrap_only.push(entry_mir)
+        var idx = 0
+        while idx < mir_module_names.len() + bootstrap_only.len():
+            val module: MirModule = if idx < mir_module_names.len():
+                self.ctx.mir_modules[mir_module_names[idx]]!
+            else:
+                bootstrap_only[idx - mir_module_names.len()]
+            idx = idx + 1
+            val report = mir_verify_module(module)
+            modules_checked = modules_checked + 1
+            functions_total = functions_total + report.functions_checked
+            instructions_total = instructions_total + report.instructions_checked
+            for finding in report.findings:
+                findings_total = findings_total + 1
+                val fatal = finding.is_fatal() and not warning_phase
+                if fatal:
+                    fatal_total = fatal_total + 1
+                    self.ctx.add_error(finding.format())
+                else:
+                    self.ctx.add_warning(finding.format())
+        val _mir_verify_receipt = record_pass_receipt(PassReceipt(
+            pass_name: "mir_verify",
+            profile: self.ctx.assurance_policy.strictness.name(),
+            executed: true,
+            modules_checked: modules_checked,
+            diagnostics: findings_total,
+            errors_raised: fatal_total
+        ))
+        log_phase("mir_verify: modules={modules_checked} functions={functions_total} instructions={instructions_total} findings={findings_total} fatal={fatal_total}")
+        if fatal_total > 0:
+            print "error[MIRV]: MIR validity verification found {fatal_total} fatal finding(s) across {modules_checked} module(s); refusing to hand invalid MIR to any backend"
+            return false
+        true
 
     me lower_to_mir_with_target_context(
         target_context: MirTargetContext,

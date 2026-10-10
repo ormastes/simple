@@ -1,0 +1,109 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Mandatory MIR verification — rule registry parity
+
+`config/compiler/mir_verify_rules.sdn` is the policy record (id, family,
+lifecycle, eventual_profiles, evidence) and `mir_verify_rules()` is its
+in-binary projection. The two must agree exactly — same ids in the same
+order with the same lifecycle — and every `"MIRV-…"` literal the verifier
+source reports must be a registered rule, so a new check cannot ship without
+a registry record (and therefore without a declared lifecycle).
+"""
+
+# @tag: unit, compiler, mir, verify
+
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+use compiler.mir.mir_verify.*
+
+val REGISTRY_PATH: text = "config/compiler/mir_verify_rules.sdn"
+val VERIFIER_PATH: text = "src/compiler/50.mir/mir_verify.spl"
+
+struct RegistryRow:
+    id: text
+    lifecycle: text
+
+fn trim_left(s: text) -> text:
+    var i = 0
+    while i < s.len() and (s[i] == " " or s[i] == "\t"):
+        i = i + 1
+    s.substring(i, s.len())
+
+fn parse_registry(content: text) -> [RegistryRow]:
+    var rows: [RegistryRow] = []
+    var cur_id = ""
+    for raw_line in content.split("\n"):
+        val line = trim_left(raw_line)
+        if line.starts_with("- id: "):
+            if cur_id != "":
+                rows = rows.push(RegistryRow(id: cur_id, lifecycle: ""))
+            cur_id = line.substring(6, line.len()).trim()
+        elif line.starts_with("lifecycle: ") and cur_id != "":
+            rows = rows.push(RegistryRow(id: cur_id, lifecycle: line.substring(11, line.len()).trim()))
+            cur_id = ""
+    if cur_id != "":
+        rows = rows.push(RegistryRow(id: cur_id, lifecycle: ""))
+    rows
+
+fn reported_rule_ids(source: text) -> [text]:
+    """Every distinct `"MIRV-…"` literal in the verifier source."""
+    var ids: [text] = []
+    var rest = source
+    while true:
+        val at = rest.index_of("\"MIRV-") ?? -1
+        if at < 0:
+            break
+        val after = rest.substring(at + 1)
+        val close = after.index_of("\"") ?? -1
+        if close < 0:
+            break
+        val id = after.substring(0, close)
+        var seen = false
+        for known in ids:
+            if known == id:
+                seen = true
+        if not seen:
+            ids = ids.push(id)
+        rest = after.substring(close + 1)
+    ids
+
+describe "MIR verify rule registry":
+    it "the SDN registry exists and lists every in-binary rule in order with the same lifecycle":
+        expect(file_exists(REGISTRY_PATH)).to_equal(true)
+        val rows = parse_registry(file_read(REGISTRY_PATH))
+        val rules = mir_verify_rules()
+        expect(rows.len()).to_equal(rules.len())
+        var i = 0
+        while i < rules.len() and i < rows.len():
+            expect(rows[i].id).to_equal(rules[i].id)
+            expect(rows[i].lifecycle).to_equal(rules[i].lifecycle)
+            i = i + 1
+
+    it "every lifecycle is either error or warning, and the fatal core rules are errors":
+        for rule in mir_verify_rules():
+            expect(rule.lifecycle == "error" or rule.lifecycle == "warning").to_equal(true)
+        expect(mir_verify_rule_lifecycle("MIRV-001")).to_equal("error")
+        expect(mir_verify_rule_lifecycle("MIRV-002")).to_equal("error")
+        expect(mir_verify_rule_lifecycle("MIRV-003")).to_equal("error")
+        expect(mir_verify_rule_lifecycle("MIRV-004")).to_equal("error")
+        expect(mir_verify_rule_lifecycle("MIRV-005")).to_equal("error")
+        expect(mir_verify_rule_lifecycle("MIRV-006")).to_equal("error")
+        expect(mir_verify_rule_lifecycle("MIRV-007")).to_equal("error")
+
+    it "an unregistered rule id fails closed to error":
+        expect(mir_verify_rule_lifecycle("MIRV-999")).to_equal("error")
+
+    it "every rule id the verifier source reports is registered":
+        val ids = reported_rule_ids(file_read(VERIFIER_PATH))
+        expect(ids.len()).to_be_greater_than(10)
+        var registered: [text] = []
+        for rule in mir_verify_rules():
+            registered = registered.push(rule.id)
+        for id in ids:
+            var found = false
+            for r in registered:
+                if r == id:
+                    found = true
+            if not found:
+                print "unregistered rule id reported by verifier: {id}"
+            expect(found).to_equal(true)
