@@ -153,3 +153,31 @@ Remote concurrency observation: PR 2860 acquired merge commit
 actor while the local schema work was unpushed. Its body still records blocked
 verification. This session preserves that remote history and does not interpret
 ready status or structural CI as runtime admission.
+
+## Follow-up verification checkpoint
+
+The remaining work is isolated on `work/item6-schema4-followup-20261010`,
+rebased onto `d71b8bcf76d` on `release/1.0`. The tracked-file increase from
+142941 to 143023 matches exactly the 82 upstream additions; no upstream files
+were deleted by the rebase. This follow-up includes the prior unlanded item-six
+commits and must be reconciled with PR 2860 before eventual merge.
+
+Primary review accepted the smaller-model schema review and additional scoped
+roundtrip/reachability and malformed-witness regression specs as source work.
+Working and staged direct-environment guards passed, the numbered-artifact guard
+passed, and whitespace checks passed. These checks do not execute Simple code.
+
+The bounded bootstrap audit found the preserved `frozen-old-49cbd005/simple.exe`
+candidate with matching historical admission, sanity and receiver evidence, but
+its compiler-test log contains only the missing MC/DC waiver gate. The newer
+`5d97a3dc` candidate has sanity/receiver evidence but no matching admission;
+the current phase-two verification owner is still running. Neither result
+supplies the required full-CLI check/test, MCP/native-smoke or acceptance results.
+Other sessions' binaries and processes were left untouched.
+
+STATUS: WARN — implementation candidate only; release admission not established.
+Pending execution: changed unit/integration specs and their manual generation,
+all 44 package-index system scenarios, compiler/lib/MCP/LSP checks, MCP stdio
+integration, runtime and MCP native smokes, coverage and performance targets.
+Pending implementation: independently selected generated-plan authority and real
+producer execution. Do not merge or publish this follow-up as completed item six.
