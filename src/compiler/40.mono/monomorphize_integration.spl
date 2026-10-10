@@ -34,6 +34,32 @@ fn mono_arg_value(a: HirCallArg) -> HirExpr:
 # recursion (`f<T>` requesting `f<[T]>` forever) and refused loudly.
 val MONO_MAX_TYPE_DEPTH: i64 = 16
 
+# First SymbolId handed to a specialization (2^50). A fresh id used to be
+# "largest FUNCTION id seen + 1", but a module's SymbolTable also holds its
+# locals, params and type symbols, and the repointed callee's id is read
+# through the CALLER's table by MIR: `pick_second$str` landed on id 4 ==
+# `g_untyped`, so MIR named the specialization after that local, typed the
+# call through the local's symbol (i64) and the `text` instance printed as a
+# pointer / SEGV'd on `.len()` (stage2 micro_b / micro_f, BUG-IT-5). Same
+# constant as the parked generic-class lane
+# (doc/08_tracking/bug/mono_specialization_symbol_id_collision_2026-10-10.md).
+#
+# ONE id-space rule for specializations (three mechanisms, one invariant --
+# "no SymbolId a module can see names two things"):
+#   1. ids come from a single pass-wide counter that starts at this base and
+#      is first advanced past every input table's own counter
+#      (`collect_generics`), so an id is unique across ALL modules of the
+#      pass and deterministic (module-key order, then request order);
+#   2. a module that never OWNS a specialization keeps its compact counter:
+#      nothing it mints later can reach this range, so the specialization
+#      ids its call sites name stay unaliased;
+#   3. the OWNING module gets a row per specialization
+#      (`register_preserved_symbol`, which lifts that table's counter into
+#      this range); its counter is then set to the pass's FINAL counter, so
+#      what MIR mints there afterwards is past every specialization of the
+#      pass, not just past the ones this module owns.
+val MONO_SYMBOL_BASE: i64 = 1125899906842624
+
 # ============================================================================
 # Monomorphization Pass
 # ============================================================================
@@ -162,7 +188,7 @@ impl MonomorphizationPass:
             fn_returns: {},
             spec_queue: [],
             spec_symbols: {},
-            next_symbol: 1,
+            next_symbol: MONO_SYMBOL_BASE,
             env: {},
             diagnostics: [],
             unresolved_templates: {},
@@ -235,6 +261,7 @@ impl MonomorphizationPass:
             val module: HirModule = modules[name]
             var out = module
             var funcs: Dict<SymbolId, HirFunction> = rewritten[name]
+            var owns_specialization = false
             for mangled in self.specialized_functions.keys():
                 val m: text = mangled
                 if self.spec_module[m] != name:
@@ -249,6 +276,11 @@ impl MonomorphizationPass:
                     visibility: Visibility.Private, is_public: false,
                     is_mutable: false, defining_module: name,
                     builtin_method_tag: BUILTIN_METHOD_NONE))
+                owns_specialization = true
+            # Rule 3 at MONO_SYMBOL_BASE: an owner also CALLS specializations
+            # other modules own; its counter must clear all of them.
+            if owns_specialization and out.symbols.next_symbol_id < self.next_symbol:
+                out.symbols.next_symbol_id = self.next_symbol
             out.functions = funcs
             result[name] = out
 
@@ -1024,6 +1056,20 @@ impl MonomorphizationPass:
             case HirExprKind.NogradBlock(body):
                 val nb: HirBlock = body
                 self.collect_lets_block(nb)
+            case HirExprKind.StringLit(_, interps):
+                if interps.?:
+                    for item in interps:
+                        val it: HirInterpolation = item
+                        self.collect_lets_expr(it.expr)
+            case HirExprKind.TryCatch(body, clauses, finally_):
+                val tcb: HirBlock = body
+                self.collect_lets_block(tcb)
+                for clause in clauses:
+                    val cc: HirCatchClause = clause
+                    if cc.has_pattern:
+                        self.collect_pattern_bindings(cc.pattern)
+                    self.collect_lets_block(cc.body)
+                self.collect_lets_block_opt(finally_)
             case _:
                 pass
 
@@ -1315,9 +1361,21 @@ impl MonomorphizationPass:
         # So the repointed callee is a NamedVar carrying the mangled name,
         # re-qualified exactly as the original callee was.
         val spec_name: text = self.mangled_name(gname, targs)
+        # The repointed callee carries the SPECIALIZATION's concrete
+        # `fn(params) -> ret`. Its SymbolId is minted outside every module
+        # table (MONO_SYMBOL_BASE), so MIR cannot type the call through a
+        # symbol lookup; without this stamp the result defaulted to the
+        # erased i64 and a `text`/`f64` instance was consumed as an integer
+        # (BUG-IT-5).
+        val spec_fn: HirFunction = self.specialized_functions[spec_name]
+        var spec_param_types: [HirType] = []
+        for sp in spec_fn.params:
+            val spp: HirParam = sp
+            spec_param_types = spec_param_types.push(spp.type_)
+        val spec_sig = HirType(kind: HirTypeKind.Function(spec_param_types, spec_fn.return_type, []), span: callee.span)
         new_callee = HirExpr(kind: HirExprKind.NamedVar(SymbolId.new(target), mono_requalify(callee, spec_name)),
-                             has_type_: callee.has_type_,
-                             type_: callee.type_,
+                             has_type_: true,
+                             type_: spec_sig,
                              span: callee.span)
         new_type_args = []
         HirExprKind.Call(new_callee, new_args, new_type_args)
@@ -1567,6 +1625,37 @@ impl MonomorphizationPass:
             case HirExprKind.UnsafeBlock(body):
                 val ubb: HirBlock = body
                 out.kind = HirExprKind.UnsafeBlock(self.rewrite_block(ubb))
+
+            # A string literal is a leaf only when it has no interpolation.
+            # `"x={pick(a, b)}"` holds a full call expression per segment;
+            # skipping it left the template name in the object file while
+            # the counters said 0 unresolved (stage2 micro_h: `[mono]
+            # call_sites=0`, then `undefined symbol: pick_second` at link).
+            case HirExprKind.StringLit(value, interps):
+                # Flat value-or-nil, exactly as HIR lowering builds it
+                # (expression_core.spl `if interps.?: ... else: nil`); an
+                # Option-returning helper re-wraps the list as `Some([..])`,
+                # which the generated walker cannot iterate.
+                if interps.?:
+                    var new_interps: [HirInterpolation] = []
+                    for item in interps:
+                        val it: HirInterpolation = item
+                        var ni = it
+                        ni.expr = self.rewrite_expr(it.expr)
+                        new_interps = new_interps.push(ni)
+                    out.kind = HirExprKind.StringLit(value, new_interps)
+            case HirExprKind.TypeTest(value, type_name):
+                val ttv: HirExpr = value
+                out.kind = HirExprKind.TypeTest(self.rewrite_expr(ttv), type_name)
+            case HirExprKind.TryCatch(body, clauses, finally_):
+                val tcb: HirBlock = body
+                var new_clauses: [HirCatchClause] = []
+                for clause in clauses:
+                    val cc: HirCatchClause = clause
+                    var ncc = cc
+                    ncc.body = self.rewrite_block(cc.body)
+                    new_clauses = new_clauses.push(ncc)
+                out.kind = HirExprKind.TryCatch(self.rewrite_block(tcb), new_clauses, self.rewrite_block_opt(finally_))
 
             # Leaves / opaque: literals, symbol references, Continue,
             # CustomBlock, inline asm (operands are substituted by

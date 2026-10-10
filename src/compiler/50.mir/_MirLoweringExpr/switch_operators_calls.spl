@@ -30,6 +30,30 @@ use compiler.semantics.match_exhaustiveness.{build_match_coverage, match_coverag
 use compiler.mir._MirLowering.bootstrap_globals.{bootstrap_mir_logical_module_name}
 use compiler.mir._MirLowering.module_lowering.{mir_layout_canonical_module_name}
 use compiler.mir._MirLowering.provider_metadata.{mir_class_identity}
+
+fn mono_mangling_names_type(callee_name: text, type_name: text) -> bool:
+    """True when `type_name` is a token of the 40.mono mangling suffix of
+    `callee_name` (`pick$Acc` -> `Acc`; `f$arr_Acc_i64` -> `arr`, `Acc`,
+    `i64`). A callee with no `$` suffix names no type."""
+    if type_name == "":
+        return false
+    val at = callee_name.index_of("$")
+    if at < 0:
+        return false
+    val suffix = callee_name.substring(at + 1, callee_name.len())
+    for token in suffix.split("_"):
+        val tk: text = token
+        if tk == type_name:
+            return true
+    false
+
+fn mono_layout_key_bare_name(layout_key: text) -> text:
+    """`mod.path::Acc` -> `Acc`; a bare name is returned unchanged."""
+    val parts = layout_key.split("::")
+    if parts.len() == 0:
+        return layout_key
+    val last: text = parts[parts.len() - 1]
+    last
 # Explicit import, not an ambient builtin: the Rust seed resolves `eprint`
 # ambiently but the self-hosted HIR resolver does not, so a Stage-3 build fails
 # with "unresolved name: eprint" without this (same fix as mir_data.spl:27).
@@ -6066,6 +6090,60 @@ impl MirLowering:
             val source_name = if direct_name != "": direct_name else: self.bootstrap_resolved_call_name(direct_symbol)
             val resolved_name = self.provider_callable_symbol_name(direct_symbol, source_name)
             var return_type = self.bootstrap_resolved_call_return_type(direct_symbol, resolved_name)
+            # A callee 40.mono repointed at a specialization carries the
+            # specialization's own `fn(..) -> R` (BUG-IT-5): its SymbolId is
+            # minted outside every module table, so the symbol/registry chain
+            # above cannot type it and fell back to the erased i64 -- the
+            # `text` instance's ptr result was then consumed as an integer.
+            # The stamped signature wins when R is symbol-free (ids inside a
+            # Named R belong to the TEMPLATE's table, not necessarily ours).
+            var stamped_return: HirType? = nil
+            var stamped_struct_name = ""
+            if callee.has_type_:
+                match callee.type_.kind:
+                    case HirTypeKind.Function(_, stamped_ret, _):
+                        val sr: HirType = stamped_ret
+                        if hir_type_metadata_symbol_free(sr):
+                            return_type = self.lower_type(sr)
+                            stamped_return = sr
+                        else:
+                            match sr.kind:
+                                case HirTypeKind.Named(sr_sym, _):
+                                    # A struct/enum/class R names its type by
+                                    # a SymbolId of the TEMPLATE's table. Accept
+                                    # it only when this table resolves that id
+                                    # to an aggregate whose NAME is a token of
+                                    # the specialization's mangling
+                                    # (`pick$Acc`, `pick$arr_Acc`), so a
+                                    # colliding id of another module can never
+                                    # lend its layout; otherwise fall back to
+                                    # the name-keyed return-shape registry.
+                                    val sr_symbol = self.symbols.get_symbol_raw(sr_sym.id)
+                                    var sr_accepted = false
+                                    if sr_symbol != nil:
+                                        match sr_symbol.kind:
+                                            case SymbolKind.Struct | SymbolKind.Class | SymbolKind.Enum:
+                                                if mono_mangling_names_type(source_name, sr_symbol.name):
+                                                    return_type = self.lower_type(sr)
+                                                    stamped_return = sr
+                                                    stamped_struct_name = sr_symbol.name
+                                                    sr_accepted = true
+                                            case _:
+                                                ()
+                                    if not sr_accepted:
+                                        var sr_shape: text = bootstrap_fn_ret_shape_lookup(source_name) ?? ""
+                                        if sr_shape == "":
+                                            sr_shape = bootstrap_fn_ret_shape_lookup(resolved_name) ?? ""
+                                        if sr_shape != "" and sr_shape != "__runtime_array__" and self.struct_field_order.has(sr_shape):
+                                            val sr_bare = mono_layout_key_bare_name(sr_shape)
+                                            val sr_by_name = self.symbols.lookup_or_invalid(sr_bare)
+                                            if sr_by_name.is_valid():
+                                                return_type = MirType(kind: MirTypeKind.Struct(self.canonical_mir_type_symbol(sr_by_name)))
+                                                stamped_struct_name = sr_shape
+                                case _:
+                                    ()
+                    case _:
+                        ()
             var direct_signature = MirSignature(params: [], return_type: return_type, is_variadic: false)
             if val declared_signature = self.exact_extern_signatures.get(mir_expr_symbol_id_value(direct_symbol)):
                 if declared_signature.params.len() != arg_operands.len():
@@ -6085,6 +6163,20 @@ impl MirLowering:
                 self.symbol_to_operand(direct_symbol)
             val result = self.emit_resolved_direct_call(func_operand, arg_operands, return_type)
             self.remember_call_hir_return(result, direct_symbol)
+            if stamped_struct_name != "" and not self.struct_value_syms.contains(result.id):
+                self.struct_value_syms[result.id] = stamped_struct_name
+            if stamped_return != nil:
+                val stamped_t: HirType = stamped_return
+                self.remember_local_hir_type(result.id, stamped_t, 0, 0)
+                match stamped_t.kind:
+                    case HirTypeKind.Optional(_):
+                        self.option_value_locals[result.id] = true
+                        self.mark_runtime_value_local(result.id)
+                    case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
+                        self.runtime_array_locals[result.id] = true
+                        self.mark_runtime_value_local(result.id)
+                    case _:
+                        ()
             return result
 
         val callee_local = self.lower_expr(callee)

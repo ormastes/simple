@@ -589,6 +589,36 @@ fn substitute_expr(expr: HirExpr, subst: TypeSubstitution) -> HirExpr:
                 aarms = aarms.push(na2)
             out.kind = HirExprKind.InlineAsmMatch(aarms)
 
+        # Interpolation segments, type tests and try/catch hold full
+        # expressions/blocks too (same positions `rewrite_expr` in
+        # monomorphize_integration.spl walks for call sites).
+        case HirExprKind.StringLit(value, interps):
+            # Flat value-or-nil, as HIR lowering builds it (never `Some([..])`).
+            if interps.?:
+                var new_interps: [HirInterpolation] = []
+                for item in interps:
+                    val it: HirInterpolation = item
+                    var ni = it
+                    ni.expr = substitute_expr(it.expr, subst)
+                    new_interps = new_interps.push(ni)
+                out.kind = HirExprKind.StringLit(value, new_interps)
+        case HirExprKind.TypeTest(value, type_name):
+            val ttv: HirExpr = value
+            out.kind = HirExprKind.TypeTest(substitute_expr(ttv, subst), type_name)
+        case HirExprKind.TryCatch(body, clauses, finally_):
+            val tcb: HirBlock = body
+            var new_clauses: [HirCatchClause] = []
+            for clause in clauses:
+                val cc: HirCatchClause = clause
+                var ncc = cc
+                if cc.has_pattern:
+                    ncc.pattern = substitute_pattern(cc.pattern, subst)
+                if cc.has_type_:
+                    ncc.type_ = substitute_type(cc.type_, subst)
+                ncc.body = substitute_block(cc.body, subst)
+                new_clauses = new_clauses.push(ncc)
+            out.kind = HirExprKind.TryCatch(substitute_block(tcb, subst), new_clauses, substitute_block_opt(finally_, subst))
+
         case _:
             # Literals, Var/NamedVar, Continue and CustomBlock carry no nested
             # HirExpr that this layer can reach; their own `type_` was already
