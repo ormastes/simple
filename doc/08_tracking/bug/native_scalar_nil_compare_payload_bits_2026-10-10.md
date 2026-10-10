@@ -514,3 +514,5 @@ SIMPLE_LINKER_FLAVOR=msvc CC=clang-cl.exe` and `tools/` present in the checkout.
 - `optional_nil_arm_stale_producer_2026-10-10.md` (PR #2844, `src/lib/common/
   binary_io.spl` -- explicit `None` arms for an older retained producer; no
   overlap with this series)
+- `optional_scalar_runtime_classified_three_becomes_none_2026-10-11.md` (static-Some
+  proof widened, payload use of a narrowed optional, extern marking order)

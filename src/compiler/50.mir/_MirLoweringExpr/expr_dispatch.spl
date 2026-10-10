@@ -1108,6 +1108,47 @@ impl MirLowering:
                 case _: ()
         nil
 
+    me cast_of_provably_scalar_variable(e: HirExpr) -> bool:
+        """`x as T` with scalar `T` where `x` is a variable whose local is a
+        provably non-optional scalar (declared type or non-I64 scalar slot,
+        never an extern result). The structural rule refuses a cast of
+        anything it cannot prove, because a cast passes the word through."""
+        match e.kind:
+            case HirExprKind.Cast(cast_operand, cast_target):
+                if not hir_type_is_plain_scalar(cast_target):
+                    return false
+                match cast_operand.kind:
+                    case HirExprKind.Var(cast_symbol) | HirExprKind.NamedVar(cast_symbol, _):
+                        val cast_local = self.find_local(cast_symbol.id)
+                        if cast_local.id >= 0:
+                            return self.local_is_provably_scalar_payload(cast_local)
+                    case _: ()
+            case _: ()
+        false
+
+    me index_expr_reads_declared_scalar_element(e: HirExpr) -> bool:
+        """`xs[i]` on a local DECLARED `[T]` / `[T; n]` with a non-optional
+        scalar `T`: the same static element type the `== nil` fold uses
+        (nil_compare_operand_hir_type). Dict reads are not covered -- a miss
+        carries the raw nil word."""
+        match e.kind:
+            case HirExprKind.Index(index_base, _):
+                match index_base.kind:
+                    case HirExprKind.Var(base_symbol) | HirExprKind.NamedVar(base_symbol, _):
+                        val base_local = self.find_local(base_symbol.id)
+                        if base_local.id >= 0:
+                            match self.find_local_hir_type(base_local.id):
+                                case Some(base_type):
+                                    if base_type != nil and base_type != 0:
+                                        match base_type.kind:
+                                            case HirTypeKind.Array(elem, _) | HirTypeKind.Slice(elem):
+                                                return hir_type_is_plain_scalar(elem)
+                                            case _: ()
+                                case nil: ()
+                    case _: ()
+            case _: ()
+        false
+
     me nil_compare_operand_is_declared_optional(e: HirExpr, local: LocalId) -> bool:
         if val t = self.nil_compare_operand_hir_type(e, local):
             return match t.kind:
@@ -2484,7 +2525,17 @@ impl MirLowering:
         # `return expr`, nil for a bare `return`.
         if val rv = value:
             var br = self.builder
-            var result = self.lower_expr(rv)
+            # Lower for the DECLARED return slot, so a conditional returned
+            # from a scalar-optional function boxes per arm.
+            var result = LocalId(id: 0)
+            val slot_builder = self.builder
+            val slot_return: HirType? = match slot_builder.current_function:
+                case Some(slot_fn): self.resolved_call_hir_return_type(slot_fn.symbol)
+                case None: nil
+            if val slot_return_type = slot_return:
+                result = self.lower_expr_for_slot(rv, slot_return_type)
+            else:
+                result = self.lower_expr(rv)
             # The return payload is evaluated before control transfers; only
             # then release decisions owned by the abandoned enclosing path.
             self.emit_mcdc_abort_if_active()
@@ -2503,6 +2554,10 @@ impl MirLowering:
                         # Explicit and implicit returns share the same tagged
                         # Any ABI. Never hand a raw scalar to an Any caller.
                         result = self.box_runtime_value(result)
+                    case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                        # `return v` with `v: i64?` from a `-> i64` function
+                        # returns the payload, not the Option handle.
+                        result = self.option_scalar_payload_of(result)
                     case _:
                         ()
             br = self.builder
@@ -3259,6 +3314,13 @@ impl MirLowering:
         # expression produced it. Catch it at the single choke point every
         # lowered expression passes through, name it, and substitute a real
         # temp so the accumulated diagnostics actually get reported.
+        if span_result != nil and expr != nil and not garbage_expr_here:
+            if hir_expr_is_static_scalar(expr, 0):
+                self.static_scalar_locals[span_result.id] = true
+            elif self.index_expr_reads_declared_scalar_element(expr):
+                self.static_scalar_locals[span_result.id] = true
+            elif self.cast_of_provably_scalar_variable(expr):
+                self.static_scalar_locals[span_result.id] = true
         if span_result == nil:
             self.error_fatal("MIR lowering produced no local for this expression", nil)
             if mir_lower_expr_trace_state == 1:
@@ -3428,8 +3490,28 @@ impl MirLowering:
                 self.builder = b_rhs_done
                 logic_result
             case _:
-                val left_local = self.lower_expr(left)
-                val right_local = self.lower_expr(right)
+                var left_local = self.lower_expr(left)
+                var right_local = self.lower_expr(right)
+                # Arithmetic / bitwise / ordering on a scalar Optional local
+                # (`v + 1` after `if v != nil:`) operates on its PAYLOAD; the
+                # local itself holds the Option handle. Eq / NotEq keep the
+                # Optional-aware paths below.
+                val binary_reads_payload = match op:
+                    case Eq | NotEq: false
+                    case _: true
+                if binary_reads_payload:
+                    left_local = self.option_scalar_payload_of(left_local)
+                    right_local = self.option_scalar_payload_of(right_local)
+                else:
+                    val eq_negate = match op:
+                        case NotEq: true
+                        case _: false
+                    if self.local_is_declared_scalar_optional(left_local) and self.local_is_declared_scalar_optional(right_local):
+                        return self.lower_scalar_optional_eq_optional(left_local, right_local, eq_negate)
+                    if self.local_is_declared_scalar_optional(left_local) and self.local_is_provably_scalar_payload(right_local):
+                        return self.lower_scalar_optional_eq_plain(left_local, right_local, eq_negate)
+                    if self.local_is_declared_scalar_optional(right_local) and self.local_is_provably_scalar_payload(left_local):
+                        return self.lower_scalar_optional_eq_plain(right_local, left_local, eq_negate)
                 # Custom enum values are tagged runtime handles, so a
                 # raw backend Eq compares allocation addresses. Route
                 # only operands proven to share one declared enum type
