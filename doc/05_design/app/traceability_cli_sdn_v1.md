@@ -30,3 +30,14 @@ observation is required for unfiltered walks. These changes are source-reviewed.
 The earlier CLI stage passed7/0; final capture controls remain6/1 after three
 cycles (Unicode/NUL positive control). Final command construction succeeded;
 full acceptance is not claimed. See traceability_cli_tdd_2026-10-11.md report.
+
+## Fixture transport / actual provider evidence update
+
+The prior6/1 positive control was malformed: nil-coalescing Result does not
+extract a text payload. The corrected helper explicitly matches Ok and asserts
+len1/bytes[0]. No original capped suite was rerun or retroactively validated.
+New native fixture regression3/0 and actual provider legacy6/5 -> current6/0
+qualify concrete worktree-provider properties. See the CLI TDD report for
+source-stage boundaries, owned inputs and P2 oracle limitations. Direct Unicode
+selection is proven; find transport of that filename remains open. All20REQ/40AC
+remain required; no full runtime or protected admission PASS is claimed.

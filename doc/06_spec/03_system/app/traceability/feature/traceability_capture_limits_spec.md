@@ -17,3 +17,8 @@ Actual final native result: six examples, one failure. The Unicode/NUL positive
 control remains red after three scoped cycles. No full failed-cwd, configuration
 capture-boundary or cross-file linkage execution is claimed. Manual authored from
 executable steps; no rendering or manual quality admission is claimed.
+
+Follow-up: the historical6/1 positive fixture coalesced Result as text. Its helper
+is corrected, but this capped suite was not rerun. New fixture3/0 and actual
+provider6/0 evidence is recorded separately; this manual must not claim6/0 for
+the original suite. The Unicode failure record is resolved as a malformed fixture.

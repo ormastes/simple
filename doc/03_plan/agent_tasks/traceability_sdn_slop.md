@@ -208,3 +208,10 @@ Implementation/merge owner: Codex root. Sidecar lanes: N/A. Final source reviewe
 Astra (P0=0/P1=0). Execution reviewer: native SSpec failure preserved; no admission.
 Three-cycle cap reached with Unicode/NUL6/1. Continue only in a fresh bounded lane.
 Verified scalar/strict/typed release synchronization is independent.
+
+## Distinct fixture/provider investigation
+
+Owner: Codex root. Sidecar lanes: N/A. Final source/oracle reviewer: Astra,
+P0=0/P1=0; evidence WARN. Fixed Result fixture extraction, retained capped
+historical6/1, and added native3/0 plus actual provider6/5 ->6/0. Broader graph,
+runner, snapshot admission, projection/Slop and complete20/40 scopes remain next.

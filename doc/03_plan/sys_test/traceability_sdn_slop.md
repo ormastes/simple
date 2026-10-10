@@ -121,3 +121,14 @@ after the three-cycle cap; Unicode/NUL acceptance is unresolved. CLI/capture
 work stays private and must not be counted as release-qualified or full AC002/015
 completion. Follow doc/09_report/traceability_cli_tdd_2026-10-11.md and the
 tracked native Unicode capture bug before resuming a fresh bounded investigation.
+
+## Fixture transport / actual provider evidence update
+
+The prior6/1 positive control was malformed: nil-coalescing Result does not
+extract a text payload. The corrected helper explicitly matches Ok and asserts
+len1/bytes[0]. No original capped suite was rerun or retroactively validated.
+New native fixture regression3/0 and actual provider legacy6/5 -> current6/0
+qualify concrete worktree-provider properties. See the CLI TDD report for
+source-stage boundaries, owned inputs and P2 oracle limitations. Direct Unicode
+selection is proven; find transport of that filename remains open. All20REQ/40AC
+remain required; no full runtime or protected admission PASS is claimed.
