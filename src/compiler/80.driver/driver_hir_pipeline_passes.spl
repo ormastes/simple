@@ -30,6 +30,7 @@ use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
 use compiler.semantics.any_escape.{AnyEscapeProfile, any_escape_check}
 use compiler.semantics.enum_contract.{enum_contract_check}
+use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, frontend_diag_enabled}
 use compiler.mono.verify.post_mono_verify.{
     post_mono_verify_modules,
     post_mono_report_total,
@@ -225,6 +226,10 @@ pub fn run_typecheck_warn_pass(
             val msg = "[typecheck] {name}: " +
                 _format_type_infer_error(ictx.errors[e_idx])
             out = out.push(msg)
+            # E-TYPE-NIL-COMPARE rides this list at the pass's own severity:
+            # a non-optional-vs-nil comparison was a unification ERROR here
+            # before the rule named it, so under Deny it stays an error (an
+            # existing check is never loosened by naming it).
             match severity:
                 case TypecheckPassSeverity.Advisory:
                     val _ = 0
@@ -233,6 +238,18 @@ pub fn run_typecheck_warn_pass(
                 case TypecheckPassSeverity.Deny:
                     ctx.add_error(msg)
             e_idx = e_idx + 1
+        # HIR frontend rules (MEXH007/008/009, W-HIR-INFER-00x): read-only over
+        # the lowered module, always warn-first -> never add_error.
+        # SIMPLE_FRONTEND_DIAG=0 is the kill switch.
+        if frontend_diag_enabled():
+            for finding in run_hir_frontend_diagnostics(m):
+                val fmsg = "[frontend {finding.code}] {name}: {finding.line}:{finding.col}: in `{finding.function_name}`: {finding.message}"
+                out = out.push(fmsg)
+                match severity:
+                    case TypecheckPassSeverity.Advisory:
+                        val _ = 0
+                    case _:
+                        ctx.add_warning(fmsg)
         # Visibility diagnostics (cross-module private/friend/package access).
         val vwarnings = check_module_visibility(m, name)
         var v_idx = 0

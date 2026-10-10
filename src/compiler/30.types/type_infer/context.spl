@@ -41,7 +41,9 @@ impl HmInferContext:
             mutable_symbols: {},
             current_function_effects: [],
             current_return_type: nil,
-            current_fn_name: ""
+            current_fn_name: "",
+            symbol_names: {},
+            symbol_kinds: {}
         )
 
     static fn with_dim_check_mode(mode: DimCheckMode) -> HmInferContext:
@@ -61,7 +63,9 @@ impl HmInferContext:
             mutable_symbols: {},
             current_function_effects: [],
             current_return_type: nil,
-            current_fn_name: ""
+            current_fn_name: "",
+            symbol_names: {},
+            symbol_kinds: {}
         )
 
     static fn with_builtins() -> HmInferContext:
@@ -131,7 +135,7 @@ impl HmInferContext:
         val is_mutable = self.mutable_symbols[sym_id]
         if is_mutable.? and is_mutable.unwrap():
             # Mutable symbol -- skip narrowing, use normal lookup
-            return self.lookup(name, span)
+            return self.lookup_local_or_name(sym_id, name, span)
 
         # Check narrowing context for a narrowed type
         val narrowed = self.narrowing.lookup(sym_id)
@@ -139,6 +143,22 @@ impl HmInferContext:
             return Ok(narrowed.unwrap())
 
         # Fall back to normal type environment lookup
+        self.lookup_local_or_name(sym_id, name, span)
+
+    me lookup_local_or_name(sym_id: i64, name: text, span: Span) -> Result<HirType, TypeInferError>:
+        """`Let` binds a local under its raw symbol id (inference_control.spl,
+        `symbol.id.to_text()`), while a `Var`/`NamedVar` read carries the
+        source name. Without this fallback every local read -- `val` and
+        `var` alike -- was `undefined: <name>`, so no rule that needs a
+        local's type (E-TYPE-NIL-COMPARE) could fire on `val v = 3; v == nil`.
+        The symbol-id binding is consulted FIRST: it is the innermost
+        declaration, so a local that shadows a parameter or a module-level
+        fn/const (`fn f(x: i64): val x = "s"`) resolves to the local, not
+        the outer by-name scheme. Parameters (bound by name only) are the
+        fallback."""
+        val by_id = sym_id.to_text()
+        if self.env[by_id].?:
+            return self.lookup(by_id, span)
         self.lookup(name, span)
 
     me register_symbol_mutability(sym_id: i64, is_mutable: bool):

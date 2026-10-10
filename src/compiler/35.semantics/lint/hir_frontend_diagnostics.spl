@@ -1,0 +1,703 @@
+# HIR frontend diagnostics — warn-first rules over a lowered HirModule.
+#
+# These rules read a `HirModule` after lowering and never mutate it, so they
+# cannot change MIR output (pinned by
+# test/01_unit/compiler/lint/frontend_diag_no_lowering_effect_spec.spl). They
+# are the static half of three recurring stage-2 bootstrap bug classes
+# (C:/dev/simple-bootstrap-storage/robustness/CURRENT_BUG_PREVENTION.md):
+#
+#   MEXH007  variant_shadow_binding   (class 2b) a pattern/for/val BINDING whose
+#            name is a unit variant of an enum visible in this module. After
+#            HIR lowering (2a, 9e8a321091d) a bare variant name over a known
+#            subject that does not own it, or over an unknown subject, is
+#            resolved against the subject; a name that still lowers as a
+#            `Binding` while a visible enum has that unit variant is the
+#            ambiguous shape that silently captured every value (#2801/#2821).
+#   MEXH004  non_exhaustive_match     arm after an unguarded catch-all arm
+#   MEXH008  non_exhaustive_match     duplicate unguarded unit-variant arm
+#   MEXH009  non_exhaustive_match     guarded catch-all arm with no later arm
+#   W-HIR-INFER-001 inferred_type_fallback_use (class 1b) an unannotated `val`
+#            whose initialiser is a call to a callee whose declared return type
+#            this module cannot resolve (imported fn returning a struct from a
+#            module this module does not import) and whose binding is then used
+#            as a `for` iterable, method receiver, index base or field base.
+#            Today this surfaces 58 times as a MIR for-in error at the USE; this
+#            rule reports it at the DECLARATION with the callee named.
+#   W-HIR-INFER-002 inferred_type_fallback_use untyped `var c = []` / `{}`
+#            whose binding is then used as a receiver (element type unknown).
+#
+# Registry: families and code->family mapping live in
+# src/compiler/90.tools/lint/_LintMain/config_and_model.spl; the default level
+# for every code here is `warn` and the driver typecheck pass never raises a
+# finding of this module above Warn (warn-first lifecycle, UP §4 / BP §15).
+#
+# Spans: HIR match/pattern spans are frequently zero on this lane; every
+# finding is anchored at the first non-zero span found walking pattern -> arm
+# -> arm body -> enclosing expression -> function, and names the function.
+
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.semantics.lint.match_exhaustiveness.{_mexh_is_suspect_case_name}
+
+extern fn rt_env_get(key: text) -> text
+
+# Kill switch: `SIMPLE_FRONTEND_DIAG=0` skips the HIR walk in every consumer
+# (semantic_check, driver typecheck pass). Anything else, including unset,
+# keeps the rules on; the walk is read-only and warn-only either way.
+pub fn frontend_diag_enabled() -> bool:
+    (rt_env_get("SIMPLE_FRONTEND_DIAG") ?? "") != "0"
+
+pub struct HirFrontendFinding:
+    code: text
+    family: text
+    message: text
+    line: i64
+    col: i64
+    function_name: text
+
+pub fn hir_frontend_family_for_code(code: text) -> text:
+    if code == "MEXH007":
+        return "variant_shadow_binding"
+    if code == "MEXH004" or code == "MEXH008" or code == "MEXH009":
+        return "non_exhaustive_match"
+    if code == "W-HIR-INFER-001" or code == "W-HIR-INFER-002":
+        return "inferred_type_fallback_use"
+    ""
+
+pub fn hir_frontend_rule_codes() -> [text]:
+    ["MEXH004", "MEXH007", "MEXH008", "MEXH009", "W-HIR-INFER-001", "W-HIR-INFER-002"]
+
+fn span_is_set(s: Span) -> bool:
+    s.line > 0
+
+fn first_set_span(a: Span, b: Span) -> Span:
+    if span_is_set(a): a else: b
+
+fn hir_frontend_type_name(hir: HirModule, t: HirType) -> text:
+    match t.kind:
+        case Int(bits, signed):
+            val prefix = if signed: "i" else: "u"
+            "{prefix}{bits}"
+        case Float(bits): "f{bits}"
+        case Bool: "bool"
+        case Char: "char"
+        case Str: "text"
+        case Unit: "()"
+        case Optional(inner): hir_frontend_type_name(hir, inner) + "?"
+        case Array(elem, _): "[" + hir_frontend_type_name(hir, elem) + "]"
+        case Named(sym, _):
+            val s = hir.symbols.get_symbol(sym)
+            if s.?: s.unwrap().name else: "<unresolved type #{sym.id}>"
+        case Infer(_, _): "<inferred>"
+        case Error: "<error>"
+        case Any: "Any"
+        case _: "<type>"
+
+# A declared type this module cannot lay out. `Infer` on a DECLARED return
+# slot means the signature reached this module without a type. A `Named`
+# type is the erased-foreign-struct shape when its symbol resolves but was
+# DEFINED by a module this module does not import (measured: `node_get`
+# imported from lib.api returning lib.model.Node registers a `Node` symbol
+# with defining_module=lib.model while `imports` lists only lib.api; adding
+# `use lib.model.{Node}` adds the import and the type is laid out).
+fn hir_frontend_module_imports(hir: HirModule, module_path: text) -> bool:
+    if module_path == "" or module_path == hir.name or module_path == hir.path:
+        return true
+    for imp in hir.imports:
+        if imp.module_path == module_path:
+            return true
+    false
+
+# Re-export chains (`lib.api: export use lib.model.*`, consumer `use lib.api.*`
+# or `use lib.api.{node_get, Node}`): the consumer never imports lib.model by
+# path, yet the type IS available. Measured: whenever a type arrives through
+# an import -- direct, glob, or via a re-exporting facade -- the importer's
+# symbol table holds a SECOND type symbol with that name (the import
+# registration), while the erased signature-only shape registers exactly one.
+fn hir_frontend_import_names(hir: HirModule, name: text) -> bool:
+    for imp in hir.imports:
+        for item in imp.items:
+            if item.name == name:
+                return true
+            if item.alias.? and item.alias.unwrap() == name:
+                return true
+    false
+
+fn hir_frontend_type_symbol_count(hir: HirModule, name: text) -> i64:
+    var n = 0
+    for s in hir.symbols.symbols.values():
+        if s.name == name:
+            match s.kind:
+                case SymbolKind.Struct: n = n + 1
+                case SymbolKind.Class: n = n + 1
+                case SymbolKind.Enum: n = n + 1
+                case SymbolKind.TypeAlias: n = n + 1
+                case _: ()
+    n
+
+fn hir_frontend_type_unresolved(hir: HirModule, t: HirType) -> bool:
+    match t.kind:
+        case Error: true
+        case Any: true
+        case Infer(_, _): true
+        case Named(sym, _):
+            if not sym.is_valid():
+                return true
+            val s = hir.symbols.get_symbol(sym)
+            if not s.?:
+                return true
+            val symbol = s.unwrap()
+            val dm = symbol.defining_module
+            if not dm.?:
+                return false
+            if hir_frontend_module_imports(hir, dm.unwrap()):
+                return false
+            if hir_frontend_import_names(hir, symbol.name):
+                return false
+            hir_frontend_type_symbol_count(hir, symbol.name) < 2
+        case Optional(inner): hir_frontend_type_unresolved(hir, inner)
+        case Array(elem, _): hir_frontend_type_unresolved(hir, elem)
+        case _: false
+
+class HirFrontendWalker:
+    hir: HirModule
+    # unit-variant name -> comma-joined owning enum names visible here
+    unit_variants: Dict<text, text>
+    findings: [HirFrontendFinding]
+    fn_name: text
+    fn_span: Span
+    # R3: Let symbol id -> reason text, for unannotated lets with an unresolved
+    # initialiser type; cleared per function.
+    pending_reason: Dict<i64, text>
+    pending_code: Dict<i64, text>
+    pending_line: Dict<i64, i64>
+    pending_col: Dict<i64, i64>
+    reported: Dict<i64, bool>
+
+    static fn create(hir: HirModule) -> HirFrontendWalker:
+        # Deterministic: enum names are sorted before the owner strings are
+        # built, so a Dict iteration order change cannot reorder a message.
+        var enum_names: [text] = []
+        for en in hir.enums.values():
+            enum_names = enum_names.push(en.name)
+        enum_names = enum_names.sort()
+        var variants: Dict<text, text> = {}
+        for enum_name in enum_names:
+            for en in hir.enums.values():
+                if en.name != enum_name:
+                    continue
+                for v in en.variants:
+                    var is_unit = false
+                    match v.kind:
+                        case Unit: is_unit = true
+                        case Tuple(types): is_unit = types.len() == 0
+                        case _: ()
+                    if is_unit:
+                        if variants.contains_key(v.name):
+                            val owners = variants[v.name]
+                            if not (owners == en.name or owners.starts_with(en.name + ",") or owners.contains("," + en.name + ",") or owners.ends_with("," + en.name)):
+                                variants[v.name] = owners + "," + en.name
+                        else:
+                            variants[v.name] = en.name
+        val empty_findings: [HirFrontendFinding] = []
+        val empty_reason: Dict<i64, text> = {}
+        val empty_code: Dict<i64, text> = {}
+        val empty_line: Dict<i64, i64> = {}
+        val empty_col: Dict<i64, i64> = {}
+        val empty_reported: Dict<i64, bool> = {}
+        HirFrontendWalker(
+            hir: hir,
+            unit_variants: variants,
+            findings: empty_findings,
+            fn_name: "",
+            fn_span: Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0),
+            pending_reason: empty_reason,
+            pending_code: empty_code,
+            pending_line: empty_line,
+            pending_col: empty_col,
+            reported: empty_reported)
+
+    fn symbol_name(sym: SymbolId) -> text:
+        val s = self.hir.symbols.get_symbol(sym)
+        if s.?: s.unwrap().name else: ""
+
+    me emit(code: text, message: text, anchor: Span):
+        val at = first_set_span(anchor, self.fn_span)
+        self.findings = self.findings.push(HirFrontendFinding(
+            code: code,
+            family: hir_frontend_family_for_code(code),
+            message: message,
+            line: at.line,
+            col: at.col,
+            function_name: self.fn_name))
+
+    # ------------------------------------------------------------------
+    # MEXH007: binding name shadows a visible unit variant
+    # ------------------------------------------------------------------
+    me check_binding_name(name: text, where_: text, anchor: Span):
+        if name == "" or name == "_":
+            return
+        if not self.unit_variants.contains_key(name):
+            return
+        val owners = self.unit_variants[name]
+        val first_owner = if owners.contains(","): owners.split(",")[0] else: owners
+        self.emit("MEXH007",
+            "ambiguous bare pattern `{name}`: {where_} binds a new variable named `{name}`, but `{name}` is a unit variant of visible enum(s) {owners}; write `{first_owner}.{name}` to match the variant, or rename the binding",
+            anchor)
+
+    me walk_pattern(p: HirPattern, fallback: Span):
+        val anchor = first_set_span(p.span, fallback)
+        match p.kind:
+            case Binding(sym, _):
+                self.check_binding_name(self.symbol_name(sym), "this `case` arm", anchor)
+            case Tuple(elements):
+                for e in elements:
+                    self.walk_pattern(e, anchor)
+            case Array(elements, _):
+                for e in elements:
+                    self.walk_pattern(e, anchor)
+            case Struct(_, fields):
+                for f in fields:
+                    val (_, fp) = f
+                    self.walk_pattern(fp, anchor)
+            case Enum(_, _, payload):
+                if payload.?:
+                    match payload.unwrap():
+                        case HirPatternPayload.Tuple(patterns):
+                            for q in patterns:
+                                self.walk_pattern(q, anchor)
+                        case HirPatternPayload.Struct(fields):
+                            for f in fields:
+                                val (_, fp) = f
+                                self.walk_pattern(fp, anchor)
+            case Or(patterns):
+                for q in patterns:
+                    self.walk_pattern(q, anchor)
+            case _: ()
+
+    # ------------------------------------------------------------------
+    # MEXH004 / MEXH008 / MEXH009: arm reachability
+    # ------------------------------------------------------------------
+    fn binding_name_is_variant_like(name: text) -> bool:
+        # Capitalised bare names are the unresolved-variant shape (an imported
+        # enum's variant in a module lowered without its surfaces, or the 2a
+        # residue). They are MEXH007 territory and must NOT make every later
+        # arm "unreachable": measured 132 false MEXH004s on 28 modules
+        # (`case I32 | U32 | Ptr(..): true / case _: false`) before this guard.
+        # Reuses MEXH006's set-membership test (match_exhaustiveness.spl): a
+        # `name[0]` char compare and a `substring().lower()` form both
+        # segfaulted the seed interpreter on real compiler modules
+        # (codegen.spl, resolve.spl) while the measurement run was taken.
+        _mexh_is_suspect_case_name(name)
+
+    fn pattern_is_catch_all(p: HirPattern) -> bool:
+        match p.kind:
+            case Wildcard: true
+            case Binding(sym, _): not self.binding_name_is_variant_like(self.symbol_name(sym))
+            case Or(patterns):
+                for q in patterns:
+                    if self.pattern_is_catch_all(q):
+                        return true
+                false
+            case _: false
+
+    fn pattern_unit_variant(p: HirPattern) -> text:
+        match p.kind:
+            case Enum(_, variant, payload):
+                if payload.?: "" else: variant
+            case _: ""
+
+    fn block_anchor(b: HirBlock) -> Span:
+        if span_is_set(b.span):
+            return b.span
+        for st in b.stmts:
+            if span_is_set(st.span):
+                return st.span
+            match st.kind:
+                case Expr(e):
+                    if span_is_set(e.span):
+                        return e.span
+                case Let(_, _, init):
+                    if span_is_set(init.span):
+                        return init.span
+                case _: ()
+        if b.has and span_is_set(b.value.span):
+            return b.value.span
+        b.span
+
+    fn arm_anchor(arm: HirMatchArm, fallback: Span) -> Span:
+        if span_is_set(arm.pattern.span):
+            return arm.pattern.span
+        if span_is_set(arm.span):
+            return arm.span
+        val body = self.block_anchor(arm.body)
+        if span_is_set(body):
+            return body
+        fallback
+
+    me check_match_arms(arms: [HirMatchArm], match_span: Span):
+        var catch_all_seen = false
+        var seen_variants: Dict<text, bool> = {}
+        var idx = 0
+        val total = arms.len()
+        for arm in arms:
+            val anchor = self.arm_anchor(arm, match_span)
+            if catch_all_seen:
+                self.emit("MEXH004",
+                    "unreachable match arm: an earlier unguarded catch-all arm (`_` or a binding) already matches every value",
+                    anchor)
+            elif not arm.has_guard:
+                val variant = self.pattern_unit_variant(arm.pattern)
+                if variant != "":
+                    if seen_variants.contains_key(variant):
+                        self.emit("MEXH008",
+                            "duplicate match arm for variant `{variant}`: an earlier unguarded arm already matches it, so this arm is unreachable",
+                            anchor)
+                    else:
+                        seen_variants[variant] = true
+                if self.pattern_is_catch_all(arm.pattern):
+                    catch_all_seen = true
+            else:
+                if self.pattern_is_catch_all(arm.pattern) and idx == total - 1:
+                    self.emit("MEXH009",
+                        "guarded catch-all arm is the last arm: when its guard is false the match has no fallback; add an unguarded `case _:` after it or drop the guard",
+                        anchor)
+            idx = idx + 1
+
+    # ------------------------------------------------------------------
+    # W-HIR-INFER-001/002: unresolved declaration type used later
+    # ------------------------------------------------------------------
+    fn let_unresolved_reason(init: HirExpr) -> (text, text):
+        match init.kind:
+            case Call(callee, _, _):
+                var callee_sym = SymbolId(id: -1)
+                var callee_name = ""
+                match callee.kind:
+                    case NamedVar(s, n):
+                        callee_sym = s
+                        callee_name = n
+                    case Var(s):
+                        callee_sym = s
+                        callee_name = self.symbol_name(s)
+                    case _: ()
+                if not callee_sym.is_valid():
+                    return ("", "")
+                var ret_known = false
+                var ret_type: HirType = HirType(kind: HirTypeKind.Error, span: init.span)
+                for local_fn in self.hir.functions.values():
+                    if local_fn.symbol.id == callee_sym.id:
+                        ret_type = local_fn.return_type
+                        ret_known = true
+                if not ret_known:
+                    val s = self.hir.symbols.get_symbol(callee_sym)
+                    if s.?:
+                        val st = s.unwrap().type_
+                        if st.?:
+                            match st.unwrap().kind:
+                                case Function(_, ret, _):
+                                    ret_type = ret
+                                    ret_known = true
+                                case _: ()
+                if not ret_known:
+                    return ("", "")
+                if hir_frontend_type_unresolved(self.hir, ret_type):
+                    val rendered = hir_frontend_type_name(self.hir, ret_type)
+                    return ("W-HIR-INFER-001", "callee `{callee_name}` returns `{rendered}`, a type this module does not import or cannot resolve")
+                ("", "")
+            # An UNANNOTATED `[]` / `{}` has no element type by construction
+            # (the caller already excluded annotated lets). The payload's
+            # optional elem/value type slot is deliberately not read: the
+            # seed materialises that nil slot as an invalid heap value.
+            case ArrayLit(elements, _):
+                if elements.len() == 0:
+                    return ("W-HIR-INFER-002", "the empty array literal `[]` has no element type")
+                ("", "")
+            case DictLit(entries, _, _):
+                if entries.len() == 0:
+                    return ("W-HIR-INFER-002", "the empty dict literal `{}` has no key/value type")
+                ("", "")
+            case _: ("", "")
+
+    me note_let(sym: SymbolId, declared: HirType?, init: HirExpr, stmt_span: Span):
+        var annotated = false
+        if declared.?:
+            val d: HirType = declared
+            annotated = match d.kind:
+                case Infer(_, _): false
+                case _: true
+        if annotated:
+            return
+        val (code, reason) = self.let_unresolved_reason(init)
+        if code == "":
+            return
+        val anchor = first_set_span(stmt_span, init.span)
+        self.pending_code[sym.id] = code
+        self.pending_reason[sym.id] = reason
+        self.pending_line[sym.id] = anchor.line
+        self.pending_col[sym.id] = anchor.col
+
+    fn receiver_symbol(e: HirExpr) -> SymbolId:
+        match e.kind:
+            case Var(s): s
+            case NamedVar(s, _): s
+            case _: SymbolId(id: -1)
+
+    me note_use(receiver: HirExpr, use_kind: text, use_span: Span):
+        val sym = self.receiver_symbol(receiver)
+        if not sym.is_valid():
+            return
+        if not self.pending_code.contains_key(sym.id):
+            return
+        if self.reported.contains_key(sym.id):
+            return
+        self.reported[sym.id] = true
+        val name = self.symbol_name(sym)
+        val code = self.pending_code[sym.id]
+        val reason = self.pending_reason[sym.id]
+        val use_line = first_set_span(use_span, receiver.span).line
+        val anchor = Span(start: 0, end: 0, line: self.pending_line[sym.id], col: self.pending_col[sym.id], file: "", length: 0)
+        val hint = if code == "W-HIR-INFER-002": "annotate the declaration, e.g. `var {name}: [T] = []`" else: "annotate the declaration (`val {name}: T = ...`) or import the type"
+        self.emit(code,
+            "type of `{name}` could not be determined at its declaration ({reason}); it is used as {use_kind} at line {use_line}, which lowers against an untyped value — {hint}",
+            anchor)
+
+    # ------------------------------------------------------------------
+    # Walk
+    # ------------------------------------------------------------------
+    me walk_block(b: HirBlock):
+        for st in b.stmts:
+            self.walk_stmt(st)
+        if b.has:
+            self.walk_expr(b.value)
+
+    me walk_stmt(st: HirStmt):
+        match st.kind:
+            case Expr(e):
+                self.walk_expr(e)
+            case Let(sym, type_, init):
+                self.check_binding_name(self.symbol_name(sym), "this `val`/`if val` declaration", first_set_span(st.span, init.span))
+                self.note_let(sym, type_, init, st.span)
+                self.walk_expr(init)
+            case Assign(target, _, value):
+                self.walk_expr(target)
+                self.walk_expr(value)
+            case Block(block):
+                self.walk_block(block)
+            case _: ()
+
+    me walk_args(args: [HirCallArg]):
+        for a in args:
+            self.walk_expr(a.value)
+
+    me walk_expr(e: HirExpr):
+        match e.kind:
+            case ArrayLit(elements, _):
+                for x in elements:
+                    self.walk_expr(x)
+            case ArrayRepeat(value, count, _):
+                self.walk_expr(value)
+                self.walk_expr(count)
+            case TupleLit(elements):
+                for x in elements:
+                    self.walk_expr(x)
+            case DictLit(entries, _, _):
+                for entry in entries:
+                    val (k, v) = entry
+                    self.walk_expr(k)
+                    self.walk_expr(v)
+            case SetLit(elements, _):
+                for x in elements:
+                    self.walk_expr(x)
+            case Field(base, _, _):
+                self.note_use(base, "a field access base", e.span)
+                self.walk_expr(base)
+            case Index(base, index):
+                self.note_use(base, "an index base", e.span)
+                self.walk_expr(base)
+                self.walk_expr(index)
+            case TupleIndex(base, _):
+                self.walk_expr(base)
+            case OptionalChain(base, _):
+                self.walk_expr(base)
+            case NullCoalesce(left, right):
+                self.walk_expr(left)
+                self.walk_expr(right)
+            case ExistsCheck(base):
+                self.walk_expr(base)
+            case Unwrap(base):
+                self.walk_expr(base)
+            case Binary(_, left, right):
+                self.walk_expr(left)
+                self.walk_expr(right)
+            case Unary(_, operand):
+                self.walk_expr(operand)
+            case Call(callee, args, _):
+                self.walk_expr(callee)
+                self.walk_args(args)
+            case MethodCall(receiver, _, args, _):
+                self.note_use(receiver, "a method-call receiver", e.span)
+                self.walk_expr(receiver)
+                self.walk_args(args)
+            case StaticCall(_, _, args, _):
+                self.walk_args(args)
+            case If(cond, then_, else_):
+                self.walk_expr(cond)
+                self.walk_block(then_)
+                if else_.?:
+                    self.walk_block(else_.unwrap())
+            case IfChain(arms, else_):
+                for arm in arms:
+                    self.walk_expr(arm.cond)
+                    self.walk_block(arm.then_)
+                if else_.?:
+                    self.walk_block(else_.unwrap())
+            case MatchCase(scrutinee, arms):
+                self.walk_expr(scrutinee)
+                val match_span = first_set_span(e.span, scrutinee.span)
+                self.check_match_arms(arms, match_span)
+                for arm in arms:
+                    self.walk_pattern(arm.pattern, self.arm_anchor(arm, match_span))
+                    if arm.has_guard:
+                        self.walk_expr(arm.guard)
+                    self.walk_block(arm.body)
+            case Loop(body, _):
+                self.walk_block(body)
+            case While(cond, body, _):
+                self.walk_expr(cond)
+                self.walk_block(body)
+            case For(var_, iter, body, _):
+                val anchor = first_set_span(e.span, iter.span)
+                self.check_binding_name(self.symbol_name(var_), "this `for` loop", anchor)
+                self.note_use(iter, "a `for` iterable", anchor)
+                self.walk_expr(iter)
+                self.walk_block(body)
+            case With(items, body):
+                for item in items:
+                    self.walk_expr(item.context_expr)
+                self.walk_block(body)
+            case Lambda(_, body, _):
+                self.walk_expr(body)
+            case Block(block):
+                self.walk_block(block)
+            case HostGpuLane(_, _, marker, body):
+                self.walk_expr(marker)
+                self.walk_block(body)
+            case Return(value):
+                if value.?:
+                    self.walk_expr(value.unwrap())
+            case Break(_, value):
+                if value.?:
+                    self.walk_expr(value.unwrap())
+            case Throw(value):
+                self.walk_expr(value)
+            case Try(inner):
+                self.walk_expr(inner)
+            case Await(inner):
+                self.walk_expr(inner)
+            case Yield(value):
+                if value.?:
+                    self.walk_expr(value.unwrap())
+            case StructLit(_, fields):
+                for f in fields:
+                    val (_, fv) = f
+                    self.walk_expr(fv)
+            case EnumLit(_, _, payload):
+                if payload.?:
+                    match payload.unwrap():
+                        case HirEnumPayload.Tuple(values):
+                            for v in values:
+                                self.walk_expr(v)
+                        case HirEnumPayload.Struct(fields):
+                            for f in fields:
+                                val (_, fv) = f
+                                self.walk_expr(fv)
+            case Cast(inner, _):
+                self.walk_expr(inner)
+            case As(inner, _):
+                self.walk_expr(inner)
+            case Range(start, end, _, step):
+                if start.?:
+                    self.walk_expr(start.unwrap())
+                if end.?:
+                    self.walk_expr(end.unwrap())
+                if step.?:
+                    self.walk_expr(step.unwrap())
+            case Comprehension(_, inner, _):
+                self.walk_expr(inner)
+            case UnsafeBlock(body):
+                self.walk_block(body)
+            case TryCatch(body, clauses, finally_):
+                self.walk_block(body)
+                for c in clauses:
+                    self.walk_block(c.body)
+                if finally_.?:
+                    self.walk_block(finally_.unwrap())
+            case TypeTest(value, _):
+                self.walk_expr(value)
+            case _: ()
+
+    me walk_function(f: HirFunction):
+        self.fn_name = f.name
+        self.fn_span = f.span
+        val empty_reason: Dict<i64, text> = {}
+        val empty_code: Dict<i64, text> = {}
+        val empty_line: Dict<i64, i64> = {}
+        val empty_col: Dict<i64, i64> = {}
+        val empty_reported: Dict<i64, bool> = {}
+        self.pending_reason = empty_reason
+        self.pending_code = empty_code
+        self.pending_line = empty_line
+        self.pending_col = empty_col
+        self.reported = empty_reported
+        if f.is_extern:
+            return
+        self.walk_block(f.body)
+
+fn hir_frontend_pad(n: i64) -> text:
+    var s = "{n}"
+    while s.len() < 9:
+        s = "0" + s
+    s
+
+fn hir_frontend_sort_key(f: HirFrontendFinding) -> text:
+    hir_frontend_pad(f.line) + ":" + hir_frontend_pad(f.col) + ":" + f.code + ":" + f.function_name + ":" + f.message
+
+pub fn hir_frontend_sort_findings(findings: [HirFrontendFinding]) -> [HirFrontendFinding]:
+    """Deterministic order (line, col, code, function, message): functions
+    are visited in Dict order, which is not a stable contract."""
+    var keys: [text] = []
+    for f in findings:
+        keys = keys.push(hir_frontend_sort_key(f))
+    val sorted_keys = keys.sort()
+    var out: [HirFrontendFinding] = []
+    var used: [bool] = []
+    for f in findings:
+        used = used.push(false)
+    for k in sorted_keys:
+        var i = 0
+        while i < findings.len():
+            if not used[i] and keys[i] == k:
+                used[i] = true
+                out = out.push(findings[i])
+                break
+            i = i + 1
+    out
+
+pub fn run_hir_frontend_diagnostics(hir: HirModule) -> [HirFrontendFinding]:
+    var walker = HirFrontendWalker.create(hir)
+    for f in hir.functions.values():
+        walker.walk_function(f)
+    hir_frontend_sort_findings(walker.findings)
+
+pub fn hir_frontend_findings_with_code(findings: [HirFrontendFinding], code: text) -> [HirFrontendFinding]:
+    var out: [HirFrontendFinding] = []
+    for f in findings:
+        if f.code == code:
+            out = out.push(f)
+    out
+
+pub fn hir_frontend_finding_render(path: text, f: HirFrontendFinding) -> text:
+    # Same bracketed-code shape as HIR lowering's `[E-ANY-COMPILE-001] ...`
+    # (hir_lowering/types.spl) so one grep finds every frontend rule id.
+    "{path}:{f.line}:{f.col}: warning: [{f.code}] in `{f.function_name}`: {f.message}"

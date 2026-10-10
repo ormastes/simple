@@ -1,0 +1,127 @@
+# @req REQ-SSPEC-UNIT
+"""
+# W-HIR-INFER-001/002: a declaration whose type could not be determined is used as a receiver (rule 1b)
+
+Bug class: doc/08_tracking/bug/stage2_imported_fn_foreign_struct_return_type_erased_2026-10-10.md
+(58 `test_interp` sites): `val src = node_get(0)` where `node_get` is imported
+and returns a struct from a THIRD module this module does not import. The
+binding's type is erased, and `for x in src` / `src.len()` fail far away in MIR
+lowering. This rule reports at the DECLARATION, names the callee and the
+unresolved type, and says which later use needs the type.
+
+W-HIR-INFER-002 is the sibling for `var c = []` / `{}` with no element type
+that is then used as a receiver
+(doc/08_tracking/bug/untyped_var_collection_binding_loses_identity_2026-10-10.md).
+"""
+
+# @tag: unit, compiler, lint, hir, imports
+
+use std.spec.*
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.semantics.lint.hir_frontend_diagnostics.{run_hir_frontend_diagnostics, hir_frontend_findings_with_code, HirFrontendFinding}
+use compiler.tools.lint._LintMain.config_and_model.{build_default_levels}
+
+val model_src = "pub struct Node:\n    n: i64\n\npub fn make() -> Node:\n    Node(n: 1)\n"
+val api_src = "use lib.model.\{Node, make\}\n\npub fn node_get(i: i64) -> Node:\n    make()\n\npub fn names() -> [text]:\n    []\n"
+# Facade that RE-EXPORTS the model: a consumer importing only lib.facade can
+# still see Node (glob or explicit item), and must not be warned.
+val facade_src = "export use lib.model.*\n\npub fn node_get(i: i64) -> Node:\n    make()\n"
+
+fn lower_consumer_with_api(src: text, api_source: text) -> HirModule:
+    val log = Logger(level: 0)
+    val model_ast = parse_full_frontend(model_src, "lib/model.spl", "lib.model", log)
+    val api_ast = parse_full_frontend(api_source, "lib/api.spl", "lib.api", log)
+    val consumer_ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.model"] = model_ast
+    modules["lib.api"] = api_ast
+    val sources = [
+        SourceFile(path: "lib/model.spl", content: model_src, module_name: "lib.model"),
+        SourceFile(path: "lib/api.spl", content: api_source, module_name: "lib.api")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    lowering.lower_module(consumer_ast)
+
+fn lower_consumer(src: text) -> HirModule:
+    lower_consumer_with_api(src, api_src)
+
+fn lower_single(src: text) -> HirModule:
+    var lowering = HirLowering.with_filename("probe/single.spl")
+    lowering.lower_module(parse_full_frontend(src, "probe/single.spl", "probe.single", Logger(level: 0)))
+
+fn infer_findings(hir: HirModule, code: text) -> [HirFrontendFinding]:
+    hir_frontend_findings_with_code(run_hir_frontend_diagnostics(hir), code)
+
+describe "W-HIR-INFER-001 at the erased declaration":
+    it "names the binding, the callee and the `for` use when an imported fn returns a third-module struct":
+        val hir = lower_consumer("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    var n = 0\n    for x in src:\n        n = n + 1\n    n\n")
+        val ws = infer_findings(hir, "W-HIR-INFER-001")
+        expect(ws.len()).to_equal(1)
+        expect(ws[0].message).to_contain("type of `src` could not be determined at its declaration")
+        expect(ws[0].message).to_contain("callee `node_get`")
+        expect(ws[0].message).to_contain("a `for` iterable")
+        expect(ws[0].message).to_contain("annotate the declaration")
+        expect(ws[0].function_name).to_equal("f")
+        expect(ws[0].line).to_equal(4)
+        expect(ws[0].family).to_equal("inferred_type_fallback_use")
+
+    it "reports once per binding even when it is used as receiver, index base and field base":
+        val hir = lower_consumer("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    val a = src.len()\n    val b = src[0]\n    val c = src.n\n    a + b + c\n")
+        val ws = infer_findings(hir, "W-HIR-INFER-001")
+        expect(ws.len()).to_equal(1)
+        expect(ws[0].message).to_contain("a method-call receiver")
+
+describe "W-HIR-INFER-002 for untyped empty collections":
+    it "flags `var c = []` used as a receiver":
+        val hir = lower_single("fn f() -> i64:\n    var c = []\n    c.push(1)\n    c.len()\n")
+        val ws = infer_findings(hir, "W-HIR-INFER-002")
+        expect(ws.len()).to_equal(1)
+        expect(ws[0].message).to_contain("the empty array literal `[]` has no element type")
+        expect(ws[0].message).to_contain("`var c: [T] = []`")
+
+    it "does not flag an annotated `var c: [i64] = []`":
+        val hir = lower_single("fn f() -> i64:\n    var c: [i64] = []\n    c.push(1)\n    c.len()\n")
+        expect(infer_findings(hir, "W-HIR-INFER-002").len()).to_equal(0)
+
+describe "W-HIR-INFER-001 stays silent when the type is known":
+    it "accepts an imported callee whose return type resolves ([text])":
+        val hir = lower_consumer("use lib.api.\{names\}\n\nfn g() -> i64:\n    val ns = names()\n    for x in ns:\n        pass\n    ns.len()\n")
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+
+    it "accepts a local callee returning a local struct":
+        val hir = lower_single("struct P:\n    xs: [i64]\n\nfn mk() -> P:\n    P(xs: [])\n\nfn f() -> i64:\n    val p = mk()\n    for x in p.xs:\n        pass\n    p.xs.len()\n")
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+
+    it "does not fire when the erased binding is never used as a receiver":
+        val hir = lower_consumer("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    0\n")
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+
+    it "does not fire when the type arrives through a re-exporting facade imported with a glob":
+        val hir = lower_consumer_with_api("use lib.api.*\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n", facade_src)
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+
+    it "does not fire when the re-exported type is named in the facade import":
+        val hir = lower_consumer_with_api("use lib.api.\{node_get, Node\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n", facade_src)
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+
+    it "still fires when only the facade FUNCTION is imported and the re-exported type is not":
+        val hir = lower_consumer_with_api("use lib.api.\{node_get\}\n\nfn f() -> i64:\n    val src = node_get(0)\n    src.n\n", facade_src)
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(1)
+
+    it "does not fire when the callee itself is unresolved (that is a lowering error, not an erased type)":
+        val hir = lower_single("fn f() -> i64:\n    val src = node_get(0)\n    for x in src:\n        pass\n    0\n")
+        expect(infer_findings(hir, "W-HIR-INFER-001").len()).to_equal(0)
+
+describe "inferred_type_fallback_use registry":
+    it "is a warn-level family in the canonical catalog":
+        val levels = build_default_levels()
+        expect(levels.contains_key("inferred_type_fallback_use")).to_equal(true)
+        expect(levels["inferred_type_fallback_use"]).to_equal("warn")
