@@ -1,0 +1,147 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Stage2 native pipeline: a closure write to a captured local is a compile error
+
+Bug: doc/08_tracking/bug/stage2_closure_capture_write_silently_dropped_2026-10-11.md
+
+Language rule (owner ruling 2026-09-27, `.claude/rules/language.md`): a nested
+`fn` or lambda captures enclosing locals BY VALUE and READ-ONLY. The seed
+rejects a write at compile time (`capture_write_check.rs`), and so does the
+pure-Simple interpreter. The pure-Simple NATIVE pipeline (flat AST -> HIR ->
+MIR) ran no such check: MIR lowers the body against a by-value snapshot
+(`snapshot_lambda_capture`), so the write landed in a copy and the program
+printed `flag=false counter=0` with no diagnostic.
+
+Every expected diagnostic and every accepted shape below was taken from the
+seed (`seed run <probe>.spl`), which is the oracle.
+
+| shape | seed | here |
+|-------|------|------|
+| `fn():` lambda assigns an enclosing `var` | reject | reject |
+| compound assign `+=` | reject | reject |
+| closure inside a `for` body | reject | reject |
+| closure that escapes (returned) | reject | reject |
+| closure nested in a closure | reject | reject |
+| nested `fn` declaration | reject | reject |
+| `\x:` block lambda passed as an argument | reject | reject |
+| closure inside a method body | reject | reject |
+| write under a loop inside the closure | reject | reject |
+| whole-collection rebind `xs = [...]` | reject | reject |
+| write under `if val` or in a `match` arm inside the closure | reject | reject |
+| closure defined inside a `match` arm | reject | reject |
+| field / index write through a captured reference | accept | accept |
+| closure-local `var`, parameter, shadowing `var` | accept | accept |
+| module-level `var`, also when the enclosing fn assigns it | accept | accept |
+| closure local bound by `if val`, reassigned in `match` arms | accept | accept |
+"""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.core.parser.{parser_has_errors, parser_get_errors}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+
+val RULE = ": closures capture enclosing locals by value and are read-only; return the new value or use a module-level `var`"
+
+val FIXTURE_SRC = "fn run_twice(hook: fn() -> i64) -> i64:\n    hook()\n    hook()\n\nfn main() -> i64:\n    var flag = false\n    var counter = 0\n    val hook = fn() -> i64:\n        flag = true\n        counter = counter + 1\n        counter\n    run_twice(hook)\n    0\n"
+val COMPOUND_SRC = "fn main() -> i64:\n    var counter = 0\n    val hook = fn() -> i64:\n        counter += 1\n        counter\n    hook()\n"
+val LOOP_SRC = "fn main() -> i64:\n    var total = 0\n    for i in [1, 2, 3]:\n        val f = fn() -> i64:\n            total = total + i\n            total\n        f()\n    total\n"
+val ESCAPE_SRC = "fn make() -> fn() -> i64:\n    var c = 0\n    val f = fn() -> i64:\n        c = c + 1\n        c\n    f\n\nfn main() -> i64:\n    val f = make()\n    f()\n"
+val NESTED_SRC = "fn main() -> i64:\n    var c = 0\n    val outer = fn() -> i64:\n        val inner = fn() -> i64:\n            c = c + 1\n            c\n        inner()\n    outer()\n"
+val NESTED_FN_SRC = "fn main() -> i64:\n    var c = 0\n    fn bump() -> i64:\n        c = c + 1\n        c\n    bump()\n"
+val ARG_LAMBDA_SRC = "fn apply(xs: [i64], f: fn(i64) -> i64) -> i64:\n    f(xs[0])\n\nfn main() -> i64:\n    var total = 0\n    apply([1, 2, 3], \\x:\n        total = total + x\n        total\n    )\n"
+val METHOD_SRC = "class Acc:\n    n: i64\n    me run() -> i64:\n        var local = 0\n        val f = fn() -> i64:\n            local = local + 1\n            local\n        f()\n\nfn main() -> i64:\n    0\n"
+val CONTROL_SRC = "fn main() -> i64:\n    var c = 0\n    val f = fn(x: i64) -> i64:\n        while c < 3:\n            c = c + 1\n        c\n    f(1)\n"
+val REBIND_SRC = "fn main() -> i64:\n    var xs = [1, 2]\n    val f = fn() -> i64:\n        xs = [7]\n        0\n    f()\n"
+val IF_VAL_SRC = "fn opt(n: i64) -> i64?:\n    if n > 0:\n        return n\n    nil\n\nfn main() -> i64:\n    var c = 0\n    val f = fn(x: i64?) -> i64:\n        if val v = x:\n            c = c + v\n        c\n    f(opt(1))\n"
+val MATCH_ARM_SRC = "fn main() -> i64:\n    var c = 0\n    val f = fn(x: i64) -> i64:\n        match x:\n            case 1:\n                c = c + 1\n            case _:\n                c = c + 2\n        c\n    f(1)\n"
+val CLOSURE_IN_ARM_SRC = "fn main() -> i64:\n    var c = 0\n    val x = 1\n    match x:\n        case 1:\n            val f = fn() -> i64:\n                c = c + 1\n                c\n            f()\n        case _:\n            0\n"
+
+val REF_WRITE_SRC = "class Box:\n    n: i64\n\nfn main() -> i64:\n    val b = Box(n: 1)\n    var xs = [1, 2]\n    val hook = fn() -> i64:\n        b.n = b.n + 5\n        xs[0] = 9\n        b.n\n    hook()\n"
+val LOCAL_SRC = "fn main() -> i64:\n    var c = 10\n    val f = fn() -> i64:\n        var c2 = c\n        c2 = c2 + 1\n        c2\n    val g = fn(c: i64) -> i64:\n        c + 1\n    val h = fn() -> i64:\n        var c = 1\n        c = c + 1\n        c\n    f() + g(1) + h()\n"
+val GLOBAL_SRC = "var G = 0\n\nfn main() -> i64:\n    val f = fn() -> i64:\n        G = G + 1\n        G\n    f()\n"
+val GLOBAL_RESET_SRC = "var G = 0\nval K = 5\n\nfn main() -> i64:\n    G = 0\n    val f = fn() -> i64:\n        G = G + K\n        G\n    f()\n"
+val PATTERN_LOCAL_SRC = "fn opt(n: i64) -> i64?:\n    if n > 0:\n        return n\n    nil\n\nfn main() -> i64:\n    val v = 1\n    val f = fn(x: i64?) -> i64:\n        var acc = 0\n        if val w = x:\n            acc = acc + w\n        match acc:\n            case 1:\n                acc = acc + 10\n            case _:\n                acc = 0\n        acc\n    f(opt(v))\n"
+
+fn parse_diagnostics(src: text) -> [text]:
+    val _module = parse_and_build_module(src, "closure_capture_write_probe.spl")
+    if parser_has_errors(): parser_get_errors() else: []
+
+fn first_diagnostic(src: text) -> text:
+    val errors = parse_diagnostics(src)
+    if errors.len() == 0: "" else: errors[0]
+
+# Errors of the whole native front half (flat AST, HIR, MIR) for `src`.
+fn pipeline_error_count(src: text) -> i64:
+    val parsed = parse_full_frontend(src, "closure_capture_write_probe.spl", "closure_capture_write_probe", Logger(level: 0))
+    val parse_errors = if parser_has_errors(): parser_get_errors().len() else: 0
+    var hl = HirLowering.with_filename("closure_capture_write_probe.spl")
+    val hir = hl.lower_module(parsed)
+    var ml = MirLowering.new(hir.symbols)
+    val _mir = ml.lower_module(hir)
+    parse_errors + hl.errors.len() + ml.errors.len()
+
+describe "stage2 closure write to a captured local":
+
+    it "does not lower the differential fixture silently":
+        # Before the fix: 0 errors across parse + HIR + MIR, and the write
+        # went to the by-value snapshot.
+        expect(pipeline_error_count(FIXTURE_SRC)).to_be_greater_than(0)
+
+    it "rejects a fn-lambda assigning an enclosing var with the seed's diagnostic":
+        expect(first_diagnostic(FIXTURE_SRC)).to_contain("cannot assign to captured variable `flag` inside nested fn `hook` (line 9)" + RULE)
+
+    it "rejects a compound assignment":
+        expect(first_diagnostic(COMPOUND_SRC)).to_contain("cannot assign to captured variable `counter` inside nested fn `hook` (line 4)")
+
+    it "rejects a closure in a for body writing an outer var":
+        expect(first_diagnostic(LOOP_SRC)).to_contain("cannot assign to captured variable `total` inside nested fn `f` (line 5)")
+
+    it "rejects an escaping closure that writes its defining function's local":
+        expect(first_diagnostic(ESCAPE_SRC)).to_contain("cannot assign to captured variable `c` inside nested fn `f` (line 4)")
+
+    it "rejects a write from a closure nested in a closure":
+        expect(first_diagnostic(NESTED_SRC)).to_contain("cannot assign to captured variable `c` inside nested fn `inner` (line 5)")
+
+    it "rejects a nested fn declaration writing an enclosing local":
+        expect(first_diagnostic(NESTED_FN_SRC)).to_contain("cannot assign to captured variable `c` inside nested fn `bump` (line 4)")
+
+    it "rejects a block lambda argument writing an enclosing local":
+        expect(first_diagnostic(ARG_LAMBDA_SRC)).to_contain("cannot assign to captured variable `total` inside a closure (line 7)")
+
+    it "rejects a closure in a method body writing a method local":
+        expect(first_diagnostic(METHOD_SRC)).to_contain("cannot assign to captured variable `local` inside nested fn `f` (line 6)")
+
+    it "rejects a write under a loop inside the closure":
+        expect(first_diagnostic(CONTROL_SRC)).to_contain("cannot assign to captured variable `c` inside nested fn `f` (line 5)")
+
+    it "rejects rebinding a captured collection":
+        expect(first_diagnostic(REBIND_SRC)).to_contain("cannot assign to captured variable `xs` inside nested fn `f` (line 4)")
+
+    it "rejects a write under `if val` inside the closure":
+        expect(first_diagnostic(IF_VAL_SRC)).to_contain("cannot assign to captured variable `c` inside nested fn `f` (line 10)")
+
+    it "rejects a write in a match arm inside the closure":
+        expect(first_diagnostic(MATCH_ARM_SRC)).to_contain("cannot assign to captured variable `c` inside nested fn `f` (line 6)")
+
+    it "rejects a closure defined in a match arm writing an outer var":
+        expect(first_diagnostic(CLOSURE_IN_ARM_SRC)).to_contain("cannot assign to captured variable `c` inside nested fn `f` (line 7)")
+
+    it "accepts field and index writes through a captured reference":
+        expect(parse_diagnostics(REF_WRITE_SRC).len()).to_equal(0)
+
+    it "accepts closure-local vars, parameters and shadowing vars":
+        expect(parse_diagnostics(LOCAL_SRC).len()).to_equal(0)
+
+    it "accepts a write to a module-level var":
+        expect(parse_diagnostics(GLOBAL_SRC).len()).to_equal(0)
+
+    it "accepts a module-level var that the enclosing fn also assigns":
+        expect(parse_diagnostics(GLOBAL_RESET_SRC).len()).to_equal(0)
+
+    it "accepts closure locals bound by `if val` and reassigned in match arms":
+        expect(parse_diagnostics(PATTERN_LOCAL_SRC).len()).to_equal(0)

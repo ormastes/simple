@@ -391,3 +391,14 @@ the same way (bug `stage2_imported_fn_foreign_struct_return_type_erased_2026-10-
 - Still bare-keyed, not changed here: Optional/Result struct payload shapes
   (`bootstrap_fn_ret_opt_shape_*` / `ok_shape`) and
   `optional_payload_struct_name`'s Struct arm.
+
+## 2026-10-11 — closure writes to a captured local are rejected before HIR
+
+`snapshot_lambda_capture` gives closures by-value captures, so a body
+assignment to an enclosing local lands in the snapshot copy. That is the
+language rule for reads; a WRITE is a compile error (owner ruling 2026-09-27).
+The gate is not in MIR: `core/capture_write_check.spl` runs on the flat AST in
+`parse_and_build_module_with_scope_owner`, before `desugar_collections`
+(which turns `x = x + y` into `x.merge(y)`). Do not add by-reference capture
+in MIR to "fix" a dropped write. Bug:
+`doc/08_tracking/bug/stage2_closure_capture_write_silently_dropped_2026-10-11.md`.
