@@ -483,7 +483,24 @@ impl MirLowering:
                         numeric_kind = left_kind
                         if right_kind == 3:
                             numeric_kind = 3
+            case Index(index_base, _):
+                # An element of a DECLARED numeric array (`xs[0]` on `[i64]`).
+                if val index_base_type = self.enum_match_expr_type(index_base):
+                    match index_base_type.kind:
+                        case HirTypeKind.Array(index_elem, _): numeric_kind = self.builtin_numeric_kind_of_hir(index_elem)
+                        case HirTypeKind.Slice(index_slice_elem): numeric_kind = self.builtin_numeric_kind_of_hir(index_slice_elem)
+                        case _: ()
             case MethodCall(inner_receiver, inner_method, inner_args, _):
+                # `len()` of a DECLARED text / array / dict is the builtin
+                # length: a signed integer.
+                if inner_method == "len" and inner_args.len() == 0:
+                    if val len_receiver_type = self.enum_match_expr_type(inner_receiver):
+                        match len_receiver_type.kind:
+                            case HirTypeKind.Str: numeric_kind = 1
+                            case HirTypeKind.Array(_, _): numeric_kind = 1
+                            case HirTypeKind.Slice(_): numeric_kind = 1
+                            case HirTypeKind.Dict(_, _): numeric_kind = 1
+                            case _: ()
                 # A builtin numeric method on a PROVEN numeric receiver. A
                 # user method of the same name can only be reached through a
                 # user-typed receiver, which is not proven numeric.
@@ -504,6 +521,30 @@ impl MirLowering:
                         numeric_kind = inner_kind
             case _: ()
         numeric_kind
+
+    me builtin_remember_numeric_init(init: HirExpr, local: LocalId):
+        """Give an UNTYPED `val`/`var` whose initialiser is positively numeric
+        (`var best = 0`, `val n = xs.len()`, `val r = 1.5`) the matching HIR
+        type, so a later `best.max(e)` has a positive proof on the local. Only
+        the two default widths are recorded, and only when the local's MIR
+        type agrees; an initialiser that is not proven records nothing."""
+        val init_kind = self.builtin_numeric_expr_kind(init)
+        if init_kind != 1 and init_kind != 3:
+            return
+        if self.builtin_local_has_custom_owner(local) or self.is_runtime_value_local(local.id):
+            return
+        var agrees = false
+        if val local_mir = self.local_mir_type_of(local):
+            match local_mir.kind:
+                case MirTypeKind.I64: agrees = init_kind == 1
+                case MirTypeKind.F64: agrees = init_kind == 3
+                case _: ()
+        if not agrees:
+            return
+        if init_kind == 1:
+            self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Int(64, true), span: init.span), 0, 0)
+        else:
+            self.remember_local_hir_type(local.id, HirType(kind: HirTypeKind.Float(64), span: init.span), 0, 0)
 
     me builtin_numeric_receiver_kind(receiver: HirExpr, recv: LocalId) -> i64:
         """Numeric kind of a method receiver, or 0 when it is not POSITIVELY a
@@ -1049,7 +1090,9 @@ impl MirLowering:
         self.builder = b_init
 
         if var_symbol_id < 0:
-            self.error_fatal("for range loop variable has no resolved symbol", Some(source_span))
+            # Fatal AND an rt_panic placeholder: the body below is still
+            # lowered, and a lane that drops the error must not run it.
+            self.builtin_extra_fail_closed("for range loop variable has no resolved symbol", Some(source_span))
         else:
             self.bind_local(var_symbol_id, counter)
         # `continue` targets the increment, exactly as in lower_for_range.
