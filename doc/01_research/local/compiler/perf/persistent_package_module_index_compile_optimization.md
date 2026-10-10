@@ -155,3 +155,65 @@ requirement IDs remain unchanged.
 - Existing design/test-plan artifacts for shared types, fixtures, failure
   rules, and implementation gates; these are intended contracts, not runtime
   evidence.
+
+## Follow-up: generated-source declaration and execution seam (2026-10-10)
+
+This check used immutable repository source at `80656786aa810a48532a04d26ff7b12b5e23e28f`
+in `C:/dev/simple-item6-acceptance-contract-20261010` (`work/item6-acceptance-contract-20261010`).
+It was source inspection only; no runtime/build commands were run.
+
+`cold_full_index_publish_from_driver_v1` in
+`src/compiler/80.driver/cache/cold_full_index_producer_v1.spl` is the earliest
+existing full-index composition seam. It constructs each
+`ColdHirCompiledPackageArtifactV1` from the driver’s runtime-standard HIR
+emission (`generated_source_file` included), then calls
+`cold_hir_package_outputs_from_driver_v1` in
+`src/compiler/80.driver/cache/cold_hir_compiled_package_outputs_v1.spl`.
+That admission function already has the frozen `CompileSourceInventoryV1`,
+checks artifact payload digests, and fails closed for non-empty generated
+output because no independently selected declaration authority reaches it.
+The next production-connected design should select a generator declaration
+from the same frozen compile/build plan used for the pass, carry that selected
+declaration and an execution receipt through the full-index call into each
+compiled-package artifact, and perform receipt admission at this existing
+inventory-aware boundary. A declaration and receipt copied only from the
+artifact remain self-asserted and must not authorize one another.
+
+The compiler action model in
+`src/compiler/80.driver/action_graph/build_action_v1.spl` is a possible plan
+carrier, not a generator implementation: `BuildActionV1` binds command
+identity, declared inputs/outputs, dynamic edges, snapshot revision, and
+memory budget; `BuildActionResultV1` does not contain observed read/write
+sets. The runtime-std owner in
+`src/compiler/80.driver/smf/runtime_std_package_set.spl` constructs only the
+runtime/std package action. In the inspected compiler driver/config call path,
+there is no generator-specific declaration-selection or execution owner to
+reuse. The similarly named app build-manager contract is a distinct lane:
+`src/lib/common/build_manager/contracts.spl` `BuildTaskV1` declares inputs and
+outputs, and `builder_validate_result_v1` checks the reported successful
+output paths equal that declaration. Its worker stages declared inputs and
+pre-creates declared outputs (`src/app/bootstrap_builder/transport.spl`), then
+`src/app/bootstrap_builder/worker.spl` launches a pinned executable in the
+attempt workspace. `builder_worker_outputs_v1` hashes only declared output
+paths. These mechanisms provide task identity, staged inputs, output hashing,
+and process lifecycle/resource evidence, but they do not establish that the
+child did not read undeclared files or write undeclared paths.
+
+Specifically, `ProcessObservationRequestV4` in
+`src/lib/common/process/observation_v4.spl` carries argv/environment, pinned
+executable and cwd identities, wall/cleanup limits, memory enforcement, and a
+descendant policy. It has no filesystem access policy or observed-I/O receipt.
+Therefore the present process observation and build-manager contracts cannot
+prove generated-source isolation or detect unreported writes. Before using
+that executor as the generated-source runner, an owner must add enforceable
+read/write confinement (or equivalent complete OS-level I/O observation),
+bind its policy to the frozen declaration, and reject any unreported access;
+post-run enumeration of declared output files alone does not close the gap.
+
+The minimal next implementation is consequently a compiler-connected
+declaration-selection/execution contract at the full-index seam, backed by a
+real generator process owner with enforced filesystem policy and a receipt
+that records the selected action/declaration, frozen inventory, observed
+inputs, produced outputs, and process outcome. Until both links exist,
+non-empty generated output must continue to fail closed. This is a design
+recommendation, not evidence that such a path is implemented or verified.
