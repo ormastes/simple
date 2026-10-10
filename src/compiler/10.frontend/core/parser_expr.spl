@@ -52,6 +52,7 @@ use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident}
 use compiler.core.ast.{expr_binary, expr_unary, expr_call, expr_call_named, expr_index}
 use compiler.core.ast.{expr_field_access, expr_method_call, expr_method_call_named, expr_array_lit}
 use compiler.core.ast.{expr_struct_lit}
+use compiler.frontend.core.ast_expr.{expr_set_call_type_args}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr}
 use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
 use compiler.core.ast.{expr_range, expr_assign, expr_compound_assign}
@@ -767,11 +768,11 @@ fn extract_dotted_path(eid: i64) -> text:
 # Uses lex_snapshot_save / lex_snapshot_restore for full state save/restore.
 # Parity target: Rust src/compiler_rust/parser/src/expressions/postfix.rs
 #                try_skip_ident_generic_args()
-fn try_skip_ident_generic_args():
+fn try_skip_ident_generic_args() -> [i64]:
     # Only trigger on < or <-in-generic-context
     val cur = par_kind_get()
     if cur != 82 and cur != 86:
-        return
+        return []
 
     # Save full lexer + current-token state
     val snap = lex_snapshot_save()
@@ -905,12 +906,26 @@ fn try_skip_ident_generic_args():
         # Backtrack: restore full lexer state and current parser token
         lex_snapshot_rollback(snap)
         parser_tok_restore(saved_tok_nums, saved_tok_text)
-    else:
+        return []
+    if saw_const_arg:
         lex_snapshot_commit(snap)
-        if saw_const_arg:
-            parser_error("const generic arguments are not supported: a numeric literal such as " +
-                "`Tensor<i64, 2>` is not a type, and Simple has no const generic parameters. " +
-                "Drop the explicit generic arguments and let them be inferred, e.g. `Tensor(...)`")
+        parser_error("const generic arguments are not supported: a numeric literal such as " +
+            "`Tensor<i64, 2>` is not a type, and Simple has no const generic parameters. " +
+            "Drop the explicit generic arguments and let them be inferred, e.g. `Tensor(...)`")
+        return []
+    # The unchanged lookahead confirmed a type list. Reparse it with the real
+    # type parser so nested, optional and qualified type structure is retained.
+    lex_snapshot_rollback(snap)
+    parser_tok_restore(saved_tok_nums, saved_tok_text)
+    parser_advance()
+    var parsed_types: [i64] = []
+    while true:
+        parsed_types.push(parser_parse_type())
+        if par_kind_get() != 160:
+            break
+        parser_advance()
+    parser_expect(83)
+    parsed_types
 
 # Nested tuple-index re-split: `pair.0.1`.
 #
@@ -1048,9 +1063,12 @@ fn parser_postfix_span_from(base: i64) -> i64:
 fn parse_postfix_on(base_expr: i64) -> i64:
     # Continue postfix parsing from an already-parsed base expression
     # Disambiguate Ident<TypeArgs>.method() vs Ident < expr (binary less-than).
+    var explicit_call_types: [i64] = []
     if (expr_get_tag(base_expr) == EXPR_IDENT and
         (par_kind_get() == 82 or par_kind_get() == 86)):
-        try_skip_ident_generic_args()
+        val parsed_types = try_skip_ident_generic_args()
+        if par_kind_get() == 140:
+            explicit_call_types = parsed_types
     var base = base_expr
     while true:
         val kind = par_kind_get()
@@ -1213,6 +1231,8 @@ fn parse_postfix_on(base_expr: i64) -> i64:
                 base = expr_array_lit([], ppo_call_span)
             else:
                 base = expr_call_named(base, call_args, call_arg_names, ppo_call_span)
+                expr_set_call_type_args(base, explicit_call_types)
+            explicit_call_types = []
         elif kind == 131:
             parser_advance()
             val field_name = par_text_get()
@@ -1257,9 +1277,12 @@ fn parse_postfix() -> i64:
     parser_expr_trace_step("postfix")
     var base = parse_primary_expr()
     # Disambiguate Ident<TypeArgs>.method() vs Ident < expr (binary less-than).
+    var explicit_call_types: [i64] = []
     if (expr_get_tag(base) == EXPR_IDENT and
         (par_kind_get() == 82 or par_kind_get() == 86)):
-        try_skip_ident_generic_args()
+        val parsed_types = try_skip_ident_generic_args()
+        if par_kind_get() == 140:
+            explicit_call_types = parsed_types
     while true:
         val kind = par_kind_get()
         if kind == 164 or kind == 162:
@@ -1445,6 +1468,8 @@ fn parse_postfix() -> i64:
                 base = expr_array_lit([], pp_call_span)
             else:
                 base = expr_call_named(base, call_args, call_arg_names, pp_call_span)
+                expr_set_call_type_args(base, explicit_call_types)
+            explicit_call_types = []
             if parser_expr_trace_line_enabled():
                 eprint("[parser-expr] call:done callee={expr_get_str(base)} argc={call_args.len()}")
         elif kind == 131:

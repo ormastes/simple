@@ -28,6 +28,17 @@ fn emit_bitcast_ir(source_llvm_type: text, return_llvm_type: text) -> text:
     llvm.translate_terminator(MirTerminator.Ret(Some(mir_operand_copy(LocalId(id: 0)))))
     llvm.builder.build()
 
+fn emit_mir_bitcast_ir(source_llvm_type: text, target: MirType) -> text:
+    val llvm = MirToLlvm.create("test.llvm.mir_bitcast", CodegenTarget.X86_64, nil)
+    llvm.local_types[0] = source_llvm_type
+    llvm.defined_locals[0] = true
+    if source_llvm_type == "ptr":
+        llvm.ptr_locals[0] = true
+    elif source_llvm_type == "i1":
+        llvm.bool_locals[0] = true
+    llvm.llvm_bitcast_impl(LocalId(id: 1), mir_operand_copy(LocalId(id: 0)), target)
+    llvm.builder.build()
+
 describe "LLVM pointer and boolean bitcast lowering":
     # @manual scenario evidence
     it "preserves an i1 value through native integer before pointer conversion":
@@ -66,3 +77,35 @@ describe "LLVM pointer and boolean bitcast lowering":
 
         expect(ir).to_contain("ptrtoint ptr %l0 to i64")
         expect(ir.contains("bitcast ptr %l0 to i64")).to_equal(false)
+
+    it "lowers a MIR payload word bitcast to a pointer":
+        step("lowers a MIR payload word bitcast to a pointer")
+        val pointer_type = MirType(kind: MirTypeKind.Ref(MirType.i64(), true))
+        val ir = emit_mir_bitcast_ir("i64", pointer_type)
+        expect(ir).to_contain("%l1 = inttoptr i64 %l0 to ptr")
+        expect(ir.contains("bitcast i64 %l0 to ptr")).to_equal(false)
+
+    it "lowers a MIR pointer bitcast to an integer word":
+        step("lowers a MIR pointer bitcast to an integer word")
+        val ir = emit_mir_bitcast_ir("ptr", MirType.i64())
+        expect(ir).to_contain("%l1 = ptrtoint ptr %l0 to i64")
+        expect(ir.contains("bitcast ptr %l0 to i64")).to_equal(false)
+
+    it "preserves same pointer identity without a pointer bitcast":
+        step("preserves same pointer identity without a pointer bitcast")
+        val pointer_type = MirType(kind: MirTypeKind.Ref(MirType.i64(), true))
+        val ir = emit_mir_bitcast_ir("ptr", pointer_type)
+        expect(ir).to_contain("%l1 = getelementptr i8, ptr %l0, i64 0")
+
+    it "keeps integer to float bit reinterpretation":
+        step("keeps integer to float bit reinterpretation")
+        val ir = emit_mir_bitcast_ir("i64", MirType(kind: MirTypeKind.F64))
+        expect(ir).to_contain("%l1 = bitcast i64 %l0 to double")
+
+    it "legalizes one-bit integer pointer bit reinterpretation in both directions":
+        step("legalizes one-bit integer pointer bit reinterpretation in both directions")
+        val pointer_type = MirType(kind: MirTypeKind.Ref(MirType.i64(), true))
+        val to_pointer = emit_mir_bitcast_ir("i1", pointer_type)
+        val to_bit = emit_mir_bitcast_ir("ptr", MirType(kind: MirTypeKind.Bool))
+        expect(to_pointer).to_contain("%l1 = inttoptr i1 %l0 to ptr")
+        expect(to_bit).to_contain("%l1 = ptrtoint ptr %l0 to i1")
