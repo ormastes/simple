@@ -399,3 +399,60 @@ If no valid workaround exists, leave that dependency BLOCKED and continue
 other work. Preserve progress rather than rebuilding from Phase 1. A later
 rebuild must revisit the owning bug and verify the intended path before
 removing the workaround; restarting a process does not reset the repair count.
+
+## Cached object continuation and early linking
+
+Keep caches enabled with a stable, exclusively owned cache directory. Preserve
+successful frontend, HIR and native outputs and report actual cache reuse; never
+force fingerprints or infer reuse from object existence. Minimize compiler
+rebuilds by using the existing producer for valid source workarounds while a
+separate agent repairs the compiler. A new producer or changed dependency may
+invalidate more than the failed file; obey the normal cache contract.
+
+Freeze the complete requested source/target inventory before collection. Report
+HIR failures, monomorphization failures, MIR failures, object-emission failures,
+dependency-blocked files and unattempted files separately. Worker progress is
+not the final aggregate ledger. HIR acceptance does not prove an object exists.
+Count emitted objects by their actual paths, sizes and hashes, with producer,
+source, target, backend and ABI identities retained in the receipt.
+
+Advance independent passing files through HIR, monomorphization, MIR and object
+generation where the supported compiler interface and complete dependencies
+permit it. A diagnostic subset must preserve the remaining required inventory;
+do not disable the full build's aggregate guard or call blocked files successful.
+Use supported per-unit object commands rather than inventing a failed-only mode.
+Bound each collection epoch, preserve pending rows and caches, and resume without
+rerunning unchanged successes. Parallel jobs need separate writable source/SCV
+and cache ownership as well as measured combined resource capacity.
+
+For user-authorized workarounds, freeze a separate source revision and retain the
+original failure. Tag affected blocks using the existing
+[@workaround contract](bug_linked_workarounds.md), linking the bug, exact scope
+and removal/retest condition. Preserve pattern binders, guards, error behavior
+and every required module; never replace an unsupported construct with a dummy
+success. Retry failed files and normally invalidated dependents, then continue
+through later stages. A workaround build remains provisional until its real
+runtime checks pass. Fix the underlying owner in parallel and add both an exact
+reproducing scenario and similar prevention cases, including negative cases
+where relevant. Authored tests remain unexecuted until observed on the real runner.
+
+As soon as a target has its complete verified object set, attempt manual linking
+to expose linker failures early. Retain the actual generated linker argv and
+verify every object/runtime input against the target's compile receipts; do not
+guess flags or substitute stale objects. Preserve the primary link failure,
+all missing/duplicate-symbol and relocation diagnostics, and the separate relink
+result. Link success still requires executable smoke tests and the exact new
+compiler's Hello compile/run before dependent provisional phases.
+
+When observing a successful compile, read only the last log line, exit code and
+object size; retain full logs on disk. Inspect additional log contents only when
+the run fails. A crash, nonzero exit, or absent/empty required object is a failure.
+Run lint with the built pure-Simple CLI, retain real diagnostics, and report a
+missing lint owner as blocked rather than substituting the seed.
+
+Host access in product code goes through SoSix aliases/facades, with raw runtime
+calls confined to the appropriate provider owner. Review OS fixes against
+Windows, macOS, FreeBSD and SimpleOS contracts. Distinguish source review from
+actual platform execution and unavailable providers; Linux PASS cannot stand
+for another host. The [POSIX/host interface index](../app/llm/simpleos_posix_host_interface_index.md)
+and LLM wiki's SOSIX/QEMU matrix route to the canonical owners and platform checks.

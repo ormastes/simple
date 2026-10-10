@@ -18,6 +18,17 @@ neither is Stage 4 or release evidence.
 
 ## Required rows
 
+When the requested bootstrap matrix includes Phase 3/4, preserve every named
+producer and target beyond this Phase 1/2 controller. Test the supported Phase
+1/2/3 runtimes and build each requested Phase 4 target with each supported
+producer. Collect early Phase 2-to-Phase 4 failures independently of Phase 3.
+If all Phase 4 sources were requested, an entry-closure build alone does not
+cover that scope: retain a complete owned-source inventory and per-file results.
+Only a documented phase capability restriction permits `UNSUPPORTED`; missing
+tools, failed compiler stages and dependency-blocked files are not exclusions.
+Use [cached object continuation](bootstrap_failure_collection.md#cached-object-continuation-and-early-linking)
+for diagnostic workarounds and manual linking; these never replace admission.
+
 Each suite family has an interpreter and native row:
 
 | Family | Required behavior |
