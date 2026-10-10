@@ -36,3 +36,30 @@ Remaining enum payload, local binding, and collection method failures remain
 open. No host access or runtime FFI declaration changed.
 
 Concrete leaf type repair commit: `e298d4513` (qualified tests still pending).
+
+## Nongeneric SMTP and I/O continuation (2026-10-10)
+
+Producer `4cca9585` on source `6320be383` clears the earlier I/O facade
+`thread_sleep_ms` HIR failure after binding the canonical millisecond thread
+owner. That owner imports no modules, so the alias adds no import cycle.
+The CS fixture still fails MIR (exit 1, no object) on `then`, `is_open`,
+`close`, and `trim` owners; it is not qualified. Receipt:
+`/home/ormastes/simple-phase4-web-a0-parallel-20261010/leaf-fixtures/cs-host-alias-sleep-epoch02/evidence.json`.
+
+The earlier SMTP fixture identifies unsupported `append` calls in three
+configured send owners and an absent numeric `to_hex` method. Use the existing
+array `push` API with explicit text arrays and the common uppercase formatter.
+Quoted-printable characters now retain two hexadecimal digits for a control
+byte (tab is `=09`). The fixture checks exact message bodies for all three
+owners and both ordinary/control quoted-printable bytes, in addition to the
+existing recipient checks. Native verification is pending; no compiler generic
+repair or configured-family routing change is included.
+
+Focused SMTP verification: epoch02 removed all array append diagnostics, then
+exposed the same numeric formatting calls in the async utility owner. Apply
+the common formatter to all three physical family copies. Epoch03 compiled
+a 364808-byte object (exit 0), linked (exit 0), and executed all nine native
+checks (exit 0; exact `smtp-recipient-arrays-ok` stdout). Receipt:
+`/home/ormastes/simple-phase4-web-a0-parallel-20261010/leaf-fixtures/smtp-api-epoch03/evidence.json`.
+This is focused provisional LLVM evidence, not a full application or release
+qualification; producer remains unadmitted.
