@@ -19,8 +19,9 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 use compiler.driver.driver_source_loading.{
     _driver_resolve_entry_import, _driver_text_bucket_set_new,
     _driver_cached_entry_source_scan, driver_closure_scan_phase_trace,
-    _driver_entry_import_dirname, _driver_try_numbered_entry_import_rel
+    _driver_entry_import_dirname, _driver_try_numbered_entry_import_rel_checked_v1
 }
+use compiler.common.source_root_resolution.{SourceRootResolutionV1}
 use std.scv.compile_snapshot.{
     scv_compile_snapshot_open_v1
 }
@@ -248,27 +249,27 @@ fn _nb_normalize_source_dirs(source_dirs: [text]) -> [text]:
         result = result.push(candidate)
     result
 
-fn _nb_resolve_under_root(root: text, segs: [text]) -> text:
+fn _nb_resolve_under_root(root: text, segs: [text]) -> SourceRootResolutionV1:
     if segs.len() == 0:
-        return ""
+        return SourceRootResolutionV1.Missing
     val rel = _nb_join_segments(segs)
     val p1 = "{root}/{rel}.spl"
     if _nb_file_exists_raw(p1):
-        return p1
+        return SourceRootResolutionV1.Found(p1)
     val p2 = "{root}/{rel}/mod.spl"
     if _nb_file_exists_raw(p2):
-        return p2
+        return SourceRootResolutionV1.Found(p2)
     val p3 = "{root}/{rel}/__init__.spl"
     if _nb_file_exists_raw(p3):
-        return p3
+        return SourceRootResolutionV1.Found(p3)
     # Share the driver's numbered-directory owner. The former exact-only
     # split omitted editor/00.common declarations from the frozen closure.
-    _driver_try_numbered_entry_import_rel(root, rel)
+    _driver_try_numbered_entry_import_rel_checked_v1(root, rel)
 
-fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> text:
+fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> SourceRootResolutionV1:
     # Resolve a module segment list to an .spl file under a --source root.
     # Mirrors the Rust discovery FS-fallback: strip a leading segment matching
-    # the root's dir name. Returns "" if unresolved.
+    # the root's dir name. Ambiguity terminates root traversal.
     for root in source_dirs:
         val dir_name = _nb_basename(root)
         val public_lib_alias = dir_name == "lib" and segs.len() > 0 and segs[0] == "std"
@@ -279,19 +280,22 @@ fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> text:
                 stripped = stripped.push(segs[si])
                 si = si + 1
             val stripped_path = _nb_resolve_under_root(root, stripped)
-            if stripped_path != "":
-                return stripped_path
+            match stripped_path:
+                case SourceRootResolutionV1.Missing: ()
+                case _: return stripped_path
         val direct_path = _nb_resolve_under_root(root, segs)
-        if direct_path != "":
-            return direct_path
+        match direct_path:
+            case SourceRootResolutionV1.Missing: ()
+            case _: return direct_path
     # Unprefixed tier-qualified paths (`nogc_sync_mut.io_runtime` from the
     # std.io_runtime shim's `export use`; `common.ui.access_types`) live
     # under src/lib but carry no std./lib. prefix — no root above matches.
     val lib_root = _nb_source_root_named(source_dirs, "lib")
     if lib_root != "":
         val lib_direct = _nb_resolve_under_root(lib_root, segs)
-        if lib_direct != "":
-            return lib_direct
+        match lib_direct:
+            case SourceRootResolutionV1.Missing: ()
+            case _: return lib_direct
     # `std.X` flattens the concurrency-tier directories: std.mcp_sdk.server.
     # method_detect is physically src/lib/<tier>/mcp_sdk/server/method_detect
     # .spl. Mirror the seed interpreter's family-fallback order.
@@ -304,9 +308,10 @@ fn _nb_resolve_segs(segs: [text], source_dirs: [text]) -> text:
         if lib_root != "":
             for tier in ["nogc_async_mut", "nogc_sync_mut", "nogc_async_immut", "common", "gc_async_mut", "nogc_async_mut_noalloc"]:
                 val tier_path = _nb_resolve_under_root(lib_root + "/" + tier, tier_tail)
-                if tier_path != "":
-                    return tier_path
-    ""
+                match tier_path:
+                    case SourceRootResolutionV1.Missing: ()
+                    case _: return tier_path
+    SourceRootResolutionV1.Missing
 
 fn _nb_join_segments(segs: [text]) -> text:
     segs.join("/")
@@ -418,7 +423,13 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             if resolve_cache.has(seg_key):
                 rp = resolve_cache[seg_key]
             else:
-                rp = _nb_resolve_segs(segs, closure_source_dirs)
+                val selected = _nb_resolve_segs(segs, closure_source_dirs)
+                match selected:
+                    case SourceRootResolutionV1.Found(path): rp = path
+                    case SourceRootResolutionV1.Missing: ()
+                    case SourceRootResolutionV1.Ambiguous(directory):
+                        _cli_eprint("SOURCE_ROOT_AMBIGUOUS: import '{mp}' has competing numbered directories under '{directory}'")
+                        return []
                 resolve_cache[seg_key] = rp
             if trace_closure and f == frozen_entry:
                 _cli_eprint("[native-build] closure import {mp} -> {rp}")
@@ -436,7 +447,13 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                 if resolve_cache.has(drop_key):
                     drop_rp = resolve_cache[drop_key]
                 else:
-                    drop_rp = _nb_resolve_segs(drop, closure_source_dirs)
+                    val selected = _nb_resolve_segs(drop, closure_source_dirs)
+                    match selected:
+                        case SourceRootResolutionV1.Found(path): drop_rp = path
+                        case SourceRootResolutionV1.Missing: ()
+                        case SourceRootResolutionV1.Ambiguous(directory):
+                            _cli_eprint("SOURCE_ROOT_AMBIGUOUS: import '{mp}' has competing numbered directories under '{directory}'")
+                            return []
                     resolve_cache[drop_key] = drop_rp
                 if drop_rp != "" and not discovered.contains_key(drop_rp):
                     queue.append(drop_rp)
