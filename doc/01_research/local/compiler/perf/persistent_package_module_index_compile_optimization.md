@@ -217,3 +217,13 @@ that records the selected action/declaration, frozen inventory, observed
 inputs, produced outputs, and process outcome. Until both links exist,
 non-empty generated output must continue to fail closed. This is a design
 recommendation, not evidence that such a path is implemented or verified.
+
+Primary review clarification: the full-index composition seam above is the
+publication/admission connection, not the execution starting point. A generator
+must run before generated source is compiled, with a derived frozen snapshot
+admitted before HIR. Also, expected declaration authority must arrive separately
+from artifact-carried declarations/receipts through driver-owned selected-plan
+state; putting both in the artifact would preserve the self-authorization bug.
+The detail design now specifies input snapshot S, derived compilation snapshot
+S', and the required refusal/success observations. This clarification supersedes
+any reading of the recommendation as executing a generator at publication time.
