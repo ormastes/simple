@@ -3741,14 +3741,22 @@ impl MirLowering:
                 # then use the runtime's tagged-or-raw text ABI directly.
                 # Its index and result are raw i64 values; boxing either side
                 # recreates the native 88 -> 11 tag-shift corruption.
-                if method == "char_code_at" and args.len() == 1:
+                # Text.ord() is the first Unicode scalar, or zero for empty
+                # text, exactly the existing char_code_at(0) runtime contract.
+                if (method == "char_code_at" and args.len() == 1) or (method == "ord" and args.len() == 0):
                     var char_code_receiver_is_text = self.local_is_str(unresolved_receiver_local)
                     if not char_code_receiver_is_text:
                         char_code_receiver_is_text = self.local_hir_type_is_str(unresolved_receiver_local)
                     if not char_code_receiver_is_text:
-                        self.error_fatal("char_code_at receiver is not text", Some(receiver.span))
+                        self.error_fatal("{method} receiver is not text", Some(receiver.span))
                         return unresolved_receiver_local
-                    val char_code_index = self.lower_expr(args[0].value)
+                    var char_code_index = LocalId(id: -1)
+                    if method == "ord":
+                        var ord_index_builder = self.builder
+                        char_code_index = ord_index_builder.emit_const_int(0)
+                        self.builder = ord_index_builder
+                    else:
+                        char_code_index = self.lower_expr(args[0].value)
                     val char_code_op = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("__simple_rt_string_char_code_at"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(
