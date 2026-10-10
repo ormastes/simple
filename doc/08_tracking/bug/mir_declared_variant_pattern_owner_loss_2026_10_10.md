@@ -13,3 +13,49 @@ Authored real native regression imports actual compiler declarations and actual 
 Known limits: generic enum payload substitution is unchanged; late dynamic import pattern registration is unchanged. Prescan currently repeats nongeneric declared-type projection later in full enum lowering; measure if this adds material startup/build cost, then reuse exact-owner slot metadata without forcing caches. No performance claim is made.
 
 Unresolved representation boundary: HirDeclaredPatternEnumSlots stores tuple types, struct names/types and is_struct, without the original VariantKind discriminator. VariantKind.Unit and VariantKind.Tuple([]) therefore share the same empty tuple layout. The existing flat bridge likewise represents payload-less variants as Tuple([]), but this does not prove whether Unit() and a unit pattern without parentheses must be distinguished by every frontend. Extra nonempty unit payload is explicitly rejected; the zero-length unit/tuple distinction remains UNQUALIFIED and needs an actual parser/frontend contract regression before any completeness claim.
+
+## Linux ARM and RISC-V continuation, 2026-10-10
+
+Release `7b45c1e4959bc05af01eb8b212416947195bc4ce` rebuilt 1217 Stage 2
+modules and passed both frontend admission modes on Linux AArch64. Its
+in-process Stage 2 test-runner prerequisite failed HIR in four modules:
+`test_runner_types`, `test_runner_files`, `test_runner_config`, and
+`test_runner_main`. Each uses positional `Composite(spec)` patterns against
+the named `Composite(spec: text)` declaration. The flat bridge deliberately
+retains those names as `VariantKind.Struct`; the new declared-slot check
+incorrectly treated positional matching of that declaration as a shape error.
+
+The repair takes positional slot types from `field_types` for a named variant,
+in declaration order. Tuple declarations retain `tuple_types`. Pattern payload
+shape remains positional, and declared owner, arity, named-field validation,
+and concrete-type admission remain enforced. No target-specific behavior is
+introduced: ARM and RISC-V share this HIR owner.
+
+`test/fixtures/compiler/named_variant_positional_pattern.spl` exercises distinct
+text and integer slots, payload values and a unit alternative. The admitted
+old compiler rejects it with the same shape error for both AArch64 and RISC-V.
+The rebuilt diagnostic compiler clears HIR on both target paths; its first
+unbound build then traps at `spl_cranelift_new_aot_module_config_v2`, so that
+attempt is not object-generation or runtime PASS evidence. Rebuilding with the
+canonical bootstrap policy and `SIMPLE_BINARY` runtime authority reused 1215
+objects and rebuilt two. That runtime-bound compiler produced an AArch64
+relocatable object and a native executable: exact stdout `named-positional-ok`,
+exit zero, empty stderr. Its explicit source/entry RISC-V build produced an
+ELF64 relocatable object with `EM_RISCV`. Wrong positional arity still fails
+with the arity diagnostic and no object. RISC-V runtime execution was not
+performed: no GNU cross compiler/sysroot was available. The new unit spec
+checks exact bound types and wrong arity; it is authored and has not been
+executed by a qualified test runner.
+
+Separate open target-routing finding: the positional `native-build file.spl`
+path ignores a RISC-V target request and produces `EM_AARCH64` on this host,
+even with `SIMPLE_NATIVE_BUILD_TARGET` set. The explicit
+`--source ... --entry-closure --entry ... --target riscv64-unknown-linux-gnu`
+coordinator path produces `EM_RISCV`. These are distinct observations;
+positional-path output must not be accepted as cross-target evidence. This
+HIR repair does not fix or qualify that routing defect.
+
+Evidence lives in the isolated Linux worktrees under
+`build/native_probe/linux-arm-riscv-phase3-20261010/` and
+`build/native_probe/named-variant-pattern/`. Neither Phase 3 nor Phase 4 is
+admitted by these diagnostic observations.
