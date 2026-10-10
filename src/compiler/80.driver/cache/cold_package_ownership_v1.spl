@@ -50,6 +50,26 @@ struct ColdPackageOwnershipCaptureV1:
     membership: RuntimeStdPackageMembershipV1
     members: [ColdPackageOwnershipMemberV1]
     members_by_source: Dict<text, ColdPackageOwnershipMemberV1>
+    project_root_digest: text = ""
+
+# Only SCV-validated policy bytes enter this namespace. Source and manifest
+# content, revision, checkout location and inventory epoch remain separate
+# witnesses so the transition owner can invalidate their exact consumers.
+fn _cold_package_project_root_v1(
+    policy_content: text
+) -> Result<text, text>:
+    match parse(policy_content):
+        case Err(_): return Err("cold-package-policy-sdn-invalid")
+        case Ok(root):
+            match root.get_path("ownership_v1.project_identity"):
+                case None: return Ok("")
+                case Some(identity):
+                    val name = identity.as_str() ?? ""
+                    if not _cold_package_identity_valid_v1(name):
+                        return Err("cold-package-project-identity-invalid")
+                    val payload = "simple/cold-package-project-root/v1|" +
+                        "{name.len()}:{name}|{sha256_text(policy_content)}|"
+                    return Ok(sha256_text(payload))
 
 fn _cold_package_identity_valid_v1(value: text) -> bool:
     if value == "" or value.len() > 128:
@@ -282,8 +302,9 @@ fn cold_package_ownership_capture_v1(
         membership, sources)
     if verdict != "ok":
         return Err("cold-package-membership-invalid:{verdict}")
+    val project_root = _cold_package_project_root_v1(policy_content)?
     Ok(ColdPackageOwnershipCaptureV1(
-        policy_digest, membership, members, by_source))
+        policy_digest, membership, members, by_source, project_root))
 
 export ColdPackageOwnershipManifestV1
 export ColdPackageOwnershipRuleV1
