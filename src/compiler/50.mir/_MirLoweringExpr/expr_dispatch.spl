@@ -5755,6 +5755,50 @@ impl MirLowering:
     # ========================================================================
 
     me lower_match_case(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
+        """Lower one HIR `match`, then check the guard-count invariant (3a):
+        the number of guarded arms HIR handed over must equal the number of
+        guard branches MIR emitted for it. A guard that was parsed but not
+        lowered makes its arm run whenever the pattern matches -- wrong code
+        with no other symptom (the 8759c630e05 class).
+
+        Both counts live on the lowering (`match_guards_expected` /
+        `match_guards_lowered`) so every arm shape and every dispatch path is
+        covered by the same comparison; the only sites allowed to adjust the
+        expectation are the or-arm split (one guard per alternative) and the
+        unreachable-arm skips. Saved and restored here, so a match nested in
+        an arm body is checked on its own.
+
+        Reported as the lowering advisory E-MIR-MATCH-GUARD (`mir_advisories`,
+        never `errors`; SIMPLE_MIR_VERIFY_LEVELS error | warning | off, and
+        `off` skips the counting, not just the report)."""
+        if self.mir_advisory_level("E-MIR-MATCH-GUARD") == "off":
+            return self.lower_match_case_unchecked(scrutinee, arms, expected_type)
+        var guarded_arms = 0
+        var guard_scan = 0
+        while guard_scan < arms.len():
+            val guard_scan_arm: HirMatchArm = arms[guard_scan]
+            if guard_scan_arm.has_guard:
+                guarded_arms = guarded_arms + 1
+            guard_scan = guard_scan + 1
+        if guarded_arms == 0:
+            return self.lower_match_case_unchecked(scrutinee, arms, expected_type)
+        val outer_expected = self.match_guards_expected
+        val outer_lowered = self.match_guards_lowered
+        self.match_guards_expected = guarded_arms
+        self.match_guards_lowered = 0
+        val lowered_local = self.lower_match_case_unchecked(scrutinee, arms, expected_type)
+        val want_guards = self.match_guards_expected
+        val got_guards = self.match_guards_lowered
+        self.match_guards_expected = outer_expected
+        self.match_guards_lowered = outer_lowered
+        if want_guards != got_guards:
+            var guard_fn_name = "<module-level>"
+            if val guard_fn = self.builder.current_function:
+                guard_fn_name = guard_fn.name
+            self.advisory("E-MIR-MATCH-GUARD", "match in fn {guard_fn_name} (module {self.current_module_id}) has {want_guards} guard(s) to evaluate but lowered {got_guards} guard branch(es); a guard was dropped and its arm would run unconditionally", Some(scrutinee.span))
+        lowered_local
+
+    me lower_match_case_unchecked(scrutinee: HirExpr, arms: [HirMatchArm], expected_type: HirType?) -> LocalId:
         """Lower a `match` expression on integer-literal patterns.
 
         Phase 1 supports:
@@ -5896,27 +5940,9 @@ impl MirLowering:
         while idx < arms.len():
             val arm: HirMatchArm = arms[idx]
             if arm.has_guard:
-                # Guard clauses (`case x if cond:`) have no MIR lowering yet
-                # (B5b Phase 2). Fail loudly instead of silently: record a
-                # compile error AND emit an rt_panic call carrying the same
-                # message, so pipelines that drop MirLowering.errors (e.g.
-                # the native-build worker's lower_to_mir — see
-                # lower_for_iterator in mir_lowering_stmts.spl for the same
-                # pattern) still abort with a clear diagnostic instead of
-                # emitting an empty function body that crashes the LLVM
-                # backend on a dangling SSA reference.
-                val guard_unsupported_msg = "match guards (case x if cond:) are not supported by native codegen yet (B5b Phase 2)"
-                self.error(guard_unsupported_msg, Some(arm.span))
-                var b_err = self.builder
-                val panic_msg_local = b_err.emit_const_str(guard_unsupported_msg)
-                val panic_func_operand = MirOperand(kind: MirOperandKind.Const(
-                    MirConstValue.Str("rt_panic"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.unit(), is_variadic: false)))
-                ))
-                b_err.emit_call(panic_func_operand, [mir_operand_copy(panic_msg_local)], MirType.unit())
-                val err_temp = b_err.new_temp(MirType.unit())
-                self.builder = b_err
-                return err_temp
+                # Guards are lowered in source order by the guarded chain
+                # (pattern test, bind, guard branch per arm).
+                return self.lower_guarded_scalar_match(scrutinee, arms, expected_type)
             match arm.pattern.kind:
                 case Wildcard:
                     if has_default_body:
