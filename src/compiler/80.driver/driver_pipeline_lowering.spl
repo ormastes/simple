@@ -255,6 +255,7 @@ impl CompilerDriver:
         var modules_checked = 0
         var findings_total = 0
         var fatal_total = 0
+        var suppressed_total = 0
         var functions_total = 0
         var instructions_total = 0
         var mir_module_names: [text] = []
@@ -276,8 +277,17 @@ impl CompilerDriver:
             functions_total = functions_total + report.functions_checked
             instructions_total = instructions_total + report.instructions_checked
             for finding in report.findings:
+                # Per-rule level: registry default (all `warning` for the
+                # warn-first landing) overridden by SIMPLE_MIR_VERIFY_LEVELS
+                # ("MIRV-002=error,MIRV-005e=off,*=warning"). `off` = not
+                # reported; `error` = fatal unless the global warning phase
+                # downgrades it one level.
+                val level = finding.level()
+                if level == "off":
+                    suppressed_total = suppressed_total + 1
+                    continue
                 findings_total = findings_total + 1
-                val fatal = finding.is_fatal() and not warning_phase
+                val fatal = level == "error" and not warning_phase
                 if fatal:
                     fatal_total = fatal_total + 1
                     self.ctx.add_error(finding.format())
@@ -291,7 +301,7 @@ impl CompilerDriver:
             diagnostics: findings_total,
             errors_raised: fatal_total
         ))
-        log_phase("mir_verify: modules={modules_checked} functions={functions_total} instructions={instructions_total} findings={findings_total} fatal={fatal_total}")
+        log_phase("mir_verify: modules={modules_checked} functions={functions_total} instructions={instructions_total} findings={findings_total} fatal={fatal_total} suppressed={suppressed_total}")
         if fatal_total > 0:
             print "error[MIRV]: MIR validity verification found {fatal_total} fatal finding(s) across {modules_checked} module(s); refusing to hand invalid MIR to any backend"
             return false

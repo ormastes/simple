@@ -28,6 +28,7 @@ use compiler.mir.mir_types.*
 use compiler.mir.mir_instruction_support.*
 use compiler.mir.mir_instruction_kinds.{MirInstKind}
 use compiler.mir.mir_instruction_graph.{MirInst, MirBlock, MirFunction, MirModule}
+use std.nogc_sync_mut.io.env_ops.{env_get}
 
 # ============================================================================
 # Rule registry projection
@@ -36,37 +37,77 @@ use compiler.mir.mir_instruction_graph.{MirInst, MirBlock, MirFunction, MirModul
 struct MirVerifyRule:
     id: text
     family: text
-    lifecycle: text      # "error" (fatal) | "warning" (warn-first)
+    lifecycle: text              # registry default: "warning" | "error"
+    promotion_candidate: bool    # zero hits so far; eligible for "error" after a full-closure zero-hit run
 
 # Keep in sync with config/compiler/mir_verify_rules.sdn (pinned by spec).
+# WARN-FIRST LANDING (review of 0df5354dfca): every rule starts at `warning`.
+# Promotion to `error` happens per rule, in the registry, only after a
+# phase-3 + phase-4 full-closure run shows zero hits for that rule.
 fn mir_verify_rules() -> [MirVerifyRule]:
     [
-        MirVerifyRule(id: "MIRV-001", family: "unresolved_type", lifecycle: "error"),
-        MirVerifyRule(id: "MIRV-002", family: "illegal_cast", lifecycle: "error"),
-        MirVerifyRule(id: "MIRV-002b", family: "bitcast_width", lifecycle: "error"),
-        MirVerifyRule(id: "MIRV-003", family: "unit_static", lifecycle: "error"),
-        MirVerifyRule(id: "MIRV-003b", family: "unit_stored_local", lifecycle: "warning"),
-        MirVerifyRule(id: "MIRV-004", family: "call_generic_template", lifecycle: "error"),
-        MirVerifyRule(id: "MIRV-004b", family: "call_arity", lifecycle: "error"),
-        MirVerifyRule(id: "MIRV-004c", family: "call_arg_type", lifecycle: "warning"),
-        MirVerifyRule(id: "MIRV-004d", family: "call_abi_kind", lifecycle: "warning"),
-        MirVerifyRule(id: "MIRV-005", family: "cfg_structure", lifecycle: "error"),
-        MirVerifyRule(id: "MIRV-005b", family: "use_undeclared_local", lifecycle: "error"),
-        MirVerifyRule(id: "MIRV-005c", family: "unused_condition", lifecycle: "warning"),
-        MirVerifyRule(id: "MIRV-005d", family: "invalid_variant", lifecycle: "error"),
-        MirVerifyRule(id: "MIRV-005e", family: "local_never_defined", lifecycle: "warning"),
-        MirVerifyRule(id: "MIRV-006", family: "field_out_of_layout", lifecycle: "error"),
-        MirVerifyRule(id: "MIRV-006b", family: "layout_owner_unresolved", lifecycle: "warning"),
-        MirVerifyRule(id: "MIRV-007", family: "duplicate_symbol", lifecycle: "error"),
-        MirVerifyRule(id: "MIRV-007b", family: "static_initializer_type", lifecycle: "warning")
+        MirVerifyRule(id: "MIRV-001", family: "unresolved_type", lifecycle: "warning", promotion_candidate: true),
+        MirVerifyRule(id: "MIRV-002", family: "illegal_cast", lifecycle: "warning", promotion_candidate: false),
+        MirVerifyRule(id: "MIRV-002b", family: "bitcast_width", lifecycle: "warning", promotion_candidate: true),
+        MirVerifyRule(id: "MIRV-003", family: "unit_static", lifecycle: "warning", promotion_candidate: true),
+        MirVerifyRule(id: "MIRV-003b", family: "unit_stored_local", lifecycle: "warning", promotion_candidate: false),
+        MirVerifyRule(id: "MIRV-004", family: "call_generic_template", lifecycle: "warning", promotion_candidate: true),
+        MirVerifyRule(id: "MIRV-004b", family: "call_arity", lifecycle: "warning", promotion_candidate: false),
+        MirVerifyRule(id: "MIRV-004c", family: "call_arg_type", lifecycle: "warning", promotion_candidate: false),
+        MirVerifyRule(id: "MIRV-004d", family: "call_abi_kind", lifecycle: "warning", promotion_candidate: false),
+        MirVerifyRule(id: "MIRV-005", family: "cfg_structure", lifecycle: "warning", promotion_candidate: true),
+        MirVerifyRule(id: "MIRV-005b", family: "use_undeclared_local", lifecycle: "warning", promotion_candidate: true),
+        MirVerifyRule(id: "MIRV-005c", family: "unused_condition", lifecycle: "warning", promotion_candidate: false),
+        MirVerifyRule(id: "MIRV-005d", family: "invalid_variant", lifecycle: "warning", promotion_candidate: true),
+        MirVerifyRule(id: "MIRV-005e", family: "local_never_defined", lifecycle: "warning", promotion_candidate: false),
+        MirVerifyRule(id: "MIRV-006", family: "field_out_of_layout", lifecycle: "warning", promotion_candidate: true),
+        MirVerifyRule(id: "MIRV-006b", family: "layout_owner_unresolved", lifecycle: "warning", promotion_candidate: false),
+        MirVerifyRule(id: "MIRV-007", family: "duplicate_symbol", lifecycle: "warning", promotion_candidate: true),
+        MirVerifyRule(id: "MIRV-007b", family: "static_initializer_type", lifecycle: "warning", promotion_candidate: false)
     ]
 
 fn mir_verify_rule_lifecycle(rule_id: text) -> text:
+    """Registry default for a rule ('' = unregistered)."""
     for rule in mir_verify_rules():
         if rule.id == rule_id:
             return rule.lifecycle
-    # An unregistered id is a programming error in this file; fail closed.
-    "error"
+    ""
+
+# Per-rule level override: SIMPLE_MIR_VERIFY_LEVELS="MIRV-002=error,MIRV-005e=off,*=warning"
+# Levels: "error" (fatal, aborts before codegen) | "warning" | "off" (not reported).
+# `*` sets the level for every rule not named explicitly. Unknown rule ids and
+# unknown levels are ignored (fail closed to the registry default), never a
+# silent downgrade of a named rule.
+fn mir_verify_rule_level_from_spec(rule_id: text, spec: text) -> text:
+    var level = mir_verify_rule_lifecycle(rule_id)
+    if level == "":
+        # Unregistered id: a programming error in this file; report loudly.
+        level = "error"
+    if spec == "":
+        return level
+    var wildcard = ""
+    var exact = ""
+    for item in spec.split(","):
+        val entry = item.trim()
+        val eq = entry.index_of("=") ?? -1
+        if eq <= 0:
+            continue
+        val key = entry.substring(0, eq).trim()
+        val value = entry.substring(eq + 1).trim().lower()
+        if value != "error" and value != "warning" and value != "off":
+            continue
+        if key == "*":
+            wildcard = value
+        elif key == rule_id:
+            exact = value
+    if exact != "":
+        return exact
+    if wildcard != "":
+        return wildcard
+    level
+
+fn mir_verify_rule_level(rule_id: text) -> text:
+    mir_verify_rule_level_from_spec(rule_id, env_get("SIMPLE_MIR_VERIFY_LEVELS"))
 
 # ============================================================================
 # Findings
@@ -82,8 +123,15 @@ struct MirVerifyFinding:
     span: Span?
 
 impl MirVerifyFinding:
+    fn level() -> text:
+        """Resolved level: registry default overridden by SIMPLE_MIR_VERIFY_LEVELS."""
+        mir_verify_rule_level(self.rule)
+
     fn is_fatal() -> bool:
-        mir_verify_rule_lifecycle(self.rule) == "error"
+        self.level() == "error"
+
+    fn is_suppressed() -> bool:
+        self.level() == "off"
 
     fn format() -> text:
         var where_ = "module {self.module}"
@@ -217,9 +265,67 @@ fn mir_verify_type_text(t: MirType) -> text:
         case _: "<other>"
 
 fn mir_verify_type_same(a: MirType, b: MirType) -> bool:
-    """Structural equality through the compact rendering (no allocation on the
-    hot path: only called when a class check already passed)."""
-    mir_verify_type_text(a) == mir_verify_type_text(b)
+    mir_verify_type_eq(a, b, 0)
+
+fn mir_verify_type_eq(a: MirType, b: MirType, depth: i64) -> bool:
+    """Structural equality without allocation (hot path for every aggregate
+    call argument). Depth-bounded; unknown/foreign kinds compare equal only
+    when their coarse class agrees."""
+    if depth > 8:
+        return true
+    match a.kind:
+        case MirTypeKind.Ptr(pa, _):
+            match b.kind:
+                case MirTypeKind.Ptr(pb, _): mir_verify_type_eq(pa, pb, depth + 1)
+                case _: false
+        case MirTypeKind.Ref(ra, _):
+            match b.kind:
+                case MirTypeKind.Ref(rb, _): mir_verify_type_eq(ra, rb, depth + 1)
+                case _: false
+        case MirTypeKind.Array(ea, na):
+            match b.kind:
+                case MirTypeKind.Array(eb, nb): na == nb and mir_verify_type_eq(ea, eb, depth + 1)
+                case _: false
+        case MirTypeKind.Slice(ea):
+            match b.kind:
+                case MirTypeKind.Slice(eb): mir_verify_type_eq(ea, eb, depth + 1)
+                case _: false
+        case MirTypeKind.Dict(ka, va):
+            match b.kind:
+                case MirTypeKind.Dict(kb, vb): mir_verify_type_eq(ka, kb, depth + 1) and mir_verify_type_eq(va, vb, depth + 1)
+                case _: false
+        case MirTypeKind.Tuple(ea):
+            match b.kind:
+                case MirTypeKind.Tuple(eb):
+                    if ea.len() != eb.len(): return false
+                    var i = 0
+                    while i < ea.len():
+                        if not mir_verify_type_eq(ea[i], eb[i], depth + 1): return false
+                        i = i + 1
+                    true
+                case _: false
+        case MirTypeKind.Struct(sa):
+            match b.kind:
+                case MirTypeKind.Struct(sb): sa.id == sb.id
+                case _: false
+        case MirTypeKind.Enum(sa):
+            match b.kind:
+                case MirTypeKind.Enum(sb): sa.id == sb.id
+                case _: false
+        case MirTypeKind.Result(oa, ea):
+            match b.kind:
+                case MirTypeKind.Result(ob, eb): mir_verify_type_eq(oa, ob, depth + 1) and mir_verify_type_eq(ea, eb, depth + 1)
+                case _: false
+        case MirTypeKind.Opaque(na):
+            match b.kind:
+                case MirTypeKind.Opaque(nb): na == nb
+                case _: false
+        case MirTypeKind.Bits(wa, sa):
+            match b.kind:
+                case MirTypeKind.Bits(wb, sb): wa == wb and sa == sb
+                case _: false
+        case _:
+            mir_verify_type_class(a) == mir_verify_type_class(b) and mir_verify_type_bits(a) == mir_verify_type_bits(b)
 
 fn mir_verify_type_unresolved_reason(t: MirType, depth: i64) -> text:
     """'' when the type is fully resolved; otherwise why it is not.
@@ -327,6 +433,22 @@ impl MirFnVerifier:
         if val d = id:
             self.def_local(d)
 
+    me def_operand_base(op: MirOperand):
+        """Mark the local behind an operand as defined WITHOUT counting a use.
+        Used where a local is initialised indirectly: address-taken (`Ref`,
+        `GetElementPtr`), written through a pointer (`Store` target), or
+        passed to an intrinsic/call that fills an out-parameter. MIRV-005e is
+        therefore 'no direct or indirect definition anywhere in the function',
+        not dominance -- see mir_verify_rules.sdn (005e stays warn-first)."""
+        match op.kind:
+            case MirOperandKind.Copy(local):
+                val p = self.local_pos(local)
+                if p >= 0: self.defined[p] = true
+            case MirOperandKind.Move(local):
+                val p = self.local_pos(local)
+                if p >= 0: self.defined[p] = true
+            case MirOperandKind.Const(_, _): ()
+
     fn block_exists(id: BlockId) -> bool:
         id.id >= 0 and id.id < self.block_pos.len() and self.block_pos[id.id] >= 0
 
@@ -343,37 +465,28 @@ impl MirFnVerifier:
         val src = src_opt!
         val sc = mir_verify_type_class(src)
         val tc = mir_verify_type_class(target)
-        if mir_verify_is_text(src) or mir_verify_is_text(target):
-            # `text` is a runtime string handle (this lowering spells it
-            # Opaque("str") or the (ptr<u8>,u64) fat tuple); `s[i] as u8` is
-            # the "ptr to i8" LLVM crash.
-            self.report("MIRV-002", "raw cast between text and scalar: " + mir_verify_type_text(src) + " -> " + mir_verify_type_text(target) + "; convert through a byte/char accessor instead")
-            return
-        # Renderings are only built on the error path (allocation-free hot path).
-        val src_text = if sc == tc and sc == MVT_INT: "" else: mir_verify_type_text(src)
-        val dst_text = if sc == tc and sc == MVT_INT: "" else: mir_verify_type_text(target)
-        if sc == MVT_AGG or tc == MVT_AGG:
-            # The "ptr to i8" crash: `text[i] as u8` casts a (ptr,len) tuple
-            # to a scalar. No backend has a legal instruction for this.
-            self.report("MIRV-002", "raw cast between aggregate and scalar: {src_text} -> {dst_text}; aggregates need an explicit field projection / conversion call")
-            return
-        if sc == MVT_UNIT or tc == MVT_UNIT or sc == MVT_NEVER or tc == MVT_NEVER:
-            self.report("MIRV-002", "cast involving a value-less type: {src_text} -> {dst_text}")
-            return
-        if (sc == MVT_PTR and tc == MVT_FLOAT) or (sc == MVT_FLOAT and tc == MVT_PTR):
-            self.report("MIRV-002", "pointer <-> float cast: {src_text} -> {dst_text}")
-            return
-        if (sc == MVT_PTR and tc == MVT_INT and mir_verify_type_bits(target) < 64) or
-                (sc == MVT_INT and tc == MVT_PTR and mir_verify_type_bits(src) < 64):
-            # ptr <-> i64/u64 is the handle convention (explicit PtrToInt /
-            # IntToPtr in the backends); anything narrower truncates a pointer.
-            self.report("MIRV-002", "pointer <-> narrow integer cast: {src_text} -> {dst_text}; only 64-bit integers may carry a pointer")
+        # MIRV-002 is deliberately NARROW (review of 0df5354dfca): `lower_cast_expr`
+        # emits Cast for every non-enum `as`, and text/aggregate <-> i64/ptr
+        # handle casts and same-type `x as T` are legal today (backends lower
+        # them as PtrToInt/IntToPtr or no-ops). The only shape no backend can
+        # lower is a text or aggregate value cast to/from a NARROW scalar:
+        # `s[i] as u8` (the "ptr to i8" LLVM crash) or `s as f64`.
+        val src_wide = sc == MVT_AGG or mir_verify_is_text(src)
+        val dst_wide = tc == MVT_AGG or mir_verify_is_text(target)
+        val src_narrow = sc == MVT_FLOAT or (sc == MVT_INT and mir_verify_type_bits(src) < 64)
+        val dst_narrow = tc == MVT_FLOAT or (tc == MVT_INT and mir_verify_type_bits(target) < 64)
+        if (src_wide and dst_narrow) or (src_narrow and dst_wide):
+            # Renderings are built on the error path only.
+            val src_text = mir_verify_type_text(src)
+            val dst_text = mir_verify_type_text(target)
+            val what = if mir_verify_is_text(src) or mir_verify_is_text(target): "text" else: "aggregate"
+            self.report("MIRV-002", "raw cast between {what} and narrow scalar: {src_text} -> {dst_text}; no backend can lower this (use a byte/char accessor or a conversion call)")
             return
         if bitcast:
             val sb = mir_verify_type_bits(src)
             val tb = mir_verify_type_bits(target)
             if sb != 0 and tb != 0 and sb != tb:
-                self.report("MIRV-002b", "bitcast between different widths: {src_text} ({sb} bits) -> {dst_text} ({tb} bits)")
+                self.report("MIRV-002b", "bitcast between different widths: " + mir_verify_type_text(src) + " ({sb} bits) -> " + mir_verify_type_text(target) + " ({tb} bits)")
 
     me check_field(base: MirOperand, field: i64, module: MirModule, write: bool):
         val base_opt = self.operand_type(base)
@@ -535,10 +648,17 @@ impl MirFnVerifier:
             case MirInstKind.Store(ptr, value):
                 self.use_operand(ptr)
                 self.use_operand(value)
+                # A Store through a local-held pointer initialises what it
+                # points at; when that pointer IS the var slot (address-taken
+                # var lowered as its own pointer), count the slot as defined.
+                self.def_operand_base(ptr)
             case MirInstKind.GetElementPtr(dest, base, indices):
                 self.def_local(dest)
                 self.use_operand(base)
                 self.use_operands(indices)
+                # Address-taken: the pointee may be initialised through the
+                # resulting pointer (Store), so the base counts as defined.
+                self.def_operand_base(base)
             case MirInstKind.LoadGlobal(dest, _):
                 self.def_local(dest)
             case MirInstKind.StoreGlobal(_, value):
@@ -583,9 +703,16 @@ impl MirFnVerifier:
             case MirInstKind.Intrinsic(dest, _, args):
                 self.def_local_opt(dest)
                 self.use_operands(args)
+                # Intrinsics fill out-parameters passed by local; count them
+                # as definitions rather than reads of an undefined slot.
+                for a in args:
+                    self.def_operand_base(a)
             case MirInstKind.Ref(dest, _, place):
                 self.def_local(dest)
                 self.use_local(place.local)
+                # Address-taken var: initialised through the reference later.
+                val rp = self.local_pos(place.local)
+                if rp >= 0: self.defined[rp] = true
                 for proj in place.projection:
                     match proj:
                         case MirProjection.Index(local): self.use_local(local)

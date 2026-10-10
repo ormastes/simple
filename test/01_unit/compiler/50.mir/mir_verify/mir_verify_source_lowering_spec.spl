@@ -64,9 +64,10 @@ describe "MIR verify on lowered source: the ptr->i8 cast class (bug A)":
         val hits = findings_for(report, "MIRV-002")
         expect(hits.len()).to_equal(1)
         expect(hits[0].function.ends_with("to_bytes")).to_equal(true)
-        expect(hits[0].is_fatal()).to_equal(true)
         expect(hits[0].message.contains("-> u8")).to_equal(true)
-        expect(report.fatal_count()).to_equal(1)
+        # Warn-first landing: reported, not fatal, until promoted in the registry.
+        expect(hits[0].is_fatal()).to_equal(false)
+        expect(report.fatal_count()).to_equal(0)
 
 describe "MIR verify on lowered source: no false positives on plain code":
     it "a branching arithmetic module verifies with zero fatal findings":
@@ -75,10 +76,31 @@ describe "MIR verify on lowered source: no false positives on plain code":
         expect(report.functions_checked).to_equal(2)
         expect(report.fatal_count()).to_equal(0)
 
+val GUARD_THEN_PLAIN_SRC: text = "enum D:\n    A\n    B\n\nfn pick(d: D, c: bool) -> i64:\n    match d:\n        case D.A if c:\n            1\n        case D.A:\n            2\n        case D.B:\n            3\n"
+
+fn guard_branch_count(mir: MirModule) -> i64:
+    var n = 0
+    for f in mir.functions.values():
+        for b in f.blocks:
+            match b.terminator:
+                case MirTerminator.If(_, then_, _):
+                    for tb in f.blocks:
+                        if tb.id.id == then_.id and (tb.label ?? "").contains("guard_pass"):
+                            n = n + 1
+                case _: ()
+    n
+
 describe "MIR verify on lowered source: enum-match guards (3a)":
     it "every guard is lowered: no E-MIR-MATCH-GUARD, no fatal verifier finding, no dropped-condition warning":
         val (mir, messages) = lower_src(GUARD_SRC)
         expect(any_message_contains(messages, "E-MIR-MATCH-GUARD")).to_equal(false)
         val report = mir_verify_module(mir)
         expect(report.fatal_count()).to_equal(0)
+        expect(findings_for(report, "MIRV-005c").len()).to_equal(0)
+
+    it "`case A if c:` followed by plain `case A:` lowers exactly one guard branch and the counter agrees":
+        val (mir, messages) = lower_src(GUARD_THEN_PLAIN_SRC)
+        expect(any_message_contains(messages, "E-MIR-MATCH-GUARD")).to_equal(false)
+        expect(guard_branch_count(mir)).to_equal(1)
+        val report = mir_verify_module(mir)
         expect(findings_for(report, "MIRV-005c").len()).to_equal(0)

@@ -1236,7 +1236,15 @@ impl MirLowering:
                     Some(type_.span)
                 else:
                     nil
-                self.error("E-MIR-TYPE-Error: unresolved HIR type (HirTypeKind.Error) reached lower_type in fn {error_fn} (module {self.current_module_id}) and was erased to i64", error_span)
+                # Rate limit: at most 3 reports per function, then one
+                # summary line, so an unresolved import does not produce
+                # hundreds of identical diagnostics (measured 240/file).
+                val prior_reports = self.mir_type_error_reports[error_fn] ?? 0
+                self.mir_type_error_reports[error_fn] = prior_reports + 1
+                if prior_reports < 3:
+                    self.error("E-MIR-TYPE-Error: unresolved HIR type (HirTypeKind.Error) reached lower_type in fn {error_fn} (module {self.current_module_id}) and was erased to i64", error_span)
+                elif prior_reports == 3:
+                    self.error("E-MIR-TYPE-Error: further unresolved HIR types in fn {error_fn} (module {self.current_module_id}) suppressed after 3 reports", error_span)
                 MirType.i64()
             case HirTypeKind.Isolated(inner):
                 # `iso T` ERASES to T's MIR representation. Isolation is an
