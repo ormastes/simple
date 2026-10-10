@@ -379,8 +379,11 @@ The full static composition and dedicated VHDL entry install the plugin
 runner; the plugin retains its existing provenance, assurance, AOP, and
 artifact-writing logic. The closure checker reports zero K0-to-P and K1-to-P
 imports, three kernel-to-app/OS imports, zero unclassified files; the Phase 5
-source checker passes. A bounded self-hosted Stage 2 compile of the focused
-port spec parsed and built surfaces for all 525 reached files, then timed out
-at HIR 75/525 without a port diagnostic. The focused spec has not executed.
+source checker passes. A longer bounded admitted self-hosted Stage 2 compile
+of the focused port spec parsed and built surfaces for all 525 reached files,
+then completed HIR with one poisoned unrelated module:
+`compiler.semantics.perf.collection_plan` reports a qualified enum-pattern
+owner mismatch and error-recovery pattern. The focused spec has not executed.
+See [the exact compiler blocker](../../../08_tracking/bug/item5_vhdl_port_stage2_hir_collection_plan_owner_2026-10-11.md).
 This is structural evidence only: admitted native port dispatch, optional
 demand loading, and matched size/startup/RSS remain open.

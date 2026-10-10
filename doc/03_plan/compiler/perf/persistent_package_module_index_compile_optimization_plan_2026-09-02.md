@@ -479,3 +479,12 @@ The focused second-generation native CAS scenario now passes publish, readback, 
 ### 2026-10-11 warm tracked-restore handoff
 
 The event cursor v4 persists the dirty tracked src/test path set so a path restored to HEAD generates an exact warm modify event. A successful warm publication is now carried through source-authority snapshot readback into the stale-graph cold-rebuild-pending transition; the prior complete graph remains at CURRENT until a complete publisher replaces it. The focused source-authority fixture requires edit, restore, and unchanged warm acquisition without a cold inventory fallback. This is an unexecuted source candidate: the focused current-source native probe passed HIR and monomorphization but failed MIR in unrelated environment/SDN lowering. Ordinary CLI full-graph publication, removal of per-request untracked listing, cross-entrypoint SPipe, and matched time/RSS gates remain open.
+
+### 2026-10-11 admitted Stage 2 qualification blocker
+
+A 600-second bounded compile of the focused Item 5 VHDL port spec with the
+admitted pure-Simple Stage 2 compiler completed HIR for 525 source modules,
+then failed on two enum-pattern owner mismatches in
+`compiler.semantics.perf.collection_plan`. This is a shared compiler
+qualification blocker rather than evidence that the Item 6 graph cutover works.
+See [the exact reproduction](../../../08_tracking/bug/item5_vhdl_port_stage2_hir_collection_plan_owner_2026-10-11.md).
