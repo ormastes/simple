@@ -19,3 +19,5 @@ The inspected source skips optional asynchronous HIR warmup and retains ordinary
 Recovery: apply and qualify the underlying process/diagnostic repair, then narrowly remove the explicit opt-in and helper in a linked recovery commit. Fetching a fix alone is insufficient. The bug record preserves original sources, private experiment/recovery identities and the public workaround link.
 
 Configuration regression: `sh test/00_unit/scripts/hir_worker_diagnostics_workaround_test.shs`. This checks the helper's actual shell behavior only; it does not rerun the seven original native attempts or establish any of the six full subsystem binaries.
+
+Portable workaround commit: [99c65b91e269e3c4c489a859d94a0e2c741bb645](https://github.com/ormastes/simple/commit/99c65b91e269e3c4c489a859d94a0e2c741bb645). Recovery baseline remains `d6abe34243c4ea9365454eca4c7e8586b8d216bf`.
